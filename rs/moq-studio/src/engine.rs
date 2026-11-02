@@ -8,9 +8,10 @@
 //! - **encode** waits for each program copy and encodes it.
 //! - **source-***: one per running source, since a capture stream may not
 //!   leave the thread that opened it.
+//! - **autosave** writes the collection to its scene file once it changes.
 //! - The UI runs on the main thread and edits [`State`] under its lock.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -21,6 +22,8 @@ use kio::clock::Instant;
 use moq_scene::source::{self, Driver, Sources};
 use moq_scene::{Collection, Compositor, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
+
+use crate::autosave::{self, Autosave};
 
 /// The GPU everything shares: sources upload to it, the compositor draws on
 /// it, the window presents from it, and the encoder reads the program from it.
@@ -62,39 +65,22 @@ impl Gpu {
 
 /// What the UI edits and the program clock draws.
 pub struct State {
-	/// The scene file, saved to and reloaded from.
-	pub path: PathBuf,
 	pub collection: Collection,
 	pub sources: Sources,
 	pub compositor: Compositor,
 	/// Edited since the sources were last synced.
 	stale: bool,
-	/// Edited since the last save or load.
-	unsaved: bool,
 }
 
 impl State {
 	/// The collection, for an edit: the sources follow it on the next frame.
 	pub fn edit(&mut self) -> &mut Collection {
 		self.stale = true;
-		self.unsaved = true;
 		&mut self.collection
 	}
 
-	pub fn unsaved(&self) -> bool {
-		self.unsaved
-	}
-
-	pub fn save(&mut self) -> anyhow::Result<()> {
-		let text = self.collection.to_toml()?;
-		std::fs::write(&self.path, text).with_context(|| format!("writing {}", self.path.display()))?;
-		self.unsaved = false;
-		Ok(())
-	}
-
-	/// Replace the collection with what the scene file holds now.
-	pub fn reload(&mut self) -> anyhow::Result<()> {
-		let collection = load(&self.path)?;
+	/// Swap in a collection reloaded from the scene file.
+	fn replace(&mut self, collection: Collection) -> anyhow::Result<()> {
 		anyhow::ensure!(
 			collection.canvas == self.collection.canvas,
 			"the canvas changed; restart the studio to use {}x{} at {} fps",
@@ -106,17 +92,7 @@ impl State {
 		// black until another is picked.
 		self.collection = collection;
 		self.stale = true;
-		self.unsaved = false;
 		Ok(())
-	}
-}
-
-/// Read a scene file, or start a new collection if there is none yet.
-pub fn load(path: &Path) -> anyhow::Result<Collection> {
-	match std::fs::read_to_string(path) {
-		Ok(text) => Collection::from_toml(&text).with_context(|| format!("loading {}", path.display())),
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Collection::new()),
-		Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
 	}
 }
 
@@ -177,6 +153,7 @@ impl Drop for Output {
 /// The running studio.
 pub struct Engine {
 	pub state: Mutex<State>,
+	pub autosave: Autosave,
 	pub stats: Stats,
 	pub bus: moq_audio::bus::Bus,
 	/// `None` when running without a relay.
@@ -193,14 +170,15 @@ const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_k
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
 impl Engine {
-	/// Open the collection at `path` on `gpu` and start the program clock.
+	/// Open `collection` on `gpu`, start the program clock, and save the
+	/// collection to `autosave`'s file as it changes.
 	/// With `connect`, publish the program at `broadcast` on that relay,
 	/// encoding its video only while someone watches when `on_demand`.
 	///
 	/// Call inside the tokio runtime that serves the relay connection.
 	pub async fn start(
 		gpu: Gpu,
-		path: PathBuf,
+		autosave: Autosave,
 		collection: Collection,
 		connect: Option<(moq_tokio::Client, url::Url)>,
 		broadcast: &str,
@@ -208,7 +186,7 @@ impl Engine {
 	) -> anyhow::Result<Arc<Self>> {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
-		let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+		let dir = autosave.path().parent().map(Path::to_path_buf).unwrap_or_default();
 		let sources = Sources::new(source::Context {
 			bus: bus.clone(),
 			origin: subscribe.consume(),
@@ -230,13 +208,12 @@ impl Engine {
 
 		let engine = Arc::new(Self {
 			state: Mutex::new(State {
-				path,
 				collection,
 				sources,
 				compositor,
 				stale: true,
-				unsaved: false,
 			}),
+			autosave,
 			stats: Stats::default(),
 			bus,
 			output,
@@ -280,8 +257,36 @@ impl Engine {
 		std::thread::Builder::new()
 			.name("audio".into())
 			.spawn(move || clocked(mix.run_audio(start, epoch, audio)))?;
+		let save = engine.clone();
+		std::thread::Builder::new()
+			.name("autosave".into())
+			.spawn(move || clocked(save.run_autosave()))?;
 
 		Ok(engine)
+	}
+
+	/// Write the collection to the scene file unless it already holds it.
+	pub fn save(&self) -> anyhow::Result<()> {
+		self.autosave
+			.save(|| Ok(self.state.lock().unwrap().collection.to_toml()?))
+	}
+
+	/// Replace the collection with what the scene file holds now.
+	pub fn reload(&self) -> anyhow::Result<()> {
+		self.autosave
+			.reload(|collection| self.state.lock().unwrap().replace(collection))
+	}
+
+	/// Save once per period, so a change is on disk within one and a burst of
+	/// changes is written once. The first save creates a missing file.
+	async fn run_autosave(&self) {
+		let mut clock = kio::clock::interval(autosave::PERIOD);
+		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
+		loop {
+			clock.tick().await;
+			// Kept for the status bar until a save succeeds.
+			let _ = self.save();
+		}
 	}
 
 	/// Draw a canvas frame per tick of the program clock, and hand the program
@@ -637,10 +642,10 @@ mod tests {
 		});
 
 		let gpu = Gpu::new().await.expect("a GPU");
-		let path = dir.path().join("show.toml");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let connect = Some((client, fixture.url.clone()));
 		let on_demand = false;
-		let engine = Engine::start(gpu, path, collection, connect, "studio", on_demand)
+		let engine = Engine::start(gpu, autosave, collection, connect, "studio", on_demand)
 			.await
 			.expect("the studio starts");
 
