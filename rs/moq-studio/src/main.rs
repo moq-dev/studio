@@ -11,6 +11,7 @@ use anyhow::Context;
 
 mod engine;
 mod ui;
+mod vcam;
 
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]

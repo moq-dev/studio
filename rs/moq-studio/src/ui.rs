@@ -559,6 +559,39 @@ impl Panels {
 		if let Some(error) = stats.error.lock().unwrap().as_ref() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
+
+		ui.separator();
+		self.camera(ui);
+	}
+
+	/// The canvas's virtual camera: a toggle, and how it is doing while on.
+	fn camera(&mut self, ui: &mut Ui) {
+		let camera = self.engine.state.lock().unwrap().camera();
+		let mut on = camera.is_some();
+		if ui
+			.checkbox(&mut on, "Virtual camera")
+			.on_hover_text("Show the program as a camera that video-call apps can pick")
+			.changed()
+		{
+			let result = self.engine.set_camera(on);
+			let message = if on { "virtual camera on" } else { "virtual camera off" };
+			self.report(result.map(|()| message.to_string()));
+		}
+		let Some(camera) = camera else { return };
+		egui::Grid::new("camera").show(ui, |ui| {
+			ui.label("Camera");
+			ui.label(&camera.backend);
+			ui.end_row();
+			ui.label("Apps");
+			ui.label(if camera.reading { "reading" } else { "none; not copying" });
+			ui.end_row();
+			ui.label("Sent");
+			ui.label(format!("{} frames, {} dropped", camera.sent, camera.dropped));
+			ui.end_row();
+		});
+		if let Some(error) = &camera.error {
+			ui.colored_label(ui.visuals().error_fg_color, error);
+		}
 	}
 }
 

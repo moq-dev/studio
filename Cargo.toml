@@ -31,6 +31,7 @@ moq-net = { path = "moq/rs/moq-net" }
 moq-relay = { path = "moq/rs/moq-relay", default-features = false }
 moq-scene = { path = "rs/moq-scene" }
 moq-tokio = { path = "moq/rs/moq-tokio", default-features = false }
+moq-v4l = { path = "moq/rs/moq-v4l" }
 # Default features off, as in moq: each consumer opts into native codecs and
 # rendering explicitly.
 moq-video = { path = "moq/rs/moq-video", default-features = false }

@@ -28,10 +28,10 @@ nvidia = ["moq-video/nvidia"]
 openh264 = ["moq-video/openh264"]
 # Intel/AMD VAAPI hardware codecs (Linux); its bindgen needs libclang.
 vaapi = ["moq-video/vaapi"]
-# PipeWire cameras, drawn without a copy, and audio through the sound server.
-# Wayland screens and windows are not reachable yet: display and window sources
-# capture X11 only.
-pipewire = ["capture", "moq-scene/pipewire"]
+# PipeWire cameras, drawn without a copy, audio through the sound server, and
+# the virtual camera as a PipeWire node. Wayland screens and windows are not
+# reachable yet: display and window sources capture X11 only.
+pipewire = ["capture", "moq-scene/pipewire", "dep:pipewire"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
@@ -54,6 +54,14 @@ tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The virtual camera's v4l2loopback fallback. Pure Rust with its kernel bindings
+# checked in, and already in the graph through moq-video's capture.
+moq-v4l = { workspace = true }
+# The virtual camera's PipeWire node, behind `pipewire`. moq-video links the
+# same release; `v0_3_34` adds the trigger a driving stream paces frames with.
+pipewire = { version = "0.10", optional = true, features = ["v0_3_34"] }
 
 [dev-dependencies]
 moq-relay = { workspace = true, features = ["test-support"] }

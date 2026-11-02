@@ -1,7 +1,9 @@
 name: Nightly
 
-# The gates too slow or too specialized for a pull request: compositing and
-# publishing through wgpu on Mesa's software Vulkan driver.
+# The gates too slow or too specialized for a pull request: compositing,
+# publishing, and the virtual camera through wgpu on Mesa's software Vulkan
+# driver, the camera in a private PipeWire session; and the virtual camera's
+# v4l2loopback fallback, a module load no pull request job should make.
 
 permissions:
   contents: read
@@ -34,3 +36,32 @@ jobs:
 
       - name: Render
         run: nix develop --command just render-sw
+
+  v4l2loopback:
+    name: v4l2loopback camera
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NEXTEST_PROFILE: ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - uses: ./.github/actions/nix
+
+      - name: Load v4l2loopback
+        # Out of tree, so DKMS builds it for the runner's kernel.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-headers-$(uname -r)" v4l2loopback-dkms
+          sudo modprobe v4l2loopback exclusive_caps=1
+          sudo udevadm settle
+          # The runner user is not in the video group.
+          sudo chmod a+rw /dev/video*
+
+      - name: Test
+        run: nix develop --command just v4l2loopback

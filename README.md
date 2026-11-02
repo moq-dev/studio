@@ -17,8 +17,9 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
-  On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
-  is the software H.264 fallback for a machine without a hardware encoder.
+  On Linux it links ALSA; add `pipewire` for PipeWire cameras and the
+  [virtual camera](#virtual-camera)'s PipeWire node. `openh264` is the
+  software H.264 fallback for a machine without a hardware encoder.
 - On Linux, display and window sources capture X11 and XWayland only; a
   Wayland screen or window cannot be picked yet.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
@@ -36,7 +37,7 @@ Every panel is a tab you can drag, split, or stack.
 | Sources | Add a source by hand, see whether each is live, and remove one. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the relay connection, whether anyone is watching, and the encoder's work. |
+| Output | See the relay connection, whether anyone is watching, and the encoder's work, and turn the virtual camera on. |
 
 A broadcast source subscribes through the same relay connection, plays the
 best video and audio its catalog lists, switches when the catalog changes, and
@@ -116,6 +117,22 @@ driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
 macOS. Every other source, every source on Windows or on a GPU that cannot
 import, and every still image delivers its frames from the CPU, which the
 compositor uploads.
+
+## Virtual camera
+
+The **Virtual camera** toggle in the Output panel shows the program as a
+camera that video-call and conferencing apps can pick, at the canvas size and
+frame rate. It stays on until you turn it off or quit; it is not saved in the
+scene file. The program is copied for the camera only while an app reads it.
+
+- **Linux:** a PipeWire camera named "MoQ Studio" (needs the `pipewire`
+  feature), which browsers and other PipeWire-aware apps list beside your
+  other cameras. Without PipeWire, the studio writes to the first
+  [v4l2loopback](https://github.com/v4l2loopback/v4l2loopback) device that
+  takes the canvas size, for apps that open `/dev/video*` directly. The
+  studio never loads that module, since it needs root:
+  `sudo modprobe v4l2loopback exclusive_caps=1 card_label="MoQ Studio"`.
+- **macOS and Windows:** not available yet.
 
 ## Development
 
