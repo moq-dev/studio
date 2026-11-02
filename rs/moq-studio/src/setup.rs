@@ -558,8 +558,11 @@ impl Setup {
 			let path = launch.path.clone();
 			let engine = Engine::start(launch, proposed.clone().unwrap_or_default()).await?;
 			let message = proposed.map(|_| {
-				let saved = engine.state.lock().unwrap().save();
-				saved
+				let mut state = engine.state.lock().unwrap();
+				// Unsaved until the write lands, so a failed one still shows.
+				state.edit();
+				state
+					.save()
 					.map(|()| format!("set up; saved {}", path.display()))
 					.map_err(|err| format!("{err:#}"))
 			});
