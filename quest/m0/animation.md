@@ -19,5 +19,5 @@ Overlays animate through their own CSS. No Lottie runtime for now (decided
 
 ## Required
 
-- [Undo and the scene model](/quest/m3/studio/scene-model.md) - keyframes are scene model state
-- [Layout track](/quest/m3/studio/compose/layout.md) - where transitions and keyframes travel
+- [Undo and the scene model](/quest/m0/scene-model.md) - keyframes are scene model state
+- [Layout track](/quest/m0/compose/layout.md) - where transitions and keyframes travel

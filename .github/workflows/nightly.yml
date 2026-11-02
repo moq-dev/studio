@@ -1,0 +1,36 @@
+name: Nightly
+
+# The gates too slow or too specialized for a pull request: compositing and
+# publishing through wgpu on Mesa's software Vulkan driver.
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: "37 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render:
+    name: Software render
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      NEXTEST_PROFILE: ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - uses: ./.github/actions/nix
+
+      - name: Render
+        run: nix develop --command just render-sw

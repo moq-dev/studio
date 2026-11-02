@@ -3,7 +3,7 @@
 ## Goal
 
 The studio owns a moq-room prefix and shows a join link and QR code. A guest
-or a phone opens a demo/web page (js/publish), and each participant's camera
+or a phone opens a join page this repository serves (built on @moq/publish), and each participant's camera
 and screen appear in the studio as sources. The host sees who joined and can
 remove a participant from the scene.
 

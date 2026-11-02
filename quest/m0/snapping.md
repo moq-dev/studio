@@ -15,4 +15,4 @@ still go through the scene model's commands so they undo and autosave.
 
 ## Related
 
-- [Undo and the scene model](/quest/m3/studio/scene-model.md) - snapped moves are ordinary commands
+- [Undo and the scene model](/quest/m0/scene-model.md) - snapped moves are ordinary commands

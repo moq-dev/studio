@@ -1,0 +1,89 @@
+[workspace]
+members = ["rs/moq-scene", "rs/moq-studio"]
+# The moq submodule is its own cargo workspace; exclude it so this one does not
+# try to adopt its members.
+exclude = ["moq"]
+resolver = "2"
+
+[workspace.package]
+# egui 0.36 and egui_dock 0.21 need 1.92 and 1.95, and moq-relay (a test
+# dependency) needs 1.95. rust-toolchain.toml pins the build toolchain above it.
+rust-version = "1.95"
+edition = "2024"
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/studio"
+license = "MIT OR Apache-2.0"
+
+[workspace.lints.clippy]
+# Every suppression says why, so the next lint audit can judge it.
+allow_attributes_without_reason = "warn"
+
+# Every moq crate is a path dependency into the `moq` submodule, so they all
+# compile against one checkout and cargo unifies moq-net, hang, and kio across
+# them. The submodule's gitlink is the single pin; sh/check-moq-pin.sh fails
+# `just check` if a moq git dependency appears or the checkout drifts from it.
+[workspace.dependencies]
+hang = { path = "moq/rs/hang" }
+kio = { path = "moq/rs/kio" }
+moq-audio = { path = "moq/rs/moq-audio", default-features = false }
+moq-mux = { path = "moq/rs/moq-mux" }
+moq-net = { path = "moq/rs/moq-net" }
+moq-relay = { path = "moq/rs/moq-relay", default-features = false }
+moq-scene = { path = "rs/moq-scene" }
+moq-tokio = { path = "moq/rs/moq-tokio", default-features = false }
+# Default features off, as in moq: each consumer opts into native codecs and
+# rendering explicitly.
+moq-video = { path = "moq/rs/moq-video", default-features = false }
+
+anyhow = "1"
+bytes = "1"
+humantime-serde = "1.1.1"
+pollster = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_with = "3"
+tempfile = "3"
+thiserror = "2"
+tokio = "1.48"
+toml = "1.1"
+tracing = "0.1"
+url = "2"
+usage-rs = "7.1.0"
+
+[profile.dev]
+# Line tables keep file and line in every backtrace and panic, without the
+# variable and type records that make a debug build of this graph enormous.
+# `profile.test` inherits this.
+debug = "line-tables-only"
+
+# moq-audio's dependencies whose hot loops are SIMD intrinsics, which compile to
+# out-of-line calls with debug checks at opt-level 0: unoptimized, the sonora
+# echo canceller runs slower than realtime. Optimize them even in dev and test
+# builds, as moq does; nobody steps through them in a debugger.
+[profile.dev.package.sonora]
+opt-level = 3
+
+[profile.dev.package.sonora-aec3]
+opt-level = 3
+
+[profile.dev.package.sonora-agc2]
+opt-level = 3
+
+[profile.dev.package.sonora-common-audio]
+opt-level = 3
+
+[profile.dev.package.sonora-fft]
+opt-level = 3
+
+[profile.dev.package.sonora-ns]
+opt-level = 3
+
+[profile.dev.package.sonora-simd]
+opt-level = 3
+
+[profile.dev.package.rubato]
+opt-level = 3
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

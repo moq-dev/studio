@@ -4,7 +4,7 @@
 
 Titles, lower thirds, tickers, and other graphics in `moq-studio` are written
 as HTML and CSS without JavaScript, travel in the layout track, and render in
-all three composition hosts: through Blitz in the studio and `moq compose`,
+all three composition hosts: through Blitz in the studio and the headless compositor,
 and as real DOM over the video in the browser. CSS animations and transitions
 run on the media clock, so an overlay animates on the same frame everywhere.
 
@@ -24,7 +24,7 @@ Decided 2026-10-26 (maintainer):
   the rest at setup with the property named. Blitz is beta (no blend modes or
   `text-shadow`, filters limited to blur and drop-shadow), and the subset
   grows as it does.
-- **Parity:** layout parity per the [composition epic](/quest/m3/studio/compose/README.md);
+- **Parity:** layout parity per the [composition epic](/quest/m0/compose/README.md);
   the fixture compares boxes and timing, and pixels only loosely.
 
 An overlay is hostile input to every viewer, so it fetches nothing from the
@@ -34,9 +34,9 @@ sandboxed frame with scripts off and a content security policy that loads
 only those carried resources. First check
 whether Blitz can draw into a caller's wgpu texture without a readback, and
 upstream that if it cannot. Arbitrary web pages and JavaScript graphics stay
-[browser sources](/quest/m3/studio/browser-source.md), baked into their own
+[browser sources](/quest/m0/browser-source.md), baked into their own
 track.
 
 ## Required
 
-- [Layout track](/quest/m3/studio/compose/layout.md) - where overlays travel
+- [Layout track](/quest/m0/compose/layout.md) - where overlays travel

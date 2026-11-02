@@ -14,15 +14,15 @@ source.
 
 These are the most-voted OBS gaps and the most-installed plugins (Source
 Clone, Source Copy, Downstream Keyer), and they all shape moq-scene's data
-model, which the [layout track](/quest/m3/studio/compose/layout.md) also
+model, which the [layout track](/quest/m0/compose/layout.md) also
 serializes. So land them right after viewer composition, before more features
 build on the model. Route every edit through one command type so undo,
 autosave, and the layout track see the same changes. Autosave persists the
 history beside the scene file, bounded by a count, and launch restores it;
 an entry the loader cannot replay drops it and everything older. Update
-`doc/bin/studio.md`.
+`README.md`.
 
 ## Related
 
-- [Autosave](/quest/m3/studio/autosave.md) - the history must survive it
-- [Scene editing](/quest/m3/studio/scene-editing.md) - rename, reorder, and resize go through the same commands
+- [Autosave](/quest/m0/autosave.md) - the history must survive it
+- [Scene editing](/quest/m0/scene-editing.md) - rename, reorder, and resize go through the same commands

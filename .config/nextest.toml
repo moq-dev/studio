@@ -1,0 +1,16 @@
+# Shared nextest settings, picked up by every `cargo nextest` run in the workspace.
+
+[profile.default]
+# Kill a test that stops making progress instead of letting it wedge: a lost
+# `kio` wakeup is a hang rather than a failure. A test is reported SLOW at 30s
+# and killed at a minute; make a slow test fast rather than raising this.
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+# Retries hide flakes; treat an intermittent failure as a real race.
+retries = 0
+
+# CI has noisier neighbours and cold caches.
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 2 }
+retries = 0
+failure-output = "immediate-final"

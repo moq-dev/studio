@@ -1,0 +1,23 @@
+# Local
+.DS_Store
+*.local
+*.log*
+*.local.json
+
+# Claude Code scratch space.
+/.claude/cache/
+/.claude/tmp/
+/.claude/worktrees/
+
+# Per-checkout scratch output, such as logs and agent notes.
+/.tmp/
+
+# IDE
+.idea
+
+# Build output.
+target
+result
+
+# direnv
+.direnv

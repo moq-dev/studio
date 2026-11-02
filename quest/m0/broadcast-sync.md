@@ -12,7 +12,7 @@ can leave audio and video apart.
 Decided 2026-10-26 (maintainer):
 
 - **Scope:** broadcast sources only. Local devices keep the manual
-  per-source offsets in [Audio mixes](/quest/m3/studio/mixes.md).
+  per-source offsets in [Audio mixes](/quest/m0/mixes.md).
 - **Delay:** reuse `moq play`'s timing, the `--delay auto` target from
   moq-audio's jitter estimate (`rs/moq-audio/src/jitter.rs`,
   `doc/concept/audio-jitter.md`), rather than a second algorithm or a manual
@@ -26,9 +26,9 @@ rather than copying it. The video side holds frames until their audio-aligned
 time, and a source still repeats its last frame rather than stalling the
 canvas. This replaces the live-edge behavior the studio app PR chose, where
 replaying a publisher's timestamp gaps pushed audio behind its own video. Here
-video waits for audio instead. Update `doc/bin/studio.md`.
+video waits for audio instead. Update `README.md`.
 
 ## Related
 
-- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the delay estimate this reuses
-- [Guests](/quest/m3/studio/guests.md) - guests are broadcast sources and inherit this
+- [Audio jitter target](https://github.com/moq-dev/moq/blob/main/quest/m1/audio-jitter-target/README.md) - the delay estimate this reuses
+- [Guests](/quest/m0/guests.md) - guests are broadcast sources and inherit this

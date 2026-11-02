@@ -9,7 +9,7 @@ is verified to launch and list devices on its platform.
 ## Plan
 
 Decided 2026-10-26 (maintainer): as for the `moq` binary in
-[Ship capture and playback](/quest/m2/cli-packaging.md), moq-studio's defaults
+[Ship capture and playback](https://github.com/moq-dev/moq/blob/main/quest/m2/cli-packaging.md), moq-studio's defaults
 skip any feature that is expensive to build or relies on a system library,
 and a `release` feature turns on every backend its platform can load without
 one (`capture`, `openh264`, `vaapi`, `nvidia`, and the platform frameworks).
@@ -21,9 +21,9 @@ compositor imports without a copy.
 
 ## Required
 
-- [Signing identities are available](/quest/m3/studio/signing.md) - the credentials signing needs
-- [Studio on macOS and Windows](/quest/m3/studio/app.md) - the studio running on every platform it packages
+- [Signing identities are available](/quest/m0/signing.md) - the credentials signing needs
+- [Studio on macOS and Windows](/quest/m0/app.md) - the studio running on every platform it packages
 
 ## Related
 
-- [Ship capture and playback](/quest/m2/cli-packaging.md) - the same distribution checks for the `moq` binary
+- [Ship capture and playback](https://github.com/moq-dev/moq/blob/main/quest/m2/cli-packaging.md) - the same distribution checks for the `moq` binary

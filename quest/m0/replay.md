@@ -16,7 +16,7 @@ frame buffer like OBS's. Retention past the relay cache is the archive's job.
 
 Sources and the program encode whatever the subscriber demand (decided
 2026-10-28, from [#7101](https://github.com/moq-dev/moq/issues/7101); see
-[source tracks](/quest/m3/studio/compose/sources.md)), so a track nobody
+[source tracks](/quest/m0/compose/sources.md)), so a track nobody
 watched still holds its recent groups, as far back as its `max_age`. Replay
 needs no arming and no local subscriber. A studio started with `--on-demand`
 encodes the program only while someone watches, so the program has no past
@@ -30,5 +30,5 @@ any other.
 
 ## Related
 
-- [Archive DVR](/quest/m2/archive-dvr.md) - viewer scrubbing beyond the relay cache
-- [Recording](/quest/m3/studio/recording.md) - clips use the same file writer
+- [Archive DVR](https://github.com/moq-dev/moq/blob/main/quest/m2/archive-dvr.md) - viewer scrubbing beyond the relay cache
+- [Recording](/quest/m0/recording.md) - clips use the same file writer

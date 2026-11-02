@@ -17,5 +17,5 @@ at zero, which is the confusion to avoid.
 
 ## Related
 
-- [Stats](/quest/m2/stats/README.md) - the stats tracks this reads
-- [Latency ledger](/quest/m2/latency-ledger.md) - per-stage playback delay a viewer reports
+- [Stats](https://github.com/moq-dev/moq/blob/main/quest/m2/stats/README.md) - the stats tracks this reads
+- [Latency ledger](https://github.com/moq-dev/moq/blob/main/quest/m2/latency-ledger.md) - per-stage playback delay a viewer reports

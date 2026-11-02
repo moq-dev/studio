@@ -1,0 +1,8 @@
+# Skip the moq submodule and build and scratch trees.
+exclude = ["moq/**", "**/target/**", "**/.direnv/**", "**/.tmp/**"]
+
+# Match moq's style: 4-space indent on Cargo.toml, lines up to ~150 chars.
+[formatting]
+indent_string = "    "
+column_width = 150
+align_comments = false

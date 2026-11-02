@@ -1,16 +1,14 @@
----
-title: Studio
-description: Compose scenes on the GPU and go live over MoQ from a native app
----
-
-# Studio
+# MoQ Studio
 
 `moq-studio` is a native streaming studio for Linux, macOS, and Windows. It
 composes cameras, screens, windows, images, colors, and broadcasts from a relay
-into scenes on the GPU, mixes their audio, and publishes the result to a MoQ
-relay. It is early and not packaged yet, so build it from source:
+into scenes on the GPU, mixes their audio, and publishes the result to a
+[MoQ](https://github.com/moq-dev/moq) relay. It is early and not packaged yet,
+so build it from source. The moq crates come from the `moq` submodule:
 
 ```bash
+git clone --recurse-submodules https://github.com/moq-dev/studio
+cd studio
 cargo run --release -p moq-studio --features capture,openh264 -- \
     show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
 ```
@@ -23,8 +21,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   is the software H.264 fallback for a machine without a hardware encoder.
 - On Linux, display and window sources capture X11 and XWayland only; a
   Wayland screen or window cannot be picked yet.
-- The `--connect-*`, `--quic-*`, and `--log-level` flags are moq-cli's; see
-  `moq-studio --help`.
+- The `--connect-*`, `--quic-*`, and `--log-level` flags are
+  [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
 
 ## Panels
 
@@ -118,3 +116,23 @@ driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
 macOS. Every other source, every source on Windows or on a GPU that cannot
 import, and every still image delivers its frames from the CPU, which the
 compositor uploads.
+
+## Development
+
+Use the Nix dev shell (`direnv allow`, or `nix develop --command ...`) so
+tooling matches CI, then:
+
+```bash
+just check   # Lint everything, including the quest tree
+just test    # Run the tests
+just ci      # Both, as CI runs them
+just fix     # Auto-fix formatting
+```
+
+`rs/moq-scene` is the UI-free compositor and `rs/moq-studio` the app. See
+[AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md), and the
+[quest tree](quest/README.md) for planned work.
+
+## License
+
+Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

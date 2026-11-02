@@ -20,6 +20,6 @@ Decided 2026-10-22:
 
 ## Required
 
-- [Linux virtual camera](/quest/m3/studio/vcam/linux.md) - a PipeWire video node carrying the program
-- [Windows virtual camera](/quest/m3/studio/vcam/windows.md) - a Media Foundation virtual camera on Windows 11
-- [macOS virtual camera](/quest/m3/studio/vcam/macos.md) - a CoreMediaIO Camera Extension inside the app bundle
+- [Linux virtual camera](/quest/m0/vcam/linux.md) - a PipeWire video node carrying the program
+- [Windows virtual camera](/quest/m0/vcam/windows.md) - a Media Foundation virtual camera on Windows 11
+- [macOS virtual camera](/quest/m0/vcam/macos.md) - a CoreMediaIO Camera Extension inside the app bundle

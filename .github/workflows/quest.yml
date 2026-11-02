@@ -1,0 +1,39 @@
+name: Quest
+
+# Validates the quest tree on direct pushes, which no pull request checks.
+# Check runs `quest check` (through `just check`) on pull requests.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+      - "quest/**"
+    paths:
+      - "quest/**"
+      - "flake.lock"
+      - ".github/workflows/quest.yml"
+
+concurrency:
+  group: quest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Quest
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/nix
+
+      # Only the quest package, not the whole dev shell.
+      - name: Check
+        run: nix run .#quest -- check

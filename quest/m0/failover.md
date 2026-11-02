@@ -19,4 +19,4 @@ as a restart. Show each relay's state in the health panel.
 
 ## Related
 
-- [Stream health](/quest/m3/studio/health.md) - where each relay's state shows
+- [Stream health](/quest/m0/health.md) - where each relay's state shows

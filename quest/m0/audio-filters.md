@@ -1,20 +1,25 @@
-# [M] Audio filters
+# [S] Audio filters
 
 ## Goal
 
-Each audio source has an ordered processing chain in moq-audio: gain, noise
-suppression, noise gate, compressor, and limiter. Each filter is configured
-from the studio and saved with the scene collection. Ducking lowers one source
-(music) when another (the microphone) is active. Third-party VST3 and CLAP
-plugins load into the chain.
+Each audio source's filter chain (gain, noise suppression, noise gate,
+compressor, limiter, ducking, and VST3 and CLAP plugins) is configured from
+the studio and saved with the scene collection. Ducking lowers one source
+(music) when another (the microphone) is active. A plugin that fails or keeps
+missing its deadline shows as failed on its source.
 
 ## Plan
 
-Prefer maintained crates, such as `nnnoiseless` for RNNoise suppression, over
-hand-rolled DSP. Benchmark the chain per source so its cost per added source
-shows up as a slope. Host plugins out of process, so a crashing or hung plugin
-drops that filter rather than the audio bus: the audio thread never blocks on
-the plugin process, a block the plugin misses its deadline for passes through
-unfiltered, and a plugin that keeps missing is bypassed and shown as failed.
-Use a maintained host crate
-(such as `clack` for CLAP) rather than hand-rolling the plugin ABIs.
+Changed 2026-11-02 (maintainer), when the studio moved out of moq: the chain
+itself, its filters, and the out-of-process plugin host are moq-audio work in
+[moq-audio filter chain](https://github.com/moq-dev/moq/blob/main/quest/m3/audio-filters.md).
+This quest is the studio's side: the panel, the scene-file shape, and wiring
+each source's chain into the program bus.
+
+The scene file names filters and their settings, never a plugin's absolute
+path, so a collection stays portable; a missing plugin loads as failed rather
+than refusing the file.
+
+## Required
+
+- [moq-audio's filter chain is pinned](/quest/m0/pin-audio-filters.md) - the chain this configures

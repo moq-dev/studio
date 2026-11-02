@@ -8,5 +8,5 @@ update installs the new extension without a reboot.
 
 ## Required
 
-- [Signing identities are available](/quest/m3/studio/signing.md) - system extensions only load when signed
-- [Studio on macOS and Windows](/quest/m3/studio/app.md) - the studio running on macOS
+- [Signing identities are available](/quest/m0/signing.md) - system extensions only load when signed
+- [Studio on macOS and Windows](/quest/m0/app.md) - the studio running on macOS

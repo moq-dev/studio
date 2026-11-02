@@ -15,4 +15,4 @@ atomically (temporary file plus rename) so a crash never leaves a half-written
 file. The scene file stays diffable, so an autosave that changes nothing
 writes nothing. A scene path that does not exist yet is created by the first
 autosave, replacing the guide's "created on the first save" and
-**File > Save**. Update `doc/bin/studio.md`.
+**File > Save**. Update `README.md`.

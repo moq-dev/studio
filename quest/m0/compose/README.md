@@ -9,7 +9,7 @@ remains for protocols and devices that cannot compose (RTMP and WHIP
 destinations, HLS, legacy players), produced by the studio or by a server.
 
 This README's own work is the end-to-end test: a studio broadcast is composed
-by the browser, by `moq compose`, and by the studio itself, and all three
+by the browser, by the headless compositor, and by the studio itself, and all three
 pictures match.
 
 ## Plan
@@ -19,7 +19,7 @@ Decided 2026-10-26 (maintainer), the studio's flagship and first in its epic:
 - **Delivery:** MoQ's value is per-track delivery, so the studio embraces
   viewer composition. The program is the fallback, not the default.
 - **One compositor, three hosts:** moq-scene renders in the studio, headless
-  on a server (`moq compose` in moq-cli), and in the browser, so all three
+  on a server (the headless compositor), and in the browser, so all three
   pictures come from one implementation.
 - **Parity rule:** every scene feature (transitions, filters, effects,
   overlays) renders in all three hosts with the same layout, timing, and
@@ -34,7 +34,7 @@ Decided 2026-10-26 (maintainer), the studio's flagship and first in its epic:
 - **Layout:** the live scene state (items, transforms, transitions, and each
   element's priority and toggleable flag) as a hang JSON track on the media
   clock, so any host composites the same frame the studio shows.
-- **Browser build:** whichever line [JS-only @moq/net from Rust](/quest/m2/rs2ts-js.md)
+- **Browser build:** whichever line [JS-only @moq/net from Rust](https://github.com/moq-dev/moq/blob/main/quest/m2/rs2ts-js.md)
   lands. moq's WASM support was removed on 2026-10-31.
 - **Cost:** every source and the program encode whatever the subscriber
   demand (decided 2026-10-28, from
@@ -44,8 +44,8 @@ Decided 2026-10-26 (maintainer), the studio's flagship and first in its epic:
 
 ## Required
 
-- [Source tracks](/quest/m3/studio/compose/sources.md) - each source publishes as its own track in the studio broadcast, encoded whatever the demand and uploaded only while subscribed
-- [Layout track](/quest/m3/studio/compose/layout.md) - the live scene state as a hang JSON track on the media clock, specified in the hang draft
-- [Browser composition](/quest/m3/studio/compose/browser.md) - `@moq/watch` composes a broadcast with a layout track through moq-scene's browser build
-- [Server composition](/quest/m3/studio/compose/server.md) - `moq compose` renders the program from sources and layout, headless
-- [Viewer controls](/quest/m3/studio/compose/controls.md) - viewers toggle elements and the layout's priorities steer what they fetch
+- [Source tracks](/quest/m0/compose/sources.md) - each source publishes as its own track in the studio broadcast, encoded whatever the demand and uploaded only while subscribed
+- [Layout track](/quest/m0/compose/layout.md) - the live scene state as a hang JSON track on the media clock, specified in the hang draft
+- [Browser composition](/quest/m0/compose/browser.md) - `@moq/watch` composes a broadcast with a layout track through moq-scene's browser build
+- [Server composition](/quest/m0/compose/server.md) - a headless compositor renders the program from sources and layout, headless
+- [Viewer controls](/quest/m0/compose/controls.md) - viewers toggle elements and the layout's priorities steer what they fetch

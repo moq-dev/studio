@@ -64,5 +64,4 @@ Decided 2026-10-22 with the maintainer:
 
 ## Required
 
-- [AudioToolbox AAC encode](/quest/m2/audio-encode-audiotoolbox.md) - AAC on macOS
-- [Media Foundation AAC encode](/quest/m2/audio-encode-mediafoundation.md) - AAC on Windows
+- [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - AAC on macOS and Windows

@@ -20,4 +20,4 @@ of them is on, at the highest priority among them.
 
 ## Required
 
-- [Browser composition](/quest/m3/studio/compose/browser.md) - the viewer that exposes the toggles
+- [Browser composition](/quest/m0/compose/browser.md) - the viewer that exposes the toggles

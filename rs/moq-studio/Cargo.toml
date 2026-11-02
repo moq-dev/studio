@@ -3,15 +3,13 @@
 publish = false
 name = "moq-studio"
 description = "A native streaming studio that composites scenes on the GPU and goes live over MoQ"
-authors = ["Luke Curley <kixelated@gmail.com>"]
-repository = "https://github.com/moq-dev/moq"
-license = "MIT OR Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
 
 version = "0.1.0"
-edition = "2024"
-# egui 0.36 and egui_dock 0.21 need 1.92 and 1.95. This is an application, so
-# the bump stays here rather than raising the libraries' floor.
-rust-version = "1.95"
+edition.workspace = true
+rust-version.workspace = true
 
 keywords = ["quic", "streaming", "studio", "live", "media"]
 categories = ["multimedia", "multimedia::video", "gui"]
@@ -58,9 +56,8 @@ url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
 
 [dev-dependencies]
-moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
+moq-relay = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
-workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true

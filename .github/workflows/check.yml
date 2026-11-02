@@ -1,0 +1,40 @@
+name: Check
+
+permissions:
+  contents: read
+
+# Ready PRs into main run the full `just ci`; drafts skip it. Pushes to main run
+# it too, since a merge is nobody's pull request.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04-arm
+    # Backstop a hang instead of holding the runner for the 6-hour default.
+    timeout-minutes: 60
+    env:
+      NEXTEST_PROFILE: ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - uses: ./.github/actions/nix
+
+      - name: Check
+        run: nix develop --command just ci
