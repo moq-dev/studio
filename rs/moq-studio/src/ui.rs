@@ -404,6 +404,22 @@ impl Panels {
 						Some(err) => status(ui, &Status::Failed(err.to_string())),
 						None => status(ui, &feed.status()),
 					}
+					// A track can fail while its source still draws, such as on a GPU
+					// out of encode sessions, so its reason is spelled out.
+					match feed.track() {
+						Some(Status::Failed(reason)) => {
+							ui.colored_label(ui.visuals().error_fg_color, format!("track failed: {reason}"));
+						}
+						Some(track) => {
+							ui.horizontal(|ui| {
+								ui.weak("track");
+								status(ui, &track);
+							});
+						}
+						None => {
+							ui.label("");
+						}
+					}
 					if ui.small_button("Remove").clicked() {
 						remove = Some(name.to_string());
 					}

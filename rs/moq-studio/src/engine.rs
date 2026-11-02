@@ -1,5 +1,6 @@
 //! Everything behind the window: the GPU, the sources, the program clock that
-//! draws the canvas and mixes the audio, and the broadcast it publishes.
+//! draws the canvas and mixes the audio, and the broadcast it publishes: the
+//! program, and each local source's own track beside it.
 //!
 //! Threads:
 //! - **program** draws preview and program once per canvas frame and hands the
@@ -208,16 +209,7 @@ impl Engine {
 	) -> anyhow::Result<Arc<Self>> {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
-		let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-		let sources = Sources::new(source::Context {
-			bus: bus.clone(),
-			origin: subscribe.consume(),
-			dir,
-			output: moq_video::render::output(&gpu.device),
-		});
-		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
-		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
-		compositor.cut();
+		let sources = subscribe.consume();
 		let canvas = collection.canvas;
 
 		let (output, origin, publish) = match connect {
@@ -227,6 +219,18 @@ impl Engine {
 			}
 			None => (None, Some(subscribe), None),
 		};
+
+		let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+		let sources = Sources::new(source::Context {
+			bus: bus.clone(),
+			origin: sources,
+			dir,
+			output: moq_video::render::output(&gpu.device),
+			publish: publish.as_ref().map(|publish| publish.sources.clone()),
+		});
+		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
+		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
+		compositor.cut();
 
 		let engine = Arc::new(Self {
 			state: Mutex::new(State {
@@ -250,6 +254,7 @@ impl Engine {
 				config,
 				exporter,
 				clock,
+				sources: _,
 			}) => {
 				let zero_copy = exporter.route() == Route::Gpu;
 				engine.stats.zero_copy.store(zero_copy, Ordering::Relaxed);
@@ -406,10 +411,13 @@ struct Publish {
 	/// The catalog's clock, which the codec producers write timestamps
 	/// against verbatim.
 	clock: moq_mux::Clock,
+	/// Where each local source publishes its own track.
+	sources: moq_scene::publish::Publish,
 }
 
-/// Announce the program broadcast and connect to the relay, which also
-/// carries `subscribe`'s broadcast sources.
+/// Announce the program broadcast, which also carries each local source's own
+/// track, and connect to the relay, which also carries `subscribe`'s broadcast
+/// sources.
 async fn publish(
 	gpu: &Gpu,
 	client: moq_tokio::Client,
@@ -422,7 +430,8 @@ async fn publish(
 	let origin = moq_tokio::origin::spawn();
 	let publication = origin.create_broadcast(path).context("cannot create the broadcast")?;
 	let mut broadcast = publication.broadcast().clone();
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
+	let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
+	let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config)?;
 	let clock = catalog.clock();
 
 	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
@@ -432,6 +441,15 @@ async fn publish(
 	let (exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config)
 		.await
 		.context("cannot encode the canvas")?;
+	// Sources take the program's tier: hardware when the program found it, so a
+	// session the GPU refuses fails that source loudly instead of falling to
+	// software. When the program could not use hardware, such as NVENC beside an
+	// integrated GPU it cannot read, a source may still reach it from the CPU.
+	let kind = match &config.kind {
+		moq_video::encode::Kind::Named(name) if name == "openh264" => moq_video::encode::Kind::Auto,
+		_ => moq_video::encode::Kind::Hardware,
+	};
+	let sources = moq_scene::publish::Publish::new(broadcast.clone(), catalog.clone(), kind);
 	let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
 	let video = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition)?;
 
@@ -464,6 +482,7 @@ async fn publish(
 			exporter,
 			audio,
 			clock,
+			sources,
 		},
 	))
 }
@@ -653,6 +672,7 @@ mod tests {
 			.await
 			.expect("catalog");
 		let catalog = catalogs.next().await.expect("catalog").expect("a catalog");
+		assert_eq!(catalog.video.renditions.len(), 1, "only the program is a rendition");
 		let (video, config) = catalog.video.enabled().next().expect("a video rendition");
 		let mut options = moq_video::decode::Options::new();
 		options.start = moq_video::decode::Start::Latest;
@@ -693,6 +713,22 @@ mod tests {
 		} else {
 			assert!(read_back > 0, "the program was neither exported nor read back");
 		}
+
+		// The color source is listed beside the program as its own still.
+		let mut listings = moq_mux::catalog::Consumer::<moq_scene::publish::Ext>::new(&broadcast, format)
+			.await
+			.expect("catalog");
+		kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let catalog = listings.next().await.expect("catalog").expect("a catalog");
+				if let Some(red) = catalog.ext.studio.sources.get("red") {
+					assert_eq!(red.binary.tracks.len(), 1, "{red:?}");
+					return;
+				}
+			}
+		})
+		.await
+		.expect("the source is listed");
 
 		let (audio, config) = catalog.audio.enabled().next().expect("an audio rendition");
 		let mut options = moq_audio::decode::Options::new();

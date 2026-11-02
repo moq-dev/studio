@@ -19,4 +19,4 @@ current state, so use the JSON track's snapshot mode.
 
 ## Required
 
-- [Source tracks](/quest/m0/compose/sources.md) - the tracks a layout names
+- [Audio source tracks](/quest/m0/compose/sources.md) - the audio tracks a layout names

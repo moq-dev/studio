@@ -1,29 +1,37 @@
-# [M] Source tracks
+# [S] Audio source tracks
 
 ## Goal
 
-Each local source in a `moq-studio` scene (camera, display, window, image,
-microphone) publishes as its own track in the studio's broadcast, listed in
-its catalog, alongside the program. Each encodes while it is in the
+Each microphone and system-audio source in a `moq-studio` scene publishes its
+own capture as an Opus track in the studio's broadcast, listed in that
+source's catalog under the studio catalog's `dev.moq.studio` section, beside
+the program. Like the picture sources, it encodes while it is in the
 collection, whatever the subscriber demand, and uploads only while something
 subscribes to it.
 
 ## Plan
 
+Cameras, displays, windows, images, and colors already publish this way
+(`rs/moq-scene/src/publish.rs`): each source's renditions sit in a nested hang
+catalog keyed by source name, so the root `video` and `audio` sections stay
+the program's. An audio source adds an `audio` rendition to its own nested
+catalog the same way.
+
+Blocked upstream: moq-audio's capture stream is crate-private, and the only
+public captures feed either the program bus (`bus::Capture`) or an encoder
+(`encode::publish_capture`), never both. Land a capture that feeds both in
+moq first, with a moq-side test, then bump the `moq` pin, rather than opening
+each device twice. Publish the raw capture, before the source's gain and
+mute, since a composing viewer mixes the sources itself.
+
 Encode like every first-party publisher (decided 2026-10-28, from
 [#7101](https://github.com/moq-dev/moq/issues/7101)): an unwatched source
 still encodes, so a late viewer or a [replay](/quest/m0/replay.md)
-finds its recent past, but costs no upload. Static sources (images, colors) publish once rather
-than as a video stream. Consumer GPUs cap concurrent hardware encode
-sessions, so when the hardware refuses one, that source's track fails loudly
-with the reason shown rather than silently degrading.
+finds its recent past, but costs no upload.
 
 ✅ 2026-11-01 (maintainer, on
 [moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)): sources stay
-always-on, accepting that a collection with many sources reaches the
-hardware encode-session cap when it loads rather than when viewers
-subscribe; the loud failure above is the answer to that cap. Rejected:
-sources on demand, which would make replaying a source need an armed local
-subscriber again.
+always-on. Rejected: sources on demand, which would make replaying a source
+need an armed local subscriber again.
 Track names stay stable for a source's life, and an edited source that
 changes what it shows gets a new name.
