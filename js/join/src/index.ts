@@ -62,6 +62,18 @@ function join(link: Link): () => void {
 	});
 	signals.cleanup(() => preview.close());
 
+	// A refused permission or a missing device leaves the toggle on with nothing sent, so say so.
+	signals.run((effect) => {
+		const failures = [
+			["camera", effect.get(local.webcam.out.error)],
+			["microphone", effect.get(local.microphone.out.error)],
+		] as const;
+		const messages = failures.flatMap(([device, error]) => (error ? [`No ${device}: ${error.message}`] : []));
+		const capture = element("capture");
+		capture.textContent = messages.join(" ");
+		capture.hidden = messages.length === 0;
+	});
+
 	signals.run((effect) => {
 		const status = effect.get(connection.status);
 		element("status").textContent = status.charAt(0).toUpperCase() + status.slice(1);

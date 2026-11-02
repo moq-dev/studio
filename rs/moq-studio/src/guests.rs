@@ -122,6 +122,12 @@ impl Room {
 		let _ = url.set_username("");
 		let _ = url.set_password(None);
 		url.set_path(root.as_str());
+		// The relay compares a token's root with the dialed path as sent, so a room
+		// the URL would percent-encode could never match its guests' tokens.
+		anyhow::ensure!(
+			url.path().strip_prefix('/') == Some(root.as_str()),
+			"the room `{room}` changes when written in a URL; use only letters, digits, and `-_.~`"
+		);
 
 		check_scope(&key, &root)?;
 		let room = Self {
@@ -378,6 +384,20 @@ mod tests {
 			.err()
 			.unwrap();
 		assert!(err.to_string().contains("cannot sign"), "{err:#}");
+	}
+
+	#[test]
+	fn refuses_a_room_a_url_would_spell_differently() {
+		for room in ["guest room", "gäste"] {
+			let key = key(&format!("show/{room}"), &["**"], &["**"]);
+			let page = Url::parse("https://studio.example/join/").unwrap();
+			let connect = Url::parse("https://relay.example/show").unwrap();
+			let err = Room::new(&connect, room, key, page, EXPIRY).err().unwrap();
+			assert!(
+				err.to_string().contains("changes when written in a URL"),
+				"{room}: {err}"
+			);
+		}
 	}
 
 	#[test]
