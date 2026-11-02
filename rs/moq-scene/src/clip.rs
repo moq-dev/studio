@@ -140,16 +140,25 @@ impl Draft {
 				Source::Clone { source } => Source::Clone {
 					source: names.get(source).cloned().unwrap_or_else(|| source.clone()),
 				},
-				Source::Image { path } => Source::Image {
-					path: path.strip_prefix(dir).unwrap_or(path).to_path_buf(),
-				},
 				source => source.clone(),
 			};
-			let existing = self.collection().sources.get(name);
-			if existing == Some(&source) {
+			// An image is the same source if it names the same file, however
+			// either spells the path.
+			let resolve = |source: &Source| match source {
+				Source::Image { path } => Source::Image { path: dir.join(path) },
+				source => source.clone(),
+			};
+			let existing = self.collection().sources.get(name).map(resolve);
+			if existing.as_ref() == Some(&resolve(&source)) {
 				names.insert(name.clone(), name.clone());
 				continue;
 			}
+			let source = match source {
+				Source::Image { path } => Source::Image {
+					path: path.strip_prefix(dir).unwrap_or(&path).to_path_buf(),
+				},
+				source => source,
+			};
 			let renamed = self.collection().unused_name(name);
 			self.set_source(&renamed, Some(source))?;
 			if let Some(audio) = items.audio.get(name) {
@@ -265,6 +274,17 @@ mod tests {
 
 		let home = paste(&collection, &Layer::Top, &text, DIR);
 		assert_eq!(home.sources, collection.sources, "linked to the same image");
+
+		// However the scene file spells the path.
+		let mut absolute = collection.clone();
+		absolute.sources.insert(
+			"logo".into(),
+			Source::Image {
+				path: "/shows/one/logo.png".into(),
+			},
+		);
+		let home = paste(&absolute, &Layer::Top, &text, DIR);
+		assert_eq!(home.sources, absolute.sources, "linked to the same image");
 
 		let mut other = Collection::new();
 		other.sources.insert(
