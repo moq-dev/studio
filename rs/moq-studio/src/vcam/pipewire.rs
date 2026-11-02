@@ -9,6 +9,8 @@
 //! own main loop. The `vcam` thread leaves the newest picture in a [`Slot`]
 //! and wakes the loop; the loop copies it into a PipeWire buffer.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -63,7 +65,10 @@ impl Node {
 			std::thread::Builder::new()
 				.name("vcam-pipewire".into())
 				.spawn(move || {
-					if let Err(err) = run(size, framerate, slot, shared, messages, &ready) {
+					let ready = Rc::new(RefCell::new(Some(ready)));
+					if let Err(err) = run(size, framerate, slot, shared, messages, ready.clone())
+						&& let Some(ready) = ready.take()
+					{
 						let _ = ready.send(Err(format!("{err:#}")));
 					}
 				})
@@ -114,15 +119,19 @@ impl Drop for Node {
 	}
 }
 
+/// Whoever waits for the node to be added, until it is or PipeWire refuses it.
+type Ready = Rc<RefCell<Option<mpsc::Sender<Result<(), String>>>>>;
+
 /// Add the node and run it until it is dropped or PipeWire ends it, saying on
-/// `ready` once it is added. Fails only before that.
+/// `ready` whether PipeWire added it. A failure before then goes to `ready`
+/// rather than `shared`, so the caller can still fall back.
 fn run(
 	size: Size,
 	framerate: u32,
 	slot: Arc<Slot>,
 	shared: Arc<Shared>,
 	messages: pw::channel::Receiver<Message>,
-	ready: &mpsc::Sender<Result<(), String>>,
+	ready: Ready,
 ) -> anyhow::Result<()> {
 	pw::init();
 	let mainloop = pw::main_loop::MainLoopRc::new(None).context("PipeWire main loop")?;
@@ -158,10 +167,22 @@ fn run(
 				let ended = match state {
 					pw::stream::StreamState::Error(err) => Some(format!("PipeWire: {err}")),
 					pw::stream::StreamState::Unconnected => Some("the PipeWire session ended".to_string()),
+					// Paused first once PipeWire has added the node.
+					pw::stream::StreamState::Paused => {
+						if let Some(ready) = ready.take() {
+							let _ = ready.send(Ok(()));
+						}
+						None
+					}
 					_ => None,
 				};
 				if let Some(ended) = ended {
-					shared.fail(ended);
+					match ready.take() {
+						Some(ready) => {
+							let _ = ready.send(Err(ended));
+						}
+						None => shared.fail(ended),
+					}
 					if let Some(mainloop) = mainloop.upgrade() {
 						mainloop.quit();
 					}
@@ -260,9 +281,6 @@ fn run(
 		}
 	});
 
-	if ready.send(Ok(())).is_err() {
-		return Ok(());
-	}
 	mainloop.run();
 	Ok(())
 }
