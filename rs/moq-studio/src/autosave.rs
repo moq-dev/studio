@@ -106,29 +106,36 @@ fn write(path: &Path, text: &str) -> std::io::Result<()> {
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
 		Err(err) => return Err(err),
 	};
-	let mut name = std::ffi::OsString::from(".");
-	name.push(path.file_name().unwrap_or_default());
-	name.push(".autosave");
-	let temp = path.with_file_name(name);
+	let existing = match std::fs::metadata(&path) {
+		Ok(metadata) => Some(metadata.permissions()),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+		Err(err) => return Err(err),
+	};
 
-	let result = (|| {
-		let mut file = std::fs::File::create(&temp)?;
-		// The temporary file replaces the old one, so it takes its permissions.
-		match std::fs::metadata(&path) {
-			Ok(metadata) => file.set_permissions(metadata.permissions())?,
-			Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-			Err(err) => return Err(err),
-		}
-		file.write_all(text.as_bytes())?;
-		// On disk before the rename, so a power loss cannot leave the new name
-		// pointing at an empty file.
-		file.sync_all()?;
-		std::fs::rename(&temp, &path)
-	})();
-	if result.is_err() {
-		let _ = std::fs::remove_file(&temp);
+	// Named uniquely and created exclusively, so another studio saving the
+	// same file never writes into this one.
+	let mut prefix = std::ffi::OsString::from(".");
+	prefix.push(path.file_name().unwrap_or_default());
+	prefix.push(".");
+	let mut builder = tempfile::Builder::new();
+	builder.prefix(&prefix).suffix(".autosave");
+	// A new file gets the umask's permissions, like any other.
+	#[cfg(unix)]
+	if existing.is_none() {
+		use std::os::unix::fs::PermissionsExt;
+		builder.permissions(std::fs::Permissions::from_mode(0o666));
 	}
-	result
+	let mut file = builder.tempfile_in(path.parent().unwrap_or(Path::new("")))?;
+	// It replaces the old file, so it takes its permissions.
+	if let Some(permissions) = existing {
+		file.as_file().set_permissions(permissions)?;
+	}
+	file.write_all(text.as_bytes())?;
+	// On disk before the rename, so a power loss cannot leave the new name
+	// pointing at an empty file.
+	file.as_file().sync_all()?;
+	file.persist(&path)?;
+	Ok(())
 }
 
 #[cfg(test)]
@@ -169,6 +176,24 @@ mod tests {
 			.map(|e| e.unwrap().file_name())
 			.collect();
 		assert_eq!(names, ["show.toml"], "the temporary file is renamed into place");
+	}
+
+	/// A new file gets the permissions any new file would, not a temporary
+	/// file's owner-only ones.
+	#[cfg(unix)]
+	#[test]
+	fn creates_a_file_with_the_umask_permissions() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		let plain = dir.path().join("plain");
+		std::fs::File::create(&plain).unwrap();
+		let path = dir.path().join("show.toml");
+		let (autosave, opened) = Autosave::open(path.clone()).unwrap();
+		autosave.save(serialize(&opened)).unwrap();
+
+		let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode(&path), mode(&plain));
 	}
 
 	/// A hand-written file keeps its comments and layout until the collection
