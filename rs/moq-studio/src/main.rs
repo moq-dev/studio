@@ -9,15 +9,19 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+mod devices;
 mod engine;
+mod setup;
 mod ui;
+mod uplink;
 
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-studio")]
 #[usage(completion, settings)]
 pub struct Config {
-	/// The scene collection to open. Created on the first save if it does not exist.
+	/// The scene collection to open. If it does not exist, guided setup proposes
+	/// one and writes it here.
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub scenes: PathBuf,
 
@@ -65,25 +69,69 @@ fn main() -> anyhow::Result<()> {
 	// The QUIC client binds its socket on the current runtime.
 	let _runtime = runtime.enter();
 	let gpu = pollster::block_on(engine::Gpu::new())?;
-	let collection = engine::load(&config.scenes)?;
 	let connect = match config.client.url.clone() {
 		Some(url) => Some((config.client.clone().init(config.quic.clone())?, url)),
 		None => None,
 	};
-	let engine = runtime.block_on(engine::Engine::start(
-		gpu.clone(),
-		config.scenes.clone(),
-		collection,
+	let launch = engine::Launch {
+		gpu: gpu.clone(),
+		path: config.scenes.clone(),
 		connect,
-		&config.broadcast,
-		config.on_demand,
-	))?;
+		broadcast: config.broadcast.clone(),
+		on_demand: config.on_demand,
+	};
+	let exists = config
+		.scenes
+		.try_exists()
+		.with_context(|| format!("reading {}", config.scenes.display()))?;
+	let app = match exists {
+		true => {
+			let collection = engine::load(&config.scenes)?;
+			App::Starting(runtime.block_on(engine::Engine::start(launch, collection))?)
+		}
+		false => App::Setup(Box::new(setup::Setup::new(launch, runtime.handle().clone()))),
+	};
 
-	run(engine, gpu, runtime.handle().clone())
+	run(app, gpu, runtime.handle().clone())
+}
+
+/// What the window shows.
+enum App {
+	/// First launch: guided setup, until it starts the studio.
+	Setup(Box<setup::Setup>),
+	/// An engine whose studio is built once the window can draw it.
+	Starting(Arc<engine::Engine>),
+	Studio(Box<ui::Studio>),
+}
+
+/// The window's contents, and what building the studio takes.
+struct Window {
+	app: App,
+	render: eframe::egui_wgpu::RenderState,
+	runtime: tokio::runtime::Handle,
+}
+
+impl eframe::App for Window {
+	fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+		let started = match &mut self.app {
+			App::Studio(studio) => return studio.ui(ui, frame),
+			App::Setup(setup) => match setup.ui(ui) {
+				Some(started) => started,
+				None => return,
+			},
+			App::Starting(engine) => setup::Started {
+				engine: engine.clone(),
+				message: None,
+			},
+		};
+		let studio = ui::Studio::new(&self.render, started.engine, self.runtime.clone(), started.message);
+		self.app = App::Studio(Box::new(studio));
+		ui.ctx().request_repaint();
+	}
 }
 
 /// Show the window until it is closed.
-fn run(engine: Arc<engine::Engine>, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::Result<()> {
+fn run(app: App, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::Result<()> {
 	let options = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
 			.with_title("MoQ Studio")
@@ -105,7 +153,13 @@ fn run(engine: Arc<engine::Engine>, gpu: engine::Gpu, runtime: tokio::runtime::H
 	eframe::run_native(
 		"moq-studio",
 		options,
-		Box::new(move |cc| Ok(Box::new(ui::Studio::new(cc, engine, runtime)?))),
+		Box::new(move |cc| {
+			let render = cc
+				.wgpu_render_state
+				.clone()
+				.context("the window is not drawn with wgpu")?;
+			Ok(Box::new(Window { app, render, runtime }))
+		}),
 	)
 	.map_err(|err| anyhow::anyhow!("{err}"))
 	.context("the window failed")

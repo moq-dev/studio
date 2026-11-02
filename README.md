@@ -13,7 +13,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
     show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
 ```
 
-- `show.toml` is the scene collection. It is created on the first save.
+- `show.toml` is the scene collection. If it does not exist yet,
+  [guided setup](#first-launch) proposes one and writes it there.
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
@@ -23,6 +24,35 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   Wayland screen or window cannot be picked yet.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
   [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
+
+## First launch
+
+Opening a scene file that does not exist yet starts guided setup instead of
+the studio. It runs three checks, and a check that fails shows its reason:
+
+- **Devices:** the cameras, displays, and audio inputs this machine has.
+- **Encoders:** for each canvas setup can propose (1080p and 720p at 60 or 30
+  fps, and 360p at 30 fps), the encoder the program would pick, whether it
+  reads the GPU, and the bitrate it encodes at.
+- **Uplink:** with `--connect`, setup publishes a probe at the `--broadcast`
+  path for about six seconds and subscribes to it through the relay, so the
+  relay pulls it. The congestion controller's send-rate estimate is the
+  measurement. A connection that reports no estimate, such as WebSocket, fails
+  the check.
+
+Setup then proposes a scene named Main and a canvas, explaining each choice.
+The scene has the first display filling the canvas, the first camera in the
+bottom-right corner over it (or filling the canvas alone), and the first audio
+input. Swap any of them for another device or leave it out. The canvas is the
+largest one whose video and audio fit in three quarters of the measured
+uplink. Without a measurement, it is the default 1080p at 30 fps.
+**Start with this scene** writes the scene file and opens the studio.
+**Start with an empty scene** opens it with nothing and writes no file, so
+setup runs again on the next launch unless you save first.
+
+Setup writes an ordinary scene file. Change its sources and scenes in their
+panels, and its canvas in the file, which takes a restart. The Output panel
+shows the canvas in use.
 
 ## Panels
 
@@ -36,7 +66,7 @@ Every panel is a tab you can drag, split, or stack.
 | Sources | Add a source by hand, see whether each is live, and remove one. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the relay connection, whether anyone is watching, and the encoder's work. |
+| Output | See the relay connection, whether anyone is watching, the canvas, and the encoder's work. |
 
 A broadcast source subscribes through the same relay connection, plays the
 best video and audio its catalog lists, switches when the catalog changes, and

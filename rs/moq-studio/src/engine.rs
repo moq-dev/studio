@@ -186,26 +186,42 @@ pub struct Engine {
 }
 
 /// The audio the program publishes.
-const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(128);
+pub const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(128);
 
 /// How often the audio thread reads the bus. Short enough that a read is never
 /// close to the bus's buffering, long enough to cost nothing.
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
+/// Everything starting the engine takes besides the collection, which guided
+/// setup holds until it has proposed one.
+#[derive(Clone)]
+pub struct Launch {
+	pub gpu: Gpu,
+	/// The scene file.
+	pub path: PathBuf,
+	/// The relay to publish to, if any.
+	pub connect: Option<(moq_tokio::Client, url::Url)>,
+	/// The broadcast path the program is published at.
+	pub broadcast: String,
+	/// Whether the program video encodes only while someone watches.
+	pub on_demand: bool,
+}
+
 impl Engine {
-	/// Open the collection at `path` on `gpu` and start the program clock.
-	/// With `connect`, publish the program at `broadcast` on that relay,
-	/// encoding its video only while someone watches when `on_demand`.
+	/// Open `collection` from `launch.path` on `launch.gpu` and start the
+	/// program clock. With `launch.connect`, publish the program at
+	/// `launch.broadcast` on that relay, encoding its video only while someone
+	/// watches when `launch.on_demand`.
 	///
 	/// Call inside the tokio runtime that serves the relay connection.
-	pub async fn start(
-		gpu: Gpu,
-		path: PathBuf,
-		collection: Collection,
-		connect: Option<(moq_tokio::Client, url::Url)>,
-		broadcast: &str,
-		on_demand: bool,
-	) -> anyhow::Result<Arc<Self>> {
+	pub async fn start(launch: Launch, collection: Collection) -> anyhow::Result<Arc<Self>> {
+		let Launch {
+			gpu,
+			path,
+			connect,
+			broadcast,
+			on_demand,
+		} = launch;
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
 		let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -222,7 +238,7 @@ impl Engine {
 
 		let (output, origin, publish) = match connect {
 			Some((client, url)) => {
-				let (output, publish) = publish(&gpu, client, url, subscribe, broadcast, canvas, on_demand).await?;
+				let (output, publish) = publish(&gpu, client, url, subscribe, &broadcast, canvas, on_demand).await?;
 				(Some(output), None, Some(publish))
 			}
 			None => (None, Some(subscribe), None),
@@ -636,13 +652,14 @@ mod tests {
 			visible: true,
 		});
 
-		let gpu = Gpu::new().await.expect("a GPU");
-		let path = dir.path().join("show.toml");
-		let connect = Some((client, fixture.url.clone()));
-		let on_demand = false;
-		let engine = Engine::start(gpu, path, collection, connect, "studio", on_demand)
-			.await
-			.expect("the studio starts");
+		let launch = Launch {
+			gpu: Gpu::new().await.expect("a GPU"),
+			path: dir.path().join("show.toml"),
+			connect: Some((client, fixture.url.clone())),
+			broadcast: "studio".into(),
+			on_demand: false,
+		};
+		let engine = Engine::start(launch, collection).await.expect("the studio starts");
 
 		let broadcast = kio::clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await

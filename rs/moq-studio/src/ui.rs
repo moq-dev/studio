@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::source::Status;
 use moq_scene::{Item, Rect, Scene, Source, wgpu};
 
+use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
 
 /// The panels, each a tab the user can move, split, or stack.
@@ -47,15 +47,13 @@ pub struct Studio {
 }
 
 impl Studio {
+	/// The studio over `engine`, with `message` in the status bar.
 	pub fn new(
-		cc: &eframe::CreationContext<'_>,
+		render: &eframe::egui_wgpu::RenderState,
 		engine: Arc<Engine>,
 		runtime: tokio::runtime::Handle,
-	) -> anyhow::Result<Self> {
-		let render = cc
-			.wgpu_render_state
-			.as_ref()
-			.context("the window is not drawn with wgpu")?;
+		message: Option<Result<String, String>>,
+	) -> Self {
 
 		// The compositor's textures live as long as the engine, so registering
 		// them once is enough: egui samples whatever they hold each frame.
@@ -80,7 +78,7 @@ impl Studio {
 		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices]);
 		tree.split_right(sources, 0.5, vec![Tab::Audio, Tab::Output]);
 
-		Ok(Self {
+		Self {
 			dock,
 			panels: Panels {
 				engine,
@@ -91,9 +89,9 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
-				message: None,
+				message,
 			},
-		})
+		}
 	}
 }
 
@@ -518,6 +516,13 @@ impl Panels {
 					ui.end_row();
 				}
 			}
+			let canvas = self.engine.state.lock().unwrap().collection.canvas;
+			ui.label("Canvas");
+			ui.label(format!(
+				"{}x{} at {} fps, set in the scene file and read at startup",
+				canvas.width, canvas.height, canvas.framerate
+			));
+			ui.end_row();
 			ui.label("Drawn");
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
@@ -772,12 +777,6 @@ impl AddSource {
 	}
 }
 
-/// A device the user can add as a source.
-struct Pick {
-	name: String,
-	source: Source,
-}
-
 /// The capture devices this machine has, listed in the background.
 #[derive(Default)]
 struct Devices {
@@ -785,17 +784,12 @@ struct Devices {
 	pending: Option<std::sync::mpsc::Receiver<Listing>>,
 }
 
-/// One listing of every kind of device, each of which can fail on its own.
-struct Listing {
-	kinds: Vec<(&'static str, Result<Vec<Pick>, String>)>,
-}
-
 impl Devices {
 	fn refresh(&mut self, runtime: &tokio::runtime::Handle) {
 		let (send, recv) = std::sync::mpsc::channel();
 		self.pending = Some(recv);
 		runtime.spawn(async move {
-			let _ = send.send(list().await);
+			let _ = send.send(devices::list().await);
 		});
 	}
 
@@ -818,8 +812,8 @@ impl Devices {
 		let mut picked = None;
 		egui::ScrollArea::vertical()
 			.show(ui, |ui| {
-				for (kind, devices) in &mut listing.kinds {
-					ui.strong(*kind);
+				for (kind, devices) in listing.kinds() {
+					ui.strong(kind);
 					match devices {
 						Ok(devices) if devices.is_empty() => {
 							ui.weak("none");
@@ -848,55 +842,3 @@ impl Devices {
 	}
 }
 
-#[cfg(feature = "capture")]
-async fn list() -> Listing {
-	fn picks<T>(result: Result<Vec<T>, impl std::fmt::Display>, pick: impl Fn(T) -> Pick) -> Result<Vec<Pick>, String> {
-		result
-			.map(|devices| devices.into_iter().map(pick).collect())
-			.map_err(|err| err.to_string())
-	}
-
-	let cameras = picks(moq_video::capture::cameras().await, |camera| Pick {
-		name: camera.name,
-		source: Source::Camera { id: Some(camera.id) },
-	});
-	let displays = picks(moq_video::capture::displays().await, |display| Pick {
-		name: display.name,
-		source: Source::Display { id: Some(display.id) },
-	});
-	let windows = picks(moq_video::capture::windows().await, |window| Pick {
-		name: format!("{} ({})", window.title, window.app),
-		source: Source::Window { id: window.id },
-	});
-	let mut microphones = picks(moq_audio::capture::devices().await, |device| Pick {
-		name: format!("{} ({})", device.name, device.host),
-		source: Source::Microphone { id: Some(device.id) },
-	});
-	if cfg!(target_os = "macos")
-		&& let Ok(microphones) = &mut microphones
-	{
-		microphones.push(Pick {
-			name: "System audio".into(),
-			source: Source::SystemAudio,
-		});
-	}
-
-	Listing {
-		kinds: vec![
-			("Cameras", cameras),
-			("Displays", displays),
-			("Windows", windows),
-			("Audio inputs", microphones),
-		],
-	}
-}
-
-#[cfg(not(feature = "capture"))]
-async fn list() -> Listing {
-	Listing {
-		kinds: vec![(
-			"Devices",
-			Err("this build cannot capture; rebuild with `--features capture`".into()),
-		)],
-	}
-}
