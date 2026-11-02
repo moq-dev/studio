@@ -100,16 +100,20 @@ fn parse(path: &Path, text: &str) -> anyhow::Result<Collection> {
 /// Replace the file at `path` with `text` all at once, so a crash leaves
 /// either the old file or the new one, never part of either.
 fn write(path: &Path, text: &str) -> std::io::Result<()> {
-	// Through a symlink to the file it names, so the link survives.
-	let path = match std::fs::canonicalize(path) {
-		Ok(path) => path,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
-		Err(err) => return Err(err),
-	};
+	let path = resolve(path)?;
 	let existing = match std::fs::metadata(&path) {
-		Ok(metadata) => Some(metadata.permissions()),
+		Ok(metadata) => {
+			// Refused as a write in place would be, so a read-only scene file
+			// is not replaced.
+			std::fs::OpenOptions::new().write(true).open(&path)?;
+			Some(metadata.permissions())
+		}
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
 		Err(err) => return Err(err),
+	};
+	let dir = match path.parent() {
+		Some(dir) if !dir.as_os_str().is_empty() => dir,
+		_ => Path::new("."),
 	};
 
 	// Named uniquely and created exclusively, so another studio saving the
@@ -125,7 +129,7 @@ fn write(path: &Path, text: &str) -> std::io::Result<()> {
 		use std::os::unix::fs::PermissionsExt;
 		builder.permissions(std::fs::Permissions::from_mode(0o666));
 	}
-	let mut file = builder.tempfile_in(path.parent().unwrap_or(Path::new("")))?;
+	let mut file = builder.tempfile_in(dir)?;
 	// It replaces the old file, so it takes its permissions.
 	if let Some(permissions) = existing {
 		file.as_file().set_permissions(permissions)?;
@@ -135,7 +139,33 @@ fn write(path: &Path, text: &str) -> std::io::Result<()> {
 	// pointing at an empty file.
 	file.as_file().sync_all()?;
 	file.persist(&path)?;
+	// And the rename itself, so a power loss cannot undo the save.
+	#[cfg(unix)]
+	std::fs::File::open(dir)?.sync_all()?;
 	Ok(())
+}
+
+/// The file a chain of symlinks at `path` ends in, which need not exist yet,
+/// so a save replaces that file and every link survives.
+fn resolve(path: &Path) -> std::io::Result<PathBuf> {
+	let mut path = path.to_path_buf();
+	// Linux's own limit on links followed in one lookup.
+	for _ in 0..40 {
+		match std::fs::symlink_metadata(&path) {
+			Ok(metadata) if metadata.file_type().is_symlink() => {
+				let target = std::fs::read_link(&path)?;
+				// Relative to the link's directory; an absolute target replaces it.
+				path = path.parent().unwrap_or(Path::new("")).join(target);
+			}
+			Ok(_) => return Ok(path),
+			Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(path),
+			Err(err) => return Err(err),
+		}
+	}
+	Err(std::io::Error::other(format!(
+		"{}: too many levels of symbolic links",
+		path.display()
+	)))
 }
 
 #[cfg(test)]
@@ -275,5 +305,44 @@ mod tests {
 		assert_eq!(std::fs::read_to_string(&target).unwrap(), edited.to_toml().unwrap());
 		let mode = std::fs::metadata(&target).unwrap().permissions().mode();
 		assert_eq!(mode & 0o777, 0o640);
+	}
+
+	/// A chain of links to a file that does not exist yet creates that file,
+	/// as a write through the links would.
+	#[cfg(unix)]
+	#[test]
+	fn creates_the_file_a_dangling_symlink_chain_names() {
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("target.toml");
+		let middle = dir.path().join("middle.toml");
+		let link = dir.path().join("show.toml");
+		std::os::unix::fs::symlink("target.toml", &middle).unwrap();
+		std::os::unix::fs::symlink(&middle, &link).unwrap();
+
+		let (autosave, opened) = Autosave::open(link.clone()).unwrap();
+		autosave.save(serialize(&opened)).unwrap();
+
+		assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+		assert!(std::fs::symlink_metadata(&middle).unwrap().file_type().is_symlink());
+		assert_eq!(std::fs::read_to_string(&target).unwrap(), opened.to_toml().unwrap());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn refuses_to_replace_a_read_only_file() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		let text = Collection::new().to_toml().unwrap();
+		std::fs::write(&path, &text).unwrap();
+		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+		if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+			return; // Running as root, which may write it anyway.
+		}
+
+		let (autosave, _) = Autosave::open(path.clone()).unwrap();
+		assert!(autosave.save(serialize(&collection("Edited"))).is_err());
+		assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
 	}
 }

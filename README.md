@@ -95,7 +95,8 @@ quit, so a crash loses at most the last second of edits. Each write replaces
 the whole file at once, never leaving half of it, and a collection that has not
 changed is not rewritten, so a hand-written file keeps its comments and layout
 until the next edit in the studio. A failed write shows in the status bar and
-is retried. To edit the file by hand while the studio runs, save it and pick
+is retried every second; until one succeeds, a crash loses every edit since the
+last write. To edit the file by hand while the studio runs, save it and pick
 **File > Reload**; an edit in the studio before that overwrites it. A new
 canvas size or frame rate takes a restart.
 
