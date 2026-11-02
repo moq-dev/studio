@@ -616,7 +616,10 @@ impl Panels {
 				};
 				ui.end_row();
 				ui.label("Reporting");
-				ui.label(format!("{} viewers", viewers.reports.len()));
+				ui.label(match viewers.unread {
+					0 => format!("{} viewers", viewers.reports.len()),
+					unread => format!("{} viewers read, {unread} more not", viewers.reports.len()),
+				});
 				ui.end_row();
 			});
 			ui.separator();

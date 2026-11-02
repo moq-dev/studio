@@ -33,6 +33,12 @@ const ECHO: &str = "viewers";
 /// whose patches keep adding keys.
 const MAX_REPORT: usize = 64 * 1024;
 
+/// The most viewers whose feedback the studio reads at once. Their grades are
+/// a sample, which a few dozen viewers show as well as thousands would, while
+/// the readers, their subscriptions, and their reports stay a fixed cost
+/// however many viewers announce feedback.
+const MAX_VIEWERS: usize = 64;
+
 /// What the Health panel draws, rebuilt every [`INTERVAL`].
 #[derive(Debug, Default)]
 pub struct Report {
@@ -89,8 +95,11 @@ pub struct Viewers {
 	/// Sessions subscribed to the broadcast, summed over the relay's nodes, or
 	/// `None` when the relay shares no stats with this connection.
 	pub watching: Option<u64>,
-	/// Each viewer that reports what it receives, by name.
+	/// The viewers whose feedback is read, by name: a sample of at most
+	/// [`MAX_VIEWERS`].
 	pub reports: Vec<Viewer>,
+	/// Viewers reporting beyond the sample, whose feedback is not read.
+	pub unread: usize,
 }
 
 /// One viewer's feedback.
@@ -220,6 +229,7 @@ impl Sampler {
 			report.uplink = uplink(&ours.snapshot, &graded_ours, local.watched);
 			graded.publisher = Some(graded_ours);
 			graded.viewers = publisher.feedback.grade(now, &self.thresholds);
+			report.viewers.unread = publisher.feedback.unread();
 			report.viewers.watching = publisher.watching.get();
 			report.tracks = tracks(publisher, &graded);
 			report.viewers.reports = viewers(publisher, &graded.viewers);
@@ -530,13 +540,14 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 /// What viewers' reports show, one problem per kind of trouble across them.
 fn viewer_problems(facts: &Facts<'_>, add: &mut impl FnMut(Verdict, String)) {
 	let reporting = facts.viewers.iter().filter(|viewer| viewer.health.is_some()).count();
-	// A congested uplink starves every viewer; only a healthy one leaves the
-	// blame with the viewers' own links.
-	let theirs = facts.uplink.verdict <= Verdict::Healthy;
-	let cause = if theirs {
-		"their own connections cannot keep up"
-	} else {
-		"the uplink cannot keep up"
+	// A congested or lossy uplink starves every viewer, and one measured
+	// clear of both leaves the blame with the viewers' own links. Without
+	// those measurements the cause goes unnamed.
+	let uplink = facts.uplink;
+	let cause = match uplink.grade(Input::Headroom).max(uplink.grade(Input::Loss)) {
+		Verdict::Unknown => "",
+		Verdict::Healthy => ": their own connections cannot keep up",
+		Verdict::Degraded | Verdict::Unhealthy => ": the uplink cannot keep up",
 	};
 
 	// Each input's worst grade, how many viewers it troubles, and the track
@@ -582,8 +593,8 @@ fn viewer_problems(facts: &Facts<'_>, add: &mut impl FnMut(Verdict, String)) {
 	for (input, verdict, count, id) in worst {
 		let of = format!("{count} of {reporting} viewers");
 		let cause = match input {
-			Input::Late => format!("{of} receive {} too late to play: {cause}.", track(id)),
-			Input::Stalled => format!("{of} are stalling on {}: {cause}.", track(id)),
+			Input::Late => format!("{of} receive {} too late to play{cause}.", track(id)),
+			Input::Stalled => format!("{of} are stalling on {}{cause}.", track(id)),
 			Input::Errors => format!("{of} cannot decode {}.", track(id)),
 			Input::Rtt => format!("{of} are far from their relay."),
 			// Graded for publishers only.
@@ -633,9 +644,17 @@ pub fn echo(path: &moq_net::Path) -> anyhow::Result<(moq_net::path::Relative, mo
 	Ok((relative, resolved))
 }
 
-/// Every viewer's feedback, kept by the readers [`Feedback::follow`] runs.
+/// The feedback of a sample of viewers, kept by the readers
+/// [`Feedback::follow`] runs.
 #[derive(Clone, Default)]
-pub struct Feedback(Arc<Mutex<BTreeMap<String, Slot>>>);
+pub struct Feedback(Arc<Mutex<Sample>>);
+
+/// The viewers being read, and how many more wait for a reader.
+#[derive(Default)]
+struct Sample {
+	slots: BTreeMap<String, Slot>,
+	unread: usize,
+}
 
 /// Where one reader keeps its viewer's reports. A reader aborted mid-write
 /// writes to a slot nobody reads any more, rather than bringing back a viewer
@@ -651,17 +670,19 @@ struct Reports {
 }
 
 impl Feedback {
-	/// Read the feedback of every viewer under `prefix` on `origin`, as viewers
-	/// come and go, until dropped.
+	/// Read the feedback of viewers under `prefix` on `origin`, as viewers
+	/// come and go, until dropped: at most [`MAX_VIEWERS`] at once, the rest
+	/// waiting in path order for a reader to free up.
 	///
 	/// Who may publish feedback is the relay's authorization, as for any
-	/// broadcast, so a viewer can only report under a name it may publish, and
-	/// the studio holds at most [`MAX_REPORT`] of each.
+	/// broadcast. A waiting viewer costs only its path, which the announcement
+	/// cursor holds anyway, and a read one at most [`MAX_REPORT`].
 	pub async fn follow(self, origin: moq_net::origin::Consumer, prefix: moq_net::Path) -> anyhow::Result<()> {
 		let pattern = moq_net::Pattern::subtree(prefix.as_str())?;
 		let origin = origin.scope("", &moq_net::Patterns::from(pattern))?;
 		let mut announced = origin.announced();
 		let mut readers = BTreeMap::<moq_net::Path, Reader>::new();
+		let mut waiting = BTreeMap::<moq_net::Path, Option<moq_net::Epoch>>::new();
 		while let Some(event) = announced.next().await {
 			let (announce, start) = match event {
 				moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
@@ -672,39 +693,48 @@ impl Feedback {
 				_ => continue,
 			};
 			let path = announce.prefix;
-			if !hang::echo::is_echo(&path) {
+			if !hang::echo::is_echo(&path) || name(&prefix, &path).is_none() {
 				continue;
 			}
-			let Some(name) = path
-				.strip_prefix(&prefix)
-				.and_then(|name| name.as_str().strip_suffix(hang::echo::SUFFIX).map(str::to_string))
-			else {
-				continue;
-			};
 			readers.remove(&path);
+			waiting.remove(&path);
 			if start {
-				let slot = Slot::default();
-				self.0.lock().unwrap().insert(name.clone(), slot.clone());
-				let observer = Observer::new(path.clone(), announce.route.epoch.clone());
-				let task = tokio::spawn(read(origin.clone(), observer, slot.clone()));
-				readers.insert(
-					path,
-					Reader {
-						name,
-						slot,
-						task,
-						feedback: self.clone(),
-					},
-				);
+				waiting.insert(path, announce.route.epoch);
 			}
+			while readers.len() < MAX_VIEWERS
+				&& let Some((path, epoch)) = waiting.pop_first()
+			{
+				let name = name(&prefix, &path).expect("checked when it was announced");
+				let reader = self.read(origin.clone(), Observer::new(path.clone(), epoch), name);
+				readers.insert(path, reader);
+			}
+			self.0.lock().unwrap().unread = waiting.len();
 		}
 		Ok(())
 	}
 
+	/// Start reading the viewer `observer` names.
+	fn read(&self, origin: moq_net::origin::Consumer, observer: Observer, name: String) -> Reader {
+		let slot = Slot::default();
+		self.0.lock().unwrap().slots.insert(name.clone(), slot.clone());
+		let task = tokio::spawn(read(origin, observer, slot.clone()));
+		Reader {
+			name,
+			slot,
+			task,
+			feedback: self.clone(),
+		}
+	}
+
+	fn unread(&self) -> usize {
+		self.0.lock().unwrap().unread
+	}
+
 	/// Grade every viewer's latest report as of `now`.
 	fn grade(&self, now: Instant, thresholds: &Thresholds) -> Vec<GradedViewer> {
-		let viewers = self.0.lock().unwrap();
-		viewers
+		let sample = self.0.lock().unwrap();
+		sample
+			.slots
 			.iter()
 			.map(|(name, slot)| {
 				let reports = slot.lock().unwrap();
@@ -724,6 +754,13 @@ impl Feedback {
 			})
 			.collect()
 	}
+}
+
+/// The name a viewer publishes feedback under: its path beneath `prefix`,
+/// without the `.echo` suffix.
+fn name(prefix: &moq_net::Path, path: &moq_net::Path) -> Option<String> {
+	let name = path.strip_prefix(prefix)?;
+	name.as_str().strip_suffix(hang::echo::SUFFIX).map(str::to_string)
 }
 
 /// Keep the latest reports of the viewer `observer` names in `slot`, until
@@ -760,12 +797,9 @@ struct Reader {
 impl Drop for Reader {
 	fn drop(&mut self) {
 		self.task.abort();
-		let mut viewers = self.feedback.0.lock().unwrap();
-		if viewers
-			.get(&self.name)
-			.is_some_and(|slot| Arc::ptr_eq(slot, &self.slot))
-		{
-			viewers.remove(&self.name);
+		let slots = &mut self.feedback.0.lock().unwrap().slots;
+		if slots.get(&self.name).is_some_and(|slot| Arc::ptr_eq(slot, &self.slot)) {
+			slots.remove(&self.name);
 		}
 	}
 }
@@ -938,7 +972,9 @@ mod tests {
 	}
 
 	/// Stalling viewers are blamed on their own links while the uplink is
-	/// healthy, and on the uplink when it is not, counting each viewer once.
+	/// measured clear, on the uplink when it is congested or lossy, and on
+	/// nobody while it is unmeasured, counting each viewer once. A slow round
+	/// trip alone blames nobody.
 	#[test]
 	fn stalling_viewers_name_whose_link_fails() {
 		let tracks = [track("video0", "video h264 1920x1080")];
@@ -947,18 +983,29 @@ mod tests {
 			stalling("bob", "video0", Duration::ZERO),
 		];
 		let local = Local::default();
-		let mut uplink = Uplink {
-			verdict: Verdict::Healthy,
-			..Default::default()
+		let stalling = |grades: Vec<(Input, Verdict)>| {
+			let uplink = Uplink {
+				grades,
+				..Default::default()
+			};
+			causes(problems(&facts(&local, &uplink, &viewers, &tracks)))
 		};
+		let clear = vec![(Input::Headroom, Verdict::Healthy), (Input::Loss, Verdict::Healthy)];
 		assert_eq!(
-			causes(problems(&facts(&local, &uplink, &viewers, &tracks))),
+			stalling(clear.clone()),
 			["1 of 2 viewers are stalling on video h264 1920x1080: their own connections cannot keep up."]
 		);
-		uplink.verdict = Verdict::Unhealthy;
+		let lossy = vec![(Input::Headroom, Verdict::Healthy), (Input::Loss, Verdict::Degraded)];
 		assert_eq!(
-			causes(problems(&facts(&local, &uplink, &viewers, &tracks))),
+			stalling(lossy),
 			["1 of 2 viewers are stalling on video h264 1920x1080: the uplink cannot keep up."]
+		);
+		let mut far = clear;
+		far.push((Input::Rtt, Verdict::Degraded));
+		assert!(stalling(far)[0].ends_with("their own connections cannot keep up."));
+		assert_eq!(
+			stalling(Vec::new()),
+			["1 of 2 viewers are stalling on video h264 1920x1080."]
 		);
 	}
 
@@ -1158,6 +1205,45 @@ mod tests {
 		kio::clock::timeout(Duration::from_secs(30), wait)
 			.await
 			.expect("the relay never counted the viewer");
+	}
+
+	/// However many viewers announce feedback, only [`MAX_VIEWERS`] are read;
+	/// the rest wait, and one takes the reader a departing viewer frees.
+	#[tokio::test(start_paused = true)]
+	async fn feedback_reads_a_bounded_sample() {
+		let origin = moq_tokio::origin::spawn();
+		let (_, prefix) = echo(&moq_net::Path::new("show").unwrap()).unwrap();
+		let feedback = Feedback::default();
+		let follow = tokio::spawn(feedback.clone().follow(origin.consume(), prefix));
+
+		let viewers: Vec<_> = (0..=MAX_VIEWERS)
+			.map(|n| {
+				let viewer = origin.create_broadcast(format!("show/viewers/{n:03}.echo")).unwrap();
+				viewer.announce(Default::default()).unwrap();
+				viewer
+			})
+			.collect();
+		let read = |feedback: &Feedback| {
+			let graded = feedback.grade(kio::clock::now(), &Thresholds::default());
+			(
+				graded.len(),
+				feedback.unread(),
+				graded.iter().any(|viewer| viewer.name == "064"),
+			)
+		};
+		let settled = async {
+			while read(&feedback) != (MAX_VIEWERS, 1, false) {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+			viewers[0].unannounce();
+			while read(&feedback) != (MAX_VIEWERS, 0, true) {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		};
+		kio::clock::timeout(Duration::from_secs(30), settled)
+			.await
+			.expect("the sample never settled");
+		follow.abort();
 	}
 
 	/// Sample every interval of the paused clock until `done` holds.
