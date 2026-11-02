@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::Context;
 
 mod engine;
+mod guests;
 mod ui;
 
 #[derive(usage_rs::Cli, Clone)]
@@ -30,6 +31,10 @@ pub struct Config {
 	/// from before they arrived. Audio is always encoded.
 	#[usage(long)]
 	pub on_demand: bool,
+
+	/// Guests who join from a web page, appearing as sources.
+	#[usage(flatten)]
+	pub guests: guests::Config,
 
 	/// The MoQ client configuration. Without `--connect`, nothing is published
 	/// and broadcast sources stay offline.
@@ -66,6 +71,7 @@ fn main() -> anyhow::Result<()> {
 	let _runtime = runtime.enter();
 	let gpu = pollster::block_on(engine::Gpu::new())?;
 	let collection = engine::load(&config.scenes)?;
+	let room = config.guests.load(config.client.url.as_ref())?;
 	let connect = match config.client.url.clone() {
 		Some(url) => Some((config.client.clone().init(config.quic.clone())?, url)),
 		None => None,
@@ -77,6 +83,7 @@ fn main() -> anyhow::Result<()> {
 		connect,
 		&config.broadcast,
 		config.on_demand,
+		room,
 	))?;
 
 	run(engine, gpu, runtime.handle().clone())
@@ -113,6 +120,8 @@ fn run(engine: Arc<engine::Engine>, gpu: engine::Gpu, runtime: tokio::runtime::H
 
 #[cfg(test)]
 mod tests {
+	use std::time::Duration;
+
 	use super::*;
 
 	#[test]
@@ -127,6 +136,11 @@ mod tests {
 		assert_eq!(config.scenes, PathBuf::from("show.toml"));
 		assert_eq!(config.broadcast, "studio");
 		assert!(!config.on_demand, "the program encodes whatever the demand by default");
+		assert!(config.guests.room.is_none(), "guests are opt-in");
+		assert_eq!(
+			Duration::from(config.guests.guest_expiry),
+			Duration::from_secs(4 * 3600)
+		);
 		assert_eq!(config.client.url.unwrap().port(), Some(4443));
 	}
 }

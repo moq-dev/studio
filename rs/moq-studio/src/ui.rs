@@ -21,6 +21,7 @@ enum Tab {
 	Items,
 	Sources,
 	Devices,
+	Guests,
 	Audio,
 	Output,
 }
@@ -34,6 +35,7 @@ impl Tab {
 			Self::Items => "Items",
 			Self::Sources => "Sources",
 			Self::Devices => "Devices",
+			Self::Guests => "Guests",
 			Self::Audio => "Audio",
 			Self::Output => "Output",
 		}
@@ -77,7 +79,7 @@ impl Studio {
 		let [top, bottom] = tree.split_below(NodeIndex::root(), 0.62, vec![Tab::Scenes]);
 		tree.split_right(top, 0.5, vec![Tab::Program]);
 		let [_, items] = tree.split_right(bottom, 0.18, vec![Tab::Items]);
-		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices]);
+		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices, Tab::Guests]);
 		tree.split_right(sources, 0.5, vec![Tab::Audio, Tab::Output]);
 
 		Ok(Self {
@@ -91,6 +93,8 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
+				guest: String::new(),
+				shown: None,
 				message: None,
 			},
 		})
@@ -125,6 +129,10 @@ struct Panels {
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
+	/// The name typed for the next guest.
+	guest: String,
+	/// The join link on screen.
+	shown: Option<Shown>,
 	/// The outcome of the last action, shown in the status bar.
 	message: Option<Result<String, String>>,
 }
@@ -152,6 +160,7 @@ impl TabViewer for Panels {
 			Tab::Items => self.items(ui),
 			Tab::Sources => self.sources(ui),
 			Tab::Devices => self.devices(ui),
+			Tab::Guests => self.guests(ui),
 			Tab::Audio => self.audio(ui),
 			Tab::Output => self.output(ui),
 		}
@@ -449,6 +458,133 @@ impl Panels {
 		self.report(result.map(|name| format!("added `{name}`")));
 	}
 
+	/// Invite guests, show their links, and see who joined.
+	fn guests(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let Some(room) = &engine.room else {
+			ui.label("Start with --room, --room-key, and --join-page to invite guests.");
+			return;
+		};
+
+		ui.horizontal(|ui| {
+			ui.label("Name");
+			let field = ui.text_edit_singleline(&mut self.guest);
+			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+			if ui.button("Invite").clicked() || entered {
+				let name = self.guest.trim().to_string();
+				match room.invite(&name) {
+					Ok(invite) => {
+						self.show(ui.ctx(), name, invite);
+						self.guest.clear();
+					}
+					Err(err) => self.report(Err(err)),
+				}
+			}
+		});
+
+		let now = kio::clock::wall();
+		if let Some(shown) = &self.shown {
+			ui.separator();
+			ui.horizontal(|ui| {
+				ui.strong(format!("Join link for {}", shown.name));
+				ui.label(expiry(shown.invite.expires, now));
+			});
+			let mut hide = false;
+			ui.horizontal(|ui| {
+				if ui.button("Copy link").clicked() {
+					ui.ctx().copy_text(shown.invite.link.to_string());
+				}
+				hide = ui.button("Hide").clicked();
+			});
+			// The link is the guest's credential, so it shows only as a code to scan.
+			let side = ui.available_width().min(240.0);
+			ui.image((shown.qr.id(), egui::vec2(side, side)));
+			if hide {
+				self.shown = None;
+			}
+		}
+
+		ui.separator();
+		let participants = room.participants();
+		if participants.is_empty() {
+			ui.weak("Nobody invited yet.");
+			return;
+		}
+		let mut show = None;
+		let mut invite = None;
+		let mut remove = None;
+		egui::ScrollArea::vertical().show(ui, |ui| {
+			egui::Grid::new("guests").striped(true).show(ui, |ui| {
+				for heading in ["Guest", "Camera", "Screen", "Link", ""] {
+					ui.strong(heading);
+				}
+				ui.end_row();
+				for (name, participant) in &participants {
+					ui.label(name);
+					for online in [participant.camera, participant.screen] {
+						if online {
+							ui.colored_label(Color32::from_rgb(80, 200, 120), "live");
+						} else {
+							ui.weak("offline");
+						}
+					}
+					match &participant.invite {
+						Some(link) => ui.label(expiry(link.expires, now)),
+						None => ui.weak("invited before this session"),
+					};
+					ui.horizontal(|ui| {
+						if let Some(link) = &participant.invite
+							&& ui.small_button("Show link").clicked()
+						{
+							show = Some((name.clone(), link.clone()));
+						}
+						if ui.small_button("New link").clicked() {
+							invite = Some(name.clone());
+						}
+						if ui
+							.small_button("Remove from scenes")
+							.on_hover_text("Take their camera and screen out of every scene. They stay connected until their link expires.")
+							.clicked()
+						{
+							remove = Some(name.clone());
+						}
+					});
+					ui.end_row();
+				}
+			});
+		});
+
+		if let Some((name, link)) = show {
+			self.show(ui.ctx(), name, link);
+		}
+		if let Some(name) = invite {
+			match room.invite(&name) {
+				Ok(link) => self.show(ui.ctx(), name, link),
+				Err(err) => self.report(Err(err)),
+			}
+		}
+		if let Some(name) = remove {
+			let mut state = engine.state.lock().unwrap();
+			let sources = room.sources_of(&state.collection, &name);
+			let shown = |scene: &Scene| scene.items.iter().any(|item| sources.contains(&item.source));
+			if state.collection.scenes.iter().any(shown) {
+				for scene in &mut state.edit().scenes {
+					scene.items.retain(|item| !sources.contains(&item.source));
+				}
+			}
+			drop(state);
+			self.report(Ok(format!("removed {name} from every scene")));
+		}
+	}
+
+	/// Put `invite`'s link for `name` on screen as a QR code.
+	fn show(&mut self, ctx: &egui::Context, name: String, invite: crate::guests::Invite) {
+		match qr(ctx, invite.link.as_str()) {
+			Ok(qr) => self.shown = Some(Shown { name, invite, qr }),
+			Err(err) => self.report(Err(err)),
+		}
+	}
+
 	fn audio(&mut self, ui: &mut Ui) {
 		ui.horizontal(|ui| {
 			ui.strong("Program");
@@ -583,6 +719,44 @@ fn add(state: &mut State, name: String, source: Source) -> anyhow::Result<String
 		});
 	}
 	Ok(name)
+}
+
+/// A join link on screen.
+struct Shown {
+	name: String,
+	invite: crate::guests::Invite,
+	qr: egui::TextureHandle,
+}
+
+/// `text` as a QR code, one texel per module, inside the quiet zone scanners need.
+fn qr(ctx: &egui::Context, text: &str) -> anyhow::Result<egui::TextureHandle> {
+	const QUIET: i32 = 4;
+	let code = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Low)
+		.map_err(|err| anyhow::anyhow!("the join link is too long for a QR code: {err:?}"))?;
+	let side = code.size() + 2 * QUIET;
+	let pixels = (0..side)
+		.flat_map(|y| (0..side).map(move |x| (x, y)))
+		// Outside the code, which is the quiet zone, reads as light.
+		.map(|(x, y)| match code.get_module(x - QUIET, y - QUIET) {
+			true => Color32::BLACK,
+			false => Color32::WHITE,
+		})
+		.collect();
+	let image = egui::ColorImage::new([side as usize; 2], pixels);
+	Ok(ctx.load_texture("join link", image, egui::TextureOptions::NEAREST))
+}
+
+/// When a join link stops working, from `now`.
+fn expiry(expires: kio::clock::Wall, now: kio::clock::Wall) -> String {
+	match expires.checked_duration_since(now) {
+		Some(left) if !left.is_zero() => {
+			// Whole minutes, rounded up, so a link never reads as expired early.
+			let minutes = left.as_secs().div_ceil(60);
+			let left = Duration::from_secs(minutes * 60);
+			format!("expires in {}", moq_tokio::cli::Duration::from(left))
+		}
+		_ => "expired".into(),
+	}
 }
 
 /// Draw `texture` as large as fits, keeping the canvas's shape.

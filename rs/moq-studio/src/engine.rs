@@ -181,6 +181,8 @@ pub struct Engine {
 	pub bus: moq_audio::bus::Bus,
 	/// `None` when running without a relay.
 	pub output: Option<Output>,
+	/// The room guests join, when configured.
+	pub room: Option<crate::guests::Room>,
 	/// Keeps broadcast sources' origin open when no connection holds it.
 	_origin: Option<moq_net::origin::Producer>,
 }
@@ -195,7 +197,8 @@ const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 impl Engine {
 	/// Open the collection at `path` on `gpu` and start the program clock.
 	/// With `connect`, publish the program at `broadcast` on that relay,
-	/// encoding its video only while someone watches when `on_demand`.
+	/// encoding its video only while someone watches when `on_demand`, and add
+	/// the guests who join `room` as sources.
 	///
 	/// Call inside the tokio runtime that serves the relay connection.
 	pub async fn start(
@@ -205,9 +208,19 @@ impl Engine {
 		connect: Option<(moq_tokio::Client, url::Url)>,
 		broadcast: &str,
 		on_demand: bool,
+		room: Option<crate::guests::Room>,
 	) -> anyhow::Result<Arc<Self>> {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
+		let guests = match &room {
+			Some(room) => Some(
+				subscribe
+					.consume()
+					.scope(room.path(), &moq_auth::Pattern::all().into())
+					.context("cannot follow the room")?,
+			),
+			None => None,
+		};
 		let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
 		let sources = Sources::new(source::Context {
 			bus: bus.clone(),
@@ -240,8 +253,12 @@ impl Engine {
 			stats: Stats::default(),
 			bus,
 			output,
+			room,
 			_origin: origin,
 		});
+		if let Some(guests) = guests {
+			tokio::spawn(crate::guests::run(engine.clone(), guests));
+		}
 
 		let (video, audio, clock) = match publish {
 			Some(Publish {
@@ -640,7 +657,7 @@ mod tests {
 		let path = dir.path().join("show.toml");
 		let connect = Some((client, fixture.url.clone()));
 		let on_demand = false;
-		let engine = Engine::start(gpu, path, collection, connect, "studio", on_demand)
+		let engine = Engine::start(gpu, path, collection, connect, "studio", on_demand, None)
 			.await
 			.expect("the studio starts");
 

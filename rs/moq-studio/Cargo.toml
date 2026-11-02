@@ -44,18 +44,26 @@ egui = "0.36"
 egui_dock = "0.21"
 kio = { workspace = true, features = ["runtime"] }
 moq-audio = { workspace = true, features = ["bus"] }
+# Signs guest tokens with the room key.
+moq-auth = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
+# The guest room: its path convention, roster, and token claims.
+moq-room = { workspace = true }
 moq-scene = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "net"] }
 moq-video = { workspace = true }
 pollster = { workspace = true }
+# The join link's QR code. No dependencies of its own.
+qrcodegen = "1.8"
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
 
 [dev-dependencies]
+# The auth server a test relay verifies guest tokens with.
+moq-auth = { workspace = true, features = ["serve"] }
 moq-relay = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
