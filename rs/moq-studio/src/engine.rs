@@ -19,7 +19,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use kio::clock::Instant;
 use moq_scene::source::{self, Driver, Sources};
-use moq_scene::{Collection, Compositor, wgpu};
+use moq_scene::{Collection, Compositor, Draft, History, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
 
 /// The GPU everything shares: sources upload to it, the compositor draws on
@@ -64,7 +64,13 @@ impl Gpu {
 pub struct State {
 	/// The scene file, saved to and reloaded from.
 	pub path: PathBuf,
-	pub collection: Collection,
+	/// Changed only through [`commit`](Self::commit) and the history, so every
+	/// edit can be undone.
+	collection: Collection,
+	history: History,
+	/// History entries the last load dropped, since they no longer applied to
+	/// the scene file.
+	pub dropped: usize,
 	pub sources: Sources,
 	pub compositor: Compositor,
 	/// Edited since the sources were last synced.
@@ -74,27 +80,70 @@ pub struct State {
 }
 
 impl State {
-	/// The collection, for an edit: the sources follow it on the next frame.
-	pub fn edit(&mut self) -> &mut Collection {
+	pub fn collection(&self) -> &Collection {
+		&self.collection
+	}
+
+	pub fn history(&self) -> &History {
+		&self.history
+	}
+
+	/// Apply `draft` and record it in the history; the sources follow it on
+	/// the next frame. `gesture` names the interaction that made it, so the
+	/// steps of one drag undo together.
+	pub fn commit(&mut self, draft: Draft, gesture: Option<u64>) -> anyhow::Result<()> {
+		let edit = draft.finish()?;
+		self.collection.apply(&edit)?;
+		self.history.record(edit, gesture);
+		self.edited();
+		Ok(())
+	}
+
+	/// Undo the newest edit, returning its label, or `None` with none left.
+	pub fn undo(&mut self) -> anyhow::Result<Option<String>> {
+		let label = self.history.undo(&mut self.collection)?.map(|edit| edit.label.clone());
+		self.edited();
+		Ok(label)
+	}
+
+	/// Redo the oldest undone edit, returning its label, or `None` with none left.
+	pub fn redo(&mut self) -> anyhow::Result<Option<String>> {
+		let label = self.history.redo(&mut self.collection)?.map(|edit| edit.label.clone());
+		self.edited();
+		Ok(label)
+	}
+
+	/// Undo or redo to just after the history's `position`th entry.
+	pub fn seek(&mut self, position: usize) -> anyhow::Result<()> {
+		self.history.seek(&mut self.collection, position)?;
+		self.edited();
+		Ok(())
+	}
+
+	fn edited(&mut self) {
 		self.stale = true;
 		self.unsaved = true;
-		&mut self.collection
 	}
 
 	pub fn unsaved(&self) -> bool {
 		self.unsaved
 	}
 
+	/// Write the scene file, then the history beside it, so a history never
+	/// describes edits the scene file lacks.
 	pub fn save(&mut self) -> anyhow::Result<()> {
 		let text = self.collection.to_toml()?;
 		std::fs::write(&self.path, text).with_context(|| format!("writing {}", self.path.display()))?;
+		let path = history_path(&self.path);
+		let text = self.history.to_toml()?;
+		std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
 		self.unsaved = false;
 		Ok(())
 	}
 
-	/// Replace the collection with what the scene file holds now.
+	/// Replace the collection and its history with what the files hold now.
 	pub fn reload(&mut self) -> anyhow::Result<()> {
-		let collection = load(&self.path)?;
+		let (collection, history, dropped) = load(&self.path)?;
 		anyhow::ensure!(
 			collection.canvas == self.collection.canvas,
 			"the canvas changed; restart the studio to use {}x{} at {} fps",
@@ -105,19 +154,42 @@ impl State {
 		// A scene in preview or on program that the file no longer has draws
 		// black until another is picked.
 		self.collection = collection;
+		self.history = history;
+		self.dropped = dropped;
 		self.stale = true;
 		self.unsaved = false;
 		Ok(())
 	}
 }
 
-/// Read a scene file, or start a new collection if there is none yet.
-pub fn load(path: &Path) -> anyhow::Result<Collection> {
-	match std::fs::read_to_string(path) {
-		Ok(text) => Collection::from_toml(&text).with_context(|| format!("loading {}", path.display())),
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Collection::new()),
-		Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+/// Read a scene file and the history saved beside it, or start a new
+/// collection if there is no scene file yet. Also returns how many history
+/// entries were dropped since they no longer apply to the scene file.
+pub fn load(path: &Path) -> anyhow::Result<(Collection, History, usize)> {
+	let collection = match std::fs::read_to_string(path) {
+		Ok(text) => Collection::from_toml(&text).with_context(|| format!("loading {}", path.display()))?,
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Collection::new(),
+		Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+	};
+	let path = history_path(path);
+	let (history, dropped) = match std::fs::read_to_string(&path) {
+		Ok(text) => History::from_toml(&text, &collection)
+			.with_context(|| format!("loading {}; delete it to start a new history", path.display()))?,
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => (History::new(), 0),
+		Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+	};
+	if dropped > 0 {
+		tracing::warn!(dropped, path = %path.display(), "history entries no longer apply to the scene file");
 	}
+	Ok((collection, history, dropped))
+}
+
+/// Where the history of the scene file at `scene` is saved: beside it, as
+/// `show.history.toml` for `show.toml`.
+pub fn history_path(scene: &Path) -> PathBuf {
+	let mut name = scene.file_stem().unwrap_or_default().to_os_string();
+	name.push(".history.toml");
+	scene.with_file_name(name)
 }
 
 /// How the output is doing, for the stream panel.
@@ -193,7 +265,8 @@ const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_k
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
 impl Engine {
-	/// Open the collection at `path` on `gpu` and start the program clock.
+	/// Open the collection loaded from `path`, with its history, on `gpu` and
+	/// start the program clock.
 	/// With `connect`, publish the program at `broadcast` on that relay,
 	/// encoding its video only while someone watches when `on_demand`.
 	///
@@ -201,7 +274,7 @@ impl Engine {
 	pub async fn start(
 		gpu: Gpu,
 		path: PathBuf,
-		collection: Collection,
+		(collection, history, dropped): (Collection, History, usize),
 		connect: Option<(moq_tokio::Client, url::Url)>,
 		broadcast: &str,
 		on_demand: bool,
@@ -232,6 +305,8 @@ impl Engine {
 			state: Mutex::new(State {
 				path,
 				collection,
+				history,
+				dropped,
 				sources,
 				compositor,
 				stale: true,
@@ -296,7 +371,7 @@ impl Engine {
 		epoch: Duration,
 		mut video: Option<(mpsc::SyncSender<Video>, Exporter)>,
 	) {
-		let canvas = self.state.lock().unwrap().collection.canvas;
+		let canvas = self.state.lock().unwrap().collection().canvas;
 		let period = Duration::from_secs(1) / canvas.framerate;
 		let mut clock = kio::clock::interval_at(start, period);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
@@ -634,13 +709,15 @@ mod tests {
 			source: "red".into(),
 			rect: moq_scene::Rect::fill(&collection.canvas),
 			visible: true,
+			filters: Vec::new(),
 		});
 
 		let gpu = Gpu::new().await.expect("a GPU");
 		let path = dir.path().join("show.toml");
 		let connect = Some((client, fixture.url.clone()));
 		let on_demand = false;
-		let engine = Engine::start(gpu, path, collection, connect, "studio", on_demand)
+		let loaded = (collection, History::new(), 0);
+		let engine = Engine::start(gpu, path, loaded, connect, "studio", on_demand)
 			.await
 			.expect("the studio starts");
 

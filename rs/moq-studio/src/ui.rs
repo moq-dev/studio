@@ -8,7 +8,7 @@ use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::source::Status;
-use moq_scene::{Item, Rect, Scene, Source, wgpu};
+use moq_scene::{Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Video, wgpu};
 
 use crate::engine::{Engine, State};
 
@@ -18,9 +18,11 @@ enum Tab {
 	Preview,
 	Program,
 	Scenes,
+	History,
 	Items,
 	Sources,
 	Devices,
+	Filters,
 	Audio,
 	Output,
 }
@@ -31,9 +33,11 @@ impl Tab {
 			Self::Preview => "Preview",
 			Self::Program => "Program",
 			Self::Scenes => "Scenes",
+			Self::History => "History",
 			Self::Items => "Items",
 			Self::Sources => "Sources",
 			Self::Devices => "Devices",
+			Self::Filters => "Filters",
 			Self::Audio => "Audio",
 			Self::Output => "Output",
 		}
@@ -59,7 +63,7 @@ impl Studio {
 
 		// The compositor's textures live as long as the engine, so registering
 		// them once is enough: egui samples whatever they hold each frame.
-		let (preview, program) = {
+		let (preview, program, dropped) = {
 			let state = engine.state.lock().unwrap();
 			let mut renderer = render.renderer.write();
 			let mut register = |texture: &wgpu::Texture| {
@@ -69,16 +73,17 @@ impl Studio {
 			(
 				register(state.compositor.preview()),
 				register(state.compositor.program()),
+				state.dropped,
 			)
 		};
 
 		let mut dock = DockState::new(vec![Tab::Preview]);
 		let tree = dock.main_surface_mut();
-		let [top, bottom] = tree.split_below(NodeIndex::root(), 0.62, vec![Tab::Scenes]);
+		let [top, bottom] = tree.split_below(NodeIndex::root(), 0.62, vec![Tab::Scenes, Tab::History]);
 		tree.split_right(top, 0.5, vec![Tab::Program]);
 		let [_, items] = tree.split_right(bottom, 0.18, vec![Tab::Items]);
 		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices]);
-		tree.split_right(sources, 0.5, vec![Tab::Audio, Tab::Output]);
+		tree.split_right(sources, 0.5, vec![Tab::Filters, Tab::Audio, Tab::Output]);
 
 		Ok(Self {
 			dock,
@@ -87,11 +92,14 @@ impl Studio {
 				runtime,
 				preview,
 				program,
+				top: false,
+				selection: None,
+				gestures: Gestures::default(),
 				new_scene: String::new(),
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
-				message: None,
+				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
 			},
 		})
 	}
@@ -100,13 +108,10 @@ impl Studio {
 impl eframe::App for Studio {
 	fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
 		// Redraw at the canvas rate, so preview and program are live.
-		let framerate = self.panels.engine.state.lock().unwrap().collection.canvas.framerate;
+		let framerate = self.panels.engine.state.lock().unwrap().collection().canvas.framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 
-		if ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-			self.panels.save();
-		}
-
+		self.panels.shortcuts(ui.ctx());
 		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui));
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
 		DockArea::new(&mut self.dock)
@@ -121,6 +126,12 @@ struct Panels {
 	runtime: tokio::runtime::Handle,
 	preview: egui::TextureId,
 	program: egui::TextureId,
+	/// Whether the Items panel shows the top layer rather than the scene in
+	/// preview.
+	top: bool,
+	/// What the Filters panel edits and a copy takes.
+	selection: Option<Selection>,
+	gestures: Gestures,
 	new_scene: String,
 	new_item: Option<String>,
 	add: AddSource,
@@ -149,16 +160,126 @@ impl TabViewer for Panels {
 			Tab::Preview => self.preview(ui),
 			Tab::Program => self.program(ui),
 			Tab::Scenes => self.scenes(ui),
+			Tab::History => self.history(ui),
 			Tab::Items => self.items(ui),
 			Tab::Sources => self.sources(ui),
 			Tab::Devices => self.devices(ui),
+			Tab::Filters => self.filters(ui),
 			Tab::Audio => self.audio(ui),
 			Tab::Output => self.output(ui),
 		}
 	}
 }
 
+/// A source or an item: what the Filters panel edits.
+#[derive(Clone, Debug, PartialEq)]
+enum Selection {
+	Source(String),
+	Item(Layer, usize),
+}
+
+impl Selection {
+	/// The filters of what is selected, or `None` if it is gone or has no picture.
+	fn filters(&self, collection: &Collection) -> Option<Vec<Filter>> {
+		match self {
+			Self::Source(name) => {
+				collection.sources.get(name).filter(|source| source.has_video())?;
+				Some(collection.video.get(name).cloned().unwrap_or_default().filters)
+			}
+			Self::Item(layer, index) => Some(collection.items(layer)?.get(*index)?.filters.clone()),
+		}
+	}
+
+	fn set_filters(&self, draft: &mut Draft, filters: Vec<Filter>) -> Result<(), moq_scene::Error> {
+		match self {
+			Self::Source(name) => draft.set_video(name, Some(Video { filters })),
+			Self::Item(layer, index) => {
+				let item = draft.collection().items(layer).and_then(|items| items.get(*index)).cloned();
+				let item = item.ok_or_else(|| moq_scene::Error::Conflict(format!("there is no item {index} in {layer}")))?;
+				draft.set_item(layer, *index, Item { filters, ..item })
+			}
+		}
+	}
+
+	fn describe(&self, collection: &Collection) -> String {
+		match self {
+			Self::Source(name) => format!("source `{name}`"),
+			Self::Item(layer, index) => {
+				let item = collection.items(layer).and_then(|items| items.get(*index));
+				let source = item.map_or("nothing", |item| item.source.as_str());
+				format!("`{source}` in {layer}")
+			}
+		}
+	}
+}
+
+/// Numbers the drags and typing sessions, so the edits one makes over many
+/// frames undo as one.
+#[derive(Default)]
+struct Gestures(u64);
+
+impl Gestures {
+	/// The gesture `response` is part of, if it lasts across frames.
+	fn of(&mut self, response: &egui::Response) -> Option<u64> {
+		if response.drag_started() || response.gained_focus() {
+			self.0 += 1;
+		}
+		(response.dragged() || response.has_focus()).then_some(self.0)
+	}
+}
+
+/// Build an edit labelled `label` with `build` and commit it.
+fn edit(
+	state: &mut State,
+	label: impl Into<String>,
+	gesture: Option<u64>,
+	build: impl FnOnce(&mut Draft) -> Result<(), moq_scene::Error>,
+) -> anyhow::Result<()> {
+	let mut draft = state.collection().draft(label);
+	build(&mut draft)?;
+	state.commit(draft, gesture)
+}
+
+fn dropped_message(dropped: usize) -> String {
+	format!("{dropped} history entries no longer matched the scene file and were dropped")
+}
+
 impl Panels {
+	/// The keyboard shortcuts, and the clipboard.
+	fn shortcuts(&mut self, ctx: &egui::Context) {
+		if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+			self.save();
+		}
+		// A focused text field keeps its own undo, copy, and paste.
+		if ctx.egui_wants_keyboard_input() {
+			return;
+		}
+		// Shift first, since the plain shortcut also matches with it held.
+		let redo = ctx.input_mut(|input| {
+			input.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
+				|| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Y)
+		});
+		if redo {
+			self.redo();
+		} else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+			self.undo();
+		}
+		let (copy, paste) = ctx.input(|input| {
+			let copy = input.events.iter().any(|event| matches!(event, egui::Event::Copy));
+			let paste = input.events.iter().find_map(|event| match event {
+				egui::Event::Paste(text) => Some(text.clone()),
+				_ => None,
+			});
+			(copy, paste)
+		});
+		if copy {
+			self.copy(ctx);
+		}
+		if let Some(text) = paste {
+			self.paste(&text);
+		}
+	}
+
 	fn menu(&mut self, ui: &mut Ui) {
 		egui::MenuBar::new().ui(ui, |ui| {
 			ui.menu_button("File", |ui| {
@@ -166,8 +287,29 @@ impl Panels {
 					self.save();
 				}
 				if ui.button("Reload").clicked() {
-					let result = self.engine.state.lock().unwrap().reload();
-					self.report(result.map(|()| "reloaded".to_string()));
+					let mut state = self.engine.state.lock().unwrap();
+					let result = state.reload().map(|()| match state.dropped {
+						0 => "reloaded".to_string(),
+						dropped => format!("reloaded; {}", dropped_message(dropped)),
+					});
+					drop(state);
+					self.report(result);
+				}
+			});
+			ui.menu_button("Edit", |ui| {
+				if ui.button("Undo").clicked() {
+					self.undo();
+				}
+				if ui.button("Redo").clicked() {
+					self.redo();
+				}
+				ui.separator();
+				if ui.button("Copy item").clicked() {
+					self.copy(ui.ctx());
+				}
+				if ui.button("Paste").clicked() {
+					// Arrives as a paste event on a later frame.
+					ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
 				}
 			});
 		});
@@ -200,13 +342,102 @@ impl Panels {
 		self.report(result.map(|()| "saved".to_string()));
 	}
 
+	fn undo(&mut self) {
+		let result = self.engine.state.lock().unwrap().undo();
+		self.report(result.map(|label| match label {
+			Some(label) => format!("undid: {label}"),
+			None => "nothing to undo".into(),
+		}));
+	}
+
+	fn redo(&mut self) {
+		let result = self.engine.state.lock().unwrap().redo();
+		self.report(result.map(|label| match label {
+			Some(label) => format!("redid: {label}"),
+			None => "nothing to redo".into(),
+		}));
+	}
+
 	fn report(&mut self, result: anyhow::Result<String>) {
 		self.message = Some(result.map_err(|err| format!("{err:#}")));
 	}
 
+	/// Report a failed edit; a successful one shows for itself.
+	fn check(&mut self, result: anyhow::Result<()>) {
+		if let Err(err) = result {
+			self.report(Err(err));
+		}
+	}
+
+	/// The layer the Items panel shows, and new sources are placed in.
+	fn layer(&self, state: &State) -> Result<Layer, String> {
+		if self.top {
+			return Ok(Layer::Top);
+		}
+		match state.compositor.preview_scene() {
+			Some(name) => Ok(Layer::Scene(name.to_string())),
+			None => Err("Pick a scene to edit what it shows.".into()),
+		}
+	}
+
+	/// Copy the selected item, with what it shows, to the clipboard.
+	fn copy(&mut self, ctx: &egui::Context) {
+		let state = self.engine.state.lock().unwrap();
+		let collection = state.collection();
+		let item = match &self.selection {
+			Some(Selection::Item(layer, index)) => collection.items(layer).and_then(|items| items.get(*index)),
+			_ => None,
+		};
+		let Some(item) = item.cloned() else {
+			drop(state);
+			self.report(Err(anyhow::anyhow!("select an item to copy it")));
+			return;
+		};
+		let result = Clip::items(collection, vec![item.clone()]).to_toml();
+		drop(state);
+		let result = result.map(|text| {
+			ctx.copy_text(text);
+			format!("copied `{}`", item.source)
+		});
+		self.report(result.map_err(Into::into));
+	}
+
+	/// Paste items into the layer the Items panel shows, or filters onto the
+	/// selection.
+	fn paste(&mut self, text: &str) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let result = (|| {
+			let clip = Clip::from_toml(text).context("the clipboard holds no items or filters")?;
+			match clip {
+				Clip::Items(items) => {
+					let layer = self.layer(&state).map_err(anyhow::Error::msg)?;
+					edit(&mut state, format!("Paste into {layer}"), None, |draft| {
+						draft.paste(&layer, &items)
+					})?;
+					Ok(format!("pasted into {layer}"))
+				}
+				Clip::Filters(pasted) => {
+					let selection = self.selection.clone().context("select a source or an item to paste filters onto")?;
+					let mut filters = selection
+						.filters(state.collection())
+						.context("the selection has no picture to filter")?;
+					filters.extend(pasted.filters);
+					let what = selection.describe(state.collection());
+					edit(&mut state, format!("Paste filters onto {what}"), None, |draft| {
+						selection.set_filters(draft, filters)
+					})?;
+					Ok(format!("pasted filters onto {what}"))
+				}
+			}
+		})();
+		drop(state);
+		self.report(result);
+	}
+
 	fn preview(&mut self, ui: &mut Ui) {
 		let state = self.engine.state.lock().unwrap();
-		let canvas = state.collection.canvas;
+		let canvas = state.collection().canvas;
 		ui.label(format!(
 			"Preview: {}",
 			state.compositor.preview_scene().unwrap_or("nothing")
@@ -217,8 +448,8 @@ impl Panels {
 
 	fn program(&mut self, ui: &mut Ui) {
 		let mut state = self.engine.state.lock().unwrap();
-		let canvas = state.collection.canvas;
-		let fade = state.collection.transition.fade;
+		let canvas = state.collection().canvas;
+		let fade = state.collection().transition.fade;
 		ui.horizontal(|ui| {
 			if ui.button("Cut").clicked() {
 				state.compositor.cut();
@@ -239,14 +470,15 @@ impl Panels {
 	}
 
 	fn scenes(&mut self, ui: &mut Ui) {
-		let mut state = self.engine.state.lock().unwrap();
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
 		let preview = state.compositor.preview_scene().map(str::to_owned);
 		let program = state.compositor.program_scene().map(str::to_owned);
 		let mut pick = None;
 		let mut remove = None;
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
-			for (index, scene) in state.collection.scenes.iter().enumerate() {
+			for (index, scene) in state.collection().scenes.iter().enumerate() {
 				ui.horizontal(|ui| {
 					let selected = preview.as_deref() == Some(scene.name.as_str());
 					if ui.selectable_label(selected, &scene.name).clicked() {
@@ -256,7 +488,7 @@ impl Panels {
 						ui.colored_label(Color32::RED, "on program");
 					}
 					if ui.small_button("Remove").clicked() {
-						remove = Some(index);
+						remove = Some((index, scene.name.clone()));
 					}
 				});
 			}
@@ -267,12 +499,16 @@ impl Panels {
 			ui.text_edit_singleline(&mut self.new_scene);
 			if ui.button("Add scene").clicked() {
 				let name = self.new_scene.trim().to_string();
-				if name.is_empty() || state.collection.scene(&name).is_some() {
-					self.message = Some(Err(format!("a scene needs a new, non-empty name, not `{name}`")));
-				} else {
-					state.edit().scenes.push(Scene::new(name.clone()));
-					pick = Some(name);
-					self.new_scene.clear();
+				let index = state.collection().scenes.len();
+				let result = edit(&mut state, format!("Add scene `{name}`"), None, |draft| {
+					draft.insert_scene(index, Scene::new(name.clone()))
+				});
+				match result {
+					Ok(()) => {
+						pick = Some(name);
+						self.new_scene.clear();
+					}
+					Err(err) => self.report(Err(err)),
 				}
 			}
 		});
@@ -280,64 +516,142 @@ impl Panels {
 		if let Some(pick) = pick {
 			state.compositor.set_preview(Some(pick));
 		}
-		if let Some(index) = remove {
-			state.edit().scenes.remove(index);
+		if let Some((index, name)) = remove {
+			let result = edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
+				draft.remove_scene(index)
+			});
+			drop(state);
+			self.check(result);
 		}
 	}
 
-	/// The items of the scene in preview, back to front.
+	/// Every edit, oldest first; pick one to undo or redo to just after it.
+	fn history(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let position = state.history().position();
+		let count = state.history().entries().len();
+		let mut seek = None;
+		ui.horizontal(|ui| {
+			if ui.add_enabled(position > 0, egui::Button::new("Undo")).clicked() {
+				seek = Some(position - 1);
+			}
+			if ui.add_enabled(position < count, egui::Button::new("Redo")).clicked() {
+				seek = Some(position + 1);
+			}
+		});
+		ui.separator();
+		egui::ScrollArea::vertical().show(ui, |ui| {
+			if ui.selectable_label(position == 0, "Start").clicked() {
+				seek = Some(0);
+			}
+			for (index, edit) in state.history().entries().enumerate() {
+				// Undone edits are dimmed, as redo would bring them back.
+				let mut label = egui::RichText::new(&edit.label);
+				if index >= position {
+					label = label.weak();
+				}
+				if ui.selectable_label(position == index + 1, label).clicked() {
+					seek = Some(index + 1);
+				}
+			}
+		});
+		if let Some(seek) = seek {
+			let result = state.seek(seek);
+			drop(state);
+			self.check(result);
+		}
+	}
+
+	/// The items of the scene in preview or the top layer, back to front.
 	fn items(&mut self, ui: &mut Ui) {
-		let mut state = self.engine.state.lock().unwrap();
-		let Some(name) = state.compositor.preview_scene().map(str::to_owned) else {
-			ui.label("Pick a scene to edit what it shows.");
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
+		ui.horizontal(|ui| {
+			ui.selectable_value(&mut self.top, false, format!("Scene: {scene}"));
+			ui.selectable_value(&mut self.top, true, "Top layer")
+				.on_hover_text("Drawn over every scene, in preview and on program");
+		});
+		ui.separator();
+		let layer = match self.layer(&state) {
+			Ok(layer) => layer,
+			Err(message) => {
+				ui.label(message);
+				return;
+			}
+		};
+		let collection = state.collection();
+		let Some(items) = collection.items(&layer).cloned() else {
+			ui.label(format!("There is no {layer}."));
 			return;
 		};
-		let Some(scene) = state.collection.scene(&name) else {
-			ui.label(format!("There is no scene `{name}`."));
-			return;
-		};
-		let canvas = state.collection.canvas;
-		let mut items = scene.items.clone();
-		let mut edited = false;
-		let mut moved = None;
-		let mut remove = None;
+		let canvas = collection.canvas;
+		let mut action = None;
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
 			egui::Grid::new("items").striped(true).show(ui, |ui| {
-				for heading in ["Shown", "Source", "x", "y", "Width", "Height", ""] {
+				for heading in ["Source", "Shown", "x", "y", "Width", "Height", ""] {
 					ui.strong(heading);
 				}
 				ui.end_row();
 
 				let count = items.len();
-				for (index, item) in items.iter_mut().enumerate() {
-					edited |= ui.checkbox(&mut item.visible, "").changed();
-					ui.label(&item.source);
-					let rect = &mut item.rect;
-					edited |= ui.add(egui::DragValue::new(&mut rect.x)).changed();
-					edited |= ui.add(egui::DragValue::new(&mut rect.y)).changed();
-					edited |= ui
-						.add(egui::DragValue::new(&mut rect.width).range(0.0..=f32::MAX))
-						.changed();
-					edited |= ui
-						.add(egui::DragValue::new(&mut rect.height).range(0.0..=f32::MAX))
-						.changed();
+				for (index, item) in items.iter().enumerate() {
+					let selection = Selection::Item(layer.clone(), index);
+					ui.horizontal(|ui| {
+						let selected = self.selection.as_ref() == Some(&selection);
+						if ui.selectable_label(selected, &item.source).clicked() {
+							self.selection = Some(selection);
+						}
+						linked(ui, collection, &layer, index, item);
+					});
+
+					let mut visible = item.visible;
+					if ui.checkbox(&mut visible, "").changed() {
+						let verb = if visible { "Show" } else { "Hide" };
+						let label = format!("{verb} `{}`", item.source);
+						action = Some(ItemAction::Set(index, Item { visible, ..item.clone() }, label, None));
+					}
+
+					let mut rect = item.rect;
+					let responses = [
+						("Move", ui.add(egui::DragValue::new(&mut rect.x))),
+						("Move", ui.add(egui::DragValue::new(&mut rect.y))),
+						(
+							"Resize",
+							ui.add(egui::DragValue::new(&mut rect.width).range(0.0..=f32::MAX)),
+						),
+						(
+							"Resize",
+							ui.add(egui::DragValue::new(&mut rect.height).range(0.0..=f32::MAX)),
+						),
+					];
+					for (verb, response) in responses {
+						let gesture = self.gestures.of(&response);
+						if response.changed() {
+							let label = format!("{verb} `{}`", item.source);
+							action = Some(ItemAction::Set(index, Item { rect, ..item.clone() }, label, gesture));
+						}
+					}
+
 					ui.horizontal(|ui| {
 						if ui.small_button("Fill").clicked() {
-							*rect = Rect::fill(&canvas);
-							edited = true;
+							let rect = Rect::fill(&canvas);
+							let label = format!("Fill with `{}`", item.source);
+							action = Some(ItemAction::Set(index, Item { rect, ..item.clone() }, label, None));
 						}
 						if ui.add_enabled(index > 0, egui::Button::new("Back").small()).clicked() {
-							moved = Some((index, index - 1));
+							action = Some(ItemAction::Move(index, index - 1));
 						}
 						if ui
 							.add_enabled(index + 1 < count, egui::Button::new("Front").small())
 							.clicked()
 						{
-							moved = Some((index, index + 1));
+							action = Some(ItemAction::Move(index, index + 1));
 						}
 						if ui.small_button("Remove").clicked() {
-							remove = Some(index);
+							action = Some(ItemAction::Remove(index));
 						}
 					});
 					ui.end_row();
@@ -346,8 +660,7 @@ impl Panels {
 
 			ui.separator();
 			ui.horizontal(|ui| {
-				let pictures: Vec<&String> = state
-					.collection
+				let pictures: Vec<&String> = collection
 					.sources
 					.iter()
 					.filter(|(_, source)| source.has_video())
@@ -364,49 +677,88 @@ impl Panels {
 							ui.selectable_value(&mut self.new_item, Some(name.clone()), name);
 						}
 					});
-				if ui.button("Add to scene").clicked()
+				if ui.button("Add").clicked()
 					&& let Some(source) = self.new_item.take()
 				{
-					items.push(Item {
-						source,
-						rect: Rect::fill(&canvas),
-						visible: true,
-					});
-					edited = true;
+					action = Some(ItemAction::Add(Item::new(source, Rect::fill(&canvas))));
 				}
 			});
 		});
 
-		if let Some((from, to)) = moved {
-			items.swap(from, to);
-			edited = true;
-		}
-		if let Some(index) = remove {
-			items.remove(index);
-			edited = true;
-		}
-		if edited && let Some(scene) = state.edit().scene_mut(&name) {
-			scene.items = items;
-		}
+		let Some(action) = action else { return };
+		let result = match action {
+			ItemAction::Set(index, item, label, gesture) => edit(&mut state, label, gesture, |draft| {
+				draft.set_item(&layer, index, item)
+			}),
+			ItemAction::Move(from, to) => {
+				let label = format!("Reorder `{}`", items[from].source);
+				let result = edit(&mut state, label, None, |draft| draft.move_item(&layer, from, to));
+				// The selection follows the item it was on.
+				if result.is_ok() && self.selection == Some(Selection::Item(layer.clone(), from)) {
+					self.selection = Some(Selection::Item(layer.clone(), to));
+				}
+				result
+			}
+			ItemAction::Remove(index) => {
+				let label = format!("Remove `{}` from {layer}", items[index].source);
+				edit(&mut state, label, None, |draft| draft.remove_item(&layer, index).map(drop))
+			}
+			ItemAction::Add(item) => {
+				let label = format!("Add `{}` to {layer}", item.source);
+				edit(&mut state, label, None, |draft| draft.insert_item(&layer, items.len(), item))
+			}
+		};
+		drop(state);
+		self.check(result);
 	}
 
 	fn sources(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let mut remove = None;
+		let mut clone = None;
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
 			egui::Grid::new("sources").striped(true).show(ui, |ui| {
-				for (name, feed) in state.sources.iter() {
-					ui.label(name);
-					ui.label(describe(feed.source()));
-					match state.compositor.error(name) {
-						Some(err) => status(ui, &Status::Failed(err.to_string())),
-						None => status(ui, &feed.status()),
+				let collection = state.collection();
+				for (name, source) in &collection.sources {
+					let selection = Selection::Source(name.clone());
+					let selected = self.selection.as_ref() == Some(&selection);
+					if ui.selectable_label(selected, name).clicked() {
+						self.selection = Some(selection);
 					}
-					if ui.small_button("Remove").clicked() {
-						remove = Some(name.to_string());
+					ui.label(describe(source));
+					// A clone is as live as what it clones.
+					let capture = collection.capture(name);
+					match (state.compositor.error(capture), state.sources.get(capture)) {
+						(Some(err), _) => status(ui, &Status::Failed(err.to_string())),
+						(None, Some(feed)) => status(ui, &feed.status()),
+						(None, None) => status(ui, &Status::Starting),
 					}
+					let places = collection
+						.layers()
+						.filter(|(_, items)| items.iter().any(|item| item.source == *name))
+						.map(|(layer, _)| layer.to_string())
+						.collect::<Vec<_>>();
+					match places.len() {
+						0 => ui.weak("unused"),
+						1 => ui.weak("in 1 place"),
+						n => ui.weak(format!("linked in {n} places")),
+					}
+					.on_hover_text(places.join("\n"));
+					ui.horizontal(|ui| {
+						if source.has_video()
+							&& ui
+								.small_button("Clone")
+								.on_hover_text("A new source showing the same capture, with filters of its own")
+								.clicked()
+						{
+							clone = Some(name.clone());
+						}
+						if ui.small_button("Remove").clicked() {
+							remove = Some(name.clone());
+						}
+					});
 					ui.end_row();
 				}
 			});
@@ -414,7 +766,8 @@ impl Panels {
 			ui.separator();
 			if let Some(source) = self.add.ui(ui) {
 				let name = self.add.name.trim().to_string();
-				let result = add(&mut state, name, source);
+				let layer = self.layer(&state).ok();
+				let result = add(&mut state, layer, name, source, None);
 				if result.is_ok() {
 					self.add.name.clear();
 				}
@@ -422,14 +775,26 @@ impl Panels {
 			}
 		});
 
-		if let Some(name) = remove {
-			let collection = state.edit();
-			collection.sources.remove(&name);
-			collection.audio.remove(&name);
-			for scene in &mut collection.scenes {
-				scene.items.retain(|item| item.source != name);
-			}
-		}
+		let result = if let Some(name) = remove {
+			edit(&mut state, format!("Remove `{name}`"), None, |draft| {
+				draft.remove_source(&name)
+			})
+		} else if let Some(name) = clone {
+			// A clone of a clone shows the same capture, so it clones that, with
+			// a copy of the clone's filters.
+			let collection = state.collection();
+			let source = Source::Clone {
+				source: collection.capture(&name).to_string(),
+			};
+			let video = collection.video.get(&name).cloned();
+			let clone = collection.unused_name(&format!("{name} clone"));
+			let layer = self.layer(&state).ok();
+			add(&mut state, layer, clone, source, video).map(drop)
+		} else {
+			Ok(())
+		};
+		drop(state);
+		self.check(result);
 	}
 
 	fn devices(&mut self, ui: &mut Ui) {
@@ -440,13 +805,104 @@ impl Panels {
 		let Some(picked) = self.devices.ui(ui) else { return };
 		let mut state = self.engine.state.lock().unwrap();
 		// Two cameras of the same model share a name; number the later ones.
-		let name = std::iter::once(picked.name.clone())
-			.chain((2..).map(|n| format!("{} {n}", picked.name)))
-			.find(|name| !state.collection.sources.contains_key(name))
-			.expect("an unused name");
-		let result = add(&mut state, name, picked.source);
+		let name = state.collection().unused_name(&picked.name);
+		let layer = self.layer(&state).ok();
+		let result = add(&mut state, layer, name, picked.source, None);
 		drop(state);
 		self.report(result.map(|name| format!("added `{name}`")));
+	}
+
+	/// The filters of the selected source or item, in order.
+	fn filters(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let collection = state.collection();
+		let Some(selection) = self.selection.clone() else {
+			ui.label("Select a source or an item to filter it.");
+			return;
+		};
+		let what = selection.describe(collection);
+		let Some(filters) = selection.filters(collection) else {
+			ui.label(format!("{what} has no picture to filter."));
+			return;
+		};
+		ui.strong(format!("Filters on {what}"));
+		if let Selection::Item(layer, index) = &selection
+			&& let Some(item) = collection.items(layer).and_then(|items| items.get(*index))
+			&& let Some(video) = collection.video.get(&item.source)
+		{
+			let source = video.filters.iter().map(describe_filter).collect::<Vec<_>>();
+			ui.weak(format!("after `{}`'s own: {}", item.source, source.join(", ")));
+		}
+
+		let mut next = filters.clone();
+		let mut action: Option<(String, Option<u64>)> = None;
+		let count = next.len();
+		let mut moved = None;
+		let mut remove = None;
+		for (index, filter) in next.iter_mut().enumerate() {
+			ui.horizontal(|ui| {
+				match filter {
+					Filter::Opacity { amount } => {
+						ui.label("Opacity");
+						let response = ui.add(egui::Slider::new(amount, 0.0..=1.0));
+						let gesture = self.gestures.of(&response);
+						if response.changed() {
+							action = Some((format!("Set opacity on {what}"), gesture));
+						}
+					}
+				}
+				if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
+					moved = Some((index, index - 1));
+				}
+				if ui
+					.add_enabled(index + 1 < count, egui::Button::new("Down").small())
+					.clicked()
+				{
+					moved = Some((index, index + 1));
+				}
+				if ui.small_button("Remove").clicked() {
+					remove = Some(index);
+				}
+			});
+		}
+		if let Some((from, to)) = moved {
+			next.swap(from, to);
+			action = Some((format!("Reorder filters on {what}"), None));
+		}
+		if let Some(index) = remove {
+			next.remove(index);
+			action = Some((format!("Remove a filter from {what}"), None));
+		}
+
+		ui.separator();
+		ui.horizontal(|ui| {
+			if ui.button("Add opacity").clicked() {
+				next.push(Filter::Opacity { amount: 1.0 });
+				action = Some((format!("Add opacity to {what}"), None));
+			}
+			if ui.add_enabled(!filters.is_empty(), egui::Button::new("Copy")).clicked() {
+				let clip = Clip::Filters(moq_scene::clip::Filters {
+					filters: filters.clone(),
+				});
+				match clip.to_toml() {
+					Ok(text) => {
+						ui.ctx().copy_text(text);
+						self.message = Some(Ok(format!("copied the filters on {what}")));
+					}
+					Err(err) => self.message = Some(Err(err.to_string())),
+				}
+			}
+			if ui.button("Paste").clicked() {
+				// Arrives as a paste event on a later frame, adding the filters.
+				ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+			}
+		});
+
+		let Some((label, gesture)) = action else { return };
+		let result = edit(&mut state, label, gesture, |draft| selection.set_filters(draft, next));
+		drop(state);
+		self.check(result);
 	}
 
 	fn audio(&mut self, ui: &mut Ui) {
@@ -456,31 +912,33 @@ impl Panels {
 		});
 		ui.separator();
 
-		let mut state = self.engine.state.lock().unwrap();
-		let mut edits = Vec::new();
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let mut change = None;
 		egui::Grid::new("audio").striped(true).show(ui, |ui| {
 			for (name, feed) in state.sources.iter() {
 				let Some(strip) = feed.strip() else { continue };
-				let mut audio = state.collection.audio.get(name).copied().unwrap_or_default();
+				let mut audio = state.collection().audio.get(name).copied().unwrap_or_default();
 				let mut db = decibels(audio.gain);
 				ui.label(name);
-				let mut edited = ui.checkbox(&mut audio.muted, "Mute").changed();
-				if ui
-					.add(egui::Slider::new(&mut db, MUTE_DB..=12.0).suffix(" dB"))
-					.changed()
-				{
+				if ui.checkbox(&mut audio.muted, "Mute").changed() {
+					let verb = if audio.muted { "Mute" } else { "Unmute" };
+					change = Some((name.to_string(), audio, format!("{verb} `{name}`"), None));
+				}
+				let response = ui.add(egui::Slider::new(&mut db, MUTE_DB..=12.0).suffix(" dB"));
+				let gesture = self.gestures.of(&response);
+				if response.changed() {
 					audio.gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
-					edited = true;
+					change = Some((name.to_string(), audio, format!("Set `{name}` gain"), gesture));
 				}
 				meter(ui, strip.level());
 				ui.end_row();
-				if edited {
-					edits.push((name.to_string(), audio));
-				}
 			}
 		});
-		for (name, audio) in edits {
-			state.edit().audio.insert(name, audio);
+		if let Some((name, audio, label, gesture)) = change {
+			let result = edit(&mut state, label, gesture, |draft| draft.set_audio(&name, Some(audio)));
+			drop(state);
+			self.check(result);
 		}
 	}
 
@@ -562,26 +1020,66 @@ impl Panels {
 	}
 }
 
-/// Add `source` as `name`, and place it over the scene in preview if it has a
-/// picture. Returns the name.
-fn add(state: &mut State, name: String, source: Source) -> anyhow::Result<String> {
+/// An edit the Items panel makes.
+enum ItemAction {
+	/// Replace the item at an index, labelled, as part of a gesture.
+	Set(usize, Item, String, Option<u64>),
+	Move(usize, usize),
+	Remove(usize),
+	Add(Item),
+}
+
+/// Say where else the item at `index` of `layer` shows its source, and what
+/// a clone clones.
+fn linked(ui: &mut Ui, collection: &Collection, layer: &Layer, index: usize, item: &Item) {
+	if let Some(Source::Clone { source }) = collection.sources.get(&item.source) {
+		ui.weak(format!("clone of `{source}`"));
+	}
+	let elsewhere: Vec<String> = collection
+		.layers()
+		.flat_map(|(other, items)| {
+			let at = items.iter().enumerate();
+			at.filter(|(i, shown)| shown.source == item.source && !(other == *layer && *i == index))
+				.map(|_| other.to_string())
+				.collect::<Vec<_>>()
+		})
+		.collect();
+	if !elsewhere.is_empty() {
+		ui.weak("linked").on_hover_text(format!("Also shown in:\n{}", elsewhere.join("\n")));
+	}
+}
+
+fn describe_filter(filter: &Filter) -> String {
+	match filter {
+		Filter::Opacity { amount } => format!("opacity {:.0}%", amount * 100.0),
+	}
+}
+
+/// Add `source` as `name`, with `video` filters, and place it in front of
+/// `layer` if it has a picture. Returns the name.
+fn add(
+	state: &mut State,
+	layer: Option<Layer>,
+	name: String,
+	source: Source,
+	video: Option<Video>,
+) -> anyhow::Result<String> {
 	anyhow::ensure!(!name.is_empty(), "a source needs a name");
 	anyhow::ensure!(
-		!state.collection.sources.contains_key(&name),
+		!state.collection().sources.contains_key(&name),
 		"there is already a source named `{name}`"
 	);
-	let preview = state.compositor.preview_scene().map(str::to_owned);
-	let canvas = state.collection.canvas;
-	let video = source.has_video();
-	let collection = state.edit();
-	collection.sources.insert(name.clone(), source);
-	if video && let Some(scene) = preview.and_then(|preview| collection.scene_mut(&preview)) {
-		scene.items.push(Item {
-			source: name.clone(),
-			rect: Rect::fill(&canvas),
-			visible: true,
-		});
-	}
+	let canvas = state.collection().canvas;
+	let place = source.has_video();
+	edit(state, format!("Add `{name}`"), None, |draft| {
+		draft.set_source(&name, Some(source))?;
+		draft.set_video(&name, video)?;
+		if place && let Some(layer) = layer {
+			let index = draft.collection().items(&layer).map_or(0, Vec::len);
+			draft.insert_item(&layer, index, Item::new(name.clone(), Rect::fill(&canvas)))?;
+		}
+		Ok(())
+	})?;
 	Ok(name)
 }
 
@@ -607,6 +1105,7 @@ fn describe(source: &Source) -> String {
 		Source::Image { path } => format!("image: {}", path.display()),
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
+		Source::Clone { source } => format!("clone of {source}"),
 	}
 }
 

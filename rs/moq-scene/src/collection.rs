@@ -33,9 +33,18 @@ pub struct Collection {
 	/// without an entry plays at unity.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub audio: BTreeMap<String, Audio>,
+	/// The filters on each picture-carrying source, by source name, applied
+	/// wherever the source is placed. A source without an entry is unfiltered.
+	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+	pub video: BTreeMap<String, Video>,
 	/// The scenes, in the order the scene list shows them.
 	#[serde(default)]
 	pub scenes: Vec<Scene>,
+	/// The top layer: items drawn over whichever scene is in preview and on
+	/// program, back to front, so they stay on across scene switches (a
+	/// downstream keyer). They do not fade with a transition.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub top: Vec<Item>,
 }
 
 impl Collection {
@@ -52,25 +61,15 @@ impl Collection {
 			transition: Transition::default(),
 			sources: BTreeMap::new(),
 			audio: BTreeMap::new(),
+			video: BTreeMap::new(),
 			scenes: vec![Scene::new("Scene")],
+			top: Vec::new(),
 		}
 	}
 
 	/// Parse and validate a scene file.
 	pub fn from_toml(text: &str) -> Result<Self, Error> {
-		let mut table: toml::Table = toml::from_str(text).map_err(|err| Error::Format(err.to_string()))?;
-		let version = match table.remove("version") {
-			Some(toml::Value::Integer(version)) => version,
-			Some(other) => return Err(Error::Format(format!("`version` must be an integer, got {other}"))),
-			None => return Err(Error::Format("missing `version`".into())),
-		};
-		if version != i64::from(Self::VERSION) {
-			return Err(Error::Version {
-				found: version,
-				supported: Self::VERSION,
-			});
-		}
-
+		let table = versioned(text)?;
 		let collection = Self::deserialize(table).map_err(|err| Error::Format(err.to_string()))?;
 		collection.validate()?;
 		Ok(collection)
@@ -88,13 +87,52 @@ impl Collection {
 		self.scenes.iter().find(|scene| scene.name == name)
 	}
 
-	/// The scene called `name`, to edit.
-	pub fn scene_mut(&mut self, name: &str) -> Option<&mut Scene> {
-		self.scenes.iter_mut().find(|scene| scene.name == name)
+	/// The items of `layer`, or `None` for a scene that does not exist.
+	pub fn items(&self, layer: &Layer) -> Option<&Vec<Item>> {
+		match layer {
+			Layer::Scene(name) => self.scene(name).map(|scene| &scene.items),
+			Layer::Top => Some(&self.top),
+		}
+	}
+
+	/// The items of `layer`, to edit.
+	pub(crate) fn items_mut(&mut self, layer: &Layer) -> Option<&mut Vec<Item>> {
+		match layer {
+			Layer::Scene(name) => self
+				.scenes
+				.iter_mut()
+				.find(|scene| &scene.name == name)
+				.map(|scene| &mut scene.items),
+			Layer::Top => Some(&mut self.top),
+		}
+	}
+
+	/// Every layer: the scenes in order, then the top layer.
+	pub fn layers(&self) -> impl Iterator<Item = (Layer, &[Item])> {
+		let scenes = self
+			.scenes
+			.iter()
+			.map(|scene| (Layer::Scene(scene.name.clone()), scene.items.as_slice()));
+		scenes.chain(std::iter::once((Layer::Top, self.top.as_slice())))
+	}
+
+	/// The source whose capture `name` shows: itself, or what it clones.
+	pub fn capture<'a>(&'a self, name: &'a str) -> &'a str {
+		match self.sources.get(name) {
+			Some(Source::Clone { source }) => source,
+			_ => name,
+		}
+	}
+
+	/// The filters `item` draws through: its source's, then its own.
+	pub fn filters<'a>(&'a self, item: &'a Item) -> impl Iterator<Item = &'a Filter> {
+		let source = self.video.get(&item.source).map(|video| video.filters.as_slice());
+		source.unwrap_or_default().iter().chain(&item.filters)
 	}
 
 	/// Check what the types cannot: the canvas can be encoded, names are unique,
-	/// and every item and audio entry names a source that exists.
+	/// every item, clone, audio, and video entry names a source that exists,
+	/// and every filter's settings are in range.
 	pub fn validate(&self) -> Result<(), Error> {
 		self.canvas.validate()?;
 
@@ -106,19 +144,47 @@ impl Collection {
 			if !names.insert(scene.name.as_str()) {
 				return Err(Error::Invalid(format!("two scenes are named `{}`", scene.name)));
 			}
-			for item in &scene.items {
-				if !self.sources.contains_key(&item.source) {
+		}
+		for (layer, items) in self.layers() {
+			for item in items {
+				if !self.sources.get(&item.source).is_some_and(Source::has_video) {
 					return Err(Error::Invalid(format!(
-						"scene `{}` places `{}`, which is not a source",
-						scene.name, item.source
+						"{layer} places `{}`, which is not a source with a picture",
+						item.source
 					)));
 				}
-				item.rect.validate(&scene.name, &item.source)?;
+				item.rect.validate(&layer, &item.source)?;
+				validate_filters(&item.filters, &format!("`{}` in {layer}", item.source))?;
 			}
 		}
 
 		if let Some(name) = self.sources.keys().find(|name| name.is_empty()) {
 			return Err(Error::Invalid(format!("a source has an empty name: `{name}`")));
+		}
+		for (name, source) in &self.sources {
+			let Source::Clone { source } = source else { continue };
+			match self.sources.get(source) {
+				Some(Source::Clone { .. }) => {
+					return Err(Error::Invalid(format!(
+						"`{name}` clones `{source}`, which is itself a clone"
+					)));
+				}
+				Some(origin) if origin.has_video() => {}
+				_ => {
+					return Err(Error::Invalid(format!(
+						"`{name}` clones `{source}`, which is not a source with a picture"
+					)));
+				}
+			}
+		}
+
+		for (name, video) in &self.video {
+			if !self.sources.get(name).is_some_and(Source::has_video) {
+				return Err(Error::Invalid(format!(
+					"video settings for `{name}`, which is not a source with a picture"
+				)));
+			}
+			validate_filters(&video.filters, &format!("`{name}`"))?;
 		}
 
 		for (name, audio) in &self.audio {
@@ -134,6 +200,25 @@ impl Collection {
 
 		Ok(())
 	}
+}
+
+/// Parse a TOML file of this build's [`Collection::VERSION`], without its
+/// `version` key: the scene file, and the history and clipboard formats that
+/// carry its sources and items.
+pub(crate) fn versioned(text: &str) -> Result<toml::Table, Error> {
+	let mut table: toml::Table = toml::from_str(text).map_err(|err| Error::Format(err.to_string()))?;
+	let version = match table.remove("version") {
+		Some(toml::Value::Integer(version)) => version,
+		Some(other) => return Err(Error::Format(format!("`version` must be an integer, got {other}"))),
+		None => return Err(Error::Format("missing `version`".into())),
+	};
+	if version != i64::from(Collection::VERSION) {
+		return Err(Error::Version {
+			found: version,
+			supported: Collection::VERSION,
+		});
+	}
+	Ok(table)
 }
 
 impl Default for Collection {
@@ -226,7 +311,30 @@ impl Scene {
 	}
 }
 
-/// A source placed in a scene.
+/// Where a list of items lives: a scene, or the top layer over every scene.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layer {
+	/// The scene with this name.
+	Scene(String),
+	/// [`Collection::top`].
+	Top,
+}
+
+impl fmt::Display for Layer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Scene(name) => write!(f, "scene `{name}`"),
+			Self::Top => write!(f, "the top layer"),
+		}
+	}
+}
+
+/// A source placed in a scene or the top layer.
+///
+/// Every item naming the same source shows the same capture, with the
+/// source's filters: the items are linked. A [`Source::Clone`] shows another
+/// source's capture with filters of its own.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Item {
@@ -237,10 +345,66 @@ pub struct Item {
 	/// Whether the item is drawn. A hidden item keeps its place.
 	#[serde(default = "visible")]
 	pub visible: bool,
+	/// This item's own filters, applied after its source's.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub filters: Vec<Filter>,
+}
+
+impl Item {
+	/// `source` shown, unfiltered, at `rect`.
+	pub fn new(source: impl Into<String>, rect: Rect) -> Self {
+		Self {
+			source: source.into(),
+			rect,
+			visible: true,
+			filters: Vec::new(),
+		}
+	}
 }
 
 fn visible() -> bool {
 	true
+}
+
+/// What a source or item is drawn through, in order.
+///
+/// Each filter means what the CSS Filter Effects function of the same name
+/// does, so every host that composes a scene draws it the same way.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Filter {
+	/// CSS `opacity()`: 0 is transparent and 1 leaves the picture as it is.
+	Opacity {
+		/// From 0 to 1.
+		amount: f32,
+	},
+}
+
+impl Filter {
+	fn validate(&self) -> Result<(), String> {
+		match self {
+			Self::Opacity { amount } if !(0.0..=1.0).contains(amount) => {
+				Err(format!("opacity {amount} is not between 0 and 1"))
+			}
+			Self::Opacity { .. } => Ok(()),
+		}
+	}
+}
+
+pub(crate) fn validate_filters(filters: &[Filter], on: &str) -> Result<(), Error> {
+	for filter in filters {
+		filter.validate().map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
+	}
+	Ok(())
+}
+
+/// How one source's picture is processed wherever it is placed.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Video {
+	/// Applied in order, before each item's own.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub filters: Vec<Filter>,
 }
 
 /// A rectangle in canvas pixels, from the top-left corner.
@@ -268,11 +432,11 @@ impl Rect {
 		}
 	}
 
-	fn validate(&self, scene: &str, source: &str) -> Result<(), Error> {
+	fn validate(&self, layer: &Layer, source: &str) -> Result<(), Error> {
 		let finite = [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite());
 		if !finite || self.width < 0.0 || self.height < 0.0 {
 			return Err(Error::Invalid(format!(
-				"scene `{scene}` places `{source}` at {self:?}, which is not a rectangle"
+				"{layer} places `{source}` at {self:?}, which is not a rectangle"
 			)));
 		}
 		Ok(())
@@ -326,12 +490,24 @@ pub enum Source {
 		/// The broadcast path on that relay.
 		path: String,
 	},
+	/// Another source's picture, captured once, with [`Collection::video`]
+	/// filters of its own. Its sound is not mixed a second time.
+	Clone {
+		/// The source cloned: one with a picture, and not itself a clone.
+		source: String,
+	},
 }
 
 impl Source {
 	/// Whether the source has a picture to place in a scene.
 	pub fn has_video(&self) -> bool {
 		!matches!(self, Self::Microphone { .. } | Self::SystemAudio)
+	}
+
+	/// Whether the source opens a capture, file, or subscription of its own,
+	/// rather than showing another source's.
+	pub fn opens(&self) -> bool {
+		!matches!(self, Self::Clone { .. })
 	}
 
 	/// Whether the source feeds the program audio.
@@ -435,6 +611,7 @@ mod tests {
 			source: "background".into(),
 			rect: Rect::fill(&canvas),
 			visible: true,
+			filters: Vec::new(),
 		});
 		scene.items.push(Item {
 			source: "camera".into(),
@@ -445,6 +622,7 @@ mod tests {
 				height: 360.0,
 			},
 			visible: false,
+			filters: Vec::new(),
 		});
 		collection
 	}

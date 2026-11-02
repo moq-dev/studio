@@ -83,7 +83,8 @@ impl Sources {
 	}
 
 	/// Run exactly the sources `collection` has: start new and edited ones and
-	/// stop removed and edited ones. Returns a driver for each source started,
+	/// stop removed and edited ones. A clone shares the feed of the source it
+	/// clones rather than opening one. Returns a driver for each source started,
 	/// which does nothing until run.
 	///
 	/// Also applies the collection's gain and mute to every audio strip, which
@@ -93,7 +94,7 @@ impl Sources {
 			.retain(|name, feed| collection.sources.get(name) == Some(&feed.source));
 
 		let mut drivers = Vec::new();
-		for (name, source) in &collection.sources {
+		for (name, source) in collection.sources.iter().filter(|(_, source)| source.opens()) {
 			if !self.feeds.contains_key(name) {
 				let (feed, driver) = open(name, source, &self.context);
 				self.feeds.insert(name.clone(), feed);
@@ -200,6 +201,7 @@ impl Driver {
 				std::future::pending().await
 			}
 			Source::Broadcast { path } => self.broadcast(path).await,
+			Source::Clone { .. } => unreachable!("a clone opens no feed"),
 			device => self.device(device).await,
 		}
 	}
@@ -221,7 +223,7 @@ impl Driver {
 			Source::Window { id } => Video::Window(id.clone()),
 			Source::Microphone { id } => return self.listen(Audio::Microphone(id.clone())).await,
 			Source::SystemAudio => return self.listen(Audio::System).await,
-			Source::Color { .. } | Source::Image { .. } | Source::Broadcast { .. } => {
+			Source::Color { .. } | Source::Image { .. } | Source::Broadcast { .. } | Source::Clone { .. } => {
 				unreachable!("not a device source")
 			}
 		};
