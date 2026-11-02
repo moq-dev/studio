@@ -11,13 +11,16 @@ platform.
 
 ## Plan
 
-Today the studio publishes one H.264 rendition at fixed settings and never
-reads `bandwidth::Allocator`. Reuse what exists rather than adding a studio
+Today the studio publishes one H.264 rendition at fixed settings. Its tracks
+claim their bitrate on the connection's `bandwidth::Allocator`, but nothing
+follows the grant. Reuse what exists rather than adding a studio
 path: the grant follower in `moq_video::encode` and `moq_mux::rate`, the
 catalog's in-place updates and new renditions (`doc/concept/hang.md`). The
 encode producer already cuts a keyframe when a subscriber joins
-(`encode/cuts.rs`), so each rung inherits that and can run a long GOP. Show
-each rung's grant, bitrate, and viewers in the Output panel.
+(`encode/cuts.rs`), so each rung inherits that and can run a long GOP. The
+Health panel's track table already shows each track's bitrate and reporting
+viewers; add each rung's grant beside them, which needs moq to expose a
+track's share of the allocator.
 
 ## Related
 
