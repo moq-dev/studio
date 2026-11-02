@@ -224,7 +224,7 @@ impl Video {
 }
 
 /// The size an encoder takes for a picture of `size`: even, since the encoder
-/// subsamples chroma, dropping an odd edge row or column.
+/// subsamples chroma. An odd picture is scaled down to it.
 fn encodable(size: moq_video::Size) -> moq_video::Size {
 	moq_video::Size::new((size.width & !1).max(2), (size.height & !1).max(2))
 }
