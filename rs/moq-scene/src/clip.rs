@@ -2,6 +2,7 @@
 //! collection.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,8 +48,11 @@ pub struct Filters {
 }
 
 impl Clip {
-	/// A copy of `items` of `collection`, with what they show.
-	pub fn items(collection: &Collection, items: Vec<Item>) -> Self {
+	/// A copy of `items` of `collection`, with what they show. Relative image
+	/// paths are resolved against `dir`, the absolute directory of the
+	/// collection's scene file, so they name the same file wherever the clip is
+	/// pasted.
+	pub fn items(collection: &Collection, items: Vec<Item>, dir: &Path) -> Self {
 		let mut names: Vec<String> = items.iter().map(|item| item.source.clone()).collect();
 		names.extend(items.iter().map(|item| collection.capture(&item.source).to_string()));
 
@@ -62,7 +66,11 @@ impl Clip {
 			let Some(source) = collection.sources.get(&name) else {
 				continue;
 			};
-			clip.sources.insert(name.clone(), source.clone());
+			let source = match source {
+				Source::Image { path } => Source::Image { path: dir.join(path) },
+				source => source.clone(),
+			};
+			clip.sources.insert(name.clone(), source);
 			if let Some(audio) = collection.audio.get(&name) {
 				clip.audio.insert(name.clone(), *audio);
 			}
@@ -112,13 +120,15 @@ impl Collection {
 }
 
 impl Draft {
-	/// Add `items` in front of everything in `layer`.
+	/// Add `items` in front of everything in `layer`, of the collection whose
+	/// scene file is in the absolute directory `dir`.
 	///
 	/// A source the collection has under the same name and definition is the
 	/// one shown, so items pasted within a collection are linked to the ones
 	/// copied. A source whose name is taken by a different one is added under
-	/// a new name, and an added source brings its audio and video settings.
-	pub fn paste(&mut self, layer: &Layer, items: &Items) -> Result<(), Error> {
+	/// a new name, and an added source brings its audio and video settings. An
+	/// image under `dir` is named relative to it, as the scene file would.
+	pub fn paste(&mut self, layer: &Layer, items: &Items, dir: &Path) -> Result<(), Error> {
 		let mut names = BTreeMap::new();
 		// What clones clone first, so each clone names what it was renamed to.
 		let (clones, origins): (Vec<_>, Vec<_>) = items
@@ -129,6 +139,9 @@ impl Draft {
 			let source = match source {
 				Source::Clone { source } => Source::Clone {
 					source: names.get(source).cloned().unwrap_or_else(|| source.clone()),
+				},
+				Source::Image { path } => Source::Image {
+					path: path.strip_prefix(dir).unwrap_or(path).to_path_buf(),
 				},
 				source => source.clone(),
 			};
@@ -190,12 +203,14 @@ mod tests {
 		collection
 	}
 
-	fn paste(collection: &Collection, layer: &Layer, text: &str) -> Collection {
+	const DIR: &str = "/shows/one";
+
+	fn paste(collection: &Collection, layer: &Layer, text: &str, dir: &str) -> Collection {
 		let Clip::Items(items) = Clip::from_toml(text).unwrap() else {
 			panic!("not items")
 		};
 		let mut draft = collection.draft("Paste");
-		draft.paste(layer, &items).unwrap();
+		draft.paste(layer, &items, Path::new(dir)).unwrap();
 		let mut pasted = collection.clone();
 		pasted.apply(&draft.finish().unwrap()).unwrap();
 		pasted
@@ -205,8 +220,8 @@ mod tests {
 	#[test]
 	fn pastes_linked_within_a_collection() {
 		let collection = collection();
-		let clip = Clip::items(&collection, collection.scenes[0].items.clone());
-		let pasted = paste(&collection, &Layer::Top, &clip.to_toml().unwrap());
+		let clip = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR));
+		let pasted = paste(&collection, &Layer::Top, &clip.to_toml().unwrap(), DIR);
 		assert_eq!(pasted.sources, collection.sources, "no source added");
 		assert_eq!(pasted.top, collection.scenes[0].items);
 	}
@@ -216,16 +231,56 @@ mod tests {
 	#[test]
 	fn pastes_into_another_collection() {
 		let source = collection();
-		let text = Clip::items(&source, source.scenes[0].items.clone()).to_toml().unwrap();
+		let text = Clip::items(&source, source.scenes[0].items.clone(), Path::new(DIR))
+			.to_toml()
+			.unwrap();
 
 		let mut other = Collection::new();
 		other.sources.insert("cam".into(), color([0, 255, 0, 255]));
-		let pasted = paste(&other, &Layer::Scene("Scene".into()), &text);
+		let pasted = paste(&other, &Layer::Scene("Scene".into()), &text, DIR);
 		assert_eq!(pasted.sources["cam"], color([0, 255, 0, 255]), "left alone");
 		assert_eq!(pasted.sources["cam 2"], Source::Camera { id: None });
 		assert_eq!(pasted.sources["cam faded"], Source::Clone { source: "cam 2".into() });
 		assert_eq!(pasted.video["cam faded"], source.video["cam faded"]);
 		assert_eq!(pasted.scenes[0].items, source.scenes[0].items);
+	}
+
+	/// A relative image path names the same file wherever the clip is pasted,
+	/// and stays relative, and linked, within its own collection.
+	#[test]
+	fn an_image_names_the_same_file_anywhere() {
+		let mut collection = Collection::new();
+		collection.sources.insert(
+			"logo".into(),
+			Source::Image {
+				path: "logo.png".into(),
+			},
+		);
+		collection.scenes[0]
+			.items
+			.push(Item::new("logo", Rect::fill(&collection.canvas)));
+		let text = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR))
+			.to_toml()
+			.unwrap();
+
+		let home = paste(&collection, &Layer::Top, &text, DIR);
+		assert_eq!(home.sources, collection.sources, "linked to the same image");
+
+		let mut other = Collection::new();
+		other.sources.insert(
+			"logo".into(),
+			Source::Image {
+				path: "logo.png".into(),
+			},
+		);
+		let away = paste(&other, &Layer::Top, &text, "/shows/two");
+		assert_eq!(away.sources["logo"], other.sources["logo"], "another file, left alone");
+		assert_eq!(
+			away.sources["logo 2"],
+			Source::Image {
+				path: "/shows/one/logo.png".into()
+			}
+		);
 	}
 
 	#[test]
@@ -241,7 +296,7 @@ mod tests {
 	#[test]
 	fn refuses_what_a_scene_file_would() {
 		let collection = collection();
-		let text = Clip::items(&collection, collection.scenes[0].items.clone())
+		let text = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR))
 			.to_toml()
 			.unwrap();
 		let dangling = text.replace("[sources.cam]", "[sources.other]");

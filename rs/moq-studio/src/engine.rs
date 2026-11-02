@@ -285,7 +285,9 @@ impl Engine {
 	) -> anyhow::Result<Arc<Self>> {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
-		let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+		// Absolute, so a copied image names the same file in another collection.
+		let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+		let dir = std::path::absolute(dir.unwrap_or(Path::new(".")))?;
 		let sources = Sources::new(source::Context {
 			bus: bus.clone(),
 			origin: subscribe.consume(),

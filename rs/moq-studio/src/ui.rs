@@ -292,6 +292,7 @@ impl Panels {
 					self.save();
 				}
 				if ui.button("Reload").clicked() {
+					self.deselect_item();
 					let mut state = self.engine.state.lock().unwrap();
 					let result = state.reload().map(|()| match state.dropped {
 						0 => "reloaded".to_string(),
@@ -348,6 +349,7 @@ impl Panels {
 	}
 
 	fn undo(&mut self) {
+		self.deselect_item();
 		let result = self.engine.state.lock().unwrap().undo();
 		self.report(result.map(|label| match label {
 			Some(label) => format!("undid: {label}"),
@@ -356,6 +358,7 @@ impl Panels {
 	}
 
 	fn redo(&mut self) {
+		self.deselect_item();
 		let result = self.engine.state.lock().unwrap().redo();
 		self.report(result.map(|label| match label {
 			Some(label) => format!("redid: {label}"),
@@ -371,6 +374,23 @@ impl Panels {
 	fn check(&mut self, result: anyhow::Result<()>) {
 		if let Err(err) = result {
 			self.report(Err(err));
+		}
+	}
+
+	/// Keep a selected item of `layer` on the item it named, now at `moved`'s
+	/// index, or deselect it if `moved` says it is gone.
+	fn follow(&mut self, layer: &Layer, moved: impl FnOnce(usize) -> Option<usize>) {
+		if let Some(Selection::Item(selected, index)) = &self.selection
+			&& selected == layer
+		{
+			self.selection = moved(*index).map(|index| Selection::Item(layer.clone(), index));
+		}
+	}
+
+	/// Deselect an item, after an edit that may have moved any of them.
+	fn deselect_item(&mut self) {
+		if matches!(self.selection, Some(Selection::Item(..))) {
+			self.selection = None;
 		}
 	}
 
@@ -398,7 +418,8 @@ impl Panels {
 			self.report(Err(anyhow::anyhow!("select an item to copy it")));
 			return;
 		};
-		let result = Clip::items(collection, vec![item.clone()]).to_toml();
+		let dir = &state.sources.context().dir;
+		let result = Clip::items(collection, vec![item.clone()], dir).to_toml();
 		drop(state);
 		let result = result.map(|text| {
 			ctx.copy_text(text);
@@ -417,8 +438,9 @@ impl Panels {
 			match clip {
 				Clip::Items(items) => {
 					let layer = self.layer(&state).map_err(anyhow::Error::msg)?;
+					let dir = state.sources.context().dir.clone();
 					edit(&mut state, format!("Paste into {layer}"), None, |draft| {
-						draft.paste(&layer, &items)
+						draft.paste(&layer, &items, &dir)
 					})?;
 					Ok(format!("pasted into {layer}"))
 				}
@@ -567,6 +589,7 @@ impl Panels {
 		if let Some(seek) = seek {
 			let result = state.seek(seek);
 			drop(state);
+			self.deselect_item();
 			self.check(result);
 		}
 	}
@@ -709,9 +732,13 @@ impl Panels {
 			ItemAction::Move(from, to) => {
 				let label = format!("Reorder `{}`", items[from].source);
 				let result = edit(&mut state, label, None, |draft| draft.move_item(&layer, from, to));
-				// The selection follows the item it was on.
-				if result.is_ok() && self.selection == Some(Selection::Item(layer.clone(), from)) {
-					self.selection = Some(Selection::Item(layer.clone(), to));
+				if result.is_ok() {
+					// Adjacent items swap, and the selection stays on its item.
+					self.follow(&layer, |index| match index {
+						i if i == from => Some(to),
+						i if i == to => Some(from),
+						i => Some(i),
+					});
 				}
 				result
 			}
@@ -720,8 +747,12 @@ impl Panels {
 				let result = edit(&mut state, label, None, |draft| {
 					draft.remove_item(&layer, index).map(drop)
 				});
-				if result.is_ok() && self.selection == Some(Selection::Item(layer.clone(), index)) {
-					self.selection = None;
+				if result.is_ok() {
+					self.follow(&layer, |selected| match selected.cmp(&index) {
+						std::cmp::Ordering::Less => Some(selected),
+						std::cmp::Ordering::Equal => None,
+						std::cmp::Ordering::Greater => Some(selected - 1),
+					});
 				}
 				result
 			}
@@ -800,6 +831,8 @@ impl Panels {
 		});
 
 		let result = if let Some(name) = remove {
+			// Removing the items that show it moves the ones after them.
+			self.deselect_item();
 			edit(&mut state, format!("Remove `{name}`"), None, |draft| {
 				draft.remove_source(&name)
 			})
