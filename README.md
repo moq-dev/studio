@@ -140,8 +140,8 @@ stalling, or cannot decode a track. Below that it shows:
   from the program clock to the slowest viewer. Latency compares the two
   hosts' wall clocks, so keep both synced.
 - **Viewers**: each viewer that reports, with its round trip, latency, and
-  playout delay. The studio reads 64 at most, a sample the grades rest on, and
-  counts the rest.
+  playout delay. The studio reads 64 at most, a sample the grades rest on: it
+  counts the rest, and a reader one frees goes to the next viewer to arrive.
 
 The catalog asks viewers to report under `<broadcast>/viewers/`: a viewer
 publishes `<broadcast>/viewers/<name>.echo`, as `moq export --echo <name>`

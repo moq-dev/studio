@@ -541,13 +541,17 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 fn viewer_problems(facts: &Facts<'_>, add: &mut impl FnMut(Verdict, String)) {
 	let reporting = facts.viewers.iter().filter(|viewer| viewer.health.is_some()).count();
 	// A congested or lossy uplink starves every viewer, and one measured
-	// clear of both leaves the blame with the viewers' own links. Without
-	// those measurements the cause goes unnamed.
+	// clear of both leaves the blame with the viewers' own links. With either
+	// unmeasured, as headroom is under a controller without an estimate, the
+	// cause goes unnamed.
 	let uplink = facts.uplink;
-	let cause = match uplink.grade(Input::Headroom).max(uplink.grade(Input::Loss)) {
-		Verdict::Unknown => "",
-		Verdict::Healthy => ": their own connections cannot keep up",
-		Verdict::Degraded | Verdict::Unhealthy => ": the uplink cannot keep up",
+	let (headroom, loss) = (uplink.grade(Input::Headroom), uplink.grade(Input::Loss));
+	let cause = if headroom >= Verdict::Degraded || loss >= Verdict::Degraded {
+		": the uplink cannot keep up"
+	} else if headroom == Verdict::Healthy && loss == Verdict::Healthy {
+		": their own connections cannot keep up"
+	} else {
+		""
 	};
 
 	// Each input's worst grade, how many viewers it troubles, and the track
@@ -671,44 +675,52 @@ struct Reports {
 
 impl Feedback {
 	/// Read the feedback of viewers under `prefix` on `origin`, as viewers
-	/// come and go, until dropped: at most [`MAX_VIEWERS`] at once, the rest
-	/// waiting in path order for a reader to free up.
+	/// come and go, until dropped: at most [`MAX_VIEWERS`] at once. A viewer
+	/// that arrives while that many are read is only counted, and a reader
+	/// that frees up goes to the next viewer to arrive, so the studio holds a
+	/// fixed number of readers and a count however many viewers announce.
 	///
 	/// Who may publish feedback is the relay's authorization, as for any
-	/// broadcast. A waiting viewer costs only its path, which the announcement
-	/// cursor holds anyway, and a read one at most [`MAX_REPORT`].
+	/// broadcast, and a read viewer's report is held to [`MAX_REPORT`].
 	pub async fn follow(self, origin: moq_net::origin::Consumer, prefix: moq_net::Path) -> anyhow::Result<()> {
 		let pattern = moq_net::Pattern::subtree(prefix.as_str())?;
 		let origin = origin.scope("", &moq_net::Patterns::from(pattern))?;
 		let mut announced = origin.announced();
 		let mut readers = BTreeMap::<moq_net::Path, Reader>::new();
-		let mut waiting = BTreeMap::<moq_net::Path, Option<moq_net::Epoch>>::new();
+		let mut unread = 0usize;
 		while let Some(event) = announced.next().await {
-			let (announce, start) = match event {
-				moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
-					(announce, true)
+			let (announce, restart) = match event {
+				moq_net::announce::Event::Start(announce) => (announce, false),
+				moq_net::announce::Event::Restart(announce) => (announce, true),
+				moq_net::announce::Event::End(announce) => {
+					if readers.remove(&announce.prefix).is_none() && hang::echo::is_echo(&announce.prefix) {
+						unread = unread.saturating_sub(1);
+					}
+					self.0.lock().unwrap().unread = unread;
+					continue;
 				}
-				moq_net::announce::Event::End(announce) => (announce, false),
 				// A takeover continues the same instance, and an update moves its route.
 				_ => continue,
 			};
 			let path = announce.prefix;
-			if !hang::echo::is_echo(&path) || name(&prefix, &path).is_none() {
+			let Some(name) = name(&prefix, &path).filter(|_| hang::echo::is_echo(&path)) else {
 				continue;
-			}
-			readers.remove(&path);
-			waiting.remove(&path);
-			if start {
-				waiting.insert(path, announce.route.epoch);
-			}
-			while readers.len() < MAX_VIEWERS
-				&& let Some((path, epoch)) = waiting.pop_first()
-			{
-				let name = name(&prefix, &path).expect("checked when it was announced");
-				let reader = self.read(origin.clone(), Observer::new(path.clone(), epoch), name);
+			};
+			// A new instance of a viewer being read replaces its reader; one not
+			// read was counted when it started.
+			let read = if restart {
+				readers.remove(&path).is_some()
+			} else if readers.len() < MAX_VIEWERS {
+				true
+			} else {
+				unread += 1;
+				false
+			};
+			if read {
+				let reader = self.read(origin.clone(), Observer::new(path.clone(), announce.route.epoch), name);
 				readers.insert(path, reader);
 			}
-			self.0.lock().unwrap().unread = waiting.len();
+			self.0.lock().unwrap().unread = unread;
 		}
 		Ok(())
 	}
@@ -1007,6 +1019,11 @@ mod tests {
 			stalling(Vec::new()),
 			["1 of 2 viewers are stalling on video h264 1920x1080."]
 		);
+		let unestimated = vec![(Input::Headroom, Verdict::Unknown), (Input::Loss, Verdict::Healthy)];
+		assert_eq!(
+			stalling(unestimated),
+			["1 of 2 viewers are stalling on video h264 1920x1080."]
+		);
 	}
 
 	/// Problems list worst first: an unreachable relay and a frozen source
@@ -1207,8 +1224,9 @@ mod tests {
 			.expect("the relay never counted the viewer");
 	}
 
-	/// However many viewers announce feedback, only [`MAX_VIEWERS`] are read;
-	/// the rest wait, and one takes the reader a departing viewer frees.
+	/// However many viewers announce feedback, only [`MAX_VIEWERS`] are read
+	/// and the rest counted; a reader a departing viewer frees goes to the
+	/// next to arrive.
 	#[tokio::test(start_paused = true)]
 	async fn feedback_reads_a_bounded_sample() {
 		let origin = moq_tokio::origin::spawn();
@@ -1216,27 +1234,31 @@ mod tests {
 		let feedback = Feedback::default();
 		let follow = tokio::spawn(feedback.clone().follow(origin.consume(), prefix));
 
-		let viewers: Vec<_> = (0..=MAX_VIEWERS)
-			.map(|n| {
-				let viewer = origin.create_broadcast(format!("show/viewers/{n:03}.echo")).unwrap();
-				viewer.announce(Default::default()).unwrap();
-				viewer
-			})
-			.collect();
-		let read = |feedback: &Feedback| {
+		let announce = |n: usize| {
+			let viewer = origin.create_broadcast(format!("show/viewers/{n:03}.echo")).unwrap();
+			viewer.announce(Default::default()).unwrap();
+			viewer
+		};
+		let read = |feedback: &Feedback, name: &str| {
 			let graded = feedback.grade(kio::clock::now(), &Thresholds::default());
 			(
 				graded.len(),
 				feedback.unread(),
-				graded.iter().any(|viewer| viewer.name == "064"),
+				graded.iter().any(|viewer| viewer.name == name),
 			)
 		};
 		let settled = async {
-			while read(&feedback) != (MAX_VIEWERS, 1, false) {
+			let viewers: Vec<_> = (0..MAX_VIEWERS + 2).map(announce).collect();
+			while read(&feedback, "065") != (MAX_VIEWERS, 2, false) {
 				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 			viewers[0].unannounce();
-			while read(&feedback) != (MAX_VIEWERS, 0, true) {
+			viewers[MAX_VIEWERS].unannounce();
+			while read(&feedback, "000") != (MAX_VIEWERS - 1, 1, false) {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+			let _late = announce(MAX_VIEWERS + 2);
+			while read(&feedback, "066") != (MAX_VIEWERS, 1, true) {
 				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		};
