@@ -54,7 +54,6 @@ impl Studio {
 		runtime: tokio::runtime::Handle,
 		message: Option<Result<String, String>>,
 	) -> Self {
-
 		// The compositor's textures live as long as the engine, so registering
 		// them once is enough: egui samples whatever they hold each frame.
 		let (preview, program) = {
@@ -841,4 +840,3 @@ impl Devices {
 			.inner
 	}
 }
-

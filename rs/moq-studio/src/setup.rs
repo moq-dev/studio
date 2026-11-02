@@ -94,7 +94,11 @@ async fn probe_encoders(gpu: engine::Gpu) -> Encoders {
 /// uplink's [`HEADROOM`], or the cheapest that encodes when none fits. Without a
 /// measurement it is the default canvas when that encodes.
 fn pick(encoders: &Encoders, uplink: Option<Rate>) -> Canvas {
-	let encodable = || encoders.iter().filter_map(|(canvas, result)| Some((*canvas, result.as_ref().ok()?)));
+	let encodable = || {
+		encoders
+			.iter()
+			.filter_map(|(canvas, result)| Some((*canvas, result.as_ref().ok()?)))
+	};
 	let Some(uplink) = uplink else {
 		let default = Canvas::default();
 		return encodable()
@@ -116,7 +120,9 @@ fn explain(canvas: Canvas, encoders: &Encoders, uplink: &Result<Rate, String>) -
 	let name = describe(canvas);
 	let encoding = match encoders.iter().find(|(probed, _)| *probed == canvas) {
 		Some((_, Ok(encoding))) => encoding,
-		Some((_, Err(err))) => return format!("{name} cannot be encoded on this machine, so publishing it fails: {err}"),
+		Some((_, Err(err))) => {
+			return format!("{name} cannot be encoded on this machine, so publishing it fails: {err}");
+		}
 		None => return format!("{name} was not probed."),
 	};
 	let route = match encoding.gpu {
@@ -267,11 +273,16 @@ impl<T: Send + 'static> Task<T> {
 	}
 
 	/// The result, once it arrived.
+	///
+	/// Panics if the task did, rather than waiting forever on a result that
+	/// will never come.
 	fn poll(&mut self) -> Option<&T> {
-		if let Self::Running(recv) = self
-			&& let Ok(done) = recv.try_recv()
-		{
-			*self = Self::Done(done);
+		if let Self::Running(recv) = self {
+			match recv.try_recv() {
+				Ok(done) => *self = Self::Done(done),
+				Err(mpsc::TryRecvError::Empty) => {}
+				Err(mpsc::TryRecvError::Disconnected) => panic!("a setup task stopped without a result"),
+			}
 		}
 		match self {
 			Self::Running(_) => None,
@@ -474,46 +485,50 @@ impl Setup {
 			return None;
 		};
 
+		let idle = self.starting.is_none();
 		ui.strong(format!("Proposed scene: {SCENE}"));
-		egui::Grid::new("proposal").num_columns(3).show(ui, |ui| {
-			let has_display = device(ui, "Display", "display", &listing.displays, &mut choices.display);
-			ui.label(match has_display {
-				true => "Fills the canvas, so viewers see your screen.",
-				false => "No display, so the camera fills the canvas.",
-			});
-			ui.end_row();
-
-			let has_camera = device(ui, "Camera", "camera", &listing.cameras, &mut choices.camera);
-			ui.label(match (has_camera, choices.display.is_some()) {
-				(true, true) => "Sits in the bottom-right corner, a quarter of the canvas wide, over the display.",
-				(true, false) => "Fills the canvas.",
-				(false, _) => "No camera.",
-			});
-			ui.end_row();
-
-			let has_audio = device(ui, "Audio", "audio", &listing.audio, &mut choices.audio);
-			ui.label(match has_audio {
-				true => "Mixed into the program. Set its level in the Audio panel.",
-				false => "No input, so the program is silent unless a source carries sound.",
-			});
-			ui.end_row();
-
-			ui.label("Canvas");
-			egui::ComboBox::from_id_salt("canvas")
-				.selected_text(describe(choices.canvas))
-				.show_ui(ui, |ui| {
-					for (canvas, _) in encoders {
-						ui.selectable_value(&mut choices.canvas, *canvas, describe(*canvas));
-					}
+		ui.add_enabled_ui(idle, |ui| {
+			egui::Grid::new("proposal").num_columns(3).show(ui, |ui| {
+				let has_display = device(ui, "Display", "display", &listing.displays, &mut choices.display);
+				ui.label(match (has_display, choices.camera.is_some()) {
+					(true, _) => "Fills the canvas, so viewers see your screen.",
+					(false, true) => "No display, so the camera fills the canvas.",
+					(false, false) => "No display.",
 				});
-			ui.label(explain(choices.canvas, encoders, uplink));
-			ui.end_row();
+				ui.end_row();
+
+				let has_camera = device(ui, "Camera", "camera", &listing.cameras, &mut choices.camera);
+				ui.label(match (has_camera, choices.display.is_some()) {
+					(true, true) => "Sits in the bottom-right corner, a quarter of the canvas wide, over the display.",
+					(true, false) => "Fills the canvas.",
+					(false, _) => "No camera.",
+				});
+				ui.end_row();
+
+				let has_audio = device(ui, "Audio", "audio", &listing.audio, &mut choices.audio);
+				ui.label(match has_audio {
+					true => "Mixed into the program. Set its level in the Audio panel.",
+					false => "No input, so the program is silent unless a source carries sound.",
+				});
+				ui.end_row();
+
+				ui.label("Canvas");
+				egui::ComboBox::from_id_salt("canvas")
+					.selected_text(describe(choices.canvas))
+					.show_ui(ui, |ui| {
+						for (canvas, _) in encoders {
+							ui.selectable_value(&mut choices.canvas, *canvas, describe(*canvas));
+						}
+					});
+				ui.label(explain(choices.canvas, encoders, uplink));
+				ui.end_row();
+			});
 		});
 
 		if let Some(error) = &self.error {
 			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
-		if self.starting.is_some() {
+		if !idle {
 			ui.spinner();
 			return None;
 		}
@@ -555,23 +570,21 @@ impl Setup {
 
 /// A row picking one of `devices` or none, or saying why there is none to
 /// pick. Whether one is picked.
-fn device(
-	ui: &mut Ui,
-	label: &str,
-	id: &str,
-	devices: &Result<Vec<Pick>, String>,
-	choice: &mut Option<usize>,
-) -> bool {
+fn device(ui: &mut Ui, label: &str, id: &str, devices: &Result<Vec<Pick>, String>, choice: &mut Option<usize>) -> bool {
 	ui.label(label);
 	match devices {
 		Ok(devices) if !devices.is_empty() => {
-			let selected = choice.and_then(|index| devices.get(index)).map_or("None", |pick| pick.name.as_str());
-			egui::ComboBox::from_id_salt(id).selected_text(selected).show_ui(ui, |ui| {
-				ui.selectable_value(choice, None, "None");
-				for (index, pick) in devices.iter().enumerate() {
-					ui.selectable_value(choice, Some(index), &pick.name);
-				}
-			});
+			let selected = choice
+				.and_then(|index| devices.get(index))
+				.map_or("None", |pick| pick.name.as_str());
+			egui::ComboBox::from_id_salt(id)
+				.selected_text(selected)
+				.show_ui(ui, |ui| {
+					ui.selectable_value(choice, None, "None");
+					for (index, pick) in devices.iter().enumerate() {
+						ui.selectable_value(choice, Some(index), &pick.name);
+					}
+				});
 		}
 		Ok(_) => {
 			ui.weak("none found");
@@ -634,7 +647,10 @@ mod tests {
 	#[test]
 	fn keeps_the_default_canvas_without_a_measurement() {
 		assert_eq!(pick(&encoders(DEFAULTS), None), Canvas::default());
-		assert_eq!(pick(&encoders([None; 5]), Some(Rate::from_mbps(100))), Canvas::default());
+		assert_eq!(
+			pick(&encoders([None; 5]), Some(Rate::from_mbps(100))),
+			Canvas::default()
+		);
 	}
 
 	fn listing(cameras: &[&str], displays: &[&str], audio: &[&str]) -> Listing {
@@ -667,7 +683,10 @@ mod tests {
 		assert_eq!(placed, ["Screen", "Webcam"], "back to front");
 		assert_eq!(items[0].rect, Rect::fill(&CANVASES[3]));
 		let corner = items[1].rect;
-		assert!(corner.x > 640.0 && corner.y > 360.0, "in the bottom-right quarter: {corner:?}");
+		assert!(
+			corner.x > 640.0 && corner.y > 360.0,
+			"in the bottom-right quarter: {corner:?}"
+		);
 		assert!(corner.x + corner.width < 1280.0 && corner.y + corner.height < 720.0);
 		assert!(collection.sources.contains_key("Mic"), "the input is a source");
 	}

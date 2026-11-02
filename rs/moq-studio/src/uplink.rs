@@ -39,7 +39,9 @@ pub async fn measure(
 	window: Duration,
 ) -> anyhow::Result<Rate> {
 	let publish = moq_tokio::origin::spawn();
-	let publication = publish.create_broadcast(path).context("cannot create the probe broadcast")?;
+	let publication = publish
+		.create_broadcast(path)
+		.context("cannot create the probe broadcast")?;
 	let track = publication
 		.broadcast()
 		.create_track(TRACK, None)
@@ -160,9 +162,15 @@ mod tests {
 		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
 		let client = client.init(Default::default()).expect("client");
 
-		let rate = measure(&client, fixture.url.clone(), "studio", Rate::from_mbps(10), Duration::from_secs(2))
-			.await
-			.expect("a measurement");
+		let rate = measure(
+			&client,
+			fixture.url.clone(),
+			"studio",
+			Rate::from_mbps(10),
+			Duration::from_secs(2),
+		)
+		.await
+		.expect("a measurement");
 		assert!(rate > Rate::ZERO, "an estimate of {rate:?}");
 	}
 
