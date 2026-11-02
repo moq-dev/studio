@@ -222,7 +222,9 @@ impl Panels {
 			));
 			let toggled = ui
 				.toggle_value(&mut self.interacting, "Interact")
-				.on_hover_text("Pass the mouse to the browser source under it, and the keyboard to the one last clicked")
+				.on_hover_text(
+					"Pass the mouse to the browser source under it, and the keyboard to the one last clicked",
+				)
 				.changed();
 			if toggled && !self.interacting {
 				self.interact.release(&state.sources);
@@ -429,9 +431,9 @@ impl Panels {
 					}
 					match feed.page().and_then(|page| page.paint()) {
 						Some(Paint::Gpu) => ui.weak("GPU").on_hover_text("The page is copied on the GPU"),
-						Some(Paint::Cpu) => ui
-							.colored_label(Color32::from_rgb(220, 180, 60), "CPU")
-							.on_hover_text("The page is uploaded from memory every frame: its GPU process or this device cannot share textures"),
+						Some(Paint::Cpu) => ui.colored_label(Color32::from_rgb(220, 180, 60), "CPU").on_hover_text(
+							"The page is uploaded from memory every frame: its GPU process or this device cannot share textures",
+						),
 						_ => ui.label(""),
 					};
 					if ui.small_button("Remove").clicked() {

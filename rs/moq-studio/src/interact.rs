@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_scene::browser::{Button, Input, Modifiers};
-use moq_scene::{Collection, Source};
 use moq_scene::source::Sources;
+use moq_scene::{Collection, Source};
 
 /// How close in time and space a press must follow the last to count toward a
 /// double or triple click.
@@ -76,7 +76,14 @@ impl Interact {
 						send(&left, Input::Leave { modifiers: buttons });
 					}
 					if let Some(Hit { page, x, y }) = hit {
-						send(&page, Input::Move { x, y, modifiers: buttons });
+						send(
+							&page,
+							Input::Move {
+								x,
+								y,
+								modifiers: buttons,
+							},
+						);
 						self.hovered = Some(page);
 					}
 				}
@@ -121,7 +128,9 @@ impl Interact {
 						},
 					);
 				}
-				egui::Event::MouseWheel { unit, delta, modifiers, .. } => {
+				egui::Event::MouseWheel {
+					unit, delta, modifiers, ..
+				} => {
 					let Some(Hit { page, x, y }) = ui.input(|input| input.pointer.hover_pos()).and_then(hit) else {
 						continue;
 					};
@@ -144,17 +153,23 @@ impl Interact {
 					);
 				}
 				egui::Event::Key {
-					key, pressed, modifiers, ..
+					key,
+					pressed,
+					modifiers,
+					..
 				} => {
 					let (Some(page), Some(code)) = (&self.focused, code(key)) else {
 						continue;
 					};
 					let modifiers = keys(modifiers, buttons);
-					send(page, Input::Key {
-						code,
-						down: pressed,
-						modifiers,
-					});
+					send(
+						page,
+						Input::Key {
+							code,
+							down: pressed,
+							modifiers,
+						},
+					);
 					// A page sees Enter as typed text too, which is what
 					// submits a form or breaks a line.
 					if pressed && key == egui::Key::Enter {
@@ -383,9 +398,8 @@ mod tests {
 			name: "Main".into(),
 			items: vec![item("alerts", fill, true), item("chat", corner, true)],
 		}];
-		let at = |collection: &Collection, x, y| {
-			page_at(collection, Some("Main"), x, y).map(|hit| (hit.page, hit.x, hit.y))
-		};
+		let at =
+			|collection: &Collection, x, y| page_at(collection, Some("Main"), x, y).map(|hit| (hit.page, hit.x, hit.y));
 
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(at(&collection, 960.0, 540.0), Some(("alerts".into(), 400, 300)));

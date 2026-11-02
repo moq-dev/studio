@@ -90,18 +90,21 @@ fn serve() -> Result<(), String> {
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 	let args = args::Args::new();
 	let mut app = HelperApp::new(shared.open.render_node.clone());
-	// A profile of its own, since two CEF instances cannot share one, gone
-	// when the helper is.
-	let profile = tempfile::tempdir().map_err(|err| format!("profile: {err}"))?;
 	let settings = Settings {
 		windowless_rendering_enabled: 1,
-		root_cache_path: profile.path().to_string_lossy().as_ref().into(),
+		root_cache_path: shared.open.profile.as_str().into(),
 		log_severity: LogSeverity::WARNING,
 		// Transparent, so an overlay shows what is under it.
 		background_color: 0,
 		..Default::default()
 	};
-	if initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) != 1 {
+	if initialize(
+		Some(args.as_main_args()),
+		Some(&settings),
+		Some(&mut app),
+		std::ptr::null_mut(),
+	) != 1
+	{
 		return Err("CEF failed to initialize".into());
 	}
 
@@ -142,7 +145,6 @@ fn serve() -> Result<(), String> {
 	run_message_loop();
 	BROWSER.with_borrow_mut(|slot| *slot = None);
 	shutdown();
-	drop(profile);
 	Ok(())
 }
 

@@ -13,8 +13,8 @@ use std::os::unix::net::UnixStream;
 use rustix::net::{
 	RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer, SendAncillaryMessage, SendFlags,
 };
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use super::Input;
 
@@ -39,7 +39,7 @@ pub(crate) enum Command {
 }
 
 /// The page a helper opens.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Open {
 	pub url: String,
 	/// The page's viewport, in pixels.
@@ -52,6 +52,9 @@ pub(crate) struct Open {
 	pub accelerated: bool,
 	/// The DRM render node to paint on: the studio's GPU.
 	pub render_node: Option<String>,
+	/// An empty directory for CEF's profile, since two CEF instances cannot
+	/// share one. The studio removes it once the helper has exited.
+	pub profile: String,
 	/// The sound the page plays is delivered at the program bus's rate and
 	/// channel count, so it joins the bus without resampling.
 	pub sample_rate: u32,
@@ -234,7 +237,11 @@ mod tests {
 		assert_eq!(fds.len(), 1);
 		let ours = rustix::fs::fstat(&fds[0]).unwrap();
 		let theirs = rustix::fs::fstat(&file).unwrap();
-		assert_eq!((ours.st_dev, ours.st_ino), (theirs.st_dev, theirs.st_ino), "the same file");
+		assert_eq!(
+			(ours.st_dev, ours.st_ino),
+			(theirs.st_dev, theirs.st_ino),
+			"the same file"
+		);
 
 		let (event, fds) = studio.recv::<Event>().unwrap().unwrap();
 		assert_eq!(event, Event::Failed("gone".into()));

@@ -29,7 +29,7 @@ pipewire = ["capture", "moq-video/pipewire", "moq-audio/pipewire"]
 # process, on Linux. Off by default: the build downloads the CEF runtime, or
 # takes it from `CEF_PATH`, and compiles its C++ wrapper. Without it, a browser
 # source reports that this build cannot render web pages.
-cef = ["dep:cef", "dep:tempfile"]
+cef = ["dep:cef"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
@@ -58,8 +58,8 @@ tracing = { workspace = true }
 cef = { version = "156.3", default-features = false, features = ["accelerated_osr"], optional = true }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 rustix = { version = "1", features = ["net", "stdio"] }
-# The helper's CEF profile, which lives as long as the helper.
-tempfile = { workspace = true, optional = true }
+# The helper's CEF profile, removed once the helper has exited.
+tempfile = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

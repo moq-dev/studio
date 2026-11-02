@@ -32,15 +32,7 @@ mod host;
 mod import;
 
 #[cfg(target_os = "linux")]
-pub(crate) use import::supported as accelerated;
-#[cfg(target_os = "linux")]
 pub(crate) use protocol::Open;
-
-/// The render node CEF paints on, if the studio's device has one.
-#[cfg(target_os = "linux")]
-pub(crate) fn render_node(helper: &Helper) -> Option<String> {
-	Some(helper.render_node.as_ref()?.to_str()?.to_string())
-}
 #[cfg(target_os = "linux")]
 pub(crate) use run::run;
 
@@ -48,7 +40,10 @@ pub(crate) use run::run;
 pub(crate) const MAX_SIDE: u32 = 4096;
 
 /// The argument that starts the studio's executable as a helper.
-#[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "browser sources are Linux-only"))]
+#[cfg_attr(
+	not(target_os = "linux"),
+	expect(dead_code, reason = "browser sources are Linux-only")
+)]
 const ARG: &str = "--moq-browser-helper";
 
 /// Become a browser source's helper, or one of CEF's subprocesses, if this
@@ -78,7 +73,10 @@ pub struct Helper {
 	queue: wgpu::Queue,
 	/// The device's DRM render node, which CEF must paint on for the studio to
 	/// import what it paints.
-	#[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "browser sources are Linux-only"))]
+	#[cfg_attr(
+		not(target_os = "linux"),
+		expect(dead_code, reason = "browser sources are Linux-only")
+	)]
 	render_node: Option<PathBuf>,
 }
 
@@ -86,7 +84,12 @@ impl Helper {
 	/// Start helpers from `program`, which calls [`child`] first thing in
 	/// `main`, usually the running executable, and copy their pictures to
 	/// `device`, opened from `adapter`.
-	pub fn new(program: impl Into<PathBuf>, adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+	pub fn new(
+		program: impl Into<PathBuf>,
+		adapter: &wgpu::Adapter,
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+	) -> Self {
 		// A machine with two GPUs would otherwise paint on whichever CEF
 		// picks, and the studio cannot import from another GPU.
 		let bus = adapter.get_info().device_pci_bus_id;
@@ -179,7 +182,11 @@ pub enum Input {
 	},
 	/// A key went down or up. `code` is the Windows virtual-key code, which is
 	/// what CEF takes on every platform.
-	Key { code: i32, down: bool, modifiers: Modifiers },
+	Key {
+		code: i32,
+		down: bool,
+		modifiers: Modifiers,
+	},
 	/// Text typed, after the keyboard layout and any input method.
 	Text(String),
 	/// The page gained or lost keyboard focus.
@@ -209,11 +216,22 @@ pub struct Modifiers {
 
 /// The texture a page's pixels are uploaded to: premultiplied BGRA, as CEF
 /// paints.
-#[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "browser sources are Linux-only"))]
-fn upload(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, data: &[u8]) -> Result<wgpu::Texture, String> {
+#[cfg_attr(
+	not(target_os = "linux"),
+	expect(dead_code, reason = "browser sources are Linux-only")
+)]
+fn upload(
+	device: &wgpu::Device,
+	queue: &wgpu::Queue,
+	width: u32,
+	height: u32,
+	data: &[u8],
+) -> Result<wgpu::Texture, String> {
 	let limit = device.limits().max_texture_dimension_2d;
 	if width == 0 || height == 0 || width > limit || height > limit {
-		return Err(format!("a {width}x{height} page does not fit this GPU's {limit}px texture limit"));
+		return Err(format!(
+			"a {width}x{height} page does not fit this GPU's {limit}px texture limit"
+		));
 	}
 	if data.len() != width as usize * height as usize * 4 {
 		return Err(format!("{} bytes is not a {width}x{height} picture", data.len()));

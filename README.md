@@ -1,8 +1,8 @@
 # MoQ Studio
 
 `moq-studio` is a native streaming studio for Linux, macOS, and Windows. It
-composes cameras, screens, windows, images, colors, and broadcasts from a relay
-into scenes on the GPU, mixes their audio, and publishes the result to a
+composes cameras, screens, windows, images, colors, web pages, and broadcasts
+from a relay into scenes on the GPU, mixes their audio, and publishes the result to a
 [MoQ](https://github.com/moq-dev/moq) relay. It is early and not packaged yet,
 so build it from source. The moq crates come from the `moq` submodule:
 
@@ -19,6 +19,9 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - `capture` adds camera, display, window, microphone, and system-audio sources.
   On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
+- `cef` adds browser sources, on Linux only for now. The build takes CEF from
+  `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
+  loads `libcef.so` from beside itself or from that `CEF_PATH`.
 - On Linux, display and window sources capture X11 and XWayland only; a
   Wayland screen or window cannot be picked yet.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
@@ -30,10 +33,10 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
+| Preview, Program | See the scene you are editing and the one that is live. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. **Interact** passes the mouse over the preview to the browser source under it, and the keyboard to the one last clicked. |
 | Scenes | Pick the scene in preview, add one, or remove one. |
 | Items | Place, show, hide, and order the sources the preview scene draws, back to front. |
-| Sources | Add a source by hand, see whether each is live, and remove one. |
+| Sources | Add a source by hand, see whether each is live, and remove one. A browser source also shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU). |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
 | Output | See the relay connection, whether anyone is watching, and the encoder's work. |
@@ -42,6 +45,13 @@ A broadcast source subscribes through the same relay connection, plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
+
+A browser source renders a web page, such as an overlay, alert box, or chat
+widget, at the canvas frame rate (CEF caps it at 60) over a transparent
+background, and its sound joins the program audio. Each page runs in a
+process of its own, so a page or browser crash fails that source, with the
+reason, while the stream carries on; edit or re-add the source to restart it.
+Every start is a fresh profile: no cookies or logins persist.
 
 ## Scene file
 
@@ -73,6 +83,12 @@ path = "logo.png" # relative to the scene file
 kind = "broadcast"
 path = "room/guest"
 
+[sources.alerts]
+kind = "browser"
+url = "https://example.com/alerts"
+width = 800 # the page's own size, whatever its items stretch it to
+height = 600
+
 [audio.guest]
 gain = 0.5
 
@@ -86,8 +102,8 @@ items = [
 
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
-(macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`), and
-`broadcast`. The Devices panel fills in ids. **File > Save** (Ctrl+S) writes
+(macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
+`broadcast`, and `browser` (a `url`, and a `width` and `height` up to 4096). The Devices panel fills in ids. **File > Save** (Ctrl+S) writes
 the file and **File > Reload** reads it back; a new canvas size or frame rate
 takes a restart.
 
@@ -113,9 +129,10 @@ stream.
 Sources make the opposite trip. A frame already on the GPU is drawn where it
 lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
 driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
-macOS. Every other source, every source on Windows or on a GPU that cannot
-import, and every still image delivers its frames from the CPU, which the
-compositor uploads.
+macOS. A browser source's page is copied on the GPU from the shared texture CEF
+paints, given the same Vulkan DMA-BUF import. Every other source, every source
+on Windows or on a GPU that cannot import, and every still image delivers its
+frames from the CPU, which the compositor uploads.
 
 ## Development
 

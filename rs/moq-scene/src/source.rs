@@ -285,10 +285,9 @@ impl Driver {
 			width,
 			height,
 			framerate: self.framerate,
-			accelerated: crate::browser::accelerated(helper),
-			render_node: crate::browser::render_node(helper),
 			sample_rate: bus.sample_rate,
 			channels: bus.layout.channels(),
+			..Default::default()
 		};
 		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
 		input.format = moq_audio::Format::F32;
@@ -828,6 +827,36 @@ mod tests {
 				panic!("a missing image fails");
 			};
 			assert!(reason.contains("missing.png"), "{reason}");
+		})
+		.await;
+	}
+
+	/// Without a helper to run it in, a browser source fails rather than
+	/// staying blank.
+	#[tokio::test]
+	async fn a_page_without_a_helper_says_so() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let mut collection = Collection::new();
+			collection.sources.insert(
+				"chat".into(),
+				Source::Browser {
+					url: "https://example.com".into(),
+					width: 400,
+					height: 800,
+				},
+			);
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let chat = sources.get("chat").unwrap();
+			let Status::Failed(reason) = chat.status() else {
+				panic!("a page without a helper fails");
+			};
+			assert!(reason.contains("web pages") || reason.contains("Linux"), "{reason}");
+			assert!(chat.page().is_some_and(|page| page.paint().is_none()));
+			assert!(chat.strip().is_some(), "a page feeds the bus");
 		})
 		.await;
 	}

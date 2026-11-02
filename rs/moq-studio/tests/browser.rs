@@ -142,7 +142,10 @@ impl Studio {
 			if near(actual, expected) {
 				return;
 			}
-			assert!(Instant::now() < deadline, "the center stayed {actual:?}, not {expected:?}");
+			assert!(
+				Instant::now() < deadline,
+				"the center stayed {actual:?}, not {expected:?}"
+			);
 			kio::clock::sleep(Duration::from_millis(30)).await;
 		}
 	}
@@ -198,9 +201,7 @@ async fn a_page_draws_and_plays() {
 		studio.until_center([128, 0, 127, 255], &[]).await;
 		let feed = studio.sources.get("page").unwrap();
 		assert_eq!(feed.status(), Status::Live);
-		let paint = feed.page().unwrap().paint();
-		assert!(paint.is_some(), "the paint path shows");
-		eprintln!("PAINT {paint:?}");
+		assert!(feed.page().unwrap().paint().is_some(), "the paint path shows");
 
 		let strip = feed.strip().unwrap().clone();
 		let deadline = Instant::now() + TIMEOUT;
@@ -241,25 +242,28 @@ async fn a_click_reaches_the_page() {
 }
 
 /// A page whose renderer crashes, or whose whole browser process does, fails
-/// its own source while the canvas keeps drawing everything else.
+/// its own source and leaves the canvas, while everything else keeps drawing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
 async fn a_crash_drops_only_its_source() {
 	local(async {
-		let crash = |url: &str| Source::Browser {
-			url: url.into(),
+		let crash = Source::Browser {
+			url: "chrome://crash".into(),
 			width: 320,
 			height: 240,
 		};
-		let mut studio = Studio::new(&[
-			("blue", blue()),
-			("renderer", crash("chrome://crash")),
-			("browser", crash("chrome://inducebrowsercrashforrealz")),
-		])
-		.await;
+		let red = page("<body style='background:red'></body>");
+		let mut studio = Studio::new(&[("blue", blue()), ("browser", red), ("renderer", crash)]).await;
 
 		let reason = studio.until_failed("renderer").await;
 		assert!(reason.contains("renderer"), "{reason}");
+
+		studio.until_center([255, 0, 0, 255], &["renderer"]).await;
+		let helper = helper().expect("the page's helper is running");
+		let killed = std::process::Command::new("kill")
+			.args(["-KILL", &helper.to_string()])
+			.status();
+		assert!(killed.unwrap().success());
 		let reason = studio.until_failed("browser").await;
 		assert!(reason.contains("browser process exited"), "{reason}");
 
@@ -267,4 +271,21 @@ async fn a_crash_drops_only_its_source() {
 		studio.until_center(BLUE, &["renderer", "browser"]).await;
 	})
 	.await;
+}
+
+/// The one helper this test process still runs: a child started with the
+/// helper's argument.
+fn helper() -> Option<u32> {
+	let ours = std::process::id().to_string();
+	std::fs::read_dir("/proc").ok()?.flatten().find_map(|entry| {
+		let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+		let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+		// The parent is the second field after the parenthesized command.
+		let parent = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?;
+		let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+		let helper = cmdline
+			.split(|byte| *byte == 0)
+			.any(|arg| arg == b"--moq-browser-helper");
+		(parent == ours && helper).then_some(pid)
+	})
 }

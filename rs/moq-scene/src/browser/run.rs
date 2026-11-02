@@ -14,17 +14,31 @@ use crate::source::{Mailbox, Picture, Status};
 
 /// Run the page `open` describes until its helper stops, delivering pictures
 /// to `picture` and sound to `sound`. Dropping the future stops the helper.
+///
+/// Fills in how the helper paints: `open` names only the page, its frame
+/// rate, and the bus's format.
 pub(crate) async fn run(
 	helper: &Helper,
-	open: Open,
+	mut open: Open,
 	page: &Page,
 	picture: &Mailbox,
 	sound: Option<Sound>,
 	status: &kio::Producer<Status>,
 ) -> Result<(), Error> {
-	let (mut process, events) = spawn(helper)
-		.map_err(|err| Error::Browser(format!("cannot start {}: {err}", helper.program.display())))?;
-	let commands = events.try_clone().map_err(|err| Error::Browser(format!("socket: {err}")))?;
+	// Declared first so it is removed last, once the helper is gone.
+	let profile = tempfile::tempdir().map_err(|err| Error::Browser(format!("cannot create a profile: {err}")))?;
+	open.profile = profile.path().to_string_lossy().into_owned();
+	open.accelerated = super::import::supported(helper);
+	open.render_node = helper
+		.render_node
+		.as_ref()
+		.and_then(|node| node.to_str())
+		.map(str::to_string);
+	let (mut process, events) =
+		spawn(helper).map_err(|err| Error::Browser(format!("cannot start {}: {err}", helper.program.display())))?;
+	let commands = events
+		.try_clone()
+		.map_err(|err| Error::Browser(format!("socket: {err}")))?;
 	let end = match commands.send(&Command::Open(open), &[]) {
 		Ok(()) => {
 			page.state.lock().unwrap().commands = Some(commands);
@@ -38,10 +52,19 @@ pub(crate) async fn run(
 		}
 		Err(err) => closed(err),
 	};
+	// A stopped page leaves the canvas rather than freezing on its last
+	// picture, which for an alert or a ticker would show stale news.
+	*picture.lock().unwrap() = Some(Picture::Rgba {
+		size: moq_video::Size::new(1, 1),
+		pixels: vec![0; 4],
+	});
 	match end {
 		// The helper is exiting or gone, so its status says why.
 		End::Closed => {
-			let exit = process.child.wait().map_err(|err| Error::Browser(format!("the browser process: {err}")))?;
+			let exit = process
+				.child
+				.wait()
+				.map_err(|err| Error::Browser(format!("the browser process: {err}")))?;
 			Err(Error::Browser(format!("the browser process exited: {exit}")))
 		}
 		End::Failed(reason) => Err(Error::Browser(reason)),

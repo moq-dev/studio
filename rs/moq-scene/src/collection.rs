@@ -457,6 +457,14 @@ mod tests {
 				path: "studio/guest".into(),
 			},
 		);
+		collection.sources.insert(
+			"chat".into(),
+			Source::Browser {
+				url: "https://example.com/chat".into(),
+				width: 400,
+				height: 800,
+			},
+		);
 		collection.audio.insert("mic".into(), Audio { gain: 0.5, muted: true });
 
 		let canvas = collection.canvas;
@@ -616,6 +624,35 @@ items = [
 		let mut collection = example();
 		collection.scenes[0].items[0].rect.width = f32::NAN;
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+	}
+
+	/// A page needs an address and a size the helper can paint and the socket
+	/// can carry.
+	#[test]
+	fn refuses_a_degenerate_page() {
+		let page = |url: &str, width, height| {
+			let mut collection = example();
+			collection.sources.insert(
+				"chat".into(),
+				Source::Browser {
+					url: url.into(),
+					width,
+					height,
+				},
+			);
+			collection.validate()
+		};
+		assert!(page("https://example.com", 4096, 1).is_ok());
+		for (url, width, height) in [
+			(" ", 400, 800),
+			("https://example.com", 0, 800),
+			("https://example.com", 400, 4097),
+		] {
+			assert!(
+				matches!(page(url, width, height), Err(Error::Invalid(_))),
+				"{url:?} {width}x{height}"
+			);
+		}
 	}
 
 	#[test]
