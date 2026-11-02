@@ -21,9 +21,9 @@ pub struct Interact {
 	/// The page last clicked, which receives the keyboard.
 	focused: Option<String>,
 	/// The page a button went down on, which gets the pointer wherever it
-	/// goes until that button comes up, so a drag never leaves a page with a
-	/// button stuck down.
-	captured: Option<(String, Button)>,
+	/// goes until every button it saw go down comes up, so a drag never
+	/// leaves a page with a button stuck down.
+	captured: Option<Capture>,
 	/// The last press, to count multi-clicks.
 	last: Option<Press>,
 }
@@ -35,6 +35,12 @@ struct Press {
 	y: i32,
 	at: Instant,
 	clicks: u32,
+}
+
+struct Capture {
+	page: String,
+	/// The buttons the page saw go down and not yet up.
+	held: Vec<Button>,
 }
 
 /// A point on one page.
@@ -80,7 +86,7 @@ impl Interact {
 		for event in events {
 			match event {
 				egui::Event::PointerMoved(pos) => {
-					if let Some((page, _)) = &self.captured {
+					if let Some(Capture { page, .. }) = &self.captured {
 						if let Some((x, y)) = on_page(page, pos) {
 							send(
 								page,
@@ -125,9 +131,15 @@ impl Interact {
 					let modifiers = keys(modifiers, buttons);
 					if !pressed {
 						// Only the page that saw the press hears the release.
-						let Some((page, _)) = self.captured.take_if(|(_, held)| *held == button) else {
+						let Some(capture) = self.captured.as_mut().filter(|capture| capture.held.contains(&button))
+						else {
 							continue;
 						};
+						capture.held.retain(|held| *held != button);
+						let page = capture.page.clone();
+						if capture.held.is_empty() {
+							self.captured = None;
+						}
 						if let Some((x, y)) = on_page(&page, pos) {
 							let clicks = self.last.as_ref().map_or(1, |last| last.clicks);
 							send(
@@ -144,22 +156,34 @@ impl Interact {
 						}
 						continue;
 					}
-					let Some(Hit { page, x, y }) = hit(pos) else {
+					// Another press during a drag goes to the dragged page too.
+					let target = match &self.captured {
+						Some(capture) => on_page(&capture.page, pos).map(|(x, y)| Hit {
+							page: capture.page.clone(),
+							x,
+							y,
+						}),
+						None => hit(pos),
+					};
+					let Some(Hit { page, x, y }) = target else {
 						if self.captured.is_none() {
 							self.blur(&send);
 						}
 						continue;
 					};
-					if self.captured.as_ref().is_some_and(|(held, _)| *held != page) {
-						continue;
-					}
 					let clicks = self.press(&page, button, x, y);
 					if self.focused.as_ref() != Some(&page) {
 						self.blur(&send);
 						send(&page, Input::Focus(true));
 						self.focused = Some(page.clone());
 					}
-					self.captured.get_or_insert_with(|| (page.clone(), button));
+					let capture = self.captured.get_or_insert_with(|| Capture {
+						page: page.clone(),
+						held: Vec::new(),
+					});
+					if !capture.held.contains(&button) {
+						capture.held.push(button);
+					}
 					send(
 						&page,
 						Input::Button {
@@ -542,12 +566,15 @@ mod tests {
 			output.textures_delta.clear();
 			delivered
 		};
-		let button = |x, y, pressed| egui::Event::PointerButton {
+		let press = |x, y, button, pressed| egui::Event::PointerButton {
 			pos: egui::pos2(x, y),
-			button: egui::PointerButton::Primary,
+			button,
 			pressed,
 			modifiers: Default::default(),
 		};
+		let left = egui::PointerButton::Primary;
+		let right = egui::PointerButton::Secondary;
+		let button = move |x, y, pressed| press(x, y, left, pressed);
 		let pages =
 			|delivered: &[(String, Input)]| -> Vec<String> { delivered.iter().map(|(page, _)| page.clone()).collect() };
 
@@ -579,6 +606,35 @@ mod tests {
 
 		// A release with no press behind it is dropped.
 		assert!(frame(vec![button(150.0, 50.0, false)]).is_empty());
+
+		// Every button the page saw go down comes up there, whichever order
+		// they are released in and wherever the pointer is.
+		let chord = frame(vec![
+			press(50.0, 50.0, left, true),
+			press(150.0, 50.0, right, true),
+			press(150.0, 50.0, left, false),
+			press(150.0, 50.0, right, false),
+		]);
+		let buttons: Vec<_> = chord
+			.iter()
+			.filter_map(|(page, input)| match input {
+				Input::Button { button, down, .. } => Some((page.as_str(), *button, *down)),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			buttons,
+			[
+				("left", Button::Left, true),
+				("left", Button::Right, true),
+				("left", Button::Left, false),
+				("left", Button::Right, false),
+			]
+		);
+		assert!(
+			frame(vec![press(150.0, 50.0, right, false)]).is_empty(),
+			"the drag is over"
+		);
 	}
 
 	/// Presses close in time and place count up to a triple click, then start
