@@ -185,7 +185,10 @@ impl Room {
 			.with_context(|| format!("cannot invite `{identity}`"))?
 			.with_issued(issued)
 			.with_expires(expires);
-		let token = self.key.sign(&claims).context("the room key cannot sign a guest's token")?;
+		let token = self
+			.key
+			.sign(&claims)
+			.context("the room key cannot sign a guest's token")?;
 		Ok((token, expires))
 	}
 
@@ -238,7 +241,9 @@ impl Room {
 			.sources
 			.iter()
 			.filter(|(_, source)| {
-				let Source::Broadcast { path } = source else { return false };
+				let Source::Broadcast { path } = source else {
+					return false;
+				};
 				let Ok(path) = Path::new(path) else { return false };
 				path.strip_prefix(&self.path)
 					.and_then(moq_room::parse)
@@ -259,11 +264,8 @@ fn check_scope(key: &moq_auth::Key, room: &Path) -> anyhow::Result<()> {
 		);
 	};
 	let inside: moq_auth::Patterns = moq_auth::Pattern::subtree(room.as_str())?.into();
-	let confined = |patterns: &moq_auth::Patterns| {
-		patterns
-			.rooted(&scope.root)
-			.is_ok_and(|rooted| inside.covers(&rooted))
-	};
+	let confined =
+		|patterns: &moq_auth::Patterns| patterns.rooted(&scope.root).is_ok_and(|rooted| inside.covers(&rooted));
 	anyhow::ensure!(
 		confined(&scope.publish) && confined(&scope.subscribe),
 		"the room key's scope reaches outside the room `{room}`; generate one with \
@@ -330,7 +332,11 @@ mod tests {
 		};
 
 		assert!(config(false, false, false).load(Some(&connect)).unwrap().is_none());
-		for partial in [config(true, false, false), config(true, true, false), config(false, true, true)] {
+		for partial in [
+			config(true, false, false),
+			config(true, true, false),
+			config(false, true, true),
+		] {
 			let err = partial.load(Some(&connect)).err().unwrap();
 			assert!(err.to_string().contains("need all of"), "{err}");
 		}
@@ -358,7 +364,11 @@ mod tests {
 	#[test]
 	fn accepts_a_key_scoped_to_the_room_however_it_is_spelled() {
 		room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
-		room("https://relay.example/show", key("", &["show/guests/**"], &["show/guests/**"])).unwrap();
+		room(
+			"https://relay.example/show",
+			key("", &["show/guests/**"], &["show/guests/**"]),
+		)
+		.unwrap();
 		room("https://relay.example/", key("guests", &["**"], &["**"])).unwrap();
 	}
 
@@ -381,11 +391,19 @@ mod tests {
 	#[test]
 	fn a_link_carries_the_room_and_a_token_for_one_guest_in_its_fragment() {
 		let key = key("show/guests", &["**"], &["**"]);
-		let room = room("https://user:pass@relay.example:4443/show?jwt=studio-secret", key.clone()).unwrap();
+		let room = room(
+			"https://user:pass@relay.example:4443/show?jwt=studio-secret",
+			key.clone(),
+		)
+		.unwrap();
 		let invite = room.invite(" alice ").unwrap();
 
 		assert_eq!(invite.link.path(), "/join/");
-		assert_eq!(invite.link.query(), None, "the token must stay out of what a server sees");
+		assert_eq!(
+			invite.link.query(),
+			None,
+			"the token must stay out of what a server sees"
+		);
 		let fragment = fragment(&invite.link);
 		assert_eq!(fragment["url"], "https://relay.example:4443/show/guests");
 		assert_eq!(fragment["name"], "alice");
@@ -461,7 +479,10 @@ mod tests {
 		let scoped = key("show/guests", &["**"], &["**"]);
 		for key in [&admin, &scoped] {
 			let kid = key.kid.as_ref().unwrap().encode();
-			key.to_public().unwrap().to_file(dir.path().join(format!("{kid}.jwk"))).unwrap();
+			key.to_public()
+				.unwrap()
+				.to_file(dir.path().join(format!("{kid}.jwk")))
+				.unwrap();
 		}
 		let mut policy = moq_auth::serve::Policy::default();
 		policy.keys = Some(moq_auth::serve::Keys::Dir(dir.path().into()));
@@ -490,7 +511,9 @@ mod tests {
 			.with_root("show")
 			.with_subscribe([moq_auth::Pattern::all()]);
 		let mut connect = Url::parse(&format!("https://localhost:{}/show", addr.port())).unwrap();
-		connect.query_pairs_mut().append_pair("jwt", &admin.sign(&studio).unwrap());
+		connect
+			.query_pairs_mut()
+			.append_pair("jwt", &admin.sign(&studio).unwrap());
 		let subscribe = moq_tokio::origin::spawn();
 		let all = moq_auth::Pattern::all().into();
 		let mut announced = moq_room::Room::new(&subscribe.consume().scope("guests", &all).unwrap(), None);

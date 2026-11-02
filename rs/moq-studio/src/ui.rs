@@ -543,7 +543,9 @@ impl Panels {
 						}
 						if ui
 							.small_button("Remove from scenes")
-							.on_hover_text("Take their camera and screen out of every scene. They stay connected until their link expires.")
+							.on_hover_text(
+								"Take their camera and screen out of every scene. They stay connected until their link expires.",
+							)
 							.clicked()
 						{
 							remove = Some(name.clone());

@@ -35,6 +35,7 @@ Every panel is a tab you can drag, split, or stack.
 | Items | Place, show, hide, and order the sources the preview scene draws, back to front. |
 | Sources | Add a source by hand, see whether each is live, and remove one. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
+| Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
 | Output | See the relay connection, whether anyone is watching, and the encoder's work. |
 
@@ -42,6 +43,45 @@ A broadcast source subscribes through the same relay connection, plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
+
+## Guests
+
+Guests and phones join a room the studio owns on its relay, from a web page,
+and their camera and screen appear as broadcast sources. The room follows
+[moq-room](https://github.com/moq-dev/moq/tree/main/rs/moq-room): a guest
+named `alice` publishes `alice/camera.hang` and `alice/screen.hang` under it.
+Guests need a relay that verifies tokens, so run your own with
+[`moq auth serve`](https://doc.moq.dev/bin/cli) behind it, and a key that can
+sign only for the room:
+
+```bash
+moq auth generate --algorithm ES256 --out room.jwk --public-dir keys \
+    --root show/guests --publish '**' --subscribe '**'
+moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
+    --room guests --room-key room.jwk --join-page https://join.example.com/
+```
+
+- `--room` is a path under the `--connect` URL's, here `show/guests` on the
+  relay. The studio's own token must let it subscribe there.
+- `--room-key` signs each guest's token. The studio refuses a key whose scope
+  reaches outside the room, so a stolen key cannot sign for the rest of the
+  relay. Put its public half in the directory `moq auth serve --key-dir` reads.
+- `--join-page` is where the join page (`js/join`, `bun run --cwd js/join
+  build`) is hosted. Browsers open the camera only on an `https://` page or
+  `localhost`.
+- `--guest-expiry` (default `4h`) is how long a link works. The relay
+  disconnects a guest when their link expires, so send a new one before then.
+
+**Invite** in the Guests panel makes a link for one guest name and shows it as
+a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
+in the link's fragment, which the browser never sends to a server, and lets
+them publish only under their own name, so they cannot appear as someone else.
+Treat the link like a password: anyone holding it can join as that guest until
+it expires. A guest's broadcasts become sources named after them (`alice`,
+`alice screen`) when they first appear, ready to place from the Items panel.
+Only guests invited this session, or whose sources are already in the scene
+file, are added. **Remove from scenes** takes a guest out of every scene; a
+signed token cannot be taken back, so they stay connected until it expires.
 
 ## Scene file
 
@@ -127,9 +167,11 @@ just check   # Lint everything, including the quest tree
 just test    # Run the tests
 just ci      # Both, as CI runs them
 just fix     # Auto-fix formatting
+just join    # Serve the join page locally
 ```
 
-`rs/moq-scene` is the UI-free compositor and `rs/moq-studio` the app. See
+`rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
+`js/join` the join page, built on `@moq/room` and `@moq/publish`. See
 [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md), and the
 [quest tree](quest/README.md) for planned work.
 
