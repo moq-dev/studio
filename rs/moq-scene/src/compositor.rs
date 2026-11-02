@@ -22,7 +22,8 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 struct Uniform {
 	/// Top-left x, top-left y, bottom-right x, bottom-right y, in clip space.
 	rect: [f32; 4],
-	/// Opacity in `x`; the rest pads the struct to WGSL's 16-byte vectors.
+	/// Opacity in `x`, and in `y` 1 if the image's alpha is premultiplied;
+	/// the rest pads the struct to WGSL's 16-byte vectors.
 	opacity: [f32; 4],
 }
 
@@ -50,9 +51,11 @@ struct Varyings {
 	return out;
 }
 
+// Premultiplied out, so straight and premultiplied images blend alike.
 @fragment fn fs_main(in: Varyings) -> @location(0) vec4<f32> {
 	let color = textureSample(image, image_sampler, in.uv);
-	return vec4<f32>(color.rgb, color.a * item.opacity.x);
+	let rgb = select(color.rgb * color.a, color.rgb, item.opacity.y > 0.5);
+	return vec4<f32>(rgb, color.a) * item.opacity.x;
 }
 "#;
 
@@ -114,6 +117,8 @@ struct Layer {
 	renderer: Option<Renderer>,
 	/// Samples the newest picture; `None` until the first arrives.
 	bind: Option<wgpu::BindGroup>,
+	/// Whether that picture's alpha is premultiplied.
+	premultiplied: bool,
 	/// Why the newest picture failed to draw, logged when it first does.
 	error: Option<String>,
 }
@@ -216,10 +221,11 @@ impl Compositor {
 				compilation_options: Default::default(),
 				targets: &[Some(wgpu::ColorTargetState {
 					format: FORMAT,
-					// Straight alpha over an opaque canvas, which stays opaque.
+					// Premultiplied alpha over an opaque canvas, which stays
+					// opaque.
 					blend: Some(wgpu::BlendState {
 						color: wgpu::BlendComponent {
-							src_factor: wgpu::BlendFactor::SrcAlpha,
+							src_factor: wgpu::BlendFactor::One,
 							dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
 							operation: wgpu::BlendOperation::Add,
 						},
@@ -357,7 +363,7 @@ impl Compositor {
 				let mut draws = self.scene(collection, fade.from.as_deref());
 				draws.push(Draw {
 					bind: self.incoming.bind.clone(),
-					uniform: uniform(Rect::fill(&self.canvas), self.canvas, progress),
+					uniform: uniform(Rect::fill(&self.canvas), self.canvas, progress, false),
 				});
 				passes.push(Pass {
 					view: &self.program.view,
@@ -426,10 +432,10 @@ impl Compositor {
 			.iter()
 			.filter(|item| item.visible)
 			.filter_map(|item| {
-				let bind = self.layers.get(&item.source)?.bind.clone()?;
+				let layer = self.layers.get(&item.source)?;
 				Some(Draw {
-					bind,
-					uniform: uniform(item.rect, self.canvas, 1.0),
+					bind: layer.bind.clone()?,
+					uniform: uniform(item.rect, self.canvas, 1.0, layer.premultiplied),
 				})
 			})
 			.collect()
@@ -452,8 +458,10 @@ impl Compositor {
 				source: source.clone(),
 				renderer: None,
 				bind: None,
+				premultiplied: false,
 				error: None,
 			});
+			let premultiplied = matches!(picture, Picture::Texture(_));
 			let texture = match picture {
 				Picture::Frame(frame) => {
 					let renderer = match layer.renderer.as_mut() {
@@ -466,6 +474,7 @@ impl Compositor {
 						.map_err(Error::from)
 				}
 				Picture::Rgba { size, pixels } => upload(&self.device, &self.queue, size, &pixels),
+				Picture::Texture(texture) => Ok(texture),
 			};
 
 			match texture {
@@ -473,6 +482,7 @@ impl Compositor {
 					layer.error = None;
 					let view = texture.create_view(&Default::default());
 					layer.bind = Some(image_bind(&self.device, &self.image_layout, &self.sampler, &view));
+					layer.premultiplied = premultiplied;
 				}
 				Err(err) => {
 					if layer.error.is_none() {
@@ -486,13 +496,13 @@ impl Compositor {
 }
 
 /// Place `rect` (canvas pixels) in clip space.
-fn uniform(rect: Rect, canvas: Canvas, opacity: f32) -> Uniform {
+fn uniform(rect: Rect, canvas: Canvas, opacity: f32, premultiplied: bool) -> Uniform {
 	let (width, height) = (canvas.width as f32, canvas.height as f32);
 	let x = |px: f32| px / width * 2.0 - 1.0;
 	let y = |px: f32| 1.0 - px / height * 2.0;
 	Uniform {
 		rect: [x(rect.x), y(rect.y), x(rect.x + rect.width), y(rect.y + rect.height)],
-		opacity: [opacity, 0.0, 0.0, 0.0],
+		opacity: [opacity, f32::from(u8::from(premultiplied)), 0.0, 0.0],
 	}
 }
 

@@ -214,6 +214,7 @@ impl Engine {
 			origin: subscribe.consume(),
 			dir,
 			output: moq_video::render::output(&gpu.device),
+			browser: browser(&gpu)?,
 		});
 		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
 		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
@@ -571,6 +572,21 @@ fn encode_frames(
 		stats.encoded.fetch_add(1, Ordering::Relaxed);
 	}
 	Ok(())
+}
+
+/// What browser sources run in: this executable, which `main` hands to
+/// `moq_scene::browser::child` when it is started as their helper.
+fn browser(gpu: &Gpu) -> anyhow::Result<Option<moq_scene::browser::Helper>> {
+	if !cfg!(feature = "cef") {
+		return Ok(None);
+	}
+	let program = std::env::current_exe().context("cannot find the studio's executable")?;
+	Ok(Some(moq_scene::browser::Helper::new(
+		program,
+		&gpu.adapter,
+		&gpu.device,
+		&gpu.queue,
+	)))
 }
 
 /// Run a source on its own thread until its feed is dropped.

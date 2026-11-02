@@ -7,10 +7,12 @@ use std::time::Duration;
 use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use moq_scene::browser::Paint;
 use moq_scene::source::Status;
 use moq_scene::{Item, Rect, Scene, Source, wgpu};
 
 use crate::engine::{Engine, State};
+use crate::interact::Interact;
 
 /// The panels, each a tab the user can move, split, or stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -91,6 +93,8 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
+				interacting: false,
+				interact: Interact::default(),
 				message: None,
 			},
 		})
@@ -125,6 +129,9 @@ struct Panels {
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
+	/// Whether the preview passes the mouse and keyboard to browser sources.
+	interacting: bool,
+	interact: Interact,
 	/// The outcome of the last action, shown in the status bar.
 	message: Option<Result<String, String>>,
 }
@@ -205,14 +212,30 @@ impl Panels {
 	}
 
 	fn preview(&mut self, ui: &mut Ui) {
-		let state = self.engine.state.lock().unwrap();
+		let engine = self.engine.clone();
+		let state = engine.state.lock().unwrap();
 		let canvas = state.collection.canvas;
-		ui.label(format!(
-			"Preview: {}",
-			state.compositor.preview_scene().unwrap_or("nothing")
-		));
+		ui.horizontal(|ui| {
+			ui.label(format!(
+				"Preview: {}",
+				state.compositor.preview_scene().unwrap_or("nothing")
+			));
+			let toggled = ui
+				.toggle_value(&mut self.interacting, "Interact")
+				.on_hover_text("Pass the mouse to the browser source under it, and the keyboard to the one last clicked")
+				.changed();
+			if toggled && !self.interacting {
+				self.interact.release(&state.sources);
+			}
+		});
 		drop(state);
-		picture(ui, self.preview, canvas);
+		let image = picture(ui, self.preview, canvas);
+		if self.interacting {
+			let state = engine.state.lock().unwrap();
+			let scene = state.compositor.preview_scene();
+			self.interact
+				.update(ui, image, &state.collection, scene, &state.sources);
+		}
 	}
 
 	fn program(&mut self, ui: &mut Ui) {
@@ -404,6 +427,13 @@ impl Panels {
 						Some(err) => status(ui, &Status::Failed(err.to_string())),
 						None => status(ui, &feed.status()),
 					}
+					match feed.page().and_then(|page| page.paint()) {
+						Some(Paint::Gpu) => ui.weak("GPU").on_hover_text("The page is copied on the GPU"),
+						Some(Paint::Cpu) => ui
+							.colored_label(Color32::from_rgb(220, 180, 60), "CPU")
+							.on_hover_text("The page is uploaded from memory every frame: its GPU process or this device cannot share textures"),
+						_ => ui.label(""),
+					};
 					if ui.small_button("Remove").clicked() {
 						remove = Some(name.to_string());
 					}
@@ -573,27 +603,39 @@ fn add(state: &mut State, name: String, source: Source) -> anyhow::Result<String
 	let preview = state.compositor.preview_scene().map(str::to_owned);
 	let canvas = state.collection.canvas;
 	let video = source.has_video();
+	// A page lands at its own size, pixel for pixel; anything else fills the
+	// canvas.
+	let rect = match &source {
+		Source::Browser { width, height, .. } => Rect {
+			x: 0.0,
+			y: 0.0,
+			width: *width as f32,
+			height: *height as f32,
+		},
+		_ => Rect::fill(&canvas),
+	};
 	let collection = state.edit();
 	collection.sources.insert(name.clone(), source);
 	if video && let Some(scene) = preview.and_then(|preview| collection.scene_mut(&preview)) {
 		scene.items.push(Item {
 			source: name.clone(),
-			rect: Rect::fill(&canvas),
+			rect,
 			visible: true,
 		});
 	}
 	Ok(name)
 }
 
-/// Draw `texture` as large as fits, keeping the canvas's shape.
-fn picture(ui: &mut Ui, texture: egui::TextureId, canvas: moq_scene::Canvas) {
+/// Draw `texture` as large as fits, keeping the canvas's shape, and return
+/// where it landed.
+fn picture(ui: &mut Ui, texture: egui::TextureId, canvas: moq_scene::Canvas) -> egui::Rect {
 	let available = ui.available_size();
 	let aspect = canvas.width as f32 / canvas.height as f32;
 	let mut size = egui::vec2(available.x, available.x / aspect);
 	if size.y > available.y {
 		size = egui::vec2(available.y * aspect, available.y);
 	}
-	ui.vertical_centered(|ui| ui.image((texture, size)));
+	ui.vertical_centered(|ui| ui.image((texture, size)).rect).inner
 }
 
 fn describe(source: &Source) -> String {
@@ -607,6 +649,7 @@ fn describe(source: &Source) -> String {
 		Source::Image { path } => format!("image: {}", path.display()),
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
+		Source::Browser { url, width, height } => format!("browser: {url} ({width}x{height})"),
 	}
 }
 
@@ -655,18 +698,24 @@ fn meter(ui: &mut Ui, level: moq_audio::Level) {
 struct AddSource {
 	name: String,
 	kind: Kind,
-	/// A path, broadcast path, or device id, depending on the kind.
+	/// A path, broadcast path, url, or device id, depending on the kind.
 	value: String,
 	color: Color32,
+	/// A browser source's page size.
+	width: u32,
+	height: u32,
 }
 
 impl Default for AddSource {
 	fn default() -> Self {
+		let canvas = moq_scene::Canvas::default();
 		Self {
 			name: String::new(),
 			kind: Kind::default(),
 			value: String::new(),
 			color: Color32::WHITE,
+			width: canvas.width,
+			height: canvas.height,
 		}
 	}
 }
@@ -682,10 +731,11 @@ enum Kind {
 	Window,
 	Microphone,
 	SystemAudio,
+	Browser,
 }
 
 impl Kind {
-	const ALL: [Self; 8] = [
+	const ALL: [Self; 9] = [
 		Self::Color,
 		Self::Image,
 		Self::Broadcast,
@@ -694,6 +744,7 @@ impl Kind {
 		Self::Window,
 		Self::Microphone,
 		Self::SystemAudio,
+		Self::Browser,
 	];
 
 	fn label(self) -> &'static str {
@@ -706,6 +757,7 @@ impl Kind {
 			Self::Window => "Window",
 			Self::Microphone => "Microphone",
 			Self::SystemAudio => "System audio",
+			Self::Browser => "Browser",
 		}
 	}
 
@@ -716,6 +768,7 @@ impl Kind {
 			Self::Image => Some("file"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
+			Self::Browser => Some("url"),
 			Self::Camera | Self::Display | Self::Microphone => Some("id (empty for the default)"),
 		}
 	}
@@ -743,6 +796,15 @@ impl AddSource {
 				ui.text_edit_singleline(&mut self.value);
 				ui.end_row();
 			}
+			if self.kind == Kind::Browser {
+				ui.label("Size");
+				ui.horizontal(|ui| {
+					ui.add(egui::DragValue::new(&mut self.width).range(1..=4096));
+					ui.label("x");
+					ui.add(egui::DragValue::new(&mut self.height).range(1..=4096));
+				});
+				ui.end_row();
+			}
 			if self.kind == Kind::Color {
 				ui.label("Color");
 				egui::color_picker::color_edit_button_srgba(ui, &mut self.color, egui::color_picker::Alpha::OnlyBlend);
@@ -768,6 +830,11 @@ impl AddSource {
 			Kind::Window => Source::Window { id: value },
 			Kind::Microphone => Source::Microphone { id },
 			Kind::SystemAudio => Source::SystemAudio,
+			Kind::Browser => Source::Browser {
+				url: value,
+				width: self.width,
+				height: self.height,
+			},
 		})
 	}
 }

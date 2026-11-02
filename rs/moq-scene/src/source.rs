@@ -16,6 +16,7 @@ use moq_audio::bus::{Bus, Strip};
 use moq_mux::catalog::Stream;
 
 use crate::Error;
+use crate::browser::Page;
 use crate::collection::{Collection, Source};
 
 /// A source's newest picture, waiting for the compositor to draw it.
@@ -24,11 +25,14 @@ pub(crate) enum Picture {
 	Frame(moq_video::Frame),
 	/// Tightly packed RGBA with straight alpha, such as a still image.
 	Rgba { size: moq_video::Size, pixels: Vec<u8> },
+	/// A texture on the compositor's device with premultiplied alpha, such as
+	/// a web page.
+	Texture(moq_video::render::wgpu::Texture),
 }
 
 /// The one picture a source holds for the compositor. A newer picture replaces
 /// an undrawn one, so a slow canvas skips pictures instead of queuing them.
-type Mailbox = Arc<Mutex<Option<Picture>>>;
+pub(crate) type Mailbox = Arc<Mutex<Option<Picture>>>;
 
 /// One instance of a broadcast being decoded.
 type Playing<'a> = Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>>;
@@ -60,6 +64,8 @@ pub struct Context {
 	/// What cameras, screens, and broadcasts deliver video as:
 	/// `moq_video::render::output` of the compositor's device.
 	pub output: moq_video::Output,
+	/// What browser sources run in; without it they fail as unsupported.
+	pub browser: Option<crate::browser::Helper>,
 }
 
 /// The running sources of a collection.
@@ -95,7 +101,7 @@ impl Sources {
 		let mut drivers = Vec::new();
 		for (name, source) in &collection.sources {
 			if !self.feeds.contains_key(name) {
-				let (feed, driver) = open(name, source, &self.context);
+				let (feed, driver) = open(name, source, &self.context, collection.canvas.framerate);
 				self.feeds.insert(name.clone(), feed);
 				drivers.push(driver);
 			}
@@ -126,6 +132,7 @@ pub struct Feed {
 	picture: Mailbox,
 	strip: Option<Strip>,
 	status: kio::Consumer<Status>,
+	page: Option<Page>,
 }
 
 impl Feed {
@@ -144,6 +151,11 @@ impl Feed {
 		self.strip.as_ref()
 	}
 
+	/// A browser source's page: how it paints, and interaction with it.
+	pub fn page(&self) -> Option<&Page> {
+		self.page.as_ref()
+	}
+
 	/// The newest picture not yet drawn.
 	pub(crate) fn take(&self) -> Option<Picture> {
 		self.picture.lock().unwrap().take()
@@ -159,6 +171,9 @@ pub struct Driver {
 	picture: Mailbox,
 	strip: Option<Strip>,
 	status: kio::Producer<Status>,
+	page: Option<Page>,
+	/// The canvas's, which a browser source paints at.
+	framerate: u32,
 }
 
 impl Driver {
@@ -200,6 +215,7 @@ impl Driver {
 				std::future::pending().await
 			}
 			Source::Broadcast { path } => self.broadcast(path).await,
+			Source::Browser { url, width, height } => self.browser(url, *width, *height).await,
 			device => self.device(device).await,
 		}
 	}
@@ -221,7 +237,7 @@ impl Driver {
 			Source::Window { id } => Video::Window(id.clone()),
 			Source::Microphone { id } => return self.listen(Audio::Microphone(id.clone())).await,
 			Source::SystemAudio => return self.listen(Audio::System).await,
-			Source::Color { .. } | Source::Image { .. } | Source::Broadcast { .. } => {
+			Source::Color { .. } | Source::Image { .. } | Source::Broadcast { .. } | Source::Browser { .. } => {
 				unreachable!("not a device source")
 			}
 		};
@@ -251,6 +267,39 @@ impl Driver {
 		Err(Error::Unsupported(
 			"this build cannot capture devices (enable the `capture` feature)".into(),
 		))
+	}
+
+	/// Render the page at `url` until its helper stops, or fail at once if the
+	/// studio offers no helper.
+	#[cfg(target_os = "linux")]
+	async fn browser(&self, url: &str, width: u32, height: u32) -> Result<(), Error> {
+		let Some(helper) = &self.context.browser else {
+			return Err(Error::Unsupported(
+				"this build cannot render web pages (enable the `cef` feature)".into(),
+			));
+		};
+		let page = self.page.as_ref().expect("browser sources have a page");
+		let bus = self.context.bus.config().clone();
+		let open = crate::browser::Open {
+			url: url.to_string(),
+			width,
+			height,
+			framerate: self.framerate,
+			accelerated: crate::browser::accelerated(helper),
+			render_node: crate::browser::render_node(helper),
+			sample_rate: bus.sample_rate,
+			channels: bus.layout.channels(),
+		};
+		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
+		input.format = moq_audio::Format::F32;
+		let strip = self.strip.clone().expect("browser sources have a strip");
+		let sound = self.context.bus.channel(input, strip)?;
+		crate::browser::run(helper, open, page, &self.picture, Some(sound), &self.status).await
+	}
+
+	#[cfg(not(target_os = "linux"))]
+	async fn browser(&self, _: &str, _: u32, _: u32) -> Result<(), Error> {
+		Err(Error::Unsupported("browser sources run on Linux only for now".into()))
 	}
 
 	/// Follow the broadcast at `path` for as long as the feed lives, playing
@@ -417,16 +466,18 @@ fn pick<'a, C: Reference + Clone + 'a>(
 }
 
 /// Start the feed for `source`, and the driver that fills it.
-fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
+fn open(name: &str, source: &Source, context: &Context, framerate: u32) -> (Feed, Driver) {
 	let picture = Mailbox::default();
 	let strip = source.has_audio().then(Strip::default);
 	let status = kio::Producer::new(Status::Starting);
+	let page = matches!(source, Source::Browser { .. }).then(Page::default);
 
 	let feed = Feed {
 		source: source.clone(),
 		picture: picture.clone(),
 		strip: strip.clone(),
 		status: status.consume(),
+		page: page.clone(),
 	};
 	let driver = Driver {
 		name: name.to_string(),
@@ -435,6 +486,8 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		picture,
 		strip,
 		status,
+		page,
+		framerate,
 	};
 	(feed, driver)
 }
@@ -472,6 +525,7 @@ pub(crate) mod test {
 			origin: origin.consume(),
 			dir: dir.to_path_buf(),
 			output: moq_video::Output::Cpu,
+			browser: None,
 		};
 		(context, origin)
 	}

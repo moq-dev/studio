@@ -5,11 +5,13 @@
 //! window around them and the program clock that publishes the result.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Context;
 
 mod engine;
+mod interact;
 mod ui;
 
 #[derive(usage_rs::Cli, Clone)]
@@ -55,7 +57,13 @@ impl Config {
 	}
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<ExitCode> {
+	// A browser source's helper, and CEF's subprocesses, are this executable
+	// started again.
+	if let Some(code) = moq_scene::browser::child() {
+		return Ok(code);
+	}
+
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
@@ -79,7 +87,8 @@ fn main() -> anyhow::Result<()> {
 		config.on_demand,
 	))?;
 
-	run(engine, gpu, runtime.handle().clone())
+	run(engine, gpu, runtime.handle().clone())?;
+	Ok(ExitCode::SUCCESS)
 }
 
 /// Show the window until it is closed.

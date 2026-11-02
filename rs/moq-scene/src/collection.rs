@@ -120,6 +120,9 @@ impl Collection {
 		if let Some(name) = self.sources.keys().find(|name| name.is_empty()) {
 			return Err(Error::Invalid(format!("a source has an empty name: `{name}`")));
 		}
+		for (name, source) in &self.sources {
+			source.validate(name)?;
+		}
 
 		for (name, audio) in &self.audio {
 			if !self.sources.contains_key(name) {
@@ -326,6 +329,18 @@ pub enum Source {
 		/// The broadcast path on that relay.
 		path: String,
 	},
+	/// A web page, such as an overlay, alert box, or chat widget, with its
+	/// sound. Desktop only: viewers cannot render one, so it reaches them
+	/// only as pixels.
+	Browser {
+		/// The page's address.
+		url: String,
+		/// The page's viewport width in pixels, independent of where it is
+		/// placed.
+		width: u32,
+		/// The page's viewport height in pixels.
+		height: u32,
+	},
 }
 
 impl Source {
@@ -338,8 +353,23 @@ impl Source {
 	pub fn has_audio(&self) -> bool {
 		matches!(
 			self,
-			Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. }
+			Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. } | Self::Browser { .. }
 		)
+	}
+
+	fn validate(&self, name: &str) -> Result<(), Error> {
+		if let Self::Browser { url, width, height } = self {
+			if url.trim().is_empty() {
+				return Err(Error::Invalid(format!("browser source `{name}` has no url")));
+			}
+			let max = crate::browser::MAX_SIDE;
+			if *width == 0 || *height == 0 || *width > max || *height > max {
+				return Err(Error::Invalid(format!(
+					"browser source `{name}` is {width}x{height}; each side must be 1 to {max} pixels"
+				)));
+			}
+		}
+		Ok(())
 	}
 }
 
