@@ -3,7 +3,8 @@
 
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
-use std::process::{Child, Stdio};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, ExitStatus, Stdio};
 
 use moq_audio::bus::Channel as Sound;
 
@@ -62,8 +63,7 @@ pub(crate) async fn run(
 		// The helper is exiting or gone, so its status says why.
 		End::Closed => {
 			let exit = process
-				.child
-				.wait()
+				.exited()
 				.map_err(|err| Error::Browser(format!("the browser process: {err}")))?;
 			Err(Error::Browser(format!("the browser process exited: {exit}")))
 		}
@@ -88,15 +88,43 @@ fn closed(err: std::io::Error) -> End {
 	}
 }
 
-/// The helper process, killed when dropped.
+/// The helper process, killed with every CEF process it started when
+/// dropped.
+///
+/// The helper leads its own process group, which CEF's subprocesses join, so
+/// killing the group leaves none of them behind. The group is killed before
+/// the helper is reaped, while its id cannot belong to anything else.
 struct Process {
 	child: Child,
+	exit: Option<ExitStatus>,
+}
+
+impl Process {
+	/// Wait for the helper to exit on its own, then stop the rest of its
+	/// group, returning how it exited.
+	fn exited(&mut self) -> std::io::Result<ExitStatus> {
+		let pid = rustix::process::Pid::from_child(&self.child);
+		let options = rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT;
+		rustix::process::waitid(rustix::process::WaitId::Pid(pid), options)?;
+		self.stop()
+	}
+
+	/// Kill the helper's group and reap the helper.
+	fn stop(&mut self) -> std::io::Result<ExitStatus> {
+		if let Some(exit) = self.exit {
+			return Ok(exit);
+		}
+		let group = rustix::process::Pid::from_child(&self.child);
+		let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+		let exit = self.child.wait()?;
+		self.exit = Some(exit);
+		Ok(exit)
+	}
 }
 
 impl Drop for Process {
 	fn drop(&mut self) {
-		let _ = self.child.kill();
-		let _ = self.child.wait();
+		let _ = self.stop();
 	}
 }
 
@@ -107,8 +135,9 @@ fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 		.arg(ARG)
 		.stdin(OwnedFd::from(theirs))
 		.stdout(Stdio::null())
+		.process_group(0)
 		.spawn()?;
-	Ok((Process { child }, Channel::new(ours)))
+	Ok((Process { child, exit: None }, Channel::new(ours)))
 }
 
 /// Read the helper's events until it closes the socket or reports a failure.

@@ -1,11 +1,11 @@
 //! Interaction with browser sources through the preview: the pointer goes to
 //! the page under it, and the keyboard to the page last clicked.
 
+use std::cell::RefCell;
 use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_scene::browser::{Button, Input, Modifiers};
-use moq_scene::source::Sources;
 use moq_scene::{Collection, Source};
 
 /// How close in time and space a press must follow the last to count toward a
@@ -20,6 +20,10 @@ pub struct Interact {
 	hovered: Option<String>,
 	/// The page last clicked, which receives the keyboard.
 	focused: Option<String>,
+	/// The page a button went down on, which gets the pointer wherever it
+	/// goes until that button comes up, so a drag never leaves a page with a
+	/// button stuck down.
+	captured: Option<(String, Button)>,
 	/// The last press, to count multi-clicks.
 	last: Option<Press>,
 }
@@ -41,35 +45,54 @@ struct Hit {
 }
 
 impl Interact {
-	/// Forward this frame's input over `image`, which shows `scene` of
-	/// `collection` on `canvas`, to the pages it touches.
+	/// Turn this frame's input over `image`, which shows `scene` of
+	/// `collection`, into what each page it touches should receive, by page
+	/// name.
 	pub fn update(
 		&mut self,
 		ui: &egui::Ui,
 		image: egui::Rect,
 		collection: &Collection,
 		scene: Option<&str>,
-		sources: &Sources,
-	) {
+	) -> Vec<(String, Input)> {
 		let canvas = collection.canvas;
+		let on_canvas = |pos: egui::Pos2| {
+			let x = (pos.x - image.min.x) / image.width() * canvas.width as f32;
+			let y = (pos.y - image.min.y) / image.height() * canvas.height as f32;
+			(x, y)
+		};
 		let hit = |pos: egui::Pos2| -> Option<Hit> {
 			if !image.contains(pos) {
 				return None;
 			}
-			let x = (pos.x - image.min.x) / image.width() * canvas.width as f32;
-			let y = (pos.y - image.min.y) / image.height() * canvas.height as f32;
+			let (x, y) = on_canvas(pos);
 			page_at(collection, scene, x, y)
 		};
-		let send = |page: &str, input: Input| {
-			if let Some(page) = sources.get(page).and_then(|feed| feed.page()) {
-				page.send(input);
-			}
+		// Where `pos` falls on `page`, even off its edges.
+		let on_page = |page: &str, pos: egui::Pos2| -> Option<(i32, i32)> {
+			let (x, y) = on_canvas(pos);
+			point_on(collection, scene, page, x, y)
 		};
+		let out = RefCell::new(Vec::new());
+		let send = |page: &str, input: Input| out.borrow_mut().push((page.to_string(), input));
 
 		let (events, buttons) = ui.input(|input| (input.events.clone(), held(&input.pointer)));
 		for event in events {
 			match event {
 				egui::Event::PointerMoved(pos) => {
+					if let Some((page, _)) = &self.captured {
+						if let Some((x, y)) = on_page(page, pos) {
+							send(
+								page,
+								Input::Move {
+									x,
+									y,
+									modifiers: buttons,
+								},
+							);
+						}
+						continue;
+					}
 					let hit = hit(pos);
 					let page = hit.as_ref().map(|hit| hit.page.clone());
 					if let Some(left) = self.hovered.take().filter(|left| Some(left) != page.as_ref()) {
@@ -99,30 +122,51 @@ impl Interact {
 					modifiers,
 				} => {
 					let Some(button) = self::button(button) else { continue };
+					let modifiers = keys(modifiers, buttons);
+					if !pressed {
+						// Only the page that saw the press hears the release.
+						let Some((page, _)) = self.captured.take_if(|(_, held)| *held == button) else {
+							continue;
+						};
+						if let Some((x, y)) = on_page(&page, pos) {
+							let clicks = self.last.as_ref().map_or(1, |last| last.clicks);
+							send(
+								&page,
+								Input::Button {
+									x,
+									y,
+									button,
+									down: false,
+									clicks,
+									modifiers,
+								},
+							);
+						}
+						continue;
+					}
 					let Some(Hit { page, x, y }) = hit(pos) else {
-						if pressed {
+						if self.captured.is_none() {
 							self.blur(&send);
 						}
 						continue;
 					};
-					let modifiers = keys(modifiers, buttons);
-					let clicks = if pressed {
-						self.press(&page, button, x, y)
-					} else {
-						self.last.as_ref().map_or(1, |last| last.clicks)
-					};
-					if pressed && self.focused.as_ref() != Some(&page) {
+					if self.captured.as_ref().is_some_and(|(held, _)| *held != page) {
+						continue;
+					}
+					let clicks = self.press(&page, button, x, y);
+					if self.focused.as_ref() != Some(&page) {
 						self.blur(&send);
 						send(&page, Input::Focus(true));
 						self.focused = Some(page.clone());
 					}
+					self.captured.get_or_insert_with(|| (page.clone(), button));
 					send(
 						&page,
 						Input::Button {
 							x,
 							y,
 							button,
-							down: pressed,
+							down: true,
 							clicks,
 							modifiers,
 						},
@@ -184,15 +228,16 @@ impl Interact {
 				_ => {}
 			}
 		}
+		out.into_inner()
 	}
 
-	/// Give the keyboard back, as when interaction ends.
-	pub fn release(&mut self, sources: &Sources) {
+	/// Give the keyboard back, as when interaction ends: what the page that
+	/// had it should receive.
+	pub fn release(&mut self) -> Option<(String, Input)> {
 		self.hovered = None;
+		self.captured = None;
 		self.last = None;
-		if let Some(page) = self.focused.take().and_then(|name| sources.get(&name)?.page().cloned()) {
-			page.send(Input::Focus(false));
-		}
+		Some((self.focused.take()?, Input::Focus(false)))
 	}
 
 	fn blur(&mut self, send: &impl Fn(&str, Input)) {
@@ -233,20 +278,45 @@ impl Interact {
 fn page_at(collection: &Collection, scene: Option<&str>, x: f32, y: f32) -> Option<Hit> {
 	let scene = collection.scene(scene?)?;
 	scene.items.iter().rev().filter(|item| item.visible).find_map(|item| {
-		let Some(Source::Browser { width, height, .. }) = collection.sources.get(&item.source) else {
-			return None;
-		};
 		let rect = item.rect;
 		let inside = x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
-		if !inside || rect.width <= 0.0 || rect.height <= 0.0 {
+		if !inside {
 			return None;
 		}
+		let (x, y) = scale(collection, item, x, y)?;
 		Some(Hit {
 			page: item.source.clone(),
-			x: ((x - rect.x) / rect.width * *width as f32) as i32,
-			y: ((y - rect.y) / rect.height * *height as f32) as i32,
+			x,
+			y,
 		})
 	})
+}
+
+/// Canvas point (`x`, `y`) on `page`'s topmost visible item in `scene`, in
+/// page pixels, even off the page's edges.
+fn point_on(collection: &Collection, scene: Option<&str>, page: &str, x: f32, y: f32) -> Option<(i32, i32)> {
+	let scene = collection.scene(scene?)?;
+	let item = scene
+		.items
+		.iter()
+		.rev()
+		.find(|item| item.visible && item.source == page)?;
+	scale(collection, item, x, y)
+}
+
+/// Canvas point (`x`, `y`) in the page pixels of `item`, if it places a page.
+fn scale(collection: &Collection, item: &moq_scene::Item, x: f32, y: f32) -> Option<(i32, i32)> {
+	let Some(Source::Browser { width, height, .. }) = collection.sources.get(&item.source) else {
+		return None;
+	};
+	let rect = item.rect;
+	if rect.width <= 0.0 || rect.height <= 0.0 {
+		return None;
+	}
+	Some((
+		((x - rect.x) / rect.width * *width as f32) as i32,
+		((y - rect.y) / rect.height * *height as f32) as i32,
+	))
 }
 
 fn button(button: egui::PointerButton) -> Option<Button> {
@@ -411,6 +481,104 @@ mod tests {
 			"a hidden page takes no input"
 		);
 		assert!(page_at(&collection, Some("Other"), 1.0, 1.0).is_none());
+
+		// A captured pointer maps onto its page past the edges.
+		collection.scenes[0].items[1].visible = true;
+		assert_eq!(
+			point_on(&collection, Some("Main"), "chat", 1420.0, 280.0),
+			Some((-100, 0))
+		);
+		assert_eq!(
+			point_on(&collection, Some("Main"), "chat", 960.0, 540.0),
+			Some((-560, 260))
+		);
+	}
+
+	/// A drag that starts on a page stays with it: the moves and the release
+	/// go to that page off its edges and over another page, and a release
+	/// nobody pressed for goes nowhere.
+	#[test]
+	fn a_drag_stays_with_its_page() {
+		let mut collection = Collection::new();
+		collection.canvas.width = 200;
+		collection.canvas.height = 100;
+		let page = Source::Browser {
+			url: "https://example.com".into(),
+			width: 100,
+			height: 100,
+		};
+		collection.sources.insert("left".into(), page.clone());
+		collection.sources.insert("right".into(), page);
+		let item = |source: &str, x| Item {
+			source: source.into(),
+			rect: Rect {
+				x,
+				y: 0.0,
+				width: 100.0,
+				height: 100.0,
+			},
+			visible: true,
+		};
+		collection.scenes = vec![Scene {
+			name: "Main".into(),
+			items: vec![item("left", 0.0), item("right", 100.0)],
+		}];
+		// The preview shows the canvas at its own size.
+		let image = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
+
+		let ctx = egui::Context::default();
+		let mut interact = Interact::default();
+		let mut frame = |events: Vec<egui::Event>| {
+			let input = egui::RawInput {
+				screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0))),
+				events,
+				..Default::default()
+			};
+			let mut delivered = Vec::new();
+			let mut output = ctx.run_ui(input, |ui| {
+				delivered = interact.update(ui, image, &collection, Some("Main"));
+			});
+			// Nothing renders, so the font atlas egui uploaded goes nowhere.
+			output.textures_delta.clear();
+			delivered
+		};
+		let button = |x, y, pressed| egui::Event::PointerButton {
+			pos: egui::pos2(x, y),
+			button: egui::PointerButton::Primary,
+			pressed,
+			modifiers: Default::default(),
+		};
+		let pages =
+			|delivered: &[(String, Input)]| -> Vec<String> { delivered.iter().map(|(page, _)| page.clone()).collect() };
+
+		let pressed = frame(vec![
+			egui::Event::PointerMoved(egui::pos2(50.0, 50.0)),
+			button(50.0, 50.0, true),
+		]);
+		assert_eq!(pages(&pressed), ["left", "left", "left"], "move, focus, press");
+
+		// Over the other page and then off the preview, still the left page's.
+		let dragged = frame(vec![
+			egui::Event::PointerMoved(egui::pos2(150.0, 50.0)),
+			egui::Event::PointerMoved(egui::pos2(300.0, 50.0)),
+			button(300.0, 50.0, false),
+		]);
+		assert_eq!(pages(&dragged), ["left", "left", "left"]);
+		assert!(
+			matches!(
+				dragged[2].1,
+				Input::Button {
+					x: 300,
+					down: false,
+					..
+				}
+			),
+			"{:?}",
+			dragged[2].1
+		);
+
+		// A release with no press behind it is dropped.
+		assert!(frame(vec![button(150.0, 50.0, false)]).is_empty());
 	}
 
 	/// Presses close in time and place count up to a triple click, then start

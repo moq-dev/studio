@@ -57,7 +57,7 @@ tracing = { workspace = true }
 # `accelerated_osr` copies the page's shared texture into the studio's device.
 cef = { version = "156.3", default-features = false, features = ["accelerated_osr"], optional = true }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
-rustix = { version = "1", features = ["net", "stdio"] }
+rustix = { version = "1", features = ["net", "process", "stdio"] }
 # The helper's CEF profile, removed once the helper has exited.
 tempfile = { workspace = true }
 

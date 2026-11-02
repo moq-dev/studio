@@ -215,13 +215,15 @@ async fn a_page_draws_and_plays() {
 	.await;
 }
 
-/// A click reaches the page where the preview put it.
+/// A click reaches the page where the preview put it, and a popup it asks for
+/// opens nothing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
 async fn a_click_reaches_the_page() {
 	local(async {
-		let html = "<body style='margin:0;height:100vh;background:red' \
-			onclick=\"document.body.style.background='blue'\"></body>";
+		let html = "<body style='margin:0;height:100vh;background:red' onclick=\"\
+			const popup = window.open('about:blank');\
+			document.body.style.background = popup ? 'green' : 'blue'\"></body>";
 		let mut studio = Studio::new(&[("page", page(html))]).await;
 		studio.until_center([255, 0, 0, 255], &[]).await;
 
@@ -237,6 +239,7 @@ async fn a_click_reaches_the_page() {
 			});
 		}
 		studio.until_center(BLUE, &[]).await;
+		assert_eq!(studio.sources.get("page").unwrap().status(), Status::Live);
 	})
 	.await;
 }

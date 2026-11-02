@@ -227,7 +227,7 @@ impl Panels {
 				)
 				.changed();
 			if toggled && !self.interacting {
-				self.interact.release(&state.sources);
+				deliver(&state.sources, self.interact.release());
 			}
 		});
 		drop(state);
@@ -235,8 +235,8 @@ impl Panels {
 		if self.interacting {
 			let state = engine.state.lock().unwrap();
 			let scene = state.compositor.preview_scene();
-			self.interact
-				.update(ui, image, &state.collection, scene, &state.sources);
+			let delivered = self.interact.update(ui, image, &state.collection, scene);
+			deliver(&state.sources, delivered);
 		}
 	}
 
@@ -626,6 +626,18 @@ fn add(state: &mut State, name: String, source: Source) -> anyhow::Result<String
 		});
 	}
 	Ok(name)
+}
+
+/// Hand each input to its page.
+fn deliver(
+	sources: &moq_scene::source::Sources,
+	inputs: impl IntoIterator<Item = (String, moq_scene::browser::Input)>,
+) {
+	for (name, input) in inputs {
+		if let Some(page) = sources.get(&name).and_then(|feed| feed.page()) {
+			page.send(input);
+		}
+	}
 }
 
 /// Draw `texture` as large as fits, keeping the canvas's shape, and return

@@ -535,6 +535,28 @@ wrap_life_span_handler! {
 	struct HelperLife;
 
 	impl LifeSpanHandler {
+		// A source shows one page, and nothing would show a popup, so
+		// `window.open` and `target="_blank"` open nothing. That also keeps
+		// the page the only browser, whose closing ends the helper.
+		fn on_before_popup(
+			&self,
+			_browser: Option<&mut Browser>,
+			_frame: Option<&mut Frame>,
+			_popup_id: ::std::os::raw::c_int,
+			_target_url: Option<&CefString>,
+			_target_frame_name: Option<&CefString>,
+			_target_disposition: WindowOpenDisposition,
+			_user_gesture: ::std::os::raw::c_int,
+			_popup_features: Option<&PopupFeatures>,
+			_window_info: Option<&mut WindowInfo>,
+			_client: Option<&mut Option<Client>>,
+			_settings: Option<&mut BrowserSettings>,
+			_extra_info: Option<&mut Option<DictionaryValue>>,
+			_no_javascript_access: Option<&mut ::std::os::raw::c_int>,
+		) -> ::std::os::raw::c_int {
+			1
+		}
+
 		fn on_before_close(&self, _browser: Option<&mut Browser>) {
 			quit_message_loop();
 		}
