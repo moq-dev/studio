@@ -126,33 +126,42 @@ impl Change {
 	/// `self` then `newer`, as one change, if both change the same part.
 	fn merge(&self, newer: &Self) -> Option<Self> {
 		let merged = match (self.clone(), newer) {
-			(Self::Source { name, before, after }, Self::Source { name: n, before: b, after: a })
-				if name == *n && after == *b =>
-			{
+			(
+				Self::Source { name, before, after },
 				Self::Source {
-					name,
-					before,
-					after: a.clone(),
-				}
-			}
-			(Self::Audio { name, before, after }, Self::Audio { name: n, before: b, after: a })
-				if name == *n && after == *b =>
-			{
+					name: n,
+					before: b,
+					after: a,
+				},
+			) if name == *n && after == *b => Self::Source {
+				name,
+				before,
+				after: a.clone(),
+			},
+			(
+				Self::Audio { name, before, after },
 				Self::Audio {
-					name,
-					before,
-					after: *a,
-				}
-			}
-			(Self::Video { name, before, after }, Self::Video { name: n, before: b, after: a })
-				if name == *n && after == *b =>
-			{
+					name: n,
+					before: b,
+					after: a,
+				},
+			) if name == *n && after == *b => Self::Audio {
+				name,
+				before,
+				after: *a,
+			},
+			(
+				Self::Video { name, before, after },
 				Self::Video {
-					name,
-					before,
-					after: a.clone(),
-				}
-			}
+					name: n,
+					before: b,
+					after: a,
+				},
+			) if name == *n && after == *b => Self::Video {
+				name,
+				before,
+				after: a.clone(),
+			},
 			// Only a replacement in place, so an index means the same scene or
 			// item on both sides.
 			(
@@ -764,14 +773,18 @@ mod tests {
 	#[test]
 	fn removing_a_source_cascades_and_undoes_whole() {
 		let mut collection = collection();
-		collection.sources.insert("red copy".into(), Source::Clone { source: "red".into() });
+		collection
+			.sources
+			.insert("red copy".into(), Source::Clone { source: "red".into() });
 		collection.video.insert(
 			"red copy".into(),
 			Video {
 				filters: vec![Filter::Opacity { amount: 0.5 }],
 			},
 		);
-		collection.top.push(Item::new("red copy", Rect::fill(&collection.canvas)));
+		collection
+			.top
+			.push(Item::new("red copy", Rect::fill(&collection.canvas)));
 		collection.scenes[0]
 			.items
 			.push(Item::new("red", Rect::fill(&collection.canvas)));
@@ -908,7 +921,12 @@ mod tests {
 	#[test]
 	fn refuses_a_file_that_is_not_a_history() {
 		let collection = collection();
-		for text in ["", "version = 2\nposition = 0", "version = 1\nposition = 1", "version = 1"] {
+		for text in [
+			"",
+			"version = 2\nposition = 0",
+			"version = 1\nposition = 1",
+			"version = 1",
+		] {
 			assert!(History::from_toml(text, &collection).is_err(), "{text}");
 		}
 	}

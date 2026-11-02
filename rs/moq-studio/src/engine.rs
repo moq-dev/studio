@@ -102,14 +102,18 @@ impl State {
 	/// Undo the newest edit, returning its label, or `None` with none left.
 	pub fn undo(&mut self) -> anyhow::Result<Option<String>> {
 		let label = self.history.undo(&mut self.collection)?.map(|edit| edit.label.clone());
-		self.edited();
+		if label.is_some() {
+			self.edited();
+		}
 		Ok(label)
 	}
 
 	/// Redo the oldest undone edit, returning its label, or `None` with none left.
 	pub fn redo(&mut self) -> anyhow::Result<Option<String>> {
 		let label = self.history.redo(&mut self.collection)?.map(|edit| edit.label.clone());
-		self.edited();
+		if label.is_some() {
+			self.edited();
+		}
 		Ok(label)
 	}
 
@@ -672,6 +676,36 @@ mod tests {
 	use moq_mux::catalog::Stream;
 
 	use super::*;
+
+	/// The history saved beside a scene file loads with it, and one that
+	/// cannot be read stops the studio, naming the file, rather than being
+	/// overwritten on the next save.
+	#[test]
+	fn the_history_loads_beside_its_scene_file() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		assert_eq!(history_path(&path), dir.path().join("show.history.toml"));
+
+		let mut collection = Collection::new();
+		let mut history = History::new();
+		let mut draft = collection.draft("Add scene `Two`");
+		draft.insert_scene(1, moq_scene::Scene::new("Two")).unwrap();
+		let edit = draft.finish().unwrap();
+		collection.apply(&edit).unwrap();
+		history.record(edit, None);
+		std::fs::write(&path, collection.to_toml().unwrap()).unwrap();
+		std::fs::write(history_path(&path), history.to_toml().unwrap()).unwrap();
+
+		let (loaded, mut history, dropped) = load(&path).unwrap();
+		assert_eq!((loaded.clone(), dropped), (collection, 0));
+		let mut undone = loaded;
+		history.undo(&mut undone).unwrap();
+		assert_eq!(undone, Collection::new());
+
+		std::fs::write(history_path(&path), "not a history").unwrap();
+		let err = format!("{:#}", load(&path).unwrap_err());
+		assert!(err.contains("show.history.toml"), "{err}");
+	}
 
 	/// Bounds each step, so a stall fails rather than hangs.
 	const TIMEOUT: Duration = Duration::from_secs(30);

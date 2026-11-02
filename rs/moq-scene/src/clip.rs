@@ -59,7 +59,9 @@ impl Clip {
 			video: BTreeMap::new(),
 		};
 		for name in names {
-			let Some(source) = collection.sources.get(&name) else { continue };
+			let Some(source) = collection.sources.get(&name) else {
+				continue;
+			};
 			clip.sources.insert(name.clone(), source.clone());
 			if let Some(audio) = collection.audio.get(&name) {
 				clip.audio.insert(name.clone(), *audio);
@@ -221,12 +223,7 @@ mod tests {
 		let pasted = paste(&other, &Layer::Scene("Scene".into()), &text);
 		assert_eq!(pasted.sources["cam"], color([0, 255, 0, 255]), "left alone");
 		assert_eq!(pasted.sources["cam 2"], Source::Camera { id: None });
-		assert_eq!(
-			pasted.sources["cam faded"],
-			Source::Clone {
-				source: "cam 2".into()
-			}
-		);
+		assert_eq!(pasted.sources["cam faded"], Source::Clone { source: "cam 2".into() });
 		assert_eq!(pasted.video["cam faded"], source.video["cam faded"]);
 		assert_eq!(pasted.scenes[0].items, source.scenes[0].items);
 	}
@@ -248,10 +245,17 @@ mod tests {
 			.to_toml()
 			.unwrap();
 		let dangling = text.replace("[sources.cam]", "[sources.other]");
-		assert!(matches!(Clip::from_toml(&dangling), Err(Error::Invalid(_))), "{dangling}");
+		assert!(
+			matches!(Clip::from_toml(&dangling), Err(Error::Invalid(_))),
+			"{dangling}"
+		);
 		let faint = text.replace("amount = 0.5", "amount = 2.0");
 		assert!(matches!(Clip::from_toml(&faint), Err(Error::Invalid(_))), "{faint}");
-		for text in ["hello", "version = 1\nclip = \"scenes\"", "version = 2\nclip = \"filters\"\nfilters = []"] {
+		for text in [
+			"hello",
+			"version = 1\nclip = \"scenes\"",
+			"version = 2\nclip = \"filters\"\nfilters = []",
+		] {
 			assert!(Clip::from_toml(text).is_err(), "{text}");
 		}
 	}

@@ -194,8 +194,13 @@ impl Selection {
 		match self {
 			Self::Source(name) => draft.set_video(name, Some(Video { filters })),
 			Self::Item(layer, index) => {
-				let item = draft.collection().items(layer).and_then(|items| items.get(*index)).cloned();
-				let item = item.ok_or_else(|| moq_scene::Error::Conflict(format!("there is no item {index} in {layer}")))?;
+				let item = draft
+					.collection()
+					.items(layer)
+					.and_then(|items| items.get(*index))
+					.cloned();
+				let item =
+					item.ok_or_else(|| moq_scene::Error::Conflict(format!("there is no item {index} in {layer}")))?;
 				draft.set_item(layer, *index, Item { filters, ..item })
 			}
 		}
@@ -418,7 +423,10 @@ impl Panels {
 					Ok(format!("pasted into {layer}"))
 				}
 				Clip::Filters(pasted) => {
-					let selection = self.selection.clone().context("select a source or an item to paste filters onto")?;
+					let selection = self
+						.selection
+						.clone()
+						.context("select a source or an item to paste filters onto")?;
 					let mut filters = selection
 						.filters(state.collection())
 						.context("the selection has no picture to filter")?;
@@ -611,7 +619,15 @@ impl Panels {
 					if ui.checkbox(&mut visible, "").changed() {
 						let verb = if visible { "Show" } else { "Hide" };
 						let label = format!("{verb} `{}`", item.source);
-						action = Some(ItemAction::Set(index, Item { visible, ..item.clone() }, label, None));
+						action = Some(ItemAction::Set(
+							index,
+							Item {
+								visible,
+								..item.clone()
+							},
+							label,
+							None,
+						));
 					}
 
 					let mut rect = item.rect;
@@ -687,9 +703,9 @@ impl Panels {
 
 		let Some(action) = action else { return };
 		let result = match action {
-			ItemAction::Set(index, item, label, gesture) => edit(&mut state, label, gesture, |draft| {
-				draft.set_item(&layer, index, item)
-			}),
+			ItemAction::Set(index, item, label, gesture) => {
+				edit(&mut state, label, gesture, |draft| draft.set_item(&layer, index, item))
+			}
 			ItemAction::Move(from, to) => {
 				let label = format!("Reorder `{}`", items[from].source);
 				let result = edit(&mut state, label, None, |draft| draft.move_item(&layer, from, to));
@@ -701,11 +717,19 @@ impl Panels {
 			}
 			ItemAction::Remove(index) => {
 				let label = format!("Remove `{}` from {layer}", items[index].source);
-				edit(&mut state, label, None, |draft| draft.remove_item(&layer, index).map(drop))
+				let result = edit(&mut state, label, None, |draft| {
+					draft.remove_item(&layer, index).map(drop)
+				});
+				if result.is_ok() && self.selection == Some(Selection::Item(layer.clone(), index)) {
+					self.selection = None;
+				}
+				result
 			}
 			ItemAction::Add(item) => {
 				let label = format!("Add `{}` to {layer}", item.source);
-				edit(&mut state, label, None, |draft| draft.insert_item(&layer, items.len(), item))
+				edit(&mut state, label, None, |draft| {
+					draft.insert_item(&layer, items.len(), item)
+				})
 			}
 		};
 		drop(state);
@@ -1045,7 +1069,8 @@ fn linked(ui: &mut Ui, collection: &Collection, layer: &Layer, index: usize, ite
 		})
 		.collect();
 	if !elsewhere.is_empty() {
-		ui.weak("linked").on_hover_text(format!("Also shown in:\n{}", elsewhere.join("\n")));
+		ui.weak("linked")
+			.on_hover_text(format!("Also shown in:\n{}", elsewhere.join("\n")));
 	}
 }
 

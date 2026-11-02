@@ -20,6 +20,5 @@ per the [composition epic](/quest/m0/compose/README.md), so ML effects
 apply to a source, never to one scene item. Prefer an
 existing model crate for ML effects over training one.
 
-## Required
-
-- [Undo and the scene model](/quest/m0/scene-model.md) - per-item filters this extends
+Effects extend moq-scene's `Filter`, which a source (`[video.<name>]`) or an
+item lists, so they undo, copy, and paste as opacity, the first filter, does.

@@ -147,9 +147,9 @@ impl Collection {
 		}
 		for (layer, items) in self.layers() {
 			for item in items {
-				if !self.sources.get(&item.source).is_some_and(Source::has_video) {
+				if !self.sources.contains_key(&item.source) {
 					return Err(Error::Invalid(format!(
-						"{layer} places `{}`, which is not a source with a picture",
+						"{layer} places `{}`, which is not a source",
 						item.source
 					)));
 				}
@@ -393,7 +393,9 @@ impl Filter {
 
 pub(crate) fn validate_filters(filters: &[Filter], on: &str) -> Result<(), Error> {
 	for filter in filters {
-		filter.validate().map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
+		filter
+			.validate()
+			.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 	}
 	Ok(())
 }
@@ -604,6 +606,19 @@ mod tests {
 			},
 		);
 		collection.audio.insert("mic".into(), Audio { gain: 0.5, muted: true });
+		collection.sources.insert(
+			"camera faded".into(),
+			Source::Clone {
+				source: "camera".into(),
+			},
+		);
+		collection.video.insert(
+			"camera faded".into(),
+			Video {
+				filters: vec![Filter::Opacity { amount: 0.5 }],
+			},
+		);
+		collection.top.push(Item::new("logo", Rect::fill(&collection.canvas)));
 
 		let canvas = collection.canvas;
 		let scene = &mut collection.scenes[0];
@@ -663,12 +678,24 @@ gain = 2.0
 kind = "broadcast"
 path = "room/alice"
 
+[sources.cam-faded]
+kind = "clone"
+source = "cam"
+
+[video.cam-faded]
+filters = [{ kind = "opacity", amount = 0.5 }]
+
 [[scenes]]
 name = "Main"
 items = [
 	{ source = "bg", rect = { x = 0, y = 0, width = 1280, height = 720 } },
 	{ source = "cam", rect = { x = 10, y = 10, width = 320, height = 180 }, visible = false },
+	{ source = "cam-faded", rect = { x = 0, y = 0, width = 640, height = 360 }, filters = [{ kind = "opacity", amount = 0.8 }] },
 ]
+
+[[top]]
+source = "bg"
+rect = { x = 0, y = 680, width = 1280, height = 40 }
 "##;
 		let collection = Collection::from_toml(text).unwrap();
 		assert_eq!(collection.canvas.framerate, 60);
@@ -690,6 +717,14 @@ items = [
 		let main = collection.scene("Main").unwrap();
 		assert!(main.items[0].visible);
 		assert!(!main.items[1].visible);
+		assert_eq!(collection.capture("cam-faded"), "cam");
+		let filters: Vec<_> = collection.filters(&main.items[2]).collect();
+		assert_eq!(
+			filters,
+			[&Filter::Opacity { amount: 0.5 }, &Filter::Opacity { amount: 0.8 }],
+			"the source's filters, then the item's"
+		);
+		assert_eq!(collection.top[0].source, "bg");
 	}
 
 	#[test]
@@ -734,6 +769,49 @@ items = [
 		let mut collection = example();
 		collection.audio.insert("nobody".into(), Audio::default());
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+	}
+
+	/// A clone shows another source's capture, so it must name one with a
+	/// picture that is not itself a clone, and only a picture is filtered.
+	#[test]
+	fn refuses_a_clone_or_filter_with_nothing_to_show() {
+		let clone = |collection: &mut Collection, of: &str| {
+			collection
+				.sources
+				.insert("copy".into(), Source::Clone { source: of.into() });
+		};
+		let mut collection = example();
+		clone(&mut collection, "camera");
+		collection.validate().unwrap();
+
+		for of in ["nobody", "mic"] {
+			let mut collection = example();
+			clone(&mut collection, of);
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{of}");
+		}
+		let mut collection = example();
+		clone(&mut collection, "camera");
+		collection
+			.sources
+			.insert("copy 2".into(), Source::Clone { source: "copy".into() });
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+
+		let mut collection = example();
+		collection.video.insert("mic".into(), Video::default());
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+
+		let mut collection = example();
+		collection.top.push(Item::new("nobody", Rect::fill(&collection.canvas)));
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+	}
+
+	#[test]
+	fn refuses_a_filter_out_of_range() {
+		for amount in [-0.1, 1.5, f32::NAN] {
+			let mut collection = example();
+			collection.scenes[0].items[0].filters = vec![Filter::Opacity { amount }];
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{amount}");
+		}
 	}
 
 	#[test]
