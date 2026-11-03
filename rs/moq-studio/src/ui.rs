@@ -10,6 +10,7 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::source::{Feed, Status};
 use moq_scene::{Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Video, wgpu};
 
+use crate::autosave::Conflict;
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
 
@@ -103,6 +104,7 @@ impl Studio {
 				add: AddSource::default(),
 				devices: Devices::default(),
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
+				reloads: 0,
 			},
 		})
 	}
@@ -114,8 +116,12 @@ impl eframe::App for Studio {
 		let framerate = self.panels.engine.state.lock().unwrap().collection().canvas.framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 
+		self.panels.follow_reloads();
 		self.panels.shortcuts(ui.ctx());
 		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui));
+		if let Some(conflict) = self.panels.engine.autosave.conflict() {
+			egui::Panel::top("conflict").show(ui, |ui| self.panels.conflict(ui, conflict));
+		}
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
 		DockArea::new(&mut self.dock)
 			.style(Style::from_egui(ui.style()))
@@ -141,6 +147,8 @@ struct Panels {
 	devices: Devices,
 	/// The outcome of the last action, shown in the status bar.
 	message: Option<Result<String, String>>,
+	/// The engine's reloads seen so far.
+	reloads: u64,
 }
 
 impl TabViewer for Panels {
@@ -291,13 +299,8 @@ impl Panels {
 		egui::MenuBar::new().ui(ui, |ui| {
 			ui.menu_button("File", |ui| {
 				if ui.button("Reload").clicked() {
-					self.deselect_item();
 					let result = self.engine.reload();
-					let result = result.map(|()| match self.engine.state.lock().unwrap().dropped {
-						0 => "reloaded".to_string(),
-						dropped => format!("reloaded; {}", dropped_message(dropped)),
-					});
-					self.report(result);
+					self.check(result);
 				}
 			});
 			ui.menu_button("Edit", |ui| {
@@ -316,6 +319,49 @@ impl Panels {
 					ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
 				}
 			});
+		});
+	}
+
+	/// Report a reload, from File > Reload or an outside edit the autosave
+	/// took, and let go of a selected item it may have removed.
+	fn follow_reloads(&mut self) {
+		let (reloads, dropped) = {
+			let state = self.engine.state.lock().unwrap();
+			(state.reloads, state.dropped)
+		};
+		if reloads == self.reloads {
+			return;
+		}
+		self.reloads = reloads;
+		self.deselect_item();
+		let path = self.engine.autosave.path().display();
+		self.report(Ok(match dropped {
+			0 => format!("reloaded {path}"),
+			dropped => format!("reloaded {path}; {}", dropped_message(dropped)),
+		}));
+	}
+
+	/// An outside edit to the scene file the studio has not taken, and the
+	/// choice of which version to keep.
+	fn conflict(&mut self, ui: &mut Ui, conflict: Conflict) {
+		ui.horizontal_wrapped(|ui| {
+			let path = self.engine.autosave.path().display().to_string();
+			let why = match &conflict.refused {
+				None => "while the studio has unsaved edits".to_string(),
+				Some(refused) => format!("and cannot be loaded: {refused}"),
+			};
+			ui.colored_label(
+				ui.visuals().warn_fg_color,
+				format!("{path} changed outside the studio {why}. Nothing is saved until you pick a version."),
+			);
+			if ui.button("Keep the studio's").clicked() {
+				let result = self.engine.keep();
+				self.report(result.map(|()| format!("saved the studio's version over {path}")));
+			}
+			if ui.button("Take the file's").clicked() {
+				let result = self.engine.reload();
+				self.check(result);
+			}
 		});
 	}
 

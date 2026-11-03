@@ -84,7 +84,6 @@ repository.
 - [Viewer-side composition](/quest/m0/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
 - [Worker threads fail loud at startup](/quest/m0/thread-start.md) - a worker that cannot start fails the studio's start instead of logging
 - [The program encoder drains](/quest/m0/program-drain.md) - a hardware encoder never loses the program's last frames at exit or on pause
-- [Outside edits to the scene file](/quest/m0/outside-edits.md) - autosave reloads or asks instead of overwriting a change made outside the studio
 - [Scene editing](/quest/m0/scene-editing.md) - rename and reorder scenes, and resize the canvas while live through a new rendition
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
