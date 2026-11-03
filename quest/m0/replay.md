@@ -27,8 +27,9 @@ case where every viewer composes sources themselves and nothing outside the
 studio subscribes to the program.
 Replay published to viewers is a new source in the scene, so it composes like
 any other.
+A clip saves through the studio's recorder (`rs/moq-studio/src/record.rs`),
+which already writes a broadcast, or one source's listing, to a crash-safe MP4.
 
 ## Related
 
 - [Archive DVR](https://github.com/moq-dev/moq/blob/main/quest/m2/archive-dvr.md) - viewer scrubbing beyond the relay cache
-- [Recording](/quest/m0/recording.md) - clips use the same file writer

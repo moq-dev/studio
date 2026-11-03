@@ -21,9 +21,11 @@ use moq_mux::container::mp4;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::watch;
 
-/// How far a file may fall behind the broadcast before it skips ahead. Only a
-/// disk stalled this long loses media; the studio never holds more for it.
-const MAX_DELAY: Duration = Duration::from_secs(5);
+/// How far a file may fall behind the broadcast before it skips ahead: only a
+/// disk stalled this long loses media, and the studio never holds more for it.
+/// A recording also starts with what the broadcast still holds from this far
+/// before it started, since moq-mux reads from the oldest group within it.
+pub const MAX_DELAY: Duration = Duration::from_secs(2);
 
 /// Records the program into a directory, one recording at a time.
 pub struct Recorder {
@@ -572,6 +574,10 @@ mod tests {
 
 		/// Stop listing the source `name`.
 		fn remove(&mut self, name: &str) {
+			// A removed source ends its track cleanly, as the studio's do.
+			for (_, tone, ..) in self.sources.iter_mut().filter(|(source, ..)| source == name) {
+				tone.audio.finish().unwrap();
+			}
 			self.sources.retain(|(source, ..)| source != name);
 			self.relist();
 		}
@@ -633,7 +639,8 @@ mod tests {
 	}
 
 	/// A recording started mid-program and stopped while it plays on is a
-	/// regular MP4 of what played in between.
+	/// regular MP4 of what played in between, from [`MAX_DELAY`] before it
+	/// started.
 	#[tokio::test(start_paused = true)]
 	async fn records_a_regular_mp4_until_stopped() {
 		let dir = tempfile::tempdir().unwrap();
@@ -641,7 +648,7 @@ mod tests {
 		let recorder = studio.recorder(dir.path());
 		assert!(recorder.status().is_none());
 
-		studio.play(Duration::from_millis(500)).await;
+		studio.play(Duration::from_secs(5)).await;
 		recorder.start(false).unwrap();
 		assert!(recorder.start(false).is_err(), "one recording at a time");
 		studio.play(Duration::from_secs(1)).await;
@@ -659,7 +666,7 @@ mod tests {
 		assert_eq!(file.written, std::fs::metadata(&file.path).unwrap().len());
 		let [(handler, duration)] = tracks(&file.path).try_into().unwrap();
 		assert_eq!(handler, "soun");
-		assert!(about(duration, Duration::from_secs(1)), "{duration:?}");
+		assert!(about(duration, MAX_DELAY + Duration::from_secs(1)), "{duration:?}");
 
 		// The next recording starts fresh.
 		recorder.start(false).unwrap();
@@ -715,13 +722,20 @@ mod tests {
 		}
 	}
 
-	/// A recording stopped before any media arrived leaves no file behind.
+	/// A recording of a broadcast with nothing to describe yet, stopped, leaves
+	/// no file behind.
 	#[tokio::test(start_paused = true)]
 	async fn an_empty_recording_is_removed() {
 		let dir = tempfile::tempdir().unwrap();
-		let studio = Studio::new();
-		let recorder = studio.recorder(dir.path());
+		let origin = moq_tokio::origin::spawn();
+		let publication = origin.create_broadcast("studio").unwrap();
+		let mut broadcast = publication.broadcast().clone();
+		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
+		let _catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
+		let source = moq_mux::Source::new(origin.consume(), publication.broadcast().consume());
+		let recorder = Recorder::new(source, dir.path(), Path::new("show.toml")).unwrap();
 		recorder.start(true).unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		recorder.finish().await;
 
 		let status = recorder.status().unwrap();

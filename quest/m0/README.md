@@ -98,7 +98,6 @@ repository.
 - [Guests](/quest/m0/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
 - [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
-- [Recording](/quest/m0/recording.md) - each canvas's program, and optionally each source, recorded to disk alongside live outputs
 - [Browser sources](/quest/m0/browser-source.md) - web overlays rendered by out-of-process CEF into the compositor through shared GPU textures
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS

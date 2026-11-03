@@ -1112,5 +1112,11 @@ mod tests {
 		})
 		.await
 		.expect("health grades the program's tracks");
+
+		// A recording beside the live program reads the encoder viewers do.
+		let encoded = engine.stats.encoded.load(Ordering::Relaxed);
+		let files = record(&engine, encoded + 60, true).await;
+		assert_eq!(files, [["soun", "vide"]]);
+		assert!(engine.stats.error.lock().unwrap().is_none());
 	}
 }
