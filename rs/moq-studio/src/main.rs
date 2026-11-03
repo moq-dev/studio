@@ -11,6 +11,7 @@ use anyhow::Context;
 
 mod engine;
 mod guests;
+mod health;
 mod ui;
 
 #[derive(usage_rs::Cli, Clone)]
