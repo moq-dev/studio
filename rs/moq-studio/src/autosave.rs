@@ -118,7 +118,8 @@ struct Written {
 
 impl Autosave {
 	/// Read the scene file at `path` and its history, or start a new
-	/// collection if there is no scene file yet; the first save creates it.
+	/// collection if there is no scene file yet; the first save creates it, and
+	/// fails rather than replace one another program created meanwhile.
 	pub fn open(path: PathBuf) -> anyhow::Result<(Self, Loaded)> {
 		let (collection, written) = match std::fs::read_to_string(&path) {
 			Ok(text) => {
@@ -151,6 +152,12 @@ impl Autosave {
 		&self.path
 	}
 
+	/// Whether the scene file exists: it was read when opened, or a save has
+	/// created it since.
+	pub fn exists(&self) -> bool {
+		self.written.lock().unwrap().collection.is_some()
+	}
+
 	/// Where the studio records its edits to the collection.
 	pub fn edits(&self) -> Edits {
 		self.edits.clone()
@@ -171,11 +178,13 @@ impl Autosave {
 		self.edits.0.lock().take();
 		let result = serialize().and_then(|text| {
 			if written.collection.as_ref() != Some(&text.collection) {
-				write(&self.path, &text.collection).with_context(|| format!("writing {}", self.path.display()))?;
+				let new = written.collection.is_none();
+				write(&self.path, &text.collection, new).with_context(|| format!("writing {}", self.path.display()))?;
 				written.collection = Some(text.collection);
 			}
 			if written.history != text.history {
-				write(&self.history, &text.history).with_context(|| format!("writing {}", self.history.display()))?;
+				write(&self.history, &text.history, false)
+					.with_context(|| format!("writing {}", self.history.display()))?;
 				written.history = text.history;
 			}
 			Ok(())
@@ -263,9 +272,13 @@ fn load_history(path: &Path, collection: Collection) -> anyhow::Result<Loaded> {
 
 /// Replace the file at `path` with `text` all at once, so a crash leaves
 /// either the old file or the new one, never part of either.
-fn write(path: &Path, text: &str) -> std::io::Result<()> {
+///
+/// A `new` file must not exist yet: one another program created since the
+/// studio found none is left alone rather than replaced.
+fn write(path: &Path, text: &str, new: bool) -> std::io::Result<()> {
 	let path = resolve(path)?;
 	let existing = match std::fs::metadata(&path) {
+		Ok(_) if new => return Err(created_since()),
 		Ok(metadata) => {
 			// Refused as a write in place would be, so a read-only scene file
 			// is not replaced.
@@ -302,11 +315,25 @@ fn write(path: &Path, text: &str) -> std::io::Result<()> {
 	// On disk before the rename, so a power loss cannot leave the new name
 	// pointing at an empty file.
 	file.as_file().sync_all()?;
-	file.persist(&path)?;
+	match new {
+		// Fails if the file appeared since the check above.
+		true => file.persist_noclobber(&path).map_err(|err| match err.error.kind() {
+			std::io::ErrorKind::AlreadyExists => created_since(),
+			_ => err.error,
+		})?,
+		false => file.persist(&path)?,
+	};
 	// And the rename itself, so a power loss cannot undo the save.
 	#[cfg(unix)]
 	std::fs::File::open(dir)?.sync_all()?;
 	Ok(())
+}
+
+fn created_since() -> std::io::Error {
+	std::io::Error::new(
+		std::io::ErrorKind::AlreadyExists,
+		"another program created it since the studio started; restart the studio to open it",
+	)
 }
 
 /// The file a chain of symlinks at `path` ends in, which need not exist yet,
@@ -389,6 +416,21 @@ mod tests {
 			["show.toml"],
 			"the temporary file is renamed into place, and an empty history is not written"
 		);
+	}
+
+	/// A scene file another program creates after the studio found none, such
+	/// as a second studio finishing setup first, is never replaced.
+	#[test]
+	fn leaves_a_file_created_since_it_found_none() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		let (autosave, Loaded { collection: opened, .. }) = Autosave::open(path.clone()).unwrap();
+
+		std::fs::write(&path, "elsewhere").unwrap();
+		let err = format!("{:#}", autosave.save(serialize(&opened)).unwrap_err());
+		assert!(err.contains("restart the studio"), "{err}");
+		assert_eq!(std::fs::read_to_string(&path).unwrap(), "elsewhere");
+		assert!(autosave.error().is_some(), "shown until a restart");
 	}
 
 	/// A new file gets the permissions any new file would, not a temporary
