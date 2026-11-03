@@ -174,7 +174,7 @@ pub struct Local {
 pub struct Publisher {
 	/// The broadcast's path and the epoch it was announced with.
 	pub observer: Observer,
-	pub catalog: moq_mux::catalog::Producer,
+	pub catalog: moq_scene::publish::Catalog,
 	/// The catalog's clock, which maps a track's timestamps to the wall time
 	/// the program drew them.
 	pub clock: moq_mux::Clock,
@@ -1089,7 +1089,8 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let publication = origin.create_broadcast("show").unwrap();
 		let mut broadcast = publication.broadcast().clone();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
+		let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
 		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		let track = broadcast
 			.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))
