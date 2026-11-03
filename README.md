@@ -55,8 +55,8 @@ the canvas closest to keeping up.
 
 Nothing is written until you start the studio, so quitting during setup runs
 it again on the next launch. **Start with this scene** and **Start with an
-empty scene** both create the scene file at once, the second with nothing in
-it.
+empty scene** both create the scene file at once, the second with the chosen
+canvas and no sources.
 
 Setup writes an ordinary scene file. Change its sources and scenes in their
 panels, and its canvas in the file, which takes a restart. The Output panel

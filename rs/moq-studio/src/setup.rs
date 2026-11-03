@@ -756,14 +756,19 @@ impl Setup {
 		start
 	}
 
-	/// Start the studio with the proposal, or with an empty collection when
-	/// `empty`. Either way its autosave creates the scene file at once.
+	/// Start the studio with the proposal, or with no sources on the chosen
+	/// canvas when `empty`. Either way its autosave creates the scene file at
+	/// once.
 	fn start(&mut self, empty: bool) {
 		let (Task::Done(listing), Some(choices)) = (&self.devices, &self.choices) else {
 			return;
 		};
 		let collection = match empty {
-			true => Collection::new(),
+			true => {
+				let mut collection = Collection::new();
+				collection.canvas = choices.canvas;
+				collection
+			}
 			false => collection(listing, choices),
 		};
 		// Kept, so a start that fails can be retried with other choices.
