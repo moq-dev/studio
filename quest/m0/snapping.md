@@ -12,7 +12,3 @@ turns snapping off.
 OBS only now adds axis snapping. Snapping is a preview interaction, so it
 lives in the studio, not in moq-scene or the layout track. Moves and resizes
 still go through the scene model's commands so they undo and autosave.
-
-## Related
-
-- [Undo and the scene model](/quest/m0/scene-model.md) - snapped moves are ordinary commands

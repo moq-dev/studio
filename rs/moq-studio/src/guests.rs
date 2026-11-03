@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::Context;
 use moq_net::Path;
 use moq_room::Kind;
-use moq_scene::{Collection, Source};
+use moq_scene::{Collection, Draft, Source};
 use url::Url;
 
 use crate::engine::Engine;
@@ -113,13 +113,26 @@ impl Room {
 	/// signs for and who join at `page` within `expiry`.
 	///
 	/// Refuses a key whose scope reaches outside the room, or that cannot sign a
-	/// guest's claims.
+	/// guest's claims, and a relay, page, or expiry no guest could join with.
 	pub fn new(connect: &Url, room: &str, key: moq_auth::Key, page: Url, expiry: Duration) -> anyhow::Result<Self> {
 		anyhow::ensure!(
 			matches!(connect.scheme(), "https" | "http"),
 			"guests join from a browser, which cannot dial {}://; connect over https://",
 			connect.scheme()
 		);
+		anyhow::ensure!(
+			connect.scheme() == "https" || local(connect),
+			"a guest's browser blocks http:// to {} from a secure page; \
+			 connect over https://, or over http:// only to this machine or the local network",
+			connect.host_str().unwrap_or_default()
+		);
+		anyhow::ensure!(
+			page.scheme() == "https" || (page.scheme() == "http" && loopback(&page)),
+			"browsers open the camera only on a secure page, so the join page {page} must be https://, \
+			 or http:// on localhost"
+		);
+		// The token carries whole seconds, so anything shorter expires as it is made.
+		anyhow::ensure!(expiry.as_secs() > 0, "--guest-expiry must be at least a second");
 		let path = Path::new(room).with_context(|| format!("invalid room `{room}`"))?;
 		anyhow::ensure!(!path.is_empty(), "the room needs a path");
 		let base = Path::new(connect.path().trim_matches('/')).context("invalid --connect path")?;
@@ -246,11 +259,7 @@ impl Room {
 			Kind::Camera => identity,
 			Kind::Screen => format!("{identity} screen"),
 		};
-		let name = std::iter::once(base.clone())
-			.chain((2..).map(|n| format!("{base} {n}")))
-			.find(|name| !collection.sources.contains_key(name))
-			.expect("an unused name");
-		Some((name, Source::Broadcast { path: source }))
+		Some((collection.unused_name(&base), Source::Broadcast { path: source }))
 	}
 
 	/// The sources in `collection` that show the guest called `identity`.
@@ -270,6 +279,30 @@ impl Room {
 			.map(|(name, _)| name.clone())
 			.collect()
 	}
+}
+
+/// Whether `url` names this machine, so a browser treats an `http://` page
+/// there as secure.
+fn loopback(url: &Url) -> bool {
+	match url.host() {
+		Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+		Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+		Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+		None => false,
+	}
+}
+
+/// Whether a browser on an `https://` page may reach `url` over `http://`:
+/// this machine, or, after a local network prompt, a private address or a
+/// `.local` name. Anything else is mixed content it blocks.
+fn local(url: &Url) -> bool {
+	loopback(url)
+		|| match url.host() {
+			Some(url::Host::Domain(host)) => host.ends_with(".local"),
+			Some(url::Host::Ipv4(ip)) => ip.is_private() || ip.is_link_local(),
+			Some(url::Host::Ipv6(ip)) => ip.is_unique_local() || ip.is_unicast_link_local(),
+			None => false,
+		}
 }
 
 /// Refuse a key that could sign beyond `room`: one with no scope, or a scope
@@ -299,24 +332,31 @@ pub async fn run(engine: Arc<Engine>, origin: moq_net::origin::Consumer) {
 	let mut announced = moq_room::Room::new(&origin, None);
 	while let Some(event) = announced.next().await {
 		let mut state = engine.state.lock().unwrap();
-		if let Some((name, source)) = room.observe(&event.path, event.broadcast.is_some(), &state.collection) {
-			tracing::info!(source = %name, identity = %event.identity, "a guest joined");
-			admit(state.edit(), name, source);
+		let online = event.broadcast.is_some();
+		let Some((name, source)) = room.observe(&event.path, online, state.collection()) else {
+			continue;
+		};
+		let mut draft = state.collection().draft(format!("Add guest `{name}`"));
+		let added = admit(&mut draft, &name, source)
+			.map_err(anyhow::Error::from)
+			.and_then(|()| state.commit(draft, None));
+		match added {
+			Ok(()) => tracing::info!(source = %name, identity = %event.identity, "a guest joined"),
+			Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot add a guest"),
 		}
 	}
 	tracing::warn!("the room's announcements ended");
 }
 
-/// Add a guest's broadcast to `collection` as the source `name`, muted: it is in
-/// no scene, so the guest reaches the program only once the host places or
-/// unmutes them.
-fn admit(collection: &mut Collection, name: String, source: Source) {
+/// Add a guest's broadcast as the source `name`, muted: it is in no scene, so
+/// the guest reaches the program only once the host places or unmutes them.
+fn admit(draft: &mut Draft, name: &str, source: Source) -> Result<(), moq_scene::Error> {
 	let muted = moq_scene::Audio {
 		muted: true,
 		..Default::default()
 	};
-	collection.audio.insert(name.clone(), muted);
-	collection.sources.insert(name, source);
+	draft.set_source(name, Some(source))?;
+	draft.set_audio(name, Some(muted))
 }
 
 #[cfg(test)]
@@ -432,10 +472,56 @@ mod tests {
 
 	#[test]
 	fn refuses_a_relay_a_browser_cannot_dial() {
-		let err = room("moqt://relay.example/show", key("show/guests", &["**"], &["**"]))
-			.err()
-			.unwrap();
-		assert!(err.to_string().contains("browser"), "{err}");
+		let key = || key("show/guests", &["**"], &["**"]);
+		for connect in [
+			"moqt://relay.example/show",
+			"http://relay.example/show",
+			"http://8.8.8.8/show",
+		] {
+			let err = room(connect, key()).err().unwrap();
+			assert!(err.to_string().contains("browser"), "{connect}: {err}");
+		}
+		for connect in [
+			"http://localhost:4443/show",
+			"http://127.0.0.1:4443/show",
+			"http://[::1]:4443/show",
+			"http://192.168.1.20:4443/show",
+			"http://[fd00::20]:4443/show",
+			"http://studio.local:4443/show",
+		] {
+			room(connect, key()).unwrap_or_else(|err| panic!("{connect}: {err}"));
+		}
+	}
+
+	#[test]
+	fn refuses_a_join_page_that_cannot_open_the_camera() {
+		let connect = Url::parse("https://relay.example/show").unwrap();
+		let key = || key("show/guests", &["**"], &["**"]);
+		for page in [
+			"http://join.example/",
+			"http://192.168.1.20/",
+			"file:///join/index.html",
+		] {
+			let err = Room::new(&connect, "guests", key(), Url::parse(page).unwrap(), EXPIRY)
+				.err()
+				.unwrap();
+			assert!(err.to_string().contains("secure page"), "{page}: {err}");
+		}
+		for page in ["http://localhost:5173/", "http://127.0.0.1:5173/"] {
+			Room::new(&connect, "guests", key(), Url::parse(page).unwrap(), EXPIRY)
+				.unwrap_or_else(|err| panic!("{page}: {err}"));
+		}
+	}
+
+	#[test]
+	fn refuses_a_link_that_expires_as_it_is_made() {
+		let connect = Url::parse("https://relay.example/show").unwrap();
+		let page = Url::parse("https://studio.example/join/").unwrap();
+		for expiry in [Duration::ZERO, Duration::from_millis(500)] {
+			let key = key("show/guests", &["**"], &["**"]);
+			let err = Room::new(&connect, "guests", key, page.clone(), expiry).err().unwrap();
+			assert!(err.to_string().contains("--guest-expiry"), "{expiry:?}: {err}");
+		}
 	}
 
 	#[test]
@@ -498,7 +584,9 @@ mod tests {
 				path: "guests/alice/camera.hang".into()
 			}
 		);
-		admit(&mut collection, name, source);
+		let mut draft = collection.draft("Add guest");
+		admit(&mut draft, &name, source).unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
 		assert!(collection.audio["alice"].muted);
 		assert_eq!(
 			room.participants()["alice"],

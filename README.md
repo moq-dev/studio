@@ -22,6 +22,11 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   is the software H.264 fallback for a machine without a hardware encoder.
 - On Linux, display and window sources capture X11 and XWayland only; a
   Wayland screen or window cannot be picked yet.
+- On macOS, the studio is not an app bundle yet, so the camera, microphone,
+  and Screen & System Audio Recording permissions are asked of, and granted
+  to, the app that launched it, such as your terminal. Display, window, and
+  system-audio sources need the last, granted in System Settings > Privacy &
+  Security.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
   [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
 
@@ -33,13 +38,36 @@ Every panel is a tab you can drag, split, or stack.
 | --- | --- |
 | Preview, Program | See the scene you are editing and the one that is live. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
 | Scenes | Pick the scene in preview, add one, or remove one. |
-| Items | Place, show, hide, and order the sources the preview scene draws, back to front. |
-| Sources | Add a source by hand, see whether each is live, and remove one. |
+| History | See every edit, and undo or redo back to any of them. |
+| Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
+| Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
 | Output | See the broadcast path, whether the program is encoding, and the encoder's work. |
 | Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
+
+A new source, from the Sources or Devices panel, is placed over whatever the
+Items panel shows. The **top layer** is drawn over every scene, in preview and
+on program, and stays on through a cut or fade: a downstream keyer for a logo
+or a lower third.
+
+Items showing the same source are **linked**: one capture, with the source's
+filters, wherever it is shown. A **clone** is a new source showing another's
+capture with filters of its own, so a camera can be shown faded in one scene
+and plain in another while being opened once. An item's own filters apply
+after its source's.
+
+**Edit > Undo** (Ctrl+Z) and **Redo** (Ctrl+Shift+Z or Ctrl+Y) step through the
+history, and a drag undoes as one step; on macOS each shortcut uses Cmd in
+place of Ctrl. **Copy** (Ctrl+C) takes the selected
+item with the source it shows; **Paste** (Ctrl+V) adds it over whatever the
+Items panel shows, in this studio or another. Pasted where the same source
+exists under the same name, the item is linked to it; otherwise the source
+comes along, renamed if its name is taken. Copied filters paste onto the
+selected source or item, after its own. The clipboard holds text in the scene
+file's format.
 
 A broadcast source subscribes through the same relay connection, plays the
 best video and audio its catalog lists, switches when the catalog changes, and
@@ -64,13 +92,15 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
 ```
 
 - `--room` is a path under the `--connect` URL's, here `show/guests` on the
-  relay. The studio's own token must let it subscribe there.
+  relay. The studio's own token must let it subscribe there. A guest's browser
+  dials the same relay, so `--connect` must be `https://`, or `http://` only to
+  this machine or the local network.
 - `--room-key` signs each guest's token. The studio refuses a key whose scope
   reaches outside the room, so a stolen key cannot sign for the rest of the
   relay. Put its public half in the directory `moq auth serve --key-dir` reads.
 - `--join-page` is where the join page (`js/join`, `bun run --cwd js/join
   build`) is hosted. Browsers open the camera only on an `https://` page or
-  `localhost`. It defaults to `https://join.studio.moq.dev/`, which this
+  `localhost`, so the studio refuses any other. It defaults to `https://join.studio.moq.dev/`, which this
   repository deploys from `main`, but that domain is not live yet, so for now
   host the page yourself and pass its URL.
 - `--guest-expiry` (default `4h`) is how long a link works. The relay
@@ -84,10 +114,11 @@ Treat the link like a password: anyone holding it can join as that guest until
 it expires. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, muted and in no scene: place them from
 the Items panel and unmute them in Audio to put them on air. That includes a
-guest invited before a restart whose link still works. A guest's sources are
-saved to the scene file like your own edits. **Remove from scenes** takes a
-guest out of every scene and mutes them; a signed token cannot be taken back,
-so they stay connected until it expires.
+guest invited before a restart whose link still works. Adding a guest's source
+is an edit like your own: it is listed in History and saved to the scene file.
+**Remove from scenes** takes a guest, and any clone of their sources, out of
+every scene and the top layer and mutes them; a signed token cannot be taken
+back, so they stay connected until it expires.
 
 ## Scene file
 
@@ -122,18 +153,38 @@ path = "room/guest"
 [audio.guest]
 gain = 0.5
 
+[sources.camera-faded]
+kind = "clone"
+source = "camera"
+
+[video.camera-faded]
+filters = [{ kind = "opacity", amount = 0.5 }]
+
 [[scenes]]
 name = "Main"
 items = [
     { source = "camera", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
-    { source = "logo", rect = { x = 1600, y = 40, width = 280, height = 120 } },
+    { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, filters = [{ kind = "opacity", amount = 0.8 }] },
 ]
+
+[[scenes]]
+name = "Break"
+items = [
+    { source = "camera-faded", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+]
+
+[[top]]
+source = "logo"
+rect = { x = 1600, y = 40, width = 280, height = 120 }
 ```
 
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
-(macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`), and
-`broadcast`. The Devices panel fills in ids.
+(macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
+`broadcast`, and `clone` (with the `source` it shows). The Devices panel fills
+in ids. `[video.<source>]` lists a source's filters, and an item's `filters`
+its own; the one filter so far is `opacity`, from 0 to 1, as in CSS. `[[top]]`
+items make up the top layer.
 
 The studio writes the file a second after the last change, so a burst such as a
 slider drag is one write, and once more on quit. Edits that never pause for a
@@ -146,6 +197,16 @@ is retried every second; until one succeeds, a crash loses every edit since the
 last write. To edit the file by hand while the studio runs, save it and pick
 **File > Reload**; an edit in the studio before that overwrites it. A new
 canvas size or frame rate takes a restart.
+
+The last 100 edits are written the same way beside the scene file, as
+`show.history.toml` for `show.toml`, after the scene file, and opening the
+scene file restores them, so undo reaches back past a restart. An undo or redo
+is saved like any other edit. An edit that no longer matches the scene file,
+such as after editing it by hand, is dropped with every older one, and the
+status bar says how many. A history file that cannot be read stops the
+studio, naming the file; delete it to start a new history. The history holds
+whatever the scene file held, including removed sources, so check it too
+before sharing.
 
 ## Output
 
@@ -165,6 +226,50 @@ studio passes over it for an encoder that reads each frame back to the CPU
 (the opt-in `vaapi` or `openh264` features), which the Output panel counts.
 Frames the encoder cannot keep up with are dropped rather than delaying the
 stream.
+
+### Source tracks
+
+Each camera, display, window, image, and color also publishes as its own track
+in the same broadcast, so a viewer can compose the scene itself. The catalog's
+`video` and `audio` sections stay the program's; the sources are listed under
+the `dev.moq.studio` section's `sources`, by source name, each as a hang
+catalog of its own on the program's clock. This listing is provisional until
+the hang draft specifies source listings:
+
+```json
+{
+  "video": { "renditions": { "0.avc3": { "codec": "avc3.42c01f", "...": "..." } } },
+  "audio": { "renditions": { "audio": { "codec": "opus", "...": "..." } } },
+  "dev.moq.studio": {
+    "sources": {
+      "camera": { "video": { "renditions": { "1.avc3": { "...": "..." } } } },
+      "logo": { "binary": { "tracks": { "2.png": { "mode": "snapshot", "mime": "image/png" } } } }
+    }
+  }
+}
+```
+
+A captured source encodes as H.264 for as long as it is in the collection,
+whether or not anyone watches, so a late viewer can fetch its recent past; the
+relay uploads only what someone subscribes to. A capture that changes size or
+color space moves to a new track, which its catalog entry follows. Images and
+colors publish once, as the image file and as a one-pixel PNG. Removing or
+editing a source ends its track. A track carries the plain capture, before any
+filter, and a clone publishes none, since it shows its source's capture.
+Microphones and system audio do not publish tracks of their own yet, and a
+broadcast source is already its publisher's.
+
+Every captured source opens an encode session as it starts, and consumer GPUs
+allow only a few hardware sessions at once. When the program encodes on
+hardware, so do the sources, and a session the GPU refuses fails that source's
+track with the encoder's reason in the Sources panel rather than falling back
+to software. The source keeps drawing in the studio's own scenes. The program
+opens its session before any source, even with `--on-demand`, so the sources
+past the cap fail rather than the program. When the
+program encodes in software, a source takes hardware where it can and software
+otherwise.
+
+### Source frames
 
 Sources make the opposite trip. A frame already on the GPU is drawn where it
 lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan

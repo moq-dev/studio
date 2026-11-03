@@ -22,7 +22,8 @@ compositor imports without a copy.
 ## Required
 
 - [Signing identities are available](/quest/m0/signing.md) - the credentials signing needs
-- [Studio on macOS and Windows](/quest/m0/app.md) - the studio running on every platform it packages
+- [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac
+- [Studio on Windows](/quest/m0/app-windows.md) - the studio running on Windows
 
 ## Related
 

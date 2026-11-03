@@ -4,6 +4,9 @@
 //! for each one it opens. The caller runs the drivers wherever suits it (a
 //! capture driver is `!Send` on macOS); a driver stops once its feed is
 //! dropped, which happens when the source is removed or edited.
+//!
+//! With [`Context::publish`] set, each local source that shows a picture also
+//! publishes it as its own track; see [`crate::publish`].
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -19,6 +22,7 @@ use moq_mux::catalog::Stream;
 
 use crate::Error;
 use crate::collection::{Collection, Source};
+use crate::publish::{Claim, Listing, Publish, Still};
 
 /// A source's newest picture, waiting for the compositor to draw it.
 pub(crate) enum Picture {
@@ -70,6 +74,8 @@ pub struct Context {
 	/// What cameras, screens, and broadcasts deliver video as:
 	/// `moq_video::render::output` of the compositor's device.
 	pub output: moq_video::Output,
+	/// Where local sources publish their own tracks, or `None` to publish nothing.
+	pub publish: Option<Publish>,
 }
 
 /// The running sources of a collection.
@@ -93,7 +99,8 @@ impl Sources {
 	}
 
 	/// Run exactly the sources `collection` has: start new and edited ones and
-	/// stop removed and edited ones. Returns a driver for each source started,
+	/// stop removed and edited ones. A clone shares the feed of the source it
+	/// clones rather than opening one. Returns a driver for each source started,
 	/// which does nothing until run.
 	///
 	/// Also applies the collection's gain and mute to every audio strip, which
@@ -103,7 +110,7 @@ impl Sources {
 			.retain(|name, feed| collection.sources.get(name) == Some(&feed.source));
 
 		let mut drivers = Vec::new();
-		for (name, source) in &collection.sources {
+		for (name, source) in collection.sources.iter().filter(|(_, source)| source.opens()) {
 			if !self.feeds.contains_key(name) {
 				let (feed, driver) = open(name, source, &self.context);
 				self.feeds.insert(name.clone(), feed);
@@ -137,6 +144,7 @@ pub struct Feed {
 	shown: Shown,
 	strip: Option<Strip>,
 	status: kio::Consumer<Status>,
+	track: Option<kio::Consumer<Status>>,
 }
 
 impl Feed {
@@ -148,6 +156,14 @@ impl Feed {
 	/// What the source is doing.
 	pub fn status(&self) -> Status {
 		self.status.read().clone()
+	}
+
+	/// What the source's own track is doing, or `None` when it publishes none:
+	/// nothing is published, or the source is another broadcast or only sound.
+	///
+	/// A failed track leaves the source drawing in the studio's own scenes.
+	pub fn track(&self) -> Option<Status> {
+		self.track.as_ref().map(|track| track.read().clone())
 	}
 
 	/// How long a live camera or broadcast has gone without a new picture, once
@@ -186,6 +202,16 @@ pub struct Driver {
 	shown: Shown,
 	strip: Option<Strip>,
 	status: kio::Producer<Status>,
+	/// The source's own track, when it publishes one.
+	track: Option<Track>,
+}
+
+/// Where a source's own track goes, its claim on the studio catalog's listing
+/// under its name, and what the track is doing.
+struct Track {
+	publish: Publish,
+	claim: Claim,
+	status: kio::Producer<Status>,
 }
 
 impl Driver {
@@ -196,38 +222,94 @@ impl Driver {
 
 	/// Run the source until its [`Feed`] is dropped.
 	///
-	/// A failure is reported through [`Feed::status`] rather than returned. On
-	/// macOS a capture source's future is `!Send`, so run it on a local task.
+	/// A failure is reported through [`Feed::status`] rather than returned, and
+	/// a track's through [`Feed::track`]. On macOS a capture source's future is
+	/// `!Send`, so run it on a local task.
 	pub async fn run(self) {
 		let status = self.status.clone();
+		let listing = self.listing();
 		let result = tokio::select! {
 			_ = status.wanted_changed(true) => return,
-			result = self.produce() => result,
+			result = self.produce(listing.as_ref()) => result,
+			() = self.mirror(listing.as_ref()) => unreachable!("a mirror never ends"),
 		};
 		let status = match result {
 			Ok(()) => Status::Failed("the source ended".into()),
 			Err(err) => Status::Failed(err.to_string()),
 		};
 		tracing::warn!(source = %self.name, ?status, "source stopped");
+		self.fail_track(status.clone());
 		set(&self.status, status);
 	}
 
-	async fn produce(&self) -> Result<(), Error> {
+	/// The source's own catalog, listed in the studio's, when it publishes.
+	fn listing(&self) -> Option<Listing<'_>> {
+		let track = self.track.as_ref()?;
+		Listing::new(&track.claim, &track.publish)
+			.inspect_err(|err| self.fail_track(Status::Failed(err.to_string())))
+			.ok()
+	}
+
+	/// Keep the studio catalog listing what `listing` publishes. A catalog that
+	/// closes fails the track, and the source keeps running.
+	async fn mirror(&self, listing: Option<&Listing<'_>>) {
+		if let Some(listing) = listing
+			&& let Err(err) = listing.mirror().await
+		{
+			self.fail_track(Status::Failed(err.to_string()));
+		}
+		std::future::pending().await
+	}
+
+	fn set_track(&self, value: Status) {
+		if let Some(track) = &self.track {
+			set(&track.status, value);
+		}
+	}
+
+	/// Fail the track, unless it already failed with its own reason.
+	fn fail_track(&self, value: Status) {
+		if let Some(track) = &self.track
+			&& !matches!(*track.status.read(), Status::Failed(_))
+		{
+			set(&track.status, value);
+		}
+	}
+
+	async fn produce(&self, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		match &self.source {
 			Source::Color { color } => {
 				self.show(Picture::Rgba {
 					size: moq_video::Size::new(1, 1),
 					pixels: color.0.to_vec(),
 				});
+				let _still = listing.and_then(|listing| self.publish(Still::color(listing, *color)));
 				std::future::pending().await
 			}
 			Source::Image { path } => {
-				let picture = image(&self.context.dir.join(path))?;
+				let (picture, bytes) = image(&self.context.dir.join(path))?;
 				self.show(picture);
+				let _still = listing.and_then(|listing| self.publish(Still::new(listing, bytes)));
 				std::future::pending().await
 			}
 			Source::Broadcast { path } => self.broadcast(path).await,
-			device => self.device(device).await,
+			Source::Clone { .. } => unreachable!("a clone opens no feed"),
+			device => self.device(device, listing).await,
+		}
+	}
+
+	/// Report how publishing went, keeping what was published.
+	fn publish<T>(&self, result: Result<T, Error>) -> Option<T> {
+		match result {
+			Ok(published) => {
+				self.set_track(Status::Live);
+				Some(published)
+			}
+			Err(err) => {
+				tracing::warn!(source = %self.name, %err, "cannot publish the source");
+				self.fail_track(Status::Failed(err.to_string()));
+				None
+			}
 		}
 	}
 
@@ -237,9 +319,10 @@ impl Driver {
 		set(&self.status, Status::Live);
 	}
 
-	/// Capture a camera, display, window, or audio input.
+	/// Capture a camera, display, window, or audio input. A picture is also
+	/// encoded onto the source's own track as it is shown, when `listing` is set.
 	#[cfg(feature = "capture")]
-	async fn device(&self, source: &Source) -> Result<(), Error> {
+	async fn device(&self, source: &Source, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		use moq_audio::capture::Source as Audio;
 		use moq_video::capture::Source as Video;
 
@@ -249,7 +332,7 @@ impl Driver {
 			Source::Window { id } => Video::Window(id.clone()),
 			Source::Microphone { id } => return self.listen(Audio::Microphone(id.clone())).await,
 			Source::SystemAudio => return self.listen(Audio::System).await,
-			Source::Color { .. } | Source::Image { .. } | Source::Broadcast { .. } => {
+			Source::Color { .. } | Source::Image { .. } | Source::Broadcast { .. } | Source::Clone { .. } => {
 				unreachable!("not a device source")
 			}
 		};
@@ -258,10 +341,35 @@ impl Driver {
 		config.source = video;
 		config.output = self.context.output;
 		let mut stream = moq_video::capture::open(&config).await?;
-		while let Some(frame) = stream.read().await? {
-			self.show(Picture::Frame(frame));
+
+		let mut track = match listing {
+			Some(listing) => {
+				let size = moq_video::Size::new(stream.width(), stream.height());
+				let framerate = stream.framerate().unwrap_or_else(default_framerate);
+				let video = crate::publish::Video::new(listing, size, framerate, stream.color()).await;
+				self.publish(video)
+			}
+			None => None,
+		};
+
+		let result = async {
+			while let Some(mut frame) = stream.read().await? {
+				if let Some(video) = &mut track
+					&& let Err(err) = video.encode(&mut frame)
+				{
+					tracing::warn!(source = %self.name, %err, "cannot encode the source");
+					self.fail_track(Status::Failed(err.to_string()));
+					track.take().expect("encoding").abort(&err);
+				}
+				self.show(Picture::Frame(frame));
+			}
+			Ok(())
 		}
-		Ok(())
+		.await;
+		if let (Some(video), Err(err)) = (track, &result) {
+			video.abort(err);
+		}
+		result
 	}
 
 	#[cfg(feature = "capture")]
@@ -275,7 +383,7 @@ impl Driver {
 	}
 
 	#[cfg(not(feature = "capture"))]
-	async fn device(&self, _: &Source) -> Result<(), Error> {
+	async fn device(&self, _: &Source, _: Option<&Listing<'_>>) -> Result<(), Error> {
 		Err(Error::Unsupported(
 			"this build cannot capture devices (enable the `capture` feature)".into(),
 		))
@@ -450,6 +558,17 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 	let shown = Shown::default();
 	let strip = source.has_audio().then(Strip::default);
 	let status = kio::Producer::new(Status::Starting);
+	// Claimed here, in the order sources open, so an edited source's
+	// replacement owns the listing however their drivers are scheduled.
+	let track = context
+		.publish
+		.clone()
+		.filter(|_| publishes(source))
+		.map(|publish| Track {
+			claim: publish.claim(name),
+			publish,
+			status: kio::Producer::new(Status::Starting),
+		});
 
 	let feed = Feed {
 		source: source.clone(),
@@ -457,6 +576,7 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		shown: shown.clone(),
 		strip: strip.clone(),
 		status: status.consume(),
+		track: track.as_ref().map(|track| track.status.consume()),
 	};
 	let driver = Driver {
 		name: name.to_string(),
@@ -466,8 +586,26 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		shown,
 		strip,
 		status,
+		track,
 	};
 	(feed, driver)
+}
+
+/// Whether `source` publishes its own track: a picture the studio captures or
+/// loads itself, before any filter. A broadcast is already published by its own
+/// publisher, and a clone shows its source's track, its filters carried by the
+/// layout rather than encoded again.
+///
+/// Microphones and system audio do not yet: moq-audio offers no capture that
+/// feeds both the program bus and an encoder.
+fn publishes(source: &Source) -> bool {
+	source.has_video() && !matches!(source, Source::Broadcast { .. } | Source::Clone { .. })
+}
+
+/// The frame rate a capture is encoded at when the device reports none.
+#[cfg(feature = "capture")]
+fn default_framerate() -> moq_video::FrameRate {
+	moq_video::FrameRate::new(30, 1).expect("a valid frame rate")
 }
 
 fn set(status: &kio::Producer<Status>, value: Status) {
@@ -476,16 +614,17 @@ fn set(status: &kio::Producer<Status>, value: Status) {
 	}
 }
 
-/// Decode a still image to straight-alpha RGBA.
-fn image(path: &Path) -> Result<Picture, Error> {
+/// Read a still image, decoded to straight-alpha RGBA, and the file it came from.
+fn image(path: &Path) -> Result<(Picture, bytes::Bytes), Error> {
 	let bytes = std::fs::read(path).map_err(|err| Error::Image(format!("{}: {err}", path.display())))?;
 	let image = image::load_from_memory(&bytes)
 		.map_err(|err| Error::Image(format!("{}: {err}", path.display())))?
 		.into_rgba8();
-	Ok(Picture::Rgba {
+	let picture = Picture::Rgba {
 		size: moq_video::Size::new(image.width(), image.height()),
 		pixels: image.into_raw(),
-	})
+	};
+	Ok((picture, bytes.into()))
 }
 
 /// Helpers for tests across the crate.
@@ -503,6 +642,7 @@ pub(crate) mod test {
 			origin: origin.consume(),
 			dir: dir.to_path_buf(),
 			output: moq_video::Output::Cpu,
+			publish: None,
 		};
 		(context, origin)
 	}

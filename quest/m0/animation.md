@@ -15,9 +15,9 @@ standard in broadcast. Animate in moq-scene on the media clock and carry the
 transition and keyframes in the layout track, so viewers compose them too.
 Overlays animate through their own CSS. No Lottie runtime for now (decided
 2026-10-26): the open ones either lack text (velato) or add a C++ build
-(ThorVG). A stinger clip is a media source like any other.
+(ThorVG). A stinger clip is a media source like any other. Transitions and
+keyframes change through moq-scene's `Edit`, so they undo like any edit.
 
 ## Required
 
-- [Undo and the scene model](/quest/m0/scene-model.md) - keyframes are scene model state
 - [Layout track](/quest/m0/compose/layout.md) - where transitions and keyframes travel
