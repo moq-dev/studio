@@ -789,15 +789,13 @@ impl Setup {
 		self.starting = Some(Task::spawn(&self.runtime, move || async move {
 			// Setup proposes only for a missing file, so one that appeared since,
 			// such as another studio's, is opened by a restart, not overwritten.
-			let exists = path
-				.try_exists()
-				.with_context(|| format!("reading {}", path.display()))?;
-			anyhow::ensure!(
-				!exists,
-				"{} was created during setup; restart the studio to open it",
-				path.display()
-			);
+			// The autosave's first save refuses one that appears after this.
 			let (autosave, _) = Autosave::open(path)?;
+			anyhow::ensure!(
+				!autosave.exists(),
+				"{} was created during setup; restart the studio to open it",
+				autosave.path().display()
+			);
 			Engine::start(launch, autosave, loaded).await
 		}));
 	}

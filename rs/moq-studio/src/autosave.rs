@@ -152,6 +152,12 @@ impl Autosave {
 		&self.path
 	}
 
+	/// Whether the scene file exists: it was read when opened, or a save has
+	/// created it since.
+	pub fn exists(&self) -> bool {
+		self.written.lock().unwrap().collection.is_some()
+	}
+
 	/// Where the studio records its edits to the collection.
 	pub fn edits(&self) -> Edits {
 		self.edits.clone()
@@ -177,7 +183,8 @@ impl Autosave {
 				written.collection = Some(text.collection);
 			}
 			if written.history != text.history {
-				write(&self.history, &text.history, false).with_context(|| format!("writing {}", self.history.display()))?;
+				write(&self.history, &text.history, false)
+					.with_context(|| format!("writing {}", self.history.display()))?;
 				written.history = text.history;
 			}
 			Ok(())
