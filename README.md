@@ -13,8 +13,9 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
     show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
 ```
 
-- `show.toml` is the scene collection. It is created if it does not exist, and
-  changes are saved to it a second after you stop editing, with no save step.
+- `show.toml` is the scene collection. If it does not exist yet,
+  [guided setup](#first-launch) proposes one and creates it. Changes are saved
+  to it a second after you stop editing, with no save step.
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
@@ -22,8 +23,51 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   is the software H.264 fallback for a machine without a hardware encoder.
 - On Linux, display and window sources capture X11 and XWayland only; a
   Wayland screen or window cannot be picked yet.
+- On macOS, the studio is not an app bundle yet, so the camera, microphone,
+  and Screen & System Audio Recording permissions are asked of, and granted
+  to, the app that launched it, such as your terminal. Display, window, and
+  system-audio sources need the last, granted in System Settings > Privacy &
+  Security.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
   [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
+
+## First launch
+
+Opening a scene file that does not exist yet starts guided setup instead of
+the studio. It runs three checks, and a check that fails shows its reason:
+
+- **Devices:** the cameras, displays, and audio inputs this machine has.
+- **Encoders:** for each canvas setup can propose (1080p and 720p at 60 or 30
+  fps, and 360p at 30 fps), the encoder the program would pick, whether it
+  reads the GPU, the most its whole ladder (see [Output](#output)) sends, and
+  how long a frame takes at every rung over a short burst of moving frames. An encoder keeps up when a frame takes at most
+  three quarters of the frame period, leaving the rest for sources and the
+  compositor.
+- **Uplink:** with `--connect`, setup publishes a probe at the `--broadcast`
+  path for about six seconds and subscribes to it through the relay, so the
+  relay pulls it. The congestion controller's send-rate estimate is the
+  measurement. A connection that reports no estimate, such as WebSocket, fails
+  the check.
+
+Setup then proposes a scene named Main and a canvas, explaining each choice.
+The scene has the first display filling the canvas, the first camera in the
+bottom-right corner over it (or filling the canvas alone), and the first audio
+input. Swap any of them for another device or leave it out. The canvas is the
+largest one whose encoder keeps up and whose video and audio fit in two thirds
+of the measured uplink, the most the Health panel grades healthy. Without a
+measurement, it is the default 1080p at 30 fps. If no encoder keeps up, it is
+the canvas closest to keeping up.
+
+Nothing is written until you start the studio, so quitting during setup runs
+it again on the next launch. **Start with this scene** and **Start with an
+empty scene** both create the scene file at once, the second with the chosen
+canvas and no sources. The proposed scene is the first edit in the history, so
+undoing it leaves that empty scene.
+
+Setup writes an ordinary scene file. Change its sources and scenes in their
+panels, and its canvas in the file, which takes a restart. The Output panel
+shows the canvas in use, and the Health panel shows how the uplink holds up
+once you are live.
 
 ## Panels
 
@@ -31,7 +75,7 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
+| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
 | Scenes | Pick the scene in preview, add one, or remove one. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
@@ -39,13 +83,21 @@ Every panel is a tab you can drag, split, or stack.
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the broadcast path, whether the program is encoding, and the encoders' work over every rung. |
+| Output | See the broadcast path, whether the program is encoding, the canvas, and the encoders' work over every rung. |
 | Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
 on program, and stays on through a cut or fade: a downstream keyer for a logo
 or a lower third.
+
+In the preview, click an item of whatever the Items panel shows to select it,
+drag it to move it, and drag its edges or corners to resize it. A drag snaps
+edges and centers to the canvas's edges and center, to the other items shown,
+and to the grid while **Grid** is on, drawing a guide through what it lines up
+with. A moved item also snaps to the spacing of its neighbors, marking the
+equal spaces. Hold Ctrl (Cmd on macOS) to drag without snapping, or turn
+**Snap** off. The snap and grid settings last until the studio quits.
 
 Items showing the same source are **linked**: one capture, with the source's
 filters, wherever it is shown. A **clone** is a new source showing another's
@@ -54,7 +106,8 @@ and plain in another while being opened once. An item's own filters apply
 after its source's.
 
 **Edit > Undo** (Ctrl+Z) and **Redo** (Ctrl+Shift+Z or Ctrl+Y) step through the
-history, and a drag undoes as one step. **Copy** (Ctrl+C) takes the selected
+history, and a drag undoes as one step; on macOS each shortcut uses Cmd in
+place of Ctrl. **Copy** (Ctrl+C) takes the selected
 item with the source it shows; **Paste** (Ctrl+V) adds it over whatever the
 Items panel shows, in this studio or another. Pasted where the same source
 exists under the same name, the item is linked to it; otherwise the source

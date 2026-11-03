@@ -2,8 +2,9 @@
 
 ## Goal
 
-In `moq-studio`, scenes can be renamed and reordered, and the canvas can be
-resized while live, with no restart.
+In `moq-studio`, scenes can be renamed and reordered, the transition's
+settings (such as the fade time) can be edited as undoable steps, and the
+canvas can be resized while live, with no restart.
 
 ## Plan
 
