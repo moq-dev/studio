@@ -955,6 +955,26 @@ pub(crate) mod test {
 		(broadcast, video, producer)
 	}
 
+	/// Wait until `f` returns something, without letting a paused clock move.
+	///
+	/// Decoding and probing an encoder run on moq-video's own threads off Apple
+	/// platforms, which tokio cannot see: a runtime left idle while one works
+	/// advances a paused clock to its next timer, past whatever the test was
+	/// waiting for. Keeping a timer due now holds the clock where the test put
+	/// it, so time moves only by `tokio::time::advance`. A wait that never ends
+	/// is a hang nextest kills.
+	pub(crate) async fn until<T>(mut f: impl FnMut() -> Option<T>) -> T {
+		loop {
+			if let Some(value) = f() {
+				return value;
+			}
+			// Through the timer driver, so the replay's due timers fire, but
+			// due now, so a paused clock has nowhere later to jump to.
+			#[expect(clippy::disallowed_methods, reason = "a zero sleep that holds the paused clock")]
+			tokio::time::sleep(Duration::ZERO).await;
+		}
+	}
+
 	/// Run `f` on a local task set, as drivers need.
 	pub(crate) async fn local<F: Future>(f: F) -> F::Output {
 		tokio::task::LocalSet::new().run_until(f).await
@@ -963,7 +983,7 @@ pub(crate) mod test {
 
 #[cfg(test)]
 mod tests {
-	use super::test::{context, local, start, video};
+	use super::test::{context, local, start, until, video};
 	use super::*;
 	use crate::collection::{Audio, Rgba};
 
@@ -1334,42 +1354,35 @@ mod tests {
 			};
 			let take = Take::new(&target, Duration::from_secs(1)).await.unwrap();
 			let speed = 0.5;
+			let begin = kio::clock::now();
 			feed.replay(take, speed).unwrap();
 
-			// Each picture as it shows, and when.
-			let mut shown = Vec::new();
-			let cleared = loop {
-				kio::clock::sleep(Duration::from_millis(1)).await;
-				match feed.take() {
-					Some(Picture::Frame(frame)) => shown.push((kio::clock::now(), frame.timestamp)),
-					Some(Picture::Rgba { .. }) => break kio::clock::now(),
-					None => {}
-				}
-			};
-
-			// From the start, not from the keyframe of its group at 1 s, up to
-			// the end.
-			let timestamps: Vec<_> = shown.iter().map(|(_, timestamp)| *timestamp).collect();
-			let expected: Vec<_> = (45..75u64)
-				.map(|index| moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap())
-				.collect();
-			assert_eq!(timestamps, expected, "every picture of the span, in order");
-			// Each shows `t / speed` into the replay, which lasts the span's
-			// second over two.
-			let first = shown[0].0;
-			for (at, timestamp) in &shown {
-				let into = Duration::from(*timestamp) - Duration::from(expected[0]);
-				let due = first + into.div_f32(speed);
-				assert!(
-					at.saturating_duration_since(due) <= Duration::from_millis(1),
-					"{timestamp:?}"
-				);
+			// From the start, not from the keyframe of its group at 1 s, each
+			// picture `t / speed` into the replay, and none sooner. The clock
+			// moves only to each picture's moment.
+			let start = moq_net::Timestamp::from_micros(1_500_000).unwrap();
+			for index in 45..75u64 {
+				let timestamp = moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap();
+				let due = begin + (Duration::from(timestamp) - Duration::from(start)).div_f32(speed);
+				assert!(feed.take().is_none(), "a picture before {timestamp:?} is due");
+				tokio::time::advance(due.saturating_duration_since(kio::clock::now())).await;
+				let shown = until(|| match feed.take() {
+					Some(Picture::Frame(frame)) => Some(frame.timestamp),
+					Some(Picture::Rgba { .. }) => panic!("cleared before {timestamp:?}"),
+					None => None,
+				})
+				.await;
+				assert_eq!(shown, timestamp);
 			}
-			let played = cleared.saturating_duration_since(first);
-			assert!(
-				played.abs_diff(Duration::from_secs(2)) <= Duration::from_millis(1),
-				"{played:?}"
-			);
+
+			// Nothing more, and the replay ends once the span's second has
+			// played over two.
+			assert!(feed.take().is_none(), "the picture at the end shows for no time");
+			let end = begin + Duration::from_secs(2);
+			tokio::time::advance(end.saturating_duration_since(kio::clock::now()) - Duration::from_micros(1)).await;
+			assert!(feed.take().is_none(), "cleared before the end");
+			tokio::time::advance(Duration::from_micros(1)).await;
+			until(|| matches!(feed.take(), Some(Picture::Rgba { .. })).then_some(())).await;
 			assert_eq!(feed.status(), Status::Live, "ready for the next replay");
 		})
 		.await;

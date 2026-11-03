@@ -365,7 +365,7 @@ mod tests {
 
 	use super::*;
 	use crate::collection::{Collection, Rgba, Source};
-	use crate::source::test::{context, local, start, video};
+	use crate::source::test::{context, local, start, until, video};
 	use crate::source::{Sources, Status};
 
 	/// A studio broadcast and catalog to publish into, and a reader of it.
@@ -604,21 +604,14 @@ mod tests {
 				.unwrap();
 			let feed = sources.get("replay").unwrap();
 			feed.replay(take, 1.0).unwrap();
-			for _ in 0..100 {
-				let snapshot = catalog.snapshot();
-				if snapshot
-					.ext
-					.studio
-					.sources
-					.get("replay")
-					.is_some_and(|listed| !listed.video.renditions.is_empty())
-				{
-					assert_eq!(feed.track(), Some(Status::Live));
-					return;
-				}
-				kio::clock::sleep(std::time::Duration::from_millis(10)).await;
-			}
-			panic!("the replay was never published: {:?}", feed.track());
+			// The first picture is due at once, so the clock stays put while
+			// the encoder opens.
+			until(|| {
+				let listed = catalog.snapshot().ext.studio.sources.remove("replay");
+				listed.filter(|listed| !listed.video.renditions.is_empty())
+			})
+			.await;
+			assert_eq!(feed.track(), Some(Status::Live));
 		})
 		.await;
 	}
