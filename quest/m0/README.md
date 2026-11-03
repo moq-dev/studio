@@ -91,7 +91,6 @@ repository.
 - [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
 - [Animation and transitions](/quest/m0/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
 - [Video effects](/quest/m0/effects.md) - a curated effect set with CSS meanings, and ML effects baked into their source
-- [Snapping and guides](/quest/m0/snapping.md) - preview moves snap to edges, centers, and other items
 - [Guided setup](/quest/m0/guided-setup.md) - first launch detects devices, measures the uplink, and proposes settings
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
