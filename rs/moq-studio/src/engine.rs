@@ -826,12 +826,9 @@ mod tests {
 				color: moq_scene::Rgba([255, 0, 0, 255]),
 			},
 		);
-		collection.scenes[0].items.push(moq_scene::Item {
-			source: "red".into(),
-			rect: moq_scene::Rect::fill(&collection.canvas),
-			visible: true,
-			filters: Vec::new(),
-		});
+		collection.scenes[0]
+			.items
+			.push(moq_scene::Item::new("red", moq_scene::Rect::fill(&collection.canvas)));
 
 		let gpu = Gpu::new().await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();

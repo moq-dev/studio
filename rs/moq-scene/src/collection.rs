@@ -156,7 +156,9 @@ impl Collection {
 				}
 				item.rect.validate(&layer, &item.source)?;
 				let on = format!("`{}` in {layer}", item.source);
-				item.crop.validate().map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
+				item.crop
+					.validate()
+					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 				self.validate_chain(&item.filters, &on)?;
 			}
 		}
@@ -188,7 +190,10 @@ impl Collection {
 				)));
 			}
 			let on = format!("`{name}`");
-			video.crop.validate().map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
+			video
+				.crop
+				.validate()
+				.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 			self.validate_chain(&video.filters, &on)?;
 		}
 
@@ -1217,7 +1222,13 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		collection.scenes[0].items[0].filters = vec![lut("grade"), mask("logo")];
 		collection.validate().unwrap();
 
-		for filter in [lut("logo"), lut("nobody"), mask("grade"), mask("mic"), mask("camera faded")] {
+		for filter in [
+			lut("logo"),
+			lut("nobody"),
+			mask("grade"),
+			mask("mic"),
+			mask("camera faded"),
+		] {
 			let mut collection = collection.clone();
 			collection.video.insert(
 				"camera".into(),

@@ -28,7 +28,9 @@ impl Cube {
 		for (number, line) in text.lines().enumerate() {
 			let line = line.split('#').next().unwrap_or_default().trim();
 			let words: Vec<&str> = line.split_whitespace().collect();
-			let Some((&first, rest)) = words.split_first() else { continue };
+			let Some((&first, rest)) = words.split_first() else {
+				continue;
+			};
 			let floats = |words: &[&str]| {
 				words
 					.iter()
@@ -147,7 +149,9 @@ DOMAIN_MAX 1 1 1
 		let empty = IDENTITY.replace("DOMAIN_MAX 1 1 1", "DOMAIN_MAX 0 1 1");
 		let unknown = IDENTITY.replace("TITLE", "LUT_FANCY 3\nTITLE");
 		let nan = IDENTITY.replace("1 0 1", "1 NaN 1");
-		for text in [&short, &long, &late, &one, &huge, &pair, &empty, &unknown, &nan, "hello"] {
+		for text in [
+			&short, &long, &late, &one, &huge, &pair, &empty, &unknown, &nan, "hello",
+		] {
 			assert!(Cube::parse(text).is_err(), "{text}");
 		}
 	}

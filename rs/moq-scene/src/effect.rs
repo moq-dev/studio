@@ -1022,7 +1022,15 @@ impl Effects {
 	}
 
 	/// `input` through `segment`, blurred by `sigma` canvas pixels over `area`.
-	fn blur(&mut self, frame: &mut Frame, input: &Input, segment: &Segment, item: Area, area: Area, sigma: f32) -> Input {
+	fn blur(
+		&mut self,
+		frame: &mut Frame,
+		input: &Input,
+		segment: &Segment,
+		item: Area,
+		area: Area,
+		sigma: f32,
+	) -> Input {
 		let mut current = self.raster(frame, input, segment, item, area);
 		let mut size = self.texels(&area);
 		let texels = |size: (u32, u32)| (size.0 as f32 / area.width(), size.1 as f32 / area.height());
@@ -1179,7 +1187,11 @@ impl Effects {
 	}
 }
 
-fn extra_bind(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, views: [&wgpu::TextureView; 3]) -> wgpu::BindGroup {
+fn extra_bind(
+	device: &wgpu::Device,
+	layout: &wgpu::BindGroupLayout,
+	views: [&wgpu::TextureView; 3],
+) -> wgpu::BindGroup {
 	let entries: Vec<wgpu::BindGroupEntry> = views
 		.iter()
 		.enumerate()

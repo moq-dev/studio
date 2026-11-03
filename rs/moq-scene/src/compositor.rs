@@ -951,7 +951,11 @@ mod tests {
 			// The share of a Gaussian of deviation 10, centered half a pixel
 			// inside an edge, that falls inside: Φ(0.05).
 			let edge = 0.52;
-			let cases = [((32, 32), 255.0), ((0, 32), edge * 255.0), ((0, 0), edge * edge * 255.0)];
+			let cases = [
+				((32, 32), 255.0),
+				((0, 32), edge * 255.0),
+				((0, 0), edge * edge * 255.0),
+			];
 			for ((x, y), expected) in cases {
 				let actual = f32::from(at(x, y));
 				assert!((actual - expected).abs() <= 4.0, "({x}, {y}): {actual} vs {expected}");

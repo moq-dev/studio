@@ -8,7 +8,9 @@ use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::source::{Feed, Status};
-use moq_scene::{Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Video, wgpu};
+use moq_scene::{
+	Blend, Clip, Collection, Crop, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source, Video, wgpu,
+};
 
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
@@ -182,21 +184,48 @@ enum Selection {
 	Item(Layer, usize),
 }
 
+/// What the Filters panel sets on a selection.
+#[derive(Clone, Debug, PartialEq)]
+struct Look {
+	crop: Crop,
+	filters: Vec<Filter>,
+	/// An item's blend mode; a source has none.
+	blend: Option<Blend>,
+}
+
 impl Selection {
-	/// The filters of what is selected, or `None` if it is gone or has no picture.
-	fn filters(&self, collection: &Collection) -> Option<Vec<Filter>> {
+	/// The look of what is selected, or `None` if it is gone or has no picture.
+	fn look(&self, collection: &Collection) -> Option<Look> {
 		match self {
 			Self::Source(name) => {
 				collection.sources.get(name).filter(|source| source.has_video())?;
-				Some(collection.video.get(name).cloned().unwrap_or_default().filters)
+				let video = collection.video.get(name).cloned().unwrap_or_default();
+				Some(Look {
+					crop: video.crop,
+					filters: video.filters,
+					blend: None,
+				})
 			}
-			Self::Item(layer, index) => Some(collection.items(layer)?.get(*index)?.filters.clone()),
+			Self::Item(layer, index) => {
+				let item = collection.items(layer)?.get(*index)?;
+				Some(Look {
+					crop: item.crop,
+					filters: item.filters.clone(),
+					blend: Some(item.blend),
+				})
+			}
 		}
 	}
 
-	fn set_filters(&self, draft: &mut Draft, filters: Vec<Filter>) -> Result<(), moq_scene::Error> {
+	/// The filters of what is selected, or `None` if it is gone or has no picture.
+	fn filters(&self, collection: &Collection) -> Option<Vec<Filter>> {
+		self.look(collection).map(|look| look.filters)
+	}
+
+	fn set_look(&self, draft: &mut Draft, look: Look) -> Result<(), moq_scene::Error> {
+		let Look { crop, filters, blend } = look;
 		match self {
-			Self::Source(name) => draft.set_video(name, Some(Video { filters })),
+			Self::Source(name) => draft.set_video(name, Some(Video { crop, filters })),
 			Self::Item(layer, index) => {
 				let item = draft
 					.collection()
@@ -205,9 +234,26 @@ impl Selection {
 					.cloned();
 				let item =
 					item.ok_or_else(|| moq_scene::Error::Conflict(format!("there is no item {index} in {layer}")))?;
-				draft.set_item(layer, *index, Item { filters, ..item })
+				let blend = blend.unwrap_or(item.blend);
+				draft.set_item(
+					layer,
+					*index,
+					Item {
+						crop,
+						filters,
+						blend,
+						..item
+					},
+				)
 			}
 		}
+	}
+
+	fn set_filters(&self, draft: &mut Draft, filters: Vec<Filter>) -> Result<(), moq_scene::Error> {
+		let look = self
+			.look(draft.collection())
+			.ok_or_else(|| moq_scene::Error::Conflict("the selection is gone".into()))?;
+		self.set_look(draft, Look { filters, ..look })
 	}
 
 	fn describe(&self, collection: &Collection) -> String {
@@ -889,7 +935,7 @@ impl Panels {
 		self.report(result.map(|name| format!("added `{name}`")));
 	}
 
-	/// The filters of the selected source or item, in order.
+	/// The crop, filters in order, and blend mode of the selected source or item.
 	fn filters(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -899,7 +945,7 @@ impl Panels {
 			return;
 		};
 		let what = selection.describe(collection);
-		let Some(filters) = selection.filters(collection) else {
+		let Some(look) = selection.look(collection) else {
 			ui.label(format!("{what} has no picture to filter."));
 			return;
 		};
@@ -911,53 +957,107 @@ impl Panels {
 			let source = video.filters.iter().map(describe_filter).collect::<Vec<_>>();
 			ui.weak(format!("after `{}`'s own: {}", item.source, source.join(", ")));
 		}
+		// What a mask can show, a picture of its own, and what a LUT reads.
+		let pictures: Vec<String> = collection
+			.sources
+			.iter()
+			.filter(|(_, source)| source.has_video() && source.opens())
+			.map(|(name, _)| name.clone())
+			.collect();
+		let luts: Vec<String> = collection
+			.sources
+			.iter()
+			.filter(|(_, source)| matches!(source, Source::Lut { .. }))
+			.map(|(name, _)| name.clone())
+			.collect();
 
-		let mut next = filters.clone();
+		let mut next = look.clone();
 		let mut action: Option<(String, Option<u64>)> = None;
-		let count = next.len();
-		let mut moved = None;
-		let mut remove = None;
-		for (index, filter) in next.iter_mut().enumerate() {
+		egui::Grid::new("look").show(ui, |ui| {
+			ui.label("Crop");
 			ui.horizontal(|ui| {
-				match filter {
-					Filter::Opacity { amount } => {
-						ui.label("Opacity");
-						let response = ui.add(egui::Slider::new(amount, 0.0..=1.0));
-						let gesture = self.gestures.of(&response);
-						if response.changed() {
-							action = Some((format!("Set opacity on {what}"), gesture));
-						}
+				let crop = &mut next.crop;
+				for (label, edge) in [
+					("left", &mut crop.left),
+					("top", &mut crop.top),
+					("right", &mut crop.right),
+					("bottom", &mut crop.bottom),
+				] {
+					ui.weak(label);
+					let response = ui.add(egui::DragValue::new(edge).range(0.0..=0.95).speed(0.002));
+					if let Some(gesture) = changed(&response, &mut self.gestures) {
+						action = Some((format!("Crop {what}"), gesture));
 					}
 				}
-				if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
-					moved = Some((index, index - 1));
+			})
+			.response
+			.on_hover_text("The fraction of the picture trimmed from each edge, the rest stretched to fill");
+			ui.end_row();
+			if let Some(blend) = &mut next.blend {
+				ui.label("Blend");
+				let before = *blend;
+				egui::ComboBox::from_id_salt("blend")
+					.selected_text(blend_name(*blend))
+					.show_ui(ui, |ui| {
+						for mode in Blend::ALL {
+							ui.selectable_value(blend, mode, blend_name(mode));
+						}
+					});
+				if *blend != before {
+					action = Some((format!("Set the blend mode of {what}"), None));
 				}
-				if ui
-					.add_enabled(index + 1 < count, egui::Button::new("Down").small())
-					.clicked()
-				{
-					moved = Some((index, index + 1));
-				}
-				if ui.small_button("Remove").clicked() {
-					remove = Some(index);
-				}
+				ui.end_row();
+			}
+		});
+
+		let count = next.filters.len();
+		let mut moved = None;
+		let mut remove = None;
+		for (index, filter) in next.filters.iter_mut().enumerate() {
+			ui.push_id(index, |ui| {
+				ui.horizontal_wrapped(|ui| {
+					if let Some(gesture) = filter_ui(ui, filter, &pictures, &luts, &mut self.gestures) {
+						action = Some((format!("Set {} on {what}", filter_name(filter)), gesture));
+					}
+					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
+						moved = Some((index, index - 1));
+					}
+					if ui
+						.add_enabled(index + 1 < count, egui::Button::new("Down").small())
+						.clicked()
+					{
+						moved = Some((index, index + 1));
+					}
+					if ui.small_button("Remove").clicked() {
+						remove = Some(index);
+					}
+				});
 			});
 		}
 		if let Some((from, to)) = moved {
-			next.swap(from, to);
+			next.filters.swap(from, to);
 			action = Some((format!("Reorder filters on {what}"), None));
 		}
 		if let Some(index) = remove {
-			next.remove(index);
+			next.filters.remove(index);
 			action = Some((format!("Remove a filter from {what}"), None));
 		}
 
 		ui.separator();
+		let filters = look.filters;
 		ui.horizontal(|ui| {
-			if ui.button("Add opacity").clicked() {
-				next.push(Filter::Opacity { amount: 1.0 });
-				action = Some((format!("Add opacity to {what}"), None));
-			}
+			egui::ComboBox::from_id_salt("add filter")
+				.selected_text("Add filter")
+				.show_ui(ui, |ui| {
+					for filter in templates(&pictures, &luts) {
+						if ui.selectable_label(false, filter_name(&filter)).clicked() {
+							action = Some((format!("Add {} to {what}", filter_name(&filter)), None));
+							next.filters.push(filter);
+						}
+					}
+				})
+				.response
+				.on_hover_text("A LUT needs a LUT source, and a mask a source with a picture of its own");
 			if ui.add_enabled(!filters.is_empty(), egui::Button::new("Copy")).clicked() {
 				let clip = Clip::Filters(moq_scene::clip::Filters {
 					filters: filters.clone(),
@@ -977,7 +1077,7 @@ impl Panels {
 		});
 
 		let Some((label, gesture)) = action else { return };
-		let result = edit(&mut state, label, gesture, |draft| selection.set_filters(draft, next));
+		let result = edit(&mut state, label, gesture, |draft| selection.set_look(draft, next));
 		drop(state);
 		self.check(result);
 	}
@@ -1264,9 +1364,218 @@ fn linked(ui: &mut Ui, collection: &Collection, layer: &Layer, index: usize, ite
 }
 
 fn describe_filter(filter: &Filter) -> String {
+	let name = filter_name(filter);
 	match filter {
-		Filter::Opacity { amount } => format!("opacity {:.0}%", amount * 100.0),
+		Filter::Opacity { amount }
+		| Filter::Brightness { amount }
+		| Filter::Contrast { amount }
+		| Filter::Saturate { amount }
+		| Filter::Grayscale { amount }
+		| Filter::Sepia { amount }
+		| Filter::Invert { amount } => format!("{name} {:.0}%", amount * 100.0),
+		Filter::HueRotate { degrees } => format!("{name} {degrees:.0}°"),
+		Filter::Blur { radius } => format!("{name} {radius:.1} px"),
+		Filter::Lut { source, .. } | Filter::Mask { source, .. } => format!("{name} `{source}`"),
+		_ => name.to_string(),
 	}
+}
+
+fn filter_name(filter: &Filter) -> &'static str {
+	match filter {
+		Filter::Opacity { .. } => "opacity",
+		Filter::Brightness { .. } => "brightness",
+		Filter::Contrast { .. } => "contrast",
+		Filter::Saturate { .. } => "saturation",
+		Filter::Grayscale { .. } => "grayscale",
+		Filter::Sepia { .. } => "sepia",
+		Filter::Invert { .. } => "invert",
+		Filter::HueRotate { .. } => "hue rotation",
+		Filter::Blur { .. } => "blur",
+		Filter::DropShadow { .. } => "drop shadow",
+		Filter::ChromaKey { .. } => "chroma key",
+		Filter::LumaKey { .. } => "luma key",
+		Filter::Lut { .. } => "LUT",
+		Filter::Mask { .. } => "mask",
+	}
+}
+
+fn blend_name(blend: Blend) -> &'static str {
+	match blend {
+		Blend::Normal => "normal",
+		Blend::Multiply => "multiply",
+		Blend::Screen => "screen",
+		Blend::Overlay => "overlay",
+		Blend::Darken => "darken",
+		Blend::Lighten => "lighten",
+		Blend::ColorDodge => "color dodge",
+		Blend::ColorBurn => "color burn",
+		Blend::HardLight => "hard light",
+		Blend::SoftLight => "soft light",
+		Blend::Difference => "difference",
+		Blend::Exclusion => "exclusion",
+		Blend::Hue => "hue",
+		Blend::Saturation => "saturation",
+		Blend::Color => "color",
+		Blend::Luminosity => "luminosity",
+	}
+}
+
+/// A new filter of each kind, as the Add menu offers it: one that leaves the
+/// picture as it is where the kind allows. A LUT or mask names the first
+/// source it can read, and is left out without one.
+fn templates(pictures: &[String], luts: &[String]) -> Vec<Filter> {
+	let mut filters = vec![
+		Filter::Opacity { amount: 1.0 },
+		Filter::Brightness { amount: 1.0 },
+		Filter::Contrast { amount: 1.0 },
+		Filter::Saturate { amount: 1.0 },
+		Filter::Grayscale { amount: 0.0 },
+		Filter::Sepia { amount: 0.0 },
+		Filter::Invert { amount: 0.0 },
+		Filter::HueRotate { degrees: 0.0 },
+		Filter::Blur { radius: 4.0 },
+		Filter::DropShadow {
+			x: 4.0,
+			y: 4.0,
+			blur: 4.0,
+			color: moq_scene::Rgba([0, 0, 0, 128]),
+		},
+		Filter::ChromaKey {
+			color: moq_scene::Rgba([0, 255, 0, 255]),
+			similarity: 0.4,
+			smoothness: 0.08,
+			spill: 0.1,
+		},
+		Filter::LumaKey {
+			min: 0.0,
+			max: 1.0,
+			smoothness: 0.05,
+		},
+	];
+	if let Some(source) = luts.first() {
+		filters.push(Filter::Lut {
+			source: source.clone(),
+			amount: 1.0,
+		});
+	}
+	if let Some(source) = pictures.first() {
+		filters.push(Filter::Mask {
+			source: source.clone(),
+			mode: MaskMode::Alpha,
+		});
+	}
+	filters
+}
+
+/// The gesture an edit through `response` belongs to, if it changed anything.
+fn changed(response: &egui::Response, gestures: &mut Gestures) -> Option<Option<u64>> {
+	let gesture = gestures.of(response);
+	response.changed().then_some(gesture)
+}
+
+/// Edit `filter`'s settings; the gesture of the edit, if it made one.
+fn filter_ui(
+	ui: &mut Ui,
+	filter: &mut Filter,
+	pictures: &[String],
+	luts: &[String],
+	gestures: &mut Gestures,
+) -> Option<Option<u64>> {
+	ui.label(filter_name(filter));
+	let mut edits = Vec::new();
+	let slider = |ui: &mut Ui, value: &mut f32, range| ui.add(egui::Slider::new(value, range));
+	match filter {
+		Filter::Opacity { amount }
+		| Filter::Grayscale { amount }
+		| Filter::Sepia { amount }
+		| Filter::Invert { amount } => {
+			edits.push(slider(ui, amount, 0.0..=1.0));
+		}
+		Filter::Brightness { amount } | Filter::Contrast { amount } | Filter::Saturate { amount } => {
+			edits.push(slider(ui, amount, 0.0..=3.0));
+		}
+		Filter::HueRotate { degrees } => edits.push(ui.add(egui::Slider::new(degrees, -180.0..=180.0).suffix("°"))),
+		Filter::Blur { radius } => {
+			edits.push(ui.add(egui::Slider::new(radius, 0.0..=100.0).logarithmic(true).suffix(" px")));
+		}
+		Filter::DropShadow { x, y, blur, color } => {
+			edits.push(ui.add(egui::DragValue::new(x).prefix("x ").suffix(" px")));
+			edits.push(ui.add(egui::DragValue::new(y).prefix("y ").suffix(" px")));
+			edits.push(ui.add(egui::Slider::new(blur, 0.0..=50.0).suffix(" px")));
+			edits.push(color_ui(ui, color));
+		}
+		Filter::ChromaKey {
+			color,
+			similarity,
+			smoothness,
+			spill,
+		} => {
+			edits.push(color_ui(ui, color));
+			for (label, value) in [("similarity", similarity), ("smoothness", smoothness), ("spill", spill)] {
+				ui.weak(label);
+				edits.push(slider(ui, value, 0.0..=1.0));
+			}
+		}
+		Filter::LumaKey { min, max, smoothness } => {
+			for (label, value) in [("min", &mut *min), ("max", &mut *max), ("smoothness", smoothness)] {
+				ui.weak(label);
+				edits.push(slider(ui, value, 0.0..=1.0));
+			}
+			// Dragging one end past the other moves both.
+			*max = max.max(*min);
+		}
+		Filter::Lut { source, amount } => {
+			edits.push(pick(ui, "lut", source, luts));
+			edits.push(slider(ui, amount, 0.0..=1.0));
+		}
+		Filter::Mask { source, mode } => {
+			edits.push(pick(ui, "mask", source, pictures));
+			let before = *mode;
+			let mut response = egui::ComboBox::from_id_salt("mode")
+				.selected_text(match mode {
+					MaskMode::Alpha => "alpha",
+					MaskMode::Luminance => "luminance",
+				})
+				.show_ui(ui, |ui| {
+					ui.selectable_value(mode, MaskMode::Alpha, "alpha");
+					ui.selectable_value(mode, MaskMode::Luminance, "luminance");
+				})
+				.response;
+			if *mode != before {
+				response.mark_changed();
+			}
+			edits.push(response);
+		}
+	}
+	edits.iter().find_map(|response| changed(response, gestures))
+}
+
+/// Pick one of `names` for `value`.
+fn pick(ui: &mut Ui, id: &str, value: &mut String, names: &[String]) -> egui::Response {
+	let before = value.clone();
+	let mut response = egui::ComboBox::from_id_salt(id)
+		.selected_text(value.as_str())
+		.show_ui(ui, |ui| {
+			for name in names {
+				ui.selectable_value(value, name.clone(), name);
+			}
+		})
+		.response;
+	if *value != before {
+		response.mark_changed();
+	}
+	response
+}
+
+/// Edit `color` with straight alpha.
+fn color_ui(ui: &mut Ui, color: &mut moq_scene::Rgba) -> egui::Response {
+	let [r, g, b, a] = color.0;
+	let mut edited = Color32::from_rgba_unmultiplied(r, g, b, a);
+	let response = egui::color_picker::color_edit_button_srgba(ui, &mut edited, egui::color_picker::Alpha::OnlyBlend);
+	if response.changed() {
+		*color = moq_scene::Rgba(edited.to_srgba_unmultiplied());
+	}
+	response
 }
 
 /// Add `source` as `name`, with `video` filters, and place it in front of
@@ -1320,6 +1629,7 @@ fn describe(source: &Source) -> String {
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
 		Source::Clone { source } => format!("clone of {source}"),
+		Source::Lut { path } => format!("LUT: {}", path.display()),
 	}
 }
 
@@ -1395,10 +1705,11 @@ enum Kind {
 	Window,
 	Microphone,
 	SystemAudio,
+	Lut,
 }
 
 impl Kind {
-	const ALL: [Self; 8] = [
+	const ALL: [Self; 9] = [
 		Self::Color,
 		Self::Image,
 		Self::Broadcast,
@@ -1407,6 +1718,7 @@ impl Kind {
 		Self::Window,
 		Self::Microphone,
 		Self::SystemAudio,
+		Self::Lut,
 	];
 
 	fn label(self) -> &'static str {
@@ -1419,6 +1731,7 @@ impl Kind {
 			Self::Window => "Window",
 			Self::Microphone => "Microphone",
 			Self::SystemAudio => "System audio",
+			Self::Lut => "LUT",
 		}
 	}
 
@@ -1427,6 +1740,7 @@ impl Kind {
 		match self {
 			Self::Color | Self::SystemAudio => None,
 			Self::Image => Some("file"),
+			Self::Lut => Some(".cube file"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
 			Self::Camera | Self::Display | Self::Microphone => Some("id (empty for the default)"),
@@ -1475,6 +1789,7 @@ impl AddSource {
 				color: moq_scene::Rgba(self.color.to_srgba_unmultiplied()),
 			},
 			Kind::Image => Source::Image { path: value.into() },
+			Kind::Lut => Source::Lut { path: value.into() },
 			Kind::Broadcast => Source::Broadcast { path: value },
 			Kind::Camera => Source::Camera { id },
 			Kind::Display => Source::Display { id },

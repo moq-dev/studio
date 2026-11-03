@@ -194,7 +194,13 @@ impl Draft {
 			}
 			if let Some(video) = items.video.get(name) {
 				let filters = rename(&video.filters);
-				self.set_video(&renamed, Some(Video { filters, ..video.clone() }))?;
+				self.set_video(
+					&renamed,
+					Some(Video {
+						filters,
+						..video.clone()
+					}),
+				)?;
 			}
 		}
 		for item in &items.items {
@@ -362,10 +368,15 @@ mod tests {
 			mode: MaskMode::Luminance,
 		};
 		collection.scenes[0].items[0].filters = vec![mask("matte")];
-		collection.video.get_mut("cam faded").unwrap().filters.push(Filter::Lut {
-			source: "grade".into(),
-			amount: 0.5,
-		});
+		collection
+			.video
+			.get_mut("cam faded")
+			.unwrap()
+			.filters
+			.push(Filter::Lut {
+				source: "grade".into(),
+				amount: 0.5,
+			});
 		collection.validate().unwrap();
 		let text = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR))
 			.to_toml()
