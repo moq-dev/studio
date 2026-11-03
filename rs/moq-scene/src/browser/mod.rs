@@ -67,16 +67,16 @@ pub fn child() -> Option<ExitCode> {
 /// What browser sources need from the studio: the executable that becomes
 /// their helper, and the device their pictures are copied to.
 #[derive(Clone)]
+#[cfg_attr(
+	not(target_os = "linux"),
+	expect(dead_code, reason = "browser sources are Linux-only")
+)]
 pub struct Helper {
 	program: PathBuf,
 	device: wgpu::Device,
 	queue: wgpu::Queue,
 	/// The device's DRM render node, which CEF must paint on for the studio to
 	/// import what it paints.
-	#[cfg_attr(
-		not(target_os = "linux"),
-		expect(dead_code, reason = "browser sources are Linux-only")
-	)]
 	render_node: Option<PathBuf>,
 }
 

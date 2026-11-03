@@ -29,6 +29,10 @@ pub(crate) enum Picture {
 	Rgba { size: moq_video::Size, pixels: Vec<u8> },
 	/// A texture on the compositor's device with premultiplied alpha, such as
 	/// a web page.
+	#[cfg_attr(
+		not(target_os = "linux"),
+		expect(dead_code, reason = "browser sources are Linux-only")
+	)]
 	Texture(moq_video::render::wgpu::Texture),
 }
 
@@ -198,8 +202,16 @@ pub struct Driver {
 	shown: Shown,
 	strip: Option<Strip>,
 	status: kio::Producer<Status>,
+	#[cfg_attr(
+		not(target_os = "linux"),
+		expect(dead_code, reason = "browser sources are Linux-only")
+	)]
 	page: Option<Page>,
 	/// The canvas's, which a browser source paints at.
+	#[cfg_attr(
+		not(target_os = "linux"),
+		expect(dead_code, reason = "browser sources are Linux-only")
+	)]
 	framerate: u32,
 }
 
@@ -641,7 +653,7 @@ mod tests {
 			let (context, _origin) = context(dir.path());
 			let start = kio::clock::now();
 			let opened = |source: Source| {
-				let (feed, driver) = open("source", &source, &context);
+				let (feed, driver) = open("source", &source, &context, 30);
 				set(&driver.status, Status::Live);
 				(feed, driver)
 			};
