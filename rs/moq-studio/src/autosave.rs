@@ -62,6 +62,17 @@ impl Edits {
 		}
 	}
 
+	/// Ask for a save [`QUIET`] from now, without delaying one already
+	/// waiting, which a repeated failure would otherwise put off until
+	/// [`LIMIT`].
+	fn retry(&self) {
+		let mut unsaved = self.0.lock();
+		if unsaved.is_none() {
+			let now = kio::clock::now();
+			*unsaved = Some(Unsaved { first: now, last: now });
+		}
+	}
+
 	/// When the unsaved edits are due, if there are any.
 	fn deadline(&self) -> Option<Instant> {
 		self.0.read().as_ref().map(Unsaved::deadline)
@@ -414,7 +425,7 @@ impl Autosave {
 					if self.check(doc).is_err() {
 						// Retried as a save, so a file that cannot be read shows in the
 						// status bar until a save succeeds.
-						self.edits.record();
+						self.edits.retry();
 					}
 				}
 			}
