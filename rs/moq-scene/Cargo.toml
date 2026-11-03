@@ -28,6 +28,7 @@ pipewire = ["capture", "moq-video/pipewire", "moq-audio/pipewire"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
+bytes = { workspace = true }
 # The catalog's rendition configs, which a broadcast source follows.
 hang = { workspace = true }
 humantime-serde = { workspace = true }
@@ -48,6 +49,8 @@ toml = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# An encoder on every machine, for the source track tests.
+moq-video = { workspace = true, features = ["openh264"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 
