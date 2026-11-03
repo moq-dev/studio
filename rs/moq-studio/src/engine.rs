@@ -574,7 +574,8 @@ async fn publish(
 	let publication = origin.create_broadcast(&path).context("cannot create the broadcast")?;
 	let mut broadcast = publication.broadcast().clone();
 	// Each track claims its bitrate on the first relay's estimate, which that
-	// connection then probes to fund: the bandwidth the stream is granted.
+	// connection then probes to fund: the bandwidth the stream is granted. An
+	// allocator takes one connection's estimate, so the failover's goes unused.
 	let bandwidth = connections[0].allocator();
 	let catalog = moq_mux::catalog::Config::default()
 		.with_bandwidth(bandwidth.clone())
