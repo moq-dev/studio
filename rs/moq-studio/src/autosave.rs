@@ -155,10 +155,26 @@ struct Written {
 	/// An empty history when there is no history file, so none is created
 	/// until there is an edit to undo. `None` when it must be rewritten.
 	history: Option<String>,
-	/// Exactly what the scene file held when the studio last read or wrote
-	/// it, so anything else there is an outside edit. Compared by content,
-	/// not time, so the studio's own write never reads as one.
-	disk: Option<Vec<u8>>,
+	disk: Disk,
+}
+
+/// Exactly what the scene file and its history held when the studio last read
+/// or wrote them, so anything else there is an outside edit. Compared by
+/// content, not time, so the studio's own write never reads as one. `None`
+/// for a missing file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Disk {
+	scene: Option<Vec<u8>>,
+	history: Option<Vec<u8>>,
+}
+
+impl Disk {
+	fn read(scene: &Path, history: &Path) -> std::io::Result<Self> {
+		Ok(Self {
+			scene: read(scene)?,
+			history: read(history)?,
+		})
+	}
 }
 
 impl Written {
@@ -172,8 +188,9 @@ impl Autosave {
 	/// Read the scene file at `path` and its history, or start a new
 	/// collection if there is no scene file yet; the first save creates it.
 	pub fn open(path: PathBuf) -> anyhow::Result<(Self, Loaded)> {
-		let disk = read(&path)?;
-		let (collection, written) = match &disk {
+		let history = history_path(&path);
+		let disk = Disk::read(&path, &history)?;
+		let (collection, written) = match &disk.scene {
 			Some(bytes) => {
 				let collection = parse(&path, bytes)?;
 				// Kept as the studio would write it, not as the file spells it, so
@@ -183,8 +200,7 @@ impl Autosave {
 			}
 			None => (Collection::new(), None),
 		};
-		let history = history_path(&path);
-		let loaded = load_history(&history, collection)?;
+		let loaded = load_history(&history, disk.history.as_deref(), collection)?;
 		let written = Written {
 			collection: written,
 			history: Some(loaded.history.to_toml()?),
@@ -256,48 +272,50 @@ impl Autosave {
 			let text = doc.lock().unwrap().text()?;
 			if written.collection.as_ref() != Some(&text.collection) {
 				// Checked again right before the rename, since another studio may
-				// have written the file since the look above.
-				let unchanged = |path: &Path| Ok(outside(path, written.disk.as_deref())?.is_none());
+				// have written the files since the look above.
+				let unchanged = || Ok(self.outside(&written.disk)?.is_none());
 				let wrote = write(&self.path, &text.collection, unchanged)
 					.with_context(|| format!("writing {}", self.path.display()))?;
 				if !wrote {
 					// Taken or held as a conflict by the next look.
 					continue;
 				}
-				written.disk = Some(text.collection.clone().into_bytes());
+				written.disk.scene = Some(text.collection.clone().into_bytes());
 				written.collection = Some(text.collection);
 			}
 			if written.history.as_ref() != Some(&text.history) {
-				write(&self.history, &text.history, |_| Ok(true))
+				let unchanged = || Ok(self.outside(&written.disk)?.is_none());
+				let wrote = write(&self.history, &text.history, unchanged)
 					.with_context(|| format!("writing {}", self.history.display()))?;
+				if !wrote {
+					continue;
+				}
+				written.disk.history = Some(text.history.clone().into_bytes());
 				written.history = Some(text.history);
 			}
 			return Ok(());
 		}
 	}
 
-	/// Look for an outside edit to the scene file now, without writing.
+	/// Look for an outside edit to the files now, without writing.
 	pub fn check<D: Document>(&self, doc: &Mutex<D>) -> anyhow::Result<()> {
 		let mut written = self.written.lock().unwrap();
 		self.look(&mut written, doc)
 	}
 
-	/// Take an outside edit to the scene file if `doc` has nothing unsaved and
+	/// Take an outside edit to the files if `doc` has nothing unsaved and
 	/// accepts it, or else hold it as a [`Conflict`] and fail.
 	fn look<D: Document>(&self, written: &mut Written, doc: &Mutex<D>) -> anyhow::Result<()> {
-		let Some(bytes) =
-			outside(&self.path, written.disk.as_deref()).with_context(|| format!("reading {}", self.path.display()))?
-		else {
+		let Some(disk) = self.outside(&written.disk)? else {
 			*self.conflict.lock().unwrap() = None;
 			return Ok(());
 		};
 
-		let loaded = parse(&self.path, &bytes).and_then(|collection| load_history(&self.history, collection));
-		let refused = match loaded {
+		let refused = match self.load(&disk) {
 			Ok(loaded) => {
 				let mut doc = doc.lock().unwrap();
 				if written.holds(&doc.text()?) {
-					match self.take(written, &mut *doc, loaded, bytes) {
+					match self.take(written, &mut *doc, loaded, disk) {
 						Ok(()) => return Ok(()),
 						Err(err) => Some(err),
 					}
@@ -319,21 +337,36 @@ impl Autosave {
 		anyhow::bail!("{} changed outside the studio", self.path.display())
 	}
 
-	/// Hand `loaded`, read as `bytes` from the scene file, to `doc`. Once it
-	/// is accepted, the files count as holding it.
-	fn take(
-		&self,
-		written: &mut Written,
-		doc: &mut impl Document,
-		loaded: Loaded,
-		bytes: Vec<u8>,
-	) -> anyhow::Result<()> {
+	/// What the files hold now, if an edit outside the studio changed them
+	/// since `disk`. The history counts on its own, since another studio
+	/// writes it after the scene file. A file deleted since holds nothing to
+	/// keep, so the next write recreates it.
+	fn outside(&self, disk: &Disk) -> std::io::Result<Option<Disk>> {
+		let now = Disk::read(&self.path, &self.history)?;
+		let changed = |now: &Option<Vec<u8>>, then: &Option<Vec<u8>>| now.is_some() && now != then;
+		let changed = now.scene.is_some() && (changed(&now.scene, &disk.scene) || changed(&now.history, &disk.history));
+		Ok(changed.then_some(now))
+	}
+
+	/// The collection and history `disk` holds.
+	fn load(&self, disk: &Disk) -> anyhow::Result<Loaded> {
+		let scene = disk
+			.scene
+			.as_deref()
+			.with_context(|| format!("{} does not exist", self.path.display()))?;
+		let collection = parse(&self.path, scene)?;
+		load_history(&self.history, disk.history.as_deref(), collection)
+	}
+
+	/// Hand `loaded`, read from `disk`, to `doc`. Once it is accepted, the
+	/// files count as holding it.
+	fn take(&self, written: &mut Written, doc: &mut impl Document, loaded: Loaded, disk: Disk) -> anyhow::Result<()> {
 		let text = Text::new(&loaded.collection, &loaded.history)?;
 		doc.replace(loaded)?;
 		*written = Written {
 			collection: Some(text.collection),
 			history: Some(text.history),
-			disk: Some(bytes),
+			disk,
 		};
 		*self.conflict.lock().unwrap() = None;
 		Ok(())
@@ -343,17 +376,16 @@ impl Autosave {
 	/// it has unsaved: the user taking the file's version.
 	pub fn reload<D: Document>(&self, doc: &Mutex<D>) -> anyhow::Result<()> {
 		let mut written = self.written.lock().unwrap();
-		let bytes = std::fs::read(&self.path).with_context(|| format!("reading {}", self.path.display()))?;
-		let collection = parse(&self.path, &bytes)?;
-		let loaded = load_history(&self.history, collection)?;
-		self.take(&mut written, &mut *doc.lock().unwrap(), loaded, bytes)
+		let disk = Disk::read(&self.path, &self.history)?;
+		let loaded = self.load(&disk)?;
+		self.take(&mut written, &mut *doc.lock().unwrap(), loaded, disk)
 	}
 
 	/// Write `doc` over whatever the scene file and its history hold now: the
 	/// user keeping the studio's version.
 	pub fn keep<D: Document>(&self, doc: &Mutex<D>) -> anyhow::Result<()> {
 		let mut written = self.written.lock().unwrap();
-		written.disk = read(&self.path)?;
+		written.disk = Disk::read(&self.path, &self.history)?;
 		// The history beside an outside edit may be another studio's.
 		written.collection = None;
 		written.history = None;
@@ -372,8 +404,11 @@ impl Autosave {
 					let _ = self.save(doc);
 				}
 				() = kio::clock::sleep(POLL) => {
-					// A conflict shows for itself.
-					let _ = self.check(doc);
+					if self.check(doc).is_err() {
+						// Retried as a save, so a file that cannot be read shows in the
+						// status bar until a save succeeds.
+						self.edits.record();
+					}
 				}
 			}
 		}
@@ -381,23 +416,14 @@ impl Autosave {
 }
 
 /// Read the file at `path`, or `None` if there is none.
-fn read(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+fn read(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
 	match std::fs::read(path) {
 		Ok(bytes) => Ok(Some(bytes)),
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-		Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
-	}
-}
-
-/// What the scene file at `path` holds if it is not `disk`, what the studio
-/// last read or wrote there. A file deleted since holds nothing to keep, so
-/// the next write recreates it.
-fn outside(path: &Path, disk: Option<&[u8]>) -> std::io::Result<Option<Vec<u8>>> {
-	match std::fs::read(path) {
-		Ok(bytes) if Some(bytes.as_slice()) != disk => Ok(Some(bytes)),
-		Ok(_) => Ok(None),
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-		Err(err) => Err(err),
+		Err(err) => Err(std::io::Error::new(
+			err.kind(),
+			format!("reading {}: {err}", path.display()),
+		)),
 	}
 }
 
@@ -414,14 +440,16 @@ fn history_path(scene: &Path) -> PathBuf {
 	scene.with_file_name(name)
 }
 
-/// Read the history at `path` for `collection`, keeping the entries that
-/// still apply to it, or start a new one if there is no history file.
-fn load_history(path: &Path, collection: Collection) -> anyhow::Result<Loaded> {
-	let (history, dropped) = match std::fs::read_to_string(path) {
-		Ok(text) => History::from_toml(&text, &collection)
+/// Load the history file at `path`, which holds `bytes`, for `collection`,
+/// keeping the entries that still apply to it, or start a new one if there is
+/// no history file.
+fn load_history(path: &Path, bytes: Option<&[u8]>, collection: Collection) -> anyhow::Result<Loaded> {
+	let (history, dropped) = match bytes {
+		Some(bytes) => std::str::from_utf8(bytes)
+			.map_err(anyhow::Error::from)
+			.and_then(|text| Ok(History::from_toml(text, &collection)?))
 			.with_context(|| format!("loading {}; delete it to start a new history", path.display()))?,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => (History::new(), 0),
-		Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+		None => (History::new(), 0),
 	};
 	if dropped > 0 {
 		tracing::warn!(dropped, path = %path.display(), "history entries no longer apply to the scene file");
@@ -435,9 +463,9 @@ fn load_history(path: &Path, collection: Collection) -> anyhow::Result<Loaded> {
 
 /// Replace the file at `path` with `text` all at once, so a crash leaves
 /// either the old file or the new one, never part of either. Returns `false`,
-/// leaving the file as it is, if `unchanged` says otherwise of the file it
-/// would replace right before the rename.
-fn write(path: &Path, text: &str, unchanged: impl FnOnce(&Path) -> std::io::Result<bool>) -> std::io::Result<bool> {
+/// leaving the file as it is, if `unchanged` says the files changed outside
+/// the studio, asked right before the rename.
+fn write(path: &Path, text: &str, unchanged: impl FnOnce() -> std::io::Result<bool>) -> std::io::Result<bool> {
 	let path = resolve(path)?;
 	let existing = match std::fs::metadata(&path) {
 		Ok(metadata) => {
@@ -478,7 +506,7 @@ fn write(path: &Path, text: &str, unchanged: impl FnOnce(&Path) -> std::io::Resu
 	file.as_file().sync_all()?;
 	// As late as it can be. An edit landing between this and the rename is
 	// still lost, since nothing binds every editor to a lock.
-	if !unchanged(&path)? {
+	if !unchanged()? {
 		return Ok(false);
 	}
 	file.persist(&path)?;
@@ -755,7 +783,8 @@ mod tests {
 	}
 
 	/// With nothing unsaved, an outside edit is taken within a poll, its
-	/// history with it, and left as written until the next edit.
+	/// history with it even when it lands a poll later, and left as written
+	/// until the next edit.
 	#[tokio::test(start_paused = true)]
 	async fn takes_an_outside_edit_with_nothing_unsaved() {
 		let dir = tempfile::tempdir().unwrap();
@@ -763,15 +792,16 @@ mod tests {
 		let running = Running::start(path.clone()).await;
 
 		std::fs::write(&path, HAND_WRITTEN).unwrap();
-		// Another studio's history, describing the edit that made the file.
-		let mut theirs = Doc::new(Collection::from_toml(HAND_WRITTEN).unwrap())
-			.into_inner()
-			.unwrap();
+		kio::clock::sleep(POLL + Duration::from_millis(100)).await;
+		let hand = Collection::from_toml(HAND_WRITTEN).unwrap();
+		assert_eq!(running.text().collection, hand.to_toml().unwrap());
+
+		// Another studio's history, written after its scene file.
+		let mut theirs = Doc::new(hand).into_inner().unwrap();
 		theirs.edit("Theirs");
 		theirs.history.undo(&mut theirs.collection).unwrap();
 		std::fs::write(history_path(&path), theirs.history.to_toml().unwrap()).unwrap();
-
-		kio::clock::sleep(POLL + Duration::from_millis(100)).await;
+		kio::clock::sleep(POLL).await;
 		assert_eq!(running.text(), theirs.text().unwrap());
 		assert_eq!(running.autosave.conflict(), None);
 		assert_eq!(read(&path), HAND_WRITTEN, "taken, not rewritten");
@@ -851,6 +881,29 @@ mod tests {
 			running.text().collection,
 			Collection::from_toml(HAND_WRITTEN).unwrap().to_toml().unwrap()
 		);
+	}
+
+	/// A scene file that cannot be read shows as a failed save until it can.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn shows_a_file_it_cannot_read() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		let running = Running::start(path.clone()).await;
+		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+		if std::fs::File::open(&path).is_ok() {
+			return; // Running as root, which may read it anyway.
+		}
+
+		kio::clock::sleep(POLL + QUIET + Duration::from_millis(100)).await;
+		let error = running.autosave.error().unwrap();
+		assert!(error.contains("show.toml"), "{error}");
+
+		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+		kio::clock::sleep(QUIET + Duration::from_millis(100)).await;
+		assert_eq!(running.autosave.error(), None);
 	}
 
 	/// The file is checked again after the save serializes the studio's
