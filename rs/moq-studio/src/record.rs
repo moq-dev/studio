@@ -274,9 +274,13 @@ impl Run {
 					ended.retain(|name| listed.contains(name));
 				}
 				joined = writers.join_next() => match joined.context("no writer left")?? {
+					// Held back only while still listed: one already gone may be
+					// listed again later, and is then recorded afresh.
 					Some(name) => {
 						writing.remove(&name);
-						ended.insert(name);
+						if listed.contains(&name) {
+							ended.insert(name);
+						}
 					}
 					// The program's writer ended, so the recording is over.
 					None => {
@@ -675,7 +679,8 @@ mod tests {
 	}
 
 	/// Each source with media of its own records into its own file while it is
-	/// listed, beside the program; a still has nothing to record.
+	/// listed, beside the program, and into another when listed again; a still
+	/// has nothing to record.
 	#[tokio::test(start_paused = true)]
 	async fn sources_record_into_their_own_files() {
 		let dir = tempfile::tempdir().unwrap();
@@ -701,6 +706,9 @@ mod tests {
 		// Its file finishes while the rest record on.
 		studio.remove("mic/1");
 		studio.play(Duration::from_secs(1)).await;
+		// Added back, it records into another file.
+		studio.add("mic/1");
+		studio.play(Duration::from_secs(1)).await;
 		recorder.finish().await;
 
 		let status = recorder.status().unwrap();
@@ -716,8 +724,8 @@ mod tests {
 			})
 			.collect();
 		let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
-		assert_eq!(names, [".mp4", " mic_1.mp4", " guitar.mp4"]);
-		for ((_, duration), expected) in files.iter().zip([3, 2, 2]) {
+		assert_eq!(names, [".mp4", " mic_1.mp4", " guitar.mp4", " mic_1 (2).mp4"]);
+		for ((_, duration), expected) in files.iter().zip([4, 2, 3, 1]) {
 			assert!(about(*duration, Duration::from_secs(expected)), "{files:?}");
 		}
 	}
