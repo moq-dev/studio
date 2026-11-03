@@ -54,20 +54,28 @@ pub type Catalog = moq_mux::catalog::Producer<Ext>;
 pub struct Publish {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Catalog,
+	bandwidth: moq_net::bandwidth::Allocator,
 	kind: moq_video::encode::Kind,
 }
 
 impl Publish {
 	/// Publish sources into `broadcast`, listed in `catalog`, the one serving it,
-	/// encoding captured video with `kind`.
+	/// encoding captured video with `kind`. Each source track claims its bitrate
+	/// on `bandwidth`, the allocator the program's tracks claim on.
 	///
 	/// Pass [`Kind::Hardware`](moq_video::encode::Kind::Hardware) on a machine
 	/// with a hardware encoder, so a session it refuses fails that source's track
 	/// with the reason rather than quietly loading the CPU with a software one.
-	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: Catalog, kind: moq_video::encode::Kind) -> Self {
+	pub fn new(
+		broadcast: moq_net::broadcast::Producer,
+		catalog: Catalog,
+		bandwidth: moq_net::bandwidth::Allocator,
+		kind: moq_video::encode::Kind,
+	) -> Self {
 		Self {
 			broadcast,
 			catalog,
+			bandwidth,
 			kind,
 		}
 	}
@@ -91,6 +99,7 @@ impl Listing {
 		// The studio's clock, so source and program timestamps share one timeline.
 		let config = moq_mux::catalog::Config::default()
 			.with_clock(publish.catalog.clock())
+			.with_bandwidth(publish.bandwidth.clone())
 			.with_hls(None);
 		let catalog = moq_mux::catalog::Producer::new(&mut scratch, config)?;
 		Ok(Self {
@@ -288,7 +297,8 @@ mod tests {
 		let consumer = broadcast.consume();
 		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 		let catalog = Catalog::new(&mut broadcast, config).unwrap();
-		let publish = Publish::new(broadcast, catalog.clone(), moq_video::encode::Kind::Auto);
+		let bandwidth = moq_net::bandwidth::Allocator::unlimited();
+		let publish = Publish::new(broadcast, catalog.clone(), bandwidth, moq_video::encode::Kind::Auto);
 		(publish, catalog, consumer)
 	}
 

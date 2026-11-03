@@ -1,0 +1,1287 @@
+//! Stream health: how the program actually reaches viewers, track by track,
+//! and in plain words why it does not when it does not.
+//!
+//! Every [`INTERVAL`] the studio grades its stream with `hang::health`, the
+//! grader the rest of the stack shares, from three points of view:
+//! - its own: what each track of the broadcast wrote, and the relay
+//!   connection's round trip, estimated capacity, and loss;
+//! - its viewers': the feedback each publishes under the broadcast's `echo`
+//!   path, which the catalog solicits (`moq export --echo` answers it);
+//! - the relay's: how many sessions watch the broadcast, read from the relay's
+//!   stats broadcasts when it shares them with this connection.
+//!
+//! It adds what only the studio knows (program frames the encoder had no room
+//! for, sources that stopped delivering) and names the cause of each problem.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+pub use hang::health::Verdict;
+use hang::health::{self, Health, Input, Observer, Thresholds};
+use kio::clock::Instant;
+use moq_net::bandwidth::Rate;
+
+/// How often the health is graded: as often as reporters write.
+pub const INTERVAL: Duration = Duration::from_secs(1);
+
+/// The prefix, under the broadcast's own path, where viewers publish feedback.
+const ECHO: &str = "viewers";
+
+/// The most of one viewer's report the studio holds. A report covers the
+/// broadcast's few tracks in well under a KiB, so this only stops a viewer
+/// whose patches keep adding keys.
+const MAX_REPORT: usize = 64 * 1024;
+
+/// The most viewers whose feedback the studio reads at once. Their grades are
+/// a sample, which a few dozen viewers show as well as thousands would, while
+/// the readers, their subscriptions, and their reports stay a fixed cost
+/// however many viewers announce feedback.
+const MAX_VIEWERS: usize = 64;
+
+/// What the Health panel draws, rebuilt every [`INTERVAL`].
+#[derive(Debug, Default)]
+pub struct Report {
+	/// The relay connection, `None` when the studio publishes nothing.
+	pub relay: Option<Relay>,
+	pub uplink: Uplink,
+	pub viewers: Viewers,
+	/// Each track of the broadcast, in catalog order.
+	pub tracks: Vec<Track>,
+	/// What is wrong, worst first, each naming its cause.
+	pub problems: Vec<Problem>,
+}
+
+/// The relay connection's state.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Relay {
+	/// No session has connected yet.
+	Connecting,
+	Connected,
+	/// The connection is redialing, with why the last session ended.
+	Disconnected(String),
+}
+
+/// The connection to the relay, graded as the publisher's link.
+#[derive(Debug, Default)]
+pub struct Uplink {
+	/// The worst of the grades below.
+	pub verdict: Verdict,
+	pub rtt: Option<Duration>,
+	/// What the congestion controller estimates the connection can carry.
+	pub capacity: Option<Rate>,
+	/// The media every track wrote over the last interval.
+	pub media: Option<Rate>,
+	/// Transport bytes lost per media byte written over the last interval.
+	pub loss: Option<f64>,
+	/// `hang::health`'s grade of each input. Loss and headroom are unknown
+	/// while nobody watches: the relay pulls nothing then, so an idle link's
+	/// estimate and loss say nothing about the stream.
+	grades: Vec<(Input, Verdict)>,
+}
+
+impl Uplink {
+	fn grade(&self, input: Input) -> Verdict {
+		self.grades
+			.iter()
+			.find(|(graded, _)| *graded == input)
+			.map_or(Verdict::Unknown, |(_, verdict)| *verdict)
+	}
+}
+
+/// Who watches.
+#[derive(Debug, Default)]
+pub struct Viewers {
+	/// Sessions subscribed to the broadcast, summed over the relay's nodes, or
+	/// `None` when the relay shares no stats with this connection.
+	pub watching: Option<u64>,
+	/// The viewers whose feedback is read, by name: a sample of at most
+	/// [`MAX_VIEWERS`].
+	pub reports: Vec<Viewer>,
+	/// Viewers reporting beyond the sample, whose feedback is not read.
+	pub unread: usize,
+}
+
+/// One viewer's feedback.
+#[derive(Debug)]
+pub struct Viewer {
+	/// The name it publishes feedback under.
+	pub name: String,
+	pub verdict: Verdict,
+	/// Its round trip to its relay.
+	pub rtt: Option<Duration>,
+	/// The longest any track took from the program clock to this viewer.
+	pub latency: Option<Duration>,
+	/// The longest playout delay it reports.
+	pub playout: Option<Duration>,
+	/// Why its report cannot be read, if it cannot.
+	pub error: Option<String>,
+}
+
+/// One track of the broadcast.
+#[derive(Debug)]
+pub struct Track {
+	/// Its catalog rendition ID.
+	pub id: String,
+	/// What it carries, such as `video H.264 1920x1080`.
+	pub label: String,
+	/// The bitrate it wrote over the last interval.
+	pub sent: Option<Rate>,
+	/// Frames per second it wrote over the last interval.
+	pub framerate: Option<f64>,
+	/// Viewers reporting this track.
+	pub viewers: usize,
+	/// The lowest bitrate any of them received over its last interval.
+	pub received: Option<Rate>,
+	/// The worst grade any of them gave it.
+	pub verdict: Verdict,
+	/// The longest it took any of them from the program clock to arrival.
+	pub latency: Option<Duration>,
+}
+
+/// Something wrong with the stream, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Problem {
+	/// Degraded or unhealthy.
+	pub verdict: Verdict,
+	pub cause: String,
+}
+
+/// What only the studio knows, read each interval: cumulative counters and
+/// the state of its sources.
+#[derive(Debug, Default, Clone)]
+pub struct Local {
+	/// Canvas frames drawn.
+	pub rendered: u64,
+	/// Program frames the encoder had no room for.
+	pub dropped: u64,
+	/// Program frames encoded.
+	pub encoded: u64,
+	/// Whether the program should be encoding: always, or while watched when
+	/// on demand.
+	pub encoding: bool,
+	/// Whether anyone subscribes to the program video.
+	pub watched: bool,
+	/// The encoder backend, once one opened.
+	pub encoder: Option<String>,
+	/// Why the output stopped, if it did.
+	pub failed: Option<String>,
+	/// Sources the program shows that stopped delivering pictures, and for how long.
+	pub stalled: Vec<(String, Duration)>,
+}
+
+/// What the studio publishes, for grading its delivery.
+pub struct Publisher {
+	/// The broadcast's path and the epoch it was announced with.
+	pub observer: Observer,
+	pub catalog: moq_scene::publish::Catalog,
+	/// The catalog's clock, which maps a track's timestamps to the wall time
+	/// the program drew them.
+	pub clock: moq_mux::Clock,
+	pub monitor: moq_tokio::connection::Monitor,
+	pub feedback: Feedback,
+	pub watching: Watching,
+}
+
+/// Grades the stream every interval.
+pub struct Sampler {
+	publisher: Option<Publisher>,
+	thresholds: Thresholds,
+	previous: Option<Previous>,
+}
+
+/// The last interval's readings, which the next one is measured against.
+struct Previous {
+	at: Instant,
+	local: Local,
+	report: Option<health::Report<hang::stats::Snapshot>>,
+}
+
+impl Sampler {
+	/// Grade a studio publishing as `publisher`, or only its local work without one.
+	pub fn new(publisher: Option<Publisher>) -> Self {
+		Self {
+			publisher,
+			thresholds: Thresholds::default(),
+			previous: None,
+		}
+	}
+
+	/// Grade the interval ending `now`, given what the studio reads now.
+	pub fn sample(&mut self, now: Instant, local: Local) -> Report {
+		let previous = self.previous.take();
+		let interval = previous
+			.as_ref()
+			.map(|previous| now.saturating_duration_since(previous.at));
+
+		let mut report = Report::default();
+		let mut graded = Graded::default();
+		let mut current = None;
+		if let Some(publisher) = &self.publisher {
+			report.relay = Some(relay(&publisher.monitor));
+			let snapshot = snapshot(publisher);
+			let ours = health::Report::new(publisher.observer.clone(), snapshot);
+			let mut sample = health::Sample::new(&ours, Duration::ZERO);
+			if let (Some(previous), Some(interval)) = (previous.as_ref().and_then(|p| p.report.as_ref()), interval) {
+				sample = sample.with_previous(previous, interval);
+			}
+			let graded_ours = health::publisher(&sample, &self.thresholds);
+			report.uplink = uplink(&ours.snapshot, &graded_ours, local.watched);
+			graded.publisher = Some(graded_ours);
+			graded.viewers = publisher.feedback.grade(now, &self.thresholds);
+			report.viewers.unread = publisher.feedback.unread();
+			report.viewers.watching = publisher.watching.get();
+			report.tracks = tracks(publisher, &graded);
+			report.viewers.reports = viewers(publisher, &graded.viewers);
+			current = Some(ours);
+		}
+
+		let drops = previous.as_ref().map(|previous| Drops {
+			drawn: local.rendered.saturating_sub(previous.local.rendered),
+			dropped: local.dropped.saturating_sub(previous.local.dropped),
+			encoded: local.encoded.saturating_sub(previous.local.encoded),
+		});
+		report.problems = problems(&Facts {
+			relay: report.relay.as_ref(),
+			local: &local,
+			drops,
+			uplink: &report.uplink,
+			viewers: &graded.viewers,
+			labels: &report.tracks,
+			thresholds: &self.thresholds,
+		});
+
+		self.previous = Some(Previous {
+			at: now,
+			local,
+			report: current,
+		});
+		report
+	}
+}
+
+fn relay(monitor: &moq_tokio::connection::Monitor) -> Relay {
+	match monitor.state().phase {
+		moq_tokio::connection::Phase::Connecting => Relay::Connecting,
+		moq_tokio::connection::Phase::Connected | moq_tokio::connection::Phase::Migrating => Relay::Connected,
+		moq_tokio::connection::Phase::Disconnected | moq_tokio::connection::Phase::Closed => Relay::Disconnected(
+			monitor
+				.failure()
+				.map_or_else(|| "the connection closed".to_string(), |err| err.to_string()),
+		),
+	}
+}
+
+/// What the studio's tracks have written, and the connection's transport.
+fn snapshot(publisher: &Publisher) -> hang::stats::Snapshot {
+	let mut snapshot = hang::stats::Snapshot::default();
+	snapshot.renditions = publisher.catalog.stats();
+	if let Some(stats) = publisher.monitor.stats() {
+		snapshot.transport.rtt = stats.rtt;
+		snapshot.transport.rate = stats.estimated_send_rate.map(Rate::as_bps);
+		snapshot.transport.lost_bytes = stats.bytes_lost;
+		snapshot.transport.lost_packets = stats.packets_lost;
+	}
+	snapshot
+}
+
+/// The connection's readings and grades; see [`Uplink::grades`].
+fn uplink(snapshot: &hang::stats::Snapshot, graded: &Health, watched: bool) -> Uplink {
+	let evidence = &graded.transport.evidence;
+	let grades: Vec<(Input, Verdict)> = evidence
+		.iter()
+		.map(|evidence| {
+			let idle = !watched && evidence.input != Input::Rtt;
+			(evidence.input, if idle { Verdict::Unknown } else { evidence.verdict })
+		})
+		.collect();
+	let media = graded.interval.map(|_| {
+		graded
+			.renditions
+			.values()
+			.filter_map(|rendition| rendition.bitrate)
+			.sum()
+	});
+	Uplink {
+		verdict: grades
+			.iter()
+			.map(|(_, verdict)| *verdict)
+			.fold(Verdict::Unknown, Verdict::max),
+		rtt: snapshot.transport.rtt,
+		capacity: snapshot.transport.rate.map(Rate::from_bps),
+		media: media.map(Rate::from_bps),
+		loss: evidence
+			.iter()
+			.find(|evidence| evidence.input == Input::Loss)
+			.and_then(|evidence| evidence.value),
+		grades,
+	}
+}
+
+/// Each catalog track, with what it sent and what its viewers received.
+fn tracks(publisher: &Publisher, graded: &Graded) -> Vec<Track> {
+	let catalog = publisher.catalog.snapshot();
+	let sent = graded.publisher.as_ref();
+	let video = catalog.video.renditions.iter().map(|(id, config)| {
+		let size = match (config.coded_width, config.coded_height) {
+			(Some(width), Some(height)) => format!(" {width}x{height}"),
+			_ => String::new(),
+		};
+		(id, format!("video {}{size}", config.codec))
+	});
+	let audio = catalog
+		.audio
+		.renditions
+		.iter()
+		.map(|(id, config)| (id, format!("audio {} {} ch", config.codec, config.channel_count)));
+	video
+		.chain(audio)
+		.map(|(id, label)| {
+			let ours = sent.and_then(|health| health.renditions.get(id));
+			let interval = sent.and_then(|health| health.interval);
+			let mut track = Track {
+				id: id.clone(),
+				label,
+				sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
+				framerate: ours
+					.and_then(|rendition| rendition.frames)
+					.zip(interval)
+					.map(|(frames, interval)| frames as f64 / interval.as_secs_f64()),
+				viewers: 0,
+				received: None,
+				verdict: Verdict::Unknown,
+				latency: None,
+			};
+			for viewer in &graded.viewers {
+				let Some(health) = &viewer.health else { continue };
+				let Some(rendition) = health.renditions.get(id) else {
+					continue;
+				};
+				track.viewers += 1;
+				track.verdict = track.verdict.max(rendition.verdict);
+				if let Some(bitrate) = rendition.bitrate.map(Rate::from_bps) {
+					track.received = Some(track.received.map_or(bitrate, |received| received.min(bitrate)));
+				}
+				let latency = viewer.latency(id, &publisher.clock);
+				track.latency = track.latency.max(latency);
+			}
+			track
+		})
+		.collect()
+}
+
+fn viewers(publisher: &Publisher, graded: &[GradedViewer]) -> Vec<Viewer> {
+	graded
+		.iter()
+		.map(|viewer| {
+			let current = viewer.current.as_ref().map(|report| &report.snapshot);
+			Viewer {
+				name: viewer.name.clone(),
+				verdict: viewer.health.as_ref().map_or(Verdict::Unknown, |health| health.verdict),
+				rtt: current.and_then(|snapshot| snapshot.transport.rtt),
+				latency: current.and_then(|snapshot| {
+					snapshot
+						.renditions
+						.keys()
+						.filter_map(|id| viewer.latency(id, &publisher.clock))
+						.max()
+				}),
+				playout: current.and_then(|snapshot| {
+					snapshot
+						.renditions
+						.values()
+						.filter_map(|rendition| rendition.latency)
+						.max()
+				}),
+				error: viewer.error.clone(),
+			}
+		})
+		.collect()
+}
+
+/// The grades of one interval.
+#[derive(Default)]
+struct Graded {
+	publisher: Option<Health>,
+	viewers: Vec<GradedViewer>,
+}
+
+/// One viewer's latest report and its grade.
+struct GradedViewer {
+	name: String,
+	current: Option<health::Report<hang::echo::Snapshot>>,
+	health: Option<Health>,
+	error: Option<String>,
+}
+
+impl GradedViewer {
+	/// How long rendition `id`'s newest frame took from the program clock to
+	/// this viewer, by the two hosts' wall clocks. `None` when it reports no
+	/// arrival, or arrived before it was drawn, as a viewer whose clock runs
+	/// behind can claim.
+	fn latency(&self, id: &str, clock: &moq_mux::Clock) -> Option<Duration> {
+		let arrival = self.current.as_ref()?.snapshot.renditions.get(id)?.arrival.as_ref()?;
+		let drawn = clock.wall_clock(arrival.timestamp).ok()?;
+		arrival.wall.checked_duration_since(drawn)
+	}
+}
+
+/// Program frames over one interval.
+#[derive(Debug, Clone, Copy)]
+struct Drops {
+	drawn: u64,
+	dropped: u64,
+	encoded: u64,
+}
+
+/// Everything a problem can rest on.
+struct Facts<'a> {
+	relay: Option<&'a Relay>,
+	local: &'a Local,
+	drops: Option<Drops>,
+	uplink: &'a Uplink,
+	viewers: &'a [GradedViewer],
+	/// The tracks, for naming one a viewer reports on.
+	labels: &'a [Track],
+	thresholds: &'a Thresholds,
+}
+
+/// Name each problem the facts show, worst first.
+fn problems(facts: &Facts<'_>) -> Vec<Problem> {
+	let mut problems = Vec::new();
+	let mut add = |verdict: Verdict, cause: String| {
+		if verdict >= Verdict::Degraded {
+			problems.push(Problem { verdict, cause });
+		}
+	};
+	let local = facts.local;
+
+	match facts.relay {
+		Some(Relay::Disconnected(reason)) => add(
+			Verdict::Unhealthy,
+			format!("The relay is unreachable ({reason}), so nothing reaches viewers until it reconnects."),
+		),
+		Some(Relay::Connecting) => add(Verdict::Degraded, "Connecting to the relay.".into()),
+		Some(Relay::Connected) | None => {}
+	}
+	if let Some(failed) = &local.failed {
+		add(Verdict::Unhealthy, format!("The output stopped: {failed}."));
+	}
+
+	for (name, since) in &local.stalled {
+		add(
+			Verdict::Unhealthy,
+			format!(
+				"Source `{name}` stalled: no new picture for {:.0} s, so the program repeats its last one.",
+				since.as_secs_f64()
+			),
+		);
+	}
+
+	if let Some(drops) = facts.drops
+		&& local.encoding
+		&& local.failed.is_none()
+	{
+		let encoder = local.encoder.as_deref().unwrap_or("the encoder");
+		let share = ratio(drops.dropped, drops.drawn);
+		let limits = &facts.thresholds.publisher.skipped;
+		if drops.drawn > 0 && drops.encoded == 0 && drops.dropped == 0 && local.encoder.is_some() {
+			add(
+				Verdict::Unhealthy,
+				format!("The encoder is stuck: {encoder} produced nothing in the last second."),
+			);
+		} else if let Some(share) = share {
+			add(
+				grade_above(share, limits.degraded, limits.unhealthy),
+				format!(
+					"The encoder is behind: {encoder} had no room for {} of {} program frames in the last second.",
+					drops.dropped, drops.drawn
+				),
+			);
+		}
+	}
+
+	let uplink = facts.uplink;
+	if let (Some(capacity), Some(media)) = (uplink.capacity, uplink.media) {
+		add(
+			uplink.grade(Input::Headroom),
+			format!(
+				"The uplink is congested: the connection carries about {} and the stream needs {}.",
+				rate(capacity),
+				rate(media)
+			),
+		);
+	}
+	if let Some(loss) = uplink.loss {
+		add(
+			uplink.grade(Input::Loss),
+			format!(
+				"The uplink is losing packets: {:.1}% of the media sent had to be resent.",
+				loss * 100.0
+			),
+		);
+	}
+	if let Some(rtt) = uplink.rtt {
+		add(
+			uplink.grade(Input::Rtt),
+			format!(
+				"The relay is far away: a round trip to it takes {} ms.",
+				rtt.as_millis()
+			),
+		);
+	}
+
+	viewer_problems(facts, &mut add);
+
+	problems.sort_by_key(|problem| std::cmp::Reverse(problem.verdict));
+	problems
+}
+
+/// What viewers' reports show, one problem per kind of trouble across them.
+fn viewer_problems(facts: &Facts<'_>, add: &mut impl FnMut(Verdict, String)) {
+	let reporting = facts.viewers.iter().filter(|viewer| viewer.health.is_some()).count();
+	// A congested or lossy uplink starves every viewer, and one measured
+	// clear of both leaves the blame with the viewers' own links. With either
+	// unmeasured, as headroom is under a controller without an estimate, the
+	// cause goes unnamed.
+	let uplink = facts.uplink;
+	let (headroom, loss) = (uplink.grade(Input::Headroom), uplink.grade(Input::Loss));
+	let cause = if headroom >= Verdict::Degraded || loss >= Verdict::Degraded {
+		": the uplink cannot keep up"
+	} else if headroom == Verdict::Healthy && loss == Verdict::Healthy {
+		": their own connections cannot keep up"
+	} else {
+		""
+	};
+
+	// Each input's worst grade, how many viewers it troubles, and the track
+	// the worst grade is on.
+	let mut worst: Vec<(Input, Verdict, usize, Option<&str>)> = Vec::new();
+	for viewer in facts.viewers {
+		let Some(health) = &viewer.health else { continue };
+		let transport = health.transport.evidence.iter().map(|evidence| (evidence, None));
+		let renditions = health.renditions.iter().flat_map(|(id, rendition)| {
+			rendition
+				.evidence
+				.iter()
+				.map(move |evidence| (evidence, Some(id.as_str())))
+		});
+		let mut counted = Vec::new();
+		for (evidence, id) in transport.chain(renditions) {
+			if evidence.verdict < Verdict::Degraded {
+				continue;
+			}
+			let index = match worst.iter().position(|entry| entry.0 == evidence.input) {
+				Some(index) => index,
+				None => {
+					worst.push((evidence.input, Verdict::Unknown, 0, None));
+					worst.len() - 1
+				}
+			};
+			let entry = &mut worst[index];
+			if !counted.contains(&evidence.input) {
+				counted.push(evidence.input);
+				entry.2 += 1;
+			}
+			if evidence.verdict > entry.1 {
+				entry.1 = evidence.verdict;
+				entry.3 = id;
+			}
+		}
+	}
+
+	let track = |id: Option<&str>| {
+		id.and_then(|id| facts.labels.iter().find(|track| track.id == id))
+			.map_or_else(|| "the stream".to_string(), |track| track.label.clone())
+	};
+	for (input, verdict, count, id) in worst {
+		let of = format!("{count} of {reporting} viewers");
+		let cause = match input {
+			Input::Late => format!("{of} receive {} too late to play{cause}.", track(id)),
+			Input::Stalled => format!("{of} are stalling on {}{cause}.", track(id)),
+			Input::Errors => format!("{of} cannot decode {}.", track(id)),
+			Input::Rtt => format!("{of} are far from their relay."),
+			// Graded for publishers only.
+			Input::Loss | Input::Headroom | Input::Skipped => continue,
+		};
+		add(verdict, cause);
+	}
+}
+
+fn ratio(numerator: u64, denominator: u64) -> Option<f64> {
+	(denominator > 0).then(|| numerator as f64 / denominator as f64)
+}
+
+fn grade_above(value: f64, degraded: f64, unhealthy: f64) -> Verdict {
+	if value >= unhealthy {
+		Verdict::Unhealthy
+	} else if value >= degraded {
+		Verdict::Degraded
+	} else {
+		Verdict::Healthy
+	}
+}
+
+/// A rate as people read it.
+pub fn rate(rate: Rate) -> String {
+	let bps = rate.as_bps() as f64;
+	if bps >= 1e6 {
+		format!("{:.1} Mb/s", bps / 1e6)
+	} else {
+		format!("{:.0} kb/s", bps / 1e3)
+	}
+}
+
+/// The prefix viewers publish feedback under, relative to the broadcast at
+/// `path` as the catalog's `echo` section spells it, and resolved.
+pub fn echo(path: &moq_net::Path) -> anyhow::Result<(moq_net::path::Relative, moq_net::Path)> {
+	// A reference resolves against the broadcast's parent, as a relative URL
+	// does, so naming the broadcast's last segment puts the prefix beneath it.
+	let relative = match path.parts().last() {
+		Some(last) => format!("{last}/{ECHO}"),
+		None => ECHO.to_string(),
+	};
+	let relative = moq_net::path::Relative::new(&relative)?;
+	let resolved = path
+		.try_resolve(&relative)
+		.ok_or_else(|| anyhow::anyhow!("the feedback prefix of `{path}` escapes the root"))?;
+	Ok((relative, resolved))
+}
+
+/// The feedback of a sample of viewers, kept by the readers
+/// [`Feedback::follow`] runs.
+#[derive(Clone, Default)]
+pub struct Feedback(Arc<Mutex<Sample>>);
+
+/// The viewers being read, and how many more wait for a reader.
+#[derive(Default)]
+struct Sample {
+	slots: BTreeMap<String, Slot>,
+	unread: usize,
+}
+
+/// Where one reader keeps its viewer's reports. A reader aborted mid-write
+/// writes to a slot nobody reads any more, rather than bringing back a viewer
+/// that left.
+type Slot = Arc<Mutex<Reports>>;
+
+/// One viewer's two latest reports, each with when it arrived.
+#[derive(Default)]
+struct Reports {
+	previous: Option<(health::Report<hang::echo::Snapshot>, Instant)>,
+	current: Option<(health::Report<hang::echo::Snapshot>, Instant)>,
+	error: Option<String>,
+}
+
+impl Feedback {
+	/// Read the feedback of viewers under `prefix` on `origin`, as viewers
+	/// come and go, until dropped: at most [`MAX_VIEWERS`] at once. A viewer
+	/// that arrives while that many are read is only counted, and a reader
+	/// that frees up goes to the next viewer to arrive, so the studio holds a
+	/// fixed number of readers and a count however many viewers announce.
+	///
+	/// Who may publish feedback is the relay's authorization, as for any
+	/// broadcast, and a read viewer's report is held to [`MAX_REPORT`].
+	pub async fn follow(self, origin: moq_net::origin::Consumer, prefix: moq_net::Path) -> anyhow::Result<()> {
+		let pattern = moq_net::Pattern::subtree(prefix.as_str())?;
+		let origin = origin.scope("", &moq_net::Patterns::from(pattern))?;
+		let mut announced = origin.announced();
+		let mut readers = BTreeMap::<moq_net::Path, Reader>::new();
+		let mut unread = 0usize;
+		while let Some(event) = announced.next().await {
+			let (announce, restart) = match event {
+				moq_net::announce::Event::Start(announce) => (announce, false),
+				moq_net::announce::Event::Restart(announce) => (announce, true),
+				moq_net::announce::Event::End(announce) => {
+					if readers.remove(&announce.prefix).is_none() && hang::echo::is_echo(&announce.prefix) {
+						unread = unread.saturating_sub(1);
+					}
+					self.0.lock().unwrap().unread = unread;
+					continue;
+				}
+				// A takeover continues the same instance, and an update moves its route.
+				_ => continue,
+			};
+			let path = announce.prefix;
+			let Some(name) = name(&prefix, &path).filter(|_| hang::echo::is_echo(&path)) else {
+				continue;
+			};
+			// A new instance of a viewer being read replaces its reader; one not
+			// read was counted when it started.
+			let read = if restart {
+				readers.remove(&path).is_some()
+			} else if readers.len() < MAX_VIEWERS {
+				true
+			} else {
+				unread += 1;
+				false
+			};
+			if read {
+				let reader = self.read(origin.clone(), Observer::new(path.clone(), announce.route.epoch), name);
+				readers.insert(path, reader);
+			}
+			self.0.lock().unwrap().unread = unread;
+		}
+		Ok(())
+	}
+
+	/// Start reading the viewer `observer` names.
+	fn read(&self, origin: moq_net::origin::Consumer, observer: Observer, name: String) -> Reader {
+		let slot = Slot::default();
+		self.0.lock().unwrap().slots.insert(name.clone(), slot.clone());
+		let task = tokio::spawn(read(origin, observer, slot.clone()));
+		Reader {
+			name,
+			slot,
+			task,
+			feedback: self.clone(),
+		}
+	}
+
+	fn unread(&self) -> usize {
+		self.0.lock().unwrap().unread
+	}
+
+	/// Grade every viewer's latest report as of `now`.
+	fn grade(&self, now: Instant, thresholds: &Thresholds) -> Vec<GradedViewer> {
+		let sample = self.0.lock().unwrap();
+		sample
+			.slots
+			.iter()
+			.map(|(name, slot)| {
+				let reports = slot.lock().unwrap();
+				let health = reports.current.as_ref().map(|(current, at)| {
+					let mut sample = health::Sample::new(current, now.saturating_duration_since(*at));
+					if let Some((previous, then)) = &reports.previous {
+						sample = sample.with_previous(previous, at.saturating_duration_since(*then));
+					}
+					health::viewer(&sample, thresholds)
+				});
+				GradedViewer {
+					name: name.clone(),
+					current: reports.current.as_ref().map(|(current, _)| current.clone()),
+					health,
+					error: reports.error.clone(),
+				}
+			})
+			.collect()
+	}
+}
+
+/// The name a viewer publishes feedback under: its path beneath `prefix`,
+/// without the `.echo` suffix.
+fn name(prefix: &moq_net::Path, path: &moq_net::Path) -> Option<String> {
+	let name = path.strip_prefix(prefix)?;
+	name.as_str().strip_suffix(hang::echo::SUFFIX).map(str::to_string)
+}
+
+/// Keep the latest reports of the viewer `observer` names in `slot`, until
+/// its broadcast ends or the report cannot be read.
+async fn read(origin: moq_net::origin::Consumer, observer: Observer, slot: Slot) {
+	let read = async {
+		let broadcast = origin.request(&observer.path, observer.epoch.clone()).await?;
+		let track = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
+		let mut config = moq_json::snapshot::consumer::Config::default();
+		config.max_size = Some(MAX_REPORT);
+		let mut reports = moq_json::snapshot::Consumer::<hang::echo::Snapshot>::new(track, config);
+		while let Some(report) = reports.latest().await? {
+			let report = health::Report::new(observer.clone(), report.value);
+			let mut reports = slot.lock().unwrap();
+			reports.previous = reports.current.take();
+			reports.current = Some((report, kio::clock::now()));
+		}
+		anyhow::Ok(())
+	};
+	if let Err(err) = read.await {
+		tracing::debug!(%err, viewer = %observer.path, "stopped reading feedback");
+		slot.lock().unwrap().error = Some(format!("{err:#}"));
+	}
+}
+
+/// A running feedback reader, which forgets its viewer when it stops.
+struct Reader {
+	name: String,
+	slot: Slot,
+	task: tokio::task::JoinHandle<()>,
+	feedback: Feedback,
+}
+
+impl Drop for Reader {
+	fn drop(&mut self) {
+		self.task.abort();
+		let slots = &mut self.feedback.0.lock().unwrap().slots;
+		if slots.get(&self.name).is_some_and(|slot| Arc::ptr_eq(slot, &self.slot)) {
+			slots.remove(&self.name);
+		}
+	}
+}
+
+/// How many sessions watch the broadcast, by the relay's own stats.
+#[derive(Clone, Default)]
+pub struct Watching(Arc<Mutex<Option<u64>>>);
+
+impl Watching {
+	fn get(&self) -> Option<u64> {
+		*self.0.lock().unwrap()
+	}
+
+	/// Follow the broadcast at `path` in the stats every relay node publishes
+	/// under `.stats` on `origin`, until dropped. Nothing is counted when the
+	/// relay shares no stats with this connection.
+	pub async fn follow(self, origin: moq_net::origin::Consumer, path: moq_net::Path) -> anyhow::Result<()> {
+		let config = moq_stats::aggregate::Config::new();
+		let pattern = moq_net::Pattern::subtree(config.prefix.as_str())?;
+		let origin = origin.scope("", &moq_net::Patterns::from(pattern))?;
+		let mut prefix = moq_stats::aggregate::Consumer::new(origin, config).prefix(path);
+		while let Some(frame) = prefix.next().await? {
+			*self.0.lock().unwrap() = Some(watching(&frame));
+		}
+		Ok(())
+	}
+}
+
+/// Sessions subscribed to exactly the prefix's broadcast, over every tier.
+fn watching(frame: &moq_stats::PrefixFrame) -> u64 {
+	frame
+		.values()
+		.map(|tier| {
+			let egress = &tier.own.publisher;
+			egress.broadcasts_started.saturating_sub(egress.broadcasts_ended)
+		})
+		.sum()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn facts<'a>(local: &'a Local, uplink: &'a Uplink, viewers: &'a [GradedViewer], tracks: &'a [Track]) -> Facts<'a> {
+		static THRESHOLDS: std::sync::LazyLock<Thresholds> = std::sync::LazyLock::new(Thresholds::default);
+		Facts {
+			relay: Some(&Relay::Connected),
+			local,
+			drops: None,
+			uplink,
+			viewers,
+			labels: tracks,
+			thresholds: &THRESHOLDS,
+		}
+	}
+
+	fn causes(problems: Vec<Problem>) -> Vec<String> {
+		problems.into_iter().map(|problem| problem.cause).collect()
+	}
+
+	/// A viewer that spent `stalled` of the last second stalled on `id`.
+	fn stalling(name: &str, id: &str, stalled: Duration) -> GradedViewer {
+		let observer = Observer::new(moq_net::Path::new(&format!("show/viewers/{name}.echo")).unwrap(), None);
+		let report = |frames: u64, stalled: Duration| {
+			let mut snapshot = hang::echo::Snapshot::default();
+			let mut rendition = hang::echo::Rendition::default();
+			rendition.frames = frames;
+			rendition.stalled = stalled;
+			snapshot.renditions.insert(id.to_string(), rendition);
+			health::Report::new(observer.clone(), snapshot)
+		};
+		let (previous, current) = (report(30, Duration::ZERO), report(60, stalled));
+		let sample = health::Sample::new(&current, Duration::ZERO).with_previous(&previous, INTERVAL);
+		let health = health::viewer(&sample, &Thresholds::default());
+		GradedViewer {
+			name: name.into(),
+			current: Some(current),
+			health: Some(health),
+			error: None,
+		}
+	}
+
+	fn track(id: &str, label: &str) -> Track {
+		Track {
+			id: id.into(),
+			label: label.into(),
+			sent: None,
+			framerate: None,
+			viewers: 0,
+			received: None,
+			verdict: Verdict::Unknown,
+			latency: None,
+		}
+	}
+
+	/// An uplink that cannot carry the stream is named, with both rates, but
+	/// only while the relay pulls the stream: an idle link's estimate says
+	/// nothing about it.
+	#[test]
+	fn a_congested_uplink_names_both_rates() {
+		let observer = Observer::new(moq_net::Path::new("show").unwrap(), None);
+		let report = |bytes: u64| {
+			let mut snapshot = hang::stats::Snapshot::default();
+			snapshot.transport.rate = Some(2_500_000);
+			let mut rendition = hang::stats::Rendition::default();
+			rendition.bytes = bytes;
+			snapshot.renditions.insert("video0".into(), rendition);
+			health::Report::new(observer.clone(), snapshot)
+		};
+		// 375 kB in a second is 3 Mb/s.
+		let (previous, current) = (report(0), report(375_000));
+		let sample = health::Sample::new(&current, Duration::ZERO).with_previous(&previous, INTERVAL);
+		let graded = health::publisher(&sample, &Thresholds::default());
+
+		let mut local = Local {
+			watched: true,
+			..Default::default()
+		};
+		let watched = uplink(&current.snapshot, &graded, true);
+		assert_eq!(watched.verdict, Verdict::Unhealthy);
+		assert_eq!(
+			causes(problems(&facts(&local, &watched, &[], &[]))),
+			["The uplink is congested: the connection carries about 2.5 Mb/s and the stream needs 3.0 Mb/s."]
+		);
+		local.watched = false;
+		let idle = uplink(&current.snapshot, &graded, false);
+		assert_eq!(idle.verdict, Verdict::Unknown);
+		assert!(problems(&facts(&local, &idle, &[], &[])).is_empty());
+	}
+
+	/// Program frames the encoder had no room for, and an encoder that
+	/// produces nothing at all, both blame the encoder by name.
+	#[test]
+	fn the_encoder_falling_behind_is_named() {
+		let local = Local {
+			encoding: true,
+			encoder: Some("nvenc".into()),
+			..Default::default()
+		};
+		let uplink = Uplink::default();
+		let mut facts = facts(&local, &uplink, &[], &[]);
+		facts.drops = Some(Drops {
+			drawn: 30,
+			dropped: 3,
+			encoded: 27,
+		});
+		let problems = problems(&facts);
+		assert_eq!(problems[0].verdict, Verdict::Unhealthy);
+		assert_eq!(
+			problems[0].cause,
+			"The encoder is behind: nvenc had no room for 3 of 30 program frames in the last second."
+		);
+
+		facts.drops = Some(Drops {
+			drawn: 30,
+			dropped: 0,
+			encoded: 0,
+		});
+		assert_eq!(
+			causes(super::problems(&facts)),
+			["The encoder is stuck: nvenc produced nothing in the last second."]
+		);
+
+		facts.drops = Some(Drops {
+			drawn: 30,
+			dropped: 0,
+			encoded: 30,
+		});
+		assert!(super::problems(&facts).is_empty());
+	}
+
+	/// Stalling viewers are blamed on their own links while the uplink is
+	/// measured clear, on the uplink when it is congested or lossy, and on
+	/// nobody while it is unmeasured, counting each viewer once. A slow round
+	/// trip alone blames nobody.
+	#[test]
+	fn stalling_viewers_name_whose_link_fails() {
+		let tracks = [track("video0", "video h264 1920x1080")];
+		let viewers = [
+			stalling("alice", "video0", Duration::from_millis(100)),
+			stalling("bob", "video0", Duration::ZERO),
+		];
+		let local = Local::default();
+		let stalling = |grades: Vec<(Input, Verdict)>| {
+			let uplink = Uplink {
+				grades,
+				..Default::default()
+			};
+			causes(problems(&facts(&local, &uplink, &viewers, &tracks)))
+		};
+		let clear = vec![(Input::Headroom, Verdict::Healthy), (Input::Loss, Verdict::Healthy)];
+		assert_eq!(
+			stalling(clear.clone()),
+			["1 of 2 viewers are stalling on video h264 1920x1080: their own connections cannot keep up."]
+		);
+		let lossy = vec![(Input::Headroom, Verdict::Healthy), (Input::Loss, Verdict::Degraded)];
+		assert_eq!(
+			stalling(lossy),
+			["1 of 2 viewers are stalling on video h264 1920x1080: the uplink cannot keep up."]
+		);
+		let mut far = clear;
+		far.push((Input::Rtt, Verdict::Degraded));
+		assert!(stalling(far)[0].ends_with("their own connections cannot keep up."));
+		assert_eq!(
+			stalling(Vec::new()),
+			["1 of 2 viewers are stalling on video h264 1920x1080."]
+		);
+		let unestimated = vec![(Input::Headroom, Verdict::Unknown), (Input::Loss, Verdict::Healthy)];
+		assert_eq!(
+			stalling(unestimated),
+			["1 of 2 viewers are stalling on video h264 1920x1080."]
+		);
+	}
+
+	/// Problems list worst first: an unreachable relay and a frozen source
+	/// above a slow round trip.
+	#[test]
+	fn problems_list_worst_first() {
+		let local = Local {
+			stalled: vec![("camera".into(), Duration::from_secs(3))],
+			..Default::default()
+		};
+		let uplink = Uplink {
+			rtt: Some(Duration::from_millis(400)),
+			grades: vec![(Input::Rtt, Verdict::Degraded)],
+			..Default::default()
+		};
+		let relay = Relay::Disconnected("timed out".into());
+		let mut facts = facts(&local, &uplink, &[], &[]);
+		facts.relay = Some(&relay);
+		assert_eq!(
+			causes(problems(&facts)),
+			[
+				"The relay is unreachable (timed out), so nothing reaches viewers until it reconnects.",
+				"Source `camera` stalled: no new picture for 3 s, so the program repeats its last one.",
+				"The relay is far away: a round trip to it takes 400 ms.",
+			]
+		);
+	}
+
+	/// The relay's count is the sessions on the broadcast itself, over every
+	/// tier, not those on broadcasts nested beneath it.
+	#[test]
+	fn watching_counts_sessions_on_the_broadcast_itself() {
+		let mut viewers = moq_stats::Prefix::default();
+		viewers.own.publisher.broadcasts_started = 5;
+		viewers.own.publisher.broadcasts_ended = 2;
+		viewers.publisher.broadcasts_started = 9;
+		let mut cluster = moq_stats::Prefix::default();
+		cluster.own.publisher.broadcasts_started = 1;
+		let frame = moq_stats::PrefixFrame::from([("".to_string(), viewers), ("eu".to_string(), cluster)]);
+		assert_eq!(watching(&frame), 4);
+	}
+
+	/// The catalog's `echo` reference resolves beneath the broadcast, wherever
+	/// the broadcast sits.
+	#[test]
+	fn feedback_lands_beneath_the_broadcast() {
+		for (path, relative, resolved) in [
+			("show", "show/viewers", "show/viewers"),
+			("room/live", "live/viewers", "room/live/viewers"),
+		] {
+			let (rel, abs) = echo(&moq_net::Path::new(path).unwrap()).unwrap();
+			assert_eq!(rel.as_str(), relative);
+			assert_eq!(abs.as_str(), resolved);
+		}
+	}
+
+	/// A viewer's feedback is read as it arrives, grades the track it
+	/// reports, and times the track from the program clock to the viewer. The
+	/// viewer is forgotten when its broadcast ends.
+	#[tokio::test(start_paused = true)]
+	async fn viewer_feedback_times_each_track() {
+		let _ = moq_tokio::crypto::install_default();
+		let origin = moq_tokio::origin::spawn();
+		let publication = origin.create_broadcast("show").unwrap();
+		let mut broadcast = publication.broadcast().clone();
+		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
+		let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
+		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		let track = broadcast
+			.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let _audio = catalog
+			.audio(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+				config,
+			)
+			.unwrap();
+		let id = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+
+		let path = moq_net::Path::new("show").unwrap();
+		let (_, prefix) = echo(&path).unwrap();
+		let feedback = Feedback::default();
+		let follow = tokio::spawn(feedback.clone().follow(origin.consume(), prefix));
+
+		// Connecting nowhere, so the connection only ever redials.
+		let client = moq_tokio::connect::Config::default().init(Default::default()).unwrap();
+		let connection = client.connect("https://127.0.0.1:1".parse::<url::Url>().unwrap());
+		let clock = catalog.clock();
+		let mut sampler = Sampler::new(Some(Publisher {
+			observer: Observer::new(path, None),
+			catalog: catalog.clone(),
+			clock: clock.clone(),
+			monitor: connection.monitor(),
+			feedback: feedback.clone(),
+			watching: Watching::default(),
+		}));
+
+		let alice = origin.create_broadcast("show/viewers/alice.echo").unwrap();
+		let track = alice.create_track(hang::echo::TRACK, None).unwrap();
+		let mut reports = moq_json::snapshot::Producer::<hang::echo::Snapshot>::new(track, Default::default());
+		alice.announce(Default::default()).unwrap();
+
+		let timestamp = moq_net::Timestamp::from_millis(20_000).unwrap();
+		let wall = clock.wall_clock(timestamp).unwrap() + Duration::from_millis(250);
+		let mut report = hang::echo::Snapshot::default();
+		let mut rendition = hang::echo::Rendition::default();
+		rendition.frames = 50;
+		rendition.arrival = Some(hang::echo::Arrival::new(timestamp, wall));
+		report.renditions.insert(id.clone(), rendition);
+		reports.update(&report).unwrap();
+
+		let sampled = until(&mut sampler, |report| {
+			report
+				.viewers
+				.reports
+				.first()
+				.is_some_and(|viewer| viewer.latency.is_some())
+		})
+		.await;
+		let viewer = &sampled.viewers.reports[0];
+		assert_eq!(viewer.name, "alice");
+		let audio = sampled.tracks.iter().find(|track| track.id == id).unwrap();
+		assert_eq!(audio.label, "audio opus 2 ch");
+		assert_eq!(audio.viewers, 1);
+		// The report carries milliseconds, so the program clock's sub-millisecond
+		// wall mapping can floor it by one.
+		let latency = audio.latency.unwrap();
+		assert!(
+			(Duration::from_millis(249)..=Duration::from_millis(250)).contains(&latency),
+			"{latency:?}"
+		);
+		assert_eq!(viewer.latency, Some(latency));
+
+		alice.unannounce();
+		until(&mut sampler, |report| report.viewers.reports.is_empty()).await;
+		follow.abort();
+	}
+
+	/// A relay that shares its stats counts each session watching the
+	/// broadcast, and only those on the broadcast itself.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn the_relay_counts_who_watches() {
+		let _ = moq_tokio::crypto::install_default();
+		let mut config = moq_relay::Config::default();
+		config.drain_timeout = Some(Duration::ZERO.into());
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.generate = vec!["localhost".into()];
+		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.stats.enabled = true;
+		let relay = moq_relay::Relay::load(config).await.unwrap().with_signals(false);
+		let url: url::Url = format!("https://{}/", relay.quic_addr().unwrap()).parse().unwrap();
+		let ready = relay.ready();
+		tokio::spawn(relay.run());
+		ready.wait().await.unwrap();
+		// `moq_relay::test_relay` cannot turn stats on, so this relay's
+		// generated certificate goes unchecked, on loopback.
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.insecure = Some(true);
+		let client = client.init(Default::default()).unwrap();
+
+		let published = moq_tokio::origin::spawn();
+		let show = published.create_broadcast("show").unwrap();
+		let track = show.create_track("video", None).unwrap();
+		show.announce(Default::default()).unwrap();
+		let subscribe = moq_tokio::origin::spawn();
+		let watching = Watching::default();
+		tokio::spawn(
+			watching
+				.clone()
+				.follow(subscribe.consume(), moq_net::Path::new("show").unwrap()),
+		);
+		let _studio = client
+			.clone()
+			.with_publisher(&published)
+			.with_subscriber(subscribe)
+			.connect(url.clone());
+
+		let viewer = moq_tokio::origin::spawn();
+		let _session = client.with_subscriber(viewer.clone()).connect(url);
+		let wait = async {
+			let broadcast = viewer
+				.consume()
+				.follow("show", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
+			let mut video = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
+			track.append_group().unwrap().finish().unwrap();
+			video.recv_group().await.unwrap();
+			while watching.get() != Some(1) {
+				kio::clock::sleep(INTERVAL / 4).await;
+			}
+		};
+		kio::clock::timeout(Duration::from_secs(30), wait)
+			.await
+			.expect("the relay never counted the viewer");
+	}
+
+	/// However many viewers announce feedback, only [`MAX_VIEWERS`] are read
+	/// and the rest counted; a reader a departing viewer frees goes to the
+	/// next to arrive.
+	#[tokio::test(start_paused = true)]
+	async fn feedback_reads_a_bounded_sample() {
+		let origin = moq_tokio::origin::spawn();
+		let (_, prefix) = echo(&moq_net::Path::new("show").unwrap()).unwrap();
+		let feedback = Feedback::default();
+		let follow = tokio::spawn(feedback.clone().follow(origin.consume(), prefix));
+
+		let announce = |n: usize| {
+			let viewer = origin.create_broadcast(format!("show/viewers/{n:03}.echo")).unwrap();
+			viewer.announce(Default::default()).unwrap();
+			viewer
+		};
+		let read = |feedback: &Feedback, name: &str| {
+			let graded = feedback.grade(kio::clock::now(), &Thresholds::default());
+			(
+				graded.len(),
+				feedback.unread(),
+				graded.iter().any(|viewer| viewer.name == name),
+			)
+		};
+		let settled = async {
+			let viewers: Vec<_> = (0..MAX_VIEWERS + 2).map(announce).collect();
+			while read(&feedback, "065") != (MAX_VIEWERS, 2, false) {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+			viewers[0].unannounce();
+			viewers[MAX_VIEWERS].unannounce();
+			while read(&feedback, "000") != (MAX_VIEWERS - 1, 1, false) {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+			let _late = announce(MAX_VIEWERS + 2);
+			while read(&feedback, "066") != (MAX_VIEWERS, 1, true) {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		};
+		kio::clock::timeout(Duration::from_secs(30), settled)
+			.await
+			.expect("the sample never settled");
+		follow.abort();
+	}
+
+	/// Sample every interval of the paused clock until `done` holds.
+	async fn until(sampler: &mut Sampler, done: impl Fn(&Report) -> bool) -> Report {
+		let wait = async {
+			loop {
+				let report = sampler.sample(kio::clock::now(), Local::default());
+				if done(&report) {
+					return report;
+				}
+				kio::clock::sleep(INTERVAL).await;
+			}
+		};
+		kio::clock::timeout(Duration::from_secs(30), wait)
+			.await
+			.expect("the report never arrived")
+	}
+}
