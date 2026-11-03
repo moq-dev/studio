@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::Context;
 
 mod engine;
+mod health;
 mod interact;
 mod ui;
 

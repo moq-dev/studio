@@ -10,8 +10,10 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use hang::catalog::Reference;
+use kio::clock::Instant;
 use moq_audio::bus::{Bus, Strip};
 use moq_mux::catalog::Stream;
 
@@ -33,6 +35,14 @@ pub(crate) enum Picture {
 /// The one picture a source holds for the compositor. A newer picture replaces
 /// an undrawn one, so a slow canvas skips pictures instead of queuing them.
 pub(crate) type Mailbox = Arc<Mutex<Option<Picture>>>;
+
+/// When a source last delivered a picture, `None` before its first.
+type Shown = Arc<Mutex<Option<Instant>>>;
+
+/// How long a camera or broadcast may go without a new picture before it reads
+/// as stalled. Either delivers several pictures a second while it works, so a
+/// second without one is a freeze a viewer sees.
+pub const STALL: Duration = Duration::from_secs(1);
 
 /// One instance of a broadcast being decoded.
 type Playing<'a> = Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>>;
@@ -130,6 +140,7 @@ impl Sources {
 pub struct Feed {
 	source: Source,
 	picture: Mailbox,
+	shown: Shown,
 	strip: Option<Strip>,
 	status: kio::Consumer<Status>,
 	page: Option<Page>,
@@ -144,6 +155,21 @@ impl Feed {
 	/// What the source is doing.
 	pub fn status(&self) -> Status {
 		self.status.read().clone()
+	}
+
+	/// How long a live camera or broadcast has gone without a new picture, once
+	/// that is at least [`STALL`] at `now`.
+	///
+	/// Displays and windows are never stalled: a capture of a still screen
+	/// delivers nothing until it changes. Neither are sources that have not
+	/// delivered their first picture, such as an audio-only broadcast.
+	pub fn stalled(&self, now: Instant) -> Option<Duration> {
+		if !matches!(self.source, Source::Camera { .. } | Source::Broadcast { .. }) || self.status() != Status::Live {
+			return None;
+		}
+		let shown = (*self.shown.lock().unwrap())?;
+		let since = now.saturating_duration_since(shown);
+		(since >= STALL).then_some(since)
 	}
 
 	/// The source's gain, mute, and meter in the program audio, if it has sound.
@@ -169,6 +195,7 @@ pub struct Driver {
 	source: Source,
 	context: Context,
 	picture: Mailbox,
+	shown: Shown,
 	strip: Option<Strip>,
 	status: kio::Producer<Status>,
 	page: Option<Page>,
@@ -222,6 +249,7 @@ impl Driver {
 
 	fn show(&self, picture: Picture) {
 		*self.picture.lock().unwrap() = Some(picture);
+		*self.shown.lock().unwrap() = Some(kio::clock::now());
 		set(&self.status, Status::Live);
 	}
 
@@ -467,6 +495,7 @@ fn pick<'a, C: Reference + Clone + 'a>(
 /// Start the feed for `source`, and the driver that fills it.
 fn open(name: &str, source: &Source, context: &Context, framerate: u32) -> (Feed, Driver) {
 	let picture = Mailbox::default();
+	let shown = Shown::default();
 	let strip = source.has_audio().then(Strip::default);
 	let status = kio::Producer::new(Status::Starting);
 	let page = matches!(source, Source::Browser { .. }).then(Page::default);
@@ -474,6 +503,7 @@ fn open(name: &str, source: &Source, context: &Context, framerate: u32) -> (Feed
 	let feed = Feed {
 		source: source.clone(),
 		picture: picture.clone(),
+		shown: shown.clone(),
 		strip: strip.clone(),
 		status: status.consume(),
 		page: page.clone(),
@@ -483,6 +513,7 @@ fn open(name: &str, source: &Source, context: &Context, framerate: u32) -> (Feed
 		source: source.clone(),
 		context: context.clone(),
 		picture,
+		shown,
 		strip,
 		status,
 		page,
@@ -596,6 +627,36 @@ mod tests {
 			let guest = sources.get("guest").unwrap();
 			assert_eq!(guest.status(), Status::Offline, "nothing is announced");
 			assert!(guest.strip().is_some(), "a broadcast feeds the bus");
+		})
+		.await;
+	}
+
+	/// A camera or broadcast that stops delivering pictures reads as stalled once
+	/// [`STALL`] passes; a display, a still, and a source that never delivered
+	/// one do not.
+	#[tokio::test]
+	async fn a_live_source_without_new_pictures_stalls() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let start = kio::clock::now();
+			let opened = |source: Source| {
+				let (feed, driver) = open("source", &source, &context);
+				set(&driver.status, Status::Live);
+				(feed, driver)
+			};
+
+			let (camera, driver) = opened(Source::Camera { id: None });
+			assert_eq!(camera.stalled(start + STALL), None, "no picture yet");
+			*driver.shown.lock().unwrap() = Some(start);
+			assert_eq!(camera.stalled(start + STALL / 2), None);
+			assert_eq!(camera.stalled(start + STALL * 3), Some(STALL * 3));
+			set(&driver.status, Status::Failed("unplugged".into()));
+			assert_eq!(camera.stalled(start + STALL * 3), None, "a failure says why on its own");
+
+			let (display, driver) = opened(Source::Display { id: None });
+			*driver.shown.lock().unwrap() = Some(start);
+			assert_eq!(display.stalled(start + STALL * 3), None, "a still screen sends nothing");
 		})
 		.await;
 	}

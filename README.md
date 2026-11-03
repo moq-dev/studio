@@ -39,7 +39,8 @@ Every panel is a tab you can drag, split, or stack.
 | Sources | Add a source by hand, see whether each is live, and remove one. A browser source also shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU). |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the relay connection, whether anyone is watching, and the encoder's work. |
+| Output | See the broadcast path, whether the program is encoding, and the encoder's work. |
+| Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
 
 A broadcast source subscribes through the same relay connection, plays the
 best video and audio its catalog lists, switches when the catalog changes, and
@@ -133,6 +134,35 @@ macOS. A browser source's page is copied on the GPU from the shared texture CEF
 paints, given the same Vulkan DMA-BUF import. Every other source, every source
 on Windows or on a GPU that cannot import, and every still image delivers its
 frames from the CPU, which the compositor uploads.
+
+## Health
+
+The Health panel grades the stream every second on the thresholds moq's
+`hang::health` shares with the rest of the stack, and lists each problem
+with its cause in plain words: the relay is unreachable, the uplink is
+congested or losing packets, the relay is far away, the encoder is behind or
+stuck, a camera or broadcast source on program stalled, or viewers are late,
+stalling, or cannot decode a track. Below that it shows:
+
+- **Uplink**: the round trip to the relay, the bandwidth the connection
+  estimates it can carry, the media every track writes, and the share lost and
+  resent. Loss and headroom are graded only while someone watches, since the
+  relay pulls nothing otherwise.
+- **Watching**: the sessions subscribed to the broadcast, from the relay's
+  `.stats` broadcasts. A relay shares those only with a connection allowed to
+  read them, so most show "unknown". In a cluster, a relay forwarding the
+  stream to another counts as one session.
+- **Tracks**: each track's bitrate and frame rate, and, from viewers that
+  report, the lowest bitrate any received, its worst grade, and the latency
+  from the program clock to the slowest viewer. Latency compares the two
+  hosts' wall clocks, so keep both synced.
+- **Viewers**: each viewer that reports, with its round trip, latency, and
+  playout delay. The studio reads 64 at most, a sample the grades rest on: it
+  counts the rest, and a reader one frees goes to the next viewer to arrive.
+
+The catalog asks viewers to report under `<broadcast>/viewers/`: a viewer
+publishes `<broadcast>/viewers/<name>.echo`, as `moq export --echo <name>`
+does. The relay decides who may publish there, as for any broadcast.
 
 ## Development
 
