@@ -13,7 +13,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
     show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
 ```
 
-- `show.toml` is the scene collection. It is created on the first save.
+- `show.toml` is the scene collection. It is created if it does not exist, and
+  changes are saved to it a second after you stop editing, with no save step.
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
@@ -38,7 +39,8 @@ Every panel is a tab you can drag, split, or stack.
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the relay connection, whether anyone is watching, and the encoder's work. |
+| Output | See the broadcast path, whether the program is encoding, and the encoder's work. |
+| Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
@@ -125,19 +127,30 @@ rect = { x = 1600, y = 40, width = 280, height = 120 }
 
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
-(macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`), and
+(macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, and `clone` (with the `source` it shows). The Devices panel fills
 in ids. `[video.<source>]` lists a source's filters, and an item's `filters`
 its own; the one filter so far is `opacity`, from 0 to 1, as in CSS. `[[top]]`
-items make up the top layer. **File > Save** (Ctrl+S) writes the file and
-**File > Reload** reads it back; a new canvas size or frame rate takes a
-restart.
+items make up the top layer.
 
-Saving also writes the last 100 edits beside the scene file, as
-`show.history.toml` for `show.toml`, and opening the scene file restores them,
-so undo reaches back past a restart. An edit that no longer matches the scene
-file, such as after editing it by hand, is dropped with every older one, and
-the status bar says how many. A history file that cannot be read stops the
+The studio writes the file a second after the last change, so a burst such as a
+slider drag is one write, and once more on quit. Edits that never pause for a
+second are written five seconds after the first, so a crash loses at most the
+last five seconds of edits. Each write replaces the whole file at once, never
+leaving half of it, and a collection that has not changed is not rewritten, so
+a hand-written file keeps its comments and layout until the next edit in the
+studio. A failed write shows in the status bar and
+is retried every second; until one succeeds, a crash loses every edit since the
+last write. To edit the file by hand while the studio runs, save it and pick
+**File > Reload**; an edit in the studio before that overwrites it. A new
+canvas size or frame rate takes a restart.
+
+The last 100 edits are written the same way beside the scene file, as
+`show.history.toml` for `show.toml`, after the scene file, and opening the
+scene file restores them, so undo reaches back past a restart. An undo or redo
+is saved like any other edit. An edit that no longer matches the scene file,
+such as after editing it by hand, is dropped with every older one, and the
+status bar says how many. A history file that cannot be read stops the
 studio, naming the file; delete it to start a new history. The history holds
 whatever the scene file held, including removed sources, so check it too
 before sharing.
@@ -167,6 +180,35 @@ driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
 macOS. Every other source, every source on Windows or on a GPU that cannot
 import, and every still image delivers its frames from the CPU, which the
 compositor uploads.
+
+## Health
+
+The Health panel grades the stream every second on the thresholds moq's
+`hang::health` shares with the rest of the stack, and lists each problem
+with its cause in plain words: the relay is unreachable, the uplink is
+congested or losing packets, the relay is far away, the encoder is behind or
+stuck, a camera or broadcast source on program stalled, or viewers are late,
+stalling, or cannot decode a track. Below that it shows:
+
+- **Uplink**: the round trip to the relay, the bandwidth the connection
+  estimates it can carry, the media every track writes, and the share lost and
+  resent. Loss and headroom are graded only while someone watches, since the
+  relay pulls nothing otherwise.
+- **Watching**: the sessions subscribed to the broadcast, from the relay's
+  `.stats` broadcasts. A relay shares those only with a connection allowed to
+  read them, so most show "unknown". In a cluster, a relay forwarding the
+  stream to another counts as one session.
+- **Tracks**: each track's bitrate and frame rate, and, from viewers that
+  report, the lowest bitrate any received, its worst grade, and the latency
+  from the program clock to the slowest viewer. Latency compares the two
+  hosts' wall clocks, so keep both synced.
+- **Viewers**: each viewer that reports, with its round trip, latency, and
+  playout delay. The studio reads 64 at most, a sample the grades rest on: it
+  counts the rest, and a reader one frees goes to the next viewer to arrive.
+
+The catalog asks viewers to report under `<broadcast>/viewers/`: a viewer
+publishes `<broadcast>/viewers/<name>.echo`, as `moq export --echo <name>`
+does. The relay decides who may publish there, as for any broadcast.
 
 ## Development
 

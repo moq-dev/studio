@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+mod autosave;
 mod engine;
+mod health;
 mod ui;
 
 #[derive(usage_rs::Cli, Clone)]
@@ -17,7 +19,7 @@ mod ui;
 #[usage(name = "moq-studio")]
 #[usage(completion, settings)]
 pub struct Config {
-	/// The scene collection to open. Created on the first save if it does not exist.
+	/// The scene collection to open, saved as it changes. Created if it does not exist.
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub scenes: PathBuf,
 
@@ -65,21 +67,28 @@ fn main() -> anyhow::Result<()> {
 	// The QUIC client binds its socket on the current runtime.
 	let _runtime = runtime.enter();
 	let gpu = pollster::block_on(engine::Gpu::new())?;
-	let loaded = engine::load(&config.scenes)?;
+	let (autosave, loaded) = autosave::Autosave::open(config.scenes.clone())?;
 	let connect = match config.client.url.clone() {
 		Some(url) => Some((config.client.clone().init(config.quic.clone())?, url)),
 		None => None,
 	};
 	let engine = runtime.block_on(engine::Engine::start(
 		gpu.clone(),
-		config.scenes.clone(),
+		autosave,
 		loaded,
 		connect,
 		&config.broadcast,
 		config.on_demand,
 	))?;
 
-	run(engine, gpu, runtime.handle().clone())
+	let ran = run(engine.clone(), gpu, runtime.handle().clone());
+	// The edits since the last autosave, so quitting loses none.
+	let saved = engine.save();
+	if let (Err(err), Err(_)) = (&saved, &ran) {
+		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
+	}
+	ran?;
+	saved
 }
 
 /// Show the window until it is closed.
