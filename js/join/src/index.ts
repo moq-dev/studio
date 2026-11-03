@@ -27,13 +27,25 @@ function fail(err: unknown): void {
 	error.hidden = false;
 }
 
+/**
+ * `use` on the page's session storage, or `undefined` where the browser denies
+ * it, which only costs rejoining after a reload.
+ */
+function stored<T>(use: (storage: Storage) => T): T | undefined {
+	try {
+		return use(sessionStorage);
+	} catch {
+		return undefined;
+	}
+}
+
 /** The link this page was opened with, moved out of the address bar. */
 function read(): Link {
-	const fragment = location.hash.slice(1) || sessionStorage.getItem(STORED);
+	const fragment = location.hash.slice(1) || stored((storage) => storage.getItem(STORED));
 	if (!fragment) throw new Error("open the join link the host sent you");
 	const link = parse(fragment);
 	// Out of the address bar, history, and anything that shows them, such as a screen share.
-	sessionStorage.setItem(STORED, fragment);
+	stored((storage) => storage.setItem(STORED, fragment));
 	history.replaceState(null, "", location.pathname + location.search);
 	return link;
 }
@@ -69,6 +81,10 @@ function join(link: Link): () => void {
 			["microphone", effect.get(local.microphone.out.error)],
 		] as const;
 		const messages = failures.flatMap(([device, error]) => (error ? [`No ${device}: ${error.message}`] : []));
+		// The screen picker gives no reason when it is closed or refused.
+		if (effect.get(local.screenEnabled) && !effect.get(local.share.out.source)) {
+			messages.push("No screen shared: pick one in the browser's prompt, or turn Share screen off.");
+		}
 		const capture = element("capture");
 		capture.textContent = messages.join(" ");
 		capture.hidden = messages.length === 0;
@@ -114,13 +130,14 @@ function main(): void {
 	let leave: (() => void) | undefined;
 	element("join").addEventListener("click", () => {
 		element("ready").hidden = true;
+		element("error").hidden = true;
 		element("joined").hidden = false;
 		leave = join(link);
 	});
 	element("leave").addEventListener("click", () => {
 		leave?.();
 		leave = undefined;
-		sessionStorage.removeItem(STORED);
+		stored((storage) => storage.removeItem(STORED));
 		element("joined").hidden = true;
 		element("ready").hidden = false;
 	});
