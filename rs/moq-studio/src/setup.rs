@@ -13,11 +13,12 @@ use std::time::Duration;
 use anyhow::Context;
 use egui::Ui;
 use moq_net::bandwidth::Rate;
-use moq_scene::{Canvas, Collection, Item, Rect, Scene};
+use moq_scene::{Canvas, Collection, Item, Rect, Scene, wgpu};
 
 use crate::autosave::Autosave;
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{self, Engine, Launch};
+use crate::health::rate;
 use crate::uplink;
 
 /// The canvases setup can propose, best first. Each encodes at its own default
@@ -38,9 +39,25 @@ const fn canvas(width: u32, height: u32, framerate: u32) -> Canvas {
 	}
 }
 
-/// The share of the measured uplink the program may use. The rest absorbs the
-/// estimate's error and whatever else shares the connection.
-const HEADROOM: f64 = 0.75;
+/// The share of the measured uplink the program may use: as much as keeps the
+/// Health panel's headroom grade healthy, so a proposal is not flagged the
+/// moment it goes live. The rest absorbs the estimate's error and whatever else
+/// shares the connection.
+fn headroom() -> f64 {
+	1.0 / hang::health::Thresholds::default().transport.headroom.degraded
+}
+
+/// Frames timed per canvas once its encoder opens: enough to average out one
+/// slow frame, few enough that setup stays quick.
+const BURST: u32 = 15;
+
+/// The share of each frame's period that copying and encoding it may take, so
+/// the encoder still keeps up while sources and the compositor share the machine.
+const PACE: f64 = 0.75;
+
+/// How far the timed picture pans each frame, so the encoder searches motion as
+/// it does for live content instead of skipping a still picture.
+const PAN: u32 = 4;
 
 /// The scene setup proposes.
 const SCENE: &str = "Main";
@@ -55,6 +72,8 @@ pub struct Encoding {
 	pub gpu: bool,
 	/// The video bitrate it encodes at.
 	pub bitrate: Rate,
+	/// How long copying and encoding a frame took, on average over a burst.
+	pub frame: Duration,
 }
 
 impl Encoding {
@@ -62,59 +81,230 @@ impl Encoding {
 	fn total(&self) -> Rate {
 		Rate::from_bps(self.bitrate.as_bps() + engine::AUDIO_BITRATE.as_bps())
 	}
+
+	/// Whether the encoder keeps up with `canvas` in real time, within [`PACE`].
+	fn keeps_up(&self, canvas: Canvas) -> bool {
+		self.frame <= budget(canvas)
+	}
+
+	/// How many times its [`budget`] a frame of `canvas` took, scaled to compare
+	/// canvases without floats.
+	fn load(&self, canvas: Canvas) -> u128 {
+		self.frame.as_nanos() * u128::from(canvas.framerate)
+	}
+}
+
+/// The time a frame of `canvas` may take to copy and encode.
+fn budget(canvas: Canvas) -> Duration {
+	(Duration::from_secs(1) / canvas.framerate).mul_f64(PACE)
 }
 
 /// Each of [`CANVASES`], with how it encodes or why it cannot.
 pub type Encoders = Vec<(Canvas, Result<Encoding, String>)>;
 
+/// The canvases setup may propose: those whose encoder keeps up, or the one
+/// closest to keeping up when none does, best first.
+fn candidates(encoders: &Encoders) -> Vec<(Canvas, &Encoding)> {
+	let encodable = encoders
+		.iter()
+		.filter_map(|(canvas, result)| Some((*canvas, result.as_ref().ok()?)));
+	let fast: Vec<_> = encodable
+		.clone()
+		.filter(|(canvas, encoding)| encoding.keeps_up(*canvas))
+		.collect();
+	match fast.is_empty() {
+		true => encodable
+			.min_by_key(|(canvas, encoding)| encoding.load(*canvas))
+			.into_iter()
+			.collect(),
+		false => fast,
+	}
+}
+
 /// Open the exporter the program would for each canvas, the same probe that
-/// picks its encoder at startup, and keep what it settled on.
+/// picks its encoder at startup, and time a burst through what it settled on.
 async fn probe_encoders(gpu: engine::Gpu) -> Encoders {
+	let picture = Picture::new(&gpu);
 	let mut probed = Vec::new();
 	for canvas in CANVASES {
-		let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
-		let result = moq_video::render::export::Exporter::new(&gpu.device, &gpu.queue, &mut config)
+		let result = probe_encoder(&gpu, &picture, canvas)
 			.await
-			.map_err(|err| err.to_string())
-			.and_then(|(exporter, rendition)| {
-				let encoder = match &config.kind {
-					moq_video::encode::Kind::Named(name) => name.clone(),
-					other => format!("{other:?}"),
-				};
-				let bitrate = rendition.bitrate.ok_or("the encoder reports no bitrate")?;
-				Ok(Encoding {
-					encoder,
-					gpu: exporter.route() == moq_video::render::export::Route::Gpu,
-					bitrate: Rate::from_bps(bitrate),
-				})
-			});
+			.map_err(|err| format!("{err:#}"));
 		probed.push((canvas, result));
 	}
 	probed
 }
 
-/// The canvas to propose: the best one that encodes and whose program fits the
-/// uplink's [`HEADROOM`], or the cheapest that encodes when none fits. Without a
-/// measurement it is the default canvas when that encodes.
-fn pick(encoders: &Encoders, uplink: Option<Rate>) -> Canvas {
-	let encodable = || {
-		encoders
-			.iter()
-			.filter_map(|(canvas, result)| Some((*canvas, result.as_ref().ok()?)))
+async fn probe_encoder(gpu: &engine::Gpu, picture: &Picture, canvas: Canvas) -> anyhow::Result<Encoding> {
+	use moq_video::render::export::{Exporter, Route};
+
+	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
+	let (mut exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config).await?;
+	let bitrate = rendition.bitrate.context("the encoder reports no bitrate")?;
+	let encoder = match &config.kind {
+		moq_video::encode::Kind::Named(name) => name.clone(),
+		other => format!("{other:?}"),
 	};
+
+	// The program's own path: a canvas-sized texture copied through the
+	// exporter, waited on, and encoded, as its encode thread does.
+	let started = kio::clock::now();
+	let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+		label: Some("setup burst"),
+		size: extent(canvas.width, canvas.height),
+		mip_level_count: 1,
+		sample_count: 1,
+		dimension: wgpu::TextureDimension::D2,
+		format: wgpu::TextureFormat::Rgba8Unorm,
+		usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+		view_formats: &[],
+	});
+	let mut session = moq_video::encode::Encoder::new(&config)?;
+	let period = Duration::from_secs(1) / canvas.framerate;
+	let frame = time(budget(canvas), async |index| {
+		picture.pan(gpu, &target, index);
+		let timestamp = moq_net::Timestamp::try_from(period * index)?;
+		let pending = match exporter.copy(&target, timestamp)? {
+			Some(pending) => pending,
+			// Fed back to back, as the program never feeds it, a pipelined
+			// encoder can hold every slot; drained, it gives them back.
+			None => {
+				session.flush()?;
+				exporter
+					.copy(&target, timestamp)?
+					.context("the encoder holds every frame")?
+			}
+		};
+		session.encode(&pending.wait()?)?;
+		// So the time covers the frames a pipelined encoder still holds.
+		if index == BURST {
+			session.flush()?;
+		}
+		Ok(())
+	})
+	.await?;
+	tracing::info!(
+		canvas = describe(canvas),
+		encoder,
+		?frame,
+		burst = ?started.elapsed(),
+		"timed the encoder"
+	);
+
+	Ok(Encoding {
+		encoder,
+		gpu: exporter.route() == Route::Gpu,
+		bitrate: Rate::from_bps(bitrate),
+		frame,
+	})
+}
+
+/// How long a frame takes through `encode`, on average over [`BURST`] frames,
+/// calling it with each index from 0 through [`BURST`].
+///
+/// Frame 0 is not timed: it is a keyframe, and the encoder's first frame.
+/// The burst stops as soon as it is over `budget` a frame in total, since its
+/// average can no longer come in under it, so a slow encoder costs no more
+/// time than a fast one.
+async fn time(budget: Duration, mut encode: impl AsyncFnMut(u32) -> anyhow::Result<()>) -> anyhow::Result<Duration> {
+	encode(0).await?;
+	let started = kio::clock::now();
+	for index in 1..=BURST {
+		encode(index).await?;
+		let elapsed = started.elapsed();
+		if elapsed > budget * BURST {
+			return Ok(elapsed / index);
+		}
+	}
+	Ok(started.elapsed() / BURST)
+}
+
+/// A picture as large as the largest canvas plus a burst's panning, uploaded
+/// once and copied from for every canvas.
+struct Picture(wgpu::Texture);
+
+impl Picture {
+	fn new(gpu: &engine::Gpu) -> Self {
+		let width = CANVASES.iter().map(|canvas| canvas.width).max().unwrap_or_default() + PAN * BURST;
+		let height = CANVASES.iter().map(|canvas| canvas.height).max().unwrap_or_default();
+		let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+			label: Some("setup picture"),
+			size: extent(width, height),
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			format: wgpu::TextureFormat::Rgba8Unorm,
+			usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+			view_formats: &[],
+		});
+		// Gradients crossed with a pattern: detail to search, unlike a flat fill,
+		// without the cost of noise, which no camera or screen produces.
+		let pixels: Vec<u8> = (0..height)
+			.flat_map(|y| (0..width).flat_map(move |x| [x as u8, y as u8, (x ^ y) as u8, 0xff]))
+			.collect();
+		gpu.queue.write_texture(
+			texture.as_image_copy(),
+			&pixels,
+			wgpu::TexelCopyBufferLayout {
+				offset: 0,
+				bytes_per_row: Some(width * 4),
+				rows_per_image: Some(height),
+			},
+			extent(width, height),
+		);
+		Self(texture)
+	}
+
+	/// Draw frame `index` of a burst into `target`: the picture, panned [`PAN`]
+	/// pixels a frame.
+	fn pan(&self, gpu: &engine::Gpu, target: &wgpu::Texture, index: u32) {
+		let mut commands = gpu.device.create_command_encoder(&Default::default());
+		commands.copy_texture_to_texture(
+			wgpu::TexelCopyTextureInfo {
+				texture: &self.0,
+				mip_level: 0,
+				origin: wgpu::Origin3d {
+					x: index * PAN,
+					y: 0,
+					z: 0,
+				},
+				aspect: wgpu::TextureAspect::All,
+			},
+			target.as_image_copy(),
+			extent(target.width(), target.height()),
+		);
+		gpu.queue.submit([commands.finish()]);
+	}
+}
+
+fn extent(width: u32, height: u32) -> wgpu::Extent3d {
+	wgpu::Extent3d {
+		width,
+		height,
+		depth_or_array_layers: 1,
+	}
+}
+
+/// The canvas to propose: the best candidate whose program fits the uplink's
+/// [`headroom`], or the cheapest candidate when none fits. Without a
+/// measurement it is the default canvas when that is a candidate.
+fn pick(encoders: &Encoders, uplink: Option<Rate>) -> Canvas {
+	let candidates = candidates(encoders);
 	let Some(uplink) = uplink else {
 		let default = Canvas::default();
-		return encodable()
-			.map(|(canvas, _)| canvas)
+		return candidates
+			.iter()
+			.map(|(canvas, _)| *canvas)
 			.find(|canvas| *canvas == default)
-			.or_else(|| encodable().next().map(|(canvas, _)| canvas))
+			.or_else(|| candidates.first().map(|(canvas, _)| *canvas))
 			.unwrap_or(default);
 	};
-	let budget = uplink.scaled(HEADROOM);
-	encodable()
+	let budget = uplink.scaled(headroom());
+	candidates
+		.iter()
 		.find(|(_, encoding)| encoding.total() <= budget)
-		.or_else(|| encodable().min_by_key(|(_, encoding)| encoding.total()))
-		.map(|(canvas, _)| canvas)
+		.or_else(|| candidates.iter().min_by_key(|(_, encoding)| encoding.total()))
+		.map(|(canvas, _)| *canvas)
 		.unwrap_or_default()
 }
 
@@ -129,41 +319,52 @@ fn explain(canvas: Canvas, encoders: &Encoders, uplink: &Result<Rate, String>) -
 		None => return format!("{name} was not probed."),
 	};
 	let route = match encoding.gpu {
-		true => "reading it on the GPU",
+		true => "on the GPU",
 		false => "from a copy read back to the CPU each frame",
 	};
-	let cost = format!(
-		"{} encodes it with {route} at about {}, {} with audio",
+	let mut text = format!(
+		"{name}: {} encodes it {route} at about {}, {} with audio.",
 		encoding.encoder,
-		mbps(encoding.bitrate),
-		mbps(encoding.total())
+		rate(encoding.bitrate),
+		rate(encoding.total())
 	);
+	if !encoding.keeps_up(canvas) {
+		text.push_str(&format!(
+			" A frame took {}, more than the {} keeping up at {} fps allows, so expect dropped frames.",
+			millis(encoding.frame),
+			millis(budget(canvas)),
+			canvas.framerate
+		));
+	}
 	let uplink = match uplink {
 		Ok(uplink) => *uplink,
-		Err(_) => return format!("{name}: {cost}. The uplink was not measured, so check that it carries that."),
+		Err(_) => {
+			text.push_str(" The uplink was not measured, so check that it carries that.");
+			return text;
+		}
 	};
 	let share = encoding.total().as_bps() as f64 / uplink.as_bps().max(1) as f64;
-	let percent = (share * 100.0).round();
-	if share <= HEADROOM {
-		format!(
-			"{name}: {cost}, {percent}% of the {} uplink measured to the relay.",
-			mbps(uplink)
-		)
-	} else {
-		format!(
-			"{name}: {cost}, {percent}% of the {} uplink measured to the relay, more than the {}% it should use. Expect dropped frames.",
-			mbps(uplink),
-			(HEADROOM * 100.0).round()
-		)
+	text.push_str(&format!(
+		" That is {}% of the {} uplink measured to the relay",
+		(share * 100.0).round(),
+		rate(uplink)
+	));
+	match share <= headroom() {
+		true => text.push('.'),
+		false => text.push_str(&format!(
+			", more than the {}% it should use. Expect dropped frames.",
+			(headroom() * 100.0).round()
+		)),
 	}
+	text
 }
 
 fn describe(canvas: Canvas) -> String {
 	format!("{}x{} at {} fps", canvas.width, canvas.height, canvas.framerate)
 }
 
-fn mbps(rate: Rate) -> String {
-	format!("{:.1} Mbps", rate.as_bps() as f64 / 1e6)
+fn millis(duration: Duration) -> String {
+	format!("{:.1} ms", duration.as_secs_f64() * 1e3)
 }
 
 /// The devices and canvas the creator settles on, each picked by index into
@@ -368,12 +569,11 @@ impl Setup {
 		if self.uplink.is_none()
 			&& let Some(encoders) = self.encoders.poll()
 		{
-			let ceiling = encoders
-				.iter()
-				.filter_map(|(_, result)| result.as_ref().ok())
-				.map(Encoding::total)
+			let ceiling = candidates(encoders)
+				.into_iter()
+				.map(|(_, encoding)| encoding.total())
 				.max()
-				.map(|top| top.scaled(1.0 / HEADROOM));
+				.map(|top| top.scaled(1.0 / headroom()));
 			let connect = self
 				.launch
 				.connect
@@ -425,19 +625,32 @@ impl Setup {
 			ui.label("Encoders");
 			match &self.encoders {
 				Task::Running(_) => {
-					ui.spinner();
+					ui.horizontal(|ui| {
+						ui.spinner();
+						ui.label("timing a short burst through each canvas's encoder");
+					});
 				}
 				Task::Done(encoders) => {
 					ui.vertical(|ui| {
 						for (canvas, result) in encoders {
 							match result {
-								Ok(encoding) => ui.label(format!(
-									"{}: {}{}, {}",
-									describe(*canvas),
-									encoding.encoder,
-									if encoding.gpu { " on the GPU" } else { " from the CPU" },
-									mbps(encoding.bitrate)
-								)),
+								Ok(encoding) => {
+									let text = format!(
+										"{}: {}{}, {}, {} a frame",
+										describe(*canvas),
+										encoding.encoder,
+										if encoding.gpu { " on the GPU" } else { " from the CPU" },
+										rate(encoding.bitrate),
+										millis(encoding.frame),
+									);
+									match encoding.keeps_up(*canvas) {
+										true => ui.label(text),
+										false => ui.colored_label(
+											ui.visuals().warn_fg_color,
+											format!("{text}, too slow to keep up"),
+										),
+									}
+								}
 								Err(err) => ui.colored_label(
 									ui.visuals().error_fg_color,
 									format!("{}: {err}", describe(*canvas)),
@@ -463,8 +676,8 @@ impl Setup {
 						));
 					});
 				}
-				Some(Task::Done(Ok(rate))) => {
-					ui.label(format!("{} to the relay", mbps(*rate)));
+				Some(Task::Done(Ok(uplink))) => {
+					ui.label(format!("{} to the relay", rate(*uplink)));
 				}
 				Some(Task::Done(Err(err))) => {
 					ui.colored_label(ui.visuals().error_fg_color, format!("not measured: {err}"));
@@ -609,7 +822,8 @@ mod tests {
 
 	use super::*;
 
-	/// [`CANVASES`] each encoding at its default bitrate, or failing where `None`.
+	/// [`CANVASES`] each encoding at its default bitrate and keeping up, or
+	/// failing where `None`.
 	fn encoders(kbps: [Option<u64>; 5]) -> Encoders {
 		CANVASES
 			.into_iter()
@@ -620,6 +834,7 @@ mod tests {
 						encoder: "test".into(),
 						gpu: true,
 						bitrate: Rate::from_kbps(kbps),
+						frame: Duration::from_millis(1),
 					})
 					.ok_or_else(|| "refused".to_string());
 				(canvas, result)
@@ -627,15 +842,90 @@ mod tests {
 			.collect()
 	}
 
+	/// [`encoders`] at their default bitrates, each frame taking `millis`.
+	fn timed(millis: [u64; 5]) -> Encoders {
+		let mut encoders = encoders(DEFAULTS);
+		for ((_, result), millis) in encoders.iter_mut().zip(millis) {
+			result.as_mut().unwrap().frame = Duration::from_millis(millis);
+		}
+		encoders
+	}
+
 	const DEFAULTS: [Option<u64>; 5] = [Some(8709), Some(4354), Some(3870), Some(1935), Some(484)];
 
 	#[test]
 	fn picks_the_best_canvas_within_the_headroom() {
 		let encoders = encoders(DEFAULTS);
-		// 4.354 + 0.128 Mbps is just inside three quarters of 6 Mbps.
-		assert_eq!(pick(&encoders, Some(Rate::from_mbps(6))), CANVASES[1]);
-		assert_eq!(pick(&encoders, Some(Rate::from_kbps(5900))), CANVASES[2]);
+		// 4.354 + 0.128 Mbps is just inside two thirds of 6.8 Mbps, where the
+		// Health panel's headroom grade turns degraded.
+		assert_eq!(pick(&encoders, Some(Rate::from_kbps(6800))), CANVASES[1]);
+		assert_eq!(pick(&encoders, Some(Rate::from_kbps(6700))), CANVASES[2]);
 		assert_eq!(pick(&encoders, Some(Rate::from_mbps(100))), CANVASES[0]);
+	}
+
+	#[test]
+	fn skips_canvases_whose_encoder_cannot_keep_up() {
+		// 60 fps leaves 12.5 ms a frame, and 30 fps 25 ms.
+		let encoders = timed([20, 20, 12, 12, 5]);
+		assert_eq!(pick(&encoders, Some(Rate::from_mbps(100))), CANVASES[1]);
+		assert_eq!(pick(&encoders, None), Canvas::default());
+		let encoders = timed([20, 30, 12, 12, 5]);
+		assert_eq!(pick(&encoders, Some(Rate::from_mbps(100))), CANVASES[2]);
+		assert_eq!(pick(&encoders, None), CANVASES[2], "the default does not keep up");
+	}
+
+	#[test]
+	fn proposes_the_closest_to_keeping_up_when_none_does() {
+		let encoders = timed([100, 80, 60, 40, 30]);
+		assert_eq!(pick(&encoders, Some(Rate::from_mbps(100))), CANVASES[4]);
+		assert_eq!(pick(&encoders, None), CANVASES[4]);
+	}
+
+	/// Times `time` over an encoder whose frames take `first` and then `rest`
+	/// on the paused clock, with how many frames it was handed.
+	async fn burst(budget: Duration, first: Duration, rest: Duration) -> (Duration, u32) {
+		let mut calls = 0;
+		let frame = time(budget, async |index| {
+			calls += 1;
+			kio::clock::sleep(if index == 0 { first } else { rest }).await;
+			Ok(())
+		})
+		.await
+		.unwrap();
+		(frame, calls)
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn times_every_frame_but_the_first() {
+		let budget = Duration::from_millis(25);
+		let (frame, calls) = burst(budget, Duration::from_secs(1), Duration::from_millis(10)).await;
+		assert_eq!(frame, Duration::from_millis(10));
+		assert_eq!(calls, BURST + 1);
+	}
+
+	/// A slow encoder is cut off once it cannot average under the budget, so
+	/// it takes no longer than one that keeps up.
+	#[tokio::test(start_paused = true)]
+	async fn stops_a_burst_that_falls_behind() {
+		let budget = Duration::from_millis(25);
+		let started = kio::clock::now();
+		let (frame, calls) = burst(budget, Duration::ZERO, Duration::from_millis(50)).await;
+		assert_eq!(frame, Duration::from_millis(50));
+		// Over the 375 ms the whole burst may take, at the eighth timed frame.
+		assert_eq!(calls, 9);
+		assert!(started.elapsed() <= budget * BURST + Duration::from_millis(50));
+	}
+
+	/// The burst runs on a real device and encoder, through the program's own
+	/// copy path.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
+	async fn times_every_canvas() {
+		let gpu = engine::Gpu::new().await.expect("a GPU");
+		for (canvas, result) in probe_encoders(gpu).await {
+			let encoding = result.unwrap_or_else(|err| panic!("{}: {err}", describe(canvas)));
+			assert!(encoding.frame > Duration::ZERO, "{}", describe(canvas));
+		}
 	}
 
 	#[test]
