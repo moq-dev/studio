@@ -337,17 +337,15 @@ impl Engine {
 			None => Duration::ZERO,
 		};
 		let program = engine.clone();
-		std::thread::Builder::new()
-			.name("program".into())
-			.spawn(move || clocked(program.run_program(start, epoch, video)))?;
+		clocked("program".into(), async move || {
+			program.run_program(start, epoch, video).await
+		})?;
 		let mix = engine.clone();
-		std::thread::Builder::new()
-			.name("audio".into())
-			.spawn(move || clocked(mix.run_audio(start, epoch, audio)))?;
+		clocked("audio".into(), async move || mix.run_audio(start, epoch, audio).await)?;
 		let save = engine.clone();
-		std::thread::Builder::new()
-			.name("autosave".into())
-			.spawn(move || clocked(save.autosave.run(|| save.serialize())))?;
+		clocked("autosave".into(), async move || {
+			save.autosave.run(|| save.serialize()).await
+		})?;
 		tokio::spawn(engine.clone().grade(health::Sampler::new(publisher)));
 
 		Ok(engine)
@@ -769,23 +767,41 @@ fn encode_frames(
 	Ok(())
 }
 
-/// Run a source on its own thread until its feed is dropped.
+/// Run a source on its own thread until its feed is dropped, or fail the
+/// source when its thread cannot start.
 fn spawn(driver: Driver) {
+	// Handed over once the thread exists, since a failed spawn drops what it
+	// was given and the driver must stay here to report why.
+	let (handoff, received) = mpsc::sync_channel::<Driver>(1);
 	let name = format!("source-{}", driver.name());
-	let spawned = std::thread::Builder::new()
-		.name(name)
-		.spawn(move || clocked(driver.run()));
-	if let Err(err) = spawned {
-		tracing::error!(%err, "cannot start a source thread");
+	let started = clocked(name, async move || {
+		if let Ok(driver) = received.recv() {
+			driver.run().await;
+		}
+	});
+	match started {
+		Ok(()) => {
+			if let Err(mpsc::SendError(driver)) = handoff.send(driver) {
+				driver.fail("the source thread stopped");
+			}
+		}
+		Err(err) => driver.fail(format!("{err:#}")),
 	}
 }
 
-/// Run `task` on the calling thread, with its own clock and IO.
-fn clocked<F: Future<Output = ()>>(task: F) {
-	match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-		Ok(runtime) => runtime.block_on(task),
-		Err(err) => tracing::error!(%err, "cannot start a runtime"),
-	}
+/// Start a thread called `name` that runs `task` with its own clock and IO.
+/// The runtime is built before the thread, so the caller learns if either
+/// cannot start.
+fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::Result<()> {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.with_context(|| format!("cannot start the {name} runtime"))?;
+	std::thread::Builder::new()
+		.name(name.clone())
+		.spawn(move || runtime.block_on(task()))
+		.with_context(|| format!("cannot start the {name} thread"))?;
+	Ok(())
 }
 
 #[cfg(test)]
