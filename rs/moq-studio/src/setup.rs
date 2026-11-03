@@ -466,19 +466,22 @@ enum Task<T> {
 }
 
 impl<T: Send + 'static> Task<T> {
-	/// Run `task` on a blocking thread of `runtime`, since encoder probes and the
-	/// engine's start block while they open encoders.
-	fn spawn<F, Fut>(runtime: &tokio::runtime::Handle, task: F) -> Self
+	/// Run `task` in `runtime` on a thread of its own, since encoder probes and
+	/// the engine's start block while they open encoders. Not on the runtime's
+	/// blocking pool, which dropping the runtime waits out, so a probe that never
+	/// ends, such as one waiting on a camera permission prompt, cannot hold the
+	/// studio open once its window closes.
+	fn spawn<F, Fut>(runtime: &tokio::runtime::Handle, task: F) -> std::io::Result<Self>
 	where
 		F: FnOnce() -> Fut + Send + 'static,
 		Fut: Future<Output = T>,
 	{
 		let (send, recv) = mpsc::channel();
-		let handle = runtime.clone();
-		runtime.spawn_blocking(move || {
-			let _ = send.send(handle.block_on(task()));
-		});
-		Self::Running(recv)
+		let runtime = runtime.clone();
+		std::thread::Builder::new().name("setup".into()).spawn(move || {
+			let _ = send.send(runtime.block_on(task()));
+		})?;
+		Ok(Self::Running(recv))
 	}
 
 	/// The result, once it arrived.
@@ -519,11 +522,11 @@ pub struct Setup {
 
 impl Setup {
 	/// Start probing for `launch`, to create the scene file at `path`.
-	pub fn new(launch: Launch, path: PathBuf, runtime: tokio::runtime::Handle) -> Self {
-		let devices = Task::spawn(&runtime, devices::list);
+	pub fn new(launch: Launch, path: PathBuf, runtime: tokio::runtime::Handle) -> std::io::Result<Self> {
+		let devices = Task::spawn(&runtime, devices::list)?;
 		let gpu = launch.gpu.clone();
-		let encoders = Task::spawn(&runtime, move || probe_encoders(gpu));
-		Self {
+		let encoders = Task::spawn(&runtime, move || probe_encoders(gpu))?;
+		Ok(Self {
 			runtime,
 			launch,
 			path,
@@ -533,7 +536,7 @@ impl Setup {
 			choices: None,
 			starting: None,
 			error: None,
-		}
+		})
 	}
 
 	/// Draw the screen; the engine once the creator has started the studio.
@@ -594,11 +597,14 @@ impl Setup {
 			self.uplink = Some(match (connect, ceiling) {
 				(None, _) => Task::Done(Err("no relay is configured; start with --connect to measure it".into())),
 				(Some(_), None) => Task::Done(Err("nothing encodes on this machine, so nothing would be sent".into())),
-				(Some((client, url, path)), Some(ceiling)) => Task::spawn(&self.runtime, move || async move {
-					uplink::measure(&client, url, &path, ceiling, uplink::WINDOW)
-						.await
-						.map_err(|err| format!("{err:#}"))
-				}),
+				(Some((client, url, path)), Some(ceiling)) => {
+					let measured = Task::spawn(&self.runtime, move || async move {
+						uplink::measure(&client, url, &path, ceiling, uplink::WINDOW)
+							.await
+							.map_err(|err| format!("{err:#}"))
+					});
+					measured.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the probe: {err}"))))
+				}
 			});
 		}
 		if let Some(uplink) = &mut self.uplink {
@@ -785,8 +791,7 @@ impl Setup {
 		// Kept, so a start that fails can be retried with other choices.
 		let launch = self.launch.clone();
 		let path = self.path.clone();
-		self.error = None;
-		self.starting = Some(Task::spawn(&self.runtime, move || async move {
+		let starting = Task::spawn(&self.runtime, move || async move {
 			// Setup proposes only for a missing file, so one that appeared since,
 			// such as another studio's, is opened by a restart, not overwritten.
 			// The autosave's first save refuses one that appears after this.
@@ -797,7 +802,14 @@ impl Setup {
 				autosave.path().display()
 			);
 			Engine::start(launch, autosave, loaded).await
-		}));
+		});
+		match starting {
+			Ok(starting) => {
+				self.error = None;
+				self.starting = Some(starting);
+			}
+			Err(err) => self.error = Some(format!("cannot start the studio: {err}")),
+		}
 	}
 }
 

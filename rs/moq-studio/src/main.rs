@@ -96,7 +96,7 @@ fn main() -> anyhow::Result<()> {
 			launch,
 			config.scenes.clone(),
 			runtime.handle().clone(),
-		))),
+		)?)),
 	};
 
 	let started = Arc::new(OnceLock::new());
