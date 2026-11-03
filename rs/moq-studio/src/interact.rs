@@ -86,7 +86,9 @@ impl Interact {
 		let out = RefCell::new(Vec::new());
 		let send = |page: &str, input: Input| out.borrow_mut().push((page.to_string(), input));
 
-		let (events, buttons) = ui.input(|input| (input.events.clone(), held(&input.pointer)));
+		// The buttons and keys held now, for events that carry no modifiers
+		// of their own.
+		let (events, current) = ui.input(|input| (input.events.clone(), keys(input.modifiers, held(&input.pointer))));
 		for event in events {
 			match event {
 				egui::Event::PointerMoved(pos) => {
@@ -97,7 +99,7 @@ impl Interact {
 								Input::Move {
 									x,
 									y,
-									modifiers: buttons,
+									modifiers: current,
 								},
 							);
 						}
@@ -106,7 +108,7 @@ impl Interact {
 					let hit = hit(pos);
 					let page = hit.as_ref().map(|hit| hit.page.clone());
 					if let Some(left) = self.hovered.take().filter(|left| Some(left) != page.as_ref()) {
-						send(&left, Input::Leave { modifiers: buttons });
+						send(&left, Input::Leave { modifiers: current });
 					}
 					if let Some(Hit { page, x, y, .. }) = hit {
 						send(
@@ -114,7 +116,7 @@ impl Interact {
 							Input::Move {
 								x,
 								y,
-								modifiers: buttons,
+								modifiers: current,
 							},
 						);
 						self.hovered = Some(page);
@@ -122,7 +124,7 @@ impl Interact {
 				}
 				egui::Event::PointerGone => {
 					if let Some(left) = self.hovered.take() {
-						send(&left, Input::Leave { modifiers: buttons });
+						send(&left, Input::Leave { modifiers: current });
 					}
 				}
 				egui::Event::PointerButton {
@@ -132,7 +134,7 @@ impl Interact {
 					modifiers,
 				} => {
 					let Some(button) = self::button(button) else { continue };
-					let modifiers = keys(modifiers, buttons);
+					let modifiers = keys(modifiers, current);
 					if !pressed {
 						// Only the page that saw the press hears the release.
 						let Some(capture) = self.captured.as_mut().filter(|capture| capture.held.contains(&button))
@@ -223,7 +225,7 @@ impl Interact {
 							y,
 							dx: (delta.x * scale) as i32,
 							dy: (delta.y * scale) as i32,
-							modifiers: keys(modifiers, buttons),
+							modifiers: keys(modifiers, current),
 						},
 					);
 				}
@@ -236,7 +238,7 @@ impl Interact {
 					let (Some(page), Some(code)) = (&self.focused, code(key)) else {
 						continue;
 					};
-					let modifiers = keys(modifiers, buttons);
+					let modifiers = keys(modifiers, current);
 					send(
 						page,
 						Input::Key {
@@ -251,9 +253,27 @@ impl Interact {
 						send(page, Input::Text("\r".into()));
 					}
 				}
-				egui::Event::Text(text) => {
+				// egui turns a paste into its own event with the clipboard's
+				// text, which the page takes as typed.
+				egui::Event::Text(text) | egui::Event::Paste(text) => {
 					if let Some(page) = &self.focused {
 						send(page, Input::Text(text));
+					}
+				}
+				// egui swallows the copy and cut shortcuts too, so the page
+				// gets them back as keys: only it knows its selection.
+				egui::Event::Copy | egui::Event::Cut => {
+					let Some(page) = &self.focused else { continue };
+					let code = i32::from(if event == egui::Event::Copy { b'C' } else { b'X' });
+					for down in [true, false] {
+						send(
+							page,
+							Input::Key {
+								code,
+								down,
+								modifiers: current,
+							},
+						);
 					}
 				}
 				_ => {}
@@ -689,6 +709,75 @@ mod tests {
 		assert!(
 			frame(vec![press(150.0, 50.0, right, false)]).is_empty(),
 			"the drag is over"
+		);
+	}
+
+	/// What egui keeps for itself still reaches the page: the keys held during
+	/// a drag, and the clipboard shortcuts it turns into events of their own.
+	#[test]
+	fn held_keys_and_the_clipboard_reach_the_page() {
+		let mut collection = Collection::new();
+		collection.canvas.width = 100;
+		collection.canvas.height = 100;
+		collection.sources.insert(
+			"chat".into(),
+			Source::Browser {
+				url: "https://example.com".into(),
+				width: 100,
+				height: 100,
+			},
+		);
+		collection.scenes = vec![Scene {
+			name: "Main".into(),
+			items: vec![Item {
+				source: "chat".into(),
+				rect: Rect::fill(&collection.canvas),
+				visible: true,
+			}],
+		}];
+		let delivered = frame(
+			&egui::Context::default(),
+			&mut Interact::default(),
+			&collection,
+			vec![
+				egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+				egui::Event::PointerButton {
+					pos: egui::pos2(10.0, 10.0),
+					button: egui::PointerButton::Primary,
+					pressed: true,
+					modifiers: egui::Modifiers::SHIFT,
+				},
+				egui::Event::PointerMoved(egui::pos2(20.0, 10.0)),
+				egui::Event::Paste("pasted".into()),
+				egui::Event::Copy,
+			],
+		);
+		let inputs: Vec<_> = delivered.into_iter().map(|(_, input)| input).collect();
+		let shift = Modifiers {
+			shift: true,
+			left: true,
+			..Default::default()
+		};
+		assert_eq!(
+			inputs[2..],
+			[
+				Input::Move {
+					x: 20,
+					y: 10,
+					modifiers: shift
+				},
+				Input::Text("pasted".into()),
+				Input::Key {
+					code: i32::from(b'C'),
+					down: true,
+					modifiers: shift
+				},
+				Input::Key {
+					code: i32::from(b'C'),
+					down: false,
+					modifiers: shift
+				},
+			]
 		);
 	}
 
