@@ -1,20 +1,75 @@
-//! The scene file, written shortly after every change to the collection.
+//! The scene file, written once the collection settles after a change.
 //!
-//! Autosave compares the serialized collection with what the file holds rather
-//! than tracking edits, so whatever changes the collection is saved, and a
-//! change that is undone before the next write writes nothing.
+//! Each edit to the collection is recorded in [`Edits`], and the collection is
+//! written [`QUIET`] after the last one, or [`LIMIT`] after the first unsaved
+//! one if the edits never pause. A write compares the serialized collection
+//! with what the file holds, so a change undone before it is written writes
+//! nothing.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::Context;
+use kio::clock::Instant;
 use moq_scene::Collection;
 
-/// How often the collection is compared with the file: the most edits a crash
-/// loses, and what a burst such as a slider drag coalesces into one write.
-pub const PERIOD: Duration = Duration::from_secs(1);
+/// How long the collection must go unchanged before it is written, so a burst
+/// such as a slider drag becomes one write.
+pub const QUIET: Duration = Duration::from_secs(1);
+
+/// The longest an edit waits for the collection to settle, so a continuous
+/// drag is still written: the most edits a crash loses.
+pub const LIMIT: Duration = Duration::from_secs(5);
+
+/// The edits not yet written, shared by the studio's edit path and the autosave.
+#[derive(Clone, Default)]
+pub struct Edits(kio::Shared<Option<Unsaved>>);
+
+#[derive(Clone, Copy)]
+struct Unsaved {
+	first: Instant,
+	last: Instant,
+}
+
+impl Unsaved {
+	/// [`QUIET`] after the last edit, but no later than [`LIMIT`] after the
+	/// first. Another edit only moves it later.
+	fn deadline(&self) -> Instant {
+		(self.last + QUIET).min(self.first + LIMIT)
+	}
+}
+
+impl Edits {
+	/// Note an edit to the collection, to be written once it settles.
+	pub fn record(&self) {
+		let now = kio::clock::now();
+		let mut unsaved = self.0.lock();
+		match unsaved.as_mut() {
+			Some(unsaved) => unsaved.last = now,
+			None => *unsaved = Some(Unsaved { first: now, last: now }),
+		}
+	}
+
+	/// When the unsaved edits are due, if there are any.
+	fn deadline(&self) -> Option<Instant> {
+		self.0.read().as_ref().map(Unsaved::deadline)
+	}
+
+	/// Wait for an unsaved edit, and return when it is due.
+	async fn next(&self) -> Instant {
+		let unsaved = self
+			.0
+			.wait(|unsaved| match unsaved.is_some() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})
+			.await;
+		unsaved.expect("waited for an edit").deadline()
+	}
+}
 
 pub struct Autosave {
 	path: PathBuf,
@@ -22,6 +77,7 @@ pub struct Autosave {
 	/// `None` until the file exists. Held across each read and write, so a
 	/// reload and a write never interleave.
 	written: Mutex<Option<String>>,
+	edits: Edits,
 	/// Why the last write failed, until one succeeds.
 	error: Mutex<Option<String>>,
 }
@@ -44,6 +100,7 @@ impl Autosave {
 		let autosave = Self {
 			path,
 			written: Mutex::new(written),
+			edits: Edits::default(),
 			error: Mutex::new(None),
 		};
 		Ok((autosave, collection))
@@ -51,6 +108,11 @@ impl Autosave {
 
 	pub fn path(&self) -> &Path {
 		&self.path
+	}
+
+	/// Where the studio records its edits to the collection.
+	pub fn edits(&self) -> Edits {
+		self.edits.clone()
 	}
 
 	/// Why the last write failed, until one succeeds.
@@ -62,6 +124,8 @@ impl Autosave {
 	/// holds it. A failure stays in [`Self::error`] until a write succeeds.
 	pub fn save(&self, serialize: impl FnOnce() -> anyhow::Result<String>) -> anyhow::Result<()> {
 		let mut written = self.written.lock().unwrap();
+		// Before serializing, so an edit made after it is recorded anew.
+		self.edits.0.lock().take();
 		let result = serialize().and_then(|text| {
 			if written.as_ref() != Some(&text) {
 				write(&self.path, &text).with_context(|| format!("writing {}", self.path.display()))?;
@@ -77,7 +141,29 @@ impl Autosave {
 			tracing::error!(error = error.as_deref(), "autosave failed");
 		}
 		*last = error;
+		if result.is_err() {
+			// Still unsaved, so tried again once the collection is quiet.
+			self.edits.record();
+		}
 		result
+	}
+
+	/// Write the collection that `serialize` returns now, which creates a
+	/// missing file, and then whenever the recorded edits are due.
+	pub async fn run(&self, serialize: impl Fn() -> anyhow::Result<String>) {
+		loop {
+			// Kept for the status bar until a save succeeds.
+			let _ = self.save(&serialize);
+			let mut deadline = self.edits.next().await;
+			// Another edit only moves the deadline later, so sleep until it holds.
+			loop {
+				kio::clock::sleep_until(deadline).await;
+				match self.edits.deadline() {
+					Some(next) if next > deadline => deadline = next,
+					_ => break,
+				}
+			}
+		}
 	}
 
 	/// Read the scene file and hand its collection to `replace`. Once it is
@@ -170,6 +256,8 @@ fn resolve(path: &Path) -> std::io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::Arc;
+
 	use super::*;
 
 	fn collection(scene: &str) -> Collection {
@@ -240,19 +328,106 @@ mod tests {
 		assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
 	}
 
-	#[test]
-	fn reports_a_failed_write_until_one_succeeds() {
+	/// An autosave running over a collection the test edits, as the engine's
+	/// does over the studio's.
+	struct Running {
+		autosave: Arc<Autosave>,
+		collection: Arc<Mutex<Collection>>,
+		task: tokio::task::JoinHandle<()>,
+	}
+
+	impl Running {
+		async fn start(path: PathBuf) -> Self {
+			let (autosave, opened) = Autosave::open(path).unwrap();
+			let autosave = Arc::new(autosave);
+			let collection = Arc::new(Mutex::new(opened));
+			let task = tokio::spawn({
+				let autosave = autosave.clone();
+				let collection = collection.clone();
+				async move { autosave.run(|| Ok(collection.lock().unwrap().to_toml()?)).await }
+			});
+			// Its first save, at once.
+			tokio::task::yield_now().await;
+			Self {
+				autosave,
+				collection,
+				task,
+			}
+		}
+
+		/// Add a scene, as an edit in the studio would, and return the
+		/// collection it leaves serialized.
+		fn edit(&self, scene: &str) -> String {
+			let mut collection = self.collection.lock().unwrap();
+			collection.scenes.push(moq_scene::Scene::new(scene));
+			self.autosave.edits().record();
+			collection.to_toml().unwrap()
+		}
+	}
+
+	impl Drop for Running {
+		fn drop(&mut self) {
+			self.task.abort();
+		}
+	}
+
+	fn read(path: &Path) -> String {
+		std::fs::read_to_string(path).unwrap()
+	}
+
+	/// A burst of edits is written once, a quiet second after the last.
+	#[tokio::test(start_paused = true)]
+	async fn writes_once_the_edits_pause() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		let running = Running::start(path.clone()).await;
+		let created = Collection::new().to_toml().unwrap();
+		assert_eq!(read(&path), created, "a missing file is created at once");
+
+		running.edit("A");
+		kio::clock::sleep(QUIET / 2).await;
+		let last = running.edit("B");
+		kio::clock::sleep(QUIET - Duration::from_millis(100)).await;
+		assert_eq!(read(&path), created, "written before the edits paused");
+		kio::clock::sleep(Duration::from_millis(200)).await;
+		assert_eq!(read(&path), last);
+	}
+
+	/// Edits that never pause are still written, [`LIMIT`] after the first.
+	#[tokio::test(start_paused = true)]
+	async fn writes_continuous_edits_within_the_limit() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		let running = Running::start(path.clone()).await;
+		let created = read(&path);
+
+		// Off the limit's beat, so no edit lands on it.
+		let every = QUIET * 2 / 5;
+		let mut elapsed = Duration::ZERO;
+		let mut last = None;
+		while elapsed < LIMIT {
+			assert_eq!(read(&path), created, "written before the limit");
+			last = Some(running.edit(&elapsed.as_millis().to_string()));
+			kio::clock::sleep(every).await;
+			elapsed += every;
+		}
+		// Past the limit, and less than a quiet second after the last edit.
+		assert_eq!(Some(read(&path)), last);
+	}
+
+	/// A failed write shows until a retry, a quiet second later, succeeds.
+	#[tokio::test(start_paused = true)]
+	async fn retries_a_failed_write_until_one_succeeds() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("missing").join("show.toml");
-		let (autosave, opened) = Autosave::open(path.clone()).unwrap();
+		let running = Running::start(path.clone()).await;
+		assert!(running.autosave.error().unwrap().contains("show.toml"));
 
-		assert!(autosave.save(serialize(&opened)).is_err());
-		assert!(autosave.error().unwrap().contains("show.toml"));
-
-		// Still unwritten, so the next save tries again.
 		std::fs::create_dir(path.parent().unwrap()).unwrap();
-		autosave.save(serialize(&opened)).unwrap();
-		assert_eq!(autosave.error(), None);
+		kio::clock::sleep(QUIET - Duration::from_millis(100)).await;
+		assert!(!path.exists(), "retried before the collection was quiet");
+		kio::clock::sleep(Duration::from_millis(200)).await;
+		assert_eq!(running.autosave.error(), None);
 		assert!(path.exists());
 	}
 

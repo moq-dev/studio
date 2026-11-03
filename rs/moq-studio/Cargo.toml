@@ -43,7 +43,7 @@ egui = "0.36"
 # Docked, rearrangeable panels. 0.21 is the newest release and pins egui 0.36.
 egui_dock = "0.21"
 hang = { workspace = true }
-kio = { workspace = true, features = ["runtime"] }
+kio = { workspace = true, features = ["async", "runtime"] }
 moq-audio = { workspace = true, features = ["bus"] }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }

@@ -8,7 +8,7 @@
 //! - **encode** waits for each program copy and encodes it.
 //! - **source-***: one per running source, since a capture stream may not
 //!   leave the thread that opened it.
-//! - **autosave** writes the collection to its scene file once it changes.
+//! - **autosave** writes the collection to its scene file once edits to it settle.
 //! - The UI runs on the main thread and edits [`State`] under its lock.
 
 use std::path::Path;
@@ -71,12 +71,16 @@ pub struct State {
 	pub compositor: Compositor,
 	/// Edited since the sources were last synced.
 	stale: bool,
+	/// For the autosave, which writes the collection once edits settle.
+	edits: autosave::Edits,
 }
 
 impl State {
-	/// The collection, for an edit: the sources follow it on the next frame.
+	/// The collection, for an edit: the sources follow it on the next frame,
+	/// and the scene file shortly after.
 	pub fn edit(&mut self) -> &mut Collection {
 		self.stale = true;
+		self.edits.record();
 		&mut self.collection
 	}
 
@@ -216,6 +220,7 @@ impl Engine {
 				sources,
 				compositor,
 				stale: true,
+				edits: autosave.edits(),
 			}),
 			autosave,
 			stats: Stats::default(),
@@ -266,7 +271,7 @@ impl Engine {
 		let save = engine.clone();
 		std::thread::Builder::new()
 			.name("autosave".into())
-			.spawn(move || clocked(save.run_autosave()))?;
+			.spawn(move || clocked(save.autosave.run(|| save.serialize())))?;
 		tokio::spawn(engine.clone().grade(health::Sampler::new(publisher)));
 
 		Ok(engine)
@@ -274,26 +279,17 @@ impl Engine {
 
 	/// Write the collection to the scene file unless it already holds it.
 	pub fn save(&self) -> anyhow::Result<()> {
-		self.autosave
-			.save(|| Ok(self.state.lock().unwrap().collection.to_toml()?))
+		self.autosave.save(|| self.serialize())
+	}
+
+	fn serialize(&self) -> anyhow::Result<String> {
+		Ok(self.state.lock().unwrap().collection.to_toml()?)
 	}
 
 	/// Replace the collection with what the scene file holds now.
 	pub fn reload(&self) -> anyhow::Result<()> {
 		self.autosave
 			.reload(|collection| self.state.lock().unwrap().replace(collection))
-	}
-
-	/// Save once per period, so a change is on disk within one and a burst of
-	/// changes is written once. The first save creates a missing file.
-	async fn run_autosave(&self) {
-		let mut clock = kio::clock::interval(autosave::PERIOD);
-		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
-		loop {
-			clock.tick().await;
-			// Kept for the status bar until a save succeeds.
-			let _ = self.save();
-		}
 	}
 
 	/// Grade the stream's health every interval, for the Health panel.
@@ -816,6 +812,21 @@ mod tests {
 		})
 		.await
 		.expect("sound arrives");
+
+		// An edit reaches the scene file through the autosave the studio runs.
+		let path = dir.path().join("show.toml");
+		let edited = {
+			let mut state = engine.state.lock().unwrap();
+			state.edit().scenes.push(moq_scene::Scene::new("Edited"));
+			state.collection.to_toml().unwrap()
+		};
+		kio::clock::timeout(TIMEOUT, async {
+			while std::fs::read_to_string(&path).ok().as_ref() != Some(&edited) {
+				kio::clock::sleep(autosave::QUIET / 10).await;
+			}
+		})
+		.await
+		.expect("the edit is saved");
 
 		// Health sees the relay and what each track of the program writes.
 		kio::clock::timeout(TIMEOUT, async {
