@@ -259,8 +259,8 @@ impl Run {
 		// Each source with a file being written, and whether its listing has
 		// gone since that file started.
 		let mut writing: BTreeMap<String, bool> = BTreeMap::new();
-		// Sources whose file ended while their listing stayed, such as on a
-		// failure, held back until they leave the catalog.
+		// Sources whose file ended, or could not be created, while their listing
+		// stayed, held back until they leave the catalog.
 		let mut ended = BTreeSet::new();
 		loop {
 			tokio::select! {
@@ -301,14 +301,18 @@ impl Run {
 				.cloned()
 				.collect();
 			for name in start {
-				self.source_file(&name, writers);
-				writing.insert(name, false);
+				if self.source_file(&name, writers) {
+					writing.insert(name, false);
+				} else {
+					ended.insert(name);
+				}
 			}
 		}
 	}
 
-	/// Start recording the source `name` into a file of its own.
-	fn source_file(&self, name: &str, writers: &mut tokio::task::JoinSet<Option<String>>) {
+	/// Start recording the source `name` into a file of its own, returning
+	/// whether it started rather than failing to create the file.
+	fn source_file(&self, name: &str, writers: &mut tokio::task::JoinSet<Option<String>>) -> bool {
 		// The scene file names sources, and a name may hold a path separator.
 		let safe: String = name
 			.chars()
@@ -324,7 +328,7 @@ impl Run {
 				let entry = File::new(self.dir.join(format!("{stem}.mp4")));
 				entry.finish(Err(err));
 				self.files.lock().unwrap().push(Arc::new(entry));
-				return;
+				return false;
 			}
 		};
 		let entry = Arc::new(File::new(path));
@@ -336,6 +340,7 @@ impl Run {
 			entry.finish(write_source(source, &name, file, &entry, asked).await);
 			Some(name)
 		});
+		true
 	}
 }
 
@@ -733,6 +738,56 @@ mod tests {
 		for ((_, duration), expected) in files.iter().zip([4, 2, 3, 1]) {
 			assert!(about(*duration, Duration::from_secs(expected)), "{files:?}");
 		}
+	}
+
+	/// A source whose file cannot be created fails without stopping the rest,
+	/// and once removed and added back, records again.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_source_that_failed_to_start_records_once_added_back() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		let recorder = studio.recorder(dir.path());
+		recorder.start(true).unwrap();
+		studio.play(Duration::from_millis(500)).await;
+
+		let mode = |mode| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+		mode(0o555);
+		studio.add("mic");
+		studio.play(Duration::from_secs(1)).await;
+		studio.remove("mic");
+		studio.play(Duration::from_millis(500)).await;
+		mode(0o755);
+		// Fixed, it still waits to be listed again.
+		studio.play(Duration::from_millis(500)).await;
+		assert_eq!(recorder.status().unwrap().files.len(), 2);
+		studio.add("mic");
+		studio.play(Duration::from_secs(1)).await;
+		recorder.finish().await;
+
+		let status = recorder.status().unwrap();
+		let outcomes: Vec<_> = status
+			.files
+			.iter()
+			.map(|file| {
+				let name = file.path.file_name().unwrap().to_string_lossy();
+				(name.rsplit_once('Z').unwrap().1.to_string(), file.finished.clone())
+			})
+			.collect();
+		let [program, failed, added] = outcomes.as_slice() else {
+			panic!("{outcomes:?}");
+		};
+		assert_eq!(program, &(".mp4".to_string(), Some(Finished::Saved)));
+		assert_eq!(failed.0, " mic.mp4");
+		assert!(
+			matches!(&failed.1, Some(Finished::Failed(reason)) if reason.contains("cannot create")),
+			"{failed:?}"
+		);
+		assert_eq!(added, &(" mic.mp4".to_string(), Some(Finished::Saved)));
+		let [(_, duration)] = tracks(&status.files[2].path).try_into().unwrap();
+		assert!(about(duration, Duration::from_secs(1)), "{duration:?}");
 	}
 
 	/// A recording of a broadcast with nothing to describe yet, stopped, leaves
