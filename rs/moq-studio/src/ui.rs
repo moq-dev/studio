@@ -11,6 +11,7 @@ use moq_scene::{Item, Rect, Scene, Source, wgpu};
 
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
+use crate::health::{self, Verdict};
 
 /// The panels, each a tab the user can move, split, or stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -23,6 +24,7 @@ enum Tab {
 	Devices,
 	Audio,
 	Output,
+	Health,
 }
 
 impl Tab {
@@ -36,6 +38,7 @@ impl Tab {
 			Self::Devices => "Devices",
 			Self::Audio => "Audio",
 			Self::Output => "Output",
+			Self::Health => "Health",
 		}
 	}
 }
@@ -47,13 +50,7 @@ pub struct Studio {
 }
 
 impl Studio {
-	/// The studio over `engine`, with `message` in the status bar.
-	pub fn new(
-		render: &eframe::egui_wgpu::RenderState,
-		engine: Arc<Engine>,
-		runtime: tokio::runtime::Handle,
-		message: Option<Result<String, String>>,
-	) -> Self {
+	pub fn new(render: &eframe::egui_wgpu::RenderState, engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> Self {
 		// The compositor's textures live as long as the engine, so registering
 		// them once is enough: egui samples whatever they hold each frame.
 		let (preview, program) = {
@@ -75,7 +72,7 @@ impl Studio {
 		tree.split_right(top, 0.5, vec![Tab::Program]);
 		let [_, items] = tree.split_right(bottom, 0.18, vec![Tab::Items]);
 		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices]);
-		tree.split_right(sources, 0.5, vec![Tab::Audio, Tab::Output]);
+		tree.split_right(sources, 0.5, vec![Tab::Health, Tab::Audio, Tab::Output]);
 
 		Self {
 			dock,
@@ -88,7 +85,7 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
-				message,
+				message: None,
 			},
 		}
 	}
@@ -99,10 +96,6 @@ impl eframe::App for Studio {
 		// Redraw at the canvas rate, so preview and program are live.
 		let framerate = self.panels.engine.state.lock().unwrap().collection.canvas.framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
-
-		if ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-			self.panels.save();
-		}
 
 		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui));
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
@@ -151,6 +144,7 @@ impl TabViewer for Panels {
 			Tab::Devices => self.devices(ui),
 			Tab::Audio => self.audio(ui),
 			Tab::Output => self.output(ui),
+			Tab::Health => self.health(ui),
 		}
 	}
 }
@@ -159,11 +153,8 @@ impl Panels {
 	fn menu(&mut self, ui: &mut Ui) {
 		egui::MenuBar::new().ui(ui, |ui| {
 			ui.menu_button("File", |ui| {
-				if ui.button("Save").clicked() {
-					self.save();
-				}
 				if ui.button("Reload").clicked() {
-					let result = self.engine.state.lock().unwrap().reload();
+					let result = self.engine.reload();
 					self.report(result.map(|()| "reloaded".to_string()));
 				}
 			});
@@ -172,12 +163,12 @@ impl Panels {
 
 	fn status(&mut self, ui: &mut Ui) {
 		ui.horizontal(|ui| {
-			let state = self.engine.state.lock().unwrap();
-			ui.label(state.path.display().to_string());
-			if state.unsaved() {
-				ui.weak("(unsaved)");
+			let autosave = &self.engine.autosave;
+			ui.label(autosave.path().display().to_string());
+			if let Some(error) = autosave.error() {
+				ui.separator();
+				ui.colored_label(ui.visuals().error_fg_color, format!("not saved: {error}"));
 			}
-			drop(state);
 			match &self.message {
 				Some(Ok(message)) => {
 					ui.separator();
@@ -190,11 +181,6 @@ impl Panels {
 				None => {}
 			}
 		});
-	}
-
-	fn save(&mut self) {
-		let result = self.engine.state.lock().unwrap().save();
-		self.report(result.map(|()| "saved".to_string()));
 	}
 
 	fn report(&mut self, result: anyhow::Result<String>) {
@@ -391,15 +377,20 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let mut remove = None;
+		let now = kio::clock::now();
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
 			egui::Grid::new("sources").striped(true).show(ui, |ui| {
 				for (name, feed) in state.sources.iter() {
 					ui.label(name);
 					ui.label(describe(feed.source()));
-					match state.compositor.error(name) {
-						Some(err) => status(ui, &Status::Failed(err.to_string())),
-						None => status(ui, &feed.status()),
+					match (state.compositor.error(name), feed.stalled(now)) {
+						(Some(err), _) => status(ui, &Status::Failed(err.to_string())),
+						(None, Some(since)) => {
+							ui.colored_label(DEGRADED, "stalled")
+								.on_hover_text(format!("no new picture for {:.0} s", since.as_secs_f64()));
+						}
+						(None, None) => status(ui, &feed.status()),
 					}
 					if ui.small_button("Remove").clicked() {
 						remove = Some(name.to_string());
@@ -492,20 +483,11 @@ impl Panels {
 					ui.label("Broadcast");
 					ui.label(&output.path);
 					ui.end_row();
-					ui.label("Relay");
-					ui.label(if output.connection.connected() {
-						"connected"
-					} else {
-						"connecting"
-					});
-					ui.end_row();
-					ui.label("Viewers");
-					ui.label(if stats.watched.load(Ordering::Relaxed) {
-						"watching"
-					} else if output.on_demand {
-						"none; not encoding"
-					} else {
-						"none"
+					ui.label("Encoding");
+					ui.label(match (output.on_demand, stats.watched.load(Ordering::Relaxed)) {
+						(false, _) => "always",
+						(true, true) => "while watched; watched now",
+						(true, false) => "while watched; idle now",
 					});
 					ui.end_row();
 				}
@@ -564,6 +546,151 @@ impl Panels {
 			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
 	}
+
+	/// How the stream reaches viewers: what is wrong and why, the uplink, each
+	/// track, and each viewer that reports.
+	fn health(&mut self, ui: &mut Ui) {
+		let report = self.engine.health.lock().unwrap();
+		let Some(relay) = &report.relay else {
+			ui.label("Not publishing; start with --connect to see how the stream is delivered.");
+			for problem in &report.problems {
+				ui.colored_label(color(ui, problem.verdict), &problem.cause);
+			}
+			return;
+		};
+
+		egui::ScrollArea::vertical().show(ui, |ui| {
+			if report.problems.is_empty() {
+				ui.colored_label(HEALTHY, "No problems.");
+			}
+			for problem in &report.problems {
+				ui.colored_label(color(ui, problem.verdict), &problem.cause);
+			}
+			ui.separator();
+
+			let uplink = &report.uplink;
+			let viewers = &report.viewers;
+			egui::Grid::new("uplink").show(ui, |ui| {
+				ui.label("Relay");
+				match relay {
+					health::Relay::Connecting => ui.weak("connecting"),
+					health::Relay::Connected => ui.colored_label(HEALTHY, "connected"),
+					health::Relay::Disconnected(reason) => ui
+						.colored_label(ui.visuals().error_fg_color, "unreachable")
+						.on_hover_text(reason),
+				};
+				ui.end_row();
+				ui.label("Uplink");
+				verdict(ui, uplink.verdict);
+				ui.end_row();
+				ui.label("Round trip");
+				ui.label(or_unknown(uplink.rtt.map(|rtt| format!("{} ms", rtt.as_millis()))));
+				ui.end_row();
+				ui.label("Estimated capacity");
+				ui.label(or_unknown(uplink.capacity.map(health::rate)));
+				ui.end_row();
+				ui.label("Media written");
+				ui.label(or_unknown(uplink.media.map(health::rate)));
+				ui.end_row();
+				ui.label("Lost and resent");
+				ui.label(or_unknown(uplink.loss.map(|loss| format!("{:.2}%", loss * 100.0))));
+				ui.end_row();
+				ui.label("Watching");
+				match viewers.watching {
+					Some(watching) => ui.label(format!("{watching} sessions, by the relay's stats")),
+					None => ui.weak("unknown; the relay shares no stats with this connection"),
+				};
+				ui.end_row();
+				ui.label("Reporting");
+				ui.label(match viewers.unread {
+					0 => format!("{} viewers", viewers.reports.len()),
+					unread => format!("{} viewers read, {unread} more not", viewers.reports.len()),
+				});
+				ui.end_row();
+			});
+			ui.separator();
+
+			egui::Grid::new("tracks").striped(true).show(ui, |ui| {
+				for heading in [
+					"Track",
+					"Sent",
+					"Frames",
+					"Viewers",
+					"Lowest received",
+					"Latency",
+					"Grade",
+				] {
+					ui.strong(heading);
+				}
+				ui.end_row();
+				for track in &report.tracks {
+					ui.label(&track.label).on_hover_text(&track.id);
+					ui.label(or_unknown(track.sent.map(health::rate)));
+					ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
+					ui.label(track.viewers.to_string());
+					ui.label(or_unknown(track.received.map(health::rate)));
+					ui.label(or_unknown(track.latency.map(millis)));
+					verdict(ui, track.verdict);
+					ui.end_row();
+				}
+			});
+
+			if viewers.reports.is_empty() {
+				return;
+			}
+			ui.separator();
+			egui::Grid::new("viewers").striped(true).show(ui, |ui| {
+				for heading in ["Viewer", "Grade", "Round trip", "Latency", "Playout"] {
+					ui.strong(heading);
+				}
+				ui.end_row();
+				for viewer in &viewers.reports {
+					ui.label(&viewer.name);
+					match &viewer.error {
+						Some(error) => {
+							ui.colored_label(ui.visuals().error_fg_color, "unreadable")
+								.on_hover_text(error);
+						}
+						None => verdict(ui, viewer.verdict),
+					}
+					ui.label(or_unknown(viewer.rtt.map(millis)));
+					ui.label(or_unknown(viewer.latency.map(millis)));
+					ui.label(or_unknown(viewer.playout.map(millis)));
+					ui.end_row();
+				}
+			});
+		});
+	}
+}
+
+const HEALTHY: Color32 = Color32::from_rgb(80, 200, 120);
+const DEGRADED: Color32 = Color32::from_rgb(220, 180, 60);
+
+fn color(ui: &Ui, verdict: Verdict) -> Color32 {
+	match verdict {
+		Verdict::Healthy => HEALTHY,
+		Verdict::Degraded => DEGRADED,
+		Verdict::Unhealthy => ui.visuals().error_fg_color,
+		Verdict::Unknown => ui.visuals().weak_text_color(),
+	}
+}
+
+fn verdict(ui: &mut Ui, verdict: Verdict) {
+	let text = match verdict {
+		Verdict::Unknown => "unknown",
+		Verdict::Healthy => "healthy",
+		Verdict::Degraded => "degraded",
+		Verdict::Unhealthy => "unhealthy",
+	};
+	ui.colored_label(color(ui, verdict), text);
+}
+
+fn or_unknown(value: Option<String>) -> String {
+	value.unwrap_or_else(|| "-".into())
+}
+
+fn millis(duration: Duration) -> String {
+	format!("{} ms", duration.as_millis())
 }
 
 /// Add `source` as `name`, and place it over the scene in preview if it has a
@@ -617,8 +744,8 @@ fn describe(source: &Source) -> String {
 fn status(ui: &mut Ui, status: &Status) {
 	match status {
 		Status::Starting => ui.weak("starting"),
-		Status::Live => ui.colored_label(Color32::from_rgb(80, 200, 120), "live"),
-		Status::Offline => ui.colored_label(Color32::from_rgb(220, 180, 60), "offline"),
+		Status::Live => ui.colored_label(HEALTHY, "live"),
+		Status::Offline => ui.colored_label(DEGRADED, "offline"),
 		Status::Failed(reason) => ui
 			.colored_label(ui.visuals().error_fg_color, "failed")
 			.on_hover_text(reason),

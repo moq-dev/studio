@@ -5,14 +5,17 @@
 //! Every probe that fails is shown with its reason, and the proposal says what
 //! it assumed instead.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use anyhow::Context;
 use egui::Ui;
 use moq_net::bandwidth::Rate;
 use moq_scene::{Canvas, Collection, Item, Rect, Scene};
 
+use crate::autosave::Autosave;
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{self, Engine, Launch};
 use crate::uplink;
@@ -243,13 +246,6 @@ fn corner(canvas: &Canvas) -> Rect {
 	}
 }
 
-/// What the studio starts with once setup is done: its engine, and the line for
-/// its status bar.
-pub struct Started {
-	pub engine: Arc<Engine>,
-	pub message: Option<Result<String, String>>,
-}
-
 /// A result being worked out in the background.
 enum Task<T> {
 	Running(mpsc::Receiver<T>),
@@ -295,26 +291,29 @@ impl<T: Send + 'static> Task<T> {
 pub struct Setup {
 	runtime: tokio::runtime::Handle,
 	launch: Launch,
+	/// The scene file, which does not exist until setup starts the studio.
+	path: PathBuf,
 	devices: Task<Listing>,
 	encoders: Task<Encoders>,
 	/// Started once the encoders are known, since they set what to probe up to.
 	uplink: Option<Task<Result<Rate, String>>>,
 	/// Filled in once every probe is done, then edited by the creator.
 	choices: Option<Choices>,
-	starting: Option<Task<anyhow::Result<Started>>>,
+	starting: Option<Task<anyhow::Result<Arc<Engine>>>>,
 	/// Why the last start failed.
 	error: Option<String>,
 }
 
 impl Setup {
-	/// Start probing for `launch`.
-	pub fn new(launch: Launch, runtime: tokio::runtime::Handle) -> Self {
+	/// Start probing for `launch`, to create the scene file at `path`.
+	pub fn new(launch: Launch, path: PathBuf, runtime: tokio::runtime::Handle) -> Self {
 		let devices = Task::spawn(&runtime, devices::list);
 		let gpu = launch.gpu.clone();
 		let encoders = Task::spawn(&runtime, move || probe_encoders(gpu));
 		Self {
 			runtime,
 			launch,
+			path,
 			devices,
 			encoders,
 			uplink: None,
@@ -324,8 +323,8 @@ impl Setup {
 		}
 	}
 
-	/// Draw the screen; what the studio starts with once the creator starts it.
-	pub fn ui(&mut self, ui: &mut Ui) -> Option<Started> {
+	/// Draw the screen; the engine once the creator has started the studio.
+	pub fn ui(&mut self, ui: &mut Ui) -> Option<Arc<Engine>> {
 		self.advance();
 		if self.choices.is_none() || self.starting.is_some() {
 			ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -337,7 +336,7 @@ impl Setup {
 				unreachable!("polled done")
 			};
 			match result {
-				Ok(started) => return Some(started),
+				Ok(engine) => return Some(engine),
 				Err(err) => self.error = Some(format!("{err:#}")),
 			}
 		}
@@ -544,29 +543,33 @@ impl Setup {
 		start
 	}
 
-	/// Start the studio with the proposal, writing it to the scene file, or
-	/// with an empty collection when `empty`, which writes nothing yet.
+	/// Start the studio with the proposal, or with an empty collection when
+	/// `empty`. Either way its autosave creates the scene file at once.
 	fn start(&mut self, empty: bool) {
 		let (Task::Done(listing), Some(choices)) = (&self.devices, &self.choices) else {
 			return;
 		};
-		let proposed = (!empty).then(|| collection(listing, choices));
+		let collection = match empty {
+			true => Collection::new(),
+			false => collection(listing, choices),
+		};
 		// Kept, so a start that fails can be retried with other choices.
 		let launch = self.launch.clone();
+		let path = self.path.clone();
 		self.error = None;
 		self.starting = Some(Task::spawn(&self.runtime, move || async move {
-			let path = launch.path.clone();
-			let engine = Engine::start(launch, proposed.clone().unwrap_or_default()).await?;
-			let message = proposed.map(|_| {
-				let mut state = engine.state.lock().unwrap();
-				// Unsaved until the write lands, so a failed one still shows.
-				state.edit();
-				state
-					.save()
-					.map(|()| format!("set up; saved {}", path.display()))
-					.map_err(|err| format!("{err:#}"))
-			});
-			Ok(Started { engine, message })
+			// Setup proposes only for a missing file, so one that appeared since,
+			// such as another studio's, is opened by a restart, not overwritten.
+			let exists = path
+				.try_exists()
+				.with_context(|| format!("reading {}", path.display()))?;
+			anyhow::ensure!(
+				!exists,
+				"{} was created during setup; restart the studio to open it",
+				path.display()
+			);
+			let (autosave, _) = Autosave::open(path)?;
+			Engine::start(launch, autosave, collection).await
 		}));
 	}
 }

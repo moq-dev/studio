@@ -5,12 +5,14 @@
 //! window around them and the program clock that publishes the result.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
 
+mod autosave;
 mod devices;
 mod engine;
+mod health;
 mod setup;
 mod ui;
 mod uplink;
@@ -20,8 +22,8 @@ mod uplink;
 #[usage(name = "moq-studio")]
 #[usage(completion, settings)]
 pub struct Config {
-	/// The scene collection to open. If it does not exist, guided setup proposes
-	/// one and writes it here.
+	/// The scene collection to open, saved as it changes. If it does not exist,
+	/// guided setup proposes one and creates it.
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub scenes: PathBuf,
 
@@ -75,7 +77,6 @@ fn main() -> anyhow::Result<()> {
 	};
 	let launch = engine::Launch {
 		gpu: gpu.clone(),
-		path: config.scenes.clone(),
 		connect,
 		broadcast: config.broadcast.clone(),
 		on_demand: config.on_demand,
@@ -86,13 +87,28 @@ fn main() -> anyhow::Result<()> {
 		.with_context(|| format!("reading {}", config.scenes.display()))?;
 	let app = match exists {
 		true => {
-			let collection = engine::load(&config.scenes)?;
-			App::Starting(runtime.block_on(engine::Engine::start(launch, collection))?)
+			let (autosave, collection) = autosave::Autosave::open(config.scenes.clone())?;
+			App::Starting(runtime.block_on(engine::Engine::start(launch, autosave, collection))?)
 		}
-		false => App::Setup(Box::new(setup::Setup::new(launch, runtime.handle().clone()))),
+		// Nothing is saved until setup starts the studio, so quitting before then
+		// leaves no file and the next launch runs setup again.
+		false => App::Setup(Box::new(setup::Setup::new(
+			launch,
+			config.scenes.clone(),
+			runtime.handle().clone(),
+		))),
 	};
 
-	run(app, gpu, runtime.handle().clone())
+	let started = Arc::new(OnceLock::new());
+	let ran = run(app, gpu, runtime.handle().clone(), started.clone());
+	let Some(engine) = started.get() else { return ran };
+	// The edits since the last autosave, so quitting loses none.
+	let saved = engine.save();
+	if let (Err(err), Err(_)) = (&saved, &ran) {
+		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
+	}
+	ran?;
+	saved
 }
 
 /// What the window shows.
@@ -109,29 +125,34 @@ struct Window {
 	app: App,
 	render: eframe::egui_wgpu::RenderState,
 	runtime: tokio::runtime::Handle,
+	/// The engine once the studio is built, for the save on quit.
+	started: Arc<OnceLock<Arc<engine::Engine>>>,
 }
 
 impl eframe::App for Window {
 	fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-		let started = match &mut self.app {
+		let engine = match &mut self.app {
 			App::Studio(studio) => return studio.ui(ui, frame),
 			App::Setup(setup) => match setup.ui(ui) {
-				Some(started) => started,
+				Some(engine) => engine,
 				None => return,
 			},
-			App::Starting(engine) => setup::Started {
-				engine: engine.clone(),
-				message: None,
-			},
+			App::Starting(engine) => engine.clone(),
 		};
-		let studio = ui::Studio::new(&self.render, started.engine, self.runtime.clone(), started.message);
+		let _ = self.started.set(engine.clone());
+		let studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
 		self.app = App::Studio(Box::new(studio));
 		ui.ctx().request_repaint();
 	}
 }
 
 /// Show the window until it is closed.
-fn run(app: App, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::Result<()> {
+fn run(
+	app: App,
+	gpu: engine::Gpu,
+	runtime: tokio::runtime::Handle,
+	started: Arc<OnceLock<Arc<engine::Engine>>>,
+) -> anyhow::Result<()> {
 	let options = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
 			.with_title("MoQ Studio")
@@ -158,7 +179,12 @@ fn run(app: App, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::R
 				.wgpu_render_state
 				.clone()
 				.context("the window is not drawn with wgpu")?;
-			Ok(Box::new(Window { app, render, runtime }))
+			Ok(Box::new(Window {
+				app,
+				render,
+				runtime,
+				started,
+			}))
 		}),
 	)
 	.map_err(|err| anyhow::anyhow!("{err}"))
