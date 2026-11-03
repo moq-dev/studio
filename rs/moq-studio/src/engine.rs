@@ -1,5 +1,6 @@
 //! Everything behind the window: the GPU, the sources, the program clock that
-//! draws the canvas and mixes the audio, and the broadcast it publishes.
+//! draws the canvas and mixes the audio, and the broadcast it publishes: the
+//! program, and each local source's own track beside it.
 //!
 //! Threads:
 //! - **program** draws preview and program once per canvas frame and hands the
@@ -257,23 +258,12 @@ impl Engine {
 	) -> anyhow::Result<Arc<Self>> {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
+		let sources = subscribe.consume();
 		let autosave::Loaded {
 			collection,
 			history,
 			dropped,
 		} = loaded;
-		// Absolute, so a copied image names the same file in another collection.
-		let dir = autosave.path().parent().filter(|dir| !dir.as_os_str().is_empty());
-		let dir = std::path::absolute(dir.unwrap_or(Path::new(".")))?;
-		let sources = Sources::new(source::Context {
-			bus: bus.clone(),
-			origin: subscribe.consume(),
-			dir,
-			output: moq_video::render::output(&gpu.device),
-		});
-		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
-		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
-		compositor.cut();
 		let canvas = collection.canvas;
 
 		let (output, origin, publish) = if relays.is_empty() {
@@ -282,6 +272,20 @@ impl Engine {
 			let (output, publish) = publish(&gpu, relays, subscribe, broadcast, canvas, on_demand).await?;
 			(Some(output), None, Some(publish))
 		};
+
+		// Absolute, so a copied image names the same file in another collection.
+		let dir = autosave.path().parent().filter(|dir| !dir.as_os_str().is_empty());
+		let dir = std::path::absolute(dir.unwrap_or(Path::new(".")))?;
+		let sources = Sources::new(source::Context {
+			bus: bus.clone(),
+			origin: sources,
+			dir,
+			output: moq_video::render::output(&gpu.device),
+			publish: publish.as_ref().map(|publish| publish.sources.clone()),
+		});
+		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
+		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
+		compositor.cut();
 
 		let engine = Arc::new(Self {
 			state: Mutex::new(State {
@@ -309,6 +313,7 @@ impl Engine {
 				exporter,
 				clock,
 				health,
+				sources: _,
 			}) => {
 				let zero_copy = exporter.route() == Route::Gpu;
 				engine.stats.zero_copy.store(zero_copy, Ordering::Relaxed);
@@ -316,9 +321,14 @@ impl Engine {
 				let (frames, pending) = mpsc::sync_channel(Exporter::DEPTH + 1);
 				tokio::spawn(watch(video.demand(), engine.clone()));
 				let encoder = engine.clone();
+				let (opened, open) = tokio::sync::oneshot::channel();
 				std::thread::Builder::new()
 					.name("encode".into())
-					.spawn(move || encode(&encoder, pending, video, config, zero_copy))?;
+					.spawn(move || encode(&encoder, opened, pending, video, config, zero_copy))?;
+				// Before the program clock starts the sources, so the program holds
+				// its encode session even while unwatched, and a source past the
+				// GPU's session cap is the one that fails.
+				open.await.context("the encode thread stopped")??;
 				(Some((frames, exporter)), Some(audio), Some(clock), Some(health))
 			}
 			None => (None, None, None, None),
@@ -540,10 +550,13 @@ struct Publish {
 	clock: moq_mux::Clock,
 	/// What the health sampler grades.
 	health: health::Publisher,
+	/// Where each local source publishes its own track.
+	sources: moq_scene::publish::Publish,
 }
 
-/// Announce the program broadcast under one epoch and connect to every relay,
-/// each also carrying `subscribe`'s broadcast sources.
+/// Announce the program broadcast under one epoch, which also carries each
+/// local source's own track, and connect to every relay, each also carrying
+/// `subscribe`'s broadcast sources.
 async fn publish(
 	gpu: &Gpu,
 	relays: Vec<Relay>,
@@ -562,8 +575,11 @@ async fn publish(
 	let mut broadcast = publication.broadcast().clone();
 	// Each track claims its bitrate on the first relay's estimate, which that
 	// connection then probes to fund: the bandwidth the stream is granted.
-	let catalog = moq_mux::catalog::Config::default().with_bandwidth(connections[0].allocator());
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, catalog)?;
+	let bandwidth = connections[0].allocator();
+	let catalog = moq_mux::catalog::Config::default()
+		.with_bandwidth(bandwidth.clone())
+		.with_catalog(Default::default());
+	let catalog = moq_scene::publish::Catalog::new(&mut broadcast, catalog)?;
 	let clock = catalog.clock();
 	let (echo, viewers) = health::echo(&path)?;
 
@@ -574,6 +590,15 @@ async fn publish(
 	let (exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config)
 		.await
 		.context("cannot encode the canvas")?;
+	// Sources take the program's tier: hardware when the program found it, so a
+	// session the GPU refuses fails that source loudly instead of falling to
+	// software. When the program could not use hardware, such as NVENC beside an
+	// integrated GPU it cannot read, a source may still reach it from the CPU.
+	let kind = match &config.kind {
+		moq_video::encode::Kind::Named(name) if name == "openh264" => moq_video::encode::Kind::Auto,
+		_ => moq_video::encode::Kind::Hardware,
+	};
+	let sources = moq_scene::publish::Publish::new(broadcast.clone(), catalog.clone(), bandwidth, kind);
 	let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
 	// While the reservation holds, so the solicitation rides the first catalog.
 	let mut soliciting = catalog.clone();
@@ -630,6 +655,7 @@ async fn publish(
 			audio,
 			clock,
 			health,
+			sources,
 		},
 	))
 }
@@ -700,18 +726,31 @@ enum Video {
 	Failed(moq_video::Error),
 }
 
-/// Encode program frames until the program clock stops.
+/// Open the program's encoder, reporting how that went on `opened`, then
+/// encode program frames until the program clock stops.
 ///
 /// A failure aborts the video track, so viewers see that it failed rather
 /// than a track that went away unfinished.
 fn encode(
 	engine: &Engine,
+	opened: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 	video: mpsc::Receiver<Video>,
 	mut producer: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
 	zero_copy: bool,
 ) {
-	let result = encode_frames(&engine.stats, video, &mut producer, &config, zero_copy).and_then(|()| {
+	let mut encoder = match moq_video::encode::Encoder::new(&config) {
+		Ok(encoder) => encoder,
+		Err(err) => {
+			producer.abort(moq_net::StreamError::Internal.into());
+			let _ = opened.send(Err(anyhow::Error::new(err).context("video encoder")));
+			return;
+		}
+	};
+	*engine.stats.encoder.lock().unwrap() = Some(encoder.name().to_string());
+	let _ = opened.send(Ok(()));
+
+	let result = encode_frames(&engine.stats, video, &mut producer, &mut encoder, zero_copy).and_then(|()| {
 		producer.finish()?;
 		Ok(())
 	});
@@ -725,10 +764,9 @@ fn encode_frames(
 	stats: &Stats,
 	video: mpsc::Receiver<Video>,
 	producer: &mut moq_video::encode::Producer,
-	config: &moq_video::encode::Config,
+	encoder: &mut moq_video::encode::Encoder,
 	zero_copy: bool,
 ) -> anyhow::Result<()> {
-	let mut encoder: Option<moq_video::encode::Encoder> = None;
 	let mut paused = false;
 
 	while let Ok(video) = video.recv() {
@@ -752,15 +790,6 @@ fn encode_frames(
 		if !zero_copy {
 			stats.read_back.fetch_add(1, Ordering::Relaxed);
 		}
-
-		let encoder = match &mut encoder {
-			Some(encoder) => encoder,
-			None => {
-				let opened = moq_video::encode::Encoder::new(config).context("video encoder")?;
-				*stats.encoder.lock().unwrap() = Some(opened.name().to_string());
-				encoder.insert(opened)
-			}
-		};
 
 		// A viewer arriving after a break starts from a keyframe rather than
 		// waiting out the rest of a group nobody received the start of.
@@ -858,6 +887,10 @@ mod tests {
 		let engine = Engine::start(gpu, autosave, loaded, relays, "studio", on_demand)
 			.await
 			.expect("the studio starts");
+		assert!(
+			engine.stats.encoder.lock().unwrap().is_some(),
+			"the program holds its encoder before any source opens one"
+		);
 
 		let broadcast = kio::clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
@@ -868,6 +901,7 @@ mod tests {
 			.await
 			.expect("catalog");
 		let catalog = catalogs.next().await.expect("catalog").expect("a catalog");
+		assert_eq!(catalog.video.renditions.len(), 1, "only the program is a rendition");
 		// Viewers are asked for feedback beneath the broadcast from its first catalog.
 		let echo = catalog.echo.as_ref().expect("the catalog solicits feedback");
 		assert_eq!(echo.path.as_str(), "studio/viewers");
@@ -911,6 +945,22 @@ mod tests {
 		} else {
 			assert!(read_back > 0, "the program was neither exported nor read back");
 		}
+
+		// The color source is listed beside the program as its own still.
+		let mut listings = moq_mux::catalog::Consumer::<moq_scene::publish::Ext>::new(&broadcast, format)
+			.await
+			.expect("catalog");
+		kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let catalog = listings.next().await.expect("catalog").expect("a catalog");
+				if let Some(red) = catalog.ext.studio.sources.get("red") {
+					assert_eq!(red.binary.tracks.len(), 1, "{red:?}");
+					return;
+				}
+			}
+		})
+		.await
+		.expect("the source is listed");
 
 		let (audio, config) = catalog.audio.enabled().next().expect("an audio rendition");
 		let mut options = moq_audio::decode::Options::new();
