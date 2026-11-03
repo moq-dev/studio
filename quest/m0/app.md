@@ -15,10 +15,7 @@ landed.
   there until [Windows capture parity](https://github.com/moq-dev/moq/blob/main/quest/m2/capture-windows.md) adds
   WASAPI loopback, so that quest runs it.
 - Build with `--features capture`, since a default build has image, color,
-  and broadcast sources only. That build fails on macOS today: the Devices
-  panel's listing task holds moq-video's ScreenCaptureKit listing future,
-  which is not `Send`, across a `runtime.spawn` in `rs/moq-studio/src/ui.rs`.
-  Linux CI never builds it.
+  and broadcast sources only.
 
 ## Related
 
