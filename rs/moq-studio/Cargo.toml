@@ -42,11 +42,14 @@ eframe = { version = "0.36", default-features = false, features = ["default_font
 egui = "0.36"
 # Docked, rearrangeable panels. 0.21 is the newest release and pins egui 0.36.
 egui_dock = "0.21"
+hang = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 moq-audio = { workspace = true, features = ["bus"] }
+moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-scene = { workspace = true }
+moq-stats = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "net"] }
 moq-video = { workspace = true }
 pollster = { workspace = true }
@@ -56,8 +59,11 @@ url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
 
 [dev-dependencies]
+moq-auth = { workspace = true }
 moq-relay = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+# A paused clock, so health tests sample without waiting.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

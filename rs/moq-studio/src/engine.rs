@@ -22,6 +22,8 @@ use moq_scene::source::{self, Driver, Sources};
 use moq_scene::{Collection, Compositor, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
 
+use crate::health;
+
 /// The GPU everything shares: sources upload to it, the compositor draws on
 /// it, the window presents from it, and the encoder reads the program from it.
 #[derive(Clone)]
@@ -163,8 +165,9 @@ pub struct Output {
 	/// Whether the program video is copied and encoded only while someone
 	/// watches, rather than all the time.
 	pub on_demand: bool,
-	/// The relay connection, which reconnects on its own.
-	pub connection: moq_tokio::Connection,
+	/// The relay connection, which reconnects on its own and dials only while
+	/// held. The Health panel reads its state.
+	_connection: moq_tokio::Connection,
 	publication: moq_net::origin::Publication,
 }
 
@@ -178,6 +181,8 @@ impl Drop for Output {
 pub struct Engine {
 	pub state: Mutex<State>,
 	pub stats: Stats,
+	/// How the stream is delivered, graded every [`health::INTERVAL`].
+	pub health: Mutex<health::Report>,
 	pub bus: moq_audio::bus::Bus,
 	/// `None` when running without a relay.
 	pub output: Option<Output>,
@@ -238,18 +243,20 @@ impl Engine {
 				unsaved: false,
 			}),
 			stats: Stats::default(),
+			health: Mutex::default(),
 			bus,
 			output,
 			_origin: origin,
 		});
 
-		let (video, audio, clock) = match publish {
+		let (video, audio, clock, publisher) = match publish {
 			Some(Publish {
 				video,
 				audio,
 				config,
 				exporter,
 				clock,
+				health,
 			}) => {
 				let zero_copy = exporter.route() == Route::Gpu;
 				engine.stats.zero_copy.store(zero_copy, Ordering::Relaxed);
@@ -260,9 +267,9 @@ impl Engine {
 				std::thread::Builder::new()
 					.name("encode".into())
 					.spawn(move || encode(&encoder, pending, video, config, zero_copy))?;
-				(Some((frames, exporter)), Some(audio), Some(clock))
+				(Some((frames, exporter)), Some(audio), Some(clock), Some(health))
 			}
-			None => (None, None, None),
+			None => (None, None, None, None),
 		};
 
 		let start = Instant::now();
@@ -280,8 +287,59 @@ impl Engine {
 		std::thread::Builder::new()
 			.name("audio".into())
 			.spawn(move || clocked(mix.run_audio(start, epoch, audio)))?;
+		tokio::spawn(engine.clone().grade(health::Sampler::new(publisher)));
 
 		Ok(engine)
+	}
+
+	/// Grade the stream's health every interval, for the Health panel.
+	async fn grade(self: Arc<Self>, mut sampler: health::Sampler) {
+		let mut interval = kio::clock::interval(health::INTERVAL);
+		interval.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
+		loop {
+			let now = interval.tick().await;
+			let report = sampler.sample(now, self.local(now));
+			*self.health.lock().unwrap() = report;
+		}
+	}
+
+	/// What only the studio knows about its stream at `now`.
+	fn local(&self, now: Instant) -> health::Local {
+		let stats = &self.stats;
+		let watched = stats.watched.load(Ordering::Relaxed);
+		let on_demand = self.output.as_ref().is_some_and(|output| output.on_demand);
+		let stalled = {
+			let state = self.state.lock().unwrap();
+			let program = state
+				.compositor
+				.program_scene()
+				.and_then(|name| state.collection.scene(name));
+			let mut shown: Vec<&str> = program
+				.into_iter()
+				.flat_map(|scene| &scene.items)
+				.filter(|item| item.visible)
+				.map(|item| item.source.as_str())
+				.collect();
+			shown.sort_unstable();
+			shown.dedup();
+			shown
+				.into_iter()
+				.filter_map(|name| {
+					let since = state.sources.get(name)?.stalled(now)?;
+					Some((name.to_string(), since))
+				})
+				.collect()
+		};
+		health::Local {
+			rendered: stats.rendered.load(Ordering::Relaxed),
+			dropped: stats.dropped.load(Ordering::Relaxed),
+			encoded: stats.encoded.load(Ordering::Relaxed),
+			encoding: self.output.is_some() && (!on_demand || watched),
+			watched,
+			encoder: stats.encoder.lock().unwrap().clone(),
+			failed: stats.error.lock().unwrap().clone(),
+			stalled,
+		}
 	}
 
 	/// Draw a canvas frame per tick of the program clock, and hand the program
@@ -406,6 +464,8 @@ struct Publish {
 	/// The catalog's clock, which the codec producers write timestamps
 	/// against verbatim.
 	clock: moq_mux::Clock,
+	/// What the health sampler grades.
+	health: health::Publisher,
 }
 
 /// Announce the program broadcast and connect to the relay, which also
@@ -420,10 +480,19 @@ async fn publish(
 	on_demand: bool,
 ) -> anyhow::Result<(Output, Publish)> {
 	let origin = moq_tokio::origin::spawn();
-	let publication = origin.create_broadcast(path).context("cannot create the broadcast")?;
+	let path = moq_net::Path::new(path).with_context(|| format!("cannot publish at `{path}`"))?;
+	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), broadcast = %path, "connecting");
+	let reports = subscribe.consume();
+	let connection = client.with_publisher(&origin).with_subscriber(subscribe).connect(url);
+
+	let publication = origin.create_broadcast(&path).context("cannot create the broadcast")?;
 	let mut broadcast = publication.broadcast().clone();
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
+	// Each track claims its bitrate on the connection's estimate, which the
+	// connection then probes to fund: the bandwidth the stream is granted.
+	let catalog = moq_mux::catalog::Config::default().with_bandwidth(connection.allocator());
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, catalog)?;
 	let clock = catalog.clock();
+	let (echo, viewers) = health::echo(&path)?;
 
 	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
 	// Opens a throwaway encoder now, so a machine that cannot encode the
@@ -433,6 +502,11 @@ async fn publish(
 		.await
 		.context("cannot encode the canvas")?;
 	let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
+	// While the reservation holds, so the solicitation rides the first catalog.
+	let mut soliciting = catalog.clone();
+	let mut section = soliciting.modify()?;
+	section.echo = Some(hang::catalog::Echo::new(echo));
+	section.commit()?;
 	let video = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition)?;
 
 	let bus = moq_audio::bus::Config::default();
@@ -442,18 +516,34 @@ async fn publish(
 	options.track = Some("audio".into());
 	options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Opus, &input);
 	options.config.bitrate = Some(AUDIO_BITRATE);
+	let stats = catalog.clone();
 	let audio = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)?;
 
+	let epoch = moq_net::Epoch::mint();
 	publication
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 		.context("cannot announce the broadcast")?;
-	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), broadcast = %path, "connecting");
-	let connection = client.with_publisher(&origin).with_subscriber(subscribe).connect(url);
+
+	let feedback = health::Feedback::default();
+	let watching = health::Watching::default();
+	tokio::spawn(log(
+		"viewer feedback",
+		feedback.clone().follow(reports.clone(), viewers),
+	));
+	tokio::spawn(log("relay stats", watching.clone().follow(reports, path.clone())));
+	let health = health::Publisher {
+		observer: hang::health::Observer::new(path.clone(), Some(epoch)),
+		catalog: stats,
+		clock: clock.clone(),
+		monitor: connection.monitor(),
+		feedback,
+		watching,
+	};
 
 	let output = Output {
 		path: path.to_string(),
 		on_demand,
-		connection,
+		_connection: connection,
 		publication,
 	};
 	Ok((
@@ -464,8 +554,16 @@ async fn publish(
 			exporter,
 			audio,
 			clock,
+			health,
 		},
 	))
+}
+
+/// Run a background reader, logging why it stopped.
+async fn log(what: &'static str, task: impl Future<Output = anyhow::Result<()>>) {
+	if let Err(err) = task.await {
+		tracing::warn!(%err, "stopped reading {what}");
+	}
 }
 
 /// Track whether anyone watches the video, for the Output panel, and so an
@@ -653,6 +751,9 @@ mod tests {
 			.await
 			.expect("catalog");
 		let catalog = catalogs.next().await.expect("catalog").expect("a catalog");
+		// Viewers are asked for feedback beneath the broadcast from its first catalog.
+		let echo = catalog.echo.as_ref().expect("the catalog solicits feedback");
+		assert_eq!(echo.path.as_str(), "studio/viewers");
 		let (video, config) = catalog.video.enabled().next().expect("a video rendition");
 		let mut options = moq_video::decode::Options::new();
 		options.start = moq_video::decode::Start::Latest;
@@ -711,5 +812,25 @@ mod tests {
 		})
 		.await
 		.expect("sound arrives");
+
+		// Health sees the relay and what each track of the program writes.
+		kio::clock::timeout(TIMEOUT, async {
+			loop {
+				{
+					let report = engine.health.lock().unwrap();
+					let sending = report.tracks.len() == 2
+						&& report
+							.tracks
+							.iter()
+							.all(|track| track.sent.is_some_and(|sent| sent.as_bps() > 0));
+					if report.relay == Some(health::Relay::Connected) && sending {
+						return;
+					}
+				}
+				kio::clock::sleep(health::INTERVAL).await;
+			}
+		})
+		.await
+		.expect("health grades the program's tracks");
 	}
 }
