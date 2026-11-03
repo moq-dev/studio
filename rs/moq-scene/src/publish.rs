@@ -203,7 +203,7 @@ impl Drop for Listing<'_> {
 	}
 }
 
-/// A captured source's video, encoded frame by frame as it is shown.
+/// A captured or replayed source's video, encoded frame by frame as it is shown.
 pub(crate) struct Video {
 	/// Taken only to abort or finish it, as the track ends.
 	producer: Option<moq_video::encode::Producer>,
@@ -222,10 +222,6 @@ impl Video {
 	/// to learn exactly what the real one will write, so a machine that cannot
 	/// encode another stream, such as a GPU at its hardware session cap, fails
 	/// here with the reason.
-	#[cfg_attr(
-		not(feature = "capture"),
-		allow(dead_code, reason = "only capture sources encode video")
-	)]
 	pub(crate) async fn new(
 		listing: &Listing<'_>,
 		size: moq_video::Size,
@@ -252,10 +248,6 @@ impl Video {
 	}
 
 	/// Encode and publish `frame`, restamping it onto the studio clock.
-	#[cfg_attr(
-		not(feature = "capture"),
-		allow(dead_code, reason = "only capture sources encode video")
-	)]
 	pub(crate) fn encode(&mut self, frame: &mut moq_video::Frame) -> Result<(), Error> {
 		let captured = frame.timestamp.as_micros();
 		let epoch = *self
@@ -295,10 +287,6 @@ impl Video {
 	}
 
 	/// End the track, failed with `err` so viewers see why.
-	#[cfg_attr(
-		not(feature = "capture"),
-		allow(dead_code, reason = "only capture sources encode video")
-	)]
 	pub(crate) fn abort(mut self, err: &Error) {
 		if let Some(producer) = self.producer.take() {
 			producer.abort(moq_net::Error::Transport(err.to_string()));

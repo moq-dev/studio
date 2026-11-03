@@ -31,6 +31,7 @@ mod collection;
 mod compositor;
 mod edit;
 pub mod publish;
+pub mod replay;
 pub mod source;
 
 pub use clip::Clip;
