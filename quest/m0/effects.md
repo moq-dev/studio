@@ -18,9 +18,10 @@ effect is baked into its source's track per the
 to one scene item, and sits before the source's crop and filters, as the
 encoder in `rs/moq-scene/src/publish.rs` sees the capture.
 
-Prefer an existing runtime crate and a small, permissively licensed person
-segmentation model (such as MediaPipe's selfie segmentation, Apache-2.0) over
-training one. Running it on the studio's own wgpu device keeps the frame on
-the GPU and works toward the [web studio](/quest/m0/web.md); a CPU runtime
-costs a readback per frame. Measure the per-frame cost at 1080p and 30 fps
-before choosing.
+This quest picks the runtime crate (`ort`, `tract`, or `burn`) and the model
+(a small, permissively licensed person segmentation model such as MediaPipe's
+selfie segmentation, Apache-2.0) after measuring each candidate's per-frame
+cost at 1080p and 30 fps (decided 2026-11-03, maintainer, on
+[moq-dev/studio#17](https://github.com/moq-dev/studio/pull/17)). Running on the
+studio's own wgpu device keeps the frame on the GPU and works toward the
+[web studio](/quest/m0/web.md); a CPU runtime costs a readback per frame.

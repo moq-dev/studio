@@ -22,14 +22,20 @@ what it settles on. Until then sources are listed provisionally as
 `dev.moq.studio.sources.<name>` in the studio catalog, each a nested hang
 catalog (decided 2026-11-02, maintainer; `rs/moq-scene/src/publish.rs`).
 
-Clones and filters travel in the layout, not as tracks: a source's track is
-its capture before any filter, and a clone publishes none, so the layout names
-the source a clone shows and the filters each source and item applies
-(decided 2026-11-02, maintainer). That includes crops and blend modes, and the
-filters naming another source: a mask names a picture source's track, and a
-LUT a `lut` source, whose `.cube` table publishes no track yet, so a viewer
-needs one carrying it, as an image's file is.
+Clones and video filters travel in the layout, not as tracks: a picture
+source's track is its capture before any filter, and a clone publishes none,
+so the layout names the source a clone shows and the video filters each
+source and item applies (decided 2026-11-02, maintainer), with crops and
+blend modes. Only a video filter that cannot render the same way in every
+viewer is baked into a track of its own. A mask names a picture source's
+track, and a LUT a `lut` source, whose `.cube` table publishes no track yet,
+so a viewer needs one carrying it, as an image's file is. Audio is the other
+way round: an audio source's track is published after its audio filters ([Audio source tracks](/quest/m0/compose/sources.md)), so
+the layout carries only what is applied after that point, such as gain and
+mute, and never names an audio filter for a viewer to apply again. The
+picture source tracks are enough to start; audio source tracks join the
+layout when they land.
 
-## Required
+## Related
 
-- [Audio source tracks](/quest/m0/compose/sources.md) - the audio tracks a layout names
+- [Audio source tracks](/quest/m0/compose/sources.md) - the audio tracks a layout also names once they land
