@@ -229,27 +229,41 @@ pub struct Engine {
 }
 
 /// The audio the program publishes.
-const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(128);
+pub const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(128);
 
 /// How often the audio thread reads the bus. Short enough that a read is never
 /// close to the bus's buffering, long enough to cost nothing.
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
+/// Everything starting the engine takes besides the scene file, which guided
+/// setup holds back until the creator has settled on a collection.
+#[derive(Clone)]
+pub struct Launch {
+	pub gpu: Gpu,
+	/// The relay to publish to, if any.
+	pub connect: Option<(moq_tokio::Client, url::Url)>,
+	/// The broadcast path the program is published at.
+	pub broadcast: String,
+	/// Whether the program video encodes only while someone watches.
+	pub on_demand: bool,
+}
+
 impl Engine {
-	/// Open the `loaded` collection and history on `gpu`, start the program
-	/// clock, and save both to `autosave`'s files as they change.
-	/// With `connect`, publish the program at `broadcast` on that relay,
-	/// encoding its video only while someone watches when `on_demand`.
+	/// Open the `loaded` collection and history on `launch.gpu`, start the
+	/// program clock, and save both to `autosave`'s files as they change,
+	/// starting at once.
+	/// With `launch.connect`, publish the program at `launch.broadcast` on that
+	/// relay, encoding its video only while someone watches when
+	/// `launch.on_demand`.
 	///
 	/// Call inside the tokio runtime that serves the relay connection.
-	pub async fn start(
-		gpu: Gpu,
-		autosave: Autosave,
-		loaded: autosave::Loaded,
-		connect: Option<(moq_tokio::Client, url::Url)>,
-		broadcast: &str,
-		on_demand: bool,
-	) -> anyhow::Result<Arc<Self>> {
+	pub async fn start(launch: Launch, autosave: Autosave, loaded: autosave::Loaded) -> anyhow::Result<Arc<Self>> {
+		let Launch {
+			gpu,
+			connect,
+			broadcast,
+			on_demand,
+		} = launch;
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
 		let sources = subscribe.consume();
@@ -262,7 +276,7 @@ impl Engine {
 
 		let (output, origin, publish) = match connect {
 			Some((client, url)) => {
-				let (output, publish) = publish(&gpu, client, url, subscribe, broadcast, canvas, on_demand).await?;
+				let (output, publish) = publish(&gpu, client, url, subscribe, &broadcast, canvas, on_demand).await?;
 				(Some(output), None, Some(publish))
 			}
 			None => (None, Some(subscribe), None),
@@ -875,16 +889,19 @@ mod tests {
 			filters: Vec::new(),
 		});
 
-		let gpu = Gpu::new().await.expect("a GPU");
+		let launch = Launch {
+			gpu: Gpu::new().await.expect("a GPU"),
+			connect: Some((client, fixture.url.clone())),
+			broadcast: "studio".into(),
+			on_demand: false,
+		};
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
-		let connect = Some((client, fixture.url.clone()));
-		let on_demand = false;
 		let loaded = autosave::Loaded {
 			collection,
 			history: History::new(),
 			dropped: 0,
 		};
-		let engine = Engine::start(gpu, autosave, loaded, connect, "studio", on_demand)
+		let engine = Engine::start(launch, autosave, loaded)
 			.await
 			.expect("the studio starts");
 		assert!(
