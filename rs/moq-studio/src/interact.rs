@@ -56,7 +56,7 @@ struct Hit {
 
 impl Interact {
 	/// Turn this frame's input over `image`, which shows `scene` of
-	/// `collection`, into what each page it touches should receive, by page
+	/// `collection` under its top layer, into what each page it touches should receive, by page
 	/// name.
 	pub fn update(
 		&mut self,
@@ -320,24 +320,32 @@ impl Interact {
 	}
 }
 
-/// The topmost visible browser source in `scene` at canvas point (`x`, `y`),
-/// and the point on its page.
+/// The topmost visible browser source, or clone of one, at canvas point (`x`,
+/// `y`) in `scene` and the top layer over it, and the point on its page.
 fn page_at(collection: &Collection, scene: Option<&str>, x: f32, y: f32) -> Option<Hit> {
-	let scene = collection.scene(scene?)?;
-	scene.items.iter().rev().filter(|item| item.visible).find_map(|item| {
-		let rect = item.rect;
-		let inside = x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
-		if !inside {
-			return None;
-		}
-		let (x, y) = scale(collection, &item.source, rect, x, y)?;
-		Some(Hit {
-			page: item.source.clone(),
-			rect,
-			x,
-			y,
+	let scene = scene.and_then(|name| collection.scene(name));
+	let items = scene.map(|scene| scene.items.as_slice()).unwrap_or_default();
+	items
+		.iter()
+		.chain(&collection.top)
+		.rev()
+		.filter(|item| item.visible)
+		.find_map(|item| {
+			let rect = item.rect;
+			let inside = x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
+			if !inside {
+				return None;
+			}
+			// A clone shows its source's page, which runs under that name.
+			let page = collection.capture(&item.source);
+			let (x, y) = scale(collection, page, rect, x, y)?;
+			Some(Hit {
+				page: page.to_string(),
+				rect,
+				x,
+				y,
+			})
 		})
-	})
 }
 
 /// Canvas point (`x`, `y`) in the pixels of `page` placed at `rect`, even off
@@ -489,9 +497,8 @@ mod tests {
 		collection.sources.insert("chat".into(), page(400, 800));
 		collection.sources.insert("alerts".into(), page(800, 600));
 		let item = |source: &str, rect, visible| Item {
-			source: source.into(),
-			rect,
 			visible,
+			..Item::new(source, rect)
 		};
 		let fill = Rect::fill(&collection.canvas);
 		let corner = Rect {
@@ -517,6 +524,18 @@ mod tests {
 			"a hidden page takes no input"
 		);
 		assert!(page_at(&collection, Some("Other"), 1.0, 1.0).is_none());
+
+		// The top layer draws over every scene, and a clone shows its source's
+		// page, which runs under the source's name.
+		collection
+			.sources
+			.insert("chat copy".into(), Source::Clone { source: "chat".into() });
+		collection.top = vec![item("chat copy", corner, true)];
+		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
+		assert_eq!(
+			page_at(&collection, None, 1720.0, 680.0).map(|hit| hit.page),
+			Some("chat".into())
+		);
 
 		// A captured pointer maps onto its page past the edges.
 		assert_eq!(scale(&collection, "chat", corner, 1420.0, 280.0), Some((-100, 0)));
@@ -562,15 +581,14 @@ mod tests {
 				height: 100,
 			},
 		);
-		let item = |x| Item {
-			source: "chat".into(),
-			rect: Rect {
+		let item = |x| {
+			let rect = Rect {
 				x,
 				y: 0.0,
 				width: 100.0,
 				height: 100.0,
-			},
-			visible: true,
+			};
+			Item::new("chat", rect)
 		};
 		collection.scenes = vec![Scene {
 			name: "Main".into(),
@@ -620,15 +638,14 @@ mod tests {
 		};
 		collection.sources.insert("left".into(), page.clone());
 		collection.sources.insert("right".into(), page);
-		let item = |source: &str, x| Item {
-			source: source.into(),
-			rect: Rect {
+		let item = |source: &str, x| {
+			let rect = Rect {
 				x,
 				y: 0.0,
 				width: 100.0,
 				height: 100.0,
-			},
-			visible: true,
+			};
+			Item::new(source, rect)
 		};
 		collection.scenes = vec![Scene {
 			name: "Main".into(),
@@ -725,11 +742,7 @@ mod tests {
 		);
 		collection.scenes = vec![Scene {
 			name: "Main".into(),
-			items: vec![Item {
-				source: "chat".into(),
-				rect: Rect::fill(&collection.canvas),
-				visible: true,
-			}],
+			items: vec![Item::new("chat", Rect::fill(&collection.canvas))],
 		}];
 		let delivered = frame(
 			&egui::Context::default(),

@@ -3638,6 +3638,7 @@ name = "moq-scene"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "bytes",
  "cef",
  "hang",
  "humantime-serde",

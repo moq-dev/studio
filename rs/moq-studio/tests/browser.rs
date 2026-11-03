@@ -48,14 +48,7 @@ impl Studio {
 		let fill = Rect::fill(&collection.canvas);
 		collection.scenes = vec![Scene {
 			name: "Main".into(),
-			items: sources
-				.iter()
-				.map(|(name, _)| Item {
-					source: name.to_string(),
-					rect: fill,
-					visible: true,
-				})
-				.collect(),
+			items: sources.iter().map(|(name, _)| Item::new(*name, fill)).collect(),
 		}];
 		for (name, source) in sources {
 			collection.sources.insert(name.to_string(), source.clone());
@@ -71,6 +64,7 @@ impl Studio {
 			origin: origin.consume(),
 			dir: dir.path().to_path_buf(),
 			output: moq_video::render::output(&device),
+			publish: None,
 			browser: Some(Helper::new(env!("CARGO_BIN_EXE_moq-studio"), &adapter, &device, &queue)),
 		});
 		for driver in sources.sync(&collection) {
