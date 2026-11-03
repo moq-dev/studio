@@ -201,10 +201,16 @@ pub struct Output {
 	/// Whether the program video is copied and encoded only while someone
 	/// watches, rather than all the time.
 	pub on_demand: bool,
-	/// The relay connection, which reconnects on its own and dials only while
-	/// held. The Health panel reads its state.
-	_connection: moq_tokio::Connection,
+	/// A connection to each relay, which reconnects on its own and dials only
+	/// while held. The Health panel reads their states.
+	_connections: Vec<moq_tokio::Connection>,
 	publication: moq_net::origin::Publication,
+}
+
+/// A relay the program is published to.
+pub struct Relay {
+	pub client: moq_tokio::Client,
+	pub url: url::Url,
 }
 
 impl Drop for Output {
@@ -237,15 +243,15 @@ const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 impl Engine {
 	/// Open the `loaded` collection and history on `gpu`, start the program
 	/// clock, and save both to `autosave`'s files as they change.
-	/// With `connect`, publish the program at `broadcast` on that relay,
-	/// encoding its video only while someone watches when `on_demand`.
+	/// Publish the program at `broadcast` on every one of `relays`, preferred
+	/// first, encoding its video only while someone watches when `on_demand`.
 	///
-	/// Call inside the tokio runtime that serves the relay connection.
+	/// Call inside the tokio runtime that serves the relay connections.
 	pub async fn start(
 		gpu: Gpu,
 		autosave: Autosave,
 		loaded: autosave::Loaded,
-		connect: Option<(moq_tokio::Client, url::Url)>,
+		relays: Vec<Relay>,
 		broadcast: &str,
 		on_demand: bool,
 	) -> anyhow::Result<Arc<Self>> {
@@ -270,12 +276,11 @@ impl Engine {
 		compositor.cut();
 		let canvas = collection.canvas;
 
-		let (output, origin, publish) = match connect {
-			Some((client, url)) => {
-				let (output, publish) = publish(&gpu, client, url, subscribe, broadcast, canvas, on_demand).await?;
-				(Some(output), None, Some(publish))
-			}
-			None => (None, Some(subscribe), None),
+		let (output, origin, publish) = if relays.is_empty() {
+			(None, Some(subscribe), None)
+		} else {
+			let (output, publish) = publish(&gpu, relays, subscribe, broadcast, canvas, on_demand).await?;
+			(Some(output), None, Some(publish))
 		};
 
 		let engine = Arc::new(Self {
@@ -537,12 +542,11 @@ struct Publish {
 	health: health::Publisher,
 }
 
-/// Announce the program broadcast and connect to the relay, which also
-/// carries `subscribe`'s broadcast sources.
+/// Announce the program broadcast under one epoch and connect to every relay,
+/// each also carrying `subscribe`'s broadcast sources.
 async fn publish(
 	gpu: &Gpu,
-	client: moq_tokio::Client,
-	url: url::Url,
+	relays: Vec<Relay>,
 	subscribe: moq_net::origin::Producer,
 	path: &str,
 	canvas: moq_scene::Canvas,
@@ -550,15 +554,15 @@ async fn publish(
 ) -> anyhow::Result<(Output, Publish)> {
 	let origin = moq_tokio::origin::spawn();
 	let path = moq_net::Path::new(path).with_context(|| format!("cannot publish at `{path}`"))?;
-	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), broadcast = %path, "connecting");
 	let reports = subscribe.consume();
-	let connection = client.with_publisher(&origin).with_subscriber(subscribe).connect(url);
+	tracing::info!(broadcast = %path, "publishing");
+	let (connections, links) = connect(relays, &origin, &subscribe);
 
 	let publication = origin.create_broadcast(&path).context("cannot create the broadcast")?;
 	let mut broadcast = publication.broadcast().clone();
-	// Each track claims its bitrate on the connection's estimate, which the
+	// Each track claims its bitrate on the first relay's estimate, which that
 	// connection then probes to fund: the bandwidth the stream is granted.
-	let catalog = moq_mux::catalog::Config::default().with_bandwidth(connection.allocator());
+	let catalog = moq_mux::catalog::Config::default().with_bandwidth(connections[0].allocator());
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, catalog)?;
 	let clock = catalog.clock();
 	let (echo, viewers) = health::echo(&path)?;
@@ -588,6 +592,8 @@ async fn publish(
 	let stats = catalog.clone();
 	let audio = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)?;
 
+	// One epoch on every relay, so a viewer moving between them resumes
+	// mid-group rather than restarting.
 	let epoch = moq_net::Epoch::mint();
 	publication
 		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
@@ -604,7 +610,7 @@ async fn publish(
 		observer: hang::health::Observer::new(path.clone(), Some(epoch)),
 		catalog: stats,
 		clock: clock.clone(),
-		monitor: connection.monitor(),
+		relays: links,
 		feedback,
 		watching,
 	};
@@ -612,7 +618,7 @@ async fn publish(
 	let output = Output {
 		path: path.to_string(),
 		on_demand,
-		_connection: connection,
+		_connections: connections,
 		publication,
 	};
 	Ok((
@@ -626,6 +632,39 @@ async fn publish(
 			health,
 		},
 	))
+}
+
+/// Connect to every relay, publishing `origin` to each and feeding `subscribe`
+/// the broadcast sources of each, and watch each connection for the Health
+/// panel.
+fn connect(
+	relays: Vec<Relay>,
+	origin: &moq_net::origin::Producer,
+	subscribe: &moq_net::origin::Producer,
+) -> (Vec<moq_tokio::Connection>, Vec<health::Link>) {
+	relays
+		.into_iter()
+		.enumerate()
+		.map(|(rank, Relay { client, url })| {
+			tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), "connecting");
+			// Only the scheme, host, and port: a path can carry a credential, and
+			// the panel may be on a shared screen.
+			let mut endpoint = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
+			if let Some(port) = url.port() {
+				endpoint.push_str(&format!(":{port}"));
+			}
+			// A broadcast source comes through the first relay while it has a
+			// route, and through the failover only while the first has none.
+			let preference = match rank {
+				0 => moq_net::origin::Preference::default(),
+				_ => moq_net::origin::Preference::new(-1),
+			};
+			let sources = subscribe.clone().with_preference(preference);
+			let connection = client.with_publisher(origin).with_subscriber(sources).connect(url);
+			let monitor = connection.monitor();
+			(connection, health::Link { endpoint, monitor })
+		})
+		.unzip()
 }
 
 /// Run a background reader, logging why it stopped.
@@ -806,14 +845,17 @@ mod tests {
 
 		let gpu = Gpu::new().await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
-		let connect = Some((client, fixture.url.clone()));
+		let relays = vec![Relay {
+			client,
+			url: fixture.url.clone(),
+		}];
 		let on_demand = false;
 		let loaded = autosave::Loaded {
 			collection,
 			history: History::new(),
 			dropped: 0,
 		};
-		let engine = Engine::start(gpu, autosave, loaded, connect, "studio", on_demand)
+		let engine = Engine::start(gpu, autosave, loaded, relays, "studio", on_demand)
 			.await
 			.expect("the studio starts");
 
@@ -930,7 +972,8 @@ mod tests {
 							.tracks
 							.iter()
 							.all(|track| track.sent.is_some_and(|sent| sent.as_bps() > 0));
-					if report.relay == Some(health::Relay::Connected) && sending {
+					let connected = matches!(&report.relays[..], [relay] if relay.state == health::State::Connected);
+					if connected && sending {
 						return;
 					}
 				}
@@ -939,5 +982,79 @@ mod tests {
 		})
 		.await
 		.expect("health grades the program's tracks");
+	}
+
+	/// With a failover relay, both relays route the program under its one
+	/// epoch over the one protocol version, so a viewer moving between them
+	/// resumes; and a broadcast source only the failover has still reaches
+	/// the studio.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn every_relay_routes_one_epoch() {
+		let _ = moq_tokio::crypto::install_default();
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+		let mut relays = Vec::new();
+		let mut routes = Vec::new();
+		let mut guests = Vec::new();
+		for _ in 0..2 {
+			let fixture = moq_relay::test_relay().await.expect("test relay");
+			let ready = fixture.relay.ready();
+			routes.push(fixture.relay.cluster().origin.consume());
+			tokio::spawn(fixture.relay.run());
+			ready.wait().await.expect("relay ready");
+			let mut client = moq_tokio::connect::Config::default();
+			client.tls.fingerprint = vec![fixture.fingerprint.clone()];
+			client.version = vec![version];
+			let client = client.init(Default::default()).expect("client");
+			guests.push((client.clone(), fixture.url.clone()));
+			relays.push(Relay {
+				client,
+				url: fixture.url,
+			});
+		}
+
+		let origin = moq_tokio::origin::spawn();
+		let subscribe = moq_tokio::origin::spawn();
+		let (_connections, links) = connect(relays, &origin, &subscribe);
+		let publication = origin.create_broadcast("studio").unwrap();
+		let epoch = moq_net::Epoch::mint();
+		publication
+			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+			.unwrap();
+
+		let guest = moq_tokio::origin::spawn();
+		let source = guest.create_broadcast("guest").unwrap();
+		source.announce(Default::default()).unwrap();
+		let (client, url) = guests.pop().unwrap();
+		let _guest = client.with_publisher(&guest).connect(url);
+
+		let routed = async {
+			for relay in &routes {
+				let mut announced = relay.announced();
+				loop {
+					match announced.next().await.expect("announcements") {
+						moq_net::announce::Event::Start(announce) if announce.prefix.as_str() == "studio" => {
+							assert_eq!(announce.route.epoch, Some(epoch.clone()));
+							break;
+						}
+						_ => continue,
+					}
+				}
+			}
+			for link in &links {
+				let mut state = link.monitor.state();
+				while state.version != Some(version) {
+					state = link
+						.monitor
+						.state_changed(state.revision)
+						.await
+						.expect("the connection");
+				}
+			}
+			subscribe.consume().follow("guest", None).unwrap().available().await
+		};
+		kio::clock::timeout(TIMEOUT, routed)
+			.await
+			.expect("both relays route the program, and the failover the source")
+			.expect("the source");
 	}
 }

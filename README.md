@@ -17,6 +17,13 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   changes are saved to it a second after you stop editing, with no save step.
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
+- `--failover <url>` publishes the same broadcast to a second relay under the
+  same publisher epoch, so a viewer linked to both resumes mid-group from it
+  when the first fails. Both relays must speak the one `--connect-version`,
+  which must carry publisher epochs (`moq-lite-07-wip` today, which a relay
+  accepts only when configured to), or the studio refuses to start. Its
+  credential rides its URL's `?jwt=`; `--connect-token` goes to the first
+  relay only.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
   On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
@@ -40,7 +47,7 @@ Every panel is a tab you can drag, split, or stack.
 | Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
 | Output | See the broadcast path, whether the program is encoding, and the encoder's work. |
-| Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
+| Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
@@ -62,7 +69,8 @@ comes along, renamed if its name is taken. Copied filters paste onto the
 selected source or item, after its own. The clipboard holds text in the scene
 file's format.
 
-A broadcast source subscribes through the same relay connection, plays the
+A broadcast source subscribes through the same relay connections, from the
+first relay while it has the broadcast and the failover only while it does not, plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
@@ -185,16 +193,19 @@ compositor uploads.
 
 The Health panel grades the stream every second on the thresholds moq's
 `hang::health` shares with the rest of the stack, and lists each problem
-with its cause in plain words: the relay is unreachable, the uplink is
+with its cause in plain words: a relay is unreachable, the uplink is
 congested or losing packets, the relay is far away, the encoder is behind or
 stuck, a camera or broadcast source on program stalled, or viewers are late,
-stalling, or cannot decode a track. Below that it shows:
+stalling, or cannot decode a track. A relay lost while the other serves is
+degraded, since viewers have nothing left to fall back to; with none serving
+it is unhealthy. Below that it shows:
 
-- **Uplink**: the round trip to the relay, the bandwidth the connection
-  estimates it can carry, the media every track writes, and the share lost and
-  resent. Loss and headroom are graded only while someone watches, since the
-  relay pulls nothing otherwise.
-- **Watching**: the sessions subscribed to the broadcast, from the relay's
+- **Relays**: each relay's state, and the protocol its session negotiated.
+- **Uplink**: the round trip to the first connected relay, the bandwidth the
+  connection estimates it can carry, the media every track writes, and the
+  share lost and resent. Loss and headroom are graded only while someone
+  watches, since the relay pulls nothing otherwise.
+- **Watching**: the sessions subscribed to the broadcast, from the relays'
   `.stats` broadcasts. A relay shares those only with a connection allowed to
   read them, so most show "unknown". In a cluster, a relay forwarding the
   stream to another counts as one session.
