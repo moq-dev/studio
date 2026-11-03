@@ -156,7 +156,9 @@ Every captured source opens an encode session as it starts, and consumer GPUs
 allow only a few hardware sessions at once. When the program encodes on
 hardware, so do the sources, and a session the GPU refuses fails that source's
 track with the encoder's reason in the Sources panel rather than falling back
-to software. The source keeps drawing in the studio's own scenes. When the
+to software. The source keeps drawing in the studio's own scenes. The program
+opens its session before any source, even with `--on-demand`, so the sources
+past the cap fail rather than the program. When the
 program encodes in software, a source takes hardware where it can and software
 otherwise.
 

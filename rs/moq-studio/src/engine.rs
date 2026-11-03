@@ -250,9 +250,14 @@ impl Engine {
 				let (frames, pending) = mpsc::sync_channel(Exporter::DEPTH + 1);
 				tokio::spawn(watch(video.demand(), engine.clone()));
 				let encoder = engine.clone();
+				let (opened, open) = tokio::sync::oneshot::channel();
 				std::thread::Builder::new()
 					.name("encode".into())
-					.spawn(move || encode(&encoder, pending, video, config, zero_copy))?;
+					.spawn(move || encode(&encoder, opened, pending, video, config, zero_copy))?;
+				// Before the program clock starts the sources, so the program holds
+				// its encode session even while unwatched, and a source past the
+				// GPU's session cap is the one that fails.
+				open.await.context("the encode thread stopped")??;
 				(Some((frames, exporter)), Some(audio), Some(clock), Some(health))
 			}
 			None => (None, None, None, None),
@@ -613,18 +618,31 @@ enum Video {
 	Failed(moq_video::Error),
 }
 
-/// Encode program frames until the program clock stops.
+/// Open the program's encoder, reporting how that went on `opened`, then
+/// encode program frames until the program clock stops.
 ///
 /// A failure aborts the video track, so viewers see that it failed rather
 /// than a track that went away unfinished.
 fn encode(
 	engine: &Engine,
+	opened: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 	video: mpsc::Receiver<Video>,
 	mut producer: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
 	zero_copy: bool,
 ) {
-	let result = encode_frames(&engine.stats, video, &mut producer, &config, zero_copy).and_then(|()| {
+	let mut encoder = match moq_video::encode::Encoder::new(&config) {
+		Ok(encoder) => encoder,
+		Err(err) => {
+			producer.abort(moq_net::StreamError::Internal.into());
+			let _ = opened.send(Err(anyhow::Error::new(err).context("video encoder")));
+			return;
+		}
+	};
+	*engine.stats.encoder.lock().unwrap() = Some(encoder.name().to_string());
+	let _ = opened.send(Ok(()));
+
+	let result = encode_frames(&engine.stats, video, &mut producer, &mut encoder, zero_copy).and_then(|()| {
 		producer.finish()?;
 		Ok(())
 	});
@@ -638,10 +656,9 @@ fn encode_frames(
 	stats: &Stats,
 	video: mpsc::Receiver<Video>,
 	producer: &mut moq_video::encode::Producer,
-	config: &moq_video::encode::Config,
+	encoder: &mut moq_video::encode::Encoder,
 	zero_copy: bool,
 ) -> anyhow::Result<()> {
-	let mut encoder: Option<moq_video::encode::Encoder> = None;
 	let mut paused = false;
 
 	while let Ok(video) = video.recv() {
@@ -665,15 +682,6 @@ fn encode_frames(
 		if !zero_copy {
 			stats.read_back.fetch_add(1, Ordering::Relaxed);
 		}
-
-		let encoder = match &mut encoder {
-			Some(encoder) => encoder,
-			None => {
-				let opened = moq_video::encode::Encoder::new(config).context("video encoder")?;
-				*stats.encoder.lock().unwrap() = Some(opened.name().to_string());
-				encoder.insert(opened)
-			}
-		};
 
 		// A viewer arriving after a break starts from a keyframe rather than
 		// waiting out the rest of a group nobody received the start of.
@@ -762,6 +770,10 @@ mod tests {
 		let engine = Engine::start(gpu, autosave, collection, connect, "studio", on_demand)
 			.await
 			.expect("the studio starts");
+		assert!(
+			engine.stats.encoder.lock().unwrap().is_some(),
+			"the program holds its encoder before any source opens one"
+		);
 
 		let broadcast = kio::clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
