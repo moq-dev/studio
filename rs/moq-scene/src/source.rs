@@ -23,6 +23,7 @@ use tokio::sync::watch;
 
 use crate::Error;
 use crate::collection::{Collection, Source};
+use crate::lut::Cube;
 use crate::publish::{Claim, Listing, Publish, Still};
 use crate::replay::{Take, Target};
 
@@ -32,6 +33,8 @@ pub(crate) enum Picture {
 	Frame(moq_video::Frame),
 	/// Tightly packed RGBA with straight alpha, such as a still image.
 	Rgba { size: moq_video::Size, pixels: Vec<u8> },
+	/// A LUT source's table, which is not drawn but looked up.
+	Lut(Cube),
 }
 
 /// The one picture a source holds for the compositor. A newer picture replaces
@@ -99,7 +102,7 @@ pub struct Context {
 	pub bus: Bus,
 	/// Where broadcast sources are announced: the studio's relay connection.
 	pub origin: moq_net::origin::Consumer,
-	/// What a relative image path is relative to: the scene file's directory.
+	/// What a relative image or LUT path is relative to: the scene file's directory.
 	pub dir: PathBuf,
 	/// What cameras, screens, and broadcasts deliver video as:
 	/// `moq_video::render::output` of the compositor's device.
@@ -373,6 +376,14 @@ impl Driver {
 				let _still = listing.and_then(|listing| self.publish(Still::new(listing, bytes)));
 				std::future::pending().await
 			}
+			Source::Lut { path } => {
+				let path = self.context.dir.join(path);
+				let failed = |err: String| Error::Lut(format!("{}: {err}", path.display()));
+				let text = std::fs::read_to_string(&path).map_err(|err| failed(err.to_string()))?;
+				let cube = Cube::parse(&text).map_err(failed)?;
+				self.show(Picture::Lut(cube));
+				std::future::pending().await
+			}
 			Source::Broadcast { path } => self.broadcast(path).await,
 			Source::Replay => {
 				let plays = self.plays.clone().expect("a replay source has plays");
@@ -421,6 +432,7 @@ impl Driver {
 			| Source::Image { .. }
 			| Source::Broadcast { .. }
 			| Source::Clone { .. }
+			| Source::Lut { .. }
 			| Source::Replay => unreachable!("not a device source"),
 		};
 
@@ -1376,7 +1388,7 @@ mod tests {
 				until_time(due).await;
 				let shown = until(|| match feed.take() {
 					Some(Picture::Frame(frame)) => Some(frame.timestamp),
-					Some(Picture::Rgba { .. }) => panic!("cleared before {timestamp:?}"),
+					Some(_) => panic!("cleared before {timestamp:?}"),
 					None => None,
 				})
 				.await;

@@ -81,7 +81,7 @@ Every panel is a tab you can drag, split, or stack.
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
-| Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
+| Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
 | Output | See the broadcast path, whether the program is encoding, the canvas, and the encoder's work. |
 | Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
@@ -161,11 +161,23 @@ source = "camera"
 [video.camera-faded]
 filters = [{ kind = "opacity", amount = 0.5 }]
 
+[sources.grade]
+kind = "lut"
+path = "teal-orange.cube"
+
+[video.camera]
+crop = { left = 0.1, right = 0.1 } # trim 10% of the picture off each side
+filters = [
+    { kind = "chroma_key", color = "#00ff00", similarity = 0.4, smoothness = 0.08, spill = 0.1 },
+    { kind = "lut", source = "grade", amount = 0.8 },
+]
+
 [[scenes]]
 name = "Main"
 items = [
     { source = "camera", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
-    { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, filters = [{ kind = "opacity", amount = 0.8 }] },
+    { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, filters = [{ kind = "drop_shadow", x = 8, y = 8, blur = 12, color = "#00000080" }] },
+    { source = "logo", rect = { x = 0, y = 0, width = 1920, height = 1080 }, blend = "multiply", filters = [{ kind = "opacity", amount = 0.3 }] },
 ]
 
 [[scenes]]
@@ -182,11 +194,36 @@ rect = { x = 1600, y = 40, width = 280, height = 120 }
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
 (macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
-`broadcast`, `clone` (with the `source` it shows), and `replay`, where the
-Replay panel plays replays. The Devices panel fills
-in ids. `[video.<source>]` lists a source's filters, and an item's `filters`
-its own; the one filter so far is `opacity`, from 0 to 1, as in CSS. `[[top]]`
-items make up the top layer.
+`broadcast`, `clone` (with the `source` it shows), `lut` (a 3D Adobe or
+Resolve `.cube` file, which no item places, but which grades what a `lut`
+filter names it in), and `replay`, where the Replay panel plays replays. The
+Devices panel fills in ids. `[[top]]` items make up the top layer.
+
+`[video.<source>]` sets a source's `crop` and `filters`, wherever it is shown,
+and an item's `crop`, `filters`, and `blend` its own. A `crop` trims a fraction
+(0 to 1) of the picture off its `left`, `top`, `right`, and `bottom`, opposite
+sides together trimming less than the whole, and stretches the rest over the
+item; an item's crop trims what its source's
+leaves. Filters apply in order, the source's then the item's, with lengths in
+canvas pixels:
+
+| Filter | Settings |
+| --- | --- |
+| `opacity`, `grayscale`, `sepia`, `invert` | `amount`, 0 to 1, as in CSS |
+| `brightness`, `contrast`, `saturate` | `amount`, 0 or more, 1 leaving the picture as it is, as in CSS |
+| `hue_rotate` | `degrees`, as in CSS |
+| `blur` | `radius`, the standard deviation; the edges fade out, as in CSS |
+| `drop_shadow` | `x`, `y`, `blur` (the standard deviation), and `color`, as in CSS |
+| `chroma_key` | `color` keyed out, and `similarity`, `smoothness`, and `spill` from 0 to 1 |
+| `luma_key` | `min` and `max` luma kept, `min` at most `max`, and `smoothness`, all from 0 to 1 |
+| `lut` | the `lut` `source` to grade through, and `amount` from 0 to 1 |
+| `mask` | a `source` whose picture, stretched over the item, keeps what it covers: by its alpha, or `mode = "luminance"` |
+
+An item's `blend` mixes it with what is under it by a CSS `mix-blend-mode`:
+`multiply`, `screen`, `overlay`, `darken`, `lighten`, `color_dodge`,
+`color_burn`, `hard_light`, `soft_light`, `difference`, `exclusion`, `hue`,
+`saturation`, `color`, or `luminosity`. Removing a source removes the filters
+that name it.
 
 The studio writes the file a second after the last change, so a burst such as a
 slider drag is one write, and once more on quit. Edits that never pause for a
