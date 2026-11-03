@@ -518,29 +518,11 @@ impl Panels {
 			return Ok(());
 		};
 		let selected = match &self.selection {
-			Some(Selection::Item(selected, index)) if *selected == layer && *index < items.len() => Some(*index),
+			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
 			_ => None,
 		};
 		let reach = view.canvas(REACH);
-		// The selected item's edges first, since they reach past it, then the
-		// frontmost item shown, so a selected backdrop does not hide what is
-		// in front of it.
-		let hit = |pos: egui::Pos2| {
-			let point = view.point(pos);
-			if let Some(index) = selected
-				&& let Some(grab @ Grab::Resize { .. }) = Grab::at(&items[index].rect, point, reach)
-			{
-				return Some((index, grab));
-			}
-			let inside = |rect: &Rect| {
-				(rect.x..=rect.x + rect.width).contains(&point[0])
-					&& (rect.y..=rect.y + rect.height).contains(&point[1])
-			};
-			let index = (0..items.len())
-				.rev()
-				.find(|&index| items[index].visible && inside(&items[index].rect))?;
-			Some((index, Grab::Move))
-		};
+		let hit = |pos: egui::Pos2| snap::hit(&items, selected, view.point(pos), reach);
 
 		if response.clicked() {
 			match response.interact_pointer_pos().and_then(hit) {
@@ -606,7 +588,8 @@ impl Panels {
 			_ => None,
 		};
 		let accent = ui.visuals().selection.stroke.color;
-		if let Some(item) = selected.and_then(|index| items.get(index)) {
+		// A hidden item has no handles, as the preview cannot grab it.
+		if let Some(item) = selected.and_then(|index| items.get(index)).filter(|item| item.visible) {
 			view.selected(&painter, &item.rect, accent);
 		}
 		let grab = match &self.drag {

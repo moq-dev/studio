@@ -4,7 +4,7 @@
 //! Plain math in canvas pixels with no egui types, so it is tested here; the
 //! preview only converts the pointer and draws the result.
 
-use moq_scene::{Canvas, Rect};
+use moq_scene::{Canvas, Item, Rect};
 
 /// How close two positions are to count as lined up. Snapping makes them
 /// equal up to float rounding; unsnapped drags never draw guides.
@@ -141,6 +141,29 @@ fn shift(rect: &mut Rect, axis: Axis, moves: Moves, by: f32) {
 		Moves::Neither => return,
 	};
 	axis.set_span(rect, span);
+}
+
+/// The item of `items` a press at `point` grabs, and what part of it. The
+/// `selected` item's edges come first, since they reach past it; then the
+/// frontmost item under the point, so a selected backdrop does not hide what
+/// is in front of it. Hidden items are not shown, so nothing grabs them.
+pub fn hit(items: &[Item], selected: Option<usize>, point: [f32; 2], reach: f32) -> Option<(usize, Grab)> {
+	if let Some(index) = selected
+		&& let Some(item) = items.get(index).filter(|item| item.visible)
+		&& let Some(grab @ Grab::Resize { .. }) = Grab::at(&item.rect, point, reach)
+	{
+		return Some((index, grab));
+	}
+	let inside = |rect: &Rect| {
+		Axis::ALL.into_iter().all(|axis| {
+			let (start, end) = axis.span(rect);
+			(start..=end).contains(&axis.of(point))
+		})
+	};
+	let index = (0..items.len())
+		.rev()
+		.find(|&index| items[index].visible && inside(&items[index].rect))?;
+	Some((index, Grab::Move))
 }
 
 /// How a drag snaps.
@@ -545,6 +568,32 @@ mod tests {
 		let snapped = SNAP.apply(Grab::Move, rect(507.0, 500.0, 50.0, 100.0), &others, &CANVAS);
 		assert_eq!(snapped.rect.x, 507.0);
 		assert!(snapped.gaps.is_empty());
+	}
+
+	#[test]
+	fn hits_the_selected_edges_then_the_front() {
+		let backdrop = Item::new("backdrop", rect(0.0, 0.0, 1920.0, 1080.0));
+		let mut hidden = Item::new("hidden", rect(500.0, 500.0, 200.0, 200.0));
+		hidden.visible = false;
+		let front = Item::new("front", rect(400.0, 400.0, 400.0, 400.0));
+		let items = [backdrop, hidden, front];
+		let right = Grab::Resize {
+			x: Some(Side::End),
+			y: None,
+		};
+
+		// A selected backdrop's inside yields to the item in front of it.
+		assert_eq!(hit(&items, Some(0), [600.0, 600.0], 8.0), Some((2, Grab::Move)));
+		assert_eq!(hit(&items, Some(0), [1915.0, 600.0], 8.0), Some((0, right)));
+		// The selected item's edge reaches past the item in front of it.
+		let mut selected = items.clone();
+		selected[0].rect = rect(0.0, 0.0, 600.0, 1080.0);
+		assert_eq!(hit(&selected, Some(0), [603.0, 600.0], 8.0), Some((0, right)));
+		// A hidden selected item's edge, inside a visible item, grabs that item.
+		assert_eq!(hit(&items, Some(1), [700.0, 600.0], 8.0), Some((2, Grab::Move)));
+		// Outside everything shown, nothing.
+		let items = &items[1..2];
+		assert_eq!(hit(items, Some(0), [700.0, 600.0], 8.0), None);
 	}
 
 	#[test]
