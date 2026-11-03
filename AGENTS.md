@@ -34,5 +34,5 @@ just fix     # Auto-fix formatting
 
 `README.md` is the user guide. A change to what a user does (flags, panels, the scene file, outputs) updates it in the same PR.
 
-Quests: before starting work, run `quest context` and `quest guide`, and follow both.
+Quests: before any work, run `quest context` and follow it.
 The `quest` binary comes from the moq-dev/quest flake input and serves the quest skills; change them upstream and bump the input.
