@@ -8,7 +8,7 @@
 //! `<identity>/camera.hang` and `<identity>/screen.hang`, and the studio adds
 //! each as a muted [`Source::Broadcast`] when it is announced. Only the room key
 //! mints those tokens, so guests can make the studio hold at most two sources
-//! per link it signed.
+//! per name it signed for.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -218,6 +218,13 @@ impl Room {
 	/// link still works, so a restart finds the guests already connected.
 	fn observe(&self, path: &Path, online: bool, collection: &Collection) -> Option<(String, Source)> {
 		let parsed = moq_room::parse(path)?;
+		// Only the two paths a link's one-segment identity publishes, so the
+		// `<identity>/**` its token grants cannot mint more guests or sources.
+		let canonical = moq_room::broadcast_path(parsed.identity.clone(), parsed.kind).ok()?;
+		if parsed.identity.parts().count() != 1 || canonical != *path {
+			tracing::debug!(%path, "ignoring a broadcast that is not a guest's camera or screen");
+			return None;
+		}
 		let source = self.path.join(path).ok()?.to_string();
 		let existing = collection
 			.sources
@@ -475,6 +482,12 @@ mod tests {
 		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
 		let mut collection = Collection::new();
 		let path = |text: &str| Path::new(text).unwrap();
+
+		// Anything else under a guest's own path is not a guest.
+		for other in ["alice/1/camera.hang", "alice/camera", "alice/mic.hang"] {
+			assert_eq!(room.observe(&path(other), true, &collection), None, "{other}");
+		}
+		assert!(room.participants().is_empty());
 
 		// Invited before this session, so the roster has no link for them.
 		let (name, source) = room.observe(&path("alice/camera.hang"), true, &collection).unwrap();
