@@ -4,7 +4,7 @@
 //! The scenes, sources, and compositor live in `moq-scene`; this binary is the
 //! window around them and the program clock that publishes the result.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -12,6 +12,7 @@ use anyhow::Context;
 mod autosave;
 mod engine;
 mod health;
+mod record;
 mod ui;
 
 #[derive(usage_rs::Cli, Clone)]
@@ -27,11 +28,16 @@ pub struct Config {
 	#[usage(long, default = "studio")]
 	pub broadcast: String,
 
-	/// Copy and encode the program video only while someone watches it. This
-	/// saves the work while nobody watches, but leaves a late viewer nothing
-	/// from before they arrived. Audio is always encoded.
+	/// Copy and encode the program video only while someone watches or records
+	/// it. This saves the work while nobody does, but leaves a late viewer
+	/// nothing from before they arrived. Audio is always encoded. Without
+	/// `--connect`, the program and the sources are always on demand.
 	#[usage(long)]
 	pub on_demand: bool,
+
+	/// The directory recordings are saved in. Defaults to the scene file's.
+	#[usage(long, value_hint = usage_rs::ValueHint::DirPath)]
+	pub recordings: Option<PathBuf>,
 
 	/// The MoQ client configuration. Without `--connect`, nothing is published
 	/// and broadcast sources stay offline.
@@ -72,6 +78,15 @@ fn main() -> anyhow::Result<()> {
 		Some(url) => Some((config.client.clone().init(config.quic.clone())?, url)),
 		None => None,
 	};
+	let recordings = match &config.recordings {
+		Some(dir) => dir.clone(),
+		None => config
+			.scenes
+			.parent()
+			.filter(|dir| !dir.as_os_str().is_empty())
+			.unwrap_or(Path::new("."))
+			.to_path_buf(),
+	};
 	let engine = runtime.block_on(engine::Engine::start(
 		gpu.clone(),
 		autosave,
@@ -79,9 +94,14 @@ fn main() -> anyhow::Result<()> {
 		connect,
 		&config.broadcast,
 		config.on_demand,
+		&recordings,
 	))?;
 
 	let ran = run(engine.clone(), gpu, runtime.handle().clone());
+	// A recording still running is finished, so it is a regular MP4.
+	if let Ok(recorder) = &engine.recorder {
+		runtime.block_on(recorder.finish());
+	}
 	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
 	if let (Err(err), Err(_)) = (&saved, &ran) {

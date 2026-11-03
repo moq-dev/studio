@@ -15,8 +15,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 
 - `show.toml` is the scene collection. It is created if it does not exist, and
   changes are saved to it a second after you stop editing, with no save step.
-- Without `--connect`, the studio composes and previews but publishes nothing,
-  and broadcast sources stay offline.
+- `--recordings <dir>` is where recordings are saved, by default beside
+  `show.toml`.
+- Without `--connect`, the studio composes, previews, and records but
+  publishes nothing, and broadcast sources stay offline.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
   On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
@@ -39,7 +41,7 @@ Every panel is a tab you can drag, split, or stack.
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the broadcast path, whether the program is encoding, and the encoder's work. |
+| Output | Start and stop recording, and see the broadcast path, whether the program is encoding, and the encoder's work. |
 | Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
@@ -198,7 +200,8 @@ the hang draft specifies source listings:
 
 A captured source encodes as H.264 for as long as it is in the collection,
 whether or not anyone watches, so a late viewer can fetch its recent past; the
-relay uploads only what someone subscribes to. A capture that changes size or
+relay uploads only what someone subscribes to. Without `--connect`, it encodes
+only while a recording reads it. A capture that changes size or
 color space moves to a new track, which its catalog entry follows. Images and
 colors publish once, as the image file and as a one-pixel PNG. Removing or
 editing a source ends its track. A track carries the plain capture, before any
@@ -215,6 +218,23 @@ opens its session before any source, even with `--on-demand`, so the sources
 past the cap fail rather than the program. When the
 program encodes in software, a source takes hardware where it can and software
 otherwise.
+
+### Recording
+
+**Start recording** in the Output panel saves the program to
+`<scene file name> <UTC start time>.mp4` in the `--recordings` directory, live
+or not. With **each source too**, every camera, display, and window that
+publishes a track of its own records into a file of its own beside it,
+`<scene file name> <UTC start time> <source>.mp4`, holding the capture before
+any filter. A source added while recording starts its file then, and one
+removed finishes its file then. A recording reads the broadcast the way a
+viewer does, so it shares the live encoders and starts and stops without
+touching what the relay serves. Without `--connect`, or with `--on-demand`,
+the program encodes only while something records or watches it.
+
+Each file plays while it grows, so a crash leaves a playable fragmented MP4,
+and becomes a regular MP4 when the recording stops or the studio quits. A
+file nothing reached before the recording stopped is removed.
 
 ### Source frames
 

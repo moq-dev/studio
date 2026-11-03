@@ -12,6 +12,7 @@ use moq_scene::{Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Sourc
 
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
+use crate::record;
 
 /// The panels, each a tab the user can move, split, or stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -102,6 +103,7 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
+				record_sources: false,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
 			},
 		})
@@ -139,6 +141,8 @@ struct Panels {
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
+	/// Whether the next recording gives each source a file of its own too.
+	record_sources: bool,
 	/// The outcome of the last action, shown in the status bar.
 	message: Option<Result<String, String>>,
 }
@@ -1019,10 +1023,64 @@ impl Panels {
 		}
 	}
 
+	/// Start and stop recording, and see what the recording wrote.
+	fn record(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let recorder = match &engine.recorder {
+			Ok(recorder) => recorder,
+			Err(reason) => {
+				ui.colored_label(ui.visuals().error_fg_color, format!("Cannot record: {reason}"));
+				return;
+			}
+		};
+		let status = recorder.status();
+		ui.horizontal(|ui| match status.as_ref().filter(|status| !status.done) {
+			Some(status) => {
+				if ui
+					.add_enabled(!status.stopping, egui::Button::new("Stop recording"))
+					.clicked()
+				{
+					recorder.stop();
+				}
+				if status.stopping {
+					ui.label("finishing");
+				} else {
+					let elapsed = kio::clock::now().saturating_duration_since(status.started).as_secs();
+					let elapsed = format!("{}:{:02}:{:02}", elapsed / 3600, elapsed / 60 % 60, elapsed % 60);
+					ui.colored_label(ui.visuals().error_fg_color, format!("recording {elapsed}"));
+				}
+			}
+			None => {
+				if ui.button("Start recording").clicked() {
+					let result = recorder.start(self.record_sources);
+					self.check(result);
+				}
+				ui.checkbox(&mut self.record_sources, "each source too");
+				ui.weak(format!("into {}", recorder.dir().display()));
+			}
+		});
+		for file in status.iter().flat_map(|status| &status.files) {
+			let name = file.path.file_name().unwrap_or_default().to_string_lossy();
+			let size = format!("{:.1} MB", file.written as f64 / 1e6);
+			match &file.finished {
+				None => ui.label(format!("{name}: {size}")),
+				Some(record::Finished::Saved) => ui.label(format!("{name}: saved, {size}")),
+				Some(record::Finished::Empty) => ui.weak(format!("{name}: nothing recorded, removed")),
+				Some(record::Finished::Failed(reason)) => {
+					ui.colored_label(ui.visuals().error_fg_color, format!("{name}: {reason}"))
+				}
+			};
+		}
+	}
+
 	fn output(&mut self, ui: &mut Ui) {
+		self.record(ui);
+		ui.separator();
+
 		let stats = &self.engine.stats;
 		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
 		let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
+		let watched = stats.watched.load(Ordering::Relaxed);
 
 		egui::Grid::new("output").show(ui, |ui| {
 			match &self.engine.output {
@@ -1031,10 +1089,10 @@ impl Panels {
 					ui.label(&output.path);
 					ui.end_row();
 					ui.label("Encoding");
-					ui.label(match (output.on_demand, stats.watched.load(Ordering::Relaxed)) {
+					ui.label(match (output.on_demand, watched) {
 						(false, _) => "always",
-						(true, true) => "while watched; watched now",
-						(true, false) => "while watched; idle now",
+						(true, true) => "while watched or recorded; wanted now",
+						(true, false) => "while watched or recorded; idle now",
 					});
 					ui.end_row();
 				}
@@ -1042,6 +1100,15 @@ impl Panels {
 					ui.label("Relay");
 					ui.label("none; start with --connect to publish");
 					ui.end_row();
+					if self.engine.recorder.is_ok() {
+						ui.label("Encoding");
+						ui.label(if watched {
+							"while recorded; recording now"
+						} else {
+							"while recorded; idle now"
+						});
+						ui.end_row();
+					}
 				}
 			}
 			ui.label("Drawn");

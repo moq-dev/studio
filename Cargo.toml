@@ -40,6 +40,7 @@ moq-video = { path = "moq/rs/moq-video", default-features = false }
 
 anyhow = "1"
 bytes = "1"
+humantime = "2.4"
 humantime-serde = "1.1.1"
 pollster = "1.0"
 serde = { version = "1", features = ["derive"] }

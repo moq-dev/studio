@@ -1,12 +1,14 @@
 //! Everything behind the window: the GPU, the sources, the program clock that
-//! draws the canvas and mixes the audio, and the broadcast it publishes: the
-//! program, and each local source's own track beside it.
+//! draws the canvas and mixes the audio, and the broadcast it encodes into:
+//! the program, and each local source's own track beside it. The relay serves
+//! that broadcast, and recordings read it.
 //!
 //! Threads:
 //! - **program** draws preview and program once per canvas frame and hands the
 //!   program to the encoder, stamped with the program clock.
 //! - **audio** reads the program bus on the same clock and publishes it.
 //! - **encode** waits for each program copy and encodes it.
+//! - Recordings write their files on the tokio runtime.
 //! - **source-***: one per running source, since a capture stream may not
 //!   leave the thread that opened it.
 //! - **autosave** writes the collection and its history to their files once
@@ -26,7 +28,7 @@ use moq_scene::{Collection, Compositor, Draft, History, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
 
 use crate::autosave::{self, Autosave};
-use crate::health;
+use crate::{health, record};
 
 /// The GPU everything shares: sources upload to it, the compositor draws on
 /// it, the window presents from it, and the encoder reads the program from it.
@@ -180,7 +182,8 @@ pub struct Stats {
 	pub encoded: AtomicU64,
 	/// Microseconds the last encode took.
 	pub encode_us: AtomicU64,
-	/// Whether any viewer is subscribed to the video.
+	/// Whether anyone subscribes to the program video: a viewer through the
+	/// relay, or a recording.
 	pub watched: AtomicBool,
 	/// The encoder backend, once one opened.
 	pub encoder: Mutex<Option<String>>,
@@ -195,20 +198,27 @@ impl Stats {
 	}
 }
 
-/// Where the program goes.
+/// The relay the program goes live on.
 pub struct Output {
 	/// The broadcast path on the relay.
 	pub path: String,
 	/// Whether the program video is copied and encoded only while someone
-	/// watches, rather than all the time.
+	/// watches or records it, rather than all the time.
 	pub on_demand: bool,
 	/// The relay connection, which reconnects on its own and dials only while
 	/// held. The Health panel reads its state.
 	_connection: moq_tokio::Connection,
+}
+
+/// The program's broadcast, open for as long as the engine runs.
+struct Program {
+	/// Where the broadcast is announced: the relay connection publishes it,
+	/// and recordings read it.
+	origin: moq_net::origin::Producer,
 	publication: moq_net::origin::Publication,
 }
 
-impl Drop for Output {
+impl Drop for Program {
 	fn drop(&mut self) {
 		self.publication.close();
 	}
@@ -224,6 +234,10 @@ pub struct Engine {
 	pub bus: moq_audio::bus::Bus,
 	/// `None` when running without a relay.
 	pub output: Option<Output>,
+	/// Records the program, or says why it cannot: without a relay, a machine
+	/// that cannot encode the canvas still composes and previews.
+	pub recorder: Result<record::Recorder, String>,
+	_program: Option<Program>,
 	/// Keeps broadcast sources' origin open when no connection holds it.
 	_origin: Option<moq_net::origin::Producer>,
 }
@@ -238,8 +252,9 @@ const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 impl Engine {
 	/// Open the `loaded` collection and history on `gpu`, start the program
 	/// clock, and save both to `autosave`'s files as they change.
-	/// With `connect`, publish the program at `broadcast` on that relay,
-	/// encoding its video only while someone watches when `on_demand`.
+	/// The program is encoded into a broadcast at `broadcast` while anyone
+	/// wants it: a recording into `recordings`, or with `connect`, that relay,
+	/// which wants it all the time unless `on_demand`.
 	///
 	/// Call inside the tokio runtime that serves the relay connection.
 	pub async fn start(
@@ -249,6 +264,7 @@ impl Engine {
 		connect: Option<(moq_tokio::Client, url::Url)>,
 		broadcast: &str,
 		on_demand: bool,
+		recordings: &Path,
 	) -> anyhow::Result<Arc<Self>> {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
@@ -260,13 +276,34 @@ impl Engine {
 		} = loaded;
 		let canvas = collection.canvas;
 
-		let (output, origin, publish) = match connect {
+		let path = moq_net::Path::new(broadcast).with_context(|| format!("cannot publish at `{broadcast}`"))?;
+		let origin = moq_tokio::origin::spawn();
+		let (relay, subscribe) = match connect {
 			Some((client, url)) => {
-				let (output, publish) = publish(&gpu, client, url, subscribe, broadcast, canvas, on_demand).await?;
-				(Some(output), None, Some(publish))
+				tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), broadcast = %path, "connecting");
+				let reports = subscribe.consume();
+				let connection = client.with_publisher(&origin).with_subscriber(subscribe).connect(url);
+				(Some(Relay { connection, reports }), None)
 			}
-			None => (None, Some(subscribe), None),
+			None => (None, Some(subscribe)),
 		};
+		let (program, publish, recorder) = match publish(&gpu, origin, &path, canvas, relay.as_ref()).await {
+			Ok((program, publish)) => {
+				let broadcast = program.publication.broadcast().consume();
+				let source = moq_mux::Source::new(program.origin.consume(), broadcast);
+				let recorder = record::Recorder::new(source, recordings, autosave.path())?;
+				(Some(program), Some(publish), Ok(recorder))
+			}
+			// Without a relay the studio still composes and previews; only a
+			// recording needs the encoder.
+			Err(err) if relay.is_none() => (None, None, Err(format!("{err:#}"))),
+			Err(err) => return Err(err),
+		};
+		let output = relay.map(|relay| Output {
+			path: path.to_string(),
+			on_demand,
+			_connection: relay.connection,
+		});
 
 		// Absolute, so a copied image names the same file in another collection.
 		let dir = autosave.path().parent().filter(|dir| !dir.as_os_str().is_empty());
@@ -297,7 +334,9 @@ impl Engine {
 			health: Mutex::default(),
 			bus,
 			output,
-			_origin: origin,
+			recorder,
+			_program: program,
+			_origin: subscribe,
 		});
 
 		let (video, audio, clock, publisher) = match publish {
@@ -324,7 +363,7 @@ impl Engine {
 				// its encode session even while unwatched, and a source past the
 				// GPU's session cap is the one that fails.
 				open.await.context("the encode thread stopped")??;
-				(Some((frames, exporter)), Some(audio), Some(clock), Some(health))
+				(Some((frames, exporter)), Some(audio), Some(clock), health)
 			}
 			None => (None, None, None, None),
 		};
@@ -386,7 +425,6 @@ impl Engine {
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
 		let watched = stats.watched.load(Ordering::Relaxed);
-		let on_demand = self.output.as_ref().is_some_and(|output| output.on_demand);
 		let stalled = {
 			let state = self.state.lock().unwrap();
 			let program = state
@@ -413,7 +451,7 @@ impl Engine {
 			rendered: stats.rendered.load(Ordering::Relaxed),
 			dropped: stats.dropped.load(Ordering::Relaxed),
 			encoded: stats.encoded.load(Ordering::Relaxed),
-			encoding: self.output.is_some() && (!on_demand || watched),
+			encoding: self.recorder.is_ok() && (self.always() || watched),
 			watched,
 			encoder: stats.encoder.lock().unwrap().clone(),
 			failed: stats.error.lock().unwrap().clone(),
@@ -421,9 +459,15 @@ impl Engine {
 		}
 	}
 
+	/// Whether the program video encodes whether or not anyone wants it: live on
+	/// a relay, and not on demand.
+	fn always(&self) -> bool {
+		self.output.as_ref().is_some_and(|output| !output.on_demand)
+	}
+
 	/// Draw a canvas frame per tick of the program clock, and hand the program
-	/// to the encoder, stamped `epoch` past `start`: every frame, or only while
-	/// anyone watches when the output is on demand.
+	/// to the encoder, stamped `epoch` past `start`: every frame while live and
+	/// not on demand, otherwise only while anyone watches or records it.
 	///
 	/// Drawing outlives the encoder: a failed output stops copying the program,
 	/// and the preview and program keep moving.
@@ -437,7 +481,7 @@ impl Engine {
 		let period = Duration::from_secs(1) / canvas.framerate;
 		let mut clock = kio::clock::interval_at(start, period);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
-		let on_demand = self.output.as_ref().is_some_and(|output| output.on_demand);
+		let always = self.always();
 		let mut encoding = false;
 
 		loop {
@@ -459,7 +503,7 @@ impl Engine {
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
 			let Some((sender, exporter)) = &mut video else { continue };
-			let wanted = !on_demand || self.stats.watched.load(Ordering::Relaxed);
+			let wanted = always || self.stats.watched.load(Ordering::Relaxed);
 			let was = std::mem::replace(&mut encoding, wanted);
 			if !encoding {
 				// Behind every frame already sent, so the break lands after them.
@@ -534,7 +578,14 @@ impl Engine {
 	}
 }
 
-/// The encoders behind an [`Output`], handed to their threads.
+/// The relay connection the program goes live on, and the origin its viewers'
+/// reports and the relay's stats arrive on.
+struct Relay {
+	connection: moq_tokio::Connection,
+	reports: moq_net::origin::Consumer,
+}
+
+/// The encoders behind the program's broadcast, handed to their threads.
 struct Publish {
 	video: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
@@ -543,41 +594,35 @@ struct Publish {
 	/// The catalog's clock, which the codec producers write timestamps
 	/// against verbatim.
 	clock: moq_mux::Clock,
-	/// What the health sampler grades.
-	health: health::Publisher,
+	/// What the health sampler grades, while live on a relay.
+	health: Option<health::Publisher>,
 	/// Where each local source publishes its own track.
 	sources: moq_scene::publish::Publish,
 }
 
-/// Announce the program broadcast, which also carries each local source's own
-/// track, and connect to the relay, which also carries `subscribe`'s broadcast
-/// sources.
+/// Announce the program broadcast at `path` on `origin`, which `relay`
+/// publishes when there is one. The broadcast also carries each local
+/// source's own track.
 async fn publish(
 	gpu: &Gpu,
-	client: moq_tokio::Client,
-	url: url::Url,
-	subscribe: moq_net::origin::Producer,
-	path: &str,
+	origin: moq_net::origin::Producer,
+	path: &moq_net::Path,
 	canvas: moq_scene::Canvas,
-	on_demand: bool,
-) -> anyhow::Result<(Output, Publish)> {
-	let origin = moq_tokio::origin::spawn();
-	let path = moq_net::Path::new(path).with_context(|| format!("cannot publish at `{path}`"))?;
-	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), broadcast = %path, "connecting");
-	let reports = subscribe.consume();
-	let connection = client.with_publisher(&origin).with_subscriber(subscribe).connect(url);
-
-	let publication = origin.create_broadcast(&path).context("cannot create the broadcast")?;
+	relay: Option<&Relay>,
+) -> anyhow::Result<(Program, Publish)> {
+	let publication = origin.create_broadcast(path).context("cannot create the broadcast")?;
 	let mut broadcast = publication.broadcast().clone();
 	// Each track claims its bitrate on the connection's estimate, which the
 	// connection then probes to fund: the bandwidth the stream is granted.
-	let bandwidth = connection.allocator();
+	let bandwidth = match relay {
+		Some(relay) => relay.connection.allocator(),
+		None => moq_net::bandwidth::Allocator::unlimited(),
+	};
 	let catalog = moq_mux::catalog::Config::default()
 		.with_bandwidth(bandwidth.clone())
 		.with_catalog(Default::default());
 	let catalog = moq_scene::publish::Catalog::new(&mut broadcast, catalog)?;
 	let clock = catalog.clock();
-	let (echo, viewers) = health::echo(&path)?;
 
 	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
 	// Opens a throwaway encoder now, so a machine that cannot encode the
@@ -594,13 +639,26 @@ async fn publish(
 		moq_video::encode::Kind::Named(name) if name == "openh264" => moq_video::encode::Kind::Auto,
 		_ => moq_video::encode::Kind::Hardware,
 	};
-	let sources = moq_scene::publish::Publish::new(broadcast.clone(), catalog.clone(), bandwidth, kind);
+	let mut sources = moq_scene::publish::Publish::new(broadcast.clone(), catalog.clone(), bandwidth, kind);
+	// Without a relay only a recording reads a source's track, and nothing
+	// fetches a past it was not recording.
+	if relay.is_none() {
+		sources = sources.on_demand();
+	}
 	let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
-	// While the reservation holds, so the solicitation rides the first catalog.
-	let mut soliciting = catalog.clone();
-	let mut section = soliciting.modify()?;
-	section.echo = Some(hang::catalog::Echo::new(echo));
-	section.commit()?;
+	// Viewers report back beneath the broadcast, which only a relay carries.
+	let viewers = match relay {
+		Some(_) => {
+			let (echo, viewers) = health::echo(path)?;
+			// While the reservation holds, so the solicitation rides the first catalog.
+			let mut soliciting = catalog.clone();
+			let mut section = soliciting.modify()?;
+			section.echo = Some(hang::catalog::Echo::new(echo));
+			section.commit()?;
+			Some(viewers)
+		}
+		None => None,
+	};
 	let video = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition)?;
 
 	let bus = moq_audio::bus::Config::default();
@@ -618,30 +676,29 @@ async fn publish(
 		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 		.context("cannot announce the broadcast")?;
 
-	let feedback = health::Feedback::default();
-	let watching = health::Watching::default();
-	tokio::spawn(log(
-		"viewer feedback",
-		feedback.clone().follow(reports.clone(), viewers),
-	));
-	tokio::spawn(log("relay stats", watching.clone().follow(reports, path.clone())));
-	let health = health::Publisher {
-		observer: hang::health::Observer::new(path.clone(), Some(epoch)),
-		catalog: stats,
-		clock: clock.clone(),
-		monitor: connection.monitor(),
-		feedback,
-		watching,
-	};
+	let health = relay.zip(viewers).map(|(relay, viewers)| {
+		let feedback = health::Feedback::default();
+		let watching = health::Watching::default();
+		tokio::spawn(log(
+			"viewer feedback",
+			feedback.clone().follow(relay.reports.clone(), viewers),
+		));
+		tokio::spawn(log(
+			"relay stats",
+			watching.clone().follow(relay.reports.clone(), path.clone()),
+		));
+		health::Publisher {
+			observer: hang::health::Observer::new(path.clone(), Some(epoch)),
+			catalog: stats,
+			clock: clock.clone(),
+			monitor: relay.connection.monitor(),
+			feedback,
+			watching,
+		}
+	});
 
-	let output = Output {
-		path: path.to_string(),
-		on_demand,
-		_connection: connection,
-		publication,
-	};
 	Ok((
-		output,
+		Program { origin, publication },
 		Publish {
 			video,
 			config,
@@ -797,23 +854,8 @@ mod tests {
 	/// Bounds each step, so a stall fails rather than hangs.
 	const TIMEOUT: Duration = Duration::from_secs(30);
 
-	/// The program a studio publishes reaches a relay as the picture it composed,
-	/// with its audio alongside.
-	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
-	async fn the_program_reaches_a_relay() {
-		let _ = moq_tokio::crypto::install_default();
-		let fixture = moq_relay::test_relay().await.expect("test relay");
-		let ready = fixture.relay.ready();
-		let relay = fixture.relay.cluster().origin.consume();
-		tokio::spawn(fixture.relay.run());
-		ready.wait().await.expect("relay ready");
-
-		let mut client = moq_tokio::connect::Config::default();
-		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
-		let client = client.init(Default::default()).expect("client");
-
-		let dir = tempfile::tempdir().unwrap();
+	/// A small canvas filled red.
+	fn red() -> autosave::Loaded {
 		let mut collection = Collection::new();
 		collection.canvas = moq_scene::Canvas {
 			width: 320,
@@ -832,17 +874,98 @@ mod tests {
 			visible: true,
 			filters: Vec::new(),
 		});
+		autosave::Loaded {
+			collection,
+			history: History::new(),
+			dropped: 0,
+		}
+	}
 
+	/// Record until `encoded` program frames were encoded, and return the
+	/// handler of every track in each file, by file.
+	async fn record(engine: &Engine, encoded: u64, sources: bool) -> Vec<Vec<String>> {
+		let recorder = engine.recorder.as_ref().expect("the canvas can be encoded");
+		recorder.start(sources).expect("recording starts");
+		kio::clock::timeout(TIMEOUT, async {
+			while engine.stats.encoded.load(Ordering::Relaxed) < encoded {
+				kio::clock::sleep(Duration::from_millis(100)).await;
+			}
+		})
+		.await
+		.expect("the recording encodes the program");
+		kio::clock::timeout(TIMEOUT, recorder.finish())
+			.await
+			.expect("the recording finishes");
+
+		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+		let status = recorder.status().expect("a recording");
+		status
+			.files
+			.iter()
+			.map(|file| {
+				assert_eq!(file.finished, Some(record::Finished::Saved), "{}", file.path.display());
+				let data = std::fs::read(&file.path).unwrap();
+				assert_eq!(file.written, data.len() as u64);
+				let mut cursor = std::io::Cursor::new(data.as_slice());
+				assert!(
+					moq_mux::container::mp4::repair(&mut cursor).unwrap().is_none(),
+					"a regular MP4"
+				);
+				let mut cursor = std::io::Cursor::new(data.as_slice());
+				let mut handlers = Vec::new();
+				while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+					if let mp4_atom::Any::Moov(moov) = atom {
+						handlers.extend(moov.trak.iter().map(|trak| trak.mdia.hdlr.handler.to_string()));
+					}
+				}
+				handlers.sort();
+				handlers
+			})
+			.collect()
+	}
+
+	/// Without a relay, a recording encodes the program on its own and saves it
+	/// as a regular MP4 holding its video and audio. The color source publishes
+	/// a still, which has no file of its own.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	async fn the_program_records_without_a_relay() {
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new().await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = Engine::start(gpu, autosave, red(), None, "studio", false, dir.path())
+			.await
+			.expect("the studio starts");
+		assert!(engine.output.is_none());
+		assert_eq!(engine.stats.encoded.load(Ordering::Relaxed), 0);
+
+		// Long enough for the first group to close, so the video has a fragment.
+		let files = record(&engine, 90, true).await;
+		assert_eq!(files, [["soun", "vide"]]);
+	}
+
+	/// The program a studio publishes reaches a relay as the picture it composed,
+	/// with its audio alongside.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	async fn the_program_reaches_a_relay() {
+		let _ = moq_tokio::crypto::install_default();
+		let fixture = moq_relay::test_relay().await.expect("test relay");
+		let ready = fixture.relay.ready();
+		let relay = fixture.relay.cluster().origin.consume();
+		tokio::spawn(fixture.relay.run());
+		ready.wait().await.expect("relay ready");
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
+		let client = client.init(Default::default()).expect("client");
+
+		let dir = tempfile::tempdir().unwrap();
 		let gpu = Gpu::new().await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let connect = Some((client, fixture.url.clone()));
 		let on_demand = false;
-		let loaded = autosave::Loaded {
-			collection,
-			history: History::new(),
-			dropped: 0,
-		};
-		let engine = Engine::start(gpu, autosave, loaded, connect, "studio", on_demand)
+		let engine = Engine::start(gpu, autosave, red(), connect, "studio", on_demand, dir.path())
 			.await
 			.expect("the studio starts");
 		assert!(
