@@ -13,8 +13,9 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
     show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
 ```
 
-- `show.toml` is the scene collection. It is created if it does not exist, and
-  changes are saved to it a second after you stop editing, with no save step.
+- `show.toml` is the scene collection. If it does not exist yet,
+  [guided setup](#first-launch) proposes one and creates it. Changes are saved
+  to it a second after you stop editing, with no save step.
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
@@ -29,6 +30,44 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   Security.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
   [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
+
+## First launch
+
+Opening a scene file that does not exist yet starts guided setup instead of
+the studio. It runs three checks, and a check that fails shows its reason:
+
+- **Devices:** the cameras, displays, and audio inputs this machine has.
+- **Encoders:** for each canvas setup can propose (1080p and 720p at 60 or 30
+  fps, and 360p at 30 fps), the encoder the program would pick, whether it
+  reads the GPU, the bitrate it encodes at, and how long a frame takes over a
+  short burst of moving frames. An encoder keeps up when a frame takes at most
+  three quarters of the frame period, leaving the rest for sources and the
+  compositor.
+- **Uplink:** with `--connect`, setup publishes a probe at the `--broadcast`
+  path for about six seconds and subscribes to it through the relay, so the
+  relay pulls it. The congestion controller's send-rate estimate is the
+  measurement. A connection that reports no estimate, such as WebSocket, fails
+  the check.
+
+Setup then proposes a scene named Main and a canvas, explaining each choice.
+The scene has the first display filling the canvas, the first camera in the
+bottom-right corner over it (or filling the canvas alone), and the first audio
+input. Swap any of them for another device or leave it out. The canvas is the
+largest one whose encoder keeps up and whose video and audio fit in two thirds
+of the measured uplink, the most the Health panel grades healthy. Without a
+measurement, it is the default 1080p at 30 fps. If no encoder keeps up, it is
+the canvas closest to keeping up.
+
+Nothing is written until you start the studio, so quitting during setup runs
+it again on the next launch. **Start with this scene** and **Start with an
+empty scene** both create the scene file at once, the second with the chosen
+canvas and no sources. The proposed scene is the first edit in the history, so
+undoing it leaves that empty scene.
+
+Setup writes an ordinary scene file. Change its sources and scenes in their
+panels, and its canvas in the file, which takes a restart. The Output panel
+shows the canvas in use, and the Health panel shows how the uplink holds up
+once you are live.
 
 ## Panels
 
@@ -45,7 +84,7 @@ Every panel is a tab you can drag, split, or stack.
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the broadcast path, whether the program is encoding, and the encoder's work. |
+| Output | See the broadcast path, whether the program is encoding, the canvas, and the encoder's work. |
 | Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
