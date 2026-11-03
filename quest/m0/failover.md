@@ -15,8 +15,4 @@ once and publish to both. The second relay is configured, never inferred.
 Both links must negotiate the same protocol and draft, one with publisher
 epochs, since a copy whose track info differs ends the track; a relay that
 does not match is refused at setup with the reason, rather than failing over
-as a restart. Show each relay's state in the health panel.
-
-## Related
-
-- [Stream health](/quest/m0/health.md) - where each relay's state shows
+as a restart. Show each relay's state in the Health panel.
