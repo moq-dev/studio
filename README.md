@@ -117,7 +117,8 @@ Each camera, display, window, image, and color also publishes as its own track
 in the same broadcast, so a viewer can compose the scene itself. The catalog's
 `video` and `audio` sections stay the program's; the sources are listed under
 the `dev.moq.studio` section's `sources`, by source name, each as a hang
-catalog of its own on the program's clock:
+catalog of its own on the program's clock. This listing is provisional until
+the hang draft specifies source listings:
 
 ```json
 {
