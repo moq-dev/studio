@@ -60,10 +60,7 @@ pub struct Publish {
 	owners: Arc<Mutex<Owners>>,
 }
 
-/// Which [`Listing`] owns each source name's entry in the studio catalog.
-///
-/// An edited source's replacement starts before the old one stops, so only the
-/// newest listing under a name may write or remove its entry.
+/// Which [`Claim`] owns each source name's entry in the studio catalog.
 #[derive(Default)]
 struct Owners {
 	next: u64,
@@ -92,14 +89,54 @@ impl Publish {
 			owners: Default::default(),
 		}
 	}
+
+	/// Claim `name`'s entry in the studio catalog for a source that is opening,
+	/// taking it from any older source of that name.
+	pub(crate) fn claim(&self, name: &str) -> Claim {
+		let mut owners = self.owners.lock().unwrap();
+		let id = owners.next;
+		owners.next += 1;
+		owners.by_name.insert(name.to_string(), id);
+		Claim {
+			name: name.to_string(),
+			id,
+			owners: self.owners.clone(),
+		}
+	}
 }
 
-/// One source's catalog, listed in the studio's for as long as this lives.
-pub(crate) struct Listing {
+/// A source's hold on its name's entry in the studio catalog, until a newer
+/// source of that name claims it.
+///
+/// An edited source's replacement starts before the old one stops, and their
+/// drivers run wherever their caller puts them, so the claim is taken in the
+/// order the sources open rather than the order their drivers run.
+pub(crate) struct Claim {
 	name: String,
-	/// This listing's claim on `name` in [`Owners`].
 	id: u64,
 	owners: Arc<Mutex<Owners>>,
+}
+
+impl Claim {
+	/// Whether no newer source of this name has opened since.
+	fn owned(&self) -> bool {
+		self.owners.lock().unwrap().by_name.get(&self.name) == Some(&self.id)
+	}
+}
+
+impl Drop for Claim {
+	fn drop(&mut self) {
+		let mut owners = self.owners.lock().unwrap();
+		if owners.by_name.get(&self.name) == Some(&self.id) {
+			owners.by_name.remove(&self.name);
+		}
+	}
+}
+
+/// One source's catalog, listed in the studio's for as long as this lives and
+/// its claim holds.
+pub(crate) struct Listing<'a> {
+	claim: &'a Claim,
 	kind: moq_video::encode::Kind,
 	broadcast: moq_net::broadcast::Producer,
 	studio: Catalog,
@@ -109,8 +146,8 @@ pub(crate) struct Listing {
 	_scratch: moq_net::broadcast::Producer,
 }
 
-impl Listing {
-	pub(crate) fn new(name: &str, publish: &Publish) -> Result<Self, Error> {
+impl<'a> Listing<'a> {
+	pub(crate) fn new(claim: &'a Claim, publish: &Publish) -> Result<Self, Error> {
 		let mut scratch = moq_net::broadcast::Info::new().produce();
 		// The studio's clock, so source and program timestamps share one timeline.
 		let config = moq_mux::catalog::Config::default()
@@ -118,17 +155,8 @@ impl Listing {
 			.with_bandwidth(publish.bandwidth.clone())
 			.with_hls(None);
 		let catalog = moq_mux::catalog::Producer::new(&mut scratch, config)?;
-		let id = {
-			let mut owners = publish.owners.lock().unwrap();
-			let id = owners.next;
-			owners.next += 1;
-			owners.by_name.insert(name.to_string(), id);
-			id
-		};
 		Ok(Self {
-			name: name.to_string(),
-			id,
-			owners: publish.owners.clone(),
+			claim,
 			kind: publish.kind.clone(),
 			broadcast: publish.broadcast.clone(),
 			studio: publish.catalog.clone(),
@@ -145,37 +173,31 @@ impl Listing {
 		while let Some(mut catalog) = updates.next().await? {
 			// Already at the studio catalog's root.
 			catalog.clock = None;
+			// The claim is checked inside the mutation, so a newer source's
+			// writes, made under the same lock, are never overwritten.
 			studio.mutate(|root| {
-				if !self.owned() {
+				if !self.claim.owned() {
 					return;
 				}
+				let name = &self.claim.name;
 				let sources = &mut root.ext.studio.sources;
 				if catalog == hang::Catalog::default() {
-					sources.remove(&self.name);
+					sources.remove(name);
 				} else {
-					sources.insert(self.name.clone(), catalog);
+					sources.insert(name.clone(), catalog);
 				}
 			})?;
 		}
 		Ok(())
 	}
-
-	/// Whether this is still the newest listing under its name. Checked inside
-	/// a studio catalog mutation, so a replacement cannot claim the name between
-	/// the check and the write.
-	fn owned(&self) -> bool {
-		self.owners.lock().unwrap().by_name.get(&self.name) == Some(&self.id)
-	}
 }
 
-impl Drop for Listing {
+impl Drop for Listing<'_> {
 	fn drop(&mut self) {
 		// Fails only once the studio catalog closed, which took the entry with it.
 		let _ = self.studio.mutate(|root| {
-			let mut owners = self.owners.lock().unwrap();
-			if owners.by_name.get(&self.name) == Some(&self.id) {
-				owners.by_name.remove(&self.name);
-				root.ext.studio.sources.remove(&self.name);
+			if self.claim.owned() {
+				root.ext.studio.sources.remove(&self.claim.name);
 			}
 		});
 	}
@@ -205,7 +227,7 @@ impl Video {
 		allow(dead_code, reason = "only capture sources encode video")
 	)]
 	pub(crate) async fn new(
-		listing: &Listing,
+		listing: &Listing<'_>,
 		size: moq_video::Size,
 		framerate: moq_video::FrameRate,
 		color: Option<moq_video::Color>,
@@ -297,7 +319,7 @@ pub(crate) struct Still {
 
 impl Still {
 	/// Publish `bytes`, a PNG or JPEG file, as a one-group binary track.
-	pub(crate) fn new(listing: &Listing, bytes: bytes::Bytes) -> Result<Self, Error> {
+	pub(crate) fn new(listing: &Listing<'_>, bytes: bytes::Bytes) -> Result<Self, Error> {
 		let format = image::guess_format(&bytes).map_err(|err| Error::Image(err.to_string()))?;
 		let suffix = match format {
 			image::ImageFormat::Png => ".png",
@@ -318,7 +340,7 @@ impl Still {
 	}
 
 	/// A solid color as a one-pixel PNG, so every still reads the same way.
-	pub(crate) fn color(listing: &Listing, color: crate::Rgba) -> Result<Self, Error> {
+	pub(crate) fn color(listing: &Listing<'_>, color: crate::Rgba) -> Result<Self, Error> {
 		let pixel = image::RgbaImage::from_raw(1, 1, color.0.to_vec()).expect("one pixel");
 		let mut png = std::io::Cursor::new(Vec::new());
 		pixel
@@ -460,7 +482,8 @@ mod tests {
 	async fn a_video_follows_its_pictures_size() {
 		local(async {
 			let (publish, catalog, consumer) = studio();
-			let listing = Listing::new("camera", &publish).unwrap();
+			let claim = publish.claim("camera");
+			let listing = Listing::new(&claim, &publish).unwrap();
 			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
 			let width = |sources: &BTreeMap<String, hang::Catalog>| {
 				let source = sources.get("camera")?;
@@ -499,15 +522,16 @@ mod tests {
 		.await;
 	}
 
-	/// An edited source's replacement starts before the old one stops, and the
-	/// old one's end leaves the replacement listed.
+	/// An edited source's replacement owns the listing from the moment it
+	/// opens, even when the old source's driver only gets to list itself later,
+	/// and the old one's end leaves the replacement listed.
 	#[tokio::test]
-	async fn a_replaced_listing_keeps_its_successor() {
+	async fn a_replaced_source_keeps_its_listing() {
 		local(async {
 			let (publish, catalog, _consumer) = studio();
-			let old = Listing::new("logo", &publish).unwrap();
-			let old_still = Still::color(&old, Rgba([0, 0, 0, 255])).unwrap();
-			let new = Listing::new("logo", &publish).unwrap();
+			let old_claim = publish.claim("logo");
+			let new_claim = publish.claim("logo");
+			let new = Listing::new(&new_claim, &publish).unwrap();
 			let still = Still::color(&new, Rgba([255, 0, 0, 255])).unwrap();
 			let name = still.track.name().to_string();
 			let replaced = |sources: &BTreeMap<String, hang::Catalog>| {
@@ -515,14 +539,23 @@ mod tests {
 					.get("logo")
 					.is_some_and(|logo| logo.binary.tracks.contains_key(&name))
 			};
+			let old = Listing::new(&old_claim, &publish).unwrap();
+			let old_still = Still::color(&old, Rgba([0, 0, 0, 255])).unwrap();
 
 			tokio::select! {
 				result = old.mirror() => panic!("the mirror ended: {result:?}"),
 				result = new.mirror() => panic!("the mirror ended: {result:?}"),
-				_ = listed(&catalog, replaced) => {}
+				() = async {
+					listed(&catalog, replaced).await;
+					// Let the old mirror write too, if it would.
+					for _ in 0..100 {
+						tokio::task::yield_now().await;
+					}
+				} => {}
 			}
 			drop(old_still);
 			drop(old);
+			drop(old_claim);
 			assert!(
 				replaced(&catalog.snapshot().ext.studio.sources),
 				"the replacement stays listed"

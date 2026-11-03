@@ -22,7 +22,7 @@ use moq_mux::catalog::Stream;
 
 use crate::Error;
 use crate::collection::{Collection, Source};
-use crate::publish::{Listing, Publish, Still};
+use crate::publish::{Claim, Listing, Publish, Still};
 
 /// A source's newest picture, waiting for the compositor to draw it.
 pub(crate) enum Picture {
@@ -201,8 +201,16 @@ pub struct Driver {
 	shown: Shown,
 	strip: Option<Strip>,
 	status: kio::Producer<Status>,
-	/// Where the source's own track goes and what it is doing, when it publishes one.
-	track: Option<(Publish, kio::Producer<Status>)>,
+	/// The source's own track, when it publishes one.
+	track: Option<Track>,
+}
+
+/// Where a source's own track goes, its claim on the studio catalog's listing
+/// under its name, and what the track is doing.
+struct Track {
+	publish: Publish,
+	claim: Claim,
+	status: kio::Producer<Status>,
 }
 
 impl Driver {
@@ -234,16 +242,16 @@ impl Driver {
 	}
 
 	/// The source's own catalog, listed in the studio's, when it publishes.
-	fn listing(&self) -> Option<Listing> {
-		let (publish, _) = self.track.as_ref()?;
-		Listing::new(&self.name, publish)
+	fn listing(&self) -> Option<Listing<'_>> {
+		let track = self.track.as_ref()?;
+		Listing::new(&track.claim, &track.publish)
 			.inspect_err(|err| self.fail_track(Status::Failed(err.to_string())))
 			.ok()
 	}
 
 	/// Keep the studio catalog listing what `listing` publishes. A catalog that
 	/// closes fails the track, and the source keeps running.
-	async fn mirror(&self, listing: Option<&Listing>) {
+	async fn mirror(&self, listing: Option<&Listing<'_>>) {
 		if let Some(listing) = listing
 			&& let Err(err) = listing.mirror().await
 		{
@@ -253,21 +261,21 @@ impl Driver {
 	}
 
 	fn set_track(&self, value: Status) {
-		if let Some((_, track)) = &self.track {
-			set(track, value);
+		if let Some(track) = &self.track {
+			set(&track.status, value);
 		}
 	}
 
 	/// Fail the track, unless it already failed with its own reason.
 	fn fail_track(&self, value: Status) {
-		if let Some((_, track)) = &self.track
-			&& !matches!(*track.read(), Status::Failed(_))
+		if let Some(track) = &self.track
+			&& !matches!(*track.status.read(), Status::Failed(_))
 		{
-			set(track, value);
+			set(&track.status, value);
 		}
 	}
 
-	async fn produce(&self, listing: Option<&Listing>) -> Result<(), Error> {
+	async fn produce(&self, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		match &self.source {
 			Source::Color { color } => {
 				self.show(Picture::Rgba {
@@ -312,7 +320,7 @@ impl Driver {
 	/// Capture a camera, display, window, or audio input. A picture is also
 	/// encoded onto the source's own track as it is shown, when `listing` is set.
 	#[cfg(feature = "capture")]
-	async fn device(&self, source: &Source, listing: Option<&Listing>) -> Result<(), Error> {
+	async fn device(&self, source: &Source, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		use moq_audio::capture::Source as Audio;
 		use moq_video::capture::Source as Video;
 
@@ -373,7 +381,7 @@ impl Driver {
 	}
 
 	#[cfg(not(feature = "capture"))]
-	async fn device(&self, _: &Source, _: Option<&Listing>) -> Result<(), Error> {
+	async fn device(&self, _: &Source, _: Option<&Listing<'_>>) -> Result<(), Error> {
 		Err(Error::Unsupported(
 			"this build cannot capture devices (enable the `capture` feature)".into(),
 		))
@@ -548,11 +556,17 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 	let shown = Shown::default();
 	let strip = source.has_audio().then(Strip::default);
 	let status = kio::Producer::new(Status::Starting);
+	// Claimed here, in the order sources open, so an edited source's
+	// replacement owns the listing however their drivers are scheduled.
 	let track = context
 		.publish
 		.clone()
 		.filter(|_| publishes(source))
-		.map(|publish| (publish, kio::Producer::new(Status::Starting)));
+		.map(|publish| Track {
+			claim: publish.claim(name),
+			publish,
+			status: kio::Producer::new(Status::Starting),
+		});
 
 	let feed = Feed {
 		source: source.clone(),
@@ -560,7 +574,7 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		shown: shown.clone(),
 		strip: strip.clone(),
 		status: status.consume(),
-		track: track.as_ref().map(|(_, status)| status.consume()),
+		track: track.as_ref().map(|track| track.status.consume()),
 	};
 	let driver = Driver {
 		name: name.to_string(),
