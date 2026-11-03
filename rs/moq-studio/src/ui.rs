@@ -256,8 +256,9 @@ fn dropped_message(dropped: usize) -> String {
 impl Panels {
 	/// The keyboard shortcuts, and the clipboard.
 	fn shortcuts(&mut self, ctx: &egui::Context) {
-		// A focused text field keeps its own undo, copy, and paste.
-		if ctx.egui_wants_keyboard_input() {
+		// A focused text field keeps its own undo, copy, and paste; any other
+		// focused widget, such as a slider, leaves them to the studio.
+		if ctx.text_edit_focused() {
 			return;
 		}
 		// Shift first, since the plain shortcut also matches with it held.
