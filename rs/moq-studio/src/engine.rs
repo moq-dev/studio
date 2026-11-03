@@ -469,9 +469,9 @@ impl Engine {
 		// The encode threads of renditions ended since, whose sessions the next
 		// probe waits to be closed.
 		let mut ending = Vec::new();
-		// The canvas the newest rendition, or the failure to open one, is for,
-		// so a failure is not retried until the canvas changes.
-		let mut settled = canvas;
+		// Whether the canvas drawn has its rendition, or failed to open one, so
+		// a failure is not retried until the canvas changes.
+		let mut settled = true;
 		if let Some(rendition) = &rendition {
 			rendition.adopted(&self.stats);
 		}
@@ -499,6 +499,7 @@ impl Engine {
 					clock = program_clock(tick + period(drawn), drawn);
 				}
 				canvas = drawn;
+				settled = false;
 				// Ended before the next opens, so the two never hold encode
 				// sessions at once.
 				ending.extend(rendition.take().map(Rendition::end));
@@ -511,7 +512,7 @@ impl Engine {
 						.unwrap_or_else(|_| Err(anyhow::anyhow!("the encoder probe panicked")));
 					// One for a canvas since left is dropped unlisted.
 					if probed == canvas {
-						settled = canvas;
+						settled = true;
 						match probe.and_then(|probe| renditions.start(probe)) {
 							Ok((started, _)) => {
 								started.adopted(&self.stats);
@@ -521,12 +522,12 @@ impl Engine {
 						}
 					}
 				}
-				if probing.is_none() && settled != canvas {
+				if probing.is_none() && !settled {
 					let ending = std::mem::take(&mut ending);
 					match Probe::spawn(renditions.gpu.clone(), canvas, ending) {
 						Ok(probe) => probing = Some((canvas, probe)),
 						Err(err) => {
-							settled = canvas;
+							settled = true;
 							self.stats.fail_video(format!("cannot start an encoder probe: {err}"));
 						}
 					}
