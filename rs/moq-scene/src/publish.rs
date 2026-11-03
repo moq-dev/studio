@@ -599,10 +599,9 @@ mod tests {
 				audio: None,
 				end: moq_net::Timestamp::from_micros(2_500_000).unwrap(),
 			};
-			let (take, copy) = crate::replay::Take::new(&target, std::time::Duration::from_secs(1))
+			let take = crate::replay::Take::new(&target, std::time::Duration::from_secs(1))
 				.await
 				.unwrap();
-			tokio::task::spawn_local(copy);
 			let feed = sources.get("replay").unwrap();
 			feed.replay(take, 1.0).unwrap();
 			for _ in 0..100 {

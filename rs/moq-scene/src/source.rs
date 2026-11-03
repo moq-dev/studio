@@ -1305,8 +1305,7 @@ mod tests {
 				audio: None,
 				end: moq_net::Timestamp::from_micros(2_500_000).unwrap(),
 			};
-			let (take, copy) = Take::new(&target, Duration::from_secs(1)).await.unwrap();
-			tokio::task::spawn_local(copy);
+			let take = Take::new(&target, Duration::from_secs(1)).await.unwrap();
 			let speed = 0.5;
 			feed.replay(take, speed).unwrap();
 

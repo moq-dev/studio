@@ -84,10 +84,7 @@ pub async fn play(
 	speed: f32,
 	into: String,
 ) -> anyhow::Result<()> {
-	let (take, copy) = Take::new(&target, length).await?;
-	// A failed copy ends the take's tracks with the error, which the replay
-	// source then reports.
-	tokio::spawn(copy);
+	let take = Take::new(&target, length).await?;
 	let state = engine.state.lock().unwrap();
 	let feed = state
 		.sources
@@ -100,7 +97,7 @@ pub async fn play(
 /// Copy `length` of `target` and save it, in real time, as a new MP4 file
 /// beside `scenes`, the scene file. Returns where.
 pub async fn save(target: Target, length: Duration, scenes: &Path) -> anyhow::Result<PathBuf> {
-	let (take, copy) = Take::new(&target, length).await?;
+	let take = Take::new(&target, length).await?;
 	let (path, mut file) = create(scenes).await?;
 	let written = async {
 		let broadcast = take.consume();
@@ -125,8 +122,7 @@ pub async fn save(target: Target, length: Duration, scenes: &Path) -> anyhow::Re
 		file.sync_all().await?;
 		anyhow::Ok(())
 	};
-	let (copied, written) = tokio::join!(copy, written);
-	if let Err(err) = copied.map_err(anyhow::Error::from).and(written) {
+	if let Err(err) = written.await {
 		// Half a clip is no clip.
 		drop(file);
 		let _ = tokio::fs::remove_file(&path).await;

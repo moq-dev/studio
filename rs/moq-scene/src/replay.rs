@@ -9,7 +9,7 @@
 //! Copying shares each frame's payload rather than duplicating it.
 
 use std::collections::BTreeSet;
-use std::future::Future;
+use std::task::Poll;
 use std::time::Duration;
 
 use hang::catalog::{AudioConfig, Reference, VideoConfig};
@@ -44,7 +44,7 @@ pub struct Target {
 /// picture. Dropping it releases them.
 pub struct Take {
 	broadcast: moq_net::broadcast::Producer,
-	/// Keep the copies and their listing readable once the copy finishes.
+	/// Keep the copies and their listing readable.
 	_tracks: Vec<moq_net::track::Producer>,
 	_listing: moq_mux::catalog::Producer,
 	/// The video rendition, under its catalog name.
@@ -59,21 +59,16 @@ pub struct Take {
 
 impl Take {
 	/// Hold the `length` of `target` that ends at its end, at most [`MAX_LENGTH`],
-	/// as far as its tracks hold it now: a frame written after this call is not
-	/// copied, so a span ending at the live edge may stop a frame or two short.
+	/// as far as its tracks hold it now.
 	///
-	/// Returns the take and the copy that fills it. Run the copy until it
-	/// finishes, which needs nothing more to be published, since the take's
-	/// tracks end only then. A copy that fails aborts the take's tracks, so
-	/// their readers see why.
+	/// Copies only what is readable at once, so it never waits on a publisher:
+	/// a frame or group still to be written or still in transit is left out, and
+	/// a span ending at the live edge may stop a frame or two short.
 	///
 	/// Refuses a target with neither rendition, one served from another
 	/// broadcast, a length of zero or over [`MAX_LENGTH`], and, over a wire that
 	/// cannot address a received track by time, a broadcast from a relay.
-	pub async fn new(
-		target: &Target,
-		length: Duration,
-	) -> Result<(Self, impl Future<Output = Result<(), Error>> + Send + 'static), Error> {
+	pub async fn new(target: &Target, length: Duration) -> Result<Self, Error> {
 		if length.is_zero() || length > MAX_LENGTH {
 			return Err(Error::Invalid(format!(
 				"a replay is above 0 and at most {} s long, not {length:?}",
@@ -94,26 +89,16 @@ impl Take {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = hang::Catalog::<()>::default();
 		let mut tracks = Vec::new();
-		let video = match &target.video {
-			Some((name, config)) => {
-				reference(config)?;
-				catalog.video.renditions.insert(name.clone(), config.clone());
-				let (source, track) = open(target, &broadcast, Reference::track(config, name), start).await?;
-				tracks.push(track.clone());
-				Some(copy(source, track))
-			}
-			None => None,
-		};
-		let audio = match &target.audio {
-			Some((name, config)) => {
-				reference(config)?;
-				catalog.audio.renditions.insert(name.clone(), config.clone());
-				let (source, track) = open(target, &broadcast, Reference::track(config, name), start).await?;
-				tracks.push(track.clone());
-				Some(copy(source, track))
-			}
-			None => None,
-		};
+		if let Some((name, config)) = &target.video {
+			reference(config)?;
+			catalog.video.renditions.insert(name.clone(), config.clone());
+			tracks.push(copy(target, &broadcast, Reference::track(config, name), start).await?);
+		}
+		if let Some((name, config)) = &target.audio {
+			reference(config)?;
+			catalog.audio.renditions.insert(name.clone(), config.clone());
+			tracks.push(copy(target, &broadcast, Reference::track(config, name), start).await?);
+		}
 		// Listed so an export of the take finds its renditions; HLS is for live
 		// viewers, which a take has none of.
 		let config = moq_mux::catalog::Config::default().with_hls(None);
@@ -122,40 +107,22 @@ impl Take {
 			listed.video.renditions = catalog.video.renditions;
 			listed.audio.renditions = catalog.audio.renditions;
 		})?;
-		let listed = listing.clone();
+		listing.finish()?;
 
-		let copy = async move {
-			let (video, audio) = tokio::join!(run(video), run(audio));
-			let result = video.and(audio);
-			match &result {
-				Ok(()) => listing.finish()?,
-				Err(_) => listing.abort(moq_net::Error::Cancel),
-			}
-			result
-		};
-		let take = Self {
+		Ok(Self {
 			broadcast,
 			_tracks: tracks,
-			_listing: listed,
+			_listing: listing,
 			video: target.video.clone(),
 			audio: target.audio.clone(),
 			start,
 			end,
-		};
-		Ok((take, copy))
+		})
 	}
 
 	/// The take's broadcast, to decode or export.
 	pub fn consume(&self) -> moq_net::broadcast::Consumer {
 		self.broadcast.consume()
-	}
-}
-
-/// Run a copy, if there is one.
-async fn run(copy: Option<impl Future<Output = Result<(), Error>>>) -> Result<(), Error> {
-	match copy {
-		Some(copy) => copy.await,
-		None => Ok(()),
 	}
 }
 
@@ -170,95 +137,65 @@ fn reference(config: &impl Reference) -> Result<(), Error> {
 	}
 }
 
-/// Subscribe to the span of `name` in `target`, and create the track in
-/// `broadcast` it is copied to. Also returns the newest frame the track held
-/// when asked, which the copy stops at.
-async fn open(
+/// Copy the span of `name` in `target`, as far as it is readable now, into a
+/// track of `broadcast`, and end that track.
+async fn copy(
 	target: &Target,
 	broadcast: &moq_net::broadcast::Producer,
 	name: &str,
 	start: moq_net::Timestamp,
-) -> Result<(Copy, moq_net::track::Producer), Error> {
+) -> Result<moq_net::track::Producer, Error> {
 	let range = moq_net::track::Range {
 		start: moq_net::track::Anchor::Time(start),
 		end: Some(moq_net::track::Anchor::Time(target.end)),
 	};
-	// Oldest first, so the start of the span is copied ahead of the group still
-	// being written at its end, and with the publisher's whole window, so none of
-	// it is skipped as stale.
+	// Oldest first, and with the publisher's whole window, so none of the span
+	// is skipped as stale.
 	let subscription = moq_net::track::Subscription::default()
 		.with_ranges([range])
 		.with_max_delay(None)
 		.with_order(moq_net::track::Order::Ascending);
-	let mut track = target.broadcast.track(name)?;
-	// What is held now, without waiting: a span is the recent past, and a
-	// source that has stopped publishing, such as a still screen, may never
-	// write past it.
-	let held = match track.poll_largest(&kio::Waiter::noop()) {
-		std::task::Poll::Ready(held) => held,
-		std::task::Poll::Pending => None,
-	};
-	let source = track.subscribe(subscription).await?;
+	let mut source = target.broadcast.track(name)?.subscribe(subscription).await?;
 	// Never stale: the take keeps its groups for as long as it lives.
 	let info = source.info().clone().with_max_age(None);
-	let track = broadcast.create_track(name, info)?;
-	let copy = Copy {
-		source,
-		held,
-		end: target.end,
-	};
-	Ok((copy, track))
-}
-
-/// Where a copy reads from, and how far.
-struct Copy {
-	source: moq_net::track::Subscriber,
-	/// The newest frame held when the take was asked for, or `None` when the
-	/// track held nothing.
-	held: Option<moq_net::track::Position>,
-	end: moq_net::Timestamp,
-}
-
-/// Copy each group the span covers into `track`, then end it.
-async fn copy(copy: Copy, mut track: moq_net::track::Producer) -> Result<(), Error> {
-	let result = copy_groups(copy, &mut track).await;
-	match &result {
+	let mut track = broadcast.create_track(name, info)?;
+	match copy_held(&mut source, &mut track, target.end) {
 		Ok(()) => track.finish()?,
 		Err(err) => {
-			let _ = track.abort(moq_net::Error::Cancel);
-			tracing::warn!(%err, "replay copy failed");
+			let _ = track.clone().abort(moq_net::Error::Cancel);
+			return Err(err);
 		}
 	}
-	result
+	Ok(track)
 }
 
-async fn copy_groups(copy: Copy, track: &mut moq_net::track::Producer) -> Result<(), Error> {
-	let Copy { mut source, held, end } = copy;
-	let Some(held) = held else {
-		return Ok(());
-	};
+/// Copy every group and frame `source` has ready, up to `end`, into `track`.
+fn copy_held(
+	source: &mut moq_net::track::Subscriber,
+	track: &mut moq_net::track::Producer,
+	end: moq_net::Timestamp,
+) -> Result<(), Error> {
+	// Never woken: anything not ready now is left out.
+	let now = kio::Waiter::noop();
 	let mut copied = BTreeSet::new();
 	let mut past = false;
-	// Oldest first, so once the newest frame held, or one past the end, is
-	// copied the span is whole.
-	while !past && let Some(mut group) = source.recv_group().await? {
+	while !past {
+		let mut group = match source.poll_recv_group(&now) {
+			Poll::Ready(group) => match group? {
+				Some(group) => group,
+				None => break,
+			},
+			Poll::Pending => break,
+		};
 		let sequence = group.sequence;
-		if sequence > held.group {
-			break;
-		}
 		let mut into: Option<moq_net::group::Producer> = None;
-		let mut index = 0;
 		let read = loop {
-			if sequence == held.group && index > held.frame {
-				past = true;
-				break Ok(());
-			}
-			let frame = match group.read_frame().await {
-				Ok(Some(frame)) => frame,
-				Ok(None) => break Ok(()),
-				Err(err) => break Err(err),
+			let frame = match group.poll_read_frame(&now) {
+				Poll::Ready(Ok(Some(frame))) => frame,
+				// A group still arriving is copied as far as it arrived.
+				Poll::Ready(Ok(None)) | Poll::Pending => break Ok(()),
+				Poll::Ready(Err(err)) => break Err(err),
 			};
-			index += 1;
 			if frame.timestamp.is_some_and(|timestamp| timestamp > end) {
 				past = true;
 				break Ok(());
@@ -284,7 +221,7 @@ async fn copy_groups(copy: Copy, track: &mut moq_net::track::Producer) -> Result
 		}
 	}
 
-	// Groups the span covers that never arrived are gaps, not groups still to come.
+	// Groups the span covers that are not here are gaps, not groups to come.
 	let copied: Vec<u64> = copied.into_iter().collect();
 	for pair in copied.windows(2) {
 		if pair[1] > pair[0] + 1 {
@@ -371,11 +308,10 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_take_holds_its_span() {
 		let (broadcast, _track) = broadcast(10, None);
-		let (take, copy) = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3))
+		let take = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3))
 			.await
 			.unwrap();
 		assert_eq!(take.start, ts(4_500));
-		copy.await.unwrap();
 		assert_eq!(
 			read(&take).await,
 			[
@@ -392,10 +328,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_take_keeps_a_gap() {
 		let (broadcast, _track) = broadcast(10, Some(5));
-		let (take, copy) = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3))
+		let take = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3))
 			.await
 			.unwrap();
-		copy.await.unwrap();
 		assert_eq!(
 			read(&take).await,
 			[(4, frames(4, 3)), (6, frames(6, 3)), (7, frames(7, 2))]
@@ -410,11 +345,10 @@ mod tests {
 		let (broadcast, track) = broadcast(7, None);
 		let mut live = track.create_group(moq_net::group::Info { sequence: 7 }).unwrap();
 		live.write_frame(ts(7_000), b"7.0".to_vec()).unwrap();
-		let (take, copy) = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3))
+		let take = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3))
 			.await
 			.unwrap();
 		live.write_frame(ts(7_333), b"7.1".to_vec()).unwrap();
-		copy.await.unwrap();
 		assert_eq!(
 			read(&take).await,
 			[
