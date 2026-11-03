@@ -110,10 +110,6 @@ impl eframe::App for Studio {
 		let framerate = self.panels.engine.state.lock().unwrap().collection.canvas.framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 
-		if ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-			self.panels.save();
-		}
-
 		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui));
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
 		DockArea::new(&mut self.dock)
@@ -175,11 +171,8 @@ impl Panels {
 	fn menu(&mut self, ui: &mut Ui) {
 		egui::MenuBar::new().ui(ui, |ui| {
 			ui.menu_button("File", |ui| {
-				if ui.button("Save").clicked() {
-					self.save();
-				}
 				if ui.button("Reload").clicked() {
-					let result = self.engine.state.lock().unwrap().reload();
+					let result = self.engine.reload();
 					self.report(result.map(|()| "reloaded".to_string()));
 				}
 			});
@@ -188,12 +181,12 @@ impl Panels {
 
 	fn status(&mut self, ui: &mut Ui) {
 		ui.horizontal(|ui| {
-			let state = self.engine.state.lock().unwrap();
-			ui.label(state.path.display().to_string());
-			if state.unsaved() {
-				ui.weak("(unsaved)");
+			let autosave = &self.engine.autosave;
+			ui.label(autosave.path().display().to_string());
+			if let Some(error) = autosave.error() {
+				ui.separator();
+				ui.colored_label(ui.visuals().error_fg_color, format!("not saved: {error}"));
 			}
-			drop(state);
 			match &self.message {
 				Some(Ok(message)) => {
 					ui.separator();
@@ -206,11 +199,6 @@ impl Panels {
 				None => {}
 			}
 		});
-	}
-
-	fn save(&mut self) {
-		let result = self.engine.state.lock().unwrap().save();
-		self.report(result.map(|()| "saved".to_string()));
 	}
 
 	fn report(&mut self, result: anyhow::Result<String>) {
