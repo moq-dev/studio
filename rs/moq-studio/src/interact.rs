@@ -272,10 +272,46 @@ impl Interact {
 						send(page, Input::Cut);
 					}
 				}
+				// A release or a key typed in another app never arrives here,
+				// so let go of the page as a native window does on losing
+				// focus.
+				egui::Event::WindowFocused(false) => {
+					if let Some(capture) = self.captured.take() {
+						let pos = ui.input(|input| input.pointer.latest_pos());
+						let (x, y) = pos.and_then(|pos| on_page(&capture, pos)).unwrap_or_default();
+						for button in capture.held {
+							let modifiers = Modifiers::default();
+							let up = Input::Button {
+								x,
+								y,
+								button,
+								down: false,
+								clicks: 1,
+								modifiers,
+							};
+							send(&capture.page, up);
+						}
+					}
+					if let Some(left) = self.hovered.take() {
+						send(
+							&left,
+							Input::Leave {
+								modifiers: Modifiers::default(),
+							},
+						);
+					}
+					self.blur(&send);
+				}
 				_ => {}
 			}
 		}
 		out.into_inner()
+	}
+
+	/// Whether a page has the keyboard, so the studio's own shortcuts leave
+	/// it alone.
+	pub fn has_keyboard(&self) -> bool {
+		self.focused.is_some()
 	}
 
 	/// Give the keyboard back, as when interaction ends: what the page that
@@ -781,6 +817,61 @@ mod tests {
 				Input::Cut,
 			]
 		);
+	}
+
+	/// Switching to another app mid-drag releases the page's button and its
+	/// keyboard, since the release happens where the studio cannot see it.
+	#[test]
+	fn losing_the_window_lets_go_of_the_page() {
+		let mut collection = Collection::new();
+		collection.canvas.width = 100;
+		collection.canvas.height = 100;
+		collection.sources.insert(
+			"chat".into(),
+			Source::Browser {
+				url: "https://example.com".into(),
+				width: 100,
+				height: 100,
+			},
+		);
+		collection.scenes = vec![Scene {
+			name: "Main".into(),
+			items: vec![Item::new("chat", Rect::fill(&collection.canvas))],
+		}];
+		let ctx = egui::Context::default();
+		let mut interact = Interact::default();
+		let press = egui::Event::PointerButton {
+			pos: egui::pos2(10.0, 10.0),
+			button: egui::PointerButton::Primary,
+			pressed: true,
+			modifiers: Default::default(),
+		};
+		frame(&ctx, &mut interact, &collection, vec![press]);
+		assert!(interact.has_keyboard());
+
+		let delivered = frame(
+			&ctx,
+			&mut interact,
+			&collection,
+			vec![egui::Event::WindowFocused(false)],
+		);
+		let inputs: Vec<_> = delivered.into_iter().map(|(_, input)| input).collect();
+		assert_eq!(
+			inputs,
+			[
+				Input::Button {
+					x: 10,
+					y: 10,
+					button: Button::Left,
+					down: false,
+					clicks: 1,
+					modifiers: Modifiers::default(),
+				},
+				Input::Focus(false),
+			]
+		);
+		assert!(!interact.has_keyboard());
+		assert!(interact.captured.is_none());
 	}
 
 	/// Presses close in time and place count up to a triple click, then start
