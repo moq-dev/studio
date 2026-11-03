@@ -75,7 +75,7 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
+| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
 | Scenes | Pick the scene in preview, add one, or remove one. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
@@ -91,6 +91,14 @@ A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
 on program, and stays on through a cut or fade: a downstream keyer for a logo
 or a lower third.
+
+In the preview, click an item of whatever the Items panel shows to select it,
+drag it to move it, and drag its edges or corners to resize it. A drag snaps
+edges and centers to the canvas's edges and center, to the other items shown,
+and to the grid while **Grid** is on, drawing a guide through what it lines up
+with. A moved item also snaps to the spacing of its neighbors, marking the
+equal spaces. Hold Ctrl (Cmd on macOS) to drag without snapping, or turn
+**Snap** off. The snap and grid settings last until the studio quits.
 
 Items showing the same source are **linked**: one capture, with the source's
 filters, wherever it is shown. A **clone** is a new source showing another's
