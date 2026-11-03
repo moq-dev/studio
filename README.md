@@ -13,7 +13,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
     show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
 ```
 
-- `show.toml` is the scene collection. It is created on the first save.
+- `show.toml` is the scene collection. It is created if it does not exist, and
+  changes are saved to it a second after you stop editing, with no save step.
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
@@ -106,9 +107,19 @@ items = [
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
 (macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
-`broadcast`, and `browser` (a `url`, and a `width` and `height` up to 4096). The Devices panel fills in ids. **File > Save** (Ctrl+S) writes
-the file and **File > Reload** reads it back; a new canvas size or frame rate
-takes a restart.
+`broadcast`, and `browser` (a `url`, and a `width` and `height` up to 4096). The Devices panel fills in ids.
+
+The studio writes the file a second after the last change, so a burst such as a
+slider drag is one write, and once more on quit. Edits that never pause for a
+second are written five seconds after the first, so a crash loses at most the
+last five seconds of edits. Each write replaces the whole file at once, never
+leaving half of it, and a collection that has not changed is not rewritten, so
+a hand-written file keeps its comments and layout until the next edit in the
+studio. A failed write shows in the status bar and
+is retried every second; until one succeeds, a crash loses every edit since the
+last write. To edit the file by hand while the studio runs, save it and pick
+**File > Reload**; an edit in the studio before that overwrites it. A new
+canvas size or frame rate takes a restart.
 
 ## Output
 
