@@ -194,14 +194,15 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
 (macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `clone` (with the `source` it shows), and `lut` (a 3D Adobe or
-Resolve `.cube` file, which shows nothing itself but grades what a `lut` filter
-names it in). The Devices panel fills in ids. `[[top]]` items make up the top
+Resolve `.cube` file, which no item places, but which grades what a `lut`
+filter names it in). The Devices panel fills in ids. `[[top]]` items make up the top
 layer.
 
 `[video.<source>]` sets a source's `crop` and `filters`, wherever it is shown,
 and an item's `crop`, `filters`, and `blend` its own. A `crop` trims a fraction
-(0 to 1) of the picture off its `left`, `top`, `right`, and `bottom` and
-stretches the rest over the item; an item's crop trims what its source's
+(0 to 1) of the picture off its `left`, `top`, `right`, and `bottom`, opposite
+sides together trimming less than the whole, and stretches the rest over the
+item; an item's crop trims what its source's
 leaves. Filters apply in order, the source's then the item's, with lengths in
 canvas pixels:
 
@@ -213,7 +214,7 @@ canvas pixels:
 | `blur` | `radius`, the standard deviation; the edges fade out, as in CSS |
 | `drop_shadow` | `x`, `y`, `blur` (the standard deviation), and `color`, as in CSS |
 | `chroma_key` | `color` keyed out, and `similarity`, `smoothness`, and `spill` from 0 to 1 |
-| `luma_key` | `min` and `max` luma kept, and `smoothness`, from 0 to 1 |
+| `luma_key` | `min` and `max` luma kept, `min` at most `max`, and `smoothness`, all from 0 to 1 |
 | `lut` | the `lut` `source` to grade through, and `amount` from 0 to 1 |
 | `mask` | a `source` whose picture, stretched over the item, keeps what it covers: by its alpha, or `mode = "luminance"` |
 

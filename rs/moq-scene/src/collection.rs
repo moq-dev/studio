@@ -148,9 +148,15 @@ impl Collection {
 		}
 		for (layer, items) in self.layers() {
 			for item in items {
-				if !self.sources.contains_key(&item.source) {
+				let Some(source) = self.sources.get(&item.source) else {
 					return Err(Error::Invalid(format!(
 						"{layer} places `{}`, which is not a source",
+						item.source
+					)));
+				};
+				if matches!(source, Source::Lut { .. }) {
+					return Err(Error::Invalid(format!(
+						"{layer} places `{}`, a LUT, which only a filter can name",
 						item.source
 					)));
 				}
@@ -165,6 +171,10 @@ impl Collection {
 
 		if let Some(name) = self.sources.keys().find(|name| name.is_empty()) {
 			return Err(Error::Invalid(format!("a source has an empty name: `{name}`")));
+		}
+		let unnamed = |source: &Source| source.path().is_some_and(|path| path.as_os_str().is_empty());
+		if let Some((name, _)) = self.sources.iter().find(|(_, source)| unnamed(source)) {
+			return Err(Error::Invalid(format!("`{name}` names no file")));
 		}
 		for (name, source) in &self.sources {
 			let Source::Clone { source } = source else { continue };
@@ -837,6 +847,14 @@ impl Source {
 		!matches!(self, Self::Microphone { .. } | Self::SystemAudio | Self::Lut { .. })
 	}
 
+	/// The file an image or LUT source reads.
+	pub(crate) fn path(&self) -> Option<&std::path::Path> {
+		match self {
+			Self::Image { path } | Self::Lut { path } => Some(path),
+			_ => None,
+		}
+	}
+
 	/// The file the source reads, to resolve or relativize it.
 	pub(crate) fn path_mut(&mut self) -> Option<&mut PathBuf> {
 		match self {
@@ -1162,6 +1180,23 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		let mut collection = example();
 		collection.top.push(Item::new("nobody", Rect::fill(&collection.canvas)));
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+
+		// A LUT is only looked up, and a file source needs a file.
+		let mut collection = example();
+		collection.sources.insert(
+			"grade".into(),
+			Source::Lut {
+				path: "grade.cube".into(),
+			},
+		);
+		collection.validate().unwrap();
+		collection.top.push(Item::new("grade", Rect::fill(&collection.canvas)));
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+		for source in [Source::Lut { path: "".into() }, Source::Image { path: "".into() }] {
+			let mut collection = example();
+			collection.sources.insert("blank".into(), source.clone());
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{source:?}");
+		}
 	}
 
 	#[test]
