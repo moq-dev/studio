@@ -338,10 +338,6 @@ impl Engine {
 			room,
 			_origin: origin,
 		});
-		if let Some(guests) = guests {
-			tokio::spawn(crate::guests::run(engine.clone(), guests));
-		}
-
 		let (video, audio, clock, publisher) = match publish {
 			Some(Publish {
 				video,
@@ -389,6 +385,12 @@ impl Engine {
 			save.autosave.run(|| save.serialize()).await
 		})?;
 		tokio::spawn(engine.clone().grade(health::Sampler::new(publisher)));
+		// Last, once nothing can fail: a start that fails is retried from setup,
+		// and a follower already running would keep this engine and its
+		// publication alive beside the retry's.
+		if let Some(guests) = guests {
+			tokio::spawn(crate::guests::run(engine.clone(), guests));
+		}
 
 		Ok(engine)
 	}
