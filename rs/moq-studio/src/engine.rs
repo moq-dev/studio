@@ -276,27 +276,41 @@ pub struct Engine {
 }
 
 /// The audio the program publishes.
-const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(128);
+pub const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(128);
 
 /// How often the audio thread reads the bus. Short enough that a read is never
 /// close to the bus's buffering, long enough to cost nothing.
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
+/// Everything starting the engine takes besides the scene file, which guided
+/// setup holds back until the creator has settled on a collection.
+#[derive(Clone)]
+pub struct Launch {
+	pub gpu: Gpu,
+	/// The relay to publish to, if any.
+	pub connect: Option<(moq_tokio::Client, url::Url)>,
+	/// The broadcast path the program is published at.
+	pub broadcast: String,
+	/// Whether the program video encodes only while someone watches.
+	pub on_demand: bool,
+}
+
 impl Engine {
-	/// Open the `loaded` collection and history on `gpu`, start the program
-	/// clock, and save both to `autosave`'s files as they change.
-	/// With `connect`, publish the program at `broadcast` on that relay,
-	/// encoding its video only while someone watches when `on_demand`.
+	/// Open the `loaded` collection and history on `launch.gpu`, start the
+	/// program clock, and save both to `autosave`'s files as they change,
+	/// starting at once.
+	/// With `launch.connect`, publish the program at `launch.broadcast` on that
+	/// relay, encoding its video only while someone watches when
+	/// `launch.on_demand`.
 	///
 	/// Call inside the tokio runtime that serves the relay connection.
-	pub async fn start(
-		gpu: Gpu,
-		autosave: Autosave,
-		loaded: autosave::Loaded,
-		connect: Option<(moq_tokio::Client, url::Url)>,
-		broadcast: &str,
-		on_demand: bool,
-	) -> anyhow::Result<Arc<Self>> {
+	pub async fn start(launch: Launch, autosave: Autosave, loaded: autosave::Loaded) -> anyhow::Result<Arc<Self>> {
+		let Launch {
+			gpu,
+			connect,
+			broadcast,
+			on_demand,
+		} = launch;
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
 		let sources = subscribe.consume();
@@ -310,7 +324,7 @@ impl Engine {
 
 		let (output, origin, publish) = match connect {
 			Some(connect) => {
-				let (output, publish) = publish(&gpu, &stats, connect, subscribe, broadcast, canvas, on_demand).await?;
+				let (output, publish) = publish(&gpu, &stats, connect, subscribe, &broadcast, canvas, on_demand).await?;
 				(Some(output), None, Some(publish))
 			}
 			None => (None, Some(subscribe), None),
@@ -368,17 +382,15 @@ impl Engine {
 			None => Duration::ZERO,
 		};
 		let program = engine.clone();
-		std::thread::Builder::new()
-			.name("program".into())
-			.spawn(move || clocked(program.run_program(start, epoch, video)))?;
+		clocked("program".into(), async move || {
+			program.run_program(start, epoch, video).await
+		})?;
 		let mix = engine.clone();
-		std::thread::Builder::new()
-			.name("audio".into())
-			.spawn(move || clocked(mix.run_audio(start, epoch, audio)))?;
+		clocked("audio".into(), async move || mix.run_audio(start, epoch, audio).await)?;
 		let save = engine.clone();
-		std::thread::Builder::new()
-			.name("autosave".into())
-			.spawn(move || clocked(save.autosave.run(|| save.serialize())))?;
+		clocked("autosave".into(), async move || {
+			save.autosave.run(|| save.serialize()).await
+		})?;
 		tokio::spawn(engine.clone().grade(health::Sampler::new(publisher)));
 
 		Ok(engine)
@@ -987,23 +999,51 @@ fn encode_frames(
 	Ok(())
 }
 
-/// Run a source on its own thread until its feed is dropped.
+/// Run a source on its own thread until its feed is dropped, or fail the
+/// source when its thread cannot start.
 fn spawn(driver: Driver) {
+	// Handed over once the thread exists, since a failed spawn drops what it
+	// was given and the driver must stay here to report why.
+	let (handoff, received) = mpsc::sync_channel::<Driver>(1);
 	let name = format!("source-{}", driver.name());
-	let spawned = std::thread::Builder::new()
-		.name(name)
-		.spawn(move || clocked(driver.run()));
-	if let Err(err) = spawned {
-		tracing::error!(%err, "cannot start a source thread");
+	let started = clocked(name, async move || {
+		if let Ok(driver) = received.recv() {
+			driver.run().await;
+		}
+	});
+	match started {
+		Ok(()) => {
+			if let Err(mpsc::SendError(driver)) = handoff.send(driver) {
+				driver.fail("the source thread stopped");
+			}
+		}
+		Err(err) => driver.fail(format!("{err:#}")),
 	}
 }
 
-/// Run `task` on the calling thread, with its own clock and IO.
-fn clocked<F: Future<Output = ()>>(task: F) {
-	match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-		Ok(runtime) => runtime.block_on(task),
-		Err(err) => tracing::error!(%err, "cannot start a runtime"),
+/// Start a thread called `name` that runs `task` with its own clock and IO,
+/// returning why if either cannot start.
+fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::Result<()> {
+	// The thread starts before its runtime is built and handed over, since a
+	// runtime dropped in the async caller, as a refused spawn would, panics.
+	let (handoff, received) = mpsc::sync_channel::<tokio::runtime::Runtime>(1);
+	std::thread::Builder::new()
+		.name(name.clone())
+		.spawn(move || {
+			if let Ok(runtime) = received.recv() {
+				runtime.block_on(task());
+			}
+		})
+		.with_context(|| format!("cannot start the {name} thread"))?;
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.with_context(|| format!("cannot start the {name} runtime"))?;
+	if let Err(mpsc::SendError(runtime)) = handoff.send(runtime) {
+		runtime.shutdown_background();
+		anyhow::bail!("the {name} thread stopped");
 	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -1092,16 +1132,19 @@ mod tests {
 			filters: Vec::new(),
 		});
 
-		let gpu = Gpu::new().await.expect("a GPU");
+		let launch = Launch {
+			gpu: Gpu::new().await.expect("a GPU"),
+			connect: Some((client, fixture.url.clone())),
+			broadcast: "studio".into(),
+			on_demand: false,
+		};
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
-		let connect = Some((client, fixture.url.clone()));
-		let on_demand = false;
 		let loaded = autosave::Loaded {
 			collection,
 			history: History::new(),
 			dropped: 0,
 		};
-		let engine = Engine::start(gpu, autosave, loaded, connect, "studio", on_demand)
+		let engine = Engine::start(launch, autosave, loaded)
 			.await
 			.expect("the studio starts");
 		assert!(
