@@ -913,6 +913,37 @@ pub(crate) mod test {
 		panic!("sources never started");
 	}
 
+	/// Three seconds of 30 fps H.264 with a keyframe each second, its track
+	/// open for as long as the returned producer lives, as a live one is.
+	pub(crate) async fn video() -> (
+		moq_net::broadcast::Producer,
+		(String, VideoConfig),
+		moq_video::encode::Producer,
+	) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
+		config.kind = moq_video::encode::Kind::Software;
+		let rendition = config.probe().await.unwrap();
+		let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
+		let mut producer = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition).unwrap();
+		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
+		let gray = vec![0x80; 64 * 64 * 4];
+		for index in 0..90u64 {
+			if index % 30 == 0 {
+				encoder.cut().unwrap();
+			}
+			let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(64, 64)).unwrap();
+			let frame = moq_video::Frame::new(
+				surface,
+				moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap(),
+			);
+			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+		}
+		let video = catalog.snapshot().video.renditions.into_iter().next().unwrap();
+		(broadcast, video, producer)
+	}
+
 	/// Run `f` on a local task set, as drivers need.
 	pub(crate) async fn local<F: Future>(f: F) -> F::Output {
 		tokio::task::LocalSet::new().run_until(f).await
@@ -921,7 +952,7 @@ pub(crate) mod test {
 
 #[cfg(test)]
 mod tests {
-	use super::test::{context, local, start};
+	use super::test::{context, local, start, video};
 	use super::*;
 	use crate::collection::{Audio, Rgba};
 
@@ -1250,37 +1281,6 @@ mod tests {
 			}
 		})
 		.await;
-	}
-
-	/// Three seconds of 30 fps H.264 with a keyframe each second, its track
-	/// open for as long as the returned producer lives, as a live one is.
-	async fn video() -> (
-		moq_net::broadcast::Producer,
-		(String, VideoConfig),
-		moq_video::encode::Producer,
-	) {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
-		config.kind = moq_video::encode::Kind::Software;
-		let rendition = config.probe().await.unwrap();
-		let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
-		let mut producer = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition).unwrap();
-		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
-		let gray = vec![0x80; 64 * 64 * 4];
-		for index in 0..90u64 {
-			if index % 30 == 0 {
-				encoder.cut().unwrap();
-			}
-			let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(64, 64)).unwrap();
-			let frame = moq_video::Frame::new(
-				surface,
-				moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap(),
-			);
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
-		}
-		let video = catalog.snapshot().video.renditions.into_iter().next().unwrap();
-		(broadcast, video, producer)
 	}
 
 	/// A replay shows the span's pictures, and only those, at its speed: half

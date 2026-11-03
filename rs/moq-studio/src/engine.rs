@@ -1029,5 +1029,16 @@ mod tests {
 		})
 		.await
 		.expect("health grades the program's tracks");
+
+		// The program's recent past saves as a clip, from the groups it holds.
+		let target = engine.target(&crate::replay::Of::Program).expect("the program's past");
+		let clip = kio::clock::timeout(
+			TIMEOUT,
+			crate::replay::save(target, Duration::from_secs(1), engine.autosave.path()),
+		)
+		.await
+		.expect("the clip saves")
+		.expect("a clip");
+		assert_eq!(clip, dir.path().join("show-clip-1.mp4"));
 	}
 }

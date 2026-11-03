@@ -365,7 +365,7 @@ mod tests {
 
 	use super::*;
 	use crate::collection::{Collection, Rgba, Source};
-	use crate::source::test::{context, local, start};
+	use crate::source::test::{context, local, start, video};
 	use crate::source::{Sources, Status};
 
 	/// A studio broadcast and catalog to publish into, and a reader of it.
@@ -573,6 +573,53 @@ mod tests {
 			drop(still);
 			drop(new);
 			assert!(catalog.snapshot().ext.studio.sources.is_empty());
+		})
+		.await;
+	}
+
+	/// A replay source publishes each replay as it shows, so viewers composing
+	/// the scene themselves see it too.
+	#[tokio::test(start_paused = true)]
+	async fn a_replay_is_published_as_it_plays() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (publish, catalog, _consumer) = studio();
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish);
+			let mut collection = Collection::new();
+			collection.sources.insert("replay".into(), Source::Replay);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			let (broadcast, video, _live) = video().await;
+			let target = crate::replay::Target {
+				broadcast: broadcast.consume(),
+				video: Some(video),
+				audio: None,
+				end: moq_net::Timestamp::from_micros(2_500_000).unwrap(),
+			};
+			let (take, copy) = crate::replay::Take::new(&target, std::time::Duration::from_secs(1))
+				.await
+				.unwrap();
+			tokio::task::spawn_local(copy);
+			let feed = sources.get("replay").unwrap();
+			feed.replay(take, 1.0).unwrap();
+			for _ in 0..100 {
+				let snapshot = catalog.snapshot();
+				if snapshot
+					.ext
+					.studio
+					.sources
+					.get("replay")
+					.is_some_and(|listed| !listed.video.renditions.is_empty())
+				{
+					assert_eq!(feed.track(), Some(Status::Live));
+					return;
+				}
+				kio::clock::sleep(std::time::Duration::from_millis(10)).await;
+			}
+			panic!("the replay was never published: {:?}", feed.track());
 		})
 		.await;
 	}

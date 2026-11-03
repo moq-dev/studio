@@ -87,7 +87,6 @@ repository.
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
 - [Relay failover](/quest/m0/failover.md) - the same epoch on two relays, so a relay failure does not drop the stream
-- [Instant replay and DVR](/quest/m0/replay.md) - replays and clips from held groups, and viewer scrubbing through the archive
 - [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
 - [Animation and transitions](/quest/m0/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
 - [Video effects](/quest/m0/effects.md) - a curated effect set with CSS meanings, and ML effects baked into their source
