@@ -959,10 +959,11 @@ pub(crate) mod test {
 	///
 	/// Decoding and probing an encoder run on moq-video's own threads off Apple
 	/// platforms, which tokio cannot see: a runtime left idle while one works
-	/// advances a paused clock to its next timer, past whatever the test was
-	/// waiting for. Keeping a timer due now holds the clock where the test put
-	/// it, so time moves only by `tokio::time::advance`. A wait that never ends
-	/// is a hang nextest kills.
+	/// advances a paused clock to its earliest timer, which may lie past whatever
+	/// the test was waiting for. Keeping a timer due now holds the clock where it
+	/// is. Move it with [`until_time`], never `tokio::time::advance`, whose yield
+	/// leaves the runtime idle with only later timers pending. A wait that never
+	/// ends is a hang nextest kills.
 	pub(crate) async fn until<T>(mut f: impl FnMut() -> Option<T>) -> T {
 		loop {
 			if let Some(value) = f() {
@@ -975,6 +976,12 @@ pub(crate) mod test {
 		}
 	}
 
+	/// Move a paused clock to `at`, and no further: the timer due then is the
+	/// earliest pending while the runtime waits for it. See [`until`].
+	pub(crate) async fn until_time(at: Instant) {
+		kio::clock::sleep_until(at).await;
+	}
+
 	/// Run `f` on a local task set, as drivers need.
 	pub(crate) async fn local<F: Future>(f: F) -> F::Output {
 		tokio::task::LocalSet::new().run_until(f).await
@@ -983,7 +990,7 @@ pub(crate) mod test {
 
 #[cfg(test)]
 mod tests {
-	use super::test::{context, local, start, until, video};
+	use super::test::{context, local, start, until, until_time, video};
 	use super::*;
 	use crate::collection::{Audio, Rgba};
 
@@ -1359,13 +1366,14 @@ mod tests {
 
 			// From the start, not from the keyframe of its group at 1 s, each
 			// picture `t / speed` into the replay, and none sooner. The clock
-			// moves only to each picture's moment.
+			// moves only to each picture's moment, which the timer wheel rounds
+			// up to its millisecond.
 			let start = moq_net::Timestamp::from_micros(1_500_000).unwrap();
 			for index in 45..75u64 {
 				let timestamp = moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap();
 				let due = begin + (Duration::from(timestamp) - Duration::from(start)).div_f32(speed);
 				assert!(feed.take().is_none(), "a picture before {timestamp:?} is due");
-				tokio::time::advance(due.saturating_duration_since(kio::clock::now())).await;
+				until_time(due).await;
 				let shown = until(|| match feed.take() {
 					Some(Picture::Frame(frame)) => Some(frame.timestamp),
 					Some(Picture::Rgba { .. }) => panic!("cleared before {timestamp:?}"),
@@ -1379,9 +1387,9 @@ mod tests {
 			// played over two.
 			assert!(feed.take().is_none(), "the picture at the end shows for no time");
 			let end = begin + Duration::from_secs(2);
-			tokio::time::advance(end.saturating_duration_since(kio::clock::now()) - Duration::from_micros(1)).await;
+			until_time(end - Duration::from_millis(1)).await;
 			assert!(feed.take().is_none(), "cleared before the end");
-			tokio::time::advance(Duration::from_micros(1)).await;
+			until_time(end).await;
 			until(|| matches!(feed.take(), Some(Picture::Rgba { .. })).then_some(())).await;
 			assert_eq!(feed.status(), Status::Live, "ready for the next replay");
 		})
