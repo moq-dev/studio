@@ -48,13 +48,13 @@ pub struct Filters {
 }
 
 impl Clip {
-	/// A copy of `items` of `collection`, with what they show. Relative image
-	/// paths are resolved against `dir`, the absolute directory of the
-	/// collection's scene file, so they name the same file wherever the clip is
-	/// pasted.
+	/// A copy of `items` of `collection`, with what they show and what their
+	/// filters read. Relative image and LUT paths are resolved against `dir`,
+	/// the absolute directory of the collection's scene file, so they name the
+	/// same file wherever the clip is pasted.
 	pub fn items(collection: &Collection, items: Vec<Item>, dir: &Path) -> Self {
 		let mut names: Vec<String> = items.iter().map(|item| item.source.clone()).collect();
-		names.extend(items.iter().map(|item| collection.capture(&item.source).to_string()));
+		names.extend(items.iter().flat_map(|item| &item.filters).filter_map(read));
 
 		let mut clip = Items {
 			items,
@@ -62,19 +62,25 @@ impl Clip {
 			audio: BTreeMap::new(),
 			video: BTreeMap::new(),
 		};
-		for name in names {
+		// Each source brings what it clones and what its own filters read.
+		while let Some(name) = names.pop() {
 			let Some(source) = collection.sources.get(&name) else {
 				continue;
 			};
-			let source = match source {
-				Source::Image { path } => Source::Image { path: dir.join(path) },
-				source => source.clone(),
-			};
+			if clip.sources.contains_key(&name) {
+				continue;
+			}
+			let mut source = source.clone();
+			if let Some(path) = source.path_mut() {
+				*path = dir.join(&path);
+			}
 			clip.sources.insert(name.clone(), source);
+			names.push(collection.capture(&name).to_string());
 			if let Some(audio) = collection.audio.get(&name) {
 				clip.audio.insert(name.clone(), *audio);
 			}
 			if let Some(video) = collection.video.get(&name) {
+				names.extend(video.filters.iter().filter_map(read));
 				clip.video.insert(name, video.clone());
 			}
 		}
@@ -109,6 +115,11 @@ impl Clip {
 	}
 }
 
+/// The source `filter` reads, if any.
+fn read(filter: &Filter) -> Option<String> {
+	filter.source().map(str::to_string)
+}
+
 impl Collection {
 	/// `base`, or `base 2`, `base 3`, and so on: the first no source is named.
 	pub fn unused_name(&self, base: &str) -> String {
@@ -126,50 +137,72 @@ impl Draft {
 	/// A source the collection has under the same name and definition is the
 	/// one shown, so items pasted within a collection are linked to the ones
 	/// copied. A source whose name is taken by a different one is added under
-	/// a new name, and an added source brings its audio and video settings. An
-	/// image under `dir` is named relative to it, as the scene file would.
+	/// a new name, which clones and filters naming it follow, and an added
+	/// source brings its audio and video settings. An image or LUT under `dir`
+	/// is named relative to it, as the scene file would.
 	pub fn paste(&mut self, layer: &Layer, items: &Items, dir: &Path) -> Result<(), Error> {
 		let mut names = BTreeMap::new();
+		let mut added = Vec::new();
 		// What clones clone first, so each clone names what it was renamed to.
 		let (clones, origins): (Vec<_>, Vec<_>) = items
 			.sources
 			.iter()
 			.partition(|(_, source)| matches!(source, Source::Clone { .. }));
 		for (name, source) in origins.into_iter().chain(clones) {
-			let source = match source {
+			let mut source = match source {
 				Source::Clone { source } => Source::Clone {
 					source: names.get(source).cloned().unwrap_or_else(|| source.clone()),
 				},
 				source => source.clone(),
 			};
-			// An image is the same source if it names the same file, however
+			// A file is the same source if it names the same file, however
 			// either spells the path.
-			let resolve = |source: &Source| match source {
-				Source::Image { path } => Source::Image { path: dir.join(path) },
-				source => source.clone(),
+			let resolve = |source: &Source| {
+				let mut source = source.clone();
+				if let Some(path) = source.path_mut() {
+					*path = dir.join(&path);
+				}
+				source
 			};
 			let existing = self.collection().sources.get(name).map(resolve);
 			if existing.as_ref() == Some(&resolve(&source)) {
 				names.insert(name.clone(), name.clone());
 				continue;
 			}
-			let source = match source {
-				Source::Image { path } => Source::Image {
-					path: path.strip_prefix(dir).unwrap_or(&path).to_path_buf(),
-				},
-				source => source,
-			};
+			if let Some(path) = source.path_mut() {
+				*path = path.strip_prefix(dir).unwrap_or(path).to_path_buf();
+			}
 			let renamed = self.collection().unused_name(name);
 			self.set_source(&renamed, Some(source))?;
+			names.insert(name.clone(), renamed.clone());
+			added.push((name, renamed));
+		}
+
+		// Filters name sources by their pasted names, once every one is known.
+		let rename = |filters: &[Filter]| -> Vec<Filter> {
+			let mut filters = filters.to_vec();
+			for name in filters.iter_mut().filter_map(Filter::source_mut) {
+				if let Some(renamed) = names.get(name) {
+					*name = renamed.clone();
+				}
+			}
+			filters
+		};
+		for (name, renamed) in added {
 			if let Some(audio) = items.audio.get(name) {
 				self.set_audio(&renamed, Some(*audio))?;
 			}
 			if let Some(video) = items.video.get(name) {
-				self.set_video(&renamed, Some(video.clone()))?;
+				let filters = rename(&video.filters);
+				self.set_video(
+					&renamed,
+					Some(Video {
+						filters,
+						..video.clone()
+					}),
+				)?;
 			}
-			names.insert(name.clone(), renamed);
 		}
-
 		for item in &items.items {
 			let source = names.get(&item.source).cloned().unwrap_or_else(|| item.source.clone());
 			let index = self
@@ -177,7 +210,16 @@ impl Draft {
 				.items(layer)
 				.ok_or_else(|| Error::Conflict(format!("there is no {layer}")))?
 				.len();
-			self.insert_item(layer, index, Item { source, ..item.clone() })?;
+			let filters = rename(&item.filters);
+			self.insert_item(
+				layer,
+				index,
+				Item {
+					source,
+					filters,
+					..item.clone()
+				},
+			)?;
 		}
 		Ok(())
 	}
@@ -186,7 +228,7 @@ impl Draft {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::collection::{Rect, Rgba};
+	use crate::collection::{MaskMode, Rect, Rgba};
 
 	fn color(rgba: [u8; 4]) -> Source {
 		Source::Color { color: Rgba(rgba) }
@@ -203,6 +245,7 @@ mod tests {
 			"cam faded".into(),
 			Video {
 				filters: vec![Filter::Opacity { amount: 0.5 }],
+				..Default::default()
 			},
 		);
 		collection.scenes[0]
@@ -301,6 +344,55 @@ mod tests {
 				path: "/shows/one/logo.png".into()
 			}
 		);
+	}
+
+	/// Copied items bring the sources their filters read, and a renamed one is
+	/// renamed in the filters too.
+	#[test]
+	fn filters_bring_what_they_read() {
+		let mut collection = collection();
+		collection.sources.insert(
+			"matte".into(),
+			Source::Image {
+				path: "matte.png".into(),
+			},
+		);
+		collection.sources.insert(
+			"grade".into(),
+			Source::Lut {
+				path: "grade.cube".into(),
+			},
+		);
+		let mask = |source: &str| Filter::Mask {
+			source: source.into(),
+			mode: MaskMode::Luminance,
+		};
+		collection.scenes[0].items[0].filters = vec![mask("matte")];
+		collection
+			.video
+			.get_mut("cam faded")
+			.unwrap()
+			.filters
+			.push(Filter::Lut {
+				source: "grade".into(),
+				amount: 0.5,
+			});
+		collection.validate().unwrap();
+		let text = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR))
+			.to_toml()
+			.unwrap();
+
+		let mut other = Collection::new();
+		other.sources.insert("matte".into(), color([0, 255, 0, 255]));
+		let pasted = paste(&other, &Layer::Top, &text, "/shows/two");
+		assert_eq!(pasted.top[0].filters, [mask("matte 2")]);
+		assert_eq!(
+			pasted.sources["grade"],
+			Source::Lut {
+				path: "/shows/one/grade.cube".into()
+			}
+		);
+		assert_eq!(pasted.video["cam faded"], collection.video["cam faded"]);
 	}
 
 	#[test]

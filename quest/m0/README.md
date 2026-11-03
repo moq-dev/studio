@@ -94,7 +94,7 @@ repository.
 - [Instant replay and DVR](/quest/m0/replay.md) - replays and clips from held groups, and viewer scrubbing through the archive
 - [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
 - [Animation and transitions](/quest/m0/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
-- [Video effects](/quest/m0/effects.md) - a curated effect set with CSS meanings, and ML effects baked into their source
+- [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [Guests](/quest/m0/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
