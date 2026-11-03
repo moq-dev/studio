@@ -6,7 +6,9 @@
 //! under its own `<identity>/`, and hands it to the join page in a link's
 //! fragment, which no server logs. The guest publishes moq-room's
 //! `<identity>/camera.hang` and `<identity>/screen.hang`, and the studio adds
-//! each as a [`Source::Broadcast`] when it is announced.
+//! each as a muted [`Source::Broadcast`] when it is announced. Only the room key
+//! mints those tokens, so guests can make the studio hold at most two sources
+//! per link it signed.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -171,6 +173,9 @@ impl Room {
 			!name.contains(['/', '\\']),
 			"a guest's name is one path segment, without `/` or `\\`"
 		);
+		// The room's announcements hide a path segment starting with `.`, so the
+		// studio would never see this guest join.
+		anyhow::ensure!(!name.starts_with('.'), "a guest's name cannot start with `.`");
 		let (token, expires) = self.sign(name)?;
 		let mut link = self.page.clone();
 		let fragment = url::form_urlencoded::Serializer::new(String::new())
@@ -209,9 +214,8 @@ impl Room {
 	/// Record that the broadcast at `path` in the room went online or offline,
 	/// returning the source to add for it, if the collection lacks one.
 	///
-	/// Only guests the host invited this session, or whose broadcast is already
-	/// a source, are tracked: anyone else with a token for the room cannot make
-	/// the studio hold anything.
+	/// Every guest is tracked, including one invited before this session whose
+	/// link still works, so a restart finds the guests already connected.
 	fn observe(&self, path: &Path, online: bool, collection: &Collection) -> Option<(String, Source)> {
 		let parsed = moq_room::parse(path)?;
 		let source = self.path.join(path).ok()?.to_string();
@@ -222,14 +226,7 @@ impl Room {
 
 		let identity = parsed.identity.to_string();
 		let mut participants = self.participants.lock().unwrap();
-		let participant = match participants.get_mut(&identity) {
-			Some(participant) => participant,
-			None if existing => participants.entry(identity.clone()).or_default(),
-			None => {
-				tracing::debug!(%path, "ignoring a broadcast from someone the studio did not invite");
-				return None;
-			}
-		};
+		let participant = participants.entry(identity.clone()).or_default();
 		match parsed.kind {
 			Kind::Camera => participant.camera = online,
 			Kind::Screen => participant.screen = online,
@@ -297,10 +294,22 @@ pub async fn run(engine: Arc<Engine>, origin: moq_net::origin::Consumer) {
 		let mut state = engine.state.lock().unwrap();
 		if let Some((name, source)) = room.observe(&event.path, event.broadcast.is_some(), &state.collection) {
 			tracing::info!(source = %name, identity = %event.identity, "a guest joined");
-			state.edit().sources.insert(name, source);
+			admit(state.edit(), name, source);
 		}
 	}
 	tracing::warn!("the room's announcements ended");
+}
+
+/// Add a guest's broadcast to `collection` as the source `name`, muted: it is in
+/// no scene, so the guest reaches the program only once the host places or
+/// unmutes them.
+fn admit(collection: &mut Collection, name: String, source: Source) {
+	let muted = moq_scene::Audio {
+		muted: true,
+		..Default::default()
+	};
+	collection.audio.insert(name.clone(), muted);
+	collection.sources.insert(name, source);
 }
 
 #[cfg(test)]
@@ -455,22 +464,19 @@ mod tests {
 	#[test]
 	fn refuses_a_name_that_is_not_one_literal_segment() {
 		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
-		for name in ["", "  ", "a/b", r"a\/b", "*", "al*ce"] {
+		for name in ["", "  ", "a/b", r"a\/b", "*", "al*ce", ".alice"] {
 			assert!(room.invite(name).is_err(), "`{name}` was accepted");
 		}
 		assert!(room.participants().is_empty());
 	}
 
 	#[test]
-	fn an_invited_guest_becomes_a_source_once_and_a_stranger_never_does() {
+	fn a_guest_becomes_a_muted_source_once() {
 		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
-		room.invite("alice").unwrap();
 		let mut collection = Collection::new();
 		let path = |text: &str| Path::new(text).unwrap();
 
-		assert_eq!(room.observe(&path("mallory/camera.hang"), true, &collection), None);
-		assert!(!room.participants().contains_key("mallory"));
-
+		// Invited before this session, so the roster has no link for them.
 		let (name, source) = room.observe(&path("alice/camera.hang"), true, &collection).unwrap();
 		assert_eq!(name, "alice");
 		assert_eq!(
@@ -479,8 +485,16 @@ mod tests {
 				path: "guests/alice/camera.hang".into()
 			}
 		);
-		collection.sources.insert(name, source);
-		assert!(room.participants()["alice"].camera);
+		admit(&mut collection, name, source);
+		assert!(collection.audio["alice"].muted);
+		assert_eq!(
+			room.participants()["alice"],
+			Participant {
+				invite: None,
+				camera: true,
+				screen: false,
+			}
+		);
 
 		// The same broadcast again, after a restart or a reconnect, is the same source.
 		assert_eq!(room.observe(&path("alice/camera.hang"), true, &collection), None);
@@ -580,7 +594,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_guest_already_in_the_collection_is_tracked_without_an_invite() {
+	fn a_guest_already_in_the_collection_is_tracked_without_being_added() {
 		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
 		let mut collection = Collection::new();
 		collection.sources.insert(

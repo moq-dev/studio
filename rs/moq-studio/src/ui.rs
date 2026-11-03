@@ -553,7 +553,7 @@ impl Panels {
 						if ui
 							.small_button("Remove from scenes")
 							.on_hover_text(
-								"Take their camera and screen out of every scene. They stay connected until their link expires.",
+								"Take their camera and screen out of every scene and mute them. They stay connected until their link expires.",
 							)
 							.clicked()
 						{
@@ -578,13 +578,18 @@ impl Panels {
 			let mut state = engine.state.lock().unwrap();
 			let sources = room.sources_of(&state.collection, &name);
 			let shown = |scene: &Scene| scene.items.iter().any(|item| sources.contains(&item.source));
-			if state.collection.scenes.iter().any(shown) {
-				for scene in &mut state.edit().scenes {
+			let audible = |source: &String| state.collection.audio.get(source).is_none_or(|audio| !audio.muted);
+			if state.collection.scenes.iter().any(shown) || sources.iter().any(audible) {
+				let collection = state.edit();
+				for scene in &mut collection.scenes {
 					scene.items.retain(|item| !sources.contains(&item.source));
+				}
+				for source in sources {
+					collection.audio.entry(source).or_default().muted = true;
 				}
 			}
 			drop(state);
-			self.report(Ok(format!("removed {name} from every scene")));
+			self.report(Ok(format!("removed {name} from every scene and muted them")));
 		}
 	}
 
