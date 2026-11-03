@@ -48,15 +48,9 @@ pub(crate) async fn run(
 	let end = match commands.send(&Command::Open(open), &[]).map(|()| writer(commands)) {
 		Ok(Ok(commands)) => {
 			page.state.lock().unwrap().commands = Some(commands.clone());
-			let reader = {
-				let (helper, page, picture, status) = (helper.clone(), page.clone(), picture.clone(), status.clone());
-				tokio::task::spawn_blocking(move || {
-					deliver(&helper, &events, &commands, &page, &picture, sound, &status)
-				})
-			};
-			let end = reader.await;
+			let end = reader(helper, events, commands, page, picture, sound, status).await;
 			page.state.lock().unwrap().commands = None;
-			end.unwrap_or_else(|err| End::Failed(format!("the page's reader panicked: {err}")))
+			end
 		}
 		Ok(Err(err)) => End::Failed(format!("cannot start the page's writer: {err}")),
 		Err(err) => closed(err),
@@ -80,6 +74,7 @@ pub(crate) async fn run(
 }
 
 /// Why a page stopped.
+#[derive(Clone)]
 enum End {
 	/// The helper closed the socket: it exited, or crashed.
 	Closed,
@@ -152,6 +147,43 @@ fn writer(channel: Channel) -> std::io::Result<mpsc::SyncSender<Command>> {
 			}
 		})?;
 	Ok(sender)
+}
+
+/// Run [`deliver`] on a thread of its own, since it blocks on the socket, and
+/// wait for why it ended. A thread that cannot start, or that stops without
+/// saying why, fails the page with the reason rather than leaving it live.
+async fn reader(
+	helper: &Helper,
+	events: Channel,
+	commands: mpsc::SyncSender<Command>,
+	page: &Page,
+	picture: &Mailbox,
+	sound: Option<Sound>,
+	status: &kio::Producer<Status>,
+) -> End {
+	let done = kio::Producer::new(None);
+	let ended = done.consume();
+	let spawned = {
+		let (helper, page, picture, status) = (helper.clone(), page.clone(), picture.clone(), status.clone());
+		std::thread::Builder::new()
+			.name("browser-events".into())
+			.spawn(move || {
+				let end = deliver(&helper, &events, &commands, &page, &picture, sound, &status);
+				if let Ok(mut done) = done.write() {
+					*done = Some(end);
+				}
+			})
+	};
+	if let Err(err) = spawned {
+		return End::Failed(format!("cannot start the page's reader: {err}"));
+	}
+	let end = ended
+		.wait(|end: &kio::Ref<'_, Option<End>>| match end.as_ref() {
+			Some(end) => std::task::Poll::Ready(end.clone()),
+			None => std::task::Poll::Pending,
+		})
+		.await;
+	end.unwrap_or_else(|_| End::Failed("the page's reader stopped".into()))
 }
 
 /// Start a helper, handing it one end of a socket as its stdin.

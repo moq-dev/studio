@@ -86,7 +86,12 @@ fn serve() -> Result<(), String> {
 		writer: Mutex::new(writer),
 		painted: Mutex::new(painted),
 	});
+	// The studio shows why, rather than only that the helper exited.
+	page(&shared, reader, painted_tx).inspect_err(|reason| shared.fail(reason.clone()))
+}
 
+/// Open the page `shared` describes and run CEF until it closes.
+fn page(shared: &Arc<Shared>, reader: Channel, painted_tx: mpsc::Sender<()>) -> Result<(), String> {
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 	let args = args::Args::new();
 	let mut app = HelperApp::new(shared.open.render_node.clone());
@@ -140,7 +145,7 @@ fn serve() -> Result<(), String> {
 	std::thread::Builder::new()
 		.name("browser-commands".into())
 		.spawn(move || commands(reader, painted_tx))
-		.map_err(|err| format!("thread: {err}"))?;
+		.map_err(|err| format!("cannot start the helper's command thread: {err}"))?;
 
 	run_message_loop();
 	BROWSER.with_borrow_mut(|slot| *slot = None);
