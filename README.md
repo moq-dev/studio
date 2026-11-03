@@ -240,7 +240,8 @@ as the gap it was.
 
 **Save clip** writes the same seconds, in real time, beside the scene file as a
 regular MP4: `show-clip-1.mp4` for `show.toml`, then `show-clip-2.mp4`, and so
-on. The panel says where once it is written, shortly after the click.
+on. Nothing is re-encoded, so a clip starts at the keyframe before those
+seconds, up to one keyframe interval earlier. The panel says where once it is written, shortly after the click.
 
 Nothing records in the background for this. The program and each source's
 track keep their last 30 seconds for late viewers anyway, and a replay copies
