@@ -228,9 +228,9 @@ color space moves to a new track, which its catalog entry follows. Images and
 colors publish once, as the image file and as a one-pixel PNG. Removing or
 editing a source ends its track. A track carries the plain capture, before any
 filter, and a clone publishes none, since it shows its source's capture.
-Microphones and system audio do not publish tracks of their own yet, nor do
-browser sources, whose mostly transparent pages H.264 would encode over black.
-A broadcast source is already its publisher's.
+Microphones and system audio do not publish tracks of their own yet. A browser
+source publishes none, so viewers see its page only in the program, and a
+broadcast source is already its publisher's.
 
 Every captured source opens an encode session as it starts, and consumer GPUs
 allow only a few hardware sessions at once. When the program encodes on

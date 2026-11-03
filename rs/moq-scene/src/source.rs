@@ -677,8 +677,9 @@ fn open(name: &str, source: &Source, context: &Context, framerate: u32) -> (Feed
 /// layout rather than encoded again.
 ///
 /// Microphones and system audio do not yet: moq-audio offers no capture that
-/// feeds both the program bus and an encoder. Nor do web pages: an overlay is
-/// mostly transparent, and H.264 would encode it over black.
+/// feeds both the program bus and an encoder. Nor do web pages, which viewers
+/// see only in the program: H.264 would encode a transparent overlay over
+/// black.
 fn publishes(source: &Source) -> bool {
 	source.has_video()
 		&& !matches!(
