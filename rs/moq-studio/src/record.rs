@@ -7,7 +7,7 @@
 //! still leaves a playable file, and becomes a regular MP4 when the recording
 //! stops.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -256,8 +256,11 @@ impl Run {
 			() = stopped(&mut asked) => return Ok(()),
 		};
 		let mut listed = BTreeSet::new();
-		let mut writing = BTreeSet::new();
-		// Sources whose file ended while they were still listed last we looked.
+		// Each source with a file being written, and whether its listing has
+		// gone since that file started.
+		let mut writing = BTreeMap::new();
+		// Sources whose file ended while their listing stayed, such as on a
+		// failure, held back until they leave the catalog.
 		let mut ended = BTreeSet::new();
 		loop {
 			tokio::select! {
@@ -272,13 +275,15 @@ impl Run {
 						.map(|(name, _)| name)
 						.collect();
 					ended.retain(|name| listed.contains(name));
+					for (name, gone) in &mut writing {
+						*gone |= !listed.contains(name);
+					}
 				}
 				joined = writers.join_next() => match joined.context("no writer left")?? {
-					// Held back only while still listed: one already gone may be
-					// listed again later, and is then recorded afresh.
+					// A listing that went away and came back is recorded afresh.
 					Some(name) => {
-						writing.remove(&name);
-						if listed.contains(&name) {
+						let gone = writing.remove(&name).unwrap_or_default();
+						if !gone && listed.contains(&name) {
 							ended.insert(name);
 						}
 					}
@@ -292,12 +297,12 @@ impl Run {
 			}
 			let start: Vec<String> = listed
 				.iter()
-				.filter(|name| !writing.contains(*name) && !ended.contains(*name))
+				.filter(|name| !writing.contains_key(*name) && !ended.contains(*name))
 				.cloned()
 				.collect();
 			for name in start {
 				self.source_file(&name, writers);
-				writing.insert(name);
+				writing.insert(name, false);
 			}
 		}
 	}
