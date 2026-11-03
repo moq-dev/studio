@@ -21,9 +21,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   same publisher epoch, so a viewer linked to both resumes mid-group from it
   when the first fails. Both relays must speak the one `--connect-version`,
   which must carry publisher epochs (`moq-lite-07-wip` today, which a relay
-  accepts only when configured to), or the studio refuses to start. Its
-  credential rides its URL's `?jwt=`; `--connect-token` goes to the first
-  relay only.
+  accepts only when configured to), or the studio refuses to start; it also
+  refuses a fixed `--connect-bind` port, since each relay's connection binds
+  its own. Its credential rides its URL's `?jwt=`; `--connect-token` goes to
+  the first relay only.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
   On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
@@ -252,7 +253,9 @@ it is unhealthy. Below that it shows:
 - **Watching**: the sessions subscribed to the broadcast, from the relays'
   `.stats` broadcasts. A relay shares those only with a connection allowed to
   read them, so most show "unknown". In a cluster, a relay forwarding the
-  stream to another counts as one session.
+  stream to another counts as one session. Two relays whose stats use the
+  same node name publish them at the same path, so only the first relay's
+  count.
 - **Tracks**: each track's bitrate and frame rate, and, from viewers that
   report, the lowest bitrate any received, its worst grade, and the latency
   from the program clock to the slowest viewer. Latency compares the two

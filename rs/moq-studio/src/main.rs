@@ -99,6 +99,12 @@ impl Config {
 			"--failover needs a --connect-version with publisher epochs (moq-lite-07 or newer), not {version}, \
 			 or a viewer moving between relays restarts the stream rather than resuming it"
 		);
+		// Each relay's client binds its own socket, so a fixed port would be
+		// bound twice.
+		anyhow::ensure!(
+			self.client.bind.is_none_or(|bind| bind.port() == 0),
+			"--failover cannot share a fixed --connect-bind port between the two relays; leave the port 0"
+		);
 		Ok(())
 	}
 }
@@ -187,20 +193,22 @@ mod tests {
 	/// than restarts.
 	#[test]
 	fn failover_needs_one_version_with_epochs() {
-		let check = |versions: &[&str]| {
+		let check = |extra: &[&str]| {
 			let mut args = vec!["show.toml", "--connect", "https://a/", "--failover", "https://b/"];
-			for version in versions {
-				args.extend(["--connect-version", version]);
-			}
+			args.extend(extra);
 			let args: Vec<_> = args.into_iter().map(std::ffi::OsStr::new).collect();
 			Config::parse_from(&args).unwrap().check_failover()
 		};
-		check(&["moq-lite-07-wip"]).expect("one version with epochs");
+		let lite07 = ["--connect-version", "moq-lite-07-wip"];
+		check(&lite07).expect("one version with epochs");
+		check(&[&lite07[..], &["--connect-bind", "127.0.0.1:0"]].concat()).expect("an ephemeral port");
 		for refused in [
 			&[][..],
-			&["moq-lite-06"],
-			&["moq-transport-22"],
-			&["moq-lite-07-wip", "moq-lite-06"],
+			&["--connect-version", "moq-lite-06"],
+			&["--connect-version", "moq-transport-22"],
+			&[&lite07[..], &["--connect-version", "moq-lite-06"]].concat(),
+			// Each relay binds its own socket.
+			&[&lite07[..], &["--connect-bind", "127.0.0.1:4444"]].concat(),
 		] {
 			assert!(check(refused).is_err(), "{refused:?} was accepted");
 		}
