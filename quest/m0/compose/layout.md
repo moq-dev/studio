@@ -22,6 +22,11 @@ what it settles on. Until then sources are listed provisionally as
 `dev.moq.studio.sources.<name>` in the studio catalog, each a nested hang
 catalog (decided 2026-11-02, maintainer; `rs/moq-scene/src/publish.rs`).
 
+Clones and filters travel in the layout, not as tracks: a source's track is
+its capture before any filter, and a clone publishes none, so the layout names
+the source a clone shows and the filters each source and item applies
+(decided 2026-11-02, maintainer).
+
 ## Required
 
 - [Audio source tracks](/quest/m0/compose/sources.md) - the audio tracks a layout names

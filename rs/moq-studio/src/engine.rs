@@ -9,7 +9,8 @@
 //! - **encode** waits for each program copy and encodes it.
 //! - **source-***: one per running source, since a capture stream may not
 //!   leave the thread that opened it.
-//! - **autosave** writes the collection to its scene file once edits to it settle.
+//! - **autosave** writes the collection and its history to their files once
+//!   edits to them settle.
 //! - The UI runs on the main thread and edits [`State`] under its lock.
 
 use std::path::Path;
@@ -21,7 +22,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use kio::clock::Instant;
 use moq_scene::source::{self, Driver, Sources};
-use moq_scene::{Collection, Compositor, wgpu};
+use moq_scene::{Collection, Compositor, Draft, History, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
 
 use crate::autosave::{self, Autosave};
@@ -67,7 +68,13 @@ impl Gpu {
 
 /// What the UI edits and the program clock draws.
 pub struct State {
-	pub collection: Collection,
+	/// Changed only through [`commit`](Self::commit) and the history, so every
+	/// edit can be undone.
+	collection: Collection,
+	history: History,
+	/// History entries the last load dropped, since they no longer applied to
+	/// the scene file.
+	pub dropped: usize,
 	pub sources: Sources,
 	pub compositor: Compositor,
 	/// Edited since the sources were last synced.
@@ -77,16 +84,64 @@ pub struct State {
 }
 
 impl State {
-	/// The collection, for an edit: the sources follow it on the next frame,
-	/// and the scene file shortly after.
-	pub fn edit(&mut self) -> &mut Collection {
-		self.stale = true;
-		self.edits.record();
-		&mut self.collection
+	pub fn collection(&self) -> &Collection {
+		&self.collection
 	}
 
-	/// Swap in a collection reloaded from the scene file.
-	fn replace(&mut self, collection: Collection) -> anyhow::Result<()> {
+	pub fn history(&self) -> &History {
+		&self.history
+	}
+
+	/// Apply `draft` and record it in the history; the sources follow it on
+	/// the next frame, and the files shortly after. `gesture` names the
+	/// interaction that made it, so the steps of one drag undo together.
+	pub fn commit(&mut self, draft: Draft, gesture: Option<u64>) -> anyhow::Result<()> {
+		let edit = draft.finish()?;
+		self.collection.apply(&edit)?;
+		self.history.record(edit, gesture);
+		self.edited();
+		Ok(())
+	}
+
+	/// Undo the newest edit, returning its label, or `None` with none left.
+	pub fn undo(&mut self) -> anyhow::Result<Option<String>> {
+		let label = self.history.undo(&mut self.collection)?.map(|edit| edit.label.clone());
+		if label.is_some() {
+			self.edited();
+		}
+		Ok(label)
+	}
+
+	/// Redo the oldest undone edit, returning its label, or `None` with none left.
+	pub fn redo(&mut self) -> anyhow::Result<Option<String>> {
+		let label = self.history.redo(&mut self.collection)?.map(|edit| edit.label.clone());
+		if label.is_some() {
+			self.edited();
+		}
+		Ok(label)
+	}
+
+	/// Undo or redo to just after the history's `position`th entry.
+	pub fn seek(&mut self, position: usize) -> anyhow::Result<()> {
+		self.history.seek(&mut self.collection, position)?;
+		self.edited();
+		Ok(())
+	}
+
+	/// After any change to the collection or its history, which the autosave
+	/// writes once they settle.
+	fn edited(&mut self) {
+		self.stale = true;
+		self.edits.record();
+	}
+
+	/// Swap in a collection and history reloaded from their files.
+	fn replace(&mut self, loaded: autosave::Loaded) -> anyhow::Result<()> {
+		let autosave::Loaded {
+			collection,
+			history,
+			dropped,
+		} = loaded;
 		anyhow::ensure!(
 			collection.canvas == self.collection.canvas,
 			"the canvas changed; restart the studio to use {}x{} at {} fps",
@@ -97,6 +152,8 @@ impl State {
 		// A scene in preview or on program that the file no longer has draws
 		// black until another is picked.
 		self.collection = collection;
+		self.history = history;
+		self.dropped = dropped;
 		self.stale = true;
 		Ok(())
 	}
@@ -179,8 +236,8 @@ const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_k
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
 impl Engine {
-	/// Open `collection` on `gpu`, start the program clock, and save the
-	/// collection to `autosave`'s file as it changes.
+	/// Open the `loaded` collection and history on `gpu`, start the program
+	/// clock, and save both to `autosave`'s files as they change.
 	/// With `connect`, publish the program at `broadcast` on that relay,
 	/// encoding its video only while someone watches when `on_demand`.
 	///
@@ -188,7 +245,7 @@ impl Engine {
 	pub async fn start(
 		gpu: Gpu,
 		autosave: Autosave,
-		collection: Collection,
+		loaded: autosave::Loaded,
 		connect: Option<(moq_tokio::Client, url::Url)>,
 		broadcast: &str,
 		on_demand: bool,
@@ -196,6 +253,11 @@ impl Engine {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
 		let sources = subscribe.consume();
+		let autosave::Loaded {
+			collection,
+			history,
+			dropped,
+		} = loaded;
 		let canvas = collection.canvas;
 
 		let (output, origin, publish) = match connect {
@@ -206,7 +268,9 @@ impl Engine {
 			None => (None, Some(subscribe), None),
 		};
 
-		let dir = autosave.path().parent().map(Path::to_path_buf).unwrap_or_default();
+		// Absolute, so a copied image names the same file in another collection.
+		let dir = autosave.path().parent().filter(|dir| !dir.as_os_str().is_empty());
+		let dir = std::path::absolute(dir.unwrap_or(Path::new(".")))?;
 		let sources = Sources::new(source::Context {
 			bus: bus.clone(),
 			origin: sources,
@@ -221,6 +285,8 @@ impl Engine {
 		let engine = Arc::new(Self {
 			state: Mutex::new(State {
 				collection,
+				history,
+				dropped,
 				sources,
 				compositor,
 				stale: true,
@@ -287,19 +353,22 @@ impl Engine {
 		Ok(engine)
 	}
 
-	/// Write the collection to the scene file unless it already holds it.
+	/// Write the collection and its history to their files unless they
+	/// already hold them.
 	pub fn save(&self) -> anyhow::Result<()> {
 		self.autosave.save(|| self.serialize())
 	}
 
-	fn serialize(&self) -> anyhow::Result<String> {
-		Ok(self.state.lock().unwrap().collection.to_toml()?)
+	/// Both under one lock, so the history describes the collection beside it.
+	fn serialize(&self) -> anyhow::Result<autosave::Text> {
+		let state = self.state.lock().unwrap();
+		autosave::Text::new(&state.collection, &state.history)
 	}
 
-	/// Replace the collection with what the scene file holds now.
+	/// Replace the collection and its history with what the files hold now.
 	pub fn reload(&self) -> anyhow::Result<()> {
 		self.autosave
-			.reload(|collection| self.state.lock().unwrap().replace(collection))
+			.reload(|loaded| self.state.lock().unwrap().replace(loaded))
 	}
 
 	/// Grade the stream's health every interval, for the Health panel.
@@ -364,7 +433,7 @@ impl Engine {
 		epoch: Duration,
 		mut video: Option<(mpsc::SyncSender<Video>, Exporter)>,
 	) {
-		let canvas = self.state.lock().unwrap().collection.canvas;
+		let canvas = self.state.lock().unwrap().collection().canvas;
 		let period = Duration::from_secs(1) / canvas.framerate;
 		let mut clock = kio::clock::interval_at(start, period);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
@@ -761,13 +830,19 @@ mod tests {
 			source: "red".into(),
 			rect: moq_scene::Rect::fill(&collection.canvas),
 			visible: true,
+			filters: Vec::new(),
 		});
 
 		let gpu = Gpu::new().await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let connect = Some((client, fixture.url.clone()));
 		let on_demand = false;
-		let engine = Engine::start(gpu, autosave, collection, connect, "studio", on_demand)
+		let loaded = autosave::Loaded {
+			collection,
+			history: History::new(),
+			dropped: 0,
+		};
+		let engine = Engine::start(gpu, autosave, loaded, connect, "studio", on_demand)
 			.await
 			.expect("the studio starts");
 		assert!(
@@ -863,20 +938,37 @@ mod tests {
 		.await
 		.expect("sound arrives");
 
-		// An edit reaches the scene file through the autosave the studio runs.
+		// An edit, and then its undo, reach the scene file and the history
+		// beside it through the autosave the studio runs.
 		let path = dir.path().join("show.toml");
+		let history = dir.path().join("show.history.toml");
+		let read = || {
+			let collection = std::fs::read_to_string(&path).ok()?;
+			let history = std::fs::read_to_string(&history).ok()?;
+			Some(autosave::Text { collection, history })
+		};
+		let saved = |text: autosave::Text| {
+			let read = &read;
+			kio::clock::timeout(TIMEOUT, async move {
+				while read().as_ref() != Some(&text) {
+					kio::clock::sleep(autosave::QUIET / 10).await;
+				}
+			})
+		};
 		let edited = {
 			let mut state = engine.state.lock().unwrap();
-			state.edit().scenes.push(moq_scene::Scene::new("Edited"));
-			state.collection.to_toml().unwrap()
+			let mut draft = state.collection().draft("Add scene `Edited`");
+			draft.insert_scene(1, moq_scene::Scene::new("Edited")).unwrap();
+			state.commit(draft, None).unwrap();
+			autosave::Text::new(state.collection(), state.history()).unwrap()
 		};
-		kio::clock::timeout(TIMEOUT, async {
-			while std::fs::read_to_string(&path).ok().as_ref() != Some(&edited) {
-				kio::clock::sleep(autosave::QUIET / 10).await;
-			}
-		})
-		.await
-		.expect("the edit is saved");
+		saved(edited).await.expect("the edit is saved");
+		let undone = {
+			let mut state = engine.state.lock().unwrap();
+			state.undo().unwrap().expect("an edit to undo");
+			autosave::Text::new(state.collection(), state.history()).unwrap()
+		};
+		saved(undone).await.expect("the undo is saved");
 
 		// Health sees the relay and what each track of the program writes.
 		kio::clock::timeout(TIMEOUT, async {

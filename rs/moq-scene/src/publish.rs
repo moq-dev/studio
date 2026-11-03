@@ -399,7 +399,7 @@ mod tests {
 
 	/// Stills publish once, as image files listed under their source's name
 	/// rather than as renditions of the program, and leave the listing when
-	/// removed. A broadcast source publishes nothing of its own.
+	/// removed. A broadcast or a clone publishes nothing of its own.
 	#[tokio::test]
 	async fn stills_are_listed_by_source() {
 		local(async {
@@ -430,6 +430,10 @@ mod tests {
 					path: "room/guest".into(),
 				},
 			);
+			collection
+				.sources
+				.insert("red copy".into(), Source::Clone { source: "red".into() });
+			collection.validate().unwrap();
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
@@ -440,6 +444,7 @@ mod tests {
 			assert!(published["red"].clock.is_none(), "the root carries the clock");
 			assert_eq!(sources.get("red").unwrap().track(), Some(Status::Live));
 			assert_eq!(sources.get("guest").unwrap().track(), None);
+			assert!(sources.get("red copy").is_none(), "a clone opens no feed, so no track");
 
 			// A viewer reads the same listing off the wire.
 			let format = moq_mux::catalog::CatalogFormat::default();
@@ -461,6 +466,7 @@ mod tests {
 			assert_eq!(mime, "image/png");
 			assert_eq!(payload, std::fs::read(dir.path().join("logo.png")).unwrap());
 
+			collection.sources.remove("red copy");
 			collection.sources.remove("red");
 			sources.sync(&collection);
 			let snapshot = listed(&catalog, |sources| !sources.contains_key("red")).await;

@@ -4,8 +4,12 @@
 //! windowed app, a headless renderer, or a test:
 //!
 //! - [`Collection`] is the scene graph: a [`Canvas`], named [`Source`]s, and
-//!   [`Scene`]s placing them. It saves to a versioned TOML file that holds no
-//!   credentials.
+//!   [`Scene`]s placing them, under a top layer that stays on across scene
+//!   switches. It saves to a versioned TOML file that holds no credentials.
+//! - [`Edit`] is every change to a collection, built with a [`Draft`]. Each
+//!   one undoes itself, so a [`History`] undoes and redoes them and saves
+//!   beside the scene file. A [`Clip`] carries items or filters between
+//!   scenes and collections as text.
 //! - [`source::Sources`] runs each source: a camera, display, window,
 //!   microphone, or system-audio capture (with the `capture` feature), a still
 //!   image, a solid color, or a broadcast subscribed over MoQ. Pictures go to the
@@ -22,13 +26,17 @@
 //! source that stalls repeats its last picture rather than holding up the
 //! canvas.
 
+pub mod clip;
 mod collection;
 mod compositor;
+mod edit;
 pub mod publish;
 pub mod source;
 
-pub use collection::{Audio, Canvas, Collection, Item, Rect, Rgba, Scene, Source, Transition};
+pub use clip::Clip;
+pub use collection::{Audio, Canvas, Collection, Filter, Item, Layer, Rect, Rgba, Scene, Source, Transition, Video};
 pub use compositor::{Compositor, FORMAT};
+pub use edit::{Change, Draft, Edit, History};
 
 /// The `wgpu` the compositor draws with: `moq_video`'s, so its textures and
 /// the decoder's are the same type.
@@ -55,6 +63,11 @@ pub enum Error {
 	/// naming a source that does not exist.
 	#[error("invalid scene collection: {0}")]
 	Invalid(String),
+
+	/// An edit does not apply, since the collection no longer holds what the
+	/// edit replaces.
+	#[error("the edit no longer applies: {0}")]
+	Conflict(String),
 
 	/// An image source could not be read or decoded.
 	#[error("image: {0}")]

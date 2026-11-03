@@ -9,7 +9,7 @@ use kio::clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
-use crate::collection::{Canvas, Collection, Rect, Source};
+use crate::collection::{Canvas, Collection, Filter, Item, Rect, Source};
 use crate::source::{Picture, Sources};
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
@@ -128,6 +128,7 @@ struct Uniforms {
 }
 
 /// One textured quad: what to sample, and the uniform that places it.
+#[derive(Clone)]
 struct Draw {
 	bind: wgpu::BindGroup,
 	uniform: Uniform,
@@ -344,11 +345,16 @@ impl Compositor {
 			self.fade = None;
 		}
 
+		// The top layer goes over both outputs, and over a fade rather than
+		// through it, so it stays on across the switch.
+		let top = self.items(collection, &collection.top);
+		let mut preview = self.scene(collection, self.preview_scene.as_deref());
+		preview.extend(top.iter().cloned());
 		let mut passes = vec![Pass {
 			view: &self.preview.view,
-			draws: self.scene(collection, self.preview_scene.as_deref()),
+			draws: preview,
 		}];
-		match (&self.fade, progress) {
+		let mut program = match (&self.fade, progress) {
 			(Some(fade), Some(progress)) => {
 				passes.push(Pass {
 					view: &self.incoming.view,
@@ -359,16 +365,15 @@ impl Compositor {
 					bind: self.incoming.bind.clone(),
 					uniform: uniform(Rect::fill(&self.canvas), self.canvas, progress),
 				});
-				passes.push(Pass {
-					view: &self.program.view,
-					draws,
-				});
+				draws
 			}
-			_ => passes.push(Pass {
-				view: &self.program.view,
-				draws: self.scene(collection, self.program_scene.as_deref()),
-			}),
-		}
+			_ => self.scene(collection, self.program_scene.as_deref()),
+		};
+		program.extend(top);
+		passes.push(Pass {
+			view: &self.program.view,
+			draws: program,
+		});
 
 		let count: usize = passes.iter().map(|pass| pass.draws.len()).sum();
 		self.uniforms.reserve(&self.device, &self.uniform_layout, count as u64);
@@ -415,21 +420,31 @@ impl Compositor {
 		Ok(())
 	}
 
-	/// The quads drawing `scene`, back to front. A missing scene, a hidden item,
-	/// or a source with no picture yet draws nothing.
+	/// The quads drawing `scene`, back to front. A missing scene draws nothing.
 	fn scene(&self, collection: &Collection, scene: Option<&str>) -> Vec<Draw> {
-		let Some(scene) = scene.and_then(|name| collection.scene(name)) else {
-			return Vec::new();
-		};
-		scene
-			.items
+		let items = scene
+			.and_then(|name| collection.scene(name))
+			.map(|scene| scene.items.as_slice());
+		self.items(collection, items.unwrap_or_default())
+	}
+
+	/// The quads drawing `items`, back to front, each through its filters. A
+	/// hidden item or a source with no picture yet draws nothing.
+	fn items(&self, collection: &Collection, items: &[Item]) -> Vec<Draw> {
+		items
 			.iter()
 			.filter(|item| item.visible)
 			.filter_map(|item| {
-				let bind = self.layers.get(&item.source)?.bind.clone()?;
+				let bind = self.layers.get(collection.capture(&item.source))?.bind.clone()?;
+				let opacity = collection
+					.filters(item)
+					.map(|filter| match filter {
+						Filter::Opacity { amount } => *amount,
+					})
+					.product();
 				Some(Draw {
 					bind,
-					uniform: uniform(item.rect, self.canvas, 1.0),
+					uniform: uniform(item.rect, self.canvas, opacity),
 				})
 			})
 			.collect()
@@ -634,7 +649,7 @@ impl Uniforms {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::collection::{Item, Rgba, Scene, Source};
+	use crate::collection::{Rgba, Scene};
 	use crate::source::test::{context, local, start};
 
 	const RED: [u8; 4] = [255, 0, 0, 255];
@@ -672,6 +687,7 @@ mod tests {
 			source: source.into(),
 			rect,
 			visible: true,
+			filters: Vec::new(),
 		};
 		let fill = Rect::fill(&collection.canvas);
 		let corner = Rect {
@@ -855,6 +871,78 @@ mod tests {
 			studio.render(start + Duration::from_secs(1));
 			assert!(!studio.compositor.fading());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+		})
+		.await;
+	}
+
+	/// The bottom-left quarter of the 8x8 canvas.
+	const CORNER: Rect = Rect {
+		x: 0.0,
+		y: 4.0,
+		width: 4.0,
+		height: 4.0,
+	};
+
+	/// A clone draws its source's picture through its own filters, then the
+	/// item's, and leaves the source it clones as it was.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_clone_draws_through_its_own_filters() {
+		local(async {
+			let mut collection = collection();
+			collection
+				.sources
+				.insert("blue faded".into(), Source::Clone { source: "blue".into() });
+			collection.video.insert(
+				"blue faded".into(),
+				crate::Video {
+					filters: vec![Filter::Opacity { amount: 0.5 }],
+				},
+			);
+			collection.scenes[0].items.push(Item {
+				filters: vec![Filter::Opacity { amount: 0.5 }],
+				..Item::new("blue faded", CORNER)
+			});
+			collection.validate().unwrap();
+
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.render(Instant::now());
+			let program = studio.program();
+			let actual = pixel(&program, 1, 6);
+			assert!(near(actual, [191, 0, 64, 255]), "a quarter blue over red: {actual:?}");
+			assert_eq!(pixel(&program, 6, 1), BLUE, "the source itself is unfiltered");
+		})
+		.await;
+	}
+
+	/// The top layer draws over preview and program, and over a fade rather
+	/// than fading with it.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn the_top_layer_stays_over_a_fade() {
+		local(async {
+			let mut collection = collection();
+			collection.top.push(Item::new("blue", CORNER));
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.render(start);
+			assert_eq!(pixel(&studio.program(), 1, 6), BLUE);
+
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.fade(Duration::from_secs(1), start);
+			studio.render(start + Duration::from_millis(500));
+			let program = studio.program();
+			let actual = pixel(&program, 1, 1);
+			assert!(near(actual, [128, 0, 127, 255]), "{actual:?}");
+			assert_eq!(pixel(&program, 1, 6), BLUE, "the top layer does not fade");
+			studio.collection.scenes[1].items.clear();
+			studio.render(start + Duration::from_millis(600));
+			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE);
+			assert_eq!(pixel(&studio.preview(), 6, 1), BLACK);
 		})
 		.await;
 	}
