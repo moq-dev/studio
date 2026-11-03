@@ -132,7 +132,8 @@ impl Collection {
 
 	/// Check what the types cannot: the canvas can be encoded, names are unique,
 	/// every item, clone, audio, and video entry names a source that exists,
-	/// and every filter's settings are in range.
+	/// and every crop and filter's settings are in range, each filter naming a
+	/// source of the kind it reads.
 	pub fn validate(&self) -> Result<(), Error> {
 		self.canvas.validate()?;
 
@@ -147,19 +148,33 @@ impl Collection {
 		}
 		for (layer, items) in self.layers() {
 			for item in items {
-				if !self.sources.contains_key(&item.source) {
+				let Some(source) = self.sources.get(&item.source) else {
 					return Err(Error::Invalid(format!(
 						"{layer} places `{}`, which is not a source",
 						item.source
 					)));
+				};
+				if matches!(source, Source::Lut { .. }) {
+					return Err(Error::Invalid(format!(
+						"{layer} places `{}`, a LUT, which only a filter can name",
+						item.source
+					)));
 				}
 				item.rect.validate(&layer, &item.source)?;
-				validate_filters(&item.filters, &format!("`{}` in {layer}", item.source))?;
+				let on = format!("`{}` in {layer}", item.source);
+				item.crop
+					.validate()
+					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
+				self.validate_chain(&item.filters, &on)?;
 			}
 		}
 
 		if let Some(name) = self.sources.keys().find(|name| name.is_empty()) {
 			return Err(Error::Invalid(format!("a source has an empty name: `{name}`")));
+		}
+		let unnamed = |source: &Source| source.path().is_some_and(|path| path.as_os_str().is_empty());
+		if let Some((name, _)) = self.sources.iter().find(|(_, source)| unnamed(source)) {
+			return Err(Error::Invalid(format!("`{name}` names no file")));
 		}
 		for (name, source) in &self.sources {
 			let Source::Clone { source } = source else { continue };
@@ -184,7 +199,12 @@ impl Collection {
 					"video settings for `{name}`, which is not a source with a picture"
 				)));
 			}
-			validate_filters(&video.filters, &format!("`{name}`"))?;
+			let on = format!("`{name}`");
+			video
+				.crop
+				.validate()
+				.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
+			self.validate_chain(&video.filters, &on)?;
 		}
 
 		for (name, audio) in &self.audio {
@@ -198,6 +218,34 @@ impl Collection {
 			}
 		}
 
+		Ok(())
+	}
+
+	/// Check `filters` are in range and name sources of the kind they read.
+	fn validate_chain(&self, filters: &[Filter], on: &str) -> Result<(), Error> {
+		validate_filters(filters, on)?;
+		for filter in filters {
+			let (name, ok, wanted) = match filter {
+				Filter::Lut { source, .. } => (
+					source,
+					matches!(self.sources.get(source), Some(Source::Lut { .. })),
+					"a LUT",
+				),
+				Filter::Mask { source, .. } => (
+					source,
+					self.sources
+						.get(source)
+						.is_some_and(|source| source.has_video() && source.opens()),
+					"a source with a picture of its own",
+				),
+				_ => continue,
+			};
+			if !ok {
+				return Err(Error::Invalid(format!(
+					"{on}: a filter names `{name}`, which is not {wanted}"
+				)));
+			}
+		}
 		Ok(())
 	}
 }
@@ -345,19 +393,27 @@ pub struct Item {
 	/// Whether the item is drawn. A hidden item keeps its place.
 	#[serde(default = "visible")]
 	pub visible: bool,
+	/// Trimmed from what its source's crop leaves, before every filter.
+	#[serde(default, skip_serializing_if = "Crop::is_none")]
+	pub crop: Crop,
 	/// This item's own filters, applied after its source's.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub filters: Vec<Filter>,
+	/// How the filtered picture mixes with what is under it.
+	#[serde(default, skip_serializing_if = "Blend::is_normal")]
+	pub blend: Blend,
 }
 
 impl Item {
-	/// `source` shown, unfiltered, at `rect`.
+	/// `source` shown, uncropped and unfiltered, at `rect`.
 	pub fn new(source: impl Into<String>, rect: Rect) -> Self {
 		Self {
 			source: source.into(),
 			rect,
 			visible: true,
+			crop: Crop::default(),
 			filters: Vec::new(),
+			blend: Blend::Normal,
 		}
 	}
 }
@@ -368,9 +424,13 @@ fn visible() -> bool {
 
 /// What a source or item is drawn through, in order.
 ///
-/// Each filter means what the CSS Filter Effects function of the same name
-/// does, so every host that composes a scene draws it the same way.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// Every filter is a pure function of the picture, so every host that composes
+/// a scene with moq-scene draws it the same way, and it travels in a layout as
+/// its name and settings. The CSS ones mean what the CSS Filter Effects
+/// function of the same name does, in the gamma-encoded sRGB the canvas holds,
+/// with lengths in canvas pixels. A filter naming another source uses that
+/// source's picture as it arrives, without its filters.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Filter {
 	/// CSS `opacity()`: 0 is transparent and 1 leaves the picture as it is.
@@ -378,16 +438,288 @@ pub enum Filter {
 		/// From 0 to 1.
 		amount: f32,
 	},
+	/// CSS `brightness()`: each color channel times `amount`.
+	Brightness {
+		/// 0 or more: 0 is black and 1 leaves the picture as it is.
+		amount: f32,
+	},
+	/// CSS `contrast()`: each color channel pushed away from middle gray.
+	Contrast {
+		/// 0 or more: 0 is gray and 1 leaves the picture as it is.
+		amount: f32,
+	},
+	/// CSS `saturate()`.
+	Saturate {
+		/// 0 or more: 0 is gray, 1 leaves the picture as it is, and more
+		/// oversaturates.
+		amount: f32,
+	},
+	/// CSS `grayscale()`.
+	Grayscale {
+		/// From 0 to 1, where 1 is fully gray.
+		amount: f32,
+	},
+	/// CSS `sepia()`.
+	Sepia {
+		/// From 0 to 1, where 1 is fully sepia.
+		amount: f32,
+	},
+	/// CSS `invert()`.
+	Invert {
+		/// From 0 to 1, where 1 is a negative.
+		amount: f32,
+	},
+	/// CSS `hue-rotate()`.
+	HueRotate {
+		/// The angle around the color wheel.
+		degrees: f32,
+	},
+	/// CSS `blur()`: a Gaussian blur whose edges fade into transparency.
+	Blur {
+		/// The standard deviation, in canvas pixels; 0 or more.
+		radius: f32,
+	},
+	/// CSS `drop-shadow()`: the picture's shape, offset, blurred, and filled
+	/// with `color`, drawn under it.
+	DropShadow {
+		/// Offset right, in canvas pixels.
+		x: f32,
+		/// Offset down, in canvas pixels.
+		y: f32,
+		/// The blur's standard deviation, in canvas pixels; 0 or more.
+		blur: f32,
+		/// The shadow's color.
+		color: Rgba,
+	},
+	/// Make what is close to `color` transparent, as a green screen is keyed.
+	///
+	/// Closeness is the distance between the Rec. 709 chroma (Cb, Cr) of a
+	/// pixel and of `color`, so a shadow on the screen keys like its lit part.
+	/// Within `similarity` a pixel is transparent, and over the next
+	/// `smoothness` it fades in. Within `similarity + spill`, the key color
+	/// bleeding onto the subject is desaturated away.
+	ChromaKey {
+		/// The screen's color.
+		color: Rgba,
+		/// From 0 to 1.
+		similarity: f32,
+		/// From 0 to 1.
+		smoothness: f32,
+		/// From 0 to 1.
+		spill: f32,
+	},
+	/// Make what is too dark or too bright transparent, by Rec. 709 luma.
+	///
+	/// Luma from `min` to `max` stays opaque, and over `smoothness` past
+	/// either end fades out.
+	LumaKey {
+		/// From 0 to 1.
+		min: f32,
+		/// From `min` to 1.
+		max: f32,
+		/// From 0 to 1.
+		smoothness: f32,
+	},
+	/// Look each color up in a [`Source::Lut`]'s table, as a color grade does.
+	Lut {
+		/// The [`Source::Lut`].
+		source: String,
+		/// From 0 (the picture as it is) to 1 (fully graded).
+		amount: f32,
+	},
+	/// Keep the picture only where another source's picture, stretched over
+	/// the item, is opaque, as CSS `mask-image` does.
+	Mask {
+		/// A source with a picture of its own: not a clone.
+		source: String,
+		/// What of the mask's picture counts.
+		#[serde(default)]
+		mode: MaskMode,
+	},
+}
+
+/// What of a mask's picture keeps the picture under it, as CSS `mask-mode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskMode {
+	/// Its opacity.
+	#[default]
+	Alpha,
+	/// Its Rec. 709 luma times its opacity, so white keeps and black hides.
+	Luminance,
 }
 
 impl Filter {
-	fn validate(&self) -> Result<(), String> {
+	/// The source whose picture or table this filter reads, if any.
+	pub fn source(&self) -> Option<&str> {
 		match self {
-			Self::Opacity { amount } if !(0.0..=1.0).contains(amount) => {
-				Err(format!("opacity {amount} is not between 0 and 1"))
-			}
-			Self::Opacity { .. } => Ok(()),
+			Self::Lut { source, .. } | Self::Mask { source, .. } => Some(source),
+			_ => None,
 		}
+	}
+
+	/// The source this filter reads, to rename it.
+	pub(crate) fn source_mut(&mut self) -> Option<&mut String> {
+		match self {
+			Self::Lut { source, .. } | Self::Mask { source, .. } => Some(source),
+			_ => None,
+		}
+	}
+
+	fn validate(&self) -> Result<(), String> {
+		fn check(ok: bool, err: impl FnOnce() -> String) -> Result<(), String> {
+			if ok { Ok(()) } else { Err(err()) }
+		}
+		let unit = |name: &str, value: f32| {
+			check((0.0..=1.0).contains(&value), || {
+				format!("{name} {value} is not between 0 and 1")
+			})
+		};
+		let positive = |name: &str, value: f32| {
+			check(value.is_finite() && value >= 0.0, || {
+				format!("{name} {value} is not 0 or more")
+			})
+		};
+		let finite = |name: &str, value: f32| check(value.is_finite(), || format!("{name} {value} is not a number"));
+
+		match *self {
+			Self::Opacity { amount } => unit("opacity", amount),
+			Self::Brightness { amount } => positive("brightness", amount),
+			Self::Contrast { amount } => positive("contrast", amount),
+			Self::Saturate { amount } => positive("saturation", amount),
+			Self::Grayscale { amount } => unit("grayscale", amount),
+			Self::Sepia { amount } => unit("sepia", amount),
+			Self::Invert { amount } => unit("invert", amount),
+			Self::HueRotate { degrees } => finite("hue rotation", degrees),
+			Self::Blur { radius } => positive("blur", radius),
+			Self::DropShadow { x, y, blur, .. } => {
+				finite("shadow x", x)?;
+				finite("shadow y", y)?;
+				positive("shadow blur", blur)
+			}
+			Self::ChromaKey {
+				similarity,
+				smoothness,
+				spill,
+				..
+			} => {
+				unit("similarity", similarity)?;
+				unit("smoothness", smoothness)?;
+				unit("spill", spill)
+			}
+			Self::LumaKey { min, max, smoothness } => {
+				unit("luma min", min)?;
+				unit("luma max", max)?;
+				unit("smoothness", smoothness)?;
+				check(min <= max, || format!("luma min {min} is over max {max}"))
+			}
+			Self::Lut { amount, .. } => unit("LUT amount", amount),
+			Self::Mask { .. } => Ok(()),
+		}
+	}
+}
+
+/// How an item's picture mixes with what is under it, as CSS
+/// `mix-blend-mode`, by the formulas of the Compositing and Blending spec.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[expect(missing_docs, reason = "each is the CSS blend mode of the same name")]
+pub enum Blend {
+	/// Drawn over, as without a blend mode.
+	#[default]
+	Normal,
+	Multiply,
+	Screen,
+	Overlay,
+	Darken,
+	Lighten,
+	ColorDodge,
+	ColorBurn,
+	HardLight,
+	SoftLight,
+	Difference,
+	Exclusion,
+	Hue,
+	Saturation,
+	Color,
+	Luminosity,
+}
+
+impl Blend {
+	/// Every mode, in the CSS spec's order.
+	pub const ALL: [Self; 16] = [
+		Self::Normal,
+		Self::Multiply,
+		Self::Screen,
+		Self::Overlay,
+		Self::Darken,
+		Self::Lighten,
+		Self::ColorDodge,
+		Self::ColorBurn,
+		Self::HardLight,
+		Self::SoftLight,
+		Self::Difference,
+		Self::Exclusion,
+		Self::Hue,
+		Self::Saturation,
+		Self::Color,
+		Self::Luminosity,
+	];
+
+	fn is_normal(&self) -> bool {
+		*self == Self::Normal
+	}
+}
+
+/// The fraction of a picture trimmed from each edge, the rest stretched to
+/// fill the item, as CSS `object-view-box: inset()` does.
+///
+/// Fractions rather than pixels, so a crop keeps its framing when the
+/// picture's resolution changes, such as a viewer picking another rendition.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Crop {
+	/// From the left edge.
+	#[serde(default)]
+	pub left: f32,
+	/// From the top edge.
+	#[serde(default)]
+	pub top: f32,
+	/// From the right edge.
+	#[serde(default)]
+	pub right: f32,
+	/// From the bottom edge.
+	#[serde(default)]
+	pub bottom: f32,
+}
+
+impl Crop {
+	/// Whether the crop trims nothing.
+	pub fn is_none(&self) -> bool {
+		*self == Self::default()
+	}
+
+	/// `inner` applied to the picture this crop leaves, as one crop.
+	pub fn then(&self, inner: &Self) -> Self {
+		let width = 1.0 - self.left - self.right;
+		let height = 1.0 - self.top - self.bottom;
+		Self {
+			left: self.left + inner.left * width,
+			top: self.top + inner.top * height,
+			right: self.right + inner.right * width,
+			bottom: self.bottom + inner.bottom * height,
+		}
+	}
+
+	fn validate(&self) -> Result<(), String> {
+		let edges = [self.left, self.top, self.right, self.bottom];
+		if edges.iter().any(|edge| !(0.0..1.0).contains(edge))
+			|| self.left + self.right >= 1.0
+			|| self.top + self.bottom >= 1.0
+		{
+			return Err(format!("{self:?} leaves nothing of the picture"));
+		}
+		Ok(())
 	}
 }
 
@@ -404,6 +736,9 @@ pub(crate) fn validate_filters(filters: &[Filter], on: &str) -> Result<(), Error
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Video {
+	/// Trimmed before every filter and each item's own crop.
+	#[serde(default, skip_serializing_if = "Crop::is_none")]
+	pub crop: Crop,
 	/// Applied in order, before each item's own.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub filters: Vec<Filter>,
@@ -498,12 +833,34 @@ pub enum Source {
 		/// The source cloned: one with a picture, and not itself a clone.
 		source: String,
 	},
+	/// A 3D color lookup table for [`Filter::Lut`], from an Adobe or Resolve
+	/// `.cube` file. It has no picture or sound of its own.
+	Lut {
+		/// The file, relative to the scene file's directory unless absolute.
+		path: PathBuf,
+	},
 }
 
 impl Source {
 	/// Whether the source has a picture to place in a scene.
 	pub fn has_video(&self) -> bool {
-		!matches!(self, Self::Microphone { .. } | Self::SystemAudio)
+		!matches!(self, Self::Microphone { .. } | Self::SystemAudio | Self::Lut { .. })
+	}
+
+	/// The file an image or LUT source reads.
+	pub(crate) fn path(&self) -> Option<&std::path::Path> {
+		match self {
+			Self::Image { path } | Self::Lut { path } => Some(path),
+			_ => None,
+		}
+	}
+
+	/// The file the source reads, to resolve or relativize it.
+	pub(crate) fn path_mut(&mut self) -> Option<&mut PathBuf> {
+		match self {
+			Self::Image { path } | Self::Lut { path } => Some(path),
+			_ => None,
+		}
 	}
 
 	/// Whether the source opens a capture, file, or subscription of its own,
@@ -616,28 +973,28 @@ mod tests {
 			"camera faded".into(),
 			Video {
 				filters: vec![Filter::Opacity { amount: 0.5 }],
+				..Default::default()
 			},
 		);
 		collection.top.push(Item::new("logo", Rect::fill(&collection.canvas)));
 
 		let canvas = collection.canvas;
 		let scene = &mut collection.scenes[0];
+		scene.items.push(Item::new("background", Rect::fill(&canvas)));
+		let rect = Rect {
+			x: 100.0,
+			y: 50.0,
+			width: 640.0,
+			height: 360.0,
+		};
 		scene.items.push(Item {
-			source: "background".into(),
-			rect: Rect::fill(&canvas),
-			visible: true,
-			filters: Vec::new(),
-		});
-		scene.items.push(Item {
-			source: "camera".into(),
-			rect: Rect {
-				x: 100.0,
-				y: 50.0,
-				width: 640.0,
-				height: 360.0,
-			},
 			visible: false,
-			filters: Vec::new(),
+			crop: Crop {
+				left: 0.25,
+				..Crop::default()
+			},
+			blend: Blend::Screen,
+			..Item::new("camera", rect)
 		});
 		collection
 	}
@@ -685,12 +1042,22 @@ source = "cam"
 [video.cam-faded]
 filters = [{ kind = "opacity", amount = 0.5 }]
 
+[sources.grade]
+kind = "lut"
+path = "grade.cube"
+
 [[scenes]]
 name = "Main"
 items = [
 	{ source = "bg", rect = { x = 0, y = 0, width = 1280, height = 720 } },
 	{ source = "cam", rect = { x = 10, y = 10, width = 320, height = 180 }, visible = false },
 	{ source = "cam-faded", rect = { x = 0, y = 0, width = 640, height = 360 }, filters = [{ kind = "opacity", amount = 0.8 }] },
+	{ source = "cam", rect = { x = 0, y = 0, width = 640, height = 360 }, crop = { left = 0.1, right = 0.1 }, blend = "soft_light", filters = [
+		{ kind = "chroma_key", color = "#00ff00", similarity = 0.4, smoothness = 0.08, spill = 0.1 },
+		{ kind = "lut", source = "grade", amount = 0.7 },
+		{ kind = "mask", source = "bg", mode = "luminance" },
+		{ kind = "drop_shadow", x = 4, y = 4, blur = 8, color = "#00000080" },
+	] },
 ]
 
 [[top]]
@@ -723,6 +1090,16 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			filters,
 			[&Filter::Opacity { amount: 0.5 }, &Filter::Opacity { amount: 0.8 }],
 			"the source's filters, then the item's"
+		);
+		let keyed = &main.items[3];
+		assert_eq!(keyed.blend, Blend::SoftLight);
+		assert_eq!(keyed.crop.right, 0.1);
+		assert_eq!(
+			keyed.filters[2],
+			Filter::Mask {
+				source: "bg".into(),
+				mode: MaskMode::Luminance
+			}
 		);
 		assert_eq!(collection.top[0].source, "bg");
 	}
@@ -803,15 +1180,147 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		let mut collection = example();
 		collection.top.push(Item::new("nobody", Rect::fill(&collection.canvas)));
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+
+		// A LUT is only looked up, and a file source needs a file.
+		let mut collection = example();
+		collection.sources.insert(
+			"grade".into(),
+			Source::Lut {
+				path: "grade.cube".into(),
+			},
+		);
+		collection.validate().unwrap();
+		collection.top.push(Item::new("grade", Rect::fill(&collection.canvas)));
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+		for source in [Source::Lut { path: "".into() }, Source::Image { path: "".into() }] {
+			let mut collection = example();
+			collection.sources.insert("blank".into(), source.clone());
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{source:?}");
+		}
 	}
 
 	#[test]
 	fn refuses_a_filter_out_of_range() {
-		for amount in [-0.1, 1.5, f32::NAN] {
+		let red = Rgba([255, 0, 0, 255]);
+		let bad = [
+			Filter::Opacity { amount: 1.5 },
+			Filter::Opacity { amount: f32::NAN },
+			Filter::Brightness { amount: -0.1 },
+			Filter::Saturate { amount: f32::INFINITY },
+			Filter::Invert { amount: 2.0 },
+			Filter::HueRotate { degrees: f32::NAN },
+			Filter::Blur { radius: -1.0 },
+			Filter::DropShadow {
+				x: f32::INFINITY,
+				y: 0.0,
+				blur: 0.0,
+				color: red,
+			},
+			Filter::ChromaKey {
+				color: red,
+				similarity: 1.5,
+				smoothness: 0.1,
+				spill: 0.1,
+			},
+			Filter::LumaKey {
+				min: 0.8,
+				max: 0.2,
+				smoothness: 0.0,
+			},
+		];
+		for filter in bad {
 			let mut collection = example();
-			collection.scenes[0].items[0].filters = vec![Filter::Opacity { amount }];
-			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{amount}");
+			collection.scenes[0].items[0].filters = vec![filter.clone()];
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{filter:?}");
 		}
+	}
+
+	/// A LUT filter names a LUT, and a mask a source with a picture of its own,
+	/// since a mask draws its source's picture as it arrives.
+	#[test]
+	fn refuses_a_filter_reading_the_wrong_source() {
+		let lut = |source: &str| Filter::Lut {
+			source: source.into(),
+			amount: 1.0,
+		};
+		let mask = |source: &str| Filter::Mask {
+			source: source.into(),
+			mode: MaskMode::Alpha,
+		};
+		let mut collection = example();
+		collection.sources.insert(
+			"grade".into(),
+			Source::Lut {
+				path: "grade.cube".into(),
+			},
+		);
+		collection.scenes[0].items[0].filters = vec![lut("grade"), mask("logo")];
+		collection.validate().unwrap();
+
+		for filter in [
+			lut("logo"),
+			lut("nobody"),
+			mask("grade"),
+			mask("mic"),
+			mask("camera faded"),
+		] {
+			let mut collection = collection.clone();
+			collection.video.insert(
+				"camera".into(),
+				Video {
+					filters: vec![filter.clone()],
+					..Default::default()
+				},
+			);
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{filter:?}");
+		}
+	}
+
+	#[test]
+	fn refuses_a_crop_that_leaves_nothing() {
+		let crops = [
+			Crop {
+				left: 0.6,
+				right: 0.4,
+				..Crop::default()
+			},
+			Crop {
+				top: -0.1,
+				..Crop::default()
+			},
+			Crop {
+				bottom: f32::NAN,
+				..Crop::default()
+			},
+		];
+		for crop in crops {
+			let mut collection = example();
+			collection.scenes[0].items[0].crop = crop;
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{crop:?}");
+		}
+	}
+
+	/// A source's crop then an item's is one crop of the original picture.
+	#[test]
+	fn crops_compose() {
+		let source = Crop {
+			left: 0.5,
+			..Crop::default()
+		};
+		let item = Crop {
+			left: 0.5,
+			bottom: 0.25,
+			..Crop::default()
+		};
+		assert_eq!(
+			source.then(&item),
+			Crop {
+				left: 0.75,
+				bottom: 0.25,
+				..Crop::default()
+			}
+		);
+		assert_eq!(Crop::default().then(&item), item);
 	}
 
 	#[test]

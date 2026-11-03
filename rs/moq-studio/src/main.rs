@@ -14,6 +14,7 @@ mod devices;
 mod engine;
 mod health;
 mod setup;
+mod snap;
 mod ui;
 mod uplink;
 
