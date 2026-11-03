@@ -96,6 +96,7 @@ repository.
 - [Guided setup](/quest/m0/guided-setup.md) - first launch detects devices, measures the uplink, and proposes settings
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
+- [The join page is live](/quest/m0/join-page-live.md) - `join.studio.moq.dev` serves the join page `--join-page` defaults to
 - [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
 - [Recording](/quest/m0/recording.md) - each canvas's program, and optionally each source, recorded to disk alongside live outputs

@@ -471,7 +471,7 @@ impl Panels {
 	fn guests(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let Some(room) = &engine.room else {
-			ui.label("Start with --room, --room-key, and --join-page to invite guests.");
+			ui.label("Start with --room and --room-key to invite guests.");
 			return;
 		};
 

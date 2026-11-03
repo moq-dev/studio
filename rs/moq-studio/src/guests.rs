@@ -21,13 +21,16 @@ use url::Url;
 
 use crate::engine::Engine;
 
+/// The domain `.github/workflows/join.yml` deploys `js/join` to.
+const JOIN_PAGE: &str = "https://join.studio.moq.dev/";
+
 /// The guest flags.
 #[derive(usage_rs::Args, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Config {
 	/// The room guests join: a path under the `--connect` URL's, which the
 	/// studio's own connection must be allowed to subscribe to. Needs
-	/// `--room-key` and `--join-page`.
+	/// `--room-key`.
 	#[usage(long)]
 	pub room: Option<String>,
 
@@ -37,8 +40,9 @@ pub struct Config {
 	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 	pub room_key: Option<PathBuf>,
 
-	/// The join page a guest opens. Its link carries the room's relay URL, the
-	/// guest's name, and its token in the fragment.
+	/// The join page a guest opens, `js/join` hosted anywhere. Its link carries
+	/// the room's relay URL, the guest's name, and its token in the fragment.
+	/// Defaults to `https://join.studio.moq.dev/`.
 	#[usage(long)]
 	pub join_page: Option<Url>,
 
@@ -52,14 +56,18 @@ impl Config {
 	/// The room these flags describe on the relay at `connect`, or `None` without
 	/// `--room`.
 	pub fn load(&self, connect: Option<&Url>) -> anyhow::Result<Option<Room>> {
-		let (room, key, page) = match (&self.room, &self.room_key, &self.join_page) {
+		let (room, key) = match (&self.room, &self.room_key, &self.join_page) {
 			(None, None, None) => return Ok(None),
-			(Some(room), Some(key), Some(page)) => (room, key, page),
-			_ => anyhow::bail!("guests need all of --room, --room-key, and --join-page"),
+			(Some(room), Some(key), _) => (room, key),
+			_ => anyhow::bail!("guests need both --room and --room-key"),
 		};
+		let page = self
+			.join_page
+			.clone()
+			.unwrap_or_else(|| Url::parse(JOIN_PAGE).expect("the default join page is a URL"));
 		let connect = connect.context("guests join through the relay; add --connect")?;
 		let key = moq_auth::Key::from_file(key).with_context(|| format!("reading the room key {}", key.display()))?;
-		let room = Room::new(connect, room, key, page.clone(), self.guest_expiry.into())?;
+		let room = Room::new(connect, room, key, page, self.guest_expiry.into())?;
 		Ok(Some(room))
 	}
 }
@@ -339,17 +347,23 @@ mod tests {
 
 		assert!(config(false, false, false).load(Some(&connect)).unwrap().is_none());
 		for partial in [
-			config(true, false, false),
-			config(true, true, false),
+			config(true, false, true),
 			config(false, true, true),
+			config(false, false, true),
 		] {
 			let err = partial.load(Some(&connect)).err().unwrap();
-			assert!(err.to_string().contains("need all of"), "{err}");
+			assert!(err.to_string().contains("need both"), "{err}");
 		}
 		let err = config(true, true, true).load(None).err().unwrap();
 		assert!(err.to_string().contains("--connect"), "{err}");
 		let room = config(true, true, true).load(Some(&connect)).unwrap().unwrap();
 		assert_eq!(room.path().as_str(), "guests");
+		let link = room.invite("alice").unwrap().link;
+		assert!(link.as_str().starts_with("https://studio.example/join/#"), "{link}");
+
+		let room = config(true, true, false).load(Some(&connect)).unwrap().unwrap();
+		let link = room.invite("alice").unwrap().link;
+		assert!(link.as_str().starts_with(JOIN_PAGE), "{link}");
 	}
 
 	#[test]
