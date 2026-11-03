@@ -186,7 +186,8 @@ impl Written {
 
 impl Autosave {
 	/// Read the scene file at `path` and its history, or start a new
-	/// collection if there is no scene file yet; the first save creates it.
+	/// collection if there is no scene file yet; the first save creates it,
+	/// and one another program created meanwhile is an outside edit.
 	pub fn open(path: PathBuf) -> anyhow::Result<(Self, Loaded)> {
 		let history = history_path(&path);
 		let disk = Disk::read(&path, &history)?;
@@ -219,6 +220,12 @@ impl Autosave {
 
 	pub fn path(&self) -> &Path {
 		&self.path
+	}
+
+	/// Whether the scene file exists: it was read when opened, or a save has
+	/// created it since.
+	pub fn exists(&self) -> bool {
+		self.written.lock().unwrap().disk.scene.is_some()
 	}
 
 	/// Where the studio records its edits to the collection.
@@ -274,7 +281,7 @@ impl Autosave {
 				// Checked again right before the rename, since another studio may
 				// have written the files since the look above.
 				let unchanged = || Ok(self.outside(&written.disk)?.is_none());
-				let wrote = write(&self.path, &text.collection, unchanged)
+				let wrote = write(&self.path, &text.collection, written.disk.scene.is_none(), unchanged)
 					.with_context(|| format!("writing {}", self.path.display()))?;
 				if !wrote {
 					// Taken or held as a conflict by the next look.
@@ -285,7 +292,7 @@ impl Autosave {
 			}
 			if written.history.as_ref() != Some(&text.history) {
 				let unchanged = || Ok(self.outside(&written.disk)?.is_none());
-				let wrote = write(&self.history, &text.history, unchanged)
+				let wrote = write(&self.history, &text.history, false, unchanged)
 					.with_context(|| format!("writing {}", self.history.display()))?;
 				if !wrote {
 					continue;
@@ -463,11 +470,18 @@ fn load_history(path: &Path, bytes: Option<&[u8]>, collection: Collection) -> an
 
 /// Replace the file at `path` with `text` all at once, so a crash leaves
 /// either the old file or the new one, never part of either. Returns `false`,
-/// leaving the file as it is, if `unchanged` says the files changed outside
-/// the studio, asked right before the rename.
-fn write(path: &Path, text: &str, unchanged: impl FnOnce() -> std::io::Result<bool>) -> std::io::Result<bool> {
+/// leaving the file as it is, if the files changed outside the studio: a
+/// `new` file, one the studio last found missing, exists, or `unchanged`,
+/// asked right before the rename, says otherwise.
+fn write(
+	path: &Path,
+	text: &str,
+	new: bool,
+	unchanged: impl FnOnce() -> std::io::Result<bool>,
+) -> std::io::Result<bool> {
 	let path = resolve(path)?;
 	let existing = match std::fs::metadata(&path) {
+		Ok(_) if new => return Ok(false),
 		Ok(metadata) => {
 			// Refused as a write in place would be, so a read-only scene file
 			// is not replaced.
@@ -505,11 +519,21 @@ fn write(path: &Path, text: &str, unchanged: impl FnOnce() -> std::io::Result<bo
 	// pointing at an empty file.
 	file.as_file().sync_all()?;
 	// As late as it can be. An edit landing between this and the rename is
-	// still lost, since nothing binds every editor to a lock.
+	// still lost, since nothing binds every editor to a lock, except that a
+	// new file is never replaced.
 	if !unchanged()? {
 		return Ok(false);
 	}
-	file.persist(&path)?;
+	match new {
+		true => match file.persist_noclobber(&path) {
+			Ok(_) => {}
+			Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+			Err(err) => return Err(err.error),
+		},
+		false => {
+			file.persist(&path)?;
+		}
+	}
 	// And the rename itself, so a power loss cannot undo the save.
 	#[cfg(unix)]
 	std::fs::File::open(dir)?.sync_all()?;
@@ -625,6 +649,24 @@ mod tests {
 			["show.toml"],
 			"the temporary file is renamed into place, and an empty history is not written"
 		);
+	}
+
+	/// A scene file another program creates after the studio found none, such
+	/// as a second studio finishing setup first, is an outside edit, not
+	/// replaced by the collection setup proposed.
+	#[test]
+	fn leaves_a_file_created_since_it_found_none() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		let (autosave, _) = Autosave::open(path.clone()).unwrap();
+		assert!(!autosave.exists());
+
+		std::fs::write(&path, HAND_WRITTEN).unwrap();
+		let err = format!("{:#}", autosave.save(&Doc::new(collection("Proposed"))).unwrap_err());
+		assert!(err.contains("changed outside the studio"), "{err}");
+		assert_eq!(read(&path), HAND_WRITTEN);
+		assert_eq!(autosave.conflict(), Some(Conflict { refused: None }));
+		assert!(!autosave.exists(), "the studio has not read it");
 	}
 
 	/// A new file gets the permissions any new file would, not a temporary
