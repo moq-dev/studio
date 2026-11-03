@@ -35,7 +35,7 @@ Every panel is a tab you can drag, split, or stack.
 | Scenes | Pick the scene in preview, add one, or remove one. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each is live and where it is shown, clone one, and remove one. Select a source to filter it. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
@@ -173,6 +173,50 @@ studio passes over it for an encoder that reads each frame back to the CPU
 (the opt-in `vaapi` or `openh264` features), which the Output panel counts.
 Frames the encoder cannot keep up with are dropped rather than delaying the
 stream.
+
+### Source tracks
+
+Each camera, display, window, image, and color also publishes as its own track
+in the same broadcast, so a viewer can compose the scene itself. The catalog's
+`video` and `audio` sections stay the program's; the sources are listed under
+the `dev.moq.studio` section's `sources`, by source name, each as a hang
+catalog of its own on the program's clock. This listing is provisional until
+the hang draft specifies source listings:
+
+```json
+{
+  "video": { "renditions": { "0.avc3": { "codec": "avc3.42c01f", "...": "..." } } },
+  "audio": { "renditions": { "audio": { "codec": "opus", "...": "..." } } },
+  "dev.moq.studio": {
+    "sources": {
+      "camera": { "video": { "renditions": { "1.avc3": { "...": "..." } } } },
+      "logo": { "binary": { "tracks": { "2.png": { "mode": "snapshot", "mime": "image/png" } } } }
+    }
+  }
+}
+```
+
+A captured source encodes as H.264 for as long as it is in the collection,
+whether or not anyone watches, so a late viewer can fetch its recent past; the
+relay uploads only what someone subscribes to. A capture that changes size or
+color space moves to a new track, which its catalog entry follows. Images and
+colors publish once, as the image file and as a one-pixel PNG. Removing or
+editing a source ends its track. A track carries the plain capture, before any
+filter, and a clone publishes none, since it shows its source's capture.
+Microphones and system audio do not publish tracks of their own yet, and a
+broadcast source is already its publisher's.
+
+Every captured source opens an encode session as it starts, and consumer GPUs
+allow only a few hardware sessions at once. When the program encodes on
+hardware, so do the sources, and a session the GPU refuses fails that source's
+track with the encoder's reason in the Sources panel rather than falling back
+to software. The source keeps drawing in the studio's own scenes. The program
+opens its session before any source, even with `--on-demand`, so the sources
+past the cap fail rather than the program. When the
+program encodes in software, a source takes hardware where it can and software
+otherwise.
+
+### Source frames
 
 Sources make the opposite trip. A frame already on the GPU is drawn where it
 lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
