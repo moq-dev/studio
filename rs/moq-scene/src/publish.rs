@@ -261,7 +261,13 @@ impl Video {
 			let producer = ladder::producer(&listing.broadcast, reserved, rendition, priority)?;
 			let rendition = Rendition::new(producer, config, false);
 			let lower = ceilings.get(index + 1).copied();
-			let gate = Gate::new(&listing.bandwidth, rendition.demand(), ceilings[index], lower, index == 0);
+			let gate = Gate::new(
+				&listing.bandwidth,
+				rendition.demand(),
+				ceilings[index],
+				lower,
+				index == 0,
+			);
 			rungs.push((gate, rendition));
 		}
 		Ok(Self {
@@ -564,6 +570,60 @@ mod tests {
 			drop(still);
 			drop(new);
 			assert!(catalog.snapshot().ext.studio.sources.is_empty());
+		})
+		.await;
+	}
+
+	/// A source's largest rung encodes unwatched, so a late viewer finds its
+	/// recent past, and a smaller one only while someone subscribes to it,
+	/// each listed as its own rendition.
+	#[tokio::test]
+	async fn smaller_rungs_encode_while_watched() {
+		local(async {
+			let (publish, catalog, consumer) = studio();
+			let claim = publish.claim("camera");
+			let listing = Listing::new(&claim, &publish).unwrap();
+			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+			let size = moq_video::Size::new(640, 360);
+			let frames = |name: &str| listing.catalog.stats().get(name).map_or(0, |sent| sent.frames);
+
+			tokio::select! {
+				result = listing.mirror() => panic!("the mirror ended: {result:?}"),
+				() = async {
+					let mut video = Video::new(&listing, size, framerate, None).await.unwrap();
+					let snapshot = listed(&catalog, |sources| {
+						sources.get("camera").is_some_and(|camera| camera.video.renditions.len() == 2)
+					})
+					.await;
+					let renditions = &snapshot.ext.studio.sources["camera"].video.renditions;
+					let named = |width| {
+						let (name, _) = renditions.iter().find(|(_, config)| config.coded_width == Some(width)).unwrap();
+						name.clone()
+					};
+					let (large, small) = (named(640), named(426));
+
+					let mut millis = 0;
+					let mut encode = |video: &mut Video| {
+						for _ in 0..3 {
+							video.encode(&mut gray(size, millis)).unwrap();
+							millis += 33;
+						}
+					};
+					encode(&mut video);
+					assert!(frames(&large) > 0, "the largest rung encodes unwatched");
+					assert_eq!(frames(&small), 0, "nobody watches the smaller one");
+
+					let watching = consumer.track(&small).unwrap().subscribe(None).await.unwrap();
+					encode(&mut video);
+					let watched = frames(&small);
+					assert!(watched > 0, "a viewer starts the smaller rung");
+
+					drop(watching);
+					tokio::task::yield_now().await;
+					encode(&mut video);
+					assert_eq!(frames(&small), watched, "it stops once the viewer leaves");
+				} => {}
+			}
 		})
 		.await;
 	}

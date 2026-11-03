@@ -39,7 +39,7 @@ Every panel is a tab you can drag, split, or stack.
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the broadcast path, whether the program is encoding, and the encoder's work. |
+| Output | See the broadcast path, whether the program is encoding, and the encoders' work over every rung. |
 | Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
@@ -157,21 +157,34 @@ before sharing.
 
 ## Output
 
-The program publishes as one H.264 rendition at the canvas size and frame rate,
-with Opus stereo audio, under the `--broadcast` path. Timestamps come from the
-studio's own clock, so a source that stalls repeats its last picture instead of
-holding up the stream.
+The program publishes as H.264 renditions at the canvas frame rate, with Opus
+stereo audio, under the `--broadcast` path. Timestamps come from the studio's
+own clock, so a source that stalls repeats its last picture instead of holding
+up the stream.
 
-The program encodes whether or not anyone watches, so a viewer who arrives
-late can fetch the recent past. `--on-demand` copies and encodes the video only
+The video is a simulcast ladder: the canvas size, then two thirds and one third
+of it (1080p, 720p, and 360p for a 1080p canvas), leaving out any rung under
+180 pixels on its shorter side. Each rung reserves at most 0.07 bits per pixel
+per frame (about 4.4 Mb/s at 1080p30) on the relay connection's bandwidth
+estimate, and its encoder follows the share it is granted: down at once when
+the uplink closes, back up over a few seconds when it opens. A rung whose grant
+can no longer fund it, so the one below would look better, stops encoding and
+is advertised as disabled in the catalog until the grant recovers, so viewers
+move to a smaller one; the smallest never stops. Smaller rungs are funded
+first.
+
+The canvas-size rung encodes whether or not anyone watches, so a viewer who
+arrives late can fetch the recent past. `--on-demand` copies and encodes it only
 while someone watches it, which saves that work but leaves nothing from before
-the first viewer; audio encodes either way. A hardware encoder that reads
+the first viewer. The smaller rungs encode only while someone watches them, and
+give their encode sessions back between viewers. Audio encodes either way. A
+hardware encoder that reads
 the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
 takes each frame there when it can read the GPU the studio draws on. When it
 cannot, such as NVENC while the studio draws on a laptop's integrated GPU, the
 studio passes over it for an encoder that reads each frame back to the CPU
 (the opt-in `vaapi` or `openh264` features), which the Output panel counts.
-Frames the encoder cannot keep up with are dropped rather than delaying the
+Frames an encoder cannot keep up with are dropped rather than delaying the
 stream.
 
 ### Source tracks
@@ -196,18 +209,22 @@ the hang draft specifies source listings:
 }
 ```
 
-A captured source encodes as H.264 for as long as it is in the collection,
-whether or not anyone watches, so a late viewer can fetch its recent past; the
-relay uploads only what someone subscribes to. A capture that changes size or
-color space moves to a new track, which its catalog entry follows. Images and
+A captured source encodes as an H.264 ladder like the program's, ranked below
+every rung of the program. Its own size encodes for as long as it is in the
+collection, whether or not anyone watches, so a late viewer can fetch its
+recent past; the relay uploads only what someone subscribes to. Its smaller
+rungs encode only while watched. A capture that changes size or color space
+moves each rung that encodes to a new track, which its catalog entry follows;
+a rung nobody watches moves once it next encodes. Images and
 colors publish once, as the image file and as a one-pixel PNG. Removing or
 editing a source ends its track. A track carries the plain capture, before any
 filter, and a clone publishes none, since it shows its source's capture.
 Microphones and system audio do not publish tracks of their own yet, and a
 broadcast source is already its publisher's.
 
-Every captured source opens an encode session as it starts, and consumer GPUs
-allow only a few hardware sessions at once. When the program encodes on
+Every captured source opens an encode session as it starts, and one more for
+each smaller rung someone watches, and consumer GPUs allow only a few hardware
+sessions at once. When the program encodes on
 hardware, so do the sources, and a session the GPU refuses fails that source's
 track with the encoder's reason in the Sources panel rather than falling back
 to software. The source keeps drawing in the studio's own scenes. The program
@@ -242,9 +259,10 @@ stalling, or cannot decode a track. Below that it shows:
   `.stats` broadcasts. A relay shares those only with a connection allowed to
   read them, so most show "unknown". In a cluster, a relay forwarding the
   stream to another counts as one session.
-- **Tracks**: each track's bitrate and frame rate, and, from viewers that
-  report, the lowest bitrate any received, its worst grade, and the latency
-  from the program clock to the slowest viewer. Latency compares the two
+- **Tracks**: each track's share of the connection's bandwidth estimate, or
+  "off" for a rung its grant cannot fund, its bitrate and frame rate, and,
+  from viewers that report, the lowest bitrate any received, its worst grade,
+  and the latency from the program clock to the slowest viewer. Latency compares the two
   hosts' wall clocks, so keep both synced.
 - **Viewers**: each viewer that reports, with its round trip, latency, and
   playout delay. The studio reads 64 at most, a sample the grades rest on: it

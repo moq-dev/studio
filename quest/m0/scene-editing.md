@@ -11,7 +11,8 @@ Decided 2026-10-26 (maintainer): a resize while publishing adds a new video
 rendition under a new track name in a catalog update, and viewers switch to
 it. A track name never changes what it means (AGENTS.md), so the old track
 ends rather than changing resolution mid-stream. The compositor reallocates
-its canvas textures and the program encoder restarts on the new size.
+its canvas textures and the program's ladder (`moq_scene::ladder`) restarts
+on the new size, each rung on a new track.
 
 A rename updates every reference to the scene in the collection. Reordering
 is the order of the scene file's list. Update

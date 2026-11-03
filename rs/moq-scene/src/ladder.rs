@@ -92,7 +92,11 @@ pub fn producer<E: moq_mux::catalog::hang::CatalogExt>(
 	let suffix = match &rendition.codec {
 		hang::catalog::VideoCodec::H264(_) => ".avc3",
 		hang::catalog::VideoCodec::H265(_) => ".hev1",
-		other => return Err(Error::Unsupported(format!("{other} is not a codec the studio publishes"))),
+		other => {
+			return Err(Error::Unsupported(format!(
+				"{other} is not a codec the studio publishes"
+			)));
+		}
 	};
 	let track = broadcast.unique_track(suffix, reserved.track_info(priority))?;
 	Ok(moq_video::encode::Producer::with_track(track, reserved, rendition)?)
@@ -215,6 +219,8 @@ pub struct Rendition {
 	encoder: Option<moq_video::encode::Encoder>,
 	/// Keep the encoder, and its session, while skipping frames.
 	hold: bool,
+	/// A held encoder skipped frames, so its next frame has to be a keyframe.
+	resumed: bool,
 	state: State,
 	/// The bitrate the gate last asked for.
 	target: Rate,
@@ -235,6 +241,7 @@ impl Rendition {
 			config,
 			encoder: None,
 			hold,
+			resumed: false,
 			state: State::Idle,
 			target,
 			fixed: false,
@@ -270,10 +277,13 @@ impl Rendition {
 		}
 		if (self.state == State::Disabled) != (state == State::Disabled) {
 			let enabled = state != State::Disabled;
-			self.producer.as_mut().expect("open until it ends").set_enabled(enabled)?;
+			self.producer
+				.as_mut()
+				.expect("open until it ends")
+				.set_enabled(enabled)?;
 		}
-		if self.state != State::Encoding
-			&& state == State::Encoding
+		if state == State::Encoding
+			&& std::mem::take(&mut self.resumed)
 			&& let Some(encoder) = &mut self.encoder
 		{
 			// A held encoder resumes where a viewer can start decoding.
@@ -363,6 +373,7 @@ impl Rendition {
 			true => {
 				if let (Some(encoder), Some(producer)) = (&mut self.encoder, &mut self.producer) {
 					producer.publish(&encoder.flush()?)?;
+					self.resumed = true;
 				}
 			}
 			false => self.drain()?,
@@ -471,7 +482,10 @@ mod tests {
 			[size(1920, 1080), size(1280, 720), size(640, 360)]
 		);
 		// A portrait picture scales by its shorter side too.
-		assert_eq!(sizes(size(1080, 1920)), [size(1080, 1920), size(720, 1280), size(360, 640)]);
+		assert_eq!(
+			sizes(size(1080, 1920)),
+			[size(1080, 1920), size(720, 1280), size(360, 640)]
+		);
 		// Rungs under the floor are dropped, and odd sides round down to even.
 		assert_eq!(sizes(size(641, 361)), [size(640, 360), size(426, 240)]);
 		assert_eq!(sizes(size(200, 150)), [size(200, 150)]);
@@ -482,5 +496,98 @@ mod tests {
 		let base = hang::catalog::PRIORITY.video;
 		let ranks: Vec<i8> = (0..3).map(|index| priority(base, index, 3)).collect();
 		assert_eq!(ranks, [base - 2, base - 1, base]);
+	}
+
+	/// A gate follows its share of the estimate down at once and back up over
+	/// the ramp, and a rung that is not `always` encodes only while watched.
+	#[tokio::test(start_paused = true)]
+	async fn a_gate_follows_its_grant_and_its_viewers() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let track = broadcast.create_track("video", None).unwrap();
+		let estimate = bandwidth::Producer::new();
+		estimate.set(Some(Rate::from_mbps(3))).unwrap();
+		let allocator = bandwidth::Allocator::new(estimate.consume());
+		let ceiling = Rate::from_mbps(2);
+
+		let mut always = Gate::new(&allocator, track.demand(), ceiling, None, true);
+		assert_eq!(always.step(), Step::Encode(ceiling));
+		estimate.set(Some(Rate::from_mbps(1))).unwrap();
+		assert_eq!(
+			always.step(),
+			Step::Encode(Rate::from_mbps(1)),
+			"a drop applies at once"
+		);
+		assert_eq!(always.grant().peek(), Some(Rate::from_mbps(1)));
+		estimate.set(Some(Rate::from_mbps(3))).unwrap();
+		match always.step() {
+			Step::Encode(rate) => assert!(rate < ceiling, "a raise climbs: {rate:?}"),
+			step => panic!("{step:?}"),
+		}
+		tokio::time::advance(std::time::Duration::from_secs(5)).await;
+		assert_eq!(always.step(), Step::Encode(ceiling), "and reaches the ceiling");
+		drop(always);
+
+		let mut watched = Gate::new(&allocator, track.demand(), ceiling, None, false);
+		assert_eq!(watched.step(), Step::Idle, "nobody watches");
+		let subscription = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		assert_eq!(watched.step(), Step::Encode(ceiling));
+		drop(subscription);
+		tokio::task::yield_now().await;
+		assert_eq!(watched.step(), Step::Idle, "the viewer left");
+	}
+
+	/// A rung its grant cannot fund is advertised disabled and encodes
+	/// nothing, then resumes on a keyframe; an idle one stays on offer. Either
+	/// gives its encoder session up, unless it holds it.
+	#[tokio::test]
+	async fn a_disabled_rung_is_advertised_off() {
+		for hold in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::<()>::new(&mut broadcast, Default::default()).unwrap();
+			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+			let size = moq_video::Size::new(64, 48);
+			let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
+			// The one encoder every host has, and one that holds no frames back.
+			config.kind = moq_video::encode::Kind::Named("openh264".into());
+			config.bitrate = Some(ceiling(size, framerate));
+			let rendition = config.probe().await.unwrap();
+			let producer = producer(&broadcast, catalog.reserve(), rendition, hang::catalog::PRIORITY.video).unwrap();
+			let mut rendition = Rendition::new(producer, config, hold);
+			let name = rendition.demand().name().to_string();
+			let enabled = || catalog.snapshot().video.renditions[&name].enabled;
+			let sent = || catalog.stats()[&name].clone();
+			let gray = |millis: u64| {
+				let i420 = moq_video::I420::new(size, vec![0x80; moq_video::I420::len(size).unwrap()]).unwrap();
+				let timestamp = moq_net::Timestamp::from_micros(millis * 1000).unwrap();
+				moq_video::Frame::new(moq_video::Surface::I420(i420), timestamp)
+			};
+			let encode = Step::Encode(ceiling(size, framerate));
+
+			rendition.apply(encode).unwrap();
+			for millis in [0, 33, 66] {
+				rendition.encode(&gray(millis)).unwrap();
+			}
+			assert!(enabled());
+			assert_eq!((sent().frames, sent().keyframes), (3, 1));
+
+			rendition.apply(Step::Disabled).unwrap();
+			assert!(!enabled(), "viewers pick another rung");
+			assert_eq!(rendition.encoder.is_some(), hold, "only a held rung keeps its session");
+
+			rendition.apply(encode).unwrap();
+			assert!(enabled());
+			for millis in [200, 233] {
+				rendition.encode(&gray(millis)).unwrap();
+			}
+			assert_eq!((sent().frames, sent().keyframes), (5, 2), "it resumes on a keyframe");
+
+			rendition.apply(Step::Idle).unwrap();
+			assert!(enabled(), "an unwatched rung stays on offer");
+			assert_eq!(rendition.encoder.is_some(), hold, "only a held rung keeps its session");
+			rendition.apply(encode).unwrap();
+			rendition.encode(&gray(400)).unwrap();
+			assert_eq!((sent().frames, sent().keyframes), (6, 3), "it resumes on a keyframe");
+		}
 	}
 }

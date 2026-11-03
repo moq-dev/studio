@@ -125,6 +125,10 @@ pub struct Track {
 	pub id: String,
 	/// What it carries, such as `video H.264 1920x1080`.
 	pub label: String,
+	/// Whether it is advertised as encoding: a rung its grant cannot fund is not.
+	pub enabled: bool,
+	/// Its share of the connection's bandwidth, as the allocator grants it.
+	pub grant: Option<Rate>,
 	/// The bitrate it wrote over the last interval.
 	pub sent: Option<Rate>,
 	/// Frames per second it wrote over the last interval.
@@ -151,15 +155,12 @@ pub struct Problem {
 /// the state of its sources.
 #[derive(Debug, Default, Clone)]
 pub struct Local {
-	/// Canvas frames drawn.
-	pub rendered: u64,
-	/// Program frames the encoder had no room for.
+	/// Program frames offered to an encoder, one per rung encoding it.
+	pub offered: u64,
+	/// Program frames an encoder had no room for.
 	pub dropped: u64,
 	/// Program frames encoded.
 	pub encoded: u64,
-	/// Whether the program should be encoding: always, or while watched when
-	/// on demand.
-	pub encoding: bool,
 	/// Whether anyone subscribes to the program video.
 	pub watched: bool,
 	/// The encoder backend, once one opened.
@@ -181,6 +182,8 @@ pub struct Publisher {
 	pub monitor: moq_tokio::connection::Monitor,
 	pub feedback: Feedback,
 	pub watching: Watching,
+	/// Each track's share of the connection's bandwidth, by track name.
+	pub grants: BTreeMap<String, moq_net::bandwidth::Consumer>,
 }
 
 /// Grades the stream every interval.
@@ -237,7 +240,7 @@ impl Sampler {
 		}
 
 		let drops = previous.as_ref().map(|previous| Drops {
-			drawn: local.rendered.saturating_sub(previous.local.rendered),
+			offered: local.offered.saturating_sub(previous.local.offered),
 			dropped: local.dropped.saturating_sub(previous.local.dropped),
 			encoded: local.encoded.saturating_sub(previous.local.encoded),
 		});
@@ -327,21 +330,22 @@ fn tracks(publisher: &Publisher, graded: &Graded) -> Vec<Track> {
 			(Some(width), Some(height)) => format!(" {width}x{height}"),
 			_ => String::new(),
 		};
-		(id, format!("video {}{size}", config.codec))
+		(id, format!("video {}{size}", config.codec), config.enabled)
 	});
-	let audio = catalog
-		.audio
-		.renditions
-		.iter()
-		.map(|(id, config)| (id, format!("audio {} {} ch", config.codec, config.channel_count)));
+	let audio = catalog.audio.renditions.iter().map(|(id, config)| {
+		let label = format!("audio {} {} ch", config.codec, config.channel_count);
+		(id, label, config.enabled)
+	});
 	video
 		.chain(audio)
-		.map(|(id, label)| {
+		.map(|(id, label, enabled)| {
 			let ours = sent.and_then(|health| health.renditions.get(id));
 			let interval = sent.and_then(|health| health.interval);
 			let mut track = Track {
 				id: id.clone(),
 				label,
+				enabled,
+				grant: publisher.grants.get(id).and_then(moq_net::bandwidth::Consumer::peek),
 				sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
 				framerate: ours
 					.and_then(|rendition| rendition.frames)
@@ -426,10 +430,10 @@ impl GradedViewer {
 	}
 }
 
-/// Program frames over one interval.
+/// Program frames over one interval, summed over the rungs.
 #[derive(Debug, Clone, Copy)]
 struct Drops {
-	drawn: u64,
+	offered: u64,
 	dropped: u64,
 	encoded: u64,
 }
@@ -478,14 +482,15 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		);
 	}
 
+	// Only frames offered count, so a rung skipping frames, because nobody
+	// watches or its grant cannot fund it, is not an encoder behind.
 	if let Some(drops) = facts.drops
-		&& local.encoding
 		&& local.failed.is_none()
 	{
 		let encoder = local.encoder.as_deref().unwrap_or("the encoder");
-		let share = ratio(drops.dropped, drops.drawn);
+		let share = ratio(drops.dropped, drops.offered);
 		let limits = &facts.thresholds.publisher.skipped;
-		if drops.drawn > 0 && drops.encoded == 0 && drops.dropped == 0 && local.encoder.is_some() {
+		if drops.offered > 0 && drops.encoded == 0 && drops.dropped == 0 && local.encoder.is_some() {
 			add(
 				Verdict::Unhealthy,
 				format!("The encoder is stuck: {encoder} produced nothing in the last second."),
@@ -495,7 +500,7 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 				grade_above(share, limits.degraded, limits.unhealthy),
 				format!(
 					"The encoder is behind: {encoder} had no room for {} of {} program frames in the last second.",
-					drops.dropped, drops.drawn
+					drops.dropped, drops.offered
 				),
 			);
 		}
@@ -898,6 +903,8 @@ mod tests {
 		Track {
 			id: id.into(),
 			label: label.into(),
+			enabled: true,
+			grant: None,
 			sent: None,
 			framerate: None,
 			viewers: 0,
@@ -943,18 +950,18 @@ mod tests {
 	}
 
 	/// Program frames the encoder had no room for, and an encoder that
-	/// produces nothing at all, both blame the encoder by name.
+	/// produces nothing at all, both blame the encoder by name. Rungs that
+	/// are offered nothing, being unwatched or unfunded, blame nobody.
 	#[test]
 	fn the_encoder_falling_behind_is_named() {
 		let local = Local {
-			encoding: true,
 			encoder: Some("nvenc".into()),
 			..Default::default()
 		};
 		let uplink = Uplink::default();
 		let mut facts = facts(&local, &uplink, &[], &[]);
 		facts.drops = Some(Drops {
-			drawn: 30,
+			offered: 30,
 			dropped: 3,
 			encoded: 27,
 		});
@@ -966,7 +973,7 @@ mod tests {
 		);
 
 		facts.drops = Some(Drops {
-			drawn: 30,
+			offered: 30,
 			dropped: 0,
 			encoded: 0,
 		});
@@ -976,9 +983,16 @@ mod tests {
 		);
 
 		facts.drops = Some(Drops {
-			drawn: 30,
+			offered: 30,
 			dropped: 0,
 			encoded: 30,
+		});
+		assert!(super::problems(&facts).is_empty());
+
+		facts.drops = Some(Drops {
+			offered: 0,
+			dropped: 0,
+			encoded: 0,
 		});
 		assert!(super::problems(&facts).is_empty());
 	}
@@ -1095,6 +1109,11 @@ mod tests {
 		let track = broadcast
 			.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
+		// A 1 Mb/s estimate, of which the track's ceiling is its grant.
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate.set(Some(Rate::from_mbps(1))).unwrap();
+		let allocator = moq_net::bandwidth::Allocator::new(estimate.consume());
+		let reservation = allocator.reserve(&track.demand(), Rate::from_kbps(128));
 		let _audio = catalog
 			.audio(
 				track,
@@ -1120,6 +1139,7 @@ mod tests {
 			monitor: connection.monitor(),
 			feedback: feedback.clone(),
 			watching: Watching::default(),
+			grants: [(id.clone(), reservation.consume())].into(),
 		}));
 
 		let alice = origin.create_broadcast("show/viewers/alice.echo").unwrap();
@@ -1148,6 +1168,7 @@ mod tests {
 		assert_eq!(viewer.name, "alice");
 		let audio = sampled.tracks.iter().find(|track| track.id == id).unwrap();
 		assert_eq!(audio.label, "audio opus 2 ch");
+		assert_eq!(audio.grant, Some(Rate::from_kbps(128)));
 		assert_eq!(audio.viewers, 1);
 		// The report carries milliseconds, so the program clock's sub-millisecond
 		// wall mapping can floor it by one.

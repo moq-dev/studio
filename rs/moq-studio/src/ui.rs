@@ -1031,8 +1031,9 @@ impl Panels {
 					ui.label(&output.path);
 					ui.end_row();
 					ui.label("Encoding");
+					// The smaller renditions encode only while watched either way.
 					ui.label(match (output.on_demand, stats.watched.load(Ordering::Relaxed)) {
-						(false, _) => "always",
+						(false, _) => "always; smaller sizes while watched",
 						(true, true) => "while watched; watched now",
 						(true, false) => "while watched; idle now",
 					});
@@ -1153,6 +1154,7 @@ impl Panels {
 			egui::Grid::new("tracks").striped(true).show(ui, |ui| {
 				for heading in [
 					"Track",
+					"Granted",
 					"Sent",
 					"Frames",
 					"Viewers",
@@ -1165,6 +1167,12 @@ impl Panels {
 				ui.end_row();
 				for track in &report.tracks {
 					ui.label(&track.label).on_hover_text(&track.id);
+					match track.enabled {
+						true => ui.label(or_unknown(track.grant.map(health::rate))),
+						false => ui
+							.weak("off")
+							.on_hover_text("The grant cannot fund this size, so viewers get a smaller one."),
+					};
 					ui.label(or_unknown(track.sent.map(health::rate)));
 					ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
 					ui.label(track.viewers.to_string());
