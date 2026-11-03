@@ -416,11 +416,13 @@ impl Panels {
 		}
 	}
 
-	/// Deselect an item, after an edit that may have moved any of them.
+	/// Deselect an item and drop a scene rename under way, after an edit that
+	/// may have moved any of them.
 	fn deselect_item(&mut self) {
 		if matches!(self.selection, Some(Selection::Item(..))) {
 			self.selection = None;
 		}
+		self.renaming = None;
 	}
 
 	/// The layer the Items panel shows, and new sources are placed in.

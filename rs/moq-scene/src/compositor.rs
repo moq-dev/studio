@@ -1,7 +1,7 @@
 //! Draw scenes onto the canvas on the GPU: a preview, a program, and the fade
 //! between them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -321,16 +321,18 @@ impl Compositor {
 		self.preview_scene = scene;
 	}
 
-	/// Follow the scene called `from` to its new name `to`, wherever it is: in
-	/// preview, on program, or fading out. See [`Edit::renames`](crate::Edit::renames).
-	pub fn rename(&mut self, from: &str, to: &str) {
+	/// Follow each renamed scene to its new name, wherever it is: in preview,
+	/// on program, or fading out. `renames` maps each old name to its new one,
+	/// as [`Collection::renames`] reads them, and each scene is looked up once,
+	/// so a name one scene gave up and another took is not followed twice.
+	pub fn rename(&mut self, renames: &BTreeMap<String, String>) {
 		let fading = self.fade.as_mut().map(|fade| &mut fade.from);
 		for scene in [&mut self.preview_scene, &mut self.program_scene]
 			.into_iter()
 			.chain(fading)
 		{
-			if scene.as_deref() == Some(from) {
-				*scene = Some(to.to_string());
+			if let Some(to) = scene.as_ref().and_then(|name| renames.get(name)) {
+				*scene = Some(to.clone());
 			}
 		}
 	}
@@ -1078,7 +1080,8 @@ mod tests {
 		.await;
 	}
 
-	/// A renamed scene stays in preview, on program, and in the fade under way.
+	/// A renamed scene stays in preview, on program, and in the fade under way,
+	/// even when another scene takes its old name in the same edit.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn a_renamed_scene_stays_where_it_is() {
@@ -1090,18 +1093,15 @@ mod tests {
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.compositor.fade(Duration::from_secs(1), start);
 
-			for (from, to) in [("red", "crimson"), ("blue", "navy")] {
-				studio
-					.collection
-					.scenes
-					.iter_mut()
-					.find(|scene| scene.name == from)
-					.unwrap()
-					.name = to.into();
-				studio.compositor.rename(from, to);
-			}
-			assert_eq!(studio.compositor.preview_scene(), Some("navy"));
-			assert_eq!(studio.compositor.program_scene(), Some("navy"));
+			// `blue` takes the name `red` gives up, which is followed once.
+			let mut draft = studio.collection.draft("Rename");
+			draft.rename_scene(0, "crimson").unwrap();
+			draft.rename_scene(1, "red").unwrap();
+			let edit = draft.finish().unwrap();
+			studio.compositor.rename(&studio.collection.renames(&edit));
+			studio.collection.apply(&edit).unwrap();
+			assert_eq!(studio.compositor.preview_scene(), Some("red"));
+			assert_eq!(studio.compositor.program_scene(), Some("red"));
 			studio.render(start + Duration::from_millis(500));
 			let actual = pixel(&studio.program(), 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "still fading from red: {actual:?}");

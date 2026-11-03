@@ -154,13 +154,20 @@ impl State {
 		Ok(())
 	}
 
-	/// Make `collection`, which `made` led to, the one drawn, once the
-	/// compositor takes its canvas. The scenes in preview and on program
-	/// follow the renames `made` holds.
+	/// Make `collection`, which the edits `made` led to from the current one,
+	/// the one drawn, once the compositor takes its canvas. The scenes in
+	/// preview and on program follow the renames `made` holds, each edit read
+	/// against the collection it was made to.
 	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<()> {
+		let mut before = self.collection.clone();
+		let mut renames = Vec::with_capacity(made.len());
+		for edit in made {
+			renames.push(before.renames(edit));
+			before.apply(edit)?;
+		}
 		self.compositor.set_canvas(collection.canvas)?;
-		for (from, to) in made.iter().flat_map(Edit::renames) {
-			self.compositor.rename(from, to);
+		for renames in &renames {
+			self.compositor.rename(renames);
 		}
 		self.collection = collection;
 		Ok(())
@@ -228,7 +235,11 @@ impl Stats {
 	/// Why the output stopped, if it did.
 	pub fn error(&self) -> Option<String> {
 		let video = self.video_error.lock().unwrap().clone();
-		video.or_else(|| self.audio_error.lock().unwrap().clone())
+		let audio = self.audio_error.lock().unwrap().clone();
+		match (video, audio) {
+			(Some(video), Some(audio)) => Some(format!("{video}; {audio}")),
+			(video, audio) => video.or(audio),
+		}
 	}
 
 	fn fail_video(&self, err: impl std::fmt::Display) {
@@ -324,7 +335,8 @@ impl Engine {
 
 		let (output, origin, publish) = match connect {
 			Some(connect) => {
-				let (output, publish) = publish(&gpu, &stats, connect, subscribe, &broadcast, canvas, on_demand).await?;
+				let (output, publish) =
+					publish(&gpu, &stats, connect, subscribe, &broadcast, canvas, on_demand).await?;
 				(Some(output), None, Some(publish))
 			}
 			None => (None, Some(subscribe), None),
@@ -478,8 +490,8 @@ impl Engine {
 		// One probe at a time, with the canvas it is for, since a GPU caps its
 		// encode sessions.
 		let mut probing: Option<(Canvas, std::thread::JoinHandle<anyhow::Result<Probe>>)> = None;
-		// The encode threads of renditions ended since, whose sessions the next
-		// probe waits to be closed.
+		// The encode threads of renditions ended or failed since, whose
+		// sessions the next probe waits to be closed.
 		let mut ending = Vec::new();
 		// Whether the canvas drawn has its rendition, or failed to open one, so
 		// a failure is not retried until the canvas changes.
@@ -515,6 +527,7 @@ impl Engine {
 				// Ended before the next opens, so the two never hold encode
 				// sessions at once.
 				ending.extend(rendition.take().map(Rendition::end));
+				*self.stats.encoder.lock().unwrap() = None;
 			}
 			if let Some(renditions) = &renditions {
 				// Probed beside the program clock, so drawing carries on.
@@ -558,7 +571,7 @@ impl Engine {
 				// Behind every frame already sent, so the break lands after them.
 				// A send fails only once the encoder stopped, having reported why.
 				if was && current.frames.send(Video::Pause).is_err() {
-					rendition = None;
+					ending.extend(rendition.take().map(Rendition::end));
 				}
 				continue;
 			}
@@ -570,7 +583,7 @@ impl Engine {
 				// a pause the encoder has not reached yet.
 				Ok(Some(pending)) => {
 					if current.frames.send(Video::Frame(pending)).is_err() {
-						rendition = None;
+						ending.extend(rendition.take().map(Rendition::end));
 					}
 				}
 				Ok(None) => {
@@ -580,7 +593,7 @@ impl Engine {
 				// the GPU failing: the video stops, and the canvas keeps drawing.
 				Err(err) => {
 					let _ = current.frames.send(Video::Failed(err));
-					rendition = None;
+					ending.extend(rendition.take().map(Rendition::end));
 				}
 			}
 		}
@@ -1167,7 +1180,7 @@ mod tests {
 		assert_eq!(echo.path.as_str(), "studio/viewers");
 		let (video, config) = catalog.video.enabled().next().expect("a video rendition");
 		let mut pictures = subscribe(&broadcast, video, config).await;
-		red(&mut pictures, moq_video::Size::new(320, 180))
+		let shown = red(&mut pictures, moq_video::Size::new(320, 180))
 			.await
 			.expect("the composed picture arrives");
 
@@ -1230,10 +1243,10 @@ mod tests {
 			state.commit(draft, None).unwrap();
 		}
 		let ended = kio::clock::timeout(TIMEOUT, async {
-			let mut last = None;
+			let mut last = shown;
 			while let Some(read) = pictures.read().await.expect("decode") {
 				if let moq_video::decode::Read::Frame(frame) = read {
-					last = Some(frame.timestamp);
+					last = frame.timestamp;
 				}
 			}
 			last
@@ -1256,10 +1269,7 @@ mod tests {
 		let first = red(&mut pictures, moq_video::Size::new(160, 90))
 			.await
 			.expect("the resized picture arrives");
-		assert!(
-			ended.is_none_or(|ended| ended < first),
-			"the new rendition continues the old one's timeline"
-		);
+		assert!(ended < first, "the new rendition continues the old one's timeline");
 
 		// An edit, and then its undo, reach the scene file and the history
 		// beside it through the autosave the studio runs.

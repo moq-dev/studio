@@ -9,7 +9,7 @@
 //! Build an edit with a [`Draft`], which reads what each change replaces from
 //! the collection as the earlier changes left it.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -316,20 +316,6 @@ impl Edit {
 			changes: self.changes.iter().rev().map(Change::inverse).collect(),
 		}
 	}
-
-	/// The scenes this edit renames, as each old name and its new one, in the
-	/// order it renames them. Whatever follows a scene by name, such as the
-	/// one in preview, follows these in turn.
-	pub fn renames(&self) -> impl Iterator<Item = (&str, &str)> {
-		self.changes.iter().filter_map(|change| match change {
-			Change::Scene {
-				before: Some(before),
-				after: Some(after),
-				..
-			} if before.name != after.name => Some((before.name.as_str(), after.name.as_str())),
-			_ => None,
-		})
-	}
 }
 
 impl Collection {
@@ -343,6 +329,40 @@ impl Collection {
 		next.validate()?;
 		*self = next;
 		Ok(())
+	}
+
+	/// The new name of each scene `edit` renames, by its name here, before the
+	/// edit. A scene is followed by its place in the list rather than by name,
+	/// so an edit that reuses a name it just freed, such as renaming `A` to
+	/// `B` and the old `B` to `C`, maps each scene to its own new name.
+	/// Whatever follows a scene by name, such as the one in preview, looks its
+	/// name up here once.
+	pub fn renames(&self, edit: &Edit) -> BTreeMap<String, String> {
+		// Each place's scene: its name here, or `None` for one the edit added.
+		let mut scenes: Vec<(Option<&str>, &str)> = self
+			.scenes
+			.iter()
+			.map(|scene| (Some(scene.name.as_str()), scene.name.as_str()))
+			.collect();
+		for change in &edit.changes {
+			let Change::Scene { index, before, after } = change else {
+				continue;
+			};
+			match (before, after) {
+				(None, Some(after)) if *index <= scenes.len() => scenes.insert(*index, (None, &after.name)),
+				(Some(_), None) if *index < scenes.len() => {
+					scenes.remove(*index);
+				}
+				(Some(_), Some(after)) if *index < scenes.len() => scenes[*index].1 = &after.name,
+				_ => {}
+			}
+		}
+		scenes
+			.into_iter()
+			.filter_map(|(was, now)| Some((was?, now)))
+			.filter(|(was, now)| was != now)
+			.map(|(was, now)| (was.to_string(), now.to_string()))
+			.collect()
 	}
 
 	/// Start an edit labelled `label` against this collection.
@@ -906,9 +926,16 @@ mod tests {
 		assert_eq!(history.entries().len(), 2, "a drag back to the start is no edit");
 	}
 
+	fn renamed(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+		pairs
+			.iter()
+			.map(|(was, now)| (was.to_string(), now.to_string()))
+			.collect()
+	}
+
 	/// A rename keeps the scene's items and place, a move keeps its name, and
-	/// the edit lists its renames in order, so two scenes can swap names
-	/// through a third.
+	/// each scene maps to its own new name, even through names the edit
+	/// frees and reuses.
 	#[test]
 	fn renames_and_reorders_scenes() {
 		let mut collection = collection();
@@ -921,8 +948,8 @@ mod tests {
 		draft.rename_scene(1, "Scene").unwrap();
 		draft.rename_scene(0, "Other").unwrap();
 		let edit = draft.finish().unwrap();
-		let renames: Vec<_> = edit.renames().collect();
-		assert_eq!(renames, [("Scene", "swap"), ("Other", "Scene"), ("swap", "Other")]);
+		let renames = collection.renames(&edit);
+		assert_eq!(renames, renamed(&[("Scene", "Other"), ("Other", "Scene")]));
 		collection.apply(&edit).unwrap();
 		history.record(edit, None);
 		assert_eq!(collection.scenes[0].name, "Other");
@@ -931,7 +958,7 @@ mod tests {
 		let mut draft = collection.draft("Move `Other` down");
 		draft.move_scene(0, 1).unwrap();
 		let edit = draft.finish().unwrap();
-		assert_eq!(edit.renames().count(), 0, "a move is no rename");
+		assert!(collection.renames(&edit).is_empty(), "a move is no rename");
 		collection.apply(&edit).unwrap();
 		history.record(edit, None);
 		let names: Vec<_> = collection.scenes.iter().map(|scene| scene.name.as_str()).collect();
@@ -940,6 +967,25 @@ mod tests {
 
 		history.seek(&mut collection, 0).unwrap();
 		assert_eq!(collection, start);
+
+		// The second rename takes the name the first freed, so read one after
+		// the other, `Scene` would land on `Next`, the other scene.
+		let mut draft = collection.draft("Chain");
+		draft.rename_scene(0, "Other").unwrap();
+		draft.rename_scene(1, "Next").unwrap();
+		draft.insert_scene(0, Scene::new("New")).unwrap();
+		let edit = draft.finish().unwrap();
+		assert_eq!(
+			collection.renames(&edit),
+			renamed(&[("Scene", "Other"), ("Other", "Next")]),
+			"an added scene renames nothing"
+		);
+		collection.apply(&edit).unwrap();
+		assert_eq!(
+			collection.renames(&edit.inverse()),
+			renamed(&[("Other", "Scene"), ("Next", "Other")]),
+			"the undo maps each back"
+		);
 
 		// Names stay unique and non-empty.
 		for name in ["Other", ""] {
