@@ -1678,8 +1678,12 @@ impl Devices {
 	fn refresh(&mut self, runtime: &tokio::runtime::Handle) {
 		let (send, recv) = std::sync::mpsc::channel();
 		self.pending = Some(recv);
-		runtime.spawn(async move {
-			let _ = send.send(list().await);
+		// The capture backends' listing futures are `!Send` on macOS, as their
+		// capture futures are (which is why each source runs on its own thread),
+		// so poll the listing on a blocking thread rather than spawn it.
+		let handle = runtime.clone();
+		runtime.spawn_blocking(move || {
+			let _ = send.send(handle.block_on(list()));
 		});
 	}
 
