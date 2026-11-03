@@ -12,6 +12,7 @@ use anyhow::Context;
 mod autosave;
 mod engine;
 mod health;
+mod replay;
 mod ui;
 
 #[derive(usage_rs::Cli, Clone)]

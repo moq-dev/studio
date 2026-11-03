@@ -44,8 +44,9 @@ pub struct Target {
 /// picture. Dropping it releases them.
 pub struct Take {
 	broadcast: moq_net::broadcast::Producer,
-	/// Keeps the copies readable once their copy finishes.
+	/// Keep the copies and their listing readable once the copy finishes.
 	_tracks: Vec<moq_net::track::Producer>,
+	_listing: moq_mux::catalog::Producer,
 	/// The video rendition, under its catalog name.
 	pub video: Option<(String, VideoConfig)>,
 	/// The audio rendition, under its catalog name.
@@ -78,7 +79,9 @@ impl Take {
 			)));
 		}
 		if target.video.is_none() && target.audio.is_none() {
-			return Err(Error::Unsupported("the broadcast has no video or audio to replay".into()));
+			return Err(Error::Unsupported(
+				"the broadcast has no video or audio to replay".into(),
+			));
 		}
 		let end = target.end;
 		let start = Duration::from(end).saturating_sub(length);
@@ -111,8 +114,13 @@ impl Take {
 		};
 		// Listed so an export of the take finds its renditions; HLS is for live
 		// viewers, which a take has none of.
-		let config = moq_mux::catalog::Config::default().with_catalog(catalog).with_hls(None);
+		let config = moq_mux::catalog::Config::default().with_hls(None);
 		let mut listing = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+		listing.mutate(|listed| {
+			listed.video.renditions = catalog.video.renditions;
+			listed.audio.renditions = catalog.audio.renditions;
+		})?;
+		let listed = listing.clone();
 
 		let copy = async move {
 			let (video, audio) = tokio::join!(run(video), run(audio));
@@ -126,6 +134,7 @@ impl Take {
 		let take = Self {
 			broadcast,
 			_tracks: tracks,
+			_listing: listed,
 			video: target.video.clone(),
 			audio: target.audio.clone(),
 			start,
@@ -279,7 +288,9 @@ mod tests {
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			for frame in 0..3 {
 				let at = ts(sequence * 1000 + frame * 333);
-				group.write_frame(at, format!("{sequence}.{frame}").into_bytes()).unwrap();
+				group
+					.write_frame(at, format!("{sequence}.{frame}").into_bytes())
+					.unwrap();
 			}
 			group.finish().unwrap();
 		}
@@ -337,7 +348,12 @@ mod tests {
 		copy.await.unwrap();
 		assert_eq!(
 			read(&take).await,
-			[(4, frames(4, 3)), (5, frames(5, 3)), (6, frames(6, 3)), (7, frames(7, 2))]
+			[
+				(4, frames(4, 3)),
+				(5, frames(5, 3)),
+				(6, frames(6, 3)),
+				(7, frames(7, 2))
+			]
 		);
 	}
 
@@ -377,7 +393,12 @@ mod tests {
 		copy.await.unwrap().unwrap();
 		assert_eq!(
 			read(&take).await,
-			[(4, frames(4, 3)), (5, frames(5, 3)), (6, frames(6, 3)), (7, frames(7, 2))]
+			[
+				(4, frames(4, 3)),
+				(5, frames(5, 3)),
+				(6, frames(6, 3)),
+				(7, frames(7, 2))
+			]
 		);
 	}
 

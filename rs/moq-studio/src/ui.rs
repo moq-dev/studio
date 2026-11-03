@@ -1,7 +1,7 @@
 //! The window: docked panels over the engine's state.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -12,6 +12,7 @@ use moq_scene::{Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Sourc
 
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
+use crate::replay::{self, Of};
 
 /// The panels, each a tab the user can move, split, or stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -27,6 +28,7 @@ enum Tab {
 	Audio,
 	Output,
 	Health,
+	Replay,
 }
 
 impl Tab {
@@ -43,6 +45,7 @@ impl Tab {
 			Self::Audio => "Audio",
 			Self::Output => "Output",
 			Self::Health => "Health",
+			Self::Replay => "Replay",
 		}
 	}
 }
@@ -86,7 +89,11 @@ impl Studio {
 		tree.split_right(top, 0.5, vec![Tab::Program]);
 		let [_, items] = tree.split_right(bottom, 0.18, vec![Tab::Items]);
 		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices]);
-		tree.split_right(sources, 0.5, vec![Tab::Filters, Tab::Health, Tab::Audio, Tab::Output]);
+		tree.split_right(
+			sources,
+			0.5,
+			vec![Tab::Filters, Tab::Replay, Tab::Health, Tab::Audio, Tab::Output],
+		);
 
 		Ok(Self {
 			dock,
@@ -102,6 +109,7 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
+				replay: Replay::default(),
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
 			},
 		})
@@ -139,6 +147,7 @@ struct Panels {
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
+	replay: Replay,
 	/// The outcome of the last action, shown in the status bar.
 	message: Option<Result<String, String>>,
 }
@@ -171,6 +180,7 @@ impl TabViewer for Panels {
 			Tab::Audio => self.audio(ui),
 			Tab::Output => self.output(ui),
 			Tab::Health => self.health(ui),
+			Tab::Replay => self.replay(ui),
 		}
 	}
 }
@@ -1087,6 +1097,126 @@ impl Panels {
 		}
 	}
 
+	/// Replay the recent past of the program or a source in a replay source,
+	/// or save it as a clip.
+	fn replay(&mut self, ui: &mut Ui) {
+		let (pictures, replays) = {
+			let state = self.engine.state.lock().unwrap();
+			let named = |kind: fn(&Source) -> bool| -> Vec<String> {
+				let sources = &state.collection().sources;
+				sources
+					.iter()
+					.filter(|(_, source)| kind(source))
+					.map(|(name, _)| name.clone())
+					.collect()
+			};
+			(
+				named(|source| source.has_video() && !matches!(source, Source::Image { .. } | Source::Color { .. })),
+				named(|source| matches!(source, Source::Replay)),
+			)
+		};
+		let panel = &mut self.replay;
+		if panel.into.as_ref().is_none_or(|into| !replays.contains(into)) {
+			panel.into = replays.first().cloned();
+		}
+
+		egui::Grid::new("replay").show(ui, |ui| {
+			ui.label("Replay");
+			egui::ComboBox::from_id_salt("replay of")
+				.selected_text(panel.of.to_string())
+				.show_ui(ui, |ui| {
+					ui.selectable_value(&mut panel.of, Of::Program, Of::Program.to_string());
+					for name in pictures {
+						let of = Of::Source(name);
+						let label = of.to_string();
+						ui.selectable_value(&mut panel.of, of, label);
+					}
+				});
+			ui.end_row();
+			ui.label("Length");
+			egui::ComboBox::from_id_salt("replay length")
+				.selected_text(format!("{} s", panel.length.as_secs()))
+				.show_ui(ui, |ui| {
+					for length in replay::LENGTHS {
+						ui.selectable_value(&mut panel.length, length, format!("{} s", length.as_secs()));
+					}
+				});
+			ui.end_row();
+			ui.label("Speed");
+			egui::ComboBox::from_id_salt("replay speed")
+				.selected_text(format!("{:.0}%", panel.speed * 100.0))
+				.show_ui(ui, |ui| {
+					for speed in replay::SPEEDS {
+						ui.selectable_value(&mut panel.speed, speed, format!("{:.0}%", speed * 100.0));
+					}
+				});
+			ui.end_row();
+			ui.label("Play in");
+			match &mut panel.into {
+				Some(into) => {
+					egui::ComboBox::from_id_salt("replay into")
+						.selected_text(into.as_str())
+						.show_ui(ui, |ui| {
+							for name in replays {
+								let label = name.clone();
+								ui.selectable_value(into, name, label);
+							}
+						});
+				}
+				None => {
+					ui.weak("no replay source; add one in Sources");
+				}
+			}
+			ui.end_row();
+		});
+
+		let (play, save) = ui
+			.horizontal(|ui| {
+				let play = ui
+					.add_enabled(panel.into.is_some(), egui::Button::new("Replay"))
+					.on_hover_text("Play the last moments in the replay source")
+					.clicked();
+				let save = ui
+					.button("Save clip")
+					.on_hover_text("Save the last moments, in real time, beside the scene file")
+					.clicked();
+				(play, save)
+			})
+			.inner;
+		if let Some(outcome) = panel.outcome.lock().unwrap().as_ref() {
+			match outcome {
+				Ok(message) => ui.label(message),
+				Err(err) => ui.colored_label(ui.visuals().error_fg_color, err),
+			};
+		}
+		if !play && !save {
+			return;
+		}
+
+		// The span ends at the click, however long copying it takes to start.
+		let outcome = panel.outcome.clone();
+		let target = match self.engine.target(&panel.of) {
+			Ok(target) => target,
+			Err(err) => {
+				*outcome.lock().unwrap() = Some(Err(format!("{err:#}")));
+				return;
+			}
+		};
+		let engine = self.engine.clone();
+		let (of, length, speed, into) = (panel.of.clone(), panel.length, panel.speed, panel.into.clone());
+		self.runtime.spawn(async move {
+			let result = match into.filter(|_| play) {
+				Some(into) => replay::play(engine, target, length, speed, into.clone())
+					.await
+					.map(|()| format!("replaying {of} in `{into}`")),
+				None => replay::save(target, length, engine.autosave.path())
+					.await
+					.map(|path| format!("saved {of} to {}", path.display())),
+			};
+			*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
+		});
+	}
+
 	/// How the stream reaches viewers: what is wrong and why, the uplink, each
 	/// track, and each viewer that reports.
 	fn health(&mut self, ui: &mut Ui) {
@@ -1320,6 +1450,7 @@ fn describe(source: &Source) -> String {
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
 		Source::Clone { source } => format!("clone of {source}"),
+		Source::Replay => "replay".into(),
 	}
 }
 
@@ -1395,10 +1526,11 @@ enum Kind {
 	Window,
 	Microphone,
 	SystemAudio,
+	Replay,
 }
 
 impl Kind {
-	const ALL: [Self; 8] = [
+	const ALL: [Self; 9] = [
 		Self::Color,
 		Self::Image,
 		Self::Broadcast,
@@ -1407,6 +1539,7 @@ impl Kind {
 		Self::Window,
 		Self::Microphone,
 		Self::SystemAudio,
+		Self::Replay,
 	];
 
 	fn label(self) -> &'static str {
@@ -1419,13 +1552,14 @@ impl Kind {
 			Self::Window => "Window",
 			Self::Microphone => "Microphone",
 			Self::SystemAudio => "System audio",
+			Self::Replay => "Replay",
 		}
 	}
 
 	/// What the value field holds, if this kind takes one.
 	fn value(self) -> Option<&'static str> {
 		match self {
-			Self::Color | Self::SystemAudio => None,
+			Self::Color | Self::SystemAudio | Self::Replay => None,
 			Self::Image => Some("file"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
@@ -1481,7 +1615,31 @@ impl AddSource {
 			Kind::Window => Source::Window { id: value },
 			Kind::Microphone => Source::Microphone { id },
 			Kind::SystemAudio => Source::SystemAudio,
+			Kind::Replay => Source::Replay,
 		})
+	}
+}
+
+/// The Replay panel's choices, and how the last replay or clip went.
+struct Replay {
+	of: Of,
+	length: Duration,
+	speed: f32,
+	/// The replay source a replay plays in.
+	into: Option<String>,
+	/// Set by the replay or save running in the background.
+	outcome: Arc<Mutex<Option<Result<String, String>>>>,
+}
+
+impl Default for Replay {
+	fn default() -> Self {
+		Self {
+			of: Of::Program,
+			length: replay::LENGTHS[1],
+			speed: replay::SPEEDS[0],
+			into: None,
+			outcome: Arc::default(),
+		}
 	}
 }
 

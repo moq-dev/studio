@@ -613,7 +613,11 @@ impl Driver {
 
 	/// Play each replay [`Feed::replay`] hands over, showing nothing between
 	/// them. A new one cuts off the one playing.
-	async fn replays(&self, mut plays: watch::Receiver<Option<Play>>, listing: Option<&Listing<'_>>) -> Result<(), Error> {
+	async fn replays(
+		&self,
+		mut plays: watch::Receiver<Option<Play>>,
+		listing: Option<&Listing<'_>>,
+	) -> Result<(), Error> {
 		*self.picture.lock().unwrap() = Some(clear());
 		set(&self.status, Status::Live);
 
@@ -682,7 +686,8 @@ impl Driver {
 								.filter(|rate| rate.is_finite() && *rate >= 1.0)
 								.and_then(|rate| moq_video::FrameRate::new(rate.round() as u32, 1).ok())
 								.unwrap_or_else(|| moq_video::FrameRate::new(30, 1).expect("a valid frame rate"));
-							let video = crate::publish::Video::new(listing, frame.size(), framerate, frame.surface.color());
+							let video =
+								crate::publish::Video::new(listing, frame.size(), framerate, frame.surface.color());
 							track = self.publish(video.await);
 						}
 						if let Some(video) = &mut track {
@@ -699,7 +704,8 @@ impl Driver {
 					}
 					// A stretch the broadcast was offline, paused, or lost
 					// replays as the gap it was.
-					moq_video::decode::Read::Gap { timestamp, .. } | moq_video::decode::Read::End { end: timestamp } => {
+					moq_video::decode::Read::Gap { timestamp, .. }
+					| moq_video::decode::Read::End { end: timestamp } => {
 						kio::clock::sleep_until(at(timestamp.max(take.start))).await;
 						*self.picture.lock().unwrap() = Some(clear());
 					}
@@ -1267,7 +1273,10 @@ mod tests {
 				encoder.cut().unwrap();
 			}
 			let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(64, 64)).unwrap();
-			let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap());
+			let frame = moq_video::Frame::new(
+				surface,
+				moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap(),
+			);
 			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
 		}
 		let video = catalog.snapshot().video.renditions.into_iter().next().unwrap();
@@ -1325,13 +1334,18 @@ mod tests {
 			for (at, timestamp) in &shown {
 				let into = Duration::from(*timestamp) - Duration::from(expected[0]);
 				let due = first + into.div_f32(speed);
-				assert!(at.saturating_duration_since(due) <= Duration::from_millis(1), "{timestamp:?}");
+				assert!(
+					at.saturating_duration_since(due) <= Duration::from_millis(1),
+					"{timestamp:?}"
+				);
 			}
 			let played = cleared.saturating_duration_since(first);
-			assert!(played.abs_diff(Duration::from_secs(2)) <= Duration::from_millis(1), "{played:?}");
+			assert!(
+				played.abs_diff(Duration::from_secs(2)) <= Duration::from_millis(1),
+				"{played:?}"
+			);
 			assert_eq!(feed.status(), Status::Live, "ready for the next replay");
 		})
 		.await;
 	}
-
 }
