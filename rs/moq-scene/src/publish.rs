@@ -269,7 +269,7 @@ impl Video {
 			self.config.width = size.width;
 			self.config.height = size.height;
 			self.config.color = color;
-			self.encoder = None;
+			self.drain()?;
 		}
 		let encoder = match &mut self.encoder {
 			Some(encoder) => encoder,
@@ -281,6 +281,16 @@ impl Video {
 			encoder.encode(&frame.resize(size, &Default::default())?)?
 		};
 		self.producer.as_mut().expect("open until it ends").publish(&encoded)?;
+		Ok(())
+	}
+
+	/// Publish what the encoder still holds and close it, so a pipelined
+	/// backend's last pictures are not lost when the encoder is replaced or the
+	/// track ends.
+	fn drain(&mut self) -> Result<(), Error> {
+		if let (Some(encoder), Some(producer)) = (self.encoder.take(), &mut self.producer) {
+			producer.publish(&encoder.finish()?)?;
+		}
 		Ok(())
 	}
 
@@ -300,8 +310,13 @@ impl Drop for Video {
 	fn drop(&mut self) {
 		// A capture that ends, or a source removed or edited, ends its track
 		// cleanly rather than leaving subscribers with a dropped one.
-		if let Some(mut producer) = self.producer.take() {
-			let _ = producer.finish();
+		let drained = self.drain();
+		match (self.producer.take(), drained) {
+			(Some(mut producer), Ok(())) => {
+				let _ = producer.finish();
+			}
+			(Some(producer), Err(err)) => producer.abort(moq_net::Error::Transport(err.to_string())),
+			(None, _) => {}
 		}
 	}
 }
