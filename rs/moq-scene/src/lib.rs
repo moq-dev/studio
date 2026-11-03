@@ -20,6 +20,9 @@
 //!   where the platform allows.
 //! - [`publish`] gives each local source its own track in the studio's
 //!   broadcast, so viewers can compose the scene themselves.
+//! - [`ladder`] encodes a picture at several sizes, each following its own
+//!   share of the connection's bandwidth, and [`Scaler`] draws the smaller
+//!   sizes of the program on the GPU.
 //!
 //! Every picture is drawn on the program clock the caller ticks
 //! [`Compositor::render`] with, from whatever each source delivered last: a
@@ -30,13 +33,16 @@ pub mod clip;
 mod collection;
 mod compositor;
 mod edit;
+pub mod ladder;
 pub mod publish;
+mod scale;
 pub mod source;
 
 pub use clip::Clip;
 pub use collection::{Audio, Canvas, Collection, Filter, Item, Layer, Rect, Rgba, Scene, Source, Transition, Video};
 pub use compositor::{Compositor, FORMAT};
 pub use edit::{Change, Draft, Edit, History};
+pub use scale::Scaler;
 
 /// The `wgpu` the compositor draws with: `moq_video`'s, so its textures and
 /// the decoder's are the same type.

@@ -7,15 +7,19 @@
 //! their entries as alternatives of one picture, so a camera listed there would
 //! be played, or packaged for HLS, as a variant of the program.
 //!
-//! A source encodes while it runs, whatever the demand, so a late viewer finds
-//! its recent past; MoQ uploads only what a subscriber pulls.
+//! A captured source encodes a [`ladder`](crate::ladder) of renditions. The
+//! largest encodes while the source runs, whatever the demand, so a late viewer
+//! finds its recent past; MoQ uploads only what a subscriber pulls. The smaller
+//! ones encode only while watched.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use moq_net::bandwidth::Rate;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
+use crate::ladder::{self, Gate, Ladder, Rendition};
 
 /// The studio catalog's own root section, namespaced as hang asks of
 /// application sections.
@@ -69,8 +73,9 @@ struct Owners {
 
 impl Publish {
 	/// Publish sources into `broadcast`, listed in `catalog`, the one serving it,
-	/// encoding captured video with `kind`. Each source track claims its bitrate
-	/// on `bandwidth`, the allocator the program's tracks claim on.
+	/// encoding captured video with `kind`. Each source rung reserves its
+	/// ceiling on `bandwidth`, the allocator the program's tracks reserve on,
+	/// and follows its share.
 	///
 	/// Pass [`Kind::Hardware`](moq_video::encode::Kind::Hardware) on a machine
 	/// with a hardware encoder, so a session it refuses fails that source's track
@@ -138,6 +143,7 @@ impl Drop for Claim {
 pub(crate) struct Listing<'a> {
 	claim: &'a Claim,
 	kind: moq_video::encode::Kind,
+	bandwidth: moq_net::bandwidth::Allocator,
 	broadcast: moq_net::broadcast::Producer,
 	studio: Catalog,
 	catalog: moq_mux::catalog::Producer,
@@ -150,14 +156,16 @@ impl<'a> Listing<'a> {
 	pub(crate) fn new(claim: &'a Claim, publish: &Publish) -> Result<Self, Error> {
 		let mut scratch = moq_net::broadcast::Info::new().produce();
 		// The studio's clock, so source and program timestamps share one timeline.
+		// No bandwidth: each rung reserves its own ceiling, which a catalog claim
+		// would count a second time.
 		let config = moq_mux::catalog::Config::default()
 			.with_clock(publish.catalog.clock())
-			.with_bandwidth(publish.bandwidth.clone())
 			.with_hls(None);
 		let catalog = moq_mux::catalog::Producer::new(&mut scratch, config)?;
 		Ok(Self {
 			claim,
 			kind: publish.kind.clone(),
+			bandwidth: publish.bandwidth.clone(),
 			broadcast: publish.broadcast.clone(),
 			studio: publish.catalog.clone(),
 			catalog,
@@ -203,25 +211,27 @@ impl Drop for Listing<'_> {
 	}
 }
 
-/// A captured source's video, encoded frame by frame as it is shown.
+/// A captured source's video, encoded frame by frame as it is shown, at each
+/// rung of a [`ladder`](crate::ladder).
 pub(crate) struct Video {
-	/// Taken only to abort or finish it, as the track ends.
-	producer: Option<moq_video::encode::Producer>,
-	config: moq_video::encode::Config,
-	/// Opened on the first frame, and reopened when the picture's size or color
-	/// space changes, which moves the rendition to a new track.
-	encoder: Option<moq_video::encode::Encoder>,
+	/// Taken only to abort it.
+	ladder: Option<Ladder>,
 	clock: moq_mux::Clock,
 	/// Where the capture's private timeline starts on the studio clock, in
 	/// microseconds, taken at the first frame.
 	epoch: Option<u128>,
+	/// The color space the rungs encode; a picture in another reopens them.
+	color: Option<moq_video::Color>,
 }
 
 impl Video {
-	/// Advertise a rendition for pictures of `size`. Opens a throwaway encoder
-	/// to learn exactly what the real one will write, so a machine that cannot
-	/// encode another stream, such as a GPU at its hardware session cap, fails
-	/// here with the reason.
+	/// Advertise a rendition per rung for pictures of `size`. Opens a
+	/// throwaway encoder per rung to learn exactly what the real one will
+	/// write, so a machine that cannot encode another stream, such as a GPU at
+	/// its hardware session cap, fails here with the reason.
+	///
+	/// The largest rung encodes whatever the demand, so a late viewer finds
+	/// its recent past; the smaller ones encode only while watched.
 	#[cfg_attr(
 		not(feature = "capture"),
 		allow(dead_code, reason = "only capture sources encode video")
@@ -232,22 +242,33 @@ impl Video {
 		framerate: moq_video::FrameRate,
 		color: Option<moq_video::Color>,
 	) -> Result<Self, Error> {
-		let size = encodable(size);
-		let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
-		config.color = color;
-		config.kind = listing.kind.clone();
-		let rendition = config.probe().await?;
-		let reserved = listing
-			.catalog
-			.reserve()
-			.with_hls_hint(config.gop.duration(config.framerate));
-		let producer = moq_video::encode::Producer::new(listing.broadcast.clone(), reserved, rendition)?;
+		let sizes = ladder::sizes(size);
+		let ceilings: Vec<Rate> = sizes.iter().map(|size| ladder::ceiling(*size, framerate)).collect();
+		// Below every rung of the program, which is what viewers come for.
+		let base = hang::catalog::PRIORITY.video.saturating_sub(ladder::RUNGS as i8);
+		let mut rungs = Vec::with_capacity(sizes.len());
+		for (index, size) in sizes.iter().enumerate() {
+			let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
+			config.color = color;
+			config.kind = listing.kind.clone();
+			config.bitrate = Some(ceilings[index]);
+			let rendition = config.probe().await?;
+			let reserved = listing
+				.catalog
+				.reserve()
+				.with_hls_hint(config.gop.duration(config.framerate));
+			let priority = ladder::priority(base, index, sizes.len());
+			let producer = ladder::producer(&listing.broadcast, reserved, rendition, priority)?;
+			let rendition = Rendition::new(producer, config, false);
+			let lower = ceilings.get(index + 1).copied();
+			let gate = Gate::new(&listing.bandwidth, rendition.demand(), ceilings[index], lower, index == 0);
+			rungs.push((gate, rendition));
+		}
 		Ok(Self {
-			producer: Some(producer),
-			config,
-			encoder: None,
+			ladder: Some(Ladder::new(rungs, framerate)),
 			clock: listing.studio.clock(),
 			epoch: None,
+			color,
 		})
 	}
 
@@ -263,68 +284,26 @@ impl Video {
 			.get_or_insert_with(|| self.clock.now().as_micros().saturating_sub(captured));
 		frame.timestamp = moq_net::Timestamp::from_micros((epoch + captured) as u64).map_err(moq_video::Error::from)?;
 
-		let size = encodable(frame.size());
+		let ladder = self.ladder.as_mut().expect("open until it ends");
+		let size = ladder::encodable(frame.size());
 		let color = frame.surface.color();
-		if size != self.config.size() || color.is_some_and(|color| Some(color) != self.config.color) {
-			self.config.width = size.width;
-			self.config.height = size.height;
-			self.config.color = color;
-			self.drain()?;
+		if size != ladder.size() || color.is_some_and(|color| Some(color) != self.color) {
+			self.color = color;
+			ladder.resize(size, color)?;
 		}
-		let encoder = match &mut self.encoder {
-			Some(encoder) => encoder,
-			None => self.encoder.insert(moq_video::encode::Encoder::new(&self.config)?),
-		};
-		let encoded = if frame.size() == size {
-			encoder.encode(frame)?
-		} else {
-			encoder.encode(&frame.resize(size, &Default::default())?)?
-		};
-		self.producer.as_mut().expect("open until it ends").publish(&encoded)?;
-		Ok(())
+		ladder.encode(frame)
 	}
 
-	/// Publish what the encoder still holds and close it, so a pipelined
-	/// backend's last pictures are not lost when the encoder is replaced or the
-	/// track ends.
-	fn drain(&mut self) -> Result<(), Error> {
-		if let (Some(encoder), Some(producer)) = (self.encoder.take(), &mut self.producer) {
-			producer.publish(&encoder.finish()?)?;
-		}
-		Ok(())
-	}
-
-	/// End the track, failed with `err` so viewers see why.
+	/// End every rung's track, failed with `err` so viewers see why.
 	#[cfg_attr(
 		not(feature = "capture"),
 		allow(dead_code, reason = "only capture sources encode video")
 	)]
 	pub(crate) fn abort(mut self, err: &Error) {
-		if let Some(producer) = self.producer.take() {
-			producer.abort(moq_net::Error::Transport(err.to_string()));
+		if let Some(ladder) = self.ladder.take() {
+			ladder.abort(err);
 		}
 	}
-}
-
-impl Drop for Video {
-	fn drop(&mut self) {
-		// A capture that ends, or a source removed or edited, ends its track
-		// cleanly rather than leaving subscribers with a dropped one.
-		let drained = self.drain();
-		match (self.producer.take(), drained) {
-			(Some(mut producer), Ok(())) => {
-				let _ = producer.finish();
-			}
-			(Some(producer), Err(err)) => producer.abort(moq_net::Error::Transport(err.to_string())),
-			(None, _) => {}
-		}
-	}
-}
-
-/// The size an encoder takes for a picture of `size`: even, since the encoder
-/// subsamples chroma. An odd picture is scaled down to it.
-fn encodable(size: moq_video::Size) -> moq_video::Size {
-	moq_video::Size::new((size.width & !1).max(2), (size.height & !1).max(2))
 }
 
 /// A still picture, published once as the image file it is.
