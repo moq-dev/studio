@@ -260,20 +260,16 @@ impl Interact {
 						send(page, Input::Text(text));
 					}
 				}
-				// egui swallows the copy and cut shortcuts too, so the page
-				// gets them back as keys: only it knows its selection.
-				egui::Event::Copy | egui::Event::Cut => {
-					let Some(page) = &self.focused else { continue };
-					let code = i32::from(if event == egui::Event::Copy { b'C' } else { b'X' });
-					for down in [true, false] {
-						send(
-							page,
-							Input::Key {
-								code,
-								down,
-								modifiers: current,
-							},
-						);
+				// egui swallows the copy and cut shortcuts too, which go to
+				// the page as commands: only it knows its selection.
+				egui::Event::Copy => {
+					if let Some(page) = &self.focused {
+						send(page, Input::Copy);
+					}
+				}
+				egui::Event::Cut => {
+					if let Some(page) = &self.focused {
+						send(page, Input::Cut);
 					}
 				}
 				_ => {}
@@ -750,6 +746,7 @@ mod tests {
 				egui::Event::PointerMoved(egui::pos2(20.0, 10.0)),
 				egui::Event::Paste("pasted".into()),
 				egui::Event::Copy,
+				egui::Event::Cut,
 			],
 		);
 		let inputs: Vec<_> = delivered.into_iter().map(|(_, input)| input).collect();
@@ -767,16 +764,8 @@ mod tests {
 					modifiers: shift
 				},
 				Input::Text("pasted".into()),
-				Input::Key {
-					code: i32::from(b'C'),
-					down: true,
-					modifiers: shift
-				},
-				Input::Key {
-					code: i32::from(b'C'),
-					down: false,
-					modifiers: shift
-				},
+				Input::Copy,
+				Input::Cut,
 			]
 		);
 	}

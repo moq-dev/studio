@@ -189,6 +189,10 @@ pub enum Input {
 	},
 	/// Text typed, after the keyboard layout and any input method.
 	Text(String),
+	/// Copy the page's selection to the clipboard.
+	Copy,
+	/// Cut the page's selection to the clipboard.
+	Cut,
 	/// The page gained or lost keyboard focus.
 	Focus(bool),
 }

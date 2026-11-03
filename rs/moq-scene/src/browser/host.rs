@@ -237,6 +237,18 @@ fn deliver(input: Input) {
 					host.send_key_event(Some(&event));
 				}
 			}
+			// The focused frame holds the selection, which may be in an
+			// iframe.
+			Input::Copy => {
+				if let Some(frame) = browser.as_ref().and_then(|browser| browser.focused_frame()) {
+					frame.copy();
+				}
+			}
+			Input::Cut => {
+				if let Some(frame) = browser.as_ref().and_then(|browser| browser.focused_frame()) {
+					frame.cut();
+				}
+			}
 			Input::Focus(focused) => host.set_focus(focused.into()),
 		}
 	});
