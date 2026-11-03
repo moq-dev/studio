@@ -588,7 +588,7 @@ async fn publish(
 	let mut broadcast = publication.broadcast().clone();
 	// Each track claims its bitrate on the first relay's estimate, which that
 	// connection then probes to fund: the bandwidth the stream is granted. An
-	// allocator takes one connection's estimate, so the failover's goes unused.
+	// allocator spans one connection, so the failover's link is never probed.
 	let bandwidth = connections[0].allocator();
 	let catalog = moq_mux::catalog::Config::default()
 		.with_bandwidth(bandwidth.clone())
@@ -688,13 +688,18 @@ fn connect(
 		.map(|(rank, Relay { client, url })| {
 			tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), "connecting");
 			// Only the scheme, host, and port: a path can carry a credential, and
-			// the panel may be on a shared screen.
-			let mut endpoint = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
-			if let Some(port) = url.port() {
-				endpoint.push_str(&format!(":{port}"));
-			}
-			// A broadcast source comes through the first relay while it has a
-			// route, and through the failover only while the first has none.
+			// the panel may be on a shared screen. A URL without a host, such as
+			// a unix socket's, keeps its path, which is the address.
+			let endpoint = match url.host_str() {
+				Some(host) => match url.port() {
+					Some(port) => format!("{}://{host}:{port}", url.scheme()),
+					None => format!("{}://{host}", url.scheme()),
+				},
+				None => format!("{}:{}", url.scheme(), url.path()),
+			};
+			// Among routes of one instance of a broadcast source, the first
+			// relay's wins while it has one. A newer instance wins first,
+			// whichever relay it comes through.
 			let preference = match rank {
 				0 => moq_net::origin::Preference::default(),
 				_ => moq_net::origin::Preference::new(-1),
@@ -1078,8 +1083,9 @@ mod tests {
 
 	/// With a failover relay, both relays route the program under its one
 	/// epoch over the one protocol version, so a viewer moving between them
-	/// resumes; and a broadcast source only the failover has still reaches
-	/// the studio.
+	/// resumes. A broadcast source only the failover has still reaches the
+	/// studio, and a newer instance of a source behind the failover replaces
+	/// the first relay's.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn every_relay_routes_one_epoch() {
 		let _ = moq_tokio::crypto::install_default();
@@ -1113,11 +1119,21 @@ mod tests {
 			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.unwrap();
 
-		let guest = moq_tokio::origin::spawn();
-		let source = guest.create_broadcast("guest").unwrap();
-		source.announce(Default::default()).unwrap();
-		let (client, url) = guests.pop().unwrap();
-		let _guest = client.with_publisher(&guest).connect(url);
+		// Publish `path` under `epoch` through one relay's guest.
+		let publish = |path: &str, epoch: Option<&moq_net::Epoch>, (client, url): &(moq_tokio::Client, url::Url)| {
+			let origin = moq_tokio::origin::spawn();
+			let source = origin.create_broadcast(path).unwrap();
+			let route = moq_net::origin::Route::default();
+			let route = match epoch {
+				Some(epoch) => route.with_epoch(epoch.clone()),
+				None => route,
+			};
+			source.announce(route).unwrap();
+			let connection = client.clone().with_publisher(&origin).connect(url.clone());
+			(origin, source, connection)
+		};
+		let _guest = publish("guest", None, &guests[1]);
+		let mut sources = subscribe.consume().announced();
 
 		let routed = async {
 			for relay in &routes {
@@ -1142,11 +1158,40 @@ mod tests {
 						.expect("the connection");
 				}
 			}
-			subscribe.consume().follow("guest", None).unwrap().available().await
+			subscribe
+				.consume()
+				.follow("guest", None)
+				.unwrap()
+				.available()
+				.await
+				.expect("the source");
+
+			// The newest instance of a source wins before the first relay's rank,
+			// so one restarted behind the failover replaces the first relay's.
+			let older: moq_net::Epoch = "01900000-0000-7000-8000-000000000000".parse().unwrap();
+			let newer: moq_net::Epoch = "01910000-0000-7000-8000-000000000000".parse().unwrap();
+			let _first = publish("show", Some(&older), &guests[0]);
+			routed_at(&mut sources, &older).await;
+			let _restarted = publish("show", Some(&newer), &guests[1]);
+			routed_at(&mut sources, &newer).await;
 		};
 		kio::clock::timeout(TIMEOUT, routed)
 			.await
-			.expect("both relays route the program, and the failover the source")
-			.expect("the source");
+			.expect("both relays route the program, the failover the sources");
+	}
+
+	/// Wait until `announced` routes `show` under `epoch`.
+	async fn routed_at(announced: &mut moq_net::announce::Consumer, epoch: &moq_net::Epoch) {
+		use moq_net::announce::Event;
+		loop {
+			let announce = match announced.next().await.expect("announcements") {
+				Event::Start(announce) | Event::Update(announce) | Event::Restart(announce) => announce,
+				Event::Takeover { announce, .. } => announce,
+				Event::End(_) => continue,
+			};
+			if announce.prefix.as_str() == "show" && announce.route.epoch.as_ref() == Some(epoch) {
+				return;
+			}
+		}
 	}
 }

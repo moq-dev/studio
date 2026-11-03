@@ -25,9 +25,9 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   accepts only when configured to), or the studio refuses to start; it also
   refuses a fixed `--connect-bind` port, since each relay's connection binds
   its own. Its credential rides its URL's `?jwt=`; `--connect-token` goes to
-  the first relay only. Captured sources follow the first relay's bandwidth
-  estimate alone, so while only the failover serves, they hold their last
-  bitrate rather than fit its link.
+  the first relay only. The stream's tracks claim their bitrate on the first
+  relay's link alone, so only that link is probed toward the stream's rate;
+  no encoder adapts to either estimate.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
   On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
@@ -57,8 +57,8 @@ the studio. It runs three checks, and a check that fails shows its reason:
   path for about six seconds and subscribes to it through the relay, so the
   relay pulls it. The congestion controller's send-rate estimate is the
   measurement. With `--failover`, only the `--connect` relay is measured,
-  since the stream's bandwidth follows it. A connection that reports no estimate, such as WebSocket, fails
-  the check.
+  since only its link is probed toward the stream's rate. A connection that
+  reports no estimate, such as WebSocket, fails the check.
 
 Setup then proposes a scene named Main and a canvas, explaining each choice.
 The scene has the first display filling the canvas, the first camera in the
@@ -126,8 +126,10 @@ comes along, renamed if its name is taken. Copied filters paste onto the
 selected source or item, after its own. The clipboard holds text in the scene
 file's format.
 
-A broadcast source subscribes through the same relay connections, from the
-first relay while it has the broadcast and the failover only while it does not, plays the
+A broadcast source subscribes through the same relay connections. It plays the
+newest instance of its broadcast through either relay, preferring the first
+relay among routes to the same instance, so a publisher restarted behind only
+the failover replaces the first relay's copy. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
@@ -348,8 +350,8 @@ it is unhealthy. Below that it shows:
   `.stats` broadcasts. A relay shares those only with a connection allowed to
   read them, so most show "unknown". In a cluster, a relay forwarding the
   stream to another counts as one session. Two relays whose stats use the
-  same node name publish them at the same path, so only the first relay's
-  count.
+  same node name publish them at the same path, so only one of them counts:
+  the newer instance, or the first relay's when they are one instance.
 - **Tracks**: each track's bitrate and frame rate, and, from viewers that
   report, the lowest bitrate any received, its worst grade, and the latency
   from the program clock to the slowest viewer. Latency compares the two

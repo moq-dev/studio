@@ -101,7 +101,7 @@ impl Config {
 		};
 		anyhow::ensure!(
 			matches!(version, moq_net::Version::Lite(lite) if lite.has_epoch()),
-			"--failover needs a --connect-version with publisher epochs (moq-lite-07 or newer), not {version}, \
+			"--failover needs a --connect-version with publisher epochs (moq-lite-07-wip today), not {version}, \
 			 or a viewer moving between relays restarts the stream rather than resuming it"
 		);
 		// Each relay's client binds its own socket, so a fixed port would be
