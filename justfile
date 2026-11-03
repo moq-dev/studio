@@ -50,7 +50,9 @@ render-sw:
     export LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}"
     cargo nextest run --locked -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
     cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay)'
-    cargo nextest run --locked -p moq-studio --features cef --run-ignored only -E 'binary(browser)'
+    # CEF's browser process opens an X display even to paint offscreen.
+    xvfb=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#xvfb-run)
+    "$xvfb/bin/xvfb-run" -a cargo nextest run --locked -p moq-studio --features cef --run-ignored only -E 'binary(browser)'
 
 # Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock.
 upgrade-moq rev="origin/main":
