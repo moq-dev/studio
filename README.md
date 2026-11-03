@@ -22,6 +22,11 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   is the software H.264 fallback for a machine without a hardware encoder.
 - On Linux, display and window sources capture X11 and XWayland only; a
   Wayland screen or window cannot be picked yet.
+- On macOS, the studio is not an app bundle yet, so the camera, microphone,
+  and Screen & System Audio Recording permissions are asked of, and granted
+  to, the app that launched it, such as your terminal. Display, window, and
+  system-audio sources need the last, granted in System Settings > Privacy &
+  Security.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
   [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
 
@@ -62,7 +67,8 @@ and plain in another while being opened once. An item's own filters apply
 after its source's.
 
 **Edit > Undo** (Ctrl+Z) and **Redo** (Ctrl+Shift+Z or Ctrl+Y) step through the
-history, and a drag undoes as one step. **Copy** (Ctrl+C) takes the selected
+history, and a drag undoes as one step; on macOS each shortcut uses Cmd in
+place of Ctrl. **Copy** (Ctrl+C) takes the selected
 item with the source it shows; **Paste** (Ctrl+V) adds it over whatever the
 Items panel shows, in this studio or another. Pasted where the same source
 exists under the same name, the item is linked to it; otherwise the source

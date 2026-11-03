@@ -1,7 +1,8 @@
 name: Nightly
 
 # The gates too slow or too specialized for a pull request: compositing and
-# publishing through wgpu on Mesa's software Vulkan driver.
+# publishing through wgpu on Mesa's software Vulkan driver, and `just ci` on
+# macOS, whose capture backends Check's Linux runner never compiles.
 
 permissions:
   contents: read
@@ -34,3 +35,22 @@ jobs:
 
       - name: Render
         run: nix develop --command just render-sw
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      NEXTEST_PROFILE: ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - uses: ./.github/actions/nix
+
+      - name: Check
+        run: nix develop --command just ci
