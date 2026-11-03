@@ -30,11 +30,15 @@ pub mod clip;
 mod collection;
 mod compositor;
 mod edit;
+mod effect;
+mod lut;
 pub mod publish;
 pub mod source;
 
 pub use clip::Clip;
-pub use collection::{Audio, Canvas, Collection, Filter, Item, Layer, Rect, Rgba, Scene, Source, Transition, Video};
+pub use collection::{
+	Audio, Blend, Canvas, Collection, Crop, Filter, Item, Layer, MaskMode, Rect, Rgba, Scene, Source, Transition, Video,
+};
 pub use compositor::{Compositor, FORMAT};
 pub use edit::{Change, Draft, Edit, History};
 
@@ -72,6 +76,10 @@ pub enum Error {
 	/// An image source could not be read or decoded.
 	#[error("image: {0}")]
 	Image(String),
+
+	/// A LUT source could not be read or parsed.
+	#[error("LUT: {0}")]
+	Lut(String),
 
 	/// This build or platform cannot open the source.
 	#[error("unsupported source: {0}")]
