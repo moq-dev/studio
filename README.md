@@ -52,7 +52,9 @@ widget, at the canvas frame rate (CEF caps it at 60) over a transparent
 background, and its sound joins the program audio. Each page runs in a
 process of its own, so a page or browser crash fails that source, with the
 reason, while the stream carries on; edit or re-add the source to restart it.
-Every start is a fresh profile: no cookies or logins persist.
+Every start is a fresh profile: no cookies or logins persist. A page opens
+no other windows (`window.open` and new-tab links do nothing), and its
+dropdown lists, such as a `<select>`'s, are not drawn yet.
 
 ## Scene file
 

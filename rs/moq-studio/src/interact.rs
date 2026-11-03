@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_scene::browser::{Button, Input, Modifiers};
-use moq_scene::{Collection, Source};
+use moq_scene::{Collection, Rect, Source};
 
 /// How close in time and space a press must follow the last to count toward a
 /// double or triple click.
@@ -39,13 +39,17 @@ struct Press {
 
 struct Capture {
 	page: String,
+	/// Where the pressed item places the page, since the same page can be in
+	/// several.
+	rect: Rect,
 	/// The buttons the page saw go down and not yet up.
 	held: Vec<Button>,
 }
 
-/// A point on one page.
+/// A point on one page, placed on the canvas at `rect`.
 struct Hit {
 	page: String,
+	rect: Rect,
 	x: i32,
 	y: i32,
 }
@@ -74,10 +78,10 @@ impl Interact {
 			let (x, y) = on_canvas(pos);
 			page_at(collection, scene, x, y)
 		};
-		// Where `pos` falls on `page`, even off its edges.
-		let on_page = |page: &str, pos: egui::Pos2| -> Option<(i32, i32)> {
+		// Where `pos` falls on the captured page, even off its edges.
+		let on_page = |capture: &Capture, pos: egui::Pos2| -> Option<(i32, i32)> {
 			let (x, y) = on_canvas(pos);
-			point_on(collection, scene, page, x, y)
+			scale(collection, &capture.page, capture.rect, x, y)
 		};
 		let out = RefCell::new(Vec::new());
 		let send = |page: &str, input: Input| out.borrow_mut().push((page.to_string(), input));
@@ -86,10 +90,10 @@ impl Interact {
 		for event in events {
 			match event {
 				egui::Event::PointerMoved(pos) => {
-					if let Some(Capture { page, .. }) = &self.captured {
-						if let Some((x, y)) = on_page(page, pos) {
+					if let Some(capture) = &self.captured {
+						if let Some((x, y)) = on_page(capture, pos) {
 							send(
-								page,
+								&capture.page,
 								Input::Move {
 									x,
 									y,
@@ -104,7 +108,7 @@ impl Interact {
 					if let Some(left) = self.hovered.take().filter(|left| Some(left) != page.as_ref()) {
 						send(&left, Input::Leave { modifiers: buttons });
 					}
-					if let Some(Hit { page, x, y }) = hit {
+					if let Some(Hit { page, x, y, .. }) = hit {
 						send(
 							&page,
 							Input::Move {
@@ -136,11 +140,12 @@ impl Interact {
 							continue;
 						};
 						capture.held.retain(|held| *held != button);
+						let point = on_page(capture, pos);
 						let page = capture.page.clone();
 						if capture.held.is_empty() {
 							self.captured = None;
 						}
-						if let Some((x, y)) = on_page(&page, pos) {
+						if let Some((x, y)) = point {
 							let clicks = self.last.as_ref().map_or(1, |last| last.clicks);
 							send(
 								&page,
@@ -158,14 +163,15 @@ impl Interact {
 					}
 					// Another press during a drag goes to the dragged page too.
 					let target = match &self.captured {
-						Some(capture) => on_page(&capture.page, pos).map(|(x, y)| Hit {
+						Some(capture) => on_page(capture, pos).map(|(x, y)| Hit {
 							page: capture.page.clone(),
+							rect: capture.rect,
 							x,
 							y,
 						}),
 						None => hit(pos),
 					};
-					let Some(Hit { page, x, y }) = target else {
+					let Some(Hit { page, rect, x, y }) = target else {
 						if self.captured.is_none() {
 							self.blur(&send);
 						}
@@ -179,6 +185,7 @@ impl Interact {
 					}
 					let capture = self.captured.get_or_insert_with(|| Capture {
 						page: page.clone(),
+						rect,
 						held: Vec::new(),
 					});
 					if !capture.held.contains(&button) {
@@ -199,7 +206,7 @@ impl Interact {
 				egui::Event::MouseWheel {
 					unit, delta, modifiers, ..
 				} => {
-					let Some(Hit { page, x, y }) = ui.input(|input| input.pointer.hover_pos()).and_then(hit) else {
+					let Some(Hit { page, x, y, .. }) = ui.input(|input| input.pointer.hover_pos()).and_then(hit) else {
 						continue;
 					};
 					// Pixels, as a page scrolls; a line is what a browser
@@ -307,33 +314,22 @@ fn page_at(collection: &Collection, scene: Option<&str>, x: f32, y: f32) -> Opti
 		if !inside {
 			return None;
 		}
-		let (x, y) = scale(collection, item, x, y)?;
+		let (x, y) = scale(collection, &item.source, rect, x, y)?;
 		Some(Hit {
 			page: item.source.clone(),
+			rect,
 			x,
 			y,
 		})
 	})
 }
 
-/// Canvas point (`x`, `y`) on `page`'s topmost visible item in `scene`, in
-/// page pixels, even off the page's edges.
-fn point_on(collection: &Collection, scene: Option<&str>, page: &str, x: f32, y: f32) -> Option<(i32, i32)> {
-	let scene = collection.scene(scene?)?;
-	let item = scene
-		.items
-		.iter()
-		.rev()
-		.find(|item| item.visible && item.source == page)?;
-	scale(collection, item, x, y)
-}
-
-/// Canvas point (`x`, `y`) in the page pixels of `item`, if it places a page.
-fn scale(collection: &Collection, item: &moq_scene::Item, x: f32, y: f32) -> Option<(i32, i32)> {
-	let Some(Source::Browser { width, height, .. }) = collection.sources.get(&item.source) else {
+/// Canvas point (`x`, `y`) in the pixels of `page` placed at `rect`, even off
+/// the page's edges, if `page` is a browser source.
+fn scale(collection: &Collection, page: &str, rect: Rect, x: f32, y: f32) -> Option<(i32, i32)> {
+	let Some(Source::Browser { width, height, .. }) = collection.sources.get(page) else {
 		return None;
 	};
-	let rect = item.rect;
 	if rect.width <= 0.0 || rect.height <= 0.0 {
 		return None;
 	}
@@ -460,7 +456,7 @@ fn code(key: egui::Key) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-	use moq_scene::{Item, Rect, Scene};
+	use moq_scene::{Item, Scene};
 
 	use super::*;
 
@@ -507,15 +503,90 @@ mod tests {
 		assert!(page_at(&collection, Some("Other"), 1.0, 1.0).is_none());
 
 		// A captured pointer maps onto its page past the edges.
-		collection.scenes[0].items[1].visible = true;
-		assert_eq!(
-			point_on(&collection, Some("Main"), "chat", 1420.0, 280.0),
-			Some((-100, 0))
+		assert_eq!(scale(&collection, "chat", corner, 1420.0, 280.0), Some((-100, 0)));
+		assert_eq!(scale(&collection, "chat", corner, 960.0, 540.0), Some((-560, 260)));
+	}
+
+	/// One frame of `events` over a preview showing the canvas at its own
+	/// size, and what each page receives.
+	fn frame(
+		ctx: &egui::Context,
+		interact: &mut Interact,
+		collection: &Collection,
+		events: Vec<egui::Event>,
+	) -> Vec<(String, Input)> {
+		let canvas = egui::vec2(collection.canvas.width as f32, collection.canvas.height as f32);
+		let image = egui::Rect::from_min_size(egui::Pos2::ZERO, canvas);
+		let input = egui::RawInput {
+			screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas * 2.0)),
+			events,
+			..Default::default()
+		};
+		let mut delivered = Vec::new();
+		let mut output = ctx.run_ui(input, |ui| {
+			delivered = interact.update(ui, image, collection, Some("Main"));
+		});
+		// Nothing renders, so the font atlas egui uploaded goes nowhere.
+		output.textures_delta.clear();
+		delivered
+	}
+
+	/// A page placed twice keeps a drag in the item it was pressed in, even
+	/// under the other one.
+	#[test]
+	fn a_drag_stays_with_its_item() {
+		let mut collection = Collection::new();
+		collection.canvas.width = 200;
+		collection.canvas.height = 100;
+		collection.sources.insert(
+			"chat".into(),
+			Source::Browser {
+				url: "https://example.com".into(),
+				width: 100,
+				height: 100,
+			},
 		);
-		assert_eq!(
-			point_on(&collection, Some("Main"), "chat", 960.0, 540.0),
-			Some((-560, 260))
+		let item = |x| Item {
+			source: "chat".into(),
+			rect: Rect {
+				x,
+				y: 0.0,
+				width: 100.0,
+				height: 100.0,
+			},
+			visible: true,
+		};
+		collection.scenes = vec![Scene {
+			name: "Main".into(),
+			items: vec![item(0.0), item(100.0)],
+		}];
+		let ctx = egui::Context::default();
+		let mut interact = Interact::default();
+		let button = |x, pressed| egui::Event::PointerButton {
+			pos: egui::pos2(x, 50.0),
+			button: egui::PointerButton::Primary,
+			pressed,
+			modifiers: Default::default(),
+		};
+
+		let delivered = frame(
+			&ctx,
+			&mut interact,
+			&collection,
+			vec![
+				button(50.0, true),
+				egui::Event::PointerMoved(egui::pos2(60.0, 50.0)),
+				button(60.0, false),
+			],
 		);
+		let xs: Vec<_> = delivered
+			.iter()
+			.filter_map(|(_, input)| match input {
+				Input::Move { x, .. } | Input::Button { x, .. } => Some(*x),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(xs, [50, 60, 60]);
 	}
 
 	/// A drag that starts on a page stays with it: the moves and the release
@@ -547,25 +618,9 @@ mod tests {
 			name: "Main".into(),
 			items: vec![item("left", 0.0), item("right", 100.0)],
 		}];
-		// The preview shows the canvas at its own size.
-		let image = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
-
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();
-		let mut frame = |events: Vec<egui::Event>| {
-			let input = egui::RawInput {
-				screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0))),
-				events,
-				..Default::default()
-			};
-			let mut delivered = Vec::new();
-			let mut output = ctx.run_ui(input, |ui| {
-				delivered = interact.update(ui, image, &collection, Some("Main"));
-			});
-			// Nothing renders, so the font atlas egui uploaded goes nowhere.
-			output.textures_delta.clear();
-			delivered
-		};
+		let mut frame = |events| self::frame(&ctx, &mut interact, &collection, events);
 		let press = |x, y, button, pressed| egui::Event::PointerButton {
 			pos: egui::pos2(x, y),
 			button,
