@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, Collection, Item, Layer, Scene, Source, Transition, Video};
+use crate::collection::{Audio, Canvas, Collection, Item, Layer, Scene, Source, Transition, Video};
 
 /// One part of a collection, before and after an edit.
 ///
@@ -47,7 +47,8 @@ pub enum Change {
 		after: Option<Video>,
 	},
 	/// The scene at `index` of [`Collection::scenes`]. Adding one inserts it
-	/// there, shifting the later ones back.
+	/// there, shifting the later ones back, and replacing one with another
+	/// name renames it.
 	Scene {
 		index: usize,
 		#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,6 +68,8 @@ pub enum Change {
 	},
 	/// [`Collection::transition`].
 	Transition { before: Transition, after: Transition },
+	/// [`Collection::canvas`].
+	Canvas { before: Canvas, after: Canvas },
 }
 
 impl Change {
@@ -108,6 +111,10 @@ impl Change {
 				before: after,
 				after: before,
 			},
+			Self::Canvas { before, after } => Self::Canvas {
+				before: after,
+				after: before,
+			},
 		}
 	}
 
@@ -120,6 +127,7 @@ impl Change {
 			Self::Scene { before, after, .. } => before == after,
 			Self::Item { before, after, .. } => before == after,
 			Self::Transition { before, after } => before == after,
+			Self::Canvas { before, after } => before == after,
 		}
 	}
 
@@ -202,6 +210,9 @@ impl Change {
 			(Self::Transition { before, after }, Self::Transition { before: b, after: a }) if after == *b => {
 				Self::Transition { before, after: *a }
 			}
+			(Self::Canvas { before, after }, Self::Canvas { before: b, after: a }) if after == *b => {
+				Self::Canvas { before, after: *a }
+			}
 			_ => return None,
 		};
 		Some(merged)
@@ -233,6 +244,13 @@ impl Change {
 					return Err(conflict("the transition changed".into()));
 				}
 				collection.transition = *after;
+				Ok(())
+			}
+			Self::Canvas { before, after } => {
+				if collection.canvas != *before {
+					return Err(conflict("the canvas changed".into()));
+				}
+				collection.canvas = *after;
 				Ok(())
 			}
 		}
@@ -297,6 +315,20 @@ impl Edit {
 			label: self.label.clone(),
 			changes: self.changes.iter().rev().map(Change::inverse).collect(),
 		}
+	}
+
+	/// The scenes this edit renames, as each old name and its new one, in the
+	/// order it renames them. Whatever follows a scene by name, such as the
+	/// one in preview, follows these in turn.
+	pub fn renames(&self) -> impl Iterator<Item = (&str, &str)> {
+		self.changes.iter().filter_map(|change| match change {
+			Change::Scene {
+				before: Some(before),
+				after: Some(after),
+				..
+			} if before.name != after.name => Some((before.name.as_str(), after.name.as_str())),
+			_ => None,
+		})
 	}
 }
 
@@ -431,7 +463,7 @@ impl Draft {
 		})
 	}
 
-	/// Replace the scene at `index`, such as to rename it.
+	/// Replace the scene at `index`.
 	pub fn set_scene(&mut self, index: usize, scene: Scene) -> Result<(), Error> {
 		let before = self.scene_at(index)?;
 		self.change(Change::Scene {
@@ -439,6 +471,22 @@ impl Draft {
 			before: Some(before),
 			after: Some(scene),
 		})
+	}
+
+	/// Rename the scene at `index`, keeping what it shows.
+	pub fn rename_scene(&mut self, index: usize, name: impl Into<String>) -> Result<(), Error> {
+		let scene = Scene {
+			name: name.into(),
+			..self.scene_at(index)?
+		};
+		self.set_scene(index, scene)
+	}
+
+	/// Move the scene at `from` to `to`, counted after its removal.
+	pub fn move_scene(&mut self, from: usize, to: usize) -> Result<(), Error> {
+		let scene = self.scene_at(from)?;
+		self.remove_scene(from)?;
+		self.insert_scene(to, scene)
 	}
 
 	fn scene_at(&self, index: usize) -> Result<Scene, Error> {
@@ -497,6 +545,13 @@ impl Draft {
 			before,
 			after: transition,
 		})
+	}
+
+	/// Set the canvas's size and frame rate. Items keep their place in canvas
+	/// pixels.
+	pub fn set_canvas(&mut self, canvas: Canvas) -> Result<(), Error> {
+		let before = self.collection.canvas;
+		self.change(Change::Canvas { before, after: canvas })
 	}
 
 	/// The edit, once the collection it leaves is valid. Changes that ended up
@@ -849,6 +904,92 @@ mod tests {
 		drag(&mut collection, &mut history, 9.0, Some(9));
 		drag(&mut collection, &mut history, 6.0, Some(9));
 		assert_eq!(history.entries().len(), 2, "a drag back to the start is no edit");
+	}
+
+	/// A rename keeps the scene's items and place, a move keeps its name, and
+	/// the edit lists its renames in order, so two scenes can swap names
+	/// through a third.
+	#[test]
+	fn renames_and_reorders_scenes() {
+		let mut collection = collection();
+		collection.scenes.push(Scene::new("Other"));
+		let start = collection.clone();
+		let mut history = History::new();
+
+		let mut draft = collection.draft("Swap names");
+		draft.rename_scene(0, "swap").unwrap();
+		draft.rename_scene(1, "Scene").unwrap();
+		draft.rename_scene(0, "Other").unwrap();
+		let edit = draft.finish().unwrap();
+		let renames: Vec<_> = edit.renames().collect();
+		assert_eq!(renames, [("Scene", "swap"), ("Other", "Scene"), ("swap", "Other")]);
+		collection.apply(&edit).unwrap();
+		history.record(edit, None);
+		assert_eq!(collection.scenes[0].name, "Other");
+		assert_eq!(collection.scenes[0].items, start.scenes[0].items);
+
+		let mut draft = collection.draft("Move `Other` down");
+		draft.move_scene(0, 1).unwrap();
+		let edit = draft.finish().unwrap();
+		assert_eq!(edit.renames().count(), 0, "a move is no rename");
+		collection.apply(&edit).unwrap();
+		history.record(edit, None);
+		let names: Vec<_> = collection.scenes.iter().map(|scene| scene.name.as_str()).collect();
+		assert_eq!(names, ["Scene", "Other"]);
+		assert_eq!(collection.scenes[1].items, start.scenes[0].items);
+
+		history.seek(&mut collection, 0).unwrap();
+		assert_eq!(collection, start);
+
+		// Names stay unique and non-empty.
+		for name in ["Other", ""] {
+			let mut draft = collection.draft("Rename");
+			draft.rename_scene(0, name).unwrap();
+			assert!(matches!(draft.finish(), Err(Error::Invalid(_))), "{name:?}");
+		}
+	}
+
+	/// The canvas and the transition are edits like any other: a drag of one
+	/// undoes as one step, and a canvas the encoder cannot take is refused.
+	#[test]
+	fn the_canvas_and_transition_undo() {
+		let mut collection = collection();
+		let start = collection.clone();
+		let mut history = History::new();
+		for millis in [400, 500, 600] {
+			let mut draft = collection.draft("Set the fade time");
+			draft
+				.set_transition(Transition {
+					fade: std::time::Duration::from_millis(millis),
+				})
+				.unwrap();
+			commit(&mut collection, &mut history, draft, Some(1));
+		}
+		let canvas = Canvas {
+			width: 1280,
+			height: 720,
+			framerate: 60,
+		};
+		let mut draft = collection.draft("Resize the canvas");
+		draft.set_canvas(canvas).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(history.entries().len(), 2);
+		assert_eq!(collection.canvas, canvas);
+		assert_eq!(collection.scenes[0].items[0].rect, Rect::fill(&start.canvas), "items keep their pixels");
+
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection.canvas, start.canvas);
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, start);
+
+		let mut draft = collection.draft("Resize the canvas");
+		draft
+			.set_canvas(Canvas {
+				width: 1279,
+				..canvas
+			})
+			.unwrap();
+		assert!(matches!(draft.finish(), Err(Error::Invalid(_))));
 	}
 
 	#[test]

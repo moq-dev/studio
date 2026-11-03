@@ -8,7 +8,7 @@ use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::source::{Feed, Status};
-use moq_scene::{Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Video, wgpu};
+use moq_scene::{Canvas, Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Transition, Video, wgpu};
 
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
@@ -64,18 +64,13 @@ impl Studio {
 			.as_ref()
 			.context("the window is not drawn with wgpu")?;
 
-		// The compositor's textures live as long as the engine, so registering
-		// them once is enough: egui samples whatever they hold each frame.
+		// egui samples whatever the compositor's textures hold each frame, so
+		// they are registered again only when a resize replaces them.
 		let (preview, program, dropped) = {
 			let state = engine.state.lock().unwrap();
-			let mut renderer = render.renderer.write();
-			let mut register = |texture: &wgpu::Texture| {
-				let view = texture.create_view(&Default::default());
-				renderer.register_native_texture(&render.device, &view, wgpu::FilterMode::Linear)
-			};
 			(
-				register(state.compositor.preview()),
-				register(state.compositor.program()),
+				Shown::new(render, state.compositor.preview()),
+				Shown::new(render, state.compositor.program()),
 				state.dropped,
 			)
 		};
@@ -99,6 +94,8 @@ impl Studio {
 				selection: None,
 				gestures: Gestures::default(),
 				new_scene: String::new(),
+				renaming: None,
+				canvas: None,
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
@@ -109,9 +106,16 @@ impl Studio {
 }
 
 impl eframe::App for Studio {
-	fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+		let framerate = {
+			let state = self.panels.engine.state.lock().unwrap();
+			if let Some(render) = frame.wgpu_render_state() {
+				self.panels.preview.follow(render, state.compositor.preview());
+				self.panels.program.follow(render, state.compositor.program());
+			}
+			state.compositor.canvas().framerate
+		};
 		// Redraw at the canvas rate, so preview and program are live.
-		let framerate = self.panels.engine.state.lock().unwrap().collection().canvas.framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 
 		self.panels.shortcuts(ui.ctx());
@@ -123,12 +127,47 @@ impl eframe::App for Studio {
 	}
 }
 
+/// A compositor texture as egui shows it.
+struct Shown {
+	id: egui::TextureId,
+	texture: wgpu::Texture,
+}
+
+impl Shown {
+	fn new(render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) -> Self {
+		let view = texture.create_view(&Default::default());
+		let id = render
+			.renderer
+			.write()
+			.register_native_texture(&render.device, &view, wgpu::FilterMode::Linear);
+		Self {
+			id,
+			texture: texture.clone(),
+		}
+	}
+
+	/// Show `texture` from now on, if a resize replaced the one shown.
+	fn follow(&mut self, render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) {
+		if self.texture == *texture {
+			return;
+		}
+		let view = texture.create_view(&Default::default());
+		render.renderer.write().update_egui_texture_from_wgpu_texture(
+			&render.device,
+			&view,
+			wgpu::FilterMode::Linear,
+			self.id,
+		);
+		self.texture = texture.clone();
+	}
+}
+
 /// What every panel draws from, plus the half-typed forms.
 struct Panels {
 	engine: Arc<Engine>,
 	runtime: tokio::runtime::Handle,
-	preview: egui::TextureId,
-	program: egui::TextureId,
+	preview: Shown,
+	program: Shown,
 	/// Whether the Items panel shows the top layer rather than the scene in
 	/// preview.
 	top: bool,
@@ -136,6 +175,11 @@ struct Panels {
 	selection: Option<Selection>,
 	gestures: Gestures,
 	new_scene: String,
+	/// The scene being renamed, by index, and the name typed so far.
+	renaming: Option<(usize, String)>,
+	/// The canvas the Output panel's form holds until it is applied, or
+	/// `None` while it shows the collection's.
+	canvas: Option<Canvas>,
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
@@ -466,19 +510,32 @@ impl Panels {
 			state.compositor.preview_scene().unwrap_or("nothing")
 		));
 		drop(state);
-		picture(ui, self.preview, canvas);
+		picture(ui, self.preview.id, canvas);
 	}
 
 	fn program(&mut self, ui: &mut Ui) {
-		let mut state = self.engine.state.lock().unwrap();
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
 		let canvas = state.collection().canvas;
 		let fade = state.collection().transition.fade;
+		let mut result = Ok(());
 		ui.horizontal(|ui| {
 			if ui.button("Cut").clicked() {
 				state.compositor.cut();
 			}
-			if ui.button(format!("Fade ({} ms)", fade.as_millis())).clicked() {
+			if ui.button("Fade").clicked() {
 				state.compositor.fade(fade, kio::clock::Instant::now());
+			}
+			let mut millis = fade.as_millis() as u64;
+			let response = ui
+				.add(egui::DragValue::new(&mut millis).suffix(" ms"))
+				.on_hover_text("How long a fade takes");
+			let gesture = self.gestures.of(&response);
+			if response.changed() {
+				let fade = Duration::from_millis(millis);
+				result = edit(&mut state, "Set the fade time", gesture, |draft| {
+					draft.set_transition(Transition { fade })
+				});
 			}
 			ui.label(format!(
 				"Program: {}",
@@ -489,7 +546,8 @@ impl Panels {
 			}
 		});
 		drop(state);
-		picture(ui, self.program, canvas);
+		self.check(result);
+		picture(ui, self.program.id, canvas);
 	}
 
 	fn scenes(&mut self, ui: &mut Ui) {
@@ -498,20 +556,50 @@ impl Panels {
 		let preview = state.compositor.preview_scene().map(str::to_owned);
 		let program = state.compositor.program_scene().map(str::to_owned);
 		let mut pick = None;
-		let mut remove = None;
+		let mut action = None;
+		let count = state.collection().scenes.len();
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
 			for (index, scene) in state.collection().scenes.iter().enumerate() {
 				ui.horizontal(|ui| {
+					if let Some((renaming, name)) = &mut self.renaming
+						&& *renaming == index
+					{
+						let response = ui.text_edit_singleline(name);
+						if !response.has_focus() && !response.lost_focus() {
+							response.request_focus();
+						}
+						if response.lost_focus() {
+							// Escape cancels; Enter or a click away renames.
+							if !ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+								action = Some(SceneAction::Rename(index, name.trim().to_string()));
+							}
+							self.renaming = None;
+						}
+						return;
+					}
 					let selected = preview.as_deref() == Some(scene.name.as_str());
-					if ui.selectable_label(selected, &scene.name).clicked() {
+					let label = ui.selectable_label(selected, &scene.name);
+					if label.clicked() {
 						pick = Some(scene.name.clone());
+					}
+					if label.double_clicked() || ui.small_button("Rename").clicked() {
+						self.renaming = Some((index, scene.name.clone()));
 					}
 					if program.as_deref() == Some(scene.name.as_str()) {
 						ui.colored_label(Color32::RED, "on program");
 					}
+					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
+						action = Some(SceneAction::Move(index, index - 1));
+					}
+					if ui
+						.add_enabled(index + 1 < count, egui::Button::new("Down").small())
+						.clicked()
+					{
+						action = Some(SceneAction::Move(index, index + 1));
+					}
 					if ui.small_button("Remove").clicked() {
-						remove = Some((index, scene.name.clone()));
+						action = Some(SceneAction::Remove(index));
 					}
 				});
 			}
@@ -539,12 +627,35 @@ impl Panels {
 		if let Some(pick) = pick {
 			state.compositor.set_preview(Some(pick));
 		}
-		if let Some((index, name)) = remove {
-			let result = edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
+		let Some(action) = action else { return };
+		let name = state.collection().scenes[action.index()].name.clone();
+		let result = match action {
+			SceneAction::Rename(index, to) => {
+				let result = edit(&mut state, format!("Rename scene `{name}` to `{to}`"), None, |draft| {
+					draft.rename_scene(index, to.clone())
+				});
+				if result.is_ok() {
+					self.renamed(&name, &to);
+				}
+				result
+			}
+			SceneAction::Move(from, to) => edit(&mut state, format!("Reorder scene `{name}`"), None, |draft| {
+				draft.move_scene(from, to)
+			}),
+			SceneAction::Remove(index) => edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
 				draft.remove_scene(index)
-			});
-			drop(state);
-			self.check(result);
+			}),
+		};
+		drop(state);
+		self.check(result);
+	}
+
+	/// Keep a selected item of the scene renamed from `from` selected.
+	fn renamed(&mut self, from: &str, to: &str) {
+		if let Some(Selection::Item(Layer::Scene(scene), _)) = &mut self.selection
+			&& scene == from
+		{
+			*scene = to.to_string();
 		}
 	}
 
@@ -1020,6 +1131,9 @@ impl Panels {
 	}
 
 	fn output(&mut self, ui: &mut Ui) {
+		self.canvas_form(ui);
+		ui.separator();
+
 		let stats = &self.engine.stats;
 		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
 		let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
@@ -1082,9 +1196,46 @@ impl Panels {
 			));
 			ui.end_row();
 		});
-		if let Some(error) = stats.error.lock().unwrap().as_ref() {
+		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
+	}
+
+	/// The canvas's size and frame rate, applied at once rather than as each
+	/// field changes, since a new canvas starts a new rendition.
+	fn canvas_form(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let current = state.collection().canvas;
+		let mut canvas = self.canvas.unwrap_or(current);
+		let mut apply = false;
+		ui.horizontal(|ui| {
+			ui.strong("Canvas");
+			ui.add(egui::DragValue::new(&mut canvas.width).range(2..=u32::MAX));
+			ui.label("x");
+			ui.add(egui::DragValue::new(&mut canvas.height).range(2..=u32::MAX));
+			ui.label("at");
+			ui.add(egui::DragValue::new(&mut canvas.framerate).range(1..=u32::MAX).suffix(" fps"));
+			let edited = canvas != current;
+			apply = ui.add_enabled(edited, egui::Button::new("Apply")).clicked();
+			if ui.add_enabled(edited, egui::Button::new("Reset")).clicked() {
+				canvas = current;
+			}
+		});
+		self.canvas = (canvas != current).then_some(canvas);
+		if !apply {
+			return;
+		}
+		let label = format!(
+			"Set the canvas to {}x{} at {} fps",
+			canvas.width, canvas.height, canvas.framerate
+		);
+		let result = edit(&mut state, label, None, |draft| draft.set_canvas(canvas));
+		if result.is_ok() {
+			self.canvas = None;
+		}
+		drop(state);
+		self.check(result);
 	}
 
 	/// How the stream reaches viewers: what is wrong and why, the uplink, each
@@ -1231,6 +1382,22 @@ fn or_unknown(value: Option<String>) -> String {
 
 fn millis(duration: Duration) -> String {
 	format!("{} ms", duration.as_millis())
+}
+
+/// An edit the Scenes panel makes to the scene at an index.
+enum SceneAction {
+	Rename(usize, String),
+	/// From one index to the other, counted after the removal.
+	Move(usize, usize),
+	Remove(usize),
+}
+
+impl SceneAction {
+	fn index(&self) -> usize {
+		match self {
+			Self::Rename(index, _) | Self::Move(index, _) | Self::Remove(index) => *index,
+		}
+	}
 }
 
 /// An edit the Items panel makes.

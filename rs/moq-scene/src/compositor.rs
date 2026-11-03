@@ -145,13 +145,7 @@ impl Compositor {
 	///
 	/// Fails if the device cannot hold a texture that large.
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, canvas: Canvas) -> Result<Self, Error> {
-		let limit = device.limits().max_texture_dimension_2d;
-		if canvas.width > limit || canvas.height > limit {
-			return Err(Error::Invalid(format!(
-				"canvas {}x{} exceeds this GPU's {limit}px texture limit",
-				canvas.width, canvas.height
-			)));
-		}
+		fits(device, canvas)?;
 
 		let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("moq-scene image"),
@@ -272,6 +266,24 @@ impl Compositor {
 		self.canvas
 	}
 
+	/// Draw `canvas` from the next [`render`](Self::render) on. A new size
+	/// replaces the [`preview`](Self::preview) and [`program`](Self::program)
+	/// textures with ones of that size, blank until drawn; a fade under way
+	/// carries on.
+	///
+	/// Fails, changing nothing, if the device cannot hold a texture that large.
+	pub fn set_canvas(&mut self, canvas: Canvas) -> Result<(), Error> {
+		fits(&self.device, canvas)?;
+		if canvas.size() != self.canvas.size() {
+			let target = |label| Target::new(&self.device, &self.image_layout, &self.sampler, canvas, label);
+			self.preview = target("moq-scene preview");
+			self.program = target("moq-scene program");
+			self.incoming = target("moq-scene incoming");
+		}
+		self.canvas = canvas;
+		Ok(())
+	}
+
 	/// The scene in preview, as of the last [`render`](Self::render).
 	pub fn preview(&self) -> &wgpu::Texture {
 		&self.preview.texture
@@ -307,6 +319,17 @@ impl Compositor {
 	/// Put the scene called `scene` in preview, or nothing.
 	pub fn set_preview(&mut self, scene: Option<String>) {
 		self.preview_scene = scene;
+	}
+
+	/// Follow the scene called `from` to its new name `to`, wherever it is: in
+	/// preview, on program, or fading out. See [`Edit::renames`](crate::Edit::renames).
+	pub fn rename(&mut self, from: &str, to: &str) {
+		let fading = self.fade.as_mut().map(|fade| &mut fade.from);
+		for scene in [&mut self.preview_scene, &mut self.program_scene].into_iter().chain(fading) {
+			if scene.as_deref() == Some(from) {
+				*scene = Some(to.to_string());
+			}
+		}
 	}
 
 	/// Put the preview on program at once, ending any fade.
@@ -498,6 +521,18 @@ impl Compositor {
 			}
 		}
 	}
+}
+
+/// Refuse a canvas larger than `device` can hold as a texture.
+fn fits(device: &wgpu::Device, canvas: Canvas) -> Result<(), Error> {
+	let limit = device.limits().max_texture_dimension_2d;
+	if canvas.width > limit || canvas.height > limit {
+		return Err(Error::Invalid(format!(
+			"canvas {}x{} exceeds this GPU's {limit}px texture limit",
+			canvas.width, canvas.height
+		)));
+	}
+	Ok(())
 }
 
 /// Place `rect` (canvas pixels) in clip space.
@@ -999,6 +1034,68 @@ mod tests {
 			studio.collection.scenes.clear();
 			studio.render(Instant::now());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
+		})
+		.await;
+	}
+
+	/// A resize draws the next frame on textures of the new size, with items
+	/// where their pixels say, and a canvas the GPU cannot hold changes nothing.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_resize_draws_the_new_canvas() {
+		local(async {
+			let mut studio = Studio::new(collection()).await;
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut();
+			studio.render(Instant::now());
+			let old = studio.compositor.program().clone();
+
+			let wide = Canvas {
+				width: 16,
+				..studio.collection.canvas
+			};
+			studio.collection.canvas = wide;
+			studio.compositor.set_canvas(wide).unwrap();
+			assert_ne!(studio.compositor.program(), &old, "a new texture");
+			studio.render(Instant::now());
+			let program = studio.program();
+			assert_eq!(program.len(), 16 * 8 * 4);
+			let pixel = |x: usize| -> [u8; 4] { program[x * 4..x * 4 + 4].try_into().unwrap() };
+			assert_eq!(pixel(1), BLUE);
+			assert_eq!(pixel(12), BLACK, "items keep their pixels");
+
+			let limit = studio.compositor.device.limits().max_texture_dimension_2d;
+			let huge = Canvas {
+				width: limit + 2,
+				..wide
+			};
+			assert!(matches!(studio.compositor.set_canvas(huge), Err(Error::Invalid(_))));
+			assert_eq!(studio.compositor.canvas(), wide);
+		})
+		.await;
+	}
+
+	/// A renamed scene stays in preview, on program, and in the fade under way.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_renamed_scene_stays_where_it_is() {
+		local(async {
+			let mut studio = Studio::new(collection()).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.fade(Duration::from_secs(1), start);
+
+			for (from, to) in [("red", "crimson"), ("blue", "navy")] {
+				studio.collection.scenes.iter_mut().find(|scene| scene.name == from).unwrap().name = to.into();
+				studio.compositor.rename(from, to);
+			}
+			assert_eq!(studio.compositor.preview_scene(), Some("navy"));
+			assert_eq!(studio.compositor.program_scene(), Some("navy"));
+			studio.render(start + Duration::from_millis(500));
+			let actual = pixel(&studio.program(), 1, 1);
+			assert!(near(actual, [128, 0, 127, 255]), "still fading from red: {actual:?}");
 		})
 		.await;
 	}
