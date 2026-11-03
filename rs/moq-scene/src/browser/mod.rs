@@ -123,8 +123,12 @@ pub struct Page {
 
 #[derive(Default)]
 struct PageState {
+	/// The queue to the helper's socket, which [`run::writer`] drains.
 	#[cfg(target_os = "linux")]
-	commands: Option<protocol::Channel>,
+	commands: Option<std::sync::mpsc::SyncSender<protocol::Command>>,
+	/// Whether input is being dropped because the queue is full.
+	#[cfg(target_os = "linux")]
+	backlogged: bool,
 	paint: Option<Paint>,
 }
 
@@ -134,19 +138,26 @@ impl Page {
 		self.state.lock().unwrap().paint
 	}
 
-	/// Interact with the page. Dropped while the page is starting or after it
-	/// stopped, as a click on a window that is not there yet would be.
+	/// Interact with the page, without waiting on its helper. Dropped while
+	/// the page is starting or after it stopped, as a click on a window that is
+	/// not there yet would be, and while the helper is too far behind to take
+	/// more, as a hung window's would be.
 	pub fn send(&self, input: Input) {
 		#[cfg(target_os = "linux")]
 		{
+			use std::sync::mpsc::TrySendError;
+
 			let mut state = self.state.lock().unwrap();
-			let sent = state
-				.commands
-				.as_ref()
-				.map(|commands| commands.send(&protocol::Command::Input(input), &[]));
-			// A failed send means the helper is gone, which its source reports.
-			if let Some(Err(_)) = sent {
-				state.commands = None;
+			let Some(commands) = &state.commands else { return };
+			match commands.try_send(protocol::Command::Input(input)) {
+				Ok(()) => state.backlogged = false,
+				Err(TrySendError::Full(_)) => {
+					if !std::mem::replace(&mut state.backlogged, true) {
+						tracing::warn!("a browser source's helper is not reading input; dropping it");
+					}
+				}
+				// The helper is gone, which its source reports.
+				Err(TrySendError::Disconnected(_)) => state.commands = None,
 			}
 		}
 		#[cfg(not(target_os = "linux"))]

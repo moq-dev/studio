@@ -5,6 +5,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ExitStatus, Stdio};
+use std::sync::mpsc;
 
 use moq_audio::bus::Channel as Sound;
 
@@ -12,6 +13,10 @@ use super::protocol::{Channel, Command, Event, Open};
 use super::{ARG, Helper, Page, Paint};
 use crate::Error;
 use crate::source::{Mailbox, Picture, Status};
+
+/// Commands waiting for the helper to read them. A helper this far behind is
+/// hung, and [`Page::send`] drops new input rather than wait for it.
+const BACKLOG: usize = 256;
 
 /// Run the page `open` describes until its helper stops, delivering pictures
 /// to `picture` and sound to `sound`. Dropping the future stops the helper.
@@ -40,17 +45,20 @@ pub(crate) async fn run(
 	let commands = events
 		.try_clone()
 		.map_err(|err| Error::Browser(format!("socket: {err}")))?;
-	let end = match commands.send(&Command::Open(open), &[]) {
-		Ok(()) => {
-			page.state.lock().unwrap().commands = Some(commands);
+	let end = match commands.send(&Command::Open(open), &[]).map(|()| writer(commands)) {
+		Ok(Ok(commands)) => {
+			page.state.lock().unwrap().commands = Some(commands.clone());
 			let reader = {
 				let (helper, page, picture, status) = (helper.clone(), page.clone(), picture.clone(), status.clone());
-				tokio::task::spawn_blocking(move || deliver(&helper, &events, &page, &picture, sound, &status))
+				tokio::task::spawn_blocking(move || {
+					deliver(&helper, &events, &commands, &page, &picture, sound, &status)
+				})
 			};
 			let end = reader.await;
 			page.state.lock().unwrap().commands = None;
 			end.unwrap_or_else(|err| End::Failed(format!("the page's reader panicked: {err}")))
 		}
+		Ok(Err(err)) => End::Failed(format!("cannot start the page's writer: {err}")),
 		Err(err) => closed(err),
 	};
 	// A stopped page leaves the canvas rather than freezing on its last
@@ -128,6 +136,24 @@ impl Drop for Process {
 	}
 }
 
+/// Write the commands queued on the returned sender to `channel`, on a thread
+/// of its own, so a helper that stops reading blocks only that thread, never a
+/// sender holding the studio's state. The thread ends once every sender is
+/// dropped or the socket fails, as it does when the helper is killed.
+fn writer(channel: Channel) -> std::io::Result<mpsc::SyncSender<Command>> {
+	let (sender, queue) = mpsc::sync_channel(BACKLOG);
+	std::thread::Builder::new()
+		.name("browser-commands".into())
+		.spawn(move || {
+			for command in queue {
+				if channel.send(&command, &[]).is_err() {
+					break;
+				}
+			}
+		})?;
+	Ok(sender)
+}
+
 /// Start a helper, handing it one end of a socket as its stdin.
 fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 	let (ours, theirs) = UnixStream::pair()?;
@@ -144,6 +170,7 @@ fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 fn deliver(
 	helper: &Helper,
 	events: &Channel,
+	commands: &mpsc::SyncSender<Command>,
 	page: &Page,
 	picture: &Mailbox,
 	mut sound: Option<Sound>,
@@ -173,10 +200,10 @@ fn deliver(
 			Event::Failed(reason) => return End::Failed(reason),
 		};
 		// The copy is done, so the helper may hand the source back to CEF.
-		if let Some(commands) = &page.state.lock().unwrap().commands
-			&& let Err(err) = commands.send(&Command::Painted, &[])
-		{
-			return closed(err);
+		// Waits behind queued input, never dropped: the helper waits on it. A
+		// closed queue means the writer lost the socket, so the helper is gone.
+		if commands.send(Command::Painted).is_err() {
+			return End::Closed;
 		}
 		let texture = match texture {
 			Ok(texture) => texture,
@@ -189,5 +216,26 @@ fn deliver(
 		{
 			*status = Status::Live;
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::browser::Input;
+
+	/// A helper that stops reading costs dropped input, never a sender stuck
+	/// on a full socket while it holds the studio's state.
+	#[test]
+	fn a_helper_that_stops_reading_never_blocks_input() {
+		let (ours, theirs) = UnixStream::pair().unwrap();
+		let page = Page::default();
+		page.state.lock().unwrap().commands = Some(writer(Channel::new(ours)).unwrap());
+		// Far more than the socket buffers and the backlog hold together.
+		for _ in 0..4096 {
+			page.send(Input::Text("x".repeat(1024)));
+		}
+		assert!(page.state.lock().unwrap().backlogged);
+		drop(theirs);
 	}
 }
