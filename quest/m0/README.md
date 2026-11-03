@@ -79,7 +79,8 @@ repository.
 
 ## Required
 
-- [Studio on macOS and Windows](/quest/m0/app.md) - the studio runs on macOS and Windows, not only Linux
+- [Studio on macOS](/quest/m0/app-macos.md) - the studio runs on macOS, not only Linux
+- [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Viewer-side composition](/quest/m0/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
 - [Scene editing](/quest/m0/scene-editing.md) - rename and reorder scenes, and resize the canvas while live through a new rendition
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
