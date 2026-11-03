@@ -8,10 +8,12 @@ use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::source::{Feed, Status};
-use moq_scene::{Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Video, wgpu};
+use moq_scene::{Canvas, Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Video, wgpu};
 
+use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
+use crate::snap::{self, Grab, Snap};
 
 /// The panels, each a tab the user can move, split, or stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -54,16 +56,7 @@ pub struct Studio {
 }
 
 impl Studio {
-	pub fn new(
-		cc: &eframe::CreationContext<'_>,
-		engine: Arc<Engine>,
-		runtime: tokio::runtime::Handle,
-	) -> anyhow::Result<Self> {
-		let render = cc
-			.wgpu_render_state
-			.as_ref()
-			.context("the window is not drawn with wgpu")?;
-
+	pub fn new(render: &eframe::egui_wgpu::RenderState, engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> Self {
 		// The compositor's textures live as long as the engine, so registering
 		// them once is enough: egui samples whatever they hold each frame.
 		let (preview, program, dropped) = {
@@ -88,7 +81,7 @@ impl Studio {
 		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices]);
 		tree.split_right(sources, 0.5, vec![Tab::Filters, Tab::Health, Tab::Audio, Tab::Output]);
 
-		Ok(Self {
+		Self {
 			dock,
 			panels: Panels {
 				engine,
@@ -98,13 +91,15 @@ impl Studio {
 				top: false,
 				selection: None,
 				gestures: Gestures::default(),
+				snapping: Snapping::default(),
+				drag: None,
 				new_scene: String::new(),
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
 			},
-		})
+		}
 	}
 }
 
@@ -135,6 +130,9 @@ struct Panels {
 	/// What the Filters panel edits and a copy takes.
 	selection: Option<Selection>,
 	gestures: Gestures,
+	snapping: Snapping,
+	/// The item a drag in the preview holds.
+	drag: Option<Drag>,
 	new_scene: String,
 	new_item: Option<String>,
 	add: AddSource,
@@ -380,11 +378,13 @@ impl Panels {
 		}
 	}
 
-	/// Deselect an item, after an edit that may have moved any of them.
+	/// Deselect an item, after an edit that may have moved any of them, and
+	/// let go of any drag.
 	fn deselect_item(&mut self) {
 		if matches!(self.selection, Some(Selection::Item(..))) {
 			self.selection = None;
 		}
+		self.drag = None;
 	}
 
 	/// The layer the Items panel shows, and new sources are placed in.
@@ -459,14 +459,151 @@ impl Panels {
 	}
 
 	fn preview(&mut self, ui: &mut Ui) {
-		let state = self.engine.state.lock().unwrap();
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
 		let canvas = state.collection().canvas;
-		ui.label(format!(
-			"Preview: {}",
-			state.compositor.preview_scene().unwrap_or("nothing")
-		));
+		ui.horizontal(|ui| {
+			ui.label(format!(
+				"Preview: {}",
+				state.compositor.preview_scene().unwrap_or("nothing")
+			));
+			ui.separator();
+			let free = ui.ctx().format_modifiers(egui::Modifiers::COMMAND);
+			ui.checkbox(&mut self.snapping.on, "Snap").on_hover_text(format!(
+				"Snap a dragged item to the canvas, other items, and the grid. Hold {free} to drag freely."
+			));
+			ui.checkbox(&mut self.snapping.grid, "Grid");
+			let largest = canvas.width.max(canvas.height);
+			ui.add_enabled(
+				self.snapping.grid,
+				egui::DragValue::new(&mut self.snapping.spacing)
+					.range(2..=largest)
+					.suffix(" px"),
+			);
+		});
+		let response = picture(ui, self.preview, canvas, egui::Sense::click_and_drag());
+		let result = self.arrange(ui, &mut state, &response, canvas);
 		drop(state);
-		picture(ui, self.preview, canvas);
+		self.check(result);
+	}
+
+	/// Select, move, and resize the items of the layer the Items panel shows
+	/// by dragging them in the preview, snapping as they go.
+	fn arrange(&mut self, ui: &Ui, state: &mut State, response: &egui::Response, canvas: Canvas) -> anyhow::Result<()> {
+		let gesture = self.gestures.of(response);
+		// The release still moves the item to where the pointer let go.
+		if !response.dragged() && !response.drag_stopped() {
+			self.drag = None;
+		}
+		// A panel squeezed to nothing has no picture to map the pointer onto.
+		if !response.rect.is_positive() {
+			return Ok(());
+		}
+		let view = View::new(response.rect, canvas);
+		let painter = ui.painter_at(response.rect);
+		if self.snapping.grid {
+			view.grid(&painter, self.snapping.spacing as f32);
+		}
+
+		let Ok(layer) = self.layer(state) else { return Ok(()) };
+		let Some(items) = state.collection().items(&layer).cloned() else {
+			return Ok(());
+		};
+		let selected = match &self.selection {
+			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
+			_ => None,
+		};
+		let reach = view.canvas(REACH);
+		let hit = |pos: egui::Pos2| snap::hit(&items, selected, view.point(pos), reach);
+
+		if response.clicked() {
+			match response.interact_pointer_pos().and_then(hit) {
+				Some((index, _)) => self.selection = Some(Selection::Item(layer.clone(), index)),
+				None => self.deselect_item(),
+			}
+		}
+		if response.drag_started()
+			&& let Some(origin) = ui.input(|input| input.pointer.press_origin())
+			&& let Some((index, grab)) = hit(origin)
+		{
+			self.selection = Some(Selection::Item(layer.clone(), index));
+			self.drag = Some(Drag {
+				layer: layer.clone(),
+				index,
+				grab,
+				rect: items[index].rect,
+				origin: view.point(origin),
+				gesture,
+				hints: None,
+			});
+		}
+
+		let mut result = Ok(());
+		if let Some(drag) = &mut self.drag
+			&& let Some(pos) = response.interact_pointer_pos()
+		{
+			let point = view.point(pos);
+			// Whole canvas pixels, so an unsnapped drag saves round numbers.
+			let delta = [(point[0] - drag.origin[0]).round(), (point[1] - drag.origin[1]).round()];
+			let rect = drag.grab.drag(drag.rect, delta);
+			let free = ui.input(|input| input.modifiers.command);
+			drag.hints = (self.snapping.on && !free).then(|| {
+				let snap = Snap {
+					reach,
+					grid: self.snapping.grid.then_some(self.snapping.spacing as f32),
+				};
+				snap.apply(drag.grab, rect, &others(state, &drag.layer, drag.index), &canvas)
+			});
+			let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
+			let item = state
+				.collection()
+				.items(&drag.layer)
+				.and_then(|items| items.get(drag.index));
+			if let Some(item) = item.cloned()
+				&& item.rect != rect
+			{
+				let verb = if drag.grab == Grab::Move { "Move" } else { "Resize" };
+				let label = format!("{verb} `{}`", item.source);
+				result = edit(state, label, drag.gesture, |draft| {
+					draft.set_item(&drag.layer, drag.index, Item { rect, ..item })
+				});
+			}
+		}
+		if !response.dragged() {
+			self.drag = None;
+		}
+
+		// Drawn from the collection and selection as this frame left them.
+		let items = state.collection().items(&layer).cloned().unwrap_or_default();
+		let selected = match &self.selection {
+			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
+			_ => None,
+		};
+		let accent = ui.visuals().selection.stroke.color;
+		// A hidden item has no handles, as the preview cannot grab it.
+		if let Some(item) = selected.and_then(|index| items.get(index)).filter(|item| item.visible) {
+			view.selected(&painter, &item.rect, accent);
+		}
+		let grab = match &self.drag {
+			Some(drag) => {
+				if let Some(snapped) = &drag.hints {
+					view.hints(&painter, snapped);
+				}
+				Some(drag.grab)
+			}
+			None => response.hover_pos().and_then(hit).map(|(index, grab)| {
+				if selected != Some(index)
+					&& let Some(item) = items.get(index)
+				{
+					view.hovered(&painter, &item.rect, accent);
+				}
+				grab
+			}),
+		};
+		if let Some(grab) = grab {
+			ui.ctx().set_cursor_icon(cursor(grab));
+		}
+		result
 	}
 
 	fn program(&mut self, ui: &mut Ui) {
@@ -489,7 +626,7 @@ impl Panels {
 			}
 		});
 		drop(state);
-		picture(ui, self.program, canvas);
+		picture(ui, self.program, canvas, egui::Sense::hover());
 	}
 
 	fn scenes(&mut self, ui: &mut Ui) {
@@ -877,7 +1014,8 @@ impl Panels {
 	fn devices(&mut self, ui: &mut Ui) {
 		self.devices.poll();
 		if ui.button("Refresh").clicked() {
-			self.devices.refresh(&self.runtime);
+			let refreshed = self.devices.refresh(&self.runtime).context("cannot list devices");
+			self.check(refreshed);
 		}
 		let Some(picked) = self.devices.ui(ui) else { return };
 		let mut state = self.engine.state.lock().unwrap();
@@ -1044,6 +1182,13 @@ impl Panels {
 					ui.end_row();
 				}
 			}
+			let canvas = self.engine.state.lock().unwrap().collection().canvas;
+			ui.label("Canvas");
+			ui.label(format!(
+				"{}x{} at {} fps, set in the scene file and read at startup",
+				canvas.width, canvas.height, canvas.framerate
+			));
+			ui.end_row();
 			ui.label("Drawn");
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
@@ -1298,15 +1443,196 @@ fn add(
 }
 
 /// Draw `texture` as large as fits, keeping the canvas's shape.
-fn picture(ui: &mut Ui, texture: egui::TextureId, canvas: moq_scene::Canvas) {
+fn picture(ui: &mut Ui, texture: egui::TextureId, canvas: Canvas, sense: egui::Sense) -> egui::Response {
 	let available = ui.available_size();
 	let aspect = canvas.width as f32 / canvas.height as f32;
 	let mut size = egui::vec2(available.x, available.x / aspect);
 	if size.y > available.y {
 		size = egui::vec2(available.y * aspect, available.y);
 	}
-	ui.vertical_centered(|ui| ui.image((texture, size)));
+	ui.vertical_centered(|ui| ui.add(egui::Image::new((texture, size)).sense(sense)))
+		.inner
 }
+
+/// How the preview snaps a dragged item, for this session.
+struct Snapping {
+	on: bool,
+	/// Whether the grid is drawn and snapped to.
+	grid: bool,
+	/// The grid's spacing in canvas pixels.
+	spacing: u32,
+}
+
+impl Default for Snapping {
+	fn default() -> Self {
+		Self {
+			on: true,
+			grid: false,
+			spacing: 40,
+		}
+	}
+}
+
+/// An item a drag in the preview holds.
+struct Drag {
+	layer: Layer,
+	index: usize,
+	grab: Grab,
+	/// The item's rect, and where the pointer was in canvas pixels, when the
+	/// drag started. Each frame drags from these, so snaps never accumulate.
+	rect: Rect,
+	origin: [f32; 2],
+	/// Kept from the start, since the frame that releases the drag no longer
+	/// reports it but still moves the item.
+	gesture: Option<u64>,
+	/// The snapped rect, its guides, and its spacing, unless snapping is off.
+	hints: Option<snap::Snapped>,
+}
+
+/// How far, in points on screen, the pointer reaches to an edge or a line.
+const REACH: f32 = 8.0;
+
+/// The visible items of the scene in preview and the top layer, other than
+/// the one at `index` of `layer`: what a dragged item snaps to.
+fn others(state: &State, layer: &Layer, index: usize) -> Vec<Rect> {
+	let scene = state
+		.compositor
+		.preview_scene()
+		.map(|name| Layer::Scene(name.to_string()));
+	let collection = state.collection();
+	let mut rects = Vec::new();
+	for shown in scene.into_iter().chain([Layer::Top]) {
+		let items = collection.items(&shown).map_or(&[][..], Vec::as_slice);
+		for (at, item) in items.iter().enumerate() {
+			if item.visible && !(shown == *layer && at == index) {
+				rects.push(item.rect);
+			}
+		}
+	}
+	rects
+}
+
+fn cursor(grab: Grab) -> egui::CursorIcon {
+	use snap::Side::{End, Start};
+	match grab {
+		Grab::Resize { x: Some(_), y: None } => egui::CursorIcon::ResizeHorizontal,
+		Grab::Resize { x: None, y: Some(_) } => egui::CursorIcon::ResizeVertical,
+		Grab::Resize {
+			x: Some(Start),
+			y: Some(Start),
+		}
+		| Grab::Resize {
+			x: Some(End),
+			y: Some(End),
+		} => egui::CursorIcon::ResizeNwSe,
+		Grab::Resize { x: Some(_), y: Some(_) } => egui::CursorIcon::ResizeNeSw,
+		Grab::Move | Grab::Resize { x: None, y: None } => egui::CursorIcon::Move,
+	}
+}
+
+/// The preview's picture on screen, mapping canvas pixels to points.
+struct View {
+	rect: egui::Rect,
+	/// Canvas pixels per point.
+	scale: f32,
+}
+
+impl View {
+	fn new(rect: egui::Rect, canvas: Canvas) -> Self {
+		Self {
+			rect,
+			scale: canvas.width as f32 / rect.width(),
+		}
+	}
+
+	/// The canvas position under `pos`.
+	fn point(&self, pos: egui::Pos2) -> [f32; 2] {
+		let offset = (pos - self.rect.min) * self.scale;
+		[offset.x, offset.y]
+	}
+
+	/// A distance on screen, in canvas pixels.
+	fn canvas(&self, points: f32) -> f32 {
+		points * self.scale
+	}
+
+	fn pos(&self, x: f32, y: f32) -> egui::Pos2 {
+		self.rect.min + egui::vec2(x, y) / self.scale
+	}
+
+	fn screen(&self, rect: &Rect) -> egui::Rect {
+		egui::Rect::from_two_pos(
+			self.pos(rect.x, rect.y),
+			self.pos(rect.x + rect.width, rect.y + rect.height),
+		)
+	}
+
+	/// The line at `at` on `axis`, from `from` to `to` across it.
+	fn line(&self, axis: snap::Axis, at: f32, from: f32, to: f32) -> [egui::Pos2; 2] {
+		match axis {
+			snap::Axis::X => [self.pos(at, from), self.pos(at, to)],
+			snap::Axis::Y => [self.pos(from, at), self.pos(to, at)],
+		}
+	}
+
+	fn grid(&self, painter: &egui::Painter, spacing: f32) {
+		// Any finer on screen, the grid is a wash.
+		if spacing / self.scale < 4.0 {
+			return;
+		}
+		let stroke = egui::Stroke::new(1.0, Color32::from_white_alpha(32));
+		let size = self.rect.size() * self.scale;
+		for (axis, length, across) in [(snap::Axis::X, size.x, size.y), (snap::Axis::Y, size.y, size.x)] {
+			let mut at = spacing;
+			while at < length {
+				painter.line_segment(self.line(axis, at, 0.0, across), stroke);
+				at += spacing;
+			}
+		}
+	}
+
+	/// An outline with a handle at each corner and edge.
+	fn selected(&self, painter: &egui::Painter, rect: &Rect, color: Color32) {
+		let rect = self.screen(rect);
+		painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.5, color), egui::StrokeKind::Outside);
+		for x in [rect.left(), rect.center().x, rect.right()] {
+			for y in [rect.top(), rect.center().y, rect.bottom()] {
+				if (x, y) != (rect.center().x, rect.center().y) {
+					let handle = egui::Rect::from_center_size(egui::pos2(x, y), egui::Vec2::splat(6.0));
+					painter.rect_filled(handle, 1.0, color);
+				}
+			}
+		}
+	}
+
+	fn hovered(&self, painter: &egui::Painter, rect: &Rect, color: Color32) {
+		let stroke = egui::Stroke::new(1.0, color.gamma_multiply(0.6));
+		painter.rect_stroke(self.screen(rect), 0.0, stroke, egui::StrokeKind::Outside);
+	}
+
+	/// The guides the dragged item lines up on, and the equal spaces beside it.
+	fn hints(&self, painter: &egui::Painter, snapped: &snap::Snapped) {
+		let stroke = egui::Stroke::new(1.0, GUIDE);
+		for guide in &snapped.guides {
+			painter.line_segment(self.line(guide.axis, guide.at, guide.from, guide.to), stroke);
+		}
+		for gap in &snapped.gaps {
+			// A gap along X is a horizontal span: a line at its `at` on Y.
+			let (across, tick) = match gap.axis {
+				snap::Axis::X => (snap::Axis::Y, egui::vec2(0.0, 4.0)),
+				snap::Axis::Y => (snap::Axis::X, egui::vec2(4.0, 0.0)),
+			};
+			let [start, end] = self.line(across, gap.at, gap.start, gap.end);
+			painter.line_segment([start, end], stroke);
+			for pos in [start, end] {
+				painter.line_segment([pos - tick, pos + tick], stroke);
+			}
+		}
+	}
+}
+
+/// Smart guides and spacing hints, bright enough to read over any picture.
+const GUIDE: Color32 = Color32::from_rgb(255, 64, 160);
 
 fn describe(source: &Source) -> String {
 	let or_default = |id: &Option<String>| id.clone().unwrap_or_else(|| "default".into());
@@ -1485,12 +1811,6 @@ impl AddSource {
 	}
 }
 
-/// A device the user can add as a source.
-struct Pick {
-	name: String,
-	source: Source,
-}
-
 /// The capture devices this machine has, listed in the background.
 #[derive(Default)]
 struct Devices {
@@ -1498,22 +1818,20 @@ struct Devices {
 	pending: Option<std::sync::mpsc::Receiver<Listing>>,
 }
 
-/// One listing of every kind of device, each of which can fail on its own.
-struct Listing {
-	kinds: Vec<(&'static str, Result<Vec<Pick>, String>)>,
-}
-
 impl Devices {
-	fn refresh(&mut self, runtime: &tokio::runtime::Handle) {
+	fn refresh(&mut self, runtime: &tokio::runtime::Handle) -> std::io::Result<()> {
 		let (send, recv) = std::sync::mpsc::channel();
-		self.pending = Some(recv);
 		// The capture backends' listing futures are `!Send` on macOS, as their
 		// capture futures are (which is why each source runs on its own thread),
-		// so poll the listing on a blocking thread rather than spawn it.
+		// so poll the listing on a thread rather than spawn it. Not the runtime's
+		// blocking pool, which dropping the runtime waits out, so a listing stuck
+		// on a permission prompt cannot hold the studio open once it closes.
 		let handle = runtime.clone();
-		runtime.spawn_blocking(move || {
-			let _ = send.send(handle.block_on(list()));
-		});
+		std::thread::Builder::new().name("devices".into()).spawn(move || {
+			let _ = send.send(handle.block_on(devices::list()));
+		})?;
+		self.pending = Some(recv);
+		Ok(())
 	}
 
 	fn poll(&mut self) {
@@ -1535,8 +1853,8 @@ impl Devices {
 		let mut picked = None;
 		egui::ScrollArea::vertical()
 			.show(ui, |ui| {
-				for (kind, devices) in &mut listing.kinds {
-					ui.strong(*kind);
+				for (kind, devices) in listing.kinds() {
+					ui.strong(kind);
 					match devices {
 						Ok(devices) if devices.is_empty() => {
 							ui.weak("none");
@@ -1562,58 +1880,5 @@ impl Devices {
 				None
 			})
 			.inner
-	}
-}
-
-#[cfg(feature = "capture")]
-async fn list() -> Listing {
-	fn picks<T>(result: Result<Vec<T>, impl std::fmt::Display>, pick: impl Fn(T) -> Pick) -> Result<Vec<Pick>, String> {
-		result
-			.map(|devices| devices.into_iter().map(pick).collect())
-			.map_err(|err| err.to_string())
-	}
-
-	let cameras = picks(moq_video::capture::cameras().await, |camera| Pick {
-		name: camera.name,
-		source: Source::Camera { id: Some(camera.id) },
-	});
-	let displays = picks(moq_video::capture::displays().await, |display| Pick {
-		name: display.name,
-		source: Source::Display { id: Some(display.id) },
-	});
-	let windows = picks(moq_video::capture::windows().await, |window| Pick {
-		name: format!("{} ({})", window.title, window.app),
-		source: Source::Window { id: window.id },
-	});
-	let mut microphones = picks(moq_audio::capture::devices().await, |device| Pick {
-		name: format!("{} ({})", device.name, device.host),
-		source: Source::Microphone { id: Some(device.id) },
-	});
-	if cfg!(target_os = "macos")
-		&& let Ok(microphones) = &mut microphones
-	{
-		microphones.push(Pick {
-			name: "System audio".into(),
-			source: Source::SystemAudio,
-		});
-	}
-
-	Listing {
-		kinds: vec![
-			("Cameras", cameras),
-			("Displays", displays),
-			("Windows", windows),
-			("Audio inputs", microphones),
-		],
-	}
-}
-
-#[cfg(not(feature = "capture"))]
-async fn list() -> Listing {
-	Listing {
-		kinds: vec![(
-			"Devices",
-			Err("this build cannot capture; rebuild with `--features capture`".into()),
-		)],
 	}
 }
