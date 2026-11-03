@@ -82,7 +82,6 @@ repository.
 - [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Viewer-side composition](/quest/m0/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
-- [Worker threads fail loud at startup](/quest/m0/thread-start.md) - a worker that cannot start fails the studio's start instead of logging
 - [The program encoder drains](/quest/m0/program-drain.md) - a hardware encoder never loses the program's last frames at exit or on pause
 - [Outside edits to the scene file](/quest/m0/outside-edits.md) - autosave reloads or asks instead of overwriting a change made outside the studio
 - [Scene editing](/quest/m0/scene-editing.md) - rename and reorder scenes, and resize the canvas while live through a new rendition
@@ -96,7 +95,6 @@ repository.
 - [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
 - [Animation and transitions](/quest/m0/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
 - [Video effects](/quest/m0/effects.md) - a curated effect set with CSS meanings, and ML effects baked into their source
-- [Guided setup](/quest/m0/guided-setup.md) - first launch detects devices, measures the uplink, and proposes settings
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [Guests](/quest/m0/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
