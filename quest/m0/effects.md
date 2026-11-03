@@ -1,24 +1,26 @@
-# [M] Video effects
+# [M] ML video effects
 
 ## Goal
 
-Sources and scene items in `moq-studio` take a curated set of video effects:
-color correction, `.cube` LUTs, blur, crop and masks, chroma and luma key,
-and blend modes. They render the same in every composition host. ML effects
-such as background removal are offered too, applied before the source
-publishes.
+Sources in `moq-studio` offer ML video effects, starting with background
+removal (a person cut out of a camera), applied to the source's picture before
+it is drawn or published, so every viewer sees the same cut-out from the
+source's own track.
 
 ## Plan
 
-Write the effects in WGSL to the meanings the CSS Filter Effects and
-Compositing specs define (color matrices, blur, drop-shadow, blend modes), so
-an effect means the same thing as the CSS overlays use. The layout track
-carries effect names and parameters, never shader code, since a shader from
-the network costs every viewer's GPU and can lose the device. An effect the
-browser cannot reproduce, like an ML model, is baked into its source's track
-per the [composition epic](/quest/m0/compose/README.md), so ML effects
-apply to a source, never to one scene item. Prefer an
-existing model crate for ML effects over training one.
+The rest of the effect set landed as moq-scene `Filter`s that every
+composition host renders with the same WGSL and the layout carries by name and
+settings. A model cannot meet that parity rule: viewers would each need the
+model and a GPU to run it, and inference differs across backends. So an ML
+effect is baked into its source's track per the
+[composition epic](/quest/m0/compose/README.md): it belongs to a source, never
+to one scene item, and sits before the source's crop and filters, as the
+encoder in `rs/moq-scene/src/publish.rs` sees the capture.
 
-Effects extend moq-scene's `Filter`, which a source (`[video.<name>]`) or an
-item lists, so they undo, copy, and paste as opacity, the first filter, does.
+Prefer an existing runtime crate and a small, permissively licensed person
+segmentation model (such as MediaPipe's selfie segmentation, Apache-2.0) over
+training one. Running it on the studio's own wgpu device keeps the frame on
+the GPU and works toward the [web studio](/quest/m0/web.md); a CPU runtime
+costs a readback per frame. Measure the per-frame cost at 1080p and 30 fps
+before choosing.

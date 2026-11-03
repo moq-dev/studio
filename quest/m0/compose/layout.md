@@ -25,7 +25,10 @@ catalog (decided 2026-11-02, maintainer; `rs/moq-scene/src/publish.rs`).
 Clones and filters travel in the layout, not as tracks: a source's track is
 its capture before any filter, and a clone publishes none, so the layout names
 the source a clone shows and the filters each source and item applies
-(decided 2026-11-02, maintainer).
+(decided 2026-11-02, maintainer). That includes crops and blend modes, and the
+filters naming another source: a mask names a picture source's track, and a
+LUT a `lut` source, whose `.cube` table publishes no track yet, so a viewer
+needs one carrying it, as an image's file is.
 
 ## Required
 
