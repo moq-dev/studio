@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
-use moq_scene::source::Status;
+use moq_scene::source::{Feed, Status};
 use moq_scene::{Canvas, Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Video, wgpu};
 
 use crate::engine::{Engine, State};
@@ -948,6 +948,23 @@ impl Panels {
 						}
 						(None, Some(feed), None) => status(ui, &feed.status()),
 						(None, None, None) => status(ui, &Status::Starting),
+					}
+					// A track can fail while its source still draws, such as on a GPU
+					// out of encode sessions, so its reason is spelled out. A clone
+					// publishes none: it shows its source's capture, not a feed of its own.
+					match state.sources.get(name).and_then(Feed::track) {
+						Some(Status::Failed(reason)) => {
+							ui.colored_label(ui.visuals().error_fg_color, format!("track failed: {reason}"));
+						}
+						Some(track) => {
+							ui.horizontal(|ui| {
+								ui.weak("track");
+								status(ui, &track);
+							});
+						}
+						None => {
+							ui.label("");
+						}
 					}
 					let places = collection
 						.layers()

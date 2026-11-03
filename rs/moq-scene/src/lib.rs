@@ -18,6 +18,8 @@
 //!   textures on the caller's `wgpu` device, cutting or fading between them.
 //!   `moq_video::render::export` hands the program to an encoder, on the GPU
 //!   where the platform allows.
+//! - [`publish`] gives each local source its own track in the studio's
+//!   broadcast, so viewers can compose the scene themselves.
 //!
 //! Every picture is drawn on the program clock the caller ticks
 //! [`Compositor::render`] with, from whatever each source delivered last: a
@@ -28,6 +30,7 @@ pub mod clip;
 mod collection;
 mod compositor;
 mod edit;
+pub mod publish;
 pub mod source;
 
 pub use clip::Clip;
