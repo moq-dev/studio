@@ -789,18 +789,28 @@ fn spawn(driver: Driver) {
 	}
 }
 
-/// Start a thread called `name` that runs `task` with its own clock and IO.
-/// The runtime is built before the thread, so the caller learns if either
-/// cannot start.
+/// Start a thread called `name` that runs `task` with its own clock and IO,
+/// returning why if either cannot start.
 fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::Result<()> {
+	// The thread starts before its runtime is built and handed over, since a
+	// runtime dropped in the async caller, as a refused spawn would, panics.
+	let (handoff, received) = mpsc::sync_channel::<tokio::runtime::Runtime>(1);
+	std::thread::Builder::new()
+		.name(name.clone())
+		.spawn(move || {
+			if let Ok(runtime) = received.recv() {
+				runtime.block_on(task());
+			}
+		})
+		.with_context(|| format!("cannot start the {name} thread"))?;
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
 		.with_context(|| format!("cannot start the {name} runtime"))?;
-	std::thread::Builder::new()
-		.name(name.clone())
-		.spawn(move || runtime.block_on(task()))
-		.with_context(|| format!("cannot start the {name} thread"))?;
+	if let Err(mpsc::SendError(runtime)) = handoff.send(runtime) {
+		runtime.shutdown_background();
+		anyhow::bail!("the {name} thread stopped");
+	}
 	Ok(())
 }
 
