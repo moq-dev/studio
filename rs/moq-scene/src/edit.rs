@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, Collection, Item, Layer, Scene, Source, Transition, Video};
+use crate::collection::{Audio, Collection, Filter, Item, Layer, Scene, Source, Transition, Video};
 
 /// One part of a collection, before and after an edit.
 ///
@@ -386,7 +386,8 @@ impl Draft {
 	}
 
 	/// Remove the source called `name` and everything that refers to it: its
-	/// clones, the items showing either, and their audio and video settings.
+	/// clones, the items showing either, their audio and video settings, and
+	/// the filters reading it, such as a mask.
 	pub fn remove_source(&mut self, name: &str) -> Result<(), Error> {
 		let clones: Vec<String> = self
 			.collection
@@ -410,6 +411,36 @@ impl Draft {
 		// Back to front, so each index still names the item found.
 		for (layer, index) in placed.into_iter().rev() {
 			self.remove_item(&layer, index)?;
+		}
+
+		let reads = |filter: &Filter| filter.source() == Some(name);
+		let items: Vec<(Layer, usize, Item)> = self
+			.collection
+			.layers()
+			.flat_map(|(layer, items)| {
+				let reading = items
+					.iter()
+					.enumerate()
+					.filter(|(_, item)| item.filters.iter().any(reads));
+				reading
+					.map(move |(index, item)| (layer.clone(), index, item.clone()))
+					.collect::<Vec<_>>()
+			})
+			.collect();
+		for (layer, index, mut item) in items {
+			item.filters.retain(|filter| !reads(filter));
+			self.set_item(&layer, index, item)?;
+		}
+		let videos: Vec<(String, Video)> = self
+			.collection
+			.video
+			.iter()
+			.filter(|(_, video)| video.filters.iter().any(reads))
+			.map(|(name, video)| (name.clone(), video.clone()))
+			.collect();
+		for (other, mut video) in videos {
+			video.filters.retain(|filter| !reads(filter));
+			self.set_video(&other, Some(video))?;
 		}
 		if self.collection.audio.contains_key(name) {
 			self.set_audio(name, None)?;
@@ -648,8 +679,9 @@ impl History {
 	/// edit here still undoes and redoes around it.
 	///
 	/// So it must commute with each of them: it may only add source, audio,
-	/// and video entries, under names no edit here changes, and no clone,
-	/// whose source an edit could remove. Anything else is refused.
+	/// and video entries, under names no edit here changes, and nothing that
+	/// names another source, such as a clone or a mask, which an edit could
+	/// remove. Anything else is refused.
 	pub fn apply_outside(&self, collection: &mut Collection, edit: &Edit) -> Result<(), Error> {
 		for change in &edit.changes {
 			let name = match change {
@@ -662,12 +694,12 @@ impl History {
 					name,
 					before: None,
 					after: Some(_),
-				}
-				| Change::Video {
+				} => name,
+				Change::Video {
 					name,
 					before: None,
-					after: Some(_),
-				} => name,
+					after: Some(video),
+				} if video.filters.iter().all(|filter| filter.source().is_none()) => name,
 				_ => {
 					return Err(Error::Invalid(format!(
 						"`{}` changes more than adding a source's own entries",
@@ -844,6 +876,7 @@ mod tests {
 			"red copy".into(),
 			Video {
 				filters: vec![Filter::Opacity { amount: 0.5 }],
+				..Default::default()
 			},
 		);
 		collection
@@ -866,6 +899,43 @@ mod tests {
 
 		history.undo(&mut collection).unwrap();
 		assert_eq!(collection, before);
+	}
+
+	/// A removed source's filters go with it, from items and other sources
+	/// alike, leaving their other filters.
+	#[test]
+	fn removing_a_source_removes_the_filters_reading_it() {
+		let mut collection = collection();
+		collection.sources.insert("matte".into(), color([0, 0, 0, 128]));
+		collection.sources.insert(
+			"grade".into(),
+			Source::Lut {
+				path: "grade.cube".into(),
+			},
+		);
+		let mask = Filter::Mask {
+			source: "matte".into(),
+			mode: Default::default(),
+		};
+		let lut = Filter::Lut {
+			source: "grade".into(),
+			amount: 1.0,
+		};
+		collection.scenes[0].items[0].filters = vec![mask.clone(), lut.clone()];
+		collection.video.insert(
+			"red".into(),
+			Video {
+				filters: vec![lut.clone(), mask],
+				..Default::default()
+			},
+		);
+		collection.validate().unwrap();
+
+		let mut draft = collection.draft("Remove matte");
+		draft.remove_source("matte").unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
+		assert_eq!(collection.scenes[0].items[0].filters, std::slice::from_ref(&lut));
+		assert_eq!(collection.video["red"].filters, [lut]);
 	}
 
 	/// An edit that leaves the collection invalid is refused whole.
@@ -1036,9 +1106,20 @@ mod tests {
 		placed.set_source("guest", Some(color([0, 255, 0, 255]))).unwrap();
 		let item = Item::new("guest", Rect::fill(&collection.canvas));
 		placed.insert_item(&main(), 0, item).unwrap();
+		let mut masked = collection.draft("Add guest");
+		masked.set_source("guest", Some(color([0, 255, 0, 255]))).unwrap();
+		let mask = Filter::Mask {
+			source: "red".into(),
+			mode: Default::default(),
+		};
+		let video = Video {
+			filters: vec![mask],
+			..Default::default()
+		};
+		masked.set_video("guest", Some(video)).unwrap();
 		let mut removed = collection.draft("Remove red");
 		removed.remove_source("red").unwrap();
-		for draft in [taken, clone, placed, removed] {
+		for draft in [taken, clone, placed, masked, removed] {
 			let edit = draft.finish().unwrap();
 			assert!(history.apply_outside(&mut collection, &edit).is_err(), "{edit:?}");
 		}

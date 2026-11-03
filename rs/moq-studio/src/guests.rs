@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::Context;
 use moq_net::Path;
 use moq_room::Kind;
-use moq_scene::{Collection, Draft, History, Source};
+use moq_scene::{Collection, Draft, Filter, History, Item, Layer, Source, Video};
 use url::Url;
 
 use crate::engine::Engine;
@@ -270,6 +270,64 @@ impl Room {
 			history.unused_name(collection, &base),
 			Source::Broadcast { path: source },
 		))
+	}
+
+	/// Take the guest called `identity` off the program in `draft`: their
+	/// items, the items showing a clone of their sources, and the masks
+	/// reading them leave every layer, and their sources are muted. Returns
+	/// whether that changed anything.
+	pub fn take_off(&self, draft: &mut Draft, identity: &str) -> Result<bool, moq_scene::Error> {
+		let before = draft.collection().clone();
+		let sources = self.sources_of(&before, identity);
+		let ours = |name: &str| sources.iter().any(|source| source == name);
+		// A clone shows the same capture, and a mask puts their picture on air.
+		let shows = |item: &Item| ours(before.capture(&item.source));
+		let reads = |filter: &Filter| filter.source().is_some_and(ours);
+
+		let placed: Vec<(Layer, usize)> = before
+			.layers()
+			.flat_map(|(layer, items)| {
+				let at = items.iter().enumerate().filter(|(_, item)| shows(item));
+				at.map(move |(index, _)| (layer.clone(), index)).collect::<Vec<_>>()
+			})
+			.collect();
+		// Back to front, so each index still names the item found.
+		for (layer, index) in placed.into_iter().rev() {
+			draft.remove_item(&layer, index)?;
+		}
+
+		let masked: Vec<(Layer, usize, Item)> = draft
+			.collection()
+			.layers()
+			.flat_map(|(layer, items)| {
+				let at = items
+					.iter()
+					.enumerate()
+					.filter(|(_, item)| item.filters.iter().any(reads));
+				at.map(move |(index, item)| (layer.clone(), index, item.clone()))
+					.collect::<Vec<_>>()
+			})
+			.collect();
+		for (layer, index, mut item) in masked {
+			item.filters.retain(|filter| !reads(filter));
+			draft.set_item(&layer, index, item)?;
+		}
+		let masked: Vec<(String, Video)> = before
+			.video
+			.iter()
+			.filter(|(_, video)| video.filters.iter().any(reads))
+			.map(|(name, video)| (name.clone(), video.clone()))
+			.collect();
+		for (name, mut video) in masked {
+			video.filters.retain(|filter| !reads(filter));
+			draft.set_video(&name, Some(video))?;
+		}
+
+		for source in &sources {
+			let audio = before.audio.get(source).copied().unwrap_or_default();
+			draft.set_audio(source, Some(moq_scene::Audio { muted: true, ..audio }))?;
+		}
+		Ok(*draft.collection() != before)
 	}
 
 	/// The sources in `collection` that show the guest called `identity`.
@@ -767,6 +825,69 @@ mod tests {
 		for name in ["alice", "bob", "bob 2"] {
 			assert!(collection.sources.contains_key(name), "{name}");
 		}
+	}
+
+	/// Remove from scenes takes the guest off the program however they reach
+	/// it, leaves everything else, and is one edit that undoes whole.
+	#[test]
+	fn taking_a_guest_off_leaves_nothing_of_them_on_air() {
+		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
+		let mut collection = Collection::new();
+		let fill = moq_scene::Rect::fill(&collection.canvas);
+		let mask = Filter::Mask {
+			source: "alice".into(),
+			mode: Default::default(),
+		};
+		let gray = Filter::Grayscale { amount: 1.0 };
+		collection.sources.insert(
+			"alice".into(),
+			Source::Broadcast {
+				path: "guests/alice/camera.hang".into(),
+			},
+		);
+		collection
+			.sources
+			.insert("alice clone".into(), Source::Clone { source: "alice".into() });
+		collection.sources.insert(
+			"bg".into(),
+			Source::Color {
+				color: moq_scene::Rgba([0, 0, 0, 255]),
+			},
+		);
+		let mut bg = Item::new("bg", fill);
+		bg.filters = vec![mask.clone(), gray.clone()];
+		collection.scenes[0].items = vec![bg, Item::new("alice", fill), Item::new("alice clone", fill)];
+		collection.top.push(Item::new("alice", fill));
+		let video = Video {
+			filters: vec![mask],
+			..Default::default()
+		};
+		collection.video.insert("bg".into(), video);
+		collection.validate().unwrap();
+		let start = collection.clone();
+
+		let mut draft = collection.draft("Remove from scenes");
+		assert!(room.take_off(&mut draft, "alice").unwrap());
+		let edit = draft.finish().unwrap();
+		collection.apply(&edit).unwrap();
+		let bg = &collection.scenes[0].items;
+		assert_eq!(bg.len(), 1);
+		assert_eq!(
+			(bg[0].source.as_str(), bg[0].filters.as_slice()),
+			("bg", [gray].as_slice())
+		);
+		assert!(collection.top.is_empty());
+		assert!(!collection.video.contains_key("bg"));
+		assert!(collection.audio["alice"].muted);
+		assert!(collection.sources.contains_key("alice clone"), "a clone stays a source");
+
+		let mut again = collection.draft("Remove from scenes");
+		assert!(
+			!room.take_off(&mut again, "alice").unwrap(),
+			"nothing is left to take off"
+		);
+		collection.apply(&edit.inverse()).unwrap();
+		assert_eq!(collection, start);
 	}
 
 	#[test]
