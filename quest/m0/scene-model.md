@@ -24,5 +24,4 @@ an entry the loader cannot replay drops it and everything older. Update
 
 ## Related
 
-- [Autosave](/quest/m0/autosave.md) - the history must survive it
 - [Scene editing](/quest/m0/scene-editing.md) - rename, reorder, and resize go through the same commands
