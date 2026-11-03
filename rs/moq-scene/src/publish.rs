@@ -60,11 +60,13 @@ pub struct Publish {
 	owners: Arc<Mutex<Owners>>,
 }
 
-/// Which [`Claim`] owns each source name's entry in the studio catalog.
+/// Which [`Claim`] owns each source name's entry in the studio catalog, and
+/// each open [`Listing`]'s catalog by its claim.
 #[derive(Default)]
 struct Owners {
 	next: u64,
 	by_name: BTreeMap<String, u64>,
+	catalogs: BTreeMap<u64, moq_mux::catalog::Producer>,
 }
 
 impl Publish {
@@ -88,6 +90,15 @@ impl Publish {
 			kind,
 			owners: Default::default(),
 		}
+	}
+
+	/// What each source track has written, keyed by rendition ID, as
+	/// [`Catalog::stats`](moq_mux::catalog::Producer::stats) reports the
+	/// program's. The broadcast names every track uniquely, so all sources share
+	/// one map, and a replaced source's tracks count until it stops.
+	pub fn stats(&self) -> BTreeMap<String, hang::stats::Rendition> {
+		let owners = self.owners.lock().unwrap();
+		owners.catalogs.values().flat_map(|catalog| catalog.stats()).collect()
 	}
 
 	/// Claim `name`'s entry in the studio catalog for a source that is opening,
@@ -155,6 +166,7 @@ impl<'a> Listing<'a> {
 			.with_bandwidth(publish.bandwidth.clone())
 			.with_hls(None);
 		let catalog = moq_mux::catalog::Producer::new(&mut scratch, config)?;
+		claim.owners.lock().unwrap().catalogs.insert(claim.id, catalog.clone());
 		Ok(Self {
 			claim,
 			kind: publish.kind.clone(),
@@ -194,6 +206,7 @@ impl<'a> Listing<'a> {
 
 impl Drop for Listing<'_> {
 	fn drop(&mut self) {
+		self.claim.owners.lock().unwrap().catalogs.remove(&self.claim.id);
 		// Fails only once the studio catalog closed, which took the entry with it.
 		let _ = self.studio.mutate(|root| {
 			if self.claim.owned() {
@@ -539,6 +552,17 @@ mod tests {
 					}
 				} => {}
 			}
+
+			// Every frame written counts for the Health panel, until the
+			// source stops.
+			let stats = publish.stats();
+			assert_eq!(
+				stats.values().map(|rendition| rendition.frames).sum::<u64>(),
+				5,
+				"{stats:?}"
+			);
+			drop(listing);
+			assert!(publish.stats().is_empty());
 		})
 		.await;
 	}

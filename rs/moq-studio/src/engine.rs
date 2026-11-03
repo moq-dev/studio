@@ -632,6 +632,7 @@ async fn publish(
 		monitor: connection.monitor(),
 		feedback,
 		watching,
+		sources: sources.clone(),
 	};
 
 	let output = Output {

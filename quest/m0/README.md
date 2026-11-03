@@ -89,7 +89,6 @@ repository.
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
-- [Health grades source tracks](/quest/m0/health-sources.md) - the Health panel covers each published source track, not only the program
 - [Audio sources report stalls](/quest/m0/audio-stall.md) - a dead microphone or system audio reads stalled like a camera
 - [Relay failover](/quest/m0/failover.md) - the same epoch on two relays, so a relay failure does not drop the stream
 - [Instant replay and DVR](/quest/m0/replay.md) - replays and clips from held groups, and viewer scrubbing through the archive

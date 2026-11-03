@@ -1152,6 +1152,7 @@ impl Panels {
 
 			egui::Grid::new("tracks").striped(true).show(ui, |ui| {
 				for heading in [
+					"Source",
 					"Track",
 					"Sent",
 					"Frames",
@@ -1163,7 +1164,19 @@ impl Panels {
 					ui.strong(heading);
 				}
 				ui.end_row();
+				// Each source named once, beside its first track.
+				let mut group = None;
 				for track in &report.tracks {
+					let source = Some(track.source.as_deref());
+					if group != source {
+						match &track.source {
+							Some(name) => ui.label(name),
+							None => ui.weak("program"),
+						};
+						group = source;
+					} else {
+						ui.label("");
+					}
 					ui.label(&track.label).on_hover_text(&track.id);
 					ui.label(or_unknown(track.sent.map(health::rate)));
 					ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
