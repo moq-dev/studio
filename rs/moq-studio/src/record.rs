@@ -258,7 +258,7 @@ impl Run {
 		let mut listed = BTreeSet::new();
 		// Each source with a file being written, and whether its listing has
 		// gone since that file started.
-		let mut writing = BTreeMap::new();
+		let mut writing: BTreeMap<String, bool> = BTreeMap::new();
 		// Sources whose file ended while their listing stayed, such as on a
 		// failure, held back until they leave the catalog.
 		let mut ended = BTreeSet::new();
