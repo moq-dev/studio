@@ -261,10 +261,21 @@ impl Driver {
 			result = self.produce(listing.as_ref()) => result,
 			() = self.mirror(listing.as_ref()) => unreachable!("a mirror never ends"),
 		};
-		let status = match result {
-			Ok(()) => Status::Failed("the source ended".into()),
-			Err(err) => Status::Failed(err.to_string()),
+		let reason = match result {
+			Ok(()) => "the source ended".into(),
+			Err(err) => err.to_string(),
 		};
+		self.stop(reason);
+	}
+
+	/// Fail the source without running it, such as when its thread cannot
+	/// start, so its [`Feed`] says why rather than starting forever.
+	pub fn fail(self, err: impl std::fmt::Display) {
+		self.stop(err.to_string());
+	}
+
+	fn stop(&self, reason: String) {
+		let status = Status::Failed(reason);
 		tracing::warn!(source = %self.name, ?status, "source stopped");
 		self.fail_track(status.clone());
 		set(&self.status, status);
@@ -1010,6 +1021,22 @@ mod tests {
 
 			sources.sync(&Collection::new());
 			running.await.unwrap();
+		})
+		.await;
+	}
+
+	#[tokio::test]
+	async fn a_driver_that_cannot_run_fails_its_feed() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			for driver in sources.sync(&collection()) {
+				driver.fail("no thread");
+			}
+			for (name, feed) in sources.iter() {
+				assert_eq!(feed.status(), Status::Failed("no thread".into()), "{name}");
+			}
 		})
 		.await;
 	}
