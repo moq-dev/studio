@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
 	// The QUIC client binds its socket on the current runtime.
 	let _runtime = runtime.enter();
 	let gpu = pollster::block_on(engine::Gpu::new())?;
-	let (autosave, collection) = autosave::Autosave::open(config.scenes.clone())?;
+	let (autosave, loaded) = autosave::Autosave::open(config.scenes.clone())?;
 	let connect = match config.client.url.clone() {
 		Some(url) => Some((config.client.clone().init(config.quic.clone())?, url)),
 		None => None,
@@ -75,7 +75,7 @@ fn main() -> anyhow::Result<()> {
 	let engine = runtime.block_on(engine::Engine::start(
 		gpu.clone(),
 		autosave,
-		collection,
+		loaded,
 		connect,
 		&config.broadcast,
 		config.on_demand,

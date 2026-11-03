@@ -17,13 +17,19 @@ tracks and contribution references, never files. A viewer that refuses a
 layout version plays the program instead and says why. A late joiner needs the
 current state, so use the JSON track's snapshot mode.
 
-Decided 2026-11-02 (maintainer, follow-up planning after
-[#6](https://github.com/moq-dev/studio/pull/6)): clones and filters travel in
-the layout, with each item naming the source track it shows and the filters
-applied to it. Only a filter that cannot render the same way in every viewer
-is baked into a track of its own. The picture source tracks are enough to
-start; audio source tracks join the layout when they land.
+Specify the source listings in the hang draft too, then move the studio to
+what it settles on. Until then sources are listed provisionally as
+`dev.moq.studio.sources.<name>` in the studio catalog, each a nested hang
+catalog (decided 2026-11-02, maintainer; `rs/moq-scene/src/publish.rs`).
+
+Clones and filters travel in the layout, not as tracks: a source's track is
+its capture before any filter, and a clone publishes none, so the layout names
+the source a clone shows and the filters each source and item applies
+(decided 2026-11-02, maintainer). Only a filter that cannot render the same
+way in every viewer is baked into a track of its own. The picture source
+tracks are enough to start; audio source tracks join the layout when they
+land.
 
 ## Related
 
-- [Source tracks](/quest/m0/compose/sources.md) - the audio source tracks a layout also names once they land
+- [Audio source tracks](/quest/m0/compose/sources.md) - the audio tracks a layout also names once they land

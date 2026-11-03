@@ -1,5 +1,6 @@
 //! Everything behind the window: the GPU, the sources, the program clock that
-//! draws the canvas and mixes the audio, and the broadcast it publishes.
+//! draws the canvas and mixes the audio, and the broadcast it publishes: the
+//! program, and each local source's own track beside it.
 //!
 //! Threads:
 //! - **program** draws preview and program once per canvas frame and hands the
@@ -8,7 +9,8 @@
 //! - **encode** waits for each program copy and encodes it.
 //! - **source-***: one per running source, since a capture stream may not
 //!   leave the thread that opened it.
-//! - **autosave** writes the collection to its scene file once edits to it settle.
+//! - **autosave** writes the collection and its history to their files once
+//!   edits to them settle.
 //! - The UI runs on the main thread and edits [`State`] under its lock.
 
 use std::path::Path;
@@ -20,7 +22,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use kio::clock::Instant;
 use moq_scene::source::{self, Driver, Sources};
-use moq_scene::{Collection, Compositor, wgpu};
+use moq_scene::{Collection, Compositor, Draft, History, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
 
 use crate::autosave::{self, Autosave};
@@ -66,7 +68,13 @@ impl Gpu {
 
 /// What the UI edits and the program clock draws.
 pub struct State {
-	pub collection: Collection,
+	/// Changed only through [`commit`](Self::commit) and the history, so every
+	/// edit can be undone.
+	collection: Collection,
+	history: History,
+	/// History entries the last load dropped, since they no longer applied to
+	/// the scene file.
+	pub dropped: usize,
 	pub sources: Sources,
 	pub compositor: Compositor,
 	/// Edited since the sources were last synced.
@@ -76,16 +84,64 @@ pub struct State {
 }
 
 impl State {
-	/// The collection, for an edit: the sources follow it on the next frame,
-	/// and the scene file shortly after.
-	pub fn edit(&mut self) -> &mut Collection {
-		self.stale = true;
-		self.edits.record();
-		&mut self.collection
+	pub fn collection(&self) -> &Collection {
+		&self.collection
 	}
 
-	/// Swap in a collection reloaded from the scene file.
-	fn replace(&mut self, collection: Collection) -> anyhow::Result<()> {
+	pub fn history(&self) -> &History {
+		&self.history
+	}
+
+	/// Apply `draft` and record it in the history; the sources follow it on
+	/// the next frame, and the files shortly after. `gesture` names the
+	/// interaction that made it, so the steps of one drag undo together.
+	pub fn commit(&mut self, draft: Draft, gesture: Option<u64>) -> anyhow::Result<()> {
+		let edit = draft.finish()?;
+		self.collection.apply(&edit)?;
+		self.history.record(edit, gesture);
+		self.edited();
+		Ok(())
+	}
+
+	/// Undo the newest edit, returning its label, or `None` with none left.
+	pub fn undo(&mut self) -> anyhow::Result<Option<String>> {
+		let label = self.history.undo(&mut self.collection)?.map(|edit| edit.label.clone());
+		if label.is_some() {
+			self.edited();
+		}
+		Ok(label)
+	}
+
+	/// Redo the oldest undone edit, returning its label, or `None` with none left.
+	pub fn redo(&mut self) -> anyhow::Result<Option<String>> {
+		let label = self.history.redo(&mut self.collection)?.map(|edit| edit.label.clone());
+		if label.is_some() {
+			self.edited();
+		}
+		Ok(label)
+	}
+
+	/// Undo or redo to just after the history's `position`th entry.
+	pub fn seek(&mut self, position: usize) -> anyhow::Result<()> {
+		self.history.seek(&mut self.collection, position)?;
+		self.edited();
+		Ok(())
+	}
+
+	/// After any change to the collection or its history, which the autosave
+	/// writes once they settle.
+	fn edited(&mut self) {
+		self.stale = true;
+		self.edits.record();
+	}
+
+	/// Swap in a collection and history reloaded from their files.
+	fn replace(&mut self, loaded: autosave::Loaded) -> anyhow::Result<()> {
+		let autosave::Loaded {
+			collection,
+			history,
+			dropped,
+		} = loaded;
 		anyhow::ensure!(
 			collection.canvas == self.collection.canvas,
 			"the canvas changed; restart the studio to use {}x{} at {} fps",
@@ -96,6 +152,8 @@ impl State {
 		// A scene in preview or on program that the file no longer has draws
 		// black until another is picked.
 		self.collection = collection;
+		self.history = history;
+		self.dropped = dropped;
 		self.stale = true;
 		Ok(())
 	}
@@ -178,8 +236,8 @@ const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_k
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
 impl Engine {
-	/// Open `collection` on `gpu`, start the program clock, and save the
-	/// collection to `autosave`'s file as it changes.
+	/// Open the `loaded` collection and history on `gpu`, start the program
+	/// clock, and save both to `autosave`'s files as they change.
 	/// With `connect`, publish the program at `broadcast` on that relay,
 	/// encoding its video only while someone watches when `on_demand`.
 	///
@@ -187,23 +245,19 @@ impl Engine {
 	pub async fn start(
 		gpu: Gpu,
 		autosave: Autosave,
-		collection: Collection,
+		loaded: autosave::Loaded,
 		connect: Option<(moq_tokio::Client, url::Url)>,
 		broadcast: &str,
 		on_demand: bool,
 	) -> anyhow::Result<Arc<Self>> {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
-		let dir = autosave.path().parent().map(Path::to_path_buf).unwrap_or_default();
-		let sources = Sources::new(source::Context {
-			bus: bus.clone(),
-			origin: subscribe.consume(),
-			dir,
-			output: moq_video::render::output(&gpu.device),
-		});
-		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
-		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
-		compositor.cut();
+		let sources = subscribe.consume();
+		let autosave::Loaded {
+			collection,
+			history,
+			dropped,
+		} = loaded;
 		let canvas = collection.canvas;
 
 		let (output, origin, publish) = match connect {
@@ -214,9 +268,25 @@ impl Engine {
 			None => (None, Some(subscribe), None),
 		};
 
+		// Absolute, so a copied image names the same file in another collection.
+		let dir = autosave.path().parent().filter(|dir| !dir.as_os_str().is_empty());
+		let dir = std::path::absolute(dir.unwrap_or(Path::new(".")))?;
+		let sources = Sources::new(source::Context {
+			bus: bus.clone(),
+			origin: sources,
+			dir,
+			output: moq_video::render::output(&gpu.device),
+			publish: publish.as_ref().map(|publish| publish.sources.clone()),
+		});
+		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
+		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
+		compositor.cut();
+
 		let engine = Arc::new(Self {
 			state: Mutex::new(State {
 				collection,
+				history,
+				dropped,
 				sources,
 				compositor,
 				stale: true,
@@ -238,6 +308,7 @@ impl Engine {
 				exporter,
 				clock,
 				health,
+				sources: _,
 			}) => {
 				let zero_copy = exporter.route() == Route::Gpu;
 				engine.stats.zero_copy.store(zero_copy, Ordering::Relaxed);
@@ -245,9 +316,14 @@ impl Engine {
 				let (frames, pending) = mpsc::sync_channel(Exporter::DEPTH + 1);
 				tokio::spawn(watch(video.demand(), engine.clone()));
 				let encoder = engine.clone();
+				let (opened, open) = tokio::sync::oneshot::channel();
 				std::thread::Builder::new()
 					.name("encode".into())
-					.spawn(move || encode(&encoder, pending, video, config, zero_copy))?;
+					.spawn(move || encode(&encoder, opened, pending, video, config, zero_copy))?;
+				// Before the program clock starts the sources, so the program holds
+				// its encode session even while unwatched, and a source past the
+				// GPU's session cap is the one that fails.
+				open.await.context("the encode thread stopped")??;
 				(Some((frames, exporter)), Some(audio), Some(clock), Some(health))
 			}
 			None => (None, None, None, None),
@@ -277,19 +353,22 @@ impl Engine {
 		Ok(engine)
 	}
 
-	/// Write the collection to the scene file unless it already holds it.
+	/// Write the collection and its history to their files unless they
+	/// already hold them.
 	pub fn save(&self) -> anyhow::Result<()> {
 		self.autosave.save(|| self.serialize())
 	}
 
-	fn serialize(&self) -> anyhow::Result<String> {
-		Ok(self.state.lock().unwrap().collection.to_toml()?)
+	/// Both under one lock, so the history describes the collection beside it.
+	fn serialize(&self) -> anyhow::Result<autosave::Text> {
+		let state = self.state.lock().unwrap();
+		autosave::Text::new(&state.collection, &state.history)
 	}
 
-	/// Replace the collection with what the scene file holds now.
+	/// Replace the collection and its history with what the files hold now.
 	pub fn reload(&self) -> anyhow::Result<()> {
 		self.autosave
-			.reload(|collection| self.state.lock().unwrap().replace(collection))
+			.reload(|loaded| self.state.lock().unwrap().replace(loaded))
 	}
 
 	/// Grade the stream's health every interval, for the Health panel.
@@ -354,7 +433,7 @@ impl Engine {
 		epoch: Duration,
 		mut video: Option<(mpsc::SyncSender<Video>, Exporter)>,
 	) {
-		let canvas = self.state.lock().unwrap().collection.canvas;
+		let canvas = self.state.lock().unwrap().collection().canvas;
 		let period = Duration::from_secs(1) / canvas.framerate;
 		let mut clock = kio::clock::interval_at(start, period);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
@@ -466,10 +545,13 @@ struct Publish {
 	clock: moq_mux::Clock,
 	/// What the health sampler grades.
 	health: health::Publisher,
+	/// Where each local source publishes its own track.
+	sources: moq_scene::publish::Publish,
 }
 
-/// Announce the program broadcast and connect to the relay, which also
-/// carries `subscribe`'s broadcast sources.
+/// Announce the program broadcast, which also carries each local source's own
+/// track, and connect to the relay, which also carries `subscribe`'s broadcast
+/// sources.
 async fn publish(
 	gpu: &Gpu,
 	client: moq_tokio::Client,
@@ -489,8 +571,11 @@ async fn publish(
 	let mut broadcast = publication.broadcast().clone();
 	// Each track claims its bitrate on the connection's estimate, which the
 	// connection then probes to fund: the bandwidth the stream is granted.
-	let catalog = moq_mux::catalog::Config::default().with_bandwidth(connection.allocator());
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, catalog)?;
+	let bandwidth = connection.allocator();
+	let catalog = moq_mux::catalog::Config::default()
+		.with_bandwidth(bandwidth.clone())
+		.with_catalog(Default::default());
+	let catalog = moq_scene::publish::Catalog::new(&mut broadcast, catalog)?;
 	let clock = catalog.clock();
 	let (echo, viewers) = health::echo(&path)?;
 
@@ -501,6 +586,15 @@ async fn publish(
 	let (exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config)
 		.await
 		.context("cannot encode the canvas")?;
+	// Sources take the program's tier: hardware when the program found it, so a
+	// session the GPU refuses fails that source loudly instead of falling to
+	// software. When the program could not use hardware, such as NVENC beside an
+	// integrated GPU it cannot read, a source may still reach it from the CPU.
+	let kind = match &config.kind {
+		moq_video::encode::Kind::Named(name) if name == "openh264" => moq_video::encode::Kind::Auto,
+		_ => moq_video::encode::Kind::Hardware,
+	};
+	let sources = moq_scene::publish::Publish::new(broadcast.clone(), catalog.clone(), bandwidth, kind);
 	let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
 	// While the reservation holds, so the solicitation rides the first catalog.
 	let mut soliciting = catalog.clone();
@@ -555,6 +649,7 @@ async fn publish(
 			audio,
 			clock,
 			health,
+			sources,
 		},
 	))
 }
@@ -592,18 +687,31 @@ enum Video {
 	Failed(moq_video::Error),
 }
 
-/// Encode program frames until the program clock stops.
+/// Open the program's encoder, reporting how that went on `opened`, then
+/// encode program frames until the program clock stops.
 ///
 /// A failure aborts the video track, so viewers see that it failed rather
 /// than a track that went away unfinished.
 fn encode(
 	engine: &Engine,
+	opened: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 	video: mpsc::Receiver<Video>,
 	mut producer: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
 	zero_copy: bool,
 ) {
-	let result = encode_frames(&engine.stats, video, &mut producer, &config, zero_copy).and_then(|()| {
+	let mut encoder = match moq_video::encode::Encoder::new(&config) {
+		Ok(encoder) => encoder,
+		Err(err) => {
+			producer.abort(moq_net::StreamError::Internal.into());
+			let _ = opened.send(Err(anyhow::Error::new(err).context("video encoder")));
+			return;
+		}
+	};
+	*engine.stats.encoder.lock().unwrap() = Some(encoder.name().to_string());
+	let _ = opened.send(Ok(()));
+
+	let result = encode_frames(&engine.stats, video, &mut producer, &mut encoder, zero_copy).and_then(|()| {
 		producer.finish()?;
 		Ok(())
 	});
@@ -617,10 +725,9 @@ fn encode_frames(
 	stats: &Stats,
 	video: mpsc::Receiver<Video>,
 	producer: &mut moq_video::encode::Producer,
-	config: &moq_video::encode::Config,
+	encoder: &mut moq_video::encode::Encoder,
 	zero_copy: bool,
 ) -> anyhow::Result<()> {
-	let mut encoder: Option<moq_video::encode::Encoder> = None;
 	let mut paused = false;
 
 	while let Ok(video) = video.recv() {
@@ -644,15 +751,6 @@ fn encode_frames(
 		if !zero_copy {
 			stats.read_back.fetch_add(1, Ordering::Relaxed);
 		}
-
-		let encoder = match &mut encoder {
-			Some(encoder) => encoder,
-			None => {
-				let opened = moq_video::encode::Encoder::new(config).context("video encoder")?;
-				*stats.encoder.lock().unwrap() = Some(opened.name().to_string());
-				encoder.insert(opened)
-			}
-		};
 
 		// A viewer arriving after a break starts from a keyframe rather than
 		// waiting out the rest of a group nobody received the start of.
@@ -732,15 +830,25 @@ mod tests {
 			source: "red".into(),
 			rect: moq_scene::Rect::fill(&collection.canvas),
 			visible: true,
+			filters: Vec::new(),
 		});
 
 		let gpu = Gpu::new().await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let connect = Some((client, fixture.url.clone()));
 		let on_demand = false;
-		let engine = Engine::start(gpu, autosave, collection, connect, "studio", on_demand)
+		let loaded = autosave::Loaded {
+			collection,
+			history: History::new(),
+			dropped: 0,
+		};
+		let engine = Engine::start(gpu, autosave, loaded, connect, "studio", on_demand)
 			.await
 			.expect("the studio starts");
+		assert!(
+			engine.stats.encoder.lock().unwrap().is_some(),
+			"the program holds its encoder before any source opens one"
+		);
 
 		let broadcast = kio::clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
@@ -751,6 +859,7 @@ mod tests {
 			.await
 			.expect("catalog");
 		let catalog = catalogs.next().await.expect("catalog").expect("a catalog");
+		assert_eq!(catalog.video.renditions.len(), 1, "only the program is a rendition");
 		// Viewers are asked for feedback beneath the broadcast from its first catalog.
 		let echo = catalog.echo.as_ref().expect("the catalog solicits feedback");
 		assert_eq!(echo.path.as_str(), "studio/viewers");
@@ -795,6 +904,22 @@ mod tests {
 			assert!(read_back > 0, "the program was neither exported nor read back");
 		}
 
+		// The color source is listed beside the program as its own still.
+		let mut listings = moq_mux::catalog::Consumer::<moq_scene::publish::Ext>::new(&broadcast, format)
+			.await
+			.expect("catalog");
+		kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let catalog = listings.next().await.expect("catalog").expect("a catalog");
+				if let Some(red) = catalog.ext.studio.sources.get("red") {
+					assert_eq!(red.binary.tracks.len(), 1, "{red:?}");
+					return;
+				}
+			}
+		})
+		.await
+		.expect("the source is listed");
+
 		let (audio, config) = catalog.audio.enabled().next().expect("an audio rendition");
 		let mut options = moq_audio::decode::Options::new();
 		options.start = moq_audio::decode::Start::Latest;
@@ -813,20 +938,37 @@ mod tests {
 		.await
 		.expect("sound arrives");
 
-		// An edit reaches the scene file through the autosave the studio runs.
+		// An edit, and then its undo, reach the scene file and the history
+		// beside it through the autosave the studio runs.
 		let path = dir.path().join("show.toml");
+		let history = dir.path().join("show.history.toml");
+		let read = || {
+			let collection = std::fs::read_to_string(&path).ok()?;
+			let history = std::fs::read_to_string(&history).ok()?;
+			Some(autosave::Text { collection, history })
+		};
+		let saved = |text: autosave::Text| {
+			let read = &read;
+			kio::clock::timeout(TIMEOUT, async move {
+				while read().as_ref() != Some(&text) {
+					kio::clock::sleep(autosave::QUIET / 10).await;
+				}
+			})
+		};
 		let edited = {
 			let mut state = engine.state.lock().unwrap();
-			state.edit().scenes.push(moq_scene::Scene::new("Edited"));
-			state.collection.to_toml().unwrap()
+			let mut draft = state.collection().draft("Add scene `Edited`");
+			draft.insert_scene(1, moq_scene::Scene::new("Edited")).unwrap();
+			state.commit(draft, None).unwrap();
+			autosave::Text::new(state.collection(), state.history()).unwrap()
 		};
-		kio::clock::timeout(TIMEOUT, async {
-			while std::fs::read_to_string(&path).ok().as_ref() != Some(&edited) {
-				kio::clock::sleep(autosave::QUIET / 10).await;
-			}
-		})
-		.await
-		.expect("the edit is saved");
+		saved(edited).await.expect("the edit is saved");
+		let undone = {
+			let mut state = engine.state.lock().unwrap();
+			state.undo().unwrap().expect("an edit to undo");
+			autosave::Text::new(state.collection(), state.history()).unwrap()
+		};
+		saved(undone).await.expect("the undo is saved");
 
 		// Health sees the relay and what each track of the program writes.
 		kio::clock::timeout(TIMEOUT, async {
