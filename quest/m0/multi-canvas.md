@@ -10,7 +10,8 @@ captures or decodes once however many canvases use it.
 ## Plan
 
 Each canvas publishes its own broadcast, because different content needs a
-different name. Transitions are per canvas, so a scene change cuts every
+different name. Each canvas has its own top layer, which the collection's
+`top` holds for the one canvas today. Transitions are per canvas, so a scene change cuts every
 canvas together unless the creator unlinks one.
 
 Benchmark source count against canvas count, including sparse reuse. Per-canvas

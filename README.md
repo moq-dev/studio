@@ -33,12 +33,34 @@ Every panel is a tab you can drag, split, or stack.
 | --- | --- |
 | Preview, Program | See the scene you are editing and the one that is live. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
 | Scenes | Pick the scene in preview, add one, or remove one. |
-| Items | Place, show, hide, and order the sources the preview scene draws, back to front. |
-| Sources | Add a source by hand, see whether each is live, and remove one. |
+| History | See every edit, and undo or redo back to any of them. |
+| Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
+| Sources | Add a source by hand, see whether each is live and where it is shown, clone one, and remove one. Select a source to filter it. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
+| Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
 | Output | See the broadcast path, whether the program is encoding, and the encoder's work. |
 | Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
+
+A new source, from the Sources or Devices panel, is placed over whatever the
+Items panel shows. The **top layer** is drawn over every scene, in preview and
+on program, and stays on through a cut or fade: a downstream keyer for a logo
+or a lower third.
+
+Items showing the same source are **linked**: one capture, with the source's
+filters, wherever it is shown. A **clone** is a new source showing another's
+capture with filters of its own, so a camera can be shown faded in one scene
+and plain in another while being opened once. An item's own filters apply
+after its source's.
+
+**Edit > Undo** (Ctrl+Z) and **Redo** (Ctrl+Shift+Z or Ctrl+Y) step through the
+history, and a drag undoes as one step. **Copy** (Ctrl+C) takes the selected
+item with the source it shows; **Paste** (Ctrl+V) adds it over whatever the
+Items panel shows, in this studio or another. Pasted where the same source
+exists under the same name, the item is linked to it; otherwise the source
+comes along, renamed if its name is taken. Copied filters paste onto the
+selected source or item, after its own. The clipboard holds text in the scene
+file's format.
 
 A broadcast source subscribes through the same relay connection, plays the
 best video and audio its catalog lists, switches when the catalog changes, and
@@ -78,18 +100,38 @@ path = "room/guest"
 [audio.guest]
 gain = 0.5
 
+[sources.camera-faded]
+kind = "clone"
+source = "camera"
+
+[video.camera-faded]
+filters = [{ kind = "opacity", amount = 0.5 }]
+
 [[scenes]]
 name = "Main"
 items = [
     { source = "camera", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
-    { source = "logo", rect = { x = 1600, y = 40, width = 280, height = 120 } },
+    { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, filters = [{ kind = "opacity", amount = 0.8 }] },
 ]
+
+[[scenes]]
+name = "Break"
+items = [
+    { source = "camera-faded", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+]
+
+[[top]]
+source = "logo"
+rect = { x = 1600, y = 40, width = 280, height = 120 }
 ```
 
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
-(macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`), and
-`broadcast`. The Devices panel fills in ids.
+(macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
+`broadcast`, and `clone` (with the `source` it shows). The Devices panel fills
+in ids. `[video.<source>]` lists a source's filters, and an item's `filters`
+its own; the one filter so far is `opacity`, from 0 to 1, as in CSS. `[[top]]`
+items make up the top layer.
 
 The studio writes the file a second after the last change, so a burst such as a
 slider drag is one write, and once more on quit. Edits that never pause for a
@@ -102,6 +144,16 @@ is retried every second; until one succeeds, a crash loses every edit since the
 last write. To edit the file by hand while the studio runs, save it and pick
 **File > Reload**; an edit in the studio before that overwrites it. A new
 canvas size or frame rate takes a restart.
+
+The last 100 edits are written the same way beside the scene file, as
+`show.history.toml` for `show.toml`, after the scene file, and opening the
+scene file restores them, so undo reaches back past a restart. An undo or redo
+is saved like any other edit. An edit that no longer matches the scene file,
+such as after editing it by hand, is dropped with every older one, and the
+status bar says how many. A history file that cannot be read stops the
+studio, naming the file; delete it to start a new history. The history holds
+whatever the scene file held, including removed sources, so check it too
+before sharing.
 
 ## Output
 

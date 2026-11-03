@@ -81,7 +81,6 @@ repository.
 
 - [Studio on macOS and Windows](/quest/m0/app.md) - the studio runs on macOS and Windows, not only Linux
 - [Viewer-side composition](/quest/m0/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
-- [Undo and the scene model](/quest/m0/scene-model.md) - undo history, linked and cloned sources, copy and paste, a downstream keyer, and per-item filters
 - [Scene editing](/quest/m0/scene-editing.md) - rename and reorder scenes, and resize the canvas while live through a new rendition
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
