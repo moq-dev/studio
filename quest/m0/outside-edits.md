@@ -18,6 +18,10 @@ keep-mine or take-theirs prompt above. Today the last writer wins, which
 
 - Detect a change by what the studio last wrote or read, not by timing, so the
   studio's own atomic rename never reads as an outside edit.
+- Check again right before the autosave's rename, not only before its write,
+  since another studio can write in between. A window remains between that
+  check and the rename; close it with an advisory lock between studios if one
+  works on every platform, or else name the residual race in `README.md`.
 - An outside edit that does not parse is refused like File > Reload refuses
   it: the studio keeps its state, says why, and does not overwrite the file
   until the user picks.
