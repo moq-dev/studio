@@ -7,6 +7,8 @@
 
 - enables GitHub Pages for moq-dev/studio with GitHub Actions as its source,
   and limits the `github-pages` environment's deployment branches to `main`
+- protects `main` so only reviewed PRs reach it, since whatever lands there
+  deploys to the page every guest's token passes through
 - points `join.studio.moq.dev` at Pages in DNS, sets it as the custom domain,
   and enforces HTTPS
 - runs the Join page workflow (`.github/workflows/join.yml`) once

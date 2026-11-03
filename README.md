@@ -84,9 +84,10 @@ Treat the link like a password: anyone holding it can join as that guest until
 it expires. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, muted and in no scene: place them from
 the Items panel and unmute them in Audio to put them on air. That includes a
-guest invited before a restart whose link still works. **Remove from scenes**
-takes a guest out of every scene and mutes them; a signed token cannot be
-taken back, so they stay connected until it expires.
+guest invited before a restart whose link still works. A guest's sources are
+saved to the scene file like your own edits. **Remove from scenes** takes a
+guest out of every scene and mutes them; a signed token cannot be taken back,
+so they stay connected until it expires.
 
 ## Scene file
 
