@@ -114,11 +114,14 @@ Treat the link like a password: anyone holding it can join as that guest until
 it expires. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, muted and in no scene: place them from
 the Items panel and unmute them in Audio to put them on air. That includes a
-guest invited before a restart whose link still works. Adding a guest's source
-is an edit like your own: it is listed in History and saved to the scene file.
-**Remove from scenes** takes a guest, and any clone of their sources, out of
-every scene and the top layer and mutes them; a signed token cannot be taken
-back, so they stay connected until it expires.
+guest invited before a restart whose link still works. A guest's source is
+saved to the scene file but is not your edit: it stays out of History, so undo
+never removes it and a guest joining never loses what you could redo. A guest
+who reconnects after you removed their source comes back under a new name
+(`alice 2`), since undoing the removal brings back the old one.
+**Remove from scenes** is your edit, so it undoes: it takes a guest, and any
+clone of their sources, out of every scene and the top layer and mutes them; a
+signed token cannot be taken back, so they stay connected until it expires.
 
 ## Scene file
 

@@ -103,6 +103,16 @@ impl State {
 		Ok(())
 	}
 
+	/// Apply `draft`, a change the user did not make, such as a guest joining,
+	/// without recording it: it is not undone, and drops nothing that could be
+	/// redone. See [`History::apply_outside`] for what it may change.
+	pub fn apply_outside(&mut self, draft: Draft) -> anyhow::Result<()> {
+		let edit = draft.finish()?;
+		self.history.apply_outside(&mut self.collection, &edit)?;
+		self.edited();
+		Ok(())
+	}
+
 	/// Undo the newest edit, returning its label, or `None` with none left.
 	pub fn undo(&mut self) -> anyhow::Result<Option<String>> {
 		let label = self.history.undo(&mut self.collection)?.map(|edit| edit.label.clone());

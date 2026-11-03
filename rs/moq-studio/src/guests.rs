@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::Context;
 use moq_net::Path;
 use moq_room::Kind;
-use moq_scene::{Collection, Draft, Source};
+use moq_scene::{Collection, Draft, History, Source};
 use url::Url;
 
 use crate::engine::Engine;
@@ -225,11 +225,18 @@ impl Room {
 	}
 
 	/// Record that the broadcast at `path` in the room went online or offline,
-	/// returning the source to add for it, if the collection lacks one.
+	/// returning the source to add for it, if the collection lacks one. Its
+	/// name is one `history` never edited, so the source can be added outside it.
 	///
 	/// Every guest is tracked, including one invited before this session whose
 	/// link still works, so a restart finds the guests already connected.
-	fn observe(&self, path: &Path, online: bool, collection: &Collection) -> Option<(String, Source)> {
+	fn observe(
+		&self,
+		path: &Path,
+		online: bool,
+		collection: &Collection,
+		history: &History,
+	) -> Option<(String, Source)> {
 		let parsed = moq_room::parse(path)?;
 		// Only the two paths a link's one-segment identity publishes, so the
 		// `<identity>/**` its token grants cannot mint more guests or sources.
@@ -259,7 +266,10 @@ impl Room {
 			Kind::Camera => identity,
 			Kind::Screen => format!("{identity} screen"),
 		};
-		Some((collection.unused_name(&base), Source::Broadcast { path: source }))
+		Some((
+			history.unused_name(collection, &base),
+			Source::Broadcast { path: source },
+		))
 	}
 
 	/// The sources in `collection` that show the guest called `identity`.
@@ -333,13 +343,14 @@ pub async fn run(engine: Arc<Engine>, origin: moq_net::origin::Consumer) {
 	while let Some(event) = announced.next().await {
 		let mut state = engine.state.lock().unwrap();
 		let online = event.broadcast.is_some();
-		let Some((name, source)) = room.observe(&event.path, online, state.collection()) else {
+		let Some((name, source)) = room.observe(&event.path, online, state.collection(), state.history()) else {
 			continue;
 		};
+		// Not the host's edit, so it stays out of what they undo and redo.
 		let mut draft = state.collection().draft(format!("Add guest `{name}`"));
 		let added = admit(&mut draft, &name, source)
 			.map_err(anyhow::Error::from)
-			.and_then(|()| state.commit(draft, None));
+			.and_then(|()| state.apply_outside(draft));
 		match added {
 			Ok(()) => tracing::info!(source = %name, identity = %event.identity, "a guest joined"),
 			Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot add a guest"),
@@ -567,16 +578,19 @@ mod tests {
 	fn a_guest_becomes_a_muted_source_once() {
 		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
 		let mut collection = Collection::new();
+		let history = History::new();
 		let path = |text: &str| Path::new(text).unwrap();
 
 		// Anything else under a guest's own path is not a guest.
 		for other in ["alice/1/camera.hang", "alice/camera", "alice/mic.hang"] {
-			assert_eq!(room.observe(&path(other), true, &collection), None, "{other}");
+			assert_eq!(room.observe(&path(other), true, &collection, &history), None, "{other}");
 		}
 		assert!(room.participants().is_empty());
 
 		// Invited before this session, so the roster has no link for them.
-		let (name, source) = room.observe(&path("alice/camera.hang"), true, &collection).unwrap();
+		let (name, source) = room
+			.observe(&path("alice/camera.hang"), true, &collection, &history)
+			.unwrap();
 		assert_eq!(name, "alice");
 		assert_eq!(
 			source,
@@ -586,7 +600,9 @@ mod tests {
 		);
 		let mut draft = collection.draft("Add guest");
 		admit(&mut draft, &name, source).unwrap();
-		collection.apply(&draft.finish().unwrap()).unwrap();
+		history
+			.apply_outside(&mut collection, &draft.finish().unwrap())
+			.unwrap();
 		assert!(collection.audio["alice"].muted);
 		assert_eq!(
 			room.participants()["alice"],
@@ -598,7 +614,10 @@ mod tests {
 		);
 
 		// The same broadcast again, after a restart or a reconnect, is the same source.
-		assert_eq!(room.observe(&path("alice/camera.hang"), true, &collection), None);
+		assert_eq!(
+			room.observe(&path("alice/camera.hang"), true, &collection, &history),
+			None
+		);
 
 		// A source already named after the guest pushes the screen's name along.
 		collection.sources.insert(
@@ -607,10 +626,15 @@ mod tests {
 				color: moq_scene::Rgba([0, 0, 0, 255]),
 			},
 		);
-		let (name, _) = room.observe(&path("alice/screen.hang"), true, &collection).unwrap();
+		let (name, _) = room
+			.observe(&path("alice/screen.hang"), true, &collection, &history)
+			.unwrap();
 		assert_eq!(name, "alice screen 2");
 
-		assert_eq!(room.observe(&path("alice/camera.hang"), false, &collection), None);
+		assert_eq!(
+			room.observe(&path("alice/camera.hang"), false, &collection, &history),
+			None
+		);
 		assert!(!room.participants()["alice"].camera);
 		assert!(room.participants()["alice"].screen);
 	}
@@ -684,7 +708,9 @@ mod tests {
 			.expect("an announcement");
 		assert_eq!(event.path.as_str(), "alice/camera.hang");
 		assert!(event.broadcast.is_some());
-		let (name, source) = room.observe(&event.path, true, &Collection::new()).unwrap();
+		let (name, source) = room
+			.observe(&event.path, true, &Collection::new(), &History::new())
+			.unwrap();
 		assert_eq!(name, "alice");
 		assert_eq!(
 			source,
@@ -692,6 +718,55 @@ mod tests {
 				path: "guests/alice/camera.hang".into()
 			}
 		);
+	}
+
+	/// A guest joining is not the host's edit: what the host undid can still
+	/// be redone, and undo never takes the guest out. A guest whose source the
+	/// host removed comes back under a name of its own, so undoing the removal
+	/// still applies.
+	#[test]
+	fn a_guest_joining_keeps_what_the_host_can_undo_and_redo() {
+		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
+		let path = |text: &str| Path::new(text).unwrap();
+		let mut collection = Collection::new();
+		let mut history = History::new();
+		let join = |collection: &mut Collection, history: &History, guest: &str| {
+			let (name, source) = room
+				.observe(&path(&format!("{guest}/camera.hang")), true, collection, history)
+				.unwrap();
+			let mut draft = collection.draft("Add guest");
+			admit(&mut draft, &name, source).unwrap();
+			history.apply_outside(collection, &draft.finish().unwrap()).unwrap();
+			name
+		};
+		let commit = |collection: &mut Collection, history: &mut History, draft: Draft| {
+			let edit = draft.finish().unwrap();
+			collection.apply(&edit).unwrap();
+			history.record(edit, None);
+		};
+
+		assert_eq!(join(&mut collection, &history, "bob"), "bob");
+		let mut draft = collection.draft("Remove bob");
+		draft.remove_source("bob").unwrap();
+		commit(&mut collection, &mut history, draft);
+		let mut draft = collection.draft("Add a color");
+		let black = Source::Color {
+			color: moq_scene::Rgba([0, 0, 0, 255]),
+		};
+		draft.set_source("black", Some(black)).unwrap();
+		commit(&mut collection, &mut history, draft);
+		history.undo(&mut collection).unwrap();
+
+		assert_eq!(join(&mut collection, &history, "alice"), "alice");
+		assert_eq!(join(&mut collection, &history, "bob"), "bob 2");
+		assert_eq!(history.entries().len(), 2);
+		history.redo(&mut collection).unwrap();
+		assert!(collection.sources.contains_key("black"));
+
+		history.seek(&mut collection, 0).unwrap();
+		for name in ["alice", "bob", "bob 2"] {
+			assert!(collection.sources.contains_key(name), "{name}");
+		}
 	}
 
 	#[test]
@@ -705,7 +780,7 @@ mod tests {
 			},
 		);
 		let path = Path::new("bob/camera.hang").unwrap();
-		assert_eq!(room.observe(&path, true, &collection), None);
+		assert_eq!(room.observe(&path, true, &collection, &History::new()), None);
 		assert!(room.participants()["bob"].camera);
 		assert_eq!(room.sources_of(&collection, "bob"), ["bob"]);
 		assert!(room.sources_of(&collection, "alice").is_empty());

@@ -111,6 +111,14 @@ impl Change {
 		}
 	}
 
+	/// The name of the source, audio, or video entry the change makes.
+	fn entry(&self) -> Option<&str> {
+		match self {
+			Self::Source { name, .. } | Self::Audio { name, .. } | Self::Video { name, .. } => Some(name),
+			Self::Scene { .. } | Self::Item { .. } | Self::Transition { .. } => None,
+		}
+	}
+
 	/// Whether the change leaves its part as it was.
 	fn is_noop(&self) -> bool {
 		match self {
@@ -635,6 +643,62 @@ impl History {
 		Ok(())
 	}
 
+	/// Make `edit` to `collection` without recording it, for a change the
+	/// user did not make, such as a guest joining. It is not undone, and every
+	/// edit here still undoes and redoes around it.
+	///
+	/// So it must commute with each of them: it may only add source, audio,
+	/// and video entries, under names no edit here changes, and no clone,
+	/// whose source an edit could remove. Anything else is refused.
+	pub fn apply_outside(&self, collection: &mut Collection, edit: &Edit) -> Result<(), Error> {
+		for change in &edit.changes {
+			let name = match change {
+				Change::Source {
+					name,
+					before: None,
+					after: Some(source),
+				} if source.opens() => name,
+				Change::Audio {
+					name,
+					before: None,
+					after: Some(_),
+				}
+				| Change::Video {
+					name,
+					before: None,
+					after: Some(_),
+				} => name,
+				_ => {
+					return Err(Error::Invalid(format!(
+						"`{}` changes more than adding a source's own entries",
+						edit.label
+					)));
+				}
+			};
+			if self.touches(name) {
+				return Err(conflict(format!("the history edits `{name}`")));
+			}
+		}
+		collection.apply(edit)
+	}
+
+	/// Whether any edit here, done or undone, changes the source, audio, or
+	/// video entry called `name`.
+	pub fn touches(&self, name: &str) -> bool {
+		let mut changes = self.entries().flat_map(|edit| &edit.changes);
+		changes.any(|change| change.entry() == Some(name))
+	}
+
+	/// `base`, or `base 2`, `base 3`, and so on: the first name no source of
+	/// `collection` has and no edit here changes, for
+	/// [`apply_outside`](Self::apply_outside) to add.
+	pub fn unused_name(&self, collection: &Collection, base: &str) -> String {
+		std::iter::once(base.to_string())
+			.chain((2..).map(|n| format!("{base} {n}")))
+			.find(|name| !collection.sources.contains_key(name) && !self.touches(name))
+			.expect("an unused name")
+	}
+
 	/// Serialize to the history file format, in the scene file's version,
 	/// since entries hold its sources, scenes, and items.
 	pub fn to_toml(&self) -> Result<String, Error> {
@@ -916,6 +980,71 @@ mod tests {
 		assert_eq!(loaded.entries().next().unwrap().label, "Add blue");
 		loaded.undo(&mut edited).unwrap();
 		assert!(!edited.sources.contains_key("blue"));
+	}
+
+	/// A change from outside, such as a guest joining, drops nothing to redo,
+	/// and undo and redo pass over it, here or after a reload.
+	#[test]
+	fn an_outside_edit_keeps_the_history_around_it() {
+		let mut collection = collection();
+		let mut history = History::new();
+		drag(&mut collection, &mut history, 1.0, None);
+		drag(&mut collection, &mut history, 2.0, None);
+		history.undo(&mut collection).unwrap();
+
+		let mut draft = collection.draft("Add guest");
+		draft.set_source("guest", Some(color([0, 255, 0, 255]))).unwrap();
+		draft.set_audio("guest", Some(Audio::default())).unwrap();
+		history
+			.apply_outside(&mut collection, &draft.finish().unwrap())
+			.unwrap();
+		assert_eq!((history.position(), history.entries().len()), (1, 2));
+
+		history.redo(&mut collection).unwrap();
+		assert_eq!(collection.scenes[0].items[0].rect.x, 2.0);
+		history.seek(&mut collection, 0).unwrap();
+		assert_eq!(collection.scenes[0].items[0].rect.x, 0.0);
+		assert!(collection.sources.contains_key("guest"));
+
+		// The scene file now holds the guest, and the whole history still replays.
+		let (mut loaded, dropped) = History::from_toml(&history.to_toml().unwrap(), &collection).unwrap();
+		assert_eq!(dropped, 0);
+		loaded.seek(&mut collection, 2).unwrap();
+		assert_eq!(collection.scenes[0].items[0].rect.x, 2.0);
+		assert!(collection.sources.contains_key("guest"));
+	}
+
+	/// An outside change that an edit's undo or redo would collide with, or
+	/// that moves what an edit names by index, is refused.
+	#[test]
+	fn refuses_an_outside_edit_the_history_could_not_pass_over() {
+		let mut collection = collection();
+		let mut history = History::new();
+		let mut draft = collection.draft("Add blue");
+		draft.set_source("blue", Some(color([0, 0, 255, 255]))).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		history.undo(&mut collection).unwrap();
+		let before = collection.clone();
+
+		let mut taken = collection.draft("Add guest");
+		taken.set_source("blue", Some(color([0, 0, 255, 255]))).unwrap();
+		let mut clone = collection.draft("Add guest");
+		clone
+			.set_source("clone", Some(Source::Clone { source: "red".into() }))
+			.unwrap();
+		let mut placed = collection.draft("Add guest");
+		placed.set_source("guest", Some(color([0, 255, 0, 255]))).unwrap();
+		let item = Item::new("guest", Rect::fill(&collection.canvas));
+		placed.insert_item(&main(), 0, item).unwrap();
+		let mut removed = collection.draft("Remove red");
+		removed.remove_source("red").unwrap();
+		for draft in [taken, clone, placed, removed] {
+			let edit = draft.finish().unwrap();
+			assert!(history.apply_outside(&mut collection, &edit).is_err(), "{edit:?}");
+		}
+		assert_eq!(collection, before);
+		assert_eq!(history.unused_name(&collection, "blue"), "blue 2");
+		assert_eq!(history.unused_name(&collection, "red"), "red 2");
 	}
 
 	#[test]
