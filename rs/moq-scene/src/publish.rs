@@ -11,6 +11,7 @@
 //! its recent past; MoQ uploads only what a subscriber pulls.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +57,17 @@ pub struct Publish {
 	catalog: Catalog,
 	bandwidth: moq_net::bandwidth::Allocator,
 	kind: moq_video::encode::Kind,
+	owners: Arc<Mutex<Owners>>,
+}
+
+/// Which [`Listing`] owns each source name's entry in the studio catalog.
+///
+/// An edited source's replacement starts before the old one stops, so only the
+/// newest listing under a name may write or remove its entry.
+#[derive(Default)]
+struct Owners {
+	next: u64,
+	by_name: BTreeMap<String, u64>,
 }
 
 impl Publish {
@@ -77,6 +89,7 @@ impl Publish {
 			catalog,
 			bandwidth,
 			kind,
+			owners: Default::default(),
 		}
 	}
 }
@@ -84,6 +97,9 @@ impl Publish {
 /// One source's catalog, listed in the studio's for as long as this lives.
 pub(crate) struct Listing {
 	name: String,
+	/// This listing's claim on `name` in [`Owners`].
+	id: u64,
+	owners: Arc<Mutex<Owners>>,
 	kind: moq_video::encode::Kind,
 	broadcast: moq_net::broadcast::Producer,
 	studio: Catalog,
@@ -102,8 +118,17 @@ impl Listing {
 			.with_bandwidth(publish.bandwidth.clone())
 			.with_hls(None);
 		let catalog = moq_mux::catalog::Producer::new(&mut scratch, config)?;
+		let id = {
+			let mut owners = publish.owners.lock().unwrap();
+			let id = owners.next;
+			owners.next += 1;
+			owners.by_name.insert(name.to_string(), id);
+			id
+		};
 		Ok(Self {
 			name: name.to_string(),
+			id,
+			owners: publish.owners.clone(),
 			kind: publish.kind.clone(),
 			broadcast: publish.broadcast.clone(),
 			studio: publish.catalog.clone(),
@@ -121,6 +146,9 @@ impl Listing {
 			// Already at the studio catalog's root.
 			catalog.clock = None;
 			studio.mutate(|root| {
+				if !self.owned() {
+					return;
+				}
 				let sources = &mut root.ext.studio.sources;
 				if catalog == hang::Catalog::default() {
 					sources.remove(&self.name);
@@ -131,20 +159,32 @@ impl Listing {
 		}
 		Ok(())
 	}
+
+	/// Whether this is still the newest listing under its name. Checked inside
+	/// a studio catalog mutation, so a replacement cannot claim the name between
+	/// the check and the write.
+	fn owned(&self) -> bool {
+		self.owners.lock().unwrap().by_name.get(&self.name) == Some(&self.id)
+	}
 }
 
 impl Drop for Listing {
 	fn drop(&mut self) {
 		// Fails only once the studio catalog closed, which took the entry with it.
 		let _ = self.studio.mutate(|root| {
-			root.ext.studio.sources.remove(&self.name);
+			let mut owners = self.owners.lock().unwrap();
+			if owners.by_name.get(&self.name) == Some(&self.id) {
+				owners.by_name.remove(&self.name);
+				root.ext.studio.sources.remove(&self.name);
+			}
 		});
 	}
 }
 
 /// A captured source's video, encoded frame by frame as it is shown.
 pub(crate) struct Video {
-	producer: moq_video::encode::Producer,
+	/// Taken only to abort or finish it, as the track ends.
+	producer: Option<moq_video::encode::Producer>,
 	config: moq_video::encode::Config,
 	/// Opened on the first frame, and reopened when the picture's size or color
 	/// space changes, which moves the rendition to a new track.
@@ -181,7 +221,7 @@ impl Video {
 			.with_hls_hint(config.gop.duration(config.framerate));
 		let producer = moq_video::encode::Producer::new(listing.broadcast.clone(), reserved, rendition)?;
 		Ok(Self {
-			producer,
+			producer: Some(producer),
 			config,
 			encoder: None,
 			clock: listing.studio.clock(),
@@ -218,7 +258,7 @@ impl Video {
 		} else {
 			encoder.encode(&frame.resize(size, &Default::default())?)?
 		};
-		self.producer.publish(&encoded)?;
+		self.producer.as_mut().expect("open until it ends").publish(&encoded)?;
 		Ok(())
 	}
 
@@ -227,8 +267,20 @@ impl Video {
 		not(feature = "capture"),
 		allow(dead_code, reason = "only capture sources encode video")
 	)]
-	pub(crate) fn abort(self, err: &Error) {
-		self.producer.abort(moq_net::Error::Transport(err.to_string()));
+	pub(crate) fn abort(mut self, err: &Error) {
+		if let Some(producer) = self.producer.take() {
+			producer.abort(moq_net::Error::Transport(err.to_string()));
+		}
+	}
+}
+
+impl Drop for Video {
+	fn drop(&mut self) {
+		// A capture that ends, or a source removed or edited, ends its track
+		// cleanly rather than leaving subscribers with a dropped one.
+		if let Some(mut producer) = self.producer.take() {
+			let _ = producer.finish();
+		}
 	}
 }
 
@@ -407,7 +459,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_video_follows_its_pictures_size() {
 		local(async {
-			let (publish, catalog, _consumer) = studio();
+			let (publish, catalog, consumer) = studio();
 			let listing = Listing::new("camera", &publish).unwrap();
 			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
 			let width = |sources: &BTreeMap<String, hang::Catalog>| {
@@ -432,9 +484,53 @@ mod tests {
 					for millis in [100, 133] {
 						video.encode(&mut gray(large, millis)).unwrap();
 					}
-					listed(&catalog, |sources| width(sources) == Some(80)).await;
+					let snapshot = listed(&catalog, |sources| width(sources) == Some(80)).await;
+
+					// Removing the source ends its track cleanly.
+					let name = snapshot.ext.studio.sources["camera"].video.renditions.keys().next().unwrap();
+					let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+					drop(video);
+					while let Some(mut group) = track.recv_group().await.unwrap() {
+						while group.read_frame().await.unwrap().is_some() {}
+					}
 				} => {}
 			}
+		})
+		.await;
+	}
+
+	/// An edited source's replacement starts before the old one stops, and the
+	/// old one's end leaves the replacement listed.
+	#[tokio::test]
+	async fn a_replaced_listing_keeps_its_successor() {
+		local(async {
+			let (publish, catalog, _consumer) = studio();
+			let old = Listing::new("logo", &publish).unwrap();
+			let old_still = Still::color(&old, Rgba([0, 0, 0, 255])).unwrap();
+			let new = Listing::new("logo", &publish).unwrap();
+			let still = Still::color(&new, Rgba([255, 0, 0, 255])).unwrap();
+			let name = still.track.name().to_string();
+			let replaced = |sources: &BTreeMap<String, hang::Catalog>| {
+				sources
+					.get("logo")
+					.is_some_and(|logo| logo.binary.tracks.contains_key(&name))
+			};
+
+			tokio::select! {
+				result = old.mirror() => panic!("the mirror ended: {result:?}"),
+				result = new.mirror() => panic!("the mirror ended: {result:?}"),
+				_ = listed(&catalog, replaced) => {}
+			}
+			drop(old_still);
+			drop(old);
+			assert!(
+				replaced(&catalog.snapshot().ext.studio.sources),
+				"the replacement stays listed"
+			);
+
+			drop(still);
+			drop(new);
+			assert!(catalog.snapshot().ext.studio.sources.is_empty());
 		})
 		.await;
 	}
