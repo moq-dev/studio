@@ -13,9 +13,9 @@ use std::time::Duration;
 use anyhow::Context;
 use egui::Ui;
 use moq_net::bandwidth::Rate;
-use moq_scene::{Canvas, Collection, Item, Rect, Scene, wgpu};
+use moq_scene::{Canvas, Collection, Draft, Edit, History, Item, Rect, Scene, wgpu};
 
-use crate::autosave::Autosave;
+use crate::autosave::{self, Autosave};
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{self, Engine, Launch};
 use crate::health::rate;
@@ -388,9 +388,29 @@ fn propose(listing: &Listing, canvas: Canvas) -> Choices {
 	}
 }
 
-/// The collection `choices` describe: the display filling the canvas, the
-/// camera over its corner (or filling the canvas alone), and the audio input.
-fn collection(listing: &Listing, choices: &Choices) -> Collection {
+/// What setup starts the studio with: a new collection on the chosen canvas
+/// and, unless `empty`, the proposal as its first edit, so the history holds it
+/// and undoing it leaves the empty collection.
+fn loaded(listing: &Listing, choices: &Choices, empty: bool) -> anyhow::Result<autosave::Loaded> {
+	let mut collection = Collection::new();
+	collection.canvas = choices.canvas;
+	let mut history = History::new();
+	if !empty {
+		let edit = proposal(&collection, listing, choices)?;
+		collection.apply(&edit)?;
+		history.record(edit, None);
+	}
+	Ok(autosave::Loaded {
+		collection,
+		history,
+		dropped: 0,
+	})
+}
+
+/// The edit `choices` describe to the new `collection`: its scene becomes
+/// [`SCENE`], with the display filling the canvas and the camera over its
+/// corner (or filling the canvas alone), and the audio input is added.
+fn proposal(collection: &Collection, listing: &Listing, choices: &Choices) -> Result<Edit, moq_scene::Error> {
 	let chosen = |devices: &Result<Vec<Pick>, String>, index: Option<usize>| {
 		devices.as_ref().ok().and_then(|devices| devices.get(index?)).cloned()
 	};
@@ -398,8 +418,7 @@ fn collection(listing: &Listing, choices: &Choices) -> Collection {
 	let camera = chosen(&listing.cameras, choices.camera);
 	let audio = chosen(&listing.audio, choices.audio);
 
-	let mut collection = Collection::new();
-	collection.canvas = choices.canvas;
+	let mut draft = collection.draft(format!("Set up scene `{SCENE}`"));
 	let mut scene = Scene::new(SCENE);
 	let fill = Rect::fill(&choices.canvas);
 	let corner = corner(&choices.canvas);
@@ -409,28 +428,21 @@ fn collection(listing: &Listing, choices: &Choices) -> Collection {
 	];
 	for (pick, rect) in placed {
 		let Some(pick) = pick else { continue };
-		let name = add(&mut collection, pick);
-		scene.items.push(Item {
-			source: name,
-			rect,
-			visible: true,
-		});
+		let name = add(&mut draft, pick)?;
+		scene.items.push(Item::new(name, rect));
 	}
 	if let Some(pick) = &audio {
-		add(&mut collection, pick);
+		add(&mut draft, pick)?;
 	}
-	collection.scenes = vec![scene];
-	collection
+	draft.set_scene(0, scene)?;
+	draft.finish()
 }
 
 /// Add `pick` under its device name, numbered past any source already called that.
-fn add(collection: &mut Collection, pick: &Pick) -> String {
-	let name = std::iter::once(pick.name.clone())
-		.chain((2..).map(|n| format!("{} {n}", pick.name)))
-		.find(|name| !collection.sources.contains_key(name))
-		.expect("an unused name");
-	collection.sources.insert(name.clone(), pick.source.clone());
-	name
+fn add(draft: &mut Draft, pick: &Pick) -> Result<String, moq_scene::Error> {
+	let name = draft.collection().unused_name(&pick.name);
+	draft.set_source(&name, Some(pick.source.clone()))?;
+	Ok(name)
 }
 
 /// A quarter of the canvas wide in its bottom-right corner, 16:9 like most
@@ -763,13 +775,12 @@ impl Setup {
 		let (Task::Done(listing), Some(choices)) = (&self.devices, &self.choices) else {
 			return;
 		};
-		let collection = match empty {
-			true => {
-				let mut collection = Collection::new();
-				collection.canvas = choices.canvas;
-				collection
+		let loaded = match loaded(listing, choices, empty) {
+			Ok(loaded) => loaded,
+			Err(err) => {
+				self.error = Some(format!("{err:#}"));
+				return;
 			}
-			false => collection(listing, choices),
 		};
 		// Kept, so a start that fails can be retried with other choices.
 		let launch = self.launch.clone();
@@ -787,7 +798,7 @@ impl Setup {
 				path.display()
 			);
 			let (autosave, _) = Autosave::open(path)?;
-			Engine::start(launch, autosave, collection).await
+			Engine::start(launch, autosave, loaded).await
 		}));
 	}
 }
@@ -976,7 +987,11 @@ mod tests {
 	fn the_camera_sits_over_the_display() {
 		let listing = listing(&["Webcam"], &["Screen"], &["Mic"]);
 		let choices = propose(&listing, CANVASES[3]);
-		let collection = collection(&listing, &choices);
+		let autosave::Loaded {
+			mut collection,
+			mut history,
+			..
+		} = loaded(&listing, &choices, false).unwrap();
 		collection.to_toml().expect("a valid collection");
 
 		let items = &collection.scene(SCENE).expect("the scene").items;
@@ -990,6 +1005,13 @@ mod tests {
 		);
 		assert!(corner.x + corner.width < 1280.0 && corner.y + corner.height < 720.0);
 		assert!(collection.sources.contains_key("Mic"), "the input is a source");
+
+		// One edit, which undoes to what starting empty opens.
+		assert_eq!(history.entries().len(), 1);
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, loaded(&listing, &choices, true).unwrap().collection);
+		assert!(collection.sources.is_empty());
+		assert_eq!(collection.canvas, CANVASES[3]);
 	}
 
 	#[test]
@@ -997,7 +1019,7 @@ mod tests {
 		let listing = listing(&["Webcam"], &["Screen"], &[]);
 		let mut choices = propose(&listing, Canvas::default());
 		choices.display = None;
-		let collection = collection(&listing, &choices);
+		let collection = loaded(&listing, &choices, false).unwrap().collection;
 		let items = &collection.scene(SCENE).expect("the scene").items;
 		assert_eq!(items.len(), 1);
 		assert_eq!(items[0].rect, Rect::fill(&Canvas::default()));
@@ -1006,7 +1028,9 @@ mod tests {
 	#[test]
 	fn devices_sharing_a_name_get_their_own_sources() {
 		let listing = listing(&["Built-in"], &["Built-in"], &["Built-in"]);
-		let collection = collection(&listing, &propose(&listing, Canvas::default()));
+		let collection = loaded(&listing, &propose(&listing, Canvas::default()), false)
+			.unwrap()
+			.collection;
 		let names: Vec<_> = collection.sources.keys().map(String::as_str).collect();
 		assert_eq!(names, ["Built-in", "Built-in 2", "Built-in 3"]);
 		collection.to_toml().expect("a valid collection");

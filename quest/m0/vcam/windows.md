@@ -8,4 +8,4 @@ Apps list it as a camera while the studio runs.
 
 ## Required
 
-- [Studio on macOS and Windows](/quest/m0/app.md) - the studio running on Windows
+- [Studio on Windows](/quest/m0/app-windows.md) - the studio running on Windows

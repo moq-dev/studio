@@ -87,8 +87,8 @@ fn main() -> anyhow::Result<()> {
 		.with_context(|| format!("reading {}", config.scenes.display()))?;
 	let app = match exists {
 		true => {
-			let (autosave, collection) = autosave::Autosave::open(config.scenes.clone())?;
-			App::Starting(runtime.block_on(engine::Engine::start(launch, autosave, collection))?)
+			let (autosave, loaded) = autosave::Autosave::open(config.scenes.clone())?;
+			App::Starting(runtime.block_on(engine::Engine::start(launch, autosave, loaded))?)
 		}
 		// Nothing is saved until setup starts the studio, so quitting before then
 		// leaves no file and the next launch runs setup again.
