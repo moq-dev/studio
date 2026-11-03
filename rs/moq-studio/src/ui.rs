@@ -499,7 +499,8 @@ impl Panels {
 	/// by dragging them in the preview, snapping as they go.
 	fn arrange(&mut self, ui: &Ui, state: &mut State, response: &egui::Response, canvas: Canvas) -> anyhow::Result<()> {
 		let gesture = self.gestures.of(response);
-		if !response.dragged() {
+		// The release still moves the item to where the pointer let go.
+		if !response.dragged() && !response.drag_stopped() {
 			self.drag = None;
 		}
 		// A panel squeezed to nothing has no picture to map the pointer onto.
@@ -522,11 +523,12 @@ impl Panels {
 		};
 		let reach = view.canvas(REACH);
 		// The selected item's edges first, since they reach past it, then the
-		// frontmost item shown.
+		// frontmost item shown, so a selected backdrop does not hide what is
+		// in front of it.
 		let hit = |pos: egui::Pos2| {
 			let point = view.point(pos);
 			if let Some(index) = selected
-				&& let Some(grab) = Grab::at(&items[index].rect, point, reach)
+				&& let Some(grab @ Grab::Resize { .. }) = Grab::at(&items[index].rect, point, reach)
 			{
 				return Some((index, grab));
 			}
@@ -557,6 +559,7 @@ impl Panels {
 				grab,
 				rect: items[index].rect,
 				origin: view.point(origin),
+				gesture,
 				hints: None,
 			});
 		}
@@ -587,10 +590,13 @@ impl Panels {
 			{
 				let verb = if drag.grab == Grab::Move { "Move" } else { "Resize" };
 				let label = format!("{verb} `{}`", item.source);
-				result = edit(state, label, gesture, |draft| {
+				result = edit(state, label, drag.gesture, |draft| {
 					draft.set_item(&drag.layer, drag.index, Item { rect, ..item })
 				});
 			}
+		}
+		if !response.dragged() {
+			self.drag = None;
 		}
 
 		// Drawn from the collection and selection as this frame left them.
@@ -1493,6 +1499,9 @@ struct Drag {
 	/// drag started. Each frame drags from these, so snaps never accumulate.
 	rect: Rect,
 	origin: [f32; 2],
+	/// Kept from the start, since the frame that releases the drag no longer
+	/// reports it but still moves the item.
+	gesture: Option<u64>,
 	/// The snapped rect, its guides, and its spacing, unless snapping is off.
 	hints: Option<snap::Snapped>,
 }

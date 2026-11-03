@@ -200,10 +200,13 @@ impl Snap {
 			if let Some(grid) = self.grid {
 				shifts.extend(points.iter().map(|point| (point / grid).round() * grid - point));
 			}
-			// An alignment wins a tie, since it comes first.
+			// Spacing places the whole item, so a resize never takes it. An
+			// alignment wins a tie, since it comes first.
+			if moves == Moves::Both {
+				shifts.extend(spacings(axis, &rect, others));
+			}
 			let best = shifts
 				.into_iter()
-				.chain(spacings(axis, &rect, others))
 				.filter(|shift| shift.abs() <= self.reach)
 				.min_by(|a, b| a.abs().total_cmp(&b.abs()));
 			if let Some(best) = best {
@@ -512,6 +515,15 @@ mod tests {
 		let snapped = SNAP.apply(Grab::Move, rect(395.0, 520.0, 100.0, 100.0), &others, &CANVAS);
 		assert_eq!(snapped.rect.x, 400.0);
 		assert_eq!(spaces(&snapped), [(200.0, 400.0), (500.0, 700.0)]);
+		// Resizing the same item is not pulled by the spacing it would have moved to.
+		let right = Grab::Resize {
+			x: Some(Side::End),
+			y: None,
+		};
+		let item = rect(395.0, 520.0, 100.0, 100.0);
+		let snapped = SNAP.apply(right, item, &others, &CANVAS);
+		assert_eq!(snapped.rect, item);
+		assert!(snapped.gaps.is_empty());
 	}
 
 	#[test]
