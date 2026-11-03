@@ -1,0 +1,23 @@
+# [M] Guest return feed
+
+## Goal
+
+Guests in the studio's room see the program and hear a mix-minus, the program
+audio without their own voice, so they can follow the show without hearing
+themselves back.
+The join page plays it.
+
+## Plan
+
+Decided 2026-11-02 (maintainer): guests get a mix-minus, not the full program,
+so this waits on audio mixes; video and audio land together. Publish into the
+room the studio already owns, under names the room's token scope allows, and
+keep it free of the studio's own credentials. One mix-minus per guest grows
+with the guest count, so bound it by design (the guest roster is already
+bounded to guests the studio signed for). Raised on
+[#10](https://github.com/moq-dev/studio/pull/10).
+
+## Required
+
+- [Audio mixes](/quest/m0/mixes.md) - the per-output mixes a mix-minus is
+  built from

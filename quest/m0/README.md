@@ -82,10 +82,14 @@ repository.
 - [Studio on macOS and Windows](/quest/m0/app.md) - the studio runs on macOS and Windows, not only Linux
 - [Viewer-side composition](/quest/m0/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
 - [Undo and the scene model](/quest/m0/scene-model.md) - undo history, linked and cloned sources, copy and paste, a downstream keyer, and per-item filters
+- [Worker threads fail loud at startup](/quest/m0/thread-start.md) - a worker that cannot start fails the studio's start instead of logging
+- [Outside edits to the scene file](/quest/m0/outside-edits.md) - autosave reloads or asks instead of overwriting a change made outside the studio
 - [Scene editing](/quest/m0/scene-editing.md) - rename and reorder scenes, and resize the canvas while live through a new rendition
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
+- [Health grades source tracks](/quest/m0/health-sources.md) - the Health panel covers each published source track, not only the program
+- [Audio sources report stalls](/quest/m0/audio-stall.md) - a dead microphone or system audio reads stalled like a camera
 - [Relay failover](/quest/m0/failover.md) - the same epoch on two relays, so a relay failure does not drop the stream
 - [Instant replay and DVR](/quest/m0/replay.md) - replays and clips from held groups, and viewer scrubbing through the archive
 - [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
@@ -96,10 +100,14 @@ repository.
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [Guests](/quest/m0/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
+- [Guest return feed](/quest/m0/guest-return.md) - guests see the program and hear a mix-minus
+- [Guest token refresh](/quest/m0/guest-refresh.md) - a show outlasts the guest link's expiry without new links
 - [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
 - [Recording](/quest/m0/recording.md) - each canvas's program, and optionally each source, recorded to disk alongside live outputs
 - [Browser sources](/quest/m0/browser-source.md) - web overlays rendered by out-of-process CEF into the compositor through shared GPU textures
+- [Browser sources keep a profile](/quest/m0/browser-profile.md) - one persistent profile, so logins survive restarts, and a reload action
+- [Browser source popups](/quest/m0/browser-popups.md) - dropdowns and other in-page popups draw and take input
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS
 - [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need
@@ -109,6 +117,7 @@ repository.
 - [moq-audio's filter chain is pinned](/quest/m0/pin-audio-filters.md) - the chain audio filters configure
 - [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice and browser composition
 - [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
+- [moq-video's program readback is pinned](/quest/m0/pin-readback.md) - the readback the Linux virtual camera uses
 
 ## Related
 
