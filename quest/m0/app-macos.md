@@ -1,20 +1,21 @@
-# [M] Studio on macOS
+# [S] Studio on macOS with capture granted
 
 ## Goal
 
-`moq-studio` is run, not only compiled, on macOS, and whatever only shows up
-there is fixed: camera, display, microphone, and system audio sources, plus
-the window, preview, program, and publish path. Only Linux was built and run
-when the studio landed.
+Someone at a Mac grants the camera, microphone, and Screen & System Audio
+Recording permissions, runs `moq-studio --features capture`, and fixes
+whatever only shows up there: camera, display, window, microphone, and system
+audio sources reaching preview, program, and the published broadcast, and the
+Devices panel listing and adding each.
+
+The build, `just ci`, the window, compositing on Metal, and publishing through
+VideoToolbox already run on an Apple Silicon Mac. Capture has not: its TCC
+prompts need a person to answer them, so an unattended agent cannot do this.
 
 ## Plan
 
-- Build with `--features capture`, since a default build has image, color,
-  and broadcast sources only. That build fails on macOS today: the Devices
-  panel's listing task holds moq-video's ScreenCaptureKit listing future,
-  which is not `Send`, across a `runtime.spawn` in `rs/moq-studio/src/ui.rs`.
-  Linux CI never builds it, so `just ci` cannot pass on a Mac until this is
-  fixed. If the fix belongs in moq-video, land it there first.
+- The studio is not an app bundle, so the prompts and grants belong to the app
+  that launched it, such as the terminal.
 
 ## Related
 

@@ -869,7 +869,8 @@ impl Panels {
 	fn devices(&mut self, ui: &mut Ui) {
 		self.devices.poll();
 		if ui.button("Refresh").clicked() {
-			self.devices.refresh(&self.runtime);
+			let refreshed = self.devices.refresh(&self.runtime).context("cannot list devices");
+			self.check(refreshed);
 		}
 		let Some(picked) = self.devices.ui(ui) else { return };
 		let mut state = self.engine.state.lock().unwrap();
@@ -1492,12 +1493,19 @@ struct Devices {
 }
 
 impl Devices {
-	fn refresh(&mut self, runtime: &tokio::runtime::Handle) {
+	fn refresh(&mut self, runtime: &tokio::runtime::Handle) -> std::io::Result<()> {
 		let (send, recv) = std::sync::mpsc::channel();
+		// The capture backends' listing futures are `!Send` on macOS, as their
+		// capture futures are (which is why each source runs on its own thread),
+		// so poll the listing on a thread rather than spawn it. Not the runtime's
+		// blocking pool, which dropping the runtime waits out, so a listing stuck
+		// on a permission prompt cannot hold the studio open once it closes.
+		let handle = runtime.clone();
+		std::thread::Builder::new().name("devices".into()).spawn(move || {
+			let _ = send.send(handle.block_on(devices::list()));
+		})?;
 		self.pending = Some(recv);
-		runtime.spawn(async move {
-			let _ = send.send(devices::list().await);
-		});
+		Ok(())
 	}
 
 	fn poll(&mut self) {
