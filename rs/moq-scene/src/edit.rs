@@ -975,7 +975,11 @@ mod tests {
 		commit(&mut collection, &mut history, draft, None);
 		assert_eq!(history.entries().len(), 2);
 		assert_eq!(collection.canvas, canvas);
-		assert_eq!(collection.scenes[0].items[0].rect, Rect::fill(&start.canvas), "items keep their pixels");
+		assert_eq!(
+			collection.scenes[0].items[0].rect,
+			Rect::fill(&start.canvas),
+			"items keep their pixels"
+		);
 
 		history.undo(&mut collection).unwrap();
 		assert_eq!(collection.canvas, start.canvas);
@@ -983,12 +987,7 @@ mod tests {
 		assert_eq!(collection, start);
 
 		let mut draft = collection.draft("Resize the canvas");
-		draft
-			.set_canvas(Canvas {
-				width: 1279,
-				..canvas
-			})
-			.unwrap();
+		draft.set_canvas(Canvas { width: 1279, ..canvas }).unwrap();
 		assert!(matches!(draft.finish(), Err(Error::Invalid(_))));
 	}
 

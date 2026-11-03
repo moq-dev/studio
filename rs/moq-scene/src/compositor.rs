@@ -325,7 +325,10 @@ impl Compositor {
 	/// preview, on program, or fading out. See [`Edit::renames`](crate::Edit::renames).
 	pub fn rename(&mut self, from: &str, to: &str) {
 		let fading = self.fade.as_mut().map(|fade| &mut fade.from);
-		for scene in [&mut self.preview_scene, &mut self.program_scene].into_iter().chain(fading) {
+		for scene in [&mut self.preview_scene, &mut self.program_scene]
+			.into_iter()
+			.chain(fading)
+		{
 			if scene.as_deref() == Some(from) {
 				*scene = Some(to.to_string());
 			}
@@ -1088,7 +1091,13 @@ mod tests {
 			studio.compositor.fade(Duration::from_secs(1), start);
 
 			for (from, to) in [("red", "crimson"), ("blue", "navy")] {
-				studio.collection.scenes.iter_mut().find(|scene| scene.name == from).unwrap().name = to.into();
+				studio
+					.collection
+					.scenes
+					.iter_mut()
+					.find(|scene| scene.name == from)
+					.unwrap()
+					.name = to.into();
 				studio.compositor.rename(from, to);
 			}
 			assert_eq!(studio.compositor.preview_scene(), Some("navy"));

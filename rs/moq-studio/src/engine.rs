@@ -140,7 +140,11 @@ impl State {
 		let from = self.history.position();
 		let entries: Vec<&Edit> = self.history.entries().collect();
 		let made: Vec<Edit> = if position < from {
-			entries[position..from].iter().rev().map(|edit| edit.inverse()).collect()
+			entries[position..from]
+				.iter()
+				.rev()
+				.map(|edit| edit.inverse())
+				.collect()
 		} else {
 			entries[from..position].iter().map(|&edit| edit.clone()).collect()
 		};
@@ -757,10 +761,17 @@ impl Renditions {
 	/// List `probe`'s rendition in the catalog under a new track, and start its
 	/// encode thread, which reports on the receiver once its encoder opens.
 	fn start(&self, probe: Probe) -> anyhow::Result<(Rendition, tokio::sync::oneshot::Receiver<anyhow::Result<()>>)> {
-		let Probe { exporter, config, video } = probe;
+		let Probe {
+			exporter,
+			config,
+			video,
+		} = probe;
 		// Before its encode thread starts, which reports its own failure.
 		*self.stats.video_error.lock().unwrap() = None;
-		let reserved = self.timebase.reserve().with_hls_hint(config.gop.duration(config.framerate));
+		let reserved = self
+			.timebase
+			.reserve()
+			.with_hls_hint(config.gop.duration(config.framerate));
 		let producer = moq_video::encode::Producer::new(self.broadcast.clone(), reserved, video)?;
 		let watched = Arc::new(AtomicBool::new(false));
 		self.runtime.spawn(watch(producer.demand(), watched.clone()));
@@ -1003,6 +1014,47 @@ mod tests {
 	/// Bounds each step, so a stall fails rather than hangs.
 	const TIMEOUT: Duration = Duration::from_secs(30);
 
+	async fn subscribe(
+		broadcast: &moq_net::broadcast::Consumer,
+		name: &str,
+		config: &hang::catalog::VideoConfig,
+	) -> moq_video::decode::Consumer {
+		let mut options = moq_video::decode::Options::new();
+		options.start = moq_video::decode::Start::Latest;
+		moq_video::decode::Consumer::new(broadcast, config, name.to_string(), options)
+			.await
+			.expect("video decoder")
+	}
+
+	/// Wait for `pictures` to show the red canvas at `size`, returning when it
+	/// is shown. The canvas is black until the color source delivers its first
+	/// picture, so this waits for the composed one rather than take the first.
+	async fn red(
+		pictures: &mut moq_video::decode::Consumer,
+		size: moq_video::Size,
+	) -> Result<moq_net::Timestamp, kio::clock::Elapsed> {
+		kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let frame = match pictures.read().await.expect("decode") {
+					Some(moq_video::decode::Read::Frame(frame)) => frame,
+					Some(_) => continue,
+					None => panic!("the video ended"),
+				};
+				assert_eq!(frame.size(), size);
+				let rgba = frame.surface.to_rgba(&Default::default()).expect("rgba");
+				let center = ((size.height / 2 * size.width + size.width / 2) * 4) as usize;
+				let [r, g, b, _] = rgba.data()[center..center + 4] else {
+					unreachable!()
+				};
+				// H.264 and its 4:2:0 round trip shift a primary a little.
+				if r > 200 && g < 60 && b < 60 {
+					return frame.timestamp;
+				}
+			}
+		})
+		.await
+	}
+
 	/// The program a studio publishes reaches a relay as the picture it composed,
 	/// with its audio alongside.
 	#[tokio::test(flavor = "multi_thread")]
@@ -1070,34 +1122,10 @@ mod tests {
 		let echo = catalog.echo.as_ref().expect("the catalog solicits feedback");
 		assert_eq!(echo.path.as_str(), "studio/viewers");
 		let (video, config) = catalog.video.enabled().next().expect("a video rendition");
-		let mut options = moq_video::decode::Options::new();
-		options.start = moq_video::decode::Start::Latest;
-		let mut decoder = moq_video::decode::Consumer::new(&broadcast, config, video.clone(), options)
+		let mut pictures = subscribe(&broadcast, video, config).await;
+		red(&mut pictures, moq_video::Size::new(320, 180))
 			.await
-			.expect("video decoder");
-		// The canvas is black until the color source delivers its first
-		// picture, so wait for the composed one rather than take the first.
-		kio::clock::timeout(TIMEOUT, async {
-			loop {
-				let frame = match decoder.read().await.expect("decode") {
-					Some(moq_video::decode::Read::Frame(frame)) => frame,
-					Some(_) => continue,
-					None => panic!("the video ended"),
-				};
-				assert_eq!(frame.size(), moq_video::Size::new(320, 180));
-				let rgba = frame.surface.to_rgba(&Default::default()).expect("rgba");
-				let center = (90 * 320 + 160) * 4;
-				let [r, g, b, _] = rgba.data()[center..center + 4] else {
-					unreachable!()
-				};
-				// H.264 and its 4:2:0 round trip shift a primary a little.
-				if r > 200 && g < 60 && b < 60 {
-					return;
-				}
-			}
-		})
-		.await
-		.expect("the composed picture arrives");
+			.expect("the composed picture arrives");
 
 		// The program reaches the encoder as a GPU surface when the encoder
 		// reads one, and is read back frame by frame only when it does not.
@@ -1143,6 +1171,51 @@ mod tests {
 		})
 		.await
 		.expect("sound arrives");
+
+		// A resize while live ends the old track and lists a rendition of the
+		// new size under a new one, on the same timeline.
+		{
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft("Resize the canvas");
+			let canvas = moq_scene::Canvas {
+				width: 160,
+				height: 90,
+				framerate: 30,
+			};
+			draft.set_canvas(canvas).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		let ended = kio::clock::timeout(TIMEOUT, async {
+			let mut last = None;
+			while let Some(read) = pictures.read().await.expect("decode") {
+				if let moq_video::decode::Read::Frame(frame) = read {
+					last = Some(frame.timestamp);
+				}
+			}
+			last
+		})
+		.await
+		.expect("the old track ends");
+		let (resized, config) = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let catalog = catalogs.next().await.expect("catalog").expect("a catalog");
+				if let [(name, config)] = catalog.video.enabled().collect::<Vec<_>>().as_slice()
+					&& *name != video
+				{
+					return ((*name).clone(), (*config).clone());
+				}
+			}
+		})
+		.await
+		.expect("the catalog lists the new rendition alone");
+		let mut pictures = subscribe(&broadcast, &resized, &config).await;
+		let first = red(&mut pictures, moq_video::Size::new(160, 90))
+			.await
+			.expect("the resized picture arrives");
+		assert!(
+			ended.is_none_or(|ended| ended < first),
+			"the new rendition continues the old one's timeline"
+		);
 
 		// An edit, and then its undo, reach the scene file and the history
 		// beside it through the autosave the studio runs.

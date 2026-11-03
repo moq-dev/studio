@@ -1215,7 +1215,11 @@ impl Panels {
 			ui.label("x");
 			ui.add(egui::DragValue::new(&mut canvas.height).range(2..=u32::MAX));
 			ui.label("at");
-			ui.add(egui::DragValue::new(&mut canvas.framerate).range(1..=u32::MAX).suffix(" fps"));
+			ui.add(
+				egui::DragValue::new(&mut canvas.framerate)
+					.range(1..=u32::MAX)
+					.suffix(" fps"),
+			);
 			let edited = canvas != current;
 			apply = ui.add_enabled(edited, egui::Button::new("Apply")).clicked();
 			if ui.add_enabled(edited, egui::Button::new("Reset")).clicked() {
