@@ -21,6 +21,7 @@ use std::time::Duration;
 use anyhow::Context;
 use bytes::Bytes;
 use kio::clock::Instant;
+use moq_scene::publish::Encoding;
 use moq_scene::source::{self, Driver, Sources};
 use moq_scene::{Collection, Compositor, Draft, History, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
@@ -226,6 +227,10 @@ pub struct Engine {
 	pub output: Option<Output>,
 	/// Keeps broadcast sources' origin open when no connection holds it.
 	_origin: Option<moq_net::origin::Producer>,
+	/// Set by [`stop`](Self::stop), which ends the program clock.
+	stopped: AtomicBool,
+	/// The encode thread, which [`stop`](Self::stop) waits on.
+	encoding: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 /// The audio the program publishes.
@@ -298,6 +303,8 @@ impl Engine {
 			bus,
 			output,
 			_origin: origin,
+			stopped: AtomicBool::new(false),
+			encoding: Mutex::default(),
 		});
 
 		let (video, audio, clock, publisher) = match publish {
@@ -317,9 +324,10 @@ impl Engine {
 				tokio::spawn(watch(video.demand(), engine.clone()));
 				let encoder = engine.clone();
 				let (opened, open) = tokio::sync::oneshot::channel();
-				std::thread::Builder::new()
+				let thread = std::thread::Builder::new()
 					.name("encode".into())
 					.spawn(move || encode(&encoder, opened, pending, video, config, zero_copy))?;
+				*engine.encoding.lock().unwrap() = Some(thread);
 				// Before the program clock starts the sources, so the program holds
 				// its encode session even while unwatched, and a source past the
 				// GPU's session cap is the one that fails.
@@ -351,6 +359,19 @@ impl Engine {
 		tokio::spawn(engine.clone().grade(health::Sampler::new(publisher)));
 
 		Ok(engine)
+	}
+
+	/// Stop the program clock, then wait for the encoder to publish the copies
+	/// on their way to it and what it still holds, and to end the video track,
+	/// so quitting loses none of the program's last pictures.
+	pub fn stop(&self) {
+		self.stopped.store(true, Ordering::Relaxed);
+		let thread = self.encoding.lock().unwrap().take();
+		if let Some(thread) = thread
+			&& thread.join().is_err()
+		{
+			tracing::error!("the encode thread panicked");
+		}
 	}
 
 	/// Write the collection and its history to their files unless they
@@ -424,6 +445,7 @@ impl Engine {
 	/// Draw a canvas frame per tick of the program clock, and hand the program
 	/// to the encoder, stamped `epoch` past `start`: every frame, or only while
 	/// anyone watches when the output is on demand.
+	/// Runs until the studio [stops](Self::stop).
 	///
 	/// Drawing outlives the encoder: a failed output stops copying the program,
 	/// and the preview and program keep moving.
@@ -442,6 +464,10 @@ impl Engine {
 
 		loop {
 			let tick = clock.tick().await;
+			// Dropping the sender lets the encoder finish what was sent and end.
+			if self.stopped.load(Ordering::Relaxed) {
+				return;
+			}
 			let program = {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
@@ -669,7 +695,10 @@ async fn watch(mut demand: moq_net::track::Demand, engine: Arc<Engine>) {
 			Ok(wanted) => engine.stats.watched.store(wanted.is_some(), Ordering::Relaxed),
 			Err(err) => {
 				engine.stats.watched.store(false, Ordering::Relaxed);
-				engine.stats.fail(format!("video: {err}"));
+				// Stopping ends the track on purpose.
+				if !engine.stopped.load(Ordering::Relaxed) {
+					engine.stats.fail(format!("video: {err}"));
+				}
 				return;
 			}
 		}
@@ -696,14 +725,15 @@ fn encode(
 	engine: &Engine,
 	opened: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 	video: mpsc::Receiver<Video>,
-	mut producer: moq_video::encode::Producer,
+	producer: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
 	zero_copy: bool,
 ) {
-	let mut encoder = match moq_video::encode::Encoder::new(&config) {
+	let mut track = Encoding::new(producer);
+	let encoder = match moq_video::encode::Encoder::new(&config) {
 		Ok(encoder) => encoder,
 		Err(err) => {
-			producer.abort(moq_net::StreamError::Internal.into());
+			track.abort(moq_net::StreamError::Internal.into());
 			let _ = opened.send(Err(anyhow::Error::new(err).context("video encoder")));
 			return;
 		}
@@ -711,33 +741,39 @@ fn encode(
 	*engine.stats.encoder.lock().unwrap() = Some(encoder.name().to_string());
 	let _ = opened.send(Ok(()));
 
-	let result = encode_frames(&engine.stats, video, &mut producer, &mut encoder, zero_copy).and_then(|()| {
-		producer.finish()?;
-		Ok(())
-	});
-	if let Err(err) = result {
-		engine.stats.fail(format!("{err:#}"));
-		producer.abort(moq_net::StreamError::Internal.into());
+	let encoded = track
+		.open(encoder)
+		.context("video encoder")
+		.and_then(|()| encode_frames(&engine.stats, video, &mut track, zero_copy));
+	match encoded {
+		// Publishes what the encoder still holds before the track ends, so the
+		// program's last pictures are not lost at exit. A failure aborts it.
+		Ok(()) => {
+			if let Err(err) = track.finish() {
+				engine.stats.fail(format!("video: {err}"));
+			}
+		}
+		Err(err) => {
+			engine.stats.fail(format!("{err:#}"));
+			track.abort(moq_net::StreamError::Internal.into());
+		}
 	}
 }
 
 fn encode_frames(
 	stats: &Stats,
 	video: mpsc::Receiver<Video>,
-	producer: &mut moq_video::encode::Producer,
-	encoder: &mut moq_video::encode::Encoder,
+	track: &mut Encoding,
 	zero_copy: bool,
 ) -> anyhow::Result<()> {
-	let mut paused = false;
-
 	while let Ok(video) = video.recv() {
 		let pending = match video {
 			Video::Frame(pending) => pending,
 			// Marks the gap, so a viewer arriving during it is not served the
-			// last group before it as if it were live.
+			// last group before it as if it were live, and one arriving after it
+			// starts from a keyframe.
 			Video::Pause => {
-				producer.discontinuity().context("video")?;
-				paused = true;
+				track.pause().context("video")?;
 				continue;
 			}
 			Video::Failed(err) => return Err(err).context("copying the program"),
@@ -752,15 +788,8 @@ fn encode_frames(
 			stats.read_back.fetch_add(1, Ordering::Relaxed);
 		}
 
-		// A viewer arriving after a break starts from a keyframe rather than
-		// waiting out the rest of a group nobody received the start of.
-		if std::mem::take(&mut paused) {
-			encoder.cut().context("video encoder")?;
-		}
-
 		let start = Instant::now();
-		let encoded = encoder.encode(&frame).context("video encoder")?;
-		producer.publish(&encoded).context("video")?;
+		track.encode(&frame).context("video")?;
 		stats
 			.encode_us
 			.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -989,5 +1018,20 @@ mod tests {
 		})
 		.await
 		.expect("health grades the program's tracks");
+
+		// Quitting ends the program's video cleanly once the encoder published
+		// what it was handed, rather than leaving viewers a dropped track.
+		let mut track = broadcast.track(video).unwrap().subscribe(None).await.unwrap();
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		kio::clock::timeout(TIMEOUT, async {
+			while let Some(mut group) = track.recv_group().await.expect("the video finishes") {
+				while group.read_frame().await.expect("the video finishes").is_some() {}
+			}
+		})
+		.await
+		.expect("the video ends");
+		let failed = engine.stats.error.lock().unwrap().clone();
+		assert!(failed.is_none(), "{failed:?}");
 	}
 }

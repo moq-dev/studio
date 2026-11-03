@@ -203,14 +203,144 @@ impl Drop for Listing<'_> {
 	}
 }
 
-/// A captured source's video, encoded frame by frame as it is shown.
-pub(crate) struct Video {
+/// What an [`Encoding`] needs of its encoder: a
+/// [`moq_video::encode::Encoder`], or a test's stand-in that holds pictures the
+/// way a pipelined hardware backend does.
+pub trait Encode {
+	/// [`Encoder::encode`](moq_video::encode::Encoder::encode).
+	fn encode(&mut self, frame: &moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
+	/// [`Encoder::flush`](moq_video::encode::Encoder::flush).
+	fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
+	/// [`Encoder::finish`](moq_video::encode::Encoder::finish).
+	fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
+	/// [`Encoder::cut`](moq_video::encode::Encoder::cut).
+	fn cut(&mut self) -> Result<(), moq_video::Error>;
+}
+
+impl Encode for moq_video::encode::Encoder {
+	fn encode(&mut self, frame: &moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
+		self.encode(frame)
+	}
+
+	fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
+		self.flush()
+	}
+
+	fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
+		self.finish()
+	}
+
+	fn cut(&mut self) -> Result<(), moq_video::Error> {
+		self.cut()
+	}
+}
+
+/// An encoder and the video track it publishes into.
+///
+/// A pipelined backend still holds its last pictures when its encoder is
+/// replaced, the track pauses, or the track ends, so each of those publishes
+/// them first. Dropping this ends the track cleanly rather than leaving
+/// subscribers with a dropped one, and a drain that fails aborts the track with
+/// the reason.
+pub struct Encoding<E: Encode = moq_video::encode::Encoder> {
 	/// Taken only to abort or finish it, as the track ends.
 	producer: Option<moq_video::encode::Producer>,
+	encoder: Option<E>,
+}
+
+impl<E: Encode> Encoding<E> {
+	/// Publish into `producer`, with no encoder open yet.
+	pub fn new(producer: moq_video::encode::Producer) -> Self {
+		Self {
+			producer: Some(producer),
+			encoder: None,
+		}
+	}
+
+	/// Whether an encoder is open.
+	pub fn is_open(&self) -> bool {
+		self.encoder.is_some()
+	}
+
+	/// Encode with `encoder` from here on, after draining the one it replaces.
+	pub fn open(&mut self, encoder: E) -> Result<(), Error> {
+		self.drain()?;
+		self.encoder = Some(encoder);
+		Ok(())
+	}
+
+	/// Encode `frame` and publish what the encoder hands back.
+	///
+	/// # Panics
+	///
+	/// When no encoder is [open](Self::open).
+	pub fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), Error> {
+		let encoder = self.encoder.as_mut().expect("an encoder is open");
+		let encoded = encoder.encode(frame)?;
+		self.producer.as_mut().expect("open until it ends").publish(&encoded)?;
+		Ok(())
+	}
+
+	/// Close the encoder, publishing what it still holds.
+	pub fn drain(&mut self) -> Result<(), Error> {
+		if let (Some(encoder), Some(producer)) = (self.encoder.take(), &mut self.producer) {
+			producer.publish(&encoder.finish()?)?;
+		}
+		Ok(())
+	}
+
+	/// Mark a gap in the track, such as the last viewer leaving an on-demand
+	/// one. What the encoder still holds lands before the gap rather than after
+	/// it, and the next picture is a keyframe, so a viewer arriving after the
+	/// gap starts there.
+	pub fn pause(&mut self) -> Result<(), Error> {
+		let producer = self.producer.as_mut().expect("open until it ends");
+		if let Some(encoder) = &mut self.encoder {
+			producer.publish(&encoder.flush()?)?;
+			encoder.cut()?;
+		}
+		producer.discontinuity()?;
+		Ok(())
+	}
+
+	/// End the track cleanly, after publishing what the encoder still holds.
+	/// A failure aborts the track with the reason.
+	pub fn finish(mut self) -> Result<(), Error> {
+		self.end()
+	}
+
+	/// End the track, failed with `err` so viewers see why, dropping what the
+	/// encoder still holds.
+	pub fn abort(mut self, err: moq_net::Error) {
+		self.encoder = None;
+		if let Some(producer) = self.producer.take() {
+			producer.abort(err);
+		}
+	}
+
+	fn end(&mut self) -> Result<(), Error> {
+		let drained = self.drain();
+		let Some(mut producer) = self.producer.take() else {
+			return drained;
+		};
+		let result = drained.and_then(|()| Ok(producer.finish()?));
+		if let Err(err) = &result {
+			producer.abort(moq_net::Error::Transport(err.to_string()));
+		}
+		result
+	}
+}
+
+impl<E: Encode> Drop for Encoding<E> {
+	fn drop(&mut self) {
+		let _ = self.end();
+	}
+}
+
+/// A captured source's video, encoded frame by frame as it is shown.
+pub(crate) struct Video {
+	track: Encoding,
 	config: moq_video::encode::Config,
-	/// Opened on the first frame, and reopened when the picture's size or color
-	/// space changes, which moves the rendition to a new track.
-	encoder: Option<moq_video::encode::Encoder>,
 	clock: moq_mux::Clock,
 	/// Where the capture's private timeline starts on the studio clock, in
 	/// microseconds, taken at the first frame.
@@ -243,15 +373,16 @@ impl Video {
 			.with_hls_hint(config.gop.duration(config.framerate));
 		let producer = moq_video::encode::Producer::new(listing.broadcast.clone(), reserved, rendition)?;
 		Ok(Self {
-			producer: Some(producer),
+			track: Encoding::new(producer),
 			config,
-			encoder: None,
 			clock: listing.studio.clock(),
 			epoch: None,
 		})
 	}
 
-	/// Encode and publish `frame`, restamping it onto the studio clock.
+	/// Encode and publish `frame`, restamping it onto the studio clock. The
+	/// encoder opens on the first frame, and reopens when the picture's size or
+	/// color space changes, which moves the rendition to a new track.
 	#[cfg_attr(
 		not(feature = "capture"),
 		allow(dead_code, reason = "only capture sources encode video")
@@ -269,29 +400,17 @@ impl Video {
 			self.config.width = size.width;
 			self.config.height = size.height;
 			self.config.color = color;
-			self.drain()?;
+			// Before the next one opens, so a GPU at its session cap has room.
+			self.track.drain()?;
 		}
-		let encoder = match &mut self.encoder {
-			Some(encoder) => encoder,
-			None => self.encoder.insert(moq_video::encode::Encoder::new(&self.config)?),
-		};
-		let encoded = if frame.size() == size {
-			encoder.encode(frame)?
+		if !self.track.is_open() {
+			self.track.open(moq_video::encode::Encoder::new(&self.config)?)?;
+		}
+		if frame.size() == size {
+			self.track.encode(frame)
 		} else {
-			encoder.encode(&frame.resize(size, &Default::default())?)?
-		};
-		self.producer.as_mut().expect("open until it ends").publish(&encoded)?;
-		Ok(())
-	}
-
-	/// Publish what the encoder still holds and close it, so a pipelined
-	/// backend's last pictures are not lost when the encoder is replaced or the
-	/// track ends.
-	fn drain(&mut self) -> Result<(), Error> {
-		if let (Some(encoder), Some(producer)) = (self.encoder.take(), &mut self.producer) {
-			producer.publish(&encoder.finish()?)?;
+			self.track.encode(&frame.resize(size, &Default::default())?)
 		}
-		Ok(())
 	}
 
 	/// End the track, failed with `err` so viewers see why.
@@ -299,25 +418,8 @@ impl Video {
 		not(feature = "capture"),
 		allow(dead_code, reason = "only capture sources encode video")
 	)]
-	pub(crate) fn abort(mut self, err: &Error) {
-		if let Some(producer) = self.producer.take() {
-			producer.abort(moq_net::Error::Transport(err.to_string()));
-		}
-	}
-}
-
-impl Drop for Video {
-	fn drop(&mut self) {
-		// A capture that ends, or a source removed or edited, ends its track
-		// cleanly rather than leaving subscribers with a dropped one.
-		let drained = self.drain();
-		match (self.producer.take(), drained) {
-			(Some(mut producer), Ok(())) => {
-				let _ = producer.finish();
-			}
-			(Some(producer), Err(err)) => producer.abort(moq_net::Error::Transport(err.to_string())),
-			(None, _) => {}
-		}
+	pub(crate) fn abort(self, err: &Error) {
+		self.track.abort(moq_net::Error::Transport(err.to_string()));
 	}
 }
 
@@ -541,6 +643,125 @@ mod tests {
 			}
 		})
 		.await;
+	}
+
+	/// Holds its newest pictures back the way a pipelined hardware encoder
+	/// does, handing them over only on a flush or finish. openh264, the encoder
+	/// on every machine, holds nothing.
+	struct Pipelined {
+		encoder: moq_video::encode::Encoder,
+		held: Vec<moq_video::encode::Encoded>,
+	}
+
+	impl Pipelined {
+		const DEPTH: usize = 2;
+	}
+
+	impl Encode for Pipelined {
+		fn encode(&mut self, frame: &moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
+			self.held.extend(self.encoder.encode(frame)?);
+			let ready = self.held.len().saturating_sub(Self::DEPTH);
+			Ok(self.held.drain(..ready).collect())
+		}
+
+		fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
+			let mut encoded = std::mem::take(&mut self.held);
+			encoded.extend(self.encoder.flush()?);
+			Ok(encoded)
+		}
+
+		fn finish(mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
+			let mut encoded = std::mem::take(&mut self.held);
+			encoded.extend(self.encoder.finish()?);
+			Ok(encoded)
+		}
+
+		fn cut(&mut self) -> Result<(), moq_video::Error> {
+			self.encoder.cut()
+		}
+	}
+
+	/// A pipelined encoder's last pictures land before a pause's gap rather
+	/// than after it, the picture after the gap opens a group of its own, and
+	/// the pictures it still holds as the track ends are published before the
+	/// track finishes cleanly.
+	#[tokio::test]
+	async fn a_pipelined_encoder_loses_no_pictures() {
+		let (publish, _catalog, consumer) = studio();
+		let claim = publish.claim("program");
+		let listing = Listing::new(&claim, &publish).unwrap();
+		let size = moq_video::Size::new(64, 48);
+		let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+		let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
+		config.kind = moq_video::encode::Kind::Named("openh264".into());
+		let rendition = config.probe().await.unwrap();
+		let producer =
+			moq_video::encode::Producer::new(listing.broadcast.clone(), listing.catalog.reserve(), rendition).unwrap();
+		let (name, rendition) = listing.catalog.snapshot().video.renditions.pop_first().unwrap();
+		// Every group, however far behind the newest, since this reads only once
+		// the track has ended.
+		let mut subscription = moq_net::track::Subscription::default();
+		subscription.max_delay = None;
+		let subscriber = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
+		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
+		let mut reader = moq_mux::container::Consumer::new(subscriber, container);
+
+		let mut track = Encoding::new(producer);
+		let encoder = moq_video::encode::Encoder::new(&config).unwrap();
+		track
+			.open(Pipelined {
+				encoder,
+				held: Vec::new(),
+			})
+			.unwrap();
+		for millis in [0, 33, 66] {
+			track.encode(&gray(size, millis)).unwrap();
+		}
+		track.pause().unwrap();
+		for millis in [500, 533, 566] {
+			track.encode(&gray(size, millis)).unwrap();
+		}
+		track.finish().unwrap();
+
+		/// What a viewer reads, in order.
+		#[derive(Debug, PartialEq)]
+		enum Seen {
+			/// A group opens.
+			Group,
+			/// A picture, at its timestamp in milliseconds.
+			Picture(u128),
+			/// The media stops for a gap.
+			End,
+		}
+		let mut seen = Vec::new();
+		let mut current = None;
+		while let Some(read) = reader.read().await.unwrap() {
+			match read {
+				moq_mux::container::Read::Frame { group, frame } => {
+					if current.replace(group) != Some(group) {
+						seen.push(Seen::Group);
+					}
+					seen.push(Seen::Picture(frame.timestamp.as_micros() / 1000));
+				}
+				moq_mux::container::Read::End { .. } => seen.push(Seen::End),
+				moq_mux::container::Read::Gap { .. } => panic!("pictures went missing"),
+			}
+		}
+		use Seen::*;
+		assert_eq!(
+			seen,
+			[
+				Group,
+				Picture(0),
+				Picture(33),
+				Picture(66),
+				End,
+				Group,
+				Picture(500),
+				Picture(533),
+				Picture(566),
+			]
+		);
 	}
 
 	/// An edited source's replacement owns the listing from the moment it
