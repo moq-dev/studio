@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_scene::browser::{Button, Input, Modifiers};
-use moq_scene::{Collection, Crop, Rect, Source};
+use moq_scene::{Collection, Crop, Layer, Rect, Source};
 
 /// How close in time and space a press must follow the last to count toward a
 /// double or triple click.
@@ -66,19 +66,22 @@ struct Place {
 
 impl Interact {
 	/// Turn this frame's input over `image`, which shows `scene` of
-	/// `collection` under its top layer, into what each page it touches should receive, by page
-	/// name.
+	/// `collection` under its top layer on `canvas`, the main one for `None`,
+	/// into what each page it touches should receive, by page name.
 	pub fn update(
 		&mut self,
 		ui: &egui::Ui,
 		image: egui::Rect,
 		collection: &Collection,
+		canvas: Option<&str>,
 		scene: Option<&str>,
 	) -> Vec<(String, Input)> {
-		let canvas = collection.canvas;
+		let Some(size) = collection.canvas(canvas) else {
+			return Vec::new();
+		};
 		let on_canvas = |pos: egui::Pos2| {
-			let x = (pos.x - image.min.x) / image.width() * canvas.width as f32;
-			let y = (pos.y - image.min.y) / image.height() * canvas.height as f32;
+			let x = (pos.x - image.min.x) / image.width() * size.width as f32;
+			let y = (pos.y - image.min.y) / image.height() * size.height as f32;
 			(x, y)
 		};
 		let hit = |pos: egui::Pos2| -> Option<Hit> {
@@ -86,7 +89,7 @@ impl Interact {
 				return None;
 			}
 			let (x, y) = on_canvas(pos);
-			page_at(collection, scene, x, y)
+			page_at(collection, canvas, scene, x, y)
 		};
 		// Where `pos` falls on the captured page, even off its edges.
 		let on_page = |capture: &Capture, pos: egui::Pos2| -> Option<(i32, i32)> {
@@ -232,7 +235,7 @@ impl Interact {
 					let scale = match unit {
 						egui::MouseWheelUnit::Point => 1.0,
 						egui::MouseWheelUnit::Line => 40.0,
-						egui::MouseWheelUnit::Page => canvas.height as f32,
+						egui::MouseWheelUnit::Page => size.height as f32,
 					};
 					send(
 						&page,
@@ -396,12 +399,16 @@ impl Interact {
 
 /// The topmost visible browser source, or clone of one, at canvas point (`x`,
 /// `y`) in `scene` and the top layer over it, and the point on its page.
-fn page_at(collection: &Collection, scene: Option<&str>, x: f32, y: f32) -> Option<Hit> {
-	let scene = scene.and_then(|name| collection.scene(name));
-	let items = scene.map(|scene| scene.items.as_slice()).unwrap_or_default();
-	items
+fn page_at(collection: &Collection, canvas: Option<&str>, scene: Option<&str>, x: f32, y: f32) -> Option<Hit> {
+	let layer = |scene: Option<&str>| Layer {
+		canvas: canvas.map(str::to_string),
+		scene: scene.map(str::to_string),
+	};
+	let items = |layer: Layer| collection.items(&layer).unwrap_or_default();
+	let scene = scene.map(|scene| items(layer(Some(scene)))).unwrap_or_default();
+	scene
 		.iter()
-		.chain(&collection.top)
+		.chain(items(layer(None)))
 		.rev()
 		.filter(|item| item.visible)
 		.find_map(|item| {
@@ -587,11 +594,12 @@ mod tests {
 			height: 800.0,
 		};
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![item("alerts", fill, true), item("chat", corner, true)],
+			..Scene::new("Main")
 		}];
-		let at =
-			|collection: &Collection, x, y| page_at(collection, Some("Main"), x, y).map(|hit| (hit.page, hit.x, hit.y));
+		let at = |collection: &Collection, x, y| {
+			page_at(collection, None, Some("Main"), x, y).map(|hit| (hit.page, hit.x, hit.y))
+		};
 
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(at(&collection, 960.0, 540.0), Some(("alerts".into(), 400, 300)));
@@ -602,7 +610,7 @@ mod tests {
 			Some(("alerts".into(), 716, 377)),
 			"a hidden page takes no input"
 		);
-		assert!(page_at(&collection, Some("Other"), 1.0, 1.0).is_none());
+		assert!(page_at(&collection, None, Some("Other"), 1.0, 1.0).is_none());
 
 		// The top layer draws over every scene, and a clone shows its source's
 		// page, which runs under the source's name.
@@ -612,7 +620,7 @@ mod tests {
 		collection.top = vec![item("chat copy", corner, true)];
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(
-			page_at(&collection, None, 1720.0, 680.0).map(|hit| hit.page),
+			page_at(&collection, None, None, 1720.0, 680.0).map(|hit| hit.page),
 			Some("chat".into())
 		);
 
@@ -663,7 +671,7 @@ mod tests {
 		};
 		let mut delivered = Vec::new();
 		let mut output = ctx.run_ui(input, |ui| {
-			delivered = interact.update(ui, image, collection, Some("Main"));
+			delivered = interact.update(ui, image, collection, None, Some("Main"));
 		});
 		// Nothing renders, so the font atlas egui uploaded goes nowhere.
 		output.textures_delta.clear();
@@ -695,8 +703,8 @@ mod tests {
 			Item::new("chat", rect)
 		};
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![item(0.0), item(100.0)],
+			..Scene::new("Main")
 		}];
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();
@@ -752,8 +760,8 @@ mod tests {
 			Item::new(source, rect)
 		};
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![item("left", 0.0), item("right", 100.0)],
+			..Scene::new("Main")
 		}];
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();
@@ -845,8 +853,8 @@ mod tests {
 			},
 		);
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![Item::new("chat", Rect::fill(&collection.canvas))],
+			..Scene::new("Main")
 		}];
 		let delivered = frame(
 			&egui::Context::default(),
@@ -903,8 +911,8 @@ mod tests {
 			},
 		);
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![Item::new("chat", Rect::fill(&collection.canvas))],
+			..Scene::new("Main")
 		}];
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();
@@ -958,8 +966,8 @@ mod tests {
 			},
 		);
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![Item::new("chat", Rect::fill(&collection.canvas))],
+			..Scene::new("Main")
 		}];
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();

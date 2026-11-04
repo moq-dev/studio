@@ -100,6 +100,7 @@ impl Studio {
 				runtime,
 				preview,
 				program,
+				view: None,
 				top: false,
 				selection: None,
 				gestures: Gestures::default(),
@@ -131,6 +132,9 @@ impl Studio {
 	}
 }
 
+/// What the canvas picker calls the main canvas.
+const MAIN: &str = "Main";
+
 /// Where the output Listen plays on is kept, per user.
 const SPEAKER: &str = "speaker";
 
@@ -152,8 +156,10 @@ impl eframe::App for Studio {
 		let engine = self.panels.engine.clone();
 		let state = engine.state.lock().unwrap();
 		if let Some(render) = frame.wgpu_render_state() {
-			self.panels.preview.follow(render, state.compositor.preview());
-			self.panels.program.follow(render, state.compositor.program());
+			let view = state.compositor.output(self.panels.view.as_deref());
+			let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
+			self.panels.preview.follow(render, view.preview());
+			self.panels.program.follow(render, view.program());
 		}
 		// Redraw at the canvas rate, so preview and program are live.
 		let framerate = state.compositor.canvas().framerate;
@@ -220,6 +226,9 @@ struct Panels {
 	runtime: tokio::runtime::Handle,
 	preview: Registered,
 	program: Registered,
+	/// The canvas Preview, Program, and Items show: a further one by name, or
+	/// `None` for the main one.
+	view: Option<String>,
 	/// Whether the Items panel shows the top layer rather than the scene in
 	/// preview.
 	top: bool,
@@ -599,14 +608,49 @@ impl Panels {
 		self.renaming = None;
 	}
 
-	/// The layer the Items panel shows, and new sources are placed in.
+	/// The layer the Items panel shows, and new sources are placed in, on the
+	/// canvas shown.
 	fn layer(&self, state: &State) -> Result<Layer, String> {
-		if self.top {
-			return Ok(Layer::Top);
+		let layer = match (self.top, state.compositor.preview_scene()) {
+			(true, _) => Layer::top(),
+			(false, Some(name)) => Layer::scene(name),
+			(false, None) => return Err("Pick a scene to edit what it shows.".into()),
+		};
+		Ok(layer.on(self.view.clone()))
+	}
+
+	/// The canvas Preview, Program, and Items show, and its size: the main
+	/// one once a further one shown is removed.
+	fn view(&mut self, state: &State) -> Canvas {
+		if let Some(canvas) = state.collection().canvas(self.view.as_deref()) {
+			return canvas;
 		}
-		match state.compositor.preview_scene() {
-			Some(name) => Ok(Layer::Scene(name.to_string())),
-			None => Err("Pick a scene to edit what it shows.".into()),
+		self.view = None;
+		self.deselect_item();
+		state.collection().canvas
+	}
+
+	/// Pick which canvas Preview, Program, and Items show.
+	fn pick_view(&mut self, ui: &mut Ui, collection: &Collection) {
+		if collection.canvases.is_empty() {
+			return;
+		}
+		let name = |view: &Option<String>| view.clone().unwrap_or_else(|| MAIN.to_string());
+		let mut view = self.view.clone();
+		egui::ComboBox::from_id_salt("view")
+			.selected_text(name(&view))
+			.show_ui(ui, |ui| {
+				let views = std::iter::once(None).chain(collection.canvases.keys().cloned().map(Some));
+				for option in views {
+					let label = name(&option);
+					ui.selectable_value(&mut view, option, label);
+				}
+			})
+			.response
+			.on_hover_text("The canvas preview and program show, and the items edited are on");
+		if view != self.view {
+			self.view = view;
+			self.deselect_item();
 		}
 	}
 
@@ -709,8 +753,9 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let canvas = state.collection().canvas;
+		let canvas = self.view(&state);
 		ui.horizontal(|ui| {
+			self.pick_view(ui, state.collection());
 			ui.label(format!(
 				"Preview: {}",
 				state.compositor.preview_scene().unwrap_or("nothing")
@@ -744,7 +789,9 @@ impl Panels {
 			let image = picture(ui, self.preview.id, canvas, egui::Sense::hover()).rect;
 			let scene = state.compositor.preview_scene();
 			self.rebind(&state.sources);
-			let delivered = self.interact.update(ui, image, state.collection(), scene);
+			let delivered = self
+				.interact
+				.update(ui, image, state.collection(), self.view.as_deref(), scene);
 			deliver(&state.sources, delivered);
 			self.rebind(&state.sources);
 			return;
@@ -774,7 +821,7 @@ impl Panels {
 		}
 
 		let Ok(layer) = self.layer(state) else { return Ok(()) };
-		let Some(items) = state.collection().items(&layer).cloned() else {
+		let Some(items) = state.collection().items(&layer).map(<[Item]>::to_vec) else {
 			return Ok(());
 		};
 		let selected = match &self.selection {
@@ -842,7 +889,11 @@ impl Panels {
 		}
 
 		// Drawn from the collection and selection as this frame left them.
-		let items = state.collection().items(&layer).cloned().unwrap_or_default();
+		let items = state
+			.collection()
+			.items(&layer)
+			.map(<[Item]>::to_vec)
+			.unwrap_or_default();
 		let selected = match &self.selection {
 			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
 			_ => None,
@@ -877,7 +928,7 @@ impl Panels {
 	fn program(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
-		let canvas = state.collection().canvas;
+		let canvas = self.view(&state);
 		let transition = state.collection().transition;
 		let mut next = transition;
 		let mut gesture = None;
@@ -1056,7 +1107,7 @@ impl Panels {
 
 	/// Keep a selected item of the scene renamed from `from` selected.
 	fn renamed(&mut self, from: &str, to: &str) {
-		if let Some(Selection::Item(Layer::Scene(scene), _)) = &mut self.selection
+		if let Some(Selection::Item(Layer { scene: Some(scene), .. }, _)) = &mut self.selection
 			&& scene == from
 		{
 			*scene = to.to_string();
@@ -1121,12 +1172,12 @@ impl Panels {
 				return;
 			}
 		};
+		let canvas = self.view(&state);
 		let collection = state.collection();
-		let Some(items) = collection.items(&layer).cloned() else {
+		let Some(items) = collection.items(&layer).map(<[Item]>::to_vec) else {
 			ui.label(format!("There is no {layer}."));
 			return;
 		};
-		let canvas = collection.canvas;
 		let mut action = None;
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2719,7 +2770,10 @@ fn add(
 		!state.collection().sources.contains_key(&name),
 		"there is already a source named `{name}`"
 	);
-	let canvas = state.collection().canvas;
+	let canvas = layer
+		.as_ref()
+		.and_then(|layer| state.collection().canvas(layer.canvas.as_deref()));
+	let canvas = canvas.unwrap_or(state.collection().canvas);
 	let place = source.has_video();
 	// A page or overlay, or a clone of one, lands at its own size, pixel for
 	// pixel; anything else fills the canvas.
@@ -2740,7 +2794,7 @@ fn add(
 		draft.set_source(&name, Some(source))?;
 		draft.set_video(&name, video)?;
 		if place && let Some(layer) = layer {
-			let index = draft.collection().items(&layer).map_or(0, Vec::len);
+			let index = draft.collection().items(&layer).map_or(0, <[Item]>::len);
 			draft.insert_item(&layer, index, Item::new(name.clone(), rect))?;
 		}
 		Ok(())
@@ -2849,17 +2903,16 @@ struct Drag {
 /// How far, in points on screen, the pointer reaches to an edge or a line.
 const REACH: f32 = 8.0;
 
-/// The visible items of the scene in preview and the top layer, other than
-/// the one at `index` of `layer`: what a dragged item snaps to.
+/// The visible items of the scene in preview and the top layer on `layer`'s
+/// canvas, other than the one at `index` of `layer`: what a dragged item snaps
+/// to.
 fn others(state: &State, layer: &Layer, index: usize) -> Vec<Rect> {
-	let scene = state
-		.compositor
-		.preview_scene()
-		.map(|name| Layer::Scene(name.to_string()));
+	let scene = state.compositor.preview_scene().map(Layer::scene);
 	let collection = state.collection();
 	let mut rects = Vec::new();
-	for shown in scene.into_iter().chain([Layer::Top]) {
-		let items = collection.items(&shown).map_or(&[][..], Vec::as_slice);
+	for shown in scene.into_iter().chain([Layer::top()]) {
+		let shown = shown.on(layer.canvas.clone());
+		let items = collection.items(&shown).unwrap_or_default();
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == *layer && at == index) {
 				rects.push(item.rect);

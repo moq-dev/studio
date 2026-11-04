@@ -1,4 +1,4 @@
-//! Draw scenes onto the canvas on the GPU: a preview, a program, and the
+//! Draw scenes onto each canvas on the GPU: a preview, a program, and the
 //! transition between them.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -16,36 +16,32 @@ use crate::source::{self, Sources};
 /// `moq_video::render` produces and what its exporter hands an encoder.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Draws a [`Collection`]'s scenes onto its canvas: one texture for the scene
-/// in preview, one for the scene on program, and the [`Transition`] from one
-/// to the other.
+/// Draws a [`Collection`]'s scenes onto each of its canvases: one texture for
+/// the scene in preview, one for the scene on program, and the [`Transition`]
+/// from one to the other.
 ///
-/// Both textures are plain [`wgpu::Texture`]s on the caller's device, so a UI
+/// The textures are plain [`wgpu::Texture`]s on the caller's device, so a UI
 /// shows them without a copy and an encoder reads the program from the same
-/// memory. [`render`](Self::render) redraws both from the newest picture each
+/// memory. [`render`](Self::render) redraws them from the newest picture each
 /// source has, so a source that stalls repeats its last picture rather than
-/// holding up the canvas.
+/// holding up the canvas. Each source's picture is uploaded once however many
+/// canvases show it, and a canvas draws only the items it places.
 ///
 /// Pixels are blended in the gamma-encoded space sources arrive in, as a
 /// broadcast switcher and CSS do, so a 50% fade is a 50% mix of the stored
 /// values.
 ///
-/// A transition runs on the clock [`render`](Self::render) is given, so every
-/// output drawn from the program, such as the encoder and a recording, sees the
-/// same frame of it.
+/// The canvases are linked: one scene is in preview and one on program on
+/// every canvas, and a transition runs on each at once, on the clock
+/// [`render`](Self::render) is given, so every output drawn from a program,
+/// such as the encoder and a recording, sees the same frame of it.
 pub struct Compositor {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
-	canvas: Canvas,
 	effects: Effects,
 
-	preview: Target,
-	program: Target,
-	/// The scene coming in, drawn whole so it fades, slides, or is uncovered
-	/// as one picture rather than item by item.
-	incoming: Target,
-	/// The scene going out, drawn whole to slide it off the canvas.
-	outgoing: Target,
+	main: Output,
+	extras: BTreeMap<String, Output>,
 
 	layers: HashMap<String, Layer>,
 	/// Lays out and paints overlays, started with the first one.
@@ -53,6 +49,49 @@ pub struct Compositor {
 	preview_scene: Option<String>,
 	program_scene: Option<String>,
 	switch: Option<Switch>,
+}
+
+/// One canvas's preview and program, as of the last
+/// [`render`](Compositor::render).
+pub struct Output {
+	canvas: Canvas,
+	preview: Target,
+	program: Target,
+	/// The scene coming in, drawn whole so it fades, slides, or is uncovered
+	/// as one picture rather than item by item.
+	incoming: Target,
+	/// The scene going out, drawn whole to slide it off the canvas.
+	outgoing: Target,
+}
+
+impl Output {
+	fn new(device: &wgpu::Device, effects: &Effects, canvas: Canvas) -> Self {
+		let target = |label| Target::new(device, effects, canvas, label);
+		Self {
+			canvas,
+			preview: target("moq-scene preview"),
+			program: target("moq-scene program"),
+			incoming: target("moq-scene incoming"),
+			outgoing: target("moq-scene outgoing"),
+		}
+	}
+
+	/// The canvas this draws.
+	pub fn canvas(&self) -> Canvas {
+		self.canvas
+	}
+
+	/// The scene in preview.
+	pub fn preview(&self) -> &wgpu::Texture {
+		&self.preview.texture
+	}
+
+	/// The program. Created with `COPY_SRC | TEXTURE_BINDING`, what
+	/// `moq_video::render::export::Exporter::copy` takes to hand it to an
+	/// encoder.
+	pub fn program(&self) -> &wgpu::Texture {
+		&self.program.texture
+	}
 }
 
 /// A transition under way from `from` to the program scene.
@@ -99,23 +138,20 @@ impl effect::Library for Library<'_> {
 }
 
 impl Compositor {
-	/// A compositor drawing `canvas`-sized pictures on `device`.
+	/// A compositor drawing a main canvas of `canvas` on `device`, and no
+	/// further canvas until [`set_canvases`](Self::set_canvases) adds one.
 	///
 	/// Fails if the canvas is invalid or the device cannot hold a texture that
 	/// large.
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, canvas: Canvas) -> Result<Self, Error> {
 		fits(device, canvas)?;
 
-		let effects = Effects::new(device, queue, canvas);
-		let target = |label| Target::new(device, &effects, canvas, label);
+		let effects = Effects::new(device, queue, canvas.width, canvas.height);
 		Ok(Self {
-			preview: target("moq-scene preview"),
-			program: target("moq-scene program"),
-			incoming: target("moq-scene incoming"),
-			outgoing: target("moq-scene outgoing"),
+			main: Output::new(device, &effects, canvas),
+			extras: BTreeMap::new(),
 			device: device.clone(),
 			queue: queue.clone(),
-			canvas,
 			effects,
 			layers: HashMap::new(),
 			overlays: None,
@@ -125,42 +161,80 @@ impl Compositor {
 		})
 	}
 
-	/// The canvas this compositor draws.
+	/// The main canvas.
 	pub fn canvas(&self) -> Canvas {
-		self.canvas
+		self.main.canvas
 	}
 
-	/// Draw `canvas` from the next [`render`](Self::render) on. A new size
-	/// replaces the [`preview`](Self::preview) and [`program`](Self::program)
-	/// textures, and every other texture sized from the canvas, with ones of
-	/// that size, blank until drawn; a transition under way carries on.
+	/// Draw `collection`'s canvases from the next [`render`](Self::render) on:
+	/// its main canvas and each further one. A canvas of a new size gets new
+	/// textures of that size, blank until drawn; a new canvas starts blank,
+	/// and one `collection` no longer has is dropped. A transition under way
+	/// carries on.
 	///
-	/// Fails, changing nothing, if the canvas is invalid or the device cannot
+	/// Fails, changing nothing, if a canvas is invalid or the device cannot
 	/// hold a texture that large.
-	pub fn set_canvas(&mut self, canvas: Canvas) -> Result<(), Error> {
-		fits(&self.device, canvas)?;
-		self.effects.set_canvas(canvas);
-		if canvas.size() != self.canvas.size() {
-			let target = |label| Target::new(&self.device, &self.effects, canvas, label);
-			self.preview = target("moq-scene preview");
-			self.program = target("moq-scene program");
-			self.incoming = target("moq-scene incoming");
-			self.outgoing = target("moq-scene outgoing");
+	pub fn set_canvases(&mut self, collection: &Collection) -> Result<(), Error> {
+		let canvas = collection.canvas;
+		let extras: BTreeMap<&str, Canvas> = collection
+			.canvases
+			.iter()
+			.map(|(name, extra)| (name.as_str(), extra.canvas(canvas.framerate)))
+			.collect();
+		for canvas in std::iter::once(&canvas).chain(extras.values()) {
+			fits(&self.device, *canvas)?;
 		}
-		self.canvas = canvas;
+
+		let width = extras.values().map(|extra| extra.width).fold(canvas.width, u32::max);
+		let height = extras.values().map(|extra| extra.height).fold(canvas.height, u32::max);
+		self.effects.fit(width, height);
+		let (device, effects) = (&self.device, &self.effects);
+		let resize = |output: &mut Output, canvas: Canvas| {
+			if output.canvas.size() == canvas.size() {
+				output.canvas = canvas;
+			} else {
+				*output = Output::new(device, effects, canvas);
+			}
+		};
+		resize(&mut self.main, canvas);
+		self.extras.retain(|name, _| extras.contains_key(name.as_str()));
+		for (name, canvas) in extras {
+			match self.extras.get_mut(name) {
+				Some(output) => resize(output, canvas),
+				None => {
+					self.extras
+						.insert(name.to_string(), Output::new(device, effects, canvas));
+				}
+			}
+		}
 		Ok(())
 	}
 
-	/// The scene in preview, as of the last [`render`](Self::render).
+	/// The scene in preview on the main canvas, as of the last
+	/// [`render`](Self::render).
 	pub fn preview(&self) -> &wgpu::Texture {
-		&self.preview.texture
+		self.main.preview()
 	}
 
-	/// The program output, as of the last [`render`](Self::render). Created
-	/// with `COPY_SRC | TEXTURE_BINDING`, what
-	/// `moq_video::render::export::Exporter::copy` takes to hand it to an encoder.
+	/// The main canvas's program, as of the last [`render`](Self::render). See
+	/// [`Output::program`].
 	pub fn program(&self) -> &wgpu::Texture {
-		&self.program.texture
+		self.main.program()
+	}
+
+	/// The canvas `canvas` names, the main one for `None`, as of the last
+	/// [`render`](Self::render); `None` for a canvas it does not draw.
+	pub fn output(&self, canvas: Option<&str>) -> Option<&Output> {
+		match canvas {
+			None => Some(&self.main),
+			Some(name) => self.extras.get(name),
+		}
+	}
+
+	/// Every canvas drawn, by name: the main one first, as `None`.
+	pub fn outputs(&self) -> impl Iterator<Item = (Option<&str>, &Output)> {
+		let extras = self.extras.iter().map(|(name, output)| (Some(name.as_str()), output));
+		std::iter::once((None, &self.main)).chain(extras)
 	}
 
 	/// The scene in preview.
@@ -247,11 +321,11 @@ impl Compositor {
 		});
 	}
 
-	/// Draw preview and program as of `now`, from the newest picture each of
-	/// `sources` has.
+	/// Draw preview and program on every canvas as of `now`, from the newest
+	/// picture each of `sources` has.
 	///
 	/// A source whose picture fails to draw keeps its last one and reports why
-	/// through [`error`](Self::error); this fails only when the canvas itself
+	/// through [`error`](Self::error); this fails only when a canvas itself
 	/// cannot be drawn.
 	pub fn render(&mut self, collection: &Collection, sources: &Sources, now: Instant) -> Result<(), Error> {
 		self.update(collection, sources, now);
@@ -271,60 +345,19 @@ impl Compositor {
 			effects: &mut self.effects,
 			library: Library(&self.layers),
 			frame: &mut frame,
+			canvas: None,
+			size: self.main.canvas,
 			prepared: HashMap::new(),
 		};
-
-		// The top layer goes over both outputs, and over a transition rather
-		// than through it, so it stays on across the switch.
-		draw.target(&self.preview);
-		draw.scene(&self.preview, self.preview_scene.as_deref());
-		draw.layer(&self.preview, Place::Top);
-
-		let to = self.program_scene.as_deref();
-		match (&self.switch, linear) {
-			(Some(switch), Some(linear)) => {
-				let from = switch.from.as_deref();
-				let progress = switch.transition.progress(linear);
-				let canvas = Rect::fill(&self.canvas);
-				match switch.transition {
-					Transition::Fade { .. } => {
-						draw.whole(&self.incoming, to);
-						draw.target(&self.program);
-						draw.scene(&self.program, from);
-						draw.place(&self.program, &self.incoming, canvas, canvas, progress);
-					}
-					// Uncovered where a slide would have moved it in.
-					Transition::Wipe { direction, .. } => {
-						draw.whole(&self.incoming, to);
-						draw.target(&self.program);
-						draw.scene(&self.program, from);
-						let (x, y) = offset(direction, progress, &canvas);
-						let (dx, dy) = offset(direction, 1.0, &canvas);
-						let uncovered = shifted(canvas, x - dx, y - dy);
-						draw.place(&self.program, &self.incoming, canvas, uncovered, 1.0);
-					}
-					Transition::Slide { direction, .. } => {
-						draw.whole(&self.incoming, to);
-						draw.whole(&self.outgoing, from);
-						draw.target(&self.program);
-						let (x, y) = offset(direction, progress, &canvas);
-						let (dx, dy) = offset(direction, 1.0, &canvas);
-						draw.place(&self.program, &self.outgoing, shifted(canvas, x, y), canvas, 1.0);
-						let entering = shifted(canvas, x - dx, y - dy);
-						draw.place(&self.program, &self.incoming, entering, canvas, 1.0);
-					}
-					Transition::Move { .. } => {
-						draw.target(&self.program);
-						draw.moving(&self.program, from, to, progress);
-					}
-				}
-			}
-			_ => {
-				draw.target(&self.program);
-				draw.scene(&self.program, to);
-			}
+		let preview = self.preview_scene.as_deref();
+		let program = self.program_scene.as_deref();
+		let switch = self.switch.as_ref().zip(linear);
+		let extras = self.extras.iter().map(|(name, output)| (Some(name.as_str()), output));
+		for (canvas, output) in std::iter::once((None, &self.main)).chain(extras) {
+			draw.canvas = canvas;
+			draw.size = output.canvas;
+			draw.output(output, preview, program, switch);
 		}
-		draw.layer(&self.program, Place::Top);
 
 		self.effects.submit(frame);
 		Ok(())
@@ -448,26 +481,31 @@ impl Compositor {
 		}
 	}
 
-	/// The sources whose pictures preview and program draw: each visible
-	/// item's, and each mask's, through clones.
+	/// The sources whose pictures preview and program draw on any canvas:
+	/// each visible item's, and each mask's, through clones.
 	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
 		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
-		let scenes = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving]
+		let scenes: Vec<Option<String>> = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving]
 			.into_iter()
 			.flatten()
-			.map(|name| Place::Scene(name.to_string()));
+			.map(|name| Some(name.to_string()))
+			.chain([None])
+			.collect();
+		let canvases = std::iter::once(None).chain(self.extras.keys().map(Some));
 		let mut shown = HashSet::new();
-		for place in scenes.chain([Place::Top]) {
-			for item in collection
-				.items(&place)
-				.into_iter()
-				.flatten()
-				.filter(|item| item.visible)
-			{
-				shown.insert(collection.capture(&item.source));
-				for filter in collection.filters(item) {
-					if let Filter::Mask { source, .. } = filter {
-						shown.insert(collection.capture(source));
+		for canvas in canvases {
+			for scene in &scenes {
+				let place = Place {
+					canvas: canvas.cloned(),
+					scene: scene.clone(),
+				};
+				let items = collection.items(&place).unwrap_or_default();
+				for item in items.iter().filter(|item| item.visible) {
+					shown.insert(collection.capture(&item.source));
+					for filter in collection.filters(item) {
+						if let Filter::Mask { source, .. } = filter {
+							shown.insert(collection.capture(source));
+						}
 					}
 				}
 			}
@@ -603,20 +641,95 @@ struct Draw<'a> {
 	effects: &'a mut Effects,
 	library: Library<'a>,
 	frame: &'a mut Frame,
+	/// The canvas drawn now: a further one by name, or `None` for the main one.
+	canvas: Option<&'a str>,
+	/// Its size and frame rate.
+	size: Canvas,
 	/// Each item, filtered once though it is drawn onto several targets.
 	prepared: HashMap<(Place, usize), Option<Prepared>>,
 }
 
 impl Draw<'_> {
+	/// Draw `output`'s preview, showing `preview`, and its program, showing
+	/// `program`, or `switch` to it, `linear` of its time along.
+	fn output(
+		&mut self,
+		output: &Output,
+		preview: Option<&str>,
+		program: Option<&str>,
+		switch: Option<(&Switch, f32)>,
+	) {
+		let top = self.place(None);
+		// The top layer goes over both outputs, and over a transition rather
+		// than through it, so it stays on across the switch.
+		self.target(&output.preview);
+		self.scene(&output.preview, preview);
+		self.layer(&output.preview, top.clone());
+
+		let to = program;
+		match switch {
+			Some((switch, linear)) => {
+				let from = switch.from.as_deref();
+				let progress = switch.transition.progress(linear);
+				let canvas = Rect::fill(&self.size);
+				match switch.transition {
+					Transition::Fade { .. } => {
+						self.whole(&output.incoming, to);
+						self.target(&output.program);
+						self.scene(&output.program, from);
+						self.picture(&output.program, &output.incoming, canvas, canvas, progress);
+					}
+					// Uncovered where a slide would have moved it in.
+					Transition::Wipe { direction, .. } => {
+						self.whole(&output.incoming, to);
+						self.target(&output.program);
+						self.scene(&output.program, from);
+						let (x, y) = offset(direction, progress, &canvas);
+						let (dx, dy) = offset(direction, 1.0, &canvas);
+						let uncovered = shifted(canvas, x - dx, y - dy);
+						self.picture(&output.program, &output.incoming, canvas, uncovered, 1.0);
+					}
+					Transition::Slide { direction, .. } => {
+						self.whole(&output.incoming, to);
+						self.whole(&output.outgoing, from);
+						self.target(&output.program);
+						let (x, y) = offset(direction, progress, &canvas);
+						let (dx, dy) = offset(direction, 1.0, &canvas);
+						self.picture(&output.program, &output.outgoing, shifted(canvas, x, y), canvas, 1.0);
+						let entering = shifted(canvas, x - dx, y - dy);
+						self.picture(&output.program, &output.incoming, entering, canvas, 1.0);
+					}
+					Transition::Move { .. } => {
+						self.target(&output.program);
+						self.moving(&output.program, from, to, progress);
+					}
+				}
+			}
+			None => {
+				self.target(&output.program);
+				self.scene(&output.program, to);
+			}
+		}
+		self.layer(&output.program, top);
+	}
+
+	/// `scene`'s layout on the canvas drawn now, or its top layer for `None`.
+	fn place(&self, scene: Option<&str>) -> Place {
+		Place {
+			canvas: self.canvas.map(str::to_string),
+			scene: scene.map(str::to_string),
+		}
+	}
+
 	/// Start drawing `target`.
 	fn target(&mut self, target: &Target) {
-		self.frame.target(&target.picture);
+		self.frame.target(&target.picture, self.size);
 	}
 
 	/// Draw `scene`'s items onto `target`. A missing scene draws nothing.
 	fn scene(&mut self, target: &Target, scene: Option<&str>) {
 		if let Some(scene) = scene.filter(|name| self.collection.scene(name).is_some()) {
-			self.layer(target, Place::Scene(scene.to_string()));
+			self.layer(target, self.place(Some(scene)));
 		}
 	}
 
@@ -628,8 +741,8 @@ impl Draw<'_> {
 
 	/// Draw `picture`, a canvas-sized target drawn this render, onto `target`
 	/// stretched over `at`, showing only within `within`, at `opacity`.
-	fn place(&mut self, target: &Target, picture: &Target, at: Rect, within: Rect, opacity: f32) {
-		if let Some(placed) = self.effects.place(&picture.picture, at, within, opacity) {
+	fn picture(&mut self, target: &Target, picture: &Target, at: Rect, within: Rect, opacity: f32) {
+		if let Some(placed) = self.effects.place(self.frame, &picture.picture, at, within, opacity) {
 			self.effects.draw(self.frame, &target.texture, &placed);
 		}
 	}
@@ -638,7 +751,7 @@ impl Draw<'_> {
 	/// filters, and blend mode. A hidden item, a source with no picture yet, or
 	/// a filter whose source has nothing yet draws nothing.
 	fn layer(&mut self, target: &Target, place: Place) {
-		let items = self.collection.items(&place).map_or(&[][..], Vec::as_slice);
+		let items = self.collection.items(&place).unwrap_or_default();
 		for (index, item) in items.iter().enumerate().filter(|(_, item)| item.visible) {
 			self.item(target, &place, index, item);
 		}
@@ -684,9 +797,9 @@ impl Draw<'_> {
 	/// whose blend mode or kinds of filter differ changes look halfway too.
 	fn moving(&mut self, target: &Target, from: Option<&str>, to: Option<&str>, progress: f32) {
 		let collection = self.collection;
-		let items = |scene: Option<&str>| {
-			let scene = scene.and_then(|name| collection.scene(name));
-			scene.map_or(&[][..], |scene| scene.items.as_slice())
+		let items = |scene: Option<&str>| match scene {
+			Some(scene) => collection.items(&self.place(Some(scene))).unwrap_or_default(),
+			None => &[],
 		};
 		let (leaving, entering) = (items(from), items(to));
 
@@ -710,7 +823,7 @@ impl Draw<'_> {
 			slots.into_iter().map(|(to, from)| (from, to)).collect()
 		};
 
-		let place = Place::Scene(to.unwrap_or_default().to_string());
+		let place = self.place(Some(to.unwrap_or_default()));
 		for slot in slots {
 			match slot {
 				(Some(at), None) => {
@@ -848,7 +961,7 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
-	use crate::collection::{Blend, MaskMode, Rgba, Scene};
+	use crate::collection::{Blend, Extra, MaskMode, Rgba, Scene};
 	use crate::source::test::{context, local, start};
 
 	/// A fade over a second.
@@ -898,12 +1011,12 @@ mod tests {
 		};
 		collection.scenes = vec![
 			Scene {
-				name: "red".into(),
 				items: vec![item("red", fill), item("blue", corner)],
+				..Scene::new("red")
 			},
 			Scene {
-				name: "blue".into(),
 				items: vec![item("blue", fill)],
+				..Scene::new("blue")
 			},
 		];
 		collection.validate().unwrap();
@@ -952,11 +1065,11 @@ mod tests {
 		/// The canvas texture's exact RGBA rows: no 4:2:0 round trip, so a test
 		/// compares the stored values.
 		fn read(&mut self, texture: &wgpu::Texture) -> Vec<u8> {
-			let canvas = self.compositor.canvas();
-			let row = (canvas.width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+			let (width, height) = (texture.width(), texture.height());
+			let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
 			let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
 				label: None,
-				size: u64::from(row * canvas.height),
+				size: u64::from(row * height),
 				usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
 				mapped_at_creation: false,
 			});
@@ -976,7 +1089,7 @@ mod tests {
 			self.queue.submit([encoder.finish()]);
 			buffer.map_async(wgpu::MapMode::Read, .., |result| result.unwrap());
 			self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-			let width = canvas.width as usize * 4;
+			let width = width as usize * 4;
 			let mapped = buffer.slice(..).get_mapped_range().unwrap();
 			mapped
 				.chunks_exact(row as usize)
@@ -1148,6 +1261,66 @@ mod tests {
 			studio.render(start + Duration::from_millis(600));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE);
 			assert_eq!(pixel(&studio.preview(), 6, 1), BLACK);
+		})
+		.await;
+	}
+
+	/// A further canvas draws its own layout of each scene and its own top
+	/// layer, from the same upload of each source, and cuts and fades with
+	/// the main canvas. A scene without a layout there shows only the top
+	/// layer, and a canvas the collection drops is no longer drawn.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_further_canvas_draws_its_own_layout() {
+		local(async {
+			let mut collection = collection();
+			let mut tall = Extra::new(4, 8);
+			let bottom = Rect {
+				x: 0.0,
+				y: 4.0,
+				width: 4.0,
+				height: 4.0,
+			};
+			tall.top.push(Item::new("red", bottom));
+			collection.canvases.insert("tall".into(), tall);
+			let top = Rect { y: 0.0, ..bottom };
+			collection.scenes[0]
+				.canvases
+				.insert("tall".into(), vec![Item::new("blue", top)]);
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_canvases(&studio.collection).unwrap();
+			let tall = |studio: &mut Studio| {
+				let texture = studio.compositor.output(Some("tall")).unwrap().program().clone();
+				let rgba = studio.read(&texture);
+				let pixel = |x: usize, y: usize| -> [u8; 4] { rgba[(y * 4 + x) * 4..][..4].try_into().unwrap() };
+				(pixel(1, 1), pixel(1, 6))
+			};
+
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.render(start);
+			assert_eq!(pixel(&studio.program(), 1, 1), RED);
+			assert_eq!(tall(&mut studio), (BLUE, RED));
+			assert_eq!(studio.compositor.layers.len(), 2, "each source is uploaded once");
+
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.transition(FADE, start);
+			studio.render(start + Duration::from_millis(500));
+			let (fading, kept) = tall(&mut studio);
+			assert!(near(fading, [0, 0, 128, 255]), "{fading:?}");
+			assert_eq!(kept, RED, "the top layer does not fade");
+
+			studio.render(start + Duration::from_secs(1));
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+			assert_eq!(tall(&mut studio), (BLACK, RED), "no layout leaves the top layer");
+
+			studio.collection.canvases.clear();
+			studio.collection.scenes[0].canvases.clear();
+			studio.compositor.set_canvases(&studio.collection).unwrap();
+			assert!(studio.compositor.output(Some("tall")).is_none());
+			assert_eq!(studio.compositor.outputs().count(), 1);
 		})
 		.await;
 	}
@@ -1784,9 +1957,9 @@ mod tests {
 				width: 16,
 				..studio.collection.canvas
 			};
-			studio.compositor.set_canvas(wide).unwrap();
-			assert_ne!(studio.compositor.program(), &old, "a new texture");
 			studio.collection.canvas = wide;
+			studio.compositor.set_canvases(&studio.collection).unwrap();
+			assert_ne!(studio.compositor.program(), &old, "a new texture");
 			let fill = Rect::fill(&wide);
 			studio.collection.scenes[0].items = vec![
 				Item::new("red", Rect { width: 8.0, ..fill }),
@@ -1819,9 +1992,20 @@ mod tests {
 				width: limit + 2,
 				..wide
 			};
-			assert!(matches!(studio.compositor.set_canvas(huge), Err(Error::Invalid(_))));
+			let refused = |canvas: Canvas| {
+				let mut collection = studio.collection.clone();
+				collection.canvas = canvas;
+				collection
+			};
+			assert!(matches!(
+				studio.compositor.set_canvases(&refused(huge)),
+				Err(Error::Invalid(_))
+			));
 			let empty = Canvas { width: 0, ..wide };
-			assert!(matches!(studio.compositor.set_canvas(empty), Err(Error::Invalid(_))));
+			assert!(matches!(
+				studio.compositor.set_canvases(&refused(empty)),
+				Err(Error::Invalid(_))
+			));
 			assert_eq!(studio.compositor.canvas(), wide);
 		})
 		.await;

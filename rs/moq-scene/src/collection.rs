@@ -11,8 +11,8 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use crate::Error;
 
-/// Everything a studio composes: the canvas, the sources, and the scenes that
-/// place them.
+/// Everything a studio composes: the canvases, the sources, and the scenes
+/// that place them.
 ///
 /// Saved with [`to_toml`](Self::to_toml) and loaded with
 /// [`from_toml`](Self::from_toml). The file names devices, files, and broadcast
@@ -20,8 +20,14 @@ use crate::Error;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Collection {
-	/// The output every scene is drawn onto.
+	/// The main canvas every scene is drawn onto, whose frame rate every
+	/// canvas shares.
 	pub canvas: Canvas,
+	/// Further canvases by name, such as a portrait one beside a landscape
+	/// main canvas. Each draws its own layout of every scene from the same
+	/// sources, under its own top layer.
+	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+	pub canvases: BTreeMap<String, Extra>,
 	/// How the preview is taken to program, short of a cut.
 	#[serde(default)]
 	pub transition: Transition,
@@ -61,6 +67,7 @@ impl Collection {
 	pub fn new() -> Self {
 		Self {
 			canvas: Canvas::default(),
+			canvases: BTreeMap::new(),
 			transition: Transition::default(),
 			sources: BTreeMap::new(),
 			mixes: Mixes::default(),
@@ -91,33 +98,79 @@ impl Collection {
 		self.scenes.iter().find(|scene| scene.name == name)
 	}
 
-	/// The items of `layer`, or `None` for a scene that does not exist.
-	pub fn items(&self, layer: &Layer) -> Option<&Vec<Item>> {
-		match layer {
-			Layer::Scene(name) => self.scene(name).map(|scene| &scene.items),
-			Layer::Top => Some(&self.top),
+	/// The canvas `canvas` names: the main one for `None`, or a further one,
+	/// at the main canvas's frame rate. `None` for a canvas that does not
+	/// exist.
+	pub fn canvas(&self, canvas: Option<&str>) -> Option<Canvas> {
+		match canvas {
+			None => Some(self.canvas),
+			Some(name) => self.canvases.get(name).map(|extra| extra.canvas(self.canvas.framerate)),
 		}
 	}
 
-	/// The items of `layer`, to edit.
+	/// The items of `layer`, or `None` for a scene or canvas that does not
+	/// exist. A scene with no layout on a further canvas has none there.
+	pub fn items(&self, layer: &Layer) -> Option<&[Item]> {
+		match (&layer.canvas, &layer.scene) {
+			(None, Some(scene)) => self.scene(scene).map(|scene| scene.items.as_slice()),
+			(None, None) => Some(&self.top),
+			(Some(canvas), scene) => {
+				let extra = self.canvases.get(canvas)?;
+				match scene {
+					Some(scene) => {
+						let layout = self.scene(scene)?.canvases.get(canvas);
+						Some(layout.map_or(&[], Vec::as_slice))
+					}
+					None => Some(&extra.top),
+				}
+			}
+		}
+	}
+
+	/// The items of `layer`, to edit. A scene's layout on a further canvas is
+	/// added empty, and [`prune`](Self::prune) drops it once empty again.
 	pub(crate) fn items_mut(&mut self, layer: &Layer) -> Option<&mut Vec<Item>> {
-		match layer {
-			Layer::Scene(name) => self
-				.scenes
-				.iter_mut()
-				.find(|scene| &scene.name == name)
-				.map(|scene| &mut scene.items),
-			Layer::Top => Some(&mut self.top),
+		if let Some(canvas) = &layer.canvas
+			&& !self.canvases.contains_key(canvas)
+		{
+			return None;
+		}
+		match (&layer.canvas, &layer.scene) {
+			(None, None) => Some(&mut self.top),
+			(Some(canvas), None) => self.canvases.get_mut(canvas).map(|extra| &mut extra.top),
+			(canvas, Some(name)) => {
+				let scene = self.scenes.iter_mut().find(|scene| &scene.name == name)?;
+				Some(match canvas {
+					None => &mut scene.items,
+					Some(canvas) => scene.canvases.entry(canvas.clone()).or_default(),
+				})
+			}
 		}
 	}
 
-	/// Every layer: the scenes in order, then the top layer.
+	/// Drop the layouts on further canvases that hold no items, so a scene
+	/// reads the same however its layouts were emptied.
+	pub(crate) fn prune(&mut self) {
+		for scene in &mut self.scenes {
+			scene.canvases.retain(|_, items| !items.is_empty());
+		}
+	}
+
+	/// Every layer: the main canvas's scenes in order, then its top layer,
+	/// then each further canvas's the same way.
 	pub fn layers(&self) -> impl Iterator<Item = (Layer, &[Item])> {
-		let scenes = self
-			.scenes
-			.iter()
-			.map(|scene| (Layer::Scene(scene.name.clone()), scene.items.as_slice()));
-		scenes.chain(std::iter::once((Layer::Top, self.top.as_slice())))
+		let canvases = std::iter::once(None).chain(self.canvases.keys().cloned().map(Some));
+		canvases.flat_map(move |canvas| {
+			let scenes = self.scenes.iter().map(|scene| Some(scene.name.clone()));
+			scenes.chain([None]).map(move |scene| {
+				let layer = Layer {
+					canvas: canvas.clone(),
+					scene,
+				};
+				let items = self.items(&layer).unwrap_or_default();
+				(layer, items)
+			})
+		})
 	}
 
 	/// The source whose capture `name` shows: itself, or what it clones.
@@ -147,6 +200,17 @@ impl Collection {
 	/// source of the kind it reads.
 	pub fn validate(&self) -> Result<(), Error> {
 		self.canvas.validate()?;
+		for (name, extra) in &self.canvases {
+			if name.is_empty() || name.contains('/') {
+				return Err(Error::Invalid(format!(
+					"canvas `{name}` must be named, without a `/`, since its name names its broadcast"
+				)));
+			}
+			extra
+				.canvas(self.canvas.framerate)
+				.validate()
+				.map_err(|err| Error::Invalid(format!("canvas `{name}`: {err}")))?;
+		}
 
 		let mut names = BTreeSet::new();
 		for scene in &self.scenes {
@@ -155,6 +219,16 @@ impl Collection {
 			}
 			if !names.insert(scene.name.as_str()) {
 				return Err(Error::Invalid(format!("two scenes are named `{}`", scene.name)));
+			}
+			if let Some(canvas) = scene
+				.canvases
+				.keys()
+				.find(|canvas| !self.canvases.contains_key(*canvas))
+			{
+				return Err(Error::Invalid(format!(
+					"scene `{}` has a layout on `{canvas}`, which is not a canvas",
+					scene.name
+				)));
 			}
 		}
 		for (layer, items) in self.layers() {
@@ -346,6 +420,41 @@ impl Default for Canvas {
 	}
 }
 
+/// A canvas beside the main one: its size, and the items drawn over every
+/// scene on it. Each scene's layout on it is the scene's own
+/// [`Scene::canvases`] entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Extra {
+	/// Width in pixels. Even, since the encoder subsamples chroma.
+	pub width: u32,
+	/// Height in pixels. Even, since the encoder subsamples chroma.
+	pub height: u32,
+	/// Its top layer, as [`Collection::top`] is the main canvas's.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub top: Vec<Item>,
+}
+
+impl Extra {
+	/// An empty canvas of `width` by `height`.
+	pub fn new(width: u32, height: u32) -> Self {
+		Self {
+			width,
+			height,
+			top: Vec::new(),
+		}
+	}
+
+	/// This canvas drawn `framerate` times a second.
+	pub fn canvas(&self, framerate: u32) -> Canvas {
+		Canvas {
+			width: self.width,
+			height: self.height,
+			framerate,
+		}
+	}
+}
+
 /// How the program changes when the preview is taken to it, short of a cut.
 ///
 /// A fade runs at an even pace; the others ease in and out, so motion starts
@@ -454,9 +563,13 @@ impl Direction {
 pub struct Scene {
 	/// Unique among the collection's scenes.
 	pub name: String,
-	/// What the scene draws, back to front.
+	/// What the scene draws on the main canvas, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
+	/// What the scene draws on each further canvas, by the canvas's name, back
+	/// to front. A canvas without an entry shows only its top layer.
+	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+	pub canvases: BTreeMap<String, Vec<Item>>,
 }
 
 impl Scene {
@@ -465,25 +578,53 @@ impl Scene {
 		Self {
 			name: name.into(),
 			items: Vec::new(),
+			canvases: BTreeMap::new(),
 		}
 	}
 }
 
-/// Where a list of items lives: a scene, or the top layer over every scene.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Layer {
-	/// The scene with this name.
-	Scene(String),
-	/// [`Collection::top`].
-	Top,
+/// Where a list of items lives: a scene's layout, or the top layer over every
+/// scene, on one canvas.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layer {
+	/// A further canvas by name, or `None` for the main canvas.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub canvas: Option<String>,
+	/// The scene, or `None` for the canvas's top layer.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub scene: Option<String>,
+}
+
+impl Layer {
+	/// The scene called `name`, on the main canvas.
+	pub fn scene(name: impl Into<String>) -> Self {
+		Self {
+			canvas: None,
+			scene: Some(name.into()),
+		}
+	}
+
+	/// The main canvas's top layer.
+	pub fn top() -> Self {
+		Self::default()
+	}
+
+	/// The same layer on `canvas` instead.
+	pub fn on(self, canvas: Option<String>) -> Self {
+		Self { canvas, ..self }
+	}
 }
 
 impl fmt::Display for Layer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Scene(name) => write!(f, "scene `{name}`"),
-			Self::Top => write!(f, "the top layer"),
+		match &self.scene {
+			Some(name) => write!(f, "scene `{name}`")?,
+			None => write!(f, "the top layer")?,
+		}
+		match &self.canvas {
+			Some(canvas) => write!(f, " on canvas `{canvas}`"),
+			None => Ok(()),
 		}
 	}
 }
@@ -1720,6 +1861,26 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		let mut collection = example();
 		collection.scenes.push(Scene::new("Scene"));
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+	}
+
+	/// A further canvas is named as a path segment, since it names its
+	/// broadcast, is a size the encoder can take, and is the only canvas a
+	/// scene lays items out on.
+	#[test]
+	fn refuses_a_further_canvas_that_cannot_be() {
+		for (name, width) in [("", 1080), ("a/b", 1080), ("tall", 1081)] {
+			let mut collection = example();
+			collection.canvases.insert(name.into(), Extra::new(width, 1920));
+			assert!(
+				matches!(collection.validate(), Err(Error::Invalid(_))),
+				"{name} {width}"
+			);
+		}
+		let mut collection = example();
+		collection.scenes[0].canvases.insert("tall".into(), Vec::new());
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+		collection.canvases.insert("tall".into(), Extra::new(1080, 1920));
+		collection.validate().unwrap();
 	}
 
 	#[test]

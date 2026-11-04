@@ -288,7 +288,7 @@ mod tests {
 	fn pastes_linked_within_a_collection() {
 		let collection = collection();
 		let clip = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR));
-		let pasted = paste(&collection, &Layer::Top, &clip.to_toml().unwrap(), DIR);
+		let pasted = paste(&collection, &Layer::top(), &clip.to_toml().unwrap(), DIR);
 		assert_eq!(pasted.sources, collection.sources, "no source added");
 		assert_eq!(pasted.top, collection.scenes[0].items);
 	}
@@ -304,7 +304,7 @@ mod tests {
 
 		let mut other = Collection::new();
 		other.sources.insert("cam".into(), color([0, 255, 0, 255]));
-		let pasted = paste(&other, &Layer::Scene("Scene".into()), &text, DIR);
+		let pasted = paste(&other, &Layer::scene("Scene"), &text, DIR);
 		assert_eq!(pasted.sources["cam"], color([0, 255, 0, 255]), "left alone");
 		assert_eq!(pasted.sources["cam 2"], Source::Camera { id: None });
 		assert_eq!(pasted.sources["cam faded"], Source::Clone { source: "cam 2".into() });
@@ -338,7 +338,7 @@ mod tests {
 			.to_toml()
 			.unwrap();
 
-		let pasted = paste(&Collection::new(), &Layer::Top, &text, DIR);
+		let pasted = paste(&Collection::new(), &Layer::top(), &text, DIR);
 		let expected = crate::Audio {
 			exclude: ["Program".to_string()].into(),
 			..audio
@@ -364,7 +364,7 @@ mod tests {
 			.to_toml()
 			.unwrap();
 
-		let home = paste(&collection, &Layer::Top, &text, DIR);
+		let home = paste(&collection, &Layer::top(), &text, DIR);
 		assert_eq!(home.sources, collection.sources, "linked to the same image");
 
 		// However the scene file spells the path.
@@ -375,7 +375,7 @@ mod tests {
 				path: "/shows/one/logo.png".into(),
 			},
 		);
-		let home = paste(&absolute, &Layer::Top, &text, DIR);
+		let home = paste(&absolute, &Layer::top(), &text, DIR);
 		assert_eq!(home.sources, absolute.sources, "linked to the same image");
 
 		let mut other = Collection::new();
@@ -385,7 +385,7 @@ mod tests {
 				path: "logo.png".into(),
 			},
 		);
-		let away = paste(&other, &Layer::Top, &text, "/shows/two");
+		let away = paste(&other, &Layer::top(), &text, "/shows/two");
 		assert_eq!(away.sources["logo"], other.sources["logo"], "another file, left alone");
 		assert_eq!(
 			away.sources["logo 2"],
@@ -433,7 +433,7 @@ mod tests {
 
 		let mut other = Collection::new();
 		other.sources.insert("matte".into(), color([0, 255, 0, 255]));
-		let pasted = paste(&other, &Layer::Top, &text, "/shows/two");
+		let pasted = paste(&other, &Layer::top(), &text, "/shows/two");
 		assert_eq!(pasted.top[0].filters, [mask("matte 2")]);
 		assert_eq!(
 			pasted.sources["grade"],

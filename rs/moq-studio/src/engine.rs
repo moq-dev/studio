@@ -192,7 +192,7 @@ impl State {
 			before.apply(edit)?;
 		}
 		keep_on_air(self.compositor.on_air(), &renames)?;
-		self.compositor.set_canvas(collection.canvas)?;
+		self.compositor.set_canvases(&collection)?;
 		for renames in &renames {
 			self.compositor.rename(renames);
 		}
