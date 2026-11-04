@@ -397,7 +397,8 @@ otherwise.
 or not. With **each source too**, every camera, display, and window that
 publishes a track of its own records into a file of its own beside it,
 `<scene file name> <UTC start time> <source>.mp4`, holding the capture before
-any filter. A source added while recording starts its file then, and one
+any filter. Broadcast sources, guests included, publish no track of the
+studio's, so they get no file of their own. A source added while recording starts its file then, and one
 removed finishes its file then. A recording reads the broadcast the way a
 viewer does, so it shares the live encoders and starts and stops without
 touching what the relay serves. Without `--connect`, or with `--on-demand`,
