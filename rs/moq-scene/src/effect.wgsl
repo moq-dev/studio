@@ -19,7 +19,8 @@ const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 struct Op {
 	kind: vec4<u32>,
 	// MATRIX: unused. CHROMA_KEY: key Cb, key Cr, similarity, smoothness.
-	// LUMA_KEY: min, max, smoothness. LUT: amount, size. MASK: mode.
+	// LUMA_KEY: min, max, smoothness. LUT: amount, size. MASK: mode, and 1 if
+	// the mask is premultiplied.
 	params: vec4<f32>,
 	// MATRIX: applied to straight RGBA. LUT: the domain's max in column 0.
 	matrix: mat4x4<f32>,
@@ -143,7 +144,8 @@ fn coverage(item: vec2<f32>, op: Op) -> f32 {
 	}
 	let color = textureSampleLevel(mask, bilinear, item, 0.0);
 	if op.params.x > 0.5 {
-		return dot(color.rgb, LUMA) * color.a;
+		let rgb = select(color.rgb * color.a, color.rgb, op.params.y > 0.5);
+		return dot(rgb, LUMA);
 	}
 	return color.a;
 }

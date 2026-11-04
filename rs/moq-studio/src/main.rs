@@ -5,6 +5,7 @@
 //! window around them and the program clock that publishes the result.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
@@ -14,6 +15,7 @@ mod devices;
 mod engine;
 mod guests;
 mod health;
+mod interact;
 mod replay;
 mod setup;
 mod snap;
@@ -120,7 +122,13 @@ impl Config {
 	}
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<ExitCode> {
+	// A browser source's helper, and CEF's subprocesses, are this executable
+	// started again.
+	if let Some(code) = moq_scene::browser::child() {
+		return Ok(code);
+	}
+
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
@@ -159,7 +167,9 @@ fn main() -> anyhow::Result<()> {
 
 	let started = Arc::new(OnceLock::new());
 	let ran = run(app, gpu, runtime.handle().clone(), started.clone());
-	let Some(engine) = started.get() else { return ran };
+	let Some(engine) = started.get() else {
+		return ran.map(|()| ExitCode::SUCCESS);
+	};
 	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
 	engine.stop();
@@ -167,7 +177,8 @@ fn main() -> anyhow::Result<()> {
 		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
 	}
 	ran?;
-	saved
+	saved?;
+	Ok(ExitCode::SUCCESS)
 }
 
 /// What the window shows.

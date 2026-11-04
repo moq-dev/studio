@@ -323,6 +323,8 @@ fn reach(sigma: f32) -> f32 {
 pub(crate) struct Picture {
 	view: wgpu::TextureView,
 	bind: wgpu::BindGroup,
+	/// Whether its alpha is premultiplied, as a web page's is.
+	premultiplied: bool,
 }
 
 /// A LUT source's table on the GPU.
@@ -659,7 +661,7 @@ impl Effects {
 	}
 
 	/// `texture`, a source's picture or a canvas-sized target, bound to sample.
-	pub fn picture(&self, texture: &wgpu::Texture) -> Picture {
+	pub fn picture(&self, texture: &wgpu::Texture, premultiplied: bool) -> Picture {
 		let view = texture.create_view(&Default::default());
 		let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
 			label: Some("moq-scene input"),
@@ -675,7 +677,11 @@ impl Effects {
 				},
 			],
 		});
-		Picture { view, bind }
+		Picture {
+			view,
+			bind,
+			premultiplied,
+		}
 	}
 
 	/// Upload a LUT's table.
@@ -825,7 +831,7 @@ impl Effects {
 			area,
 			uv: crop,
 			valid: crop,
-			premultiplied: false,
+			premultiplied: item.picture.premultiplied,
 		};
 
 		let stages: Vec<Stage> = item.filters.iter().map(|filter| Stage::of(filter)).collect();
@@ -859,12 +865,13 @@ impl Effects {
 								MaskMode::Alpha => 0.0,
 								MaskMode::Luminance => 1.0,
 							};
+							let picture = library.picture(source)?;
 							let op = Op {
 								kind: [Op::MASK, 0, 0, 0],
-								params: [mode, 0.0, 0.0, 0.0],
+								params: [mode, f32::from(u8::from(picture.premultiplied)), 0.0, 0.0],
 								..Default::default()
 							};
-							(op, None, Some(library.picture(source)?.view))
+							(op, None, Some(picture.view))
 						}
 						filter => (Op::of(filter).expect("a per-pixel filter"), None, None),
 					};
@@ -1172,7 +1179,7 @@ impl Effects {
 				});
 				Raster {
 					size,
-					picture: self.picture(&texture),
+					picture: self.picture(&texture, true),
 				}
 			}
 		};
