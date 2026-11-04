@@ -485,6 +485,24 @@ pub(crate) struct Effects {
 	used: Vec<Raster>,
 }
 
+/// What a blend mode mixes with, as large as the canvas.
+fn backdrop(device: &wgpu::Device, canvas: Canvas) -> wgpu::Texture {
+	device.create_texture(&wgpu::TextureDescriptor {
+		label: Some("moq-scene backdrop"),
+		size: wgpu::Extent3d {
+			width: canvas.width,
+			height: canvas.height,
+			depth_or_array_layers: 1,
+		},
+		mip_level_count: 1,
+		sample_count: 1,
+		dimension: wgpu::TextureDimension::D2,
+		format: FORMAT,
+		usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+		view_formats: &[],
+	})
+}
+
 impl Effects {
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, canvas: Canvas) -> Self {
 		let texture = |binding, sample_type, view_dimension| wgpu::BindGroupLayoutEntry {
@@ -604,20 +622,7 @@ impl Effects {
 		};
 		let empty_2d = empty(wgpu::TextureDimension::D2, FORMAT);
 		let empty_3d = empty(wgpu::TextureDimension::D3, wgpu::TextureFormat::Rgba32Float);
-		let backdrop = device.create_texture(&wgpu::TextureDescriptor {
-			label: Some("moq-scene backdrop"),
-			size: wgpu::Extent3d {
-				width: canvas.width,
-				height: canvas.height,
-				depth_or_array_layers: 1,
-			},
-			mip_level_count: 1,
-			sample_count: 1,
-			dimension: wgpu::TextureDimension::D2,
-			format: FORMAT,
-			usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-			view_formats: &[],
-		});
+		let backdrop = backdrop(device, canvas);
 
 		let alignment = u64::from(device.limits().min_uniform_buffer_offset_alignment);
 		let stride = (size_of::<Uniform>() as u64).next_multiple_of(alignment);
@@ -643,6 +648,16 @@ impl Effects {
 			free: Vec::new(),
 			used: Vec::new(),
 		}
+	}
+
+	/// Draw onto `canvas` from the next frame on, reallocating what is sized
+	/// from it.
+	pub fn set_canvas(&mut self, canvas: Canvas) {
+		if canvas.width != self.canvas.width || canvas.height != self.canvas.height {
+			self.backdrop = backdrop(&self.device, canvas);
+			self.backdrop_view = self.backdrop.create_view(&Default::default());
+		}
+		self.canvas = canvas;
 	}
 
 	/// `texture`, a source's picture or a canvas-sized target, bound to sample.

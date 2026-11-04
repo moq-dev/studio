@@ -12,7 +12,9 @@ captures or decodes once however many canvases use it.
 Each canvas publishes its own broadcast, because different content needs a
 different name. Each canvas has its own top layer, which the collection's
 `top` holds for the one canvas today. Transitions are per canvas, so a scene change cuts every
-canvas together unless the creator unlinks one.
+canvas together unless the creator unlinks one. Reuse the one canvas's resize
+path per canvas: the compositor reallocates on a new canvas, and the program
+video publishes a rendition at a time, ending one and listing the next.
 
 Benchmark source count against canvas count, including sparse reuse. Per-canvas
 cost must grow only with the sources that canvas uses, never with the whole

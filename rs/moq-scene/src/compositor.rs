@@ -1,7 +1,7 @@
 //! Draw scenes onto the canvas on the GPU: a preview, a program, and the fade
 //! between them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use kio::clock::Instant;
@@ -90,15 +90,10 @@ impl effect::Library for Library<'_> {
 impl Compositor {
 	/// A compositor drawing `canvas`-sized pictures on `device`.
 	///
-	/// Fails if the device cannot hold a texture that large.
+	/// Fails if the canvas is invalid or the device cannot hold a texture that
+	/// large.
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, canvas: Canvas) -> Result<Self, Error> {
-		let limit = device.limits().max_texture_dimension_2d;
-		if canvas.width > limit || canvas.height > limit {
-			return Err(Error::Invalid(format!(
-				"canvas {}x{} exceeds this GPU's {limit}px texture limit",
-				canvas.width, canvas.height
-			)));
-		}
+		fits(device, canvas)?;
 
 		let effects = Effects::new(device, queue, canvas);
 		let target = |label| Target::new(device, &effects, canvas, label);
@@ -120,6 +115,26 @@ impl Compositor {
 	/// The canvas this compositor draws.
 	pub fn canvas(&self) -> Canvas {
 		self.canvas
+	}
+
+	/// Draw `canvas` from the next [`render`](Self::render) on. A new size
+	/// replaces the [`preview`](Self::preview) and [`program`](Self::program)
+	/// textures, and every other texture sized from the canvas, with ones of
+	/// that size, blank until drawn; a fade under way carries on.
+	///
+	/// Fails, changing nothing, if the canvas is invalid or the device cannot
+	/// hold a texture that large.
+	pub fn set_canvas(&mut self, canvas: Canvas) -> Result<(), Error> {
+		fits(&self.device, canvas)?;
+		self.effects.set_canvas(canvas);
+		if canvas.size() != self.canvas.size() {
+			let target = |label| Target::new(&self.device, &self.effects, canvas, label);
+			self.preview = target("moq-scene preview");
+			self.program = target("moq-scene program");
+			self.incoming = target("moq-scene incoming");
+		}
+		self.canvas = canvas;
+		Ok(())
 	}
 
 	/// The scene in preview, as of the last [`render`](Self::render).
@@ -154,9 +169,49 @@ impl Compositor {
 		self.fade.is_some()
 	}
 
+	/// The scenes program draws: the one on program, and the one a fade under
+	/// way leaves.
+	pub fn on_air(&self) -> impl Iterator<Item = &str> {
+		let leaving = self.fade.as_ref().and_then(|fade| fade.from.as_deref());
+		self.program_scene.as_deref().into_iter().chain(leaving)
+	}
+
 	/// Put the scene called `scene` in preview, or nothing.
 	pub fn set_preview(&mut self, scene: Option<String>) {
 		self.preview_scene = scene;
+	}
+
+	/// Follow each renamed scene to its new name, wherever it is: in preview,
+	/// on program, or fading out, and drop each removed one, so a scene that
+	/// later takes its name does not go on program without a cut. `renames`
+	/// maps each old name to its new one, or `None`, as
+	/// [`Collection::renames`] reads them, and each scene is looked up once, so
+	/// a name one scene gave up and another took is not followed twice.
+	pub fn rename(&mut self, renames: &BTreeMap<String, Option<String>>) {
+		for scene in self.scenes() {
+			if let Some(to) = scene.as_ref().and_then(|name| renames.get(name)) {
+				*scene = to.clone();
+			}
+		}
+	}
+
+	/// Drop each scene `collection` does not have from preview, program, and a
+	/// fade under way, such as one a reloaded file left out, so a scene that
+	/// later takes its name does not go on program without a cut.
+	pub fn retain(&mut self, collection: &Collection) {
+		for scene in self.scenes() {
+			if scene.as_deref().is_some_and(|name| collection.scene(name).is_none()) {
+				*scene = None;
+			}
+		}
+	}
+
+	/// The scenes followed by name: in preview, on program, and fading out.
+	fn scenes(&mut self) -> impl Iterator<Item = &mut Option<String>> {
+		let fading = self.fade.as_mut().map(|fade| &mut fade.from);
+		[&mut self.preview_scene, &mut self.program_scene]
+			.into_iter()
+			.chain(fading)
 	}
 
 	/// Put the preview on program at once, ending any fade.
@@ -285,6 +340,20 @@ impl Compositor {
 			}
 		}
 	}
+}
+
+/// Refuse an invalid canvas, or one larger than `device` can hold as a
+/// texture.
+fn fits(device: &wgpu::Device, canvas: Canvas) -> Result<(), Error> {
+	canvas.validate()?;
+	let limit = device.limits().max_texture_dimension_2d;
+	if canvas.width > limit || canvas.height > limit {
+		return Err(Error::Invalid(format!(
+			"canvas {}x{} exceeds this GPU's {limit}px texture limit",
+			canvas.width, canvas.height
+		)));
+	}
+	Ok(())
 }
 
 /// One render's draws onto its targets.
@@ -1155,6 +1224,110 @@ mod tests {
 				assert_eq!(pixel(&program, 6, y), RED, "row {y}");
 			}
 			assert_eq!(pixel(&program, 1, 4), RED, "an offline mask hides the item");
+		})
+		.await;
+	}
+
+	/// A resize draws the next frame on textures of the new size, with items
+	/// where their pixels say, a blend mode and a blur reaching the canvas's
+	/// new width, and a canvas the GPU cannot hold changes nothing.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_resize_draws_the_new_canvas() {
+		local(async {
+			let mut collection = collection();
+			collection.sources.insert(
+				"tint".into(),
+				Source::Color {
+					color: Rgba([0, 0, 255, 255]),
+				},
+			);
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.render(Instant::now());
+			let old = studio.compositor.program().clone();
+
+			let wide = Canvas {
+				width: 16,
+				..studio.collection.canvas
+			};
+			studio.compositor.set_canvas(wide).unwrap();
+			assert_ne!(studio.compositor.program(), &old, "a new texture");
+			studio.collection.canvas = wide;
+			let fill = Rect::fill(&wide);
+			studio.collection.scenes[0].items = vec![
+				Item::new("red", Rect { width: 8.0, ..fill }),
+				Item {
+					blend: Blend::Screen,
+					filters: vec![Filter::Blur { radius: 1.0 }],
+					..Item::new("tint", fill)
+				},
+			];
+			studio.render(Instant::now());
+			let program = studio.program();
+			assert_eq!(program.len(), 16 * 8 * 4);
+			let pixel = |x: usize, y: usize| -> [u8; 4] {
+				let at = (y * 16 + x) * 4;
+				program[at..at + 4].try_into().unwrap()
+			};
+			assert!(
+				near(pixel(4, 4), [255, 0, 255, 255]),
+				"screened over red: {:?}",
+				pixel(4, 4)
+			);
+			assert!(
+				near(pixel(12, 4), BLUE),
+				"screened past the old width: {:?}",
+				pixel(12, 4)
+			);
+
+			let limit = studio.compositor.device.limits().max_texture_dimension_2d;
+			let huge = Canvas {
+				width: limit + 2,
+				..wide
+			};
+			assert!(matches!(studio.compositor.set_canvas(huge), Err(Error::Invalid(_))));
+			let empty = Canvas { width: 0, ..wide };
+			assert!(matches!(studio.compositor.set_canvas(empty), Err(Error::Invalid(_))));
+			assert_eq!(studio.compositor.canvas(), wide);
+		})
+		.await;
+	}
+
+	/// A renamed scene stays in preview, on program, and in the fade under way,
+	/// even when another scene takes its old name in the same edit, and a scene
+	/// the collection lost leaves them.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_renamed_scene_stays_where_it_is() {
+		local(async {
+			let mut studio = Studio::new(collection()).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.fade(Duration::from_secs(1), start);
+
+			// `blue` takes the name `red` gives up, which is followed once.
+			let mut draft = studio.collection.draft("Rename");
+			draft.rename_scene(0, "crimson").unwrap();
+			draft.rename_scene(1, "red").unwrap();
+			let edit = draft.finish().unwrap();
+			studio.compositor.rename(&studio.collection.renames(&edit));
+			studio.collection.apply(&edit).unwrap();
+			assert_eq!(studio.compositor.preview_scene(), Some("red"));
+			assert_eq!(studio.compositor.program_scene(), Some("red"));
+			studio.render(start + Duration::from_millis(500));
+			let actual = pixel(&studio.program(), 1, 1);
+			assert!(near(actual, [128, 0, 127, 255]), "still fading from red: {actual:?}");
+
+			// A scene the collection no longer has, as a reload can leave, is
+			// dropped, so one that later takes its name is not drawn unasked.
+			studio.collection.scenes.retain(|scene| scene.name != "red");
+			studio.compositor.retain(&studio.collection);
+			assert_eq!(studio.compositor.preview_scene(), None);
+			assert_eq!(studio.compositor.program_scene(), None);
 		})
 		.await;
 	}

@@ -47,7 +47,8 @@ pub struct Report {
 	pub relays: Vec<Relay>,
 	pub uplink: Uplink,
 	pub viewers: Viewers,
-	/// Each track of the broadcast, in catalog order.
+	/// Each track of the broadcast in catalog order: the program's, then each
+	/// source's by source name.
 	pub tracks: Vec<Track>,
 	/// What is wrong, worst first, each naming its cause.
 	pub problems: Vec<Problem>,
@@ -84,7 +85,9 @@ pub struct Uplink {
 	pub rtt: Option<Duration>,
 	/// What the congestion controller estimates the connection can carry.
 	pub capacity: Option<Rate>,
-	/// The media every track wrote over the last interval.
+	/// The media the program's tracks wrote over the last interval. Source
+	/// tracks are left out: they encode whether or not anyone pulls them, and
+	/// the relay uploads only what someone does.
 	pub media: Option<Rate>,
 	/// Transport bytes lost per media byte written over the last interval.
 	pub loss: Option<f64>,
@@ -135,6 +138,8 @@ pub struct Viewer {
 /// One track of the broadcast.
 #[derive(Debug)]
 pub struct Track {
+	/// The source whose own track it is, or `None` for the program's.
+	pub source: Option<String>,
 	/// Its catalog rendition ID.
 	pub id: String,
 	/// What it carries, such as `video H.264 1920x1080`.
@@ -151,6 +156,16 @@ pub struct Track {
 	pub verdict: Verdict,
 	/// The longest it took any of them from the program clock to arrival.
 	pub latency: Option<Duration>,
+}
+
+impl Track {
+	/// How a problem names it.
+	fn name(&self) -> String {
+		match &self.source {
+			Some(source) => format!("source `{source}`'s {}", self.label),
+			None => self.label.clone(),
+		}
+	}
 }
 
 /// Something wrong with the stream, and why.
@@ -196,6 +211,8 @@ pub struct Publisher {
 	pub relays: Vec<Link>,
 	pub feedback: Feedback,
 	pub watching: Watching,
+	/// Where the sources publish their own tracks, for what those wrote.
+	pub sources: moq_scene::publish::Publish,
 }
 
 /// The connection to one relay.
@@ -217,6 +234,7 @@ struct Previous {
 	at: Instant,
 	local: Local,
 	report: Option<health::Report<hang::stats::Snapshot>>,
+	sources: Option<health::Report<hang::stats::Snapshot>>,
 	/// Which relay's link the report's transport readings came from.
 	serving: Option<usize>,
 }
@@ -240,33 +258,39 @@ impl Sampler {
 
 		let mut report = Report::default();
 		let mut graded = Graded::default();
-		let mut current = None;
+		let (mut current, mut sources) = (None, None);
 		let mut serving = None;
 		if let Some(publisher) = &self.publisher {
 			report.relays = publisher.relays.iter().map(relay).collect();
 			serving = report.relays.iter().position(|relay| relay.state == State::Connected);
 			let link = serving.map(|index| &publisher.relays[index]);
-			let snapshot = snapshot(publisher, link.map(|link| &link.monitor));
-			let ours = health::Report::new(publisher.observer.clone(), snapshot);
-			let mut sample = health::Sample::new(&ours, Duration::ZERO);
+			let ours = health::Report::new(
+				publisher.observer.clone(),
+				snapshot(publisher, link.map(|link| &link.monitor)),
+			);
 			// Another relay's link counted its transport from another start.
-			let previous_report = previous
+			let previous_ours = previous
 				.as_ref()
 				.filter(|previous| previous.serving == serving)
 				.and_then(|previous| previous.report.as_ref());
-			if let (Some(previous), Some(interval)) = (previous_report, interval) {
-				sample = sample.with_previous(previous, interval);
-			}
-			let graded_ours = health::publisher(&sample, &self.thresholds);
+			let graded_ours = self.grade(&ours, previous_ours.zip(interval));
 			report.uplink = uplink(&ours.snapshot, &graded_ours, local.watched);
 			report.uplink.relay = link.map(|link| link.endpoint.clone());
 			graded.publisher = Some(graded_ours);
+			// Graded apart from the program's, so their media stays out of the
+			// uplink's; see [`Uplink::media`].
+			let mut snapshot = hang::stats::Snapshot::default();
+			snapshot.renditions = publisher.sources.stats();
+			let theirs = health::Report::new(publisher.observer.clone(), snapshot);
+			let previous_theirs = previous.as_ref().and_then(|previous| previous.sources.as_ref());
+			graded.sources = Some(self.grade(&theirs, previous_theirs.zip(interval)));
 			graded.viewers = publisher.feedback.grade(now, &self.thresholds);
 			report.viewers.unread = publisher.feedback.unread();
 			report.viewers.watching = publisher.watching.get();
-			report.tracks = tracks(publisher, &graded);
+			report.tracks = tracks(&publisher.catalog.snapshot(), &publisher.clock, &graded);
 			report.viewers.reports = viewers(publisher, &graded.viewers);
 			current = Some(ours);
+			sources = Some(theirs);
 		}
 
 		let drops = previous.as_ref().map(|previous| Drops {
@@ -288,9 +312,23 @@ impl Sampler {
 			at: now,
 			local,
 			report: current,
+			sources,
 			serving,
 		});
 		report
+	}
+
+	/// Grade what the studio wrote, against `previous` and the interval since.
+	fn grade(
+		&self,
+		current: &health::Report<hang::stats::Snapshot>,
+		previous: Option<(&health::Report<hang::stats::Snapshot>, Duration)>,
+	) -> Health {
+		let mut sample = health::Sample::new(current, Duration::ZERO);
+		if let Some((previous, interval)) = previous {
+			sample = sample.with_previous(previous, interval);
+		}
+		health::publisher(&sample, &self.thresholds)
 	}
 }
 
@@ -361,28 +399,21 @@ fn uplink(snapshot: &hang::stats::Snapshot, graded: &Health, watched: bool) -> U
 	}
 }
 
-/// Each catalog track, with what it sent and what its viewers received.
-fn tracks(publisher: &Publisher, graded: &Graded) -> Vec<Track> {
-	let catalog = publisher.catalog.snapshot();
-	let sent = graded.publisher.as_ref();
-	let video = catalog.video.renditions.iter().map(|(id, config)| {
-		let size = match (config.coded_width, config.coded_height) {
-			(Some(width), Some(height)) => format!(" {width}x{height}"),
-			_ => String::new(),
-		};
-		(id, format!("video {}{size}", config.codec))
+/// Each media track `catalog` lists, the program's and then each source's,
+/// with what it sent and what its viewers received. A source's stills carry
+/// no media to grade, so they are left out.
+fn tracks(catalog: &hang::Catalog<moq_scene::publish::Ext>, clock: &moq_mux::Clock, graded: &Graded) -> Vec<Track> {
+	let program = renditions(catalog).map(|(id, label)| (None, id, label, graded.publisher.as_ref()));
+	let sources = catalog.ext.studio.sources.iter().flat_map(|(name, catalog)| {
+		renditions(catalog).map(move |(id, label)| (Some(name), id, label, graded.sources.as_ref()))
 	});
-	let audio = catalog
-		.audio
-		.renditions
-		.iter()
-		.map(|(id, config)| (id, format!("audio {} {} ch", config.codec, config.channel_count)));
-	video
-		.chain(audio)
-		.map(|(id, label)| {
+	program
+		.chain(sources)
+		.map(|(source, id, label, sent)| {
 			let ours = sent.and_then(|health| health.renditions.get(id));
 			let interval = sent.and_then(|health| health.interval);
 			let mut track = Track {
+				source: source.cloned(),
 				id: id.clone(),
 				label,
 				sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
@@ -405,12 +436,29 @@ fn tracks(publisher: &Publisher, graded: &Graded) -> Vec<Track> {
 				if let Some(bitrate) = rendition.bitrate.map(Rate::from_bps) {
 					track.received = Some(track.received.map_or(bitrate, |received| received.min(bitrate)));
 				}
-				let latency = viewer.latency(id, &publisher.clock);
+				let latency = viewer.latency(id, clock);
 				track.latency = track.latency.max(latency);
 			}
 			track
 		})
 		.collect()
+}
+
+/// Each video and audio rendition `catalog` lists, by ID, with what it carries.
+fn renditions<E>(catalog: &hang::Catalog<E>) -> impl Iterator<Item = (&String, String)> {
+	let video = catalog.video.renditions.iter().map(|(id, config)| {
+		let size = match (config.coded_width, config.coded_height) {
+			(Some(width), Some(height)) => format!(" {width}x{height}"),
+			_ => String::new(),
+		};
+		(id, format!("video {}{size}", config.codec))
+	});
+	let audio = catalog
+		.audio
+		.renditions
+		.iter()
+		.map(|(id, config)| (id, format!("audio {} {} ch", config.codec, config.channel_count)));
+	video.chain(audio)
 }
 
 fn viewers(publisher: &Publisher, graded: &[GradedViewer]) -> Vec<Viewer> {
@@ -445,7 +493,10 @@ fn viewers(publisher: &Publisher, graded: &[GradedViewer]) -> Vec<Viewer> {
 /// The grades of one interval.
 #[derive(Default)]
 struct Graded {
+	/// The program's tracks and the uplink.
 	publisher: Option<Health>,
+	/// The sources' own tracks.
+	sources: Option<Health>,
 	viewers: Vec<GradedViewer>,
 }
 
@@ -654,7 +705,7 @@ fn viewer_problems(facts: &Facts<'_>, add: &mut impl FnMut(Verdict, String)) {
 
 	let track = |id: Option<&str>| {
 		id.and_then(|id| facts.labels.iter().find(|track| track.id == id))
-			.map_or_else(|| "the stream".to_string(), |track| track.label.clone())
+			.map_or_else(|| "the stream".to_string(), Track::name)
 	};
 	for (input, verdict, count, id) in worst {
 		let of = format!("{count} of {reporting} viewers");
@@ -958,6 +1009,7 @@ mod tests {
 
 	fn track(id: &str, label: &str) -> Track {
 		Track {
+			source: None,
 			id: id.into(),
 			label: label.into(),
 			sent: None,
@@ -1088,6 +1140,80 @@ mod tests {
 		assert_eq!(
 			stalling(unestimated),
 			["1 of 2 viewers are stalling on video h264 1920x1080."]
+		);
+	}
+
+	/// What the studio wrote over one interval, graded: `bytes` and 30 frames
+	/// for each rendition.
+	fn wrote(renditions: &[(&str, u64)]) -> Health {
+		let observer = Observer::new(moq_net::Path::new("show").unwrap(), None);
+		let report = |scale: u64| {
+			let mut snapshot = hang::stats::Snapshot::<()>::default();
+			for (id, bytes) in renditions {
+				let mut rendition = hang::stats::Rendition::default();
+				rendition.bytes = bytes * scale;
+				rendition.frames = 30 * scale;
+				snapshot.renditions.insert(id.to_string(), rendition);
+			}
+			health::Report::new(observer.clone(), snapshot)
+		};
+		let (previous, current) = (report(0), report(1));
+		let sample = health::Sample::new(&current, Duration::ZERO).with_previous(&previous, INTERVAL);
+		health::publisher(&sample, &Thresholds::default())
+	}
+
+	/// Each source's media tracks are graded like the program's, after them and
+	/// by source name, from what the source wrote and what viewers report on
+	/// them; a still has no media to grade. A viewer stalling on one names
+	/// its source.
+	#[test]
+	fn source_tracks_are_graded_by_source() {
+		let video = |width: u32, height: u32| {
+			let codec: hang::catalog::VideoCodec = "avc3.42c01f".parse().unwrap();
+			let mut config = hang::catalog::VideoConfig::new(codec);
+			config.coded_width = Some(width);
+			config.coded_height = Some(height);
+			config
+		};
+		let mut catalog = hang::Catalog::<moq_scene::publish::Ext>::default();
+		catalog.video.renditions.insert("0.avc3".into(), video(1920, 1080));
+		let mut camera = hang::Catalog::default();
+		camera.video.renditions.insert("2.avc3".into(), video(1280, 720));
+		let mut logo = hang::Catalog::default();
+		let png = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
+		logo.binary.tracks.insert("1.png".into(), png);
+		let sources = &mut catalog.ext.studio.sources;
+		sources.insert("logo".into(), logo);
+		sources.insert("camera".into(), camera);
+
+		// 375 kB in a second is 3 Mb/s, and 125 kB is 1 Mb/s.
+		let graded = Graded {
+			publisher: Some(wrote(&[("0.avc3", 375_000)])),
+			sources: Some(wrote(&[("2.avc3", 125_000)])),
+			viewers: vec![stalling("alice", "2.avc3", Duration::from_millis(100))],
+		};
+		let tracks = tracks(&catalog, &moq_mux::Clock::new(), &graded);
+		let rows: Vec<_> = tracks
+			.iter()
+			.map(|track| (track.source.as_deref(), track.id.as_str(), track.sent.map(rate)))
+			.collect();
+		assert_eq!(
+			rows,
+			[
+				(None, "0.avc3", Some("3.0 Mb/s".into())),
+				(Some("camera"), "2.avc3", Some("1.0 Mb/s".into())),
+			]
+		);
+		let camera = &tracks[1];
+		assert_eq!(camera.framerate, Some(30.0));
+		assert_eq!((camera.viewers, camera.verdict), (1, Verdict::Unhealthy));
+		assert_eq!((tracks[0].viewers, tracks[0].verdict), (0, Verdict::Unknown));
+
+		let local = Local::default();
+		let uplink = Uplink::default();
+		assert_eq!(
+			causes(problems(&facts(&local, &uplink, &graded.viewers, &tracks))),
+			["1 of 1 viewers are stalling on source `camera`'s video avc3.42c01f 1280x720."]
 		);
 	}
 
@@ -1235,6 +1361,12 @@ mod tests {
 			}],
 			feedback: feedback.clone(),
 			watching: Watching::default(),
+			sources: moq_scene::publish::Publish::new(
+				broadcast.clone(),
+				catalog.clone(),
+				moq_net::bandwidth::Allocator::unlimited(),
+				moq_video::encode::Kind::Auto,
+			),
 		}));
 
 		let alice = origin.create_broadcast("show/viewers/alice.echo").unwrap();
