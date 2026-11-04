@@ -417,7 +417,13 @@ pub struct Program {
 	/// Where the local sources keep their own tracks, on the same clock.
 	sources: moq_scene::publish::Publish,
 	/// What a recording reads the program from, on the same clock.
-	recording: moq_net::broadcast::Producer,
+	recording: moq_net::origin::Publication,
+	/// The recording broadcast's catalog, held for as long as the engine runs,
+	/// so a recording still reading as the studio stops finds it open.
+	_recorded: moq_scene::publish::Catalog,
+	/// The origin the studio's own broadcasts are read through, which no relay
+	/// connection carries.
+	local: moq_net::origin::Producer,
 	/// The audio's claim on the connection's bandwidth, which it does not
 	/// follow: Opus at this rate is never what congests the uplink.
 	_audio: bandwidth::Reservation,
@@ -601,13 +607,10 @@ impl Engine {
 			(Some(live), None)
 		};
 		let (program, publish) = publish(&gpu, &stats, origin, &path, canvas, live.as_ref()).await?;
-		// Nothing in either local broadcast refers to another, so each
-		// resolves through an origin of its own.
-		let local = |broadcast: moq_net::broadcast::Consumer| {
-			moq_mux::Source::new(moq_tokio::origin::spawn().consume(), broadcast)
-		};
+		// Nothing in either local broadcast refers to another.
+		let local = |broadcast: moq_net::broadcast::Consumer| moq_mux::Source::new(program.local.consume(), broadcast);
 		let recorder = record::Recorder::new(
-			local(program.recording.consume()),
+			local(program.recording.broadcast().consume()),
 			local(program.sources.consume()),
 			&recordings,
 			autosave.path(),
@@ -959,8 +962,15 @@ impl Engine {
 			let Ok(timestamp) = timestamp else { continue };
 			let data: Bytes = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
 			let frame = moq_audio::Frame::new(data, timestamp);
-			for producer in [&mut audio.program, &mut audio.recording] {
-				let Some(publish) = producer.as_mut() else { continue };
+			// The recording's copy encodes only while a recording reads it.
+			let recorded = audio
+				.recording
+				.as_ref()
+				.is_some_and(|recording| recording.demand().wanted().is_some());
+			for (producer, wanted) in [(&mut audio.program, true), (&mut audio.recording, recorded)] {
+				let Some(publish) = producer.as_mut().filter(|_| wanted) else {
+					continue;
+				};
 				if let Err(err) = publish.write(&frame) {
 					self.stats.fail_audio(err);
 					// Readers see the audio fail rather than go away unfinished.
@@ -1070,18 +1080,27 @@ async fn publish(
 	// What a recording reads the program from: its own canvas-size encoder,
 	// at full quality whatever the grant, and the program audio, in a
 	// broadcast no relay sees. HLS is for viewers on a relay.
-	let mut recording = moq_net::broadcast::Info::new().produce();
+	// Announced on an origin of its own, which no relay connection carries, so
+	// a recording reads it as it would the published program.
+	let local = moq_tokio::origin::spawn();
+	let recording = local
+		.create_broadcast("recording")
+		.context("cannot create the recording broadcast")?;
+	recording
+		.announce(Default::default())
+		.context("cannot announce the recording broadcast")?;
+	let mut recorder = recording.broadcast().clone();
 	let config = moq_mux::catalog::Config::default()
 		.with_catalog(Default::default())
 		.with_clock(clock.clone())
 		.with_hls(None);
-	let recorded = moq_scene::publish::Catalog::new(&mut recording, config)?;
+	let recorded = moq_scene::publish::Catalog::new(&mut recorder, config)?;
 	let renditions = Renditions {
 		gpu: gpu.clone(),
 		broadcast: broadcast.clone(),
 		timebase: catalog.timebase(),
 		recording: Recording {
-			broadcast: recording.clone(),
+			broadcast: recorder.clone(),
 			timebase: recorded.timebase(),
 		},
 		bandwidth: bandwidth.clone(),
@@ -1115,7 +1134,7 @@ async fn publish(
 	options.config.bitrate = Some(AUDIO_BITRATE);
 	let graded = catalog.clone();
 	let listed = catalog.clone();
-	let recorded_audio = moq_audio::encode::Producer::new(&mut recording, recorded, input.clone(), &options)?;
+	let recorded_audio = moq_audio::encode::Producer::new(&mut recorder, recorded.clone(), input.clone(), &options)?;
 	let audio = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)?;
 	let audio_reservation = bandwidth.reserve(&audio.demand(), AUDIO_BITRATE);
 	stats
@@ -1162,6 +1181,8 @@ async fn publish(
 			clock: clock.clone(),
 			sources: sources.clone(),
 			recording,
+			_recorded: recorded,
+			local,
 			_audio: audio_reservation,
 		},
 		Publish {
