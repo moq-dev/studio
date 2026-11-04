@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Poll, ready};
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -607,8 +607,7 @@ impl Stream for Listing {
 		if self.replaced.load(Ordering::Relaxed) {
 			return Poll::Ready(Ok(None));
 		}
-		// Polled for the program's listing, so closing wakes it: with nothing
-		// left to read, it ends without waiting for another catalog update.
+		// Polled for the program's listing, so closing wakes it.
 		let closing = self.name.is_none()
 			&& matches!(
 				self.closing.poll(waiter, |closing| if **closing {
@@ -618,16 +617,22 @@ impl Stream for Listing {
 				}),
 				Poll::Ready(Ok(()))
 			);
-		if closing
-			&& self
-				.last
-				.as_ref()
-				.is_some_and(|last| last.video.renditions.is_empty() && last.audio.renditions.is_empty())
-		{
-			return Poll::Ready(Ok(None));
-		}
 		loop {
-			let Some(studio) = ready!(self.catalog.poll_next(waiter))? else {
+			let studio = match self.catalog.poll_next(waiter) {
+				Poll::Ready(studio) => studio?,
+				// With nothing new, a closing program listing with nothing left to
+				// read ends without waiting for another catalog update. A catalog
+				// that failed is reported above instead.
+				Poll::Pending => {
+					let empty =
+						|last: &hang::Catalog| last.video.renditions.is_empty() && last.audio.renditions.is_empty();
+					if closing && self.last.as_ref().is_some_and(empty) {
+						return Poll::Ready(Ok(None));
+					}
+					return Poll::Pending;
+				}
+			};
+			let Some(studio) = studio else {
 				return Poll::Ready(Ok(None));
 			};
 			let listing = match &self.name {
@@ -1113,25 +1118,38 @@ mod tests {
 
 	/// A recording that read the program with no tracks left, such as one whose
 	/// video never opened and whose audio failed, finishes once closed, without
-	/// waiting for a catalog update that will not come.
+	/// waiting for a catalog update that will not come. A catalog that failed
+	/// just before is what it reports.
 	#[tokio::test(start_paused = true)]
 	async fn a_recording_of_an_empty_program_finishes_once_closed() {
 		let dir = tempfile::tempdir().unwrap();
 		let mut studio = Studio::new();
 		studio.end_program();
 		let recorder = studio.recorder(dir.path());
-		recorder.start(false).unwrap();
-		kio::clock::sleep(Duration::from_millis(500)).await;
-		assert!(!recorder.status().unwrap().done, "nothing ends it before closing");
-		recorder.close();
-		kio::clock::timeout(Duration::from_secs(5), recorder.done())
-			.await
-			.expect("closing wakes the recording");
-		let status = recorder.status().unwrap();
-		let [file] = status.files.as_slice() else {
-			panic!("{} files", status.files.len());
+		let file = async |abort: bool| {
+			recorder.start(false).unwrap();
+			kio::clock::sleep(Duration::from_millis(500)).await;
+			assert!(!recorder.status().unwrap().done, "nothing ends it before closing");
+			if abort {
+				// With no chance for the file to read the failure before closing.
+				studio.catalog.clone().abort(moq_net::StreamError::Internal.into());
+			}
+			recorder.close();
+			kio::clock::timeout(Duration::from_secs(5), recorder.done())
+				.await
+				.expect("closing wakes the recording");
+			let status = recorder.status().unwrap();
+			let [file] = status.files.as_slice() else {
+				panic!("{} files", status.files.len());
+			};
+			file.finished.clone()
 		};
-		assert_eq!(file.finished, Some(Finished::Empty));
+		assert_eq!(file(false).await, Some(Finished::Empty));
+		let failed = file(true).await;
+		assert!(
+			matches!(&failed, Some(Finished::Failed(reason)) if reason.contains("reading the broadcast")),
+			"{failed:?}"
+		);
 	}
 
 	/// A failure already waiting as a recording stops is what each file
