@@ -122,7 +122,7 @@ impl Change {
 	fn entry(&self) -> Option<&str> {
 		match self {
 			Self::Source { name, .. } | Self::Audio { name, .. } | Self::Video { name, .. } => Some(name),
-			Self::Scene { .. } | Self::Item { .. } | Self::Transition { .. } => None,
+			Self::Scene { .. } | Self::Item { .. } | Self::Transition { .. } | Self::Canvas { .. } => None,
 		}
 	}
 

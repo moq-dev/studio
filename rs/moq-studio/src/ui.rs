@@ -67,8 +67,8 @@ impl Studio {
 		let (preview, program, dropped) = {
 			let state = engine.state.lock().unwrap();
 			(
-				Shown::new(render, state.compositor.preview()),
-				Shown::new(render, state.compositor.program()),
+				Registered::new(render, state.compositor.preview()),
+				Registered::new(render, state.compositor.program()),
 				state.dropped,
 			)
 		};
@@ -130,12 +130,12 @@ impl eframe::App for Studio {
 }
 
 /// A compositor texture as egui shows it.
-struct Shown {
+struct Registered {
 	id: egui::TextureId,
 	texture: wgpu::Texture,
 }
 
-impl Shown {
+impl Registered {
 	fn new(render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) -> Self {
 		let view = texture.create_view(&Default::default());
 		let id = render
@@ -168,8 +168,8 @@ impl Shown {
 struct Panels {
 	engine: Arc<Engine>,
 	runtime: tokio::runtime::Handle,
-	preview: Shown,
-	program: Shown,
+	preview: Registered,
+	program: Registered,
 	/// Whether the Items panel shows the top layer rather than the scene in
 	/// preview.
 	top: bool,
