@@ -2280,11 +2280,11 @@ mod bench {
 		studio.compositor.cut();
 		let mut total = Duration::ZERO;
 		for frame in 0..FRAMES * 2 {
-			let start = std::time::Instant::now();
+			let start = Instant::now();
 			studio.render(Instant::now());
 			studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 			if frame >= FRAMES {
-				total += start.elapsed();
+				total += Instant::now().saturating_duration_since(start);
 			}
 		}
 		total / FRAMES

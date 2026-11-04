@@ -1171,7 +1171,11 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
+		let canvas = self.view(&state);
+		let mut scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
+		if let Some(view) = &self.view {
+			scene = format!("{scene} on `{view}`");
+		}
 		ui.horizontal(|ui| {
 			ui.selectable_value(&mut self.top, false, format!("Scene: {scene}"));
 			ui.selectable_value(&mut self.top, true, "Top layer")
@@ -1185,7 +1189,6 @@ impl Panels {
 				return;
 			}
 		};
-		let canvas = self.view(&state);
 		let collection = state.collection();
 		let Some(items) = collection.items(&layer).map(<[Item]>::to_vec) else {
 			ui.label(format!("There is no {layer}."));
