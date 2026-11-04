@@ -1,19 +1,23 @@
 import { expect, test } from "bun:test";
-import { parse } from "./link.ts";
+import { format, parse } from "./link.ts";
 
 const fragment = (params: Record<string, string>) => new URLSearchParams(params).toString();
 
-test("a link dials the room with its token in the query", () => {
+test("a link names the room and keeps its token out of the URL", () => {
 	const link = parse(fragment({ url: "https://relay.example:4443/show/guests", name: "alice", jwt: "a.b.c" }));
 	expect(link.name).toBe("alice");
 	expect(link.url.origin).toBe("https://relay.example:4443");
 	expect(link.url.pathname).toBe("/show/guests");
-	expect(link.url.searchParams.get("jwt")).toBe("a.b.c");
+	expect(link.url.search).toBe("");
+	expect(link.jwt).toBe("a.b.c");
+	// A renewed token replaces the link's when the page stores it.
+	expect(parse(format({ ...link, jwt: "d.e.f" }))).toEqual({ ...link, jwt: "d.e.f" });
 });
 
 test("a name with spaces survives the fragment's encoding", () => {
 	const link = parse(fragment({ url: "https://relay.example/room", name: "Alice Smith", jwt: "t" }));
 	expect(link.name).toBe("Alice Smith");
+	expect(parse(format(link)).name).toBe("Alice Smith");
 });
 
 test("an incomplete or malformed link is refused", () => {

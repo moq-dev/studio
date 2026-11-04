@@ -1188,6 +1188,12 @@ impl Panels {
 		}
 
 		ui.separator();
+		if let Some(failure) = room.renewal_failure() {
+			ui.colored_label(
+				ui.visuals().error_fg_color,
+				format!("Guests' tokens are not renewing, so each leaves when their link expires: {failure}"),
+			);
+		}
 		let participants = room.participants();
 		if participants.is_empty() {
 			ui.weak("Nobody invited yet.");
@@ -1227,7 +1233,7 @@ impl Panels {
 						if ui
 							.small_button("Remove from scenes")
 							.on_hover_text(
-								"Take their camera and screen, and any mask reading them, out of every scene and mute them. They stay connected until their link expires.",
+								"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within --guest-expiry unless you send a new link.",
 							)
 							.clicked()
 						{
@@ -1249,6 +1255,7 @@ impl Panels {
 			}
 		}
 		if let Some(name) = remove {
+			room.stop_renewing(&name);
 			let mut state = engine.state.lock().unwrap();
 			let mut draft = state.collection().draft(format!("Remove `{name}` from scenes"));
 			let result = match room.take_off(&mut draft, &name) {

@@ -96,7 +96,6 @@ repository.
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [The join page is live](/quest/m0/join-page-live.md) - `join.studio.moq.dev` serves the join page `--join-page` defaults to
 - [Guest return feed](/quest/m0/guest-return.md) - guests see the program and hear a mix-minus
-- [Guest token refresh](/quest/m0/guest-refresh.md) - a show outlasts the guest link's expiry without new links
 - [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
 - [Recording](/quest/m0/recording.md) - each canvas's program, and optionally each source, recorded to disk alongside live outputs
