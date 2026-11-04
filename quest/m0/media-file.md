@@ -20,7 +20,7 @@ scene-file paths in the browser belongs to the [web studio](/quest/m0/web.md),
 as it does for image sources.
 
 A file is played on the program clock. Settings: loop, or play once and hold
-the last frame; and whether going on program restarts it. A restart on demand
+the last frame (an audio-only file goes silent after its last sample); and whether going on program restarts it. A restart on demand
 (the stinger's need) is an API on the source, not only a setting. A file that
 ends or fails reads as ended or failed in the Sources panel and Health.
 
