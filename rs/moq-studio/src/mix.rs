@@ -189,7 +189,7 @@ pub struct Monitor {
 	/// The mix it plays, by name.
 	name: String,
 	/// The [`Speaker::id`] it plays on, or `None` for the system default.
-	speaker: Option<String>,
+	speaker: tokio::sync::watch::Sender<Option<String>>,
 	pick: Pick,
 	failed: Arc<Mutex<Option<String>>>,
 	task: tokio::task::JoinHandle<()>,
@@ -205,16 +205,16 @@ impl Monitor {
 		let follow = pick.follow();
 		let failed = Arc::new(Mutex::new(None));
 		let reason = failed.clone();
-		let device = speaker.map(str::to_string);
+		let (speaker, speakers) = tokio::sync::watch::channel(speaker.map(str::to_string));
 		let task = runtime.spawn(async move {
-			if let Err(err) = play(follow, device).await {
+			if let Err(err) = play(follow, speakers).await {
 				tracing::warn!(error = format!("{err:#}"), "the monitor stopped");
 				*reason.lock().unwrap() = Some(format!("{err:#}"));
 			}
 		});
 		Ok(Self {
 			name: name.to_string(),
-			speaker: speaker.map(str::to_string),
+			speaker,
 			pick,
 			failed,
 			task,
@@ -226,9 +226,14 @@ impl Monitor {
 		&self.name
 	}
 
-	/// The output it plays on, or `None` for the system default.
-	pub fn speaker(&self) -> Option<&str> {
-		self.speaker.as_deref()
+	/// Move to the output `speaker`, or the system default, closing the one it
+	/// plays on first.
+	pub fn set_speaker(&self, speaker: Option<&str>) {
+		self.speaker.send_if_modified(|current| {
+			let changed = current.as_deref() != speaker;
+			*current = speaker.map(str::to_string);
+			changed
+		});
 	}
 
 	/// Play the mix called `name` once it is given.
@@ -253,15 +258,19 @@ impl Drop for Monitor {
 	}
 }
 
-/// Play what `follow` reads out the output `device`, or the system default,
-/// until the bus stops.
+/// Play what `follow` reads out the output `speakers` names, or the system
+/// default, until the bus stops, moving as it names another.
 #[cfg(feature = "capture")]
-async fn play(mut follow: Follow, device: Option<String>) -> anyhow::Result<()> {
+async fn play(mut follow: Follow, mut speakers: tokio::sync::watch::Receiver<Option<String>>) -> anyhow::Result<()> {
 	use anyhow::Context;
 
-	let mut config = moq_audio::playback::Config::default();
-	config.device = device;
-	let device = moq_audio::playback::Engine::open(config)
+	let output = |device: Option<String>| {
+		let mut config = moq_audio::playback::Config::default();
+		config.device = device;
+		config
+	};
+	let device = speakers.borrow_and_update().clone();
+	let device = moq_audio::playback::Engine::open(output(device))
 		.await
 		.context("cannot open the output device")?;
 	let config = moq_audio::bus::Config::default();
@@ -270,16 +279,26 @@ async fn play(mut follow: Follow, device: Option<String>) -> anyhow::Result<()> 
 	input.sample_rate = config.sample_rate;
 	input.layout = config.layout;
 	let mut sink = device.sink(input)?;
-	while let Some(block) = follow.read().await {
-		let data: Vec<u8> = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-		// What the device cannot take is dropped rather than played late.
-		let _ = sink.write(&data)?;
+	loop {
+		tokio::select! {
+			block = follow.read() => {
+				let Some(block) = block else { return Ok(()) };
+				let data: Vec<u8> = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+				// What the device cannot take is dropped rather than played late.
+				let _ = sink.write(&data)?;
+			}
+			// Closes the old stream before opening the new, which an output
+			// only one stream may hold needs; the sink plays on.
+			Ok(()) = speakers.changed() => {
+				let speaker = speakers.borrow_and_update().clone();
+				device.switch(output(speaker)).await.context("cannot switch the output device")?;
+			}
+		}
 	}
-	Ok(())
 }
 
 #[cfg(not(feature = "capture"))]
-async fn play(_follow: Follow, _device: Option<String>) -> anyhow::Result<()> {
+async fn play(_follow: Follow, _speakers: tokio::sync::watch::Receiver<Option<String>>) -> anyhow::Result<()> {
 	unreachable!("refused by Monitor::start")
 }
 

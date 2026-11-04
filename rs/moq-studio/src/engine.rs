@@ -646,7 +646,7 @@ impl Engine {
 
 	/// Play a mix to an output on `runtime`, from the next frame, or stop with
 	/// `None`. A monitored mix that leaves the collection hands over to the one
-	/// the program carries, and another output reopens the monitor on it.
+	/// the program carries, and another output takes over from the old one.
 	///
 	/// Takes the `state` already locked, so an edit renaming the mix and the
 	/// pick that follows it land before the next frame's sync.
@@ -659,12 +659,12 @@ impl Engine {
 		let mut monitor = self.monitor.lock().unwrap();
 		match (listen, monitor.as_mut()) {
 			(None, _) => *monitor = None,
-			(Some(listen), Some(monitor)) if monitor.speaker() == listen.speaker => monitor.set_name(listen.mix),
-			(Some(listen), _) => {
-				// The old one closes its output first.
-				*monitor = None;
-				*monitor = Some(mix::Monitor::start(runtime, listen.mix, listen.speaker)?);
+			(Some(listen), Some(monitor)) if monitor.failed().is_none() => {
+				monitor.set_name(listen.mix);
+				monitor.set_speaker(listen.speaker);
 			}
+			// Listening again after a failure starts over.
+			(Some(listen), _) => *monitor = Some(mix::Monitor::start(runtime, listen.mix, listen.speaker)?),
 		}
 		// Synced on the next frame, which picks the mix by its name.
 		state.stale = true;

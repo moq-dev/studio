@@ -1738,7 +1738,7 @@ impl Panels {
 			}
 		});
 		if mix::MONITOR && self.speakers.ui(ui, &self.runtime, &mut self.speaker) {
-			// Another output reopens the monitor on it.
+			// The monitor moves to the new output.
 			if let Some((heard, _)) = &listening {
 				listen = Some(Some(heard.clone()));
 			}
