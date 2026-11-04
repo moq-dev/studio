@@ -35,7 +35,7 @@ pub struct Collection {
 	/// so one camera can appear in many scenes while being opened once.
 	#[serde(default)]
 	pub sources: BTreeMap<String, Source>,
-	/// The audio mixes, and which one the program carries.
+	/// The audio mixes, and which ones the program and recordings carry.
 	#[serde(default, skip_serializing_if = "Mixes::is_default")]
 	pub mixes: Mixes,
 	/// Gain, mute, routing, and sync delay of each audio-carrying source, by
@@ -1266,8 +1266,8 @@ impl Source {
 	}
 }
 
-/// The audio mixes every source with sound feeds, and which one the program
-/// carries.
+/// The audio mixes every source with sound feeds, and which ones the program
+/// and recordings carry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mixes {
@@ -1275,6 +1275,10 @@ pub struct Mixes {
 	pub names: Vec<String>,
 	/// The mix the program broadcast carries.
 	pub program: String,
+	/// The mix recordings hold, when not the one on program. It never
+	/// reaches a relay.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub recording: Option<String>,
 }
 
 impl Mixes {
@@ -1283,6 +1287,11 @@ impl Mixes {
 
 	fn is_default(&self) -> bool {
 		*self == Self::default()
+	}
+
+	/// The mix recordings hold.
+	pub fn recorded(&self) -> &str {
+		self.recording.as_deref().unwrap_or(&self.program)
 	}
 
 	fn validate(&self) -> Result<(), Error> {
@@ -1301,6 +1310,12 @@ impl Mixes {
 				self.program
 			)));
 		}
+		if !names.contains(self.recorded()) {
+			return Err(Error::Invalid(format!(
+				"recordings hold `{}`, which is not a mix",
+				self.recorded()
+			)));
+		}
 		Ok(())
 	}
 }
@@ -1310,6 +1325,7 @@ impl Default for Mixes {
 		Self {
 			names: vec![Self::DEFAULT.into()],
 			program: Self::DEFAULT.into(),
+			recording: None,
 		}
 	}
 }
@@ -1420,6 +1436,7 @@ mod tests {
 		collection.mixes = Mixes {
 			names: vec!["Stream".into(), "Recording".into()],
 			program: "Stream".into(),
+			recording: Some("Recording".into()),
 		};
 		collection.audio.insert(
 			"mic".into(),
@@ -1500,6 +1517,7 @@ color = "#ff000080"
 [mixes]
 names = ["Stream", "Recording"]
 program = "Stream"
+recording = "Recording"
 
 [audio.cam2]
 gain = 2.0
@@ -1565,6 +1583,7 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			}
 		);
 		assert_eq!(collection.mixes.program, "Stream");
+		assert_eq!(collection.mixes.recorded(), "Recording");
 		let main = collection.scene("Main").unwrap();
 		assert!(main.items[0].visible);
 		assert!(!main.items[1].visible);
@@ -1642,6 +1661,7 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			matches!(collection.validate(), Err(Error::Invalid(_)))
 		};
 		assert!(refused(|collection| collection.mixes.program = "Monitor".into()));
+		assert!(refused(|collection| collection.mixes.recording = Some("Monitor".into())));
 		assert!(refused(|collection| collection.mixes.names.push("Stream".into())));
 		assert!(refused(|collection| collection.mixes.names.push(String::new())));
 		assert!(refused(|collection| {

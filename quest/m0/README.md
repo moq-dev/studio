@@ -93,13 +93,14 @@ repository.
 - [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio get their own tracks, for isolated recording and replay
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
-- [Keyframes and stingers](/quest/m0/animation.md) - keyframed item properties with easing, and stinger transitions
+- [Keyframes](/quest/m0/animation.md) - keyframed item properties with easing, starting when their scene goes on program
+- [Media file source](/quest/m0/media-file.md) - a local video or audio file plays as a source, looping or from the start on demand
+- [Stinger transitions](/quest/m0/stinger.md) - a clip played over the program that switches scenes at its cut point
 - [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [The join page is live](/quest/m0/join-page-live.md) - `join.studio.moq.dev` serves the join page `--join-page` defaults to
 - [Guest return feed](/quest/m0/guest-return.md) - guests see the program and hear a mix-minus
-- [A recording picks its mix](/quest/m0/record-mix.md) - a recording keeps what the stream's mix leaves out
 - [Clap-to-measure sync delay](/quest/m0/sync-clap.md) - a clap sets a microphone's delay against its camera
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
 - [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
