@@ -124,8 +124,10 @@ mod tests {
 		Area { x, y, width, height }
 	}
 
-	/// Copies as `((from x, from y), (to x, to y), (width, height))`.
-	fn clipped(area: Area, popup: (u32, u32), view: (u32, u32)) -> Option<((u32, u32), (u32, u32), (u32, u32))> {
+	/// A copy as `((from x, from y), (to x, to y), (width, height))`.
+	type Copied = ((u32, u32), (u32, u32), (u32, u32));
+
+	fn clipped(area: Area, popup: (u32, u32), view: (u32, u32)) -> Option<Copied> {
 		clip(area, extent(popup.0, popup.1), extent(view.0, view.1))
 			.map(|(from, to, size)| ((from.x, from.y), (to.x, to.y), (size.width, size.height)))
 	}
