@@ -43,6 +43,9 @@ pub(crate) enum Picture {
 	Texture(moq_video::render::wgpu::Texture),
 	/// A LUT source's table, which is not drawn but looked up.
 	Lut(Cube),
+	/// An overlay whose HTML passed [`crate::overlay::check`], which the
+	/// compositor lays out and paints itself, on the program clock.
+	Overlay,
 }
 
 /// The one picture a source holds for the compositor. A newer picture replaces
@@ -463,6 +466,11 @@ impl Driver {
 				self.show(Picture::Lut(cube));
 				std::future::pending().await
 			}
+			Source::Overlay { html, .. } => {
+				crate::overlay::check(html)?;
+				self.show(Picture::Overlay);
+				std::future::pending().await
+			}
 			Source::Broadcast { path } => self.broadcast(path).await,
 			Source::Browser { url, width, height } => self.browser(url, *width, *height).await,
 			Source::Replay => {
@@ -512,6 +520,7 @@ impl Driver {
 			| Source::Image { .. }
 			| Source::Broadcast { .. }
 			| Source::Browser { .. }
+			| Source::Overlay { .. }
 			| Source::Clone { .. }
 			| Source::Lut { .. }
 			| Source::Replay => unreachable!("not a device source"),
@@ -1017,14 +1026,14 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 /// layout rather than encoded again.
 ///
 /// Microphones and system audio do not yet: moq-audio offers no capture that
-/// feeds both the program bus and an encoder. Nor do web pages, which viewers
-/// see only in the program: H.264 would encode a transparent overlay over
-/// black.
+/// feeds both the program bus and an encoder. Nor do web pages and overlays,
+/// which viewers see only in the program: H.264 would encode their
+/// transparency over black.
 fn publishes(source: &Source) -> bool {
 	source.has_video()
 		&& !matches!(
 			source,
-			Source::Broadcast { .. } | Source::Clone { .. } | Source::Browser { .. }
+			Source::Broadcast { .. } | Source::Clone { .. } | Source::Browser { .. } | Source::Overlay { .. }
 		)
 }
 
@@ -1563,6 +1572,39 @@ mod tests {
 			sources.restart("chat");
 			assert_eq!(sources.sync(&collection).len(), 1, "a restart starts it again");
 			assert!(!sources.get("chat").unwrap().page().unwrap().same(&failed));
+		})
+		.await;
+	}
+
+	/// An overlay goes live for the compositor to paint, and one outside what
+	/// overlays draw fails the source, naming what.
+	#[tokio::test]
+	async fn an_overlay_fails_on_what_it_cannot_draw() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let overlay = |html: &str| Source::Overlay {
+				html: html.into(),
+				width: 640,
+				height: 360,
+			};
+			let mut collection = Collection::new();
+			collection.sources.insert("title".into(), overlay("<h1>Live</h1>"));
+			collection.sources.insert(
+				"shadow".into(),
+				overlay(r#"<h1 style="text-shadow: 0 0 4px">Live</h1>"#),
+			);
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			let title = sources.get("title").unwrap();
+			assert_eq!(title.status(), Status::Live);
+			assert!(matches!(title.take(), Some(Picture::Overlay)));
+			let Status::Failed(reason) = sources.get("shadow").unwrap().status() else {
+				panic!("an overlay outside the subset fails");
+			};
+			assert!(reason.contains("`text-shadow`"), "{reason}");
 		})
 		.await;
 	}

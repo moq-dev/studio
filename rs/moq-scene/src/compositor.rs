@@ -1,15 +1,16 @@
 //! Draw scenes onto the canvas on the GPU: a preview, a program, and the fade
 //! between them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
-use crate::collection::{Canvas, Collection, Item, Layer as Place, Source};
+use crate::collection::{Canvas, Collection, Filter, Item, Layer as Place, Source};
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
+use crate::overlay::{Overlay, Overlays};
 use crate::source::{self, Sources};
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
@@ -41,6 +42,8 @@ pub struct Compositor {
 	incoming: Target,
 
 	layers: HashMap<String, Layer>,
+	/// Lays out and paints overlays, started with the first one.
+	overlays: Option<Overlays>,
 	preview_scene: Option<String>,
 	program_scene: Option<String>,
 	fade: Option<Fade>,
@@ -70,6 +73,8 @@ struct Layer {
 	picture: Option<Picture>,
 	/// A LUT source's table; `None` until it is read.
 	lut: Option<Lut>,
+	/// An overlay's document, which paints `picture`.
+	overlay: Option<Overlay>,
 	/// Why the newest picture failed to draw, logged when it first does.
 	error: Option<String>,
 }
@@ -106,6 +111,7 @@ impl Compositor {
 			canvas,
 			effects,
 			layers: HashMap::new(),
+			overlays: None,
 			preview_scene: None,
 			program_scene: None,
 			fade: None,
@@ -240,7 +246,8 @@ impl Compositor {
 	/// through [`error`](Self::error); this fails only when the canvas itself
 	/// cannot be drawn.
 	pub fn render(&mut self, collection: &Collection, sources: &Sources, now: Instant) -> Result<(), Error> {
-		self.update(collection, sources);
+		self.update(collection, sources, now);
+		self.paint(collection, now);
 
 		let progress = self.fade.as_ref().map(|fade| {
 			let elapsed = now.saturating_duration_since(fade.start);
@@ -286,8 +293,9 @@ impl Compositor {
 	}
 
 	/// Pull the newest picture from every source onto the GPU, and forget the
-	/// sources the collection no longer has or has since edited.
-	fn update(&mut self, collection: &Collection, sources: &Sources) {
+	/// sources the collection no longer has or has since edited. An overlay
+	/// that arrives now starts its CSS timeline at `now`.
+	fn update(&mut self, collection: &Collection, sources: &Sources, now: Instant) {
 		self.layers
 			.retain(|name, layer| collection.sources.get(name) == Some(&layer.source));
 
@@ -303,6 +311,7 @@ impl Compositor {
 				renderer: None,
 				picture: None,
 				lut: None,
+				overlay: None,
 				error: None,
 			});
 			// A page arrives premultiplied; frames and images are straight.
@@ -324,6 +333,24 @@ impl Compositor {
 					layer.lut = Some(self.effects.lut(&cube));
 					continue;
 				}
+				source::Picture::Overlay => {
+					let Source::Overlay { html, width, height } = source else {
+						unreachable!("only an overlay source shows an overlay")
+					};
+					let overlays = match &mut self.overlays {
+						Some(overlays) => Ok(overlays),
+						None => Overlays::new(&self.device, &self.queue).map(|overlays| self.overlays.insert(overlays)),
+					};
+					match overlays {
+						Ok(overlays) => {
+							let overlay = overlays.open(html, *width, *height, now);
+							layer.picture = Some(self.effects.picture(overlay.texture(), false));
+							layer.overlay = Some(overlay);
+						}
+						Err(err) => layer.error = Some(err.to_string()),
+					}
+					continue;
+				}
 			};
 
 			match texture {
@@ -339,6 +366,75 @@ impl Compositor {
 				}
 			}
 		}
+	}
+
+	/// Paint each overlay preview or program draws as of `now`, where it moved
+	/// since its last paint. One drawn nowhere waits: its CSS runs on the
+	/// program clock, so it lands where it should whenever it is drawn again.
+	fn paint(&mut self, collection: &Collection, now: Instant) {
+		let Some(overlays) = &self.overlays else { return };
+		let shown = self.shown(collection);
+		let painting: Vec<_> = self
+			.layers
+			.iter()
+			.filter(|(name, _)| shown.contains(name.as_str()))
+			.filter_map(|(_, layer)| layer.overlay.as_ref().map(Overlay::id))
+			.collect();
+		if painting.is_empty() {
+			return;
+		}
+
+		let failed = overlays.paint(now, painting.clone());
+		for (name, layer) in &mut self.layers {
+			let Some(overlay) = &layer.overlay else { continue };
+			let error = match &failed {
+				// The thread is gone, and with it every overlay it held, drawn or
+				// not, until each is edited.
+				Err(err) => {
+					layer.overlay = None;
+					layer.picture = None;
+					Some(err.to_string())
+				}
+				Ok(_) if !painting.contains(&overlay.id()) => continue,
+				Ok(failed) => failed.get(&overlay.id()).cloned(),
+			};
+			if let Some(err) = &error
+				&& layer.error.is_none()
+			{
+				tracing::warn!(source = %name, %err, "cannot paint overlay");
+			}
+			layer.error = error;
+		}
+		if failed.is_err() {
+			self.overlays = None;
+		}
+	}
+
+	/// The sources whose pictures preview and program draw: each visible
+	/// item's, and each mask's, through clones.
+	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
+		let leaving = self.fade.as_ref().and_then(|fade| fade.from.as_deref());
+		let scenes = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving]
+			.into_iter()
+			.flatten()
+			.map(|name| Place::Scene(name.to_string()));
+		let mut shown = HashSet::new();
+		for place in scenes.chain([Place::Top]) {
+			for item in collection
+				.items(&place)
+				.into_iter()
+				.flatten()
+				.filter(|item| item.visible)
+			{
+				shown.insert(collection.capture(&item.source));
+				for filter in collection.filters(item) {
+					if let Filter::Mask { source, .. } = filter {
+						shown.insert(collection.capture(source));
+					}
+				}
+			}
+		}
+		shown
 	}
 }
 
@@ -1365,6 +1461,95 @@ mod tests {
 				let actual = pixel(&program, 3, 3);
 				assert!(near(actual, rgb(expected)), "{blend:?} at {alpha}: {actual:?}");
 			}
+		})
+		.await;
+	}
+
+	/// An overlay's CSS animation runs on the program clock from when the
+	/// overlay opens: a frame shows it where the program time says, however late
+	/// that frame is drawn, even the first one to show it.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn an_overlay_animates_on_the_program_clock() {
+		local(async {
+			let mut collection = collection();
+			collection.sources.insert(
+				"overlay".into(),
+				Source::Overlay {
+					html: "<style>
+						body { margin: 0 }
+						div { width: 8px; height: 4px; animation: fade 1s linear both }
+						@keyframes fade { from { background: red } to { background: blue } }
+					</style><div></div>"
+						.into(),
+					width: 8,
+					height: 8,
+				},
+			);
+			collection.scenes[1].items = vec![Item::new("overlay", Rect::fill(&collection.canvas))];
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			// Opened here, but drawn nowhere until the cut.
+			let start = Instant::now();
+			studio.render(start);
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut();
+
+			for (at, expected) in [(500, [128, 0, 128, 255]), (750, [64, 0, 191, 255]), (2000, BLUE)] {
+				studio.render(start + Duration::from_millis(at));
+				let program = studio.program();
+				let actual = pixel(&program, 3, 1);
+				assert!(
+					actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2),
+					"{at} ms: {actual:?}"
+				);
+				assert_eq!(pixel(&program, 3, 6), BLACK, "{at} ms: the rest is transparent");
+			}
+		})
+		.await;
+	}
+
+	/// When the overlay thread stops, every overlay it held fails, including
+	/// one off air, rather than showing its last paint when cut to.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stopped_overlay_thread_fails_every_overlay() {
+		local(async {
+			let mut collection = collection();
+			let overlay = |color: &str| Source::Overlay {
+				html: format!("<body style=\"margin: 0; background: {color}\"></body>"),
+				width: 8,
+				height: 8,
+			};
+			collection.sources.insert("shown".into(), overlay("lime"));
+			collection.sources.insert("aside".into(), overlay("yellow"));
+			let fill = Rect::fill(&collection.canvas);
+			collection.scenes[0].items = vec![Item::new("red", fill), Item::new("aside", fill)];
+			collection.scenes[1].items = vec![Item::new("blue", fill), Item::new("shown", fill)];
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+
+			// Paint the aside overlay, then leave it off air.
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.render(start);
+			assert_eq!(pixel(&studio.program(), 3, 3), [255, 255, 0, 255]);
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut();
+			studio.render(start);
+
+			studio.compositor.overlays.as_ref().unwrap().panic();
+			studio.render(start);
+			for name in ["shown", "aside"] {
+				let err = studio.compositor.error(name).unwrap_or_else(|| panic!("{name} fails"));
+				assert!(err.contains("overlay thread stopped"), "{name}: {err}");
+			}
+
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.render(start);
+			assert_eq!(pixel(&studio.program(), 3, 3), RED, "no frozen overlay");
 		})
 		.await;
 	}
