@@ -99,7 +99,7 @@ Every panel is a tab you can drag, split, or stack.
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
-| Output | Start and stop recording, set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each rendition's encoder work. |
+| Output | Start and stop recording, pick the mix it records, set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each rendition's encoder work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 
@@ -162,7 +162,11 @@ monitor mix for your headphones. A source feeds every mix, a new one included,
 until you untick that mix in its row of the Audio panel; mute a source to take
 it out of every mix. **On program** picks the mix the broadcast carries, and
 switching it, or editing a mix, never drops or repeats audio. A recording
-holds the mix on program. The mix on program cannot be removed.
+holds the mix on program unless the Output panel picks another, such as one
+keeping music the stream leaves out; that mix never reaches the relay, and
+switching it while recording never drops or repeats audio either. The mix on
+program cannot be removed; removing the one a recording picks returns the
+recording to the mix on program.
 
 **Listen** plays a mix to an audio output, from the `capture` feature's
 build: the system default, or the one picked under **Listen on**, which the
@@ -411,8 +415,9 @@ file, which no item places, but which grades what a `lut` filter names it in),
 and `replay`, where the Replay panel plays replays. The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
 
-`[mixes]` names every mix, in the order the Audio panel lists them, and the
-one on `program`; without it, the collection has one mix, `Program`.
+`[mixes]` names every mix, in the order the Audio panel lists them, the one
+on `program`, and the one a `recording` holds, the mix on program without it;
+without `[mixes]`, the collection has one mix, `Program`.
 `[audio.<source>]` sets a source's linear `gain`, `muted`, the mixes it is
 left out of (`exclude`), and its `delay`.
 
@@ -576,9 +581,10 @@ starts with up to 2 s from before it opened, so a recording starts a little
 early, and a track that goes on into the next file, such as the program
 audio, repeats up to 2 s of the last. A
 recording reads the studio's own broadcasts, never what the relay serves, so it
-starts and stops without touching the live stream. The mix on program is
-encoded a second time for it while recording, so the file holds the same mix
-viewers hear. Without `--connect`, only the
+starts and stops without touching the live stream. The mix it holds is
+encoded a second time for it while recording: the mix on program, so the file
+holds what viewers hear, or the one the Output panel picks, which viewers never
+can. Without `--connect`, only the
 recording's encoder encodes the program.
 
 Each file plays while it grows, so a crash leaves a playable fragmented MP4,
