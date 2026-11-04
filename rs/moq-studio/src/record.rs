@@ -462,7 +462,10 @@ async fn record<S: Stream>(
 	};
 
 	let Some(finish) = export.finish().context("finishing the recording")? else {
-		return remove(file, entry).await;
+		// Removed either way, but a broadcast that failed says why.
+		let removed = remove(file, entry).await;
+		ended.context("reading the broadcast")?;
+		return removed;
 	};
 	// The moov where the media ends, then the mdat header over the reserved box,
 	// which points readers past the media at the moov, so the moov must be on
@@ -975,6 +978,38 @@ mod tests {
 		let status = recorder.status().unwrap();
 		assert_eq!(status.files.len(), 1);
 		assert_eq!(status.files[0].finished, Some(Finished::Empty));
+		assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+	}
+
+	/// A broadcast that fails before anything reached the file still says why,
+	/// though the empty file is removed.
+	#[tokio::test(start_paused = true)]
+	async fn a_failure_before_any_media_says_why() {
+		let dir = tempfile::tempdir().unwrap();
+		let origin = moq_tokio::origin::spawn();
+		let publication = origin.create_broadcast("studio").unwrap();
+		let mut broadcast = publication.broadcast().clone();
+		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
+		let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
+		publication.announce(Default::default()).unwrap();
+		let source = moq_mux::Source::new(origin.consume(), publication.broadcast().consume());
+		let recorder = Recorder::new(source, dir.path(), Path::new("show.toml")).unwrap();
+		recorder.start(false).unwrap();
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		catalog.abort(moq_net::StreamError::Internal.into());
+		kio::clock::timeout(Duration::from_secs(5), recorder.finish())
+			.await
+			.expect("the recording ends with its program");
+
+		let status = recorder.status().unwrap();
+		let [file] = status.files.as_slice() else {
+			panic!("{} files", status.files.len());
+		};
+		assert!(
+			matches!(&file.finished, Some(Finished::Failed(reason)) if reason.contains("reading the broadcast")),
+			"{:?}",
+			file.finished
+		);
 		assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 	}
 

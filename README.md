@@ -410,7 +410,10 @@ studio's, so they get no file of their own. A source added while recording
 starts its file then, and one removed finishes its file then. A new canvas
 size or frame rate, or a capture that changes size or color space, moves the
 video to a new track, so the program or that source goes on in a new file,
-numbered after the first, since players show only one video track. A
+numbered after the first, since players show only one video track. A file
+starts with up to 2 s from before it opened, so a recording starts a little
+early, and a track that goes on into the next file, such as the program
+audio, repeats up to 2 s of the last. A
 recording reads the broadcast the way a viewer does, so it shares the live
 encoders and starts and stops without touching what the relay serves. Without
 `--connect`, or with `--on-demand`, the program encodes only while something
