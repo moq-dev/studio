@@ -85,25 +85,32 @@ impl Engine {
 /// Hold the `length` of `of` up to now: to play in a replay source with
 /// `play`, or as a clip to save.
 ///
-/// Takes the first target that holds video for the span, such as the
-/// program's half size while the grant could not fund its canvas size, or
-/// else the last one tried.
+/// Takes the target whose video covers the most of the span, the first of
+/// those tied, such as the program's half size over a canvas size the grant
+/// disabled partway, or else the first one tried.
 pub fn take(engine: &Engine, of: &Of, length: Duration, play: bool) -> anyhow::Result<Take> {
-	let mut take = None;
+	let mut best: Option<anyhow::Result<Take>> = None;
 	for target in engine.targets(of)? {
 		let next = match play {
 			true => Take::new(&target, length),
 			false => Take::clip(&target, length),
 		};
-		let video = next.as_ref().is_ok_and(|next| next.video.is_some());
-		take = Some(next);
-		if video {
-			break;
+		let coverage = |take: &anyhow::Result<Take>| {
+			take.as_ref()
+				.ok()
+				.filter(|take| take.video.is_some())
+				.map(|take| take.covered)
+		};
+		let next = next.map_err(anyhow::Error::from);
+		if best.as_ref().is_none_or(|best| coverage(&next) > coverage(best)) {
+			best = Some(next);
 		}
 	}
-	let take = take.context("nothing to replay")?;
+	let take = best.context("nothing to replay")?;
 	take.with_context(|| match of {
-		Of::Source(name) => format!("cannot replay `{name}`, which keeps a past only while it is on program"),
+		Of::Source(name) => {
+			format!("cannot replay `{name}`, which keeps a past only while it is on program or recorded")
+		}
 		Of::Program => "cannot replay the program".into(),
 	})
 }

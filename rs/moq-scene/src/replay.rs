@@ -66,6 +66,9 @@ pub struct Take {
 	pub video: Option<(String, VideoConfig)>,
 	/// The audio rendition, under its catalog name.
 	pub audio: Option<(String, AudioConfig)>,
+	/// How much of the span the video holds pictures across, from its first
+	/// to its last: less than the span where the rendition was not encoding.
+	pub covered: Duration,
 	/// Where the span starts on the copied broadcast's timeline.
 	pub start: moq_net::Timestamp,
 	/// Where it ends.
@@ -117,10 +120,14 @@ impl Take {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut tracks = Vec::new();
 		let mut video = None;
+		let mut covered = Duration::ZERO;
 		if let Some((name, config)) = &target.video {
 			reference(config)?;
-			if let Some(track) = copy(target, &broadcast, Reference::track(config, name), start, cut)? {
+			let container = moq_mux::catalog::hang::Container::try_from(config)?;
+			let track = Reference::track(config, name);
+			if let Some((track, held)) = copy(target, &broadcast, track, start, cut, &container)? {
 				tracks.push(track);
+				covered = held;
 				// What the take holds plays, even from a rendition the
 				// publisher has since stopped encoding.
 				let mut config = config.clone();
@@ -131,7 +138,9 @@ impl Take {
 		let mut audio = None;
 		if let Some((name, config)) = &target.audio {
 			reference(config)?;
-			if let Some(track) = copy(target, &broadcast, Reference::track(config, name), start, cut)? {
+			let container = moq_mux::catalog::hang::Container::try_from(config)?;
+			let track = Reference::track(config, name);
+			if let Some((track, _)) = copy(target, &broadcast, track, start, cut, &container)? {
 				tracks.push(track);
 				let mut config = config.clone();
 				config.enabled = true;
@@ -161,6 +170,7 @@ impl Take {
 			_listing: listing,
 			video,
 			audio,
+			covered,
 			start,
 			end,
 		})
@@ -194,15 +204,18 @@ enum Cut {
 }
 
 /// Copy the span of `name` in `target`, as far as it is readable now, into a
-/// track of `broadcast`, and end that track. `None` when it holds nothing of
-/// the span, or while its publisher has not described the track.
+/// track of `broadcast`, and end that track, with how much of the span its
+/// media covers. `None` when it holds no media of the span, only the markers
+/// of a publisher's gaps if anything, or while its publisher has not
+/// described the track. `container` reads its frames.
 fn copy(
 	target: &Target,
 	broadcast: &moq_net::broadcast::Producer,
 	name: &str,
 	start: moq_net::Timestamp,
 	cut: Cut,
-) -> Result<Option<moq_net::track::Producer>, Error> {
+	container: &impl moq_mux::container::Container,
+) -> Result<Option<(moq_net::track::Producer, Duration)>, Error> {
 	let range = moq_net::track::Range {
 		start: moq_net::track::Anchor::Time(start),
 		end: Some(moq_net::track::Anchor::Time(target.end)),
@@ -223,9 +236,9 @@ fn copy(
 	// Never stale: the take keeps its groups for as long as it lives.
 	let info = source.info().clone().with_max_age(None);
 	let mut track = broadcast.create_track(name, info)?;
-	match copy_held(&mut source, &mut track, target.end, cut) {
-		Ok(true) => track.finish()?,
-		Ok(false) => {
+	let covered = match copy_held(&mut source, &mut track, target.end, cut, container) {
+		Ok(Some(covered)) => covered,
+		Ok(None) => {
 			let _ = track.abort(moq_net::Error::Cancel);
 			return Ok(None);
 		}
@@ -233,8 +246,19 @@ fn copy(
 			let _ = track.clone().abort(moq_net::Error::Cancel);
 			return Err(err);
 		}
+	};
+	track.finish()?;
+	Ok(Some((track, covered)))
+}
+
+/// Whether `frame` is only the marker a publisher writes at a gap: one media
+/// frame with nothing in it, as `container` reads it. A frame it cannot read
+/// counts as media, since only the publisher's marker is known to be empty.
+fn marker(frame: &moq_net::frame::Frame, container: &impl moq_mux::container::Container) -> bool {
+	match container.decode(frame.clone()) {
+		Ok(frames) => !frames.is_empty() && frames.iter().all(|frame| frame.payload.is_empty()),
+		Err(_) => false,
 	}
-	Ok(Some(track))
 }
 
 /// A group's frames as far as they were readable, and how reading it ended.
@@ -244,13 +268,15 @@ struct Held {
 }
 
 /// Copy every group and frame `source` has ready, up to `end` as `cut` says,
-/// into `track`, returning whether it held any.
+/// into `track`, returning how much its media covers, from its first media
+/// frame to its last, or `None` without media.
 fn copy_held(
 	source: &mut moq_net::track::Subscriber,
 	track: &mut moq_net::track::Producer,
 	end: moq_net::Timestamp,
 	cut: Cut,
-) -> Result<bool, Error> {
+	container: &impl moq_mux::container::Container,
+) -> Result<Option<Duration>, Error> {
 	// Never woken: anything not ready now is left out.
 	let now = kio::Waiter::noop();
 	// Groups come in the order they reached the studio, which over a session
@@ -301,6 +327,18 @@ fn copy_held(
 		}
 	}
 
+	// The media's first and last timestamps, past the markers of gaps.
+	let mut media = held
+		.values()
+		.flat_map(|held| &held.frames)
+		.filter(|frame| !marker(frame, container))
+		.map(|frame| frame.timestamp.map(Duration::from).unwrap_or_default())
+		.peekable();
+	let covered = media.peek().copied().map(|first| {
+		let (low, high) = media.fold((first, first), |(low, high), at| (low.min(at), high.max(at)));
+		high - low
+	});
+
 	// Groups the span covers that are not here are gaps, not groups to come.
 	let copied: Vec<u64> = held.into_keys().collect();
 	for pair in copied.windows(2) {
@@ -308,7 +346,7 @@ fn copy_held(
 			track.drop_groups(pair[0] + 1..pair[1], moq_net::StreamError::NotFound);
 		}
 	}
-	Ok(!copied.is_empty())
+	Ok(covered)
 }
 
 #[cfg(test)]
@@ -518,6 +556,33 @@ mod tests {
 		target.video = None;
 		let result = Take::new(&target, Duration::from_secs(1));
 		assert!(matches!(result, Err(Error::Unsupported(_))));
+	}
+
+	/// A take says how much of its span holds pictures, and one whose span
+	/// holds only the marker of a gap, such as a rendition the grant disabled,
+	/// is refused as holding nothing.
+	#[test]
+	fn a_take_of_a_gap_holds_no_pictures() {
+		use moq_mux::container::Container;
+
+		let (broadcast, track) = broadcast(3, None);
+		let take = Take::new(&target(&broadcast, ts(2_900)), Duration::from_secs(2)).unwrap();
+		assert_eq!(take.covered, Duration::from_millis(2_666), "from 0.000 to 2.666");
+
+		// The marker a publisher writes as it stops encoding.
+		let config = target(&broadcast, ts(0)).video.unwrap().1;
+		let container = moq_mux::catalog::hang::Container::try_from(&config).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
+		let gap = moq_mux::container::Frame {
+			timestamp: ts(3_500),
+			payload: bytes::Bytes::new(),
+			keyframe: false,
+			duration: None,
+		};
+		container.write(&mut group, &[gap]).unwrap();
+		group.finish().unwrap();
+		let result = Take::new(&target(&broadcast, ts(3_900)), Duration::from_millis(300));
+		assert!(matches!(result, Err(Error::Unsupported(_))), "{:?}", result.err());
 	}
 
 	/// A take of a track that wrote nothing in its span, such as a source that

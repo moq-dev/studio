@@ -85,6 +85,7 @@ pub struct Gate {
 	_reservation: bandwidth::Reservation,
 	grant: bandwidth::Consumer,
 	control: rate::Control,
+	ceiling: Rate,
 	always: bool,
 }
 
@@ -107,6 +108,7 @@ impl Gate {
 			grant: reservation.consume(),
 			_reservation: reservation,
 			control: rate::Control::new(policy),
+			ceiling,
 			demand,
 			always,
 		}
@@ -134,6 +136,12 @@ impl Gate {
 	/// The rendition's share of the connection, as the allocator grants it.
 	pub fn grant(&self) -> bandwidth::Consumer {
 		self.grant.clone()
+	}
+
+	/// Stop disabling below another rendition, since it is now the only one.
+	/// Starts following the grant afresh.
+	pub fn alone(&mut self) {
+		self.control = rate::Control::new(rate::Policy::new(self.ceiling));
 	}
 
 	/// The name of the rendition's track.
@@ -230,6 +238,25 @@ mod tests {
 		drop(subscription);
 		tokio::task::yield_now().await;
 		assert_eq!(watched.step(), Step::Idle, "the viewer left");
+	}
+
+	/// A rendition left alone stops disabling below the smaller one it had.
+	#[tokio::test(start_paused = true)]
+	async fn a_gate_left_alone_never_disables() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("video", None).unwrap();
+		let allocator = bandwidth::Allocator::unlimited();
+		let ceiling = Rate::from_mbps(4);
+		let mut gate = Gate::new(&allocator, track.demand(), ceiling, Some(Rate::from_mbps(1)), true);
+		let low = |gate: &mut Gate| {
+			// As a session that probed the link would report.
+			gate.control.set_probed(true);
+			gate.control.update(Some(Rate::from_kbps(500)), kio::clock::now());
+			gate.control.target()
+		};
+		assert_eq!(low(&mut gate), rate::Target::Disabled);
+		gate.alone();
+		assert_eq!(low(&mut gate), rate::Target::Enabled(Rate::from_kbps(500)));
 	}
 
 	/// A join past the newest group asks for one cut, however many pictures

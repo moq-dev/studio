@@ -501,13 +501,31 @@ impl Driver {
 		};
 
 		let result = async {
-			while let Some(mut frame) = stream.read().await? {
+			loop {
+				let idle = async {
+					match &track {
+						Some(video) => video.idle().await,
+						None => std::future::pending().await,
+					}
+				};
+				// Leaving program gives the encode session back at once, even
+				// while the capture delivers nothing new, as a still screen does.
+				let frame = tokio::select! {
+					frame = stream.read() => frame?,
+					() = idle => {
+						if let Some(video) = &mut track
+							&& let Err(err) = video.release()
+						{
+							self.fail_encoding(&mut track, err);
+						}
+						continue;
+					}
+				};
+				let Some(mut frame) = frame else { break };
 				if let Some(video) = &mut track
 					&& let Err(err) = video.encode(&mut frame)
 				{
-					tracing::warn!(source = %self.name, %err, "cannot encode the source");
-					self.fail_track(Status::Failed(err.to_string()));
-					track.take().expect("encoding").abort(&err);
+					self.fail_encoding(&mut track, err);
 				}
 				self.show(Picture::Frame(frame));
 			}
@@ -518,6 +536,17 @@ impl Driver {
 			video.abort(err);
 		}
 		result
+	}
+
+	/// Fail the source's own track with `err`, ending it, while the source
+	/// keeps drawing.
+	#[cfg(feature = "capture")]
+	fn fail_encoding(&self, track: &mut Option<crate::publish::Video<'_>>, err: Error) {
+		tracing::warn!(source = %self.name, %err, "cannot encode the source");
+		self.fail_track(Status::Failed(err.to_string()));
+		if let Some(video) = track.take() {
+			video.abort(&err);
+		}
 	}
 
 	#[cfg(feature = "capture")]

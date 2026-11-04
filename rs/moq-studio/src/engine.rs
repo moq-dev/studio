@@ -270,6 +270,9 @@ pub struct Stats {
 	pub encoding: AtomicBool,
 	/// The video encoders open, the program's and the sources'.
 	pub sessions: Sessions,
+	/// How many sizes the program's video has now: the canvas size, and the
+	/// half size unless the canvas is too small or its encoder refused it.
+	pub sizes: std::sync::atomic::AtomicUsize,
 	/// Each program track's share of the connection's bandwidth, by name.
 	grants: Mutex<BTreeMap<String, bandwidth::Consumer>>,
 	/// The encoder backend, once the program's current rendition opened one.
@@ -296,6 +299,22 @@ pub struct Load {
 	pub encoded: AtomicU64,
 	/// Microseconds the last encode took.
 	pub encode_us: AtomicU64,
+	/// Why the half size stopped, or could not start, while the canvas size
+	/// carries on, until the next canvas. The canvas size's own failure stops
+	/// the video, which [`Stats::error`] reports.
+	error: Mutex<Option<String>>,
+}
+
+impl Load {
+	/// Why the half size stopped, if it did; see [`Load::error`].
+	pub fn error(&self) -> Option<String> {
+		self.error.lock().unwrap().clone()
+	}
+
+	fn fail(&self, err: impl std::fmt::Display) {
+		tracing::warn!(%err, "the half size stopped");
+		*self.error.lock().unwrap() = Some(err.to_string());
+	}
 }
 
 /// The encoder backend the program's current rendition opened, if it has.
@@ -1142,6 +1161,10 @@ impl Renditions {
 	fn start(&self, probe: Probe) -> anyhow::Result<(Ladder, tokio::sync::oneshot::Receiver<anyhow::Result<()>>)> {
 		// Before the encode threads start, which report their own failures.
 		*self.stats.video_error.lock().unwrap() = None;
+		*self.stats.renditions[1].error.lock().unwrap() = probe.refused.clone();
+		if let Some(refused) = &probe.refused {
+			tracing::warn!(%refused, "the program goes on at the canvas size alone");
+		}
 		let ceilings: Vec<_> = probe
 			.rungs
 			.iter()
@@ -1222,6 +1245,8 @@ impl Renditions {
 struct Probe {
 	/// The canvas size first.
 	rungs: Vec<Probed>,
+	/// Why the half size could not start, when it could not.
+	refused: Option<String>,
 }
 
 /// One size of a [`Probe`].
@@ -1240,13 +1265,23 @@ impl Probe {
 		let framerate = canvas.framerate();
 		let mut kind = moq_video::encode::Kind::Auto;
 		let mut rungs = Vec::new();
+		let mut refused = None;
 		for size in ladder::sizes(moq_video::Size::new(canvas.width, canvas.height)) {
 			let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
 			config.bitrate = Some(ladder::ceiling(size, framerate));
-			config.kind = kind;
-			let (exporter, video) = Exporter::new(&gpu.device, &gpu.queue, &mut config)
+			config.kind = kind.clone();
+			let probed = Exporter::new(&gpu.device, &gpu.queue, &mut config)
 				.await
-				.with_context(|| format!("cannot encode a {}x{} canvas", size.width, size.height))?;
+				.with_context(|| format!("cannot encode a {}x{} canvas", size.width, size.height));
+			let (exporter, video) = match probed {
+				Ok(probed) => probed,
+				Err(err) if rungs.is_empty() => return Err(err),
+				// The program goes on at the canvas size alone.
+				Err(err) => {
+					refused = Some(format!("{err:#}"));
+					break;
+				}
+			};
 			kind = config.kind.clone();
 			rungs.push(Probed {
 				exporter,
@@ -1254,7 +1289,7 @@ impl Probe {
 				video,
 			});
 		}
-		Ok(Self { rungs })
+		Ok(Self { rungs, refused })
 	}
 
 	/// [`new`](Self::new) on a thread of its own, off the program clock, once
@@ -1286,11 +1321,13 @@ impl Ladder {
 	fn adopted(&self, stats: &Stats) {
 		let zero_copy = self.rungs[0].exporter.route() == Route::Gpu;
 		stats.zero_copy.store(zero_copy, Ordering::Relaxed);
+		stats.sizes.store(self.rungs.len(), Ordering::Relaxed);
 	}
 
 	/// Stop handing the renditions frames, so each encode thread encodes those
 	/// it holds, finishes its track, and returns.
 	fn end(self, stats: &Stats) -> Vec<std::thread::JoinHandle<()>> {
+		stats.sizes.store(0, Ordering::Relaxed);
 		let mut grants = stats.grants.lock().unwrap();
 		self.rungs
 			.into_iter()
@@ -1302,9 +1339,15 @@ impl Ladder {
 	}
 
 	/// Stop handing rendition `index` frames, as [`end`](Self::end) does.
+	/// The canvas size left alone no longer disables below the half size,
+	/// since no viewer has a smaller one to move to.
 	fn remove(&mut self, index: usize, stats: &Stats) -> std::thread::JoinHandle<()> {
 		let rung = self.rungs.remove(index);
 		stats.grants.lock().unwrap().remove(rung.gate.track());
+		stats.sizes.store(self.rungs.len(), Ordering::Relaxed);
+		if let [canvas] = self.rungs.as_mut_slice() {
+			canvas.gate.alone();
+		}
 		rung.thread
 	}
 }
@@ -1573,9 +1616,11 @@ fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<(
 		encoding: false,
 		enabled: true,
 	};
+	// The canvas size failing stops the video; the half size failing leaves
+	// it to the canvas size.
 	let fail = |err: &anyhow::Error| match index {
 		0 => stats.fail_video(format!("{err:#}")),
-		_ => stats.fail_video(format!("{}x{}: {err:#}", size.width, size.height)),
+		_ => stats.renditions[index].fail(format!("{}x{}: {err:#}", size.width, size.height)),
 	};
 	if let Some(opened) = opened {
 		match encoder.open() {

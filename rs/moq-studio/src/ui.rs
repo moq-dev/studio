@@ -1780,12 +1780,15 @@ impl Panels {
 			ui.end_row();
 		});
 		ui.separator();
+		// Only the sizes the program has: a small canvas, or an encoder that
+		// refused the half size, has the canvas size alone.
+		let sizes = stats.sizes.load(Ordering::Relaxed).clamp(1, stats.renditions.len());
+		let renditions = &stats.renditions[..sizes];
 		egui::Grid::new("renditions").show(ui, |ui| {
-			for heading in ["", "Canvas size", "Half size"] {
+			for heading in ["", "Canvas size", "Half size"].into_iter().take(sizes + 1) {
 				ui.strong(heading);
 			}
 			ui.end_row();
-			let renditions = &stats.renditions;
 			let row = |ui: &mut Ui, label: &str, cell: &dyn Fn(&crate::engine::Load) -> String| {
 				ui.label(label);
 				for load in renditions {
@@ -1808,6 +1811,9 @@ impl Panels {
 		});
 		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
+		}
+		if let Some(error) = stats.renditions[1].error() {
+			ui.colored_label(ui.visuals().warn_fg_color, format!("half size off: {error}"));
 		}
 	}
 

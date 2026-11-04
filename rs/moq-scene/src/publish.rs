@@ -86,16 +86,17 @@ pub struct Publish {
 	kind: moq_video::encode::Kind,
 	sessions: Sessions,
 	owners: Arc<Mutex<Owners>>,
+	/// The sources on program, which each source's video follows.
+	shown: Arc<tokio::sync::watch::Sender<BTreeSet<String>>>,
 }
 
-/// Which [`Claim`] owns each source name's entry in the local catalog, each
-/// open [`Listing`]'s catalog by its claim, and which sources show on program.
+/// Which [`Claim`] owns each source name's entry in the local catalog, and
+/// each open [`Listing`]'s catalog by its claim.
 #[derive(Default)]
 struct Owners {
 	next: u64,
 	by_name: BTreeMap<String, u64>,
 	catalogs: BTreeMap<u64, moq_mux::catalog::Producer>,
-	shown: BTreeSet<String>,
 }
 
 impl Publish {
@@ -120,6 +121,7 @@ impl Publish {
 			kind,
 			sessions,
 			owners: Default::default(),
+			shown: Default::default(),
 		})
 	}
 
@@ -136,7 +138,12 @@ impl Publish {
 	/// Encode the sources named in `shown`, those on program, whether or not
 	/// anything reads their tracks; any other encodes only while read.
 	pub fn show(&self, shown: BTreeSet<String>) {
-		self.owners.lock().unwrap().shown = shown;
+		// Only a change wakes the sources, since this runs every frame.
+		self.shown.send_if_modified(|current| {
+			let changed = *current != shown;
+			*current = shown;
+			changed
+		});
 	}
 
 	/// What each source track the local catalog lists has written, keyed by
@@ -182,11 +189,6 @@ impl Claim {
 	fn owned(&self) -> bool {
 		self.owners.lock().unwrap().by_name.get(&self.name) == Some(&self.id)
 	}
-
-	/// Whether the source shows on program.
-	fn shown(&self) -> bool {
-		self.owners.lock().unwrap().shown.contains(&self.name)
-	}
 }
 
 impl Drop for Claim {
@@ -204,6 +206,7 @@ pub(crate) struct Listing<'a> {
 	claim: &'a Claim,
 	kind: moq_video::encode::Kind,
 	sessions: Sessions,
+	shown: tokio::sync::watch::Receiver<BTreeSet<String>>,
 	broadcast: moq_net::broadcast::Producer,
 	studio: Catalog,
 	catalog: moq_mux::catalog::Producer,
@@ -225,6 +228,7 @@ impl<'a> Listing<'a> {
 			claim,
 			kind: publish.kind.clone(),
 			sessions: publish.sessions.clone(),
+			shown: publish.shown.subscribe(),
 			broadcast: publish.broadcast.clone(),
 			studio: publish.catalog.clone(),
 			catalog,
@@ -342,8 +346,13 @@ impl<E: Encode> Encoding<E> {
 
 	/// Whether anything reads the track.
 	pub fn watched(&self) -> bool {
-		let producer = self.producer.as_ref().expect("open until it ends");
-		producer.demand().wanted().is_some()
+		self.demand().wanted().is_some()
+	}
+
+	/// Who reads the track, which moves with it when a new encoder writes
+	/// another kind of picture.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.producer.as_ref().expect("open until it ends").demand()
 	}
 
 	/// Encode with `encoder` from here on, after draining the one it replaces.
@@ -463,6 +472,8 @@ impl<E: Encode> Drop for Encoding<E> {
 pub(crate) struct Video<'a> {
 	track: Encoding,
 	claim: &'a Claim,
+	/// The sources on program.
+	shown: tokio::sync::watch::Receiver<BTreeSet<String>>,
 	config: moq_video::encode::Config,
 	clock: moq_mux::Clock,
 	/// Where the capture's private timeline starts on the studio clock, in
@@ -493,6 +504,7 @@ impl<'a> Video<'a> {
 		Ok(Self {
 			track: Encoding::new(producer, listing.sessions.clone()),
 			claim: listing.claim,
+			shown: listing.shown.clone(),
 			config,
 			clock: listing.studio.clock(),
 			epoch: None,
@@ -511,12 +523,8 @@ impl<'a> Video<'a> {
 			.get_or_insert_with(|| self.clock.now().as_micros().saturating_sub(captured));
 		frame.timestamp = moq_net::Timestamp::from_micros((epoch + captured) as u64).map_err(moq_video::Error::from)?;
 
-		if !self.claim.shown() && !self.track.watched() {
-			// Gives the encode session back.
-			if self.track.is_open() {
-				self.track.discontinuity()?;
-			}
-			return Ok(());
+		if !self.used() {
+			return self.release();
 		}
 
 		let size = encodable(frame.size());
@@ -536,6 +544,45 @@ impl<'a> Video<'a> {
 		} else {
 			self.track.encode(&frame.resize(size, &Default::default())?)
 		}
+	}
+
+	/// Whether the source is used: shown on program, or its track read.
+	fn used(&self) -> bool {
+		self.shown.borrow().contains(&self.claim.name) || self.track.watched()
+	}
+
+	/// Wait until the encoder is open while nothing uses the source, so a
+	/// capture that delivers nothing new, such as a still screen, gives its
+	/// session back without waiting on a picture. Then [`release`](Self::release)
+	/// it.
+	#[cfg_attr(
+		not(any(feature = "capture", test)),
+		expect(dead_code, reason = "only a capture waits on it")
+	)]
+	pub(crate) async fn idle(&self) {
+		if !self.track.is_open() {
+			// Only a picture opens it, and a new picture means a new wait.
+			return std::future::pending().await;
+		}
+		let mut demand = self.track.demand();
+		let mut shown = self.shown.clone();
+		shown.mark_unchanged();
+		while self.used() {
+			// The first look at the demand reports it as it is now.
+			tokio::select! {
+				changed = shown.changed() => if changed.is_err() { std::future::pending::<()>().await },
+				wanted = demand.wanted_changed() => if wanted.is_err() { std::future::pending::<()>().await },
+			}
+		}
+	}
+
+	/// Close the encoder while nothing uses the source, marking the gap, which
+	/// gives the encode session back.
+	pub(crate) fn release(&mut self) -> Result<(), Error> {
+		if self.track.is_open() && !self.used() {
+			self.track.discontinuity()?;
+		}
+		Ok(())
 	}
 
 	/// Mark a break, such as a gap in a replay: what follows does not continue
@@ -795,6 +842,33 @@ mod tests {
 			assert!(publish.stats().is_empty());
 			drop(listing);
 			assert!(publish.owners.lock().unwrap().catalogs.is_empty());
+		})
+		.await;
+	}
+
+	/// A source leaving program gives its encode session back without waiting
+	/// on a picture, since a still screen delivers none.
+	#[tokio::test(start_paused = true)]
+	async fn a_video_leaving_program_closes_its_encoder_at_once() {
+		local(async {
+			let (publish, _catalog, _consumer) = studio();
+			let claim = publish.claim("display");
+			let listing = Listing::new(&claim, &publish).unwrap();
+			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+			let size = moq_video::Size::new(64, 48);
+			let mut video = Video::new(&listing, size, framerate, None).await.unwrap();
+			let wait = std::time::Duration::from_secs(1);
+
+			publish.show(["display".to_string()].into());
+			video.encode(&mut gray(size, 0)).unwrap();
+			assert_eq!(publish.sessions.open(), 1);
+			assert!(kio::clock::timeout(wait, video.idle()).await.is_err(), "on program");
+
+			publish.show(Default::default());
+			kio::clock::timeout(wait, video.idle()).await.expect("off program");
+			video.release().unwrap();
+			assert_eq!(publish.sessions.open(), 0);
+			assert!(kio::clock::timeout(wait, video.idle()).await.is_err(), "closed");
 		})
 		.await;
 	}
