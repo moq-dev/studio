@@ -423,11 +423,19 @@ impl Autosave {
 	fn take(&self, written: &mut Written, doc: &mut impl Document, loaded: Loaded, disk: Disk) -> anyhow::Result<()> {
 		let text = Text::new(&loaded.collection, &loaded.history)?;
 		doc.replace(loaded)?;
+		// A rename of the studio's still waits on its sync, unless the edit
+		// replaced that file too.
+		let unsynced =
+			|rewrite: bool, then: &Option<Vec<u8>>, now: &Option<Vec<u8>>| rewrite && now.is_some() && now == then;
+		let rewrite = Rewrite {
+			scene: unsynced(written.rewrite.scene, &written.disk.scene, &disk.scene),
+			history: unsynced(written.rewrite.history, &written.disk.history, &disk.history),
+		};
 		*written = Written {
 			collection: Some(text.collection),
 			history: Some(text.history),
 			disk,
-			rewrite: Rewrite::default(),
+			rewrite,
 		};
 		*self.conflict.lock().unwrap() = None;
 		Ok(())
@@ -1084,6 +1092,22 @@ mod tests {
 		assert_ne!(inode(), renamed, "written again, so its rename is synced");
 		assert_eq!(read(&path), mine.collection);
 		assert_eq!(read(&history_path(&path)), mine.history);
+
+		// Still written again after taking an outside edit to the history alone.
+		std::fs::remove_file(&path).unwrap();
+		mode(0o333);
+		let err = autosave.save(&doc);
+		mode(0o755);
+		assert!(err.is_err());
+		let mut theirs = Doc::new(doc.lock().unwrap().collection.clone()).into_inner().unwrap();
+		theirs.edit("Theirs");
+		theirs.history.undo(&mut theirs.collection).unwrap();
+		std::fs::write(history_path(&path), theirs.history.to_toml().unwrap()).unwrap();
+		autosave.check(&doc).unwrap();
+		assert_eq!(doc.lock().unwrap().text().unwrap(), theirs.text().unwrap());
+		let renamed = inode();
+		autosave.save(&doc).unwrap();
+		assert_ne!(inode(), renamed, "written again, so its rename is synced");
 	}
 
 	/// A retry asks for a save without putting off one already waiting, so a
