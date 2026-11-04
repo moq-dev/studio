@@ -3,7 +3,8 @@
 ## Goal
 
 The program's encoder drains its buffered pictures before it stops at exit
-and before the studio publishes the gap marker of an on-demand pause, so a
+or when a new canvas ends its rendition, and before the studio publishes the
+gap marker of an on-demand pause, so a
 pipelined hardware encoder never loses the program's last frames.
 
 ## Plan

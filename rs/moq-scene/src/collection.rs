@@ -298,7 +298,7 @@ impl Canvas {
 		moq_video::FrameRate::new(self.framerate, 1).expect("validated canvas framerate")
 	}
 
-	fn validate(&self) -> Result<(), Error> {
+	pub(crate) fn validate(&self) -> Result<(), Error> {
 		if self.width == 0 || self.height == 0 || !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
 			return Err(Error::Invalid(format!(
 				"canvas {}x{} must be non-zero and even",
