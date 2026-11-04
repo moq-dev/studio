@@ -780,7 +780,8 @@ impl Panels {
 					if label.double_clicked() || ui.small_button("Rename").clicked() {
 						self.renaming = Some((index, scene.name.clone()));
 					}
-					if program.as_deref() == Some(scene.name.as_str()) {
+					let live = program.as_deref() == Some(scene.name.as_str());
+					if live {
 						ui.colored_label(Color32::RED, "on program");
 					}
 					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
@@ -792,7 +793,11 @@ impl Panels {
 					{
 						action = Some(SceneAction::Move(index, index + 1));
 					}
-					if ui.small_button("Remove").clicked() {
+					if ui
+						.add_enabled(!live, egui::Button::new("Remove").small())
+						.on_disabled_hover_text("On program; cut to another scene first")
+						.clicked()
+					{
 						action = Some(SceneAction::Remove(index));
 					}
 				});

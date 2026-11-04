@@ -14,6 +14,7 @@
 //!   edits to them settle.
 //! - The UI runs on the main thread and edits [`State`] under its lock.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -168,7 +169,8 @@ impl State {
 	/// the one drawn, once the compositor takes its canvas. The scenes in
 	/// preview and on program follow the renames and removals `made` holds,
 	/// each edit read against the collection it was made to, and any
-	/// `collection` lacks is dropped.
+	/// `collection` lacks is dropped. Edits that remove the scene on program
+	/// are refused, changing nothing.
 	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<()> {
 		let mut before = self.collection.clone();
 		let mut renames = Vec::with_capacity(made.len());
@@ -176,6 +178,7 @@ impl State {
 			renames.push(before.renames(edit));
 			before.apply(edit)?;
 		}
+		keep_program(self.compositor.program_scene(), &renames)?;
 		self.compositor.set_canvas(collection.canvas)?;
 		for renames in &renames {
 			self.compositor.rename(renames);
@@ -207,6 +210,21 @@ impl State {
 		self.stale = true;
 		Ok(())
 	}
+}
+
+/// Refuse edits, each read as its [`Collection::renames`], that remove
+/// `program`, the scene on program, so a slip cannot put black on air. A
+/// reload that leaves it out still empties program, having nothing to show.
+fn keep_program(program: Option<&str>, renames: &[BTreeMap<String, Option<String>>]) -> anyhow::Result<()> {
+	let Some(mut program) = program else { return Ok(()) };
+	for renames in renames {
+		match renames.get(program) {
+			Some(Some(to)) => program = to,
+			Some(None) => anyhow::bail!("`{program}` is on program; cut to another scene before removing it"),
+			None => {}
+		}
+	}
+	Ok(())
 }
 
 /// How the output is doing, for the stream panel.
@@ -1198,6 +1216,38 @@ mod tests {
 		assert_eq!(stats.encoder(), None, "the retired encoder opened after the resize");
 		stats.opened_encoder(next, "new");
 		assert_eq!(stats.encoder().as_deref(), Some("new"));
+	}
+
+	/// No edit removes the scene on program: not a remove, nor an undo of the
+	/// add that made it, even after a rename, while any other scene can go.
+	#[test]
+	fn the_scene_on_program_stays() {
+		let mut collection = Collection::new();
+		let live = collection.scenes[0].name.clone();
+		let mut draft = collection.draft("Add `Other`");
+		draft.insert_scene(1, moq_scene::Scene::new("Other")).unwrap();
+		let add = draft.finish().unwrap();
+		collection.apply(&add).unwrap();
+		let mut draft = collection.draft("Rename `Other`");
+		draft.rename_scene(1, "Renamed").unwrap();
+		let rename = draft.finish().unwrap();
+		let added = collection.clone();
+		collection.apply(&rename).unwrap();
+
+		let remove = |collection: &Collection, index| {
+			let mut draft = collection.draft("Remove");
+			draft.remove_scene(index).unwrap();
+			collection.renames(&draft.finish().unwrap())
+		};
+		assert!(keep_program(Some(&live), &[remove(&collection, 0)]).is_err());
+		keep_program(Some(&live), &[remove(&collection, 1)]).unwrap();
+		keep_program(None, &[remove(&collection, 0)]).unwrap();
+
+		// Undoing both edits, newest first, removes `Other` once renamed.
+		let undo = [collection.renames(&rename.inverse()), added.renames(&add.inverse())];
+		let err = keep_program(Some("Renamed"), &undo).unwrap_err();
+		assert!(err.to_string().contains("`Other` is on program"), "{err}");
+		keep_program(Some(&live), &undo).unwrap();
 	}
 
 	async fn subscribe(
