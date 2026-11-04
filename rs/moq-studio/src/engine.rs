@@ -774,7 +774,7 @@ impl Engine {
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
 		// A stalled picture matters where the program draws it: a scene on air,
-		// including one fading out, or the top layer over them. Stalled sound
+		// including one leaving in a transition, or the top layer over them. Stalled sound
 		// matters wherever the program plays it.
 		let stalled = {
 			let state = self.state.lock().unwrap();
@@ -2178,7 +2178,7 @@ mod tests {
 		};
 		let removed = [remove(&collection, 0)];
 		assert!(keep_on_air([live.as_str()], &removed).is_err());
-		assert!(keep_on_air(["Renamed", live.as_str()], &removed).is_err(), "fading out");
+		assert!(keep_on_air(["Renamed", live.as_str()], &removed).is_err(), "leaving");
 		keep_on_air([live.as_str()], &[remove(&collection, 1)]).unwrap();
 		keep_on_air([], &removed).unwrap();
 

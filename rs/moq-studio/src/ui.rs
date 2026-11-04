@@ -11,8 +11,8 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::browser::Paint;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
-	Blend, Canvas, Clip, Collection, Crop, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source, Transition,
-	Video, wgpu,
+	Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source,
+	Transition, Video, wgpu,
 };
 
 use crate::autosave::Conflict;
@@ -104,6 +104,7 @@ impl Studio {
 				selection: None,
 				gestures: Gestures::default(),
 				snapping: Snapping::default(),
+				direction: Direction::Left,
 				drag: None,
 				new_scene: String::new(),
 				renaming: None,
@@ -206,6 +207,9 @@ struct Panels {
 	selection: Option<Selection>,
 	gestures: Gestures,
 	snapping: Snapping,
+	/// The direction a slide or wipe last had, which the transition picker
+	/// offers again after a fade or move.
+	direction: Direction,
 	/// The item a drag in the preview holds.
 	drag: Option<Drag>,
 	new_scene: String,
@@ -847,34 +851,71 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let canvas = state.collection().canvas;
-		let fade = state.collection().transition.fade;
-		let mut result = Ok(());
+		let transition = state.collection().transition;
+		let mut next = transition;
+		let mut gesture = None;
 		ui.horizontal(|ui| {
 			if ui.button("Cut").clicked() {
 				state.compositor.cut();
 			}
-			if ui.button("Fade").clicked() {
-				state.compositor.fade(fade, kio::clock::Instant::now());
+			if ui
+				.button("Transition")
+				.on_hover_text("Take the preview to program by the transition set beside it")
+				.clicked()
+			{
+				state.compositor.transition(transition, kio::clock::Instant::now());
 			}
-			let mut millis = fade.as_millis() as u64;
+			let duration = next.duration();
+			if let Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } = next {
+				self.direction = direction;
+			}
+			let direction = self.direction;
+			egui::ComboBox::from_id_salt("transition")
+				.selected_text(transition_name(&next))
+				.show_ui(ui, |ui| {
+					let kinds = [
+						Transition::Fade { duration },
+						Transition::Slide { duration, direction },
+						Transition::Wipe { duration, direction },
+						Transition::Move { duration },
+					];
+					for kind in kinds {
+						ui.selectable_value(&mut next, kind, transition_name(&kind));
+					}
+				});
+			if let Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } = &mut next {
+				egui::ComboBox::from_id_salt("direction")
+					.selected_text(direction_name(*direction))
+					.show_ui(ui, |ui| {
+						for to in Direction::ALL {
+							ui.selectable_value(direction, to, direction_name(to));
+						}
+					});
+			}
+			let mut millis = duration.as_millis() as u64;
 			let response = ui
 				.add(egui::DragValue::new(&mut millis).suffix(" ms"))
-				.on_hover_text("How long a fade takes");
-			let gesture = self.gestures.of(&response);
+				.on_hover_text("How long the transition takes");
+			let dragging = self.gestures.of(&response);
 			if response.changed() {
-				let fade = Duration::from_millis(millis);
-				result = edit(&mut state, "Set the fade time", gesture, |draft| {
-					draft.set_transition(Transition { fade })
-				});
+				*next.duration_mut() = Duration::from_millis(millis);
+				gesture = dragging;
 			}
 			ui.label(format!(
 				"Program: {}",
 				state.compositor.program_scene().unwrap_or("nothing")
 			));
-			if state.compositor.fading() {
-				ui.weak("fading");
+			if state.compositor.transitioning() {
+				ui.weak("in transition");
 			}
 		});
+		let result = if next == transition {
+			Ok(())
+		} else {
+			edit(&mut state, "Set the transition", gesture, |draft| {
+				draft.set_transition(next)
+			})
+		};
 		drop(state);
 		self.check(result);
 		picture(ui, self.program.id, canvas, egui::Sense::hover());
@@ -2285,6 +2326,24 @@ fn filter_name(filter: &Filter) -> &'static str {
 		Filter::LumaKey { .. } => "luma key",
 		Filter::Lut { .. } => "LUT",
 		Filter::Mask { .. } => "mask",
+	}
+}
+
+fn transition_name(transition: &Transition) -> &'static str {
+	match transition {
+		Transition::Fade { .. } => "fade",
+		Transition::Slide { .. } => "slide",
+		Transition::Wipe { .. } => "wipe",
+		Transition::Move { .. } => "move",
+	}
+}
+
+fn direction_name(direction: Direction) -> &'static str {
+	match direction {
+		Direction::Left => "left",
+		Direction::Right => "right",
+		Direction::Up => "up",
+		Direction::Down => "down",
 	}
 }
 

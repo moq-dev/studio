@@ -17,10 +17,10 @@
 //!   compositor and sound goes to a `moq_audio::bus::Bus`, routed into its
 //!   program mix.
 //! - [`Compositor`] draws the scene in preview and the scene on program into
-//!   textures on the caller's `wgpu` device, cutting or fading between them.
-//!   `moq_video::render::export` hands the program to an encoder, on the GPU
-//!   where the platform allows, and a [`Scaler`] draws it smaller for a
-//!   smaller rendition.
+//!   textures on the caller's `wgpu` device, cutting or running a
+//!   [`Transition`] between them. `moq_video::render::export` hands the
+//!   program to an encoder, on the GPU where the platform allows, and a
+//!   [`Scaler`] draws it smaller for a smaller rendition.
 //! - [`publish`] gives each local source its own track, in a broadcast the
 //!   studio keeps to itself, to replay or record the source on its own.
 //!
@@ -44,7 +44,8 @@ pub mod source;
 
 pub use clip::Clip;
 pub use collection::{
-	Audio, Blend, Canvas, Collection, Crop, Filter, Item, Layer, MaskMode, Rect, Rgba, Scene, Source, Transition, Video,
+	Audio, Blend, Canvas, Collection, Crop, Direction, Filter, Item, Layer, MaskMode, Rect, Rgba, Scene, Source,
+	Transition, Video,
 };
 pub use compositor::{Compositor, FORMAT};
 pub use edit::{Change, Draft, Edit, History};

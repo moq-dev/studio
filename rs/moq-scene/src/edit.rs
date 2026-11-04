@@ -608,7 +608,7 @@ impl Draft {
 		item.ok_or_else(|| conflict(format!("there is no item {index} in {layer}")))
 	}
 
-	/// Set how a fade behaves.
+	/// Set how the preview is taken to program, short of a cut.
 	pub fn set_transition(&mut self, transition: Transition) -> Result<(), Error> {
 		let before = self.collection.transition;
 		self.change(Change::Transition {
@@ -1158,10 +1158,10 @@ mod tests {
 		let start = collection.clone();
 		let mut history = History::new();
 		for millis in [400, 500, 600] {
-			let mut draft = collection.draft("Set the fade time");
+			let mut draft = collection.draft("Set the transition");
 			draft
-				.set_transition(Transition {
-					fade: std::time::Duration::from_millis(millis),
+				.set_transition(Transition::Fade {
+					duration: std::time::Duration::from_millis(millis),
 				})
 				.unwrap();
 			commit(&mut collection, &mut history, draft, Some(1));
