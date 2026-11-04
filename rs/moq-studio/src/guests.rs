@@ -12,10 +12,11 @@
 //!
 //! A token cannot be revoked, and the relay ends a session at its expiry. So
 //! while a guest is in the room, the studio signs them a fresh token every half
-//! `--guest-expiry` and publishes it at `.renew/<identity>`, which only their
-//! token may subscribe to. The join page presents each one in band. Removing a guest from scenes stops
-//! their renewals, across restarts, until a new link, so their last token
-//! bounds how long they stay.
+//! `--guest-expiry` and publishes it at `.renew/<identity>/<generation>`,
+//! which only their token may subscribe to. The join page presents each one in
+//! band. Removing a guest from scenes stops their renewals, across restarts,
+//! until a new link, which moves them to the next generation, so their last
+//! token bounds how long they stay.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -33,8 +34,8 @@ use crate::engine::Engine;
 /// The domain `.github/workflows/join.yml` deploys `js/join` to.
 const JOIN_PAGE: &str = "https://join.studio.moq.dev/";
 
-/// Where each guest's renewed tokens are published: `.renew/<identity>`, which
-/// moq-room's announcements hide. `js/join` reads the same path.
+/// The prefix of each guest's renewed tokens, which moq-room's announcements
+/// hide; [`Room::renewal_path`] names the rest. `js/join` reads the same path.
 const RENEW: &str = ".renew";
 
 /// The track holding a guest's renewed tokens, one group each. `js/join` reads
@@ -76,9 +77,8 @@ pub struct Config {
 
 impl Config {
 	/// The room these flags describe on the relay at `connect`, or `None` without
-	/// `--room`, remembering who was removed from scenes beside the scene file
-	/// at `scenes`.
-	pub fn load(&self, connect: Option<&Url>, scenes: &std::path::Path) -> anyhow::Result<Option<Room>> {
+	/// `--room`, remembering who was removed from scenes beside the room key.
+	pub fn load(&self, connect: Option<&Url>) -> anyhow::Result<Option<Room>> {
 		let (room, key) = match (&self.room, &self.room_key, &self.join_page) {
 			(None, None, None) => return Ok(None),
 			(Some(room), Some(key), _) => (room, key),
@@ -89,18 +89,20 @@ impl Config {
 			.clone()
 			.unwrap_or_else(|| Url::parse(JOIN_PAGE).expect("the default join page is a URL"));
 		let connect = connect.context("guests join through the relay; add --connect")?;
+		let removals = removals_path(key);
 		let key = moq_auth::Key::from_file(key).with_context(|| format!("reading the room key {}", key.display()))?;
 		let room = Room::new(connect, room, key, page, self.guest_expiry.into())?;
-		Ok(Some(room.remember(removals_path(scenes))?))
+		Ok(Some(room.remember(removals)?))
 	}
 }
 
 /// Where the guests removed from scenes, and how often each was let back in,
-/// are kept: `show.guests.toml` for `show.toml`, beside its history.
-fn removals_path(scenes: &std::path::Path) -> PathBuf {
-	let mut name = scenes.file_stem().unwrap_or_default().to_os_string();
+/// are kept: `room.guests.toml` for `room.jwk`. Beside the key, since the
+/// tokens they bound are the key's, whichever scene file the studio opens.
+fn removals_path(key: &std::path::Path) -> PathBuf {
+	let mut name = key.file_stem().unwrap_or_default().to_os_string();
 	name.push(".guests.toml");
-	scenes.with_file_name(name)
+	key.with_file_name(name)
 }
 
 /// The file at [`removals_path`].
@@ -811,7 +813,6 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("room.jwk");
 		key("show/guests", &["**"], &["**"]).to_file(&path).unwrap();
-		let scenes = dir.path().join("show.toml");
 		let connect = Url::parse("https://relay.example/show").unwrap();
 		let config = |room: bool, key: bool, page: bool| Config {
 			room: room.then(|| "guests".into()),
@@ -820,31 +821,23 @@ mod tests {
 			guest_expiry: EXPIRY.into(),
 		};
 
-		assert!(
-			config(false, false, false)
-				.load(Some(&connect), &scenes)
-				.unwrap()
-				.is_none()
-		);
+		assert!(config(false, false, false).load(Some(&connect)).unwrap().is_none());
 		for partial in [
 			config(true, false, true),
 			config(false, true, true),
 			config(false, false, true),
 		] {
-			let err = partial.load(Some(&connect), &scenes).err().unwrap();
+			let err = partial.load(Some(&connect)).err().unwrap();
 			assert!(err.to_string().contains("need both"), "{err}");
 		}
-		let err = config(true, true, true).load(None, &scenes).err().unwrap();
+		let err = config(true, true, true).load(None).err().unwrap();
 		assert!(err.to_string().contains("--connect"), "{err}");
-		let room = config(true, true, true).load(Some(&connect), &scenes).unwrap().unwrap();
+		let room = config(true, true, true).load(Some(&connect)).unwrap().unwrap();
 		assert_eq!(room.path().as_str(), "guests");
 		let link = room.invite("alice").unwrap().link;
 		assert!(link.as_str().starts_with("https://studio.example/join/#"), "{link}");
 
-		let room = config(true, true, false)
-			.load(Some(&connect), &scenes)
-			.unwrap()
-			.unwrap();
+		let room = config(true, true, false).load(Some(&connect)).unwrap().unwrap();
 		let link = room.invite("alice").unwrap().link;
 		assert!(link.as_str().starts_with(JOIN_PAGE), "{link}");
 	}
@@ -1272,14 +1265,15 @@ mod tests {
 		assert!(renewals.tracks.is_empty(), "a guest who left is not renewed");
 	}
 
-	/// A removed guest stays unrenewed when the studio restarts, until a new
-	/// link, whose generation a restart keeps too.
+	/// A removed guest stays unrenewed when the studio restarts, whichever
+	/// scene file it opens, until a new link, whose generation a restart keeps
+	/// too: the state is the room key's, kept beside it.
 	#[test]
 	fn a_removal_outlasts_a_restart() {
 		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("room.jwk");
+		std::fs::create_dir(dir.path().join("keys")).unwrap();
+		let path = dir.path().join("keys/room.jwk");
 		key("show/guests", &["**"], &["**"]).to_file(&path).unwrap();
-		let scenes = dir.path().join("show.toml");
 		let connect = Url::parse("https://relay.example/show").unwrap();
 		let config = Config {
 			room: Some("guests".into()),
@@ -1287,13 +1281,15 @@ mod tests {
 			join_page: None,
 			guest_expiry: EXPIRY.into(),
 		};
-		let start = || config.load(Some(&connect), &scenes).unwrap().unwrap();
+		// Nothing the studio loads names the scene file, so another one sees the same state.
+		let start = || config.load(Some(&connect)).unwrap().unwrap();
 		let camera = Path::new("alice/camera.hang").unwrap();
 
 		let room = start();
 		room.invite("alice").unwrap();
 		room.stop_renewing("alice").unwrap();
-		assert!(dir.path().join("show.guests.toml").exists());
+		let file = dir.path().join("keys/room.guests.toml");
+		assert!(file.exists());
 
 		let room = start();
 		room.observe(&camera, true, &Collection::new(), &History::new());
@@ -1314,7 +1310,6 @@ mod tests {
 		);
 
 		// A removal the file cannot hold is not made, so trying again saves it.
-		let file = dir.path().join("show.guests.toml");
 		std::fs::remove_file(&file).unwrap();
 		std::fs::create_dir(&file).unwrap();
 		assert!(room.stop_renewing("alice").is_err());

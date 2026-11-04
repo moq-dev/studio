@@ -222,9 +222,10 @@ who reconnects after you removed their source comes back under a new name
 of their sources, and any mask reading them out of every scene and the top
 layer and mutes them. A signed token cannot be taken back, so it also stops
 renewing theirs, and they are disconnected within `--guest-expiry`. That
-holds across a restart: removed guests are kept beside the scene file, as
-`show.guests.toml` for `show.toml`. Undo puts them back in the scenes but not
-on renewal; **New link** lets them back in and renews them again, under a new
+holds across a restart, whichever scene file you open: removed guests are
+kept beside the room key, as `room.guests.toml` for `room.jwk`, so its
+directory must be writable. Undo puts them back in the scenes but not on
+renewal; **New link** lets them back in and renews them again, under a new
 generation, so a link from before the removal cannot read their renewals.
 
 ## Scene file
