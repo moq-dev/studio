@@ -933,25 +933,32 @@ impl Effects {
 		})
 	}
 
-	/// A whole canvas-sized `picture` faded to `opacity`, to draw over another.
-	pub fn fade(&self, picture: &Picture, opacity: f32) -> Prepared {
-		let canvas = Area::canvas(self.canvas);
-		Prepared {
+	/// A whole canvas-sized `picture` stretched over `at`, showing only within
+	/// `within`, at `opacity`, to draw over another: `None` if none of it
+	/// shows on the canvas.
+	pub fn place(&self, picture: &Picture, at: Rect, within: Rect, opacity: f32) -> Option<Prepared> {
+		let area = Area::of(at);
+		let bounds = area.intersect(&Area::of(within)).intersect(&Area::canvas(self.canvas));
+		if bounds.is_empty() || opacity <= 0.0 {
+			return None;
+		}
+		let ops = (opacity < 1.0).then(|| Op::of(&Filter::Opacity { amount: opacity }).expect("per pixel"));
+		Some(Prepared {
 			input: Input {
 				picture: picture.clone(),
-				area: canvas,
+				area,
 				uv: UNIT,
 				valid: UNIT,
 				premultiplied: false,
 			},
 			segment: Segment {
-				ops: vec![Op::of(&Filter::Opacity { amount: opacity }).expect("per pixel")],
+				ops: ops.into_iter().collect(),
 				..Default::default()
 			},
-			item: canvas,
-			bounds: canvas,
+			item: area,
+			bounds,
 			blend: Blend::Normal,
-		}
+		})
 	}
 
 	/// Draw `prepared` onto the target `frame` last started, which is `texture`.

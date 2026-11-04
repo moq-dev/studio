@@ -1590,7 +1590,7 @@ mod tests {
 		};
 		let removed = [remove(&collection, 0)];
 		assert!(keep_on_air([live.as_str()], &removed).is_err());
-		assert!(keep_on_air(["Renamed", live.as_str()], &removed).is_err(), "fading out");
+		assert!(keep_on_air(["Renamed", live.as_str()], &removed).is_err(), "leaving");
 		keep_on_air([live.as_str()], &[remove(&collection, 1)]).unwrap();
 		keep_on_air([], &removed).unwrap();
 

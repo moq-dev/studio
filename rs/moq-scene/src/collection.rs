@@ -22,7 +22,7 @@ use crate::Error;
 pub struct Collection {
 	/// The output every scene is drawn onto.
 	pub canvas: Canvas,
-	/// How a fade from preview to program behaves.
+	/// How the preview is taken to program, short of a cut.
 	#[serde(default)]
 	pub transition: Transition,
 	/// Every source, by its unique name. Scenes refer to sources by that name,
@@ -329,21 +329,106 @@ impl Default for Canvas {
 	}
 }
 
-/// How the program changes when the preview is faded in.
+/// How the program changes when the preview is taken to it, short of a cut.
+///
+/// A fade runs at an even pace; the others ease in and out, so motion starts
+/// and lands gently. One that takes no time is a cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Transition {
-	/// How long a fade takes.
-	#[serde(with = "humantime_serde")]
-	pub fade: Duration,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Transition {
+	/// The incoming scene fades in over the outgoing one.
+	Fade {
+		/// How long it takes.
+		#[serde(with = "humantime_serde")]
+		duration: Duration,
+	},
+	/// The incoming scene pushes the outgoing one off the canvas, both moving
+	/// in `direction`.
+	Slide {
+		/// How long it takes.
+		#[serde(with = "humantime_serde")]
+		duration: Duration,
+		/// Which way the scenes move.
+		direction: Direction,
+	},
+	/// An edge sweeps across the canvas in `direction`, uncovering the
+	/// incoming scene behind it.
+	Wipe {
+		/// How long it takes.
+		#[serde(with = "humantime_serde")]
+		duration: Duration,
+		/// Which way the edge moves.
+		direction: Direction,
+	},
+	/// Each item showing a source both scenes place glides from where the
+	/// outgoing scene has it to where the incoming one does, resizing and
+	/// recropping on the way; the other items fade out and in.
+	Move {
+		/// How long it takes.
+		#[serde(with = "humantime_serde")]
+		duration: Duration,
+	},
+}
+
+impl Transition {
+	/// How long it takes.
+	pub fn duration(&self) -> Duration {
+		match *self {
+			Self::Fade { duration }
+			| Self::Slide { duration, .. }
+			| Self::Wipe { duration, .. }
+			| Self::Move { duration } => duration,
+		}
+	}
+
+	/// How long it takes, to change.
+	pub fn duration_mut(&mut self) -> &mut Duration {
+		match self {
+			Self::Fade { duration }
+			| Self::Slide { duration, .. }
+			| Self::Wipe { duration, .. }
+			| Self::Move { duration } => duration,
+		}
+	}
+
+	/// How far along it looks once `linear` of its time has passed, both from
+	/// 0 to 1: as is for a fade, and eased in and out otherwise.
+	pub fn progress(&self, linear: f32) -> f32 {
+		let linear = linear.clamp(0.0, 1.0);
+		match self {
+			Self::Fade { .. } => linear,
+			// The cubic ease in and out.
+			_ if linear < 0.5 => 4.0 * linear.powi(3),
+			_ => 1.0 - (2.0 - 2.0 * linear).powi(3) / 2.0,
+		}
+	}
 }
 
 impl Default for Transition {
 	fn default() -> Self {
-		Self {
-			fade: Duration::from_millis(300),
+		Self::Fade {
+			duration: Duration::from_millis(300),
 		}
 	}
+}
+
+/// Which way a [`Transition`] moves across the canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+	/// Toward the left edge.
+	Left,
+	/// Toward the right edge.
+	Right,
+	/// Toward the top edge.
+	Up,
+	/// Toward the bottom edge.
+	Down,
+}
+
+impl Direction {
+	/// Every direction.
+	pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
 }
 
 /// One arrangement of sources on the canvas.
@@ -1066,7 +1151,9 @@ height = 720
 framerate = 60
 
 [transition]
-fade = "500ms"
+kind = "slide"
+duration = "500ms"
+direction = "up"
 
 [sources.cam]
 kind = "camera"
@@ -1113,7 +1200,13 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 "##;
 		let collection = Collection::from_toml(text).unwrap();
 		assert_eq!(collection.canvas.framerate, 60);
-		assert_eq!(collection.transition.fade, Duration::from_millis(500));
+		assert_eq!(
+			collection.transition,
+			Transition::Slide {
+				duration: Duration::from_millis(500),
+				direction: Direction::Up
+			}
+		);
 		assert_eq!(collection.sources["cam"], Source::Camera { id: None });
 		assert_eq!(
 			collection.sources["bg"],
