@@ -546,6 +546,9 @@ enum Request {
 	Close(u64),
 	/// Paint these overlays as of this time on the program clock.
 	Paint(Instant, Vec<u64>),
+	/// Stop the thread the way a panic in Blitz would.
+	#[cfg(test)]
+	Panic,
 }
 
 impl Overlays {
@@ -616,6 +619,14 @@ impl Overlays {
 	}
 }
 
+#[cfg(test)]
+impl Overlays {
+	/// Stop the thread as a panic in Blitz would.
+	pub fn panic(&self) {
+		self.requests.send(Request::Panic).unwrap();
+	}
+}
+
 /// One open overlay, which closes when dropped.
 pub(crate) struct Overlay {
 	id: u64,
@@ -671,6 +682,8 @@ fn run(
 			Request::Close(id) => {
 				documents.remove(&id);
 			}
+			#[cfg(test)]
+			Request::Panic => panic!("a test stopped the overlay thread"),
 			Request::Paint(now, ids) => {
 				let painter = painter.get_or_insert_with(|| Painter::new(device));
 				let failed = ids

@@ -386,21 +386,17 @@ impl Compositor {
 
 		let failed = overlays.paint(now, painting.clone());
 		for (name, layer) in &mut self.layers {
-			let Some(overlay) = layer
-				.overlay
-				.as_ref()
-				.filter(|overlay| painting.contains(&overlay.id()))
-			else {
-				continue;
-			};
+			let Some(overlay) = &layer.overlay else { continue };
 			let error = match &failed {
-				Ok(failed) => failed.get(&overlay.id()).cloned(),
-				// Its thread is gone, so the overlay is too, until it is edited.
+				// The thread is gone, and with it every overlay it held, drawn or
+				// not, until each is edited.
 				Err(err) => {
 					layer.overlay = None;
 					layer.picture = None;
 					Some(err.to_string())
 				}
+				Ok(_) if !painting.contains(&overlay.id()) => continue,
+				Ok(failed) => failed.get(&overlay.id()).cloned(),
 			};
 			if let Some(err) = &error
 				&& layer.error.is_none()
@@ -1510,6 +1506,50 @@ mod tests {
 				);
 				assert_eq!(pixel(&program, 3, 6), BLACK, "{at} ms: the rest is transparent");
 			}
+		})
+		.await;
+	}
+
+	/// When the overlay thread stops, every overlay it held fails, including
+	/// one off air, rather than showing its last paint when cut to.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stopped_overlay_thread_fails_every_overlay() {
+		local(async {
+			let mut collection = collection();
+			let overlay = |color: &str| Source::Overlay {
+				html: format!("<body style=\"margin: 0; background: {color}\"></body>"),
+				width: 8,
+				height: 8,
+			};
+			collection.sources.insert("shown".into(), overlay("lime"));
+			collection.sources.insert("aside".into(), overlay("yellow"));
+			let fill = Rect::fill(&collection.canvas);
+			collection.scenes[0].items = vec![Item::new("red", fill), Item::new("aside", fill)];
+			collection.scenes[1].items = vec![Item::new("blue", fill), Item::new("shown", fill)];
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+
+			// Paint the aside overlay, then leave it off air.
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.render(start);
+			assert_eq!(pixel(&studio.program(), 3, 3), [255, 255, 0, 255]);
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut();
+			studio.render(start);
+
+			studio.compositor.overlays.as_ref().unwrap().panic();
+			studio.render(start);
+			for name in ["shown", "aside"] {
+				let err = studio.compositor.error(name).unwrap_or_else(|| panic!("{name} fails"));
+				assert!(err.contains("overlay thread stopped"), "{name}: {err}");
+			}
+
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.render(start);
+			assert_eq!(pixel(&studio.program(), 3, 3), RED, "no frozen overlay");
 		})
 		.await;
 	}
