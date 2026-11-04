@@ -177,8 +177,7 @@ impl<'a> Listing<'a> {
 		// The studio's clock, so source and program timestamps share one timeline.
 		let config = moq_mux::catalog::Config::default()
 			.with_clock(publish.catalog.clock())
-			.with_bandwidth(publish.bandwidth.clone())
-			.with_hls(None);
+			.with_bandwidth(publish.bandwidth.clone());
 		let catalog = moq_mux::catalog::Producer::new(&mut scratch, config)?;
 		claim.owners.lock().unwrap().catalogs.insert(claim.id, catalog.clone());
 		Ok(Self {
@@ -198,8 +197,9 @@ impl<'a> Listing<'a> {
 		let mut updates = self.catalog.consume()?;
 		let mut studio = self.studio.clone();
 		while let Some(mut catalog) = updates.next().await? {
-			// Already at the studio catalog's root.
-			catalog.clock = None;
+			// Media timing is the root's: the one clock, and the join interval an
+			// HLS export of the program numbers its segments on.
+			catalog.media = Default::default();
 			// The claim is checked inside the mutation, so a newer source's
 			// writes, made under the same lock, are never overwritten.
 			studio.mutate(|root| {
@@ -411,7 +411,7 @@ impl Video {
 		let reserved = listing
 			.catalog
 			.reserve()
-			.with_hls_hint(config.gop.duration(config.framerate));
+			.with_interval(config.gop.duration(config.framerate));
 		let producer = moq_video::encode::Producer::new(listing.broadcast.clone(), reserved, rendition)?;
 		Ok(Self {
 			track: Encoding::new(producer),
@@ -609,7 +609,7 @@ mod tests {
 			let snapshot = listed(&catalog, |sources| sources.len() == 2).await;
 			assert!(snapshot.video.renditions.is_empty(), "no source is a program rendition");
 			let published = &snapshot.ext.studio.sources;
-			assert!(published["red"].clock.is_none(), "the root carries the clock");
+			assert!(published["red"].media.is_empty(), "the root carries the media timing");
 			assert_eq!(sources.get("red").unwrap().track(), Some(Status::Live));
 			assert_eq!(sources.get("guest").unwrap().track(), None);
 			assert!(sources.get("red copy").is_none(), "a clone opens no feed, so no track");
