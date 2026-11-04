@@ -45,6 +45,10 @@ themselves; off, viewers see the page only in the program. A replay source
 layout says when it is hidden and when its span has ended, rather than leaving
 a viewer on its last frame.
 
+Items carry their keyframes (`moq_scene::Keyframe`), which play from when
+their scene went on program, so the layout says when that was on the media
+clock, and a viewer that joins late lands at the same point of them.
+
 Only sources the creator publishes independently
 ([Published independently](/quest/m0/publish-independently.md)) have tracks a
 viewer can fetch; the rest reach viewers only in the program.

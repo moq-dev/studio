@@ -1,5 +1,6 @@
 //! The scene graph, and the TOML file a [`Collection`] saves to.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
@@ -177,6 +178,19 @@ impl Collection {
 					.validate()
 					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 				self.validate_chain(&item.filters, &on)?;
+				if layer == Layer::Top && !item.keyframes.is_empty() {
+					return Err(Error::Invalid(format!(
+						"{on} has keyframes, but the top layer never goes on to start them"
+					)));
+				}
+				if !item.keyframes.is_sorted_by_key(|keyframe| keyframe.at) {
+					return Err(Error::Invalid(format!("{on} has keyframes out of order")));
+				}
+				for keyframe in &item.keyframes {
+					keyframe
+						.validate()
+						.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
+				}
 			}
 		}
 
@@ -411,13 +425,47 @@ impl Transition {
 	/// How far along it looks once `linear` of its time has passed, both from
 	/// 0 to 1: as is for a fade, and eased in and out otherwise.
 	pub(crate) fn progress(&self, linear: f32) -> f32 {
+		match self {
+			Self::Fade { .. } => Ease::Linear.apply(linear),
+			_ => Ease::InOut.apply(linear),
+		}
+	}
+}
+
+/// How a change speeds up and slows down over its time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ease {
+	/// At an even pace.
+	Linear,
+	/// Starting slowly (cubic).
+	In,
+	/// Landing slowly (cubic).
+	Out,
+	/// Starting and landing slowly (cubic).
+	#[default]
+	InOut,
+}
+
+impl Ease {
+	/// Every curve.
+	pub const ALL: [Self; 4] = [Self::Linear, Self::In, Self::Out, Self::InOut];
+
+	/// How far along the change looks once `linear` of its time has passed,
+	/// both from 0 to 1.
+	pub(crate) fn apply(self, linear: f32) -> f32 {
 		let linear = linear.clamp(0.0, 1.0);
 		match self {
-			Self::Fade { .. } => linear,
-			// The cubic ease in and out.
-			_ if linear < 0.5 => 4.0 * linear.powi(3),
-			_ => 1.0 - (2.0 - 2.0 * linear).powi(3) / 2.0,
+			Self::Linear => linear,
+			Self::In => linear.powi(3),
+			Self::Out => 1.0 - (1.0 - linear).powi(3),
+			Self::InOut if linear < 0.5 => 4.0 * linear.powi(3),
+			Self::InOut => 1.0 - (2.0 - 2.0 * linear).powi(3) / 2.0,
 		}
+	}
+
+	fn is_default(&self) -> bool {
+		*self == Self::default()
 	}
 }
 
@@ -512,10 +560,16 @@ pub struct Item {
 	/// How the filtered picture mixes with what is under it.
 	#[serde(default, skip_serializing_if = "Blend::is_normal")]
 	pub blend: Blend,
+	/// How the item moves away from and back to where it rests, from when its
+	/// scene goes on, in order of time. It plays once: before the first
+	/// keyframe the item holds that one, and after the last it holds the last.
+	/// A top-layer item has none, since the top layer never goes on.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub keyframes: Vec<Keyframe>,
 }
 
 impl Item {
-	/// `source` shown, uncropped and unfiltered, at `rect`.
+	/// `source` shown, uncropped, unfiltered, and still, at `rect`.
 	pub fn new(source: impl Into<String>, rect: Rect) -> Self {
 		Self {
 			source: source.into(),
@@ -524,8 +578,145 @@ impl Item {
 			crop: Crop::default(),
 			filters: Vec::new(),
 			blend: Blend::Normal,
+			keyframes: Vec::new(),
 		}
 	}
+
+	/// The item as it is drawn `since` its scene went on: moved, resized,
+	/// cropped, and filtered by its keyframes, which the result has none of.
+	pub fn posed(&self, since: Duration) -> Cow<'_, Self> {
+		let Some(offset) = self.offset(since) else {
+			return Cow::Borrowed(self);
+		};
+		let mut filters = self.filters.clone();
+		filters.extend(offset.filters);
+		Cow::Owned(Self {
+			source: self.source.clone(),
+			rect: Rect {
+				x: self.rect.x + offset.x,
+				y: self.rect.y + offset.y,
+				// A size shrunk past nothing draws nothing.
+				width: (self.rect.width + offset.width).max(0.0),
+				height: (self.rect.height + offset.height).max(0.0),
+			},
+			visible: self.visible,
+			crop: self.crop.then(&offset.crop),
+			filters,
+			blend: self.blend,
+			keyframes: Vec::new(),
+		})
+	}
+
+	/// `since` held within the keyframes' times, so two times this clamps to
+	/// the same pose the item the same.
+	pub(crate) fn settled(&self, since: Duration) -> Duration {
+		match (self.keyframes.first(), self.keyframes.last()) {
+			(Some(first), Some(last)) => since.clamp(first.at, last.at),
+			_ => Duration::ZERO,
+		}
+	}
+
+	/// How far the keyframes take the item from where it rests `since` its
+	/// scene went on, or `None` if it has none.
+	fn offset(&self, since: Duration) -> Option<Keyframe> {
+		let next = self.keyframes.iter().position(|keyframe| keyframe.at > since);
+		let (from, to) = match next {
+			None => return self.keyframes.last().cloned(),
+			Some(0) => return self.keyframes.first().cloned(),
+			Some(next) => (&self.keyframes[next - 1], &self.keyframes[next]),
+		};
+		// `to` is later than `since`, and `from` no later, so the span is not empty.
+		let linear = (since - from.at).as_secs_f32() / (to.at - from.at).as_secs_f32();
+		Some(from.toward(to, to.ease.apply(linear)))
+	}
+}
+
+/// Where an item is at a moment after its scene goes on, as an offset from
+/// where it rests, so moving the item moves its whole animation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Keyframe {
+	/// How long after the item's scene goes on.
+	#[serde(with = "humantime_serde")]
+	pub at: Duration,
+	/// How the item eases into this keyframe from the one before.
+	#[serde(default, skip_serializing_if = "Ease::is_default")]
+	pub ease: Ease,
+	/// Canvas pixels added to the item's left edge.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub x: f32,
+	/// Canvas pixels added to the item's top edge.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub y: f32,
+	/// Canvas pixels added to the item's width.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub width: f32,
+	/// Canvas pixels added to the item's height.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub height: f32,
+	/// Trimmed from what the item's crop leaves, as a push-in does.
+	#[serde(default, skip_serializing_if = "Crop::is_none")]
+	pub crop: Crop,
+	/// Applied after the item's own. Each one's settings mix into the next
+	/// keyframe's when the two lists pair up by kind, in order, and otherwise
+	/// change halfway. None reads another source.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub filters: Vec<Filter>,
+}
+
+impl Keyframe {
+	/// The item where it rests, `at` after its scene goes on.
+	pub fn new(at: Duration) -> Self {
+		Self {
+			at,
+			ease: Ease::default(),
+			x: 0.0,
+			y: 0.0,
+			width: 0.0,
+			height: 0.0,
+			crop: Crop::default(),
+			filters: Vec::new(),
+		}
+	}
+
+	/// `progress` of the way from this keyframe's offset to `to`'s.
+	fn toward(&self, to: &Self, progress: f32) -> Self {
+		let mix = |from: f32, to: f32| mix(from, to, progress);
+		let paired = self.filters.len() == to.filters.len();
+		let pairs = self.filters.iter().zip(&to.filters);
+		let filters = paired.then(|| pairs.map(|(from, to)| from.toward(to, progress)).collect());
+		Self {
+			at: to.at,
+			ease: to.ease,
+			x: mix(self.x, to.x),
+			y: mix(self.y, to.y),
+			width: mix(self.width, to.width),
+			height: mix(self.height, to.height),
+			crop: self.crop.toward(&to.crop, progress),
+			filters: filters
+				.flatten()
+				.unwrap_or_else(|| if progress < 0.5 { &self.filters } else { &to.filters }.clone()),
+		}
+	}
+
+	fn validate(&self) -> Result<(), String> {
+		let offsets = [self.x, self.y, self.width, self.height];
+		if !offsets.iter().all(|offset| offset.is_finite()) {
+			return Err(format!("a keyframe at {:?} offsets by {offsets:?}", self.at));
+		}
+		self.crop.validate()?;
+		if let Some(source) = self.filters.iter().find_map(Filter::source) {
+			return Err(format!(
+				"a keyframe at {:?} has a filter reading `{source}`; a keyframe's filters read no other source",
+				self.at
+			));
+		}
+		self.filters.iter().try_for_each(Filter::validate)
+	}
+}
+
+fn is_zero(value: &f32) -> bool {
+	*value == 0.0
 }
 
 fn visible() -> bool {
@@ -896,6 +1087,18 @@ impl Crop {
 			top: self.top + inner.top * height,
 			right: self.right + inner.right * width,
 			bottom: self.bottom + inner.bottom * height,
+		}
+	}
+
+	/// `progress` of the way from this crop to `other`, which a mix of two
+	/// valid crops is.
+	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Self {
+		let mix = |from: f32, to: f32| mix(from, to, progress);
+		Self {
+			left: mix(self.left, other.left),
+			top: mix(self.top, other.top),
+			right: mix(self.right, other.right),
+			bottom: mix(self.bottom, other.bottom),
 		}
 	}
 
@@ -1320,6 +1523,22 @@ mod tests {
 				..Crop::default()
 			},
 			blend: Blend::Screen,
+			keyframes: vec![
+				Keyframe {
+					x: -740.0,
+					crop: Crop {
+						right: 0.5,
+						..Crop::default()
+					},
+					filters: vec![Filter::Blur { radius: 8.0 }],
+					..Keyframe::new(Duration::ZERO)
+				},
+				Keyframe {
+					ease: Ease::Out,
+					filters: vec![Filter::Blur { radius: 0.0 }],
+					..Keyframe::new(Duration::from_millis(400))
+				},
+			],
 			..Item::new("camera", rect)
 		});
 		collection
@@ -1384,7 +1603,10 @@ path = "grade.cube"
 name = "Main"
 items = [
 	{ source = "bg", rect = { x = 0, y = 0, width = 1280, height = 720 } },
-	{ source = "cam", rect = { x = 10, y = 10, width = 320, height = 180 }, visible = false },
+	{ source = "cam", rect = { x = 10, y = 10, width = 320, height = 180 }, visible = false, keyframes = [
+		{ at = "0s", x = -330, crop = { left = 0.2 }, filters = [{ kind = "opacity", amount = 0 }] },
+		{ at = "1.5s", ease = "out", filters = [{ kind = "opacity", amount = 1 }] },
+	] },
 	{ source = "cam-faded", rect = { x = 0, y = 0, width = 640, height = 360 }, filters = [{ kind = "opacity", amount = 0.8 }] },
 	{ source = "cam", rect = { x = 0, y = 0, width = 640, height = 360 }, crop = { left = 0.1, right = 0.1 }, blend = "soft_light", filters = [
 		{ kind = "chroma_key", color = "#00ff00", similarity = 0.4, smoothness = 0.08, spill = 0.1 },
@@ -1427,6 +1649,25 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		let main = collection.scene("Main").unwrap();
 		assert!(main.items[0].visible);
 		assert!(!main.items[1].visible);
+		assert_eq!(
+			main.items[1].keyframes,
+			[
+				Keyframe {
+					x: -330.0,
+					crop: Crop {
+						left: 0.2,
+						..Crop::default()
+					},
+					filters: vec![Filter::Opacity { amount: 0.0 }],
+					..Keyframe::new(Duration::ZERO)
+				},
+				Keyframe {
+					ease: Ease::Out,
+					filters: vec![Filter::Opacity { amount: 1.0 }],
+					..Keyframe::new(Duration::from_millis(1500))
+				},
+			]
+		);
 		assert_eq!(collection.capture("cam-faded"), "cam");
 		let filters: Vec<_> = collection.filters(&main.items[2]).collect();
 		assert_eq!(
@@ -1713,6 +1954,150 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			}
 		);
 		assert_eq!(Crop::default().then(&item), item);
+	}
+
+	/// An item with keyframes `keyframes`, resting at (100, 50), 200x100.
+	fn animated(keyframes: Vec<Keyframe>) -> Item {
+		let rect = Rect {
+			x: 100.0,
+			y: 50.0,
+			width: 200.0,
+			height: 100.0,
+		};
+		Item {
+			filters: vec![Filter::Grayscale { amount: 1.0 }],
+			keyframes,
+			..Item::new("camera", rect)
+		}
+	}
+
+	/// Keyframes offset the item from where it rests, ease between each other,
+	/// and hold the first before it and the last after it.
+	#[test]
+	fn keyframes_offset_the_item_and_hold_at_the_ends() {
+		let item = animated(vec![
+			Keyframe {
+				x: -300.0,
+				width: -250.0,
+				crop: Crop {
+					left: 0.5,
+					..Crop::default()
+				},
+				filters: vec![Filter::Opacity { amount: 0.0 }],
+				..Keyframe::new(Duration::from_secs(1))
+			},
+			Keyframe {
+				ease: Ease::Linear,
+				filters: vec![Filter::Opacity { amount: 1.0 }],
+				..Keyframe::new(Duration::from_secs(2))
+			},
+		]);
+		let at = |millis| item.posed(Duration::from_millis(millis)).into_owned();
+
+		let first = at(0);
+		assert_eq!(first, at(1000), "held before the first keyframe");
+		assert_eq!(first.rect.x, -200.0);
+		assert_eq!(first.rect.width, 0.0, "a size shrunk past nothing is nothing");
+		assert_eq!(first.crop.left, 0.5);
+		assert_eq!(
+			first.filters,
+			[Filter::Grayscale { amount: 1.0 }, Filter::Opacity { amount: 0.0 }],
+			"after the item's own"
+		);
+		assert!(first.keyframes.is_empty());
+
+		let half = at(1500);
+		assert_eq!(half.rect.x, -50.0);
+		assert_eq!(half.rect.width, 75.0);
+		assert_eq!(half.crop.left, 0.25);
+		assert_eq!(half.filters[1], Filter::Opacity { amount: 0.5 });
+
+		let last = at(5000);
+		assert_eq!(last, at(2000), "held after the last keyframe");
+		assert_eq!(last.rect, item.rect);
+		assert_eq!(item.settled(Duration::from_secs(5)), Duration::from_secs(2));
+		assert_eq!(item.settled(Duration::ZERO), Duration::from_secs(1));
+
+		let still = Item::new("camera", item.rect);
+		assert!(matches!(still.posed(Duration::from_secs(1)), Cow::Borrowed(_)));
+	}
+
+	#[test]
+	fn eases_start_and_land_slowly() {
+		assert_eq!(Ease::Linear.apply(0.5), 0.5);
+		assert_eq!(Ease::In.apply(0.5), 0.125);
+		assert_eq!(Ease::Out.apply(0.5), 0.875);
+		assert_eq!(Ease::InOut.apply(0.25), 0.0625);
+		assert_eq!(Ease::InOut.apply(0.5), 0.5);
+		for ease in Ease::ALL {
+			assert_eq!((ease.apply(-1.0), ease.apply(2.0)), (0.0, 1.0), "{ease:?}");
+		}
+	}
+
+	/// Filters that do not pair up by kind change halfway rather than mixing.
+	#[test]
+	fn unpaired_keyframe_filters_change_halfway() {
+		let item = animated(vec![
+			Keyframe {
+				filters: vec![Filter::Sepia { amount: 1.0 }],
+				..Keyframe::new(Duration::ZERO)
+			},
+			Keyframe {
+				ease: Ease::Linear,
+				filters: vec![Filter::Invert { amount: 1.0 }],
+				..Keyframe::new(Duration::from_secs(1))
+			},
+		]);
+		let filters = |millis| item.posed(Duration::from_millis(millis)).filters[1].clone();
+		assert_eq!(filters(499), Filter::Sepia { amount: 1.0 });
+		assert_eq!(filters(500), Filter::Invert { amount: 1.0 });
+	}
+
+	#[test]
+	fn refuses_keyframes_it_cannot_play() {
+		let at = |millis| Keyframe::new(Duration::from_millis(millis));
+		let cases = [
+			vec![at(500), at(100)],
+			vec![Keyframe { x: f32::NAN, ..at(0) }],
+			vec![Keyframe {
+				crop: Crop {
+					left: 0.6,
+					right: 0.6,
+					..Crop::default()
+				},
+				..at(0)
+			}],
+			vec![Keyframe {
+				filters: vec![Filter::Opacity { amount: 2.0 }],
+				..at(0)
+			}],
+			vec![Keyframe {
+				filters: vec![Filter::Lut {
+					source: "grade".into(),
+					amount: 1.0,
+				}],
+				..at(0)
+			}],
+		];
+		for keyframes in cases {
+			let mut collection = example();
+			collection.sources.insert(
+				"grade".into(),
+				Source::Lut {
+					path: "grade.cube".into(),
+				},
+			);
+			collection.scenes[0].items[0].keyframes = keyframes.clone();
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{keyframes:?}");
+		}
+
+		let mut collection = example();
+		collection.top[0].keyframes = vec![at(0)];
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "the top layer");
+		// The same moment twice jumps.
+		collection.top[0].keyframes.clear();
+		collection.scenes[0].items[0].keyframes = vec![at(100), at(100)];
+		collection.validate().unwrap();
 	}
 
 	#[test]
