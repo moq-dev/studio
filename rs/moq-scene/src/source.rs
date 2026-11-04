@@ -6,7 +6,7 @@
 //! dropped, which happens when the source is removed or edited.
 //!
 //! With [`Context::publish`] set, each local source that shows a picture also
-//! publishes it as its own track; see [`crate::publish`].
+//! publishes it as its own track, web pages aside; see [`crate::publish`].
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -22,6 +22,7 @@ use moq_mux::catalog::Stream;
 use tokio::sync::watch;
 
 use crate::Error;
+use crate::browser::Page;
 use crate::collection::{Collection, Source};
 use crate::lut::Cube;
 use crate::publish::{Claim, Listing, Publish, Still};
@@ -33,13 +34,20 @@ pub(crate) enum Picture {
 	Frame(moq_video::Frame),
 	/// Tightly packed RGBA with straight alpha, such as a still image.
 	Rgba { size: moq_video::Size, pixels: Vec<u8> },
+	/// A texture on the compositor's device with premultiplied alpha, such as
+	/// a web page.
+	#[cfg_attr(
+		not(target_os = "linux"),
+		expect(dead_code, reason = "browser sources are Linux-only")
+	)]
+	Texture(moq_video::render::wgpu::Texture),
 	/// A LUT source's table, which is not drawn but looked up.
 	Lut(Cube),
 }
 
 /// The one picture a source holds for the compositor. A newer picture replaces
 /// an undrawn one, so a slow canvas skips pictures instead of queuing them.
-type Mailbox = Arc<Mutex<Option<Picture>>>;
+pub(crate) type Mailbox = Arc<Mutex<Option<Picture>>>;
 
 /// When a source last delivered a picture, `None` before its first.
 type Shown = Arc<Mutex<Option<Instant>>>;
@@ -112,6 +120,8 @@ pub struct Context {
 	/// What cameras, screens, and broadcasts deliver video as:
 	/// `moq_video::render::output` of the compositor's device.
 	pub output: moq_video::Output,
+	/// What browser sources run in; without it they fail as unsupported.
+	pub browser: Option<crate::browser::Helper>,
 	/// Where local sources publish their own tracks, or `None` to publish nothing.
 	pub publish: Option<Publish>,
 }
@@ -141,8 +151,9 @@ impl Sources {
 	/// clones rather than opening one. Returns a driver for each source started,
 	/// which does nothing until run.
 	///
-	/// Also applies the collection's gain and mute to every audio strip, which
-	/// never restarts a source. Panics on a gain [`Collection::validate`] refuses.
+	/// Also applies the collection's gain and mute to every audio strip, and its
+	/// frame rate to every web page, which never restarts a source. Panics on a
+	/// gain [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		self.feeds
 			.retain(|name, feed| collection.sources.get(name) == Some(&feed.source));
@@ -153,6 +164,10 @@ impl Sources {
 				let (feed, driver) = open(name, source, &self.context);
 				self.feeds.insert(name.clone(), feed);
 				drivers.push(driver);
+			}
+			// A page paints at the canvas's frame rate, live.
+			if let Some(page) = self.feeds[name].page() {
+				page.set_framerate(collection.canvas.framerate);
 			}
 
 			if let Some(strip) = self.feeds[name].strip() {
@@ -182,6 +197,7 @@ pub struct Feed {
 	shown: Shown,
 	strip: Option<Strip>,
 	status: kio::Consumer<Status>,
+	page: Option<Page>,
 	track: Option<kio::Consumer<Status>>,
 	played: Playback,
 	/// A replay source's next replay.
@@ -239,7 +255,8 @@ impl Feed {
 	}
 
 	/// What the source's own track is doing, or `None` when it publishes none:
-	/// nothing is published, or the source is another broadcast or only sound.
+	/// nothing is published, or the source is another broadcast, a web page, or
+	/// only sound.
 	///
 	/// A failed track leaves the source drawing in the studio's own scenes.
 	pub fn track(&self) -> Option<Status> {
@@ -266,6 +283,11 @@ impl Feed {
 		self.strip.as_ref()
 	}
 
+	/// A browser source's page: how it paints, and interaction with it.
+	pub fn page(&self) -> Option<&Page> {
+		self.page.as_ref()
+	}
+
 	/// The newest picture not yet drawn.
 	pub(crate) fn take(&self) -> Option<Picture> {
 		self.picture.lock().unwrap().take()
@@ -282,6 +304,11 @@ pub struct Driver {
 	shown: Shown,
 	strip: Option<Strip>,
 	status: kio::Producer<Status>,
+	#[cfg_attr(
+		not(target_os = "linux"),
+		expect(dead_code, reason = "browser sources are Linux-only")
+	)]
+	page: Option<Page>,
 	/// The source's own track, when it publishes one.
 	track: Option<Track>,
 	played: Playback,
@@ -404,6 +431,7 @@ impl Driver {
 				std::future::pending().await
 			}
 			Source::Broadcast { path } => self.broadcast(path).await,
+			Source::Browser { url, width, height } => self.browser(url, *width, *height).await,
 			Source::Replay => {
 				let plays = self.plays.clone().expect("a replay source has plays");
 				self.replays(plays, listing).await
@@ -450,6 +478,7 @@ impl Driver {
 			Source::Color { .. }
 			| Source::Image { .. }
 			| Source::Broadcast { .. }
+			| Source::Browser { .. }
 			| Source::Clone { .. }
 			| Source::Lut { .. }
 			| Source::Replay => unreachable!("not a device source"),
@@ -505,6 +534,37 @@ impl Driver {
 		Err(Error::Unsupported(
 			"this build cannot capture devices (enable the `capture` feature)".into(),
 		))
+	}
+
+	/// Render the page at `url` until its helper stops, or fail at once if the
+	/// studio offers no helper.
+	#[cfg(target_os = "linux")]
+	async fn browser(&self, url: &str, width: u32, height: u32) -> Result<(), Error> {
+		let Some(helper) = &self.context.browser else {
+			return Err(Error::Unsupported(
+				"this build cannot render web pages (enable the `cef` feature)".into(),
+			));
+		};
+		let page = self.page.as_ref().expect("browser sources have a page");
+		let bus = self.context.bus.config().clone();
+		let open = crate::browser::Open {
+			url: url.to_string(),
+			width,
+			height,
+			sample_rate: bus.sample_rate,
+			channels: bus.layout.channels(),
+			..Default::default()
+		};
+		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
+		input.format = moq_audio::Format::F32;
+		let strip = self.strip.clone().expect("browser sources have a strip");
+		let sound = self.context.bus.channel(input, strip)?;
+		crate::browser::run(helper, open, page, &self.picture, Some(sound), &self.status).await
+	}
+
+	#[cfg(not(target_os = "linux"))]
+	async fn browser(&self, _: &str, _: u32, _: u32) -> Result<(), Error> {
+		Err(Error::Unsupported("browser sources run on Linux only for now".into()))
 	}
 
 	/// Follow the broadcast at `path` for as long as the feed lives, playing
@@ -858,6 +918,7 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		context.program.route(strip);
 	}
 	let status = kio::Producer::new(Status::Starting);
+	let page = matches!(source, Source::Browser { .. }).then(Page::default);
 	// Claimed here, in the order sources open, so an edited source's
 	// replacement owns the listing however their drivers are scheduled.
 	let track = context
@@ -885,6 +946,7 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		shown: shown.clone(),
 		strip: strip.clone(),
 		status: status.consume(),
+		page: page.clone(),
 		track: track.as_ref().map(|track| track.status.consume()),
 		played: played.clone(),
 		plays,
@@ -897,6 +959,7 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		shown,
 		strip,
 		status,
+		page,
 		track,
 		played,
 		plays: replays,
@@ -910,9 +973,15 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 /// layout rather than encoded again.
 ///
 /// Microphones and system audio do not yet: moq-audio offers no capture that
-/// feeds both the program bus and an encoder.
+/// feeds both the program bus and an encoder. Nor do web pages, which viewers
+/// see only in the program: H.264 would encode a transparent overlay over
+/// black.
 fn publishes(source: &Source) -> bool {
-	source.has_video() && !matches!(source, Source::Broadcast { .. } | Source::Clone { .. })
+	source.has_video()
+		&& !matches!(
+			source,
+			Source::Broadcast { .. } | Source::Clone { .. } | Source::Browser { .. }
+		)
 }
 
 /// The frame rate a capture is encoded at when the device reports none.
@@ -980,6 +1049,7 @@ pub(crate) mod test {
 			origin: origin.consume(),
 			dir: dir.to_path_buf(),
 			output: moq_video::Output::Cpu,
+			browser: None,
 			publish: None,
 		};
 		(context, origin)
@@ -1406,6 +1476,36 @@ mod tests {
 				panic!("a missing image fails");
 			};
 			assert!(reason.contains("missing.png"), "{reason}");
+		})
+		.await;
+	}
+
+	/// Without a helper to run it in, a browser source fails rather than
+	/// staying blank.
+	#[tokio::test]
+	async fn a_page_without_a_helper_says_so() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let mut collection = Collection::new();
+			collection.sources.insert(
+				"chat".into(),
+				Source::Browser {
+					url: "https://example.com".into(),
+					width: 400,
+					height: 800,
+				},
+			);
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let chat = sources.get("chat").unwrap();
+			let Status::Failed(reason) = chat.status() else {
+				panic!("a page without a helper fails");
+			};
+			assert!(reason.contains("web pages") || reason.contains("Linux"), "{reason}");
+			assert!(chat.page().is_some_and(|page| page.paint().is_none()));
+			assert!(chat.strip().is_some(), "a page feeds the bus");
 		})
 		.await;
 	}

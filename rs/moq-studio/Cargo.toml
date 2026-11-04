@@ -32,6 +32,10 @@ vaapi = ["moq-video/vaapi"]
 # Wayland screens and windows are not reachable yet: display and window sources
 # capture X11 only.
 pipewire = ["capture", "moq-scene/pipewire"]
+# Browser sources, rendered by CEF in a helper process (Linux). Off by default:
+# the build downloads the CEF runtime (or takes it from `CEF_PATH`) and copies
+# it beside the binary, where the binary looks for it when it starts.
+cef = ["moq-scene/cef"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }

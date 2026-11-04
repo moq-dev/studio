@@ -65,6 +65,11 @@ impl Engine {
 				.get(capture)
 				.and_then(|feed| feed.target())
 				.with_context(|| format!("`{name}` has shown nothing yet")),
+			Some(Source::Browser { .. }) => {
+				anyhow::bail!(
+					"`{name}` is a web page, which publishes no track of its own, so it has no past to replay"
+				)
+			}
 			Some(source) if source.has_video() => output()?
 				.source(capture)
 				.with_context(|| format!("`{name}` publishes no video to replay")),

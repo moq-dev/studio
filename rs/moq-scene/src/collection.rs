@@ -130,6 +130,13 @@ impl Collection {
 		source.unwrap_or_default().iter().chain(&item.filters)
 	}
 
+	/// What `item` shows of its source's picture: its source's crop, then its
+	/// own.
+	pub fn crop(&self, item: &Item) -> Crop {
+		let source = self.video.get(&item.source).map(|video| video.crop);
+		source.unwrap_or_default().then(&item.crop)
+	}
+
 	/// Check what the types cannot: the canvas can be encoded, names are unique,
 	/// every item, clone, audio, and video entry names a source that exists,
 	/// and every crop and filter's settings are in range, each filter naming a
@@ -177,6 +184,7 @@ impl Collection {
 			return Err(Error::Invalid(format!("`{name}` names no file")));
 		}
 		for (name, source) in &self.sources {
+			source.validate(name)?;
 			let Source::Clone { source } = source else { continue };
 			match self.sources.get(source) {
 				Some(Source::Clone { .. }) => {
@@ -827,6 +835,18 @@ pub enum Source {
 		/// The broadcast path on that relay.
 		path: String,
 	},
+	/// A web page, such as an overlay, alert box, or chat widget, with its
+	/// sound. Desktop only: viewers cannot render one, so it reaches them
+	/// only as pixels.
+	Browser {
+		/// The page's address.
+		url: String,
+		/// The page's viewport width in pixels, independent of where it is
+		/// placed.
+		width: u32,
+		/// The page's viewport height in pixels.
+		height: u32,
+	},
 	/// Another source's picture, captured once, with [`Collection::video`]
 	/// filters of its own. Its sound is not mixed a second time.
 	Clone {
@@ -877,8 +897,23 @@ impl Source {
 	pub fn has_audio(&self) -> bool {
 		matches!(
 			self,
-			Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. } | Self::Replay
+			Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. } | Self::Browser { .. } | Self::Replay
 		)
+	}
+
+	fn validate(&self, name: &str) -> Result<(), Error> {
+		if let Self::Browser { url, width, height } = self {
+			if url.trim().is_empty() {
+				return Err(Error::Invalid(format!("browser source `{name}` has no url")));
+			}
+			let max = crate::browser::MAX_SIDE;
+			if *width == 0 || *height == 0 || *width > max || *height > max {
+				return Err(Error::Invalid(format!(
+					"browser source `{name}` is {width}x{height}; each side must be 1 to {max} pixels"
+				)));
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -964,6 +999,14 @@ mod tests {
 			"guest".into(),
 			Source::Broadcast {
 				path: "studio/guest".into(),
+			},
+		);
+		collection.sources.insert(
+			"chat".into(),
+			Source::Browser {
+				url: "https://example.com/chat".into(),
+				width: 400,
+				height: 800,
 			},
 		);
 		collection.audio.insert("mic".into(), Audio { gain: 0.5, muted: true });
@@ -1355,6 +1398,35 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		let mut collection = example();
 		collection.scenes[0].items[0].rect.width = f32::NAN;
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+	}
+
+	/// A page needs an address and a size the helper can paint and the socket
+	/// can carry.
+	#[test]
+	fn refuses_a_degenerate_page() {
+		let page = |url: &str, width, height| {
+			let mut collection = example();
+			collection.sources.insert(
+				"chat".into(),
+				Source::Browser {
+					url: url.into(),
+					width,
+					height,
+				},
+			);
+			collection.validate()
+		};
+		assert!(page("https://example.com", 4096, 1).is_ok());
+		for (url, width, height) in [
+			(" ", 400, 800),
+			("https://example.com", 0, 800),
+			("https://example.com", 400, 4097),
+		] {
+			assert!(
+				matches!(page(url, width, height), Err(Error::Invalid(_))),
+				"{url:?} {width}x{height}"
+			);
+		}
 	}
 
 	#[test]

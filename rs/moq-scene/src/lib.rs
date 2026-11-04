@@ -12,7 +12,8 @@
 //!   scenes and collections as text.
 //! - [`source::Sources`] runs each source: a camera, display, window,
 //!   microphone, or system-audio capture (with the `capture` feature), a still
-//!   image, a solid color, or a broadcast subscribed over MoQ. Pictures go to the
+//!   image, a solid color, a broadcast subscribed over MoQ, or a web page
+//!   rendered by a browser engine (the [`browser`] module). Pictures go to the
 //!   compositor and sound goes to a `moq_audio::bus::Bus`, routed into its
 //!   program mix.
 //! - [`Compositor`] draws the scene in preview and the scene on program into
@@ -27,6 +28,7 @@
 //! source that stalls repeats its last picture rather than holding up the
 //! canvas.
 
+pub mod browser;
 pub mod clip;
 mod collection;
 mod compositor;
@@ -106,4 +108,8 @@ pub enum Error {
 	/// The broadcast subscription failed.
 	#[error(transparent)]
 	Net(#[from] moq_net::Error),
+
+	/// A browser source's page failed, or its helper process stopped.
+	#[error("browser: {0}")]
+	Browser(String),
 }
