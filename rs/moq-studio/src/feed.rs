@@ -105,12 +105,14 @@ impl Feeds {
 			let Some(program) = program else { continue };
 			let pick = &self.feeds[&identity].pick;
 			// A mix-minus takes out one strip, so the copy of their camera the
-			// program plays, if any. A guest the host never added, or removed, is
-			// in no mix to take out.
+			// program plays audibly, if any. A guest the host never added, or
+			// removed, is in no mix to take out.
 			let voices: Vec<&str> = self.room.voices(collection, &identity).collect();
-			let heard = voices
-				.iter()
-				.find(|name| sources.plays(&collection.mixes.program, name));
+			let heard = voices.iter().find(|name| {
+				let strip = sources.get(name).and_then(|source| source.strip());
+				let audible = strip.is_some_and(|strip| strip.gain() > 0.0);
+				audible && sources.plays(&collection.mixes.program, name)
+			});
 			let voice = heard.or(voices.first());
 			match voice.and_then(|name| sources.get(name)?.strip()) {
 				Some(strip) => pick.set(program.minus(strip)),
@@ -385,15 +387,30 @@ mod tests {
 		let (mut feeds, _program) = feeds(&room, &origin);
 		let (bus, mut driver) = Bus::new(Default::default()).unwrap();
 		let (mut collection, mut sources) = guests(&room, &bus);
-		// A muted copy of alice's camera, listed first, which the program does
-		// not play, so her mix-minus takes out the copy it does.
-		let copy = collection.sources["alice"].clone();
-		collection.sources.insert("Alice muted".into(), copy);
-		let muted = moq_scene::Audio {
-			muted: true,
-			..Default::default()
-		};
-		collection.audio.insert("Alice muted".into(), muted);
+		// Copies of alice's camera listed first, one muted and one with its
+		// fader down, which nobody hears on program, so her mix-minus takes
+		// out the copy they do.
+		let quiet = [
+			(
+				"Alice muted",
+				moq_scene::Audio {
+					muted: true,
+					..Default::default()
+				},
+			),
+			(
+				"Alice silent",
+				moq_scene::Audio {
+					gain: 0.0,
+					..Default::default()
+				},
+			),
+		];
+		for (name, audio) in quiet {
+			let copy = collection.sources["alice"].clone();
+			collection.sources.insert(name.into(), copy);
+			collection.audio.insert(name.into(), audio);
+		}
 		drop(sources.sync(&collection));
 		let mut alice = channel(&bus, &sources, "alice");
 		let mut bob = channel(&bus, &sources, "bob");
