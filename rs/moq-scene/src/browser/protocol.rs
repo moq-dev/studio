@@ -78,24 +78,48 @@ pub(crate) struct Open {
 /// What the helper tells the studio.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Event {
-	/// A page painted into a shared texture, whose plane descriptors ride
-	/// with this message. Valid until the studio answers
+	/// A page painted a layer into a shared texture, whose plane descriptors
+	/// ride with this message. Valid until the studio answers
 	/// [`Command::Painted`].
-	Texture(Id, Texture),
-	/// A page painted into memory: `width * height` premultiplied BGRA
-	/// pixels, tightly packed.
+	Texture(Id, Layer, Texture),
+	/// A page painted `layer` into memory: `width * height` premultiplied
+	/// BGRA pixels, tightly packed.
 	Pixels {
 		page: Id,
+		layer: Layer,
 		width: u32,
 		height: u32,
 		data: Vec<u8>,
 	},
+	/// A page's popup opened or moved to this area of its view, or closed.
+	Popup(Id, Option<Area>),
 	/// Interleaved samples at the [`Open`] rate and channel count.
 	Audio(Id, Vec<f32>),
 	/// A page cannot be shown, and why.
 	Failed(Id, String),
 	/// No page can be shown, and why. The helper exits next.
 	Fatal(String),
+}
+
+/// Which of a page's pictures a paint is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Layer {
+	/// The page itself.
+	View,
+	/// Its open popup, such as a `<select>`'s list, which CEF paints apart
+	/// from the page, drawn over it at the area the last [`Event::Popup`]
+	/// gave.
+	Popup,
+}
+
+/// A rectangle of a page's view, in pixels from its top-left corner. It may
+/// reach past the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Area {
+	pub x: i32,
+	pub y: i32,
+	pub width: u32,
+	pub height: u32,
 }
 
 /// A shared texture's layout, CEF's `cef_accelerated_paint_info_t` minus the
@@ -246,7 +270,7 @@ mod tests {
 		let file = tempfile::tempfile().unwrap();
 		helper.send(&Event::Audio(1, vec![0.5; 3]), &[]).unwrap();
 		helper
-			.send(&Event::Texture(1, texture.clone()), &[file.as_fd()])
+			.send(&Event::Texture(1, Layer::View, texture.clone()), &[file.as_fd()])
 			.unwrap();
 		helper.send(&Event::Failed(1, "gone".into()), &[]).unwrap();
 		drop(helper);
@@ -256,7 +280,7 @@ mod tests {
 		assert!(fds.is_empty());
 
 		let (event, fds) = studio.recv::<Event>().unwrap().unwrap();
-		assert_eq!(event, Event::Texture(1, texture));
+		assert_eq!(event, Event::Texture(1, Layer::View, texture));
 		assert_eq!(fds.len(), 1);
 		let ours = rustix::fs::fstat(&fds[0]).unwrap();
 		let theirs = rustix::fs::fstat(&file).unwrap();
@@ -280,6 +304,7 @@ mod tests {
 		let data: Vec<u8> = (0..1920 * 1080 * 4).map(|i| i as u8).collect();
 		let sent = Event::Pixels {
 			page: 1,
+			layer: Layer::View,
 			width: 1920,
 			height: 1080,
 			data,
