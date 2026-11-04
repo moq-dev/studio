@@ -160,7 +160,7 @@ mod tests {
 		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 		let rendition = config.probe().await.unwrap();
-		let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
+		let reserved = catalog.reserve().with_interval(config.gop.duration(config.framerate));
 		let mut producer = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition).unwrap();
 		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
 		let gray = vec![0x80; 64 * 64 * 4];

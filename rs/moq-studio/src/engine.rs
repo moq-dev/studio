@@ -1088,7 +1088,7 @@ impl Renditions {
 		let reserved = self
 			.timebase
 			.reserve()
-			.with_hls_hint(config.gop.duration(config.framerate));
+			.with_interval(config.gop.duration(config.framerate));
 		let producer = moq_video::encode::Producer::new(self.broadcast.clone(), reserved, video)?;
 		let watched = Arc::new(AtomicBool::new(false));
 		self.runtime.spawn(watch(producer.demand(), watched.clone()));
