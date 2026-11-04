@@ -22,19 +22,12 @@ Decided 2026-10-26 (maintainer):
   whole broadcast. A broadcast with no audio keeps video's own short delay.
   Show each source's delay in the UI.
 
-Lift the shared part out of `moq play` into a library both binaries use,
-rather than copying it. Decided 2026-11-02 (maintainer): that library is
-moq-mux, which already owns the broadcast clock and the `Pacer` the timing
-is built on, and it lands there first; this quest waits on its
-[pin](/quest/m0/pin-presentation-timeline.md). The video side holds frames until their audio-aligned
-time, and a source still repeats its last frame rather than stalling the
-canvas. This replaces the live-edge behavior the studio app PR chose, where
+Use the timing `moq play` shares rather than copying it: moq-mux's
+`timeline` module, pinned here (decided 2026-11-02, maintainer). The video
+side holds frames until their audio-aligned time, and a source still repeats
+its last frame rather than stalling the canvas. This replaces the live-edge behavior the studio app PR chose, where
 replaying a publisher's timestamp gaps pushed audio behind its own video. Here
 video waits for audio instead. Update `README.md`.
-
-## Required
-
-- [moq-mux's presentation timeline is pinned](/quest/m0/pin-presentation-timeline.md) - the shared audio-anchored timing
 
 ## Related
 

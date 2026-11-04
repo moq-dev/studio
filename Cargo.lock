@@ -3738,7 +3738,6 @@ name = "moq-relay"
 version = "0.17.2"
 dependencies = [
  "anyhow",
- "async-trait",
  "aws-lc-rs",
  "axum",
  "axum-server",
@@ -3748,7 +3747,6 @@ dependencies = [
  "hex",
  "http-body",
  "http-cache-reqwest",
- "humantime",
  "hyper-util",
  "kio",
  "moq-auth",
@@ -3774,8 +3772,6 @@ dependencies = [
  "tracing",
  "url",
  "usage-rs",
- "web-transport-trait",
- "x509-parser",
 ]
 
 [[package]]
@@ -3922,7 +3918,6 @@ dependencies = [
  "url",
  "usage-rs",
  "web-transport-proto",
- "web-transport-trait",
  "webpki-roots",
  "x509-parser",
 ]
@@ -7556,15 +7551,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
-]
-
-[[package]]
-name = "web-transport-trait"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60221f03172c9e8e8d19d1c038c87ef2804d05f8a71264817f60a28bbd03edab"
-dependencies = [
- "bytes",
 ]
 
 [[package]]
