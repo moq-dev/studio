@@ -58,11 +58,14 @@ struct Played {
 type Playback = Arc<Mutex<Played>>;
 
 /// A take for a replay source to play, and how fast.
-#[derive(Clone)]
 struct Play {
-	take: Arc<Take>,
+	take: Take,
 	speed: f32,
 }
+
+/// A replay source's next replay, until its driver takes it, so a replay that
+/// ended holds its take no longer.
+type Next = Arc<Mutex<Option<Play>>>;
 
 /// A picture that shows nothing, for a replay source between replays.
 fn clear() -> Picture {
@@ -180,7 +183,7 @@ pub struct Feed {
 	track: Option<kio::Consumer<Status>>,
 	played: Playback,
 	/// A replay source's next replay.
-	plays: Option<watch::Sender<Option<Play>>>,
+	plays: Option<watch::Sender<Next>>,
 }
 
 impl Feed {
@@ -213,12 +216,9 @@ impl Feed {
 				"a replay plays at {MIN_SPEED} to 1 times real time, not {speed}"
 			)));
 		}
-		let play = Play {
-			take: Arc::new(take),
-			speed,
-		};
+		let play = Play { take, speed };
 		// Fails once the driver is gone, which leaves the reason in the status.
-		plays.send(Some(play)).map_err(|_| {
+		plays.send(Arc::new(Mutex::new(Some(play)))).map_err(|_| {
 			Error::Stopped(match self.status() {
 				Status::Failed(reason) => reason,
 				status => format!("{status:?}"),
@@ -283,7 +283,7 @@ pub struct Driver {
 	/// The source's own track, when it publishes one.
 	track: Option<Track>,
 	played: Playback,
-	plays: Option<watch::Receiver<Option<Play>>>,
+	plays: Option<watch::Receiver<Next>>,
 }
 
 /// Where a source's own track goes, its claim on the studio catalog's listing
@@ -650,7 +650,7 @@ impl Driver {
 	/// them. A new one cuts off the one playing.
 	async fn replays(
 		&self,
-		mut plays: watch::Receiver<Option<Play>>,
+		mut plays: watch::Receiver<Next>,
 		listing: Option<&Listing<'_>>,
 	) -> Result<(), Error> {
 		*self.picture.lock().unwrap() = Some(clear());
@@ -664,7 +664,7 @@ impl Driver {
 					if changed.is_err() {
 						return std::future::pending().await;
 					}
-					let play = plays.borrow_and_update().clone();
+					let play = plays.borrow_and_update().lock().unwrap().take();
 					// Ends the one playing, whose last picture must not linger
 					// until the new one's first.
 					playing = play.map(|play| Box::pin(self.replay(play, listing)) as Playing<'_>);
@@ -786,14 +786,15 @@ impl Driver {
 					_ => {}
 				}
 			}
-			Ok::<_, Error>(())
+			// The bus plays what is written after a buffer's delay, and drops
+			// what a closed channel has not played, so it stays open until the
+			// replay ends.
+			std::future::pending().await
 		};
 
 		// The span ends where it does even when its tracks have not ended yet.
 		let played = async {
-			let (video, audio) = tokio::join!(video, audio);
-			video?;
-			audio?;
+			tokio::try_join!(video, audio)?;
 			std::future::pending().await
 		};
 		// Played first, so a picture due at the very end shows before it does.
@@ -857,7 +858,7 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 	let played = Playback::default();
 	let (plays, replays) = match source {
 		Source::Replay => {
-			let (plays, replays) = watch::channel(None);
+			let (plays, replays) = watch::channel(Next::default());
 			(Some(plays), Some(replays))
 		}
 		_ => (None, None),
