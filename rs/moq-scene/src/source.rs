@@ -122,7 +122,8 @@ pub enum Status {
 	/// Waiting for its broadcast to be announced.
 	Offline,
 	/// Stopped, with the reason. A broadcast source keeps waiting for the
-	/// broadcast to come back; every other source stays stopped until edited.
+	/// broadcast to come back; every other source stays stopped until edited
+	/// or [restarted](Sources::restart).
 	Failed(String),
 }
 
@@ -197,6 +198,12 @@ impl Sources {
 			}
 		}
 		drivers
+	}
+
+	/// Stop the source called `name`, so the next [`sync`](Self::sync) starts
+	/// it again, as an edit would, such as to reload a web page.
+	pub fn restart(&mut self, name: &str) {
+		self.feeds.remove(name);
 	}
 
 	/// The running source called `name`.
@@ -1526,7 +1533,7 @@ mod tests {
 	}
 
 	/// Without a helper to run it in, a browser source fails rather than
-	/// staying blank.
+	/// staying blank, until a restart starts a new page.
 	#[tokio::test]
 	async fn a_page_without_a_helper_says_so() {
 		local(async {
@@ -1551,6 +1558,11 @@ mod tests {
 			assert!(reason.contains("web pages") || reason.contains("Linux"), "{reason}");
 			assert!(chat.page().is_some_and(|page| page.paint().is_none()));
 			assert!(chat.strip().is_some(), "a page feeds the bus");
+
+			let failed = chat.page().unwrap().clone();
+			sources.restart("chat");
+			assert_eq!(sources.sync(&collection).len(), 1, "a restart starts it again");
+			assert!(!sources.get("chat").unwrap().page().unwrap().same(&failed));
 		})
 		.await;
 	}
