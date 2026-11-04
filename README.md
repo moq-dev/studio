@@ -167,12 +167,15 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   `localhost`, so the studio refuses any other. It defaults to `https://join.studio.moq.dev/`, which this
   repository deploys from `main`, but that domain is not live yet, so for now
   host the page yourself and pass its URL.
-- `--guest-expiry` (default `4h`) is how long a link works, and each token
-  the studio renews it with. While a guest is in the room, the studio signs
-  them a fresh token every half of it, over a session of its own in the room
-  that the room key signs for, and the join page presents it without
-  reconnecting. A guest who leaves needs a link, or a renewed token, that has
-  not expired to come back. The Guests panel says when renewal is failing.
+- `--guest-expiry` (default `4h`, at least `1m`) is how long a link works,
+  and each token the studio renews it with. While a guest is in the room, the
+  studio signs them a fresh token every half of it, over a session of its own
+  in the room that the room key signs for, and the join page presents it
+  without reconnecting. Each renewal is encrypted to a key only that guest's
+  links carry, so nothing else that can subscribe in the room, a link from an
+  older studio included, can read it. A guest who leaves needs a link, or a
+  renewed token, that has not expired to come back. The Guests panel says
+  when renewal is failing.
 - With `--failover`, a link still names only the `--connect` relay: the join
   page dials one relay, and a guest's token is rooted at the room there, so
   guests drop while that relay is down. The studio follows the room through
@@ -186,8 +189,9 @@ a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
 in the link's fragment, which the browser never sends to a server, and lets
 them publish only under their own name, so they cannot appear as someone else,
 and read only their own renewals.
-Treat the link like a password: anyone holding it can join as that guest until
-it expires. A guest's broadcasts become sources named after them (`alice`,
+Treat the link like a password: anyone holding it can join as that guest
+before it expires, and is then renewed for as long as they stay, until you
+remove them. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, muted and in no scene: place them from
 the Items panel and unmute them in Audio to put them on air. That includes a
 guest invited before a restart whose link still works. A guest's source is
@@ -198,8 +202,10 @@ who reconnects after you removed their source comes back under a new name
 **Remove from scenes** is your edit, so it undoes: it takes a guest, any clone
 of their sources, and any mask reading them out of every scene and the top
 layer and mutes them. A signed token cannot be taken back, so it also stops
-renewing theirs, and they are disconnected within `--guest-expiry`. **New
-link** lets them back in and renews them again.
+renewing theirs, and they are disconnected within `--guest-expiry`. That
+holds across a restart: removed guests are kept beside the scene file, as
+`show.guests.toml` for `show.toml`. Undo puts them back in the scenes but not
+on renewal; **New link** lets them back in and renews them again.
 
 ## Scene file
 

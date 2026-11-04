@@ -130,7 +130,10 @@ fn main() -> anyhow::Result<()> {
 	let _runtime = runtime.enter();
 	let relays = config.relays()?;
 	let gpu = pollster::block_on(engine::Gpu::new())?;
-	let room = config.guests.load(config.client.url.as_ref())?.map(Arc::new);
+	let room = config
+		.guests
+		.load(config.client.url.as_ref(), &config.scenes)?
+		.map(Arc::new);
 	if let Some(room) = &room {
 		let renewal = guests::Renewal::connect(room.clone(), &config.client, config.quic.clone())?;
 		runtime.spawn(renewal.run());

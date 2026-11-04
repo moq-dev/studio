@@ -13,6 +13,7 @@
 		"test": "bun test"
 	},
 	"dependencies": {
+		"@moq/e2ee": "workspace:*",
 		"@moq/net": "workspace:*",
 		"@moq/publish": "workspace:*",
 		"@moq/room": "workspace:*",

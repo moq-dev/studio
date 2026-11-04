@@ -1333,12 +1333,17 @@ impl Panels {
 							ui.weak("offline");
 						}
 					}
+					// A renewed guest no longer depends on their link's expiry.
 					match &participant.invite {
+						_ if participant.renewed() => ui.label("renewing"),
+						_ if participant.removed => ui.weak("not renewed"),
 						Some(link) => ui.label(expiry(link.expires, now)),
 						None => ui.weak("invited before this session"),
 					};
 					ui.horizontal(|ui| {
+						// Only a link that still works is worth sharing again.
 						if let Some(link) = &participant.invite
+							&& link.expires > now
 							&& ui.small_button("Show link").clicked()
 						{
 							show = Some((name.clone(), link.clone()));
@@ -1349,7 +1354,7 @@ impl Panels {
 						if ui
 							.small_button("Remove from scenes")
 							.on_hover_text(
-								"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within --guest-expiry unless you send a new link.",
+								"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within --guest-expiry. Undo puts them back in the scenes; only New link renews them again.",
 							)
 							.clicked()
 						{
@@ -1371,7 +1376,10 @@ impl Panels {
 			}
 		}
 		if let Some(name) = remove {
-			room.stop_renewing(&name);
+			if let Err(err) = room.stop_renewing(&name) {
+				self.report(Err(err));
+				return;
+			}
 			let mut state = engine.state.lock().unwrap();
 			let mut draft = state.collection().draft(format!("Remove `{name}` from scenes"));
 			let result = match room.take_off(&mut draft, &name) {

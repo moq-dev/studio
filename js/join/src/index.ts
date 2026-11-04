@@ -59,7 +59,7 @@ function join(link: Link): () => void {
 	const connection = new Net.Connection({ url: link.url, versions: [Renew.VERSION], tokens, enabled: true });
 	signals.cleanup(() => connection.close());
 
-	const renewal = Renew.follow(connection.origin, link.name, (jwt) => {
+	const renewal = Renew.follow(connection.origin, Renew.credential(link.name, link.key), (jwt) => {
 		tokens.set([jwt]);
 		// So joining again, or a reload, uses the newest token once the link's has expired.
 		link.jwt = jwt;

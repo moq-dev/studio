@@ -26,6 +26,7 @@ allow_attributes_without_reason = "warn"
 hang = { path = "moq/rs/hang" }
 kio = { path = "moq/rs/kio" }
 moq-auth = { path = "moq/rs/moq-auth", default-features = false }
+moq-e2ee = { path = "moq/rs/moq-e2ee" }
 moq-audio = { path = "moq/rs/moq-audio", default-features = false }
 moq-json = { path = "moq/rs/moq-json" }
 moq-mux = { path = "moq/rs/moq-mux" }
@@ -43,6 +44,7 @@ anyhow = "1"
 bytes = "1"
 humantime-serde = "1.1.1"
 pollster = "1.0"
+rind = "0.1.2"
 serde = { version = "1", features = ["derive"] }
 serde_with = "3"
 tempfile = "3"
