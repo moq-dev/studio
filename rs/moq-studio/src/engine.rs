@@ -430,8 +430,9 @@ pub struct Engine {
 	_origin: Option<moq_net::origin::Producer>,
 	/// Set by [`stop`](Self::stop), which ends the program clock.
 	stopped: AtomicBool,
-	/// The program clock's thread, which [`stop`](Self::stop) waits on.
-	program_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+	/// The program clock's and the audio's threads, which [`stop`](Self::stop)
+	/// waits on.
+	threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 /// The audio the program publishes.
@@ -562,7 +563,7 @@ impl Engine {
 			program,
 			_origin: subscribe,
 			stopped: AtomicBool::new(false),
-			program_thread: Mutex::default(),
+			threads: Mutex::default(),
 		});
 		let Publish {
 			renditions,
@@ -581,12 +582,13 @@ impl Engine {
 		let thread = clocked("program".into(), async move || {
 			program.run_program(start, epoch, renditions, rendition).await
 		})?;
-		*engine.program_thread.lock().unwrap() = Some(thread);
+		engine.threads.lock().unwrap().push(thread);
 		let mix = engine.clone();
 		let config = bus.config().clone();
-		clocked("audio".into(), async move || {
+		let thread = clocked("audio".into(), async move || {
 			mix.run_audio(start, epoch, config, mixer, Some(audio)).await
 		})?;
+		engine.threads.lock().unwrap().push(thread);
 		let save = engine.clone();
 		clocked("autosave".into(), async move || save.autosave.run(&save.state).await)?;
 		tokio::spawn(engine.clone().grade(health::Sampler::new(health)));
@@ -603,14 +605,16 @@ impl Engine {
 	/// Stop the program clock, then wait for each rendition's encoder to
 	/// publish the copies on their way to it and what it still holds, and to
 	/// end its video track, so quitting loses none of the program's last
-	/// pictures.
+	/// pictures. The program audio ends its track too, so a recording reading
+	/// the program reaches the end of each.
 	pub fn stop(&self) {
 		self.stopped.store(true, Ordering::Relaxed);
-		let thread = self.program_thread.lock().unwrap().take();
-		if let Some(thread) = thread
-			&& thread.join().is_err()
-		{
-			tracing::error!("the program thread panicked");
+		let threads = std::mem::take(&mut *self.threads.lock().unwrap());
+		for thread in threads {
+			let name = thread.thread().name().unwrap_or_default().to_string();
+			if thread.join().is_err() {
+				tracing::error!(name, "the thread panicked");
+			}
 		}
 	}
 
@@ -830,7 +834,8 @@ impl Engine {
 	/// Advance the bus as the program clock advances, and publish the program
 	/// mix stamped `epoch` past `start`.
 	///
-	/// Runs without a relay too, so the meters move and sources never back up.
+	/// Runs without a relay too, so the meters move and sources never back up,
+	/// until the studio [stops](Self::stop), which finishes the audio track.
 	async fn run_audio(
 		&self,
 		start: Instant,
@@ -847,6 +852,14 @@ impl Engine {
 
 		loop {
 			let tick = clock.tick().await;
+			if self.stopped.load(Ordering::Relaxed) {
+				if let Some(mut producer) = producer.take()
+					&& let Err(err) = producer.finish()
+				{
+					self.stats.fail_audio(err);
+				}
+				return;
+			}
 			// Sample-exact against the program clock, so audio and video stay
 			// aligned however the ticks jitter.
 			let due = tick.saturating_duration_since(start).as_nanos() * rate / 1_000_000_000;
@@ -1452,7 +1465,14 @@ mod tests {
 	/// Finish the recording, and return the handler of every track in each
 	/// file, by file.
 	async fn finished(recorder: &record::Recorder) -> Vec<Vec<String>> {
-		kio::clock::timeout(TIMEOUT, recorder.finish())
+		recorder.stop();
+		done(recorder).await
+	}
+
+	/// Wait for the recording to finish, and return the handler of every
+	/// track in each file, by file.
+	async fn done(recorder: &record::Recorder) -> Vec<Vec<String>> {
+		kio::clock::timeout(TIMEOUT, recorder.done())
 			.await
 			.expect("the recording finishes");
 
@@ -1519,6 +1539,18 @@ mod tests {
 		let status = engine.recorder.status().unwrap();
 		let name = status.files[1].path.file_name().unwrap().to_string_lossy();
 		assert!(name.ends_with("Z (2).mp4"), "{name}");
+
+		// Quitting while recording reads the program until stopping ends its
+		// tracks, into the one file.
+		engine.recorder.start(false).expect("recording starts");
+		let frames = engine.stats.encoded.load(Ordering::Relaxed);
+		encoded(&engine, frames + 30).await;
+		engine.recorder.close();
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		let files = done(&engine.recorder).await;
+		assert_eq!(files, [["soun", "vide"]]);
+		assert!(engine.stats.error().is_none());
 	}
 
 	/// A rendition a resize retired while its encoder was still opening must

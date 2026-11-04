@@ -186,12 +186,14 @@ fn main() -> anyhow::Result<ExitCode> {
 	let Some(engine) = started.get() else {
 		return ran.map(|()| ExitCode::SUCCESS);
 	};
-	// A recording still running is finished, so it is a regular MP4. Before
-	// the program stops, whose ended video would roll it into another file.
-	runtime.block_on(engine.recorder.finish());
+	// A recording still running reads the program until stopping ends its
+	// tracks, so it holds what the encoders publish on the way out, and then
+	// finishes as a regular MP4.
+	engine.recorder.close();
 	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
 	engine.stop();
+	runtime.block_on(engine.recorder.done());
 	if let (Err(err), Err(_)) = (&saved, &ran) {
 		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
 	}

@@ -41,6 +41,8 @@ pub struct Recorder {
 struct Session {
 	started: Instant,
 	stop: Arc<watch::Sender<bool>>,
+	/// Set by [`Recorder::close`].
+	closing: Arc<AtomicBool>,
 	done: watch::Receiver<bool>,
 	files: Files,
 }
@@ -133,6 +135,7 @@ impl Recorder {
 		let program = Arc::new(File::new(path));
 		let files: Files = Arc::new(Mutex::new(vec![program.clone()]));
 		let stop = Arc::new(watch::channel(false).0);
+		let closing = Arc::new(AtomicBool::new(false));
 		let (finished, done) = watch::channel(false);
 
 		let run = Run {
@@ -141,6 +144,7 @@ impl Recorder {
 			stem,
 			files: files.clone(),
 			stop: stop.clone(),
+			closing: closing.clone(),
 		};
 		let file = tokio::fs::File::from_std(file);
 		self.runtime.spawn(async move {
@@ -151,6 +155,7 @@ impl Recorder {
 		*session = Some(Session {
 			started: kio::clock::now(),
 			stop,
+			closing,
 			done,
 			files,
 		});
@@ -165,12 +170,32 @@ impl Recorder {
 	}
 
 	/// Stop recording and wait until every file is finished.
+	#[cfg(test)]
 	pub async fn finish(&self) {
-		let mut done = {
-			let session = self.session.lock().unwrap();
-			let Some(session) = session.as_ref() else { return };
-			session.stop.send_replace(true);
-			session.done.clone()
+		self.stop();
+		self.done().await;
+	}
+
+	/// Let the recording read the program until the program's own tracks end,
+	/// as stopping the studio ends them, and then finish, rather than stop where
+	/// it is or go on in another file. So a recording still running when the
+	/// studio quits holds what the encoders publish on the way out.
+	pub fn close(&self) {
+		if let Some(session) = self.session.lock().unwrap().as_ref() {
+			session.closing.store(true, Ordering::Relaxed);
+		}
+	}
+
+	/// Wait until the recording, if any, has finished every file.
+	pub async fn done(&self) {
+		let Some(mut done) = self
+			.session
+			.lock()
+			.unwrap()
+			.as_ref()
+			.map(|session| session.done.clone())
+		else {
+			return;
 		};
 		// Fails only once the recording's task is gone, having finished.
 		let _ = done.wait_for(|done| *done).await;
@@ -223,6 +248,8 @@ struct Run {
 	stem: String,
 	files: Files,
 	stop: Arc<watch::Sender<bool>>,
+	/// The recording reads the program to its end; see [`Recorder::close`].
+	closing: Arc<AtomicBool>,
 }
 
 /// A recording's file writers, each ending with the file it wrote.
@@ -246,7 +273,12 @@ impl Run {
 			tracing::error!(error = format!("{err:#}"), "a recording's writer failed");
 			self.stop.send_replace(true);
 		}
-		while writers.join_next().await.is_some() {}
+		// Whatever ends the program's file ends the recording.
+		while let Some(joined) = writers.join_next().await {
+			if matches!(joined, Ok(Ended { source: None, .. })) {
+				self.stop.send_replace(true);
+			}
+		}
 	}
 
 	/// Go on in a new file whenever the program's tracks are replaced, and with
@@ -305,7 +337,7 @@ impl Run {
 					}
 					// A new canvas size or frame rate moves the program video to a
 					// new track, which goes on in the next file.
-					Ended { source: None, replaced: true } if !*asked.borrow() => {
+					Ended { source: None, replaced: true } if !*asked.borrow() && !self.closing.load(Ordering::Relaxed) => {
 						if !self.file(None, writers) {
 							self.stop.send_replace(true);
 							return Ok(());
@@ -319,8 +351,8 @@ impl Run {
 				},
 				() = stopped(&mut asked) => return Ok(()),
 			}
-			if *asked.borrow() {
-				return Ok(());
+			if *asked.borrow() || self.closing.load(Ordering::Relaxed) {
+				continue;
 			}
 			let start: Vec<String> = listed
 				.iter()
@@ -368,8 +400,9 @@ impl Run {
 	fn spawn(&self, source: Option<String>, entry: Arc<File>, file: tokio::fs::File, writers: &mut Writers) {
 		let broadcast = self.source.clone();
 		let asked = self.stop.subscribe();
+		let closing = self.closing.clone();
 		writers.spawn(async move {
-			let (finished, replaced) = write(broadcast, source.as_deref(), file, &entry, asked).await;
+			let (finished, replaced) = write(broadcast, source.as_deref(), file, &entry, asked, closing).await;
 			entry.finish(finished);
 			Ended { source, replaced }
 		});
@@ -444,6 +477,7 @@ async fn write(
 	file: tokio::fs::File,
 	entry: &File,
 	mut stop: watch::Receiver<bool>,
+	closing: Arc<AtomicBool>,
 ) -> (anyhow::Result<Finished>, bool) {
 	let catalog = tokio::select! {
 		catalog = source.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => catalog.context("the studio's catalog"),
@@ -459,6 +493,7 @@ async fn write(
 		name: name.map(str::to_string),
 		last: None,
 		replaced: replaced.clone(),
+		closing,
 	};
 	let finished = record(mp4::Export::new(source, listing), file, entry, stop).await;
 	(finished, replaced.load(Ordering::Relaxed))
@@ -547,6 +582,9 @@ struct Listing {
 	last: Option<hang::Catalog>,
 	/// Set as the listing ends because its tracks were replaced.
 	replaced: Arc<AtomicBool>,
+	/// Set by [`Recorder::close`]: the program's listing then ends once the
+	/// tracks it recorded have all ended, adding and replacing none.
+	closing: Arc<AtomicBool>,
 }
 
 impl Stream for Listing {
@@ -570,6 +608,26 @@ impl Stream for Listing {
 				}
 				continue;
 			};
+			if let Some(last) = &self.last
+				&& self.name.is_none()
+				&& self.closing.load(Ordering::Relaxed)
+			{
+				// Each track a publisher ended leaves the catalog, and the export
+				// reads every one to its end before it finishes.
+				let listed = |track: &String| {
+					listing.video.renditions.contains_key(track) || listing.audio.renditions.contains_key(track)
+				};
+				if !last
+					.video
+					.renditions
+					.keys()
+					.chain(last.audio.renditions.keys())
+					.any(listed)
+				{
+					return Poll::Ready(Ok(None));
+				}
+				continue;
+			}
 			if let Some(last) = &self.last {
 				let video = replaced(&last.video.renditions, &listing.video.renditions);
 				let audio = replaced(&last.audio.renditions, &listing.audio.renditions);
@@ -942,6 +1000,44 @@ mod tests {
 		for ((_, duration), expected) in files.iter().zip([1, 2]) {
 			assert!(about(*duration, Duration::from_secs(expected)), "{files:?}");
 		}
+	}
+
+	/// Closed as the studio quits, a recording reads the program until the
+	/// program's track ends, rather than stopping where it was, and goes on in
+	/// no other file even as a new track appears; the sources finish with it.
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_recording_reads_the_program_to_its_end() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		studio.add("mic");
+		let recorder = studio.recorder(dir.path());
+
+		recorder.start(true).unwrap();
+		studio.play(Duration::from_secs(1)).await;
+		recorder.close();
+		studio.play(Duration::from_secs(1)).await;
+		studio.replace_program();
+		kio::clock::timeout(Duration::from_secs(5), async {
+			tokio::join!(recorder.done(), studio.play(Duration::from_millis(500)))
+		})
+		.await
+		.expect("the recording finishes once the program's track ends");
+
+		let status = recorder.status().unwrap();
+		let files: Vec<_> = status
+			.files
+			.iter()
+			.map(|file| {
+				assert_eq!(file.finished, Some(Finished::Saved), "{}", file.path.display());
+				let name = file.path.file_name().unwrap().to_string_lossy().into_owned();
+				let [(_, duration)] = tracks(&file.path).try_into().unwrap();
+				(name.rsplit_once("Z").unwrap().1.to_string(), duration)
+			})
+			.collect();
+		let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, [".mp4", " mic.mp4"]);
+		let program = files[0].1;
+		assert!(about(program, Duration::from_secs(2)), "{files:?}");
 	}
 
 	/// A source whose file cannot be created fails without stopping the rest,

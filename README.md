@@ -441,8 +441,10 @@ encoders and starts and stops without touching what the relay serves. Without
 records or watches it.
 
 Each file plays while it grows, so a crash leaves a playable fragmented MP4,
-and becomes a regular MP4 when the recording stops or the studio quits. A
-file nothing reached before the recording stopped is removed.
+and becomes a regular MP4 when the recording stops or the studio quits.
+Quitting first lets the program's encoders publish what they still hold, and
+the program's file keeps it. A file nothing reached before the recording
+stopped is removed.
 
 ### Source frames
 
