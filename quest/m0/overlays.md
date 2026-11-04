@@ -34,7 +34,7 @@ sandboxed frame with scripts off and a content security policy that loads
 only those carried resources. First check
 whether Blitz can draw into a caller's wgpu texture without a readback, and
 upstream that if it cannot. Arbitrary web pages and JavaScript graphics stay
-[browser sources](/quest/m0/browser-source.md), baked into their own
+browser sources (`moq_scene::browser`), baked into their own
 track.
 
 ## Required
