@@ -661,10 +661,14 @@ impl Driver {
 						return std::future::pending().await;
 					}
 					let play = plays.borrow_and_update().lock().unwrap().take();
-					// Ends the one playing, whose last picture must not linger
-					// until the new one's first.
+					// A replay cut off must not leave its last picture up until
+					// the new one's first. Between replays the picture is clear
+					// already, and clearing it again would show before the new
+					// one's first picture even when that is due at once.
+					if playing.is_some() {
+						*self.picture.lock().unwrap() = Some(clear());
+					}
 					playing = play.map(|play| Box::pin(self.replay(play, listing)) as Playing<'_>);
-					*self.picture.lock().unwrap() = Some(clear());
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
