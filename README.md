@@ -313,9 +313,11 @@ mix-minus), so they follow the show without hearing themselves back. Ask
 guests to wear headphones, so the show does not reach their microphone. The
 studio publishes it over its session in the room, never with its own
 credentials: the program once at `.program`, and each guest's feed at
-`.return/<name>/<generation>`. The video is the program's own encode, which
-this session uploads a second time while any guest watches it; each guest
-in the room costs one 64 kbps Opus encode of their mix-minus. A guest's
+`.return/<name>/<generation>`. The video is the program's own two sizes,
+and a guest's player picks one for their link; this session uploads the size
+a guest watches a second time, and a guest watching the half size makes it
+encode as any viewer does. Each guest in the room costs one 64 kbps Opus
+encode of their mix-minus. A guest's
 screen share stays in their feed, since only their camera's microphone is
 taken out.
 
