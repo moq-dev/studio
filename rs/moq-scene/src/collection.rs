@@ -393,7 +393,7 @@ impl Transition {
 
 	/// How far along it looks once `linear` of its time has passed, both from
 	/// 0 to 1: as is for a fade, and eased in and out otherwise.
-	pub fn progress(&self, linear: f32) -> f32 {
+	pub(crate) fn progress(&self, linear: f32) -> f32 {
 		let linear = linear.clamp(0.0, 1.0);
 		match self {
 			Self::Fade { .. } => linear,
