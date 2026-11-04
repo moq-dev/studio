@@ -13,28 +13,31 @@ import { Effect, type Getter } from "@moq/signals";
 /** The version that presents a token on a live session, and the only one the page offers. */
 export const VERSION = "moq-lite-07-wip";
 
-/** Where the studio publishes `name`'s tokens: `RENEW` in `rs/moq-studio/src/guests.rs`. */
-export function path(name: string): Net.Path.Valid {
-	return Net.Path.from(`.renew/${name}`);
+/**
+ * Where the studio publishes `name`'s tokens in `generation`: `Room::renewal_path` in
+ * `rs/moq-studio/src/guests.rs`.
+ */
+export function path(name: string, generation: number): Net.Path.Valid {
+	return Net.Path.from(`.renew/${name}/${generation}`);
 }
 
 /** The track of those tokens, one group each: `TOKEN_TRACK` in `rs/moq-studio/src/guests.rs`. */
 const TRACK = "token";
 
 /**
- * Hand `renewed` each token the studio publishes for `name` in `origin`, across
+ * Hand `renewed` each token the studio publishes at `renewals` in `origin`, across
  * the studio's restarts, until the returned effect is closed.
  */
 export function follow(
 	origin: Getter<Net.Origin.Reader | undefined>,
-	name: string,
+	renewals: Net.Path.Valid,
 	renewed: (token: string) => void,
 ): Effect {
 	const signals = new Effect();
 	signals.run((effect) => {
 		const reader = effect.get(origin);
 		if (!reader) return;
-		const request = reader.follow(path(name));
+		const request = reader.follow(renewals);
 		effect.cleanup(() => request.close());
 
 		effect.run((effect) => {
@@ -46,7 +49,14 @@ export function follow(
 				for (;;) {
 					const group = await effect.race(track.recvGroup());
 					if (!group) return;
-					const token = await effect.race(group.readString());
+					let token: string | undefined;
+					try {
+						token = await effect.race(group.readString());
+					} catch (err) {
+						// A group a newer token superseded before it completed: read that one.
+						if (err instanceof Net.Error.Stream && err.code === Net.StreamCode.Old) continue;
+						throw err;
+					}
 					if (token) renewed(token);
 				}
 			});

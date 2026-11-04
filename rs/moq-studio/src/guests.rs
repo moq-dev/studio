@@ -95,8 +95,8 @@ impl Config {
 	}
 }
 
-/// Where the guests removed from scenes are kept: `show.guests.toml` for
-/// `show.toml`, beside its history.
+/// Where the guests removed from scenes, and how often each was let back in,
+/// are kept: `show.guests.toml` for `show.toml`, beside its history.
 fn removals_path(scenes: &std::path::Path) -> PathBuf {
 	let mut name = scenes.file_stem().unwrap_or_default().to_os_string();
 	name.push(".guests.toml");
@@ -108,7 +108,11 @@ fn removals_path(scenes: &std::path::Path) -> PathBuf {
 #[serde(deny_unknown_fields)]
 struct Removals {
 	/// The guests whose tokens are not renewed until the host makes them a new link.
+	#[serde(default)]
 	removed: BTreeSet<String>,
+	/// Each guest's [`Participant::generation`], when not zero.
+	#[serde(default)]
+	generation: BTreeMap<String, u64>,
 }
 
 /// The studio's room: who was invited, and what each guest publishes.
@@ -143,6 +147,9 @@ pub struct Participant {
 	/// Whether the host removed them from scenes since their newest link, which
 	/// stops renewing their token, across restarts.
 	pub removed: bool,
+	/// How often a new link let them back in after a removal. Their renewals are
+	/// published under it, so a token from before cannot read them.
+	pub generation: u64,
 }
 
 impl Participant {
@@ -224,7 +231,7 @@ impl Room {
 		};
 		// Sign once now, so a key that cannot sign for guests or for the studio's
 		// own session fails at startup.
-		room.sign("guest")?;
+		room.sign("guest", 0)?;
 		room.sign_session()?;
 		Ok(room)
 	}
@@ -241,23 +248,27 @@ impl Room {
 		for identity in removals.removed {
 			participants.entry(identity).or_default().removed = true;
 		}
+		for (identity, generation) in removals.generation {
+			participants.entry(identity).or_default().generation = generation;
+		}
 		self.removals = Some(path);
 		Ok(self)
 	}
 
-	/// Mark `identity` removed or not, once the file holds it, so a failed
-	/// write leaves both as they were.
-	fn set_removed(
+	/// Apply `change` to `identity` once the file holds it, so a failed write
+	/// leaves both as they were.
+	fn change(
 		&self,
 		participants: &mut BTreeMap<String, Participant>,
 		identity: &str,
-		removed: bool,
+		change: impl FnOnce(&mut Participant),
 	) -> anyhow::Result<()> {
 		let participant = participants.entry(identity.to_string()).or_default();
-		let before = std::mem::replace(&mut participant.removed, removed);
+		let before = participant.clone();
+		change(participant);
 		let saved = self.save_removals(participants);
 		if saved.is_err() {
-			participants.entry(identity.to_string()).or_default().removed = before;
+			participants.insert(identity.to_string(), before);
 		}
 		saved
 	}
@@ -266,8 +277,14 @@ impl Room {
 	fn save_removals(&self, participants: &BTreeMap<String, Participant>) -> anyhow::Result<()> {
 		let Some(path) = &self.removals else { return Ok(()) };
 		let removed = participants.iter().filter(|(_, participant)| participant.removed);
+		let generation = participants
+			.iter()
+			.filter(|(_, participant)| participant.generation > 0);
 		let removals = Removals {
 			removed: removed.map(|(identity, _)| identity.clone()).collect(),
+			generation: generation
+				.map(|(identity, participant)| (identity.clone(), participant.generation))
+				.collect(),
 		};
 		let context = || format!("writing {}", path.display());
 		let dir = match path.parent() {
@@ -303,20 +320,28 @@ impl Room {
 		// The room's announcements hide a path segment starting with `.`, so the
 		// studio would never see this guest join.
 		anyhow::ensure!(!name.starts_with('.'), "a guest's name cannot start with `.`");
-		let (token, expires) = self.sign(name)?;
+		let mut participants = self.participants.lock().unwrap();
+		let removed = participants.get(name).is_some_and(|participant| participant.removed);
+		let generation = participants.get(name).map_or(0, |participant| participant.generation);
+		// Refused before anything changes, as a name that cannot be a guest.
+		let (token, expires) = self.sign(name, generation + u64::from(removed))?;
+		// A new link lets a removed guest back in, under a new generation, so a
+		// token from before the removal cannot read the renewals.
+		if removed {
+			self.change(&mut participants, name, |participant| {
+				participant.removed = false;
+				participant.generation += 1;
+			})?;
+		}
 		let mut link = self.page.clone();
 		let fragment = url::form_urlencoded::Serializer::new(String::new())
 			.append_pair("url", self.url.as_str())
 			.append_pair("name", name)
 			.append_pair("jwt", &token)
+			.append_pair("generation", &(generation + u64::from(removed)).to_string())
 			.finish();
 		link.set_fragment(Some(&fragment));
 		let invite = Invite { link, expires };
-		let mut participants = self.participants.lock().unwrap();
-		// A new link lets a removed guest back in.
-		if participants.get(name).is_some_and(|participant| participant.removed) {
-			self.set_removed(&mut participants, name, false)?;
-		}
 		participants.entry(name.to_string()).or_default().invite = Some(invite.clone());
 		drop(participants);
 		self.changed.notify_one();
@@ -331,16 +356,16 @@ impl Room {
 			.get(identity)
 			.is_some_and(|participant| participant.removed)
 		{
-			self.set_removed(&mut participants, identity, true)?;
+			self.change(&mut participants, identity, |participant| participant.removed = true)?;
 		}
 		drop(participants);
 		self.changed.notify_one();
 		Ok(())
 	}
 
-	/// Where `identity`'s renewals are published, in the room.
-	fn renewal_path(identity: &str) -> anyhow::Result<Path> {
-		Ok(Path::new(&format!("{RENEW}/{identity}"))?)
+	/// Where `identity`'s renewals in `generation` are published, in the room.
+	fn renewal_path(identity: &str, generation: u64) -> anyhow::Result<Path> {
+		Ok(Path::new(&format!("{RENEW}/{identity}/{generation}"))?)
 	}
 
 	/// Why the session publishing guests' renewed tokens is not connected, if it
@@ -353,9 +378,9 @@ impl Room {
 	/// A token for `identity`, and when it expires. It publishes moq-room's
 	/// paths but subscribes only to its own renewals, so no guest reads
 	/// another's.
-	fn sign(&self, identity: &str) -> anyhow::Result<(String, kio::clock::Wall)> {
+	fn sign(&self, identity: &str, generation: u64) -> anyhow::Result<(String, kio::clock::Wall)> {
 		let invalid = || format!("cannot invite `{identity}`");
-		let renewals = Self::renewal_path(identity).with_context(invalid)?;
+		let renewals = Self::renewal_path(identity, generation).with_context(invalid)?;
 		let claims = moq_room::claims(self.root.as_str(), identity)
 			.with_context(invalid)?
 			.with_subscribe([moq_auth::Pattern::literal(renewals.as_str())?]);
@@ -386,11 +411,13 @@ impl Room {
 		Ok((token, expires))
 	}
 
-	/// The guests whose tokens are renewed.
-	fn renewed(&self) -> Vec<String> {
+	/// The guests whose tokens are renewed, and in which generation.
+	fn renewed(&self) -> Vec<(String, u64)> {
 		let participants = self.participants.lock().unwrap();
 		let renewed = participants.iter().filter(|(_, participant)| participant.renewed());
-		renewed.map(|(identity, _)| identity.clone()).collect()
+		renewed
+			.map(|(identity, participant)| (identity.clone(), participant.generation))
+			.collect()
 	}
 
 	/// Record that the broadcast at `path` in the room went online or offline,
@@ -665,6 +692,7 @@ struct Renewals {
 
 /// One guest's token track, ended when dropped.
 struct Renewed {
+	generation: u64,
 	publication: moq_net::origin::Publication,
 	track: moq_net::track::Producer,
 }
@@ -689,12 +717,13 @@ impl Renewals {
 	/// of those who are not anymore.
 	fn sync(&mut self) {
 		let renewed = self.room.renewed();
-		self.tracks.retain(|identity, _| renewed.contains(identity));
-		for identity in renewed {
+		self.tracks
+			.retain(|identity, track| renewed.contains(&(identity.clone(), track.generation)));
+		for (identity, generation) in renewed {
 			if self.tracks.contains_key(&identity) {
 				continue;
 			}
-			match self.publish(&identity) {
+			match self.publish(&identity, generation) {
 				Ok(track) => {
 					self.tracks.insert(identity, track);
 				}
@@ -703,11 +732,17 @@ impl Renewals {
 		}
 	}
 
-	/// The token track for `identity`, holding a fresh token.
-	fn publish(&self, identity: &str) -> anyhow::Result<Renewed> {
-		let publication = self.origin.create_broadcast(Room::renewal_path(identity)?)?;
+	/// The token track for `identity` in `generation`, holding a fresh token.
+	fn publish(&self, identity: &str, generation: u64) -> anyhow::Result<Renewed> {
+		let publication = self
+			.origin
+			.create_broadcast(Room::renewal_path(identity, generation)?)?;
 		let track = publication.create_track(TOKEN_TRACK, None)?;
-		let mut renewed = Renewed { publication, track };
+		let mut renewed = Renewed {
+			generation,
+			publication,
+			track,
+		};
 		self.write(identity, &mut renewed)?;
 		renewed.publication.announce(Default::default())?;
 		Ok(renewed)
@@ -725,7 +760,7 @@ impl Renewals {
 	}
 
 	fn write(&self, identity: &str, renewed: &mut Renewed) -> anyhow::Result<()> {
-		let (token, _) = self.room.sign(identity)?;
+		let (token, _) = self.room.sign(identity, renewed.generation)?;
 		renewed.track.write_frame(None, token)?;
 		Ok(())
 	}
@@ -939,13 +974,14 @@ mod tests {
 		let fragment = fragment(&invite.link);
 		assert_eq!(fragment["url"], "https://relay.example:4443/show/guests");
 		assert_eq!(fragment["name"], "alice");
+		assert_eq!(fragment["generation"], "0");
 
 		let claims = key.verify(&fragment["jwt"]).unwrap();
 		assert_eq!(claims.root, "show/guests");
 		assert_eq!(claims.publish, ["alice/**".parse().unwrap()].into_iter().collect());
 		assert_eq!(
 			claims.subscribe,
-			[".renew/alice".parse().unwrap()].into_iter().collect(),
+			[".renew/alice/0".parse().unwrap()].into_iter().collect(),
 			"a guest reads only its own renewals"
 		);
 		let (issued, expires) = (claims.issued.unwrap(), claims.expires.unwrap());
@@ -1004,6 +1040,7 @@ mod tests {
 				camera: true,
 				screen: false,
 				removed: false,
+				generation: 0,
 			}
 		);
 
@@ -1141,7 +1178,7 @@ mod tests {
 			}
 		);
 
-		let token = kio::clock::timeout(TIMEOUT, next_token(&renewals.consume(), "alice"))
+		let token = kio::clock::timeout(TIMEOUT, next_token(&renewals.consume(), "alice", 0))
 			.await
 			.expect("the studio renews the guest")
 			.expect("a token");
@@ -1153,7 +1190,7 @@ mod tests {
 
 		// Published before alice's, over the same session, so the relay holds it.
 		let other = kio::clock::timeout(TIMEOUT, async {
-			let broadcast = renewals.consume().request(Room::renewal_path("bob")?, None).await?;
+			let broadcast = renewals.consume().request(Room::renewal_path("bob", 0)?, None).await?;
 			read_token(broadcast).await
 		})
 		.await
@@ -1162,8 +1199,11 @@ mod tests {
 	}
 
 	/// The newest token published for `identity` in `origin`, once there is one.
-	async fn next_token(origin: &moq_net::origin::Consumer, identity: &str) -> anyhow::Result<String> {
-		let broadcast = origin.follow(Room::renewal_path(identity)?, None)?.available().await?;
+	async fn next_token(origin: &moq_net::origin::Consumer, identity: &str, generation: u64) -> anyhow::Result<String> {
+		let broadcast = origin
+			.follow(Room::renewal_path(identity, generation)?, None)?
+			.available()
+			.await?;
 		read_token(broadcast).await
 	}
 
@@ -1198,7 +1238,7 @@ mod tests {
 
 		join(true);
 		renewals.sync();
-		let first = key.verify(&next_token(&consumer, "alice").await.unwrap()).unwrap();
+		let first = key.verify(&next_token(&consumer, "alice", 0).await.unwrap()).unwrap();
 		assert_eq!(first.root, "show/guests");
 		assert_eq!(first.publish, ["alice/**".parse().unwrap()].into_iter().collect());
 		// Each renewal comes half an expiry later, so a token must outlast that.
@@ -1208,7 +1248,7 @@ mod tests {
 		clock.advance(EXPIRY / 2);
 		assert!(ahead(&first) >= EXPIRY / 2, "renewed before the token expires");
 		renewals.renew();
-		let second = key.verify(&next_token(&consumer, "alice").await.unwrap()).unwrap();
+		let second = key.verify(&next_token(&consumer, "alice", 0).await.unwrap()).unwrap();
 		assert!(ahead(&second) >= EXPIRY, "{:?}", ahead(&second));
 
 		room.stop_renewing("alice").unwrap();
@@ -1216,9 +1256,16 @@ mod tests {
 		renewals.sync();
 		assert!(renewals.tracks.is_empty(), "a removed guest's renewals end");
 
+		// Let back in under a new generation, which a token from before cannot read.
 		room.invite("alice").unwrap();
 		renewals.sync();
-		next_token(&consumer, "alice").await.unwrap();
+		let back = key.verify(&next_token(&consumer, "alice", 1).await.unwrap()).unwrap();
+		assert_eq!(
+			back.subscribe,
+			[".renew/alice/1".parse().unwrap()].into_iter().collect()
+		);
+		let before = consumer.request(Room::renewal_path("alice", 0).unwrap(), None).await;
+		assert!(before.is_err(), "the earlier generation is still renewed");
 
 		join(false);
 		renewals.sync();
@@ -1226,7 +1273,7 @@ mod tests {
 	}
 
 	/// A removed guest stays unrenewed when the studio restarts, until a new
-	/// link.
+	/// link, whose generation a restart keeps too.
 	#[test]
 	fn a_removal_outlasts_a_restart() {
 		let dir = tempfile::tempdir().unwrap();
@@ -1253,18 +1300,25 @@ mod tests {
 		assert!(room.participants()["alice"].removed);
 		assert!(room.renewed().is_empty(), "a removed guest is renewed after a restart");
 		room.invite("alice").unwrap();
-		assert_eq!(room.renewed(), ["alice"]);
+		let alice = vec![("alice".to_string(), 1)];
+		assert_eq!(room.renewed(), alice);
 
 		let room = start();
 		room.observe(&camera, true, &Collection::new(), &History::new());
-		assert_eq!(room.renewed(), ["alice"], "a new link is remembered too");
+		assert_eq!(room.renewed(), alice, "a new link is remembered too");
+		room.invite("alice").unwrap();
+		assert_eq!(
+			room.renewed(),
+			alice,
+			"only letting a removed guest back in moves them on"
+		);
 
 		// A removal the file cannot hold is not made, so trying again saves it.
 		let file = dir.path().join("show.guests.toml");
 		std::fs::remove_file(&file).unwrap();
 		std::fs::create_dir(&file).unwrap();
 		assert!(room.stop_renewing("alice").is_err());
-		assert_eq!(room.renewed(), ["alice"]);
+		assert_eq!(room.renewed(), alice);
 		std::fs::remove_dir(&file).unwrap();
 		room.stop_renewing("alice").unwrap();
 		assert!(start().participants()["alice"].removed);

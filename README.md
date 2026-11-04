@@ -185,14 +185,16 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   studio signs them a fresh token every half of it, over a session of its own
   in the room that the room key signs for, and the join page presents it
   without reconnecting. A guest's token may read only their own renewals, at
-  `.renew/<name>` in the room, but anything else the relay lets subscribe
+  `.renew/<name>/<generation>` in the room, but anything else the relay lets subscribe
   there can read every guest's, so grant that only to the studio. A guest who
-  leaves needs a link, or a renewed token, that has not expired to come back. The Guests panel says
-  when renewal is failing.
-- **Upgrading from a studio without renewal:** generate a new room key and
-  drop the old one's public half from `--key-dir`. Links from before let
-  their holder subscribe to the whole room, renewals included, so they must
-  die with the old key.
+  leaves needs a link, or a renewed token, that has not expired to come back.
+  The Guests panel says when renewal is failing.
+- **Upgrading from a studio without renewal:** generate a new room key, drop
+  the old one's public half from `--key-dir`, then restart the relay (or wait
+  out the old links' `--guest-expiry`) before starting the upgraded studio.
+  Links from before let their holder subscribe to the whole room, renewals
+  included, so they must die with the old key, and a relay keeps a session
+  it already admitted until its token expires.
 - With `--failover`, a link still names only the `--connect` relay: the join
   page dials one relay, and a guest's token is rooted at the room there, so
   guests drop while that relay is down. The studio follows the room through
@@ -222,7 +224,8 @@ layer and mutes them. A signed token cannot be taken back, so it also stops
 renewing theirs, and they are disconnected within `--guest-expiry`. That
 holds across a restart: removed guests are kept beside the scene file, as
 `show.guests.toml` for `show.toml`. Undo puts them back in the scenes but not
-on renewal; **New link** lets them back in and renews them again.
+on renewal; **New link** lets them back in and renews them again, under a new
+generation, so a link from before the removal cannot read their renewals.
 
 ## Scene file
 
