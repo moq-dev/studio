@@ -435,11 +435,14 @@ fn tracks(listed: &Listed, clock: &moq_mux::Clock, graded: &Graded) -> Vec<Track
 		.map(|(source, id, label, enabled, sent)| {
 			let ours = sent.and_then(|health| health.renditions.get(id));
 			let interval = sent.and_then(|health| health.interval);
+			// A source's track is in the local broadcast, whose names can repeat
+			// the program's, and no relay viewer or grant reaches it.
+			let program = source.is_none();
 			let mut track = Track {
 				source: source.cloned(),
 				id: id.clone(),
 				label,
-				granted: listed.grants.get(id).copied().flatten(),
+				granted: listed.grants.get(id).copied().flatten().filter(|_| program),
 				enabled,
 				sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
 				framerate: ours
@@ -451,7 +454,7 @@ fn tracks(listed: &Listed, clock: &moq_mux::Clock, graded: &Graded) -> Vec<Track
 				verdict: Verdict::Unknown,
 				latency: None,
 			};
-			for viewer in &graded.viewers {
+			for viewer in graded.viewers.iter().filter(|_| program) {
 				let Some(health) = &viewer.health else { continue };
 				let Some(rendition) = health.renditions.get(id) else {
 					continue;
@@ -1194,9 +1197,9 @@ mod tests {
 	}
 
 	/// Each source's media tracks are graded like the program's, after them and
-	/// by source name, from what the source wrote and what viewers report on
-	/// them; a still has no media to grade. A viewer stalling on one names
-	/// its source.
+	/// by source name, from what the source wrote; a still has no media to
+	/// grade. A source's track stays in the studio, so no viewer report or
+	/// grant applies to it, even under a name the program's track shares.
 	#[test]
 	fn source_tracks_are_graded_by_source() {
 		let video = |width: u32, height: u32| {
@@ -1212,7 +1215,7 @@ mod tests {
 		half.enabled = false;
 		program.video.renditions.insert("3.avc3".into(), half);
 		let mut camera = hang::Catalog::default();
-		camera.video.renditions.insert("2.avc3".into(), video(1280, 720));
+		camera.video.renditions.insert("0.avc3".into(), video(1280, 720));
 		let mut logo = hang::Catalog::default();
 		let png = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
 		logo.binary.tracks.insert("1.png".into(), png);
@@ -1230,8 +1233,8 @@ mod tests {
 		// 375 kB in a second is 3 Mb/s, and 125 kB is 1 Mb/s.
 		let graded = Graded {
 			publisher: Some(wrote(&[("0.avc3", 375_000)])),
-			sources: Some(wrote(&[("2.avc3", 125_000)])),
-			viewers: vec![stalling("alice", "2.avc3", Duration::from_millis(100))],
+			sources: Some(wrote(&[("0.avc3", 125_000)])),
+			viewers: vec![stalling("alice", "0.avc3", Duration::from_millis(100))],
 		};
 		let tracks = tracks(&listed, &moq_mux::Clock::new(), &graded);
 		let rows: Vec<_> = tracks
@@ -1252,19 +1255,19 @@ mod tests {
 			[
 				(None, "0.avc3", Some("3.0 Mb/s".into()), Some("4.0 Mb/s".into()), true),
 				(None, "3.avc3", None, None, false),
-				(Some("camera"), "2.avc3", Some("1.0 Mb/s".into()), None, true),
+				(Some("camera"), "0.avc3", Some("1.0 Mb/s".into()), None, true),
 			]
 		);
 		let camera = &tracks[2];
 		assert_eq!(camera.framerate, Some(30.0));
-		assert_eq!((camera.viewers, camera.verdict), (1, Verdict::Unhealthy));
-		assert_eq!((tracks[0].viewers, tracks[0].verdict), (0, Verdict::Unknown));
+		assert_eq!((camera.viewers, camera.verdict), (0, Verdict::Unknown));
+		assert_eq!((tracks[0].viewers, tracks[0].verdict), (1, Verdict::Unhealthy));
 
 		let local = Local::default();
 		let uplink = Uplink::default();
 		assert_eq!(
 			causes(problems(&facts(&local, &uplink, &graded.viewers, &tracks))),
-			["1 of 1 viewers are stalling on source `camera`'s video avc3.42c01f 1280x720."]
+			["1 of 1 viewers are stalling on video avc3.42c01f 1920x1080."]
 		);
 	}
 

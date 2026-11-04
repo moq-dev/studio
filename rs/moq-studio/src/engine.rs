@@ -400,13 +400,23 @@ impl Drop for Output {
 }
 
 impl Output {
-	/// What a replay of the program copies: its video and audio, up to now.
-	pub fn program(&self) -> moq_scene::replay::Target {
+	/// What a replay of the program could copy: its video at each size,
+	/// largest first, with its audio, up to now.
+	pub fn program(&self) -> Vec<moq_scene::replay::Target> {
 		let catalog = self.catalog.snapshot();
-		self.target(
-			catalog.video.renditions.into_iter().next(),
-			catalog.audio.renditions.into_iter().next(),
-		)
+		let audio = catalog.audio.renditions.into_iter().next();
+		let mut video: Vec<_> = catalog.video.renditions.into_iter().collect();
+		video.sort_by_key(|(_, config)| {
+			let pixels = u64::from(config.coded_width.unwrap_or(0)) * u64::from(config.coded_height.unwrap_or(0));
+			std::cmp::Reverse(pixels)
+		});
+		match video.is_empty() {
+			true => vec![self.target(None, audio)],
+			false => video
+				.into_iter()
+				.map(|video| self.target(Some(video), audio.clone()))
+				.collect(),
+		}
 	}
 
 	/// What a replay of the local source `name` copies: the video of its own
@@ -1974,8 +1984,9 @@ mod tests {
 		.expect("health grades the program's tracks");
 
 		// The program's recent past saves as a clip, from the groups it holds.
-		let target = engine.target(&crate::replay::Of::Program).expect("the program's past");
-		let take = moq_scene::replay::Take::clip(&target, Duration::from_secs(1)).expect("a take");
+		let take = crate::replay::take(&engine, &crate::replay::Of::Program, Duration::from_secs(1), false)
+			.expect("the program's past");
+		assert!(take.video.is_some(), "the canvas size holds video");
 		let clip = kio::clock::timeout(TIMEOUT, crate::replay::save(take, engine.autosave.path()))
 			.await
 			.expect("the clip saves")

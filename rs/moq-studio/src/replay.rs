@@ -42,12 +42,13 @@ impl std::fmt::Display for Of {
 }
 
 impl Engine {
-	/// What a replay of `of` copies, ending now.
+	/// What a replay of `of` could copy, ending now, the most wanted first:
+	/// the program at each of its sizes, largest first, or a source's one.
 	///
 	/// The program has a past only while it is published, a local source only
 	/// from while it was on program, since nothing else encodes them, and a
 	/// broadcast source once it shows a picture.
-	pub fn target(&self, of: &Of) -> anyhow::Result<Target> {
+	pub fn targets(&self, of: &Of) -> anyhow::Result<Vec<Target>> {
 		let output = || {
 			self.output
 				.as_ref()
@@ -59,7 +60,7 @@ impl Engine {
 		};
 		let state = self.state.lock().unwrap();
 		let capture = state.collection().capture(name);
-		match state.collection().sources.get(capture) {
+		let target = match state.collection().sources.get(capture) {
 			Some(Source::Broadcast { .. }) => state
 				.sources
 				.get(capture)
@@ -75,18 +76,31 @@ impl Engine {
 				.with_context(|| format!("`{name}` publishes no video to replay")),
 			Some(_) => anyhow::bail!("`{name}` has no picture to replay"),
 			None => anyhow::bail!("there is no source named `{name}`"),
-		}
+		};
+		Ok(vec![target?])
 	}
 }
 
 /// Hold the `length` of `of` up to now: to play in a replay source with
 /// `play`, or as a clip to save.
+///
+/// Takes the first target that holds video for the span, such as the
+/// program's half size while the grant could not fund its canvas size, or
+/// else the last one tried.
 pub fn take(engine: &Engine, of: &Of, length: Duration, play: bool) -> anyhow::Result<Take> {
-	let target = engine.target(of)?;
-	let take = match play {
-		true => Take::new(&target, length),
-		false => Take::clip(&target, length),
-	};
+	let mut take = None;
+	for target in engine.targets(of)? {
+		let next = match play {
+			true => Take::new(&target, length),
+			false => Take::clip(&target, length),
+		};
+		let video = next.as_ref().is_ok_and(|next| next.video.is_some());
+		take = Some(next);
+		if video {
+			break;
+		}
+	}
+	let take = take.context("nothing to replay")?;
 	take.with_context(|| match of {
 		Of::Source(name) => format!("cannot replay `{name}`, which keeps a past only while it is on program"),
 		Of::Program => "cannot replay the program".into(),
