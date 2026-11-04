@@ -85,7 +85,7 @@ impl Engine {
 /// Hold the `length` of `of` up to now: to play in a replay source with
 /// `play`, or as a clip to save.
 ///
-/// Takes the target whose video covers the most of the span, the first of
+/// Takes the target whose video holds the most pictures of the span, the first of
 /// those tied, such as the program's half size over a canvas size the grant
 /// disabled partway, or else the first one tried.
 pub fn take(engine: &Engine, of: &Of, length: Duration, play: bool) -> anyhow::Result<Take> {
@@ -99,7 +99,7 @@ pub fn take(engine: &Engine, of: &Of, length: Duration, play: bool) -> anyhow::R
 			take.as_ref()
 				.ok()
 				.filter(|take| take.video.is_some())
-				.map(|take| take.covered)
+				.map(|take| take.pictures)
 		};
 		let next = next.map_err(anyhow::Error::from);
 		if best.as_ref().is_none_or(|best| coverage(&next) > coverage(best)) {
