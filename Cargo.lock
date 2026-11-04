@@ -3431,6 +3431,7 @@ name = "moq-auth"
 version = "0.2.1"
 dependencies = [
  "aws-lc-rs",
+ "axum",
  "base64 0.23.1",
  "data-encoding",
  "jsonwebtoken",
@@ -3634,6 +3635,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-room"
+version = "0.2.11"
+dependencies = [
+ "kio",
+ "moq-auth",
+ "moq-json",
+ "moq-net",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "moq-scene"
 version = "0.1.0"
 dependencies = [
@@ -3705,11 +3717,13 @@ dependencies = [
  "moq-mux",
  "moq-net",
  "moq-relay",
+ "moq-room",
  "moq-scene",
  "moq-stats",
  "moq-tokio",
  "moq-video",
  "pollster",
+ "qrcodegen",
  "tempfile",
  "tokio",
  "tracing",
@@ -5171,6 +5185,12 @@ dependencies = [
  "tokio-util",
  "tracing",
 ]
+
+[[package]]
+name = "qrcodegen"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4339fc7a1021c9c1621d87f5e3505f2805c8c105420ba2f2a4df86814590c142"
 
 [[package]]
 name = "quick-error"

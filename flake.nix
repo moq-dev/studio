@@ -21,7 +21,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/d003102129236c88edbfec11f001e8efeaf9b5fd";
+      url = "github:moq-dev/quest/4be350816f2a5c1157f799773ee1594f199fd9a7";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -192,6 +192,9 @@
                 cargo-sort
                 cargo-shear
                 quest-cli
+
+                # The join page: install, lint, type-check, test, and build.
+                bun
 
                 # `just check` lints.
                 shellcheck
