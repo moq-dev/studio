@@ -104,7 +104,6 @@ repository.
 - [Guest return feed](/quest/m0/guest-return.md) - guests see the program and hear a mix-minus
 - [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
-- [Recording](/quest/m0/recording.md) - each canvas's program, and optionally each source, recorded to disk alongside live outputs
 - [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Browser sources keep a profile](/quest/m0/browser-profile.md) - one persistent profile, so logins survive restarts, and a reload action
 - [Browser source popups](/quest/m0/browser-popups.md) - dropdowns and other in-page popups draw and take input

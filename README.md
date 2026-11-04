@@ -16,8 +16,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - `show.toml` is the scene collection. If it does not exist yet,
   [guided setup](#first-launch) proposes one and creates it. Changes are saved
   to it a second after you stop editing, with no save step.
-- Without `--connect`, the studio composes and previews but publishes nothing,
-  and broadcast sources stay offline.
+- `--recordings <dir>` is where recordings are saved, by default beside
+  `show.toml`.
+- Without `--connect`, the studio composes, previews, and records but
+  publishes nothing, and broadcast sources stay offline.
 - `--failover <url>` publishes the same broadcast to a second relay under the
   same broadcast instance, so a viewer linked to both resumes mid-group from
   it when the first fails. Both relays must speak the one `--connect-version`,
@@ -97,7 +99,7 @@ Every panel is a tab you can drag, split, or stack.
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | Set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
+| Output | Start and stop recording, set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 
@@ -382,12 +384,13 @@ rendition's track ends and a new one is listed in its place in a catalog
 update, on the same timeline, and viewers switch to it; the video pauses while
 the new encoder opens. Items keep their place in canvas pixels. A canvas the
 encoder cannot take stops the video, saying why, until the canvas changes
-again.
+again. At startup, it stops the studio when live; without `--connect`, the
+studio starts without video.
 
 The program encodes whether or not anyone watches, so a viewer who arrives
 late can fetch the recent past. `--on-demand` copies and encodes the video only
-while someone watches it, which saves that work but leaves nothing from before
-the first viewer; audio encodes either way. A hardware encoder that reads
+while someone watches or records it, which saves that work but leaves nothing
+from before the first viewer; audio encodes either way. A hardware encoder that reads
 the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
 takes each frame there when it can read the GPU the studio draws on. When it
 cannot, such as NVENC while the studio draws on a laptop's integrated GPU, the
@@ -420,7 +423,8 @@ the hang draft specifies source listings:
 
 A captured source encodes as H.264 for as long as it is in the collection,
 whether or not anyone watches, so a late viewer can fetch its recent past; the
-relay uploads only what someone subscribes to. A capture that changes size or
+relay uploads only what someone subscribes to. Without `--connect`, it encodes
+only while a recording reads it. A capture that changes size or
 color space moves to a new track, which its catalog entry follows. Images and
 colors publish once, as the image file and as a one-pixel PNG. Removing or
 editing a source ends its track. A track carries the plain capture, before any
@@ -438,6 +442,33 @@ opens its session before any source, even with `--on-demand`, so the sources
 past the cap fail rather than the program. When the
 program encodes in software, a source takes hardware where it can and software
 otherwise.
+
+### Recording
+
+**Start recording** in the Output panel saves the program to
+`<scene file name> <UTC start time>.mp4` in the `--recordings` directory, live
+or not. With **each source too**, every camera, display, and window that
+publishes a track of its own records into a file of its own beside it,
+`<scene file name> <UTC start time> <source>.mp4`, holding the capture before
+any filter. Broadcast sources, guests included, publish no track of the
+studio's, so they get no file of their own. A source added while recording
+starts its file then, and one removed finishes its file then. A new canvas
+size or frame rate, or a capture that changes size or color space, moves the
+video to a new track, so the program or that source goes on in a new file,
+numbered after the first, since players show only one video track. A file
+starts with up to 2 s from before it opened, so a recording starts a little
+early, and a track that goes on into the next file, such as the program
+audio, repeats up to 2 s of the last. A
+recording reads the broadcast the way a viewer does, so it shares the live
+encoders and starts and stops without touching what the relay serves. Without
+`--connect`, or with `--on-demand`, the program encodes only while something
+records or watches it.
+
+Each file plays while it grows, so a crash leaves a playable fragmented MP4,
+and becomes a regular MP4 when the recording stops or the studio quits.
+Quitting first lets the program's encoders publish what they still hold, and
+the program's file keeps it. A file nothing reached before the recording
+stopped is removed.
 
 ### Source frames
 
