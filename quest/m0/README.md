@@ -93,7 +93,6 @@ repository.
 - [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio get their own tracks, for isolated recording and replay
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
-- [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
 - [Audio sources report stalls](/quest/m0/audio-stall.md) - a dead microphone or system audio reads stalled like a camera
 - [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
 - [Animation and transitions](/quest/m0/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
