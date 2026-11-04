@@ -55,7 +55,7 @@ when this epic starts.
 
 ## Required
 
-- [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio publish their own tracks beside the picture sources, encoded whatever the demand and uploaded only while subscribed
+- [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio get their own tracks beside the picture sources (an m0 quest), encoded while the studio uses them and published to the relay only when published independently
 - [Layout track](/quest/m1/compose/layout.md) - the live scene state as a hang JSON track on the media clock, specified in the hang draft
 - [Browser composition](/quest/m1/compose/browser.md) - `@moq/watch` composes a broadcast with a layout track through moq-scene's browser build
 - [Server composition](/quest/m1/compose/server.md) - a headless compositor renders the program from sources and layout, headless

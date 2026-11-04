@@ -34,6 +34,7 @@ This replaces the earlier always-on decision (2026-11-01, on
 [moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)), because
 encoding every source costs encoder sessions a consumer machine does not
 have; an audio source follows the picture sources' rule.
+
 Track names stay stable for a source's life, and an edited source that
 changes what it shows gets a new name.
 
