@@ -512,7 +512,9 @@ impl Program {
 
 	/// Encode the local sources on program, from `state`, whether or not
 	/// anything reads their tracks, so a replay of one has its past: those a
-	/// scene on air shows, and those the program mix plays.
+	/// scene on air shows, and the microphones and system audio the program
+	/// mix plays. A replay source's track is its pictures, so being heard
+	/// alone does not put it on program.
 	fn on_program(&self, state: &State) {
 		let collection = &state.collection;
 		let scenes = state.compositor.on_air().filter_map(|scene| collection.scene(scene));
@@ -524,7 +526,12 @@ impl Program {
 		let heard = state
 			.sources
 			.iter()
-			.filter(|(name, _)| state.sources.plays(&collection.mixes.program, name))
+			.filter(|(name, feed)| {
+				matches!(
+					feed.source(),
+					moq_scene::Source::Microphone { .. } | moq_scene::Source::SystemAudio
+				) && state.sources.plays(&collection.mixes.program, name)
+			})
 			.map(|(name, _)| name.to_string());
 		self.sources.set_on_program(shown.chain(heard).collect());
 	}
