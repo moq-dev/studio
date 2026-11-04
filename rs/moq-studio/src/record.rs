@@ -419,10 +419,14 @@ const MAX_NAME: usize = 255;
 /// The most [`create`] adds to a stem: the largest number, and the extension.
 const SUFFIX: usize = " (4294967295).mp4".len();
 
-/// The stem of a recording's program file: the scene file's, cut to fit, and
-/// when it started.
+/// What a long scene file name leaves of each source's file name, in bytes,
+/// so the Output panel can still tell the source files apart.
+const SOURCE: usize = 64;
+
+/// The stem of a recording's program file: the scene file's, cut to fit
+/// beside a source's name, and when it started.
 fn program_stem(scenes: &str, stamp: &str) -> String {
-	let budget = (MAX_NAME - SUFFIX).saturating_sub(stamp.len() + 1);
+	let budget = (MAX_NAME - SUFFIX).saturating_sub(stamp.len() + 1 + SOURCE + 1);
 	format!("{} {stamp}", truncate(scenes, budget))
 }
 
@@ -1296,12 +1300,13 @@ mod tests {
 	fn a_long_name_is_cut_to_fit() {
 		let dir = tempfile::tempdir().unwrap();
 		// The first leaves an odd budget for the source's two-byte characters,
-		// and the second none.
+		// and the second only the source's reserve.
 		for scenes in ["shows".to_string(), "s".repeat(250)] {
 			let program = program_stem(&scenes, "2026-11-03T12-00-00Z");
 			assert!(program.ends_with(" 2026-11-03T12-00-00Z"), "{program}");
 			let source = source_stem(&program, &"é".repeat(300));
 			assert!(source.len() > MAX_NAME - SUFFIX - 2, "{} bytes", source.len());
+			assert!(source.len() >= program.len() + 1 + SOURCE - 1, "{source}");
 			for stem in [&program, &source, &source] {
 				let (path, _) = create(dir.path(), stem).unwrap();
 				let name = path.file_name().unwrap().len();
