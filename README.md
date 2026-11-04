@@ -90,16 +90,16 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
+| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. With more than one canvas, pick the canvas they show, and that the Items panel edits, beside the preview. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
-| Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
+| Items | Place, show, hide, and order what the preview scene or the top layer draws on the canvas shown, back to front. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
-| Output | Start and stop recording, set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each rendition's encoder work. |
+| Output | Start and stop recording, set the canvas size and frame rate, add, resize, and remove further canvases, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each canvas's renditions' encoder work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 
@@ -107,6 +107,24 @@ A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
 on program, and stays on through a cut or transition: a downstream keyer for a
 logo or a lower third.
+
+### Canvases
+
+Beside the main canvas, the studio can draw further canvases at once, such as
+a 1080x1920 portrait one for a vertical stream beside a 1920x1080 landscape
+main canvas. Add one by name in the Output panel. Each scene has its own
+layout on each canvas, and each canvas its own top layer; a scene without a
+layout on a canvas shows only that canvas's top layer there. Every canvas
+shares the main canvas's frame rate, and the canvases are linked: one scene is
+in preview and one on program on all of them, and a cut or transition takes
+every canvas together. A source captures or decodes once however many canvases
+show it, and a canvas draws only the items it places.
+
+Each further canvas publishes a broadcast of its own beneath the main one, at
+`<--broadcast>/<canvas name>`, with renditions and encoders of its own (see
+[Output](#output)). Its catalog lists the main broadcast's audio rather than
+encoding it again. Removing a canvas ends its broadcast, and removes its top
+layer and every scene's layout on it.
 
 ### Transitions
 
@@ -320,6 +338,11 @@ width = 1920
 height = 1080
 framerate = 30
 
+[canvases.portrait] # a further canvas, at the main one's frame rate
+width = 1080
+height = 1920
+top = [{ source = "logo", rect = { x = 780, y = 40, width = 280, height = 120 } }]
+
 [transition]
 kind = "slide"      # fade, slide, wipe, or move
 duration = "300ms"
@@ -390,6 +413,10 @@ items = [
     { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, filters = [{ kind = "drop_shadow", x = 8, y = 8, blur = 12, color = "#00000080" }] },
     { source = "logo", rect = { x = 0, y = 0, width = 1920, height = 1080 }, blend = "multiply", filters = [{ kind = "opacity", amount = 0.3 }] },
 ]
+canvases.portrait = [ # the same scene laid out on the portrait canvas
+    { source = "camera", rect = { x = 0, y = 0, width = 1080, height = 1920 }, crop = { left = 0.34, right = 0.34 } },
+    { source = "guest", rect = { x = 0, y = 1312, width = 1080, height = 608 } },
+]
 
 [[scenes]]
 name = "Break"
@@ -410,6 +437,11 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 file, which no item places, but which grades what a `lut` filter names it in),
 and `replay`, where the Replay panel plays replays. The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
+
+`[canvases.<name>]` adds a further canvas, with its `width` and `height` and
+its own `top` layer, and a scene's `canvases.<name>` lists its items on that
+canvas. A canvas name is one segment of its broadcast path, so it holds no
+`/`.
 
 `[mixes]` names every mix, in the order the Audio panel lists them, and the
 one on `program`; without it, the collection has one mix, `Program`.
@@ -541,11 +573,13 @@ encode engine for them all. The Output panel counts the sessions open:
 |---|---|
 | The program's canvas size, live | 1, or none without `--connect` |
 | Its half size | 1 while someone watches it |
+| Each further canvas's canvas size and half size | as the program's |
 | The recording's own canvas size | 1 while recording |
 | Each captured source | 1 while on program or recorded |
 
 So a live scene showing a camera, a display, and a window holds 4 sessions, 5
-with the half size watched, and 6 while recording too. When the program
+with the half size watched, and 6 while recording too. A portrait canvas beside
+it adds 1 more, 2 with its half size watched. When the program
 encodes on hardware, so do the sources, and a
 session the GPU refuses fails that source's track with the encoder's reason in
 the Sources panel rather than falling back to software. The source keeps

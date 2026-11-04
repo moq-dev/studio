@@ -1024,18 +1024,18 @@ mod tests {
 	}
 
 	/// A compositor over running sources, read back to check pixels.
-	struct Studio {
-		collection: Collection,
+	pub(super) struct Studio {
+		pub(super) collection: Collection,
 		sources: Sources,
-		compositor: Compositor,
-		device: wgpu::Device,
+		pub(super) compositor: Compositor,
+		pub(super) device: wgpu::Device,
 		queue: wgpu::Queue,
 		_origin: moq_net::origin::Producer,
 		_dir: tempfile::TempDir,
 	}
 
 	impl Studio {
-		async fn new(collection: Collection) -> Self {
+		pub(super) async fn new(collection: Collection) -> Self {
 			Self::with_files(collection, tempfile::tempdir().unwrap()).await
 		}
 
@@ -1058,7 +1058,7 @@ mod tests {
 			}
 		}
 
-		fn render(&mut self, now: Instant) {
+		pub(super) fn render(&mut self, now: Instant) {
 			self.compositor.render(&self.collection, &self.sources, now).unwrap();
 		}
 
@@ -2213,6 +2213,98 @@ mod tests {
 			studio.compositor.cut();
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 3, 3), RED, "no frozen overlay");
+		})
+		.await;
+	}
+}
+
+/// What drawing more canvases costs, against how many sources the collection
+/// has and how many each canvas places. Run by hand:
+/// `cargo nextest run -p moq-scene --run-ignored only --no-capture -E 'test(/^compositor::bench::/)'`.
+#[cfg(test)]
+mod bench {
+	use std::time::Duration;
+
+	use super::tests::Studio;
+	use super::*;
+	use crate::collection::{Extra, Rgba};
+	use crate::source::test::local;
+
+	/// Frames timed per case, after as many to warm up.
+	const FRAMES: u32 = 60;
+
+	/// A collection of `sources` color sources on a 1080p main canvas and
+	/// `canvases - 1` portrait ones. The main canvas places every source, and
+	/// each further canvas the first `placed`, each item a quarter of the
+	/// canvas at half opacity, so every one draws.
+	fn collection(sources: usize, canvases: usize, placed: usize) -> Collection {
+		let mut collection = Collection::new();
+		let item = |index: usize, canvas: &Canvas| {
+			let quarter = Rect {
+				x: (index % 4) as f32 * canvas.width as f32 / 4.0,
+				y: (index / 4 % 4) as f32 * canvas.height as f32 / 4.0,
+				width: canvas.width as f32 / 2.0,
+				height: canvas.height as f32 / 2.0,
+			};
+			Item {
+				filters: vec![Filter::Opacity { amount: 0.5 }],
+				..Item::new(format!("color {index}"), quarter)
+			}
+		};
+		for index in 0..sources {
+			let color = Rgba([(index * 37) as u8, (index * 91) as u8, (index * 13) as u8, 255]);
+			collection
+				.sources
+				.insert(format!("color {index}"), Source::Color { color });
+		}
+		let main = collection.canvas;
+		collection.scenes[0].items = (0..sources).map(|index| item(index, &main)).collect();
+		for canvas in 1..canvases {
+			let name = format!("portrait {canvas}");
+			let extra = Extra::new(1080, 1920);
+			let size = extra.canvas(main.framerate);
+			collection.canvases.insert(name.clone(), extra);
+			let items = (0..placed.min(sources)).map(|index| item(index, &size)).collect();
+			collection.scenes[0].canvases.insert(name, items);
+		}
+		collection.validate().unwrap();
+		collection
+	}
+
+	/// The mean time to draw and finish every canvas once.
+	async fn frame(collection: Collection) -> Duration {
+		let mut studio = Studio::new(collection).await;
+		studio.compositor.set_canvases(&studio.collection).unwrap();
+		let scene = studio.collection.scenes[0].name.clone();
+		studio.compositor.set_preview(Some(scene));
+		studio.compositor.cut();
+		let mut total = Duration::ZERO;
+		for frame in 0..FRAMES * 2 {
+			let start = std::time::Instant::now();
+			studio.render(Instant::now());
+			studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+			if frame >= FRAMES {
+				total += start.elapsed();
+			}
+		}
+		total / FRAMES
+	}
+
+	/// Sources against canvases, each further canvas placing every source
+	/// (dense) or two (sparse). A sparse canvas should cost about the same
+	/// however many sources the collection has.
+	#[tokio::test]
+	#[ignore = "a benchmark; run by hand on a GPU"]
+	async fn sources_against_canvases() {
+		local(async {
+			println!("sources canvases  dense   sparse");
+			for sources in [4, 16, 64] {
+				for canvases in [1, 2, 4] {
+					let dense = frame(collection(sources, canvases, sources)).await;
+					let sparse = frame(collection(sources, canvases, 2)).await;
+					println!("{sources:>7} {canvases:>8} {dense:>7.2?} {sparse:>7.2?}");
+				}
+			}
 		})
 		.await;
 	}
