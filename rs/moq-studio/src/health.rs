@@ -226,6 +226,7 @@ pub struct Publisher {
 }
 
 /// The connection to one relay.
+#[derive(Clone)]
 pub struct Link {
 	/// Its scheme, host, and port.
 	pub endpoint: String,

@@ -16,8 +16,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - `show.toml` is the scene collection. If it does not exist yet,
   [guided setup](#first-launch) proposes one and creates it. Changes are saved
   to it a second after you stop editing, with no save step.
-- Without `--connect`, the studio composes and previews but publishes nothing,
-  and broadcast sources stay offline.
+- `--recordings <dir>` is where recordings are saved, by default beside
+  `show.toml`.
+- Without `--connect`, the studio composes, previews, and records but
+  publishes nothing, and broadcast sources stay offline.
 - `--failover <url>` publishes the same broadcast to a second relay under the
   same broadcast instance, so a viewer linked to both resumes mid-group from
   it when the first fails. Both relays must speak the one `--connect-version`,
@@ -97,7 +99,7 @@ Every panel is a tab you can drag, split, or stack.
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | Set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
+| Output | Start and stop recording, set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 
@@ -155,7 +157,11 @@ and their camera and screen appear as broadcast sources. The room follows
 named `alice` publishes `alice/camera.hang` and `alice/screen.hang` under it.
 Guests need a relay that verifies tokens, so run your own with
 [`moq auth serve`](https://doc.moq.dev/bin/cli) behind it, and a key that can
-sign only for the room:
+sign only for the room. The relay must be built from moq's `main` and accept
+moq-lite-07 (`--listen-version moq-lite-07-wip`, beside the versions your
+other clients use), the version that renews a guest's token without
+reconnecting. Its wire is still a work in progress, so the join page offers
+nothing else, and a guest cannot join through a relay without it.
 
 ```bash
 moq auth generate --algorithm ES256 --out room.jwk --public-dir keys \
@@ -176,8 +182,21 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   `localhost`, so the studio refuses any other. It defaults to `https://join.studio.moq.dev/`, which this
   repository deploys from `main`, but that domain is not live yet, so for now
   host the page yourself and pass its URL.
-- `--guest-expiry` (default `4h`) is how long a link works. The relay
-  disconnects a guest when their link expires, so send a new one before then.
+- `--guest-expiry` (default `4h`, at least `1m`) is how long a link works,
+  and each token the studio renews it with. While a guest is in the room, the
+  studio signs them a fresh token every half of it, over a session of its own
+  in the room that the room key signs for, and the join page presents it
+  without reconnecting. A guest's token may read only their own renewals, at
+  `.renew/<name>/<generation>` in the room, but anything else the relay lets subscribe
+  there can read every guest's, so grant that only to the studio. A guest who
+  leaves needs a link, or a renewed token, that has not expired to come back.
+  The Guests panel says when renewal is failing.
+- **Upgrading from a studio without renewal:** generate a new room key, drop
+  the old one's public half from `--key-dir`, then restart the relay (or wait
+  out the old links' `--guest-expiry`) before starting the upgraded studio.
+  Links from before let their holder subscribe to the whole room, renewals
+  included, so they must die with the old key, and a relay keeps a session
+  it already admitted until its token expires.
 - With `--failover`, a link still names only the `--connect` relay: the join
   page dials one relay, and a guest's token is rooted at the room there, so
   guests drop while that relay is down. The studio follows the room through
@@ -189,9 +208,11 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
 **Invite** in the Guests panel makes a link for one guest name and shows it as
 a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
 in the link's fragment, which the browser never sends to a server, and lets
-them publish only under their own name, so they cannot appear as someone else.
-Treat the link like a password: anyone holding it can join as that guest until
-it expires. A guest's broadcasts become sources named after them (`alice`,
+them publish only under their own name, so they cannot appear as someone else,
+and read only their own renewals.
+Treat the link like a password: anyone holding it can join as that guest
+before it expires, and is then renewed for as long as they stay, until you
+remove them. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, muted and in no scene: place them from
 the Items panel and unmute them in Audio to put them on air. That includes a
 guest invited before a restart whose link still works. A guest's source is
@@ -201,8 +222,13 @@ who reconnects after you removed their source comes back under a new name
 (`alice 2`), since undoing the removal brings back the old one.
 **Remove from scenes** is your edit, so it undoes: it takes a guest, any clone
 of their sources, and any mask reading them out of every scene and the top
-layer and mutes them; a signed token cannot be taken back, so they stay
-connected until it expires.
+layer and mutes them. A signed token cannot be taken back, so it also stops
+renewing theirs, and they are disconnected within `--guest-expiry`. That
+holds across a restart, whichever scene file you open: removed guests are
+kept beside the room key, as `room.guests.toml` for `room.jwk`, so its
+directory must be writable. Undo puts them back in the scenes but not on
+renewal; **New link** lets them back in and renews them again, under a new
+generation, so a link from before the removal cannot read their renewals.
 
 ## Scene file
 
@@ -358,12 +384,13 @@ rendition's track ends and a new one is listed in its place in a catalog
 update, on the same timeline, and viewers switch to it; the video pauses while
 the new encoder opens. Items keep their place in canvas pixels. A canvas the
 encoder cannot take stops the video, saying why, until the canvas changes
-again.
+again. At startup, it stops the studio when live; without `--connect`, the
+studio starts without video.
 
 The program encodes whether or not anyone watches, so a viewer who arrives
 late can fetch the recent past. `--on-demand` copies and encodes the video only
-while someone watches it, which saves that work but leaves nothing from before
-the first viewer; audio encodes either way. A hardware encoder that reads
+while someone watches or records it, which saves that work but leaves nothing
+from before the first viewer; audio encodes either way. A hardware encoder that reads
 the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
 takes each frame there when it can read the GPU the studio draws on. When it
 cannot, such as NVENC while the studio draws on a laptop's integrated GPU, the
@@ -396,7 +423,8 @@ the hang draft specifies source listings:
 
 A captured source encodes as H.264 for as long as it is in the collection,
 whether or not anyone watches, so a late viewer can fetch its recent past; the
-relay uploads only what someone subscribes to. A capture that changes size or
+relay uploads only what someone subscribes to. Without `--connect`, it encodes
+only while a recording reads it. A capture that changes size or
 color space moves to a new track, which its catalog entry follows. Images and
 colors publish once, as the image file and as a one-pixel PNG. Removing or
 editing a source ends its track. A track carries the plain capture, before any
@@ -414,6 +442,33 @@ opens its session before any source, even with `--on-demand`, so the sources
 past the cap fail rather than the program. When the
 program encodes in software, a source takes hardware where it can and software
 otherwise.
+
+### Recording
+
+**Start recording** in the Output panel saves the program to
+`<scene file name> <UTC start time>.mp4` in the `--recordings` directory, live
+or not. With **each source too**, every camera, display, and window that
+publishes a track of its own records into a file of its own beside it,
+`<scene file name> <UTC start time> <source>.mp4`, holding the capture before
+any filter. Broadcast sources, guests included, publish no track of the
+studio's, so they get no file of their own. A source added while recording
+starts its file then, and one removed finishes its file then. A new canvas
+size or frame rate, or a capture that changes size or color space, moves the
+video to a new track, so the program or that source goes on in a new file,
+numbered after the first, since players show only one video track. A file
+starts with up to 2 s from before it opened, so a recording starts a little
+early, and a track that goes on into the next file, such as the program
+audio, repeats up to 2 s of the last. A
+recording reads the broadcast the way a viewer does, so it shares the live
+encoders and starts and stops without touching what the relay serves. Without
+`--connect`, or with `--on-demand`, the program encodes only while something
+records or watches it.
+
+Each file plays while it grows, so a crash leaves a playable fragmented MP4,
+and becomes a regular MP4 when the recording stops or the studio quits.
+Quitting first lets the program's encoders publish what they still hold, and
+the program's file keeps it. A file nothing reached before the recording
+stopped is removed.
 
 ### Source frames
 
@@ -508,7 +563,9 @@ just join    # Serve the join page locally
 ```
 
 `rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
-`js/join` the join page, built on `@moq/room` and `@moq/publish`. See
+`js/join` the join page, built on `@moq/room` and `@moq/publish`. Like the
+Rust crates, those come from the `moq` submodule rather than npm, so
+`bun install` needs it checked out, and Nix to build `@moq/libav`. See
 [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md), and the
 [quest tree](quest/README.md) for planned work.
 
