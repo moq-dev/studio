@@ -608,12 +608,17 @@ impl Stream for Listing {
 				}
 				continue;
 			};
-			if let Some(last) = &self.last
-				&& self.name.is_none()
-				&& self.closing.load(Ordering::Relaxed)
-			{
+			if self.name.is_none() && self.closing.load(Ordering::Relaxed) {
 				// Each track a publisher ended leaves the catalog, and the export
-				// reads every one to its end before it finishes.
+				// reads every one to its end before it finishes. Before the first
+				// snapshot, the tracks listed are the ones left to read.
+				let Some(last) = &self.last else {
+					if listing.video.renditions.is_empty() && listing.audio.renditions.is_empty() {
+						return Poll::Ready(Ok(None));
+					}
+					self.last = Some(listing.clone());
+					return Poll::Ready(Ok(Some(listing)));
+				};
 				let listed = |track: &String| {
 					listing.video.renditions.contains_key(track) || listing.audio.renditions.contains_key(track)
 				};
@@ -709,7 +714,8 @@ mod tests {
 		origin: moq_net::origin::Producer,
 		publication: moq_net::origin::Publication,
 		catalog: moq_scene::publish::Catalog,
-		program: Tone,
+		/// `None` once [ended](Self::end_program).
+		program: Option<Tone>,
 		/// Each listed source's tone, and the scratch broadcast its own catalog
 		/// writes into.
 		sources: Vec<(String, Tone, moq_net::broadcast::Producer, moq_mux::catalog::Producer)>,
@@ -724,7 +730,7 @@ mod tests {
 			let mut broadcast = publication.broadcast().clone();
 			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 			let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
-			let program = Tone::new(&mut broadcast, catalog.clone());
+			let program = Some(Tone::new(&mut broadcast, catalog.clone()));
 			publication.announce(Default::default()).unwrap();
 			Self {
 				origin,
@@ -783,9 +789,20 @@ mod tests {
 			let mut broadcast = self.publication.broadcast().clone();
 			let old = self.catalog.snapshot().audio.renditions;
 			let tone = Tone::new(&mut broadcast, self.catalog.clone());
-			let mut old_tone = std::mem::replace(&mut self.program, tone);
+			let mut old_tone = self.program.replace(tone).unwrap();
 			old_tone.audio.finish().unwrap();
 			drop(old_tone);
+			self.catalog
+				.mutate(|root| root.audio.renditions.retain(|track, _| !old.contains_key(track)))
+				.unwrap();
+		}
+
+		/// End the program's track, as stopping the studio does.
+		fn end_program(&mut self) {
+			let old = self.catalog.snapshot().audio.renditions;
+			let mut tone = self.program.take().unwrap();
+			tone.audio.finish().unwrap();
+			drop(tone);
 			self.catalog
 				.mutate(|root| root.audio.renditions.retain(|track, _| !old.contains_key(track)))
 				.unwrap();
@@ -811,7 +828,9 @@ mod tests {
 		async fn play(&mut self, duration: Duration) {
 			let end = self.played + duration;
 			while self.played < end {
-				self.program.write(self.played);
+				if let Some(program) = &mut self.program {
+					program.write(self.played);
+				}
 				for (_, tone, ..) in &mut self.sources {
 					tone.write(self.played);
 				}
@@ -1038,6 +1057,26 @@ mod tests {
 		assert_eq!(names, [".mp4", " mic.mp4"]);
 		let program = files[0].1;
 		assert!(about(program, Duration::from_secs(2)), "{files:?}");
+	}
+
+	/// Closed and its program ended before its file read anything, a recording
+	/// still finishes, with nothing left to wait for.
+	#[tokio::test(start_paused = true)]
+	async fn a_recording_closed_before_it_read_anything_finishes() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		let recorder = studio.recorder(dir.path());
+		recorder.start(false).unwrap();
+		recorder.close();
+		studio.end_program();
+		kio::clock::timeout(Duration::from_secs(5), recorder.done())
+			.await
+			.expect("the recording finishes without another catalog update");
+		let status = recorder.status().unwrap();
+		let [file] = status.files.as_slice() else {
+			panic!("{} files", status.files.len());
+		};
+		assert_eq!(file.finished, Some(Finished::Empty));
 	}
 
 	/// A source whose file cannot be created fails without stopping the rest,
