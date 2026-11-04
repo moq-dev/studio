@@ -2,7 +2,6 @@
 //! played in a replay source or saved to disk.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -75,29 +74,20 @@ impl Engine {
 	}
 }
 
-/// Copy `length` of `target` and play it at `speed` in the replay source
-/// `into`.
-pub async fn play(
-	engine: Arc<Engine>,
-	target: Target,
-	length: Duration,
-	speed: f32,
-	into: String,
-) -> anyhow::Result<()> {
-	let take = Take::new(&target, length).await?;
+/// Play `take` at `speed` in the replay source `into`.
+pub fn play(engine: &Engine, take: Take, speed: f32, into: &str) -> anyhow::Result<()> {
 	let state = engine.state.lock().unwrap();
 	let feed = state
 		.sources
-		.get(&into)
+		.get(into)
 		.with_context(|| format!("the replay source `{into}` is not running"))?;
 	feed.replay(take, speed)?;
 	Ok(())
 }
 
-/// Copy `length` of `target` and save it, in real time, as a new MP4 file
-/// beside `scenes`, the scene file. Returns where.
-pub async fn save(target: Target, length: Duration, scenes: &Path) -> anyhow::Result<PathBuf> {
-	let take = Take::new(&target, length).await?;
+/// Save `take`, in real time, as a new MP4 file beside `scenes`, the scene
+/// file. Returns where.
+pub async fn save(take: Take, scenes: &Path) -> anyhow::Result<PathBuf> {
 	let (path, mut file) = create(scenes).await?;
 	let written = async {
 		let broadcast = take.consume();
@@ -186,8 +176,8 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let scenes = dir.path().join("show.toml");
 		std::fs::write(dir.path().join("show-clip-1.mp4"), b"an earlier clip").unwrap();
-		let length = Duration::from_secs(1);
-		let path = save(target, length, &scenes).await.unwrap();
+		let take = Take::new(&target, Duration::from_secs(1)).unwrap();
+		let path = save(take, &scenes).await.unwrap();
 		assert_eq!(path, dir.path().join("show-clip-2.mp4"));
 		assert_eq!(
 			std::fs::read(dir.path().join("show-clip-1.mp4")).unwrap(),

@@ -86,6 +86,10 @@ pub enum Error {
 	#[error("unsupported source: {0}")]
 	Unsupported(String),
 
+	/// The source stopped, with the reason, so it takes nothing more.
+	#[error("the source stopped: {0}")]
+	Stopped(String),
+
 	/// Capturing, decoding, or drawing video failed.
 	#[error(transparent)]
 	Video(#[from] moq_video::Error),

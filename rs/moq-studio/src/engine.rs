@@ -1122,13 +1122,11 @@ mod tests {
 
 		// The program's recent past saves as a clip, from the groups it holds.
 		let target = engine.target(&crate::replay::Of::Program).expect("the program's past");
-		let clip = kio::clock::timeout(
-			TIMEOUT,
-			crate::replay::save(target, Duration::from_secs(1), engine.autosave.path()),
-		)
-		.await
-		.expect("the clip saves")
-		.expect("a clip");
+		let take = moq_scene::replay::Take::new(&target, Duration::from_secs(1)).expect("a take");
+		let clip = kio::clock::timeout(TIMEOUT, crate::replay::save(take, engine.autosave.path()))
+			.await
+			.expect("the clip saves")
+			.expect("a clip");
 		assert_eq!(clip, dir.path().join("show-clip-1.mp4"));
 	}
 

@@ -25,7 +25,7 @@ use crate::Error;
 use crate::collection::{Collection, Source};
 use crate::lut::Cube;
 use crate::publish::{Claim, Listing, Publish, Still};
-use crate::replay::{Take, Target};
+use crate::replay::{MIN_SPEED, Take, Target};
 
 /// A source's newest picture, waiting for the compositor to draw it.
 pub(crate) enum Picture {
@@ -199,24 +199,31 @@ impl Feed {
 		})
 	}
 
-	/// Play `take` at `speed`, above 0 and at most 1 for real time, in place of
-	/// whatever this replay source plays now. Its sound plays only in real time.
+	/// Play `take` at `speed`, from [`MIN_SPEED`] to 1 for real time, in place
+	/// of whatever this replay source plays now. Its sound plays only in real
+	/// time.
 	///
-	/// Refused by any other kind of source.
+	/// Refused by any other kind of source, and by a replay source that stopped.
 	pub fn replay(&self, take: Take, speed: f32) -> Result<(), Error> {
 		let Some(plays) = &self.plays else {
 			return Err(Error::Unsupported("only a replay source plays replays".into()));
 		};
-		if !(speed > 0.0 && speed <= 1.0) {
+		if !(MIN_SPEED..=1.0).contains(&speed) {
 			return Err(Error::Invalid(format!(
-				"a replay plays above 0 and at most 1 times real time, not {speed}"
+				"a replay plays at {MIN_SPEED} to 1 times real time, not {speed}"
 			)));
 		}
-		plays.send_replace(Some(Play {
+		let play = Play {
 			take: Arc::new(take),
 			speed,
-		}));
-		Ok(())
+		};
+		// Fails once the driver is gone, which leaves the reason in the status.
+		plays.send(Some(play)).map_err(|_| {
+			Error::Stopped(match self.status() {
+				Status::Failed(reason) => reason,
+				status => format!("{status:?}"),
+			})
+		})
 	}
 
 	/// What this feed was opened for.
@@ -551,7 +558,12 @@ impl Driver {
 					let track = next.as_ref().map(|(id, config)| Reference::track(config, id).to_string());
 					if track != video {
 						video = track;
-						self.played.lock().unwrap().video = next.clone();
+						let mut played = self.played.lock().unwrap();
+						played.video = next.clone();
+						// The newest picture was the old track's, a moment the
+						// new one may not hold.
+						played.newest = None;
+						drop(played);
 						video_playing = match next {
 							Some((id, config)) => Box::pin(self.play_video(&broadcast, id, config)),
 							None => Box::pin(std::future::pending()),
@@ -653,7 +665,10 @@ impl Driver {
 						return std::future::pending().await;
 					}
 					let play = plays.borrow_and_update().clone();
+					// Ends the one playing, whose last picture must not linger
+					// until the new one's first.
 					playing = play.map(|play| Box::pin(self.replay(play, listing)) as Playing<'_>);
+					*self.picture.lock().unwrap() = Some(clear());
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
@@ -726,11 +741,19 @@ impl Driver {
 						self.show(Picture::Frame(frame));
 					}
 					// A stretch the broadcast was offline, paused, or lost
-					// replays as the gap it was.
+					// replays as the gap it was, for viewers composing the
+					// scene too. Past the end, the replay is over anyway.
 					moq_video::decode::Read::Gap { timestamp, .. }
 					| moq_video::decode::Read::End { end: timestamp } => {
-						kio::clock::sleep_until(at(timestamp.max(take.start))).await;
+						kio::clock::sleep_until(at(timestamp.clamp(take.start, take.end))).await;
 						*self.picture.lock().unwrap() = Some(clear());
+						if let Some(video) = &mut track
+							&& let Err(err) = video.discontinuity()
+						{
+							tracing::warn!(source = %self.name, %err, "cannot mark a gap in the replay");
+							self.fail_track(Status::Failed(err.to_string()));
+							track.take().expect("encoding").abort(&err);
+						}
 					}
 				}
 			}
@@ -936,9 +959,12 @@ pub(crate) mod test {
 		panic!("sources never started");
 	}
 
-	/// Three seconds of 30 fps H.264 with a keyframe each second, its track
-	/// open for as long as the returned producer lives, as a live one is.
-	pub(crate) async fn video() -> (
+	/// Three seconds of 30 fps H.264 with a keyframe each second, but for the
+	/// second `skip` the broadcast paused through, its track open for as long
+	/// as the returned producer lives, as a live one is.
+	pub(crate) async fn video(
+		skip: Option<u64>,
+	) -> (
 		moq_net::broadcast::Producer,
 		(String, VideoConfig),
 		moq_video::encode::Producer,
@@ -953,6 +979,12 @@ pub(crate) mod test {
 		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
 		let gray = vec![0x80; 64 * 64 * 4];
 		for index in 0..90u64 {
+			if skip == Some(index / 30) {
+				if index % 30 == 0 {
+					producer.discontinuity().unwrap();
+				}
+				continue;
+			}
 			if index % 30 == 0 {
 				encoder.cut().unwrap();
 			}
@@ -973,9 +1005,11 @@ pub(crate) mod test {
 	/// platforms, which tokio cannot see: a runtime left idle while one works
 	/// advances a paused clock to its earliest timer, which may lie past whatever
 	/// the test was waiting for. Keeping a timer due now holds the clock where it
-	/// is. Move it with [`until_time`], never `tokio::time::advance`, whose yield
-	/// leaves the runtime idle with only later timers pending. A wait that never
-	/// ends is a hang nextest kills.
+	/// is, but only on a whole millisecond: the timer wheel rounds a deadline up
+	/// to one, so from between two a zero sleep is due at the next, and the idle
+	/// runtime moves the clock a millisecond per loop. Move it with
+	/// [`until_time`], which lands on one, never `tokio::time::advance`, which
+	/// may not. A wait that never ends is a hang nextest kills.
 	pub(crate) async fn until<T>(mut f: impl FnMut() -> Option<T>) -> T {
 		loop {
 			if let Some(value) = f() {
@@ -988,8 +1022,9 @@ pub(crate) mod test {
 		}
 	}
 
-	/// Move a paused clock to `at`, and no further: the timer due then is the
-	/// earliest pending while the runtime waits for it. See [`until`].
+	/// Move a paused clock to `at`, rounded up to its millisecond, and no
+	/// further: the timer due then is the earliest pending while the runtime
+	/// waits for it. See [`until`].
 	pub(crate) async fn until_time(at: Instant) {
 		kio::clock::sleep_until(at).await;
 	}
@@ -1364,14 +1399,14 @@ mod tests {
 			let feed = sources.get("replay").unwrap();
 			assert!(matches!(feed.take(), Some(Picture::Rgba { pixels, .. }) if pixels == [0; 4]));
 
-			let (broadcast, video, _live) = video().await;
+			let (broadcast, video, _live) = video(None).await;
 			let target = Target {
 				broadcast: broadcast.consume(),
 				video: Some(video),
 				audio: None,
 				end: moq_net::Timestamp::from_micros(2_500_000).unwrap(),
 			};
-			let take = Take::new(&target, Duration::from_secs(1)).await.unwrap();
+			let take = Take::new(&target, Duration::from_secs(1)).unwrap();
 			let speed = 0.5;
 			let begin = kio::clock::now();
 			feed.replay(take, speed).unwrap();
@@ -1404,6 +1439,41 @@ mod tests {
 			until_time(end).await;
 			until(|| matches!(feed.take(), Some(Picture::Rgba { .. })).then_some(())).await;
 			assert_eq!(feed.status(), Status::Live, "ready for the next replay");
+		})
+		.await;
+	}
+
+	/// A new replay cuts off the one playing, whose picture does not linger
+	/// until the new one's first is due.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_replay_clears_the_one_playing() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let mut collection = Collection::new();
+			collection.sources.insert("replay".into(), Source::Replay);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let feed = sources.get("replay").unwrap();
+
+			let (broadcast, video, _live) = video(None).await;
+			let take = |end| {
+				let target = Target {
+					broadcast: broadcast.consume(),
+					video: Some(video.clone()),
+					audio: None,
+					end: moq_net::Timestamp::from_micros(end).unwrap(),
+				};
+				Take::new(&target, Duration::from_secs(1)).unwrap()
+			};
+			// Its first picture, at 1.5 s, is due at once.
+			feed.replay(take(2_500_000), 1.0).unwrap();
+			until(|| matches!(feed.take(), Some(Picture::Frame(_))).then_some(())).await;
+			// This one's first picture, at the same 1.5 s, is due 20 ms in.
+			feed.replay(take(2_480_000), 1.0).unwrap();
+			let shown = until(|| feed.take()).await;
+			assert!(matches!(shown, Picture::Rgba { pixels, .. } if pixels == [0; 4]));
 		})
 		.await;
 	}

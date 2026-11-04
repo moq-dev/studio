@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use moq_scene::replay::Take;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
 	Blend, Canvas, Clip, Collection, Crop, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source, Video, wgpu,
@@ -1438,26 +1439,32 @@ impl Panels {
 			return;
 		}
 
-		// The span ends at the click, however long copying it takes to start.
+		// Copied at the click, without waiting on anything, so the span ends
+		// there and replays apply in the order they were asked for.
 		let outcome = panel.outcome.clone();
-		let target = match self.engine.target(&panel.of) {
-			Ok(target) => target,
+		let take = self
+			.engine
+			.target(&panel.of)
+			.and_then(|target| Ok(Take::new(&target, panel.length)?));
+		let take = match take {
+			Ok(take) => take,
 			Err(err) => {
 				*outcome.lock().unwrap() = Some(Err(format!("{err:#}")));
 				return;
 			}
 		};
+		let of = panel.of.clone();
+		if let Some(into) = panel.into.as_ref().filter(|_| play) {
+			let result =
+				replay::play(&self.engine, take, panel.speed, into).map(|()| format!("replaying {of} in `{into}`"));
+			*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
+			return;
+		}
 		let engine = self.engine.clone();
-		let (of, length, speed, into) = (panel.of.clone(), panel.length, panel.speed, panel.into.clone());
 		self.runtime.spawn(async move {
-			let result = match into.filter(|_| play) {
-				Some(into) => replay::play(engine, target, length, speed, into.clone())
-					.await
-					.map(|()| format!("replaying {of} in `{into}`")),
-				None => replay::save(target, length, engine.autosave.path())
-					.await
-					.map(|path| format!("saved {of} to {}", path.display())),
-			};
+			let result = replay::save(take, engine.autosave.path())
+				.await
+				.map(|path| format!("saved {of} to {}", path.display()));
 			*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
 		});
 	}
