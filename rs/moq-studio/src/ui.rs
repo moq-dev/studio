@@ -1478,11 +1478,11 @@ impl Panels {
 		}
 	}
 
-	/// How the stream reaches viewers: what is wrong and why, the uplink, each
-	/// track, and each viewer that reports.
+	/// How the stream reaches viewers: what is wrong and why, each relay, the
+	/// uplink, each track, and each viewer that reports.
 	fn health(&mut self, ui: &mut Ui) {
 		let report = self.engine.health.lock().unwrap();
-		let Some(relay) = &report.relay else {
+		if report.relays.is_empty() {
 			ui.label("Not publishing; start with --connect to see how the stream is delivered.");
 			for problem in &report.problems {
 				ui.colored_label(color(ui, problem.verdict), &problem.cause);
@@ -1499,20 +1499,37 @@ impl Panels {
 			}
 			ui.separator();
 
+			egui::Grid::new("relays").striped(true).show(ui, |ui| {
+				for heading in ["Relay", "State", "Protocol"] {
+					ui.strong(heading);
+				}
+				ui.end_row();
+				for relay in &report.relays {
+					ui.label(&relay.endpoint);
+					match &relay.state {
+						health::State::Connecting => ui.weak("connecting"),
+						health::State::Connected => ui.colored_label(HEALTHY, "connected"),
+						health::State::Disconnected(reason) => ui
+							.colored_label(ui.visuals().error_fg_color, "unreachable")
+							.on_hover_text(reason),
+					};
+					ui.label(or_unknown(relay.version.map(|version| version.to_string())));
+					ui.end_row();
+				}
+			});
+			ui.separator();
+
 			let uplink = &report.uplink;
 			let viewers = &report.viewers;
 			egui::Grid::new("uplink").show(ui, |ui| {
-				ui.label("Relay");
-				match relay {
-					health::Relay::Connecting => ui.weak("connecting"),
-					health::Relay::Connected => ui.colored_label(HEALTHY, "connected"),
-					health::Relay::Disconnected(reason) => ui
-						.colored_label(ui.visuals().error_fg_color, "unreachable")
-						.on_hover_text(reason),
-				};
-				ui.end_row();
 				ui.label("Uplink");
-				verdict(ui, uplink.verdict);
+				ui.horizontal(|ui| {
+					verdict(ui, uplink.verdict);
+					match &uplink.relay {
+						Some(relay) => ui.weak(format!("to {relay}")),
+						None => ui.weak("no relay connected"),
+					};
+				});
 				ui.end_row();
 				ui.label("Round trip");
 				ui.label(or_unknown(uplink.rtt.map(|rtt| format!("{} ms", rtt.as_millis()))));
@@ -1528,8 +1545,8 @@ impl Panels {
 				ui.end_row();
 				ui.label("Watching");
 				match viewers.watching {
-					Some(watching) => ui.label(format!("{watching} sessions, by the relay's stats")),
-					None => ui.weak("unknown; the relay shares no stats with this connection"),
+					Some(watching) => ui.label(format!("{watching} sessions, by the relays' stats")),
+					None => ui.weak("unknown; no relay shares its stats with this studio"),
 				};
 				ui.end_row();
 				ui.label("Reporting");
