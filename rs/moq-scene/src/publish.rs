@@ -92,13 +92,15 @@ impl Publish {
 		}
 	}
 
-	/// What each source track has written, keyed by rendition ID, as
-	/// [`Catalog::stats`](moq_mux::catalog::Producer::stats) reports the
-	/// program's. The broadcast names every track uniquely, so all sources share
-	/// one map, and a replaced source's tracks count until it stops.
+	/// What each source track the studio catalog lists has written, keyed by
+	/// rendition ID, as [`Catalog::stats`](moq_mux::catalog::Producer::stats)
+	/// reports the program's. The broadcast names every track uniquely, so all
+	/// sources share one map. A replaced source's tracks drop out with its
+	/// catalog entry, even while it is still stopping.
 	pub fn stats(&self) -> BTreeMap<String, hang::stats::Rendition> {
 		let owners = self.owners.lock().unwrap();
-		owners.catalogs.values().flat_map(|catalog| catalog.stats()).collect()
+		let listed = owners.by_name.values().filter_map(|id| owners.catalogs.get(id));
+		listed.flat_map(|catalog| catalog.stats()).collect()
 	}
 
 	/// Claim `name`'s entry in the studio catalog for a source that is opening,
@@ -553,16 +555,19 @@ mod tests {
 				} => {}
 			}
 
-			// Every frame written counts for the Health panel, until the
-			// source stops.
+			// Every frame written counts for the Health panel, while the
+			// studio catalog lists the source.
 			let stats = publish.stats();
 			assert_eq!(
 				stats.values().map(|rendition| rendition.frames).sum::<u64>(),
 				5,
 				"{stats:?}"
 			);
-			drop(listing);
+			// A replacement takes the listing, and the old tracks with it.
+			let _newer = publish.claim("camera");
 			assert!(publish.stats().is_empty());
+			drop(listing);
+			assert!(publish.owners.lock().unwrap().catalogs.is_empty());
 		})
 		.await;
 	}

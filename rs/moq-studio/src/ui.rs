@@ -1625,19 +1625,18 @@ impl Panels {
 					ui.strong(heading);
 				}
 				ui.end_row();
-				// Each source named once, beside its first track.
+				// Each source named once, beside its first track. The program's
+				// tracks come first and name none, so no source name can pass
+				// for them.
 				let mut group = None;
 				for track in &report.tracks {
-					let source = Some(track.source.as_deref());
-					if group != source {
-						match &track.source {
-							Some(name) => ui.label(name),
-							None => ui.weak("program"),
-						};
-						group = source;
+					let source = track.source.as_deref();
+					ui.label(if source == group {
+						""
 					} else {
-						ui.label("");
-					}
+						source.unwrap_or_default()
+					});
+					group = source;
 					ui.label(&track.label).on_hover_text(&track.id);
 					ui.label(or_unknown(track.sent.map(health::rate)));
 					ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
