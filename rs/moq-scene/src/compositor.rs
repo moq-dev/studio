@@ -441,6 +441,41 @@ impl Pose {
 	}
 }
 
+/// The order to draw a move's visible items in, back to front, as `lead`
+/// stacks them: each slot is an item of `lead`, of `other`, or a pair of
+/// both, as `lead_pairs` and `other_pairs` pair them. An unpaired item of
+/// `other` goes just over the paired item it was over in `other`, or under
+/// every slot if it was under every paired item.
+fn stack(
+	lead: &[Item],
+	lead_pairs: &[Option<usize>],
+	other: &[Item],
+	other_pairs: &[Option<usize>],
+) -> Vec<(Option<usize>, Option<usize>)> {
+	let mut over: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+	let mut under = None;
+	for index in (0..other.len()).filter(|&index| other[index].visible) {
+		match other_pairs[index] {
+			Some(_) => under = Some(index),
+			None => over.entry(under).or_default().push(index),
+		}
+	}
+	let mut unpaired = |under: Option<usize>| {
+		let items = over.remove(&under).unwrap_or_default();
+		items.into_iter().map(|index| (None, Some(index)))
+	};
+
+	let mut slots: Vec<_> = unpaired(None).collect();
+	for index in (0..lead.len()).filter(|&index| lead[index].visible) {
+		let pair = lead_pairs[index];
+		slots.push((Some(index), pair));
+		if pair.is_some() {
+			slots.extend(unpaired(pair));
+		}
+	}
+	slots
+}
+
 /// Refuse an invalid canvas, or one larger than `device` can hold as a
 /// texture.
 fn fits(device: &wgpu::Device, canvas: Canvas) -> Result<(), Error> {
@@ -533,65 +568,88 @@ impl Draw<'_> {
 	///
 	/// Each visible item of `to` is paired with the first visible item of
 	/// `from` showing the same source that no earlier one took, and glides
-	/// from its pose to its own. The rest of `to` fades in where it is placed,
-	/// and the rest of `from` fades out just over the paired item it was over,
-	/// so the move starts from `from` and lands on `to` as each is drawn.
+	/// from its pose to its own, cross-fading from its look in `from` to its
+	/// look in `to` if its filters or blend mode differ. The rest of `from`
+	/// fades out and the rest of `to` fades in, where each was placed. Items
+	/// stack as `from` stacks them until halfway, then as `to` does, each
+	/// unpaired item just over the paired item it was over, so the move
+	/// starts from `from` and lands on `to` as each is drawn.
 	fn moving(&mut self, target: &Target, from: Option<&str>, to: Option<&str>, progress: f32) {
 		let collection = self.collection;
 		let items = |scene: Option<&str>| {
 			let scene = scene.and_then(|name| collection.scene(name));
 			scene.map_or(&[][..], |scene| scene.items.as_slice())
 		};
-		let leaving = items(from);
+		let (leaving, entering) = (items(from), items(to));
 
-		// The item of `from` each visible item of `to` glides from.
-		let mut paired = vec![false; leaving.len()];
-		let mut moves = Vec::new();
-		for (index, item) in items(to).iter().enumerate().filter(|(_, item)| item.visible) {
-			let pair =
-				(0..leaving.len()).find(|&at| !paired[at] && leaving[at].visible && leaving[at].source == item.source);
+		// Which item of the other scene each visible item pairs with.
+		let mut left = vec![None; leaving.len()];
+		let mut entered = vec![None; entering.len()];
+		for (index, item) in entering.iter().enumerate().filter(|(_, item)| item.visible) {
+			let pair = (0..leaving.len())
+				.find(|&at| left[at].is_none() && leaving[at].visible && leaving[at].source == item.source);
 			if let Some(at) = pair {
-				paired[at] = true;
+				left[at] = Some(index);
+				entered[index] = Some(at);
 			}
-			moves.push((index, item, pair));
 		}
 
-		// Each unpaired item of `from` fading out, after the paired item it
-		// was over, or before everything when it was under them all.
-		let mut over: HashMap<Option<usize>, Vec<&Item>> = HashMap::new();
-		let mut under = None;
-		for (at, item) in leaving.iter().enumerate().filter(|(_, item)| item.visible) {
-			if paired[at] {
-				under = Some(at);
-			} else {
-				over.entry(under).or_default().push(item);
-			}
-		}
-		let mut fade = |draw: &mut Self, under: Option<usize>| {
-			for item in over.remove(&under).unwrap_or_default() {
-				let pose = Pose::of(collection, item);
-				let opacity = 1.0 - progress;
-				draw.posed(target, item, Pose { opacity, ..pose });
-			}
+		// Each slot is an index into `leaving`, `entering`, or both.
+		let slots: Vec<(Option<usize>, Option<usize>)> = if progress < 0.5 {
+			stack(leaving, &left, entering, &entered)
+		} else {
+			let slots = stack(entering, &entered, leaving, &left);
+			slots.into_iter().map(|(to, from)| (from, to)).collect()
 		};
 
-		fade(self, None);
 		let place = Place::Scene(to.unwrap_or_default().to_string());
-		for (index, item, pair) in moves {
-			let own = Pose::of(collection, item);
-			let start = match pair {
-				Some(at) => Pose::of(collection, &leaving[at]),
-				None => Pose { opacity: 0.0, ..own },
-			};
-			let pose = start.toward(&own, progress);
-			if pose == own {
-				// Shared with the preview, which draws it the same.
-				self.item(target, &place, index, item);
-			} else {
-				self.posed(target, item, pose);
-			}
-			if pair.is_some() {
-				fade(self, pair);
+		for slot in slots {
+			match slot {
+				(Some(at), None) => {
+					let pose = Pose::of(collection, &leaving[at]);
+					let opacity = 1.0 - progress;
+					self.posed(target, &leaving[at], Pose { opacity, ..pose });
+				}
+				(None, Some(index)) => {
+					let pose = Pose::of(collection, &entering[index]);
+					self.posed(
+						target,
+						&entering[index],
+						Pose {
+							opacity: progress,
+							..pose
+						},
+					);
+				}
+				(Some(at), Some(index)) => {
+					let (old, new) = (&leaving[at], &entering[index]);
+					let own = Pose::of(collection, new);
+					let pose = Pose::of(collection, old).toward(&own, progress);
+					if old.filters != new.filters || old.blend != new.blend {
+						self.posed(
+							target,
+							old,
+							Pose {
+								opacity: 1.0 - progress,
+								..pose
+							},
+						);
+						self.posed(
+							target,
+							new,
+							Pose {
+								opacity: progress,
+								..pose
+							},
+						);
+					} else if pose == own {
+						// Shared with the preview, which draws it the same.
+						self.item(target, &place, index, new);
+					} else {
+						self.posed(target, new, pose);
+					}
+				}
+				(None, None) => unreachable!("a slot holds an item"),
 			}
 		}
 	}
@@ -1139,6 +1197,48 @@ mod tests {
 			assert_eq!(pixel(&program, 1, 6), BLUE);
 			assert_eq!(pixel(&program, 6, 6), BLACK);
 			assert_eq!(pixel(&program, 7, 0), GREEN);
+		})
+		.await;
+	}
+
+	/// A move starts from the outgoing scene's stacking and switches to the
+	/// incoming scene's halfway, and an item whose filters differ between the
+	/// scenes cross-fades from one look to the other as it goes.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_move_restacks_halfway_and_crossfades_a_new_look() {
+		local(async {
+			let mut collection = collection();
+			let fill = Rect::fill(&collection.canvas);
+			collection.scenes[0].items = vec![Item::new("red", CORNER), Item::new("blue", fill)];
+			collection.scenes[1].items = vec![
+				Item {
+					filters: vec![Filter::Invert { amount: 1.0 }],
+					..Item::new("blue", fill)
+				},
+				Item::new("red", CORNER),
+			];
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.compositor.set_preview(Some("blue".into()));
+			let duration = Duration::from_secs(1);
+			studio.compositor.transition(Transition::Move { duration }, start);
+
+			studio.render(start);
+			let program = studio.program();
+			assert_eq!(pixel(&program, 1, 6), BLUE, "blue over red, as the outgoing scene");
+			assert_eq!(pixel(&program, 6, 1), BLUE);
+
+			studio.render(start + Duration::from_millis(500));
+			let program = studio.program();
+			assert_eq!(pixel(&program, 1, 6), RED, "red over blue from halfway");
+			let actual = pixel(&program, 6, 1);
+			assert!(near(actual, [128, 128, 64, 255]), "half blue, half yellow: {actual:?}");
+
+			studio.render(start + duration);
+			assert_eq!(pixel(&studio.program(), 6, 1), [255, 255, 0, 255]);
 		})
 		.await;
 	}

@@ -105,6 +105,7 @@ impl Studio {
 				selection: None,
 				gestures: Gestures::default(),
 				snapping: Snapping::default(),
+				direction: Direction::Left,
 				drag: None,
 				new_scene: String::new(),
 				renaming: None,
@@ -207,6 +208,9 @@ struct Panels {
 	selection: Option<Selection>,
 	gestures: Gestures,
 	snapping: Snapping,
+	/// The direction a slide or wipe last had, which the transition picker
+	/// offers again after a fade or move.
+	direction: Direction,
 	/// The item a drag in the preview holds.
 	drag: Option<Drag>,
 	new_scene: String,
@@ -863,10 +867,10 @@ impl Panels {
 				state.compositor.transition(transition, kio::clock::Instant::now());
 			}
 			let duration = next.duration();
-			let direction = match next {
-				Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } => direction,
-				_ => Direction::Left,
-			};
+			if let Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } = next {
+				self.direction = direction;
+			}
+			let direction = self.direction;
 			egui::ComboBox::from_id_salt("transition")
 				.selected_text(transition_name(&next))
 				.show_ui(ui, |ui| {
