@@ -649,17 +649,17 @@ impl Engine {
 	/// What only the studio knows about its stream at `now`.
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
-		// A stalled picture matters where the program shows it, and stalled
-		// sound wherever the program plays it.
+		// A stalled picture matters where the program draws it: a scene on air,
+		// including one fading out, or the top layer over them. Stalled sound
+		// matters wherever the program plays it.
 		let stalled = {
 			let state = self.state.lock().unwrap();
-			let program = state
+			let shown: Vec<&str> = state
 				.compositor
-				.program_scene()
-				.and_then(|name| state.collection.scene(name));
-			let shown: Vec<&str> = program
-				.into_iter()
+				.on_air()
+				.filter_map(|name| state.collection.scene(name))
 				.flat_map(|scene| &scene.items)
+				.chain(&state.collection.top)
 				.filter(|item| item.visible)
 				.map(|item| state.collection.capture(&item.source))
 				.collect();
