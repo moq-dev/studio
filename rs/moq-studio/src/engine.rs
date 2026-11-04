@@ -195,6 +195,13 @@ impl State {
 		Ok(())
 	}
 
+	/// Restart the source called `name`, as an edit would, such as to reload a
+	/// web page.
+	pub fn restart(&mut self, name: &str) {
+		self.sources.restart(name);
+		self.stale = true;
+	}
+
 	/// After any change to the collection or its history, which the autosave
 	/// writes once they settle.
 	fn edited(&mut self) {
@@ -606,7 +613,9 @@ impl Engine {
 	/// publish the copies on their way to it and what it still holds, and to
 	/// end its video track, so quitting loses none of the program's last
 	/// pictures. The program audio ends its track too, so a recording reading
-	/// the program reaches the end of each.
+	/// the program reaches the end of each. Then stop the browser sources'
+	/// helper and wait for it to exit, so their profile is saved and free for
+	/// the next launch.
 	pub fn stop(&self) {
 		self.stopped.store(true, Ordering::Relaxed);
 		let threads = std::mem::take(&mut *self.threads.lock().unwrap());
@@ -615,6 +624,11 @@ impl Engine {
 			if thread.join().is_err() {
 				tracing::error!(name, "the thread panicked");
 			}
+		}
+		// Taken out first, so the wait holds no lock the window draws with.
+		let browser = self.state.lock().unwrap().sources.context().browser.clone();
+		if let Some(browser) = browser {
+			browser.stop();
 		}
 	}
 
@@ -650,7 +664,7 @@ impl Engine {
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
 		// A stalled picture matters where the program draws it: a scene on air,
-		// including one fading out, or the top layer over them. Stalled sound
+		// including one leaving in a transition, or the top layer over them. Stalled sound
 		// matters wherever the program plays it.
 		let stalled = {
 			let state = self.state.lock().unwrap();
@@ -1350,7 +1364,8 @@ fn encode_frames(
 }
 
 /// What browser sources run in: this executable, which `main` hands to
-/// `moq_scene::browser::child` when it is started as their helper.
+/// `moq_scene::browser::child` when it is started as their helper, on the
+/// user's browser profile.
 fn browser(gpu: &Gpu) -> anyhow::Result<Option<moq_scene::browser::Helper>> {
 	if !cfg!(feature = "cef") {
 		return Ok(None);
@@ -1358,10 +1373,26 @@ fn browser(gpu: &Gpu) -> anyhow::Result<Option<moq_scene::browser::Helper>> {
 	let program = std::env::current_exe().context("cannot find the studio's executable")?;
 	Ok(Some(moq_scene::browser::Helper::new(
 		program,
+		browser_profile()?,
 		&gpu.adapter,
 		&gpu.device,
 		&gpu.queue,
 	)))
+}
+
+/// Where browser sources keep their cookies and logins, whichever scene file
+/// is open: `moq-studio/browser` in the user's data directory, as the XDG base
+/// directories name it, since browser sources run on Linux only for now.
+fn browser_profile() -> anyhow::Result<PathBuf> {
+	let data = match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+		// The spec ignores a relative one.
+		Some(data) if data.is_absolute() => data,
+		_ => {
+			let home = std::env::var_os("HOME").context("no HOME to keep the browser profile in")?;
+			PathBuf::from(home).join(".local/share")
+		}
+	};
+	Ok(data.join("moq-studio/browser"))
 }
 
 /// Run a source on its own thread until its feed is dropped, or fail the

@@ -17,9 +17,15 @@ pub(super) fn supported(helper: &Helper) -> bool {
 }
 
 /// Copy the DMA-BUF `texture` describes, whose plane descriptors are `fds`,
-/// into a texture of the studio's own, waiting until the copy is done.
+/// into a texture of the studio's own on `device`, waiting until the copy is
+/// done.
 #[cfg(feature = "cef")]
-pub(super) fn texture(helper: &Helper, texture: &Texture, fds: Vec<OwnedFd>) -> Result<wgpu::Texture, String> {
+pub(super) fn texture(
+	device: &wgpu::Device,
+	queue: &wgpu::Queue,
+	texture: &Texture,
+	fds: Vec<OwnedFd>,
+) -> Result<wgpu::Texture, String> {
 	use std::os::fd::AsRawFd;
 
 	use cef::osr_texture_import::SharedTextureHandle;
@@ -53,11 +59,16 @@ pub(super) fn texture(helper: &Helper, texture: &Texture, fds: Vec<OwnedFd>) -> 
 	// back, and `fds` stay open until this returns. The device is the
 	// studio's, opened by `moq_video::render::request_device` with DMA-BUF
 	// import, on the GPU CEF paints with.
-	unsafe { SharedTextureHandle::new(&info).import_texture(&helper.device, &helper.queue) }
+	unsafe { SharedTextureHandle::new(&info).import_texture(device, queue) }
 		.map_err(|err| format!("cannot import the page's texture: {err}"))
 }
 
 #[cfg(not(feature = "cef"))]
-pub(super) fn texture(_: &Helper, _: &Texture, _: Vec<OwnedFd>) -> Result<wgpu::Texture, String> {
+pub(super) fn texture(
+	_: &wgpu::Device,
+	_: &wgpu::Queue,
+	_: &Texture,
+	_: Vec<OwnedFd>,
+) -> Result<wgpu::Texture, String> {
 	Err("this build cannot import shared textures (enable the `cef` feature)".into())
 }
