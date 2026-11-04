@@ -100,7 +100,8 @@ repository.
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [The join page is live](/quest/m0/join-page-live.md) - `join.studio.moq.dev` serves the join page `--join-page` defaults to
 - [Guest return feed](/quest/m0/guest-return.md) - guests see the program and hear a mix-minus
-- [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
+- [A recording picks its mix](/quest/m0/record-mix.md) - a recording keeps what the stream's mix leaves out
+- [Clap-to-measure sync delay](/quest/m0/sync-clap.md) - a clap sets a microphone's delay against its camera
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
 - [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Published independently](/quest/m0/publish-independently.md) - a source opts out of the program and publishes its own track for services that place it themselves

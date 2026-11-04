@@ -42,7 +42,7 @@ pub mod source;
 
 pub use clip::Clip;
 pub use collection::{
-	Audio, Blend, Canvas, Collection, Crop, Direction, Filter, Item, Layer, MaskMode, Rect, Rgba, Scene, Source,
+	Audio, Blend, Canvas, Collection, Crop, Direction, Filter, Item, Layer, MaskMode, Mixes, Rect, Rgba, Scene, Source,
 	Transition, Video,
 };
 pub use compositor::{Compositor, FORMAT};

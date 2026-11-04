@@ -30,8 +30,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   the first relay only. The stream's tracks claim their bitrate on the first
   relay's link alone, so only that link is probed toward the stream's rate;
   no encoder adapts to either estimate.
-- `capture` adds camera, display, window, microphone, and system-audio sources.
-  On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
+- `capture` adds camera, display, window, microphone, and system-audio
+  sources, and listening to a mix. On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
 - `cef` adds browser sources, on Linux only for now. The build takes CEF from
   `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
@@ -98,7 +98,7 @@ Every panel is a tab you can drag, split, or stack.
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
-| Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
+| Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
 | Output | Start and stop recording, set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
@@ -151,12 +151,34 @@ broadcast through the first relay while that relay has a route to it, and
 through the failover otherwise, so a publisher restarted behind only the
 failover replaces the first relay's copy once that copy ends. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
-comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
-or not its scene is live; mute a source to leave it out.
+comes back on its own when the publisher restarts.
+
+### Audio mixes
+
+Audio from every source is mixed whether or not its scene is live. A
+collection has one or more **mixes**, each the sum of the sources it is fed:
+for example, a stream mix that leaves out music you may not broadcast, and a
+monitor mix for your headphones. A source feeds every mix, a new one included,
+until you untick that mix in its row of the Audio panel; mute a source to take
+it out of every mix. **On program** picks the mix the broadcast carries, and
+switching it, or editing a mix, never drops or repeats audio. A recording
+holds the mix on program. The mix on program cannot be removed.
+
+**Listen** plays a mix to an audio output, from the `capture` feature's
+build: the system default, or the one picked under **Listen on**, which the
+studio remembers for you rather than in the scene file. Use headphones: a
+microphone that hears the speakers feeds the mix back into itself.
+
+A source's **delay** holds it back in every mix, up to 2 s, so a microphone
+lines up with a camera that lags it.
+
+Each mix is advanced on the program clock, and each output reads its mix on
+its own, so an output that falls behind skips ahead in its own audio rather
+than holding up the mixes or another output.
 
 A browser source renders a web page, such as an overlay, alert box, or chat
 widget, at the canvas frame rate (CEF caps it at 60) over a transparent
-background, and its sound joins the program audio. Every page shares one
+background, and its sound joins the mixes. Every page shares one
 browser profile, kept in `$XDG_DATA_HOME/moq-studio/browser`
 (`~/.local/share/moq-studio/browser` by default) rather than beside the scene
 file, so cookies and logins, such as an alert service's, survive a reload and
@@ -334,8 +356,14 @@ html = '''
 <div class="third">Ada Lovelace</div>
 '''
 
+[mixes]
+names = ["Stream", "Headphones"]
+program = "Stream" # the mix the broadcast carries
+
 [audio.guest]
 gain = 0.5
+exclude = ["Headphones"] # feeds every other mix
+delay = "80ms"
 
 [sources.camera-faded]
 kind = "clone"
@@ -382,6 +410,11 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 file, which no item places, but which grades what a `lut` filter names it in),
 and `replay`, where the Replay panel plays replays. The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
+
+`[mixes]` names every mix, in the order the Audio panel lists them, and the
+one on `program`; without it, the collection has one mix, `Program`.
+`[audio.<source>]` sets a source's linear `gain`, `muted`, the mixes it is
+left out of (`exclude`), and its `delay`.
 
 `[video.<source>]` sets a source's `crop` and `filters`, wherever it is shown,
 and an item's `crop`, `filters`, and `blend` its own. A `crop` trims a fraction
@@ -442,7 +475,7 @@ before sharing.
 ## Output
 
 The program publishes as one H.264 rendition at the canvas size and frame rate,
-with Opus stereo audio, under the `--broadcast` path. Timestamps come from the
+with the mix on program as Opus stereo audio, under the `--broadcast` path. Timestamps come from the
 studio's own clock, so a source that stalls repeats its last picture instead of
 holding up the stream.
 
@@ -586,8 +619,9 @@ The Health panel grades the stream every second on the thresholds moq's
 `hang::health` shares with the rest of the stack, and lists each problem
 with its cause in plain words: a relay is unreachable, the uplink is
 congested or losing packets, the relay is far away, the encoder is behind or
-stuck, a source stalled (a camera or broadcast the program draws, or an
-unmuted microphone or system audio), or viewers are late, stalling, or cannot
+stuck, a source stalled (a camera or broadcast the program draws, or a
+microphone or system audio the mix on program plays: unmuted and not left
+out of it), or viewers are late, stalling, or cannot
 decode a track. A relay lost while the other serves is
 degraded, since viewers have nothing left to fall back to; with none serving
 it is unhealthy. Below that it shows:

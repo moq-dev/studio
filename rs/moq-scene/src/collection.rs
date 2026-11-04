@@ -29,8 +29,11 @@ pub struct Collection {
 	/// so one camera can appear in many scenes while being opened once.
 	#[serde(default)]
 	pub sources: BTreeMap<String, Source>,
-	/// Gain and mute of each audio-carrying source, by source name. A source
-	/// without an entry plays at unity.
+	/// The audio mixes, and which one the program carries.
+	#[serde(default, skip_serializing_if = "Mixes::is_default")]
+	pub mixes: Mixes,
+	/// Gain, mute, routing, and sync delay of each audio-carrying source, by
+	/// source name. A source without an entry plays at unity in every mix.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub audio: BTreeMap<String, Audio>,
 	/// The filters on each picture-carrying source, by source name, applied
@@ -60,6 +63,7 @@ impl Collection {
 			canvas: Canvas::default(),
 			transition: Transition::default(),
 			sources: BTreeMap::new(),
+			mixes: Mixes::default(),
 			audio: BTreeMap::new(),
 			video: BTreeMap::new(),
 			scenes: vec![Scene::new("Scene")],
@@ -215,6 +219,7 @@ impl Collection {
 			self.validate_chain(&video.filters, &on)?;
 		}
 
+		self.mixes.validate()?;
 		for (name, audio) in &self.audio {
 			if !self.sources.contains_key(name) {
 				return Err(Error::Invalid(format!(
@@ -223,6 +228,18 @@ impl Collection {
 			}
 			if !audio.gain.is_finite() || audio.gain < 0.0 {
 				return Err(Error::Invalid(format!("`{name}` has gain {}", audio.gain)));
+			}
+			if let Some(mix) = audio.exclude.iter().find(|mix| !self.mixes.names.contains(mix)) {
+				return Err(Error::Invalid(format!(
+					"`{name}` is left out of `{mix}`, which is not a mix"
+				)));
+			}
+			if audio.delay > moq_audio::bus::MAX_DELAY {
+				return Err(Error::Invalid(format!(
+					"`{name}` is held back {:?}, past the longest, {:?}",
+					audio.delay,
+					moq_audio::bus::MAX_DELAY
+				)));
 			}
 		}
 
@@ -1108,15 +1125,72 @@ impl Source {
 	}
 }
 
-/// The gain and mute of one source in the program audio.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// The audio mixes every source with sound feeds, and which one the program
+/// carries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Mixes {
+	/// Each mix's unique name, in the order the studio lists them.
+	pub names: Vec<String>,
+	/// The mix the program broadcast carries.
+	pub program: String,
+}
+
+impl Mixes {
+	/// The one mix a new collection has, which the program carries.
+	pub const DEFAULT: &str = "Program";
+
+	fn is_default(&self) -> bool {
+		*self == Self::default()
+	}
+
+	fn validate(&self) -> Result<(), Error> {
+		let mut names = BTreeSet::new();
+		for name in &self.names {
+			if name.is_empty() {
+				return Err(Error::Invalid("a mix has an empty name".into()));
+			}
+			if !names.insert(name.as_str()) {
+				return Err(Error::Invalid(format!("two mixes are named `{name}`")));
+			}
+		}
+		if !names.contains(self.program.as_str()) {
+			return Err(Error::Invalid(format!(
+				"the program carries `{}`, which is not a mix",
+				self.program
+			)));
+		}
+		Ok(())
+	}
+}
+
+impl Default for Mixes {
+	fn default() -> Self {
+		Self {
+			names: vec![Self::DEFAULT.into()],
+			program: Self::DEFAULT.into(),
+		}
+	}
+}
+
+/// The gain, mute, routing, and sync delay of one source with sound.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Audio {
 	/// Linear gain: 1.0 is unity.
 	pub gain: f32,
-	/// Whether the source is silenced, keeping its gain.
+	/// Whether the source is silenced in every mix, keeping its gain.
 	#[serde(default)]
 	pub muted: bool,
+	/// The mixes the source is left out of. It feeds every other one,
+	/// including a mix added later.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	pub exclude: BTreeSet<String>,
+	/// How long the source is held back in every mix, so a microphone lines up
+	/// with a camera that lags it. At most the bus's
+	/// [`MAX_DELAY`](moq_audio::bus::MAX_DELAY).
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Duration::is_zero")]
+	pub delay: Duration,
 }
 
 impl Default for Audio {
@@ -1124,6 +1198,8 @@ impl Default for Audio {
 		Self {
 			gain: 1.0,
 			muted: false,
+			exclude: BTreeSet::new(),
+			delay: Duration::ZERO,
 		}
 	}
 }
@@ -1200,7 +1276,19 @@ mod tests {
 				height: 800,
 			},
 		);
-		collection.audio.insert("mic".into(), Audio { gain: 0.5, muted: true });
+		collection.mixes = Mixes {
+			names: vec!["Stream".into(), "Recording".into()],
+			program: "Stream".into(),
+		};
+		collection.audio.insert(
+			"mic".into(),
+			Audio {
+				gain: 0.5,
+				muted: true,
+				exclude: ["Recording".to_string()].into(),
+				delay: Duration::from_millis(80),
+			},
+		);
 		collection.sources.insert(
 			"camera faded".into(),
 			Source::Clone {
@@ -1268,8 +1356,14 @@ kind = "camera"
 kind = "color"
 color = "#ff000080"
 
+[mixes]
+names = ["Stream", "Recording"]
+program = "Stream"
+
 [audio.cam2]
 gain = 2.0
+exclude = ["Stream"]
+delay = "120ms"
 
 [sources.cam2]
 kind = "broadcast"
@@ -1324,9 +1418,12 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			collection.audio["cam2"],
 			Audio {
 				gain: 2.0,
-				muted: false
+				muted: false,
+				exclude: ["Stream".to_string()].into(),
+				delay: Duration::from_millis(120),
 			}
 		);
+		assert_eq!(collection.mixes.program, "Stream");
 		let main = collection.scene("Main").unwrap();
 		assert!(main.items[0].visible);
 		assert!(!main.items[1].visible);
@@ -1392,6 +1489,32 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		let mut collection = example();
 		collection.audio.insert("nobody".into(), Audio::default());
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+	}
+
+	/// The program carries one of the mixes, each named once, and a source is
+	/// left out of mixes that exist, held back no longer than the bus can.
+	#[test]
+	fn refuses_a_mix_that_does_not_add_up() {
+		let refused = |edit: fn(&mut Collection)| {
+			let mut collection = example();
+			edit(&mut collection);
+			matches!(collection.validate(), Err(Error::Invalid(_)))
+		};
+		assert!(refused(|collection| collection.mixes.program = "Monitor".into()));
+		assert!(refused(|collection| collection.mixes.names.push("Stream".into())));
+		assert!(refused(|collection| collection.mixes.names.push(String::new())));
+		assert!(refused(|collection| {
+			let mic = collection.audio.get_mut("mic").unwrap();
+			mic.exclude.insert("Monitor".into());
+		}));
+		assert!(refused(|collection| {
+			let mic = collection.audio.get_mut("mic").unwrap();
+			mic.delay = moq_audio::bus::MAX_DELAY + Duration::from_millis(1);
+		}));
+		assert!(!refused(|collection| {
+			let mic = collection.audio.get_mut("mic").unwrap();
+			mic.delay = moq_audio::bus::MAX_DELAY;
+		}));
 	}
 
 	/// A clone shows another source's capture, so it must name one with a

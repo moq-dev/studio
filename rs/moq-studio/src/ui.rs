@@ -21,9 +21,9 @@ use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
 use crate::interact::Interact;
-use crate::record;
 use crate::replay::{self, Of};
 use crate::snap::{self, Grab, Snap};
+use crate::{mix, record};
 
 /// The panels, each a tab the user can move, split, or stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -109,6 +109,10 @@ impl Studio {
 				drag: None,
 				new_scene: String::new(),
 				renaming: None,
+				new_mix: String::new(),
+				renaming_mix: None,
+				speaker: None,
+				speakers: Speakers::default(),
 				canvas: None,
 				new_item: None,
 				add: AddSource::default(),
@@ -128,7 +132,23 @@ impl Studio {
 	}
 }
 
+/// Where the output Listen plays on is kept, per user.
+const SPEAKER: &str = "speaker";
+
+impl Studio {
+	/// Take up what this user picked last time, from `storage`.
+	pub fn load(&mut self, storage: Option<&dyn eframe::Storage>) {
+		if let Some(storage) = storage {
+			self.panels.speaker = eframe::get_value::<Option<String>>(storage, SPEAKER).flatten();
+		}
+	}
+}
+
 impl eframe::App for Studio {
+	fn save(&mut self, storage: &mut dyn eframe::Storage) {
+		eframe::set_value(storage, SPEAKER, &self.panels.speaker);
+	}
+
 	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
 		let engine = self.panels.engine.clone();
 		let state = engine.state.lock().unwrap();
@@ -216,6 +236,13 @@ struct Panels {
 	new_scene: String,
 	/// The scene being renamed, by index, and the name typed so far.
 	renaming: Option<(usize, String)>,
+	new_mix: String,
+	/// The mix being renamed, by its name, and the name typed so far.
+	renaming_mix: Option<(String, String)>,
+	/// The output Listen plays on, by [`mix::Speaker::id`], or `None` for the
+	/// system default. Saved per user, not in the shared scene file.
+	speaker: Option<String>,
+	speakers: Speakers,
 	/// The canvas the Output panel's form holds until it is applied, or
 	/// `None` while it shows the collection's.
 	canvas: Option<Canvas>,
@@ -1703,41 +1730,183 @@ impl Panels {
 		self.check(result);
 	}
 
+	/// The mixes, which the program carries and which plays to the speakers,
+	/// and each source's gain, mute, delay, and routing.
 	fn audio(&mut self, ui: &mut Ui) {
-		ui.horizontal(|ui| {
-			ui.strong("Program");
-			meter(ui, self.engine.mix.level());
-		});
-		ui.separator();
-
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		let mixes = state.collection().mixes.clone();
+		let listening = engine.listening();
+		let mut action = None;
+		let mut listen = None;
+
+		egui::Grid::new("mixes").show(ui, |ui| {
+			for name in &mixes.names {
+				if let Some((renaming, typed)) = &mut self.renaming_mix
+					&& renaming == name
+				{
+					let response = ui.text_edit_singleline(typed);
+					if !response.has_focus() && !response.lost_focus() {
+						response.request_focus();
+					}
+					if response.lost_focus() {
+						// Escape cancels; Enter or a click away renames.
+						if !ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+							action = Some(MixAction::Rename(name.clone(), typed.trim().to_string()));
+						}
+						self.renaming_mix = None;
+					}
+				} else if ui.label(name).double_clicked() {
+					self.renaming_mix = Some((name.clone(), name.clone()));
+				}
+				meter(ui, state.sources.mix(name).map(|mix| mix.level()).unwrap_or_default());
+				if ui.radio(mixes.program == *name, "On program").clicked() && mixes.program != *name {
+					action = Some(MixAction::Program(name.clone()));
+				}
+				let heard = listening.as_ref().is_some_and(|(heard, _)| heard == name);
+				let response = ui
+					.add_enabled(mix::MONITOR, egui::Button::selectable(heard, "Listen"))
+					.on_hover_text("Play this mix to the speakers; use headphones")
+					.on_disabled_hover_text("Needs a build with the `capture` feature");
+				if response.clicked() {
+					listen = Some((!heard).then(|| name.clone()));
+				}
+				if ui.small_button("Rename").clicked() {
+					self.renaming_mix = Some((name.clone(), name.clone()));
+				}
+				if ui
+					.add_enabled(mixes.program != *name, egui::Button::new("Remove").small())
+					.on_disabled_hover_text("On program; put another mix on program first")
+					.clicked()
+				{
+					action = Some(MixAction::Remove(name.clone()));
+				}
+				ui.end_row();
+			}
+		});
+		ui.horizontal(|ui| {
+			ui.text_edit_singleline(&mut self.new_mix);
+			if ui.button("Add mix").clicked() {
+				action = Some(MixAction::Add(self.new_mix.trim().to_string()));
+			}
+		});
+		if mix::MONITOR && self.speakers.ui(ui, &self.runtime, &mut self.speaker) {
+			// The monitor moves to the new output.
+			if let Some((heard, _)) = &listening {
+				listen = Some(Some(heard.clone()));
+			}
+		}
+		if let Some((_, Some(failed))) = &listening {
+			ui.colored_label(ui.visuals().error_fg_color, format!("Listening stopped: {failed}"));
+		}
+		ui.separator();
+
 		let mut change = None;
 		egui::Grid::new("audio").striped(true).show(ui, |ui| {
+			ui.label("");
+			ui.label("");
+			ui.label("Gain");
+			ui.label("Delay")
+				.on_hover_text("Hold the source back to line it up with a camera that lags it");
+			for name in &mixes.names {
+				ui.label(name);
+			}
+			ui.end_row();
 			for (name, feed) in state.sources.iter() {
 				let Some(strip) = feed.strip() else { continue };
-				let mut audio = state.collection().audio.get(name).copied().unwrap_or_default();
+				let mut audio = state.collection().audio.get(name).cloned().unwrap_or_default();
 				let mut db = decibels(audio.gain);
 				ui.label(name);
 				if ui.checkbox(&mut audio.muted, "Mute").changed() {
 					let verb = if audio.muted { "Mute" } else { "Unmute" };
-					change = Some((name.to_string(), audio, format!("{verb} `{name}`"), None));
+					change = Some((name.to_string(), audio.clone(), format!("{verb} `{name}`"), None));
 				}
 				let response = ui.add(egui::Slider::new(&mut db, MUTE_DB..=12.0).suffix(" dB"));
 				let gesture = self.gestures.of(&response);
 				if response.changed() {
+					let mut audio = audio.clone();
 					audio.gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
 					change = Some((name.to_string(), audio, format!("Set `{name}` gain"), gesture));
+				}
+				let max = moq_audio::bus::MAX_DELAY.as_millis() as u64;
+				let mut millis = audio.delay.as_millis() as u64;
+				let response = ui.add(egui::DragValue::new(&mut millis).range(0..=max).suffix(" ms"));
+				let gesture = self.gestures.of(&response);
+				if response.changed() {
+					let mut audio = audio.clone();
+					audio.delay = Duration::from_millis(millis);
+					change = Some((name.to_string(), audio, format!("Set `{name}` delay"), gesture));
+				}
+				for mix in &mixes.names {
+					let mut routed = !audio.exclude.contains(mix);
+					if ui.checkbox(&mut routed, "").changed() {
+						let mut audio = audio.clone();
+						let label = if routed {
+							audio.exclude.remove(mix);
+							format!("Add `{name}` to `{mix}`")
+						} else {
+							audio.exclude.insert(mix.clone());
+							format!("Leave `{name}` out of `{mix}`")
+						};
+						change = Some((name.to_string(), audio, label, None));
+					}
 				}
 				meter(ui, strip.level());
 				ui.end_row();
 			}
 		});
+
+		let mut result = Ok(());
 		if let Some((name, audio, label, gesture)) = change {
-			let result = edit(&mut state, label, gesture, |draft| draft.set_audio(&name, Some(audio)));
-			drop(state);
-			self.check(result);
+			result = edit(&mut state, label, gesture, |draft| draft.set_audio(&name, Some(audio)));
 		}
+		if let Some(action) = action {
+			result = result.and(match action {
+				MixAction::Add(name) => {
+					let mut next = mixes.clone();
+					next.names.push(name.clone());
+					let added = edit(&mut state, format!("Add mix `{name}`"), None, |draft| {
+						draft.set_mixes(next)
+					});
+					if added.is_ok() {
+						self.new_mix.clear();
+					}
+					added
+				}
+				MixAction::Rename(from, to) if from == to => Ok(()),
+				MixAction::Rename(from, to) => {
+					let renamed = edit(&mut state, format!("Rename mix `{from}` to `{to}`"), None, |draft| {
+						draft.rename_mix(&from, &to)
+					});
+					// Listening follows the mix to its new name.
+					if renamed.is_ok() && listening.as_ref().is_some_and(|(heard, _)| *heard == from) {
+						listen = Some(Some(to));
+					}
+					renamed
+				}
+				MixAction::Program(name) => {
+					let next = moq_scene::Mixes {
+						program: name.clone(),
+						..mixes.clone()
+					};
+					edit(&mut state, format!("Put mix `{name}` on program"), None, |draft| {
+						draft.set_mixes(next)
+					})
+				}
+				MixAction::Remove(name) => edit(&mut state, format!("Remove mix `{name}`"), None, |draft| {
+					draft.remove_mix(&name)
+				}),
+			});
+		}
+		if let Some(listen) = listen {
+			let listen = listen.as_deref().map(|mix| mix::Listen {
+				mix,
+				speaker: self.speaker.as_deref(),
+			});
+			result = result.and(engine.listen(&mut state, &self.runtime, listen));
+		}
+		drop(state);
+		self.check(result);
 	}
 
 	/// Start and stop recording, and see what the recording wrote.
@@ -2237,6 +2406,16 @@ impl SceneAction {
 			Self::Rename(index, _) | Self::Move(index, _) | Self::Remove(index) => *index,
 		}
 	}
+}
+
+/// An edit the Audio panel makes to the mixes, each named.
+enum MixAction {
+	Add(String),
+	/// From one name to the other.
+	Rename(String, String),
+	/// Put the mix on program.
+	Program(String),
+	Remove(String),
 }
 
 /// An edit the Items panel makes.
@@ -3036,6 +3215,60 @@ impl Default for Replay {
 			into: None,
 			outcome: Arc::default(),
 		}
+	}
+}
+
+/// The audio outputs Listen can play on, listed once the Audio panel is shown
+/// and again on Refresh.
+#[derive(Default)]
+struct Speakers {
+	listing: Option<Result<Vec<mix::Speaker>, String>>,
+	pending: Option<std::sync::mpsc::Receiver<Result<Vec<mix::Speaker>, String>>>,
+}
+
+impl Speakers {
+	/// Pick the output `speaker` names, or `None` for the system default.
+	/// Returns whether the pick changed.
+	fn ui(&mut self, ui: &mut Ui, runtime: &tokio::runtime::Handle, speaker: &mut Option<String>) -> bool {
+		if let Some(listing) = self.pending.as_ref().and_then(|pending| pending.try_recv().ok()) {
+			self.listing = Some(listing);
+			self.pending = None;
+		}
+		let mut refresh = self.listing.is_none() && self.pending.is_none();
+		let before = speaker.clone();
+		ui.horizontal(|ui| {
+			ui.label("Listen on");
+			let speakers = self.listing.as_ref().and_then(|listing| listing.as_ref().ok());
+			let named = |id: &str| {
+				let found = speakers.and_then(|speakers| speakers.iter().find(|speaker| speaker.id == id));
+				found.map_or_else(|| format!("{id} (not found)"), |speaker| speaker.name.clone())
+			};
+			let shown = speaker.as_deref().map_or_else(|| "System default".to_string(), named);
+			egui::ComboBox::from_id_salt("speaker")
+				.selected_text(shown)
+				.show_ui(ui, |ui| {
+					ui.selectable_value(speaker, None, "System default");
+					for found in speakers.into_iter().flatten() {
+						ui.selectable_value(speaker, Some(found.id.clone()), &found.name);
+					}
+				});
+			if self.pending.is_some() {
+				ui.spinner();
+			} else if ui.small_button("Refresh").clicked() {
+				refresh = true;
+			}
+		});
+		if let Some(Err(err)) = &self.listing {
+			ui.colored_label(ui.visuals().error_fg_color, format!("Cannot list the outputs: {err}"));
+		}
+		if refresh {
+			let (send, recv) = std::sync::mpsc::channel();
+			runtime.spawn(async move {
+				let _ = send.send(mix::speakers().await);
+			});
+			self.pending = Some(recv);
+		}
+		*speaker != before
 	}
 }
 
