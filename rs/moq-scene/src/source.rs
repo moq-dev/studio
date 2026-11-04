@@ -22,6 +22,7 @@ use moq_mux::catalog::Stream;
 
 use crate::Error;
 use crate::collection::{Collection, Source};
+use crate::lut::Cube;
 use crate::publish::{Claim, Listing, Publish, Still};
 
 /// A source's newest picture, waiting for the compositor to draw it.
@@ -30,6 +31,8 @@ pub(crate) enum Picture {
 	Frame(moq_video::Frame),
 	/// Tightly packed RGBA with straight alpha, such as a still image.
 	Rgba { size: moq_video::Size, pixels: Vec<u8> },
+	/// A LUT source's table, which is not drawn but looked up.
+	Lut(Cube),
 }
 
 /// The one picture a source holds for the compositor. A newer picture replaces
@@ -69,7 +72,7 @@ pub struct Context {
 	pub bus: Bus,
 	/// Where broadcast sources are announced: the studio's relay connection.
 	pub origin: moq_net::origin::Consumer,
-	/// What a relative image path is relative to: the scene file's directory.
+	/// What a relative image or LUT path is relative to: the scene file's directory.
 	pub dir: PathBuf,
 	/// What cameras, screens, and broadcasts deliver video as:
 	/// `moq_video::render::output` of the compositor's device.
@@ -233,10 +236,21 @@ impl Driver {
 			result = self.produce(listing.as_ref()) => result,
 			() = self.mirror(listing.as_ref()) => unreachable!("a mirror never ends"),
 		};
-		let status = match result {
-			Ok(()) => Status::Failed("the source ended".into()),
-			Err(err) => Status::Failed(err.to_string()),
+		let reason = match result {
+			Ok(()) => "the source ended".into(),
+			Err(err) => err.to_string(),
 		};
+		self.stop(reason);
+	}
+
+	/// Fail the source without running it, such as when its thread cannot
+	/// start, so its [`Feed`] says why rather than starting forever.
+	pub fn fail(self, err: impl std::fmt::Display) {
+		self.stop(err.to_string());
+	}
+
+	fn stop(&self, reason: String) {
+		let status = Status::Failed(reason);
 		tracing::warn!(source = %self.name, ?status, "source stopped");
 		self.fail_track(status.clone());
 		set(&self.status, status);
@@ -292,6 +306,14 @@ impl Driver {
 				let _still = listing.and_then(|listing| self.publish(Still::new(listing, bytes)));
 				std::future::pending().await
 			}
+			Source::Lut { path } => {
+				let path = self.context.dir.join(path);
+				let failed = |err: String| Error::Lut(format!("{}: {err}", path.display()));
+				let text = std::fs::read_to_string(&path).map_err(|err| failed(err.to_string()))?;
+				let cube = Cube::parse(&text).map_err(failed)?;
+				self.show(Picture::Lut(cube));
+				std::future::pending().await
+			}
 			Source::Broadcast { path } => self.broadcast(path).await,
 			Source::Clone { .. } => unreachable!("a clone opens no feed"),
 			device => self.device(device, listing).await,
@@ -332,7 +354,11 @@ impl Driver {
 			Source::Window { id } => Video::Window(id.clone()),
 			Source::Microphone { id } => return self.listen(Audio::Microphone(id.clone())).await,
 			Source::SystemAudio => return self.listen(Audio::System).await,
-			Source::Color { .. } | Source::Image { .. } | Source::Broadcast { .. } | Source::Clone { .. } => {
+			Source::Color { .. }
+			| Source::Image { .. }
+			| Source::Broadcast { .. }
+			| Source::Clone { .. }
+			| Source::Lut { .. } => {
 				unreachable!("not a device source")
 			}
 		};
@@ -935,6 +961,22 @@ mod tests {
 
 			sources.sync(&Collection::new());
 			running.await.unwrap();
+		})
+		.await;
+	}
+
+	#[tokio::test]
+	async fn a_driver_that_cannot_run_fails_its_feed() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			for driver in sources.sync(&collection()) {
+				driver.fail("no thread");
+			}
+			for (name, feed) in sources.iter() {
+				assert_eq!(feed.status(), Status::Failed("no thread".into()), "{name}");
+			}
 		})
 		.await;
 	}

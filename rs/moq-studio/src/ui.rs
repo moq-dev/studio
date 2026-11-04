@@ -8,10 +8,14 @@ use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::source::{Feed, Status};
-use moq_scene::{Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Video, wgpu};
+use moq_scene::{
+	Blend, Canvas, Clip, Collection, Crop, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source, Video, wgpu,
+};
 
+use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
+use crate::snap::{self, Grab, Snap};
 
 /// The panels, each a tab the user can move, split, or stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -23,6 +27,7 @@ enum Tab {
 	Items,
 	Sources,
 	Devices,
+	Guests,
 	Filters,
 	Audio,
 	Output,
@@ -39,6 +44,7 @@ impl Tab {
 			Self::Items => "Items",
 			Self::Sources => "Sources",
 			Self::Devices => "Devices",
+			Self::Guests => "Guests",
 			Self::Filters => "Filters",
 			Self::Audio => "Audio",
 			Self::Output => "Output",
@@ -54,16 +60,7 @@ pub struct Studio {
 }
 
 impl Studio {
-	pub fn new(
-		cc: &eframe::CreationContext<'_>,
-		engine: Arc<Engine>,
-		runtime: tokio::runtime::Handle,
-	) -> anyhow::Result<Self> {
-		let render = cc
-			.wgpu_render_state
-			.as_ref()
-			.context("the window is not drawn with wgpu")?;
-
+	pub fn new(render: &eframe::egui_wgpu::RenderState, engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> Self {
 		// The compositor's textures live as long as the engine, so registering
 		// them once is enough: egui samples whatever they hold each frame.
 		let (preview, program, dropped) = {
@@ -85,10 +82,10 @@ impl Studio {
 		let [top, bottom] = tree.split_below(NodeIndex::root(), 0.62, vec![Tab::Scenes, Tab::History]);
 		tree.split_right(top, 0.5, vec![Tab::Program]);
 		let [_, items] = tree.split_right(bottom, 0.18, vec![Tab::Items]);
-		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices]);
+		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices, Tab::Guests]);
 		tree.split_right(sources, 0.5, vec![Tab::Filters, Tab::Health, Tab::Audio, Tab::Output]);
 
-		Ok(Self {
+		Self {
 			dock,
 			panels: Panels {
 				engine,
@@ -98,13 +95,17 @@ impl Studio {
 				top: false,
 				selection: None,
 				gestures: Gestures::default(),
+				snapping: Snapping::default(),
+				drag: None,
 				new_scene: String::new(),
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
+				guest: String::new(),
+				shown: None,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
 			},
-		})
+		}
 	}
 }
 
@@ -135,10 +136,17 @@ struct Panels {
 	/// What the Filters panel edits and a copy takes.
 	selection: Option<Selection>,
 	gestures: Gestures,
+	snapping: Snapping,
+	/// The item a drag in the preview holds.
+	drag: Option<Drag>,
 	new_scene: String,
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
+	/// The name typed for the next guest.
+	guest: String,
+	/// The join link on screen.
+	shown: Option<Shown>,
 	/// The outcome of the last action, shown in the status bar.
 	message: Option<Result<String, String>>,
 }
@@ -167,6 +175,7 @@ impl TabViewer for Panels {
 			Tab::Items => self.items(ui),
 			Tab::Sources => self.sources(ui),
 			Tab::Devices => self.devices(ui),
+			Tab::Guests => self.guests(ui),
 			Tab::Filters => self.filters(ui),
 			Tab::Audio => self.audio(ui),
 			Tab::Output => self.output(ui),
@@ -182,21 +191,48 @@ enum Selection {
 	Item(Layer, usize),
 }
 
+/// What the Filters panel sets on a selection.
+#[derive(Clone, Debug, PartialEq)]
+struct Look {
+	crop: Crop,
+	filters: Vec<Filter>,
+	/// An item's blend mode; a source has none.
+	blend: Option<Blend>,
+}
+
 impl Selection {
-	/// The filters of what is selected, or `None` if it is gone or has no picture.
-	fn filters(&self, collection: &Collection) -> Option<Vec<Filter>> {
+	/// The look of what is selected, or `None` if it is gone or has no picture.
+	fn look(&self, collection: &Collection) -> Option<Look> {
 		match self {
 			Self::Source(name) => {
 				collection.sources.get(name).filter(|source| source.has_video())?;
-				Some(collection.video.get(name).cloned().unwrap_or_default().filters)
+				let video = collection.video.get(name).cloned().unwrap_or_default();
+				Some(Look {
+					crop: video.crop,
+					filters: video.filters,
+					blend: None,
+				})
 			}
-			Self::Item(layer, index) => Some(collection.items(layer)?.get(*index)?.filters.clone()),
+			Self::Item(layer, index) => {
+				let item = collection.items(layer)?.get(*index)?;
+				Some(Look {
+					crop: item.crop,
+					filters: item.filters.clone(),
+					blend: Some(item.blend),
+				})
+			}
 		}
 	}
 
-	fn set_filters(&self, draft: &mut Draft, filters: Vec<Filter>) -> Result<(), moq_scene::Error> {
+	/// The filters of what is selected, or `None` if it is gone or has no picture.
+	fn filters(&self, collection: &Collection) -> Option<Vec<Filter>> {
+		self.look(collection).map(|look| look.filters)
+	}
+
+	fn set_look(&self, draft: &mut Draft, look: Look) -> Result<(), moq_scene::Error> {
+		let Look { crop, filters, blend } = look;
 		match self {
-			Self::Source(name) => draft.set_video(name, Some(Video { filters })),
+			Self::Source(name) => draft.set_video(name, Some(Video { crop, filters })),
 			Self::Item(layer, index) => {
 				let item = draft
 					.collection()
@@ -205,9 +241,26 @@ impl Selection {
 					.cloned();
 				let item =
 					item.ok_or_else(|| moq_scene::Error::Conflict(format!("there is no item {index} in {layer}")))?;
-				draft.set_item(layer, *index, Item { filters, ..item })
+				let blend = blend.unwrap_or(item.blend);
+				draft.set_item(
+					layer,
+					*index,
+					Item {
+						crop,
+						filters,
+						blend,
+						..item
+					},
+				)
 			}
 		}
+	}
+
+	fn set_filters(&self, draft: &mut Draft, filters: Vec<Filter>) -> Result<(), moq_scene::Error> {
+		let look = self
+			.look(draft.collection())
+			.ok_or_else(|| moq_scene::Error::Conflict("the selection is gone".into()))?;
+		self.set_look(draft, Look { filters, ..look })
 	}
 
 	fn describe(&self, collection: &Collection) -> String {
@@ -380,11 +433,13 @@ impl Panels {
 		}
 	}
 
-	/// Deselect an item, after an edit that may have moved any of them.
+	/// Deselect an item, after an edit that may have moved any of them, and
+	/// let go of any drag.
 	fn deselect_item(&mut self) {
 		if matches!(self.selection, Some(Selection::Item(..))) {
 			self.selection = None;
 		}
+		self.drag = None;
 	}
 
 	/// The layer the Items panel shows, and new sources are placed in.
@@ -459,14 +514,151 @@ impl Panels {
 	}
 
 	fn preview(&mut self, ui: &mut Ui) {
-		let state = self.engine.state.lock().unwrap();
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
 		let canvas = state.collection().canvas;
-		ui.label(format!(
-			"Preview: {}",
-			state.compositor.preview_scene().unwrap_or("nothing")
-		));
+		ui.horizontal(|ui| {
+			ui.label(format!(
+				"Preview: {}",
+				state.compositor.preview_scene().unwrap_or("nothing")
+			));
+			ui.separator();
+			let free = ui.ctx().format_modifiers(egui::Modifiers::COMMAND);
+			ui.checkbox(&mut self.snapping.on, "Snap").on_hover_text(format!(
+				"Snap a dragged item to the canvas, other items, and the grid. Hold {free} to drag freely."
+			));
+			ui.checkbox(&mut self.snapping.grid, "Grid");
+			let largest = canvas.width.max(canvas.height);
+			ui.add_enabled(
+				self.snapping.grid,
+				egui::DragValue::new(&mut self.snapping.spacing)
+					.range(2..=largest)
+					.suffix(" px"),
+			);
+		});
+		let response = picture(ui, self.preview, canvas, egui::Sense::click_and_drag());
+		let result = self.arrange(ui, &mut state, &response, canvas);
 		drop(state);
-		picture(ui, self.preview, canvas);
+		self.check(result);
+	}
+
+	/// Select, move, and resize the items of the layer the Items panel shows
+	/// by dragging them in the preview, snapping as they go.
+	fn arrange(&mut self, ui: &Ui, state: &mut State, response: &egui::Response, canvas: Canvas) -> anyhow::Result<()> {
+		let gesture = self.gestures.of(response);
+		// The release still moves the item to where the pointer let go.
+		if !response.dragged() && !response.drag_stopped() {
+			self.drag = None;
+		}
+		// A panel squeezed to nothing has no picture to map the pointer onto.
+		if !response.rect.is_positive() {
+			return Ok(());
+		}
+		let view = View::new(response.rect, canvas);
+		let painter = ui.painter_at(response.rect);
+		if self.snapping.grid {
+			view.grid(&painter, self.snapping.spacing as f32);
+		}
+
+		let Ok(layer) = self.layer(state) else { return Ok(()) };
+		let Some(items) = state.collection().items(&layer).cloned() else {
+			return Ok(());
+		};
+		let selected = match &self.selection {
+			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
+			_ => None,
+		};
+		let reach = view.canvas(REACH);
+		let hit = |pos: egui::Pos2| snap::hit(&items, selected, view.point(pos), reach);
+
+		if response.clicked() {
+			match response.interact_pointer_pos().and_then(hit) {
+				Some((index, _)) => self.selection = Some(Selection::Item(layer.clone(), index)),
+				None => self.deselect_item(),
+			}
+		}
+		if response.drag_started()
+			&& let Some(origin) = ui.input(|input| input.pointer.press_origin())
+			&& let Some((index, grab)) = hit(origin)
+		{
+			self.selection = Some(Selection::Item(layer.clone(), index));
+			self.drag = Some(Drag {
+				layer: layer.clone(),
+				index,
+				grab,
+				rect: items[index].rect,
+				origin: view.point(origin),
+				gesture,
+				hints: None,
+			});
+		}
+
+		let mut result = Ok(());
+		if let Some(drag) = &mut self.drag
+			&& let Some(pos) = response.interact_pointer_pos()
+		{
+			let point = view.point(pos);
+			// Whole canvas pixels, so an unsnapped drag saves round numbers.
+			let delta = [(point[0] - drag.origin[0]).round(), (point[1] - drag.origin[1]).round()];
+			let rect = drag.grab.drag(drag.rect, delta);
+			let free = ui.input(|input| input.modifiers.command);
+			drag.hints = (self.snapping.on && !free).then(|| {
+				let snap = Snap {
+					reach,
+					grid: self.snapping.grid.then_some(self.snapping.spacing as f32),
+				};
+				snap.apply(drag.grab, rect, &others(state, &drag.layer, drag.index), &canvas)
+			});
+			let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
+			let item = state
+				.collection()
+				.items(&drag.layer)
+				.and_then(|items| items.get(drag.index));
+			if let Some(item) = item.cloned()
+				&& item.rect != rect
+			{
+				let verb = if drag.grab == Grab::Move { "Move" } else { "Resize" };
+				let label = format!("{verb} `{}`", item.source);
+				result = edit(state, label, drag.gesture, |draft| {
+					draft.set_item(&drag.layer, drag.index, Item { rect, ..item })
+				});
+			}
+		}
+		if !response.dragged() {
+			self.drag = None;
+		}
+
+		// Drawn from the collection and selection as this frame left them.
+		let items = state.collection().items(&layer).cloned().unwrap_or_default();
+		let selected = match &self.selection {
+			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
+			_ => None,
+		};
+		let accent = ui.visuals().selection.stroke.color;
+		// A hidden item has no handles, as the preview cannot grab it.
+		if let Some(item) = selected.and_then(|index| items.get(index)).filter(|item| item.visible) {
+			view.selected(&painter, &item.rect, accent);
+		}
+		let grab = match &self.drag {
+			Some(drag) => {
+				if let Some(snapped) = &drag.hints {
+					view.hints(&painter, snapped);
+				}
+				Some(drag.grab)
+			}
+			None => response.hover_pos().and_then(hit).map(|(index, grab)| {
+				if selected != Some(index)
+					&& let Some(item) = items.get(index)
+				{
+					view.hovered(&painter, &item.rect, accent);
+				}
+				grab
+			}),
+		};
+		if let Some(grab) = grab {
+			ui.ctx().set_cursor_icon(cursor(grab));
+		}
+		result
 	}
 
 	fn program(&mut self, ui: &mut Ui) {
@@ -489,7 +681,7 @@ impl Panels {
 			}
 		});
 		drop(state);
-		picture(ui, self.program, canvas);
+		picture(ui, self.program, canvas, egui::Sense::hover());
 	}
 
 	fn scenes(&mut self, ui: &mut Ui) {
@@ -877,7 +1069,8 @@ impl Panels {
 	fn devices(&mut self, ui: &mut Ui) {
 		self.devices.poll();
 		if ui.button("Refresh").clicked() {
-			self.devices.refresh(&self.runtime);
+			let refreshed = self.devices.refresh(&self.runtime).context("cannot list devices");
+			self.check(refreshed);
 		}
 		let Some(picked) = self.devices.ui(ui) else { return };
 		let mut state = self.engine.state.lock().unwrap();
@@ -889,7 +1082,144 @@ impl Panels {
 		self.report(result.map(|name| format!("added `{name}`")));
 	}
 
-	/// The filters of the selected source or item, in order.
+	/// Invite guests, show their links, and see who joined.
+	fn guests(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let Some(room) = &engine.room else {
+			ui.label("Start with --room and --room-key to invite guests.");
+			return;
+		};
+
+		ui.horizontal(|ui| {
+			ui.label("Name");
+			let field = ui.text_edit_singleline(&mut self.guest);
+			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+			if ui.button("Invite").clicked() || entered {
+				let name = self.guest.trim().to_string();
+				match room.invite(&name) {
+					Ok(invite) => {
+						self.show(ui.ctx(), name, invite);
+						self.guest.clear();
+					}
+					Err(err) => self.report(Err(err)),
+				}
+			}
+		});
+
+		let now = kio::clock::wall();
+		if let Some(shown) = &self.shown {
+			ui.separator();
+			ui.horizontal(|ui| {
+				ui.strong(format!("Join link for {}", shown.name));
+				ui.label(expiry(shown.invite.expires, now));
+			});
+			let mut hide = false;
+			ui.horizontal(|ui| {
+				if ui.button("Copy link").clicked() {
+					ui.ctx().copy_text(shown.invite.link.to_string());
+				}
+				hide = ui.button("Hide").clicked();
+			});
+			// The link is the guest's credential, so it shows only as a code to scan.
+			match &shown.qr {
+				Ok(qr) => {
+					let side = ui.available_width().min(240.0);
+					ui.image((qr.id(), egui::vec2(side, side)));
+				}
+				Err(err) => {
+					ui.colored_label(ui.visuals().error_fg_color, format!("{err}; copy the link instead."));
+				}
+			}
+			if hide {
+				self.shown = None;
+			}
+		}
+
+		ui.separator();
+		let participants = room.participants();
+		if participants.is_empty() {
+			ui.weak("Nobody invited yet.");
+			return;
+		}
+		let mut show = None;
+		let mut invite = None;
+		let mut remove = None;
+		egui::ScrollArea::vertical().show(ui, |ui| {
+			egui::Grid::new("guests").striped(true).show(ui, |ui| {
+				for heading in ["Guest", "Camera", "Screen", "Link", ""] {
+					ui.strong(heading);
+				}
+				ui.end_row();
+				for (name, participant) in &participants {
+					ui.label(name);
+					for online in [participant.camera, participant.screen] {
+						if online {
+							ui.colored_label(HEALTHY, "live");
+						} else {
+							ui.weak("offline");
+						}
+					}
+					match &participant.invite {
+						Some(link) => ui.label(expiry(link.expires, now)),
+						None => ui.weak("invited before this session"),
+					};
+					ui.horizontal(|ui| {
+						if let Some(link) = &participant.invite
+							&& ui.small_button("Show link").clicked()
+						{
+							show = Some((name.clone(), link.clone()));
+						}
+						if ui.small_button("New link").clicked() {
+							invite = Some(name.clone());
+						}
+						if ui
+							.small_button("Remove from scenes")
+							.on_hover_text(
+								"Take their camera and screen, and any mask reading them, out of every scene and mute them. They stay connected until their link expires.",
+							)
+							.clicked()
+						{
+							remove = Some(name.clone());
+						}
+					});
+					ui.end_row();
+				}
+			});
+		});
+
+		if let Some((name, link)) = show {
+			self.show(ui.ctx(), name, link);
+		}
+		if let Some(name) = invite {
+			match room.invite(&name) {
+				Ok(link) => self.show(ui.ctx(), name, link),
+				Err(err) => self.report(Err(err)),
+			}
+		}
+		if let Some(name) = remove {
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft(format!("Remove `{name}` from scenes"));
+			let result = match room.take_off(&mut draft, &name) {
+				Ok(false) => Ok(()),
+				Ok(true) => {
+					// Removing items moves the ones after them.
+					self.deselect_item();
+					state.commit(draft, None)
+				}
+				Err(err) => Err(err.into()),
+			};
+			drop(state);
+			self.report(result.map(|()| format!("removed {name} from every scene and muted them")));
+		}
+	}
+
+	/// Put `invite`'s link for `name` on screen as a QR code.
+	fn show(&mut self, ctx: &egui::Context, name: String, invite: crate::guests::Invite) {
+		let qr = qr(ctx, invite.link.as_str());
+		self.shown = Some(Shown { name, invite, qr });
+	}
+
+	/// The crop, filters in order, and blend mode of the selected source or item.
 	fn filters(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -899,7 +1229,7 @@ impl Panels {
 			return;
 		};
 		let what = selection.describe(collection);
-		let Some(filters) = selection.filters(collection) else {
+		let Some(look) = selection.look(collection) else {
 			ui.label(format!("{what} has no picture to filter."));
 			return;
 		};
@@ -911,53 +1241,107 @@ impl Panels {
 			let source = video.filters.iter().map(describe_filter).collect::<Vec<_>>();
 			ui.weak(format!("after `{}`'s own: {}", item.source, source.join(", ")));
 		}
+		// What a mask can show, a picture of its own, and what a LUT reads.
+		let pictures: Vec<String> = collection
+			.sources
+			.iter()
+			.filter(|(_, source)| source.has_video() && source.opens())
+			.map(|(name, _)| name.clone())
+			.collect();
+		let luts: Vec<String> = collection
+			.sources
+			.iter()
+			.filter(|(_, source)| matches!(source, Source::Lut { .. }))
+			.map(|(name, _)| name.clone())
+			.collect();
 
-		let mut next = filters.clone();
+		let mut next = look.clone();
 		let mut action: Option<(String, Option<u64>)> = None;
-		let count = next.len();
-		let mut moved = None;
-		let mut remove = None;
-		for (index, filter) in next.iter_mut().enumerate() {
+		egui::Grid::new("look").show(ui, |ui| {
+			ui.label("Crop");
 			ui.horizontal(|ui| {
-				match filter {
-					Filter::Opacity { amount } => {
-						ui.label("Opacity");
-						let response = ui.add(egui::Slider::new(amount, 0.0..=1.0));
-						let gesture = self.gestures.of(&response);
-						if response.changed() {
-							action = Some((format!("Set opacity on {what}"), gesture));
-						}
+				let crop = &mut next.crop;
+				for (label, edge) in [
+					("left", &mut crop.left),
+					("top", &mut crop.top),
+					("right", &mut crop.right),
+					("bottom", &mut crop.bottom),
+				] {
+					ui.weak(label);
+					let response = ui.add(egui::DragValue::new(edge).range(0.0..=0.95).speed(0.002));
+					if let Some(gesture) = changed(&response, &mut self.gestures) {
+						action = Some((format!("Crop {what}"), gesture));
 					}
 				}
-				if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
-					moved = Some((index, index - 1));
+			})
+			.response
+			.on_hover_text("The fraction of the picture trimmed from each edge, the rest stretched to fill");
+			ui.end_row();
+			if let Some(blend) = &mut next.blend {
+				ui.label("Blend");
+				let before = *blend;
+				egui::ComboBox::from_id_salt("blend")
+					.selected_text(blend_name(*blend))
+					.show_ui(ui, |ui| {
+						for mode in Blend::ALL {
+							ui.selectable_value(blend, mode, blend_name(mode));
+						}
+					});
+				if *blend != before {
+					action = Some((format!("Set the blend mode of {what}"), None));
 				}
-				if ui
-					.add_enabled(index + 1 < count, egui::Button::new("Down").small())
-					.clicked()
-				{
-					moved = Some((index, index + 1));
-				}
-				if ui.small_button("Remove").clicked() {
-					remove = Some(index);
-				}
+				ui.end_row();
+			}
+		});
+
+		let count = next.filters.len();
+		let mut moved = None;
+		let mut remove = None;
+		for (index, filter) in next.filters.iter_mut().enumerate() {
+			ui.push_id(index, |ui| {
+				ui.horizontal_wrapped(|ui| {
+					if let Some(gesture) = filter_ui(ui, filter, &pictures, &luts, &mut self.gestures) {
+						action = Some((format!("Set {} on {what}", filter_name(filter)), gesture));
+					}
+					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
+						moved = Some((index, index - 1));
+					}
+					if ui
+						.add_enabled(index + 1 < count, egui::Button::new("Down").small())
+						.clicked()
+					{
+						moved = Some((index, index + 1));
+					}
+					if ui.small_button("Remove").clicked() {
+						remove = Some(index);
+					}
+				});
 			});
 		}
 		if let Some((from, to)) = moved {
-			next.swap(from, to);
+			next.filters.swap(from, to);
 			action = Some((format!("Reorder filters on {what}"), None));
 		}
 		if let Some(index) = remove {
-			next.remove(index);
+			next.filters.remove(index);
 			action = Some((format!("Remove a filter from {what}"), None));
 		}
 
 		ui.separator();
+		let filters = look.filters;
 		ui.horizontal(|ui| {
-			if ui.button("Add opacity").clicked() {
-				next.push(Filter::Opacity { amount: 1.0 });
-				action = Some((format!("Add opacity to {what}"), None));
-			}
+			egui::ComboBox::from_id_salt("add filter")
+				.selected_text("Add filter")
+				.show_ui(ui, |ui| {
+					for filter in templates(&pictures, &luts) {
+						if ui.selectable_label(false, filter_name(&filter)).clicked() {
+							action = Some((format!("Add {} to {what}", filter_name(&filter)), None));
+							next.filters.push(filter);
+						}
+					}
+				})
+				.response
+				.on_hover_text("A LUT needs a LUT source, and a mask a source with a picture of its own");
 			if ui.add_enabled(!filters.is_empty(), egui::Button::new("Copy")).clicked() {
 				let clip = Clip::Filters(moq_scene::clip::Filters {
 					filters: filters.clone(),
@@ -977,7 +1361,7 @@ impl Panels {
 		});
 
 		let Some((label, gesture)) = action else { return };
-		let result = edit(&mut state, label, gesture, |draft| selection.set_filters(draft, next));
+		let result = edit(&mut state, label, gesture, |draft| selection.set_look(draft, next));
 		drop(state);
 		self.check(result);
 	}
@@ -1044,6 +1428,13 @@ impl Panels {
 					ui.end_row();
 				}
 			}
+			let canvas = self.engine.state.lock().unwrap().collection().canvas;
+			ui.label("Canvas");
+			ui.label(format!(
+				"{}x{} at {} fps, set in the scene file and read at startup",
+				canvas.width, canvas.height, canvas.framerate
+			));
+			ui.end_row();
 			ui.label("Drawn");
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
@@ -1087,11 +1478,11 @@ impl Panels {
 		}
 	}
 
-	/// How the stream reaches viewers: what is wrong and why, the uplink, each
-	/// track, and each viewer that reports.
+	/// How the stream reaches viewers: what is wrong and why, each relay, the
+	/// uplink, each track, and each viewer that reports.
 	fn health(&mut self, ui: &mut Ui) {
 		let report = self.engine.health.lock().unwrap();
-		let Some(relay) = &report.relay else {
+		if report.relays.is_empty() {
 			ui.label("Not publishing; start with --connect to see how the stream is delivered.");
 			for problem in &report.problems {
 				ui.colored_label(color(ui, problem.verdict), &problem.cause);
@@ -1108,20 +1499,37 @@ impl Panels {
 			}
 			ui.separator();
 
+			egui::Grid::new("relays").striped(true).show(ui, |ui| {
+				for heading in ["Relay", "State", "Protocol"] {
+					ui.strong(heading);
+				}
+				ui.end_row();
+				for relay in &report.relays {
+					ui.label(&relay.endpoint);
+					match &relay.state {
+						health::State::Connecting => ui.weak("connecting"),
+						health::State::Connected => ui.colored_label(HEALTHY, "connected"),
+						health::State::Disconnected(reason) => ui
+							.colored_label(ui.visuals().error_fg_color, "unreachable")
+							.on_hover_text(reason),
+					};
+					ui.label(or_unknown(relay.version.map(|version| version.to_string())));
+					ui.end_row();
+				}
+			});
+			ui.separator();
+
 			let uplink = &report.uplink;
 			let viewers = &report.viewers;
 			egui::Grid::new("uplink").show(ui, |ui| {
-				ui.label("Relay");
-				match relay {
-					health::Relay::Connecting => ui.weak("connecting"),
-					health::Relay::Connected => ui.colored_label(HEALTHY, "connected"),
-					health::Relay::Disconnected(reason) => ui
-						.colored_label(ui.visuals().error_fg_color, "unreachable")
-						.on_hover_text(reason),
-				};
-				ui.end_row();
 				ui.label("Uplink");
-				verdict(ui, uplink.verdict);
+				ui.horizontal(|ui| {
+					verdict(ui, uplink.verdict);
+					match &uplink.relay {
+						Some(relay) => ui.weak(format!("to {relay}")),
+						None => ui.weak("no relay connected"),
+					};
+				});
 				ui.end_row();
 				ui.label("Round trip");
 				ui.label(or_unknown(uplink.rtt.map(|rtt| format!("{} ms", rtt.as_millis()))));
@@ -1137,8 +1545,8 @@ impl Panels {
 				ui.end_row();
 				ui.label("Watching");
 				match viewers.watching {
-					Some(watching) => ui.label(format!("{watching} sessions, by the relay's stats")),
-					None => ui.weak("unknown; the relay shares no stats with this connection"),
+					Some(watching) => ui.label(format!("{watching} sessions, by the relays' stats")),
+					None => ui.weak("unknown; no relay shares its stats with this studio"),
 				};
 				ui.end_row();
 				ui.label("Reporting");
@@ -1277,9 +1685,218 @@ fn linked(ui: &mut Ui, collection: &Collection, layer: &Layer, index: usize, ite
 }
 
 fn describe_filter(filter: &Filter) -> String {
+	let name = filter_name(filter);
 	match filter {
-		Filter::Opacity { amount } => format!("opacity {:.0}%", amount * 100.0),
+		Filter::Opacity { amount }
+		| Filter::Brightness { amount }
+		| Filter::Contrast { amount }
+		| Filter::Saturate { amount }
+		| Filter::Grayscale { amount }
+		| Filter::Sepia { amount }
+		| Filter::Invert { amount } => format!("{name} {:.0}%", amount * 100.0),
+		Filter::HueRotate { degrees } => format!("{name} {degrees:.0}°"),
+		Filter::Blur { radius } => format!("{name} {radius:.1} px"),
+		Filter::Lut { source, .. } | Filter::Mask { source, .. } => format!("{name} `{source}`"),
+		_ => name.to_string(),
 	}
+}
+
+fn filter_name(filter: &Filter) -> &'static str {
+	match filter {
+		Filter::Opacity { .. } => "opacity",
+		Filter::Brightness { .. } => "brightness",
+		Filter::Contrast { .. } => "contrast",
+		Filter::Saturate { .. } => "saturation",
+		Filter::Grayscale { .. } => "grayscale",
+		Filter::Sepia { .. } => "sepia",
+		Filter::Invert { .. } => "invert",
+		Filter::HueRotate { .. } => "hue rotation",
+		Filter::Blur { .. } => "blur",
+		Filter::DropShadow { .. } => "drop shadow",
+		Filter::ChromaKey { .. } => "chroma key",
+		Filter::LumaKey { .. } => "luma key",
+		Filter::Lut { .. } => "LUT",
+		Filter::Mask { .. } => "mask",
+	}
+}
+
+fn blend_name(blend: Blend) -> &'static str {
+	match blend {
+		Blend::Normal => "normal",
+		Blend::Multiply => "multiply",
+		Blend::Screen => "screen",
+		Blend::Overlay => "overlay",
+		Blend::Darken => "darken",
+		Blend::Lighten => "lighten",
+		Blend::ColorDodge => "color dodge",
+		Blend::ColorBurn => "color burn",
+		Blend::HardLight => "hard light",
+		Blend::SoftLight => "soft light",
+		Blend::Difference => "difference",
+		Blend::Exclusion => "exclusion",
+		Blend::Hue => "hue",
+		Blend::Saturation => "saturation",
+		Blend::Color => "color",
+		Blend::Luminosity => "luminosity",
+	}
+}
+
+/// A new filter of each kind, as the Add menu offers it: one that leaves the
+/// picture as it is where the kind allows. A LUT or mask names the first
+/// source it can read, and is left out without one.
+fn templates(pictures: &[String], luts: &[String]) -> Vec<Filter> {
+	let mut filters = vec![
+		Filter::Opacity { amount: 1.0 },
+		Filter::Brightness { amount: 1.0 },
+		Filter::Contrast { amount: 1.0 },
+		Filter::Saturate { amount: 1.0 },
+		Filter::Grayscale { amount: 0.0 },
+		Filter::Sepia { amount: 0.0 },
+		Filter::Invert { amount: 0.0 },
+		Filter::HueRotate { degrees: 0.0 },
+		Filter::Blur { radius: 4.0 },
+		Filter::DropShadow {
+			x: 4.0,
+			y: 4.0,
+			blur: 4.0,
+			color: moq_scene::Rgba([0, 0, 0, 128]),
+		},
+		Filter::ChromaKey {
+			color: moq_scene::Rgba([0, 255, 0, 255]),
+			similarity: 0.4,
+			smoothness: 0.08,
+			spill: 0.1,
+		},
+		Filter::LumaKey {
+			min: 0.0,
+			max: 1.0,
+			smoothness: 0.05,
+		},
+	];
+	if let Some(source) = luts.first() {
+		filters.push(Filter::Lut {
+			source: source.clone(),
+			amount: 1.0,
+		});
+	}
+	if let Some(source) = pictures.first() {
+		filters.push(Filter::Mask {
+			source: source.clone(),
+			mode: MaskMode::Alpha,
+		});
+	}
+	filters
+}
+
+/// The gesture an edit through `response` belongs to, if it changed anything.
+fn changed(response: &egui::Response, gestures: &mut Gestures) -> Option<Option<u64>> {
+	let gesture = gestures.of(response);
+	response.changed().then_some(gesture)
+}
+
+/// Edit `filter`'s settings; the gesture of the edit, if it made one.
+fn filter_ui(
+	ui: &mut Ui,
+	filter: &mut Filter,
+	pictures: &[String],
+	luts: &[String],
+	gestures: &mut Gestures,
+) -> Option<Option<u64>> {
+	ui.label(filter_name(filter));
+	let mut edits = Vec::new();
+	let slider = |ui: &mut Ui, value: &mut f32, range| ui.add(egui::Slider::new(value, range));
+	match filter {
+		Filter::Opacity { amount }
+		| Filter::Grayscale { amount }
+		| Filter::Sepia { amount }
+		| Filter::Invert { amount } => {
+			edits.push(slider(ui, amount, 0.0..=1.0));
+		}
+		Filter::Brightness { amount } | Filter::Contrast { amount } | Filter::Saturate { amount } => {
+			edits.push(slider(ui, amount, 0.0..=3.0));
+		}
+		Filter::HueRotate { degrees } => edits.push(ui.add(egui::Slider::new(degrees, -180.0..=180.0).suffix("°"))),
+		Filter::Blur { radius } => {
+			edits.push(ui.add(egui::Slider::new(radius, 0.0..=100.0).logarithmic(true).suffix(" px")));
+		}
+		Filter::DropShadow { x, y, blur, color } => {
+			edits.push(ui.add(egui::DragValue::new(x).prefix("x ").suffix(" px")));
+			edits.push(ui.add(egui::DragValue::new(y).prefix("y ").suffix(" px")));
+			edits.push(ui.add(egui::Slider::new(blur, 0.0..=50.0).suffix(" px")));
+			edits.push(color_ui(ui, color));
+		}
+		Filter::ChromaKey {
+			color,
+			similarity,
+			smoothness,
+			spill,
+		} => {
+			edits.push(color_ui(ui, color));
+			for (label, value) in [("similarity", similarity), ("smoothness", smoothness), ("spill", spill)] {
+				ui.weak(label);
+				edits.push(slider(ui, value, 0.0..=1.0));
+			}
+		}
+		Filter::LumaKey { min, max, smoothness } => {
+			for (label, value) in [("min", &mut *min), ("max", &mut *max), ("smoothness", smoothness)] {
+				ui.weak(label);
+				edits.push(slider(ui, value, 0.0..=1.0));
+			}
+			// Dragging one end past the other moves both.
+			*max = max.max(*min);
+		}
+		Filter::Lut { source, amount } => {
+			edits.push(pick(ui, "lut", source, luts));
+			edits.push(slider(ui, amount, 0.0..=1.0));
+		}
+		Filter::Mask { source, mode } => {
+			edits.push(pick(ui, "mask", source, pictures));
+			let before = *mode;
+			let mut response = egui::ComboBox::from_id_salt("mode")
+				.selected_text(match mode {
+					MaskMode::Alpha => "alpha",
+					MaskMode::Luminance => "luminance",
+				})
+				.show_ui(ui, |ui| {
+					ui.selectable_value(mode, MaskMode::Alpha, "alpha");
+					ui.selectable_value(mode, MaskMode::Luminance, "luminance");
+				})
+				.response;
+			if *mode != before {
+				response.mark_changed();
+			}
+			edits.push(response);
+		}
+	}
+	edits.iter().find_map(|response| changed(response, gestures))
+}
+
+/// Pick one of `names` for `value`.
+fn pick(ui: &mut Ui, id: &str, value: &mut String, names: &[String]) -> egui::Response {
+	let before = value.clone();
+	let mut response = egui::ComboBox::from_id_salt(id)
+		.selected_text(value.as_str())
+		.show_ui(ui, |ui| {
+			for name in names {
+				ui.selectable_value(value, name.clone(), name);
+			}
+		})
+		.response;
+	if *value != before {
+		response.mark_changed();
+	}
+	response
+}
+
+/// Edit `color` with straight alpha.
+fn color_ui(ui: &mut Ui, color: &mut moq_scene::Rgba) -> egui::Response {
+	let [r, g, b, a] = color.0;
+	let mut edited = Color32::from_rgba_unmultiplied(r, g, b, a);
+	let response = egui::color_picker::color_edit_button_srgba(ui, &mut edited, egui::color_picker::Alpha::OnlyBlend);
+	if response.changed() {
+		*color = moq_scene::Rgba(edited.to_srgba_unmultiplied());
+	}
+	response
 }
 
 /// Add `source` as `name`, with `video` filters, and place it in front of
@@ -1310,16 +1927,236 @@ fn add(
 	Ok(name)
 }
 
+/// A join link on screen.
+struct Shown {
+	name: String,
+	invite: crate::guests::Invite,
+	/// Or why the link cannot be one, so it can still be copied.
+	qr: Result<egui::TextureHandle, String>,
+}
+
+/// `text` as a QR code, one texel per module, inside the quiet zone scanners need.
+fn qr(ctx: &egui::Context, text: &str) -> Result<egui::TextureHandle, String> {
+	const QUIET: i32 = 4;
+	let code = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Low)
+		.map_err(|err| format!("The join link is too long for a QR code ({err:?})"))?;
+	let side = code.size() + 2 * QUIET;
+	let pixels = (0..side)
+		.flat_map(|y| (0..side).map(move |x| (x, y)))
+		// Outside the code, which is the quiet zone, reads as light.
+		.map(|(x, y)| match code.get_module(x - QUIET, y - QUIET) {
+			true => Color32::BLACK,
+			false => Color32::WHITE,
+		})
+		.collect();
+	let image = egui::ColorImage::new([side as usize; 2], pixels);
+	Ok(ctx.load_texture("join link", image, egui::TextureOptions::NEAREST))
+}
+
+/// When a join link stops working, from `now`.
+fn expiry(expires: kio::clock::Wall, now: kio::clock::Wall) -> String {
+	match expires.checked_duration_since(now) {
+		Some(left) if !left.is_zero() => {
+			// Whole minutes, rounded up, so a link never reads as expired early.
+			let minutes = left.as_secs().div_ceil(60).max(1);
+			let left = Duration::from_secs(minutes * 60);
+			format!("expires in {}", moq_tokio::cli::Duration::from(left))
+		}
+		_ => "expired".into(),
+	}
+}
+
 /// Draw `texture` as large as fits, keeping the canvas's shape.
-fn picture(ui: &mut Ui, texture: egui::TextureId, canvas: moq_scene::Canvas) {
+fn picture(ui: &mut Ui, texture: egui::TextureId, canvas: Canvas, sense: egui::Sense) -> egui::Response {
 	let available = ui.available_size();
 	let aspect = canvas.width as f32 / canvas.height as f32;
 	let mut size = egui::vec2(available.x, available.x / aspect);
 	if size.y > available.y {
 		size = egui::vec2(available.y * aspect, available.y);
 	}
-	ui.vertical_centered(|ui| ui.image((texture, size)));
+	ui.vertical_centered(|ui| ui.add(egui::Image::new((texture, size)).sense(sense)))
+		.inner
 }
+
+/// How the preview snaps a dragged item, for this session.
+struct Snapping {
+	on: bool,
+	/// Whether the grid is drawn and snapped to.
+	grid: bool,
+	/// The grid's spacing in canvas pixels.
+	spacing: u32,
+}
+
+impl Default for Snapping {
+	fn default() -> Self {
+		Self {
+			on: true,
+			grid: false,
+			spacing: 40,
+		}
+	}
+}
+
+/// An item a drag in the preview holds.
+struct Drag {
+	layer: Layer,
+	index: usize,
+	grab: Grab,
+	/// The item's rect, and where the pointer was in canvas pixels, when the
+	/// drag started. Each frame drags from these, so snaps never accumulate.
+	rect: Rect,
+	origin: [f32; 2],
+	/// Kept from the start, since the frame that releases the drag no longer
+	/// reports it but still moves the item.
+	gesture: Option<u64>,
+	/// The snapped rect, its guides, and its spacing, unless snapping is off.
+	hints: Option<snap::Snapped>,
+}
+
+/// How far, in points on screen, the pointer reaches to an edge or a line.
+const REACH: f32 = 8.0;
+
+/// The visible items of the scene in preview and the top layer, other than
+/// the one at `index` of `layer`: what a dragged item snaps to.
+fn others(state: &State, layer: &Layer, index: usize) -> Vec<Rect> {
+	let scene = state
+		.compositor
+		.preview_scene()
+		.map(|name| Layer::Scene(name.to_string()));
+	let collection = state.collection();
+	let mut rects = Vec::new();
+	for shown in scene.into_iter().chain([Layer::Top]) {
+		let items = collection.items(&shown).map_or(&[][..], Vec::as_slice);
+		for (at, item) in items.iter().enumerate() {
+			if item.visible && !(shown == *layer && at == index) {
+				rects.push(item.rect);
+			}
+		}
+	}
+	rects
+}
+
+fn cursor(grab: Grab) -> egui::CursorIcon {
+	use snap::Side::{End, Start};
+	match grab {
+		Grab::Resize { x: Some(_), y: None } => egui::CursorIcon::ResizeHorizontal,
+		Grab::Resize { x: None, y: Some(_) } => egui::CursorIcon::ResizeVertical,
+		Grab::Resize {
+			x: Some(Start),
+			y: Some(Start),
+		}
+		| Grab::Resize {
+			x: Some(End),
+			y: Some(End),
+		} => egui::CursorIcon::ResizeNwSe,
+		Grab::Resize { x: Some(_), y: Some(_) } => egui::CursorIcon::ResizeNeSw,
+		Grab::Move | Grab::Resize { x: None, y: None } => egui::CursorIcon::Move,
+	}
+}
+
+/// The preview's picture on screen, mapping canvas pixels to points.
+struct View {
+	rect: egui::Rect,
+	/// Canvas pixels per point.
+	scale: f32,
+}
+
+impl View {
+	fn new(rect: egui::Rect, canvas: Canvas) -> Self {
+		Self {
+			rect,
+			scale: canvas.width as f32 / rect.width(),
+		}
+	}
+
+	/// The canvas position under `pos`.
+	fn point(&self, pos: egui::Pos2) -> [f32; 2] {
+		let offset = (pos - self.rect.min) * self.scale;
+		[offset.x, offset.y]
+	}
+
+	/// A distance on screen, in canvas pixels.
+	fn canvas(&self, points: f32) -> f32 {
+		points * self.scale
+	}
+
+	fn pos(&self, x: f32, y: f32) -> egui::Pos2 {
+		self.rect.min + egui::vec2(x, y) / self.scale
+	}
+
+	fn screen(&self, rect: &Rect) -> egui::Rect {
+		egui::Rect::from_two_pos(
+			self.pos(rect.x, rect.y),
+			self.pos(rect.x + rect.width, rect.y + rect.height),
+		)
+	}
+
+	/// The line at `at` on `axis`, from `from` to `to` across it.
+	fn line(&self, axis: snap::Axis, at: f32, from: f32, to: f32) -> [egui::Pos2; 2] {
+		match axis {
+			snap::Axis::X => [self.pos(at, from), self.pos(at, to)],
+			snap::Axis::Y => [self.pos(from, at), self.pos(to, at)],
+		}
+	}
+
+	fn grid(&self, painter: &egui::Painter, spacing: f32) {
+		// Any finer on screen, the grid is a wash.
+		if spacing / self.scale < 4.0 {
+			return;
+		}
+		let stroke = egui::Stroke::new(1.0, Color32::from_white_alpha(32));
+		let size = self.rect.size() * self.scale;
+		for (axis, length, across) in [(snap::Axis::X, size.x, size.y), (snap::Axis::Y, size.y, size.x)] {
+			let mut at = spacing;
+			while at < length {
+				painter.line_segment(self.line(axis, at, 0.0, across), stroke);
+				at += spacing;
+			}
+		}
+	}
+
+	/// An outline with a handle at each corner and edge.
+	fn selected(&self, painter: &egui::Painter, rect: &Rect, color: Color32) {
+		let rect = self.screen(rect);
+		painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.5, color), egui::StrokeKind::Outside);
+		for x in [rect.left(), rect.center().x, rect.right()] {
+			for y in [rect.top(), rect.center().y, rect.bottom()] {
+				if (x, y) != (rect.center().x, rect.center().y) {
+					let handle = egui::Rect::from_center_size(egui::pos2(x, y), egui::Vec2::splat(6.0));
+					painter.rect_filled(handle, 1.0, color);
+				}
+			}
+		}
+	}
+
+	fn hovered(&self, painter: &egui::Painter, rect: &Rect, color: Color32) {
+		let stroke = egui::Stroke::new(1.0, color.gamma_multiply(0.6));
+		painter.rect_stroke(self.screen(rect), 0.0, stroke, egui::StrokeKind::Outside);
+	}
+
+	/// The guides the dragged item lines up on, and the equal spaces beside it.
+	fn hints(&self, painter: &egui::Painter, snapped: &snap::Snapped) {
+		let stroke = egui::Stroke::new(1.0, GUIDE);
+		for guide in &snapped.guides {
+			painter.line_segment(self.line(guide.axis, guide.at, guide.from, guide.to), stroke);
+		}
+		for gap in &snapped.gaps {
+			// A gap along X is a horizontal span: a line at its `at` on Y.
+			let (across, tick) = match gap.axis {
+				snap::Axis::X => (snap::Axis::Y, egui::vec2(0.0, 4.0)),
+				snap::Axis::Y => (snap::Axis::X, egui::vec2(4.0, 0.0)),
+			};
+			let [start, end] = self.line(across, gap.at, gap.start, gap.end);
+			painter.line_segment([start, end], stroke);
+			for pos in [start, end] {
+				painter.line_segment([pos - tick, pos + tick], stroke);
+			}
+		}
+	}
+}
+
+/// Smart guides and spacing hints, bright enough to read over any picture.
+const GUIDE: Color32 = Color32::from_rgb(255, 64, 160);
 
 fn describe(source: &Source) -> String {
 	let or_default = |id: &Option<String>| id.clone().unwrap_or_else(|| "default".into());
@@ -1333,6 +2170,7 @@ fn describe(source: &Source) -> String {
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
 		Source::Clone { source } => format!("clone of {source}"),
+		Source::Lut { path } => format!("LUT: {}", path.display()),
 	}
 }
 
@@ -1408,10 +2246,11 @@ enum Kind {
 	Window,
 	Microphone,
 	SystemAudio,
+	Lut,
 }
 
 impl Kind {
-	const ALL: [Self; 8] = [
+	const ALL: [Self; 9] = [
 		Self::Color,
 		Self::Image,
 		Self::Broadcast,
@@ -1420,6 +2259,7 @@ impl Kind {
 		Self::Window,
 		Self::Microphone,
 		Self::SystemAudio,
+		Self::Lut,
 	];
 
 	fn label(self) -> &'static str {
@@ -1432,6 +2272,7 @@ impl Kind {
 			Self::Window => "Window",
 			Self::Microphone => "Microphone",
 			Self::SystemAudio => "System audio",
+			Self::Lut => "LUT",
 		}
 	}
 
@@ -1440,6 +2281,7 @@ impl Kind {
 		match self {
 			Self::Color | Self::SystemAudio => None,
 			Self::Image => Some("file"),
+			Self::Lut => Some(".cube file"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
 			Self::Camera | Self::Display | Self::Microphone => Some("id (empty for the default)"),
@@ -1488,6 +2330,7 @@ impl AddSource {
 				color: moq_scene::Rgba(self.color.to_srgba_unmultiplied()),
 			},
 			Kind::Image => Source::Image { path: value.into() },
+			Kind::Lut => Source::Lut { path: value.into() },
 			Kind::Broadcast => Source::Broadcast { path: value },
 			Kind::Camera => Source::Camera { id },
 			Kind::Display => Source::Display { id },
@@ -1498,12 +2341,6 @@ impl AddSource {
 	}
 }
 
-/// A device the user can add as a source.
-struct Pick {
-	name: String,
-	source: Source,
-}
-
 /// The capture devices this machine has, listed in the background.
 #[derive(Default)]
 struct Devices {
@@ -1511,22 +2348,20 @@ struct Devices {
 	pending: Option<std::sync::mpsc::Receiver<Listing>>,
 }
 
-/// One listing of every kind of device, each of which can fail on its own.
-struct Listing {
-	kinds: Vec<(&'static str, Result<Vec<Pick>, String>)>,
-}
-
 impl Devices {
-	fn refresh(&mut self, runtime: &tokio::runtime::Handle) {
+	fn refresh(&mut self, runtime: &tokio::runtime::Handle) -> std::io::Result<()> {
 		let (send, recv) = std::sync::mpsc::channel();
-		self.pending = Some(recv);
 		// The capture backends' listing futures are `!Send` on macOS, as their
 		// capture futures are (which is why each source runs on its own thread),
-		// so poll the listing on a blocking thread rather than spawn it.
+		// so poll the listing on a thread rather than spawn it. Not the runtime's
+		// blocking pool, which dropping the runtime waits out, so a listing stuck
+		// on a permission prompt cannot hold the studio open once it closes.
 		let handle = runtime.clone();
-		runtime.spawn_blocking(move || {
-			let _ = send.send(handle.block_on(list()));
-		});
+		std::thread::Builder::new().name("devices".into()).spawn(move || {
+			let _ = send.send(handle.block_on(devices::list()));
+		})?;
+		self.pending = Some(recv);
+		Ok(())
 	}
 
 	fn poll(&mut self) {
@@ -1548,8 +2383,8 @@ impl Devices {
 		let mut picked = None;
 		egui::ScrollArea::vertical()
 			.show(ui, |ui| {
-				for (kind, devices) in &mut listing.kinds {
-					ui.strong(*kind);
+				for (kind, devices) in listing.kinds() {
+					ui.strong(kind);
 					match devices {
 						Ok(devices) if devices.is_empty() => {
 							ui.weak("none");
@@ -1575,58 +2410,5 @@ impl Devices {
 				None
 			})
 			.inner
-	}
-}
-
-#[cfg(feature = "capture")]
-async fn list() -> Listing {
-	fn picks<T>(result: Result<Vec<T>, impl std::fmt::Display>, pick: impl Fn(T) -> Pick) -> Result<Vec<Pick>, String> {
-		result
-			.map(|devices| devices.into_iter().map(pick).collect())
-			.map_err(|err| err.to_string())
-	}
-
-	let cameras = picks(moq_video::capture::cameras().await, |camera| Pick {
-		name: camera.name,
-		source: Source::Camera { id: Some(camera.id) },
-	});
-	let displays = picks(moq_video::capture::displays().await, |display| Pick {
-		name: display.name,
-		source: Source::Display { id: Some(display.id) },
-	});
-	let windows = picks(moq_video::capture::windows().await, |window| Pick {
-		name: format!("{} ({})", window.title, window.app),
-		source: Source::Window { id: window.id },
-	});
-	let mut microphones = picks(moq_audio::capture::devices().await, |device| Pick {
-		name: format!("{} ({})", device.name, device.host),
-		source: Source::Microphone { id: Some(device.id) },
-	});
-	if cfg!(target_os = "macos")
-		&& let Ok(microphones) = &mut microphones
-	{
-		microphones.push(Pick {
-			name: "System audio".into(),
-			source: Source::SystemAudio,
-		});
-	}
-
-	Listing {
-		kinds: vec![
-			("Cameras", cameras),
-			("Displays", displays),
-			("Windows", windows),
-			("Audio inputs", microphones),
-		],
-	}
-}
-
-#[cfg(not(feature = "capture"))]
-async fn list() -> Listing {
-	Listing {
-		kinds: vec![(
-			"Devices",
-			Err("this build cannot capture; rebuild with `--features capture`".into()),
-		)],
 	}
 }

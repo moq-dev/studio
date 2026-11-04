@@ -7,7 +7,7 @@ features := "moq-scene/capture,moq-studio/capture,moq-studio/openh264"
 default:
     @just --list
 
-# Lint the repository tooling, the quest tree, and the workspace.
+# Lint the repository tooling, the quest tree, the join page, and the workspace.
 check:
     sh/check-moq-pin.sh
     quest check
@@ -16,6 +16,10 @@ check:
     shfmt -d .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh
     taplo format --check
     nixfmt --check flake.nix
+    bun install --frozen-lockfile
+    bun biome check .
+    bun run check
+    bun run --cwd js/join build
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --all-targets --features {{ features }} -- -D warnings
@@ -24,6 +28,7 @@ check:
 [positional-arguments]
 test *args:
     bash .claude/hooks/direnv.test.sh
+    bun run test
     cargo nextest run --locked --workspace --features {{ features }} "$@"
 
 # Run what CI's Check runs: the lints, then the tests.
@@ -36,6 +41,7 @@ fix:
     shfmt -w .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh
     taplo format
     nixfmt flake.nix
+    bun biome check --write .
     cargo fmt --all
 
 # Composite scenes and publish a program through wgpu on Mesa's software Vulkan
@@ -48,8 +54,13 @@ render-sw:
     icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
     export LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}"
     cargo nextest run --locked -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
-    cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay)'
+    cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay) | test(=setup::tests::times_every_canvas)'
 
 # Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock.
 upgrade-moq rev="origin/main":
     sh/upgrade-moq.sh {{ rev }}
+
+# Serve the join page locally while working on it.
+join:
+    bun install --frozen-lockfile
+    bun run --cwd js/join dev

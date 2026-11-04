@@ -1,0 +1,73 @@
+:root {
+	color-scheme: dark;
+	font-family: system-ui, sans-serif;
+	background: #111;
+	color: #eee;
+}
+
+main {
+	max-width: 40rem;
+	margin: 0 auto;
+	padding: 1rem;
+}
+
+button {
+	font: inherit;
+	padding: 0.5rem 1rem;
+	border: 1px solid #444;
+	border-radius: 0.375rem;
+	background: #222;
+	color: inherit;
+	cursor: pointer;
+}
+
+button[aria-pressed="true"] {
+	background: #1f6f4a;
+	border-color: #2a9d68;
+}
+
+#join {
+	background: #1f6f4a;
+}
+
+canvas {
+	display: block;
+	width: 100%;
+	aspect-ratio: 16 / 9;
+	background: #000;
+	border-radius: 0.375rem;
+}
+
+.controls {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin-top: 0.75rem;
+}
+
+.status {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+}
+
+.dot {
+	width: 0.6rem;
+	height: 0.6rem;
+	border-radius: 50%;
+	background: #c93;
+}
+
+.dot.connected {
+	background: #3c8;
+}
+
+.dot.disconnected,
+.error {
+	color: #f77;
+	background: #c33;
+}
+
+.error {
+	background: none;
+}

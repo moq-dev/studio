@@ -13,10 +13,21 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
     show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
 ```
 
-- `show.toml` is the scene collection. It is created if it does not exist, and
-  changes are saved to it a second after you stop editing, with no save step.
+- `show.toml` is the scene collection. If it does not exist yet,
+  [guided setup](#first-launch) proposes one and creates it. Changes are saved
+  to it a second after you stop editing, with no save step.
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
+- `--failover <url>` publishes the same broadcast to a second relay under the
+  same publisher epoch, so a viewer linked to both resumes mid-group from it
+  when the first fails. Both relays must speak the one `--connect-version`,
+  which must carry publisher epochs (`moq-lite-07-wip` today, which a relay
+  accepts only when configured to), or the studio refuses to start; it also
+  refuses a fixed `--connect-bind` port, since each relay's connection binds
+  its own. Its credential rides its URL's `?jwt=`; `--connect-token` goes to
+  the first relay only. The stream's tracks claim their bitrate on the first
+  relay's link alone, so only that link is probed toward the stream's rate;
+  no encoder adapts to either estimate.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
   On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
@@ -30,27 +41,75 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
   [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
 
+## First launch
+
+Opening a scene file that does not exist yet starts guided setup instead of
+the studio. It runs three checks, and a check that fails shows its reason:
+
+- **Devices:** the cameras, displays, and audio inputs this machine has.
+- **Encoders:** for each canvas setup can propose (1080p and 720p at 60 or 30
+  fps, and 360p at 30 fps), the encoder the program would pick, whether it
+  reads the GPU, the bitrate it encodes at, and how long a frame takes over a
+  short burst of moving frames. An encoder keeps up when a frame takes at most
+  three quarters of the frame period, leaving the rest for sources and the
+  compositor.
+- **Uplink:** with `--connect`, setup publishes a probe at the `--broadcast`
+  path for about six seconds and subscribes to it through the relay, so the
+  relay pulls it. The congestion controller's send-rate estimate is the
+  measurement. With `--failover`, only the `--connect` relay is measured,
+  since only its link is probed toward the stream's rate. A connection that
+  reports no estimate, such as WebSocket, fails the check.
+
+Setup then proposes a scene named Main and a canvas, explaining each choice.
+The scene has the first display filling the canvas, the first camera in the
+bottom-right corner over it (or filling the canvas alone), and the first audio
+input. Swap any of them for another device or leave it out. The canvas is the
+largest one whose encoder keeps up and whose video and audio fit in two thirds
+of the measured uplink, the most the Health panel grades healthy. Without a
+measurement, it is the default 1080p at 30 fps. If no encoder keeps up, it is
+the canvas closest to keeping up.
+
+Nothing is written until you start the studio, so quitting during setup runs
+it again on the next launch. **Start with this scene** and **Start with an
+empty scene** both create the scene file at once, the second with the chosen
+canvas and no sources. The proposed scene is the first edit in the history, so
+undoing it leaves that empty scene.
+
+Setup writes an ordinary scene file. Change its sources and scenes in their
+panels, and its canvas in the file, which takes a restart. The Output panel
+shows the canvas in use, and the Health panel shows how the uplink holds up
+once you are live.
+
 ## Panels
 
 Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
+| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
 | Scenes | Pick the scene in preview, add one, or remove one. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
-| Filters | Add, order, and set the filters of the selected source or item, and copy or paste them. |
+| Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
+| Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the broadcast path, whether the program is encoding, and the encoder's work. |
-| Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
+| Output | See the broadcast path, whether the program is encoding, the canvas, and the encoder's work. |
+| Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
 on program, and stays on through a cut or fade: a downstream keyer for a logo
 or a lower third.
+
+In the preview, click an item of whatever the Items panel shows to select it,
+drag it to move it, and drag its edges or corners to resize it. A drag snaps
+edges and centers to the canvas's edges and center, to the other items shown,
+and to the grid while **Grid** is on, drawing a guide through what it lines up
+with. A moved item also snaps to the spacing of its neighbors, marking the
+equal spaces. Hold Ctrl (Cmd on macOS) to drag without snapping, or turn
+**Snap** off. The snap and grid settings last until the studio quits.
 
 Items showing the same source are **linked**: one capture, with the source's
 filters, wherever it is shown. A **clone** is a new source showing another's
@@ -68,10 +127,70 @@ comes along, renamed if its name is taken. Copied filters paste onto the
 selected source or item, after its own. The clipboard holds text in the scene
 file's format.
 
-A broadcast source subscribes through the same relay connection, plays the
+A broadcast source subscribes through the same relay connections. It plays the
+newest instance of its broadcast through either relay, preferring the first
+relay among routes to the same instance, so a publisher restarted behind only
+the failover replaces the first relay's copy. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
+
+## Guests
+
+Guests and phones join a room the studio owns on its relay, from a web page,
+and their camera and screen appear as broadcast sources. The room follows
+[moq-room](https://github.com/moq-dev/moq/tree/main/rs/moq-room): a guest
+named `alice` publishes `alice/camera.hang` and `alice/screen.hang` under it.
+Guests need a relay that verifies tokens, so run your own with
+[`moq auth serve`](https://doc.moq.dev/bin/cli) behind it, and a key that can
+sign only for the room:
+
+```bash
+moq auth generate --algorithm ES256 --out room.jwk --public-dir keys \
+    --root show/guests --publish '**' --subscribe '**'
+moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
+    --room guests --room-key room.jwk --join-page https://join.example.com/
+```
+
+- `--room` is a path under the `--connect` URL's, here `show/guests` on the
+  relay. The studio's own token must let it subscribe there. A guest's browser
+  dials the same relay, so `--connect` must be `https://`, or `http://` only to
+  this machine or the local network.
+- `--room-key` signs each guest's token. The studio refuses a key whose scope
+  reaches outside the room, so a stolen key cannot sign for the rest of the
+  relay. Put its public half in the directory `moq auth serve --key-dir` reads.
+- `--join-page` is where the join page (`js/join`, `bun run --cwd js/join
+  build`) is hosted. Browsers open the camera only on an `https://` page or
+  `localhost`, so the studio refuses any other. It defaults to `https://join.studio.moq.dev/`, which this
+  repository deploys from `main`, but that domain is not live yet, so for now
+  host the page yourself and pass its URL.
+- `--guest-expiry` (default `4h`) is how long a link works. The relay
+  disconnects a guest when their link expires, so send a new one before then.
+- With `--failover`, a link still names only the `--connect` relay: the join
+  page dials one relay, and a guest's token is rooted at the room there, so
+  guests drop while that relay is down. The studio follows the room through
+  both relays, like any broadcast source, so a guest the failover routes at
+  the same path, as a relay in the same cluster does, keeps reaching it.
+  Anyone the failover lets publish in the room joins as a guest, so guard the
+  room there as on the `--connect` relay.
+
+**Invite** in the Guests panel makes a link for one guest name and shows it as
+a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
+in the link's fragment, which the browser never sends to a server, and lets
+them publish only under their own name, so they cannot appear as someone else.
+Treat the link like a password: anyone holding it can join as that guest until
+it expires. A guest's broadcasts become sources named after them (`alice`,
+`alice screen`) when they first appear, muted and in no scene: place them from
+the Items panel and unmute them in Audio to put them on air. That includes a
+guest invited before a restart whose link still works. A guest's source is
+saved to the scene file but is not your edit: it stays out of History, so undo
+never removes it and a guest joining never loses what you could redo. A guest
+who reconnects after you removed their source comes back under a new name
+(`alice 2`), since undoing the removal brings back the old one.
+**Remove from scenes** is your edit, so it undoes: it takes a guest, any clone
+of their sources, and any mask reading them out of every scene and the top
+layer and mutes them; a signed token cannot be taken back, so they stay
+connected until it expires.
 
 ## Scene file
 
@@ -113,11 +232,23 @@ source = "camera"
 [video.camera-faded]
 filters = [{ kind = "opacity", amount = 0.5 }]
 
+[sources.grade]
+kind = "lut"
+path = "teal-orange.cube"
+
+[video.camera]
+crop = { left = 0.1, right = 0.1 } # trim 10% of the picture off each side
+filters = [
+    { kind = "chroma_key", color = "#00ff00", similarity = 0.4, smoothness = 0.08, spill = 0.1 },
+    { kind = "lut", source = "grade", amount = 0.8 },
+]
+
 [[scenes]]
 name = "Main"
 items = [
     { source = "camera", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
-    { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, filters = [{ kind = "opacity", amount = 0.8 }] },
+    { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, filters = [{ kind = "drop_shadow", x = 8, y = 8, blur = 12, color = "#00000080" }] },
+    { source = "logo", rect = { x = 0, y = 0, width = 1920, height = 1080 }, blend = "multiply", filters = [{ kind = "opacity", amount = 0.3 }] },
 ]
 
 [[scenes]]
@@ -134,10 +265,36 @@ rect = { x = 1600, y = 40, width = 280, height = 120 }
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
 (macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
-`broadcast`, and `clone` (with the `source` it shows). The Devices panel fills
-in ids. `[video.<source>]` lists a source's filters, and an item's `filters`
-its own; the one filter so far is `opacity`, from 0 to 1, as in CSS. `[[top]]`
-items make up the top layer.
+`broadcast`, `clone` (with the `source` it shows), and `lut` (a 3D Adobe or
+Resolve `.cube` file, which no item places, but which grades what a `lut`
+filter names it in). The Devices panel fills in ids. `[[top]]` items make up the top
+layer.
+
+`[video.<source>]` sets a source's `crop` and `filters`, wherever it is shown,
+and an item's `crop`, `filters`, and `blend` its own. A `crop` trims a fraction
+(0 to 1) of the picture off its `left`, `top`, `right`, and `bottom`, opposite
+sides together trimming less than the whole, and stretches the rest over the
+item; an item's crop trims what its source's
+leaves. Filters apply in order, the source's then the item's, with lengths in
+canvas pixels:
+
+| Filter | Settings |
+| --- | --- |
+| `opacity`, `grayscale`, `sepia`, `invert` | `amount`, 0 to 1, as in CSS |
+| `brightness`, `contrast`, `saturate` | `amount`, 0 or more, 1 leaving the picture as it is, as in CSS |
+| `hue_rotate` | `degrees`, as in CSS |
+| `blur` | `radius`, the standard deviation; the edges fade out, as in CSS |
+| `drop_shadow` | `x`, `y`, `blur` (the standard deviation), and `color`, as in CSS |
+| `chroma_key` | `color` keyed out, and `similarity`, `smoothness`, and `spill` from 0 to 1 |
+| `luma_key` | `min` and `max` luma kept, `min` at most `max`, and `smoothness`, all from 0 to 1 |
+| `lut` | the `lut` `source` to grade through, and `amount` from 0 to 1 |
+| `mask` | a `source` whose picture, stretched over the item, keeps what it covers: by its alpha, or `mode = "luminance"` |
+
+An item's `blend` mixes it with what is under it by a CSS `mix-blend-mode`:
+`multiply`, `screen`, `overlay`, `darken`, `lighten`, `color_dodge`,
+`color_burn`, `hard_light`, `soft_light`, `difference`, `exclusion`, `hue`,
+`saturation`, `color`, or `luminosity`. Removing a source removes the filters
+that name it.
 
 The studio writes the file a second after the last change, so a burst such as a
 slider drag is one write, and once more on quit. Edits that never pause for a
@@ -235,20 +392,25 @@ compositor uploads.
 
 The Health panel grades the stream every second on the thresholds moq's
 `hang::health` shares with the rest of the stack, and lists each problem
-with its cause in plain words: the relay is unreachable, the uplink is
+with its cause in plain words: a relay is unreachable, the uplink is
 congested or losing packets, the relay is far away, the encoder is behind or
 stuck, a camera or broadcast source on program stalled, or viewers are late,
-stalling, or cannot decode a track. Below that it shows:
+stalling, or cannot decode a track. A relay lost while the other serves is
+degraded, since viewers have nothing left to fall back to; with none serving
+it is unhealthy. Below that it shows:
 
-- **Uplink**: the round trip to the relay, the bandwidth the connection
-  estimates it can carry, the media the program's tracks write, and the share
-  lost and resent. Loss and headroom are graded only while someone watches,
-  since the relay pulls nothing otherwise. Source tracks are left out of the
-  media, since they encode whether or not anyone pulls them.
-- **Watching**: the sessions subscribed to the broadcast, from the relay's
+- **Relays**: each relay's state, and the protocol its session negotiated.
+- **Uplink**: the round trip to the first connected relay, the bandwidth the
+  connection estimates it can carry, the media the program's tracks write, and
+  the share lost and resent. Loss and headroom are graded only while someone
+  watches, since the relay pulls nothing otherwise. Source tracks are left out
+  of the media, since they encode whether or not anyone pulls them.
+- **Watching**: the sessions subscribed to the broadcast, from the relays'
   `.stats` broadcasts. A relay shares those only with a connection allowed to
   read them, so most show "unknown". In a cluster, a relay forwarding the
-  stream to another counts as one session.
+  stream to another counts as one session. Two relays whose stats use the
+  same node name publish them at the same path, so only one of them counts:
+  the newer instance, or the first relay's when they are one instance.
 - **Tracks**: each track's bitrate and frame rate, and, from viewers that
   report, the lowest bitrate any received, its worst grade, and the latency
   from the program clock to the slowest viewer. The program's tracks come
@@ -273,9 +435,11 @@ just check   # Lint everything, including the quest tree
 just test    # Run the tests
 just ci      # Both, as CI runs them
 just fix     # Auto-fix formatting
+just join    # Serve the join page locally
 ```
 
-`rs/moq-scene` is the UI-free compositor and `rs/moq-studio` the app. See
+`rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
+`js/join` the join page, built on `@moq/room` and `@moq/publish`. See
 [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md), and the
 [quest tree](quest/README.md) for planned work.
 
