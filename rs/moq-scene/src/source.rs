@@ -820,8 +820,8 @@ impl Driver {
 
 /// How a replay reads its take: from the first group, where the take's tracks
 /// declare they start, skipping nothing as late, since a take is history.
-const REPLAY: moq_mux::container::Delay = moq_mux::container::Delay {
-	min: Duration::ZERO,
+const REPLAY: moq_net::track::Delay = moq_net::track::Delay {
+	min: Some(Duration::ZERO),
 	max: None,
 };
 

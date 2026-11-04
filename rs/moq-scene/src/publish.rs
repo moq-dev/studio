@@ -656,7 +656,9 @@ mod tests {
 			let track = consumer
 				.track(hang::catalog::Reference::track(config, name))
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(None))
+				.subscribe(
+					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None)),
+				)
 				.await
 				.unwrap();
 			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
