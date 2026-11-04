@@ -472,7 +472,9 @@ as a hang catalog of its own on the program's clock.
 
 A captured source encodes its track as H.264 only while it is used: while it
 is shown on program, so a replay of it has its recent past, or while a
-recording reads its track. Otherwise it holds no encoder. A capture that
+recording reads its track. Otherwise it holds no encoder. A display or window
+that goes into use while its screen stands still, and so delivers nothing new,
+restarts its capture, so its track starts with the picture as it is. A capture that
 changes size or color space moves to a new track, which its catalog entry
 follows. Images and colors keep their picture once, as the image file and as a
 one-pixel PNG. Removing or editing a source ends its track. A track carries the

@@ -542,27 +542,45 @@ impl Driver {
 			None => None,
 		};
 
+		// A display or window delivers nothing while its screen stands still,
+		// so going into use reopens its capture, which starts with the picture
+		// as it is. A camera delivers its next picture within a frame anyway.
+		let still = matches!(source, Source::Display { .. } | Source::Window { .. });
 		let result = async {
+			// Whether a change of use is still to be acted on: not again until
+			// a picture arrives, since a closed encoder opens only on one.
+			let mut settling = true;
 			loop {
-				let idle = async {
+				let settled = async {
 					match &track {
-						Some(video) => video.idle().await,
-						None => std::future::pending().await,
+						Some(video) if settling => video.settle().await,
+						_ => std::future::pending().await,
 					}
 				};
-				// Leaving program gives the encode session back at once, even
-				// while the capture delivers nothing new, as a still screen does.
+				// Leaving use gives the encode session back at once, and going
+				// into use brings a picture, even while the capture delivers
+				// nothing new.
 				let frame = tokio::select! {
 					frame = stream.read() => frame?,
-					() = idle => {
-						if let Some(video) = &mut track
-							&& let Err(err) = video.release()
-						{
-							self.fail_encoding(&mut track, err);
+					() = settled => {
+						let Some(video) = &mut track else { continue };
+						if video.is_open() {
+							if let Err(err) = video.release() {
+								self.fail_encoding(&mut track, err);
+							}
+						} else {
+							settling = false;
+							if still {
+								// Closed before the next opens, so the device is
+								// captured once.
+								drop(stream);
+								stream = moq_video::capture::open(&config).await?;
+							}
 						}
 						continue;
 					}
 				};
+				settling = true;
 				let Some(mut frame) = frame else { break };
 				if let Some(video) = &mut track
 					&& let Err(err) = video.encode(&mut frame)

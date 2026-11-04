@@ -548,29 +548,34 @@ impl<'a> Video<'a> {
 		self.shown.borrow().contains(&self.claim.name) || self.track.watched()
 	}
 
-	/// Wait until the encoder is open while nothing uses the source, so a
-	/// capture that delivers nothing new, such as a still screen, gives its
-	/// session back without waiting on a picture. Then [`release`](Self::release)
-	/// it.
+	/// Wait until whether the source is used disagrees with whether its
+	/// encoder is open, so a capture that delivers nothing new, such as a
+	/// still screen, can act without waiting on a picture: [`release`] the
+	/// encoder when it is open and nothing uses the source, or bring a picture
+	/// when it is closed and the source goes into use.
+	///
+	/// [`release`]: Self::release
 	#[cfg_attr(
 		not(any(feature = "capture", test)),
 		expect(dead_code, reason = "only a capture waits on it")
 	)]
-	pub(crate) async fn idle(&self) {
-		if !self.track.is_open() {
-			// Only a picture opens it, and a new picture means a new wait.
-			return std::future::pending().await;
-		}
+	pub(crate) async fn settle(&self) {
 		let mut demand = self.track.demand();
 		let mut shown = self.shown.clone();
 		shown.mark_unchanged();
-		while self.used() {
+		while self.used() == self.track.is_open() {
 			// The first look at the demand reports it as it is now.
 			tokio::select! {
 				changed = shown.changed() => if changed.is_err() { std::future::pending::<()>().await },
 				wanted = demand.wanted_changed() => if wanted.is_err() { std::future::pending::<()>().await },
 			}
 		}
+	}
+
+	/// Whether the encoder is open.
+	#[cfg_attr(not(feature = "capture"), expect(dead_code, reason = "only a capture asks"))]
+	pub(crate) fn is_open(&self) -> bool {
+		self.track.is_open()
 	}
 
 	/// Close the encoder while nothing uses the source, marking the gap, which
@@ -844,9 +849,10 @@ mod tests {
 	}
 
 	/// A source leaving program gives its encode session back without waiting
-	/// on a picture, since a still screen delivers none.
+	/// on a picture, since a still screen delivers none, and one going on
+	/// program while closed says so, so its capture can bring a picture.
 	#[tokio::test(start_paused = true)]
-	async fn a_video_leaving_program_closes_its_encoder_at_once() {
+	async fn a_video_follows_its_use_without_a_picture() {
 		local(async {
 			let (publish, _catalog, _consumer) = studio();
 			let claim = publish.claim("display");
@@ -856,16 +862,23 @@ mod tests {
 			let mut video = Video::new(&listing, size, framerate, None).await.unwrap();
 			let wait = std::time::Duration::from_secs(1);
 
+			assert!(
+				kio::clock::timeout(wait, video.settle()).await.is_err(),
+				"unused and closed"
+			);
 			publish.show(["display".to_string()].into());
+			kio::clock::timeout(wait, video.settle())
+				.await
+				.expect("on program without a picture, so the capture brings one");
 			video.encode(&mut gray(size, 0)).unwrap();
 			assert_eq!(publish.sessions.open(), 1);
-			assert!(kio::clock::timeout(wait, video.idle()).await.is_err(), "on program");
+			assert!(kio::clock::timeout(wait, video.settle()).await.is_err(), "on program");
 
 			publish.show(Default::default());
-			kio::clock::timeout(wait, video.idle()).await.expect("off program");
+			kio::clock::timeout(wait, video.settle()).await.expect("off program");
 			video.release().unwrap();
 			assert_eq!(publish.sessions.open(), 0);
-			assert!(kio::clock::timeout(wait, video.idle()).await.is_err(), "closed");
+			assert!(kio::clock::timeout(wait, video.settle()).await.is_err(), "closed");
 		})
 		.await;
 	}
