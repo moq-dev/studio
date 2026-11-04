@@ -225,14 +225,14 @@ struct Run {
 	stop: Arc<watch::Sender<bool>>,
 }
 
-/// A recording's file writers, each ending with the source whose file it
-/// wrote, or `None` for the program's.
-type Writers = tokio::task::JoinSet<Option<Ended>>;
+/// A recording's file writers, each ending with the file it wrote.
+type Writers = tokio::task::JoinSet<Ended>;
 
-/// A source's file that ended.
+/// A file that ended.
 struct Ended {
-	name: String,
-	/// The source's tracks were replaced, so it goes on in another file.
+	/// The source whose file it was, or `None` for the program's.
+	source: Option<String>,
+	/// Its tracks were replaced, so it goes on in another file.
 	replaced: bool,
 }
 
@@ -241,26 +241,22 @@ impl Run {
 	/// until asked to stop or the program ends, and finish every file.
 	async fn record(self, program: Arc<File>, file: tokio::fs::File, sources: bool) {
 		let mut writers = tokio::task::JoinSet::new();
-		let source = self.source.clone();
-		let asked = self.stop.subscribe();
-		writers.spawn(async move {
-			program.finish(write(source, file, &program, asked).await);
-			None
-		});
-		if sources && let Err(err) = self.sources(&mut writers).await {
-			tracing::error!(error = format!("{err:#}"), "cannot record the sources");
+		self.spawn(None, program, file, &mut writers);
+		if let Err(err) = self.follow(&mut writers, sources).await {
+			tracing::error!(error = format!("{err:#}"), "cannot follow the catalog");
 			self.stop.send_replace(true);
 		}
 		while writers.join_next().await.is_some() {}
 	}
 
-	/// Give each source that publishes video or audio a file of its own while
-	/// it is listed, until asked to stop or the program's writer ends.
+	/// Go on in a new file whenever the program's tracks are replaced, and with
+	/// `sources`, give each source that publishes video or audio a file of its
+	/// own while it is listed, until asked to stop or the program ends.
 	///
 	/// A source removed while recording finishes its file; one added, or added
 	/// back, starts another, as does one whose tracks were replaced. One whose
 	/// file failed while it stays listed gets no other.
-	async fn sources(&self, writers: &mut Writers) -> anyhow::Result<()> {
+	async fn follow(&self, writers: &mut Writers, sources: bool) -> anyhow::Result<()> {
 		let mut asked = self.stop.subscribe();
 		let mut catalog = tokio::select! {
 			catalog = self.source.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => catalog?,
@@ -277,6 +273,9 @@ impl Run {
 			tokio::select! {
 				snapshot = catalog.next() => {
 					let Some(snapshot) = snapshot? else { return Ok(()) };
+					if !sources {
+						continue;
+					}
 					listed = snapshot
 						.ext
 						.studio
@@ -293,19 +292,30 @@ impl Run {
 				joined = writers.join_next() => match joined.context("no writer left")?? {
 					// A listing that went away and came back, or whose tracks were
 					// replaced, is recorded afresh.
-					Some(Ended { name, replaced }) => {
+					Ended { source: Some(name), replaced } => {
 						let gone = writing.remove(&name).unwrap_or_default();
 						if !gone && !replaced && listed.contains(&name) {
 							ended.insert(name);
 						}
 					}
+					// A new canvas size or frame rate moves the program video to a
+					// new track, which goes on in the next file.
+					Ended { source: None, replaced: true } if !*asked.borrow() => {
+						if !self.file(None, writers) {
+							self.stop.send_replace(true);
+							return Ok(());
+						}
+					}
 					// The program's writer ended, so the recording is over.
-					None => {
+					Ended { source: None, .. } => {
 						self.stop.send_replace(true);
 						return Ok(());
 					}
 				},
 				() = stopped(&mut asked) => return Ok(()),
+			}
+			if *asked.borrow() {
+				return Ok(());
 			}
 			let start: Vec<String> = listed
 				.iter()
@@ -313,7 +323,7 @@ impl Run {
 				.cloned()
 				.collect();
 			for name in start {
-				if self.source_file(&name, writers) {
+				if self.file(Some(&name), writers) {
 					writing.insert(name, false);
 				} else {
 					ended.insert(name);
@@ -322,18 +332,23 @@ impl Run {
 		}
 	}
 
-	/// Start recording the source `name` into a file of its own, returning
-	/// whether it started rather than failing to create the file.
-	fn source_file(&self, name: &str, writers: &mut Writers) -> bool {
-		// The scene file names sources, and a name may hold a path separator.
-		let safe: String = name
-			.chars()
-			.map(|c| match c {
-				c if c.is_alphanumeric() || " -_.()".contains(c) => c,
-				_ => '_',
-			})
-			.collect();
-		let stem = format!("{} {safe}", self.stem);
+	/// Start recording the program, or the source named, into a new file,
+	/// returning whether it started rather than failing to create the file.
+	fn file(&self, source: Option<&str>, writers: &mut Writers) -> bool {
+		let stem = match source {
+			None => self.stem.clone(),
+			Some(name) => {
+				// The scene file names sources, and a name may hold a path separator.
+				let safe: String = name
+					.chars()
+					.map(|c| match c {
+						c if c.is_alphanumeric() || " -_.()".contains(c) => c,
+						_ => '_',
+					})
+					.collect();
+				format!("{} {safe}", self.stem)
+			}
+		};
 		let (path, file) = match create(&self.dir, &stem) {
 			Ok(created) => created,
 			Err(err) => {
@@ -345,15 +360,24 @@ impl Run {
 		};
 		let entry = Arc::new(File::new(path));
 		self.files.lock().unwrap().push(entry.clone());
-		let (source, name) = (self.source.clone(), name.to_string());
-		let asked = self.stop.subscribe();
-		let file = tokio::fs::File::from_std(file);
-		writers.spawn(async move {
-			let (finished, replaced) = write_source(source, &name, file, &entry, asked).await;
-			entry.finish(finished);
-			Some(Ended { name, replaced })
-		});
+		self.spawn(
+			source.map(str::to_string),
+			entry,
+			tokio::fs::File::from_std(file),
+			writers,
+		);
 		true
+	}
+
+	/// Write the program, or the source named, into `file`.
+	fn spawn(&self, source: Option<String>, entry: Arc<File>, file: tokio::fs::File, writers: &mut Writers) {
+		let broadcast = self.source.clone();
+		let asked = self.stop.subscribe();
+		writers.spawn(async move {
+			let (finished, replaced) = write(broadcast, source.as_deref(), file, &entry, asked).await;
+			entry.finish(finished);
+			Ended { source, replaced }
+		});
 	}
 }
 
@@ -375,27 +399,13 @@ fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File)> {
 	}
 }
 
-/// Record the program from `source` into `file` until it ends or `stop` is
-/// set, then finish the file with everything it received.
+/// Record the program's own tracks from `source`, or with `name` that
+/// source's, into `file` until they leave the catalog or are replaced, or
+/// `stop` is set, then finish the file. Also returns whether they were
+/// replaced.
 async fn write(
 	source: moq_mux::Source,
-	file: tokio::fs::File,
-	entry: &File,
-	mut stop: watch::Receiver<bool>,
-) -> anyhow::Result<Finished> {
-	let catalog = tokio::select! {
-		catalog = source.catalog::<()>(CatalogFormat::Hang) => catalog.context("the program's catalog")?,
-		() = stopped(&mut stop) => return remove(file, entry).await,
-	};
-	record(mp4::Export::new(source, catalog), file, entry, stop).await
-}
-
-/// Record the source `name`'s own tracks from `source` into `file` until it
-/// leaves the catalog, its tracks are replaced, or `stop` is set, then finish
-/// the file. Also returns whether its tracks were replaced.
-async fn write_source(
-	source: moq_mux::Source,
-	name: &str,
+	name: Option<&str>,
 	file: tokio::fs::File,
 	entry: &File,
 	mut stop: watch::Receiver<bool>,
@@ -411,7 +421,7 @@ async fn write_source(
 	let replaced = Arc::new(AtomicBool::new(false));
 	let listing = Listing {
 		catalog,
-		name: name.to_string(),
+		name: name.map(str::to_string),
 		last: None,
 		replaced: replaced.clone(),
 	};
@@ -484,15 +494,17 @@ async fn remove(file: tokio::fs::File, entry: &File) -> anyhow::Result<Finished>
 	Ok(Finished::Empty)
 }
 
-/// One source's own catalog, nested in the studio's, which ends once the
-/// source leaves it or its tracks are replaced.
+/// The program's own tracks in the studio's catalog, or one source's catalog
+/// nested in it, which ends once the source leaves it or the tracks are
+/// replaced.
 ///
-/// A capture that changes size or color space moves to a new track, which an
-/// MP4 would hold as a second track that players skip, so the new one goes
-/// into another file instead.
+/// A new canvas size or frame rate, or a capture that changes size or color
+/// space, moves the video to a new track, which an MP4 would hold as a second
+/// track that players skip, so the new one goes into another file instead.
 struct Listing {
 	catalog: moq_mux::catalog::Consumer<moq_scene::publish::Ext>,
-	name: String,
+	/// The source, or `None` for the program.
+	name: Option<String>,
 	/// The source's catalog as last recorded, once it was listed.
 	last: Option<hang::Catalog>,
 	/// Set as the listing ends because its tracks were replaced.
@@ -510,7 +522,11 @@ impl Stream for Listing {
 			let Some(studio) = ready!(self.catalog.poll_next(waiter))? else {
 				return Poll::Ready(Ok(None));
 			};
-			let Some(listing) = studio.ext.studio.sources.get(&self.name) else {
+			let listing = match &self.name {
+				None => Some(studio.media()),
+				Some(name) => studio.ext.studio.sources.get(name).cloned(),
+			};
+			let Some(listing) = listing else {
 				if self.last.is_some() {
 					return Poll::Ready(Ok(None));
 				}
@@ -534,7 +550,7 @@ impl Stream for Listing {
 				}
 			}
 			self.last = Some(listing.clone());
-			return Poll::Ready(Ok(Some(listing.clone())));
+			return Poll::Ready(Ok(Some(listing)));
 		}
 	}
 }
@@ -663,6 +679,20 @@ mod tests {
 				.mutate(|catalog| catalog.audio.renditions.retain(|track, _| !old.contains_key(track)))
 				.unwrap();
 			self.relist();
+		}
+
+		/// Move the program onto a new track, as a new canvas size or frame rate
+		/// moves its video.
+		fn replace_program(&mut self) {
+			let mut broadcast = self.publication.broadcast().clone();
+			let old = self.catalog.snapshot().audio.renditions;
+			let tone = Tone::new(&mut broadcast, self.catalog.clone());
+			let mut old_tone = std::mem::replace(&mut self.program, tone);
+			old_tone.audio.finish().unwrap();
+			drop(old_tone);
+			self.catalog
+				.mutate(|root| root.audio.renditions.retain(|track, _| !old.contains_key(track)))
+				.unwrap();
 		}
 
 		/// List what each source's own catalog holds, as the studio mirrors it.
@@ -839,6 +869,39 @@ mod tests {
 		let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, [".mp4", " camera.mp4", " camera (2).mp4"]);
 		for ((_, duration), expected) in files.iter().zip([3, 1, 2]) {
+			assert!(about(*duration, Duration::from_secs(expected)), "{files:?}");
+		}
+	}
+
+	/// A program moved onto a new track, as a new canvas moves its video, goes
+	/// on in another file, with or without the sources.
+	#[tokio::test(start_paused = true)]
+	async fn a_replaced_program_goes_on_in_another_file() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		let recorder = studio.recorder(dir.path());
+
+		recorder.start(false).unwrap();
+		studio.play(Duration::from_secs(1)).await;
+		studio.replace_program();
+		studio.play(Duration::from_secs(2)).await;
+		recorder.finish().await;
+
+		let status = recorder.status().unwrap();
+		let files: Vec<_> = status
+			.files
+			.iter()
+			.map(|file| {
+				assert_eq!(file.finished, Some(Finished::Saved), "{}", file.path.display());
+				let name = file.path.file_name().unwrap().to_string_lossy().into_owned();
+				let [(handler, duration)] = tracks(&file.path).try_into().unwrap();
+				assert_eq!(handler, "soun");
+				(name.rsplit_once("Z").unwrap().1.to_string(), duration)
+			})
+			.collect();
+		let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, [".mp4", " (2).mp4"]);
+		for ((_, duration), expected) in files.iter().zip([1, 2]) {
 			assert!(about(*duration, Duration::from_secs(expected)), "{files:?}");
 		}
 	}

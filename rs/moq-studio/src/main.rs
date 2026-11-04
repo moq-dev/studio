@@ -176,9 +176,7 @@ fn main() -> anyhow::Result<()> {
 	let ran = run(app, gpu, runtime.handle().clone(), started.clone());
 	let Some(engine) = started.get() else { return ran };
 	// A recording still running is finished, so it is a regular MP4.
-	if let Ok(recorder) = &engine.recorder {
-		runtime.block_on(recorder.finish());
-	}
+	runtime.block_on(engine.recorder.finish());
 	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
 	if let (Err(err), Err(_)) = (&saved, &ran) {
