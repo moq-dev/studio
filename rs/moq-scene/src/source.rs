@@ -182,11 +182,11 @@ impl Sources {
 	/// replacement never plays over it. Panics on a gain or delay
 	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
-		let mut gone = Vec::new();
+		let mixes = &self.mixes;
 		self.feeds.retain(|name, feed| {
 			let keep = collection.sources.get(name) == Some(&feed.source);
 			if !keep {
-				gone.extend(feed.strip.clone());
+				leave(mixes, feed);
 			}
 			keep
 		});
@@ -195,11 +195,6 @@ impl Sources {
 		for name in &collection.mixes.names {
 			if !self.mixes.contains_key(name) {
 				self.mixes.insert(name.clone(), self.context.bus.mix());
-			}
-		}
-		for strip in &gone {
-			for mix in self.mixes.values() {
-				mix.unroute(strip);
 			}
 		}
 
@@ -237,9 +232,12 @@ impl Sources {
 	}
 
 	/// Stop the source called `name`, so the next [`sync`](Self::sync) starts
-	/// it again, as an edit would, such as to reload a web page.
+	/// it again, as an edit would, such as to reload a web page. It leaves
+	/// every mix at once, as an edited source does.
 	pub fn restart(&mut self, name: &str) {
-		self.feeds.remove(name);
+		if let Some(feed) = self.feeds.remove(name) {
+			leave(&self.mixes, &feed);
+		}
 	}
 
 	/// The running source called `name`.
@@ -265,6 +263,15 @@ impl Sources {
 	/// Every running source, by name.
 	pub fn iter(&self) -> impl Iterator<Item = (&str, &Feed)> {
 		self.feeds.iter().map(|(name, feed)| (name.as_str(), feed))
+	}
+}
+
+/// Take a stopping `feed` out of every one of `mixes`, so it leaves nothing
+/// behind in them, nor plays over a replacement.
+fn leave(mixes: &BTreeMap<String, Mix>, feed: &Feed) {
+	let Some(strip) = &feed.strip else { return };
+	for mix in mixes.values() {
+		mix.unroute(strip);
 	}
 }
 
@@ -1339,6 +1346,17 @@ mod tests {
 			assert!(!sources.plays(program, "red"), "a color is silent");
 			assert!(!sources.plays(program, "nobody"));
 			assert!(!sources.plays("Nothing", "guest"));
+
+			// A restart, such as a page's reload, leaves every mix at once, and
+			// the source comes back in under its new strip.
+			let before = sources.get("guest").unwrap().strip().unwrap().clone();
+			sources.restart("guest");
+			for mix in [program, "Headphones"] {
+				assert!(!sources.mix(mix).unwrap().routes(&before), "{mix} keeps the old strip");
+			}
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			assert!(sources.plays(program, "guest"));
 
 			let left_out = Audio {
 				exclude: [program.to_string()].into(),
