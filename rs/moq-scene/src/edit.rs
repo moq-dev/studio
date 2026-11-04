@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, Canvas, Collection, Filter, Item, Layer, Scene, Source, Transition, Video};
+use crate::collection::{Audio, Canvas, Collection, Filter, Item, Layer, Mixes, Scene, Source, Transition, Video};
 
 /// One part of a collection, before and after an edit.
 ///
@@ -70,6 +70,8 @@ pub enum Change {
 	Transition { before: Transition, after: Transition },
 	/// [`Collection::canvas`].
 	Canvas { before: Canvas, after: Canvas },
+	/// [`Collection::mixes`].
+	Mixes { before: Mixes, after: Mixes },
 }
 
 impl Change {
@@ -115,6 +117,10 @@ impl Change {
 				before: after,
 				after: before,
 			},
+			Self::Mixes { before, after } => Self::Mixes {
+				before: after,
+				after: before,
+			},
 		}
 	}
 
@@ -122,7 +128,11 @@ impl Change {
 	fn entry(&self) -> Option<&str> {
 		match self {
 			Self::Source { name, .. } | Self::Audio { name, .. } | Self::Video { name, .. } => Some(name),
-			Self::Scene { .. } | Self::Item { .. } | Self::Transition { .. } | Self::Canvas { .. } => None,
+			Self::Scene { .. }
+			| Self::Item { .. }
+			| Self::Transition { .. }
+			| Self::Canvas { .. }
+			| Self::Mixes { .. } => None,
 		}
 	}
 
@@ -136,6 +146,7 @@ impl Change {
 			Self::Item { before, after, .. } => before == after,
 			Self::Transition { before, after } => before == after,
 			Self::Canvas { before, after } => before == after,
+			Self::Mixes { before, after } => before == after,
 		}
 	}
 
@@ -164,7 +175,7 @@ impl Change {
 			) if name == *n && after == *b => Self::Audio {
 				name,
 				before,
-				after: *a,
+				after: a.clone(),
 			},
 			(
 				Self::Video { name, before, after },
@@ -221,6 +232,10 @@ impl Change {
 			(Self::Canvas { before, after }, Self::Canvas { before: b, after: a }) if after == *b => {
 				Self::Canvas { before, after: *a }
 			}
+			(Self::Mixes { before, after }, Self::Mixes { before: b, after: a }) if after == *b => Self::Mixes {
+				before,
+				after: a.clone(),
+			},
 			_ => return None,
 		};
 		Some(merged)
@@ -259,6 +274,13 @@ impl Change {
 					return Err(conflict("the canvas changed".into()));
 				}
 				collection.canvas = *after;
+				Ok(())
+			}
+			Self::Mixes { before, after } => {
+				if collection.mixes != *before {
+					return Err(conflict("the mixes changed".into()));
+				}
+				collection.mixes = after.clone();
 				Ok(())
 			}
 		}
@@ -427,9 +449,10 @@ impl Draft {
 		})
 	}
 
-	/// Set or clear the gain and mute of the source called `name`.
+	/// Set or clear the gain, mute, routing, and delay of the source called
+	/// `name`.
 	pub fn set_audio(&mut self, name: &str, audio: Option<Audio>) -> Result<(), Error> {
-		let before = self.collection.audio.get(name).copied();
+		let before = self.collection.audio.get(name).cloned();
 		self.change(Change::Audio {
 			name: name.to_string(),
 			before,
@@ -622,6 +645,59 @@ impl Draft {
 	pub fn set_canvas(&mut self, canvas: Canvas) -> Result<(), Error> {
 		let before = self.collection.canvas;
 		self.change(Change::Canvas { before, after: canvas })
+	}
+
+	/// Set the mixes and which one the program carries, and nothing else: see
+	/// [`rename_mix`](Self::rename_mix) and [`remove_mix`](Self::remove_mix) for
+	/// what refers to a mix.
+	pub fn set_mixes(&mut self, mixes: Mixes) -> Result<(), Error> {
+		let before = self.collection.mixes.clone();
+		self.change(Change::Mixes { before, after: mixes })
+	}
+
+	/// Rename the mix `from` to `to`, keeping its place, its routing, and
+	/// whether the program carries it.
+	pub fn rename_mix(&mut self, from: &str, to: &str) -> Result<(), Error> {
+		self.retarget_mix(from, Some(to))
+	}
+
+	/// Remove the mix `name`, and every source's exclusion from it. The mix the
+	/// program carries cannot be removed.
+	pub fn remove_mix(&mut self, name: &str) -> Result<(), Error> {
+		self.retarget_mix(name, None)
+	}
+
+	/// Rename the mix `from` to `to`, or remove it with `None`, and every
+	/// reference to it.
+	fn retarget_mix(&mut self, from: &str, to: Option<&str>) -> Result<(), Error> {
+		let mut mixes = self.collection.mixes.clone();
+		let index = mixes.names.iter().position(|name| name == from);
+		let index = index.ok_or_else(|| conflict(format!("there is no mix `{from}`")))?;
+		match to {
+			Some(to) => mixes.names[index] = to.to_string(),
+			None => {
+				mixes.names.remove(index);
+			}
+		}
+		if mixes.program == from {
+			mixes.program = to.unwrap_or_default().to_string();
+		}
+		let routed: Vec<(String, Audio)> = self
+			.collection
+			.audio
+			.iter()
+			.filter(|(_, audio)| audio.exclude.contains(from))
+			.map(|(name, audio)| (name.clone(), audio.clone()))
+			.collect();
+		self.set_mixes(mixes)?;
+		for (name, mut audio) in routed {
+			audio.exclude.remove(from);
+			if let Some(to) = to {
+				audio.exclude.insert(to.to_string());
+			}
+			self.set_audio(&name, Some(audio))?;
+		}
+		Ok(())
 	}
 
 	/// The edit, once the collection it leaves is valid. Changes that ended up
@@ -1190,6 +1266,61 @@ mod tests {
 		let mut draft = collection.draft("Resize the canvas");
 		draft.set_canvas(Canvas { width: 1279, ..canvas }).unwrap();
 		assert!(matches!(draft.finish(), Err(Error::Invalid(_))));
+	}
+
+	/// A renamed mix keeps its place, the program's pick, and every source left
+	/// out of it; a removed one takes those exclusions with it and undoes
+	/// whole; and the mix the program carries stays.
+	#[test]
+	fn a_mix_renames_and_removes_with_its_routing() {
+		let mut collection = collection();
+		collection.sources.insert(
+			"guest".into(),
+			Source::Broadcast {
+				path: "room/guest".into(),
+			},
+		);
+		collection.mixes = Mixes {
+			names: vec!["Program".into(), "Stream".into()],
+			program: "Stream".into(),
+		};
+		let left_out = Audio {
+			exclude: ["Stream".to_string()].into(),
+			..Audio::default()
+		};
+		collection.audio.insert("guest".into(), left_out);
+		collection.validate().unwrap();
+		let start = collection.clone();
+		let mut history = History::new();
+
+		let mut draft = collection.draft("Rename mix");
+		draft.rename_mix("Stream", "Live").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.mixes.names, ["Program", "Live"]);
+		assert_eq!(collection.mixes.program, "Live");
+		assert_eq!(collection.audio["guest"].exclude, ["Live".to_string()].into());
+
+		let mut draft = collection.draft("Remove mix");
+		draft.remove_mix("Live").unwrap();
+		assert!(
+			matches!(draft.finish(), Err(Error::Invalid(_))),
+			"the program carries it"
+		);
+
+		let mut draft = collection.draft("Pick mix");
+		let mixes = Mixes {
+			program: "Program".into(),
+			..collection.mixes.clone()
+		};
+		draft.set_mixes(mixes).unwrap();
+		draft.remove_mix("Live").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.mixes, Mixes::default());
+		assert!(collection.audio["guest"].exclude.is_empty());
+
+		history.undo(&mut collection).unwrap();
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, start);
 	}
 
 	#[test]

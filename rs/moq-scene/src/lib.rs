@@ -41,7 +41,8 @@ pub mod source;
 
 pub use clip::Clip;
 pub use collection::{
-	Audio, Blend, Canvas, Collection, Crop, Filter, Item, Layer, MaskMode, Rect, Rgba, Scene, Source, Transition, Video,
+	Audio, Blend, Canvas, Collection, Crop, Filter, Item, Layer, MaskMode, Mixes, Rect, Rgba, Scene, Source,
+	Transition, Video,
 };
 pub use compositor::{Compositor, FORMAT};
 pub use edit::{Change, Draft, Edit, History};

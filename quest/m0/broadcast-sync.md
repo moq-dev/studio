@@ -12,7 +12,8 @@ can leave audio and video apart.
 Decided 2026-10-26 (maintainer):
 
 - **Scope:** broadcast sources only. Local devices keep the manual
-  per-source offsets in [Audio mixes](/quest/m0/mixes.md).
+  per-source `delay`, which [Clap-to-measure](/quest/m0/sync-clap.md) sets
+  from a clap.
 - **Delay:** reuse `moq play`'s timing, the `--delay auto` target from
   moq-audio's jitter estimate (`rs/moq-audio/src/jitter.rs`,
   `doc/concept/audio-jitter.md`), rather than a second algorithm or a manual

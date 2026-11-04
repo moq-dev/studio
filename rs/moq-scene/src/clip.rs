@@ -1,13 +1,13 @@
 //! Items and filters copied as text, to paste into another scene or another
 //! collection.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, Collection, Filter, Item, Layer, Source, Video, validate_filters, versioned};
+use crate::collection::{Audio, Collection, Filter, Item, Layer, Mixes, Source, Video, validate_filters, versioned};
 use crate::edit::Draft;
 
 /// What a copy holds: items, or a filter chain.
@@ -77,7 +77,7 @@ impl Clip {
 			clip.sources.insert(name.clone(), source);
 			names.push(collection.capture(&name).to_string());
 			if let Some(audio) = collection.audio.get(&name) {
-				clip.audio.insert(name.clone(), *audio);
+				clip.audio.insert(name.clone(), audio.clone());
 			}
 			if let Some(video) = collection.video.get(&name) {
 				names.extend(video.filters.iter().filter_map(read));
@@ -99,16 +99,26 @@ impl Clip {
 		let clip = Self::deserialize(table).map_err(|err| Error::Format(err.to_string()))?;
 		match &clip {
 			// The rules a collection holding just the clip would break, such as
-			// an item showing a source the clip lacks.
-			Self::Items(items) => Collection {
-				sources: items.sources.clone(),
-				audio: items.audio.clone(),
-				video: items.video.clone(),
-				scenes: Vec::new(),
-				top: items.items.clone(),
-				..Collection::new()
+			// an item showing a source the clip lacks. It has whatever mixes the
+			// clip's sources are left out of, which pasting checks.
+			Self::Items(items) => {
+				let excluded = items.audio.values().flat_map(|audio| &audio.exclude);
+				let mut names: BTreeSet<String> = excluded.cloned().collect();
+				names.insert(Mixes::DEFAULT.into());
+				Collection {
+					sources: items.sources.clone(),
+					mixes: Mixes {
+						names: names.into_iter().collect(),
+						program: Mixes::DEFAULT.into(),
+					},
+					audio: items.audio.clone(),
+					video: items.video.clone(),
+					scenes: Vec::new(),
+					top: items.items.clone(),
+					..Collection::new()
+				}
+				.validate()?
 			}
-			.validate()?,
 			Self::Filters(filters) => validate_filters(&filters.filters, "the copied filters")?,
 		}
 		Ok(clip)
@@ -138,7 +148,8 @@ impl Draft {
 	/// one shown, so items pasted within a collection are linked to the ones
 	/// copied. A source whose name is taken by a different one is added under
 	/// a new name, which clones and filters naming it follow, and an added
-	/// source brings its audio and video settings. An image or LUT under `dir`
+	/// source brings its audio and video settings, left out of only the mixes
+	/// both collections have. An image or LUT under `dir`
 	/// is named relative to it, as the scene file would.
 	pub fn paste(&mut self, layer: &Layer, items: &Items, dir: &Path) -> Result<(), Error> {
 		let mut names = BTreeMap::new();
@@ -190,7 +201,11 @@ impl Draft {
 		};
 		for (name, renamed) in added {
 			if let Some(audio) = items.audio.get(name) {
-				self.set_audio(&renamed, Some(*audio))?;
+				// Left out only of the mixes this collection has too.
+				let mut audio = audio.clone();
+				let mixes = &self.collection().mixes.names;
+				audio.exclude.retain(|mix| mixes.contains(mix));
+				self.set_audio(&renamed, Some(audio))?;
 			}
 			if let Some(video) = items.video.get(name) {
 				let filters = rename(&video.filters);
@@ -295,6 +310,40 @@ mod tests {
 		assert_eq!(pasted.sources["cam faded"], Source::Clone { source: "cam 2".into() });
 		assert_eq!(pasted.video["cam faded"], source.video["cam faded"]);
 		assert_eq!(pasted.scenes[0].items, source.scenes[0].items);
+	}
+
+	/// A pasted source keeps its sound's settings, left out of only the mixes
+	/// the collection it lands in has.
+	#[test]
+	fn pastes_audio_into_the_mixes_there() {
+		let mut source = Collection::new();
+		source.mixes.names.push("Stream".into());
+		source.sources.insert(
+			"guest".into(),
+			Source::Broadcast {
+				path: "room/guest".into(),
+			},
+		);
+		let audio = crate::Audio {
+			gain: 0.5,
+			exclude: ["Program".to_string(), "Stream".to_string()].into(),
+			..Default::default()
+		};
+		source.audio.insert("guest".into(), audio.clone());
+		source.scenes[0]
+			.items
+			.push(Item::new("guest", Rect::fill(&source.canvas)));
+		source.validate().unwrap();
+		let text = Clip::items(&source, source.scenes[0].items.clone(), Path::new(DIR))
+			.to_toml()
+			.unwrap();
+
+		let pasted = paste(&Collection::new(), &Layer::Top, &text, DIR);
+		let expected = crate::Audio {
+			exclude: ["Program".to_string()].into(),
+			..audio
+		};
+		assert_eq!(pasted.audio["guest"], expected);
 	}
 
 	/// A relative image path names the same file wherever the clip is pasted,

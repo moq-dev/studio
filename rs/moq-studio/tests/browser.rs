@@ -61,7 +61,6 @@ impl Studio {
 		tokio::spawn(moq_net::time::run(driver));
 		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
 		let mut sources = Sources::new(Context {
-			program: bus.mix(),
 			bus,
 			origin: origin.consume(),
 			dir: dir.path().to_path_buf(),

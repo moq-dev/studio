@@ -19,7 +19,7 @@ with the guest count, so bound it by design (the guest roster is already
 bounded to guests the studio signed for). Raised on
 [#10](https://github.com/moq-dev/studio/pull/10).
 
-## Required
-
-- [Audio mixes](/quest/m0/mixes.md) - the per-output mixes a mix-minus is
-  built from
+Audio mixes landed in [#32](https://github.com/moq-dev/studio/pull/32): build
+each guest's feed with moq-audio's `bus::Mix::minus` from the mix on program
+(`Sources::mix`), taking the guest's own strip out, which costs one
+subtraction per block rather than a mix per guest.

@@ -109,10 +109,9 @@ pub enum Status {
 /// What every source shares.
 #[derive(Clone)]
 pub struct Context {
-	/// Where microphones, system audio, and broadcasts feed their sound.
+	/// Where microphones, system audio, and broadcasts feed their sound, and
+	/// where the collection's mixes are made.
 	pub bus: Bus,
-	/// The program audio: every running source with sound is routed into it.
-	pub program: Mix,
 	/// Where broadcast sources are announced: the studio's relay connection.
 	pub origin: moq_net::origin::Consumer,
 	/// What a relative image or LUT path is relative to: the scene file's directory.
@@ -126,18 +125,20 @@ pub struct Context {
 	pub publish: Option<Publish>,
 }
 
-/// The running sources of a collection.
+/// The running sources of a collection, and its mixes.
 pub struct Sources {
 	context: Context,
 	feeds: BTreeMap<String, Feed>,
+	mixes: BTreeMap<String, Mix>,
 }
 
 impl Sources {
-	/// No sources running yet; [`sync`](Self::sync) starts them.
+	/// No sources or mixes yet; [`sync`](Self::sync) starts them.
 	pub fn new(context: Context) -> Self {
 		Self {
 			context,
 			feeds: BTreeMap::new(),
+			mixes: BTreeMap::new(),
 		}
 	}
 
@@ -146,17 +147,37 @@ impl Sources {
 		&self.context
 	}
 
-	/// Run exactly the sources `collection` has: start new and edited ones and
-	/// stop removed and edited ones. A clone shares the feed of the source it
-	/// clones rather than opening one. Returns a driver for each source started,
-	/// which does nothing until run.
+	/// Run exactly the sources and mixes `collection` has: start new and edited
+	/// sources and stop removed and edited ones. A clone shares the feed of the
+	/// source it clones rather than opening one. Returns a driver for each
+	/// source started, which does nothing until run.
 	///
-	/// Also applies the collection's gain and mute to every audio strip, and its
-	/// frame rate to every web page, which never restarts a source. Panics on a
-	/// gain [`Collection::validate`] refuses.
+	/// Also applies the collection's gain, mute, delay, and routing to every
+	/// audio strip, and its frame rate to every web page, which never restarts
+	/// a source. A removed or edited source leaves every mix at once, so its
+	/// replacement never plays over it. Panics on a gain or delay
+	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
-		self.feeds
-			.retain(|name, feed| collection.sources.get(name) == Some(&feed.source));
+		let mut gone = Vec::new();
+		self.feeds.retain(|name, feed| {
+			let keep = collection.sources.get(name) == Some(&feed.source);
+			if !keep {
+				gone.extend(feed.strip.clone());
+			}
+			keep
+		});
+		// A mix ends once its last handle drops, which may be a reader's.
+		self.mixes.retain(|name, _| collection.mixes.names.contains(name));
+		for name in &collection.mixes.names {
+			if !self.mixes.contains_key(name) {
+				self.mixes.insert(name.clone(), self.context.bus.mix());
+			}
+		}
+		for strip in &gone {
+			for mix in self.mixes.values() {
+				mix.unroute(strip);
+			}
+		}
 
 		let mut drivers = Vec::new();
 		for (name, source) in collection.sources.iter().filter(|(_, source)| source.opens()) {
@@ -171,9 +192,21 @@ impl Sources {
 			}
 
 			if let Some(strip) = self.feeds[name].strip() {
-				let audio = collection.audio.get(name).copied().unwrap_or_default();
+				let audio = collection.audio.get(name).cloned().unwrap_or_default();
 				strip.set_gain(audio.gain);
 				strip.set_muted(audio.muted);
+				strip.set_delay(audio.delay);
+				for (mix_name, mix) in &self.mixes {
+					let routed = !audio.exclude.contains(mix_name);
+					if mix.routes(strip) == routed {
+						continue;
+					}
+					if routed {
+						mix.route(strip);
+					} else {
+						mix.unroute(strip);
+					}
+				}
 			}
 		}
 		drivers
@@ -182,6 +215,11 @@ impl Sources {
 	/// The running source called `name`.
 	pub fn get(&self, name: &str) -> Option<&Feed> {
 		self.feeds.get(name)
+	}
+
+	/// The mix called `name`, as the collection last synced had it.
+	pub fn mix(&self, name: &str) -> Option<&Mix> {
+		self.mixes.get(name)
 	}
 
 	/// Every running source, by name.
@@ -278,7 +316,7 @@ impl Feed {
 		(since >= STALL).then_some(since)
 	}
 
-	/// The source's gain, mute, and meter in the program audio, if it has sound.
+	/// The source's gain, mute, delay, and meter in every mix, if it has sound.
 	pub fn strip(&self) -> Option<&Strip> {
 		self.strip.as_ref()
 	}
@@ -321,16 +359,6 @@ struct Track {
 	publish: Publish,
 	claim: Claim,
 	status: kio::Producer<Status>,
-}
-
-/// Takes the source out of the program, which [`open`] routed it into, so a
-/// removed or edited source leaves nothing behind in the mix.
-impl Drop for Driver {
-	fn drop(&mut self) {
-		if let Some(strip) = &self.strip {
-			self.context.program.unroute(strip);
-		}
-	}
 }
 
 impl Driver {
@@ -914,9 +942,6 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 	let picture = Mailbox::default();
 	let shown = Shown::default();
 	let strip = source.has_audio().then(Strip::default);
-	if let Some(strip) = &strip {
-		context.program.route(strip);
-	}
 	let status = kio::Producer::new(Status::Starting);
 	let page = matches!(source, Source::Browser { .. }).then(Page::default);
 	// Claimed here, in the order sources open, so an edited source's
@@ -1044,7 +1069,6 @@ pub(crate) mod test {
 		tokio::task::spawn_local(moq_net::time::run(driver));
 		let (bus, _) = Bus::new(Default::default()).unwrap();
 		let context = Context {
-			program: bus.mix(),
 			bus,
 			origin: origin.consume(),
 			dir: dir.to_path_buf(),
@@ -1227,8 +1251,9 @@ mod tests {
 	}
 
 	/// Editing a source restarts it, removing one stops it, and an untouched one
-	/// keeps running. Gain changes reach the strip without restarting anything,
-	/// and a source plays in the program until it is removed.
+	/// keeps running. Gain, delay, and routing changes reach the strip without
+	/// restarting anything, and a source plays in every mix it is not left out
+	/// of until it is removed.
 	#[tokio::test]
 	async fn sync_restarts_only_what_changed() {
 		local(async {
@@ -1239,19 +1264,34 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			let guest = sources.get("guest").unwrap().strip().unwrap().clone();
-			let program = sources.context().program.clone();
+			let program = sources.mix(crate::Mixes::DEFAULT).unwrap().clone();
 			assert!(program.routes(&guest));
 
+			collection.mixes.names.push("Stream".into());
 			collection.audio.insert(
 				"guest".into(),
 				Audio {
 					gain: 0.25,
 					muted: true,
+					exclude: ["Stream".to_string()].into(),
+					delay: Duration::from_millis(120),
 				},
 			);
 			assert!(sources.sync(&collection).is_empty());
 			assert_eq!(guest.gain(), 0.25);
 			assert!(guest.muted());
+			assert_eq!(guest.delay(), Duration::from_millis(120));
+			let stream = sources.mix("Stream").unwrap().clone();
+			assert!(program.routes(&guest));
+			assert!(!stream.routes(&guest), "left out of the new mix");
+
+			collection.audio.get_mut("guest").unwrap().exclude.clear();
+			assert!(sources.sync(&collection).is_empty());
+			assert!(stream.routes(&guest), "put back in");
+
+			collection.mixes.names.retain(|name| name != "Stream");
+			assert!(sources.sync(&collection).is_empty());
+			assert!(sources.mix("Stream").is_none());
 
 			collection.sources.insert(
 				"red".into(),
@@ -1273,13 +1313,7 @@ mod tests {
 
 			collection.sources.remove("guest");
 			assert!(sources.sync(&collection).is_empty());
-			for _ in 0..1000 {
-				if !program.routes(&guest) {
-					return;
-				}
-				tokio::task::yield_now().await;
-			}
-			panic!("a removed source stays in the program");
+			assert!(!program.routes(&guest), "a removed source leaves at once");
 		})
 		.await;
 	}
