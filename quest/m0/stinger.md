@@ -11,9 +11,6 @@ Split from [Keyframes](/quest/m0/animation.md) on 2026-11-04 (maintainer). A
 stinger is a transition kind beside fade, slide, wipe, and move
 ([moq-dev/studio#33](https://github.com/moq-dev/studio/pull/33)), drawn on the
 program clock, whose clip is a media file source. It must start its clip as
-the transition starts, or its cut point lands at random. Its settings (clip
-and cut point) change through `Edit`, so they undo.
-
-## Required
-
-- [Media file source](/quest/m0/media-file.md) - a clip that starts on demand
+the transition starts, or its cut point lands at random: `Feed::play` in
+`rs/moq-scene/src/source.rs` starts a media source from its start at once.
+Its settings (clip and cut point) change through `Edit`, so they undo.

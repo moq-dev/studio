@@ -1014,6 +1014,20 @@ pub enum Source {
 		/// The file, relative to the scene file's directory unless absolute.
 		path: PathBuf,
 	},
+	/// A video or audio file, such as an intro clip or a music bed, played on
+	/// the program clock from its start, and again whenever
+	/// [`Feed::play`](crate::source::Feed::play) asks.
+	Media {
+		/// The file, relative to the scene file's directory unless absolute.
+		path: PathBuf,
+		/// Whether it starts over at its end, rather than holding its last
+		/// picture and going silent.
+		#[serde(default, rename = "loop", skip_serializing_if = "std::ops::Not::not")]
+		looping: bool,
+		/// Whether it plays from its start each time it goes on program.
+		#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+		restart: bool,
+	},
 	/// A solid color.
 	Color {
 		/// The color, as `#rrggbb` or `#rrggbbaa`.
@@ -1074,10 +1088,10 @@ impl Source {
 		!matches!(self, Self::Microphone { .. } | Self::SystemAudio | Self::Lut { .. })
 	}
 
-	/// The file an image or LUT source reads.
+	/// The file an image, media, or LUT source reads.
 	pub(crate) fn path(&self) -> Option<&std::path::Path> {
 		match self {
-			Self::Image { path } | Self::Lut { path } => Some(path),
+			Self::Image { path } | Self::Media { path, .. } | Self::Lut { path } => Some(path),
 			_ => None,
 		}
 	}
@@ -1085,7 +1099,7 @@ impl Source {
 	/// The file the source reads, to resolve or relativize it.
 	pub(crate) fn path_mut(&mut self) -> Option<&mut PathBuf> {
 		match self {
-			Self::Image { path } | Self::Lut { path } => Some(path),
+			Self::Image { path } | Self::Media { path, .. } | Self::Lut { path } => Some(path),
 			_ => None,
 		}
 	}
@@ -1100,7 +1114,12 @@ impl Source {
 	pub fn has_audio(&self) -> bool {
 		matches!(
 			self,
-			Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. } | Self::Browser { .. } | Self::Replay
+			Self::Microphone { .. }
+				| Self::SystemAudio
+				| Self::Media { .. }
+				| Self::Broadcast { .. }
+				| Self::Browser { .. }
+				| Self::Replay
 		)
 	}
 
@@ -1266,6 +1285,14 @@ mod tests {
 			"guest".into(),
 			Source::Broadcast {
 				path: "studio/guest".into(),
+			},
+		);
+		collection.sources.insert(
+			"intro".into(),
+			Source::Media {
+				path: "intro.mkv".into(),
+				looping: false,
+				restart: true,
 			},
 		);
 		collection.sources.insert(
@@ -1561,7 +1588,16 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		collection.validate().unwrap();
 		collection.top.push(Item::new("grade", Rect::fill(&collection.canvas)));
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
-		for source in [Source::Lut { path: "".into() }, Source::Image { path: "".into() }] {
+		let media = Source::Media {
+			path: "".into(),
+			looping: true,
+			restart: false,
+		};
+		for source in [
+			Source::Lut { path: "".into() },
+			Source::Image { path: "".into() },
+			media,
+		] {
 			let mut collection = example();
 			collection.sources.insert("blank".into(), source.clone());
 			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{source:?}");

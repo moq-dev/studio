@@ -94,7 +94,6 @@ repository.
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Keyframes](/quest/m0/animation.md) - keyframed item properties with easing, starting when their scene goes on program
-- [Media file source](/quest/m0/media-file.md) - a local video or audio file plays as a source, looping or from the start on demand
 - [Stinger transitions](/quest/m0/stinger.md) - a clip played over the program that switches scenes at its cut point
 - [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse

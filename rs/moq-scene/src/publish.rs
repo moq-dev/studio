@@ -1188,4 +1188,72 @@ mod tests {
 		})
 		.await;
 	}
+
+	/// A media source on program encodes its pictures onto its own track as
+	/// they show, on one timeline when it plays again from its start.
+	#[tokio::test(start_paused = true)]
+	async fn a_media_file_is_published_on_one_timeline() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("clip.mkv"), crate::media::tests::CLIP).unwrap();
+			let (publish, catalog, consumer) = studio();
+			publish.show(["clip".to_string()].into());
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish);
+			let mut collection = Collection::new();
+			let clip = Source::Media {
+				path: "clip.mkv".into(),
+				looping: false,
+				restart: false,
+			};
+			collection.sources.insert("clip".into(), clip);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			// The first picture is due at once, so the clock stays put while
+			// the encoder opens.
+			let listed = until(|| {
+				let listed = catalog.snapshot().ext.studio.sources.remove("clip");
+				listed.filter(|listed| !listed.video.renditions.is_empty())
+			})
+			.await;
+			let feed = sources.get("clip").unwrap();
+			assert_eq!(feed.track(), Some(Status::Live));
+			let (name, config) = listed.video.renditions.iter().next().unwrap();
+			let track = consumer
+				.track(hang::catalog::Reference::track(config, name))
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None)),
+				)
+				.await
+				.unwrap();
+			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
+			let mut track = moq_mux::container::Consumer::new(track, container);
+
+			// Half way, it starts over.
+			let begin = kio::clock::now();
+			until_time(begin + std::time::Duration::from_millis(450)).await;
+			feed.play().unwrap();
+			until_time(begin + std::time::Duration::from_millis(900)).await;
+			let now = kio::Waiter::noop();
+			let mut stamps = Vec::new();
+			until(|| {
+				while let std::task::Poll::Ready(read) = track.poll_read(&now) {
+					if let moq_mux::container::Read::Frame { frame, .. } = read.unwrap().expect("open") {
+						stamps.push(frame.timestamp);
+					}
+				}
+				// Five pictures of each play.
+				(stamps.len() >= 10).then_some(())
+			})
+			.await;
+			assert!(
+				stamps.is_sorted() && stamps.windows(2).all(|pair| pair[0] < pair[1]),
+				"{stamps:?}"
+			);
+		})
+		.await;
+	}
 }

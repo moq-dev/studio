@@ -21,7 +21,7 @@
 //!   edits to them settle, and takes or holds an outside edit to the scene file.
 //! - The UI runs on the main thread and edits [`State`] under its lock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -32,7 +32,7 @@ use bytes::Bytes;
 use kio::clock::Instant;
 use moq_net::bandwidth;
 use moq_scene::publish::{Encoding, Sessions};
-use moq_scene::source::{self, Driver, Sources};
+use moq_scene::source::{self, Driver, Sources, Status};
 use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
 
@@ -199,6 +199,20 @@ impl State {
 		self.compositor.retain(&collection);
 		self.collection = collection;
 		Ok(())
+	}
+
+	/// The sources the program shows: in a scene on air, including one
+	/// leaving in a transition, or the top layer over them, a clone by the
+	/// source it shows.
+	fn shown(&self) -> BTreeSet<String> {
+		let collection = &self.collection;
+		let scenes = self.compositor.on_air().filter_map(|scene| collection.scene(scene));
+		scenes
+			.flat_map(|scene| &scene.items)
+			.chain(&collection.top)
+			.filter(|item| item.visible)
+			.map(|item| collection.capture(&item.source).to_string())
+			.collect()
 	}
 
 	/// Restart the source called `name`, as an edit would, such as to reload a
@@ -506,17 +520,9 @@ impl Program {
 		}
 	}
 
-	/// Encode the local sources the program shows, from `state`, whether or
-	/// not anything reads their tracks, so a replay of one has its past.
-	fn show(&self, state: &State) {
-		let collection = &state.collection;
-		let scenes = state.compositor.on_air().filter_map(|scene| collection.scene(scene));
-		let shown = scenes
-			.flat_map(|scene| &scene.items)
-			.chain(&collection.top)
-			.filter(|item| item.visible)
-			.map(|item| collection.capture(&item.source).to_string())
-			.collect();
+	/// Encode the local sources the program shows, `shown`, whether or not
+	/// anything reads their tracks, so a replay of one has its past.
+	fn show(&self, shown: BTreeSet<String>) {
 		self.sources.show(shown);
 	}
 }
@@ -844,30 +850,33 @@ impl Engine {
 		// A stalled picture matters where the program draws it: a scene on air,
 		// including one leaving in a transition, or the top layer over them.
 		// Stalled sound matters only if the mix on program plays it, not one
-		// only listened to.
-		let stalled = {
+		// only listened to. A source that stopped matters either way.
+		let (stalled, stopped) = {
 			let state = self.state.lock().unwrap();
-			let shown: Vec<&str> = state
-				.compositor
-				.on_air()
-				.filter_map(|name| state.collection.scene(name))
-				.flat_map(|scene| &scene.items)
-				.chain(&state.collection.top)
-				.filter(|item| item.visible)
-				.map(|item| state.collection.capture(&item.source))
-				.collect();
-			state
+			let shown = state.shown();
+			let heard = |name: &str| state.sources.plays(&state.collection.mixes.program, name);
+			let stalled = state
 				.sources
 				.iter()
 				.filter_map(|(name, feed)| {
 					let stall = feed.stalled(now)?;
 					let matters = match stall {
-						source::Stall::Picture(_) => shown.contains(&name),
-						source::Stall::Sound(_) => state.sources.plays(&state.collection.mixes.program, name),
+						source::Stall::Picture(_) => shown.contains(name),
+						source::Stall::Sound(_) => heard(name),
 					};
 					matters.then(|| (name.to_string(), stall))
 				})
-				.collect()
+				.collect();
+			let stopped = state
+				.sources
+				.iter()
+				.filter(|(name, _)| shown.contains(*name) || heard(name))
+				.filter_map(|(name, feed)| match feed.status() {
+					status @ (Status::Ended | Status::Failed(_)) => Some((name.to_string(), status)),
+					_ => None,
+				})
+				.collect();
+			(stalled, stopped)
 		};
 		let canvas = &stats.renditions[0];
 		health::Local {
@@ -880,6 +889,7 @@ impl Engine {
 			encoder: stats.encoder(),
 			failed: stats.error(),
 			stalled,
+			stopped,
 		}
 	}
 
@@ -942,7 +952,9 @@ impl Engine {
 					tracing::error!(%err, "cannot draw the canvas");
 					continue;
 				}
-				self.program.show(state);
+				let shown = state.shown();
+				state.sources.set_on_program(&shown);
+				self.program.show(shown);
 				(state.compositor.program().clone(), state.compositor.canvas())
 			};
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
