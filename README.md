@@ -115,7 +115,7 @@ logo or a lower third.
 | Fade | The incoming scene fades in over the outgoing one, at an even pace. |
 | Slide | The incoming scene pushes the outgoing one off the canvas, both moving left, right, up, or down. |
 | Wipe | An edge sweeps across the canvas left, right, up, or down, uncovering the incoming scene behind it. |
-| Move | Each item showing a source both scenes place glides from its place in the outgoing scene to its place in the incoming one, resizing and recropping on the way. The rest of the outgoing scene fades out under the incoming one, and the rest of the incoming scene fades in. A source placed more than once pairs up in order, back to front. |
+| Move | Each item showing a source both scenes place glides from its place in the outgoing scene to its place in the incoming one, resizing and recropping on the way. The rest of the outgoing scene fades out, staying over what it was over, and the rest of the incoming scene fades in. A source placed more than once pairs up in order, back to front. |
 
 All but a fade ease in and out. A transition is drawn on the program clock, so
 the stream and a recording show the same frames of it, and a second

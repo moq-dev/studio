@@ -533,9 +533,9 @@ impl Draw<'_> {
 	///
 	/// Each visible item of `to` is paired with the first visible item of
 	/// `from` showing the same source that no earlier one took, and glides
-	/// from its pose to its own. The rest of `from` fades out under all of
-	/// `to`, and the rest of `to` fades in where it is placed, so the move
-	/// lands on `to` drawn as it is.
+	/// from its pose to its own. The rest of `to` fades in where it is placed,
+	/// and the rest of `from` fades out just over the paired item it was over,
+	/// so the move starts from `from` and lands on `to` as each is drawn.
 	fn moving(&mut self, target: &Target, from: Option<&str>, to: Option<&str>, progress: f32) {
 		let collection = self.collection;
 		let items = |scene: Option<&str>| {
@@ -544,45 +544,54 @@ impl Draw<'_> {
 		};
 		let leaving = items(from);
 
+		// The item of `from` each visible item of `to` glides from.
 		let mut paired = vec![false; leaving.len()];
 		let mut moves = Vec::new();
 		for (index, item) in items(to).iter().enumerate().filter(|(_, item)| item.visible) {
-			let own = Pose::of(collection, item);
 			let pair =
 				(0..leaving.len()).find(|&at| !paired[at] && leaving[at].visible && leaving[at].source == item.source);
-			let start = match pair {
-				Some(at) => {
-					paired[at] = true;
-					Pose::of(collection, &leaving[at])
-				}
-				None => Pose { opacity: 0.0, ..own },
-			};
-			moves.push((index, item, start.toward(&own, progress), own));
+			if let Some(at) = pair {
+				paired[at] = true;
+			}
+			moves.push((index, item, pair));
 		}
 
-		for (item, _) in leaving
-			.iter()
-			.zip(&paired)
-			.filter(|(item, paired)| item.visible && !**paired)
-		{
-			let pose = Pose::of(collection, item);
-			self.posed(
-				target,
-				item,
-				Pose {
-					opacity: 1.0 - progress,
-					..pose
-				},
-			);
+		// Each unpaired item of `from` fading out, after the paired item it
+		// was over, or before everything when it was under them all.
+		let mut over: HashMap<Option<usize>, Vec<&Item>> = HashMap::new();
+		let mut under = None;
+		for (at, item) in leaving.iter().enumerate().filter(|(_, item)| item.visible) {
+			if paired[at] {
+				under = Some(at);
+			} else {
+				over.entry(under).or_default().push(item);
+			}
 		}
-		let Some(to) = to else { return };
-		let place = Place::Scene(to.to_string());
-		for (index, item, pose, own) in moves {
+		let mut fade = |draw: &mut Self, under: Option<usize>| {
+			for item in over.remove(&under).unwrap_or_default() {
+				let pose = Pose::of(collection, item);
+				let opacity = 1.0 - progress;
+				draw.posed(target, item, Pose { opacity, ..pose });
+			}
+		};
+
+		fade(self, None);
+		let place = Place::Scene(to.unwrap_or_default().to_string());
+		for (index, item, pair) in moves {
+			let own = Pose::of(collection, item);
+			let start = match pair {
+				Some(at) => Pose::of(collection, &leaving[at]),
+				None => Pose { opacity: 0.0, ..own },
+			};
+			let pose = start.toward(&own, progress);
 			if pose == own {
 				// Shared with the preview, which draws it the same.
 				self.item(target, &place, index, item);
 			} else {
 				self.posed(target, item, pose);
+			}
+			if pair.is_some() {
+				fade(self, pair);
 			}
 		}
 	}
@@ -1073,8 +1082,9 @@ mod tests {
 	}
 
 	/// A move glides an item both scenes place from one place to the other,
-	/// fades out what only the outgoing scene places, and fades in what only
-	/// the incoming one does, landing on the incoming scene as drawn.
+	/// fades out what only the outgoing scene places, still over what it was
+	/// over, and fades in what only the incoming one does, landing on the
+	/// incoming scene as drawn.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn a_move_glides_what_both_scenes_place() {
@@ -1092,6 +1102,16 @@ mod tests {
 				width: 2.0,
 				height: 2.0,
 			};
+			collection
+				.sources
+				.insert("white".into(), Source::Color { color: Rgba([255; 4]) });
+			let badge = Rect {
+				x: 4.0,
+				y: 2.0,
+				width: 2.0,
+				height: 2.0,
+			};
+			collection.scenes[0].items.push(Item::new("white", badge));
 			collection.scenes[1].items = vec![Item::new("blue", CORNER), Item::new("green", tile)];
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
@@ -1106,6 +1126,8 @@ mod tests {
 			let program = studio.program();
 			assert_eq!(pixel(&program, 3, 3), BLUE, "blue in between");
 			assert_eq!(pixel(&program, 5, 4), BLUE);
+			let actual = pixel(&program, 5, 3);
+			assert!(near(actual, [128, 128, 255, 255]), "white half over blue: {actual:?}");
 			let actual = pixel(&program, 1, 6);
 			assert!(near(actual, [128, 0, 0, 255]), "red half gone: {actual:?}");
 			let actual = pixel(&program, 7, 0);
