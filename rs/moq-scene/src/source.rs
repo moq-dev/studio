@@ -1050,9 +1050,9 @@ impl Driver {
 		listing: Option<&Listing<'_>>,
 	) -> Result<(), Error> {
 		let clip = Clip::open(path)?;
-		// A closed channel drops what it has not played yet, so a loop keeps
-		// its channel, sounding on, while a restart takes a new one, cutting
-		// off what the play it cut off still had queued.
+		// The last channel on a strip to close drops what it has not played
+		// yet, so a loop keeps its channel, sounding on, while a restart takes
+		// a new one, cutting off what the play it cut off still had queued.
 		let channel = || match (&clip.audio, &self.strip) {
 			(Some(_), Some(strip)) => self.channel(strip.clone()).map(Some),
 			_ => Ok(None),
@@ -1074,6 +1074,9 @@ impl Driver {
 				}
 			};
 			if restarted {
+				// Dropped first: a channel left on the strip keeps the strip's
+				// queue, delay included, for the new one.
+				drop(sound.take());
 				sound = channel()?;
 				continue;
 			}
