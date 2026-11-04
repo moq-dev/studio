@@ -25,9 +25,13 @@ as video bakes in its ML effects, and the levels stay the program's.
 
 Changed 2026-11-03 (maintainer, on
 [moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)): a source's
-own track encodes only while something in the studio uses it (an isolated
-recording, a replay), and reaches the relay only when the creator publishes
-the source independently ([Published independently](/quest/m0/publish-independently.md)).
+own track encodes only while something in the studio uses it, and reaches
+the relay only when the creator publishes the source independently
+([Published independently](/quest/m0/publish-independently.md)). A source
+visible in the program scene counts as used (decided 2026-11-04, maintainer),
+so a replay finds its past from when it appeared; one not on program encodes
+only while an isolated recording or a running replay reads it, and replaying a
+source with no history is refused with the reason.
 This replaces the earlier always-on decision (2026-11-01, on
 [moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)), because
 encoding every source costs encoder sessions a consumer machine does not

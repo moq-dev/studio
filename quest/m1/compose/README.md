@@ -50,8 +50,11 @@ are not published to the relay by default: a source's own track encodes only
 while something in the studio uses it, such as an isolated recording or a
 replay, and reaches viewers only when the creator ticks
 [Published independently](/quest/m0/publish-independently.md). The Delivery
-and Cost bullets above stand only for sources published that way; replan them
-when this epic starts.
+and Cost bullets above, and this epic's parity goal, are deferred with it: a
+source published independently is left out of the program, so no picture a
+viewer composes from fetchable tracks matches the program today. When this
+epic starts, define the reference picture (such as the program with the
+independent sources layered over it) and replan those bullets.
 
 ## Required
 
