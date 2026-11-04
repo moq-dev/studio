@@ -106,6 +106,16 @@ impl State {
 		Ok(())
 	}
 
+	/// Apply `draft`, a change the user did not make, such as a guest joining,
+	/// without recording it: it is not undone, and drops nothing that could be
+	/// redone. See [`History::apply_outside`] for what it may change.
+	pub fn apply_outside(&mut self, draft: Draft) -> anyhow::Result<()> {
+		let edit = draft.finish()?;
+		self.history.apply_outside(&mut self.collection, &edit)?;
+		self.edited();
+		Ok(())
+	}
+
 	/// Undo the newest edit, returning its label, or `None` with none left.
 	pub fn undo(&mut self) -> anyhow::Result<Option<String>> {
 		let Some(position) = self.history.position().checked_sub(1) else {
@@ -327,6 +337,8 @@ pub struct Engine {
 	pub bus: moq_audio::bus::Bus,
 	/// `None` when running without a relay.
 	pub output: Option<Output>,
+	/// The room guests join, when configured.
+	pub room: Option<Arc<crate::guests::Room>>,
 	/// Keeps broadcast sources' origin open when no connection holds it.
 	_origin: Option<moq_net::origin::Producer>,
 }
@@ -349,6 +361,8 @@ pub struct Launch {
 	pub broadcast: String,
 	/// Whether the program video encodes only while someone watches.
 	pub on_demand: bool,
+	/// The room guests join, if any.
+	pub room: Option<Arc<crate::guests::Room>>,
 }
 
 impl Engine {
@@ -357,7 +371,8 @@ impl Engine {
 	/// starting at once.
 	/// Publish the program at `launch.broadcast` on every one of
 	/// `launch.relays`, preferred first, encoding its video only while someone
-	/// watches when `launch.on_demand`.
+	/// watches when `launch.on_demand`, and add the guests who join `launch.room`
+	/// as sources.
 	///
 	/// Call inside the tokio runtime that serves the relay connections.
 	pub async fn start(launch: Launch, autosave: Autosave, loaded: autosave::Loaded) -> anyhow::Result<Arc<Self>> {
@@ -366,9 +381,20 @@ impl Engine {
 			relays,
 			broadcast,
 			on_demand,
+			room,
 		} = launch;
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
+		// Every relay feeds `subscribe`, so a guest either one routes is seen.
+		let guests = match &room {
+			Some(room) => Some(
+				subscribe
+					.consume()
+					.scope(room.path(), &moq_auth::Pattern::all().into())
+					.context("cannot follow the room")?,
+			),
+			None => None,
+		};
 		let sources = subscribe.consume();
 		let autosave::Loaded {
 			collection,
@@ -414,9 +440,9 @@ impl Engine {
 			health: Mutex::default(),
 			bus,
 			output,
+			room,
 			_origin: origin,
 		});
-
 		let (video, audio, clock, publisher) = match publish {
 			Some(Publish {
 				renditions,
@@ -447,6 +473,12 @@ impl Engine {
 			save.autosave.run(|| save.serialize()).await
 		})?;
 		tokio::spawn(engine.clone().grade(health::Sampler::new(publisher)));
+		// Last, once nothing can fail: a start that fails is retried from setup,
+		// and a follower already running would keep this engine and its
+		// publication alive beside the retry's.
+		if let Some(guests) = guests {
+			tokio::spawn(crate::guests::run(engine.clone(), guests));
+		}
 
 		Ok(engine)
 	}
@@ -1250,6 +1282,7 @@ mod tests {
 			}],
 			broadcast: "studio".into(),
 			on_demand: false,
+			room: None,
 		};
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let loaded = autosave::Loaded {

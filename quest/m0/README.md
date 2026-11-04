@@ -95,7 +95,7 @@ repository.
 - [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
-- [Guests](/quest/m0/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
+- [The join page is live](/quest/m0/join-page-live.md) - `join.studio.moq.dev` serves the join page `--join-page` defaults to
 - [Guest return feed](/quest/m0/guest-return.md) - guests see the program and hear a mix-minus
 - [Guest token refresh](/quest/m0/guest-refresh.md) - a show outlasts the guest link's expiry without new links
 - [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
