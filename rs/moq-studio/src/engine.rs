@@ -407,7 +407,7 @@ pub struct Engine {
 	/// How the stream is delivered, graded every [`health::INTERVAL`].
 	pub health: Mutex<health::Report>,
 	/// The program audio, which every source with sound is routed into.
-	pub program: moq_audio::bus::Mix,
+	pub mix: moq_audio::bus::Mix,
 	/// `None` when running without a relay.
 	pub output: Option<Output>,
 	/// The room guests join, when configured.
@@ -519,7 +519,7 @@ impl Engine {
 			autosave,
 			stats,
 			health: Mutex::default(),
-			program,
+			mix: program,
 			output,
 			room,
 			_origin: origin,
@@ -805,7 +805,7 @@ impl Engine {
 		let rate = u128::from(config.sample_rate);
 		let mut clock = kio::clock::interval_at(start, AUDIO_PERIOD);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
-		let mut program = self.program.reader();
+		let mut program = self.mix.reader();
 		let mut written: u128 = 0;
 
 		loop {
