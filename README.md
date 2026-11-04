@@ -638,8 +638,9 @@ it is written, shortly after the click.
 Nothing records in the background for this. The program's tracks keep their
 last 30 seconds for late viewers anyway, and each source's track while it is on
 program (shown in a scene on air, or for a microphone or system audio, played by
-the mix on program) or recorded, and a replay copies from those, so a replay needs
-`--connect` and goes back at most that far. With `--on-demand`, the program has
+the mix on program) or recorded, and a replay copies from those, so a replay
+goes back at most that far, and one of the program needs `--connect`. A local
+source keeps its track without a relay too. With `--on-demand`, the program has
 no past from before someone watched it, and a source has none from before it
 was last on program or recorded; a replay of nothing is refused, saying why. A
 broadcast source replays from what the studio received of it, and only over a

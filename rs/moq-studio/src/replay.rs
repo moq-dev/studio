@@ -45,19 +45,17 @@ impl Engine {
 	/// What a replay of `of` could copy, ending now, the most wanted first:
 	/// the program at each of its sizes, largest first, or a source's one.
 	///
-	/// The program has a past only while it is encoded, which without a relay
-	/// is only while recorded, a local source only from while it was on
-	/// program, shown or heard, or recorded, and a broadcast source once it
-	/// shows a picture.
+	/// The program has a past only with a relay, from while it was encoded, a
+	/// local source, relay or not, only from while it was on program, shown or
+	/// heard, or recorded, and a broadcast source once it shows a picture.
 	pub fn targets(&self, of: &Of) -> anyhow::Result<Vec<Target>> {
-		let output = || {
-			self.output
-				.as_ref()
-				.map(|_| &self.program)
-				.context("without --connect, nothing holds a past to replay")
-		};
 		let name = match of {
-			Of::Program => return Ok(output()?.program()),
+			Of::Program => {
+				self.output
+					.as_ref()
+					.context("without --connect, the program holds no past to replay")?;
+				return Ok(self.program.program());
+			}
 			Of::Source(name) => name,
 		};
 		let state = self.state.lock().unwrap();
@@ -79,7 +77,9 @@ impl Engine {
 				)
 			}
 			Some(Source::Lut { .. }) => anyhow::bail!("`{name}` has no picture or sound to replay"),
-			Some(_) => output()?
+			// A local source's track is kept with or without a relay.
+			Some(_) => self
+				.program
 				.source(capture)
 				.with_context(|| format!("`{name}` publishes no video or sound to replay")),
 			None => anyhow::bail!("there is no source named `{name}`"),
