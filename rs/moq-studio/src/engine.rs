@@ -711,7 +711,7 @@ impl Engine {
 		let stats = &self.stats;
 		// A stalled picture matters where the program draws it: a scene on air,
 		// including one fading out, or the top layer over them. Stalled sound
-		// matters wherever the program plays it.
+		// matters only if the mix on program plays it, not one only listened to.
 		let stalled = {
 			let state = self.state.lock().unwrap();
 			let shown: Vec<&str> = state
@@ -730,7 +730,7 @@ impl Engine {
 					let stall = feed.stalled(now)?;
 					let matters = match stall {
 						source::Stall::Picture(_) => shown.contains(&name),
-						source::Stall::Sound(_) => feed.strip().is_some_and(|strip| !strip.muted()),
+						source::Stall::Sound(_) => state.sources.plays(&state.collection.mixes.program, name),
 					};
 					matters.then(|| (name.to_string(), stall))
 				})

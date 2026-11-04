@@ -242,6 +242,16 @@ impl Sources {
 		self.mixes.get(name)
 	}
 
+	/// Whether the mix called `mix` plays the source called `name`: it has
+	/// sound, is not muted, and is routed into that mix.
+	pub fn plays(&self, mix: &str, name: &str) -> bool {
+		let strip = self.feeds.get(name).and_then(Feed::strip);
+		let mix = self.mixes.get(mix);
+		strip
+			.zip(mix)
+			.is_some_and(|(strip, mix)| !strip.muted() && mix.routes(strip))
+	}
+
 	/// Every running source, by name.
 	pub fn iter(&self) -> impl Iterator<Item = (&str, &Feed)> {
 		self.feeds.iter().map(|(name, feed)| (name.as_str(), feed))
@@ -1291,6 +1301,46 @@ mod tests {
 			let (display, driver) = opened(Source::Display { id: None });
 			*driver.delivered.lock().unwrap() = Some(start);
 			assert_eq!(display.stalled(start + STALL * 3), None, "a still screen sends nothing");
+		})
+		.await;
+	}
+
+	/// A mix plays a source with sound that is routed into it and not muted, so
+	/// one left out of the program's mix is heard only in the others.
+	#[tokio::test]
+	async fn a_mix_plays_only_what_is_routed_into_it() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let mut collection = collection();
+			collection.mixes.names.push("Headphones".into());
+			let program = crate::Mixes::DEFAULT;
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			assert!(sources.plays(program, "guest"));
+			assert!(sources.plays("Headphones", "guest"));
+			assert!(!sources.plays(program, "red"), "a color is silent");
+			assert!(!sources.plays(program, "nobody"));
+			assert!(!sources.plays("Nothing", "guest"));
+
+			let left_out = Audio {
+				exclude: [program.to_string()].into(),
+				..Audio::default()
+			};
+			collection.audio.insert("guest".into(), left_out);
+			assert!(sources.sync(&collection).is_empty());
+			assert!(!sources.plays(program, "guest"), "left out of the program");
+			assert!(sources.plays("Headphones", "guest"));
+
+			let muted = Audio {
+				muted: true,
+				..Audio::default()
+			};
+			collection.audio.insert("guest".into(), muted);
+			assert!(sources.sync(&collection).is_empty());
+			assert!(!sources.plays(program, "guest"), "muted");
+			assert!(!sources.plays("Headphones", "guest"), "muted everywhere");
 		})
 		.await;
 	}
