@@ -49,7 +49,7 @@ moq-video = { workspace = true, features = ["render"] }
 serde = { workspace = true }
 serde_with = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "time"] }
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 
@@ -63,7 +63,7 @@ rustix = { version = "1", features = ["net", "process", "stdio"] }
 tempfile = { workspace = true }
 
 [dev-dependencies]
-# An encoder on every machine, for the source track tests.
+# An encoder on every machine, for the source track and replay tests.
 moq-video = { workspace = true, features = ["openh264"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

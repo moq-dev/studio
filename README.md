@@ -99,6 +99,7 @@ Every panel is a tab you can drag, split, or stack.
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
 | Output | Set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
+| Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
@@ -283,9 +284,10 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
 (macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
-`clone` (with the `source` it shows), and `lut` (a 3D Adobe or Resolve `.cube`
-file, which no item places, but which grades what a `lut` filter names it in).
-The Devices panel fills in ids. `[[top]]` items make up the top layer.
+`clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
+file, which no item places, but which grades what a `lut` filter names it in),
+and `replay`, where the Replay panel plays replays. The Devices panel fills in
+ids. `[[top]]` items make up the top layer.
 
 `[video.<source>]` sets a source's `crop` and `filters`, wherever it is shown,
 and an item's `crop`, `filters`, and `blend` its own. A `crop` trims a fraction
@@ -422,6 +424,38 @@ macOS. A browser source's page is copied on the GPU from the shared texture CEF
 paints, given the same Vulkan DMA-BUF import. Every other source, every source
 on Windows or on a GPU that cannot import, and every still image delivers its
 frames from the CPU, which the compositor uploads.
+
+## Replay
+
+Add a `replay` source and place it like any other, such as full screen in a
+scene of its own. In the Replay panel, pick the program or a source, a length
+up to 30 seconds, and a speed of 100%, 50%, or 25%, then **Replay** plays that
+many seconds up to the click in the replay source, which is transparent before
+and after. **Cut** to its scene to put it on program. Sound replays only at
+100%, through the replay source's strip in the Audio panel. A new replay cuts
+off the one playing, and a stretch the source was offline or paused replays
+as the gap it was.
+
+**Save clip** writes the same seconds, in real time, beside the scene file as a
+regular MP4: `show-clip-1.mp4` for `show.toml`, then `show-clip-2.mp4`, and so
+on. Nothing is re-encoded, so a clip starts at the keyframe before those
+seconds, up to one keyframe interval earlier. It shows nothing after them, so
+video with B-frames can end early: the pictures shown before the end that refer
+to one shown after it are left out, along with everything decoded after that
+one. That is usually a fraction of a second, but it can reach back as far as
+the keyframe for a slow or deeply reordered source. The panel says where once
+it is written, shortly after the click.
+
+Nothing records in the background for this. The program and each source's
+track keep their last 30 seconds for late viewers anyway, and a replay copies
+from those, so a replay needs `--connect` and goes back at most that far. With
+`--on-demand`, the program has no past from before someone watched it. A
+broadcast source replays from what the studio received of it, and only over a
+relay connection whose protocol version can address a track by time; an older
+one refuses with the reason in the panel. An image, a color, or a web page has
+no past to replay: a page publishes no track of its own, so replay the program
+to show it. A replay source publishes each replay as its own track while it plays,
+like a camera, so viewers composing the scene themselves see it too.
 
 ## Health
 

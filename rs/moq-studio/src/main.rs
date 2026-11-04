@@ -16,6 +16,7 @@ mod engine;
 mod guests;
 mod health;
 mod interact;
+mod replay;
 mod setup;
 mod snap;
 mod ui;
