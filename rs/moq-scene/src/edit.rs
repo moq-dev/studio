@@ -647,22 +647,23 @@ impl Draft {
 		self.change(Change::Canvas { before, after: canvas })
 	}
 
-	/// Set the mixes and which one the program carries, and nothing else: see
-	/// [`rename_mix`](Self::rename_mix) and [`remove_mix`](Self::remove_mix) for
-	/// what refers to a mix.
+	/// Set the mixes and which ones the program and recordings carry, and
+	/// nothing else: see [`rename_mix`](Self::rename_mix) and
+	/// [`remove_mix`](Self::remove_mix) for what refers to a mix.
 	pub fn set_mixes(&mut self, mixes: Mixes) -> Result<(), Error> {
 		let before = self.collection.mixes.clone();
 		self.change(Change::Mixes { before, after: mixes })
 	}
 
 	/// Rename the mix `from` to `to`, keeping its place, its routing, and
-	/// whether the program carries it.
+	/// whether the program or recordings carry it.
 	pub fn rename_mix(&mut self, from: &str, to: &str) -> Result<(), Error> {
 		self.retarget_mix(from, Some(to))
 	}
 
 	/// Remove the mix `name`, and every source's exclusion from it. The mix the
-	/// program carries cannot be removed.
+	/// program carries cannot be removed; recordings holding it go back to
+	/// holding the mix on program.
 	pub fn remove_mix(&mut self, name: &str) -> Result<(), Error> {
 		self.retarget_mix(name, None)
 	}
@@ -681,6 +682,9 @@ impl Draft {
 		}
 		if mixes.program == from {
 			mixes.program = to.unwrap_or_default().to_string();
+		}
+		if mixes.recording.as_deref() == Some(from) {
+			mixes.recording = to.map(str::to_string);
 		}
 		let routed: Vec<(String, Audio)> = self
 			.collection
@@ -1268,9 +1272,10 @@ mod tests {
 		assert!(matches!(draft.finish(), Err(Error::Invalid(_))));
 	}
 
-	/// A renamed mix keeps its place, the program's pick, and every source left
-	/// out of it; a removed one takes those exclusions with it and undoes
-	/// whole; and the mix the program carries stays.
+	/// A renamed mix keeps its place, the program's and recordings' picks, and
+	/// every source left out of it; a removed one takes those exclusions with
+	/// it, sends recordings back to the mix on program, and undoes whole; and
+	/// the mix the program carries stays.
 	#[test]
 	fn a_mix_renames_and_removes_with_its_routing() {
 		let mut collection = collection();
@@ -1281,8 +1286,9 @@ mod tests {
 			},
 		);
 		collection.mixes = Mixes {
-			names: vec!["Program".into(), "Stream".into()],
+			names: vec!["Program".into(), "Stream".into(), "Full".into()],
 			program: "Stream".into(),
+			recording: Some("Full".into()),
 		};
 		let left_out = Audio {
 			exclude: ["Stream".to_string()].into(),
@@ -1296,9 +1302,20 @@ mod tests {
 		let mut draft = collection.draft("Rename mix");
 		draft.rename_mix("Stream", "Live").unwrap();
 		commit(&mut collection, &mut history, draft, None);
-		assert_eq!(collection.mixes.names, ["Program", "Live"]);
+		assert_eq!(collection.mixes.names, ["Program", "Live", "Full"]);
 		assert_eq!(collection.mixes.program, "Live");
 		assert_eq!(collection.audio["guest"].exclude, ["Live".to_string()].into());
+
+		let mut draft = collection.draft("Rename mix");
+		draft.rename_mix("Full", "Everything").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.mixes.recorded(), "Everything");
+
+		let mut draft = collection.draft("Remove mix");
+		draft.remove_mix("Everything").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.mixes.recording, None);
+		assert_eq!(collection.mixes.recorded(), "Live", "the mix on program");
 
 		let mut draft = collection.draft("Remove mix");
 		draft.remove_mix("Live").unwrap();
@@ -1318,8 +1335,9 @@ mod tests {
 		assert_eq!(collection.mixes, Mixes::default());
 		assert!(collection.audio["guest"].exclude.is_empty());
 
-		history.undo(&mut collection).unwrap();
-		history.undo(&mut collection).unwrap();
+		for _ in 0..4 {
+			history.undo(&mut collection).unwrap();
+		}
 		assert_eq!(collection, start);
 	}
 

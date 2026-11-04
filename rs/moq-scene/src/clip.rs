@@ -112,6 +112,7 @@ impl Clip {
 					mixes: Mixes {
 						names: names.into_iter().collect(),
 						program: Mixes::DEFAULT.into(),
+						recording: None,
 					},
 					audio: items.audio.clone(),
 					video: items.video.clone(),
