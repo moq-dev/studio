@@ -14,8 +14,9 @@ use std::thread::JoinHandle;
 
 use moq_audio::bus::Channel as Sound;
 
+use super::layers::Layers;
 use super::outbox::Commands;
-use super::protocol::{Channel, Command, Event, Id, Open, Start};
+use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Start};
 use super::{ARG, Helper, Page, Paint};
 use crate::Error;
 use crate::source::{Mailbox, Picture, Status};
@@ -47,6 +48,7 @@ pub(crate) async fn run(
 		picture: picture.clone(),
 		sound,
 		status: status.clone(),
+		layers: Layers::default(),
 		live: false,
 		end: kio::Producer::new(None),
 	};
@@ -99,6 +101,9 @@ pub(crate) struct Instance {
 	reader: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// The studio's device, which pages' pictures are copied to.
+type Gpu<'a> = (&'a wgpu::Device, &'a wgpu::Queue);
+
 /// Where each open page's events go.
 #[derive(Default)]
 struct Routes {
@@ -113,6 +118,7 @@ struct Route {
 	picture: Mailbox,
 	sound: Option<Sound>,
 	status: kio::Producer<Status>,
+	layers: Layers,
 	/// Whether a picture has arrived.
 	live: bool,
 	/// Why the page stopped, once it has.
@@ -135,10 +141,32 @@ impl Routes {
 		}
 	}
 
-	/// Show `texture`, painted the way `paint` says, on page `id`.
-	fn show(&mut self, id: Id, texture: wgpu::Texture, paint: Paint) {
+	/// Take `texture`, painted the way `paint` says, as page `id`'s newest
+	/// `layer`, and show the page.
+	fn paint(&mut self, gpu: Gpu<'_>, id: Id, layer: Layer, texture: wgpu::Texture, paint: Paint) {
 		let Some(route) = self.pages.get_mut(&id) else { return };
-		route.page.state.lock().unwrap().paint = Some(paint);
+		if layer == Layer::View {
+			route.page.state.lock().unwrap().paint = Some(paint);
+		}
+		route.layers.paint(layer, texture);
+		self.show(gpu, id);
+	}
+
+	/// Page `id`'s popup opened or moved to `area`, or closed.
+	fn place(&mut self, gpu: Gpu<'_>, id: Id, area: Option<Area>) {
+		let Some(route) = self.pages.get_mut(&id) else { return };
+		route.layers.place(area);
+		self.show(gpu, id);
+	}
+
+	/// Show page `id`'s newest pictures, once it has painted.
+	fn show(&mut self, (device, queue): Gpu<'_>, id: Id) {
+		let Some(route) = self.pages.get_mut(&id) else { return };
+		let texture = match route.layers.picture(device, queue) {
+			Ok(Some(texture)) => texture,
+			Ok(None) => return,
+			Err(reason) => return self.end(id, reason),
+		};
 		*route.picture.lock().unwrap() = Some(Picture::Texture(texture));
 		if !std::mem::replace(&mut route.live, true)
 			&& let Ok(mut status) = route.status.write()
@@ -409,14 +437,29 @@ fn deliver(
 			Err(err) if matches!(err.kind(), BrokenPipe | ConnectionReset | UnexpectedEof) => return Ok(()),
 			Err(err) => return Err(format!("the browser process's socket: {err}")),
 		};
-		let (id, texture, paint) = match event {
-			Event::Texture(id, texture) => (id, super::import::texture(device, queue, &texture, fds), Paint::Gpu),
+		let (id, layer, texture, paint) = match event {
+			Event::Texture(id, layer, texture) => (
+				id,
+				layer,
+				super::import::texture(device, queue, &texture, fds),
+				Paint::Gpu,
+			),
 			Event::Pixels {
 				page,
+				layer,
 				width,
 				height,
 				data,
-			} => (page, super::upload(device, queue, width, height, &data), Paint::Cpu),
+			} => (
+				page,
+				layer,
+				super::upload(device, queue, width, height, &data),
+				Paint::Cpu,
+			),
+			Event::Popup(id, area) => {
+				routes.lock().unwrap().place((device, queue), id, area);
+				continue;
+			}
 			Event::Audio(id, samples) => {
 				routes.lock().unwrap().play(id, &samples);
 				continue;
@@ -435,7 +478,7 @@ fn deliver(
 		commands.painted();
 		let mut routes = routes.lock().unwrap();
 		match texture {
-			Ok(texture) => routes.show(id, texture, paint),
+			Ok(texture) => routes.paint((device, queue), id, layer, texture, paint),
 			Err(reason) => routes.end(id, reason),
 		}
 	}
