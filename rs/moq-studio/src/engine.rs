@@ -644,9 +644,9 @@ impl Engine {
 		self.autosave.keep(&self.state)
 	}
 
-	/// Play the mix called `name` to the speakers on `runtime`, from the next
-	/// frame, or stop with `None`. A monitored mix that leaves the collection
-	/// hands over to the one the program carries.
+	/// Play a mix to an output on `runtime`, from the next frame, or stop with
+	/// `None`. A monitored mix that leaves the collection hands over to the one
+	/// the program carries, and another output reopens the monitor on it.
 	///
 	/// Takes the `state` already locked, so an edit renaming the mix and the
 	/// pick that follows it land before the next frame's sync.
@@ -654,13 +654,17 @@ impl Engine {
 		&self,
 		state: &mut State,
 		runtime: &tokio::runtime::Handle,
-		name: Option<&str>,
+		listen: Option<mix::Listen<'_>>,
 	) -> anyhow::Result<()> {
 		let mut monitor = self.monitor.lock().unwrap();
-		match (name, monitor.as_mut()) {
+		match (listen, monitor.as_mut()) {
 			(None, _) => *monitor = None,
-			(Some(name), Some(monitor)) => monitor.set_name(name),
-			(Some(name), None) => *monitor = Some(mix::Monitor::start(runtime, name)?),
+			(Some(listen), Some(monitor)) if monitor.speaker() == listen.speaker => monitor.set_name(listen.mix),
+			(Some(listen), _) => {
+				// The old one closes its output first.
+				*monitor = None;
+				*monitor = Some(mix::Monitor::start(runtime, listen.mix, listen.speaker)?);
+			}
 		}
 		// Synced on the next frame, which picks the mix by its name.
 		state.stale = true;

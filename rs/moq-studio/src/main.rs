@@ -236,9 +236,16 @@ impl eframe::App for Window {
 			App::Starting(engine) => engine.clone(),
 		};
 		let _ = self.started.set(engine.clone());
-		let studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
+		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
+		studio.load(frame.storage());
 		self.app = App::Studio(Box::new(studio));
 		ui.ctx().request_repaint();
+	}
+
+	fn save(&mut self, storage: &mut dyn eframe::Storage) {
+		if let App::Studio(studio) = &mut self.app {
+			studio.save(storage);
+		}
 	}
 }
 

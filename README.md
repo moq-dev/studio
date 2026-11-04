@@ -98,7 +98,7 @@ Every panel is a tab you can drag, split, or stack.
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
-| Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
+| Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
 | Output | Start and stop recording, set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
@@ -150,9 +150,10 @@ it out of every mix. **On program** picks the mix the broadcast carries, and
 switching it, or editing a mix, never drops or repeats audio. A recording
 holds the mix on program. The mix on program cannot be removed.
 
-**Listen** plays a mix to this machine's default output, from the `capture`
-feature's build. Use headphones: a microphone that hears the speakers feeds
-the mix back into itself.
+**Listen** plays a mix to an audio output, from the `capture` feature's
+build: the system default, or the one picked under **Listen on**, which the
+studio remembers for you rather than in the scene file. Use headphones: a
+microphone that hears the speakers feeds the mix back into itself.
 
 A source's **delay** holds it back in every mix, up to 2 s, so a microphone
 lines up with a camera that lags it.

@@ -110,6 +110,8 @@ impl Studio {
 				renaming: None,
 				new_mix: String::new(),
 				renaming_mix: None,
+				speaker: None,
+				speakers: Speakers::default(),
 				canvas: None,
 				new_item: None,
 				add: AddSource::default(),
@@ -129,7 +131,23 @@ impl Studio {
 	}
 }
 
+/// Where the output Listen plays on is kept, per user.
+const SPEAKER: &str = "speaker";
+
+impl Studio {
+	/// Take up what this user picked last time, from `storage`.
+	pub fn load(&mut self, storage: Option<&dyn eframe::Storage>) {
+		if let Some(storage) = storage {
+			self.panels.speaker = eframe::get_value::<Option<String>>(storage, SPEAKER).flatten();
+		}
+	}
+}
+
 impl eframe::App for Studio {
+	fn save(&mut self, storage: &mut dyn eframe::Storage) {
+		eframe::set_value(storage, SPEAKER, &self.panels.speaker);
+	}
+
 	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
 		let engine = self.panels.engine.clone();
 		let state = engine.state.lock().unwrap();
@@ -217,6 +235,10 @@ struct Panels {
 	new_mix: String,
 	/// The mix being renamed, by its name, and the name typed so far.
 	renaming_mix: Option<(String, String)>,
+	/// The output Listen plays on, by [`mix::Speaker::id`], or `None` for the
+	/// system default. Saved per user, not in the shared scene file.
+	speaker: Option<String>,
+	speakers: Speakers,
 	/// The canvas the Output panel's form holds until it is applied, or
 	/// `None` while it shows the collection's.
 	canvas: Option<Canvas>,
@@ -1715,6 +1737,12 @@ impl Panels {
 				action = Some(MixAction::Add(self.new_mix.trim().to_string()));
 			}
 		});
+		if mix::MONITOR && self.speakers.ui(ui, &self.runtime, &mut self.speaker) {
+			// Another output reopens the monitor on it.
+			if let Some((heard, _)) = &listening {
+				listen = Some(Some(heard.clone()));
+			}
+		}
 		if let Some((_, Some(failed))) = &listening {
 			ui.colored_label(ui.visuals().error_fg_color, format!("Listening stopped: {failed}"));
 		}
@@ -1818,7 +1846,11 @@ impl Panels {
 			});
 		}
 		if let Some(listen) = listen {
-			result = result.and(engine.listen(&mut state, &self.runtime, listen.as_deref()));
+			let listen = listen.as_deref().map(|mix| mix::Listen {
+				mix,
+				speaker: self.speaker.as_deref(),
+			});
+			result = result.and(engine.listen(&mut state, &self.runtime, listen));
 		}
 		drop(state);
 		self.check(result);
@@ -3095,6 +3127,60 @@ impl Default for Replay {
 			into: None,
 			outcome: Arc::default(),
 		}
+	}
+}
+
+/// The audio outputs Listen can play on, listed once the Audio panel is shown
+/// and again on Refresh.
+#[derive(Default)]
+struct Speakers {
+	listing: Option<Result<Vec<mix::Speaker>, String>>,
+	pending: Option<std::sync::mpsc::Receiver<Result<Vec<mix::Speaker>, String>>>,
+}
+
+impl Speakers {
+	/// Pick the output `speaker` names, or `None` for the system default.
+	/// Returns whether the pick changed.
+	fn ui(&mut self, ui: &mut Ui, runtime: &tokio::runtime::Handle, speaker: &mut Option<String>) -> bool {
+		if let Some(listing) = self.pending.as_ref().and_then(|pending| pending.try_recv().ok()) {
+			self.listing = Some(listing);
+			self.pending = None;
+		}
+		let mut refresh = self.listing.is_none() && self.pending.is_none();
+		let before = speaker.clone();
+		ui.horizontal(|ui| {
+			ui.label("Listen on");
+			let speakers = self.listing.as_ref().and_then(|listing| listing.as_ref().ok());
+			let named = |id: &str| {
+				let found = speakers.and_then(|speakers| speakers.iter().find(|speaker| speaker.id == id));
+				found.map_or_else(|| format!("{id} (not found)"), |speaker| speaker.name.clone())
+			};
+			let shown = speaker.as_deref().map_or_else(|| "System default".to_string(), named);
+			egui::ComboBox::from_id_salt("speaker")
+				.selected_text(shown)
+				.show_ui(ui, |ui| {
+					ui.selectable_value(speaker, None, "System default");
+					for found in speakers.into_iter().flatten() {
+						ui.selectable_value(speaker, Some(found.id.clone()), &found.name);
+					}
+				});
+			if self.pending.is_some() {
+				ui.spinner();
+			} else if ui.small_button("Refresh").clicked() {
+				refresh = true;
+			}
+		});
+		if let Some(Err(err)) = &self.listing {
+			ui.colored_label(ui.visuals().error_fg_color, format!("Cannot list the outputs: {err}"));
+		}
+		if refresh {
+			let (send, recv) = std::sync::mpsc::channel();
+			runtime.spawn(async move {
+				let _ = send.send(mix::speakers().await);
+			});
+			self.pending = Some(recv);
+		}
+		*speaker != before
 	}
 }
 

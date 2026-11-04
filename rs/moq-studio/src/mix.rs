@@ -148,34 +148,73 @@ impl Follow {
 /// brings the device's audio library.
 pub const MONITOR: bool = cfg!(feature = "capture");
 
-/// Plays one mix to this machine's default output, for headphones.
+/// What to listen to, and where.
+#[derive(Clone, Copy, Debug)]
+pub struct Listen<'a> {
+	/// The mix, by name.
+	pub mix: &'a str,
+	/// The [`Speaker::id`] to play on, or `None` for the system default.
+	pub speaker: Option<&'a str>,
+}
+
+/// An audio output this machine has, to listen on.
+#[derive(Clone, Debug)]
+pub struct Speaker {
+	/// What [`Monitor::start`] opens it by.
+	pub id: String,
+	/// The device's name and the host API it is reached through.
+	pub name: String,
+}
+
+/// This machine's audio outputs, or why they cannot be listed.
+#[cfg(feature = "capture")]
+pub async fn speakers() -> Result<Vec<Speaker>, String> {
+	let devices = moq_audio::playback::devices().await.map_err(|err| err.to_string())?;
+	let speakers = devices.into_iter().map(|device| Speaker {
+		name: format!("{} ({})", device.name, device.host),
+		id: device.id,
+	});
+	Ok(speakers.collect())
+}
+
+#[cfg(not(feature = "capture"))]
+pub async fn speakers() -> Result<Vec<Speaker>, String> {
+	Err("listening needs a build with the `capture` feature".into())
+}
+
+/// Plays one mix to an audio output, for headphones.
 ///
 /// Stops when dropped.
 pub struct Monitor {
 	/// The mix it plays, by name.
 	name: String,
+	/// The [`Speaker::id`] it plays on, or `None` for the system default.
+	speaker: Option<String>,
 	pick: Pick,
 	failed: Arc<Mutex<Option<String>>>,
 	task: tokio::task::JoinHandle<()>,
 }
 
 impl Monitor {
-	/// Open the output device on `runtime`, to play the mix called `name` once
-	/// it is [given](Self::play). Fails in a build without [`MONITOR`].
-	pub fn start(runtime: &tokio::runtime::Handle, name: &str) -> anyhow::Result<Self> {
+	/// Open the output `speaker`, or the system default, on `runtime`, to play
+	/// the mix called `name` once it is [given](Self::play). Fails in a build
+	/// without [`MONITOR`].
+	pub fn start(runtime: &tokio::runtime::Handle, name: &str, speaker: Option<&str>) -> anyhow::Result<Self> {
 		anyhow::ensure!(MONITOR, "listening needs a build with the `capture` feature");
 		let pick = Pick::default();
 		let follow = pick.follow();
 		let failed = Arc::new(Mutex::new(None));
 		let reason = failed.clone();
+		let device = speaker.map(str::to_string);
 		let task = runtime.spawn(async move {
-			if let Err(err) = play(follow).await {
+			if let Err(err) = play(follow, device).await {
 				tracing::warn!(error = format!("{err:#}"), "the monitor stopped");
 				*reason.lock().unwrap() = Some(format!("{err:#}"));
 			}
 		});
 		Ok(Self {
 			name: name.to_string(),
+			speaker: speaker.map(str::to_string),
 			pick,
 			failed,
 			task,
@@ -185,6 +224,11 @@ impl Monitor {
 	/// The name of the mix it plays.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// The output it plays on, or `None` for the system default.
+	pub fn speaker(&self) -> Option<&str> {
+		self.speaker.as_deref()
 	}
 
 	/// Play the mix called `name` once it is given.
@@ -209,12 +253,15 @@ impl Drop for Monitor {
 	}
 }
 
-/// Play what `follow` reads out the default output device until the bus stops.
+/// Play what `follow` reads out the output `device`, or the system default,
+/// until the bus stops.
 #[cfg(feature = "capture")]
-async fn play(mut follow: Follow) -> anyhow::Result<()> {
+async fn play(mut follow: Follow, device: Option<String>) -> anyhow::Result<()> {
 	use anyhow::Context;
 
-	let device = moq_audio::playback::Engine::open(Default::default())
+	let mut config = moq_audio::playback::Config::default();
+	config.device = device;
+	let device = moq_audio::playback::Engine::open(config)
 		.await
 		.context("cannot open the output device")?;
 	let config = moq_audio::bus::Config::default();
@@ -232,7 +279,7 @@ async fn play(mut follow: Follow) -> anyhow::Result<()> {
 }
 
 #[cfg(not(feature = "capture"))]
-async fn play(_follow: Follow) -> anyhow::Result<()> {
+async fn play(_follow: Follow, _device: Option<String>) -> anyhow::Result<()> {
 	unreachable!("refused by Monitor::start")
 }
 
