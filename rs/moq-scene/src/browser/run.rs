@@ -21,8 +21,8 @@ const BACKLOG: usize = 256;
 /// Run the page `open` describes until its helper stops, delivering pictures
 /// to `picture` and sound to `sound`. Dropping the future stops the helper.
 ///
-/// Fills in how the helper paints: `open` names only the page, its frame
-/// rate, and the bus's format.
+/// Fills in how the helper paints and the page's frame rate: `open` names
+/// only the page and the bus's format.
 pub(crate) async fn run(
 	helper: &Helper,
 	mut open: Open,
@@ -34,6 +34,12 @@ pub(crate) async fn run(
 	// Declared first so it is removed last, once the helper is gone.
 	let profile = tempfile::tempdir().map_err(|err| Error::Browser(format!("cannot create a profile: {err}")))?;
 	open.profile = profile.path().to_string_lossy().into_owned();
+	// A later change waits for the writer, which sends it after `open`.
+	open.framerate = {
+		let mut state = page.state.lock().unwrap();
+		state.retime = false;
+		state.framerate
+	};
 	open.accelerated = super::import::supported(helper);
 	open.render_node = helper
 		.render_node
@@ -50,7 +56,11 @@ pub(crate) async fn run(
 		.map(|()| writer(commands, page))
 	{
 		Ok(Ok(commands)) => {
-			page.state.lock().unwrap().commands = Some(commands.clone());
+			{
+				let mut state = page.state.lock().unwrap();
+				state.commands = Some(commands.clone());
+				state.flush();
+			}
 			let end = reader(helper, events, commands, page, picture, sound, status).await;
 			page.state.lock().unwrap().commands = None;
 			end

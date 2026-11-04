@@ -36,6 +36,8 @@ pub(crate) enum Command {
 	Painted,
 	/// Interaction with the page.
 	Input(Input),
+	/// The canvas's frame rate changed, so the page paints at this one.
+	FrameRate(u32),
 }
 
 /// The page a helper opens.

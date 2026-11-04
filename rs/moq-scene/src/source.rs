@@ -116,8 +116,9 @@ impl Sources {
 	/// clones rather than opening one. Returns a driver for each source started,
 	/// which does nothing until run.
 	///
-	/// Also applies the collection's gain and mute to every audio strip, which
-	/// never restarts a source. Panics on a gain [`Collection::validate`] refuses.
+	/// Also applies the collection's gain and mute to every audio strip, and its
+	/// frame rate to every web page, which never restarts a source. Panics on a
+	/// gain [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		self.feeds
 			.retain(|name, feed| collection.sources.get(name) == Some(&feed.source));
@@ -125,9 +126,13 @@ impl Sources {
 		let mut drivers = Vec::new();
 		for (name, source) in collection.sources.iter().filter(|(_, source)| source.opens()) {
 			if !self.feeds.contains_key(name) {
-				let (feed, driver) = open(name, source, &self.context, collection.canvas.framerate);
+				let (feed, driver) = open(name, source, &self.context);
 				self.feeds.insert(name.clone(), feed);
 				drivers.push(driver);
+			}
+			// A page paints at the canvas's frame rate, live.
+			if let Some(page) = self.feeds[name].page() {
+				page.set_framerate(collection.canvas.framerate);
 			}
 
 			if let Some(strip) = self.feeds[name].strip() {
@@ -227,12 +232,6 @@ pub struct Driver {
 		expect(dead_code, reason = "browser sources are Linux-only")
 	)]
 	page: Option<Page>,
-	/// The canvas's, which a browser source paints at.
-	#[cfg_attr(
-		not(target_os = "linux"),
-		expect(dead_code, reason = "browser sources are Linux-only")
-	)]
-	framerate: u32,
 	/// The source's own track, when it publishes one.
 	track: Option<Track>,
 }
@@ -460,7 +459,6 @@ impl Driver {
 			url: url.to_string(),
 			width,
 			height,
-			framerate: self.framerate,
 			sample_rate: bus.sample_rate,
 			channels: bus.layout.channels(),
 			..Default::default()
@@ -641,7 +639,7 @@ fn pick<'a, C: Reference + Clone + 'a>(
 }
 
 /// Start the feed for `source`, and the driver that fills it.
-fn open(name: &str, source: &Source, context: &Context, framerate: u32) -> (Feed, Driver) {
+fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 	let picture = Mailbox::default();
 	let shown = Shown::default();
 	let strip = source.has_audio().then(Strip::default);
@@ -677,7 +675,6 @@ fn open(name: &str, source: &Source, context: &Context, framerate: u32) -> (Feed
 		strip,
 		status,
 		page,
-		framerate,
 		track,
 	};
 	(feed, driver)
@@ -827,7 +824,7 @@ mod tests {
 			let (context, _origin) = context(dir.path());
 			let start = kio::clock::now();
 			let opened = |source: Source| {
-				let (feed, driver) = open("source", &source, &context, 30);
+				let (feed, driver) = open("source", &source, &context);
 				set(&driver.status, Status::Live);
 				(feed, driver)
 			};

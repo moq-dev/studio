@@ -162,6 +162,7 @@ fn commands(reader: Channel, painted: mpsc::Sender<()>) {
 				let _ = painted.send(());
 			}
 			Ok(Some((Command::Input(input), _))) => post(move || deliver(input)),
+			Ok(Some((Command::FrameRate(rate), _))) => post(move || retime(rate)),
 			Ok(Some((Command::Open(_), _))) | Ok(None) | Err(_) => break,
 		}
 	}
@@ -174,6 +175,15 @@ fn commands(reader: Channel, painted: mpsc::Sender<()>) {
 			}
 		})
 	});
+}
+
+/// Paint the page `rate` times a second. Runs on the UI thread.
+fn retime(rate: u32) {
+	BROWSER.with_borrow(|browser| {
+		if let Some(host) = browser.as_ref().and_then(|browser| browser.host()) {
+			host.set_windowless_frame_rate(rate.try_into().unwrap_or(i32::MAX));
+		}
+	})
 }
 
 /// Hand one input event to the page. Runs on the UI thread.

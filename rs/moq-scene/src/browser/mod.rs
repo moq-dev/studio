@@ -133,6 +133,12 @@ struct PageState {
 	/// button, key, focus, and pointer, sent ahead of any newer input.
 	#[cfg(target_os = "linux")]
 	owed: std::collections::VecDeque<Input>,
+	/// The canvas's frame rate, which the page paints at.
+	#[cfg(target_os = "linux")]
+	framerate: u32,
+	/// Whether the helper has yet to hear `framerate`.
+	#[cfg(target_os = "linux")]
+	retime: bool,
 	paint: Option<Paint>,
 }
 
@@ -168,11 +174,19 @@ impl PageState {
 		}
 	}
 
-	/// Queue the owed releases, oldest first, while the queue has room.
+	/// Queue a new frame rate, then the owed releases, oldest first, while the
+	/// queue has room.
 	fn flush(&mut self) {
 		use std::sync::mpsc::TrySendError;
 
 		let Some(commands) = &self.commands else { return };
+		if self.retime {
+			match commands.try_send(protocol::Command::FrameRate(self.framerate)) {
+				Ok(()) => self.retime = false,
+				Err(TrySendError::Full(_)) => return,
+				Err(TrySendError::Disconnected(_)) => return self.disconnect(),
+			}
+		}
 		while let Some(input) = self.owed.pop_front() {
 			match commands.try_send(protocol::Command::Input(input)) {
 				Ok(()) => {}
@@ -222,6 +236,22 @@ impl Page {
 	/// How the newest picture arrived, once one has.
 	pub fn paint(&self) -> Option<Paint> {
 		self.state.lock().unwrap().paint
+	}
+
+	/// Paint at `rate`, the canvas's frame rate, from now on, without waiting on
+	/// the helper. One that is behind hears it once it catches up.
+	pub(crate) fn set_framerate(&self, rate: u32) {
+		#[cfg(target_os = "linux")]
+		{
+			let mut state = self.state.lock().unwrap();
+			if state.framerate != rate {
+				state.framerate = rate;
+				state.retime = true;
+				state.flush();
+			}
+		}
+		#[cfg(not(target_os = "linux"))]
+		let _ = rate;
 	}
 
 	/// Interact with the page, without waiting on its helper. Dropped while
@@ -398,5 +428,23 @@ mod tests {
 		assert_eq!(received.last(), Some(&button(false)));
 		assert_eq!(received.iter().filter(|input| **input == button(false)).count(), 1);
 		assert!(!received.iter().any(|input| matches!(input, Input::Move { .. })));
+	}
+
+	/// A new canvas frame rate reaches the page once, even past the backlog.
+	#[test]
+	fn a_new_frame_rate_reaches_the_page() {
+		let (sender, queue) = std::sync::mpsc::sync_channel(1);
+		let page = Page::default();
+		page.state.lock().unwrap().commands = Some(sender);
+		page.set_framerate(30);
+		page.set_framerate(30);
+		assert!(matches!(queue.try_recv(), Ok(protocol::Command::FrameRate(30))));
+		assert!(queue.try_recv().is_err(), "an unchanged rate is not sent again");
+
+		page.send(Input::Text("x".into()));
+		page.set_framerate(60);
+		assert!(matches!(queue.try_recv(), Ok(protocol::Command::Input(_))));
+		page.state.lock().unwrap().flush();
+		assert!(matches!(queue.try_recv(), Ok(protocol::Command::FrameRate(60))));
 	}
 }
