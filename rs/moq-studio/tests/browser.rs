@@ -269,6 +269,22 @@ async fn a_click_reaches_the_page() {
 	.await;
 }
 
+/// A page that closes itself fails its own source and leaves the canvas,
+/// while the page beside it in the same helper keeps drawing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_page_that_closes_itself_fails_alone() {
+	local(async {
+		let closer = page("<body><script>addEventListener('load', () => window.close())</script></body>");
+		let red = page("<body style='background:red'></body>");
+		let mut studio = Studio::new(&[("red", red), ("closer", closer)]).await;
+		let reason = studio.until_failed("closer").await;
+		assert!(reason.contains("closed itself"), "{reason}");
+		studio.until_center([255, 0, 0, 255], &["closer"]).await;
+	})
+	.await;
+}
+
 /// A page whose renderer crashes fails its own source and leaves the canvas,
 /// while everything else keeps drawing. A crash of the helper every page
 /// shares fails them all and nothing else, and a reload starts a new one.

@@ -156,17 +156,16 @@ pub struct Page {
 
 #[derive(Default)]
 struct PageState {
-	/// The queue to the helper's socket, which [`run::writer`] drains, while
-	/// the page is open.
+	/// The queue to the helper's socket, while the page is open.
 	#[cfg(target_os = "linux")]
-	commands: Option<std::sync::mpsc::SyncSender<protocol::Command>>,
+	commands: Option<run::Commands>,
 	/// The page's number in the helper.
 	#[cfg(target_os = "linux")]
 	id: protocol::Id,
-	/// Whether input is being dropped because the queue is full.
+	/// Whether input is being dropped because the backlog is full.
 	#[cfg(target_os = "linux")]
 	backlogged: bool,
-	/// Releases that did not fit the queue, oldest first, at most one per
+	/// Releases that did not fit the backlog, oldest first, at most one per
 	/// button, key, focus, and pointer, sent ahead of any newer input.
 	#[cfg(target_os = "linux")]
 	owed: std::collections::VecDeque<Input>,
@@ -185,19 +184,16 @@ impl PageState {
 	/// owed rather than dropped, so a helper that catches up never leaves the
 	/// page holding a button or key the studio let go of; other input drops.
 	fn send(&mut self, input: Input) {
-		use std::sync::mpsc::TrySendError;
-
 		self.flush();
 		let Some(commands) = &self.commands else { return };
 		let input = match self.owed.is_empty() {
-			true => match commands.try_send(protocol::Command::Input(self.id, input)) {
+			true => match commands.input(self.id, input) {
 				Ok(()) => {
 					self.backlogged = false;
 					return;
 				}
-				Err(TrySendError::Full(protocol::Command::Input(_, input))) => input,
-				Err(TrySendError::Full(_)) => unreachable!("only input is sent here"),
-				Err(TrySendError::Disconnected(_)) => return self.disconnect(),
+				Err(run::Refused::Full(input)) => input,
+				Err(run::Refused::Gone) => return self.disconnect(),
 			},
 			// Newer input waits behind the owed releases.
 			false => input,
@@ -212,27 +208,23 @@ impl PageState {
 	}
 
 	/// Queue a new frame rate, then the owed releases, oldest first, while the
-	/// queue has room.
+	/// backlog has room.
 	fn flush(&mut self) {
-		use std::sync::mpsc::TrySendError;
-
 		let Some(commands) = &self.commands else { return };
 		if self.retime {
-			match commands.try_send(protocol::Command::FrameRate(self.id, self.framerate)) {
-				Ok(()) => self.retime = false,
-				Err(TrySendError::Full(_)) => return,
-				Err(TrySendError::Disconnected(_)) => return self.disconnect(),
+			if !commands.send(protocol::Command::FrameRate(self.id, self.framerate)) {
+				return self.disconnect();
 			}
+			self.retime = false;
 		}
 		while let Some(input) = self.owed.pop_front() {
-			match commands.try_send(protocol::Command::Input(self.id, input)) {
+			match commands.input(self.id, input) {
 				Ok(()) => {}
-				Err(TrySendError::Full(protocol::Command::Input(_, input))) => {
+				Err(run::Refused::Full(input)) => {
 					self.owed.push_front(input);
 					return;
 				}
-				Err(TrySendError::Full(_)) => unreachable!("only input is sent here"),
-				Err(TrySendError::Disconnected(_)) => return self.disconnect(),
+				Err(run::Refused::Gone) => return self.disconnect(),
 			}
 		}
 	}
@@ -444,9 +436,9 @@ mod tests {
 	/// page never keeps holding what the studio let go of.
 	#[test]
 	fn a_release_past_the_backlog_is_owed() {
-		let (sender, queue) = std::sync::mpsc::sync_channel(4);
+		let (commands, queue) = run::Commands::new();
 		let page = Page::default();
-		page.state.lock().unwrap().commands = Some(sender);
+		page.state.lock().unwrap().commands = Some(commands.clone());
 		page.send(button(true));
 		while !page.state.lock().unwrap().backlogged {
 			page.send(Input::Text("x".into()));
@@ -463,7 +455,11 @@ mod tests {
 
 		// The helper catches up, and each write makes room, as the writer's do.
 		let mut received = Vec::new();
-		while let Ok(protocol::Command::Input(_, input)) = queue.try_recv() {
+		while let Ok(command) = queue.try_recv() {
+			commands.wrote(&command);
+			let protocol::Command::Input(_, input) = command else {
+				panic!("only input is queued");
+			};
 			received.push(input);
 			page.state.lock().unwrap().flush();
 		}
@@ -476,18 +472,19 @@ mod tests {
 	/// A new canvas frame rate reaches the page once, even past the backlog.
 	#[test]
 	fn a_new_frame_rate_reaches_the_page() {
-		let (sender, queue) = std::sync::mpsc::sync_channel(1);
+		let (commands, queue) = run::Commands::new();
 		let page = Page::default();
-		page.state.lock().unwrap().commands = Some(sender);
+		page.state.lock().unwrap().commands = Some(commands);
 		page.set_framerate(30);
 		page.set_framerate(30);
 		assert!(matches!(queue.try_recv(), Ok(protocol::Command::FrameRate(_, 30))));
 		assert!(queue.try_recv().is_err(), "an unchanged rate is not sent again");
 
-		page.send(Input::Text("x".into()));
+		while !page.state.lock().unwrap().backlogged {
+			page.send(Input::Text("x".into()));
+		}
 		page.set_framerate(60);
-		assert!(matches!(queue.try_recv(), Ok(protocol::Command::Input(..))));
-		page.state.lock().unwrap().flush();
-		assert!(matches!(queue.try_recv(), Ok(protocol::Command::FrameRate(_, 60))));
+		let last = queue.try_iter().last();
+		assert!(matches!(last, Some(protocol::Command::FrameRate(_, 60))));
 	}
 }

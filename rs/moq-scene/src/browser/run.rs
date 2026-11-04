@@ -8,21 +8,80 @@ use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 
 use moq_audio::bus::Channel as Sound;
 
 use super::protocol::{Channel, Command, Event, Id, Open, Start};
-use super::{ARG, Helper, Page, Paint};
+use super::{ARG, Helper, Input, Page, Paint};
 use crate::Error;
 use crate::source::{Mailbox, Picture, Status};
 use crate::wgpu;
 
-/// Commands waiting for the helper to read them. A helper this far behind is
-/// hung, and [`Page::send`] drops new input rather than wait for it.
+/// Input waiting for the helper to read it. A helper this far behind is hung,
+/// and [`Page::send`] drops new input rather than wait for it.
 const BACKLOG: usize = 256;
+
+/// The queue to the helper's socket, which [`writer`] drains. Only input
+/// counts against the [`BACKLOG`], so a hung helper costs dropped input
+/// rather than memory, while what keeps pages and paints in step (opens,
+/// closes, frame rates, and answers to paints), few and needed, always
+/// queues, in order, without waiting.
+#[derive(Clone)]
+pub(crate) struct Commands {
+	sender: mpsc::Sender<Command>,
+	/// Input queued and not yet written.
+	input: Arc<AtomicUsize>,
+}
+
+/// Why input was not queued.
+pub(crate) enum Refused {
+	/// The backlog is full, and the input is handed back.
+	Full(Input),
+	/// The writer is gone, and so is the helper.
+	Gone,
+}
+
+impl Commands {
+	/// A queue, and the end [`writer`] drains.
+	pub(crate) fn new() -> (Self, mpsc::Receiver<Command>) {
+		let (sender, queue) = mpsc::channel();
+		let commands = Self {
+			sender,
+			input: Default::default(),
+		};
+		(commands, queue)
+	}
+
+	/// Queue `command`, which is not input; false once the writer is gone.
+	pub(crate) fn send(&self, command: Command) -> bool {
+		self.sender.send(command).is_ok()
+	}
+
+	/// Queue input for page `id`, unless the backlog is full.
+	pub(crate) fn input(&self, id: Id, input: Input) -> Result<(), Refused> {
+		if self.input.fetch_add(1, Ordering::Relaxed) >= BACKLOG {
+			self.input.fetch_sub(1, Ordering::Relaxed);
+			return Err(Refused::Full(input));
+		}
+		self.sender.send(Command::Input(id, input)).map_err(|_| Refused::Gone)
+	}
+
+	/// Note that `command`, taken off the queue, is written.
+	fn written(input: &AtomicUsize, command: &Command) {
+		if matches!(command, Command::Input(..)) {
+			input.fetch_sub(1, Ordering::Relaxed);
+		}
+	}
+
+	/// Note that `command` is written, as [`writer`] does.
+	#[cfg(test)]
+	pub(crate) fn wrote(&self, command: &Command) {
+		Self::written(&self.input, command);
+	}
+}
 
 /// Run the page `open` describes until it fails or its helper stops,
 /// delivering pictures to `picture` and sound to `sound`. Dropping the future
@@ -91,7 +150,7 @@ impl Helper {
 /// The helper every page runs in.
 pub(crate) struct Instance {
 	/// Queued commands, which [`writer`] writes.
-	commands: mpsc::SyncSender<Command>,
+	commands: Commands,
 	routes: Arc<Mutex<Routes>>,
 	/// The next page's number.
 	next: AtomicU64,
@@ -106,9 +165,6 @@ pub(crate) struct Instance {
 #[derive(Default)]
 struct Routes {
 	pages: HashMap<Id, Route>,
-	/// Pages closed while the command queue was full, which [`writer`] closes
-	/// as the queue makes room.
-	closing: Vec<Id>,
 	/// Why the helper stopped, once it has: no page opens in it after.
 	ended: Option<String>,
 }
@@ -237,7 +293,7 @@ impl Instance {
 		};
 		// A closed queue means the writer lost the socket, so the helper is
 		// gone and the reader ends the page.
-		let _ = self.commands.send(Command::Open(id, open));
+		self.commands.send(Command::Open(id, open));
 		// After the page opens, since the helper delivers only to an open page.
 		let mut state = page.state.lock().unwrap();
 		state.id = id;
@@ -276,12 +332,8 @@ struct Opened {
 impl Drop for Opened {
 	fn drop(&mut self) {
 		self.page.state.lock().unwrap().disconnect();
-		let mut routes = self.instance.routes.lock().unwrap();
-		routes.pages.remove(&self.id);
-		// Never waits on the helper: a full queue closes it as it drains.
-		if let Err(mpsc::TrySendError::Full(_)) = self.instance.commands.try_send(Command::Close(self.id)) {
-			routes.closing.push(self.id);
-		}
+		self.instance.routes.lock().unwrap().pages.remove(&self.id);
+		self.instance.commands.send(Command::Close(self.id));
 	}
 }
 
@@ -325,56 +377,31 @@ impl Drop for Process {
 	}
 }
 
-/// Write the commands queued on the returned sender to `channel`, on a thread
+/// Write the commands queued on the returned queue to `channel`, on a thread
 /// of its own, so a helper that stops reading blocks only that thread, never a
-/// sender holding the studio's state. Each write makes room for the pages
-/// `routes` closed and the releases their pages owe. The thread ends once
-/// every sender is dropped or a write fails, as one does when the helper
-/// exits, and ends the socket on its way out.
-fn writer(channel: Channel, routes: Arc<Mutex<Routes>>) -> std::io::Result<mpsc::SyncSender<Command>> {
-	let (sender, queue) = mpsc::sync_channel(BACKLOG);
+/// sender holding the studio's state. Each write makes room for the releases
+/// `routes`' pages owe. The thread ends once every sender is dropped or a
+/// write fails, as one does when the helper exits, and ends the socket on its
+/// way out.
+fn writer(channel: Channel, routes: Arc<Mutex<Routes>>) -> std::io::Result<Commands> {
+	let (commands, queue) = Commands::new();
+	let input = commands.input.clone();
 	std::thread::Builder::new()
 		.name("browser-commands".into())
 		.spawn(move || {
-			// Pages whose Open is written and whose Close is not, since a page
-			// closed past the backlog closes only after it opens.
-			let mut open = std::collections::HashSet::new();
-			'write: for command in queue {
-				match &command {
-					Command::Open(id, _) => {
-						let mut routes = routes.lock().unwrap();
-						// Closed while its Open waited: it never opens.
-						if let Some(at) = routes.closing.iter().position(|closing| closing == id) {
-							routes.closing.swap_remove(at);
-							continue;
-						}
-						open.insert(*id);
-					}
-					Command::Close(id) => _ = open.remove(id),
-					_ => {}
-				}
+			for command in queue {
 				if channel.send(&command, &[]).is_err() {
 					break;
 				}
-				// Taken first, so a closing page never waits on a socket write.
-				let (closing, pages): (Vec<Id>, Vec<Page>) = {
-					let mut routes = routes.lock().unwrap();
-					let pages = routes.pages.values().map(|route| route.page.clone()).collect();
-					let mut closing = Vec::new();
-					routes.closing.retain(|id| match open.remove(id) {
-						true => {
-							closing.push(*id);
-							false
-						}
-						false => true,
-					});
-					(closing, pages)
-				};
-				for id in closing {
-					if channel.send(&Command::Close(id), &[]).is_err() {
-						break 'write;
-					}
-				}
+				Commands::written(&input, &command);
+				// Taken first, so no page waits on a socket write.
+				let pages: Vec<Page> = routes
+					.lock()
+					.unwrap()
+					.pages
+					.values()
+					.map(|route| route.page.clone())
+					.collect();
 				for page in pages {
 					page.state.lock().unwrap().flush();
 				}
@@ -383,7 +410,7 @@ fn writer(channel: Channel, routes: Arc<Mutex<Routes>>) -> std::io::Result<mpsc:
 			// longer reach never keeps running unheard.
 			let _ = rustix::net::shutdown(&channel, rustix::net::Shutdown::Write);
 		})?;
-	Ok(sender)
+	Ok(commands)
 }
 
 /// Start a helper, handing it one end of a socket as its stdin.
@@ -405,7 +432,7 @@ fn read(
 	queue: &wgpu::Queue,
 	mut process: Process,
 	events: &Channel,
-	commands: &mpsc::SyncSender<Command>,
+	commands: &Commands,
 	routes: &Mutex<Routes>,
 ) {
 	let reason = match deliver(device, queue, events, commands, routes) {
@@ -433,7 +460,7 @@ fn deliver(
 	device: &wgpu::Device,
 	queue: &wgpu::Queue,
 	events: &Channel,
-	commands: &mpsc::SyncSender<Command>,
+	commands: &Commands,
 	routes: &Mutex<Routes>,
 ) -> Result<(), String> {
 	use std::io::ErrorKind::*;
@@ -464,11 +491,11 @@ fn deliver(
 			Event::Fatal(reason) => return Err(reason),
 		};
 		// The copy is done, so the helper may hand the source back to CEF,
-		// even for a page closed since. Waits behind queued input, never
-		// dropped: the helper waits on it. A closed queue means the writer lost
-		// the socket, so the helper is exiting, and stops waiting; reading on
-		// until it has exited keeps it from blocking on a full socket.
-		let _ = commands.send(Command::Painted);
+		// even for a page closed since: the helper waits on it. A closed queue
+		// means the writer lost the socket, so the helper is exiting, and stops
+		// waiting; reading on until it has exited keeps it from blocking on a
+		// full socket.
+		commands.send(Command::Painted);
 		let mut routes = routes.lock().unwrap();
 		match texture {
 			Ok(texture) => routes.show(id, texture, paint),
@@ -484,7 +511,7 @@ mod tests {
 
 	/// An open page, as [`Instance::open`] routes one, with a writer to
 	/// `ours`.
-	fn routed(ours: UnixStream) -> (Page, mpsc::SyncSender<Command>, Arc<Mutex<Routes>>) {
+	fn routed(ours: UnixStream) -> (Page, Commands, Arc<Mutex<Routes>>) {
 		let routes = Arc::new(Mutex::new(Routes::default()));
 		let commands = writer(Channel::new(ours), routes.clone()).unwrap();
 		let page = Page::default();
@@ -504,17 +531,32 @@ mod tests {
 	}
 
 	/// A helper that stops reading costs dropped input, never a sender stuck
-	/// on a full socket while it holds the studio's state.
+	/// on a full socket while it holds the studio's state. A page still opens
+	/// and closes past the backlog without waiting, in order, so removing a
+	/// starting page never hangs on the helper.
 	#[test]
-	fn a_helper_that_stops_reading_never_blocks_input() {
+	fn a_helper_that_stops_reading_blocks_nothing() {
 		let (ours, theirs) = UnixStream::pair().unwrap();
-		let (page, _commands, _routes) = routed(ours);
+		let (page, commands, _routes) = routed(ours);
 		// Far more than the socket buffers and the backlog hold together.
 		for _ in 0..4096 {
 			page.send(Input::Text("x".repeat(1024)));
 		}
 		assert!(page.state.lock().unwrap().backlogged);
-		drop(theirs);
+		commands.send(Command::Open(1, Open::default()));
+		commands.send(Command::Close(1));
+
+		let helper = Channel::new(theirs);
+		let mut pages = Vec::new();
+		while pages.len() < 2 {
+			match helper.recv::<Command>().unwrap() {
+				Some((Command::Open(id, _), _)) => pages.push(("open", id)),
+				Some((Command::Close(id), _)) => pages.push(("close", id)),
+				Some(_) => {}
+				None => panic!("the writer stopped"),
+			}
+		}
+		assert_eq!(pages, [("open", 1), ("close", 1)]);
 	}
 
 	/// Each write makes room for an owed release, so it reaches the page once
@@ -529,7 +571,7 @@ mod tests {
 			modifiers: Modifiers::default(),
 		};
 		page.state.lock().unwrap().owed.push_back(release.clone());
-		commands.send(Command::Painted).unwrap();
+		commands.send(Command::Painted);
 
 		let helper = Channel::new(theirs);
 		assert!(matches!(helper.recv::<Command>().unwrap(), Some((Command::Painted, _))));
@@ -537,33 +579,5 @@ mod tests {
 			panic!("the owed release never came");
 		};
 		assert_eq!(input, release);
-	}
-
-	/// A page closed past the backlog closes once the next write makes room,
-	/// and never ahead of its Open: one closed while its Open waited never
-	/// opens.
-	#[test]
-	fn a_deferred_close_follows_its_open() {
-		let (ours, theirs) = UnixStream::pair().unwrap();
-		let routes = Arc::new(Mutex::new(Routes::default()));
-		let commands = writer(Channel::new(ours), routes.clone()).unwrap();
-		let helper = Channel::new(theirs);
-
-		routes.lock().unwrap().closing.push(2);
-		commands.send(Command::Open(1, Open::default())).unwrap();
-		commands.send(Command::Open(2, Open::default())).unwrap();
-		assert!(matches!(
-			helper.recv::<Command>().unwrap(),
-			Some((Command::Open(1, _), _))
-		));
-
-		routes.lock().unwrap().closing.push(1);
-		commands.send(Command::Painted).unwrap();
-		assert!(matches!(helper.recv::<Command>().unwrap(), Some((Command::Painted, _))));
-		assert!(matches!(
-			helper.recv::<Command>().unwrap(),
-			Some((Command::Close(1), _))
-		));
-		assert!(routes.lock().unwrap().closing.is_empty());
 	}
 }

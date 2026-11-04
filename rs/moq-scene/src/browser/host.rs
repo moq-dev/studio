@@ -212,7 +212,7 @@ fn open(shared: Arc<Shared>, id: Id, open: Open) {
 		HelperAudio::new(paged.clone()),
 		HelperLoad::new(paged.clone()),
 		HelperRequest::new(paged.clone()),
-		HelperLife::new(id),
+		HelperLife::new(paged.clone()),
 	);
 	match browser_host_create_browser_sync(
 		Some(&window),
@@ -644,7 +644,7 @@ wrap_request_handler! {
 
 wrap_life_span_handler! {
 	struct HelperLife {
-		id: Id,
+		page: Arc<Paged>,
 	}
 
 	impl LifeSpanHandler {
@@ -671,8 +671,11 @@ wrap_life_span_handler! {
 		}
 
 		fn on_before_close(&self, _browser: Option<&mut Browser>) {
+			// A page can close itself with `window.close()`, which its source
+			// reports; one the studio closed has left it already.
+			self.page.fail("the page closed itself".into());
 			let last = PAGES.with_borrow_mut(|pages| {
-				pages.remove(&self.id);
+				pages.remove(&self.page.id);
 				pages.is_empty()
 			});
 			if last && QUITTING.get() {
