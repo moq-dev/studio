@@ -1050,12 +1050,14 @@ impl Driver {
 		listing: Option<&Listing<'_>>,
 	) -> Result<(), Error> {
 		let clip = Clip::open(path)?;
-		// One channel for every play, since a closed one drops what it has not
-		// played yet.
-		let mut sound = match (&clip.audio, &self.strip) {
-			(Some(_), Some(strip)) => Some(self.channel(strip.clone())?),
-			_ => None,
+		// A closed channel drops what it has not played yet, so a loop keeps
+		// its channel, sounding on, while a restart takes a new one, cutting
+		// off what the play it cut off still had queued.
+		let channel = || match (&clip.audio, &self.strip) {
+			(Some(_), Some(strip)) => self.channel(strip.clone()).map(Some),
+			_ => Ok(None),
 		};
+		let mut sound = channel()?;
 		let mut own = Own::new(listing, kio::clock::now());
 		loop {
 			let restarted = tokio::select! {
@@ -1071,12 +1073,44 @@ impl Driver {
 					true
 				}
 			};
-			if restarted || looping {
+			if restarted {
+				sound = channel()?;
+				continue;
+			}
+			if looping {
 				continue;
 			}
 			set(&self.status, Status::Ended);
-			if starts.changed().await.is_err() {
-				return std::future::pending().await;
+			self.ended(&mut starts, &mut own).await;
+		}
+	}
+
+	/// Wait out a media source that ended until `starts` changes. Its own
+	/// track gets no more pictures, so its encoder is released here once
+	/// nothing uses the source, giving the encode session back.
+	async fn ended(&self, starts: &mut watch::Receiver<()>, own: &mut Own<'_, '_>) {
+		loop {
+			let settled = async {
+				match &own.track {
+					Some(video) if video.is_open() => video.settle().await,
+					_ => std::future::pending().await,
+				}
+			};
+			tokio::select! {
+				changed = starts.changed() => {
+					// The feed is gone, which stops this driver anyway.
+					if changed.is_err() {
+						std::future::pending::<()>().await;
+					}
+					return;
+				}
+				() = settled => {
+					if let Some(video) = &mut own.track
+						&& let Err(err) = video.release()
+					{
+						self.fail_encoding(&mut own.track, err);
+					}
+				}
 			}
 		}
 	}

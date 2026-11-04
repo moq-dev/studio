@@ -549,16 +549,13 @@ impl<'a> Video<'a> {
 	}
 
 	/// Wait until whether the source is used disagrees with whether its
-	/// encoder is open, so a capture that delivers nothing new, such as a
-	/// still screen, can act without waiting on a picture: [`release`] the
-	/// encoder when it is open and nothing uses the source, or bring a picture
-	/// when it is closed and the source goes into use.
+	/// encoder is open, so a source that delivers nothing new, such as a
+	/// still screen or a media file that ended, can act without waiting on a
+	/// picture: [`release`] the encoder when it is open and nothing uses the
+	/// source, or bring a picture when it is closed and the source goes into
+	/// use.
 	///
 	/// [`release`]: Self::release
-	#[cfg_attr(
-		not(any(feature = "capture", test)),
-		expect(dead_code, reason = "only a capture waits on it")
-	)]
 	pub(crate) async fn settle(&self) {
 		let mut demand = self.track.demand();
 		let mut shown = self.shown.clone();
@@ -573,7 +570,6 @@ impl<'a> Video<'a> {
 	}
 
 	/// Whether the encoder is open.
-	#[cfg_attr(not(feature = "capture"), expect(dead_code, reason = "only a capture asks"))]
 	pub(crate) fn is_open(&self) -> bool {
 		self.track.is_open()
 	}
@@ -1198,8 +1194,9 @@ mod tests {
 			std::fs::write(dir.path().join("clip.mkv"), crate::media::tests::CLIP).unwrap();
 			let (publish, catalog, consumer) = studio();
 			publish.show(["clip".to_string()].into());
+			let sessions = publish.sessions.clone();
 			let (mut context, _origin) = context(dir.path());
-			context.publish = Some(publish);
+			context.publish = Some(publish.clone());
 			let mut collection = Collection::new();
 			let clip = Source::Media {
 				path: "clip.mkv".into(),
@@ -1249,10 +1246,16 @@ mod tests {
 				(stamps.len() >= 10).then_some(())
 			})
 			.await;
-			assert!(
-				stamps.is_sorted() && stamps.windows(2).all(|pair| pair[0] < pair[1]),
-				"{stamps:?}"
-			);
+			assert!(stamps.windows(2).all(|pair| pair[0] < pair[1]), "{stamps:?}");
+
+			// Ended, it shows nothing new, yet gives its session back once off
+			// program and unread.
+			until_time(begin + std::time::Duration::from_millis(1_600)).await;
+			until(|| (feed.status() == Status::Ended).then_some(())).await;
+			assert_eq!(sessions.open(), 1, "on program");
+			drop(track);
+			publish.show(Default::default());
+			until(|| (sessions.open() == 0).then_some(())).await;
 		})
 		.await;
 	}
