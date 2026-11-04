@@ -1,7 +1,8 @@
 /**
  * The join page: a guest opens the studio's link and publishes their camera,
  * microphone, and screen into the studio's room, following moq-room's
- * `{name}/camera.hang` and `{name}/screen.hang`.
+ * `{name}/camera.hang` and `{name}/screen.hang`, and plays the show the studio
+ * sends back.
  *
  * @module
  */
@@ -10,6 +11,8 @@ import * as Net from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Local } from "@moq/room";
 import { Effect, Signal } from "@moq/signals";
+import * as Watch from "@moq/watch";
+import * as Feed from "./feed.ts";
 import { format, type Link, parse } from "./link.ts";
 import * as Renew from "./renew.ts";
 
@@ -66,6 +69,14 @@ function join(link: Link): () => void {
 		stored((storage) => storage.setItem(STORED, format(link)));
 	});
 	signals.cleanup(() => renewal.close());
+
+	// The program, with everyone's sound but the guest's own, so they hear no echo of themselves.
+	const show = new Watch.Player({
+		origin: connection.origin,
+		name: Feed.path(link.name, link.generation),
+		video: { canvas: element<HTMLCanvasElement>("show") },
+	});
+	signals.cleanup(() => show.close());
 
 	const local = new Local({
 		connection,
