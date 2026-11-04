@@ -5,7 +5,8 @@
 Browser sources run on macOS and Windows as they do on Linux: a URL (an
 overlay, alert box, or chat widget) renders into the compositor at the canvas
 frame rate, the creator can interact with it, its audio joins the bus, and a
-crash in the browser process drops that source, never the stream.
+crash drops browser sources, never the stream: a page's renderer only its own
+source, the shared browser process every browser source.
 
 ## Plan
 

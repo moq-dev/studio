@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use crate::wgpu;
 
 #[cfg(target_os = "linux")]
+mod outbox;
+#[cfg(target_os = "linux")]
 mod protocol;
 #[cfg(target_os = "linux")]
 mod run;
@@ -158,7 +160,7 @@ pub struct Page {
 struct PageState {
 	/// The queue to the helper's socket, while the page is open.
 	#[cfg(target_os = "linux")]
-	commands: Option<run::Commands>,
+	commands: Option<outbox::Commands>,
 	/// The page's number in the helper.
 	#[cfg(target_os = "linux")]
 	id: protocol::Id,
@@ -192,8 +194,8 @@ impl PageState {
 					self.backlogged = false;
 					return;
 				}
-				Err(run::Refused::Full(input)) => input,
-				Err(run::Refused::Gone) => return self.disconnect(),
+				Err(outbox::Refused::Full(input)) => input,
+				Err(outbox::Refused::Gone) => return self.disconnect(),
 			},
 			// Newer input waits behind the owed releases.
 			false => input,
@@ -212,7 +214,7 @@ impl PageState {
 	fn flush(&mut self) {
 		let Some(commands) = &self.commands else { return };
 		if self.retime {
-			if !commands.send(protocol::Command::FrameRate(self.id, self.framerate)) {
+			if !commands.rate(self.id, self.framerate) {
 				return self.disconnect();
 			}
 			self.retime = false;
@@ -220,11 +222,11 @@ impl PageState {
 		while let Some(input) = self.owed.pop_front() {
 			match commands.input(self.id, input) {
 				Ok(()) => {}
-				Err(run::Refused::Full(input)) => {
+				Err(outbox::Refused::Full(input)) => {
 					self.owed.push_front(input);
 					return;
 				}
-				Err(run::Refused::Gone) => return self.disconnect(),
+				Err(outbox::Refused::Gone) => return self.disconnect(),
 			}
 		}
 	}
@@ -436,7 +438,7 @@ mod tests {
 	/// page never keeps holding what the studio let go of.
 	#[test]
 	fn a_release_past_the_backlog_is_owed() {
-		let (commands, queue) = run::Commands::new();
+		let commands = outbox::Commands::default();
 		let page = Page::default();
 		page.state.lock().unwrap().commands = Some(commands.clone());
 		page.send(button(true));
@@ -453,14 +455,19 @@ mod tests {
 		});
 		assert_eq!(page.state.lock().unwrap().owed, [button(false)]);
 
-		// The helper catches up, and each write makes room, as the writer's do.
+		// The helper catches up, and each batch makes room, as the writer's do.
 		let mut received = Vec::new();
-		while let Ok(command) = queue.try_recv() {
-			commands.wrote(&command);
-			let protocol::Command::Input(_, input) = command else {
-				panic!("only input is queued");
-			};
-			received.push(input);
+		loop {
+			let batch = commands.take();
+			if batch.is_empty() {
+				break;
+			}
+			for command in batch {
+				let protocol::Command::Input(_, input) = command else {
+					panic!("only input is queued");
+				};
+				received.push(input);
+			}
 			page.state.lock().unwrap().flush();
 		}
 		assert_eq!(received.first(), Some(&button(true)));
@@ -469,22 +476,31 @@ mod tests {
 		assert!(!received.iter().any(|input| matches!(input, Input::Move { .. })));
 	}
 
-	/// A new canvas frame rate reaches the page once, even past the backlog.
+	/// A new canvas frame rate reaches the page once, the newest of those
+	/// waiting, even past the backlog.
 	#[test]
 	fn a_new_frame_rate_reaches_the_page() {
-		let (commands, queue) = run::Commands::new();
+		let commands = outbox::Commands::default();
 		let page = Page::default();
-		page.state.lock().unwrap().commands = Some(commands);
+		page.state.lock().unwrap().commands = Some(commands.clone());
 		page.set_framerate(30);
 		page.set_framerate(30);
-		assert!(matches!(queue.try_recv(), Ok(protocol::Command::FrameRate(_, 30))));
-		assert!(queue.try_recv().is_err(), "an unchanged rate is not sent again");
+		assert!(matches!(commands.take()[..], [protocol::Command::FrameRate(_, 30)]));
+		assert!(commands.take().is_empty(), "an unchanged rate is not sent again");
 
 		while !page.state.lock().unwrap().backlogged {
 			page.send(Input::Text("x".into()));
 		}
 		page.set_framerate(60);
-		let last = queue.try_iter().last();
-		assert!(matches!(last, Some(protocol::Command::FrameRate(_, 60))));
+		page.set_framerate(90);
+		let rates: Vec<_> = commands
+			.take()
+			.into_iter()
+			.filter_map(|command| match command {
+				protocol::Command::FrameRate(_, rate) => Some(rate),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(rates, [90]);
 	}
 }
