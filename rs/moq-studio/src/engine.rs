@@ -8,8 +8,10 @@
 //! - **program** draws preview and program once per canvas frame and hands the
 //!   program to each rendition's encoder its gate lets encode, scaled to the
 //!   rendition and stamped with the program clock.
-//! - **audio** advances the audio bus on the same clock and publishes its
-//!   program mix.
+//! - **audio** advances the audio bus, and with it every mix, on the same
+//!   clock.
+//! - **audio-encode** encodes the mix on program into the program audio, and
+//!   **audio-record** into the recording's own copy while a recording reads it.
 //! - **encode**: one per program rendition, which waits for each program copy
 //!   and encodes it. A new canvas size or frame rate starts new renditions.
 //! - Recordings write their files on the tokio runtime.
@@ -36,7 +38,7 @@ use moq_video::render::export::{Exporter, Pending, Route};
 
 use crate::autosave::{self, Autosave};
 use crate::ladder::{self, Gate, Joins, Step};
-use crate::{health, record};
+use crate::{health, mix, record};
 
 /// The GPU everything shares: sources upload to it, the compositor draws on
 /// it, the window presents from it, and the encoder reads the program from it.
@@ -526,8 +528,10 @@ pub struct Engine {
 	pub stats: Arc<Stats>,
 	/// How the stream is delivered, graded every [`health::INTERVAL`].
 	pub health: Mutex<health::Report>,
-	/// The program audio, which every source with sound is routed into.
-	pub mix: moq_audio::bus::Mix,
+	/// The mix the program audio carries, as the collection picks it.
+	program_audio: mix::Pick,
+	/// Plays a mix to the speakers while the creator listens.
+	monitor: Mutex<Option<mix::Monitor>>,
 	/// `None` when running without a relay.
 	pub output: Option<Output>,
 	/// Records the program, and each source too if asked.
@@ -590,7 +594,6 @@ impl Engine {
 			room,
 		} = launch;
 		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default())?;
-		let program_mix = bus.mix();
 		let subscribe = moq_tokio::origin::spawn();
 		// Every relay feeds `subscribe`, so a guest either one routes is seen.
 		let guests = match &room {
@@ -648,7 +651,6 @@ impl Engine {
 		let dir = std::path::absolute(dir.unwrap_or(Path::new(".")))?;
 		let sources = Sources::new(source::Context {
 			bus: bus.clone(),
-			program: program_mix.clone(),
 			origin: sources,
 			dir,
 			output: moq_video::render::output(&gpu.device),
@@ -673,7 +675,8 @@ impl Engine {
 			autosave,
 			stats,
 			health: Mutex::default(),
-			mix: program_mix,
+			program_audio: mix::Pick::default(),
+			monitor: Mutex::default(),
 			output,
 			recorder,
 			room,
@@ -686,6 +689,7 @@ impl Engine {
 			renditions,
 			ladder,
 			audio,
+			recorded_audio,
 			clock,
 			health,
 			sources: _,
@@ -702,10 +706,23 @@ impl Engine {
 		engine.threads.lock().unwrap().push(thread);
 		let mix = engine.clone();
 		let config = bus.config().clone();
-		let thread = clocked("audio".into(), async move || {
-			mix.run_audio(start, epoch, config, mixer, audio).await
-		})?;
+		let rate = config.sample_rate;
+		let thread = clocked("audio".into(), async move || mix.run_audio(start, config, mixer).await)?;
 		engine.threads.lock().unwrap().push(thread);
+		// Each on its own thread, so an encoder that falls behind skips its own
+		// audio rather than holding up the bus or the other.
+		let audio = [
+			("audio-encode", Audio::Program(audio)),
+			("audio-record", Audio::Recording(recorded_audio)),
+		];
+		for (name, audio) in audio {
+			let encode = engine.clone();
+			let follow = engine.program_audio.follow();
+			let thread = clocked(name.into(), async move || {
+				encode.encode_audio(epoch, rate, follow, audio).await
+			})?;
+			engine.threads.lock().unwrap().push(thread);
+		}
 		let save = engine.clone();
 		clocked("autosave".into(), async move || save.autosave.run(&save.state).await)?;
 		tokio::spawn(engine.clone().grade(health::Sampler::new(health)));
@@ -759,6 +776,57 @@ impl Engine {
 		self.autosave.keep(&self.state)
 	}
 
+	/// Play a mix to an output on `runtime`, from the next frame, or stop with
+	/// `None`. A monitored mix that leaves the collection hands over to the one
+	/// the program carries, and another output takes over from the old one.
+	///
+	/// Takes the `state` already locked, so an edit renaming the mix and the
+	/// pick that follows it land before the next frame's sync.
+	pub fn listen(
+		&self,
+		state: &mut State,
+		runtime: &tokio::runtime::Handle,
+		listen: Option<mix::Listen<'_>>,
+	) -> anyhow::Result<()> {
+		let mut monitor = self.monitor.lock().unwrap();
+		match (listen, monitor.as_mut()) {
+			(None, _) => *monitor = None,
+			(Some(listen), Some(monitor)) if monitor.failed().is_none() => {
+				monitor.set_name(listen.mix);
+				monitor.set_speaker(listen.speaker);
+			}
+			// Listening again after a failure starts over.
+			(Some(listen), _) => *monitor = Some(mix::Monitor::start(runtime, listen.mix, listen.speaker)?),
+		}
+		// Synced on the next frame, which picks the mix by its name.
+		state.stale = true;
+		Ok(())
+	}
+
+	/// The mix played to the speakers, and why it stopped if it did.
+	pub fn listening(&self) -> Option<(String, Option<String>)> {
+		let monitor = self.monitor.lock().unwrap();
+		monitor
+			.as_ref()
+			.map(|monitor| (monitor.name().to_string(), monitor.failed()))
+	}
+
+	/// Point the program audio and the monitor at the mixes `state` now has.
+	fn pick_mixes(&self, state: &State) {
+		let mixes = &state.collection.mixes;
+		if let Some(mix) = state.sources.mix(&mixes.program) {
+			self.program_audio.set(mix.clone());
+		}
+		if let Some(monitor) = self.monitor.lock().unwrap().as_mut() {
+			if !mixes.names.iter().any(|name| name == monitor.name()) {
+				monitor.set_name(&mixes.program);
+			}
+			if let Some(mix) = state.sources.mix(monitor.name()) {
+				monitor.play(mix.clone());
+			}
+		}
+	}
+
 	/// Grade the stream's health every interval, for the Health panel.
 	async fn grade(self: Arc<Self>, mut sampler: health::Sampler) {
 		let mut interval = kio::clock::interval(health::INTERVAL);
@@ -774,8 +842,9 @@ impl Engine {
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
 		// A stalled picture matters where the program draws it: a scene on air,
-		// including one leaving in a transition, or the top layer over them. Stalled sound
-		// matters wherever the program plays it.
+		// including one leaving in a transition, or the top layer over them.
+		// Stalled sound matters only if the mix on program plays it, not one
+		// only listened to.
 		let stalled = {
 			let state = self.state.lock().unwrap();
 			let shown: Vec<&str> = state
@@ -794,7 +863,7 @@ impl Engine {
 					let stall = feed.stalled(now)?;
 					let matters = match stall {
 						source::Stall::Picture(_) => shown.contains(&name),
-						source::Stall::Sound(_) => feed.strip().is_some_and(|strip| !strip.muted()),
+						source::Stall::Sound(_) => state.sources.plays(&state.collection.mixes.program, name),
 					};
 					matters.then(|| (name.to_string(), stall))
 				})
@@ -867,6 +936,7 @@ impl Engine {
 					for driver in state.sources.sync(&state.collection) {
 						spawn(driver);
 					}
+					self.pick_mixes(state);
 				}
 				if let Err(err) = state.compositor.render(&state.collection, &state.sources, tick) {
 					tracing::error!(%err, "cannot draw the canvas");
@@ -951,38 +1021,22 @@ impl Engine {
 		}
 	}
 
-	/// Advance the bus as the program clock advances, and publish the program
-	/// mix stamped `epoch` past `start`.
+	/// Advance the bus as the program clock advances, from `start`.
 	///
 	/// Runs without a relay too, so the meters move and sources never back up,
-	/// until the studio [stops](Self::stop), which finishes the audio track.
-	async fn run_audio(
-		&self,
-		start: Instant,
-		epoch: Duration,
-		config: moq_audio::bus::Config,
-		mut mixer: moq_audio::bus::Driver,
-		mut audio: Audio,
-	) {
+	/// until the studio [stops](Self::stop), which ends every mix, so each
+	/// output reads its mix to the end.
+	async fn run_audio(&self, start: Instant, config: moq_audio::bus::Config, mut mixer: moq_audio::bus::Driver) {
 		let rate = u128::from(config.sample_rate);
 		let mut clock = kio::clock::interval_at(start, AUDIO_PERIOD);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
-		let mut program = self.mix.reader();
 		let mut written: u128 = 0;
 
 		loop {
 			let tick = clock.tick().await;
 			if self.stopped.load(Ordering::Relaxed) {
-				if let Some(mut producer) = audio.program.take()
-					&& let Err(err) = producer.finish()
-				{
-					self.stats.fail_audio(err);
-				}
-				if let Some(mut producer) = audio.recording.take()
-					&& let Err(err) = producer.finish()
-				{
-					self.stats.fail_recording_audio(err);
-				}
+				drop(mixer);
+				self.program_audio.close();
 				return;
 			}
 			// Sample-exact against the program clock, so audio and video stay
@@ -994,60 +1048,70 @@ impl Engine {
 			}
 			mixer.advance(frames);
 			written = due;
-			let block = program.read().await.expect("the mixer is alive");
-			let position = u128::from(block.position);
-			let timestamp = moq_net::Timestamp::from_micros((epoch.as_micros() + position * 1_000_000 / rate) as u64);
+		}
+	}
 
-			let Ok(timestamp) = timestamp else { continue };
-			let data: Bytes = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-			let frame = moq_audio::Frame::new(data, timestamp);
-			// The recording's copy encodes only while a recording reads it, and
-			// marks the gap as the last one stops, so the next starts on the
-			// program clock rather than where the samples left off.
-			let recorded = audio
-				.recording
-				.as_ref()
-				.is_some_and(|recording| recording.demand().wanted().is_some());
-			if std::mem::replace(&mut audio.recorded, recorded)
-				&& !recorded && let Some(recording) = audio.recording.as_mut()
-				&& let Err(err) = recording.discontinuity()
-			{
-				self.stats.fail_recording_audio(err);
-				if let Some(producer) = audio.recording.take() {
+	/// Encode the mix `follow` reads into `audio`, stamped `epoch` past the
+	/// bus's start at `rate`, until the bus stops, and finish the track.
+	///
+	/// The recording's copy encodes only while a recording reads it, and marks
+	/// the gap as the last one stops, so the next starts on the program clock
+	/// rather than where the samples left off.
+	async fn encode_audio(&self, epoch: Duration, rate: u32, mut follow: mix::Follow, audio: Audio) {
+		let (mut producer, recording) = match audio {
+			Audio::Program(producer) => (producer, false),
+			Audio::Recording(producer) => (producer, true),
+		};
+		// The recording's copy failing leaves the published audio running, so
+		// it is the recording's to report.
+		let fail = |err: moq_audio::Error| match recording {
+			false => self.stats.fail_audio(err),
+			true => self.stats.fail_recording_audio(err),
+		};
+		let rate = u128::from(rate);
+		let mut next = None;
+		let mut wanted = false;
+		while let Some(block) = follow.read().await {
+			let was = std::mem::replace(&mut wanted, !recording || producer.demand().wanted().is_some());
+			if !wanted {
+				if was && let Err(err) = producer.discontinuity() {
+					fail(err);
 					producer.abort(moq_net::StreamError::Internal.into());
+					return;
 				}
+				next = None;
+				continue;
 			}
-			for (producer, wanted, published) in [
-				(&mut audio.program, true, true),
-				(&mut audio.recording, recorded, false),
-			] {
-				let Some(publish) = producer.as_mut().filter(|_| wanted) else {
-					continue;
-				};
-				if let Err(err) = publish.write(&frame) {
-					// The recording's copy failing leaves the published audio
-					// running, so it is the recording's to report.
-					match published {
-						true => self.stats.fail_audio(err),
-						false => self.stats.fail_recording_audio(err),
-					}
-					// Readers see the audio fail rather than go away unfinished.
-					if let Some(producer) = producer.take() {
-						producer.abort(moq_net::StreamError::Internal.into());
-					}
-				}
+			// Audio this encoder fell too far behind to read leaves a gap in
+			// the track rather than pulling what follows early.
+			if next.is_some_and(|next| next != block.position) {
+				producer.reanchor();
 			}
+			next = Some(block.position + block.frames() as u64);
+			let position = u128::from(block.position);
+			let micros = epoch.as_micros() + position * 1_000_000 / rate;
+			let Ok(timestamp) = moq_net::Timestamp::from_micros(micros as u64) else {
+				continue;
+			};
+			let data: Vec<u8> = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+			if let Err(err) = producer.write(&moq_audio::Frame::new(Bytes::from(data), timestamp)) {
+				fail(err);
+				// Readers see the audio fail rather than go away unfinished.
+				producer.abort(moq_net::StreamError::Internal.into());
+				return;
+			}
+		}
+		if let Err(err) = producer.finish() {
+			fail(err);
 		}
 	}
 }
 
-/// The program audio's encoders: the published one, and the recording's own
-/// copy, each `None` once it failed.
-struct Audio {
-	program: Option<moq_audio::encode::Producer>,
-	recording: Option<moq_audio::encode::Producer>,
-	/// Whether the recording's copy was written last, while a recording read it.
-	recorded: bool,
+/// One encoder of the mix on program: the published program audio, or the
+/// recording's own copy.
+enum Audio {
+	Program(moq_audio::encode::Producer),
+	Recording(moq_audio::encode::Producer),
 }
 
 /// The relay connections the program goes live on, the preferred first, and
@@ -1067,7 +1131,10 @@ struct Publish {
 	/// The renditions of the canvas the studio started with, unless the canvas
 	/// could not be encoded without a relay.
 	ladder: Option<Ladder>,
-	audio: Audio,
+	/// The program audio's encoder.
+	audio: moq_audio::encode::Producer,
+	/// The recording's own copy of it.
+	recorded_audio: moq_audio::encode::Producer,
 	/// The catalog's clock, which the codec producers write timestamps
 	/// against verbatim.
 	clock: moq_mux::Clock,
@@ -1247,11 +1314,8 @@ async fn publish(
 		Publish {
 			renditions,
 			ladder,
-			audio: Audio {
-				program: Some(audio),
-				recording: Some(recorded_audio),
-				recorded: false,
-			},
+			audio,
+			recorded_audio,
 			clock,
 			health,
 			sources,

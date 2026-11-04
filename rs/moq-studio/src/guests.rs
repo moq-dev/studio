@@ -524,7 +524,7 @@ impl Room {
 		}
 
 		for source in &sources {
-			let audio = before.audio.get(source).copied().unwrap_or_default();
+			let audio = before.audio.get(source).cloned().unwrap_or_default();
 			draft.set_audio(source, Some(moq_scene::Audio { muted: true, ..audio }))?;
 		}
 		Ok(*draft.collection() != before)

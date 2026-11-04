@@ -18,10 +18,11 @@ categories = ["multimedia", "multimedia::video", "gui"]
 default = ["quic", "websocket", "nvidia"]
 quic = ["moq-tokio/quic"]
 websocket = ["moq-tokio/websocket"]
-# Camera, display, window, microphone, and system-audio sources. Off by default
-# like moq-cli's `capture`: on Linux the microphone links libasound at build
-# time. Enable with `cargo run -p moq-studio --features capture,openh264`.
-capture = ["moq-scene/capture"]
+# Camera, display, window, microphone, and system-audio sources, and playing a
+# mix to the speakers. Off by default like moq-cli's `capture`: on Linux the
+# microphone and the speakers link libasound at build time. Enable with
+# `cargo run -p moq-studio --features capture,openh264`.
+capture = ["moq-scene/capture", "moq-audio/playback"]
 # NVIDIA hardware codecs (NVENC + NVDEC) on Linux, as in moq-cli.
 nvidia = ["moq-video/nvidia"]
 # The vendored OpenH264 software H.264 fallback, opt-in like moq-video's.
@@ -42,7 +43,9 @@ anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
 # The window, its event loop, and the egui integration. `wgpu` is the renderer
 # the compositor shares a device with; no glow, no system font discovery.
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wayland", "wgpu", "x11"] }
+# `persistence` keeps per-user picks, such as the output Listen plays on, out
+# of the shared scene file.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "persistence", "wayland", "wgpu", "x11"] }
 egui = "0.36"
 # Docked, rearrangeable panels. 0.21 is the newest release and pins egui 0.36.
 egui_dock = "0.21"

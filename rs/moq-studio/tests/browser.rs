@@ -75,7 +75,6 @@ impl Studio {
 		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
 		let helper = Helper::new(env!("CARGO_BIN_EXE_moq-studio"), profile, &adapter, &device, &queue);
 		let mut sources = Sources::new(Context {
-			program: bus.mix(),
 			bus,
 			origin: origin.consume(),
 			dir: dir.path().to_path_buf(),
