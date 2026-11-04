@@ -66,6 +66,8 @@ url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
 
 [dev-dependencies]
+# Reads a saved clip's timeline back; the version moq-mux writes it with.
+mp4-atom = "0.17.0"
 # The auth server a test relay verifies guest tokens with.
 moq-auth = { workspace = true, features = ["serve"] }
 moq-relay = { workspace = true, features = ["test-support"] }

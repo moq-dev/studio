@@ -346,6 +346,10 @@ pub struct Output {
 	/// while held. The Health panel reads their states.
 	_connections: Vec<moq_tokio::Connection>,
 	publication: moq_net::origin::Publication,
+	/// What the broadcast lists and the clock its timestamps are on, for a
+	/// replay of the program or a source.
+	catalog: moq_scene::publish::Catalog,
+	clock: moq_mux::Clock,
 }
 
 /// A relay the program is published to.
@@ -358,6 +362,39 @@ pub struct Relay {
 impl Drop for Output {
 	fn drop(&mut self) {
 		self.publication.close();
+	}
+}
+
+impl Output {
+	/// What a replay of the program copies: its video and audio, up to now.
+	pub fn program(&self) -> moq_scene::replay::Target {
+		let catalog = self.catalog.snapshot();
+		self.target(
+			catalog.video.renditions.into_iter().next(),
+			catalog.audio.renditions.into_iter().next(),
+		)
+	}
+
+	/// What a replay of the local source `name` copies: the video of its own
+	/// track, up to now, or `None` while it publishes no video.
+	pub fn source(&self, name: &str) -> Option<moq_scene::replay::Target> {
+		let mut catalog = self.catalog.snapshot();
+		let listed = catalog.ext.studio.sources.remove(name)?;
+		let video = listed.video.renditions.into_iter().next()?;
+		Some(self.target(Some(video), None))
+	}
+
+	fn target(
+		&self,
+		video: Option<(String, hang::catalog::VideoConfig)>,
+		audio: Option<(String, hang::catalog::AudioConfig)>,
+	) -> moq_scene::replay::Target {
+		moq_scene::replay::Target {
+			broadcast: self.publication.broadcast().consume(),
+			video,
+			audio,
+			end: self.clock.now(),
+		}
 	}
 }
 
@@ -846,6 +883,7 @@ async fn publish(
 	options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Opus, &input);
 	options.config.bitrate = Some(AUDIO_BITRATE);
 	let graded = catalog.clone();
+	let listed = catalog.clone();
 	let audio = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)?;
 	drop(reserved);
 
@@ -878,6 +916,8 @@ async fn publish(
 		on_demand,
 		_connections: connections,
 		publication,
+		catalog: listed,
+		clock: clock.clone(),
 	};
 	Ok((
 		output,
@@ -1552,6 +1592,15 @@ mod tests {
 		})
 		.await
 		.expect("health grades the program's tracks");
+
+		// The program's recent past saves as a clip, from the groups it holds.
+		let target = engine.target(&crate::replay::Of::Program).expect("the program's past");
+		let take = moq_scene::replay::Take::clip(&target, Duration::from_secs(1)).expect("a take");
+		let clip = kio::clock::timeout(TIMEOUT, crate::replay::save(take, engine.autosave.path()))
+			.await
+			.expect("the clip saves")
+			.expect("a clip");
+		assert_eq!(clip, dir.path().join("show-clip-1.mp4"));
 	}
 
 	/// With a failover relay, both relays route the program under its one
