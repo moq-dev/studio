@@ -168,6 +168,16 @@ struct Written {
 	/// until there is an edit to undo. `None` when it must be rewritten.
 	history: Option<String>,
 	disk: Disk,
+	rewrite: Rewrite,
+}
+
+/// Files to write again though they hold the collection and history: deleted
+/// outside the studio, or renamed into place without a sync. Kept apart from
+/// what they hold, so the studio still has nothing unsaved.
+#[derive(Default)]
+struct Rewrite {
+	scene: bool,
+	history: bool,
 }
 
 /// Exactly what the scene file and its history held when the studio last read
@@ -228,6 +238,7 @@ impl Autosave {
 			collection: written,
 			history: Some(loaded.history.to_toml()?),
 			disk,
+			rewrite: Rewrite::default(),
 		};
 		let autosave = Self {
 			path,
@@ -298,7 +309,7 @@ impl Autosave {
 		loop {
 			self.look(written, doc)?;
 			let text = doc.lock().unwrap().text()?;
-			if written.collection.as_ref() != Some(&text.collection) {
+			if written.rewrite.scene || written.collection.as_ref() != Some(&text.collection) {
 				// Checked again right before the rename, since another studio may
 				// have written the files since the look above.
 				let unchanged = || Ok(self.outside(&written.disk)?.is_none());
@@ -312,11 +323,12 @@ impl Autosave {
 				// Renamed into place, so the studio's own file never reads as an
 				// outside edit, but written again until its rename is synced.
 				written.disk.scene = Some(text.collection.clone().into_bytes());
-				written.collection = None;
-				sync(&dir).with_context(context)?;
 				written.collection = Some(text.collection);
+				written.rewrite.scene = true;
+				sync(&dir).with_context(context)?;
+				written.rewrite.scene = false;
 			}
-			if written.history.as_ref() != Some(&text.history) {
+			if written.rewrite.history || written.history.as_ref() != Some(&text.history) {
 				let unchanged = || Ok(self.outside(&written.disk)?.is_none());
 				let context = || format!("writing {}", self.history.display());
 				let renamed = write(&self.history, &text.history, false, unchanged).with_context(context)?;
@@ -324,9 +336,10 @@ impl Autosave {
 					continue;
 				};
 				written.disk.history = Some(text.history.clone().into_bytes());
-				written.history = None;
-				sync(&dir).with_context(context)?;
 				written.history = Some(text.history);
+				written.rewrite.history = true;
+				sync(&dir).with_context(context)?;
+				written.rewrite.history = false;
 			}
 			return Ok(());
 		}
@@ -337,7 +350,7 @@ impl Autosave {
 	pub fn check<D: Document>(&self, doc: &Mutex<D>) -> anyhow::Result<()> {
 		let mut written = self.written.lock().unwrap();
 		self.look(&mut written, doc)?;
-		if written.collection.is_none() || written.history.is_none() {
+		if written.rewrite.scene || written.rewrite.history {
 			self.edits.retry();
 		}
 		Ok(())
@@ -351,12 +364,12 @@ impl Autosave {
 		if now.scene.is_none() && written.disk.scene.is_some() {
 			tracing::warn!(path = %self.path.display(), "the scene file was deleted outside the studio; writing it again");
 			written.disk.scene = None;
-			written.collection = None;
+			written.rewrite.scene = true;
 		}
 		if now.history.is_none() && written.disk.history.is_some() {
 			tracing::warn!(path = %self.history.display(), "the history was deleted outside the studio; writing it again");
 			written.disk.history = None;
-			written.history = None;
+			written.rewrite.history = true;
 		}
 		let Some(disk) = written.disk.changed(now) else {
 			*self.conflict.lock().unwrap() = None;
@@ -414,6 +427,7 @@ impl Autosave {
 			collection: Some(text.collection),
 			history: Some(text.history),
 			disk,
+			rewrite: Rewrite::default(),
 		};
 		*self.conflict.lock().unwrap() = None;
 		Ok(())
@@ -1020,7 +1034,15 @@ mod tests {
 		std::fs::remove_file(&path).unwrap();
 		running.autosave.save(&*running.doc).unwrap();
 		assert_eq!(read(&path), saved.collection);
+
+		// The studio still has nothing unsaved, so an outside edit landing
+		// beside a deletion is taken, not held.
+		std::fs::remove_file(&history).unwrap();
+		std::fs::write(&path, HAND_WRITTEN).unwrap();
+		kio::clock::sleep(POLL + Duration::from_millis(100)).await;
 		assert_eq!(running.autosave.conflict(), None);
+		let hand = Collection::from_toml(HAND_WRITTEN).unwrap();
+		assert_eq!(running.text().collection, hand.to_toml().unwrap());
 	}
 
 	/// A rename whose directory cannot be synced still replaced the file, so
