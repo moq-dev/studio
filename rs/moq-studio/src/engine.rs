@@ -2589,7 +2589,7 @@ mod tests {
 	/// Removing it ends its broadcast and gives its session back.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
-	async fn a_further_canvas_publishes_its_own_broadcast() {
+	async fn the_program_of_a_further_canvas_has_its_own_broadcast() {
 		let _ = moq_tokio::crypto::install_default();
 		let fixture = moq_relay::test_relay().await.expect("test relay");
 		let ready = fixture.relay.ready();
