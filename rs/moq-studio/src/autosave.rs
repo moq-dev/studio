@@ -10,7 +10,8 @@
 //! studio. The studio looks for that every [`POLL`], before each write, and
 //! again right before each write's rename. It takes such a change when it has
 //! nothing unsaved, and otherwise holds it as a [`Conflict`], writing nothing
-//! until the user keeps the studio's version or takes the file's.
+//! until the user keeps the studio's version or takes the file's. A file
+//! deleted outside the studio is written again.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -186,6 +187,16 @@ impl Disk {
 			history: read(history)?,
 		})
 	}
+
+	/// `now`, what the files hold, if an edit outside the studio changed them
+	/// since they held `self`. The history counts on its own, since another
+	/// studio writes it after the scene file. A deleted file is no edit to
+	/// take, as the studio writes it again.
+	fn changed(&self, now: Self) -> Option<Self> {
+		let changed = |now: &Option<Vec<u8>>, then: &Option<Vec<u8>>| now.is_some() && now != then;
+		let changed = now.scene.is_some() && (changed(&now.scene, &self.scene) || changed(&now.history, &self.history));
+		changed.then_some(now)
+	}
 }
 
 impl Written {
@@ -233,8 +244,7 @@ impl Autosave {
 		&self.path
 	}
 
-	/// Whether the scene file exists: it was read when opened, or a save has
-	/// created it since.
+	/// Whether the scene file exists, as the studio last read or wrote it.
 	pub fn exists(&self) -> bool {
 		self.written.lock().unwrap().disk.scene.is_some()
 	}
@@ -292,39 +302,63 @@ impl Autosave {
 				// Checked again right before the rename, since another studio may
 				// have written the files since the look above.
 				let unchanged = || Ok(self.outside(&written.disk)?.is_none());
-				let wrote = write(&self.path, &text.collection, written.disk.scene.is_none(), unchanged)
-					.with_context(|| format!("writing {}", self.path.display()))?;
-				if !wrote {
+				let context = || format!("writing {}", self.path.display());
+				let renamed = write(&self.path, &text.collection, written.disk.scene.is_none(), unchanged)
+					.with_context(context)?;
+				let Some(dir) = renamed else {
 					// Taken or held as a conflict by the next look.
 					continue;
-				}
+				};
+				// Renamed into place, so the studio's own file never reads as an
+				// outside edit, but written again until its rename is synced.
 				written.disk.scene = Some(text.collection.clone().into_bytes());
+				written.collection = None;
+				sync(&dir).with_context(context)?;
 				written.collection = Some(text.collection);
 			}
 			if written.history.as_ref() != Some(&text.history) {
 				let unchanged = || Ok(self.outside(&written.disk)?.is_none());
-				let wrote = write(&self.history, &text.history, false, unchanged)
-					.with_context(|| format!("writing {}", self.history.display()))?;
-				if !wrote {
+				let context = || format!("writing {}", self.history.display());
+				let renamed = write(&self.history, &text.history, false, unchanged).with_context(context)?;
+				let Some(dir) = renamed else {
 					continue;
-				}
+				};
 				written.disk.history = Some(text.history.clone().into_bytes());
+				written.history = None;
+				sync(&dir).with_context(context)?;
 				written.history = Some(text.history);
 			}
 			return Ok(());
 		}
 	}
 
-	/// Look for an outside edit to the files now, without writing.
+	/// Look for an outside edit to the files now, without writing, and ask
+	/// for a save if a file must be written again, such as one deleted.
 	pub fn check<D: Document>(&self, doc: &Mutex<D>) -> anyhow::Result<()> {
 		let mut written = self.written.lock().unwrap();
-		self.look(&mut written, doc)
+		self.look(&mut written, doc)?;
+		if written.collection.is_none() || written.history.is_none() {
+			self.edits.retry();
+		}
+		Ok(())
 	}
 
 	/// Take an outside edit to the files if `doc` has nothing unsaved and
-	/// accepts it, or else hold it as a [`Conflict`] and fail.
+	/// accepts it, or else hold it as a [`Conflict`] and fail. A file deleted
+	/// outside the studio holds nothing to keep, so it is written again.
 	fn look<D: Document>(&self, written: &mut Written, doc: &Mutex<D>) -> anyhow::Result<()> {
-		let Some(disk) = self.outside(&written.disk)? else {
+		let now = Disk::read(&self.path, &self.history)?;
+		if now.scene.is_none() && written.disk.scene.is_some() {
+			tracing::warn!(path = %self.path.display(), "the scene file was deleted outside the studio; writing it again");
+			written.disk.scene = None;
+			written.collection = None;
+		}
+		if now.history.is_none() && written.disk.history.is_some() {
+			tracing::warn!(path = %self.history.display(), "the history was deleted outside the studio; writing it again");
+			written.disk.history = None;
+			written.history = None;
+		}
+		let Some(disk) = written.disk.changed(now) else {
 			*self.conflict.lock().unwrap() = None;
 			return Ok(());
 		};
@@ -356,14 +390,9 @@ impl Autosave {
 	}
 
 	/// What the files hold now, if an edit outside the studio changed them
-	/// since `disk`. The history counts on its own, since another studio
-	/// writes it after the scene file. A file deleted since holds nothing to
-	/// keep, so the next write recreates it.
+	/// since `disk`.
 	fn outside(&self, disk: &Disk) -> std::io::Result<Option<Disk>> {
-		let now = Disk::read(&self.path, &self.history)?;
-		let changed = |now: &Option<Vec<u8>>, then: &Option<Vec<u8>>| now.is_some() && now != then;
-		let changed = now.scene.is_some() && (changed(&now.scene, &disk.scene) || changed(&now.history, &disk.history));
-		Ok(changed.then_some(now))
+		Ok(disk.changed(Disk::read(&self.path, &self.history)?))
 	}
 
 	/// The collection and history `disk` holds.
@@ -480,19 +509,20 @@ fn load_history(path: &Path, bytes: Option<&[u8]>, collection: Collection) -> an
 }
 
 /// Replace the file at `path` with `text` all at once, so a crash leaves
-/// either the old file or the new one, never part of either. Returns `false`,
-/// leaving the file as it is, if the files changed outside the studio: a
-/// `new` file, one the studio last found missing, exists, or `unchanged`,
-/// asked right before the rename, says otherwise.
+/// either the old file or the new one, never part of either. Returns the
+/// directory to [`sync`] once the caller notes the rename, or `None`, leaving
+/// the file as it is, if the files changed outside the studio: a `new` file,
+/// one the studio last found missing, exists, or `unchanged`, asked right
+/// before the rename, says otherwise.
 fn write(
 	path: &Path,
 	text: &str,
 	new: bool,
 	unchanged: impl FnOnce() -> std::io::Result<bool>,
-) -> std::io::Result<bool> {
+) -> std::io::Result<Option<PathBuf>> {
 	let path = resolve(path)?;
 	let existing = match std::fs::metadata(&path) {
-		Ok(_) if new => return Ok(false),
+		Ok(_) if new => return Ok(None),
 		Ok(metadata) => {
 			// Refused as a write in place would be, so a read-only scene file
 			// is not replaced.
@@ -503,8 +533,8 @@ fn write(
 		Err(err) => return Err(err),
 	};
 	let dir = match path.parent() {
-		Some(dir) if !dir.as_os_str().is_empty() => dir,
-		_ => Path::new("."),
+		Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+		_ => PathBuf::from("."),
 	};
 
 	// Named uniquely and created exclusively, so another studio saving the
@@ -520,7 +550,7 @@ fn write(
 		use std::os::unix::fs::PermissionsExt;
 		builder.permissions(std::fs::Permissions::from_mode(0o666));
 	}
-	let mut file = builder.tempfile_in(dir)?;
+	let mut file = builder.tempfile_in(&dir)?;
 	// It replaces the old file, so it takes its permissions.
 	if let Some(permissions) = existing {
 		file.as_file().set_permissions(permissions)?;
@@ -533,22 +563,29 @@ fn write(
 	// still lost, since nothing binds every editor to a lock, except that a
 	// new file is never replaced.
 	if !unchanged()? {
-		return Ok(false);
+		return Ok(None);
 	}
 	match new {
 		true => match file.persist_noclobber(&path) {
 			Ok(_) => {}
-			Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+			Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
 			Err(err) => return Err(err.error),
 		},
 		false => {
 			file.persist(&path)?;
 		}
 	}
-	// And the rename itself, so a power loss cannot undo the save.
+	Ok(Some(dir))
+}
+
+/// Sync the directory `dir` a file was renamed into, so a power loss cannot
+/// undo the rename.
+fn sync(dir: &Path) -> std::io::Result<()> {
 	#[cfg(unix)]
 	std::fs::File::open(dir)?.sync_all()?;
-	Ok(true)
+	#[cfg(not(unix))]
+	let _ = dir;
+	Ok(())
 }
 
 /// The file a chain of symlinks at `path` ends in, which need not exist yet,
@@ -957,6 +994,86 @@ mod tests {
 		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 		kio::clock::sleep(QUIET + Duration::from_millis(100)).await;
 		assert_eq!(running.autosave.error(), None);
+	}
+
+	/// A file deleted outside the studio holds nothing to keep, so it is
+	/// written again within a poll, or by the save on quit, without waiting
+	/// for an edit.
+	#[tokio::test(start_paused = true)]
+	async fn writes_a_deleted_file_again() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		let history = history_path(&path);
+		let running = Running::start(path.clone()).await;
+		running.edit("A");
+		kio::clock::sleep(QUIET + Duration::from_millis(100)).await;
+		let saved = running.text();
+		assert_eq!(read(&history), saved.history);
+
+		std::fs::remove_file(&path).unwrap();
+		std::fs::remove_file(&history).unwrap();
+		kio::clock::sleep(POLL + QUIET + Duration::from_millis(100)).await;
+		assert_eq!(read(&path), saved.collection);
+		assert_eq!(read(&history), saved.history);
+
+		// Saved on quit before a poll sees it.
+		std::fs::remove_file(&path).unwrap();
+		running.autosave.save(&*running.doc).unwrap();
+		assert_eq!(read(&path), saved.collection);
+		assert_eq!(running.autosave.conflict(), None);
+	}
+
+	/// A rename whose directory cannot be synced still replaced the file, so
+	/// once the directory can be synced, the studio's own file is no outside
+	/// edit, and it is written again so the save is durable.
+	#[cfg(unix)]
+	#[test]
+	fn remembers_a_rename_it_could_not_sync() {
+		use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+		let dir = tempfile::tempdir().unwrap();
+		let show = dir.path().join("show");
+		std::fs::create_dir(&show).unwrap();
+		let path = show.join("show.toml");
+		let (autosave, Loaded { collection, .. }) = Autosave::open(path.clone()).unwrap();
+		let doc = Doc::new(collection);
+		autosave.save(&doc).unwrap();
+
+		// Files can be created and renamed in it, but it cannot be opened to sync.
+		let mode = |mode| std::fs::set_permissions(&show, std::fs::Permissions::from_mode(mode)).unwrap();
+		mode(0o333);
+		if std::fs::File::open(&show).is_ok() {
+			return mode(0o755); // Running as root, which may open it anyway.
+		}
+		doc.lock().unwrap().edit("Mine");
+		let err = autosave.save(&doc);
+		mode(0o755);
+		let err = format!("{:#}", err.unwrap_err());
+		assert!(err.contains("show.toml"), "{err}");
+		let mine = doc.lock().unwrap().text().unwrap();
+		assert_eq!(read(&path), mine.collection, "renamed before the sync failed");
+
+		autosave.check(&doc).unwrap();
+		assert_eq!(autosave.conflict(), None);
+		let inode = || std::fs::metadata(&path).unwrap().ino();
+		let renamed = inode();
+		autosave.save(&doc).unwrap();
+		assert_eq!(autosave.error(), None);
+		assert_ne!(inode(), renamed, "written again, so its rename is synced");
+		assert_eq!(read(&path), mine.collection);
+		assert_eq!(read(&history_path(&path)), mine.history);
+	}
+
+	/// A retry asks for a save without putting off one already waiting, so a
+	/// failure repeating every poll cannot hold it back until [`LIMIT`].
+	#[tokio::test(start_paused = true)]
+	async fn a_retry_does_not_put_off_a_waiting_save() {
+		let edits = Edits::default();
+		edits.record();
+		let deadline = edits.deadline();
+		kio::clock::sleep(QUIET / 2).await;
+		edits.retry();
+		assert_eq!(edits.deadline(), deadline);
 	}
 
 	/// The file is checked again after the save serializes the studio's

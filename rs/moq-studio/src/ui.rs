@@ -592,8 +592,12 @@ impl Panels {
 	/// by dragging them in the preview, snapping as they go.
 	fn arrange(&mut self, ui: &Ui, state: &mut State, response: &egui::Response, canvas: Canvas) -> anyhow::Result<()> {
 		let gesture = self.gestures.of(response);
-		// The release still moves the item to where the pointer let go.
-		if !response.dragged() && !response.drag_stopped() {
+		// The release still moves the item to where the pointer let go. A
+		// reload since the drag started, which the autosave can make between
+		// frames, may have put another item at its index.
+		if (!response.dragged() && !response.drag_stopped())
+			|| self.drag.as_ref().is_some_and(|drag| drag.reloads != state.reloads)
+		{
 			self.drag = None;
 		}
 		// A panel squeezed to nothing has no picture to map the pointer onto.
@@ -636,6 +640,7 @@ impl Panels {
 				origin: view.point(origin),
 				gesture,
 				hints: None,
+				reloads: state.reloads,
 			});
 		}
 
@@ -2044,6 +2049,8 @@ struct Drag {
 	gesture: Option<u64>,
 	/// The snapped rect, its guides, and its spacing, unless snapping is off.
 	hints: Option<snap::Snapped>,
+	/// The collection's reloads when the drag started.
+	reloads: u64,
 }
 
 /// How far, in points on screen, the pointer reaches to an edge or a line.

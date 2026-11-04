@@ -312,8 +312,9 @@ its own unsaved, it reloads the change, as **File > Reload** does, which
 replaces even unsaved edits. If both sides changed, or the change cannot be
 loaded, the studio saves nothing until you pick **Keep the studio's**, which
 writes its version over the file, or **Take the file's**; quitting before you
-pick saves nothing. One overwrite remains possible: a change saved in the
-instant between the studio's last look and its write replacing the file.
+pick saves nothing. A file deleted while the studio runs is written again. One
+overwrite remains possible: a change saved in the instant between the studio's
+last look and its write replacing the file.
 
 The last 100 edits are written the same way beside the scene file, as
 `show.history.toml` for `show.toml`, after the scene file, and opening the
