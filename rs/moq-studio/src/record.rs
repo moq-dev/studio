@@ -517,15 +517,21 @@ async fn record<S: Stream>(
 	let mut export = export.with_max_delay(MAX_DELAY);
 	let mut stopping = false;
 	let ended = loop {
-		let next = tokio::select! {
-			// What the export already has, a failure included, before the stop.
-			biased;
-			next = export.next() => next,
-			// What was read is still written.
-			() = stopped(&mut stop), if !stopping => {
-				export.stop();
-				stopping = true;
-				continue;
+		let next = if !stopping && *stop.borrow() {
+			// Checked on every chunk, so media that keeps arriving never holds a
+			// stop off. One look first, which reports a failure already waiting
+			// rather than losing it to the stop; what was read is still written.
+			stopping = true;
+			let next = export.poll_next(&kio::Waiter::noop());
+			export.stop();
+			match next {
+				Poll::Ready(next) => next,
+				Poll::Pending => continue,
+			}
+		} else {
+			tokio::select! {
+				next = export.next() => next,
+				() = stopped(&mut stop), if !stopping => continue,
 			}
 		};
 		match next {
