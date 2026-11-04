@@ -868,6 +868,8 @@ impl Driver {
 		clock: &Clock,
 		max: Duration,
 	) -> Result<(), Error> {
+		// A replacement track's stamps need not continue the old one's.
+		clock.timeline.video_restarted();
 		let mut options = moq_video::decode::Options::new();
 		options.start = moq_video::decode::Start::Latest;
 		options.decoder.output = self.context.output;
@@ -1744,26 +1746,35 @@ mod tests {
 		.await;
 	}
 
-	/// A live broadcast at `room/guest` with a video track, and an audio one
-	/// with `audio`, writing nothing until the test does.
-	async fn live(
-		origin: &moq_net::origin::Producer,
-		audio: bool,
-	) -> (
-		moq_net::origin::Publication,
-		moq_video::encode::Producer,
-		moq_video::encode::Encoder,
-		Option<moq_audio::encode::Producer>,
-	) {
-		let publication = origin.create_broadcast("room/guest").unwrap();
-		let mut broadcast = publication.broadcast().clone();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	/// A live broadcast at `room/guest`, writing nothing until the test does.
+	struct Live {
+		_publication: moq_net::origin::Publication,
+		broadcast: moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer,
+		video: moq_video::encode::Producer,
+		encoder: moq_video::encode::Encoder,
+		audio: Option<moq_audio::encode::Producer>,
+	}
+
+	/// A video track on its own timestamp base.
+	async fn rendition(
+		broadcast: &moq_net::broadcast::Producer,
+		timebase: moq_mux::catalog::Timebase,
+	) -> (moq_video::encode::Producer, moq_video::encode::Encoder) {
 		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 		let rendition = config.probe().await.unwrap();
-		let reserved = catalog.reserve().with_interval(config.gop.duration(config.framerate));
+		let reserved = timebase.reserve().with_interval(config.gop.duration(config.framerate));
 		let video = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition).unwrap();
-		let encoder = moq_video::encode::Encoder::new(&config).unwrap();
+		(video, moq_video::encode::Encoder::new(&config).unwrap())
+	}
+
+	/// A broadcast with a video track, and an audio one with `audio`.
+	async fn live(origin: &moq_net::origin::Producer, audio: bool) -> Live {
+		let publication = origin.create_broadcast("room/guest").unwrap();
+		let mut broadcast = publication.broadcast().clone();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let (video, encoder) = rendition(&broadcast, catalog.timebase()).await;
 		let audio = audio.then(|| {
 			let input = moq_audio::encode::Input::default();
 			let mut options = moq_audio::encode::Options::default();
@@ -1771,7 +1782,14 @@ mod tests {
 			moq_audio::encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap()
 		});
 		publication.announce(moq_net::origin::Route::default()).unwrap();
-		(publication, video, encoder, audio)
+		Live {
+			_publication: publication,
+			broadcast,
+			catalog,
+			video,
+			encoder,
+			audio,
+		}
 	}
 
 	/// Encode and publish one gray picture stamped `at`.
@@ -1799,7 +1817,7 @@ mod tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
-			let (_publication, mut video, mut encoder, _) = live(&origin, false).await;
+			let mut live = live(&origin, false).await;
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
 			start(&sources, drivers).await;
@@ -1808,7 +1826,7 @@ mod tests {
 
 			until_time(kio::clock::now()).await;
 			let arrived = kio::clock::now();
-			picture(&mut video, &mut encoder, 1_000);
+			picture(&mut live.video, &mut live.encoder, 1_000);
 			let stamp = moq_net::Timestamp::from_millis(1_000).unwrap();
 			let due = until(|| clock.due(stamp)).await;
 			assert_eq!(due, arrived + VIDEO_DELAY);
@@ -1820,6 +1838,55 @@ mod tests {
 		.await;
 	}
 
+	/// A video track replaced by one stamped earlier starts its own delay over,
+	/// rather than showing every picture on arrival against the old track's.
+	#[tokio::test(start_paused = true)]
+	async fn a_replacement_track_keeps_its_delay() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let mut live = live(&origin, false).await;
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection());
+			start(&sources, drivers).await;
+			let feed = sources.get("guest").unwrap();
+			let clock = feed.clock.clone().unwrap();
+			picture(&mut live.video, &mut live.encoder, 1_000);
+			let first = moq_net::Timestamp::from_millis(1_000).unwrap();
+			let due = until(|| clock.due(first)).await;
+			until_time(due).await;
+			assert_eq!(shown(feed).await, Duration::from(first));
+
+			// Its stamps sit half a second before the first track's clock reading.
+			let timebase = live.catalog.timebase();
+			timebase
+				.place(
+					moq_net::Timestamp::ZERO,
+					kio::clock::wall() - Duration::from_millis(500),
+				)
+				.unwrap();
+			let (video, mut encoder) = rendition(&live.broadcast, timebase).await;
+			drop(std::mem::replace(&mut live.video, video));
+			until_time(kio::clock::now()).await;
+			let arrived = kio::clock::now();
+			picture(&mut live.video, &mut encoder, 0);
+			let moved = until(|| match feed.take() {
+				Some(Picture::Frame(frame)) => panic!("{:?} shown on arrival", frame.timestamp),
+				_ => clock.due(first).filter(|at| *at != due),
+			})
+			.await;
+			assert!(moved > due, "the replacement re-anchored behind the first track");
+			until_time(arrived + VIDEO_DELAY - Duration::from_millis(1)).await;
+			assert!(feed.take().is_none(), "shown before its delay");
+			until_time(arrived + VIDEO_DELAY).await;
+			assert!(
+				shown(feed).await < Duration::from(first),
+				"stamped before the first track"
+			);
+		})
+		.await;
+	}
+
 	/// A picture waits for the sound stamped with it, which plays the jitter
 	/// estimate after it arrives, rather than showing on its own delay.
 	#[tokio::test(start_paused = true)]
@@ -1827,8 +1894,7 @@ mod tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
-			let (_publication, mut video, mut encoder, audio) = live(&origin, true).await;
-			let mut audio = audio.unwrap();
+			let mut live = live(&origin, true).await;
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
 			start(&sources, drivers).await;
@@ -1839,8 +1905,9 @@ mod tests {
 			let arrived = kio::clock::now();
 			let silence = vec![0u8; 960 * 2 * size_of::<f32>()];
 			let stamp = moq_net::Timestamp::from_millis(1_000).unwrap();
+			let audio = live.audio.as_mut().unwrap();
 			audio.write(&moq_audio::Frame::new(silence.into(), stamp)).unwrap();
-			picture(&mut video, &mut encoder, 1_000);
+			picture(&mut live.video, &mut live.encoder, 1_000);
 			let target = until(|| clock.target()).await;
 			assert!(target + crate::playout::BUS_LATENCY > VIDEO_DELAY, "{target:?}");
 			let due = arrived + target + crate::playout::BUS_LATENCY;

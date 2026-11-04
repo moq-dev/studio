@@ -85,35 +85,30 @@ impl<'a> Speaker<'a> {
 	/// media between them. A frame that arrives too late for that, because the
 	/// network stalled longer than the target, re-buffers instead: it sounds the
 	/// whole target after it arrived, and the clock re-pins on it, so video
-	/// waits along with the sound rather than running ahead of it.
+	/// waits along with the sound rather than running ahead of it. A frame
+	/// that would queue past the target, or that overlaps media already queued,
+	/// is skipped, so the queue never holds more than the target.
 	pub(crate) fn place(&mut self, start: Duration, duration: Duration, target: Duration, now: Instant) -> Place {
 		let target = target.min(MAX_DELAY);
 		let end = start.saturating_add(duration);
-		// A write half the bus's latency late still finds sound queued ahead of
-		// it, however coarsely the bus advances.
-		let follows = self.tail.and_then(|(sounds, media)| {
-			let begins = sounds + start.saturating_sub(media);
-			let rewound = start.saturating_add(CONTIGUOUS) < media;
-			let dry = begins < now + BUS_LATENCY / 2;
-			(!rewound && !dry).then_some((begins, sounds))
-		});
-		let begins = match follows {
-			Some((begins, sounds)) => {
-				if begins.saturating_duration_since(now) > target + BUS_LATENCY + SLACK {
-					self.tail = Some((sounds, end));
+		let begins = match self.tail {
+			None => now + target + BUS_LATENCY,
+			Some((sounds, media)) => {
+				let follows = sounds + start.saturating_sub(media);
+				// A write half the bus's latency late still finds sound queued
+				// ahead of it, however coarsely the bus advances.
+				if follows < now + BUS_LATENCY / 2 {
+					self.clock.audio_restarted();
+					now + target + BUS_LATENCY
+				} else if start.saturating_add(CONTIGUOUS) < media
+					|| follows.saturating_duration_since(now) > target + BUS_LATENCY + SLACK
+				{
+					// Media overlapping what is queued, or past the target, would
+					// queue without bound however fast it arrives.
+					self.tail = Some((sounds, media.max(end)));
 					return Place::Skip;
-				}
-				begins
-			}
-			None => {
-				let begins = now + target + BUS_LATENCY;
-				match self.tail {
-					Some((sounds, _)) => {
-						self.clock.audio_restarted();
-						// Never over audio still queued, after a rewind.
-						begins.max(sounds)
-					}
-					None => begins,
+				} else {
+					follows
 				}
 			}
 		};
@@ -311,6 +306,25 @@ mod tests {
 		assert_eq!(placed, [Place::Play(at(150)), Place::Play(at(170))]);
 		assert_eq!(speaker.place(ms(1_200), FRAME, TARGET, at(20)), Place::Play(at(190)));
 		assert_eq!(clock.due(stamp(1_200)), Some(at(190)));
+	}
+
+	/// Media overlapping what is queued, stamped the same or a millisecond
+	/// apart however long each frame is, is skipped rather than queued behind
+	/// it; once the queue runs out, a rewound timeline plays from the target.
+	#[test]
+	fn overlapping_media_queues_no_more_than_the_target() {
+		let clock = timeline::Producer::new(VIDEO_DELAY);
+		let changed = Notify::new();
+		let mut speaker = Speaker::new(clock.clone(), &changed);
+		for index in 0..1_000 {
+			for start in [ms(1_000), ms(1_000 + index)] {
+				if let Place::Play(begins) = speaker.place(start, FRAME, TARGET, at(0)) {
+					assert!(begins <= at(0) + TARGET + BUS_LATENCY + SLACK, "{index}: {begins:?}");
+				}
+			}
+		}
+		assert_eq!(speaker.place(ms(500), FRAME, TARGET, at(1_000)), Place::Play(at(1_150)));
+		assert_eq!(clock.due(stamp(500)), Some(at(1_150)));
 	}
 
 	/// A frame sounds when placed: the first, one that follows it, and ones
