@@ -1833,6 +1833,9 @@ impl Panels {
 		if let Some(error) = recording.error() {
 			ui.colored_label(ui.visuals().warn_fg_color, format!("recording encoder off: {error}"));
 		}
+		if let Some(error) = stats.recording_audio_error() {
+			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
+		}
 	}
 
 	/// Replay the recent past of the program or a source in a replay source,

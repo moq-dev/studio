@@ -288,6 +288,9 @@ pub struct Stats {
 	video_error: Mutex<Option<String>>,
 	/// Why the audio stopped, if it did.
 	audio_error: Mutex<Option<String>>,
+	/// Why the recording's copy of the audio stopped, if it did, which leaves
+	/// the published audio running.
+	recording_audio_error: Mutex<Option<String>>,
 }
 
 /// What one of the program's renditions costs.
@@ -384,6 +387,18 @@ impl Stats {
 	fn fail_video(&self, err: impl std::fmt::Display) {
 		tracing::error!(%err, "video stopped");
 		*self.video_error.lock().unwrap() = Some(format!("video: {err}"));
+	}
+
+	/// The recording's audio copy failed, which stops what recordings hold but
+	/// not the published program.
+	fn fail_recording_audio(&self, err: impl std::fmt::Display) {
+		tracing::error!(%err, "the recording's audio stopped");
+		*self.recording_audio_error.lock().unwrap() = Some(format!("{err}"));
+	}
+
+	/// Why the recording's copy of the audio stopped, if it did.
+	pub fn recording_audio_error(&self) -> Option<String> {
+		self.recording_audio_error.lock().unwrap().clone()
 	}
 
 	fn fail_audio(&self, err: impl std::fmt::Display) {
@@ -958,10 +973,15 @@ impl Engine {
 		loop {
 			let tick = clock.tick().await;
 			if self.stopped.load(Ordering::Relaxed) {
-				for mut producer in [audio.program.take(), audio.recording.take()].into_iter().flatten() {
-					if let Err(err) = producer.finish() {
-						self.stats.fail_audio(err);
-					}
+				if let Some(mut producer) = audio.program.take()
+					&& let Err(err) = producer.finish()
+				{
+					self.stats.fail_audio(err);
+				}
+				if let Some(mut producer) = audio.recording.take()
+					&& let Err(err) = producer.finish()
+				{
+					self.stats.fail_recording_audio(err);
 				}
 				return;
 			}
@@ -992,17 +1012,25 @@ impl Engine {
 				&& !recorded && let Some(recording) = audio.recording.as_mut()
 				&& let Err(err) = recording.discontinuity()
 			{
-				self.stats.fail_audio(err);
+				self.stats.fail_recording_audio(err);
 				if let Some(producer) = audio.recording.take() {
 					producer.abort(moq_net::StreamError::Internal.into());
 				}
 			}
-			for (producer, wanted) in [(&mut audio.program, true), (&mut audio.recording, recorded)] {
+			for (producer, wanted, published) in [
+				(&mut audio.program, true, true),
+				(&mut audio.recording, recorded, false),
+			] {
 				let Some(publish) = producer.as_mut().filter(|_| wanted) else {
 					continue;
 				};
 				if let Err(err) = publish.write(&frame) {
-					self.stats.fail_audio(err);
+					// The recording's copy failing leaves the published audio
+					// running, so it is the recording's to report.
+					match published {
+						true => self.stats.fail_audio(err),
+						false => self.stats.fail_recording_audio(err),
+					}
 					// Readers see the audio fail rather than go away unfinished.
 					if let Some(producer) = producer.take() {
 						producer.abort(moq_net::StreamError::Internal.into());
