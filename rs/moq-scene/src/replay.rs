@@ -54,7 +54,9 @@ pub struct Target {
 /// can refer to one shown after its end. A take to play ([`Take::new`]) keeps
 /// such references, since playing stops showing at the end anyway. A clip
 /// ([`Take::clip`]) stops before the first frame shown after the end, since an
-/// export shows everything it holds, so it may end a few pictures early.
+/// export shows everything it holds. It loses every frame decoded after that
+/// one too, so it can end early by as much as the span that frame's group
+/// reorders, back to the group's keyframe at worst.
 pub struct Take {
 	broadcast: moq_net::broadcast::Producer,
 	/// Keep the copies and their listing readable.
@@ -439,6 +441,20 @@ mod tests {
 		assert_eq!(read(&take).await, [(3, frames(3, 3)), (4, frames(4, 3))]);
 		let clip = Take::clip(&target, Duration::from_secs(1)).unwrap();
 		assert_eq!(read(&clip).await, [(3, frames(3, 3)), (4, frames(4, 1))]);
+	}
+
+	/// A clip of a slow source that reorders deeply can end seconds early: at
+	/// one picture a second, decoded I0 P8 B1 ... B7, a clip to 7.5 s keeps
+	/// only the keyframe, since every picture after it refers to P8.
+	#[tokio::test(start_paused = true)]
+	async fn a_clip_can_end_back_at_its_keyframe() {
+		let (broadcast, track) = broadcast(0, None);
+		write(&track, 0, &[0, 8_000, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000]);
+		let target = target(&broadcast, ts(7_500));
+		let clip = Take::clip(&target, Duration::from_secs(5)).unwrap();
+		assert_eq!(read(&clip).await, [(0, frames(0, 1))]);
+		let take = Take::new(&target, Duration::from_secs(5)).unwrap();
+		assert_eq!(read(&take).await, [(0, frames(0, 9))]);
 	}
 
 	/// A take at the live edge holds what was written when it was taken, and

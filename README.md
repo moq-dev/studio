@@ -412,8 +412,11 @@ as the gap it was.
 regular MP4: `show-clip-1.mp4` for `show.toml`, then `show-clip-2.mp4`, and so
 on. Nothing is re-encoded, so a clip starts at the keyframe before those
 seconds, up to one keyframe interval earlier. It shows nothing after them, so
-video with B-frames may end a few pictures, up to about 200 ms, early. The
-panel says where once it is written, shortly after the click.
+video with B-frames can end early: the pictures shown before the end that refer
+to one shown after it are left out, along with everything decoded after that
+one. That is usually a fraction of a second, but it can reach back as far as
+the keyframe for a slow or deeply reordered source. The panel says where once
+it is written, shortly after the click.
 
 Nothing records in the background for this. The program and each source's
 track keep their last 30 seconds for late viewers anyway, and a replay copies

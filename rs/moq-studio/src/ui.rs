@@ -1623,7 +1623,10 @@ impl Panels {
 					.clicked();
 				let save = ui
 					.button("Save clip")
-					.on_hover_text("Save the last moments, in real time, beside the scene file")
+					.on_hover_text(
+						"Save the last moments, in real time, beside the scene file. Copied without re-encoding, a \
+						 clip starts at the keyframe before them, and video with B-frames can end early.",
+					)
 					.clicked();
 				(play, save)
 			})
