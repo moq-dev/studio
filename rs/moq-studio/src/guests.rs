@@ -271,6 +271,23 @@ impl Room {
 		Ok(self)
 	}
 
+	/// Mark `identity` removed or not, once the file holds it, so a failed
+	/// write leaves both as they were.
+	fn set_removed(
+		&self,
+		participants: &mut BTreeMap<String, Participant>,
+		identity: &str,
+		removed: bool,
+	) -> anyhow::Result<()> {
+		let participant = participants.entry(identity.to_string()).or_default();
+		let before = std::mem::replace(&mut participant.removed, removed);
+		let saved = self.save_removals(participants);
+		if saved.is_err() {
+			participants.entry(identity.to_string()).or_default().removed = before;
+		}
+		saved
+	}
+
 	/// Write the removals to their file, if they are kept in one.
 	fn save_removals(&self, participants: &BTreeMap<String, Participant>) -> anyhow::Result<()> {
 		let Some(path) = &self.removals else { return Ok(()) };
@@ -324,12 +341,11 @@ impl Room {
 		link.set_fragment(Some(&fragment));
 		let invite = Invite { link, expires };
 		let mut participants = self.participants.lock().unwrap();
-		let participant = participants.entry(name.to_string()).or_default();
-		participant.invite = Some(invite.clone());
 		// A new link lets a removed guest back in.
-		if std::mem::take(&mut participant.removed) {
-			self.save_removals(&participants)?;
+		if participants.get(name).is_some_and(|participant| participant.removed) {
+			self.set_removed(&mut participants, name, false)?;
 		}
+		participants.entry(name.to_string()).or_default().invite = Some(invite.clone());
 		drop(participants);
 		self.changed.notify_one();
 		Ok(invite)
@@ -339,9 +355,11 @@ impl Room {
 	/// until the host makes them a new link.
 	pub fn stop_renewing(&self, identity: &str) -> anyhow::Result<()> {
 		let mut participants = self.participants.lock().unwrap();
-		let participant = participants.entry(identity.to_string()).or_default();
-		if !std::mem::replace(&mut participant.removed, true) {
-			self.save_removals(&participants)?;
+		if !participants
+			.get(identity)
+			.is_some_and(|participant| participant.removed)
+		{
+			self.set_removed(&mut participants, identity, true)?;
 		}
 		drop(participants);
 		self.changed.notify_one();
@@ -1354,6 +1372,16 @@ mod tests {
 		let room = start();
 		room.observe(&camera, true, &Collection::new(), &History::new());
 		assert_eq!(room.renewed(), ["alice"], "a new link is remembered too");
+
+		// A removal the file cannot hold is not made, so trying again saves it.
+		let file = dir.path().join("show.guests.toml");
+		std::fs::remove_file(&file).unwrap();
+		std::fs::create_dir(&file).unwrap();
+		assert!(room.stop_renewing("alice").is_err());
+		assert_eq!(room.renewed(), ["alice"]);
+		std::fs::remove_dir(&file).unwrap();
+		room.stop_renewing("alice").unwrap();
+		assert!(start().participants()["alice"].removed);
 	}
 
 	/// A guest joining is not the host's edit: what the host undid can still
