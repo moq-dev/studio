@@ -409,9 +409,10 @@ it is unhealthy. Below that it shows:
 
 - **Relays**: each relay's state, and the protocol its session negotiated.
 - **Uplink**: the round trip to the first connected relay, the bandwidth the
-  connection estimates it can carry, the media every track writes, and the
-  share lost and resent. Loss and headroom are graded only while someone
-  watches, since the relay pulls nothing otherwise.
+  connection estimates it can carry, the media the program's tracks write, and
+  the share lost and resent. Loss and headroom are graded only while someone
+  watches, since the relay pulls nothing otherwise. Source tracks are left out
+  of the media, since they encode whether or not anyone pulls them.
 - **Watching**: the sessions subscribed to the broadcast, from the relays'
   `.stats` broadcasts. A relay shares those only with a connection allowed to
   read them, so most show "unknown". In a cluster, a relay forwarding the
@@ -420,8 +421,10 @@ it is unhealthy. Below that it shows:
   the newer instance, or the first relay's when they are one instance.
 - **Tracks**: each track's bitrate and frame rate, and, from viewers that
   report, the lowest bitrate any received, its worst grade, and the latency
-  from the program clock to the slowest viewer. Latency compares the two
-  hosts' wall clocks, so keep both synced.
+  from the program clock to the slowest viewer. The program's tracks come
+  first, then each source's own tracks, grouped by source; a still image or
+  color carries no media to grade. Latency compares the two hosts' wall
+  clocks, so keep both synced.
 - **Viewers**: each viewer that reports, with its round trip, latency, and
   playout delay. The studio reads 64 at most, a sample the grades rest on: it
   counts the rest, and a reader one frees goes to the next viewer to arrive.

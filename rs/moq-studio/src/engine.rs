@@ -693,6 +693,7 @@ async fn publish(
 		relays: links,
 		feedback,
 		watching,
+		sources: sources.clone(),
 	};
 
 	let output = Output {

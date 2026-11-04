@@ -1613,6 +1613,7 @@ impl Panels {
 
 			egui::Grid::new("tracks").striped(true).show(ui, |ui| {
 				for heading in [
+					"Source",
 					"Track",
 					"Sent",
 					"Frames",
@@ -1624,7 +1625,18 @@ impl Panels {
 					ui.strong(heading);
 				}
 				ui.end_row();
+				// Each source named once, beside its first track. The program's
+				// tracks come first and name none, so no source name can pass
+				// for them.
+				let mut group = None;
 				for track in &report.tracks {
+					let source = track.source.as_deref();
+					ui.label(if source == group {
+						""
+					} else {
+						source.unwrap_or_default()
+					});
+					group = source;
 					ui.label(&track.label).on_hover_text(&track.id);
 					ui.label(or_unknown(track.sent.map(health::rate)));
 					ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
