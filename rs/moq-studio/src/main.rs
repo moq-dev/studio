@@ -39,10 +39,9 @@ pub struct Config {
 	pub broadcast: String,
 
 	/// Copy and encode the program video at the canvas size only while someone
-	/// watches or records it, as the half size always is. This saves the work
-	/// while nobody does, but leaves a late viewer nothing from before they
-	/// arrived. Audio is always encoded. Without `--connect`, the program is
-	/// always on demand.
+	/// watches it, as the half size always is. This saves the work while
+	/// nobody does, but leaves a late viewer nothing from before they arrived.
+	/// Audio is always encoded, and a recording has an encoder of its own.
 	#[usage(long)]
 	pub on_demand: bool,
 

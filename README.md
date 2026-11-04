@@ -399,10 +399,10 @@ studio starts without video.
 
 The canvas size encodes whether or not anyone watches, so a viewer who arrives
 late can fetch the recent past. The half size encodes only while someone
-watches or records it. `--on-demand` copies and encodes the canvas size only
-while someone watches or records it too, which saves that work but leaves
-nothing from before the first viewer; audio encodes either way. Without
-`--connect`, the program encodes only while recorded. A hardware encoder that reads
+watches it. `--on-demand` copies and encodes the canvas size only while someone
+watches it too, which saves that work but leaves nothing from before the first
+viewer; audio encodes either way. A recording has an encoder of its own (see
+Recording). A hardware encoder that reads
 the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
 takes each frame there when it can read the GPU the studio draws on. When it
 cannot, such as NVENC while the studio draws on a laptop's integrated GPU, the
@@ -431,11 +431,18 @@ nor does a browser source, and a broadcast source is already its publisher's.
 
 Every encoder holds an encode session, and consumer GPUs allow only a few
 hardware sessions at once: 8 on a GeForce card, while a base Apple M4 has one
-encode engine for them all. The Output panel counts the sessions open. The
-program holds one, and one more while someone watches its half size; each
-captured source holds one while it is on program or recorded. So a scene
-showing a camera, a display, and a window holds 4 sessions, or 5 with the half
-size watched. When the program encodes on hardware, so do the sources, and a
+encode engine for them all. The Output panel counts the sessions open:
+
+| Encoder | Sessions |
+|---|---|
+| The program's canvas size, live | 1, or none without `--connect` |
+| Its half size | 1 while someone watches it |
+| The recording's own canvas size | 1 while recording |
+| Each captured source | 1 while on program or recorded |
+
+So a live scene showing a camera, a display, and a window holds 4 sessions, 5
+with the half size watched, and 6 while recording too. When the program
+encodes on hardware, so do the sources, and a
 session the GPU refuses fails that source's track with the encoder's reason in
 the Sources panel rather than falling back to software. The source keeps
 drawing in the studio's own scenes. The program opens its session before any
@@ -447,9 +454,11 @@ where it can and software otherwise.
 
 **Start recording** in the Output panel saves the program, at the canvas size,
 to `<scene file name> <UTC start time>.mp4` in the `--recordings` directory,
-live or not. While the uplink cannot fund the canvas size, viewers move to the
-half size and the canvas size stops encoding, so the program's file has a gap
-then. With **each source too**, every camera, display, and window records its
+live or not. The recording has an encoder of its own, opened only while it
+records, at full quality whatever the uplink grants the live stream, as OBS's
+advanced output mode records apart from streaming. It costs one more encode
+session and one more copy of each program frame while recording. With
+**each source too**, every camera, display, and window records its
 own track into a file of its own beside it,
 `<scene file name> <UTC start time> <source>.mp4`, holding the capture before
 any filter; a source being recorded encodes whether or not it is on program.
@@ -462,14 +471,14 @@ numbered after the first, since players show only one video track. A file
 starts with up to 2 s from before it opened, so a recording starts a little
 early, and a track that goes on into the next file, such as the program
 audio, repeats up to 2 s of the last. A
-recording reads the broadcast the way a viewer does, so it shares the live
-encoders and starts and stops without touching what the relay serves. Without
-`--connect`, or with `--on-demand`, the program's canvas size encodes only
-while something records or watches it.
+recording reads the studio's own broadcasts, never what the relay serves, so it
+starts and stops without touching the live stream. The program audio is
+encoded a second time for it while recording. Without `--connect`, only the
+recording's encoder encodes the program.
 
 Each file plays while it grows, so a crash leaves a playable fragmented MP4,
 and becomes a regular MP4 when the recording stops or the studio quits.
-Quitting first lets the program's encoders publish what they still hold, and
+Quitting first lets the recording's encoders publish what they still hold, and
 the program's file keeps it. A file nothing reached before the recording
 stopped is removed.
 

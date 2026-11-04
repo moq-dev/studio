@@ -1750,8 +1750,8 @@ impl Panels {
 					ui.label("Encoding");
 					ui.label(match (output.on_demand, watched) {
 						(false, _) => "the canvas size always, half size while watched",
-						(true, true) => "while watched or recorded; wanted now",
-						(true, false) => "while watched or recorded; idle now",
+						(true, true) => "while watched; watched now",
+						(true, false) => "while watched; idle now",
 					});
 					ui.end_row();
 				}
@@ -1760,11 +1760,7 @@ impl Panels {
 					ui.label("none; start with --connect to publish");
 					ui.end_row();
 					ui.label("Encoding");
-					ui.label(if watched {
-						"while recorded; recording now"
-					} else {
-						"while recorded; idle now"
-					});
+					ui.label("only the recording's encoder, while recording");
 					ui.end_row();
 				}
 			}
@@ -1780,18 +1776,25 @@ impl Panels {
 			ui.end_row();
 		});
 		ui.separator();
-		// Only the sizes the program has: a small canvas, or an encoder that
-		// refused the half size, has the canvas size alone.
-		let sizes = stats.sizes.load(Ordering::Relaxed).clamp(1, stats.renditions.len());
-		let renditions = &stats.renditions[..sizes];
+		// Only the sizes the program publishes, since a small canvas, or an
+		// encoder that refused the half size, has the canvas size alone, and
+		// the recording's own encoder.
+		let [canvas, half, recording] = &stats.renditions;
+		let published = stats.sizes.load(Ordering::Relaxed);
+		let mut columns = vec![("Canvas size", canvas)];
+		if published > 1 {
+			columns.push(("Half size", half));
+		}
+		columns.push(("Recording", recording));
 		egui::Grid::new("renditions").show(ui, |ui| {
-			for heading in ["", "Canvas size", "Half size"].into_iter().take(sizes + 1) {
-				ui.strong(heading);
+			ui.strong("");
+			for (heading, _) in &columns {
+				ui.strong(*heading);
 			}
 			ui.end_row();
 			let row = |ui: &mut Ui, label: &str, cell: &dyn Fn(&crate::engine::Load) -> String| {
 				ui.label(label);
-				for load in renditions {
+				for (_, load) in &columns {
 					ui.label(cell(load));
 				}
 				ui.end_row();
@@ -1812,8 +1815,11 @@ impl Panels {
 		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
-		if let Some(error) = stats.renditions[1].error() {
+		if let Some(error) = half.error() {
 			ui.colored_label(ui.visuals().warn_fg_color, format!("half size off: {error}"));
+		}
+		if let Some(error) = recording.error() {
+			ui.colored_label(ui.visuals().warn_fg_color, format!("recording encoder off: {error}"));
 		}
 	}
 
