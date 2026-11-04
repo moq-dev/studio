@@ -740,6 +740,7 @@ mod tests {
 					assert!(video.track.is_open(), "a subscriber gets pictures");
 					let mut group = track.recv_group().await.unwrap().expect("a group");
 					assert!(group.read_frame().await.unwrap().is_some());
+					let first = group.sequence;
 
 					drop(group);
 					drop(track);
@@ -748,6 +749,15 @@ mod tests {
 					}
 					video.encode(&mut gray(size, 66)).unwrap();
 					assert!(!video.track.is_open(), "the encoder closes once nobody subscribes");
+
+					// The next subscriber gets a fresh encoder's pictures, in a group
+					// after the gap rather than the one before it.
+					let mut track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+					video.encode(&mut gray(size, 100)).unwrap();
+					assert!(video.track.is_open(), "a new subscriber reopens the encoder");
+					let mut group = track.recv_group().await.unwrap().expect("a group");
+					assert!(group.sequence > first, "{} after {first}", group.sequence);
+					assert!(group.read_frame().await.unwrap().is_some());
 				} => {}
 			}
 		})

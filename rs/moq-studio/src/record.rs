@@ -42,7 +42,7 @@ struct Session {
 	started: Instant,
 	stop: Arc<watch::Sender<bool>>,
 	/// Set by [`Recorder::close`].
-	closing: Arc<AtomicBool>,
+	closing: kio::Producer<bool>,
 	done: watch::Receiver<bool>,
 	files: Files,
 }
@@ -135,7 +135,7 @@ impl Recorder {
 		let program = Arc::new(File::new(path));
 		let files: Files = Arc::new(Mutex::new(vec![program.clone()]));
 		let stop = Arc::new(watch::channel(false).0);
-		let closing = Arc::new(AtomicBool::new(false));
+		let closing = kio::Producer::new(false);
 		let (finished, done) = watch::channel(false);
 
 		let run = Run {
@@ -144,7 +144,7 @@ impl Recorder {
 			stem,
 			files: files.clone(),
 			stop: stop.clone(),
-			closing: closing.clone(),
+			closing: closing.consume(),
 		};
 		let file = tokio::fs::File::from_std(file);
 		self.runtime.spawn(async move {
@@ -182,7 +182,10 @@ impl Recorder {
 	/// studio quits holds what the encoders publish on the way out.
 	pub fn close(&self) {
 		if let Some(session) = self.session.lock().unwrap().as_ref() {
-			session.closing.store(true, Ordering::Relaxed);
+			// Fails only once the recording has finished.
+			if let Ok(mut closing) = session.closing.write() {
+				*closing = true;
+			}
 		}
 	}
 
@@ -249,7 +252,7 @@ struct Run {
 	files: Files,
 	stop: Arc<watch::Sender<bool>>,
 	/// The recording reads the program to its end; see [`Recorder::close`].
-	closing: Arc<AtomicBool>,
+	closing: kio::Consumer<bool>,
 }
 
 /// A recording's file writers, each ending with the file it wrote.
@@ -337,7 +340,7 @@ impl Run {
 					}
 					// A new canvas size or frame rate moves the program video to a
 					// new track, which goes on in the next file.
-					Ended { source: None, replaced: true } if !*asked.borrow() && !self.closing.load(Ordering::Relaxed) => {
+					Ended { source: None, replaced: true } if !*asked.borrow() && !*self.closing.read() => {
 						if !self.file(None, writers) {
 							self.stop.send_replace(true);
 							return Ok(());
@@ -351,7 +354,7 @@ impl Run {
 				},
 				() = stopped(&mut asked) => return Ok(()),
 			}
-			if *asked.borrow() || self.closing.load(Ordering::Relaxed) {
+			if *asked.borrow() || *self.closing.read() {
 				continue;
 			}
 			let start: Vec<String> = listed
@@ -477,9 +480,11 @@ async fn write(
 	file: tokio::fs::File,
 	entry: &File,
 	mut stop: watch::Receiver<bool>,
-	closing: Arc<AtomicBool>,
+	closing: kio::Consumer<bool>,
 ) -> (anyhow::Result<Finished>, bool) {
 	let catalog = tokio::select! {
+		// A failure already there is reported rather than lost to the stop.
+		biased;
 		catalog = source.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => catalog.context("the studio's catalog"),
 		() = stopped(&mut stop) => return (remove(file, entry).await, false),
 	};
@@ -513,6 +518,8 @@ async fn record<S: Stream>(
 	let mut stopping = false;
 	let ended = loop {
 		let next = tokio::select! {
+			// What the export already has, a failure included, before the stop.
+			biased;
 			next = export.next() => next,
 			// What was read is still written.
 			() = stopped(&mut stop), if !stopping => {
@@ -584,7 +591,7 @@ struct Listing {
 	replaced: Arc<AtomicBool>,
 	/// Set by [`Recorder::close`]: the program's listing then ends once the
 	/// tracks it recorded have all ended, adding and replacing none.
-	closing: Arc<AtomicBool>,
+	closing: kio::Consumer<bool>,
 }
 
 impl Stream for Listing {
@@ -592,6 +599,25 @@ impl Stream for Listing {
 
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<moq_mux::Result<Option<hang::Catalog>>> {
 		if self.replaced.load(Ordering::Relaxed) {
+			return Poll::Ready(Ok(None));
+		}
+		// Polled for the program's listing, so closing wakes it: with nothing
+		// left to read, it ends without waiting for another catalog update.
+		let closing = self.name.is_none()
+			&& matches!(
+				self.closing.poll(waiter, |closing| if **closing {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}),
+				Poll::Ready(Ok(()))
+			);
+		if closing
+			&& self
+				.last
+				.as_ref()
+				.is_some_and(|last| last.video.renditions.is_empty() && last.audio.renditions.is_empty())
+		{
 			return Poll::Ready(Ok(None));
 		}
 		loop {
@@ -608,7 +634,7 @@ impl Stream for Listing {
 				}
 				continue;
 			};
-			if self.name.is_none() && self.closing.load(Ordering::Relaxed) {
+			if closing {
 				// Each track a publisher ended leaves the catalog, and the export
 				// reads every one to its end before it finishes. Before the first
 				// snapshot, the tracks listed are the ones left to read.
@@ -1077,6 +1103,58 @@ mod tests {
 			panic!("{} files", status.files.len());
 		};
 		assert_eq!(file.finished, Some(Finished::Empty));
+	}
+
+	/// A recording that read the program with no tracks left, such as one whose
+	/// video never opened and whose audio failed, finishes once closed, without
+	/// waiting for a catalog update that will not come.
+	#[tokio::test(start_paused = true)]
+	async fn a_recording_of_an_empty_program_finishes_once_closed() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		studio.end_program();
+		let recorder = studio.recorder(dir.path());
+		recorder.start(false).unwrap();
+		kio::clock::sleep(Duration::from_millis(500)).await;
+		assert!(!recorder.status().unwrap().done, "nothing ends it before closing");
+		recorder.close();
+		kio::clock::timeout(Duration::from_secs(5), recorder.done())
+			.await
+			.expect("closing wakes the recording");
+		let status = recorder.status().unwrap();
+		let [file] = status.files.as_slice() else {
+			panic!("{} files", status.files.len());
+		};
+		assert_eq!(file.finished, Some(Finished::Empty));
+	}
+
+	/// A failure already waiting as a recording stops is what each file
+	/// reports, the program's and every source's, rather than lost to the stop.
+	#[tokio::test(start_paused = true)]
+	async fn a_failure_wins_over_a_stop() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		studio.add("mic");
+		let recorder = studio.recorder(dir.path());
+		recorder.start(true).unwrap();
+		studio.play(Duration::from_secs(1)).await;
+		// Together, with no chance for either file to read the failure first.
+		studio.catalog.clone().abort(moq_net::StreamError::Internal.into());
+		recorder.stop();
+		kio::clock::timeout(Duration::from_secs(5), recorder.done())
+			.await
+			.expect("the recording finishes");
+
+		let status = recorder.status().unwrap();
+		assert_eq!(status.files.len(), 2);
+		for file in &status.files {
+			assert!(
+				matches!(&file.finished, Some(Finished::Failed(reason)) if reason.contains("reading the broadcast")),
+				"{}: {:?}",
+				file.path.display(),
+				file.finished
+			);
+		}
 	}
 
 	/// A source whose file cannot be created fails without stopping the rest,
