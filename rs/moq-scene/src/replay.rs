@@ -121,7 +121,11 @@ impl Take {
 			reference(config)?;
 			if let Some(track) = copy(target, &broadcast, Reference::track(config, name), start, cut)? {
 				tracks.push(track);
-				video = Some((name.clone(), config.clone()));
+				// What the take holds plays, even from a rendition the
+				// publisher has since stopped encoding.
+				let mut config = config.clone();
+				config.enabled = true;
+				video = Some((name.clone(), config));
 			}
 		}
 		let mut audio = None;
@@ -129,7 +133,9 @@ impl Take {
 			reference(config)?;
 			if let Some(track) = copy(target, &broadcast, Reference::track(config, name), start, cut)? {
 				tracks.push(track);
-				audio = Some((name.clone(), config.clone()));
+				let mut config = config.clone();
+				config.enabled = true;
+				audio = Some((name.clone(), config));
 			}
 		}
 		if tracks.is_empty() {
@@ -394,7 +400,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_take_holds_its_span() {
 		let (broadcast, _track) = broadcast(10, None);
-		let take = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3)).unwrap();
+		let mut target = target(&broadcast, ts(7_500));
+		// Disabled since, such as for lack of bandwidth, which leaves what it
+		// held playable.
+		target.video.as_mut().unwrap().1.enabled = false;
+		let take = Take::new(&target, Duration::from_secs(3)).unwrap();
+		assert!(take.video.as_ref().unwrap().1.enabled);
 		assert_eq!(take.start, ts(4_500));
 		assert_eq!(
 			read(&take).await,
