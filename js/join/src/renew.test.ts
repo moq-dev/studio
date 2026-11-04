@@ -51,7 +51,7 @@ test("each token the studio publishes reaches the page, decrypted with its own k
 test("a key that is not the guest's names another broadcast", async () => {
 	const right = await path(credential("alice", new Uint8Array(32).fill(1)));
 	// The same vector as `renewals_name_the_same_broadcast_as_the_join_page` in the studio.
-	expect(right).toBe(".renew/8W8-sbdtrkZZF_byr3vEcQ");
+	expect(right).toBe(Net.Path.from(".renew/8W8-sbdtrkZZF_byr3vEcQ"));
 	expect(await path(credential("alice", new Uint8Array(32).fill(1)))).toBe(right);
 	expect(await path(credential("alice", new Uint8Array(32).fill(2)))).not.toBe(right);
 	expect(await path(credential("bob", new Uint8Array(32).fill(1)))).not.toBe(right);
