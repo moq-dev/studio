@@ -10,7 +10,7 @@
 //! - **source-***: one per running source, since a capture stream may not
 //!   leave the thread that opened it.
 //! - **autosave** writes the collection and its history to their files once
-//!   edits to them settle.
+//!   edits to them settle, and takes or holds an outside edit to the scene file.
 //! - The UI runs on the main thread and edits [`State`] under its lock.
 
 use std::path::Path;
@@ -75,6 +75,9 @@ pub struct State {
 	/// History entries the last load dropped, since they no longer applied to
 	/// the scene file.
 	pub dropped: usize,
+	/// How many times the collection was reloaded from its files, so the UI
+	/// can let go of what a reload may have removed.
+	pub reloads: u64,
 	pub sources: Sources,
 	pub compositor: Compositor,
 	/// Edited since the sources were last synced.
@@ -144,6 +147,13 @@ impl State {
 		self.stale = true;
 		self.edits.record();
 	}
+}
+
+impl autosave::Document for State {
+	/// Both under one lock, so the history describes the collection beside it.
+	fn text(&self) -> anyhow::Result<autosave::Text> {
+		autosave::Text::new(&self.collection, &self.history)
+	}
 
 	/// Swap in a collection and history reloaded from their files.
 	fn replace(&mut self, loaded: autosave::Loaded) -> anyhow::Result<()> {
@@ -164,6 +174,7 @@ impl State {
 		self.collection = collection;
 		self.history = history;
 		self.dropped = dropped;
+		self.reloads += 1;
 		self.stale = true;
 		Ok(())
 	}
@@ -370,6 +381,7 @@ impl Engine {
 				collection,
 				history,
 				dropped,
+				reloads: 0,
 				sources,
 				compositor,
 				stale: true,
@@ -426,9 +438,7 @@ impl Engine {
 		let mix = engine.clone();
 		clocked("audio".into(), async move || mix.run_audio(start, epoch, audio).await)?;
 		let save = engine.clone();
-		clocked("autosave".into(), async move || {
-			save.autosave.run(|| save.serialize()).await
-		})?;
+		clocked("autosave".into(), async move || save.autosave.run(&save.state).await)?;
 		tokio::spawn(engine.clone().grade(health::Sampler::new(publisher)));
 		// Last, once nothing can fail: a start that fails is retried from setup,
 		// and a follower already running would keep this engine and its
@@ -441,21 +451,20 @@ impl Engine {
 	}
 
 	/// Write the collection and its history to their files unless they
-	/// already hold them.
+	/// already hold them, or the scene file changed outside the studio.
 	pub fn save(&self) -> anyhow::Result<()> {
-		self.autosave.save(|| self.serialize())
+		self.autosave.save(&self.state)
 	}
 
-	/// Both under one lock, so the history describes the collection beside it.
-	fn serialize(&self) -> anyhow::Result<autosave::Text> {
-		let state = self.state.lock().unwrap();
-		autosave::Text::new(&state.collection, &state.history)
-	}
-
-	/// Replace the collection and its history with what the files hold now.
+	/// Replace the collection and its history with what the files hold now,
+	/// dropping any unsaved edit.
 	pub fn reload(&self) -> anyhow::Result<()> {
-		self.autosave
-			.reload(|loaded| self.state.lock().unwrap().replace(loaded))
+		self.autosave.reload(&self.state)
+	}
+
+	/// Write the collection and its history over what the files hold now.
+	pub fn keep(&self) -> anyhow::Result<()> {
+		self.autosave.keep(&self.state)
 	}
 
 	/// Grade the stream's health every interval, for the Health panel.

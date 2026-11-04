@@ -13,6 +13,7 @@ use moq_scene::{
 	Blend, Canvas, Clip, Collection, Crop, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source, Video, wgpu,
 };
 
+use crate::autosave::Conflict;
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
@@ -113,6 +114,7 @@ impl Studio {
 				guest: String::new(),
 				shown: None,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
+				reloads: 0,
 			},
 		}
 	}
@@ -121,11 +123,18 @@ impl Studio {
 impl eframe::App for Studio {
 	fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
 		// Redraw at the canvas rate, so preview and program are live.
-		let framerate = self.panels.engine.state.lock().unwrap().collection().canvas.framerate;
+		let engine = self.panels.engine.clone();
+		let state = engine.state.lock().unwrap();
+		let framerate = state.collection().canvas.framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
+		self.panels.follow_reloads(&state);
+		drop(state);
 
 		self.panels.shortcuts(ui.ctx());
 		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui));
+		if let Some(conflict) = self.panels.engine.autosave.conflict() {
+			egui::Panel::top("conflict").show(ui, |ui| self.panels.conflict(ui, conflict));
+		}
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
 		DockArea::new(&mut self.dock)
 			.style(Style::from_egui(ui.style()))
@@ -159,6 +168,8 @@ struct Panels {
 	shown: Option<Shown>,
 	/// The outcome of the last action, shown in the status bar.
 	message: Option<Result<String, String>>,
+	/// The engine's reloads seen so far.
+	reloads: u64,
 }
 
 impl TabViewer for Panels {
@@ -355,13 +366,8 @@ impl Panels {
 		egui::MenuBar::new().ui(ui, |ui| {
 			ui.menu_button("File", |ui| {
 				if ui.button("Reload").clicked() {
-					self.deselect_item();
 					let result = self.engine.reload();
-					let result = result.map(|()| match self.engine.state.lock().unwrap().dropped {
-						0 => "reloaded".to_string(),
-						dropped => format!("reloaded; {}", dropped_message(dropped)),
-					});
-					self.report(result);
+					self.check(result);
 				}
 			});
 			ui.menu_button("Edit", |ui| {
@@ -380,6 +386,47 @@ impl Panels {
 					ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
 				}
 			});
+		});
+	}
+
+	/// Report a reload, from File > Reload or an outside edit the autosave
+	/// took, and let go of a selected item and a drag whose index it may have
+	/// given to another item. Called under every lock that uses either, since
+	/// the autosave can reload between two.
+	fn follow_reloads(&mut self, state: &State) {
+		if state.reloads == self.reloads {
+			return;
+		}
+		self.reloads = state.reloads;
+		self.deselect_item();
+		let path = self.engine.autosave.path().display();
+		self.report(Ok(match state.dropped {
+			0 => format!("reloaded {path}"),
+			dropped => format!("reloaded {path}; {}", dropped_message(dropped)),
+		}));
+	}
+
+	/// An outside edit to the scene file the studio has not taken, and the
+	/// choice of which version to keep.
+	fn conflict(&mut self, ui: &mut Ui, conflict: Conflict) {
+		ui.horizontal_wrapped(|ui| {
+			let path = self.engine.autosave.path().display().to_string();
+			let why = match &conflict.refused {
+				None => "while the studio has unsaved edits".to_string(),
+				Some(refused) => format!("and cannot be loaded: {refused}"),
+			};
+			ui.colored_label(
+				ui.visuals().warn_fg_color,
+				format!("{path} changed outside the studio {why}. Nothing is saved until you pick a version."),
+			);
+			if ui.button("Keep the studio's").clicked() {
+				let result = self.engine.keep();
+				self.report(result.map(|()| format!("saved the studio's version over {path}")));
+			}
+			if ui.button("Take the file's").clicked() {
+				let result = self.engine.reload();
+				self.check(result);
+			}
 		});
 	}
 
@@ -466,7 +513,9 @@ impl Panels {
 
 	/// Copy the selected item, with what it shows, to the clipboard.
 	fn copy(&mut self, ctx: &egui::Context) {
-		let state = self.engine.state.lock().unwrap();
+		let engine = self.engine.clone();
+		let state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let collection = state.collection();
 		let item = match &self.selection {
 			Some(Selection::Item(layer, index)) => collection.items(layer).and_then(|items| items.get(*index)),
@@ -492,6 +541,7 @@ impl Panels {
 	fn paste(&mut self, text: &str) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let result = (|| {
 			let clip = Clip::from_toml(text).context("the clipboard holds no items or filters")?;
 			match clip {
@@ -527,6 +577,7 @@ impl Panels {
 	fn preview(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let canvas = state.collection().canvas;
 		ui.horizontal(|ui| {
 			ui.label(format!(
@@ -794,6 +845,7 @@ impl Panels {
 	fn items(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
 		ui.horizontal(|ui| {
 			ui.selectable_value(&mut self.top, false, format!("Scene: {scene}"));
@@ -1234,6 +1286,7 @@ impl Panels {
 	fn filters(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let collection = state.collection();
 		let Some(selection) = self.selection.clone() else {
 			ui.label("Select a source or an item to filter it.");
