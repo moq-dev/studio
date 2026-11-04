@@ -22,7 +22,7 @@ use crate::Error;
 pub struct Collection {
 	/// The output every scene is drawn onto.
 	pub canvas: Canvas,
-	/// How a fade from preview to program behaves.
+	/// How the preview is taken to program, short of a cut.
 	#[serde(default)]
 	pub transition: Transition,
 	/// Every source, by its unique name. Scenes refer to sources by that name,
@@ -329,21 +329,106 @@ impl Default for Canvas {
 	}
 }
 
-/// How the program changes when the preview is faded in.
+/// How the program changes when the preview is taken to it, short of a cut.
+///
+/// A fade runs at an even pace; the others ease in and out, so motion starts
+/// and lands gently. One that takes no time is a cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Transition {
-	/// How long a fade takes.
-	#[serde(with = "humantime_serde")]
-	pub fade: Duration,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Transition {
+	/// The incoming scene fades in over the outgoing one.
+	Fade {
+		/// How long it takes.
+		#[serde(with = "humantime_serde")]
+		duration: Duration,
+	},
+	/// The incoming scene pushes the outgoing one off the canvas, both moving
+	/// in `direction`.
+	Slide {
+		/// How long it takes.
+		#[serde(with = "humantime_serde")]
+		duration: Duration,
+		/// Which way the scenes move.
+		direction: Direction,
+	},
+	/// An edge sweeps across the canvas in `direction`, uncovering the
+	/// incoming scene behind it.
+	Wipe {
+		/// How long it takes.
+		#[serde(with = "humantime_serde")]
+		duration: Duration,
+		/// Which way the edge moves.
+		direction: Direction,
+	},
+	/// Each item showing a source both scenes place glides from where the
+	/// outgoing scene has it to where the incoming one does, resizing and
+	/// recropping on the way; the other items fade out and in.
+	Move {
+		/// How long it takes.
+		#[serde(with = "humantime_serde")]
+		duration: Duration,
+	},
+}
+
+impl Transition {
+	/// How long it takes.
+	pub fn duration(&self) -> Duration {
+		match *self {
+			Self::Fade { duration }
+			| Self::Slide { duration, .. }
+			| Self::Wipe { duration, .. }
+			| Self::Move { duration } => duration,
+		}
+	}
+
+	/// How long it takes, to change.
+	pub fn duration_mut(&mut self) -> &mut Duration {
+		match self {
+			Self::Fade { duration }
+			| Self::Slide { duration, .. }
+			| Self::Wipe { duration, .. }
+			| Self::Move { duration } => duration,
+		}
+	}
+
+	/// How far along it looks once `linear` of its time has passed, both from
+	/// 0 to 1: as is for a fade, and eased in and out otherwise.
+	pub(crate) fn progress(&self, linear: f32) -> f32 {
+		let linear = linear.clamp(0.0, 1.0);
+		match self {
+			Self::Fade { .. } => linear,
+			// The cubic ease in and out.
+			_ if linear < 0.5 => 4.0 * linear.powi(3),
+			_ => 1.0 - (2.0 - 2.0 * linear).powi(3) / 2.0,
+		}
+	}
 }
 
 impl Default for Transition {
 	fn default() -> Self {
-		Self {
-			fade: Duration::from_millis(300),
+		Self::Fade {
+			duration: Duration::from_millis(300),
 		}
 	}
+}
+
+/// Which way a [`Transition`] moves across the canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+	/// Toward the left edge.
+	Left,
+	/// Toward the right edge.
+	Right,
+	/// Toward the top edge.
+	Up,
+	/// Toward the bottom edge.
+	Down,
+}
+
+impl Direction {
+	/// Every direction.
+	pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
 }
 
 /// One arrangement of sources on the canvas.
@@ -566,6 +651,84 @@ impl Filter {
 		}
 	}
 
+	/// `progress` of the way from this filter's settings to `other`'s, or
+	/// `None` if they are of different kinds or read different sources or
+	/// mask modes. A mix of valid settings is valid.
+	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Option<Self> {
+		let mix = |from: f32, to: f32| mix(from, to, progress);
+		let color = |from: Rgba, to: Rgba| {
+			Rgba(std::array::from_fn(|channel| {
+				mix(f32::from(from.0[channel]), f32::from(to.0[channel])).round() as u8
+			}))
+		};
+		Some(match (self, other) {
+			(Self::Opacity { amount: a }, Self::Opacity { amount: b }) => Self::Opacity { amount: mix(*a, *b) },
+			(Self::Brightness { amount: a }, Self::Brightness { amount: b }) => {
+				Self::Brightness { amount: mix(*a, *b) }
+			}
+			(Self::Contrast { amount: a }, Self::Contrast { amount: b }) => Self::Contrast { amount: mix(*a, *b) },
+			(Self::Saturate { amount: a }, Self::Saturate { amount: b }) => Self::Saturate { amount: mix(*a, *b) },
+			(Self::Grayscale { amount: a }, Self::Grayscale { amount: b }) => Self::Grayscale { amount: mix(*a, *b) },
+			(Self::Sepia { amount: a }, Self::Sepia { amount: b }) => Self::Sepia { amount: mix(*a, *b) },
+			(Self::Invert { amount: a }, Self::Invert { amount: b }) => Self::Invert { amount: mix(*a, *b) },
+			(Self::HueRotate { degrees: a }, Self::HueRotate { degrees: b }) => {
+				Self::HueRotate { degrees: mix(*a, *b) }
+			}
+			(Self::Blur { radius: a }, Self::Blur { radius: b }) => Self::Blur { radius: mix(*a, *b) },
+			(
+				Self::DropShadow { x, y, blur, color: c },
+				Self::DropShadow {
+					x: x2,
+					y: y2,
+					blur: blur2,
+					color: c2,
+				},
+			) => Self::DropShadow {
+				x: mix(*x, *x2),
+				y: mix(*y, *y2),
+				blur: mix(*blur, *blur2),
+				color: color(*c, *c2),
+			},
+			(
+				Self::ChromaKey {
+					color: c,
+					similarity,
+					smoothness,
+					spill,
+				},
+				Self::ChromaKey {
+					color: c2,
+					similarity: similarity2,
+					smoothness: smoothness2,
+					spill: spill2,
+				},
+			) => Self::ChromaKey {
+				color: color(*c, *c2),
+				similarity: mix(*similarity, *similarity2),
+				smoothness: mix(*smoothness, *smoothness2),
+				spill: mix(*spill, *spill2),
+			},
+			(
+				Self::LumaKey { min, max, smoothness },
+				Self::LumaKey {
+					min: min2,
+					max: max2,
+					smoothness: smoothness2,
+				},
+			) => Self::LumaKey {
+				min: mix(*min, *min2),
+				max: mix(*max, *max2),
+				smoothness: mix(*smoothness, *smoothness2),
+			},
+			(Self::Lut { source, amount: a }, Self::Lut { source: to, amount: b }) if source == to => Self::Lut {
+				source: source.clone(),
+				amount: mix(*a, *b),
+			},
+			(Self::Mask { .. }, Self::Mask { .. }) if self == other => self.clone(),
+			_ => return None,
+		})
+	}
+
 	/// The source this filter reads, to rename it.
 	pub(crate) fn source_mut(&mut self) -> Option<&mut String> {
 		match self {
@@ -729,6 +892,15 @@ impl Crop {
 		}
 		Ok(())
 	}
+}
+
+/// `progress` of the way from `from` to `to`, finite whenever both are, since
+/// it never leaves the range between them.
+pub(crate) fn mix(from: f32, to: f32, progress: f32) -> f32 {
+	// In f64, where neither product can overflow, and each term's weight
+	// rounds no larger than it is.
+	let progress = f64::from(progress);
+	(f64::from(from) * (1.0 - progress) + f64::from(to) * progress) as f32
 }
 
 pub(crate) fn validate_filters(filters: &[Filter], on: &str) -> Result<(), Error> {
@@ -1085,7 +1257,9 @@ height = 720
 framerate = 60
 
 [transition]
-fade = "500ms"
+kind = "slide"
+duration = "500ms"
+direction = "up"
 
 [sources.cam]
 kind = "camera"
@@ -1132,7 +1306,13 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 "##;
 		let collection = Collection::from_toml(text).unwrap();
 		assert_eq!(collection.canvas.framerate, 60);
-		assert_eq!(collection.transition.fade, Duration::from_millis(500));
+		assert_eq!(
+			collection.transition,
+			Transition::Slide {
+				duration: Duration::from_millis(500),
+				direction: Direction::Up
+			}
+		);
 		assert_eq!(collection.sources["cam"], Source::Camera { id: None });
 		assert_eq!(
 			collection.sources["bg"],
@@ -1340,6 +1520,29 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			);
 			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{filter:?}");
 		}
+	}
+
+	/// Mixing two valid settings is valid, even from one end of the floats to
+	/// the other, and a mix of different kinds is refused.
+	#[test]
+	fn filters_mix_within_their_settings() {
+		let shadow = |x: f32| Filter::DropShadow {
+			x,
+			y: -x,
+			blur: 0.0,
+			color: Rgba([0, 0, 0, 255]),
+		};
+		for progress in [0.0, 0.25, 0.5, 1.0] {
+			let mixed = shadow(-f32::MAX).toward(&shadow(f32::MAX), progress).unwrap();
+			validate_filters(&[mixed], "mixed").unwrap();
+			let hue = |degrees| Filter::HueRotate { degrees };
+			let mixed = hue(f32::MAX).toward(&hue(-f32::MAX), progress).unwrap();
+			validate_filters(&[mixed], "mixed").unwrap();
+		}
+		assert_eq!(mix(-f32::MAX, f32::MAX, 0.5), 0.0);
+		assert_eq!(mix(f32::MAX, f32::MAX, 0.3), f32::MAX);
+		let invert = Filter::Invert { amount: 1.0 };
+		assert!(invert.toward(&Filter::Sepia { amount: 1.0 }, 0.5).is_none());
 	}
 
 	#[test]

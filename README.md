@@ -90,8 +90,8 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Fade** blends over the fade time set beside it. **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
-| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still fading out, cannot be removed, even by an undo, until program cuts away from it. |
+| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
+| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. |
@@ -105,8 +105,22 @@ Every panel is a tab you can drag, split, or stack.
 
 A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
-on program, and stays on through a cut or fade: a downstream keyer for a logo
-or a lower third.
+on program, and stays on through a cut or transition: a downstream keyer for a
+logo or a lower third.
+
+### Transitions
+
+| Transition | What it does |
+| --- | --- |
+| Fade | The incoming scene fades in over the outgoing one, at an even pace. |
+| Slide | The incoming scene pushes the outgoing one off the canvas, both moving left, right, up, or down. |
+| Wipe | An edge sweeps across the canvas left, right, up, or down, uncovering the incoming scene behind it. |
+| Move | Each item showing a source both scenes place glides from its place in the outgoing scene to its place in the incoming one, resizing, recropping, and mixing its filters' settings on the way. If its blend mode or kinds of filter differ, it changes look halfway. The rest of the outgoing scene fades out and the rest of the incoming scene fades in. Items stack as the outgoing scene has them until halfway, then as the incoming one does. A source placed more than once pairs up in order, back to front. |
+
+All but a fade ease in and out. A transition is drawn on the program clock, so
+the stream and a recording show the same frames of it, and a second
+**Transition** while one runs starts from the scene it was heading to. A
+transition set to 0 ms is a cut.
 
 In the preview, click an item of whatever the Items panel shows to select it,
 drag it to move it, and drag its edges or corners to resize it. A drag snaps
@@ -284,7 +298,9 @@ height = 1080
 framerate = 30
 
 [transition]
-fade = "300ms"
+kind = "slide"      # fade, slide, wipe, or move
+duration = "300ms"
+direction = "left"  # slide and wipe: left, right, up, or down
 
 [sources.camera]
 kind = "camera"
