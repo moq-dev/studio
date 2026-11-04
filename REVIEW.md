@@ -4,7 +4,7 @@ It is read from the base branch by whichever model reviews, so a PR cannot chang
 # Context
 
 The rules live in `quest context`, `AGENTS.md`, and `CONTRIBUTING.md`.
-`quest review` passes its reviewer only `AGENTS.md` and this file, so run `quest context` and read `CONTRIBUTING.md` yourself. If `quest context` does not run, say so in your review.
+`quest review` passes its reviewer only `AGENTS.md` and this file, so run `quest context` and read the base's `CONTRIBUTING.md` (`git show <base>:CONTRIBUTING.md`) yourself. If `quest context` does not run, say so in your review.
 Read the root `AGENTS.md` and every nested `AGENTS.md` on the path to each changed file; most tools only load the ones above their working directory.
 For changes to agent instructions (`AGENTS.md`, `CONTRIBUTING.md`, `REVIEW.md`, skills, quest plans), also follow Prompting in `quest context`.
 
