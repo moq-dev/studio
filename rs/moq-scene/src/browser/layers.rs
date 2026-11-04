@@ -131,7 +131,9 @@ impl Gpu {
 			sample_count: 1,
 			dimension: wgpu::TextureDimension::D2,
 			format: view.format(),
+			// A copy source like every other picture of a page.
 			usage: wgpu::TextureUsages::TEXTURE_BINDING
+				| wgpu::TextureUsages::COPY_SRC
 				| wgpu::TextureUsages::COPY_DST
 				| wgpu::TextureUsages::RENDER_ATTACHMENT,
 			view_formats: &[],
@@ -393,12 +395,7 @@ mod tests {
 		let mapped = buffer.slice(..).get_mapped_range().unwrap();
 		mapped
 			.chunks_exact(row as usize)
-			.flat_map(|row| {
-				row[..16]
-					.chunks_exact(4)
-					.map(|pixel| pixel.try_into().unwrap())
-					.collect::<Vec<_>>()
-			})
+			.flat_map(|row| row[..16].as_chunks::<4>().0.to_vec())
 			.collect()
 	}
 
