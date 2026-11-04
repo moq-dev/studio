@@ -42,6 +42,9 @@ struct Capture {
 	/// Where the pressed item places the page, since the same page can be in
 	/// several.
 	place: Place,
+	/// The last point the page heard, where a release lands that comes from
+	/// no pointer.
+	at: (i32, i32),
 	/// The buttons the page saw go down and not yet up.
 	held: Vec<Button>,
 }
@@ -99,8 +102,9 @@ impl Interact {
 		for event in events {
 			match event {
 				egui::Event::PointerMoved(pos) => {
-					if let Some(capture) = &self.captured {
+					if let Some(capture) = &mut self.captured {
 						if let Some((x, y)) = on_page(capture, pos) {
+							capture.at = (x, y);
 							send(
 								&capture.page,
 								Input::Move {
@@ -150,6 +154,9 @@ impl Interact {
 						};
 						capture.held.retain(|held| *held != button);
 						let point = on_page(capture, pos);
+						if let Some(point) = point {
+							capture.at = point;
+						}
 						let page = capture.page.clone();
 						if capture.held.is_empty() {
 							self.captured = None;
@@ -195,8 +202,10 @@ impl Interact {
 					let capture = self.captured.get_or_insert_with(|| Capture {
 						page: page.clone(),
 						place,
+						at: (x, y),
 						held: Vec::new(),
 					});
+					capture.at = (x, y);
 					if !capture.held.contains(&button) {
 						capture.held.push(button);
 					}
@@ -283,31 +292,9 @@ impl Interact {
 				// so let go of the page as a native window does on losing
 				// focus.
 				egui::Event::WindowFocused(false) => {
-					if let Some(capture) = self.captured.take() {
-						let pos = ui.input(|input| input.pointer.latest_pos());
-						let (x, y) = pos.and_then(|pos| on_page(&capture, pos)).unwrap_or_default();
-						for button in capture.held {
-							let modifiers = Modifiers::default();
-							let up = Input::Button {
-								x,
-								y,
-								button,
-								down: false,
-								clicks: 1,
-								modifiers,
-							};
-							send(&capture.page, up);
-						}
+					for (page, input) in self.release() {
+						send(&page, input);
 					}
-					if let Some(left) = self.hovered.take() {
-						send(
-							&left,
-							Input::Leave {
-								modifiers: Modifiers::default(),
-							},
-						);
-					}
-					self.blur(&send);
 				}
 				_ => {}
 			}
@@ -321,13 +308,37 @@ impl Interact {
 		self.focused.is_some()
 	}
 
-	/// Give the keyboard back, as when interaction ends: what the page that
-	/// had it should receive.
-	pub fn release(&mut self) -> Option<(String, Input)> {
-		self.hovered = None;
-		self.captured = None;
+	/// Let go of every page, as a native window does on losing focus or when
+	/// interaction ends: release the buttons a page saw go down, tell the page
+	/// under the pointer it left, and give the keyboard back. What each page
+	/// should receive.
+	pub fn release(&mut self) -> Vec<(String, Input)> {
+		let mut out = Vec::new();
+		if let Some(capture) = self.captured.take() {
+			let (x, y) = capture.at;
+			for button in capture.held {
+				let up = Input::Button {
+					x,
+					y,
+					button,
+					down: false,
+					clicks: 1,
+					modifiers: Modifiers::default(),
+				};
+				out.push((capture.page.clone(), up));
+			}
+		}
+		if let Some(left) = self.hovered.take() {
+			let leave = Input::Leave {
+				modifiers: Modifiers::default(),
+			};
+			out.push((left, leave));
+		}
+		if let Some(page) = self.focused.take() {
+			out.push((page, Input::Focus(false)));
+		}
 		self.last = None;
-		Some((self.focused.take()?, Input::Focus(false)))
+		out
 	}
 
 	fn blur(&mut self, send: &impl Fn(&str, Input)) {

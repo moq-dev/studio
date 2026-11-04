@@ -106,6 +106,7 @@ impl Studio {
 				devices: Devices::default(),
 				interacting: false,
 				interact: Interact::default(),
+				previewed: false,
 				guest: String::new(),
 				shown: None,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
@@ -131,9 +132,15 @@ impl eframe::App for Studio {
 			egui::Panel::top("conflict").show(ui, |ui| self.panels.conflict(ui, conflict));
 		}
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
+		self.panels.previewed = false;
 		DockArea::new(&mut self.dock)
 			.style(Style::from_egui(ui.style()))
 			.show_inside(ui, &mut self.panels);
+		// A hidden preview hears no input, so it lets go of the pages, as
+		// turning Interact off does.
+		if !self.panels.previewed {
+			self.panels.let_go();
+		}
 	}
 }
 
@@ -159,6 +166,8 @@ struct Panels {
 	/// Whether the preview passes the mouse and keyboard to browser sources.
 	interacting: bool,
 	interact: Interact,
+	/// Whether this frame drew the preview, which a stacked tab can hide.
+	previewed: bool,
 	/// The name typed for the next guest.
 	guest: String,
 	/// The join link on screen.
@@ -571,7 +580,16 @@ impl Panels {
 		self.report(result);
 	}
 
+	/// Let go of every page the preview passed input to.
+	fn let_go(&mut self) {
+		let released = self.interact.release();
+		if !released.is_empty() {
+			deliver(&self.engine.state.lock().unwrap().sources, released);
+		}
+	}
+
 	fn preview(&mut self, ui: &mut Ui) {
+		self.previewed = true;
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
