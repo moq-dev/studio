@@ -1803,12 +1803,10 @@ impl Extras {
 				"canvas `{name}` would publish where viewers report back; rename it"
 			);
 		}
-		let last = self.path.parts().last().context("the broadcast has no path")?;
-		let audio = moq_net::path::Relative::new(&format!("../{last}"))?;
-		anyhow::ensure!(
-			path.try_resolve(&audio).as_ref() == Some(&self.path),
-			"canvas `{name}` cannot refer to the main broadcast"
-		);
+		let audio = self
+			.path
+			.relative(&path)
+			.with_context(|| format!("canvas `{name}` cannot refer to the main broadcast"))?;
 
 		let publication = self
 			.origin
@@ -2645,7 +2643,9 @@ mod tests {
 		.await
 		.expect("the canvas lists its video");
 		let (_, audio) = catalog.audio.renditions.iter().next().expect("the program audio");
-		assert_eq!(audio.broadcast.as_ref().map(|path| path.as_str()), Some("../studio"));
+		let main = audio.broadcast.as_ref().expect("a reference to the main broadcast");
+		let main = moq_net::Path::new("studio/tall").unwrap().try_resolve(main);
+		assert_eq!(main.as_ref().map(moq_net::Path::as_str), Some("studio"));
 		assert!(audio.instance.is_some(), "the main broadcast's instance");
 		let (video, config) = catalog
 			.video
