@@ -1780,7 +1780,7 @@ impl Panels {
 			result = edit(&mut state, label, gesture, |draft| draft.set_audio(&name, Some(audio)));
 		}
 		if let Some(action) = action {
-			result = match action {
+			result = result.and(match action {
 				MixAction::Add(name) => {
 					let mut next = mixes.clone();
 					next.names.push(name.clone());
@@ -1815,13 +1815,12 @@ impl Panels {
 				MixAction::Remove(name) => edit(&mut state, format!("Remove mix `{name}`"), None, |draft| {
 					draft.remove_mix(&name)
 				}),
-			};
+			});
+		}
+		if let Some(listen) = listen {
+			result = result.and(engine.listen(&mut state, &self.runtime, listen.as_deref()));
 		}
 		drop(state);
-		if let Some(listen) = listen {
-			// Without the state's lock, which it takes itself.
-			result = result.and(engine.listen(&self.runtime, listen.as_deref()));
-		}
 		self.check(result);
 	}
 

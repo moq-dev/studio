@@ -647,8 +647,15 @@ impl Engine {
 	/// Play the mix called `name` to the speakers on `runtime`, from the next
 	/// frame, or stop with `None`. A monitored mix that leaves the collection
 	/// hands over to the one the program carries.
-	pub fn listen(&self, runtime: &tokio::runtime::Handle, name: Option<&str>) -> anyhow::Result<()> {
-		let mut state = self.state.lock().unwrap();
+	///
+	/// Takes the `state` already locked, so an edit renaming the mix and the
+	/// pick that follows it land before the next frame's sync.
+	pub fn listen(
+		&self,
+		state: &mut State,
+		runtime: &tokio::runtime::Handle,
+		name: Option<&str>,
+	) -> anyhow::Result<()> {
 		let mut monitor = self.monitor.lock().unwrap();
 		match (name, monitor.as_mut()) {
 			(None, _) => *monitor = None,
