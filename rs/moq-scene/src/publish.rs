@@ -809,8 +809,8 @@ mod tests {
 		let (name, rendition) = listing.catalog.snapshot().video.renditions.pop_first().unwrap();
 		// Every group, however far behind the newest, since this reads only once
 		// the track has ended.
-		let mut subscription = moq_net::track::Subscription::default();
-		subscription.max_delay = None;
+		let subscription =
+			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None));
 		let subscriber = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
 		let mut reader = moq_mux::container::Consumer::new(subscriber, container);
@@ -960,7 +960,9 @@ mod tests {
 			let track = consumer
 				.track(hang::catalog::Reference::track(config, name))
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(None))
+				.subscribe(
+					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None)),
+				)
 				.await
 				.unwrap();
 			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
