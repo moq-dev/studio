@@ -947,7 +947,7 @@ impl Driver {
 		input.format = moq_audio::Format::F32;
 		let channel = self.context.bus.channel(input, strip)?;
 		let mut writer = Writer::new(channel, bus.sample_rate, bus.layout.channels());
-		let mut speaker = Speaker::new(clock.timeline.clone(), &clock.changed);
+		let speaker = RefCell::new(Speaker::new(clock.timeline.clone(), &clock.changed));
 		let stride = bus.layout.channels() as usize * size_of::<f32>();
 		let rate = f64::from(bus.sample_rate);
 
@@ -964,7 +964,10 @@ impl Driver {
 					continue;
 				};
 				let duration = Duration::from_secs_f64((frame.data.len() / stride) as f64 / rate);
-				let place = speaker.place(frame.timestamp.into(), duration, consumer.delay(), kio::clock::now());
+				let now = kio::clock::now();
+				let place = speaker
+					.borrow_mut()
+					.place(frame.timestamp.into(), duration, consumer.delay(), now);
 				if let Place::Play(sounds) = place {
 					queue.borrow_mut().push_back((sounds, frame));
 					queued.notify_one();
@@ -974,14 +977,27 @@ impl Driver {
 			queued.notify_one();
 			Ok::<_, Error>(())
 		};
+		// Writes each frame its bus latency ahead, and tells the clock about
+		// the frames after a skip once they sound.
 		let write = async {
 			loop {
-				let next = queue.borrow_mut().pop_front();
-				match next {
-					Some((sounds, frame)) => {
-						kio::clock::sleep_until(sounds - crate::playout::BUS_LATENCY).await;
-						writer.write(sounds, &frame.data, kio::clock::now())?;
-					}
+				let now = kio::clock::now();
+				speaker.borrow_mut().commit(now);
+				let write = queue
+					.borrow()
+					.front()
+					.map(|(sounds, _)| *sounds - crate::playout::BUS_LATENCY);
+				if write.is_some_and(|at| at <= now) {
+					let (sounds, frame) = queue.borrow_mut().pop_front().expect("peeked");
+					writer.write(sounds, &frame.data, now)?;
+					continue;
+				}
+				let wake = write.into_iter().chain(speaker.borrow().deferred()).min();
+				match wake {
+					Some(at) => tokio::select! {
+						() = kio::clock::sleep_until(at) => {}
+						() = queued.notified() => {}
+					},
 					None if received.get() => return Ok::<_, Error>(()),
 					None => queued.notified().await,
 				}

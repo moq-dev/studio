@@ -57,8 +57,12 @@ pub(crate) struct Speaker<'a> {
 	tail: Option<(Instant, Duration)>,
 	/// When the media after a skip starts sounding. The clock holds one
 	/// mapping, and the audio queued ahead of the skip plays on the old one
-	/// until then, so frames placed before it are not reported yet.
+	/// until then, so frames placed before it are reported only once it comes:
+	/// see [`commit`](Self::commit).
 	skipped: Option<Instant>,
+	/// The newest frame placed but not reported yet: when it finishes
+	/// sounding, the media time it ends at, and the target it was placed on.
+	unreported: Option<(Instant, Duration, Duration)>,
 }
 
 /// What to do with a frame [`Speaker::place`] was given.
@@ -80,6 +84,7 @@ impl<'a> Speaker<'a> {
 			changed,
 			tail: None,
 			skipped: None,
+			unreported: None,
 		}
 	}
 
@@ -105,6 +110,7 @@ impl<'a> Speaker<'a> {
 				if follows < now + BUS_LATENCY / 2 {
 					self.clock.audio_restarted();
 					self.skipped = None;
+					self.unreported = None;
 					now + target + BUS_LATENCY
 				} else if start.saturating_add(CONTIGUOUS) < media
 					|| follows.saturating_duration_since(now) > target + BUS_LATENCY + SLACK
@@ -121,10 +127,32 @@ impl<'a> Speaker<'a> {
 		};
 		let sounds = begins + duration;
 		self.tail = Some((sounds, end));
-		if self.skipped.is_some_and(|skipped| now < skipped) {
-			return Place::Play(begins);
+		self.unreported = Some((sounds, end, target));
+		if self.skipped.is_none_or(|skipped| skipped <= now) {
+			self.report(now);
 		}
+		Place::Play(begins)
+	}
+
+	/// When [`commit`](Self::commit) has a report to make, after a skip.
+	pub(crate) fn deferred(&self) -> Option<Instant> {
+		self.unreported.and(self.skipped)
+	}
+
+	/// Report the frames placed since a skip, once the media after it sounds at
+	/// `now`, whether or not another frame has arrived since.
+	pub(crate) fn commit(&mut self, now: Instant) {
+		if self.deferred().is_some_and(|skipped| skipped <= now) {
+			self.report(now);
+		}
+	}
+
+	/// Tell the clock where the newest frame placed sounds, as of `now`.
+	fn report(&mut self, now: Instant) {
 		self.skipped = None;
+		let Some((sounds, end, target)) = self.unreported.take() else {
+			return;
+		};
 		let audio = timeline::Audio {
 			end,
 			buffered: sounds.saturating_duration_since(now),
@@ -132,7 +160,6 @@ impl<'a> Speaker<'a> {
 		};
 		self.clock.audio(audio, now);
 		self.changed.notify_one();
-		Place::Play(begins)
 	}
 }
 
@@ -306,14 +333,17 @@ mod tests {
 		// the media after it starts to sound.
 		assert_eq!(speaker.place(ms(2_080), FRAME, TARGET, at(60)), Place::Skip);
 		let schedule = clock.consume();
-		for index in 0..9 {
-			let place = speaker.place(ms(2_100 + index * 20), FRAME, TARGET, at(61 + index * 20));
-			assert_eq!(place, Place::Play(at(230 + index * 20)));
-			assert_eq!(clock.due(stamp(1_060)), Some(at(210)), "{index}");
-			assert!(!heard(&schedule, stamp(2_100), at(61 + index * 20)), "{index}");
-		}
-		assert_eq!(speaker.place(ms(2_280), FRAME, TARGET, at(241)), Place::Play(at(410)));
+		assert_eq!(speaker.place(ms(2_100), FRAME, TARGET, at(61)), Place::Play(at(230)));
+		assert_eq!(clock.due(stamp(1_060)), Some(at(210)));
+		assert!(!heard(&schedule, stamp(2_100), at(61)));
+		// It sounds whether or not anything arrives after it.
+		assert_eq!(speaker.deferred(), Some(at(230)));
+		speaker.commit(at(229));
+		assert_eq!(clock.due(stamp(1_060)), Some(at(210)));
+		speaker.commit(at(230));
+		assert_eq!(speaker.deferred(), None);
 		assert_eq!(clock.due(stamp(2_100)), Some(at(230)));
+		assert!(heard(&schedule, stamp(2_100), at(230)));
 	}
 
 	/// A burst queues no more than the target and a frame of slack: the rest
@@ -329,7 +359,7 @@ mod tests {
 			.collect::<Vec<_>>();
 		assert_eq!(placed, [Place::Play(at(150)), Place::Play(at(170))]);
 		// What arrives next follows the queue, and the clock takes its media
-		// once the first of it sounds.
+		// once the first of it sounds, on arrival or not.
 		for index in 0..9 {
 			let place = speaker.place(ms(1_200 + index * 20), FRAME, TARGET, at(20 + index * 20));
 			assert_eq!(place, Place::Play(at(190 + index * 20)));
@@ -337,6 +367,7 @@ mod tests {
 		}
 		assert_eq!(speaker.place(ms(1_380), FRAME, TARGET, at(200)), Place::Play(at(370)));
 		assert_eq!(clock.due(stamp(1_200)), Some(at(190)));
+		assert_eq!(speaker.deferred(), None);
 	}
 
 	/// Media overlapping what is queued, stamped the same or a millisecond
