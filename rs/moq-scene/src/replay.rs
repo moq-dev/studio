@@ -202,7 +202,7 @@ fn copy(
 	// stale.
 	let subscription = moq_net::track::Subscription::default()
 		.with_ranges([range])
-		.with_max_delay(None)
+		.with_delay(moq_net::track::Delay::default().with_max(None))
 		.with_order(moq_net::track::Order::Ascending);
 	let subscribing = target.broadcast.track(name)?.subscribe(subscription);
 	// Never woken, like the reads below: a publisher that never describes the
@@ -362,7 +362,9 @@ mod tests {
 			.consume()
 			.track("video")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(None))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None)),
+			)
 			.await
 			.unwrap();
 		let mut groups = Vec::new();
