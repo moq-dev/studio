@@ -1419,14 +1419,7 @@ impl Panels {
 			ui.label(format!("{} frames", count(&stats.dropped)));
 			ui.end_row();
 			ui.label("Encoder");
-			ui.label(
-				stats
-					.encoder
-					.lock()
-					.unwrap()
-					.clone()
-					.unwrap_or_else(|| "not open".into()),
-			);
+			ui.label(stats.encoder().unwrap_or_else(|| "not open".into()));
 			ui.end_row();
 			ui.label("Encoded");
 			ui.label(format!(

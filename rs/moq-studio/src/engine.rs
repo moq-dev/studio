@@ -223,15 +223,51 @@ pub struct Stats {
 	/// Whether the program is handed to an encoder now: not while on demand
 	/// and unwatched, nor while a new rendition opens.
 	pub encoding: AtomicBool,
-	/// The encoder backend, once one opened.
-	pub encoder: Mutex<Option<String>>,
+	/// The encoder backend, once the program's current rendition opened one.
+	encoder: Mutex<EncoderName>,
 	/// Why the video stopped, if it did, until a new rendition starts.
 	video_error: Mutex<Option<String>>,
 	/// Why the audio stopped, if it did.
 	audio_error: Mutex<Option<String>>,
 }
 
+/// The encoder backend the program's current rendition opened, if it has.
+#[derive(Default)]
+struct EncoderName {
+	/// Counts the program's renditions, so one a resize retired while its
+	/// encoder was still opening cannot report that encoder afterwards.
+	rendition: u64,
+	name: Option<String>,
+}
+
 impl Stats {
+	/// The encoder backend, once the program's current rendition opened one.
+	pub fn encoder(&self) -> Option<String> {
+		self.encoder.lock().unwrap().name.clone()
+	}
+
+	/// The number of the program's current rendition, which its encode thread
+	/// reports its encoder under.
+	fn rendition(&self) -> u64 {
+		self.encoder.lock().unwrap().rendition
+	}
+
+	/// Retire the current rendition, so its encoder is no longer reported, even
+	/// one that opens afterwards.
+	fn retire_encoder(&self) {
+		let mut encoder = self.encoder.lock().unwrap();
+		encoder.rendition += 1;
+		encoder.name = None;
+	}
+
+	/// Report `name` as the program's encoder, unless `rendition` was retired.
+	fn opened_encoder(&self, rendition: u64, name: &str) {
+		let mut encoder = self.encoder.lock().unwrap();
+		if encoder.rendition == rendition {
+			encoder.name = Some(name.to_string());
+		}
+	}
+
 	/// Why the output stopped, if it did.
 	pub fn error(&self) -> Option<String> {
 		let video = self.video_error.lock().unwrap().clone();
@@ -473,7 +509,7 @@ impl Engine {
 			encoded: stats.encoded.load(Ordering::Relaxed),
 			encoding: stats.encoding.load(Ordering::Relaxed),
 			watched: stats.watched.load(Ordering::Relaxed),
-			encoder: stats.encoder.lock().unwrap().clone(),
+			encoder: stats.encoder(),
 			failed: stats.error(),
 			stalled,
 		}
@@ -532,7 +568,7 @@ impl Engine {
 				// Ended before the next opens, so the two never hold encode
 				// sessions at once.
 				ending.extend(rendition.take().map(Rendition::end));
-				*self.stats.encoder.lock().unwrap() = None;
+				self.stats.retire_encoder();
 			}
 			if let Some(renditions) = &renditions {
 				// Probed beside the program clock, so drawing carries on.
@@ -815,9 +851,10 @@ impl Renditions {
 		let zero_copy = exporter.route() == Route::Gpu;
 		let stats = self.stats.clone();
 		let (opened, open) = tokio::sync::oneshot::channel();
+		let number = stats.rendition();
 		let thread = std::thread::Builder::new()
 			.name("encode".into())
-			.spawn(move || encode(&stats, opened, pending, producer, config, zero_copy))?;
+			.spawn(move || encode(&stats, number, opened, pending, producer, config, zero_copy))?;
 		let rendition = Rendition {
 			exporter,
 			frames,
@@ -981,6 +1018,7 @@ enum Video {
 /// than a track that went away unfinished.
 fn encode(
 	stats: &Stats,
+	rendition: u64,
 	opened: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 	video: mpsc::Receiver<Video>,
 	mut producer: moq_video::encode::Producer,
@@ -997,7 +1035,7 @@ fn encode(
 			return;
 		}
 	};
-	*stats.encoder.lock().unwrap() = Some(encoder.name().to_string());
+	stats.opened_encoder(rendition, encoder.name());
 	let _ = opened.send(Ok(()));
 
 	let result = encode_frames(stats, video, &mut producer, &mut encoder, zero_copy).and_then(|()| {
@@ -1114,6 +1152,20 @@ mod tests {
 	/// Bounds each step, so a stall fails rather than hangs.
 	const TIMEOUT: Duration = Duration::from_secs(30);
 
+	/// A rendition a resize retired while its encoder was still opening must
+	/// not report that encoder over the next rendition's.
+	#[test]
+	fn a_retired_rendition_reports_no_encoder() {
+		let stats = Stats::default();
+		let retired = stats.rendition();
+		stats.retire_encoder();
+		let next = stats.rendition();
+		stats.opened_encoder(retired, "old");
+		assert_eq!(stats.encoder(), None, "the retired encoder opened after the resize");
+		stats.opened_encoder(next, "new");
+		assert_eq!(stats.encoder().as_deref(), Some("new"));
+	}
+
 	async fn subscribe(
 		broadcast: &moq_net::broadcast::Consumer,
 		name: &str,
@@ -1207,7 +1259,7 @@ mod tests {
 			.await
 			.expect("the studio starts");
 		assert!(
-			engine.stats.encoder.lock().unwrap().is_some(),
+			engine.stats.encoder().is_some(),
 			"the program holds its encoder before any source opens one"
 		);
 
