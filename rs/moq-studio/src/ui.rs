@@ -1213,6 +1213,7 @@ impl Panels {
 		let mut state = engine.state.lock().unwrap();
 		let mut remove = None;
 		let mut clone = None;
+		let mut reload = None;
 		let now = kio::clock::now();
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1289,6 +1290,14 @@ impl Panels {
 						{
 							clone = Some(name.clone());
 						}
+						if matches!(source, Source::Browser { .. })
+							&& ui
+								.small_button("Reload")
+								.on_hover_text("Restart the page, keeping the cookies and logins every page shares")
+								.clicked()
+						{
+							reload = Some(name.clone());
+						}
 						if ui.small_button("Remove").clicked() {
 							remove = Some(name.clone());
 						}
@@ -1309,6 +1318,9 @@ impl Panels {
 			}
 		});
 
+		if let Some(name) = reload {
+			state.restart(&name);
+		}
 		let result = if let Some(name) = remove {
 			// Removing the items that show it moves the ones after them.
 			self.deselect_item();

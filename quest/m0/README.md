@@ -103,7 +103,6 @@ repository.
 - [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
 - [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
-- [Browser sources keep a profile](/quest/m0/browser-profile.md) - one persistent profile, so logins survive restarts, and a reload action
 - [Browser source popups](/quest/m0/browser-popups.md) - dropdowns and other in-page popups draw and take input
 - [Published independently](/quest/m0/publish-independently.md) - a source opts out of the program and publishes its own track for services that place it themselves
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
