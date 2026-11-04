@@ -839,6 +839,10 @@ pub enum Source {
 		/// The file, relative to the scene file's directory unless absolute.
 		path: PathBuf,
 	},
+	/// Where instant replays play: the recent past of the program or another
+	/// source, on demand through [`Feed::replay`](crate::source::Feed::replay).
+	/// Transparent while nothing plays.
+	Replay,
 }
 
 impl Source {
@@ -873,7 +877,7 @@ impl Source {
 	pub fn has_audio(&self) -> bool {
 		matches!(
 			self,
-			Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. }
+			Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. } | Self::Replay
 		)
 	}
 }

@@ -3484,6 +3484,7 @@ dependencies = [
  "moq-stats",
  "moq-tokio",
  "moq-video",
+ "mp4-atom",
  "pollster",
  "qrcodegen",
  "tempfile",

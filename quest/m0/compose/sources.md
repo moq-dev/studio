@@ -28,7 +28,7 @@ in its ML effects, and a composing viewer mixes the levels itself.
 
 Encode like every first-party publisher (decided 2026-10-28, from
 [#7101](https://github.com/moq-dev/moq/issues/7101)): an unwatched source
-still encodes, so a late viewer or a [replay](/quest/m0/replay.md)
+still encodes, so a late viewer or a replay
 finds its recent past, but costs no upload.
 
 ✅ 2026-11-01 (maintainer, on
