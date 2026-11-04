@@ -33,6 +33,7 @@ mod edit;
 mod effect;
 mod lut;
 pub mod publish;
+pub mod replay;
 pub mod source;
 
 pub use clip::Clip;
@@ -84,6 +85,10 @@ pub enum Error {
 	/// This build or platform cannot open the source.
 	#[error("unsupported source: {0}")]
 	Unsupported(String),
+
+	/// The source stopped, with the reason, so it takes nothing more.
+	#[error("the source stopped: {0}")]
+	Stopped(String),
 
 	/// Capturing, decoding, or drawing video failed.
 	#[error(transparent)]
