@@ -304,10 +304,19 @@ impl<E: Encode> Encoding<E> {
 		Ok(())
 	}
 
+	/// Mark a gap in the track after [draining](Self::drain) the encoder, so
+	/// the next one [opened](Self::open) starts with a keyframe, even on a
+	/// backend that cannot [cut](Encode::cut).
+	pub(crate) fn discontinuity(&mut self) -> Result<(), Error> {
+		self.drain()?;
+		self.producer.as_mut().expect("open until it ends").discontinuity()?;
+		Ok(())
+	}
+
 	/// Mark a gap in the track, such as the last viewer leaving an on-demand
-	/// one. What the encoder still holds lands before the gap rather than after
-	/// it, and the next picture is a keyframe, so a viewer arriving after the
-	/// gap starts there.
+	/// one, keeping the encoder and its session open. What the encoder still
+	/// holds lands before the gap rather than after it, and the next picture
+	/// is a keyframe, so a viewer arriving after the gap starts there.
 	pub fn pause(&mut self) -> Result<(), Error> {
 		let producer = self.producer.as_mut().expect("open until it ends");
 		if let Some(encoder) = &mut self.encoder {
@@ -424,7 +433,7 @@ impl Video {
 	/// what came before, and a viewer arriving during it waits for what follows
 	/// rather than being served the last picture as if it were live.
 	pub(crate) fn discontinuity(&mut self) -> Result<(), Error> {
-		self.track.pause()
+		self.track.discontinuity()
 	}
 
 	/// End the track, failed with `err` so viewers see why.
