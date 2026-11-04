@@ -5,7 +5,8 @@
 //! Threads:
 //! - **program** draws preview and program once per canvas frame and hands the
 //!   program to the encoder, stamped with the program clock.
-//! - **audio** reads the program bus on the same clock and publishes it.
+//! - **audio** advances the audio bus on the same clock and publishes its
+//!   program mix.
 //! - **encode**: one per program rendition, which waits for each program copy
 //!   and encodes it. A new canvas size or frame rate starts a new rendition.
 //! - **source-***: one per running source, since a capture stream may not
@@ -23,6 +24,7 @@ use std::time::Duration;
 use anyhow::Context;
 use bytes::Bytes;
 use kio::clock::Instant;
+use moq_scene::publish::Encoding;
 use moq_scene::source::{self, Driver, Sources};
 use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
@@ -411,19 +413,24 @@ pub struct Engine {
 	pub stats: Arc<Stats>,
 	/// How the stream is delivered, graded every [`health::INTERVAL`].
 	pub health: Mutex<health::Report>,
-	pub bus: moq_audio::bus::Bus,
+	/// The program audio, which every source with sound is routed into.
+	pub mix: moq_audio::bus::Mix,
 	/// `None` when running without a relay.
 	pub output: Option<Output>,
 	/// The room guests join, when configured.
 	pub room: Option<Arc<crate::guests::Room>>,
 	/// Keeps broadcast sources' origin open when no connection holds it.
 	_origin: Option<moq_net::origin::Producer>,
+	/// Set by [`stop`](Self::stop), which ends the program clock.
+	stopped: AtomicBool,
+	/// The program clock's thread, which [`stop`](Self::stop) waits on.
+	program: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 /// The audio the program publishes.
 pub const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(128);
 
-/// How often the audio thread reads the bus. Short enough that a read is never
+/// How often the audio thread advances the bus. Short enough that a block is never
 /// close to the bus's buffering, long enough to cost nothing.
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
@@ -460,7 +467,8 @@ impl Engine {
 			on_demand,
 			room,
 		} = launch;
-		let bus = moq_audio::bus::Bus::new(Default::default())?;
+		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default())?;
+		let program = bus.mix();
 		let subscribe = moq_tokio::origin::spawn();
 		// Every relay feeds `subscribe`, so a guest either one routes is seen.
 		let guests = match &room {
@@ -493,6 +501,7 @@ impl Engine {
 		let dir = std::path::absolute(dir.unwrap_or(Path::new(".")))?;
 		let sources = Sources::new(source::Context {
 			bus: bus.clone(),
+			program: program.clone(),
 			origin: sources,
 			dir,
 			output: moq_video::render::output(&gpu.device),
@@ -517,10 +526,12 @@ impl Engine {
 			autosave,
 			stats,
 			health: Mutex::default(),
-			bus,
+			mix: program,
 			output,
 			room,
 			_origin: origin,
+			stopped: AtomicBool::new(false),
+			program: Mutex::default(),
 		});
 		let (video, audio, clock, publisher) = match publish {
 			Some(Publish {
@@ -542,11 +553,15 @@ impl Engine {
 			None => Duration::ZERO,
 		};
 		let program = engine.clone();
-		clocked("program".into(), async move || {
+		let thread = clocked("program".into(), async move || {
 			program.run_program(start, epoch, video).await
 		})?;
+		*engine.program.lock().unwrap() = Some(thread);
 		let mix = engine.clone();
-		clocked("audio".into(), async move || mix.run_audio(start, epoch, audio).await)?;
+		let config = bus.config().clone();
+		clocked("audio".into(), async move || {
+			mix.run_audio(start, epoch, config, mixer, audio).await
+		})?;
 		let save = engine.clone();
 		clocked("autosave".into(), async move || save.autosave.run(&save.state).await)?;
 		tokio::spawn(engine.clone().grade(health::Sampler::new(publisher)));
@@ -560,6 +575,26 @@ impl Engine {
 		Ok(engine)
 	}
 
+	/// Stop the program clock, then wait for each rendition's encoder to
+	/// publish the copies on their way to it and what it still holds, and to
+	/// end its video track, so quitting loses none of the program's last
+	/// pictures. Then stop the browser sources' helper and wait for it to
+	/// exit, so their profile is saved and free for the next launch.
+	pub fn stop(&self) {
+		self.stopped.store(true, Ordering::Relaxed);
+		let thread = self.program.lock().unwrap().take();
+		if let Some(thread) = thread
+			&& thread.join().is_err()
+		{
+			tracing::error!("the program thread panicked");
+		}
+		// Taken out first, so the wait holds no lock the window draws with.
+		let browser = self.state.lock().unwrap().sources.context().browser.clone();
+		if let Some(browser) = browser {
+			browser.stop();
+		}
+	}
+
 	/// Write the collection and its history to their files unless they
 	/// already hold them, or the scene file changed outside the studio.
 	pub fn save(&self) -> anyhow::Result<()> {
@@ -570,16 +605,6 @@ impl Engine {
 	/// dropping any unsaved edit.
 	pub fn reload(&self) -> anyhow::Result<()> {
 		self.autosave.reload(&self.state)
-	}
-
-	/// Stop the browser sources' helper and wait for it to exit, so their
-	/// profile is saved and free for the next launch.
-	pub fn stop_browsers(&self) {
-		// Taken out first, so the wait holds no lock the window draws with.
-		let browser = self.state.lock().unwrap().sources.context().browser.clone();
-		if let Some(browser) = browser {
-			browser.stop();
-		}
 	}
 
 	/// Write the collection and its history over what the files hold now.
@@ -643,6 +668,9 @@ impl Engine {
 	/// drawn at and opens another, since a track never changes what it
 	/// carries. Drawing outlives the encoder: a failed output stops copying the
 	/// program, and the preview and program keep moving.
+	///
+	/// Runs until the studio [stops](Self::stop), and returns once every
+	/// rendition's encode thread has finished its track.
 	async fn run_program(&self, start: Instant, epoch: Duration, video: Option<(Renditions, Rendition)>) {
 		let (renditions, mut rendition) = video.unzip();
 		let mut canvas = self.state.lock().unwrap().compositor.canvas();
@@ -663,6 +691,21 @@ impl Engine {
 
 		loop {
 			let tick = clock.tick().await;
+			if self.stopped.load(Ordering::Relaxed) {
+				// Without a sender, each encoder publishes what it was sent and
+				// still holds, then finishes its track.
+				ending.extend(rendition.take().map(Rendition::end));
+				for thread in ending {
+					if thread.join().is_err() {
+						tracing::error!("an encode thread panicked");
+					}
+				}
+				// It holds the threads of the renditions it waits on.
+				if let Some((_, probe)) = probing {
+					let _ = probe.join();
+				}
+				return;
+			}
 			let (program, drawn) = {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
@@ -760,17 +803,22 @@ impl Engine {
 		}
 	}
 
-	/// Read the program bus as the program clock advances, and publish it
-	/// stamped `epoch` past `start`.
+	/// Advance the bus as the program clock advances, and publish the program
+	/// mix stamped `epoch` past `start`.
 	///
 	/// Runs without a relay too, so the meters move and sources never back up.
-	async fn run_audio(&self, start: Instant, epoch: Duration, mut producer: Option<moq_audio::encode::Producer>) {
-		let config = self.bus.config().clone();
+	async fn run_audio(
+		&self,
+		start: Instant,
+		epoch: Duration,
+		config: moq_audio::bus::Config,
+		mut mixer: moq_audio::bus::Driver,
+		mut producer: Option<moq_audio::encode::Producer>,
+	) {
 		let rate = u128::from(config.sample_rate);
-		let channels = config.layout.channels() as usize;
 		let mut clock = kio::clock::interval_at(start, AUDIO_PERIOD);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
-		let mut samples = Vec::new();
+		let mut program = self.mix.reader();
 		let mut written: u128 = 0;
 
 		loop {
@@ -782,14 +830,15 @@ impl Engine {
 			if frames == 0 {
 				continue;
 			}
-			samples.resize(frames * channels, 0.0);
-			self.bus.read(&mut samples);
-			let timestamp = moq_net::Timestamp::from_micros((epoch.as_micros() + written * 1_000_000 / rate) as u64);
+			mixer.advance(frames);
 			written = due;
+			let block = program.read().await.expect("the mixer is alive");
+			let position = u128::from(block.position);
+			let timestamp = moq_net::Timestamp::from_micros((epoch.as_micros() + position * 1_000_000 / rate) as u64);
 
 			let Some(publish) = producer.as_mut() else { continue };
 			let Ok(timestamp) = timestamp else { continue };
-			let data: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+			let data: Vec<u8> = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
 			if let Err(err) = publish.write(&moq_audio::Frame::new(Bytes::from(data), timestamp)) {
 				self.stats.fail_audio(err);
 				// Viewers see the audio fail rather than go away unfinished.
@@ -817,7 +866,7 @@ struct Publish {
 	sources: moq_scene::publish::Publish,
 }
 
-/// Announce the program broadcast under one epoch, which also carries each
+/// Announce the program broadcast under one instance, which also carries each
 /// local source's own track, and connect to every relay, each also carrying
 /// `subscribe`'s broadcast sources.
 async fn publish(
@@ -892,11 +941,11 @@ async fn publish(
 	let audio = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)?;
 	drop(reserved);
 
-	// One epoch on every relay, so a viewer moving between them resumes
+	// One instance on every relay, so a viewer moving between them resumes
 	// mid-group rather than restarting.
-	let epoch = moq_net::Epoch::mint();
+	let instance = moq_net::Instance::random();
 	publication
-		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+		.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 		.context("cannot announce the broadcast")?;
 
 	let feedback = health::Feedback::default();
@@ -907,7 +956,7 @@ async fn publish(
 	));
 	tokio::spawn(log("relay stats", watching.clone().follow(reports, path.clone())));
 	let health = health::Publisher {
-		observer: hang::health::Observer::new(path.clone(), Some(epoch)),
+		observer: hang::health::Observer::new(path.clone(), Some(instance)),
 		catalog: graded,
 		clock: clock.clone(),
 		relays: links,
@@ -1091,9 +1140,9 @@ fn connect(
 				},
 				None => format!("{}:{}", url.scheme(), url.path()),
 			};
-			// Among routes of one instance of a broadcast source, the first
-			// relay's wins while it has one. A newer instance wins first,
-			// whichever relay it comes through.
+			// The first relay's route to a broadcast source wins while it has
+			// one, whether it carries the same instance as the failover's or
+			// another.
 			let preference = match rank {
 				0 => moq_net::origin::Preference::default(),
 				_ => moq_net::origin::Preference::new(-1),
@@ -1145,14 +1194,15 @@ fn encode(
 	rendition: u64,
 	opened: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 	video: mpsc::Receiver<Video>,
-	mut producer: moq_video::encode::Producer,
+	producer: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
 	zero_copy: bool,
 ) {
-	let mut encoder = match moq_video::encode::Encoder::new(&config) {
+	let mut track = Encoding::new(producer);
+	let encoder = match moq_video::encode::Encoder::new(&config) {
 		Ok(encoder) => encoder,
 		Err(err) => {
-			producer.abort(moq_net::StreamError::Internal.into());
+			track.abort(moq_net::StreamError::Internal.into());
 			let err = anyhow::Error::new(err).context("video encoder");
 			stats.fail_video(format!("{err:#}"));
 			let _ = opened.send(Err(err));
@@ -1162,33 +1212,40 @@ fn encode(
 	stats.opened_encoder(rendition, encoder.name());
 	let _ = opened.send(Ok(()));
 
-	let result = encode_frames(stats, video, &mut producer, &mut encoder, zero_copy).and_then(|()| {
-		producer.finish()?;
-		Ok(())
-	});
-	if let Err(err) = result {
-		stats.fail_video(format!("{err:#}"));
-		producer.abort(moq_net::StreamError::Internal.into());
+	let encoded = track
+		.open(encoder)
+		.context("video encoder")
+		.and_then(|()| encode_frames(stats, video, &mut track, zero_copy));
+	match encoded {
+		// Publishes what the encoder still holds before the track ends, so a
+		// rendition's last pictures are not lost to a resize or to quitting. A
+		// failure aborts it.
+		Ok(()) => {
+			if let Err(err) = track.finish() {
+				stats.fail_video(format!("{err:#}"));
+			}
+		}
+		Err(err) => {
+			stats.fail_video(format!("{err:#}"));
+			track.abort(moq_net::StreamError::Internal.into());
+		}
 	}
 }
 
 fn encode_frames(
 	stats: &Stats,
 	video: mpsc::Receiver<Video>,
-	producer: &mut moq_video::encode::Producer,
-	encoder: &mut moq_video::encode::Encoder,
+	track: &mut Encoding,
 	zero_copy: bool,
 ) -> anyhow::Result<()> {
-	let mut paused = false;
-
 	while let Ok(video) = video.recv() {
 		let pending = match video {
 			Video::Frame(pending) => pending,
 			// Marks the gap, so a viewer arriving during it is not served the
-			// last group before it as if it were live.
+			// last group before it as if it were live, and one arriving after it
+			// starts from a keyframe.
 			Video::Pause => {
-				producer.discontinuity().context("video")?;
-				paused = true;
+				track.pause().context("video")?;
 				continue;
 			}
 			Video::Failed(err) => return Err(err).context("copying the program"),
@@ -1203,15 +1260,8 @@ fn encode_frames(
 			stats.read_back.fetch_add(1, Ordering::Relaxed);
 		}
 
-		// A viewer arriving after a break starts from a keyframe rather than
-		// waiting out the rest of a group nobody received the start of.
-		if std::mem::take(&mut paused) {
-			encoder.cut().context("video encoder")?;
-		}
-
 		let start = Instant::now();
-		let encoded = encoder.encode(&frame).context("video encoder")?;
-		producer.publish(&encoded).context("video")?;
+		track.encode(&frame).context("video")?;
 		stats
 			.encode_us
 			.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -1265,7 +1315,7 @@ fn spawn(driver: Driver) {
 		}
 	});
 	match started {
-		Ok(()) => {
+		Ok(_) => {
 			if let Err(mpsc::SendError(driver)) = handoff.send(driver) {
 				driver.fail("the source thread stopped");
 			}
@@ -1276,11 +1326,11 @@ fn spawn(driver: Driver) {
 
 /// Start a thread called `name` that runs `task` with its own clock and IO,
 /// returning why if either cannot start.
-fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::Result<()> {
+fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::Result<std::thread::JoinHandle<()>> {
 	// The thread starts before its runtime is built and handed over, since a
 	// runtime dropped in the async caller, as a refused spawn would, panics.
 	let (handoff, received) = mpsc::sync_channel::<tokio::runtime::Runtime>(1);
-	std::thread::Builder::new()
+	let thread = std::thread::Builder::new()
 		.name(name.clone())
 		.spawn(move || {
 			if let Ok(runtime) = received.recv() {
@@ -1296,7 +1346,7 @@ fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::R
 		runtime.shutdown_background();
 		anyhow::bail!("the {name} thread stopped");
 	}
-	Ok(())
+	Ok(thread)
 }
 
 #[cfg(test)]
@@ -1638,15 +1688,30 @@ mod tests {
 			.expect("the clip saves")
 			.expect("a clip");
 		assert_eq!(clip, dir.path().join("show-clip-1.mp4"));
+
+		// Quitting ends the program's video cleanly once the encoder published
+		// what it was handed, rather than leaving viewers a dropped track.
+		let mut track = broadcast.track(&resized).unwrap().subscribe(None).await.unwrap();
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		kio::clock::timeout(TIMEOUT, async {
+			while let Some(mut group) = track.recv_group().await.expect("the video finishes") {
+				while group.read_frame().await.expect("the video finishes").is_some() {}
+			}
+		})
+		.await
+		.expect("the video ends");
+		let failed = engine.stats.error();
+		assert!(failed.is_none(), "{failed:?}");
 	}
 
 	/// With a failover relay, both relays route the program under its one
-	/// epoch over the one protocol version, so a viewer moving between them
+	/// instance over the one protocol version, so a viewer moving between them
 	/// resumes. A broadcast source only the failover has still reaches the
-	/// studio, and a newer instance of a source behind the failover replaces
-	/// the first relay's.
+	/// studio, and one restarted behind the failover replaces the first
+	/// relay's once that one ends.
 	#[tokio::test(flavor = "multi_thread")]
-	async fn every_relay_routes_one_epoch() {
+	async fn every_relay_routes_one_instance() {
 		let _ = moq_tokio::crypto::install_default();
 		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 		let mut relays = Vec::new();
@@ -1673,25 +1738,22 @@ mod tests {
 		let subscribe = moq_tokio::origin::spawn();
 		let (_connections, links) = connect(relays, &origin, &subscribe);
 		let publication = origin.create_broadcast("studio").unwrap();
-		let epoch = moq_net::Epoch::mint();
+		let instance = moq_net::Instance::random();
 		publication
-			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+			.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 			.unwrap();
 
-		// Publish `path` under `epoch` through one relay's guest.
-		let publish = |path: &str, epoch: Option<&moq_net::Epoch>, (client, url): &(moq_tokio::Client, url::Url)| {
+		// Publish `path` under `instance` through one relay's guest.
+		let publish = |path: &str, instance: &moq_net::Instance, (client, url): &(moq_tokio::Client, url::Url)| {
 			let origin = moq_tokio::origin::spawn();
 			let source = origin.create_broadcast(path).unwrap();
-			let route = moq_net::origin::Route::default();
-			let route = match epoch {
-				Some(epoch) => route.with_epoch(epoch.clone()),
-				None => route,
-			};
-			source.announce(route).unwrap();
+			source
+				.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
+				.unwrap();
 			let connection = client.clone().with_publisher(&origin).connect(url.clone());
 			(origin, source, connection)
 		};
-		let _guest = publish("guest", None, &guests[1]);
+		let _guest = publish("guest", &moq_net::Instance::random(), &guests[1]);
 		let mut sources = subscribe.consume().announced();
 
 		let routed = async {
@@ -1700,7 +1762,7 @@ mod tests {
 				loop {
 					match announced.next().await.expect("announcements") {
 						moq_net::announce::Event::Start(announce) if announce.prefix.as_str() == "studio" => {
-							assert_eq!(announce.route.epoch, Some(epoch.clone()));
+							assert_eq!(announce.route.instance, Some(instance.clone()));
 							break;
 						}
 						_ => continue,
@@ -1725,13 +1787,37 @@ mod tests {
 				.await
 				.expect("the source");
 
-			// The newest instance of a source wins before the first relay's rank,
-			// so one restarted behind the failover replaces the first relay's.
-			let older: moq_net::Epoch = "01900000-0000-7000-8000-000000000000".parse().unwrap();
-			let newer: moq_net::Epoch = "01910000-0000-7000-8000-000000000000".parse().unwrap();
-			let _first = publish("show", Some(&older), &guests[0]);
+			// A source restarted behind the failover takes over only once the
+			// first relay's route to it ends, since that relay ranks first.
+			let older = moq_net::Instance::random();
+			let newer = moq_net::Instance::random();
+			let first = publish("show", &older, &guests[0]);
 			routed_at(&mut sources, &older).await;
-			let _restarted = publish("show", Some(&newer), &guests[1]);
+			let _restarted = publish("show", &newer, &guests[1]);
+			routed_at(&mut routes[1].announced(), &newer).await;
+			// Announced after the restart on the failover's one announce
+			// stream, so once it reaches the studio the restart has too.
+			let _marker = publish("marker", &moq_net::Instance::random(), &guests[1]);
+			subscribe
+				.consume()
+				.follow("marker", None)
+				.unwrap()
+				.available()
+				.await
+				.expect("the marker");
+			while let Some(event) = sources.try_next() {
+				if let moq_net::announce::Event::Start(announce)
+				| moq_net::announce::Event::Update(announce)
+				| moq_net::announce::Event::Restart(announce)
+				| moq_net::announce::Event::Takeover { announce, .. } = event
+				{
+					assert!(
+						announce.prefix.as_str() != "show" || announce.route.instance.as_ref() != Some(&newer),
+						"the failover's instance won while the first relay has one"
+					);
+				}
+			}
+			drop(first);
 			routed_at(&mut sources, &newer).await;
 		};
 		kio::clock::timeout(TIMEOUT, routed)
@@ -1739,8 +1825,8 @@ mod tests {
 			.expect("both relays route the program, the failover the sources");
 	}
 
-	/// Wait until `announced` routes `show` under `epoch`.
-	async fn routed_at(announced: &mut moq_net::announce::Consumer, epoch: &moq_net::Epoch) {
+	/// Wait until `announced` routes `show` under `instance`.
+	async fn routed_at(announced: &mut moq_net::announce::Consumer, instance: &moq_net::Instance) {
 		use moq_net::announce::Event;
 		loop {
 			let announce = match announced.next().await.expect("announcements") {
@@ -1748,7 +1834,7 @@ mod tests {
 				Event::Takeover { announce, .. } => announce,
 				Event::End(_) => continue,
 			};
-			if announce.prefix.as_str() == "show" && announce.route.epoch.as_ref() == Some(epoch) {
+			if announce.prefix.as_str() == "show" && announce.route.instance.as_ref() == Some(instance) {
 				return;
 			}
 		}

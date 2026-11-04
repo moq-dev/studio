@@ -25,7 +25,8 @@ struct Studio {
 	compositor: Compositor,
 	device: wgpu::Device,
 	queue: wgpu::Queue,
-	bus: moq_audio::bus::Bus,
+	/// Advances the bus, which meters each source's strip.
+	mixer: moq_audio::bus::Driver,
 	helper: Helper,
 	_origin: moq_net::origin::Producer,
 	_dir: tempfile::TempDir,
@@ -71,10 +72,11 @@ impl Studio {
 		let dir = tempfile::tempdir().unwrap();
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let bus = moq_audio::bus::Bus::new(Default::default()).unwrap();
+		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
 		let helper = Helper::new(env!("CARGO_BIN_EXE_moq-studio"), profile, &adapter, &device, &queue);
 		let mut sources = Sources::new(Context {
-			bus: bus.clone(),
+			program: bus.mix(),
+			bus,
 			origin: origin.consume(),
 			dir: dir.path().to_path_buf(),
 			output: moq_video::render::output(&device),
@@ -93,7 +95,7 @@ impl Studio {
 			compositor,
 			device,
 			queue,
-			bus,
+			mixer,
 			helper,
 			_origin: origin,
 			_dir: dir,
@@ -229,10 +231,9 @@ async fn a_page_draws_and_plays() {
 
 		let strip = feed.strip().unwrap().clone();
 		let deadline = Instant::now() + TIMEOUT;
-		let mut samples = vec![0.0; 960];
 		while strip.level().peak() <= 0.0 {
 			assert!(Instant::now() < deadline, "the page's tone never reached the bus");
-			studio.bus.read(&mut samples);
+			studio.mixer.advance(480);
 			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 	})
@@ -306,6 +307,8 @@ async fn a_crash_drops_only_its_source() {
 
 /// Cookies, even one without an expiry, survive a reload of the page and a
 /// restart of the studio, since every page keeps them in one profile on disk.
+/// A second studio on the profile while it is in use fails its pages saying
+/// why, and leaves the first one's drawing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
 async fn cookies_survive_a_restart() {
@@ -328,29 +331,16 @@ async fn cookies_survive_a_restart() {
 		studio.until_center([255, 0, 0, 255], &[]).await;
 		studio.reload("page");
 		studio.until_center(GREEN, &[]).await;
+
+		let second = Studio::on(profile.path(), &[("page", page.clone())]).await;
+		let reason = second.until_failed("page").await;
+		assert!(reason.contains("another studio"), "{reason}");
+		drop(second);
+		studio.until_center(GREEN, &[]).await;
 		drop(studio);
 
 		let mut studio = Studio::on(profile.path(), &[("page", page)]).await;
 		studio.until_center(GREEN, &[]).await;
-	})
-	.await;
-}
-
-/// A second studio on a profile in use fails its pages saying why, and
-/// leaves the first studio's pages drawing.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
-async fn a_profile_in_use_fails_the_second_studio() {
-	local(async {
-		let profile = tempfile::tempdir().unwrap();
-		let red = page("<body style='background:red'></body>");
-		let mut first = Studio::on(profile.path(), &[("page", red.clone())]).await;
-		first.until_center([255, 0, 0, 255], &[]).await;
-
-		let second = Studio::on(profile.path(), &[("page", red)]).await;
-		let reason = second.until_failed("page").await;
-		assert!(reason.contains("another studio"), "{reason}");
-		first.until_center([255, 0, 0, 255], &[]).await;
 	})
 	.await;
 }
