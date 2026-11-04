@@ -60,7 +60,7 @@ render-sw:
     xvfb=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#xvfb-run)
     "$xvfb/bin/xvfb-run" -a cargo nextest run --locked -p moq-studio --features cef --run-ignored only -E 'binary(browser)'
 
-# Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock.
+# Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock and bun.lock.
 upgrade-moq rev="origin/main":
     sh/upgrade-moq.sh {{ rev }}
 

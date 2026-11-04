@@ -139,13 +139,17 @@ fn main() -> anyhow::Result<ExitCode> {
 	let _runtime = runtime.enter();
 	let relays = config.relays()?;
 	let gpu = pollster::block_on(engine::Gpu::new())?;
-	let room = config.guests.load(config.client.url.as_ref())?;
+	let room = config.guests.load(config.client.url.as_ref())?.map(Arc::new);
+	if let Some(room) = &room {
+		let renewal = guests::Renewal::connect(room.clone(), &config.client, config.quic.clone())?;
+		runtime.spawn(renewal.run());
+	}
 	let launch = engine::Launch {
 		gpu: gpu.clone(),
 		relays,
 		broadcast: config.broadcast.clone(),
 		on_demand: config.on_demand,
-		room: room.map(Arc::new),
+		room,
 	};
 	let exists = config
 		.scenes
