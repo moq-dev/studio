@@ -30,12 +30,25 @@ blend modes. Only a video filter that cannot render the same way in every
 viewer is baked into a track of its own. A mask names a picture source's
 track, and a LUT a `lut` source, whose `.cube` table publishes no track yet,
 so a viewer needs one carrying it, as an image's file is. Audio is the other
-way round: an audio source's track is published after its audio filters ([Audio source tracks](/quest/m0/compose/sources.md)), so
+way round: an audio source's track is published after its audio filters ([Audio source tracks](/quest/m0/audio-source-tracks.md)), so
 the layout carries only what is applied after that point, such as gain and
 mute, and never names an audio filter for a viewer to apply again. The
 picture source tracks are enough to start; audio source tracks join the
 layout when they land.
 
+A browser source publishes no track of its own (decided 2026-11-03,
+maintainer, on [moq-dev/studio#8](https://github.com/moq-dev/studio/pull/8)).
+Each has a "viewers load this page" option, off by default and refused for a
+localhost URL: on, the layout carries the page's URL and viewers load it
+themselves; off, viewers see the page only in the program. A replay source
+(`rs/moq-scene/src/replay.rs`) shows a span of another source's past, so the
+layout says when it is hidden and when its span has ended, rather than leaving
+a viewer on its last frame.
+
+Only sources the creator publishes independently
+([Published independently](/quest/m0/publish-independently.md)) have tracks a
+viewer can fetch; the rest reach viewers only in the program.
+
 ## Related
 
-- [Audio source tracks](/quest/m0/compose/sources.md) - the audio tracks a layout also names once they land
+- [Audio source tracks](/quest/m0/audio-source-tracks.md) - the audio tracks a layout also names once they land

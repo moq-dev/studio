@@ -14,7 +14,7 @@ composition host renders with the same WGSL and the layout carries by name and
 settings. A model cannot meet that parity rule: viewers would each need the
 model and a GPU to run it, and inference differs across backends. So an ML
 effect is baked into its source's track per the
-[composition epic](/quest/m0/compose/README.md): it belongs to a source, never
+[composition epic](/quest/m1/compose/README.md): it belongs to a source, never
 to one scene item, and sits before the source's crop and filters, as the
 encoder in `rs/moq-scene/src/publish.rs` sees the capture.
 
