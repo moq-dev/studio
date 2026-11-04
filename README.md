@@ -158,8 +158,9 @@ so its sound and picture stay in sync through network jitter and stalls. Its
 audio plays as far behind what arrives as the network's jitter needs, measured
 as it goes, the same delay `moq play --delay auto` holds, up to 2 s. Each
 picture waits for the sound stamped with it, and the canvas shows the last one
-meanwhile. A stall longer than that delay pauses both and starts them again
-together, and a burst after one skips ahead to the delay. Without audio, the
+meanwhile. A sound stall longer than that delay pauses the picture too and
+starts both again together; a picture stall leaves the sound playing. A burst
+after a stall skips ahead to the delay. Without audio, the
 picture plays 100 ms behind. Sources shows how far behind each broadcast
 plays.
 

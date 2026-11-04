@@ -55,6 +55,10 @@ pub(crate) struct Speaker<'a> {
 	/// The last frame placed: when it finishes sounding, and the media time it
 	/// ends at.
 	tail: Option<(Instant, Duration)>,
+	/// When the media after a skip starts sounding. The clock holds one
+	/// mapping, and the audio queued ahead of the skip plays on the old one
+	/// until then, so frames placed before it are not reported yet.
+	skipped: Option<Instant>,
 }
 
 /// What to do with a frame [`Speaker::place`] was given.
@@ -75,6 +79,7 @@ impl<'a> Speaker<'a> {
 			clock,
 			changed,
 			tail: None,
+			skipped: None,
 		}
 	}
 
@@ -99,6 +104,7 @@ impl<'a> Speaker<'a> {
 				// ahead of it, however coarsely the bus advances.
 				if follows < now + BUS_LATENCY / 2 {
 					self.clock.audio_restarted();
+					self.skipped = None;
 					now + target + BUS_LATENCY
 				} else if start.saturating_add(CONTIGUOUS) < media
 					|| follows.saturating_duration_since(now) > target + BUS_LATENCY + SLACK
@@ -106,6 +112,7 @@ impl<'a> Speaker<'a> {
 					// Media overlapping what is queued, or past the target, would
 					// queue without bound however fast it arrives.
 					self.tail = Some((sounds, media.max(end)));
+					self.skipped = Some(sounds);
 					return Place::Skip;
 				} else {
 					follows
@@ -114,6 +121,10 @@ impl<'a> Speaker<'a> {
 		};
 		let sounds = begins + duration;
 		self.tail = Some((sounds, end));
+		if self.skipped.is_some_and(|skipped| now < skipped) {
+			return Place::Play(begins);
+		}
+		self.skipped = None;
 		let audio = timeline::Audio {
 			end,
 			buffered: sounds.saturating_duration_since(now),
@@ -173,12 +184,16 @@ impl Writer {
 		}
 	}
 
-	/// Write `data` at `now` to sound at `sounds`, or as soon after as it can.
-	/// Call it no sooner than [`BUS_LATENCY`] ahead.
+	/// Write `data` at `now` to sound at `sounds`. Call it no sooner than
+	/// [`BUS_LATENCY`] ahead. Written late, the part whose moment has passed is
+	/// dropped, so the rest still sounds on schedule, and so does what follows.
 	pub(crate) fn write(&mut self, sounds: Instant, data: &[u8], now: Instant) -> Result<(), moq_audio::Error> {
 		let free = self.runs_out.unwrap_or(now + BUS_LATENCY).max(now);
-		let gap = sounds.saturating_duration_since(free).min(BUS_LATENCY);
-		let gap = self.frames(gap);
+		let late = self.frames(free.saturating_duration_since(sounds)) * self.stride;
+		let Some(data) = data.get(late..).filter(|data| !data.is_empty()) else {
+			return Ok(());
+		};
+		let gap = self.frames(sounds.saturating_duration_since(free).min(BUS_LATENCY));
 		self.pending.clear();
 		self.pending.resize(gap * self.stride, 0);
 		self.pending.extend_from_slice(data);
@@ -287,8 +302,17 @@ mod tests {
 		assert_eq!(clock.due(stamp(1_060)), Some(at(210)));
 
 		// 1 s lost, with only the target queued: skipped back onto the target.
+		// The audio queued ahead of the skip keeps its pictures' moments until
+		// the media after it starts to sound.
 		assert_eq!(speaker.place(ms(2_080), FRAME, TARGET, at(60)), Place::Skip);
-		assert_eq!(speaker.place(ms(2_100), FRAME, TARGET, at(61)), Place::Play(at(230)));
+		let schedule = clock.consume();
+		for index in 0..9 {
+			let place = speaker.place(ms(2_100 + index * 20), FRAME, TARGET, at(61 + index * 20));
+			assert_eq!(place, Place::Play(at(230 + index * 20)));
+			assert_eq!(clock.due(stamp(1_060)), Some(at(210)), "{index}");
+			assert!(!heard(&schedule, stamp(2_100), at(61 + index * 20)), "{index}");
+		}
+		assert_eq!(speaker.place(ms(2_280), FRAME, TARGET, at(241)), Place::Play(at(410)));
 		assert_eq!(clock.due(stamp(2_100)), Some(at(230)));
 	}
 
@@ -304,7 +328,14 @@ mod tests {
 			.filter(|place| *place != Place::Skip)
 			.collect::<Vec<_>>();
 		assert_eq!(placed, [Place::Play(at(150)), Place::Play(at(170))]);
-		assert_eq!(speaker.place(ms(1_200), FRAME, TARGET, at(20)), Place::Play(at(190)));
+		// What arrives next follows the queue, and the clock takes its media
+		// once the first of it sounds.
+		for index in 0..9 {
+			let place = speaker.place(ms(1_200 + index * 20), FRAME, TARGET, at(20 + index * 20));
+			assert_eq!(place, Place::Play(at(190 + index * 20)));
+			assert_eq!(clock.due(stamp(1_000)), Some(at(150)), "{index}");
+		}
+		assert_eq!(speaker.place(ms(1_380), FRAME, TARGET, at(200)), Place::Play(at(370)));
 		assert_eq!(clock.due(stamp(1_200)), Some(at(190)));
 	}
 
@@ -329,7 +360,8 @@ mod tests {
 
 	/// A frame sounds when placed: the first, one that follows it, and ones
 	/// written after the channel ran dry, on time or late, which the bus would
-	/// otherwise play at once or pad behind, apart from their pictures.
+	/// otherwise play at once or pad behind, apart from their pictures. One
+	/// written after its moment loses what has passed, or all of it.
 	#[test]
 	fn a_write_sounds_when_placed() {
 		let (bus, mut driver) = moq_audio::bus::Bus::new(Default::default()).unwrap();
@@ -385,6 +417,19 @@ mod tests {
 			.write(clock(2 * rate) + BUS_LATENCY, &frame(4.0), clock(2 * rate + 1_920))
 			.unwrap();
 		advance(3 * rate, &mut heard);
+		// Run dry and written after its moment began, then after it ended.
+		writer
+			.write(
+				clock(3 * rate) - Duration::from_millis(10),
+				&frame(5.0),
+				clock(3 * rate),
+			)
+			.unwrap();
+		advance(4 * rate, &mut heard);
+		writer
+			.write(clock(4 * rate) - FRAME, &frame(6.0), clock(4 * rate))
+			.unwrap();
+		advance(5 * rate, &mut heard);
 
 		let latency = rate * BUS_LATENCY.as_millis() as u64 / 1_000;
 		let first = block + latency;
@@ -399,7 +444,9 @@ mod tests {
 				(after, 3.0),
 				(after + 960, 0.0),
 				(late, 4.0),
-				(late + 960, 0.0)
+				(late + 960, 0.0),
+				(3 * rate, 5.0),
+				(3 * rate + 480, 0.0)
 			]
 		);
 	}
