@@ -1860,7 +1860,9 @@ impl Panels {
 						source.has_video()
 							&& !matches!(
 								source,
-								Source::Image { .. } | Source::Color { .. } | Source::Browser { .. }
+								Source::Image { .. }
+									| Source::Color { .. } | Source::Browser { .. }
+									| Source::Overlay { .. }
 							)
 					})
 				})
@@ -2478,14 +2480,14 @@ fn add(
 	);
 	let canvas = state.collection().canvas;
 	let place = source.has_video();
-	// A page, or a clone of one, lands at the page's size, pixel for pixel;
-	// anything else fills the canvas.
+	// A page or overlay, or a clone of one, lands at its own size, pixel for
+	// pixel; anything else fills the canvas.
 	let shown = match &source {
 		Source::Clone { source } => state.collection().sources.get(source),
 		source => Some(source),
 	};
 	let rect = match shown {
-		Some(Source::Browser { width, height, .. }) => Rect {
+		Some(Source::Browser { width, height, .. } | Source::Overlay { width, height, .. }) => Rect {
 			x: 0.0,
 			y: 0.0,
 			width: *width as f32,
@@ -2760,6 +2762,7 @@ fn describe(source: &Source) -> String {
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
 		Source::Browser { url, width, height } => format!("browser: {url} ({width}x{height})"),
+		Source::Overlay { width, height, .. } => format!("overlay ({width}x{height})"),
 		Source::Clone { source } => format!("clone of {source}"),
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
@@ -2811,10 +2814,11 @@ fn meter(ui: &mut Ui, level: moq_audio::Level) {
 struct AddSource {
 	name: String,
 	kind: Kind,
-	/// A path, broadcast path, url, or device id, depending on the kind.
+	/// A path, broadcast path, url, device id, or an overlay's HTML, depending
+	/// on the kind.
 	value: String,
 	color: Color32,
-	/// A browser source's page size.
+	/// A browser source's page size, or an overlay's.
 	width: u32,
 	height: u32,
 }
@@ -2845,12 +2849,13 @@ enum Kind {
 	Microphone,
 	SystemAudio,
 	Browser,
+	Overlay,
 	Replay,
 	Lut,
 }
 
 impl Kind {
-	const ALL: [Self; 11] = [
+	const ALL: [Self; 12] = [
 		Self::Color,
 		Self::Image,
 		Self::Broadcast,
@@ -2860,6 +2865,7 @@ impl Kind {
 		Self::Microphone,
 		Self::SystemAudio,
 		Self::Browser,
+		Self::Overlay,
 		Self::Replay,
 		Self::Lut,
 	];
@@ -2875,6 +2881,7 @@ impl Kind {
 			Self::Microphone => "Microphone",
 			Self::SystemAudio => "System audio",
 			Self::Browser => "Browser",
+			Self::Overlay => "Overlay",
 			Self::Replay => "Replay",
 			Self::Lut => "LUT",
 		}
@@ -2889,6 +2896,7 @@ impl Kind {
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
 			Self::Browser => Some("url"),
+			Self::Overlay => Some("HTML and CSS"),
 			Self::Camera | Self::Display | Self::Microphone => Some("id (empty for the default)"),
 		}
 	}
@@ -2913,10 +2921,14 @@ impl AddSource {
 			ui.end_row();
 			if let Some(label) = self.kind.value() {
 				ui.label(label);
-				ui.text_edit_singleline(&mut self.value);
+				if self.kind == Kind::Overlay {
+					ui.add(egui::TextEdit::multiline(&mut self.value).code_editor());
+				} else {
+					ui.text_edit_singleline(&mut self.value);
+				}
 				ui.end_row();
 			}
-			if self.kind == Kind::Browser {
+			if matches!(self.kind, Kind::Browser | Kind::Overlay) {
 				ui.label("Size");
 				ui.horizontal(|ui| {
 					ui.add(egui::DragValue::new(&mut self.width).range(1..=4096));
@@ -2953,6 +2965,11 @@ impl AddSource {
 			Kind::SystemAudio => Source::SystemAudio,
 			Kind::Browser => Source::Browser {
 				url: value,
+				width: self.width,
+				height: self.height,
+			},
+			Kind::Overlay => Source::Overlay {
+				html: value,
 				width: self.width,
 				height: self.height,
 			},

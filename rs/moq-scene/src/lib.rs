@@ -36,6 +36,7 @@ mod compositor;
 mod edit;
 mod effect;
 mod lut;
+mod overlay;
 pub mod publish;
 pub mod replay;
 mod scale;
@@ -115,4 +116,9 @@ pub enum Error {
 	/// A browser source's page failed, or its helper process stopped.
 	#[error("browser: {0}")]
 	Browser(String),
+
+	/// An overlay holds HTML or CSS outside what overlays draw, named, or
+	/// failed to draw.
+	#[error("overlay: {0}")]
+	Overlay(String),
 }

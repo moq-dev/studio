@@ -1,8 +1,8 @@
 # MoQ Studio
 
 `moq-studio` is a native streaming studio for Linux, macOS, and Windows. It
-composes cameras, screens, windows, images, colors, web pages, and broadcasts
-from a relay into scenes on the GPU, mixes their audio, and publishes the result to a
+composes cameras, screens, windows, images, colors, web pages, HTML and CSS
+overlays, and broadcasts from a relay into scenes on the GPU, mixes their audio, and publishes the result to a
 [MoQ](https://github.com/moq-dev/moq) relay. It is early and not packaged yet,
 so build it from source. The moq crates come from the `moq` submodule:
 
@@ -154,6 +154,38 @@ stream carries on. A crash of the browser itself fails every browser source.
 windows (`window.open` and new-tab links do nothing), and its dropdown lists,
 such as a `<select>`'s, are not drawn yet.
 
+An overlay is a title, lower third, or other graphic written as HTML and CSS,
+drawn by the studio itself (through [Blitz](https://github.com/DioxusLabs/blitz))
+rather than a browser, on every platform. Its CSS animations and transitions
+run on the program clock, so they land on the same frame in the program and in
+a recording or replay of it, whatever the studio's load. It runs no scripts
+and loads nothing: no images, stylesheets, or fonts from anywhere. Its text is
+set in the bundled Noto Sans, regular, bold, or italic, whatever `font-family`
+names, so it looks the same on every machine. An overlay outside what
+overlays draw fails to start, naming the first element, attribute, rule, or
+property it refused:
+
+- Elements: text and the boxes around it (`div`, `span`, `p`, headings,
+  lists, tables, and the like), plus `style`, `title`, and `meta`. Not
+  `script`, `img`, `link`, `iframe`, `svg`, `canvas`, or form controls.
+- Attributes: `id`, `class`, `style`, `lang`, `dir`, `title`, `hidden`,
+  table and list numbering ones, and `data-*` and `aria-*`.
+- CSS rules: style rules, nested ones included, `@media`, and `@keyframes`.
+  Not `@import` or `@font-face`, nor any `url()` or `image-set()`.
+- CSS properties: box layout, flexbox, grid, positioning, margins and
+  padding, colors, opacity, gradients, borders and their radii, `box-shadow`,
+  outlines, transforms, `clip-path`, fonts and text layout, text decoration,
+  `content`, and animations and transitions, by their usual shorthands too.
+  Not yet `filter`, `backdrop-filter`, `mix-blend-mode`, `text-shadow`,
+  `mask`, `text-overflow`, or multi-column layout; the list grows as Blitz
+  draws more.
+
+An overlay's animation starts when the overlay does: when the studio opens
+it, and again whenever it is edited. One that no preview or program shows
+costs nothing until it is shown again, where its animation has carried on.
+Overlays publish no track of their own, so viewers see them only in the
+program.
+
 ## Guests
 
 Guests and phones join a room the studio owns on its relay, from a web page,
@@ -271,6 +303,20 @@ url = "https://example.com/alerts"
 width = 800 # the page's own size, whatever its items stretch it to
 height = 600
 
+[sources.name]
+kind = "overlay"
+width = 1920 # the overlay's own size, like a page's
+height = 1080
+html = '''
+<style>
+  .third { position: absolute; left: 80px; bottom: 120px; padding: 16px 32px;
+    background: linear-gradient(90deg, #1e3a8a, #2563eb); border-radius: 12px;
+    font: bold 48px sans-serif; color: white; animation: in 400ms ease-out both; }
+  @keyframes in { from { transform: translateX(-40px); opacity: 0 } }
+</style>
+<div class="third">Ada Lovelace</div>
+'''
+
 [audio.guest]
 gain = 0.5
 
@@ -315,7 +361,7 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
 (macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
-`clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
+`overlay` (its `html`, and a `width` and `height` up to 4096), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
 file, which no item places, but which grades what a `lut` filter names it in),
 and `replay`, where the Replay panel plays replays. The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
@@ -432,7 +478,8 @@ follows. Images and colors keep their picture once, as the image file and as a
 one-pixel PNG. Removing or editing a source ends its track. A track carries the
 plain capture, before any filter, and a clone has none, since it shows its
 source's capture. Microphones and system audio have no tracks of their own yet,
-nor does a browser source, and a broadcast source is already its publisher's.
+nor does a browser source or an overlay, and a broadcast source is already its
+publisher's.
 
 Every encoder holds an encode session, and consumer GPUs allow only a few
 hardware sessions at once: 8 on a GeForce card, while a base Apple M4 has one
