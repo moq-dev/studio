@@ -1,8 +1,9 @@
-//! The helper process: CEF's browser process, rendering one page offscreen
-//! and handing each picture and sound to the studio over the socket on its
-//! stdin.
+//! The helper process: CEF's browser process, rendering every page offscreen
+//! in one profile and handing each picture and sound to the studio over the
+//! socket on its stdin.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::os::fd::BorrowedFd;
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
@@ -10,7 +11,7 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use cef::*;
 
-use super::protocol::{Channel, Command, Event, Format, Open, Plane, Texture};
+use super::protocol::{Channel, Command, Event, Format, Id, Open, Plane, Start, Texture};
 use super::{Button, Input, Modifiers};
 
 /// Run one of CEF's subprocesses (renderer, GPU, utility, zygote).
@@ -32,13 +33,15 @@ pub(super) fn run() -> ExitCode {
 	}
 }
 
-/// What every handler shares.
+/// What every page's handlers share.
 struct Shared {
-	open: Open,
 	/// Sends from the UI thread (pictures) and CEF's audio thread (sound).
 	writer: Mutex<Channel>,
 	/// Each [`Command::Painted`], which lets a painted picture go back to CEF.
+	/// Pictures are painted on the UI thread, one at a time, so one answer is
+	/// never another page's.
 	painted: Mutex<mpsc::Receiver<()>>,
+	accelerated: bool,
 }
 
 impl Shared {
@@ -53,15 +56,27 @@ impl Shared {
 			let _ = self.painted.lock().unwrap().recv();
 		}
 	}
+}
 
+/// One page's handlers' view of it.
+struct Paged {
+	shared: Arc<Shared>,
+	id: Id,
+	open: Open,
+}
+
+impl Paged {
 	fn fail(&self, reason: String) {
-		self.send(&Event::Failed(reason), &[]);
+		self.shared.send(&Event::Failed(self.id, reason), &[]);
 	}
 }
 
 thread_local! {
-	/// The page, on CEF's UI thread, where input is delivered.
-	static BROWSER: RefCell<Option<Browser>> = const { RefCell::new(None) };
+	/// The open pages, on CEF's UI thread, where input is delivered.
+	static PAGES: RefCell<HashMap<Id, Browser>> = RefCell::new(HashMap::new());
+	/// Whether the studio is gone, so the helper quits once its last page
+	/// closes.
+	static QUITTING: Cell<bool> = const { Cell::new(false) };
 }
 
 fn serve() -> Result<(), String> {
@@ -73,31 +88,39 @@ fn serve() -> Result<(), String> {
 	let reader = Channel::new(UnixStream::from(socket));
 	let writer = reader.try_clone().map_err(|err| format!("socket: {err}"))?;
 
-	let open = match reader.recv::<Command>() {
-		Ok(Some((Command::Open(open), _))) => open,
-		Ok(Some((command, _))) => return Err(format!("expected Open, got {command:?}")),
+	let start = match reader.recv::<Command>() {
+		Ok(Some((Command::Start(start), _))) => start,
+		Ok(Some((command, _))) => return Err(format!("expected Start, got {command:?}")),
 		Ok(None) => return Ok(()),
 		Err(err) => return Err(format!("socket: {err}")),
 	};
 
 	let (painted_tx, painted) = mpsc::channel();
 	let shared = Arc::new(Shared {
-		open,
 		writer: Mutex::new(writer),
 		painted: Mutex::new(painted),
+		accelerated: start.accelerated,
 	});
 	// The studio shows why, rather than only that the helper exited.
-	page(&shared, reader, painted_tx).inspect_err(|reason| shared.fail(reason.clone()))
+	browse(&shared, start, reader, painted_tx).inspect_err(|reason| _ = shared.send(&Event::Fatal(reason.clone()), &[]))
 }
 
-/// Open the page `shared` describes and run CEF until it closes.
-fn page(shared: &Arc<Shared>, reader: Channel, painted_tx: mpsc::Sender<()>) -> Result<(), String> {
+/// Run CEF on the profile `start` names, opening and closing pages as the
+/// studio asks, until it closes the socket and the last page closes.
+fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc::Sender<()>) -> Result<(), String> {
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 	let args = args::Args::new();
-	let mut app = HelperApp::new(shared.open.render_node.clone());
+	let mut app = HelperApp::new(HelperProcess::new(), start.render_node);
+	let profile = CefString::from(start.profile.as_str());
 	let settings = Settings {
 		windowless_rendering_enabled: 1,
-		root_cache_path: shared.open.profile.as_str().into(),
+		// The global profile, kept on disk: without a cache path CEF keeps
+		// everything in memory.
+		root_cache_path: profile.clone(),
+		cache_path: profile,
+		// A login that sets a cookie without an expiry survives a restart, as
+		// it would in a browser left open.
+		persist_session_cookies: 1,
 		log_severity: LogSeverity::WARNING,
 		// Transparent, so an overlay shows what is under it.
 		background_color: 0,
@@ -110,163 +133,202 @@ fn page(shared: &Arc<Shared>, reader: Channel, painted_tx: mpsc::Sender<()>) -> 
 		std::ptr::null_mut(),
 	) != 1
 	{
-		return Err("CEF failed to initialize".into());
+		let notified = sys::cef_resultcode_t::CEF_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED as i32;
+		return Err(match get_exit_code() == notified {
+			true => format!(
+				"another studio is using the browser profile {}; quit it, then reload the source",
+				start.profile
+			),
+			false => "CEF failed to initialize".into(),
+		});
 	}
 
+	let commands = {
+		let shared = shared.clone();
+		std::thread::Builder::new()
+			.name("browser-commands".into())
+			.spawn(move || commands(shared, reader, painted_tx))
+	};
+	if let Err(err) = commands {
+		shutdown();
+		return Err(format!("cannot start the helper's command thread: {err}"));
+	}
+
+	run_message_loop();
+	PAGES.with_borrow_mut(HashMap::clear);
+	// Saves the profile, such as cookies not yet written.
+	shutdown();
+	Ok(())
+}
+
+/// Read the studio's commands until it closes the socket, then close every
+/// page, which ends the message loop.
+fn commands(shared: Arc<Shared>, reader: Channel, painted: mpsc::Sender<()>) {
+	loop {
+		match reader.recv::<Command>() {
+			Ok(Some((Command::Painted, _))) => {
+				let _ = painted.send(());
+			}
+			Ok(Some((Command::Open(id, open), _))) => {
+				let shared = shared.clone();
+				post(move || self::open(shared, id, open));
+			}
+			Ok(Some((Command::Close(id), _))) => post(move || close(id)),
+			Ok(Some((Command::Input(id, input), _))) => post(move || deliver(id, input)),
+			Ok(Some((Command::FrameRate(id, rate), _))) => post(move || retime(id, rate)),
+			Ok(Some((Command::Start(_), _))) | Ok(None) | Err(_) => break,
+		}
+	}
+	// Unblocks a paint waiting on the studio.
+	drop(painted);
+	post(|| {
+		QUITTING.set(true);
+		let ids: Vec<Id> = PAGES.with_borrow(|pages| pages.keys().copied().collect());
+		if ids.is_empty() {
+			quit_message_loop();
+		}
+		for id in ids {
+			close(id);
+		}
+	});
+}
+
+/// Open page `id`. Runs on the UI thread.
+fn open(shared: Arc<Shared>, id: Id, open: Open) {
 	let window = WindowInfo {
 		windowless_rendering_enabled: 1,
-		shared_texture_enabled: shared.open.accelerated.into(),
+		shared_texture_enabled: shared.accelerated.into(),
 		..Default::default()
 	};
 	let browser_settings = BrowserSettings {
-		windowless_frame_rate: shared.open.framerate as _,
+		windowless_frame_rate: open.framerate as _,
 		background_color: 0,
 		..Default::default()
 	};
+	let url = CefString::from(open.url.as_str());
+	let paged = Arc::new(Paged { shared, id, open });
 	let mut client = HelperClient::new(
-		HelperRender::new(shared.clone()),
-		HelperAudio::new(shared.clone()),
-		HelperLoad::new(shared.clone()),
-		HelperRequest::new(shared.clone()),
-		HelperLife::new(),
+		HelperRender::new(paged.clone()),
+		HelperAudio::new(paged.clone()),
+		HelperLoad::new(paged.clone()),
+		HelperRequest::new(paged.clone()),
+		HelperLife::new(id),
 	);
-	let url = CefString::from(shared.open.url.as_str());
-	let browser = browser_host_create_browser_sync(
+	match browser_host_create_browser_sync(
 		Some(&window),
 		Some(&mut client),
 		Some(&url),
 		Some(&browser_settings),
 		None,
 		None,
-	)
-	.ok_or("CEF failed to create the page")?;
-	BROWSER.with_borrow_mut(|slot| *slot = Some(browser));
-
-	std::thread::Builder::new()
-		.name("browser-commands".into())
-		.spawn(move || commands(reader, painted_tx))
-		.map_err(|err| format!("cannot start the helper's command thread: {err}"))?;
-
-	run_message_loop();
-	BROWSER.with_borrow_mut(|slot| *slot = None);
-	shutdown();
-	Ok(())
+	) {
+		Some(browser) => _ = PAGES.with_borrow_mut(|pages| pages.insert(id, browser)),
+		None => paged.fail("CEF failed to create the page".into()),
+	}
 }
 
-/// Read the studio's commands until it closes the socket, then close the page,
-/// which ends the message loop.
-fn commands(reader: Channel, painted: mpsc::Sender<()>) {
-	loop {
-		match reader.recv::<Command>() {
-			Ok(Some((Command::Painted, _))) => {
-				let _ = painted.send(());
-			}
-			Ok(Some((Command::Input(input), _))) => post(move || deliver(input)),
-			Ok(Some((Command::FrameRate(rate), _))) => post(move || retime(rate)),
-			Ok(Some((Command::Open(_), _))) | Ok(None) | Err(_) => break,
-		}
+/// Close page `id`, which leaves [`PAGES`] once CEF has closed it. Runs on
+/// the UI thread.
+fn close(id: Id) {
+	host(id, |host| host.close_browser(1));
+}
+
+/// Run `f` on page `id`'s host, if the page is open. Runs on the UI thread.
+fn host(id: Id, f: impl FnOnce(BrowserHost)) {
+	if let Some(host) = PAGES.with_borrow(|pages| pages.get(&id).and_then(|browser| browser.host())) {
+		f(host);
 	}
-	// Unblocks a paint waiting on the studio.
-	drop(painted);
-	post(|| {
-		BROWSER.with_borrow(|browser| {
-			if let Some(host) = browser.as_ref().and_then(|browser| browser.host()) {
-				host.close_browser(1);
-			}
-		})
+}
+
+/// Paint page `id` `rate` times a second. Runs on the UI thread.
+fn retime(id: Id, rate: u32) {
+	host(id, |host| {
+		host.set_windowless_frame_rate(rate.try_into().unwrap_or(i32::MAX))
 	});
 }
 
-/// Paint the page `rate` times a second. Runs on the UI thread.
-fn retime(rate: u32) {
-	BROWSER.with_borrow(|browser| {
-		if let Some(host) = browser.as_ref().and_then(|browser| browser.host()) {
-			host.set_windowless_frame_rate(rate.try_into().unwrap_or(i32::MAX));
-		}
-	})
-}
-
-/// Hand one input event to the page. Runs on the UI thread.
-fn deliver(input: Input) {
-	BROWSER.with_borrow(|browser| {
-		let Some(host) = browser.as_ref().and_then(|browser| browser.host()) else {
-			return;
-		};
-		let mouse = |x: i32, y: i32, modifiers: Modifiers| MouseEvent {
+/// Hand one input event to page `id`. Runs on the UI thread.
+fn deliver(id: Id, input: Input) {
+	let Some(browser) = PAGES.with_borrow(|pages| pages.get(&id).cloned()) else {
+		return;
+	};
+	let Some(host) = browser.host() else {
+		return;
+	};
+	let mouse = |x: i32, y: i32, modifiers: Modifiers| MouseEvent {
+		x,
+		y,
+		modifiers: flags(modifiers),
+	};
+	match input {
+		Input::Move { x, y, modifiers } => host.send_mouse_move_event(Some(&mouse(x, y, modifiers)), 0),
+		Input::Leave { modifiers } => host.send_mouse_move_event(Some(&mouse(0, 0, modifiers)), 1),
+		Input::Button {
 			x,
 			y,
-			modifiers: flags(modifiers),
-		};
-		match input {
-			Input::Move { x, y, modifiers } => host.send_mouse_move_event(Some(&mouse(x, y, modifiers)), 0),
-			Input::Leave { modifiers } => host.send_mouse_move_event(Some(&mouse(0, 0, modifiers)), 1),
-			Input::Button {
-				x,
-				y,
+			button,
+			down,
+			clicks,
+			modifiers,
+		} => {
+			let button = match button {
+				Button::Left => MouseButtonType::LEFT,
+				Button::Middle => MouseButtonType::MIDDLE,
+				Button::Right => MouseButtonType::RIGHT,
+			};
+			host.send_mouse_click_event(
+				Some(&mouse(x, y, modifiers)),
 				button,
-				down,
-				clicks,
-				modifiers,
-			} => {
-				let button = match button {
-					Button::Left => MouseButtonType::LEFT,
-					Button::Middle => MouseButtonType::MIDDLE,
-					Button::Right => MouseButtonType::RIGHT,
-				};
-				host.send_mouse_click_event(
-					Some(&mouse(x, y, modifiers)),
-					button,
-					(!down).into(),
-					clicks.min(3) as _,
-				);
-			}
-			Input::Wheel {
-				x,
-				y,
-				dx,
-				dy,
-				modifiers,
-			} => host.send_mouse_wheel_event(Some(&mouse(x, y, modifiers)), dx, dy),
-			Input::Key { code, down, modifiers } => {
+				(!down).into(),
+				clicks.min(3) as _,
+			);
+		}
+		Input::Wheel {
+			x,
+			y,
+			dx,
+			dy,
+			modifiers,
+		} => host.send_mouse_wheel_event(Some(&mouse(x, y, modifiers)), dx, dy),
+		Input::Key { code, down, modifiers } => {
+			let event = KeyEvent {
+				type_: if down {
+					KeyEventType::RAWKEYDOWN
+				} else {
+					KeyEventType::KEYUP
+				},
+				modifiers: flags(modifiers),
+				windows_key_code: code,
+				..Default::default()
+			};
+			host.send_key_event(Some(&event));
+		}
+		Input::Text(text) => {
+			for unit in text.encode_utf16() {
 				let event = KeyEvent {
-					type_: if down {
-						KeyEventType::RAWKEYDOWN
-					} else {
-						KeyEventType::KEYUP
-					},
-					modifiers: flags(modifiers),
-					windows_key_code: code,
+					type_: KeyEventType::CHAR,
+					windows_key_code: unit.into(),
+					character: unit,
+					unmodified_character: unit,
 					..Default::default()
 				};
 				host.send_key_event(Some(&event));
 			}
-			Input::Text(text) => {
-				for unit in text.encode_utf16() {
-					let event = KeyEvent {
-						type_: KeyEventType::CHAR,
-						windows_key_code: unit.into(),
-						character: unit,
-						unmodified_character: unit,
-						..Default::default()
-					};
-					host.send_key_event(Some(&event));
-				}
-			}
-			// The focused frame holds the selection, which may be in an
-			// iframe.
-			Input::Copy => {
-				if let Some(frame) = browser.as_ref().and_then(|browser| browser.focused_frame()) {
-					frame.copy();
-				}
-			}
-			Input::Cut => {
-				if let Some(frame) = browser.as_ref().and_then(|browser| browser.focused_frame()) {
-					frame.cut();
-				}
-			}
-			Input::Focus(focused) => host.set_focus(focused.into()),
 		}
-	});
+		// The focused frame holds the selection, which may be in an
+		// iframe.
+		Input::Copy => {
+			if let Some(frame) = browser.focused_frame() {
+				frame.copy();
+			}
+		}
+		Input::Cut => {
+			if let Some(frame) = browser.focused_frame() {
+				frame.cut();
+			}
+		}
+		Input::Focus(focused) => host.set_focus(focused.into()),
+	}
 }
 
 fn flags(modifiers: Modifiers) -> u32 {
@@ -310,10 +372,15 @@ wrap_task! {
 
 wrap_app! {
 	struct HelperApp {
+		process: BrowserProcessHandler,
 		render_node: Option<String>,
 	}
 
 	impl App {
+		fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
+			Some(self.process.clone())
+		}
+
 		fn on_before_command_line_processing(
 			&self,
 			_process_type: Option<&CefString>,
@@ -331,6 +398,22 @@ wrap_app! {
 			if let Some(node) = &self.render_node {
 				command_line.append_switch_with_value(Some(&"render-node-override".into()), Some(&node.as_str().into()));
 			}
+		}
+	}
+}
+
+wrap_browser_process_handler! {
+	struct HelperProcess;
+
+	impl BrowserProcessHandler {
+		// A second studio starting on this profile is refused, and told so
+		// by its own failure; this one opens no window for it.
+		fn on_already_running_app_relaunch(
+			&self,
+			_command_line: Option<&mut CommandLine>,
+			_current_directory: Option<&CefString>,
+		) -> ::std::os::raw::c_int {
+			1
 		}
 	}
 }
@@ -369,14 +452,14 @@ wrap_client! {
 
 wrap_render_handler! {
 	struct HelperRender {
-		shared: Arc<Shared>,
+		page: Arc<Paged>,
 	}
 
 	impl RenderHandler {
 		fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>) {
 			if let Some(rect) = rect {
-				rect.width = self.shared.open.width as _;
-				rect.height = self.shared.open.height as _;
+				rect.width = self.page.open.width as _;
+				rect.height = self.page.open.height as _;
 			}
 		}
 
@@ -397,11 +480,12 @@ wrap_render_handler! {
 			// this call.
 			let data = unsafe { std::slice::from_raw_parts(buffer, len) }.to_vec();
 			let event = Event::Pixels {
+				page: self.page.id,
 				width: width as u32,
 				height: height as u32,
 				data,
 			};
-			self.shared.paint(&event, &[]);
+			self.page.shared.paint(&event, &[]);
 		}
 
 		fn on_accelerated_paint(
@@ -419,7 +503,7 @@ wrap_render_handler! {
 				ColorType::RGBA_8888 => Format::Rgba,
 				ColorType::BGRA_8888 => Format::Bgra,
 				other => {
-					self.shared.fail(format!("CEF painted an unknown format {:?}", other.as_ref()));
+					self.page.fail(format!("CEF painted an unknown format {:?}", other.as_ref()));
 					return;
 				}
 			};
@@ -442,14 +526,14 @@ wrap_render_handler! {
 			// SAFETY: CEF owns these descriptors and keeps them open for this
 			// call, which outlasts the send that duplicates them.
 			let fds: Vec<_> = planes.iter().map(|plane| unsafe { BorrowedFd::borrow_raw(plane.fd) }).collect();
-			self.shared.paint(&Event::Texture(texture), &fds);
+			self.page.shared.paint(&Event::Texture(self.page.id, texture), &fds);
 		}
 	}
 }
 
 wrap_audio_handler! {
 	struct HelperAudio {
-		shared: Arc<Shared>,
+		page: Arc<Paged>,
 	}
 
 	impl AudioHandler {
@@ -459,12 +543,12 @@ wrap_audio_handler! {
 			params: Option<&mut AudioParameters>,
 		) -> ::std::os::raw::c_int {
 			let Some(params) = params else { return 0 };
-			params.channel_layout = match self.shared.open.channels {
+			params.channel_layout = match self.page.open.channels {
 				1 => ChannelLayout::LAYOUT_MONO,
 				2 => ChannelLayout::LAYOUT_STEREO,
 				_ => return 0,
 			};
-			params.sample_rate = self.shared.open.sample_rate as _;
+			params.sample_rate = self.page.open.sample_rate as _;
 			1
 		}
 
@@ -475,10 +559,10 @@ wrap_audio_handler! {
 			channels: ::std::os::raw::c_int,
 		) {
 			let rate = params.map(|params| params.sample_rate);
-			if channels as u32 != self.shared.open.channels || rate != Some(self.shared.open.sample_rate as _) {
-				self.shared.fail(format!(
+			if channels as u32 != self.page.open.channels || rate != Some(self.page.open.sample_rate as _) {
+				self.page.fail(format!(
 					"the page's sound arrived as {channels} channels at {rate:?} Hz, not the bus's {} at {} Hz",
-					self.shared.open.channels, self.shared.open.sample_rate
+					self.page.open.channels, self.page.open.sample_rate
 				));
 			}
 		}
@@ -493,7 +577,7 @@ wrap_audio_handler! {
 			if data.is_null() || frames <= 0 {
 				return;
 			}
-			let channels = self.shared.open.channels as usize;
+			let channels = self.page.open.channels as usize;
 			let frames = frames as usize;
 			// SAFETY: CEF hands over one plane of `frames` samples per
 			// channel it started the stream with, which is the bus's count.
@@ -503,19 +587,19 @@ wrap_audio_handler! {
 			let samples = (0..frames)
 				.flat_map(|frame| planes.iter().map(move |plane| plane[frame]))
 				.collect();
-			self.shared.send(&Event::Audio(samples), &[]);
+			self.page.shared.send(&Event::Audio(self.page.id, samples), &[]);
 		}
 
 		fn on_audio_stream_error(&self, _browser: Option<&mut Browser>, message: Option<&CefString>) {
 			let message = message.map(|message| message.to_string()).unwrap_or_default();
-			self.shared.fail(format!("the page's sound failed: {message}"));
+			self.page.fail(format!("the page's sound failed: {message}"));
 		}
 	}
 }
 
 wrap_load_handler! {
 	struct HelperLoad {
-		shared: Arc<Shared>,
+		page: Arc<Paged>,
 	}
 
 	impl LoadHandler {
@@ -534,14 +618,14 @@ wrap_load_handler! {
 			}
 			let url = failed_url.map(|url| url.to_string()).unwrap_or_default();
 			let text = error_text.map(|text| text.to_string()).unwrap_or_default();
-			self.shared.fail(format!("cannot load {url}: {text}"));
+			self.page.fail(format!("cannot load {url}: {text}"));
 		}
 	}
 }
 
 wrap_request_handler! {
 	struct HelperRequest {
-		shared: Arc<Shared>,
+		page: Arc<Paged>,
 	}
 
 	impl RequestHandler {
@@ -553,18 +637,20 @@ wrap_request_handler! {
 			error_string: Option<&CefString>,
 		) {
 			let reason = error_string.map(|reason| reason.to_string()).unwrap_or_default();
-			self.shared.fail(format!("the page's renderer stopped ({error_code}): {reason}"));
+			self.page.fail(format!("the page's renderer stopped ({error_code}): {reason}"));
 		}
 	}
 }
 
 wrap_life_span_handler! {
-	struct HelperLife;
+	struct HelperLife {
+		id: Id,
+	}
 
 	impl LifeSpanHandler {
 		// A source shows one page, and nothing would show a popup, so
 		// `window.open` and `target="_blank"` open nothing. That also keeps
-		// the page the only browser, whose closing ends the helper.
+		// the studio's pages the only browsers, whose closing ends the helper.
 		fn on_before_popup(
 			&self,
 			_browser: Option<&mut Browser>,
@@ -585,7 +671,13 @@ wrap_life_span_handler! {
 		}
 
 		fn on_before_close(&self, _browser: Option<&mut Browser>) {
-			quit_message_loop();
+			let last = PAGES.with_borrow_mut(|pages| {
+				pages.remove(&self.id);
+				pages.is_empty()
+			});
+			if last && QUITTING.get() {
+				quit_message_loop();
+			}
 		}
 	}
 }

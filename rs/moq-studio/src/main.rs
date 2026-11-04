@@ -172,6 +172,8 @@ fn main() -> anyhow::Result<ExitCode> {
 	};
 	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
+	// So a quick relaunch finds the browser profile saved and free.
+	engine.stop_browsers();
 	if let (Err(err), Err(_)) = (&saved, &ran) {
 		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
 	}

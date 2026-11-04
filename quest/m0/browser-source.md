@@ -20,11 +20,13 @@ Decided 2026-10-22: use CEF through `cef-rs`, desktop only.
   path is the fallback and shows in stats.
 - **Process:** CEF runs out of process.
 
-Linux landed first (`moq_scene::browser`): one helper process per page,
-which is the studio's executable started again, talking over a Unix socket
-on its stdin that carries the DMA-BUF descriptors, and `cef-rs`'s
-`osr_texture_import` copies each texture on the studio's device. What the
-other platforms need on top:
+Linux landed first (`moq_scene::browser`): one helper process every page
+shares, on one persistent profile, which is the studio's executable started
+again, talking over a Unix socket on its stdin that carries the DMA-BUF
+descriptors, and `cef-rs`'s `osr_texture_import` copies each texture on the
+studio's device. The profile lives in the XDG data directory
+(`engine::browser_profile`); each platform keeps it in its own per-user data
+directory instead. What the other platforms need on top:
 - **Windows:** a channel without Unix sockets, such as the helper's stdio
   pipes. The studio duplicates CEF's NT handle out of the helper with
   `DuplicateHandle` before `cef-rs` imports it.
