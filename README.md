@@ -303,8 +303,17 @@ leaving half of it, and a collection that has not changed is not rewritten, so
 a hand-written file keeps its comments and layout until the next edit in the
 studio. A failed write shows in the status bar and
 is retried every second; until one succeeds, a crash loses every edit since the
-last write. To edit the file by hand while the studio runs, save it and pick
-**File > Reload**; an edit in the studio before that overwrites it.
+last write.
+
+The file can be edited by hand, or by another studio, while the studio runs.
+The studio looks at it every second and before each write. With no edits of
+its own unsaved, it reloads the change, as **File > Reload** does, which
+replaces even unsaved edits. If both sides changed, or the change cannot be
+loaded, the studio saves nothing until you pick **Keep the studio's**, which
+writes its version over the file, or **Take the file's**; quitting before you
+pick saves nothing. A file deleted while the studio runs is written again. One
+overwrite remains possible: a change saved in the instant between the studio's
+last look and its write replacing the file.
 
 The last 100 edits are written the same way beside the scene file, as
 `show.history.toml` for `show.toml`, after the scene file, and opening the
