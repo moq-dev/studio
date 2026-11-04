@@ -9,7 +9,6 @@ use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::browser::Paint;
-use moq_scene::replay::Take;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
 	Blend, Canvas, Clip, Collection, Crop, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source, Transition,
@@ -1857,12 +1856,7 @@ impl Panels {
 		// there and replays apply in the order they were asked for.
 		let outcome = panel.outcome.clone();
 		let into = panel.into.as_ref().filter(|_| play);
-		let take = self.engine.target(&panel.of).and_then(|target| {
-			Ok(match into {
-				Some(_) => Take::new(&target, panel.length)?,
-				None => Take::clip(&target, panel.length)?,
-			})
-		});
+		let take = replay::take(&self.engine, &panel.of, panel.length, into.is_some());
 		let take = match take {
 			Ok(take) => take,
 			Err(err) => {

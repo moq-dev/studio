@@ -968,8 +968,8 @@ mod tests {
 		.await;
 	}
 
-	/// A replay source publishes each replay as it shows, so viewers composing
-	/// the scene themselves see it too, gaps included.
+	/// A replay source on program encodes each replay onto its own track as it
+	/// shows, gaps included.
 	#[tokio::test(start_paused = true)]
 	async fn a_replay_is_published_as_it_plays() {
 		local(async {

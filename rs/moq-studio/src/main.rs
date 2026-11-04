@@ -37,9 +37,10 @@ pub struct Config {
 	#[usage(long, default = "studio")]
 	pub broadcast: String,
 
-	/// Copy and encode the program video only while someone watches it. This
-	/// saves the work while nobody watches, but leaves a late viewer nothing
-	/// from before they arrived. Audio is always encoded.
+	/// Copy and encode the program video at the canvas size only while someone
+	/// watches it, as the half size always is. This saves the work while
+	/// nobody watches, but leaves a late viewer nothing from before they
+	/// arrived. Audio is always encoded.
 	#[usage(long)]
 	pub on_demand: bool,
 

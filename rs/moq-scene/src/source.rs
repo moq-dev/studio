@@ -316,7 +316,7 @@ pub struct Driver {
 	plays: Option<watch::Receiver<Next>>,
 }
 
-/// Where a source's own track goes, its claim on the studio catalog's listing
+/// Where a source's own track goes, its claim on the local catalog's listing
 /// under its name, and what the track is doing.
 struct Track {
 	publish: Publish,
@@ -381,7 +381,7 @@ impl Driver {
 			.ok()
 	}
 
-	/// Keep the studio catalog listing what `listing` publishes. A catalog that
+	/// Keep the local catalog listing what `listing` publishes. A catalog that
 	/// closes fails the track, and the source keeps running.
 	async fn mirror(&self, listing: Option<&Listing<'_>>) {
 		if let Some(listing) = listing
@@ -760,7 +760,7 @@ impl Driver {
 	/// Ends once the whole span has played.
 	///
 	/// With `listing`, the pictures are also encoded onto the source's own
-	/// track as they show, so viewers composing the scene see the replay too.
+	/// track as they show, while it is used.
 	async fn replay(&self, play: Play, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		set(&self.status, Status::Live);
 		let take = &play.take;
@@ -814,8 +814,8 @@ impl Driver {
 						self.show(Picture::Frame(frame));
 					}
 					// A stretch the broadcast was offline, paused, or lost
-					// replays as the gap it was, for viewers composing the
-					// scene too. Past the end, the replay is over anyway.
+					// replays as the gap it was, on its own track too. Past
+					// the end, the replay is over anyway.
 					moq_video::decode::Read::Gap { timestamp, .. }
 					| moq_video::decode::Read::End { end: timestamp } => {
 						kio::clock::sleep_until(at(timestamp.clamp(take.start, take.end))).await;

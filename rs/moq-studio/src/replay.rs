@@ -44,9 +44,9 @@ impl std::fmt::Display for Of {
 impl Engine {
 	/// What a replay of `of` copies, ending now.
 	///
-	/// The program and the local sources have a past only while they are
-	/// published, since nothing else encodes them, and a broadcast source once
-	/// it shows a picture.
+	/// The program has a past only while it is published, a local source only
+	/// from while it was on program, since nothing else encodes them, and a
+	/// broadcast source once it shows a picture.
 	pub fn target(&self, of: &Of) -> anyhow::Result<Target> {
 		let output = || {
 			self.output
@@ -77,6 +77,20 @@ impl Engine {
 			None => anyhow::bail!("there is no source named `{name}`"),
 		}
 	}
+}
+
+/// Hold the `length` of `of` up to now: to play in a replay source with
+/// `play`, or as a clip to save.
+pub fn take(engine: &Engine, of: &Of, length: Duration, play: bool) -> anyhow::Result<Take> {
+	let target = engine.target(of)?;
+	let take = match play {
+		true => Take::new(&target, length),
+		false => Take::clip(&target, length),
+	};
+	take.with_context(|| match of {
+		Of::Source(name) => format!("cannot replay `{name}`, which keeps a past only while it is on program"),
+		Of::Program => "cannot replay the program".into(),
+	})
 }
 
 /// Play `take` at `speed` in the replay source `into`.

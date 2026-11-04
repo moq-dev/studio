@@ -26,8 +26,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   refuses a fixed `--connect-bind` port, since each relay's connection binds
   its own. Its credential rides its URL's `?jwt=`; `--connect-token` goes to
   the first relay only. The stream's tracks claim their bitrate on the first
-  relay's link alone, so only that link is probed toward the stream's rate;
-  no encoder adapts to either estimate.
+  relay's link alone, so only that link is probed toward the stream's rate,
+  and the video follows that link's estimate alone.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
   On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
@@ -97,7 +97,7 @@ Every panel is a tab you can drag, split, or stack.
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | Set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
+| Output | Set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each rendition's encoder work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 
@@ -347,23 +347,34 @@ before sharing.
 
 ## Output
 
-The program publishes as one H.264 rendition at the canvas size and frame rate,
-with Opus stereo audio, under the `--broadcast` path. Timestamps come from the
-studio's own clock, so a source that stalls repeats its last picture instead of
-holding up the stream.
+The program publishes as two H.264 renditions, at the canvas size and at half
+of it, at the canvas frame rate, with Opus stereo audio, under the
+`--broadcast` path. A canvas under 360 lines has no half size. Timestamps come
+from the studio's own clock, so a source that stalls repeats its last picture
+instead of holding up the stream.
+
+Each rendition follows its share of the bandwidth the first relay's connection
+estimates: a closing uplink lowers its bitrate at once, and an opening one
+raises it back over a few seconds, up to 0.07 bits per pixel (about 4.4 Mb/s
+for 1080p at 30 fps). The half size is funded first. When the share left for
+the canvas size cannot fund it over the half size, the catalog lists it as
+disabled and viewers move to the half size until the uplink recovers. A viewer
+joining a track whose newest group has grown heavy asks for a keyframe, and
+the encoder cuts one, so later viewers start near it.
 
 A new canvas size or frame rate, from the Output panel, an undo, or a reload,
 takes effect live. A track never changes what it carries, so the old
-rendition's track ends and a new one is listed in its place in a catalog
-update, on the same timeline, and viewers switch to it; the video pauses while
-the new encoder opens. Items keep their place in canvas pixels. A canvas the
-encoder cannot take stops the video, saying why, until the canvas changes
+renditions' tracks end and new ones are listed in their place in a catalog
+update, on the same timeline, and viewers switch to them; the video pauses
+while the new encoders open. Items keep their place in canvas pixels. A canvas
+the encoder cannot take stops the video, saying why, until the canvas changes
 again.
 
-The program encodes whether or not anyone watches, so a viewer who arrives
-late can fetch the recent past. `--on-demand` copies and encodes the video only
-while someone watches it, which saves that work but leaves nothing from before
-the first viewer; audio encodes either way. A hardware encoder that reads
+The canvas size encodes whether or not anyone watches, so a viewer who arrives
+late can fetch the recent past. The half size encodes only while someone
+watches it. `--on-demand` copies and encodes the canvas size only while someone
+watches it too, which saves that work but leaves nothing from before the first
+viewer; audio encodes either way. A hardware encoder that reads
 the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
 takes each frame there when it can read the GPU the studio draws on. When it
 cannot, such as NVENC while the studio draws on a laptop's integrated GPU, the
@@ -374,46 +385,35 @@ stream.
 
 ### Source tracks
 
-Each camera, display, window, image, and color also publishes as its own track
-in the same broadcast, so a viewer can compose the scene itself. The catalog's
-`video` and `audio` sections stay the program's; the sources are listed under
-the `dev.moq.studio` section's `sources`, by source name, each as a hang
-catalog of its own on the program's clock. This listing is provisional until
-the hang draft specifies source listings:
+Each camera, display, window, image, and color also has a track of its own, so
+the studio can replay it on its own. These tracks stay in the studio: the
+program is the only video it publishes to a relay. They are listed in a local
+catalog under the `dev.moq.studio` section's `sources`, by source name, each
+as a hang catalog of its own on the program's clock.
 
-```json
-{
-  "video": { "renditions": { "0.avc3": { "codec": "avc3.42c01f", "...": "..." } } },
-  "audio": { "renditions": { "audio": { "codec": "opus", "...": "..." } } },
-  "dev.moq.studio": {
-    "sources": {
-      "camera": { "video": { "renditions": { "1.avc3": { "...": "..." } } } },
-      "logo": { "binary": { "tracks": { "2.png": { "mode": "snapshot", "mime": "image/png" } } } }
-    }
-  }
-}
-```
+A captured source encodes its track as H.264 only while it is used: while it
+is shown on program, so a replay of it has its recent past, or while something
+in the studio reads its track. Off program it holds no encoder. A capture that
+changes size or color space moves to a new track, which its catalog entry
+follows. Images and colors keep their picture once, as the image file and as a
+one-pixel PNG. Removing or editing a source ends its track. A track carries the
+plain capture, before any filter, and a clone has none, since it shows its
+source's capture. Microphones and system audio have no tracks of their own yet,
+nor does a browser source, and a broadcast source is already its publisher's.
 
-A captured source encodes as H.264 for as long as it is in the collection,
-whether or not anyone watches, so a late viewer can fetch its recent past; the
-relay uploads only what someone subscribes to. A capture that changes size or
-color space moves to a new track, which its catalog entry follows. Images and
-colors publish once, as the image file and as a one-pixel PNG. Removing or
-editing a source ends its track. A track carries the plain capture, before any
-filter, and a clone publishes none, since it shows its source's capture.
-Microphones and system audio do not publish tracks of their own yet. A browser
-source publishes none, so viewers see its page only in the program, and a
-broadcast source is already its publisher's.
-
-Every captured source opens an encode session as it starts, and consumer GPUs
-allow only a few hardware sessions at once. When the program encodes on
-hardware, so do the sources, and a session the GPU refuses fails that source's
-track with the encoder's reason in the Sources panel rather than falling back
-to software. The source keeps drawing in the studio's own scenes. The program
-opens its session before any source, even with `--on-demand`, so the sources
-past the cap fail rather than the program. When the
-program encodes in software, a source takes hardware where it can and software
-otherwise.
+Every encoder holds an encode session, and consumer GPUs allow only a few
+hardware sessions at once: 8 on a GeForce card, while a base Apple M4 has one
+encode engine for them all. The Output panel counts the sessions open. The
+program holds one, and one more while someone watches its half size; each
+captured source holds one while it is on program. So a scene showing a camera,
+a display, and a window holds 4 sessions, or 5 with the half size watched.
+When the program encodes on hardware, so do the sources, and a session the GPU
+refuses fails that source's track with the encoder's reason in the Sources
+panel rather than falling back to software. The source keeps drawing in the
+studio's own scenes. The program opens its session before any source, even
+with `--on-demand`, so the sources past the cap fail rather than the program.
+When the program encodes in software, a source takes hardware where it can
+and software otherwise.
 
 ### Source frames
 
@@ -446,16 +446,18 @@ one. That is usually a fraction of a second, but it can reach back as far as
 the keyframe for a slow or deeply reordered source. The panel says where once
 it is written, shortly after the click.
 
-Nothing records in the background for this. The program and each source's
-track keep their last 30 seconds for late viewers anyway, and a replay copies
-from those, so a replay needs `--connect` and goes back at most that far. With
-`--on-demand`, the program has no past from before someone watched it. A
+Nothing records in the background for this. The program's tracks keep their
+last 30 seconds for late viewers anyway, and each source's track while it is on
+program, and a replay copies from those, so a replay needs `--connect` and goes
+back at most that far. With `--on-demand`, the program has no past from before
+someone watched it, and a source has none from before it was last on program;
+a replay of nothing is refused, saying why. A
 broadcast source replays from what the studio received of it, and only over a
 relay connection whose protocol version can address a track by time; an older
 one refuses with the reason in the panel. An image, a color, or a web page has
 no past to replay: a page publishes no track of its own, so replay the program
-to show it. A replay source publishes each replay as its own track while it plays,
-like a camera, so viewers composing the scene themselves see it too.
+to show it. A replay source on program encodes each replay as its own track
+while it plays, like a camera.
 
 ## Health
 
@@ -472,18 +474,20 @@ it is unhealthy. Below that it shows:
 - **Uplink**: the round trip to the first connected relay, the bandwidth the
   connection estimates it can carry, the media the program's tracks write, and
   the share lost and resent. Loss and headroom are graded only while someone
-  watches, since the relay pulls nothing otherwise. Source tracks are left out
-  of the media, since they encode whether or not anyone pulls them.
+  watches, since the relay pulls nothing otherwise. Source tracks never reach
+  the relay, so they are left out of the media.
 - **Watching**: the sessions subscribed to the broadcast, from the relays'
   `.stats` broadcasts. A relay shares those only with a connection allowed to
   read them, so most show "unknown". In a cluster, a relay forwarding the
   stream to another counts as one session. Two relays whose stats use the
   same node name publish them at the same path, so only one of them counts:
   the first relay's while it has them.
-- **Tracks**: each track's bitrate and frame rate, and, from viewers that
-  report, the lowest bitrate any received, its worst grade, and the latency
-  from the program clock to the slowest viewer. The program's tracks come
-  first, then each source's own tracks, grouped by source; a still image or
+- **Tracks**: each track's share of the connection's bandwidth (**Granted**,
+  or "off" for a rendition the share cannot fund), its bitrate and frame rate,
+  and, from viewers that report, the lowest bitrate any received, its worst
+  grade, and the latency from the program clock to the slowest viewer. The
+  program's tracks come first, then each source's own tracks, grouped by
+  source; a still image or
   color carries no media to grade. Latency compares the two hosts' wall
   clocks, so keep both synced.
 - **Viewers**: each viewer that reports, with its round trip, latency, and
