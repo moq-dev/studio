@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 
 use moq_audio::bus::Channel as Sound;
 
-use super::layers::Layers;
+use super::layers::{Gpu, Layers};
 use super::outbox::Commands;
 use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Start};
 use super::{ARG, Helper, Page, Paint};
@@ -101,9 +101,6 @@ pub(crate) struct Instance {
 	reader: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// The studio's device, which pages' pictures are copied to.
-type Gpu<'a> = (&'a wgpu::Device, &'a wgpu::Queue);
-
 /// Where each open page's events go.
 #[derive(Default)]
 struct Routes {
@@ -143,7 +140,7 @@ impl Routes {
 
 	/// Take `texture`, painted the way `paint` says, as page `id`'s newest
 	/// `layer`, and show the page.
-	fn paint(&mut self, gpu: Gpu<'_>, id: Id, layer: Layer, texture: wgpu::Texture, paint: Paint) {
+	fn paint(&mut self, gpu: &Gpu, id: Id, layer: Layer, texture: wgpu::Texture, paint: Paint) {
 		let Some(route) = self.pages.get_mut(&id) else { return };
 		if layer == Layer::View {
 			route.page.state.lock().unwrap().paint = Some(paint);
@@ -153,16 +150,16 @@ impl Routes {
 	}
 
 	/// Page `id`'s popup opened or moved to `area`, or closed.
-	fn place(&mut self, gpu: Gpu<'_>, id: Id, area: Option<Area>) {
+	fn place(&mut self, gpu: &Gpu, id: Id, area: Option<Area>) {
 		let Some(route) = self.pages.get_mut(&id) else { return };
 		route.layers.place(area);
 		self.show(gpu, id);
 	}
 
 	/// Show page `id`'s newest pictures, once it has painted.
-	fn show(&mut self, (device, queue): Gpu<'_>, id: Id) {
+	fn show(&mut self, gpu: &Gpu, id: Id) {
 		let Some(route) = self.pages.get_mut(&id) else { return };
-		let texture = match route.layers.picture(device, queue) {
+		let texture = match route.layers.picture(gpu) {
 			Ok(Some(texture)) => texture,
 			Ok(None) => return,
 			Err(reason) => return self.end(id, reason),
@@ -225,11 +222,11 @@ impl Instance {
 		let reader = {
 			// Not the helper, whose hold on this instance would keep it running
 			// once every other owner is gone.
-			let (device, queue) = (helper.device.clone(), helper.queue.clone());
+			let gpu = Gpu::new(&helper.device, &helper.queue);
 			let (reading, routes) = (commands.clone(), routes.clone());
 			let spawned = std::thread::Builder::new()
 				.name("browser-events".into())
-				.spawn(move || read(&device, &queue, process, &events, &reading, &routes));
+				.spawn(move || read(&gpu, process, &events, &reading, &routes));
 			// The writer ends with it; the helper, dropped with the closure, is
 			// killed.
 			spawned.map_err(|err| {
@@ -390,15 +387,8 @@ fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 
 /// Deliver the helper's events until it exits or breaks the protocol, then
 /// stop it and every page still open, saying why.
-fn read(
-	device: &wgpu::Device,
-	queue: &wgpu::Queue,
-	mut process: Process,
-	events: &Channel,
-	commands: &Commands,
-	routes: &Mutex<Routes>,
-) {
-	let reason = match deliver(device, queue, events, commands, routes) {
+fn read(gpu: &Gpu, mut process: Process, events: &Channel, commands: &Commands, routes: &Mutex<Routes>) {
+	let reason = match deliver(gpu, events, commands, routes) {
 		// Gone, or exiting: wait for it, so the next helper finds the profile
 		// free.
 		Ok(()) => match process.exited() {
@@ -421,14 +411,10 @@ fn read(
 
 /// Route the helper's events to their pages until it closes the socket, or
 /// fail with why it cannot go on.
-fn deliver(
-	device: &wgpu::Device,
-	queue: &wgpu::Queue,
-	events: &Channel,
-	commands: &Commands,
-	routes: &Mutex<Routes>,
-) -> Result<(), String> {
+fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Routes>) -> Result<(), String> {
 	use std::io::ErrorKind::*;
+
+	let Gpu { device, queue, .. } = gpu;
 
 	loop {
 		let (event, fds) = match events.recv::<Event>() {
@@ -457,7 +443,7 @@ fn deliver(
 				Paint::Cpu,
 			),
 			Event::Popup(id, area) => {
-				routes.lock().unwrap().place((device, queue), id, area);
+				routes.lock().unwrap().place(gpu, id, area);
 				continue;
 			}
 			Event::Audio(id, samples) => {
@@ -478,7 +464,7 @@ fn deliver(
 		commands.painted();
 		let mut routes = routes.lock().unwrap();
 		match texture {
-			Ok(texture) => routes.paint((device, queue), id, layer, texture, paint),
+			Ok(texture) => routes.paint(gpu, id, layer, texture, paint),
 			Err(reason) => routes.end(id, reason),
 		}
 	}
