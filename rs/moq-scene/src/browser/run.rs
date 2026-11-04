@@ -45,7 +45,10 @@ pub(crate) async fn run(
 	let commands = events
 		.try_clone()
 		.map_err(|err| Error::Browser(format!("socket: {err}")))?;
-	let end = match commands.send(&Command::Open(open), &[]).map(|()| writer(commands)) {
+	let end = match commands
+		.send(&Command::Open(open), &[])
+		.map(|()| writer(commands, page))
+	{
 		Ok(Ok(commands)) => {
 			page.state.lock().unwrap().commands = Some(commands.clone());
 			let end = reader(helper, events, commands, page, picture, sound, status).await;
@@ -133,16 +136,22 @@ impl Drop for Process {
 
 /// Write the commands queued on the returned sender to `channel`, on a thread
 /// of its own, so a helper that stops reading blocks only that thread, never a
-/// sender holding the studio's state. The thread ends once every sender is
-/// dropped or the socket fails, as it does when the helper is killed.
-fn writer(channel: Channel) -> std::io::Result<mpsc::SyncSender<Command>> {
+/// sender holding the studio's state. Each write makes room for the releases
+/// `page` owes. The thread ends once every sender is dropped or the socket
+/// fails, as it does when the helper is killed.
+fn writer(channel: Channel, page: &Page) -> std::io::Result<mpsc::SyncSender<Command>> {
 	let (sender, queue) = mpsc::sync_channel(BACKLOG);
+	// Weak, since the page holds a sender, which would keep the thread waiting.
+	let page = std::sync::Arc::downgrade(&page.state);
 	std::thread::Builder::new()
 		.name("browser-commands".into())
 		.spawn(move || {
 			for command in queue {
 				if channel.send(&command, &[]).is_err() {
 					break;
+				}
+				if let Some(page) = page.upgrade() {
+					page.lock().unwrap().flush();
 				}
 			}
 		})?;
@@ -254,7 +263,7 @@ fn deliver(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::browser::Input;
+	use crate::browser::{Input, Modifiers};
 
 	/// A helper that stops reading costs dropped input, never a sender stuck
 	/// on a full socket while it holds the studio's state.
@@ -262,12 +271,39 @@ mod tests {
 	fn a_helper_that_stops_reading_never_blocks_input() {
 		let (ours, theirs) = UnixStream::pair().unwrap();
 		let page = Page::default();
-		page.state.lock().unwrap().commands = Some(writer(Channel::new(ours)).unwrap());
+		page.state.lock().unwrap().commands = Some(writer(Channel::new(ours), &page).unwrap());
 		// Far more than the socket buffers and the backlog hold together.
 		for _ in 0..4096 {
 			page.send(Input::Text("x".repeat(1024)));
 		}
 		assert!(page.state.lock().unwrap().backlogged);
 		drop(theirs);
+	}
+
+	/// Each write makes room for an owed release, so it reaches the page once
+	/// the helper reads again, with no newer input to carry it.
+	#[test]
+	fn the_writer_delivers_owed_releases() {
+		let (ours, theirs) = UnixStream::pair().unwrap();
+		let page = Page::default();
+		let commands = writer(Channel::new(ours), &page).unwrap();
+		let release = Input::Key {
+			code: 65,
+			down: false,
+			modifiers: Modifiers::default(),
+		};
+		{
+			let mut state = page.state.lock().unwrap();
+			state.commands = Some(commands.clone());
+			state.owed.push_back(release.clone());
+		}
+		commands.send(Command::Painted).unwrap();
+
+		let helper = Channel::new(theirs);
+		assert!(matches!(helper.recv::<Command>().unwrap(), Some((Command::Painted, _))));
+		let Some((Command::Input(input), _)) = helper.recv().unwrap() else {
+			panic!("the owed release never came");
+		};
+		assert_eq!(input, release);
 	}
 }

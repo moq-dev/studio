@@ -129,7 +129,93 @@ struct PageState {
 	/// Whether input is being dropped because the queue is full.
 	#[cfg(target_os = "linux")]
 	backlogged: bool,
+	/// Releases that did not fit the queue, oldest first, at most one per
+	/// button, key, focus, and pointer, sent ahead of any newer input.
+	#[cfg(target_os = "linux")]
+	owed: std::collections::VecDeque<Input>,
 	paint: Option<Paint>,
+}
+
+#[cfg(target_os = "linux")]
+impl PageState {
+	/// Queue `input` behind any owed releases. Past the backlog, a release is
+	/// owed rather than dropped, so a helper that catches up never leaves the
+	/// page holding a button or key the studio let go of; other input drops.
+	fn send(&mut self, input: Input) {
+		use std::sync::mpsc::TrySendError;
+
+		self.flush();
+		let Some(commands) = &self.commands else { return };
+		let input = match self.owed.is_empty() {
+			true => match commands.try_send(protocol::Command::Input(input)) {
+				Ok(()) => {
+					self.backlogged = false;
+					return;
+				}
+				Err(TrySendError::Full(protocol::Command::Input(input))) => input,
+				Err(TrySendError::Full(_)) => unreachable!("only input is sent here"),
+				Err(TrySendError::Disconnected(_)) => return self.disconnect(),
+			},
+			// Newer input waits behind the owed releases.
+			false => input,
+		};
+		if let Some(release) = Release::of(&input) {
+			self.owed.retain(|owed| Release::of(owed) != Some(release));
+			self.owed.push_back(input);
+		}
+		if !std::mem::replace(&mut self.backlogged, true) {
+			tracing::warn!("a browser source's helper is not reading input; dropping it");
+		}
+	}
+
+	/// Queue the owed releases, oldest first, while the queue has room.
+	fn flush(&mut self) {
+		use std::sync::mpsc::TrySendError;
+
+		let Some(commands) = &self.commands else { return };
+		while let Some(input) = self.owed.pop_front() {
+			match commands.try_send(protocol::Command::Input(input)) {
+				Ok(()) => {}
+				Err(TrySendError::Full(protocol::Command::Input(input))) => {
+					self.owed.push_front(input);
+					return;
+				}
+				Err(TrySendError::Full(_)) => unreachable!("only input is sent here"),
+				Err(TrySendError::Disconnected(_)) => return self.disconnect(),
+			}
+		}
+	}
+
+	/// The helper is gone, which its source reports.
+	fn disconnect(&mut self) {
+		self.commands = None;
+		self.owed.clear();
+	}
+}
+
+/// What an input lets go of, which a later release of the same supersedes.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Release {
+	Button(Button),
+	Key(i32),
+	Focus,
+	Pointer,
+}
+
+#[cfg(target_os = "linux")]
+impl Release {
+	fn of(input: &Input) -> Option<Self> {
+		match *input {
+			Input::Button {
+				button, down: false, ..
+			} => Some(Self::Button(button)),
+			Input::Key { code, down: false, .. } => Some(Self::Key(code)),
+			Input::Focus(false) => Some(Self::Focus),
+			Input::Leave { .. } => Some(Self::Pointer),
+			_ => None,
+		}
+	}
 }
 
 impl Page {
@@ -141,25 +227,11 @@ impl Page {
 	/// Interact with the page, without waiting on its helper. Dropped while
 	/// the page is starting or after it stopped, as a click on a window that is
 	/// not there yet would be, and while the helper is too far behind to take
-	/// more, as a hung window's would be.
+	/// more, as a hung window's would be, except that a release is delivered
+	/// once the helper catches up.
 	pub fn send(&self, input: Input) {
 		#[cfg(target_os = "linux")]
-		{
-			use std::sync::mpsc::TrySendError;
-
-			let mut state = self.state.lock().unwrap();
-			let Some(commands) = &state.commands else { return };
-			match commands.try_send(protocol::Command::Input(input)) {
-				Ok(()) => state.backlogged = false,
-				Err(TrySendError::Full(_)) => {
-					if !std::mem::replace(&mut state.backlogged, true) {
-						tracing::warn!("a browser source's helper is not reading input; dropping it");
-					}
-				}
-				// The helper is gone, which its source reports.
-				Err(TrySendError::Disconnected(_)) => state.commands = None,
-			}
-		}
+		self.state.lock().unwrap().send(input);
 		#[cfg(not(target_os = "linux"))]
 		let _ = input;
 	}
@@ -277,4 +349,54 @@ fn upload(
 		size,
 	);
 	Ok(texture)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+	use super::*;
+
+	fn button(down: bool) -> Input {
+		Input::Button {
+			x: 1,
+			y: 1,
+			button: Button::Left,
+			down,
+			clicks: 1,
+			modifiers: Modifiers::default(),
+		}
+	}
+
+	/// Past the backlog, a release is owed rather than dropped, once per
+	/// button, and goes ahead of newer input as the queue makes room, so the
+	/// page never keeps holding what the studio let go of.
+	#[test]
+	fn a_release_past_the_backlog_is_owed() {
+		let (sender, queue) = std::sync::mpsc::sync_channel(4);
+		let page = Page::default();
+		page.state.lock().unwrap().commands = Some(sender);
+		page.send(button(true));
+		while !page.state.lock().unwrap().backlogged {
+			page.send(Input::Text("x".into()));
+		}
+		page.send(button(false));
+		page.send(button(true));
+		page.send(button(false));
+		page.send(Input::Move {
+			x: 2,
+			y: 2,
+			modifiers: Modifiers::default(),
+		});
+		assert_eq!(page.state.lock().unwrap().owed, [button(false)]);
+
+		// The helper catches up, and each write makes room, as the writer's do.
+		let mut received = Vec::new();
+		while let Ok(protocol::Command::Input(input)) = queue.try_recv() {
+			received.push(input);
+			page.state.lock().unwrap().flush();
+		}
+		assert_eq!(received.first(), Some(&button(true)));
+		assert_eq!(received.last(), Some(&button(false)));
+		assert_eq!(received.iter().filter(|input| **input == button(false)).count(), 1);
+		assert!(!received.iter().any(|input| matches!(input, Input::Move { .. })));
+	}
 }
