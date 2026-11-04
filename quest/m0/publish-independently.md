@@ -15,7 +15,8 @@ Decided 2026-11-03 (maintainer, on
 not published to the relay by default, since every encoding costs an encoder
 session and consumer GPUs have few. A source published independently gets one
 rendition, as sources do in the encode ladder, while the program keeps its
-two sizes.
+two sizes. It counts as used, so it encodes for as long as it is published
+([Audio source tracks](/quest/m0/audio-source-tracks.md) states the rule).
 
 Low priority: this is for services that move webcams and overlays themselves,
 and none exists yet. The option lives on the source, in the scene file, so it

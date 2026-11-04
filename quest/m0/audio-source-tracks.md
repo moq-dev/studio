@@ -28,10 +28,13 @@ Changed 2026-11-03 (maintainer, on
 own track encodes only while something in the studio uses it, and reaches
 the relay only when the creator publishes the source independently
 ([Published independently](/quest/m0/publish-independently.md)). A source
-visible in the program scene counts as used (decided 2026-11-04, maintainer),
-so a replay finds its past from when it appeared; one not on program encodes
-only while an isolated recording or a running replay reads it, and replaying a
-source with no history is refused with the reason.
+on program counts as used (decided 2026-11-04, maintainer), so a replay finds
+its past from when it went on: a picture source while the program scene shows
+it, and an audio source while it feeds the program mix. A source published
+independently counts as used too, since its track is what it publishes.
+Otherwise a source encodes only while an isolated recording or a running
+replay reads it, and replaying a source with no history is refused with the
+reason.
 This replaces the earlier always-on decision (2026-11-01, on
 [moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)), because
 encoding every source costs encoder sessions a consumer machine does not
