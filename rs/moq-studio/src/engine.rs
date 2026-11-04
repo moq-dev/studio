@@ -9,6 +9,7 @@
 //! - **audio** advances the audio bus, and with it every mix, on the same
 //!   clock.
 //! - **audio-encode** encodes the mix on program into the program audio.
+//! - Each guest's return feed encodes its mix-minus on the tokio runtime.
 //! - **encode**: one per program rendition, which waits for each program copy
 //!   and encodes it. A new canvas size or frame rate starts a new rendition.
 //! - Recordings write their files on the tokio runtime.
@@ -434,6 +435,8 @@ pub struct Engine {
 	pub recorder: record::Recorder,
 	/// The room guests join, when configured.
 	pub room: Option<Arc<crate::guests::Room>>,
+	/// Each guest's return feed, once the studio's session in the room dials.
+	feeds: Mutex<Option<crate::feed::Feeds>>,
 	/// The program's broadcast.
 	pub program: Program,
 	/// Keeps broadcast sources' origin open when no connection holds it.
@@ -569,6 +572,7 @@ impl Engine {
 			output,
 			recorder,
 			room,
+			feeds: Mutex::default(),
 			program,
 			_origin: subscribe,
 			stopped: AtomicBool::new(false),
@@ -587,6 +591,13 @@ impl Engine {
 		// Where the program clock starts on the catalog's, so the wall time the
 		// catalog advertises for a frame is when the program drew it.
 		let epoch = Duration::from(clock.capture(start)?);
+		if let Some(room) = &engine.room
+			&& let Some(origin) = room.origin()
+		{
+			let program = engine.program.publication.broadcast().consume();
+			let feeds = crate::feed::Feeds::new(room.clone(), origin.clone(), program, clock.clone(), epoch)?;
+			*engine.feeds.lock().unwrap() = Some(feeds);
+		}
 		let program = engine.clone();
 		let thread = clocked("program".into(), async move || {
 			program.run_program(start, epoch, renditions, rendition).await
@@ -613,6 +624,16 @@ impl Engine {
 		// publication alive beside the retry's.
 		if let Some(guests) = guests {
 			tokio::spawn(crate::guests::run(engine.clone(), guests));
+		}
+		if let Some(room) = &engine.room {
+			// Who has a return feed follows who is renewed, synced with the mixes.
+			let mut changes = room.changes();
+			let follow = engine.clone();
+			tokio::spawn(async move {
+				while changes.changed().await.is_ok() {
+					follow.state.lock().unwrap().stale = true;
+				}
+			});
 		}
 
 		Ok(engine)
@@ -693,11 +714,15 @@ impl Engine {
 			.map(|monitor| (monitor.name().to_string(), monitor.failed()))
 	}
 
-	/// Point the program audio and the monitor at the mixes `state` now has.
+	/// Point the program audio, the monitor, and each guest's return feed at
+	/// the mixes `state` now has.
 	fn pick_mixes(&self, state: &State) {
 		let mixes = &state.collection.mixes;
 		if let Some(mix) = state.sources.mix(&mixes.program) {
 			self.program_audio.set(mix.clone());
+		}
+		if let Some(feeds) = self.feeds.lock().unwrap().as_mut() {
+			feeds.sync(&state.collection, &state.sources);
 		}
 		if let Some(monitor) = self.monitor.lock().unwrap().as_mut() {
 			if !mixes.names.iter().any(|name| name == monitor.name()) {

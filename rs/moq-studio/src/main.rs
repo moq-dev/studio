@@ -13,6 +13,7 @@ use anyhow::Context;
 mod autosave;
 mod devices;
 mod engine;
+mod feed;
 mod guests;
 mod health;
 mod interact;
