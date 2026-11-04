@@ -126,7 +126,7 @@ impl Recorder {
 		let stamp = humantime::format_rfc3339_seconds(kio::clock::wall().into())
 			.to_string()
 			.replace(':', "-");
-		let stem = format!("{} {stamp}", self.name);
+		let stem = program_stem(&self.name, &stamp);
 		// Here rather than on the runtime, so a directory that cannot take it
 		// fails the click that started it.
 		let (path, file) = create(&self.dir, &stem)?;
@@ -337,17 +337,7 @@ impl Run {
 	fn file(&self, source: Option<&str>, writers: &mut Writers) -> bool {
 		let stem = match source {
 			None => self.stem.clone(),
-			Some(name) => {
-				// The scene file names sources, and a name may hold a path separator.
-				let safe: String = name
-					.chars()
-					.map(|c| match c {
-						c if c.is_alphanumeric() || " -_.()".contains(c) => c,
-						_ => '_',
-					})
-					.collect();
-				format!("{} {safe}", self.stem)
-			}
+			Some(name) => source_stem(&self.stem, name),
 		};
 		let (path, file) = match create(&self.dir, &stem) {
 			Ok(created) => created,
@@ -381,10 +371,48 @@ impl Run {
 	}
 }
 
+/// The longest file name, in bytes of UTF-8, that common file systems take.
+/// Windows counts UTF-16 units instead, which are never more.
+const MAX_NAME: usize = 255;
+
+/// The most [`create`] adds to a stem: the largest number, and the extension.
+const SUFFIX: usize = " (4294967295).mp4".len();
+
+/// The stem of a recording's program file: the scene file's, cut to fit, and
+/// when it started.
+fn program_stem(scenes: &str, stamp: &str) -> String {
+	let budget = (MAX_NAME - SUFFIX).saturating_sub(stamp.len() + 1);
+	format!("{} {stamp}", truncate(scenes, budget))
+}
+
+/// The stem of the source `name`'s file beside the program's, `program`,
+/// holding as much of its name as fits.
+fn source_stem(program: &str, name: &str) -> String {
+	// The scene file names sources, and a name may hold a path separator.
+	let safe: String = name
+		.chars()
+		.map(|c| match c {
+			c if c.is_alphanumeric() || " -_.()".contains(c) => c,
+			_ => '_',
+		})
+		.collect();
+	let budget = (MAX_NAME - SUFFIX).saturating_sub(program.len() + 1);
+	format!("{program} {}", truncate(&safe, budget))
+}
+
+/// The longest start of `text` within `bytes`, cut between characters.
+fn truncate(text: &str, bytes: usize) -> &str {
+	let mut end = bytes.min(text.len());
+	while !text.is_char_boundary(end) {
+		end -= 1;
+	}
+	&text[..end]
+}
+
 /// Create a file named `stem` in `dir`, numbering it rather than replacing
 /// one already there.
 fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File)> {
-	let mut number = 1;
+	let mut number: u32 = 1;
 	loop {
 		let name = match number {
 			1 => format!("{stem}.mp4"),
@@ -393,7 +421,9 @@ fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File)> {
 		let path = dir.join(name);
 		match std::fs::File::create_new(&path) {
 			Ok(file) => return Ok((path, file)),
-			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => number += 1,
+			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+				number = number.checked_add(1).context("every numbered name is taken")?;
+			}
 			Err(err) => return Err(err).with_context(|| format!("cannot create {}", path.display())),
 		}
 	}
@@ -1011,6 +1041,26 @@ mod tests {
 			file.finished
 		);
 		assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+	}
+
+	/// A long scene file or source name is cut, between characters, so every
+	/// file name fits, numbered ones included.
+	#[test]
+	fn a_long_name_is_cut_to_fit() {
+		let dir = tempfile::tempdir().unwrap();
+		// The first leaves an odd budget for the source's two-byte characters,
+		// and the second none.
+		for scenes in ["shows".to_string(), "s".repeat(250)] {
+			let program = program_stem(&scenes, "2026-11-03T12-00-00Z");
+			assert!(program.ends_with(" 2026-11-03T12-00-00Z"), "{program}");
+			let source = source_stem(&program, &"é".repeat(300));
+			assert!(source.len() > MAX_NAME - SUFFIX - 2, "{} bytes", source.len());
+			for stem in [&program, &source, &source] {
+				let (path, _) = create(dir.path(), stem).unwrap();
+				let name = path.file_name().unwrap().len();
+				assert!(name <= MAX_NAME, "{name} bytes");
+			}
+		}
 	}
 
 	/// A name already taken, such as by a recording started in the same
