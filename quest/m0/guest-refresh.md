@@ -39,7 +39,3 @@ Recommendations for the delivery track:
 - Each renewal lasts one `--guest-expiry` and goes out well before the
   current `exp`, so a removed or departed guest stays bounded by one expiry.
   The studio holds at most one token broadcast per guest it signed for.
-
-## Required
-
-- [In-band token renewal is released](/quest/m0/auth-renewal-release.md) - the join page's `@moq/net` and the relay renew a token on a live session

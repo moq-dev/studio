@@ -56,7 +56,7 @@ render-sw:
     cargo nextest run --locked -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
     cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay) | test(=setup::tests::times_every_canvas)'
 
-# Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock.
+# Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock and bun.lock.
 upgrade-moq rev="origin/main":
     sh/upgrade-moq.sh {{ rev }}
 

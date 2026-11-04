@@ -447,7 +447,9 @@ just join    # Serve the join page locally
 ```
 
 `rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
-`js/join` the join page, built on `@moq/room` and `@moq/publish`. See
+`js/join` the join page, built on `@moq/room` and `@moq/publish`. Like the
+Rust crates, those come from the `moq` submodule rather than npm, so
+`bun install` needs it checked out, and Nix to build `@moq/libav`. See
 [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md), and the
 [quest tree](quest/README.md) for planned work.
 
