@@ -413,9 +413,7 @@ impl Driver {
 	#[cfg(feature = "capture")]
 	async fn listen(&self, source: moq_audio::capture::Source) -> Result<(), Error> {
 		let strip = self.strip.clone().expect("audio sources have a strip");
-		let mut config = moq_audio::capture::Config::default();
-		config.source = source;
-		let capture = moq_audio::capture::Producer::open(config).await?;
+		let capture = capture(source).await?;
 		let channel = self.context.bus.capture(capture.consume(), strip)?;
 		set(&self.status, Status::Live);
 		tokio::try_join!(capture.run(), channel.run())?;
@@ -654,6 +652,29 @@ fn default_framerate() -> moq_video::FrameRate {
 fn set(status: &kio::Producer<Status>, value: Status) {
 	if let Ok(mut status) = status.write() {
 		*status = value;
+	}
+}
+
+/// Open `source` in a layout the bus can mix. Past stereo a device's channels
+/// carry no speaker positions to downmix by, such as a microphone array's or an
+/// interface's inputs, so a device that defaults to more is asked for stereo,
+/// then mono, and fails with the formats it offers if it has neither.
+#[cfg(feature = "capture")]
+async fn capture(source: moq_audio::capture::Source) -> Result<moq_audio::capture::Producer, moq_audio::Error> {
+	let mut config = moq_audio::capture::Config::default();
+	config.source = source;
+	let capture = moq_audio::capture::Producer::open(config.clone()).await?;
+	if !matches!(capture.consume().input().layout, moq_audio::Layout::Discrete(_)) {
+		return Ok(capture);
+	}
+	drop(capture);
+	config.channels = Some(2);
+	match moq_audio::capture::Producer::open(config.clone()).await {
+		Err(moq_audio::Error::Unsupported(_)) => {
+			config.channels = Some(1);
+			moq_audio::capture::Producer::open(config).await
+		}
+		result => result,
 	}
 }
 

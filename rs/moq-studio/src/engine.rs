@@ -1636,13 +1636,36 @@ mod tests {
 				.await
 				.expect("the source");
 
-			// A source restarted behind the failover takes over once the first
-			// relay's route to it ends, since that relay ranks first.
+			// A source restarted behind the failover takes over only once the
+			// first relay's route to it ends, since that relay ranks first.
 			let older = moq_net::Instance::random();
 			let newer = moq_net::Instance::random();
 			let first = publish("show", &older, &guests[0]);
 			routed_at(&mut sources, &older).await;
 			let _restarted = publish("show", &newer, &guests[1]);
+			routed_at(&mut routes[1].announced(), &newer).await;
+			// Announced after the restart on the failover's one announce
+			// stream, so once it reaches the studio the restart has too.
+			let _marker = publish("marker", &moq_net::Instance::random(), &guests[1]);
+			subscribe
+				.consume()
+				.follow("marker", None)
+				.unwrap()
+				.available()
+				.await
+				.expect("the marker");
+			while let Some(event) = sources.try_next() {
+				if let moq_net::announce::Event::Start(announce)
+				| moq_net::announce::Event::Update(announce)
+				| moq_net::announce::Event::Restart(announce)
+				| moq_net::announce::Event::Takeover { announce, .. } = event
+				{
+					assert!(
+						announce.prefix.as_str() != "show" || announce.route.instance.as_ref() != Some(&newer),
+						"the failover's instance won while the first relay has one"
+					);
+				}
+			}
 			drop(first);
 			routed_at(&mut sources, &newer).await;
 		};
