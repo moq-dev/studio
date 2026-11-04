@@ -302,6 +302,26 @@ impl Interact {
 		out.into_inner()
 	}
 
+	/// The pages this holds the pointer, the keyboard, or a drag for.
+	pub fn pages(&self) -> impl Iterator<Item = &str> {
+		let captured = self.captured.as_ref().map(|capture| &capture.page);
+		[&self.hovered, &self.focused]
+			.into_iter()
+			.flatten()
+			.chain(captured)
+			.map(String::as_str)
+	}
+
+	/// Drop what this holds for `page`, which stopped or restarted, so it hears
+	/// nothing more: a restarted page starts with nothing held.
+	pub fn forget(&mut self, page: &str) {
+		let is = |name: &String| name == page;
+		self.hovered.take_if(|name| is(name));
+		self.focused.take_if(|name| is(name));
+		self.captured.take_if(|capture| is(&capture.page));
+		self.last.take_if(|press| is(&press.page));
+	}
+
 	/// Whether a page has the keyboard, so the studio's own shortcuts leave
 	/// it alone.
 	pub fn has_keyboard(&self) -> bool {
@@ -920,6 +940,45 @@ mod tests {
 		);
 		assert!(!interact.has_keyboard());
 		assert!(interact.captured.is_none());
+	}
+
+	/// A page that stopped or restarted is forgotten: it hears no release, and
+	/// the studio's shortcuts come back.
+	#[test]
+	fn a_forgotten_page_hears_nothing() {
+		let mut collection = Collection::new();
+		collection.canvas.width = 100;
+		collection.canvas.height = 100;
+		collection.sources.insert(
+			"chat".into(),
+			Source::Browser {
+				url: "https://example.com".into(),
+				width: 100,
+				height: 100,
+			},
+		);
+		collection.scenes = vec![Scene {
+			name: "Main".into(),
+			items: vec![Item::new("chat", Rect::fill(&collection.canvas))],
+		}];
+		let ctx = egui::Context::default();
+		let mut interact = Interact::default();
+		let events = vec![
+			egui::Event::PointerMoved(egui::pos2(10.0, 10.0)),
+			egui::Event::PointerButton {
+				pos: egui::pos2(10.0, 10.0),
+				button: egui::PointerButton::Primary,
+				pressed: true,
+				modifiers: Default::default(),
+			},
+		];
+		frame(&ctx, &mut interact, &collection, events);
+		assert_eq!(interact.pages().collect::<Vec<_>>(), ["chat"; 3]);
+
+		interact.forget("chat");
+		assert!(!interact.has_keyboard());
+		assert_eq!(interact.pages().count(), 0);
+		assert!(interact.release().is_empty());
 	}
 
 	/// Presses close in time and place count up to a triple click, then start

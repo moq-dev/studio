@@ -233,6 +233,12 @@ impl Release {
 }
 
 impl Page {
+	/// Whether `other` is this page, rather than one restarted under the same
+	/// name.
+	pub fn same(&self, other: &Page) -> bool {
+		Arc::ptr_eq(&self.state, &other.state)
+	}
+
 	/// How the newest picture arrived, once one has.
 	pub fn paint(&self) -> Option<Paint> {
 		self.state.lock().unwrap().paint

@@ -1,5 +1,6 @@
 //! The window: docked panels over the engine's state.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -105,6 +106,7 @@ impl Studio {
 				interacting: false,
 				interact: Interact::default(),
 				previewed: false,
+				bound: BTreeMap::new(),
 				guest: String::new(),
 				shown: None,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
@@ -210,6 +212,9 @@ struct Panels {
 	interact: Interact,
 	/// Whether this frame drew the preview, which a stacked tab can hide.
 	previewed: bool,
+	/// The page `interact` holds state for under each name, so one stopped or
+	/// restarted under it, as an edit or a reload does, is forgotten.
+	bound: BTreeMap<String, moq_scene::browser::Page>,
 	/// The name typed for the next guest.
 	guest: String,
 	/// The join link on screen.
@@ -625,9 +630,32 @@ impl Panels {
 
 	/// Let go of every page the preview passed input to.
 	fn let_go(&mut self) {
-		let released = self.interact.release();
-		if !released.is_empty() {
-			deliver(&self.engine.state.lock().unwrap().sources, released);
+		if self.interact.pages().next().is_none() {
+			return;
+		}
+		let engine = self.engine.clone();
+		let state = engine.state.lock().unwrap();
+		self.rebind(&state.sources);
+		deliver(&state.sources, self.interact.release());
+	}
+
+	/// Forget the pages `interact` holds that stopped or restarted, and note
+	/// the page under each name it newly holds.
+	fn rebind(&mut self, sources: &moq_scene::source::Sources) {
+		let held: BTreeSet<String> = self.interact.pages().map(str::to_string).collect();
+		self.bound.retain(|name, _| held.contains(name));
+		for name in held {
+			let current = sources.get(&name).and_then(Feed::page);
+			match (self.bound.get(&name), current) {
+				(Some(bound), Some(current)) if bound.same(current) => {}
+				(None, Some(current)) => {
+					self.bound.insert(name, current.clone());
+				}
+				_ => {
+					self.interact.forget(&name);
+					self.bound.remove(&name);
+				}
+			}
 		}
 	}
 
@@ -649,6 +677,7 @@ impl Panels {
 				)
 				.changed();
 			if toggled && !self.interacting {
+				self.rebind(&state.sources);
 				deliver(&state.sources, self.interact.release());
 			}
 			ui.separator();
@@ -669,8 +698,10 @@ impl Panels {
 		if self.interacting {
 			let image = picture(ui, self.preview.id, canvas, egui::Sense::hover()).rect;
 			let scene = state.compositor.preview_scene();
+			self.rebind(&state.sources);
 			let delivered = self.interact.update(ui, image, state.collection(), scene);
 			deliver(&state.sources, delivered);
+			self.rebind(&state.sources);
 			return;
 		}
 		let response = picture(ui, self.preview.id, canvas, egui::Sense::click_and_drag());
