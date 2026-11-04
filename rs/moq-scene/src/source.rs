@@ -27,7 +27,7 @@ use crate::Error;
 use crate::browser::Page;
 use crate::collection::{Collection, Source};
 use crate::lut::Cube;
-use crate::playout::{MAX_DELAY, Place, Speaker, VIDEO_DELAY};
+use crate::playout::{MAX_DELAY, Place, Speaker, VIDEO_DELAY, Writer};
 use crate::publish::{Claim, Listing, Publish, Still};
 use crate::replay::{MIN_SPEED, Take, Target};
 
@@ -120,9 +120,9 @@ type Playing<'a> = Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>>;
 /// The playout clock one instance of a broadcast's audio and video share.
 struct Clock {
 	timeline: timeline::Producer,
-	/// Woken when audio moves the anchor, so video works out again when its
-	/// next picture is due.
-	moved: Notify,
+	/// Woken when audio places a frame, which may move the anchor or let a
+	/// picture waiting for its sound show.
+	placed: Notify,
 }
 
 /// Decoded pictures a broadcast source holds until they are due. The rest wait
@@ -744,7 +744,7 @@ impl Driver {
 		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
 		let clock = Clock {
 			timeline: clock,
-			moved: Notify::new(),
+			placed: Notify::new(),
 		};
 
 		// A track name always means the same content, so only a new track
@@ -832,7 +832,13 @@ impl Driver {
 		let mut ended = false;
 		loop {
 			let now = kio::clock::now();
-			if let Some(index) = schedule.present(queue.iter().map(|frame| frame.timestamp), now) {
+			// Counted first: `present` holds the clock's lock while it iterates.
+			let heard = queue
+				.iter()
+				.take_while(|frame| crate::playout::heard(&schedule, frame.timestamp, now))
+				.count();
+			let ready = queue.iter().take(heard).map(|frame| frame.timestamp);
+			if let Some(index) = schedule.present(ready, now) {
 				let frame = queue.drain(..=index).next_back().expect("an index into the queue");
 				self.played.lock().unwrap().newest = Some(frame.timestamp);
 				self.show(Picture::Frame(frame));
@@ -840,7 +846,11 @@ impl Driver {
 			if ended && queue.is_empty() {
 				return Ok(());
 			}
-			let due = queue.front().and_then(|frame| schedule.due(frame.timestamp));
+			// A picture due but not yet heard waits for audio to place more.
+			let due = queue
+				.front()
+				.and_then(|frame| schedule.due(frame.timestamp))
+				.filter(|due| *due > now);
 			tokio::select! {
 				read = consumer.read(), if !ended && queue.len() < QUEUED => match read? {
 					Some(moq_video::decode::Read::Frame(frame)) => {
@@ -853,7 +863,7 @@ impl Driver {
 					None => ended = true,
 				},
 				() = kio::clock::sleep_until(due.unwrap_or(now)), if due.is_some() => {}
-				() = clock.moved.notified() => {}
+				() = clock.placed.notified() => {}
 			}
 		}
 	}
@@ -884,7 +894,8 @@ impl Driver {
 
 		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
 		input.format = moq_audio::Format::F32;
-		let mut channel = self.context.bus.channel(input, strip)?;
+		let channel = self.context.bus.channel(input, strip)?;
+		let mut writer = Writer::new(channel, bus.sample_rate, bus.layout.channels());
 		let mut speaker = Speaker::new(clock.timeline.clone());
 		let stride = bus.layout.channels() as usize * size_of::<f32>();
 		let rate = f64::from(bus.sample_rate);
@@ -903,11 +914,9 @@ impl Driver {
 				};
 				let duration = Duration::from_secs_f64((frame.data.len() / stride) as f64 / rate);
 				let place = speaker.place(frame.timestamp.into(), duration, consumer.delay(), kio::clock::now());
-				if let Place::Write { at, moved } = place {
-					if moved {
-						clock.moved.notify_one();
-					}
-					queue.borrow_mut().push_back((at, frame));
+				if let Place::Play(sounds) = place {
+					clock.placed.notify_one();
+					queue.borrow_mut().push_back((sounds, frame));
 					queued.notify_one();
 				}
 			}
@@ -919,9 +928,9 @@ impl Driver {
 			loop {
 				let next = queue.borrow_mut().pop_front();
 				match next {
-					Some((at, frame)) => {
-						kio::clock::sleep_until(at).await;
-						channel.write(&frame.data)?;
+					Some((sounds, frame)) => {
+						kio::clock::sleep_until(sounds - crate::playout::BUS_LATENCY).await;
+						writer.write(sounds, &frame.data, kio::clock::now())?;
 					}
 					None if received.get() => return Ok::<_, Error>(()),
 					None => queued.notified().await,
