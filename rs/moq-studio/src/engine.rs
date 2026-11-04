@@ -479,16 +479,20 @@ impl Program {
 		}
 	}
 
-	/// What a replay of the local source `name` copies: the video of its own
-	/// track, up to now, or `None` while it publishes no video.
+	/// What a replay of the local source `name` copies: the video or sound of
+	/// its own track, up to now, or `None` while it publishes neither.
 	pub fn source(&self, name: &str) -> Option<moq_scene::replay::Target> {
 		let mut catalog = self.sources.catalog();
 		let listed = catalog.ext.studio.sources.remove(name)?;
-		let video = listed.video.renditions.into_iter().next()?;
+		let video = listed.video.renditions.into_iter().next();
+		let audio = listed.audio.renditions.into_iter().next();
+		if video.is_none() && audio.is_none() {
+			return None;
+		}
 		Some(moq_scene::replay::Target {
 			broadcast: self.sources.consume(),
-			video: Some(video),
-			audio: None,
+			video,
+			audio,
 			end: self.clock.now(),
 		})
 	}
@@ -506,18 +510,23 @@ impl Program {
 		}
 	}
 
-	/// Encode the local sources the program shows, from `state`, whether or
-	/// not anything reads their tracks, so a replay of one has its past.
-	fn show(&self, state: &State) {
+	/// Encode the local sources on program, from `state`, whether or not
+	/// anything reads their tracks, so a replay of one has its past: those a
+	/// scene on air shows, and those the program mix plays.
+	fn on_program(&self, state: &State) {
 		let collection = &state.collection;
 		let scenes = state.compositor.on_air().filter_map(|scene| collection.scene(scene));
 		let shown = scenes
 			.flat_map(|scene| &scene.items)
 			.chain(&collection.top)
 			.filter(|item| item.visible)
-			.map(|item| collection.capture(&item.source).to_string())
-			.collect();
-		self.sources.show(shown);
+			.map(|item| collection.capture(&item.source).to_string());
+		let heard = state
+			.sources
+			.iter()
+			.filter(|(name, _)| state.sources.plays(&collection.mixes.program, name))
+			.map(|(name, _)| name.to_string());
+		self.sources.set_on_program(shown.chain(heard).collect());
 	}
 }
 
@@ -942,7 +951,7 @@ impl Engine {
 					tracing::error!(%err, "cannot draw the canvas");
 					continue;
 				}
-				self.program.show(state);
+				self.program.on_program(state);
 				(state.compositor.program().clone(), state.compositor.canvas())
 			};
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);

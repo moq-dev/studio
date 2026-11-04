@@ -47,7 +47,8 @@ impl Engine {
 	///
 	/// The program has a past only while it is encoded, which without a relay
 	/// is only while recorded, a local source only from while it was on
-	/// program or recorded, and a broadcast source once it shows a picture.
+	/// program, shown or heard, or recorded, and a broadcast source once it
+	/// shows a picture.
 	pub fn targets(&self, of: &Of) -> anyhow::Result<Vec<Target>> {
 		let output = || {
 			self.output
@@ -77,10 +78,10 @@ impl Engine {
 					"`{name}` is an overlay, which publishes no track of its own, so it has no past to replay"
 				)
 			}
-			Some(source) if source.has_video() => output()?
+			Some(Source::Lut { .. }) => anyhow::bail!("`{name}` has no picture or sound to replay"),
+			Some(_) => output()?
 				.source(capture)
-				.with_context(|| format!("`{name}` publishes no video to replay")),
-			Some(_) => anyhow::bail!("`{name}` has no picture to replay"),
+				.with_context(|| format!("`{name}` publishes no video or sound to replay")),
 			None => anyhow::bail!("there is no source named `{name}`"),
 		};
 		Ok(vec![target?])
