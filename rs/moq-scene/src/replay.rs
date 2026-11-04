@@ -49,6 +49,12 @@ pub struct Target {
 /// It holds the groups covering the span, from the one in progress at its start
 /// through the one in progress at its end, so the span decodes from its first
 /// picture. Dropping it releases them.
+///
+/// Frames are in decode order, so with B-frames a picture shown inside the span
+/// can refer to one shown after its end. A take to play ([`Take::new`]) keeps
+/// such references, since playing stops showing at the end anyway. A clip
+/// ([`Take::clip`]) stops before the first frame shown after the end, since an
+/// export shows everything it holds, so it may end a few pictures early.
 pub struct Take {
 	broadcast: moq_net::broadcast::Producer,
 	/// Keep the copies and their listing readable.
@@ -78,6 +84,16 @@ impl Take {
 	/// described neither rendition yet, and, over a wire that cannot address a
 	/// received track by time, a broadcast from a relay.
 	pub fn new(target: &Target, length: Duration) -> Result<Self, Error> {
+		Self::cut(target, length, Cut::Decodable)
+	}
+
+	/// Hold the `length` of `target` that ends at its end to save, as
+	/// [`Take::new`] does, but with nothing shown after the end.
+	pub fn clip(target: &Target, length: Duration) -> Result<Self, Error> {
+		Self::cut(target, length, Cut::Shown)
+	}
+
+	fn cut(target: &Target, length: Duration, cut: Cut) -> Result<Self, Error> {
 		if length.is_zero() || length > MAX_LENGTH {
 			return Err(Error::Invalid(format!(
 				"a replay is above 0 and at most {} s long, not {length:?}",
@@ -100,7 +116,7 @@ impl Take {
 		let mut video = None;
 		if let Some((name, config)) = &target.video {
 			reference(config)?;
-			if let Some(track) = copy(target, &broadcast, Reference::track(config, name), start)? {
+			if let Some(track) = copy(target, &broadcast, Reference::track(config, name), start, cut)? {
 				tracks.push(track);
 				video = Some((name.clone(), config.clone()));
 			}
@@ -108,7 +124,7 @@ impl Take {
 		let mut audio = None;
 		if let Some((name, config)) = &target.audio {
 			reference(config)?;
-			if let Some(track) = copy(target, &broadcast, Reference::track(config, name), start)? {
+			if let Some(track) = copy(target, &broadcast, Reference::track(config, name), start, cut)? {
 				tracks.push(track);
 				audio = Some((name.clone(), config.clone()));
 			}
@@ -156,6 +172,16 @@ fn reference(config: &impl Reference) -> Result<(), Error> {
 	}
 }
 
+/// Where a take's groups stop in decode order, at the end of its span.
+#[derive(Clone, Copy)]
+enum Cut {
+	/// Through the last frame shown inside the span, with every reference it
+	/// needs, even one shown after the end.
+	Decodable,
+	/// Before the first frame shown after the end.
+	Shown,
+}
+
 /// Copy the span of `name` in `target`, as far as it is readable now, into a
 /// track of `broadcast`, and end that track. `None` while its publisher has
 /// not described the track, so nothing of it is held.
@@ -164,6 +190,7 @@ fn copy(
 	broadcast: &moq_net::broadcast::Producer,
 	name: &str,
 	start: moq_net::Timestamp,
+	cut: Cut,
 ) -> Result<Option<moq_net::track::Producer>, Error> {
 	let range = moq_net::track::Range {
 		start: moq_net::track::Anchor::Time(start),
@@ -185,7 +212,7 @@ fn copy(
 	// Never stale: the take keeps its groups for as long as it lives.
 	let info = source.info().clone().with_max_age(None);
 	let mut track = broadcast.create_track(name, info)?;
-	match copy_held(&mut source, &mut track, target.end) {
+	match copy_held(&mut source, &mut track, target.end, cut) {
 		Ok(()) => track.finish()?,
 		Err(err) => {
 			let _ = track.clone().abort(moq_net::Error::Cancel);
@@ -201,11 +228,13 @@ struct Held {
 	read: Result<(), moq_net::Error>,
 }
 
-/// Copy every group and frame `source` has ready, up to `end`, into `track`.
+/// Copy every group and frame `source` has ready, up to `end` as `cut` says,
+/// into `track`.
 fn copy_held(
 	source: &mut moq_net::track::Subscriber,
 	track: &mut moq_net::track::Producer,
 	end: moq_net::Timestamp,
+	cut: Cut,
 ) -> Result<(), Error> {
 	// Never woken: anything not ready now is left out.
 	let now = kio::Waiter::noop();
@@ -229,15 +258,16 @@ fn copy_held(
 				Poll::Ready(Err(err)) => break Err(err),
 			}
 		};
-		// Frames are in decode order, so one presented past the end may be a
-		// reference of one inside the span: keep through the last inside it.
-		let inside = frames
-			.iter()
-			.rposition(|frame| frame.timestamp.is_none_or(|timestamp| timestamp <= end));
-		// None is a group wholly past the span, or one the publisher gave up or
-		// that aged out before any of it was read, which replays as the gap it is.
-		if let Some(last) = inside {
-			frames.truncate(last + 1);
+		let inside = |frame: &moq_net::frame::Frame| frame.timestamp.is_none_or(|timestamp| timestamp <= end);
+		let kept = match cut {
+			Cut::Decodable => frames.iter().rposition(inside).map_or(0, |last| last + 1),
+			Cut::Shown => frames.iter().position(|frame| !inside(frame)).unwrap_or(frames.len()),
+		};
+		// None kept is a group wholly past the span, or one the publisher gave
+		// up or that aged out before any of it was read, which replays as the
+		// gap it is.
+		if kept > 0 {
+			frames.truncate(kept);
 			held.insert(group.sequence, Held { frames, read });
 		}
 	}
@@ -397,14 +427,18 @@ mod tests {
 		);
 	}
 
-	/// A picture presented past the end is kept when one decoded after it, and
-	/// shown inside the span, may refer to it.
+	/// A picture presented past the end is kept to play when one decoded after
+	/// it, and shown inside the span, may refer to it, and left out of a clip,
+	/// with the pictures that refer to it.
 	#[tokio::test(start_paused = true)]
 	async fn a_take_keeps_the_references_of_its_last_pictures() {
 		let (broadcast, track) = broadcast(4, None);
 		write(&track, 4, &[4_000, 4_400, 4_133, 4_266]);
-		let take = Take::new(&target(&broadcast, ts(4_200)), Duration::from_secs(1)).unwrap();
+		let target = target(&broadcast, ts(4_200));
+		let take = Take::new(&target, Duration::from_secs(1)).unwrap();
 		assert_eq!(read(&take).await, [(3, frames(3, 3)), (4, frames(4, 3))]);
+		let clip = Take::clip(&target, Duration::from_secs(1)).unwrap();
+		assert_eq!(read(&clip).await, [(3, frames(3, 3)), (4, frames(4, 1))]);
 	}
 
 	/// A take at the live edge holds what was written when it was taken, and

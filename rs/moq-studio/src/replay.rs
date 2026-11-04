@@ -140,10 +140,13 @@ async fn create(scenes: &Path) -> anyhow::Result<(PathBuf, tokio::fs::File)> {
 // The software encoder is the one every test machine has.
 #[cfg(all(test, feature = "openh264"))]
 mod tests {
+	use std::io::Seek;
+
 	use super::*;
 
 	/// A clip is a finished MP4 of the span, named beside the scene file
-	/// without overwriting an earlier one.
+	/// without overwriting an earlier one, that shows nothing after the span's
+	/// end even when a picture inside it refers to one shown after.
 	#[tokio::test]
 	async fn a_clip_saves_its_span() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -155,28 +158,40 @@ mod tests {
 		let mut producer = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition).unwrap();
 		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
 		let gray = vec![0x80; 64 * 64 * 4];
+		let at = |index: u64| moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap();
+		// Each second in the decode order of B-frames: I0 P2 B1 P4 B3 ... B27 P29.
+		let shown = |index: u64| match index % 30 {
+			0 | 29 => index,
+			odd if odd % 2 == 1 => index + 1,
+			_ => index - 1,
+		};
 		for index in 0..90u64 {
 			if index % 30 == 0 {
 				encoder.cut().unwrap();
 			}
 			let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(64, 64)).unwrap();
-			let frame = moq_video::Frame::new(
-				surface,
-				moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap(),
-			);
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			let mut encoded = encoder.encode(&moq_video::Frame::new(surface, at(index))).unwrap();
+			// The software encoder writes each picture as it takes it.
+			let [unit] = encoded.as_mut_slice() else {
+				panic!("one access unit per picture");
+			};
+			unit.timestamp = at(shown(index));
+			producer.publish(&encoded).unwrap();
 		}
+		// Between the pictures shown at 2.433 and 2.467 s, which are decoded the
+		// other way around.
+		let end = Duration::from_millis(2_450);
 		let target = Target {
 			broadcast: broadcast.consume(),
 			video: catalog.snapshot().video.renditions.into_iter().next(),
 			audio: None,
-			end: moq_net::Timestamp::from_micros(2_500_000).unwrap(),
+			end: moq_net::Timestamp::from_micros(end.as_micros() as u64).unwrap(),
 		};
 
 		let dir = tempfile::tempdir().unwrap();
 		let scenes = dir.path().join("show.toml");
 		std::fs::write(dir.path().join("show-clip-1.mp4"), b"an earlier clip").unwrap();
-		let take = Take::new(&target, Duration::from_secs(1)).unwrap();
+		let take = Take::clip(&target, Duration::from_secs(1)).unwrap();
 		let path = save(take, &scenes).await.unwrap();
 		assert_eq!(path, dir.path().join("show-clip-2.mp4"));
 		assert_eq!(
@@ -186,5 +201,19 @@ mod tests {
 		// A regular MP4 needs no repair, unlike one a crash cut short.
 		let mut file = std::fs::File::open(&path).unwrap();
 		assert!(moq_mux::container::mp4::repair(&mut file).unwrap().is_none());
+
+		// It shows from the keyframe at 1 s, before the span's start, to its
+		// end at the latest, and at most a few pictures short of it.
+		file.rewind().unwrap();
+		let moov = std::iter::from_fn(|| mp4_atom::ReadFrom::read_from(&mut file).unwrap())
+			.find_map(|atom| match atom {
+				mp4_atom::Any::Moov(moov) => Some(moov),
+				_ => None,
+			})
+			.expect("a moov");
+		let shows = Duration::from_secs(1)
+			+ Duration::from_secs_f64(moov.mvhd.duration as f64 / f64::from(moov.mvhd.timescale));
+		assert!(shows <= end, "shows until {shows:?}, past {end:?}");
+		assert!(shows >= end - Duration::from_millis(200), "shows only until {shows:?}");
 	}
 }
