@@ -9,8 +9,9 @@
 import * as Net from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Local } from "@moq/room";
-import { Effect } from "@moq/signals";
-import { type Link, parse } from "./link.ts";
+import { Effect, Signal } from "@moq/signals";
+import { format, type Link, parse } from "./link.ts";
+import * as Renew from "./renew.ts";
 
 /** Where the fragment is kept once it leaves the address bar, so a reload rejoins. */
 const STORED = "moq-studio-join";
@@ -53,8 +54,18 @@ function read(): Link {
 /** Publish into the room until the guest leaves. Returns how to leave. */
 function join(link: Link): () => void {
 	const signals = new Effect();
-	const connection = new Net.Connection({ url: link.url, enabled: true });
+	// The token rides SETUP rather than the URL, and each renewal replaces it in band.
+	const tokens = new Signal<readonly string[]>([link.jwt]);
+	const connection = new Net.Connection({ url: link.url, versions: [Renew.VERSION], tokens, enabled: true });
 	signals.cleanup(() => connection.close());
+
+	const renewal = Renew.follow(connection.origin, Renew.path(link.name, link.generation), (jwt) => {
+		tokens.set([jwt]);
+		// So joining again, or a reload, uses the newest token once the link's has expired.
+		link.jwt = jwt;
+		stored((storage) => storage.setItem(STORED, format(link)));
+	});
+	signals.cleanup(() => renewal.close());
 
 	const local = new Local({
 		connection,

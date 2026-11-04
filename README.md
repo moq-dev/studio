@@ -155,7 +155,11 @@ and their camera and screen appear as broadcast sources. The room follows
 named `alice` publishes `alice/camera.hang` and `alice/screen.hang` under it.
 Guests need a relay that verifies tokens, so run your own with
 [`moq auth serve`](https://doc.moq.dev/bin/cli) behind it, and a key that can
-sign only for the room:
+sign only for the room. The relay must be built from moq's `main` and accept
+moq-lite-07 (`--listen-version moq-lite-07-wip`, beside the versions your
+other clients use), the version that renews a guest's token without
+reconnecting. Its wire is still a work in progress, so the join page offers
+nothing else, and a guest cannot join through a relay without it.
 
 ```bash
 moq auth generate --algorithm ES256 --out room.jwk --public-dir keys \
@@ -176,8 +180,21 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   `localhost`, so the studio refuses any other. It defaults to `https://join.studio.moq.dev/`, which this
   repository deploys from `main`, but that domain is not live yet, so for now
   host the page yourself and pass its URL.
-- `--guest-expiry` (default `4h`) is how long a link works. The relay
-  disconnects a guest when their link expires, so send a new one before then.
+- `--guest-expiry` (default `4h`, at least `1m`) is how long a link works,
+  and each token the studio renews it with. While a guest is in the room, the
+  studio signs them a fresh token every half of it, over a session of its own
+  in the room that the room key signs for, and the join page presents it
+  without reconnecting. A guest's token may read only their own renewals, at
+  `.renew/<name>/<generation>` in the room, but anything else the relay lets subscribe
+  there can read every guest's, so grant that only to the studio. A guest who
+  leaves needs a link, or a renewed token, that has not expired to come back.
+  The Guests panel says when renewal is failing.
+- **Upgrading from a studio without renewal:** generate a new room key, drop
+  the old one's public half from `--key-dir`, then restart the relay (or wait
+  out the old links' `--guest-expiry`) before starting the upgraded studio.
+  Links from before let their holder subscribe to the whole room, renewals
+  included, so they must die with the old key, and a relay keeps a session
+  it already admitted until its token expires.
 - With `--failover`, a link still names only the `--connect` relay: the join
   page dials one relay, and a guest's token is rooted at the room there, so
   guests drop while that relay is down. The studio follows the room through
@@ -189,9 +206,11 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
 **Invite** in the Guests panel makes a link for one guest name and shows it as
 a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
 in the link's fragment, which the browser never sends to a server, and lets
-them publish only under their own name, so they cannot appear as someone else.
-Treat the link like a password: anyone holding it can join as that guest until
-it expires. A guest's broadcasts become sources named after them (`alice`,
+them publish only under their own name, so they cannot appear as someone else,
+and read only their own renewals.
+Treat the link like a password: anyone holding it can join as that guest
+before it expires, and is then renewed for as long as they stay, until you
+remove them. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, muted and in no scene: place them from
 the Items panel and unmute them in Audio to put them on air. That includes a
 guest invited before a restart whose link still works. A guest's source is
@@ -201,8 +220,13 @@ who reconnects after you removed their source comes back under a new name
 (`alice 2`), since undoing the removal brings back the old one.
 **Remove from scenes** is your edit, so it undoes: it takes a guest, any clone
 of their sources, and any mask reading them out of every scene and the top
-layer and mutes them; a signed token cannot be taken back, so they stay
-connected until it expires.
+layer and mutes them. A signed token cannot be taken back, so it also stops
+renewing theirs, and they are disconnected within `--guest-expiry`. That
+holds across a restart, whichever scene file you open: removed guests are
+kept beside the room key, as `room.guests.toml` for `room.jwk`, so its
+directory must be writable. Undo puts them back in the scenes but not on
+renewal; **New link** lets them back in and renews them again, under a new
+generation, so a link from before the removal cannot read their renewals.
 
 ## Scene file
 
@@ -512,7 +536,9 @@ just join    # Serve the join page locally
 ```
 
 `rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
-`js/join` the join page, built on `@moq/room` and `@moq/publish`. See
+`js/join` the join page, built on `@moq/room` and `@moq/publish`. Like the
+Rust crates, those come from the `moq` submodule rather than npm, so
+`bun install` needs it checked out, and Nix to build `@moq/libav`. See
 [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md), and the
 [quest tree](quest/README.md) for planned work.
 

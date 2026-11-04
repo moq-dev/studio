@@ -13,13 +13,14 @@
 		"test": "bun test"
 	},
 	"dependencies": {
-		"@moq/net": "^0.4.7",
-		"@moq/publish": "^0.5.4",
-		"@moq/room": "^0.2.1",
-		"@moq/signals": "^0.2.6"
+		"@moq/net": "workspace:*",
+		"@moq/publish": "workspace:*",
+		"@moq/room": "workspace:*",
+		"@moq/signals": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.4",
+		"rolldown": "^1.2.15",
 		"typescript": "7.0.2",
 		"vite": "^8.3.5"
 	}
