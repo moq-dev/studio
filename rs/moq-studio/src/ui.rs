@@ -421,9 +421,9 @@ impl Panels {
 	}
 
 	/// Report a reload, from File > Reload or an outside edit the autosave
-	/// took, and let go of a selected item and a drag whose index it may have
-	/// given to another item. Called under every lock that uses either, since
-	/// the autosave can reload between two.
+	/// took, and let go of a selected item, a drag, and a scene rename under
+	/// way, whose index it may have given to another. Called under every lock
+	/// that uses one, since the autosave can reload between two.
 	fn follow_reloads(&mut self, state: &State) {
 		if state.reloads == self.reloads {
 			return;
@@ -795,6 +795,7 @@ impl Panels {
 	fn scenes(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let preview = state.compositor.preview_scene().map(str::to_owned);
 		let program = state.compositor.program_scene().map(str::to_owned);
 		let on_air: Vec<String> = state.compositor.on_air().map(str::to_owned).collect();
