@@ -1,0 +1,4 @@
+# Hoisted, as in moq: the submodule's build helpers (such as its worklet plugin)
+# resolve their tools from the root node_modules.
+[install]
+linker = "hoisted"

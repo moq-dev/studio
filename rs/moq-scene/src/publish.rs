@@ -8,7 +8,8 @@
 //! be played, or packaged for HLS, as a variant of the program.
 //!
 //! A source encodes while it runs, whatever the demand, so a late viewer finds
-//! its recent past; MoQ uploads only what a subscriber pulls.
+//! its recent past; MoQ uploads only what a subscriber pulls. On
+//! [demand](Publish::on_demand), it encodes only while subscribed.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -57,6 +58,7 @@ pub struct Publish {
 	catalog: Catalog,
 	bandwidth: moq_net::bandwidth::Allocator,
 	kind: moq_video::encode::Kind,
+	on_demand: bool,
 	owners: Arc<Mutex<Owners>>,
 }
 
@@ -88,8 +90,17 @@ impl Publish {
 			catalog,
 			bandwidth,
 			kind,
+			on_demand: false,
 			owners: Default::default(),
 		}
+	}
+
+	/// Encode each source's video only while someone subscribes to it, for a
+	/// studio whose only readers are its own recordings, which never fetch a
+	/// past they were not reading.
+	pub fn on_demand(mut self) -> Self {
+		self.on_demand = true;
+		self
 	}
 
 	/// What each source track the studio catalog lists has written, keyed by
@@ -151,6 +162,7 @@ impl Drop for Claim {
 pub(crate) struct Listing<'a> {
 	claim: &'a Claim,
 	kind: moq_video::encode::Kind,
+	on_demand: bool,
 	broadcast: moq_net::broadcast::Producer,
 	studio: Catalog,
 	catalog: moq_mux::catalog::Producer,
@@ -172,6 +184,7 @@ impl<'a> Listing<'a> {
 		Ok(Self {
 			claim,
 			kind: publish.kind.clone(),
+			on_demand: publish.on_demand,
 			broadcast: publish.broadcast.clone(),
 			studio: publish.catalog.clone(),
 			catalog,
@@ -277,6 +290,12 @@ impl<E: Encode> Encoding<E> {
 		self.encoder.is_some()
 	}
 
+	/// Whether anyone subscribes to the track.
+	pub(crate) fn wanted(&self) -> bool {
+		let producer = self.producer.as_ref().expect("open until it ends");
+		producer.demand().wanted().is_some()
+	}
+
 	/// Encode with `encoder` from here on, after draining the one it replaces.
 	pub fn open(&mut self, encoder: E) -> Result<(), Error> {
 		self.drain()?;
@@ -365,6 +384,8 @@ impl<E: Encode> Drop for Encoding<E> {
 pub(crate) struct Video {
 	track: Encoding,
 	config: moq_video::encode::Config,
+	/// Encodes only while the track is subscribed.
+	on_demand: bool,
 	clock: moq_mux::Clock,
 	/// Where the capture's private timeline starts on the studio clock, in
 	/// microseconds, taken at the first frame.
@@ -395,20 +416,31 @@ impl Video {
 		Ok(Self {
 			track: Encoding::new(producer),
 			config,
+			on_demand: listing.on_demand,
 			clock: listing.studio.clock(),
 			epoch: None,
 		})
 	}
 
-	/// Encode and publish `frame`, restamping it onto the studio clock. The
-	/// encoder opens on the first frame, and reopens when the picture's size or
-	/// color space changes, which moves the rendition to a new track.
+	/// Encode and publish `frame`, restamping it onto the studio clock, unless
+	/// it is on demand and nobody subscribes. The encoder opens on the first
+	/// frame it encodes, and reopens when the picture's size or color space
+	/// changes, which moves the rendition to a new track.
 	pub(crate) fn encode(&mut self, frame: &mut moq_video::Frame) -> Result<(), Error> {
 		let captured = frame.timestamp.as_micros();
 		let epoch = *self
 			.epoch
 			.get_or_insert_with(|| self.clock.now().as_micros().saturating_sub(captured));
 		frame.timestamp = moq_net::Timestamp::from_micros((epoch + captured) as u64).map_err(moq_video::Error::from)?;
+
+		if self.on_demand && !self.track.wanted() {
+			// The next subscriber starts on a fresh encoder's keyframe, and the
+			// session is free meanwhile; the gap is marked so nobody reads across it.
+			if self.track.is_open() {
+				self.track.discontinuity()?;
+			}
+			return Ok(());
+		}
 
 		let size = encodable(frame.size());
 		let color = frame.surface.color();
@@ -674,6 +706,60 @@ mod tests {
 			assert!(publish.stats().is_empty());
 			drop(listing);
 			assert!(publish.owners.lock().unwrap().catalogs.is_empty());
+		})
+		.await;
+	}
+
+	/// An on-demand source encodes only while its track is subscribed, holding
+	/// no encoder between subscribers.
+	#[tokio::test]
+	async fn an_on_demand_video_encodes_while_subscribed() {
+		local(async {
+			let (publish, catalog, consumer) = studio();
+			let publish = publish.on_demand();
+			let claim = publish.claim("camera");
+			let listing = Listing::new(&claim, &publish).unwrap();
+			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+			let size = moq_video::Size::new(64, 48);
+
+			tokio::select! {
+				result = listing.mirror() => panic!("the mirror ended: {result:?}"),
+				() = async {
+					let mut video = Video::new(&listing, size, framerate, None).await.unwrap();
+					video.encode(&mut gray(size, 0)).unwrap();
+					assert!(!video.track.is_open(), "nothing encodes unsubscribed");
+
+					// Advertised before anything encodes, so a recording can find it.
+					let rendition = |sources: &BTreeMap<String, hang::Catalog>| {
+						sources.get("camera").is_some_and(|camera| !camera.video.renditions.is_empty())
+					};
+					let snapshot = listed(&catalog, rendition).await;
+					let name = snapshot.ext.studio.sources["camera"].video.renditions.keys().next().unwrap().clone();
+					let mut track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+					video.encode(&mut gray(size, 33)).unwrap();
+					assert!(video.track.is_open(), "a subscriber gets pictures");
+					let mut group = track.recv_group().await.unwrap().expect("a group");
+					assert!(group.read_frame().await.unwrap().is_some());
+					let first = group.sequence;
+
+					drop(group);
+					drop(track);
+					for _ in 0..100 {
+						tokio::task::yield_now().await;
+					}
+					video.encode(&mut gray(size, 66)).unwrap();
+					assert!(!video.track.is_open(), "the encoder closes once nobody subscribes");
+
+					// The next subscriber gets a fresh encoder's pictures, in a group
+					// after the gap rather than the one before it.
+					let mut track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+					video.encode(&mut gray(size, 100)).unwrap();
+					assert!(video.track.is_open(), "a new subscriber reopens the encoder");
+					let mut group = track.recv_group().await.unwrap().expect("a group");
+					assert!(group.sequence > first, "{} after {first}", group.sequence);
+					assert!(group.read_frame().await.unwrap().is_some());
+				} => {}
+			}
 		})
 		.await;
 	}

@@ -60,7 +60,7 @@ cameras, packaging, signing) that one monorepo no longer pays off.
 - **Pin:** moq is a `moq` git submodule whose crates are path dependencies,
   as in moq.pro, so the studio compiles against one moq checkout.
 - **moq-scene** moved here with the app, its only consumer. The
-  [viewer-side composition](/quest/m0/compose/README.md) epic moved whole:
+  [viewer-side composition](/quest/m1/compose/README.md) epic (now m1) moved whole:
   browser composition ships as a package from this repository layered on
   `@moq/watch`, and the server composite is a headless binary here rather
   than a moq-cli subcommand, so moq never depends on the studio.
@@ -72,6 +72,15 @@ cameras, packaging, signing) that one monorepo no longer pays off.
   waits on a pin quest here, which `just upgrade-moq` advances. This replaces
   "never ahead of the studio UI that consumes them" above.
 
+Changed 2026-11-04 with the maintainer: the program is how a studio
+broadcast reaches viewers, not the fallback. Sources are not published to the
+relay by default (decided 2026-11-03 on
+[moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), because
+each encoding costs an encoder session and consumer GPUs have few, so the
+[viewer-side composition](/quest/m1/compose/README.md) epic moved to m1.
+Overlays and animation render into the program here, and travel to viewers
+in the layout track only once that epic lands.
+
 Dropped from the first scoping round: relay fan-out ("encode once, the relay
 restreams") and its upload savings. Direct push with shared encoders matches
 OBS multistream, and the hosted version is product work outside this
@@ -81,7 +90,7 @@ repository.
 
 - [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
-- [Viewer-side composition](/quest/m0/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
+- [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio get their own tracks, for isolated recording and replay
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
@@ -93,12 +102,11 @@ repository.
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [The join page is live](/quest/m0/join-page-live.md) - `join.studio.moq.dev` serves the join page `--join-page` defaults to
 - [Guest return feed](/quest/m0/guest-return.md) - guests see the program and hear a mix-minus
-- [Guest token refresh](/quest/m0/guest-refresh.md) - a show outlasts the guest link's expiry without new links
 - [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
-- [Recording](/quest/m0/recording.md) - each canvas's program, and optionally each source, recorded to disk alongside live outputs
 - [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Browser source popups](/quest/m0/browser-popups.md) - dropdowns and other in-page popups draw and take input
+- [Published independently](/quest/m0/publish-independently.md) - a source opts out of the program and publishes its own track for services that place it themselves
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS
 - [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need

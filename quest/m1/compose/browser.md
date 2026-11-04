@@ -23,5 +23,5 @@ studio, compared within a stated tolerance.
 
 ## Required
 
-- [Layout track](/quest/m0/compose/layout.md) - what the browser composes
+- [Layout track](/quest/m1/compose/layout.md) - what the browser composes
 - [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - browser frames into wgpu

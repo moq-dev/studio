@@ -55,12 +55,12 @@ render-sw:
     icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
     export LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}"
     cargo nextest run --locked -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
-    cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay) | test(=setup::tests::times_every_canvas)'
+    cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E 'test(/^engine::tests::the_program_/) | test(=setup::tests::times_every_canvas)'
     # CEF's browser process opens an X display even to paint offscreen.
     xvfb=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#xvfb-run)
     "$xvfb/bin/xvfb-run" -a cargo nextest run --locked -p moq-studio --features cef --run-ignored only -E 'binary(browser)'
 
-# Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock.
+# Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock and bun.lock.
 upgrade-moq rev="origin/main":
     sh/upgrade-moq.sh {{ rev }}
 

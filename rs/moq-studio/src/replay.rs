@@ -45,13 +45,14 @@ impl Engine {
 	/// What a replay of `of` copies, ending now.
 	///
 	/// The program and the local sources have a past only while they are
-	/// published, since nothing else encodes them, and a broadcast source once
-	/// it shows a picture.
+	/// published, since without a relay they encode only while recorded, and
+	/// a broadcast source once it shows a picture.
 	pub fn target(&self, of: &Of) -> anyhow::Result<Target> {
 		let output = || {
 			self.output
 				.as_ref()
-				.context("nothing is encoded without --connect, so there is no past to replay")
+				.map(|_| &self.program)
+				.context("without --connect, nothing holds a past to replay")
 		};
 		let name = match of {
 			Of::Program => return Ok(output()?.program()),
