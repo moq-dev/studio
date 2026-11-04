@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_scene::browser::{Button, Input, Modifiers};
-use moq_scene::{Collection, Rect, Source};
+use moq_scene::{Collection, Crop, Rect, Source};
 
 /// How close in time and space a press must follow the last to count toward a
 /// double or triple click.
@@ -41,17 +41,24 @@ struct Capture {
 	page: String,
 	/// Where the pressed item places the page, since the same page can be in
 	/// several.
-	rect: Rect,
+	place: Place,
 	/// The buttons the page saw go down and not yet up.
 	held: Vec<Button>,
 }
 
-/// A point on one page, placed on the canvas at `rect`.
+/// A point on one page, placed on the canvas by `place`.
 struct Hit {
 	page: String,
-	rect: Rect,
+	place: Place,
 	x: i32,
 	y: i32,
+}
+
+/// What part of a page an item shows, and where on the canvas.
+#[derive(Clone, Copy)]
+struct Place {
+	rect: Rect,
+	crop: Crop,
 }
 
 impl Interact {
@@ -81,7 +88,7 @@ impl Interact {
 		// Where `pos` falls on the captured page, even off its edges.
 		let on_page = |capture: &Capture, pos: egui::Pos2| -> Option<(i32, i32)> {
 			let (x, y) = on_canvas(pos);
-			scale(collection, &capture.page, capture.rect, x, y)
+			scale(collection, &capture.page, capture.place, x, y)
 		};
 		let out = RefCell::new(Vec::new());
 		let send = |page: &str, input: Input| out.borrow_mut().push((page.to_string(), input));
@@ -167,13 +174,13 @@ impl Interact {
 					let target = match &self.captured {
 						Some(capture) => on_page(capture, pos).map(|(x, y)| Hit {
 							page: capture.page.clone(),
-							rect: capture.rect,
+							place: capture.place,
 							x,
 							y,
 						}),
 						None => hit(pos),
 					};
-					let Some(Hit { page, rect, x, y }) = target else {
+					let Some(Hit { page, place, x, y }) = target else {
 						if self.captured.is_none() {
 							self.blur(&send);
 						}
@@ -187,7 +194,7 @@ impl Interact {
 					}
 					let capture = self.captured.get_or_insert_with(|| Capture {
 						page: page.clone(),
-						rect,
+						place,
 						held: Vec::new(),
 					});
 					if !capture.held.contains(&button) {
@@ -374,29 +381,34 @@ fn page_at(collection: &Collection, scene: Option<&str>, x: f32, y: f32) -> Opti
 			}
 			// A clone shows its source's page, which runs under that name.
 			let page = collection.capture(&item.source);
-			let (x, y) = scale(collection, page, rect, x, y)?;
+			let place = Place {
+				rect,
+				crop: collection.crop(item),
+			};
+			let (x, y) = scale(collection, page, place, x, y)?;
 			Some(Hit {
 				page: page.to_string(),
-				rect,
+				place,
 				x,
 				y,
 			})
 		})
 }
 
-/// Canvas point (`x`, `y`) in the pixels of `page` placed at `rect`, even off
+/// Canvas point (`x`, `y`) in the pixels of `page` placed by `place`, even off
 /// the page's edges, if `page` is a browser source.
-fn scale(collection: &Collection, page: &str, rect: Rect, x: f32, y: f32) -> Option<(i32, i32)> {
+fn scale(collection: &Collection, page: &str, place: Place, x: f32, y: f32) -> Option<(i32, i32)> {
 	let Some(Source::Browser { width, height, .. }) = collection.sources.get(page) else {
 		return None;
 	};
+	let Place { rect, crop } = place;
 	if rect.width <= 0.0 || rect.height <= 0.0 {
 		return None;
 	}
-	Some((
-		((x - rect.x) / rect.width * *width as f32) as i32,
-		((y - rect.y) / rect.height * *height as f32) as i32,
-	))
+	// The crop's part of the page is stretched over the item.
+	let u = crop.left + (x - rect.x) / rect.width * (1.0 - crop.left - crop.right);
+	let v = crop.top + (y - rect.y) / rect.height * (1.0 - crop.top - crop.bottom);
+	Some(((u * *width as f32) as i32, (v * *height as f32) as i32))
 }
 
 fn button(button: egui::PointerButton) -> Option<Button> {
@@ -574,8 +586,33 @@ mod tests {
 		);
 
 		// A captured pointer maps onto its page past the edges.
-		assert_eq!(scale(&collection, "chat", corner, 1420.0, 280.0), Some((-100, 0)));
-		assert_eq!(scale(&collection, "chat", corner, 960.0, 540.0), Some((-560, 260)));
+		let place = Place {
+			rect: corner,
+			crop: Crop::default(),
+		};
+		assert_eq!(scale(&collection, "chat", place, 1420.0, 280.0), Some((-100, 0)));
+		assert_eq!(scale(&collection, "chat", place, 960.0, 540.0), Some((-560, 260)));
+
+		// A crop stretches what it leaves over the item: the source's right
+		// half, then the item's bottom half of that.
+		collection.top.clear();
+		collection.video.insert(
+			"chat".into(),
+			moq_scene::Video {
+				crop: Crop {
+					left: 0.5,
+					..Default::default()
+				},
+				..Default::default()
+			},
+		);
+		collection.scenes[0].items[1].visible = true;
+		collection.scenes[0].items[1].crop = Crop {
+			top: 0.5,
+			..Default::default()
+		};
+		assert_eq!(at(&collection, 1520.0, 280.0), Some(("chat".into(), 200, 400)));
+		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 300, 600)));
 	}
 
 	/// One frame of `events` over a preview showing the canvas at its own

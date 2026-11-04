@@ -130,6 +130,13 @@ impl Collection {
 		source.unwrap_or_default().iter().chain(&item.filters)
 	}
 
+	/// What `item` shows of its source's picture: its source's crop, then its
+	/// own.
+	pub fn crop(&self, item: &Item) -> Crop {
+		let source = self.video.get(&item.source).map(|video| video.crop);
+		source.unwrap_or_default().then(&item.crop)
+	}
+
 	/// Check what the types cannot: the canvas can be encoded, names are unique,
 	/// every item, clone, audio, and video entry names a source that exists,
 	/// and every crop and filter's settings are in range, each filter naming a

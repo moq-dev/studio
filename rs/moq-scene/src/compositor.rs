@@ -334,12 +334,10 @@ impl Draw<'_> {
 	fn prepare(&mut self, item: &Item) -> Option<Prepared> {
 		let collection = self.collection;
 		let picture = self.library.0.get(collection.capture(&item.source))?.picture.as_ref()?;
-		let video = collection.video.get(&item.source);
-		let crop = video.map_or(collection::Crop::default(), |video| video.crop);
 		let item = effect::Item {
 			picture,
 			rect: item.rect,
-			crop: crop.then(&item.crop),
+			crop: collection.crop(item),
 			filters: collection.filters(item).collect(),
 			blend: item.blend,
 		};
