@@ -61,8 +61,9 @@ function join(link: Link): () => void {
 
 	const renewal = Renew.follow(connection.origin, link.name, (jwt) => {
 		tokens.set([jwt]);
-		// So a reload rejoins with the newest token, after the link's has expired.
-		stored((storage) => storage.setItem(STORED, format({ ...link, jwt })));
+		// So joining again, or a reload, uses the newest token once the link's has expired.
+		link.jwt = jwt;
+		stored((storage) => storage.setItem(STORED, format(link)));
 	});
 	signals.cleanup(() => renewal.close());
 
