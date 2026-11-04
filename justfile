@@ -1,7 +1,8 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# The device and codec features off by default, which every check covers too.
-features := "moq-scene/capture,moq-studio/capture,moq-studio/openh264"
+# The device, codec, and browser features off by default, which every check
+# covers too.
+features := "moq-scene/capture,moq-studio/capture,moq-studio/openh264,moq-studio/cef"
 
 # List the available development commands.
 default:
@@ -44,8 +45,8 @@ fix:
     bun biome check --write .
     cargo fmt --all
 
-# Composite scenes and publish a program through wgpu on Mesa's software Vulkan
-# driver, so no GPU is needed.
+# Composite scenes, render browser sources, and publish a program through wgpu
+# on Mesa's software Vulkan driver, so no GPU is needed.
 render-sw:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -55,6 +56,9 @@ render-sw:
     export LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}"
     cargo nextest run --locked -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
     cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay) | test(=setup::tests::times_every_canvas)'
+    # CEF's browser process opens an X display even to paint offscreen.
+    xvfb=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#xvfb-run)
+    "$xvfb/bin/xvfb-run" -a cargo nextest run --locked -p moq-studio --features cef --run-ignored only -E 'binary(browser)'
 
 # Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock and bun.lock.
 upgrade-moq rev="origin/main":

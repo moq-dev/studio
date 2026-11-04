@@ -1,5 +1,6 @@
 //! The window: docked panels over the engine's state.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7,6 +8,7 @@ use std::time::Duration;
 use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use moq_scene::browser::Paint;
 use moq_scene::replay::Take;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
@@ -18,6 +20,7 @@ use crate::autosave::Conflict;
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
+use crate::interact::Interact;
 use crate::replay::{self, Of};
 use crate::snap::{self, Grab, Snap};
 
@@ -108,6 +111,10 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
+				interacting: false,
+				interact: Interact::default(),
+				previewed: false,
+				bound: BTreeMap::new(),
 				replay: Replay::default(),
 				guest: String::new(),
 				shown: None,
@@ -138,9 +145,15 @@ impl eframe::App for Studio {
 			egui::Panel::top("conflict").show(ui, |ui| self.panels.conflict(ui, conflict));
 		}
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
+		self.panels.previewed = false;
 		DockArea::new(&mut self.dock)
 			.style(Style::from_egui(ui.style()))
 			.show_inside(ui, &mut self.panels);
+		// A hidden preview hears no input, so it lets go of the pages, as
+		// turning Interact off does.
+		if !self.panels.previewed {
+			self.panels.let_go();
+		}
 	}
 }
 
@@ -203,6 +216,14 @@ struct Panels {
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
+	/// Whether the preview passes the mouse and keyboard to browser sources.
+	interacting: bool,
+	interact: Interact,
+	/// Whether this frame drew the preview, which a stacked tab can hide.
+	previewed: bool,
+	/// The page `interact` holds state for under each name, so one stopped or
+	/// restarted under it, as an edit or a reload does, is forgotten.
+	bound: BTreeMap<String, moq_scene::browser::Page>,
 	replay: Replay,
 	/// The name typed for the next guest.
 	guest: String,
@@ -373,9 +394,10 @@ fn dropped_message(dropped: usize) -> String {
 impl Panels {
 	/// The keyboard shortcuts, and the clipboard.
 	fn shortcuts(&mut self, ctx: &egui::Context) {
-		// A focused text field keeps its own undo, copy, and paste; any other
-		// focused widget, such as a slider, leaves them to the studio.
-		if ctx.text_edit_focused() {
+		// A focused text field, or a page the preview passes the keyboard to,
+		// keeps its own undo, copy, and paste; any other focused widget, such
+		// as a slider, leaves them to the studio.
+		if ctx.text_edit_focused() || self.interact.has_keyboard() {
 			return;
 		}
 		// Shift first, since the plain shortcut also matches with it held.
@@ -617,7 +639,39 @@ impl Panels {
 		self.report(result);
 	}
 
+	/// Let go of every page the preview passed input to.
+	fn let_go(&mut self) {
+		if self.interact.pages().next().is_none() {
+			return;
+		}
+		let engine = self.engine.clone();
+		let state = engine.state.lock().unwrap();
+		self.rebind(&state.sources);
+		deliver(&state.sources, self.interact.release());
+	}
+
+	/// Forget the pages `interact` holds that stopped or restarted, and note
+	/// the page under each name it newly holds.
+	fn rebind(&mut self, sources: &moq_scene::source::Sources) {
+		let held: BTreeSet<String> = self.interact.pages().map(str::to_string).collect();
+		self.bound.retain(|name, _| held.contains(name));
+		for name in held {
+			let current = sources.get(&name).and_then(Feed::page);
+			match (self.bound.get(&name), current) {
+				(Some(bound), Some(current)) if bound.same(current) => {}
+				(None, Some(current)) => {
+					self.bound.insert(name, current.clone());
+				}
+				_ => {
+					self.interact.forget(&name);
+					self.bound.remove(&name);
+				}
+			}
+		}
+	}
+
 	fn preview(&mut self, ui: &mut Ui) {
+		self.previewed = true;
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
@@ -627,6 +681,16 @@ impl Panels {
 				"Preview: {}",
 				state.compositor.preview_scene().unwrap_or("nothing")
 			));
+			let toggled = ui
+				.toggle_value(&mut self.interacting, "Interact")
+				.on_hover_text(
+					"Pass the mouse to the browser source under it, and the keyboard to the one last clicked",
+				)
+				.changed();
+			if toggled && !self.interacting {
+				self.rebind(&state.sources);
+				deliver(&state.sources, self.interact.release());
+			}
 			ui.separator();
 			let free = ui.ctx().format_modifiers(egui::Modifiers::COMMAND);
 			ui.checkbox(&mut self.snapping.on, "Snap").on_hover_text(format!(
@@ -641,6 +705,16 @@ impl Panels {
 					.suffix(" px"),
 			);
 		});
+		// Interacting, the pointer belongs to the pages rather than to arranging.
+		if self.interacting {
+			let image = picture(ui, self.preview.id, canvas, egui::Sense::hover()).rect;
+			let scene = state.compositor.preview_scene();
+			self.rebind(&state.sources);
+			let delivered = self.interact.update(ui, image, state.collection(), scene);
+			deliver(&state.sources, delivered);
+			self.rebind(&state.sources);
+			return;
+		}
 		let response = picture(ui, self.preview.id, canvas, egui::Sense::click_and_drag());
 		let result = self.arrange(ui, &mut state, &response, canvas);
 		drop(state);
@@ -1167,6 +1241,7 @@ impl Panels {
 					// A track can fail while its source still draws, such as on a GPU
 					// out of encode sessions, so its reason is spelled out. A clone
 					// publishes none: it shows its source's capture, not a feed of its own.
+					// Nor does a page, which shows how it paints instead.
 					match state.sources.get(name).and_then(Feed::track) {
 						Some(Status::Failed(reason)) => {
 							ui.colored_label(ui.visuals().error_fg_color, format!("track failed: {reason}"));
@@ -1177,9 +1252,19 @@ impl Panels {
 								status(ui, &track);
 							});
 						}
-						None => {
-							ui.label("");
-						}
+						None => match feed.and_then(Feed::page).and_then(|page| page.paint()) {
+							Some(Paint::Gpu) => {
+								ui.weak("GPU").on_hover_text("The page is copied on the GPU");
+							}
+							Some(Paint::Cpu) => {
+								ui.colored_label(DEGRADED, "CPU").on_hover_text(
+									"The page is uploaded from memory every frame: its GPU process or this device cannot share textures",
+								);
+							}
+							None => {
+								ui.label("");
+							}
+						},
 					}
 					let places = collection
 						.layers()
@@ -1675,10 +1760,25 @@ impl Panels {
 					.map(|(name, _)| name.clone())
 					.collect()
 			};
-			(
-				named(|source| source.has_video() && !matches!(source, Source::Image { .. } | Source::Color { .. })),
-				named(|source| matches!(source, Source::Replay)),
-			)
+			// What a source shows, a clone its source's, has a past only if
+			// something encodes it: not an image, a color, or a web page.
+			let collection = state.collection();
+			let pictures = collection
+				.sources
+				.keys()
+				.filter(|name| {
+					let shown = collection.sources.get(collection.capture(name));
+					shown.is_some_and(|source| {
+						source.has_video()
+							&& !matches!(
+								source,
+								Source::Image { .. } | Source::Color { .. } | Source::Browser { .. }
+							)
+					})
+				})
+				.cloned()
+				.collect::<Vec<_>>();
+			(pictures, named(|source| matches!(source, Source::Replay)))
 		};
 		let panel = &mut self.replay;
 		if panel.into.as_ref().is_none_or(|into| !replays.contains(into)) {
@@ -2287,16 +2387,43 @@ fn add(
 	);
 	let canvas = state.collection().canvas;
 	let place = source.has_video();
+	// A page, or a clone of one, lands at the page's size, pixel for pixel;
+	// anything else fills the canvas.
+	let shown = match &source {
+		Source::Clone { source } => state.collection().sources.get(source),
+		source => Some(source),
+	};
+	let rect = match shown {
+		Some(Source::Browser { width, height, .. }) => Rect {
+			x: 0.0,
+			y: 0.0,
+			width: *width as f32,
+			height: *height as f32,
+		},
+		_ => Rect::fill(&canvas),
+	};
 	edit(state, format!("Add `{name}`"), None, |draft| {
 		draft.set_source(&name, Some(source))?;
 		draft.set_video(&name, video)?;
 		if place && let Some(layer) = layer {
 			let index = draft.collection().items(&layer).map_or(0, Vec::len);
-			draft.insert_item(&layer, index, Item::new(name.clone(), Rect::fill(&canvas)))?;
+			draft.insert_item(&layer, index, Item::new(name.clone(), rect))?;
 		}
 		Ok(())
 	})?;
 	Ok(name)
+}
+
+/// Hand each input to its page.
+fn deliver(
+	sources: &moq_scene::source::Sources,
+	inputs: impl IntoIterator<Item = (String, moq_scene::browser::Input)>,
+) {
+	for (name, input) in inputs {
+		if let Some(page) = sources.get(&name).and_then(|feed| feed.page()) {
+			page.send(input);
+		}
+	}
 }
 
 /// A join link on screen.
@@ -2541,6 +2668,7 @@ fn describe(source: &Source) -> String {
 		Source::Image { path } => format!("image: {}", path.display()),
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
+		Source::Browser { url, width, height } => format!("browser: {url} ({width}x{height})"),
 		Source::Clone { source } => format!("clone of {source}"),
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
@@ -2592,18 +2720,24 @@ fn meter(ui: &mut Ui, level: moq_audio::Level) {
 struct AddSource {
 	name: String,
 	kind: Kind,
-	/// A path, broadcast path, or device id, depending on the kind.
+	/// A path, broadcast path, url, or device id, depending on the kind.
 	value: String,
 	color: Color32,
+	/// A browser source's page size.
+	width: u32,
+	height: u32,
 }
 
 impl Default for AddSource {
 	fn default() -> Self {
+		let canvas = moq_scene::Canvas::default();
 		Self {
 			name: String::new(),
 			kind: Kind::default(),
 			value: String::new(),
 			color: Color32::WHITE,
+			width: canvas.width,
+			height: canvas.height,
 		}
 	}
 }
@@ -2619,12 +2753,13 @@ enum Kind {
 	Window,
 	Microphone,
 	SystemAudio,
+	Browser,
 	Replay,
 	Lut,
 }
 
 impl Kind {
-	const ALL: [Self; 10] = [
+	const ALL: [Self; 11] = [
 		Self::Color,
 		Self::Image,
 		Self::Broadcast,
@@ -2633,6 +2768,7 @@ impl Kind {
 		Self::Window,
 		Self::Microphone,
 		Self::SystemAudio,
+		Self::Browser,
 		Self::Replay,
 		Self::Lut,
 	];
@@ -2647,6 +2783,7 @@ impl Kind {
 			Self::Window => "Window",
 			Self::Microphone => "Microphone",
 			Self::SystemAudio => "System audio",
+			Self::Browser => "Browser",
 			Self::Replay => "Replay",
 			Self::Lut => "LUT",
 		}
@@ -2660,6 +2797,7 @@ impl Kind {
 			Self::Lut => Some(".cube file"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
+			Self::Browser => Some("url"),
 			Self::Camera | Self::Display | Self::Microphone => Some("id (empty for the default)"),
 		}
 	}
@@ -2685,6 +2823,15 @@ impl AddSource {
 			if let Some(label) = self.kind.value() {
 				ui.label(label);
 				ui.text_edit_singleline(&mut self.value);
+				ui.end_row();
+			}
+			if self.kind == Kind::Browser {
+				ui.label("Size");
+				ui.horizontal(|ui| {
+					ui.add(egui::DragValue::new(&mut self.width).range(1..=4096));
+					ui.label("x");
+					ui.add(egui::DragValue::new(&mut self.height).range(1..=4096));
+				});
 				ui.end_row();
 			}
 			if self.kind == Kind::Color {
@@ -2713,6 +2860,11 @@ impl AddSource {
 			Kind::Window => Source::Window { id: value },
 			Kind::Microphone => Source::Microphone { id },
 			Kind::SystemAudio => Source::SystemAudio,
+			Kind::Browser => Source::Browser {
+				url: value,
+				width: self.width,
+				height: self.height,
+			},
 			Kind::Replay => Source::Replay,
 		})
 	}
