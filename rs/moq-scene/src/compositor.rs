@@ -8,7 +8,7 @@ use kio::clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
-use crate::collection::{self, Canvas, Collection, Item, Layer as Place, Source};
+use crate::collection::{Canvas, Collection, Item, Layer as Place, Source};
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::source::{self, Sources};
 
