@@ -646,7 +646,7 @@ mod tests {
 	}
 
 	/// A collection and its history as the studio holds them, which can be
-	/// told to refuse a reload as the studio refuses a new canvas.
+	/// told to refuse a reload as the studio refuses a canvas the GPU cannot hold.
 	struct Doc {
 		collection: Collection,
 		history: History,
@@ -978,7 +978,8 @@ mod tests {
 		assert_eq!(running.text(), created);
 		assert_eq!(read(&path), "not a scene file");
 
-		// One the studio refuses, as it does a new canvas, is held the same way.
+		// One the studio refuses, as it does a canvas the GPU cannot hold, is held
+		// the same way.
 		running.doc.lock().unwrap().refuse = true;
 		std::fs::write(&path, HAND_WRITTEN).unwrap();
 		kio::clock::sleep(POLL + Duration::from_millis(100)).await;
