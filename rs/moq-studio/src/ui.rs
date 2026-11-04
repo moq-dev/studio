@@ -1276,9 +1276,9 @@ impl Panels {
 						feed.and_then(|feed| feed.stalled(now)),
 					) {
 						(Some(err), _, _) => status(ui, &Status::Failed(err.to_string())),
-						(None, _, Some(since)) => {
+						(None, _, Some(stall)) => {
 							ui.colored_label(DEGRADED, "stalled")
-								.on_hover_text(format!("no new picture for {:.0} s", since.as_secs_f64()));
+								.on_hover_text(health::without(stall));
 						}
 						(None, Some(feed), None) => status(ui, &feed.status()),
 						(None, None, None) => status(ui, &Status::Starting),

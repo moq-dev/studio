@@ -94,7 +94,7 @@ Every panel is a tab you can drag, split, or stack.
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
@@ -534,8 +534,9 @@ The Health panel grades the stream every second on the thresholds moq's
 `hang::health` shares with the rest of the stack, and lists each problem
 with its cause in plain words: a relay is unreachable, the uplink is
 congested or losing packets, the relay is far away, the encoder is behind or
-stuck, a camera or broadcast source on program stalled, or viewers are late,
-stalling, or cannot decode a track. A relay lost while the other serves is
+stuck, a source stalled (a camera or broadcast the program draws, or an
+unmuted microphone or system audio), or viewers are late, stalling, or cannot
+decode a track. A relay lost while the other serves is
 degraded, since viewers have nothing left to fall back to; with none serving
 it is unhealthy. Below that it shows:
 
