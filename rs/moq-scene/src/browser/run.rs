@@ -199,10 +199,13 @@ impl Instance {
 		let routes = Arc::new(Mutex::new(Routes::default()));
 		let commands = writer(commands, routes.clone()).map_err(|err| failed("cannot start the page writer", err))?;
 		let reader = {
-			let (helper, commands, routes) = (helper.clone(), commands.clone(), routes.clone());
+			// Not the helper, whose hold on this instance would keep it running
+			// once every other owner is gone.
+			let (device, queue) = (helper.device.clone(), helper.queue.clone());
+			let (commands, routes) = (commands.clone(), routes.clone());
 			std::thread::Builder::new()
 				.name("browser-events".into())
-				.spawn(move || read(&helper, process, &events, &commands, &routes))
+				.spawn(move || read(&device, &queue, process, &events, &commands, &routes))
 				.map_err(|err| failed("cannot start the page reader", err))?
 		};
 		Ok(Self {
@@ -333,7 +336,23 @@ fn writer(channel: Channel, routes: Arc<Mutex<Routes>>) -> std::io::Result<mpsc:
 	std::thread::Builder::new()
 		.name("browser-commands".into())
 		.spawn(move || {
+			// Pages whose Open is written and whose Close is not, since a page
+			// closed past the backlog closes only after it opens.
+			let mut open = std::collections::HashSet::new();
 			'write: for command in queue {
+				match &command {
+					Command::Open(id, _) => {
+						let mut routes = routes.lock().unwrap();
+						// Closed while its Open waited: it never opens.
+						if let Some(at) = routes.closing.iter().position(|closing| closing == id) {
+							routes.closing.swap_remove(at);
+							continue;
+						}
+						open.insert(*id);
+					}
+					Command::Close(id) => _ = open.remove(id),
+					_ => {}
+				}
 				if channel.send(&command, &[]).is_err() {
 					break;
 				}
@@ -341,7 +360,15 @@ fn writer(channel: Channel, routes: Arc<Mutex<Routes>>) -> std::io::Result<mpsc:
 				let (closing, pages): (Vec<Id>, Vec<Page>) = {
 					let mut routes = routes.lock().unwrap();
 					let pages = routes.pages.values().map(|route| route.page.clone()).collect();
-					(std::mem::take(&mut routes.closing), pages)
+					let mut closing = Vec::new();
+					routes.closing.retain(|id| match open.remove(id) {
+						true => {
+							closing.push(*id);
+							false
+						}
+						false => true,
+					});
+					(closing, pages)
 				};
 				for id in closing {
 					if channel.send(&Command::Close(id), &[]).is_err() {
@@ -374,13 +401,14 @@ fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 /// Deliver the helper's events until it exits or breaks the protocol, then
 /// stop it and every page still open, saying why.
 fn read(
-	helper: &Helper,
+	device: &wgpu::Device,
+	queue: &wgpu::Queue,
 	mut process: Process,
 	events: &Channel,
 	commands: &mpsc::SyncSender<Command>,
 	routes: &Mutex<Routes>,
 ) {
-	let reason = match deliver(helper, events, commands, routes) {
+	let reason = match deliver(device, queue, events, commands, routes) {
 		// Gone, or exiting: wait for it, so the next helper finds the profile
 		// free.
 		Ok(()) => match process.exited() {
@@ -402,7 +430,8 @@ fn read(
 /// Route the helper's events to their pages until it closes the socket, or
 /// fail with why it cannot go on.
 fn deliver(
-	helper: &Helper,
+	device: &wgpu::Device,
+	queue: &wgpu::Queue,
 	events: &Channel,
 	commands: &mpsc::SyncSender<Command>,
 	routes: &Mutex<Routes>,
@@ -417,17 +446,13 @@ fn deliver(
 			Err(err) => return Err(format!("the browser process's socket: {err}")),
 		};
 		let (id, texture, paint) = match event {
-			Event::Texture(id, texture) => (id, super::import::texture(helper, &texture, fds), Paint::Gpu),
+			Event::Texture(id, texture) => (id, super::import::texture(device, queue, &texture, fds), Paint::Gpu),
 			Event::Pixels {
 				page,
 				width,
 				height,
 				data,
-			} => (
-				page,
-				super::upload(&helper.device, &helper.queue, width, height, &data),
-				Paint::Cpu,
-			),
+			} => (page, super::upload(device, queue, width, height, &data), Paint::Cpu),
 			Event::Audio(id, samples) => {
 				routes.lock().unwrap().play(id, &samples);
 				continue;
@@ -492,31 +517,53 @@ mod tests {
 		drop(theirs);
 	}
 
-	/// Each write makes room for an owed release and a page closed past the
-	/// backlog, so both reach the helper once it reads again, with nothing
-	/// newer to carry them.
+	/// Each write makes room for an owed release, so it reaches the page once
+	/// the helper reads again, with no newer input to carry it.
 	#[test]
-	fn the_writer_delivers_owed_releases_and_closes() {
+	fn the_writer_delivers_owed_releases() {
 		let (ours, theirs) = UnixStream::pair().unwrap();
-		let (page, commands, routes) = routed(ours);
+		let (page, commands, _routes) = routed(ours);
 		let release = Input::Key {
 			code: 65,
 			down: false,
 			modifiers: Modifiers::default(),
 		};
 		page.state.lock().unwrap().owed.push_back(release.clone());
-		routes.lock().unwrap().closing.push(7);
 		commands.send(Command::Painted).unwrap();
 
 		let helper = Channel::new(theirs);
 		assert!(matches!(helper.recv::<Command>().unwrap(), Some((Command::Painted, _))));
-		assert!(matches!(
-			helper.recv::<Command>().unwrap(),
-			Some((Command::Close(7), _))
-		));
 		let Some((Command::Input(0, input), _)) = helper.recv().unwrap() else {
 			panic!("the owed release never came");
 		};
 		assert_eq!(input, release);
+	}
+
+	/// A page closed past the backlog closes once the next write makes room,
+	/// and never ahead of its Open: one closed while its Open waited never
+	/// opens.
+	#[test]
+	fn a_deferred_close_follows_its_open() {
+		let (ours, theirs) = UnixStream::pair().unwrap();
+		let routes = Arc::new(Mutex::new(Routes::default()));
+		let commands = writer(Channel::new(ours), routes.clone()).unwrap();
+		let helper = Channel::new(theirs);
+
+		routes.lock().unwrap().closing.push(2);
+		commands.send(Command::Open(1, Open::default())).unwrap();
+		commands.send(Command::Open(2, Open::default())).unwrap();
+		assert!(matches!(
+			helper.recv::<Command>().unwrap(),
+			Some((Command::Open(1, _), _))
+		));
+
+		routes.lock().unwrap().closing.push(1);
+		commands.send(Command::Painted).unwrap();
+		assert!(matches!(helper.recv::<Command>().unwrap(), Some((Command::Painted, _))));
+		assert!(matches!(
+			helper.recv::<Command>().unwrap(),
+			Some((Command::Close(1), _))
+		));
+		assert!(routes.lock().unwrap().closing.is_empty());
 	}
 }
