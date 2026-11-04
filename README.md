@@ -127,10 +127,10 @@ comes along, renamed if its name is taken. Copied filters paste onto the
 selected source or item, after its own. The clipboard holds text in the scene
 file's format.
 
-A broadcast source subscribes through the same relay connections. It plays the
-newest instance of its broadcast through either relay, preferring the first
-relay among routes to the same instance, so a publisher restarted behind only
-the failover replaces the first relay's copy. It plays the
+A broadcast source subscribes through the same relay connections. It plays its
+broadcast through the first relay while that relay has a route to it, and
+through the failover otherwise, so a publisher restarted behind only the
+failover replaces the first relay's copy once that copy ends. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
@@ -418,7 +418,7 @@ it is unhealthy. Below that it shows:
   read them, so most show "unknown". In a cluster, a relay forwarding the
   stream to another counts as one session. Two relays whose stats use the
   same node name publish them at the same path, so only one of them counts:
-  the newer instance, or the first relay's when they are one instance.
+  the first relay's while it has them.
 - **Tracks**: each track's bitrate and frame rate, and, from viewers that
   report, the lowest bitrate any received, its worst grade, and the latency
   from the program clock to the slowest viewer. The program's tracks come
