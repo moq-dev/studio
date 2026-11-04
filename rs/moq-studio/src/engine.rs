@@ -967,11 +967,22 @@ impl Engine {
 			let Ok(timestamp) = timestamp else { continue };
 			let data: Bytes = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
 			let frame = moq_audio::Frame::new(data, timestamp);
-			// The recording's copy encodes only while a recording reads it.
+			// The recording's copy encodes only while a recording reads it, and
+			// marks the gap as the last one stops, so the next starts on the
+			// program clock rather than where the samples left off.
 			let recorded = audio
 				.recording
 				.as_ref()
 				.is_some_and(|recording| recording.demand().wanted().is_some());
+			if std::mem::replace(&mut audio.recorded, recorded)
+				&& !recorded && let Some(recording) = audio.recording.as_mut()
+				&& let Err(err) = recording.discontinuity()
+			{
+				self.stats.fail_audio(err);
+				if let Some(producer) = audio.recording.take() {
+					producer.abort(moq_net::StreamError::Internal.into());
+				}
+			}
 			for (producer, wanted) in [(&mut audio.program, true), (&mut audio.recording, recorded)] {
 				let Some(publish) = producer.as_mut().filter(|_| wanted) else {
 					continue;
@@ -993,6 +1004,8 @@ impl Engine {
 struct Audio {
 	program: Option<moq_audio::encode::Producer>,
 	recording: Option<moq_audio::encode::Producer>,
+	/// Whether the recording's copy was written last, while a recording read it.
+	recorded: bool,
 }
 
 /// The relay connections the program goes live on, the preferred first, and
@@ -1195,6 +1208,7 @@ async fn publish(
 			audio: Audio {
 				program: Some(audio),
 				recording: Some(recorded_audio),
+				recorded: false,
 			},
 			clock,
 			health,
