@@ -18,6 +18,16 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   to it a second after you stop editing, with no save step.
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
+- `--failover <url>` publishes the same broadcast to a second relay under the
+  same publisher epoch, so a viewer linked to both resumes mid-group from it
+  when the first fails. Both relays must speak the one `--connect-version`,
+  which must carry publisher epochs (`moq-lite-07-wip` today, which a relay
+  accepts only when configured to), or the studio refuses to start; it also
+  refuses a fixed `--connect-bind` port, since each relay's connection binds
+  its own. Its credential rides its URL's `?jwt=`; `--connect-token` goes to
+  the first relay only. The stream's tracks claim their bitrate on the first
+  relay's link alone, so only that link is probed toward the stream's rate;
+  no encoder adapts to either estimate.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
   On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
@@ -46,8 +56,9 @@ the studio. It runs three checks, and a check that fails shows its reason:
 - **Uplink:** with `--connect`, setup publishes a probe at the `--broadcast`
   path for about six seconds and subscribes to it through the relay, so the
   relay pulls it. The congestion controller's send-rate estimate is the
-  measurement. A connection that reports no estimate, such as WebSocket, fails
-  the check.
+  measurement. With `--failover`, only the `--connect` relay is measured,
+  since only its link is probed toward the stream's rate. A connection that
+  reports no estimate, such as WebSocket, fails the check.
 
 Setup then proposes a scene named Main and a canvas, explaining each choice.
 The scene has the first display filling the canvas, the first camera in the
@@ -83,7 +94,7 @@ Every panel is a tab you can drag, split, or stack.
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
 | Output | Set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
-| Health | See how the stream reaches viewers, track by track, and the cause of each problem. |
+| Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
@@ -114,7 +125,10 @@ comes along, renamed if its name is taken. Copied filters paste onto the
 selected source or item, after its own. The clipboard holds text in the scene
 file's format.
 
-A broadcast source subscribes through the same relay connection, plays the
+A broadcast source subscribes through the same relay connections. It plays the
+newest instance of its broadcast through either relay, preferring the first
+relay among routes to the same instance, so a publisher restarted behind only
+the failover replaces the first relay's copy. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
@@ -326,19 +340,24 @@ compositor uploads.
 
 The Health panel grades the stream every second on the thresholds moq's
 `hang::health` shares with the rest of the stack, and lists each problem
-with its cause in plain words: the relay is unreachable, the uplink is
+with its cause in plain words: a relay is unreachable, the uplink is
 congested or losing packets, the relay is far away, the encoder is behind or
 stuck, a camera or broadcast source on program stalled, or viewers are late,
-stalling, or cannot decode a track. Below that it shows:
+stalling, or cannot decode a track. A relay lost while the other serves is
+degraded, since viewers have nothing left to fall back to; with none serving
+it is unhealthy. Below that it shows:
 
-- **Uplink**: the round trip to the relay, the bandwidth the connection
-  estimates it can carry, the media every track writes, and the share lost and
-  resent. Loss and headroom are graded only while someone watches, since the
-  relay pulls nothing otherwise.
-- **Watching**: the sessions subscribed to the broadcast, from the relay's
+- **Relays**: each relay's state, and the protocol its session negotiated.
+- **Uplink**: the round trip to the first connected relay, the bandwidth the
+  connection estimates it can carry, the media every track writes, and the
+  share lost and resent. Loss and headroom are graded only while someone
+  watches, since the relay pulls nothing otherwise.
+- **Watching**: the sessions subscribed to the broadcast, from the relays'
   `.stats` broadcasts. A relay shares those only with a connection allowed to
   read them, so most show "unknown". In a cluster, a relay forwarding the
-  stream to another counts as one session.
+  stream to another counts as one session. Two relays whose stats use the
+  same node name publish them at the same path, so only one of them counts:
+  the newer instance, or the first relay's when they are one instance.
 - **Tracks**: each track's bitrate and frame rate, and, from viewers that
   report, the lowest bitrate any received, its worst grade, and the latency
   from the program clock to the slowest viewer. Latency compares the two
