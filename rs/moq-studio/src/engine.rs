@@ -23,6 +23,7 @@ use std::time::Duration;
 use anyhow::Context;
 use bytes::Bytes;
 use kio::clock::Instant;
+use moq_scene::publish::Encoding;
 use moq_scene::source::{self, Driver, Sources};
 use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
@@ -411,6 +412,10 @@ pub struct Engine {
 	pub room: Option<Arc<crate::guests::Room>>,
 	/// Keeps broadcast sources' origin open when no connection holds it.
 	_origin: Option<moq_net::origin::Producer>,
+	/// Set by [`stop`](Self::stop), which ends the program clock.
+	stopped: AtomicBool,
+	/// The program clock's thread, which [`stop`](Self::stop) waits on.
+	program: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 /// The audio the program publishes.
@@ -514,6 +519,8 @@ impl Engine {
 			output,
 			room,
 			_origin: origin,
+			stopped: AtomicBool::new(false),
+			program: Mutex::default(),
 		});
 		let (video, audio, clock, publisher) = match publish {
 			Some(Publish {
@@ -535,9 +542,10 @@ impl Engine {
 			None => Duration::ZERO,
 		};
 		let program = engine.clone();
-		clocked("program".into(), async move || {
+		let thread = clocked("program".into(), async move || {
 			program.run_program(start, epoch, video).await
 		})?;
+		*engine.program.lock().unwrap() = Some(thread);
 		let mix = engine.clone();
 		clocked("audio".into(), async move || mix.run_audio(start, epoch, audio).await)?;
 		let save = engine.clone();
@@ -551,6 +559,20 @@ impl Engine {
 		}
 
 		Ok(engine)
+	}
+
+	/// Stop the program clock, then wait for each rendition's encoder to
+	/// publish the copies on their way to it and what it still holds, and to
+	/// end its video track, so quitting loses none of the program's last
+	/// pictures.
+	pub fn stop(&self) {
+		self.stopped.store(true, Ordering::Relaxed);
+		let thread = self.program.lock().unwrap().take();
+		if let Some(thread) = thread
+			&& thread.join().is_err()
+		{
+			tracing::error!("the program thread panicked");
+		}
 	}
 
 	/// Write the collection and its history to their files unless they
@@ -626,6 +648,9 @@ impl Engine {
 	/// drawn at and opens another, since a track never changes what it
 	/// carries. Drawing outlives the encoder: a failed output stops copying the
 	/// program, and the preview and program keep moving.
+	///
+	/// Runs until the studio [stops](Self::stop), and returns once every
+	/// rendition's encode thread has finished its track.
 	async fn run_program(&self, start: Instant, epoch: Duration, video: Option<(Renditions, Rendition)>) {
 		let (renditions, mut rendition) = video.unzip();
 		let mut canvas = self.state.lock().unwrap().compositor.canvas();
@@ -646,6 +671,21 @@ impl Engine {
 
 		loop {
 			let tick = clock.tick().await;
+			if self.stopped.load(Ordering::Relaxed) {
+				// Without a sender, each encoder publishes what it was sent and
+				// still holds, then finishes its track.
+				ending.extend(rendition.take().map(Rendition::end));
+				for thread in ending {
+					if thread.join().is_err() {
+						tracing::error!("an encode thread panicked");
+					}
+				}
+				// It holds the threads of the renditions it waits on.
+				if let Some((_, probe)) = probing {
+					let _ = probe.join();
+				}
+				return;
+			}
 			let (program, drawn) = {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
@@ -1128,14 +1168,15 @@ fn encode(
 	rendition: u64,
 	opened: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 	video: mpsc::Receiver<Video>,
-	mut producer: moq_video::encode::Producer,
+	producer: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
 	zero_copy: bool,
 ) {
-	let mut encoder = match moq_video::encode::Encoder::new(&config) {
+	let mut track = Encoding::new(producer);
+	let encoder = match moq_video::encode::Encoder::new(&config) {
 		Ok(encoder) => encoder,
 		Err(err) => {
-			producer.abort(moq_net::StreamError::Internal.into());
+			track.abort(moq_net::StreamError::Internal.into());
 			let err = anyhow::Error::new(err).context("video encoder");
 			stats.fail_video(format!("{err:#}"));
 			let _ = opened.send(Err(err));
@@ -1145,33 +1186,40 @@ fn encode(
 	stats.opened_encoder(rendition, encoder.name());
 	let _ = opened.send(Ok(()));
 
-	let result = encode_frames(stats, video, &mut producer, &mut encoder, zero_copy).and_then(|()| {
-		producer.finish()?;
-		Ok(())
-	});
-	if let Err(err) = result {
-		stats.fail_video(format!("{err:#}"));
-		producer.abort(moq_net::StreamError::Internal.into());
+	let encoded = track
+		.open(encoder)
+		.context("video encoder")
+		.and_then(|()| encode_frames(stats, video, &mut track, zero_copy));
+	match encoded {
+		// Publishes what the encoder still holds before the track ends, so a
+		// rendition's last pictures are not lost to a resize or to quitting. A
+		// failure aborts it.
+		Ok(()) => {
+			if let Err(err) = track.finish() {
+				stats.fail_video(format!("{err:#}"));
+			}
+		}
+		Err(err) => {
+			stats.fail_video(format!("{err:#}"));
+			track.abort(moq_net::StreamError::Internal.into());
+		}
 	}
 }
 
 fn encode_frames(
 	stats: &Stats,
 	video: mpsc::Receiver<Video>,
-	producer: &mut moq_video::encode::Producer,
-	encoder: &mut moq_video::encode::Encoder,
+	track: &mut Encoding,
 	zero_copy: bool,
 ) -> anyhow::Result<()> {
-	let mut paused = false;
-
 	while let Ok(video) = video.recv() {
 		let pending = match video {
 			Video::Frame(pending) => pending,
 			// Marks the gap, so a viewer arriving during it is not served the
-			// last group before it as if it were live.
+			// last group before it as if it were live, and one arriving after it
+			// starts from a keyframe.
 			Video::Pause => {
-				producer.discontinuity().context("video")?;
-				paused = true;
+				track.pause().context("video")?;
 				continue;
 			}
 			Video::Failed(err) => return Err(err).context("copying the program"),
@@ -1186,15 +1234,8 @@ fn encode_frames(
 			stats.read_back.fetch_add(1, Ordering::Relaxed);
 		}
 
-		// A viewer arriving after a break starts from a keyframe rather than
-		// waiting out the rest of a group nobody received the start of.
-		if std::mem::take(&mut paused) {
-			encoder.cut().context("video encoder")?;
-		}
-
 		let start = Instant::now();
-		let encoded = encoder.encode(&frame).context("video encoder")?;
-		producer.publish(&encoded).context("video")?;
+		track.encode(&frame).context("video")?;
 		stats
 			.encode_us
 			.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -1231,7 +1272,7 @@ fn spawn(driver: Driver) {
 		}
 	});
 	match started {
-		Ok(()) => {
+		Ok(_) => {
 			if let Err(mpsc::SendError(driver)) = handoff.send(driver) {
 				driver.fail("the source thread stopped");
 			}
@@ -1242,11 +1283,11 @@ fn spawn(driver: Driver) {
 
 /// Start a thread called `name` that runs `task` with its own clock and IO,
 /// returning why if either cannot start.
-fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::Result<()> {
+fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::Result<std::thread::JoinHandle<()>> {
 	// The thread starts before its runtime is built and handed over, since a
 	// runtime dropped in the async caller, as a refused spawn would, panics.
 	let (handoff, received) = mpsc::sync_channel::<tokio::runtime::Runtime>(1);
-	std::thread::Builder::new()
+	let thread = std::thread::Builder::new()
 		.name(name.clone())
 		.spawn(move || {
 			if let Ok(runtime) = received.recv() {
@@ -1262,7 +1303,7 @@ fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::R
 		runtime.shutdown_background();
 		anyhow::bail!("the {name} thread stopped");
 	}
-	Ok(())
+	Ok(thread)
 }
 
 #[cfg(test)]
@@ -1604,6 +1645,21 @@ mod tests {
 			.expect("the clip saves")
 			.expect("a clip");
 		assert_eq!(clip, dir.path().join("show-clip-1.mp4"));
+
+		// Quitting ends the program's video cleanly once the encoder published
+		// what it was handed, rather than leaving viewers a dropped track.
+		let mut track = broadcast.track(&resized).unwrap().subscribe(None).await.unwrap();
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		kio::clock::timeout(TIMEOUT, async {
+			while let Some(mut group) = track.recv_group().await.expect("the video finishes") {
+				while group.read_frame().await.expect("the video finishes").is_some() {}
+			}
+		})
+		.await
+		.expect("the video ends");
+		let failed = engine.stats.error();
+		assert!(failed.is_none(), "{failed:?}");
 	}
 
 	/// With a failover relay, both relays route the program under its one
