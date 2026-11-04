@@ -93,7 +93,6 @@ repository.
 - [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio get their own tracks, for isolated recording and replay
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
-- [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
 - [Keyframes](/quest/m0/animation.md) - keyframed item properties with easing, starting when their scene goes on program
 - [Media file source](/quest/m0/media-file.md) - a local video or audio file plays as a source, looping or from the start on demand
 - [Stinger transitions](/quest/m0/stinger.md) - a clip played over the program that switches scenes at its cut point

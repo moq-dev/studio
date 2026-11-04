@@ -3,9 +3,10 @@
 //!
 //! A recording reads the studio's broadcast the way a relay viewer does, so it
 //! shares the live encoders and starts and stops without touching what the
-//! relay serves. Each file is an MP4 that plays while it grows, so a crash
-//! still leaves a playable file, and becomes a regular MP4 when the recording
-//! stops.
+//! relay serves, and each source's track from the studio's local broadcast,
+//! which its reading keeps encoding. Each file is an MP4 that plays while it
+//! grows, so a crash still leaves a playable file, and becomes a regular MP4
+//! when the recording stops.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -29,7 +30,8 @@ pub const MAX_DELAY: Duration = Duration::from_secs(2);
 
 /// Records the program into a directory, one recording at a time.
 pub struct Recorder {
-	source: moq_mux::Source,
+	program: moq_mux::Source,
+	sources: moq_mux::Source,
 	dir: PathBuf,
 	/// Each file's name starts with this: the scene file's.
 	name: String,
@@ -89,18 +91,20 @@ pub struct FileStatus {
 }
 
 impl Recorder {
-	/// Record `source`, the studio's broadcast, into `dir`, naming each file
-	/// after the `scenes` file.
+	/// Record `program`, the studio's broadcast, and from `sources`, the local
+	/// one, each source's own track, into `dir`, naming each file after the
+	/// `scenes` file.
 	///
 	/// Call inside the tokio runtime the recordings write on.
-	pub fn new(source: moq_mux::Source, dir: &Path, scenes: &Path) -> anyhow::Result<Self> {
+	pub fn new(program: moq_mux::Source, sources: moq_mux::Source, dir: &Path, scenes: &Path) -> anyhow::Result<Self> {
 		let name = scenes
 			.file_stem()
 			.context("the scene file has no name")?
 			.to_string_lossy()
 			.into_owned();
 		Ok(Self {
-			source,
+			program,
+			sources,
 			dir: std::path::absolute(dir)?,
 			name,
 			runtime: tokio::runtime::Handle::try_current().context("not inside a tokio runtime")?,
@@ -139,7 +143,8 @@ impl Recorder {
 		let (finished, done) = watch::channel(false);
 
 		let run = Run {
-			source: self.source.clone(),
+			program: self.program.clone(),
+			sources: self.sources.clone(),
 			dir: self.dir.clone(),
 			stem,
 			files: files.clone(),
@@ -245,7 +250,8 @@ impl File {
 
 /// One recording, running on the runtime.
 struct Run {
-	source: moq_mux::Source,
+	program: moq_mux::Source,
+	sources: moq_mux::Source,
 	dir: PathBuf,
 	/// Each file's name starts with this.
 	stem: String,
@@ -296,7 +302,7 @@ impl Run {
 		// A catalog that fails ends following it, without stopping the files:
 		// each reads the same catalog, and its outcome says why.
 		let mut catalog = tokio::select! {
-			catalog = self.source.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => match catalog {
+			catalog = self.sources.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => match catalog {
 				Ok(catalog) => catalog,
 				Err(_) => return Ok(()),
 			},
@@ -401,7 +407,10 @@ impl Run {
 
 	/// Write the program, or the source named, into `file`.
 	fn spawn(&self, source: Option<String>, entry: Arc<File>, file: tokio::fs::File, writers: &mut Writers) {
-		let broadcast = self.source.clone();
+		let broadcast = match source {
+			Some(_) => self.sources.clone(),
+			None => self.program.clone(),
+		};
 		let asked = self.stop.subscribe();
 		let closing = self.closing.clone();
 		writers.spawn(async move {
@@ -640,7 +649,7 @@ impl Stream for Listing {
 				return Poll::Ready(Ok(None));
 			};
 			let listing = match &self.name {
-				None => Some(studio.media()),
+				None => Some(canvas(studio.media())),
 				Some(name) => studio.ext.studio.sources.get(name).cloned(),
 			};
 			let Some(listing) = listing else {
@@ -697,6 +706,26 @@ impl Stream for Listing {
 	}
 }
 
+/// The program's `media` narrowed to its canvas size, the largest video
+/// rendition, which stays in the file while the bandwidth grant disables it
+/// for viewers: its pictures stop, and resume, on the same track.
+fn canvas(mut media: hang::Catalog) -> hang::Catalog {
+	let pixels = |config: &hang::catalog::VideoConfig| {
+		u64::from(config.coded_width.unwrap_or(0)) * u64::from(config.coded_height.unwrap_or(0))
+	};
+	let largest = media
+		.video
+		.renditions
+		.iter()
+		.max_by_key(|(_, config)| pixels(config))
+		.map(|(name, _)| name.clone());
+	media.video.renditions.retain(|name, _| Some(name) == largest.as_ref());
+	for config in media.video.renditions.values_mut() {
+		config.enabled = true;
+	}
+	media
+}
+
 /// Whether `now` replaced the renditions of a kind the file already records.
 /// A kind that first appears joins the file instead, and a rendition's config
 /// changing under the same name stays on its track.
@@ -750,11 +779,14 @@ mod tests {
 	}
 
 	/// The studio's broadcast with only program audio, which needs no GPU, and
-	/// sources listed beside it as the studio lists them.
+	/// sources listed in a local broadcast as the studio lists them.
 	struct Studio {
 		origin: moq_net::origin::Producer,
 		publication: moq_net::origin::Publication,
 		catalog: moq_scene::publish::Catalog,
+		/// The local broadcast the sources' tracks are in, and its catalog.
+		local: moq_net::broadcast::Producer,
+		listed: moq_scene::publish::Catalog,
 		/// `None` once [ended](Self::end_program).
 		program: Option<Tone>,
 		/// Each listed source's tone, and the scratch broadcast its own catalog
@@ -773,10 +805,17 @@ mod tests {
 			let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
 			let program = Some(Tone::new(&mut broadcast, catalog.clone()));
 			publication.announce(Default::default()).unwrap();
+			let mut local = moq_net::broadcast::Info::new().produce();
+			let config = moq_mux::catalog::Config::default()
+				.with_catalog(Default::default())
+				.with_clock(catalog.clock());
+			let listed = moq_scene::publish::Catalog::new(&mut local, config).unwrap();
 			Self {
 				origin,
 				publication,
 				catalog,
+				local,
+				listed,
 				program,
 				sources: Vec::new(),
 				played: Duration::ZERO,
@@ -784,8 +823,9 @@ mod tests {
 		}
 
 		fn recorder(&self, dir: &Path) -> Recorder {
-			let source = moq_mux::Source::new(self.origin.consume(), self.publication.broadcast().consume());
-			Recorder::new(source, dir, Path::new("show.toml")).unwrap()
+			let program = moq_mux::Source::new(self.origin.consume(), self.publication.broadcast().consume());
+			let sources = moq_mux::Source::new(moq_tokio::origin::spawn().consume(), self.local.consume());
+			Recorder::new(program, sources, dir, Path::new("show.toml")).unwrap()
 		}
 
 		/// List a source `name` publishing a tone of its own.
@@ -793,7 +833,7 @@ mod tests {
 			let mut scratch = moq_net::broadcast::Info::new().produce();
 			let config = moq_mux::catalog::Config::default().with_clock(self.catalog.clock());
 			let listing = moq_mux::catalog::Producer::new(&mut scratch, config).unwrap();
-			let mut broadcast = self.publication.broadcast().clone();
+			let mut broadcast = self.local.clone();
 			let tone = Tone::new(&mut broadcast, listing.clone());
 			self.sources.push((name.to_string(), tone, scratch, listing));
 			self.relist();
@@ -812,7 +852,7 @@ mod tests {
 		/// Move the source `name` onto a new track, as a capture that changes
 		/// size is.
 		fn replace(&mut self, name: &str) {
-			let mut broadcast = self.publication.broadcast().clone();
+			let mut broadcast = self.local.clone();
 			let (_, tone, _, listing) = self.sources.iter_mut().find(|(source, ..)| source == name).unwrap();
 			let old = listing.snapshot().audio.renditions;
 			let mut old_tone = std::mem::replace(tone, Tone::new(&mut broadcast, listing.clone()));
@@ -860,7 +900,7 @@ mod tests {
 					(name.clone(), listing)
 				})
 				.collect();
-			self.catalog
+			self.listed
 				.mutate(|root| root.ext.studio.sources = listings.into_iter().collect())
 				.unwrap();
 		}
@@ -952,7 +992,7 @@ mod tests {
 		let mut studio = Studio::new();
 		studio.add("mic/1");
 		studio
-			.catalog
+			.listed
 			.mutate(|root| {
 				let mut still = hang::Catalog::default();
 				still.binary.tracks.insert(
@@ -1166,8 +1206,11 @@ mod tests {
 		let recorder = studio.recorder(dir.path());
 		recorder.start(true).unwrap();
 		studio.play(Duration::from_secs(1)).await;
-		// Together, with no chance for either file to read the failure first.
+		// Together, with no chance for either file to read the failure first:
+		// the program's file reads the program's catalog, and the source's the
+		// local one.
 		studio.catalog.clone().abort(moq_net::StreamError::Internal.into());
+		studio.listed.clone().abort(moq_net::StreamError::Internal.into());
 		recorder.stop();
 		kio::clock::timeout(Duration::from_secs(5), recorder.done())
 			.await
@@ -1246,7 +1289,8 @@ mod tests {
 		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 		let _catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
 		let source = moq_mux::Source::new(origin.consume(), publication.broadcast().consume());
-		let recorder = Recorder::new(source, dir.path(), Path::new("show.toml")).unwrap();
+		let local = moq_mux::Source::new(origin.consume(), moq_net::broadcast::Info::new().produce().consume());
+		let recorder = Recorder::new(source, local, dir.path(), Path::new("show.toml")).unwrap();
 		recorder.start(true).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		recorder.finish().await;
@@ -1269,7 +1313,8 @@ mod tests {
 		let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
 		publication.announce(Default::default()).unwrap();
 		let source = moq_mux::Source::new(origin.consume(), publication.broadcast().consume());
-		let recorder = Recorder::new(source, dir.path(), Path::new("show.toml")).unwrap();
+		let local = moq_mux::Source::new(origin.consume(), moq_net::broadcast::Info::new().produce().consume());
+		let recorder = Recorder::new(source, local, dir.path(), Path::new("show.toml")).unwrap();
 		recorder.start(false).unwrap();
 		kio::clock::sleep(Duration::from_millis(100)).await;
 		catalog.abort(moq_net::StreamError::Internal.into());
@@ -1313,6 +1358,34 @@ mod tests {
 				assert!(name <= MAX_NAME, "{name} bytes");
 			}
 		}
+	}
+
+	/// The program's file holds its canvas size alone, kept on while the grant
+	/// disables it for viewers, with the audio.
+	#[test]
+	fn the_program_records_its_canvas_size() {
+		let video = |width: u32, height: u32, enabled: bool| {
+			let mut config =
+				hang::catalog::VideoConfig::new("avc3.42c01f".parse::<hang::catalog::VideoCodec>().unwrap());
+			config.coded_width = Some(width);
+			config.coded_height = Some(height);
+			config.enabled = enabled;
+			config
+		};
+		let mut media: hang::Catalog = Default::default();
+		media.video.renditions.insert("0.avc3".into(), video(960, 540, true));
+		media.video.renditions.insert("1.avc3".into(), video(1920, 1080, false));
+		let audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		media.audio.renditions.insert("audio".into(), audio);
+		let recorded = canvas(media);
+		let video: Vec<_> = recorded
+			.video
+			.renditions
+			.iter()
+			.map(|(name, config)| (name.as_str(), config.enabled))
+			.collect();
+		assert_eq!(video, [("1.avc3", true)]);
+		assert_eq!(recorded.audio.renditions.len(), 1);
 	}
 
 	/// A name already taken, such as by a recording started in the same

@@ -42,12 +42,13 @@ impl std::fmt::Display for Of {
 }
 
 impl Engine {
-	/// What a replay of `of` copies, ending now.
+	/// What a replay of `of` could copy, ending now, the most wanted first:
+	/// the program at each of its sizes, largest first, or a source's one.
 	///
-	/// The program and the local sources have a past only while they are
-	/// published, since without a relay they encode only while recorded, and
-	/// a broadcast source once it shows a picture.
-	pub fn target(&self, of: &Of) -> anyhow::Result<Target> {
+	/// The program has a past only while it is encoded, which without a relay
+	/// is only while recorded, a local source only from while it was on
+	/// program or recorded, and a broadcast source once it shows a picture.
+	pub fn targets(&self, of: &Of) -> anyhow::Result<Vec<Target>> {
 		let output = || {
 			self.output
 				.as_ref()
@@ -60,7 +61,7 @@ impl Engine {
 		};
 		let state = self.state.lock().unwrap();
 		let capture = state.collection().capture(name);
-		match state.collection().sources.get(capture) {
+		let target = match state.collection().sources.get(capture) {
 			Some(Source::Broadcast { .. }) => state
 				.sources
 				.get(capture)
@@ -81,8 +82,42 @@ impl Engine {
 				.with_context(|| format!("`{name}` publishes no video to replay")),
 			Some(_) => anyhow::bail!("`{name}` has no picture to replay"),
 			None => anyhow::bail!("there is no source named `{name}`"),
+		};
+		Ok(vec![target?])
+	}
+}
+
+/// Hold the `length` of `of` up to now: to play in a replay source with
+/// `play`, or as a clip to save.
+///
+/// Takes the target whose video covers the most of the span, the first of
+/// those tied, such as the program's half size over a canvas size the grant
+/// disabled partway, or else the first one tried.
+pub fn take(engine: &Engine, of: &Of, length: Duration, play: bool) -> anyhow::Result<Take> {
+	let mut best: Option<anyhow::Result<Take>> = None;
+	for target in engine.targets(of)? {
+		let next = match play {
+			true => Take::new(&target, length),
+			false => Take::clip(&target, length),
+		};
+		let coverage = |take: &anyhow::Result<Take>| {
+			take.as_ref()
+				.ok()
+				.filter(|take| take.video.is_some())
+				.map(|take| take.covered)
+		};
+		let next = next.map_err(anyhow::Error::from);
+		if best.as_ref().is_none_or(|best| coverage(&next) > coverage(best)) {
+			best = Some(next);
 		}
 	}
+	let take = best.context("nothing to replay")?;
+	take.with_context(|| match of {
+		Of::Source(name) => {
+			format!("cannot replay `{name}`, which keeps a past only while it is on program or recorded")
+		}
+		Of::Program => "cannot replay the program".into(),
+	})
 }
 
 /// Play `take` at `speed` in the replay source `into`.
