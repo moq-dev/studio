@@ -47,6 +47,7 @@ impl Pick {
 		Follow {
 			pick: self.0.consume(),
 			seen: 0,
+			end: 0,
 			current: None,
 			next: None,
 		}
@@ -59,6 +60,9 @@ pub struct Follow {
 	pick: kio::Consumer<Picked>,
 	/// The generation of the pick read last.
 	seen: u64,
+	/// Where the block after the last one read starts, which a new pick
+	/// starts at or after.
+	end: u64,
 	/// The mix being read, held so it outlives a pick that drops it from the
 	/// collection until the next one takes over.
 	current: Option<(Mix, Reader)>,
@@ -71,6 +75,14 @@ impl Follow {
 	/// The next block of the picked mix, or `None` once the bus has stopped and
 	/// every block kept for this reader has been read. Waits for a first pick.
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Option<Block>> {
+		let block = ready!(self.poll_next(waiter));
+		if let Some(block) = &block {
+			self.end = block.position + block.frames() as u64;
+		}
+		Poll::Ready(block)
+	}
+
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Block>> {
 		let seen = self.seen;
 		let picked = self.pick.poll(waiter, |picked| match &picked.mix {
 			Some(mix) if picked.generation != seen => Poll::Ready((picked.generation, mix.clone())),
@@ -84,17 +96,18 @@ impl Follow {
 			self.next = Some((mix, reader, None));
 		}
 
-		if let Some((_, reader, first)) = &mut self.next
-			&& first.is_none()
-		{
+		while let Some((_, reader, first @ None)) = &mut self.next {
 			match reader.poll_read(waiter) {
+				// Already read from the current mix, which the bus advanced
+				// since this mix was picked.
+				Poll::Ready(Some(block)) if block.position < self.end => {}
 				Poll::Ready(Some(block)) => *first = Some(block),
 				// The bus stopped, so the current mix ends too.
 				Poll::Ready(None) => {
 					self.next = None;
 					ended = true;
 				}
-				Poll::Pending => {}
+				Poll::Pending => break,
 			}
 		}
 		let first = match &self.next {
@@ -317,6 +330,35 @@ mod tests {
 
 		drop(driver);
 		assert!(ready(&mut follow).is_none(), "the bus stopped");
+	}
+
+	/// A pick whose reader starts at a block the follower already read, as one
+	/// made while the bus advances can, starts after it instead.
+	#[test]
+	fn a_pick_never_replays_a_block() {
+		let (mut driver, a, b, [mut quiet, mut loud]) = mixes();
+		let pick = Pick::default();
+		let mut follow = pick.follow();
+		let mut step = |driver: &mut Driver| {
+			feed(&mut quiet, 0.25);
+			feed(&mut loud, 0.5);
+			driver.advance(BLOCK);
+		};
+		pick.set(a.clone());
+		step(&mut driver);
+		ready(&mut follow).unwrap();
+		let late = b.reader();
+		step(&mut driver);
+		let read = ready(&mut follow).unwrap();
+		{
+			let mut picked = pick.0.write().ok().unwrap();
+			picked.generation += 1;
+			picked.mix = Some((b.clone(), late));
+		}
+		step(&mut driver);
+		let next = ready(&mut follow).unwrap();
+		assert_eq!(next.position, read.position + BLOCK as u64, "read once");
+		assert_eq!(next.data[0], 0.5);
 	}
 
 	/// A follower that stops reading holds up neither the bus nor another reader.
