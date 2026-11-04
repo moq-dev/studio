@@ -21,7 +21,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/d003102129236c88edbfec11f001e8efeaf9b5fd";
+      url = "github:moq-dev/quest/4be350816f2a5c1157f799773ee1594f199fd9a7";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -82,6 +82,80 @@
             ]
           );
 
+          # CEF for browser sources (`cef` feature), at the version the `cef`
+          # crate in Cargo.lock binds: bump them together. cef-dll-sys builds
+          # its wrapper from this instead of downloading CEF, and a dev build
+          # loads libcef.so from it. Patched like nixpkgs' cef-binary, whose
+          # install step expects GL libraries this release no longer ships.
+          cefArchive = {
+            x86_64-linux = {
+              name = "cef_binary_156.0.15+gcf671c0+chromium-156.0.8078.80_linux64_minimal";
+              hash = "sha256-aHP5dbsEcxZoDqGDmYDtW9TDPIzUzkV2HJQhGFZgU4g=";
+              sha1 = "09235427222e026a4f34399742df27c5d98a4f8a";
+            };
+            aarch64-linux = {
+              name = "cef_binary_156.0.15+gcf671c0+chromium-156.0.8078.80_linuxarm64_minimal";
+              hash = "sha256-gGZjqeyiqPe+GFSAzn53nFhktc3VK9d0iQU72xkz/rg=";
+              sha1 = "85602db8e813ad824b45ae54218476aa3d91d561";
+            };
+          };
+          cef = lib.optionalAttrs isLinux (
+            let
+              archive = cefArchive.${system};
+            in
+            pkgs.stdenv.mkDerivation {
+              pname = "cef";
+              version = "156.0.15";
+              src = pkgs.fetchurl {
+                url = "https://cef-builds.spotifycdn.com/${lib.escapeURL archive.name}.tar.bz2";
+                inherit (archive) hash;
+              };
+              nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+              buildInputs = with pkgs; [
+                alsa-lib
+                at-spi2-atk
+                at-spi2-core
+                atk
+                cairo
+                cups
+                dbus
+                expat
+                glib
+                gtk3
+                libdrm
+                libgbm
+                libx11
+                libxcb
+                libxcomposite
+                libxdamage
+                libxext
+                libxfixes
+                libxkbcommon
+                libxrandr
+                libxshmfence
+                nspr
+                nss
+                pango
+                stdenv.cc.cc
+              ];
+              # Opened at run time rather than linked.
+              runtimeDependencies = with pkgs; [
+                libGL
+                udev
+                vulkan-loader
+              ];
+              dontStrip = true;
+              installPhase = ''
+                runHook preInstall
+                mkdir $out
+                cp -r Release/. Resources/. CMakeLists.txt cmake include libcef_dll $out/
+                # What cef-dll-sys checks the version against.
+                echo '{"type":"minimal","name":"${archive.name}.tar.bz2","sha1":"${archive.sha1}"}' > $out/archive.json
+                runHook postInstall
+              '';
+            }
+          );
+
           # Where the shell's libasound looks for PCM plugins. ALSA's default
           # device is a plugin on any desktop running a sound server, and the
           # shell's alsa-lib only searches its own store path, so without this
@@ -108,6 +182,8 @@
                 jq
                 cmake
                 nasm
+                # cef-dll-sys builds CEF's C++ wrapper with Ninja.
+                ninja
                 pkg-config
                 # libclang for the bindgen builds (pipewire, VAAPI).
                 rustPlatform.bindgenHook
@@ -116,6 +192,9 @@
                 cargo-sort
                 cargo-shear
                 quest-cli
+
+                # The join page: install, lint, type-check, test, and build.
+                bun
 
                 # `just check` lints.
                 shellcheck
@@ -156,6 +235,7 @@
 
             env = lib.optionalAttrs isLinux {
               ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
+              CEF_PATH = "${cef}";
               LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
             };
           };

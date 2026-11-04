@@ -25,6 +25,11 @@ capture = ["moq-video/capture", "moq-audio/capture"]
 # moq-video's `pipewire`: it links libpipewire-0.3 at build time, so a Linux
 # package turns it on where the build host has it.
 pipewire = ["capture", "moq-video/pipewire", "moq-audio/pipewire"]
+# Browser sources, rendered by CEF (the Chromium Embedded Framework) in a helper
+# process, on Linux. Off by default: the build downloads the CEF runtime, or
+# takes it from `CEF_PATH`, and compiles its C++ wrapper. Without it, a browser
+# source reports that this build cannot render web pages.
+cef = ["dep:cef"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
@@ -44,12 +49,21 @@ moq-video = { workspace = true, features = ["render"] }
 serde = { workspace = true }
 serde_with = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "time"] }
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 
+# The helper process a browser source runs CEF in, and the socket between them.
+[target.'cfg(target_os = "linux")'.dependencies]
+# `accelerated_osr` copies the page's shared texture into the studio's device.
+cef = { version = "156.3", default-features = false, features = ["accelerated_osr"], optional = true }
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+rustix = { version = "1", features = ["net", "process", "stdio"] }
+# The helper's CEF profile, removed once the helper has exited.
+tempfile = { workspace = true }
+
 [dev-dependencies]
-# An encoder on every machine, for the source track tests.
+# An encoder on every machine, for the source track and replay tests.
 moq-video = { workspace = true, features = ["openh264"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

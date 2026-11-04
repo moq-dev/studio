@@ -21,3 +21,7 @@ result
 
 # direnv
 .direnv
+
+# The join page's dependencies and build.
+node_modules
+dist

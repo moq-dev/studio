@@ -12,37 +12,39 @@
 //!   scenes and collections as text.
 //! - [`source::Sources`] runs each source: a camera, display, window,
 //!   microphone, or system-audio capture (with the `capture` feature), a still
-//!   image, a solid color, or a broadcast subscribed over MoQ. Pictures go to the
-//!   compositor and sound goes to a `moq_audio::bus::Bus`, the program audio.
+//!   image, a solid color, a broadcast subscribed over MoQ, or a web page
+//!   rendered by a browser engine (the [`browser`] module). Pictures go to the
+//!   compositor and sound goes to a `moq_audio::bus::Bus`, routed into its
+//!   program mix.
 //! - [`Compositor`] draws the scene in preview and the scene on program into
 //!   textures on the caller's `wgpu` device, cutting or fading between them.
 //!   `moq_video::render::export` hands the program to an encoder, on the GPU
 //!   where the platform allows.
 //! - [`publish`] gives each local source its own track in the studio's
 //!   broadcast, so viewers can compose the scene themselves.
-//! - [`ladder`] encodes a picture at several sizes, each following its own
-//!   share of the connection's bandwidth, and [`Scaler`] draws the smaller
-//!   sizes of the program on the GPU.
 //!
 //! Every picture is drawn on the program clock the caller ticks
 //! [`Compositor::render`] with, from whatever each source delivered last: a
 //! source that stalls repeats its last picture rather than holding up the
 //! canvas.
 
+pub mod browser;
 pub mod clip;
 mod collection;
 mod compositor;
 mod edit;
-pub mod ladder;
+mod effect;
+mod lut;
 pub mod publish;
-mod scale;
+pub mod replay;
 pub mod source;
 
 pub use clip::Clip;
-pub use collection::{Audio, Canvas, Collection, Filter, Item, Layer, Rect, Rgba, Scene, Source, Transition, Video};
+pub use collection::{
+	Audio, Blend, Canvas, Collection, Crop, Filter, Item, Layer, MaskMode, Rect, Rgba, Scene, Source, Transition, Video,
+};
 pub use compositor::{Compositor, FORMAT};
 pub use edit::{Change, Draft, Edit, History};
-pub use scale::Scaler;
 
 /// The `wgpu` the compositor draws with: `moq_video`'s, so its textures and
 /// the decoder's are the same type.
@@ -79,9 +81,17 @@ pub enum Error {
 	#[error("image: {0}")]
 	Image(String),
 
+	/// A LUT source could not be read or parsed.
+	#[error("LUT: {0}")]
+	Lut(String),
+
 	/// This build or platform cannot open the source.
 	#[error("unsupported source: {0}")]
 	Unsupported(String),
+
+	/// The source stopped, with the reason, so it takes nothing more.
+	#[error("the source stopped: {0}")]
+	Stopped(String),
 
 	/// Capturing, decoding, or drawing video failed.
 	#[error(transparent)]
@@ -98,4 +108,8 @@ pub enum Error {
 	/// The broadcast subscription failed.
 	#[error(transparent)]
 	Net(#[from] moq_net::Error),
+
+	/// A browser source's page failed, or its helper process stopped.
+	#[error("browser: {0}")]
+	Browser(String),
 }

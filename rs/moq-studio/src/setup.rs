@@ -21,8 +21,8 @@ use crate::engine::{self, Engine, Launch};
 use crate::health::rate;
 use crate::uplink;
 
-/// The canvases setup can propose, best first. Each encodes a ladder at its
-/// own sizes' ceilings, so a smaller one is what fits a slower uplink.
+/// The canvases setup can propose, best first. Each encodes at its own default
+/// bitrate, so a smaller one is what fits a slower uplink.
 const CANVASES: [Canvas; 5] = [
 	canvas(1920, 1080, 60),
 	canvas(1920, 1080, 30),
@@ -70,10 +70,9 @@ pub struct Encoding {
 	pub encoder: String,
 	/// Whether it reads the canvas on the GPU rather than a copy on the CPU.
 	pub gpu: bool,
-	/// The video bitrate its whole ladder sends at most, every rung watched.
+	/// The video bitrate it encodes at.
 	pub bitrate: Rate,
-	/// How long copying and encoding a frame at every rung took, on average
-	/// over a burst.
+	/// How long copying and encoding a frame took, on average over a burst.
 	pub frame: Duration,
 }
 
@@ -122,9 +121,8 @@ fn candidates(encoders: &Encoders) -> Vec<(Canvas, &Encoding)> {
 	}
 }
 
-/// Open the exporters the program would for each canvas's ladder, the same
-/// probe that picks its encoder at startup, and time a burst through every rung,
-/// as the program encodes once each rung is watched.
+/// Open the exporter the program would for each canvas, the same probe that
+/// picks its encoder at startup, and time a burst through what it settled on.
 async fn probe_encoders(gpu: engine::Gpu) -> Encoders {
 	let picture = Picture::new(&gpu);
 	let mut probed = Vec::new();
@@ -140,15 +138,9 @@ async fn probe_encoders(gpu: engine::Gpu) -> Encoders {
 async fn probe_encoder(gpu: &engine::Gpu, picture: &Picture, canvas: Canvas) -> anyhow::Result<Encoding> {
 	use moq_video::render::export::{Exporter, Route};
 
-	let framerate = canvas.framerate();
-	let sizes = moq_scene::ladder::sizes(moq_video::Size::new(canvas.width, canvas.height));
-	let bitrate = sizes
-		.iter()
-		.map(|size| moq_scene::ladder::ceiling(*size, framerate).as_bps())
-		.sum();
-	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, framerate);
-	config.bitrate = Some(moq_scene::ladder::ceiling(sizes[0], framerate));
-	let (exporter, _) = Exporter::new(&gpu.device, &gpu.queue, &mut config).await?;
+	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
+	let (mut exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config).await?;
+	let bitrate = rendition.bitrate.context("the encoder reports no bitrate")?;
 	let encoder = match &config.kind {
 		moq_video::encode::Kind::Named(name) => name.clone(),
 		other => format!("{other:?}"),
@@ -167,45 +159,30 @@ async fn probe_encoder(gpu: &engine::Gpu, picture: &Picture, canvas: Canvas) -> 
 		usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
 		view_formats: &[],
 	});
-	let session = moq_video::encode::Encoder::new(&config)?;
-	let mut rungs = vec![(None, exporter, session)];
-	// The smaller rungs, scaled from the canvas on the GPU, on the encoder the
-	// largest settled.
-	for size in &sizes[1..] {
-		let mut lower = moq_video::encode::Config::new(size.width, size.height, framerate);
-		lower.kind = config.kind.clone();
-		lower.bitrate = Some(moq_scene::ladder::ceiling(*size, framerate));
-		let (exporter, _) = Exporter::new(&gpu.device, &gpu.queue, &mut lower).await?;
-		let scaler = moq_scene::Scaler::new(&gpu.device, &gpu.queue, &target, *size);
-		rungs.push((Some(scaler), exporter, moq_video::encode::Encoder::new(&lower)?));
-	}
+	let mut session = moq_video::encode::Encoder::new(&config)?;
 	let period = Duration::from_secs(1) / canvas.framerate;
 	let frame = time(budget(canvas), async |index| {
 		picture.pan(gpu, &target, index);
 		let timestamp = moq_net::Timestamp::try_from(period * index)?;
-		for (scaler, exporter, session) in &mut rungs {
-			let texture = scaler.as_ref().map_or(&target, moq_scene::Scaler::scale);
-			let pending = match exporter.copy(texture, timestamp)? {
-				Some(pending) => pending,
-				// Fed back to back, as the program never feeds it, a pipelined
-				// encoder can hold every slot; drained, it gives them back.
-				None => {
-					session.flush()?;
-					exporter
-						.copy(texture, timestamp)?
-						.context("the encoder holds every frame")?
-				}
-			};
-			session.encode(&pending.wait()?)?;
-			// So the time covers the frames a pipelined encoder still holds.
-			if index == BURST {
+		let pending = match exporter.copy(&target, timestamp)? {
+			Some(pending) => pending,
+			// Fed back to back, as the program never feeds it, a pipelined
+			// encoder can hold every slot; drained, it gives them back.
+			None => {
 				session.flush()?;
+				exporter
+					.copy(&target, timestamp)?
+					.context("the encoder holds every frame")?
 			}
+		};
+		session.encode(&pending.wait()?)?;
+		// So the time covers the frames a pipelined encoder still holds.
+		if index == BURST {
+			session.flush()?;
 		}
 		Ok(())
 	})
 	.await?;
-	let route = rungs[0].1.route();
 	tracing::info!(
 		canvas = describe(canvas),
 		encoder,
@@ -216,7 +193,7 @@ async fn probe_encoder(gpu: &engine::Gpu, picture: &Picture, canvas: Canvas) -> 
 
 	Ok(Encoding {
 		encoder,
-		gpu: route == Route::Gpu,
+		gpu: exporter.route() == Route::Gpu,
 		bitrate: Rate::from_bps(bitrate),
 		frame,
 	})
@@ -346,7 +323,7 @@ fn explain(canvas: Canvas, encoders: &Encoders, uplink: &Result<Rate, String>) -
 		false => "from a copy read back to the CPU each frame",
 	};
 	let mut text = format!(
-		"{name}: {} encodes it {route} at up to {} over every size, {} with audio.",
+		"{name}: {} encodes it {route} at about {}, {} with audio.",
 		encoding.encoder,
 		rate(encoding.bitrate),
 		rate(encoding.total())
@@ -612,11 +589,13 @@ impl Setup {
 				.map(|(_, encoding)| encoding.total())
 				.max()
 				.map(|top| top.scaled(1.0 / headroom()));
+			// The first relay's: the stream's tracks claim their bitrate on its
+			// link alone, so it is the one probed toward the stream's rate.
 			let connect = self
 				.launch
-				.connect
-				.clone()
-				.map(|(client, url)| (client, url, self.launch.broadcast.clone()));
+				.relays
+				.first()
+				.map(|relay| (relay.client.clone(), relay.url.clone(), self.launch.broadcast.clone()));
 			self.uplink = Some(match (connect, ceiling) {
 				(None, _) => Task::Done(Err("no relay is configured; start with --connect to measure it".into())),
 				(Some(_), None) => Task::Done(Err("nothing encodes on this machine, so nothing would be sent".into())),
