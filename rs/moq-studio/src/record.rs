@@ -856,7 +856,7 @@ mod tests {
 				.iter()
 				.map(|(name, _, _, listing)| {
 					let mut listing = listing.snapshot();
-					listing.clock = None;
+					listing.media = Default::default();
 					(name.clone(), listing)
 				})
 				.collect();
