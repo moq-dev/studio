@@ -1,8 +1,8 @@
 # MoQ Studio
 
 `moq-studio` is a native streaming studio for Linux, macOS, and Windows. It
-composes cameras, screens, windows, images, colors, and broadcasts from a relay
-into scenes on the GPU, mixes their audio, and publishes the result to a
+composes cameras, screens, windows, images, colors, web pages, and broadcasts
+from a relay into scenes on the GPU, mixes their audio, and publishes the result to a
 [MoQ](https://github.com/moq-dev/moq) relay. It is early and not packaged yet,
 so build it from source. The moq crates come from the `moq` submodule:
 
@@ -33,6 +33,9 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - `capture` adds camera, display, window, microphone, and system-audio sources.
   On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
+- `cef` adds browser sources, on Linux only for now. The build takes CEF from
+  `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
+  loads `libcef.so` from beside itself or from that `CEF_PATH`.
 - On Linux, display and window sources capture X11 and XWayland only; a
   Wayland screen or window cannot be picked yet.
 - On macOS, the studio is not an app bundle yet, so the camera, microphone,
@@ -87,11 +90,11 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Fade** blends over the fade time set beside it. |
+| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Fade** blends over the fade time set beside it. **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still fading out, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
@@ -136,6 +139,15 @@ the failover replaces the first relay's copy. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
+
+A browser source renders a web page, such as an overlay, alert box, or chat
+widget, at the canvas frame rate (CEF caps it at 60) over a transparent
+background, and its sound joins the program audio. Each page runs in a
+process of its own, so a page or browser crash fails that source, with the
+reason, while the stream carries on; edit or re-add the source to restart it.
+Every start is a fresh profile: no cookies or logins persist. A page opens
+no other windows (`window.open` and new-tab links do nothing), and its
+dropdown lists, such as a `<select>`'s, are not drawn yet.
 
 ## Guests
 
@@ -224,6 +236,12 @@ path = "logo.png" # relative to the scene file
 kind = "broadcast"
 path = "room/guest"
 
+[sources.alerts]
+kind = "browser"
+url = "https://example.com/alerts"
+width = 800 # the page's own size, whatever its items stretch it to
+height = 600
+
 [audio.guest]
 gain = 0.5
 
@@ -267,10 +285,11 @@ rect = { x = 1600, y = 40, width = 280, height = 120 }
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
 (macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
-`broadcast`, `clone` (with the `source` it shows), `lut` (a 3D Adobe or
-Resolve `.cube` file, which no item places, but which grades what a `lut`
-filter names it in), and `replay`, where the Replay panel plays replays. The
-Devices panel fills in ids. `[[top]]` items make up the top layer.
+`broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
+`clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
+file, which no item places, but which grades what a `lut` filter names it in),
+and `replay`, where the Replay panel plays replays. The Devices panel fills in
+ids. `[[top]]` items make up the top layer.
 
 `[video.<source>]` sets a source's `crop` and `filters`, wherever it is shown,
 and an item's `crop`, `filters`, and `blend` its own. A `crop` trims a fraction
@@ -386,7 +405,8 @@ color space moves to a new track, which its catalog entry follows. Images and
 colors publish once, as the image file and as a one-pixel PNG. Removing or
 editing a source ends its track. A track carries the plain capture, before any
 filter, and a clone publishes none, since it shows its source's capture.
-Microphones and system audio do not publish tracks of their own yet, and a
+Microphones and system audio do not publish tracks of their own yet. A browser
+source publishes none, so viewers see its page only in the program, and a
 broadcast source is already its publisher's.
 
 Every captured source opens an encode session as it starts, and consumer GPUs
@@ -429,9 +449,10 @@ file nothing reached before the recording stopped is removed.
 Sources make the opposite trip. A frame already on the GPU is drawn where it
 lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
 driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
-macOS. Every other source, every source on Windows or on a GPU that cannot
-import, and every still image delivers its frames from the CPU, which the
-compositor uploads.
+macOS. A browser source's page is copied on the GPU from the shared texture CEF
+paints, given the same Vulkan DMA-BUF import. Every other source, every source
+on Windows or on a GPU that cannot import, and every still image delivers its
+frames from the CPU, which the compositor uploads.
 
 ## Replay
 
@@ -460,8 +481,9 @@ from those, so a replay needs `--connect` and goes back at most that far. With
 `--on-demand`, the program has no past from before someone watched it. A
 broadcast source replays from what the studio received of it, and only over a
 relay connection whose protocol version can address a track by time; an older
-one refuses with the reason in the panel. An image or a color has no past to
-replay. A replay source publishes each replay as its own track while it plays,
+one refuses with the reason in the panel. An image, a color, or a web page has
+no past to replay: a page publishes no track of its own, so replay the program
+to show it. A replay source publishes each replay as its own track while it plays,
 like a camera, so viewers composing the scene themselves see it too.
 
 ## Health

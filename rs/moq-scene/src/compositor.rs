@@ -8,7 +8,7 @@ use kio::clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
-use crate::collection::{self, Canvas, Collection, Item, Layer as Place, Source};
+use crate::collection::{Canvas, Collection, Item, Layer as Place, Source};
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::source::{self, Sources};
 
@@ -305,6 +305,8 @@ impl Compositor {
 				lut: None,
 				error: None,
 			});
+			// A page arrives premultiplied; frames and images are straight.
+			let premultiplied = matches!(picture, source::Picture::Texture(_));
 			let texture = match picture {
 				source::Picture::Frame(frame) => {
 					let renderer = match layer.renderer.as_mut() {
@@ -317,6 +319,7 @@ impl Compositor {
 						.map_err(Error::from)
 				}
 				source::Picture::Rgba { size, pixels } => upload(&self.device, &self.queue, size, &pixels),
+				source::Picture::Texture(texture) => Ok(texture),
 				source::Picture::Lut(cube) => {
 					layer.lut = Some(self.effects.lut(&cube));
 					continue;
@@ -326,7 +329,7 @@ impl Compositor {
 			match texture {
 				Ok(texture) => {
 					layer.error = None;
-					layer.picture = Some(self.effects.picture(&texture));
+					layer.picture = Some(self.effects.picture(&texture, premultiplied));
 				}
 				Err(err) => {
 					if layer.error.is_none() {
@@ -400,12 +403,10 @@ impl Draw<'_> {
 	fn prepare(&mut self, item: &Item) -> Option<Prepared> {
 		let collection = self.collection;
 		let picture = self.library.0.get(collection.capture(&item.source))?.picture.as_ref()?;
-		let video = collection.video.get(&item.source);
-		let crop = video.map_or(collection::Crop::default(), |video| video.crop);
 		let item = effect::Item {
 			picture,
 			rect: item.rect,
-			crop: crop.then(&item.crop),
+			crop: collection.crop(item),
 			filters: collection.filters(item).collect(),
 			blend: item.blend,
 		};
@@ -479,7 +480,7 @@ impl Target {
 				| wgpu::TextureUsages::COPY_SRC,
 			view_formats: &[],
 		});
-		let picture = effects.picture(&texture);
+		let picture = effects.picture(&texture, false);
 		Self { texture, picture }
 	}
 }
