@@ -6,7 +6,8 @@
 //! dropped, which happens when the source is removed or edited.
 //!
 //! With [`Context::publish`] set, each local source that shows a picture also
-//! publishes it as its own track, web pages aside; see [`crate::publish`].
+//! publishes it as its own track in the studio's local broadcast, web pages
+//! aside; see [`crate::publish`].
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -433,7 +434,7 @@ pub struct Driver {
 	clock: Option<timeline::Producer>,
 }
 
-/// Where a source's own track goes, its claim on the studio catalog's listing
+/// Where a source's own track goes, its claim on the local catalog's listing
 /// under its name, and what the track is doing.
 struct Track {
 	publish: Publish,
@@ -488,7 +489,7 @@ impl Driver {
 			.ok()
 	}
 
-	/// Keep the studio catalog listing what `listing` publishes. A catalog that
+	/// Keep the local catalog listing what `listing` publishes. A catalog that
 	/// closes fails the track, and the source keeps running.
 	async fn mirror(&self, listing: Option<&Listing<'_>>) {
 		if let Some(listing) = listing
@@ -613,14 +614,51 @@ impl Driver {
 			None => None,
 		};
 
+		// A display or window delivers nothing while its screen stands still,
+		// so going into use reopens its capture, which starts with the picture
+		// as it is. A camera delivers its next picture within a frame anyway.
+		let still = matches!(source, Source::Display { .. } | Source::Window { .. });
 		let result = async {
-			while let Some(mut frame) = stream.read().await? {
+			// Whether a change of use is still to be acted on: not again until
+			// a picture arrives, since a closed encoder opens only on one.
+			let mut settling = true;
+			loop {
+				let settled = async {
+					match &track {
+						Some(video) if settling => video.settle().await,
+						_ => std::future::pending().await,
+					}
+				};
+				// Leaving use gives the encode session back at once, and going
+				// into use brings a picture, even while the capture delivers
+				// nothing new.
+				let frame = tokio::select! {
+					frame = stream.read() => frame?,
+					() = settled => {
+						let Some(video) = &mut track else { continue };
+						if video.is_open() {
+							if let Err(err) = video.release() {
+								self.fail_encoding(&mut track, err);
+							}
+						} else {
+							settling = false;
+							if still {
+								// Closed before the next opens, so the device is
+								// captured once.
+								drop(stream);
+								stream = moq_video::capture::open(&config).await?;
+								video.reopened();
+							}
+						}
+						continue;
+					}
+				};
+				settling = true;
+				let Some(mut frame) = frame else { break };
 				if let Some(video) = &mut track
 					&& let Err(err) = video.encode(&mut frame)
 				{
-					tracing::warn!(source = %self.name, %err, "cannot encode the source");
-					self.fail_track(Status::Failed(err.to_string()));
-					track.take().expect("encoding").abort(&err);
+					self.fail_encoding(&mut track, err);
 				}
 				self.show(Picture::Frame(frame));
 			}
@@ -631,6 +669,17 @@ impl Driver {
 			video.abort(err);
 		}
 		result
+	}
+
+	/// Fail the source's own track with `err`, ending it, while the source
+	/// keeps drawing.
+	#[cfg(feature = "capture")]
+	fn fail_encoding(&self, track: &mut Option<crate::publish::Video<'_>>, err: Error) {
+		tracing::warn!(source = %self.name, %err, "cannot encode the source");
+		self.fail_track(Status::Failed(err.to_string()));
+		if let Some(video) = track.take() {
+			video.abort(&err);
+		}
 	}
 
 	#[cfg(feature = "capture")]
@@ -981,7 +1030,7 @@ impl Driver {
 	/// Ends once the whole span has played.
 	///
 	/// With `listing`, the pictures are also encoded onto the source's own
-	/// track as they show, so viewers composing the scene see the replay too.
+	/// track as they show, while it is used.
 	async fn replay(&self, play: Play, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		set(&self.status, Status::Live);
 		let take = &play.take;
@@ -1035,8 +1084,8 @@ impl Driver {
 						self.show(Picture::Frame(frame));
 					}
 					// A stretch the broadcast was offline, paused, or lost
-					// replays as the gap it was, for viewers composing the
-					// scene too. Past the end, the replay is over anyway.
+					// replays as the gap it was, on its own track too. Past
+					// the end, the replay is over anyway.
 					moq_video::decode::Read::Gap { timestamp, .. }
 					| moq_video::decode::Read::End { end: timestamp } => {
 						kio::clock::sleep_until(at(timestamp.clamp(take.start, take.end))).await;

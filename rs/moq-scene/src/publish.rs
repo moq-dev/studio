@@ -1,43 +1,43 @@
-//! Each local source's own track in the studio's broadcast.
+//! Each local source's own track, kept in a broadcast of the studio's own.
 //!
-//! A source publishes what it shows beside the program, so a viewer can
-//! compose the scene itself. Its renditions are listed in a hang catalog of its
-//! own, nested by source name under the studio catalog's [`SECTION`] section.
-//! The root `video` and `audio` sections stay the program's alone: hang reads
-//! their entries as alternatives of one picture, so a camera listed there would
-//! be played, or packaged for HLS, as a variant of the program.
+//! A source's track is for the studio's own use, such as replaying the source
+//! or recording it on its own, and is never announced to a relay: the program
+//! is the only video the studio publishes, which keeps it within the encode
+//! sessions a GPU allows. Its renditions are listed in a hang catalog of its
+//! own, nested by source name under the local catalog's [`SECTION`] section.
 //!
-//! A source encodes while it runs, whatever the demand, so a late viewer finds
-//! its recent past; MoQ uploads only what a subscriber pulls. On
-//! [demand](Publish::on_demand), it encodes only while subscribed.
+//! A source encodes only while it is used: while it shows on program
+//! ([`Publish::show`]), so a replay of it has its recent past, or while
+//! something in the studio subscribes to its track, such as a recording.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
-/// The studio catalog's own root section, namespaced as hang asks of
+/// The local catalog's own root section, namespaced as hang asks of
 /// application sections.
 pub const SECTION: &str = "dev.moq.studio";
 
-/// The application sections of the studio catalog.
+/// The application sections of the local catalog.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Ext {
-	/// The [`SECTION`] section, left off the wire while nothing is published.
+	/// The [`SECTION`] section, left off the wire while nothing is listed.
 	#[serde(rename = "dev.moq.studio", default, skip_serializing_if = "Section::is_empty")]
 	pub studio: Section,
 }
 
 impl moq_mux::catalog::hang::CatalogExt for Ext {}
 
-/// What the studio lists beside the program.
+/// What the local catalog lists.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
-	/// Each publishing source's catalog, by source name. Its tracks are in the
-	/// studio's broadcast, and its timestamps are on the studio catalog's clock.
+	/// Each source's catalog, by source name. Its tracks are in the local
+	/// broadcast, and its timestamps are on the program's clock.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub sources: BTreeMap<String, hang::Catalog>,
 }
@@ -48,21 +48,49 @@ impl Section {
 	}
 }
 
-/// The studio catalog.
+/// The catalog of the program's broadcast, or of the sources' local one.
 pub type Catalog = moq_mux::catalog::Producer<Ext>;
 
-/// Where sources publish: the studio's broadcast and its catalog.
+/// How many video encoders are open. Each holds a session on a hardware
+/// encoder, which a GPU caps, such as at 8 on a GeForce card.
+#[derive(Clone, Debug, Default)]
+pub struct Sessions(Arc<AtomicUsize>);
+
+impl Sessions {
+	/// How many encoders are open now.
+	pub fn open(&self) -> usize {
+		self.0.load(Ordering::Relaxed)
+	}
+
+	fn hold(&self) -> Session {
+		self.0.fetch_add(1, Ordering::Relaxed);
+		Session(self.clone())
+	}
+}
+
+/// One open encoder's place in its [`Sessions`], given back when dropped.
+struct Session(Sessions);
+
+impl Drop for Session {
+	fn drop(&mut self) {
+		(self.0).0.fetch_sub(1, Ordering::Relaxed);
+	}
+}
+
+/// Where sources publish: a broadcast the studio keeps to itself, and its
+/// catalog.
 #[derive(Clone)]
 pub struct Publish {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Catalog,
-	bandwidth: moq_net::bandwidth::Allocator,
 	kind: moq_video::encode::Kind,
-	on_demand: bool,
+	sessions: Sessions,
 	owners: Arc<Mutex<Owners>>,
+	/// The sources on program, which each source's video follows.
+	shown: Arc<tokio::sync::watch::Sender<BTreeSet<String>>>,
 }
 
-/// Which [`Claim`] owns each source name's entry in the studio catalog, and
+/// Which [`Claim`] owns each source name's entry in the local catalog, and
 /// each open [`Listing`]'s catalog by its claim.
 #[derive(Default)]
 struct Owners {
@@ -72,38 +100,51 @@ struct Owners {
 }
 
 impl Publish {
-	/// Publish sources into `broadcast`, listed in `catalog`, the one serving it,
-	/// encoding captured video with `kind`. Each source track claims its bitrate
-	/// on `bandwidth`, the allocator the program's tracks claim on.
+	/// Keep sources' tracks in a new local broadcast stamped on `clock`, the
+	/// program's, encoding captured video with `kind` and counting its open
+	/// encoders in `sessions`.
 	///
 	/// Pass [`Kind::Hardware`](moq_video::encode::Kind::Hardware) on a machine
 	/// with a hardware encoder, so a session it refuses fails that source's track
 	/// with the reason rather than quietly loading the CPU with a software one.
-	pub fn new(
-		broadcast: moq_net::broadcast::Producer,
-		catalog: Catalog,
-		bandwidth: moq_net::bandwidth::Allocator,
-		kind: moq_video::encode::Kind,
-	) -> Self {
-		Self {
+	pub fn new(clock: moq_mux::Clock, kind: moq_video::encode::Kind, sessions: Sessions) -> Result<Self, Error> {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = moq_mux::catalog::Config::default()
+			.with_catalog(Default::default())
+			.with_clock(clock);
+		let catalog = Catalog::new(&mut broadcast, config)?;
+		Ok(Self {
 			broadcast,
 			catalog,
-			bandwidth,
 			kind,
-			on_demand: false,
+			sessions,
 			owners: Default::default(),
-		}
+			shown: Default::default(),
+		})
 	}
 
-	/// Encode each source's video only while someone subscribes to it, for a
-	/// studio whose only readers are its own recordings, which never fetch a
-	/// past they were not reading.
-	pub fn on_demand(mut self) -> Self {
-		self.on_demand = true;
-		self
+	/// The local broadcast, to read a source's track from.
+	pub fn consume(&self) -> moq_net::broadcast::Consumer {
+		self.broadcast.consume()
 	}
 
-	/// What each source track the studio catalog lists has written, keyed by
+	/// What the local catalog lists now.
+	pub fn catalog(&self) -> hang::Catalog<Ext> {
+		self.catalog.snapshot()
+	}
+
+	/// Encode the sources named in `shown`, those on program, whether or not
+	/// anything reads their tracks; any other encodes only while read.
+	pub fn show(&self, shown: BTreeSet<String>) {
+		// Only a change wakes the sources, since this runs every frame.
+		self.shown.send_if_modified(|current| {
+			let changed = *current != shown;
+			*current = shown;
+			changed
+		});
+	}
+
+	/// What each source track the local catalog lists has written, keyed by
 	/// rendition ID, as [`Catalog::stats`](moq_mux::catalog::Producer::stats)
 	/// reports the program's. The broadcast names every track uniquely, so all
 	/// sources share one map. A replaced source's tracks drop out with its
@@ -114,7 +155,7 @@ impl Publish {
 		listed.flat_map(|catalog| catalog.stats()).collect()
 	}
 
-	/// Claim `name`'s entry in the studio catalog for a source that is opening,
+	/// Claim `name`'s entry in the local catalog for a source that is opening,
 	/// taking it from any older source of that name.
 	pub(crate) fn claim(&self, name: &str) -> Claim {
 		let mut owners = self.owners.lock().unwrap();
@@ -129,7 +170,7 @@ impl Publish {
 	}
 }
 
-/// A source's hold on its name's entry in the studio catalog, until a newer
+/// A source's hold on its name's entry in the local catalog, until a newer
 /// source of that name claims it.
 ///
 /// An edited source's replacement starts before the old one stops, and their
@@ -157,33 +198,33 @@ impl Drop for Claim {
 	}
 }
 
-/// One source's catalog, listed in the studio's for as long as this lives and
-/// its claim holds.
+/// One source's catalog, listed in the local one for as long as this lives
+/// and its claim holds.
 pub(crate) struct Listing<'a> {
 	claim: &'a Claim,
 	kind: moq_video::encode::Kind,
-	on_demand: bool,
+	sessions: Sessions,
+	shown: tokio::sync::watch::Receiver<BTreeSet<String>>,
 	broadcast: moq_net::broadcast::Producer,
 	studio: Catalog,
 	catalog: moq_mux::catalog::Producer,
 	/// Where the nested catalog writes its own track, which nobody reads: its
-	/// content reaches viewers through the studio catalog instead.
+	/// content reaches viewers through the local catalog instead.
 	_scratch: moq_net::broadcast::Producer,
 }
 
 impl<'a> Listing<'a> {
 	pub(crate) fn new(claim: &'a Claim, publish: &Publish) -> Result<Self, Error> {
 		let mut scratch = moq_net::broadcast::Info::new().produce();
-		// The studio's clock, so source and program timestamps share one timeline.
-		let config = moq_mux::catalog::Config::default()
-			.with_clock(publish.catalog.clock())
-			.with_bandwidth(publish.bandwidth.clone());
+		// The program's clock, so source and program timestamps share one timeline.
+		let config = moq_mux::catalog::Config::default().with_clock(publish.catalog.clock());
 		let catalog = moq_mux::catalog::Producer::new(&mut scratch, config)?;
 		claim.owners.lock().unwrap().catalogs.insert(claim.id, catalog.clone());
 		Ok(Self {
 			claim,
 			kind: publish.kind.clone(),
-			on_demand: publish.on_demand,
+			sessions: publish.sessions.clone(),
+			shown: publish.shown.subscribe(),
 			broadcast: publish.broadcast.clone(),
 			studio: publish.catalog.clone(),
 			catalog,
@@ -191,14 +232,14 @@ impl<'a> Listing<'a> {
 		})
 	}
 
-	/// Copy every update of this source's catalog into the studio's, until
+	/// Copy every update of this source's catalog into the local one, until
 	/// either catalog closes.
 	pub(crate) async fn mirror(&self) -> Result<(), Error> {
 		let mut updates = self.catalog.consume()?;
 		let mut studio = self.studio.clone();
 		while let Some(mut catalog) = updates.next().await? {
 			// Media timing is the root's: the one clock, and the join interval an
-			// HLS export of the program numbers its segments on.
+			// HLS export numbers its segments on.
 			catalog.media = Default::default();
 			// The claim is checked inside the mutation, so a newer source's
 			// writes, made under the same lock, are never overwritten.
@@ -222,7 +263,7 @@ impl<'a> Listing<'a> {
 impl Drop for Listing<'_> {
 	fn drop(&mut self) {
 		self.claim.owners.lock().unwrap().catalogs.remove(&self.claim.id);
-		// Fails only once the studio catalog closed, which took the entry with it.
+		// Fails only once the local catalog closed, which took the entry with it.
 		let _ = self.studio.mutate(|root| {
 			if self.claim.owned() {
 				root.ext.studio.sources.remove(&self.claim.name);
@@ -243,6 +284,8 @@ pub trait Encode {
 	fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
 	/// [`Encoder::cut`](moq_video::encode::Encoder::cut).
 	fn cut(&mut self) -> Result<(), moq_video::Error>;
+	/// [`Encoder::set_bitrate`](moq_video::encode::Encoder::set_bitrate).
+	fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), moq_video::Error>;
 }
 
 impl Encode for moq_video::encode::Encoder {
@@ -261,6 +304,10 @@ impl Encode for moq_video::encode::Encoder {
 	fn cut(&mut self) -> Result<(), moq_video::Error> {
 		self.cut()
 	}
+
+	fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), moq_video::Error> {
+		self.set_bitrate(bitrate)
+	}
 }
 
 /// An encoder and the video track it publishes into.
@@ -273,15 +320,19 @@ impl Encode for moq_video::encode::Encoder {
 pub struct Encoding<E: Encode = moq_video::encode::Encoder> {
 	/// Taken only to abort or finish it, as the track ends.
 	producer: Option<moq_video::encode::Producer>,
-	encoder: Option<E>,
+	/// The open encoder, and its place among the open sessions.
+	encoder: Option<(E, Session)>,
+	sessions: Sessions,
 }
 
 impl<E: Encode> Encoding<E> {
-	/// Publish into `producer`, with no encoder open yet.
-	pub fn new(producer: moq_video::encode::Producer) -> Self {
+	/// Publish into `producer`, with no encoder open yet, counting each one
+	/// opened in `sessions`.
+	pub fn new(producer: moq_video::encode::Producer, sessions: Sessions) -> Self {
 		Self {
 			producer: Some(producer),
 			encoder: None,
+			sessions,
 		}
 	}
 
@@ -290,16 +341,21 @@ impl<E: Encode> Encoding<E> {
 		self.encoder.is_some()
 	}
 
-	/// Whether anyone subscribes to the track.
-	pub(crate) fn wanted(&self) -> bool {
-		let producer = self.producer.as_ref().expect("open until it ends");
-		producer.demand().wanted().is_some()
+	/// Whether anything reads the track.
+	pub fn watched(&self) -> bool {
+		self.demand().wanted().is_some()
+	}
+
+	/// Who reads the track, which moves with it when a new encoder writes
+	/// another kind of picture.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.producer.as_ref().expect("open until it ends").demand()
 	}
 
 	/// Encode with `encoder` from here on, after draining the one it replaces.
 	pub fn open(&mut self, encoder: E) -> Result<(), Error> {
 		self.drain()?;
-		self.encoder = Some(encoder);
+		self.encoder = Some((encoder, self.sessions.hold()));
 		Ok(())
 	}
 
@@ -309,24 +365,52 @@ impl<E: Encode> Encoding<E> {
 	///
 	/// When no encoder is [open](Self::open).
 	pub fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), Error> {
-		let encoder = self.encoder.as_mut().expect("an encoder is open");
+		let (encoder, _) = self.encoder.as_mut().expect("an encoder is open");
 		let encoded = encoder.encode(frame)?;
 		self.producer.as_mut().expect("open until it ends").publish(&encoded)?;
 		Ok(())
 	}
 
+	/// Open a group with the next picture, as a keyframe.
+	///
+	/// # Panics
+	///
+	/// When no encoder is [open](Self::open).
+	pub fn cut(&mut self) -> Result<(), Error> {
+		let (encoder, _) = self.encoder.as_mut().expect("an encoder is open");
+		Ok(encoder.cut()?)
+	}
+
+	/// Encode at `bitrate` from the next picture on.
+	///
+	/// # Panics
+	///
+	/// When no encoder is [open](Self::open).
+	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
+		let (encoder, _) = self.encoder.as_mut().expect("an encoder is open");
+		Ok(encoder.set_bitrate(bitrate)?)
+	}
+
+	/// Advertise whether the track is encoding, as the catalog's `enabled`,
+	/// so viewers pick another rendition while it is not.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<(), Error> {
+		let producer = self.producer.as_mut().expect("open until it ends");
+		producer.set_enabled(enabled)?;
+		Ok(())
+	}
+
 	/// Close the encoder, publishing what it still holds.
 	pub fn drain(&mut self) -> Result<(), Error> {
-		if let (Some(encoder), Some(producer)) = (self.encoder.take(), &mut self.producer) {
+		if let (Some((encoder, _session)), Some(producer)) = (self.encoder.take(), &mut self.producer) {
 			producer.publish(&encoder.finish()?)?;
 		}
 		Ok(())
 	}
 
-	/// Mark a gap in the track after [draining](Self::drain) the encoder, so
-	/// the next one [opened](Self::open) starts with a keyframe, even on a
-	/// backend that cannot [cut](Encode::cut).
-	pub(crate) fn discontinuity(&mut self) -> Result<(), Error> {
+	/// Mark a gap in the track after [draining](Self::drain) the encoder, which
+	/// gives its session back, so the next one [opened](Self::open) starts with
+	/// a keyframe, even on a backend that cannot [cut](Encode::cut).
+	pub fn discontinuity(&mut self) -> Result<(), Error> {
 		self.drain()?;
 		self.producer.as_mut().expect("open until it ends").discontinuity()?;
 		Ok(())
@@ -338,7 +422,7 @@ impl<E: Encode> Encoding<E> {
 	/// is a keyframe, so a viewer arriving after the gap starts there.
 	pub fn pause(&mut self) -> Result<(), Error> {
 		let producer = self.producer.as_mut().expect("open until it ends");
-		if let Some(encoder) = &mut self.encoder {
+		if let Some((encoder, _)) = &mut self.encoder {
 			producer.publish(&encoder.flush()?)?;
 			encoder.cut()?;
 		}
@@ -380,25 +464,26 @@ impl<E: Encode> Drop for Encoding<E> {
 	}
 }
 
-/// A captured or replayed source's video, encoded frame by frame as it is shown.
-pub(crate) struct Video {
+/// A captured or replayed source's video, encoded frame by frame as it is
+/// shown, while it is used.
+pub(crate) struct Video<'a> {
 	track: Encoding,
+	claim: &'a Claim,
+	/// The sources on program.
+	shown: tokio::sync::watch::Receiver<BTreeSet<String>>,
 	config: moq_video::encode::Config,
-	/// Encodes only while the track is subscribed.
-	on_demand: bool,
 	clock: moq_mux::Clock,
 	/// Where the capture's private timeline starts on the studio clock, in
 	/// microseconds, taken at the first frame.
 	epoch: Option<u128>,
 }
 
-impl Video {
+impl<'a> Video<'a> {
 	/// Advertise a rendition for pictures of `size`. Opens a throwaway encoder
 	/// to learn exactly what the real one will write, so a machine that cannot
-	/// encode another stream, such as a GPU at its hardware session cap, fails
-	/// here with the reason.
+	/// encode the picture at all fails here with the reason.
 	pub(crate) async fn new(
-		listing: &Listing<'_>,
+		listing: &Listing<'a>,
 		size: moq_video::Size,
 		framerate: moq_video::FrameRate,
 		color: Option<moq_video::Color>,
@@ -414,18 +499,20 @@ impl Video {
 			.with_interval(config.gop.duration(config.framerate));
 		let producer = moq_video::encode::Producer::new(listing.broadcast.clone(), reserved, rendition)?;
 		Ok(Self {
-			track: Encoding::new(producer),
+			track: Encoding::new(producer, listing.sessions.clone()),
+			claim: listing.claim,
+			shown: listing.shown.clone(),
 			config,
-			on_demand: listing.on_demand,
 			clock: listing.studio.clock(),
 			epoch: None,
 		})
 	}
 
-	/// Encode and publish `frame`, restamping it onto the studio clock, unless
-	/// it is on demand and nobody subscribes. The encoder opens on the first
-	/// frame it encodes, and reopens when the picture's size or color space
-	/// changes, which moves the rendition to a new track.
+	/// Restamp `frame` onto the program's clock, and encode and publish it
+	/// while the source is used: shown on program, or its track read. The
+	/// encoder opens on the first frame used and closes while none is, marking
+	/// the gap, and reopens when the picture's size or color space changes,
+	/// which moves the rendition to a new track.
 	pub(crate) fn encode(&mut self, frame: &mut moq_video::Frame) -> Result<(), Error> {
 		let captured = frame.timestamp.as_micros();
 		let epoch = *self
@@ -433,13 +520,8 @@ impl Video {
 			.get_or_insert_with(|| self.clock.now().as_micros().saturating_sub(captured));
 		frame.timestamp = moq_net::Timestamp::from_micros((epoch + captured) as u64).map_err(moq_video::Error::from)?;
 
-		if self.on_demand && !self.track.wanted() {
-			// The next subscriber starts on a fresh encoder's keyframe, and the
-			// session is free meanwhile; the gap is marked so nobody reads across it.
-			if self.track.is_open() {
-				self.track.discontinuity()?;
-			}
-			return Ok(());
+		if !self.used() {
+			return self.release();
 		}
 
 		let size = encodable(frame.size());
@@ -459,6 +541,60 @@ impl Video {
 		} else {
 			self.track.encode(&frame.resize(size, &Default::default())?)
 		}
+	}
+
+	/// Whether the source is used: shown on program, or its track read.
+	fn used(&self) -> bool {
+		self.shown.borrow().contains(&self.claim.name) || self.track.watched()
+	}
+
+	/// Wait until whether the source is used disagrees with whether its
+	/// encoder is open, so a capture that delivers nothing new, such as a
+	/// still screen, can act without waiting on a picture: [`release`] the
+	/// encoder when it is open and nothing uses the source, or bring a picture
+	/// when it is closed and the source goes into use.
+	///
+	/// [`release`]: Self::release
+	#[cfg_attr(
+		not(any(feature = "capture", test)),
+		expect(dead_code, reason = "only a capture waits on it")
+	)]
+	pub(crate) async fn settle(&self) {
+		let mut demand = self.track.demand();
+		let mut shown = self.shown.clone();
+		shown.mark_unchanged();
+		while self.used() == self.track.is_open() {
+			// The first look at the demand reports it as it is now.
+			tokio::select! {
+				changed = shown.changed() => if changed.is_err() { std::future::pending::<()>().await },
+				wanted = demand.wanted_changed() => if wanted.is_err() { std::future::pending::<()>().await },
+			}
+		}
+	}
+
+	/// Whether the encoder is open.
+	#[cfg_attr(not(feature = "capture"), expect(dead_code, reason = "only a capture asks"))]
+	pub(crate) fn is_open(&self) -> bool {
+		self.track.is_open()
+	}
+
+	/// Take pictures from a reopened capture, whose private timeline starts
+	/// over: the next picture maps it onto the program's clock afresh.
+	#[cfg_attr(
+		not(any(feature = "capture", test)),
+		expect(dead_code, reason = "only a capture reopens")
+	)]
+	pub(crate) fn reopened(&mut self) {
+		self.epoch = None;
+	}
+
+	/// Close the encoder while nothing uses the source, marking the gap, which
+	/// gives the encode session back.
+	pub(crate) fn release(&mut self) -> Result<(), Error> {
+		if self.track.is_open() && !self.used() {
+			self.track.discontinuity()?;
+		}
+		Ok(())
 	}
 
 	/// Mark a break, such as a gap in a replay: what follows does not continue
@@ -533,18 +669,15 @@ mod tests {
 	use crate::source::test::{context, local, start, until, until_time, video};
 	use crate::source::{Sources, Status};
 
-	/// A studio broadcast and catalog to publish into, and a reader of it.
+	/// Where sources publish, its catalog, and a reader of its broadcast.
 	fn studio() -> (Publish, Catalog, moq_net::broadcast::Consumer) {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
-		let catalog = Catalog::new(&mut broadcast, config).unwrap();
-		let bandwidth = moq_net::bandwidth::Allocator::unlimited();
-		let publish = Publish::new(broadcast, catalog.clone(), bandwidth, moq_video::encode::Kind::Auto);
+		let clock = moq_mux::Clock::new();
+		let publish = Publish::new(clock, moq_video::encode::Kind::Auto, Sessions::default()).unwrap();
+		let (catalog, consumer) = (publish.catalog.clone(), publish.consume());
 		(publish, catalog, consumer)
 	}
 
-	/// Yield until `f` holds of the studio catalog's source listings.
+	/// Yield until `f` holds of the local catalog's source listings.
 	async fn listed(catalog: &Catalog, f: impl Fn(&BTreeMap<String, hang::Catalog>) -> bool) -> hang::Catalog<Ext> {
 		for _ in 0..1000 {
 			let snapshot = catalog.snapshot();
@@ -650,10 +783,12 @@ mod tests {
 		moq_video::Frame::new(moq_video::Surface::I420(i420), timestamp)
 	}
 
-	/// A captured picture encodes into its source's own listing, and one that
-	/// changes size reopens the encoder rather than failing the track.
+	/// A captured picture encodes into its source's own listing only while the
+	/// source is used, shown on program or its track read, holding an encode
+	/// session only then, and one that changes size reopens the encoder rather
+	/// than failing the track.
 	#[tokio::test]
-	async fn a_video_follows_its_pictures_size() {
+	async fn a_video_encodes_while_used() {
 		local(async {
 			let (publish, catalog, consumer) = studio();
 			let claim = publish.claim("camera");
@@ -665,42 +800,55 @@ mod tests {
 				let width = renditions.next()?.coded_width;
 				renditions.next().is_none().then_some(width).flatten()
 			};
+			let written = || publish.stats().values().map(|rendition| rendition.frames).sum::<u64>();
 
 			tokio::select! {
 				result = listing.mirror() => panic!("the mirror ended: {result:?}"),
 				() = async {
 					let small = moq_video::Size::new(64, 48);
 					let mut video = Video::new(&listing, small, framerate, None).await.unwrap();
-					for millis in [0, 33, 66] {
+					for millis in [0, 33] {
 						video.encode(&mut gray(small, millis)).unwrap();
 					}
+					assert_eq!((written(), publish.sessions.open()), (0, 0), "unused");
 					let snapshot = listed(&catalog, |sources| width(sources) == Some(64)).await;
 					assert!(snapshot.video.renditions.is_empty(), "no source is a program rendition");
 
+					publish.show(["camera".to_string()].into());
+					for millis in [66, 100, 133] {
+						video.encode(&mut gray(small, millis)).unwrap();
+					}
+					assert_eq!((written(), publish.sessions.open()), (3, 1), "on program");
+
 					let large = moq_video::Size::new(80, 60);
-					for millis in [100, 133] {
+					for millis in [166, 200] {
 						video.encode(&mut gray(large, millis)).unwrap();
 					}
 					let snapshot = listed(&catalog, |sources| width(sources) == Some(80)).await;
+					assert_eq!(publish.sessions.open(), 1, "the resize closed the old encoder");
 
-					// Removing the source ends its track cleanly.
+					publish.show(Default::default());
+					video.encode(&mut gray(large, 233)).unwrap();
+					assert_eq!((written(), publish.sessions.open()), (5, 0), "off program");
+
+					// A reader, such as a recording, uses it too.
 					let name = snapshot.ext.studio.sources["camera"].video.renditions.keys().next().unwrap();
 					let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+					video.encode(&mut gray(large, 266)).unwrap();
+					assert_eq!((written(), publish.sessions.open()), (6, 1), "read");
+
+					// Removing the source ends its track cleanly.
 					drop(video);
 					while let Some(mut group) = track.recv_group().await.unwrap() {
 						while group.read_frame().await.unwrap().is_some() {}
 					}
+					assert_eq!(publish.sessions.open(), 0);
 				} => {}
 			}
 
 			// Every frame written counts for the Health panel, while the
-			// studio catalog lists the source.
-			let stats = publish.stats();
-			assert_eq!(
-				stats.values().map(|rendition| rendition.frames).sum::<u64>(),
-				5,
-				"{stats:?}"
-			);
+			// local catalog lists the source.
+			assert_eq!(written(), 6);
 			// A replacement takes the listing, and the old tracks with it.
 			let _newer = publish.claim("camera");
 			assert!(publish.stats().is_empty());
@@ -710,13 +858,57 @@ mod tests {
 		.await;
 	}
 
-	/// An on-demand source encodes only while its track is subscribed, holding
-	/// no encoder between subscribers.
+	/// A source leaving program gives its encode session back without waiting
+	/// on a picture, since a still screen delivers none, and one going on
+	/// program while closed says so, so its capture can bring a picture.
+	#[tokio::test(start_paused = true)]
+	async fn a_video_follows_its_use_without_a_picture() {
+		local(async {
+			let (publish, _catalog, _consumer) = studio();
+			let claim = publish.claim("display");
+			let listing = Listing::new(&claim, &publish).unwrap();
+			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+			let size = moq_video::Size::new(64, 48);
+			let mut video = Video::new(&listing, size, framerate, None).await.unwrap();
+			let wait = std::time::Duration::from_secs(1);
+
+			assert!(
+				kio::clock::timeout(wait, video.settle()).await.is_err(),
+				"unused and closed"
+			);
+			publish.show(["display".to_string()].into());
+			kio::clock::timeout(wait, video.settle())
+				.await
+				.expect("on program without a picture, so the capture brings one");
+			video.encode(&mut gray(size, 0)).unwrap();
+			assert_eq!(publish.sessions.open(), 1);
+			assert!(kio::clock::timeout(wait, video.settle()).await.is_err(), "on program");
+
+			publish.show(Default::default());
+			kio::clock::timeout(wait, video.settle()).await.expect("off program");
+			video.release().unwrap();
+			assert_eq!(publish.sessions.open(), 0);
+			assert!(kio::clock::timeout(wait, video.settle()).await.is_err(), "closed");
+
+			// A capture reopened a minute on starts its own timeline over, which
+			// lands on the program's clock now rather than a minute back.
+			kio::clock::sleep(std::time::Duration::from_secs(60)).await;
+			video.reopened();
+			publish.show(["display".to_string()].into());
+			let now = publish.catalog.clock().now();
+			let mut picture = gray(size, 0);
+			video.encode(&mut picture).unwrap();
+			assert!(picture.timestamp >= now, "{:?} before {now:?}", picture.timestamp);
+		})
+		.await;
+	}
+
+	/// A source off program encodes only while its track is subscribed, such
+	/// as by a recording, holding no encoder between subscribers.
 	#[tokio::test]
-	async fn an_on_demand_video_encodes_while_subscribed() {
+	async fn an_unshown_video_encodes_while_subscribed() {
 		local(async {
 			let (publish, catalog, consumer) = studio();
-			let publish = publish.on_demand();
 			let claim = publish.claim("camera");
 			let listing = Listing::new(&claim, &publish).unwrap();
 			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
@@ -798,6 +990,10 @@ mod tests {
 		fn cut(&mut self) -> Result<(), moq_video::Error> {
 			self.encoder.cut()
 		}
+
+		fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), moq_video::Error> {
+			self.encoder.set_bitrate(bitrate)
+		}
 	}
 
 	/// A pipelined encoder's last pictures land before a pause's gap rather
@@ -825,7 +1021,7 @@ mod tests {
 		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
 		let mut reader = moq_mux::container::Consumer::new(subscriber, container);
 
-		let mut track = Encoding::new(producer);
+		let mut track = Encoding::new(producer, Sessions::default());
 		let encoder = moq_video::encode::Encoder::new(&config).unwrap();
 		track
 			.open(Pipelined {
@@ -929,13 +1125,15 @@ mod tests {
 		.await;
 	}
 
-	/// A replay source publishes each replay as it shows, so viewers composing
-	/// the scene themselves see it too, gaps included.
+	/// A replay source on program encodes each replay onto its own track as it
+	/// shows, gaps included.
 	#[tokio::test(start_paused = true)]
 	async fn a_replay_is_published_as_it_plays() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (publish, catalog, consumer) = studio();
+			// On program, so its track encodes.
+			publish.show(["replay".to_string()].into());
 			let (mut context, _origin) = context(dir.path());
 			context.publish = Some(publish);
 			let mut collection = Collection::new();

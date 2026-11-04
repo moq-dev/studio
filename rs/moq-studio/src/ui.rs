@@ -9,7 +9,6 @@ use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::browser::Paint;
-use moq_scene::replay::Take;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
 	Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source,
@@ -1979,9 +1978,9 @@ impl Panels {
 					ui.end_row();
 					ui.label("Encoding");
 					ui.label(match (output.on_demand, watched) {
-						(false, _) => "always",
-						(true, true) => "while watched or recorded; wanted now",
-						(true, false) => "while watched or recorded; idle now",
+						(false, _) => "the canvas size always, half size while watched",
+						(true, true) => "while watched; watched now",
+						(true, false) => "while watched; idle now",
 					});
 					ui.end_row();
 				}
@@ -1990,47 +1989,69 @@ impl Panels {
 					ui.label("none; start with --connect to publish");
 					ui.end_row();
 					ui.label("Encoding");
-					ui.label(if watched {
-						"while recorded; recording now"
-					} else {
-						"while recorded; idle now"
-					});
+					ui.label("only the recording's encoder, while recording");
 					ui.end_row();
 				}
 			}
 			ui.label("Drawn");
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
-			ui.label("Handed to the encoder");
-			ui.label(format!(
-				"{} frames, last {}",
-				count(&stats.copied),
-				millis(&stats.copy_us)
-			));
-			ui.end_row();
-			ui.label("Read back to the CPU");
-			ui.label(if stats.zero_copy.load(Ordering::Relaxed) {
-				"none; the encoder reads the GPU".to_string()
-			} else {
-				format!("{} frames", count(&stats.read_back))
-			});
-			ui.end_row();
-			ui.label("Dropped");
-			ui.label(format!("{} frames", count(&stats.dropped)));
-			ui.end_row();
 			ui.label("Encoder");
 			ui.label(stats.encoder().unwrap_or_else(|| "not open".into()));
 			ui.end_row();
-			ui.label("Encoded");
-			ui.label(format!(
-				"{} frames, last {}",
-				count(&stats.encoded),
-				millis(&stats.encode_us)
-			));
+			ui.label("Encoder sessions");
+			ui.label(format!("{} open", stats.sessions.open()))
+				.on_hover_text("Video encoders open now, the program's and the sources'. A GPU caps them.");
 			ui.end_row();
+		});
+		ui.separator();
+		// Only the sizes the program publishes, since a small canvas, or an
+		// encoder that refused the half size, has the canvas size alone, and
+		// the recording's own encoder.
+		let [canvas, half, recording] = &stats.renditions;
+		let published = stats.sizes.load(Ordering::Relaxed);
+		let mut columns = vec![("Canvas size", canvas)];
+		if published > 1 {
+			columns.push(("Half size", half));
+		}
+		columns.push(("Recording", recording));
+		egui::Grid::new("renditions").show(ui, |ui| {
+			ui.strong("");
+			for (heading, _) in &columns {
+				ui.strong(*heading);
+			}
+			ui.end_row();
+			let row = |ui: &mut Ui, label: &str, cell: &dyn Fn(&crate::engine::Load) -> String| {
+				ui.label(label);
+				for (_, load) in &columns {
+					ui.label(cell(load));
+				}
+				ui.end_row();
+			};
+			row(ui, "Handed to the encoder", &|load| {
+				format!("{} frames, last {}", count(&load.copied), millis(&load.copy_us))
+			});
+			let zero_copy = stats.zero_copy.load(Ordering::Relaxed);
+			row(ui, "Read back to the CPU", &|load| match zero_copy {
+				true => "none; the encoder reads the GPU".to_string(),
+				false => format!("{} frames", count(&load.read_back)),
+			});
+			row(ui, "Dropped", &|load| format!("{} frames", count(&load.dropped)));
+			row(ui, "Encoded", &|load| {
+				format!("{} frames, last {}", count(&load.encoded), millis(&load.encode_us))
+			});
 		});
 		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
+		}
+		if let Some(error) = half.error() {
+			ui.colored_label(ui.visuals().warn_fg_color, format!("half size off: {error}"));
+		}
+		if let Some(error) = recording.error() {
+			ui.colored_label(ui.visuals().warn_fg_color, format!("recording encoder off: {error}"));
+		}
+		if let Some(error) = stats.recording_audio_error() {
+			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
 		}
 	}
 
@@ -2154,12 +2175,7 @@ impl Panels {
 		// there and replays apply in the order they were asked for.
 		let outcome = panel.outcome.clone();
 		let into = panel.into.as_ref().filter(|_| play);
-		let take = self.engine.target(&panel.of).and_then(|target| {
-			Ok(match into {
-				Some(_) => Take::new(&target, panel.length)?,
-				None => Take::clip(&target, panel.length)?,
-			})
-		});
+		let take = replay::take(&self.engine, &panel.of, panel.length, into.is_some());
 		let take = match take {
 			Ok(take) => take,
 			Err(err) => {
@@ -2308,6 +2324,7 @@ impl Panels {
 				for heading in [
 					"Source",
 					"Track",
+					"Granted",
 					"Sent",
 					"Frames",
 					"Viewers",
@@ -2331,6 +2348,13 @@ impl Panels {
 					});
 					group = source;
 					ui.label(&track.label).on_hover_text(&track.id);
+					match (track.enabled, track.source.is_some()) {
+						(false, _) => ui
+							.label("off")
+							.on_hover_text("The grant cannot fund it, so viewers use another"),
+						(true, true) => ui.label(""),
+						(true, false) => ui.label(or_unknown(track.granted.map(health::rate))),
+					};
 					ui.label(or_unknown(track.sent.map(health::rate)));
 					ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
 					ui.label(track.viewers.to_string());
