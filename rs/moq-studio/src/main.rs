@@ -44,6 +44,14 @@ pub struct Config {
 	#[usage(flatten)]
 	pub client: moq_tokio::connect::Config,
 
+	/// A second relay to publish the same broadcast to, so a viewer linked to
+	/// both resumes from it when the `--connect` relay fails. Both must speak
+	/// the one `--connect-version`, which must carry publisher epochs. Its
+	/// credential rides its URL's `?jwt=`: `--connect-token` goes to the
+	/// `--connect` relay only.
+	#[usage(long)]
+	pub failover: Option<url::Url>,
+
 	/// QUIC transport tuning (`--quic-*`).
 	#[usage(flatten)]
 	pub quic: moq_tokio::quic::Config,
@@ -61,6 +69,50 @@ impl Config {
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		Ok(())
 	}
+
+	/// The relays to publish to, the `--connect` one first; none without it.
+	fn relays(&self) -> anyhow::Result<Vec<engine::Relay>> {
+		let Some(url) = self.client.url.clone() else {
+			anyhow::ensure!(self.failover.is_none(), "--failover needs --connect");
+			return Ok(Vec::new());
+		};
+		if self.failover.is_some() {
+			self.check_failover()?;
+		}
+		let client = self.client.clone().init(self.quic.clone())?;
+		let mut relays = vec![engine::Relay { client, url }];
+		if let Some(url) = self.failover.clone() {
+			let mut client = self.client.clone();
+			// Its own credentials ride its URL; another operator's never reach it.
+			client.tokens.clear();
+			let client = client
+				.init(self.quic.clone())
+				.context("cannot set up the failover relay")?;
+			relays.push(engine::Relay { client, url });
+		}
+		Ok(relays)
+	}
+
+	/// Refuse relays a viewer could not move between without a restart: a copy
+	/// resumes mid-group only under the same epoch, which needs both links on
+	/// one protocol version that carries it.
+	fn check_failover(&self) -> anyhow::Result<()> {
+		let [version] = self.client.version.as_slice() else {
+			anyhow::bail!("--failover needs exactly one --connect-version, so both relays negotiate the same protocol");
+		};
+		anyhow::ensure!(
+			matches!(version, moq_net::Version::Lite(lite) if lite.has_epoch()),
+			"--failover needs a --connect-version with publisher epochs (moq-lite-07-wip today), not {version}, \
+			 or a viewer moving between relays restarts the stream rather than resuming it"
+		);
+		// Each relay's client binds its own socket, so a fixed port would be
+		// bound twice.
+		anyhow::ensure!(
+			self.client.bind.is_none_or(|bind| bind.port() == 0),
+			"--failover cannot share a fixed --connect-bind port between the two relays; leave the port 0"
+		);
+		Ok(())
+	}
 }
 
 fn main() -> anyhow::Result<()> {
@@ -72,14 +124,11 @@ fn main() -> anyhow::Result<()> {
 	let runtime = tokio::runtime::Runtime::new()?;
 	// The QUIC client binds its socket on the current runtime.
 	let _runtime = runtime.enter();
+	let relays = config.relays()?;
 	let gpu = pollster::block_on(engine::Gpu::new())?;
-	let connect = match config.client.url.clone() {
-		Some(url) => Some((config.client.clone().init(config.quic.clone())?, url)),
-		None => None,
-	};
 	let launch = engine::Launch {
 		gpu: gpu.clone(),
-		connect,
+		relays,
 		broadcast: config.broadcast.clone(),
 		on_demand: config.on_demand,
 	};
@@ -210,5 +259,31 @@ mod tests {
 		assert_eq!(config.broadcast, "studio");
 		assert!(!config.on_demand, "the program encodes whatever the demand by default");
 		assert_eq!(config.client.url.unwrap().port(), Some(4443));
+	}
+
+	/// A failover relay is accepted only on one protocol version that carries
+	/// publisher epochs, so a viewer moving between the relays resumes rather
+	/// than restarts.
+	#[test]
+	fn failover_needs_one_version_with_epochs() {
+		let check = |extra: &[&str]| {
+			let mut args = vec!["show.toml", "--connect", "https://a/", "--failover", "https://b/"];
+			args.extend(extra);
+			let args: Vec<_> = args.into_iter().map(std::ffi::OsStr::new).collect();
+			Config::parse_from(&args).unwrap().check_failover()
+		};
+		let lite07 = ["--connect-version", "moq-lite-07-wip"];
+		check(&lite07).expect("one version with epochs");
+		check(&[&lite07[..], &["--connect-bind", "127.0.0.1:0"]].concat()).expect("an ephemeral port");
+		for refused in [
+			&[][..],
+			&["--connect-version", "moq-lite-06"],
+			&["--connect-version", "moq-transport-22"],
+			&[&lite07[..], &["--connect-version", "moq-lite-06"]].concat(),
+			// Each relay binds its own socket.
+			&[&lite07[..], &["--connect-bind", "127.0.0.1:4444"]].concat(),
+		] {
+			assert!(check(refused).is_err(), "{refused:?} was accepted");
+		}
 	}
 }

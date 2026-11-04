@@ -90,7 +90,6 @@ repository.
 - [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
 - [Health grades source tracks](/quest/m0/health-sources.md) - the Health panel covers each published source track, not only the program
 - [Audio sources report stalls](/quest/m0/audio-stall.md) - a dead microphone or system audio reads stalled like a camera
-- [Relay failover](/quest/m0/failover.md) - the same epoch on two relays, so a relay failure does not drop the stream
 - [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
 - [Animation and transitions](/quest/m0/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
 - [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
