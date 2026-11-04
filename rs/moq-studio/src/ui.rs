@@ -1684,7 +1684,7 @@ impl Panels {
 					ui.end_row();
 					ui.label("Encoding");
 					ui.label(match (output.on_demand, stats.watched.load(Ordering::Relaxed)) {
-						(false, _) => "always",
+						(false, _) => "the canvas size always, half size while watched",
 						(true, true) => "while watched; watched now",
 						(true, false) => "while watched; idle now",
 					});
@@ -1699,33 +1699,40 @@ impl Panels {
 			ui.label("Drawn");
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
-			ui.label("Handed to the encoder");
-			ui.label(format!(
-				"{} frames, last {}",
-				count(&stats.copied),
-				millis(&stats.copy_us)
-			));
-			ui.end_row();
-			ui.label("Read back to the CPU");
-			ui.label(if stats.zero_copy.load(Ordering::Relaxed) {
-				"none; the encoder reads the GPU".to_string()
-			} else {
-				format!("{} frames", count(&stats.read_back))
-			});
-			ui.end_row();
-			ui.label("Dropped");
-			ui.label(format!("{} frames", count(&stats.dropped)));
-			ui.end_row();
 			ui.label("Encoder");
 			ui.label(stats.encoder().unwrap_or_else(|| "not open".into()));
 			ui.end_row();
-			ui.label("Encoded");
-			ui.label(format!(
-				"{} frames, last {}",
-				count(&stats.encoded),
-				millis(&stats.encode_us)
-			));
+			ui.label("Encoder sessions");
+			ui.label(format!("{} open", stats.sessions.open()))
+				.on_hover_text("Video encoders open now, the program's and the sources'. A GPU caps them.");
 			ui.end_row();
+		});
+		ui.separator();
+		egui::Grid::new("renditions").show(ui, |ui| {
+			for heading in ["", "Canvas size", "Half size"] {
+				ui.strong(heading);
+			}
+			ui.end_row();
+			let renditions = &stats.renditions;
+			let row = |ui: &mut Ui, label: &str, cell: &dyn Fn(&crate::engine::Load) -> String| {
+				ui.label(label);
+				for load in renditions {
+					ui.label(cell(load));
+				}
+				ui.end_row();
+			};
+			row(ui, "Handed to the encoder", &|load| {
+				format!("{} frames, last {}", count(&load.copied), millis(&load.copy_us))
+			});
+			let zero_copy = stats.zero_copy.load(Ordering::Relaxed);
+			row(ui, "Read back to the CPU", &|load| match zero_copy {
+				true => "none; the encoder reads the GPU".to_string(),
+				false => format!("{} frames", count(&load.read_back)),
+			});
+			row(ui, "Dropped", &|load| format!("{} frames", count(&load.dropped)));
+			row(ui, "Encoded", &|load| {
+				format!("{} frames, last {}", count(&load.encoded), millis(&load.encode_us))
+			});
 		});
 		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
@@ -2004,6 +2011,7 @@ impl Panels {
 				for heading in [
 					"Source",
 					"Track",
+					"Granted",
 					"Sent",
 					"Frames",
 					"Viewers",
@@ -2027,6 +2035,11 @@ impl Panels {
 					});
 					group = source;
 					ui.label(&track.label).on_hover_text(&track.id);
+					match (track.enabled, track.source.is_some()) {
+						(false, _) => ui.label("off").on_hover_text("The grant cannot fund it, so viewers use another"),
+						(true, true) => ui.label(""),
+						(true, false) => ui.label(or_unknown(track.granted.map(health::rate))),
+					};
 					ui.label(or_unknown(track.sent.map(health::rate)));
 					ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
 					ui.label(track.viewers.to_string());

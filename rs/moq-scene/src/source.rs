@@ -6,7 +6,8 @@
 //! dropped, which happens when the source is removed or edited.
 //!
 //! With [`Context::publish`] set, each local source that shows a picture also
-//! publishes it as its own track, web pages aside; see [`crate::publish`].
+//! publishes it as its own track in the studio's local broadcast, web pages
+//! aside; see [`crate::publish`].
 
 use std::collections::BTreeMap;
 use std::future::Future;

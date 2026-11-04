@@ -82,8 +82,9 @@ impl Take {
 	/// at the live edge may stop a frame or two short.
 	///
 	/// Refuses a target with neither rendition, one served from another
-	/// broadcast, a length of zero or over [`MAX_LENGTH`], a broadcast that has
-	/// described neither rendition yet, and, over a wire that cannot address a
+	/// broadcast, a length of zero or over [`MAX_LENGTH`], a broadcast that holds
+	/// nothing of the span, such as one that has described neither rendition
+	/// yet or encoded nothing then, and, over a wire that cannot address a
 	/// received track by time, a broadcast from a relay.
 	pub fn new(target: &Target, length: Duration) -> Result<Self, Error> {
 		Self::cut(target, length, Cut::Decodable)
@@ -132,9 +133,11 @@ impl Take {
 			}
 		}
 		if tracks.is_empty() {
-			return Err(Error::Unsupported(
-				"the broadcast has described none of its tracks yet".into(),
-			));
+			return Err(Error::Unsupported(format!(
+				"nothing of the last {} s is held: the broadcast encoded nothing then, or has not described its \
+				 tracks yet",
+				length.as_secs_f32()
+			)));
 		}
 		// Listed so an export of the take finds its renditions; HLS is for live
 		// viewers, which a take has none of.
@@ -185,8 +188,8 @@ enum Cut {
 }
 
 /// Copy the span of `name` in `target`, as far as it is readable now, into a
-/// track of `broadcast`, and end that track. `None` while its publisher has
-/// not described the track, so nothing of it is held.
+/// track of `broadcast`, and end that track. `None` when it holds nothing of
+/// the span, or while its publisher has not described the track.
 fn copy(
 	target: &Target,
 	broadcast: &moq_net::broadcast::Producer,
@@ -215,7 +218,11 @@ fn copy(
 	let info = source.info().clone().with_max_age(None);
 	let mut track = broadcast.create_track(name, info)?;
 	match copy_held(&mut source, &mut track, target.end, cut) {
-		Ok(()) => track.finish()?,
+		Ok(true) => track.finish()?,
+		Ok(false) => {
+			let _ = track.abort(moq_net::Error::Cancel);
+			return Ok(None);
+		}
 		Err(err) => {
 			let _ = track.clone().abort(moq_net::Error::Cancel);
 			return Err(err);
@@ -231,13 +238,13 @@ struct Held {
 }
 
 /// Copy every group and frame `source` has ready, up to `end` as `cut` says,
-/// into `track`.
+/// into `track`, returning whether it held any.
 fn copy_held(
 	source: &mut moq_net::track::Subscriber,
 	track: &mut moq_net::track::Producer,
 	end: moq_net::Timestamp,
 	cut: Cut,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
 	// Never woken: anything not ready now is left out.
 	let now = kio::Waiter::noop();
 	// Groups come in the order they reached the studio, which over a session
@@ -295,7 +302,7 @@ fn copy_held(
 			track.drop_groups(pair[0] + 1..pair[1], moq_net::StreamError::NotFound);
 		}
 	}
-	Ok(())
+	Ok(!copied.is_empty())
 }
 
 #[cfg(test)]
@@ -500,6 +507,15 @@ mod tests {
 		target.video = None;
 		let result = Take::new(&target, Duration::from_secs(1));
 		assert!(matches!(result, Err(Error::Unsupported(_))));
+	}
+
+	/// A take of a track that wrote nothing in its span, such as a source that
+	/// was not encoding, is refused rather than played as nothing.
+	#[test]
+	fn a_take_of_nothing_is_refused() {
+		let (broadcast, _track) = broadcast(0, None);
+		let result = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3));
+		assert!(matches!(result, Err(Error::Unsupported(_))), "{:?}", result.err());
 	}
 
 	#[test]
