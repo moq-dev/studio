@@ -17,6 +17,7 @@ mod feed;
 mod guests;
 mod health;
 mod interact;
+mod ladder;
 mod mix;
 mod record;
 mod replay;
@@ -39,10 +40,10 @@ pub struct Config {
 	#[usage(long, default = "studio")]
 	pub broadcast: String,
 
-	/// Copy and encode the program video only while someone watches or records
-	/// it. This saves the work while nobody does, but leaves a late viewer
-	/// nothing from before they arrived. Audio is always encoded. Without
-	/// `--connect`, the program and the sources are always on demand.
+	/// Copy and encode the program video at the canvas size only while someone
+	/// watches it, as the half size always is. This saves the work while
+	/// nobody does, but leaves a late viewer nothing from before they arrived.
+	/// Audio is always encoded, and a recording has an encoder of its own.
 	#[usage(long)]
 	pub on_demand: bool,
 

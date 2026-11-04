@@ -19,9 +19,10 @@
 //! - [`Compositor`] draws the scene in preview and the scene on program into
 //!   textures on the caller's `wgpu` device, cutting or running a
 //!   [`Transition`] between them. `moq_video::render::export` hands the
-//!   program to an encoder, on the GPU where the platform allows.
-//! - [`publish`] gives each local source its own track in the studio's
-//!   broadcast, so viewers can compose the scene themselves.
+//!   program to an encoder, on the GPU where the platform allows, and a
+//!   [`Scaler`] draws it smaller for a smaller rendition.
+//! - [`publish`] gives each local source its own track, in a broadcast the
+//!   studio keeps to itself, to replay or record the source on its own.
 //!
 //! Every picture is drawn on the program clock the caller ticks
 //! [`Compositor::render`] with, from whatever each source delivered last: a
@@ -38,6 +39,7 @@ mod lut;
 mod overlay;
 pub mod publish;
 pub mod replay;
+mod scale;
 pub mod source;
 
 pub use clip::Clip;
@@ -47,6 +49,7 @@ pub use collection::{
 };
 pub use compositor::{Compositor, FORMAT};
 pub use edit::{Change, Draft, Edit, History};
+pub use scale::Scaler;
 
 /// The `wgpu` the compositor draws with: `moq_video`'s, so its textures and
 /// the decoder's are the same type.

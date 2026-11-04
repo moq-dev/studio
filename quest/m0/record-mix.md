@@ -13,18 +13,15 @@ Split from [Audio mixes](https://github.com/moq-dev/studio/pull/32), which
 landed the mixes, routing, meters, delay, listening, and the program's pick
 (`[mixes] program`).
 
-A recording reads the studio's broadcast the way a viewer does
-(`rs/moq-studio/src/record.rs`), so a mix other than the program's needs an
-Opus track of its own. Keep that track off the relay: a mix the creator left
-off the stream must not be fetchable from it, as source tracks stay local
-after [Live encode control](/quest/m0/encode-control.md). Encode it only while
-a recording reads it, and record the program's video beside it in one file.
+A recording reads the program from a broadcast the studio keeps off the relay
+(`Recording` in `rs/moq-studio/src/engine.rs`, from
+[moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), beside the
+recording's own canvas-size encoder: its Opus track is a second encoding of
+the mix on program, made only while a recording reads it. Point that encoding
+at the mix the recording picks instead, so a mix the creator left off the
+stream is never fetchable from the relay.
 The pick lives in the scene file beside `[mixes] program`, and the Output
 panel shows it. Update `README.md`.
-
-## Required
-
-- [Live encode control](/quest/m0/encode-control.md) - the local broadcast a mix track stays off the relay in
 
 ## Related
 

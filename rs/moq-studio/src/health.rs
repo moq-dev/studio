@@ -57,8 +57,8 @@ pub struct Report {
 	pub relays: Vec<Relay>,
 	pub uplink: Uplink,
 	pub viewers: Viewers,
-	/// Each track of the broadcast in catalog order: the program's, then each
-	/// source's by source name.
+	/// Each track of the broadcast in catalog order, then each source's own
+	/// local track by source name.
 	pub tracks: Vec<Track>,
 	/// What is wrong, worst first, each naming its cause.
 	pub problems: Vec<Problem>,
@@ -96,8 +96,7 @@ pub struct Uplink {
 	/// What the congestion controller estimates the connection can carry.
 	pub capacity: Option<Rate>,
 	/// The media the program's tracks wrote over the last interval. Source
-	/// tracks are left out: they encode whether or not anyone pulls them, and
-	/// the relay uploads only what someone does.
+	/// tracks are left out: they stay in the studio, and never reach a relay.
 	pub media: Option<Rate>,
 	/// Transport bytes lost per media byte written over the last interval.
 	pub loss: Option<f64>,
@@ -145,7 +144,7 @@ pub struct Viewer {
 	pub error: Option<String>,
 }
 
-/// One track of the broadcast.
+/// One track of the broadcast, or a source's own local track.
 #[derive(Debug)]
 pub struct Track {
 	/// The source whose own track it is, or `None` for the program's.
@@ -154,6 +153,12 @@ pub struct Track {
 	pub id: String,
 	/// What it carries, such as `video H.264 1920x1080`.
 	pub label: String,
+	/// Its share of the connection's bandwidth, which a program track follows:
+	/// `None` for a source's track, or while the connection has no estimate.
+	pub granted: Option<Rate>,
+	/// Whether the catalog advertises it as encoding: not a rendition the
+	/// grant cannot fund.
+	pub enabled: bool,
 	/// The bitrate it wrote over the last interval.
 	pub sent: Option<Rate>,
 	/// Frames per second it wrote over the last interval.
@@ -196,9 +201,11 @@ pub struct Local {
 	pub dropped: u64,
 	/// Program frames encoded.
 	pub encoded: u64,
-	/// Whether the program should be encoding: always, or while watched when
-	/// on demand.
+	/// Whether the program's canvas size should be encoding: always, or while
+	/// watched when on demand, and while its grant funds it.
 	pub encoding: bool,
+	/// Each program track's share of the connection's bandwidth, by name.
+	pub grants: BTreeMap<String, Option<Rate>>,
 	/// Whether anyone subscribes to the program video.
 	pub watched: bool,
 	/// The encoder backend, once one opened.
@@ -221,7 +228,7 @@ pub struct Publisher {
 	pub relays: Vec<Link>,
 	pub feedback: Feedback,
 	pub watching: Watching,
-	/// Where the sources publish their own tracks, for what those wrote.
+	/// Where the sources keep their own tracks, for what those wrote.
 	pub sources: moq_scene::publish::Publish,
 }
 
@@ -298,7 +305,12 @@ impl Sampler {
 			graded.viewers = publisher.feedback.grade(now, &self.thresholds);
 			report.viewers.unread = publisher.feedback.unread();
 			report.viewers.watching = publisher.watching.get();
-			report.tracks = tracks(&publisher.catalog.snapshot(), &publisher.clock, &graded);
+			let listed = Listed {
+				program: publisher.catalog.snapshot(),
+				sources: publisher.sources.catalog(),
+				grants: &local.grants,
+			};
+			report.tracks = tracks(&listed, &publisher.clock, &graded);
 			report.viewers.reports = viewers(publisher, &graded.viewers);
 			current = Some(ours);
 			sources = Some(theirs);
@@ -410,23 +422,39 @@ fn uplink(snapshot: &hang::stats::Snapshot, graded: &Health, watched: bool) -> U
 	}
 }
 
-/// Each media track `catalog` lists, the program's and then each source's,
-/// with what it sent and what its viewers received. A source's stills carry
-/// no media to grade, so they are left out.
-fn tracks(catalog: &hang::Catalog<moq_scene::publish::Ext>, clock: &moq_mux::Clock, graded: &Graded) -> Vec<Track> {
-	let program = renditions(catalog).map(|(id, label)| (None, id, label, graded.publisher.as_ref()));
-	let sources = catalog.ext.studio.sources.iter().flat_map(|(name, catalog)| {
-		renditions(catalog).map(move |(id, label)| (Some(name), id, label, graded.sources.as_ref()))
+/// What the studio's catalogs list now.
+struct Listed<'a> {
+	/// The program's broadcast.
+	program: hang::Catalog<moq_scene::publish::Ext>,
+	/// The sources' local one, nesting each source's catalog.
+	sources: hang::Catalog<moq_scene::publish::Ext>,
+	/// Each program track's share of the connection, by name.
+	grants: &'a BTreeMap<String, Option<Rate>>,
+}
+
+/// Each media track `listed`, the program's and then each source's, with
+/// what it sent and what its viewers received. A source's stills carry no
+/// media to grade, so they are left out.
+fn tracks(listed: &Listed, clock: &moq_mux::Clock, graded: &Graded) -> Vec<Track> {
+	let program =
+		renditions(&listed.program).map(|(id, label, enabled)| (None, id, label, enabled, graded.publisher.as_ref()));
+	let sources = listed.sources.ext.studio.sources.iter().flat_map(|(name, catalog)| {
+		renditions(catalog).map(move |(id, label, enabled)| (Some(name), id, label, enabled, graded.sources.as_ref()))
 	});
 	program
 		.chain(sources)
-		.map(|(source, id, label, sent)| {
+		.map(|(source, id, label, enabled, sent)| {
 			let ours = sent.and_then(|health| health.renditions.get(id));
 			let interval = sent.and_then(|health| health.interval);
+			// A source's track is in the local broadcast, whose names can repeat
+			// the program's, and no relay viewer or grant reaches it.
+			let program = source.is_none();
 			let mut track = Track {
 				source: source.cloned(),
 				id: id.clone(),
 				label,
+				granted: listed.grants.get(id).copied().flatten().filter(|_| program),
+				enabled,
 				sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
 				framerate: ours
 					.and_then(|rendition| rendition.frames)
@@ -437,7 +465,7 @@ fn tracks(catalog: &hang::Catalog<moq_scene::publish::Ext>, clock: &moq_mux::Clo
 				verdict: Verdict::Unknown,
 				latency: None,
 			};
-			for viewer in &graded.viewers {
+			for viewer in graded.viewers.iter().filter(|_| program) {
 				let Some(health) = &viewer.health else { continue };
 				let Some(rendition) = health.renditions.get(id) else {
 					continue;
@@ -455,20 +483,20 @@ fn tracks(catalog: &hang::Catalog<moq_scene::publish::Ext>, clock: &moq_mux::Clo
 		.collect()
 }
 
-/// Each video and audio rendition `catalog` lists, by ID, with what it carries.
-fn renditions<E>(catalog: &hang::Catalog<E>) -> impl Iterator<Item = (&String, String)> {
+/// Each video and audio rendition `catalog` lists, by ID, with what it
+/// carries and whether it is enabled.
+fn renditions<E>(catalog: &hang::Catalog<E>) -> impl Iterator<Item = (&String, String, bool)> {
 	let video = catalog.video.renditions.iter().map(|(id, config)| {
 		let size = match (config.coded_width, config.coded_height) {
 			(Some(width), Some(height)) => format!(" {width}x{height}"),
 			_ => String::new(),
 		};
-		(id, format!("video {}{size}", config.codec))
+		(id, format!("video {}{size}", config.codec), config.enabled)
 	});
-	let audio = catalog
-		.audio
-		.renditions
-		.iter()
-		.map(|(id, config)| (id, format!("audio {} {} ch", config.codec, config.channel_count)));
+	let audio = catalog.audio.renditions.iter().map(|(id, config)| {
+		let label = format!("audio {} {} ch", config.codec, config.channel_count);
+		(id, label, config.enabled)
+	});
 	video.chain(audio)
 }
 
@@ -1031,6 +1059,8 @@ mod tests {
 			source: None,
 			id: id.into(),
 			label: label.into(),
+			granted: None,
+			enabled: true,
 			sent: None,
 			framerate: None,
 			viewers: 0,
@@ -1182,9 +1212,9 @@ mod tests {
 	}
 
 	/// Each source's media tracks are graded like the program's, after them and
-	/// by source name, from what the source wrote and what viewers report on
-	/// them; a still has no media to grade. A viewer stalling on one names
-	/// its source.
+	/// by source name, from what the source wrote; a still has no media to
+	/// grade. A source's track stays in the studio, so no viewer report or
+	/// grant applies to it, even under a name the program's track shares.
 	#[test]
 	fn source_tracks_are_graded_by_source() {
 		let video = |width: u32, height: u32| {
@@ -1194,45 +1224,65 @@ mod tests {
 			config.coded_height = Some(height);
 			config
 		};
-		let mut catalog = hang::Catalog::<moq_scene::publish::Ext>::default();
-		catalog.video.renditions.insert("0.avc3".into(), video(1920, 1080));
+		let mut program = hang::Catalog::<moq_scene::publish::Ext>::default();
+		program.video.renditions.insert("0.avc3".into(), video(1920, 1080));
+		let mut half = video(960, 540);
+		half.enabled = false;
+		program.video.renditions.insert("3.avc3".into(), half);
 		let mut camera = hang::Catalog::default();
-		camera.video.renditions.insert("2.avc3".into(), video(1280, 720));
+		camera.video.renditions.insert("0.avc3".into(), video(1280, 720));
 		let mut logo = hang::Catalog::default();
 		let png = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
 		logo.binary.tracks.insert("1.png".into(), png);
-		let sources = &mut catalog.ext.studio.sources;
+		let mut local = hang::Catalog::<moq_scene::publish::Ext>::default();
+		let sources = &mut local.ext.studio.sources;
 		sources.insert("logo".into(), logo);
 		sources.insert("camera".into(), camera);
+		let grants = [("0.avc3".to_string(), Some(Rate::from_mbps(4)))].into();
+		let listed = Listed {
+			program,
+			sources: local,
+			grants: &grants,
+		};
 
 		// 375 kB in a second is 3 Mb/s, and 125 kB is 1 Mb/s.
 		let graded = Graded {
 			publisher: Some(wrote(&[("0.avc3", 375_000)])),
-			sources: Some(wrote(&[("2.avc3", 125_000)])),
-			viewers: vec![stalling("alice", "2.avc3", Duration::from_millis(100))],
+			sources: Some(wrote(&[("0.avc3", 125_000)])),
+			viewers: vec![stalling("alice", "0.avc3", Duration::from_millis(100))],
 		};
-		let tracks = tracks(&catalog, &moq_mux::Clock::new(), &graded);
+		let tracks = tracks(&listed, &moq_mux::Clock::new(), &graded);
 		let rows: Vec<_> = tracks
 			.iter()
-			.map(|track| (track.source.as_deref(), track.id.as_str(), track.sent.map(rate)))
+			.map(|track| {
+				let granted = track.granted.map(rate);
+				(
+					track.source.as_deref(),
+					track.id.as_str(),
+					track.sent.map(rate),
+					granted,
+					track.enabled,
+				)
+			})
 			.collect();
 		assert_eq!(
 			rows,
 			[
-				(None, "0.avc3", Some("3.0 Mb/s".into())),
-				(Some("camera"), "2.avc3", Some("1.0 Mb/s".into())),
+				(None, "0.avc3", Some("3.0 Mb/s".into()), Some("4.0 Mb/s".into()), true),
+				(None, "3.avc3", None, None, false),
+				(Some("camera"), "0.avc3", Some("1.0 Mb/s".into()), None, true),
 			]
 		);
-		let camera = &tracks[1];
+		let camera = &tracks[2];
 		assert_eq!(camera.framerate, Some(30.0));
-		assert_eq!((camera.viewers, camera.verdict), (1, Verdict::Unhealthy));
-		assert_eq!((tracks[0].viewers, tracks[0].verdict), (0, Verdict::Unknown));
+		assert_eq!((camera.viewers, camera.verdict), (0, Verdict::Unknown));
+		assert_eq!((tracks[0].viewers, tracks[0].verdict), (1, Verdict::Unhealthy));
 
 		let local = Local::default();
 		let uplink = Uplink::default();
 		assert_eq!(
 			causes(problems(&facts(&local, &uplink, &graded.viewers, &tracks))),
-			["1 of 1 viewers are stalling on source `camera`'s video avc3.42c01f 1280x720."]
+			["1 of 1 viewers are stalling on video avc3.42c01f 1920x1080."]
 		);
 	}
 
@@ -1384,12 +1434,8 @@ mod tests {
 			}],
 			feedback: feedback.clone(),
 			watching: Watching::default(),
-			sources: moq_scene::publish::Publish::new(
-				broadcast.clone(),
-				catalog.clone(),
-				moq_net::bandwidth::Allocator::unlimited(),
-				moq_video::encode::Kind::Auto,
-			),
+			sources: moq_scene::publish::Publish::new(clock.clone(), moq_video::encode::Kind::Auto, Default::default())
+				.unwrap(),
 		}));
 
 		let alice = origin.create_broadcast("show/viewers/alice.echo").unwrap();
