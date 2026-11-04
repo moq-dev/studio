@@ -92,6 +92,7 @@ Every panel is a tab you can drag, split, or stack.
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
+| Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
 | Output | See the broadcast path, whether the program is encoding, the canvas, and the encoder's work. |
@@ -134,6 +135,63 @@ the failover replaces the first relay's copy. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
+
+## Guests
+
+Guests and phones join a room the studio owns on its relay, from a web page,
+and their camera and screen appear as broadcast sources. The room follows
+[moq-room](https://github.com/moq-dev/moq/tree/main/rs/moq-room): a guest
+named `alice` publishes `alice/camera.hang` and `alice/screen.hang` under it.
+Guests need a relay that verifies tokens, so run your own with
+[`moq auth serve`](https://doc.moq.dev/bin/cli) behind it, and a key that can
+sign only for the room:
+
+```bash
+moq auth generate --algorithm ES256 --out room.jwk --public-dir keys \
+    --root show/guests --publish '**' --subscribe '**'
+moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
+    --room guests --room-key room.jwk --join-page https://join.example.com/
+```
+
+- `--room` is a path under the `--connect` URL's, here `show/guests` on the
+  relay. The studio's own token must let it subscribe there. A guest's browser
+  dials the same relay, so `--connect` must be `https://`, or `http://` only to
+  this machine or the local network.
+- `--room-key` signs each guest's token. The studio refuses a key whose scope
+  reaches outside the room, so a stolen key cannot sign for the rest of the
+  relay. Put its public half in the directory `moq auth serve --key-dir` reads.
+- `--join-page` is where the join page (`js/join`, `bun run --cwd js/join
+  build`) is hosted. Browsers open the camera only on an `https://` page or
+  `localhost`, so the studio refuses any other. It defaults to `https://join.studio.moq.dev/`, which this
+  repository deploys from `main`, but that domain is not live yet, so for now
+  host the page yourself and pass its URL.
+- `--guest-expiry` (default `4h`) is how long a link works. The relay
+  disconnects a guest when their link expires, so send a new one before then.
+- With `--failover`, a link still names only the `--connect` relay: the join
+  page dials one relay, and a guest's token is rooted at the room there, so
+  guests drop while that relay is down. The studio follows the room through
+  both relays, like any broadcast source, so a guest the failover routes at
+  the same path, as a relay in the same cluster does, keeps reaching it.
+  Anyone the failover lets publish in the room joins as a guest, so guard the
+  room there as on the `--connect` relay.
+
+**Invite** in the Guests panel makes a link for one guest name and shows it as
+a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
+in the link's fragment, which the browser never sends to a server, and lets
+them publish only under their own name, so they cannot appear as someone else.
+Treat the link like a password: anyone holding it can join as that guest until
+it expires. A guest's broadcasts become sources named after them (`alice`,
+`alice screen`) when they first appear, muted and in no scene: place them from
+the Items panel and unmute them in Audio to put them on air. That includes a
+guest invited before a restart whose link still works. A guest's source is
+saved to the scene file but is not your edit: it stays out of History, so undo
+never removes it and a guest joining never loses what you could redo. A guest
+who reconnects after you removed their source comes back under a new name
+(`alice 2`), since undoing the removal brings back the old one.
+**Remove from scenes** is your edit, so it undoes: it takes a guest, any clone
+of their sources, and any mask reading them out of every scene and the top
+layer and mutes them; a signed token cannot be taken back, so they stay
+connected until it expires.
 
 ## Scene file
 
@@ -401,9 +459,11 @@ just check   # Lint everything, including the quest tree
 just test    # Run the tests
 just ci      # Both, as CI runs them
 just fix     # Auto-fix formatting
+just join    # Serve the join page locally
 ```
 
-`rs/moq-scene` is the UI-free compositor and `rs/moq-studio` the app. See
+`rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
+`js/join` the join page, built on `@moq/room` and `@moq/publish`. See
 [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md), and the
 [quest tree](quest/README.md) for planned work.
 
