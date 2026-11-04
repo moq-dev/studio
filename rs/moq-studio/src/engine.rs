@@ -663,25 +663,30 @@ impl Engine {
 	/// What only the studio knows about its stream at `now`.
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
+		// A stalled picture matters where the program draws it: a scene on air,
+		// including one fading out, or the top layer over them. Stalled sound
+		// matters wherever the program plays it.
 		let stalled = {
 			let state = self.state.lock().unwrap();
-			let program = state
+			let shown: Vec<&str> = state
 				.compositor
-				.program_scene()
-				.and_then(|name| state.collection.scene(name));
-			let mut shown: Vec<&str> = program
-				.into_iter()
+				.on_air()
+				.filter_map(|name| state.collection.scene(name))
 				.flat_map(|scene| &scene.items)
+				.chain(&state.collection.top)
 				.filter(|item| item.visible)
-				.map(|item| item.source.as_str())
+				.map(|item| state.collection.capture(&item.source))
 				.collect();
-			shown.sort_unstable();
-			shown.dedup();
-			shown
-				.into_iter()
-				.filter_map(|name| {
-					let since = state.sources.get(name)?.stalled(now)?;
-					Some((name.to_string(), since))
+			state
+				.sources
+				.iter()
+				.filter_map(|(name, feed)| {
+					let stall = feed.stalled(now)?;
+					let matters = match stall {
+						source::Stall::Picture(_) => shown.contains(&name),
+						source::Stall::Sound(_) => feed.strip().is_some_and(|strip| !strip.muted()),
+					};
+					matters.then(|| (name.to_string(), stall))
 				})
 				.collect()
 		};

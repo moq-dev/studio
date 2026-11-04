@@ -49,8 +49,9 @@ pub(crate) enum Picture {
 /// an undrawn one, so a slow canvas skips pictures instead of queuing them.
 pub(crate) type Mailbox = Arc<Mutex<Option<Picture>>>;
 
-/// When a source last delivered a picture, `None` before its first.
-type Shown = Arc<Mutex<Option<Instant>>>;
+/// When a source last delivered a picture or, for a microphone or system
+/// audio, a buffer of sound. `None` before its first.
+type Delivered = Arc<Mutex<Option<Instant>>>;
 
 /// What a broadcast source plays, for a replay of it to copy.
 #[derive(Default)]
@@ -83,10 +84,29 @@ fn clear() -> Picture {
 	}
 }
 
-/// How long a camera or broadcast may go without a new picture before it reads
-/// as stalled. Either delivers several pictures a second while it works, so a
-/// second without one is a freeze a viewer sees.
+/// How long a camera, broadcast, microphone, or system audio may go without
+/// delivering before it reads as stalled. Each delivers several pictures or
+/// buffers a second while it works, so a second without one is a freeze a
+/// viewer sees or a silence they hear.
 pub const STALL: Duration = Duration::from_secs(1);
+
+/// What a live source stopped delivering, and for how long.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stall {
+	/// A camera or broadcast without a new picture: the program repeats its last one.
+	Picture(Duration),
+	/// A microphone or system audio without new samples: the program plays silence for it.
+	Sound(Duration),
+}
+
+impl Stall {
+	/// How long the source has gone without delivering.
+	pub fn since(&self) -> Duration {
+		match self {
+			Self::Picture(since) | Self::Sound(since) => *since,
+		}
+	}
+}
 
 /// One instance of a broadcast being decoded.
 type Playing<'a> = Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>>;
@@ -201,7 +221,7 @@ impl Sources {
 pub struct Feed {
 	source: Source,
 	picture: Mailbox,
-	shown: Shown,
+	delivered: Delivered,
 	strip: Option<Strip>,
 	status: kio::Consumer<Status>,
 	page: Option<Page>,
@@ -270,19 +290,25 @@ impl Feed {
 		self.track.as_ref().map(|track| track.read().clone())
 	}
 
-	/// How long a live camera or broadcast has gone without a new picture, once
-	/// that is at least [`STALL`] at `now`.
+	/// What a live camera, broadcast, microphone, or system audio has gone
+	/// without delivering, once that is at least [`STALL`] at `now`.
 	///
 	/// Displays and windows are never stalled: a capture of a still screen
 	/// delivers nothing until it changes. Neither are sources that have not
-	/// delivered their first picture, such as an audio-only broadcast.
-	pub fn stalled(&self, now: Instant) -> Option<Duration> {
-		if !matches!(self.source, Source::Camera { .. } | Source::Broadcast { .. }) || self.status() != Status::Live {
+	/// delivered yet, such as an audio-only broadcast: a broadcast stalls by its
+	/// picture alone.
+	pub fn stalled(&self, now: Instant) -> Option<Stall> {
+		let stall = match self.source {
+			Source::Camera { .. } | Source::Broadcast { .. } => Stall::Picture,
+			Source::Microphone { .. } | Source::SystemAudio => Stall::Sound,
+			_ => return None,
+		};
+		if self.status() != Status::Live {
 			return None;
 		}
-		let shown = (*self.shown.lock().unwrap())?;
-		let since = now.saturating_duration_since(shown);
-		(since >= STALL).then_some(since)
+		let delivered = (*self.delivered.lock().unwrap())?;
+		let since = now.saturating_duration_since(delivered);
+		(since >= STALL).then(|| stall(since))
 	}
 
 	/// The source's gain, mute, and meter in the program audio, if it has sound.
@@ -308,7 +334,7 @@ pub struct Driver {
 	source: Source,
 	context: Context,
 	picture: Mailbox,
-	shown: Shown,
+	delivered: Delivered,
 	strip: Option<Strip>,
 	status: kio::Producer<Status>,
 	#[cfg_attr(
@@ -465,7 +491,7 @@ impl Driver {
 
 	fn show(&self, picture: Picture) {
 		*self.picture.lock().unwrap() = Some(picture);
-		*self.shown.lock().unwrap() = Some(kio::clock::now());
+		*self.delivered.lock().unwrap() = Some(kio::clock::now());
 		set(&self.status, Status::Live);
 	}
 
@@ -531,9 +557,20 @@ impl Driver {
 		let strip = self.strip.clone().expect("audio sources have a strip");
 		let capture = capture(source).await?;
 		let channel = self.context.bus.capture(capture.consume(), strip)?;
+		let heard = self.hear(capture.consume());
 		set(&self.status, Status::Live);
-		tokio::try_join!(capture.run(), channel.run())?;
+		tokio::try_join!(capture.run(), channel.run(), heard)?;
 		Ok(())
+	}
+
+	/// Note each buffer `capture` delivers, so one that goes quiet reads as
+	/// stalled. Ends with the capture's error.
+	#[cfg(feature = "capture")]
+	async fn hear(&self, mut capture: moq_audio::capture::Consumer) -> Result<(), moq_audio::Error> {
+		loop {
+			capture.read().await?;
+			*self.delivered.lock().unwrap() = Some(kio::clock::now());
+		}
 	}
 
 	#[cfg(not(feature = "capture"))]
@@ -919,7 +956,7 @@ fn pick<'a, C: Reference + Clone + 'a>(
 /// Start the feed for `source`, and the driver that fills it.
 fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 	let picture = Mailbox::default();
-	let shown = Shown::default();
+	let delivered = Delivered::default();
 	let strip = source.has_audio().then(Strip::default);
 	if let Some(strip) = &strip {
 		context.program.route(strip);
@@ -950,7 +987,7 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 	let feed = Feed {
 		source: source.clone(),
 		picture: picture.clone(),
-		shown: shown.clone(),
+		delivered: delivered.clone(),
 		strip: strip.clone(),
 		status: status.consume(),
 		page: page.clone(),
@@ -963,7 +1000,7 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		source: source.clone(),
 		context: context.clone(),
 		picture,
-		shown,
+		delivered,
 		strip,
 		status,
 		page,
@@ -1203,11 +1240,11 @@ mod tests {
 		.await;
 	}
 
-	/// A camera or broadcast that stops delivering pictures reads as stalled once
-	/// [`STALL`] passes; a display, a still, and a source that never delivered
-	/// one do not.
+	/// A camera or broadcast that stops delivering pictures, or a microphone or
+	/// system audio that stops delivering sound, reads as stalled once [`STALL`]
+	/// passes; a display, a still, and a source that never delivered do not.
 	#[tokio::test]
-	async fn a_live_source_without_new_pictures_stalls() {
+	async fn a_live_source_without_new_deliveries_stalls() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, _origin) = context(dir.path());
@@ -1220,14 +1257,22 @@ mod tests {
 
 			let (camera, driver) = opened(Source::Camera { id: None });
 			assert_eq!(camera.stalled(start + STALL), None, "no picture yet");
-			*driver.shown.lock().unwrap() = Some(start);
+			*driver.delivered.lock().unwrap() = Some(start);
 			assert_eq!(camera.stalled(start + STALL / 2), None);
-			assert_eq!(camera.stalled(start + STALL * 3), Some(STALL * 3));
+			assert_eq!(camera.stalled(start + STALL * 3), Some(Stall::Picture(STALL * 3)));
 			set(&driver.status, Status::Failed("unplugged".into()));
 			assert_eq!(camera.stalled(start + STALL * 3), None, "a failure says why on its own");
 
+			for source in [Source::Microphone { id: None }, Source::SystemAudio] {
+				let (audio, driver) = opened(source);
+				assert_eq!(audio.stalled(start + STALL), None, "no sound yet");
+				*driver.delivered.lock().unwrap() = Some(start);
+				assert_eq!(audio.stalled(start + STALL / 2), None);
+				assert_eq!(audio.stalled(start + STALL * 3), Some(Stall::Sound(STALL * 3)));
+			}
+
 			let (display, driver) = opened(Source::Display { id: None });
-			*driver.shown.lock().unwrap() = Some(start);
+			*driver.delivered.lock().unwrap() = Some(start);
 			assert_eq!(display.stalled(start + STALL * 3), None, "a still screen sends nothing");
 		})
 		.await;
