@@ -589,11 +589,13 @@ impl Setup {
 				.map(|(_, encoding)| encoding.total())
 				.max()
 				.map(|top| top.scaled(1.0 / headroom()));
+			// The first relay's: the stream's tracks claim their bitrate on its
+			// link alone, so it is the one probed toward the stream's rate.
 			let connect = self
 				.launch
-				.connect
-				.clone()
-				.map(|(client, url)| (client, url, self.launch.broadcast.clone()));
+				.relays
+				.first()
+				.map(|relay| (relay.client.clone(), relay.url.clone(), self.launch.broadcast.clone()));
 			self.uplink = Some(match (connect, ceiling) {
 				(None, _) => Task::Done(Err("no relay is configured; start with --connect to measure it".into())),
 				(Some(_), None) => Task::Done(Err("nothing encodes on this machine, so nothing would be sent".into())),

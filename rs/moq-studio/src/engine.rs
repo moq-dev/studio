@@ -202,10 +202,17 @@ pub struct Output {
 	/// Whether the program video is copied and encoded only while someone
 	/// watches, rather than all the time.
 	pub on_demand: bool,
-	/// The relay connection, which reconnects on its own and dials only while
-	/// held. The Health panel reads its state.
-	_connection: moq_tokio::Connection,
+	/// A connection to each relay, which reconnects on its own and dials only
+	/// while held. The Health panel reads their states.
+	_connections: Vec<moq_tokio::Connection>,
 	publication: moq_net::origin::Publication,
+}
+
+/// A relay the program is published to.
+#[derive(Clone)]
+pub struct Relay {
+	pub client: moq_tokio::Client,
+	pub url: url::Url,
 }
 
 impl Drop for Output {
@@ -240,8 +247,8 @@ const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 #[derive(Clone)]
 pub struct Launch {
 	pub gpu: Gpu,
-	/// The relay to publish to, if any.
-	pub connect: Option<(moq_tokio::Client, url::Url)>,
+	/// The relays to publish to, the preferred first; none publishes nothing.
+	pub relays: Vec<Relay>,
 	/// The broadcast path the program is published at.
 	pub broadcast: String,
 	/// Whether the program video encodes only while someone watches.
@@ -252,15 +259,15 @@ impl Engine {
 	/// Open the `loaded` collection and history on `launch.gpu`, start the
 	/// program clock, and save both to `autosave`'s files as they change,
 	/// starting at once.
-	/// With `launch.connect`, publish the program at `launch.broadcast` on that
-	/// relay, encoding its video only while someone watches when
-	/// `launch.on_demand`.
+	/// Publish the program at `launch.broadcast` on every one of
+	/// `launch.relays`, preferred first, encoding its video only while someone
+	/// watches when `launch.on_demand`.
 	///
-	/// Call inside the tokio runtime that serves the relay connection.
+	/// Call inside the tokio runtime that serves the relay connections.
 	pub async fn start(launch: Launch, autosave: Autosave, loaded: autosave::Loaded) -> anyhow::Result<Arc<Self>> {
 		let Launch {
 			gpu,
-			connect,
+			relays,
 			broadcast,
 			on_demand,
 		} = launch;
@@ -274,12 +281,11 @@ impl Engine {
 		} = loaded;
 		let canvas = collection.canvas;
 
-		let (output, origin, publish) = match connect {
-			Some((client, url)) => {
-				let (output, publish) = publish(&gpu, client, url, subscribe, &broadcast, canvas, on_demand).await?;
-				(Some(output), None, Some(publish))
-			}
-			None => (None, Some(subscribe), None),
+		let (output, origin, publish) = if relays.is_empty() {
+			(None, Some(subscribe), None)
+		} else {
+			let (output, publish) = publish(&gpu, relays, subscribe, &broadcast, canvas, on_demand).await?;
+			(Some(output), None, Some(publish))
 		};
 
 		// Absolute, so a copied image names the same file in another collection.
@@ -561,13 +567,12 @@ struct Publish {
 	sources: moq_scene::publish::Publish,
 }
 
-/// Announce the program broadcast, which also carries each local source's own
-/// track, and connect to the relay, which also carries `subscribe`'s broadcast
-/// sources.
+/// Announce the program broadcast under one epoch, which also carries each
+/// local source's own track, and connect to every relay, each also carrying
+/// `subscribe`'s broadcast sources.
 async fn publish(
 	gpu: &Gpu,
-	client: moq_tokio::Client,
-	url: url::Url,
+	relays: Vec<Relay>,
 	subscribe: moq_net::origin::Producer,
 	path: &str,
 	canvas: moq_scene::Canvas,
@@ -575,15 +580,16 @@ async fn publish(
 ) -> anyhow::Result<(Output, Publish)> {
 	let origin = moq_tokio::origin::spawn();
 	let path = moq_net::Path::new(path).with_context(|| format!("cannot publish at `{path}`"))?;
-	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), broadcast = %path, "connecting");
 	let reports = subscribe.consume();
-	let connection = client.with_publisher(&origin).with_subscriber(subscribe).connect(url);
+	tracing::info!(broadcast = %path, "publishing");
+	let (connections, links) = connect(relays, &origin, &subscribe);
 
 	let publication = origin.create_broadcast(&path).context("cannot create the broadcast")?;
 	let mut broadcast = publication.broadcast().clone();
-	// Each track claims its bitrate on the connection's estimate, which the
-	// connection then probes to fund: the bandwidth the stream is granted.
-	let bandwidth = connection.allocator();
+	// Each track claims its bitrate on the first relay's estimate, which that
+	// connection then probes to fund: the bandwidth the stream is granted. An
+	// allocator spans one connection, so the failover's link is never probed.
+	let bandwidth = connections[0].allocator();
 	let catalog = moq_mux::catalog::Config::default()
 		.with_bandwidth(bandwidth.clone())
 		.with_catalog(Default::default());
@@ -625,6 +631,8 @@ async fn publish(
 	let stats = catalog.clone();
 	let audio = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)?;
 
+	// One epoch on every relay, so a viewer moving between them resumes
+	// mid-group rather than restarting.
 	let epoch = moq_net::Epoch::mint();
 	publication
 		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
@@ -641,7 +649,7 @@ async fn publish(
 		observer: hang::health::Observer::new(path.clone(), Some(epoch)),
 		catalog: stats,
 		clock: clock.clone(),
-		monitor: connection.monitor(),
+		relays: links,
 		feedback,
 		watching,
 	};
@@ -649,7 +657,7 @@ async fn publish(
 	let output = Output {
 		path: path.to_string(),
 		on_demand,
-		_connection: connection,
+		_connections: connections,
 		publication,
 	};
 	Ok((
@@ -664,6 +672,44 @@ async fn publish(
 			sources,
 		},
 	))
+}
+
+/// Connect to every relay, publishing `origin` to each and feeding `subscribe`
+/// the broadcast sources of each, and watch each connection for the Health
+/// panel.
+fn connect(
+	relays: Vec<Relay>,
+	origin: &moq_net::origin::Producer,
+	subscribe: &moq_net::origin::Producer,
+) -> (Vec<moq_tokio::Connection>, Vec<health::Link>) {
+	relays
+		.into_iter()
+		.enumerate()
+		.map(|(rank, Relay { client, url })| {
+			tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), "connecting");
+			// Only the scheme, host, and port: a path can carry a credential, and
+			// the panel may be on a shared screen. A URL without a host, such as
+			// a unix socket's, keeps its path, which is the address.
+			let endpoint = match url.host_str() {
+				Some(host) => match url.port() {
+					Some(port) => format!("{}://{host}:{port}", url.scheme()),
+					None => format!("{}://{host}", url.scheme()),
+				},
+				None => format!("{}:{}", url.scheme(), url.path()),
+			};
+			// Among routes of one instance of a broadcast source, the first
+			// relay's wins while it has one. A newer instance wins first,
+			// whichever relay it comes through.
+			let preference = match rank {
+				0 => moq_net::origin::Preference::default(),
+				_ => moq_net::origin::Preference::new(-1),
+			};
+			let sources = subscribe.clone().with_preference(preference);
+			let connection = client.with_publisher(origin).with_subscriber(sources).connect(url);
+			let monitor = connection.monitor();
+			(connection, health::Link { endpoint, monitor })
+		})
+		.unzip()
 }
 
 /// Run a background reader, logging why it stopped.
@@ -872,7 +918,10 @@ mod tests {
 
 		let launch = Launch {
 			gpu: Gpu::new().await.expect("a GPU"),
-			connect: Some((client, fixture.url.clone())),
+			relays: vec![Relay {
+				client,
+				url: fixture.url.clone(),
+			}],
 			broadcast: "studio".into(),
 			on_demand: false,
 		};
@@ -1020,7 +1069,8 @@ mod tests {
 							.tracks
 							.iter()
 							.all(|track| track.sent.is_some_and(|sent| sent.as_bps() > 0));
-					if report.relay == Some(health::Relay::Connected) && sending {
+					let connected = matches!(&report.relays[..], [relay] if relay.state == health::State::Connected);
+					if connected && sending {
 						return;
 					}
 				}
@@ -1029,5 +1079,119 @@ mod tests {
 		})
 		.await
 		.expect("health grades the program's tracks");
+	}
+
+	/// With a failover relay, both relays route the program under its one
+	/// epoch over the one protocol version, so a viewer moving between them
+	/// resumes. A broadcast source only the failover has still reaches the
+	/// studio, and a newer instance of a source behind the failover replaces
+	/// the first relay's.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn every_relay_routes_one_epoch() {
+		let _ = moq_tokio::crypto::install_default();
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+		let mut relays = Vec::new();
+		let mut routes = Vec::new();
+		let mut guests = Vec::new();
+		for _ in 0..2 {
+			let fixture = moq_relay::test_relay().await.expect("test relay");
+			let ready = fixture.relay.ready();
+			routes.push(fixture.relay.cluster().origin.consume());
+			tokio::spawn(fixture.relay.run());
+			ready.wait().await.expect("relay ready");
+			let mut client = moq_tokio::connect::Config::default();
+			client.tls.fingerprint = vec![fixture.fingerprint.clone()];
+			client.version = vec![version];
+			let client = client.init(Default::default()).expect("client");
+			guests.push((client.clone(), fixture.url.clone()));
+			relays.push(Relay {
+				client,
+				url: fixture.url,
+			});
+		}
+
+		let origin = moq_tokio::origin::spawn();
+		let subscribe = moq_tokio::origin::spawn();
+		let (_connections, links) = connect(relays, &origin, &subscribe);
+		let publication = origin.create_broadcast("studio").unwrap();
+		let epoch = moq_net::Epoch::mint();
+		publication
+			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+			.unwrap();
+
+		// Publish `path` under `epoch` through one relay's guest.
+		let publish = |path: &str, epoch: Option<&moq_net::Epoch>, (client, url): &(moq_tokio::Client, url::Url)| {
+			let origin = moq_tokio::origin::spawn();
+			let source = origin.create_broadcast(path).unwrap();
+			let route = moq_net::origin::Route::default();
+			let route = match epoch {
+				Some(epoch) => route.with_epoch(epoch.clone()),
+				None => route,
+			};
+			source.announce(route).unwrap();
+			let connection = client.clone().with_publisher(&origin).connect(url.clone());
+			(origin, source, connection)
+		};
+		let _guest = publish("guest", None, &guests[1]);
+		let mut sources = subscribe.consume().announced();
+
+		let routed = async {
+			for relay in &routes {
+				let mut announced = relay.announced();
+				loop {
+					match announced.next().await.expect("announcements") {
+						moq_net::announce::Event::Start(announce) if announce.prefix.as_str() == "studio" => {
+							assert_eq!(announce.route.epoch, Some(epoch.clone()));
+							break;
+						}
+						_ => continue,
+					}
+				}
+			}
+			for link in &links {
+				let mut state = link.monitor.state();
+				while state.version != Some(version) {
+					state = link
+						.monitor
+						.state_changed(state.revision)
+						.await
+						.expect("the connection");
+				}
+			}
+			subscribe
+				.consume()
+				.follow("guest", None)
+				.unwrap()
+				.available()
+				.await
+				.expect("the source");
+
+			// The newest instance of a source wins before the first relay's rank,
+			// so one restarted behind the failover replaces the first relay's.
+			let older: moq_net::Epoch = "01900000-0000-7000-8000-000000000000".parse().unwrap();
+			let newer: moq_net::Epoch = "01910000-0000-7000-8000-000000000000".parse().unwrap();
+			let _first = publish("show", Some(&older), &guests[0]);
+			routed_at(&mut sources, &older).await;
+			let _restarted = publish("show", Some(&newer), &guests[1]);
+			routed_at(&mut sources, &newer).await;
+		};
+		kio::clock::timeout(TIMEOUT, routed)
+			.await
+			.expect("both relays route the program, the failover the sources");
+	}
+
+	/// Wait until `announced` routes `show` under `epoch`.
+	async fn routed_at(announced: &mut moq_net::announce::Consumer, epoch: &moq_net::Epoch) {
+		use moq_net::announce::Event;
+		loop {
+			let announce = match announced.next().await.expect("announcements") {
+				Event::Start(announce) | Event::Update(announce) | Event::Restart(announce) => announce,
+				Event::Takeover { announce, .. } => announce,
+				Event::End(_) => continue,
+			};
+			if announce.prefix.as_str() == "show" && announce.route.epoch.as_ref() == Some(epoch) {
+				return;
+			}
+		}
 	}
 }
