@@ -575,6 +575,7 @@ impl Driver {
 								// captured once.
 								drop(stream);
 								stream = moq_video::capture::open(&config).await?;
+								video.reopened();
 							}
 						}
 						continue;

@@ -578,6 +578,16 @@ impl<'a> Video<'a> {
 		self.track.is_open()
 	}
 
+	/// Take pictures from a reopened capture, whose private timeline starts
+	/// over: the next picture maps it onto the program's clock afresh.
+	#[cfg_attr(
+		not(any(feature = "capture", test)),
+		expect(dead_code, reason = "only a capture reopens")
+	)]
+	pub(crate) fn reopened(&mut self) {
+		self.epoch = None;
+	}
+
 	/// Close the encoder while nothing uses the source, marking the gap, which
 	/// gives the encode session back.
 	pub(crate) fn release(&mut self) -> Result<(), Error> {
@@ -879,6 +889,16 @@ mod tests {
 			video.release().unwrap();
 			assert_eq!(publish.sessions.open(), 0);
 			assert!(kio::clock::timeout(wait, video.settle()).await.is_err(), "closed");
+
+			// A capture reopened a minute on starts its own timeline over, which
+			// lands on the program's clock now rather than a minute back.
+			kio::clock::sleep(std::time::Duration::from_secs(60)).await;
+			video.reopened();
+			publish.show(["display".to_string()].into());
+			let now = publish.catalog.clock().now();
+			let mut picture = gray(size, 0);
+			video.encode(&mut picture).unwrap();
+			assert!(picture.timestamp >= now, "{:?} before {now:?}", picture.timestamp);
 		})
 		.await;
 	}
