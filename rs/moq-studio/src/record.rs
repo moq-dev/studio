@@ -243,7 +243,7 @@ impl Run {
 		let mut writers = tokio::task::JoinSet::new();
 		self.spawn(None, program, file, &mut writers);
 		if let Err(err) = self.follow(&mut writers, sources).await {
-			tracing::error!(error = format!("{err:#}"), "cannot follow the catalog");
+			tracing::error!(error = format!("{err:#}"), "a recording's writer failed");
 			self.stop.send_replace(true);
 		}
 		while writers.join_next().await.is_some() {}
@@ -258,8 +258,13 @@ impl Run {
 	/// file failed while it stays listed gets no other.
 	async fn follow(&self, writers: &mut Writers, sources: bool) -> anyhow::Result<()> {
 		let mut asked = self.stop.subscribe();
+		// A catalog that fails ends following it, without stopping the files:
+		// each reads the same catalog, and its outcome says why.
 		let mut catalog = tokio::select! {
-			catalog = self.source.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => catalog?,
+			catalog = self.source.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => match catalog {
+				Ok(catalog) => catalog,
+				Err(_) => return Ok(()),
+			},
 			() = stopped(&mut asked) => return Ok(()),
 		};
 		let mut listed = BTreeSet::new();
@@ -272,7 +277,7 @@ impl Run {
 		loop {
 			tokio::select! {
 				snapshot = catalog.next() => {
-					let Some(snapshot) = snapshot? else { return Ok(()) };
+					let Ok(Some(snapshot)) = snapshot else { return Ok(()) };
 					if !sources {
 						continue;
 					}
@@ -1027,9 +1032,14 @@ mod tests {
 		recorder.start(false).unwrap();
 		kio::clock::sleep(Duration::from_millis(100)).await;
 		catalog.abort(moq_net::StreamError::Internal.into());
-		kio::clock::timeout(Duration::from_secs(5), recorder.finish())
-			.await
-			.expect("the recording ends with its program");
+		// Not stopped, which would only race the failure: it ends on its own.
+		kio::clock::timeout(Duration::from_secs(5), async {
+			while !recorder.status().unwrap().done {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the recording ends with its program");
 
 		let status = recorder.status().unwrap();
 		let [file] = status.files.as_slice() else {
