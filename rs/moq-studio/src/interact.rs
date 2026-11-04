@@ -67,13 +67,14 @@ struct Place {
 impl Interact {
 	/// Turn this frame's input over `image`, which shows `scene` of
 	/// `collection` under its top layer, into what each page it touches should receive, by page
-	/// name.
+	/// name. `scene` is the scene's name and how long it has been in the
+	/// preview, which places its items where their keyframes have them.
 	pub fn update(
 		&mut self,
 		ui: &egui::Ui,
 		image: egui::Rect,
 		collection: &Collection,
-		scene: Option<&str>,
+		scene: Option<(&str, Duration)>,
 	) -> Vec<(String, Input)> {
 		let canvas = collection.canvas;
 		let on_canvas = |pos: egui::Pos2| {
@@ -395,14 +396,17 @@ impl Interact {
 }
 
 /// The topmost visible browser source, or clone of one, at canvas point (`x`,
-/// `y`) in `scene` and the top layer over it, and the point on its page.
-fn page_at(collection: &Collection, scene: Option<&str>, x: f32, y: f32) -> Option<Hit> {
-	let scene = scene.and_then(|name| collection.scene(name));
+/// `y`) in `scene`, where its keyframes have each item that long after it went
+/// on, and the top layer over it, and the point on its page.
+fn page_at(collection: &Collection, scene: Option<(&str, Duration)>, x: f32, y: f32) -> Option<Hit> {
+	let since = scene.map_or(Duration::ZERO, |(_, since)| since);
+	let scene = scene.and_then(|(name, _)| collection.scene(name));
 	let items = scene.map(|scene| scene.items.as_slice()).unwrap_or_default();
 	items
 		.iter()
 		.chain(&collection.top)
 		.rev()
+		.map(|item| item.posed(since))
 		.filter(|item| item.visible)
 		.find_map(|item| {
 			let rect = item.rect;
@@ -414,7 +418,7 @@ fn page_at(collection: &Collection, scene: Option<&str>, x: f32, y: f32) -> Opti
 			let page = collection.capture(&item.source);
 			let place = Place {
 				rect,
-				crop: collection.crop(item),
+				crop: collection.crop(&item),
 			};
 			let (x, y) = scale(collection, page, place, x, y)?;
 			Some(Hit {
@@ -590,8 +594,8 @@ mod tests {
 			name: "Main".into(),
 			items: vec![item("alerts", fill, true), item("chat", corner, true)],
 		}];
-		let at =
-			|collection: &Collection, x, y| page_at(collection, Some("Main"), x, y).map(|hit| (hit.page, hit.x, hit.y));
+		let main = Some(("Main", Duration::ZERO));
+		let at = |collection: &Collection, x, y| page_at(collection, main, x, y).map(|hit| (hit.page, hit.x, hit.y));
 
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(at(&collection, 960.0, 540.0), Some(("alerts".into(), 400, 300)));
@@ -602,7 +606,7 @@ mod tests {
 			Some(("alerts".into(), 716, 377)),
 			"a hidden page takes no input"
 		);
-		assert!(page_at(&collection, Some("Other"), 1.0, 1.0).is_none());
+		assert!(page_at(&collection, Some(("Other", Duration::ZERO)), 1.0, 1.0).is_none());
 
 		// The top layer draws over every scene, and a clone shows its source's
 		// page, which runs under the source's name.
@@ -644,6 +648,19 @@ mod tests {
 		};
 		assert_eq!(at(&collection, 1520.0, 280.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 300, 600)));
+
+		// A keyframed item takes input where its keyframes have it.
+		collection.scenes[0].items[1].keyframes = vec![moq_scene::Keyframe {
+			x: -400.0,
+			..moq_scene::Keyframe::new(Duration::ZERO)
+		}];
+		assert_eq!(at(&collection, 1320.0, 680.0), Some(("chat".into(), 300, 600)));
+		let later = page_at(&collection, Some(("Main", Duration::from_secs(9))), 1320.0, 680.0);
+		assert_eq!(
+			later.map(|hit| hit.page),
+			Some("chat".into()),
+			"the last keyframe holds"
+		);
 	}
 
 	/// One frame of `events` over a preview showing the canvas at its own
@@ -663,7 +680,7 @@ mod tests {
 		};
 		let mut delivered = Vec::new();
 		let mut output = ctx.run_ui(input, |ui| {
-			delivered = interact.update(ui, image, collection, Some("Main"));
+			delivered = interact.update(ui, image, collection, Some(("Main", Duration::ZERO)));
 		});
 		// Nothing renders, so the font atlas egui uploaded goes nowhere.
 		output.textures_delta.clear();

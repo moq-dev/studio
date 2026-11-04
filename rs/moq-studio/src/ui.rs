@@ -752,7 +752,8 @@ impl Panels {
 		// Interacting, the pointer belongs to the pages rather than to arranging.
 		if self.interacting {
 			let image = picture(ui, self.preview.id, canvas, egui::Sense::hover()).rect;
-			let scene = state.compositor.preview_scene();
+			let since = state.compositor.preview_since(kio::clock::Instant::now());
+			let scene = state.compositor.preview_scene().map(|scene| (scene, since));
 			self.rebind(&state.sources);
 			let delivered = self.interact.update(ui, image, state.collection(), scene);
 			deliver(&state.sources, delivered);
