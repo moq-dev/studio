@@ -22,4 +22,4 @@ and document it in `README.md`.
 
 ## Required
 
-- [Layout track](/quest/m0/compose/layout.md) - what the server composes
+- [Layout track](/quest/m1/compose/layout.md) - what the server composes
