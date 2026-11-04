@@ -26,4 +26,3 @@ track's share of the allocator.
 
 - [Simulcast rung disable](https://github.com/moq-dev/moq/blob/main/quest/m1/simulcast-rung-disable.md) - grant-driven rung disable this builds on
 - [moq-audio follows the grant](https://github.com/moq-dev/moq/blob/main/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the audio half
-- [Scene editing](/quest/m0/scene-editing.md) - canvas resize through a new rendition

@@ -76,9 +76,8 @@ canvas and no sources. The proposed scene is the first edit in the history, so
 undoing it leaves that empty scene.
 
 Setup writes an ordinary scene file. Change its sources and scenes in their
-panels, and its canvas in the file, which takes a restart. The Output panel
-shows the canvas in use, and the Health panel shows how the uplink holds up
-once you are live.
+panels, and its canvas in the Output panel. The Health panel shows how the
+uplink holds up once you are live.
 
 ## Panels
 
@@ -86,8 +85,8 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Fade** blends over the collection's fade time. |
-| Scenes | Pick the scene in preview, add one, or remove one. |
+| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Fade** blends over the fade time set beside it. |
+| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still fading out, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. |
@@ -95,7 +94,7 @@ Every panel is a tab you can drag, split, or stack.
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the broadcast path, whether the program is encoding, the canvas, and the encoder's work. |
+| Output | Set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, and the encoder's work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
@@ -314,7 +313,7 @@ leaving half of it, and a collection that has not changed is not rewritten, so
 a hand-written file keeps its comments and layout until the next edit in the
 studio. A failed write shows in the status bar and
 is retried every second; until one succeeds, a crash loses every edit since the
-last write. A new canvas size or frame rate takes a restart.
+last write.
 
 The file can be edited by hand, or by another studio, while the studio runs.
 The studio looks at it every second and before each write. With no edits of
@@ -342,6 +341,14 @@ The program publishes as one H.264 rendition at the canvas size and frame rate,
 with Opus stereo audio, under the `--broadcast` path. Timestamps come from the
 studio's own clock, so a source that stalls repeats its last picture instead of
 holding up the stream.
+
+A new canvas size or frame rate, from the Output panel, an undo, or a reload,
+takes effect live. A track never changes what it carries, so the old
+rendition's track ends and a new one is listed in its place in a catalog
+update, on the same timeline, and viewers switch to it; the video pauses while
+the new encoder opens. Items keep their place in canvas pixels. A canvas the
+encoder cannot take stops the video, saying why, until the canvas changes
+again.
 
 The program encodes whether or not anyone watches, so a viewer who arrives
 late can fetch the recent past. `--on-demand` copies and encodes the video only
