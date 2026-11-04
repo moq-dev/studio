@@ -169,8 +169,8 @@ impl State {
 	/// the one drawn, once the compositor takes its canvas. The scenes in
 	/// preview and on program follow the renames and removals `made` holds,
 	/// each edit read against the collection it was made to, and any
-	/// `collection` lacks is dropped. Edits that remove the scene on program
-	/// are refused, changing nothing.
+	/// `collection` lacks is dropped. Edits that remove a scene on air are
+	/// refused, changing nothing.
 	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<()> {
 		let mut before = self.collection.clone();
 		let mut renames = Vec::with_capacity(made.len());
@@ -178,7 +178,7 @@ impl State {
 			renames.push(before.renames(edit));
 			before.apply(edit)?;
 		}
-		keep_program(self.compositor.program_scene(), &renames)?;
+		keep_on_air(self.compositor.on_air(), &renames)?;
 		self.compositor.set_canvas(collection.canvas)?;
 		for renames in &renames {
 			self.compositor.rename(renames);
@@ -212,16 +212,20 @@ impl State {
 	}
 }
 
-/// Refuse edits, each read as its [`Collection::renames`], that remove
-/// `program`, the scene on program, so a slip cannot put black on air. A
-/// reload that leaves it out still empties program, having nothing to show.
-fn keep_program(program: Option<&str>, renames: &[BTreeMap<String, Option<String>>]) -> anyhow::Result<()> {
-	let Some(mut program) = program else { return Ok(()) };
-	for renames in renames {
-		match renames.get(program) {
-			Some(Some(to)) => program = to,
-			Some(None) => anyhow::bail!("`{program}` is on program; cut to another scene before removing it"),
-			None => {}
+/// Refuse edits, each read as its [`Collection::renames`], that remove a
+/// scene `on_air` program draws, so a slip cannot put black on air. A reload
+/// that leaves one out still drops it, having nothing to show instead.
+fn keep_on_air<'a>(
+	on_air: impl IntoIterator<Item = &'a str>,
+	renames: &'a [BTreeMap<String, Option<String>>],
+) -> anyhow::Result<()> {
+	for mut scene in on_air {
+		for renames in renames {
+			match renames.get(scene) {
+				Some(Some(to)) => scene = to,
+				Some(None) => anyhow::bail!("`{scene}` is on air; cut to another scene before removing it"),
+				None => {}
+			}
 		}
 	}
 	Ok(())
@@ -1218,10 +1222,10 @@ mod tests {
 		assert_eq!(stats.encoder().as_deref(), Some("new"));
 	}
 
-	/// No edit removes the scene on program: not a remove, nor an undo of the
-	/// add that made it, even after a rename, while any other scene can go.
+	/// No edit removes a scene on air: not a remove, nor an undo of the add
+	/// that made it, even after a rename, while any other scene can go.
 	#[test]
-	fn the_scene_on_program_stays() {
+	fn a_scene_on_air_stays() {
 		let mut collection = Collection::new();
 		let live = collection.scenes[0].name.clone();
 		let mut draft = collection.draft("Add `Other`");
@@ -1239,15 +1243,17 @@ mod tests {
 			draft.remove_scene(index).unwrap();
 			collection.renames(&draft.finish().unwrap())
 		};
-		assert!(keep_program(Some(&live), &[remove(&collection, 0)]).is_err());
-		keep_program(Some(&live), &[remove(&collection, 1)]).unwrap();
-		keep_program(None, &[remove(&collection, 0)]).unwrap();
+		let removed = [remove(&collection, 0)];
+		assert!(keep_on_air([live.as_str()], &removed).is_err());
+		assert!(keep_on_air(["Renamed", live.as_str()], &removed).is_err(), "fading out");
+		keep_on_air([live.as_str()], &[remove(&collection, 1)]).unwrap();
+		keep_on_air([], &removed).unwrap();
 
 		// Undoing both edits, newest first, removes `Other` once renamed.
 		let undo = [collection.renames(&rename.inverse()), added.renames(&add.inverse())];
-		let err = keep_program(Some("Renamed"), &undo).unwrap_err();
-		assert!(err.to_string().contains("`Other` is on program"), "{err}");
-		keep_program(Some(&live), &undo).unwrap();
+		let err = keep_on_air(["Renamed"], &undo).unwrap_err();
+		assert!(err.to_string().contains("`Other` is on air"), "{err}");
+		keep_on_air([live.as_str()], &undo).unwrap();
 	}
 
 	async fn subscribe(

@@ -86,7 +86,7 @@ Every panel is a tab you can drag, split, or stack.
 | Panel | Use it to |
 | --- | --- |
 | Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Fade** blends over the fade time set beside it. |
-| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. The scene on program cannot be removed, even by an undo, until program cuts to another. |
+| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still fading out, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. |

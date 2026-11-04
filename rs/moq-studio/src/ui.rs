@@ -749,6 +749,7 @@ impl Panels {
 		let mut state = engine.state.lock().unwrap();
 		let preview = state.compositor.preview_scene().map(str::to_owned);
 		let program = state.compositor.program_scene().map(str::to_owned);
+		let on_air: Vec<String> = state.compositor.on_air().map(str::to_owned).collect();
 		let mut pick = None;
 		let mut action = None;
 		let count = state.collection().scenes.len();
@@ -780,8 +781,7 @@ impl Panels {
 					if label.double_clicked() || ui.small_button("Rename").clicked() {
 						self.renaming = Some((index, scene.name.clone()));
 					}
-					let live = program.as_deref() == Some(scene.name.as_str());
-					if live {
+					if program.as_deref() == Some(scene.name.as_str()) {
 						ui.colored_label(Color32::RED, "on program");
 					}
 					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
@@ -794,8 +794,8 @@ impl Panels {
 						action = Some(SceneAction::Move(index, index + 1));
 					}
 					if ui
-						.add_enabled(!live, egui::Button::new("Remove").small())
-						.on_disabled_hover_text("On program; cut to another scene first")
+						.add_enabled(!on_air.contains(&scene.name), egui::Button::new("Remove").small())
+						.on_disabled_hover_text("On air; cut to another scene first")
 						.clicked()
 					{
 						action = Some(SceneAction::Remove(index));

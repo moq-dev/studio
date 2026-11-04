@@ -169,6 +169,13 @@ impl Compositor {
 		self.fade.is_some()
 	}
 
+	/// The scenes program draws: the one on program, and the one a fade under
+	/// way leaves.
+	pub fn on_air(&self) -> impl Iterator<Item = &str> {
+		let leaving = self.fade.as_ref().and_then(|fade| fade.from.as_deref());
+		self.program_scene.as_deref().into_iter().chain(leaving)
+	}
+
 	/// Put the scene called `scene` in preview, or nothing.
 	pub fn set_preview(&mut self, scene: Option<String>) {
 		self.preview_scene = scene;
