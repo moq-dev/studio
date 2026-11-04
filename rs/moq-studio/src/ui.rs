@@ -114,6 +114,8 @@ impl Studio {
 				speaker: None,
 				speakers: Speakers::default(),
 				canvas: None,
+				extras: BTreeMap::new(),
+				new_canvas: (String::new(), 1080, 1920),
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
@@ -254,6 +256,10 @@ struct Panels {
 	/// The canvas the Output panel's form holds until it is applied, or
 	/// `None` while it shows the collection's.
 	canvas: Option<Canvas>,
+	/// The size each further canvas's form holds until it is applied, by name.
+	extras: BTreeMap<String, (u32, u32)>,
+	/// The name and size typed for the next further canvas.
+	new_canvas: (String, u32, u32),
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
@@ -310,6 +316,13 @@ impl TabViewer for Panels {
 			Tab::Replay => self.replay(ui),
 		}
 	}
+}
+
+/// What the Output panel does to a further canvas.
+enum CanvasAction {
+	/// Add or resize the canvas of this name to this width and height.
+	Set(String, u32, u32),
+	Remove(String),
 }
 
 /// A source or an item: what the Filters panel edits.
@@ -2007,12 +2020,12 @@ impl Panels {
 		self.record(ui);
 		ui.separator();
 		self.canvas_form(ui);
+		self.canvases_form(ui);
 		ui.separator();
 
 		let stats = &self.engine.stats;
 		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
-		let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
-		let watched = stats.watched.load(Ordering::Relaxed);
+		let watched = stats.video.watched.load(Ordering::Relaxed);
 
 		egui::Grid::new("output").show(ui, |ui| {
 			match &self.engine.output {
@@ -2041,61 +2054,40 @@ impl Panels {
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
 			ui.label("Encoder");
-			ui.label(stats.encoder().unwrap_or_else(|| "not open".into()));
+			ui.label(stats.video.encoder().unwrap_or_else(|| "not open".into()));
 			ui.end_row();
 			ui.label("Encoder sessions");
-			ui.label(format!("{} open", stats.sessions.open()))
-				.on_hover_text("Video encoders open now, the program's and the sources'. A GPU caps them.");
+			ui.label(format!("{} open", stats.sessions.open())).on_hover_text(
+				"Video encoders open now: every canvas's program and the sources'. A GPU caps them, and each canvas adds its own.",
+			);
 			ui.end_row();
 		});
 		ui.separator();
-		// Only the sizes the program publishes, since a small canvas, or an
-		// encoder that refused the half size, has the canvas size alone, and
-		// the recording's own encoder.
-		let [canvas, half, recording] = &stats.renditions;
-		let published = stats.sizes.load(Ordering::Relaxed);
-		let mut columns = vec![("Canvas size", canvas)];
-		if published > 1 {
-			columns.push(("Half size", half));
-		}
-		columns.push(("Recording", recording));
-		egui::Grid::new("renditions").show(ui, |ui| {
-			ui.strong("");
-			for (heading, _) in &columns {
-				ui.strong(*heading);
-			}
-			ui.end_row();
-			let row = |ui: &mut Ui, label: &str, cell: &dyn Fn(&crate::engine::Load) -> String| {
-				ui.label(label);
-				for (_, load) in &columns {
-					ui.label(cell(load));
-				}
-				ui.end_row();
-			};
-			row(ui, "Handed to the encoder", &|load| {
-				format!("{} frames, last {}", count(&load.copied), millis(&load.copy_us))
-			});
-			let zero_copy = stats.zero_copy.load(Ordering::Relaxed);
-			row(ui, "Read back to the CPU", &|load| match zero_copy {
-				true => "none; the encoder reads the GPU".to_string(),
-				false => format!("{} frames", count(&load.read_back)),
-			});
-			row(ui, "Dropped", &|load| format!("{} frames", count(&load.dropped)));
-			row(ui, "Encoded", &|load| {
-				format!("{} frames, last {}", count(&load.encoded), millis(&load.encode_us))
-			});
-		});
+		renditions(ui, "main", &stats.video, true);
 		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
-		if let Some(error) = half.error() {
-			ui.colored_label(ui.visuals().warn_fg_color, format!("half size off: {error}"));
-		}
-		if let Some(error) = recording.error() {
-			ui.colored_label(ui.visuals().warn_fg_color, format!("recording encoder off: {error}"));
-		}
 		if let Some(error) = stats.recording_audio_error() {
 			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
+		}
+
+		for (name, video) in stats.canvases() {
+			ui.separator();
+			ui.strong(format!("Canvas `{name}`"));
+			if let Some(output) = &self.engine.output {
+				ui.label(format!(
+					"Broadcast {}/{name}, with the main broadcast's audio",
+					output.path
+				));
+			}
+			ui.label(format!(
+				"Encoder: {}",
+				video.encoder().unwrap_or_else(|| "not open".into())
+			));
+			renditions(ui, &name, &video, false);
+			if let Some(error) = video.error() {
+				ui.colored_label(ui.visuals().error_fg_color, error);
+			}
 		}
 	}
 
@@ -2280,6 +2272,91 @@ impl Panels {
 		if result.is_ok() {
 			self.canvas = None;
 		}
+		drop(state);
+		self.check(result);
+	}
+
+	/// The further canvases: each one's size, applied at once as the main
+	/// canvas's is, and a form adding another. Each publishes a broadcast of
+	/// its own, with encoders of its own.
+	fn canvases_form(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let canvases = state.collection().canvases.clone();
+		self.extras.retain(|name, _| canvases.contains_key(name));
+		let mut action = None;
+		for (name, extra) in &canvases {
+			let current = (extra.width, extra.height);
+			let (mut width, mut height) = self.extras.get(name).copied().unwrap_or(current);
+			ui.horizontal(|ui| {
+				ui.strong(name);
+				ui.add(egui::DragValue::new(&mut width).range(2..=u32::MAX));
+				ui.label("x");
+				ui.add(egui::DragValue::new(&mut height).range(2..=u32::MAX));
+				let edited = (width, height) != current;
+				if ui.add_enabled(edited, egui::Button::new("Apply")).clicked() {
+					action = Some(CanvasAction::Set(name.clone(), width, height));
+				}
+				if ui.add_enabled(edited, egui::Button::new("Reset")).clicked() {
+					(width, height) = current;
+				}
+				if ui
+					.button("Remove")
+					.on_hover_text("Remove the canvas, its top layer, and every scene's layout on it")
+					.clicked()
+				{
+					action = Some(CanvasAction::Remove(name.clone()));
+				}
+			});
+			match (width, height) == current {
+				true => self.extras.remove(name),
+				false => self.extras.insert(name.clone(), (width, height)),
+			};
+		}
+		ui.horizontal(|ui| {
+			let (name, width, height) = &mut self.new_canvas;
+			ui.add(
+				egui::TextEdit::singleline(name)
+					.hint_text("New canvas")
+					.desired_width(100.0),
+			);
+			ui.add(egui::DragValue::new(width).range(2..=u32::MAX));
+			ui.label("x");
+			ui.add(egui::DragValue::new(height).range(2..=u32::MAX));
+			let named = !name.is_empty() && !canvases.contains_key(name.as_str());
+			if ui
+				.add_enabled(named, egui::Button::new("Add canvas"))
+				.on_hover_text("Another canvas with its own layout of each scene, published in its own broadcast")
+				.clicked()
+			{
+				action = Some(CanvasAction::Set(name.clone(), *width, *height));
+			}
+		});
+
+		let result = match action {
+			None => return,
+			Some(CanvasAction::Set(name, width, height)) => {
+				let label = format!("Set canvas `{name}` to {width}x{height}");
+				let result = edit(&mut state, label, None, |draft| draft.set_extra(&name, width, height));
+				if result.is_ok() {
+					self.extras.remove(&name);
+					if self.new_canvas.0 == name {
+						self.new_canvas.0.clear();
+					}
+				}
+				result
+			}
+			Some(CanvasAction::Remove(name)) => {
+				let result = edit(&mut state, format!("Remove canvas `{name}`"), None, |draft| {
+					draft.remove_extra(&name)
+				});
+				if result.is_ok() && self.view.as_ref() == Some(&name) {
+					self.view = None;
+					self.deselect_item();
+				}
+				result
+			}
+		};
 		drop(state);
 		self.check(result);
 	}
@@ -2850,6 +2927,57 @@ fn expiry(expires: kio::clock::Wall, now: kio::clock::Wall) -> String {
 			format!("expires in {}", moq_tokio::cli::Duration::from(left))
 		}
 		_ => "expired".into(),
+	}
+}
+
+/// What each of a canvas's program encoders costs: the sizes it publishes, and
+/// its recording copy if `recording`.
+fn renditions(ui: &mut Ui, id: &str, video: &crate::engine::VideoStats, recording: bool) {
+	let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
+	let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
+	// Only the sizes the program publishes, since a small canvas, or an
+	// encoder that refused the half size, has the canvas size alone, and the
+	// recording's own encoder.
+	let [canvas, half, record] = &video.renditions;
+	let published = video.sizes.load(Ordering::Relaxed);
+	let mut columns = vec![("Canvas size", canvas)];
+	if published > 1 {
+		columns.push(("Half size", half));
+	}
+	if recording {
+		columns.push(("Recording", record));
+	}
+	egui::Grid::new(("renditions", id)).show(ui, |ui| {
+		ui.strong("");
+		for (heading, _) in &columns {
+			ui.strong(*heading);
+		}
+		ui.end_row();
+		let row = |ui: &mut Ui, label: &str, cell: &dyn Fn(&crate::engine::Load) -> String| {
+			ui.label(label);
+			for (_, load) in &columns {
+				ui.label(cell(load));
+			}
+			ui.end_row();
+		};
+		row(ui, "Handed to the encoder", &|load| {
+			format!("{} frames, last {}", count(&load.copied), millis(&load.copy_us))
+		});
+		let zero_copy = video.zero_copy.load(Ordering::Relaxed);
+		row(ui, "Read back to the CPU", &|load| match zero_copy {
+			true => "none; the encoder reads the GPU".to_string(),
+			false => format!("{} frames", count(&load.read_back)),
+		});
+		row(ui, "Dropped", &|load| format!("{} frames", count(&load.dropped)));
+		row(ui, "Encoded", &|load| {
+			format!("{} frames, last {}", count(&load.encoded), millis(&load.encode_us))
+		});
+	});
+	if let Some(error) = half.error() {
+		ui.colored_label(ui.visuals().warn_fg_color, format!("half size off: {error}"));
+	}
+	if recording && let Some(error) = record.error() {
+		ui.colored_label(ui.visuals().warn_fg_color, format!("recording encoder off: {error}"));
 	}
 }
 
