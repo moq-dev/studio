@@ -201,7 +201,7 @@ pub struct Local {
 
 /// What the studio publishes, for grading its delivery.
 pub struct Publisher {
-	/// The broadcast's path and the epoch it was announced with.
+	/// The broadcast's path and the instance it was announced with.
 	pub observer: Observer,
 	pub catalog: moq_scene::publish::Catalog,
 	/// The catalog's clock, which maps a track's timestamps to the wall time
@@ -830,7 +830,11 @@ impl Feedback {
 				false
 			};
 			if read {
-				let reader = self.read(origin.clone(), Observer::new(path.clone(), announce.route.epoch), name);
+				let reader = self.read(
+					origin.clone(),
+					Observer::new(path.clone(), announce.route.instance),
+					name,
+				);
 				readers.insert(path, reader);
 			}
 			self.0.lock().unwrap().unread = unread;
@@ -892,7 +896,7 @@ fn name(prefix: &moq_net::Path, path: &moq_net::Path) -> Option<String> {
 /// its broadcast ends or the report cannot be read.
 async fn read(origin: moq_net::origin::Consumer, observer: Observer, slot: Slot) {
 	let read = async {
-		let broadcast = origin.request(&observer.path, observer.epoch.clone()).await?;
+		let broadcast = origin.request(&observer.path, observer.instance.clone()).await?;
 		let track = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
 		let mut config = moq_json::snapshot::consumer::Config::default();
 		config.max_size = Some(MAX_REPORT);

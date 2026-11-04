@@ -19,9 +19,9 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
 - `--failover <url>` publishes the same broadcast to a second relay under the
-  same publisher epoch, so a viewer linked to both resumes mid-group from it
-  when the first fails. Both relays must speak the one `--connect-version`,
-  which must carry publisher epochs (`moq-lite-07-wip` today, which a relay
+  same broadcast instance, so a viewer linked to both resumes mid-group from
+  it when the first fails. Both relays must speak the one `--connect-version`,
+  which must carry instances (`moq-lite-07-wip` today, which a relay
   accepts only when configured to), or the studio refuses to start; it also
   refuses a fixed `--connect-bind` port, since each relay's connection binds
   its own. Its credential rides its URL's `?jwt=`; `--connect-token` goes to

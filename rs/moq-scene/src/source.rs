@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use hang::catalog::Reference;
 use kio::clock::Instant;
-use moq_audio::bus::{Bus, Strip};
+use moq_audio::bus::{Bus, Mix, Strip};
 use moq_mux::catalog::Stream;
 
 use crate::Error;
@@ -68,8 +68,10 @@ pub enum Status {
 /// What every source shares.
 #[derive(Clone)]
 pub struct Context {
-	/// The program audio that microphones, system audio, and broadcasts feed.
+	/// Where microphones, system audio, and broadcasts feed their sound.
 	pub bus: Bus,
+	/// The program audio: every running source with sound is routed into it.
+	pub program: Mix,
 	/// Where broadcast sources are announced: the studio's relay connection.
 	pub origin: moq_net::origin::Consumer,
 	/// What a relative image or LUT path is relative to: the scene file's directory.
@@ -215,6 +217,16 @@ struct Track {
 	publish: Publish,
 	claim: Claim,
 	status: kio::Producer<Status>,
+}
+
+/// Takes the source out of the program, which [`open`] routed it into, so a
+/// removed or edited source leaves nothing behind in the mix.
+impl Drop for Driver {
+	fn drop(&mut self) {
+		if let Some(strip) = &self.strip {
+			self.context.program.unroute(strip);
+		}
+	}
 }
 
 impl Driver {
@@ -403,9 +415,11 @@ impl Driver {
 		let strip = self.strip.clone().expect("audio sources have a strip");
 		let mut config = moq_audio::capture::Config::default();
 		config.source = source;
-		let capture = self.context.bus.capture(config, strip);
+		let capture = moq_audio::capture::Producer::open(config).await?;
+		let channel = self.context.bus.capture(capture.consume(), strip)?;
 		set(&self.status, Status::Live);
-		Ok(capture.run().await?)
+		tokio::try_join!(capture.run(), channel.run())?;
+		Ok(())
 	}
 
 	#[cfg(not(feature = "capture"))]
@@ -583,6 +597,9 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 	let picture = Mailbox::default();
 	let shown = Shown::default();
 	let strip = source.has_audio().then(Strip::default);
+	if let Some(strip) = &strip {
+		context.program.route(strip);
+	}
 	let status = kio::Producer::new(Status::Starting);
 	// Claimed here, in the order sources open, so an edited source's
 	// replacement owns the listing however their drivers are scheduled.
@@ -663,8 +680,10 @@ pub(crate) mod test {
 	pub(crate) fn context(dir: &Path) -> (Context, moq_net::origin::Producer) {
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::task::spawn_local(moq_net::time::run(driver));
+		let (bus, _) = Bus::new(Default::default()).unwrap();
 		let context = Context {
-			bus: Bus::new(Default::default()).unwrap(),
+			program: bus.mix(),
+			bus,
 			origin: origin.consume(),
 			dir: dir.to_path_buf(),
 			output: moq_video::Output::Cpu,
@@ -775,7 +794,8 @@ mod tests {
 	}
 
 	/// Editing a source restarts it, removing one stops it, and an untouched one
-	/// keeps running. Gain changes reach the strip without restarting anything.
+	/// keeps running. Gain changes reach the strip without restarting anything,
+	/// and a source plays in the program until it is removed.
 	#[tokio::test]
 	async fn sync_restarts_only_what_changed() {
 		local(async {
@@ -786,6 +806,8 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			let guest = sources.get("guest").unwrap().strip().unwrap().clone();
+			let program = sources.context().program.clone();
+			assert!(program.routes(&guest));
 
 			collection.audio.insert(
 				"guest".into(),
@@ -815,6 +837,16 @@ mod tests {
 			collection.sources.remove("red");
 			assert!(sources.sync(&collection).is_empty());
 			assert!(sources.get("red").is_none());
+
+			collection.sources.remove("guest");
+			assert!(sources.sync(&collection).is_empty());
+			for _ in 0..1000 {
+				if !program.routes(&guest) {
+					return;
+				}
+				tokio::task::yield_now().await;
+			}
+			panic!("a removed source stays in the program");
 		})
 		.await;
 	}
@@ -845,9 +877,7 @@ mod tests {
 					.unwrap()
 			};
 			let first = audio("first", None);
-			publication
-				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-				.unwrap();
+			publication.announce(moq_net::origin::Route::default()).unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -888,9 +918,7 @@ mod tests {
 					.unwrap();
 			};
 			point(&mut catalog, "first");
-			publication
-				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-				.unwrap();
+			publication.announce(moq_net::origin::Route::default()).unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -925,9 +953,7 @@ mod tests {
 					catalog.audio.renditions.insert("audio".into(), config);
 				})
 				.unwrap();
-			publication
-				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-				.unwrap();
+			publication.announce(moq_net::origin::Route::default()).unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());

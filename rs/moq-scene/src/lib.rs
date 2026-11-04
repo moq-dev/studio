@@ -13,7 +13,8 @@
 //! - [`source::Sources`] runs each source: a camera, display, window,
 //!   microphone, or system-audio capture (with the `capture` feature), a still
 //!   image, a solid color, or a broadcast subscribed over MoQ. Pictures go to the
-//!   compositor and sound goes to a `moq_audio::bus::Bus`, the program audio.
+//!   compositor and sound goes to a `moq_audio::bus::Bus`, routed into its
+//!   program mix.
 //! - [`Compositor`] draws the scene in preview and the scene on program into
 //!   textures on the caller's `wgpu` device, cutting or fading between them.
 //!   `moq_video::render::export` hands the program to an encoder, on the GPU

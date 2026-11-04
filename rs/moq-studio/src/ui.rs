@@ -1422,7 +1422,7 @@ impl Panels {
 	fn audio(&mut self, ui: &mut Ui) {
 		ui.horizontal(|ui| {
 			ui.strong("Program");
-			meter(ui, self.engine.bus.level());
+			meter(ui, self.engine.program.level());
 		});
 		ui.separator();
 
