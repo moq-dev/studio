@@ -655,8 +655,13 @@ fn run(
 		match request {
 			Request::Open { id, html, view, start } => {
 				let size = view.texture().size();
+				let mut document = document(&html, size.width, size.height);
+				// Stylo starts an animation at the time of the resolve that
+				// creates it, so this one starts every animation at the start of
+				// the timeline, however late the overlay is first drawn.
+				document.resolve(0.0);
 				let document = Document {
-					document: document(&html, size.width, size.height),
+					document,
 					view,
 					start,
 					painted: false,

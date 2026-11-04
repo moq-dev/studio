@@ -1469,8 +1469,9 @@ mod tests {
 		.await;
 	}
 
-	/// An overlay's CSS animation runs on the program clock: a frame shows it
-	/// where the program time says, however late that frame is drawn.
+	/// An overlay's CSS animation runs on the program clock from when the
+	/// overlay opens: a frame shows it where the program time says, however late
+	/// that frame is drawn, even the first one to show it.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn an_overlay_animates_on_the_program_clock() {
@@ -1491,11 +1492,15 @@ mod tests {
 			);
 			collection.scenes[1].items = vec![Item::new("overlay", Rect::fill(&collection.canvas))];
 			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			// Opened here, but drawn nowhere until the cut.
+			let start = Instant::now();
+			studio.render(start);
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.compositor.cut();
 
-			let start = Instant::now();
-			for (at, expected) in [(0, RED), (500, [128, 0, 128, 255]), (2000, BLUE)] {
+			for (at, expected) in [(500, [128, 0, 128, 255]), (750, [64, 0, 191, 255]), (2000, BLUE)] {
 				studio.render(start + Duration::from_millis(at));
 				let program = studio.program();
 				let actual = pixel(&program, 3, 1);
