@@ -1048,6 +1048,7 @@ impl Engine {
 			if self.stopped.load(Ordering::Relaxed) {
 				drop(mixer);
 				self.program_audio.close();
+				self.recorded_audio.close();
 				return;
 			}
 			// Sample-exact against the program clock, so audio and video stay
