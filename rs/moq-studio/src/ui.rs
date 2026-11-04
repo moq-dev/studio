@@ -27,6 +27,7 @@ enum Tab {
 	Items,
 	Sources,
 	Devices,
+	Guests,
 	Filters,
 	Audio,
 	Output,
@@ -43,6 +44,7 @@ impl Tab {
 			Self::Items => "Items",
 			Self::Sources => "Sources",
 			Self::Devices => "Devices",
+			Self::Guests => "Guests",
 			Self::Filters => "Filters",
 			Self::Audio => "Audio",
 			Self::Output => "Output",
@@ -80,7 +82,7 @@ impl Studio {
 		let [top, bottom] = tree.split_below(NodeIndex::root(), 0.62, vec![Tab::Scenes, Tab::History]);
 		tree.split_right(top, 0.5, vec![Tab::Program]);
 		let [_, items] = tree.split_right(bottom, 0.18, vec![Tab::Items]);
-		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices]);
+		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices, Tab::Guests]);
 		tree.split_right(sources, 0.5, vec![Tab::Filters, Tab::Health, Tab::Audio, Tab::Output]);
 
 		Self {
@@ -99,6 +101,8 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
+				guest: String::new(),
+				shown: None,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
 			},
 		}
@@ -139,6 +143,10 @@ struct Panels {
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
+	/// The name typed for the next guest.
+	guest: String,
+	/// The join link on screen.
+	shown: Option<Shown>,
 	/// The outcome of the last action, shown in the status bar.
 	message: Option<Result<String, String>>,
 }
@@ -167,6 +175,7 @@ impl TabViewer for Panels {
 			Tab::Items => self.items(ui),
 			Tab::Sources => self.sources(ui),
 			Tab::Devices => self.devices(ui),
+			Tab::Guests => self.guests(ui),
 			Tab::Filters => self.filters(ui),
 			Tab::Audio => self.audio(ui),
 			Tab::Output => self.output(ui),
@@ -1073,6 +1082,143 @@ impl Panels {
 		self.report(result.map(|name| format!("added `{name}`")));
 	}
 
+	/// Invite guests, show their links, and see who joined.
+	fn guests(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let Some(room) = &engine.room else {
+			ui.label("Start with --room and --room-key to invite guests.");
+			return;
+		};
+
+		ui.horizontal(|ui| {
+			ui.label("Name");
+			let field = ui.text_edit_singleline(&mut self.guest);
+			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+			if ui.button("Invite").clicked() || entered {
+				let name = self.guest.trim().to_string();
+				match room.invite(&name) {
+					Ok(invite) => {
+						self.show(ui.ctx(), name, invite);
+						self.guest.clear();
+					}
+					Err(err) => self.report(Err(err)),
+				}
+			}
+		});
+
+		let now = kio::clock::wall();
+		if let Some(shown) = &self.shown {
+			ui.separator();
+			ui.horizontal(|ui| {
+				ui.strong(format!("Join link for {}", shown.name));
+				ui.label(expiry(shown.invite.expires, now));
+			});
+			let mut hide = false;
+			ui.horizontal(|ui| {
+				if ui.button("Copy link").clicked() {
+					ui.ctx().copy_text(shown.invite.link.to_string());
+				}
+				hide = ui.button("Hide").clicked();
+			});
+			// The link is the guest's credential, so it shows only as a code to scan.
+			match &shown.qr {
+				Ok(qr) => {
+					let side = ui.available_width().min(240.0);
+					ui.image((qr.id(), egui::vec2(side, side)));
+				}
+				Err(err) => {
+					ui.colored_label(ui.visuals().error_fg_color, format!("{err}; copy the link instead."));
+				}
+			}
+			if hide {
+				self.shown = None;
+			}
+		}
+
+		ui.separator();
+		let participants = room.participants();
+		if participants.is_empty() {
+			ui.weak("Nobody invited yet.");
+			return;
+		}
+		let mut show = None;
+		let mut invite = None;
+		let mut remove = None;
+		egui::ScrollArea::vertical().show(ui, |ui| {
+			egui::Grid::new("guests").striped(true).show(ui, |ui| {
+				for heading in ["Guest", "Camera", "Screen", "Link", ""] {
+					ui.strong(heading);
+				}
+				ui.end_row();
+				for (name, participant) in &participants {
+					ui.label(name);
+					for online in [participant.camera, participant.screen] {
+						if online {
+							ui.colored_label(HEALTHY, "live");
+						} else {
+							ui.weak("offline");
+						}
+					}
+					match &participant.invite {
+						Some(link) => ui.label(expiry(link.expires, now)),
+						None => ui.weak("invited before this session"),
+					};
+					ui.horizontal(|ui| {
+						if let Some(link) = &participant.invite
+							&& ui.small_button("Show link").clicked()
+						{
+							show = Some((name.clone(), link.clone()));
+						}
+						if ui.small_button("New link").clicked() {
+							invite = Some(name.clone());
+						}
+						if ui
+							.small_button("Remove from scenes")
+							.on_hover_text(
+								"Take their camera and screen, and any mask reading them, out of every scene and mute them. They stay connected until their link expires.",
+							)
+							.clicked()
+						{
+							remove = Some(name.clone());
+						}
+					});
+					ui.end_row();
+				}
+			});
+		});
+
+		if let Some((name, link)) = show {
+			self.show(ui.ctx(), name, link);
+		}
+		if let Some(name) = invite {
+			match room.invite(&name) {
+				Ok(link) => self.show(ui.ctx(), name, link),
+				Err(err) => self.report(Err(err)),
+			}
+		}
+		if let Some(name) = remove {
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft(format!("Remove `{name}` from scenes"));
+			let result = match room.take_off(&mut draft, &name) {
+				Ok(false) => Ok(()),
+				Ok(true) => {
+					// Removing items moves the ones after them.
+					self.deselect_item();
+					state.commit(draft, None)
+				}
+				Err(err) => Err(err.into()),
+			};
+			drop(state);
+			self.report(result.map(|()| format!("removed {name} from every scene and muted them")));
+		}
+	}
+
+	/// Put `invite`'s link for `name` on screen as a QR code.
+	fn show(&mut self, ctx: &egui::Context, name: String, invite: crate::guests::Invite) {
+		let qr = qr(ctx, invite.link.as_str());
+		self.shown = Some(Shown { name, invite, qr });
+	}
+
 	/// The crop, filters in order, and blend mode of the selected source or item.
 	fn filters(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
@@ -1766,6 +1912,45 @@ fn add(
 		Ok(())
 	})?;
 	Ok(name)
+}
+
+/// A join link on screen.
+struct Shown {
+	name: String,
+	invite: crate::guests::Invite,
+	/// Or why the link cannot be one, so it can still be copied.
+	qr: Result<egui::TextureHandle, String>,
+}
+
+/// `text` as a QR code, one texel per module, inside the quiet zone scanners need.
+fn qr(ctx: &egui::Context, text: &str) -> Result<egui::TextureHandle, String> {
+	const QUIET: i32 = 4;
+	let code = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Low)
+		.map_err(|err| format!("The join link is too long for a QR code ({err:?})"))?;
+	let side = code.size() + 2 * QUIET;
+	let pixels = (0..side)
+		.flat_map(|y| (0..side).map(move |x| (x, y)))
+		// Outside the code, which is the quiet zone, reads as light.
+		.map(|(x, y)| match code.get_module(x - QUIET, y - QUIET) {
+			true => Color32::BLACK,
+			false => Color32::WHITE,
+		})
+		.collect();
+	let image = egui::ColorImage::new([side as usize; 2], pixels);
+	Ok(ctx.load_texture("join link", image, egui::TextureOptions::NEAREST))
+}
+
+/// When a join link stops working, from `now`.
+fn expiry(expires: kio::clock::Wall, now: kio::clock::Wall) -> String {
+	match expires.checked_duration_since(now) {
+		Some(left) if !left.is_zero() => {
+			// Whole minutes, rounded up, so a link never reads as expired early.
+			let minutes = left.as_secs().div_ceil(60).max(1);
+			let left = Duration::from_secs(minutes * 60);
+			format!("expires in {}", moq_tokio::cli::Duration::from(left))
+		}
+		_ => "expired".into(),
+	}
 }
 
 /// Draw `texture` as large as fits, keeping the canvas's shape.

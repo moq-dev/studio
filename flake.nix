@@ -117,6 +117,9 @@
                 cargo-shear
                 quest-cli
 
+                # The join page: install, lint, type-check, test, and build.
+                bun
+
                 # `just check` lints.
                 shellcheck
                 shfmt

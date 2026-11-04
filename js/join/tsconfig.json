@@ -1,0 +1,25 @@
+{
+	"compilerOptions": {
+		"lib": ["esnext", "dom", "dom.iterable"],
+		"target": "esnext",
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"isolatedModules": true,
+		"types": ["bun"],
+
+		"allowUnreachableCode": false,
+		"allowUnusedLabels": false,
+		"noFallthroughCasesInSwitch": true,
+		"noImplicitOverride": true,
+		"noImplicitReturns": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"strict": true,
+		"useUnknownInCatchVariables": true,
+		"erasableSyntaxOnly": true,
+		"skipLibCheck": true
+	},
+	"include": ["src", "vite.config.ts"]
+}
