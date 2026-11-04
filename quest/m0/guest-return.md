@@ -10,7 +10,7 @@ The join page plays it.
 ## Plan
 
 Decided 2026-11-02 (maintainer): guests get a mix-minus, not the full program,
-so this waits on audio mixes; video and audio land together. Publish into the
+and video and audio land together. Publish into the
 room the studio already owns, under names the room's token scope allows, and
 keep it free of the studio's own credentials. A guest's token subscribes only
 to its own renewals (`.renew/<identity>/<generation>`), so it must also grant the feed's
