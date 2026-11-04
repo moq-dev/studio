@@ -744,25 +744,30 @@ impl Engine {
 	/// What only the studio knows about its stream at `now`.
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
+		// A stalled picture matters where the program draws it: a scene on air,
+		// including one fading out, or the top layer over them. Stalled sound
+		// matters wherever the program plays it.
 		let stalled = {
 			let state = self.state.lock().unwrap();
-			let program = state
+			let shown: Vec<&str> = state
 				.compositor
-				.program_scene()
-				.and_then(|name| state.collection.scene(name));
-			let mut shown: Vec<&str> = program
-				.into_iter()
+				.on_air()
+				.filter_map(|name| state.collection.scene(name))
 				.flat_map(|scene| &scene.items)
+				.chain(&state.collection.top)
 				.filter(|item| item.visible)
-				.map(|item| item.source.as_str())
+				.map(|item| state.collection.capture(&item.source))
 				.collect();
-			shown.sort_unstable();
-			shown.dedup();
-			shown
-				.into_iter()
-				.filter_map(|name| {
-					let since = state.sources.get(name)?.stalled(now)?;
-					Some((name.to_string(), since))
+			state
+				.sources
+				.iter()
+				.filter_map(|(name, feed)| {
+					let stall = feed.stalled(now)?;
+					let matters = match stall {
+						source::Stall::Picture(_) => shown.contains(&name),
+						source::Stall::Sound(_) => feed.strip().is_some_and(|strip| !strip.muted()),
+					};
+					matters.then(|| (name.to_string(), stall))
 				})
 				.collect()
 		};
@@ -1079,9 +1084,9 @@ async fn publish(
 	};
 	// What a recording reads the program from: its own canvas-size encoder,
 	// at full quality whatever the grant, and the program audio, in a
-	// broadcast no relay sees. HLS is for viewers on a relay.
-	// Announced on an origin of its own, which no relay connection carries, so
-	// a recording reads it as it would the published program.
+	// broadcast no relay sees: announced on an origin of its own, which no
+	// relay connection carries, so a recording reads it as it would the
+	// published program.
 	let local = moq_tokio::origin::spawn();
 	let recording = local
 		.create_broadcast("recording")
@@ -1092,8 +1097,7 @@ async fn publish(
 	let mut recorder = recording.broadcast().clone();
 	let config = moq_mux::catalog::Config::default()
 		.with_catalog(Default::default())
-		.with_clock(clock.clone())
-		.with_hls(None);
+		.with_clock(clock.clone());
 	let recorded = moq_scene::publish::Catalog::new(&mut recorder, config)?;
 	let renditions = Renditions {
 		gpu: gpu.clone(),
@@ -1289,7 +1293,7 @@ impl Renditions {
 				Role::Record => (&self.recording.broadcast, &self.recording.timebase),
 				_ => (&self.broadcast, &self.timebase),
 			};
-			let reserved = timebase.reserve().with_hls_hint(config.gop.duration(config.framerate));
+			let reserved = timebase.reserve().with_interval(config.gop.duration(config.framerate));
 			let suffix = match &video.codec {
 				hang::catalog::VideoCodec::H264(_) => ".avc3",
 				hang::catalog::VideoCodec::H265(_) => ".hev1",

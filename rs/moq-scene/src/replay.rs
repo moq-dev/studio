@@ -154,10 +154,8 @@ impl Take {
 				length.as_secs_f32()
 			)));
 		}
-		// Listed so an export of the take finds its renditions; HLS is for live
-		// viewers, which a take has none of.
-		let config = moq_mux::catalog::Config::default().with_hls(None);
-		let mut listing = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+		// Listed so an export of the take finds its renditions.
+		let mut listing = moq_mux::catalog::Producer::new(&mut broadcast, Default::default())?;
 		listing.mutate(|listed| {
 			listed.video.renditions = video.clone().into_iter().collect();
 			listed.audio.renditions = audio.clone().into_iter().collect();

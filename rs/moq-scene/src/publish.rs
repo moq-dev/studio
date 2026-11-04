@@ -109,11 +109,9 @@ impl Publish {
 	/// with the reason rather than quietly loading the CPU with a software one.
 	pub fn new(clock: moq_mux::Clock, kind: moq_video::encode::Kind, sessions: Sessions) -> Result<Self, Error> {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		// HLS is for viewers on a relay, which never see this broadcast.
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(Default::default())
-			.with_clock(clock)
-			.with_hls(None);
+			.with_clock(clock);
 		let catalog = Catalog::new(&mut broadcast, config)?;
 		Ok(Self {
 			broadcast,
@@ -219,9 +217,7 @@ impl<'a> Listing<'a> {
 	pub(crate) fn new(claim: &'a Claim, publish: &Publish) -> Result<Self, Error> {
 		let mut scratch = moq_net::broadcast::Info::new().produce();
 		// The program's clock, so source and program timestamps share one timeline.
-		let config = moq_mux::catalog::Config::default()
-			.with_clock(publish.catalog.clock())
-			.with_hls(None);
+		let config = moq_mux::catalog::Config::default().with_clock(publish.catalog.clock());
 		let catalog = moq_mux::catalog::Producer::new(&mut scratch, config)?;
 		claim.owners.lock().unwrap().catalogs.insert(claim.id, catalog.clone());
 		Ok(Self {
@@ -242,8 +238,9 @@ impl<'a> Listing<'a> {
 		let mut updates = self.catalog.consume()?;
 		let mut studio = self.studio.clone();
 		while let Some(mut catalog) = updates.next().await? {
-			// Already at the local catalog's root.
-			catalog.clock = None;
+			// Media timing is the root's: the one clock, and the join interval an
+			// HLS export numbers its segments on.
+			catalog.media = Default::default();
 			// The claim is checked inside the mutation, so a newer source's
 			// writes, made under the same lock, are never overwritten.
 			studio.mutate(|root| {
@@ -499,7 +496,7 @@ impl<'a> Video<'a> {
 		let reserved = listing
 			.catalog
 			.reserve()
-			.with_hls_hint(config.gop.duration(config.framerate));
+			.with_interval(config.gop.duration(config.framerate));
 		let producer = moq_video::encode::Producer::new(listing.broadcast.clone(), reserved, rendition)?;
 		Ok(Self {
 			track: Encoding::new(producer, listing.sessions.clone()),
@@ -730,7 +727,7 @@ mod tests {
 			let snapshot = listed(&catalog, |sources| sources.len() == 2).await;
 			assert!(snapshot.video.renditions.is_empty(), "no source is a program rendition");
 			let published = &snapshot.ext.studio.sources;
-			assert!(published["red"].clock.is_none(), "the root carries the clock");
+			assert!(published["red"].media.is_empty(), "the root carries the media timing");
 			assert_eq!(sources.get("red").unwrap().track(), Some(Status::Live));
 			assert_eq!(sources.get("guest").unwrap().track(), None);
 			assert!(sources.get("red copy").is_none(), "a clone opens no feed, so no track");

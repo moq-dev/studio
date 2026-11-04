@@ -93,7 +93,6 @@ repository.
 - [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio get their own tracks, for isolated recording and replay
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
-- [Audio sources report stalls](/quest/m0/audio-stall.md) - a dead microphone or system audio reads stalled like a camera
 - [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
 - [Animation and transitions](/quest/m0/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
 - [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
@@ -111,7 +110,6 @@ repository.
 - [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS
 - [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need
 - [Packaging](/quest/m0/packaging.md) - signed installers for macOS and Windows and a Flatpak for Linux
-- [moq-mux's presentation timeline is pinned](/quest/m0/pin-presentation-timeline.md) - shared playout timing, for broadcast sync
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
 - [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - moq-audio's AAC encoders, for destinations
 - [moq-audio's filter chain is pinned](/quest/m0/pin-audio-filters.md) - the chain audio filters configure
