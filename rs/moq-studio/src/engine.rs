@@ -157,7 +157,8 @@ impl State {
 	/// Make `collection`, which the edits `made` led to from the current one,
 	/// the one drawn, once the compositor takes its canvas. The scenes in
 	/// preview and on program follow the renames and removals `made` holds,
-	/// each edit read against the collection it was made to.
+	/// each edit read against the collection it was made to, and any
+	/// `collection` lacks is dropped.
 	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<()> {
 		let mut before = self.collection.clone();
 		let mut renames = Vec::with_capacity(made.len());
@@ -169,6 +170,7 @@ impl State {
 		for renames in &renames {
 			self.compositor.rename(renames);
 		}
+		self.compositor.retain(&collection);
 		self.collection = collection;
 		Ok(())
 	}
@@ -188,7 +190,7 @@ impl State {
 			dropped,
 		} = loaded;
 		// A scene in preview or on program that the file no longer has, such as
-		// one renamed by hand, draws black until another is picked.
+		// one renamed by hand, leaves it until another is picked.
 		self.adopt(collection, &[])?;
 		self.history = history;
 		self.dropped = dropped;

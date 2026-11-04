@@ -181,15 +181,30 @@ impl Compositor {
 	/// [`Collection::renames`] reads them, and each scene is looked up once, so
 	/// a name one scene gave up and another took is not followed twice.
 	pub fn rename(&mut self, renames: &BTreeMap<String, Option<String>>) {
-		let fading = self.fade.as_mut().map(|fade| &mut fade.from);
-		for scene in [&mut self.preview_scene, &mut self.program_scene]
-			.into_iter()
-			.chain(fading)
-		{
+		for scene in self.scenes() {
 			if let Some(to) = scene.as_ref().and_then(|name| renames.get(name)) {
 				*scene = to.clone();
 			}
 		}
+	}
+
+	/// Drop each scene `collection` does not have from preview, program, and a
+	/// fade under way, such as one a reloaded file left out, so a scene that
+	/// later takes its name does not go on program without a cut.
+	pub fn retain(&mut self, collection: &Collection) {
+		for scene in self.scenes() {
+			if scene.as_deref().is_some_and(|name| collection.scene(name).is_none()) {
+				*scene = None;
+			}
+		}
+	}
+
+	/// The scenes followed by name: in preview, on program, and fading out.
+	fn scenes(&mut self) -> impl Iterator<Item = &mut Option<String>> {
+		let fading = self.fade.as_mut().map(|fade| &mut fade.from);
+		[&mut self.preview_scene, &mut self.program_scene]
+			.into_iter()
+			.chain(fading)
 	}
 
 	/// Put the preview on program at once, ending any fade.
@@ -1273,7 +1288,8 @@ mod tests {
 	}
 
 	/// A renamed scene stays in preview, on program, and in the fade under way,
-	/// even when another scene takes its old name in the same edit.
+	/// even when another scene takes its old name in the same edit, and a scene
+	/// the collection lost leaves them.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn a_renamed_scene_stays_where_it_is() {
@@ -1297,6 +1313,13 @@ mod tests {
 			studio.render(start + Duration::from_millis(500));
 			let actual = pixel(&studio.program(), 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "still fading from red: {actual:?}");
+
+			// A scene the collection no longer has, as a reload can leave, is
+			// dropped, so one that later takes its name is not drawn unasked.
+			studio.collection.scenes.retain(|scene| scene.name != "red");
+			studio.compositor.retain(&studio.collection);
+			assert_eq!(studio.compositor.preview_scene(), None);
+			assert_eq!(studio.compositor.program_scene(), None);
 		})
 		.await;
 	}
