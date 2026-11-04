@@ -268,6 +268,45 @@ async fn a_click_reaches_the_page() {
 	.await;
 }
 
+/// A `<select>`'s list, which CEF paints apart from the page, draws over the
+/// page, and a click on it picks an option like a click on the page would.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_dropdown_draws_and_takes_clicks() {
+	local(async {
+		// A select across the top, whose list of lime options covers the
+		// center once open; picking one turns the page blue.
+		let options = "<option style='background:lime'>option</option>".repeat(12);
+		let html = format!(
+			"<body style='margin:0;height:100vh;background:red'>\
+			<select style='width:320px;font-size:24px' onchange=\"document.body.style.background='blue'\">\
+			{options}</select></body>"
+		);
+		let mut studio = Studio::new(&[("page", page(&html))]).await;
+		studio.until_center([255, 0, 0, 255], &[]).await;
+
+		let page = studio.sources.get("page").unwrap().page().unwrap().clone();
+		let click = |x, y| {
+			for down in [true, false] {
+				page.send(Input::Button {
+					x,
+					y,
+					button: Button::Left,
+					down,
+					clicks: 1,
+					modifiers: Modifiers::default(),
+				});
+			}
+		};
+		page.send(Input::Focus(true));
+		click(160, 10);
+		studio.until_center(GREEN, &[]).await;
+		click(160, 120);
+		studio.until_center(BLUE, &[]).await;
+	})
+	.await;
+}
+
 /// A page that closes itself fails its own source and leaves the canvas,
 /// while the page beside it in the same helper keeps drawing.
 #[tokio::test(flavor = "multi_thread")]

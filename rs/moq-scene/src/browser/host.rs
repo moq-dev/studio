@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use cef::*;
 
 use super::outbox::Commands;
-use super::protocol::{Channel, Command, Event, Format, Id, Open, Plane, Start, Texture};
+use super::protocol::{Area, Channel, Command, Event, Format, Id, Layer, Open, Plane, Start, Texture};
 use super::{Button, Input, Modifiers};
 
 /// Run one of CEF's subprocesses (renderer, GPU, utility, zygote).
@@ -495,6 +495,25 @@ wrap_render_handler! {
 			}
 		}
 
+		// The studio draws a popup widget over the page, and CEF hands input
+		// over it to it, so the studio sends input as for the page alone.
+		fn on_popup_show(&self, _browser: Option<&mut Browser>, show: ::std::os::raw::c_int) {
+			if show == 0 {
+				self.page.shared.send(&Event::Popup(self.page.id, None), &[]);
+			}
+		}
+
+		fn on_popup_size(&self, _browser: Option<&mut Browser>, rect: Option<&Rect>) {
+			let Some(rect) = rect else { return };
+			let area = Area {
+				x: rect.x,
+				y: rect.y,
+				width: rect.width.max(0) as u32,
+				height: rect.height.max(0) as u32,
+			};
+			self.page.shared.send(&Event::Popup(self.page.id, Some(area)), &[]);
+		}
+
 		fn on_paint(
 			&self,
 			_browser: Option<&mut Browser>,
@@ -504,7 +523,8 @@ wrap_render_handler! {
 			width: ::std::os::raw::c_int,
 			height: ::std::os::raw::c_int,
 		) {
-			if type_ != PaintElementType::VIEW || buffer.is_null() || width <= 0 || height <= 0 {
+			let Some(layer) = layer(type_) else { return };
+			if buffer.is_null() || width <= 0 || height <= 0 {
 				return;
 			}
 			let len = width as usize * height as usize * 4;
@@ -513,6 +533,7 @@ wrap_render_handler! {
 			let data = unsafe { std::slice::from_raw_parts(buffer, len) }.to_vec();
 			let event = Event::Pixels {
 				page: self.page.id,
+				layer,
 				width: width as u32,
 				height: height as u32,
 				data,
@@ -527,10 +548,9 @@ wrap_render_handler! {
 			_dirty_rects: Option<&[Rect]>,
 			info: Option<&AcceleratedPaintInfo>,
 		) {
-			let Some(info) = info else { return };
-			if type_ != PaintElementType::VIEW {
+			let (Some(info), Some(layer)) = (info, layer(type_)) else {
 				return;
-			}
+			};
 			let format = match info.format {
 				ColorType::RGBA_8888 => Format::Rgba,
 				ColorType::BGRA_8888 => Format::Bgra,
@@ -558,8 +578,19 @@ wrap_render_handler! {
 			// SAFETY: CEF owns these descriptors and keeps them open for this
 			// call, which outlasts the send that duplicates them.
 			let fds: Vec<_> = planes.iter().map(|plane| unsafe { BorrowedFd::borrow_raw(plane.fd) }).collect();
-			self.page.shared.paint(&Event::Texture(self.page.id, texture), &fds);
+			self.page.shared.paint(&Event::Texture(self.page.id, layer, texture), &fds);
 		}
+	}
+}
+
+/// The layer CEF painted, if it is one the studio shows.
+fn layer(type_: PaintElementType) -> Option<Layer> {
+	if type_ == PaintElementType::VIEW {
+		Some(Layer::View)
+	} else if type_ == PaintElementType::POPUP {
+		Some(Layer::Popup)
+	} else {
+		None
 	}
 }
 
@@ -680,7 +711,7 @@ wrap_life_span_handler! {
 	}
 
 	impl LifeSpanHandler {
-		// A source shows one page, and nothing would show a popup, so
+		// A source shows one page, and nothing would show another window, so
 		// `window.open` and `target="_blank"` open nothing. That also keeps
 		// the studio's pages the only browsers, whose closing ends the helper.
 		fn on_before_popup(

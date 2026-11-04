@@ -12,7 +12,9 @@
 //! become one; CEF's own subprocesses start the same way. The helper paints
 //! into a shared GPU texture the studio copies on its device, or into memory
 //! the studio uploads when either side cannot share textures ([`Paint`] says
-//! which). A page's sound joins the program bus at the bus's rate.
+//! which). Its popups, such as a `<select>`'s list, arrive the same way apart
+//! from the page, and the studio draws them over it. A page's sound joins the
+//! program bus at the bus's rate.
 //!
 //! Linux only for now, and only with the `cef` feature: elsewhere a browser
 //! source reports that it is unsupported.
@@ -25,6 +27,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::wgpu;
 
+#[cfg(target_os = "linux")]
+mod layers;
 #[cfg(target_os = "linux")]
 mod outbox;
 #[cfg(target_os = "linux")]
@@ -316,7 +320,7 @@ pub struct Modifiers {
 }
 
 /// The texture a page's pixels are uploaded to: premultiplied BGRA, as CEF
-/// paints.
+/// paints, and a copy source for drawing a popup over the page.
 #[cfg_attr(
 	not(target_os = "linux"),
 	expect(dead_code, reason = "browser sources are Linux-only")
@@ -349,7 +353,7 @@ fn upload(
 		sample_count: 1,
 		dimension: wgpu::TextureDimension::D2,
 		format: wgpu::TextureFormat::Bgra8Unorm,
-		usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+		usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
 		view_formats: &[],
 	});
 	queue.write_texture(
