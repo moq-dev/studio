@@ -82,7 +82,6 @@ repository.
 - [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Viewer-side composition](/quest/m0/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
-- [The program encoder drains](/quest/m0/program-drain.md) - a hardware encoder never loses the program's last frames at exit or on pause
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request

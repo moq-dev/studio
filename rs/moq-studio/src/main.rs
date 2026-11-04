@@ -179,6 +179,7 @@ fn main() -> anyhow::Result<ExitCode> {
 	};
 	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
+	engine.stop();
 	if let (Err(err), Err(_)) = (&saved, &ran) {
 		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
 	}
