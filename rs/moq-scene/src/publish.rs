@@ -60,11 +60,13 @@ pub struct Publish {
 	owners: Arc<Mutex<Owners>>,
 }
 
-/// Which [`Claim`] owns each source name's entry in the studio catalog.
+/// Which [`Claim`] owns each source name's entry in the studio catalog, and
+/// each open [`Listing`]'s catalog by its claim.
 #[derive(Default)]
 struct Owners {
 	next: u64,
 	by_name: BTreeMap<String, u64>,
+	catalogs: BTreeMap<u64, moq_mux::catalog::Producer>,
 }
 
 impl Publish {
@@ -88,6 +90,17 @@ impl Publish {
 			kind,
 			owners: Default::default(),
 		}
+	}
+
+	/// What each source track the studio catalog lists has written, keyed by
+	/// rendition ID, as [`Catalog::stats`](moq_mux::catalog::Producer::stats)
+	/// reports the program's. The broadcast names every track uniquely, so all
+	/// sources share one map. A replaced source's tracks drop out with its
+	/// catalog entry, even while it is still stopping.
+	pub fn stats(&self) -> BTreeMap<String, hang::stats::Rendition> {
+		let owners = self.owners.lock().unwrap();
+		let listed = owners.by_name.values().filter_map(|id| owners.catalogs.get(id));
+		listed.flat_map(|catalog| catalog.stats()).collect()
 	}
 
 	/// Claim `name`'s entry in the studio catalog for a source that is opening,
@@ -155,6 +168,7 @@ impl<'a> Listing<'a> {
 			.with_bandwidth(publish.bandwidth.clone())
 			.with_hls(None);
 		let catalog = moq_mux::catalog::Producer::new(&mut scratch, config)?;
+		claim.owners.lock().unwrap().catalogs.insert(claim.id, catalog.clone());
 		Ok(Self {
 			claim,
 			kind: publish.kind.clone(),
@@ -194,6 +208,7 @@ impl<'a> Listing<'a> {
 
 impl Drop for Listing<'_> {
 	fn drop(&mut self) {
+		self.claim.owners.lock().unwrap().catalogs.remove(&self.claim.id);
 		// Fails only once the studio catalog closed, which took the entry with it.
 		let _ = self.studio.mutate(|root| {
 			if self.claim.owned() {
@@ -337,7 +352,7 @@ impl<E: Encode> Drop for Encoding<E> {
 	}
 }
 
-/// A captured source's video, encoded frame by frame as it is shown.
+/// A captured or replayed source's video, encoded frame by frame as it is shown.
 pub(crate) struct Video {
 	track: Encoding,
 	config: moq_video::encode::Config,
@@ -352,10 +367,6 @@ impl Video {
 	/// to learn exactly what the real one will write, so a machine that cannot
 	/// encode another stream, such as a GPU at its hardware session cap, fails
 	/// here with the reason.
-	#[cfg_attr(
-		not(feature = "capture"),
-		allow(dead_code, reason = "only capture sources encode video")
-	)]
 	pub(crate) async fn new(
 		listing: &Listing<'_>,
 		size: moq_video::Size,
@@ -383,10 +394,6 @@ impl Video {
 	/// Encode and publish `frame`, restamping it onto the studio clock. The
 	/// encoder opens on the first frame, and reopens when the picture's size or
 	/// color space changes, which moves the rendition to a new track.
-	#[cfg_attr(
-		not(feature = "capture"),
-		allow(dead_code, reason = "only capture sources encode video")
-	)]
 	pub(crate) fn encode(&mut self, frame: &mut moq_video::Frame) -> Result<(), Error> {
 		let captured = frame.timestamp.as_micros();
 		let epoch = *self
@@ -413,11 +420,14 @@ impl Video {
 		}
 	}
 
+	/// Mark a break, such as a gap in a replay: what follows does not continue
+	/// what came before, and a viewer arriving during it waits for what follows
+	/// rather than being served the last picture as if it were live.
+	pub(crate) fn discontinuity(&mut self) -> Result<(), Error> {
+		self.track.pause()
+	}
+
 	/// End the track, failed with `err` so viewers see why.
-	#[cfg_attr(
-		not(feature = "capture"),
-		allow(dead_code, reason = "only capture sources encode video")
-	)]
 	pub(crate) fn abort(self, err: &Error) {
 		self.track.abort(moq_net::Error::Transport(err.to_string()));
 	}
@@ -479,7 +489,7 @@ mod tests {
 
 	use super::*;
 	use crate::collection::{Collection, Rgba, Source};
-	use crate::source::test::{context, local, start};
+	use crate::source::test::{context, local, start, until, until_time, video};
 	use crate::source::{Sources, Status};
 
 	/// A studio broadcast and catalog to publish into, and a reader of it.
@@ -641,6 +651,20 @@ mod tests {
 					}
 				} => {}
 			}
+
+			// Every frame written counts for the Health panel, while the
+			// studio catalog lists the source.
+			let stats = publish.stats();
+			assert_eq!(
+				stats.values().map(|rendition| rendition.frames).sum::<u64>(),
+				5,
+				"{stats:?}"
+			);
+			// A replacement takes the listing, and the old tracks with it.
+			let _newer = publish.claim("camera");
+			assert!(publish.stats().is_empty());
+			drop(listing);
+			assert!(publish.owners.lock().unwrap().catalogs.is_empty());
 		})
 		.await;
 	}
@@ -806,6 +830,66 @@ mod tests {
 			drop(still);
 			drop(new);
 			assert!(catalog.snapshot().ext.studio.sources.is_empty());
+		})
+		.await;
+	}
+
+	/// A replay source publishes each replay as it shows, so viewers composing
+	/// the scene themselves see it too, gaps included.
+	#[tokio::test(start_paused = true)]
+	async fn a_replay_is_published_as_it_plays() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (publish, catalog, consumer) = studio();
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish);
+			let mut collection = Collection::new();
+			collection.sources.insert("replay".into(), Source::Replay);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			// The broadcast left out its second second, a gap in the span.
+			let (broadcast, video, _live) = video(Some(1)).await;
+			let target = crate::replay::Target {
+				broadcast: broadcast.consume(),
+				video: Some(video),
+				audio: None,
+				end: moq_net::Timestamp::from_micros(2_500_000).unwrap(),
+			};
+			let take = crate::replay::Take::new(&target, std::time::Duration::from_millis(2_500)).unwrap();
+			let feed = sources.get("replay").unwrap();
+			let begin = kio::clock::now();
+			feed.replay(take, 1.0).unwrap();
+			// The first picture is due at once, so the clock stays put while
+			// the encoder opens.
+			let listed = until(|| {
+				let listed = catalog.snapshot().ext.studio.sources.remove("replay");
+				listed.filter(|listed| !listed.video.renditions.is_empty())
+			})
+			.await;
+			assert_eq!(feed.track(), Some(Status::Live));
+
+			// Into the gap, before the replay ends, a viewer reads the break.
+			let (name, config) = listed.video.renditions.iter().next().unwrap();
+			let track = consumer
+				.track(hang::catalog::Reference::track(config, name))
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(None))
+				.await
+				.unwrap();
+			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
+			let mut track = moq_mux::container::Consumer::new(track, container);
+			until_time(begin + std::time::Duration::from_millis(1_500)).await;
+			let now = kio::Waiter::noop();
+			until(|| match track.poll_read(&now) {
+				std::task::Poll::Ready(read) => match read.unwrap().expect("open while the replay plays") {
+					moq_mux::container::Read::End { .. } | moq_mux::container::Read::Gap { .. } => Some(()),
+					_ => None,
+				},
+				std::task::Poll::Pending => None,
+			})
+			.await;
 		})
 		.await;
 	}

@@ -1,18 +1,24 @@
 //! The window: docked panels over the engine's state.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
 use egui::{Color32, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use moq_scene::replay::Take;
 use moq_scene::source::{Feed, Status};
-use moq_scene::{Canvas, Clip, Collection, Draft, Filter, Item, Layer, Rect, Scene, Source, Video, wgpu};
+use moq_scene::{
+	Blend, Canvas, Clip, Collection, Crop, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source, Transition,
+	Video, wgpu,
+};
 
+use crate::autosave::Conflict;
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
+use crate::replay::{self, Of};
 use crate::snap::{self, Grab, Snap};
 
 /// The panels, each a tab the user can move, split, or stack.
@@ -25,10 +31,12 @@ enum Tab {
 	Items,
 	Sources,
 	Devices,
+	Guests,
 	Filters,
 	Audio,
 	Output,
 	Health,
+	Replay,
 }
 
 impl Tab {
@@ -41,10 +49,12 @@ impl Tab {
 			Self::Items => "Items",
 			Self::Sources => "Sources",
 			Self::Devices => "Devices",
+			Self::Guests => "Guests",
 			Self::Filters => "Filters",
 			Self::Audio => "Audio",
 			Self::Output => "Output",
 			Self::Health => "Health",
+			Self::Replay => "Replay",
 		}
 	}
 }
@@ -57,18 +67,13 @@ pub struct Studio {
 
 impl Studio {
 	pub fn new(render: &eframe::egui_wgpu::RenderState, engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> Self {
-		// The compositor's textures live as long as the engine, so registering
-		// them once is enough: egui samples whatever they hold each frame.
+		// egui samples whatever the compositor's textures hold each frame, so
+		// they are registered again only when a resize replaces them.
 		let (preview, program, dropped) = {
 			let state = engine.state.lock().unwrap();
-			let mut renderer = render.renderer.write();
-			let mut register = |texture: &wgpu::Texture| {
-				let view = texture.create_view(&Default::default());
-				renderer.register_native_texture(&render.device, &view, wgpu::FilterMode::Linear)
-			};
 			(
-				register(state.compositor.preview()),
-				register(state.compositor.program()),
+				Registered::new(render, state.compositor.preview()),
+				Registered::new(render, state.compositor.program()),
 				state.dropped,
 			)
 		};
@@ -78,8 +83,12 @@ impl Studio {
 		let [top, bottom] = tree.split_below(NodeIndex::root(), 0.62, vec![Tab::Scenes, Tab::History]);
 		tree.split_right(top, 0.5, vec![Tab::Program]);
 		let [_, items] = tree.split_right(bottom, 0.18, vec![Tab::Items]);
-		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices]);
-		tree.split_right(sources, 0.5, vec![Tab::Filters, Tab::Health, Tab::Audio, Tab::Output]);
+		let [_, sources] = tree.split_right(items, 0.4, vec![Tab::Sources, Tab::Devices, Tab::Guests]);
+		tree.split_right(
+			sources,
+			0.5,
+			vec![Tab::Filters, Tab::Replay, Tab::Health, Tab::Audio, Tab::Output],
+		);
 
 		Self {
 			dock,
@@ -94,23 +103,40 @@ impl Studio {
 				snapping: Snapping::default(),
 				drag: None,
 				new_scene: String::new(),
+				renaming: None,
+				canvas: None,
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
+				replay: Replay::default(),
+				guest: String::new(),
+				shown: None,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
+				reloads: 0,
 			},
 		}
 	}
 }
 
 impl eframe::App for Studio {
-	fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+		let engine = self.panels.engine.clone();
+		let state = engine.state.lock().unwrap();
+		if let Some(render) = frame.wgpu_render_state() {
+			self.panels.preview.follow(render, state.compositor.preview());
+			self.panels.program.follow(render, state.compositor.program());
+		}
 		// Redraw at the canvas rate, so preview and program are live.
-		let framerate = self.panels.engine.state.lock().unwrap().collection().canvas.framerate;
+		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
+		self.panels.follow_reloads(&state);
+		drop(state);
 
 		self.panels.shortcuts(ui.ctx());
 		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui));
+		if let Some(conflict) = self.panels.engine.autosave.conflict() {
+			egui::Panel::top("conflict").show(ui, |ui| self.panels.conflict(ui, conflict));
+		}
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
 		DockArea::new(&mut self.dock)
 			.style(Style::from_egui(ui.style()))
@@ -118,12 +144,47 @@ impl eframe::App for Studio {
 	}
 }
 
+/// A compositor texture as egui shows it.
+struct Registered {
+	id: egui::TextureId,
+	texture: wgpu::Texture,
+}
+
+impl Registered {
+	fn new(render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) -> Self {
+		let view = texture.create_view(&Default::default());
+		let id = render
+			.renderer
+			.write()
+			.register_native_texture(&render.device, &view, wgpu::FilterMode::Linear);
+		Self {
+			id,
+			texture: texture.clone(),
+		}
+	}
+
+	/// Show `texture` from now on, if a resize replaced the one shown.
+	fn follow(&mut self, render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) {
+		if self.texture == *texture {
+			return;
+		}
+		let view = texture.create_view(&Default::default());
+		render.renderer.write().update_egui_texture_from_wgpu_texture(
+			&render.device,
+			&view,
+			wgpu::FilterMode::Linear,
+			self.id,
+		);
+		self.texture = texture.clone();
+	}
+}
+
 /// What every panel draws from, plus the half-typed forms.
 struct Panels {
 	engine: Arc<Engine>,
 	runtime: tokio::runtime::Handle,
-	preview: egui::TextureId,
-	program: egui::TextureId,
+	preview: Registered,
+	program: Registered,
 	/// Whether the Items panel shows the top layer rather than the scene in
 	/// preview.
 	top: bool,
@@ -134,11 +195,23 @@ struct Panels {
 	/// The item a drag in the preview holds.
 	drag: Option<Drag>,
 	new_scene: String,
+	/// The scene being renamed, by index, and the name typed so far.
+	renaming: Option<(usize, String)>,
+	/// The canvas the Output panel's form holds until it is applied, or
+	/// `None` while it shows the collection's.
+	canvas: Option<Canvas>,
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
+	replay: Replay,
+	/// The name typed for the next guest.
+	guest: String,
+	/// The join link on screen.
+	shown: Option<Shown>,
 	/// The outcome of the last action, shown in the status bar.
 	message: Option<Result<String, String>>,
+	/// The engine's reloads seen so far.
+	reloads: u64,
 }
 
 impl TabViewer for Panels {
@@ -165,10 +238,12 @@ impl TabViewer for Panels {
 			Tab::Items => self.items(ui),
 			Tab::Sources => self.sources(ui),
 			Tab::Devices => self.devices(ui),
+			Tab::Guests => self.guests(ui),
 			Tab::Filters => self.filters(ui),
 			Tab::Audio => self.audio(ui),
 			Tab::Output => self.output(ui),
 			Tab::Health => self.health(ui),
+			Tab::Replay => self.replay(ui),
 		}
 	}
 }
@@ -180,21 +255,48 @@ enum Selection {
 	Item(Layer, usize),
 }
 
+/// What the Filters panel sets on a selection.
+#[derive(Clone, Debug, PartialEq)]
+struct Look {
+	crop: Crop,
+	filters: Vec<Filter>,
+	/// An item's blend mode; a source has none.
+	blend: Option<Blend>,
+}
+
 impl Selection {
-	/// The filters of what is selected, or `None` if it is gone or has no picture.
-	fn filters(&self, collection: &Collection) -> Option<Vec<Filter>> {
+	/// The look of what is selected, or `None` if it is gone or has no picture.
+	fn look(&self, collection: &Collection) -> Option<Look> {
 		match self {
 			Self::Source(name) => {
 				collection.sources.get(name).filter(|source| source.has_video())?;
-				Some(collection.video.get(name).cloned().unwrap_or_default().filters)
+				let video = collection.video.get(name).cloned().unwrap_or_default();
+				Some(Look {
+					crop: video.crop,
+					filters: video.filters,
+					blend: None,
+				})
 			}
-			Self::Item(layer, index) => Some(collection.items(layer)?.get(*index)?.filters.clone()),
+			Self::Item(layer, index) => {
+				let item = collection.items(layer)?.get(*index)?;
+				Some(Look {
+					crop: item.crop,
+					filters: item.filters.clone(),
+					blend: Some(item.blend),
+				})
+			}
 		}
 	}
 
-	fn set_filters(&self, draft: &mut Draft, filters: Vec<Filter>) -> Result<(), moq_scene::Error> {
+	/// The filters of what is selected, or `None` if it is gone or has no picture.
+	fn filters(&self, collection: &Collection) -> Option<Vec<Filter>> {
+		self.look(collection).map(|look| look.filters)
+	}
+
+	fn set_look(&self, draft: &mut Draft, look: Look) -> Result<(), moq_scene::Error> {
+		let Look { crop, filters, blend } = look;
 		match self {
-			Self::Source(name) => draft.set_video(name, Some(Video { filters })),
+			Self::Source(name) => draft.set_video(name, Some(Video { crop, filters })),
 			Self::Item(layer, index) => {
 				let item = draft
 					.collection()
@@ -203,9 +305,26 @@ impl Selection {
 					.cloned();
 				let item =
 					item.ok_or_else(|| moq_scene::Error::Conflict(format!("there is no item {index} in {layer}")))?;
-				draft.set_item(layer, *index, Item { filters, ..item })
+				let blend = blend.unwrap_or(item.blend);
+				draft.set_item(
+					layer,
+					*index,
+					Item {
+						crop,
+						filters,
+						blend,
+						..item
+					},
+				)
 			}
 		}
+	}
+
+	fn set_filters(&self, draft: &mut Draft, filters: Vec<Filter>) -> Result<(), moq_scene::Error> {
+		let look = self
+			.look(draft.collection())
+			.ok_or_else(|| moq_scene::Error::Conflict("the selection is gone".into()))?;
+		self.set_look(draft, Look { filters, ..look })
 	}
 
 	fn describe(&self, collection: &Collection) -> String {
@@ -289,13 +408,8 @@ impl Panels {
 		egui::MenuBar::new().ui(ui, |ui| {
 			ui.menu_button("File", |ui| {
 				if ui.button("Reload").clicked() {
-					self.deselect_item();
 					let result = self.engine.reload();
-					let result = result.map(|()| match self.engine.state.lock().unwrap().dropped {
-						0 => "reloaded".to_string(),
-						dropped => format!("reloaded; {}", dropped_message(dropped)),
-					});
-					self.report(result);
+					self.check(result);
 				}
 			});
 			ui.menu_button("Edit", |ui| {
@@ -314,6 +428,47 @@ impl Panels {
 					ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
 				}
 			});
+		});
+	}
+
+	/// Report a reload, from File > Reload or an outside edit the autosave
+	/// took, and let go of a selected item, a drag, and a scene rename under
+	/// way, whose index it may have given to another. Called under every lock
+	/// that uses one, since the autosave can reload between two.
+	fn follow_reloads(&mut self, state: &State) {
+		if state.reloads == self.reloads {
+			return;
+		}
+		self.reloads = state.reloads;
+		self.deselect_item();
+		let path = self.engine.autosave.path().display();
+		self.report(Ok(match state.dropped {
+			0 => format!("reloaded {path}"),
+			dropped => format!("reloaded {path}; {}", dropped_message(dropped)),
+		}));
+	}
+
+	/// An outside edit to the scene file the studio has not taken, and the
+	/// choice of which version to keep.
+	fn conflict(&mut self, ui: &mut Ui, conflict: Conflict) {
+		ui.horizontal_wrapped(|ui| {
+			let path = self.engine.autosave.path().display().to_string();
+			let why = match &conflict.refused {
+				None => "while the studio has unsaved edits".to_string(),
+				Some(refused) => format!("and cannot be loaded: {refused}"),
+			};
+			ui.colored_label(
+				ui.visuals().warn_fg_color,
+				format!("{path} changed outside the studio {why}. Nothing is saved until you pick a version."),
+			);
+			if ui.button("Keep the studio's").clicked() {
+				let result = self.engine.keep();
+				self.report(result.map(|()| format!("saved the studio's version over {path}")));
+			}
+			if ui.button("Take the file's").clicked() {
+				let result = self.engine.reload();
+				self.check(result);
+			}
 		});
 	}
 
@@ -379,12 +534,13 @@ impl Panels {
 	}
 
 	/// Deselect an item, after an edit that may have moved any of them, and
-	/// let go of any drag.
+	/// let go of any drag and any scene rename under way.
 	fn deselect_item(&mut self) {
 		if matches!(self.selection, Some(Selection::Item(..))) {
 			self.selection = None;
 		}
 		self.drag = None;
+		self.renaming = None;
 	}
 
 	/// The layer the Items panel shows, and new sources are placed in.
@@ -400,7 +556,9 @@ impl Panels {
 
 	/// Copy the selected item, with what it shows, to the clipboard.
 	fn copy(&mut self, ctx: &egui::Context) {
-		let state = self.engine.state.lock().unwrap();
+		let engine = self.engine.clone();
+		let state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let collection = state.collection();
 		let item = match &self.selection {
 			Some(Selection::Item(layer, index)) => collection.items(layer).and_then(|items| items.get(*index)),
@@ -426,6 +584,7 @@ impl Panels {
 	fn paste(&mut self, text: &str) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let result = (|| {
 			let clip = Clip::from_toml(text).context("the clipboard holds no items or filters")?;
 			match clip {
@@ -461,6 +620,7 @@ impl Panels {
 	fn preview(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let canvas = state.collection().canvas;
 		ui.horizontal(|ui| {
 			ui.label(format!(
@@ -481,7 +641,7 @@ impl Panels {
 					.suffix(" px"),
 			);
 		});
-		let response = picture(ui, self.preview, canvas, egui::Sense::click_and_drag());
+		let response = picture(ui, self.preview.id, canvas, egui::Sense::click_and_drag());
 		let result = self.arrange(ui, &mut state, &response, canvas);
 		drop(state);
 		self.check(result);
@@ -607,15 +767,28 @@ impl Panels {
 	}
 
 	fn program(&mut self, ui: &mut Ui) {
-		let mut state = self.engine.state.lock().unwrap();
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
 		let canvas = state.collection().canvas;
 		let fade = state.collection().transition.fade;
+		let mut result = Ok(());
 		ui.horizontal(|ui| {
 			if ui.button("Cut").clicked() {
 				state.compositor.cut();
 			}
-			if ui.button(format!("Fade ({} ms)", fade.as_millis())).clicked() {
+			if ui.button("Fade").clicked() {
 				state.compositor.fade(fade, kio::clock::Instant::now());
+			}
+			let mut millis = fade.as_millis() as u64;
+			let response = ui
+				.add(egui::DragValue::new(&mut millis).suffix(" ms"))
+				.on_hover_text("How long a fade takes");
+			let gesture = self.gestures.of(&response);
+			if response.changed() {
+				let fade = Duration::from_millis(millis);
+				result = edit(&mut state, "Set the fade time", gesture, |draft| {
+					draft.set_transition(Transition { fade })
+				});
 			}
 			ui.label(format!(
 				"Program: {}",
@@ -626,29 +799,66 @@ impl Panels {
 			}
 		});
 		drop(state);
-		picture(ui, self.program, canvas, egui::Sense::hover());
+		self.check(result);
+		picture(ui, self.program.id, canvas, egui::Sense::hover());
 	}
 
 	fn scenes(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let preview = state.compositor.preview_scene().map(str::to_owned);
 		let program = state.compositor.program_scene().map(str::to_owned);
+		let on_air: Vec<String> = state.compositor.on_air().map(str::to_owned).collect();
 		let mut pick = None;
-		let mut remove = None;
+		let mut action = None;
+		let count = state.collection().scenes.len();
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
 			for (index, scene) in state.collection().scenes.iter().enumerate() {
 				ui.horizontal(|ui| {
+					if let Some((renaming, name)) = &mut self.renaming
+						&& *renaming == index
+					{
+						let response = ui.text_edit_singleline(name);
+						if !response.has_focus() && !response.lost_focus() {
+							response.request_focus();
+						}
+						if response.lost_focus() {
+							// Escape cancels; Enter or a click away renames.
+							if !ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+								action = Some(SceneAction::Rename(index, name.trim().to_string()));
+							}
+							self.renaming = None;
+						}
+						return;
+					}
 					let selected = preview.as_deref() == Some(scene.name.as_str());
-					if ui.selectable_label(selected, &scene.name).clicked() {
+					let label = ui.selectable_label(selected, &scene.name);
+					if label.clicked() {
 						pick = Some(scene.name.clone());
+					}
+					if label.double_clicked() || ui.small_button("Rename").clicked() {
+						self.renaming = Some((index, scene.name.clone()));
 					}
 					if program.as_deref() == Some(scene.name.as_str()) {
 						ui.colored_label(Color32::RED, "on program");
 					}
-					if ui.small_button("Remove").clicked() {
-						remove = Some((index, scene.name.clone()));
+					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
+						action = Some(SceneAction::Move(index, index - 1));
+					}
+					if ui
+						.add_enabled(index + 1 < count, egui::Button::new("Down").small())
+						.clicked()
+					{
+						action = Some(SceneAction::Move(index, index + 1));
+					}
+					if ui
+						.add_enabled(!on_air.contains(&scene.name), egui::Button::new("Remove").small())
+						.on_disabled_hover_text("On air; cut to another scene first")
+						.clicked()
+					{
+						action = Some(SceneAction::Remove(index));
 					}
 				});
 			}
@@ -676,12 +886,35 @@ impl Panels {
 		if let Some(pick) = pick {
 			state.compositor.set_preview(Some(pick));
 		}
-		if let Some((index, name)) = remove {
-			let result = edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
+		let Some(action) = action else { return };
+		let name = state.collection().scenes[action.index()].name.clone();
+		let result = match action {
+			SceneAction::Rename(index, to) => {
+				let result = edit(&mut state, format!("Rename scene `{name}` to `{to}`"), None, |draft| {
+					draft.rename_scene(index, to.clone())
+				});
+				if result.is_ok() {
+					self.renamed(&name, &to);
+				}
+				result
+			}
+			SceneAction::Move(from, to) => edit(&mut state, format!("Reorder scene `{name}`"), None, |draft| {
+				draft.move_scene(from, to)
+			}),
+			SceneAction::Remove(index) => edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
 				draft.remove_scene(index)
-			});
-			drop(state);
-			self.check(result);
+			}),
+		};
+		drop(state);
+		self.check(result);
+	}
+
+	/// Keep a selected item of the scene renamed from `from` selected.
+	fn renamed(&mut self, from: &str, to: &str) {
+		if let Some(Selection::Item(Layer::Scene(scene), _)) = &mut self.selection
+			&& scene == from
+		{
+			*scene = to.to_string();
 		}
 	}
 
@@ -728,6 +961,7 @@ impl Panels {
 	fn items(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
 		ui.horizontal(|ui| {
 			ui.selectable_value(&mut self.top, false, format!("Scene: {scene}"));
@@ -1027,17 +1261,155 @@ impl Panels {
 		self.report(result.map(|name| format!("added `{name}`")));
 	}
 
-	/// The filters of the selected source or item, in order.
+	/// Invite guests, show their links, and see who joined.
+	fn guests(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let Some(room) = &engine.room else {
+			ui.label("Start with --room and --room-key to invite guests.");
+			return;
+		};
+
+		ui.horizontal(|ui| {
+			ui.label("Name");
+			let field = ui.text_edit_singleline(&mut self.guest);
+			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+			if ui.button("Invite").clicked() || entered {
+				let name = self.guest.trim().to_string();
+				match room.invite(&name) {
+					Ok(invite) => {
+						self.show(ui.ctx(), name, invite);
+						self.guest.clear();
+					}
+					Err(err) => self.report(Err(err)),
+				}
+			}
+		});
+
+		let now = kio::clock::wall();
+		if let Some(shown) = &self.shown {
+			ui.separator();
+			ui.horizontal(|ui| {
+				ui.strong(format!("Join link for {}", shown.name));
+				ui.label(expiry(shown.invite.expires, now));
+			});
+			let mut hide = false;
+			ui.horizontal(|ui| {
+				if ui.button("Copy link").clicked() {
+					ui.ctx().copy_text(shown.invite.link.to_string());
+				}
+				hide = ui.button("Hide").clicked();
+			});
+			// The link is the guest's credential, so it shows only as a code to scan.
+			match &shown.qr {
+				Ok(qr) => {
+					let side = ui.available_width().min(240.0);
+					ui.image((qr.id(), egui::vec2(side, side)));
+				}
+				Err(err) => {
+					ui.colored_label(ui.visuals().error_fg_color, format!("{err}; copy the link instead."));
+				}
+			}
+			if hide {
+				self.shown = None;
+			}
+		}
+
+		ui.separator();
+		let participants = room.participants();
+		if participants.is_empty() {
+			ui.weak("Nobody invited yet.");
+			return;
+		}
+		let mut show = None;
+		let mut invite = None;
+		let mut remove = None;
+		egui::ScrollArea::vertical().show(ui, |ui| {
+			egui::Grid::new("guests").striped(true).show(ui, |ui| {
+				for heading in ["Guest", "Camera", "Screen", "Link", ""] {
+					ui.strong(heading);
+				}
+				ui.end_row();
+				for (name, participant) in &participants {
+					ui.label(name);
+					for online in [participant.camera, participant.screen] {
+						if online {
+							ui.colored_label(HEALTHY, "live");
+						} else {
+							ui.weak("offline");
+						}
+					}
+					match &participant.invite {
+						Some(link) => ui.label(expiry(link.expires, now)),
+						None => ui.weak("invited before this session"),
+					};
+					ui.horizontal(|ui| {
+						if let Some(link) = &participant.invite
+							&& ui.small_button("Show link").clicked()
+						{
+							show = Some((name.clone(), link.clone()));
+						}
+						if ui.small_button("New link").clicked() {
+							invite = Some(name.clone());
+						}
+						if ui
+							.small_button("Remove from scenes")
+							.on_hover_text(
+								"Take their camera and screen, and any mask reading them, out of every scene and mute them. They stay connected until their link expires.",
+							)
+							.clicked()
+						{
+							remove = Some(name.clone());
+						}
+					});
+					ui.end_row();
+				}
+			});
+		});
+
+		if let Some((name, link)) = show {
+			self.show(ui.ctx(), name, link);
+		}
+		if let Some(name) = invite {
+			match room.invite(&name) {
+				Ok(link) => self.show(ui.ctx(), name, link),
+				Err(err) => self.report(Err(err)),
+			}
+		}
+		if let Some(name) = remove {
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft(format!("Remove `{name}` from scenes"));
+			let result = match room.take_off(&mut draft, &name) {
+				Ok(false) => Ok(()),
+				Ok(true) => {
+					// Removing items moves the ones after them.
+					self.deselect_item();
+					state.commit(draft, None)
+				}
+				Err(err) => Err(err.into()),
+			};
+			drop(state);
+			self.report(result.map(|()| format!("removed {name} from every scene and muted them")));
+		}
+	}
+
+	/// Put `invite`'s link for `name` on screen as a QR code.
+	fn show(&mut self, ctx: &egui::Context, name: String, invite: crate::guests::Invite) {
+		let qr = qr(ctx, invite.link.as_str());
+		self.shown = Some(Shown { name, invite, qr });
+	}
+
+	/// The crop, filters in order, and blend mode of the selected source or item.
 	fn filters(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
 		let collection = state.collection();
 		let Some(selection) = self.selection.clone() else {
 			ui.label("Select a source or an item to filter it.");
 			return;
 		};
 		let what = selection.describe(collection);
-		let Some(filters) = selection.filters(collection) else {
+		let Some(look) = selection.look(collection) else {
 			ui.label(format!("{what} has no picture to filter."));
 			return;
 		};
@@ -1049,53 +1421,107 @@ impl Panels {
 			let source = video.filters.iter().map(describe_filter).collect::<Vec<_>>();
 			ui.weak(format!("after `{}`'s own: {}", item.source, source.join(", ")));
 		}
+		// What a mask can show, a picture of its own, and what a LUT reads.
+		let pictures: Vec<String> = collection
+			.sources
+			.iter()
+			.filter(|(_, source)| source.has_video() && source.opens())
+			.map(|(name, _)| name.clone())
+			.collect();
+		let luts: Vec<String> = collection
+			.sources
+			.iter()
+			.filter(|(_, source)| matches!(source, Source::Lut { .. }))
+			.map(|(name, _)| name.clone())
+			.collect();
 
-		let mut next = filters.clone();
+		let mut next = look.clone();
 		let mut action: Option<(String, Option<u64>)> = None;
-		let count = next.len();
-		let mut moved = None;
-		let mut remove = None;
-		for (index, filter) in next.iter_mut().enumerate() {
+		egui::Grid::new("look").show(ui, |ui| {
+			ui.label("Crop");
 			ui.horizontal(|ui| {
-				match filter {
-					Filter::Opacity { amount } => {
-						ui.label("Opacity");
-						let response = ui.add(egui::Slider::new(amount, 0.0..=1.0));
-						let gesture = self.gestures.of(&response);
-						if response.changed() {
-							action = Some((format!("Set opacity on {what}"), gesture));
-						}
+				let crop = &mut next.crop;
+				for (label, edge) in [
+					("left", &mut crop.left),
+					("top", &mut crop.top),
+					("right", &mut crop.right),
+					("bottom", &mut crop.bottom),
+				] {
+					ui.weak(label);
+					let response = ui.add(egui::DragValue::new(edge).range(0.0..=0.95).speed(0.002));
+					if let Some(gesture) = changed(&response, &mut self.gestures) {
+						action = Some((format!("Crop {what}"), gesture));
 					}
 				}
-				if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
-					moved = Some((index, index - 1));
+			})
+			.response
+			.on_hover_text("The fraction of the picture trimmed from each edge, the rest stretched to fill");
+			ui.end_row();
+			if let Some(blend) = &mut next.blend {
+				ui.label("Blend");
+				let before = *blend;
+				egui::ComboBox::from_id_salt("blend")
+					.selected_text(blend_name(*blend))
+					.show_ui(ui, |ui| {
+						for mode in Blend::ALL {
+							ui.selectable_value(blend, mode, blend_name(mode));
+						}
+					});
+				if *blend != before {
+					action = Some((format!("Set the blend mode of {what}"), None));
 				}
-				if ui
-					.add_enabled(index + 1 < count, egui::Button::new("Down").small())
-					.clicked()
-				{
-					moved = Some((index, index + 1));
-				}
-				if ui.small_button("Remove").clicked() {
-					remove = Some(index);
-				}
+				ui.end_row();
+			}
+		});
+
+		let count = next.filters.len();
+		let mut moved = None;
+		let mut remove = None;
+		for (index, filter) in next.filters.iter_mut().enumerate() {
+			ui.push_id(index, |ui| {
+				ui.horizontal_wrapped(|ui| {
+					if let Some(gesture) = filter_ui(ui, filter, &pictures, &luts, &mut self.gestures) {
+						action = Some((format!("Set {} on {what}", filter_name(filter)), gesture));
+					}
+					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
+						moved = Some((index, index - 1));
+					}
+					if ui
+						.add_enabled(index + 1 < count, egui::Button::new("Down").small())
+						.clicked()
+					{
+						moved = Some((index, index + 1));
+					}
+					if ui.small_button("Remove").clicked() {
+						remove = Some(index);
+					}
+				});
 			});
 		}
 		if let Some((from, to)) = moved {
-			next.swap(from, to);
+			next.filters.swap(from, to);
 			action = Some((format!("Reorder filters on {what}"), None));
 		}
 		if let Some(index) = remove {
-			next.remove(index);
+			next.filters.remove(index);
 			action = Some((format!("Remove a filter from {what}"), None));
 		}
 
 		ui.separator();
+		let filters = look.filters;
 		ui.horizontal(|ui| {
-			if ui.button("Add opacity").clicked() {
-				next.push(Filter::Opacity { amount: 1.0 });
-				action = Some((format!("Add opacity to {what}"), None));
-			}
+			egui::ComboBox::from_id_salt("add filter")
+				.selected_text("Add filter")
+				.show_ui(ui, |ui| {
+					for filter in templates(&pictures, &luts) {
+						if ui.selectable_label(false, filter_name(&filter)).clicked() {
+							action = Some((format!("Add {} to {what}", filter_name(&filter)), None));
+							next.filters.push(filter);
+						}
+					}
+				})
+				.response
+				.on_hover_text("A LUT needs a LUT source, and a mask a source with a picture of its own");
 			if ui.add_enabled(!filters.is_empty(), egui::Button::new("Copy")).clicked() {
 				let clip = Clip::Filters(moq_scene::clip::Filters {
 					filters: filters.clone(),
@@ -1115,7 +1541,7 @@ impl Panels {
 		});
 
 		let Some((label, gesture)) = action else { return };
-		let result = edit(&mut state, label, gesture, |draft| selection.set_filters(draft, next));
+		let result = edit(&mut state, label, gesture, |draft| selection.set_look(draft, next));
 		drop(state);
 		self.check(result);
 	}
@@ -1158,6 +1584,9 @@ impl Panels {
 	}
 
 	fn output(&mut self, ui: &mut Ui) {
+		self.canvas_form(ui);
+		ui.separator();
+
 		let stats = &self.engine.stats;
 		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
 		let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
@@ -1182,13 +1611,6 @@ impl Panels {
 					ui.end_row();
 				}
 			}
-			let canvas = self.engine.state.lock().unwrap().collection().canvas;
-			ui.label("Canvas");
-			ui.label(format!(
-				"{}x{} at {} fps, set in the scene file and read at startup",
-				canvas.width, canvas.height, canvas.framerate
-			));
-			ui.end_row();
 			ui.label("Drawn");
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
@@ -1210,14 +1632,7 @@ impl Panels {
 			ui.label(format!("{} frames", count(&stats.dropped)));
 			ui.end_row();
 			ui.label("Encoder");
-			ui.label(
-				stats
-					.encoder
-					.lock()
-					.unwrap()
-					.clone()
-					.unwrap_or_else(|| "not open".into()),
-			);
+			ui.label(stats.encoder().unwrap_or_else(|| "not open".into()));
 			ui.end_row();
 			ui.label("Encoded");
 			ui.label(format!(
@@ -1227,16 +1642,189 @@ impl Panels {
 			));
 			ui.end_row();
 		});
-		if let Some(error) = stats.error.lock().unwrap().as_ref() {
+		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
 	}
 
-	/// How the stream reaches viewers: what is wrong and why, the uplink, each
-	/// track, and each viewer that reports.
+	/// Replay the recent past of the program or a source in a replay source,
+	/// or save it as a clip.
+	fn replay(&mut self, ui: &mut Ui) {
+		let (pictures, replays) = {
+			let state = self.engine.state.lock().unwrap();
+			let named = |kind: fn(&Source) -> bool| -> Vec<String> {
+				let sources = &state.collection().sources;
+				sources
+					.iter()
+					.filter(|(_, source)| kind(source))
+					.map(|(name, _)| name.clone())
+					.collect()
+			};
+			(
+				named(|source| source.has_video() && !matches!(source, Source::Image { .. } | Source::Color { .. })),
+				named(|source| matches!(source, Source::Replay)),
+			)
+		};
+		let panel = &mut self.replay;
+		if panel.into.as_ref().is_none_or(|into| !replays.contains(into)) {
+			panel.into = replays.first().cloned();
+		}
+
+		egui::Grid::new("replay").show(ui, |ui| {
+			ui.label("Replay");
+			egui::ComboBox::from_id_salt("replay of")
+				.selected_text(panel.of.to_string())
+				.show_ui(ui, |ui| {
+					ui.selectable_value(&mut panel.of, Of::Program, Of::Program.to_string());
+					for name in pictures {
+						let of = Of::Source(name);
+						let label = of.to_string();
+						ui.selectable_value(&mut panel.of, of, label);
+					}
+				});
+			ui.end_row();
+			ui.label("Length");
+			egui::ComboBox::from_id_salt("replay length")
+				.selected_text(format!("{} s", panel.length.as_secs()))
+				.show_ui(ui, |ui| {
+					for length in replay::LENGTHS {
+						ui.selectable_value(&mut panel.length, length, format!("{} s", length.as_secs()));
+					}
+				});
+			ui.end_row();
+			ui.label("Speed");
+			egui::ComboBox::from_id_salt("replay speed")
+				.selected_text(format!("{:.0}%", panel.speed * 100.0))
+				.show_ui(ui, |ui| {
+					for speed in replay::SPEEDS {
+						ui.selectable_value(&mut panel.speed, speed, format!("{:.0}%", speed * 100.0));
+					}
+				});
+			ui.end_row();
+			ui.label("Play in");
+			match &mut panel.into {
+				Some(into) => {
+					egui::ComboBox::from_id_salt("replay into")
+						.selected_text(into.as_str())
+						.show_ui(ui, |ui| {
+							for name in replays {
+								let label = name.clone();
+								ui.selectable_value(into, name, label);
+							}
+						});
+				}
+				None => {
+					ui.weak("no replay source; add one in Sources");
+				}
+			}
+			ui.end_row();
+		});
+
+		let (play, save) = ui
+			.horizontal(|ui| {
+				let play = ui
+					.add_enabled(panel.into.is_some(), egui::Button::new("Replay"))
+					.on_hover_text("Play the last moments in the replay source")
+					.clicked();
+				let save = ui
+					.button("Save clip")
+					.on_hover_text(
+						"Save the last moments, in real time, beside the scene file. Copied without re-encoding, a \
+						 clip starts at the keyframe before them, and video with B-frames can end early.",
+					)
+					.clicked();
+				(play, save)
+			})
+			.inner;
+		if let Some(outcome) = panel.outcome.lock().unwrap().as_ref() {
+			match outcome {
+				Ok(message) => ui.label(message),
+				Err(err) => ui.colored_label(ui.visuals().error_fg_color, err),
+			};
+		}
+		if !play && !save {
+			return;
+		}
+
+		// Copied at the click, without waiting on anything, so the span ends
+		// there and replays apply in the order they were asked for.
+		let outcome = panel.outcome.clone();
+		let into = panel.into.as_ref().filter(|_| play);
+		let take = self.engine.target(&panel.of).and_then(|target| {
+			Ok(match into {
+				Some(_) => Take::new(&target, panel.length)?,
+				None => Take::clip(&target, panel.length)?,
+			})
+		});
+		let take = match take {
+			Ok(take) => take,
+			Err(err) => {
+				*outcome.lock().unwrap() = Some(Err(format!("{err:#}")));
+				return;
+			}
+		};
+		let of = panel.of.clone();
+		if let Some(into) = into {
+			let result =
+				replay::play(&self.engine, take, panel.speed, into).map(|()| format!("replaying {of} in `{into}`"));
+			*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
+			return;
+		}
+		let engine = self.engine.clone();
+		self.runtime.spawn(async move {
+			let result = replay::save(take, engine.autosave.path())
+				.await
+				.map(|path| format!("saved {of} to {}", path.display()));
+			*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
+		});
+	}
+
+	/// The canvas's size and frame rate, applied at once rather than as each
+	/// field changes, since a new canvas starts a new rendition.
+	fn canvas_form(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let current = state.collection().canvas;
+		let mut canvas = self.canvas.unwrap_or(current);
+		let mut apply = false;
+		ui.horizontal(|ui| {
+			ui.strong("Canvas");
+			ui.add(egui::DragValue::new(&mut canvas.width).range(2..=u32::MAX));
+			ui.label("x");
+			ui.add(egui::DragValue::new(&mut canvas.height).range(2..=u32::MAX));
+			ui.label("at");
+			ui.add(
+				egui::DragValue::new(&mut canvas.framerate)
+					.range(1..=u32::MAX)
+					.suffix(" fps"),
+			);
+			let edited = canvas != current;
+			apply = ui.add_enabled(edited, egui::Button::new("Apply")).clicked();
+			if ui.add_enabled(edited, egui::Button::new("Reset")).clicked() {
+				canvas = current;
+			}
+		});
+		self.canvas = (canvas != current).then_some(canvas);
+		if !apply {
+			return;
+		}
+		let label = format!(
+			"Set the canvas to {}x{} at {} fps",
+			canvas.width, canvas.height, canvas.framerate
+		);
+		let result = edit(&mut state, label, None, |draft| draft.set_canvas(canvas));
+		if result.is_ok() {
+			self.canvas = None;
+		}
+		drop(state);
+		self.check(result);
+	}
+
+	/// How the stream reaches viewers: what is wrong and why, each relay, the
+	/// uplink, each track, and each viewer that reports.
 	fn health(&mut self, ui: &mut Ui) {
 		let report = self.engine.health.lock().unwrap();
-		let Some(relay) = &report.relay else {
+		if report.relays.is_empty() {
 			ui.label("Not publishing; start with --connect to see how the stream is delivered.");
 			for problem in &report.problems {
 				ui.colored_label(color(ui, problem.verdict), &problem.cause);
@@ -1253,20 +1841,37 @@ impl Panels {
 			}
 			ui.separator();
 
+			egui::Grid::new("relays").striped(true).show(ui, |ui| {
+				for heading in ["Relay", "State", "Protocol"] {
+					ui.strong(heading);
+				}
+				ui.end_row();
+				for relay in &report.relays {
+					ui.label(&relay.endpoint);
+					match &relay.state {
+						health::State::Connecting => ui.weak("connecting"),
+						health::State::Connected => ui.colored_label(HEALTHY, "connected"),
+						health::State::Disconnected(reason) => ui
+							.colored_label(ui.visuals().error_fg_color, "unreachable")
+							.on_hover_text(reason),
+					};
+					ui.label(or_unknown(relay.version.map(|version| version.to_string())));
+					ui.end_row();
+				}
+			});
+			ui.separator();
+
 			let uplink = &report.uplink;
 			let viewers = &report.viewers;
 			egui::Grid::new("uplink").show(ui, |ui| {
-				ui.label("Relay");
-				match relay {
-					health::Relay::Connecting => ui.weak("connecting"),
-					health::Relay::Connected => ui.colored_label(HEALTHY, "connected"),
-					health::Relay::Disconnected(reason) => ui
-						.colored_label(ui.visuals().error_fg_color, "unreachable")
-						.on_hover_text(reason),
-				};
-				ui.end_row();
 				ui.label("Uplink");
-				verdict(ui, uplink.verdict);
+				ui.horizontal(|ui| {
+					verdict(ui, uplink.verdict);
+					match &uplink.relay {
+						Some(relay) => ui.weak(format!("to {relay}")),
+						None => ui.weak("no relay connected"),
+					};
+				});
 				ui.end_row();
 				ui.label("Round trip");
 				ui.label(or_unknown(uplink.rtt.map(|rtt| format!("{} ms", rtt.as_millis()))));
@@ -1282,8 +1887,8 @@ impl Panels {
 				ui.end_row();
 				ui.label("Watching");
 				match viewers.watching {
-					Some(watching) => ui.label(format!("{watching} sessions, by the relay's stats")),
-					None => ui.weak("unknown; the relay shares no stats with this connection"),
+					Some(watching) => ui.label(format!("{watching} sessions, by the relays' stats")),
+					None => ui.weak("unknown; no relay shares its stats with this studio"),
 				};
 				ui.end_row();
 				ui.label("Reporting");
@@ -1297,6 +1902,7 @@ impl Panels {
 
 			egui::Grid::new("tracks").striped(true).show(ui, |ui| {
 				for heading in [
+					"Source",
 					"Track",
 					"Sent",
 					"Frames",
@@ -1308,7 +1914,18 @@ impl Panels {
 					ui.strong(heading);
 				}
 				ui.end_row();
+				// Each source named once, beside its first track. The program's
+				// tracks come first and name none, so no source name can pass
+				// for them.
+				let mut group = None;
 				for track in &report.tracks {
+					let source = track.source.as_deref();
+					ui.label(if source == group {
+						""
+					} else {
+						source.unwrap_or_default()
+					});
+					group = source;
 					ui.label(&track.label).on_hover_text(&track.id);
 					ui.label(or_unknown(track.sent.map(health::rate)));
 					ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
@@ -1378,6 +1995,22 @@ fn millis(duration: Duration) -> String {
 	format!("{} ms", duration.as_millis())
 }
 
+/// An edit the Scenes panel makes to the scene at an index.
+enum SceneAction {
+	Rename(usize, String),
+	/// From one index to the other, counted after the removal.
+	Move(usize, usize),
+	Remove(usize),
+}
+
+impl SceneAction {
+	fn index(&self) -> usize {
+		match self {
+			Self::Rename(index, _) | Self::Move(index, _) | Self::Remove(index) => *index,
+		}
+	}
+}
+
 /// An edit the Items panel makes.
 enum ItemAction {
 	/// Replace the item at an index, labelled, as part of a gesture.
@@ -1409,9 +2042,218 @@ fn linked(ui: &mut Ui, collection: &Collection, layer: &Layer, index: usize, ite
 }
 
 fn describe_filter(filter: &Filter) -> String {
+	let name = filter_name(filter);
 	match filter {
-		Filter::Opacity { amount } => format!("opacity {:.0}%", amount * 100.0),
+		Filter::Opacity { amount }
+		| Filter::Brightness { amount }
+		| Filter::Contrast { amount }
+		| Filter::Saturate { amount }
+		| Filter::Grayscale { amount }
+		| Filter::Sepia { amount }
+		| Filter::Invert { amount } => format!("{name} {:.0}%", amount * 100.0),
+		Filter::HueRotate { degrees } => format!("{name} {degrees:.0}°"),
+		Filter::Blur { radius } => format!("{name} {radius:.1} px"),
+		Filter::Lut { source, .. } | Filter::Mask { source, .. } => format!("{name} `{source}`"),
+		_ => name.to_string(),
 	}
+}
+
+fn filter_name(filter: &Filter) -> &'static str {
+	match filter {
+		Filter::Opacity { .. } => "opacity",
+		Filter::Brightness { .. } => "brightness",
+		Filter::Contrast { .. } => "contrast",
+		Filter::Saturate { .. } => "saturation",
+		Filter::Grayscale { .. } => "grayscale",
+		Filter::Sepia { .. } => "sepia",
+		Filter::Invert { .. } => "invert",
+		Filter::HueRotate { .. } => "hue rotation",
+		Filter::Blur { .. } => "blur",
+		Filter::DropShadow { .. } => "drop shadow",
+		Filter::ChromaKey { .. } => "chroma key",
+		Filter::LumaKey { .. } => "luma key",
+		Filter::Lut { .. } => "LUT",
+		Filter::Mask { .. } => "mask",
+	}
+}
+
+fn blend_name(blend: Blend) -> &'static str {
+	match blend {
+		Blend::Normal => "normal",
+		Blend::Multiply => "multiply",
+		Blend::Screen => "screen",
+		Blend::Overlay => "overlay",
+		Blend::Darken => "darken",
+		Blend::Lighten => "lighten",
+		Blend::ColorDodge => "color dodge",
+		Blend::ColorBurn => "color burn",
+		Blend::HardLight => "hard light",
+		Blend::SoftLight => "soft light",
+		Blend::Difference => "difference",
+		Blend::Exclusion => "exclusion",
+		Blend::Hue => "hue",
+		Blend::Saturation => "saturation",
+		Blend::Color => "color",
+		Blend::Luminosity => "luminosity",
+	}
+}
+
+/// A new filter of each kind, as the Add menu offers it: one that leaves the
+/// picture as it is where the kind allows. A LUT or mask names the first
+/// source it can read, and is left out without one.
+fn templates(pictures: &[String], luts: &[String]) -> Vec<Filter> {
+	let mut filters = vec![
+		Filter::Opacity { amount: 1.0 },
+		Filter::Brightness { amount: 1.0 },
+		Filter::Contrast { amount: 1.0 },
+		Filter::Saturate { amount: 1.0 },
+		Filter::Grayscale { amount: 0.0 },
+		Filter::Sepia { amount: 0.0 },
+		Filter::Invert { amount: 0.0 },
+		Filter::HueRotate { degrees: 0.0 },
+		Filter::Blur { radius: 4.0 },
+		Filter::DropShadow {
+			x: 4.0,
+			y: 4.0,
+			blur: 4.0,
+			color: moq_scene::Rgba([0, 0, 0, 128]),
+		},
+		Filter::ChromaKey {
+			color: moq_scene::Rgba([0, 255, 0, 255]),
+			similarity: 0.4,
+			smoothness: 0.08,
+			spill: 0.1,
+		},
+		Filter::LumaKey {
+			min: 0.0,
+			max: 1.0,
+			smoothness: 0.05,
+		},
+	];
+	if let Some(source) = luts.first() {
+		filters.push(Filter::Lut {
+			source: source.clone(),
+			amount: 1.0,
+		});
+	}
+	if let Some(source) = pictures.first() {
+		filters.push(Filter::Mask {
+			source: source.clone(),
+			mode: MaskMode::Alpha,
+		});
+	}
+	filters
+}
+
+/// The gesture an edit through `response` belongs to, if it changed anything.
+fn changed(response: &egui::Response, gestures: &mut Gestures) -> Option<Option<u64>> {
+	let gesture = gestures.of(response);
+	response.changed().then_some(gesture)
+}
+
+/// Edit `filter`'s settings; the gesture of the edit, if it made one.
+fn filter_ui(
+	ui: &mut Ui,
+	filter: &mut Filter,
+	pictures: &[String],
+	luts: &[String],
+	gestures: &mut Gestures,
+) -> Option<Option<u64>> {
+	ui.label(filter_name(filter));
+	let mut edits = Vec::new();
+	let slider = |ui: &mut Ui, value: &mut f32, range| ui.add(egui::Slider::new(value, range));
+	match filter {
+		Filter::Opacity { amount }
+		| Filter::Grayscale { amount }
+		| Filter::Sepia { amount }
+		| Filter::Invert { amount } => {
+			edits.push(slider(ui, amount, 0.0..=1.0));
+		}
+		Filter::Brightness { amount } | Filter::Contrast { amount } | Filter::Saturate { amount } => {
+			edits.push(slider(ui, amount, 0.0..=3.0));
+		}
+		Filter::HueRotate { degrees } => edits.push(ui.add(egui::Slider::new(degrees, -180.0..=180.0).suffix("°"))),
+		Filter::Blur { radius } => {
+			edits.push(ui.add(egui::Slider::new(radius, 0.0..=100.0).logarithmic(true).suffix(" px")));
+		}
+		Filter::DropShadow { x, y, blur, color } => {
+			edits.push(ui.add(egui::DragValue::new(x).prefix("x ").suffix(" px")));
+			edits.push(ui.add(egui::DragValue::new(y).prefix("y ").suffix(" px")));
+			edits.push(ui.add(egui::Slider::new(blur, 0.0..=50.0).suffix(" px")));
+			edits.push(color_ui(ui, color));
+		}
+		Filter::ChromaKey {
+			color,
+			similarity,
+			smoothness,
+			spill,
+		} => {
+			edits.push(color_ui(ui, color));
+			for (label, value) in [("similarity", similarity), ("smoothness", smoothness), ("spill", spill)] {
+				ui.weak(label);
+				edits.push(slider(ui, value, 0.0..=1.0));
+			}
+		}
+		Filter::LumaKey { min, max, smoothness } => {
+			for (label, value) in [("min", &mut *min), ("max", &mut *max), ("smoothness", smoothness)] {
+				ui.weak(label);
+				edits.push(slider(ui, value, 0.0..=1.0));
+			}
+			// Dragging one end past the other moves both.
+			*max = max.max(*min);
+		}
+		Filter::Lut { source, amount } => {
+			edits.push(pick(ui, "lut", source, luts));
+			edits.push(slider(ui, amount, 0.0..=1.0));
+		}
+		Filter::Mask { source, mode } => {
+			edits.push(pick(ui, "mask", source, pictures));
+			let before = *mode;
+			let mut response = egui::ComboBox::from_id_salt("mode")
+				.selected_text(match mode {
+					MaskMode::Alpha => "alpha",
+					MaskMode::Luminance => "luminance",
+				})
+				.show_ui(ui, |ui| {
+					ui.selectable_value(mode, MaskMode::Alpha, "alpha");
+					ui.selectable_value(mode, MaskMode::Luminance, "luminance");
+				})
+				.response;
+			if *mode != before {
+				response.mark_changed();
+			}
+			edits.push(response);
+		}
+	}
+	edits.iter().find_map(|response| changed(response, gestures))
+}
+
+/// Pick one of `names` for `value`.
+fn pick(ui: &mut Ui, id: &str, value: &mut String, names: &[String]) -> egui::Response {
+	let before = value.clone();
+	let mut response = egui::ComboBox::from_id_salt(id)
+		.selected_text(value.as_str())
+		.show_ui(ui, |ui| {
+			for name in names {
+				ui.selectable_value(value, name.clone(), name);
+			}
+		})
+		.response;
+	if *value != before {
+		response.mark_changed();
+	}
+	response
+}
+
+/// Edit `color` with straight alpha.
+fn color_ui(ui: &mut Ui, color: &mut moq_scene::Rgba) -> egui::Response {
+	let [r, g, b, a] = color.0;
+	let mut edited = Color32::from_rgba_unmultiplied(r, g, b, a);
+	let response = egui::color_picker::color_edit_button_srgba(ui, &mut edited, egui::color_picker::Alpha::OnlyBlend);
+	if response.changed() {
+		*color = moq_scene::Rgba(edited.to_srgba_unmultiplied());
+	}
+	response
 }
 
 /// Add `source` as `name`, with `video` filters, and place it in front of
@@ -1440,6 +2282,45 @@ fn add(
 		Ok(())
 	})?;
 	Ok(name)
+}
+
+/// A join link on screen.
+struct Shown {
+	name: String,
+	invite: crate::guests::Invite,
+	/// Or why the link cannot be one, so it can still be copied.
+	qr: Result<egui::TextureHandle, String>,
+}
+
+/// `text` as a QR code, one texel per module, inside the quiet zone scanners need.
+fn qr(ctx: &egui::Context, text: &str) -> Result<egui::TextureHandle, String> {
+	const QUIET: i32 = 4;
+	let code = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Low)
+		.map_err(|err| format!("The join link is too long for a QR code ({err:?})"))?;
+	let side = code.size() + 2 * QUIET;
+	let pixels = (0..side)
+		.flat_map(|y| (0..side).map(move |x| (x, y)))
+		// Outside the code, which is the quiet zone, reads as light.
+		.map(|(x, y)| match code.get_module(x - QUIET, y - QUIET) {
+			true => Color32::BLACK,
+			false => Color32::WHITE,
+		})
+		.collect();
+	let image = egui::ColorImage::new([side as usize; 2], pixels);
+	Ok(ctx.load_texture("join link", image, egui::TextureOptions::NEAREST))
+}
+
+/// When a join link stops working, from `now`.
+fn expiry(expires: kio::clock::Wall, now: kio::clock::Wall) -> String {
+	match expires.checked_duration_since(now) {
+		Some(left) if !left.is_zero() => {
+			// Whole minutes, rounded up, so a link never reads as expired early.
+			let minutes = left.as_secs().div_ceil(60).max(1);
+			let left = Duration::from_secs(minutes * 60);
+			format!("expires in {}", moq_tokio::cli::Duration::from(left))
+		}
+		_ => "expired".into(),
+	}
 }
 
 /// Draw `texture` as large as fits, keeping the canvas's shape.
@@ -1646,6 +2527,8 @@ fn describe(source: &Source) -> String {
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
 		Source::Clone { source } => format!("clone of {source}"),
+		Source::Replay => "replay".into(),
+		Source::Lut { path } => format!("LUT: {}", path.display()),
 	}
 }
 
@@ -1721,10 +2604,12 @@ enum Kind {
 	Window,
 	Microphone,
 	SystemAudio,
+	Replay,
+	Lut,
 }
 
 impl Kind {
-	const ALL: [Self; 8] = [
+	const ALL: [Self; 10] = [
 		Self::Color,
 		Self::Image,
 		Self::Broadcast,
@@ -1733,6 +2618,8 @@ impl Kind {
 		Self::Window,
 		Self::Microphone,
 		Self::SystemAudio,
+		Self::Replay,
+		Self::Lut,
 	];
 
 	fn label(self) -> &'static str {
@@ -1745,14 +2632,17 @@ impl Kind {
 			Self::Window => "Window",
 			Self::Microphone => "Microphone",
 			Self::SystemAudio => "System audio",
+			Self::Replay => "Replay",
+			Self::Lut => "LUT",
 		}
 	}
 
 	/// What the value field holds, if this kind takes one.
 	fn value(self) -> Option<&'static str> {
 		match self {
-			Self::Color | Self::SystemAudio => None,
+			Self::Color | Self::SystemAudio | Self::Replay => None,
 			Self::Image => Some("file"),
+			Self::Lut => Some(".cube file"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
 			Self::Camera | Self::Display | Self::Microphone => Some("id (empty for the default)"),
@@ -1801,13 +2691,38 @@ impl AddSource {
 				color: moq_scene::Rgba(self.color.to_srgba_unmultiplied()),
 			},
 			Kind::Image => Source::Image { path: value.into() },
+			Kind::Lut => Source::Lut { path: value.into() },
 			Kind::Broadcast => Source::Broadcast { path: value },
 			Kind::Camera => Source::Camera { id },
 			Kind::Display => Source::Display { id },
 			Kind::Window => Source::Window { id: value },
 			Kind::Microphone => Source::Microphone { id },
 			Kind::SystemAudio => Source::SystemAudio,
+			Kind::Replay => Source::Replay,
 		})
+	}
+}
+
+/// The Replay panel's choices, and how the last replay or clip went.
+struct Replay {
+	of: Of,
+	length: Duration,
+	speed: f32,
+	/// The replay source a replay plays in.
+	into: Option<String>,
+	/// Set by the replay or save running in the background.
+	outcome: Arc<Mutex<Option<Result<String, String>>>>,
+}
+
+impl Default for Replay {
+	fn default() -> Self {
+		Self {
+			of: Of::Program,
+			length: replay::LENGTHS[1],
+			speed: replay::SPEEDS[0],
+			into: None,
+			outcome: Arc::default(),
+		}
 	}
 }
 

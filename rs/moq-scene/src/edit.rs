@@ -9,12 +9,12 @@
 //! Build an edit with a [`Draft`], which reads what each change replaces from
 //! the collection as the earlier changes left it.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, Collection, Item, Layer, Scene, Source, Transition, Video};
+use crate::collection::{Audio, Canvas, Collection, Filter, Item, Layer, Scene, Source, Transition, Video};
 
 /// One part of a collection, before and after an edit.
 ///
@@ -47,7 +47,8 @@ pub enum Change {
 		after: Option<Video>,
 	},
 	/// The scene at `index` of [`Collection::scenes`]. Adding one inserts it
-	/// there, shifting the later ones back.
+	/// there, shifting the later ones back, and replacing one with another
+	/// name renames it.
 	Scene {
 		index: usize,
 		#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,6 +68,8 @@ pub enum Change {
 	},
 	/// [`Collection::transition`].
 	Transition { before: Transition, after: Transition },
+	/// [`Collection::canvas`].
+	Canvas { before: Canvas, after: Canvas },
 }
 
 impl Change {
@@ -108,6 +111,18 @@ impl Change {
 				before: after,
 				after: before,
 			},
+			Self::Canvas { before, after } => Self::Canvas {
+				before: after,
+				after: before,
+			},
+		}
+	}
+
+	/// The name of the source, audio, or video entry the change makes.
+	fn entry(&self) -> Option<&str> {
+		match self {
+			Self::Source { name, .. } | Self::Audio { name, .. } | Self::Video { name, .. } => Some(name),
+			Self::Scene { .. } | Self::Item { .. } | Self::Transition { .. } | Self::Canvas { .. } => None,
 		}
 	}
 
@@ -120,6 +135,7 @@ impl Change {
 			Self::Scene { before, after, .. } => before == after,
 			Self::Item { before, after, .. } => before == after,
 			Self::Transition { before, after } => before == after,
+			Self::Canvas { before, after } => before == after,
 		}
 	}
 
@@ -202,6 +218,9 @@ impl Change {
 			(Self::Transition { before, after }, Self::Transition { before: b, after: a }) if after == *b => {
 				Self::Transition { before, after: *a }
 			}
+			(Self::Canvas { before, after }, Self::Canvas { before: b, after: a }) if after == *b => {
+				Self::Canvas { before, after: *a }
+			}
 			_ => return None,
 		};
 		Some(merged)
@@ -233,6 +252,13 @@ impl Change {
 					return Err(conflict("the transition changed".into()));
 				}
 				collection.transition = *after;
+				Ok(())
+			}
+			Self::Canvas { before, after } => {
+				if collection.canvas != *before {
+					return Err(conflict("the canvas changed".into()));
+				}
+				collection.canvas = *after;
 				Ok(())
 			}
 		}
@@ -313,6 +339,51 @@ impl Collection {
 		Ok(())
 	}
 
+	/// What becomes of each scene `edit` renames or removes, by its name here,
+	/// before the edit: its new name, or `None` once removed. A scene is
+	/// followed by its place in the list rather than by name, so an edit that
+	/// reuses a name it just freed, such as renaming `A` to `B` and the old `B`
+	/// to `C`, maps each scene to its own new name, and a scene taking a removed
+	/// one's name is not mistaken for it. A scene removed and put back unchanged
+	/// is the same one moved. Whatever follows a scene by name, such as the one
+	/// in preview, looks its name up here once.
+	pub fn renames(&self, edit: &Edit) -> BTreeMap<String, Option<String>> {
+		// Each place's scene: its name here, or `None` for one the edit added.
+		let mut scenes: Vec<(Option<&str>, &str)> = self
+			.scenes
+			.iter()
+			.map(|scene| (Some(scene.name.as_str()), scene.name.as_str()))
+			.collect();
+		// Scenes the edit removed, with what each was, until one is put back.
+		let mut removed: Vec<(Option<&str>, &Scene)> = Vec::new();
+		for change in &edit.changes {
+			let Change::Scene { index, before, after } = change else {
+				continue;
+			};
+			match (before, after) {
+				(None, Some(after)) if *index <= scenes.len() => {
+					let back = removed.iter().position(|(_, scene)| *scene == after);
+					let was = back.and_then(|back| removed.remove(back).0);
+					scenes.insert(*index, (was, &after.name));
+				}
+				(Some(before), None) if *index < scenes.len() => {
+					let (was, _) = scenes.remove(*index);
+					removed.push((was, before));
+				}
+				(Some(_), Some(after)) if *index < scenes.len() => scenes[*index].1 = &after.name,
+				_ => {}
+			}
+		}
+		let kept = scenes
+			.into_iter()
+			.filter_map(|(was, now)| Some((was?, Some(now))))
+			.filter(|(was, now)| Some(*was) != *now);
+		let gone = removed.into_iter().filter_map(|(was, _)| Some((was?, None)));
+		kept.chain(gone)
+			.map(|(was, now)| (was.to_string(), now.map(str::to_string)))
+			.collect()
+	}
+
 	/// Start an edit labelled `label` against this collection.
 	pub fn draft(&self, label: impl Into<String>) -> Draft {
 		Draft {
@@ -378,7 +449,8 @@ impl Draft {
 	}
 
 	/// Remove the source called `name` and everything that refers to it: its
-	/// clones, the items showing either, and their audio and video settings.
+	/// clones, the items showing either, their audio and video settings, and
+	/// the filters reading it, such as a mask.
 	pub fn remove_source(&mut self, name: &str) -> Result<(), Error> {
 		let clones: Vec<String> = self
 			.collection
@@ -402,6 +474,36 @@ impl Draft {
 		// Back to front, so each index still names the item found.
 		for (layer, index) in placed.into_iter().rev() {
 			self.remove_item(&layer, index)?;
+		}
+
+		let reads = |filter: &Filter| filter.source() == Some(name);
+		let items: Vec<(Layer, usize, Item)> = self
+			.collection
+			.layers()
+			.flat_map(|(layer, items)| {
+				let reading = items
+					.iter()
+					.enumerate()
+					.filter(|(_, item)| item.filters.iter().any(reads));
+				reading
+					.map(move |(index, item)| (layer.clone(), index, item.clone()))
+					.collect::<Vec<_>>()
+			})
+			.collect();
+		for (layer, index, mut item) in items {
+			item.filters.retain(|filter| !reads(filter));
+			self.set_item(&layer, index, item)?;
+		}
+		let videos: Vec<(String, Video)> = self
+			.collection
+			.video
+			.iter()
+			.filter(|(_, video)| video.filters.iter().any(reads))
+			.map(|(name, video)| (name.clone(), video.clone()))
+			.collect();
+		for (other, mut video) in videos {
+			video.filters.retain(|filter| !reads(filter));
+			self.set_video(&other, Some(video))?;
 		}
 		if self.collection.audio.contains_key(name) {
 			self.set_audio(name, None)?;
@@ -431,7 +533,7 @@ impl Draft {
 		})
 	}
 
-	/// Replace the scene at `index`, such as to rename it.
+	/// Replace the scene at `index`.
 	pub fn set_scene(&mut self, index: usize, scene: Scene) -> Result<(), Error> {
 		let before = self.scene_at(index)?;
 		self.change(Change::Scene {
@@ -439,6 +541,22 @@ impl Draft {
 			before: Some(before),
 			after: Some(scene),
 		})
+	}
+
+	/// Rename the scene at `index`, keeping what it shows.
+	pub fn rename_scene(&mut self, index: usize, name: impl Into<String>) -> Result<(), Error> {
+		let scene = Scene {
+			name: name.into(),
+			..self.scene_at(index)?
+		};
+		self.set_scene(index, scene)
+	}
+
+	/// Move the scene at `from` to `to`, counted after its removal.
+	pub fn move_scene(&mut self, from: usize, to: usize) -> Result<(), Error> {
+		let scene = self.scene_at(from)?;
+		self.remove_scene(from)?;
+		self.insert_scene(to, scene)
 	}
 
 	fn scene_at(&self, index: usize) -> Result<Scene, Error> {
@@ -497,6 +615,13 @@ impl Draft {
 			before,
 			after: transition,
 		})
+	}
+
+	/// Set the canvas's size and frame rate. Items keep their place in canvas
+	/// pixels.
+	pub fn set_canvas(&mut self, canvas: Canvas) -> Result<(), Error> {
+		let before = self.collection.canvas;
+		self.change(Change::Canvas { before, after: canvas })
 	}
 
 	/// The edit, once the collection it leaves is valid. Changes that ended up
@@ -633,6 +758,63 @@ impl History {
 			entry.gesture = None;
 		}
 		Ok(())
+	}
+
+	/// Make `edit` to `collection` without recording it, for a change the
+	/// user did not make, such as a guest joining. It is not undone, and every
+	/// edit here still undoes and redoes around it.
+	///
+	/// So it must commute with each of them: it may only add source, audio,
+	/// and video entries, under names no edit here changes, and nothing that
+	/// names another source, such as a clone or a mask, which an edit could
+	/// remove. Anything else is refused.
+	pub fn apply_outside(&self, collection: &mut Collection, edit: &Edit) -> Result<(), Error> {
+		for change in &edit.changes {
+			let name = match change {
+				Change::Source {
+					name,
+					before: None,
+					after: Some(source),
+				} if source.opens() => name,
+				Change::Audio {
+					name,
+					before: None,
+					after: Some(_),
+				} => name,
+				Change::Video {
+					name,
+					before: None,
+					after: Some(video),
+				} if video.filters.iter().all(|filter| filter.source().is_none()) => name,
+				_ => {
+					return Err(Error::Invalid(format!(
+						"`{}` changes more than adding a source's own entries",
+						edit.label
+					)));
+				}
+			};
+			if self.touches(name) {
+				return Err(conflict(format!("the history edits `{name}`")));
+			}
+		}
+		collection.apply(edit)
+	}
+
+	/// Whether any edit here, done or undone, changes the source, audio, or
+	/// video entry called `name`.
+	pub fn touches(&self, name: &str) -> bool {
+		let mut changes = self.entries().flat_map(|edit| &edit.changes);
+		changes.any(|change| change.entry() == Some(name))
+	}
+
+	/// `base`, or `base 2`, `base 3`, and so on: the first name no source of
+	/// `collection` has and no edit here changes, for
+	/// [`apply_outside`](Self::apply_outside) to add.
+	pub fn unused_name(&self, collection: &Collection, base: &str) -> String {
+		std::iter::once(base.to_string())
+			.chain((2..).map(|n| format!("{base} {n}")))
+			.find(|name| !collection.sources.contains_key(name) && !self.touches(name))
+			.expect("an unused name")
 	}
 
 	/// Serialize to the history file format, in the scene file's version,
@@ -780,6 +962,7 @@ mod tests {
 			"red copy".into(),
 			Video {
 				filters: vec![Filter::Opacity { amount: 0.5 }],
+				..Default::default()
 			},
 		);
 		collection
@@ -802,6 +985,43 @@ mod tests {
 
 		history.undo(&mut collection).unwrap();
 		assert_eq!(collection, before);
+	}
+
+	/// A removed source's filters go with it, from items and other sources
+	/// alike, leaving their other filters.
+	#[test]
+	fn removing_a_source_removes_the_filters_reading_it() {
+		let mut collection = collection();
+		collection.sources.insert("matte".into(), color([0, 0, 0, 128]));
+		collection.sources.insert(
+			"grade".into(),
+			Source::Lut {
+				path: "grade.cube".into(),
+			},
+		);
+		let mask = Filter::Mask {
+			source: "matte".into(),
+			mode: Default::default(),
+		};
+		let lut = Filter::Lut {
+			source: "grade".into(),
+			amount: 1.0,
+		};
+		collection.scenes[0].items[0].filters = vec![mask.clone(), lut.clone()];
+		collection.video.insert(
+			"red".into(),
+			Video {
+				filters: vec![lut.clone(), mask],
+				..Default::default()
+			},
+		);
+		collection.validate().unwrap();
+
+		let mut draft = collection.draft("Remove matte");
+		draft.remove_source("matte").unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
+		assert_eq!(collection.scenes[0].items[0].filters, std::slice::from_ref(&lut));
+		assert_eq!(collection.video["red"].filters, [lut]);
 	}
 
 	/// An edit that leaves the collection invalid is refused whole.
@@ -849,6 +1069,127 @@ mod tests {
 		drag(&mut collection, &mut history, 9.0, Some(9));
 		drag(&mut collection, &mut history, 6.0, Some(9));
 		assert_eq!(history.entries().len(), 2, "a drag back to the start is no edit");
+	}
+
+	fn renamed(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
+		pairs
+			.iter()
+			.map(|(was, now)| (was.to_string(), now.map(str::to_string)))
+			.collect()
+	}
+
+	/// A rename keeps the scene's items and place, a move keeps its name, and
+	/// each scene maps to its own new name, even through names the edit
+	/// frees and reuses.
+	#[test]
+	fn renames_and_reorders_scenes() {
+		let mut collection = collection();
+		collection.scenes.push(Scene::new("Other"));
+		let start = collection.clone();
+		let mut history = History::new();
+
+		let mut draft = collection.draft("Swap names");
+		draft.rename_scene(0, "swap").unwrap();
+		draft.rename_scene(1, "Scene").unwrap();
+		draft.rename_scene(0, "Other").unwrap();
+		let edit = draft.finish().unwrap();
+		let renames = collection.renames(&edit);
+		assert_eq!(renames, renamed(&[("Scene", Some("Other")), ("Other", Some("Scene"))]));
+		collection.apply(&edit).unwrap();
+		history.record(edit, None);
+		assert_eq!(collection.scenes[0].name, "Other");
+		assert_eq!(collection.scenes[0].items, start.scenes[0].items);
+
+		let mut draft = collection.draft("Move `Other` down");
+		draft.move_scene(0, 1).unwrap();
+		let edit = draft.finish().unwrap();
+		assert!(collection.renames(&edit).is_empty(), "a move is no rename");
+		collection.apply(&edit).unwrap();
+		history.record(edit, None);
+		let names: Vec<_> = collection.scenes.iter().map(|scene| scene.name.as_str()).collect();
+		assert_eq!(names, ["Scene", "Other"]);
+		assert_eq!(collection.scenes[1].items, start.scenes[0].items);
+
+		history.seek(&mut collection, 0).unwrap();
+		assert_eq!(collection, start);
+
+		// The second rename takes the name the first freed, so read one after
+		// the other, `Scene` would land on `Next`, the other scene.
+		let mut draft = collection.draft("Chain");
+		draft.rename_scene(0, "Other").unwrap();
+		draft.rename_scene(1, "Next").unwrap();
+		draft.insert_scene(0, Scene::new("New")).unwrap();
+		let edit = draft.finish().unwrap();
+		assert_eq!(
+			collection.renames(&edit),
+			renamed(&[("Scene", Some("Other")), ("Other", Some("Next"))]),
+			"an added scene renames nothing"
+		);
+		collection.apply(&edit).unwrap();
+		assert_eq!(
+			collection.renames(&edit.inverse()),
+			renamed(&[("Other", Some("Scene")), ("Next", Some("Other")), ("New", None)]),
+			"the undo maps each back and removes the added scene"
+		);
+
+		// A removed scene maps to nothing, even when another takes its name.
+		let mut draft = collection.draft("Replace");
+		draft.remove_scene(1).unwrap();
+		draft.rename_scene(1, "Other").unwrap();
+		let edit = draft.finish().unwrap();
+		assert_eq!(
+			collection.renames(&edit),
+			renamed(&[("Other", None), ("Next", Some("Other"))])
+		);
+
+		// Names stay unique and non-empty.
+		for name in ["Other", ""] {
+			let mut draft = collection.draft("Rename");
+			draft.rename_scene(0, name).unwrap();
+			assert!(matches!(draft.finish(), Err(Error::Invalid(_))), "{name:?}");
+		}
+	}
+
+	/// The canvas and the transition are edits like any other: a drag of one
+	/// undoes as one step, and a canvas the encoder cannot take is refused.
+	#[test]
+	fn the_canvas_and_transition_undo() {
+		let mut collection = collection();
+		let start = collection.clone();
+		let mut history = History::new();
+		for millis in [400, 500, 600] {
+			let mut draft = collection.draft("Set the fade time");
+			draft
+				.set_transition(Transition {
+					fade: std::time::Duration::from_millis(millis),
+				})
+				.unwrap();
+			commit(&mut collection, &mut history, draft, Some(1));
+		}
+		let canvas = Canvas {
+			width: 1280,
+			height: 720,
+			framerate: 60,
+		};
+		let mut draft = collection.draft("Resize the canvas");
+		draft.set_canvas(canvas).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(history.entries().len(), 2);
+		assert_eq!(collection.canvas, canvas);
+		assert_eq!(
+			collection.scenes[0].items[0].rect,
+			Rect::fill(&start.canvas),
+			"items keep their pixels"
+		);
+
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection.canvas, start.canvas);
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, start);
+
+		let mut draft = collection.draft("Resize the canvas");
+		draft.set_canvas(Canvas { width: 1279, ..canvas }).unwrap();
+		assert!(matches!(draft.finish(), Err(Error::Invalid(_))));
 	}
 
 	#[test]
@@ -916,6 +1257,82 @@ mod tests {
 		assert_eq!(loaded.entries().next().unwrap().label, "Add blue");
 		loaded.undo(&mut edited).unwrap();
 		assert!(!edited.sources.contains_key("blue"));
+	}
+
+	/// A change from outside, such as a guest joining, drops nothing to redo,
+	/// and undo and redo pass over it, here or after a reload.
+	#[test]
+	fn an_outside_edit_keeps_the_history_around_it() {
+		let mut collection = collection();
+		let mut history = History::new();
+		drag(&mut collection, &mut history, 1.0, None);
+		drag(&mut collection, &mut history, 2.0, None);
+		history.undo(&mut collection).unwrap();
+
+		let mut draft = collection.draft("Add guest");
+		draft.set_source("guest", Some(color([0, 255, 0, 255]))).unwrap();
+		draft.set_audio("guest", Some(Audio::default())).unwrap();
+		history
+			.apply_outside(&mut collection, &draft.finish().unwrap())
+			.unwrap();
+		assert_eq!((history.position(), history.entries().len()), (1, 2));
+
+		history.redo(&mut collection).unwrap();
+		assert_eq!(collection.scenes[0].items[0].rect.x, 2.0);
+		history.seek(&mut collection, 0).unwrap();
+		assert_eq!(collection.scenes[0].items[0].rect.x, 0.0);
+		assert!(collection.sources.contains_key("guest"));
+
+		// The scene file now holds the guest, and the whole history still replays.
+		let (mut loaded, dropped) = History::from_toml(&history.to_toml().unwrap(), &collection).unwrap();
+		assert_eq!(dropped, 0);
+		loaded.seek(&mut collection, 2).unwrap();
+		assert_eq!(collection.scenes[0].items[0].rect.x, 2.0);
+		assert!(collection.sources.contains_key("guest"));
+	}
+
+	/// An outside change that an edit's undo or redo would collide with, or
+	/// that moves what an edit names by index, is refused.
+	#[test]
+	fn refuses_an_outside_edit_the_history_could_not_pass_over() {
+		let mut collection = collection();
+		let mut history = History::new();
+		let mut draft = collection.draft("Add blue");
+		draft.set_source("blue", Some(color([0, 0, 255, 255]))).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		history.undo(&mut collection).unwrap();
+		let before = collection.clone();
+
+		let mut taken = collection.draft("Add guest");
+		taken.set_source("blue", Some(color([0, 0, 255, 255]))).unwrap();
+		let mut clone = collection.draft("Add guest");
+		clone
+			.set_source("clone", Some(Source::Clone { source: "red".into() }))
+			.unwrap();
+		let mut placed = collection.draft("Add guest");
+		placed.set_source("guest", Some(color([0, 255, 0, 255]))).unwrap();
+		let item = Item::new("guest", Rect::fill(&collection.canvas));
+		placed.insert_item(&main(), 0, item).unwrap();
+		let mut masked = collection.draft("Add guest");
+		masked.set_source("guest", Some(color([0, 255, 0, 255]))).unwrap();
+		let mask = Filter::Mask {
+			source: "red".into(),
+			mode: Default::default(),
+		};
+		let video = Video {
+			filters: vec![mask],
+			..Default::default()
+		};
+		masked.set_video("guest", Some(video)).unwrap();
+		let mut removed = collection.draft("Remove red");
+		removed.remove_source("red").unwrap();
+		for draft in [taken, clone, placed, masked, removed] {
+			let edit = draft.finish().unwrap();
+			assert!(history.apply_outside(&mut collection, &edit).is_err(), "{edit:?}");
+		}
+		assert_eq!(collection, before);
+		assert_eq!(history.unused_name(&collection, "blue"), "blue 2");
+		assert_eq!(history.unused_name(&collection, "red"), "red 2");
 	}
 
 	#[test]

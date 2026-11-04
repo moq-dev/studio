@@ -3,8 +3,8 @@
 //!
 //! Every [`INTERVAL`] the studio grades its stream with `hang::health`, the
 //! grader the rest of the stack shares, from three points of view:
-//! - its own: what each track of the broadcast wrote, and the relay
-//!   connection's round trip, estimated capacity, and loss;
+//! - its own: what each track of the broadcast wrote, each relay connection's
+//!   state, and the serving one's round trip, estimated capacity, and loss;
 //! - its viewers': the feedback each publishes under the broadcast's `echo`
 //!   path, which the catalog solicits (`moq export --echo` answers it);
 //! - the relay's: how many sessions watch the broadcast, read from the relay's
@@ -42,19 +42,31 @@ const MAX_VIEWERS: usize = 64;
 /// What the Health panel draws, rebuilt every [`INTERVAL`].
 #[derive(Debug, Default)]
 pub struct Report {
-	/// The relay connection, `None` when the studio publishes nothing.
-	pub relay: Option<Relay>,
+	/// Each relay the broadcast goes to, the preferred first; empty when the
+	/// studio publishes nothing.
+	pub relays: Vec<Relay>,
 	pub uplink: Uplink,
 	pub viewers: Viewers,
-	/// Each track of the broadcast, in catalog order.
+	/// Each track of the broadcast in catalog order: the program's, then each
+	/// source's by source name.
 	pub tracks: Vec<Track>,
 	/// What is wrong, worst first, each naming its cause.
 	pub problems: Vec<Problem>,
 }
 
-/// The relay connection's state.
+/// One relay connection.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Relay {
+pub struct Relay {
+	/// Its scheme, host, and port.
+	pub endpoint: String,
+	pub state: State,
+	/// The protocol its session negotiated, while connected.
+	pub version: Option<moq_net::Version>,
+}
+
+/// A relay connection's state.
+#[derive(Debug, Clone, PartialEq)]
+pub enum State {
 	/// No session has connected yet.
 	Connecting,
 	Connected,
@@ -62,15 +74,20 @@ pub enum Relay {
 	Disconnected(String),
 }
 
-/// The connection to the relay, graded as the publisher's link.
+/// The link to the first connected relay, graded as the publisher's: viewers
+/// who rank the relays as the studio does reach the stream through it.
 #[derive(Debug, Default)]
 pub struct Uplink {
+	/// The relay it reaches, `None` while none is connected.
+	pub relay: Option<String>,
 	/// The worst of the grades below.
 	pub verdict: Verdict,
 	pub rtt: Option<Duration>,
 	/// What the congestion controller estimates the connection can carry.
 	pub capacity: Option<Rate>,
-	/// The media every track wrote over the last interval.
+	/// The media the program's tracks wrote over the last interval. Source
+	/// tracks are left out: they encode whether or not anyone pulls them, and
+	/// the relay uploads only what someone does.
 	pub media: Option<Rate>,
 	/// Transport bytes lost per media byte written over the last interval.
 	pub loss: Option<f64>,
@@ -121,6 +138,8 @@ pub struct Viewer {
 /// One track of the broadcast.
 #[derive(Debug)]
 pub struct Track {
+	/// The source whose own track it is, or `None` for the program's.
+	pub source: Option<String>,
 	/// Its catalog rendition ID.
 	pub id: String,
 	/// What it carries, such as `video H.264 1920x1080`.
@@ -137,6 +156,16 @@ pub struct Track {
 	pub verdict: Verdict,
 	/// The longest it took any of them from the program clock to arrival.
 	pub latency: Option<Duration>,
+}
+
+impl Track {
+	/// How a problem names it.
+	fn name(&self) -> String {
+		match &self.source {
+			Some(source) => format!("source `{source}`'s {}", self.label),
+			None => self.label.clone(),
+		}
+	}
 }
 
 /// Something wrong with the stream, and why.
@@ -178,9 +207,19 @@ pub struct Publisher {
 	/// The catalog's clock, which maps a track's timestamps to the wall time
 	/// the program drew them.
 	pub clock: moq_mux::Clock,
-	pub monitor: moq_tokio::connection::Monitor,
+	/// Each relay the broadcast goes to, the preferred first.
+	pub relays: Vec<Link>,
 	pub feedback: Feedback,
 	pub watching: Watching,
+	/// Where the sources publish their own tracks, for what those wrote.
+	pub sources: moq_scene::publish::Publish,
+}
+
+/// The connection to one relay.
+pub struct Link {
+	/// Its scheme, host, and port.
+	pub endpoint: String,
+	pub monitor: moq_tokio::connection::Monitor,
 }
 
 /// Grades the stream every interval.
@@ -195,6 +234,9 @@ struct Previous {
 	at: Instant,
 	local: Local,
 	report: Option<health::Report<hang::stats::Snapshot>>,
+	sources: Option<health::Report<hang::stats::Snapshot>>,
+	/// Which relay's link the report's transport readings came from.
+	serving: Option<usize>,
 }
 
 impl Sampler {
@@ -216,24 +258,39 @@ impl Sampler {
 
 		let mut report = Report::default();
 		let mut graded = Graded::default();
-		let mut current = None;
+		let (mut current, mut sources) = (None, None);
+		let mut serving = None;
 		if let Some(publisher) = &self.publisher {
-			report.relay = Some(relay(&publisher.monitor));
-			let snapshot = snapshot(publisher);
-			let ours = health::Report::new(publisher.observer.clone(), snapshot);
-			let mut sample = health::Sample::new(&ours, Duration::ZERO);
-			if let (Some(previous), Some(interval)) = (previous.as_ref().and_then(|p| p.report.as_ref()), interval) {
-				sample = sample.with_previous(previous, interval);
-			}
-			let graded_ours = health::publisher(&sample, &self.thresholds);
+			report.relays = publisher.relays.iter().map(relay).collect();
+			serving = report.relays.iter().position(|relay| relay.state == State::Connected);
+			let link = serving.map(|index| &publisher.relays[index]);
+			let ours = health::Report::new(
+				publisher.observer.clone(),
+				snapshot(publisher, link.map(|link| &link.monitor)),
+			);
+			// Another relay's link counted its transport from another start.
+			let previous_ours = previous
+				.as_ref()
+				.filter(|previous| previous.serving == serving)
+				.and_then(|previous| previous.report.as_ref());
+			let graded_ours = self.grade(&ours, previous_ours.zip(interval));
 			report.uplink = uplink(&ours.snapshot, &graded_ours, local.watched);
+			report.uplink.relay = link.map(|link| link.endpoint.clone());
 			graded.publisher = Some(graded_ours);
+			// Graded apart from the program's, so their media stays out of the
+			// uplink's; see [`Uplink::media`].
+			let mut snapshot = hang::stats::Snapshot::default();
+			snapshot.renditions = publisher.sources.stats();
+			let theirs = health::Report::new(publisher.observer.clone(), snapshot);
+			let previous_theirs = previous.as_ref().and_then(|previous| previous.sources.as_ref());
+			graded.sources = Some(self.grade(&theirs, previous_theirs.zip(interval)));
 			graded.viewers = publisher.feedback.grade(now, &self.thresholds);
 			report.viewers.unread = publisher.feedback.unread();
 			report.viewers.watching = publisher.watching.get();
-			report.tracks = tracks(publisher, &graded);
+			report.tracks = tracks(&publisher.catalog.snapshot(), &publisher.clock, &graded);
 			report.viewers.reports = viewers(publisher, &graded.viewers);
 			current = Some(ours);
+			sources = Some(theirs);
 		}
 
 		let drops = previous.as_ref().map(|previous| Drops {
@@ -242,7 +299,7 @@ impl Sampler {
 			encoded: local.encoded.saturating_sub(previous.local.encoded),
 		});
 		report.problems = problems(&Facts {
-			relay: report.relay.as_ref(),
+			relays: &report.relays,
 			local: &local,
 			drops,
 			uplink: &report.uplink,
@@ -255,28 +312,51 @@ impl Sampler {
 			at: now,
 			local,
 			report: current,
+			sources,
+			serving,
 		});
 		report
 	}
-}
 
-fn relay(monitor: &moq_tokio::connection::Monitor) -> Relay {
-	match monitor.state().phase {
-		moq_tokio::connection::Phase::Connecting => Relay::Connecting,
-		moq_tokio::connection::Phase::Connected | moq_tokio::connection::Phase::Migrating => Relay::Connected,
-		moq_tokio::connection::Phase::Disconnected | moq_tokio::connection::Phase::Closed => Relay::Disconnected(
-			monitor
-				.failure()
-				.map_or_else(|| "the connection closed".to_string(), |err| err.to_string()),
-		),
+	/// Grade what the studio wrote, against `previous` and the interval since.
+	fn grade(
+		&self,
+		current: &health::Report<hang::stats::Snapshot>,
+		previous: Option<(&health::Report<hang::stats::Snapshot>, Duration)>,
+	) -> Health {
+		let mut sample = health::Sample::new(current, Duration::ZERO);
+		if let Some((previous, interval)) = previous {
+			sample = sample.with_previous(previous, interval);
+		}
+		health::publisher(&sample, &self.thresholds)
 	}
 }
 
-/// What the studio's tracks have written, and the connection's transport.
-fn snapshot(publisher: &Publisher) -> hang::stats::Snapshot {
+fn relay(link: &Link) -> Relay {
+	use moq_tokio::connection::Phase;
+	let observed = link.monitor.state();
+	let state = match observed.phase {
+		Phase::Connecting => State::Connecting,
+		Phase::Connected | Phase::Migrating => State::Connected,
+		Phase::Disconnected | Phase::Closed => State::Disconnected(
+			observed
+				.failure
+				.map_or_else(|| "the connection closed".to_string(), |err| err.to_string()),
+		),
+	};
+	Relay {
+		endpoint: link.endpoint.clone(),
+		state,
+		version: observed.version,
+	}
+}
+
+/// What the studio's tracks have written, and the transport of the link
+/// `monitor` watches.
+fn snapshot(publisher: &Publisher, monitor: Option<&moq_tokio::connection::Monitor>) -> hang::stats::Snapshot {
 	let mut snapshot = hang::stats::Snapshot::default();
 	snapshot.renditions = publisher.catalog.stats();
-	if let Some(stats) = publisher.monitor.stats() {
+	if let Some(stats) = monitor.and_then(moq_tokio::connection::Monitor::stats) {
 		snapshot.transport.rtt = stats.rtt;
 		snapshot.transport.rate = stats.estimated_send_rate.map(Rate::as_bps);
 		snapshot.transport.lost_bytes = stats.bytes_lost;
@@ -303,6 +383,7 @@ fn uplink(snapshot: &hang::stats::Snapshot, graded: &Health, watched: bool) -> U
 			.sum()
 	});
 	Uplink {
+		relay: None,
 		verdict: grades
 			.iter()
 			.map(|(_, verdict)| *verdict)
@@ -318,28 +399,21 @@ fn uplink(snapshot: &hang::stats::Snapshot, graded: &Health, watched: bool) -> U
 	}
 }
 
-/// Each catalog track, with what it sent and what its viewers received.
-fn tracks(publisher: &Publisher, graded: &Graded) -> Vec<Track> {
-	let catalog = publisher.catalog.snapshot();
-	let sent = graded.publisher.as_ref();
-	let video = catalog.video.renditions.iter().map(|(id, config)| {
-		let size = match (config.coded_width, config.coded_height) {
-			(Some(width), Some(height)) => format!(" {width}x{height}"),
-			_ => String::new(),
-		};
-		(id, format!("video {}{size}", config.codec))
+/// Each media track `catalog` lists, the program's and then each source's,
+/// with what it sent and what its viewers received. A source's stills carry
+/// no media to grade, so they are left out.
+fn tracks(catalog: &hang::Catalog<moq_scene::publish::Ext>, clock: &moq_mux::Clock, graded: &Graded) -> Vec<Track> {
+	let program = renditions(catalog).map(|(id, label)| (None, id, label, graded.publisher.as_ref()));
+	let sources = catalog.ext.studio.sources.iter().flat_map(|(name, catalog)| {
+		renditions(catalog).map(move |(id, label)| (Some(name), id, label, graded.sources.as_ref()))
 	});
-	let audio = catalog
-		.audio
-		.renditions
-		.iter()
-		.map(|(id, config)| (id, format!("audio {} {} ch", config.codec, config.channel_count)));
-	video
-		.chain(audio)
-		.map(|(id, label)| {
+	program
+		.chain(sources)
+		.map(|(source, id, label, sent)| {
 			let ours = sent.and_then(|health| health.renditions.get(id));
 			let interval = sent.and_then(|health| health.interval);
 			let mut track = Track {
+				source: source.cloned(),
 				id: id.clone(),
 				label,
 				sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
@@ -362,12 +436,29 @@ fn tracks(publisher: &Publisher, graded: &Graded) -> Vec<Track> {
 				if let Some(bitrate) = rendition.bitrate.map(Rate::from_bps) {
 					track.received = Some(track.received.map_or(bitrate, |received| received.min(bitrate)));
 				}
-				let latency = viewer.latency(id, &publisher.clock);
+				let latency = viewer.latency(id, clock);
 				track.latency = track.latency.max(latency);
 			}
 			track
 		})
 		.collect()
+}
+
+/// Each video and audio rendition `catalog` lists, by ID, with what it carries.
+fn renditions<E>(catalog: &hang::Catalog<E>) -> impl Iterator<Item = (&String, String)> {
+	let video = catalog.video.renditions.iter().map(|(id, config)| {
+		let size = match (config.coded_width, config.coded_height) {
+			(Some(width), Some(height)) => format!(" {width}x{height}"),
+			_ => String::new(),
+		};
+		(id, format!("video {}{size}", config.codec))
+	});
+	let audio = catalog
+		.audio
+		.renditions
+		.iter()
+		.map(|(id, config)| (id, format!("audio {} {} ch", config.codec, config.channel_count)));
+	video.chain(audio)
 }
 
 fn viewers(publisher: &Publisher, graded: &[GradedViewer]) -> Vec<Viewer> {
@@ -402,7 +493,10 @@ fn viewers(publisher: &Publisher, graded: &[GradedViewer]) -> Vec<Viewer> {
 /// The grades of one interval.
 #[derive(Default)]
 struct Graded {
+	/// The program's tracks and the uplink.
 	publisher: Option<Health>,
+	/// The sources' own tracks.
+	sources: Option<Health>,
 	viewers: Vec<GradedViewer>,
 }
 
@@ -436,7 +530,7 @@ struct Drops {
 
 /// Everything a problem can rest on.
 struct Facts<'a> {
-	relay: Option<&'a Relay>,
+	relays: &'a [Relay],
 	local: &'a Local,
 	drops: Option<Drops>,
 	uplink: &'a Uplink,
@@ -456,13 +550,28 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 	};
 	let local = facts.local;
 
-	match facts.relay {
-		Some(Relay::Disconnected(reason)) => add(
-			Verdict::Unhealthy,
-			format!("The relay is unreachable ({reason}), so nothing reaches viewers until it reconnects."),
-		),
-		Some(Relay::Connecting) => add(Verdict::Degraded, "Connecting to the relay.".into()),
-		Some(Relay::Connected) | None => {}
+	// While another relay serves, one lost is a lost fallback rather than an
+	// outage.
+	let serving = facts.relays.iter().find(|relay| relay.state == State::Connected);
+	for relay in facts.relays {
+		let endpoint = &relay.endpoint;
+		match (&relay.state, serving) {
+			(State::Disconnected(reason), Some(serving)) => add(
+				Verdict::Degraded,
+				format!(
+					"The relay {endpoint} is unreachable ({reason}), so the stream reaches viewers only through {}.",
+					serving.endpoint
+				),
+			),
+			(State::Disconnected(reason), None) => add(
+				Verdict::Unhealthy,
+				format!(
+					"The relay {endpoint} is unreachable ({reason}), so nothing reaches viewers until a relay reconnects."
+				),
+			),
+			(State::Connecting, _) => add(Verdict::Degraded, format!("Connecting to the relay {endpoint}.")),
+			(State::Connected, _) => {}
+		}
 	}
 	if let Some(failed) = &local.failed {
 		add(Verdict::Unhealthy, format!("The output stopped: {failed}."));
@@ -502,11 +611,15 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 	}
 
 	let uplink = facts.uplink;
+	let relay = uplink
+		.relay
+		.as_ref()
+		.map_or_else(String::new, |relay| format!(" {relay}"));
 	if let (Some(capacity), Some(media)) = (uplink.capacity, uplink.media) {
 		add(
 			uplink.grade(Input::Headroom),
 			format!(
-				"The uplink is congested: the connection carries about {} and the stream needs {}.",
+				"The uplink to the relay{relay} is congested: the connection carries about {} and the stream needs {}.",
 				rate(capacity),
 				rate(media)
 			),
@@ -516,7 +629,7 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		add(
 			uplink.grade(Input::Loss),
 			format!(
-				"The uplink is losing packets: {:.1}% of the media sent had to be resent.",
+				"The uplink to the relay{relay} is losing packets: {:.1}% of the media sent had to be resent.",
 				loss * 100.0
 			),
 		);
@@ -525,7 +638,7 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		add(
 			uplink.grade(Input::Rtt),
 			format!(
-				"The relay is far away: a round trip to it takes {} ms.",
+				"The relay{relay} is far away: a round trip to it takes {} ms.",
 				rtt.as_millis()
 			),
 		);
@@ -592,7 +705,7 @@ fn viewer_problems(facts: &Facts<'_>, add: &mut impl FnMut(Verdict, String)) {
 
 	let track = |id: Option<&str>| {
 		id.and_then(|id| facts.labels.iter().find(|track| track.id == id))
-			.map_or_else(|| "the stream".to_string(), |track| track.label.clone())
+			.map_or_else(|| "the stream".to_string(), Track::name)
 	};
 	for (input, verdict, count, id) in worst {
 		let of = format!("{count} of {reporting} viewers");
@@ -858,7 +971,7 @@ mod tests {
 	fn facts<'a>(local: &'a Local, uplink: &'a Uplink, viewers: &'a [GradedViewer], tracks: &'a [Track]) -> Facts<'a> {
 		static THRESHOLDS: std::sync::LazyLock<Thresholds> = std::sync::LazyLock::new(Thresholds::default);
 		Facts {
-			relay: Some(&Relay::Connected),
+			relays: &[],
 			local,
 			drops: None,
 			uplink,
@@ -896,6 +1009,7 @@ mod tests {
 
 	fn track(id: &str, label: &str) -> Track {
 		Track {
+			source: None,
 			id: id.into(),
 			label: label.into(),
 			sent: None,
@@ -930,11 +1044,14 @@ mod tests {
 			watched: true,
 			..Default::default()
 		};
-		let watched = uplink(&current.snapshot, &graded, true);
+		let mut watched = uplink(&current.snapshot, &graded, true);
+		watched.relay = Some("https://a".into());
 		assert_eq!(watched.verdict, Verdict::Unhealthy);
 		assert_eq!(
 			causes(problems(&facts(&local, &watched, &[], &[]))),
-			["The uplink is congested: the connection carries about 2.5 Mb/s and the stream needs 3.0 Mb/s."]
+			[
+				"The uplink to the relay https://a is congested: the connection carries about 2.5 Mb/s and the stream needs 3.0 Mb/s."
+			]
 		);
 		local.watched = false;
 		let idle = uplink(&current.snapshot, &graded, false);
@@ -1026,6 +1143,80 @@ mod tests {
 		);
 	}
 
+	/// What the studio wrote over one interval, graded: `bytes` and 30 frames
+	/// for each rendition.
+	fn wrote(renditions: &[(&str, u64)]) -> Health {
+		let observer = Observer::new(moq_net::Path::new("show").unwrap(), None);
+		let report = |scale: u64| {
+			let mut snapshot = hang::stats::Snapshot::<()>::default();
+			for (id, bytes) in renditions {
+				let mut rendition = hang::stats::Rendition::default();
+				rendition.bytes = bytes * scale;
+				rendition.frames = 30 * scale;
+				snapshot.renditions.insert(id.to_string(), rendition);
+			}
+			health::Report::new(observer.clone(), snapshot)
+		};
+		let (previous, current) = (report(0), report(1));
+		let sample = health::Sample::new(&current, Duration::ZERO).with_previous(&previous, INTERVAL);
+		health::publisher(&sample, &Thresholds::default())
+	}
+
+	/// Each source's media tracks are graded like the program's, after them and
+	/// by source name, from what the source wrote and what viewers report on
+	/// them; a still has no media to grade. A viewer stalling on one names
+	/// its source.
+	#[test]
+	fn source_tracks_are_graded_by_source() {
+		let video = |width: u32, height: u32| {
+			let codec: hang::catalog::VideoCodec = "avc3.42c01f".parse().unwrap();
+			let mut config = hang::catalog::VideoConfig::new(codec);
+			config.coded_width = Some(width);
+			config.coded_height = Some(height);
+			config
+		};
+		let mut catalog = hang::Catalog::<moq_scene::publish::Ext>::default();
+		catalog.video.renditions.insert("0.avc3".into(), video(1920, 1080));
+		let mut camera = hang::Catalog::default();
+		camera.video.renditions.insert("2.avc3".into(), video(1280, 720));
+		let mut logo = hang::Catalog::default();
+		let png = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
+		logo.binary.tracks.insert("1.png".into(), png);
+		let sources = &mut catalog.ext.studio.sources;
+		sources.insert("logo".into(), logo);
+		sources.insert("camera".into(), camera);
+
+		// 375 kB in a second is 3 Mb/s, and 125 kB is 1 Mb/s.
+		let graded = Graded {
+			publisher: Some(wrote(&[("0.avc3", 375_000)])),
+			sources: Some(wrote(&[("2.avc3", 125_000)])),
+			viewers: vec![stalling("alice", "2.avc3", Duration::from_millis(100))],
+		};
+		let tracks = tracks(&catalog, &moq_mux::Clock::new(), &graded);
+		let rows: Vec<_> = tracks
+			.iter()
+			.map(|track| (track.source.as_deref(), track.id.as_str(), track.sent.map(rate)))
+			.collect();
+		assert_eq!(
+			rows,
+			[
+				(None, "0.avc3", Some("3.0 Mb/s".into())),
+				(Some("camera"), "2.avc3", Some("1.0 Mb/s".into())),
+			]
+		);
+		let camera = &tracks[1];
+		assert_eq!(camera.framerate, Some(30.0));
+		assert_eq!((camera.viewers, camera.verdict), (1, Verdict::Unhealthy));
+		assert_eq!((tracks[0].viewers, tracks[0].verdict), (0, Verdict::Unknown));
+
+		let local = Local::default();
+		let uplink = Uplink::default();
+		assert_eq!(
+			causes(problems(&facts(&local, &uplink, &graded.viewers, &tracks))),
+			["1 of 1 viewers are stalling on source `camera`'s video avc3.42c01f 1280x720."]
+		);
+	}
+
 	/// Problems list worst first: an unreachable relay and a frozen source
 	/// above a slow round trip.
 	#[test]
@@ -1039,16 +1230,63 @@ mod tests {
 			grades: vec![(Input::Rtt, Verdict::Degraded)],
 			..Default::default()
 		};
-		let relay = Relay::Disconnected("timed out".into());
+		let relays = [relay("https://a", State::Disconnected("timed out".into()))];
 		let mut facts = facts(&local, &uplink, &[], &[]);
-		facts.relay = Some(&relay);
+		facts.relays = &relays;
 		assert_eq!(
 			causes(problems(&facts)),
 			[
-				"The relay is unreachable (timed out), so nothing reaches viewers until it reconnects.",
+				"The relay https://a is unreachable (timed out), so nothing reaches viewers until a relay reconnects.",
 				"Source `camera` stalled: no new picture for 3 s, so the program repeats its last one.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
+		);
+	}
+
+	fn relay(endpoint: &str, state: State) -> Relay {
+		Relay {
+			endpoint: endpoint.into(),
+			state,
+			version: None,
+		}
+	}
+
+	/// While another relay serves, an unreachable one costs viewers their
+	/// fallback rather than the stream, whichever of the two it is; with none
+	/// serving, nothing reaches viewers.
+	#[test]
+	fn a_lost_relay_is_an_outage_only_without_another() {
+		let local = Local::default();
+		let uplink = Uplink::default();
+		let lost = |relays: &[Relay]| {
+			let mut facts = facts(&local, &uplink, &[], &[]);
+			facts.relays = relays;
+			problems(&facts)
+				.into_iter()
+				.map(|problem| (problem.verdict, problem.cause))
+				.collect::<Vec<_>>()
+		};
+		let down = || State::Disconnected("timed out".into());
+		assert_eq!(
+			lost(&[relay("https://a", down()), relay("https://b", State::Connected)]),
+			[(
+				Verdict::Degraded,
+				"The relay https://a is unreachable (timed out), so the stream reaches viewers only through https://b."
+					.to_string()
+			)]
+		);
+		assert_eq!(
+			lost(&[relay("https://a", State::Connected), relay("https://b", down())]),
+			[(
+				Verdict::Degraded,
+				"The relay https://b is unreachable (timed out), so the stream reaches viewers only through https://a."
+					.to_string()
+			)]
+		);
+		let outage = lost(&[relay("https://a", down()), relay("https://b", State::Connecting)]);
+		assert_eq!(
+			outage.iter().map(|(verdict, _)| *verdict).collect::<Vec<_>>(),
+			[Verdict::Unhealthy, Verdict::Degraded]
 		);
 	}
 
@@ -1117,9 +1355,18 @@ mod tests {
 			observer: Observer::new(path, None),
 			catalog: catalog.clone(),
 			clock: clock.clone(),
-			monitor: connection.monitor(),
+			relays: vec![Link {
+				endpoint: "https://127.0.0.1:1".into(),
+				monitor: connection.monitor(),
+			}],
 			feedback: feedback.clone(),
 			watching: Watching::default(),
+			sources: moq_scene::publish::Publish::new(
+				broadcast.clone(),
+				catalog.clone(),
+				moq_net::bandwidth::Allocator::unlimited(),
+				moq_video::encode::Kind::Auto,
+			),
 		}));
 
 		let alice = origin.create_broadcast("show/viewers/alice.echo").unwrap();

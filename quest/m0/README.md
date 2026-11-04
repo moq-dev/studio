@@ -82,21 +82,16 @@ repository.
 - [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Viewer-side composition](/quest/m0/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
-- [Outside edits to the scene file](/quest/m0/outside-edits.md) - autosave reloads or asks instead of overwriting a change made outside the studio
-- [Scene editing](/quest/m0/scene-editing.md) - rename and reorder scenes, and resize the canvas while live through a new rendition
 - [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
-- [Health grades source tracks](/quest/m0/health-sources.md) - the Health panel covers each published source track, not only the program
 - [Audio sources report stalls](/quest/m0/audio-stall.md) - a dead microphone or system audio reads stalled like a camera
-- [Relay failover](/quest/m0/failover.md) - the same epoch on two relays, so a relay failure does not drop the stream
-- [Instant replay and DVR](/quest/m0/replay.md) - replays and clips from held groups, and viewer scrubbing through the archive
 - [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
 - [Animation and transitions](/quest/m0/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
-- [Video effects](/quest/m0/effects.md) - a curated effect set with CSS meanings, and ML effects baked into their source
+- [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
-- [Guests](/quest/m0/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
+- [The join page is live](/quest/m0/join-page-live.md) - `join.studio.moq.dev` serves the join page `--join-page` defaults to
 - [Guest return feed](/quest/m0/guest-return.md) - guests see the program and hear a mix-minus
 - [Guest token refresh](/quest/m0/guest-refresh.md) - a show outlasts the guest link's expiry without new links
 - [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets

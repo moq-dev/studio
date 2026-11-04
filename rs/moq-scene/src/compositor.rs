@@ -1,60 +1,20 @@
 //! Draw scenes onto the canvas on the GPU: a preview, a program, and the fade
 //! between them.
 
-use std::collections::HashMap;
-use std::num::NonZeroU64;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
-use crate::collection::{Canvas, Collection, Filter, Item, Rect, Source};
-use crate::source::{Picture, Sources};
+use crate::collection::{self, Canvas, Collection, Item, Layer as Place, Source};
+use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
+use crate::source::{self, Sources};
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
 /// `moq_video::render` produces and what its exporter hands an encoder.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-
-/// One draw's uniform: where on the canvas, in clip space, and how opaque.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniform {
-	/// Top-left x, top-left y, bottom-right x, bottom-right y, in clip space.
-	rect: [f32; 4],
-	/// Opacity in `x`; the rest pads the struct to WGSL's 16-byte vectors.
-	opacity: [f32; 4],
-}
-
-const SHADER: &str = r#"
-struct Item {
-	rect: vec4<f32>,
-	opacity: vec4<f32>,
-}
-
-@group(0) @binding(0) var<uniform> item: Item;
-@group(1) @binding(0) var image: texture_2d<f32>;
-@group(1) @binding(1) var image_sampler: sampler;
-
-struct Varyings {
-	@builtin(position) position: vec4<f32>,
-	@location(0) uv: vec2<f32>,
-}
-
-// A four-vertex triangle strip covering the item's rectangle.
-@vertex fn vs_main(@builtin(vertex_index) index: u32) -> Varyings {
-	let corner = vec2<f32>(f32(index & 1u), f32((index >> 1u) & 1u));
-	var out: Varyings;
-	out.position = vec4<f32>(mix(item.rect.xy, item.rect.zw, corner), 0.0, 1.0);
-	out.uv = corner;
-	return out;
-}
-
-@fragment fn fs_main(in: Varyings) -> @location(0) vec4<f32> {
-	let color = textureSample(image, image_sampler, in.uv);
-	return vec4<f32>(color.rgb, color.a * item.opacity.x);
-}
-"#;
 
 /// Draws a [`Collection`]'s scenes onto its canvas: one texture for the scene
 /// in preview, one for the scene on program, and the fade from one to the other.
@@ -66,18 +26,13 @@ struct Varyings {
 /// holding up the canvas.
 ///
 /// Pixels are blended in the gamma-encoded space sources arrive in, as a
-/// broadcast switcher does, so a 50% fade is a 50% mix of the stored values.
+/// broadcast switcher and CSS do, so a 50% fade is a 50% mix of the stored
+/// values.
 pub struct Compositor {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
 	canvas: Canvas,
-
-	pipeline: wgpu::RenderPipeline,
-	image_layout: wgpu::BindGroupLayout,
-	sampler: wgpu::Sampler,
-
-	uniform_layout: wgpu::BindGroupLayout,
-	uniforms: Uniforms,
+	effects: Effects,
 
 	preview: Target,
 	program: Target,
@@ -98,156 +53,50 @@ struct Fade {
 	duration: Duration,
 }
 
-/// A canvas-sized texture drawn into, and the bind group that samples it.
+/// A canvas-sized texture drawn into, and bound to sample.
 struct Target {
 	texture: wgpu::Texture,
-	view: wgpu::TextureView,
-	bind: wgpu::BindGroup,
+	picture: Picture,
 }
 
-/// One source's newest picture on the GPU.
+/// One source's newest picture or table on the GPU.
 struct Layer {
 	/// What the picture came from. An edited source starts a new layer, so it
 	/// never shows the old source's last picture.
 	source: Source,
 	/// Converts video frames, created on the first one.
 	renderer: Option<Renderer>,
-	/// Samples the newest picture; `None` until the first arrives.
-	bind: Option<wgpu::BindGroup>,
+	/// The newest picture; `None` until the first arrives.
+	picture: Option<Picture>,
+	/// A LUT source's table; `None` until it is read.
+	lut: Option<Lut>,
 	/// Why the newest picture failed to draw, logged when it first does.
 	error: Option<String>,
 }
 
-/// A growable uniform buffer holding one [`Uniform`] per draw of a render.
-struct Uniforms {
-	buffer: wgpu::Buffer,
-	bind: wgpu::BindGroup,
-	/// Bytes between draws, rounded up to the device's dynamic-offset alignment.
-	stride: u64,
-	capacity: u64,
-}
+/// The pictures and tables of the compositor's layers, for filters to read.
+struct Library<'a>(&'a HashMap<String, Layer>);
 
-/// One textured quad: what to sample, and the uniform that places it.
-#[derive(Clone)]
-struct Draw {
-	bind: wgpu::BindGroup,
-	uniform: Uniform,
-}
+impl effect::Library for Library<'_> {
+	fn picture(&self, name: &str) -> Option<Picture> {
+		self.0.get(name)?.picture.clone()
+	}
 
-/// One render pass: a target cleared to black and the quads drawn into it.
-struct Pass<'a> {
-	view: &'a wgpu::TextureView,
-	draws: Vec<Draw>,
+	fn lut(&self, name: &str) -> Option<Lut> {
+		self.0.get(name)?.lut.clone()
+	}
 }
 
 impl Compositor {
 	/// A compositor drawing `canvas`-sized pictures on `device`.
 	///
-	/// Fails if the device cannot hold a texture that large.
+	/// Fails if the canvas is invalid or the device cannot hold a texture that
+	/// large.
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, canvas: Canvas) -> Result<Self, Error> {
-		let limit = device.limits().max_texture_dimension_2d;
-		if canvas.width > limit || canvas.height > limit {
-			return Err(Error::Invalid(format!(
-				"canvas {}x{} exceeds this GPU's {limit}px texture limit",
-				canvas.width, canvas.height
-			)));
-		}
+		fits(device, canvas)?;
 
-		let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-			label: Some("moq-scene image"),
-			entries: &[
-				wgpu::BindGroupLayoutEntry {
-					binding: 0,
-					visibility: wgpu::ShaderStages::FRAGMENT,
-					ty: wgpu::BindingType::Texture {
-						sample_type: wgpu::TextureSampleType::Float { filterable: true },
-						view_dimension: wgpu::TextureViewDimension::D2,
-						multisampled: false,
-					},
-					count: None,
-				},
-				wgpu::BindGroupLayoutEntry {
-					binding: 1,
-					visibility: wgpu::ShaderStages::FRAGMENT,
-					ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-					count: None,
-				},
-			],
-		});
-		let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-			label: Some("moq-scene item"),
-			entries: &[wgpu::BindGroupLayoutEntry {
-				binding: 0,
-				visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-				ty: wgpu::BindingType::Buffer {
-					ty: wgpu::BufferBindingType::Uniform,
-					has_dynamic_offset: true,
-					min_binding_size: NonZeroU64::new(size_of::<Uniform>() as u64),
-				},
-				count: None,
-			}],
-		});
-		let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-			label: Some("moq-scene"),
-			bind_group_layouts: &[Some(&uniform_layout), Some(&image_layout)],
-			immediate_size: 0,
-		});
-		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-			label: Some("moq-scene"),
-			source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-		});
-		let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-			label: Some("moq-scene"),
-			layout: Some(&pipeline_layout),
-			vertex: wgpu::VertexState {
-				module: &shader,
-				entry_point: Some("vs_main"),
-				compilation_options: Default::default(),
-				buffers: &[],
-			},
-			primitive: wgpu::PrimitiveState {
-				topology: wgpu::PrimitiveTopology::TriangleStrip,
-				..Default::default()
-			},
-			depth_stencil: None,
-			multisample: Default::default(),
-			fragment: Some(wgpu::FragmentState {
-				module: &shader,
-				entry_point: Some("fs_main"),
-				compilation_options: Default::default(),
-				targets: &[Some(wgpu::ColorTargetState {
-					format: FORMAT,
-					// Straight alpha over an opaque canvas, which stays opaque.
-					blend: Some(wgpu::BlendState {
-						color: wgpu::BlendComponent {
-							src_factor: wgpu::BlendFactor::SrcAlpha,
-							dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-							operation: wgpu::BlendOperation::Add,
-						},
-						alpha: wgpu::BlendComponent {
-							src_factor: wgpu::BlendFactor::One,
-							dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-							operation: wgpu::BlendOperation::Add,
-						},
-					}),
-					write_mask: wgpu::ColorWrites::ALL,
-				})],
-			}),
-			multiview_mask: None,
-			cache: None,
-		});
-		let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-			label: Some("moq-scene"),
-			mag_filter: wgpu::FilterMode::Linear,
-			min_filter: wgpu::FilterMode::Linear,
-			..Default::default()
-		});
-
-		let alignment = u64::from(device.limits().min_uniform_buffer_offset_alignment);
-		let stride = (size_of::<Uniform>() as u64).next_multiple_of(alignment);
-		let uniforms = Uniforms::new(device, &uniform_layout, stride, 16);
-
-		let target = |label| Target::new(device, &image_layout, &sampler, canvas, label);
+		let effects = Effects::new(device, queue, canvas);
+		let target = |label| Target::new(device, &effects, canvas, label);
 		Ok(Self {
 			preview: target("moq-scene preview"),
 			program: target("moq-scene program"),
@@ -255,11 +104,7 @@ impl Compositor {
 			device: device.clone(),
 			queue: queue.clone(),
 			canvas,
-			pipeline,
-			image_layout,
-			sampler,
-			uniform_layout,
-			uniforms,
+			effects,
 			layers: HashMap::new(),
 			preview_scene: None,
 			program_scene: None,
@@ -270,6 +115,26 @@ impl Compositor {
 	/// The canvas this compositor draws.
 	pub fn canvas(&self) -> Canvas {
 		self.canvas
+	}
+
+	/// Draw `canvas` from the next [`render`](Self::render) on. A new size
+	/// replaces the [`preview`](Self::preview) and [`program`](Self::program)
+	/// textures, and every other texture sized from the canvas, with ones of
+	/// that size, blank until drawn; a fade under way carries on.
+	///
+	/// Fails, changing nothing, if the canvas is invalid or the device cannot
+	/// hold a texture that large.
+	pub fn set_canvas(&mut self, canvas: Canvas) -> Result<(), Error> {
+		fits(&self.device, canvas)?;
+		self.effects.set_canvas(canvas);
+		if canvas.size() != self.canvas.size() {
+			let target = |label| Target::new(&self.device, &self.effects, canvas, label);
+			self.preview = target("moq-scene preview");
+			self.program = target("moq-scene program");
+			self.incoming = target("moq-scene incoming");
+		}
+		self.canvas = canvas;
+		Ok(())
 	}
 
 	/// The scene in preview, as of the last [`render`](Self::render).
@@ -304,9 +169,49 @@ impl Compositor {
 		self.fade.is_some()
 	}
 
+	/// The scenes program draws: the one on program, and the one a fade under
+	/// way leaves.
+	pub fn on_air(&self) -> impl Iterator<Item = &str> {
+		let leaving = self.fade.as_ref().and_then(|fade| fade.from.as_deref());
+		self.program_scene.as_deref().into_iter().chain(leaving)
+	}
+
 	/// Put the scene called `scene` in preview, or nothing.
 	pub fn set_preview(&mut self, scene: Option<String>) {
 		self.preview_scene = scene;
+	}
+
+	/// Follow each renamed scene to its new name, wherever it is: in preview,
+	/// on program, or fading out, and drop each removed one, so a scene that
+	/// later takes its name does not go on program without a cut. `renames`
+	/// maps each old name to its new one, or `None`, as
+	/// [`Collection::renames`] reads them, and each scene is looked up once, so
+	/// a name one scene gave up and another took is not followed twice.
+	pub fn rename(&mut self, renames: &BTreeMap<String, Option<String>>) {
+		for scene in self.scenes() {
+			if let Some(to) = scene.as_ref().and_then(|name| renames.get(name)) {
+				*scene = to.clone();
+			}
+		}
+	}
+
+	/// Drop each scene `collection` does not have from preview, program, and a
+	/// fade under way, such as one a reloaded file left out, so a scene that
+	/// later takes its name does not go on program without a cut.
+	pub fn retain(&mut self, collection: &Collection) {
+		for scene in self.scenes() {
+			if scene.as_deref().is_some_and(|name| collection.scene(name).is_none()) {
+				*scene = None;
+			}
+		}
+	}
+
+	/// The scenes followed by name: in preview, on program, and fading out.
+	fn scenes(&mut self) -> impl Iterator<Item = &mut Option<String>> {
+		let fading = self.fade.as_mut().map(|fade| &mut fade.from);
+		[&mut self.preview_scene, &mut self.program_scene]
+			.into_iter()
+			.chain(fading)
 	}
 
 	/// Put the preview on program at once, ending any fade.
@@ -345,109 +250,39 @@ impl Compositor {
 			self.fade = None;
 		}
 
+		let mut frame = self.effects.frame();
+		let mut draw = Draw {
+			collection,
+			effects: &mut self.effects,
+			library: Library(&self.layers),
+			frame: &mut frame,
+			prepared: HashMap::new(),
+		};
+
 		// The top layer goes over both outputs, and over a fade rather than
 		// through it, so it stays on across the switch.
-		let top = self.items(collection, &collection.top);
-		let mut preview = self.scene(collection, self.preview_scene.as_deref());
-		preview.extend(top.iter().cloned());
-		let mut passes = vec![Pass {
-			view: &self.preview.view,
-			draws: preview,
-		}];
-		let mut program = match (&self.fade, progress) {
+		draw.target(&self.preview);
+		draw.scene(&self.preview, self.preview_scene.as_deref());
+		draw.layer(&self.preview, Place::Top);
+
+		match (&self.fade, progress) {
 			(Some(fade), Some(progress)) => {
-				passes.push(Pass {
-					view: &self.incoming.view,
-					draws: self.scene(collection, self.program_scene.as_deref()),
-				});
-				let mut draws = self.scene(collection, fade.from.as_deref());
-				draws.push(Draw {
-					bind: self.incoming.bind.clone(),
-					uniform: uniform(Rect::fill(&self.canvas), self.canvas, progress),
-				});
-				draws
+				draw.target(&self.incoming);
+				draw.scene(&self.incoming, self.program_scene.as_deref());
+				draw.target(&self.program);
+				draw.scene(&self.program, fade.from.as_deref());
+				let incoming = draw.effects.fade(&self.incoming.picture, progress);
+				draw.effects.draw(draw.frame, &self.program.texture, &incoming);
 			}
-			_ => self.scene(collection, self.program_scene.as_deref()),
-		};
-		program.extend(top);
-		passes.push(Pass {
-			view: &self.program.view,
-			draws: program,
-		});
-
-		let count: usize = passes.iter().map(|pass| pass.draws.len()).sum();
-		self.uniforms.reserve(&self.device, &self.uniform_layout, count as u64);
-		let stride = self.uniforms.stride as usize;
-		let mut bytes = vec![0u8; count * stride];
-		for (index, draw) in passes.iter().flat_map(|pass| &pass.draws).enumerate() {
-			let offset = index * stride;
-			bytes[offset..offset + size_of::<Uniform>()].copy_from_slice(bytemuck::bytes_of(&draw.uniform));
-		}
-		if !bytes.is_empty() {
-			self.queue.write_buffer(&self.uniforms.buffer, 0, &bytes);
-		}
-
-		let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-			label: Some("moq-scene"),
-		});
-		let mut index = 0u32;
-		for pass in &passes {
-			let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-				label: Some("moq-scene"),
-				color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-					view: pass.view,
-					depth_slice: None,
-					resolve_target: None,
-					ops: wgpu::Operations {
-						load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-						store: wgpu::StoreOp::Store,
-					},
-				})],
-				depth_stencil_attachment: None,
-				timestamp_writes: None,
-				occlusion_query_set: None,
-				multiview_mask: None,
-			});
-			render.set_pipeline(&self.pipeline);
-			for draw in &pass.draws {
-				render.set_bind_group(0, &self.uniforms.bind, &[index * stride as u32]);
-				render.set_bind_group(1, &draw.bind, &[]);
-				render.draw(0..4, 0..1);
-				index += 1;
+			_ => {
+				draw.target(&self.program);
+				draw.scene(&self.program, self.program_scene.as_deref());
 			}
 		}
-		self.queue.submit([encoder.finish()]);
+		draw.layer(&self.program, Place::Top);
+
+		self.effects.submit(frame);
 		Ok(())
-	}
-
-	/// The quads drawing `scene`, back to front. A missing scene draws nothing.
-	fn scene(&self, collection: &Collection, scene: Option<&str>) -> Vec<Draw> {
-		let items = scene
-			.and_then(|name| collection.scene(name))
-			.map(|scene| scene.items.as_slice());
-		self.items(collection, items.unwrap_or_default())
-	}
-
-	/// The quads drawing `items`, back to front, each through its filters. A
-	/// hidden item or a source with no picture yet draws nothing.
-	fn items(&self, collection: &Collection, items: &[Item]) -> Vec<Draw> {
-		items
-			.iter()
-			.filter(|item| item.visible)
-			.filter_map(|item| {
-				let bind = self.layers.get(collection.capture(&item.source))?.bind.clone()?;
-				let opacity = collection
-					.filters(item)
-					.map(|filter| match filter {
-						Filter::Opacity { amount } => *amount,
-					})
-					.product();
-				Some(Draw {
-					bind,
-					uniform: uniform(item.rect, self.canvas, opacity),
-				})
-			})
-			.collect()
 	}
 
 	/// Pull the newest picture from every source onto the GPU, and forget the
@@ -466,11 +301,12 @@ impl Compositor {
 			let layer = self.layers.entry(name.clone()).or_insert_with(|| Layer {
 				source: source.clone(),
 				renderer: None,
-				bind: None,
+				picture: None,
+				lut: None,
 				error: None,
 			});
 			let texture = match picture {
-				Picture::Frame(frame) => {
+				source::Picture::Frame(frame) => {
 					let renderer = match layer.renderer.as_mut() {
 						Some(renderer) => Ok(renderer),
 						None => Renderer::new(&self.device, &self.queue, Default::default())
@@ -480,14 +316,17 @@ impl Compositor {
 						.and_then(|renderer| renderer.render(&frame))
 						.map_err(Error::from)
 				}
-				Picture::Rgba { size, pixels } => upload(&self.device, &self.queue, size, &pixels),
+				source::Picture::Rgba { size, pixels } => upload(&self.device, &self.queue, size, &pixels),
+				source::Picture::Lut(cube) => {
+					layer.lut = Some(self.effects.lut(&cube));
+					continue;
+				}
 			};
 
 			match texture {
 				Ok(texture) => {
 					layer.error = None;
-					let view = texture.create_view(&Default::default());
-					layer.bind = Some(image_bind(&self.device, &self.image_layout, &self.sampler, &view));
+					layer.picture = Some(self.effects.picture(&texture));
 				}
 				Err(err) => {
 					if layer.error.is_none() {
@@ -500,14 +339,77 @@ impl Compositor {
 	}
 }
 
-/// Place `rect` (canvas pixels) in clip space.
-fn uniform(rect: Rect, canvas: Canvas, opacity: f32) -> Uniform {
-	let (width, height) = (canvas.width as f32, canvas.height as f32);
-	let x = |px: f32| px / width * 2.0 - 1.0;
-	let y = |px: f32| 1.0 - px / height * 2.0;
-	Uniform {
-		rect: [x(rect.x), y(rect.y), x(rect.x + rect.width), y(rect.y + rect.height)],
-		opacity: [opacity, 0.0, 0.0, 0.0],
+/// Refuse an invalid canvas, or one larger than `device` can hold as a
+/// texture.
+fn fits(device: &wgpu::Device, canvas: Canvas) -> Result<(), Error> {
+	canvas.validate()?;
+	let limit = device.limits().max_texture_dimension_2d;
+	if canvas.width > limit || canvas.height > limit {
+		return Err(Error::Invalid(format!(
+			"canvas {}x{} exceeds this GPU's {limit}px texture limit",
+			canvas.width, canvas.height
+		)));
+	}
+	Ok(())
+}
+
+/// One render's draws onto its targets.
+struct Draw<'a> {
+	collection: &'a Collection,
+	effects: &'a mut Effects,
+	library: Library<'a>,
+	frame: &'a mut Frame,
+	/// Each item, filtered once though it is drawn onto several targets.
+	prepared: HashMap<(Place, usize), Option<Prepared>>,
+}
+
+impl Draw<'_> {
+	/// Start drawing `target`.
+	fn target(&mut self, target: &Target) {
+		self.frame.target(&target.picture);
+	}
+
+	/// Draw `scene`'s items onto `target`. A missing scene draws nothing.
+	fn scene(&mut self, target: &Target, scene: Option<&str>) {
+		if let Some(scene) = scene.filter(|name| self.collection.scene(name).is_some()) {
+			self.layer(target, Place::Scene(scene.to_string()));
+		}
+	}
+
+	/// Draw `place`'s items onto `target`, back to front, each through its crop,
+	/// filters, and blend mode. A hidden item, a source with no picture yet, or
+	/// a filter whose source has nothing yet draws nothing.
+	fn layer(&mut self, target: &Target, place: Place) {
+		let items = self.collection.items(&place).map_or(&[][..], Vec::as_slice);
+		for (index, item) in items.iter().enumerate().filter(|(_, item)| item.visible) {
+			let key = (place.clone(), index);
+			let prepared = match self.prepared.get(&key) {
+				Some(prepared) => prepared.clone(),
+				None => {
+					let prepared = self.prepare(item);
+					self.prepared.insert(key, prepared.clone());
+					prepared
+				}
+			};
+			if let Some(prepared) = prepared {
+				self.effects.draw(self.frame, &target.texture, &prepared);
+			}
+		}
+	}
+
+	fn prepare(&mut self, item: &Item) -> Option<Prepared> {
+		let collection = self.collection;
+		let picture = self.library.0.get(collection.capture(&item.source))?.picture.as_ref()?;
+		let video = collection.video.get(&item.source);
+		let crop = video.map_or(collection::Crop::default(), |video| video.crop);
+		let item = effect::Item {
+			picture,
+			rect: item.rect,
+			crop: crop.then(&item.crop),
+			filters: collection.filters(item).collect(),
+			blend: item.blend,
+		};
+		self.effects.prepare(self.frame, item, &self.library)
 	}
 }
 
@@ -558,36 +460,8 @@ fn upload(
 	Ok(texture)
 }
 
-fn image_bind(
-	device: &wgpu::Device,
-	layout: &wgpu::BindGroupLayout,
-	sampler: &wgpu::Sampler,
-	view: &wgpu::TextureView,
-) -> wgpu::BindGroup {
-	device.create_bind_group(&wgpu::BindGroupDescriptor {
-		label: Some("moq-scene image"),
-		layout,
-		entries: &[
-			wgpu::BindGroupEntry {
-				binding: 0,
-				resource: wgpu::BindingResource::TextureView(view),
-			},
-			wgpu::BindGroupEntry {
-				binding: 1,
-				resource: wgpu::BindingResource::Sampler(sampler),
-			},
-		],
-	})
-}
-
 impl Target {
-	fn new(
-		device: &wgpu::Device,
-		layout: &wgpu::BindGroupLayout,
-		sampler: &wgpu::Sampler,
-		canvas: Canvas,
-		label: &str,
-	) -> Self {
+	fn new(device: &wgpu::Device, effects: &Effects, canvas: Canvas, label: &str) -> Self {
 		let texture = device.create_texture(&wgpu::TextureDescriptor {
 			label: Some(label),
 			size: wgpu::Extent3d {
@@ -599,57 +473,21 @@ impl Target {
 			sample_count: 1,
 			dimension: wgpu::TextureDimension::D2,
 			format: FORMAT,
+			// A blend mode copies what is under it out of the target.
 			usage: wgpu::TextureUsages::RENDER_ATTACHMENT
 				| wgpu::TextureUsages::TEXTURE_BINDING
 				| wgpu::TextureUsages::COPY_SRC,
 			view_formats: &[],
 		});
-		let view = texture.create_view(&Default::default());
-		let bind = image_bind(device, layout, sampler, &view);
-		Self { texture, view, bind }
-	}
-}
-
-impl Uniforms {
-	fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, stride: u64, capacity: u64) -> Self {
-		let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-			label: Some("moq-scene items"),
-			size: stride * capacity,
-			usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-			mapped_at_creation: false,
-		});
-		let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-			label: Some("moq-scene items"),
-			layout,
-			entries: &[wgpu::BindGroupEntry {
-				binding: 0,
-				resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-					buffer: &buffer,
-					offset: 0,
-					size: NonZeroU64::new(size_of::<Uniform>() as u64),
-				}),
-			}],
-		});
-		Self {
-			buffer,
-			bind,
-			stride,
-			capacity,
-		}
-	}
-
-	/// Grow to hold `count` draws, doubling so a growing scene reallocates rarely.
-	fn reserve(&mut self, device: &wgpu::Device, layout: &wgpu::BindGroupLayout, count: u64) {
-		if count > self.capacity {
-			*self = Self::new(device, layout, self.stride, count.next_power_of_two());
-		}
+		let picture = effects.picture(&texture);
+		Self { texture, picture }
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::collection::{Rgba, Scene};
+	use crate::collection::{Blend, Filter, MaskMode, Rect, Rgba, Scene};
 	use crate::source::test::{context, local, start};
 
 	const RED: [u8; 4] = [255, 0, 0, 255];
@@ -683,12 +521,7 @@ mod tests {
 		collection
 			.sources
 			.insert("blue".into(), Source::Color { color: Rgba(BLUE) });
-		let item = |source: &str, rect| Item {
-			source: source.into(),
-			rect,
-			visible: true,
-			filters: Vec::new(),
-		};
+		let item = Item::new;
 		let fill = Rect::fill(&collection.canvas);
 		let corner = Rect {
 			x: 4.0,
@@ -723,8 +556,12 @@ mod tests {
 
 	impl Studio {
 		async fn new(collection: Collection) -> Self {
+			Self::with_files(collection, tempfile::tempdir().unwrap()).await
+		}
+
+		/// Over sources whose files are in `dir`.
+		async fn with_files(collection: Collection, dir: tempfile::TempDir) -> Self {
 			let (device, queue) = gpu().await;
-			let dir = tempfile::tempdir().unwrap();
 			let (mut context, origin) = context(dir.path());
 			context.output = moq_video::render::output(&device);
 			let mut sources = Sources::new(context);
@@ -897,6 +734,7 @@ mod tests {
 				"blue faded".into(),
 				crate::Video {
 					filters: vec![Filter::Opacity { amount: 0.5 }],
+					..Default::default()
 				},
 			);
 			collection.scenes[0].items.push(Item {
@@ -1028,6 +866,504 @@ mod tests {
 			let err = studio.compositor.error("red").expect("the picture failed");
 			assert!(err.contains("texture limit"), "{err}");
 			assert!(studio.compositor.error("blue").is_none());
+		})
+		.await;
+	}
+
+	/// The program of `collection` with scene "red" cut to it, its files in `dir`.
+	async fn drawn(collection: Collection, dir: tempfile::TempDir) -> Vec<u8> {
+		let mut studio = Studio::with_files(collection, dir).await;
+		studio.compositor.set_preview(Some("red".into()));
+		studio.compositor.cut();
+		studio.render(Instant::now());
+		studio.program()
+	}
+
+	/// Scene "red" as `items` alone, over black.
+	fn showing(items: Vec<Item>) -> Collection {
+		let mut collection = collection();
+		collection.scenes[0].items = items;
+		collection.validate().unwrap();
+		collection
+	}
+
+	fn rgb(rgb: [u8; 3]) -> [u8; 4] {
+		[rgb[0], rgb[1], rgb[2], 255]
+	}
+
+	/// Each CSS color filter maps a color as the spec's matrix does, clamping
+	/// after each filter rather than once at the end.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn color_filters_follow_css() {
+		let cases = [
+			(vec![Filter::Grayscale { amount: 1.0 }], [118, 118, 118]),
+			(vec![Filter::Sepia { amount: 1.0 }], [165, 147, 114]),
+			(vec![Filter::Invert { amount: 1.0 }], [55, 155, 205]),
+			(vec![Filter::Brightness { amount: 0.5 }], [100, 50, 25]),
+			(vec![Filter::Contrast { amount: 0.0 }], [128, 128, 128]),
+			(vec![Filter::Saturate { amount: 0.0 }], [118, 118, 118]),
+			(vec![Filter::HueRotate { degrees: 180.0 }], [35, 135, 185]),
+			(vec![Filter::Opacity { amount: 0.5 }], [100, 50, 25]),
+			(
+				vec![Filter::Brightness { amount: 2.0 }, Filter::Brightness { amount: 0.5 }],
+				[128, 100, 50],
+			),
+		];
+		local(async {
+			for (filters, expected) in cases {
+				let mut collection = collection();
+				collection.sources.insert(
+					"tan".into(),
+					Source::Color {
+						color: Rgba([200, 100, 50, 255]),
+					},
+				);
+				collection.scenes[0].items = vec![Item {
+					filters: filters.clone(),
+					..Item::new("tan", Rect::fill(&collection.canvas))
+				}];
+				let program = drawn(collection, tempfile::tempdir().unwrap()).await;
+				let actual = pixel(&program, 3, 3);
+				assert!(near(actual, rgb(expected)), "{filters:?}: {actual:?}");
+			}
+		})
+		.await;
+	}
+
+	/// A crop trims the picture and stretches the rest over the item: an image
+	/// red on its left half and blue on its right shows blue where red was.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_crop_fills_the_item() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			image::RgbaImage::from_fn(8, 8, |x, _| image::Rgba(if x < 4 { RED } else { BLUE }))
+				.save(dir.path().join("halves.png"))
+				.unwrap();
+			let mut collection = collection();
+			collection.sources.insert(
+				"halves".into(),
+				Source::Image {
+					path: "halves.png".into(),
+				},
+			);
+			let fill = Rect::fill(&collection.canvas);
+			collection.scenes[0].items = vec![Item {
+				crop: crate::Crop {
+					left: 0.5,
+					..Default::default()
+				},
+				..Item::new("halves", fill)
+			}];
+			let program = drawn(collection, dir).await;
+			assert_eq!(pixel(&program, 3, 4), BLUE);
+		})
+		.await;
+	}
+
+	/// A blur is a Gaussian of the picture that fades into transparency past
+	/// its edges, as CSS's edge mode none: a blue square bleeds onto the black
+	/// around it by the discrete Gaussian's weights.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_blur_spreads_past_the_edges() {
+		local(async {
+			let square = Rect {
+				x: 2.0,
+				y: 2.0,
+				width: 4.0,
+				height: 4.0,
+			};
+			let program = drawn(
+				showing(vec![Item {
+					filters: vec![Filter::Blur { radius: 1.0 }],
+					..Item::new("blue", square)
+				}]),
+				tempfile::tempdir().unwrap(),
+			)
+			.await;
+			// The weights of offsets 0 to 3 at a standard deviation of 1.
+			let weight = |offset: i32| (-(offset * offset) as f32 / 2.0).exp();
+			let total: f32 = (-3..=3).map(weight).sum();
+			let covered = |offsets: std::ops::RangeInclusive<i32>| offsets.map(weight).sum::<f32>() / total;
+			// One pixel left of the square, on its second row.
+			let expected = covered(1..=3) * covered(-1..=2) * 255.0;
+			let actual = pixel(&program, 1, 3);
+			assert!(
+				near(actual, [0, 0, expected.round() as u8, 255]),
+				"{actual:?} vs {expected}"
+			);
+			assert_eq!(pixel(&program, 1, 3), pixel(&program, 6, 4), "symmetric");
+		})
+		.await;
+	}
+
+	/// A blur many pixels wide is drawn on halved rasters, still matching the
+	/// Gaussian of a square to within a few levels.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_wide_blur_matches_the_gaussian() {
+		local(async {
+			let mut collection = collection();
+			collection.canvas = Canvas {
+				width: 64,
+				height: 64,
+				framerate: 30,
+			};
+			collection.scenes[0].items = vec![Item {
+				filters: vec![Filter::Blur { radius: 10.0 }],
+				..Item::new("blue", Rect::fill(&collection.canvas))
+			}];
+			let program = drawn(collection, tempfile::tempdir().unwrap()).await;
+			let at = |x: usize, y: usize| program[(y * 64 + x) * 4 + 2];
+			// The share of a Gaussian of deviation 10, centered half a pixel
+			// inside an edge, that falls inside: Φ(0.05).
+			let edge = 0.52;
+			let cases = [
+				((32, 32), 255.0),
+				((0, 32), edge * 255.0),
+				((0, 0), edge * edge * 255.0),
+			];
+			for ((x, y), expected) in cases {
+				let actual = f32::from(at(x, y));
+				assert!((actual - expected).abs() <= 4.0, "({x}, {y}): {actual} vs {expected}");
+			}
+		})
+		.await;
+	}
+
+	/// A drop shadow is the picture's shape, offset and filled, under it.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_drop_shadow_falls_under() {
+		local(async {
+			let square = Rect {
+				x: 2.0,
+				y: 2.0,
+				width: 2.0,
+				height: 2.0,
+			};
+			let program = drawn(
+				showing(vec![Item {
+					filters: vec![Filter::DropShadow {
+						x: 1.0,
+						y: 2.0,
+						blur: 0.0,
+						color: Rgba([255, 0, 0, 128]),
+					}],
+					..Item::new("blue", square)
+				}]),
+				tempfile::tempdir().unwrap(),
+			)
+			.await;
+			assert_eq!(pixel(&program, 3, 3), BLUE, "the picture over its shadow");
+			let actual = pixel(&program, 4, 5);
+			assert!(near(actual, [128, 0, 0, 255]), "the shadow alone: {actual:?}");
+			assert_eq!(pixel(&program, 4, 2), BLACK, "beside both");
+		})
+		.await;
+	}
+
+	/// A chroma key hides its color and keeps the rest; a luma key hides what
+	/// is out of its range.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn keys_hide_what_they_key() {
+		local(async {
+			let mut collection = collection();
+			let green = Rgba([0, 255, 0, 255]);
+			for (name, color) in [("green", green), ("white", Rgba([255; 4]))] {
+				collection.sources.insert(name.into(), Source::Color { color });
+			}
+			let chroma = Filter::ChromaKey {
+				color: green,
+				similarity: 0.4,
+				smoothness: 0.08,
+				spill: 0.1,
+			};
+			let luma = Filter::LumaKey {
+				min: 0.0,
+				max: 0.5,
+				smoothness: 0.0,
+			};
+			let left = Rect {
+				x: 0.0,
+				y: 0.0,
+				width: 4.0,
+				height: 8.0,
+			};
+			let right = Rect { x: 4.0, ..left };
+			let keyed = |source: &str, rect, filter: &Filter| Item {
+				filters: vec![filter.clone()],
+				..Item::new(source, rect)
+			};
+			collection.scenes[0].items = vec![
+				Item::new("red", Rect::fill(&collection.canvas)),
+				keyed("green", left, &chroma),
+				keyed("blue", right, &chroma),
+				keyed("white", Rect { height: 4.0, ..left }, &luma),
+			];
+			let program = drawn(collection, tempfile::tempdir().unwrap()).await;
+			assert_eq!(pixel(&program, 1, 6), RED, "green is keyed out");
+			assert_eq!(pixel(&program, 6, 6), BLUE, "blue is kept");
+			assert_eq!(pixel(&program, 1, 1), RED, "white is too bright");
+		})
+		.await;
+	}
+
+	/// A LUT maps each color through its table, interpolating between points.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_lut_grades() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let mut cube = String::from("LUT_3D_SIZE 2\n");
+			for b in 0..2 {
+				for g in 0..2 {
+					for r in 0..2 {
+						cube += &format!("{} {} {}\n", 1 - r, 1 - g, 1 - b);
+					}
+				}
+			}
+			std::fs::write(dir.path().join("invert.cube"), cube).unwrap();
+			let mut collection = collection();
+			collection.sources.insert(
+				"invert".into(),
+				Source::Lut {
+					path: "invert.cube".into(),
+				},
+			);
+			collection.sources.insert(
+				"tan".into(),
+				Source::Color {
+					color: Rgba([200, 100, 50, 255]),
+				},
+			);
+			let lut = |amount| Filter::Lut {
+				source: "invert".into(),
+				amount,
+			};
+			let half = Rect {
+				x: 0.0,
+				y: 0.0,
+				width: 8.0,
+				height: 4.0,
+			};
+			collection.scenes[0].items = vec![
+				Item {
+					filters: vec![lut(1.0)],
+					..Item::new("tan", half)
+				},
+				Item {
+					filters: vec![lut(0.5)],
+					..Item::new("blue", Rect { y: 4.0, ..half })
+				},
+			];
+			let program = drawn(collection, dir).await;
+			let actual = pixel(&program, 3, 1);
+			assert!(near(actual, rgb([55, 155, 205])), "{actual:?}");
+			let actual = pixel(&program, 3, 6);
+			assert!(near(actual, rgb([128, 128, 128])), "half graded: {actual:?}");
+		})
+		.await;
+	}
+
+	/// A mask keeps the picture where its source is opaque, or bright in
+	/// luminance mode, and an item whose mask has no picture yet draws nothing.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_mask_keeps_what_it_covers() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			image::RgbaImage::from_fn(8, 8, |x, _| {
+				image::Rgba(if x < 4 { [255; 4] } else { [255, 255, 255, 0] })
+			})
+			.save(dir.path().join("alpha.png"))
+			.unwrap();
+			image::RgbaImage::from_fn(8, 8, |x, _| image::Rgba(if x < 4 { [255; 4] } else { BLACK }))
+				.save(dir.path().join("luma.png"))
+				.unwrap();
+			let mut collection = collection();
+			for (name, path) in [("alpha", "alpha.png"), ("luma", "luma.png")] {
+				collection
+					.sources
+					.insert(name.into(), Source::Image { path: path.into() });
+			}
+			collection.sources.insert(
+				"offline".into(),
+				Source::Broadcast {
+					path: "room/offline".into(),
+				},
+			);
+			let masked = |mask: &str, mode, y| Item {
+				filters: vec![Filter::Mask {
+					source: mask.into(),
+					mode,
+				}],
+				..Item::new(
+					"blue",
+					Rect {
+						x: 0.0,
+						y,
+						width: 8.0,
+						height: 2.0,
+					},
+				)
+			};
+			collection.scenes[0].items = vec![
+				Item::new("red", Rect::fill(&collection.canvas)),
+				masked("alpha", MaskMode::Alpha, 0.0),
+				masked("luma", MaskMode::Luminance, 2.0),
+				masked("offline", MaskMode::Alpha, 4.0),
+			];
+			let program = drawn(collection, dir).await;
+			for y in [0, 2] {
+				assert_eq!(pixel(&program, 1, y), BLUE, "row {y}");
+				assert_eq!(pixel(&program, 6, y), RED, "row {y}");
+			}
+			assert_eq!(pixel(&program, 1, 4), RED, "an offline mask hides the item");
+		})
+		.await;
+	}
+
+	/// A resize draws the next frame on textures of the new size, with items
+	/// where their pixels say, a blend mode and a blur reaching the canvas's
+	/// new width, and a canvas the GPU cannot hold changes nothing.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_resize_draws_the_new_canvas() {
+		local(async {
+			let mut collection = collection();
+			collection.sources.insert(
+				"tint".into(),
+				Source::Color {
+					color: Rgba([0, 0, 255, 255]),
+				},
+			);
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.render(Instant::now());
+			let old = studio.compositor.program().clone();
+
+			let wide = Canvas {
+				width: 16,
+				..studio.collection.canvas
+			};
+			studio.compositor.set_canvas(wide).unwrap();
+			assert_ne!(studio.compositor.program(), &old, "a new texture");
+			studio.collection.canvas = wide;
+			let fill = Rect::fill(&wide);
+			studio.collection.scenes[0].items = vec![
+				Item::new("red", Rect { width: 8.0, ..fill }),
+				Item {
+					blend: Blend::Screen,
+					filters: vec![Filter::Blur { radius: 1.0 }],
+					..Item::new("tint", fill)
+				},
+			];
+			studio.render(Instant::now());
+			let program = studio.program();
+			assert_eq!(program.len(), 16 * 8 * 4);
+			let pixel = |x: usize, y: usize| -> [u8; 4] {
+				let at = (y * 16 + x) * 4;
+				program[at..at + 4].try_into().unwrap()
+			};
+			assert!(
+				near(pixel(4, 4), [255, 0, 255, 255]),
+				"screened over red: {:?}",
+				pixel(4, 4)
+			);
+			assert!(
+				near(pixel(12, 4), BLUE),
+				"screened past the old width: {:?}",
+				pixel(12, 4)
+			);
+
+			let limit = studio.compositor.device.limits().max_texture_dimension_2d;
+			let huge = Canvas {
+				width: limit + 2,
+				..wide
+			};
+			assert!(matches!(studio.compositor.set_canvas(huge), Err(Error::Invalid(_))));
+			let empty = Canvas { width: 0, ..wide };
+			assert!(matches!(studio.compositor.set_canvas(empty), Err(Error::Invalid(_))));
+			assert_eq!(studio.compositor.canvas(), wide);
+		})
+		.await;
+	}
+
+	/// A renamed scene stays in preview, on program, and in the fade under way,
+	/// even when another scene takes its old name in the same edit, and a scene
+	/// the collection lost leaves them.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_renamed_scene_stays_where_it_is() {
+		local(async {
+			let mut studio = Studio::new(collection()).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.fade(Duration::from_secs(1), start);
+
+			// `blue` takes the name `red` gives up, which is followed once.
+			let mut draft = studio.collection.draft("Rename");
+			draft.rename_scene(0, "crimson").unwrap();
+			draft.rename_scene(1, "red").unwrap();
+			let edit = draft.finish().unwrap();
+			studio.compositor.rename(&studio.collection.renames(&edit));
+			studio.collection.apply(&edit).unwrap();
+			assert_eq!(studio.compositor.preview_scene(), Some("red"));
+			assert_eq!(studio.compositor.program_scene(), Some("red"));
+			studio.render(start + Duration::from_millis(500));
+			let actual = pixel(&studio.program(), 1, 1);
+			assert!(near(actual, [128, 0, 127, 255]), "still fading from red: {actual:?}");
+
+			// A scene the collection no longer has, as a reload can leave, is
+			// dropped, so one that later takes its name is not drawn unasked.
+			studio.collection.scenes.retain(|scene| scene.name != "red");
+			studio.compositor.retain(&studio.collection);
+			assert_eq!(studio.compositor.preview_scene(), None);
+			assert_eq!(studio.compositor.program_scene(), None);
+		})
+		.await;
+	}
+
+	/// A blend mode mixes an item with what is under it by the CSS formula,
+	/// weighted by the item's opacity.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn blend_modes_mix_with_what_is_under() {
+		let cases = [
+			(Blend::Multiply, 255, [0, 0, 0]),
+			(Blend::Screen, 255, [255, 0, 255]),
+			(Blend::Difference, 255, [255, 0, 255]),
+			(Blend::Luminosity, 255, [94, 0, 0]),
+			(Blend::Multiply, 128, [127, 0, 0]),
+		];
+		local(async {
+			for (blend, alpha, expected) in cases {
+				let mut collection = collection();
+				collection.sources.insert(
+					"tint".into(),
+					Source::Color {
+						color: Rgba([0, 0, 255, alpha]),
+					},
+				);
+				let fill = Rect::fill(&collection.canvas);
+				collection.scenes[0].items = vec![
+					Item::new("red", fill),
+					Item {
+						blend,
+						..Item::new("tint", fill)
+					},
+				];
+				let program = drawn(collection, tempfile::tempdir().unwrap()).await;
+				let actual = pixel(&program, 3, 3);
+				assert!(near(actual, rgb(expected)), "{blend:?} at {alpha}: {actual:?}");
+			}
 		})
 		.await;
 	}
