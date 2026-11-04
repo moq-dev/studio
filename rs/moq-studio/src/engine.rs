@@ -628,6 +628,8 @@ impl Engine {
 		if let Some(room) = &engine.room {
 			// Who has a return feed follows who is renewed, synced with the mixes.
 			let mut changes = room.changes();
+			// Including any made since the feeds started.
+			changes.mark_changed();
 			let follow = engine.clone();
 			tokio::spawn(async move {
 				while changes.changed().await.is_ok() {
