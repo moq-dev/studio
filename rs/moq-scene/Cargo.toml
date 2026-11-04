@@ -32,8 +32,23 @@ pipewire = ["capture", "moq-video/pipewire", "moq-audio/pipewire"]
 cef = ["dep:cef"]
 
 [dependencies]
+# Overlays: Blitz lays HTML and CSS out and paints it into a Vello scene, which
+# Vello renders on the compositor's device. Pinned to the beta whose Vello and
+# wgpu match moq-video's: the stable 0.2 line is on wgpu 26, which cannot share
+# the device. Fonts and network access are left off, so an overlay loads nothing.
+anyrender_vello = "0.15"
+blitz-dom = { version = "=0.3.0-beta.4", default-features = false }
+blitz-html = "=0.3.0-beta.4"
+blitz-paint = { version = "=0.3.0-beta.4", default-features = false }
+blitz-traits = "=0.3.0-beta.4"
 bytemuck = { version = "1", features = ["derive"] }
 bytes = { workspace = true }
+# Reads the declarations an overlay's CSS checks, as Stylo serializes them.
+cssparser = "0.38"
+# The faces every overlay's text is set in: Noto Sans, regular, bold, and italic.
+notosans = "0.1"
+# Blitz's text layout, to register those faces as every family's.
+parley = { version = "0.12", default-features = false, features = ["std"] }
 # The catalog's rendition configs, which a broadcast source follows.
 hang = { workspace = true }
 humantime-serde = { workspace = true }
@@ -48,10 +63,14 @@ moq-net = { workspace = true }
 moq-video = { workspace = true, features = ["render"] }
 serde = { workspace = true }
 serde_with = { workspace = true }
+# Stylo, Blitz's style engine, which parses an overlay's CSS to check it.
+style = { package = "stylo", version = "0.22" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
+vello = "0.11"
 
 # The helper process a browser source runs CEF in, and the socket between them.
 [target.'cfg(target_os = "linux")'.dependencies]

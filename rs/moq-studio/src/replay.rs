@@ -71,6 +71,11 @@ impl Engine {
 					"`{name}` is a web page, which publishes no track of its own, so it has no past to replay"
 				)
 			}
+			Some(Source::Overlay { .. }) => {
+				anyhow::bail!(
+					"`{name}` is an overlay, which publishes no track of its own, so it has no past to replay"
+				)
+			}
 			Some(source) if source.has_video() => output()?
 				.source(capture)
 				.with_context(|| format!("`{name}` publishes no video to replay")),

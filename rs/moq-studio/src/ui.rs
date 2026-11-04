@@ -12,8 +12,8 @@ use moq_scene::browser::Paint;
 use moq_scene::replay::Take;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
-	Blend, Canvas, Clip, Collection, Crop, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source, Transition,
-	Video, wgpu,
+	Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source,
+	Transition, Video, wgpu,
 };
 
 use crate::autosave::Conflict;
@@ -105,6 +105,7 @@ impl Studio {
 				selection: None,
 				gestures: Gestures::default(),
 				snapping: Snapping::default(),
+				direction: Direction::Left,
 				drag: None,
 				new_scene: String::new(),
 				renaming: None,
@@ -207,6 +208,9 @@ struct Panels {
 	selection: Option<Selection>,
 	gestures: Gestures,
 	snapping: Snapping,
+	/// The direction a slide or wipe last had, which the transition picker
+	/// offers again after a fade or move.
+	direction: Direction,
 	/// The item a drag in the preview holds.
 	drag: Option<Drag>,
 	new_scene: String,
@@ -848,34 +852,71 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let canvas = state.collection().canvas;
-		let fade = state.collection().transition.fade;
-		let mut result = Ok(());
+		let transition = state.collection().transition;
+		let mut next = transition;
+		let mut gesture = None;
 		ui.horizontal(|ui| {
 			if ui.button("Cut").clicked() {
 				state.compositor.cut();
 			}
-			if ui.button("Fade").clicked() {
-				state.compositor.fade(fade, kio::clock::Instant::now());
+			if ui
+				.button("Transition")
+				.on_hover_text("Take the preview to program by the transition set beside it")
+				.clicked()
+			{
+				state.compositor.transition(transition, kio::clock::Instant::now());
 			}
-			let mut millis = fade.as_millis() as u64;
+			let duration = next.duration();
+			if let Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } = next {
+				self.direction = direction;
+			}
+			let direction = self.direction;
+			egui::ComboBox::from_id_salt("transition")
+				.selected_text(transition_name(&next))
+				.show_ui(ui, |ui| {
+					let kinds = [
+						Transition::Fade { duration },
+						Transition::Slide { duration, direction },
+						Transition::Wipe { duration, direction },
+						Transition::Move { duration },
+					];
+					for kind in kinds {
+						ui.selectable_value(&mut next, kind, transition_name(&kind));
+					}
+				});
+			if let Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } = &mut next {
+				egui::ComboBox::from_id_salt("direction")
+					.selected_text(direction_name(*direction))
+					.show_ui(ui, |ui| {
+						for to in Direction::ALL {
+							ui.selectable_value(direction, to, direction_name(to));
+						}
+					});
+			}
+			let mut millis = duration.as_millis() as u64;
 			let response = ui
 				.add(egui::DragValue::new(&mut millis).suffix(" ms"))
-				.on_hover_text("How long a fade takes");
-			let gesture = self.gestures.of(&response);
+				.on_hover_text("How long the transition takes");
+			let dragging = self.gestures.of(&response);
 			if response.changed() {
-				let fade = Duration::from_millis(millis);
-				result = edit(&mut state, "Set the fade time", gesture, |draft| {
-					draft.set_transition(Transition { fade })
-				});
+				*next.duration_mut() = Duration::from_millis(millis);
+				gesture = dragging;
 			}
 			ui.label(format!(
 				"Program: {}",
 				state.compositor.program_scene().unwrap_or("nothing")
 			));
-			if state.compositor.fading() {
-				ui.weak("fading");
+			if state.compositor.transitioning() {
+				ui.weak("in transition");
 			}
 		});
+		let result = if next == transition {
+			Ok(())
+		} else {
+			edit(&mut state, "Set the transition", gesture, |draft| {
+				draft.set_transition(next)
+			})
+		};
 		drop(state);
 		self.check(result);
 		picture(ui, self.program.id, canvas, egui::Sense::hover());
@@ -1842,7 +1883,9 @@ impl Panels {
 						source.has_video()
 							&& !matches!(
 								source,
-								Source::Image { .. } | Source::Color { .. } | Source::Browser { .. }
+								Source::Image { .. }
+									| Source::Color { .. } | Source::Browser { .. }
+									| Source::Overlay { .. }
 							)
 					})
 				})
@@ -2262,6 +2305,24 @@ fn filter_name(filter: &Filter) -> &'static str {
 	}
 }
 
+fn transition_name(transition: &Transition) -> &'static str {
+	match transition {
+		Transition::Fade { .. } => "fade",
+		Transition::Slide { .. } => "slide",
+		Transition::Wipe { .. } => "wipe",
+		Transition::Move { .. } => "move",
+	}
+}
+
+fn direction_name(direction: Direction) -> &'static str {
+	match direction {
+		Direction::Left => "left",
+		Direction::Right => "right",
+		Direction::Up => "up",
+		Direction::Down => "down",
+	}
+}
+
 fn blend_name(blend: Blend) -> &'static str {
 	match blend {
 		Blend::Normal => "normal",
@@ -2457,14 +2518,14 @@ fn add(
 	);
 	let canvas = state.collection().canvas;
 	let place = source.has_video();
-	// A page, or a clone of one, lands at the page's size, pixel for pixel;
-	// anything else fills the canvas.
+	// A page or overlay, or a clone of one, lands at its own size, pixel for
+	// pixel; anything else fills the canvas.
 	let shown = match &source {
 		Source::Clone { source } => state.collection().sources.get(source),
 		source => Some(source),
 	};
 	let rect = match shown {
-		Some(Source::Browser { width, height, .. }) => Rect {
+		Some(Source::Browser { width, height, .. } | Source::Overlay { width, height, .. }) => Rect {
 			x: 0.0,
 			y: 0.0,
 			width: *width as f32,
@@ -2739,6 +2800,7 @@ fn describe(source: &Source) -> String {
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
 		Source::Browser { url, width, height } => format!("browser: {url} ({width}x{height})"),
+		Source::Overlay { width, height, .. } => format!("overlay ({width}x{height})"),
 		Source::Clone { source } => format!("clone of {source}"),
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
@@ -2790,10 +2852,11 @@ fn meter(ui: &mut Ui, level: moq_audio::Level) {
 struct AddSource {
 	name: String,
 	kind: Kind,
-	/// A path, broadcast path, url, or device id, depending on the kind.
+	/// A path, broadcast path, url, device id, or an overlay's HTML, depending
+	/// on the kind.
 	value: String,
 	color: Color32,
-	/// A browser source's page size.
+	/// A browser source's page size, or an overlay's.
 	width: u32,
 	height: u32,
 }
@@ -2824,12 +2887,13 @@ enum Kind {
 	Microphone,
 	SystemAudio,
 	Browser,
+	Overlay,
 	Replay,
 	Lut,
 }
 
 impl Kind {
-	const ALL: [Self; 11] = [
+	const ALL: [Self; 12] = [
 		Self::Color,
 		Self::Image,
 		Self::Broadcast,
@@ -2839,6 +2903,7 @@ impl Kind {
 		Self::Microphone,
 		Self::SystemAudio,
 		Self::Browser,
+		Self::Overlay,
 		Self::Replay,
 		Self::Lut,
 	];
@@ -2854,6 +2919,7 @@ impl Kind {
 			Self::Microphone => "Microphone",
 			Self::SystemAudio => "System audio",
 			Self::Browser => "Browser",
+			Self::Overlay => "Overlay",
 			Self::Replay => "Replay",
 			Self::Lut => "LUT",
 		}
@@ -2868,6 +2934,7 @@ impl Kind {
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
 			Self::Browser => Some("url"),
+			Self::Overlay => Some("HTML and CSS"),
 			Self::Camera | Self::Display | Self::Microphone => Some("id (empty for the default)"),
 		}
 	}
@@ -2892,10 +2959,14 @@ impl AddSource {
 			ui.end_row();
 			if let Some(label) = self.kind.value() {
 				ui.label(label);
-				ui.text_edit_singleline(&mut self.value);
+				if self.kind == Kind::Overlay {
+					ui.add(egui::TextEdit::multiline(&mut self.value).code_editor());
+				} else {
+					ui.text_edit_singleline(&mut self.value);
+				}
 				ui.end_row();
 			}
-			if self.kind == Kind::Browser {
+			if matches!(self.kind, Kind::Browser | Kind::Overlay) {
 				ui.label("Size");
 				ui.horizontal(|ui| {
 					ui.add(egui::DragValue::new(&mut self.width).range(1..=4096));
@@ -2932,6 +3003,11 @@ impl AddSource {
 			Kind::SystemAudio => Source::SystemAudio,
 			Kind::Browser => Source::Browser {
 				url: value,
+				width: self.width,
+				height: self.height,
+			},
+			Kind::Overlay => Source::Overlay {
+				html: value,
 				width: self.width,
 				height: self.height,
 			},
