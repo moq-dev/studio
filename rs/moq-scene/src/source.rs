@@ -648,11 +648,7 @@ impl Driver {
 
 	/// Play each replay [`Feed::replay`] hands over, showing nothing between
 	/// them. A new one cuts off the one playing.
-	async fn replays(
-		&self,
-		mut plays: watch::Receiver<Next>,
-		listing: Option<&Listing<'_>>,
-	) -> Result<(), Error> {
+	async fn replays(&self, mut plays: watch::Receiver<Next>, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		*self.picture.lock().unwrap() = Some(clear());
 		set(&self.status, Status::Live);
 
