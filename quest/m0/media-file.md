@@ -14,7 +14,10 @@ already uses (moq-mux import, moq-video and moq-audio decode) rather than a
 new media stack; anything they lack lands in moq first, with a moq-side test,
 then a pin. Start with the container and codecs those crates already read, and
 refuse anything else at setup with the reason. The file path is a local path
-in the scene file, like an image source's.
+in the scene file, like an image source's. The web studio has no local paths:
+there a file comes from a browser file picker for the session, and resolving
+scene-file paths in the browser belongs to the [web studio](/quest/m0/web.md),
+as it does for image sources.
 
 A file is played on the program clock. Settings: loop, or play once and hold
 the last frame; and whether going on program restarts it. A restart on demand
