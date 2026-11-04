@@ -165,6 +165,18 @@ impl Commands {
 		}
 	}
 
+	/// Whether nothing waits to be taken.
+	#[cfg(test)]
+	pub(crate) fn is_empty(&self) -> bool {
+		let outbox = self.0.0.lock().unwrap();
+		outbox.opens.is_empty()
+			&& outbox.rates.is_empty()
+			&& outbox.input.is_empty()
+			&& outbox.owed.is_empty()
+			&& outbox.painted == 0
+			&& outbox.closes.is_empty()
+	}
+
 	/// The commands waiting, without waiting for any.
 	#[cfg(any(test, feature = "cef"))]
 	pub(crate) fn take(&self) -> Vec<Command> {

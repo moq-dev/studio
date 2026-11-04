@@ -198,11 +198,16 @@ impl Instance {
 			// Not the helper, whose hold on this instance would keep it running
 			// once every other owner is gone.
 			let (device, queue) = (helper.device.clone(), helper.queue.clone());
-			let (commands, routes) = (commands.clone(), routes.clone());
-			std::thread::Builder::new()
+			let (reading, routes) = (commands.clone(), routes.clone());
+			let spawned = std::thread::Builder::new()
 				.name("browser-events".into())
-				.spawn(move || read(&device, &queue, process, &events, &commands, &routes))
-				.map_err(|err| failed("cannot start the page reader", err))?
+				.spawn(move || read(&device, &queue, process, &events, &reading, &routes));
+			// The writer ends with it; the helper, dropped with the closure, is
+			// killed.
+			spawned.map_err(|err| {
+				commands.stop();
+				failed("cannot start the page reader", err)
+			})?
 		};
 		Ok(Self {
 			commands,
@@ -451,10 +456,19 @@ mod tests {
 		let commands = writer(Channel::new(ours)).unwrap();
 		let page = Page::default();
 		page.state.lock().unwrap().commands = Some(commands.clone());
-		// Far more than the socket buffers and the backlog hold together, so
-		// the writer is stuck on the socket.
-		for _ in 0..4096 {
-			page.send(Input::Text("x".repeat(1024)));
+		// An open far larger than the socket buffers: once the writer takes
+		// it, it is stuck writing it until the helper reads.
+		let stuck = Open {
+			url: "x".repeat(16 << 20),
+			..Default::default()
+		};
+		commands.open(0, stuck);
+		while !commands.is_empty() {
+			std::thread::yield_now();
+		}
+
+		for _ in 0..1024 {
+			page.send(Input::Text("x".into()));
 		}
 		assert!(page.state.lock().unwrap().backlogged);
 		for id in 1..100 {
@@ -464,6 +478,10 @@ mod tests {
 		commands.open(100, Open::default());
 
 		let helper = Channel::new(theirs);
+		assert!(matches!(
+			helper.recv::<Command>().unwrap(),
+			Some((Command::Open(0, _), _))
+		));
 		loop {
 			match helper.recv::<Command>().unwrap() {
 				Some((Command::Open(100, _), _)) => break,
