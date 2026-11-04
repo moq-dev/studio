@@ -864,6 +864,20 @@ pub enum Source {
 		/// The page's viewport height in pixels.
 		height: u32,
 	},
+	/// A graphic written as HTML and CSS without scripts, such as a title or
+	/// lower third. Its CSS animations run on the program clock, so they land
+	/// on the same frame in the program and everything made from it. It loads
+	/// nothing, and HTML or CSS outside what overlays draw fails the source,
+	/// naming it.
+	Overlay {
+		/// The document, its CSS in `<style>` elements and `style` attributes.
+		html: String,
+		/// The overlay's viewport width in pixels, independent of where it is
+		/// placed.
+		width: u32,
+		/// The overlay's viewport height in pixels.
+		height: u32,
+	},
 	/// Another source's picture, captured once, with [`Collection::video`]
 	/// filters of its own. Its sound is not mixed a second time.
 	Clone {
@@ -919,16 +933,21 @@ impl Source {
 	}
 
 	fn validate(&self, name: &str) -> Result<(), Error> {
-		if let Self::Browser { url, width, height } = self {
-			if url.trim().is_empty() {
-				return Err(Error::Invalid(format!("browser source `{name}` has no url")));
+		let (kind, width, height) = match self {
+			Self::Browser { url, width, height } => {
+				if url.trim().is_empty() {
+					return Err(Error::Invalid(format!("browser source `{name}` has no url")));
+				}
+				("browser", width, height)
 			}
-			let max = crate::browser::MAX_SIDE;
-			if *width == 0 || *height == 0 || *width > max || *height > max {
-				return Err(Error::Invalid(format!(
-					"browser source `{name}` is {width}x{height}; each side must be 1 to {max} pixels"
-				)));
-			}
+			Self::Overlay { width, height, .. } => ("overlay", width, height),
+			_ => return Ok(()),
+		};
+		let max = crate::browser::MAX_SIDE;
+		if *width == 0 || *height == 0 || *width > max || *height > max {
+			return Err(Error::Invalid(format!(
+				"{kind} source `{name}` is {width}x{height}; each side must be 1 to {max} pixels"
+			)));
 		}
 		Ok(())
 	}

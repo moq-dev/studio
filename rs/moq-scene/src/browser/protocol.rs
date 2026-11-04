@@ -27,20 +27,40 @@ pub(crate) const MAX_PLANES: usize = 4;
 /// the other allocate.
 const MAX_MESSAGE: usize = (super::MAX_SIDE * super::MAX_SIDE * 4) as usize + 1024;
 
+/// A page's number, unique among those one helper opens.
+pub(crate) type Id = u64;
+
 /// What the studio asks of the helper.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Command {
-	/// The first message: the page to open and how to deliver it.
-	Open(Open),
+	/// The first message: how the helper runs every page.
+	Start(Start),
+	/// Open a page.
+	Open(Id, Open),
+	/// Close a page.
+	Close(Id),
 	/// The last picture is copied, so the helper may let CEF reuse it.
 	Painted,
-	/// Interaction with the page.
-	Input(Input),
+	/// Interaction with a page.
+	Input(Id, Input),
 	/// The canvas's frame rate changed, so the page paints at this one.
-	FrameRate(u32),
+	FrameRate(Id, u32),
 }
 
-/// The page a helper opens.
+/// How a helper runs every page it opens.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Start {
+	/// Whether to paint into shared textures the studio imports, rather than
+	/// into memory it uploads.
+	pub accelerated: bool,
+	/// The DRM render node to paint on: the studio's GPU.
+	pub render_node: Option<String>,
+	/// The profile every page shares: cookies, storage, and cache. CEF lets
+	/// one process at a time hold it.
+	pub profile: String,
+}
+
+/// A page to open.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Open {
 	pub url: String,
@@ -49,14 +69,6 @@ pub(crate) struct Open {
 	pub height: u32,
 	/// How often the page paints: the canvas's frame rate.
 	pub framerate: u32,
-	/// Whether to paint into shared textures the studio imports, rather than
-	/// into memory it uploads.
-	pub accelerated: bool,
-	/// The DRM render node to paint on: the studio's GPU.
-	pub render_node: Option<String>,
-	/// An empty directory for CEF's profile, since two CEF instances cannot
-	/// share one. The studio removes it once the helper has exited.
-	pub profile: String,
 	/// The sound the page plays is delivered at the program bus's rate and
 	/// channel count, so it joins the bus without resampling.
 	pub sample_rate: u32,
@@ -66,17 +78,24 @@ pub(crate) struct Open {
 /// What the helper tells the studio.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Event {
-	/// The page painted into a shared texture, whose plane descriptors ride
+	/// A page painted into a shared texture, whose plane descriptors ride
 	/// with this message. Valid until the studio answers
 	/// [`Command::Painted`].
-	Texture(Texture),
-	/// The page painted into memory: `width * height` premultiplied BGRA
+	Texture(Id, Texture),
+	/// A page painted into memory: `width * height` premultiplied BGRA
 	/// pixels, tightly packed.
-	Pixels { width: u32, height: u32, data: Vec<u8> },
+	Pixels {
+		page: Id,
+		width: u32,
+		height: u32,
+		data: Vec<u8>,
+	},
 	/// Interleaved samples at the [`Open`] rate and channel count.
-	Audio(Vec<f32>),
-	/// The page cannot be shown, and why.
-	Failed(String),
+	Audio(Id, Vec<f32>),
+	/// A page cannot be shown, and why.
+	Failed(Id, String),
+	/// No page can be shown, and why. The helper exits next.
+	Fatal(String),
 }
 
 /// A shared texture's layout, CEF's `cef_accelerated_paint_info_t` minus the
@@ -225,17 +244,19 @@ mod tests {
 			}],
 		};
 		let file = tempfile::tempfile().unwrap();
-		helper.send(&Event::Audio(vec![0.5; 3]), &[]).unwrap();
-		helper.send(&Event::Texture(texture.clone()), &[file.as_fd()]).unwrap();
-		helper.send(&Event::Failed("gone".into()), &[]).unwrap();
+		helper.send(&Event::Audio(1, vec![0.5; 3]), &[]).unwrap();
+		helper
+			.send(&Event::Texture(1, texture.clone()), &[file.as_fd()])
+			.unwrap();
+		helper.send(&Event::Failed(1, "gone".into()), &[]).unwrap();
 		drop(helper);
 
 		let (event, fds) = studio.recv::<Event>().unwrap().unwrap();
-		assert_eq!(event, Event::Audio(vec![0.5; 3]));
+		assert_eq!(event, Event::Audio(1, vec![0.5; 3]));
 		assert!(fds.is_empty());
 
 		let (event, fds) = studio.recv::<Event>().unwrap().unwrap();
-		assert_eq!(event, Event::Texture(texture));
+		assert_eq!(event, Event::Texture(1, texture));
 		assert_eq!(fds.len(), 1);
 		let ours = rustix::fs::fstat(&fds[0]).unwrap();
 		let theirs = rustix::fs::fstat(&file).unwrap();
@@ -246,7 +267,7 @@ mod tests {
 		);
 
 		let (event, fds) = studio.recv::<Event>().unwrap().unwrap();
-		assert_eq!(event, Event::Failed("gone".into()));
+		assert_eq!(event, Event::Failed(1, "gone".into()));
 		assert!(fds.is_empty());
 
 		assert!(studio.recv::<Event>().unwrap().is_none(), "closed");
@@ -258,6 +279,7 @@ mod tests {
 		let (studio, helper) = pair();
 		let data: Vec<u8> = (0..1920 * 1080 * 4).map(|i| i as u8).collect();
 		let sent = Event::Pixels {
+			page: 1,
 			width: 1920,
 			height: 1080,
 			data,

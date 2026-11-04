@@ -1,8 +1,8 @@
 # MoQ Studio
 
 `moq-studio` is a native streaming studio for Linux, macOS, and Windows. It
-composes cameras, screens, windows, images, colors, web pages, and broadcasts
-from a relay into scenes on the GPU, mixes their audio, and publishes the result to a
+composes cameras, screens, windows, images, colors, web pages, HTML and CSS
+overlays, and broadcasts from a relay into scenes on the GPU, mixes their audio, and publishes the result to a
 [MoQ](https://github.com/moq-dev/moq) relay. It is early and not packaged yet,
 so build it from source. The moq crates come from the `moq` submodule:
 
@@ -94,7 +94,7 @@ Every panel is a tab you can drag, split, or stack.
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still fading out, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
@@ -164,12 +164,49 @@ than holding up the mixes or another output.
 
 A browser source renders a web page, such as an overlay, alert box, or chat
 widget, at the canvas frame rate (CEF caps it at 60) over a transparent
-background, and its sound joins the mixes. Each page runs in a
-process of its own, so a page or browser crash fails that source, with the
-reason, while the stream carries on; edit or re-add the source to restart it.
-Every start is a fresh profile: no cookies or logins persist. A page opens
-no other windows (`window.open` and new-tab links do nothing), and its
-dropdown lists, such as a `<select>`'s, are not drawn yet.
+background, and its sound joins the mixes. Every page shares one
+browser profile, kept in `$XDG_DATA_HOME/moq-studio/browser`
+(`~/.local/share/moq-studio/browser` by default) rather than beside the scene
+file, so cookies and logins, such as an alert service's, survive a reload and
+a restart of the studio. One studio at a time can use it: a second one's
+browser sources fail saying so. Each page renders in a process of its own, so
+a page that crashes fails only its own source, with the reason, while the
+stream carries on. A crash of the browser itself fails every browser source.
+**Reload** in Sources restarts a page, failed or not. A page opens no other
+windows (`window.open` and new-tab links do nothing), and its dropdown lists,
+such as a `<select>`'s, are not drawn yet.
+
+An overlay is a title, lower third, or other graphic written as HTML and CSS,
+drawn by the studio itself (through [Blitz](https://github.com/DioxusLabs/blitz))
+rather than a browser, on every platform. Its CSS animations and transitions
+run on the program clock, so they land on the same frame in the program and in
+a recording or replay of it, whatever the studio's load. It runs no scripts
+and loads nothing: no images, stylesheets, or fonts from anywhere. Its text is
+set in the bundled Noto Sans, regular, bold, or italic, whatever `font-family`
+names, so it looks the same on every machine. An overlay outside what
+overlays draw fails to start, naming the first element, attribute, rule, or
+property it refused:
+
+- Elements: text and the boxes around it (`div`, `span`, `p`, headings,
+  lists, tables, and the like), plus `style`, `title`, and `meta`. Not
+  `script`, `img`, `link`, `iframe`, `svg`, `canvas`, or form controls.
+- Attributes: `id`, `class`, `style`, `lang`, `dir`, `title`, `hidden`,
+  table and list numbering ones, and `data-*` and `aria-*`.
+- CSS rules: style rules, nested ones included, `@media`, and `@keyframes`.
+  Not `@import` or `@font-face`, nor any `url()` or `image-set()`.
+- CSS properties: box layout, flexbox, grid, positioning, margins and
+  padding, colors, opacity, gradients, borders and their radii, `box-shadow`,
+  outlines, transforms, `clip-path`, fonts and text layout, text decoration,
+  `content`, and animations and transitions, by their usual shorthands too.
+  Not yet `filter`, `backdrop-filter`, `mix-blend-mode`, `text-shadow`,
+  `mask`, `text-overflow`, or multi-column layout; the list grows as Blitz
+  draws more.
+
+An overlay's animation starts when the overlay does: when the studio opens
+it, and again whenever it is edited. One that no preview or program shows
+costs nothing until it is shown again, where its animation has carried on.
+Overlays publish no track of their own, so viewers see them only in the
+program.
 
 ## Guests
 
@@ -288,6 +325,20 @@ url = "https://example.com/alerts"
 width = 800 # the page's own size, whatever its items stretch it to
 height = 600
 
+[sources.name]
+kind = "overlay"
+width = 1920 # the overlay's own size, like a page's
+height = 1080
+html = '''
+<style>
+  .third { position: absolute; left: 80px; bottom: 120px; padding: 16px 32px;
+    background: linear-gradient(90deg, #1e3a8a, #2563eb); border-radius: 12px;
+    font: bold 48px sans-serif; color: white; animation: in 400ms ease-out both; }
+  @keyframes in { from { transform: translateX(-40px); opacity: 0 } }
+</style>
+<div class="third">Ada Lovelace</div>
+'''
+
 [mixes]
 names = ["Stream", "Headphones"]
 program = "Stream" # the mix the broadcast carries
@@ -338,7 +389,7 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
 (macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
-`clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
+`overlay` (its `html`, and a `width` and `height` up to 4096), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
 file, which no item places, but which grades what a `lut` filter names it in),
 and `replay`, where the Replay panel plays replays. The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
@@ -463,7 +514,7 @@ colors publish once, as the image file and as a one-pixel PNG. Removing or
 editing a source ends its track. A track carries the plain capture, before any
 filter, and a clone publishes none, since it shows its source's capture.
 Microphones and system audio do not publish tracks of their own yet. A browser
-source publishes none, so viewers see its page only in the program, and a
+source or overlay publishes none, so viewers see it only in the program, and a
 broadcast source is already its publisher's.
 
 Every captured source opens an encode session as it starts, and consumer GPUs
