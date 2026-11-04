@@ -1325,6 +1325,13 @@ impl Panels {
 								status(ui, &track);
 							});
 						}
+						// A broadcast publishes no track either, and shows how far
+						// behind its publisher it plays.
+						None if let Some(delay) = feed.and_then(Feed::delay) => {
+							ui.weak(format!("{} ms behind", delay.as_millis())).on_hover_text(
+								"Plays this far behind what arrives, to ride out the network's jitter; the picture waits for its sound",
+							);
+						}
 						None => match feed.and_then(Feed::page).and_then(|page| page.paint()) {
 							Some(Paint::Gpu) => {
 								ui.weak("GPU").on_hover_text("The page is copied on the GPU");

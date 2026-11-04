@@ -153,6 +153,16 @@ failover replaces the first relay's copy once that copy ends. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts.
 
+A broadcast source, a guest's included, plays on its publisher's timestamps,
+so its sound and picture stay in sync through network jitter and stalls. Its
+audio plays as far behind what arrives as the network's jitter needs, measured
+as it goes, the same delay `moq play --delay auto` holds, up to 2 s. Each
+picture waits for the sound stamped with it, and the canvas shows the last one
+meanwhile. A stall longer than that delay pauses both and starts them again
+together, and a burst after one skips ahead to the delay. Without audio, the
+picture plays 100 ms behind. Sources shows how far behind each broadcast
+plays.
+
 ### Audio mixes
 
 Audio from every source is mixed whether or not its scene is live. A
@@ -170,7 +180,9 @@ studio remembers for you rather than in the scene file. Use headphones: a
 microphone that hears the speakers feeds the mix back into itself.
 
 A source's **delay** holds it back in every mix, up to 2 s, so a microphone
-lines up with a camera that lags it.
+lines up with a camera that lags it. A broadcast's picture already follows its
+sound, so its delay holds the sound back from its own picture: use it only for
+a publisher whose sound leads their picture.
 
 Each mix is advanced on the program clock, and each output reads its mix on
 its own, so an output that falls behind skips ahead in its own audio rather
