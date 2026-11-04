@@ -4,7 +4,7 @@
 //! The scenes, sources, and compositor live in `moq-scene`; this binary is the
 //! window around them and the program clock that publishes the result.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 
@@ -17,6 +17,7 @@ mod guests;
 mod health;
 mod interact;
 mod ladder;
+mod record;
 mod replay;
 mod setup;
 mod snap;
@@ -38,11 +39,16 @@ pub struct Config {
 	pub broadcast: String,
 
 	/// Copy and encode the program video at the canvas size only while someone
-	/// watches it, as the half size always is. This saves the work while
-	/// nobody watches, but leaves a late viewer nothing from before they
-	/// arrived. Audio is always encoded.
+	/// watches or records it, as the half size always is. This saves the work
+	/// while nobody does, but leaves a late viewer nothing from before they
+	/// arrived. Audio is always encoded. Without `--connect`, the program is
+	/// always on demand.
 	#[usage(long)]
 	pub on_demand: bool,
+
+	/// The directory recordings are saved in. Defaults to the scene file's.
+	#[usage(long, value_hint = usage_rs::ValueHint::DirPath)]
+	pub recordings: Option<PathBuf>,
 
 	/// Guests who join from a web page, appearing as sources.
 	#[usage(flatten)]
@@ -141,6 +147,15 @@ fn main() -> anyhow::Result<ExitCode> {
 	let _runtime = runtime.enter();
 	let relays = config.relays()?;
 	let gpu = pollster::block_on(engine::Gpu::new())?;
+	let recordings = match &config.recordings {
+		Some(dir) => dir.clone(),
+		None => config
+			.scenes
+			.parent()
+			.filter(|dir| !dir.as_os_str().is_empty())
+			.unwrap_or(Path::new("."))
+			.to_path_buf(),
+	};
 	let room = config.guests.load(config.client.url.as_ref())?.map(Arc::new);
 	if let Some(room) = &room {
 		let renewal = guests::Renewal::connect(room.clone(), &config.client, config.quic.clone())?;
@@ -151,6 +166,7 @@ fn main() -> anyhow::Result<ExitCode> {
 		relays,
 		broadcast: config.broadcast.clone(),
 		on_demand: config.on_demand,
+		recordings,
 		room,
 	};
 	let exists = config
@@ -176,9 +192,14 @@ fn main() -> anyhow::Result<ExitCode> {
 	let Some(engine) = started.get() else {
 		return ran.map(|()| ExitCode::SUCCESS);
 	};
+	// A recording still running reads the program until stopping ends its
+	// tracks, so it holds what the encoders publish on the way out, and then
+	// finishes as a regular MP4.
+	engine.recorder.close();
 	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
 	engine.stop();
+	runtime.block_on(engine.recorder.done());
 	if let (Err(err), Err(_)) = (&saved, &ran) {
 		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
 	}

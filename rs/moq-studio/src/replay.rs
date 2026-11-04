@@ -45,14 +45,15 @@ impl Engine {
 	/// What a replay of `of` could copy, ending now, the most wanted first:
 	/// the program at each of its sizes, largest first, or a source's one.
 	///
-	/// The program has a past only while it is published, a local source only
-	/// from while it was on program, since nothing else encodes them, and a
-	/// broadcast source once it shows a picture.
+	/// The program has a past only while it is encoded, which without a relay
+	/// is only while recorded, a local source only from while it was on
+	/// program or recorded, and a broadcast source once it shows a picture.
 	pub fn targets(&self, of: &Of) -> anyhow::Result<Vec<Target>> {
 		let output = || {
 			self.output
 				.as_ref()
-				.context("nothing is encoded without --connect, so there is no past to replay")
+				.map(|_| &self.program)
+				.context("without --connect, nothing holds a past to replay")
 		};
 		let name = match of {
 			Of::Program => return Ok(output()?.program()),

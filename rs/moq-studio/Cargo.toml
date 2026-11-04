@@ -47,6 +47,9 @@ egui = "0.36"
 # Docked, rearrangeable panels. 0.21 is the newest release and pins egui 0.36.
 egui_dock = "0.21"
 hang = { workspace = true }
+# Stamps a recording's file name with when it started. Already in the graph
+# through moq-scene's humantime-serde.
+humantime = { workspace = true }
 kio = { workspace = true, features = ["async", "runtime"] }
 moq-audio = { workspace = true, features = ["bus"] }
 # Signs guest tokens with the room key.

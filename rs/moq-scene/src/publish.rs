@@ -799,6 +799,59 @@ mod tests {
 		.await;
 	}
 
+	/// A source off program encodes only while its track is subscribed, such
+	/// as by a recording, holding no encoder between subscribers.
+	#[tokio::test]
+	async fn an_unshown_video_encodes_while_subscribed() {
+		local(async {
+			let (publish, catalog, consumer) = studio();
+			let claim = publish.claim("camera");
+			let listing = Listing::new(&claim, &publish).unwrap();
+			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+			let size = moq_video::Size::new(64, 48);
+
+			tokio::select! {
+				result = listing.mirror() => panic!("the mirror ended: {result:?}"),
+				() = async {
+					let mut video = Video::new(&listing, size, framerate, None).await.unwrap();
+					video.encode(&mut gray(size, 0)).unwrap();
+					assert!(!video.track.is_open(), "nothing encodes unsubscribed");
+
+					// Advertised before anything encodes, so a recording can find it.
+					let rendition = |sources: &BTreeMap<String, hang::Catalog>| {
+						sources.get("camera").is_some_and(|camera| !camera.video.renditions.is_empty())
+					};
+					let snapshot = listed(&catalog, rendition).await;
+					let name = snapshot.ext.studio.sources["camera"].video.renditions.keys().next().unwrap().clone();
+					let mut track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+					video.encode(&mut gray(size, 33)).unwrap();
+					assert!(video.track.is_open(), "a subscriber gets pictures");
+					let mut group = track.recv_group().await.unwrap().expect("a group");
+					assert!(group.read_frame().await.unwrap().is_some());
+					let first = group.sequence;
+
+					drop(group);
+					drop(track);
+					for _ in 0..100 {
+						tokio::task::yield_now().await;
+					}
+					video.encode(&mut gray(size, 66)).unwrap();
+					assert!(!video.track.is_open(), "the encoder closes once nobody subscribes");
+
+					// The next subscriber gets a fresh encoder's pictures, in a group
+					// after the gap rather than the one before it.
+					let mut track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+					video.encode(&mut gray(size, 100)).unwrap();
+					assert!(video.track.is_open(), "a new subscriber reopens the encoder");
+					let mut group = track.recv_group().await.unwrap().expect("a group");
+					assert!(group.sequence > first, "{} after {first}", group.sequence);
+					assert!(group.read_frame().await.unwrap().is_some());
+				} => {}
+			}
+		})
+		.await;
+	}
+
 	/// Holds its newest pictures back the way a pipelined hardware encoder
 	/// does, handing them over only on a flush or finish. openh264, the encoder
 	/// on every machine, holds nothing.

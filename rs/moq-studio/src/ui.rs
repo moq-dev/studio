@@ -20,6 +20,7 @@ use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
 use crate::interact::Interact;
+use crate::record;
 use crate::replay::{self, Of};
 use crate::snap::{self, Grab, Snap};
 
@@ -110,6 +111,7 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
+				record_sources: false,
 				interacting: false,
 				interact: Interact::default(),
 				previewed: false,
@@ -215,6 +217,8 @@ struct Panels {
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
+	/// Whether the next recording gives each source a file of its own too.
+	record_sources: bool,
 	/// Whether the preview passes the mouse and keyboard to browser sources.
 	interacting: bool,
 	interact: Interact,
@@ -1682,13 +1686,60 @@ impl Panels {
 		}
 	}
 
+	/// Start and stop recording, and see what the recording wrote.
+	fn record(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let recorder = &engine.recorder;
+		let status = recorder.status();
+		ui.horizontal(|ui| match status.as_ref().filter(|status| !status.done) {
+			Some(status) => {
+				if ui
+					.add_enabled(!status.stopping, egui::Button::new("Stop recording"))
+					.clicked()
+				{
+					recorder.stop();
+				}
+				if status.stopping {
+					ui.label("finishing");
+				} else {
+					let elapsed = kio::clock::now().saturating_duration_since(status.started).as_secs();
+					let elapsed = format!("{}:{:02}:{:02}", elapsed / 3600, elapsed / 60 % 60, elapsed % 60);
+					ui.colored_label(ui.visuals().error_fg_color, format!("recording {elapsed}"));
+				}
+			}
+			None => {
+				if ui.button("Start recording").clicked() {
+					let result = recorder.start(self.record_sources);
+					self.check(result);
+				}
+				ui.checkbox(&mut self.record_sources, "each source too");
+				ui.weak(format!("into {}", recorder.dir().display()));
+			}
+		});
+		for file in status.iter().flat_map(|status| &status.files) {
+			let name = file.path.file_name().unwrap_or_default().to_string_lossy();
+			let size = format!("{:.1} MB", file.written as f64 / 1e6);
+			match &file.finished {
+				None => ui.label(format!("{name}: {size}")),
+				Some(record::Finished::Saved) => ui.label(format!("{name}: saved, {size}")),
+				Some(record::Finished::Empty) => ui.weak(format!("{name}: nothing recorded, removed")),
+				Some(record::Finished::Failed(reason)) => {
+					ui.colored_label(ui.visuals().error_fg_color, format!("{name}: {reason}"))
+				}
+			};
+		}
+	}
+
 	fn output(&mut self, ui: &mut Ui) {
+		self.record(ui);
+		ui.separator();
 		self.canvas_form(ui);
 		ui.separator();
 
 		let stats = &self.engine.stats;
 		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
 		let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
+		let watched = stats.watched.load(Ordering::Relaxed);
 
 		egui::Grid::new("output").show(ui, |ui| {
 			match &self.engine.output {
@@ -1697,16 +1748,23 @@ impl Panels {
 					ui.label(&output.path);
 					ui.end_row();
 					ui.label("Encoding");
-					ui.label(match (output.on_demand, stats.watched.load(Ordering::Relaxed)) {
+					ui.label(match (output.on_demand, watched) {
 						(false, _) => "the canvas size always, half size while watched",
-						(true, true) => "while watched; watched now",
-						(true, false) => "while watched; idle now",
+						(true, true) => "while watched or recorded; wanted now",
+						(true, false) => "while watched or recorded; idle now",
 					});
 					ui.end_row();
 				}
 				None => {
 					ui.label("Relay");
 					ui.label("none; start with --connect to publish");
+					ui.end_row();
+					ui.label("Encoding");
+					ui.label(if watched {
+						"while recorded; recording now"
+					} else {
+						"while recorded; idle now"
+					});
 					ui.end_row();
 				}
 			}
