@@ -12,9 +12,8 @@
 //!
 //! A token cannot be revoked, and the relay ends a session at its expiry. So
 //! while a guest is in the room, the studio signs them a fresh token every half
-//! `--guest-expiry` and publishes it under `.renew/`, encrypted with moq-e2ee to
-//! a key only their link carries, at a path only their token may subscribe to.
-//! The join page presents each one in band. Removing a guest from scenes stops
+//! `--guest-expiry` and publishes it at `.renew/<identity>`, which only their
+//! token may subscribe to. The join page presents each one in band. Removing a guest from scenes stops
 //! their renewals, across restarts, until a new link, so their last token
 //! bounds how long they stay.
 
@@ -34,13 +33,12 @@ use crate::engine::Engine;
 /// The domain `.github/workflows/join.yml` deploys `js/join` to.
 const JOIN_PAGE: &str = "https://join.studio.moq.dev/";
 
-/// The prefix of each guest's renewals, which moq-room's announcements hide.
-/// Beneath it, moq-e2ee names the broadcast after the guest's key.
+/// Where each guest's renewed tokens are published: `.renew/<identity>`, which
+/// moq-room's announcements hide. `js/join` reads the same path.
 const RENEW: &str = ".renew";
 
-/// The semantic broadcast and track names of a guest's renewals, one token per
-/// group. `js/join` reads the same names.
-const RENEW_BROADCAST: &str = "renew";
+/// The track holding a guest's renewed tokens, one group each. `js/join` reads
+/// the same name.
 const TOKEN_TRACK: &str = "token";
 
 /// The shortest `--guest-expiry`: half of it must leave room for a renewal to
@@ -97,16 +95,6 @@ impl Config {
 	}
 }
 
-/// The moq-e2ee credential of `identity`'s renewals under `secret`, as
-/// `credential` in `js/join/src/renew.ts` builds it.
-fn credential(identity: &str, secret: [u8; moq_e2ee::SECRET_LEN]) -> anyhow::Result<moq_e2ee::Credential> {
-	Ok(moq_e2ee::Credential::new(moq_e2ee::credential::Config {
-		context: bytes::Bytes::copy_from_slice(identity.as_bytes()),
-		kid: 0,
-		secret,
-	})?)
-}
-
 /// Where the guests removed from scenes are kept: `show.guests.toml` for
 /// `show.toml`, beside its history.
 fn removals_path(scenes: &std::path::Path) -> PathBuf {
@@ -132,8 +120,6 @@ pub struct Room {
 	/// Where a guest dials: the relay at the room, without the studio's credentials.
 	url: Url,
 	key: moq_auth::Key,
-	/// Derives each guest's renewal key, from the room key so it survives a restart.
-	renewals: rind::hmac::Key,
 	page: Url,
 	expiry: Duration,
 	participants: Mutex<BTreeMap<String, Participant>>,
@@ -224,23 +210,11 @@ impl Room {
 		);
 
 		check_scope(&key, &root)?;
-		// The private key, which only the studio holds, so no one else can derive
-		// a guest's renewal key.
-		let secret = match &key.material {
-			moq_auth::KeyMaterial::EC { d: Some(d), .. } | moq_auth::KeyMaterial::OKP { d: Some(d), .. } => d,
-			moq_auth::KeyMaterial::RSA {
-				private: Some(private), ..
-			} => &private.d,
-			moq_auth::KeyMaterial::OCT { secret } => secret,
-			_ => anyhow::bail!("the room key has no private half, so it cannot sign guests' tokens"),
-		};
-		let renewals = rind::hmac::Key::new(&rind::hmac::HMAC_SHA256, secret);
 		let room = Self {
 			path,
 			root,
 			url,
 			key,
-			renewals,
 			page,
 			expiry,
 			participants: Mutex::default(),
@@ -330,13 +304,11 @@ impl Room {
 		// studio would never see this guest join.
 		anyhow::ensure!(!name.starts_with('.'), "a guest's name cannot start with `.`");
 		let (token, expires) = self.sign(name)?;
-		let secret: String = self.secret(name).iter().map(|byte| format!("{byte:02x}")).collect();
 		let mut link = self.page.clone();
 		let fragment = url::form_urlencoded::Serializer::new(String::new())
 			.append_pair("url", self.url.as_str())
 			.append_pair("name", name)
 			.append_pair("jwt", &token)
-			.append_pair("key", &secret)
 			.finish();
 		link.set_fragment(Some(&fragment));
 		let invite = Invite { link, expires };
@@ -366,23 +338,9 @@ impl Room {
 		Ok(())
 	}
 
-	/// The key that encrypts `identity`'s renewals, which only their links carry.
-	fn secret(&self, identity: &str) -> [u8; moq_e2ee::SECRET_LEN] {
-		let tag = rind::hmac::sign(&self.renewals, identity.as_bytes());
-		tag.as_ref()
-			.try_into()
-			.expect("HMAC-SHA256 is as long as a moq-e2ee secret")
-	}
-
-	/// The moq-e2ee credential of `identity`'s renewals.
-	fn credential(&self, identity: &str) -> anyhow::Result<moq_e2ee::Credential> {
-		credential(identity, self.secret(identity))
-	}
-
-	/// Where `identity`'s renewals are published, in the room: a name only their
-	/// key derives.
-	fn renewal_path(credential: &moq_e2ee::Credential) -> anyhow::Result<Path> {
-		Ok(Path::new(RENEW)?.join(&credential.path(RENEW_BROADCAST)?)?)
+	/// Where `identity`'s renewals are published, in the room.
+	fn renewal_path(identity: &str) -> anyhow::Result<Path> {
+		Ok(Path::new(&format!("{RENEW}/{identity}"))?)
 	}
 
 	/// Why the session publishing guests' renewed tokens is not connected, if it
@@ -397,7 +355,7 @@ impl Room {
 	/// another's.
 	fn sign(&self, identity: &str) -> anyhow::Result<(String, kio::clock::Wall)> {
 		let invalid = || format!("cannot invite `{identity}`");
-		let renewals = Self::renewal_path(&self.credential(identity).with_context(invalid)?).with_context(invalid)?;
+		let renewals = Self::renewal_path(identity).with_context(invalid)?;
 		let claims = moq_room::claims(self.root.as_str(), identity)
 			.with_context(invalid)?
 			.with_subscribe([moq_auth::Pattern::literal(renewals.as_str())?]);
@@ -705,17 +663,15 @@ struct Renewals {
 	tracks: BTreeMap<String, Renewed>,
 }
 
-/// One guest's token track, encrypted to their key, ended when dropped.
+/// One guest's token track, ended when dropped.
 struct Renewed {
 	publication: moq_net::origin::Publication,
-	track: Option<moq_e2ee::track::Producer>,
+	track: moq_net::track::Producer,
 }
 
 impl Drop for Renewed {
 	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			let _ = track.finish();
-		}
+		let _ = self.track.finish();
 		self.publication.close();
 	}
 }
@@ -749,18 +705,11 @@ impl Renewals {
 
 	/// The token track for `identity`, holding a fresh token.
 	fn publish(&self, identity: &str) -> anyhow::Result<Renewed> {
-		let credential = self.room.credential(identity)?;
-		let generation = credential.produce();
-		let publication = self.origin.create_broadcast(Room::renewal_path(&credential)?)?;
-		let protected = moq_e2ee::broadcast::Producer::new(publication.broadcast().clone(), generation.clone());
-		let track = protected.create_track(TOKEN_TRACK, None)?;
-		let mut renewed = Renewed {
-			publication,
-			track: Some(track),
-		};
+		let publication = self.origin.create_broadcast(Room::renewal_path(identity)?)?;
+		let track = publication.create_track(TOKEN_TRACK, None)?;
+		let mut renewed = Renewed { publication, track };
 		self.write(identity, &mut renewed)?;
-		let route = moq_net::origin::Route::default().with_epoch(generation.epoch().clone());
-		renewed.publication.announce(route)?;
+		renewed.publication.announce(Default::default())?;
 		Ok(renewed)
 	}
 
@@ -777,10 +726,7 @@ impl Renewals {
 
 	fn write(&self, identity: &str, renewed: &mut Renewed) -> anyhow::Result<()> {
 		let (token, _) = self.room.sign(identity)?;
-		let track = renewed.track.as_mut().expect("held until dropped");
-		let mut group = track.append_group()?;
-		group.write_frame(None, token.as_bytes())?;
-		group.finish()?;
+		renewed.track.write_frame(None, token)?;
 		Ok(())
 	}
 }
@@ -997,18 +943,10 @@ mod tests {
 		let claims = key.verify(&fragment["jwt"]).unwrap();
 		assert_eq!(claims.root, "show/guests");
 		assert_eq!(claims.publish, ["alice/**".parse().unwrap()].into_iter().collect());
-		let renewals = Room::renewal_path(&room.credential("alice").unwrap()).unwrap();
 		assert_eq!(
 			claims.subscribe,
-			[moq_auth::Pattern::literal(renewals.as_str()).unwrap()]
-				.into_iter()
-				.collect(),
+			[".renew/alice".parse().unwrap()].into_iter().collect(),
 			"a guest reads only its own renewals"
-		);
-		assert_eq!(
-			fragment["key"].len(),
-			moq_e2ee::SECRET_LEN * 2,
-			"the renewal key, in hex"
 		);
 		let (issued, expires) = (claims.issued.unwrap(), claims.expires.unwrap());
 		let lifetime = expires.saturating_duration_since(issued);
@@ -1203,7 +1141,7 @@ mod tests {
 			}
 		);
 
-		let token = kio::clock::timeout(TIMEOUT, next_token(&renewals.consume(), &room, "alice"))
+		let token = kio::clock::timeout(TIMEOUT, next_token(&renewals.consume(), "alice"))
 			.await
 			.expect("the studio renews the guest")
 			.expect("a token");
@@ -1214,63 +1152,26 @@ mod tests {
 			.expect("the relay accepts the renewed token in band");
 
 		// Published before alice's, over the same session, so the relay holds it.
-		let bob = room.credential("bob").unwrap();
 		let other = kio::clock::timeout(TIMEOUT, async {
-			let broadcast = renewals.consume().request(Room::renewal_path(&bob)?, None).await?;
-			read_token(broadcast, &bob).await
+			let broadcast = renewals.consume().request(Room::renewal_path("bob")?, None).await?;
+			read_token(broadcast).await
 		})
 		.await
 		.expect("the relay answers");
 		assert!(other.is_err(), "alice read bob's token");
-
-		// A link signed before renewals existed lets its holder subscribe to the
-		// whole room, and so reach alice's renewals, but without alice's key
-		// it reads nothing.
-		let old = moq_room::claims("show/guests", "mallory")
-			.unwrap()
-			.with_expires(kio::clock::wall() + EXPIRY);
-		let mut mallory = settings.clone();
-		mallory.tokens = vec![scoped.sign(&old).unwrap().try_into().unwrap()];
-		mallory.version = vec![LITE_07.parse().unwrap()];
-		let stolen = moq_tokio::origin::spawn();
-		let _mallory = mallory
-			.init(Default::default())
-			.unwrap()
-			.with_subscriber(stolen.clone())
-			.connect(Url::parse(&fragment["url"]).unwrap());
-		let alices = Room::renewal_path(&room.credential("alice").unwrap()).unwrap();
-		let broadcast = kio::clock::timeout(TIMEOUT, async {
-			stolen.consume().follow(alices.clone(), None)?.available().await
-		})
-		.await
-		.expect("the relay answers")
-		.expect("a room-wide grant reaches alice's renewals");
-		let guess = credential("alice", [0; moq_e2ee::SECRET_LEN]).unwrap();
-		let read = kio::clock::timeout(TIMEOUT, read_token(broadcast, &guess)).await;
-		assert!(!matches!(read, Ok(Ok(_))), "a room-wide grant read alice's token");
 	}
 
 	/// The newest token published for `identity` in `origin`, once there is one.
-	async fn next_token(origin: &moq_net::origin::Consumer, room: &Room, identity: &str) -> anyhow::Result<String> {
-		let credential = room.credential(identity)?;
-		let broadcast = origin
-			.follow(Room::renewal_path(&credential)?, None)?
-			.available()
-			.await?;
-		read_token(broadcast, &credential).await
+	async fn next_token(origin: &moq_net::origin::Consumer, identity: &str) -> anyhow::Result<String> {
+		let broadcast = origin.follow(Room::renewal_path(identity)?, None)?.available().await?;
+		read_token(broadcast).await
 	}
 
-	/// The newest token in `broadcast`, decrypted with `credential`.
-	async fn read_token(
-		broadcast: moq_net::broadcast::Consumer,
-		credential: &moq_e2ee::Credential,
-	) -> anyhow::Result<String> {
-		let epoch = broadcast.info().epoch.clone().context("no epoch")?;
-		let broadcast = moq_e2ee::broadcast::Consumer::new(broadcast, credential.consume(epoch));
-		let mut track = broadcast.subscribe(TOKEN_TRACK, None)?.await?;
+	async fn read_token(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<String> {
+		let mut track = broadcast.track(TOKEN_TRACK)?.subscribe(None).await?;
 		let mut group = track.recv_group().await?.context("the track ended")?;
 		let frame = group.read_frame().await?.context("the group is empty")?;
-		Ok(String::from_utf8(frame.plaintext.to_vec())?)
+		Ok(String::from_utf8(frame.payload.to_vec())?)
 	}
 
 	/// The tokens a renewed guest holds, as they read them: fresh while they are
@@ -1297,9 +1198,7 @@ mod tests {
 
 		join(true);
 		renewals.sync();
-		let first = key
-			.verify(&next_token(&consumer, &room, "alice").await.unwrap())
-			.unwrap();
+		let first = key.verify(&next_token(&consumer, "alice").await.unwrap()).unwrap();
 		assert_eq!(first.root, "show/guests");
 		assert_eq!(first.publish, ["alice/**".parse().unwrap()].into_iter().collect());
 		// Each renewal comes half an expiry later, so a token must outlast that.
@@ -1309,9 +1208,7 @@ mod tests {
 		clock.advance(EXPIRY / 2);
 		assert!(ahead(&first) >= EXPIRY / 2, "renewed before the token expires");
 		renewals.renew();
-		let second = key
-			.verify(&next_token(&consumer, &room, "alice").await.unwrap())
-			.unwrap();
+		let second = key.verify(&next_token(&consumer, "alice").await.unwrap()).unwrap();
 		assert!(ahead(&second) >= EXPIRY, "{:?}", ahead(&second));
 
 		room.stop_renewing("alice").unwrap();
@@ -1321,26 +1218,15 @@ mod tests {
 
 		room.invite("alice").unwrap();
 		renewals.sync();
-		next_token(&consumer, &room, "alice").await.unwrap();
+		next_token(&consumer, "alice").await.unwrap();
 
 		join(false);
 		renewals.sync();
 		assert!(renewals.tracks.is_empty(), "a guest who left is not renewed");
 	}
 
-	/// The studio publishes renewals where the join page looks for them: the
-	/// same vector as `renew.test.ts`.
-	#[test]
-	fn renewals_name_the_same_broadcast_as_the_join_page() {
-		let alice = credential("alice", [1; moq_e2ee::SECRET_LEN]).unwrap();
-		assert_eq!(
-			Room::renewal_path(&alice).unwrap().as_str(),
-			".renew/8W8-sbdtrkZZF_byr3vEcQ"
-		);
-	}
-
 	/// A removed guest stays unrenewed when the studio restarts, until a new
-	/// link, and their renewal key is the same across the restart.
+	/// link.
 	#[test]
 	fn a_removal_outlasts_a_restart() {
 		let dir = tempfile::tempdir().unwrap();
@@ -1358,7 +1244,7 @@ mod tests {
 		let camera = Path::new("alice/camera.hang").unwrap();
 
 		let room = start();
-		let key = fragment(&room.invite("alice").unwrap().link)["key"].clone();
+		room.invite("alice").unwrap();
 		room.stop_renewing("alice").unwrap();
 		assert!(dir.path().join("show.guests.toml").exists());
 
@@ -1366,7 +1252,7 @@ mod tests {
 		room.observe(&camera, true, &Collection::new(), &History::new());
 		assert!(room.participants()["alice"].removed);
 		assert!(room.renewed().is_empty(), "a removed guest is renewed after a restart");
-		assert_eq!(fragment(&room.invite("alice").unwrap().link)["key"], key);
+		room.invite("alice").unwrap();
 		assert_eq!(room.renewed(), ["alice"]);
 
 		let room = start();

@@ -1,75 +1,53 @@
 /**
  * Renewal: while a guest is in the room, the studio publishes a fresh token for
- * them every half link lifetime, encrypted with `@moq/e2ee` to the key in their
- * link, at a path only their own token may read. The page presents each one on
- * its live session, so the guest stays past the link's expiry without
- * reconnecting.
+ * them every half link lifetime, at a path only their own token may read. The
+ * page presents each one on its live session, so the guest stays past the
+ * link's expiry without reconnecting.
  *
  * @module
  */
 
-import * as E2ee from "@moq/e2ee";
 import * as Net from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter } from "@moq/signals";
 
 /** The version that presents a token on a live session, and the only one the page offers. */
 export const VERSION = "moq-lite-07-wip";
 
-/** The prefix of every guest's renewals: `RENEW` in `rs/moq-studio/src/guests.rs`. */
-const PREFIX = ".renew";
+/** Where the studio publishes `name`'s tokens: `RENEW` in `rs/moq-studio/src/guests.rs`. */
+export function path(name: string): Net.Path.Valid {
+	return Net.Path.from(`.renew/${name}`);
+}
 
-/** The semantic broadcast and track names: `RENEW_BROADCAST` and `TOKEN_TRACK` there. */
-const BROADCAST = "renew";
+/** The track of those tokens, one group each: `TOKEN_TRACK` in `rs/moq-studio/src/guests.rs`. */
 const TRACK = "token";
 
-/** The credential that decrypts `name`'s renewals, from the 32-byte `key` in their link. */
-export function credential(name: string, key: Uint8Array): E2ee.Credential {
-	return new E2ee.Credential({ context: new TextEncoder().encode(name), kid: 0, secret: key });
-}
-
-/** Where the renewals `credential` decrypts are published. */
-export async function path(credential: E2ee.Credential): Promise<Net.Path.Valid> {
-	return Net.Path.join(Net.Path.from(PREFIX), await credential.path(BROADCAST));
-}
-
 /**
- * Hand `renewed` each token the studio publishes with `credential` in `origin`,
- * across the studio's restarts, until the returned effect is closed.
+ * Hand `renewed` each token the studio publishes for `name` in `origin`, across
+ * the studio's restarts, until the returned effect is closed.
  */
 export function follow(
 	origin: Getter<Net.Origin.Reader | undefined>,
-	credential: E2ee.Credential,
+	name: string,
 	renewed: (token: string) => void,
 ): Effect {
 	const signals = new Effect();
-	const at = new Signal<Net.Path.Valid | undefined>(undefined);
-	signals.spawn(async () => at.set(await path(credential)));
-
 	signals.run((effect) => {
 		const reader = effect.get(origin);
-		const renewals = effect.get(at);
-		if (!reader || !renewals) return;
-		const request = reader.follow(renewals);
+		if (!reader) return;
+		const request = reader.follow(path(name));
 		effect.cleanup(() => request.close());
 
 		effect.run((effect) => {
 			const broadcast = effect.get(request.active);
-			// moq-lite-07 carries the publisher's epoch, which keys its encryption.
-			const epoch = broadcast?.epoch;
-			if (!broadcast || !epoch) return;
-			const decrypted = new E2ee.Broadcast.Consumer(broadcast, credential.consume(epoch));
+			if (!broadcast) return;
+			const track = broadcast.track(TRACK).subscribe();
+			effect.cleanup(() => track.close());
 			effect.spawn(async () => {
-				const track = await effect.race(decrypted.subscribe(TRACK));
-				if (!track) return;
-				try {
-					for (;;) {
-						const group = await effect.race(track.recvGroup());
-						if (!group) return;
-						const frame = await effect.race(group.readFrame());
-						if (frame) renewed(new TextDecoder().decode(frame.plaintext));
-					}
-				} finally {
-					track.close();
+				for (;;) {
+					const group = await effect.race(track.recvGroup());
+					if (!group) return;
+					const token = await effect.race(group.readString());
+					if (token) renewed(token);
 				}
 			});
 		});

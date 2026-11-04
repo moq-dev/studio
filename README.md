@@ -172,11 +172,15 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   and each token the studio renews it with. While a guest is in the room, the
   studio signs them a fresh token every half of it, over a session of its own
   in the room that the room key signs for, and the join page presents it
-  without reconnecting. Each renewal is encrypted to a key only that guest's
-  links carry, so nothing else that can subscribe in the room, a link from an
-  older studio included, can read it. A guest who leaves needs a link, or a
-  renewed token, that has not expired to come back. The Guests panel says
+  without reconnecting. A guest's token may read only their own renewals, at
+  `.renew/<name>` in the room, but anything else the relay lets subscribe
+  there can read every guest's, so grant that only to the studio. A guest who
+  leaves needs a link, or a renewed token, that has not expired to come back. The Guests panel says
   when renewal is failing.
+- **Upgrading from a studio without renewal:** generate a new room key and
+  drop the old one's public half from `--key-dir`. Links from before let
+  their holder subscribe to the whole room, renewals included, so they must
+  die with the old key.
 - With `--failover`, a link still names only the `--connect` relay: the join
   page dials one relay, and a guest's token is rooted at the room there, so
   guests drop while that relay is down. The studio follows the room through

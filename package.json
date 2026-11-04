@@ -7,7 +7,6 @@
 	"workspaces": [
 		"js/join",
 		"moq/js/clock",
-		"moq/js/e2ee",
 		"moq/js/hang",
 		"moq/js/json",
 		"moq/js/libav",

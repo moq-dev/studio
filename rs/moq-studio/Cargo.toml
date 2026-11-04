@@ -47,8 +47,6 @@ kio = { workspace = true, features = ["async", "runtime"] }
 moq-audio = { workspace = true, features = ["bus"] }
 # Signs guest tokens with the room key.
 moq-auth = { workspace = true }
-# Encrypts each guest's renewed tokens to the key in their link.
-moq-e2ee = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
@@ -61,8 +59,6 @@ moq-video = { workspace = true }
 pollster = { workspace = true }
 # The join link's QR code. No dependencies of its own.
 qrcodegen = "1.8"
-# Derives each guest's renewal key from the room key, as moq-e2ee does its own.
-rind = { workspace = true }
 # The guests removed from scenes, kept beside the scene file.
 serde = { workspace = true }
 tempfile = { workspace = true }
