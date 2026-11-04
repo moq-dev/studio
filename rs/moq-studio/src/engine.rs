@@ -11,7 +11,8 @@
 //! - **audio** advances the audio bus, and with it every mix, on the same
 //!   clock.
 //! - **audio-encode** encodes the mix on program into the program audio, and
-//!   **audio-record** into the recording's own copy while a recording reads it.
+//!   **audio-record** the mix recordings hold into the recording broadcast's
+//!   own audio while a recording reads it.
 //! - **encode**: one per program rendition, which waits for each program copy
 //!   and encodes it. A new canvas size or frame rate starts new renditions.
 //! - Recordings write their files on the tokio runtime.
@@ -290,8 +291,8 @@ pub struct Stats {
 	video_error: Mutex<Option<String>>,
 	/// Why the audio stopped, if it did.
 	audio_error: Mutex<Option<String>>,
-	/// Why the recording's copy of the audio stopped, if it did, which leaves
-	/// the published audio running.
+	/// Why the recording's audio stopped, if it did, which leaves the published
+	/// audio running.
 	recording_audio_error: Mutex<Option<String>>,
 }
 
@@ -391,14 +392,14 @@ impl Stats {
 		*self.video_error.lock().unwrap() = Some(format!("video: {err}"));
 	}
 
-	/// The recording's audio copy failed, which stops what recordings hold but
+	/// The recording's audio encoder failed, which stops what recordings hold but
 	/// not the published program.
 	fn fail_recording_audio(&self, err: impl std::fmt::Display) {
 		tracing::error!(%err, "the recording's audio stopped");
 		*self.recording_audio_error.lock().unwrap() = Some(format!("{err}"));
 	}
 
-	/// Why the recording's copy of the audio stopped, if it did.
+	/// Why the recording's audio stopped, if it did.
 	pub fn recording_audio_error(&self) -> Option<String> {
 		self.recording_audio_error.lock().unwrap().clone()
 	}
@@ -546,6 +547,8 @@ pub struct Engine {
 	pub health: Mutex<health::Report>,
 	/// The mix the program audio carries, as the collection picks it.
 	program_audio: mix::Pick,
+	/// The mix recordings hold, as the collection picks it.
+	recorded_audio: mix::Pick,
 	/// Plays a mix to the speakers while the creator listens.
 	monitor: Mutex<Option<mix::Monitor>>,
 	/// `None` when running without a relay.
@@ -692,6 +695,7 @@ impl Engine {
 			stats,
 			health: Mutex::default(),
 			program_audio: mix::Pick::default(),
+			recorded_audio: mix::Pick::default(),
 			monitor: Mutex::default(),
 			output,
 			recorder,
@@ -728,12 +732,15 @@ impl Engine {
 		// Each on its own thread, so an encoder that falls behind skips its own
 		// audio rather than holding up the bus or the other.
 		let audio = [
-			("audio-encode", Audio::Program(audio)),
-			("audio-record", Audio::Recording(recorded_audio)),
+			("audio-encode", Audio::Program(audio), engine.program_audio.follow()),
+			(
+				"audio-record",
+				Audio::Recording(recorded_audio),
+				engine.recorded_audio.follow(),
+			),
 		];
-		for (name, audio) in audio {
+		for (name, audio, follow) in audio {
 			let encode = engine.clone();
-			let follow = engine.program_audio.follow();
 			let thread = clocked(name.into(), async move || {
 				encode.encode_audio(epoch, rate, follow, audio).await
 			})?;
@@ -827,11 +834,15 @@ impl Engine {
 			.map(|monitor| (monitor.name().to_string(), monitor.failed()))
 	}
 
-	/// Point the program audio and the monitor at the mixes `state` now has.
+	/// Point the program audio, the recorded audio, and the monitor at the
+	/// mixes `state` now has.
 	fn pick_mixes(&self, state: &State) {
 		let mixes = &state.collection.mixes;
 		if let Some(mix) = state.sources.mix(&mixes.program) {
 			self.program_audio.set(mix.clone());
+		}
+		if let Some(mix) = state.sources.mix(mixes.recorded()) {
+			self.recorded_audio.set(mix.clone());
 		}
 		if let Some(monitor) = self.monitor.lock().unwrap().as_mut() {
 			if !mixes.names.iter().any(|name| name == monitor.name()) {
@@ -1053,6 +1064,7 @@ impl Engine {
 			if self.stopped.load(Ordering::Relaxed) {
 				drop(mixer);
 				self.program_audio.close();
+				self.recorded_audio.close();
 				return;
 			}
 			// Sample-exact against the program clock, so audio and video stay
@@ -1070,7 +1082,7 @@ impl Engine {
 	/// Encode the mix `follow` reads into `audio`, stamped `epoch` past the
 	/// bus's start at `rate`, until the bus stops, and finish the track.
 	///
-	/// The recording's copy encodes only while a recording reads it, and marks
+	/// The recording's audio encodes only while a recording reads it, and marks
 	/// the gap as the last one stops, so the next starts on the program clock
 	/// rather than where the samples left off.
 	async fn encode_audio(&self, epoch: Duration, rate: u32, mut follow: mix::Follow, audio: Audio) {
@@ -1078,7 +1090,7 @@ impl Engine {
 			Audio::Program(producer) => (producer, false),
 			Audio::Recording(producer) => (producer, true),
 		};
-		// The recording's copy failing leaves the published audio running, so
+		// The recording's audio failing leaves the published audio running, so
 		// it is the recording's to report.
 		let fail = |err: moq_audio::Error| match recording {
 			false => self.stats.fail_audio(err),
@@ -1123,8 +1135,8 @@ impl Engine {
 	}
 }
 
-/// One encoder of the mix on program: the published program audio, or the
-/// recording's own copy.
+/// One encoder of a mix: the published program audio, or the recording
+/// broadcast's own.
 enum Audio {
 	Program(moq_audio::encode::Producer),
 	Recording(moq_audio::encode::Producer),
@@ -1149,7 +1161,7 @@ struct Publish {
 	ladder: Option<Ladder>,
 	/// The program audio's encoder.
 	audio: moq_audio::encode::Producer,
-	/// The recording's own copy of it.
+	/// The recording broadcast's own audio encoder.
 	recorded_audio: moq_audio::encode::Producer,
 	/// The catalog's clock, which the codec producers write timestamps
 	/// against verbatim.
@@ -1221,7 +1233,7 @@ async fn publish(
 		None => None,
 	};
 	// What a recording reads the program from: its own canvas-size encoder,
-	// at full quality whatever the grant, and the program audio, in a
+	// at full quality whatever the grant, and the mix it holds, in a
 	// broadcast no relay sees: announced on an origin of its own, which no
 	// relay connection carries, so a recording reads it as it would the
 	// published program.
@@ -1360,8 +1372,8 @@ impl Role {
 }
 
 /// Where a recording reads the program from: a broadcast the studio keeps to
-/// itself, holding the recording's own canvas-size video and a copy of the
-/// program audio, listed in a catalog of its own on the program's clock.
+/// itself, holding the recording's own canvas-size video and its own encoding
+/// of the mix it holds, listed in a catalog of its own on the program's clock.
 #[derive(Clone)]
 struct Recording {
 	broadcast: moq_net::broadcast::Producer,
@@ -2122,15 +2134,15 @@ mod tests {
 		.expect("the recording encodes the program");
 	}
 
-	/// Finish the recording, and return the handler of every track in each
-	/// file, by file.
+	/// Finish the recording, and return the handler of every track holding
+	/// samples in each file, by file.
 	async fn finished(recorder: &record::Recorder) -> Vec<Vec<String>> {
 		recorder.stop();
 		done(recorder).await
 	}
 
 	/// Wait for the recording to finish, and return the handler of every
-	/// track in each file, by file.
+	/// track holding samples in each file, by file.
 	async fn done(recorder: &record::Recorder) -> Vec<Vec<String>> {
 		kio::clock::timeout(TIMEOUT, recorder.done())
 			.await
@@ -2154,7 +2166,11 @@ mod tests {
 				let mut handlers = Vec::new();
 				while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
 					if let mp4_atom::Any::Moov(moov) = atom {
-						handlers.extend(moov.trak.iter().map(|trak| trak.mdia.hdlr.handler.to_string()));
+						let sampled = moov.trak.iter().filter(|trak| match &trak.mdia.minf.stbl.stsz.samples {
+							mp4_atom::StszSamples::Identical { count, .. } => *count > 0,
+							mp4_atom::StszSamples::Different { sizes } => !sizes.is_empty(),
+						});
+						handlers.extend(sampled.map(|trak| trak.mdia.hdlr.handler.to_string()));
 					}
 				}
 				handlers.sort();
@@ -2166,7 +2182,8 @@ mod tests {
 	/// Without a relay, a recording encodes the program on its own and saves it
 	/// as a regular MP4 holding its video and audio. The color source publishes
 	/// a still, which has no file of its own. A new canvas goes on in another
-	/// file, holding the new rendition's video.
+	/// file, holding the new rendition's video. A recording holding a mix
+	/// other than the one on program records its audio.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn the_program_records_without_a_relay() {
@@ -2207,6 +2224,16 @@ mod tests {
 		let status = engine.recorder.status().unwrap();
 		let name = status.files[1].path.file_name().unwrap().to_string_lossy();
 		assert!(name.ends_with("Z (2).mp4"), "{name}");
+
+		{
+			let mut state = engine.state.lock().unwrap();
+			let mut mixes = state.collection().mixes.clone();
+			mixes.names.push("Full".into());
+			mixes.recording = Some("Full".into());
+			let mut draft = state.collection().draft("Record `Full`");
+			draft.set_mixes(mixes).unwrap();
+			state.commit(draft, None).unwrap();
+		}
 
 		// Quitting while recording reads the program until stopping ends its
 		// tracks, into the one file.
