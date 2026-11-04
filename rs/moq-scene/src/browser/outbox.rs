@@ -1,10 +1,11 @@
-//! What the studio has yet to tell the helper, which the writer takes in
-//! batches.
+//! Commands for pages not yet carried out, taken in batches: what the studio
+//! has yet to tell the helper, which its writer takes, and what the helper
+//! has yet to apply, which CEF's UI thread takes.
 //!
 //! Each page's open, frame rate, and close coalesce, and its pending input
 //! goes with it once it closes, so what waits scales with the pages open,
-//! never with how often they changed, even while the helper reads nothing.
-//! A page closed before its open was written never opens.
+//! never with how often they changed, even while the taker is stuck. A page
+//! closed before its open is taken never opens.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
@@ -129,7 +130,7 @@ impl Commands {
 	}
 
 	/// The commands waiting, without waiting for any.
-	#[cfg(test)]
+	#[cfg(any(test, feature = "cef"))]
 	pub(crate) fn take(&self) -> Vec<Command> {
 		self.0.0.lock().unwrap().take()
 	}

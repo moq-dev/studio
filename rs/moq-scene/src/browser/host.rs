@@ -7,10 +7,12 @@ use std::collections::HashMap;
 use std::os::fd::BorrowedFd;
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use cef::*;
 
+use super::outbox::Commands;
 use super::protocol::{Channel, Command, Event, Format, Id, Open, Plane, Start, Texture};
 use super::{Button, Input, Modifiers};
 
@@ -163,25 +165,42 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 
 /// Read the studio's commands until it closes the socket, then close every
 /// page, which ends the message loop.
+///
+/// What the UI thread has yet to apply waits coalesced, as in the studio, with
+/// one task at a time posted to apply it, so a stalled UI thread holds what
+/// the pages open need rather than a task per command. Input past the
+/// backlog drops, as for a hung page.
 fn commands(shared: Arc<Shared>, reader: Channel, painted: mpsc::Sender<()>) {
+	let pending = Commands::default();
+	let posted = Arc::new(AtomicBool::new(false));
+	let schedule = || {
+		if !posted.swap(true, Ordering::AcqRel) {
+			let (shared, pending, posted) = (shared.clone(), pending.clone(), posted.clone());
+			post(move || {
+				// Cleared first, so anything queued from here on posts again.
+				posted.store(false, Ordering::Release);
+				apply(&shared, pending.take());
+			});
+		}
+	};
 	loop {
 		match reader.recv::<Command>() {
 			Ok(Some((Command::Painted, _))) => {
 				let _ = painted.send(());
+				continue;
 			}
-			Ok(Some((Command::Open(id, open), _))) => {
-				let shared = shared.clone();
-				post(move || self::open(shared, id, open));
-			}
-			Ok(Some((Command::Close(id), _))) => post(move || close(id)),
-			Ok(Some((Command::Input(id, input), _))) => post(move || deliver(id, input)),
-			Ok(Some((Command::FrameRate(id, rate), _))) => post(move || retime(id, rate)),
+			Ok(Some((Command::Open(id, open), _))) => pending.open(id, open),
+			Ok(Some((Command::Close(id), _))) => pending.close(id),
+			Ok(Some((Command::Input(id, input), _))) => _ = pending.input(id, input),
+			Ok(Some((Command::FrameRate(id, rate), _))) => _ = pending.rate(id, rate),
 			Ok(Some((Command::Start(_), _))) | Ok(None) | Err(_) => break,
 		}
+		schedule();
 	}
 	// Unblocks a paint waiting on the studio.
 	drop(painted);
-	post(|| {
+	post(move || {
+		apply(&shared, pending.take());
 		QUITTING.set(true);
 		let ids: Vec<Id> = PAGES.with_borrow(|pages| pages.keys().copied().collect());
 		if ids.is_empty() {
@@ -191,6 +210,19 @@ fn commands(shared: Arc<Shared>, reader: Channel, painted: mpsc::Sender<()>) {
 			close(id);
 		}
 	});
+}
+
+/// Apply the studio's commands. Runs on the UI thread.
+fn apply(shared: &Arc<Shared>, batch: Vec<Command>) {
+	for command in batch {
+		match command {
+			Command::Open(id, open) => self::open(shared.clone(), id, open),
+			Command::Close(id) => close(id),
+			Command::Input(id, input) => deliver(id, input),
+			Command::FrameRate(id, rate) => retime(id, rate),
+			Command::Start(_) | Command::Painted => unreachable!("never pending"),
+		}
+	}
 }
 
 /// Open page `id`. Runs on the UI thread.
