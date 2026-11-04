@@ -1,0 +1,17 @@
+{
+	"name": "studio",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"js/join"
+	],
+	"scripts": {
+		"check": "bun run --filter='*' check",
+		"test": "bun run --filter='*' test",
+		"fix": "bun biome check --write ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.6.4"
+	}
+}

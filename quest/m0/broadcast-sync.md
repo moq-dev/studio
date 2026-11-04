@@ -38,4 +38,3 @@ video waits for audio instead. Update `README.md`.
 ## Related
 
 - [Audio jitter target](https://github.com/moq-dev/moq/blob/main/quest/m1/audio-jitter-target/README.md) - the delay estimate this reuses
-- [Guests](/quest/m0/guests.md) - guests are broadcast sources and inherit this
