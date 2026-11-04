@@ -92,7 +92,9 @@ repository.
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio get their own tracks, for isolated recording and replay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
-- [Keyframes and stingers](/quest/m0/animation.md) - keyframed item properties with easing, and stinger transitions
+- [Keyframes](/quest/m0/animation.md) - keyframed item properties with easing, starting when their scene goes on program
+- [Media file source](/quest/m0/media-file.md) - a local video or audio file plays as a source, looping or from the start on demand
+- [Stinger transitions](/quest/m0/stinger.md) - a clip played over the program that switches scenes at its cut point
 - [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
