@@ -154,14 +154,18 @@ fn main() -> anyhow::Result<ExitCode> {
 			.unwrap_or(Path::new("."))
 			.to_path_buf(),
 	};
-	let room = config.guests.load(config.client.url.as_ref())?;
+	let room = config.guests.load(config.client.url.as_ref())?.map(Arc::new);
+	if let Some(room) = &room {
+		let renewal = guests::Renewal::connect(room.clone(), &config.client, config.quic.clone())?;
+		runtime.spawn(renewal.run());
+	}
 	let launch = engine::Launch {
 		gpu: gpu.clone(),
 		relays,
 		broadcast: config.broadcast.clone(),
 		on_demand: config.on_demand,
 		recordings,
-		room: room.map(Arc::new),
+		room,
 	};
 	let exists = config
 		.scenes
