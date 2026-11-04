@@ -5,13 +5,15 @@
 //! Each page's open, frame rate, and close coalesce, and its pending input
 //! goes with it once it closes, so what waits scales with the pages open,
 //! never with how often they changed, even while the taker is stuck. A page
-//! closed before its open is taken never opens.
+//! closed before its open is taken never opens. Input past the backlog drops,
+//! except a release, which is owed instead, so a taker that catches up never
+//! leaves a page holding a button or key that was let go.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 
-use super::Input;
 use super::protocol::{Command, Id, Open};
+use super::{Button, Input};
 
 /// Input waiting for the helper to read it. A helper this far behind is hung,
 /// and [`Page::send`](super::Page::send) drops new input rather than wait for
@@ -25,10 +27,33 @@ pub(crate) struct Commands(Arc<(Mutex<Outbox>, Condvar)>);
 
 /// Why input was not queued.
 pub(crate) enum Refused {
-	/// The backlog is full, and the input is handed back.
-	Full(Input),
+	/// The backlog is full, so the input dropped.
+	Full,
 	/// The writer stopped, and so did the helper.
 	Gone,
+}
+
+/// What an input lets go of, which a later release of the same supersedes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Release {
+	Button(Button),
+	Key(i32),
+	Focus,
+	Pointer,
+}
+
+impl Release {
+	fn of(input: &Input) -> Option<Self> {
+		match *input {
+			Input::Button {
+				button, down: false, ..
+			} => Some(Self::Button(button)),
+			Input::Key { code, down: false, .. } => Some(Self::Key(code)),
+			Input::Focus(false) => Some(Self::Focus),
+			Input::Leave { .. } => Some(Self::Pointer),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Default)]
@@ -41,6 +66,9 @@ struct Outbox {
 	rates: HashMap<Id, u32>,
 	/// Input, at most [`BACKLOG`].
 	input: VecDeque<(Id, Input)>,
+	/// Releases past the backlog, oldest first, at most one per page and
+	/// button, key, focus, and pointer, taken after the input before them.
+	owed: Vec<(Id, Input)>,
 	/// Answers owed for pictures copied.
 	painted: usize,
 	/// Open pages to close.
@@ -72,6 +100,7 @@ impl Commands {
 	pub(crate) fn close(&self, id: Id) {
 		self.push(|outbox| {
 			outbox.input.retain(|(page, _)| *page != id);
+			outbox.owed.retain(|(page, _)| *page != id);
 			outbox.rates.remove(&id);
 			match outbox.opens.iter().position(|(page, _)| *page == id) {
 				Some(at) => _ = outbox.opens.remove(at),
@@ -91,17 +120,24 @@ impl Commands {
 		self.push(|outbox| outbox.painted += 1);
 	}
 
-	/// Queue input for page `id`, unless the backlog is full.
+	/// Queue input for page `id`. Past the backlog, or behind an owed release,
+	/// a release is owed and other input drops.
 	pub(crate) fn input(&self, id: Id, input: Input) -> Result<(), Refused> {
 		let (outbox, ready) = &*self.0;
 		let mut outbox = outbox.lock().unwrap();
 		if outbox.stopped {
 			return Err(Refused::Gone);
 		}
-		if outbox.input.len() >= BACKLOG {
-			return Err(Refused::Full(input));
+		if outbox.owed.is_empty() && outbox.input.len() < BACKLOG {
+			outbox.input.push_back((id, input));
+		} else if let Some(release) = Release::of(&input) {
+			outbox
+				.owed
+				.retain(|(page, owed)| *page != id || Release::of(owed) != Some(release));
+			outbox.owed.push((id, input));
+		} else {
+			return Err(Refused::Full);
 		}
-		outbox.input.push_back((id, input));
 		ready.notify_one();
 		Ok(())
 	}
@@ -146,6 +182,7 @@ impl Outbox {
 		}
 		batch.extend(self.rates.drain().map(|(id, rate)| Command::FrameRate(id, rate)));
 		batch.extend(self.input.drain(..).map(|(id, input)| Command::Input(id, input)));
+		batch.extend(self.owed.drain(..).map(|(id, input)| Command::Input(id, input)));
 		batch.extend(std::iter::repeat_n(Command::Painted, std::mem::take(&mut self.painted)));
 		for id in self.closes.drain(..) {
 			self.open.remove(&id);
@@ -158,6 +195,46 @@ impl Outbox {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn button(down: bool) -> Input {
+		Input::Button {
+			x: 1,
+			y: 1,
+			button: Button::Left,
+			down,
+			clicks: 1,
+			modifiers: Default::default(),
+		}
+	}
+
+	/// Past the backlog, a release is owed rather than dropped, once per
+	/// button, and goes ahead of newer input, so the page never keeps holding
+	/// what was let go.
+	#[test]
+	fn a_release_past_the_backlog_is_owed() {
+		let commands = Commands::default();
+		commands.input(0, button(true)).ok().unwrap();
+		while commands.input(0, Input::Text("x".into())).is_ok() {}
+		for input in [button(false), button(true), button(false), Input::Text("y".into())] {
+			let _ = commands.input(0, input);
+		}
+
+		let received: Vec<Input> = commands
+			.take()
+			.into_iter()
+			.map(|command| match command {
+				Command::Input(0, input) => input,
+				other => panic!("only input is queued, not {other:?}"),
+			})
+			.collect();
+		assert_eq!(received.first(), Some(&button(true)));
+		assert_eq!(received.last(), Some(&button(false)));
+		assert_eq!(received.iter().filter(|input| **input == button(false)).count(), 1);
+		assert!(!received.contains(&Input::Text("y".into())));
+
+		commands.input(0, Input::Text("z".into())).ok().unwrap();
+		assert!(matches!(&commands.take()[..], [Command::Input(0, Input::Text(text))] if text == "z"));
+	}
 
 	fn open(url: &str) -> Open {
 		Open {

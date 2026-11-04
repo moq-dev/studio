@@ -193,7 +193,7 @@ impl Instance {
 			.send(&Command::Start(start), &[])
 			.map_err(|err| failed("the browser process's socket", err))?;
 		let routes = Arc::new(Mutex::new(Routes::default()));
-		let commands = writer(commands, routes.clone()).map_err(|err| failed("cannot start the page writer", err))?;
+		let commands = writer(commands).map_err(|err| failed("cannot start the page writer", err))?;
 		let reader = {
 			// Not the helper, whose hold on this instance would keep it running
 			// once every other owner is gone.
@@ -319,11 +319,10 @@ impl Drop for Process {
 
 /// Write the commands queued on the returned handle to `channel`, on a thread
 /// of its own, so a helper that stops reading blocks only that thread, never a
-/// sender holding the studio's state. Each batch written makes room for the
-/// releases `routes`' pages owe. The thread ends once the handle is stopped or
-/// a write fails, as one does when the helper exits, and ends the socket on
-/// its way out.
-fn writer(channel: Channel, routes: Arc<Mutex<Routes>>) -> std::io::Result<Commands> {
+/// sender holding the studio's state. The thread ends once the handle is
+/// stopped or a write fails, as one does when the helper exits, and ends the
+/// socket on its way out.
+fn writer(channel: Channel) -> std::io::Result<Commands> {
 	let commands = Commands::default();
 	let outbox = commands.clone();
 	std::thread::Builder::new()
@@ -334,17 +333,6 @@ fn writer(channel: Channel, routes: Arc<Mutex<Routes>>) -> std::io::Result<Comma
 					if channel.send(&command, &[]).is_err() {
 						break 'write;
 					}
-				}
-				// Taken first, so no page waits on a socket write.
-				let pages: Vec<Page> = routes
-					.lock()
-					.unwrap()
-					.pages
-					.values()
-					.map(|route| route.page.clone())
-					.collect();
-				for page in pages {
-					page.state.lock().unwrap().flush();
 				}
 			}
 			// The helper exits once it reads the end, so one the studio can no
@@ -451,28 +439,7 @@ fn deliver(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::browser::{Input, Modifiers};
-
-	/// An open page, as [`Instance::open`] routes one, with a writer to
-	/// `ours`.
-	fn routed(ours: UnixStream) -> (Page, Commands, Arc<Mutex<Routes>>) {
-		let routes = Arc::new(Mutex::new(Routes::default()));
-		let commands = writer(Channel::new(ours), routes.clone()).unwrap();
-		let page = Page::default();
-		page.state.lock().unwrap().commands = Some(commands.clone());
-		routes.lock().unwrap().pages.insert(
-			0,
-			Route {
-				page: page.clone(),
-				picture: Default::default(),
-				sound: None,
-				status: kio::Producer::new(Status::Starting),
-				live: false,
-				end: kio::Producer::new(None),
-			},
-		);
-		(page, commands, routes)
-	}
+	use crate::browser::Input;
 
 	/// A helper that stops reading costs dropped input, never a sender stuck
 	/// on a full socket while it holds the studio's state. Pages still open
@@ -481,7 +448,9 @@ mod tests {
 	#[test]
 	fn a_helper_that_stops_reading_blocks_nothing() {
 		let (ours, theirs) = UnixStream::pair().unwrap();
-		let (page, commands, _routes) = routed(ours);
+		let commands = writer(Channel::new(ours)).unwrap();
+		let page = Page::default();
+		page.state.lock().unwrap().commands = Some(commands.clone());
 		// Far more than the socket buffers and the backlog hold together, so
 		// the writer is stuck on the socket.
 		for _ in 0..4096 {
@@ -503,27 +472,5 @@ mod tests {
 				None => panic!("the writer stopped"),
 			}
 		}
-	}
-
-	/// Each write makes room for an owed release, so it reaches the page once
-	/// the helper reads again, with no newer input to carry it.
-	#[test]
-	fn the_writer_delivers_owed_releases() {
-		let (ours, theirs) = UnixStream::pair().unwrap();
-		let (page, commands, _routes) = routed(ours);
-		let release = Input::Key {
-			code: 65,
-			down: false,
-			modifiers: Modifiers::default(),
-		};
-		page.state.lock().unwrap().owed.push_back(release.clone());
-		commands.painted();
-
-		let helper = Channel::new(theirs);
-		assert!(matches!(helper.recv::<Command>().unwrap(), Some((Command::Painted, _))));
-		let Some((Command::Input(0, input), _)) = helper.recv().unwrap() else {
-			panic!("the owed release never came");
-		};
-		assert_eq!(input, release);
 	}
 }

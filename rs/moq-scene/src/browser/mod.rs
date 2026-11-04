@@ -167,10 +167,6 @@ struct PageState {
 	/// Whether input is being dropped because the backlog is full.
 	#[cfg(target_os = "linux")]
 	backlogged: bool,
-	/// Releases that did not fit the backlog, oldest first, at most one per
-	/// button, key, focus, and pointer, sent ahead of any newer input.
-	#[cfg(target_os = "linux")]
-	owed: std::collections::VecDeque<Input>,
 	/// The canvas's frame rate, which the page paints at.
 	#[cfg(target_os = "linux")]
 	framerate: u32,
@@ -182,35 +178,22 @@ struct PageState {
 
 #[cfg(target_os = "linux")]
 impl PageState {
-	/// Queue `input` behind any owed releases. Past the backlog, a release is
-	/// owed rather than dropped, so a helper that catches up never leaves the
-	/// page holding a button or key the studio let go of; other input drops.
+	/// Queue `input`, which past the backlog drops, a release aside.
 	fn send(&mut self, input: Input) {
 		self.flush();
 		let Some(commands) = &self.commands else { return };
-		let input = match self.owed.is_empty() {
-			true => match commands.input(self.id, input) {
-				Ok(()) => {
-					self.backlogged = false;
-					return;
+		match commands.input(self.id, input) {
+			Ok(()) => self.backlogged = false,
+			Err(outbox::Refused::Full) => {
+				if !std::mem::replace(&mut self.backlogged, true) {
+					tracing::warn!("a browser source's helper is not reading input; dropping it");
 				}
-				Err(outbox::Refused::Full(input)) => input,
-				Err(outbox::Refused::Gone) => return self.disconnect(),
-			},
-			// Newer input waits behind the owed releases.
-			false => input,
-		};
-		if let Some(release) = Release::of(&input) {
-			self.owed.retain(|owed| Release::of(owed) != Some(release));
-			self.owed.push_back(input);
-		}
-		if !std::mem::replace(&mut self.backlogged, true) {
-			tracing::warn!("a browser source's helper is not reading input; dropping it");
+			}
+			Err(outbox::Refused::Gone) => self.disconnect(),
 		}
 	}
 
-	/// Queue a new frame rate, then the owed releases, oldest first, while the
-	/// backlog has room.
+	/// Queue a new frame rate.
 	fn flush(&mut self) {
 		let Some(commands) = &self.commands else { return };
 		if self.retime {
@@ -219,47 +202,11 @@ impl PageState {
 			}
 			self.retime = false;
 		}
-		while let Some(input) = self.owed.pop_front() {
-			match commands.input(self.id, input) {
-				Ok(()) => {}
-				Err(outbox::Refused::Full(input)) => {
-					self.owed.push_front(input);
-					return;
-				}
-				Err(outbox::Refused::Gone) => return self.disconnect(),
-			}
-		}
 	}
 
 	/// The page closed, or the helper is gone, which its source reports.
 	fn disconnect(&mut self) {
 		self.commands = None;
-		self.owed.clear();
-	}
-}
-
-/// What an input lets go of, which a later release of the same supersedes.
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Release {
-	Button(Button),
-	Key(i32),
-	Focus,
-	Pointer,
-}
-
-#[cfg(target_os = "linux")]
-impl Release {
-	fn of(input: &Input) -> Option<Self> {
-		match *input {
-			Input::Button {
-				button, down: false, ..
-			} => Some(Self::Button(button)),
-			Input::Key { code, down: false, .. } => Some(Self::Key(code)),
-			Input::Focus(false) => Some(Self::Focus),
-			Input::Leave { .. } => Some(Self::Pointer),
-			_ => None,
-		}
 	}
 }
 
@@ -421,60 +368,6 @@ fn upload(
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
 	use super::*;
-
-	fn button(down: bool) -> Input {
-		Input::Button {
-			x: 1,
-			y: 1,
-			button: Button::Left,
-			down,
-			clicks: 1,
-			modifiers: Modifiers::default(),
-		}
-	}
-
-	/// Past the backlog, a release is owed rather than dropped, once per
-	/// button, and goes ahead of newer input as the queue makes room, so the
-	/// page never keeps holding what the studio let go of.
-	#[test]
-	fn a_release_past_the_backlog_is_owed() {
-		let commands = outbox::Commands::default();
-		let page = Page::default();
-		page.state.lock().unwrap().commands = Some(commands.clone());
-		page.send(button(true));
-		while !page.state.lock().unwrap().backlogged {
-			page.send(Input::Text("x".into()));
-		}
-		page.send(button(false));
-		page.send(button(true));
-		page.send(button(false));
-		page.send(Input::Move {
-			x: 2,
-			y: 2,
-			modifiers: Modifiers::default(),
-		});
-		assert_eq!(page.state.lock().unwrap().owed, [button(false)]);
-
-		// The helper catches up, and each batch makes room, as the writer's do.
-		let mut received = Vec::new();
-		loop {
-			let batch = commands.take();
-			if batch.is_empty() {
-				break;
-			}
-			for command in batch {
-				let protocol::Command::Input(_, input) = command else {
-					panic!("only input is queued");
-				};
-				received.push(input);
-			}
-			page.state.lock().unwrap().flush();
-		}
-		assert_eq!(received.first(), Some(&button(true)));
-		assert_eq!(received.last(), Some(&button(false)));
-		assert_eq!(received.iter().filter(|input| **input == button(false)).count(), 1);
-		assert!(!received.iter().any(|input| matches!(input, Input::Move { .. })));
-	}
 
 	/// A new canvas frame rate reaches the page once, the newest of those
 	/// waiting, even past the backlog.
