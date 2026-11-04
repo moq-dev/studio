@@ -575,11 +575,11 @@ impl Room {
 			.collect()
 	}
 
-	/// The source in `collection` playing the camera of the guest called
+	/// The sources in `collection` playing the camera of the guest called
 	/// `identity`, whose sound is their microphone.
-	pub fn voice<'a>(&self, collection: &'a Collection, identity: &str) -> Option<&'a str> {
+	pub fn voices<'a>(&self, collection: &'a Collection, identity: &str) -> impl Iterator<Item = &'a str> {
 		self.guest_sources(collection, identity)
-			.find(|(_, kind)| *kind == Kind::Camera)
+			.filter(|(_, kind)| *kind == Kind::Camera)
 			.map(|(name, _)| name.as_str())
 	}
 
