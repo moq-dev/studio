@@ -441,6 +441,17 @@ impl Pose {
 	}
 }
 
+/// `old`'s filters `progress` of the way to `new`'s, or `None` if their blend
+/// modes differ or their filters do not pair up by kind, in order, as
+/// [`Filter::toward`] mixes them.
+fn mixed(old: &Item, new: &Item, progress: f32) -> Option<Vec<Filter>> {
+	if old.blend != new.blend || old.filters.len() != new.filters.len() {
+		return None;
+	}
+	let pairs = old.filters.iter().zip(&new.filters);
+	pairs.map(|(old, new)| old.toward(new, progress)).collect()
+}
+
 /// The order to draw a move's visible items in, back to front, as `lead`
 /// stacks them: each slot is an item of `lead`, of `other`, or a pair of
 /// both, as `lead_pairs` and `other_pairs` pair them. An unpaired item of
@@ -568,12 +579,13 @@ impl Draw<'_> {
 	///
 	/// Each visible item of `to` is paired with the first visible item of
 	/// `from` showing the same source that no earlier one took, and glides
-	/// from its pose to its own, cross-fading from its look in `from` to its
-	/// look in `to` if its filters or blend mode differ. The rest of `from`
+	/// from its pose to its own, its filters' settings mixing from its look in
+	/// `from` to its look in `to`. The rest of `from`
 	/// fades out and the rest of `to` fades in, where each was placed. Items
 	/// stack as `from` stacks them until halfway, then as `to` does, each
 	/// unpaired item just over the paired item it was over, so the move
-	/// starts from `from` and lands on `to` as each is drawn.
+	/// starts from `from` and lands on `to` as each is drawn. A paired item
+	/// whose blend mode or kinds of filter differ changes look halfway too.
 	fn moving(&mut self, target: &Target, from: Option<&str>, to: Option<&str>, progress: f32) {
 		let collection = self.collection;
 		let items = |scene: Option<&str>| {
@@ -625,28 +637,19 @@ impl Draw<'_> {
 					let (old, new) = (&leaving[at], &entering[index]);
 					let own = Pose::of(collection, new);
 					let pose = Pose::of(collection, old).toward(&own, progress);
-					if old.filters != new.filters || old.blend != new.blend {
-						self.posed(
-							target,
-							old,
-							Pose {
-								opacity: 1.0 - progress,
-								..pose
-							},
-						);
-						self.posed(
-							target,
-							new,
-							Pose {
-								opacity: progress,
-								..pose
-							},
-						);
-					} else if pose == own {
-						// Shared with the preview, which draws it the same.
-						self.item(target, &place, index, new);
+					if old.filters == new.filters && old.blend == new.blend {
+						if pose == own {
+							// Shared with the preview, which draws it the same.
+							self.item(target, &place, index, new);
+						} else {
+							self.posed(target, new, pose);
+						}
+					} else if let Some(filters) = mixed(old, new, progress) {
+						let item = Item { filters, ..new.clone() };
+						self.posed(target, &item, pose);
 					} else {
-						self.posed(target, new, pose);
+						// A look that cannot be mixed changes as the stacking does.
+						self.posed(target, if progress < 0.5 { old } else { new }, pose);
 					}
 				}
 				(None, None) => unreachable!("a slot holds an item"),
@@ -1202,22 +1205,20 @@ mod tests {
 	}
 
 	/// A move starts from the outgoing scene's stacking and switches to the
-	/// incoming scene's halfway, and an item whose filters differ between the
-	/// scenes cross-fades from one look to the other as it goes.
+	/// incoming scene's halfway, and an item's filter settings mix from one
+	/// scene's to the other's as it goes.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
-	async fn a_move_restacks_halfway_and_crossfades_a_new_look() {
+	async fn a_move_restacks_halfway_and_mixes_filters() {
 		local(async {
 			let mut collection = collection();
 			let fill = Rect::fill(&collection.canvas);
-			collection.scenes[0].items = vec![Item::new("red", CORNER), Item::new("blue", fill)];
-			collection.scenes[1].items = vec![
-				Item {
-					filters: vec![Filter::Invert { amount: 1.0 }],
-					..Item::new("blue", fill)
-				},
-				Item::new("red", CORNER),
-			];
+			let invert = |amount| Item {
+				filters: vec![Filter::Invert { amount }],
+				..Item::new("blue", fill)
+			};
+			collection.scenes[0].items = vec![Item::new("red", CORNER), invert(0.0)];
+			collection.scenes[1].items = vec![invert(1.0), Item::new("red", CORNER)];
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
@@ -1235,7 +1236,7 @@ mod tests {
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 6), RED, "red over blue from halfway");
 			let actual = pixel(&program, 6, 1);
-			assert!(near(actual, [128, 128, 64, 255]), "half blue, half yellow: {actual:?}");
+			assert!(near(actual, [128, 128, 128, 255]), "half inverted: {actual:?}");
 
 			studio.render(start + duration);
 			assert_eq!(pixel(&studio.program(), 6, 1), [255, 255, 0, 255]);

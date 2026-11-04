@@ -651,6 +651,84 @@ impl Filter {
 		}
 	}
 
+	/// `progress` of the way from this filter's settings to `other`'s, or
+	/// `None` if they are of different kinds or read different sources or
+	/// mask modes. A mix of valid settings is valid.
+	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Option<Self> {
+		let mix = |from: f32, to: f32| from + (to - from) * progress;
+		let color = |from: Rgba, to: Rgba| {
+			Rgba(std::array::from_fn(|channel| {
+				mix(f32::from(from.0[channel]), f32::from(to.0[channel])).round() as u8
+			}))
+		};
+		Some(match (self, other) {
+			(Self::Opacity { amount: a }, Self::Opacity { amount: b }) => Self::Opacity { amount: mix(*a, *b) },
+			(Self::Brightness { amount: a }, Self::Brightness { amount: b }) => {
+				Self::Brightness { amount: mix(*a, *b) }
+			}
+			(Self::Contrast { amount: a }, Self::Contrast { amount: b }) => Self::Contrast { amount: mix(*a, *b) },
+			(Self::Saturate { amount: a }, Self::Saturate { amount: b }) => Self::Saturate { amount: mix(*a, *b) },
+			(Self::Grayscale { amount: a }, Self::Grayscale { amount: b }) => Self::Grayscale { amount: mix(*a, *b) },
+			(Self::Sepia { amount: a }, Self::Sepia { amount: b }) => Self::Sepia { amount: mix(*a, *b) },
+			(Self::Invert { amount: a }, Self::Invert { amount: b }) => Self::Invert { amount: mix(*a, *b) },
+			(Self::HueRotate { degrees: a }, Self::HueRotate { degrees: b }) => {
+				Self::HueRotate { degrees: mix(*a, *b) }
+			}
+			(Self::Blur { radius: a }, Self::Blur { radius: b }) => Self::Blur { radius: mix(*a, *b) },
+			(
+				Self::DropShadow { x, y, blur, color: c },
+				Self::DropShadow {
+					x: x2,
+					y: y2,
+					blur: blur2,
+					color: c2,
+				},
+			) => Self::DropShadow {
+				x: mix(*x, *x2),
+				y: mix(*y, *y2),
+				blur: mix(*blur, *blur2),
+				color: color(*c, *c2),
+			},
+			(
+				Self::ChromaKey {
+					color: c,
+					similarity,
+					smoothness,
+					spill,
+				},
+				Self::ChromaKey {
+					color: c2,
+					similarity: similarity2,
+					smoothness: smoothness2,
+					spill: spill2,
+				},
+			) => Self::ChromaKey {
+				color: color(*c, *c2),
+				similarity: mix(*similarity, *similarity2),
+				smoothness: mix(*smoothness, *smoothness2),
+				spill: mix(*spill, *spill2),
+			},
+			(
+				Self::LumaKey { min, max, smoothness },
+				Self::LumaKey {
+					min: min2,
+					max: max2,
+					smoothness: smoothness2,
+				},
+			) => Self::LumaKey {
+				min: mix(*min, *min2),
+				max: mix(*max, *max2),
+				smoothness: mix(*smoothness, *smoothness2),
+			},
+			(Self::Lut { source, amount: a }, Self::Lut { source: to, amount: b }) if source == to => Self::Lut {
+				source: source.clone(),
+				amount: mix(*a, *b),
+			},
+			(Self::Mask { .. }, Self::Mask { .. }) if self == other => self.clone(),
+			_ => return None,
+		})
+	}
+
 	/// The source this filter reads, to rename it.
 	pub(crate) fn source_mut(&mut self) -> Option<&mut String> {
 		match self {
