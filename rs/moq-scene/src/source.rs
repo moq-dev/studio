@@ -120,9 +120,9 @@ type Playing<'a> = Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>>;
 /// The playout clock one instance of a broadcast's audio and video share.
 struct Clock {
 	timeline: timeline::Producer,
-	/// Woken when audio places a frame, which may move the anchor or let a
-	/// picture waiting for its sound show.
-	placed: Notify,
+	/// Woken when audio places a frame or stops, which may move the anchor or
+	/// let a picture waiting for its sound show.
+	changed: Notify,
 }
 
 /// Decoded pictures a broadcast source holds until they are due. The rest wait
@@ -744,7 +744,7 @@ impl Driver {
 		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
 		let clock = Clock {
 			timeline: clock,
-			placed: Notify::new(),
+			changed: Notify::new(),
 		};
 
 		// A track name always means the same content, so only a new track
@@ -863,7 +863,7 @@ impl Driver {
 					None => ended = true,
 				},
 				() = kio::clock::sleep_until(due.unwrap_or(now)), if due.is_some() => {}
-				() = clock.placed.notified() => {}
+				() = clock.changed.notified() => {}
 			}
 		}
 	}
@@ -896,7 +896,7 @@ impl Driver {
 		input.format = moq_audio::Format::F32;
 		let channel = self.context.bus.channel(input, strip)?;
 		let mut writer = Writer::new(channel, bus.sample_rate, bus.layout.channels());
-		let mut speaker = Speaker::new(clock.timeline.clone());
+		let mut speaker = Speaker::new(clock.timeline.clone(), &clock.changed);
 		let stride = bus.layout.channels() as usize * size_of::<f32>();
 		let rate = f64::from(bus.sample_rate);
 
@@ -915,7 +915,6 @@ impl Driver {
 				let duration = Duration::from_secs_f64((frame.data.len() / stride) as f64 / rate);
 				let place = speaker.place(frame.timestamp.into(), duration, consumer.delay(), kio::clock::now());
 				if let Place::Play(sounds) = place {
-					clock.placed.notify_one();
 					queue.borrow_mut().push_back((sounds, frame));
 					queued.notify_one();
 				}

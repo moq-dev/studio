@@ -16,6 +16,7 @@ use std::time::Duration;
 use kio::clock::Instant;
 use moq_audio::bus;
 use moq_mux::timeline;
+use tokio::sync::Notify;
 
 /// How far a broadcast without audio plays behind its arrivals, as under
 /// `moq play --delay auto`. With audio, video follows the audio's target.
@@ -46,8 +47,11 @@ const CONTIGUOUS: Duration = Duration::from_millis(1);
 /// where they sound to the broadcast's clock, which video follows.
 ///
 /// Dropping it hands the clock's anchor back to video.
-pub(crate) struct Speaker {
+pub(crate) struct Speaker<'a> {
 	clock: timeline::Producer,
+	/// Woken on every frame placed and when the speaker stops, so pictures
+	/// held for their sound show once it plays, or once there is none.
+	changed: &'a Notify,
 	/// The last frame placed: when it finishes sounding, and the media time it
 	/// ends at.
 	tail: Option<(Instant, Duration)>,
@@ -63,10 +67,15 @@ pub(crate) enum Place {
 	Skip,
 }
 
-impl Speaker {
-	/// Place audio on `clock`, taking its anchor from video on the first frame.
-	pub(crate) fn new(clock: timeline::Producer) -> Self {
-		Self { clock, tail: None }
+impl<'a> Speaker<'a> {
+	/// Place audio on `clock`, taking its anchor from video on the first frame,
+	/// and wake `changed` whenever that may let a picture show.
+	pub(crate) fn new(clock: timeline::Producer, changed: &'a Notify) -> Self {
+		Self {
+			clock,
+			changed,
+			tail: None,
+		}
 	}
 
 	/// Place a decoded frame covering `duration` of media from `start`,
@@ -116,13 +125,15 @@ impl Speaker {
 			target,
 		};
 		self.clock.audio(audio, now);
+		self.changed.notify_one();
 		Place::Play(begins)
 	}
 }
 
-impl Drop for Speaker {
+impl Drop for Speaker<'_> {
 	fn drop(&mut self) {
 		self.clock.audio_stopped();
+		self.changed.notify_one();
 	}
 }
 
@@ -150,7 +161,9 @@ pub(crate) struct Writer {
 	/// When what was written finishes sounding, or `None` before the first
 	/// write, which the channel's own priming holds back the full latency.
 	runs_out: Option<Instant>,
-	silence: Vec<u8>,
+	/// Silence and the frame after it, written as one, so the channel pads
+	/// behind the frame rather than between them.
+	pending: Vec<u8>,
 }
 
 impl Writer {
@@ -161,7 +174,7 @@ impl Writer {
 			stride: channels as usize * size_of::<f32>(),
 			rate,
 			runs_out: None,
-			silence: Vec::new(),
+			pending: Vec::new(),
 		}
 	}
 
@@ -171,12 +184,17 @@ impl Writer {
 		let free = self.runs_out.unwrap_or(now + BUS_LATENCY).max(now);
 		let gap = sounds.saturating_duration_since(free).min(BUS_LATENCY);
 		let gap = self.frames(gap);
-		if gap > 0 {
-			self.silence.resize(gap * self.stride, 0);
-			self.channel.write(&self.silence)?;
-		}
-		self.channel.write(data)?;
-		self.runs_out = Some(free + self.duration(gap + data.len() / self.stride));
+		self.pending.clear();
+		self.pending.resize(gap * self.stride, 0);
+		self.pending.extend_from_slice(data);
+		self.channel.write(&self.pending)?;
+		let runs_out = free + self.duration(self.pending.len() / self.stride);
+		// A channel left holding a quarter of its latency or less pads itself
+		// back up to it behind the write, as moq-audio's ring does.
+		self.runs_out = Some(match runs_out.saturating_duration_since(now) <= BUS_LATENCY / 4 {
+			true => now + BUS_LATENCY,
+			false => runs_out,
+		});
 		Ok(())
 	}
 
@@ -214,7 +232,8 @@ mod tests {
 	#[test]
 	fn video_is_due_when_its_audio_sounds() {
 		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let mut speaker = Speaker::new(clock.clone());
+		let changed = Notify::new();
+		let mut speaker = Speaker::new(clock.clone(), &changed);
 		assert_eq!(speaker.place(ms(1_000), FRAME, TARGET, at(0)), Place::Play(at(150)));
 		assert_eq!(clock.due(stamp(1_000)), Some(at(150)));
 		// Late within the target, and early: both keep their place.
@@ -238,7 +257,8 @@ mod tests {
 			heard(&schedule, stamp(5_000), at(0)),
 			"without audio, only the deadline counts"
 		);
-		let mut speaker = Speaker::new(clock.clone());
+		let changed = Notify::new();
+		let mut speaker = Speaker::new(clock.clone(), &changed);
 		speaker.place(ms(1_000), FRAME, TARGET, at(0));
 		assert!(!heard(&schedule, stamp(1_000), at(148)));
 		assert!(heard(&schedule, stamp(1_000), at(150)));
@@ -252,7 +272,8 @@ mod tests {
 	#[test]
 	fn a_stall_holds_video_back_with_the_sound() {
 		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let mut speaker = Speaker::new(clock.clone());
+		let changed = Notify::new();
+		let mut speaker = Speaker::new(clock.clone(), &changed);
 		speaker.place(ms(1_000), FRAME, TARGET, at(0));
 		assert_eq!(speaker.place(ms(1_020), FRAME, TARGET, at(500)), Place::Play(at(650)));
 		assert_eq!(clock.due(stamp(1_020)), Some(at(650)));
@@ -264,7 +285,8 @@ mod tests {
 	#[test]
 	fn a_hole_plays_as_silence_up_to_the_target() {
 		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let mut speaker = Speaker::new(clock.clone());
+		let changed = Notify::new();
+		let mut speaker = Speaker::new(clock.clone(), &changed);
 		speaker.place(ms(1_000), FRAME, TARGET, at(0));
 		assert_eq!(speaker.place(ms(1_060), FRAME, TARGET, at(40)), Place::Play(at(210)));
 		assert_eq!(clock.due(stamp(1_060)), Some(at(210)));
@@ -280,7 +302,8 @@ mod tests {
 	#[test]
 	fn a_burst_skips_past_the_target() {
 		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let mut speaker = Speaker::new(clock.clone());
+		let changed = Notify::new();
+		let mut speaker = Speaker::new(clock.clone(), &changed);
 		let placed = (0..10)
 			.map(|index| speaker.place(ms(1_000 + index * 20), FRAME, TARGET, at(0)))
 			.filter(|place| *place != Place::Skip)
@@ -290,9 +313,9 @@ mod tests {
 		assert_eq!(clock.due(stamp(1_200)), Some(at(190)));
 	}
 
-	/// A frame sounds when placed: the first, one that follows it, and one
-	/// written after the channel ran dry, which the bus would otherwise play at
-	/// once, ahead of its picture.
+	/// A frame sounds when placed: the first, one that follows it, and ones
+	/// written after the channel ran dry, on time or late, which the bus would
+	/// otherwise play at once or pad behind, apart from their pictures.
 	#[test]
 	fn a_write_sounds_when_placed() {
 		let (bus, mut driver) = moq_audio::bus::Bus::new(Default::default()).unwrap();
@@ -342,10 +365,17 @@ mod tests {
 			.write(clock(rate) + BUS_LATENCY, &frame(3.0), clock(rate))
 			.unwrap();
 		advance(2 * rate, &mut heard);
+		// Run dry and written late, with less than the latency to go.
+		advance(2 * rate + 1_920, &mut heard);
+		writer
+			.write(clock(2 * rate) + BUS_LATENCY, &frame(4.0), clock(2 * rate + 1_920))
+			.unwrap();
+		advance(3 * rate, &mut heard);
 
 		let latency = rate * BUS_LATENCY.as_millis() as u64 / 1_000;
 		let first = block + latency;
 		let after = rate + latency;
+		let late = 2 * rate + latency;
 		assert_eq!(
 			heard,
 			[
@@ -353,7 +383,9 @@ mod tests {
 				(first + 960, 2.0),
 				(first + 1_920, 0.0),
 				(after, 3.0),
-				(after + 960, 0.0)
+				(after + 960, 0.0),
+				(late, 4.0),
+				(late + 960, 0.0)
 			]
 		);
 	}
