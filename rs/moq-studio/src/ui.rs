@@ -2030,7 +2030,9 @@ impl Panels {
 					group = source;
 					ui.label(&track.label).on_hover_text(&track.id);
 					match (track.enabled, track.source.is_some()) {
-						(false, _) => ui.label("off").on_hover_text("The grant cannot fund it, so viewers use another"),
+						(false, _) => ui
+							.label("off")
+							.on_hover_text("The grant cannot fund it, so viewers use another"),
 						(true, true) => ui.label(""),
 						(true, false) => ui.label(or_unknown(track.granted.map(health::rate))),
 					};

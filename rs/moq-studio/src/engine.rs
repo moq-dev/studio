@@ -336,7 +336,10 @@ impl Stats {
 	/// `None` while the connection has no estimate.
 	pub fn grants(&self) -> BTreeMap<String, Option<bandwidth::Rate>> {
 		let grants = self.grants.lock().unwrap();
-		grants.iter().map(|(name, grant)| (name.clone(), grant.peek())).collect()
+		grants
+			.iter()
+			.map(|(name, grant)| (name.clone(), grant.peek()))
+			.collect()
 	}
 
 	/// Why the output stopped, if it did.
@@ -1380,7 +1383,10 @@ impl Encoder {
 		self.cuts = match encoder.cut() {
 			Ok(()) => true,
 			Err(moq_video::Error::CutUnsupported(name)) => {
-				tracing::warn!(encoder = name, "the encoder cannot cut, so a joining viewer waits for its next keyframe");
+				tracing::warn!(
+					encoder = name,
+					"the encoder cannot cut, so a joining viewer waits for its next keyframe"
+				);
 				false
 			}
 			Err(err) => return Err(err.into()),
@@ -1516,7 +1522,12 @@ fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<(
 	}
 }
 
-fn encode_frames(load: &Load, video: mpsc::Receiver<Video>, encoder: &mut Encoder, zero_copy: bool) -> anyhow::Result<()> {
+fn encode_frames(
+	load: &Load,
+	video: mpsc::Receiver<Video>,
+	encoder: &mut Encoder,
+	zero_copy: bool,
+) -> anyhow::Result<()> {
 	while let Ok(video) = video.recv() {
 		let (pending, bitrate) = match video {
 			Video::Frame(pending, bitrate) => (pending, bitrate),
@@ -1778,7 +1789,11 @@ mod tests {
 			.map(|(name, config)| (config.coded_width, config.coded_height, name.clone(), config.clone()))
 			.collect();
 		sizes.sort_unstable_by_key(|size| std::cmp::Reverse(size.0));
-		let [(Some(640), Some(360), video, config), (Some(320), Some(180), half, half_config)] = &sizes[..] else {
+		let [
+			(Some(640), Some(360), video, config),
+			(Some(320), Some(180), half, half_config),
+		] = &sizes[..]
+		else {
 			panic!("the program at both sizes, and only it: {sizes:?}");
 		};
 		let video = video.clone();

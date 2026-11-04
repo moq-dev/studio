@@ -58,9 +58,7 @@ pub fn ceiling(size: moq_video::Size, framerate: moq_video::FrameRate) -> Rate {
 /// allocator funds the half size first and a viewer on a slow link always has
 /// a rendition.
 pub fn priority(index: usize, count: usize) -> i8 {
-	hang::catalog::PRIORITY
-		.video
-		.saturating_sub((count - 1 - index) as i8)
+	hang::catalog::PRIORITY.video.saturating_sub((count - 1 - index) as i8)
 }
 
 /// What a rendition does with the next frame, as its [`Gate`] decides.
@@ -210,7 +208,11 @@ mod tests {
 		let mut always = Gate::new(&allocator, track.demand(), ceiling, None, true);
 		assert_eq!(always.step(), Step::Encode(ceiling));
 		estimate.set(Some(Rate::from_mbps(1))).unwrap();
-		assert_eq!(always.step(), Step::Encode(Rate::from_mbps(1)), "a drop applies at once");
+		assert_eq!(
+			always.step(),
+			Step::Encode(Rate::from_mbps(1)),
+			"a drop applies at once"
+		);
 		assert_eq!(always.grant().peek(), Some(Rate::from_mbps(1)));
 		estimate.set(Some(Rate::from_mbps(3))).unwrap();
 		match always.step() {

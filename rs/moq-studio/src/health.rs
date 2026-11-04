@@ -425,7 +425,8 @@ struct Listed<'a> {
 /// what it sent and what its viewers received. A source's stills carry no
 /// media to grade, so they are left out.
 fn tracks(listed: &Listed, clock: &moq_mux::Clock, graded: &Graded) -> Vec<Track> {
-	let program = renditions(&listed.program).map(|(id, label, enabled)| (None, id, label, enabled, graded.publisher.as_ref()));
+	let program =
+		renditions(&listed.program).map(|(id, label, enabled)| (None, id, label, enabled, graded.publisher.as_ref()));
 	let sources = listed.sources.ext.studio.sources.iter().flat_map(|(name, catalog)| {
 		renditions(catalog).map(move |(id, label, enabled)| (Some(name), id, label, enabled, graded.sources.as_ref()))
 	});
@@ -1237,7 +1238,13 @@ mod tests {
 			.iter()
 			.map(|track| {
 				let granted = track.granted.map(rate);
-				(track.source.as_deref(), track.id.as_str(), track.sent.map(rate), granted, track.enabled)
+				(
+					track.source.as_deref(),
+					track.id.as_str(),
+					track.sent.map(rate),
+					granted,
+					track.enabled,
+				)
 			})
 			.collect();
 		assert_eq!(
