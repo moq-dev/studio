@@ -1,8 +1,10 @@
 //! Browser sources against the real helper: this package's binary, built with
-//! `cef`, rendering `data:` pages with nothing fetched from the network.
+//! `cef`, rendering `data:` pages, or pages served on loopback, with nothing
+//! fetched from the network.
 
 #![cfg(all(target_os = "linux", feature = "cef"))]
 
+use std::path::Path;
 use std::time::Duration;
 
 use kio::clock::Instant;
@@ -16,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 
 /// A studio of one scene, "Main", drawing `sources` back to front over the
-/// whole of a small canvas.
+/// whole of a small canvas. Dropping it stops its helper.
 struct Studio {
 	collection: Collection,
 	sources: Sources,
@@ -25,12 +27,23 @@ struct Studio {
 	queue: wgpu::Queue,
 	/// Advances the bus, which meters each source's strip.
 	mixer: moq_audio::bus::Driver,
+	helper: Helper,
 	_origin: moq_net::origin::Producer,
 	_dir: tempfile::TempDir,
+	_profile: Option<tempfile::TempDir>,
 }
 
 impl Studio {
+	/// A studio with a fresh browser profile.
 	async fn new(sources: &[(&str, Source)]) -> Self {
+		let profile = tempfile::tempdir().unwrap();
+		let mut studio = Self::on(profile.path(), sources).await;
+		studio._profile = Some(profile);
+		studio
+	}
+
+	/// A studio whose pages keep their cookies in `profile`.
+	async fn on(profile: &Path, sources: &[(&str, Source)]) -> Self {
 		let instance = wgpu::Instance::default();
 		let adapter = instance
 			.request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -60,6 +73,7 @@ impl Studio {
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
+		let helper = Helper::new(env!("CARGO_BIN_EXE_moq-studio"), profile, &adapter, &device, &queue);
 		let mut sources = Sources::new(Context {
 			program: bus.mix(),
 			bus,
@@ -67,7 +81,7 @@ impl Studio {
 			dir: dir.path().to_path_buf(),
 			output: moq_video::render::output(&device),
 			publish: None,
-			browser: Some(Helper::new(env!("CARGO_BIN_EXE_moq-studio"), &adapter, &device, &queue)),
+			browser: Some(helper.clone()),
 		});
 		for driver in sources.sync(&collection) {
 			tokio::task::spawn_local(driver.run());
@@ -82,8 +96,18 @@ impl Studio {
 			device,
 			queue,
 			mixer,
+			helper,
 			_origin: origin,
 			_dir: dir,
+			_profile: None,
+		}
+	}
+
+	/// Restart the source `name`, as its Reload button does.
+	fn reload(&mut self, name: &str) {
+		self.sources.restart(name);
+		for driver in self.sources.sync(&self.collection) {
+			tokio::task::spawn_local(driver.run());
 		}
 	}
 
@@ -156,6 +180,12 @@ impl Studio {
 			assert!(Instant::now() < deadline, "{name} never failed");
 			kio::clock::sleep(Duration::from_millis(30)).await;
 		}
+	}
+}
+
+impl Drop for Studio {
+	fn drop(&mut self) {
+		self.helper.stop();
 	}
 }
 
@@ -239,8 +269,25 @@ async fn a_click_reaches_the_page() {
 	.await;
 }
 
-/// A page whose renderer crashes, or whose whole browser process does, fails
-/// its own source and leaves the canvas, while everything else keeps drawing.
+/// A page that closes itself fails its own source and leaves the canvas,
+/// while the page beside it in the same helper keeps drawing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_page_that_closes_itself_fails_alone() {
+	local(async {
+		let closer = page("<body><script>addEventListener('load', () => window.close())</script></body>");
+		let red = page("<body style='background:red'></body>");
+		let mut studio = Studio::new(&[("red", red), ("closer", closer)]).await;
+		let reason = studio.until_failed("closer").await;
+		assert!(reason.contains("closed itself"), "{reason}");
+		studio.until_center([255, 0, 0, 255], &["closer"]).await;
+	})
+	.await;
+}
+
+/// A page whose renderer crashes fails its own source and leaves the canvas,
+/// while everything else keeps drawing. A crash of the helper every page
+/// shares fails them all and nothing else, and a reload starts a new one.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
 async fn a_crash_drops_only_its_source() {
@@ -267,8 +314,86 @@ async fn a_crash_drops_only_its_source() {
 
 		assert_eq!(studio.sources.get("blue").unwrap().status(), Status::Live);
 		studio.until_center(BLUE, &["renderer", "browser"]).await;
+
+		studio.reload("browser");
+		studio.until_center([255, 0, 0, 255], &["renderer"]).await;
 	})
 	.await;
+}
+
+/// Cookies, even one without an expiry, survive a reload of the page and a
+/// restart of the studio, since every page keeps them in one profile on disk.
+/// A second studio on the profile while it is in use fails its pages saying
+/// why, and leaves the first one's drawing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn cookies_survive_a_restart() {
+	local(async {
+		// Red until it has seen its cookie, then green.
+		let url = serve(
+			"<body style='margin:0'><script>\
+			document.body.style.background = document.cookie.includes('login=1') ? 'lime' : 'red';\
+			document.cookie = 'login=1';\
+			</script></body>",
+		)
+		.await;
+		let page = Source::Browser {
+			url,
+			width: 320,
+			height: 240,
+		};
+		let profile = tempfile::tempdir().unwrap();
+		let mut studio = Studio::on(profile.path(), &[("page", page.clone())]).await;
+		studio.until_center([255, 0, 0, 255], &[]).await;
+		studio.reload("page");
+		studio.until_center(GREEN, &[]).await;
+
+		let second = Studio::on(profile.path(), &[("page", page.clone())]).await;
+		let reason = second.until_failed("page").await;
+		assert!(reason.contains("another studio"), "{reason}");
+		drop(second);
+		studio.until_center(GREEN, &[]).await;
+		drop(studio);
+
+		let mut studio = Studio::on(profile.path(), &[("page", page)]).await;
+		studio.until_center(GREEN, &[]).await;
+	})
+	.await;
+}
+
+const GREEN: [u8; 4] = [0, 255, 0, 255];
+
+/// Serve `html` over HTTP on loopback to every request, returning its URL,
+/// since a cookie needs an origin a `data:` page lacks.
+async fn serve(html: &'static str) -> String {
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let url = format!("http://{}/", listener.local_addr().unwrap());
+	tokio::spawn(async move {
+		loop {
+			let Ok((mut stream, _)) = listener.accept().await else {
+				return;
+			};
+			tokio::spawn(async move {
+				// The request, up to the blank line that ends its headers.
+				let mut request = Vec::new();
+				let mut buffer = [0; 1024];
+				while !request.ends_with(b"\r\n\r\n") {
+					match stream.read(&mut buffer).await {
+						Ok(0) | Err(_) => return,
+						Ok(read) => request.extend_from_slice(&buffer[..read]),
+					}
+				}
+				let response = format!(
+					"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+					html.len()
+				);
+				let _ = stream.write_all(response.as_bytes()).await;
+			});
+		}
+	});
+	url
 }
 
 /// The one helper this test process still runs: a child started with the

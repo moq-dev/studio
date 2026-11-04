@@ -2,13 +2,17 @@
 //! rendered offscreen by CEF (the Chromium Embedded Framework) and drawn by the
 //! compositor.
 //!
-//! Each page runs in a helper process of its own, so a crash there fails that
-//! source and nothing else. The helper is the studio's own executable started
-//! again, which calls [`child`] first thing in `main` to become one; CEF's own
-//! subprocesses start the same way. The helper paints into a shared GPU texture
-//! the studio copies on its device, or into memory the studio uploads when
-//! either side cannot share textures ([`Paint`] says which). The page's sound
-//! joins the program bus at the bus's rate.
+//! Every page runs in one helper process, CEF's browser process, so they
+//! share one persistent profile: cookies and logins survive a restart of the
+//! source or the studio, and CEF lets only one process hold a profile. Each
+//! page still renders in a process of its own, so a page that crashes fails
+//! only its own source. A crash of the helper itself fails every page, and the
+//! next page to start starts a new helper. The helper is the studio's own
+//! executable started again, which calls [`child`] first thing in `main` to
+//! become one; CEF's own subprocesses start the same way. The helper paints
+//! into a shared GPU texture the studio copies on its device, or into memory
+//! the studio uploads when either side cannot share textures ([`Paint`] says
+//! which). A page's sound joins the program bus at the bus's rate.
 //!
 //! Linux only for now, and only with the `cef` feature: elsewhere a browser
 //! source reports that it is unsupported.
@@ -21,6 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::wgpu;
 
+#[cfg(target_os = "linux")]
+mod outbox;
 #[cfg(target_os = "linux")]
 mod protocol;
 #[cfg(target_os = "linux")]
@@ -65,7 +71,8 @@ pub fn child() -> Option<ExitCode> {
 }
 
 /// What browser sources need from the studio: the executable that becomes
-/// their helper, and the device their pictures are copied to.
+/// their helper, the profile they share, and the device their pictures are
+/// copied to. Clones share one helper.
 #[derive(Clone)]
 #[cfg_attr(
 	not(target_os = "linux"),
@@ -73,19 +80,29 @@ pub fn child() -> Option<ExitCode> {
 )]
 pub struct Helper {
 	program: PathBuf,
+	profile: PathBuf,
 	device: wgpu::Device,
 	queue: wgpu::Queue,
 	/// The device's DRM render node, which CEF must paint on for the studio to
 	/// import what it paints.
 	render_node: Option<PathBuf>,
+	/// The helper, once a page has started it.
+	#[cfg(target_os = "linux")]
+	running: Arc<Mutex<Option<Arc<run::Instance>>>>,
 }
 
 impl Helper {
-	/// Start helpers from `program`, which calls [`child`] first thing in
-	/// `main`, usually the running executable, and copy their pictures to
-	/// `device`, opened from `adapter`.
+	/// Start the helper from `program`, which calls [`child`] first thing in
+	/// `main`, usually the running executable, keep every page's cookies and
+	/// storage in the directory `profile`, created if missing, and copy their
+	/// pictures to `device`, opened from `adapter`.
+	///
+	/// The profile holds the user's logins: keep it with their other state,
+	/// not beside a scene file meant to be shared. One studio at a time may
+	/// use it; a second's pages fail saying so.
 	pub fn new(
 		program: impl Into<PathBuf>,
+		profile: impl Into<PathBuf>,
 		adapter: &wgpu::Adapter,
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
@@ -98,9 +115,27 @@ impl Helper {
 			.flatten();
 		Self {
 			program: program.into(),
+			profile: profile.into(),
 			device: device.clone(),
 			queue: queue.clone(),
 			render_node,
+			#[cfg(target_os = "linux")]
+			running: Default::default(),
+		}
+	}
+
+	/// Stop the helper, failing every page, and wait for it to exit, so the
+	/// profile is saved and free for the next studio. The next page to start
+	/// starts a new helper.
+	pub fn stop(&self) {
+		#[cfg(target_os = "linux")]
+		{
+			// Held throughout, so no page starts another helper on the profile
+			// until this one has exited.
+			let mut running = self.running.lock().unwrap();
+			if let Some(instance) = running.take() {
+				instance.stop();
+			}
 		}
 	}
 }
@@ -123,16 +158,15 @@ pub struct Page {
 
 #[derive(Default)]
 struct PageState {
-	/// The queue to the helper's socket, which [`run::writer`] drains.
+	/// The queue to the helper's socket, while the page is open.
 	#[cfg(target_os = "linux")]
-	commands: Option<std::sync::mpsc::SyncSender<protocol::Command>>,
-	/// Whether input is being dropped because the queue is full.
+	commands: Option<outbox::Commands>,
+	/// The page's number in the helper.
+	#[cfg(target_os = "linux")]
+	id: protocol::Id,
+	/// Whether input is being dropped because the backlog is full.
 	#[cfg(target_os = "linux")]
 	backlogged: bool,
-	/// Releases that did not fit the queue, oldest first, at most one per
-	/// button, key, focus, and pointer, sent ahead of any newer input.
-	#[cfg(target_os = "linux")]
-	owed: std::collections::VecDeque<Input>,
 	/// The canvas's frame rate, which the page paints at.
 	#[cfg(target_os = "linux")]
 	framerate: u32,
@@ -144,91 +178,35 @@ struct PageState {
 
 #[cfg(target_os = "linux")]
 impl PageState {
-	/// Queue `input` behind any owed releases. Past the backlog, a release is
-	/// owed rather than dropped, so a helper that catches up never leaves the
-	/// page holding a button or key the studio let go of; other input drops.
+	/// Queue `input`, which past the backlog drops, a release aside.
 	fn send(&mut self, input: Input) {
-		use std::sync::mpsc::TrySendError;
-
 		self.flush();
 		let Some(commands) = &self.commands else { return };
-		let input = match self.owed.is_empty() {
-			true => match commands.try_send(protocol::Command::Input(input)) {
-				Ok(()) => {
-					self.backlogged = false;
-					return;
+		match commands.input(self.id, input) {
+			Ok(()) => self.backlogged = false,
+			Err(outbox::Refused::Full) => {
+				if !std::mem::replace(&mut self.backlogged, true) {
+					tracing::warn!("a browser source's helper is not reading input; dropping it");
 				}
-				Err(TrySendError::Full(protocol::Command::Input(input))) => input,
-				Err(TrySendError::Full(_)) => unreachable!("only input is sent here"),
-				Err(TrySendError::Disconnected(_)) => return self.disconnect(),
-			},
-			// Newer input waits behind the owed releases.
-			false => input,
-		};
-		if let Some(release) = Release::of(&input) {
-			self.owed.retain(|owed| Release::of(owed) != Some(release));
-			self.owed.push_back(input);
-		}
-		if !std::mem::replace(&mut self.backlogged, true) {
-			tracing::warn!("a browser source's helper is not reading input; dropping it");
+			}
+			Err(outbox::Refused::Gone) => self.disconnect(),
 		}
 	}
 
-	/// Queue a new frame rate, then the owed releases, oldest first, while the
-	/// queue has room.
+	/// Queue a new frame rate.
 	fn flush(&mut self) {
-		use std::sync::mpsc::TrySendError;
-
 		let Some(commands) = &self.commands else { return };
 		if self.retime {
-			match commands.try_send(protocol::Command::FrameRate(self.framerate)) {
-				Ok(()) => self.retime = false,
-				Err(TrySendError::Full(_)) => return,
-				Err(TrySendError::Disconnected(_)) => return self.disconnect(),
+			if !commands.rate(self.id, self.framerate) {
+				return self.disconnect();
 			}
-		}
-		while let Some(input) = self.owed.pop_front() {
-			match commands.try_send(protocol::Command::Input(input)) {
-				Ok(()) => {}
-				Err(TrySendError::Full(protocol::Command::Input(input))) => {
-					self.owed.push_front(input);
-					return;
-				}
-				Err(TrySendError::Full(_)) => unreachable!("only input is sent here"),
-				Err(TrySendError::Disconnected(_)) => return self.disconnect(),
-			}
+			self.retime = false;
 		}
 	}
 
-	/// The helper is gone, which its source reports.
+	/// The page closed, or the helper is gone, which its source reports.
 	fn disconnect(&mut self) {
 		self.commands = None;
-		self.owed.clear();
-	}
-}
-
-/// What an input lets go of, which a later release of the same supersedes.
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Release {
-	Button(Button),
-	Key(i32),
-	Focus,
-	Pointer,
-}
-
-#[cfg(target_os = "linux")]
-impl Release {
-	fn of(input: &Input) -> Option<Self> {
-		match *input {
-			Input::Button {
-				button, down: false, ..
-			} => Some(Self::Button(button)),
-			Input::Key { code, down: false, .. } => Some(Self::Key(code)),
-			Input::Focus(false) => Some(Self::Focus),
-			Input::Leave { .. } => Some(Self::Pointer),
-			_ => None,
-		}
 	}
 }
 
@@ -391,66 +369,31 @@ fn upload(
 mod tests {
 	use super::*;
 
-	fn button(down: bool) -> Input {
-		Input::Button {
-			x: 1,
-			y: 1,
-			button: Button::Left,
-			down,
-			clicks: 1,
-			modifiers: Modifiers::default(),
-		}
-	}
-
-	/// Past the backlog, a release is owed rather than dropped, once per
-	/// button, and goes ahead of newer input as the queue makes room, so the
-	/// page never keeps holding what the studio let go of.
+	/// A new canvas frame rate reaches the page once, the newest of those
+	/// waiting, even past the backlog.
 	#[test]
-	fn a_release_past_the_backlog_is_owed() {
-		let (sender, queue) = std::sync::mpsc::sync_channel(4);
+	fn a_new_frame_rate_reaches_the_page() {
+		let commands = outbox::Commands::default();
 		let page = Page::default();
-		page.state.lock().unwrap().commands = Some(sender);
-		page.send(button(true));
+		page.state.lock().unwrap().commands = Some(commands.clone());
+		page.set_framerate(30);
+		page.set_framerate(30);
+		assert!(matches!(commands.take()[..], [protocol::Command::FrameRate(_, 30)]));
+		assert!(commands.take().is_empty(), "an unchanged rate is not sent again");
+
 		while !page.state.lock().unwrap().backlogged {
 			page.send(Input::Text("x".into()));
 		}
-		page.send(button(false));
-		page.send(button(true));
-		page.send(button(false));
-		page.send(Input::Move {
-			x: 2,
-			y: 2,
-			modifiers: Modifiers::default(),
-		});
-		assert_eq!(page.state.lock().unwrap().owed, [button(false)]);
-
-		// The helper catches up, and each write makes room, as the writer's do.
-		let mut received = Vec::new();
-		while let Ok(protocol::Command::Input(input)) = queue.try_recv() {
-			received.push(input);
-			page.state.lock().unwrap().flush();
-		}
-		assert_eq!(received.first(), Some(&button(true)));
-		assert_eq!(received.last(), Some(&button(false)));
-		assert_eq!(received.iter().filter(|input| **input == button(false)).count(), 1);
-		assert!(!received.iter().any(|input| matches!(input, Input::Move { .. })));
-	}
-
-	/// A new canvas frame rate reaches the page once, even past the backlog.
-	#[test]
-	fn a_new_frame_rate_reaches_the_page() {
-		let (sender, queue) = std::sync::mpsc::sync_channel(1);
-		let page = Page::default();
-		page.state.lock().unwrap().commands = Some(sender);
-		page.set_framerate(30);
-		page.set_framerate(30);
-		assert!(matches!(queue.try_recv(), Ok(protocol::Command::FrameRate(30))));
-		assert!(queue.try_recv().is_err(), "an unchanged rate is not sent again");
-
-		page.send(Input::Text("x".into()));
 		page.set_framerate(60);
-		assert!(matches!(queue.try_recv(), Ok(protocol::Command::Input(_))));
-		page.state.lock().unwrap().flush();
-		assert!(matches!(queue.try_recv(), Ok(protocol::Command::FrameRate(60))));
+		page.set_framerate(90);
+		let rates: Vec<_> = commands
+			.take()
+			.into_iter()
+			.filter_map(|command| match command {
+				protocol::Command::FrameRate(_, rate) => Some(rate),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(rates, [90]);
 	}
 }

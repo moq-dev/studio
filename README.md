@@ -94,7 +94,7 @@ Every panel is a tab you can drag, split, or stack.
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still fading out, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
@@ -142,12 +142,17 @@ or not its scene is live; mute a source to leave it out.
 
 A browser source renders a web page, such as an overlay, alert box, or chat
 widget, at the canvas frame rate (CEF caps it at 60) over a transparent
-background, and its sound joins the program audio. Each page runs in a
-process of its own, so a page or browser crash fails that source, with the
-reason, while the stream carries on; edit or re-add the source to restart it.
-Every start is a fresh profile: no cookies or logins persist. A page opens
-no other windows (`window.open` and new-tab links do nothing), and its
-dropdown lists, such as a `<select>`'s, are not drawn yet.
+background, and its sound joins the program audio. Every page shares one
+browser profile, kept in `$XDG_DATA_HOME/moq-studio/browser`
+(`~/.local/share/moq-studio/browser` by default) rather than beside the scene
+file, so cookies and logins, such as an alert service's, survive a reload and
+a restart of the studio. One studio at a time can use it: a second one's
+browser sources fail saying so. Each page renders in a process of its own, so
+a page that crashes fails only its own source, with the reason, while the
+stream carries on. A crash of the browser itself fails every browser source.
+**Reload** in Sources restarts a page, failed or not. A page opens no other
+windows (`window.open` and new-tab links do nothing), and its dropdown lists,
+such as a `<select>`'s, are not drawn yet.
 
 An overlay is a title, lower third, or other graphic written as HTML and CSS,
 drawn by the studio itself (through [Blitz](https://github.com/DioxusLabs/blitz))
