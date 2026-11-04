@@ -42,10 +42,21 @@ Decided 2026-10-26 (maintainer), the studio's flagship and first in its epic:
   replay finds their recent past. Upload follows MoQ's pull model, so a
   fallback nobody uses costs its encode but no bandwidth.
 
+Changed 2026-11-04 (maintainer): this epic moved to m1, and the program is
+the default, not the fallback. Encoding every source for viewers would take
+more encoder sessions than a consumer GPU has (decided 2026-11-03 on
+[moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), so sources
+are not published to the relay by default: a source's own track encodes only
+while something in the studio uses it, such as an isolated recording or a
+replay, and reaches viewers only when the creator ticks
+[Published independently](/quest/m0/publish-independently.md). The Delivery
+and Cost bullets above stand only for sources published that way; replan them
+when this epic starts.
+
 ## Required
 
-- [Audio source tracks](/quest/m0/compose/sources.md) - microphones and system audio publish their own tracks beside the picture sources, encoded whatever the demand and uploaded only while subscribed
-- [Layout track](/quest/m0/compose/layout.md) - the live scene state as a hang JSON track on the media clock, specified in the hang draft
-- [Browser composition](/quest/m0/compose/browser.md) - `@moq/watch` composes a broadcast with a layout track through moq-scene's browser build
-- [Server composition](/quest/m0/compose/server.md) - a headless compositor renders the program from sources and layout, headless
-- [Viewer controls](/quest/m0/compose/controls.md) - viewers toggle elements and the layout's priorities steer what they fetch
+- [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio publish their own tracks beside the picture sources, encoded whatever the demand and uploaded only while subscribed
+- [Layout track](/quest/m1/compose/layout.md) - the live scene state as a hang JSON track on the media clock, specified in the hang draft
+- [Browser composition](/quest/m1/compose/browser.md) - `@moq/watch` composes a broadcast with a layout track through moq-scene's browser build
+- [Server composition](/quest/m1/compose/server.md) - a headless compositor renders the program from sources and layout, headless
+- [Viewer controls](/quest/m1/compose/controls.md) - viewers toggle elements and the layout's priorities steer what they fetch

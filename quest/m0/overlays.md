@@ -3,10 +3,9 @@
 ## Goal
 
 Titles, lower thirds, tickers, and other graphics in `moq-studio` are written
-as HTML and CSS without JavaScript, travel in the layout track, and render in
-all three composition hosts: through Blitz in the studio and the headless compositor,
-and as real DOM over the video in the browser. CSS animations and transitions
-run on the media clock, so an overlay animates on the same frame everywhere.
+as HTML and CSS without JavaScript and render through Blitz into the program.
+CSS animations and transitions run on the media clock, so an overlay animates
+on the same frame in the program, a recording, and a replay.
 
 ## Plan
 
@@ -20,11 +19,11 @@ Decided 2026-10-26 (maintainer):
   JavaScript engine, and has no clock injection.
 - **Browser:** the DOM layered over the composited video, so no HTML-in-Canvas
   and it works in every browser today.
-- **Subset:** the layout track accepts only the CSS Blitz renders and refuses
+- **Subset:** an overlay accepts only the CSS Blitz renders and refuses
   the rest at setup with the property named. Blitz is beta (no blend modes or
   `text-shadow`, filters limited to blur and drop-shadow), and the subset
   grows as it does.
-- **Parity:** layout parity per the [composition epic](/quest/m0/compose/README.md);
+- **Parity:** layout parity per the [composition epic](/quest/m1/compose/README.md);
   the fixture compares boxes and timing, and pixels only loosely.
 
 An overlay is hostile input to every viewer, so it fetches nothing from the
@@ -37,6 +36,12 @@ upstream that if it cannot. Arbitrary web pages and JavaScript graphics stay
 browser sources (`moq_scene::browser`), baked into their own
 track.
 
-## Required
+Changed 2026-11-04 (maintainer): the program comes first, so this quest
+renders overlays in the studio only. Carrying them in the layout track, the
+browser's DOM rendering, and the headless compositor wait for the m1
+[composition epic](/quest/m1/compose/README.md); keep the overlay model free
+of studio-only state so that epic can serialize it.
 
-- [Layout track](/quest/m0/compose/layout.md) - where overlays travel
+## Related
+
+- [Layout track](/quest/m1/compose/layout.md) - where overlays travel to viewers in m1

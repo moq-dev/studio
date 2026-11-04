@@ -19,3 +19,4 @@ there first. A quest here that needs it waits on a pin quest, which
 ## Required
 
 - [m0: the studio](/quest/m0/README.md) - the native and wasm studio for creators who rely on OBS today
+- [m1: viewers compose](/quest/m1/README.md) - viewers and a server compose a broadcast from its sources and a layout track
