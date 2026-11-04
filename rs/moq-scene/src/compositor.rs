@@ -422,7 +422,7 @@ impl Pose {
 
 	/// `progress` of the way from `self` to `other`.
 	fn toward(&self, other: &Self, progress: f32) -> Self {
-		let mix = |from: f32, to: f32| from + (to - from) * progress;
+		let mix = |from: f32, to: f32| crate::collection::mix(from, to, progress);
 		Self {
 			rect: Rect {
 				x: mix(self.rect.x, other.rect.x),

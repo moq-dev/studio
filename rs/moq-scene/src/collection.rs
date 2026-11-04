@@ -655,7 +655,7 @@ impl Filter {
 	/// `None` if they are of different kinds or read different sources or
 	/// mask modes. A mix of valid settings is valid.
 	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Option<Self> {
-		let mix = |from: f32, to: f32| from + (to - from) * progress;
+		let mix = |from: f32, to: f32| mix(from, to, progress);
 		let color = |from: Rgba, to: Rgba| {
 			Rgba(std::array::from_fn(|channel| {
 				mix(f32::from(from.0[channel]), f32::from(to.0[channel])).round() as u8
@@ -892,6 +892,15 @@ impl Crop {
 		}
 		Ok(())
 	}
+}
+
+/// `progress` of the way from `from` to `to`, finite whenever both are, since
+/// it never leaves the range between them.
+pub(crate) fn mix(from: f32, to: f32, progress: f32) -> f32 {
+	// In f64, where neither product can overflow, and each term's weight
+	// rounds no larger than it is.
+	let progress = f64::from(progress);
+	(f64::from(from) * (1.0 - progress) + f64::from(to) * progress) as f32
 }
 
 pub(crate) fn validate_filters(filters: &[Filter], on: &str) -> Result<(), Error> {
@@ -1492,6 +1501,29 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			);
 			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{filter:?}");
 		}
+	}
+
+	/// Mixing two valid settings is valid, even from one end of the floats to
+	/// the other, and a mix of different kinds is refused.
+	#[test]
+	fn filters_mix_within_their_settings() {
+		let shadow = |x: f32| Filter::DropShadow {
+			x,
+			y: -x,
+			blur: 0.0,
+			color: Rgba([0, 0, 0, 255]),
+		};
+		for progress in [0.0, 0.25, 0.5, 1.0] {
+			let mixed = shadow(-f32::MAX).toward(&shadow(f32::MAX), progress).unwrap();
+			validate_filters(&[mixed], "mixed").unwrap();
+			let hue = |degrees| Filter::HueRotate { degrees };
+			let mixed = hue(f32::MAX).toward(&hue(-f32::MAX), progress).unwrap();
+			validate_filters(&[mixed], "mixed").unwrap();
+		}
+		assert_eq!(mix(-f32::MAX, f32::MAX, 0.5), 0.0);
+		assert_eq!(mix(f32::MAX, f32::MAX, 0.3), f32::MAX);
+		let invert = Filter::Invert { amount: 1.0 };
+		assert!(invert.toward(&Filter::Sepia { amount: 1.0 }, 0.5).is_none());
 	}
 
 	#[test]
