@@ -114,9 +114,7 @@ repository.
 - [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS
 - [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need
 - [Packaging](/quest/m0/packaging.md) - signed installers for macOS and Windows and a Flatpak for Linux
-- [One audio capture feeding the bus and an encoder is pinned](/quest/m0/pin-audio-capture.md) - moq-audio's capture split, for audio source tracks
 - [moq-mux's presentation timeline is pinned](/quest/m0/pin-presentation-timeline.md) - shared playout timing, for broadcast sync
-- [moq-audio's mix router is pinned](/quest/m0/pin-audio-mix-router.md) - several mixes and mix-minus, for audio mixes
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
 - [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - moq-audio's AAC encoders, for destinations
 - [moq-audio's filter chain is pinned](/quest/m0/pin-audio-filters.md) - the chain audio filters configure

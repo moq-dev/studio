@@ -47,7 +47,7 @@ pub async fn measure(
 		.create_track(TRACK, None)
 		.context("cannot create the probe track")?;
 	publication
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default())
 		.context("cannot announce the probe")?;
 
 	// One-shot, so a relay that refuses either side ends the probe with its reason

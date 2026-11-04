@@ -23,7 +23,8 @@ struct Studio {
 	compositor: Compositor,
 	device: wgpu::Device,
 	queue: wgpu::Queue,
-	bus: moq_audio::bus::Bus,
+	/// Advances the bus, which meters each source's strip.
+	mixer: moq_audio::bus::Driver,
 	_origin: moq_net::origin::Producer,
 	_dir: tempfile::TempDir,
 }
@@ -58,9 +59,10 @@ impl Studio {
 		let dir = tempfile::tempdir().unwrap();
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let bus = moq_audio::bus::Bus::new(Default::default()).unwrap();
+		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
 		let mut sources = Sources::new(Context {
-			bus: bus.clone(),
+			program: bus.mix(),
+			bus,
 			origin: origin.consume(),
 			dir: dir.path().to_path_buf(),
 			output: moq_video::render::output(&device),
@@ -79,7 +81,7 @@ impl Studio {
 			compositor,
 			device,
 			queue,
-			bus,
+			mixer,
 			_origin: origin,
 			_dir: dir,
 		}
@@ -199,10 +201,9 @@ async fn a_page_draws_and_plays() {
 
 		let strip = feed.strip().unwrap().clone();
 		let deadline = Instant::now() + TIMEOUT;
-		let mut samples = vec![0.0; 960];
 		while strip.level().peak() <= 0.0 {
 			assert!(Instant::now() < deadline, "the page's tone never reached the bus");
-			studio.bus.read(&mut samples);
+			studio.mixer.advance(480);
 			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 	})

@@ -8,14 +8,8 @@ after a second without a picture.
 
 ## Plan
 
-Audio capture runs inside the audio bus today, which reports no last-delivery
-time per source, so the stall check video sources have cannot see it. The
-capture Producer/Consumer split that the audio-capture pin brings gives the
-studio its own handle on each capture; read delivery from there rather than
+The audio bus reports no last-delivery time per source, so the stall check
+video sources have cannot see it. The studio opens each capture as a
+`capture::Producer`, so read delivery from a consumer of its own rather than
 adding a side channel in the bus. Raised on
 [#5](https://github.com/moq-dev/studio/pull/5).
-
-## Required
-
-- [moq-audio's capture split is pinned](/quest/m0/pin-audio-capture.md) - the
-  per-capture handle this reads
