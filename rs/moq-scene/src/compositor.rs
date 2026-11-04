@@ -90,7 +90,8 @@ impl effect::Library for Library<'_> {
 impl Compositor {
 	/// A compositor drawing `canvas`-sized pictures on `device`.
 	///
-	/// Fails if the device cannot hold a texture that large.
+	/// Fails if the canvas is invalid or the device cannot hold a texture that
+	/// large.
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, canvas: Canvas) -> Result<Self, Error> {
 		fits(device, canvas)?;
 
@@ -121,7 +122,8 @@ impl Compositor {
 	/// textures, and every other texture sized from the canvas, with ones of
 	/// that size, blank until drawn; a fade under way carries on.
 	///
-	/// Fails, changing nothing, if the device cannot hold a texture that large.
+	/// Fails, changing nothing, if the canvas is invalid or the device cannot
+	/// hold a texture that large.
 	pub fn set_canvas(&mut self, canvas: Canvas) -> Result<(), Error> {
 		fits(&self.device, canvas)?;
 		self.effects.set_canvas(canvas);
@@ -173,17 +175,19 @@ impl Compositor {
 	}
 
 	/// Follow each renamed scene to its new name, wherever it is: in preview,
-	/// on program, or fading out. `renames` maps each old name to its new one,
-	/// as [`Collection::renames`] reads them, and each scene is looked up once,
-	/// so a name one scene gave up and another took is not followed twice.
-	pub fn rename(&mut self, renames: &BTreeMap<String, String>) {
+	/// on program, or fading out, and drop each removed one, so a scene that
+	/// later takes its name does not go on program without a cut. `renames`
+	/// maps each old name to its new one, or `None`, as
+	/// [`Collection::renames`] reads them, and each scene is looked up once, so
+	/// a name one scene gave up and another took is not followed twice.
+	pub fn rename(&mut self, renames: &BTreeMap<String, Option<String>>) {
 		let fading = self.fade.as_mut().map(|fade| &mut fade.from);
 		for scene in [&mut self.preview_scene, &mut self.program_scene]
 			.into_iter()
 			.chain(fading)
 		{
 			if let Some(to) = scene.as_ref().and_then(|name| renames.get(name)) {
-				*scene = Some(to.clone());
+				*scene = to.clone();
 			}
 		}
 	}
@@ -313,8 +317,10 @@ impl Compositor {
 	}
 }
 
-/// Refuse a canvas larger than `device` can hold as a texture.
+/// Refuse an invalid canvas, or one larger than `device` can hold as a
+/// texture.
 fn fits(device: &wgpu::Device, canvas: Canvas) -> Result<(), Error> {
+	canvas.validate()?;
 	let limit = device.limits().max_texture_dimension_2d;
 	if canvas.width > limit || canvas.height > limit {
 		return Err(Error::Invalid(format!(
@@ -1259,6 +1265,8 @@ mod tests {
 				..wide
 			};
 			assert!(matches!(studio.compositor.set_canvas(huge), Err(Error::Invalid(_))));
+			let empty = Canvas { width: 0, ..wide };
+			assert!(matches!(studio.compositor.set_canvas(empty), Err(Error::Invalid(_))));
 			assert_eq!(studio.compositor.canvas(), wide);
 		})
 		.await;

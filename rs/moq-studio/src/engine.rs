@@ -156,8 +156,8 @@ impl State {
 
 	/// Make `collection`, which the edits `made` led to from the current one,
 	/// the one drawn, once the compositor takes its canvas. The scenes in
-	/// preview and on program follow the renames `made` holds, each edit read
-	/// against the collection it was made to.
+	/// preview and on program follow the renames and removals `made` holds,
+	/// each edit read against the collection it was made to.
 	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<()> {
 		let mut before = self.collection.clone();
 		let mut renames = Vec::with_capacity(made.len());
@@ -1328,14 +1328,14 @@ mod tests {
 		.expect("sound arrives");
 
 		// A resize while live ends the old track and lists a rendition of the
-		// new size under a new one, on the same timeline.
+		// new size and frame rate under a new one, on the same timeline.
 		{
 			let mut state = engine.state.lock().unwrap();
 			let mut draft = state.collection().draft("Resize the canvas");
 			let canvas = moq_scene::Canvas {
 				width: 160,
 				height: 90,
-				framerate: 30,
+				framerate: 15,
 			};
 			draft.set_canvas(canvas).unwrap();
 			state.commit(draft, None).unwrap();
@@ -1368,6 +1368,23 @@ mod tests {
 			.await
 			.expect("the resized picture arrives");
 		assert!(ended < first, "the new rendition continues the old one's timeline");
+		let next = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				match pictures.read().await.expect("decode") {
+					Some(moq_video::decode::Read::Frame(frame)) => return frame.timestamp,
+					Some(_) => continue,
+					None => panic!("the video ended"),
+				}
+			}
+		})
+		.await
+		.expect("a second resized picture arrives");
+		// At least 1/15 s apart, as the old 30 fps clock would not be.
+		let gap = Duration::from(next) - Duration::from(first);
+		assert!(
+			gap > Duration::from_millis(50),
+			"the program clock follows the frame rate: {gap:?}"
+		);
 
 		// An edit, and then its undo, reach the scene file and the history
 		// beside it through the autosave the studio runs.

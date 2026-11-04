@@ -331,37 +331,48 @@ impl Collection {
 		Ok(())
 	}
 
-	/// The new name of each scene `edit` renames, by its name here, before the
-	/// edit. A scene is followed by its place in the list rather than by name,
-	/// so an edit that reuses a name it just freed, such as renaming `A` to
-	/// `B` and the old `B` to `C`, maps each scene to its own new name.
-	/// Whatever follows a scene by name, such as the one in preview, looks its
-	/// name up here once.
-	pub fn renames(&self, edit: &Edit) -> BTreeMap<String, String> {
+	/// What becomes of each scene `edit` renames or removes, by its name here,
+	/// before the edit: its new name, or `None` once removed. A scene is
+	/// followed by its place in the list rather than by name, so an edit that
+	/// reuses a name it just freed, such as renaming `A` to `B` and the old `B`
+	/// to `C`, maps each scene to its own new name, and a scene taking a removed
+	/// one's name is not mistaken for it. A scene removed and put back unchanged
+	/// is the same one moved. Whatever follows a scene by name, such as the one
+	/// in preview, looks its name up here once.
+	pub fn renames(&self, edit: &Edit) -> BTreeMap<String, Option<String>> {
 		// Each place's scene: its name here, or `None` for one the edit added.
 		let mut scenes: Vec<(Option<&str>, &str)> = self
 			.scenes
 			.iter()
 			.map(|scene| (Some(scene.name.as_str()), scene.name.as_str()))
 			.collect();
+		// Scenes the edit removed, with what each was, until one is put back.
+		let mut removed: Vec<(Option<&str>, &Scene)> = Vec::new();
 		for change in &edit.changes {
 			let Change::Scene { index, before, after } = change else {
 				continue;
 			};
 			match (before, after) {
-				(None, Some(after)) if *index <= scenes.len() => scenes.insert(*index, (None, &after.name)),
-				(Some(_), None) if *index < scenes.len() => {
-					scenes.remove(*index);
+				(None, Some(after)) if *index <= scenes.len() => {
+					let back = removed.iter().position(|(_, scene)| *scene == after);
+					let was = back.and_then(|back| removed.remove(back).0);
+					scenes.insert(*index, (was, &after.name));
+				}
+				(Some(before), None) if *index < scenes.len() => {
+					let (was, _) = scenes.remove(*index);
+					removed.push((was, before));
 				}
 				(Some(_), Some(after)) if *index < scenes.len() => scenes[*index].1 = &after.name,
 				_ => {}
 			}
 		}
-		scenes
+		let kept = scenes
 			.into_iter()
-			.filter_map(|(was, now)| Some((was?, now)))
-			.filter(|(was, now)| was != now)
-			.map(|(was, now)| (was.to_string(), now.to_string()))
+			.filter_map(|(was, now)| Some((was?, Some(now))))
+			.filter(|(was, now)| Some(*was) != *now);
+		let gone = removed.into_iter().filter_map(|(was, _)| Some((was?, None)));
+		kept.chain(gone)
+			.map(|(was, now)| (was.to_string(), now.map(str::to_string)))
 			.collect()
 	}
 
@@ -995,10 +1006,10 @@ mod tests {
 		assert_eq!(history.entries().len(), 2, "a drag back to the start is no edit");
 	}
 
-	fn renamed(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+	fn renamed(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
 		pairs
 			.iter()
-			.map(|(was, now)| (was.to_string(), now.to_string()))
+			.map(|(was, now)| (was.to_string(), now.map(str::to_string)))
 			.collect()
 	}
 
@@ -1018,7 +1029,7 @@ mod tests {
 		draft.rename_scene(0, "Other").unwrap();
 		let edit = draft.finish().unwrap();
 		let renames = collection.renames(&edit);
-		assert_eq!(renames, renamed(&[("Scene", "Other"), ("Other", "Scene")]));
+		assert_eq!(renames, renamed(&[("Scene", Some("Other")), ("Other", Some("Scene"))]));
 		collection.apply(&edit).unwrap();
 		history.record(edit, None);
 		assert_eq!(collection.scenes[0].name, "Other");
@@ -1046,14 +1057,24 @@ mod tests {
 		let edit = draft.finish().unwrap();
 		assert_eq!(
 			collection.renames(&edit),
-			renamed(&[("Scene", "Other"), ("Other", "Next")]),
+			renamed(&[("Scene", Some("Other")), ("Other", Some("Next"))]),
 			"an added scene renames nothing"
 		);
 		collection.apply(&edit).unwrap();
 		assert_eq!(
 			collection.renames(&edit.inverse()),
-			renamed(&[("Other", "Scene"), ("Next", "Other")]),
-			"the undo maps each back"
+			renamed(&[("Other", Some("Scene")), ("Next", Some("Other")), ("New", None)]),
+			"the undo maps each back and removes the added scene"
+		);
+
+		// A removed scene maps to nothing, even when another takes its name.
+		let mut draft = collection.draft("Replace");
+		draft.remove_scene(1).unwrap();
+		draft.rename_scene(1, "Other").unwrap();
+		let edit = draft.finish().unwrap();
+		assert_eq!(
+			collection.renames(&edit),
+			renamed(&[("Other", None), ("Next", Some("Other"))])
 		);
 
 		// Names stay unique and non-empty.
