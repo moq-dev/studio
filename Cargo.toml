@@ -25,12 +25,13 @@ allow_attributes_without_reason = "warn"
 [workspace.dependencies]
 hang = { path = "moq/rs/hang" }
 kio = { path = "moq/rs/kio" }
+moq-auth = { path = "moq/rs/moq-auth", default-features = false }
 moq-audio = { path = "moq/rs/moq-audio", default-features = false }
-moq-auth = { path = "moq/rs/moq-auth" }
 moq-json = { path = "moq/rs/moq-json" }
 moq-mux = { path = "moq/rs/moq-mux" }
 moq-net = { path = "moq/rs/moq-net" }
 moq-relay = { path = "moq/rs/moq-relay", default-features = false }
+moq-room = { path = "moq/rs/moq-room" }
 moq-scene = { path = "rs/moq-scene" }
 moq-stats = { path = "moq/rs/moq-stats" }
 moq-tokio = { path = "moq/rs/moq-tokio", default-features = false }
