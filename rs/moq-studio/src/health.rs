@@ -21,9 +21,19 @@ pub use hang::health::Verdict;
 use hang::health::{self, Health, Input, Observer, Thresholds};
 use kio::clock::Instant;
 use moq_net::bandwidth::Rate;
+use moq_scene::source::Stall;
 
 /// How often the health is graded: as often as reporters write.
 pub const INTERVAL: Duration = Duration::from_secs(1);
+
+/// What a stalled source has gone without, such as "no new picture for 3 s".
+pub fn without(stall: Stall) -> String {
+	let what = match stall {
+		Stall::Picture(_) => "picture",
+		Stall::Sound(_) => "sound",
+	};
+	format!("no new {what} for {:.0} s", stall.since().as_secs_f64())
+}
 
 /// The prefix, under the broadcast's own path, where viewers publish feedback.
 const ECHO: &str = "viewers";
@@ -195,8 +205,8 @@ pub struct Local {
 	pub encoder: Option<String>,
 	/// Why the output stopped, if it did.
 	pub failed: Option<String>,
-	/// Sources the program shows that stopped delivering pictures, and for how long.
-	pub stalled: Vec<(String, Duration)>,
+	/// Sources the program shows or plays that stopped delivering, and what.
+	pub stalled: Vec<(String, Stall)>,
 }
 
 /// What the studio publishes, for grading its delivery.
@@ -577,12 +587,16 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		add(Verdict::Unhealthy, format!("The output stopped: {failed}."));
 	}
 
-	for (name, since) in &local.stalled {
+	for (name, stall) in &local.stalled {
+		let instead = match stall {
+			Stall::Picture(_) => "repeats its last one",
+			Stall::Sound(_) => "plays silence for it",
+		};
 		add(
 			Verdict::Unhealthy,
 			format!(
-				"Source `{name}` stalled: no new picture for {:.0} s, so the program repeats its last one.",
-				since.as_secs_f64()
+				"Source `{name}` stalled: {}, so the program {instead}.",
+				without(*stall)
 			),
 		);
 	}
@@ -1221,12 +1235,15 @@ mod tests {
 		);
 	}
 
-	/// Problems list worst first: an unreachable relay and a frozen source
-	/// above a slow round trip.
+	/// Problems list worst first: an unreachable relay and a frozen or silent
+	/// source above a slow round trip.
 	#[test]
 	fn problems_list_worst_first() {
 		let local = Local {
-			stalled: vec![("camera".into(), Duration::from_secs(3))],
+			stalled: vec![
+				("camera".into(), Stall::Picture(Duration::from_secs(3))),
+				("mic".into(), Stall::Sound(Duration::from_secs(2))),
+			],
 			..Default::default()
 		};
 		let uplink = Uplink {
@@ -1242,6 +1259,7 @@ mod tests {
 			[
 				"The relay https://a is unreachable (timed out), so nothing reaches viewers until a relay reconnects.",
 				"Source `camera` stalled: no new picture for 3 s, so the program repeats its last one.",
+				"Source `mic` stalled: no new sound for 2 s, so the program plays silence for it.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
 		);
