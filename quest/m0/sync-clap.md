@@ -22,7 +22,3 @@ The studio sees a source's audio only through its strip's level meter, read
 once a frame, which is too coarse to time a clap. Timing it needs the
 source's samples, or an onset, with their position on the bus clock, which is
 moq-audio work: land it there first and pin it.
-
-## Related
-
-- [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - broadcast sources align on the publisher's timestamps instead
