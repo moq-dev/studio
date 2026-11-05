@@ -11,9 +11,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use cef::*;
+use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 
 use super::outbox::Commands;
-use super::protocol::{Area, Channel, Command, Event, Format, Id, Layer, Open, Plane, Start, Texture};
+use super::protocol::{Area, Channel, Command, Event, Format, Id, Layer, Open, Plane, Raster, Start, Texture};
 use super::{Button, Input, Modifiers};
 
 /// Run one of CEF's subprocesses (renderer, GPU, utility, zygote).
@@ -101,7 +102,7 @@ fn serve() -> Result<(), String> {
 	let shared = Arc::new(Shared {
 		writer: Mutex::new(writer),
 		painted: Mutex::new(painted),
-		accelerated: start.accelerated,
+		accelerated: matches!(start.raster, Raster::Gpu { .. }),
 	});
 	// The studio shows why, rather than only that the helper exited.
 	browse(&shared, start, reader, painted_tx).inspect_err(|reason| _ = shared.send(&Event::Fatal(reason.clone()), &[]))
@@ -110,9 +111,27 @@ fn serve() -> Result<(), String> {
 /// Run CEF on the profile `start` names, opening and closing pages as the
 /// studio asks, until it closes the socket and the last page closes.
 fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc::Sender<()>) -> Result<(), String> {
+	// A crashed process is reported only once it is gone, and one dumping
+	// core is not gone yet: systemd-coredump took 20 to 70 seconds over a
+	// renderer, which left its page Starting meanwhile. CEF's subprocesses
+	// inherit the limit. 1, not 0: the kernel ignores the limit for a pipe
+	// core_pattern (systemd-coredump, Apport) except at 1, where it skips the
+	// handler, and a core file needs a page. A socket core_pattern (`@`), or
+	// a pipe under a hard limit of 0, which forbids 1, relies instead on the
+	// handler honouring the limit, as systemd-coredump does.
+	let core = getrlimit(Resource::Core);
+	setrlimit(
+		Resource::Core,
+		Rlimit {
+			current: Some(core.maximum.map_or(1, |maximum| maximum.min(1))),
+			maximum: core.maximum,
+		},
+	)
+	.map_err(|err| format!("cannot turn off core dumps: {err}"))?;
+
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 	let args = args::Args::new();
-	let mut app = HelperApp::new(HelperProcess::new(), start.render_node);
+	let mut app = HelperApp::new(HelperProcess::new(), start.raster);
 	let profile = CefString::from(start.profile.as_str());
 	let settings = Settings {
 		windowless_rendering_enabled: 1,
@@ -405,7 +424,7 @@ wrap_task! {
 wrap_app! {
 	struct HelperApp {
 		process: BrowserProcessHandler,
-		render_node: Option<String>,
+		raster: Raster,
 	}
 
 	impl App {
@@ -426,9 +445,23 @@ wrap_app! {
 				Some(&"autoplay-policy".into()),
 				Some(&"no-user-gesture-required".into()),
 			);
-			// Paint on the studio's GPU, which is the only one it imports from.
-			if let Some(node) = &self.render_node {
-				command_line.append_switch_with_value(Some(&"render-node-override".into()), Some(&node.as_str().into()));
+			match &self.raster {
+				// Paint on the studio's GPU, which is the only one it imports
+				// from.
+				Raster::Gpu { render_node: Some(node) } => {
+					command_line.append_switch_with_value(Some(&"render-node-override".into()), Some(&node.as_str().into()));
+				}
+				Raster::Gpu { render_node: None } => {}
+				// The pictures come back in memory anyway. Left to find a GPU,
+				// Chromium walks its fallbacks, and one can hang until its
+				// watchdog kills it seconds later, delaying the first paint.
+				// WebGL then needs SwiftShader, which Chromium runs only when
+				// told to, since it JITs page shaders in the GPU process. A
+				// browser source runs the pages its user picked, not the web.
+				Raster::Cpu => {
+					command_line.append_switch(Some(&"disable-gpu".into()));
+					command_line.append_switch(Some(&"enable-unsafe-swiftshader".into()));
+				}
 			}
 		}
 	}

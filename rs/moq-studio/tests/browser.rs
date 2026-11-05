@@ -239,6 +239,24 @@ async fn a_page_draws_and_plays() {
 	.await;
 }
 
+/// A page gets WebGL and WebGL2 contexts, and what it draws with them shows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_webgl_page_draws() {
+	local(async {
+		// Red unless both contexts exist, and then green from WebGL2.
+		let html = "<body style='margin:0;background:red'>\
+			<canvas id=c width=320 height=240 style='display:block'></canvas><script>\
+			const gl = document.getElementById('c').getContext('webgl2');\
+			const gl1 = document.createElement('canvas').getContext('webgl');\
+			if (gl && gl1) { gl.clearColor(0, 1, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); }\
+			</script></body>";
+		let mut studio = Studio::new(&[("page", page(html))]).await;
+		studio.until_center(GREEN, &[]).await;
+	})
+	.await;
+}
+
 /// A click reaches the page where the preview put it, and a popup it asks for
 /// opens nothing.
 #[tokio::test(flavor = "multi_thread")]
@@ -323,12 +341,12 @@ async fn a_page_that_closes_itself_fails_alone() {
 	.await;
 }
 
-/// A page whose renderer crashes fails its own source and leaves the canvas,
-/// while everything else keeps drawing. A crash of the helper every page
-/// shares fails them all and nothing else, and a reload starts a new one.
+/// A page whose renderer crashes on its first navigation fails its own
+/// source, while everything else keeps drawing. A crash of the helper every
+/// page shares fails them all and nothing else, and a reload starts a new one.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
-async fn a_crash_drops_only_its_source() {
+async fn a_crash_while_loading_drops_only_its_source() {
 	local(async {
 		let crash = Source::Browser {
 			url: "chrome://crash".into(),
@@ -355,6 +373,38 @@ async fn a_crash_drops_only_its_source() {
 
 		studio.reload("browser");
 		studio.until_center([255, 0, 0, 255], &["renderer"]).await;
+	})
+	.await;
+}
+
+/// A page whose renderer crashes after it has drawn fails its source and
+/// leaves the canvas, and a reload draws it again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_crash_after_drawing_leaves_the_canvas() {
+	local(async {
+		let red = page("<body style='background:red'></body>");
+		let mut studio = Studio::new(&[("blue", blue()), ("page", red)]).await;
+		studio.until_center([255, 0, 0, 255], &[]).await;
+
+		// Abort the page's renderer, and any spare one CEF keeps ready, which
+		// shows no page, as a failed assertion would: a crash that dumps core.
+		// (V8 takes a SIGSEGV that no fault raised and carries on.)
+		let helper = helper().expect("the page's helper is running");
+		let renderers = renderers(helper);
+		assert!(!renderers.is_empty(), "the page has a renderer");
+		for renderer in renderers {
+			let crashed = std::process::Command::new("kill")
+				.args(["-ABRT", &renderer.to_string()])
+				.status();
+			assert!(crashed.unwrap().success());
+		}
+		let reason = studio.until_failed("page").await;
+		assert!(reason.contains("renderer"), "{reason}");
+		studio.until_center(BLUE, &["page"]).await;
+
+		studio.reload("page");
+		studio.until_center([255, 0, 0, 255], &[]).await;
 	})
 	.await;
 }
@@ -437,16 +487,64 @@ async fn serve(html: &'static str) -> String {
 /// The one helper this test process still runs: a child started with the
 /// helper's argument.
 fn helper() -> Option<u32> {
-	let ours = std::process::id().to_string();
-	std::fs::read_dir("/proc").ok()?.flatten().find_map(|entry| {
-		let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
-		let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
-		// The parent is the second field after the parenthesized command.
-		let parent = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?;
-		let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
-		let helper = cmdline
-			.split(|byte| *byte == 0)
-			.any(|arg| arg == b"--moq-browser-helper");
-		(parent == ours && helper).then_some(pid)
-	})
+	let ours = std::process::id();
+	processes()
+		.into_iter()
+		.find(|process| process.parent == ours && process.args.iter().any(|arg| arg == b"--moq-browser-helper"))
+		.map(|process| process.pid)
+}
+
+/// The renderers under `helper`. CEF forks them from its zygote, whose
+/// arguments they keep, so they are told apart by the compositor thread every
+/// renderer runs.
+fn renderers(helper: u32) -> Vec<u32> {
+	let processes = processes();
+	let mut family = vec![helper];
+	let mut at = 0;
+	while let Some(&parent) = family.get(at) {
+		family.extend(
+			processes
+				.iter()
+				.filter(|process| process.parent == parent)
+				.map(|process| process.pid),
+		);
+		at += 1;
+	}
+	family
+		.into_iter()
+		.filter(|pid| {
+			let threads = std::fs::read_dir(format!("/proc/{pid}/task"))
+				.into_iter()
+				.flatten()
+				.flatten();
+			threads
+				.filter_map(|thread| std::fs::read_to_string(thread.path().join("comm")).ok())
+				.any(|name| name.trim_end() == "Compositor")
+		})
+		.collect()
+}
+
+struct Process {
+	pid: u32,
+	parent: u32,
+	args: Vec<Vec<u8>>,
+}
+
+/// Every process running.
+fn processes() -> Vec<Process> {
+	let Ok(entries) = std::fs::read_dir("/proc") else {
+		return Vec::new();
+	};
+	entries
+		.flatten()
+		.filter_map(|entry| {
+			let pid = entry.file_name().to_str()?.parse().ok()?;
+			let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+			// The parent is the second field after the parenthesized command.
+			let parent = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+			let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+			let args = cmdline.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect();
+			Some(Process { pid, parent, args })
+		})
+		.collect()
 }

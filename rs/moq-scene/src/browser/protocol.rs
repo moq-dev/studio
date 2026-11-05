@@ -50,14 +50,22 @@ pub(crate) enum Command {
 /// How a helper runs every page it opens.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Start {
-	/// Whether to paint into shared textures the studio imports, rather than
-	/// into memory it uploads.
-	pub accelerated: bool,
-	/// The DRM render node to paint on: the studio's GPU.
-	pub render_node: Option<String>,
+	pub raster: Raster,
 	/// The profile every page shares: cookies, storage, and cache. CEF lets
 	/// one process at a time hold it.
 	pub profile: String,
+}
+
+/// Where a helper's pages paint.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) enum Raster {
+	/// On the GPU, into shared textures the studio imports: on the DRM render
+	/// node named, the studio's GPU, or else on the one CEF picks.
+	Gpu { render_node: Option<String> },
+	/// In software, into memory the studio uploads. Startup never waits on a
+	/// GPU process CEF cannot start, and WebGL runs on SwiftShader.
+	#[default]
+	Cpu,
 }
 
 /// A page to open.
