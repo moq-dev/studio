@@ -200,7 +200,9 @@ fn main() -> anyhow::Result<ExitCode> {
 	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
 	engine.stop();
-	runtime.block_on(engine.recorder.done());
+	// Before the runtime goes, which would drop each relay session with the
+	// tail of the broadcast still on its way.
+	runtime.block_on(async { tokio::join!(engine.close(), engine.recorder.done()) });
 	if let (Err(err), Err(_)) = (&saved, &ran) {
 		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
 	}
