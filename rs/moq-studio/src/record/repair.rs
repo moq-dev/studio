@@ -119,7 +119,7 @@ impl Marker {
 	/// holds it.
 	fn claim(path: PathBuf) -> Option<Self> {
 		// Writable, as an exclusive lock needs on NFS.
-		let file = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+		let mut file = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
 			Ok(file) => file,
 			// Its recording finished meanwhile.
 			Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
@@ -137,8 +137,9 @@ impl Marker {
 				tracing::debug!(path = %path.display(), error = %err, "cannot lock a recording's marker");
 			}
 		}
-		// A repair that ended as this opened it removed it before letting go.
-		if !path.exists() {
+		// Whoever held it before removed it, and a new recording may have
+		// marked the same name since.
+		if !Self::named(&path, &mut file) {
 			return None;
 		}
 		Some(Self { path, file })
