@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_scene::browser::{Button, Input, Modifiers};
-use moq_scene::{Collection, Crop, Item, Rect, Source};
+use moq_scene::{Collection, Crop, Item, Layer, Rect, Source};
 
 /// How close in time and space a press must follow the last to count toward a
 /// double or triple click.
@@ -72,20 +72,24 @@ struct Place {
 
 impl Interact {
 	/// Turn this frame's input over `image`, which shows `scene` of
-	/// `collection` under its top layer, into what each page it touches should receive, by page
-	/// name. `scene` is the scene's name and how long it has been in the
-	/// preview, which places its items where their keyframes have them.
+	/// `collection` under its top layer on `canvas`, the main one for `None`,
+	/// into what each page it touches should receive, by page name. `scene` is
+	/// the scene's name and how long it has been in the preview, which places
+	/// its items where their keyframes have them.
 	pub fn update(
 		&mut self,
 		ui: &egui::Ui,
 		image: egui::Rect,
 		collection: &Collection,
+		canvas: Option<&str>,
 		scene: Option<(&str, Duration)>,
 	) -> Vec<(String, Input)> {
-		let canvas = collection.canvas;
+		let Some(size) = collection.canvas(canvas) else {
+			return Vec::new();
+		};
 		let on_canvas = |pos: egui::Pos2| {
-			let x = (pos.x - image.min.x) / image.width() * canvas.width as f32;
-			let y = (pos.y - image.min.y) / image.height() * canvas.height as f32;
+			let x = (pos.x - image.min.x) / image.width() * size.width as f32;
+			let y = (pos.y - image.min.y) / image.height() * size.height as f32;
 			(x, y)
 		};
 		let hit = |pos: egui::Pos2| -> Option<Hit> {
@@ -93,13 +97,13 @@ impl Interact {
 				return None;
 			}
 			let (x, y) = on_canvas(pos);
-			page_at(collection, scene, x, y)
+			page_at(collection, canvas, scene, x, y)
 		};
 		// Where `pos` falls on the captured page, even off its edges, where the
 		// pressed item shows it now.
 		let on_page = |capture: &Capture, pos: egui::Pos2| -> Option<(i32, i32)> {
 			let (x, y) = on_canvas(pos);
-			let item = shown(collection, scene).into_iter().nth(capture.slot);
+			let item = shown(collection, canvas, scene).into_iter().nth(capture.slot);
 			let place = item
 				.filter(|item| collection.capture(&item.source) == capture.page)
 				.map_or(capture.place, |item| Place::of(collection, &item));
@@ -251,7 +255,7 @@ impl Interact {
 					let scale = match unit {
 						egui::MouseWheelUnit::Point => 1.0,
 						egui::MouseWheelUnit::Line => 40.0,
-						egui::MouseWheelUnit::Page => canvas.height as f32,
+						egui::MouseWheelUnit::Page => size.height as f32,
 					};
 					send(
 						&page,
@@ -413,24 +417,35 @@ impl Interact {
 	}
 }
 
-/// The items of `scene`, a scene's name and how long it has been on, then of
-/// the top layer, back to front, each where its keyframes have it.
-fn shown<'a>(collection: &'a Collection, scene: Option<(&str, Duration)>) -> Vec<Cow<'a, Item>> {
+/// The items of `scene` on `canvas`, the main one for `None`, given as a
+/// scene's name and how long it has been on, then of that canvas's top layer,
+/// back to front, each where its keyframes have it.
+fn shown<'a>(collection: &'a Collection, canvas: Option<&str>, scene: Option<(&str, Duration)>) -> Vec<Cow<'a, Item>> {
 	let since = scene.map_or(Duration::ZERO, |(_, since)| since);
-	let scene = scene.and_then(|(name, _)| collection.scene(name));
-	let items = scene.map(|scene| scene.items.as_slice()).unwrap_or_default();
-	items
+	let layer = |scene: Option<&str>| Layer {
+		canvas: canvas.map(str::to_string),
+		scene: scene.map(str::to_string),
+	};
+	let items = |layer: Layer| collection.items(&layer).unwrap_or_default();
+	let scene = scene.map(|(name, _)| items(layer(Some(name)))).unwrap_or_default();
+	scene
 		.iter()
-		.chain(&collection.top)
+		.chain(items(layer(None)))
 		.map(|item| item.posed(since))
 		.collect()
 }
 
 /// The topmost visible browser source, or clone of one, at canvas point (`x`,
-/// `y`) in `scene` and the top layer over it, as [`shown`] places them, and
-/// the point on its page.
-fn page_at(collection: &Collection, scene: Option<(&str, Duration)>, x: f32, y: f32) -> Option<Hit> {
-	let items = shown(collection, scene);
+/// `y`) in `scene` and the top layer over it on `canvas`, as [`shown`] places
+/// them, and the point on its page.
+fn page_at(
+	collection: &Collection,
+	canvas: Option<&str>,
+	scene: Option<(&str, Duration)>,
+	x: f32,
+	y: f32,
+) -> Option<Hit> {
+	let items = shown(collection, canvas, scene);
 	items
 		.iter()
 		.enumerate()
@@ -627,11 +642,12 @@ mod tests {
 			height: 800.0,
 		};
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![item("alerts", fill, true), item("chat", corner, true)],
+			..Scene::new("Main")
 		}];
 		let main = Some(("Main", Duration::ZERO));
-		let at = |collection: &Collection, x, y| page_at(collection, main, x, y).map(|hit| (hit.page, hit.x, hit.y));
+		let at =
+			|collection: &Collection, x, y| page_at(collection, None, main, x, y).map(|hit| (hit.page, hit.x, hit.y));
 
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(at(&collection, 960.0, 540.0), Some(("alerts".into(), 400, 300)));
@@ -642,7 +658,7 @@ mod tests {
 			Some(("alerts".into(), 716, 377)),
 			"a hidden page takes no input"
 		);
-		assert!(page_at(&collection, Some(("Other", Duration::ZERO)), 1.0, 1.0).is_none());
+		assert!(page_at(&collection, None, Some(("Other", Duration::ZERO)), 1.0, 1.0).is_none());
 
 		// The top layer draws over every scene, and a clone shows its source's
 		// page, which runs under the source's name.
@@ -652,7 +668,7 @@ mod tests {
 		collection.top = vec![item("chat copy", corner, true)];
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(
-			page_at(&collection, None, 1720.0, 680.0).map(|hit| hit.page),
+			page_at(&collection, None, None, 1720.0, 680.0).map(|hit| hit.page),
 			Some("chat".into())
 		);
 
@@ -691,7 +707,7 @@ mod tests {
 			..moq_scene::Keyframe::new(Duration::ZERO)
 		}];
 		assert_eq!(at(&collection, 1320.0, 680.0), Some(("chat".into(), 300, 600)));
-		let later = page_at(&collection, Some(("Main", Duration::from_secs(9))), 1320.0, 680.0);
+		let later = page_at(&collection, None, Some(("Main", Duration::from_secs(9))), 1320.0, 680.0);
 		assert_eq!(
 			later.map(|hit| hit.page),
 			Some("chat".into()),
@@ -716,7 +732,7 @@ mod tests {
 		};
 		let mut delivered = Vec::new();
 		let mut output = ctx.run_ui(input, |ui| {
-			delivered = interact.update(ui, image, collection, Some(("Main", Duration::ZERO)));
+			delivered = interact.update(ui, image, collection, None, Some(("Main", Duration::ZERO)));
 		});
 		// Nothing renders, so the font atlas egui uploaded goes nowhere.
 		output.textures_delta.clear();
@@ -748,8 +764,8 @@ mod tests {
 			Item::new("chat", rect)
 		};
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![item(0.0), item(100.0)],
+			..Scene::new("Main")
 		}];
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();
@@ -817,11 +833,11 @@ mod tests {
 			},
 		];
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![Item {
 				keyframes,
 				..Item::new("chat", rect)
 			}],
+			..Scene::new("Main")
 		}];
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();
@@ -834,7 +850,7 @@ mod tests {
 			};
 			let mut delivered = Vec::new();
 			let mut output = ctx.run_ui(input, |ui| {
-				delivered = interact.update(ui, image, &collection, Some(("Main", since)));
+				delivered = interact.update(ui, image, &collection, None, Some(("Main", since)));
 			});
 			output.textures_delta.clear();
 			delivered
@@ -896,8 +912,8 @@ mod tests {
 			Item::new(source, rect)
 		};
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![item("left", 0.0), item("right", 100.0)],
+			..Scene::new("Main")
 		}];
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();
@@ -989,8 +1005,8 @@ mod tests {
 			},
 		);
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![Item::new("chat", Rect::fill(&collection.canvas))],
+			..Scene::new("Main")
 		}];
 		let delivered = frame(
 			&egui::Context::default(),
@@ -1047,8 +1063,8 @@ mod tests {
 			},
 		);
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![Item::new("chat", Rect::fill(&collection.canvas))],
+			..Scene::new("Main")
 		}];
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();
@@ -1102,8 +1118,8 @@ mod tests {
 			},
 		);
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: vec![Item::new("chat", Rect::fill(&collection.canvas))],
+			..Scene::new("Main")
 		}];
 		let ctx = egui::Context::default();
 		let mut interact = Interact::default();

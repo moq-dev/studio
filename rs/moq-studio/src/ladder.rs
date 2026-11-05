@@ -143,11 +143,6 @@ impl Gate {
 	pub fn alone(&mut self) {
 		self.control = rate::Control::new(rate::Policy::new(self.ceiling));
 	}
-
-	/// The name of the rendition's track.
-	pub fn track(&self) -> &str {
-		self.demand.name()
-	}
 }
 
 /// When a viewer joining a track asks for a keyframe: past the newest group,
