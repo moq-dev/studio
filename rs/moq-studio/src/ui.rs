@@ -2766,8 +2766,9 @@ impl Panels {
 	}
 
 	/// How the stream reaches viewers: what is wrong and why, each relay, the
-	/// uplink, each track, and each viewer that reports.
+	/// uplink, and each canvas's tracks and the viewers that report on it.
 	fn health(&mut self, ui: &mut Ui) {
+		repairs(ui, &self.engine.recorder.repairs());
 		let report = self.engine.health.lock().unwrap();
 		if report.relays.is_empty() {
 			ui.label("Not publishing; start with --connect to see how the stream is delivered.");
@@ -2944,6 +2945,32 @@ fn tracks_health(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tracks
 			ui.end_row();
 		}
 	});
+}
+
+/// The recordings a crash left unfinished, found at launch, and how each
+/// repair went.
+fn repairs(ui: &mut Ui, repairs: &[record::Repair]) {
+	if repairs.is_empty() {
+		return;
+	}
+	let file = |path: &std::path::Path| path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+	for repair in repairs {
+		let name = file(&repair.path);
+		match &repair.outcome {
+			None => ui.weak(format!("Repairing {name}, which the studio left unfinished")),
+			Some(record::Repaired::Saved(repaired)) => ui.colored_label(
+				DEGRADED,
+				format!("{name} was left unfinished; repaired as {}", file(repaired)),
+			),
+			Some(record::Repaired::Finished) => ui.weak(format!("{name} was already finished")),
+			Some(record::Repaired::Empty) => ui.weak(format!("{name} was left unfinished with nothing recorded")),
+			Some(record::Repaired::Failed(reason)) => {
+				ui.colored_label(ui.visuals().error_fg_color, format!("Cannot repair {name}: {reason}"))
+			}
+		}
+		.on_hover_text(repair.path.display().to_string());
+	}
+	ui.separator();
 }
 
 const HEALTHY: Color32 = Color32::from_rgb(80, 200, 120);

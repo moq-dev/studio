@@ -69,6 +69,9 @@ moq-video = { workspace = true }
 pollster = { workspace = true }
 # The join link's QR code. No dependencies of its own.
 qrcodegen = "1.8"
+# Whether a recording's marker is still the file its holder locked, which std
+# cannot tell on Windows.
+same-file = "1.0.6"
 # The guests removed from scenes, kept beside the scene file.
 serde = { workspace = true }
 tempfile = { workspace = true }
