@@ -1,7 +1,8 @@
 // Every draw the compositor makes: a quad sampling one picture, through a list
 // of per-pixel filters, a blur, or a drop shadow. Colors are gamma-encoded
-// sRGB, as CSS filters see them. Rasters between passes hold premultiplied
-// alpha, so a blur weighs a transparent pixel as nothing.
+// sRGB, as CSS filters see them. Every picture and every raster between passes
+// holds premultiplied alpha, so neither scaling nor a blur mixes in a
+// transparent pixel's color.
 
 const OPS: u32 = 8u;
 
@@ -19,8 +20,7 @@ const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 struct Op {
 	kind: vec4<u32>,
 	// MATRIX: unused. CHROMA_KEY: key Cb, key Cr, similarity, smoothness.
-	// LUMA_KEY: min, max, smoothness. LUT: amount, size. MASK: mode, and 1 if
-	// the mask is premultiplied.
+	// LUMA_KEY: min, max, smoothness. LUT: amount, size. MASK: mode.
 	params: vec4<f32>,
 	// MATRIX: applied to straight RGBA. LUT: the domain's max in column 0.
 	matrix: mat4x4<f32>,
@@ -39,7 +39,7 @@ struct Draw {
 	item: vec4<f32>,
 	// The aux texture's coordinates at the quad's corners.
 	aux: vec4<f32>,
-	// Ops in x, whether the input is premultiplied in y, the blend mode in z.
+	// Ops in x, the blend mode in z.
 	mode: vec4<u32>,
 	// A blur's step between taps in xy, its standard deviation in z, and its
 	// taps each side in w, all in texels.
@@ -79,7 +79,8 @@ fn within(uv: vec2<f32>, low: vec2<f32>, high: vec2<f32>) -> bool {
 	return all(uv >= low) && all(uv <= high);
 }
 
-// The input at `uv`, transparent outside its picture, as CSS's edge mode none.
+// The input at `uv`, premultiplied, and transparent outside its picture, as
+// CSS's edge mode none.
 fn fetch(uv: vec2<f32>) -> vec4<f32> {
 	if !within(uv, draw.valid.xy, draw.valid.zw) {
 		return vec4<f32>(0.0);
@@ -90,9 +91,6 @@ fn fetch(uv: vec2<f32>) -> vec4<f32> {
 // The input at `uv`, with straight alpha.
 fn straight(uv: vec2<f32>) -> vec4<f32> {
 	let color = fetch(uv);
-	if draw.mode.y == 0u {
-		return color;
-	}
 	if color.a <= 0.0 {
 		return vec4<f32>(0.0);
 	}
@@ -138,14 +136,14 @@ fn lookup(rgb: vec3<f32>, op: Op) -> vec3<f32> {
 }
 
 // The mask's coverage at `item`, stretched over the item and empty outside it.
+// Luminance is of the premultiplied color, so a transparent texel covers none.
 fn coverage(item: vec2<f32>, op: Op) -> f32 {
 	if !within(item, vec2<f32>(0.0), vec2<f32>(1.0)) {
 		return 0.0;
 	}
 	let color = textureSampleLevel(mask, bilinear, item, 0.0);
 	if op.params.x > 0.5 {
-		let rgb = select(color.rgb * color.a, color.rgb, op.params.y > 0.5);
-		return dot(rgb, LUMA);
+		return dot(color.rgb, LUMA);
 	}
 	return color.a;
 }

@@ -426,8 +426,10 @@ impl Compositor {
 				overlay: None,
 				error: None,
 			});
-			// A page arrives premultiplied; frames and images are straight.
-			let premultiplied = matches!(picture, source::Picture::Texture(_));
+			// Every picture lands premultiplied, so scaling it mixes no
+			// transparent texel's color: a page arrives so, moq-video renders
+			// a frame opaque, a still is premultiplied here, and an overlay's
+			// paint as it lands.
 			let texture = match picture {
 				source::Picture::Frame(frame) => {
 					let renderer = match layer.renderer.as_mut() {
@@ -439,7 +441,10 @@ impl Compositor {
 						.and_then(|renderer| renderer.render(&frame))
 						.map_err(Error::from)
 				}
-				source::Picture::Rgba { size, pixels } => upload(&self.device, &self.queue, size, &pixels),
+				source::Picture::Rgba { size, mut pixels } => {
+					premultiply(&mut pixels);
+					upload(&self.device, &self.queue, size, &pixels)
+				}
 				source::Picture::Texture(texture) => Ok(texture),
 				source::Picture::Lut(cube) => {
 					layer.lut = Some(self.effects.lut(&cube));
@@ -456,7 +461,7 @@ impl Compositor {
 					match overlays {
 						Ok(overlays) => {
 							let overlay = overlays.open(html, *width, *height, now);
-							layer.picture = Some(self.effects.picture(overlay.texture(), false));
+							layer.picture = Some(self.effects.picture(overlay.texture()));
 							layer.overlay = Some(overlay);
 						}
 						Err(err) => layer.error = Some(err.to_string()),
@@ -468,7 +473,7 @@ impl Compositor {
 			match texture {
 				Ok(texture) => {
 					layer.error = None;
-					layer.picture = Some(self.effects.picture(&texture, premultiplied));
+					layer.picture = Some(self.effects.picture(&texture));
 				}
 				Err(err) => {
 					if layer.error.is_none() {
@@ -926,6 +931,16 @@ impl Draw<'_> {
 	}
 }
 
+/// Premultiply tightly packed RGBA in place.
+fn premultiply(pixels: &mut [u8]) {
+	for pixel in pixels.as_chunks_mut::<4>().0 {
+		let alpha = u16::from(pixel[3]);
+		for channel in &mut pixel[..3] {
+			*channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+		}
+	}
+}
+
 /// A texture holding tightly packed RGBA pixels.
 fn upload(
 	device: &wgpu::Device,
@@ -992,7 +1007,8 @@ impl Target {
 				| wgpu::TextureUsages::COPY_SRC,
 			view_formats: &[],
 		});
-		let picture = effects.picture(&texture, false);
+		// A canvas is opaque, which is premultiplied too.
+		let picture = effects.picture(&texture);
 		Self { texture, picture }
 	}
 }
@@ -2155,6 +2171,95 @@ mod tests {
 				assert_eq!(pixel(&program, 6, y), RED, "row {y}");
 			}
 			assert_eq!(pixel(&program, 1, 4), RED, "an offline mask hides the item");
+		})
+		.await;
+	}
+
+	/// A scaled picture mixes its texels premultiplied, so the color of a
+	/// transparent texel bleeds into no edge, of a still, an overlay's
+	/// straight paint, or a luminance mask, while the edge still fades.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn scaling_bleeds_no_transparent_color() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			// Red beside a transparent green, which straight mixing tints the
+			// edge with.
+			image::RgbaImage::from_fn(2, 1, |x, _| image::Rgba(if x == 0 { RED } else { [0, 255, 0, 0] }))
+				.save(dir.path().join("logo.png"))
+				.unwrap();
+			// White, black, then a transparent white, which straight mixing
+			// lets show through where the mask is black.
+			image::RgbaImage::from_fn(3, 1, |x, _| {
+				image::Rgba([[255; 4], BLACK, [255, 255, 255, 0]][x as usize])
+			})
+			.save(dir.path().join("mask.png"))
+			.unwrap();
+			let mut collection = collection();
+			for name in ["logo", "mask"] {
+				collection.sources.insert(
+					name.into(),
+					Source::Image {
+						path: format!("{name}.png").into(),
+					},
+				);
+			}
+			// White beside transparent, painted straight.
+			collection.sources.insert(
+				"overlay".into(),
+				Source::Overlay {
+					html: "<style>
+						body { margin: 0 }
+						div { width: 1px; height: 1px; background: white }
+					</style><div></div>"
+						.into(),
+					width: 2,
+					height: 1,
+				},
+			);
+			let row = |source: &str, y| {
+				Item::new(
+					source,
+					Rect {
+						x: 0.0,
+						y,
+						width: 8.0,
+						height: 2.0,
+					},
+				)
+			};
+			collection.scenes[0].items = vec![
+				row("logo", 0.0),
+				row("overlay", 2.0),
+				Item {
+					filters: vec![Filter::Mask {
+						source: "mask".into(),
+						mode: MaskMode::Luminance,
+					}],
+					..row("blue", 4.0)
+				},
+			];
+			let program = drawn(collection, dir).await;
+
+			for x in 0..8 {
+				let logo = pixel(&program, x, 0);
+				assert_eq!(logo[1..3], [0, 0], "logo at {x}: {logo:?}");
+				// The overlay's edge fades as the logo's does.
+				let overlay = pixel(&program, x, 2);
+				assert!(
+					near(overlay, rgb([logo[0]; 3])),
+					"overlay at {x}: {overlay:?}, logo {logo:?}"
+				);
+			}
+			assert_eq!(pixel(&program, 0, 0), RED);
+			let edge = pixel(&program, 3, 0)[0];
+			assert!(0 < edge && edge < 255, "the logo's edge fades: {edge}");
+			assert_eq!(pixel(&program, 7, 0), BLACK);
+
+			assert_eq!(pixel(&program, 0, 4), BLUE);
+			for x in 4..8 {
+				assert_eq!(pixel(&program, x, 4), BLACK, "mask at {x}");
+			}
 		})
 		.await;
 	}
