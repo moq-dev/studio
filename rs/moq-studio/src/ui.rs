@@ -199,10 +199,14 @@ impl eframe::App for Studio {
 		self.panels.follow_reloads(&state);
 		// A page painting in memory copies through the studio's clipboard,
 		// even if the preview let go of the page before the copy came back.
-		for (_, feed) in state.sources.iter() {
-			if let Some(text) = feed.page().and_then(|page| page.copied()) {
-				ui.ctx().copy_text(text);
-			}
+		if let Some(text) = state
+			.sources
+			.context()
+			.browser
+			.as_ref()
+			.and_then(|helper| helper.copied())
+		{
+			ui.ctx().copy_text(text);
 		}
 		drop(state);
 

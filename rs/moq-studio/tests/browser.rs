@@ -362,10 +362,11 @@ async fn copy_and_cut_reach_the_clipboard() {
 			shift: true,
 			..Default::default()
 		};
+		let helper = studio.helper.clone();
 		let copied = async || {
 			let deadline = Instant::now() + TIMEOUT;
 			loop {
-				if let Some(copied) = page.copied() {
+				if let Some(copied) = helper.copied() {
 					return copied;
 				}
 				assert!(Instant::now() < deadline, "the copy never came back");
@@ -398,7 +399,7 @@ async fn copy_and_cut_reach_the_clipboard() {
 		page.send(Input::Copy);
 		page.send(Input::Text("x".into()));
 		studio.until_center([255, 255, 255, 255], &[]).await;
-		assert_eq!(page.copied(), None, "a password was copied");
+		assert_eq!(helper.copied(), None, "a password was copied");
 
 		key(b'\t', shift);
 		key(b'A', ctrl);

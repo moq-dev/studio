@@ -107,6 +107,9 @@ struct Routes {
 	pages: HashMap<Id, Route>,
 	/// Why the helper stopped, once it has: no page opens in it after.
 	ended: Option<String>,
+	/// What a page last copied or cut, until the studio takes it. One slot
+	/// for every page, so a newer copy always replaces an older one.
+	copied: Option<String>,
 }
 
 /// One open page's source.
@@ -274,6 +277,11 @@ impl Instance {
 		state.commands = Some(self.commands.clone());
 		state.flush();
 		Ok(opened)
+	}
+
+	/// Take what a page last copied or cut, once.
+	pub(super) fn copied(&self) -> Option<String> {
+		self.routes.lock().unwrap().copied.take()
 	}
 
 	/// Ask the helper to exit, and wait until it has.
@@ -454,10 +462,8 @@ fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Rout
 				routes.lock().unwrap().play(id, &samples);
 				continue;
 			}
-			Event::Copied(id, text) => {
-				if let Some(route) = routes.lock().unwrap().pages.get(&id) {
-					route.page.state.lock().unwrap().copied = Some(text);
-				}
+			Event::Copied(text) => {
+				routes.lock().unwrap().copied = Some(text);
 				continue;
 			}
 			Event::Failed(id, reason) => {

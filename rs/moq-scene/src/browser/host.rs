@@ -643,7 +643,7 @@ wrap_client! {
 			COPYING.set(None);
 			let text = CefString::from(&args.string(0)).to_string();
 			if !text.is_empty() {
-				self.page.shared.send(&Event::Copied(self.page.id, text), &[]);
+				self.page.shared.send(&Event::Copied(text), &[]);
 			}
 			1
 		}

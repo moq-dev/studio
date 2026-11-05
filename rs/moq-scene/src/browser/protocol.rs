@@ -106,7 +106,7 @@ pub(crate) enum Event {
 	Audio(Id, Vec<f32>),
 	/// The text a [`Input::Copy`] or [`Input::Cut`] took from a page, for the
 	/// studio's clipboard.
-	Copied(Id, String),
+	Copied(String),
 	/// A page cannot be shown, and why.
 	Failed(Id, String),
 	/// No page can be shown, and why. The helper exits next.
