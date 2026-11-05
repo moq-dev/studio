@@ -1371,8 +1371,9 @@ impl Driver {
 				{
 					sound.channel = Some(self.channel(strip.clone())?);
 				}
+				// A new cue first, so a picture due as it comes never shows.
 				let played = tokio::select! {
-					result = self.play_clip(&clip, sound.as_mut(), &mut own, next, cue.play) => Some(result?),
+					biased;
 					changed = cues.changed() => {
 						// The feed is gone, which stops this driver anyway.
 						if changed.is_err() {
@@ -1380,6 +1381,7 @@ impl Driver {
 						}
 						None
 					}
+					result = self.play_clip(&clip, sound.as_mut(), &mut own, next, cue.play) => Some(result?),
 				};
 				if let Some(end) = played {
 					self.ran(cue.play, |run| {
@@ -1399,10 +1401,8 @@ impl Driver {
 			cut(&mut sound, &mut own);
 			cue = *cues.borrow_and_update();
 			next = None;
-			if cue.stopped {
-				// Over any picture shown after the feed blanked it.
-				*self.picture.lock().unwrap() = Some(clear());
-			}
+			// Over any picture the play cut off showed after the feed blanked it.
+			*self.picture.lock().unwrap() = Some(clear());
 		}
 	}
 
