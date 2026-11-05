@@ -63,6 +63,9 @@ pub struct Compositor {
 	preview_start: Option<Instant>,
 	/// When the program scene went on program, as `preview_start` is.
 	program_start: Option<Instant>,
+	/// How long the preview scene had been in preview as of the last render:
+	/// the moment of its keyframes the preview texture shows.
+	preview_shown: Duration,
 	switch: Option<Switch>,
 }
 
@@ -136,6 +139,7 @@ impl Compositor {
 			program_scene: None,
 			preview_start: None,
 			program_start: None,
+			preview_shown: Duration::ZERO,
 			switch: None,
 		})
 	}
@@ -212,11 +216,11 @@ impl Compositor {
 		self.preview_start = None;
 	}
 
-	/// How long the preview scene has been in preview as of `now`: where its
-	/// items' keyframes are, for [`Item::posed`].
-	pub fn preview_since(&self, now: Instant) -> Duration {
-		self.preview_start
-			.map_or(Duration::ZERO, |start| now.saturating_duration_since(start))
+	/// How long the preview scene had been in preview as of the last
+	/// [`render`](Self::render): the moment of its items' keyframes the
+	/// [`preview`](Self::preview) shows, for [`Item::posed`].
+	pub fn preview_since(&self) -> Duration {
+		self.preview_shown
 	}
 
 	/// Follow each renamed scene to its new name, wherever it is: in preview,
@@ -286,6 +290,7 @@ impl Compositor {
 
 		let since = |start: &mut Option<Instant>| now.saturating_duration_since(*start.get_or_insert(now));
 		let preview_since = since(&mut self.preview_start);
+		self.preview_shown = preview_since;
 		let program_since = since(&mut self.program_start);
 
 		let linear = self.switch.as_ref().map(|switch| {
@@ -1370,6 +1375,11 @@ mod tests {
 			studio.render(at(0));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK, "off the canvas");
 			studio.render(at(500));
+			assert_eq!(
+				studio.compositor.preview_since(),
+				Duration::from_millis(500),
+				"the frame shown"
+			);
 			let preview = studio.preview();
 			assert_eq!(pixel(&preview, 1, 6), BLUE, "halfway in");
 			assert_eq!(pixel(&preview, 6, 6), BLACK);

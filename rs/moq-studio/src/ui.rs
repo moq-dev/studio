@@ -752,7 +752,7 @@ impl Panels {
 		// Interacting, the pointer belongs to the pages rather than to arranging.
 		if self.interacting {
 			let image = picture(ui, self.preview.id, canvas, egui::Sense::hover()).rect;
-			let since = state.compositor.preview_since(kio::clock::Instant::now());
+			let since = state.compositor.preview_since();
 			let scene = state.compositor.preview_scene().map(|scene| (scene, since));
 			self.rebind(&state.sources);
 			let delivered = self.interact.update(ui, image, state.collection(), scene);
@@ -790,7 +790,7 @@ impl Panels {
 		let Some(resting) = state.collection().items(&layer).cloned() else {
 			return Ok(());
 		};
-		let since = state.compositor.preview_since(kio::clock::Instant::now());
+		let since = state.compositor.preview_since();
 		let items: Vec<Item> = resting.iter().map(|item| item.posed(since).into_owned()).collect();
 		let selected = match &self.selection {
 			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
