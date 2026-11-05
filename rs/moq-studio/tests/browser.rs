@@ -332,10 +332,11 @@ async fn a_dropdown_draws_and_takes_clicks() {
 async fn copy_and_cut_reach_the_clipboard() {
 	local(async {
 		// A text box over the whole page, and a password field below it. The
-		// page turns blue once the password is selected, white once it is
-		// typed in, and lime once the text box is.
+		// page turns yellow once the text box is selected, lime once it is
+		// typed in, and blue and white for the same on the password.
 		let html = "<body style='margin:0;background:red'>\
 			<input value='hello world' style='width:100vw;height:100vh;background:transparent' \
+			onselect=\"document.body.style.background = 'yellow'\" \
 			oninput=\"document.body.style.background = 'lime'\">\
 			<input type=password value='hunter2' \
 			onselect=\"document.body.style.background = 'blue'\" \
@@ -361,16 +362,14 @@ async fn copy_and_cut_reach_the_clipboard() {
 			shift: true,
 			..Default::default()
 		};
-		// The selection reaches the helper after the keys that make it.
-		let copy = async || {
+		let copied = async || {
 			let deadline = Instant::now() + TIMEOUT;
 			loop {
-				page.send(Input::Copy);
-				kio::clock::sleep(Duration::from_millis(30)).await;
 				if let Some(copied) = page.copied() {
 					return copied;
 				}
 				assert!(Instant::now() < deadline, "the copy never came back");
+				kio::clock::sleep(Duration::from_millis(30)).await;
 			}
 		};
 
@@ -385,8 +384,12 @@ async fn copy_and_cut_reach_the_clipboard() {
 				modifiers: Modifiers::default(),
 			});
 		}
+		// Copy is asked of the page only once it shows the selection, which
+		// the renderer then has.
 		key(b'A', ctrl);
-		assert_eq!(copy().await, "hello world");
+		studio.until_center(YELLOW, &[]).await;
+		page.send(Input::Copy);
+		assert_eq!(copied().await, "hello world");
 
 		// Text typed after the copy shows only once the copy has come back.
 		key(b'\t', Modifiers::default());
@@ -399,10 +402,10 @@ async fn copy_and_cut_reach_the_clipboard() {
 
 		key(b'\t', shift);
 		key(b'A', ctrl);
-		assert_eq!(copy().await, "hello world");
+		studio.until_center(YELLOW, &[]).await;
 		page.send(Input::Cut);
 		studio.until_center(GREEN, &[]).await;
-		assert_eq!(page.copied().as_deref(), Some("hello world"));
+		assert_eq!(copied().await, "hello world");
 	})
 	.await;
 }
@@ -532,6 +535,7 @@ async fn cookies_survive_a_restart() {
 }
 
 const GREEN: [u8; 4] = [0, 255, 0, 255];
+const YELLOW: [u8; 4] = [255, 255, 0, 255];
 
 /// Serve `html` over HTTP on loopback to every request, returning its URL,
 /// since a cookie needs an origin a `data:` page lacks.
