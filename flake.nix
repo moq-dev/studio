@@ -138,12 +138,10 @@
                 pango
                 stdenv.cc.cc
               ];
-              # Opened at run time rather than linked.
-              runtimeDependencies = with pkgs; [
-                libGL
-                udev
-                vulkan-loader
-              ];
+              # libEGL, which libcef.so opens at run time rather than links:
+              # without it the GPU process cannot start, and pages paint in
+              # memory. runtimeDependencies would reach only executables.
+              appendRunpaths = [ "${lib.getLib pkgs.libGL}/lib" ];
               dontStrip = true;
               installPhase = ''
                 runHook preInstall

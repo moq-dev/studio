@@ -270,7 +270,9 @@ Either shows at once, since the browser's processes dump no core.
 **Reload** in Sources restarts a page, failed or not. A page's dropdown
 lists, such as a `<select>`'s, draw over it and take clicks under
 **Interact**, but it opens no other windows (`window.open` and new-tab links
-do nothing).
+do nothing). Copy and Cut there put the page's selected text on the clipboard,
+as plain text, which the page's own copy handlers cannot change, and copy
+nothing from a password field.
 
 An overlay is a title, lower third, or other graphic written as HTML and CSS,
 drawn by the studio itself (through [Blitz](https://github.com/DioxusLabs/blitz))
@@ -785,13 +787,13 @@ Sources make the opposite trip. A frame already on the GPU is drawn where it
 lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
 driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
 macOS. A browser source's page is copied on the GPU from the shared texture CEF
-paints, given the same Vulkan DMA-BUF import. Every other source, every source
-on Windows or on a GPU that cannot import, and every still image delivers its
-frames from the CPU, which the compositor uploads. A browser source on that
-path renders its page in software, WebGL included, so a WebGL page runs
-slower there, and needs no X server or `$DISPLAY`: it runs under Wayland
-without XWayland, and with no display at all. A page copied on the GPU still
-opens the X display.
+paints, given the same Vulkan DMA-BUF import and a display to paint through:
+the Wayland one when `$WAYLAND_DISPLAY` is set, needing no XWayland, or else
+the X one in `$DISPLAY`. Every other source, every source on Windows or on a
+GPU that cannot import, and every still image delivers its frames from the
+CPU, which the compositor uploads. A browser source takes that path with no
+display at all too, and there renders its page in software, WebGL included, so
+a WebGL page runs slower.
 
 ## Replay
 

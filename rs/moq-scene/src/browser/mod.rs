@@ -11,10 +11,10 @@
 //! executable started again, which calls [`child`] first thing in `main` to
 //! become one; CEF's own subprocesses start the same way. The helper paints
 //! into a shared GPU texture the studio copies on its device, or into memory
-//! the studio uploads when either side cannot share textures ([`Paint`] says
-//! which). Its popups, such as a `<select>`'s list, arrive the same way apart
-//! from the page, and the studio draws them over it. A page's sound joins the
-//! program bus at the bus's rate.
+//! the studio uploads when either side cannot share textures or there is no
+//! display to paint them through ([`Paint`] says which). Its popups, such as a
+//! `<select>`'s list, arrive the same way apart from the page, and the studio
+//! draws them over it. A page's sound joins the program bus at the bus's rate.
 //!
 //! Linux only for now, and only with the `cef` feature: elsewhere a browser
 //! source reports that it is unsupported.
@@ -87,12 +87,9 @@ pub struct Helper {
 	profile: PathBuf,
 	device: wgpu::Device,
 	queue: wgpu::Queue,
-	/// Whether pages paint into shared textures the device imports, rather
-	/// than into memory it uploads.
-	shared: bool,
-	/// The device's DRM render node, which CEF must paint on for the studio to
-	/// import what it paints.
-	render_node: Option<PathBuf>,
+	/// Where pages paint.
+	#[cfg(target_os = "linux")]
+	raster: protocol::Raster,
 	/// The helper, once a page has started it.
 	#[cfg(target_os = "linux")]
 	running: Arc<Mutex<Option<Arc<run::Instance>>>>,
@@ -114,34 +111,22 @@ impl Helper {
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
 	) -> Self {
-		let info = adapter.get_info();
-		// A software device holds a shared texture in memory anyway, so there
-		// the page paints in software too.
-		let shared = cfg!(feature = "cef")
-			&& info.device_type != wgpu::DeviceType::Cpu
-			&& device
-				.features()
-				.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF);
-		// A machine with two GPUs would otherwise paint on whichever CEF
-		// picks, and the studio cannot import from another GPU.
-		let render_node = (!info.device_pci_bus_id.is_empty())
-			.then(|| std::fs::canonicalize(format!("/dev/dri/by-path/pci-{}-render", info.device_pci_bus_id)).ok())
-			.flatten();
+		#[cfg(not(target_os = "linux"))]
+		let _ = adapter;
 		Self {
 			program: program.into(),
 			profile: profile.into(),
 			device: device.clone(),
 			queue: queue.clone(),
-			shared,
-			render_node,
+			#[cfg(target_os = "linux")]
+			raster: raster(adapter, device),
 			#[cfg(target_os = "linux")]
 			running: Default::default(),
 		}
 	}
 
 	/// Take what a page last copied or cut, once, for the desktop's
-	/// clipboard: a page that paints in memory has no display to put it there
-	/// itself.
+	/// clipboard, which CEF cannot reach itself from an offscreen page.
 	#[cfg(target_os = "linux")]
 	pub fn copied(&self) -> Option<String> {
 		let running = self.running.lock().unwrap();
@@ -170,13 +155,49 @@ impl Helper {
 	}
 }
 
+/// Where pages paint, decided once from what the studio's device and session
+/// offer.
+#[cfg(target_os = "linux")]
+fn raster(adapter: &wgpu::Adapter, device: &wgpu::Device) -> protocol::Raster {
+	use protocol::{Display, Raster};
+
+	let info = adapter.get_info();
+	// A software device holds a shared texture in memory anyway, so there the
+	// page paints in software too.
+	let shared = cfg!(feature = "cef")
+		&& info.device_type != wgpu::DeviceType::Cpu
+		&& device
+			.features()
+			.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF);
+	if !shared {
+		return Raster::Cpu;
+	}
+	let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+	let display = if set("WAYLAND_DISPLAY") {
+		Display::Wayland
+	} else if set("DISPLAY") {
+		Display::X11
+	} else {
+		// CEF's GPU process cannot allocate shared textures without one.
+		return Raster::Cpu;
+	};
+	// A machine with two GPUs would otherwise paint on whichever CEF picks,
+	// and the studio cannot import from another GPU.
+	let render_node = (!info.device_pci_bus_id.is_empty())
+		.then(|| std::fs::canonicalize(format!("/dev/dri/by-path/pci-{}-render", info.device_pci_bus_id)).ok())
+		.flatten()
+		.and_then(|node| node.into_os_string().into_string().ok());
+	Raster::Gpu { render_node, display }
+}
+
 /// How a page's pictures reach the compositor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Paint {
 	/// A shared texture, copied on the GPU.
 	Gpu,
-	/// Pixels in memory, uploaded every frame: the fallback when the page's
-	/// GPU process or the studio's device cannot share textures.
+	/// Pixels in memory, uploaded every frame: the fallback when the studio
+	/// runs with no display, or the page's GPU process or the studio's device
+	/// cannot share textures.
 	Cpu,
 }
 
@@ -316,11 +337,9 @@ pub enum Input {
 	},
 	/// Text typed, after the keyboard layout and any input method.
 	Text(String),
-	/// Copy the page's selection to the clipboard, through
-	/// [`Helper::copied`] when it paints in memory.
+	/// Copy the page's selection, which [`Helper::copied`] then returns.
 	Copy,
-	/// Cut the page's selection to the clipboard, through
-	/// [`Helper::copied`] when it paints in memory.
+	/// Cut the page's selection, which [`Helper::copied`] then returns.
 	Cut,
 	/// The page gained or lost keyboard focus.
 	Focus(bool),
