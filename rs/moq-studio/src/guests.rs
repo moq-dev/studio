@@ -17,6 +17,10 @@
 //! band. Removing a guest from scenes stops their renewals, across restarts,
 //! until a new link, which moves them to the next generation, so their last
 //! token bounds how long they stay.
+//!
+//! A renewed guest also gets a return feed, the program with a mix-minus, at
+//! `.return/<identity>/<generation>`, which only their token may read either;
+//! see [`crate::feed`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -41,6 +45,14 @@ const RENEW: &str = ".renew";
 /// The track holding a guest's renewed tokens, one group each. `js/join` reads
 /// the same name.
 const TOKEN_TRACK: &str = "token";
+
+/// The prefix of each guest's return feed, which moq-room's announcements hide;
+/// [`Room::feed_path`] names the rest. `js/join` reads the same path.
+const RETURN: &str = ".return";
+
+/// Where the studio's session in the room serves the program, which every
+/// guest's return feed shows. moq-room's announcements hide it.
+pub const PROGRAM: &str = ".program";
 
 /// The shortest `--guest-expiry`: half of it must leave room for a renewal to
 /// reach the guest and the relay before the token it replaces expires.
@@ -131,10 +143,13 @@ pub struct Room {
 	participants: Mutex<BTreeMap<String, Participant>>,
 	/// Where removals are kept, or `None` to keep them in memory alone.
 	removals: Option<PathBuf>,
-	/// Wakes the renewals when who is renewed changes.
-	changed: tokio::sync::Notify,
+	/// Bumped when who is renewed changes, which wakes the renewals and the
+	/// return feeds.
+	changed: tokio::sync::watch::Sender<()>,
 	/// The session publishing the renewals, once it dials.
 	session: OnceLock<moq_tokio::connection::Monitor>,
+	/// What that session publishes, once it dials.
+	origin: OnceLock<moq_net::origin::Producer>,
 }
 
 /// One guest the studio knows of.
@@ -230,6 +245,7 @@ impl Room {
 			removals: None,
 			changed: Default::default(),
 			session: Default::default(),
+			origin: Default::default(),
 		};
 		// Sign once now, so a key that cannot sign for guests or for the studio's
 		// own session fails at startup.
@@ -346,7 +362,7 @@ impl Room {
 		let invite = Invite { link, expires };
 		participants.entry(name.to_string()).or_default().invite = Some(invite.clone());
 		drop(participants);
-		self.changed.notify_one();
+		self.changed.send_replace(());
 		Ok(invite)
 	}
 
@@ -361,13 +377,28 @@ impl Room {
 			self.change(&mut participants, identity, |participant| participant.removed = true)?;
 		}
 		drop(participants);
-		self.changed.notify_one();
+		self.changed.send_replace(());
 		Ok(())
 	}
 
 	/// Where `identity`'s renewals in `generation` are published, in the room.
 	fn renewal_path(identity: &str, generation: u64) -> anyhow::Result<Path> {
 		Ok(Path::new(&format!("{RENEW}/{identity}/{generation}"))?)
+	}
+
+	/// Where `identity`'s return feed in `generation` is published, in the room.
+	pub fn feed_path(identity: &str, generation: u64) -> anyhow::Result<Path> {
+		Ok(Path::new(&format!("{RETURN}/{identity}/{generation}"))?)
+	}
+
+	/// A receiver that sees each change to who is renewed.
+	pub fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+		self.changed.subscribe()
+	}
+
+	/// What the studio's session in the room publishes, once it dials.
+	pub fn origin(&self) -> Option<&moq_net::origin::Producer> {
+		self.origin.get()
 	}
 
 	/// Why the session publishing guests' renewed tokens is not connected, if it
@@ -378,24 +409,31 @@ impl Room {
 	}
 
 	/// A token for `identity`, and when it expires. It publishes moq-room's
-	/// paths but subscribes only to its own renewals, so no guest reads
-	/// another's.
+	/// paths but subscribes only to its own renewals and return feed, and the
+	/// program that feed shows, so no guest reads another's.
 	fn sign(&self, identity: &str, generation: u64) -> anyhow::Result<(String, kio::clock::Wall)> {
 		let invalid = || format!("cannot invite `{identity}`");
 		let renewals = Self::renewal_path(identity, generation).with_context(invalid)?;
+		let feed = Self::feed_path(identity, generation).with_context(invalid)?;
 		let claims = moq_room::claims(self.root.as_str(), identity)
 			.with_context(invalid)?
-			.with_subscribe([moq_auth::Pattern::literal(renewals.as_str())?]);
+			.with_subscribe([
+				moq_auth::Pattern::literal(renewals.as_str())?,
+				moq_auth::Pattern::literal(feed.as_str())?,
+				moq_auth::Pattern::literal(PROGRAM)?,
+			]);
 		self.sign_claims(claims)
 			.context("the room key cannot sign a guest's token")
 	}
 
 	/// A token for the studio's own session in the room, which publishes the
-	/// renewals and nothing else.
+	/// renewals, the return feeds, and the program they show, and nothing else.
 	fn sign_session(&self) -> anyhow::Result<(String, kio::clock::Wall)> {
-		let claims = moq_auth::Claims::default()
-			.with_root(self.root.as_str())
-			.with_publish([moq_auth::Pattern::subtree(RENEW)?]);
+		let claims = moq_auth::Claims::default().with_root(self.root.as_str()).with_publish([
+			moq_auth::Pattern::subtree(RENEW)?,
+			moq_auth::Pattern::subtree(RETURN)?,
+			moq_auth::Pattern::subtree(PROGRAM)?,
+		]);
 		self.sign_claims(claims)
 			.context("the room key cannot sign the studio's own session in the room")
 	}
@@ -414,7 +452,7 @@ impl Room {
 	}
 
 	/// The guests whose tokens are renewed, and in which generation.
-	fn renewed(&self) -> Vec<(String, u64)> {
+	pub fn renewed(&self) -> Vec<(String, u64)> {
 		let participants = self.participants.lock().unwrap();
 		let renewed = participants.iter().filter(|(_, participant)| participant.renewed());
 		renewed
@@ -428,7 +466,7 @@ impl Room {
 	///
 	/// Every guest is tracked, including one invited before this session whose
 	/// link still works, so a restart finds the guests already connected.
-	fn observe(
+	pub(crate) fn observe(
 		&self,
 		path: &Path,
 		online: bool,
@@ -457,7 +495,7 @@ impl Room {
 			Kind::Screen => participant.screen = online,
 		}
 		drop(participants);
-		self.changed.notify_one();
+		self.changed.send_replace(());
 		if !online || existing {
 			return None;
 		}
@@ -532,20 +570,36 @@ impl Room {
 
 	/// The sources in `collection` that show the guest called `identity`.
 	pub fn sources_of(&self, collection: &Collection, identity: &str) -> Vec<String> {
-		collection
-			.sources
-			.iter()
-			.filter(|(_, source)| {
-				let Source::Broadcast { path } = source else {
-					return false;
-				};
-				let Ok(path) = Path::new(path) else { return false };
-				path.strip_prefix(&self.path)
-					.and_then(moq_room::parse)
-					.is_some_and(|parsed| parsed.identity.as_str() == identity)
-			})
+		self.guest_sources(collection, identity)
 			.map(|(name, _)| name.clone())
 			.collect()
+	}
+
+	/// The sources in `collection` playing the camera of the guest called
+	/// `identity`, whose sound is their microphone.
+	pub fn voices<'a>(&self, collection: &'a Collection, identity: &str) -> impl Iterator<Item = &'a str> {
+		self.guest_sources(collection, identity)
+			.filter(|(_, kind)| *kind == Kind::Camera)
+			.map(|(name, _)| name.as_str())
+	}
+
+	/// The sources in `collection` that show the guest called `identity`, with
+	/// which of their broadcasts each plays.
+	fn guest_sources<'a>(
+		&self,
+		collection: &'a Collection,
+		identity: &str,
+	) -> impl Iterator<Item = (&'a String, Kind)> {
+		collection.sources.iter().filter_map(move |(name, source)| {
+			let Source::Broadcast { path } = source else {
+				return None;
+			};
+			let parsed = Path::new(path)
+				.ok()?
+				.strip_prefix(&self.path)
+				.and_then(moq_room::parse)?;
+			(parsed.identity.as_str() == identity).then_some((name, parsed.kind))
+		})
 	}
 }
 
@@ -654,6 +708,7 @@ impl Renewal {
 		let origin = moq_tokio::origin::spawn();
 		let connection = client.with_publisher(&origin).connect(room.url.clone());
 		let _ = room.session.set(connection.monitor());
+		let _ = room.origin.set(origin.clone());
 		let renewals = Renewals::new(room, origin);
 		Ok(Self { renewals, connection })
 	}
@@ -665,6 +720,7 @@ impl Renewal {
 		let room = self.renewals.room.clone();
 		let period = room.expiry / 2;
 		let mut renew = kio::clock::interval_at(kio::clock::now() + period, period);
+		let mut changes = room.changes();
 		loop {
 			self.renewals.sync();
 			tokio::select! {
@@ -675,7 +731,8 @@ impl Renewal {
 					}
 					self.renewals.renew();
 				}
-				() = room.changed.notified() => {}
+				// The room outlives this loop, so its changes never end.
+				_ = changes.changed() => {}
 			}
 		}
 	}
@@ -780,12 +837,12 @@ fn admit(draft: &mut Draft, name: &str, source: Source) -> Result<(), moq_scene:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use super::*;
 
-	const EXPIRY: Duration = Duration::from_secs(3600);
+	pub(crate) const EXPIRY: Duration = Duration::from_secs(3600);
 
-	fn key(root: &str, publish: &[&str], subscribe: &[&str]) -> moq_auth::Key {
+	pub(crate) fn key(root: &str, publish: &[&str], subscribe: &[&str]) -> moq_auth::Key {
 		let patterns = |texts: &[&str]| texts.iter().map(|text| text.parse().unwrap()).collect();
 		moq_auth::Key::generate(moq_auth::Algorithm::ES256, Some(moq_auth::KeyId::random()))
 			.unwrap()
@@ -802,7 +859,7 @@ mod tests {
 		Room::new(&Url::parse(connect).unwrap(), "guests", key, page, EXPIRY)
 	}
 
-	fn fragment(link: &Url) -> BTreeMap<String, String> {
+	pub(crate) fn fragment(link: &Url) -> BTreeMap<String, String> {
 		url::form_urlencoded::parse(link.fragment().unwrap().as_bytes())
 			.into_owned()
 			.collect()
@@ -974,8 +1031,8 @@ mod tests {
 		assert_eq!(claims.publish, ["alice/**".parse().unwrap()].into_iter().collect());
 		assert_eq!(
 			claims.subscribe,
-			[".renew/alice/0".parse().unwrap()].into_iter().collect(),
-			"a guest reads only its own renewals"
+			subscribes("alice", 0),
+			"a guest reads only its own renewals and feed, and the program"
 		);
 		let (issued, expires) = (claims.issued.unwrap(), claims.expires.unwrap());
 		let lifetime = expires.saturating_duration_since(issued);
@@ -1063,6 +1120,116 @@ mod tests {
 		assert!(room.participants()["alice"].screen);
 	}
 
+	/// What a guest's token in `generation` subscribes to.
+	fn subscribes(identity: &str, generation: u64) -> moq_auth::Patterns {
+		[
+			format!(".renew/{identity}/{generation}"),
+			format!(".return/{identity}/{generation}"),
+			PROGRAM.to_string(),
+		]
+		.iter()
+		.map(|pattern| pattern.parse().unwrap())
+		.collect()
+	}
+
+	/// A relay that verifies tokens signed by the operator's key or a room
+	/// key scoped to `show/guests`, as `moq auth serve` does.
+	pub(crate) struct Relay {
+		/// Dials the relay, trusting the certificate it generated.
+		pub settings: moq_tokio::connect::Config,
+		/// The studio's `--connect` URL, whose token may subscribe to the show.
+		pub connect: Url,
+		/// The room key.
+		pub key: moq_auth::Key,
+		_keys: tempfile::TempDir,
+	}
+
+	impl Relay {
+		pub(crate) async fn start() -> Self {
+			let _ = moq_tokio::crypto::install_default();
+			let keys = tempfile::tempdir().unwrap();
+			let admin = moq_auth::Key::generate(moq_auth::Algorithm::ES256, Some(moq_auth::KeyId::random())).unwrap();
+			let scoped = key("show/guests", &["**"], &["**"]);
+			for key in [&admin, &scoped] {
+				let kid = key.kid.as_ref().unwrap().encode();
+				key.to_public()
+					.unwrap()
+					.to_file(keys.path().join(format!("{kid}.jwk")))
+					.unwrap();
+			}
+			let mut policy = moq_auth::serve::Policy::default();
+			policy.keys = Some(moq_auth::serve::Keys::Dir(keys.path().into()));
+			let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let auth = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+			let server = moq_auth::serve::Server::new(policy).unwrap();
+			tokio::spawn(async move { server.serve(listener).await });
+
+			let mut config = moq_relay::Config::default();
+			config.drain_timeout = Some(Duration::ZERO.into());
+			config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+			config.listen.tls.generate = vec!["localhost".into()];
+			config.auth.url = Some(auth);
+			// Every version, as a relay serving the studio and its join page opts into
+			// the one that renews tokens in band.
+			config.listen.version = moq_net::Versions::all()
+				.iter()
+				.copied()
+				.chain([LITE_07.parse().unwrap()])
+				.collect();
+			let relay = moq_relay::Relay::load(config).await.unwrap().with_signals(false);
+			let addr = relay.quic_addr().unwrap();
+			let ready = relay.ready();
+			tokio::spawn(relay.run());
+			ready.wait().await.unwrap();
+
+			let mut settings = moq_tokio::connect::Config::default();
+			// The relay's certificate is generated for this test alone.
+			settings.tls.insecure = Some(true);
+			let studio = moq_auth::Claims::default()
+				.with_root("show")
+				.with_subscribe([moq_auth::Pattern::all()]);
+			let mut connect = Url::parse(&format!("https://localhost:{}/show", addr.port())).unwrap();
+			connect
+				.query_pairs_mut()
+				.append_pair("jwt", &admin.sign(&studio).unwrap());
+			Self {
+				settings,
+				connect,
+				key: scoped,
+				_keys: keys,
+			}
+		}
+
+		/// The room `guests`, its session in the room dialed and running.
+		pub(crate) fn room(&self) -> Arc<Room> {
+			let page = Url::parse("https://studio.example/join/").unwrap();
+			let room = Arc::new(Room::new(&self.connect, "guests", self.key.clone(), page, EXPIRY).unwrap());
+			let renewal = Renewal::connect(room.clone(), &self.settings, Default::default()).unwrap();
+			tokio::spawn(renewal.run());
+			room
+		}
+
+		/// Dial as the join page does with `link`, publishing `publish` and
+		/// reading into `read`: its token kept out of the URL, on the version
+		/// that renews it in band.
+		pub(crate) fn join(
+			&self,
+			link: &Url,
+			publish: &moq_net::origin::Producer,
+			read: &moq_net::origin::Producer,
+		) -> moq_tokio::Connection {
+			let fragment = fragment(link);
+			let mut page = self.settings.clone();
+			page.tokens = vec![fragment["jwt"].clone().try_into().unwrap()];
+			page.version = vec![LITE_07.parse().unwrap()];
+			page.init(Default::default())
+				.unwrap()
+				.with_publisher(publish)
+				.with_subscriber(read.clone())
+				.connect(Url::parse(&fragment["url"]).unwrap())
+		}
+	}
+
 	/// A guest who opens the link reaches the relay with its token, and the
 	/// studio's own connection sees its camera in the room. The studio's session
 	/// in the room then hands the guest a fresh token, which the relay accepts in
@@ -1070,65 +1237,15 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_guest_joins_and_renews_through_a_relay_that_verifies_tokens() {
 		const TIMEOUT: Duration = Duration::from_secs(10);
-		let _ = moq_tokio::crypto::install_default();
+		let relay = Relay::start().await;
+		let client = relay.settings.clone().init(Default::default()).unwrap();
 
-		// The operator's key for the studio's own connection, and the room's.
-		let dir = tempfile::tempdir().unwrap();
-		let admin = moq_auth::Key::generate(moq_auth::Algorithm::ES256, Some(moq_auth::KeyId::random())).unwrap();
-		let scoped = key("show/guests", &["**"], &["**"]);
-		for key in [&admin, &scoped] {
-			let kid = key.kid.as_ref().unwrap().encode();
-			key.to_public()
-				.unwrap()
-				.to_file(dir.path().join(format!("{kid}.jwk")))
-				.unwrap();
-		}
-		let mut policy = moq_auth::serve::Policy::default();
-		policy.keys = Some(moq_auth::serve::Keys::Dir(dir.path().into()));
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let auth = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
-		let server = moq_auth::serve::Server::new(policy).unwrap();
-		tokio::spawn(async move { server.serve(listener).await });
-
-		let mut config = moq_relay::Config::default();
-		config.drain_timeout = Some(Duration::ZERO.into());
-		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
-		config.listen.tls.generate = vec!["localhost".into()];
-		config.auth.url = Some(auth);
-		// Every version, as a relay serving the studio and its join page opts into
-		// the one that renews tokens in band.
-		config.listen.version = moq_net::Versions::all()
-			.iter()
-			.copied()
-			.chain([LITE_07.parse().unwrap()])
-			.collect();
-		let relay = moq_relay::Relay::load(config).await.unwrap().with_signals(false);
-		let addr = relay.quic_addr().unwrap();
-		let ready = relay.ready();
-		tokio::spawn(relay.run());
-		ready.wait().await.unwrap();
-
-		let mut settings = moq_tokio::connect::Config::default();
-		// The relay's certificate is generated for this test alone.
-		settings.tls.insecure = Some(true);
-		let client = settings.clone().init(Default::default()).unwrap();
-
-		let studio = moq_auth::Claims::default()
-			.with_root("show")
-			.with_subscribe([moq_auth::Pattern::all()]);
-		let mut connect = Url::parse(&format!("https://localhost:{}/show", addr.port())).unwrap();
-		connect
-			.query_pairs_mut()
-			.append_pair("jwt", &admin.sign(&studio).unwrap());
 		let subscribe = moq_tokio::origin::spawn();
 		let all = moq_auth::Pattern::all().into();
 		let mut announced = moq_room::Room::new(&subscribe.consume().scope("guests", &all).unwrap(), None);
-		let _studio = client.with_subscriber(subscribe).connect(connect.clone());
+		let _studio = client.with_subscriber(subscribe).connect(relay.connect.clone());
 
-		let page = Url::parse("https://studio.example/join/").unwrap();
-		let room = Arc::new(Room::new(&connect, "guests", scoped.clone(), page, EXPIRY).unwrap());
-		let renewal = Renewal::connect(room.clone(), &settings, Default::default()).unwrap();
-		tokio::spawn(renewal.run());
+		let room = relay.room();
 		// Another guest in the room, whose renewals alice must not read.
 		room.observe(
 			&Path::new("bob/camera.hang").unwrap(),
@@ -1137,22 +1254,11 @@ mod tests {
 			&History::new(),
 		);
 
-		// As the join page dials: its token kept out of the URL, on the version
-		// that renews it in band.
-		let fragment = fragment(&room.invite("alice").unwrap().link);
-		let mut page = settings.clone();
-		page.tokens = vec![fragment["jwt"].clone().try_into().unwrap()];
-		page.version = vec![LITE_07.parse().unwrap()];
 		let guest = moq_tokio::origin::spawn();
 		let camera = guest.create_broadcast("alice/camera.hang").unwrap();
 		camera.announce(moq_net::origin::Route::default()).unwrap();
 		let renewals = moq_tokio::origin::spawn();
-		let alice = page
-			.init(Default::default())
-			.unwrap()
-			.with_publisher(&guest)
-			.with_subscriber(renewals.clone())
-			.connect(Url::parse(&fragment["url"]).unwrap());
+		let alice = relay.join(&room.invite("alice").unwrap().link, &guest, &renewals);
 
 		let event = kio::clock::timeout(TIMEOUT, announced.next())
 			.await
@@ -1253,10 +1359,7 @@ mod tests {
 		room.invite("alice").unwrap();
 		renewals.sync();
 		let back = key.verify(&next_token(&consumer, "alice", 1).await.unwrap()).unwrap();
-		assert_eq!(
-			back.subscribe,
-			[".renew/alice/1".parse().unwrap()].into_iter().collect()
-		);
+		assert_eq!(back.subscribe, subscribes("alice", 1));
 		let before = consumer.request(Room::renewal_path("alice", 0).unwrap(), None).await;
 		assert!(before.is_err(), "the earlier generation is still renewed");
 
