@@ -198,7 +198,7 @@ impl Instance {
 			.and_then(|()| std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700)))
 			.map_err(|err| failed(&format!("cannot create the browser profile {}", profile.display()), err))?;
 		let start = Start {
-			raster: match super::import::supported(helper) {
+			raster: match helper.shared {
 				true => Raster::Gpu {
 					render_node: helper
 						.render_node
