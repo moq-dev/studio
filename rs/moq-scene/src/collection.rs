@@ -127,32 +127,31 @@ impl Collection {
 		}
 	}
 
-	/// The items of `layer`, to edit. A scene's layout on a further canvas is
-	/// added empty, and [`prune`](Self::prune) drops it once empty again.
-	pub(crate) fn items_mut(&mut self, layer: &Layer) -> Option<&mut Vec<Item>> {
+	/// Run `edit` on the items of `layer`, or return `None` for a scene or
+	/// canvas that does not exist. A scene's layout on a further canvas is
+	/// kept only while it holds items, so a scene has one way to say it has
+	/// none there, as [`validate`](Self::validate) requires.
+	pub(crate) fn edit_items<T>(&mut self, layer: &Layer, edit: impl FnOnce(&mut Vec<Item>) -> T) -> Option<T> {
 		if let Some(canvas) = &layer.canvas
 			&& !self.canvases.contains_key(canvas)
 		{
 			return None;
 		}
 		match (&layer.canvas, &layer.scene) {
-			(None, None) => Some(&mut self.top),
-			(Some(canvas), None) => self.canvases.get_mut(canvas).map(|extra| &mut extra.top),
+			(None, None) => Some(edit(&mut self.top)),
+			(Some(canvas), None) => self.canvases.get_mut(canvas).map(|extra| edit(&mut extra.top)),
 			(canvas, Some(name)) => {
 				let scene = self.scenes.iter_mut().find(|scene| &scene.name == name)?;
-				Some(match canvas {
-					None => &mut scene.items,
-					Some(canvas) => scene.canvases.entry(canvas.clone()).or_default(),
-				})
+				let Some(canvas) = canvas else {
+					return Some(edit(&mut scene.items));
+				};
+				let mut layout = scene.canvases.remove(canvas).unwrap_or_default();
+				let edited = edit(&mut layout);
+				if !layout.is_empty() {
+					scene.canvases.insert(canvas.clone(), layout);
+				}
+				Some(edited)
 			}
-		}
-	}
-
-	/// Drop the layouts on further canvases that hold no items, so a scene
-	/// reads the same however its layouts were emptied.
-	pub(crate) fn prune(&mut self) {
-		for scene in &mut self.scenes {
-			scene.canvases.retain(|_, items| !items.is_empty());
 		}
 	}
 
@@ -227,6 +226,14 @@ impl Collection {
 			{
 				return Err(Error::Invalid(format!(
 					"scene `{}` has a layout on `{canvas}`, which is not a canvas",
+					scene.name
+				)));
+			}
+			// One way to say a scene shows nothing there, so an edit snapshotting
+			// the scene and one emptying the layout agree on what it holds.
+			if let Some((canvas, _)) = scene.canvases.iter().find(|(_, items)| items.is_empty()) {
+				return Err(Error::Invalid(format!(
+					"scene `{}` has an empty layout on `{canvas}`; leave it out instead",
 					scene.name
 				)));
 			}
@@ -1897,10 +1904,20 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			);
 		}
 		let mut collection = example();
-		collection.scenes[0].canvases.insert("tall".into(), Vec::new());
-		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+		let item = Item::new("camera", Rect::fill(&collection.canvas));
+		collection.scenes[0].canvases.insert("tall".into(), vec![item]);
+		assert!(
+			matches!(collection.validate(), Err(Error::Invalid(_))),
+			"no such canvas"
+		);
 		collection.canvases.insert("tall".into(), Extra::new(1080, 1920));
 		collection.validate().unwrap();
+		// Leaving a layout out is the one way to say a scene shows nothing there.
+		collection.scenes[0].canvases.insert("tall".into(), Vec::new());
+		assert!(
+			matches!(collection.validate(), Err(Error::Invalid(_))),
+			"an empty layout"
+		);
 	}
 
 	#[test]

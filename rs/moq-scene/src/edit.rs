@@ -286,12 +286,9 @@ impl Change {
 				before,
 				after,
 			} => {
-				let items = collection
-					.items_mut(layer)
-					.ok_or_else(|| conflict(format!("there is no {layer}")))?;
-				splice(items, *index, before, after).map_err(|err| conflict(format!("item {err} in {layer}")))?;
-				collection.prune();
-				Ok(())
+				let spliced = collection.edit_items(layer, |items| splice(items, *index, before, after));
+				let spliced = spliced.ok_or_else(|| conflict(format!("there is no {layer}")))?;
+				spliced.map_err(|err| conflict(format!("item {err} in {layer}")))
 			}
 			Self::Transition { before, after } => {
 				if collection.transition != *before {
@@ -1408,6 +1405,37 @@ mod tests {
 		assert_eq!(collection.items(&tall), None);
 		history.undo(&mut collection).unwrap();
 		assert_eq!(collection, added);
+	}
+
+	/// Emptying a scene's layout on a further canvas changes only that layer,
+	/// so a scene snapshot taken before still undoes: rename the scene, empty
+	/// its layout, then undo both. A refused item edit leaves no empty layout
+	/// behind in the draft.
+	#[test]
+	fn emptying_a_layout_keeps_earlier_scene_edits_undoable() {
+		let mut collection = collection();
+		let fill = Rect::fill(&collection.canvas);
+		collection.canvases.insert("tall".into(), Extra::new(1080, 1920));
+		collection.scenes[0]
+			.canvases
+			.insert("tall".into(), vec![Item::new("red", fill)]);
+		collection.validate().unwrap();
+		let start = collection.clone();
+		let mut history = History::new();
+
+		let mut draft = collection.draft("Rename");
+		draft.rename_scene(0, "Renamed").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		let tall = Layer::scene("Renamed").on(Some("tall".into()));
+		let mut draft = collection.draft("Remove red there");
+		draft.remove_item(&tall, 0).unwrap();
+		assert!(draft.insert_item(&tall, 5, Item::new("red", fill)).is_err());
+		commit(&mut collection, &mut history, draft, None);
+		assert!(collection.scenes[0].canvases.is_empty());
+
+		history.undo(&mut collection).unwrap();
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, start);
 	}
 
 	/// A renamed mix keeps its place, the program's and recordings' picks, and

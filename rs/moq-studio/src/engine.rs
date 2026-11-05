@@ -520,16 +520,20 @@ impl Program {
 		}
 	}
 
-	/// What a replay of the local source `name` copies: the video of its own
-	/// track, up to now, or `None` while it publishes no video.
+	/// What a replay of the local source `name` copies: the video or sound of
+	/// its own track, up to now, or `None` while it publishes neither.
 	pub fn source(&self, name: &str) -> Option<moq_scene::replay::Target> {
 		let mut catalog = self.sources.catalog();
 		let listed = catalog.ext.studio.sources.remove(name)?;
-		let video = listed.video.renditions.into_iter().next()?;
+		let video = listed.video.renditions.into_iter().next();
+		let audio = listed.audio.renditions.into_iter().next();
+		if video.is_none() && audio.is_none() {
+			return None;
+		}
 		Some(moq_scene::replay::Target {
 			broadcast: self.sources.consume(),
-			video: Some(video),
-			audio: None,
+			video,
+			audio,
 			end: self.clock.now(),
 		})
 	}
@@ -547,14 +551,25 @@ impl Program {
 		}
 	}
 
-	/// Encode the local sources the program shows, from `state`, whether or
-	/// not anything reads their tracks, so a replay of one has its past.
-	fn show(&self, state: &State) {
-		let shown = state
-			.on_air()
-			.map(|item| state.collection.capture(&item.source).to_string())
-			.collect();
-		self.sources.show(shown);
+	/// Encode the local sources on program, from `state`, whether or not
+	/// anything reads their tracks, so a replay of one has its past: those a
+	/// scene on air shows on any canvas, and the microphones and system audio
+	/// the program mix plays. A replay source's track is its pictures, so being
+	/// heard alone does not put it on program.
+	fn on_program(&self, state: &State) {
+		let collection = &state.collection;
+		let shown = state.on_air().map(|item| collection.capture(&item.source).to_string());
+		let heard = state
+			.sources
+			.iter()
+			.filter(|(name, feed)| {
+				matches!(
+					feed.source(),
+					moq_scene::Source::Microphone { .. } | moq_scene::Source::SystemAudio
+				) && state.sources.plays(&collection.mixes.program, name)
+			})
+			.map(|(name, _)| name.to_string());
+		self.sources.set_on_program(shown.chain(heard).collect());
 	}
 }
 
@@ -978,7 +993,7 @@ impl Engine {
 					tracing::error!(%err, "cannot draw the canvas");
 					continue;
 				}
-				self.program.show(state);
+				self.program.on_program(state);
 				state
 					.compositor
 					.outputs()

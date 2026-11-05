@@ -457,8 +457,8 @@ ids. `[[top]]` items make up the top layer.
 
 `[canvases.<name>]` adds a further canvas, with its `width` and `height` and
 its own `top` layer, and a scene's `canvases.<name>` lists its items on that
-canvas. A canvas name is one segment of its broadcast path, so it holds no
-`/`.
+canvas; leave it out, rather than empty, for a scene that shows nothing there.
+A canvas name is one segment of its broadcast path, so it holds no `/`.
 
 `[mixes]` names every mix, in the order the Audio panel lists them, the one
 on `program`, and the one a `recording` holds, the mix on program without it;
@@ -564,9 +564,9 @@ stream.
 
 ### Source tracks
 
-Each camera, display, window, image, and color also has a track of its own, so
-the studio can replay or record it on its own. These tracks stay in the studio: the
-program is the only video it publishes to a relay. They are listed in a local
+Each camera, display, window, image, color, microphone, and system audio also
+has a track of its own, so the studio can replay or record it on its own. These
+tracks stay in the studio: the program is all it publishes to a relay. They are listed in a local
 catalog under the `dev.moq.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
@@ -579,9 +579,17 @@ changes size or color space moves to a new track, which its catalog entry
 follows. Images and colors keep their picture once, as the image file and as a
 one-pixel PNG. Removing or editing a source ends its track. A track carries the
 plain capture, before any filter, and a clone has none, since it shows its
-source's capture. Microphones and system audio have no tracks of their own yet,
-nor does a browser source or an overlay, and a broadcast source is already its
-publisher's.
+source's capture. A browser source or an overlay has no track of its own, and a
+broadcast source is already its publisher's.
+
+A microphone or system audio encodes its track as Opus, from the same device
+open the mixes hear, only while it is used: while the mix on program plays it
+(unmuted and not left out of it), so a replay of it has its recent past, or
+while a recording reads its track. The track carries the sound as captured,
+before its gain, mute, and delay, which stay the mixes'. A buffer the capture
+lost, or a stretch the source was out of use, is a gap on its track. Opus
+encodes on the CPU, about 1% of one Apple M4 core for a stereo source and
+half that for mono, and holds no encode session.
 
 Every encoder holds an encode session, and consumer GPUs allow only a few
 hardware sessions at once: 8 on a GeForce card, while a base Apple M4 has one
@@ -614,10 +622,11 @@ live or not. The recording has an encoder of its own, opened only while it
 records, at full quality whatever the uplink grants the live stream, as OBS's
 advanced output mode records apart from streaming. It costs one more encode
 session and one more copy of each program frame while recording. With
-**each source too**, every camera, display, and window records its
-own track into a file of its own beside it,
+**each source too**, every camera, display, window, microphone, and system
+audio records its own track into a file of its own beside it,
 `<scene file name> <UTC start time> <source>.mp4`, holding the capture before
-any filter; a source being recorded encodes whether or not it is on program.
+any filter, or the sound before its gain and mute; a source being recorded
+encodes whether or not it is on program.
 Broadcast sources, guests included, have no track of the studio's, so they get
 no file of their own. A source added while recording
 starts its file then, and one removed finishes its file then. A new canvas
@@ -657,7 +666,9 @@ scene of its own. In the Replay panel, pick the program or a source, a length
 up to 30 seconds, and a speed of 100%, 50%, or 25%, then **Replay** plays that
 many seconds up to the click in the replay source, which is transparent before
 and after. **Cut** to its scene to put it on program. Sound replays only at
-100%, through the replay source's strip in the Audio panel. A new replay cuts
+100%, through the replay source's strip in the Audio panel, so a replay of a
+microphone or system audio, which has only sound, plays only at 100%. A new
+replay cuts
 off the one playing, and a stretch the source was offline or paused replays
 as the gap it was.
 
@@ -673,8 +684,10 @@ it is written, shortly after the click.
 
 Nothing records in the background for this. The program's tracks keep their
 last 30 seconds for late viewers anyway, and each source's track while it is on
-program or recorded, and a replay copies from those, so a replay needs
-`--connect` and goes back at most that far. With `--on-demand`, the program has
+program (shown in a scene on air, or for a microphone or system audio, played by
+the mix on program) or recorded, and a replay copies from those, so a replay
+goes back at most that far. A replay of the program needs `--connect`; a local
+source keeps its track without a relay. With `--on-demand`, the program has
 no past from before someone watched it, and a source has none from before it
 was last on program or recorded; a replay of nothing is refused, saying why. A
 broadcast source replays from what the studio received of it, and only over a
