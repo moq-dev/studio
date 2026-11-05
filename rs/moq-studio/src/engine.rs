@@ -889,10 +889,11 @@ impl Engine {
 		Ok(engine)
 	}
 
-	/// Stop the program clock, then wait for each rendition's encoder to
-	/// publish the copies on their way to it and what it still holds, and to
-	/// end its video track, so quitting loses none of the program's last
-	/// pictures. The program audio ends its track too, so a recording reading
+	/// Stop the program clock, then wait for each rendition's encoder, on
+	/// every canvas, to publish the copies on their way to it and what it
+	/// still holds, and to end its video track, so quitting loses none of the
+	/// program's last pictures; a further canvas's catalog then finishes too.
+	/// The program audio ends its track too, so a recording reading
 	/// the program reaches the end of each. Then stop every source, which
 	/// finishes its own track on its thread, and the browser sources' helper,
 	/// waiting for it to exit, so their profile is saved and free for the next
@@ -917,10 +918,11 @@ impl Engine {
 		}
 	}
 
-	/// Once [`stop`](Self::stop) has ended every track, wait for each source's
-	/// thread to end, and close each relay session once the relay has the
-	/// tail of every track, so a viewer or a recording on the relay receives
-	/// it rather than a cut. Bounded at [`CLOSE`].
+	/// Once [`stop`](Self::stop) has ended the tracks of every canvas, close
+	/// each relay session once the relay has their tails, so a viewer or a
+	/// recording on the relay receives them rather than a cut. Meanwhile wait
+	/// for each source's thread to end, having finished its own track. Bounded
+	/// at [`CLOSE`].
 	pub async fn close(&self) {
 		let running = std::mem::take(&mut *self.running.lock().unwrap());
 		let sources = async {
@@ -934,6 +936,8 @@ impl Engine {
 				output.close().await;
 			}
 		};
+		// A source's track is in the studio's own local broadcast, which no
+		// relay session carries, so neither waits on the other.
 		let closing = async { tokio::join!(sources, relays) };
 		if kio::clock::timeout(CLOSE, closing).await.is_err() {
 			tracing::warn!(timeout = ?CLOSE, "quitting before every source stopped and every relay drained");
@@ -1108,8 +1112,13 @@ impl Engine {
 			if self.stopped.load(Ordering::Relaxed) {
 				// Without a sender, each encoder publishes what it was sent and
 				// still holds, then finishes its track.
-				retired.push(main.end());
-				retired.extend(lines.into_values().flatten().map(|(line, _)| line.end()));
+				retired.push(main.end(None));
+				retired.extend(
+					lines
+						.into_values()
+						.flatten()
+						.map(|(line, broadcast)| line.end(Some(broadcast))),
+				);
 				for ended in retired {
 					ended.join();
 				}
@@ -1160,8 +1169,8 @@ impl Engine {
 				.cloned()
 				.collect();
 			for name in gone {
-				if let Some(Some((line, _))) = lines.remove(&name) {
-					retired.push(line.end());
+				if let Some(Some((line, broadcast))) = lines.remove(&name) {
+					retired.push(line.end(Some(broadcast)));
 				}
 				self.stats.canvases.lock().unwrap().remove(&name);
 			}
@@ -1809,6 +1818,9 @@ struct Ended {
 	threads: Vec<std::thread::JoinHandle<()>>,
 	/// Holds the encode threads it was waiting on.
 	probe: Option<std::thread::JoinHandle<anyhow::Result<Probe>>>,
+	/// A further canvas's broadcast, dropped only after the threads, so its
+	/// catalog finishes after the video it lists.
+	_broadcast: Option<Broadcast>,
 }
 
 impl Ended {
@@ -1926,8 +1938,9 @@ impl Line {
 	}
 
 	/// Stop handing the renditions frames, so each encode thread publishes
-	/// what it holds and finishes its track.
-	fn end(mut self) -> Ended {
+	/// what it holds and finishes its track, then ends a further canvas's
+	/// `broadcast`.
+	fn end(mut self, broadcast: Option<Broadcast>) -> Ended {
 		let mut threads = std::mem::take(&mut self.ending);
 		threads.extend(
 			self.ladder
@@ -1940,6 +1953,7 @@ impl Line {
 		Ended {
 			threads,
 			probe: self.probing.map(|(_, probe)| probe),
+			_broadcast: broadcast,
 		}
 	}
 }
@@ -1948,15 +1962,18 @@ impl Line {
 /// to start, which is not retried until the canvas is removed and added again.
 type Lines = BTreeMap<String, Option<(Line, Broadcast)>>;
 
-/// A further canvas's broadcast, closed when dropped.
+/// A further canvas's broadcast, whose catalog finishes and which closes
+/// when dropped.
 struct Broadcast {
 	publication: moq_net::origin::Publication,
 	/// Lists the canvas's video and the main broadcast's audio.
-	_catalog: moq_scene::publish::Catalog,
+	catalog: moq_scene::publish::Catalog,
 }
 
 impl Drop for Broadcast {
 	fn drop(&mut self) {
+		// Fails only once the catalog failed, which ended its track already.
+		let _ = self.catalog.finish();
 		self.publication.close();
 	}
 }
@@ -2078,10 +2095,7 @@ impl Extras {
 			video,
 			grants: format!("{name}/"),
 		};
-		let broadcast = Broadcast {
-			publication,
-			_catalog: catalog,
-		};
+		let broadcast = Broadcast { publication, catalog };
 		Ok((renditions, broadcast))
 	}
 }
@@ -2836,10 +2850,60 @@ mod tests {
 		.await
 	}
 
+	/// The broadcast of the further canvas `tall` as `relay` routes it, its
+	/// catalogs, and the first that lists its video.
+	async fn routed_tall(
+		relay: &moq_net::origin::Consumer,
+	) -> (
+		moq_net::broadcast::Consumer,
+		moq_mux::catalog::Consumer<()>,
+		hang::Catalog,
+	) {
+		// Until the canvas's broadcast is announced, the main one's route covers
+		// its path and cannot serve it; the follow moves on once it is.
+		let mut following = relay.follow("studio/tall", None).unwrap();
+		let (broadcast, mut catalogs) = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let broadcast = following.available().await.expect("broadcast");
+				let format = moq_mux::catalog::CatalogFormat::default();
+				if let Ok(catalogs) = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await {
+					return (broadcast, catalogs);
+				}
+			}
+		})
+		.await
+		.expect("the relay routes the canvas");
+		// Audio is listed from the start, and the video once its encoder opens.
+		let catalog = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let catalog = catalogs.next().await.expect("catalog").expect("a catalog");
+				if !catalog.video.renditions.is_empty() {
+					return catalog;
+				}
+			}
+		})
+		.await
+		.expect("the canvas lists its video");
+		(broadcast, catalogs, catalog)
+	}
+
+	/// Read a further canvas's `video` and `catalogs` to a clean end.
+	async fn ended(mut catalogs: moq_mux::catalog::Consumer<()>, mut video: moq_net::track::Subscriber) {
+		kio::clock::timeout(TIMEOUT, async {
+			while let Some(mut group) = video.recv_group().await.expect("the video finishes") {
+				while group.read_frame().await.expect("the video finishes").is_some() {}
+			}
+			while catalogs.next().await.expect("the catalog finishes").is_some() {}
+		})
+		.await
+		.expect("the canvas's tracks end");
+	}
+
 	/// A further canvas reaches the relay in a broadcast of its own beneath the
 	/// main one, at its own size, with the main broadcast's audio listed by
 	/// reference rather than encoded again, and holds one more encode session.
-	/// Removing it ends its broadcast and gives its session back.
+	/// Removing it, or quitting, ends its video and then its catalog cleanly,
+	/// then its broadcast; removing it gives its session back.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn the_program_of_a_further_canvas_has_its_own_broadcast() {
@@ -2872,61 +2936,58 @@ mod tests {
 			.await
 			.expect("the studio starts");
 
-		// Until the canvas's broadcast is announced, the main one's route covers
-		// its path and cannot serve it; the follow moves on once it is.
-		let mut following = relay.follow("studio/tall", None).unwrap();
-		let (broadcast, mut catalogs) = kio::clock::timeout(TIMEOUT, async {
-			loop {
-				let broadcast = following.available().await.expect("broadcast");
-				let format = moq_mux::catalog::CatalogFormat::default();
-				if let Ok(catalogs) = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await {
-					return (broadcast, catalogs);
-				}
-			}
-		})
-		.await
-		.expect("the relay routes the canvas");
-		// Audio is listed from the start, and the video once its encoder opens.
-		let catalog = kio::clock::timeout(TIMEOUT, async {
-			loop {
-				let catalog = catalogs.next().await.expect("catalog").expect("a catalog");
-				if !catalog.video.renditions.is_empty() {
-					return catalog;
-				}
-			}
-		})
-		.await
-		.expect("the canvas lists its video");
+		let (broadcast, catalogs, catalog) = routed_tall(&relay).await;
 		let (_, audio) = catalog.audio.renditions.iter().next().expect("the program audio");
 		let main = audio.broadcast.as_ref().expect("a reference to the main broadcast");
 		let main = moq_net::Path::new("studio/tall").unwrap().try_resolve(main);
 		assert_eq!(main.as_ref().map(moq_net::Path::as_str), Some("studio"));
 		assert!(audio.instance.is_some(), "the main broadcast's instance");
-		let (video, config) = catalog
-			.video
-			.renditions
-			.iter()
-			.find(|(_, config)| config.coded_width == Some(360))
-			.expect("the canvas size");
-		assert_eq!(config.coded_height, Some(640));
-		let mut pictures = subscribe(&broadcast, video, config).await;
+		let canvas_size = |catalog: &hang::Catalog| {
+			let (video, config) = catalog
+				.video
+				.renditions
+				.iter()
+				.find(|(_, config)| config.coded_width == Some(360))
+				.expect("the canvas size");
+			assert_eq!(config.coded_height, Some(640));
+			(video.clone(), config.clone())
+		};
+		let (video, config) = canvas_size(&catalog);
+		let mut pictures = subscribe(&broadcast, &video, &config).await;
 		red(&mut pictures, moq_video::Size::new(360, 640))
 			.await
 			.expect("the canvas's own layout arrives");
 		assert_eq!(engine.stats.sessions.open(), 2, "one canvas size each");
 		assert!(engine.stats.canvases()["tall"].error().is_none());
 
+		let track = broadcast.track(&video).unwrap().subscribe(None).await.unwrap();
 		{
 			let mut state = engine.state.lock().unwrap();
 			let mut draft = state.collection().draft("Remove the canvas");
 			draft.remove_extra("tall").unwrap();
 			state.commit(draft, None).unwrap();
 		}
+		ended(catalogs, track).await;
 		kio::clock::timeout(TIMEOUT, broadcast.closed())
 			.await
 			.expect("the canvas's broadcast ends");
 		assert!(engine.stats.canvases().is_empty());
-		engine.stop();
+		assert_eq!(engine.stats.sessions.open(), 1, "the canvas's session given back");
+
+		// Back again, quitting ends it as cleanly.
+		engine.state.lock().unwrap().undo().unwrap();
+		let (broadcast, catalogs, catalog) = routed_tall(&relay).await;
+		let (video, _) = canvas_size(&catalog);
+		let track = broadcast.track(&video).unwrap().subscribe(None).await.unwrap();
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+		ended(catalogs, track).await;
+		kio::clock::timeout(TIMEOUT, broadcast.closed())
+			.await
+			.expect("the canvas's broadcast ends");
 		assert_eq!(engine.stats.sessions.open(), 0);
 	}
 
