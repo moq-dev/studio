@@ -12,7 +12,7 @@
 //!   scenes and collections as text.
 //! - [`source::Sources`] runs each source: a camera, display, window,
 //!   microphone, or system-audio capture (with the `capture` feature), a still
-//!   image, a solid color, a broadcast subscribed over MoQ, or a web page
+//!   image, a video or audio file, a solid color, a broadcast subscribed over MoQ, or a web page
 //!   rendered by a browser engine (the [`browser`] module). Pictures go to the
 //!   compositor and sound goes to a `moq_audio::bus::Bus`, routed into its
 //!   program mix.
@@ -37,6 +37,7 @@ mod compositor;
 mod edit;
 mod effect;
 mod lut;
+mod media;
 mod overlay;
 mod playout;
 pub mod publish;
@@ -87,6 +88,11 @@ pub enum Error {
 	/// An image source could not be read or decoded.
 	#[error("image: {0}")]
 	Image(String),
+
+	/// A media source's file could not be read, or holds nothing the studio
+	/// plays.
+	#[error("media: {0}")]
+	Media(String),
 
 	/// A LUT source could not be read or parsed.
 	#[error("LUT: {0}")]

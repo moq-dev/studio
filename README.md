@@ -94,7 +94,7 @@ Every panel is a tab you can drag, split, or stack.
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, and **Reload** reads the file again. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
@@ -263,6 +263,43 @@ it, and again whenever it is edited. One that no preview or program shows
 costs nothing until it is shown again, where its animation has carried on.
 Overlays publish no track of their own, so viewers see them only in the
 program.
+
+### Media files
+
+A `media` source plays a video or audio file, such as an intro clip or a music
+bed, on the program clock, and its sound joins the mixes like any other
+source's. It reads fragmented MP4, MKV or WebM, MPEG-TS, and FLV, as moq's
+importers do, and fails to start on a codec this machine cannot decode. A
+regular MP4 fails to start with a remux to fragmented MP4 that makes it readable:
+`ffmpeg -i in.mp4 -c copy -movflags frag_keyframe+empty_moov out.mp4`. The
+whole file is read into memory, compressed, when the source starts, so it
+plays from its start at once and loops without reading the disk again; keep it
+to clips and music, not hours of video.
+
+```toml
+[sources.intro]
+kind = "media"
+path = "intro.mkv"   # relative to the scene file, like an image's
+restart = true       # play from the start each time it goes on program
+
+[sources.music]
+kind = "media"
+path = "music.webm"
+loop = true          # start over at the end
+```
+
+Without `loop`, it plays once, then holds its last picture, silent, and reads
+as ended in Sources and, while the program shows or plays it, in Health.
+**Play** in Sources plays it from its start again, as does going on program
+with `restart`, in a scene on air or the top layer, when it was not on program
+before. Either clears its picture at once, so the end of the last play never
+shows on program. A file that cannot be read or decoded fails, with the reason.
+Its pictures and its sound each have a track of their own (see [Source
+tracks](#source-tracks)), its pictures on one timeline across plays. Each is
+used apart, as a camera's and a microphone's are: the pictures while a scene on
+air shows it, the sound while the mix on program plays it, and either while
+read. So a music bed that no scene shows encodes its sound alone. A file with
+no sound has no strip in the Audio panel.
 
 ## Guests
 
@@ -467,7 +504,8 @@ rect = { x = 1600, y = 40, width = 280, height = 120 }
 
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `id`, the default device without one), `window` (with an `id`), `system_audio`
-(macOS), `image` (PNG or JPEG), `color` (`#rrggbb` or `#rrggbbaa`),
+(macOS), `image` (PNG or JPEG), `media` (a video or audio file; see
+[Media files](#media-files)), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
 `overlay` (its `html`, and a `width` and `height` up to 4096), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
 file, which no item places, but which grades what a `lut` filter names it in),
@@ -584,9 +622,9 @@ stream.
 
 ### Source tracks
 
-Each camera, display, window, image, color, microphone, and system audio also
-has a track of its own, so the studio can replay or record it on its own. These
-tracks stay in the studio: the program is all it publishes to a relay. They are listed in a local
+Each camera, display, window, image, media file, color, microphone, and system
+audio also has a track of its own, so the studio can replay or record it on its
+own. These tracks stay in the studio: the program is all it publishes to a relay. They are listed in a local
 catalog under the `dev.moq.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
@@ -602,8 +640,8 @@ plain capture, before any filter, and a clone has none, since it shows its
 source's capture. A browser source or an overlay has no track of its own, and a
 broadcast source is already its publisher's.
 
-A microphone or system audio encodes its track as Opus, from the same device
-open the mixes hear, only while it is used: while the mix on program plays it
+A microphone, system audio, or media file's sound encodes its track as Opus,
+from the same sound the mixes hear, only while it is used: while the mix on program plays it
 (unmuted and not left out of it), so a replay of it has its recent past, or
 while a recording reads its track. The track carries the sound as captured,
 before its gain, mute, and delay, which stay the mixes'. A buffer the capture
@@ -620,7 +658,7 @@ encode engine for them all. The Output panel counts the sessions open:
 | The program's canvas size, live | 1, or none without `--connect` |
 | Its half size | 1 while someone watches it |
 | The recording's own canvas size | 1 while recording |
-| Each captured source | 1 while on program or recorded |
+| Each captured source or media file | 1 while on program or recorded |
 
 So a live scene showing a camera, a display, and a window holds 4 sessions, 5
 with the half size watched, and 6 while recording too. When the program
@@ -702,8 +740,8 @@ it is written, shortly after the click.
 
 Nothing records in the background for this. The program's tracks keep their
 last 30 seconds for late viewers anyway, and each source's track while it is on
-program (shown in a scene on air, or for a microphone or system audio, played by
-the mix on program) or recorded, and a replay copies from those, so a replay
+program (a picture shown in a scene on air, or a sound played by the mix on
+program) or recorded, and a replay copies from those, so a replay
 goes back at most that far. A replay of the program needs `--connect`; a local
 source keeps its track without a relay. With `--on-demand`, the program has
 no past from before someone watched it, and a source has none from before it
@@ -723,7 +761,8 @@ with its cause in plain words: a relay is unreachable, the uplink is
 congested or losing packets, the relay is far away, the encoder is behind or
 stuck, a source stalled (a camera or broadcast the program draws, or a
 microphone or system audio the mix on program plays: unmuted and not left
-out of it), or viewers are late, stalling, or cannot
+out of it), a source the program shows or plays failed or, as a media file
+that does not loop, played to its end, or viewers are late, stalling, or cannot
 decode a track. A relay lost while the other serves is
 degraded, since viewers have nothing left to fall back to; with none serving
 it is unhealthy. Below that it shows:
