@@ -14,7 +14,7 @@ use crate::collection::{
 };
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::overlay::{Overlay, Overlays};
-use crate::source::{self, Sources};
+use crate::source::{self, Feed, Sources, Status};
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
 /// `moq_video::render` produces and what its exporter hands an encoder.
@@ -116,6 +116,24 @@ struct Switch {
 	from_start: Instant,
 	start: Instant,
 	transition: Transition,
+	/// The play of its clip a stinger asked for, which the first render does.
+	played: Option<u64>,
+}
+
+impl Switch {
+	/// Stop the clip a stinger played, unless another play took it over
+	/// since, so its sound ends with a stinger cut short, or with a looping
+	/// clip's first pass.
+	fn stop(&self, sources: &Sources) {
+		let (Transition::Stinger { source, .. }, Some(play)) = (&self.transition, self.played) else {
+			return;
+		};
+		if let Some(feed) = sources.get(source).filter(|feed| feed.run().play == play)
+			&& let Err(err) = feed.stop()
+		{
+			tracing::warn!(%source, %err, "cannot stop the stinger");
+		}
+	}
 }
 
 /// A canvas-sized texture drawn into, and bound to sample.
@@ -277,6 +295,11 @@ impl Compositor {
 		self.switch.is_some()
 	}
 
+	/// The media source a stinger under way plays over the program.
+	pub fn stinger(&self) -> Option<&str> {
+		self.switch.as_ref()?.transition.stinger()
+	}
+
 	/// The scenes program draws: the one on program, and the one a transition
 	/// under way leaves.
 	pub fn on_air(&self) -> impl Iterator<Item = &str> {
@@ -332,9 +355,12 @@ impl Compositor {
 			.chain(leaving)
 	}
 
-	/// Put the preview on program at once, ending any transition.
-	pub fn cut(&mut self) {
-		self.switch = None;
+	/// Put the preview on program at once, ending any transition, and
+	/// stopping a stinger's clip in `sources`.
+	pub fn cut(&mut self, sources: &Sources) {
+		if let Some(switch) = self.switch.take() {
+			switch.stop(sources);
+		}
 		self.program_scene = self.preview_scene.clone();
 		self.program_start = None;
 	}
@@ -342,16 +368,64 @@ impl Compositor {
 	/// Take the preview to program by `transition`, starting at `now`.
 	///
 	/// A transition already under way lands on its scene first, so this one
-	/// starts from what that one was heading to.
-	pub fn transition(&mut self, transition: Transition, now: Instant) {
+	/// starts from what that one was heading to, and a stinger's clip in
+	/// `sources` stops. A stinger plays its clip from the start at the next
+	/// [`render`](Self::render), which switches the scenes `cut` into the clip
+	/// as it plays, and ends with the clip's play, leaving the clip holding its
+	/// last picture, or stopping a looping one; a clip that cannot play, or
+	/// fails, cuts at once instead.
+	pub fn transition(&mut self, transition: Transition, sources: &Sources, now: Instant) {
+		if let Some(switch) = self.switch.take() {
+			switch.stop(sources);
+		}
 		let from = std::mem::replace(&mut self.program_scene, self.preview_scene.clone());
 		let from_start = self.program_start.replace(now).unwrap_or(now);
-		self.switch = (!transition.duration().is_zero()).then_some(Switch {
+		self.switch = (transition.duration() != Some(Duration::ZERO)).then_some(Switch {
 			from,
 			from_start,
 			start: now,
 			transition,
+			played: None,
 		});
+	}
+
+	/// How far the transition under way has switched the scenes at `now`,
+	/// from 0 to 1 and eased, ending one that is over. A stinger switches
+	/// them at once at its cut point, its first call plays its clip, and its
+	/// end stops a looping one.
+	fn progress(&mut self, sources: &Sources, now: Instant) -> Option<f32> {
+		let switch = self.switch.as_mut()?;
+		let progress = match &switch.transition {
+			Transition::Stinger { source, cut } => {
+				let feed = sources.get(source);
+				match stinger(feed, *cut, &mut switch.played, now) {
+					Ok(Some(past)) => Some(if past { 1.0 } else { 0.0 }),
+					// Played to its end, a clip holds its last picture, as any
+					// media file does, but a looping one would play on, sound
+					// and all.
+					Ok(None) => {
+						if feed.is_some_and(|feed| matches!(feed.source(), Source::Media { looping: true, .. })) {
+							switch.stop(sources);
+						}
+						None
+					}
+					Err(err) => {
+						tracing::warn!(%source, %err, "cannot play the stinger; cutting instead");
+						None
+					}
+				}
+			}
+			transition => {
+				let duration = transition.duration().expect("only a stinger is untimed");
+				let elapsed = now.saturating_duration_since(switch.start);
+				let linear = (elapsed.as_secs_f32() / duration.as_secs_f32()).min(1.0);
+				(linear < 1.0).then(|| transition.progress(linear))
+			}
+		};
+		if progress.is_none() {
+			self.switch = None;
+		}
+		progress
 	}
 
 	/// Draw preview and program on every canvas as of `now`, from the newest
@@ -361,6 +435,9 @@ impl Compositor {
 	/// through [`error`](Self::error); this fails only when a canvas itself
 	/// cannot be drawn.
 	pub fn render(&mut self, collection: &Collection, sources: &Sources, now: Instant) -> Result<(), Error> {
+		// Before the pictures are pulled, so a stinger's clip starting now is
+		// cleared in this frame rather than showing where its last play ended.
+		let progress = self.progress(sources, now);
 		self.update(collection, sources, now);
 		self.paint(collection, now);
 
@@ -368,14 +445,6 @@ impl Compositor {
 		let preview_since = since(&mut self.preview_start);
 		self.preview_shown = preview_since;
 		let program_since = since(&mut self.program_start);
-
-		let linear = self.switch.as_ref().map(|switch| {
-			let elapsed = now.saturating_duration_since(switch.start);
-			(elapsed.as_secs_f32() / switch.transition.duration().as_secs_f32()).min(1.0)
-		});
-		if linear.is_some_and(|linear| linear >= 1.0) {
-			self.switch = None;
-		}
 
 		let mut frame = self.effects.frame();
 		let mut draw = Draw {
@@ -389,9 +458,9 @@ impl Compositor {
 		};
 		let preview = On(self.preview_scene.as_deref(), preview_since);
 		let program = On(self.program_scene.as_deref(), program_since);
-		let switch = self.switch.as_ref().zip(linear).map(|(switch, linear)| {
+		let switch = self.switch.as_ref().zip(progress).map(|(switch, progress)| {
 			let from = On(switch.from.as_deref(), now.saturating_duration_since(switch.from_start));
-			(switch, from, linear)
+			(switch, from, progress)
 		});
 		let extras = self.extras.iter().map(|(name, output)| (Some(name.as_str()), output));
 		for (canvas, output) in std::iter::once((None, &self.main)).chain(extras) {
@@ -528,7 +597,8 @@ impl Compositor {
 	}
 
 	/// The sources whose pictures preview and program draw on any canvas:
-	/// each visible item's, and each mask's, through clones.
+	/// each visible item's, a stinger's clip under way, and each mask's,
+	/// through clones.
 	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
 		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
 		let scenes: Vec<Option<String>> = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving]
@@ -539,6 +609,13 @@ impl Compositor {
 			.collect();
 		let canvases = std::iter::once(None).chain(self.extras.keys().map(Some));
 		let mut shown = HashSet::new();
+		let masks = |shown: &mut HashSet<&'a str>, filters: &mut dyn Iterator<Item = &'a Filter>| {
+			for filter in filters {
+				if let Filter::Mask { source, .. } = filter {
+					shown.insert(collection.capture(source));
+				}
+			}
+		};
 		for canvas in canvases {
 			for scene in &scenes {
 				let place = Place {
@@ -548,15 +625,72 @@ impl Compositor {
 				let items = collection.items(&place).unwrap_or_default();
 				for item in items.iter().filter(|item| item.visible) {
 					shown.insert(collection.capture(&item.source));
-					for filter in collection.filters(item) {
-						if let Filter::Mask { source, .. } = filter {
-							shown.insert(collection.capture(source));
-						}
-					}
+					masks(&mut shown, &mut collection.filters(item));
 				}
 			}
 		}
+		// Drawn through its source's filters alone.
+		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
+			shown.insert(name);
+			let video = collection.video.get(name);
+			masks(&mut shown, &mut video.into_iter().flat_map(|video| &video.filters));
+		}
 		shown
+	}
+}
+
+/// Whether a stinger playing `feed`'s clip is past `cut` into it at `now`, or
+/// `None` once the clip's play has ended. The first call plays the clip from
+/// its start, noting which play it is in `played`. Fails when the clip cannot
+/// play, or another play or a reload of the source cut it off.
+fn stinger(feed: Option<&Feed>, cut: Duration, played: &mut Option<u64>, now: Instant) -> Result<Option<bool>, Error> {
+	let feed = feed.ok_or_else(|| Error::Stopped("the source is not running".into()))?;
+	let play = match *played {
+		Some(play) => play,
+		None => {
+			feed.play()?;
+			*played.insert(feed.run().play)
+		}
+	};
+	if let Status::Failed(reason) = feed.status() {
+		return Err(Error::Stopped(reason));
+	}
+	let run = feed.run();
+	if run.play != play {
+		return Err(Error::Media("the clip was played again or reloaded".into()));
+	}
+	if run.ended.is_some_and(|ended| ended <= now) {
+		return Ok(None);
+	}
+	Ok(Some(
+		run.begun
+			.is_some_and(|begun| now.saturating_duration_since(begun) >= cut),
+	))
+}
+
+/// The crop that trims what `crop` leaves of a `size` picture evenly from two
+/// opposite sides to `canvas`'s shape, so it covers the canvas unstretched.
+fn cover(crop: Crop, size: (u32, u32), canvas: &Canvas) -> Crop {
+	let width = size.0 as f32 * (1.0 - crop.left - crop.right);
+	let height = size.1 as f32 * (1.0 - crop.top - crop.bottom);
+	let (shown, wanted) = (width / height, canvas.width as f32 / canvas.height as f32);
+	if !shown.is_finite() || shown <= 0.0 {
+		return Crop::default();
+	}
+	if shown > wanted {
+		let trim = (1.0 - wanted / shown) / 2.0;
+		Crop {
+			left: trim,
+			right: trim,
+			..Crop::default()
+		}
+	} else {
+		let trim = (1.0 - shown / wanted) / 2.0;
+		Crop {
+			top: trim,
+			bottom: trim,
+			..Crop::default()
+		}
 	}
 }
 
@@ -699,8 +833,8 @@ struct Draw<'a> {
 
 impl Draw<'_> {
 	/// Draw `output`'s preview, showing `preview`, and its program, showing
-	/// `program`, or `switch` to it from the scene it leaves, `linear` of its
-	/// time along.
+	/// `program`, or `switch` to it from the scene it leaves, `progress` of
+	/// the way there.
 	fn output(&mut self, output: &Output, preview: On, program: On, switch: Option<(&Switch, On, f32)>) {
 		let top = self.place(None);
 		// The top layer goes over both outputs, and over a transition rather
@@ -711,10 +845,9 @@ impl Draw<'_> {
 
 		let to = program;
 		match switch {
-			Some((switch, from, linear)) => {
-				let progress = switch.transition.progress(linear);
+			Some((switch, from, progress)) => {
 				let canvas = Rect::fill(&self.size);
-				match switch.transition {
+				match &switch.transition {
 					Transition::Fade { .. } => {
 						self.whole(&output.incoming, to);
 						self.target(&output.program);
@@ -726,8 +859,8 @@ impl Draw<'_> {
 						self.whole(&output.incoming, to);
 						self.target(&output.program);
 						self.scene(&output.program, from);
-						let (x, y) = offset(direction, progress, &canvas);
-						let (dx, dy) = offset(direction, 1.0, &canvas);
+						let (x, y) = offset(*direction, progress, &canvas);
+						let (dx, dy) = offset(*direction, 1.0, &canvas);
 						let uncovered = shifted(canvas, x - dx, y - dy);
 						self.picture(&output.program, &output.incoming, canvas, uncovered, 1.0);
 					}
@@ -735,8 +868,8 @@ impl Draw<'_> {
 						self.whole(&output.incoming, to);
 						self.whole(&output.outgoing, from);
 						self.target(&output.program);
-						let (x, y) = offset(direction, progress, &canvas);
-						let (dx, dy) = offset(direction, 1.0, &canvas);
+						let (x, y) = offset(*direction, progress, &canvas);
+						let (dx, dy) = offset(*direction, 1.0, &canvas);
 						self.picture(&output.program, &output.outgoing, shifted(canvas, x, y), canvas, 1.0);
 						let entering = shifted(canvas, x - dx, y - dy);
 						self.picture(&output.program, &output.incoming, entering, canvas, 1.0);
@@ -744,6 +877,11 @@ impl Draw<'_> {
 					Transition::Move { .. } => {
 						self.target(&output.program);
 						self.moving(&output.program, from, to, progress);
+					}
+					Transition::Stinger { source, .. } => {
+						self.target(&output.program);
+						self.scene(&output.program, if progress < 1.0 { from } else { to });
+						self.stinger(&output.program, source);
 					}
 				}
 			}
@@ -798,6 +936,23 @@ impl Draw<'_> {
 		for (index, item) in items.iter().enumerate().filter(|(_, item)| item.visible) {
 			self.item(target, (place.clone(), index, item.settled(since)), &item.posed(since));
 		}
+	}
+
+	/// Draw the picture of `source`, a stinger's clip, over the whole of
+	/// `target`, cropped to the shape of the canvas drawn now, through the
+	/// source's crop and filters. Nothing before its first picture.
+	fn stinger(&mut self, target: &Target, source: &str) {
+		let canvas = self.size;
+		let Some(picture) = self.library.0.get(source).and_then(|layer| layer.picture.as_ref()) else {
+			return;
+		};
+		let crop = self.collection.video.get(source).map(|video| video.crop);
+		let item = Item {
+			crop: cover(crop.unwrap_or_default(), picture.size(), &canvas),
+			..Item::new(source, Rect::fill(&canvas))
+		};
+		let pose = Pose::of(self.collection, &item);
+		self.posed(target, &item, pose);
 	}
 
 	/// Draw `item`, posed, where it is placed onto `target`, shared with every
@@ -1019,7 +1174,7 @@ mod tests {
 
 	use super::*;
 	use crate::collection::{Blend, Extra, MaskMode, Rgba, Scene};
-	use crate::source::test::{context, local, start};
+	use crate::source::test::{context, listen, local, start};
 
 	/// A fade over a second.
 	const FADE: Transition = Transition::Fade {
@@ -1083,10 +1238,12 @@ mod tests {
 	/// A compositor over running sources, read back to check pixels.
 	pub(super) struct Studio {
 		pub(super) collection: Collection,
-		sources: Sources,
+		pub(super) sources: Sources,
 		pub(super) compositor: Compositor,
 		pub(super) device: wgpu::Device,
 		queue: wgpu::Queue,
+		/// Mixes the sources' sound, only as a test advances it.
+		mixer: moq_audio::bus::Driver,
 		_origin: moq_net::origin::Producer,
 		_dir: tempfile::TempDir,
 	}
@@ -1101,6 +1258,8 @@ mod tests {
 			let (device, queue) = gpu().await;
 			let (mut context, origin) = context(dir.path());
 			context.output = moq_video::render::output(&device);
+			let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
+			context.bus = bus;
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
@@ -1110,6 +1269,7 @@ mod tests {
 				queue,
 				collection,
 				sources,
+				mixer,
 				_origin: origin,
 				_dir: dir,
 			}
@@ -1182,7 +1342,7 @@ mod tests {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(Instant::now());
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 1), RED);
@@ -1212,7 +1372,7 @@ mod tests {
 			collection.scenes[0].items.truncate(1);
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(Instant::now());
 			let actual = pixel(&studio.program(), 1, 1);
 			assert!(near(actual, [128, 0, 0, 255]), "{actual:?}");
@@ -1229,9 +1389,9 @@ mod tests {
 			let mut studio = Studio::new(collection()).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
+			studio.compositor.transition(FADE, &studio.sources, start);
 			assert_eq!(studio.compositor.program_scene(), Some("blue"));
 
 			studio.render(start + Duration::from_millis(500));
@@ -1282,7 +1442,7 @@ mod tests {
 
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(Instant::now());
 			let program = studio.program();
 			let actual = pixel(&program, 1, 6);
@@ -1303,12 +1463,12 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 1, 6), BLUE);
 
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
+			studio.compositor.transition(FADE, &studio.sources, start);
 			studio.render(start + Duration::from_millis(500));
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
@@ -1356,14 +1516,14 @@ mod tests {
 
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
 			assert_eq!(tall(&mut studio), (BLUE, RED));
 			assert_eq!(studio.compositor.layers.len(), 2, "each source is uploaded once");
 
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
+			studio.compositor.transition(FADE, &studio.sources, start);
 			studio.render(start + Duration::from_millis(500));
 			let (fading, kept) = tall(&mut studio);
 			assert!(near(fading, [0, 0, 128, 255]), "{fading:?}");
@@ -1393,10 +1553,10 @@ mod tests {
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
 
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
+			studio.compositor.transition(FADE, &studio.sources, start);
 			studio.render(start + Duration::from_millis(500));
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			assert!(!studio.compositor.transitioning());
 			studio.render(start + Duration::from_millis(600));
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
@@ -1455,9 +1615,9 @@ mod tests {
 			] {
 				let start = Instant::now();
 				studio.compositor.set_preview(Some("red".into()));
-				studio.compositor.cut();
+				studio.compositor.cut(&studio.sources);
 				studio.compositor.set_preview(Some("blue".into()));
-				studio.compositor.transition(transition, start);
+				studio.compositor.transition(transition.clone(), &studio.sources, start);
 				studio.render(start + Duration::from_millis(500));
 				let program = studio.program();
 				let actual = [(1, 1), (1, 6), (6, 1), (6, 6)].map(|(x, y)| pixel(&program, x, y));
@@ -1503,10 +1663,12 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.compositor.set_preview(Some("blue".into()));
 			let duration = Duration::from_secs(1);
-			studio.compositor.transition(Transition::Move { duration }, start);
+			studio
+				.compositor
+				.transition(Transition::Move { duration }, &studio.sources, start);
 
 			// Eased halfway, blue is at (2, 2) and both fades are at half.
 			studio.render(start + Duration::from_millis(500));
@@ -1586,7 +1748,7 @@ mod tests {
 			let start = Instant::now();
 			let at = |millis| start + Duration::from_millis(millis);
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.compositor.set_preview(Some("blue".into()));
 
 			studio.render(at(0));
@@ -1594,7 +1756,7 @@ mod tests {
 			assert_eq!(tall(&mut studio, true), (BLUE, BLACK), "halfway in, in preview");
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE, "the main canvas too");
 
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(at(500));
 			assert_eq!(tall(&mut studio, false), (BLACK, BLACK), "on program from the start");
 			assert_eq!(pixel(&studio.program(), 1, 6), BLACK, "the main canvas too");
@@ -1620,7 +1782,7 @@ mod tests {
 			let start = Instant::now();
 			let at = |millis| start + Duration::from_millis(millis);
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.compositor.set_preview(Some("blue".into()));
 
 			studio.render(at(0));
@@ -1635,7 +1797,7 @@ mod tests {
 			assert_eq!(pixel(&preview, 1, 6), BLUE, "halfway in");
 			assert_eq!(pixel(&preview, 6, 6), BLACK);
 
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(at(500));
 			assert_eq!(pixel(&studio.program(), 1, 6), BLACK, "on program from the start");
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE, "the preview carries on");
@@ -1674,7 +1836,7 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(start);
 			// Program has reached the jump; preview starts over before it.
 			studio.compositor.set_preview(Some("blue".into()));
@@ -1698,11 +1860,11 @@ mod tests {
 			let start = Instant::now();
 			let at = |millis| start + Duration::from_millis(millis);
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.compositor.set_preview(Some("red".into()));
 			studio.render(at(0));
 
-			studio.compositor.transition(FADE, at(9000));
+			studio.compositor.transition(FADE, &studio.sources, at(9000));
 			studio.render(at(9500));
 			let program = studio.program();
 			// Red has slid halfway in over the left half, blue is in place, and
@@ -1733,10 +1895,12 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.compositor.set_preview(Some("blue".into()));
 			let duration = Duration::from_secs(1);
-			studio.compositor.transition(Transition::Move { duration }, start);
+			studio
+				.compositor
+				.transition(Transition::Move { duration }, &studio.sources, start);
 
 			studio.render(start);
 			let program = studio.program();
@@ -1763,7 +1927,7 @@ mod tests {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(Instant::now());
 			assert!(studio.sources.get("blue").unwrap().take().is_none(), "drawn once");
 			studio.render(Instant::now());
@@ -1787,6 +1951,267 @@ mod tests {
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
 		})
 		.await;
+	}
+
+	/// Scenes "red" on program and "blue" in preview, with a stinger playing
+	/// `file` as the media source "sting", cutting 300 ms into it.
+	async fn stinging(file: &[u8]) -> Studio {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("sting.mkv"), file).unwrap();
+		let mut collection = collection();
+		let media = Source::Media {
+			path: "sting.mkv".into(),
+			looping: false,
+			restart: false,
+		};
+		collection.sources.insert("sting".into(), media);
+		collection.transition = Transition::Stinger {
+			source: "sting".into(),
+			cut: Duration::from_millis(300),
+		};
+		collection.validate().unwrap();
+		let mut studio = Studio::with_files(collection, dir).await;
+		studio.compositor.set_preview(Some("red".into()));
+		studio.compositor.cut(&studio.sources);
+		studio.compositor.set_preview(Some("blue".into()));
+		studio
+	}
+
+	/// Darken or hide the stinger's clip, through its source's filters.
+	fn sting(studio: &mut Studio, filter: Filter) {
+		let video = crate::collection::Video {
+			filters: vec![filter],
+			..Default::default()
+		};
+		studio.collection.video.insert("sting".into(), video);
+	}
+
+	/// A stinger plays its clip from its start over the program as it starts,
+	/// switches the scenes under it at its cut point into the clip, and ends
+	/// with the clip, which holds its last picture.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stinger_cuts_under_its_clip() {
+		local(async {
+			let mut studio = stinging(crate::media::tests::CLIP).await;
+			let feed = studio.sources.get("sting").unwrap();
+			assert_eq!(feed.status(), Status::Ended, "waiting for the stinger");
+			assert_eq!(feed.run(), source::Run::default());
+
+			let transition = studio.collection.transition.clone();
+			studio
+				.compositor
+				.transition(transition, &studio.sources, Instant::now());
+			assert_eq!(studio.compositor.program_scene(), Some("blue"));
+
+			// What the clip's filters read is drawn too, such as an overlay to paint.
+			let mask = Filter::Mask {
+				source: "red".into(),
+				mode: MaskMode::Alpha,
+			};
+			let mut collection = studio.collection.clone();
+			collection.scenes.retain(|scene| scene.name == "blue");
+			collection.video.insert(
+				"sting".into(),
+				crate::collection::Video {
+					filters: vec![mask],
+					..Default::default()
+				},
+			);
+			let shown = studio.compositor.shown(&collection);
+			assert!(shown.contains("sting") && shown.contains("red"), "{shown:?}");
+
+			sting(&mut studio, Filter::Brightness { amount: 0.0 });
+			// Black over the whole canvas once its first picture arrives.
+			loop {
+				studio.render(Instant::now());
+				assert!(studio.compositor.transitioning());
+				assert_eq!(studio.compositor.stinger(), Some("sting"));
+				if studio.program().chunks(4).all(|pixel| pixel == BLACK) {
+					break;
+				}
+				kio::clock::sleep(Duration::from_millis(5)).await;
+			}
+			let begun = studio.sources.get("sting").unwrap().run().begun.unwrap();
+
+			// Seen through, the outgoing scene shows until the cut point.
+			sting(&mut studio, Filter::Opacity { amount: 0.0 });
+			studio.render(begun + Duration::from_millis(299));
+			assert_eq!(pixel(&studio.program(), 1, 1), RED);
+			studio.render(begun + Duration::from_millis(300));
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+			assert!(studio.compositor.transitioning(), "until the clip ends");
+
+			let ended = loop {
+				if let Some(ended) = studio.sources.get("sting").unwrap().run().ended {
+					break ended;
+				}
+				kio::clock::sleep(Duration::from_millis(5)).await;
+			};
+			assert!(ended >= begun + Duration::from_secs(1), "{:?}", ended - begun);
+			studio.render(ended);
+			assert!(!studio.compositor.transitioning());
+			assert_eq!(studio.compositor.stinger(), None);
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+
+			// Played to its end, the clip rests ended on its last picture, not
+			// blank, as any media file that played once does.
+			while studio.sources.get("sting").unwrap().status() != Status::Ended {
+				kio::clock::sleep(Duration::from_millis(5)).await;
+			}
+			studio.render(Instant::now());
+			let held = studio.compositor.layers["sting"].picture.as_ref().unwrap().size();
+			assert_eq!(held, (64, 64), "holds its last picture");
+
+			// The next stinger starts blank, never on the last one's end.
+			sting(&mut studio, Filter::Brightness { amount: 0.0 });
+			studio.compositor.set_preview(Some("red".into()));
+			let transition = studio.collection.transition.clone();
+			studio
+				.compositor
+				.transition(transition, &studio.sources, Instant::now());
+			studio.render(Instant::now());
+			assert!(studio.compositor.transitioning());
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+		})
+		.await;
+	}
+
+	/// A stinger whose clip cannot play cuts at once, as does one whose clip
+	/// is played again from elsewhere, such as the Sources panel.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stinger_that_cannot_play_cuts() {
+		local(async {
+			let mut studio = stinging(b"not a video").await;
+			let transition = studio.collection.transition.clone();
+			studio
+				.compositor
+				.transition(transition, &studio.sources, Instant::now());
+			studio.render(Instant::now());
+			assert!(!studio.compositor.transitioning());
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+
+			let mut studio = stinging(crate::media::tests::CLIP).await;
+			let transition = studio.collection.transition.clone();
+			studio
+				.compositor
+				.transition(transition, &studio.sources, Instant::now());
+			studio.render(Instant::now());
+			assert!(studio.compositor.transitioning());
+			studio.sources.get("sting").unwrap().play().unwrap();
+			studio.render(Instant::now());
+			assert!(!studio.compositor.transitioning());
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+		})
+		.await;
+	}
+
+	/// A **Cut** mid-stinger stops its clip, sound it queued included, so
+	/// nothing of it plays on the program mix. Stopped from elsewhere, the
+	/// clip ends its stinger at once, and a looping clip stops with its
+	/// stinger after one pass.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stinger_stops_its_clip() {
+		local(async {
+			let mut studio = stinging(crate::media::tests::CLIP).await;
+			let program = studio.sources.mix(crate::Mixes::DEFAULT).unwrap().clone();
+			let mut at = Instant::now();
+			studio.mixer.advance(480);
+			let transition = studio.collection.transition.clone();
+			studio
+				.compositor
+				.transition(transition, &studio.sources, Instant::now());
+			loop {
+				studio.render(Instant::now());
+				let until = at + Duration::from_millis(10);
+				if listen(&mut studio.mixer, &program, &mut at, until).await > 0.0 {
+					break;
+				}
+			}
+			studio.compositor.cut(&studio.sources);
+			assert!(!studio.compositor.transitioning());
+			let feed = studio.sources.get("sting").unwrap();
+			while feed.status() != Status::Ended {
+				kio::clock::sleep(Duration::from_millis(5)).await;
+			}
+			let until = at + Duration::from_millis(500);
+			let heard = listen(&mut studio.mixer, &program, &mut at, until).await;
+			assert_eq!(heard, 0.0, "the clip's sound stops with the cut");
+
+			// Stopped from the Sources panel, the stinger ends with it.
+			studio.compositor.set_preview(Some("red".into()));
+			let transition = studio.collection.transition.clone();
+			studio
+				.compositor
+				.transition(transition, &studio.sources, Instant::now());
+			studio.render(Instant::now());
+			assert!(studio.compositor.transitioning());
+			studio.sources.get("sting").unwrap().stop().unwrap();
+			studio.render(Instant::now());
+			assert!(!studio.compositor.transitioning());
+			assert_eq!(pixel(&studio.program(), 1, 1), RED);
+
+			// A looping clip plays one pass, then stops with the stinger.
+			let looping = Source::Media {
+				path: "sting.mkv".into(),
+				looping: true,
+				restart: false,
+			};
+			studio.collection.sources.insert("sting".into(), looping);
+			let drivers = studio.sources.sync(&studio.collection);
+			start(&studio.sources, drivers).await;
+			studio.compositor.set_preview(Some("blue".into()));
+			let transition = studio.collection.transition.clone();
+			studio
+				.compositor
+				.transition(transition, &studio.sources, Instant::now());
+			while studio.compositor.transitioning() {
+				studio.render(Instant::now());
+				let until = at + Duration::from_millis(10);
+				listen(&mut studio.mixer, &program, &mut at, until).await;
+			}
+			let feed = studio.sources.get("sting").unwrap();
+			assert!(feed.run().ended.is_some(), "after its first pass");
+			while feed.status() != Status::Ended {
+				kio::clock::sleep(Duration::from_millis(5)).await;
+			}
+			let until = at + Duration::from_millis(500);
+			let heard = listen(&mut studio.mixer, &program, &mut at, until).await;
+			assert_eq!(heard, 0.0, "the loop stops with the stinger");
+		})
+		.await;
+	}
+
+	/// A stinger's clip covers a canvas of another shape unstretched, trimmed
+	/// evenly from the sides that overflow, after its source's own crop.
+	#[test]
+	fn a_stinger_covers_the_canvas() {
+		let portrait = Canvas {
+			width: 1080,
+			height: 1920,
+			framerate: 30,
+		};
+		let crop = cover(Crop::default(), (1920, 1080), &portrait);
+		let kept = 1.0 - crop.left - crop.right;
+		assert!((kept - (1080.0 / 1920.0) / (1920.0 / 1080.0)).abs() < 1e-6, "{crop:?}");
+		assert_eq!((crop.left, crop.top, crop.bottom), (crop.right, 0.0, 0.0));
+
+		let landscape = Canvas::default();
+		let crop = cover(Crop::default(), (1080, 1920), &landscape);
+		assert_eq!((crop.left, crop.right), (0.0, 0.0));
+		assert!(crop.top > 0.0 && crop.top == crop.bottom, "{crop:?}");
+		assert_eq!(cover(Crop::default(), (1920, 1080), &landscape), Crop::default());
+
+		// A source cropped to a square is trimmed from what it leaves.
+		let square = Crop {
+			left: 0.21875,
+			right: 0.21875,
+			..Crop::default()
+		};
+		let crop = cover(square, (1920, 1080), &landscape);
+		assert!((crop.top - 0.21875).abs() < 1e-6, "{crop:?}");
 	}
 
 	/// A picture the GPU cannot hold says why, rather than leaving its source
@@ -1822,7 +2247,7 @@ mod tests {
 	async fn drawn(collection: Collection, dir: tempfile::TempDir) -> Vec<u8> {
 		let mut studio = Studio::with_files(collection, dir).await;
 		studio.compositor.set_preview(Some("red".into()));
-		studio.compositor.cut();
+		studio.compositor.cut(&studio.sources);
 		studio.render(Instant::now());
 		studio.program()
 	}
@@ -2280,7 +2705,7 @@ mod tests {
 			);
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(Instant::now());
 			let old = studio.compositor.program().clone();
 
@@ -2352,9 +2777,9 @@ mod tests {
 			let mut studio = Studio::new(collection()).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
+			studio.compositor.transition(FADE, &studio.sources, start);
 
 			// `blue` takes the name `red` gives up, which is followed once.
 			let mut draft = studio.collection.draft("Rename");
@@ -2440,12 +2865,12 @@ mod tests {
 			collection.scenes[1].items = vec![Item::new("overlay", Rect::fill(&collection.canvas))];
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			// Opened here, but drawn nowhere until the cut.
 			let start = Instant::now();
 			studio.render(start);
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 
 			for (at, expected) in [(500, [128, 0, 128, 255]), (750, [64, 0, 191, 255]), (2000, BLUE)] {
 				studio.render(start + Duration::from_millis(at));
@@ -2487,10 +2912,12 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.compositor.set_preview(Some("blue".into()));
 			let duration = Duration::from_secs(1);
-			studio.compositor.transition(Transition::Move { duration }, start);
+			studio
+				.compositor
+				.transition(Transition::Move { duration }, &studio.sources, start);
 
 			studio.render(start + Duration::from_millis(500));
 			let program = studio.program();
@@ -2526,11 +2953,11 @@ mod tests {
 
 			// Paint the aside overlay, then leave it off air.
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 3, 3), [255, 255, 0, 255]);
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(start);
 
 			studio.compositor.overlays.as_ref().unwrap().panic();
@@ -2541,7 +2968,7 @@ mod tests {
 			}
 
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.cut(&studio.sources);
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 3, 3), RED, "no frozen overlay");
 		})
@@ -2608,7 +3035,7 @@ mod bench {
 		studio.compositor.set_canvases(&studio.collection).unwrap();
 		let scene = studio.collection.scenes[0].name.clone();
 		studio.compositor.set_preview(Some(scene));
-		studio.compositor.cut();
+		studio.compositor.cut(&studio.sources);
 		let mut total = Duration::ZERO;
 		for frame in 0..FRAMES * 2 {
 			let start = Instant::now();

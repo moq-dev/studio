@@ -244,7 +244,10 @@ impl Change {
 				after: Some(a.clone()),
 			},
 			(Self::Transition { before, after }, Self::Transition { before: b, after: a }) if after == *b => {
-				Self::Transition { before, after: *a }
+				Self::Transition {
+					before,
+					after: a.clone(),
+				}
 			}
 			(Self::Canvas { before, after }, Self::Canvas { before: b, after: a }) if after == *b => {
 				Self::Canvas { before, after: *a }
@@ -294,7 +297,7 @@ impl Change {
 				if collection.transition != *before {
 					return Err(conflict("the transition changed".into()));
 				}
-				collection.transition = *after;
+				collection.transition = after.clone();
 				Ok(())
 			}
 			Self::Canvas { before, after } => {
@@ -501,8 +504,9 @@ impl Draft {
 	}
 
 	/// Remove the source called `name` and everything that refers to it: its
-	/// clones, the items showing either, their audio and video settings, and
-	/// the filters reading it, such as a mask.
+	/// clones, the items showing either, their audio and video settings, the
+	/// filters reading it, such as a mask, and a stinger playing it, which
+	/// becomes the default fade.
 	pub fn remove_source(&mut self, name: &str) -> Result<(), Error> {
 		let clones: Vec<String> = self
 			.collection
@@ -562,6 +566,9 @@ impl Draft {
 		}
 		if self.collection.video.contains_key(name) {
 			self.set_video(name, None)?;
+		}
+		if self.collection.transition.stinger() == Some(name) {
+			self.set_transition(Transition::default())?;
 		}
 		self.set_source(name, None)
 	}
@@ -662,7 +669,7 @@ impl Draft {
 
 	/// Set how the preview is taken to program, short of a cut.
 	pub fn set_transition(&mut self, transition: Transition) -> Result<(), Error> {
-		let before = self.collection.transition;
+		let before = self.collection.transition.clone();
 		self.change(Change::Transition {
 			before,
 			after: transition,
@@ -1342,6 +1349,52 @@ mod tests {
 		let mut draft = collection.draft("Resize the canvas");
 		draft.set_canvas(Canvas { width: 1279, ..canvas }).unwrap();
 		assert!(matches!(draft.finish(), Err(Error::Invalid(_))));
+	}
+
+	/// A stinger's clip and cut point are edits, it plays only a media source,
+	/// and removing that source sets the default fade back, undoing whole.
+	#[test]
+	fn a_stinger_follows_its_source() {
+		let mut collection = collection();
+		let media = Source::Media {
+			path: "sting.webm".into(),
+			looping: false,
+			restart: false,
+		};
+		collection.sources.insert("sting".into(), media);
+		let start = collection.clone();
+		let mut history = History::new();
+		let stinger = |millis| Transition::Stinger {
+			source: "sting".into(),
+			cut: std::time::Duration::from_millis(millis),
+		};
+		for millis in [400, 500] {
+			let mut draft = collection.draft("Set the transition");
+			draft.set_transition(stinger(millis)).unwrap();
+			commit(&mut collection, &mut history, draft, None);
+		}
+		assert_eq!(collection.transition, stinger(500));
+
+		let mut draft = collection.draft("Set the transition");
+		draft
+			.set_transition(Transition::Stinger {
+				source: "red".into(),
+				cut: std::time::Duration::ZERO,
+			})
+			.unwrap();
+		let err = draft.finish().unwrap_err().to_string();
+		assert!(err.contains("not a media source"), "{err}");
+
+		let removed = collection.clone();
+		let mut draft = collection.draft("Remove sting");
+		draft.remove_source("sting").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.transition, Transition::default());
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, removed);
+		history.undo(&mut collection).unwrap();
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, start);
 	}
 
 	/// A further canvas is added, laid out, and resized as edits; removing a

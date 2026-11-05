@@ -204,9 +204,9 @@ impl Collection {
 	}
 
 	/// Check what the types cannot: the canvas can be encoded, names are unique,
-	/// every item, clone, audio, and video entry names a source that exists,
-	/// and every crop and filter's settings are in range, each filter naming a
-	/// source of the kind it reads.
+	/// every item, clone, audio, and video entry names a source that exists, a
+	/// stinger names a media source, and every crop and filter's settings are
+	/// in range, each filter naming a source of the kind it reads.
 	pub fn validate(&self) -> Result<(), Error> {
 		self.canvas.validate()?;
 		for (name, extra) in &self.canvases {
@@ -321,6 +321,14 @@ impl Collection {
 				.validate()
 				.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 			self.validate_chain(&video.filters, &on)?;
+		}
+
+		if let Some(name) = self.transition.stinger()
+			&& !matches!(self.sources.get(name), Some(Source::Media { .. }))
+		{
+			return Err(Error::Invalid(format!(
+				"the stinger plays `{name}`, which is not a media source"
+			)));
 		}
 
 		self.mixes.validate()?;
@@ -487,9 +495,9 @@ impl Extra {
 
 /// How the program changes when the preview is taken to it, short of a cut.
 ///
-/// A fade runs at an even pace; the others ease in and out, so motion starts
-/// and lands gently. One that takes no time is a cut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A fade runs at an even pace; the slide, wipe, and move ease in and out, so
+/// motion starts and lands gently. One that takes no time is a cut.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Transition {
 	/// The incoming scene fades in over the outgoing one.
@@ -524,26 +532,49 @@ pub enum Transition {
 		#[serde(with = "humantime_serde")]
 		duration: Duration,
 	},
+	/// A media source's clip plays over the program from its start, and the
+	/// program switches scenes under it at `cut` into the clip, while it
+	/// covers the canvas. It lasts as long as the clip's first play, filling
+	/// each canvas it is drawn on, cropped to the canvas's shape, through the
+	/// source's own crop and filters.
+	Stinger {
+		/// The [`Source::Media`] whose clip plays.
+		source: String,
+		/// How far into the clip the scenes switch.
+		#[serde(with = "humantime_serde")]
+		cut: Duration,
+	},
 }
 
 impl Transition {
-	/// How long it takes.
-	pub fn duration(&self) -> Duration {
+	/// How long it takes, or `None` for a stinger, which lasts as long as its
+	/// clip.
+	pub fn duration(&self) -> Option<Duration> {
 		match *self {
 			Self::Fade { duration }
 			| Self::Slide { duration, .. }
 			| Self::Wipe { duration, .. }
-			| Self::Move { duration } => duration,
+			| Self::Move { duration } => Some(duration),
+			Self::Stinger { .. } => None,
 		}
 	}
 
-	/// How long it takes, to change.
-	pub fn duration_mut(&mut self) -> &mut Duration {
+	/// How long it takes, to change, or `None` for a stinger.
+	pub fn duration_mut(&mut self) -> Option<&mut Duration> {
 		match self {
 			Self::Fade { duration }
 			| Self::Slide { duration, .. }
 			| Self::Wipe { duration, .. }
-			| Self::Move { duration } => duration,
+			| Self::Move { duration } => Some(duration),
+			Self::Stinger { .. } => None,
+		}
+	}
+
+	/// The media source a stinger plays.
+	pub fn stinger(&self) -> Option<&str> {
+		match self {
+			Self::Stinger { source, .. } => Some(source),
+			_ => None,
 		}
 	}
 
@@ -1900,6 +1931,44 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			}
 		);
 		assert_eq!(collection.top[0].source, "bg");
+	}
+
+	/// A stinger names its media source and its cut point, and round-trips.
+	#[test]
+	fn reads_a_stinger() {
+		let text = r#"
+version = 1
+
+[canvas]
+width = 1280
+height = 720
+framerate = 30
+
+[transition]
+kind = "stinger"
+source = "sting"
+cut = "800ms"
+
+[sources.sting]
+kind = "media"
+path = "sting.webm"
+"#;
+		let collection = Collection::from_toml(text).unwrap();
+		let stinger = Transition::Stinger {
+			source: "sting".into(),
+			cut: Duration::from_millis(800),
+		};
+		assert_eq!(collection.transition, stinger);
+		assert_eq!(collection.transition.stinger(), Some("sting"));
+		assert_eq!(collection.transition.duration(), None);
+		assert_eq!(
+			Collection::from_toml(&collection.to_toml().unwrap()).unwrap(),
+			collection
+		);
+
+		let missing = text.replace("source = \"sting\"", "source = \"nothing\"");
+		let err = Collection::from_toml(&missing).unwrap_err().to_string();
+		assert!(err.contains("`nothing`, which is not a media source"), "{err}");
 	}
 
 	#[test]
