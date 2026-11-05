@@ -63,7 +63,7 @@ pub(crate) enum Raster {
 	/// node named, the studio's GPU, or else on the one CEF picks.
 	Gpu { render_node: Option<String> },
 	/// In software, into memory the studio uploads. Startup never waits on a
-	/// GPU process CEF cannot start, at the cost of slower WebGL.
+	/// GPU process CEF cannot start, and WebGL runs on SwiftShader.
 	#[default]
 	Cpu,
 }

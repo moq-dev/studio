@@ -239,6 +239,24 @@ async fn a_page_draws_and_plays() {
 	.await;
 }
 
+/// A page gets WebGL and WebGL2 contexts, and what it draws with them shows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_webgl_page_draws() {
+	local(async {
+		// Red unless both contexts exist, and then green from WebGL2.
+		let html = "<body style='margin:0;background:red'>\
+			<canvas id=c width=320 height=240 style='display:block'></canvas><script>\
+			const gl = document.getElementById('c').getContext('webgl2');\
+			const gl1 = document.createElement('canvas').getContext('webgl');\
+			if (gl && gl1) { gl.clearColor(0, 1, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); }\
+			</script></body>";
+		let mut studio = Studio::new(&[("page", page(html))]).await;
+		studio.until_center(GREEN, &[]).await;
+	})
+	.await;
+}
+
 /// A click reaches the page where the preview put it, and a popup it asks for
 /// opens nothing.
 #[tokio::test(flavor = "multi_thread")]

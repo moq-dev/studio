@@ -750,7 +750,8 @@ macOS. A browser source's page is copied on the GPU from the shared texture CEF
 paints, given the same Vulkan DMA-BUF import. Every other source, every source
 on Windows or on a GPU that cannot import, and every still image delivers its
 frames from the CPU, which the compositor uploads. A browser source on that
-path renders its page in software, so a WebGL page runs slower there.
+path renders its page in software, WebGL included, so a WebGL page runs
+slower there.
 
 ## Replay
 

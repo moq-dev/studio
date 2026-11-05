@@ -436,7 +436,13 @@ wrap_app! {
 				// The pictures come back in memory anyway. Left to find a GPU,
 				// Chromium walks its fallbacks, and one can hang until its
 				// watchdog kills it seconds later, delaying the first paint.
-				Raster::Cpu => command_line.append_switch(Some(&"disable-gpu".into())),
+				// WebGL then needs SwiftShader, which Chromium runs only when
+				// told to, since it JITs page shaders in the GPU process. A
+				// browser source runs the pages its user picked, not the web.
+				Raster::Cpu => {
+					command_line.append_switch(Some(&"disable-gpu".into()));
+					command_line.append_switch(Some(&"enable-unsafe-swiftshader".into()));
+				}
 			}
 		}
 	}
