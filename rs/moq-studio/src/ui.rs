@@ -110,6 +110,7 @@ impl Studio {
 				preview,
 				program,
 				view: None,
+				picked: None,
 				top: false,
 				selection: None,
 				gestures: Gestures::default(),
@@ -165,7 +166,27 @@ impl eframe::App for Studio {
 
 	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
 		let engine = self.panels.engine.clone();
+		// A canvas picked last frame is shown from this one on, so every panel
+		// sizes the same canvas whose textures are registered here.
+		if let Some(view) = self.panels.picked.take() {
+			self.panels.view = view;
+			self.panels.deselect_item();
+		}
 		let state = engine.state.lock().unwrap();
+		// One removed since, by an edit, undo, or reload, falls back to the main
+		// canvas.
+		if let Some(name) = &self.panels.view
+			&& !state.collection().canvases.contains_key(name)
+		{
+			self.panels.view = None;
+			self.panels.deselect_item();
+		}
+		if let Some(render) = frame.wgpu_render_state() {
+			let view = state.compositor.output(self.panels.view.as_deref());
+			let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
+			self.panels.preview.follow(render, view.preview());
+			self.panels.program.follow(render, view.program());
+		}
 		// Redraw at the canvas rate, so preview and program are live.
 		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
@@ -187,15 +208,8 @@ impl eframe::App for Studio {
 		if !self.panels.previewed {
 			self.panels.let_go();
 		}
-		// After the panels, which may pick another canvas, so the textures
-		// painted at the end of this frame are the canvas the panels sized
-		// them for.
-		if let Some(render) = frame.wgpu_render_state() {
-			let state = engine.state.lock().unwrap();
-			let view = state.compositor.output(self.panels.view.as_deref());
-			let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
-			self.panels.preview.follow(render, view.preview());
-			self.panels.program.follow(render, view.program());
+		if self.panels.picked.is_some() {
+			ui.ctx().request_repaint();
 		}
 	}
 }
@@ -244,6 +258,9 @@ struct Panels {
 	/// The canvas Preview, Program, and Items show: a further one by name, or
 	/// `None` for the main one.
 	view: Option<String>,
+	/// The canvas the picker chose this frame, shown from the next, so a
+	/// frame never sizes one canvas and draws another.
+	picked: Option<Option<String>>,
 	/// Whether the Items panel shows the top layer rather than the scene in
 	/// preview.
 	top: bool,
@@ -653,14 +670,11 @@ impl Panels {
 	}
 
 	/// The canvas Preview, Program, and Items show, and its size: the main
-	/// one once a further one shown is removed.
-	fn view(&mut self, state: &State) -> Canvas {
-		if let Some(canvas) = state.collection().canvas(self.view.as_deref()) {
-			return canvas;
-		}
-		self.view = None;
-		self.deselect_item();
-		state.collection().canvas
+	/// one once a further one shown is removed, as its textures are, until the
+	/// next frame lets go of it.
+	fn view(&self, state: &State) -> Canvas {
+		let canvas = state.collection().canvas(self.view.as_deref());
+		canvas.unwrap_or(state.collection().canvas)
 	}
 
 	/// Pick which canvas Preview, Program, and Items show.
@@ -682,8 +696,7 @@ impl Panels {
 			.response
 			.on_hover_text("The canvas preview and program show, and the items edited are on");
 		if view != self.view {
-			self.view = view;
-			self.deselect_item();
+			self.picked = Some(view);
 		}
 	}
 
@@ -2635,16 +2648,9 @@ impl Panels {
 				}
 				result
 			}
-			Some(CanvasAction::Remove(name)) => {
-				let result = edit(&mut state, format!("Remove canvas `{name}`"), None, |draft| {
-					draft.remove_extra(&name)
-				});
-				if result.is_ok() && self.view.as_ref() == Some(&name) {
-					self.view = None;
-					self.deselect_item();
-				}
-				result
-			}
+			Some(CanvasAction::Remove(name)) => edit(&mut state, format!("Remove canvas `{name}`"), None, |draft| {
+				draft.remove_extra(&name)
+			}),
 		};
 		drop(state);
 		self.check(result);
