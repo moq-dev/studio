@@ -111,8 +111,16 @@ struct Cue {
 }
 
 /// A media source's latest [`Run`], which the feed starts and only the driver
-/// playing that one writes.
-type Runs = Arc<Mutex<Run>>;
+/// playing that one writes, and whether the feed stopped it.
+#[derive(Default)]
+struct Latest {
+	run: Run,
+	stopped: bool,
+}
+
+/// The feed changes it, and blanks the picture, under its lock, which the
+/// driver takes to show a picture, so a play cut off never shows over that.
+type Runs = Arc<Mutex<Latest>>;
 
 /// A picture that shows nothing, for a replay source between replays.
 fn clear() -> Picture {
@@ -437,17 +445,20 @@ impl Feed {
 		}
 		// Counted before the driver hears of it, so whatever the play before
 		// still reports is not taken for this one's.
-		let mut run = self.runs.lock().unwrap();
-		*run = Run {
-			play: run.play + 1,
-			..Run::default()
+		let mut latest = self.runs.lock().unwrap();
+		*latest = Latest {
+			run: Run {
+				play: latest.run.play + 1,
+				..Run::default()
+			},
+			stopped: false,
 		};
 		// Cleared before the driver hears of it, so the next frame drawn, such
 		// as the first of a scene going on program, shows nothing rather than
 		// where the last play was, and the new first picture replaces it.
 		*self.picture.lock().unwrap() = Some(clear());
 		let cue = Cue {
-			play: run.play,
+			play: latest.run.play,
 			stopped: false,
 		};
 		cues.send(cue).map_err(|_| self.stopped())
@@ -462,14 +473,13 @@ impl Feed {
 		let Some(cues) = &self.cues else {
 			return Err(Error::Unsupported("only a media source stops".into()));
 		};
-		let mut run = self.runs.lock().unwrap();
-		run.ended.get_or_insert_with(kio::clock::now);
-		// The driver blanks it again once it hears, over any picture it shows
-		// before then.
+		let mut latest = self.runs.lock().unwrap();
+		latest.run.ended.get_or_insert_with(kio::clock::now);
+		latest.stopped = true;
 		*self.picture.lock().unwrap() = Some(clear());
 		// Kept even with the driver gone, which plays nothing anyway.
 		cues.send_replace(Cue {
-			play: run.play,
+			play: latest.run.play,
 			stopped: true,
 		});
 		Ok(())
@@ -478,7 +488,7 @@ impl Feed {
 	/// A media source's latest play, from its start or the latest
 	/// [`play`](Self::play). Never begins for any other source.
 	pub fn run(&self) -> Run {
-		*self.runs.lock().unwrap()
+		self.runs.lock().unwrap().run
 	}
 
 	/// Why the driver is gone, from the reason it left in the status.
@@ -1371,9 +1381,8 @@ impl Driver {
 				{
 					sound.channel = Some(self.channel(strip.clone())?);
 				}
-				// A new cue first, so a picture due as it comes never shows.
 				let played = tokio::select! {
-					biased;
+					result = self.play_clip(&clip, sound.as_mut(), &mut own, next, cue.play) => Some(result?),
 					changed = cues.changed() => {
 						// The feed is gone, which stops this driver anyway.
 						if changed.is_err() {
@@ -1381,7 +1390,6 @@ impl Driver {
 						}
 						None
 					}
-					result = self.play_clip(&clip, sound.as_mut(), &mut own, next, cue.play) => Some(result?),
 				};
 				if let Some(end) = played {
 					self.ran(cue.play, |run| {
@@ -1401,17 +1409,24 @@ impl Driver {
 			cut(&mut sound, &mut own);
 			cue = *cues.borrow_and_update();
 			next = None;
-			// Over any picture the play cut off showed after the feed blanked it.
-			*self.picture.lock().unwrap() = Some(clear());
 		}
 	}
 
 	/// Note how a media source's `play` runs, unless the feed has asked for
 	/// another since or stopped it.
 	fn ran(&self, play: u64, note: impl FnOnce(&mut Run)) {
-		let mut run = self.runs.lock().unwrap();
-		if run.play == play && run.ended.is_none() {
-			note(&mut run);
+		let mut latest = self.runs.lock().unwrap();
+		if latest.run.play == play && latest.run.ended.is_none() {
+			note(&mut latest.run);
+		}
+	}
+
+	/// Show a picture of a media source's `play`, unless the feed has asked
+	/// for another or stopped it since.
+	fn show_play(&self, play: u64, picture: Picture) {
+		let latest = self.runs.lock().unwrap();
+		if latest.run.play == play && !latest.stopped {
+			self.show(picture);
 		}
 	}
 
@@ -1518,7 +1533,7 @@ impl Driver {
 				last(due + previous.map_or(Duration::ZERO, |previous| due - previous));
 				previous = Some(due);
 				self.encode(own, &mut frame, config).await?;
-				self.show(Picture::Frame(frame));
+				self.show_play(play, Picture::Frame(frame));
 				picture = next_picture(consumer).await?;
 			}
 			Ok::<_, Error>(())
@@ -1758,7 +1773,10 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 		_ => (None, None),
 	};
 	let silent = Arc::<AtomicBool>::default();
-	let runs = Runs::default();
+	let runs = Runs::new(Mutex::new(Latest {
+		run: Run::default(),
+		stopped: held,
+	}));
 
 	let feed = Feed {
 		source: source.clone(),
