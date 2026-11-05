@@ -145,8 +145,9 @@ cropped.
 A nested scene is drawn at the main canvas's size, transparent where it draws
 nothing, once per frame however many items show it, and only while something
 drawn shows it. Its items' keyframes play from when the scene showing it goes
-on, as that scene's own items' do, and a media file in it set to restart plays
-from its start when the scene showing it goes on program.
+on, as that scene's own items' do, so the top layer, which never goes on,
+cannot show a scene with keyframes. A media file in a nested scene set to
+restart plays from its start when the scene showing it goes on program.
 
 A scene cannot draw itself, even through other scenes, so an edit that would
 is refused. A scene showing the program cannot go on program, nor can the main

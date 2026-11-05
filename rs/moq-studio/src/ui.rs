@@ -1226,9 +1226,17 @@ impl Panels {
 			SceneAction::Move(from, to) => edit(&mut state, format!("Reorder scene `{name}`"), None, |draft| {
 				draft.move_scene(from, to)
 			}),
-			SceneAction::Remove(index) => edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
-				draft.remove_scene(index)
-			}),
+			SceneAction::Remove(index) => {
+				let result = edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
+					draft.remove_scene(index)
+				});
+				if result.is_ok() {
+					// Removing its scene sources removes the items showing
+					// them, which moves the ones after them.
+					self.deselect_item();
+				}
+				result
+			}
 		};
 		drop(state);
 		self.check(result);
@@ -2490,7 +2498,7 @@ impl Panels {
 			};
 			// What a source shows or plays, a clone its source's, has a past
 			// only if something encodes it: not an image, a color, a web page,
-			// an overlay, or a LUT.
+			// an overlay, a LUT, or a scene or the program drawn into another.
 			let collection = state.collection();
 			let replayable = collection
 				.sources
@@ -2503,6 +2511,7 @@ impl Panels {
 							Source::Image { .. }
 								| Source::Color { .. } | Source::Browser { .. }
 								| Source::Overlay { .. } | Source::Lut { .. }
+								| Source::Scene { .. } | Source::Program
 						)
 					})
 				})

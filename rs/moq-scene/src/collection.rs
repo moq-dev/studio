@@ -226,21 +226,30 @@ impl Collection {
 	/// a scene it draws, shown or hidden. It then cannot go on program, which
 	/// it would draw into itself.
 	pub fn draws_program(&self, scene: &str) -> bool {
+		let items = self.reached(scene);
+		items
+			.iter()
+			.any(|item| self.nested(&item.source) == Some(Nested::Program))
+	}
+
+	/// Every item of the scene called `scene` and of the scenes it draws,
+	/// shown or hidden, each scene once.
+	fn reached(&self, scene: &str) -> Vec<&Item> {
 		let mut scenes = vec![scene];
 		let mut seen = BTreeSet::new();
+		let mut items = Vec::new();
 		while let Some(scene) = scenes.pop() {
 			let Some(scene) = self.scene(scene).filter(|scene| seen.insert(&scene.name)) else {
 				continue;
 			};
 			for item in &scene.items {
-				match self.nested(&item.source) {
-					Some(Nested::Program) => return true,
-					Some(Nested::Scene(scene)) => scenes.push(scene),
-					None => {}
+				if let Some(Nested::Scene(scene)) = self.nested(&item.source) {
+					scenes.push(scene);
 				}
+				items.push(item);
 			}
 		}
-		false
+		items
 	}
 
 	/// Refuse a scene that draws itself, directly or through other scenes,
@@ -377,10 +386,20 @@ impl Collection {
 					.validate()
 					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 				self.validate_chain(&item.filters, &on)?;
-				if layer.scene.is_none() && !item.keyframes.is_empty() {
-					return Err(Error::Invalid(format!(
-						"{on} has keyframes, but the top layer never goes on to start them"
-					)));
+				if layer.scene.is_none() {
+					if !item.keyframes.is_empty() {
+						return Err(Error::Invalid(format!(
+							"{on} has keyframes, but the top layer never goes on to start them"
+						)));
+					}
+					if let Some(Nested::Scene(scene)) = self.nested(&item.source)
+						&& let Some(keyed) = self.reached(scene).into_iter().find(|item| !item.keyframes.is_empty())
+					{
+						return Err(Error::Invalid(format!(
+							"{on} draws `{}` with keyframes, but the top layer never goes on to start them",
+							keyed.source
+						)));
+					}
 				}
 				if !item.keyframes.is_sorted_by_key(|keyframe| keyframe.at) {
 					return Err(Error::Invalid(format!("{on} has keyframes out of order")));
@@ -878,7 +897,8 @@ pub struct Item {
 	/// How the item moves away from and back to where it rests, from when its
 	/// scene goes on, in order of time. It plays once: before the first
 	/// keyframe the item holds that one, and after the last it holds the last.
-	/// A top-layer item has none, since the top layer never goes on.
+	/// A top-layer item has none, nor does a scene it draws, since the top
+	/// layer never goes on.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub keyframes: Vec<Keyframe>,
 }
@@ -1611,8 +1631,8 @@ pub enum Source {
 	Replay,
 	/// Another scene, drawn whole at the main canvas's size, as a picture. Its
 	/// items' keyframes play from when the scene drawing it goes on, as that
-	/// scene's own items' do. A scene cannot draw itself, even through other
-	/// scenes.
+	/// scene's own items' do, so the top layer cannot draw one with keyframes.
+	/// A scene cannot draw itself, even through other scenes.
 	Scene {
 		/// The scene drawn.
 		scene: String,
@@ -2597,7 +2617,8 @@ path = "sting.webm"
 
 	/// A scene source names a scene, and no scene draws itself, even through
 	/// others or a clone, shown or hidden. The top layer, drawn over the
-	/// program, cannot show it, and a mask cannot read a scene.
+	/// program, cannot show it, nor a scene with keyframes, which it never
+	/// starts, and a mask cannot read a scene.
 	#[test]
 	fn refuses_a_scene_drawing_itself() {
 		let fill = Rect::fill(&Canvas::default());
@@ -2644,6 +2665,17 @@ path = "sting.webm"
 				collection.top.push(Item::new("a", fill));
 			},
 			"the top layer places `a`, which draws the program",
+		);
+		refused(
+			&|collection| {
+				let source = collection.scenes[0].items[0].source.clone();
+				collection.scenes[2].items.push(Item {
+					keyframes: vec![Keyframe::new(Duration::ZERO)],
+					..Item::new(source, fill)
+				});
+				collection.top.push(Item::new("a", fill));
+			},
+			"with keyframes, but the top layer never goes on to start them",
 		);
 		refused(
 			&|collection| {
