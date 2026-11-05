@@ -90,7 +90,6 @@ repository.
 
 - [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
-- [Audio source tracks](/quest/m0/audio-source-tracks.md) - microphones and system audio get their own tracks, for isolated recording and replay
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Keyframes](/quest/m0/animation.md) - keyframed item properties with easing, starting when their scene goes on program
 - [Stinger transitions](/quest/m0/stinger.md) - a clip played over the program that switches scenes at its cut point

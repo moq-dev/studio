@@ -140,6 +140,9 @@ pub(crate) mod tests {
 	/// Half a second of stereo Opus alone, in WebM.
 	pub(crate) const TONE: &[u8] = include_bytes!("test_data/tone.webm");
 
+	/// The first half second of [`CLIP`]'s pictures alone.
+	pub(crate) const SILENT: &[u8] = include_bytes!("test_data/silent.mkv");
+
 	#[test]
 	fn reads_by_the_first_bytes() {
 		assert_eq!(container(CLIP), Ok(ContainerFormat::Mkv));

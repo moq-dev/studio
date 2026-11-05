@@ -202,17 +202,26 @@ impl State {
 		Ok(())
 	}
 
-	/// The sources the program shows: in a scene on air, including one
-	/// leaving in a transition, or the top layer over them, a clone by the
-	/// source it shows.
+	/// The sources the program shows: placed or masking in a scene on air,
+	/// including one leaving in a transition, or in the top layer over them, a
+	/// clone by the source it shows.
 	fn shown(&self) -> BTreeSet<String> {
 		let collection = &self.collection;
 		let scenes = self.compositor.on_air().filter_map(|scene| collection.scene(scene));
-		scenes
+		let items = scenes
 			.flat_map(|scene| &scene.items)
 			.chain(&collection.top)
-			.filter(|item| item.visible)
-			.map(|item| collection.capture(&item.source).to_string())
+			.filter(|item| item.visible);
+		// A mask's picture shapes what the program draws too.
+		let masks = |item| {
+			collection.filters(item).filter_map(|filter| match filter {
+				moq_scene::Filter::Mask { source, .. } => Some(source),
+				_ => None,
+			})
+		};
+		items
+			.flat_map(|item| std::iter::once(&item.source).chain(masks(item)))
+			.map(|source| collection.capture(source).to_string())
 			.collect()
 	}
 
@@ -494,16 +503,20 @@ impl Program {
 		}
 	}
 
-	/// What a replay of the local source `name` copies: the video of its own
-	/// track, up to now, or `None` while it publishes no video.
+	/// What a replay of the local source `name` copies: the video or sound of
+	/// its own track, up to now, or `None` while it publishes neither.
 	pub fn source(&self, name: &str) -> Option<moq_scene::replay::Target> {
 		let mut catalog = self.sources.catalog();
 		let listed = catalog.ext.studio.sources.remove(name)?;
-		let video = listed.video.renditions.into_iter().next()?;
+		let video = listed.video.renditions.into_iter().next();
+		let audio = listed.audio.renditions.into_iter().next();
+		if video.is_none() && audio.is_none() {
+			return None;
+		}
 		Some(moq_scene::replay::Target {
 			broadcast: self.sources.consume(),
-			video: Some(video),
-			audio: None,
+			video,
+			audio,
 			end: self.clock.now(),
 		})
 	}
@@ -521,10 +534,24 @@ impl Program {
 		}
 	}
 
-	/// Encode the local sources the program shows, `shown`, whether or not
-	/// anything reads their tracks, so a replay of one has its past.
-	fn show(&self, shown: BTreeSet<String>) {
-		self.sources.show(shown);
+	/// Encode the local sources on program, whether or not anything reads
+	/// their tracks, so a replay of one has its past: those `shown` in a scene
+	/// on air, and the microphones and system audio the program mix plays. A
+	/// replay source's track is its pictures, so being heard alone does not
+	/// put it on program.
+	fn on_program(&self, state: &State, shown: BTreeSet<String>) {
+		let collection = &state.collection;
+		let heard = state
+			.sources
+			.iter()
+			.filter(|(name, feed)| {
+				matches!(
+					feed.source(),
+					moq_scene::Source::Microphone { .. } | moq_scene::Source::SystemAudio
+				) && state.sources.plays(&collection.mixes.program, name)
+			})
+			.map(|(name, _)| name.to_string());
+		self.sources.set_on_program(shown.into_iter().chain(heard).collect());
 	}
 }
 
@@ -882,9 +909,13 @@ impl Engine {
 				.sources
 				.iter()
 				.filter(|(name, _)| shown.contains(*name) || heard(name))
-				.filter_map(|(name, feed)| match feed.status() {
-					status @ (Status::Ended | Status::Failed(_)) => Some((name.to_string(), status)),
-					_ => None,
+				.filter_map(|(name, feed)| {
+					// A picture that fails to draw fails the source as the Sources panel shows it.
+					let status = match state.compositor.error(name) {
+						Some(err) => Status::Failed(err.to_string()),
+						None => feed.status(),
+					};
+					matches!(status, Status::Ended | Status::Failed(_)).then(|| (name.to_string(), status))
 				})
 				.collect();
 			(stalled, stopped)
@@ -959,13 +990,15 @@ impl Engine {
 					}
 					self.pick_mixes(state);
 				}
+				// Before drawing, so a media file that restarts going on program
+				// is cleared in this frame rather than showing where it ended.
+				let shown = state.shown();
+				state.sources.set_on_program(&shown);
 				if let Err(err) = state.compositor.render(&state.collection, &state.sources, tick) {
 					tracing::error!(%err, "cannot draw the canvas");
 					continue;
 				}
-				let shown = state.shown();
-				state.sources.set_on_program(&shown);
-				self.program.show(shown);
+				self.program.on_program(state, shown);
 				(state.compositor.program().clone(), state.compositor.canvas())
 			};
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
