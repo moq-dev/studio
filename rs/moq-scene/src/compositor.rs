@@ -122,8 +122,8 @@ struct Switch {
 
 impl Switch {
 	/// Stop the clip a stinger played, unless another play took it over
-	/// since, so its sound ends with the stinger, cut short or not, as does a
-	/// looping clip's.
+	/// since, so its sound ends with a stinger cut short, or with a looping
+	/// clip's first pass.
 	fn stop(&self, sources: &Sources) {
 		let (Transition::Stinger { source, .. }, Some(play)) = (&self.transition, self.played) else {
 			return;
@@ -371,8 +371,9 @@ impl Compositor {
 	/// starts from what that one was heading to, and a stinger's clip in
 	/// `sources` stops. A stinger plays its clip from the start at the next
 	/// [`render`](Self::render), which switches the scenes `cut` into the clip
-	/// as it plays, and ends with the clip's play, stopping it; a clip that
-	/// cannot play, or fails, cuts at once instead.
+	/// as it plays, and ends with the clip's play, leaving the clip holding its
+	/// last picture, or stopping a looping one; a clip that cannot play, or
+	/// fails, cuts at once instead.
 	pub fn transition(&mut self, transition: Transition, sources: &Sources, now: Instant) {
 		if let Some(switch) = self.switch.take() {
 			switch.stop(sources);
@@ -391,14 +392,23 @@ impl Compositor {
 	/// How far the transition under way has switched the scenes at `now`,
 	/// from 0 to 1 and eased, ending one that is over. A stinger switches
 	/// them at once at its cut point, its first call plays its clip, and its
-	/// end stops it.
+	/// end stops a looping one.
 	fn progress(&mut self, sources: &Sources, now: Instant) -> Option<f32> {
 		let switch = self.switch.as_mut()?;
 		let progress = match &switch.transition {
 			Transition::Stinger { source, cut } => {
 				let feed = sources.get(source);
 				match stinger(feed, *cut, &mut switch.played, now) {
-					Ok(past) => past.map(|past| if past { 1.0 } else { 0.0 }),
+					Ok(Some(past)) => Some(if past { 1.0 } else { 0.0 }),
+					// Played to its end, a clip holds its last picture, as any
+					// media file does, but a looping one would play on, sound
+					// and all.
+					Ok(None) => {
+						if feed.is_some_and(|feed| matches!(feed.source(), Source::Media { looping: true, .. })) {
+							switch.stop(sources);
+						}
+						None
+					}
 					Err(err) => {
 						tracing::warn!(%source, %err, "cannot play the stinger; cutting instead");
 						None
@@ -412,11 +422,8 @@ impl Compositor {
 				(linear < 1.0).then(|| transition.progress(linear))
 			}
 		};
-		// A stinger's clip stops with it, or a looping one would play on.
-		if progress.is_none()
-			&& let Some(switch) = self.switch.take()
-		{
-			switch.stop(sources);
+		if progress.is_none() {
+			self.switch = None;
 		}
 		progress
 	}
@@ -1981,7 +1988,7 @@ mod tests {
 
 	/// A stinger plays its clip from its start over the program as it starts,
 	/// switches the scenes under it at its cut point into the clip, and ends
-	/// with the clip.
+	/// with the clip, which holds its last picture.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn a_stinger_cuts_under_its_clip() {
@@ -2046,6 +2053,15 @@ mod tests {
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(studio.compositor.stinger(), None);
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+
+			// Played to its end, the clip rests ended on its last picture, not
+			// blank, as any media file that played once does.
+			while studio.sources.get("sting").unwrap().status() != Status::Ended {
+				kio::clock::sleep(Duration::from_millis(5)).await;
+			}
+			studio.render(Instant::now());
+			let held = studio.compositor.layers["sting"].picture.as_ref().unwrap().size();
+			assert_eq!(held, (64, 64), "holds its last picture");
 
 			// The next stinger starts blank, never on the last one's end.
 			sting(&mut studio, Filter::Brightness { amount: 0.0 });

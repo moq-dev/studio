@@ -154,7 +154,8 @@ or sound, however long the file takes to start decoding. Its sound joins the
 mixes as its source's does. Its source waits blank and silent for the first
 stinger rather than playing once when it opens, and rests ended between
 stingers, which the Health panel does not count unless a scene on air places
-it. The clip stops when the stinger ends, after one pass even if it loops. A
+it. A clip played to its end holds its last picture, as any media file does,
+and a looping one stops, blank and silent, after one pass. A
 clip that cannot play, or that is played again from the Sources panel or
 reloaded while a stinger plays it, cuts at once; one stopped there ends the
 stinger at once. A **Cut**, or another kind of transition, while a stinger
