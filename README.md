@@ -94,11 +94,11 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. With more than one canvas, pick the canvas they show, and that the Items panel edits, beside the preview. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
+| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. With more than one canvas, pick the canvas they show, and that the Items panel edits, beside the preview. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws on the canvas shown, back to front. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, and **Reload** reads the file again. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
@@ -140,11 +140,27 @@ layer and every scene's layout on it.
 | Slide | The incoming scene pushes the outgoing one off the canvas, both moving left, right, up, or down. |
 | Wipe | An edge sweeps across the canvas left, right, up, or down, uncovering the incoming scene behind it. |
 | Move | Each item showing a source both scenes place glides from its place in the outgoing scene to its place in the incoming one, resizing, recropping, and mixing its filters' settings on the way. If its blend mode or kinds of filter differ, it changes look halfway. The rest of the outgoing scene fades out and the rest of the incoming scene fades in. Items stack as the outgoing scene has them until halfway, then as the incoming one does. A source placed more than once pairs up in order, back to front. |
+| Stinger | A media source's clip plays over the program from its start, and the program switches scenes under it at the cut point, the time into the clip when it covers the canvas. It lasts as long as the clip. |
 
-All but a fade ease in and out. A transition is drawn on the program clock, so
-the stream and a recording show the same frames of it, and a second
+A slide, wipe, or move eases in and out. A transition is drawn on the program
+clock, so the stream and a recording show the same frames of it, and a second
 **Transition** while one runs starts from the scene it was heading to. A
 transition set to 0 ms is a cut.
+
+A stinger's clip fills the canvas, cropped evenly to the canvas's shape rather
+than stretched, through its source's crop and filters, so a clip without an
+alpha channel can be keyed. The cut point counts from the clip's first picture
+or sound, however long the file takes to start decoding. Its sound joins the
+mixes as its source's does. Its source waits blank and silent for the first
+stinger rather than playing once when it opens, and rests ended between
+stingers, which the Health panel does not count unless a scene on air places
+it. A clip played to its end holds its last picture, as any media file does,
+and a looping one stops, blank and silent, after one pass. A
+clip that cannot play, or that is played again from the Sources panel or
+reloaded while a stinger plays it, cuts at once; one stopped there ends the
+stinger at once. A **Cut**, or another kind of transition, while a stinger
+runs stops its clip, sound included; another stinger plays the clip again from
+its start.
 
 ### Keyframes
 
@@ -317,8 +333,11 @@ as ended in Sources and, while the program shows or plays it, in Health.
 **Play** in Sources plays it from its start again, as does going on program
 with `restart`, in a scene on air or the top layer, when it was not on program
 before. Either clears its picture at once, so the end of the last play never
-shows on program. A file that cannot be read or decoded fails, with the reason.
-Its pictures and its sound each have a track of their own (see [Source
+shows on program. **Stop** in Sources stops it at once: blank, silent, sound
+already queued included, and reading as ended until played again. A file that
+cannot be read or decoded fails, with the reason.
+The source a [stinger](#transitions) plays waits, blank and silent, for the
+first stinger instead of playing as it opens. Its pictures and its sound each have a track of their own (see [Source
 tracks](#source-tracks)), its pictures on one timeline across plays. Each is
 used apart, as a camera's and a microphone's are: the pictures while a scene on
 air shows it, the sound while the mix on program plays it, and either while
@@ -445,9 +464,13 @@ height = 1920
 top = [{ source = "logo", rect = { x = 780, y = 40, width = 280, height = 120 } }]
 
 [transition]
-kind = "slide"      # fade, slide, wipe, or move
-duration = "300ms"
+kind = "slide"      # fade, slide, wipe, move, or stinger
+duration = "300ms"  # all but a stinger
 direction = "left"  # slide and wipe: left, right, up, or down
+# A stinger names a media source and its cut point instead:
+# kind = "stinger"
+# source = "sting"
+# cut = "500ms"
 
 [sources.camera]
 kind = "camera"
