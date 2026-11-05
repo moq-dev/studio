@@ -2095,7 +2095,7 @@ impl Panels {
 	/// Replay the recent past of the program or a source in a replay source,
 	/// or save it as a clip.
 	fn replay(&mut self, ui: &mut Ui) {
-		let (pictures, replays) = {
+		let (replayable, replays) = {
 			let state = self.engine.state.lock().unwrap();
 			let named = |kind: fn(&Source) -> bool| -> Vec<String> {
 				let sources = &state.collection().sources;
@@ -2105,27 +2105,27 @@ impl Panels {
 					.map(|(name, _)| name.clone())
 					.collect()
 			};
-			// What a source shows, a clone its source's, has a past only if
-			// something encodes it: not an image, a color, or a web page.
+			// What a source shows or plays, a clone its source's, has a past
+			// only if something encodes it: not an image, a color, a web page,
+			// an overlay, or a LUT.
 			let collection = state.collection();
-			let pictures = collection
+			let replayable = collection
 				.sources
 				.keys()
 				.filter(|name| {
-					let shown = collection.sources.get(collection.capture(name));
-					shown.is_some_and(|source| {
-						source.has_video()
-							&& !matches!(
-								source,
-								Source::Image { .. }
-									| Source::Color { .. } | Source::Browser { .. }
-									| Source::Overlay { .. }
-							)
+					let captured = collection.sources.get(collection.capture(name));
+					captured.is_some_and(|source| {
+						!matches!(
+							source,
+							Source::Image { .. }
+								| Source::Color { .. } | Source::Browser { .. }
+								| Source::Overlay { .. } | Source::Lut { .. }
+						)
 					})
 				})
 				.cloned()
 				.collect::<Vec<_>>();
-			(pictures, named(|source| matches!(source, Source::Replay)))
+			(replayable, named(|source| matches!(source, Source::Replay)))
 		};
 		let panel = &mut self.replay;
 		if panel.into.as_ref().is_none_or(|into| !replays.contains(into)) {
@@ -2138,7 +2138,7 @@ impl Panels {
 				.selected_text(panel.of.to_string())
 				.show_ui(ui, |ui| {
 					ui.selectable_value(&mut panel.of, Of::Program, Of::Program.to_string());
-					for name in pictures {
+					for name in replayable {
 						let of = Of::Source(name);
 						let label = of.to_string();
 						ui.selectable_value(&mut panel.of, of, label);
