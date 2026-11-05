@@ -165,28 +165,26 @@ impl Interact {
 							continue;
 						};
 						capture.held.retain(|held| *held != button);
-						let point = on_page(capture, pos);
-						if let Some(point) = point {
-							capture.at = point;
-						}
+						// Every press hears its release, at the last point the page
+						// heard if keyframes have since shrunk it to nothing.
+						let (x, y) = on_page(capture, pos).unwrap_or(capture.at);
+						capture.at = (x, y);
 						let page = capture.page.clone();
 						if capture.held.is_empty() {
 							self.captured = None;
 						}
-						if let Some((x, y)) = point {
-							let clicks = self.last.as_ref().map_or(1, |last| last.clicks);
-							send(
-								&page,
-								Input::Button {
-									x,
-									y,
-									button,
-									down: false,
-									clicks,
-									modifiers,
-								},
-							);
-						}
+						let clicks = self.last.as_ref().map_or(1, |last| last.clicks);
+						send(
+							&page,
+							Input::Button {
+								x,
+								y,
+								button,
+								down: false,
+								clicks,
+								modifiers,
+							},
+						);
 						continue;
 					}
 					// Another press during a drag goes to the dragged page too.
@@ -783,7 +781,8 @@ mod tests {
 	}
 
 	/// A drag follows its item as the item's keyframes move it: a point held
-	/// still on the moving page stays the same point on it.
+	/// still on the moving page stays the same point on it, and a page shrunk
+	/// to nothing still hears the release, where it last heard the pointer.
 	#[test]
 	fn a_drag_follows_its_moving_item() {
 		let mut collection = Collection::new();
@@ -811,6 +810,10 @@ mod tests {
 			moq_scene::Keyframe {
 				ease: moq_scene::Ease::Linear,
 				..moq_scene::Keyframe::new(Duration::from_secs(2))
+			},
+			moq_scene::Keyframe {
+				width: -100.0,
+				..moq_scene::Keyframe::new(Duration::from_secs(3))
 			},
 		];
 		collection.scenes = vec![Scene {
@@ -850,14 +853,22 @@ mod tests {
 			Duration::from_secs(1),
 			vec![egui::Event::PointerMoved(egui::pos2(150.0, 50.0)), button(150.0, false)],
 		);
-		let xs: Vec<_> = delivered
-			.iter()
-			.filter_map(|(_, input)| match input {
-				Input::Move { x, .. } | Input::Button { x, .. } => Some(*x),
-				_ => None,
-			})
-			.collect();
-		assert_eq!(xs, [50, 50]);
+		let xs = |delivered: Vec<(String, Input)>| -> Vec<i32> {
+			delivered
+				.iter()
+				.filter_map(|(_, input)| match input {
+					Input::Move { x, .. } | Input::Button { x, .. } => Some(*x),
+					_ => None,
+				})
+				.collect()
+		};
+		assert_eq!(xs(delivered), [50, 50]);
+
+		// Pressed 50 px into the page where it rests, then released once it has
+		// shrunk to nothing.
+		run(Duration::from_secs(2), vec![button(250.0, true)]);
+		let delivered = run(Duration::from_secs(3), vec![button(250.0, false)]);
+		assert_eq!(xs(delivered), [50]);
 	}
 
 	/// A drag that starts on a page stays with it: the moves and the release
