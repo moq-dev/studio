@@ -454,6 +454,12 @@ fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Rout
 				routes.lock().unwrap().play(id, &samples);
 				continue;
 			}
+			Event::Copied(id, text) => {
+				if let Some(route) = routes.lock().unwrap().pages.get(&id) {
+					route.page.state.lock().unwrap().copied = Some(text);
+				}
+				continue;
+			}
 			Event::Failed(id, reason) => {
 				routes.lock().unwrap().end(id, reason);
 				continue;

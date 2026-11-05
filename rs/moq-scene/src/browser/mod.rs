@@ -188,6 +188,8 @@ struct PageState {
 	/// Whether the helper has yet to hear `framerate`.
 	#[cfg(target_os = "linux")]
 	retime: bool,
+	/// What the page last copied or cut, until the studio takes it.
+	copied: Option<String>,
 	paint: Option<Paint>,
 }
 
@@ -235,6 +237,11 @@ impl Page {
 	/// How the newest picture arrived, once one has.
 	pub fn paint(&self) -> Option<Paint> {
 		self.state.lock().unwrap().paint
+	}
+
+	/// Take what the page last copied or cut, once, for the clipboard.
+	pub fn copied(&self) -> Option<String> {
+		self.state.lock().unwrap().copied.take()
 	}
 
 	/// Paint at `rate`, the canvas's frame rate, from now on, without waiting on
@@ -301,9 +308,9 @@ pub enum Input {
 	},
 	/// Text typed, after the keyboard layout and any input method.
 	Text(String),
-	/// Copy the page's selection to the clipboard.
+	/// Copy the page's selection, which [`Page::copied`] then returns.
 	Copy,
-	/// Cut the page's selection to the clipboard.
+	/// Cut the page's selection, which [`Page::copied`] then returns.
 	Cut,
 	/// The page gained or lost keyboard focus.
 	Focus(bool),

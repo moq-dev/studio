@@ -756,7 +756,9 @@ paints, given the same Vulkan DMA-BUF import. Every other source, every source
 on Windows or on a GPU that cannot import, and every still image delivers its
 frames from the CPU, which the compositor uploads. A browser source on that
 path renders its page in software, WebGL included, so a WebGL page runs
-slower there.
+slower there, and needs no X server or `$DISPLAY`: it runs under Wayland
+without XWayland, and with no display at all. A page copied on the GPU still
+opens the X display.
 
 ## Replay
 

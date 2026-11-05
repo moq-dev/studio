@@ -62,8 +62,9 @@ pub(crate) enum Raster {
 	/// On the GPU, into shared textures the studio imports: on the DRM render
 	/// node named, the studio's GPU, or else on the one CEF picks.
 	Gpu { render_node: Option<String> },
-	/// In software, into memory the studio uploads. Startup never waits on a
-	/// GPU process CEF cannot start, and WebGL runs on SwiftShader.
+	/// In software, into memory the studio uploads, with no display opened.
+	/// Startup never waits on a GPU process CEF cannot start, and WebGL runs
+	/// on SwiftShader.
 	#[default]
 	Cpu,
 }
@@ -103,6 +104,9 @@ pub(crate) enum Event {
 	Popup(Id, Option<Area>),
 	/// Interleaved samples at the [`Open`] rate and channel count.
 	Audio(Id, Vec<f32>),
+	/// The text a [`Input::Copy`] or [`Input::Cut`] took from a page, for the
+	/// studio's clipboard.
+	Copied(Id, String),
 	/// A page cannot be shown, and why.
 	Failed(Id, String),
 	/// No page can be shown, and why. The helper exits next.
