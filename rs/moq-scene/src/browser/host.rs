@@ -550,7 +550,7 @@ wrap_render_process_handler! {
 			}
 			let cut = message.argument_list().is_some_and(|args| args.bool(0) != 0);
 			let copied = Arc::new(Mutex::new(String::new()));
-			frame.visit_dom(Some(&mut SelectionReader::new(copied.clone())));
+			frame.visit_dom(Some(&mut SelectionReader::new(cut, copied.clone())));
 			let Some(mut answer) = process_message_create(Some(&COPIED.into())) else {
 				return 1;
 			};
@@ -569,18 +569,22 @@ wrap_render_process_handler! {
 
 wrap_domvisitor! {
 	struct SelectionReader {
+		cut: bool,
 		text: Arc<Mutex<String>>,
 	}
 
 	impl Domvisitor {
 		fn visit(&self, document: Option<&mut Domdocument>) {
 			let Some(document) = document else { return };
-			// A browser never copies a password field's text.
-			let password = document.focused_node().is_some_and(|node| {
+			let focused = document.focused_node();
+			// A browser never copies a password field's text, and cuts only
+			// what it can delete.
+			let password = focused.as_ref().is_some_and(|node| {
 				node.is_form_control_element() != 0
 					&& node.form_control_element_type() == DomFormControlType::INPUT_PASSWORD
 			});
-			if !password {
+			let editable = focused.is_some_and(|node| node.is_editable() != 0);
+			if !password && (editable || !self.cut) {
 				*self.text.lock().unwrap() = CefString::from(&document.selection_as_text()).to_string();
 			}
 		}
