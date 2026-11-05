@@ -325,6 +325,92 @@ async fn a_dropdown_draws_and_takes_clicks() {
 	.await;
 }
 
+/// Copy and Cut hand the page's selection to the studio for its clipboard,
+/// and Cut deletes it from the page. A password field's text is never taken.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn copy_and_cut_reach_the_clipboard() {
+	local(async {
+		// A text box over the whole page, and a password field below it. The
+		// page turns yellow once the text box is selected, lime once it is
+		// typed in, and blue and white for the same on the password.
+		let html = "<body style='margin:0;background:red'>\
+			<input value='hello world' style='width:100vw;height:100vh;background:transparent' \
+			onselect=\"document.body.style.background = 'yellow'\" \
+			oninput=\"document.body.style.background = 'lime'\">\
+			<input type=password value='hunter2' \
+			onselect=\"document.body.style.background = 'blue'\" \
+			oninput=\"document.body.style.background = 'white'\"></body>";
+		let mut studio = Studio::new(&[("page", page(html))]).await;
+		studio.until_center([255, 0, 0, 255], &[]).await;
+
+		let page = studio.sources.get("page").unwrap().page().unwrap().clone();
+		let key = |code: u8, modifiers: Modifiers| {
+			for down in [true, false] {
+				page.send(Input::Key {
+					code: code.into(),
+					down,
+					modifiers,
+				});
+			}
+		};
+		let ctrl = Modifiers {
+			ctrl: true,
+			..Default::default()
+		};
+		let shift = Modifiers {
+			shift: true,
+			..Default::default()
+		};
+		let helper = studio.helper.clone();
+		let copied = async || {
+			let deadline = Instant::now() + TIMEOUT;
+			loop {
+				if let Some(copied) = helper.copied() {
+					return copied;
+				}
+				assert!(Instant::now() < deadline, "the copy never came back");
+				kio::clock::sleep(Duration::from_millis(30)).await;
+			}
+		};
+
+		page.send(Input::Focus(true));
+		for down in [true, false] {
+			page.send(Input::Button {
+				x: 160,
+				y: 120,
+				button: Button::Left,
+				down,
+				clicks: 1,
+				modifiers: Modifiers::default(),
+			});
+		}
+		// Copy is asked of the page only once it shows the selection, which
+		// the renderer then has.
+		key(b'A', ctrl);
+		studio.until_center(YELLOW, &[]).await;
+		page.send(Input::Copy);
+		assert_eq!(copied().await, "hello world");
+
+		// Text typed after the copy shows only once the copy has come back.
+		key(b'\t', Modifiers::default());
+		key(b'A', ctrl);
+		studio.until_center(BLUE, &[]).await;
+		page.send(Input::Copy);
+		page.send(Input::Text("x".into()));
+		studio.until_center([255, 255, 255, 255], &[]).await;
+		assert_eq!(helper.copied(), None, "a password was copied");
+
+		key(b'\t', shift);
+		key(b'A', ctrl);
+		studio.until_center(YELLOW, &[]).await;
+		page.send(Input::Cut);
+		studio.until_center(GREEN, &[]).await;
+		assert_eq!(copied().await, "hello world");
+	})
+	.await;
+}
+
 /// A page that closes itself fails its own source and leaves the canvas,
 /// while the page beside it in the same helper keeps drawing.
 #[tokio::test(flavor = "multi_thread")]
@@ -450,6 +536,7 @@ async fn cookies_survive_a_restart() {
 }
 
 const GREEN: [u8; 4] = [0, 255, 0, 255];
+const YELLOW: [u8; 4] = [255, 255, 0, 255];
 
 /// Serve `html` over HTTP on loopback to every request, returning its URL,
 /// since a cookie needs an origin a `data:` page lacks.

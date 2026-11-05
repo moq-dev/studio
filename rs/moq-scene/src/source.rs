@@ -3053,6 +3053,10 @@ mod media_tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			let (first, begin) = shown(sources.get("intro.mkv").unwrap()).await;
+			// Each clip starts once its first picture decodes, on a thread
+			// tokio cannot see. Waiting for both while the clock holds starts
+			// them together, so both end before the clock passes 1.1 s.
+			shown(sources.get("still.mkv").unwrap()).await;
 			until_time(begin + Duration::from_millis(1_100)).await;
 			until_status(&sources, "intro.mkv", Status::Ended).await;
 			until_status(&sources, "still.mkv", Status::Ended).await;
