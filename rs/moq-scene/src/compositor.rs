@@ -9,7 +9,9 @@ use kio::clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
-use crate::collection::{Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Rect, Source, Transition};
+use crate::collection::{
+	Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Rect, Settled, Source, Transition,
+};
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::overlay::{Overlay, Overlays};
 use crate::source::{self, Sources};
@@ -635,7 +637,7 @@ struct Draw<'a> {
 	/// Each item, filtered once though it is drawn onto several targets, by
 	/// where it is and its [`Item::settled`] time, as two outputs showing its
 	/// scene can be at different points of its keyframes.
-	prepared: HashMap<(Place, usize, Duration), Option<Prepared>>,
+	prepared: HashMap<(Place, usize, Settled), Option<Prepared>>,
 }
 
 impl Draw<'_> {
@@ -678,7 +680,7 @@ impl Draw<'_> {
 
 	/// Draw `item`, posed, where it is placed onto `target`, shared with every
 	/// other draw of it under `key`.
-	fn item(&mut self, target: &Target, key: (Place, usize, Duration), item: &Item) {
+	fn item(&mut self, target: &Target, key: (Place, usize, Settled), item: &Item) {
 		let prepared = match self.prepared.get(&key) {
 			Some(prepared) => prepared.clone(),
 			None => {
@@ -1389,6 +1391,35 @@ mod tests {
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.render(at(9000));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK);
+		})
+		.await;
+	}
+
+	/// Two outputs at either side of a jump, keyframes at the same moment, each
+	/// draw their own side of it rather than share one.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_jump_draws_each_side_on_its_own_output() {
+		local(async {
+			let mut collection = collection();
+			let jump = Duration::from_secs(1);
+			collection.scenes[1].items[0].keyframes = vec![
+				crate::Keyframe {
+					x: -8.0,
+					..crate::Keyframe::new(jump)
+				},
+				crate::Keyframe::new(jump),
+			];
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut();
+			studio.render(start);
+			// Program has reached the jump; preview starts over before it.
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(start + jump);
+			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK, "before the jump");
+			assert_eq!(pixel(&studio.program(), 1, 6), BLUE, "after the jump");
 		})
 		.await;
 	}

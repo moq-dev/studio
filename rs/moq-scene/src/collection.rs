@@ -607,12 +607,13 @@ impl Item {
 		})
 	}
 
-	/// `since` held within the keyframes' times, so two times this clamps to
-	/// the same pose the item the same.
-	pub(crate) fn settled(&self, since: Duration) -> Duration {
+	/// Where `since` falls among the keyframes, so two times that settle the
+	/// same pose the item the same.
+	pub(crate) fn settled(&self, since: Duration) -> Settled {
 		match (self.keyframes.first(), self.keyframes.last()) {
-			(Some(first), Some(last)) => since.clamp(first.at, last.at),
-			_ => Duration::ZERO,
+			(Some(first), _) if since < first.at => Settled::Before,
+			(Some(_), Some(last)) if since < last.at => Settled::At(since),
+			_ => Settled::After,
 		}
 	}
 
@@ -629,6 +630,16 @@ impl Item {
 		let linear = (since - from.at).as_secs_f32() / (to.at - from.at).as_secs_f32();
 		Some(from.toward(to, to.ease.apply(linear)))
 	}
+}
+
+/// Where a moment falls among an item's keyframes: holding the first, between
+/// two at that moment, or holding the last. Keyframes at the same moment jump,
+/// so the first keyframe's moment is not the same as before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Settled {
+	Before,
+	At(Duration),
+	After,
 }
 
 /// Where an item is at a moment after its scene goes on, as an offset from
@@ -2035,11 +2046,33 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		let last = at(5000);
 		assert_eq!(last, at(2000), "held after the last keyframe");
 		assert_eq!(last.rect, item.rect);
-		assert_eq!(item.settled(Duration::from_secs(5)), Duration::from_secs(2));
-		assert_eq!(item.settled(Duration::ZERO), Duration::from_secs(1));
+		assert_eq!(item.settled(Duration::from_secs(5)), Settled::After);
+		assert_eq!(item.settled(Duration::from_secs(2)), Settled::After);
+		assert_eq!(item.settled(Duration::ZERO), Settled::Before);
+		assert_eq!(
+			item.settled(Duration::from_secs(1)),
+			Settled::At(Duration::from_secs(1))
+		);
 
 		let still = Item::new("camera", item.rect);
 		assert!(matches!(still.posed(Duration::from_secs(1)), Cow::Borrowed(_)));
+	}
+
+	/// Keyframes at the same moment jump there, so the moment itself poses the
+	/// item as the later one, and before it as the earlier one.
+	#[test]
+	fn keyframes_at_one_moment_jump() {
+		let at = Duration::from_secs(1);
+		let item = animated(vec![
+			Keyframe {
+				x: -300.0,
+				..Keyframe::new(at)
+			},
+			Keyframe::new(at),
+		]);
+		assert_eq!(item.posed(Duration::ZERO).rect.x, -200.0);
+		assert_eq!(item.posed(at).rect.x, 100.0);
+		assert_ne!(item.settled(Duration::ZERO), item.settled(at));
 	}
 
 	#[test]
