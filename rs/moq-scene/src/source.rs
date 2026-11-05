@@ -5,9 +5,10 @@
 //! capture driver is `!Send` on macOS); a driver stops once its feed is
 //! dropped, which happens when the source is removed or edited.
 //!
-//! With [`Context::publish`] set, each local source that shows a picture also
-//! publishes it as its own track in the studio's local broadcast, web pages
-//! aside; see [`crate::publish`].
+//! With [`Context::publish`] set, each local source that shows a picture,
+//! and each microphone and system audio, also publishes it as its own track in
+//! the studio's local broadcast, web pages and overlays aside; see
+//! [`crate::publish`].
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -328,7 +329,8 @@ impl Feed {
 	/// of whatever this replay source plays now. Its sound plays only in real
 	/// time.
 	///
-	/// Refused by any other kind of source, and by a replay source that stopped.
+	/// Refused by any other kind of source, by a replay source that stopped,
+	/// and for a take of sound alone, slowed down, which would play nothing.
 	pub fn replay(&self, take: Take, speed: f32) -> Result<(), Error> {
 		let Some(plays) = &self.plays else {
 			return Err(Error::Unsupported("only a replay source plays replays".into()));
@@ -337,6 +339,11 @@ impl Feed {
 			return Err(Error::Invalid(format!(
 				"a replay plays at {MIN_SPEED} to 1 times real time, not {speed}"
 			)));
+		}
+		if take.video.is_none() && speed != 1.0 {
+			return Err(Error::Unsupported(
+				"a replay of sound alone plays only in real time".into(),
+			));
 		}
 		let play = Play { take, speed };
 		// Fails once the driver is gone, which leaves the reason in the status.
@@ -359,10 +366,11 @@ impl Feed {
 	}
 
 	/// What the source's own track is doing, or `None` when it publishes none:
-	/// nothing is published, or the source is another broadcast, a web page, or
-	/// only sound.
+	/// nothing is published, or the source is another broadcast, a web page,
+	/// an overlay, or a LUT.
 	///
-	/// A failed track leaves the source drawing in the studio's own scenes.
+	/// A failed track leaves the source drawing and playing in the studio's
+	/// own scenes and mixes.
 	pub fn track(&self) -> Option<Status> {
 		self.track.as_ref().map(|track| track.read().clone())
 	}
@@ -587,8 +595,8 @@ impl Driver {
 			Source::Camera { id } => Video::Camera(id.clone()),
 			Source::Display { id } => Video::Display(id.clone()),
 			Source::Window { id } => Video::Window(id.clone()),
-			Source::Microphone { id } => return self.listen(Audio::Microphone(id.clone())).await,
-			Source::SystemAudio => return self.listen(Audio::System).await,
+			Source::Microphone { id } => return self.listen(Audio::Microphone(id.clone()), listing).await,
+			Source::SystemAudio => return self.listen(Audio::System, listing).await,
 			Source::Color { .. }
 			| Source::Image { .. }
 			| Source::Broadcast { .. }
@@ -682,24 +690,49 @@ impl Driver {
 		}
 	}
 
+	/// Capture a microphone or system audio into the bus, and with `listing`,
+	/// onto the source's own track as well, from the one device open.
 	#[cfg(feature = "capture")]
-	async fn listen(&self, source: moq_audio::capture::Source) -> Result<(), Error> {
+	async fn listen(&self, source: moq_audio::capture::Source, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		let strip = self.strip.clone().expect("audio sources have a strip");
 		let capture = capture(source).await?;
 		let channel = self.context.bus.capture(capture.consume(), strip)?;
-		let heard = self.hear(capture.consume());
+		let mut track = listing.and_then(|listing| {
+			let input = capture.consume().input().clone();
+			self.publish(crate::publish::Audio::new(listing, input))
+		});
+		let heard = self.hear(capture.consume(), &mut track);
 		set(&self.status, Status::Live);
-		tokio::try_join!(capture.run(), channel.run(), heard)?;
-		Ok(())
+		let result = tokio::try_join!(
+			async { capture.run().await.map_err(Error::from) },
+			async { channel.run().await.map_err(Error::from) },
+			heard
+		);
+		if let (Some(audio), Err(err)) = (track, &result) {
+			audio.abort(err);
+		}
+		result.map(|_| ())
 	}
 
 	/// Note each buffer `capture` delivers, so one that goes quiet reads as
-	/// stalled. Ends with the capture's error.
+	/// stalled, and encode it onto `track` while the source is used. Ends with
+	/// the capture's error.
 	#[cfg(feature = "capture")]
-	async fn hear(&self, mut capture: moq_audio::capture::Consumer) -> Result<(), moq_audio::Error> {
+	async fn hear(
+		&self,
+		mut capture: moq_audio::capture::Consumer,
+		track: &mut Option<crate::publish::Audio<'_>>,
+	) -> Result<(), Error> {
 		loop {
-			capture.read().await?;
+			let buffer = capture.read().await?;
 			*self.delivered.lock().unwrap() = Some(kio::clock::now());
+			if let Some(audio) = track
+				&& let Err(err) = audio.write(&buffer.data, buffer.captured, buffer.gap)
+			{
+				tracing::warn!(source = %self.name, %err, "cannot encode the source");
+				self.fail_track(Status::Failed(err.to_string()));
+				track.take().expect("encoding").abort(&err);
+			}
 		}
 	}
 
@@ -1257,20 +1290,30 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 }
 
 /// Whether `source` publishes its own track: a picture the studio captures or
-/// loads itself, before any filter. A broadcast is already published by its own
-/// publisher, and a clone shows its source's track, its filters carried by the
-/// layout rather than encoded again.
+/// loads itself, before the scene's filters, or the sound of a microphone or
+/// system audio as captured, before its gain and mute.
 ///
-/// Microphones and system audio do not yet: moq-audio offers no capture that
-/// feeds both the program bus and an encoder. Nor do web pages and overlays,
-/// which viewers see only in the program: H.264 would encode their
-/// transparency over black.
+/// A broadcast is already published by its own publisher, and a clone shows
+/// its source's track, its filters carried by the layout rather than encoded
+/// again. Web pages and overlays are seen only in the program, since H.264
+/// would encode their transparency over black, and a LUT is looked up, never
+/// shown.
 fn publishes(source: &Source) -> bool {
-	source.has_video()
-		&& !matches!(
-			source,
-			Source::Broadcast { .. } | Source::Clone { .. } | Source::Browser { .. } | Source::Overlay { .. }
-		)
+	match source {
+		Source::Camera { .. }
+		| Source::Display { .. }
+		| Source::Window { .. }
+		| Source::Microphone { .. }
+		| Source::SystemAudio
+		| Source::Color { .. }
+		| Source::Image { .. }
+		| Source::Replay => true,
+		Source::Broadcast { .. }
+		| Source::Browser { .. }
+		| Source::Overlay { .. }
+		| Source::Clone { .. }
+		| Source::Lut { .. } => false,
+	}
 }
 
 /// The frame rate a capture is encoded at when the device reports none.

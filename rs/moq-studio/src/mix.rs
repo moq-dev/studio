@@ -1,5 +1,5 @@
-//! Outputs that read one of the collection's mixes: the program audio and
-//! the headphone monitor.
+//! Outputs that read one of the collection's mixes: the program audio, the
+//! headphone monitor, and each guest's return feed, which reads a mix-minus.
 //!
 //! Each output follows a [`Pick`], which the program clock sets from the
 //! collection, and reads the picked mix on its own thread or task. A mix's
@@ -9,7 +9,37 @@
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
-use moq_audio::bus::{Block, Mix, Reader};
+use moq_audio::bus::{Block, Minus, Mix, Reader};
+
+/// What an output reads: one of the collection's mixes, or a mix-minus of one.
+#[derive(Clone)]
+pub enum Mixed {
+	/// A mix, as the collection names it.
+	Mix(Mix),
+	/// A mix without one of its sources.
+	Minus(Minus),
+}
+
+impl Mixed {
+	fn reader(&self) -> Reader {
+		match self {
+			Self::Mix(mix) => mix.reader(),
+			Self::Minus(minus) => minus.reader(),
+		}
+	}
+}
+
+impl From<Mix> for Mixed {
+	fn from(mix: Mix) -> Self {
+		Self::Mix(mix)
+	}
+}
+
+impl From<Minus> for Mixed {
+	fn from(minus: Minus) -> Self {
+		Self::Minus(minus)
+	}
+}
 
 /// Which mix an output reads, as last picked.
 #[derive(Clone, Default)]
@@ -20,13 +50,14 @@ struct Picked {
 	/// How many times a mix was picked, so a reader sees each pick once.
 	generation: u64,
 	/// The mix, and a reader starting at the first block after the pick.
-	mix: Option<(Mix, Reader)>,
+	mix: Option<(Mixed, Reader)>,
 }
 
 impl Pick {
 	/// Read `mix` from its next block on. Picking the mix already read
 	/// changes nothing a reader hears.
-	pub fn set(&self, mix: Mix) {
+	pub fn set(&self, mix: impl Into<Mixed>) {
+		let mix = mix.into();
 		let reader = mix.reader();
 		// Fails only once every handle is gone, when nothing reads it.
 		if let Ok(mut picked) = self.0.write() {
@@ -65,10 +96,10 @@ pub struct Follow {
 	end: u64,
 	/// The mix being read, held so it outlives a pick that drops it from the
 	/// collection until the next one takes over.
-	current: Option<(Mix, Reader)>,
+	current: Option<(Mixed, Reader)>,
 	/// The mix picked since, with its first block once read, until the
 	/// current one has caught up to it.
-	next: Option<(Mix, Reader, Option<Block>)>,
+	next: Option<(Mixed, Reader, Option<Block>)>,
 }
 
 impl Follow {
@@ -419,7 +450,7 @@ mod tests {
 		{
 			let mut picked = pick.0.write().ok().unwrap();
 			picked.generation += 1;
-			picked.mix = Some((b.clone(), late));
+			picked.mix = Some((b.clone().into(), late));
 		}
 		step(&mut driver);
 		let next = ready(&mut follow).unwrap();

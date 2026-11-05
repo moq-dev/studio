@@ -267,7 +267,8 @@ program.
 ## Guests
 
 Guests and phones join a room the studio owns on its relay, from a web page,
-and their camera and screen appear as broadcast sources. The room follows
+and their camera and screen appear as broadcast sources. The page plays the
+show back to them, without their own voice. The room follows
 [moq-room](https://github.com/moq-dev/moq/tree/main/rs/moq-room): a guest
 named `alice` publishes `alice/camera.hang` and `alice/screen.hang` under it.
 Guests need a relay that verifies tokens, so run your own with
@@ -301,9 +302,10 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   and each token the studio renews it with. While a guest is in the room, the
   studio signs them a fresh token every half of it, over a session of its own
   in the room that the room key signs for, and the join page presents it
-  without reconnecting. A guest's token may read only their own renewals, at
-  `.renew/<name>/<generation>` in the room, but anything else the relay lets subscribe
-  there can read every guest's, so grant that only to the studio. A guest who
+  without reconnecting. A guest's token may read only their own renewals and
+  return feed, at `.renew/<name>/<generation>` and `.return/<name>/<generation>`
+  in the room, and the program at `.program`, but anything else the relay lets
+  subscribe there can read every guest's, so grant that only to the studio. A guest who
   leaves needs a link, or a renewed token, that has not expired to come back.
   The Guests panel says when renewal is failing.
 - **Upgrading from a studio without renewal:** generate a new room key, drop
@@ -324,7 +326,7 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
 a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
 in the link's fragment, which the browser never sends to a server, and lets
 them publish only under their own name, so they cannot appear as someone else,
-and read only their own renewals.
+and read only their own renewals, their return feed, and the program.
 Treat the link like a password: anyone holding it can join as that guest
 before it expires, and is then renewed for as long as they stay, until you
 remove them. A guest's broadcasts become sources named after them (`alice`,
@@ -338,12 +340,27 @@ who reconnects after you removed their source comes back under a new name
 **Remove from scenes** is your edit, so it undoes: it takes a guest, any clone
 of their sources, and any mask reading them out of every scene and the top
 layer and mutes them. A signed token cannot be taken back, so it also stops
-renewing theirs, and they are disconnected within `--guest-expiry`. That
+renewing theirs and ends their return feed, and they are disconnected within
+`--guest-expiry`. That
 holds across a restart, whichever scene file you open: removed guests are
 kept beside the room key, as `room.guests.toml` for `room.jwk`, so its
 directory must be writable. Undo puts them back in the scenes but not on
 renewal; **New link** lets them back in and renews them again, under a new
 generation, so a link from before the removal cannot read their renewals.
+
+While a guest is in the room, the join page plays their return feed: the
+program's video, and the mix on program without that guest's microphone (a
+mix-minus), so they follow the show without hearing themselves back. Ask
+guests to wear headphones, so the show does not reach their microphone. The
+studio publishes it over its session in the room, never with its own
+credentials: the program once at `.program`, and each guest's feed at
+`.return/<name>/<generation>`. The video is the program's own two sizes,
+and a guest's player picks one for their link; this session uploads the size
+a guest watches a second time, and a guest watching the half size makes it
+encode as any viewer does. Each guest in the room costs one 64 kbps Opus
+encode of their mix-minus. A guest's
+screen share stays in their feed, since only their camera's microphone is
+taken out.
 
 ## Scene file
 
@@ -567,9 +584,9 @@ stream.
 
 ### Source tracks
 
-Each camera, display, window, image, and color also has a track of its own, so
-the studio can replay or record it on its own. These tracks stay in the studio: the
-program is the only video it publishes to a relay. They are listed in a local
+Each camera, display, window, image, color, microphone, and system audio also
+has a track of its own, so the studio can replay or record it on its own. These
+tracks stay in the studio: the program is all it publishes to a relay. They are listed in a local
 catalog under the `dev.moq.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
@@ -582,9 +599,17 @@ changes size or color space moves to a new track, which its catalog entry
 follows. Images and colors keep their picture once, as the image file and as a
 one-pixel PNG. Removing or editing a source ends its track. A track carries the
 plain capture, before any filter, and a clone has none, since it shows its
-source's capture. Microphones and system audio have no tracks of their own yet,
-nor does a browser source or an overlay, and a broadcast source is already its
-publisher's.
+source's capture. A browser source or an overlay has no track of its own, and a
+broadcast source is already its publisher's.
+
+A microphone or system audio encodes its track as Opus, from the same device
+open the mixes hear, only while it is used: while the mix on program plays it
+(unmuted and not left out of it), so a replay of it has its recent past, or
+while a recording reads its track. The track carries the sound as captured,
+before its gain, mute, and delay, which stay the mixes'. A buffer the capture
+lost, or a stretch the source was out of use, is a gap on its track. Opus
+encodes on the CPU, about 1% of one Apple M4 core for a stereo source and
+half that for mono, and holds no encode session.
 
 Every encoder holds an encode session, and consumer GPUs allow only a few
 hardware sessions at once: 8 on a GeForce card, while a base Apple M4 has one
@@ -615,10 +640,11 @@ live or not. The recording has an encoder of its own, opened only while it
 records, at full quality whatever the uplink grants the live stream, as OBS's
 advanced output mode records apart from streaming. It costs one more encode
 session and one more copy of each program frame while recording. With
-**each source too**, every camera, display, and window records its
-own track into a file of its own beside it,
+**each source too**, every camera, display, window, microphone, and system
+audio records its own track into a file of its own beside it,
 `<scene file name> <UTC start time> <source>.mp4`, holding the capture before
-any filter; a source being recorded encodes whether or not it is on program.
+any filter, or the sound before its gain and mute; a source being recorded
+encodes whether or not it is on program.
 Broadcast sources, guests included, have no track of the studio's, so they get
 no file of their own. A source added while recording
 starts its file then, and one removed finishes its file then. A new canvas
@@ -658,7 +684,9 @@ scene of its own. In the Replay panel, pick the program or a source, a length
 up to 30 seconds, and a speed of 100%, 50%, or 25%, then **Replay** plays that
 many seconds up to the click in the replay source, which is transparent before
 and after. **Cut** to its scene to put it on program. Sound replays only at
-100%, through the replay source's strip in the Audio panel. A new replay cuts
+100%, through the replay source's strip in the Audio panel, so a replay of a
+microphone or system audio, which has only sound, plays only at 100%. A new
+replay cuts
 off the one playing, and a stretch the source was offline or paused replays
 as the gap it was.
 
@@ -674,8 +702,10 @@ it is written, shortly after the click.
 
 Nothing records in the background for this. The program's tracks keep their
 last 30 seconds for late viewers anyway, and each source's track while it is on
-program or recorded, and a replay copies from those, so a replay needs
-`--connect` and goes back at most that far. With `--on-demand`, the program has
+program (shown in a scene on air, or for a microphone or system audio, played by
+the mix on program) or recorded, and a replay copies from those, so a replay
+goes back at most that far. A replay of the program needs `--connect`; a local
+source keeps its track without a relay. With `--on-demand`, the program has
 no past from before someone watched it, and a source has none from before it
 was last on program or recorded; a replay of nothing is refused, saying why. A
 broadcast source replays from what the studio received of it, and only over a
@@ -740,7 +770,8 @@ just join    # Serve the join page locally
 ```
 
 `rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
-`js/join` the join page, built on `@moq/room` and `@moq/publish`. Like the
+`js/join` the join page, built on `@moq/room`, `@moq/publish`, and
+`@moq/watch`. Like the
 Rust crates, those come from the `moq` submodule rather than npm, so
 `bun install` needs it checked out, and Nix to build `@moq/libav`. See
 [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md), and the

@@ -16,7 +16,11 @@ not published to the relay by default, since every encoding costs an encoder
 session and consumer GPUs have few. A source published independently gets one
 rendition, as every source track does, while the program keeps its
 two sizes. It counts as used, so it encodes for as long as it is published
-([Audio source tracks](/quest/m0/audio-source-tracks.md) states the rule).
+(decided 2026-11-04, maintainer): a source encodes while it is on program
+(shown in a scene on air, or, for a microphone or system audio, played by the
+mix on program) or while something reads its track, and naming a published
+source among those on program (`Publish::set_on_program` in
+`rs/moq-scene/src/publish.rs`) keeps it encoding.
 
 Low priority: this is for services that move webcams and overlays themselves,
 and none exists yet. The option lives on the source, in the scene file, so it
