@@ -37,6 +37,7 @@ use moq_scene::publish::{Encoding, Sessions};
 use moq_scene::source::{self, Driver, Sources};
 use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
+use tokio::sync::oneshot::error::TryRecvError;
 
 use crate::autosave::{self, Autosave};
 use crate::ladder::{self, Gate, Joins, Step};
@@ -421,7 +422,29 @@ pub struct Output {
 	pub on_demand: bool,
 	/// A connection to each relay, which reconnects on its own and dials only
 	/// while held. The Health panel reads their states.
-	_connections: Vec<moq_tokio::Connection>,
+	connections: Vec<moq_tokio::Connection>,
+	/// The client that dialed each, whose endpoint sends the last close.
+	clients: Vec<moq_tokio::Client>,
+}
+
+impl Output {
+	/// Close each relay session once the relay has received what it was sent
+	/// of every finished track, which the session bounds at about a second,
+	/// then each client's endpoint, so the relay hears the close rather than
+	/// waiting out an idle timeout. A track still live is cut.
+	async fn close(&self) {
+		let mut closing = tokio::task::JoinSet::new();
+		for (connection, client) in self.connections.iter().zip(&self.clients) {
+			let (connection, client) = (connection.clone(), client.clone());
+			closing.spawn(async move {
+				if let Err(err) = connection.close().await {
+					tracing::warn!(%err, "the relay session closed without draining");
+				}
+				client.close().await;
+			});
+		}
+		closing.join_all().await;
+	}
 }
 
 /// A relay the program is published to.
@@ -569,6 +592,8 @@ pub struct Engine {
 	/// The program clock's and the audio's threads, which [`stop`](Self::stop)
 	/// waits on.
 	threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+	/// Each source thread's end, which [`close`](Self::close) waits on.
+	running: Mutex<Vec<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 /// The audio the program publishes.
@@ -577,6 +602,11 @@ pub const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::fr
 /// How often the audio thread advances the bus. Short enough that a block is never
 /// close to the bus's buffering, long enough to cost nothing.
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
+
+/// The longest [`Engine::close`] waits for the sources to stop and the relays
+/// to drain, so a source or relay that never answers cannot hold up quitting.
+/// Each relay session bounds its own drain at about a second.
+const CLOSE: Duration = Duration::from_secs(3);
 
 /// Everything starting the engine takes besides the scene file, which guided
 /// setup holds back until the creator has settled on a collection.
@@ -644,9 +674,11 @@ impl Engine {
 		} else {
 			tracing::info!(broadcast = %path, "publishing");
 			let reports = subscribe.consume();
+			let clients = relays.iter().map(|relay| relay.client.clone()).collect();
 			let (connections, links) = connect(relays, &origin, &subscribe);
 			let live = Live {
 				connections,
+				clients,
 				links,
 				reports,
 				on_demand,
@@ -665,7 +697,8 @@ impl Engine {
 		let output = live.map(|live| Output {
 			path: path.to_string(),
 			on_demand,
-			_connections: live.connections,
+			connections: live.connections,
+			clients: live.clients,
 		});
 
 		// Absolute, so a copied image names the same file in another collection.
@@ -708,6 +741,7 @@ impl Engine {
 			_origin: subscribe,
 			stopped: AtomicBool::new(false),
 			threads: Mutex::default(),
+			running: Mutex::default(),
 		});
 		let Publish {
 			renditions,
@@ -730,6 +764,10 @@ impl Engine {
 			let feeds = crate::feed::Feeds::new(room.clone(), origin.clone(), program, clock.clone(), epoch)?;
 			*engine.feeds.lock().unwrap() = Some(feeds);
 		}
+		// Each worker holds the engine, so one that cannot start stops those
+		// already running, which would otherwise keep this engine and its
+		// publication alive beside a retry's.
+		let starting = Starting(Some(engine.clone()));
 		let program = engine.clone();
 		let thread = clocked("program".into(), async move || {
 			program.run_program(start, epoch, renditions, ladder).await
@@ -759,6 +797,7 @@ impl Engine {
 		}
 		let save = engine.clone();
 		clocked("autosave".into(), async move || save.autosave.run(&save.state).await)?;
+		starting.started();
 		tokio::spawn(engine.clone().grade(health::Sampler::new(health)));
 		// Last, once nothing can fail: a start that fails is retried from setup,
 		// and a follower already running would keep this engine and its
@@ -786,9 +825,10 @@ impl Engine {
 	/// publish the copies on their way to it and what it still holds, and to
 	/// end its video track, so quitting loses none of the program's last
 	/// pictures. The program audio ends its track too, so a recording reading
-	/// the program reaches the end of each. Then stop the browser sources'
-	/// helper and wait for it to exit, so their profile is saved and free for
-	/// the next launch.
+	/// the program reaches the end of each. Then stop every source, which
+	/// finishes its own track on its thread, and the browser sources' helper,
+	/// waiting for it to exit, so their profile is saved and free for the next
+	/// launch.
 	pub fn stop(&self) {
 		self.stopped.store(true, Ordering::Relaxed);
 		let threads = std::mem::take(&mut *self.threads.lock().unwrap());
@@ -799,9 +839,36 @@ impl Engine {
 			}
 		}
 		// Taken out first, so the wait holds no lock the window draws with.
-		let browser = self.state.lock().unwrap().sources.context().browser.clone();
+		let browser = {
+			let mut state = self.state.lock().unwrap();
+			state.sources.stop();
+			state.sources.context().browser.clone()
+		};
 		if let Some(browser) = browser {
 			browser.stop();
+		}
+	}
+
+	/// Once [`stop`](Self::stop) has ended every track, wait for each source's
+	/// thread to end, and close each relay session once the relay has the
+	/// tail of every track, so a viewer or a recording on the relay receives
+	/// it rather than a cut. Bounded at [`CLOSE`].
+	pub async fn close(&self) {
+		let running = std::mem::take(&mut *self.running.lock().unwrap());
+		let sources = async {
+			for ended in running {
+				// Fails once the thread ends, which is all it says.
+				let _ = ended.await;
+			}
+		};
+		let relays = async {
+			if let Some(output) = &self.output {
+				output.close().await;
+			}
+		};
+		let closing = async { tokio::join!(sources, relays) };
+		if kio::clock::timeout(CLOSE, closing).await.is_err() {
+			tracing::warn!(timeout = ?CLOSE, "quitting before every source stopped and every relay drained");
 		}
 	}
 
@@ -987,8 +1054,12 @@ impl Engine {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
 				if std::mem::take(&mut state.stale) {
-					for driver in state.sources.sync(&state.collection) {
-						spawn(driver);
+					let drivers = state.sources.sync(&state.collection);
+					if !drivers.is_empty() {
+						let mut running = self.running.lock().unwrap();
+						// Forgets the threads that have ended.
+						running.retain_mut(|ended| ended.try_recv() == Err(TryRecvError::Empty));
+						running.extend(drivers.into_iter().map(spawn));
 					}
 					self.pick_mixes(state);
 				}
@@ -1162,6 +1233,25 @@ impl Engine {
 	}
 }
 
+/// An engine whose workers are starting. Unless every one
+/// [started](Self::started), dropping it stops those that did, waiting for
+/// them, which takes about a frame and the encoders' tails.
+struct Starting(Option<Arc<Engine>>);
+
+impl Starting {
+	fn started(mut self) {
+		self.0 = None;
+	}
+}
+
+impl Drop for Starting {
+	fn drop(&mut self) {
+		if let Some(engine) = self.0.take() {
+			engine.stop();
+		}
+	}
+}
+
 /// One encoder of a mix: the published program audio, or the recording
 /// broadcast's own.
 enum Audio {
@@ -1173,6 +1263,8 @@ enum Audio {
 /// the origin their viewers' reports and the relays' stats arrive on.
 struct Live {
 	connections: Vec<moq_tokio::Connection>,
+	/// The client that dialed each connection.
+	clients: Vec<moq_tokio::Client>,
 	links: Vec<health::Link>,
 	reports: moq_net::origin::Consumer,
 	/// The canvas size encodes only while someone watches it.
@@ -2052,13 +2144,16 @@ fn browser_profile() -> anyhow::Result<PathBuf> {
 }
 
 /// Run a source on its own thread until its feed is dropped, or fail the
-/// source when its thread cannot start.
-fn spawn(driver: Driver) {
+/// source when its thread cannot start. Returns what closes as the source
+/// ends, having finished its own track.
+fn spawn(driver: Driver) -> tokio::sync::oneshot::Receiver<()> {
 	// Handed over once the thread exists, since a failed spawn drops what it
 	// was given and the driver must stay here to report why.
 	let (handoff, received) = mpsc::sync_channel::<Driver>(1);
+	let (running, ended) = tokio::sync::oneshot::channel::<()>();
 	let name = format!("source-{}", driver.name());
 	let started = clocked(name, async move || {
+		let _running = running;
 		if let Ok(driver) = received.recv() {
 			driver.run().await;
 		}
@@ -2071,6 +2166,7 @@ fn spawn(driver: Driver) {
 		}
 		Err(err) => driver.fail(format!("{err:#}")),
 	}
+	ended
 }
 
 /// Start a thread called `name` that runs `task` with its own clock and IO,
@@ -2667,18 +2763,25 @@ mod tests {
 			.expect("a clip");
 		assert_eq!(clip, dir.path().join("show-clip-1.mp4"));
 
-		// Quitting ends the program's video cleanly once the encoder published
-		// what it was handed, rather than leaving viewers a dropped track.
-		let mut track = broadcast.track(&resized).unwrap().subscribe(None).await.unwrap();
+		// Quitting ends the program's video and audio cleanly once the encoders
+		// published what they were handed, and closes the relay session only
+		// once the relay has it, rather than leaving viewers dropped tracks.
+		let video = broadcast.track(&resized).unwrap().subscribe(None).await.unwrap();
+		let sound = broadcast.track(audio).unwrap().subscribe(None).await.unwrap();
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
-		kio::clock::timeout(TIMEOUT, async {
-			while let Some(mut group) = track.recv_group().await.expect("the video finishes") {
-				while group.read_frame().await.expect("the video finishes").is_some() {}
-			}
-		})
-		.await
-		.expect("the video ends");
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+		for mut track in [video, sound] {
+			kio::clock::timeout(TIMEOUT, async {
+				while let Some(mut group) = track.recv_group().await.expect("the track finishes") {
+					while group.read_frame().await.expect("the track finishes").is_some() {}
+				}
+			})
+			.await
+			.expect("the track ends");
+		}
 		let failed = engine.stats.error();
 		assert!(failed.is_none(), "{failed:?}");
 	}
@@ -2801,6 +2904,129 @@ mod tests {
 		kio::clock::timeout(TIMEOUT, routed)
 			.await
 			.expect("both relays route the program, the failover the sources");
+	}
+
+	/// Closing the output as quitting does delivers the tail of every finished
+	/// track before the relay session goes: a subscriber at the relay reads
+	/// each track's last group whole and then its end, and the broadcast is
+	/// withdrawn. Each last group is still on its way as the close starts, so
+	/// dropping the session instead cuts it.
+	#[tokio::test(start_paused = true)]
+	async fn closing_delivers_every_tail() {
+		use moq_net::announce::Event;
+
+		/// The last group's frames, each padded to this many bytes.
+		const FRAMES: usize = 10;
+		const PADDING: usize = 50_000;
+
+		let _ = moq_tokio::crypto::install_default();
+		let fixture = moq_relay::test_relay().await.expect("test relay");
+		let ready = fixture.relay.ready();
+		let relay = fixture.relay.cluster().origin.consume();
+		tokio::spawn(fixture.relay.run());
+		ready.wait().await.expect("relay ready");
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
+		let client = client.init(Default::default()).expect("client");
+
+		let origin = moq_tokio::origin::spawn();
+		let (connections, _links) = connect(
+			vec![Relay {
+				client: client.clone(),
+				url: fixture.url.clone(),
+			}],
+			&origin,
+			&moq_tokio::origin::spawn(),
+		);
+		let output = Output {
+			path: "studio".into(),
+			on_demand: false,
+			connections,
+			clients: vec![client],
+		};
+		let publication = origin.create_broadcast("studio").unwrap();
+		publication.announce(Default::default()).unwrap();
+		let info = || moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let tracks = ["video", "audio"].map(|name| publication.create_track(name, info()).unwrap());
+
+		// Wait for an event `want` picks on `announced`.
+		let routed = async |announced: &mut moq_net::announce::Consumer, want: fn(&Event) -> bool| {
+			kio::clock::timeout(TIMEOUT, async {
+				while !want(&announced.next().await.expect("announcements")) {}
+			})
+			.await
+		};
+		let mut announced = relay.announced();
+		routed(
+			&mut announced,
+			|event| matches!(event, Event::Start(announce) if announce.prefix.as_str() == "studio"),
+		)
+		.await
+		.expect("the relay routes the broadcast");
+		let broadcast = kio::clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
+			.await
+			.expect("the relay routes the broadcast")
+			.expect("broadcast");
+		let mut subscriptions = Vec::new();
+		for (name, track) in ["video", "audio"].into_iter().zip(&tracks) {
+			let mut subscription = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
+			// A head group read through the relay, so only the tail is at stake.
+			let mut group = track.append_group().unwrap();
+			group.write_frame(moq_net::Timestamp::ZERO, vec![0; 1]).unwrap();
+			group.finish().unwrap();
+			let mut head = kio::clock::timeout(TIMEOUT, subscription.recv_group())
+				.await
+				.expect("the head group arrives")
+				.unwrap()
+				.expect("a group");
+			while head.read_frame().await.unwrap().is_some() {}
+			subscriptions.push(subscription);
+		}
+
+		// Read as a viewer does, while the studio writes and closes.
+		let readers: Vec<_> = subscriptions
+			.into_iter()
+			.map(|mut subscription| {
+				tokio::spawn(async move {
+					let mut tail = subscription
+						.recv_group()
+						.await
+						.expect("the tail, not a cut")
+						.expect("a group");
+					let mut frames = 0;
+					while let Some(frame) = tail.read_frame().await.expect("the whole tail") {
+						assert_eq!(frame.payload.len(), PADDING);
+						frames += 1;
+					}
+					assert_eq!(frames, FRAMES);
+					let end = subscription.recv_group().await.expect("a clean end");
+					assert!(end.is_none(), "the track ends after its tail");
+				})
+			})
+			.collect();
+		for track in &tracks {
+			let mut group = track.append_group().unwrap();
+			for _ in 0..FRAMES {
+				group.write_frame(moq_net::Timestamp::ZERO, vec![0; PADDING]).unwrap();
+			}
+			group.finish().unwrap();
+			track.finish().unwrap();
+		}
+		kio::clock::timeout(TIMEOUT, output.close())
+			.await
+			.expect("the output closes");
+		for reader in readers {
+			kio::clock::timeout(TIMEOUT, reader)
+				.await
+				.expect("the tail arrives")
+				.unwrap();
+		}
+		routed(
+			&mut announced,
+			|event| matches!(event, Event::End(announce) if announce.prefix.as_str() == "studio"),
+		)
+		.await
+		.expect("the broadcast is withdrawn");
 	}
 
 	/// Wait until `announced` routes `show` under `instance`.

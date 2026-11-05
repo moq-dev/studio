@@ -862,6 +862,40 @@ mod tests {
 		.await;
 	}
 
+	/// Stopping the sources, as quitting does, ends each source's own track
+	/// cleanly after what it published, and takes it out of the listing.
+	#[tokio::test]
+	async fn stopping_the_sources_finishes_their_tracks() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (publish, catalog, consumer) = studio();
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish);
+			let mut collection = Collection::new();
+			collection.sources.insert(
+				"red".into(),
+				Source::Color {
+					color: Rgba([255, 0, 0, 255]),
+				},
+			);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let snapshot = listed(&catalog, |sources| sources.contains_key("red")).await;
+			let (name, _) = snapshot.ext.studio.sources["red"].binary.tracks.iter().next().unwrap();
+			let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+
+			sources.stop();
+			assert!(sources.get("red").is_none());
+			let mut group = track.recv_group().await.unwrap().expect("the still");
+			assert!(group.read_frame().await.unwrap().is_some());
+			assert!(group.read_frame().await.unwrap().is_none());
+			assert!(track.recv_group().await.unwrap().is_none(), "the track finished");
+			listed(&catalog, |sources| sources.is_empty()).await;
+		})
+		.await;
+	}
+
 	/// A mid-gray picture of `size` at `millis` on a capture's own timeline.
 	fn gray(size: moq_video::Size, millis: u64) -> moq_video::Frame {
 		let i420 = moq_video::I420::new(size, vec![0x80; moq_video::I420::len(size).unwrap()]).unwrap();

@@ -104,7 +104,6 @@ repository.
 - [Published independently](/quest/m0/publish-independently.md) - a source opts out of the program and publishes its own track for services that place it themselves
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS
-- [Clean quit](/quest/m0/clean-quit.md) - quitting finishes every track and closes the relay session, so the broadcast's tail arrives
 - [Recover crashed recordings](/quest/m0/recording-repair.md) - a recording a crash left unfinished is repaired beside the original at launch
 - [Premultiplied source sampling](/quest/m0/premultiply.md) - scaled transparent sources draw without edge fringes
 - [Deterministic browser source startup](/quest/m0/cef-startup.md) - CEF on the CPU path paints its first frame without the GPU fallback hang
