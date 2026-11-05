@@ -93,13 +93,20 @@ fn filtered(texture: texture_2d<f32>, uv: vec2<f32>, premultiplied: bool) -> vec
 	if premultiplied {
 		return textureSampleLevel(texture, bilinear, uv, 0.0);
 	}
-	// The sampler's clamp to the edge, by hand.
 	let size = vec2<i32>(textureDimensions(texture));
 	let at = uv * vec2<f32>(size) - 0.5;
+	let fraction = fract(at);
+	// Near a texel's center, where a picture drawn at its own size samples,
+	// that texel alone is the mix, to within a 512th of a neighbour.
+	if all(min(fraction, 1.0 - fraction) < vec2<f32>(1.0 / 512.0)) {
+		let color = textureSampleLevel(texture, bilinear, uv, 0.0);
+		return vec4<f32>(color.rgb * color.a, color.a);
+	}
+	// Loaded rather than gathered, which GLES 3.0 lacks, and clamped to the
+	// edge as the sampler would.
 	let low = vec2<i32>(floor(at));
 	let near = clamp(low, vec2<i32>(0), size - 1);
 	let far = clamp(low + 1, vec2<i32>(0), size - 1);
-	let fraction = at - floor(at);
 	let top = mix(texel(texture, near), texel(texture, vec2<i32>(far.x, near.y)), fraction.x);
 	let bottom = mix(texel(texture, vec2<i32>(near.x, far.y)), texel(texture, far), fraction.x);
 	return mix(top, bottom, fraction.y);

@@ -323,7 +323,8 @@ fn reach(sigma: f32) -> f32 {
 pub(crate) struct Picture {
 	view: wgpu::TextureView,
 	bind: wgpu::BindGroup,
-	/// Whether its alpha is premultiplied, as a web page's is.
+	/// Whether its alpha is premultiplied, as every picture's is but an
+	/// overlay's paint, which the shader premultiplies as it samples.
 	premultiplied: bool,
 }
 
