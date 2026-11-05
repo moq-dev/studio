@@ -405,11 +405,14 @@ enum Command {
 pub(crate) struct Frame {
 	rasters: Vec<Command>,
 	targets: Vec<Command>,
+	/// The canvas of the target drawn now, which items are prepared for.
+	canvas: Canvas,
 }
 
 impl Frame {
-	/// Start drawing a canvas-sized target, cleared to opaque black.
-	pub fn target(&mut self, target: &Picture) {
+	/// Start drawing a target the size of `canvas`, cleared to opaque black.
+	pub fn target(&mut self, target: &Picture, canvas: Canvas) {
+		self.canvas = canvas;
 		self.targets.push(Command::Pass {
 			view: target.view.clone(),
 			clear: Some(wgpu::Color::BLACK),
@@ -458,7 +461,6 @@ pub(crate) trait Library {
 pub(crate) struct Effects {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
-	canvas: Canvas,
 
 	input_layout: wgpu::BindGroupLayout,
 	extra_layout: wgpu::BindGroupLayout,
@@ -475,7 +477,8 @@ pub(crate) struct Effects {
 	none: wgpu::BindGroup,
 	empty_2d: wgpu::TextureView,
 	empty_3d: wgpu::TextureView,
-	/// What a blend mode mixes with: a copy of its target under it.
+	/// What a blend mode mixes with: a copy of its target under it, as wide
+	/// and as tall as the largest canvas.
 	backdrop: wgpu::Texture,
 	backdrop_view: wgpu::TextureView,
 
@@ -485,13 +488,13 @@ pub(crate) struct Effects {
 	used: Vec<Raster>,
 }
 
-/// What a blend mode mixes with, as large as the canvas.
-fn backdrop(device: &wgpu::Device, canvas: Canvas) -> wgpu::Texture {
+/// What a blend mode mixes with, `width` by `height`.
+fn backdrop(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
 	device.create_texture(&wgpu::TextureDescriptor {
 		label: Some("moq-scene backdrop"),
 		size: wgpu::Extent3d {
-			width: canvas.width,
-			height: canvas.height,
+			width,
+			height,
 			depth_or_array_layers: 1,
 		},
 		mip_level_count: 1,
@@ -504,7 +507,8 @@ fn backdrop(device: &wgpu::Device, canvas: Canvas) -> wgpu::Texture {
 }
 
 impl Effects {
-	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, canvas: Canvas) -> Self {
+	/// Effects drawn onto canvases that fit in `width` by `height`.
+	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) -> Self {
 		let texture = |binding, sample_type, view_dimension| wgpu::BindGroupLayoutEntry {
 			binding,
 			visibility: wgpu::ShaderStages::FRAGMENT,
@@ -622,7 +626,7 @@ impl Effects {
 		};
 		let empty_2d = empty(wgpu::TextureDimension::D2, FORMAT);
 		let empty_3d = empty(wgpu::TextureDimension::D3, wgpu::TextureFormat::Rgba32Float);
-		let backdrop = backdrop(device, canvas);
+		let backdrop = backdrop(device, width, height);
 
 		let alignment = u64::from(device.limits().min_uniform_buffer_offset_alignment);
 		let stride = (size_of::<Uniform>() as u64).next_multiple_of(alignment);
@@ -636,7 +640,6 @@ impl Effects {
 			none: extra_bind(device, &extra_layout, [&empty_3d, &empty_2d, &empty_2d]),
 			device: device.clone(),
 			queue: queue.clone(),
-			canvas,
 			input_layout,
 			extra_layout,
 			uniform_layout,
@@ -650,14 +653,13 @@ impl Effects {
 		}
 	}
 
-	/// Draw onto `canvas` from the next frame on, reallocating what is sized
-	/// from it.
-	pub fn set_canvas(&mut self, canvas: Canvas) {
-		if canvas.width != self.canvas.width || canvas.height != self.canvas.height {
-			self.backdrop = backdrop(&self.device, canvas);
+	/// Draw onto canvases that fit in `width` by `height` from the next frame
+	/// on, reallocating what is sized from them.
+	pub fn fit(&mut self, width: u32, height: u32) {
+		if (width, height) != (self.backdrop.width(), self.backdrop.height()) {
+			self.backdrop = backdrop(&self.device, width, height);
 			self.backdrop_view = self.backdrop.create_view(&Default::default());
 		}
-		self.canvas = canvas;
 	}
 
 	/// `texture`, a source's picture or a canvas-sized target, bound to sample.
@@ -816,7 +818,7 @@ impl Effects {
 	/// nothing in `library` yet.
 	pub fn prepare(&mut self, frame: &mut Frame, item: Item<'_>, library: &dyn Library) -> Option<Prepared> {
 		let area = Area::of(item.rect);
-		let canvas = Area::canvas(self.canvas);
+		let canvas = Area::canvas(frame.canvas);
 		if area.is_empty() {
 			return None;
 		}
@@ -936,9 +938,9 @@ impl Effects {
 	/// A whole canvas-sized `picture` stretched over `at`, showing only within
 	/// `within`, at `opacity`, to draw over another: `None` if none of it
 	/// shows on the canvas.
-	pub fn place(&self, picture: &Picture, at: Rect, within: Rect, opacity: f32) -> Option<Prepared> {
+	pub fn place(&self, frame: &Frame, picture: &Picture, at: Rect, within: Rect, opacity: f32) -> Option<Prepared> {
 		let area = Area::of(at);
-		let bounds = area.intersect(&Area::of(within)).intersect(&Area::canvas(self.canvas));
+		let bounds = area.intersect(&Area::of(within)).intersect(&Area::canvas(frame.canvas));
 		if bounds.is_empty() || opacity <= 0.0 {
 			return None;
 		}
@@ -970,7 +972,7 @@ impl Effects {
 			bounds,
 			blend,
 		} = prepared;
-		let (width, height) = (self.canvas.width as f32, self.canvas.height as f32);
+		let (width, height) = (frame.canvas.width as f32, frame.canvas.height as f32);
 		let x = |px: f32| px / width * 2.0 - 1.0;
 		let y = |px: f32| 1.0 - px / height * 2.0;
 		let mut uniform = self.uniform(input, segment, item, bounds);
@@ -1028,7 +1030,7 @@ impl Effects {
 
 	/// `input` through `segment`, drawn into a raster covering `area`.
 	fn raster(&mut self, frame: &mut Frame, input: &Input, segment: &Segment, item: Area, area: Area) -> Input {
-		let size = self.texels(&area);
+		let size = self.texels(frame.canvas, &area);
 		let raster = self.acquire(size);
 		let draw = Draw {
 			kind: Kind::Raster,
@@ -1061,7 +1063,7 @@ impl Effects {
 		sigma: f32,
 	) -> Input {
 		let mut current = self.raster(frame, input, segment, item, area);
-		let mut size = self.texels(&area);
+		let mut size = self.texels(frame.canvas, &area);
 		let texels = |size: (u32, u32)| (size.0 as f32 / area.width(), size.1 as f32 / area.height());
 		// Halve until the blur is a few texels wide; each texel of a halving
 		// averages four, so nothing aliases.
@@ -1124,7 +1126,7 @@ impl Effects {
 		offset: (f32, f32),
 		color: Rgba,
 	) -> Input {
-		let raster = self.acquire(self.texels(&area));
+		let raster = self.acquire(self.texels(frame.canvas, &area));
 		let uniform = Uniform {
 			rect: FULL,
 			input: picture.area.map(UNIT, &area),
@@ -1153,14 +1155,15 @@ impl Effects {
 		}
 	}
 
-	/// The texels a raster covering `area` gets: one per canvas pixel, unless
-	/// that is more than twice the canvas or the device allows either way.
-	fn texels(&self, area: &Area) -> (u32, u32) {
+	/// The texels a raster covering `area` of `canvas` gets: one per canvas
+	/// pixel, unless that is more than twice the canvas or the device allows
+	/// either way.
+	fn texels(&self, canvas: Canvas, area: &Area) -> (u32, u32) {
 		let limit = self.device.limits().max_texture_dimension_2d;
-		let most = |canvas: u32| (canvas * 2).min(limit) as f32;
+		let most = |side: u32| (side * 2).min(limit) as f32;
 		let scale = 1f32
-			.min(most(self.canvas.width) / area.width())
-			.min(most(self.canvas.height) / area.height());
+			.min(most(canvas.width) / area.width())
+			.min(most(canvas.height) / area.height());
 		let texels = |length: f32| ((length * scale).ceil() as u32).max(1);
 		(texels(area.width()), texels(area.height()))
 	}

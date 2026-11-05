@@ -109,6 +109,9 @@ impl Studio {
 				runtime,
 				preview,
 				program,
+				view: None,
+				picked: None,
+				drawn: Canvas::default(),
 				top: false,
 				selection: None,
 				gestures: Gestures::default(),
@@ -122,6 +125,8 @@ impl Studio {
 				speaker: None,
 				speakers: Speakers::default(),
 				canvas: None,
+				extras: BTreeMap::new(),
+				new_canvas: (String::new(), 1080, 1920),
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
@@ -139,6 +144,9 @@ impl Studio {
 		}
 	}
 }
+
+/// What the canvas picker calls the main canvas.
+const MAIN: &str = "Main";
 
 /// Where the output Listen plays on is kept, per user.
 const SPEAKER: &str = "speaker";
@@ -159,10 +167,29 @@ impl eframe::App for Studio {
 
 	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
 		let engine = self.panels.engine.clone();
+		// A canvas picked last frame is shown from this one on, so every panel
+		// sizes the same canvas whose textures are registered here.
+		if let Some(view) = self.panels.picked.take() {
+			self.panels.view = view;
+			self.panels.deselect_item();
+		}
 		let state = engine.state.lock().unwrap();
+		// One removed since, by an edit, undo, or reload, falls back to the main
+		// canvas.
+		if let Some(name) = &self.panels.view
+			&& !state.collection().canvases.contains_key(name)
+		{
+			self.panels.view = None;
+			self.panels.deselect_item();
+		}
+		let view = state.compositor.output(self.panels.view.as_deref());
+		let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
+		// The size the textures were drawn at, which an edit this frame, such
+		// as an undo removing the canvas, does not change until the next.
+		self.panels.drawn = view.canvas();
 		if let Some(render) = frame.wgpu_render_state() {
-			self.panels.preview.follow(render, state.compositor.preview());
-			self.panels.program.follow(render, state.compositor.program());
+			self.panels.preview.follow(render, view.preview());
+			self.panels.program.follow(render, view.program());
 		}
 		// Redraw at the canvas rate, so preview and program are live.
 		let framerate = state.compositor.canvas().framerate;
@@ -184,6 +211,9 @@ impl eframe::App for Studio {
 		// turning Interact off does.
 		if !self.panels.previewed {
 			self.panels.let_go();
+		}
+		if self.panels.picked.is_some() {
+			ui.ctx().request_repaint();
 		}
 	}
 }
@@ -229,6 +259,15 @@ struct Panels {
 	runtime: tokio::runtime::Handle,
 	preview: Registered,
 	program: Registered,
+	/// The canvas Preview, Program, and Items show: a further one by name, or
+	/// `None` for the main one.
+	view: Option<String>,
+	/// The canvas the picker chose this frame, shown from the next, so a
+	/// frame never sizes one canvas and draws another.
+	picked: Option<Option<String>>,
+	/// The size of the canvas Preview, Program, and Items show this frame, as
+	/// its textures were drawn.
+	drawn: Canvas,
 	/// Whether the Items panel shows the top layer rather than the scene in
 	/// preview.
 	top: bool,
@@ -254,6 +293,10 @@ struct Panels {
 	/// The canvas the Output panel's form holds until it is applied, or
 	/// `None` while it shows the collection's.
 	canvas: Option<Canvas>,
+	/// The size each further canvas's form holds until it is applied, by name.
+	extras: BTreeMap<String, (u32, u32)>,
+	/// The name and size typed for the next further canvas.
+	new_canvas: (String, u32, u32),
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
@@ -311,6 +354,13 @@ impl TabViewer for Panels {
 			Tab::Replay => self.replay(ui),
 		}
 	}
+}
+
+/// What the Output panel does to a further canvas.
+enum CanvasAction {
+	/// Add or resize the canvas of this name to this width and height.
+	Set(String, u32, u32),
+	Remove(String),
 }
 
 /// A source or an item: what the Filters panel edits.
@@ -609,14 +659,43 @@ impl Panels {
 		self.renaming = None;
 	}
 
-	/// The layer the Items panel shows, and new sources are placed in.
+	/// The layer the Items panel shows, and new sources are placed in, on the
+	/// canvas shown.
 	fn layer(&self, state: &State) -> Result<Layer, String> {
-		if self.top {
-			return Ok(Layer::Top);
+		let layer = match (self.top, state.compositor.preview_scene()) {
+			(true, _) => Layer::top(),
+			(false, Some(name)) => Layer::scene(name),
+			(false, None) => return Err("Pick a scene to edit what it shows.".into()),
+		};
+		// A canvas an undo or a reload removed is not shown any more, though
+		// `view` follows only once Preview, Program, or Items draws.
+		let view = self
+			.view
+			.clone()
+			.filter(|name| state.collection().canvases.contains_key(name));
+		Ok(layer.on(view))
+	}
+
+	/// Pick which canvas Preview, Program, and Items show.
+	fn pick_view(&mut self, ui: &mut Ui, collection: &Collection) {
+		if collection.canvases.is_empty() {
+			return;
 		}
-		match state.compositor.preview_scene() {
-			Some(name) => Ok(Layer::Scene(name.to_string())),
-			None => Err("Pick a scene to edit what it shows.".into()),
+		let name = |view: &Option<String>| view.clone().unwrap_or_else(|| MAIN.to_string());
+		let mut view = self.view.clone();
+		egui::ComboBox::from_id_salt("view")
+			.selected_text(name(&view))
+			.show_ui(ui, |ui| {
+				let views = std::iter::once(None).chain(collection.canvases.keys().cloned().map(Some));
+				for option in views {
+					let label = name(&option);
+					ui.selectable_value(&mut view, option, label);
+				}
+			})
+			.response
+			.on_hover_text("The canvas preview and program show, and the items edited are on");
+		if view != self.view {
+			self.picked = Some(view);
 		}
 	}
 
@@ -719,8 +798,9 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let canvas = state.collection().canvas;
+		let canvas = self.drawn;
 		ui.horizontal(|ui| {
+			self.pick_view(ui, state.collection());
 			ui.label(format!(
 				"Preview: {}",
 				state.compositor.preview_scene().unwrap_or("nothing")
@@ -755,7 +835,9 @@ impl Panels {
 			let since = state.compositor.preview_since();
 			let scene = state.compositor.preview_scene().map(|scene| (scene, since));
 			self.rebind(&state.sources);
-			let delivered = self.interact.update(ui, image, state.collection(), scene);
+			let delivered = self
+				.interact
+				.update(ui, image, state.collection(), self.view.as_deref(), scene);
 			deliver(&state.sources, delivered);
 			self.rebind(&state.sources);
 			return;
@@ -787,7 +869,7 @@ impl Panels {
 		}
 
 		let Ok(layer) = self.layer(state) else { return Ok(()) };
-		let Some(resting) = state.collection().items(&layer).cloned() else {
+		let Some(resting) = state.collection().items(&layer).map(<[Item]>::to_vec) else {
 			return Ok(());
 		};
 		let since = state.compositor.preview_since();
@@ -869,7 +951,7 @@ impl Panels {
 		}
 
 		// Drawn from the collection and selection as this frame left them.
-		let items = state.collection().items(&layer).map_or(&[][..], Vec::as_slice);
+		let items = state.collection().items(&layer).unwrap_or_default();
 		let items: Vec<Item> = items.iter().map(|item| item.posed(since).into_owned()).collect();
 		let selected = match &self.selection {
 			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
@@ -905,7 +987,7 @@ impl Panels {
 	fn program(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
-		let canvas = state.collection().canvas;
+		let canvas = self.drawn;
 		let transition = state.collection().transition;
 		let mut next = transition;
 		let mut gesture = None;
@@ -1084,7 +1166,7 @@ impl Panels {
 
 	/// Keep a selected item of the scene renamed from `from` selected.
 	fn renamed(&mut self, from: &str, to: &str) {
-		if let Some(Selection::Item(Layer::Scene(scene), _)) = &mut self.selection
+		if let Some(Selection::Item(Layer { scene: Some(scene), .. }, _)) = &mut self.selection
 			&& scene == from
 		{
 			*scene = to.to_string();
@@ -1135,7 +1217,11 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
+		let canvas = self.drawn;
+		let mut scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
+		if let Some(view) = &self.view {
+			scene = format!("{scene} on `{view}`");
+		}
 		ui.horizontal(|ui| {
 			ui.selectable_value(&mut self.top, false, format!("Scene: {scene}"));
 			ui.selectable_value(&mut self.top, true, "Top layer")
@@ -1150,11 +1236,10 @@ impl Panels {
 			}
 		};
 		let collection = state.collection();
-		let Some(items) = collection.items(&layer).cloned() else {
+		let Some(items) = collection.items(&layer).map(<[Item]>::to_vec) else {
 			ui.label(format!("There is no {layer}."));
 			return;
 		};
-		let canvas = collection.canvas;
 		let mut action = None;
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1800,7 +1885,7 @@ impl Panels {
 			ui.label("Select an item to animate it.");
 			return;
 		};
-		if layer == Layer::Top {
+		if layer.scene.is_none() {
 			ui.label("The top layer never goes on program, so its items have no keyframes to play.");
 			return;
 		}
@@ -2226,12 +2311,12 @@ impl Panels {
 		self.record(ui);
 		ui.separator();
 		self.canvas_form(ui);
+		self.canvases_form(ui);
 		ui.separator();
 
 		let stats = &self.engine.stats;
 		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
-		let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
-		let watched = stats.watched.load(Ordering::Relaxed);
+		let watched = stats.video.watched.load(Ordering::Relaxed);
 
 		egui::Grid::new("output").show(ui, |ui| {
 			match &self.engine.output {
@@ -2260,61 +2345,40 @@ impl Panels {
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
 			ui.label("Encoder");
-			ui.label(stats.encoder().unwrap_or_else(|| "not open".into()));
+			ui.label(stats.video.encoder().unwrap_or_else(|| "not open".into()));
 			ui.end_row();
 			ui.label("Encoder sessions");
-			ui.label(format!("{} open", stats.sessions.open()))
-				.on_hover_text("Video encoders open now, the program's and the sources'. A GPU caps them.");
+			ui.label(format!("{} open", stats.sessions.open())).on_hover_text(
+				"Video encoders open now: every canvas's program and the sources'. A GPU caps them, and each canvas adds its own.",
+			);
 			ui.end_row();
 		});
 		ui.separator();
-		// Only the sizes the program publishes, since a small canvas, or an
-		// encoder that refused the half size, has the canvas size alone, and
-		// the recording's own encoder.
-		let [canvas, half, recording] = &stats.renditions;
-		let published = stats.sizes.load(Ordering::Relaxed);
-		let mut columns = vec![("Canvas size", canvas)];
-		if published > 1 {
-			columns.push(("Half size", half));
-		}
-		columns.push(("Recording", recording));
-		egui::Grid::new("renditions").show(ui, |ui| {
-			ui.strong("");
-			for (heading, _) in &columns {
-				ui.strong(*heading);
-			}
-			ui.end_row();
-			let row = |ui: &mut Ui, label: &str, cell: &dyn Fn(&crate::engine::Load) -> String| {
-				ui.label(label);
-				for (_, load) in &columns {
-					ui.label(cell(load));
-				}
-				ui.end_row();
-			};
-			row(ui, "Handed to the encoder", &|load| {
-				format!("{} frames, last {}", count(&load.copied), millis(&load.copy_us))
-			});
-			let zero_copy = stats.zero_copy.load(Ordering::Relaxed);
-			row(ui, "Read back to the CPU", &|load| match zero_copy {
-				true => "none; the encoder reads the GPU".to_string(),
-				false => format!("{} frames", count(&load.read_back)),
-			});
-			row(ui, "Dropped", &|load| format!("{} frames", count(&load.dropped)));
-			row(ui, "Encoded", &|load| {
-				format!("{} frames, last {}", count(&load.encoded), millis(&load.encode_us))
-			});
-		});
+		renditions(ui, None, &stats.video, true);
 		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
-		if let Some(error) = half.error() {
-			ui.colored_label(ui.visuals().warn_fg_color, format!("half size off: {error}"));
-		}
-		if let Some(error) = recording.error() {
-			ui.colored_label(ui.visuals().warn_fg_color, format!("recording encoder off: {error}"));
-		}
 		if let Some(error) = stats.recording_audio_error() {
 			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
+		}
+
+		for (name, video) in stats.canvases() {
+			ui.separator();
+			ui.strong(format!("Canvas `{name}`"));
+			if let Some(output) = &self.engine.output {
+				ui.label(format!(
+					"Broadcast {}/{name}, with the main broadcast's audio",
+					output.path
+				));
+			}
+			ui.label(format!(
+				"Encoder: {}",
+				video.encoder().unwrap_or_else(|| "not open".into())
+			));
+			renditions(ui, Some(&name), &video, false);
+			if let Some(error) = video.error() {
+				ui.colored_label(ui.visuals().error_fg_color, error);
+			}
 		}
 	}
 
@@ -2499,6 +2563,94 @@ impl Panels {
 		if result.is_ok() {
 			self.canvas = None;
 		}
+		drop(state);
+		self.check(result);
+	}
+
+	/// The further canvases: each one's size, applied at once as the main
+	/// canvas's is, and a form adding another. Each publishes a broadcast of
+	/// its own, with encoders of its own.
+	fn canvases_form(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let canvases = state.collection().canvases.clone();
+		self.extras.retain(|name, _| canvases.contains_key(name));
+		let mut action = None;
+		for (name, extra) in &canvases {
+			let current = (extra.width, extra.height);
+			let (mut width, mut height) = self.extras.get(name).copied().unwrap_or(current);
+			// By name, so an edit under way stays on its canvas as others come
+			// and go.
+			ui.push_id(name, |ui| {
+				ui.horizontal(|ui| {
+					ui.strong(name);
+					ui.add(egui::DragValue::new(&mut width).range(2..=u32::MAX));
+					ui.label("x");
+					ui.add(egui::DragValue::new(&mut height).range(2..=u32::MAX));
+					let edited = (width, height) != current;
+					if ui.add_enabled(edited, egui::Button::new("Apply")).clicked() {
+						action = Some(CanvasAction::Set(name.clone(), width, height));
+					}
+					if ui.add_enabled(edited, egui::Button::new("Reset")).clicked() {
+						(width, height) = current;
+					}
+					if ui
+						.button("Remove")
+						.on_hover_text("Remove the canvas, its top layer, and every scene's layout on it")
+						.clicked()
+					{
+						action = Some(CanvasAction::Remove(name.clone()));
+					}
+				})
+			});
+			match (width, height) == current {
+				true => self.extras.remove(name),
+				false => self.extras.insert(name.clone(), (width, height)),
+			};
+		}
+		ui.horizontal(|ui| {
+			let (name, width, height) = &mut self.new_canvas;
+			ui.add(
+				egui::TextEdit::singleline(name)
+					.hint_text("New canvas")
+					.desired_width(100.0),
+			);
+			ui.add(egui::DragValue::new(width).range(2..=u32::MAX));
+			ui.label("x");
+			ui.add(egui::DragValue::new(height).range(2..=u32::MAX));
+			// Viewers of the main broadcast report back beneath it, under
+			// `ECHO`, where this canvas would publish.
+			let named = !name.is_empty() && !canvases.contains_key(name.as_str()) && name != crate::health::ECHO;
+			if ui
+				.add_enabled(named, egui::Button::new("Add canvas"))
+				.on_hover_text("Another canvas with its own layout of each scene, published in its own broadcast")
+				.on_disabled_hover_text(format!(
+					"Name it something new, other than `{}`, where viewers report back",
+					crate::health::ECHO
+				))
+				.clicked()
+			{
+				action = Some(CanvasAction::Set(name.clone(), *width, *height));
+			}
+		});
+
+		let result = match action {
+			None => return,
+			Some(CanvasAction::Set(name, width, height)) => {
+				let label = format!("Set canvas `{name}` to {width}x{height}");
+				let result = edit(&mut state, label, None, |draft| draft.set_extra(&name, width, height));
+				if result.is_ok() {
+					self.extras.remove(&name);
+					if self.new_canvas.0 == name {
+						self.new_canvas.0.clear();
+					}
+				}
+				result
+			}
+			Some(CanvasAction::Remove(name)) => edit(&mut state, format!("Remove canvas `{name}`"), None, |draft| {
+				draft.remove_extra(&name)
+			}),
+		};
 		drop(state);
 		self.check(result);
 	}
@@ -2998,7 +3150,10 @@ fn add(
 		!state.collection().sources.contains_key(&name),
 		"there is already a source named `{name}`"
 	);
-	let canvas = state.collection().canvas;
+	let canvas = layer
+		.as_ref()
+		.and_then(|layer| state.collection().canvas(layer.canvas.as_deref()));
+	let canvas = canvas.unwrap_or(state.collection().canvas);
 	let place = source.has_video();
 	// A page or overlay, or a clone of one, lands at its own size, pixel for
 	// pixel; anything else fills the canvas.
@@ -3019,7 +3174,7 @@ fn add(
 		draft.set_source(&name, Some(source))?;
 		draft.set_video(&name, video)?;
 		if place && let Some(layer) = layer {
-			let index = draft.collection().items(&layer).map_or(0, Vec::len);
+			let index = draft.collection().items(&layer).map_or(0, <[Item]>::len);
 			draft.insert_item(&layer, index, Item::new(name.clone(), rect))?;
 		}
 		Ok(())
@@ -3078,6 +3233,58 @@ fn expiry(expires: kio::clock::Wall, now: kio::clock::Wall) -> String {
 	}
 }
 
+/// What each of the program encoders of the canvas `name`, the main one for
+/// `None`, costs: the sizes it publishes, and its recording copy if
+/// `recording`.
+fn renditions(ui: &mut Ui, name: Option<&str>, video: &crate::engine::VideoStats, recording: bool) {
+	let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
+	let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
+	// Only the sizes the program publishes, since a small canvas, or an
+	// encoder that refused the half size, has the canvas size alone, and the
+	// recording's own encoder.
+	let [canvas, half, record] = &video.renditions;
+	let published = video.sizes.load(Ordering::Relaxed);
+	let mut columns = vec![("Canvas size", canvas)];
+	if published > 1 {
+		columns.push(("Half size", half));
+	}
+	if recording {
+		columns.push(("Recording", record));
+	}
+	egui::Grid::new(("renditions", name)).show(ui, |ui| {
+		ui.strong("");
+		for (heading, _) in &columns {
+			ui.strong(*heading);
+		}
+		ui.end_row();
+		let row = |ui: &mut Ui, label: &str, cell: &dyn Fn(&crate::engine::Load) -> String| {
+			ui.label(label);
+			for (_, load) in &columns {
+				ui.label(cell(load));
+			}
+			ui.end_row();
+		};
+		row(ui, "Handed to the encoder", &|load| {
+			format!("{} frames, last {}", count(&load.copied), millis(&load.copy_us))
+		});
+		let zero_copy = video.zero_copy.load(Ordering::Relaxed);
+		row(ui, "Read back to the CPU", &|load| match zero_copy {
+			true => "none; the encoder reads the GPU".to_string(),
+			false => format!("{} frames", count(&load.read_back)),
+		});
+		row(ui, "Dropped", &|load| format!("{} frames", count(&load.dropped)));
+		row(ui, "Encoded", &|load| {
+			format!("{} frames, last {}", count(&load.encoded), millis(&load.encode_us))
+		});
+	});
+	if let Some(error) = half.error() {
+		ui.colored_label(ui.visuals().warn_fg_color, format!("half size off: {error}"));
+	}
+	if recording && let Some(error) = record.error() {
+		ui.colored_label(ui.visuals().warn_fg_color, format!("recording encoder off: {error}"));
+	}
+}
+
 /// Draw `texture` as large as fits, keeping the canvas's shape.
 fn picture(ui: &mut Ui, texture: egui::TextureId, canvas: Canvas, sense: egui::Sense) -> egui::Response {
 	let available = ui.available_size();
@@ -3128,18 +3335,16 @@ struct Drag {
 /// How far, in points on screen, the pointer reaches to an edge or a line.
 const REACH: f32 = 8.0;
 
-/// Where the visible items of the scene in preview and the top layer show
-/// `since` the scene went into preview, other than the one at `index` of
-/// `layer`: what a dragged item snaps to.
+/// Where the visible items of the scene in preview and the top layer on
+/// `layer`'s canvas show `since` the scene went into preview, other than the
+/// one at `index` of `layer`: what a dragged item snaps to.
 fn others(state: &State, layer: &Layer, index: usize, since: Duration) -> Vec<Rect> {
-	let scene = state
-		.compositor
-		.preview_scene()
-		.map(|name| Layer::Scene(name.to_string()));
+	let scene = state.compositor.preview_scene().map(Layer::scene);
 	let collection = state.collection();
 	let mut rects = Vec::new();
-	for shown in scene.into_iter().chain([Layer::Top]) {
-		let items = collection.items(&shown).map_or(&[][..], Vec::as_slice);
+	for shown in scene.into_iter().chain([Layer::top()]) {
+		let shown = shown.on(layer.canvas.clone());
+		let items = collection.items(&shown).unwrap_or_default();
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == *layer && at == index) {
 				rects.push(item.posed(since).rect);
