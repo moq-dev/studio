@@ -197,6 +197,17 @@ impl eframe::App for Studio {
 		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 		self.panels.follow_reloads(&state);
+		// A page painting in memory copies through the studio's clipboard,
+		// even if the preview let go of the page before the copy came back.
+		if let Some(text) = state
+			.sources
+			.context()
+			.browser
+			.as_ref()
+			.and_then(|helper| helper.copied())
+		{
+			ui.ctx().copy_text(text);
+		}
 		drop(state);
 
 		self.panels.shortcuts(ui.ctx());

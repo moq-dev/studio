@@ -17,11 +17,18 @@ use super::outbox::Commands;
 use super::protocol::{Area, Channel, Command, Event, Format, Id, Layer, Open, Plane, Raster, Start, Texture};
 use super::{Button, Input, Modifiers};
 
+/// What the helper asks of a page's focused frame: its selection, and whether
+/// to cut it.
+const COPY: &str = "moq-studio-copy";
+/// What the frame's renderer answers: the text it copied.
+const COPIED: &str = "moq-studio-copied";
+
 /// Run one of CEF's subprocesses (renderer, GPU, utility, zygote).
 pub(super) fn subprocess() -> ExitCode {
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 	let args = args::Args::new();
-	let code = execute_process(Some(args.as_main_args()), None, std::ptr::null_mut());
+	let mut app = RendererApp::new(RendererCopy::new());
+	let code = execute_process(Some(args.as_main_args()), Some(&mut app), std::ptr::null_mut());
 	ExitCode::from(code.clamp(0, 255) as u8)
 }
 
@@ -76,10 +83,15 @@ impl Paged {
 
 thread_local! {
 	/// The open pages, on CEF's UI thread, where input is delivered.
-	static PAGES: RefCell<HashMap<Id, Browser>> = RefCell::new(HashMap::new());
+	static PAGES: RefCell<HashMap<Id, (Browser, Arc<Paged>)>> = RefCell::new(HashMap::new());
 	/// Whether the studio is gone, so the helper quits once its last page
 	/// closes.
 	static QUITTING: Cell<bool> = const { Cell::new(false) };
+	/// The number of the last copy asked of a renderer.
+	static COPIES: Cell<i32> = const { Cell::new(0) };
+	/// The copy whose answer the studio still wants. Only the newest is, so
+	/// a slow renderer never overwrites a newer copy, nor answers unasked.
+	static COPYING: Cell<Option<i32>> = const { Cell::new(None) };
 }
 
 fn serve() -> Result<(), String> {
@@ -259,6 +271,7 @@ fn open(shared: Arc<Shared>, id: Id, open: Open) {
 	let url = CefString::from(open.url.as_str());
 	let paged = Arc::new(Paged { shared, id, open });
 	let mut client = HelperClient::new(
+		paged.clone(),
 		HelperRender::new(paged.clone()),
 		HelperAudio::new(paged.clone()),
 		HelperLoad::new(paged.clone()),
@@ -273,7 +286,7 @@ fn open(shared: Arc<Shared>, id: Id, open: Open) {
 		None,
 		None,
 	) {
-		Some(browser) => _ = PAGES.with_borrow_mut(|pages| pages.insert(id, browser)),
+		Some(browser) => _ = PAGES.with_borrow_mut(|pages| pages.insert(id, (browser, paged))),
 		None => paged.fail("CEF failed to create the page".into()),
 	}
 }
@@ -286,7 +299,7 @@ fn close(id: Id) {
 
 /// Run `f` on page `id`'s host, if the page is open. Runs on the UI thread.
 fn host(id: Id, f: impl FnOnce(BrowserHost)) {
-	if let Some(host) = PAGES.with_borrow(|pages| pages.get(&id).and_then(|browser| browser.host())) {
+	if let Some(host) = PAGES.with_borrow(|pages| pages.get(&id).and_then(|(browser, _)| browser.host())) {
 		f(host);
 	}
 }
@@ -300,7 +313,7 @@ fn retime(id: Id, rate: u32) {
 
 /// Hand one input event to page `id`. Runs on the UI thread.
 fn deliver(id: Id, input: Input) {
-	let Some(browser) = PAGES.with_borrow(|pages| pages.get(&id).cloned()) else {
+	let Some((browser, page)) = PAGES.with_borrow(|pages| pages.get(&id).cloned()) else {
 		return;
 	};
 	let Some(host) = browser.host() else {
@@ -366,20 +379,38 @@ fn deliver(id: Id, input: Input) {
 				host.send_key_event(Some(&event));
 			}
 		}
-		// The focused frame holds the selection, which may be in an
-		// iframe.
-		Input::Copy => {
-			if let Some(frame) = browser.focused_frame() {
-				frame.copy();
-			}
-		}
-		Input::Cut => {
-			if let Some(frame) = browser.focused_frame() {
-				frame.cut();
-			}
-		}
+		Input::Copy => copy(&browser, &page, false),
+		Input::Cut => copy(&browser, &page, true),
 		Input::Focus(focused) => host.set_focus(focused.into()),
 	}
+}
+
+/// Copy, or cut if `cut`, the selection in the page's focused frame, which
+/// may be an iframe, to the desktop's clipboard.
+fn copy(browser: &Browser, page: &Paged, cut: bool) {
+	let Some(frame) = browser.focused_frame() else { return };
+	// The GPU path opens a display, whose clipboard CEF's own is, and the
+	// page's copy and cut handlers decide what lands there.
+	if page.shared.accelerated {
+		match cut {
+			true => frame.cut(),
+			false => frame.copy(),
+		}
+		return;
+	}
+	// The CPU path opens none, so the frame's renderer answers with its
+	// selection, and the studio puts that on the desktop's clipboard.
+	let Some(mut message) = process_message_create(Some(&COPY.into())) else {
+		return;
+	};
+	let number = COPIES.get().wrapping_add(1);
+	COPIES.set(number);
+	COPYING.set(Some(number));
+	if let Some(args) = message.argument_list() {
+		args.set_bool(0, cut.into());
+		args.set_int(1, number);
+	}
+	frame.send_process_message(ProcessId::RENDERER, Some(&mut message));
 }
 
 fn flags(modifiers: Modifiers) -> u32 {
@@ -458,9 +489,14 @@ wrap_app! {
 				// WebGL then needs SwiftShader, which Chromium runs only when
 				// told to, since it JITs page shaders in the GPU process. A
 				// browser source runs the pages its user picked, not the web.
+				//
+				// Painting offscreen in software needs no display either,
+				// so none is opened, which lets the helper run with no X
+				// server, as under Wayland without XWayland.
 				Raster::Cpu => {
 					command_line.append_switch(Some(&"disable-gpu".into()));
 					command_line.append_switch(Some(&"enable-unsafe-swiftshader".into()));
+					command_line.append_switch_with_value(Some(&"ozone-platform".into()), Some(&"headless".into()));
 				}
 			}
 		}
@@ -483,8 +519,83 @@ wrap_browser_process_handler! {
 	}
 }
 
+wrap_app! {
+	struct RendererApp {
+		render: RenderProcessHandler,
+	}
+
+	impl App {
+		fn render_process_handler(&self) -> Option<RenderProcessHandler> {
+			Some(self.render.clone())
+		}
+	}
+}
+
+wrap_render_process_handler! {
+	struct RendererCopy;
+
+	impl RenderProcessHandler {
+		fn on_process_message_received(
+			&self,
+			_browser: Option<&mut Browser>,
+			frame: Option<&mut Frame>,
+			source_process: ProcessId,
+			message: Option<&mut ProcessMessage>,
+		) -> ::std::os::raw::c_int {
+			let (Some(frame), Some(message)) = (frame, message) else {
+				return 0;
+			};
+			if source_process != ProcessId::BROWSER || CefString::from(&message.name()).to_string() != COPY {
+				return 0;
+			}
+			let Some(args) = message.argument_list() else { return 1 };
+			let (cut, number) = (args.bool(0) != 0, args.int(1));
+			let copied = Arc::new(Mutex::new(String::new()));
+			frame.visit_dom(Some(&mut SelectionReader::new(cut, copied.clone())));
+			let Some(mut answer) = process_message_create(Some(&COPIED.into())) else {
+				return 1;
+			};
+			if let Some(args) = answer.argument_list() {
+				args.set_string(0, Some(&copied.lock().unwrap().as_str().into()));
+				args.set_int(1, number);
+			}
+			frame.send_process_message(ProcessId::BROWSER, Some(&mut answer));
+			// After reading the selection, which cutting removes.
+			if cut {
+				frame.cut();
+			}
+			1
+		}
+	}
+}
+
+wrap_domvisitor! {
+	struct SelectionReader {
+		cut: bool,
+		text: Arc<Mutex<String>>,
+	}
+
+	impl Domvisitor {
+		fn visit(&self, document: Option<&mut Domdocument>) {
+			let Some(document) = document else { return };
+			let focused = document.focused_node();
+			// A browser never copies a password field's text, and cuts only
+			// what it can delete.
+			let password = focused.as_ref().is_some_and(|node| {
+				node.is_form_control_element() != 0
+					&& node.form_control_element_type() == DomFormControlType::INPUT_PASSWORD
+			});
+			let editable = focused.is_some_and(|node| node.is_editable() != 0);
+			if !password && (editable || !self.cut) {
+				*self.text.lock().unwrap() = CefString::from(&document.selection_as_text()).to_string();
+			}
+		}
+	}
+}
+
 wrap_client! {
 	struct HelperClient {
+		page: Arc<Paged>,
 		render: RenderHandler,
 		audio: AudioHandler,
 		load: LoadHandler,
@@ -511,6 +622,30 @@ wrap_client! {
 
 		fn life_span_handler(&self) -> Option<LifeSpanHandler> {
 			Some(self.life.clone())
+		}
+
+		fn on_process_message_received(
+			&self,
+			_browser: Option<&mut Browser>,
+			_frame: Option<&mut Frame>,
+			source_process: ProcessId,
+			message: Option<&mut ProcessMessage>,
+		) -> ::std::os::raw::c_int {
+			let Some(message) = message else { return 0 };
+			if source_process != ProcessId::RENDERER || CefString::from(&message.name()).to_string() != COPIED {
+				return 0;
+			}
+			let Some(args) = message.argument_list() else { return 1 };
+			// Only the newest copy's answer, once.
+			if COPYING.get() != Some(args.int(1)) {
+				return 1;
+			}
+			COPYING.set(None);
+			let text = CefString::from(&args.string(0)).to_string();
+			if !text.is_empty() {
+				self.page.shared.send(&Event::Copied(text), &[]);
+			}
+			1
 		}
 	}
 }
