@@ -29,7 +29,8 @@ pub struct Collection {
 	/// sources, under its own top layer.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub canvases: BTreeMap<String, Extra>,
-	/// How the preview is taken to program, short of a cut.
+	/// How the preview is taken to program, short of a cut, on the main canvas
+	/// and every canvas linked to it.
 	#[serde(default)]
 	pub transition: Transition,
 	/// Every source, by its unique name. Scenes refer to sources by that name,
@@ -97,6 +98,22 @@ impl Collection {
 	/// The scene called `name`.
 	pub fn scene(&self, name: &str) -> Option<&Scene> {
 		self.scenes.iter().find(|scene| scene.name == name)
+	}
+
+	/// The further canvas recordings hold, or `None` for the main one.
+	pub fn recorded(&self) -> Option<&str> {
+		let mut canvases = self.canvases.iter();
+		canvases
+			.find(|(_, extra)| extra.recorded)
+			.map(|(name, _)| name.as_str())
+	}
+
+	/// How `canvas` takes its preview to program: an unlinked canvas's own
+	/// transition, or the main canvas's for it, a linked one, or one that does
+	/// not exist.
+	pub fn takes(&self, canvas: Option<&str>) -> Transition {
+		let extra = canvas.and_then(|name| self.canvases.get(name));
+		extra.and_then(|extra| extra.transition).unwrap_or(self.transition)
 	}
 
 	/// The canvas `canvas` names: the main one for `None`, or a further one,
@@ -219,6 +236,12 @@ impl Collection {
 				.canvas(self.canvas.framerate)
 				.validate()
 				.map_err(|err| Error::Invalid(format!("canvas `{name}`: {err}")))?;
+		}
+		let mut recorded = self.canvases.iter().filter(|(_, extra)| extra.recorded);
+		if let (Some((first, _)), Some((second, _))) = (recorded.next(), recorded.next()) {
+			return Err(Error::Invalid(format!(
+				"canvases `{first}` and `{second}` are both recorded; recordings hold one canvas"
+			)));
 		}
 
 		let mut names = BTreeSet::new();
@@ -463,15 +486,28 @@ pub struct Extra {
 	/// Its top layer, as [`Collection::top`] is the main canvas's.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub top: Vec<Item>,
+	/// How it takes its own preview to program, short of a cut, which unlinks
+	/// it: it keeps a preview and program scene of its own, so a scene change
+	/// on the main canvas leaves it be. Without one it is linked, switching
+	/// scenes with the main canvas by the main canvas's transition.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub transition: Option<Transition>,
+	/// Whether recordings hold this canvas rather than the main one. At most
+	/// one canvas is recorded.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub recorded: bool,
 }
 
 impl Extra {
-	/// An empty canvas of `width` by `height`.
+	/// An empty canvas of `width` by `height`, linked to the main canvas and
+	/// not recorded.
 	pub fn new(width: u32, height: u32) -> Self {
 		Self {
 			width,
 			height,
 			top: Vec::new(),
+			transition: None,
+			recorded: false,
 		}
 	}
 
@@ -2380,6 +2416,38 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		assert!(
 			matches!(collection.validate(), Err(Error::Invalid(_))),
 			"an empty layout"
+		);
+	}
+
+	/// An unlinked canvas keeps its own transition and a recorded one says
+	/// so in the file, and recordings hold one canvas at most.
+	#[test]
+	fn a_further_canvas_unlinks_and_records() {
+		let mut collection = example();
+		let slide = Transition::Slide {
+			duration: Duration::from_millis(300),
+			direction: Direction::Up,
+		};
+		collection.canvases.insert(
+			"tall".into(),
+			Extra {
+				transition: Some(slide),
+				recorded: true,
+				..Extra::new(1080, 1920)
+			},
+		);
+		collection.canvases.insert("wide".into(), Extra::new(2560, 1080));
+		let text = collection.to_toml().unwrap();
+		assert_eq!(Collection::from_toml(&text).unwrap(), collection);
+		assert_eq!(collection.recorded(), Some("tall"));
+		assert_eq!(collection.takes(Some("tall")), slide);
+		assert_eq!(collection.takes(Some("wide")), collection.transition);
+		assert_eq!(collection.takes(None), collection.transition);
+
+		collection.canvases.get_mut("wide").unwrap().recorded = true;
+		assert!(
+			matches!(collection.validate(), Err(Error::Invalid(_))),
+			"two recorded canvases"
 		);
 	}
 

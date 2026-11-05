@@ -696,8 +696,44 @@ impl Draft {
 		})
 	}
 
+	/// Unlink the further canvas called `name`, to take its preview to program
+	/// by `transition` on its own, or link it back to the main canvas with
+	/// `None`.
+	pub fn set_extra_transition(&mut self, name: &str, transition: Option<Transition>) -> Result<(), Error> {
+		self.update_extra(name, |extra| extra.transition = transition)
+	}
+
+	/// Have recordings hold the further canvas `canvas`, or the main one for
+	/// `None`.
+	pub fn set_recorded(&mut self, canvas: Option<&str>) -> Result<(), Error> {
+		if let Some(name) = canvas
+			&& !self.collection.canvases.contains_key(name)
+		{
+			return Err(conflict(format!("there is no canvas `{name}`")));
+		}
+		let names: Vec<String> = self.collection.canvases.keys().cloned().collect();
+		for name in names {
+			let recorded = canvas == Some(name.as_str());
+			self.update_extra(&name, |extra| extra.recorded = recorded)?;
+		}
+		Ok(())
+	}
+
+	/// Change the further canvas called `name` by `update`.
+	fn update_extra(&mut self, name: &str, update: impl FnOnce(&mut Extra)) -> Result<(), Error> {
+		let before = self.collection.canvases.get(name).cloned();
+		let before = before.ok_or_else(|| conflict(format!("there is no canvas `{name}`")))?;
+		let mut after = before.clone();
+		update(&mut after);
+		self.change(Change::Extra {
+			name: name.to_string(),
+			before: Some(before),
+			after: Some(after),
+		})
+	}
+
 	/// Remove the further canvas called `name`, with its top layer and every
-	/// scene's layout on it.
+	/// scene's layout on it. Recordings holding it go back to the main canvas.
 	pub fn remove_extra(&mut self, name: &str) -> Result<(), Error> {
 		let laid: Vec<(usize, Scene)> = self
 			.collection
@@ -1436,6 +1472,37 @@ mod tests {
 		history.undo(&mut collection).unwrap();
 		history.undo(&mut collection).unwrap();
 		assert_eq!(collection, start);
+	}
+
+	/// Recording a canvas moves the pick off any other in one edit, removing
+	/// the recorded canvas sends recordings back to the main one, and either
+	/// undoes whole.
+	#[test]
+	fn the_recorded_canvas_moves_and_falls_back() {
+		let mut collection = collection();
+		collection.canvases.insert("tall".into(), Extra::new(1080, 1920));
+		collection.canvases.insert("wide".into(), Extra::new(2560, 1080));
+		let mut history = History::new();
+		let record = |collection: &mut Collection, history: &mut History, canvas: Option<&str>| {
+			let mut draft = collection.draft("Record");
+			draft.set_recorded(canvas).unwrap();
+			commit(collection, history, draft, None);
+		};
+
+		record(&mut collection, &mut history, Some("tall"));
+		assert_eq!(collection.recorded(), Some("tall"));
+		record(&mut collection, &mut history, Some("wide"));
+		assert_eq!(collection.recorded(), Some("wide"));
+		let mut draft = collection.draft("Remove wide");
+		draft.remove_extra("wide").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.recorded(), None);
+		assert!(collection.draft("Record").set_recorded(Some("wide")).is_err());
+
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection.recorded(), Some("wide"));
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection.recorded(), Some("tall"));
 	}
 
 	/// A renamed mix keeps its place, the program's and recordings' picks, and

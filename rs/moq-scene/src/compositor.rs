@@ -29,19 +29,20 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// memory. [`render`](Self::render) redraws them from the newest picture each
 /// source has, so a source that stalls repeats its last picture rather than
 /// holding up the canvas. Each source's picture is uploaded once however many
-/// canvases show it, and a canvas draws only the items it places.
+/// canvases show it, and a canvas draws only the items it places. Only the
+/// canvases [`set_previewed`](Self::set_previewed) names draw a preview, so
+/// one nobody looks at costs only its program.
 ///
 /// Pixels are blended in the gamma-encoded space sources arrive in, as a
 /// broadcast switcher and CSS do, so a 50% fade is a 50% mix of the stored
 /// values.
 ///
-/// The canvases are linked: one scene is in preview and one on program on
-/// every canvas, and a transition and each item's keyframes run on each at
-/// once, on the clock [`render`](Self::render) is given, so every output drawn
-/// from a program, such as the encoder and a recording, sees the same frame of
-/// them. An item's keyframes start when its scene goes on program, and
-/// separately when it goes into preview, for the preview, on every canvas
-/// alike.
+/// Each canvas switches scenes by a [`Switcher`]: the main canvas's, which a
+/// further canvas shares while linked, or one of its own once the collection
+/// unlinks it. Every switcher runs on the clock [`render`](Self::render) is
+/// given, so every output drawn from a program, such as the encoder and a
+/// recording, sees the same frame of its transition and keyframes, and linked
+/// canvases switch, transition, and play keyframes as one.
 pub struct Compositor {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
@@ -53,17 +54,8 @@ pub struct Compositor {
 	layers: HashMap<String, Layer>,
 	/// Lays out and paints overlays, started with the first one.
 	overlays: Option<Overlays>,
-	preview_scene: Option<String>,
-	program_scene: Option<String>,
-	/// When the preview scene went into preview, or `None` until the next
-	/// render, which starts it.
-	preview_start: Option<Instant>,
-	/// When the program scene went on program, as `preview_start` is.
-	program_start: Option<Instant>,
-	/// How long the preview scene had been in preview as of the last render:
-	/// the moment of its keyframes every canvas's preview texture shows.
-	preview_shown: Duration,
-	switch: Option<Switch>,
+	/// The main canvas's, which every linked canvas shares.
+	switcher: Switcher,
 }
 
 /// One canvas's preview and program, as of the last
@@ -77,6 +69,12 @@ pub struct Output {
 	incoming: Target,
 	/// The scene going out, drawn whole to slide it off the canvas.
 	outgoing: Target,
+	/// An unlinked canvas's own switcher; `None` while linked.
+	own: Option<Switcher>,
+	/// Whether the next render draws the preview.
+	previewing: bool,
+	/// Whether the last render drew it.
+	previewed: bool,
 }
 
 impl Output {
@@ -88,6 +86,9 @@ impl Output {
 			program: target("moq-scene program"),
 			incoming: target("moq-scene incoming"),
 			outgoing: target("moq-scene outgoing"),
+			own: None,
+			previewing: false,
+			previewed: false,
 		}
 	}
 
@@ -96,9 +97,17 @@ impl Output {
 		self.canvas
 	}
 
-	/// The scene in preview.
+	/// The scene in preview, current only while
+	/// [`previewed`](Self::previewed).
 	pub fn preview(&self) -> &wgpu::Texture {
 		&self.preview.texture
+	}
+
+	/// Whether the last render drew the preview, as
+	/// [`Compositor::set_previewed`] asks; otherwise it holds an older picture,
+	/// or none.
+	pub fn previewed(&self) -> bool {
+		self.previewed
 	}
 
 	/// The program. Created with `COPY_SRC | TEXTURE_BINDING`, what
@@ -109,13 +118,134 @@ impl Output {
 	}
 }
 
+/// Which scene a canvas has in preview and which on program, and the
+/// transition from one to the other: the main canvas's, which each linked
+/// canvas shares, or an unlinked canvas's own.
+///
+/// An item's keyframes start when its scene goes on program, and separately
+/// when it goes into preview, for the preview.
+#[derive(Clone, Default)]
+pub struct Switcher {
+	preview_scene: Option<String>,
+	program_scene: Option<String>,
+	/// When the preview scene went into preview, or `None` until the next
+	/// render, which starts it.
+	preview_start: Option<Instant>,
+	/// When the program scene went on program, as `preview_start` is.
+	program_start: Option<Instant>,
+	/// How long the preview scene had been in preview as of the last render:
+	/// the moment of its keyframes the preview shows.
+	preview_shown: Duration,
+	switch: Option<Switch>,
+}
+
+impl Switcher {
+	/// The scene in preview.
+	pub fn preview_scene(&self) -> Option<&str> {
+		self.preview_scene.as_deref()
+	}
+
+	/// The scene on program, or the one a transition brings in.
+	pub fn program_scene(&self) -> Option<&str> {
+		self.program_scene.as_deref()
+	}
+
+	/// Whether a transition is under way.
+	pub fn transitioning(&self) -> bool {
+		self.switch.is_some()
+	}
+
+	/// The scenes program draws: the one on program, and the one a transition
+	/// under way leaves.
+	pub fn on_air(&self) -> impl Iterator<Item = &str> {
+		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
+		self.program_scene.as_deref().into_iter().chain(leaving)
+	}
+
+	/// Put the scene called `scene` in preview, or nothing, playing its
+	/// keyframes from the start, even if it was already there.
+	pub fn set_preview(&mut self, scene: Option<String>) {
+		self.preview_scene = scene;
+		self.preview_start = None;
+	}
+
+	/// How long the preview scene had been in preview as of the last
+	/// [`render`](Compositor::render): the moment of its items' keyframes the
+	/// preview shows, for [`Item::posed`].
+	pub fn preview_since(&self) -> Duration {
+		self.preview_shown
+	}
+
+	/// Put the preview on program at once, ending any transition.
+	pub fn cut(&mut self) {
+		self.switch = None;
+		self.program_scene = self.preview_scene.clone();
+		self.program_start = None;
+	}
+
+	/// Take the preview to program by `transition`, starting at `now`.
+	///
+	/// A transition already under way lands on its scene first, so this one
+	/// starts from what that one was heading to.
+	pub fn transition(&mut self, transition: Transition, now: Instant) {
+		let from = std::mem::replace(&mut self.program_scene, self.preview_scene.clone());
+		let from_start = self.program_start.replace(now).unwrap_or(now);
+		self.switch = (!transition.duration().is_zero()).then_some(Switch {
+			from,
+			from_start,
+			start: now,
+			transition,
+		});
+	}
+
+	/// The scenes followed by name: in preview, on program, and leaving.
+	fn scenes(&mut self) -> impl Iterator<Item = &mut Option<String>> {
+		let leaving = self.switch.as_mut().map(|switch| &mut switch.from);
+		[&mut self.preview_scene, &mut self.program_scene]
+			.into_iter()
+			.chain(leaving)
+	}
+
+	/// Start the scenes that went on since the last render at `now`, and land
+	/// a transition that has run its course.
+	fn advance(&mut self, now: Instant) {
+		self.preview_shown = now.saturating_duration_since(*self.preview_start.get_or_insert(now));
+		self.program_start.get_or_insert(now);
+		if self.switch.as_ref().is_some_and(|switch| switch.linear(now) >= 1.0) {
+			self.switch = None;
+		}
+	}
+
+	/// What to draw at `now`, once [`advance`](Self::advance)d to it.
+	fn shot(&self, now: Instant) -> Shot<'_> {
+		let program = self.program_start.unwrap_or(now);
+		Shot {
+			preview: On(self.preview_scene.as_deref(), self.preview_shown),
+			program: On(self.program_scene.as_deref(), now.saturating_duration_since(program)),
+			switch: self.switch.as_ref().map(|switch| {
+				let from = On(switch.from.as_deref(), now.saturating_duration_since(switch.from_start));
+				(switch, from, switch.linear(now))
+			}),
+		}
+	}
+}
+
 /// A transition under way from `from` to the program scene.
+#[derive(Clone)]
 struct Switch {
 	from: Option<String>,
 	/// When `from` went on program.
 	from_start: Instant,
 	start: Instant,
 	transition: Transition,
+}
+
+impl Switch {
+	/// How far along it is at `now`, from 0 to 1, before easing.
+	fn linear(&self, now: Instant) -> f32 {
+		let elapsed = now.saturating_duration_since(self.start);
+		(elapsed.as_secs_f32() / self.transition.duration().as_secs_f32()).min(1.0)
+	}
 }
 
 /// A canvas-sized texture drawn into, and bound to sample.
@@ -155,8 +285,9 @@ impl effect::Library for Library<'_> {
 }
 
 impl Compositor {
-	/// A compositor drawing a main canvas of `canvas` on `device`, and no
-	/// further canvas until [`set_canvases`](Self::set_canvases) adds one.
+	/// A compositor drawing a main canvas of `canvas` on `device`, its preview
+	/// included, and no further canvas until
+	/// [`set_canvases`](Self::set_canvases) adds one.
 	///
 	/// Fails if the canvas is invalid or the device cannot hold a texture that
 	/// large.
@@ -164,20 +295,17 @@ impl Compositor {
 		fits(device, canvas)?;
 
 		let effects = Effects::new(device, queue, canvas.width, canvas.height);
+		let mut main = Output::new(device, &effects, canvas);
+		main.previewing = true;
 		Ok(Self {
-			main: Output::new(device, &effects, canvas),
+			main,
 			extras: BTreeMap::new(),
 			device: device.clone(),
 			queue: queue.clone(),
 			effects,
 			layers: HashMap::new(),
 			overlays: None,
-			preview_scene: None,
-			program_scene: None,
-			preview_start: None,
-			program_start: None,
-			preview_shown: Duration::ZERO,
-			switch: None,
+			switcher: Switcher::default(),
 		})
 	}
 
@@ -192,46 +320,80 @@ impl Compositor {
 	/// and one `collection` no longer has is dropped. A transition under way
 	/// carries on.
 	///
+	/// A canvas `collection` unlinks takes a switcher of its own, starting from
+	/// where the main canvas's is, so it goes on showing what it showed, and
+	/// one linked again takes the main canvas's scenes at once.
+	///
 	/// Fails, changing nothing, if a canvas is invalid or the device cannot
 	/// hold a texture that large.
 	pub fn set_canvases(&mut self, collection: &Collection) -> Result<(), Error> {
 		let canvas = collection.canvas;
-		let extras: BTreeMap<&str, Canvas> = collection
+		let extras: BTreeMap<&str, (Canvas, bool)> = collection
 			.canvases
 			.iter()
-			.map(|(name, extra)| (name.as_str(), extra.canvas(canvas.framerate)))
+			.map(|(name, extra)| {
+				let linked = extra.transition.is_none();
+				(name.as_str(), (extra.canvas(canvas.framerate), linked))
+			})
 			.collect();
-		for canvas in std::iter::once(&canvas).chain(extras.values()) {
+		for canvas in std::iter::once(&canvas).chain(extras.values().map(|(canvas, _)| canvas)) {
 			fits(&self.device, *canvas)?;
 		}
 
-		let width = extras.values().map(|extra| extra.width).fold(canvas.width, u32::max);
-		let height = extras.values().map(|extra| extra.height).fold(canvas.height, u32::max);
+		let width = extras
+			.values()
+			.map(|(extra, _)| extra.width)
+			.fold(canvas.width, u32::max);
+		let height = extras
+			.values()
+			.map(|(extra, _)| extra.height)
+			.fold(canvas.height, u32::max);
 		self.effects.fit(width, height);
 		let (device, effects) = (&self.device, &self.effects);
 		let resize = |output: &mut Output, canvas: Canvas| {
 			if output.canvas.size() == canvas.size() {
 				output.canvas = canvas;
 			} else {
-				*output = Output::new(device, effects, canvas);
+				let resized = Output::new(device, effects, canvas);
+				let Output { own, previewing, .. } = std::mem::replace(output, resized);
+				output.own = own;
+				output.previewing = previewing;
 			}
 		};
 		resize(&mut self.main, canvas);
 		self.extras.retain(|name, _| extras.contains_key(name.as_str()));
-		for (name, canvas) in extras {
-			match self.extras.get_mut(name) {
-				Some(output) => resize(output, canvas),
-				None => {
-					self.extras
-						.insert(name.to_string(), Output::new(device, effects, canvas));
+		for (name, (canvas, linked)) in extras {
+			let output = match self.extras.get_mut(name) {
+				Some(output) => {
+					resize(output, canvas);
+					output
 				}
+				None => self
+					.extras
+					.entry(name.to_string())
+					.or_insert_with(|| Output::new(device, effects, canvas)),
+			};
+			if linked {
+				output.own = None;
+			} else if output.own.is_none() {
+				output.own = Some(self.switcher.clone());
 			}
 		}
 		Ok(())
 	}
 
-	/// The scene in preview on the main canvas, as of the last
-	/// [`render`](Self::render).
+	/// Draw the preview only of `canvases`, each a further one by name or the
+	/// main one as `None`, from the next [`render`](Self::render) on; every
+	/// other canvas draws its program alone. A new compositor previews its
+	/// main canvas.
+	pub fn set_previewed(&mut self, canvases: &[Option<&str>]) {
+		for (name, output) in self.outputs_mut() {
+			output.previewing = canvases.contains(&name);
+		}
+	}
+
+	/// The main canvas's preview, as of the last [`render`](Self::render). See
+	/// [`Output::preview`].
 	pub fn preview(&self) -> &wgpu::Texture {
 		self.main.preview()
 	}
@@ -257,14 +419,39 @@ impl Compositor {
 		std::iter::once((None, &self.main)).chain(extras)
 	}
 
-	/// The scene in preview.
-	pub fn preview_scene(&self) -> Option<&str> {
-		self.preview_scene.as_deref()
+	fn outputs_mut(&mut self) -> impl Iterator<Item = (Option<&str>, &mut Output)> {
+		let extras = self
+			.extras
+			.iter_mut()
+			.map(|(name, output)| (Some(name.as_str()), output));
+		std::iter::once((None, &mut self.main)).chain(extras)
 	}
 
-	/// The scene on program, or the one a transition brings in.
-	pub fn program_scene(&self) -> Option<&str> {
-		self.program_scene.as_deref()
+	/// What switches the scenes of `canvas`, a further one by name or the main
+	/// one for `None`: its own once unlinked, otherwise the main canvas's,
+	/// which a canvas it does not draw gets too.
+	pub fn switcher(&self, canvas: Option<&str>) -> &Switcher {
+		let own = canvas.and_then(|name| self.extras.get(name)?.own.as_ref());
+		own.unwrap_or(&self.switcher)
+	}
+
+	/// [`switcher`](Self::switcher), to switch with.
+	pub fn switcher_mut(&mut self, canvas: Option<&str>) -> &mut Switcher {
+		let own = canvas.and_then(|name| self.extras.get_mut(name)?.own.as_mut());
+		own.unwrap_or(&mut self.switcher)
+	}
+
+	/// Every switcher: the main canvas's, then each unlinked canvas's.
+	fn switchers_mut(&mut self) -> impl Iterator<Item = &mut Switcher> {
+		let own = self.extras.values_mut().filter_map(|output| output.own.as_mut());
+		std::iter::once(&mut self.switcher).chain(own)
+	}
+
+	/// The scenes any canvas's program draws, as [`Switcher::on_air`] has
+	/// them, a scene once for each switcher drawing it.
+	pub fn on_air(&self) -> impl Iterator<Item = &str> {
+		let own = self.extras.values().filter_map(|output| output.own.as_ref());
+		std::iter::once(&self.switcher).chain(own).flat_map(Switcher::on_air)
 	}
 
 	/// Why `source`'s newest picture could not be drawn, until one is.
@@ -272,41 +459,15 @@ impl Compositor {
 		self.layers.get(source)?.error.as_deref()
 	}
 
-	/// Whether a transition is under way.
-	pub fn transitioning(&self) -> bool {
-		self.switch.is_some()
-	}
-
-	/// The scenes program draws: the one on program, and the one a transition
-	/// under way leaves.
-	pub fn on_air(&self) -> impl Iterator<Item = &str> {
-		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
-		self.program_scene.as_deref().into_iter().chain(leaving)
-	}
-
-	/// Put the scene called `scene` in preview, or nothing, playing its
-	/// keyframes from the start, even if it was already there.
-	pub fn set_preview(&mut self, scene: Option<String>) {
-		self.preview_scene = scene;
-		self.preview_start = None;
-	}
-
-	/// How long the preview scene had been in preview as of the last
-	/// [`render`](Self::render): the moment of its items' keyframes every
-	/// canvas's preview shows, since the canvases are linked, for
-	/// [`Item::posed`].
-	pub fn preview_since(&self) -> Duration {
-		self.preview_shown
-	}
-
-	/// Follow each renamed scene to its new name, wherever it is: in preview,
-	/// on program, or leaving in a transition, and drop each removed one, so a
-	/// scene that later takes its name does not go on program without a cut.
-	/// `renames` maps each old name to its new one, or `None`, as
-	/// [`Collection::renames`] reads them, and each scene is looked up once, so
-	/// a name one scene gave up and another took is not followed twice.
+	/// Follow each renamed scene to its new name, wherever it is on any
+	/// canvas: in preview, on program, or leaving in a transition, and drop
+	/// each removed one, so a scene that later takes its name does not go on
+	/// program without a cut. `renames` maps each old name to its new one, or
+	/// `None`, as [`Collection::renames`] reads them, and each scene is looked
+	/// up once, so a name one scene gave up and another took is not followed
+	/// twice.
 	pub fn rename(&mut self, renames: &BTreeMap<String, Option<String>>) {
-		for scene in self.scenes() {
+		for scene in self.switchers_mut().flat_map(Switcher::scenes) {
 			if let Some(to) = scene.as_ref().and_then(|name| renames.get(name)) {
 				*scene = to.clone();
 			}
@@ -314,48 +475,20 @@ impl Compositor {
 	}
 
 	/// Drop each scene `collection` does not have from preview, program, and a
-	/// transition under way, such as one a reloaded file left out, so a scene
-	/// that later takes its name does not go on program without a cut.
+	/// transition under way on any canvas, such as one a reloaded file left
+	/// out, so a scene that later takes its name does not go on program
+	/// without a cut.
 	pub fn retain(&mut self, collection: &Collection) {
-		for scene in self.scenes() {
+		for scene in self.switchers_mut().flat_map(Switcher::scenes) {
 			if scene.as_deref().is_some_and(|name| collection.scene(name).is_none()) {
 				*scene = None;
 			}
 		}
 	}
 
-	/// The scenes followed by name: in preview, on program, and leaving.
-	fn scenes(&mut self) -> impl Iterator<Item = &mut Option<String>> {
-		let leaving = self.switch.as_mut().map(|switch| &mut switch.from);
-		[&mut self.preview_scene, &mut self.program_scene]
-			.into_iter()
-			.chain(leaving)
-	}
-
-	/// Put the preview on program at once, ending any transition.
-	pub fn cut(&mut self) {
-		self.switch = None;
-		self.program_scene = self.preview_scene.clone();
-		self.program_start = None;
-	}
-
-	/// Take the preview to program by `transition`, starting at `now`.
-	///
-	/// A transition already under way lands on its scene first, so this one
-	/// starts from what that one was heading to.
-	pub fn transition(&mut self, transition: Transition, now: Instant) {
-		let from = std::mem::replace(&mut self.program_scene, self.preview_scene.clone());
-		let from_start = self.program_start.replace(now).unwrap_or(now);
-		self.switch = (!transition.duration().is_zero()).then_some(Switch {
-			from,
-			from_start,
-			start: now,
-			transition,
-		});
-	}
-
-	/// Draw preview and program on every canvas as of `now`, from the newest
-	/// picture each of `sources` has.
+	/// Draw every canvas as of `now`, from the newest picture each of
+	/// `sources` has: its program, and its preview if
+	/// [`set_previewed`](Self::set_previewed) asked for it.
 	///
 	/// A source whose picture fails to draw keeps its last one and reports why
 	/// through [`error`](Self::error); this fails only when a canvas itself
@@ -363,18 +496,8 @@ impl Compositor {
 	pub fn render(&mut self, collection: &Collection, sources: &Sources, now: Instant) -> Result<(), Error> {
 		self.update(collection, sources, now);
 		self.paint(collection, now);
-
-		let since = |start: &mut Option<Instant>| now.saturating_duration_since(*start.get_or_insert(now));
-		let preview_since = since(&mut self.preview_start);
-		self.preview_shown = preview_since;
-		let program_since = since(&mut self.program_start);
-
-		let linear = self.switch.as_ref().map(|switch| {
-			let elapsed = now.saturating_duration_since(switch.start);
-			(elapsed.as_secs_f32() / switch.transition.duration().as_secs_f32()).min(1.0)
-		});
-		if linear.is_some_and(|linear| linear >= 1.0) {
-			self.switch = None;
+		for switcher in self.switchers_mut() {
+			switcher.advance(now);
 		}
 
 		let mut frame = self.effects.frame();
@@ -387,20 +510,19 @@ impl Compositor {
 			size: self.main.canvas,
 			prepared: HashMap::new(),
 		};
-		let preview = On(self.preview_scene.as_deref(), preview_since);
-		let program = On(self.program_scene.as_deref(), program_since);
-		let switch = self.switch.as_ref().zip(linear).map(|(switch, linear)| {
-			let from = On(switch.from.as_deref(), now.saturating_duration_since(switch.from_start));
-			(switch, from, linear)
-		});
+		let main = self.switcher.shot(now);
 		let extras = self.extras.iter().map(|(name, output)| (Some(name.as_str()), output));
 		for (canvas, output) in std::iter::once((None, &self.main)).chain(extras) {
 			draw.canvas = canvas;
 			draw.size = output.canvas;
-			draw.output(output, preview, program, switch);
+			let shot = output.own.as_ref().map_or(main, |own| own.shot(now));
+			draw.output(output, shot);
 		}
 
 		self.effects.submit(frame);
+		for (_, output) in self.outputs_mut() {
+			output.previewed = output.previewing;
+		}
 		Ok(())
 	}
 
@@ -527,23 +649,19 @@ impl Compositor {
 		}
 	}
 
-	/// The sources whose pictures preview and program draw on any canvas:
-	/// each visible item's, and each mask's, through clones.
+	/// The sources whose pictures the next render draws on any canvas: each
+	/// visible item's, and each mask's, through clones, of the scenes on its
+	/// program and, while previewed, in its preview, and of its top layer.
 	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
-		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
-		let scenes: Vec<Option<String>> = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving]
-			.into_iter()
-			.flatten()
-			.map(|name| Some(name.to_string()))
-			.chain([None])
-			.collect();
-		let canvases = std::iter::once(None).chain(self.extras.keys().map(Some));
 		let mut shown = HashSet::new();
-		for canvas in canvases {
-			for scene in &scenes {
+		for (canvas, output) in self.outputs() {
+			let switcher = output.own.as_ref().unwrap_or(&self.switcher);
+			let preview = switcher.preview_scene().filter(|_| output.previewing);
+			let scenes = preview.into_iter().chain(switcher.on_air()).map(Some).chain([None]);
+			for scene in scenes {
 				let place = Place {
-					canvas: canvas.cloned(),
-					scene: scene.clone(),
+					canvas: canvas.map(str::to_string),
+					scene: scene.map(str::to_string),
 				};
 				let items = collection.items(&place).unwrap_or_default();
 				for item in items.iter().filter(|item| item.visible) {
@@ -681,6 +799,16 @@ fn fits(device: &wgpu::Device, canvas: Canvas) -> Result<(), Error> {
 #[derive(Clone, Copy)]
 struct On<'a>(Option<&'a str>, Duration);
 
+/// What one canvas draws at a moment, as its [`Switcher`] has it.
+#[derive(Clone, Copy)]
+struct Shot<'a> {
+	preview: On<'a>,
+	program: On<'a>,
+	/// A transition under way, the scene it leaves, and how far along it is
+	/// before easing.
+	switch: Option<(&'a Switch, On<'a>, f32)>,
+}
+
 /// One render's draws onto its targets.
 struct Draw<'a> {
 	collection: &'a Collection,
@@ -698,19 +826,20 @@ struct Draw<'a> {
 }
 
 impl Draw<'_> {
-	/// Draw `output`'s preview, showing `preview`, and its program, showing
-	/// `program`, or `switch` to it from the scene it leaves, `linear` of its
-	/// time along.
-	fn output(&mut self, output: &Output, preview: On, program: On, switch: Option<(&Switch, On, f32)>) {
+	/// Draw `output`'s program as `shot` has it, and its preview while
+	/// previewing.
+	fn output(&mut self, output: &Output, shot: Shot) {
 		let top = self.place(None);
 		// The top layer goes over both outputs, and over a transition rather
 		// than through it, so it stays on across the switch.
-		self.target(&output.preview);
-		self.scene(&output.preview, preview);
-		self.layer(&output.preview, top.clone(), Duration::ZERO);
+		if output.previewing {
+			self.target(&output.preview);
+			self.scene(&output.preview, shot.preview);
+			self.layer(&output.preview, top.clone(), Duration::ZERO);
+		}
 
-		let to = program;
-		match switch {
+		let to = shot.program;
+		match shot.switch {
 			Some((switch, from, linear)) => {
 				let progress = switch.transition.progress(linear);
 				let canvas = Rect::fill(&self.size);
@@ -1181,8 +1310,8 @@ mod tests {
 	async fn items_draw_in_place_and_in_order() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(Instant::now());
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 1), RED);
@@ -1211,8 +1340,8 @@ mod tests {
 			);
 			collection.scenes[0].items.truncate(1);
 			let mut studio = Studio::new(collection).await;
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(Instant::now());
 			let actual = pixel(&studio.program(), 1, 1);
 			assert!(near(actual, [128, 0, 0, 255]), "{actual:?}");
@@ -1228,14 +1357,14 @@ mod tests {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
 			let start = Instant::now();
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
-			assert_eq!(studio.compositor.program_scene(), Some("blue"));
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).transition(FADE, start);
+			assert_eq!(studio.compositor.switcher(None).program_scene(), Some("blue"));
 
 			studio.render(start + Duration::from_millis(500));
-			assert!(studio.compositor.transitioning());
+			assert!(studio.compositor.switcher(None).transitioning());
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "{actual:?}");
@@ -1243,7 +1372,7 @@ mod tests {
 			assert_eq!(pixel(&studio.preview(), 1, 1), BLUE);
 
 			studio.render(start + Duration::from_secs(1));
-			assert!(!studio.compositor.transitioning());
+			assert!(!studio.compositor.switcher(None).transitioning());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
 		})
 		.await;
@@ -1281,8 +1410,8 @@ mod tests {
 			collection.validate().unwrap();
 
 			let mut studio = Studio::new(collection).await;
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(Instant::now());
 			let program = studio.program();
 			let actual = pixel(&program, 1, 6);
@@ -1302,13 +1431,13 @@ mod tests {
 			collection.top.push(Item::new("blue", CORNER));
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 1, 6), BLUE);
 
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).transition(FADE, start);
 			studio.render(start + Duration::from_millis(500));
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
@@ -1355,15 +1484,15 @@ mod tests {
 			};
 
 			let start = Instant::now();
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
 			assert_eq!(tall(&mut studio), (BLUE, RED));
 			assert_eq!(studio.compositor.layers.len(), 2, "each source is uploaded once");
 
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).transition(FADE, start);
 			studio.render(start + Duration::from_millis(500));
 			let (fading, kept) = tall(&mut studio);
 			assert!(near(fading, [0, 0, 128, 255]), "{fading:?}");
@@ -1382,6 +1511,121 @@ mod tests {
 		.await;
 	}
 
+	/// The 8x8 collection with a 4x8 canvas `tall` that each scene fills with
+	/// its own source, unlinked by `transition` unless `None`.
+	fn tall(transition: Option<Transition>) -> Collection {
+		let mut collection = collection();
+		collection.canvases.insert(
+			"tall".into(),
+			Extra {
+				transition,
+				..Extra::new(4, 8)
+			},
+		);
+		let fill = Rect {
+			x: 0.0,
+			y: 0.0,
+			width: 4.0,
+			height: 8.0,
+		};
+		for scene in &mut collection.scenes {
+			let source = scene.name.clone();
+			scene.canvases.insert("tall".into(), vec![Item::new(source, fill)]);
+		}
+		collection.validate().unwrap();
+		collection
+	}
+
+	impl Studio {
+		/// A pixel of the 4x8 canvas `tall`'s program, or of its preview.
+		fn tall(&mut self, preview: bool) -> [u8; 4] {
+			let output = self.compositor.output(Some("tall")).unwrap();
+			let texture = if preview { output.preview() } else { output.program() }.clone();
+			self.read(&texture)[(4 + 1) * 4..][..4].try_into().unwrap()
+		}
+	}
+
+	/// An unlinked canvas starts from what the main canvas shows, then cuts
+	/// and fades on its own while the main canvas switches without it, and
+	/// linked again it takes the main canvas's program at once.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn an_unlinked_canvas_switches_on_its_own() {
+		local(async {
+			let mut studio = Studio::new(tall(Some(FADE))).await;
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.compositor.set_canvases(&studio.collection).unwrap();
+			let start = Instant::now();
+			studio.render(start);
+			assert_eq!(studio.tall(false), RED);
+
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.render(start + Duration::from_millis(100));
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+			assert_eq!(studio.tall(false), RED, "the main canvas's cut leaves it be");
+			assert_eq!(studio.compositor.switcher(Some("tall")).program_scene(), Some("red"));
+
+			let tall = studio.compositor.switcher_mut(Some("tall"));
+			tall.set_preview(Some("blue".into()));
+			tall.transition(FADE, start + Duration::from_millis(100));
+			studio.render(start + Duration::from_millis(600));
+			assert!(near(studio.tall(false), [128, 0, 128, 255]), "{:?}", studio.tall(false));
+			assert!(!studio.compositor.switcher(None).transitioning());
+			let on_air: HashSet<&str> = studio.compositor.on_air().collect();
+			assert_eq!(
+				on_air,
+				HashSet::from(["red", "blue"]),
+				"the scene it fades from is on air"
+			);
+
+			studio
+				.compositor
+				.switcher_mut(Some("tall"))
+				.set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(Some("tall")).cut();
+			studio.render(start + Duration::from_millis(700));
+			assert_eq!(studio.tall(false), RED);
+			studio.collection.canvases.get_mut("tall").unwrap().transition = None;
+			studio.compositor.set_canvases(&studio.collection).unwrap();
+			studio.render(start + Duration::from_millis(800));
+			assert_eq!(
+				studio.tall(false),
+				BLUE,
+				"linked again, it shows the main canvas's program"
+			);
+			assert_eq!(studio.compositor.switcher(Some("tall")).preview_scene(), Some("blue"));
+		})
+		.await;
+	}
+
+	/// Only the canvases asked for draw a preview, and each says whether its
+	/// preview is current.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn only_a_previewed_canvas_draws_its_preview() {
+		local(async {
+			let mut studio = Studio::new(tall(None)).await;
+			studio.compositor.set_canvases(&studio.collection).unwrap();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			let start = Instant::now();
+			studio.render(start);
+			let previewed = |studio: &Studio, canvas| studio.compositor.output(canvas).unwrap().previewed();
+			assert!(previewed(&studio, None) && !previewed(&studio, Some("tall")));
+			assert_eq!(pixel(&studio.preview(), 1, 1), RED);
+			assert_eq!(studio.tall(true), [0; 4], "never drawn");
+
+			studio.compositor.set_previewed(&[Some("tall")]);
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.render(start + Duration::from_millis(100));
+			assert!(!previewed(&studio, None) && previewed(&studio, Some("tall")));
+			assert_eq!(studio.tall(true), BLUE);
+			assert_eq!(pixel(&studio.preview(), 1, 1), RED, "left as last drawn");
+		})
+		.await;
+	}
+
 	/// A cut lands at once, even mid-fade, and an empty program is black.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
@@ -1392,12 +1636,12 @@ mod tests {
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
 
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).transition(FADE, start);
 			studio.render(start + Duration::from_millis(500));
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
-			assert!(!studio.compositor.transitioning());
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
+			assert!(!studio.compositor.switcher(None).transitioning());
 			studio.render(start + Duration::from_millis(600));
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
 		})
@@ -1454,10 +1698,10 @@ mod tests {
 				),
 			] {
 				let start = Instant::now();
-				studio.compositor.set_preview(Some("red".into()));
-				studio.compositor.cut();
-				studio.compositor.set_preview(Some("blue".into()));
-				studio.compositor.transition(transition, start);
+				studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+				studio.compositor.switcher_mut(None).cut();
+				studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+				studio.compositor.switcher_mut(None).transition(transition, start);
 				studio.render(start + Duration::from_millis(500));
 				let program = studio.program();
 				let actual = [(1, 1), (1, 6), (6, 1), (6, 6)].map(|(x, y)| pixel(&program, x, y));
@@ -1502,11 +1746,14 @@ mod tests {
 			collection.scenes[1].items = vec![Item::new("blue", CORNER), Item::new("green", tile)];
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
-			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
 			let duration = Duration::from_secs(1);
-			studio.compositor.transition(Transition::Move { duration }, start);
+			studio
+				.compositor
+				.switcher_mut(None)
+				.transition(Transition::Move { duration }, start);
 
 			// Eased halfway, blue is at (2, 2) and both fades are at half.
 			studio.render(start + Duration::from_millis(500));
@@ -1521,7 +1768,7 @@ mod tests {
 			assert!(near(actual, [64, 128, 0, 255]), "green half over half red: {actual:?}");
 
 			studio.render(start + duration);
-			assert!(!studio.compositor.transitioning());
+			assert!(!studio.compositor.switcher(None).transitioning());
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 6), BLUE);
 			assert_eq!(pixel(&program, 6, 6), BLACK);
@@ -1573,6 +1820,7 @@ mod tests {
 			collection.validate().unwrap();
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_canvases(&studio.collection).unwrap();
+			studio.compositor.set_previewed(&[None, Some("tall")]);
 			let tall = |studio: &mut Studio, preview: bool| {
 				let output = studio.compositor.output(Some("tall")).unwrap();
 				let texture = match preview {
@@ -1585,16 +1833,16 @@ mod tests {
 			};
 			let start = Instant::now();
 			let at = |millis| start + Duration::from_millis(millis);
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
-			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
 
 			studio.render(at(0));
 			studio.render(at(500));
 			assert_eq!(tall(&mut studio, true), (BLUE, BLACK), "halfway in, in preview");
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE, "the main canvas too");
 
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(at(500));
 			assert_eq!(tall(&mut studio, false), (BLACK, BLACK), "on program from the start");
 			assert_eq!(pixel(&studio.program(), 1, 6), BLACK, "the main canvas too");
@@ -1619,15 +1867,15 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			let at = |millis| start + Duration::from_millis(millis);
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
-			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
 
 			studio.render(at(0));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK, "off the canvas");
 			studio.render(at(500));
 			assert_eq!(
-				studio.compositor.preview_since(),
+				studio.compositor.switcher(None).preview_since(),
 				Duration::from_millis(500),
 				"the frame shown"
 			);
@@ -1635,7 +1883,7 @@ mod tests {
 			assert_eq!(pixel(&preview, 1, 6), BLUE, "halfway in");
 			assert_eq!(pixel(&preview, 6, 6), BLACK);
 
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(at(500));
 			assert_eq!(pixel(&studio.program(), 1, 6), BLACK, "on program from the start");
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE, "the preview carries on");
@@ -1649,7 +1897,7 @@ mod tests {
 			assert_eq!(pixel(&studio.program(), 6, 6), BLUE, "holding the last keyframe");
 
 			// Picking the scene again plays it again.
-			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
 			studio.render(at(9000));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK);
 		})
@@ -1673,11 +1921,11 @@ mod tests {
 			];
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(start);
 			// Program has reached the jump; preview starts over before it.
-			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
 			studio.render(start + jump);
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK, "before the jump");
 			assert_eq!(pixel(&studio.program(), 1, 6), BLUE, "after the jump");
@@ -1697,12 +1945,12 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			let at = |millis| start + Duration::from_millis(millis);
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
-			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
 			studio.render(at(0));
 
-			studio.compositor.transition(FADE, at(9000));
+			studio.compositor.switcher_mut(None).transition(FADE, at(9000));
 			studio.render(at(9500));
 			let program = studio.program();
 			// Red has slid halfway in over the left half, blue is in place, and
@@ -1732,11 +1980,14 @@ mod tests {
 			collection.scenes[1].items = vec![invert(1.0), Item::new("red", CORNER)];
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
-			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
 			let duration = Duration::from_secs(1);
-			studio.compositor.transition(Transition::Move { duration }, start);
+			studio
+				.compositor
+				.switcher_mut(None)
+				.transition(Transition::Move { duration }, start);
 
 			studio.render(start);
 			let program = studio.program();
@@ -1762,8 +2013,8 @@ mod tests {
 	async fn a_stalled_source_repeats_its_last_picture() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(Instant::now());
 			assert!(studio.sources.get("blue").unwrap().take().is_none(), "drawn once");
 			studio.render(Instant::now());
@@ -1821,8 +2072,8 @@ mod tests {
 	/// The program of `collection` with scene "red" cut to it, its files in `dir`.
 	async fn drawn(collection: Collection, dir: tempfile::TempDir) -> Vec<u8> {
 		let mut studio = Studio::with_files(collection, dir).await;
-		studio.compositor.set_preview(Some("red".into()));
-		studio.compositor.cut();
+		studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+		studio.compositor.switcher_mut(None).cut();
 		studio.render(Instant::now());
 		studio.program()
 	}
@@ -2279,8 +2530,8 @@ mod tests {
 				},
 			);
 			let mut studio = Studio::new(collection).await;
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(Instant::now());
 			let old = studio.compositor.program().clone();
 
@@ -2351,10 +2602,10 @@ mod tests {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
 			let start = Instant::now();
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, start);
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).transition(FADE, start);
 
 			// `blue` takes the name `red` gives up, which is followed once.
 			let mut draft = studio.collection.draft("Rename");
@@ -2363,8 +2614,8 @@ mod tests {
 			let edit = draft.finish().unwrap();
 			studio.compositor.rename(&studio.collection.renames(&edit));
 			studio.collection.apply(&edit).unwrap();
-			assert_eq!(studio.compositor.preview_scene(), Some("red"));
-			assert_eq!(studio.compositor.program_scene(), Some("red"));
+			assert_eq!(studio.compositor.switcher(None).preview_scene(), Some("red"));
+			assert_eq!(studio.compositor.switcher(None).program_scene(), Some("red"));
 			studio.render(start + Duration::from_millis(500));
 			let actual = pixel(&studio.program(), 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "still fading from red: {actual:?}");
@@ -2373,8 +2624,8 @@ mod tests {
 			// dropped, so one that later takes its name is not drawn unasked.
 			studio.collection.scenes.retain(|scene| scene.name != "red");
 			studio.compositor.retain(&studio.collection);
-			assert_eq!(studio.compositor.preview_scene(), None);
-			assert_eq!(studio.compositor.program_scene(), None);
+			assert_eq!(studio.compositor.switcher(None).preview_scene(), None);
+			assert_eq!(studio.compositor.switcher(None).program_scene(), None);
 		})
 		.await;
 	}
@@ -2439,13 +2690,13 @@ mod tests {
 			);
 			collection.scenes[1].items = vec![Item::new("overlay", Rect::fill(&collection.canvas))];
 			let mut studio = Studio::new(collection).await;
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
 			// Opened here, but drawn nowhere until the cut.
 			let start = Instant::now();
 			studio.render(start);
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).cut();
 
 			for (at, expected) in [(500, [128, 0, 128, 255]), (750, [64, 0, 191, 255]), (2000, BLUE)] {
 				studio.render(start + Duration::from_millis(at));
@@ -2486,11 +2737,14 @@ mod tests {
 			collection.scenes[1].items = vec![Item::new("overlay", tile(4.0, 4.0))];
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
-			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
 			let duration = Duration::from_secs(1);
-			studio.compositor.transition(Transition::Move { duration }, start);
+			studio
+				.compositor
+				.switcher_mut(None)
+				.transition(Transition::Move { duration }, start);
 
 			studio.render(start + Duration::from_millis(500));
 			let program = studio.program();
@@ -2525,12 +2779,12 @@ mod tests {
 			let start = Instant::now();
 
 			// Paint the aside overlay, then leave it off air.
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 3, 3), [255, 255, 0, 255]);
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("blue".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(start);
 
 			studio.compositor.overlays.as_ref().unwrap().panic();
@@ -2540,8 +2794,8 @@ mod tests {
 				assert!(err.contains("overlay thread stopped"), "{name}: {err}");
 			}
 
-			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut();
+			studio.compositor.switcher_mut(None).set_preview(Some("red".into()));
+			studio.compositor.switcher_mut(None).cut();
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 3, 3), RED, "no frozen overlay");
 		})
@@ -2602,13 +2856,21 @@ mod bench {
 		collection
 	}
 
-	/// The mean time to draw and finish every canvas once.
-	async fn frame(collection: Collection) -> Duration {
+	/// The mean time to draw and finish every canvas once, with every canvas's
+	/// preview if `previews`, or only the main canvas's.
+	async fn frame(collection: Collection, previews: bool) -> Duration {
 		let mut studio = Studio::new(collection).await;
 		studio.compositor.set_canvases(&studio.collection).unwrap();
+		if previews {
+			let names: Vec<String> = studio.collection.canvases.keys().cloned().collect();
+			let canvases: Vec<Option<&str>> = std::iter::once(None)
+				.chain(names.iter().map(|name| Some(name.as_str())))
+				.collect();
+			studio.compositor.set_previewed(&canvases);
+		}
 		let scene = studio.collection.scenes[0].name.clone();
-		studio.compositor.set_preview(Some(scene));
-		studio.compositor.cut();
+		studio.compositor.switcher_mut(None).set_preview(Some(scene));
+		studio.compositor.switcher_mut(None).cut();
 		let mut total = Duration::ZERO;
 		for frame in 0..FRAMES * 2 {
 			let start = Instant::now();
@@ -2622,18 +2884,24 @@ mod bench {
 	}
 
 	/// Sources against canvases, each further canvas placing every source
-	/// (dense) or two (sparse). A sparse canvas should cost about the same
-	/// however many sources the collection has.
+	/// (dense) or two (sparse), with every canvas's preview drawn or only the
+	/// main one's, as when the studio shows the main canvas. A sparse canvas
+	/// should cost about the same however many sources the collection has,
+	/// and an unseen one only its program.
 	#[tokio::test]
 	#[ignore = "a benchmark; run by hand on a GPU"]
 	async fn sources_against_canvases() {
 		local(async {
-			println!("sources canvases  dense   sparse");
+			println!("sources canvases  dense (all, main)  sparse (all, main)");
 			for sources in [4, 16, 64] {
 				for canvases in [1, 2, 4] {
-					let dense = frame(collection(sources, canvases, sources)).await;
-					let sparse = frame(collection(sources, canvases, 2)).await;
-					println!("{sources:>7} {canvases:>8} {dense:>7.2?} {sparse:>7.2?}");
+					let dense = collection(sources, canvases, sources);
+					let sparse = collection(sources, canvases, 2);
+					let (dense_all, dense_main) = (frame(dense.clone(), true).await, frame(dense, false).await);
+					let (sparse_all, sparse_main) = (frame(sparse.clone(), true).await, frame(sparse, false).await);
+					println!(
+						"{sources:>7} {canvases:>8} {dense_all:>8.2?} {dense_main:>8.2?} {sparse_all:>8.2?} {sparse_main:>8.2?}"
+					);
 				}
 			}
 		})

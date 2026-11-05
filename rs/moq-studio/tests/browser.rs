@@ -86,8 +86,8 @@ impl Studio {
 			tokio::task::spawn_local(driver.run());
 		}
 		let mut compositor = Compositor::new(&device, &queue, collection.canvas).unwrap();
-		compositor.set_preview(Some("Main".into()));
-		compositor.cut();
+		compositor.switcher_mut(None).set_preview(Some("Main".into()));
+		compositor.switcher_mut(None).cut();
 		Self {
 			collection,
 			sources,

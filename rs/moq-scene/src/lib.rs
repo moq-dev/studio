@@ -17,10 +17,12 @@
 //!   compositor and sound goes to a `moq_audio::bus::Bus`, routed into its
 //!   program mix.
 //! - [`Compositor`] draws the scene in preview and the scene on program into
-//!   textures on the caller's `wgpu` device, one pair per canvas from one
-//!   upload of each source's picture, cutting or running a [`Transition`]
-//!   between them on every canvas together, and plays each item's
-//!   [`Keyframe`]s from when its scene went on. `moq_video::render::export` hands the
+//!   textures on the caller's `wgpu` device, one [`Output`] per canvas from
+//!   one upload of each source's picture, its preview only while someone
+//!   looks. A [`Switcher`] cuts or runs a [`Transition`] between them on the
+//!   main canvas and every canvas linked to it together, or on an unlinked
+//!   canvas alone, and plays each item's [`Keyframe`]s from when its scene
+//!   went on. `moq_video::render::export` hands the
 //!   program to an encoder, on the GPU where the platform allows, and a
 //!   [`Scaler`] draws it smaller for a smaller rendition.
 //! - [`publish`] gives each local source its own track, in a broadcast the
@@ -51,7 +53,7 @@ pub use collection::{
 	Audio, Blend, Canvas, Collection, Crop, Direction, Ease, Extra, Filter, Item, Keyframe, Layer, MaskMode, Mixes,
 	Rect, Rgba, Scene, Source, Transition, Video,
 };
-pub use compositor::{Compositor, FORMAT};
+pub use compositor::{Compositor, FORMAT, Output, Switcher};
 pub use edit::{Change, Draft, Edit, History};
 pub use scale::Scaler;
 
