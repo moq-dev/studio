@@ -38,6 +38,7 @@ mod effect;
 mod lut;
 mod media;
 mod overlay;
+mod playout;
 pub mod publish;
 pub mod replay;
 mod scale;

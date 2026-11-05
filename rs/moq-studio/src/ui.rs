@@ -1325,6 +1325,13 @@ impl Panels {
 								status(ui, &track);
 							});
 						}
+						// A broadcast publishes no track either, and shows how far
+						// behind its publisher it plays.
+						None if let Some(delay) = feed.and_then(Feed::delay) => {
+							ui.weak(format!("{} ms behind", delay.as_millis())).on_hover_text(
+								"Plays this far behind what arrives, to ride out the network's jitter; the picture waits for its sound",
+							);
+						}
 						None => match feed.and_then(Feed::page).and_then(|page| page.paint()) {
 							Some(Paint::Gpu) => {
 								ui.weak("GPU").on_hover_text("The page is copied on the GPU");
@@ -1957,6 +1964,7 @@ impl Panels {
 				ui.weak(format!("into {}", recorder.dir().display()));
 			}
 		});
+		self.recorded_mix(ui);
 		for file in status.iter().flat_map(|status| &status.files) {
 			let name = file.path.file_name().unwrap_or_default().to_string_lossy();
 			let size = format!("{:.1} MB", file.written as f64 / 1e6);
@@ -1969,6 +1977,42 @@ impl Panels {
 				}
 			};
 		}
+	}
+
+	/// Pick the mix recordings hold, even while recording, which goes on
+	/// with the new mix from its next block.
+	fn recorded_mix(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let mixes = state.collection().mixes.clone();
+		let on_program = format!("on program ({})", mixes.program);
+		let mut picked = mixes.recording.clone();
+		ui.horizontal(|ui| {
+			ui.label("Mix")
+				.on_hover_text("A mix other than the one on program stays off the relay");
+			egui::ComboBox::from_id_salt("recorded mix")
+				.selected_text(picked.as_deref().unwrap_or(&on_program))
+				.show_ui(ui, |ui| {
+					ui.selectable_value(&mut picked, None, &on_program);
+					for name in &mixes.names {
+						ui.selectable_value(&mut picked, Some(name.clone()), name);
+					}
+				});
+		});
+		if picked == mixes.recording {
+			return;
+		}
+		let label = match &picked {
+			Some(name) => format!("Record mix `{name}`"),
+			None => "Record the mix on program".into(),
+		};
+		let next = moq_scene::Mixes {
+			recording: picked,
+			..mixes
+		};
+		let result = edit(&mut state, label, None, |draft| draft.set_mixes(next));
+		drop(state);
+		self.check(result);
 	}
 
 	fn output(&mut self, ui: &mut Ui) {
