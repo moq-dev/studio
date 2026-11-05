@@ -7,7 +7,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, Collection, Filter, Item, Layer, Mixes, Source, Video, validate_filters, versioned};
+use crate::collection::{
+	Audio, Collection, Filter, Item, Layer, Mixes, Scene, Source, Video, validate_filters, versioned,
+};
 use crate::edit::Draft;
 
 /// What a copy holds: items, or a filter chain.
@@ -114,8 +116,12 @@ impl Clip {
 					},
 					audio: items.audio.clone(),
 					video: items.video.clone(),
-					scenes: Vec::new(),
-					top: items.items.clone(),
+					// In a scene, where keyframes play; pasting into the top
+					// layer checks it holds none.
+					scenes: vec![Scene {
+						items: items.items.clone(),
+						..Scene::new("clip")
+					}],
 					..Collection::new()
 				}
 				.validate()?
@@ -289,9 +295,31 @@ mod tests {
 	fn pastes_linked_within_a_collection() {
 		let collection = collection();
 		let clip = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR));
-		let pasted = paste(&collection, &Layer::Top, &clip.to_toml().unwrap(), DIR);
+		let pasted = paste(&collection, &Layer::top(), &clip.to_toml().unwrap(), DIR);
 		assert_eq!(pasted.sources, collection.sources, "no source added");
 		assert_eq!(pasted.top, collection.scenes[0].items);
+	}
+
+	/// An animated item copies with its keyframes into a scene, and the top
+	/// layer, which never goes on to play them, refuses it.
+	#[test]
+	fn pastes_keyframes_into_a_scene_only() {
+		let mut collection = collection();
+		collection.scenes[0].items[0].keyframes = vec![crate::Keyframe {
+			x: -100.0,
+			..crate::Keyframe::new(std::time::Duration::ZERO)
+		}];
+		let clip = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR));
+		let text = clip.to_toml().unwrap();
+		let pasted = paste(&collection, &Layer::scene("Scene"), &text, DIR);
+		assert_eq!(pasted.scenes[0].items[1], collection.scenes[0].items[0]);
+
+		let Clip::Items(items) = Clip::from_toml(&text).unwrap() else {
+			panic!("not items")
+		};
+		let mut draft = collection.draft("Paste");
+		draft.paste(&Layer::top(), &items, Path::new(DIR)).unwrap();
+		assert!(matches!(draft.finish(), Err(Error::Invalid(_))));
 	}
 
 	/// Into another collection, a clip brings what its items show, renaming a
@@ -305,7 +333,7 @@ mod tests {
 
 		let mut other = Collection::new();
 		other.sources.insert("cam".into(), color([0, 255, 0, 255]));
-		let pasted = paste(&other, &Layer::Scene("Scene".into()), &text, DIR);
+		let pasted = paste(&other, &Layer::scene("Scene"), &text, DIR);
 		assert_eq!(pasted.sources["cam"], color([0, 255, 0, 255]), "left alone");
 		assert_eq!(pasted.sources["cam 2"], Source::Camera { id: None });
 		assert_eq!(pasted.sources["cam faded"], Source::Clone { source: "cam 2".into() });
@@ -339,7 +367,7 @@ mod tests {
 			.to_toml()
 			.unwrap();
 
-		let pasted = paste(&Collection::new(), &Layer::Top, &text, DIR);
+		let pasted = paste(&Collection::new(), &Layer::top(), &text, DIR);
 		let expected = crate::Audio {
 			exclude: ["Program".to_string()].into(),
 			..audio
@@ -365,7 +393,7 @@ mod tests {
 			.to_toml()
 			.unwrap();
 
-		let home = paste(&collection, &Layer::Top, &text, DIR);
+		let home = paste(&collection, &Layer::top(), &text, DIR);
 		assert_eq!(home.sources, collection.sources, "linked to the same image");
 
 		// However the scene file spells the path.
@@ -376,7 +404,7 @@ mod tests {
 				path: "/shows/one/logo.png".into(),
 			},
 		);
-		let home = paste(&absolute, &Layer::Top, &text, DIR);
+		let home = paste(&absolute, &Layer::top(), &text, DIR);
 		assert_eq!(home.sources, absolute.sources, "linked to the same image");
 
 		let mut other = Collection::new();
@@ -386,7 +414,7 @@ mod tests {
 				path: "logo.png".into(),
 			},
 		);
-		let away = paste(&other, &Layer::Top, &text, "/shows/two");
+		let away = paste(&other, &Layer::top(), &text, "/shows/two");
 		assert_eq!(away.sources["logo"], other.sources["logo"], "another file, left alone");
 		assert_eq!(
 			away.sources["logo 2"],
@@ -434,7 +462,7 @@ mod tests {
 
 		let mut other = Collection::new();
 		other.sources.insert("matte".into(), color([0, 255, 0, 255]));
-		let pasted = paste(&other, &Layer::Top, &text, "/shows/two");
+		let pasted = paste(&other, &Layer::top(), &text, "/shows/two");
 		assert_eq!(pasted.top[0].filters, [mask("matte 2")]);
 		assert_eq!(
 			pasted.sources["grade"],

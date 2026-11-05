@@ -6,10 +6,10 @@
 //! sessions a GPU allows. Its renditions are listed in a hang catalog of its
 //! own, nested by source name under the local catalog's [`SECTION`] section.
 //!
-//! A source encodes only while it is used: while it is on program
-//! ([`Publish::set_on_program`]), shown in a scene on air or heard in the
-//! program mix, so a replay of it has its recent past, or while something in
-//! the studio subscribes to its track, such as a recording.
+//! A track encodes only while it is used: while it is on program
+//! ([`Publish::set_on_program`]), a picture shown in a scene on air or a sound
+//! heard in the program mix, so a replay of it has its recent past, or while
+//! something in the studio subscribes to it, such as a recording.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -88,7 +88,18 @@ pub struct Publish {
 	sessions: Sessions,
 	owners: Arc<Mutex<Owners>>,
 	/// The sources on program, which each source's track follows.
-	on_program: Arc<tokio::sync::watch::Sender<BTreeSet<String>>>,
+	on_program: Arc<tokio::sync::watch::Sender<OnProgram>>,
+}
+
+/// The sources on program, by name, apart for pictures and sound: a media
+/// file heard in the program mix but shown in no scene on air encodes its
+/// sound and not its pictures.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OnProgram {
+	/// Those whose picture a scene on air shows.
+	pub shown: BTreeSet<String>,
+	/// Those whose sound the program mix plays.
+	pub heard: BTreeSet<String>,
 }
 
 /// Which [`Claim`] owns each source name's entry in the local catalog, and
@@ -134,13 +145,14 @@ impl Publish {
 		self.catalog.snapshot()
 	}
 
-	/// Encode the sources named in `names`, those on program, whether or not
-	/// anything reads their tracks; any other encodes only while read.
-	pub fn set_on_program(&self, names: BTreeSet<String>) {
+	/// Encode the picture of each source `on_program` shows and the sound of
+	/// each it hears, whether or not anything reads their tracks; any other
+	/// track encodes only while read.
+	pub fn set_on_program(&self, on_program: OnProgram) {
 		// Only a change wakes the sources, since this runs every frame.
 		self.on_program.send_if_modified(|current| {
-			let changed = *current != names;
-			*current = names;
+			let changed = *current != on_program;
+			*current = on_program;
 			changed
 		});
 	}
@@ -205,7 +217,7 @@ pub(crate) struct Listing<'a> {
 	claim: &'a Claim,
 	kind: moq_video::encode::Kind,
 	sessions: Sessions,
-	on_program: tokio::sync::watch::Receiver<BTreeSet<String>>,
+	on_program: tokio::sync::watch::Receiver<OnProgram>,
 	broadcast: moq_net::broadcast::Producer,
 	studio: Catalog,
 	catalog: moq_mux::catalog::Producer,
@@ -471,7 +483,7 @@ pub(crate) struct Video<'a> {
 	track: Encoding,
 	claim: &'a Claim,
 	/// The sources on program.
-	on_program: tokio::sync::watch::Receiver<BTreeSet<String>>,
+	on_program: tokio::sync::watch::Receiver<OnProgram>,
 	config: moq_video::encode::Config,
 	clock: moq_mux::Clock,
 	/// Where the capture's private timeline starts on the studio clock, in
@@ -546,20 +558,17 @@ impl<'a> Video<'a> {
 
 	/// Whether the source is used: shown on program, or its track read.
 	fn used(&self) -> bool {
-		self.on_program.borrow().contains(&self.claim.name) || self.track.watched()
+		self.on_program.borrow().shown.contains(&self.claim.name) || self.track.watched()
 	}
 
 	/// Wait until whether the source is used disagrees with whether its
-	/// encoder is open, so a capture that delivers nothing new, such as a
-	/// still screen, can act without waiting on a picture: [`release`] the
-	/// encoder when it is open and nothing uses the source, or bring a picture
-	/// when it is closed and the source goes into use.
+	/// encoder is open, so a source that delivers nothing new, such as a
+	/// still screen or a media file that ended, can act without waiting on a
+	/// picture: [`release`] the encoder when it is open and nothing uses the
+	/// source, or bring a picture when it is closed and the source goes into
+	/// use.
 	///
 	/// [`release`]: Self::release
-	#[cfg_attr(
-		not(any(feature = "capture", test)),
-		expect(dead_code, reason = "only a capture waits on it")
-	)]
 	pub(crate) async fn settle(&self) {
 		let mut demand = self.track.demand();
 		let mut on_program = self.on_program.clone();
@@ -574,7 +583,6 @@ impl<'a> Video<'a> {
 	}
 
 	/// Whether the encoder is open.
-	#[cfg_attr(not(feature = "capture"), expect(dead_code, reason = "only a capture asks"))]
 	pub(crate) fn is_open(&self) -> bool {
 		self.track.is_open()
 	}
@@ -598,6 +606,16 @@ impl<'a> Video<'a> {
 		Ok(())
 	}
 
+	/// Start a group with the next picture, as a keyframe, such as where a
+	/// media file plays again from its start. A closed encoder starts with one
+	/// anyway.
+	pub(crate) fn cut(&mut self) -> Result<(), Error> {
+		if self.track.is_open() {
+			self.track.cut()?;
+		}
+		Ok(())
+	}
+
 	/// Mark a break, such as a gap in a replay: what follows does not continue
 	/// what came before, and a viewer arriving during it waits for what follows
 	/// rather than being served the last picture as if it were live.
@@ -617,28 +635,21 @@ fn encodable(size: moq_video::Size) -> moq_video::Size {
 	moq_video::Size::new((size.width & !1).max(2), (size.height & !1).max(2))
 }
 
-/// A captured source's sound, encoded as Opus while the source is used, as
-/// captured: before the gain and mute the program mix applies to it.
-#[cfg_attr(
-	not(any(feature = "capture", test)),
-	expect(dead_code, reason = "only a capture publishes sound")
-)]
+/// A captured or played source's sound, encoded as Opus while the source is
+/// used, as captured or decoded: before the gain and mute the program mix
+/// applies to it.
 pub(crate) struct Audio<'a> {
 	/// Taken only as the track ends.
 	producer: Option<moq_audio::encode::Producer>,
 	claim: &'a Claim,
 	/// The sources on program.
-	on_program: tokio::sync::watch::Receiver<BTreeSet<String>>,
+	on_program: tokio::sync::watch::Receiver<OnProgram>,
 	clock: moq_mux::Clock,
 	/// Whether sound went to the encoder since the source last went out of
 	/// use, so leaving use marks one gap.
 	encoding: bool,
 }
 
-#[cfg_attr(
-	not(any(feature = "capture", test)),
-	expect(dead_code, reason = "only a capture publishes sound")
-)]
 impl<'a> Audio<'a> {
 	/// Advertise an Opus rendition of interleaved `f32` sound in `input`'s
 	/// sample rate and layout.
@@ -662,7 +673,7 @@ impl<'a> Audio<'a> {
 	/// sound after one is stamped afresh, so the track's timeline holds it.
 	pub(crate) fn write(&mut self, samples: &[f32], captured: kio::clock::Instant, gap: bool) -> Result<(), Error> {
 		let producer = self.producer.as_mut().expect("open until it ends");
-		let used = self.on_program.borrow().contains(&self.claim.name) || producer.demand().wanted().is_some();
+		let used = self.on_program.borrow().heard.contains(&self.claim.name) || producer.demand().wanted().is_some();
 		if !used {
 			if std::mem::take(&mut self.encoding) {
 				producer.discontinuity()?;
@@ -682,7 +693,6 @@ impl<'a> Audio<'a> {
 	}
 
 	/// End the track, failed with `err` so viewers see why.
-	#[cfg_attr(not(feature = "capture"), expect(dead_code, reason = "only a capture fails"))]
 	pub(crate) fn abort(mut self, err: &Error) {
 		if let Some(producer) = self.producer.take() {
 			producer.abort(moq_net::Error::Transport(err.to_string()));
@@ -761,6 +771,35 @@ mod tests {
 		let publish = Publish::new(clock, moq_video::encode::Kind::Auto, Sessions::default()).unwrap();
 		let (catalog, consumer) = (publish.catalog.clone(), publish.consume());
 		(publish, catalog, consumer)
+	}
+
+	/// On program with only `name`'s picture shown.
+	fn shown(name: &str) -> OnProgram {
+		OnProgram {
+			shown: [name.to_string()].into(),
+			..Default::default()
+		}
+	}
+
+	/// On program with only `name`'s sound heard.
+	fn heard(name: &str) -> OnProgram {
+		OnProgram {
+			heard: [name.to_string()].into(),
+			..Default::default()
+		}
+	}
+
+	/// Walk a media source playing a 10 fps clip through `count` pictures, the
+	/// first due at `first`. The clock moves to each picture's moment and is
+	/// held while it decodes, encodes, and shows, so no wait counts on work in
+	/// threads the runtime cannot see, such as a decoder's or an encoder's,
+	/// finishing within any span of the clock.
+	async fn pictures(feed: &crate::source::Feed, first: kio::clock::Instant, count: u32) {
+		let shown = || matches!(feed.take(), Some(crate::source::Picture::Frame(_))).then_some(());
+		for index in 0..count {
+			until_time(first + std::time::Duration::from_millis(100) * index).await;
+			until(shown).await;
+		}
 	}
 
 	/// Yield until `f` holds of the local catalog's source listings.
@@ -900,7 +939,7 @@ mod tests {
 					let snapshot = listed(&catalog, |sources| width(sources) == Some(64)).await;
 					assert!(snapshot.video.renditions.is_empty(), "no source is a program rendition");
 
-					publish.set_on_program(["camera".to_string()].into());
+					publish.set_on_program(shown("camera"));
 					for millis in [66, 100, 133] {
 						video.encode(&mut gray(small, millis)).unwrap();
 					}
@@ -962,7 +1001,7 @@ mod tests {
 				kio::clock::timeout(wait, video.settle()).await.is_err(),
 				"unused and closed"
 			);
-			publish.set_on_program(["display".to_string()].into());
+			publish.set_on_program(shown("display"));
 			kio::clock::timeout(wait, video.settle())
 				.await
 				.expect("on program without a picture, so the capture brings one");
@@ -980,7 +1019,7 @@ mod tests {
 			// lands on the program's clock now rather than a minute back.
 			kio::clock::sleep(std::time::Duration::from_secs(60)).await;
 			video.reopened();
-			publish.set_on_program(["display".to_string()].into());
+			publish.set_on_program(shown("display"));
 			let now = publish.catalog.clock().now();
 			let mut picture = gray(size, 0);
 			video.encode(&mut picture).unwrap();
@@ -1128,7 +1167,7 @@ mod tests {
 					let refused = crate::replay::Take::new(&target(), std::time::Duration::from_secs(1));
 					assert!(refused.is_err(), "nothing to replay");
 
-					publish.set_on_program(["mic".to_string()].into());
+					publish.set_on_program(heard("mic"));
 					let heard = clock.now();
 					capture(&mut audio, false).await;
 					assert!(written() > 0, "on program");
@@ -1353,7 +1392,7 @@ mod tests {
 			let dir = tempfile::tempdir().unwrap();
 			let (publish, catalog, consumer) = studio();
 			// On program, so its track encodes.
-			publish.set_on_program(["replay".to_string()].into());
+			publish.set_on_program(shown("replay"));
 			let (mut context, _origin) = context(dir.path());
 			context.publish = Some(publish);
 			let mut collection = Collection::new();
@@ -1405,6 +1444,229 @@ mod tests {
 				std::task::Poll::Pending => None,
 			})
 			.await;
+		})
+		.await;
+	}
+
+	/// A media source on program encodes its pictures onto its own track as
+	/// they show, on one timeline when it plays again from its start.
+	#[tokio::test(start_paused = true)]
+	async fn a_media_file_is_published_on_one_timeline() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("clip.mkv"), crate::media::tests::CLIP).unwrap();
+			let (publish, catalog, consumer) = studio();
+			publish.set_on_program(shown("clip"));
+			let sessions = publish.sessions.clone();
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish.clone());
+			let mut collection = Collection::new();
+			let clip = Source::Media {
+				path: "clip.mkv".into(),
+				looping: false,
+				restart: false,
+			};
+			collection.sources.insert("clip".into(), clip);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			// The first picture is due at once, so the clock stays put while
+			// the encoder opens.
+			let listed = until(|| {
+				let listed = catalog.snapshot().ext.studio.sources.remove("clip");
+				listed.filter(|listed| !listed.video.renditions.is_empty())
+			})
+			.await;
+			let feed = sources.get("clip").unwrap();
+			assert_eq!(feed.track(), Some(Status::Live));
+			let (name, config) = listed.video.renditions.iter().next().unwrap();
+			let track = consumer
+				.track(hang::catalog::Reference::track(config, name))
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None)),
+				)
+				.await
+				.unwrap();
+			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
+			let mut track = moq_mux::container::Consumer::new(track, container);
+
+			// Half way, five pictures in, it starts over, and plays to its end.
+			let first = kio::clock::now();
+			pictures(feed, first, 5).await;
+			until_time(first + std::time::Duration::from_millis(450)).await;
+			let cut = publish.catalog.clock().now();
+			feed.play().unwrap();
+			let restarted = kio::clock::now();
+			pictures(feed, restarted, 10).await;
+			until_time(restarted + std::time::Duration::from_millis(1_100)).await;
+			until(|| (feed.status() == Status::Ended).then_some(())).await;
+
+			// How many pictures land depends on the encoder, which may skip
+			// some to hold its rate, as openh264 does at this size; the
+			// keyframe each play opens with always does.
+			let now = kio::Waiter::noop();
+			let mut stamps = Vec::new();
+			until(|| {
+				while let std::task::Poll::Ready(read) = track.poll_read(&now) {
+					if let moq_mux::container::Read::Frame { frame, .. } = read.unwrap().expect("open") {
+						stamps.push(frame.timestamp);
+					}
+				}
+				stamps.iter().any(|stamp| *stamp >= cut).then_some(())
+			})
+			.await;
+			assert!(stamps[0] < cut, "the first play's keyframe: {stamps:?}");
+			assert!(stamps.windows(2).all(|pair| pair[0] < pair[1]), "{stamps:?}");
+
+			// Ended, it shows nothing new, yet gives its session back once off
+			// program and unread.
+			assert_eq!(sessions.open(), 1, "on program");
+			drop(track);
+			publish.set_on_program(Default::default());
+			until(|| (sessions.open() == 0).then_some(())).await;
+		})
+		.await;
+	}
+
+	/// A music bed the program mix plays encodes its sound, while its
+	/// pictures, which no scene on air shows, encode nothing until one does.
+	#[tokio::test(start_paused = true)]
+	async fn a_heard_media_file_encodes_only_its_sound() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("bed.mkv"), crate::media::tests::CLIP).unwrap();
+			let (publish, catalog, _consumer) = studio();
+			publish.set_on_program(heard("bed"));
+			let sessions = publish.sessions.clone();
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish.clone());
+			let mut collection = Collection::new();
+			let bed = Source::Media {
+				path: "bed.mkv".into(),
+				looping: true,
+				restart: false,
+			};
+			collection.sources.insert("bed".into(), bed);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			// Both listed, the pictures' at the first picture.
+			let listed = until(|| {
+				let listed = catalog.snapshot().ext.studio.sources.remove("bed");
+				listed.filter(|listed| !listed.video.renditions.is_empty() && !listed.audio.renditions.is_empty())
+			})
+			.await;
+			let audio = listed.audio.renditions.keys().next().unwrap().clone();
+			let video = listed.video.renditions.keys().next().unwrap().clone();
+			let written = |id: &str| publish.stats().get(id).map_or(0, |rendition| rendition.frames);
+
+			let feed = sources.get("bed").unwrap();
+			let first = kio::clock::now();
+			pictures(feed, first, 4).await;
+			until(|| (written(&audio) > 0).then_some(())).await;
+			assert_eq!(written(&video), 0, "heard, not shown");
+			assert_eq!(sessions.open(), 0, "no encoder for the pictures");
+
+			// Shown too, its pictures encode as they play, past what a
+			// pipelined encoder holds back.
+			publish.set_on_program(OnProgram {
+				shown: ["bed".to_string()].into(),
+				heard: ["bed".to_string()].into(),
+			});
+			pictures(feed, first + std::time::Duration::from_millis(400), 6).await;
+			until(|| (written(&video) > 0).then_some(())).await;
+		})
+		.await;
+	}
+
+	/// A looping file whose sound is shorter than its pictures keeps its sound
+	/// track on time: each loop's sound starts where the loop does, the
+	/// silence between kept, rather than right after the last loop's sound.
+	#[tokio::test(start_paused = true)]
+	async fn a_looping_media_file_keeps_its_sound_on_time() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("bed.mkv"), crate::media::tests::UNEVEN).unwrap();
+			let (publish, catalog, consumer) = studio();
+			publish.set_on_program(heard("bed"));
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish.clone());
+			let mut collection = Collection::new();
+			let bed = Source::Media {
+				path: "bed.mkv".into(),
+				looping: true,
+				restart: false,
+			};
+			collection.sources.insert("bed".into(), bed);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			let listed = until(|| {
+				let listed = catalog.snapshot().ext.studio.sources.remove("bed");
+				listed.filter(|listed| !listed.audio.renditions.is_empty())
+			})
+			.await;
+			let (name, config) = listed.audio.renditions.iter().next().unwrap();
+			let track = consumer
+				.track(hang::catalog::Reference::track(config, name))
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None)),
+				)
+				.await
+				.unwrap();
+			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
+			let mut track = moq_mux::container::Consumer::new(track, container);
+			// Two and a half loops of a second, each with half a second of sound.
+			pictures(sources.get("bed").unwrap(), kio::clock::now(), 25).await;
+			let now = kio::Waiter::noop();
+			let mut stamps = Vec::new();
+			let silences = until(|| {
+				while let std::task::Poll::Ready(read) = track.poll_read(&now) {
+					if let moq_mux::container::Read::Frame { frame, .. } = read.unwrap().expect("open") {
+						stamps.push(std::time::Duration::from(frame.timestamp));
+					}
+				}
+				let gaps = stamps.windows(2).map(|pair| pair[1].saturating_sub(pair[0]));
+				let silences = gaps.filter(|gap| *gap > std::time::Duration::from_millis(300)).count();
+				(silences >= 2).then_some(silences)
+			})
+			.await;
+			assert_eq!(silences, 2, "each loop's silence is kept: {stamps:?}");
+		})
+		.await;
+	}
+
+	/// A file of sound alone lists its sound's track, live, and no pictures.
+	#[tokio::test(start_paused = true)]
+	async fn an_audio_file_lists_its_sound() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("tone.webm"), crate::media::tests::TONE).unwrap();
+			let (publish, catalog, _consumer) = studio();
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish);
+			let mut collection = Collection::new();
+			let tone = Source::Media {
+				path: "tone.webm".into(),
+				looping: false,
+				restart: false,
+			};
+			collection.sources.insert("tone".into(), tone);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let listed = until(|| {
+				let listed = catalog.snapshot().ext.studio.sources.remove("tone");
+				listed.filter(|listed| !listed.audio.renditions.is_empty())
+			})
+			.await;
+			assert!(listed.video.renditions.is_empty());
+			assert_eq!(sources.get("tone").unwrap().track(), Some(Status::Live));
 		})
 		.await;
 	}
