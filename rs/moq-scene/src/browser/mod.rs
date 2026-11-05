@@ -239,7 +239,9 @@ impl Page {
 		self.state.lock().unwrap().paint
 	}
 
-	/// Take what the page last copied or cut, once, for the clipboard.
+	/// Take what the page last copied or cut, once, for the desktop's
+	/// clipboard: a page that paints in memory has no display to put it there
+	/// itself.
 	pub fn copied(&self) -> Option<String> {
 		self.state.lock().unwrap().copied.take()
 	}
@@ -308,9 +310,11 @@ pub enum Input {
 	},
 	/// Text typed, after the keyboard layout and any input method.
 	Text(String),
-	/// Copy the page's selection, which [`Page::copied`] then returns.
+	/// Copy the page's selection to the clipboard, through [`Page::copied`]
+	/// when it paints in memory.
 	Copy,
-	/// Cut the page's selection, which [`Page::copied`] then returns.
+	/// Cut the page's selection to the clipboard, through [`Page::copied`]
+	/// when it paints in memory.
 	Cut,
 	/// The page gained or lost keyboard focus.
 	Focus(bool),

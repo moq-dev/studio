@@ -388,12 +388,22 @@ fn deliver(id: Id, input: Input) {
 	}
 }
 
-/// Ask the page's focused frame, which may be an iframe, for its selection,
-/// and to cut it if `cut`. Its renderer answers, and the studio puts what it
-/// copied on the desktop's clipboard: CEF's own reaches that only through a
-/// display, which the CPU path never opens.
+/// Copy, or cut if `cut`, the selection in the page's focused frame, which
+/// may be an iframe, to the desktop's clipboard.
 fn copy(browser: &Browser, page: &Paged, cut: bool) {
-	let (Some(frame), Some(mut message)) = (browser.focused_frame(), process_message_create(Some(&COPY.into()))) else {
+	let Some(frame) = browser.focused_frame() else { return };
+	// The GPU path opens a display, whose clipboard CEF's own is, and the
+	// page's copy and cut handlers decide what lands there.
+	if page.shared.accelerated {
+		match cut {
+			true => frame.cut(),
+			false => frame.copy(),
+		}
+		return;
+	}
+	// The CPU path opens none, so the frame's renderer answers with its
+	// selection, and the studio puts that on the desktop's clipboard.
+	let Some(mut message) = process_message_create(Some(&COPY.into())) else {
 		return;
 	};
 	if let Some(args) = message.argument_list() {

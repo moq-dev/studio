@@ -300,8 +300,7 @@ impl Interact {
 					}
 				}
 				// egui swallows the copy and cut shortcuts too, which go to
-				// the page as commands: only it knows its selection, which
-				// comes back for the clipboard.
+				// the page as commands: only it knows its selection.
 				egui::Event::Copy => {
 					if let Some(page) = &self.focused {
 						send(page, Input::Copy);
