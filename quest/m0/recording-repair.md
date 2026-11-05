@@ -23,8 +23,11 @@ Implementation:
 
 - `moq_mux::container::mp4::repair` rebuilds a file from its fragments.
 - The recording directory and file naming are in `rs/moq-studio/src/record.rs`.
-  Mark a file as in progress while it records (for example by a sidecar or a
-  name the studio renames at finish), so launch finds only unfinished files.
+  Mark a file as in progress with a sidecar (for example `<name>.mp4.part`)
+  written when it starts and deleted when it finishes. Launch repairs each
+  file with a sidecar, then deletes the sidecar once `<name>.repaired.mp4` is
+  written, so the same file is never repaired twice and the original keeps
+  its name.
 - Repair each source's file as well as the program's.
 - A test writes a recording, stops before finishing it, and checks that
   launch produces a playable `.repaired.mp4` holding the samples written.

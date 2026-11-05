@@ -13,8 +13,11 @@ by CodeRabbit on `rs/moq-scene/src/effect.wgsl`. It predates that PR.
 
 - Source pictures are sampled bilinearly straight (not premultiplied), so a
   transparent texel's color bleeds into its neighbours when scaled.
-  Premultiply before sampling: either upload premultiplied, or sample with
-  the effect pass's premultiplied flag, whichever adds no GPU copy.
+  Premultiply before interpolation: upload premultiplied, or premultiply each
+  tap in the shader, whichever adds no GPU copy. The effect pass's
+  `premultiplied` flag is not the fix: `fetch()` in `effect.wgsl` interpolates
+  first and `straight()` divides afterwards, so the flag only describes the
+  input.
 - A compositor test scales a transparent picture with a colored transparent
   region and checks that edge texels carry no color from it.
 - Measure frame time before and after.
