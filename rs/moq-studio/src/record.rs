@@ -558,20 +558,11 @@ impl Marker {
 	/// finds no recording and removes it rather than repairing a live one.
 	fn create(path: &Path) -> anyhow::Result<Option<Self>> {
 		let path = marker(path);
-		let mut file = match std::fs::File::create_new(&path) {
+		let file = match std::fs::File::create_new(&path) {
 			Ok(file) => file,
 			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
 			Err(err) => return Err(err).with_context(|| format!("cannot create {}", path.display())),
 		};
-		let token = {
-			use std::hash::BuildHasher;
-			let random = std::hash::RandomState::new().hash_one(());
-			format!("{} {random:016x}", std::process::id())
-		};
-		if let Err(err) = std::io::Write::write_all(&mut file, token.as_bytes()) {
-			let _ = std::fs::remove_file(&path);
-			return Err(err).with_context(|| format!("cannot write {}", path.display()));
-		}
 		match file.try_lock() {
 			Ok(()) => {}
 			// A launch holds it, and removes it once it finds no recording.
@@ -584,23 +575,25 @@ impl Marker {
 		}
 		// A launch that held it before it was locked removed it, and another
 		// recording may have marked the same name since.
-		if !Self::named(&path, &mut file) {
+		if !Self::named(&path, &file)? {
 			return Ok(None);
 		}
 		Ok(Some(Self { path, file }))
 	}
 
 	/// Whether `path` still names `file`, which is locked, rather than a marker
-	/// created there after it was removed. Each marker holds a token no other
-	/// holds, since file identity has no portable query. Whoever removes a
-	/// marker holds its lock first, so the answer stands while the lock is held.
-	fn named(path: &Path, file: &mut std::fs::File) -> bool {
-		use std::io::{Read, Seek};
-		let mut held = Vec::new();
-		if file.rewind().and_then(|()| file.read_to_end(&mut held)).is_err() {
-			return false;
+	/// created there after it was removed. Whoever removes a marker holds its
+	/// lock first, so the answer stands while the lock is held. Compares file
+	/// identities rather than reading `path`, which Windows refuses while the
+	/// lock is held.
+	fn named(path: &Path, file: &std::fs::File) -> anyhow::Result<bool> {
+		let held = file.try_clone().and_then(same_file::Handle::from_file);
+		let held = held.with_context(|| format!("cannot identify {}", path.display()))?;
+		match same_file::Handle::from_path(path) {
+			Ok(named) => Ok(named == held),
+			Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+			Err(err) => Err(err).with_context(|| format!("cannot identify {}", path.display())),
 		}
-		std::fs::read(path).is_ok_and(|named| named == held)
 	}
 
 	/// Remove the marker, and only then let go of its lock, so a launch that
@@ -1753,11 +1746,11 @@ mod tests {
 	fn a_replaced_marker_is_not_its_holders() {
 		let dir = tempfile::tempdir().unwrap();
 		let recording = dir.path().join("show.mp4");
-		let Marker { path, mut file } = Marker::create(&recording).unwrap().unwrap();
-		assert!(Marker::named(&path, &mut file));
+		let Marker { path, file } = Marker::create(&recording).unwrap().unwrap();
+		assert!(Marker::named(&path, &file).unwrap());
 		std::fs::remove_file(&path).unwrap();
 		let _other = Marker::create(&recording).unwrap().unwrap();
-		assert!(!Marker::named(&path, &mut file));
+		assert!(!Marker::named(&path, &file).unwrap());
 	}
 
 	/// Starting into a directory that does not exist fails at once.
