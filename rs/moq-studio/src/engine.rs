@@ -534,24 +534,20 @@ impl Program {
 		}
 	}
 
-	/// Encode the local sources on program, whether or not anything reads
-	/// their tracks, so a replay of one has its past: those `shown` in a scene
-	/// on air, and the microphones and system audio the program mix plays. A
-	/// replay source's track is its pictures, so being heard alone does not
-	/// put it on program.
+	/// Encode the local sources' tracks on program, whether or not anything
+	/// reads them, so a replay of one has its past: the pictures `shown` in a
+	/// scene on air, and the sound the program mix plays. A media file heard
+	/// and not shown encodes only its sound.
 	fn on_program(&self, state: &State, shown: BTreeSet<String>) {
-		let collection = &state.collection;
+		let program = &state.collection.mixes.program;
 		let heard = state
 			.sources
 			.iter()
-			.filter(|(name, feed)| {
-				matches!(
-					feed.source(),
-					moq_scene::Source::Microphone { .. } | moq_scene::Source::SystemAudio
-				) && state.sources.plays(&collection.mixes.program, name)
-			})
-			.map(|(name, _)| name.to_string());
-		self.sources.set_on_program(shown.into_iter().chain(heard).collect());
+			.filter(|(name, _)| state.sources.plays(program, name))
+			.map(|(name, _)| name.to_string())
+			.collect();
+		self.sources
+			.set_on_program(moq_scene::publish::OnProgram { shown, heard });
 	}
 }
 

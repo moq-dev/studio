@@ -271,8 +271,11 @@ with `restart`, in a scene on air or the top layer, when it was not on program
 before. Either clears its picture at once, so the end of the last play never
 shows on program. A file that cannot be read or decoded fails, with the reason.
 Its pictures and its sound each have a track of their own (see [Source
-tracks](#source-tracks)), on one timeline across plays, used while it is shown
-on program or read. A file with no sound has no strip in the Audio panel.
+tracks](#source-tracks)), its pictures on one timeline across plays. Each is
+used apart, as a camera's and a microphone's are: the pictures while a scene on
+air shows it, the sound while the mix on program plays it, and either while
+read. So a music bed that no scene shows encodes its sound alone. A file with
+no sound has no strip in the Audio panel.
 
 ## Guests
 
@@ -585,8 +588,8 @@ plain capture, before any filter, and a clone has none, since it shows its
 source's capture. A browser source or an overlay has no track of its own, and a
 broadcast source is already its publisher's.
 
-A microphone or system audio encodes its track as Opus, from the same device
-open the mixes hear, only while it is used: while the mix on program plays it
+A microphone, system audio, or media file's sound encodes its track as Opus,
+from the same sound the mixes hear, only while it is used: while the mix on program plays it
 (unmuted and not left out of it), so a replay of it has its recent past, or
 while a recording reads its track. The track carries the sound as captured,
 before its gain, mute, and delay, which stay the mixes'. A buffer the capture
@@ -685,8 +688,8 @@ it is written, shortly after the click.
 
 Nothing records in the background for this. The program's tracks keep their
 last 30 seconds for late viewers anyway, and each source's track while it is on
-program (shown in a scene on air, or for a microphone or system audio, played by
-the mix on program) or recorded, and a replay copies from those, so a replay
+program (a picture shown in a scene on air, or a sound played by the mix on
+program) or recorded, and a replay copies from those, so a replay
 goes back at most that far. A replay of the program needs `--connect`; a local
 source keeps its track without a relay. With `--on-demand`, the program has
 no past from before someone watched it, and a source has none from before it
