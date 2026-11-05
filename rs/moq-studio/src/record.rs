@@ -6,7 +6,9 @@
 //! relay serves, and each source's track from the studio's local broadcast,
 //! which its reading keeps encoding. Each file is an MP4 that plays while it
 //! grows, so a crash still leaves a playable file, and becomes a regular MP4
-//! when the recording stops.
+//! when the recording stops. A sidecar marks each file while it is written, so
+//! the next launch finds one a crash left unfinished and repairs it (see
+//! [`repair`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -21,6 +23,9 @@ use moq_mux::catalog::{CatalogFormat, Stream};
 use moq_mux::container::mp4;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::watch;
+
+mod repair;
+pub use repair::{Repair, Repaired};
 
 /// How far a file may fall behind the broadcast before it skips ahead: only a
 /// disk stalled this long loses media, and the studio never holds more for it.
@@ -38,6 +43,8 @@ pub struct Recorder {
 	runtime: tokio::runtime::Handle,
 	/// The recording in progress, or the last one.
 	session: Mutex<Option<Session>>,
+	/// The recordings found unfinished in `dir` at launch.
+	repairs: repair::Repairs,
 }
 
 struct Session {
@@ -58,6 +65,9 @@ struct File {
 	written: AtomicU64,
 	/// `None` while it is being written.
 	finished: Mutex<Option<Finished>>,
+	/// Marks the file unfinished until it is a regular MP4 or removed. A file
+	/// that fails before then keeps it, so the next launch repairs it.
+	marker: Mutex<Option<Marker>>,
 }
 
 /// How a file ended.
@@ -68,7 +78,8 @@ pub enum Finished {
 	/// Nothing reached it before the recording stopped, so it was removed.
 	Empty,
 	/// Writing stopped early. A file that holds anything still plays as far as
-	/// it got, as a fragmented MP4.
+	/// it got, as a fragmented MP4 unless it finished, and one left unfinished
+	/// keeps its marker, so the next launch repairs it.
 	Failed(String),
 }
 
@@ -93,7 +104,8 @@ pub struct FileStatus {
 impl Recorder {
 	/// Record `program`, the studio's broadcast, and from `sources`, the local
 	/// one, each source's own track, into `dir`, naming each file after the
-	/// `scenes` file.
+	/// `scenes` file, and repair in the background each file in `dir` a crash
+	/// left unfinished.
 	///
 	/// Call inside the tokio runtime the recordings write on.
 	pub fn new(program: moq_mux::Source, sources: moq_mux::Source, dir: &Path, scenes: &Path) -> anyhow::Result<Self> {
@@ -102,12 +114,15 @@ impl Recorder {
 			.context("the scene file has no name")?
 			.to_string_lossy()
 			.into_owned();
+		let dir = std::path::absolute(dir)?;
+		let runtime = tokio::runtime::Handle::try_current().context("not inside a tokio runtime")?;
 		Ok(Self {
 			program,
 			sources,
-			dir: std::path::absolute(dir)?,
+			repairs: repair::Repairs::start(&dir, &runtime),
+			dir,
 			name,
-			runtime: tokio::runtime::Handle::try_current().context("not inside a tokio runtime")?,
+			runtime,
 			session: Mutex::new(None),
 		})
 	}
@@ -135,8 +150,8 @@ impl Recorder {
 		let stem = program_stem(&self.name, &stamp);
 		// Here rather than on the runtime, so a directory that cannot take it
 		// fails the click that started it.
-		let (path, file) = create(&self.dir, &stem)?;
-		let program = Arc::new(File::new(path));
+		let (path, file, marker) = create(&self.dir, &stem)?;
+		let program = Arc::new(File::new(path, Some(marker)));
 		let files: Files = Arc::new(Mutex::new(vec![program.clone()]));
 		let stop = Arc::new(watch::channel(false).0);
 		let closing = kio::Producer::new(false);
@@ -209,6 +224,19 @@ impl Recorder {
 		let _ = done.wait_for(|done| *done).await;
 	}
 
+	/// Each recording found unfinished at launch, and how its repair went.
+	pub fn repairs(&self) -> Vec<Repair> {
+		self.repairs.list()
+	}
+
+	/// Wait until every repair started at launch has ended.
+	#[cfg(test)]
+	pub async fn repaired(&self) {
+		while self.repairs().iter().any(|repair| repair.outcome.is_none()) {
+			kio::clock::sleep(Duration::from_millis(10)).await;
+		}
+	}
+
 	/// The recording in progress, or the last one, or `None` before the first.
 	pub fn status(&self) -> Option<Status> {
 		let session = self.session.lock().unwrap();
@@ -231,11 +259,19 @@ impl Recorder {
 }
 
 impl File {
-	fn new(path: PathBuf) -> Self {
+	fn new(path: PathBuf, marker: Option<Marker>) -> Self {
 		Self {
 			path,
 			written: AtomicU64::new(0),
 			finished: Mutex::new(None),
+			marker: Mutex::new(marker),
+		}
+	}
+
+	/// The file is a regular MP4, or removed, so nothing is left to repair.
+	fn settle(&self) {
+		if let Some(marker) = self.marker.lock().unwrap().take() {
+			marker.clear();
 		}
 	}
 
@@ -385,16 +421,16 @@ impl Run {
 			None => self.stem.clone(),
 			Some(name) => source_stem(&self.stem, name),
 		};
-		let (path, file) = match create(&self.dir, &stem) {
+		let (path, file, marker) = match create(&self.dir, &stem) {
 			Ok(created) => created,
 			Err(err) => {
-				let entry = File::new(self.dir.join(format!("{stem}.mp4")));
+				let entry = File::new(self.dir.join(format!("{stem}.mp4")), None);
 				entry.finish(Err(err));
 				self.files.lock().unwrap().push(Arc::new(entry));
 				return false;
 			}
 		};
-		let entry = Arc::new(File::new(path));
+		let entry = Arc::new(File::new(path, Some(marker)));
 		self.files.lock().unwrap().push(entry.clone());
 		self.spawn(
 			source.map(str::to_string),
@@ -425,8 +461,19 @@ impl Run {
 /// Windows counts UTF-16 units instead, which are never more.
 const MAX_NAME: usize = 255;
 
-/// The most [`create`] adds to a stem: the largest number, and the extension.
-const SUFFIX: usize = " (4294967295).mp4".len();
+/// The most a recording's files add to a stem: the largest number [`create`]
+/// gives, and the longest name a file takes from there, the one its repair is
+/// written under.
+const SUFFIX: usize = " (4294967295)".len() + REPAIRED.len() + PARTIAL.len();
+
+/// What a file's marker adds to its name.
+const MARKER: &str = ".part";
+
+/// What a repaired file's name has in place of `.mp4`.
+const REPAIRED: &str = ".repaired.mp4";
+
+/// What a repair's name has added while it is written.
+const PARTIAL: &str = ".tmp";
 
 /// What a long scene file name leaves of each source's file name, in bytes,
 /// so the Output panel can still tell the source files apart.
@@ -464,8 +511,8 @@ fn truncate(text: &str, bytes: usize) -> &str {
 }
 
 /// Create a file named `stem` in `dir`, numbering it rather than replacing
-/// one already there.
-fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File)> {
+/// one already there, and mark it unfinished.
+fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File, Marker)> {
 	let mut number: u32 = 1;
 	loop {
 		let name = match number {
@@ -474,13 +521,61 @@ fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File)> {
 		};
 		let path = dir.join(name);
 		match std::fs::File::create_new(&path) {
-			Ok(file) => return Ok((path, file)),
+			Ok(file) => {
+				let marker = Marker::create(&path).inspect_err(|_| {
+					let _ = std::fs::remove_file(&path);
+				})?;
+				return Ok((path, file, marker));
+			}
 			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
 				number = number.checked_add(1).context("every numbered name is taken")?;
 			}
 			Err(err) => return Err(err).with_context(|| format!("cannot create {}", path.display())),
 		}
 	}
+}
+
+/// The sidecar `<name>.mp4.part` beside a file being recorded, until the file
+/// is a regular MP4 or removed. A crash leaves it, which tells the next launch
+/// to repair the file. Its lock, held while recording, tells a launch apart
+/// from another studio still recording into the same directory.
+struct Marker {
+	path: PathBuf,
+	/// Holds the lock; closing it releases the lock.
+	file: std::fs::File,
+}
+
+impl Marker {
+	/// Mark the recording at `path` unfinished.
+	fn create(path: &Path) -> anyhow::Result<Self> {
+		let path = marker(path);
+		let file = std::fs::File::create(&path).with_context(|| format!("cannot create {}", path.display()))?;
+		// A file system without locks still marks the file; only another studio
+		// recording into the same directory as it launches goes unnoticed.
+		if let Err(err) = file.try_lock() {
+			tracing::debug!(path = %path.display(), error = %err, "cannot lock a recording's marker");
+		}
+		Ok(Self { path, file })
+	}
+
+	/// Remove the marker.
+	fn clear(self) {
+		// Unlocked first, which Windows needs to remove it.
+		drop(self.file);
+		if let Err(err) = std::fs::remove_file(&self.path)
+			&& err.kind() != std::io::ErrorKind::NotFound
+		{
+			// The next launch finds the file finished or gone, and removes it.
+			tracing::warn!(path = %self.path.display(), error = %err, "cannot remove a recording's marker");
+		}
+	}
+}
+
+/// The marker of the recording at `path`.
+fn marker(path: &Path) -> PathBuf {
+	let mut name = path.as_os_str().to_owned();
+	name.push(MARKER);
+	name.into()
 }
 
 /// Record the program's own tracks from `source`, or with `name` that
@@ -573,6 +668,7 @@ async fn record<S: Stream>(
 	file.seek(std::io::SeekFrom::Start(finish.mdat_offset)).await?;
 	file.write_all(&finish.mdat).await?;
 	file.sync_all().await?;
+	entry.settle();
 	entry
 		.written
 		.store(finish.moov_offset + finish.moov.len() as u64, Ordering::Relaxed);
@@ -590,6 +686,7 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
 async fn remove(file: tokio::fs::File, entry: &File) -> anyhow::Result<Finished> {
 	drop(file);
 	tokio::fs::remove_file(&entry.path).await?;
+	entry.settle();
 	Ok(Finished::Empty)
 }
 
@@ -1339,6 +1436,149 @@ mod tests {
 		assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 	}
 
+	/// The names in `dir`, sorted.
+	fn names(dir: &Path) -> Vec<String> {
+		let mut names: Vec<_> = std::fs::read_dir(dir)
+			.unwrap()
+			.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+			.collect();
+		names.sort();
+		names
+	}
+
+	/// A recording a crash left unfinished, the program's file and each
+	/// source's, is repaired at the next launch into a regular MP4 beside it
+	/// holding what was written, leaving the original as it was, and only once.
+	/// One that finished before the crash removed its marker is left alone.
+	#[tokio::test(start_paused = true)]
+	async fn launch_repairs_a_crashed_recording() {
+		let dir = tempfile::tempdir().unwrap();
+		let crashed = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		studio.add("mic");
+		let recorder = studio.recorder(dir.path());
+		recorder.start(true).unwrap();
+		studio.play(Duration::from_secs(1)).await;
+
+		// What a crash leaves: each file as written so far, and its marker.
+		let names_while_recording = names(dir.path());
+		assert_eq!(names_while_recording.len(), 4, "{names_while_recording:?}");
+		for name in &names_while_recording {
+			std::fs::copy(dir.path().join(name), crashed.path().join(name)).unwrap();
+		}
+		recorder.finish().await;
+		assert!(
+			names(dir.path()).iter().all(|name| name.ends_with(".mp4")),
+			"a finished recording leaves no marker: {:?}",
+			names(dir.path())
+		);
+		// A file finished just before a crash, whose marker stayed.
+		let program = &recorder.status().unwrap().files[0].path;
+		std::fs::copy(program, crashed.path().join("finished.mp4")).unwrap();
+		std::fs::write(crashed.path().join("finished.mp4.part"), b"").unwrap();
+
+		let originals: Vec<_> = names(crashed.path())
+			.into_iter()
+			.map(|name| {
+				let data = std::fs::read(crashed.path().join(&name)).unwrap();
+				(name, data)
+			})
+			.collect();
+		let launch = studio.recorder(crashed.path());
+		kio::clock::timeout(Duration::from_secs(5), launch.repaired())
+			.await
+			.expect("the repairs end");
+
+		let repairs = launch.repairs();
+		let outcomes: Vec<_> = repairs
+			.iter()
+			.map(|repair| {
+				let name = repair.path.file_name().unwrap().to_string_lossy().into_owned();
+				(
+					name.rsplit_once('Z').map_or(name.clone(), |(_, end)| end.to_string()),
+					repair.outcome.clone(),
+				)
+			})
+			.collect();
+		// In name order, where a space comes before a dot.
+		let [
+			(finished, Some(Repaired::Finished)),
+			(mic, Some(Repaired::Saved(_))),
+			(program, Some(Repaired::Saved(_))),
+		] = outcomes.as_slice()
+		else {
+			panic!("{outcomes:?}");
+		};
+		assert_eq!([finished.as_str(), mic, program], ["finished.mp4", " mic.mp4", ".mp4"]);
+		for repair in &repairs[1..] {
+			let Some(Repaired::Saved(repaired)) = &repair.outcome else {
+				unreachable!();
+			};
+			assert_eq!(repaired, &repair::repaired(&repair.path));
+			let [(handler, duration)] = tracks(repaired).try_into().unwrap();
+			assert_eq!(handler, "soun");
+			assert!(
+				about(duration, Duration::from_secs(1)),
+				"{}: {duration:?}",
+				repaired.display()
+			);
+		}
+
+		// Each original is as it was, and only the repairs were added.
+		for (name, data) in &originals {
+			let path = crashed.path().join(name);
+			if name.ends_with(".part") {
+				assert!(!path.exists(), "{name} is removed once repaired");
+			} else {
+				assert!(&std::fs::read(&path).unwrap() == data, "{name} is left as it was");
+			}
+		}
+		assert_eq!(names(crashed.path()).len(), originals.len() - 3 + 2);
+
+		// The next launch has nothing to repair.
+		let again = studio.recorder(crashed.path());
+		assert!(again.repairs().is_empty());
+	}
+
+	/// What else a launch may find: a file nothing reached and one that is no
+	/// recording each give up their marker, as does a marker whose file is
+	/// gone, and a file another studio is still recording is left alone.
+	#[tokio::test(start_paused = true)]
+	async fn launch_leaves_what_it_cannot_repair() {
+		let dir = tempfile::tempdir().unwrap();
+		let studio = Studio::new();
+		std::fs::write(dir.path().join("empty.mp4"), b"").unwrap();
+		std::fs::write(dir.path().join("empty.mp4.part"), b"").unwrap();
+		std::fs::write(dir.path().join("junk.mp4"), b"not a recording").unwrap();
+		std::fs::write(dir.path().join("junk.mp4.part"), b"").unwrap();
+		std::fs::write(dir.path().join("gone.mp4.part"), b"").unwrap();
+		let (_, _file, _marker) = create(dir.path(), "recording").unwrap();
+
+		let launch = studio.recorder(dir.path());
+		kio::clock::timeout(Duration::from_secs(5), launch.repaired())
+			.await
+			.expect("the repairs end");
+		let outcomes: Vec<_> = launch
+			.repairs()
+			.into_iter()
+			.map(|repair| {
+				(
+					repair.path.file_name().unwrap().to_string_lossy().into_owned(),
+					repair.outcome,
+				)
+			})
+			.collect();
+		let [(empty, Some(Repaired::Empty)), (junk, Some(Repaired::Failed(reason)))] = outcomes.as_slice() else {
+			panic!("{outcomes:?}");
+		};
+		assert_eq!([empty.as_str(), junk], ["empty.mp4", "junk.mp4"]);
+		assert!(reason.contains("not a recording the studio can repair"), "{reason}");
+		assert_eq!(
+			names(dir.path()),
+			["empty.mp4", "junk.mp4", "recording.mp4", "recording.mp4.part"]
+		);
+	}
+
 	/// A long scene file or source name is cut, between characters, so every
 	/// file name fits, numbered ones included.
 	#[test]
@@ -1353,9 +1593,13 @@ mod tests {
 			assert!(source.len() > MAX_NAME - SUFFIX - 2, "{} bytes", source.len());
 			assert!(source.len() >= program.len() + 1 + SOURCE - 1, "{source}");
 			for stem in [&program, &source, &source] {
-				let (path, _) = create(dir.path(), stem).unwrap();
-				let name = path.file_name().unwrap().len();
-				assert!(name <= MAX_NAME, "{name} bytes");
+				let (path, ..) = create(dir.path(), stem).unwrap();
+				// So do its marker and its repair, while written and once done.
+				let repaired = repair::repaired(&path);
+				for path in [marker(&path), repair::partial(&repaired), repaired, path] {
+					let name = path.file_name().unwrap().len();
+					assert!(name <= MAX_NAME, "{name} bytes: {}", path.display());
+				}
 			}
 		}
 	}
@@ -1393,9 +1637,9 @@ mod tests {
 	#[test]
 	fn a_taken_name_is_numbered() {
 		let dir = tempfile::tempdir().unwrap();
-		let (first, _) = create(dir.path(), "show").unwrap();
-		let (second, _) = create(dir.path(), "show").unwrap();
-		let (third, _) = create(dir.path(), "show").unwrap();
+		let (first, ..) = create(dir.path(), "show").unwrap();
+		let (second, ..) = create(dir.path(), "show").unwrap();
+		let (third, ..) = create(dir.path(), "show").unwrap();
 		assert_eq!(first, dir.path().join("show.mp4"));
 		assert_eq!(second, dir.path().join("show (2).mp4"));
 		assert_eq!(third, dir.path().join("show (3).mp4"));

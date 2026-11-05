@@ -100,7 +100,7 @@ Every panel is a tab you can drag, split, or stack.
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
 | Output | Start and stop recording, pick the mix it records, set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each rendition's encoder work. |
-| Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
+| Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
@@ -631,6 +631,15 @@ and becomes a regular MP4 when the recording stops or the studio quits.
 Quitting first lets the recording's encoders publish what they still hold, and
 the program's file keeps it. A file nothing reached before the recording
 stopped is removed.
+
+While a file is written, a marker `<name>.mp4.part` sits beside it. A crash,
+a power loss, or a write that failed leaves the marker, and the next launch
+repairs that file without asking: it writes `<name>.repaired.mp4` beside it, a
+regular MP4 of everything the file holds up to its last complete fragment,
+leaves the original untouched, and removes the marker, so the file is repaired
+only once. The repair runs in the background and appears at the top of the
+Health panel and in the log. A file another studio is still recording into the
+same directory is left alone.
 
 ### Source frames
 
