@@ -2,9 +2,9 @@
 
 ## Goal
 
-The studio exposes a canvas's program as a system camera, so video-call and
+The studio exposes the program or a published scene as a system camera, so video-call and
 conferencing apps, which offer no ingest API, can use it. The studio has one
-toggle per canvas, and each OS backend lands on its own.
+toggle per published scene, and each OS backend lands on its own.
 
 ## Plan
 
