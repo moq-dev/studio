@@ -111,6 +111,7 @@ impl Studio {
 				program,
 				view: None,
 				picked: None,
+				drawn: Canvas::default(),
 				top: false,
 				selection: None,
 				gestures: Gestures::default(),
@@ -181,9 +182,12 @@ impl eframe::App for Studio {
 			self.panels.view = None;
 			self.panels.deselect_item();
 		}
+		let view = state.compositor.output(self.panels.view.as_deref());
+		let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
+		// The size the textures were drawn at, which an edit this frame, such
+		// as an undo removing the canvas, does not change until the next.
+		self.panels.drawn = view.canvas();
 		if let Some(render) = frame.wgpu_render_state() {
-			let view = state.compositor.output(self.panels.view.as_deref());
-			let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
 			self.panels.preview.follow(render, view.preview());
 			self.panels.program.follow(render, view.program());
 		}
@@ -261,6 +265,9 @@ struct Panels {
 	/// The canvas the picker chose this frame, shown from the next, so a
 	/// frame never sizes one canvas and draws another.
 	picked: Option<Option<String>>,
+	/// The size of the canvas Preview, Program, and Items show this frame, as
+	/// its textures were drawn.
+	drawn: Canvas,
 	/// Whether the Items panel shows the top layer rather than the scene in
 	/// preview.
 	top: bool,
@@ -669,14 +676,6 @@ impl Panels {
 		Ok(layer.on(view))
 	}
 
-	/// The canvas Preview, Program, and Items show, and its size: the main
-	/// one once a further one shown is removed, as its textures are, until the
-	/// next frame lets go of it.
-	fn view(&self, state: &State) -> Canvas {
-		let canvas = state.collection().canvas(self.view.as_deref());
-		canvas.unwrap_or(state.collection().canvas)
-	}
-
 	/// Pick which canvas Preview, Program, and Items show.
 	fn pick_view(&mut self, ui: &mut Ui, collection: &Collection) {
 		if collection.canvases.is_empty() {
@@ -799,7 +798,7 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let canvas = self.view(&state);
+		let canvas = self.drawn;
 		ui.horizontal(|ui| {
 			self.pick_view(ui, state.collection());
 			ui.label(format!(
@@ -988,7 +987,7 @@ impl Panels {
 	fn program(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
-		let canvas = self.view(&state);
+		let canvas = self.drawn;
 		let transition = state.collection().transition;
 		let mut next = transition;
 		let mut gesture = None;
@@ -1218,7 +1217,7 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let canvas = self.view(&state);
+		let canvas = self.drawn;
 		let mut scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
 		if let Some(view) = &self.view {
 			scene = format!("{scene} on `{view}`");
