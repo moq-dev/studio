@@ -49,5 +49,5 @@ their scene went on program, so the layout says when that was on the media
 clock, and a viewer that joins late lands at the same point of them.
 
 Only sources the creator publishes independently
-([Published independently](/quest/m0/publish-independently.md)) have tracks a
+([Published independently](/quest/m2/publish-independently.md)) have tracks a
 viewer can fetch; the rest reach viewers only in the program.
