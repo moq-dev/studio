@@ -101,12 +101,19 @@ fn unfinished(dir: &Path) -> Vec<(PathBuf, Marker)> {
 			}
 			let recording = dir.join(name);
 			let marker = Marker::claim(path)?;
-			if !recording.exists() {
-				tracing::debug!(marker = %marker.path.display(), "removing the marker of a recording that is gone");
-				marker.clear();
-				return None;
+			match recording.try_exists() {
+				Ok(true) => Some((recording, marker)),
+				Ok(false) => {
+					tracing::debug!(marker = %marker.path.display(), "removing the marker of a recording that is gone");
+					marker.clear();
+					None
+				}
+				// Dropping the marker keeps it for the next launch.
+				Err(err) => {
+					tracing::warn!(path = %recording.display(), error = %err, "cannot look for an unfinished recording");
+					None
+				}
 			}
-			Some((recording, marker))
 		})
 		.collect();
 	claimed.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -230,6 +237,12 @@ fn copy(path: &Path, finish: &mp4::Finish) -> anyhow::Result<PathBuf> {
 	std::fs::rename(&partial, &repaired)
 		.inspect_err(|_| remove(&repaired))
 		.with_context(|| format!("cannot write {}", repaired.display()))?;
+	// The marker is removed next, so the new name reaches the disk first.
+	// Windows cannot open a directory to sync it.
+	#[cfg(unix)]
+	std::fs::File::open(dir)
+		.and_then(|dir| dir.sync_all())
+		.with_context(|| format!("cannot sync {}", dir.display()))?;
 	Ok(repaired)
 }
 
@@ -262,6 +275,21 @@ fn apply(path: &Path, to: &Path, finish: &mp4::Finish) -> std::io::Result<()> {
 	// A clone on file systems that copy on write, so even a long recording
 	// repairs at once there.
 	std::fs::copy(path, to)?;
+	// The copy takes the original's permissions, and the original may be
+	// read-only.
+	let mut permissions = std::fs::metadata(to)?.permissions();
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		permissions.set_mode(permissions.mode() | 0o200);
+	}
+	#[cfg(not(unix))]
+	#[allow(
+		clippy::permissions_set_readonly_false,
+		reason = "only clears the read-only attribute here"
+	)]
+	permissions.set_readonly(false);
+	std::fs::set_permissions(to, permissions)?;
 	let mut file = std::fs::OpenOptions::new().write(true).open(to)?;
 	file.set_len(finish.moov_offset)?;
 	file.seek(SeekFrom::Start(finish.moov_offset))?;

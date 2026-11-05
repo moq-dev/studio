@@ -281,6 +281,10 @@ impl File {
 			Finished::Failed(format!("{err:#}"))
 		});
 		*self.finished.lock().unwrap() = Some(finished);
+		// Nothing writes the file any more, so let go of the lock of a marker a
+		// failure left, keeping the marker, and another studio's launch may
+		// repair the file while this one still runs.
+		drop(self.marker.lock().unwrap().take());
 	}
 }
 
@@ -1524,6 +1528,13 @@ mod tests {
 				(name, data)
 			})
 			.collect();
+		// A read-only original repairs too.
+		#[cfg(unix)]
+		for name in names(crashed.path()).iter().filter(|name| name.ends_with(".mp4")) {
+			use std::os::unix::fs::PermissionsExt;
+			let permissions = std::fs::Permissions::from_mode(0o444);
+			std::fs::set_permissions(crashed.path().join(name), permissions).unwrap();
+		}
 		let launch = studio.recorder(crashed.path());
 		kio::clock::timeout(Duration::from_secs(5), launch.repaired())
 			.await
@@ -1742,6 +1753,8 @@ mod tests {
 
 	/// A marker removed while its holder was not looking, and replaced by
 	/// another recording's at the same name, is no longer its holder's.
+	// Windows keeps a removed name taken while a handle to it is open.
+	#[cfg(unix)]
 	#[test]
 	fn a_replaced_marker_is_not_its_holders() {
 		let dir = tempfile::tempdir().unwrap();
