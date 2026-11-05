@@ -197,8 +197,9 @@ impl eframe::App for Studio {
 		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 		self.panels.follow_reloads(&state);
-		// A page copies through the studio's clipboard, even if the preview let
-		// go of the page before the copy came back.
+		// A page not painting through an X display copies through the
+		// studio's clipboard, even if the preview let go of the page before
+		// the copy came back.
 		if let Some(text) = state
 			.sources
 			.context()

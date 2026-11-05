@@ -271,8 +271,9 @@ Either shows at once, since the browser's processes dump no core.
 lists, such as a `<select>`'s, draw over it and take clicks under
 **Interact**, but it opens no other windows (`window.open` and new-tab links
 do nothing). Copy and Cut there put the page's selected text on the clipboard,
-as plain text, which the page's own copy handlers cannot change, and copy
-nothing from a password field.
+and nothing from a password field. Except for a page copied on the GPU through
+an X display, the text goes as plain text that the page's own copy handlers
+cannot change.
 
 An overlay is a title, lower third, or other graphic written as HTML and CSS,
 drawn by the studio itself (through [Blitz](https://github.com/DioxusLabs/blitz))

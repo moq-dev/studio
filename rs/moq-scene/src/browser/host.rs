@@ -52,6 +52,9 @@ struct Shared {
 	/// never another page's.
 	painted: Mutex<mpsc::Receiver<()>>,
 	accelerated: bool,
+	/// Whether CEF's own copy reaches the desktop's clipboard: only through
+	/// an X display.
+	native_copy: bool,
 }
 
 impl Shared {
@@ -115,6 +118,13 @@ fn serve() -> Result<(), String> {
 		writer: Mutex::new(writer),
 		painted: Mutex::new(painted),
 		accelerated: matches!(start.raster, Raster::Gpu { .. }),
+		native_copy: matches!(
+			start.raster,
+			Raster::Gpu {
+				display: Display::X11,
+				..
+			}
+		),
 	});
 	// The studio shows why, rather than only that the helper exited.
 	browse(&shared, start, reader, painted_tx).inspect_err(|reason| _ = shared.send(&Event::Fatal(reason.clone()), &[]))
@@ -313,7 +323,7 @@ fn retime(id: Id, rate: u32) {
 
 /// Hand one input event to page `id`. Runs on the UI thread.
 fn deliver(id: Id, input: Input) {
-	let Some(browser) = PAGES.with_borrow(|pages| pages.get(&id).map(|(browser, _)| browser.clone())) else {
+	let Some((browser, page)) = PAGES.with_borrow(|pages| pages.get(&id).cloned()) else {
 		return;
 	};
 	let Some(host) = browser.host() else {
@@ -379,22 +389,30 @@ fn deliver(id: Id, input: Input) {
 				host.send_key_event(Some(&event));
 			}
 		}
-		Input::Copy => copy(&browser, false),
-		Input::Cut => copy(&browser, true),
+		Input::Copy => copy(&browser, &page, false),
+		Input::Cut => copy(&browser, &page, true),
 		Input::Focus(focused) => host.set_focus(focused.into()),
 	}
 }
 
 /// Copy, or cut if `cut`, the selection in the page's focused frame, which
 /// may be an iframe, to the desktop's clipboard.
-///
-/// The frame's renderer answers with its selection, and the studio puts that
-/// on the desktop's clipboard. CEF's own copy reaches no desktop: headless
-/// Ozone, on the CPU path, has no clipboard, and Wayland's takes a selection
-/// only with the serial of an input event, which an offscreen page never
-/// receives.
-fn copy(browser: &Browser, cut: bool) {
+fn copy(browser: &Browser, page: &Paged, cut: bool) {
 	let Some(frame) = browser.focused_frame() else { return };
+	// Through an X display, CEF's clipboard is the desktop's, and the page's
+	// copy and cut handlers decide what lands there.
+	if page.shared.native_copy {
+		match cut {
+			true => frame.cut(),
+			false => frame.copy(),
+		}
+		return;
+	}
+	// Elsewhere CEF's own copy reaches no desktop: headless Ozone, on the CPU
+	// path, has no clipboard, and Wayland's takes a selection only with the
+	// serial of an input event, which an offscreen page never receives. So
+	// the frame's renderer answers with its selection, and the studio puts
+	// that on the desktop's clipboard.
 	let Some(mut message) = process_message_create(Some(&COPY.into())) else {
 		return;
 	};

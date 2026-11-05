@@ -126,7 +126,7 @@ impl Helper {
 	}
 
 	/// Take what a page last copied or cut, once, for the desktop's
-	/// clipboard, which CEF cannot reach itself from an offscreen page.
+	/// clipboard, which CEF reaches itself only through an X display.
 	#[cfg(target_os = "linux")]
 	pub fn copied(&self) -> Option<String> {
 		let running = self.running.lock().unwrap();
@@ -337,9 +337,11 @@ pub enum Input {
 	},
 	/// Text typed, after the keyboard layout and any input method.
 	Text(String),
-	/// Copy the page's selection, which [`Helper::copied`] then returns.
+	/// Copy the page's selection to the clipboard, through
+	/// [`Helper::copied`] unless the page paints through an X display.
 	Copy,
-	/// Cut the page's selection, which [`Helper::copied`] then returns.
+	/// Cut the page's selection to the clipboard, through
+	/// [`Helper::copied`] unless the page paints through an X display.
 	Cut,
 	/// The page gained or lost keyboard focus.
 	Focus(bool),
