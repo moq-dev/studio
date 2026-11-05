@@ -1,6 +1,6 @@
 //! Overlays: titles, lower thirds, and other graphics written as HTML and CSS,
-//! laid out by Blitz and painted by Vello straight into a texture on the
-//! compositor's device, on the program clock.
+//! laid out by Blitz and painted by Vello into a texture on the compositor's
+//! device, on the program clock.
 //!
 //! An overlay is untrusted, so it loads and runs nothing: Blitz has no script
 //! engine, its document has no network or navigation provider, and [`check`]
@@ -22,6 +22,24 @@ use style::shared_lock::{SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
 use style::stylesheets::{AllowImportRules, CssRule, CssRuleType, Origin, StylesheetContents, UrlExtraData};
 
 use crate::Error;
+use crate::compositor::FORMAT;
+
+/// Copies an overlay's straight paint into the texture the compositor samples,
+/// premultiplied, so scaling it mixes no transparent texel's color.
+const PREMULTIPLY: &str = r#"
+@group(0) @binding(0) var paint: texture_2d<f32>;
+
+// One triangle covering the whole target.
+@vertex fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+	let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+	return vec4<f32>(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+	let color = textureLoad(paint, vec2<i32>(position.xy), 0);
+	return vec4<f32>(color.rgb * color.a, color.a);
+}
+"#;
 
 /// The elements an overlay may hold: text and the boxes around it. Anything
 /// that loads a resource (`img`, `link`, `iframe`), runs code (`script`),
@@ -540,6 +558,9 @@ enum Request {
 	Open {
 		id: u64,
 		html: String,
+		/// Where Vello paints, straight.
+		paint: wgpu::TextureView,
+		/// Where the paint lands premultiplied, for the compositor to sample.
 		view: wgpu::TextureView,
 		start: Instant,
 	},
@@ -575,27 +596,33 @@ impl Overlays {
 	/// Lay out `html` at `width` by `height`, its CSS timeline starting at
 	/// `start` on the program clock. The HTML has passed [`check`].
 	pub fn open(&mut self, html: &str, width: u32, height: u32, start: Instant) -> Overlay {
-		let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-			label: Some("moq-scene overlay"),
-			size: wgpu::Extent3d {
-				width,
-				height,
-				depth_or_array_layers: 1,
-			},
-			mip_level_count: 1,
-			sample_count: 1,
-			dimension: wgpu::TextureDimension::D2,
-			// Vello writes gamma-encoded straight alpha, what the compositor reads.
-			format: crate::FORMAT,
-			usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-			view_formats: &[],
-		});
+		let texture = |label, usage| {
+			self.device.create_texture(&wgpu::TextureDescriptor {
+				label: Some(label),
+				size: wgpu::Extent3d {
+					width,
+					height,
+					depth_or_array_layers: 1,
+				},
+				mip_level_count: 1,
+				sample_count: 1,
+				dimension: wgpu::TextureDimension::D2,
+				// Gamma-encoded, as the compositor reads.
+				format: FORMAT,
+				usage: usage | wgpu::TextureUsages::TEXTURE_BINDING,
+				view_formats: &[],
+			})
+		};
+		// Vello writes straight alpha, which one pass per paint premultiplies.
+		let paint = texture("moq-scene overlay paint", wgpu::TextureUsages::STORAGE_BINDING);
+		let texture = texture("moq-scene overlay", wgpu::TextureUsages::RENDER_ATTACHMENT);
 		let id = self.next;
 		self.next += 1;
 		// A thread that stopped fails the next paint, which says so.
 		let _ = self.requests.send(Request::Open {
 			id,
 			html: html.to_string(),
+			paint: paint.create_view(&Default::default()),
 			view: texture.create_view(&Default::default()),
 			start,
 		});
@@ -640,7 +667,7 @@ impl Overlay {
 		self.id
 	}
 
-	/// The texture the overlay paints into, straight alpha.
+	/// The texture each paint lands in, premultiplied.
 	pub fn texture(&self) -> &wgpu::Texture {
 		&self.texture
 	}
@@ -664,7 +691,13 @@ fn run(
 	let mut painter: Option<Result<Painter, String>> = None;
 	for request in requests {
 		match request {
-			Request::Open { id, html, view, start } => {
+			Request::Open {
+				id,
+				html,
+				paint,
+				view,
+				start,
+			} => {
 				let size = view.texture().size();
 				let mut document = document(&html, size.width, size.height);
 				// Stylo starts an animation at the time of the resolve that
@@ -673,7 +706,9 @@ fn run(
 				document.resolve(0.0);
 				let document = Document {
 					document,
+					paint,
 					view,
+					premultiply: None,
 					start,
 					painted: false,
 				};
@@ -705,11 +740,13 @@ fn run(
 	}
 }
 
-/// Vello's compute pipelines on the compositor's device, compiled once and
-/// shared by every overlay.
+/// Vello's compute pipelines on the compositor's device, and the pass that
+/// premultiplies what they paint, compiled once and shared by every overlay.
 struct Painter {
 	renderer: vello::Renderer,
 	scene: vello::Scene,
+	premultiply: wgpu::RenderPipeline,
+	layout: wgpu::BindGroupLayout,
 }
 
 impl Painter {
@@ -724,17 +761,107 @@ impl Painter {
 			..Default::default()
 		};
 		let renderer = vello::Renderer::new(device, options).map_err(|err| err.to_string())?;
+
+		let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+			label: Some("moq-scene premultiply"),
+			entries: &[wgpu::BindGroupLayoutEntry {
+				binding: 0,
+				visibility: wgpu::ShaderStages::FRAGMENT,
+				ty: wgpu::BindingType::Texture {
+					sample_type: wgpu::TextureSampleType::Float { filterable: false },
+					view_dimension: wgpu::TextureViewDimension::D2,
+					multisampled: false,
+				},
+				count: None,
+			}],
+		});
+		let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+			label: Some("moq-scene premultiply"),
+			bind_group_layouts: &[Some(&layout)],
+			immediate_size: 0,
+		});
+		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+			label: Some("moq-scene premultiply"),
+			source: wgpu::ShaderSource::Wgsl(PREMULTIPLY.into()),
+		});
+		let premultiply = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+			label: Some("moq-scene premultiply"),
+			layout: Some(&pipeline_layout),
+			vertex: wgpu::VertexState {
+				module: &shader,
+				entry_point: Some("vs_main"),
+				compilation_options: Default::default(),
+				buffers: &[],
+			},
+			primitive: Default::default(),
+			depth_stencil: None,
+			multisample: Default::default(),
+			fragment: Some(wgpu::FragmentState {
+				module: &shader,
+				entry_point: Some("fs_main"),
+				compilation_options: Default::default(),
+				targets: &[Some(wgpu::ColorTargetState {
+					format: FORMAT,
+					blend: None,
+					write_mask: wgpu::ColorWrites::ALL,
+				})],
+			}),
+			multiview_mask: None,
+			cache: None,
+		});
 		Ok(Self {
 			renderer,
 			scene: vello::Scene::new(),
+			premultiply,
+			layout,
 		})
+	}
+
+	/// Copy `paint` into `view`, premultiplied, after the work already queued.
+	fn premultiply(
+		&self,
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+		bind: &wgpu::BindGroup,
+		view: &wgpu::TextureView,
+	) {
+		let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+			label: Some("moq-scene premultiply"),
+		});
+		{
+			let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+				label: Some("moq-scene premultiply"),
+				color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+					view,
+					depth_slice: None,
+					resolve_target: None,
+					ops: wgpu::Operations {
+						load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+						store: wgpu::StoreOp::Store,
+					},
+				})],
+				depth_stencil_attachment: None,
+				timestamp_writes: None,
+				occlusion_query_set: None,
+				multiview_mask: None,
+			});
+			pass.set_pipeline(&self.premultiply);
+			pass.set_bind_group(0, bind, &[]);
+			pass.draw(0..3, 0..1);
+		}
+		queue.submit([encoder.finish()]);
 	}
 }
 
 /// An overlay's document on the overlay thread, and where it paints.
 struct Document {
 	document: BaseDocument,
+	/// Where Vello paints, straight.
+	paint: wgpu::TextureView,
+	/// Where the paint lands premultiplied.
 	view: wgpu::TextureView,
+	/// `paint` bound for [`Painter::premultiply`], from the first paint on.
+	premultiply: Option<wgpu::BindGroup>,
 	/// Where its CSS timeline starts on the program clock.
 	start: Instant,
 	/// Whether the texture holds a paint yet.
@@ -757,7 +884,7 @@ impl Document {
 		self.document
 			.resolve(now.saturating_duration_since(self.start).as_secs_f64());
 
-		let size = self.view.texture().size();
+		let size = self.paint.texture().size();
 		painter.scene.reset();
 		let mut scene = anyrender_vello::VelloScenePainter::new(&mut painter.scene);
 		blitz_paint::paint_scene(&mut scene, &mut self.document, 1.0, size.width, size.height, 0, 0);
@@ -769,8 +896,19 @@ impl Document {
 		};
 		painter
 			.renderer
-			.render_to_texture(device, queue, &painter.scene, &self.view, &params)
+			.render_to_texture(device, queue, &painter.scene, &self.paint, &params)
 			.map_err(|err| err.to_string())?;
+		let bind = self.premultiply.get_or_insert_with(|| {
+			device.create_bind_group(&wgpu::BindGroupDescriptor {
+				label: Some("moq-scene premultiply"),
+				layout: &painter.layout,
+				entries: &[wgpu::BindGroupEntry {
+					binding: 0,
+					resource: wgpu::BindingResource::TextureView(&self.paint),
+				}],
+			})
+		});
+		painter.premultiply(device, queue, bind, &self.view);
 		self.painted = true;
 		Ok(())
 	}

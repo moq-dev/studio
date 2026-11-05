@@ -426,10 +426,10 @@ impl Compositor {
 				overlay: None,
 				error: None,
 			});
-			// Every picture lands premultiplied, so its texels mix on the
-			// sampler's fast path: a page arrives so, moq-video renders a
-			// frame opaque, and a still is premultiplied here. Only an
-			// overlay's paint is straight, for the shader to premultiply.
+			// Every picture lands premultiplied, so scaling it mixes no
+			// transparent texel's color: a page arrives so, moq-video renders
+			// a frame opaque, a still is premultiplied here, and an overlay's
+			// paint as it lands.
 			let texture = match picture {
 				source::Picture::Frame(frame) => {
 					let renderer = match layer.renderer.as_mut() {
@@ -461,7 +461,7 @@ impl Compositor {
 					match overlays {
 						Ok(overlays) => {
 							let overlay = overlays.open(html, *width, *height, now);
-							layer.picture = Some(self.effects.picture(overlay.texture(), false));
+							layer.picture = Some(self.effects.picture(overlay.texture()));
 							layer.overlay = Some(overlay);
 						}
 						Err(err) => layer.error = Some(err.to_string()),
@@ -473,7 +473,7 @@ impl Compositor {
 			match texture {
 				Ok(texture) => {
 					layer.error = None;
-					layer.picture = Some(self.effects.picture(&texture, true));
+					layer.picture = Some(self.effects.picture(&texture));
 				}
 				Err(err) => {
 					if layer.error.is_none() {
@@ -1008,7 +1008,7 @@ impl Target {
 			view_formats: &[],
 		});
 		// A canvas is opaque, which is premultiplied too.
-		let picture = effects.picture(&texture, true);
+		let picture = effects.picture(&texture);
 		Self { texture, picture }
 	}
 }
