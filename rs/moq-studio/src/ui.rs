@@ -133,7 +133,8 @@ impl Studio {
 				record_sources: false,
 				interacting: false,
 				interact: Interact::default(),
-				previewed: false,
+				previewed: true,
+				fresh: false,
 				bound: BTreeMap::new(),
 				replay: Replay::default(),
 				guest: String::new(),
@@ -188,14 +189,17 @@ impl eframe::App for Studio {
 			self.panels.view = None;
 			self.panels.deselect_item();
 		}
-		// Only the canvas shown, and one picked to show next, draws a preview.
-		let previewed = [self.panels.view.as_deref()].into_iter();
-		let previewed: Vec<Option<&str>> = previewed
+		// Only the canvas shown, while the Preview panel was drawn last frame,
+		// and one picked to show next draw a preview.
+		let shown = self.panels.previewed.then_some(self.panels.view.as_deref());
+		let previewed: Vec<Option<&str>> = shown
+			.into_iter()
 			.chain(self.panels.picked.as_ref().map(Option::as_deref))
 			.collect();
 		state.compositor.set_previewed(&previewed);
 		let view = state.compositor.output(self.panels.view.as_deref());
 		let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
+		self.panels.fresh = view.previewed();
 		// The size the textures were drawn at, which an edit this frame, such
 		// as an undo removing the canvas, does not change until the next.
 		self.panels.drawn = view.canvas();
@@ -319,6 +323,9 @@ struct Panels {
 	interact: Interact,
 	/// Whether this frame drew the preview, which a stacked tab can hide.
 	previewed: bool,
+	/// Whether the last render drew the preview of the canvas shown, which
+	/// it skips while the Preview panel is hidden.
+	fresh: bool,
 	/// The page `interact` holds state for under each name, so one stopped or
 	/// restarted under it, as an edit or a reload does, is forgotten.
 	bound: BTreeMap<String, moq_scene::browser::Page>,
@@ -860,6 +867,13 @@ impl Panels {
 					.suffix(" px"),
 			);
 		});
+		// Shown again after being hidden, it waits a frame for a preview drawn
+		// now rather than showing the one left from before.
+		if !self.fresh {
+			ui.weak("Drawing the preview");
+			ui.ctx().request_repaint();
+			return;
+		}
 		// Interacting, the pointer belongs to the pages rather than to arranging.
 		if self.interacting {
 			let image = picture(ui, self.preview.id, canvas, egui::Sense::hover()).rect;

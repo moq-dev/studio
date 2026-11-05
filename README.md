@@ -122,8 +122,8 @@ layout on each canvas, and each canvas its own top layer; a scene without a
 layout on a canvas shows only that canvas's top layer there. Every canvas
 shares the main canvas's frame rate. A source captures or decodes once however
 many canvases show it, and a canvas draws only the items it places. Only the
-canvas Preview shows draws a preview, so a canvas nobody looks at costs only
-its program.
+canvas Preview shows draws a preview, and only while the Preview panel is
+visible, so a canvas nobody looks at costs only its program.
 
 A further canvas starts linked: it has the main canvas's scene in preview and
 on program, and a cut or transition takes it with the main canvas, by the main
