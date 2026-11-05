@@ -105,7 +105,7 @@ Every panel is a tab you can drag, split, or stack.
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
 | Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
 | Output | Start and stop recording, pick the mix it records, set the canvas size and frame rate, add, resize, and remove further canvases, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each canvas's renditions' encoder work. |
-| Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
+| Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
@@ -767,6 +767,16 @@ and becomes a regular MP4 when the recording stops or the studio quits.
 Quitting first lets the recording's encoders publish what they still hold, and
 the program's file keeps it. A file nothing reached before the recording
 stopped is removed.
+
+While a file is written, a marker `<name>.mp4.unfinished` sits beside it. A
+crash, a power loss, or a write that failed leaves the marker, and the next
+launch repairs that file without asking: it writes `<name>.repaired.mp4`
+beside it, numbered if a file already has that name, a regular MP4 of
+everything the file holds up to its last complete fragment, leaves the
+original untouched, and removes the marker, so the file is repaired
+only once. The repair runs in the background and appears at the top of the
+Health panel and in the log. A file another studio is still recording into the
+same directory is left alone.
 
 ### Source frames
 
