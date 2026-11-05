@@ -606,6 +606,16 @@ impl<'a> Video<'a> {
 		Ok(())
 	}
 
+	/// Start a group with the next picture, as a keyframe, such as where a
+	/// media file plays again from its start. A closed encoder starts with one
+	/// anyway.
+	pub(crate) fn cut(&mut self) -> Result<(), Error> {
+		if self.track.is_open() {
+			self.track.cut()?;
+		}
+		Ok(())
+	}
+
 	/// Mark a break, such as a gap in a replay: what follows does not continue
 	/// what came before, and a viewer arriving during it waits for what follows
 	/// rather than being served the last picture as if it were live.
@@ -776,6 +786,19 @@ mod tests {
 		OnProgram {
 			heard: [name.to_string()].into(),
 			..Default::default()
+		}
+	}
+
+	/// Walk a media source playing a 10 fps clip through `count` pictures, the
+	/// first due at `first`. The clock moves to each picture's moment and is
+	/// held while it decodes, encodes, and shows, so no wait counts on work in
+	/// threads the runtime cannot see, such as a decoder's or an encoder's,
+	/// finishing within any span of the clock.
+	async fn pictures(feed: &crate::source::Feed, first: kio::clock::Instant, count: u32) {
+		let shown = || matches!(feed.take(), Some(crate::source::Picture::Frame(_))).then_some(());
+		for index in 0..count {
+			until_time(first + std::time::Duration::from_millis(100) * index).await;
+			until(shown).await;
 		}
 	}
 
@@ -1469,35 +1492,36 @@ mod tests {
 			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 			let mut track = moq_mux::container::Consumer::new(track, container);
 
-			// Each wait holds the clock: a decoder working on its own thread
-			// leaves the runtime idle, which would otherwise jump the clock past
-			// pictures still to come.
+			// Half way, five pictures in, it starts over, and plays to its end.
+			let first = kio::clock::now();
+			pictures(feed, first, 5).await;
+			until_time(first + std::time::Duration::from_millis(450)).await;
+			let cut = publish.catalog.clock().now();
+			feed.play().unwrap();
+			let restarted = kio::clock::now();
+			pictures(feed, restarted, 10).await;
+			until_time(restarted + std::time::Duration::from_millis(1_100)).await;
+			until(|| (feed.status() == Status::Ended).then_some(())).await;
+
+			// How many pictures land depends on the encoder, which may skip
+			// some to hold its rate, as openh264 does at this size; the
+			// keyframe each play opens with always does.
 			let now = kio::Waiter::noop();
 			let mut stamps = Vec::new();
-			let mut read = |count: usize| {
+			until(|| {
 				while let std::task::Poll::Ready(read) = track.poll_read(&now) {
 					if let moq_mux::container::Read::Frame { frame, .. } = read.unwrap().expect("open") {
 						stamps.push(frame.timestamp);
 					}
 				}
-				(stamps.len() >= count).then_some(())
-			};
-
-			// Half way, five pictures in, it starts over.
-			let begin = kio::clock::now();
-			until_time(begin + std::time::Duration::from_millis(450)).await;
-			until(|| read(5)).await;
-			feed.play().unwrap();
-			until(|| read(6)).await;
-			let restarted = kio::clock::now();
-			until_time(restarted + std::time::Duration::from_millis(350)).await;
-			until(|| read(9)).await;
+				stamps.iter().any(|stamp| *stamp >= cut).then_some(())
+			})
+			.await;
+			assert!(stamps[0] < cut, "the first play's keyframe: {stamps:?}");
 			assert!(stamps.windows(2).all(|pair| pair[0] < pair[1]), "{stamps:?}");
 
 			// Ended, it shows nothing new, yet gives its session back once off
 			// program and unread.
-			until_time(restarted + std::time::Duration::from_millis(1_200)).await;
-			until(|| (feed.status() == Status::Ended).then_some(())).await;
 			assert_eq!(sessions.open(), 1, "on program");
 			drop(track);
 			publish.set_on_program(Default::default());
@@ -1539,18 +1563,80 @@ mod tests {
 			let video = listed.video.renditions.keys().next().unwrap().clone();
 			let written = |id: &str| publish.stats().get(id).map_or(0, |rendition| rendition.frames);
 
-			until_time(kio::clock::now() + std::time::Duration::from_millis(300)).await;
+			let feed = sources.get("bed").unwrap();
+			let first = kio::clock::now();
+			pictures(feed, first, 4).await;
 			until(|| (written(&audio) > 0).then_some(())).await;
 			assert_eq!(written(&video), 0, "heard, not shown");
 			assert_eq!(sessions.open(), 0, "no encoder for the pictures");
 
-			// Shown too, its pictures encode as they play.
+			// Shown too, its pictures encode as they play, past what a
+			// pipelined encoder holds back.
 			publish.set_on_program(OnProgram {
 				shown: ["bed".to_string()].into(),
 				heard: ["bed".to_string()].into(),
 			});
-			until_time(kio::clock::now() + std::time::Duration::from_millis(300)).await;
+			pictures(feed, first + std::time::Duration::from_millis(400), 6).await;
 			until(|| (written(&video) > 0).then_some(())).await;
+		})
+		.await;
+	}
+
+	/// A looping file whose sound is shorter than its pictures keeps its sound
+	/// track on time: each loop's sound starts where the loop does, the
+	/// silence between kept, rather than right after the last loop's sound.
+	#[tokio::test(start_paused = true)]
+	async fn a_looping_media_file_keeps_its_sound_on_time() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("bed.mkv"), crate::media::tests::UNEVEN).unwrap();
+			let (publish, catalog, consumer) = studio();
+			publish.set_on_program(heard("bed"));
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish.clone());
+			let mut collection = Collection::new();
+			let bed = Source::Media {
+				path: "bed.mkv".into(),
+				looping: true,
+				restart: false,
+			};
+			collection.sources.insert("bed".into(), bed);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			let listed = until(|| {
+				let listed = catalog.snapshot().ext.studio.sources.remove("bed");
+				listed.filter(|listed| !listed.audio.renditions.is_empty())
+			})
+			.await;
+			let (name, config) = listed.audio.renditions.iter().next().unwrap();
+			let track = consumer
+				.track(hang::catalog::Reference::track(config, name))
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None)),
+				)
+				.await
+				.unwrap();
+			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
+			let mut track = moq_mux::container::Consumer::new(track, container);
+			// Two and a half loops of a second, each with half a second of sound.
+			pictures(sources.get("bed").unwrap(), kio::clock::now(), 25).await;
+			let now = kio::Waiter::noop();
+			let mut stamps = Vec::new();
+			let silences = until(|| {
+				while let std::task::Poll::Ready(read) = track.poll_read(&now) {
+					if let moq_mux::container::Read::Frame { frame, .. } = read.unwrap().expect("open") {
+						stamps.push(std::time::Duration::from(frame.timestamp));
+					}
+				}
+				let gaps = stamps.windows(2).map(|pair| pair[1].saturating_sub(pair[0]));
+				let silences = gaps.filter(|gap| *gap > std::time::Duration::from_millis(300)).count();
+				(silences >= 2).then_some(silences)
+			})
+			.await;
+			assert_eq!(silences, 2, "each loop's silence is kept: {stamps:?}");
 		})
 		.await;
 	}

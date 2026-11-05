@@ -1252,30 +1252,38 @@ impl Driver {
 				Some(Sound {
 					channel,
 					track,
-					gap: false,
+					ended: None,
 				})
 			}
 			_ => None,
 		};
 		let mut own = Own::new(listing, kio::clock::now());
 		// The last channel on a strip to close drops what it has not played
-		// yet, so a loop keeps its channel and its track's timeline, sounding
-		// on, while a play after a restart or an end takes a new channel,
-		// cutting off what the play before still had queued, and marks a gap on
-		// its track. The old channel goes first: one left on the strip would
-		// keep the strip's queue, delay included, for the new.
-		let restart = |sound: &mut Option<Sound<'_>>| -> Result<(), Error> {
+		// yet, so a loop keeps its channel, sounding on, while a play after a
+		// restart or an end takes a new channel, cutting off what the play
+		// before still had queued. The old channel goes first: one left on the
+		// strip would keep the strip's queue, delay included, for the new.
+		// Its pictures start a group there too, a cut to the clip's start.
+		let restart = |sound: &mut Option<Sound<'_>>, own: &mut Own<'_, '_>| -> Result<(), Error> {
 			if let (Some(sound), Some(strip)) = (sound, &self.strip) {
 				drop(sound.channel.take());
 				sound.channel = Some(self.channel(strip.clone())?);
-				sound.gap = true;
+				sound.ended = None;
+			}
+			if let Some(video) = &mut own.track
+				&& let Err(err) = video.cut()
+			{
+				self.fail_encoding(&mut own.track, err);
 			}
 			Ok(())
 		};
+		// Where a loop's next play starts: where the last one ended, so loops
+		// keep exact time whatever opening the decoders takes.
+		let mut next = None;
 		loop {
 			let restarted = tokio::select! {
-				result = self.play_clip(&clip, sound.as_mut(), &mut own) => {
-					result?;
+				result = self.play_clip(&clip, sound.as_mut(), &mut own, next) => {
+					next = Some(result?);
 					false
 				}
 				changed = starts.changed() => {
@@ -1287,7 +1295,8 @@ impl Driver {
 				}
 			};
 			if restarted {
-				restart(&mut sound)?;
+				restart(&mut sound, &mut own)?;
+				next = None;
 				continue;
 			}
 			if looping {
@@ -1295,7 +1304,8 @@ impl Driver {
 			}
 			set(&self.status, Status::Ended);
 			self.ended(&mut starts, &mut own).await;
-			restart(&mut sound)?;
+			restart(&mut sound, &mut own)?;
+			next = None;
 		}
 	}
 
@@ -1330,14 +1340,16 @@ impl Driver {
 	}
 
 	/// Play `clip` once, each picture and sound when its moment comes, the
-	/// first at once. Ends once the last has played for as long as it lasts:
-	/// a sound for its samples, and a picture for as long as the one before it.
+	/// first at `begin`, or at once. Returns where it ends, once the last has
+	/// played for as long as it lasts: a sound for its samples, and a picture
+	/// for as long as the one before it. A clip that decodes to nothing fails.
 	async fn play_clip(
 		&self,
 		clip: &Clip,
 		mut sound: Option<&mut Sound<'_>>,
 		own: &mut Own<'_, '_>,
-	) -> Result<(), Error> {
+		begin: Option<Instant>,
+	) -> Result<Instant, Error> {
 		set(&self.status, Status::Live);
 		let broadcast = clip.consume();
 		let mut video = match &clip.video {
@@ -1370,14 +1382,16 @@ impl Driver {
 			samples.as_ref().map(|frame| Duration::from(frame.timestamp)),
 		];
 		let Some(start) = first.into_iter().flatten().min() else {
-			return Ok(());
+			// Its tracks hold no frame that decodes, which a loop would only
+			// play again at once, forever.
+			return Err(Error::Media("the file decodes to no picture or sound".into()));
 		};
 		// The pictures' track opens before the clock starts, so the encoder's
 		// probe holds back neither the first picture nor the sound beside it.
 		if let (Some(frame), Some((_, config))) = (&picture, &video) {
 			self.open(own, frame, config).await;
 		}
-		let begin = kio::clock::now();
+		let begin = begin.unwrap_or_else(kio::clock::now);
 		let at = |timestamp: moq_net::Timestamp| begin + Duration::from(timestamp).saturating_sub(start);
 		let end = std::cell::Cell::new(begin);
 		let last = |until: Instant| end.set(end.get().max(until));
@@ -1404,11 +1418,18 @@ impl Driver {
 			};
 			let bus = self.context.bus.config();
 			let bytes = std::mem::size_of::<f32>() * bus.layout.channels() as usize;
+			// The track's timeline runs on by its samples only from a sound
+			// that starts right where the last one ended, as a loop's does
+			// when its sound is its longest track: any other start, such as
+			// after a loop's silence while its pictures play on, is a gap.
+			let mut first = true;
 			while let Some(frame) = samples.take() {
 				let due = at(frame.timestamp);
 				kio::clock::sleep_until(due).await;
 				let length = (frame.data.len() / bytes) as u64 * 1_000_000_000 / u64::from(bus.sample_rate);
 				last(due + Duration::from_nanos(length));
+				let gap = std::mem::take(&mut first) && sound.ended != Some(due);
+				sound.ended = Some(due + Duration::from_nanos(length));
 				sound
 					.channel
 					.as_mut()
@@ -1416,7 +1437,7 @@ impl Driver {
 					.write(&frame.data)?;
 				if let Some(track) = &mut sound.track {
 					let samples: Vec<f32> = bytemuck::pod_collect_to_vec(&frame.data);
-					if let Err(err) = track.write(&samples, kio::clock::now(), std::mem::take(&mut sound.gap)) {
+					if let Err(err) = track.write(&samples, due, gap) {
 						tracing::warn!(source = %self.name, %err, "cannot encode the source");
 						self.fail_track(Status::Failed(err.to_string()));
 						sound.track.take().expect("encoding").abort(&err);
@@ -1428,7 +1449,7 @@ impl Driver {
 		};
 		tokio::try_join!(pictures, sounds)?;
 		kio::clock::sleep_until(end.get()).await;
-		Ok(())
+		Ok(end.get())
 	}
 
 	/// Open the source's own track for pictures like `frame`, which says their
@@ -1499,9 +1520,9 @@ impl Driver {
 struct Sound<'a> {
 	channel: Option<moq_audio::bus::Channel>,
 	track: Option<crate::publish::Audio<'a>>,
-	/// Whether the next sound follows a break, a restart or a pause after the
-	/// end, rather than a loop, which the track's timeline runs on through.
-	gap: bool,
+	/// When the last sound written ends, or `None` after a break, such as a
+	/// restart, so the next sound's track starts its timeline afresh.
+	ended: Option<Instant>,
 }
 
 /// A played source's own track, opened at its first picture, and the timeline

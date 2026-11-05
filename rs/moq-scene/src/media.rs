@@ -143,6 +143,9 @@ pub(crate) mod tests {
 	/// The first half second of [`CLIP`]'s pictures alone.
 	pub(crate) const SILENT: &[u8] = include_bytes!("test_data/silent.mkv");
 
+	/// [`CLIP`]'s second of pictures with [`TONE`]'s half second of sound.
+	pub(crate) const UNEVEN: &[u8] = include_bytes!("test_data/uneven.mkv");
+
 	#[test]
 	fn reads_by_the_first_bytes() {
 		assert_eq!(container(CLIP), Ok(ContainerFormat::Mkv));
