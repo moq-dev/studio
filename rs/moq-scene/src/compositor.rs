@@ -1,13 +1,17 @@
 //! Draw scenes onto the canvas on the GPU: a preview, a program, and the
 //! transition between them.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
-use crate::collection::{Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Rect, Source, Transition};
+use crate::collection::{
+	Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Rect, Settled, Source, Transition,
+};
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::overlay::{Overlay, Overlays};
 use crate::source::{self, Sources};
@@ -30,9 +34,11 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// broadcast switcher and CSS do, so a 50% fade is a 50% mix of the stored
 /// values.
 ///
-/// A transition runs on the clock [`render`](Self::render) is given, so every
-/// output drawn from the program, such as the encoder and a recording, sees the
-/// same frame of it.
+/// A transition and each item's keyframes run on the clock
+/// [`render`](Self::render) is given, so every output drawn from the program,
+/// such as the encoder and a recording, sees the same frame of them. An item's
+/// keyframes start when its scene goes on program, and separately when it goes
+/// into preview, for the preview.
 pub struct Compositor {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
@@ -52,12 +58,22 @@ pub struct Compositor {
 	overlays: Option<Overlays>,
 	preview_scene: Option<String>,
 	program_scene: Option<String>,
+	/// When the preview scene went into preview, or `None` until the next
+	/// render, which starts it.
+	preview_start: Option<Instant>,
+	/// When the program scene went on program, as `preview_start` is.
+	program_start: Option<Instant>,
+	/// How long the preview scene had been in preview as of the last render:
+	/// the moment of its keyframes the preview texture shows.
+	preview_shown: Duration,
 	switch: Option<Switch>,
 }
 
 /// A transition under way from `from` to the program scene.
 struct Switch {
 	from: Option<String>,
+	/// When `from` went on program.
+	from_start: Instant,
 	start: Instant,
 	transition: Transition,
 }
@@ -121,6 +137,9 @@ impl Compositor {
 			overlays: None,
 			preview_scene: None,
 			program_scene: None,
+			preview_start: None,
+			program_start: None,
+			preview_shown: Duration::ZERO,
 			switch: None,
 		})
 	}
@@ -190,9 +209,18 @@ impl Compositor {
 		self.program_scene.as_deref().into_iter().chain(leaving)
 	}
 
-	/// Put the scene called `scene` in preview, or nothing.
+	/// Put the scene called `scene` in preview, or nothing, playing its
+	/// keyframes from the start, even if it was already there.
 	pub fn set_preview(&mut self, scene: Option<String>) {
 		self.preview_scene = scene;
+		self.preview_start = None;
+	}
+
+	/// How long the preview scene had been in preview as of the last
+	/// [`render`](Self::render): the moment of its items' keyframes the
+	/// [`preview`](Self::preview) shows, for [`Item::posed`].
+	pub fn preview_since(&self) -> Duration {
+		self.preview_shown
 	}
 
 	/// Follow each renamed scene to its new name, wherever it is: in preview,
@@ -232,6 +260,7 @@ impl Compositor {
 	pub fn cut(&mut self) {
 		self.switch = None;
 		self.program_scene = self.preview_scene.clone();
+		self.program_start = None;
 	}
 
 	/// Take the preview to program by `transition`, starting at `now`.
@@ -240,8 +269,10 @@ impl Compositor {
 	/// starts from what that one was heading to.
 	pub fn transition(&mut self, transition: Transition, now: Instant) {
 		let from = std::mem::replace(&mut self.program_scene, self.preview_scene.clone());
+		let from_start = self.program_start.replace(now).unwrap_or(now);
 		self.switch = (!transition.duration().is_zero()).then_some(Switch {
 			from,
+			from_start,
 			start: now,
 			transition,
 		});
@@ -256,6 +287,11 @@ impl Compositor {
 	pub fn render(&mut self, collection: &Collection, sources: &Sources, now: Instant) -> Result<(), Error> {
 		self.update(collection, sources, now);
 		self.paint(collection, now);
+
+		let since = |start: &mut Option<Instant>| now.saturating_duration_since(*start.get_or_insert(now));
+		let preview_since = since(&mut self.preview_start);
+		self.preview_shown = preview_since;
+		let program_since = since(&mut self.program_start);
 
 		let linear = self.switch.as_ref().map(|switch| {
 			let elapsed = now.saturating_duration_since(switch.start);
@@ -277,13 +313,13 @@ impl Compositor {
 		// The top layer goes over both outputs, and over a transition rather
 		// than through it, so it stays on across the switch.
 		draw.target(&self.preview);
-		draw.scene(&self.preview, self.preview_scene.as_deref());
-		draw.layer(&self.preview, Place::Top);
+		draw.scene(&self.preview, On(self.preview_scene.as_deref(), preview_since));
+		draw.layer(&self.preview, Place::Top, Duration::ZERO);
 
-		let to = self.program_scene.as_deref();
+		let to = On(self.program_scene.as_deref(), program_since);
 		match (&self.switch, linear) {
 			(Some(switch), Some(linear)) => {
-				let from = switch.from.as_deref();
+				let from = On(switch.from.as_deref(), now.saturating_duration_since(switch.from_start));
 				let progress = switch.transition.progress(linear);
 				let canvas = Rect::fill(&self.canvas);
 				match switch.transition {
@@ -324,7 +360,7 @@ impl Compositor {
 				draw.scene(&self.program, to);
 			}
 		}
-		draw.layer(&self.program, Place::Top);
+		draw.layer(&self.program, Place::Top, Duration::ZERO);
 
 		self.effects.submit(frame);
 		Ok(())
@@ -526,12 +562,7 @@ impl Pose {
 				width: mix(self.rect.width, other.rect.width),
 				height: mix(self.rect.height, other.rect.height),
 			},
-			crop: Crop {
-				left: mix(self.crop.left, other.crop.left),
-				top: mix(self.crop.top, other.crop.top),
-				right: mix(self.crop.right, other.crop.right),
-				bottom: mix(self.crop.bottom, other.crop.bottom),
-			},
+			crop: self.crop.toward(&other.crop, progress),
 			opacity: mix(self.opacity, other.opacity),
 		}
 	}
@@ -554,9 +585,9 @@ fn mixed(old: &Item, new: &Item, progress: f32) -> Option<Vec<Filter>> {
 /// `other` goes just over the paired item it was over in `other`, or under
 /// every slot if it was under every paired item.
 fn stack(
-	lead: &[Item],
+	lead: &[Cow<'_, Item>],
 	lead_pairs: &[Option<usize>],
-	other: &[Item],
+	other: &[Cow<'_, Item>],
 	other_pairs: &[Option<usize>],
 ) -> Vec<(Option<usize>, Option<usize>)> {
 	let mut over: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
@@ -597,14 +628,21 @@ fn fits(device: &wgpu::Device, canvas: Canvas) -> Result<(), Error> {
 	Ok(())
 }
 
+/// A scene to draw, or none, and how long it has been on: where its items'
+/// keyframes are.
+#[derive(Clone, Copy)]
+struct On<'a>(Option<&'a str>, Duration);
+
 /// One render's draws onto its targets.
 struct Draw<'a> {
 	collection: &'a Collection,
 	effects: &'a mut Effects,
 	library: Library<'a>,
 	frame: &'a mut Frame,
-	/// Each item, filtered once though it is drawn onto several targets.
-	prepared: HashMap<(Place, usize), Option<Prepared>>,
+	/// Each item, filtered once though it is drawn onto several targets, by
+	/// where it is and its [`Item::settled`] time, as two outputs showing its
+	/// scene can be at different points of its keyframes.
+	prepared: HashMap<(Place, usize, Settled), Option<Prepared>>,
 }
 
 impl Draw<'_> {
@@ -613,17 +651,17 @@ impl Draw<'_> {
 		self.frame.target(&target.picture);
 	}
 
-	/// Draw `scene`'s items onto `target`. A missing scene draws nothing.
-	fn scene(&mut self, target: &Target, scene: Option<&str>) {
-		if let Some(scene) = scene.filter(|name| self.collection.scene(name).is_some()) {
-			self.layer(target, Place::Scene(scene.to_string()));
+	/// Draw `on`'s items onto `target`. A missing scene draws nothing.
+	fn scene(&mut self, target: &Target, on: On) {
+		if let Some(scene) = on.0.filter(|name| self.collection.scene(name).is_some()) {
+			self.layer(target, Place::Scene(scene.to_string()), on.1);
 		}
 	}
 
-	/// Start drawing `target`, and draw `scene` onto it whole.
-	fn whole(&mut self, target: &Target, scene: Option<&str>) {
+	/// Start drawing `target`, and draw `on` onto it whole.
+	fn whole(&mut self, target: &Target, on: On) {
 		self.target(target);
-		self.scene(target, scene);
+		self.scene(target, on);
 	}
 
 	/// Draw `picture`, a canvas-sized target drawn this render, onto `target`
@@ -634,19 +672,20 @@ impl Draw<'_> {
 		}
 	}
 
-	/// Draw `place`'s items onto `target`, back to front, each through its crop,
-	/// filters, and blend mode. A hidden item, a source with no picture yet, or
-	/// a filter whose source has nothing yet draws nothing.
-	fn layer(&mut self, target: &Target, place: Place) {
+	/// Draw `place`'s items onto `target`, back to front, each posed `since`
+	/// `place` went on, through its crop, filters, and blend mode. A hidden
+	/// item, a source with no picture yet, or a filter whose source has nothing
+	/// yet draws nothing.
+	fn layer(&mut self, target: &Target, place: Place, since: Duration) {
 		let items = self.collection.items(&place).map_or(&[][..], Vec::as_slice);
 		for (index, item) in items.iter().enumerate().filter(|(_, item)| item.visible) {
-			self.item(target, &place, index, item);
+			self.item(target, (place.clone(), index, item.settled(since)), &item.posed(since));
 		}
 	}
 
-	/// Draw `item`, at `index` of `place`, onto `target` where it is placed.
-	fn item(&mut self, target: &Target, place: &Place, index: usize, item: &Item) {
-		let key = (place.clone(), index);
+	/// Draw `item`, posed, where it is placed onto `target`, shared with every
+	/// other draw of it under `key`.
+	fn item(&mut self, target: &Target, key: (Place, usize, Settled), item: &Item) {
 		let prepared = match self.prepared.get(&key) {
 			Some(prepared) => prepared.clone(),
 			None => {
@@ -671,7 +710,7 @@ impl Draw<'_> {
 	}
 
 	/// Draw `progress` of a move from scene `from` to scene `to` onto
-	/// `target`.
+	/// `target`, each item posed by its keyframes as its scene is.
 	///
 	/// Each visible item of `to` is paired with the first visible item of
 	/// `from` showing the same source that no earlier one took, and glides
@@ -682,13 +721,15 @@ impl Draw<'_> {
 	/// unpaired item just over the paired item it was over, so the move
 	/// starts from `from` and lands on `to` as each is drawn. A paired item
 	/// whose blend mode or kinds of filter differ changes look halfway too.
-	fn moving(&mut self, target: &Target, from: Option<&str>, to: Option<&str>, progress: f32) {
+	fn moving(&mut self, target: &Target, from: On, to: On, progress: f32) {
 		let collection = self.collection;
 		let items = |scene: Option<&str>| {
 			let scene = scene.and_then(|name| collection.scene(name));
 			scene.map_or(&[][..], |scene| scene.items.as_slice())
 		};
-		let (leaving, entering) = (items(from), items(to));
+		let posed = |on: On| -> Vec<Cow<'_, Item>> { items(on.0).iter().map(|item| item.posed(on.1)).collect() };
+		let resting = items(to.0);
+		let (leaving, entering) = (posed(from), posed(to));
 
 		// Which item of the other scene each visible item pairs with.
 		let mut left = vec![None; leaving.len()];
@@ -704,13 +745,13 @@ impl Draw<'_> {
 
 		// Each slot is an index into `leaving`, `entering`, or both.
 		let slots: Vec<(Option<usize>, Option<usize>)> = if progress < 0.5 {
-			stack(leaving, &left, entering, &entered)
+			stack(&leaving, &left, &entering, &entered)
 		} else {
-			let slots = stack(entering, &entered, leaving, &left);
+			let slots = stack(&entering, &entered, &leaving, &left);
 			slots.into_iter().map(|(to, from)| (from, to)).collect()
 		};
 
-		let place = Place::Scene(to.unwrap_or_default().to_string());
+		let place = Place::Scene(to.0.unwrap_or_default().to_string());
 		for slot in slots {
 			match slot {
 				(Some(at), None) => {
@@ -730,13 +771,14 @@ impl Draw<'_> {
 					);
 				}
 				(Some(at), Some(index)) => {
-					let (old, new) = (&leaving[at], &entering[index]);
+					let (old, new) = (&*leaving[at], &*entering[index]);
 					let own = Pose::of(collection, new);
 					let pose = Pose::of(collection, old).toward(&own, progress);
 					if old.filters == new.filters && old.blend == new.blend {
 						if pose == own {
-							// Shared with the preview, which draws it the same.
-							self.item(target, &place, index, new);
+							// Shared with the preview when it draws the same.
+							let key = (place.clone(), index, resting[index].settled(to.1));
+							self.item(target, key, new);
 						} else {
 							self.posed(target, new, pose);
 						}
@@ -1296,6 +1338,128 @@ mod tests {
 			assert_eq!(pixel(&program, 1, 6), BLUE);
 			assert_eq!(pixel(&program, 6, 6), BLACK);
 			assert_eq!(pixel(&program, 7, 0), GREEN);
+		})
+		.await;
+	}
+
+	/// Keyframes sliding an item in from off the canvas's left over a second.
+	fn slide_in() -> Vec<crate::Keyframe> {
+		vec![
+			crate::Keyframe {
+				x: -8.0,
+				..crate::Keyframe::new(Duration::ZERO)
+			},
+			crate::Keyframe {
+				ease: crate::Ease::Linear,
+				..crate::Keyframe::new(Duration::from_secs(1))
+			},
+		]
+	}
+
+	/// An item's keyframes play from when its scene went into preview, for the
+	/// preview, and from when it went on program, for the program, so one scene
+	/// can be at two points of them at once.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn keyframes_play_from_when_the_scene_goes_on() {
+		local(async {
+			let mut collection = collection();
+			collection.scenes[1].items[0].keyframes = slide_in();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			let at = |millis| start + Duration::from_millis(millis);
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut();
+			studio.compositor.set_preview(Some("blue".into()));
+
+			studio.render(at(0));
+			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK, "off the canvas");
+			studio.render(at(500));
+			assert_eq!(
+				studio.compositor.preview_since(),
+				Duration::from_millis(500),
+				"the frame shown"
+			);
+			let preview = studio.preview();
+			assert_eq!(pixel(&preview, 1, 6), BLUE, "halfway in");
+			assert_eq!(pixel(&preview, 6, 6), BLACK);
+
+			studio.compositor.cut();
+			studio.render(at(500));
+			assert_eq!(pixel(&studio.program(), 1, 6), BLACK, "on program from the start");
+			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE, "the preview carries on");
+
+			studio.render(at(1000));
+			let program = studio.program();
+			assert_eq!(pixel(&program, 1, 6), BLUE);
+			assert_eq!(pixel(&program, 6, 6), BLACK);
+			assert_eq!(pixel(&studio.preview(), 6, 6), BLUE, "landed where it rests");
+			studio.render(at(9000));
+			assert_eq!(pixel(&studio.program(), 6, 6), BLUE, "holding the last keyframe");
+
+			// Picking the scene again plays it again.
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(at(9000));
+			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK);
+		})
+		.await;
+	}
+
+	/// Two outputs at either side of a jump, keyframes at the same moment, each
+	/// draw their own side of it rather than share one.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_jump_draws_each_side_on_its_own_output() {
+		local(async {
+			let mut collection = collection();
+			let jump = Duration::from_secs(1);
+			collection.scenes[1].items[0].keyframes = vec![
+				crate::Keyframe {
+					x: -8.0,
+					..crate::Keyframe::new(jump)
+				},
+				crate::Keyframe::new(jump),
+			];
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut();
+			studio.render(start);
+			// Program has reached the jump; preview starts over before it.
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(start + jump);
+			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK, "before the jump");
+			assert_eq!(pixel(&studio.program(), 1, 6), BLUE, "after the jump");
+		})
+		.await;
+	}
+
+	/// A transition starts the incoming scene's keyframes, however long it was
+	/// in preview, while the outgoing scene's carry on.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_transition_starts_the_incoming_keyframes() {
+		local(async {
+			let mut collection = collection();
+			collection.scenes[0].items[0].keyframes = slide_in();
+			collection.scenes[1].items[0].keyframes = slide_in();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			let at = |millis| start + Duration::from_millis(millis);
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.render(at(0));
+
+			studio.compositor.transition(FADE, at(9000));
+			studio.render(at(9500));
+			let program = studio.program();
+			// Red has slid halfway in over the left half, blue is in place, and
+			// the fade is halfway.
+			let actual = pixel(&program, 1, 6);
+			assert!(near(actual, [128, 0, 128, 255]), "red half over blue: {actual:?}");
+			let actual = pixel(&program, 6, 6);
+			assert!(near(actual, [0, 0, 128, 255]), "nothing half over blue: {actual:?}");
 		})
 		.await;
 	}

@@ -7,7 +7,7 @@ program that switches scenes at its cut point, as broadcast graphics do.
 
 ## Plan
 
-Split from [Keyframes](/quest/m0/animation.md) on 2026-11-04 (maintainer). A
+Split from the keyframes quest on 2026-11-04 (maintainer). A
 stinger is a transition kind beside fade, slide, wipe, and move
 ([moq-dev/studio#33](https://github.com/moq-dev/studio/pull/33)), drawn on the
 program clock, whose clip is a media file source. It must start its clip as
