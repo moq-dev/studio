@@ -94,7 +94,7 @@ Every panel is a tab you can drag, split, or stack.
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws on the canvas shown, back to front. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, and **Reload** reads the file again. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
@@ -149,11 +149,13 @@ alpha channel can be keyed. The cut point counts from the clip's first picture
 or sound, however long the file takes to start decoding. Its sound joins the
 mixes as its source's does. Its source waits blank and silent for the first
 stinger rather than playing once when it opens, and rests ended between
-stingers, which the Health panel does not count. A clip that cannot play, or
-that is played again from the Sources panel or reloaded while a stinger plays
-it, cuts at once. A **Cut**, or another kind of transition, while a stinger
-runs takes its clip off the program, though its sound plays out; another
-stinger plays the clip again from its start.
+stingers, which the Health panel does not count unless a scene on air places
+it. The clip stops when the stinger ends, after one pass even if it loops. A
+clip that cannot play, or that is played again from the Sources panel or
+reloaded while a stinger plays it, cuts at once; one stopped there ends the
+stinger at once. A **Cut**, or another kind of transition, while a stinger
+runs stops its clip, sound included; another stinger plays the clip again from
+its start.
 
 ### Keyframes
 
@@ -325,7 +327,9 @@ as ended in Sources and, while the program shows or plays it, in Health.
 **Play** in Sources plays it from its start again, as does going on program
 with `restart`, in a scene on air or the top layer, when it was not on program
 before. Either clears its picture at once, so the end of the last play never
-shows on program. A file that cannot be read or decoded fails, with the reason.
+shows on program. **Stop** in Sources stops it at once: blank, silent, sound
+already queued included, and reading as ended until played again. A file that
+cannot be read or decoded fails, with the reason.
 The source a [stinger](#transitions) plays waits, blank and silent, for the
 first stinger instead of playing as it opens. Its pictures and its sound each have a track of their own (see [Source
 tracks](#source-tracks)), its pictures on one timeline across plays. Each is

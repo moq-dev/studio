@@ -204,10 +204,24 @@ impl State {
 	}
 
 	/// The sources whose pictures any canvas's program draws, through clones:
-	/// each visible item's of the scenes on air, including one leaving in a
-	/// transition, and of the top layers over them, the clip a stinger under
-	/// way plays, and each mask's either reads.
+	/// those [`placed`](Self::placed) there, and the clip a stinger under way
+	/// plays with each mask its source's filters read.
 	fn shown(&self) -> BTreeSet<String> {
+		let collection = &self.collection;
+		let stinger = self.compositor.stinger().into_iter().flat_map(|clip| {
+			let filters = collection.video.get(clip).into_iter().flat_map(|video| &video.filters);
+			std::iter::once(clip).chain(masks(filters).map(String::as_str))
+		});
+		let mut shown = self.placed();
+		shown.extend(stinger.map(|source| collection.capture(source).to_string()));
+		shown
+	}
+
+	/// The sources whose pictures the scenes on air place on any canvas's
+	/// program, through clones: each visible item's of the scenes on air,
+	/// including one leaving in a transition, and of the top layers over them,
+	/// and each mask's it reads.
+	fn placed(&self) -> BTreeSet<String> {
 		let collection = &self.collection;
 		let scenes: Vec<Option<&str>> = self.compositor.on_air().map(Some).chain([None]).collect();
 		let canvases = std::iter::once(None).chain(collection.canvases.keys().map(Some));
@@ -220,18 +234,9 @@ impl State {
 			})
 			.flat_map(|layer| collection.items(&layer).unwrap_or_default())
 			.filter(|item| item.visible);
-		// A mask's picture shapes what the program draws too.
-		let masks = |item| {
-			collection.filters(item).filter_map(|filter| match filter {
-				moq_scene::Filter::Mask { source, .. } => Some(source),
-				_ => None,
-			})
-		};
-		let stinger = self.compositor.stinger().map(str::to_string);
 		items
-			.flat_map(|item| std::iter::once(&item.source).chain(masks(item)))
+			.flat_map(|item| std::iter::once(&item.source).chain(masks(collection.filters(item))))
 			.map(|source| collection.capture(source).to_string())
-			.chain(stinger)
 			.collect()
 	}
 
@@ -248,6 +253,15 @@ impl State {
 		self.stale = true;
 		self.edits.record();
 	}
+}
+
+/// The sources the masks among `filters` read: a mask's picture shapes what
+/// the program draws too.
+fn masks<'a>(filters: impl Iterator<Item = &'a moq_scene::Filter>) -> impl Iterator<Item = &'a String> {
+	filters.filter_map(|filter| match filter {
+		moq_scene::Filter::Mask { source, .. } => Some(source),
+		_ => None,
+	})
 }
 
 impl autosave::Document for State {
@@ -727,7 +741,7 @@ impl Engine {
 		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
 		compositor.set_canvases(&collection)?;
 		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
-		compositor.cut();
+		compositor.cut(&sources);
 
 		let engine = Arc::new(Self {
 			state: Mutex::new(State {
@@ -986,8 +1000,10 @@ impl Engine {
 					matters.then(|| (name.to_string(), stall))
 				})
 				.collect();
-			// A stinger's clip rests ended between stingers.
+			// A stinger's clip rests ended between stingers, unless a scene on
+			// air places it.
 			let stinger = state.collection.transition.stinger();
+			let placed = state.placed();
 			let stopped = state
 				.sources
 				.iter()
@@ -999,7 +1015,7 @@ impl Engine {
 						None => feed.status(),
 					};
 					let stopped = match status {
-						Status::Ended => stinger != Some(name),
+						Status::Ended => stinger != Some(name) || placed.contains(name),
 						Status::Failed(_) => true,
 						_ => false,
 					};
@@ -2662,8 +2678,9 @@ mod tests {
 	}
 
 	/// The clip a stinger plays rests ended between stingers without Health
-	/// counting it, while another media file that ended and is heard counts.
-	/// The program shows the clip while a stinger plays it.
+	/// counting it, while another media file that ended and is heard counts,
+	/// as does the clip once a scene on air places it. The program shows the
+	/// clip, and what its source's mask reads, while a stinger plays it.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn the_program_rests_a_stinger_clip() {
@@ -2684,6 +2701,19 @@ mod tests {
 			source: "sting".into(),
 			cut: Duration::from_millis(300),
 		};
+		let matte = moq_scene::Source::Color {
+			color: moq_scene::Rgba([255, 255, 255, 255]),
+		};
+		loaded.collection.sources.insert("matte".into(), matte);
+		let mask = moq_scene::Filter::Mask {
+			source: "matte".into(),
+			mode: moq_scene::MaskMode::Alpha,
+		};
+		let video = moq_scene::Video {
+			filters: vec![mask],
+			..Default::default()
+		};
+		loaded.collection.video.insert("sting".into(), video);
 		let gpu = Gpu::new().await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
@@ -2702,8 +2732,12 @@ mod tests {
 		{
 			let mut state = engine.state.lock().unwrap();
 			let transition = state.collection().transition.clone();
-			state.compositor.transition(transition, kio::clock::now());
-			assert!(state.shown().contains("sting"));
+			let state = &mut *state;
+			state
+				.compositor
+				.transition(transition, &state.sources, kio::clock::now());
+			let shown = state.shown();
+			assert!(shown.contains("sting") && shown.contains("matte"), "{shown:?}");
 		}
 		let played = || async {
 			while engine.state.lock().unwrap().compositor.transitioning() {
@@ -2711,10 +2745,24 @@ mod tests {
 			}
 		};
 		kio::clock::timeout(TIMEOUT, played()).await.expect("the stinger ends");
-		assert!(!engine.state.lock().unwrap().shown().contains("sting"));
+		let shown = engine.state.lock().unwrap().shown();
+		assert!(!shown.contains("sting") && !shown.contains("matte"), "{shown:?}");
 		kio::clock::timeout(TIMEOUT, ended()).await.expect("the clip rests");
 		let stopped = engine.local(kio::clock::now()).stopped;
 		assert_eq!(stopped, [("bed".to_string(), Status::Ended)]);
+
+		{
+			let mut state = engine.state.lock().unwrap();
+			let scene = state.compositor.program_scene().unwrap().to_string();
+			let fill = moq_scene::Rect::fill(&state.collection().canvas);
+			let mut draft = state.collection().draft("Place sting");
+			let item = moq_scene::Item::new("sting", fill);
+			draft.insert_item(&moq_scene::Layer::scene(scene), 1, item).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		let stopped = engine.local(kio::clock::now()).stopped;
+		let both = [("bed".to_string(), Status::Ended), ("sting".to_string(), Status::Ended)];
+		assert_eq!(stopped, both, "placed, it counts");
 
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();

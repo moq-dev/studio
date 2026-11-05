@@ -1008,16 +1008,17 @@ impl Panels {
 		let mut gesture = None;
 		ui.horizontal(|ui| {
 			if ui.button("Cut").clicked() {
-				state.compositor.cut();
+				let state = &mut *state;
+				state.compositor.cut(&state.sources);
 			}
 			if ui
 				.button("Transition")
 				.on_hover_text("Take the preview to program by the transition set beside it")
 				.clicked()
 			{
-				state
-					.compositor
-					.transition(transition.clone(), kio::clock::Instant::now());
+				let state = &mut *state;
+				let now = kio::clock::Instant::now();
+				state.compositor.transition(transition.clone(), &state.sources, now);
 			}
 			match &next {
 				Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } => self.direction = *direction,
@@ -1454,6 +1455,7 @@ impl Panels {
 		let mut clone = None;
 		let mut reload = None;
 		let mut play = None;
+		let mut stop = None;
 		let now = kio::clock::now();
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1537,13 +1539,21 @@ impl Panels {
 						{
 							clone = Some(name.clone());
 						}
-						if matches!(source, Source::Media { .. })
-							&& ui
+						if matches!(source, Source::Media { .. }) {
+							if ui
 								.small_button("Play")
 								.on_hover_text("Play the file from its start")
 								.clicked()
-						{
-							play = Some(name.clone());
+							{
+								play = Some(name.clone());
+							}
+							if ui
+								.small_button("Stop")
+								.on_hover_text("Stop the file now, blank and silent until played again")
+								.clicked()
+							{
+								stop = Some(name.clone());
+							}
 						}
 						let reloads = match source {
 							Source::Browser { .. } => {
@@ -1585,6 +1595,12 @@ impl Panels {
 		{
 			let played = feed.play().with_context(|| format!("cannot play `{name}`"));
 			self.report(played.map(|()| format!("playing `{name}` from its start")));
+		}
+		if let Some(name) = stop
+			&& let Some(feed) = state.sources.get(&name)
+		{
+			let stopped = feed.stop().with_context(|| format!("cannot stop `{name}`"));
+			self.report(stopped.map(|()| format!("stopped `{name}`")));
 		}
 		let result = if let Some(name) = remove {
 			// Removing the items that show it moves the ones after them.
