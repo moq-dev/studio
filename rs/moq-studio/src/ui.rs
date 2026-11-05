@@ -197,8 +197,9 @@ impl eframe::App for Studio {
 		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 		self.panels.follow_reloads(&state);
-		// A page painting in memory copies through the studio's clipboard,
-		// even if the preview let go of the page before the copy came back.
+		// A page not painting through an X display copies through the
+		// studio's clipboard, even if the preview let go of the page before
+		// the copy came back.
 		if let Some(text) = state
 			.sources
 			.context()
@@ -1522,7 +1523,7 @@ impl Panels {
 							}
 							Some(Paint::Cpu) => {
 								ui.colored_label(DEGRADED, "CPU").on_hover_text(
-									"The page is uploaded from memory every frame: its GPU process or this device cannot share textures",
+									"The page is uploaded from memory every frame: there is no display, or its GPU process or this device cannot share textures",
 								);
 							}
 							None => {

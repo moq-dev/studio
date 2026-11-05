@@ -60,13 +60,27 @@ pub(crate) struct Start {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Raster {
 	/// On the GPU, into shared textures the studio imports: on the DRM render
-	/// node named, the studio's GPU, or else on the one CEF picks.
-	Gpu { render_node: Option<String> },
+	/// node named, the studio's GPU, or else on the one CEF picks. CEF's GPU
+	/// process needs `display` to allocate them.
+	Gpu {
+		render_node: Option<String>,
+		display: Display,
+	},
 	/// In software, into memory the studio uploads, with no display opened.
 	/// Startup never waits on a GPU process CEF cannot start, and WebGL runs
 	/// on SwiftShader.
 	#[default]
 	Cpu,
+}
+
+/// The display server the GPU path connects to, the one the studio runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Display {
+	/// `$WAYLAND_DISPLAY`, preferred: under XWayland, CEF's GPU process finds
+	/// no GBM device on some drivers, NVIDIA's among them, and never paints.
+	Wayland,
+	/// `$DISPLAY`.
+	X11,
 }
 
 /// A page to open.
