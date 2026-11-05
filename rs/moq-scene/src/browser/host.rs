@@ -116,8 +116,9 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 	// renderer, which left its page Starting meanwhile. CEF's subprocesses
 	// inherit the limit. 1, not 0: the kernel ignores the limit for a pipe
 	// core_pattern (systemd-coredump, Apport) except at 1, where it skips the
-	// handler, and a core file needs a page. A hard limit of 0 forbids 1, so
-	// a pipe handler then dumps unless it honours the 0 it is passed.
+	// handler, and a core file needs a page. A socket core_pattern (`@`), or
+	// a pipe under a hard limit of 0, which forbids 1, relies instead on the
+	// handler honouring the limit, as systemd-coredump does.
 	let core = getrlimit(Resource::Core);
 	setrlimit(
 		Resource::Core,
