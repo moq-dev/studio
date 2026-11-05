@@ -1383,6 +1383,7 @@ impl Panels {
 		let mut remove = None;
 		let mut clone = None;
 		let mut reload = None;
+		let mut play = None;
 		let now = kio::clock::now();
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1466,11 +1467,23 @@ impl Panels {
 						{
 							clone = Some(name.clone());
 						}
-						if matches!(source, Source::Browser { .. })
+						if matches!(source, Source::Media { .. })
 							&& ui
-								.small_button("Reload")
-								.on_hover_text("Restart the page, keeping the cookies and logins every page shares")
+								.small_button("Play")
+								.on_hover_text("Play the file from its start")
 								.clicked()
+						{
+							play = Some(name.clone());
+						}
+						let reloads = match source {
+							Source::Browser { .. } => {
+								Some("Restart the page, keeping the cookies and logins every page shares")
+							}
+							Source::Media { .. } => Some("Read the file again, such as after it changed"),
+							_ => None,
+						};
+						if let Some(hover) = reloads
+							&& ui.small_button("Reload").on_hover_text(hover).clicked()
 						{
 							reload = Some(name.clone());
 						}
@@ -1496,6 +1509,12 @@ impl Panels {
 
 		if let Some(name) = reload {
 			state.restart(&name);
+		}
+		if let Some(name) = play
+			&& let Some(feed) = state.sources.get(&name)
+		{
+			let played = feed.play().with_context(|| format!("cannot play `{name}`"));
+			self.report(played.map(|()| format!("playing `{name}` from its start")));
 		}
 		let result = if let Some(name) = remove {
 			// Removing the items that show it moves the ones after them.
@@ -3461,6 +3480,10 @@ fn describe(source: &Source) -> String {
 		Source::Microphone { id } => format!("microphone: {}", or_default(id)),
 		Source::SystemAudio => "system audio".into(),
 		Source::Image { path } => format!("image: {}", path.display()),
+		Source::Media { path, looping, .. } => {
+			let ending = if *looping { "looping" } else { "once" };
+			format!("media: {} ({ending})", path.display())
+		}
 		Source::Color { color } => format!("color: {color}"),
 		Source::Broadcast { path } => format!("broadcast: {path}"),
 		Source::Browser { url, width, height } => format!("browser: {url} ({width}x{height})"),
@@ -3476,6 +3499,7 @@ fn status(ui: &mut Ui, status: &Status) {
 		Status::Starting => ui.weak("starting"),
 		Status::Live => ui.colored_label(HEALTHY, "live"),
 		Status::Offline => ui.colored_label(DEGRADED, "offline"),
+		Status::Ended => ui.colored_label(DEGRADED, "ended"),
 		Status::Failed(reason) => ui
 			.colored_label(ui.visuals().error_fg_color, "failed")
 			.on_hover_text(reason),
@@ -3523,6 +3547,10 @@ struct AddSource {
 	/// A browser source's page size, or an overlay's.
 	width: u32,
 	height: u32,
+	/// Whether a media file loops, and plays from its start each time it goes
+	/// on program.
+	looping: bool,
+	restart: bool,
 }
 
 impl Default for AddSource {
@@ -3535,6 +3563,8 @@ impl Default for AddSource {
 			color: Color32::WHITE,
 			width: canvas.width,
 			height: canvas.height,
+			looping: false,
+			restart: true,
 		}
 	}
 }
@@ -3544,6 +3574,7 @@ enum Kind {
 	#[default]
 	Color,
 	Image,
+	Media,
 	Broadcast,
 	Camera,
 	Display,
@@ -3557,9 +3588,10 @@ enum Kind {
 }
 
 impl Kind {
-	const ALL: [Self; 12] = [
+	const ALL: [Self; 13] = [
 		Self::Color,
 		Self::Image,
+		Self::Media,
 		Self::Broadcast,
 		Self::Camera,
 		Self::Display,
@@ -3576,6 +3608,7 @@ impl Kind {
 		match self {
 			Self::Color => "Color",
 			Self::Image => "Image",
+			Self::Media => "Media file",
 			Self::Broadcast => "Broadcast",
 			Self::Camera => "Camera",
 			Self::Display => "Display",
@@ -3593,7 +3626,7 @@ impl Kind {
 	fn value(self) -> Option<&'static str> {
 		match self {
 			Self::Color | Self::SystemAudio | Self::Replay => None,
-			Self::Image => Some("file"),
+			Self::Image | Self::Media => Some("file"),
 			Self::Lut => Some(".cube file"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
@@ -3644,6 +3677,16 @@ impl AddSource {
 				egui::color_picker::color_edit_button_srgba(ui, &mut self.color, egui::color_picker::Alpha::OnlyBlend);
 				ui.end_row();
 			}
+			if self.kind == Kind::Media {
+				ui.label("Playback");
+				ui.horizontal(|ui| {
+					ui.checkbox(&mut self.looping, "Loop")
+						.on_hover_text("Start over at the end, rather than hold the last picture");
+					ui.checkbox(&mut self.restart, "Restart on program")
+						.on_hover_text("Play from the start each time it goes on program");
+				});
+				ui.end_row();
+			}
 			add = ui.button("Add source").clicked();
 			ui.end_row();
 		});
@@ -3658,6 +3701,11 @@ impl AddSource {
 				color: moq_scene::Rgba(self.color.to_srgba_unmultiplied()),
 			},
 			Kind::Image => Source::Image { path: value.into() },
+			Kind::Media => Source::Media {
+				path: value.into(),
+				looping: self.looping,
+				restart: self.restart,
+			},
 			Kind::Lut => Source::Lut { path: value.into() },
 			Kind::Broadcast => Source::Broadcast { path: value },
 			Kind::Camera => Source::Camera { id },

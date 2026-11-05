@@ -34,7 +34,7 @@ use bytes::Bytes;
 use kio::clock::Instant;
 use moq_net::bandwidth;
 use moq_scene::publish::{Encoding, Sessions};
-use moq_scene::source::{self, Driver, Sources};
+use moq_scene::source::{self, Driver, Sources, Status};
 use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
 
@@ -204,9 +204,9 @@ impl State {
 	}
 
 	/// The sources whose pictures any canvas's program draws, through clones:
-	/// each visible item's of the scenes on air and of the top layers over
-	/// them, and each mask's it reads.
-	pub fn shown(&self) -> BTreeSet<&str> {
+	/// each visible item's of the scenes on air, including one leaving in a
+	/// transition, and of the top layers over them, and each mask's it reads.
+	fn shown(&self) -> BTreeSet<String> {
 		let collection = &self.collection;
 		let scenes: Vec<Option<&str>> = self.compositor.on_air().map(Some).chain([None]).collect();
 		let canvases = std::iter::once(None).chain(collection.canvases.keys().map(Some));
@@ -219,16 +219,17 @@ impl State {
 			})
 			.flat_map(|layer| collection.items(&layer).unwrap_or_default())
 			.filter(|item| item.visible);
-		let mut shown = BTreeSet::new();
-		for item in items {
-			shown.insert(collection.capture(&item.source));
-			let masks = collection.filters(item).filter_map(|filter| match filter {
-				moq_scene::Filter::Mask { source, .. } => Some(collection.capture(source)),
+		// A mask's picture shapes what the program draws too.
+		let masks = |item| {
+			collection.filters(item).filter_map(|filter| match filter {
+				moq_scene::Filter::Mask { source, .. } => Some(source),
 				_ => None,
-			});
-			shown.extend(masks);
-		}
-		shown
+			})
+		};
+		items
+			.flat_map(|item| std::iter::once(&item.source).chain(masks(item)))
+			.map(|source| collection.capture(source).to_string())
+			.collect()
 	}
 
 	/// Restart the source called `name`, as an edit would, such as to reload a
@@ -563,25 +564,20 @@ impl Program {
 		}
 	}
 
-	/// Encode the local sources on program, from `state`, whether or not
-	/// anything reads their tracks, so a replay of one has its past: those a
-	/// scene on air shows or masks with on any canvas, and the microphones and system audio
-	/// the program mix plays. A replay source's track is its pictures, so being
-	/// heard alone does not put it on program.
-	fn on_program(&self, state: &State) {
-		let collection = &state.collection;
-		let shown = state.shown().into_iter().map(str::to_string);
+	/// Encode the local sources' tracks on program, whether or not anything
+	/// reads them, so a replay of one has its past: the pictures `shown` in a
+	/// scene on air on any canvas, and the sound the program mix plays. A media file heard
+	/// and not shown encodes only its sound.
+	fn on_program(&self, state: &State, shown: BTreeSet<String>) {
+		let program = &state.collection.mixes.program;
 		let heard = state
 			.sources
 			.iter()
-			.filter(|(name, feed)| {
-				matches!(
-					feed.source(),
-					moq_scene::Source::Microphone { .. } | moq_scene::Source::SystemAudio
-				) && state.sources.plays(&collection.mixes.program, name)
-			})
-			.map(|(name, _)| name.to_string());
-		self.sources.set_on_program(shown.chain(heard).collect());
+			.filter(|(name, _)| state.sources.plays(program, name))
+			.map(|(name, _)| name.to_string())
+			.collect();
+		self.sources
+			.set_on_program(moq_scene::publish::OnProgram { shown, heard });
 	}
 }
 
@@ -967,25 +963,40 @@ impl Engine {
 	/// What only the studio knows about its stream at `now`.
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
-		// A stalled picture matters where any canvas's program draws it, or masks
-		// with it: a scene on air, including one leaving in a transition, or the
-		// top layer over them. Stalled sound matters only if the mix on program
-		// plays it, not one only listened to.
-		let stalled = {
+		// A stalled picture matters where any canvas's program draws it: a scene on air,
+		// including one leaving in a transition, or the top layer over them.
+		// Stalled sound matters only if the mix on program plays it, not one
+		// only listened to. A source that stopped matters either way.
+		let (stalled, stopped) = {
 			let state = self.state.lock().unwrap();
 			let shown = state.shown();
-			state
+			let heard = |name: &str| state.sources.plays(&state.collection.mixes.program, name);
+			let stalled = state
 				.sources
 				.iter()
 				.filter_map(|(name, feed)| {
 					let stall = feed.stalled(now)?;
 					let matters = match stall {
-						source::Stall::Picture(_) => shown.contains(&name),
-						source::Stall::Sound(_) => state.sources.plays(&state.collection.mixes.program, name),
+						source::Stall::Picture(_) => shown.contains(name),
+						source::Stall::Sound(_) => heard(name),
 					};
 					matters.then(|| (name.to_string(), stall))
 				})
-				.collect()
+				.collect();
+			let stopped = state
+				.sources
+				.iter()
+				.filter(|(name, _)| shown.contains(*name) || heard(name))
+				.filter_map(|(name, feed)| {
+					// A picture that fails to draw fails the source as the Sources panel shows it.
+					let status = match state.compositor.error(name) {
+						Some(err) => Status::Failed(err.to_string()),
+						None => feed.status(),
+					};
+					matches!(status, Status::Ended | Status::Failed(_)).then(|| (name.to_string(), status))
+				})
+				.collect();
+			(stalled, stopped)
 		};
 		let video = &stats.video;
 		let canvas = &video.renditions[0];
@@ -999,6 +1010,7 @@ impl Engine {
 			encoder: video.encoder(),
 			failed: stats.error(),
 			stalled,
+			stopped,
 		}
 	}
 
@@ -1045,11 +1057,15 @@ impl Engine {
 					}
 					self.pick_mixes(state);
 				}
+				// Before drawing, so a media file that restarts going on program
+				// is cleared in this frame rather than showing where it ended.
+				let shown = state.shown();
+				state.sources.set_on_program(&shown);
 				if let Err(err) = state.compositor.render(&state.collection, &state.sources, tick) {
 					tracing::error!(%err, "cannot draw the canvas");
 					continue;
 				}
-				self.program.on_program(state);
+				self.program.on_program(state, shown);
 				state
 					.compositor
 					.outputs()
