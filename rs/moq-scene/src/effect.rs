@@ -325,6 +325,15 @@ pub(crate) struct Picture {
 	bind: wgpu::BindGroup,
 	/// Whether its alpha is premultiplied, as a web page's is.
 	premultiplied: bool,
+	/// Its width and height in pixels.
+	size: (u32, u32),
+}
+
+impl Picture {
+	/// Its width and height in pixels.
+	pub fn size(&self) -> (u32, u32) {
+		self.size
+	}
 }
 
 /// A LUT source's table on the GPU.
@@ -681,6 +690,7 @@ impl Effects {
 			view,
 			bind,
 			premultiplied,
+			size: (texture.width(), texture.height()),
 		}
 	}
 

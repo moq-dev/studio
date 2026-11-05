@@ -204,8 +204,8 @@ impl State {
 	}
 
 	/// The sources the program shows: placed or masking in a scene on air,
-	/// including one leaving in a transition, or in the top layer over them, a
-	/// clone by the source it shows.
+	/// including one leaving in a transition, or in the top layer over them,
+	/// or the clip a stinger under way plays, a clone by the source it shows.
 	fn shown(&self) -> BTreeSet<String> {
 		let collection = &self.collection;
 		let scenes = self.compositor.on_air().filter_map(|scene| collection.scene(scene));
@@ -220,9 +220,11 @@ impl State {
 				_ => None,
 			})
 		};
+		let stinger = self.compositor.stinger().map(str::to_string);
 		items
 			.flat_map(|item| std::iter::once(&item.source).chain(masks(item)))
 			.map(|source| collection.capture(source).to_string())
+			.chain(stinger)
 			.collect()
 	}
 
@@ -928,6 +930,8 @@ impl Engine {
 					matters.then(|| (name.to_string(), stall))
 				})
 				.collect();
+			// A stinger's clip rests ended between stingers.
+			let stinger = state.collection.transition.stinger();
 			let stopped = state
 				.sources
 				.iter()
@@ -938,7 +942,12 @@ impl Engine {
 						Some(err) => Status::Failed(err.to_string()),
 						None => feed.status(),
 					};
-					matches!(status, Status::Ended | Status::Failed(_)).then(|| (name.to_string(), status))
+					let stopped = match status {
+						Status::Ended => stinger != Some(name),
+						Status::Failed(_) => true,
+						_ => false,
+					};
+					stopped.then(|| (name.to_string(), status))
 				})
 				.collect();
 			(stalled, stopped)

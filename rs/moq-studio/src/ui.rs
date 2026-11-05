@@ -114,6 +114,8 @@ impl Studio {
 				gestures: Gestures::default(),
 				snapping: Snapping::default(),
 				direction: Direction::Left,
+				duration: Transition::default().duration().unwrap_or_default(),
+				cut: STINGER_CUT,
 				drag: None,
 				new_scene: String::new(),
 				renaming: None,
@@ -239,6 +241,12 @@ struct Panels {
 	/// The direction a slide or wipe last had, which the transition picker
 	/// offers again after a fade or move.
 	direction: Direction,
+	/// How long a timed transition last took, which the transition picker
+	/// offers again after a stinger.
+	duration: Duration,
+	/// The cut point a stinger last had, which the transition picker offers
+	/// again after another kind.
+	cut: Duration,
 	/// The item a drag in the preview holds.
 	drag: Option<Drag>,
 	new_scene: String,
@@ -906,8 +914,15 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let canvas = state.collection().canvas;
-		let transition = state.collection().transition;
-		let mut next = transition;
+		let transition = state.collection().transition.clone();
+		let mut next = transition.clone();
+		let media: Vec<String> = state
+			.collection()
+			.sources
+			.iter()
+			.filter(|(_, source)| matches!(source, Source::Media { .. }))
+			.map(|(name, _)| name.clone())
+			.collect();
 		let mut gesture = None;
 		ui.horizontal(|ui| {
 			if ui.button("Cut").clicked() {
@@ -918,13 +933,28 @@ impl Panels {
 				.on_hover_text("Take the preview to program by the transition set beside it")
 				.clicked()
 			{
-				state.compositor.transition(transition, kio::clock::Instant::now());
+				state
+					.compositor
+					.transition(transition.clone(), kio::clock::Instant::now());
 			}
-			let duration = next.duration();
-			if let Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } = next {
-				self.direction = direction;
+			match &next {
+				Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } => self.direction = *direction,
+				Transition::Stinger { cut, .. } => self.cut = *cut,
+				_ => {}
 			}
-			let direction = self.direction;
+			if let Some(duration) = next.duration() {
+				self.duration = duration;
+			}
+			let (duration, direction) = (self.duration, self.direction);
+			// A stinger plays a media source's clip, so it is offered only
+			// once there is one.
+			let stinger = match &next {
+				Transition::Stinger { .. } => Some(next.clone()),
+				_ => media.first().map(|source| Transition::Stinger {
+					source: source.clone(),
+					cut: self.cut,
+				}),
+			};
 			egui::ComboBox::from_id_salt("transition")
 				.selected_text(transition_name(&next))
 				.show_ui(ui, |ui| {
@@ -934,27 +964,55 @@ impl Panels {
 						Transition::Wipe { duration, direction },
 						Transition::Move { duration },
 					];
-					for kind in kinds {
-						ui.selectable_value(&mut next, kind, transition_name(&kind));
+					for kind in kinds.into_iter().chain(stinger) {
+						let name = transition_name(&kind);
+						ui.selectable_value(&mut next, kind, name);
 					}
-				});
-			if let Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } = &mut next {
-				egui::ComboBox::from_id_salt("direction")
-					.selected_text(direction_name(*direction))
-					.show_ui(ui, |ui| {
-						for to in Direction::ALL {
-							ui.selectable_value(direction, to, direction_name(to));
-						}
-					});
+				})
+				.response
+				.on_hover_text("A stinger plays a media source's clip over the program");
+			match &mut next {
+				Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } => {
+					egui::ComboBox::from_id_salt("direction")
+						.selected_text(direction_name(*direction))
+						.show_ui(ui, |ui| {
+							for to in Direction::ALL {
+								ui.selectable_value(direction, to, direction_name(to));
+							}
+						});
+				}
+				Transition::Stinger { source, cut } => {
+					egui::ComboBox::from_id_salt("stinger")
+						.selected_text(source.as_str())
+						.show_ui(ui, |ui| {
+							for name in &media {
+								ui.selectable_value(source, name.clone(), name);
+							}
+						})
+						.response
+						.on_hover_text("The media source whose clip plays");
+					let mut millis = cut.as_millis() as u64;
+					let response = ui
+						.add(egui::DragValue::new(&mut millis).prefix("cut at ").suffix(" ms"))
+						.on_hover_text("How far into the clip the scenes switch, while it covers the canvas");
+					let dragging = self.gestures.of(&response);
+					if response.changed() {
+						*cut = Duration::from_millis(millis);
+						gesture = dragging;
+					}
+				}
+				_ => {}
 			}
-			let mut millis = duration.as_millis() as u64;
-			let response = ui
-				.add(egui::DragValue::new(&mut millis).suffix(" ms"))
-				.on_hover_text("How long the transition takes");
-			let dragging = self.gestures.of(&response);
-			if response.changed() {
-				*next.duration_mut() = Duration::from_millis(millis);
-				gesture = dragging;
+			if let Some(duration) = next.duration_mut() {
+				let mut millis = duration.as_millis() as u64;
+				let response = ui
+					.add(egui::DragValue::new(&mut millis).suffix(" ms"))
+					.on_hover_text("How long the transition takes");
+				let dragging = self.gestures.of(&response);
+				if response.changed() {
+					*duration = Duration::from_millis(millis);
+					gesture = dragging;
+				}
 			}
 			ui.label(format!(
 				"Program: {}",
@@ -2784,8 +2842,12 @@ fn transition_name(transition: &Transition) -> &'static str {
 		Transition::Slide { .. } => "slide",
 		Transition::Wipe { .. } => "wipe",
 		Transition::Move { .. } => "move",
+		Transition::Stinger { .. } => "stinger",
 	}
 }
+
+/// Where the transition picker puts a new stinger's cut point.
+const STINGER_CUT: Duration = Duration::from_millis(500);
 
 fn direction_name(direction: Direction) -> &'static str {
 	match direction {

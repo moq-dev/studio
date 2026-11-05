@@ -14,7 +14,7 @@ use crate::collection::{
 };
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::overlay::{Overlay, Overlays};
-use crate::source::{self, Sources};
+use crate::source::{self, Feed, Sources, Status};
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
 /// `moq_video::render` produces and what its exporter hands an encoder.
@@ -76,6 +76,8 @@ struct Switch {
 	from_start: Instant,
 	start: Instant,
 	transition: Transition,
+	/// The play of its clip a stinger asked for, which the first render does.
+	played: Option<u64>,
 }
 
 /// A canvas-sized texture drawn into, and bound to sample.
@@ -202,6 +204,11 @@ impl Compositor {
 		self.switch.is_some()
 	}
 
+	/// The media source a stinger under way plays over the program.
+	pub fn stinger(&self) -> Option<&str> {
+		self.switch.as_ref()?.transition.stinger()
+	}
+
 	/// The scenes program draws: the one on program, and the one a transition
 	/// under way leaves.
 	pub fn on_air(&self) -> impl Iterator<Item = &str> {
@@ -266,16 +273,49 @@ impl Compositor {
 	/// Take the preview to program by `transition`, starting at `now`.
 	///
 	/// A transition already under way lands on its scene first, so this one
-	/// starts from what that one was heading to.
+	/// starts from what that one was heading to. A stinger plays its clip from
+	/// the start at the next [`render`](Self::render), which switches the
+	/// scenes `cut` into the clip as it plays, and ends with the clip's play; a
+	/// clip that cannot play, or fails, cuts at once instead.
 	pub fn transition(&mut self, transition: Transition, now: Instant) {
 		let from = std::mem::replace(&mut self.program_scene, self.preview_scene.clone());
 		let from_start = self.program_start.replace(now).unwrap_or(now);
-		self.switch = (!transition.duration().is_zero()).then_some(Switch {
+		self.switch = (transition.duration() != Some(Duration::ZERO)).then_some(Switch {
 			from,
 			from_start,
 			start: now,
 			transition,
+			played: None,
 		});
+	}
+
+	/// How far the transition under way has switched the scenes at `now`,
+	/// from 0 to 1 and eased, ending one that is over. A stinger switches
+	/// them at once at its cut point, and its first call plays its clip.
+	fn progress(&mut self, sources: &Sources, now: Instant) -> Option<f32> {
+		let switch = self.switch.as_mut()?;
+		let progress = match &switch.transition {
+			Transition::Stinger { source, cut } => {
+				let feed = sources.get(source);
+				match stinger(feed, *cut, &mut switch.played, now) {
+					Ok(past) => past.map(|past| if past { 1.0 } else { 0.0 }),
+					Err(err) => {
+						tracing::warn!(%source, %err, "cannot play the stinger; cutting instead");
+						None
+					}
+				}
+			}
+			transition => {
+				let duration = transition.duration().expect("only a stinger is untimed");
+				let elapsed = now.saturating_duration_since(switch.start);
+				let linear = (elapsed.as_secs_f32() / duration.as_secs_f32()).min(1.0);
+				(linear < 1.0).then(|| transition.progress(linear))
+			}
+		};
+		if progress.is_none() {
+			self.switch = None;
+		}
+		progress
 	}
 
 	/// Draw preview and program as of `now`, from the newest picture each of
@@ -293,13 +333,7 @@ impl Compositor {
 		self.preview_shown = preview_since;
 		let program_since = since(&mut self.program_start);
 
-		let linear = self.switch.as_ref().map(|switch| {
-			let elapsed = now.saturating_duration_since(switch.start);
-			(elapsed.as_secs_f32() / switch.transition.duration().as_secs_f32()).min(1.0)
-		});
-		if linear.is_some_and(|linear| linear >= 1.0) {
-			self.switch = None;
-		}
+		let progress = self.progress(sources, now);
 
 		let mut frame = self.effects.frame();
 		let mut draw = Draw {
@@ -317,12 +351,11 @@ impl Compositor {
 		draw.layer(&self.preview, Place::Top, Duration::ZERO);
 
 		let to = On(self.program_scene.as_deref(), program_since);
-		match (&self.switch, linear) {
-			(Some(switch), Some(linear)) => {
+		match (&self.switch, progress) {
+			(Some(switch), Some(progress)) => {
 				let from = On(switch.from.as_deref(), now.saturating_duration_since(switch.from_start));
-				let progress = switch.transition.progress(linear);
 				let canvas = Rect::fill(&self.canvas);
-				match switch.transition {
+				match &switch.transition {
 					Transition::Fade { .. } => {
 						draw.whole(&self.incoming, to);
 						draw.target(&self.program);
@@ -334,8 +367,8 @@ impl Compositor {
 						draw.whole(&self.incoming, to);
 						draw.target(&self.program);
 						draw.scene(&self.program, from);
-						let (x, y) = offset(direction, progress, &canvas);
-						let (dx, dy) = offset(direction, 1.0, &canvas);
+						let (x, y) = offset(*direction, progress, &canvas);
+						let (dx, dy) = offset(*direction, 1.0, &canvas);
 						let uncovered = shifted(canvas, x - dx, y - dy);
 						draw.place(&self.program, &self.incoming, canvas, uncovered, 1.0);
 					}
@@ -343,8 +376,8 @@ impl Compositor {
 						draw.whole(&self.incoming, to);
 						draw.whole(&self.outgoing, from);
 						draw.target(&self.program);
-						let (x, y) = offset(direction, progress, &canvas);
-						let (dx, dy) = offset(direction, 1.0, &canvas);
+						let (x, y) = offset(*direction, progress, &canvas);
+						let (dx, dy) = offset(*direction, 1.0, &canvas);
 						draw.place(&self.program, &self.outgoing, shifted(canvas, x, y), canvas, 1.0);
 						let entering = shifted(canvas, x - dx, y - dy);
 						draw.place(&self.program, &self.incoming, entering, canvas, 1.0);
@@ -352,6 +385,11 @@ impl Compositor {
 					Transition::Move { .. } => {
 						draw.target(&self.program);
 						draw.moving(&self.program, from, to, progress);
+					}
+					Transition::Stinger { source, .. } => {
+						draw.target(&self.program);
+						draw.scene(&self.program, if progress < 1.0 { from } else { to });
+						draw.stinger(&self.program, source, &self.canvas);
 					}
 				}
 			}
@@ -509,6 +547,58 @@ impl Compositor {
 			}
 		}
 		shown
+	}
+}
+
+/// Whether a stinger playing `feed`'s clip is past `cut` into it at `now`, or
+/// `None` once the clip's play has ended. The first call plays the clip from
+/// its start, noting which play it is in `played`. Fails when the clip cannot
+/// play, or another play or a reload of the source cut it off.
+fn stinger(feed: Option<&Feed>, cut: Duration, played: &mut Option<u64>, now: Instant) -> Result<Option<bool>, Error> {
+	let feed = feed.ok_or_else(|| Error::Stopped("the source is not running".into()))?;
+	let play = match *played {
+		Some(play) => play,
+		None => {
+			feed.play()?;
+			*played.insert(feed.run().play)
+		}
+	};
+	if let Status::Failed(reason) = feed.status() {
+		return Err(Error::Stopped(reason));
+	}
+	let run = feed.run();
+	if run.play != play {
+		return Err(Error::Media("the clip was played again or reloaded".into()));
+	}
+	if run.ended.is_some_and(|ended| ended <= now) {
+		return Ok(None);
+	}
+	Ok(Some(run.begun.is_some_and(|begun| now >= begun + cut)))
+}
+
+/// The crop that trims what `crop` leaves of a `size` picture evenly from two
+/// opposite sides to `canvas`'s shape, so it covers the canvas unstretched.
+fn cover(crop: Crop, size: (u32, u32), canvas: &Canvas) -> Crop {
+	let width = size.0 as f32 * (1.0 - crop.left - crop.right);
+	let height = size.1 as f32 * (1.0 - crop.top - crop.bottom);
+	let (shown, wanted) = (width / height, canvas.width as f32 / canvas.height as f32);
+	if !shown.is_finite() || shown <= 0.0 {
+		return Crop::default();
+	}
+	if shown > wanted {
+		let trim = (1.0 - wanted / shown) / 2.0;
+		Crop {
+			left: trim,
+			right: trim,
+			..Crop::default()
+		}
+	} else {
+		let trim = (1.0 - shown / wanted) / 2.0;
+		Crop {
+			top: trim,
+			bottom: trim,
+			..Crop::default()
+		}
 	}
 }
 
@@ -681,6 +771,22 @@ impl Draw<'_> {
 		for (index, item) in items.iter().enumerate().filter(|(_, item)| item.visible) {
 			self.item(target, (place.clone(), index, item.settled(since)), &item.posed(since));
 		}
+	}
+
+	/// Draw the picture of `source`, a stinger's clip, over the whole of
+	/// `target`, a `canvas`, cropped to the canvas's shape, through the
+	/// source's crop and filters. Nothing before its first picture.
+	fn stinger(&mut self, target: &Target, source: &str, canvas: &Canvas) {
+		let Some(picture) = self.library.0.get(source).and_then(|layer| layer.picture.as_ref()) else {
+			return;
+		};
+		let crop = self.collection.video.get(source).map(|video| video.crop);
+		let item = Item {
+			crop: cover(crop.unwrap_or_default(), picture.size(), canvas),
+			..Item::new(source, Rect::fill(canvas))
+		};
+		let pose = Pose::of(self.collection, &item);
+		self.posed(target, &item, pose);
 	}
 
 	/// Draw `item`, posed, where it is placed onto `target`, shared with every
@@ -1269,7 +1375,7 @@ mod tests {
 				studio.compositor.set_preview(Some("red".into()));
 				studio.compositor.cut();
 				studio.compositor.set_preview(Some("blue".into()));
-				studio.compositor.transition(transition, start);
+				studio.compositor.transition(transition.clone(), start);
 				studio.render(start + Duration::from_millis(500));
 				let program = studio.program();
 				let actual = [(1, 1), (1, 6), (6, 1), (6, 6)].map(|(x, y)| pixel(&program, x, y));
@@ -1536,6 +1642,146 @@ mod tests {
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
 		})
 		.await;
+	}
+
+	/// Scenes "red" on program and "blue" in preview, with a stinger playing
+	/// `file` as the media source "sting", cutting 300 ms into it.
+	async fn stinging(file: &[u8]) -> Studio {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("sting.mkv"), file).unwrap();
+		let mut collection = collection();
+		let media = Source::Media {
+			path: "sting.mkv".into(),
+			looping: false,
+			restart: false,
+		};
+		collection.sources.insert("sting".into(), media);
+		collection.transition = Transition::Stinger {
+			source: "sting".into(),
+			cut: Duration::from_millis(300),
+		};
+		collection.validate().unwrap();
+		let mut studio = Studio::with_files(collection, dir).await;
+		studio.compositor.set_preview(Some("red".into()));
+		studio.compositor.cut();
+		studio.compositor.set_preview(Some("blue".into()));
+		studio
+	}
+
+	/// Darken or hide the stinger's clip, through its source's filters.
+	fn sting(studio: &mut Studio, filter: Filter) {
+		let video = crate::collection::Video {
+			filters: vec![filter],
+			..Default::default()
+		};
+		studio.collection.video.insert("sting".into(), video);
+	}
+
+	/// A stinger plays its clip from its start over the program as it starts,
+	/// switches the scenes under it at its cut point into the clip, and ends
+	/// with the clip.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stinger_cuts_under_its_clip() {
+		local(async {
+			let mut studio = stinging(crate::media::tests::CLIP).await;
+			let feed = studio.sources.get("sting").unwrap();
+			assert_eq!(feed.status(), Status::Ended, "waiting for the stinger");
+			assert_eq!(feed.run(), source::Run::default());
+
+			let transition = studio.collection.transition.clone();
+			studio.compositor.transition(transition, Instant::now());
+			assert_eq!(studio.compositor.program_scene(), Some("blue"));
+			sting(&mut studio, Filter::Brightness { amount: 0.0 });
+			// Black over the whole canvas once its first picture arrives.
+			loop {
+				studio.render(Instant::now());
+				assert!(studio.compositor.transitioning());
+				assert_eq!(studio.compositor.stinger(), Some("sting"));
+				if studio.program().chunks(4).all(|pixel| pixel == BLACK) {
+					break;
+				}
+				kio::clock::sleep(Duration::from_millis(5)).await;
+			}
+			let begun = studio.sources.get("sting").unwrap().run().begun.unwrap();
+
+			// Seen through, the outgoing scene shows until the cut point.
+			sting(&mut studio, Filter::Opacity { amount: 0.0 });
+			studio.render(begun + Duration::from_millis(299));
+			assert_eq!(pixel(&studio.program(), 1, 1), RED);
+			studio.render(begun + Duration::from_millis(300));
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+			assert!(studio.compositor.transitioning(), "until the clip ends");
+
+			let ended = loop {
+				if let Some(ended) = studio.sources.get("sting").unwrap().run().ended {
+					break ended;
+				}
+				kio::clock::sleep(Duration::from_millis(5)).await;
+			};
+			assert!(ended >= begun + Duration::from_secs(1), "{:?}", ended - begun);
+			studio.render(ended);
+			assert!(!studio.compositor.transitioning());
+			assert_eq!(studio.compositor.stinger(), None);
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+		})
+		.await;
+	}
+
+	/// A stinger whose clip cannot play cuts at once, as does one whose clip
+	/// is played again from elsewhere, such as the Sources panel.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stinger_that_cannot_play_cuts() {
+		local(async {
+			let mut studio = stinging(b"not a video").await;
+			let transition = studio.collection.transition.clone();
+			studio.compositor.transition(transition, Instant::now());
+			studio.render(Instant::now());
+			assert!(!studio.compositor.transitioning());
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+
+			let mut studio = stinging(crate::media::tests::CLIP).await;
+			let transition = studio.collection.transition.clone();
+			studio.compositor.transition(transition, Instant::now());
+			studio.render(Instant::now());
+			assert!(studio.compositor.transitioning());
+			studio.sources.get("sting").unwrap().play().unwrap();
+			studio.render(Instant::now());
+			assert!(!studio.compositor.transitioning());
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+		})
+		.await;
+	}
+
+	/// A stinger's clip covers a canvas of another shape unstretched, trimmed
+	/// evenly from the sides that overflow, after its source's own crop.
+	#[test]
+	fn a_stinger_covers_the_canvas() {
+		let portrait = Canvas {
+			width: 1080,
+			height: 1920,
+			framerate: 30,
+		};
+		let crop = cover(Crop::default(), (1920, 1080), &portrait);
+		let kept = 1.0 - crop.left - crop.right;
+		assert!((kept - (1080.0 / 1920.0) / (1920.0 / 1080.0)).abs() < 1e-6, "{crop:?}");
+		assert_eq!((crop.left, crop.top, crop.bottom), (crop.right, 0.0, 0.0));
+
+		let landscape = Canvas::default();
+		let crop = cover(Crop::default(), (1080, 1920), &landscape);
+		assert_eq!((crop.left, crop.right), (0.0, 0.0));
+		assert!(crop.top > 0.0 && crop.top == crop.bottom, "{crop:?}");
+		assert_eq!(cover(Crop::default(), (1920, 1080), &landscape), Crop::default());
+
+		// A source cropped to a square is trimmed from what it leaves.
+		let square = Crop {
+			left: 0.21875,
+			right: 0.21875,
+			..Crop::default()
+		};
+		let crop = cover(square, (1920, 1080), &landscape);
+		assert!((crop.top - 0.21875).abs() < 1e-6, "{crop:?}");
 	}
 
 	/// A picture the GPU cannot hold says why, rather than leaving its source

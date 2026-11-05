@@ -90,7 +90,7 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
+| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. Select an item to filter or copy it. |
@@ -117,11 +117,22 @@ logo or a lower third.
 | Slide | The incoming scene pushes the outgoing one off the canvas, both moving left, right, up, or down. |
 | Wipe | An edge sweeps across the canvas left, right, up, or down, uncovering the incoming scene behind it. |
 | Move | Each item showing a source both scenes place glides from its place in the outgoing scene to its place in the incoming one, resizing, recropping, and mixing its filters' settings on the way. If its blend mode or kinds of filter differ, it changes look halfway. The rest of the outgoing scene fades out and the rest of the incoming scene fades in. Items stack as the outgoing scene has them until halfway, then as the incoming one does. A source placed more than once pairs up in order, back to front. |
+| Stinger | A media source's clip plays over the program from its start, and the program switches scenes under it at the cut point, the time into the clip when it covers the canvas. It lasts as long as the clip. |
 
-All but a fade ease in and out. A transition is drawn on the program clock, so
-the stream and a recording show the same frames of it, and a second
+A slide, wipe, or move eases in and out. A transition is drawn on the program
+clock, so the stream and a recording show the same frames of it, and a second
 **Transition** while one runs starts from the scene it was heading to. A
 transition set to 0 ms is a cut.
+
+A stinger's clip fills the canvas, cropped evenly to the canvas's shape rather
+than stretched, through its source's crop and filters, so a clip without an
+alpha channel can be keyed. The cut point counts from the clip's first picture
+or sound, however long the file takes to start decoding. Its sound joins the
+mixes as its source's does. Its source waits blank and silent for the first
+stinger rather than playing once when it opens, and rests ended between
+stingers, which the Health panel does not count. A clip that cannot play, or
+that is played again from the Sources panel or reloaded while a stinger plays
+it, cuts at once.
 
 ### Keyframes
 
@@ -294,7 +305,8 @@ as ended in Sources and, while the program shows or plays it, in Health.
 with `restart`, in a scene on air or the top layer, when it was not on program
 before. Either clears its picture at once, so the end of the last play never
 shows on program. A file that cannot be read or decoded fails, with the reason.
-Its pictures and its sound each have a track of their own (see [Source
+The source a [stinger](#transitions) plays waits, blank and silent, for the
+first stinger instead of playing as it opens. Its pictures and its sound each have a track of their own (see [Source
 tracks](#source-tracks)), its pictures on one timeline across plays. Each is
 used apart, as a camera's and a microphone's are: the pictures while a scene on
 air shows it, the sound while the mix on program plays it, and either while
@@ -416,9 +428,13 @@ height = 1080
 framerate = 30
 
 [transition]
-kind = "slide"      # fade, slide, wipe, or move
-duration = "300ms"
+kind = "slide"      # fade, slide, wipe, move, or stinger
+duration = "300ms"  # all but a stinger
 direction = "left"  # slide and wipe: left, right, up, or down
+# A stinger names a media source and its cut point instead:
+# kind = "stinger"
+# source = "sting"
+# cut = "500ms"
 
 [sources.camera]
 kind = "camera"

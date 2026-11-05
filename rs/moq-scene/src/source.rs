@@ -86,6 +86,24 @@ struct Play {
 /// ended holds its take no longer.
 type Next = Arc<Mutex<Option<Play>>>;
 
+/// A media source's latest play: which it is, and when it began and ended on
+/// the program clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Run {
+	/// Which play it is: 0 for the one the source opens with, and one more
+	/// for each [`Feed::play`] since.
+	pub play: u64,
+	/// When its first picture or sound was due, or `None` until it is decoded.
+	pub begun: Option<Instant>,
+	/// When its last picture or sound finished, or a looping one's first pass
+	/// did, or `None` until then. A play cut off by the next never ends.
+	pub ended: Option<Instant>,
+}
+
+/// A media source's latest [`Run`], which the feed starts and only the driver
+/// playing that one writes.
+type Runs = Arc<Mutex<Run>>;
+
 /// A picture that shows nothing, for a replay source between replays.
 fn clear() -> Picture {
 	Picture::Rgba {
@@ -218,7 +236,9 @@ impl Sources {
 	/// Run exactly the sources and mixes `collection` has: start new and edited
 	/// sources and stop removed and edited ones. A clone shares the feed of the
 	/// source it clones rather than opening one. Returns a driver for each
-	/// source started, which does nothing until run.
+	/// source started, which does nothing until run. The media source a
+	/// stinger plays opens silent and blank, waiting for its first
+	/// [play](Feed::play), rather than playing once at the start.
 	///
 	/// Also applies the collection's gain, mute, delay, and routing to every
 	/// audio strip, and its frame rate to every web page, which never restarts
@@ -245,7 +265,8 @@ impl Sources {
 		let mut drivers = Vec::new();
 		for (name, source) in collection.sources.iter().filter(|(_, source)| source.opens()) {
 			if !self.feeds.contains_key(name) {
-				let (feed, driver) = open(name, source, &self.context);
+				let held = collection.transition.stinger() == Some(name.as_str());
+				let (feed, driver) = open(name, source, &self.context, held);
 				self.feeds.insert(name.clone(), feed);
 				drivers.push(driver);
 			}
@@ -331,8 +352,10 @@ pub struct Feed {
 	played: Playback,
 	/// A replay source's next replay.
 	plays: Option<watch::Sender<Next>>,
-	/// Marked changed to play a media source from its start.
-	starts: Option<watch::Sender<()>>,
+	/// Sent each play a media source is asked for, counted, to play from its start.
+	starts: Option<watch::Sender<u64>>,
+	/// A media source's latest play.
+	runs: Runs,
 	/// Set once a media source's file turns out to hold no sound.
 	silent: Arc<AtomicBool>,
 	/// A broadcast source's playout clock.
@@ -391,11 +414,24 @@ impl Feed {
 		if starts.is_closed() {
 			return Err(self.stopped());
 		}
+		// Counted before the driver hears of it, so whatever the play before
+		// still reports is not taken for this one's.
+		let mut run = self.runs.lock().unwrap();
+		*run = Run {
+			play: run.play + 1,
+			..Run::default()
+		};
 		// Cleared before the driver hears of it, so the next frame drawn, such
 		// as the first of a scene going on program, shows nothing rather than
 		// where the last play was, and the new first picture replaces it.
 		*self.picture.lock().unwrap() = Some(clear());
-		starts.send(()).map_err(|_| self.stopped())
+		starts.send(run.play).map_err(|_| self.stopped())
+	}
+
+	/// A media source's latest play, from its start or the latest
+	/// [`play`](Self::play). Never begins for any other source.
+	pub fn run(&self) -> Run {
+		*self.runs.lock().unwrap()
 	}
 
 	/// Why the driver is gone, from the reason it left in the status.
@@ -491,7 +527,10 @@ pub struct Driver {
 	track: Option<Track>,
 	played: Playback,
 	plays: Option<watch::Receiver<Next>>,
-	starts: Option<watch::Receiver<()>>,
+	starts: Option<watch::Receiver<u64>>,
+	runs: Runs,
+	/// Whether a media source waits for its first play rather than playing at once.
+	held: bool,
 	silent: Arc<AtomicBool>,
 	clock: Option<timeline::Producer>,
 }
@@ -1223,9 +1262,10 @@ impl Driver {
 		}
 	}
 
-	/// Play the media file at `path` from its start, and again each time
-	/// `starts` changes, cutting off the play under way. At its end it starts
-	/// over when `looping`, or holds its last picture, silent, until the next.
+	/// Play the media file at `path` from its start, unless it is held until
+	/// the first, and again each time `starts` changes, cutting off the play
+	/// under way. At its end it starts over when `looping`, or holds its last
+	/// picture, silent, until the next.
 	///
 	/// With `listing`, the pictures are also encoded onto the source's own
 	/// track as they show, while it is used, on one timeline across plays.
@@ -1233,7 +1273,7 @@ impl Driver {
 		&self,
 		path: &Path,
 		looping: bool,
-		mut starts: watch::Receiver<()>,
+		mut starts: watch::Receiver<u64>,
 		listing: Option<&Listing<'_>>,
 	) -> Result<(), Error> {
 		let clip = Clip::open(path)?;
@@ -1277,13 +1317,24 @@ impl Driver {
 			}
 			Ok(())
 		};
+		// The play under way, as the feed counts them.
+		let mut play = *starts.borrow_and_update();
+		if self.held {
+			set(&self.status, Status::Ended);
+			self.ended(&mut starts, &mut own).await;
+			play = *starts.borrow_and_update();
+		}
 		// Where a loop's next play starts: where the last one ended, so loops
 		// keep exact time whatever opening the decoders takes.
 		let mut next = None;
 		loop {
 			let restarted = tokio::select! {
-				result = self.play_clip(&clip, sound.as_mut(), &mut own, next) => {
-					next = Some(result?);
+				result = self.play_clip(&clip, sound.as_mut(), &mut own, next, play) => {
+					let end = result?;
+					self.ran(play, |run| {
+						run.ended.get_or_insert(end);
+					});
+					next = Some(end);
 					false
 				}
 				changed = starts.changed() => {
@@ -1296,6 +1347,7 @@ impl Driver {
 			};
 			if restarted {
 				restart(&mut sound, &mut own)?;
+				play = *starts.borrow_and_update();
 				next = None;
 				continue;
 			}
@@ -1305,14 +1357,24 @@ impl Driver {
 			set(&self.status, Status::Ended);
 			self.ended(&mut starts, &mut own).await;
 			restart(&mut sound, &mut own)?;
+			play = *starts.borrow_and_update();
 			next = None;
+		}
+	}
+
+	/// Note how a media source's `play` runs, unless the feed has asked for
+	/// another since.
+	fn ran(&self, play: u64, note: impl FnOnce(&mut Run)) {
+		let mut run = self.runs.lock().unwrap();
+		if run.play == play {
+			note(&mut run);
 		}
 	}
 
 	/// Wait out a media source that ended until `starts` changes. Its own
 	/// track gets no more pictures, so its encoder is released here once
 	/// nothing uses the source, giving the encode session back.
-	async fn ended(&self, starts: &mut watch::Receiver<()>, own: &mut Own<'_, '_>) {
+	async fn ended(&self, starts: &mut watch::Receiver<u64>, own: &mut Own<'_, '_>) {
 		loop {
 			let settled = async {
 				match &own.track {
@@ -1340,15 +1402,17 @@ impl Driver {
 	}
 
 	/// Play `clip` once, each picture and sound when its moment comes, the
-	/// first at `begin`, or at once. Returns where it ends, once the last has
-	/// played for as long as it lasts: a sound for its samples, and a picture
-	/// for as long as the one before it. A clip that decodes to nothing fails.
+	/// first at `begin`, or at once, as part of the feed's `play`. Returns
+	/// where it ends, once the last has played for as long as it lasts: a
+	/// sound for its samples, and a picture for as long as the one before it.
+	/// A clip that decodes to nothing fails.
 	async fn play_clip(
 		&self,
 		clip: &Clip,
 		mut sound: Option<&mut Sound<'_>>,
 		own: &mut Own<'_, '_>,
 		begin: Option<Instant>,
+		play: u64,
 	) -> Result<Instant, Error> {
 		set(&self.status, Status::Live);
 		let broadcast = clip.consume();
@@ -1392,6 +1456,9 @@ impl Driver {
 			self.open(own, frame, config).await;
 		}
 		let begin = begin.unwrap_or_else(kio::clock::now);
+		self.ran(play, |run| {
+			run.begun.get_or_insert(begin);
+		});
 		let at = |timestamp: moq_net::Timestamp| begin + Duration::from(timestamp).saturating_sub(start);
 		let end = std::cell::Cell::new(begin);
 		let last = |until: Instant| end.set(end.get().max(until));
@@ -1610,8 +1677,9 @@ pub(crate) fn pick<'a, C: Reference + Clone + 'a>(
 	}
 }
 
-/// Start the feed for `source`, and the driver that fills it.
-fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
+/// Start the feed for `source`, and the driver that fills it, `held` from
+/// playing a media file until the first [`Feed::play`].
+fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Driver) {
 	let picture = Mailbox::default();
 	let delivered = Delivered::default();
 	let strip = source.has_audio().then(Strip::default);
@@ -1640,12 +1708,13 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 	};
 	let (starts, started) = match source {
 		Source::Media { .. } => {
-			let (starts, started) = watch::channel(());
+			let (starts, started) = watch::channel(0);
 			(Some(starts), Some(started))
 		}
 		_ => (None, None),
 	};
 	let silent = Arc::<AtomicBool>::default();
+	let runs = Runs::default();
 
 	let feed = Feed {
 		source: source.clone(),
@@ -1658,6 +1727,7 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		played: played.clone(),
 		plays,
 		starts,
+		runs: runs.clone(),
 		silent: silent.clone(),
 		clock: clock.as_ref().map(timeline::Producer::consume),
 	};
@@ -1674,6 +1744,8 @@ fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
 		played,
 		plays: replays,
 		starts: started,
+		runs,
+		held,
 		silent,
 		clock,
 	};
@@ -1930,7 +2002,7 @@ mod tests {
 			let (context, _origin) = context(dir.path());
 			let start = kio::clock::now();
 			let opened = |source: Source| {
-				let (feed, driver) = open("source", &source, &context);
+				let (feed, driver) = open("source", &source, &context, false);
 				set(&driver.status, Status::Live);
 				(feed, driver)
 			};
@@ -2716,6 +2788,59 @@ mod media_tests {
 			let (again, _) = shown(feed).await;
 			assert_eq!(again, first, "from the start");
 			assert_eq!(feed.status(), Status::Live);
+		})
+		.await;
+	}
+
+	/// The file a stinger plays opens blank and silent, waiting for its first
+	/// play, and each play reports when it began and ended, never a play it
+	/// cut off.
+	#[tokio::test(start_paused = true)]
+	async fn a_stinger_clip_waits_for_its_play() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let mut collection = media(dir.path(), &[("clip.mkv", CLIP, false, false)]);
+			collection.transition = crate::Transition::Stinger {
+				source: "clip.mkv".into(),
+				cut: Duration::from_millis(500),
+			};
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let feed = sources.get("clip.mkv").unwrap();
+			assert_eq!(feed.status(), Status::Ended);
+			until_time(kio::clock::now() + Duration::from_millis(1_100)).await;
+			assert!(feed.take().is_none(), "nothing plays until asked");
+			assert_eq!(feed.run(), Run::default());
+
+			feed.play().unwrap();
+			assert_eq!(feed.run().play, 1);
+			let (first, shown_at) = shown(feed).await;
+			let begun = feed.run().begun.expect("begun once its first picture is due");
+			assert!(begun <= shown_at, "{begun:?} after {shown_at:?}");
+			assert_eq!(feed.run().ended, None);
+
+			// Cut off halfway, it never ends; the new play starts over.
+			until_time(begun + Duration::from_millis(500)).await;
+			feed.play().unwrap();
+			let forgotten = Run {
+				play: 2,
+				..Run::default()
+			};
+			assert_eq!(feed.run(), forgotten, "the play before is forgotten");
+			let (again, _) = shown(feed).await;
+			assert_eq!(again, first);
+			let begun = feed.run().begun.unwrap();
+
+			until_time(begun + Duration::from_millis(1_100)).await;
+			until_status(&sources, "clip.mkv", Status::Ended).await;
+			let ended = feed.run().ended.expect("ended at its end");
+			assert!(
+				ended >= begun + Duration::from_secs(1) && ended <= kio::clock::now(),
+				"{:?} after it began",
+				ended - begun
+			);
 		})
 		.await;
 	}
