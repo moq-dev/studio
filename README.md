@@ -98,6 +98,7 @@ Every panel is a tab you can drag, split, or stack.
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
+| Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
 | Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
 | Output | Start and stop recording, pick the mix it records, set the canvas size and frame rate, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each rendition's encoder work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem. |
@@ -121,6 +122,29 @@ All but a fade ease in and out. A transition is drawn on the program clock, so
 the stream and a recording show the same frames of it, and a second
 **Transition** while one runs starts from the scene it was heading to. A
 transition set to 0 ms is a cut.
+
+### Keyframes
+
+An item's keyframes animate it: an item can fly in, fade in, or blur into
+focus, and a camera can push in. Each keyframe is a time after the item's
+scene goes on and how far the item is from where it rests then: moved and
+resized by canvas pixels, cropped further, and drawn through filters after its
+own. Between two keyframes the item eases from one to the next, linearly or
+easing in, out, or (by default) both. Filters of the same kinds, in order,
+mix their settings, and others change halfway. A keyframe's filters cannot be
+a LUT or a mask.
+
+Keyframes play once, from when the item's scene goes on program, and hold the
+last keyframe; before the first, the item holds the first. A cut or transition
+starts them again, even to the scene already on program, while a scene leaving
+in a transition carries on with its own. The preview plays them from when the
+scene went into preview; pick the scene again, or press **Play**, to watch them
+again. They are drawn on the program clock, so the stream, a recording, and a
+replay of the program show the same frames. Top-layer items have none, since
+the top layer never goes on.
+
+Dragging an item in the preview grabs it where its keyframes have it and moves
+where it rests, so its whole animation moves with it.
 
 In the preview, click an item of whatever the Items panel shows to select it,
 drag it to move it, and drag its edges or corners to resize it. A drag snaps
@@ -429,6 +453,11 @@ items = [
 name = "Break"
 items = [
     { source = "camera-faded", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    # Flies in from the right, blurred, over half a second, landing where it rests.
+    { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, keyframes = [
+        { at = "0s", x = 700, filters = [{ kind = "blur", radius = 12 }] },
+        { at = "500ms", ease = "out", filters = [{ kind = "blur", radius = 0 }] },
+    ] },
 ]
 
 [[top]]
@@ -476,6 +505,12 @@ An item's `blend` mixes it with what is under it by a CSS `mix-blend-mode`:
 `color_burn`, `hard_light`, `soft_light`, `difference`, `exclusion`, `hue`,
 `saturation`, `color`, or `luminosity`. Removing a source removes the filters
 that name it.
+
+An item's `keyframes`, in order of time, each have an `at`, how long after the
+scene goes on, and optionally an `ease` into it from the one before (`linear`,
+`in`, `out`, or `in_out`, the default), `x`, `y`, `width`, and `height` added
+to the item's `rect`, a `crop` of what the item's crop leaves, and `filters`
+applied after the item's own.
 
 The studio writes the file a second after the last change, so a burst such as a
 slider drag is one write, and once more on quit. Edits that never pause for a

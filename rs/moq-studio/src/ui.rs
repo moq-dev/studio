@@ -11,8 +11,8 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::browser::Paint;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
-	Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Filter, Item, Layer, MaskMode, Rect, Scene, Source,
-	Transition, Video, wgpu,
+	Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode, Rect,
+	Scene, Source, Transition, Video, wgpu,
 };
 
 use crate::autosave::Conflict;
@@ -36,6 +36,7 @@ enum Tab {
 	Devices,
 	Guests,
 	Filters,
+	Keyframes,
 	Audio,
 	Output,
 	Health,
@@ -54,6 +55,7 @@ impl Tab {
 			Self::Devices => "Devices",
 			Self::Guests => "Guests",
 			Self::Filters => "Filters",
+			Self::Keyframes => "Keyframes",
 			Self::Audio => "Audio",
 			Self::Output => "Output",
 			Self::Health => "Health",
@@ -90,7 +92,14 @@ impl Studio {
 		tree.split_right(
 			sources,
 			0.5,
-			vec![Tab::Filters, Tab::Replay, Tab::Health, Tab::Audio, Tab::Output],
+			vec![
+				Tab::Filters,
+				Tab::Keyframes,
+				Tab::Replay,
+				Tab::Health,
+				Tab::Audio,
+				Tab::Output,
+			],
 		);
 
 		Self {
@@ -295,6 +304,7 @@ impl TabViewer for Panels {
 			Tab::Devices => self.devices(ui),
 			Tab::Guests => self.guests(ui),
 			Tab::Filters => self.filters(ui),
+			Tab::Keyframes => self.keyframes(ui),
 			Tab::Audio => self.audio(ui),
 			Tab::Output => self.output(ui),
 			Tab::Health => self.health(ui),
@@ -742,7 +752,8 @@ impl Panels {
 		// Interacting, the pointer belongs to the pages rather than to arranging.
 		if self.interacting {
 			let image = picture(ui, self.preview.id, canvas, egui::Sense::hover()).rect;
-			let scene = state.compositor.preview_scene();
+			let since = state.compositor.preview_since();
+			let scene = state.compositor.preview_scene().map(|scene| (scene, since));
 			self.rebind(&state.sources);
 			let delivered = self.interact.update(ui, image, state.collection(), scene);
 			deliver(&state.sources, delivered);
@@ -756,7 +767,9 @@ impl Panels {
 	}
 
 	/// Select, move, and resize the items of the layer the Items panel shows
-	/// by dragging them in the preview, snapping as they go.
+	/// by dragging them in the preview, snapping as they go. An item is
+	/// grabbed where its keyframes have it in the preview, and a drag moves
+	/// where it rests, which carries its keyframes along.
 	fn arrange(&mut self, ui: &Ui, state: &mut State, response: &egui::Response, canvas: Canvas) -> anyhow::Result<()> {
 		let gesture = self.gestures.of(response);
 		// The release still moves the item to where the pointer let go.
@@ -774,9 +787,11 @@ impl Panels {
 		}
 
 		let Ok(layer) = self.layer(state) else { return Ok(()) };
-		let Some(items) = state.collection().items(&layer).cloned() else {
+		let Some(resting) = state.collection().items(&layer).cloned() else {
 			return Ok(());
 		};
+		let since = state.compositor.preview_since();
+		let items: Vec<Item> = resting.iter().map(|item| item.posed(since).into_owned()).collect();
 		let selected = match &self.selection {
 			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
 			_ => None,
@@ -799,7 +814,7 @@ impl Panels {
 				layer: layer.clone(),
 				index,
 				grab,
-				rect: items[index].rect,
+				rect: resting[index].rect,
 				origin: view.point(origin),
 				gesture,
 				hints: None,
@@ -813,6 +828,21 @@ impl Panels {
 			let point = view.point(pos);
 			// Whole canvas pixels, so an unsnapped drag saves round numbers.
 			let delta = [(point[0] - drag.origin[0]).round(), (point[1] - drag.origin[1]).round()];
+			let item = state
+				.collection()
+				.items(&drag.layer)
+				.and_then(|items| items.get(drag.index))
+				.cloned();
+			// How far the keyframes have the item from where it rests, which
+			// snapping, done where the item shows, leaves alone.
+			let shown = item.as_ref().map_or(drag.rect, |item| item.posed(since).rect);
+			let rest = item.as_ref().map_or(drag.rect, |item| item.rect);
+			let away = |rect: Rect, sign: f32| Rect {
+				x: rect.x + sign * (shown.x - rest.x),
+				y: rect.y + sign * (shown.y - rest.y),
+				width: rect.width + sign * (shown.width - rest.width),
+				height: rect.height + sign * (shown.height - rest.height),
+			};
 			let rect = drag.grab.drag(drag.rect, delta);
 			let free = ui.input(|input| input.modifiers.command);
 			drag.hints = (self.snapping.on && !free).then(|| {
@@ -820,14 +850,11 @@ impl Panels {
 					reach,
 					grid: self.snapping.grid.then_some(self.snapping.spacing as f32),
 				};
-				snap.apply(drag.grab, rect, &others(state, &drag.layer, drag.index), &canvas)
+				let others = others(state, &drag.layer, drag.index, since);
+				snap.apply(drag.grab, away(rect, 1.0), &others, &canvas)
 			});
-			let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
-			let item = state
-				.collection()
-				.items(&drag.layer)
-				.and_then(|items| items.get(drag.index));
-			if let Some(item) = item.cloned()
+			let rect = drag.hints.as_ref().map_or(rect, |snapped| away(snapped.rect, -1.0));
+			if let Some(item) = item
 				&& item.rect != rect
 			{
 				let verb = if drag.grab == Grab::Move { "Move" } else { "Resize" };
@@ -842,7 +869,8 @@ impl Panels {
 		}
 
 		// Drawn from the collection and selection as this frame left them.
-		let items = state.collection().items(&layer).cloned().unwrap_or_default();
+		let items = state.collection().items(&layer).map_or(&[][..], Vec::as_slice);
+		let items: Vec<Item> = items.iter().map(|item| item.posed(since).into_owned()).collect();
 		let selected = match &self.selection {
 			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
 			_ => None,
@@ -1736,6 +1764,185 @@ impl Panels {
 		self.check(result);
 	}
 
+	/// The selected item's keyframes: when each is, how the item eases into
+	/// it, and how far it takes the item from where it rests.
+	fn keyframes(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
+		let selected = match &self.selection {
+			Some(Selection::Item(layer, index)) => {
+				let item = state.collection().items(layer).and_then(|items| items.get(*index));
+				item.map(|item| (layer.clone(), *index, item.clone()))
+			}
+			_ => None,
+		};
+		let Some((layer, index, item)) = selected else {
+			ui.label("Select an item to animate it.");
+			return;
+		};
+		if layer == Layer::Top {
+			ui.label("The top layer never goes on program, so its items have no keyframes to play.");
+			return;
+		}
+		let what = format!("`{}`", item.source);
+		let mut play = false;
+		ui.horizontal(|ui| {
+			ui.strong(format!("Keyframes of {what}"));
+			play = ui
+				.button("Play")
+				.on_hover_text("Play the preview scene's keyframes again from the start")
+				.clicked();
+		});
+		ui.weak(
+			"Each keyframe moves the item away from where it rests, so dragging it in the preview \
+			 moves its whole animation. They play once, from when the item's scene goes on, and the \
+			 last one holds.",
+		);
+
+		let mut next = item.keyframes.clone();
+		let mut action: Option<(String, Option<u64>)> = None;
+		let mut remove = None;
+		egui::ScrollArea::vertical().show(ui, |ui| {
+			for at in 0..next.len() {
+				// Between its neighbors, so the keyframes stay in order.
+				let earliest = at.checked_sub(1).map_or(0, |before| next[before].at.as_millis() as u64);
+				let latest = next.get(at + 1).map_or(u64::MAX, |after| after.at.as_millis() as u64);
+				let keyframe = &mut next[at];
+				ui.push_id(at, |ui| {
+					ui.horizontal_wrapped(|ui| {
+						let mut millis = keyframe.at.as_millis() as u64;
+						let response = ui
+							.add(egui::DragValue::new(&mut millis).range(earliest..=latest).suffix(" ms"))
+							.on_hover_text("How long after the item's scene goes on");
+						if let Some(gesture) = changed(&response, &mut self.gestures) {
+							keyframe.at = Duration::from_millis(millis);
+							action = Some((format!("Time a keyframe of {what}"), gesture));
+						}
+						let before = keyframe.ease;
+						egui::ComboBox::from_id_salt("ease")
+							.selected_text(ease_name(keyframe.ease))
+							.show_ui(ui, |ui| {
+								for ease in Ease::ALL {
+									ui.selectable_value(&mut keyframe.ease, ease, ease_name(ease));
+								}
+							})
+							.response
+							.on_hover_text("How the item eases into this keyframe from the one before");
+						if keyframe.ease != before {
+							action = Some((format!("Ease a keyframe of {what}"), None));
+						}
+						let offsets = [
+							("x", &mut keyframe.x),
+							("y", &mut keyframe.y),
+							("width", &mut keyframe.width),
+							("height", &mut keyframe.height),
+						];
+						for (label, offset) in offsets {
+							ui.weak(label);
+							let response = ui.add(egui::DragValue::new(offset).suffix(" px"));
+							if let Some(gesture) = changed(&response, &mut self.gestures) {
+								action = Some((format!("Move a keyframe of {what}"), gesture));
+							}
+						}
+						let crop = &mut keyframe.crop;
+						let edges = [
+							("crop left", &mut crop.left),
+							("top", &mut crop.top),
+							("right", &mut crop.right),
+							("bottom", &mut crop.bottom),
+						];
+						for (label, edge) in edges {
+							ui.weak(label);
+							let response = ui.add(egui::DragValue::new(edge).range(0.0..=0.95).speed(0.002));
+							if let Some(gesture) = changed(&response, &mut self.gestures) {
+								action = Some((format!("Crop a keyframe of {what}"), gesture));
+							}
+						}
+						if ui.small_button("Remove").clicked() {
+							remove = Some(at);
+						}
+					});
+
+					let mut dropped = None;
+					for (index, filter) in keyframe.filters.iter_mut().enumerate() {
+						ui.push_id(index, |ui| {
+							ui.horizontal_wrapped(|ui| {
+								if let Some(gesture) = filter_ui(ui, filter, &[], &[], &mut self.gestures) {
+									let label = format!("Set {} on a keyframe of {what}", filter_name(filter));
+									action = Some((label, gesture));
+								}
+								if ui.small_button("Remove").clicked() {
+									dropped = Some(index);
+								}
+							});
+						});
+					}
+					if let Some(index) = dropped {
+						keyframe.filters.remove(index);
+						action = Some((format!("Remove a filter from a keyframe of {what}"), None));
+					}
+					// A keyframe's filters read no other source, so no LUT or mask.
+					egui::ComboBox::from_id_salt("add filter")
+						.selected_text("Add filter")
+						.show_ui(ui, |ui| {
+							for filter in templates(&[], &[]) {
+								if ui.selectable_label(false, filter_name(&filter)).clicked() {
+									let label = format!("Add {} to a keyframe of {what}", filter_name(&filter));
+									action = Some((label, None));
+									keyframe.filters.push(filter);
+								}
+							}
+						})
+						.response
+						.on_hover_text(
+							"Applied after the item's own. Settings mix into the next keyframe's when \
+							 its filters are of the same kinds, in order, and otherwise change halfway.",
+						);
+					ui.separator();
+				});
+			}
+		});
+		if let Some(at) = remove {
+			next.remove(at);
+			action = Some((format!("Remove a keyframe from {what}"), None));
+		}
+		if ui
+			.button("Add keyframe")
+			.on_hover_text("Half a second after the last, where the item rests, with the last one's filters")
+			.clicked()
+		{
+			let keyframe = match next.last() {
+				Some(last) => Keyframe {
+					ease: last.ease,
+					filters: last.filters.clone(),
+					..Keyframe::new(last.at + Duration::from_millis(500))
+				},
+				None => Keyframe::new(Duration::ZERO),
+			};
+			next.push(keyframe);
+			action = Some((format!("Add a keyframe to {what}"), None));
+		}
+
+		if play {
+			let scene = state.compositor.preview_scene().map(str::to_owned);
+			state.compositor.set_preview(scene);
+		}
+		let Some((label, gesture)) = action else { return };
+		let result = edit(&mut state, label, gesture, |draft| {
+			draft.set_item(
+				&layer,
+				index,
+				Item {
+					keyframes: next,
+					..item
+				},
+			)
+		});
+		drop(state);
+		self.check(result);
+	}
+
 	/// The mixes, which the program carries and which plays to the speakers,
 	/// and each source's gain, mute, delay, and routing.
 	fn audio(&mut self, ui: &mut Ui) {
@@ -2570,6 +2777,15 @@ fn direction_name(direction: Direction) -> &'static str {
 	}
 }
 
+fn ease_name(ease: Ease) -> &'static str {
+	match ease {
+		Ease::Linear => "linear",
+		Ease::In => "ease in",
+		Ease::Out => "ease out",
+		Ease::InOut => "ease in and out",
+	}
+}
+
 fn blend_name(blend: Blend) -> &'static str {
 	match blend {
 		Blend::Normal => "normal",
@@ -2893,9 +3109,10 @@ struct Drag {
 /// How far, in points on screen, the pointer reaches to an edge or a line.
 const REACH: f32 = 8.0;
 
-/// The visible items of the scene in preview and the top layer, other than
-/// the one at `index` of `layer`: what a dragged item snaps to.
-fn others(state: &State, layer: &Layer, index: usize) -> Vec<Rect> {
+/// Where the visible items of the scene in preview and the top layer show
+/// `since` the scene went into preview, other than the one at `index` of
+/// `layer`: what a dragged item snaps to.
+fn others(state: &State, layer: &Layer, index: usize, since: Duration) -> Vec<Rect> {
 	let scene = state
 		.compositor
 		.preview_scene()
@@ -2906,7 +3123,7 @@ fn others(state: &State, layer: &Layer, index: usize) -> Vec<Rect> {
 		let items = collection.items(&shown).map_or(&[][..], Vec::as_slice);
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == *layer && at == index) {
-				rects.push(item.rect);
+				rects.push(item.posed(since).rect);
 			}
 		}
 	}
