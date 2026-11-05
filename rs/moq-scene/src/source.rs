@@ -284,6 +284,15 @@ impl Sources {
 		}
 	}
 
+	/// Stop every source, as removing it would: each [`Driver`] returns and
+	/// its own track finishes cleanly with what it published. The mixes stay,
+	/// and the next [`sync`](Self::sync) starts the sources again.
+	pub fn stop(&mut self) {
+		for feed in std::mem::take(&mut self.feeds).into_values() {
+			leave(&self.mixes, &feed);
+		}
+	}
+
 	/// The running source called `name`.
 	pub fn get(&self, name: &str) -> Option<&Feed> {
 		self.feeds.get(name)

@@ -901,6 +901,99 @@ mod tests {
 		.await;
 	}
 
+	/// Stopping the sources, as quitting does, ends each source's own track
+	/// cleanly after what it published, and takes it out of the listing.
+	#[tokio::test]
+	async fn stopping_the_sources_finishes_their_tracks() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (publish, catalog, consumer) = studio();
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish);
+			let mut collection = Collection::new();
+			collection.sources.insert(
+				"red".into(),
+				Source::Color {
+					color: Rgba([255, 0, 0, 255]),
+				},
+			);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let snapshot = listed(&catalog, |sources| sources.contains_key("red")).await;
+			let (name, _) = snapshot.ext.studio.sources["red"].binary.tracks.iter().next().unwrap();
+			let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+
+			sources.stop();
+			assert!(sources.get("red").is_none());
+			let mut group = track.recv_group().await.unwrap().expect("the still");
+			assert!(group.read_frame().await.unwrap().is_some());
+			assert!(group.read_frame().await.unwrap().is_none());
+			assert!(track.recv_group().await.unwrap().is_none(), "the track finished");
+			listed(&catalog, |sources| sources.is_empty()).await;
+		})
+		.await;
+	}
+
+	/// Stopping the sources ends a playing media file's picture and sound
+	/// tracks cleanly after what they published.
+	#[tokio::test(start_paused = true)]
+	async fn stopping_the_sources_finishes_a_media_files_tracks() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("bed.mkv"), crate::media::tests::CLIP).unwrap();
+			let (publish, catalog, consumer) = studio();
+			publish.set_on_program(OnProgram {
+				shown: ["bed".to_string()].into(),
+				heard: ["bed".to_string()].into(),
+			});
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish.clone());
+			let mut collection = Collection::new();
+			let bed = Source::Media {
+				path: "bed.mkv".into(),
+				looping: true,
+				restart: false,
+			};
+			collection.sources.insert("bed".into(), bed);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			let bed = until(|| {
+				let listed = catalog.snapshot().ext.studio.sources.remove("bed");
+				listed.filter(|listed| !listed.video.renditions.is_empty() && !listed.audio.renditions.is_empty())
+			})
+			.await;
+			let names = [
+				bed.video.renditions.keys().next().unwrap().clone(),
+				bed.audio.renditions.keys().next().unwrap().clone(),
+			];
+			let mut tracks = Vec::new();
+			for name in &names {
+				let subscription =
+					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None));
+				tracks.push(consumer.track(name).unwrap().subscribe(subscription).await.unwrap());
+			}
+			let written = |id: &str| publish.stats().get(id).map_or(0, |rendition| rendition.frames);
+			pictures(sources.get("bed").unwrap(), kio::clock::now(), 4).await;
+			until(|| names.iter().all(|name| written(name) > 0).then_some(())).await;
+
+			sources.stop();
+			for (name, mut track) in names.iter().zip(tracks) {
+				let mut frames = 0;
+				while let Some(mut group) = track.recv_group().await.expect("a clean end") {
+					while group.read_frame().await.expect("a whole group").is_some() {
+						frames += 1;
+					}
+				}
+				assert!(frames > 0, "{name} published nothing");
+			}
+			listed(&catalog, |sources| sources.is_empty()).await;
+		})
+		.await;
+	}
+
 	/// A mid-gray picture of `size` at `millis` on a capture's own timeline.
 	fn gray(size: moq_video::Size, millis: u64) -> moq_video::Frame {
 		let i420 = moq_video::I420::new(size, vec![0x80; moq_video::I420::len(size).unwrap()]).unwrap();
