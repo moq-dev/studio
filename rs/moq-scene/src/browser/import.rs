@@ -2,19 +2,8 @@
 
 use std::os::fd::OwnedFd;
 
-use super::Helper;
 use super::protocol::Texture;
 use crate::wgpu;
-
-/// Whether the studio's device can import the helper's shared textures, so
-/// the helper should paint into them.
-pub(super) fn supported(helper: &Helper) -> bool {
-	cfg!(feature = "cef")
-		&& helper
-			.device
-			.features()
-			.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
-}
 
 /// Copy the DMA-BUF `texture` describes, whose plane descriptors are `fds`,
 /// into a texture of the studio's own on `device`, waiting until the copy is

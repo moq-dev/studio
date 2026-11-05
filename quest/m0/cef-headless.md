@@ -26,7 +26,3 @@ Check first, and record the result in the PR:
 Then drop the `xvfb-run` wrapper from the `render-sw` recipe in the
 `justfile` (the nightly job inherits it through the recipe), and say in
 `README.md` that browser sources need no X server.
-
-## Required
-
-- [Deterministic browser source startup](/quest/m0/cef-startup.md) - the `--disable-gpu` CPU path this builds on

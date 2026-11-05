@@ -87,6 +87,9 @@ pub struct Helper {
 	profile: PathBuf,
 	device: wgpu::Device,
 	queue: wgpu::Queue,
+	/// Whether pages paint into shared textures the device imports, rather
+	/// than into memory it uploads.
+	shared: bool,
 	/// The device's DRM render node, which CEF must paint on for the studio to
 	/// import what it paints.
 	render_node: Option<PathBuf>,
@@ -111,17 +114,25 @@ impl Helper {
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
 	) -> Self {
+		let info = adapter.get_info();
+		// A software device holds a shared texture in memory anyway, so there
+		// the page paints in software too.
+		let shared = cfg!(feature = "cef")
+			&& info.device_type != wgpu::DeviceType::Cpu
+			&& device
+				.features()
+				.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF);
 		// A machine with two GPUs would otherwise paint on whichever CEF
 		// picks, and the studio cannot import from another GPU.
-		let bus = adapter.get_info().device_pci_bus_id;
-		let render_node = (!bus.is_empty())
-			.then(|| std::fs::canonicalize(format!("/dev/dri/by-path/pci-{bus}-render")).ok())
+		let render_node = (!info.device_pci_bus_id.is_empty())
+			.then(|| std::fs::canonicalize(format!("/dev/dri/by-path/pci-{}-render", info.device_pci_bus_id)).ok())
 			.flatten();
 		Self {
 			program: program.into(),
 			profile: profile.into(),
 			device: device.clone(),
 			queue: queue.clone(),
+			shared,
 			render_node,
 			#[cfg(target_os = "linux")]
 			running: Default::default(),
