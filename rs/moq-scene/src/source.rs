@@ -426,7 +426,8 @@ impl Feed {
 	/// One that ended or stopped plays again, and one that loops loops from
 	/// there.
 	///
-	/// Refused by any other kind of source, and by a media source that stopped.
+	/// Refused by any other kind of source, and by a media source whose driver
+	/// is gone, such as after it failed.
 	pub fn play(&self) -> Result<(), Error> {
 		let Some(cues) = &self.cues else {
 			return Err(Error::Unsupported("only a media source plays from its start".into()));
