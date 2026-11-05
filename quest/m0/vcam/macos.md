@@ -3,7 +3,7 @@
 ## Goal
 
 The macOS app bundle carries a CoreMediaIO Camera Extension. Once the user
-approves it, apps list a camera that carries a canvas's program. An app
+approves it, apps list a camera that carries the program or a published scene. An app
 update installs the new extension without a reboot.
 
 ## Required
