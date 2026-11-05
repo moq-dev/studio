@@ -166,12 +166,6 @@ impl eframe::App for Studio {
 	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
 		let engine = self.panels.engine.clone();
 		let state = engine.state.lock().unwrap();
-		if let Some(render) = frame.wgpu_render_state() {
-			let view = state.compositor.output(self.panels.view.as_deref());
-			let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
-			self.panels.preview.follow(render, view.preview());
-			self.panels.program.follow(render, view.program());
-		}
 		// Redraw at the canvas rate, so preview and program are live.
 		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
@@ -192,6 +186,16 @@ impl eframe::App for Studio {
 		// turning Interact off does.
 		if !self.panels.previewed {
 			self.panels.let_go();
+		}
+		// After the panels, which may pick another canvas, so the textures
+		// painted at the end of this frame are the canvas the panels sized
+		// them for.
+		if let Some(render) = frame.wgpu_render_state() {
+			let state = engine.state.lock().unwrap();
+			let view = state.compositor.output(self.panels.view.as_deref());
+			let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
+			self.panels.preview.follow(render, view.preview());
+			self.panels.program.follow(render, view.program());
 		}
 	}
 }
@@ -639,7 +643,13 @@ impl Panels {
 			(false, Some(name)) => Layer::scene(name),
 			(false, None) => return Err("Pick a scene to edit what it shows.".into()),
 		};
-		Ok(layer.on(self.view.clone()))
+		// A canvas an undo or a reload removed is not shown any more, though
+		// `view` follows only once Preview, Program, or Items draws.
+		let view = self
+			.view
+			.clone()
+			.filter(|name| state.collection().canvases.contains_key(name));
+		Ok(layer.on(view))
 	}
 
 	/// The canvas Preview, Program, and Items show, and its size: the main
@@ -2313,7 +2323,7 @@ impl Panels {
 			ui.end_row();
 		});
 		ui.separator();
-		renditions(ui, "main", &stats.video, true);
+		renditions(ui, None, &stats.video, true);
 		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
@@ -2334,7 +2344,7 @@ impl Panels {
 				"Encoder: {}",
 				video.encoder().unwrap_or_else(|| "not open".into())
 			));
-			renditions(ui, &name, &video, false);
+			renditions(ui, Some(&name), &video, false);
 			if let Some(error) = video.error() {
 				ui.colored_label(ui.visuals().error_fg_color, error);
 			}
@@ -2538,25 +2548,29 @@ impl Panels {
 		for (name, extra) in &canvases {
 			let current = (extra.width, extra.height);
 			let (mut width, mut height) = self.extras.get(name).copied().unwrap_or(current);
-			ui.horizontal(|ui| {
-				ui.strong(name);
-				ui.add(egui::DragValue::new(&mut width).range(2..=u32::MAX));
-				ui.label("x");
-				ui.add(egui::DragValue::new(&mut height).range(2..=u32::MAX));
-				let edited = (width, height) != current;
-				if ui.add_enabled(edited, egui::Button::new("Apply")).clicked() {
-					action = Some(CanvasAction::Set(name.clone(), width, height));
-				}
-				if ui.add_enabled(edited, egui::Button::new("Reset")).clicked() {
-					(width, height) = current;
-				}
-				if ui
-					.button("Remove")
-					.on_hover_text("Remove the canvas, its top layer, and every scene's layout on it")
-					.clicked()
-				{
-					action = Some(CanvasAction::Remove(name.clone()));
-				}
+			// By name, so an edit under way stays on its canvas as others come
+			// and go.
+			ui.push_id(name, |ui| {
+				ui.horizontal(|ui| {
+					ui.strong(name);
+					ui.add(egui::DragValue::new(&mut width).range(2..=u32::MAX));
+					ui.label("x");
+					ui.add(egui::DragValue::new(&mut height).range(2..=u32::MAX));
+					let edited = (width, height) != current;
+					if ui.add_enabled(edited, egui::Button::new("Apply")).clicked() {
+						action = Some(CanvasAction::Set(name.clone(), width, height));
+					}
+					if ui.add_enabled(edited, egui::Button::new("Reset")).clicked() {
+						(width, height) = current;
+					}
+					if ui
+						.button("Remove")
+						.on_hover_text("Remove the canvas, its top layer, and every scene's layout on it")
+						.clicked()
+					{
+						action = Some(CanvasAction::Remove(name.clone()));
+					}
+				})
 			});
 			match (width, height) == current {
 				true => self.extras.remove(name),
@@ -2573,10 +2587,16 @@ impl Panels {
 			ui.add(egui::DragValue::new(width).range(2..=u32::MAX));
 			ui.label("x");
 			ui.add(egui::DragValue::new(height).range(2..=u32::MAX));
-			let named = !name.is_empty() && !canvases.contains_key(name.as_str());
+			// Viewers of the main broadcast report back beneath it, under
+			// `ECHO`, where this canvas would publish.
+			let named = !name.is_empty() && !canvases.contains_key(name.as_str()) && name != crate::health::ECHO;
 			if ui
 				.add_enabled(named, egui::Button::new("Add canvas"))
 				.on_hover_text("Another canvas with its own layout of each scene, published in its own broadcast")
+				.on_disabled_hover_text(format!(
+					"Name it something new, other than `{}`, where viewers report back",
+					crate::health::ECHO
+				))
 				.clicked()
 			{
 				action = Some(CanvasAction::Set(name.clone(), *width, *height));
@@ -3189,9 +3209,10 @@ fn expiry(expires: kio::clock::Wall, now: kio::clock::Wall) -> String {
 	}
 }
 
-/// What each of a canvas's program encoders costs: the sizes it publishes, and
-/// its recording copy if `recording`.
-fn renditions(ui: &mut Ui, id: &str, video: &crate::engine::VideoStats, recording: bool) {
+/// What each of the program encoders of the canvas `name`, the main one for
+/// `None`, costs: the sizes it publishes, and its recording copy if
+/// `recording`.
+fn renditions(ui: &mut Ui, name: Option<&str>, video: &crate::engine::VideoStats, recording: bool) {
 	let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
 	let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
 	// Only the sizes the program publishes, since a small canvas, or an
@@ -3206,7 +3227,7 @@ fn renditions(ui: &mut Ui, id: &str, video: &crate::engine::VideoStats, recordin
 	if recording {
 		columns.push(("Recording", record));
 	}
-	egui::Grid::new(("renditions", id)).show(ui, |ui| {
+	egui::Grid::new(("renditions", name)).show(ui, |ui| {
 		ui.strong("");
 		for (heading, _) in &columns {
 			ui.strong(*heading);

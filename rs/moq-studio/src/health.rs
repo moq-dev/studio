@@ -36,7 +36,7 @@ pub fn without(stall: Stall) -> String {
 }
 
 /// The prefix, under the broadcast's own path, where viewers publish feedback.
-const ECHO: &str = "viewers";
+pub(crate) const ECHO: &str = "viewers";
 
 /// The most of one viewer's report the studio holds. A report covers the
 /// broadcast's few tracks in well under a KiB, so this only stops a viewer

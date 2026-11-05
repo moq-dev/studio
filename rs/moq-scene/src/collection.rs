@@ -159,15 +159,24 @@ impl Collection {
 	/// Every layer: the main canvas's scenes in order, then its top layer,
 	/// then each further canvas's the same way.
 	pub fn layers(&self) -> impl Iterator<Item = (Layer, &[Item])> {
-		let canvases = std::iter::once(None).chain(self.canvases.keys().cloned().map(Some));
-		canvases.flat_map(move |canvas| {
-			let scenes = self.scenes.iter().map(|scene| Some(scene.name.clone()));
-			scenes.chain([None]).map(move |scene| {
+		let extras = self
+			.canvases
+			.iter()
+			.map(|(name, extra)| (Some(name), extra.top.as_slice()));
+		let canvases = std::iter::once((None, self.top.as_slice())).chain(extras);
+		canvases.flat_map(move |(canvas, top)| {
+			let scenes = self.scenes.iter().map(move |scene| {
+				let items = match canvas {
+					None => scene.items.as_slice(),
+					Some(name) => scene.canvases.get(name).map_or(&[][..], Vec::as_slice),
+				};
+				(Some(scene.name.clone()), items)
+			});
+			scenes.chain([(None, top)]).map(move |(scene, items)| {
 				let layer = Layer {
-					canvas: canvas.clone(),
+					canvas: canvas.cloned(),
 					scene,
 				};
-				let items = self.items(&layer).unwrap_or_default();
 				(layer, items)
 			})
 		})
