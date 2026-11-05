@@ -323,8 +323,6 @@ fn reach(sigma: f32) -> f32 {
 pub(crate) struct Picture {
 	view: wgpu::TextureView,
 	bind: wgpu::BindGroup,
-	/// Whether its alpha is premultiplied, as a web page's is.
-	premultiplied: bool,
 	/// Its width and height in pixels.
 	size: (u32, u32),
 }
@@ -353,7 +351,6 @@ struct Input {
 	area: Area,
 	uv: [f32; 4],
 	valid: [f32; 4],
-	premultiplied: bool,
 }
 
 /// Per-pixel filters waiting to run when an input is sampled.
@@ -671,8 +668,9 @@ impl Effects {
 		}
 	}
 
-	/// `texture`, a source's picture or a canvas-sized target, bound to sample.
-	pub fn picture(&self, texture: &wgpu::Texture, premultiplied: bool) -> Picture {
+	/// `texture`, a source's picture or a canvas-sized target with
+	/// premultiplied alpha, bound to sample.
+	pub fn picture(&self, texture: &wgpu::Texture) -> Picture {
 		let view = texture.create_view(&Default::default());
 		let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
 			label: Some("moq-scene input"),
@@ -691,7 +689,6 @@ impl Effects {
 		Picture {
 			view,
 			bind,
-			premultiplied,
 			size: (texture.width(), texture.height()),
 		}
 	}
@@ -843,7 +840,6 @@ impl Effects {
 			area,
 			uv: crop,
 			valid: crop,
-			premultiplied: item.picture.premultiplied,
 		};
 
 		let stages: Vec<Stage> = item.filters.iter().map(|filter| Stage::of(filter)).collect();
@@ -880,7 +876,7 @@ impl Effects {
 							let picture = library.picture(source)?;
 							let op = Op {
 								kind: [Op::MASK, 0, 0, 0],
-								params: [mode, f32::from(u8::from(picture.premultiplied)), 0.0, 0.0],
+								params: [mode, 0.0, 0.0, 0.0],
 								..Default::default()
 							};
 							(op, None, Some(picture.view))
@@ -961,7 +957,6 @@ impl Effects {
 				area,
 				uv: UNIT,
 				valid: UNIT,
-				premultiplied: false,
 			},
 			segment: Segment {
 				ops: ops.into_iter().collect(),
@@ -1032,7 +1027,7 @@ impl Effects {
 			input: input.area.map(input.uv, quad),
 			valid: input.valid,
 			item: item.map(UNIT, quad),
-			mode: [segment.ops.len() as u32, input.premultiplied.into(), 0, 0],
+			mode: [segment.ops.len() as u32, 0, 0, 0],
 			ops,
 			..Default::default()
 		}
@@ -1058,7 +1053,6 @@ impl Effects {
 			area,
 			uv: UNIT,
 			valid: UNIT,
-			premultiplied: true,
 		}
 	}
 
@@ -1105,7 +1099,6 @@ impl Effects {
 			rect: FULL,
 			input: UNIT,
 			valid: UNIT,
-			mode: [0, 1, 0, 0],
 			blur,
 			..Default::default()
 		};
@@ -1142,7 +1135,6 @@ impl Effects {
 			input: picture.area.map(UNIT, &area),
 			valid: UNIT,
 			aux: shape.area.map(UNIT, &area.shift(-offset.0, -offset.1)),
-			mode: [0, 1, 0, 0],
 			color: color.0.map(|channel| f32::from(channel) / 255.0),
 			..Default::default()
 		};
@@ -1161,7 +1153,6 @@ impl Effects {
 			area,
 			uv: UNIT,
 			valid: UNIT,
-			premultiplied: true,
 		}
 	}
 
@@ -1199,7 +1190,7 @@ impl Effects {
 				});
 				Raster {
 					size,
-					picture: self.picture(&texture, true),
+					picture: self.picture(&texture),
 				}
 			}
 		};
