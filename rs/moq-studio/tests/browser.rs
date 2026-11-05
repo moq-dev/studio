@@ -61,8 +61,8 @@ impl Studio {
 		};
 		let fill = Rect::fill(&collection.canvas);
 		collection.scenes = vec![Scene {
-			name: "Main".into(),
 			items: sources.iter().map(|(name, _)| Item::new(*name, fill)).collect(),
+			..Scene::new("Main")
 		}];
 		for (name, source) in sources {
 			collection.sources.insert(name.to_string(), source.clone());
