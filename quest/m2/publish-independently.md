@@ -22,6 +22,9 @@ mix on program) or while something reads its track, and naming a published
 source among those on program (`Publish::set_on_program` in
 `rs/moq-scene/src/publish.rs`) keeps it encoding.
 
+Moved to m2 on 2026-11-05 (maintainer, /quest-plan): no service places
+sources itself yet, so it waits behind m0 and m1.
+
 Low priority: this is for services that move webcams and overlays themselves,
 and none exists yet. The option lives on the source, in the scene file, so it
 travels with the scene. The option and its effect on the program change what a

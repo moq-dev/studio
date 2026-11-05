@@ -284,6 +284,15 @@ impl Sources {
 		}
 	}
 
+	/// Stop every source, as removing it would: each [`Driver`] returns and
+	/// its own track finishes cleanly with what it published. The mixes stay,
+	/// and the next [`sync`](Self::sync) starts the sources again.
+	pub fn stop(&mut self) {
+		for feed in std::mem::take(&mut self.feeds).into_values() {
+			leave(&self.mixes, &feed);
+		}
+	}
+
 	/// The running source called `name`.
 	pub fn get(&self, name: &str) -> Option<&Feed> {
 		self.feeds.get(name)
@@ -2318,7 +2327,12 @@ mod tests {
 				)
 				.unwrap();
 			let (video, mut encoder) = rendition(&live.broadcast, timebase).await;
-			drop(std::mem::replace(&mut live.video, video));
+			// Finished before it goes, as a publisher retires a rendition: one
+			// dropped unfinished aborts its track, which fails the source if
+			// that reaches it before the catalog naming the replacement does.
+			let mut old = std::mem::replace(&mut live.video, video);
+			old.finish().unwrap();
+			drop(old);
 			until_time(kio::clock::now()).await;
 			let arrived = kio::clock::now();
 			picture(&mut live.video, &mut encoder, 0);
