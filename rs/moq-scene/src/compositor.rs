@@ -524,7 +524,7 @@ impl Compositor {
 	}
 
 	/// The sources whose pictures preview and program draw: each visible
-	/// item's, and each mask's, through clones.
+	/// item's, a stinger's clip under way, and each mask's, through clones.
 	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
 		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
 		let scenes = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving]
@@ -532,6 +532,13 @@ impl Compositor {
 			.flatten()
 			.map(|name| Place::Scene(name.to_string()));
 		let mut shown = HashSet::new();
+		let masks = |shown: &mut HashSet<&'a str>, filters: &mut dyn Iterator<Item = &'a Filter>| {
+			for filter in filters {
+				if let Filter::Mask { source, .. } = filter {
+					shown.insert(collection.capture(source));
+				}
+			}
+		};
 		for place in scenes.chain([Place::Top]) {
 			for item in collection
 				.items(&place)
@@ -540,12 +547,14 @@ impl Compositor {
 				.filter(|item| item.visible)
 			{
 				shown.insert(collection.capture(&item.source));
-				for filter in collection.filters(item) {
-					if let Filter::Mask { source, .. } = filter {
-						shown.insert(collection.capture(source));
-					}
-				}
+				masks(&mut shown, &mut collection.filters(item));
 			}
+		}
+		// Drawn through its source's filters alone.
+		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
+			shown.insert(name);
+			let video = collection.video.get(name);
+			masks(&mut shown, &mut video.into_iter().flat_map(|video| &video.filters));
 		}
 		shown
 	}
@@ -1693,6 +1702,24 @@ mod tests {
 			let transition = studio.collection.transition.clone();
 			studio.compositor.transition(transition, Instant::now());
 			assert_eq!(studio.compositor.program_scene(), Some("blue"));
+
+			// What the clip's filters read is drawn too, such as an overlay to paint.
+			let mask = Filter::Mask {
+				source: "red".into(),
+				mode: MaskMode::Alpha,
+			};
+			let mut collection = studio.collection.clone();
+			collection.scenes.retain(|scene| scene.name == "blue");
+			collection.video.insert(
+				"sting".into(),
+				crate::collection::Video {
+					filters: vec![mask],
+					..Default::default()
+				},
+			);
+			let shown = studio.compositor.shown(&collection);
+			assert!(shown.contains("sting") && shown.contains("red"), "{shown:?}");
+
 			sting(&mut studio, Filter::Brightness { amount: 0.0 });
 			// Black over the whole canvas once its first picture arrives.
 			loop {

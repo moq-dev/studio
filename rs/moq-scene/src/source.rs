@@ -1319,7 +1319,8 @@ impl Driver {
 		};
 		// The play under way, as the feed counts them.
 		let mut play = *starts.borrow_and_update();
-		if self.held {
+		// Unless the feed already asked for one while the file opened.
+		if self.held && play == 0 {
 			set(&self.status, Status::Ended);
 			self.ended(&mut starts, &mut own).await;
 			play = *starts.borrow_and_update();
@@ -2841,6 +2842,30 @@ mod media_tests {
 				"{:?} after it began",
 				ended - begun
 			);
+		})
+		.await;
+	}
+
+	/// A stinger's file asked to play while it still opens plays once open.
+	#[tokio::test(start_paused = true)]
+	async fn a_stinger_clip_asked_while_opening_plays() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let mut collection = media(dir.path(), &[("clip.mkv", CLIP, false, false)]);
+			collection.transition = crate::Transition::Stinger {
+				source: "clip.mkv".into(),
+				cut: Duration::ZERO,
+			};
+			let drivers = sources.sync(&collection);
+			let feed = sources.get("clip.mkv").unwrap();
+			assert_eq!(feed.status(), Status::Starting);
+			feed.play().unwrap();
+			start(&sources, drivers).await;
+			shown(feed).await;
+			assert_eq!(feed.run().play, 1);
+			assert!(feed.run().begun.is_some());
 		})
 		.await;
 	}
