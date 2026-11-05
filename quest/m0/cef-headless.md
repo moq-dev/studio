@@ -2,8 +2,9 @@
 
 ## Goal
 
-Browser sources run with no X server or `$DISPLAY`, so the studio's CEF
-helper works under a pure Wayland session and `just render-sw` no longer needs
+Browser sources run with no X server or `$DISPLAY` on both the CPU path and
+the GPU (shared DMA-BUF texture) path, so the studio's CEF helper works under a
+pure Wayland session without XWayland and `just render-sw` no longer needs
 `xvfb-run`. Copy and paste under Interact still reach the desktop clipboard.
 
 ## Plan
@@ -18,12 +19,13 @@ Check first, and record the result in the PR:
 - Whether Copy and Cut under Interact still reach the desktop clipboard with
   the headless platform; if not, the studio's own clipboard (egui) relays
   them.
-- Whether the GPU path (shared DMA-BUF textures) can go headless too, or
-  stays on X or Wayland.
+- Whether the GPU path can go headless too. If it cannot, land the CPU path
+  and rewrite this quest to the GPU path's remaining work, with what blocks
+  it.
 
-Then drop `xvfb-run` from `just render-sw` and the nightly setup where the
-browser tests no longer need it, and say in `README.md` that browser sources
-need no X server.
+Then drop the `xvfb-run` wrapper from the `render-sw` recipe in the
+`justfile` (the nightly job inherits it through the recipe), and say in
+`README.md` that browser sources need no X server.
 
 ## Required
 
