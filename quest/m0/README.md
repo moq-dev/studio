@@ -107,7 +107,6 @@ repository.
 - [Clean quit](/quest/m0/clean-quit.md) - quitting finishes every track and closes the relay session, so the broadcast's tail arrives
 - [Recover crashed recordings](/quest/m0/recording-repair.md) - a recording a crash left unfinished is repaired beside the original at launch
 - [Premultiplied source sampling](/quest/m0/premultiply.md) - scaled transparent sources draw without edge fringes
-- [Deterministic browser source startup](/quest/m0/cef-startup.md) - CEF on the CPU path paints its first frame without the GPU fallback hang
 - [A browser renderer that dies on its first page](/quest/m0/browser-first-crash.md) - a renderer lost during the first navigation fails its source
 - [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need
 - [Packaging](/quest/m0/packaging.md) - signed installers for macOS and Windows and a Flatpak for Linux
