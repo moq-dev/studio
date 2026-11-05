@@ -132,7 +132,9 @@ mixes as its source's does. Its source waits blank and silent for the first
 stinger rather than playing once when it opens, and rests ended between
 stingers, which the Health panel does not count. A clip that cannot play, or
 that is played again from the Sources panel or reloaded while a stinger plays
-it, cuts at once.
+it, cuts at once. A **Cut**, or another kind of transition, while a stinger
+runs takes its clip off the program, though its sound plays out; another
+stinger plays the clip again from its start.
 
 ### Keyframes
 

@@ -325,6 +325,9 @@ impl Compositor {
 	/// through [`error`](Self::error); this fails only when the canvas itself
 	/// cannot be drawn.
 	pub fn render(&mut self, collection: &Collection, sources: &Sources, now: Instant) -> Result<(), Error> {
+		// Before the pictures are pulled, so a stinger's clip starting now is
+		// cleared in this frame rather than showing where its last play ended.
+		let progress = self.progress(sources, now);
 		self.update(collection, sources, now);
 		self.paint(collection, now);
 
@@ -332,8 +335,6 @@ impl Compositor {
 		let preview_since = since(&mut self.preview_start);
 		self.preview_shown = preview_since;
 		let program_since = since(&mut self.program_start);
-
-		let progress = self.progress(sources, now);
 
 		let mut frame = self.effects.frame();
 		let mut draw = Draw {
@@ -1723,6 +1724,15 @@ mod tests {
 			studio.render(ended);
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(studio.compositor.stinger(), None);
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+
+			// The next stinger starts blank, never on the last one's end.
+			sting(&mut studio, Filter::Brightness { amount: 0.0 });
+			studio.compositor.set_preview(Some("red".into()));
+			let transition = studio.collection.transition.clone();
+			studio.compositor.transition(transition, Instant::now());
+			studio.render(Instant::now());
+			assert!(studio.compositor.transitioning());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
 		})
 		.await;

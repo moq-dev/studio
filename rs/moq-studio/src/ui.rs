@@ -970,7 +970,7 @@ impl Panels {
 					}
 				})
 				.response
-				.on_hover_text("A stinger plays a media source's clip over the program");
+				.on_hover_text("How the preview goes to program; a stinger plays a media source's clip over it");
 			match &mut next {
 				Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } => {
 					egui::ComboBox::from_id_salt("direction")

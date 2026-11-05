@@ -2309,6 +2309,65 @@ mod tests {
 		assert!(engine.stats.error().is_none());
 	}
 
+	/// The clip a stinger plays rests ended between stingers without Health
+	/// counting it, while another media file that ended and is heard counts.
+	/// The program shows the clip while a stinger plays it.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn the_program_rests_a_stinger_clip() {
+		let dir = tempfile::tempdir().unwrap();
+		let clip = include_bytes!("../../moq-scene/src/test_data/clip.mkv");
+		let mut loaded = red_canvas();
+		for name in ["sting", "bed"] {
+			let path = format!("{name}.mkv");
+			std::fs::write(dir.path().join(&path), clip).unwrap();
+			let media = moq_scene::Source::Media {
+				path: path.into(),
+				looping: false,
+				restart: false,
+			};
+			loaded.collection.sources.insert(name.into(), media);
+		}
+		loaded.collection.transition = moq_scene::Transition::Stinger {
+			source: "sting".into(),
+			cut: Duration::from_millis(300),
+		};
+		let gpu = Gpu::new().await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
+			.await
+			.expect("the studio starts");
+		let status = |name: &str| engine.state.lock().unwrap().sources.get(name).map(source::Feed::status);
+		let ended = || async {
+			while status("bed") != Some(Status::Ended) || status("sting") != Some(Status::Ended) {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		};
+		kio::clock::timeout(TIMEOUT, ended()).await.expect("the bed ends");
+		let stopped = engine.local(kio::clock::now()).stopped;
+		assert_eq!(stopped, [("bed".to_string(), Status::Ended)]);
+
+		{
+			let mut state = engine.state.lock().unwrap();
+			let transition = state.collection().transition.clone();
+			state.compositor.transition(transition, kio::clock::now());
+			assert!(state.shown().contains("sting"));
+		}
+		let played = || async {
+			while engine.state.lock().unwrap().compositor.transitioning() {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		};
+		kio::clock::timeout(TIMEOUT, played()).await.expect("the stinger ends");
+		assert!(!engine.state.lock().unwrap().shown().contains("sting"));
+		kio::clock::timeout(TIMEOUT, ended()).await.expect("the clip rests");
+		let stopped = engine.local(kio::clock::now()).stopped;
+		assert_eq!(stopped, [("bed".to_string(), Status::Ended)]);
+
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+	}
+
 	/// A rendition a resize retired while its encoder was still opening must
 	/// not report that encoder over the next rendition's.
 	#[test]
