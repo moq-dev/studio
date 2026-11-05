@@ -16,7 +16,8 @@
 		"@moq/net": "workspace:*",
 		"@moq/publish": "workspace:*",
 		"@moq/room": "workspace:*",
-		"@moq/signals": "workspace:*"
+		"@moq/signals": "workspace:*",
+		"@moq/watch": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.4",
