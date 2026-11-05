@@ -1249,11 +1249,29 @@ impl Driver {
 					self.publish(crate::publish::Audio::new(listing, input))
 				});
 				let channel = Some(self.channel(strip.clone())?);
-				Some(Sound { channel, track })
+				Some(Sound {
+					channel,
+					track,
+					gap: false,
+				})
 			}
 			_ => None,
 		};
 		let mut own = Own::new(listing, kio::clock::now());
+		// The last channel on a strip to close drops what it has not played
+		// yet, so a loop keeps its channel and its track's timeline, sounding
+		// on, while a play after a restart or an end takes a new channel,
+		// cutting off what the play before still had queued, and marks a gap on
+		// its track. The old channel goes first: one left on the strip would
+		// keep the strip's queue, delay included, for the new.
+		let restart = |sound: &mut Option<Sound<'_>>| -> Result<(), Error> {
+			if let (Some(sound), Some(strip)) = (sound, &self.strip) {
+				drop(sound.channel.take());
+				sound.channel = Some(self.channel(strip.clone())?);
+				sound.gap = true;
+			}
+			Ok(())
+		};
 		loop {
 			let restarted = tokio::select! {
 				result = self.play_clip(&clip, sound.as_mut(), &mut own) => {
@@ -1268,16 +1286,8 @@ impl Driver {
 					true
 				}
 			};
-			// The last channel on a strip to close drops what it has not
-			// played yet, so a loop keeps its channel, sounding on, while a
-			// restart takes a new one, cutting off what the play it cut off
-			// still had queued. The old one goes first: a channel left on the
-			// strip would keep the strip's queue, delay included, for the new.
 			if restarted {
-				if let (Some(sound), Some(strip)) = (&mut sound, &self.strip) {
-					drop(sound.channel.take());
-					sound.channel = Some(self.channel(strip.clone())?);
-				}
+				restart(&mut sound)?;
 				continue;
 			}
 			if looping {
@@ -1285,6 +1295,7 @@ impl Driver {
 			}
 			set(&self.status, Status::Ended);
 			self.ended(&mut starts, &mut own).await;
+			restart(&mut sound)?;
 		}
 	}
 
@@ -1393,8 +1404,6 @@ impl Driver {
 			};
 			let bus = self.context.bus.config();
 			let bytes = std::mem::size_of::<f32>() * bus.layout.channels() as usize;
-			// Each play starts the track's timeline afresh.
-			let mut gap = true;
 			while let Some(frame) = samples.take() {
 				let due = at(frame.timestamp);
 				kio::clock::sleep_until(due).await;
@@ -1407,7 +1416,7 @@ impl Driver {
 					.write(&frame.data)?;
 				if let Some(track) = &mut sound.track {
 					let samples: Vec<f32> = bytemuck::pod_collect_to_vec(&frame.data);
-					if let Err(err) = track.write(&samples, kio::clock::now(), std::mem::take(&mut gap)) {
+					if let Err(err) = track.write(&samples, kio::clock::now(), std::mem::take(&mut sound.gap)) {
 						tracing::warn!(source = %self.name, %err, "cannot encode the source");
 						self.fail_track(Status::Failed(err.to_string()));
 						sound.track.take().expect("encoding").abort(&err);
@@ -1490,6 +1499,9 @@ impl Driver {
 struct Sound<'a> {
 	channel: Option<moq_audio::bus::Channel>,
 	track: Option<crate::publish::Audio<'a>>,
+	/// Whether the next sound follows a break, a restart or a pause after the
+	/// end, rather than a loop, which the track's timeline runs on through.
+	gap: bool,
 }
 
 /// A played source's own track, opened at its first picture, and the timeline
