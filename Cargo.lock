@@ -4272,6 +4272,7 @@ dependencies = [
  "mp4-atom",
  "pollster 1.0.1",
  "qrcodegen",
+ "same-file",
  "serde",
  "tempfile",
  "tokio",

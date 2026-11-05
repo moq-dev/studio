@@ -101,7 +101,6 @@ repository.
 - [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS
-- [Recover crashed recordings](/quest/m0/recording-repair.md) - a recording a crash left unfinished is repaired beside the original at launch
 - [Browser sources on the GPU without an X display](/quest/m0/cef-headless.md) - shared-texture pages run under Wayland without XWayland, and with no display the CPU path runs instead
 - [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need
 - [Packaging](/quest/m0/packaging.md) - signed installers for macOS and Windows and a Flatpak for Linux
