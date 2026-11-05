@@ -665,7 +665,7 @@ fn uplink(snapshot: &hang::stats::Snapshot, graded: &Health, watched: bool) -> U
 /// What one catalog lists now, to grade each of its tracks.
 struct Listed<'a> {
 	/// Each video and audio rendition, as [`renditions`] reads them.
-	renditions: Vec<(String, String, bool)>,
+	renditions: Vec<Rendition>,
 	/// What its tracks are graded and granted under, before each ID.
 	prefix: String,
 	/// The source whose own catalog it is, or `None` for a canvas's.
@@ -684,60 +684,93 @@ fn tracks(listed: &Listed, clock: &moq_mux::Clock) -> Vec<Track> {
 	listed
 		.renditions
 		.iter()
-		.map(|(id, label, enabled)| {
-			let graded = format!("{}{id}", listed.prefix);
-			let ours = listed.sent.renditions.get(&graded);
-			let interval = listed.sent.interval;
-			// A source's track is in the local broadcast, whose names can repeat
-			// the program's, and no relay viewer or grant reaches it.
-			let program = listed.source.is_none();
-			let mut track = Track {
-				source: listed.source.cloned(),
-				id: id.clone(),
-				label: label.clone(),
-				granted: listed.grants.get(&graded).copied().flatten().filter(|_| program),
-				enabled: *enabled,
-				sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
-				framerate: ours
-					.and_then(|rendition| rendition.frames)
-					.zip(interval)
-					.map(|(frames, interval)| frames as f64 / interval.as_secs_f64()),
-				viewers: 0,
-				received: None,
-				verdict: Verdict::Unknown,
-				latency: None,
-			};
-			for viewer in listed.viewers {
-				let Some(health) = &viewer.health else { continue };
-				let Some(rendition) = health.renditions.get(id) else {
-					continue;
+		.map(
+			|Rendition {
+			     id,
+			     label,
+			     enabled,
+			     main,
+			 }| {
+				// One listed by reference to the main broadcast, as a further
+				// canvas lists the audio, is graded and granted there.
+				let graded = match main {
+					Some(track) => track.clone(),
+					None => format!("{}{id}", listed.prefix),
 				};
-				track.viewers += 1;
-				track.verdict = track.verdict.max(rendition.verdict);
-				if let Some(bitrate) = rendition.bitrate.map(Rate::from_bps) {
-					track.received = Some(track.received.map_or(bitrate, |received| received.min(bitrate)));
+				let ours = listed.sent.renditions.get(&graded);
+				let interval = listed.sent.interval;
+				// A source's track is in the local broadcast, whose names can repeat
+				// the program's, and no relay viewer or grant reaches it.
+				let program = listed.source.is_none();
+				let mut track = Track {
+					source: listed.source.cloned(),
+					id: id.clone(),
+					label: label.clone(),
+					granted: listed.grants.get(&graded).copied().flatten().filter(|_| program),
+					enabled: *enabled,
+					sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
+					framerate: ours
+						.and_then(|rendition| rendition.frames)
+						.zip(interval)
+						.map(|(frames, interval)| frames as f64 / interval.as_secs_f64()),
+					viewers: 0,
+					received: None,
+					verdict: Verdict::Unknown,
+					latency: None,
+				};
+				for viewer in listed.viewers {
+					let Some(health) = &viewer.health else { continue };
+					let Some(rendition) = health.renditions.get(id) else {
+						continue;
+					};
+					track.viewers += 1;
+					track.verdict = track.verdict.max(rendition.verdict);
+					if let Some(bitrate) = rendition.bitrate.map(Rate::from_bps) {
+						track.received = Some(track.received.map_or(bitrate, |received| received.min(bitrate)));
+					}
+					let latency = viewer.latency(id, clock);
+					track.latency = track.latency.max(latency);
 				}
-				let latency = viewer.latency(id, clock);
-				track.latency = track.latency.max(latency);
-			}
-			track
-		})
+				track
+			},
+		)
 		.collect()
+}
+
+/// One video or audio rendition a catalog lists.
+struct Rendition {
+	id: String,
+	/// What it carries, such as `video H.264 1920x1080`.
+	label: String,
+	enabled: bool,
+	/// Its track in the main broadcast, when listed there by reference: the
+	/// only broadcast the studio's catalogs refer to.
+	main: Option<String>,
 }
 
 /// Each video and audio rendition `catalog` lists, by ID, with what it
 /// carries and whether it is enabled.
-fn renditions<E>(catalog: &hang::Catalog<E>) -> impl Iterator<Item = (String, String, bool)> {
-	let video = catalog.video.renditions.iter().map(|(id, config)| {
+fn renditions<E>(catalog: &hang::Catalog<E>) -> impl Iterator<Item = Rendition> {
+	let main = |id: &String, broadcast: bool, track: &Option<String>| {
+		broadcast.then(|| track.clone().unwrap_or_else(|| id.clone()))
+	};
+	let video = catalog.video.renditions.iter().map(move |(id, config)| {
 		let size = match (config.coded_width, config.coded_height) {
 			(Some(width), Some(height)) => format!(" {width}x{height}"),
 			_ => String::new(),
 		};
-		(id.clone(), format!("video {}{size}", config.codec), config.enabled)
+		Rendition {
+			id: id.clone(),
+			label: format!("video {}{size}", config.codec),
+			enabled: config.enabled,
+			main: main(id, config.broadcast.is_some(), &config.track),
+		}
 	});
-	let audio = catalog.audio.renditions.iter().map(|(id, config)| {
-		let label = format!("audio {} {} ch", config.codec, config.channel_count);
-		(id.clone(), label, config.enabled)
+	let audio = catalog.audio.renditions.iter().map(move |(id, config)| Rendition {
+		id: id.clone(),
+		label: format!("audio {} {} ch", config.codec, config.channel_count),
+		enabled: config.enabled,
+		main: main(id, config.broadcast.is_some(), &config.track),
 	});
 	video.chain(audio)
 }
@@ -1509,7 +1542,9 @@ mod tests {
 	/// tracks the same way, by source name; a still has no media to grade. A
 	/// source's track stays in the studio, so no viewer report or grant
 	/// applies to it, and a further canvas's tracks take its own grants and
-	/// viewers, though each can share a track name with the main canvas's.
+	/// viewers, though each can share a track name with the main canvas's,
+	/// but the main broadcast's audio it lists by reference is graded where
+	/// the main broadcast writes it.
 	#[test]
 	fn tracks_are_graded_by_canvas_and_source() {
 		let video = |width: u32, height: u32| {
@@ -1524,8 +1559,15 @@ mod tests {
 		let mut half = video(960, 540);
 		half.enabled = false;
 		main.video.renditions.insert("3.avc3".into(), half);
+		let opus = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		main.audio.renditions.insert("audio".into(), opus.clone());
 		let mut tall = hang::Catalog::<moq_scene::publish::Ext>::default();
 		tall.video.renditions.insert("0.avc3".into(), video(1080, 1920));
+		// The main broadcast's audio, listed by reference.
+		let mut shared = opus;
+		shared.broadcast = Some(moq_net::path::Relative::new("..").unwrap());
+		shared.track = Some("audio".into());
+		tall.audio.renditions.insert("audio".into(), shared);
 		let mut camera = hang::Catalog::<()>::default();
 		camera.video.renditions.insert("0.avc3".into(), video(1280, 720));
 		let mut logo = hang::Catalog::<()>::default();
@@ -1537,8 +1579,9 @@ mod tests {
 		]
 		.into();
 
-		// 375 kB in a second is 3 Mb/s, 250 kB is 2 Mb/s, and 125 kB is 1 Mb/s.
-		let ours = wrote(&[("0.avc3", 375_000), ("tall/0.avc3", 250_000)]);
+		// 375 kB in a second is 3 Mb/s, 250 kB is 2 Mb/s, 125 kB is 1 Mb/s,
+		// and 16 kB is 128 kb/s.
+		let ours = wrote(&[("0.avc3", 375_000), ("tall/0.avc3", 250_000), ("audio", 16_000)]);
 		let theirs = wrote(&[("0.avc3", 125_000)]);
 		let main_viewers = [stalling("alice", "3.avc3", Duration::from_millis(100))];
 		let tall_viewers = [stalling("bob", "0.avc3", Duration::from_millis(100))];
@@ -1599,6 +1642,7 @@ mod tests {
 					0
 				),
 				(None, "3.avc3", None, None, false, 1),
+				(None, "audio", Some("128 kb/s".into()), None, true, 0),
 				(
 					None,
 					"0.avc3",
@@ -1607,6 +1651,7 @@ mod tests {
 					true,
 					1
 				),
+				(None, "audio", Some("128 kb/s".into()), None, true, 0),
 				(Some("camera"), "0.avc3", Some("1.0 Mb/s".into()), None, true, 0),
 			]
 		);
