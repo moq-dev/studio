@@ -243,7 +243,8 @@ program.
 ## Guests
 
 Guests and phones join a room the studio owns on its relay, from a web page,
-and their camera and screen appear as broadcast sources. The room follows
+and their camera and screen appear as broadcast sources. The page plays the
+show back to them, without their own voice. The room follows
 [moq-room](https://github.com/moq-dev/moq/tree/main/rs/moq-room): a guest
 named `alice` publishes `alice/camera.hang` and `alice/screen.hang` under it.
 Guests need a relay that verifies tokens, so run your own with
@@ -277,9 +278,10 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   and each token the studio renews it with. While a guest is in the room, the
   studio signs them a fresh token every half of it, over a session of its own
   in the room that the room key signs for, and the join page presents it
-  without reconnecting. A guest's token may read only their own renewals, at
-  `.renew/<name>/<generation>` in the room, but anything else the relay lets subscribe
-  there can read every guest's, so grant that only to the studio. A guest who
+  without reconnecting. A guest's token may read only their own renewals and
+  return feed, at `.renew/<name>/<generation>` and `.return/<name>/<generation>`
+  in the room, and the program at `.program`, but anything else the relay lets
+  subscribe there can read every guest's, so grant that only to the studio. A guest who
   leaves needs a link, or a renewed token, that has not expired to come back.
   The Guests panel says when renewal is failing.
 - **Upgrading from a studio without renewal:** generate a new room key, drop
@@ -300,7 +302,7 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
 a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
 in the link's fragment, which the browser never sends to a server, and lets
 them publish only under their own name, so they cannot appear as someone else,
-and read only their own renewals.
+and read only their own renewals, their return feed, and the program.
 Treat the link like a password: anyone holding it can join as that guest
 before it expires, and is then renewed for as long as they stay, until you
 remove them. A guest's broadcasts become sources named after them (`alice`,
@@ -314,12 +316,27 @@ who reconnects after you removed their source comes back under a new name
 **Remove from scenes** is your edit, so it undoes: it takes a guest, any clone
 of their sources, and any mask reading them out of every scene and the top
 layer and mutes them. A signed token cannot be taken back, so it also stops
-renewing theirs, and they are disconnected within `--guest-expiry`. That
+renewing theirs and ends their return feed, and they are disconnected within
+`--guest-expiry`. That
 holds across a restart, whichever scene file you open: removed guests are
 kept beside the room key, as `room.guests.toml` for `room.jwk`, so its
 directory must be writable. Undo puts them back in the scenes but not on
 renewal; **New link** lets them back in and renews them again, under a new
 generation, so a link from before the removal cannot read their renewals.
+
+While a guest is in the room, the join page plays their return feed: the
+program's video, and the mix on program without that guest's microphone (a
+mix-minus), so they follow the show without hearing themselves back. Ask
+guests to wear headphones, so the show does not reach their microphone. The
+studio publishes it over its session in the room, never with its own
+credentials: the program once at `.program`, and each guest's feed at
+`.return/<name>/<generation>`. The video is the program's own two sizes,
+and a guest's player picks one for their link; this session uploads the size
+a guest watches a second time, and a guest watching the half size makes it
+encode as any viewer does. Each guest in the room costs one 64 kbps Opus
+encode of their mix-minus. A guest's
+screen share stays in their feed, since only their camera's microphone is
+taken out.
 
 ## Scene file
 
@@ -718,7 +735,8 @@ just join    # Serve the join page locally
 ```
 
 `rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
-`js/join` the join page, built on `@moq/room` and `@moq/publish`. Like the
+`js/join` the join page, built on `@moq/room`, `@moq/publish`, and
+`@moq/watch`. Like the
 Rust crates, those come from the `moq` submodule rather than npm, so
 `bun install` needs it checked out, and Nix to build `@moq/libav`. See
 [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md), and the

@@ -13,6 +13,7 @@
 //! - **audio-encode** encodes the mix on program into the program audio, and
 //!   **audio-record** the mix recordings hold into the recording broadcast's
 //!   own audio while a recording reads it.
+//! - Each guest's return feed encodes its mix-minus on the tokio runtime.
 //! - **encode**: one per program rendition, which waits for each program copy
 //!   and encodes it. A new canvas size or frame rate starts new renditions.
 //! - Recordings write their files on the tokio runtime.
@@ -557,6 +558,8 @@ pub struct Engine {
 	pub recorder: record::Recorder,
 	/// The room guests join, when configured.
 	pub room: Option<Arc<crate::guests::Room>>,
+	/// Each guest's return feed, once the studio's session in the room dials.
+	feeds: Mutex<Option<crate::feed::Feeds>>,
 	/// The program's broadcast.
 	pub program: Program,
 	/// Keeps broadcast sources' origin open when no connection holds it.
@@ -700,6 +703,7 @@ impl Engine {
 			output,
 			recorder,
 			room,
+			feeds: Mutex::default(),
 			program,
 			_origin: subscribe,
 			stopped: AtomicBool::new(false),
@@ -719,6 +723,13 @@ impl Engine {
 		// Where the program clock starts on the catalog's, so the wall time the
 		// catalog advertises for a frame is when the program drew it.
 		let epoch = Duration::from(clock.capture(start)?);
+		if let Some(room) = &engine.room
+			&& let Some(origin) = room.origin()
+		{
+			let program = engine.program.publication.broadcast().consume();
+			let feeds = crate::feed::Feeds::new(room.clone(), origin.clone(), program, clock.clone(), epoch)?;
+			*engine.feeds.lock().unwrap() = Some(feeds);
+		}
 		let program = engine.clone();
 		let thread = clocked("program".into(), async move || {
 			program.run_program(start, epoch, renditions, ladder).await
@@ -754,6 +765,18 @@ impl Engine {
 		// publication alive beside the retry's.
 		if let Some(guests) = guests {
 			tokio::spawn(crate::guests::run(engine.clone(), guests));
+		}
+		if let Some(room) = &engine.room {
+			// Who has a return feed follows who is renewed, synced with the mixes.
+			let mut changes = room.changes();
+			// Including any made since the feeds started.
+			changes.mark_changed();
+			let follow = engine.clone();
+			tokio::spawn(async move {
+				while changes.changed().await.is_ok() {
+					follow.state.lock().unwrap().stale = true;
+				}
+			});
 		}
 
 		Ok(engine)
@@ -834,8 +857,8 @@ impl Engine {
 			.map(|monitor| (monitor.name().to_string(), monitor.failed()))
 	}
 
-	/// Point the program audio, the recorded audio, and the monitor at the
-	/// mixes `state` now has.
+	/// Point the program audio, the recorded audio, the monitor, and each
+	/// guest's return feed at the mixes `state` now has.
 	fn pick_mixes(&self, state: &State) {
 		let mixes = &state.collection.mixes;
 		if let Some(mix) = state.sources.mix(&mixes.program) {
@@ -843,6 +866,10 @@ impl Engine {
 		}
 		if let Some(mix) = state.sources.mix(mixes.recorded()) {
 			self.recorded_audio.set(mix.clone());
+		}
+		// From the mix on program, which is what each guest follows.
+		if let Some(feeds) = self.feeds.lock().unwrap().as_mut() {
+			feeds.sync(&state.collection, &state.sources);
 		}
 		if let Some(monitor) = self.monitor.lock().unwrap().as_mut() {
 			if !mixes.names.iter().any(|name| name == monitor.name()) {
@@ -2337,6 +2364,56 @@ mod tests {
 		.await
 	}
 
+	/// A guest's return feed lists every size of `engine`'s program that
+	/// `published` lists, read from the program as served at `.program`, which
+	/// holds the program's tracks and none of the sources'.
+	async fn returned(engine: &Engine, published: &hang::Catalog) {
+		use crate::guests::{PROGRAM, Room, tests};
+
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = tests::key("show/guests", &["**"], &["**"]);
+		let room = Arc::new(Room::new(&connect, "guests", key, page, tests::EXPIRY).unwrap());
+		let camera = moq_net::Path::new("alice/camera.hang").unwrap();
+		room.observe(&camera, true, &Collection::new(), &History::new());
+		let origin = moq_tokio::origin::spawn();
+		let program = engine.program.publication.broadcast().consume();
+		let clock = engine.program.clock.clone();
+		let mut feeds = crate::feed::Feeds::new(room, origin.clone(), program, clock, Duration::ZERO).unwrap();
+		{
+			let state = engine.state.lock().unwrap();
+			feeds.sync(state.collection(), &state.sources);
+		}
+
+		let format = moq_mux::catalog::CatalogFormat::Hang;
+		let feed = Room::feed_path("alice", 0).unwrap();
+		let broadcast = origin.consume().follow(feed, None).unwrap().available().await.unwrap();
+		let mut listings = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await.unwrap();
+		let listed = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let catalog = listings.next().await.unwrap().expect("a catalog");
+				if !catalog.video.renditions.is_empty() {
+					return catalog;
+				}
+			}
+		})
+		.await
+		.expect("the feed lists the program's video");
+		let names = |video: &hang::catalog::Video| video.renditions.keys().cloned().collect::<Vec<_>>();
+		assert_eq!(names(&listed.video), names(&published.video), "both sizes");
+		for config in listed.video.renditions.values() {
+			assert_eq!(config.broadcast.as_ref().unwrap().as_str(), "../../.program");
+		}
+
+		let served = origin.consume().request(PROGRAM, None).await.unwrap();
+		let mut served = moq_mux::catalog::Consumer::<moq_scene::publish::Ext>::new(&served, format)
+			.await
+			.unwrap();
+		let served = served.next().await.unwrap().expect("a catalog");
+		assert_eq!(names(&served.video), names(&published.video));
+		assert!(served.ext.studio.sources.is_empty(), "a source reached the guests");
+	}
+
 	/// The program a studio publishes reaches a relay as the picture it composed,
 	/// at the canvas size and at half of it, with its audio alongside. The half
 	/// size holds an encode session only once watched.
@@ -2397,6 +2474,7 @@ mod tests {
 		let echo = catalog.echo.as_ref().expect("the catalog solicits feedback");
 		assert_eq!(echo.path.as_str(), "studio/viewers");
 		assert_eq!(engine.stats.sessions.open(), 1, "the half size is not watched yet");
+		returned(&engine, &catalog).await;
 		let mut pictures = subscribe(&broadcast, &video, config).await;
 		let shown = red(&mut pictures, moq_video::Size::new(640, 360))
 			.await
