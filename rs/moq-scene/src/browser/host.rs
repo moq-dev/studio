@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use cef::*;
+use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 
 use super::outbox::Commands;
 use super::protocol::{Area, Channel, Command, Event, Format, Id, Layer, Open, Plane, Raster, Start, Texture};
@@ -110,6 +111,24 @@ fn serve() -> Result<(), String> {
 /// Run CEF on the profile `start` names, opening and closing pages as the
 /// studio asks, until it closes the socket and the last page closes.
 fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc::Sender<()>) -> Result<(), String> {
+	// A crashed process is reported only once it is gone, and one dumping
+	// core is not gone yet: systemd-coredump took 20 to 70 seconds over a
+	// renderer, which left its page Starting meanwhile. CEF's subprocesses
+	// inherit the limit. 1, not 0: the kernel ignores the limit for a pipe
+	// core_pattern (systemd-coredump, Apport) except at 1, where it skips the
+	// handler, and a core file needs a page. A socket core_pattern (`@`), or
+	// a pipe under a hard limit of 0, which forbids 1, relies instead on the
+	// handler honouring the limit, as systemd-coredump does.
+	let core = getrlimit(Resource::Core);
+	setrlimit(
+		Resource::Core,
+		Rlimit {
+			current: Some(core.maximum.map_or(1, |maximum| maximum.min(1))),
+			maximum: core.maximum,
+		},
+	)
+	.map_err(|err| format!("cannot turn off core dumps: {err}"))?;
+
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 	let args = args::Args::new();
 	let mut app = HelperApp::new(HelperProcess::new(), start.raster);
