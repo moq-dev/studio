@@ -323,6 +323,15 @@ fn reach(sigma: f32) -> f32 {
 pub(crate) struct Picture {
 	view: wgpu::TextureView,
 	bind: wgpu::BindGroup,
+	/// Its width and height in pixels.
+	size: (u32, u32),
+}
+
+impl Picture {
+	/// Its width and height in pixels.
+	pub fn size(&self) -> (u32, u32) {
+		self.size
+	}
 }
 
 /// A LUT source's table on the GPU.
@@ -677,7 +686,11 @@ impl Effects {
 				},
 			],
 		});
-		Picture { view, bind }
+		Picture {
+			view,
+			bind,
+			size: (texture.width(), texture.height()),
+		}
 	}
 
 	/// Upload a LUT's table.

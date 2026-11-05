@@ -87,7 +87,7 @@ impl Studio {
 		}
 		let mut compositor = Compositor::new(&device, &queue, collection.canvas).unwrap();
 		compositor.set_preview(Some("Main".into()));
-		compositor.cut();
+		compositor.cut(&sources);
 		Self {
 			collection,
 			sources,
