@@ -102,11 +102,26 @@ impl Clip {
 		match &clip {
 			// The rules a collection holding just the clip would break, such as
 			// an item showing a source the clip lacks. It has whatever mixes the
-			// clip's sources are left out of, which pasting checks.
+			// clip's sources are left out of, and an empty scene for each its
+			// scene sources draw, which pasting checks.
 			Self::Items(items) => {
 				let excluded = items.audio.values().flat_map(|audio| &audio.exclude);
 				let mut names: BTreeSet<String> = excluded.cloned().collect();
 				names.insert(Mixes::DEFAULT.into());
+				let drawn: BTreeSet<&str> = items
+					.sources
+					.values()
+					.filter_map(|source| match source {
+						Source::Scene { scene } => Some(scene.as_str()),
+						_ => None,
+					})
+					.collect();
+				// Named apart from them, so it draws none of them by name.
+				let clip = std::iter::once("clip".to_string())
+					.chain((2..).map(|n| format!("clip {n}")))
+					.find(|name| !drawn.contains(name.as_str()))
+					.expect("an unused name");
+				let drawn = drawn.into_iter().map(Scene::new);
 				Collection {
 					sources: items.sources.clone(),
 					mixes: Mixes {
@@ -118,10 +133,12 @@ impl Clip {
 					video: items.video.clone(),
 					// In a scene, where keyframes play; pasting into the top
 					// layer checks it holds none.
-					scenes: vec![Scene {
+					scenes: std::iter::once(Scene {
 						items: items.items.clone(),
-						..Scene::new("clip")
-					}],
+						..Scene::new(clip)
+					})
+					.chain(drawn)
+					.collect(),
 					..Collection::new()
 				}
 				.validate()?
@@ -288,6 +305,39 @@ mod tests {
 		let mut pasted = collection.clone();
 		pasted.apply(&draft.finish().unwrap()).unwrap();
 		pasted
+	}
+
+	/// An item showing a scene pastes linked within its collection, but not
+	/// into one without that scene, nor into the scene it shows.
+	#[test]
+	fn a_scene_source_pastes_where_its_scene_is() {
+		let mut collection = collection();
+		let fill = Rect::fill(&collection.canvas);
+		collection.scenes.push(Scene::new("clip"));
+		collection.scenes.push(Scene::new("Other"));
+		let shown = Source::Scene { scene: "clip".into() };
+		collection.sources.insert("nested".into(), shown);
+		collection.scenes[1].items.push(Item::new("cam", fill));
+		collection.scenes[2].items.push(Item::new("nested", fill));
+		collection.validate().unwrap();
+		let clip = Clip::items(&collection, collection.scenes[2].items.clone(), Path::new(DIR));
+		let text = clip.to_toml().unwrap();
+
+		let pasted = paste(&collection, &Layer::scene("Scene"), &text, DIR);
+		assert_eq!(pasted.sources, collection.sources, "linked");
+
+		let Clip::Items(items) = Clip::from_toml(&text).unwrap() else {
+			panic!("not items")
+		};
+		let refused = |collection: &Collection, layer: &Layer| {
+			let mut draft = collection.draft("Paste");
+			draft.paste(layer, &items, Path::new(DIR)).unwrap();
+			draft.finish().unwrap_err().to_string()
+		};
+		let err = refused(&collection, &Layer::scene("clip"));
+		assert!(err.contains("scene `clip` draws itself"), "{err}");
+		let err = refused(&Collection::new(), &Layer::scene("Scene"));
+		assert!(err.contains("draws scene `clip`, which is not a scene"), "{err}");
 	}
 
 	/// Within a collection, a pasted item shows the very source copied.
