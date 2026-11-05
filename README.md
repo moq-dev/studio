@@ -741,11 +741,12 @@ Quitting first lets the recording's encoders publish what they still hold, and
 the program's file keeps it. A file nothing reached before the recording
 stopped is removed.
 
-While a file is written, a marker `<name>.mp4.part` sits beside it. A crash,
-a power loss, or a write that failed leaves the marker, and the next launch
-repairs that file without asking: it writes `<name>.repaired.mp4` beside it, a
-regular MP4 of everything the file holds up to its last complete fragment,
-leaves the original untouched, and removes the marker, so the file is repaired
+While a file is written, a marker `<name>.mp4.unfinished` sits beside it. A
+crash, a power loss, or a write that failed leaves the marker, and the next
+launch repairs that file without asking: it writes `<name>.repaired.mp4`
+beside it, numbered if a file already has that name, a regular MP4 of
+everything the file holds up to its last complete fragment, leaves the
+original untouched, and removes the marker, so the file is repaired
 only once. The repair runs in the background and appears at the top of the
 Health panel and in the log. A file another studio is still recording into the
 same directory is left alone.

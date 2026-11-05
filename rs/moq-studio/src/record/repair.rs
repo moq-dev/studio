@@ -4,7 +4,8 @@
 //! written (see [`Marker`](super::Marker)). A marker found at launch whose
 //! lock nobody holds names a file that never finished. The launch takes the
 //! lock for as long as it repairs the file into a regular MP4 beside it,
-//! `<name>.repaired.mp4`, leaving the original as it was, so neither a
+//! `<name>.repaired.mp4`, numbered rather than replacing a file already
+//! there, leaving the original as it was, so neither a
 //! recording nor another studio's launch touches it meanwhile. Removing the
 //! marker after the repair keeps the file from being repaired again.
 
@@ -117,7 +118,16 @@ impl Marker {
 	/// another studio's into the same directory, or another launch's repair
 	/// holds it.
 	fn claim(path: PathBuf) -> Option<Self> {
-		let file = std::fs::File::open(&path).ok()?;
+		// Writable, as an exclusive lock needs on NFS.
+		let file = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+			Ok(file) => file,
+			// Its recording finished meanwhile.
+			Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+			Err(err) => {
+				tracing::warn!(path = %path.display(), error = %err, "cannot open a recording's marker");
+				return None;
+			}
+		};
 		match file.try_lock() {
 			Ok(()) => {}
 			Err(std::fs::TryLockError::WouldBlock) => return None,
@@ -175,9 +185,8 @@ fn write(path: &Path) -> (Repaired, bool) {
 			return (failed(err), again);
 		}
 	};
-	let repaired = repaired(path);
-	match copy(path, &repaired, &finish) {
-		Ok(()) => (Repaired::Saved(repaired), false),
+	match copy(path, &finish) {
+		Ok(repaired) => (Repaired::Saved(repaired), false),
 		Err(err) => (failed(err), true),
 	}
 }
@@ -195,15 +204,50 @@ fn read(path: &Path) -> anyhow::Result<Option<mp4::Finish>> {
 	mp4::repair(&mut file).context("not a recording the studio can repair")
 }
 
-/// Copy `path` to `repaired` with `finish` applied, through a temporary file
-/// so a repair cut short never leaves a file under the repaired name.
-fn copy(path: &Path, repaired: &Path, finish: &mp4::Finish) -> anyhow::Result<()> {
-	let partial = partial(repaired);
-	let written = apply(path, &partial, finish).and_then(|()| std::fs::rename(&partial, repaired));
-	if written.is_err() {
-		remove(&partial);
+/// Copy `path` with `finish` applied to `<name>.repaired.mp4` beside it,
+/// numbered rather than replacing a file already there, such as the recording
+/// of a source named like a repair.
+fn copy(path: &Path, finish: &mp4::Finish) -> anyhow::Result<PathBuf> {
+	let dir = path.parent().context("a recording has a directory")?;
+	let stem = stem(path)?;
+	// Written in a directory of its own first, which nothing else can name, so
+	// a repair cut short never leaves a file under a repaired name. Dropping
+	// it removes what is left.
+	let staging = tempfile::Builder::new()
+		.prefix(".repairing")
+		.tempdir_in(dir)
+		.with_context(|| format!("cannot create a directory in {}", dir.display()))?;
+	let partial = staging.path().join("repair.mp4");
+	apply(path, &partial, finish).with_context(|| format!("cannot copy {}", path.display()))?;
+	let repaired = claim(dir, &stem)?;
+	// Replaces only the empty file just claimed.
+	std::fs::rename(&partial, &repaired)
+		.inspect_err(|_| remove(&repaired))
+		.with_context(|| format!("cannot write {}", repaired.display()))?;
+	Ok(repaired)
+}
+
+/// The stem of the repair of the recording `path`: `<name>.repaired`.
+pub(super) fn stem(path: &Path) -> anyhow::Result<String> {
+	let name = path.file_stem().and_then(|name| name.to_str());
+	let name = name.with_context(|| format!("{} has no name", path.display()))?;
+	Ok(format!("{name}{}", super::REPAIRED))
+}
+
+/// Create an empty file named `stem` in `dir`, numbering it rather than
+/// replacing one already there.
+fn claim(dir: &Path, stem: &str) -> anyhow::Result<PathBuf> {
+	let mut number: u32 = 1;
+	loop {
+		let path = dir.join(super::numbered(stem, number));
+		match std::fs::File::create_new(&path) {
+			Ok(_) => return Ok(path),
+			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+				number = number.checked_add(1).context("every numbered name is taken")?;
+			}
+			Err(err) => return Err(err).with_context(|| format!("cannot create {}", path.display())),
+		}
 	}
-	written.with_context(|| format!("cannot write {}", repaired.display()))
 }
 
 /// Copy `path` to `to` and finish the copy with `finish`, as a recording
@@ -219,18 +263,6 @@ fn apply(path: &Path, to: &Path, finish: &mp4::Finish) -> std::io::Result<()> {
 	file.seek(SeekFrom::Start(finish.mdat_offset))?;
 	file.write_all(&finish.mdat)?;
 	file.sync_all()
-}
-
-/// Where the repair of the recording `path` goes: `<name>.repaired.mp4`.
-pub(super) fn repaired(path: &Path) -> PathBuf {
-	path.with_extension(super::REPAIRED.trim_start_matches('.'))
-}
-
-/// Where the repair is written before it takes its name.
-pub(super) fn partial(repaired: &Path) -> PathBuf {
-	let mut name = repaired.as_os_str().to_owned();
-	name.push(super::PARTIAL);
-	name.into()
 }
 
 /// Remove `path`, which may already be gone.

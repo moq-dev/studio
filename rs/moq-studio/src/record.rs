@@ -462,18 +462,19 @@ impl Run {
 const MAX_NAME: usize = 255;
 
 /// The most a recording's files add to a stem: the largest number [`create`]
-/// gives, and the longest name a file takes from there, the one its repair is
-/// written under.
-const SUFFIX: usize = " (4294967295)".len() + REPAIRED.len() + PARTIAL.len();
+/// gives, and the longest name a file takes from there, its repair's, which
+/// is numbered too.
+const SUFFIX: usize = 2 * NUMBER.len() + REPAIRED.len() + ".mp4".len();
 
-/// What a file's marker adds to its name.
-const MARKER: &str = ".part";
+/// The largest number a taken name is given.
+const NUMBER: &str = " (4294967295)";
 
-/// What a repaired file's name has in place of `.mp4`.
-const REPAIRED: &str = ".repaired.mp4";
+/// What a file's marker adds to its name. Specific to the studio, since a
+/// launch removes a marker whose recording is gone.
+const MARKER: &str = ".unfinished";
 
-/// What a repair's name has added while it is written.
-const PARTIAL: &str = ".tmp";
+/// What a repaired file's stem adds to the recording's.
+const REPAIRED: &str = ".repaired";
 
 /// What a long scene file name leaves of each source's file name, in bytes,
 /// so the Output panel can still tell the source files apart.
@@ -510,32 +511,35 @@ fn truncate(text: &str, bytes: usize) -> &str {
 	&text[..end]
 }
 
-/// Create a file named `stem` in `dir`, numbering it rather than replacing
-/// one already there, and mark it unfinished.
-fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File, Marker)> {
-	let mut number: u32 = 1;
-	loop {
-		let name = match number {
-			1 => format!("{stem}.mp4"),
-			_ => format!("{stem} ({number}).mp4"),
-		};
-		let path = dir.join(name);
-		match std::fs::File::create_new(&path) {
-			Ok(file) => {
-				let marker = Marker::create(&path).inspect_err(|_| {
-					let _ = std::fs::remove_file(&path);
-				})?;
-				return Ok((path, file, marker));
-			}
-			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-				number = number.checked_add(1).context("every numbered name is taken")?;
-			}
-			Err(err) => return Err(err).with_context(|| format!("cannot create {}", path.display())),
-		}
+/// The name of the `number`th file named `stem`.
+fn numbered(stem: &str, number: u32) -> String {
+	match number {
+		1 => format!("{stem}.mp4"),
+		_ => format!("{stem} ({number}).mp4"),
 	}
 }
 
-/// The sidecar `<name>.mp4.part` beside a file being recorded, until the file
+/// Create a file named `stem` in `dir`, numbering it rather than replacing
+/// one already there, and mark it unfinished before it exists.
+fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File, Marker)> {
+	let mut number: u32 = 1;
+	loop {
+		let path = dir.join(numbered(stem, number));
+		if let Some(marker) = Marker::create(&path)? {
+			match std::fs::File::create_new(&path) {
+				Ok(file) => return Ok((path, file, marker)),
+				Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => marker.clear(),
+				Err(err) => {
+					marker.clear();
+					return Err(err).with_context(|| format!("cannot create {}", path.display()));
+				}
+			}
+		}
+		number = number.checked_add(1).context("every numbered name is taken")?;
+	}
+}
+
+/// The sidecar `<name>.mp4.unfinished` beside a file being recorded, until the file
 /// is a regular MP4 or removed. A crash leaves it, which tells the next launch
 /// to repair the file. Its lock, held while recording, tells a launch apart
 /// from another studio still recording into the same directory.
@@ -546,16 +550,34 @@ struct Marker {
 }
 
 impl Marker {
-	/// Mark the recording at `path` unfinished.
-	fn create(path: &Path) -> anyhow::Result<Self> {
+	/// Mark the recording at `path`, created next, unfinished, or `None` when
+	/// the name is taken: a marker is already there, or a launch claimed this
+	/// one before it was locked.
+	///
+	/// Locked before the recording exists, so a launch that claims it first
+	/// finds no recording and removes it rather than repairing a live one.
+	fn create(path: &Path) -> anyhow::Result<Option<Self>> {
 		let path = marker(path);
-		let file = std::fs::File::create(&path).with_context(|| format!("cannot create {}", path.display()))?;
-		// A file system without locks still marks the file; only another studio
-		// recording into the same directory as it launches goes unnoticed.
-		if let Err(err) = file.try_lock() {
-			tracing::debug!(path = %path.display(), error = %err, "cannot lock a recording's marker");
+		let file = match std::fs::File::create_new(&path) {
+			Ok(file) => file,
+			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+			Err(err) => return Err(err).with_context(|| format!("cannot create {}", path.display())),
+		};
+		match file.try_lock() {
+			Ok(()) => {}
+			// A launch holds it, and removes it once it finds no recording.
+			Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+			// A file system without locks still marks the file; only another studio
+			// recording into the same directory as it launches goes unnoticed.
+			Err(std::fs::TryLockError::Error(err)) => {
+				tracing::warn!(path = %path.display(), error = %err, "cannot lock a recording's marker");
+			}
 		}
-		Ok(Self { path, file })
+		// A launch that held it before it was locked removed it.
+		if !path.exists() {
+			return Ok(None);
+		}
+		Ok(Some(Self { path, file }))
 	}
 
 	/// Remove the marker, and only then let go of its lock, so a launch that
@@ -1456,13 +1478,15 @@ mod tests {
 		let crashed = tempfile::tempdir().unwrap();
 		let mut studio = Studio::new();
 		studio.add("mic");
+		// Its file is named as the mic's repair would be.
+		studio.add("mic.repaired");
 		let recorder = studio.recorder(dir.path());
 		recorder.start(true).unwrap();
 		studio.play(Duration::from_secs(1)).await;
 
 		// What a crash leaves: each file as written so far, and its marker.
 		let names_while_recording = names(dir.path());
-		assert_eq!(names_while_recording.len(), 4, "{names_while_recording:?}");
+		assert_eq!(names_while_recording.len(), 6, "{names_while_recording:?}");
 		for name in &names_while_recording {
 			std::fs::copy(dir.path().join(name), crashed.path().join(name)).unwrap();
 		}
@@ -1475,7 +1499,7 @@ mod tests {
 		// A file finished just before a crash, whose marker stayed.
 		let program = &recorder.status().unwrap().files[0].path;
 		std::fs::copy(program, crashed.path().join("finished.mp4")).unwrap();
-		std::fs::write(crashed.path().join("finished.mp4.part"), b"").unwrap();
+		std::fs::write(crashed.path().join("finished.mp4.unfinished"), b"").unwrap();
 
 		let originals: Vec<_> = names(crashed.path())
 			.into_iter()
@@ -1489,32 +1513,37 @@ mod tests {
 			.await
 			.expect("the repairs end");
 
+		// The name after the timestamp, or all of it.
+		let end = |path: &Path| {
+			let name = path.file_name().unwrap().to_string_lossy().into_owned();
+			name.rsplit_once('Z').map_or(name.clone(), |(_, end)| end.to_string())
+		};
 		let repairs = launch.repairs();
 		let outcomes: Vec<_> = repairs
 			.iter()
 			.map(|repair| {
-				let name = repair.path.file_name().unwrap().to_string_lossy().into_owned();
-				(
-					name.rsplit_once('Z').map_or(name.clone(), |(_, end)| end.to_string()),
-					repair.outcome.clone(),
-				)
+				let outcome = match &repair.outcome {
+					Some(Repaired::Saved(repaired)) => Some(end(repaired)),
+					Some(Repaired::Finished) => None,
+					outcome => panic!("{}: {outcome:?}", repair.path.display()),
+				};
+				(end(&repair.path), outcome)
 			})
 			.collect();
-		// In name order, where a space comes before a dot.
-		let [
-			(finished, Some(Repaired::Finished)),
-			(mic, Some(Repaired::Saved(_))),
-			(program, Some(Repaired::Saved(_))),
-		] = outcomes.as_slice()
-		else {
-			panic!("{outcomes:?}");
-		};
-		assert_eq!([finished.as_str(), mic, program], ["finished.mp4", " mic.mp4", ".mp4"]);
+		// In name order, where a space comes before a dot. The repair of the
+		// mic's file is numbered rather than replacing the other source's.
+		let expected = [
+			("finished.mp4", None),
+			(" mic.mp4", Some(" mic.repaired (2).mp4")),
+			(" mic.repaired.mp4", Some(" mic.repaired.repaired.mp4")),
+			(".mp4", Some(".repaired.mp4")),
+		]
+		.map(|(name, repaired)| (name.to_string(), repaired.map(str::to_string)));
+		assert_eq!(outcomes, expected);
 		for repair in &repairs[1..] {
 			let Some(Repaired::Saved(repaired)) = &repair.outcome else {
 				unreachable!();
 			};
-			assert_eq!(repaired, &repair::repaired(&repair.path));
 			let [(handler, duration)] = tracks(repaired).try_into().unwrap();
 			assert_eq!(handler, "soun");
 			assert!(
@@ -1527,13 +1556,13 @@ mod tests {
 		// Each original is as it was, and only the repairs were added.
 		for (name, data) in &originals {
 			let path = crashed.path().join(name);
-			if name.ends_with(".part") {
+			if name.ends_with(MARKER) {
 				assert!(!path.exists(), "{name} is removed once repaired");
 			} else {
 				assert!(&std::fs::read(&path).unwrap() == data, "{name} is left as it was");
 			}
 		}
-		assert_eq!(names(crashed.path()).len(), originals.len() - 3 + 2);
+		assert_eq!(names(crashed.path()).len(), originals.len() - 4 + 3);
 
 		// The next launch has nothing to repair.
 		let again = studio.recorder(crashed.path());
@@ -1548,10 +1577,10 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let studio = Studio::new();
 		std::fs::write(dir.path().join("empty.mp4"), b"").unwrap();
-		std::fs::write(dir.path().join("empty.mp4.part"), b"").unwrap();
+		std::fs::write(dir.path().join("empty.mp4.unfinished"), b"").unwrap();
 		std::fs::write(dir.path().join("junk.mp4"), b"not a recording").unwrap();
-		std::fs::write(dir.path().join("junk.mp4.part"), b"").unwrap();
-		std::fs::write(dir.path().join("gone.mp4.part"), b"").unwrap();
+		std::fs::write(dir.path().join("junk.mp4.unfinished"), b"").unwrap();
+		std::fs::write(dir.path().join("gone.mp4.unfinished"), b"").unwrap();
 		let (_, _file, _marker) = create(dir.path(), "recording").unwrap();
 
 		let launch = studio.recorder(dir.path());
@@ -1575,7 +1604,7 @@ mod tests {
 		assert!(reason.contains("not a recording the studio can repair"), "{reason}");
 		assert_eq!(
 			names(dir.path()),
-			["empty.mp4", "junk.mp4", "recording.mp4", "recording.mp4.part"]
+			["empty.mp4", "junk.mp4", "recording.mp4", "recording.mp4.unfinished"]
 		);
 	}
 
@@ -1590,7 +1619,7 @@ mod tests {
 		let studio = Studio::new();
 		let path = dir.path().join("locked.mp4");
 		std::fs::write(&path, b"not a recording").unwrap();
-		std::fs::write(dir.path().join("locked.mp4.part"), b"").unwrap();
+		std::fs::write(dir.path().join("locked.mp4.unfinished"), b"").unwrap();
 		let launch = async |mode| {
 			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
 			let launch = studio.recorder(dir.path());
@@ -1606,7 +1635,7 @@ mod tests {
 
 		let (reason, names) = launch(0o000).await;
 		assert!(reason.contains("cannot open"), "{reason}");
-		assert_eq!(names, ["locked.mp4", "locked.mp4.part"]);
+		assert_eq!(names, ["locked.mp4", "locked.mp4.unfinished"]);
 		let (reason, names) = launch(0o644).await;
 		assert!(reason.contains("not a recording the studio can repair"), "{reason}");
 		assert_eq!(names, ["locked.mp4"]);
@@ -1627,9 +1656,9 @@ mod tests {
 			assert!(source.len() >= program.len() + 1 + SOURCE - 1, "{source}");
 			for stem in [&program, &source, &source] {
 				let (path, ..) = create(dir.path(), stem).unwrap();
-				// So do its marker and its repair, while written and once done.
-				let repaired = repair::repaired(&path);
-				for path in [marker(&path), repair::partial(&repaired), repaired, path] {
+				// So do its marker and its repair, numbered too.
+				let repaired = dir.path().join(numbered(&repair::stem(&path).unwrap(), u32::MAX));
+				for path in [marker(&path), repaired, path] {
 					let name = path.file_name().unwrap().len();
 					assert!(name <= MAX_NAME, "{name} bytes: {}", path.display());
 				}
@@ -1676,6 +1705,23 @@ mod tests {
 		assert_eq!(first, dir.path().join("show.mp4"));
 		assert_eq!(second, dir.path().join("show (2).mp4"));
 		assert_eq!(third, dir.path().join("show (3).mp4"));
+	}
+
+	/// A marker already there, such as one a launch holds while it removes it,
+	/// takes its name too, so a new recording is never marked by a marker that
+	/// someone else may remove.
+	#[test]
+	fn a_taken_marker_is_numbered() {
+		let dir = tempfile::tempdir().unwrap();
+		let held = std::fs::File::create(dir.path().join("show.mp4.unfinished")).unwrap();
+		held.try_lock().unwrap();
+		let (path, _file, created) = create(dir.path(), "show").unwrap();
+		assert_eq!(path, dir.path().join("show (2).mp4"));
+		assert_eq!(created.path, marker(&path));
+		assert_eq!(
+			names(dir.path()),
+			["show (2).mp4", "show (2).mp4.unfinished", "show.mp4.unfinished"]
+		);
 	}
 
 	/// Starting into a directory that does not exist fails at once.
