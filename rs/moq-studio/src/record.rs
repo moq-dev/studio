@@ -558,16 +558,16 @@ impl Marker {
 		Ok(Self { path, file })
 	}
 
-	/// Remove the marker.
+	/// Remove the marker, and only then let go of its lock, so a launch that
+	/// takes the lock next finds it gone.
 	fn clear(self) {
-		// Unlocked first, which Windows needs to remove it.
-		drop(self.file);
 		if let Err(err) = std::fs::remove_file(&self.path)
 			&& err.kind() != std::io::ErrorKind::NotFound
 		{
 			// The next launch finds the file finished or gone, and removes it.
 			tracing::warn!(path = %self.path.display(), error = %err, "cannot remove a recording's marker");
 		}
+		drop(self.file);
 	}
 }
 
@@ -1577,6 +1577,39 @@ mod tests {
 			names(dir.path()),
 			["empty.mp4", "junk.mp4", "recording.mp4", "recording.mp4.part"]
 		);
+	}
+
+	/// A file the launch cannot read keeps its marker, so the next launch tries
+	/// again, unlike one it reads and finds no recording in.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_repair_that_cannot_read_tries_again() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		let studio = Studio::new();
+		let path = dir.path().join("locked.mp4");
+		std::fs::write(&path, b"not a recording").unwrap();
+		std::fs::write(dir.path().join("locked.mp4.part"), b"").unwrap();
+		let launch = async |mode| {
+			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+			let launch = studio.recorder(dir.path());
+			kio::clock::timeout(Duration::from_secs(5), launch.repaired())
+				.await
+				.expect("the repairs end");
+			let [repair] = launch.repairs().try_into().unwrap();
+			let Some(Repaired::Failed(reason)) = repair.outcome else {
+				panic!("{:?}", repair.outcome);
+			};
+			(reason, names(dir.path()))
+		};
+
+		let (reason, names) = launch(0o000).await;
+		assert!(reason.contains("cannot open"), "{reason}");
+		assert_eq!(names, ["locked.mp4", "locked.mp4.part"]);
+		let (reason, names) = launch(0o644).await;
+		assert!(reason.contains("not a recording the studio can repair"), "{reason}");
+		assert_eq!(names, ["locked.mp4"]);
 	}
 
 	/// A long scene file or source name is cut, between characters, so every

@@ -2,10 +2,11 @@
 //!
 //! Each file a recording writes has a sidecar marker beside it while it is
 //! written (see [`Marker`](super::Marker)). A marker found at launch whose
-//! lock nobody holds names a file that never finished, which is repaired into
-//! a regular MP4 beside it, `<name>.repaired.mp4`, leaving the original as it
-//! was. Removing the marker after the repair keeps the file from being
-//! repaired again.
+//! lock nobody holds names a file that never finished. The launch takes the
+//! lock for as long as it repairs the file into a regular MP4 beside it,
+//! `<name>.repaired.mp4`, leaving the original as it was, so neither a
+//! recording nor another studio's launch touches it meanwhile. Removing the
+//! marker after the repair keeps the file from being repaired again.
 
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use moq_mux::container::mp4;
+
+use super::Marker;
 
 /// A recording found unfinished at launch.
 #[derive(Clone, Debug)]
@@ -32,8 +35,9 @@ pub enum Repaired {
 	Finished,
 	/// Nothing reached it before the studio stopped.
 	Empty,
-	/// It holds no recording that can be repaired, or writing the repair
-	/// failed. A failed write leaves the marker, so the next launch tries again.
+	/// It holds no recording that can be repaired, or reading it or writing
+	/// the repair failed. A failure to read or write leaves the marker, so the
+	/// next launch tries again.
 	Failed(String),
 }
 
@@ -48,20 +52,20 @@ impl Repairs {
 	///
 	/// Only the markers there now count, not those of recordings started later.
 	pub fn start(dir: &Path, runtime: &tokio::runtime::Handle) -> Self {
-		let paths = unfinished(dir);
-		let list: Vec<_> = paths
+		let claimed = unfinished(dir);
+		let list: Vec<_> = claimed
 			.iter()
-			.map(|path| Repair {
+			.map(|(path, _)| Repair {
 				path: path.clone(),
 				outcome: None,
 			})
 			.collect();
 		let list = Arc::new(Mutex::new(list));
-		if !paths.is_empty() {
+		if !claimed.is_empty() {
 			let list = list.clone();
 			runtime.spawn_blocking(move || {
-				for (index, path) in paths.iter().enumerate() {
-					let outcome = repair(path);
+				for (index, (path, marker)) in claimed.into_iter().enumerate() {
+					let outcome = repair(&path, marker);
 					list.lock().unwrap()[index].outcome = Some(outcome);
 				}
 			});
@@ -75,9 +79,9 @@ impl Repairs {
 	}
 }
 
-/// Each file in `dir` whose marker no running recording holds, in name
-/// order. A marker whose file is gone is removed.
-fn unfinished(dir: &Path) -> Vec<PathBuf> {
+/// Each file in `dir` whose marker no running recording or repair holds, in
+/// name order, with its marker claimed. A marker whose file is gone is removed.
+fn unfinished(dir: &Path) -> Vec<(PathBuf, Marker)> {
 	let entries = match std::fs::read_dir(dir) {
 		Ok(entries) => entries,
 		// Nothing was ever recorded there.
@@ -87,38 +91,57 @@ fn unfinished(dir: &Path) -> Vec<PathBuf> {
 			return Vec::new();
 		}
 	};
-	let mut paths: Vec<PathBuf> = entries
+	let mut claimed: Vec<_> = entries
 		.filter_map(|entry| {
-			let marker = entry.ok()?.path();
-			let name = marker.file_name()?.to_str()?.strip_suffix(super::MARKER)?;
-			if !name.ends_with(".mp4") || held(&marker) {
+			let path = entry.ok()?.path();
+			let name = path.file_name()?.to_str()?.strip_suffix(super::MARKER)?;
+			if !name.ends_with(".mp4") {
 				return None;
 			}
 			let recording = dir.join(name);
+			let marker = Marker::claim(path)?;
 			if !recording.exists() {
-				tracing::debug!(marker = %marker.display(), "removing the marker of a recording that is gone");
-				remove(&marker);
+				tracing::debug!(marker = %marker.path.display(), "removing the marker of a recording that is gone");
+				marker.clear();
 				return None;
 			}
-			Some(recording)
+			Some((recording, marker))
 		})
 		.collect();
-	paths.sort();
-	paths
+	claimed.sort_by(|(a, _), (b, _)| a.cmp(b));
+	claimed
 }
 
-/// Whether a running recording, such as another studio's into the same
-/// directory, holds `marker`'s lock.
-fn held(marker: &Path) -> bool {
-	let Ok(file) = std::fs::File::open(marker) else {
-		return false;
-	};
-	matches!(file.try_lock_shared(), Err(std::fs::TryLockError::WouldBlock))
+impl Marker {
+	/// Claim the marker at `path` for a repair, unless a recording, such as
+	/// another studio's into the same directory, or another launch's repair
+	/// holds it.
+	fn claim(path: PathBuf) -> Option<Self> {
+		let file = std::fs::File::open(&path).ok()?;
+		match file.try_lock() {
+			Ok(()) => {}
+			Err(std::fs::TryLockError::WouldBlock) => return None,
+			// A file system without locks: claimed, as the recording could not
+			// lock it either.
+			Err(std::fs::TryLockError::Error(err)) => {
+				tracing::debug!(path = %path.display(), error = %err, "cannot lock a recording's marker");
+			}
+		}
+		// A repair that ended as this opened it removed it before letting go.
+		if !path.exists() {
+			return None;
+		}
+		Some(Self { path, file })
+	}
 }
 
-/// Repair the unfinished recording at `path`, reporting it in the log.
-fn repair(path: &Path) -> Repaired {
-	let outcome = write(path);
+/// Repair the unfinished recording at `path`, reporting it in the log, and
+/// remove its `marker` unless the next launch should try again.
+fn repair(path: &Path, marker: Marker) -> Repaired {
+	let (outcome, again) = write(path);
+	if !again {
+		marker.clear();
+	}
 	match &outcome {
 		Repaired::Saved(repaired) => tracing::warn!(
 			path = %path.display(),
@@ -136,26 +159,34 @@ fn repair(path: &Path) -> Repaired {
 	outcome
 }
 
-/// Write the repair of `path` beside it, and remove its marker unless writing
-/// failed, which the next launch tries again.
-fn write(path: &Path) -> Repaired {
-	let outcome = if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0) {
-		Repaired::Empty
-	} else {
-		match read(path) {
-			Ok(Some(finish)) => {
-				let repaired = repaired(path);
-				if let Err(err) = copy(path, &repaired, &finish) {
-					return Repaired::Failed(format!("{err:#}"));
-				}
-				Repaired::Saved(repaired)
-			}
-			Ok(None) => Repaired::Finished,
-			Err(err) => Repaired::Failed(format!("{err:#}")),
+/// Write the repair of `path` beside it. Also returns whether the next launch
+/// should try again: after a failure to read or write rather than a file that
+/// holds no recording.
+fn write(path: &Path) -> (Repaired, bool) {
+	if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0) {
+		return (Repaired::Empty, false);
+	}
+	let failed = |err: anyhow::Error| Repaired::Failed(format!("{err:#}"));
+	let finish = match read(path) {
+		Ok(Some(finish)) => finish,
+		Ok(None) => return (Repaired::Finished, false),
+		Err(err) => {
+			let again = io(&err);
+			return (failed(err), again);
 		}
 	};
-	remove(&super::marker(path));
-	outcome
+	let repaired = repaired(path);
+	match copy(path, &repaired, &finish) {
+		Ok(()) => (Repaired::Saved(repaired), false),
+		Err(err) => (failed(err), true),
+	}
+}
+
+/// Whether `err` is a failure to read or write rather than what was read.
+fn io(err: &anyhow::Error) -> bool {
+	err.chain().any(|err| {
+		err.is::<std::io::Error>() || matches!(err.downcast_ref::<moq_mux::Error>(), Some(moq_mux::Error::Io(_)))
+	})
 }
 
 /// The writes that finish `path`, or `None` when it is already a regular MP4.
