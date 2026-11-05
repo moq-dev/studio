@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, Canvas, Collection, Filter, Item, Layer, Mixes, Scene, Source, Transition, Video};
+use crate::collection::{
+	Audio, Canvas, Collection, Extra, Filter, Item, Layer, Mixes, Scene, Source, Transition, Video,
+};
 
 /// One part of a collection, before and after an edit.
 ///
@@ -70,6 +72,14 @@ pub enum Change {
 	Transition { before: Transition, after: Transition },
 	/// [`Collection::canvas`].
 	Canvas { before: Canvas, after: Canvas },
+	/// A [`Collection::canvases`] entry.
+	Extra {
+		name: String,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		before: Option<Extra>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		after: Option<Extra>,
+	},
 	/// [`Collection::mixes`].
 	Mixes { before: Mixes, after: Mixes },
 }
@@ -117,6 +127,11 @@ impl Change {
 				before: after,
 				after: before,
 			},
+			Self::Extra { name, before, after } => Self::Extra {
+				name,
+				before: after,
+				after: before,
+			},
 			Self::Mixes { before, after } => Self::Mixes {
 				before: after,
 				after: before,
@@ -132,6 +147,7 @@ impl Change {
 			| Self::Item { .. }
 			| Self::Transition { .. }
 			| Self::Canvas { .. }
+			| Self::Extra { .. }
 			| Self::Mixes { .. } => None,
 		}
 	}
@@ -146,6 +162,7 @@ impl Change {
 			Self::Item { before, after, .. } => before == after,
 			Self::Transition { before, after } => before == after,
 			Self::Canvas { before, after } => before == after,
+			Self::Extra { before, after, .. } => before == after,
 			Self::Mixes { before, after } => before == after,
 		}
 	}
@@ -235,6 +252,18 @@ impl Change {
 			(Self::Canvas { before, after }, Self::Canvas { before: b, after: a }) if after == *b => {
 				Self::Canvas { before, after: *a }
 			}
+			(
+				Self::Extra { name, before, after },
+				Self::Extra {
+					name: n,
+					before: b,
+					after: a,
+				},
+			) if name == *n && after == *b => Self::Extra {
+				name,
+				before,
+				after: a.clone(),
+			},
 			(Self::Mixes { before, after }, Self::Mixes { before: b, after: a }) if after == *b => Self::Mixes {
 				before,
 				after: a.clone(),
@@ -260,10 +289,9 @@ impl Change {
 				before,
 				after,
 			} => {
-				let items = collection
-					.items_mut(layer)
-					.ok_or_else(|| conflict(format!("there is no {layer}")))?;
-				splice(items, *index, before, after).map_err(|err| conflict(format!("item {err} in {layer}")))
+				let spliced = collection.edit_items(layer, |items| splice(items, *index, before, after));
+				let spliced = spliced.ok_or_else(|| conflict(format!("there is no {layer}")))?;
+				spliced.map_err(|err| conflict(format!("item {err} in {layer}")))
 			}
 			Self::Transition { before, after } => {
 				if collection.transition != *before {
@@ -279,6 +307,7 @@ impl Change {
 				collection.canvas = *after;
 				Ok(())
 			}
+			Self::Extra { name, before, after } => replace(&mut collection.canvases, name, before, after, "canvas"),
 			Self::Mixes { before, after } => {
 				if collection.mixes != *before {
 					return Err(conflict("the mixes changed".into()));
@@ -654,6 +683,49 @@ impl Draft {
 		self.change(Change::Canvas { before, after: canvas })
 	}
 
+	/// Add or resize the further canvas called `name`, keeping its top layer
+	/// and every scene's layout on it. Items keep their place in canvas
+	/// pixels.
+	pub fn set_extra(&mut self, name: &str, width: u32, height: u32) -> Result<(), Error> {
+		let before = self.collection.canvases.get(name).cloned();
+		let after = match &before {
+			Some(extra) => Extra {
+				width,
+				height,
+				..extra.clone()
+			},
+			None => Extra::new(width, height),
+		};
+		self.change(Change::Extra {
+			name: name.to_string(),
+			before,
+			after: Some(after),
+		})
+	}
+
+	/// Remove the further canvas called `name`, with its top layer and every
+	/// scene's layout on it.
+	pub fn remove_extra(&mut self, name: &str) -> Result<(), Error> {
+		let laid: Vec<(usize, Scene)> = self
+			.collection
+			.scenes
+			.iter()
+			.enumerate()
+			.filter(|(_, scene)| scene.canvases.contains_key(name))
+			.map(|(index, scene)| (index, scene.clone()))
+			.collect();
+		for (index, mut scene) in laid {
+			scene.canvases.remove(name);
+			self.set_scene(index, scene)?;
+		}
+		let before = self.collection.canvases.get(name).cloned();
+		self.change(Change::Extra {
+			name: name.to_string(),
+			before,
+			after: None,
+		})
+	}
+
 	/// Set the mixes and which ones the program and recordings carry, and
 	/// nothing else: see [`rename_mix`](Self::rename_mix) and
 	/// [`remove_mix`](Self::remove_mix) for what refers to a mix.
@@ -974,7 +1046,7 @@ mod tests {
 	}
 
 	fn main() -> Layer {
-		Layer::Scene("Scene".into())
+		Layer::scene("Scene")
 	}
 
 	/// A collection with a red source shown in the one scene.
@@ -1320,6 +1392,100 @@ mod tests {
 		assert_eq!(collection.transition, Transition::default());
 		history.undo(&mut collection).unwrap();
 		assert_eq!(collection, removed);
+		history.undo(&mut collection).unwrap();
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, start);
+	}
+
+	/// A further canvas is added, laid out, and resized as edits; removing a
+	/// source takes its items off every canvas; and removing the canvas takes
+	/// its top layer and every scene's layout on it, undoing whole. A layout
+	/// emptied item by item reads as no layout, and the file round-trips.
+	#[test]
+	fn a_further_canvas_edits_and_removes_whole() {
+		let mut collection = collection();
+		collection.sources.insert("blue".into(), color([0, 0, 255, 255]));
+		let mut history = History::new();
+		let tall = Layer::scene("Scene").on(Some("tall".into()));
+		let over = Layer::top().on(Some("tall".into()));
+		let fill = Rect::fill(&Canvas {
+			width: 1080,
+			height: 1920,
+			framerate: 30,
+		});
+
+		let mut draft = collection.draft("Add a canvas");
+		assert!(
+			draft.insert_item(&tall, 0, Item::new("red", fill)).is_err(),
+			"no canvas yet"
+		);
+		draft.set_extra("tall", 1080, 1920).unwrap();
+		draft.insert_item(&tall, 0, Item::new("red", fill)).unwrap();
+		draft.insert_item(&tall, 1, Item::new("blue", fill)).unwrap();
+		draft.insert_item(&over, 0, Item::new("blue", fill)).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		let added = collection.clone();
+		assert_eq!(collection.items(&tall).unwrap().len(), 2);
+		assert_eq!(collection.canvas(Some("tall")).unwrap().framerate, 30);
+		assert_eq!(
+			Collection::from_toml(&collection.to_toml().unwrap()).unwrap(),
+			collection
+		);
+
+		let mut draft = collection.draft("Resize");
+		draft.set_extra("tall", 720, 1280).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.canvases["tall"].top.len(), 1, "the top layer stays");
+
+		let mut draft = collection.draft("Remove blue");
+		draft.remove_source("blue").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.items(&tall).unwrap().len(), 1);
+		assert!(collection.items(&over).unwrap().is_empty());
+
+		let mut draft = collection.draft("Remove red there");
+		draft.remove_item(&tall, 0).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert!(collection.scenes[0].canvases.is_empty(), "an empty layout is dropped");
+
+		history.seek(&mut collection, 1).unwrap();
+		assert_eq!(collection, added);
+		let mut draft = collection.draft("Remove the canvas");
+		draft.remove_extra("tall").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert!(collection.canvases.is_empty());
+		assert!(collection.scenes[0].canvases.is_empty());
+		assert_eq!(collection.items(&tall), None);
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, added);
+	}
+
+	/// Emptying a scene's layout on a further canvas changes only that layer,
+	/// so a scene snapshot taken before still undoes: rename the scene, empty
+	/// its layout, then undo both. A refused item edit leaves no empty layout
+	/// behind in the draft.
+	#[test]
+	fn emptying_a_layout_keeps_earlier_scene_edits_undoable() {
+		let mut collection = collection();
+		let fill = Rect::fill(&collection.canvas);
+		collection.canvases.insert("tall".into(), Extra::new(1080, 1920));
+		collection.scenes[0]
+			.canvases
+			.insert("tall".into(), vec![Item::new("red", fill)]);
+		collection.validate().unwrap();
+		let start = collection.clone();
+		let mut history = History::new();
+
+		let mut draft = collection.draft("Rename");
+		draft.rename_scene(0, "Renamed").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		let tall = Layer::scene("Renamed").on(Some("tall".into()));
+		let mut draft = collection.draft("Remove red there");
+		draft.remove_item(&tall, 0).unwrap();
+		assert!(draft.insert_item(&tall, 5, Item::new("red", fill)).is_err());
+		commit(&mut collection, &mut history, draft, None);
+		assert!(collection.scenes[0].canvases.is_empty());
+
 		history.undo(&mut collection).unwrap();
 		history.undo(&mut collection).unwrap();
 		assert_eq!(collection, start);
