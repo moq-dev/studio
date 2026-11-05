@@ -14,7 +14,7 @@ use cef::*;
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 
 use super::outbox::Commands;
-use super::protocol::{Area, Channel, Command, Event, Format, Id, Layer, Open, Plane, Raster, Start, Texture};
+use super::protocol::{Area, Channel, Command, Display, Event, Format, Id, Layer, Open, Plane, Raster, Start, Texture};
 use super::{Button, Input, Modifiers};
 
 /// What the helper asks of a page's focused frame: its selection, and whether
@@ -52,6 +52,9 @@ struct Shared {
 	/// never another page's.
 	painted: Mutex<mpsc::Receiver<()>>,
 	accelerated: bool,
+	/// Whether CEF's own copy reaches the desktop's clipboard: only through
+	/// an X display.
+	native_copy: bool,
 }
 
 impl Shared {
@@ -115,6 +118,13 @@ fn serve() -> Result<(), String> {
 		writer: Mutex::new(writer),
 		painted: Mutex::new(painted),
 		accelerated: matches!(start.raster, Raster::Gpu { .. }),
+		native_copy: matches!(
+			start.raster,
+			Raster::Gpu {
+				display: Display::X11,
+				..
+			}
+		),
 	});
 	// The studio shows why, rather than only that the helper exited.
 	browse(&shared, start, reader, painted_tx).inspect_err(|reason| _ = shared.send(&Event::Fatal(reason.clone()), &[]))
@@ -389,17 +399,20 @@ fn deliver(id: Id, input: Input) {
 /// may be an iframe, to the desktop's clipboard.
 fn copy(browser: &Browser, page: &Paged, cut: bool) {
 	let Some(frame) = browser.focused_frame() else { return };
-	// The GPU path opens a display, whose clipboard CEF's own is, and the
-	// page's copy and cut handlers decide what lands there.
-	if page.shared.accelerated {
+	// Through an X display, CEF's clipboard is the desktop's, and the page's
+	// copy and cut handlers decide what lands there.
+	if page.shared.native_copy {
 		match cut {
 			true => frame.cut(),
 			false => frame.copy(),
 		}
 		return;
 	}
-	// The CPU path opens none, so the frame's renderer answers with its
-	// selection, and the studio puts that on the desktop's clipboard.
+	// Elsewhere CEF's own copy reaches no desktop: headless Ozone, on the CPU
+	// path, has no clipboard, and Wayland's takes a selection only with the
+	// serial of an input event, which an offscreen page never receives. So
+	// the frame's renderer answers with its selection, and the studio puts
+	// that on the desktop's clipboard.
 	let Some(mut message) = process_message_create(Some(&COPY.into())) else {
 		return;
 	};
@@ -477,12 +490,19 @@ wrap_app! {
 				Some(&"no-user-gesture-required".into()),
 			);
 			match &self.raster {
-				// Paint on the studio's GPU, which is the only one it imports
-				// from.
-				Raster::Gpu { render_node: Some(node) } => {
-					command_line.append_switch_with_value(Some(&"render-node-override".into()), Some(&node.as_str().into()));
+				Raster::Gpu { render_node, display } => {
+					let platform = match display {
+						Display::Wayland => "wayland",
+						Display::X11 => "x11",
+					};
+					command_line.append_switch_with_value(Some(&"ozone-platform".into()), Some(&platform.into()));
+					// Paint on the studio's GPU, which is the only one it
+					// imports from.
+					if let Some(node) = render_node {
+						command_line
+							.append_switch_with_value(Some(&"render-node-override".into()), Some(&node.as_str().into()));
+					}
 				}
-				Raster::Gpu { render_node: None } => {}
 				// The pictures come back in memory anyway. Left to find a GPU,
 				// Chromium walks its fallbacks, and one can hang until its
 				// watchdog kills it seconds later, delaying the first paint.
