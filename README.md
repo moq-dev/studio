@@ -289,7 +289,7 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
 a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
 in the link's fragment, which the browser never sends to a server, and lets
 them publish only under their own name, so they cannot appear as someone else,
-and read only their own renewals and return feed.
+and read only their own renewals, their return feed, and the program.
 Treat the link like a password: anyone holding it can join as that guest
 before it expires, and is then renewed for as long as they stay, until you
 remove them. A guest's broadcasts become sources named after them (`alice`,

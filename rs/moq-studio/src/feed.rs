@@ -46,6 +46,10 @@ pub struct Feeds {
 	feeds: BTreeMap<String, Feed>,
 	/// Serves the program at [`PROGRAM`] until dropped.
 	serving: tokio::task::JoinHandle<()>,
+	/// Where each feed's task runs: the runtime the feeds were made on, never
+	/// the program thread [`sync`](Self::sync) is called from, so encoding a
+	/// guest's audio never holds up a frame.
+	runtime: tokio::runtime::Handle,
 }
 
 impl Feeds {
@@ -81,6 +85,7 @@ impl Feeds {
 			epoch,
 			feeds: BTreeMap::new(),
 			serving,
+			runtime: tokio::runtime::Handle::current(),
 		})
 	}
 
@@ -89,8 +94,10 @@ impl Feeds {
 	/// microphone as `sources` runs it.
 	pub fn sync(&mut self, collection: &Collection, sources: &Sources) {
 		let renewed = self.room.renewed();
-		self.feeds
-			.retain(|identity, feed| renewed.contains(&(identity.clone(), feed.generation)));
+		// A feed whose task stopped, having logged why, opens again below.
+		self.feeds.retain(|identity, feed| {
+			renewed.contains(&(identity.clone(), feed.generation)) && !feed.task.is_finished()
+		});
 		let program = sources.mix(&collection.mixes.program);
 		for (identity, generation) in renewed {
 			if !self.feeds.contains_key(&identity) {
@@ -157,7 +164,7 @@ impl Feeds {
 			rate: bus.sample_rate,
 		};
 		let identity = identity.to_string();
-		tokio::spawn(async move {
+		let task = self.runtime.spawn(async move {
 			if let Err(err) = running.run(stopped).await {
 				tracing::error!(%identity, error = format!("{err:#}"), "a guest's return feed stopped");
 			}
@@ -166,6 +173,7 @@ impl Feeds {
 			generation,
 			pick,
 			_stop: stop,
+			task,
 		})
 	}
 }
@@ -184,6 +192,8 @@ struct Feed {
 	pick: mix::Pick,
 	/// Dropped to end the feed.
 	_stop: tokio::sync::oneshot::Sender<()>,
+	/// Runs the feed until it ends.
+	task: tokio::task::JoinHandle<()>,
 }
 
 /// A feed's broadcast, as its task runs it.
@@ -414,7 +424,9 @@ mod tests {
 		drop(sources.sync(&collection));
 		let mut alice = channel(&bus, &sources, "alice");
 		let mut bob = channel(&bus, &sources, "bob");
-		feeds.sync(&collection, &sources);
+		// From a thread of its own, as the program thread syncs: the feeds run
+		// on the runtime they were made on, not the caller's.
+		std::thread::scope(|scope| scope.spawn(|| feeds.sync(&collection, &sources)).join().unwrap());
 
 		let path = Room::feed_path("alice", 0).unwrap();
 		let broadcast = origin.consume().follow(path, None).unwrap().available().await.unwrap();
