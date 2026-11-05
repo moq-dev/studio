@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::os::fd::BorrowedFd;
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use cef::*;
@@ -73,9 +73,6 @@ struct Paged {
 	shared: Arc<Shared>,
 	id: Id,
 	open: Open,
-	/// The copies asked of its renderers and not yet answered, so a renderer
-	/// sets the studio's clipboard only when asked.
-	copies: AtomicUsize,
 }
 
 impl Paged {
@@ -90,6 +87,11 @@ thread_local! {
 	/// Whether the studio is gone, so the helper quits once its last page
 	/// closes.
 	static QUITTING: Cell<bool> = const { Cell::new(false) };
+	/// The number of the last copy asked of a renderer.
+	static COPIES: Cell<i32> = const { Cell::new(0) };
+	/// The copy whose answer the studio still wants. Only the newest is, so
+	/// a slow renderer never overwrites a newer copy, nor answers unasked.
+	static COPYING: Cell<Option<i32>> = const { Cell::new(None) };
 }
 
 fn serve() -> Result<(), String> {
@@ -267,12 +269,7 @@ fn open(shared: Arc<Shared>, id: Id, open: Open) {
 		..Default::default()
 	};
 	let url = CefString::from(open.url.as_str());
-	let paged = Arc::new(Paged {
-		shared,
-		id,
-		open,
-		copies: AtomicUsize::new(0),
-	});
+	let paged = Arc::new(Paged { shared, id, open });
 	let mut client = HelperClient::new(
 		paged.clone(),
 		HelperRender::new(paged.clone()),
@@ -406,10 +403,13 @@ fn copy(browser: &Browser, page: &Paged, cut: bool) {
 	let Some(mut message) = process_message_create(Some(&COPY.into())) else {
 		return;
 	};
+	let number = COPIES.get().wrapping_add(1);
+	COPIES.set(number);
+	COPYING.set(Some(number));
 	if let Some(args) = message.argument_list() {
 		args.set_bool(0, cut.into());
+		args.set_int(1, number);
 	}
-	page.copies.fetch_add(1, Ordering::Relaxed);
 	frame.send_process_message(ProcessId::RENDERER, Some(&mut message));
 }
 
@@ -548,7 +548,8 @@ wrap_render_process_handler! {
 			if source_process != ProcessId::BROWSER || CefString::from(&message.name()).to_string() != COPY {
 				return 0;
 			}
-			let cut = message.argument_list().is_some_and(|args| args.bool(0) != 0);
+			let Some(args) = message.argument_list() else { return 1 };
+			let (cut, number) = (args.bool(0) != 0, args.int(1));
 			let copied = Arc::new(Mutex::new(String::new()));
 			frame.visit_dom(Some(&mut SelectionReader::new(cut, copied.clone())));
 			let Some(mut answer) = process_message_create(Some(&COPIED.into())) else {
@@ -556,6 +557,7 @@ wrap_render_process_handler! {
 			};
 			if let Some(args) = answer.argument_list() {
 				args.set_string(0, Some(&copied.lock().unwrap().as_str().into()));
+				args.set_int(1, number);
 			}
 			frame.send_process_message(ProcessId::BROWSER, Some(&mut answer));
 			// After reading the selection, which cutting removes.
@@ -633,12 +635,14 @@ wrap_client! {
 			if source_process != ProcessId::RENDERER || CefString::from(&message.name()).to_string() != COPIED {
 				return 0;
 			}
-			// One the helper never asked for is dropped.
-			let asked = self.page.copies.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |copies| copies.checked_sub(1));
-			let text = message.argument_list().map(|args| CefString::from(&args.string(0)).to_string());
-			if let (Ok(_), Some(text)) = (asked, text)
-				&& !text.is_empty()
-			{
+			let Some(args) = message.argument_list() else { return 1 };
+			// Only the newest copy's answer, once.
+			if COPYING.get() != Some(args.int(1)) {
+				return 1;
+			}
+			COPYING.set(None);
+			let text = CefString::from(&args.string(0)).to_string();
+			if !text.is_empty() {
 				self.page.shared.send(&Event::Copied(self.page.id, text), &[]);
 			}
 			1
