@@ -62,6 +62,9 @@ Decided 2026-10-22 with the maintainer:
   CBR) for common ingest constraints without naming platforms. The creator
   can override every field.
 
+From the multi-canvas quest: each destination picks the canvas it carries and
+its mix, as a recording picks both, and pushes that canvas's program.
+
 ## Required
 
 - [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - AAC on macOS and Windows

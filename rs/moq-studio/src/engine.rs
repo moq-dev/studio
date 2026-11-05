@@ -2762,9 +2762,9 @@ mod tests {
 
 	/// Without a relay, a recording encodes the program on its own and saves it
 	/// as a regular MP4 holding its video and audio. The color source publishes
-	/// a still, which has no file of its own. A new canvas goes on in another
-	/// file, holding the new rendition's video. A recording holding a mix
-	/// other than the one on program records its audio.
+	/// a still, which has no file of its own. Picking a further canvas of
+	/// another size goes on in another file, holding its video. A recording
+	/// holding a mix other than the one on program records its audio.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn the_program_records_without_a_relay() {
@@ -2790,13 +2790,17 @@ mod tests {
 		assert_eq!(engine.stats.sessions.open(), 1);
 		{
 			let mut state = engine.state.lock().unwrap();
-			let mut draft = state.collection().draft("Resize the canvas");
-			let canvas = moq_scene::Canvas {
-				width: 160,
-				height: 90,
-				framerate: 15,
+			let mut draft = state.collection().draft("Record a portrait canvas");
+			draft.set_extra("tall", 90, 160).unwrap();
+			let fill = moq_scene::Rect {
+				x: 0.0,
+				y: 0.0,
+				width: 90.0,
+				height: 160.0,
 			};
-			draft.set_canvas(canvas).unwrap();
+			let layer = moq_scene::Layer::scene("Scene").on(Some("tall".into()));
+			draft.insert_item(&layer, 0, moq_scene::Item::new("red", fill)).unwrap();
+			draft.set_recorded(Some("tall")).unwrap();
 			state.commit(draft, None).unwrap();
 		}
 		encoded(&engine, 90 + 45).await;
@@ -3027,6 +3031,27 @@ mod tests {
 			.expect("the canvas's own layout arrives");
 		assert_eq!(engine.stats.sessions.open(), 2, "one canvas size each");
 		assert!(engine.stats.canvases()["tall"].error().is_none());
+		assert!(catalog.echo.is_some(), "its viewers are asked for feedback");
+		// Health grades it beside the main canvas, from what it writes.
+		let graded = |engine: &Engine| {
+			let report = engine.health.lock().unwrap();
+			let tall = report
+				.canvases
+				.iter()
+				.find(|canvas| canvas.name.as_deref() == Some("tall"));
+			tall.map(|tall| {
+				tall.tracks
+					.iter()
+					.any(|track| track.sent.is_some_and(|sent| sent.as_bps() > 0))
+			})
+		};
+		kio::clock::timeout(TIMEOUT, async {
+			while graded(&engine) != Some(true) {
+				kio::clock::sleep(health::INTERVAL).await;
+			}
+		})
+		.await
+		.expect("health grades the further canvas");
 
 		let track = broadcast.track(&video).unwrap().subscribe(None).await.unwrap();
 		{
@@ -3041,6 +3066,13 @@ mod tests {
 			.expect("the canvas's broadcast ends");
 		assert!(engine.stats.canvases().is_empty());
 		assert_eq!(engine.stats.sessions.open(), 1, "the canvas's session given back");
+		kio::clock::timeout(TIMEOUT, async {
+			while graded(&engine).is_some() {
+				kio::clock::sleep(health::INTERVAL).await;
+			}
+		})
+		.await
+		.expect("health forgets the removed canvas");
 
 		// Back again, quitting ends it as cleanly.
 		engine.state.lock().unwrap().undo().unwrap();
