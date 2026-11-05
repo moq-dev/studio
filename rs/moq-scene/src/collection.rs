@@ -1,5 +1,6 @@
 //! The scene graph, and the TOML file a [`Collection`] saves to.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
@@ -11,8 +12,8 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use crate::Error;
 
-/// Everything a studio composes: the canvas, the sources, and the scenes that
-/// place them.
+/// Everything a studio composes: the canvases, the sources, and the scenes
+/// that place them.
 ///
 /// Saved with [`to_toml`](Self::to_toml) and loaded with
 /// [`from_toml`](Self::from_toml). The file names devices, files, and broadcast
@@ -20,8 +21,14 @@ use crate::Error;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Collection {
-	/// The output every scene is drawn onto.
+	/// The main canvas every scene is drawn onto, whose frame rate every
+	/// canvas shares.
 	pub canvas: Canvas,
+	/// Further canvases by name, such as a portrait one beside a landscape
+	/// main canvas. Each draws its own layout of every scene from the same
+	/// sources, under its own top layer.
+	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+	pub canvases: BTreeMap<String, Extra>,
 	/// How the preview is taken to program, short of a cut.
 	#[serde(default)]
 	pub transition: Transition,
@@ -61,6 +68,7 @@ impl Collection {
 	pub fn new() -> Self {
 		Self {
 			canvas: Canvas::default(),
+			canvases: BTreeMap::new(),
 			transition: Transition::default(),
 			sources: BTreeMap::new(),
 			mixes: Mixes::default(),
@@ -91,33 +99,87 @@ impl Collection {
 		self.scenes.iter().find(|scene| scene.name == name)
 	}
 
-	/// The items of `layer`, or `None` for a scene that does not exist.
-	pub fn items(&self, layer: &Layer) -> Option<&Vec<Item>> {
-		match layer {
-			Layer::Scene(name) => self.scene(name).map(|scene| &scene.items),
-			Layer::Top => Some(&self.top),
+	/// The canvas `canvas` names: the main one for `None`, or a further one,
+	/// at the main canvas's frame rate. `None` for a canvas that does not
+	/// exist.
+	pub fn canvas(&self, canvas: Option<&str>) -> Option<Canvas> {
+		match canvas {
+			None => Some(self.canvas),
+			Some(name) => self.canvases.get(name).map(|extra| extra.canvas(self.canvas.framerate)),
 		}
 	}
 
-	/// The items of `layer`, to edit.
-	pub(crate) fn items_mut(&mut self, layer: &Layer) -> Option<&mut Vec<Item>> {
-		match layer {
-			Layer::Scene(name) => self
-				.scenes
-				.iter_mut()
-				.find(|scene| &scene.name == name)
-				.map(|scene| &mut scene.items),
-			Layer::Top => Some(&mut self.top),
+	/// The items of `layer`, or `None` for a scene or canvas that does not
+	/// exist. A scene with no layout on a further canvas has none there.
+	pub fn items(&self, layer: &Layer) -> Option<&[Item]> {
+		match (&layer.canvas, &layer.scene) {
+			(None, Some(scene)) => self.scene(scene).map(|scene| scene.items.as_slice()),
+			(None, None) => Some(&self.top),
+			(Some(canvas), scene) => {
+				let extra = self.canvases.get(canvas)?;
+				match scene {
+					Some(scene) => {
+						let layout = self.scene(scene)?.canvases.get(canvas);
+						Some(layout.map_or(&[], Vec::as_slice))
+					}
+					None => Some(&extra.top),
+				}
+			}
 		}
 	}
 
-	/// Every layer: the scenes in order, then the top layer.
+	/// Run `edit` on the items of `layer`, or return `None` for a scene or
+	/// canvas that does not exist. A scene's layout on a further canvas is
+	/// kept only while it holds items, so a scene has one way to say it has
+	/// none there, as [`validate`](Self::validate) requires.
+	pub(crate) fn edit_items<T>(&mut self, layer: &Layer, edit: impl FnOnce(&mut Vec<Item>) -> T) -> Option<T> {
+		if let Some(canvas) = &layer.canvas
+			&& !self.canvases.contains_key(canvas)
+		{
+			return None;
+		}
+		match (&layer.canvas, &layer.scene) {
+			(None, None) => Some(edit(&mut self.top)),
+			(Some(canvas), None) => self.canvases.get_mut(canvas).map(|extra| edit(&mut extra.top)),
+			(canvas, Some(name)) => {
+				let scene = self.scenes.iter_mut().find(|scene| &scene.name == name)?;
+				let Some(canvas) = canvas else {
+					return Some(edit(&mut scene.items));
+				};
+				let mut layout = scene.canvases.remove(canvas).unwrap_or_default();
+				let edited = edit(&mut layout);
+				if !layout.is_empty() {
+					scene.canvases.insert(canvas.clone(), layout);
+				}
+				Some(edited)
+			}
+		}
+	}
+
+	/// Every layer: the main canvas's scenes in order, then its top layer,
+	/// then each further canvas's the same way.
 	pub fn layers(&self) -> impl Iterator<Item = (Layer, &[Item])> {
-		let scenes = self
-			.scenes
+		let extras = self
+			.canvases
 			.iter()
-			.map(|scene| (Layer::Scene(scene.name.clone()), scene.items.as_slice()));
-		scenes.chain(std::iter::once((Layer::Top, self.top.as_slice())))
+			.map(|(name, extra)| (Some(name), extra.top.as_slice()));
+		let canvases = std::iter::once((None, self.top.as_slice())).chain(extras);
+		canvases.flat_map(move |(canvas, top)| {
+			let scenes = self.scenes.iter().map(move |scene| {
+				let items = match canvas {
+					None => scene.items.as_slice(),
+					Some(name) => scene.canvases.get(name).map_or(&[][..], Vec::as_slice),
+				};
+				(Some(scene.name.clone()), items)
+			});
+			scenes.chain([(None, top)]).map(move |(scene, items)| {
+				let layer = Layer {
+					canvas: canvas.cloned(),
+					scene,
+				};
+				(layer, items)
+			})
+		})
 	}
 
 	/// The source whose capture `name` shows: itself, or what it clones.
@@ -147,6 +209,17 @@ impl Collection {
 	/// source of the kind it reads.
 	pub fn validate(&self) -> Result<(), Error> {
 		self.canvas.validate()?;
+		for (name, extra) in &self.canvases {
+			if name.is_empty() || name.contains('/') {
+				return Err(Error::Invalid(format!(
+					"canvas `{name}` must be named, without a `/`, since its name names its broadcast"
+				)));
+			}
+			extra
+				.canvas(self.canvas.framerate)
+				.validate()
+				.map_err(|err| Error::Invalid(format!("canvas `{name}`: {err}")))?;
+		}
 
 		let mut names = BTreeSet::new();
 		for scene in &self.scenes {
@@ -155,6 +228,24 @@ impl Collection {
 			}
 			if !names.insert(scene.name.as_str()) {
 				return Err(Error::Invalid(format!("two scenes are named `{}`", scene.name)));
+			}
+			if let Some(canvas) = scene
+				.canvases
+				.keys()
+				.find(|canvas| !self.canvases.contains_key(*canvas))
+			{
+				return Err(Error::Invalid(format!(
+					"scene `{}` has a layout on `{canvas}`, which is not a canvas",
+					scene.name
+				)));
+			}
+			// One way to say a scene shows nothing there, so an edit snapshotting
+			// the scene and one emptying the layout agree on what it holds.
+			if let Some((canvas, _)) = scene.canvases.iter().find(|(_, items)| items.is_empty()) {
+				return Err(Error::Invalid(format!(
+					"scene `{}` has an empty layout on `{canvas}`; leave it out instead",
+					scene.name
+				)));
 			}
 		}
 		for (layer, items) in self.layers() {
@@ -177,6 +268,19 @@ impl Collection {
 					.validate()
 					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 				self.validate_chain(&item.filters, &on)?;
+				if layer.scene.is_none() && !item.keyframes.is_empty() {
+					return Err(Error::Invalid(format!(
+						"{on} has keyframes, but the top layer never goes on to start them"
+					)));
+				}
+				if !item.keyframes.is_sorted_by_key(|keyframe| keyframe.at) {
+					return Err(Error::Invalid(format!("{on} has keyframes out of order")));
+				}
+				for keyframe in &item.keyframes {
+					keyframe
+						.validate()
+						.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
+				}
 			}
 		}
 
@@ -346,6 +450,41 @@ impl Default for Canvas {
 	}
 }
 
+/// A canvas beside the main one: its size, and the items drawn over every
+/// scene on it. Each scene's layout on it is the scene's own
+/// [`Scene::canvases`] entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Extra {
+	/// Width in pixels. Even, since the encoder subsamples chroma.
+	pub width: u32,
+	/// Height in pixels. Even, since the encoder subsamples chroma.
+	pub height: u32,
+	/// Its top layer, as [`Collection::top`] is the main canvas's.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub top: Vec<Item>,
+}
+
+impl Extra {
+	/// An empty canvas of `width` by `height`.
+	pub fn new(width: u32, height: u32) -> Self {
+		Self {
+			width,
+			height,
+			top: Vec::new(),
+		}
+	}
+
+	/// This canvas drawn `framerate` times a second.
+	pub fn canvas(&self, framerate: u32) -> Canvas {
+		Canvas {
+			width: self.width,
+			height: self.height,
+			framerate,
+		}
+	}
+}
+
 /// How the program changes when the preview is taken to it, short of a cut.
 ///
 /// A fade runs at an even pace; the others ease in and out, so motion starts
@@ -411,13 +550,47 @@ impl Transition {
 	/// How far along it looks once `linear` of its time has passed, both from
 	/// 0 to 1: as is for a fade, and eased in and out otherwise.
 	pub(crate) fn progress(&self, linear: f32) -> f32 {
+		match self {
+			Self::Fade { .. } => Ease::Linear.apply(linear),
+			_ => Ease::InOut.apply(linear),
+		}
+	}
+}
+
+/// How a change speeds up and slows down over its time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ease {
+	/// At an even pace.
+	Linear,
+	/// Starting slowly (cubic).
+	In,
+	/// Landing slowly (cubic).
+	Out,
+	/// Starting and landing slowly (cubic).
+	#[default]
+	InOut,
+}
+
+impl Ease {
+	/// Every curve.
+	pub const ALL: [Self; 4] = [Self::Linear, Self::In, Self::Out, Self::InOut];
+
+	/// How far along the change looks once `linear` of its time has passed,
+	/// both from 0 to 1.
+	pub(crate) fn apply(self, linear: f32) -> f32 {
 		let linear = linear.clamp(0.0, 1.0);
 		match self {
-			Self::Fade { .. } => linear,
-			// The cubic ease in and out.
-			_ if linear < 0.5 => 4.0 * linear.powi(3),
-			_ => 1.0 - (2.0 - 2.0 * linear).powi(3) / 2.0,
+			Self::Linear => linear,
+			Self::In => linear.powi(3),
+			Self::Out => 1.0 - (1.0 - linear).powi(3),
+			Self::InOut if linear < 0.5 => 4.0 * linear.powi(3),
+			Self::InOut => 1.0 - (2.0 - 2.0 * linear).powi(3) / 2.0,
 		}
+	}
+
+	fn is_default(&self) -> bool {
+		*self == Self::default()
 	}
 }
 
@@ -454,9 +627,13 @@ impl Direction {
 pub struct Scene {
 	/// Unique among the collection's scenes.
 	pub name: String,
-	/// What the scene draws, back to front.
+	/// What the scene draws on the main canvas, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
+	/// What the scene draws on each further canvas, by the canvas's name, back
+	/// to front. A canvas without an entry shows only its top layer.
+	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+	pub canvases: BTreeMap<String, Vec<Item>>,
 }
 
 impl Scene {
@@ -465,25 +642,53 @@ impl Scene {
 		Self {
 			name: name.into(),
 			items: Vec::new(),
+			canvases: BTreeMap::new(),
 		}
 	}
 }
 
-/// Where a list of items lives: a scene, or the top layer over every scene.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Layer {
-	/// The scene with this name.
-	Scene(String),
-	/// [`Collection::top`].
-	Top,
+/// Where a list of items lives: a scene's layout, or the top layer over every
+/// scene, on one canvas.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layer {
+	/// A further canvas by name, or `None` for the main canvas.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub canvas: Option<String>,
+	/// The scene, or `None` for the canvas's top layer.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub scene: Option<String>,
+}
+
+impl Layer {
+	/// The scene called `name`, on the main canvas.
+	pub fn scene(name: impl Into<String>) -> Self {
+		Self {
+			canvas: None,
+			scene: Some(name.into()),
+		}
+	}
+
+	/// The main canvas's top layer.
+	pub fn top() -> Self {
+		Self::default()
+	}
+
+	/// The same layer on `canvas` instead.
+	pub fn on(self, canvas: Option<String>) -> Self {
+		Self { canvas, ..self }
+	}
 }
 
 impl fmt::Display for Layer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Scene(name) => write!(f, "scene `{name}`"),
-			Self::Top => write!(f, "the top layer"),
+		match &self.scene {
+			Some(name) => write!(f, "scene `{name}`")?,
+			None => write!(f, "the top layer")?,
+		}
+		match &self.canvas {
+			Some(canvas) => write!(f, " on canvas `{canvas}`"),
+			None => Ok(()),
 		}
 	}
 }
@@ -512,10 +717,16 @@ pub struct Item {
 	/// How the filtered picture mixes with what is under it.
 	#[serde(default, skip_serializing_if = "Blend::is_normal")]
 	pub blend: Blend,
+	/// How the item moves away from and back to where it rests, from when its
+	/// scene goes on, in order of time. It plays once: before the first
+	/// keyframe the item holds that one, and after the last it holds the last.
+	/// A top-layer item has none, since the top layer never goes on.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub keyframes: Vec<Keyframe>,
 }
 
 impl Item {
-	/// `source` shown, uncropped and unfiltered, at `rect`.
+	/// `source` shown, uncropped, unfiltered, and still, at `rect`.
 	pub fn new(source: impl Into<String>, rect: Rect) -> Self {
 		Self {
 			source: source.into(),
@@ -524,8 +735,156 @@ impl Item {
 			crop: Crop::default(),
 			filters: Vec::new(),
 			blend: Blend::Normal,
+			keyframes: Vec::new(),
 		}
 	}
+
+	/// The item as it is drawn `since` its scene went on: moved, resized,
+	/// cropped, and filtered by its keyframes, which the result has none of.
+	pub fn posed(&self, since: Duration) -> Cow<'_, Self> {
+		let Some(offset) = self.offset(since) else {
+			return Cow::Borrowed(self);
+		};
+		let mut filters = self.filters.clone();
+		filters.extend(offset.filters);
+		Cow::Owned(Self {
+			source: self.source.clone(),
+			rect: Rect {
+				x: self.rect.x + offset.x,
+				y: self.rect.y + offset.y,
+				// A size shrunk past nothing draws nothing.
+				width: (self.rect.width + offset.width).max(0.0),
+				height: (self.rect.height + offset.height).max(0.0),
+			},
+			visible: self.visible,
+			crop: self.crop.then(&offset.crop),
+			filters,
+			blend: self.blend,
+			keyframes: Vec::new(),
+		})
+	}
+
+	/// Where `since` falls among the keyframes, so two times that settle the
+	/// same pose the item the same.
+	pub(crate) fn settled(&self, since: Duration) -> Settled {
+		match (self.keyframes.first(), self.keyframes.last()) {
+			(Some(first), _) if since < first.at => Settled::Before,
+			(Some(_), Some(last)) if since < last.at => Settled::At(since),
+			_ => Settled::After,
+		}
+	}
+
+	/// How far the keyframes take the item from where it rests `since` its
+	/// scene went on, or `None` if it has none.
+	fn offset(&self, since: Duration) -> Option<Keyframe> {
+		let next = self.keyframes.iter().position(|keyframe| keyframe.at > since);
+		let (from, to) = match next {
+			None => return self.keyframes.last().cloned(),
+			Some(0) => return self.keyframes.first().cloned(),
+			Some(next) => (&self.keyframes[next - 1], &self.keyframes[next]),
+		};
+		// `to` is later than `since`, and `from` no later, so the span is not empty.
+		let linear = (since - from.at).as_secs_f32() / (to.at - from.at).as_secs_f32();
+		Some(from.toward(to, to.ease.apply(linear)))
+	}
+}
+
+/// Where a moment falls among an item's keyframes: holding the first, between
+/// two at that moment, or holding the last. Keyframes at the same moment jump,
+/// so the first keyframe's moment is not the same as before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Settled {
+	Before,
+	At(Duration),
+	After,
+}
+
+/// Where an item is at a moment after its scene goes on, as an offset from
+/// where it rests, so moving the item moves its whole animation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Keyframe {
+	/// How long after the item's scene goes on.
+	#[serde(with = "humantime_serde")]
+	pub at: Duration,
+	/// How the item eases into this keyframe from the one before.
+	#[serde(default, skip_serializing_if = "Ease::is_default")]
+	pub ease: Ease,
+	/// Canvas pixels added to the item's left edge.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub x: f32,
+	/// Canvas pixels added to the item's top edge.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub y: f32,
+	/// Canvas pixels added to the item's width.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub width: f32,
+	/// Canvas pixels added to the item's height.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub height: f32,
+	/// Trimmed from what the item's crop leaves, as a push-in does.
+	#[serde(default, skip_serializing_if = "Crop::is_none")]
+	pub crop: Crop,
+	/// Applied after the item's own. Each one's settings mix into the next
+	/// keyframe's when the two lists pair up by kind, in order, and otherwise
+	/// change halfway. None reads another source.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub filters: Vec<Filter>,
+}
+
+impl Keyframe {
+	/// The item where it rests, `at` after its scene goes on.
+	pub fn new(at: Duration) -> Self {
+		Self {
+			at,
+			ease: Ease::default(),
+			x: 0.0,
+			y: 0.0,
+			width: 0.0,
+			height: 0.0,
+			crop: Crop::default(),
+			filters: Vec::new(),
+		}
+	}
+
+	/// `progress` of the way from this keyframe's offset to `to`'s.
+	fn toward(&self, to: &Self, progress: f32) -> Self {
+		let mix = |from: f32, to: f32| mix(from, to, progress);
+		let paired = self.filters.len() == to.filters.len();
+		let pairs = self.filters.iter().zip(&to.filters);
+		let filters = paired.then(|| pairs.map(|(from, to)| from.toward(to, progress)).collect());
+		Self {
+			at: to.at,
+			ease: to.ease,
+			x: mix(self.x, to.x),
+			y: mix(self.y, to.y),
+			width: mix(self.width, to.width),
+			height: mix(self.height, to.height),
+			crop: self.crop.toward(&to.crop, progress),
+			filters: filters
+				.flatten()
+				.unwrap_or_else(|| if progress < 0.5 { &self.filters } else { &to.filters }.clone()),
+		}
+	}
+
+	fn validate(&self) -> Result<(), String> {
+		let offsets = [self.x, self.y, self.width, self.height];
+		if !offsets.iter().all(|offset| offset.is_finite()) {
+			return Err(format!("a keyframe at {:?} offsets by {offsets:?}", self.at));
+		}
+		self.crop.validate()?;
+		if let Some(source) = self.filters.iter().find_map(Filter::source) {
+			return Err(format!(
+				"a keyframe at {:?} has a filter reading `{source}`; a keyframe's filters read no other source",
+				self.at
+			));
+		}
+		self.filters.iter().try_for_each(Filter::validate)
+	}
+}
+
+fn is_zero(value: &f32) -> bool {
+	*value == 0.0
 }
 
 fn visible() -> bool {
@@ -899,6 +1258,18 @@ impl Crop {
 		}
 	}
 
+	/// `progress` of the way from this crop to `other`, which a mix of two
+	/// valid crops is.
+	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Self {
+		let mix = |from: f32, to: f32| mix(from, to, progress);
+		Self {
+			left: mix(self.left, other.left),
+			top: mix(self.top, other.top),
+			right: mix(self.right, other.right),
+			bottom: mix(self.bottom, other.bottom),
+		}
+	}
+
 	fn validate(&self) -> Result<(), String> {
 		let edges = [self.left, self.top, self.right, self.bottom];
 		if edges.iter().any(|edge| !(0.0..1.0).contains(edge))
@@ -1014,6 +1385,20 @@ pub enum Source {
 		/// The file, relative to the scene file's directory unless absolute.
 		path: PathBuf,
 	},
+	/// A video or audio file, such as an intro clip or a music bed, played on
+	/// the program clock from its start, and again whenever
+	/// [`Feed::play`](crate::source::Feed::play) asks.
+	Media {
+		/// The file, relative to the scene file's directory unless absolute.
+		path: PathBuf,
+		/// Whether it starts over at its end, rather than holding its last
+		/// picture and going silent.
+		#[serde(default, rename = "loop", skip_serializing_if = "std::ops::Not::not")]
+		looping: bool,
+		/// Whether it plays from its start each time it goes on program.
+		#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+		restart: bool,
+	},
 	/// A solid color.
 	Color {
 		/// The color, as `#rrggbb` or `#rrggbbaa`.
@@ -1074,10 +1459,10 @@ impl Source {
 		!matches!(self, Self::Microphone { .. } | Self::SystemAudio | Self::Lut { .. })
 	}
 
-	/// The file an image or LUT source reads.
+	/// The file an image, media, or LUT source reads.
 	pub(crate) fn path(&self) -> Option<&std::path::Path> {
 		match self {
-			Self::Image { path } | Self::Lut { path } => Some(path),
+			Self::Image { path } | Self::Media { path, .. } | Self::Lut { path } => Some(path),
 			_ => None,
 		}
 	}
@@ -1085,7 +1470,7 @@ impl Source {
 	/// The file the source reads, to resolve or relativize it.
 	pub(crate) fn path_mut(&mut self) -> Option<&mut PathBuf> {
 		match self {
-			Self::Image { path } | Self::Lut { path } => Some(path),
+			Self::Image { path } | Self::Media { path, .. } | Self::Lut { path } => Some(path),
 			_ => None,
 		}
 	}
@@ -1100,7 +1485,12 @@ impl Source {
 	pub fn has_audio(&self) -> bool {
 		matches!(
 			self,
-			Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. } | Self::Browser { .. } | Self::Replay
+			Self::Microphone { .. }
+				| Self::SystemAudio
+				| Self::Media { .. }
+				| Self::Broadcast { .. }
+				| Self::Browser { .. }
+				| Self::Replay
 		)
 	}
 
@@ -1285,6 +1675,14 @@ mod tests {
 			},
 		);
 		collection.sources.insert(
+			"intro".into(),
+			Source::Media {
+				path: "intro.mkv".into(),
+				looping: false,
+				restart: true,
+			},
+		);
+		collection.sources.insert(
 			"chat".into(),
 			Source::Browser {
 				url: "https://example.com/chat".into(),
@@ -1337,6 +1735,22 @@ mod tests {
 				..Crop::default()
 			},
 			blend: Blend::Screen,
+			keyframes: vec![
+				Keyframe {
+					x: -740.0,
+					crop: Crop {
+						right: 0.5,
+						..Crop::default()
+					},
+					filters: vec![Filter::Blur { radius: 8.0 }],
+					..Keyframe::new(Duration::ZERO)
+				},
+				Keyframe {
+					ease: Ease::Out,
+					filters: vec![Filter::Blur { radius: 0.0 }],
+					..Keyframe::new(Duration::from_millis(400))
+				},
+			],
 			..Item::new("camera", rect)
 		});
 		collection
@@ -1402,7 +1816,10 @@ path = "grade.cube"
 name = "Main"
 items = [
 	{ source = "bg", rect = { x = 0, y = 0, width = 1280, height = 720 } },
-	{ source = "cam", rect = { x = 10, y = 10, width = 320, height = 180 }, visible = false },
+	{ source = "cam", rect = { x = 10, y = 10, width = 320, height = 180 }, visible = false, keyframes = [
+		{ at = "0s", x = -330, crop = { left = 0.2 }, filters = [{ kind = "opacity", amount = 0 }] },
+		{ at = "1.5s", ease = "out", filters = [{ kind = "opacity", amount = 1 }] },
+	] },
 	{ source = "cam-faded", rect = { x = 0, y = 0, width = 640, height = 360 }, filters = [{ kind = "opacity", amount = 0.8 }] },
 	{ source = "cam", rect = { x = 0, y = 0, width = 640, height = 360 }, crop = { left = 0.1, right = 0.1 }, blend = "soft_light", filters = [
 		{ kind = "chroma_key", color = "#00ff00", similarity = 0.4, smoothness = 0.08, spill = 0.1 },
@@ -1446,6 +1863,25 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		let main = collection.scene("Main").unwrap();
 		assert!(main.items[0].visible);
 		assert!(!main.items[1].visible);
+		assert_eq!(
+			main.items[1].keyframes,
+			[
+				Keyframe {
+					x: -330.0,
+					crop: Crop {
+						left: 0.2,
+						..Crop::default()
+					},
+					filters: vec![Filter::Opacity { amount: 0.0 }],
+					..Keyframe::new(Duration::ZERO)
+				},
+				Keyframe {
+					ease: Ease::Out,
+					filters: vec![Filter::Opacity { amount: 1.0 }],
+					..Keyframe::new(Duration::from_millis(1500))
+				},
+			]
+		);
 		assert_eq!(collection.capture("cam-faded"), "cam");
 		let filters: Vec<_> = collection.filters(&main.items[2]).collect();
 		assert_eq!(
@@ -1581,7 +2017,16 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		collection.validate().unwrap();
 		collection.top.push(Item::new("grade", Rect::fill(&collection.canvas)));
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
-		for source in [Source::Lut { path: "".into() }, Source::Image { path: "".into() }] {
+		let media = Source::Media {
+			path: "".into(),
+			looping: true,
+			restart: false,
+		};
+		for source in [
+			Source::Lut { path: "".into() },
+			Source::Image { path: "".into() },
+			media,
+		] {
 			let mut collection = example();
 			collection.sources.insert("blank".into(), source.clone());
 			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{source:?}");
@@ -1735,11 +2180,207 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		assert_eq!(Crop::default().then(&item), item);
 	}
 
+	/// An item with keyframes `keyframes`, resting at (100, 50), 200x100.
+	fn animated(keyframes: Vec<Keyframe>) -> Item {
+		let rect = Rect {
+			x: 100.0,
+			y: 50.0,
+			width: 200.0,
+			height: 100.0,
+		};
+		Item {
+			filters: vec![Filter::Grayscale { amount: 1.0 }],
+			keyframes,
+			..Item::new("camera", rect)
+		}
+	}
+
+	/// Keyframes offset the item from where it rests, ease between each other,
+	/// and hold the first before it and the last after it.
+	#[test]
+	fn keyframes_offset_the_item_and_hold_at_the_ends() {
+		let item = animated(vec![
+			Keyframe {
+				x: -300.0,
+				width: -250.0,
+				crop: Crop {
+					left: 0.5,
+					..Crop::default()
+				},
+				filters: vec![Filter::Opacity { amount: 0.0 }],
+				..Keyframe::new(Duration::from_secs(1))
+			},
+			Keyframe {
+				ease: Ease::Linear,
+				filters: vec![Filter::Opacity { amount: 1.0 }],
+				..Keyframe::new(Duration::from_secs(2))
+			},
+		]);
+		let at = |millis| item.posed(Duration::from_millis(millis)).into_owned();
+
+		let first = at(0);
+		assert_eq!(first, at(1000), "held before the first keyframe");
+		assert_eq!(first.rect.x, -200.0);
+		assert_eq!(first.rect.width, 0.0, "a size shrunk past nothing is nothing");
+		assert_eq!(first.crop.left, 0.5);
+		assert_eq!(
+			first.filters,
+			[Filter::Grayscale { amount: 1.0 }, Filter::Opacity { amount: 0.0 }],
+			"after the item's own"
+		);
+		assert!(first.keyframes.is_empty());
+
+		let half = at(1500);
+		assert_eq!(half.rect.x, -50.0);
+		assert_eq!(half.rect.width, 75.0);
+		assert_eq!(half.crop.left, 0.25);
+		assert_eq!(half.filters[1], Filter::Opacity { amount: 0.5 });
+
+		let last = at(5000);
+		assert_eq!(last, at(2000), "held after the last keyframe");
+		assert_eq!(last.rect, item.rect);
+		assert_eq!(item.settled(Duration::from_secs(5)), Settled::After);
+		assert_eq!(item.settled(Duration::from_secs(2)), Settled::After);
+		assert_eq!(item.settled(Duration::ZERO), Settled::Before);
+		assert_eq!(
+			item.settled(Duration::from_secs(1)),
+			Settled::At(Duration::from_secs(1))
+		);
+
+		let still = Item::new("camera", item.rect);
+		assert!(matches!(still.posed(Duration::from_secs(1)), Cow::Borrowed(_)));
+	}
+
+	/// Keyframes at the same moment jump there, so the moment itself poses the
+	/// item as the later one, and before it as the earlier one.
+	#[test]
+	fn keyframes_at_one_moment_jump() {
+		let at = Duration::from_secs(1);
+		let item = animated(vec![
+			Keyframe {
+				x: -300.0,
+				..Keyframe::new(at)
+			},
+			Keyframe::new(at),
+		]);
+		assert_eq!(item.posed(Duration::ZERO).rect.x, -200.0);
+		assert_eq!(item.posed(at).rect.x, 100.0);
+		assert_ne!(item.settled(Duration::ZERO), item.settled(at));
+	}
+
+	#[test]
+	fn eases_start_and_land_slowly() {
+		assert_eq!(Ease::Linear.apply(0.5), 0.5);
+		assert_eq!(Ease::In.apply(0.5), 0.125);
+		assert_eq!(Ease::Out.apply(0.5), 0.875);
+		assert_eq!(Ease::InOut.apply(0.25), 0.0625);
+		assert_eq!(Ease::InOut.apply(0.5), 0.5);
+		for ease in Ease::ALL {
+			assert_eq!((ease.apply(-1.0), ease.apply(2.0)), (0.0, 1.0), "{ease:?}");
+		}
+	}
+
+	/// Filters that do not pair up by kind change halfway rather than mixing.
+	#[test]
+	fn unpaired_keyframe_filters_change_halfway() {
+		let item = animated(vec![
+			Keyframe {
+				filters: vec![Filter::Sepia { amount: 1.0 }],
+				..Keyframe::new(Duration::ZERO)
+			},
+			Keyframe {
+				ease: Ease::Linear,
+				filters: vec![Filter::Invert { amount: 1.0 }],
+				..Keyframe::new(Duration::from_secs(1))
+			},
+		]);
+		let filters = |millis| item.posed(Duration::from_millis(millis)).filters[1].clone();
+		assert_eq!(filters(499), Filter::Sepia { amount: 1.0 });
+		assert_eq!(filters(500), Filter::Invert { amount: 1.0 });
+	}
+
+	#[test]
+	fn refuses_keyframes_it_cannot_play() {
+		let at = |millis| Keyframe::new(Duration::from_millis(millis));
+		let cases = [
+			vec![at(500), at(100)],
+			vec![Keyframe { x: f32::NAN, ..at(0) }],
+			vec![Keyframe {
+				crop: Crop {
+					left: 0.6,
+					right: 0.6,
+					..Crop::default()
+				},
+				..at(0)
+			}],
+			vec![Keyframe {
+				filters: vec![Filter::Opacity { amount: 2.0 }],
+				..at(0)
+			}],
+			vec![Keyframe {
+				filters: vec![Filter::Lut {
+					source: "grade".into(),
+					amount: 1.0,
+				}],
+				..at(0)
+			}],
+		];
+		for keyframes in cases {
+			let mut collection = example();
+			collection.sources.insert(
+				"grade".into(),
+				Source::Lut {
+					path: "grade.cube".into(),
+				},
+			);
+			collection.scenes[0].items[0].keyframes = keyframes.clone();
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{keyframes:?}");
+		}
+
+		let mut collection = example();
+		collection.top[0].keyframes = vec![at(0)];
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "the top layer");
+		// The same moment twice jumps.
+		collection.top[0].keyframes.clear();
+		collection.scenes[0].items[0].keyframes = vec![at(100), at(100)];
+		collection.validate().unwrap();
+	}
+
 	#[test]
 	fn refuses_duplicate_scenes() {
 		let mut collection = example();
 		collection.scenes.push(Scene::new("Scene"));
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+	}
+
+	/// A further canvas is named as a path segment, since it names its
+	/// broadcast, is a size the encoder can take, and is the only canvas a
+	/// scene lays items out on.
+	#[test]
+	fn refuses_a_further_canvas_that_cannot_be() {
+		for (name, width) in [("", 1080), ("a/b", 1080), ("tall", 1081)] {
+			let mut collection = example();
+			collection.canvases.insert(name.into(), Extra::new(width, 1920));
+			assert!(
+				matches!(collection.validate(), Err(Error::Invalid(_))),
+				"{name} {width}"
+			);
+		}
+		let mut collection = example();
+		let item = Item::new("camera", Rect::fill(&collection.canvas));
+		collection.scenes[0].canvases.insert("tall".into(), vec![item]);
+		assert!(
+			matches!(collection.validate(), Err(Error::Invalid(_))),
+			"no such canvas"
+		);
+		collection.canvases.insert("tall".into(), Extra::new(1080, 1920));
+		collection.validate().unwrap();
+		// Leaving a layout out is the one way to say a scene shows nothing there.
+		collection.scenes[0].canvases.insert("tall".into(), Vec::new());
+		assert!(
+			matches!(collection.validate(), Err(Error::Invalid(_))),
+			"an empty layout"
+		);
 	}
 
 	#[test]

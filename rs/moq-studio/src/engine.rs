@@ -23,7 +23,7 @@
 //!   edits to them settle, and takes or holds an outside edit to the scene file.
 //! - The UI runs on the main thread and edits [`State`] under its lock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -34,7 +34,7 @@ use bytes::Bytes;
 use kio::clock::Instant;
 use moq_net::bandwidth;
 use moq_scene::publish::{Encoding, Sessions};
-use moq_scene::source::{self, Driver, Sources};
+use moq_scene::source::{self, Driver, Sources, Status};
 use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
 use tokio::sync::oneshot::error::TryRecvError;
@@ -195,13 +195,42 @@ impl State {
 			before.apply(edit)?;
 		}
 		keep_on_air(self.compositor.on_air(), &renames)?;
-		self.compositor.set_canvas(collection.canvas)?;
+		self.compositor.set_canvases(&collection)?;
 		for renames in &renames {
 			self.compositor.rename(renames);
 		}
 		self.compositor.retain(&collection);
 		self.collection = collection;
 		Ok(())
+	}
+
+	/// The sources whose pictures any canvas's program draws, through clones:
+	/// each visible item's of the scenes on air, including one leaving in a
+	/// transition, and of the top layers over them, and each mask's it reads.
+	fn shown(&self) -> BTreeSet<String> {
+		let collection = &self.collection;
+		let scenes: Vec<Option<&str>> = self.compositor.on_air().map(Some).chain([None]).collect();
+		let canvases = std::iter::once(None).chain(collection.canvases.keys().map(Some));
+		let items = canvases
+			.flat_map(|canvas| {
+				scenes.iter().map(move |scene| moq_scene::Layer {
+					canvas: canvas.cloned(),
+					scene: scene.map(str::to_string),
+				})
+			})
+			.flat_map(|layer| collection.items(&layer).unwrap_or_default())
+			.filter(|item| item.visible);
+		// A mask's picture shapes what the program draws too.
+		let masks = |item| {
+			collection.filters(item).filter_map(|filter| match filter {
+				moq_scene::Filter::Mask { source, .. } => Some(source),
+				_ => None,
+			})
+		};
+		items
+			.flat_map(|item| std::iter::once(&item.source).chain(masks(item)))
+			.map(|source| collection.capture(source).to_string())
+			.collect()
 	}
 
 	/// Restart the source called `name`, as an edit would, such as to reload a
@@ -267,8 +296,28 @@ fn keep_on_air<'a>(
 pub struct Stats {
 	/// Canvas frames drawn.
 	pub rendered: AtomicU64,
-	/// What each of the program's video encoders costs: the canvas size, the
-	/// half size, and the recording's own canvas size.
+	/// The main canvas's program video.
+	pub video: Arc<VideoStats>,
+	/// Each further canvas's program video, by the canvas's name, while it is
+	/// drawn.
+	canvases: Mutex<BTreeMap<String, Arc<VideoStats>>>,
+	/// The video encoders open: every canvas's program and the sources'.
+	pub sessions: Sessions,
+	/// Each program track's share of the connection's bandwidth, by name: a
+	/// further canvas's prefixed with its own.
+	grants: Mutex<BTreeMap<String, bandwidth::Consumer>>,
+	/// Why the audio stopped, if it did.
+	audio_error: Mutex<Option<String>>,
+	/// Why the recording's audio stopped, if it did, which leaves the published
+	/// audio running.
+	recording_audio_error: Mutex<Option<String>>,
+}
+
+/// How one canvas's program video is doing.
+#[derive(Default)]
+pub struct VideoStats {
+	/// What each of its video encoders costs: the canvas size, the half size,
+	/// and, for the main canvas, the recording's own canvas size.
 	pub renditions: [Load; 3],
 	/// Whether the encoder reads the program on the GPU, rather than each frame
 	/// being read back to the CPU.
@@ -280,22 +329,13 @@ pub struct Stats {
 	/// while on demand and unwatched, nor while a new rendition opens, nor
 	/// while the grant cannot fund it.
 	pub encoding: AtomicBool,
-	/// The video encoders open, the program's and the sources'.
-	pub sessions: Sessions,
-	/// How many sizes the program's video has now: the canvas size, and the
-	/// half size unless the canvas is too small or its encoder refused it.
+	/// How many sizes the video has now: the canvas size, and the half size
+	/// unless the canvas is too small or its encoder refused it.
 	pub sizes: std::sync::atomic::AtomicUsize,
-	/// Each program track's share of the connection's bandwidth, by name.
-	grants: Mutex<BTreeMap<String, bandwidth::Consumer>>,
-	/// The encoder backend, once the program's current rendition opened one.
+	/// The encoder backend, once the current rendition opened one.
 	encoder: Mutex<EncoderName>,
 	/// Why the video stopped, if it did, until a new rendition starts.
-	video_error: Mutex<Option<String>>,
-	/// Why the audio stopped, if it did.
-	audio_error: Mutex<Option<String>>,
-	/// Why the recording's audio stopped, if it did, which leaves the published
-	/// audio running.
-	recording_audio_error: Mutex<Option<String>>,
+	error: Mutex<Option<String>>,
 }
 
 /// What one of the program's renditions costs.
@@ -316,7 +356,7 @@ pub struct Load {
 	pub encode_us: AtomicU64,
 	/// Why this encoder stopped, or could not start, while the canvas size
 	/// carries on, until the next canvas. The canvas size's own failure stops
-	/// the video, which [`Stats::error`] reports.
+	/// the video, which [`VideoStats::error`] reports.
 	error: Mutex<Option<String>>,
 }
 
@@ -332,23 +372,23 @@ impl Load {
 	}
 }
 
-/// The encoder backend the program's current rendition opened, if it has.
+/// The encoder backend the current rendition opened, if it has.
 #[derive(Default)]
 struct EncoderName {
-	/// Counts the program's renditions, so one a resize retired while its
-	/// encoder was still opening cannot report that encoder afterwards.
+	/// Counts the renditions, so one a resize retired while its encoder was
+	/// still opening cannot report that encoder afterwards.
 	rendition: u64,
 	name: Option<String>,
 }
 
-impl Stats {
-	/// The encoder backend, once the program's current rendition opened one.
+impl VideoStats {
+	/// The encoder backend, once the current rendition opened one.
 	pub fn encoder(&self) -> Option<String> {
 		self.encoder.lock().unwrap().name.clone()
 	}
 
-	/// The number of the program's current rendition, which its encode thread
-	/// reports its encoder under.
+	/// The number of the current rendition, which its encode thread reports
+	/// its encoder under.
 	fn rendition(&self) -> u64 {
 		self.encoder.lock().unwrap().rendition
 	}
@@ -361,12 +401,29 @@ impl Stats {
 		encoder.name = None;
 	}
 
-	/// Report `name` as the program's encoder, unless `rendition` was retired.
+	/// Report `name` as the encoder, unless `rendition` was retired.
 	fn opened_encoder(&self, rendition: u64, name: &str) {
 		let mut encoder = self.encoder.lock().unwrap();
 		if encoder.rendition == rendition {
 			encoder.name = Some(name.to_string());
 		}
+	}
+
+	/// Why the video stopped, if it did.
+	pub fn error(&self) -> Option<String> {
+		self.error.lock().unwrap().clone()
+	}
+
+	fn fail(&self, err: impl std::fmt::Display) {
+		tracing::error!(%err, "video stopped");
+		*self.error.lock().unwrap() = Some(format!("video: {err}"));
+	}
+}
+
+impl Stats {
+	/// Each further canvas's program video, by the canvas's name.
+	pub fn canvases(&self) -> BTreeMap<String, Arc<VideoStats>> {
+		self.canvases.lock().unwrap().clone()
 	}
 
 	/// Each program track's share of the connection's bandwidth now, by name:
@@ -379,19 +436,14 @@ impl Stats {
 			.collect()
 	}
 
-	/// Why the output stopped, if it did.
+	/// Why the main canvas's output stopped, if it did.
 	pub fn error(&self) -> Option<String> {
-		let video = self.video_error.lock().unwrap().clone();
+		let video = self.video.error();
 		let audio = self.audio_error.lock().unwrap().clone();
 		match (video, audio) {
 			(Some(video), Some(audio)) => Some(format!("{video}; {audio}")),
 			(video, audio) => video.or(audio),
 		}
-	}
-
-	fn fail_video(&self, err: impl std::fmt::Display) {
-		tracing::error!(%err, "video stopped");
-		*self.video_error.lock().unwrap() = Some(format!("video: {err}"));
 	}
 
 	/// The recording's audio encoder failed, which stops what recordings hold but
@@ -535,30 +587,20 @@ impl Program {
 		}
 	}
 
-	/// Encode the local sources on program, from `state`, whether or not
-	/// anything reads their tracks, so a replay of one has its past: those a
-	/// scene on air shows, and the microphones and system audio the program
-	/// mix plays. A replay source's track is its pictures, so being heard
-	/// alone does not put it on program.
-	fn on_program(&self, state: &State) {
-		let collection = &state.collection;
-		let scenes = state.compositor.on_air().filter_map(|scene| collection.scene(scene));
-		let shown = scenes
-			.flat_map(|scene| &scene.items)
-			.chain(&collection.top)
-			.filter(|item| item.visible)
-			.map(|item| collection.capture(&item.source).to_string());
+	/// Encode the local sources' tracks on program, whether or not anything
+	/// reads them, so a replay of one has its past: the pictures `shown` in a
+	/// scene on air on any canvas, and the sound the program mix plays. A media file heard
+	/// and not shown encodes only its sound.
+	fn on_program(&self, state: &State, shown: BTreeSet<String>) {
+		let program = &state.collection.mixes.program;
 		let heard = state
 			.sources
 			.iter()
-			.filter(|(name, feed)| {
-				matches!(
-					feed.source(),
-					moq_scene::Source::Microphone { .. } | moq_scene::Source::SystemAudio
-				) && state.sources.plays(&collection.mixes.program, name)
-			})
-			.map(|(name, _)| name.to_string());
-		self.sources.set_on_program(shown.chain(heard).collect());
+			.filter(|(name, _)| state.sources.plays(program, name))
+			.map(|(name, _)| name.to_string())
+			.collect();
+		self.sources
+			.set_on_program(moq_scene::publish::OnProgram { shown, heard });
 	}
 }
 
@@ -713,6 +755,7 @@ impl Engine {
 			browser: browser(&gpu)?,
 		});
 		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
+		compositor.set_canvases(&collection)?;
 		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
 		compositor.cut();
 
@@ -746,6 +789,7 @@ impl Engine {
 		let Publish {
 			renditions,
 			ladder,
+			extras,
 			audio,
 			recorded_audio,
 			clock,
@@ -764,13 +808,37 @@ impl Engine {
 			let feeds = crate::feed::Feeds::new(room.clone(), origin.clone(), program, clock.clone(), epoch)?;
 			*engine.feeds.lock().unwrap() = Some(feeds);
 		}
+		let main = Line::new(renditions, canvas, ladder, true);
+		// Opened before the program clock starts the sources, as the main
+		// canvas's encoder is, so each holds its encode session first.
+		let mut lines = Lines::new();
+		let canvases: Vec<(String, Canvas)> = {
+			let state = engine.state.lock().unwrap();
+			let collection = state.collection();
+			let canvases = collection.canvases.keys();
+			canvases
+				.filter_map(|name| Some((name.clone(), collection.canvas(Some(name))?)))
+				.collect()
+		};
+		for (name, canvas) in canvases {
+			let video = Arc::new(VideoStats::default());
+			engine
+				.stats
+				.canvases
+				.lock()
+				.unwrap()
+				.insert(name.clone(), video.clone());
+			let opened = extras.open(&name, canvas, video.clone(), &engine.program).await;
+			let opened = opened.inspect_err(|err| video.fail(format!("{err:#}"))).ok();
+			lines.insert(name, opened);
+		}
 		// Each worker holds the engine, so one that cannot start stops those
 		// already running, which would otherwise keep this engine and its
 		// publication alive beside a retry's.
 		let starting = Starting(Some(engine.clone()));
 		let program = engine.clone();
 		let thread = clocked("program".into(), async move || {
-			program.run_program(start, epoch, renditions, ladder).await
+			program.run_program(start, epoch, main, extras, lines).await
 		})?;
 		engine.threads.lock().unwrap().push(thread);
 		let mix = engine.clone();
@@ -962,95 +1030,92 @@ impl Engine {
 	/// What only the studio knows about its stream at `now`.
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
-		// A stalled picture matters where the program draws it: a scene on air,
+		// A stalled picture matters where any canvas's program draws it: a scene on air,
 		// including one leaving in a transition, or the top layer over them.
 		// Stalled sound matters only if the mix on program plays it, not one
-		// only listened to.
-		let stalled = {
+		// only listened to. A source that stopped matters either way.
+		let (stalled, stopped) = {
 			let state = self.state.lock().unwrap();
-			let shown: Vec<&str> = state
-				.compositor
-				.on_air()
-				.filter_map(|name| state.collection.scene(name))
-				.flat_map(|scene| &scene.items)
-				.chain(&state.collection.top)
-				.filter(|item| item.visible)
-				.map(|item| state.collection.capture(&item.source))
-				.collect();
-			state
+			let shown = state.shown();
+			let heard = |name: &str| state.sources.plays(&state.collection.mixes.program, name);
+			let stalled = state
 				.sources
 				.iter()
 				.filter_map(|(name, feed)| {
 					let stall = feed.stalled(now)?;
 					let matters = match stall {
-						source::Stall::Picture(_) => shown.contains(&name),
-						source::Stall::Sound(_) => state.sources.plays(&state.collection.mixes.program, name),
+						source::Stall::Picture(_) => shown.contains(name),
+						source::Stall::Sound(_) => heard(name),
 					};
 					matters.then(|| (name.to_string(), stall))
 				})
-				.collect()
+				.collect();
+			let stopped = state
+				.sources
+				.iter()
+				.filter(|(name, _)| shown.contains(*name) || heard(name))
+				.filter_map(|(name, feed)| {
+					// A picture that fails to draw fails the source as the Sources panel shows it.
+					let status = match state.compositor.error(name) {
+						Some(err) => Status::Failed(err.to_string()),
+						None => feed.status(),
+					};
+					matches!(status, Status::Ended | Status::Failed(_)).then(|| (name.to_string(), status))
+				})
+				.collect();
+			(stalled, stopped)
 		};
-		let canvas = &stats.renditions[0];
+		let video = &stats.video;
+		let canvas = &video.renditions[0];
 		health::Local {
 			rendered: stats.rendered.load(Ordering::Relaxed),
 			dropped: canvas.dropped.load(Ordering::Relaxed),
 			encoded: canvas.encoded.load(Ordering::Relaxed),
-			encoding: stats.encoding.load(Ordering::Relaxed),
+			encoding: video.encoding.load(Ordering::Relaxed),
 			grants: stats.grants(),
-			watched: stats.watched.load(Ordering::Relaxed),
-			encoder: stats.encoder(),
+			watched: video.watched.load(Ordering::Relaxed),
+			encoder: video.encoder(),
 			failed: stats.error(),
 			stalled,
+			stopped,
 		}
 	}
 
-	/// Draw a canvas frame per tick of the program clock, and hand the program
-	/// to each rendition's encoder, stamped `epoch` past `start`, while its gate
-	/// lets it encode: the canvas size every frame while live and not on
-	/// demand, otherwise only while anyone watches it, the half size only
-	/// while anyone watches it, and the recording's own only while recording.
+	/// Draw every canvas once per tick of the program clock, and hand each
+	/// canvas's program to its renditions' encoders, stamped `epoch` past
+	/// `start`, while their gates let them encode: the canvas size every frame
+	/// while live and not on demand, otherwise only while anyone watches it,
+	/// the half size only while anyone watches it, and the main canvas's
+	/// recording copy only while recording.
 	///
-	/// A new canvas size or frame rate ends `ladder`, the renditions it was
-	/// drawn at, and opens others in `renditions`, since a track never changes
-	/// what it carries. Drawing outlives the encoders: a failed output stops copying
-	/// the program, and the preview and program keep moving.
+	/// `main` encodes the main canvas, and `lines` the further canvases the
+	/// studio started with. Each further canvas added since gets a [`Line`] of
+	/// its own from `extras` once drawn, in a broadcast of its own, and each
+	/// ends once the collection drops its canvas. Drawing outlives the encoders: a failed
+	/// output stops copying its program, and the canvases keep moving.
 	///
 	/// Runs until the studio [stops](Self::stop), and returns once every
 	/// rendition's encode thread has finished its track.
-	async fn run_program(&self, start: Instant, epoch: Duration, renditions: Renditions, mut ladder: Option<Ladder>) {
-		let mut canvas = self.state.lock().unwrap().compositor.canvas();
-		let mut clock = program_clock(start, canvas);
-		// One probe at a time, with the canvas it is for, since a GPU caps its
-		// encode sessions.
-		let mut probing: Option<(Canvas, std::thread::JoinHandle<anyhow::Result<Probe>>)> = None;
-		// The encode threads of renditions ended or failed since, whose
-		// sessions the next probe waits to be closed.
-		let mut ending = Vec::new();
-		// Whether the canvas drawn has its renditions, or failed to open them,
-		// so a failure is not retried until the canvas changes.
-		let mut settled = true;
-		if let Some(ladder) = &ladder {
-			ladder.adopted(&self.stats);
-		}
+	async fn run_program(&self, start: Instant, epoch: Duration, mut main: Line, extras: Extras, mut lines: Lines) {
+		let mut framerate = self.state.lock().unwrap().compositor.canvas().framerate;
+		let mut clock = program_clock(start, framerate);
+		// The encoders of lines since ended, waited on as the studio stops so
+		// each finishes its track.
+		let mut retired: Vec<Ended> = Vec::new();
 
 		loop {
 			let tick = clock.tick().await;
 			if self.stopped.load(Ordering::Relaxed) {
 				// Without a sender, each encoder publishes what it was sent and
 				// still holds, then finishes its track.
-				ending.extend(ladder.take().into_iter().flat_map(|ladder| ladder.end(&self.stats)));
-				for thread in ending {
-					if thread.join().is_err() {
-						tracing::error!("an encode thread panicked");
-					}
-				}
-				// It holds the threads of the renditions it waits on.
-				if let Some((_, probe)) = probing {
-					let _ = probe.join();
+				retired.push(main.end());
+				retired.extend(lines.into_values().flatten().map(|(line, _)| line.end()));
+				for ended in retired {
+					ended.join();
 				}
 				return;
 			}
-			let (program, drawn) = {
+			let drawn: Vec<(Option<String>, wgpu::Texture, Canvas)> = {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
 				if std::mem::take(&mut state.stale) {
@@ -1063,85 +1128,61 @@ impl Engine {
 					}
 					self.pick_mixes(state);
 				}
+				// Before drawing, so a media file that restarts going on program
+				// is cleared in this frame rather than showing where it ended.
+				let shown = state.shown();
+				state.sources.set_on_program(&shown);
 				if let Err(err) = state.compositor.render(&state.collection, &state.sources, tick) {
 					tracing::error!(%err, "cannot draw the canvas");
 					continue;
 				}
-				self.program.on_program(state);
-				(state.compositor.program().clone(), state.compositor.canvas())
+				self.program.on_program(state, shown);
+				state
+					.compositor
+					.outputs()
+					.map(|(name, output)| (name.map(str::to_string), output.program().clone(), output.canvas()))
+					.collect()
 			};
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
-			if drawn != canvas {
-				if drawn.framerate != canvas.framerate {
-					clock = program_clock(tick + period(drawn), drawn);
-				}
-				canvas = drawn;
-				settled = false;
-				// Ended before the next open, so the two never hold encode
-				// sessions at once.
-				ending.extend(ladder.take().into_iter().flat_map(|ladder| ladder.end(&self.stats)));
-				self.stats.retire_encoder();
-			}
-			// Probed beside the program clock, so drawing carries on.
-			if let Some((probed, probe)) = probing.take_if(|(_, probe)| probe.is_finished()) {
-				let probe = probe
-					.join()
-					.unwrap_or_else(|_| Err(anyhow::anyhow!("the encoder probe panicked")));
-				// One for a canvas since left is dropped unlisted.
-				if probed == canvas {
-					settled = true;
-					match probe.and_then(|probe| renditions.start(probe)) {
-						Ok((started, _)) => {
-							started.adopted(&self.stats);
-							ladder = Some(started);
-						}
-						Err(err) => self.stats.fail_video(format!("{err:#}")),
-					}
-				}
-			}
-			if probing.is_none() && !settled {
-				let ending = std::mem::take(&mut ending);
-				match Probe::spawn(renditions.gpu.clone(), canvas, ending) {
-					Ok(probe) => probing = Some((canvas, probe)),
-					Err(err) => {
-						settled = true;
-						self.stats.fail_video(format!("cannot start an encoder probe: {err}"));
-					}
-				}
+			let timestamp = moq_net::Timestamp::try_from(epoch + tick.saturating_duration_since(start)).ok();
+			// Every canvas shares the main one's frame rate.
+			let drawing = drawn[0].2.framerate;
+			if drawing != framerate {
+				framerate = drawing;
+				clock = program_clock(tick + period(framerate), framerate);
 			}
 
-			let Some(current) = &mut ladder else {
-				self.stats.watched.store(false, Ordering::Relaxed);
-				self.stats.encoding.store(false, Ordering::Relaxed);
-				continue;
-			};
-			let watched = current
-				.rungs
-				.iter()
-				.any(|rung| rung.role.published() && rung.gate.watched());
-			self.stats.watched.store(watched, Ordering::Relaxed);
-			let Ok(timestamp) = moq_net::Timestamp::try_from(epoch + tick.saturating_duration_since(start)) else {
-				continue;
-			};
-			let mut encoding = false;
-			let mut failed = Vec::new();
-			for (index, rung) in current.rungs.iter_mut().enumerate() {
-				let role = rung.role;
-				match rung.feed(&self.stats.renditions[role as usize], &program, timestamp) {
-					Some(step) => encoding |= role == Role::Canvas && matches!(step, Step::Encode(_)),
-					None => failed.push((index, role)),
+			retired.retain(|ended| !ended.is_finished());
+			let gone: Vec<String> = lines
+				.keys()
+				.filter(|line| !drawn.iter().any(|(name, _, _)| name.as_ref() == Some(*line)))
+				.cloned()
+				.collect();
+			for name in gone {
+				if let Some(Some((line, _))) = lines.remove(&name) {
+					retired.push(line.end());
 				}
+				self.stats.canvases.lock().unwrap().remove(&name);
 			}
-			self.stats.encoding.store(encoding, Ordering::Relaxed);
-			// An encoder stops only having reported why. Without the canvas
-			// size the video stops; without another rendition it carries on.
-			if failed.iter().any(|(_, role)| *role == Role::Canvas) {
-				ending.extend(ladder.take().into_iter().flat_map(|ladder| ladder.end(&self.stats)));
-			} else {
-				for (index, _) in failed.into_iter().rev() {
-					ending.push(current.remove(index, &self.stats));
-				}
+
+			for (name, program, canvas) in drawn {
+				let line = match &name {
+					None => &mut main,
+					Some(name) => {
+						let started = lines.entry(name.clone()).or_insert_with(|| {
+							let video = Arc::new(VideoStats::default());
+							self.stats.canvases.lock().unwrap().insert(name.clone(), video.clone());
+							extras
+								.start(name, canvas, video.clone(), &self.program)
+								.inspect_err(|err| video.fail(format!("{err:#}")))
+								.ok()
+						});
+						let Some((line, _)) = started else { continue };
+						line
+					}
+				};
+				line.feed(&program, canvas, timestamp);
 			}
 		}
 	}
@@ -1278,6 +1319,8 @@ struct Publish {
 	/// The renditions of the canvas the studio started with, unless the canvas
 	/// could not be encoded without a relay.
 	ladder: Option<Ladder>,
+	/// What publishes each further canvas.
+	extras: Extras,
 	/// The program audio's encoder.
 	audio: moq_audio::encode::Producer,
 	/// The recording broadcast's own audio encoder.
@@ -1319,10 +1362,10 @@ async fn publish(
 	// Probed now, so a machine that cannot encode the canvas fails at startup
 	// rather than once the program clock starts. Without a relay the studio
 	// still composes, previews, and records audio, and a new canvas tries again.
-	let probe = match Probe::new(gpu, canvas).await {
+	let probe = match Probe::new(gpu, canvas, true).await {
 		Ok(probe) => Some(probe),
 		Err(err) if live.is_none() => {
-			stats.fail_video(format!("{err:#}"));
+			stats.video.fail(format!("{err:#}"));
 			None
 		}
 		Err(err) => return Err(err),
@@ -1372,16 +1415,18 @@ async fn publish(
 		gpu: gpu.clone(),
 		broadcast: broadcast.clone(),
 		timebase: catalog.timebase(),
-		recording: Recording {
+		recording: Some(Recording {
 			broadcast: recorder.clone(),
 			timebase: recorded.timebase(),
-		},
+		}),
 		bandwidth: bandwidth.clone(),
 		// Live on a relay and not on demand; otherwise only a viewer asks for
 		// the video.
 		on_demand: live.is_none_or(|live| live.on_demand),
 		live: live.is_some(),
 		stats: stats.clone(),
+		video: stats.video.clone(),
+		grants: String::new(),
 	};
 	let ladder = match probe {
 		Some(probe) => {
@@ -1436,7 +1481,7 @@ async fn publish(
 			watching.clone().follow(live.reports.clone(), path.clone()),
 		));
 		health::Publisher {
-			observer: hang::health::Observer::new(path.clone(), Some(instance)),
+			observer: hang::health::Observer::new(path.clone(), Some(instance.clone())),
 			catalog: graded,
 			clock: clock.clone(),
 			relays: live.links.clone(),
@@ -1448,7 +1493,7 @@ async fn publish(
 
 	Ok((
 		Program {
-			_origin: origin,
+			_origin: origin.clone(),
 			publication,
 			catalog: listed,
 			clock: clock.clone(),
@@ -1459,6 +1504,17 @@ async fn publish(
 			_audio: audio_reservation,
 		},
 		Publish {
+			extras: Extras {
+				origin: origin.clone(),
+				path: path.clone(),
+				clock: clock.clone(),
+				instance,
+				gpu: gpu.clone(),
+				bandwidth,
+				on_demand: renditions.on_demand,
+				live: renditions.live,
+				stats: stats.clone(),
+			},
 			renditions,
 			ladder,
 			audio,
@@ -1508,8 +1564,8 @@ struct Renditions {
 	/// Shared by every rendition, so each lands on the catalog's clock the same
 	/// way and a switch keeps the video in step with the audio.
 	timebase: moq_mux::catalog::Timebase<moq_scene::publish::Ext>,
-	/// Where the recording's own encoder writes.
-	recording: Recording,
+	/// Where the recording's own encoder writes: the main canvas's alone.
+	recording: Option<Recording>,
 	/// The connection's bandwidth, which each published rendition follows its
 	/// share of.
 	bandwidth: bandwidth::Allocator,
@@ -1518,6 +1574,11 @@ struct Renditions {
 	/// Whether the program goes out on a relay, where viewers can watch it.
 	live: bool,
 	stats: Arc<Stats>,
+	/// How this canvas's video is doing.
+	video: Arc<VideoStats>,
+	/// What each track's grant is listed under in [`Stats::grants`], before
+	/// its name: empty for the main canvas, and a further one's name.
+	grants: String,
 }
 
 impl Renditions {
@@ -1527,10 +1588,10 @@ impl Renditions {
 	/// recording's once recorded.
 	fn start(&self, probe: Probe) -> anyhow::Result<(Ladder, tokio::sync::oneshot::Receiver<anyhow::Result<()>>)> {
 		// Before the encode threads start, which report their own failures.
-		*self.stats.video_error.lock().unwrap() = None;
+		*self.video.error.lock().unwrap() = None;
 		for (role, load) in [Role::Half, Role::Record]
 			.into_iter()
-			.map(|role| (role, &self.stats.renditions[role as usize]))
+			.map(|role| (role, &self.video.renditions[role as usize]))
 		{
 			let refused = probe.refused.iter().find(|(refused, _)| *refused == role);
 			*load.error.lock().unwrap() = refused.map(|(_, reason)| reason.clone());
@@ -1547,7 +1608,7 @@ impl Renditions {
 			.collect();
 		let (opened, open) = tokio::sync::oneshot::channel();
 		let mut opened = Some(opened);
-		let number = self.stats.rendition();
+		let number = self.video.rendition();
 		let mut rungs = Vec::with_capacity(probe.rungs.len());
 		for probed in probe.rungs {
 			let Probed {
@@ -1556,8 +1617,9 @@ impl Renditions {
 				config,
 				video,
 			} = probed;
-			let (broadcast, timebase) = match role {
-				Role::Record => (&self.recording.broadcast, &self.recording.timebase),
+			let (broadcast, timebase) = match (role, &self.recording) {
+				(Role::Record, Some(recording)) => (&recording.broadcast, &recording.timebase),
+				(Role::Record, None) => anyhow::bail!("only the main canvas is recorded"),
 				_ => (&self.broadcast, &self.timebase),
 			};
 			let reserved = timebase.reserve().with_interval(config.gop.duration(config.framerate));
@@ -1574,16 +1636,19 @@ impl Renditions {
 			let info = reserved.track_info(priority).with_refresh(ladder::REFRESH);
 			let track = broadcast.unique_track(suffix, info)?;
 			let producer = moq_video::encode::Producer::with_track(track.clone(), reserved, video)?;
-			let gate = match role {
+			let (gate, grant) = match role {
 				// Reads nothing from the connection, so it always encodes at its
 				// ceiling, and only while recorded.
-				Role::Record => Gate::new(
-					&bandwidth::Allocator::unlimited(),
-					producer.demand(),
-					ladder::ceiling(config.size(), config.framerate),
-					None,
-					false,
-				),
+				Role::Record => {
+					let gate = Gate::new(
+						&bandwidth::Allocator::unlimited(),
+						producer.demand(),
+						ladder::ceiling(config.size(), config.framerate),
+						None,
+						false,
+					);
+					(gate, None)
+				}
 				_ => {
 					let gate = Gate::new(
 						&self.bandwidth,
@@ -1592,19 +1657,17 @@ impl Renditions {
 						ceilings.get(rank + 1).copied(),
 						role == Role::Canvas && !self.on_demand,
 					);
-					self.stats
-						.grants
-						.lock()
-						.unwrap()
-						.insert(track.name().to_string(), gate.grant());
-					gate
+					let grant = format!("{}{}", self.grants, track.name());
+					self.stats.grants.lock().unwrap().insert(grant.clone(), gate.grant());
+					(gate, Some(grant))
 				}
 			};
 
 			// One more than the exporter's pool, for a skip behind a full pool.
 			let (frames, pending) = mpsc::sync_channel(Exporter::DEPTH + 1);
 			let job = Job {
-				stats: self.stats.clone(),
+				sessions: self.stats.sessions.clone(),
+				video: self.video.clone(),
 				role,
 				rendition: (role == Role::Canvas).then_some(number),
 				zero_copy: exporter.route() == Route::Gpu,
@@ -1628,6 +1691,7 @@ impl Renditions {
 			rungs.push(Rung {
 				role,
 				gate,
+				grant,
 				scaler,
 				exporter,
 				frames,
@@ -1661,16 +1725,17 @@ struct Probed {
 
 impl Probe {
 	/// Open a throwaway encoder of each of `canvas`'s renditions on what `gpu`
-	/// exports, which also settles whether the encoder reads the program on
-	/// the GPU. The canvas size picks the encoder, which the others use too.
-	async fn new(gpu: &Gpu, canvas: Canvas) -> anyhow::Result<Self> {
+	/// exports, the recording's copy only if `record`, which also settles
+	/// whether the encoder reads the program on the GPU. The canvas size picks
+	/// the encoder, which the others use too.
+	async fn new(gpu: &Gpu, canvas: Canvas, record: bool) -> anyhow::Result<Self> {
 		let framerate = canvas.framerate();
 		let size = moq_video::Size::new(canvas.width, canvas.height);
 		let sizes = ladder::sizes(size);
 		let roles = [Role::Canvas, Role::Half]
 			.into_iter()
 			.zip(sizes)
-			.chain([(Role::Record, size)]);
+			.chain(record.then_some((Role::Record, size)));
 		let mut kind = moq_video::encode::Kind::Auto;
 		let mut rungs = Vec::new();
 		let mut refused = Vec::new();
@@ -1706,6 +1771,7 @@ impl Probe {
 	fn spawn(
 		gpu: Gpu,
 		canvas: Canvas,
+		record: bool,
 		ending: Vec<std::thread::JoinHandle<()>>,
 	) -> std::io::Result<std::thread::JoinHandle<anyhow::Result<Self>>> {
 		std::thread::Builder::new().name("probe".into()).spawn(move || {
@@ -1714,8 +1780,309 @@ impl Probe {
 				let _ = thread.join();
 			}
 			let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-			runtime.block_on(Self::new(&gpu, canvas))
+			runtime.block_on(Self::new(&gpu, canvas, record))
 		})
+	}
+}
+
+/// One canvas's program video as the program clock feeds it: the renditions
+/// of the canvas it last drew, the probe opening the next, and the encoders
+/// ending.
+struct Line {
+	renditions: Renditions,
+	ladder: Option<Ladder>,
+	/// The canvas `ladder` is for, or will be once probed.
+	canvas: Canvas,
+	/// One probe at a time, with the canvas it is for, since a GPU caps its
+	/// encode sessions.
+	probing: Option<(Canvas, std::thread::JoinHandle<anyhow::Result<Probe>>)>,
+	/// The encode threads of renditions ended or failed since, whose sessions
+	/// the next probe waits to be closed.
+	ending: Vec<std::thread::JoinHandle<()>>,
+	/// Whether the canvas drawn has its renditions, or failed to open them, so
+	/// a failure is not retried until the canvas changes.
+	settled: bool,
+}
+
+/// What a [`Line`] leaves running once ended, to wait on.
+struct Ended {
+	threads: Vec<std::thread::JoinHandle<()>>,
+	/// Holds the encode threads it was waiting on.
+	probe: Option<std::thread::JoinHandle<anyhow::Result<Probe>>>,
+}
+
+impl Ended {
+	fn is_finished(&self) -> bool {
+		self.threads.iter().all(std::thread::JoinHandle::is_finished)
+			&& self.probe.as_ref().is_none_or(std::thread::JoinHandle::is_finished)
+	}
+
+	fn join(self) {
+		for thread in self.threads {
+			if thread.join().is_err() {
+				tracing::error!("an encode thread panicked");
+			}
+		}
+		if let Some(probe) = self.probe {
+			let _ = probe.join();
+		}
+	}
+}
+
+impl Line {
+	/// `renditions` of `canvas`: `ladder` when already open, or `None` to probe
+	/// for them on the first feed unless `settled`, as a canvas that failed
+	/// to open at startup is.
+	fn new(renditions: Renditions, canvas: Canvas, ladder: Option<Ladder>, settled: bool) -> Self {
+		if let Some(ladder) = &ladder {
+			ladder.adopted(&renditions.video);
+		}
+		Self {
+			renditions,
+			ladder,
+			canvas,
+			probing: None,
+			ending: Vec::new(),
+			settled,
+		}
+	}
+
+	/// Hand `program`, drawn at `drawn`, to each rendition its gate lets
+	/// encode, stamped `timestamp`. A new canvas size or frame rate ends the
+	/// renditions and probes for others, since a track never changes what it
+	/// carries.
+	fn feed(&mut self, program: &wgpu::Texture, drawn: Canvas, timestamp: Option<moq_net::Timestamp>) {
+		let renditions = &self.renditions;
+		let video = &renditions.video;
+		if drawn != self.canvas {
+			self.canvas = drawn;
+			self.settled = false;
+			// Ended before the next open, so the two never hold encode sessions
+			// at once.
+			self.ending
+				.extend(self.ladder.take().into_iter().flat_map(|ladder| ladder.end(renditions)));
+			video.retire_encoder();
+		}
+		// Probed beside the program clock, so drawing carries on.
+		if let Some((probed, probe)) = self.probing.take_if(|(_, probe)| probe.is_finished()) {
+			let probe = probe
+				.join()
+				.unwrap_or_else(|_| Err(anyhow::anyhow!("the encoder probe panicked")));
+			// One for a canvas since left is dropped unlisted.
+			if probed == self.canvas {
+				self.settled = true;
+				match probe.and_then(|probe| renditions.start(probe)) {
+					Ok((started, _)) => {
+						started.adopted(video);
+						self.ladder = Some(started);
+					}
+					Err(err) => video.fail(format!("{err:#}")),
+				}
+			}
+		}
+		if self.probing.is_none() && !self.settled {
+			let ending = std::mem::take(&mut self.ending);
+			let record = renditions.recording.is_some();
+			match Probe::spawn(renditions.gpu.clone(), self.canvas, record, ending) {
+				Ok(probe) => self.probing = Some((self.canvas, probe)),
+				Err(err) => {
+					self.settled = true;
+					video.fail(format!("cannot start an encoder probe: {err}"));
+				}
+			}
+		}
+
+		let Some(current) = &mut self.ladder else {
+			video.watched.store(false, Ordering::Relaxed);
+			video.encoding.store(false, Ordering::Relaxed);
+			return;
+		};
+		let watched = current
+			.rungs
+			.iter()
+			.any(|rung| rung.role.published() && rung.gate.watched());
+		video.watched.store(watched, Ordering::Relaxed);
+		let Some(timestamp) = timestamp else { return };
+		let mut encoding = false;
+		let mut failed = Vec::new();
+		for (index, rung) in current.rungs.iter_mut().enumerate() {
+			let role = rung.role;
+			match rung.feed(&video.renditions[role as usize], program, timestamp) {
+				Some(step) => encoding |= role == Role::Canvas && matches!(step, Step::Encode(_)),
+				None => failed.push((index, role)),
+			}
+		}
+		video.encoding.store(encoding, Ordering::Relaxed);
+		// An encoder stops only having reported why. Without the canvas size
+		// the video stops; without another rendition it carries on.
+		if failed.iter().any(|(_, role)| *role == Role::Canvas) {
+			self.ending
+				.extend(self.ladder.take().into_iter().flat_map(|ladder| ladder.end(renditions)));
+		} else {
+			for (index, _) in failed.into_iter().rev() {
+				self.ending.push(current.remove(index, renditions));
+			}
+		}
+	}
+
+	/// Stop handing the renditions frames, so each encode thread publishes
+	/// what it holds and finishes its track.
+	fn end(mut self) -> Ended {
+		let mut threads = std::mem::take(&mut self.ending);
+		threads.extend(
+			self.ladder
+				.take()
+				.into_iter()
+				.flat_map(|ladder| ladder.end(&self.renditions)),
+		);
+		self.renditions.video.watched.store(false, Ordering::Relaxed);
+		self.renditions.video.encoding.store(false, Ordering::Relaxed);
+		Ended {
+			threads,
+			probe: self.probing.map(|(_, probe)| probe),
+		}
+	}
+}
+
+/// Each further canvas's line and broadcast, by name, or `None` once it failed
+/// to start, which is not retried until the canvas is removed and added again.
+type Lines = BTreeMap<String, Option<(Line, Broadcast)>>;
+
+/// A further canvas's broadcast, closed when dropped.
+struct Broadcast {
+	publication: moq_net::origin::Publication,
+	/// Lists the canvas's video and the main broadcast's audio.
+	_catalog: moq_scene::publish::Catalog,
+}
+
+impl Drop for Broadcast {
+	fn drop(&mut self) {
+		self.publication.close();
+	}
+}
+
+/// What starts each further canvas's broadcast: beneath the main one's path,
+/// on its clock, sharing its connection's bandwidth.
+struct Extras {
+	origin: moq_net::origin::Producer,
+	path: moq_net::Path,
+	clock: moq_mux::Clock,
+	/// The main broadcast's, which its audio is listed by.
+	instance: moq_net::Instance,
+	gpu: Gpu,
+	bandwidth: bandwidth::Allocator,
+	on_demand: bool,
+	live: bool,
+	stats: Arc<Stats>,
+}
+
+impl Extras {
+	/// Publish the further canvas `name`, first drawn at `canvas`, and the
+	/// [`Line`] that encodes its video, reporting in `video`. Its encoders are
+	/// probed for on the line's first feed, off the program clock, for a canvas
+	/// added while the studio runs.
+	fn start(
+		&self,
+		name: &str,
+		canvas: Canvas,
+		video: Arc<VideoStats>,
+		program: &Program,
+	) -> anyhow::Result<(Line, Broadcast)> {
+		let (renditions, broadcast) = self.publish(name, video, program)?;
+		Ok((Line::new(renditions, canvas, None, false), broadcast))
+	}
+
+	/// [`start`](Self::start), opening the canvas size's encoder before
+	/// returning, as the main canvas does at startup, so a canvas in the scene
+	/// file holds its encode session before any source opens one. A canvas
+	/// whose encoder cannot open draws on without video, saying why in `video`.
+	async fn open(
+		&self,
+		name: &str,
+		canvas: Canvas,
+		video: Arc<VideoStats>,
+		program: &Program,
+	) -> anyhow::Result<(Line, Broadcast)> {
+		let (renditions, broadcast) = self.publish(name, video.clone(), program)?;
+		let opened = async {
+			let probe = Probe::new(&self.gpu, canvas, false).await?;
+			let (ladder, opened) = renditions.start(probe)?;
+			opened.await.context("the encode thread stopped")??;
+			anyhow::Ok(ladder)
+		};
+		let ladder = match opened.await {
+			Ok(ladder) => Some(ladder),
+			Err(err) => {
+				video.fail(format!("{err:#}"));
+				None
+			}
+		};
+		Ok((Line::new(renditions, canvas, ladder, true), broadcast))
+	}
+
+	/// Publish the further canvas `name` at its own path beneath the main
+	/// broadcast's, listing the main broadcast's audio by reference so it is
+	/// encoded once, and where its video goes, reporting in `video`.
+	fn publish(
+		&self,
+		name: &str,
+		video: Arc<VideoStats>,
+		program: &Program,
+	) -> anyhow::Result<(Renditions, Broadcast)> {
+		let path = moq_net::Path::new(name)
+			.and_then(|name| self.path.join(&name))
+			.with_context(|| format!("cannot publish canvas `{name}`"))?;
+		if self.live {
+			let (_, echo) = health::echo(&self.path)?;
+			anyhow::ensure!(
+				path != echo,
+				"canvas `{name}` would publish where viewers report back; remove it and add it under another name"
+			);
+		}
+		let audio = self
+			.path
+			.relative(&path)
+			.with_context(|| format!("canvas `{name}` cannot refer to the main broadcast"))?;
+
+		let publication = self
+			.origin
+			.create_broadcast(&path)
+			.with_context(|| format!("cannot create the broadcast of canvas `{name}`"))?;
+		let mut broadcast = publication.broadcast().clone();
+		let config = moq_mux::catalog::Config::default()
+			.with_catalog(Default::default())
+			.with_clock(self.clock.clone());
+		let mut catalog = moq_scene::publish::Catalog::new(&mut broadcast, config)?;
+		let listed = program.catalog.snapshot().audio.renditions;
+		catalog.mutate(|catalog| {
+			for (id, mut config) in listed {
+				config.broadcast = Some(audio.clone());
+				config.instance = Some(self.instance.clone());
+				config.track.get_or_insert_with(|| id.clone());
+				catalog.audio.renditions.insert(id, config);
+			}
+		})?;
+		publication
+			.announce(moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0))
+			.with_context(|| format!("cannot announce the broadcast of canvas `{name}`"))?;
+
+		let renditions = Renditions {
+			gpu: self.gpu.clone(),
+			broadcast,
+			timebase: catalog.timebase(),
+			recording: None,
+			bandwidth: self.bandwidth.clone(),
+			on_demand: self.on_demand,
+			live: self.live,
+			stats: self.stats.clone(),
+			video,
+			grants: format!("{name}/"),
+		};
+		let broadcast = Broadcast {
+			publication,
+			_catalog: catalog,
+		};
+		Ok((renditions, broadcast))
 	}
 }
 
@@ -1726,28 +2093,30 @@ struct Ladder {
 }
 
 impl Ladder {
-	/// Report these renditions as the program's from now on.
-	fn adopted(&self, stats: &Stats) {
+	/// Report these renditions as the canvas's from now on.
+	fn adopted(&self, video: &VideoStats) {
 		let zero_copy = self.rungs[0].exporter.route() == Route::Gpu;
-		stats.zero_copy.store(zero_copy, Ordering::Relaxed);
-		self.count(stats);
+		video.zero_copy.store(zero_copy, Ordering::Relaxed);
+		self.count(video);
 	}
 
-	/// Report how many sizes the program publishes.
-	fn count(&self, stats: &Stats) {
+	/// Report how many sizes the canvas publishes.
+	fn count(&self, video: &VideoStats) {
 		let sizes = self.rungs.iter().filter(|rung| rung.role.published()).count();
-		stats.sizes.store(sizes, Ordering::Relaxed);
+		video.sizes.store(sizes, Ordering::Relaxed);
 	}
 
 	/// Stop handing the renditions frames, so each encode thread encodes those
 	/// it holds, finishes its track, and returns.
-	fn end(self, stats: &Stats) -> Vec<std::thread::JoinHandle<()>> {
-		stats.sizes.store(0, Ordering::Relaxed);
-		let mut grants = stats.grants.lock().unwrap();
+	fn end(self, renditions: &Renditions) -> Vec<std::thread::JoinHandle<()>> {
+		renditions.video.sizes.store(0, Ordering::Relaxed);
+		let mut grants = renditions.stats.grants.lock().unwrap();
 		self.rungs
 			.into_iter()
 			.map(|rung| {
-				grants.remove(rung.gate.track());
+				if let Some(grant) = &rung.grant {
+					grants.remove(grant);
+				}
 				rung.thread
 			})
 			.collect()
@@ -1756,10 +2125,12 @@ impl Ladder {
 	/// Stop handing rendition `index` frames, as [`end`](Self::end) does.
 	/// The canvas size left alone no longer disables below the half size,
 	/// since no viewer has a smaller one to move to.
-	fn remove(&mut self, index: usize, stats: &Stats) -> std::thread::JoinHandle<()> {
+	fn remove(&mut self, index: usize, renditions: &Renditions) -> std::thread::JoinHandle<()> {
 		let rung = self.rungs.remove(index);
-		stats.grants.lock().unwrap().remove(rung.gate.track());
-		self.count(stats);
+		if let Some(grant) = &rung.grant {
+			renditions.stats.grants.lock().unwrap().remove(grant);
+		}
+		self.count(&renditions.video);
 		if rung.role == Role::Half {
 			for canvas in self.rungs.iter_mut().filter(|rung| rung.role == Role::Canvas) {
 				canvas.gate.alone();
@@ -1774,6 +2145,8 @@ impl Ladder {
 struct Rung {
 	role: Role,
 	gate: Gate,
+	/// Its grant's name in [`Stats::grants`]: a published rendition's alone.
+	grant: Option<String>,
 	/// Draws the program at the rendition's size; `None` at the canvas size.
 	scaler: Option<Scaler>,
 	exporter: Exporter,
@@ -1822,15 +2195,15 @@ impl Rung {
 	}
 }
 
-/// How often the program is drawn at `canvas`'s frame rate, from `start`.
-fn program_clock(start: Instant, canvas: Canvas) -> kio::clock::Interval {
-	let mut clock = kio::clock::interval_at(start, period(canvas));
+/// How often the program is drawn at `framerate`, from `start`.
+fn program_clock(start: Instant, framerate: u32) -> kio::clock::Interval {
+	let mut clock = kio::clock::interval_at(start, period(framerate));
 	clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
 	clock
 }
 
-fn period(canvas: Canvas) -> Duration {
-	Duration::from_secs(1) / canvas.framerate
+fn period(framerate: u32) -> Duration {
+	Duration::from_secs(1) / framerate
 }
 
 /// Connect to every relay, publishing `origin` to each and feeding `subscribe`
@@ -1892,7 +2265,9 @@ enum Video {
 
 /// What an encode thread runs.
 struct Job {
-	stats: Arc<Stats>,
+	sessions: Sessions,
+	/// How its canvas's video is doing.
+	video: Arc<VideoStats>,
 	/// Which of the program's renditions it is.
 	role: Role,
 	/// The number of the program's renditions to report the encoder under:
@@ -1913,9 +2288,9 @@ struct Encoder {
 	track: Encoding,
 	config: moq_video::encode::Config,
 	joins: Joins,
-	/// Where to report each encoder opened as the program's, under the
-	/// number of the program's renditions: the canvas size's alone.
-	report: Option<(Arc<Stats>, u64)>,
+	/// Where to report each encoder opened as its canvas's, under the
+	/// number of the canvas's renditions: the canvas size's alone.
+	report: Option<(Arc<VideoStats>, u64)>,
 	/// Keep the encoder, and its session, while skipping frames.
 	hold: bool,
 	/// Whether the open encoder can cut a keyframe for a joining viewer.
@@ -2018,7 +2393,8 @@ impl Encoder {
 /// track that went away unfinished.
 fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<()>>>, video: mpsc::Receiver<Video>) {
 	let Job {
-		stats,
+		sessions,
+		video: stats,
 		role,
 		rendition,
 		zero_copy,
@@ -2030,7 +2406,7 @@ fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<(
 	let size = config.size();
 	// Built here, since an encoder stays on the thread that opened it.
 	let mut encoder = Encoder {
-		track: Encoding::new(producer, stats.sessions.clone()),
+		track: Encoding::new(producer, sessions),
 		joins: Joins::new(track),
 		report: rendition.map(|rendition| (stats.clone(), rendition)),
 		config,
@@ -2044,7 +2420,7 @@ fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<(
 	// leaves it to the canvas size.
 	let load = &stats.renditions[role as usize];
 	let fail = |err: &anyhow::Error| match role {
-		Role::Canvas => stats.fail_video(format!("{err:#}")),
+		Role::Canvas => stats.fail(format!("{err:#}")),
 		_ => load.fail(format!("{}x{}: {err:#}", size.width, size.height)),
 	};
 	if let Some(opened) = opened {
@@ -2241,7 +2617,7 @@ mod tests {
 
 	/// Program frames the recording's own encoder encoded.
 	fn recorded(engine: &Engine) -> u64 {
-		engine.stats.renditions[Role::Record as usize]
+		engine.stats.video.renditions[Role::Record as usize]
 			.encoded
 			.load(Ordering::Relaxed)
 	}
@@ -2328,7 +2704,7 @@ mod tests {
 		// Long enough for the first group to close, so the video has a fragment.
 		encoded(&engine, 90).await;
 		// Only the recording's own encoder: nobody watches the published sizes.
-		assert_eq!(engine.stats.renditions[0].encoded.load(Ordering::Relaxed), 0);
+		assert_eq!(engine.stats.video.renditions[0].encoded.load(Ordering::Relaxed), 0);
 		assert_eq!(engine.stats.sessions.open(), 1);
 		{
 			let mut state = engine.state.lock().unwrap();
@@ -2375,7 +2751,7 @@ mod tests {
 	/// not report that encoder over the next rendition's.
 	#[test]
 	fn a_retired_rendition_reports_no_encoder() {
-		let stats = Stats::default();
+		let stats = VideoStats::default();
 		let retired = stats.rendition();
 		stats.retire_encoder();
 		let next = stats.rendition();
@@ -2460,6 +2836,100 @@ mod tests {
 		.await
 	}
 
+	/// A further canvas reaches the relay in a broadcast of its own beneath the
+	/// main one, at its own size, with the main broadcast's audio listed by
+	/// reference rather than encoded again, and holds one more encode session.
+	/// Removing it ends its broadcast and gives its session back.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	async fn the_program_of_a_further_canvas_has_its_own_broadcast() {
+		let _ = moq_tokio::crypto::install_default();
+		let fixture = moq_relay::test_relay().await.expect("test relay");
+		let ready = fixture.relay.ready();
+		let relay = fixture.relay.cluster().origin.consume();
+		tokio::spawn(fixture.relay.run());
+		ready.wait().await.expect("relay ready");
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
+		let client = client.init(Default::default()).expect("client");
+
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new().await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let relays = vec![Relay {
+			client,
+			url: fixture.url.clone(),
+		}];
+		let mut loaded = red_canvas();
+		let tall = moq_scene::Extra::new(360, 640);
+		let fill = moq_scene::Rect::fill(&tall.canvas(30));
+		loaded.collection.canvases.insert("tall".into(), tall);
+		loaded.collection.scenes[0]
+			.canvases
+			.insert("tall".into(), vec![moq_scene::Item::new("red", fill)]);
+		let engine = Engine::start(launch(gpu, relays, dir.path()), autosave, loaded)
+			.await
+			.expect("the studio starts");
+
+		// Until the canvas's broadcast is announced, the main one's route covers
+		// its path and cannot serve it; the follow moves on once it is.
+		let mut following = relay.follow("studio/tall", None).unwrap();
+		let (broadcast, mut catalogs) = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let broadcast = following.available().await.expect("broadcast");
+				let format = moq_mux::catalog::CatalogFormat::default();
+				if let Ok(catalogs) = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await {
+					return (broadcast, catalogs);
+				}
+			}
+		})
+		.await
+		.expect("the relay routes the canvas");
+		// Audio is listed from the start, and the video once its encoder opens.
+		let catalog = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let catalog = catalogs.next().await.expect("catalog").expect("a catalog");
+				if !catalog.video.renditions.is_empty() {
+					return catalog;
+				}
+			}
+		})
+		.await
+		.expect("the canvas lists its video");
+		let (_, audio) = catalog.audio.renditions.iter().next().expect("the program audio");
+		let main = audio.broadcast.as_ref().expect("a reference to the main broadcast");
+		let main = moq_net::Path::new("studio/tall").unwrap().try_resolve(main);
+		assert_eq!(main.as_ref().map(moq_net::Path::as_str), Some("studio"));
+		assert!(audio.instance.is_some(), "the main broadcast's instance");
+		let (video, config) = catalog
+			.video
+			.renditions
+			.iter()
+			.find(|(_, config)| config.coded_width == Some(360))
+			.expect("the canvas size");
+		assert_eq!(config.coded_height, Some(640));
+		let mut pictures = subscribe(&broadcast, video, config).await;
+		red(&mut pictures, moq_video::Size::new(360, 640))
+			.await
+			.expect("the canvas's own layout arrives");
+		assert_eq!(engine.stats.sessions.open(), 2, "one canvas size each");
+		assert!(engine.stats.canvases()["tall"].error().is_none());
+
+		{
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft("Remove the canvas");
+			draft.remove_extra("tall").unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		kio::clock::timeout(TIMEOUT, broadcast.closed())
+			.await
+			.expect("the canvas's broadcast ends");
+		assert!(engine.stats.canvases().is_empty());
+		engine.stop();
+		assert_eq!(engine.stats.sessions.open(), 0);
+	}
+
 	/// A guest's return feed lists every size of `engine`'s program that
 	/// `published` lists, read from the program as served at `.program`, which
 	/// holds the program's tracks and none of the sources'.
@@ -2538,7 +3008,7 @@ mod tests {
 			.await
 			.expect("the studio starts");
 		assert!(
-			engine.stats.encoder().is_some(),
+			engine.stats.video.encoder().is_some(),
 			"the program holds its encoder before any source opens one"
 		);
 
@@ -2584,7 +3054,7 @@ mod tests {
 
 		// The program reaches the encoder as a GPU surface when the encoder
 		// reads one, and is read back frame by frame only when it does not.
-		let stats = &engine.stats;
+		let stats = &engine.stats.video;
 		for load in &stats.renditions[..2] {
 			assert!(load.copied.load(Ordering::Relaxed) > 0);
 			let read_back = load.read_back.load(Ordering::Relaxed);

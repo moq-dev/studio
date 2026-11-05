@@ -21,7 +21,7 @@ pub use hang::health::Verdict;
 use hang::health::{self, Health, Input, Observer, Thresholds};
 use kio::clock::Instant;
 use moq_net::bandwidth::Rate;
-use moq_scene::source::Stall;
+use moq_scene::source::{Stall, Status};
 
 /// How often the health is graded: as often as reporters write.
 pub const INTERVAL: Duration = Duration::from_secs(1);
@@ -36,7 +36,7 @@ pub fn without(stall: Stall) -> String {
 }
 
 /// The prefix, under the broadcast's own path, where viewers publish feedback.
-const ECHO: &str = "viewers";
+pub(crate) const ECHO: &str = "viewers";
 
 /// The most of one viewer's report the studio holds. A report covers the
 /// broadcast's few tracks in well under a KiB, so this only stops a viewer
@@ -214,6 +214,8 @@ pub struct Local {
 	pub failed: Option<String>,
 	/// Sources the program shows or plays that stopped delivering, and what.
 	pub stalled: Vec<(String, Stall)>,
+	/// Sources the program shows or plays that ended or failed.
+	pub stopped: Vec<(String, Status)>,
 }
 
 /// What the studio publishes, for grading its delivery.
@@ -628,6 +630,18 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 				without(*stall)
 			),
 		);
+	}
+	for (name, status) in &local.stopped {
+		match status {
+			Status::Ended => add(
+				Verdict::Degraded,
+				format!(
+					"Source `{name}` played to its end, so the program holds its last picture and plays no sound for it."
+				),
+			),
+			Status::Failed(reason) => add(Verdict::Unhealthy, format!("Source `{name}` failed: {reason}.")),
+			_ => {}
+		}
 	}
 
 	if let Some(drops) = facts.drops
@@ -1295,6 +1309,10 @@ mod tests {
 				("camera".into(), Stall::Picture(Duration::from_secs(3))),
 				("mic".into(), Stall::Sound(Duration::from_secs(2))),
 			],
+			stopped: vec![
+				("intro".into(), Status::Ended),
+				("music".into(), Status::Failed("the file is gone".into())),
+			],
 			..Default::default()
 		};
 		let uplink = Uplink {
@@ -1311,6 +1329,8 @@ mod tests {
 				"The relay https://a is unreachable (timed out), so nothing reaches viewers until a relay reconnects.",
 				"Source `camera` stalled: no new picture for 3 s, so the program repeats its last one.",
 				"Source `mic` stalled: no new sound for 2 s, so the program plays silence for it.",
+				"Source `music` failed: the file is gone.",
+				"Source `intro` played to its end, so the program holds its last picture and plays no sound for it.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
 		);
