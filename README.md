@@ -30,6 +30,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   the first relay only. The stream's tracks claim their bitrate on the first
   relay's link alone, so only that link is probed toward the stream's rate,
   and the video follows that link's estimate alone.
+- Quitting while live ends every track after its last pictures and sound,
+  then closes each relay session once the relay has them, waiting up to about
+  a second, so viewers and recordings on the relay see the broadcast end
+  rather than cut off.
 - `capture` adds camera, display, window, microphone, and system-audio
   sources, and listening to a mix. On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
