@@ -91,7 +91,6 @@ repository.
 - [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
-- [Keyframes](/quest/m0/animation.md) - keyframed item properties with easing, starting when their scene goes on program
 - [Media file source](/quest/m0/media-file.md) - a local video or audio file plays as a source, looping or from the start on demand
 - [Stinger transitions](/quest/m0/stinger.md) - a clip played over the program that switches scenes at its cut point
 - [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
@@ -104,6 +103,11 @@ repository.
 - [Published independently](/quest/m0/publish-independently.md) - a source opts out of the program and publishes its own track for services that place it themselves
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS
+- [Clean quit](/quest/m0/clean-quit.md) - quitting finishes every track and closes the relay session, so the broadcast's tail arrives
+- [Recover crashed recordings](/quest/m0/recording-repair.md) - a recording a crash left unfinished is repaired beside the original at launch
+- [Premultiplied source sampling](/quest/m0/premultiply.md) - scaled transparent sources draw without edge fringes
+- [Deterministic browser source startup](/quest/m0/cef-startup.md) - CEF on the CPU path paints its first frame without the GPU fallback hang
+- [A browser renderer that dies on its first page](/quest/m0/browser-first-crash.md) - a renderer lost during the first navigation fails its source
 - [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need
 - [Packaging](/quest/m0/packaging.md) - signed installers for macOS and Windows and a Flatpak for Linux
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources

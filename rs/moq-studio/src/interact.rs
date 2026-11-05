@@ -1,12 +1,13 @@
 //! Interaction with browser sources through the preview: the pointer goes to
 //! the page under it, and the keyboard to the page last clicked.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_scene::browser::{Button, Input, Modifiers};
-use moq_scene::{Collection, Crop, Layer, Rect, Source};
+use moq_scene::{Collection, Crop, Item, Layer, Rect, Source};
 
 /// How close in time and space a press must follow the last to count toward a
 /// double or triple click.
@@ -39,8 +40,12 @@ struct Press {
 
 struct Capture {
 	page: String,
-	/// Where the pressed item places the page, since the same page can be in
-	/// several.
+	/// The pressed item, by its index among the scene's items then the top
+	/// layer's, since the same page can be in several, and its keyframes move
+	/// it during the drag.
+	slot: usize,
+	/// Where the pressed item placed the page, for when the slot no longer
+	/// shows it.
 	place: Place,
 	/// The last point the page heard, where a release lands that comes from
 	/// no pointer.
@@ -49,9 +54,10 @@ struct Capture {
 	held: Vec<Button>,
 }
 
-/// A point on one page, placed on the canvas by `place`.
+/// A point on one page, placed on the canvas by `place`, the item at `slot`.
 struct Hit {
 	page: String,
+	slot: usize,
 	place: Place,
 	x: i32,
 	y: i32,
@@ -67,14 +73,16 @@ struct Place {
 impl Interact {
 	/// Turn this frame's input over `image`, which shows `scene` of
 	/// `collection` under its top layer on `canvas`, the main one for `None`,
-	/// into what each page it touches should receive, by page name.
+	/// into what each page it touches should receive, by page name. `scene` is
+	/// the scene's name and how long it has been in the preview, which places
+	/// its items where their keyframes have them.
 	pub fn update(
 		&mut self,
 		ui: &egui::Ui,
 		image: egui::Rect,
 		collection: &Collection,
 		canvas: Option<&str>,
-		scene: Option<&str>,
+		scene: Option<(&str, Duration)>,
 	) -> Vec<(String, Input)> {
 		let Some(size) = collection.canvas(canvas) else {
 			return Vec::new();
@@ -91,10 +99,15 @@ impl Interact {
 			let (x, y) = on_canvas(pos);
 			page_at(collection, canvas, scene, x, y)
 		};
-		// Where `pos` falls on the captured page, even off its edges.
+		// Where `pos` falls on the captured page, even off its edges, where the
+		// pressed item shows it now.
 		let on_page = |capture: &Capture, pos: egui::Pos2| -> Option<(i32, i32)> {
 			let (x, y) = on_canvas(pos);
-			scale(collection, &capture.page, capture.place, x, y)
+			let item = shown(collection, canvas, scene).into_iter().nth(capture.slot);
+			let place = item
+				.filter(|item| collection.capture(&item.source) == capture.page)
+				.map_or(capture.place, |item| Place::of(collection, &item));
+			scale(collection, &capture.page, place, x, y)
 		};
 		let out = RefCell::new(Vec::new());
 		let send = |page: &str, input: Input| out.borrow_mut().push((page.to_string(), input));
@@ -156,41 +169,47 @@ impl Interact {
 							continue;
 						};
 						capture.held.retain(|held| *held != button);
-						let point = on_page(capture, pos);
-						if let Some(point) = point {
-							capture.at = point;
-						}
+						// Every press hears its release, at the last point the page
+						// heard if keyframes have since shrunk it to nothing.
+						let (x, y) = on_page(capture, pos).unwrap_or(capture.at);
+						capture.at = (x, y);
 						let page = capture.page.clone();
 						if capture.held.is_empty() {
 							self.captured = None;
 						}
-						if let Some((x, y)) = point {
-							let clicks = self.last.as_ref().map_or(1, |last| last.clicks);
-							send(
-								&page,
-								Input::Button {
-									x,
-									y,
-									button,
-									down: false,
-									clicks,
-									modifiers,
-								},
-							);
-						}
+						let clicks = self.last.as_ref().map_or(1, |last| last.clicks);
+						send(
+							&page,
+							Input::Button {
+								x,
+								y,
+								button,
+								down: false,
+								clicks,
+								modifiers,
+							},
+						);
 						continue;
 					}
 					// Another press during a drag goes to the dragged page too.
 					let target = match &self.captured {
 						Some(capture) => on_page(capture, pos).map(|(x, y)| Hit {
 							page: capture.page.clone(),
+							slot: capture.slot,
 							place: capture.place,
 							x,
 							y,
 						}),
 						None => hit(pos),
 					};
-					let Some(Hit { page, place, x, y }) = target else {
+					let Some(Hit {
+						page,
+						slot,
+						place,
+						x,
+						y,
+					}) = target
+					else {
 						if self.captured.is_none() {
 							self.blur(&send);
 						}
@@ -204,6 +223,7 @@ impl Interact {
 					}
 					let capture = self.captured.get_or_insert_with(|| Capture {
 						page: page.clone(),
+						slot,
 						place,
 						at: (x, y),
 						held: Vec::new(),
@@ -397,21 +417,41 @@ impl Interact {
 	}
 }
 
-/// The topmost visible browser source, or clone of one, at canvas point (`x`,
-/// `y`) in `scene` and the top layer over it, and the point on its page.
-fn page_at(collection: &Collection, canvas: Option<&str>, scene: Option<&str>, x: f32, y: f32) -> Option<Hit> {
+/// The items of `scene` on `canvas`, the main one for `None`, given as a
+/// scene's name and how long it has been on, then of that canvas's top layer,
+/// back to front, each where its keyframes have it.
+fn shown<'a>(collection: &'a Collection, canvas: Option<&str>, scene: Option<(&str, Duration)>) -> Vec<Cow<'a, Item>> {
+	let since = scene.map_or(Duration::ZERO, |(_, since)| since);
 	let layer = |scene: Option<&str>| Layer {
 		canvas: canvas.map(str::to_string),
 		scene: scene.map(str::to_string),
 	};
 	let items = |layer: Layer| collection.items(&layer).unwrap_or_default();
-	let scene = scene.map(|scene| items(layer(Some(scene)))).unwrap_or_default();
+	let scene = scene.map(|(name, _)| items(layer(Some(name)))).unwrap_or_default();
 	scene
 		.iter()
 		.chain(items(layer(None)))
+		.map(|item| item.posed(since))
+		.collect()
+}
+
+/// The topmost visible browser source, or clone of one, at canvas point (`x`,
+/// `y`) in `scene` and the top layer over it on `canvas`, as [`shown`] places
+/// them, and the point on its page.
+fn page_at(
+	collection: &Collection,
+	canvas: Option<&str>,
+	scene: Option<(&str, Duration)>,
+	x: f32,
+	y: f32,
+) -> Option<Hit> {
+	let items = shown(collection, canvas, scene);
+	items
+		.iter()
+		.enumerate()
 		.rev()
-		.filter(|item| item.visible)
-		.find_map(|item| {
+		.filter(|(_, item)| item.visible)
+		.find_map(|(slot, item)| {
 			let rect = item.rect;
 			let inside = x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
 			if !inside {
@@ -419,18 +459,26 @@ fn page_at(collection: &Collection, canvas: Option<&str>, scene: Option<&str>, x
 			}
 			// A clone shows its source's page, which runs under that name.
 			let page = collection.capture(&item.source);
-			let place = Place {
-				rect,
-				crop: collection.crop(item),
-			};
+			let place = Place::of(collection, item);
 			let (x, y) = scale(collection, page, place, x, y)?;
 			Some(Hit {
 				page: page.to_string(),
+				slot,
 				place,
 				x,
 				y,
 			})
 		})
+}
+
+impl Place {
+	/// Where `item` places its page.
+	fn of(collection: &Collection, item: &Item) -> Self {
+		Self {
+			rect: item.rect,
+			crop: collection.crop(item),
+		}
+	}
 }
 
 /// Canvas point (`x`, `y`) in the pixels of `page` placed by `place`, even off
@@ -566,7 +614,7 @@ fn code(key: egui::Key) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-	use moq_scene::{Item, Scene};
+	use moq_scene::Scene;
 
 	use super::*;
 
@@ -597,9 +645,9 @@ mod tests {
 			items: vec![item("alerts", fill, true), item("chat", corner, true)],
 			..Scene::new("Main")
 		}];
-		let at = |collection: &Collection, x, y| {
-			page_at(collection, None, Some("Main"), x, y).map(|hit| (hit.page, hit.x, hit.y))
-		};
+		let main = Some(("Main", Duration::ZERO));
+		let at =
+			|collection: &Collection, x, y| page_at(collection, None, main, x, y).map(|hit| (hit.page, hit.x, hit.y));
 
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(at(&collection, 960.0, 540.0), Some(("alerts".into(), 400, 300)));
@@ -610,7 +658,7 @@ mod tests {
 			Some(("alerts".into(), 716, 377)),
 			"a hidden page takes no input"
 		);
-		assert!(page_at(&collection, None, Some("Other"), 1.0, 1.0).is_none());
+		assert!(page_at(&collection, None, Some(("Other", Duration::ZERO)), 1.0, 1.0).is_none());
 
 		// The top layer draws over every scene, and a clone shows its source's
 		// page, which runs under the source's name.
@@ -652,6 +700,19 @@ mod tests {
 		};
 		assert_eq!(at(&collection, 1520.0, 280.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 300, 600)));
+
+		// A keyframed item takes input where its keyframes have it.
+		collection.scenes[0].items[1].keyframes = vec![moq_scene::Keyframe {
+			x: -400.0,
+			..moq_scene::Keyframe::new(Duration::ZERO)
+		}];
+		assert_eq!(at(&collection, 1320.0, 680.0), Some(("chat".into(), 300, 600)));
+		let later = page_at(&collection, None, Some(("Main", Duration::from_secs(9))), 1320.0, 680.0);
+		assert_eq!(
+			later.map(|hit| hit.page),
+			Some("chat".into()),
+			"the last keyframe holds"
+		);
 	}
 
 	/// One frame of `events` over a preview showing the canvas at its own
@@ -671,7 +732,7 @@ mod tests {
 		};
 		let mut delivered = Vec::new();
 		let mut output = ctx.run_ui(input, |ui| {
-			delivered = interact.update(ui, image, collection, None, Some("Main"));
+			delivered = interact.update(ui, image, collection, None, Some(("Main", Duration::ZERO)));
 		});
 		// Nothing renders, so the font atlas egui uploaded goes nowhere.
 		output.textures_delta.clear();
@@ -733,6 +794,97 @@ mod tests {
 			})
 			.collect();
 		assert_eq!(xs, [50, 60, 60]);
+	}
+
+	/// A drag follows its item as the item's keyframes move it: a point held
+	/// still on the moving page stays the same point on it, and a page shrunk
+	/// to nothing still hears the release, where it last heard the pointer.
+	#[test]
+	fn a_drag_follows_its_moving_item() {
+		let mut collection = Collection::new();
+		collection.canvas.width = 400;
+		collection.canvas.height = 100;
+		collection.sources.insert(
+			"chat".into(),
+			Source::Browser {
+				url: "https://example.com".into(),
+				width: 100,
+				height: 100,
+			},
+		);
+		let rect = Rect {
+			x: 200.0,
+			y: 0.0,
+			width: 100.0,
+			height: 100.0,
+		};
+		let keyframes = vec![
+			moq_scene::Keyframe {
+				x: -200.0,
+				..moq_scene::Keyframe::new(Duration::ZERO)
+			},
+			moq_scene::Keyframe {
+				ease: moq_scene::Ease::Linear,
+				..moq_scene::Keyframe::new(Duration::from_secs(2))
+			},
+			moq_scene::Keyframe {
+				width: -100.0,
+				..moq_scene::Keyframe::new(Duration::from_secs(3))
+			},
+		];
+		collection.scenes = vec![Scene {
+			items: vec![Item {
+				keyframes,
+				..Item::new("chat", rect)
+			}],
+			..Scene::new("Main")
+		}];
+		let ctx = egui::Context::default();
+		let mut interact = Interact::default();
+		let image = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 100.0));
+		let mut run = |since, events| {
+			let input = egui::RawInput {
+				screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 200.0))),
+				events,
+				..Default::default()
+			};
+			let mut delivered = Vec::new();
+			let mut output = ctx.run_ui(input, |ui| {
+				delivered = interact.update(ui, image, &collection, None, Some(("Main", since)));
+			});
+			output.textures_delta.clear();
+			delivered
+		};
+		let button = |x, pressed| egui::Event::PointerButton {
+			pos: egui::pos2(x, 50.0),
+			button: egui::PointerButton::Primary,
+			pressed,
+			modifiers: Default::default(),
+		};
+
+		// Pressed 50 px into the page while it is at x = 0.
+		run(Duration::ZERO, vec![button(50.0, true)]);
+		// A second later the page is at x = 100, and the pointer followed it.
+		let delivered = run(
+			Duration::from_secs(1),
+			vec![egui::Event::PointerMoved(egui::pos2(150.0, 50.0)), button(150.0, false)],
+		);
+		let xs = |delivered: Vec<(String, Input)>| -> Vec<i32> {
+			delivered
+				.iter()
+				.filter_map(|(_, input)| match input {
+					Input::Move { x, .. } | Input::Button { x, .. } => Some(*x),
+					_ => None,
+				})
+				.collect()
+		};
+		assert_eq!(xs(delivered), [50, 50]);
+
+		// Pressed 50 px into the page where it rests, then released once it has
+		// shrunk to nothing.
+		run(Duration::from_secs(2), vec![button(250.0, true)]);
+		let delivered = run(Duration::from_secs(3), vec![button(250.0, false)]);
+		assert_eq!(xs(delivered), [50]);
 	}
 
 	/// A drag that starts on a page stays with it: the moves and the release

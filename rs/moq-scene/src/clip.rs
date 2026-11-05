@@ -7,7 +7,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, Collection, Filter, Item, Layer, Mixes, Source, Video, validate_filters, versioned};
+use crate::collection::{
+	Audio, Collection, Filter, Item, Layer, Mixes, Scene, Source, Video, validate_filters, versioned,
+};
 use crate::edit::Draft;
 
 /// What a copy holds: items, or a filter chain.
@@ -114,8 +116,12 @@ impl Clip {
 					},
 					audio: items.audio.clone(),
 					video: items.video.clone(),
-					scenes: Vec::new(),
-					top: items.items.clone(),
+					// In a scene, where keyframes play; pasting into the top
+					// layer checks it holds none.
+					scenes: vec![Scene {
+						items: items.items.clone(),
+						..Scene::new("clip")
+					}],
 					..Collection::new()
 				}
 				.validate()?
@@ -292,6 +298,28 @@ mod tests {
 		let pasted = paste(&collection, &Layer::top(), &clip.to_toml().unwrap(), DIR);
 		assert_eq!(pasted.sources, collection.sources, "no source added");
 		assert_eq!(pasted.top, collection.scenes[0].items);
+	}
+
+	/// An animated item copies with its keyframes into a scene, and the top
+	/// layer, which never goes on to play them, refuses it.
+	#[test]
+	fn pastes_keyframes_into_a_scene_only() {
+		let mut collection = collection();
+		collection.scenes[0].items[0].keyframes = vec![crate::Keyframe {
+			x: -100.0,
+			..crate::Keyframe::new(std::time::Duration::ZERO)
+		}];
+		let clip = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR));
+		let text = clip.to_toml().unwrap();
+		let pasted = paste(&collection, &Layer::scene("Scene"), &text, DIR);
+		assert_eq!(pasted.scenes[0].items[1], collection.scenes[0].items[0]);
+
+		let Clip::Items(items) = Clip::from_toml(&text).unwrap() else {
+			panic!("not items")
+		};
+		let mut draft = collection.draft("Paste");
+		draft.paste(&Layer::top(), &items, Path::new(DIR)).unwrap();
+		assert!(matches!(draft.finish(), Err(Error::Invalid(_))));
 	}
 
 	/// Into another collection, a clip brings what its items show, renaming a
