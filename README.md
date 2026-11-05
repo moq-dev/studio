@@ -250,6 +250,7 @@ a restart of the studio. One studio at a time can use it: a second one's
 browser sources fail saying so. Each page renders in a process of its own, so
 a page that crashes fails only its own source, with the reason, while the
 stream carries on. A crash of the browser itself fails every browser source.
+Either shows at once, since the browser's processes dump no core.
 **Reload** in Sources restarts a page, failed or not. A page's dropdown
 lists, such as a `<select>`'s, draw over it and take clicks under
 **Interact**, but it opens no other windows (`window.open` and new-tab links
