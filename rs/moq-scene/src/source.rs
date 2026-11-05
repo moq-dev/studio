@@ -710,7 +710,9 @@ impl Driver {
 				let plays = self.plays.clone().expect("a replay source has plays");
 				self.replays(plays, listing).await
 			}
-			Source::Clone { .. } => unreachable!("a clone opens no feed"),
+			Source::Clone { .. } | Source::Scene { .. } | Source::Program => {
+				unreachable!("a clone or scene opens no feed")
+			}
 			device => self.device(device, listing).await,
 		}
 	}
@@ -757,7 +759,9 @@ impl Driver {
 			| Source::Overlay { .. }
 			| Source::Clone { .. }
 			| Source::Lut { .. }
-			| Source::Replay => unreachable!("not a device source"),
+			| Source::Replay
+			| Source::Scene { .. }
+			| Source::Program => unreachable!("not a device source"),
 		};
 
 		let mut config = moq_video::capture::Config::default();
@@ -1821,8 +1825,8 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 /// A broadcast is already published by its own publisher, and a clone shows
 /// its source's track, its filters carried by the layout rather than encoded
 /// again. Web pages and overlays are seen only in the program, since H.264
-/// would encode their transparency over black, and a LUT is looked up, never
-/// shown.
+/// would encode their transparency over black, a LUT is looked up, never
+/// shown, and a scene is drawn from other sources.
 fn publishes(source: &Source) -> bool {
 	match source {
 		Source::Camera { .. }
@@ -1838,7 +1842,9 @@ fn publishes(source: &Source) -> bool {
 		| Source::Browser { .. }
 		| Source::Overlay { .. }
 		| Source::Clone { .. }
-		| Source::Lut { .. } => false,
+		| Source::Lut { .. }
+		| Source::Scene { .. }
+		| Source::Program => false,
 	}
 }
 

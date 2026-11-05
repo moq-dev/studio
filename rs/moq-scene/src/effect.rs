@@ -405,23 +405,30 @@ enum Command {
 	Backdrop { texture: wgpu::Texture, area: Area },
 }
 
-/// One render's passes: the rasters items are filtered through, then the
-/// targets, in the order they are drawn.
+/// One render's passes: each target's after the rasters its items are
+/// filtered through, and the targets in the order they are drawn, so an item
+/// can show a target drawn before its own.
 #[derive(Default)]
 pub(crate) struct Frame {
+	/// The passes of the targets finished, in order.
+	done: Vec<Command>,
+	/// The rasters of the target drawn now.
 	rasters: Vec<Command>,
+	/// The target drawn now: its passes, and the copies a blend mode makes.
 	targets: Vec<Command>,
 	/// The canvas of the target drawn now, which items are prepared for.
 	canvas: Canvas,
 }
 
 impl Frame {
-	/// Start drawing a target the size of `canvas`, cleared to opaque black.
-	pub fn target(&mut self, target: &Picture, canvas: Canvas) {
+	/// Start drawing a target the size of `canvas`, cleared to `clear`.
+	pub fn target(&mut self, target: &Picture, canvas: Canvas, clear: wgpu::Color) {
+		self.done.append(&mut self.rasters);
+		self.done.append(&mut self.targets);
 		self.canvas = canvas;
 		self.targets.push(Command::Pass {
 			view: target.view.clone(),
-			clear: Some(wgpu::Color::BLACK),
+			clear: Some(clear),
 			draws: Vec::new(),
 		});
 	}
@@ -492,6 +499,11 @@ pub(crate) struct Effects {
 	free: Vec<Raster>,
 	/// Rasters used by this render.
 	used: Vec<Raster>,
+
+	/// The render passes and texture copies the last submit ran, for the
+	/// benchmarks.
+	#[cfg(test)]
+	pub(crate) ran: (usize, usize),
 }
 
 /// What a blend mode mixes with, `width` by `height`.
@@ -656,6 +668,8 @@ impl Effects {
 			backdrop,
 			free: Vec::new(),
 			used: Vec::new(),
+			#[cfg(test)]
+			ran: (0, 0),
 		}
 	}
 
@@ -738,7 +752,22 @@ impl Effects {
 
 	/// Run `frame`'s passes.
 	pub fn submit(&mut self, frame: Frame) {
-		let commands: Vec<Command> = frame.rasters.into_iter().chain(frame.targets).collect();
+		let Frame {
+			mut done,
+			rasters,
+			targets,
+			..
+		} = frame;
+		done.extend(rasters.into_iter().chain(targets));
+		let commands = done;
+		#[cfg(test)]
+		{
+			let copies = commands
+				.iter()
+				.filter(|command| matches!(command, Command::Backdrop { .. }))
+				.count();
+			self.ran = (commands.len() - copies, copies);
+		}
 		let draws = commands.iter().flat_map(|command| match command {
 			Command::Pass { draws, .. } => draws.as_slice(),
 			Command::Backdrop { .. } => &[],

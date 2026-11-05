@@ -20,7 +20,8 @@
 //!   textures on the caller's `wgpu` device, one pair per canvas from one
 //!   upload of each source's picture, cutting or running a [`Transition`]
 //!   between them on every canvas together, and plays each item's
-//!   [`Keyframe`]s from when its scene went on. `moq_video::render::export` hands the
+//!   [`Keyframe`]s from when its scene went on. A scene source shows another
+//!   scene, drawn first into a texture of its own, or the program itself. `moq_video::render::export` hands the
 //!   program to an encoder, on the GPU where the platform allows, and a
 //!   [`Scaler`] draws it smaller for a smaller rendition.
 //! - [`publish`] gives each local source its own track, in a broadcast the
@@ -49,7 +50,7 @@ pub mod source;
 pub use clip::Clip;
 pub use collection::{
 	Audio, Blend, Canvas, Collection, Crop, Direction, Ease, Extra, Filter, Item, Keyframe, Layer, MaskMode, Mixes,
-	Rect, Rgba, Scene, Source, Transition, Video,
+	Nested, Rect, Rgba, Scene, Source, Transition, Video,
 };
 pub use compositor::{Compositor, FORMAT};
 pub use edit::{Change, Draft, Edit, History};

@@ -1008,17 +1008,16 @@ impl Panels {
 		let mut gesture = None;
 		ui.horizontal(|ui| {
 			if ui.button("Cut").clicked() {
-				let state = &mut *state;
-				state.compositor.cut(&state.sources);
+				let cut = state.cut();
+				self.check(cut);
 			}
 			if ui
 				.button("Transition")
 				.on_hover_text("Take the preview to program by the transition set beside it")
 				.clicked()
 			{
-				let state = &mut *state;
-				let now = kio::clock::Instant::now();
-				state.compositor.transition(transition.clone(), &state.sources, now);
+				let taken = state.transition(transition.clone(), kio::clock::Instant::now());
+				self.check(taken);
 			}
 			match &next {
 				Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } => self.direction = *direction,
@@ -1482,6 +1481,8 @@ impl Panels {
 								.on_hover_text(health::without(stall));
 						}
 						(None, Some(feed), None) => status(ui, &feed.status()),
+						// A scene is drawn from other sources, so it runs nothing.
+						(None, None, None) if collection.nested(name).is_some() => status(ui, &Status::Live),
 						(None, None, None) => status(ui, &Status::Starting),
 					}
 					// A track can fail while its source still draws, such as on a GPU
@@ -1576,7 +1577,13 @@ impl Panels {
 			});
 
 			ui.separator();
-			if let Some(source) = self.add.ui(ui) {
+			let scenes: Vec<String> = state
+				.collection()
+				.scenes
+				.iter()
+				.map(|scene| scene.name.clone())
+				.collect();
+			if let Some(source) = self.add.ui(ui, &scenes) {
 				let name = self.add.name.trim().to_string();
 				let layer = self.layer(&state).ok();
 				let result = add(&mut state, layer, name, source, None);
@@ -3601,6 +3608,8 @@ fn describe(source: &Source) -> String {
 		Source::Clone { source } => format!("clone of {source}"),
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
+		Source::Scene { scene } => format!("scene: {scene}"),
+		Source::Program => "program".into(),
 	}
 }
 
@@ -3661,6 +3670,8 @@ struct AddSource {
 	/// on program.
 	looping: bool,
 	restart: bool,
+	/// The scene a scene source draws, or `None` for the program.
+	scene: Option<String>,
 }
 
 impl Default for AddSource {
@@ -3675,6 +3686,7 @@ impl Default for AddSource {
 			height: canvas.height,
 			looping: false,
 			restart: true,
+			scene: None,
 		}
 	}
 }
@@ -3695,10 +3707,11 @@ enum Kind {
 	Overlay,
 	Replay,
 	Lut,
+	Scene,
 }
 
 impl Kind {
-	const ALL: [Self; 13] = [
+	const ALL: [Self; 14] = [
 		Self::Color,
 		Self::Image,
 		Self::Media,
@@ -3712,6 +3725,7 @@ impl Kind {
 		Self::Overlay,
 		Self::Replay,
 		Self::Lut,
+		Self::Scene,
 	];
 
 	fn label(self) -> &'static str {
@@ -3729,13 +3743,14 @@ impl Kind {
 			Self::Overlay => "Overlay",
 			Self::Replay => "Replay",
 			Self::Lut => "LUT",
+			Self::Scene => "Scene",
 		}
 	}
 
 	/// What the value field holds, if this kind takes one.
 	fn value(self) -> Option<&'static str> {
 		match self {
-			Self::Color | Self::SystemAudio | Self::Replay => None,
+			Self::Color | Self::SystemAudio | Self::Replay | Self::Scene => None,
 			Self::Image | Self::Media => Some("file"),
 			Self::Lut => Some(".cube file"),
 			Self::Broadcast => Some("path"),
@@ -3748,8 +3763,9 @@ impl Kind {
 }
 
 impl AddSource {
-	/// Draw the form; the source to add once the user asks for it.
-	fn ui(&mut self, ui: &mut Ui) -> Option<Source> {
+	/// Draw the form, offering `scenes` to a scene source; the source to add
+	/// once the user asks for it.
+	fn ui(&mut self, ui: &mut Ui, scenes: &[String]) -> Option<Source> {
 		let mut add = false;
 		egui::Grid::new("add source").show(ui, |ui| {
 			ui.label("Name");
@@ -3785,6 +3801,23 @@ impl AddSource {
 			if self.kind == Kind::Color {
 				ui.label("Color");
 				egui::color_picker::color_edit_button_srgba(ui, &mut self.color, egui::color_picker::Alpha::OnlyBlend);
+				ui.end_row();
+			}
+			if self.kind == Kind::Scene {
+				// A pick whose scene was removed or renamed away names no scene.
+				if self.scene.as_ref().is_some_and(|scene| !scenes.contains(scene)) {
+					self.scene = None;
+				}
+				ui.label("Draws");
+				egui::ComboBox::from_id_salt("scene")
+					.selected_text(self.scene.as_deref().unwrap_or("Program"))
+					.show_ui(ui, |ui| {
+						ui.selectable_value(&mut self.scene, None, "Program")
+							.on_hover_text("Whatever is on air, transitions included");
+						for scene in scenes {
+							ui.selectable_value(&mut self.scene, Some(scene.clone()), scene);
+						}
+					});
 				ui.end_row();
 			}
 			if self.kind == Kind::Media {
@@ -3834,6 +3867,10 @@ impl AddSource {
 				height: self.height,
 			},
 			Kind::Replay => Source::Replay,
+			Kind::Scene => match &self.scene {
+				Some(scene) => Source::Scene { scene: scene.clone() },
+				None => Source::Program,
+			},
 		})
 	}
 }

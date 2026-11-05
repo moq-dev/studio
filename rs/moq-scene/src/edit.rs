@@ -582,14 +582,32 @@ impl Draft {
 		})
 	}
 
-	/// Remove the scene at `index`, with its items.
+	/// Remove the scene at `index`, with its items, and every scene source
+	/// drawing it, as [`remove_source`](Self::remove_source) removes one.
 	pub fn remove_scene(&mut self, index: usize) -> Result<(), Error> {
+		let name = self.scene_at(index)?.name;
+		for source in self.drawing(&name) {
+			self.remove_source(&source)?;
+		}
+		self.take_scene(index).map(drop)
+	}
+
+	/// Take the scene at `index` out, leaving what refers to it.
+	fn take_scene(&mut self, index: usize) -> Result<Scene, Error> {
 		let before = self.scene_at(index)?;
 		self.change(Change::Scene {
 			index,
-			before: Some(before),
+			before: Some(before.clone()),
 			after: None,
-		})
+		})?;
+		Ok(before)
+	}
+
+	/// The scene sources drawing the scene called `scene`.
+	fn drawing(&self, scene: &str) -> Vec<String> {
+		let sources = self.collection.sources.iter();
+		let drawing = sources.filter(|(_, source)| matches!(source, Source::Scene { scene: drawn } if drawn == scene));
+		drawing.map(|(name, _)| name.clone()).collect()
 	}
 
 	/// Replace the scene at `index`.
@@ -602,19 +620,24 @@ impl Draft {
 		})
 	}
 
-	/// Rename the scene at `index`, keeping what it shows.
+	/// Rename the scene at `index`, keeping what it shows, and every scene
+	/// source drawing it.
 	pub fn rename_scene(&mut self, index: usize, name: impl Into<String>) -> Result<(), Error> {
+		let before = self.scene_at(index)?;
 		let scene = Scene {
 			name: name.into(),
-			..self.scene_at(index)?
+			..before.clone()
 		};
+		for source in self.drawing(&before.name) {
+			let scene = scene.name.clone();
+			self.set_source(&source, Some(Source::Scene { scene }))?;
+		}
 		self.set_scene(index, scene)
 	}
 
 	/// Move the scene at `from` to `to`, counted after its removal.
 	pub fn move_scene(&mut self, from: usize, to: usize) -> Result<(), Error> {
-		let scene = self.scene_at(from)?;
-		self.remove_scene(from)?;
+		let scene = self.take_scene(from)?;
 		self.insert_scene(to, scene)
 	}
 
@@ -1144,6 +1167,40 @@ mod tests {
 
 		history.undo(&mut collection).unwrap();
 		assert_eq!(collection, before);
+	}
+
+	/// A scene source follows its scene through a rename and a move, and goes
+	/// with it, with the items showing it, when it is removed, all undone whole.
+	#[test]
+	fn a_scene_source_follows_its_scene() {
+		let mut collection = collection();
+		let fill = Rect::fill(&collection.canvas);
+		collection.scenes.push(Scene {
+			items: vec![Item::new("red", fill)],
+			..Scene::new("Inner")
+		});
+		let inner = Source::Scene { scene: "Inner".into() };
+		collection.sources.insert("inner".into(), inner);
+		collection.scenes[0].items.push(Item::new("inner", fill));
+		collection.validate().unwrap();
+		let mut history = History::new();
+
+		let mut draft = collection.draft("Rename `Inner`");
+		draft.rename_scene(1, "Nested").unwrap();
+		draft.move_scene(1, 0).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.sources["inner"], Source::Scene { scene: "Nested".into() });
+		assert_eq!(collection.scenes[0].name, "Nested");
+		let renamed = collection.clone();
+
+		let mut draft = collection.draft("Remove `Nested`");
+		draft.remove_scene(0).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert!(!collection.sources.contains_key("inner"));
+		assert_eq!(collection.scenes[0].items.len(), 1, "the item showing it went too");
+
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, renamed);
 	}
 
 	/// A removed source's filters go with it, from items and other sources

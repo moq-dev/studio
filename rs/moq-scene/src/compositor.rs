@@ -10,7 +10,7 @@ use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
 use crate::collection::{
-	Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Rect, Settled, Source, Transition,
+	Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Nested, Rect, Settled, Source, Transition,
 };
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::overlay::{Overlay, Overlays};
@@ -42,6 +42,14 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// them. An item's keyframes start when its scene goes on program, and
 /// separately when it goes into preview, for the preview, on every canvas
 /// alike.
+///
+/// A scene a [`Source::Scene`] draws is drawn first, at the main canvas's
+/// size, into a texture of its own that is transparent where it draws
+/// nothing, once per render however many items show it, and only while one
+/// that is drawn does. Its keyframes play from when the scene drawing it went
+/// on, so where preview and program show it at different moments of them, it
+/// is drawn once for each. A [`Source::Program`] shows the main canvas's
+/// program texture itself, drawn before anything showing it.
 pub struct Compositor {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
@@ -51,6 +59,10 @@ pub struct Compositor {
 	extras: BTreeMap<String, Output>,
 
 	layers: HashMap<String, Layer>,
+	/// The textures scenes drawn through scene sources are drawn into, by
+	/// scene: as many as the last render drew it at different moments,
+	/// reused by the next.
+	nested: HashMap<String, Vec<Target>>,
 	/// Lays out and paints overlays, started with the first one.
 	overlays: Option<Overlays>,
 	preview_scene: Option<String>,
@@ -137,6 +149,7 @@ impl Switch {
 }
 
 /// A canvas-sized texture drawn into, and bound to sample.
+#[derive(Clone)]
 struct Target {
 	texture: wgpu::Texture,
 	picture: Picture,
@@ -189,6 +202,7 @@ impl Compositor {
 			queue: queue.clone(),
 			effects,
 			layers: HashMap::new(),
+			nested: HashMap::new(),
 			overlays: None,
 			preview_scene: None,
 			program_scene: None,
@@ -357,12 +371,27 @@ impl Compositor {
 
 	/// Put the preview on program at once, ending any transition, and
 	/// stopping a stinger's clip in `sources`.
-	pub fn cut(&mut self, sources: &Sources) {
+	///
+	/// Refused, changing nothing, if the preview scene draws the program in
+	/// `collection`, which it would draw into itself.
+	pub fn cut(&mut self, collection: &Collection, sources: &Sources) -> Result<(), Error> {
+		self.can_take(collection)?;
 		if let Some(switch) = self.switch.take() {
 			switch.stop(sources);
 		}
 		self.program_scene = self.preview_scene.clone();
 		self.program_start = None;
+		Ok(())
+	}
+
+	/// Refuse to take a preview scene that draws the program to program.
+	fn can_take(&self, collection: &Collection) -> Result<(), Error> {
+		match self.preview_scene.as_deref() {
+			Some(scene) if collection.draws_program(scene) => Err(Error::Invalid(format!(
+				"`{scene}` draws the program, so it cannot go on program"
+			))),
+			_ => Ok(()),
+		}
 	}
 
 	/// Take the preview to program by `transition`, starting at `now`.
@@ -374,7 +403,16 @@ impl Compositor {
 	/// as it plays, and ends with the clip's play, leaving the clip holding its
 	/// last picture, or stopping a looping one; a clip that cannot play, or
 	/// fails, cuts at once instead.
-	pub fn transition(&mut self, transition: Transition, sources: &Sources, now: Instant) {
+	///
+	/// Refused, changing nothing, as [`cut`](Self::cut) is.
+	pub fn transition(
+		&mut self,
+		collection: &Collection,
+		transition: Transition,
+		sources: &Sources,
+		now: Instant,
+	) -> Result<(), Error> {
+		self.can_take(collection)?;
 		if let Some(switch) = self.switch.take() {
 			switch.stop(sources);
 		}
@@ -387,6 +425,7 @@ impl Compositor {
 			transition,
 			played: None,
 		});
+		Ok(())
 	}
 
 	/// How far the transition under way has switched the scenes at `now`,
@@ -446,6 +485,34 @@ impl Compositor {
 		self.preview_shown = preview_since;
 		let program_since = since(&mut self.program_start);
 
+		let preview = On(self.preview_scene.as_deref(), preview_since);
+		let program = On(self.program_scene.as_deref(), program_since);
+		let switch = self.switch.as_ref().zip(progress).map(|(switch, progress)| {
+			let from = On(switch.from.as_deref(), now.saturating_duration_since(switch.from_start));
+			(switch, from, progress)
+		});
+
+		// Each canvas's scenes and top layer, and the scenes they draw.
+		let shown: Vec<On> = std::iter::once(preview).chain(on_program(program, switch)).collect();
+		let mut roots = Vec::new();
+		for canvas in std::iter::once(None).chain(self.extras.keys().cloned().map(Some)) {
+			for On(scene, since) in &shown {
+				if let Some(scene) = scene {
+					let place = Place::scene(*scene).on(canvas.clone());
+					roots.push((place, *since));
+				}
+			}
+			roots.push((Place::top().on(canvas), Duration::ZERO));
+		}
+		let nesting = Nesting::of(collection, roots);
+		let targets = nested_targets(
+			&mut self.nested,
+			&self.device,
+			&self.effects,
+			self.main.canvas,
+			&nesting,
+		);
+
 		let mut frame = self.effects.frame();
 		let mut draw = Draw {
 			collection,
@@ -455,18 +522,28 @@ impl Compositor {
 			canvas: None,
 			size: self.main.canvas,
 			prepared: HashMap::new(),
+			nesting: &nesting,
+			scenes: HashMap::new(),
+			program: None,
 		};
-		let preview = On(self.preview_scene.as_deref(), preview_since);
-		let program = On(self.program_scene.as_deref(), program_since);
-		let switch = self.switch.as_ref().zip(progress).map(|(switch, progress)| {
-			let from = On(switch.from.as_deref(), now.saturating_duration_since(switch.from_start));
-			(switch, from, progress)
-		});
-		let extras = self.extras.iter().map(|(name, output)| (Some(name.as_str()), output));
-		for (canvas, output) in std::iter::once((None, &self.main)).chain(extras) {
-			draw.canvas = canvas;
+		// What the program shows is drawn first, then the program, then what
+		// shows it, then everything else.
+		let nests = nesting.order.iter().zip(&targets).enumerate();
+		let (late, early): (Vec<_>, Vec<_>) = nests.partition(|(_, (nest, _))| nest.program);
+		for (index, (nest, target)) in early {
+			draw.nest(index, nest, target);
+		}
+		draw.draw_program(&self.main, program, switch);
+		draw.program = Some(self.main.program.picture.clone());
+		for (index, (nest, target)) in late {
+			draw.nest(index, nest, target);
+		}
+		draw.draw_preview(&self.main, preview);
+		for (name, output) in &self.extras {
+			draw.canvas = Some(name);
 			draw.size = output.canvas;
-			draw.output(output, preview, program, switch);
+			draw.draw_preview(output, preview);
+			draw.draw_program(output, program, switch);
 		}
 
 		self.effects.submit(frame);
@@ -597,8 +674,8 @@ impl Compositor {
 	}
 
 	/// The sources whose pictures preview and program draw on any canvas:
-	/// each visible item's, a stinger's clip under way, and each mask's,
-	/// through clones.
+	/// each visible item's, through the scenes they draw, a stinger's clip
+	/// under way, and each mask's, through clones.
 	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
 		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
 		let scenes: Vec<Option<String>> = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving]
@@ -607,7 +684,14 @@ impl Compositor {
 			.map(|name| Some(name.to_string()))
 			.chain([None])
 			.collect();
-		let canvases = std::iter::once(None).chain(self.extras.keys().map(Some));
+		let canvases = std::iter::once(None).chain(self.extras.keys().cloned().map(Some));
+		let layers = canvases.flat_map(|canvas| {
+			let scenes = scenes.iter().cloned();
+			scenes.map(move |scene| Place {
+				canvas: canvas.clone(),
+				scene,
+			})
+		});
 		let mut shown = HashSet::new();
 		let masks = |shown: &mut HashSet<&'a str>, filters: &mut dyn Iterator<Item = &'a Filter>| {
 			for filter in filters {
@@ -616,18 +700,9 @@ impl Compositor {
 				}
 			}
 		};
-		for canvas in canvases {
-			for scene in &scenes {
-				let place = Place {
-					canvas: canvas.cloned(),
-					scene: scene.clone(),
-				};
-				let items = collection.items(&place).unwrap_or_default();
-				for item in items.iter().filter(|item| item.visible) {
-					shown.insert(collection.capture(&item.source));
-					masks(&mut shown, &mut collection.filters(item));
-				}
-			}
+		for item in collection.drawn(layers) {
+			shown.insert(collection.capture(&item.source));
+			masks(&mut shown, &mut collection.filters(item));
 		}
 		// Drawn through its source's filters alone.
 		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
@@ -637,6 +712,31 @@ impl Compositor {
 		}
 		shown
 	}
+}
+
+/// A texture of `canvas` for each scene `nesting` draws, reusing those in
+/// `pool`, the last render's, and leaving there only those used now.
+fn nested_targets(
+	pool: &mut HashMap<String, Vec<Target>>,
+	device: &wgpu::Device,
+	effects: &Effects,
+	canvas: Canvas,
+	nesting: &Nesting,
+) -> Vec<Target> {
+	let mut free = std::mem::take(pool);
+	let mut targets = Vec::with_capacity(nesting.order.len());
+	for nest in &nesting.order {
+		let reused = free.get_mut(nest.scene).and_then(Vec::pop);
+		let target = match reused {
+			Some(target) if (target.texture.width(), target.texture.height()) == (canvas.width, canvas.height) => {
+				target
+			}
+			_ => Target::new(device, effects, canvas, "moq-scene nested"),
+		};
+		pool.entry(nest.scene.to_string()).or_default().push(target.clone());
+		targets.push(target);
+	}
+	targets
 }
 
 /// Whether a stinger playing `feed`'s clip is past `cut` into it at `now`, or
@@ -815,6 +915,119 @@ fn fits(device: &wgpu::Device, canvas: Canvas) -> Result<(), Error> {
 #[derive(Clone, Copy)]
 struct On<'a>(Option<&'a str>, Duration);
 
+/// The scenes program draws: `program`, or those `switch` draws as it goes
+/// to it.
+fn on_program<'a>(program: On<'a>, switch: Option<(&Switch, On<'a>, f32)>) -> Vec<On<'a>> {
+	match switch {
+		// Under its clip, the program switches scenes at once.
+		Some((switch, from, progress)) if switch.transition.stinger().is_some() => {
+			vec![if progress < 1.0 { from } else { program }]
+		}
+		Some((_, from, _)) => vec![from, program],
+		None => vec![program],
+	}
+}
+
+/// The scenes a render draws through scene sources, each at the moment of its
+/// keyframes it is shown at.
+struct Nesting<'a> {
+	/// In an order that draws each after the scenes it shows.
+	order: Vec<Nest<'a>>,
+	/// Which of `order` draws a scene shown in a scene that went on a while
+	/// ago, by the scene's name and that while.
+	drawn: HashMap<(&'a str, Duration), usize>,
+}
+
+/// A scene drawn through a scene source.
+struct Nest<'a> {
+	scene: &'a str,
+	/// How long ago the scene drawing it went on, which its keyframes play
+	/// from.
+	since: Duration,
+	/// `since`, or `None` once every item it draws, through the scenes it
+	/// draws, holds its last keyframe, which every later moment draws alike.
+	moment: Option<Duration>,
+	/// Whether it shows the program, itself or through the scenes it draws.
+	program: bool,
+}
+
+impl<'a> Nesting<'a> {
+	/// The scenes the items of each of `roots` draw, from when its scene went
+	/// on, and those they draw in turn.
+	fn of(collection: &'a Collection, roots: impl IntoIterator<Item = (Place, Duration)>) -> Self {
+		let mut nesting = Self {
+			order: Vec::new(),
+			drawn: HashMap::new(),
+		};
+		let mut walked = HashMap::new();
+		for (place, since) in roots {
+			let items = collection.items(&place).unwrap_or_default();
+			nesting.walk(collection, items, since, &mut walked);
+		}
+		nesting
+	}
+
+	/// Add the scenes `items` show, from when the scene they are in went on
+	/// `since` ago. Returns whether any shows the program. `walked` holds each
+	/// scene and moment added, or being walked.
+	fn walk(
+		&mut self,
+		collection: &'a Collection,
+		items: &'a [Item],
+		since: Duration,
+		walked: &mut HashMap<(&'a str, Option<Duration>), Option<usize>>,
+	) -> bool {
+		let mut program = false;
+		for item in items.iter().filter(|item| item.visible) {
+			let scene = match collection.nested(&item.source) {
+				Some(Nested::Scene(scene)) => scene,
+				Some(Nested::Program) => {
+					program = true;
+					continue;
+				}
+				None => continue,
+			};
+			if let Some(&index) = self.drawn.get(&(scene, since)) {
+				program |= self.order[index].program;
+				continue;
+			}
+			let moment = moment(collection, scene, since);
+			let index = match walked.get(&(scene, moment)) {
+				Some(Some(index)) => *index,
+				// A scene drawing itself, which validation refuses: it shows
+				// nothing there rather than recursing forever.
+				Some(None) => continue,
+				None => {
+					walked.insert((scene, moment), None);
+					let items = collection.scene(scene).map_or(&[][..], |scene| scene.items.as_slice());
+					let shows = self.walk(collection, items, since, walked);
+					self.order.push(Nest {
+						scene,
+						since,
+						moment,
+						program: shows,
+					});
+					let index = self.order.len() - 1;
+					walked.insert((scene, moment), Some(index));
+					index
+				}
+			};
+			self.drawn.insert((scene, since), index);
+			program |= self.order[index].program;
+		}
+		program
+	}
+}
+
+/// The moment of its keyframes the scene called `scene` is drawn at, `since`
+/// the scene drawing it went on, or `None` once every item it draws, through
+/// the scenes it draws, holds its last keyframe.
+fn moment(collection: &Collection, scene: &str, since: Duration) -> Option<Duration> {
+	let items = collection.drawn([Place::scene(scene)]);
+	let moving = items.iter().any(|item| item.settled(since) != Settled::After);
+	moving.then_some(since)
+}
+
 /// One render's draws onto its targets.
 struct Draw<'a> {
 	collection: &'a Collection,
@@ -829,20 +1042,37 @@ struct Draw<'a> {
 	/// where it is, on which canvas, and its [`Item::settled`] time, as two
 	/// outputs showing its scene can be at different points of its keyframes.
 	prepared: HashMap<(Place, usize, Settled), Option<Prepared>>,
+	/// The scenes drawn through scene sources this render.
+	nesting: &'a Nesting<'a>,
+	/// The picture of each of `nesting`'s scenes drawn so far, by its place
+	/// in the order.
+	scenes: HashMap<usize, Picture>,
+	/// The main canvas's program, once drawn.
+	program: Option<Picture>,
 }
 
 impl Draw<'_> {
-	/// Draw `output`'s preview, showing `preview`, and its program, showing
-	/// `program`, or `switch` to it from the scene it leaves, `progress` of
-	/// the way there.
-	fn output(&mut self, output: &Output, preview: On, program: On, switch: Option<(&Switch, On, f32)>) {
-		let top = self.place(None);
+	/// Draw the scene `nest` names, the `index`th of the nesting, into
+	/// `target`, transparent where it draws nothing, for items to show.
+	fn nest(&mut self, index: usize, nest: &Nest, target: &Target) {
+		self.frame.target(&target.picture, self.size, wgpu::Color::TRANSPARENT);
+		self.layer(target, Place::scene(nest.scene), nest.since);
+		self.scenes.insert(index, target.picture.clone());
+	}
+
+	/// Draw `output`'s preview, showing `preview` under the top layer.
+	fn draw_preview(&mut self, output: &Output, preview: On) {
 		// The top layer goes over both outputs, and over a transition rather
 		// than through it, so it stays on across the switch.
 		self.target(&output.preview);
 		self.scene(&output.preview, preview);
-		self.layer(&output.preview, top.clone(), Duration::ZERO);
+		self.layer(&output.preview, self.place(None), Duration::ZERO);
+	}
 
+	/// Draw `output`'s program, showing `program`, or `switch` to it from the
+	/// scene it leaves, `progress` of the way there, under the top layer.
+	fn draw_program(&mut self, output: &Output, program: On, switch: Option<(&Switch, On, f32)>) {
+		let top = self.place(None);
 		let to = program;
 		match switch {
 			Some((switch, from, progress)) => {
@@ -901,9 +1131,9 @@ impl Draw<'_> {
 		}
 	}
 
-	/// Start drawing `target`.
+	/// Start drawing `target`, a canvas, opaque black where nothing is drawn.
 	fn target(&mut self, target: &Target) {
-		self.frame.target(&target.picture, self.size);
+		self.frame.target(&target.picture, self.size, wgpu::Color::BLACK);
 	}
 
 	/// Draw `on`'s items onto `target`. A missing scene draws nothing.
@@ -934,7 +1164,27 @@ impl Draw<'_> {
 	fn layer(&mut self, target: &Target, place: Place, since: Duration) {
 		let items = self.collection.items(&place).unwrap_or_default();
 		for (index, item) in items.iter().enumerate().filter(|(_, item)| item.visible) {
-			self.item(target, (place.clone(), index, item.settled(since)), &item.posed(since));
+			let key = (place.clone(), index, self.settled(item, since));
+			self.item(target, key, &item.posed(since), since);
+		}
+	}
+
+	/// Where `since` falls among `item`'s keyframes, as [`Item::settled`], but
+	/// at that moment itself while a scene it shows moves, so a draw of it is
+	/// shared only with draws showing the scene alike.
+	fn settled(&self, item: &Item, since: Duration) -> Settled {
+		let moving = match self.collection.nested(&item.source) {
+			Some(Nested::Scene(scene)) => self
+				.nesting
+				.drawn
+				.get(&(scene, since))
+				.is_some_and(|&index| self.nesting.order[index].moment.is_some()),
+			_ => false,
+		};
+		if moving {
+			Settled::At(since)
+		} else {
+			item.settled(since)
 		}
 	}
 
@@ -952,16 +1202,16 @@ impl Draw<'_> {
 			..Item::new(source, Rect::fill(&canvas))
 		};
 		let pose = Pose::of(self.collection, &item);
-		self.posed(target, &item, pose);
+		self.posed(target, &item, pose, Duration::ZERO);
 	}
 
-	/// Draw `item`, posed, where it is placed onto `target`, shared with every
-	/// other draw of it under `key`.
-	fn item(&mut self, target: &Target, key: (Place, usize, Settled), item: &Item) {
+	/// Draw `item`, posed `since` its scene went on, where it is placed onto
+	/// `target`, shared with every other draw of it under `key`.
+	fn item(&mut self, target: &Target, key: (Place, usize, Settled), item: &Item, since: Duration) {
 		let prepared = match self.prepared.get(&key) {
 			Some(prepared) => prepared.clone(),
 			None => {
-				let prepared = self.prepare(item, Pose::of(self.collection, item));
+				let prepared = self.prepare(item, Pose::of(self.collection, item), since);
 				self.prepared.insert(key, prepared.clone());
 				prepared
 			}
@@ -971,12 +1221,13 @@ impl Draw<'_> {
 		}
 	}
 
-	/// Draw `item` onto `target` in `pose` rather than where it is placed.
-	fn posed(&mut self, target: &Target, item: &Item, pose: Pose) {
+	/// Draw `item` onto `target` in `pose` rather than where it is placed,
+	/// `since` its scene went on.
+	fn posed(&mut self, target: &Target, item: &Item, pose: Pose, since: Duration) {
 		if pose.opacity <= 0.0 {
 			return;
 		}
-		if let Some(prepared) = self.prepare(item, pose) {
+		if let Some(prepared) = self.prepare(item, pose, since) {
 			self.effects.draw(self.frame, &target.texture, &prepared);
 		}
 	}
@@ -1029,7 +1280,7 @@ impl Draw<'_> {
 				(Some(at), None) => {
 					let pose = Pose::of(collection, &leaving[at]);
 					let opacity = 1.0 - progress;
-					self.posed(target, &leaving[at], Pose { opacity, ..pose });
+					self.posed(target, &leaving[at], Pose { opacity, ..pose }, from.1);
 				}
 				(None, Some(index)) => {
 					let pose = Pose::of(collection, &entering[index]);
@@ -1040,6 +1291,7 @@ impl Draw<'_> {
 							opacity: progress,
 							..pose
 						},
+						to.1,
 					);
 				}
 				(Some(at), Some(index)) => {
@@ -1049,17 +1301,18 @@ impl Draw<'_> {
 					if old.filters == new.filters && old.blend == new.blend {
 						if pose == own {
 							// Shared with the preview when it draws the same.
-							let key = (place.clone(), index, resting[index].settled(to.1));
-							self.item(target, key, new);
+							let key = (place.clone(), index, self.settled(&resting[index], to.1));
+							self.item(target, key, new, to.1);
 						} else {
-							self.posed(target, new, pose);
+							self.posed(target, new, pose, to.1);
 						}
 					} else if let Some(filters) = mixed(old, new, progress) {
 						let item = Item { filters, ..new.clone() };
-						self.posed(target, &item, pose);
+						self.posed(target, &item, pose, to.1);
 					} else {
 						// A look that cannot be mixed changes as the stacking does.
-						self.posed(target, if progress < 0.5 { old } else { new }, pose);
+						let (item, since) = if progress < 0.5 { (old, from.1) } else { (new, to.1) };
+						self.posed(target, item, pose, since);
 					}
 				}
 				(None, None) => unreachable!("a slot holds an item"),
@@ -1067,9 +1320,11 @@ impl Draw<'_> {
 		}
 	}
 
-	fn prepare(&mut self, item: &Item, pose: Pose) -> Option<Prepared> {
+	/// `item` in `pose`, `since` its scene went on, ready to draw: `None`
+	/// while it shows nothing yet.
+	fn prepare(&mut self, item: &Item, pose: Pose, since: Duration) -> Option<Prepared> {
 		let collection = self.collection;
-		let picture = self.library.0.get(collection.capture(&item.source))?.picture.as_ref()?;
+		let picture = &self.shows(item, since)?;
 		let fade = Filter::Opacity { amount: pose.opacity };
 		let mut filters: Vec<&Filter> = collection.filters(item).collect();
 		if pose.opacity < 1.0 {
@@ -1083,6 +1338,25 @@ impl Draw<'_> {
 			blend: item.blend,
 		};
 		self.effects.prepare(self.frame, item, &self.library)
+	}
+}
+
+impl Draw<'_> {
+	/// The picture `item` shows, `since` its scene went on: its source's
+	/// newest, the scene it draws as drawn this render, or the main canvas's
+	/// program once drawn.
+	fn shows(&self, item: &Item, since: Duration) -> Option<Picture> {
+		match self.collection.nested(&item.source) {
+			Some(Nested::Scene(scene)) => {
+				let index = self.nesting.drawn.get(&(scene, since))?;
+				self.scenes.get(index).cloned()
+			}
+			Some(Nested::Program) => self.program.clone(),
+			None => {
+				let layer = self.library.0.get(self.collection.capture(&item.source))?;
+				layer.picture.clone()
+			}
+		}
 	}
 }
 
@@ -1342,7 +1616,7 @@ mod tests {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(Instant::now());
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 1), RED);
@@ -1372,7 +1646,7 @@ mod tests {
 			collection.scenes[0].items.truncate(1);
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(Instant::now());
 			let actual = pixel(&studio.program(), 1, 1);
 			assert!(near(actual, [128, 0, 0, 255]), "{actual:?}");
@@ -1389,9 +1663,12 @@ mod tests {
 			let mut studio = Studio::new(collection()).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, &studio.sources, start);
+			studio
+				.compositor
+				.transition(&studio.collection, FADE, &studio.sources, start)
+				.unwrap();
 			assert_eq!(studio.compositor.program_scene(), Some("blue"));
 
 			studio.render(start + Duration::from_millis(500));
@@ -1442,7 +1719,7 @@ mod tests {
 
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(Instant::now());
 			let program = studio.program();
 			let actual = pixel(&program, 1, 6);
@@ -1463,12 +1740,15 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 1, 6), BLUE);
 
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, &studio.sources, start);
+			studio
+				.compositor
+				.transition(&studio.collection, FADE, &studio.sources, start)
+				.unwrap();
 			studio.render(start + Duration::from_millis(500));
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
@@ -1516,14 +1796,17 @@ mod tests {
 
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
 			assert_eq!(tall(&mut studio), (BLUE, RED));
 			assert_eq!(studio.compositor.layers.len(), 2, "each source is uploaded once");
 
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, &studio.sources, start);
+			studio
+				.compositor
+				.transition(&studio.collection, FADE, &studio.sources, start)
+				.unwrap();
 			studio.render(start + Duration::from_millis(500));
 			let (fading, kept) = tall(&mut studio);
 			assert!(near(fading, [0, 0, 128, 255]), "{fading:?}");
@@ -1553,10 +1836,13 @@ mod tests {
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
 
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, &studio.sources, start);
+			studio
+				.compositor
+				.transition(&studio.collection, FADE, &studio.sources, start)
+				.unwrap();
 			studio.render(start + Duration::from_millis(500));
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			assert!(!studio.compositor.transitioning());
 			studio.render(start + Duration::from_millis(600));
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
@@ -1615,9 +1901,12 @@ mod tests {
 			] {
 				let start = Instant::now();
 				studio.compositor.set_preview(Some("red".into()));
-				studio.compositor.cut(&studio.sources);
+				studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 				studio.compositor.set_preview(Some("blue".into()));
-				studio.compositor.transition(transition.clone(), &studio.sources, start);
+				studio
+					.compositor
+					.transition(&studio.collection, transition.clone(), &studio.sources, start)
+					.unwrap();
 				studio.render(start + Duration::from_millis(500));
 				let program = studio.program();
 				let actual = [(1, 1), (1, 6), (6, 1), (6, 6)].map(|(x, y)| pixel(&program, x, y));
@@ -1663,12 +1952,18 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
 			let duration = Duration::from_secs(1);
 			studio
 				.compositor
-				.transition(Transition::Move { duration }, &studio.sources, start);
+				.transition(
+					&studio.collection,
+					Transition::Move { duration },
+					&studio.sources,
+					start,
+				)
+				.unwrap();
 
 			// Eased halfway, blue is at (2, 2) and both fades are at half.
 			studio.render(start + Duration::from_millis(500));
@@ -1748,7 +2043,7 @@ mod tests {
 			let start = Instant::now();
 			let at = |millis| start + Duration::from_millis(millis);
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
 
 			studio.render(at(0));
@@ -1756,7 +2051,7 @@ mod tests {
 			assert_eq!(tall(&mut studio, true), (BLUE, BLACK), "halfway in, in preview");
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE, "the main canvas too");
 
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(at(500));
 			assert_eq!(tall(&mut studio, false), (BLACK, BLACK), "on program from the start");
 			assert_eq!(pixel(&studio.program(), 1, 6), BLACK, "the main canvas too");
@@ -1782,7 +2077,7 @@ mod tests {
 			let start = Instant::now();
 			let at = |millis| start + Duration::from_millis(millis);
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
 
 			studio.render(at(0));
@@ -1797,7 +2092,7 @@ mod tests {
 			assert_eq!(pixel(&preview, 1, 6), BLUE, "halfway in");
 			assert_eq!(pixel(&preview, 6, 6), BLACK);
 
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(at(500));
 			assert_eq!(pixel(&studio.program(), 1, 6), BLACK, "on program from the start");
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE, "the preview carries on");
@@ -1836,7 +2131,7 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 			// Program has reached the jump; preview starts over before it.
 			studio.compositor.set_preview(Some("blue".into()));
@@ -1860,11 +2155,14 @@ mod tests {
 			let start = Instant::now();
 			let at = |millis| start + Duration::from_millis(millis);
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("red".into()));
 			studio.render(at(0));
 
-			studio.compositor.transition(FADE, &studio.sources, at(9000));
+			studio
+				.compositor
+				.transition(&studio.collection, FADE, &studio.sources, at(9000))
+				.unwrap();
 			studio.render(at(9500));
 			let program = studio.program();
 			// Red has slid halfway in over the left half, blue is in place, and
@@ -1895,12 +2193,18 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
 			let duration = Duration::from_secs(1);
 			studio
 				.compositor
-				.transition(Transition::Move { duration }, &studio.sources, start);
+				.transition(
+					&studio.collection,
+					Transition::Move { duration },
+					&studio.sources,
+					start,
+				)
+				.unwrap();
 
 			studio.render(start);
 			let program = studio.program();
@@ -1927,7 +2231,7 @@ mod tests {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(Instant::now());
 			assert!(studio.sources.get("blue").unwrap().take().is_none(), "drawn once");
 			studio.render(Instant::now());
@@ -1972,7 +2276,7 @@ mod tests {
 		collection.validate().unwrap();
 		let mut studio = Studio::with_files(collection, dir).await;
 		studio.compositor.set_preview(Some("red".into()));
-		studio.compositor.cut(&studio.sources);
+		studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 		studio.compositor.set_preview(Some("blue".into()));
 		studio
 	}
@@ -2001,7 +2305,8 @@ mod tests {
 			let transition = studio.collection.transition.clone();
 			studio
 				.compositor
-				.transition(transition, &studio.sources, Instant::now());
+				.transition(&studio.collection, transition, &studio.sources, Instant::now())
+				.unwrap();
 			assert_eq!(studio.compositor.program_scene(), Some("blue"));
 
 			// What the clip's filters read is drawn too, such as an overlay to paint.
@@ -2069,7 +2374,8 @@ mod tests {
 			let transition = studio.collection.transition.clone();
 			studio
 				.compositor
-				.transition(transition, &studio.sources, Instant::now());
+				.transition(&studio.collection, transition, &studio.sources, Instant::now())
+				.unwrap();
 			studio.render(Instant::now());
 			assert!(studio.compositor.transitioning());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
@@ -2087,7 +2393,8 @@ mod tests {
 			let transition = studio.collection.transition.clone();
 			studio
 				.compositor
-				.transition(transition, &studio.sources, Instant::now());
+				.transition(&studio.collection, transition, &studio.sources, Instant::now())
+				.unwrap();
 			studio.render(Instant::now());
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
@@ -2096,7 +2403,8 @@ mod tests {
 			let transition = studio.collection.transition.clone();
 			studio
 				.compositor
-				.transition(transition, &studio.sources, Instant::now());
+				.transition(&studio.collection, transition, &studio.sources, Instant::now())
+				.unwrap();
 			studio.render(Instant::now());
 			assert!(studio.compositor.transitioning());
 			studio.sources.get("sting").unwrap().play().unwrap();
@@ -2122,7 +2430,8 @@ mod tests {
 			let transition = studio.collection.transition.clone();
 			studio
 				.compositor
-				.transition(transition, &studio.sources, Instant::now());
+				.transition(&studio.collection, transition, &studio.sources, Instant::now())
+				.unwrap();
 			loop {
 				studio.render(Instant::now());
 				let until = at + Duration::from_millis(10);
@@ -2130,7 +2439,7 @@ mod tests {
 					break;
 				}
 			}
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			assert!(!studio.compositor.transitioning());
 			let feed = studio.sources.get("sting").unwrap();
 			while feed.status() != Status::Ended {
@@ -2145,7 +2454,8 @@ mod tests {
 			let transition = studio.collection.transition.clone();
 			studio
 				.compositor
-				.transition(transition, &studio.sources, Instant::now());
+				.transition(&studio.collection, transition, &studio.sources, Instant::now())
+				.unwrap();
 			studio.render(Instant::now());
 			assert!(studio.compositor.transitioning());
 			studio.sources.get("sting").unwrap().stop().unwrap();
@@ -2166,7 +2476,8 @@ mod tests {
 			let transition = studio.collection.transition.clone();
 			studio
 				.compositor
-				.transition(transition, &studio.sources, Instant::now());
+				.transition(&studio.collection, transition, &studio.sources, Instant::now())
+				.unwrap();
 			while studio.compositor.transitioning() {
 				studio.render(Instant::now());
 				let until = at + Duration::from_millis(10);
@@ -2247,7 +2558,7 @@ mod tests {
 	async fn drawn(collection: Collection, dir: tempfile::TempDir) -> Vec<u8> {
 		let mut studio = Studio::with_files(collection, dir).await;
 		studio.compositor.set_preview(Some("red".into()));
-		studio.compositor.cut(&studio.sources);
+		studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 		studio.render(Instant::now());
 		studio.program()
 	}
@@ -2705,7 +3016,7 @@ mod tests {
 			);
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(Instant::now());
 			let old = studio.compositor.program().clone();
 
@@ -2777,9 +3088,12 @@ mod tests {
 			let mut studio = Studio::new(collection()).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.transition(FADE, &studio.sources, start);
+			studio
+				.compositor
+				.transition(&studio.collection, FADE, &studio.sources, start)
+				.unwrap();
 
 			// `blue` takes the name `red` gives up, which is followed once.
 			let mut draft = studio.collection.draft("Rename");
@@ -2865,12 +3179,12 @@ mod tests {
 			collection.scenes[1].items = vec![Item::new("overlay", Rect::fill(&collection.canvas))];
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			// Opened here, but drawn nowhere until the cut.
 			let start = Instant::now();
 			studio.render(start);
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 
 			for (at, expected) in [(500, [128, 0, 128, 255]), (750, [64, 0, 191, 255]), (2000, BLUE)] {
 				studio.render(start + Duration::from_millis(at));
@@ -2912,12 +3226,18 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
 			let duration = Duration::from_secs(1);
 			studio
 				.compositor
-				.transition(Transition::Move { duration }, &studio.sources, start);
+				.transition(
+					&studio.collection,
+					Transition::Move { duration },
+					&studio.sources,
+					start,
+				)
+				.unwrap();
 
 			studio.render(start + Duration::from_millis(500));
 			let program = studio.program();
@@ -2953,11 +3273,11 @@ mod tests {
 
 			// Paint the aside overlay, then leave it off air.
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 3, 3), [255, 255, 0, 255]);
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 
 			studio.compositor.overlays.as_ref().unwrap().panic();
@@ -2968,9 +3288,199 @@ mod tests {
 			}
 
 			studio.compositor.set_preview(Some("red".into()));
-			studio.compositor.cut(&studio.sources);
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 			assert_eq!(pixel(&studio.program(), 3, 3), RED, "no frozen overlay");
+		})
+		.await;
+	}
+
+	/// `collection()` with a scene source drawing each of its scenes, named
+	/// after it with ` scene`, and a program source, `on air`, and `scene`
+	/// added showing `items`.
+	fn nesting(items: Vec<Item>) -> Collection {
+		let mut collection = collection();
+		for scene in ["red", "blue"] {
+			let source = Source::Scene { scene: scene.into() };
+			collection.sources.insert(format!("{scene} scene"), source);
+		}
+		collection.sources.insert("on air".into(), Source::Program);
+		collection.scenes.push(Scene {
+			items,
+			..Scene::new("scene")
+		});
+		collection.validate().unwrap();
+		collection
+	}
+
+	/// A scene source draws its scene's items, scaled and cropped like any
+	/// picture, and transparent where the scene draws nothing. It is drawn once
+	/// however many items show it, and not at all once nothing drawn does.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_scene_source_draws_its_scene() {
+		local(async {
+			let fill = Rect::fill(&collection().canvas);
+			let mut collection = nesting(vec![
+				Item::new("blue", fill),
+				// The red scene, red with blue over its top-right quarter.
+				Item::new("red scene", CORNER),
+				Item {
+					visible: false,
+					..Item::new("red scene", fill)
+				},
+			]);
+			// Blue over the top-right quarter alone, transparent elsewhere.
+			collection.scenes.push(Scene {
+				items: vec![collection.scenes[0].items[1].clone()],
+				..Scene::new("corner")
+			});
+			let corner = Source::Scene { scene: "corner".into() };
+			collection.sources.insert("corner scene".into(), corner);
+			collection.scenes[1].items = vec![Item::new("red", fill), Item::new("corner scene", fill)];
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+
+			studio.compositor.set_preview(Some("scene".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			let program = studio.program();
+			assert_eq!(pixel(&program, 0, 7), RED, "the red scene's red");
+			assert_eq!(pixel(&program, 3, 4), BLUE, "the red scene's corner");
+			assert_eq!(pixel(&program, 6, 6), BLUE, "under it");
+			assert_eq!(studio.compositor.nested.get("red").map(Vec::len), Some(1));
+
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			let program = studio.program();
+			assert_eq!(pixel(&program, 1, 1), RED, "through the nested scene");
+			assert_eq!(pixel(&program, 6, 1), BLUE);
+			let drawn: Vec<&String> = studio.compositor.nested.keys().collect();
+			assert_eq!(drawn, ["corner"], "only what is drawn");
+		})
+		.await;
+	}
+
+	/// A program source shows what the program draws on the same frame,
+	/// a transition under way included, and a scene showing it cannot go on
+	/// program.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_program_source_shows_the_program_on_the_same_frame() {
+		local(async {
+			let mut studio = Studio::new(nesting(vec![Item::new("on air", CORNER)])).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.compositor.set_preview(Some("blue".into()));
+			studio
+				.compositor
+				.transition(&studio.collection, FADE, &studio.sources, start)
+				.unwrap();
+			studio.compositor.set_preview(Some("scene".into()));
+
+			studio.render(start + Duration::from_millis(500));
+			let faded = pixel(&studio.program(), 1, 1);
+			assert!(near(faded, [128, 0, 127, 255]), "{faded:?}");
+			let preview = studio.preview();
+			assert_eq!(pixel(&preview, 1, 5), faded, "the program as it fades");
+			assert_eq!(pixel(&preview, 3, 4), BLUE, "blue under blue");
+			assert_eq!(pixel(&preview, 6, 1), BLACK);
+
+			let err = studio.compositor.cut(&studio.collection, &studio.sources).unwrap_err();
+			assert!(err.to_string().contains("draws the program"), "{err}");
+			let err = studio
+				.compositor
+				.transition(&studio.collection, FADE, &studio.sources, start)
+				.unwrap_err();
+			assert!(err.to_string().contains("draws the program"), "{err}");
+			assert_eq!(studio.compositor.program_scene(), Some("blue"));
+			assert!(studio.compositor.transitioning(), "the fade carries on");
+		})
+		.await;
+	}
+
+	/// A nested scene's keyframes play from when the scene showing it went
+	/// on, so preview and program can show it at two moments, each drawn once,
+	/// and once both settle, drawn once for both.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_nested_scene_plays_its_keyframes_from_when_its_scene_goes_on() {
+		local(async {
+			let fill = Rect::fill(&collection().canvas);
+			let mut collection = nesting(vec![Item::new("blue scene", fill)]);
+			collection.scenes[1].items[0].keyframes = slide_in();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			let at = |millis| start + Duration::from_millis(millis);
+
+			studio.compositor.set_preview(Some("scene".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(at(0));
+			assert_eq!(pixel(&studio.program(), 1, 1), BLACK, "still off the canvas");
+			studio.render(at(500));
+			let program = studio.program();
+			assert_eq!(
+				(pixel(&program, 3, 1), pixel(&program, 4, 1)),
+				(BLUE, BLACK),
+				"halfway in"
+			);
+
+			// Into preview again, so its keyframes start over there.
+			studio.compositor.set_preview(Some("scene".into()));
+			studio.render(at(500));
+			studio.render(at(750));
+			let program = studio.program();
+			assert_eq!((pixel(&program, 5, 1), pixel(&program, 6, 1)), (BLUE, BLACK));
+			let preview = studio.preview();
+			assert_eq!((pixel(&preview, 1, 1), pixel(&preview, 2, 1)), (BLUE, BLACK));
+			assert_eq!(studio.compositor.nested["blue"].len(), 2, "one per moment");
+
+			studio.render(at(2000));
+			assert_eq!(pixel(&studio.program(), 7, 1), BLUE);
+			assert_eq!(pixel(&studio.preview(), 7, 1), BLUE);
+			assert_eq!(studio.compositor.nested["blue"].len(), 1, "settled alike");
+		})
+		.await;
+	}
+
+	/// A filter reading around each pixel, such as a blur, reads the nested
+	/// scene drawn this render, not the last one.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_blur_reads_the_nested_scene_drawn_now() {
+		local(async {
+			let fill = Rect::fill(&collection().canvas);
+			let blurred = Item {
+				filters: vec![Filter::Blur { radius: 0.5 }],
+				..Item::new("blue scene", fill)
+			};
+			let mut studio = Studio::new(nesting(vec![blurred])).await;
+			studio.compositor.set_preview(Some("scene".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			let actual = pixel(&studio.program(), 4, 4);
+			assert!(near(actual, BLUE), "{actual:?}");
+		})
+		.await;
+	}
+
+	/// A blend mode in a nested scene mixes with what the scene draws under it,
+	/// and where it draws nothing, leaves the picture as it is, as CSS does.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_blend_mode_over_nothing_in_a_nested_scene_draws_the_picture() {
+		local(async {
+			let fill = Rect::fill(&collection().canvas);
+			let mut collection = nesting(vec![Item::new("red", fill), Item::new("blue scene", fill)]);
+			collection.scenes[1].items[0].blend = Blend::Multiply;
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("scene".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
 		})
 		.await;
 	}
@@ -3031,11 +3541,20 @@ mod bench {
 
 	/// The mean time to draw and finish every canvas once.
 	async fn frame(collection: Collection) -> Duration {
+		let scene = collection.scenes[0].name.clone();
+		cost(collection, &scene).await.0
+	}
+
+	/// The mean time to draw and finish every canvas once with the first scene
+	/// on program and `preview` in preview, and the render passes and texture
+	/// copies each frame runs.
+	async fn cost(collection: Collection, preview: &str) -> (Duration, (usize, usize)) {
 		let mut studio = Studio::new(collection).await;
 		studio.compositor.set_canvases(&studio.collection).unwrap();
 		let scene = studio.collection.scenes[0].name.clone();
 		studio.compositor.set_preview(Some(scene));
-		studio.compositor.cut(&studio.sources);
+		studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+		studio.compositor.set_preview(Some(preview.to_string()));
 		let mut total = Duration::ZERO;
 		for frame in 0..FRAMES * 2 {
 			let start = Instant::now();
@@ -3045,7 +3564,53 @@ mod bench {
 				total += Instant::now().saturating_duration_since(start);
 			}
 		}
-		total / FRAMES
+		(total / FRAMES, studio.compositor.effects.ran)
+	}
+
+	/// What a scene source costs: every source placed in the scene on program
+	/// and preview (direct), the same items in a scene it shows through a
+	/// scene source (nested), and the program shown again in preview through a
+	/// program source (program).
+	#[tokio::test]
+	#[ignore = "a benchmark; run by hand on a GPU"]
+	async fn nested_scenes() {
+		local(async {
+			println!("sources case     frame   passes copies");
+			for sources in [4, 16, 64] {
+				let direct = collection(sources, 1, sources);
+				let scene = direct.scenes[0].name.clone();
+
+				let mut nested = direct.clone();
+				let fill = Rect::fill(&nested.canvas);
+				let inner = std::mem::take(&mut nested.scenes[0].items);
+				nested.scenes.push(crate::Scene {
+					items: inner,
+					..crate::Scene::new("inner")
+				});
+				let inner = Source::Scene { scene: "inner".into() };
+				nested.sources.insert("inner".into(), inner);
+				nested.scenes[0].items = vec![Item::new("inner", fill)];
+				nested.validate().unwrap();
+
+				let mut program = direct.clone();
+				program.sources.insert("on air".into(), Source::Program);
+				program.scenes.push(crate::Scene {
+					items: vec![Item::new("on air", fill)],
+					..crate::Scene::new("multiview")
+				});
+				program.validate().unwrap();
+
+				for (case, collection, preview) in [
+					("direct", direct, scene.as_str()),
+					("nested", nested, scene.as_str()),
+					("program", program, "multiview"),
+				] {
+					let (frame, (passes, copies)) = cost(collection, preview).await;
+					println!("{sources:>7} {case:<8} {frame:>7.2?} {passes:>6} {copies:>6}");
+				}
+			}
+		})
+		.await;
 	}
 
 	/// Sources against canvases, each further canvas placing every source
