@@ -1523,7 +1523,7 @@ async fn publish(
 			let observer = hang::health::Observer::new(path.clone(), Some(instance.clone()));
 			Some(health::Publisher {
 				main: health::Broadcast::follow(observer, graded, &live.reports)?,
-				canvases: health::Canvases::default(),
+				canvases: health::Canvases::new(live.reports.clone()),
 				clock: clock.clone(),
 				relays: live.links.clone(),
 				sources: sources.clone(),
@@ -1532,8 +1532,7 @@ async fn publish(
 		None => None,
 	};
 	// Each further canvas is graded beside the main one, with its own viewers.
-	let graded = live.zip(health.as_ref());
-	let graded = graded.map(|(live, health)| (health.canvases.clone(), live.reports.clone()));
+	let graded = health.as_ref().map(|health| health.canvases.clone());
 
 	Ok((
 		Program {
@@ -2059,9 +2058,8 @@ struct Extras {
 	on_demand: bool,
 	live: bool,
 	stats: Arc<Stats>,
-	/// Where each canvas's broadcast is graded, and the origin its viewers'
-	/// reports and the relays' stats arrive on, while live.
-	graded: Option<(health::Canvases, moq_net::origin::Consumer)>,
+	/// Where each canvas's broadcast is graded, while live.
+	graded: Option<health::Canvases>,
 }
 
 impl Extras {
@@ -2146,10 +2144,9 @@ impl Extras {
 			.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 			.with_context(|| format!("cannot announce the broadcast of canvas `{name}`"))?;
 		let graded = match &self.graded {
-			Some((canvases, reports)) => {
+			Some(canvases) => {
 				let observer = hang::health::Observer::new(path.clone(), Some(instance));
-				let broadcast = health::Broadcast::follow(observer, catalog.clone(), reports)?;
-				Some(canvases.insert(name, broadcast))
+				Some(canvases.follow(name, observer, catalog.clone())?)
 			}
 			None => None,
 		};

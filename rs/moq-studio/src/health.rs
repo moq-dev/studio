@@ -273,7 +273,7 @@ pub struct Broadcast {
 	pub feedback: Feedback,
 	pub watching: Watching,
 	/// Read for as long as any clone is held.
-	_followers: Arc<Followers>,
+	followers: Arc<Followers>,
 }
 
 impl Broadcast {
@@ -304,7 +304,7 @@ impl Broadcast {
 			catalog,
 			feedback,
 			watching,
-			_followers: Arc::new(followers),
+			followers: Arc::new(followers),
 		})
 	}
 }
@@ -339,22 +339,51 @@ async fn log(what: &'static str, task: impl Future<Output = anyhow::Result<()>>)
 
 /// The further canvases' broadcasts graded, by canvas name, shared with what
 /// publishes them.
-#[derive(Clone, Default)]
-pub struct Canvases(Arc<Mutex<BTreeMap<String, Broadcast>>>);
+#[derive(Clone)]
+pub struct Canvases {
+	graded: Arc<Mutex<BTreeMap<String, Broadcast>>>,
+	/// Where viewers' reports and the relays' stats arrive.
+	reports: moq_net::origin::Consumer,
+	/// Where their readers run, rather than on the thread that adds a canvas,
+	/// such as the program clock's.
+	runtime: tokio::runtime::Handle,
+}
 
 impl Canvases {
-	/// Grade `broadcast` as canvas `name`'s until the returned handle drops.
-	pub fn insert(&self, name: &str, broadcast: Broadcast) -> Graded {
-		self.0.lock().unwrap().insert(name.to_string(), broadcast);
-		Graded {
-			canvases: self.clone(),
-			name: name.to_string(),
+	/// Further canvases graded from what arrives on `reports`, read on the
+	/// tokio runtime this is called inside.
+	pub fn new(reports: moq_net::origin::Consumer) -> Self {
+		Self {
+			graded: Arc::default(),
+			reports,
+			runtime: tokio::runtime::Handle::current(),
 		}
 	}
 
+	/// Grade canvas `name`'s broadcast, which `observer` names and `catalog`
+	/// lists, as [`Broadcast::follow`] does, until the returned handle drops.
+	pub fn follow(
+		&self,
+		name: &str,
+		observer: Observer,
+		catalog: moq_scene::publish::Catalog,
+	) -> anyhow::Result<Graded> {
+		let broadcast = {
+			let _runtime = self.runtime.enter();
+			Broadcast::follow(observer, catalog, &self.reports)?
+		};
+		let followers = broadcast.followers.clone();
+		self.graded.lock().unwrap().insert(name.to_string(), broadcast);
+		Ok(Graded {
+			graded: self.graded.clone(),
+			name: name.to_string(),
+			followers,
+		})
+	}
+
 	fn snapshot(&self) -> Vec<(String, Broadcast)> {
-		let canvases = self.0.lock().unwrap();
-		canvases
+		let graded = self.graded.lock().unwrap();
+		graded
 			.iter()
 			.map(|(name, broadcast)| (name.clone(), broadcast.clone()))
 			.collect()
@@ -363,13 +392,20 @@ impl Canvases {
 
 /// A further canvas's broadcast being graded, until dropped.
 pub struct Graded {
-	canvases: Canvases,
+	graded: Arc<Mutex<BTreeMap<String, Broadcast>>>,
 	name: String,
+	/// Its readers, which tell it from a canvas added back under its name
+	/// before it ended.
+	followers: Arc<Followers>,
 }
 
 impl Drop for Graded {
 	fn drop(&mut self) {
-		self.canvases.0.lock().unwrap().remove(&self.name);
+		let mut graded = self.graded.lock().unwrap();
+		let ours = graded.get(&self.name);
+		if ours.is_some_and(|broadcast| Arc::ptr_eq(&broadcast.followers, &self.followers)) {
+			graded.remove(&self.name);
+		}
 	}
 }
 
@@ -1770,9 +1806,12 @@ mod tests {
 		let (tall, tall_id, _tall_audio) = listing(&origin, "show/tall");
 		let observer = |path: &str| Observer::new(moq_net::Path::new(path).unwrap(), None);
 		let main = Broadcast::follow(observer("show"), catalog.clone(), &origin.consume()).unwrap();
-		let canvases = Canvases::default();
-		let graded = Broadcast::follow(observer("show/tall"), tall, &origin.consume()).unwrap();
-		let graded = canvases.insert("tall", graded);
+		let canvases = Canvases::new(origin.consume());
+		// Added back under its name before it ended, as an undo can, so the
+		// one ending leaves the one added back.
+		let ended = canvases.follow("tall", observer("show/tall"), tall.clone()).unwrap();
+		let graded = canvases.follow("tall", observer("show/tall"), tall).unwrap();
+		drop(ended);
 
 		// Connecting nowhere, so the connection only ever redials.
 		let client = moq_tokio::connect::Config::default().init(Default::default()).unwrap();
