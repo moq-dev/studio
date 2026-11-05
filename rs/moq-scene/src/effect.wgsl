@@ -1,7 +1,8 @@
 // Every draw the compositor makes: a quad sampling one picture, through a list
 // of per-pixel filters, a blur, or a drop shadow. Colors are gamma-encoded
-// sRGB, as CSS filters see them. Rasters between passes hold premultiplied
-// alpha, so a blur weighs a transparent pixel as nothing.
+// sRGB, as CSS filters see them. Every picture is sampled premultiplied, and
+// rasters between passes hold premultiplied alpha, so neither scaling nor a
+// blur mixes in a transparent pixel's color.
 
 const OPS: u32 = 8u;
 
@@ -79,20 +80,43 @@ fn within(uv: vec2<f32>, low: vec2<f32>, high: vec2<f32>) -> bool {
 	return all(uv >= low) && all(uv <= high);
 }
 
-// The input at `uv`, transparent outside its picture, as CSS's edge mode none.
+// One texel of a straight-alpha texture, premultiplied.
+fn texel(texture: texture_2d<f32>, at: vec2<i32>) -> vec4<f32> {
+	let color = textureLoad(texture, at, 0);
+	return vec4<f32>(color.rgb * color.a, color.a);
+}
+
+// `texture` at `uv`, mixed bilinearly with premultiplied alpha. A straight
+// texture's four nearest texels are premultiplied before they mix, so a
+// transparent texel's color, which shows nowhere, bleeds into no neighbour.
+fn filtered(texture: texture_2d<f32>, uv: vec2<f32>, premultiplied: bool) -> vec4<f32> {
+	if premultiplied {
+		return textureSampleLevel(texture, bilinear, uv, 0.0);
+	}
+	// The sampler's clamp to the edge, by hand.
+	let size = vec2<i32>(textureDimensions(texture));
+	let at = uv * vec2<f32>(size) - 0.5;
+	let low = vec2<i32>(floor(at));
+	let near = clamp(low, vec2<i32>(0), size - 1);
+	let far = clamp(low + 1, vec2<i32>(0), size - 1);
+	let fraction = at - floor(at);
+	let top = mix(texel(texture, near), texel(texture, vec2<i32>(far.x, near.y)), fraction.x);
+	let bottom = mix(texel(texture, vec2<i32>(near.x, far.y)), texel(texture, far), fraction.x);
+	return mix(top, bottom, fraction.y);
+}
+
+// The input at `uv`, premultiplied, and transparent outside its picture, as
+// CSS's edge mode none.
 fn fetch(uv: vec2<f32>) -> vec4<f32> {
 	if !within(uv, draw.valid.xy, draw.valid.zw) {
 		return vec4<f32>(0.0);
 	}
-	return textureSampleLevel(input, bilinear, uv, 0.0);
+	return filtered(input, uv, draw.mode.y != 0u);
 }
 
 // The input at `uv`, with straight alpha.
 fn straight(uv: vec2<f32>) -> vec4<f32> {
 	let color = fetch(uv);
-	if draw.mode.y == 0u {
-		return color;
-	}
 	if color.a <= 0.0 {
 		return vec4<f32>(0.0);
 	}
@@ -142,10 +166,9 @@ fn coverage(item: vec2<f32>, op: Op) -> f32 {
 	if !within(item, vec2<f32>(0.0), vec2<f32>(1.0)) {
 		return 0.0;
 	}
-	let color = textureSampleLevel(mask, bilinear, item, 0.0);
+	let color = filtered(mask, item, op.params.y > 0.5);
 	if op.params.x > 0.5 {
-		let rgb = select(color.rgb * color.a, color.rgb, op.params.y > 0.5);
-		return dot(rgb, LUMA);
+		return dot(color.rgb, LUMA);
 	}
 	return color.a;
 }

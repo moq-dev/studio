@@ -949,7 +949,7 @@ impl Effects {
 				area,
 				uv: UNIT,
 				valid: UNIT,
-				premultiplied: false,
+				premultiplied: picture.premultiplied,
 			},
 			segment: Segment {
 				ops: ops.into_iter().collect(),
