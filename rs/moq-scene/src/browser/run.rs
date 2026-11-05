@@ -16,7 +16,7 @@ use moq_audio::bus::Channel as Sound;
 
 use super::layers::{Gpu, Layers};
 use super::outbox::Commands;
-use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Start};
+use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Raster, Start};
 use super::{ARG, Helper, Page, Paint};
 use crate::Error;
 use crate::source::{Mailbox, Picture, Status};
@@ -198,12 +198,16 @@ impl Instance {
 			.and_then(|()| std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700)))
 			.map_err(|err| failed(&format!("cannot create the browser profile {}", profile.display()), err))?;
 		let start = Start {
-			accelerated: super::import::supported(helper),
-			render_node: helper
-				.render_node
-				.as_ref()
-				.and_then(|node| node.to_str())
-				.map(str::to_string),
+			raster: match super::import::supported(helper) {
+				true => Raster::Gpu {
+					render_node: helper
+						.render_node
+						.as_ref()
+						.and_then(|node| node.to_str())
+						.map(str::to_string),
+				},
+				false => Raster::Cpu,
+			},
 			profile: profile
 				.to_str()
 				.ok_or_else(|| Error::Browser(format!("the browser profile {} is not UTF-8", profile.display())))?
