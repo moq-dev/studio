@@ -5,7 +5,7 @@
 A native, cross-platform streaming studio (`rs/moq-studio`) for creators and
 teams who rely on OBS today, plus the same app built to wasm. It composites
 cameras, screens, media, browser sources, and remote MoQ guests into scenes
-on the GPU with moq-video and moq-audio, across several canvases at once
+on the GPU with moq-video and moq-audio, publishing several scenes at once
 (landscape and portrait), and goes live to a MoQ relay and directly to RTMP,
 RTMPS, and WHIP ingests.
 
@@ -37,7 +37,7 @@ Decided 2026-10-22 with the maintainer (/quest-plan):
   destination itself. It remuxes its own broadcast through a UI-free egress
   library that a hosted service can also run server-side. There is no
   gateway service and no moq-cli dependency, because a studio user does not
-  run a server. Destinations that take the same canvas and audio mix with
+  run a server. Destinations that take the same picture scene and audio scene with
   identical encode settings share one encoder. The studio picks codecs per destination: Opus by default, AAC
   where an ingest requires it, from platform encoders only.
 - **Extensibility:** first-party features plus browser sources (CEF
@@ -93,13 +93,13 @@ repository.
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
-- [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
+- [Composable scenes](/quest/m0/scenes/README.md) - scenes nest scenes and the program, any scene publishes at its own size, and mixes become audio scenes
 - [The join page is live](/quest/m0/join-page-live.md) - `join.studio.moq.dev` serves the join page `--join-page` defaults to
 - [Clap-to-measure sync delay](/quest/m0/sync-clap.md) - a clap sets a microphone's delay against its camera
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
 - [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
-- [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS
+- [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [Browser sources without an X display](/quest/m0/cef-headless.md) - CEF runs headless, so Wayland sessions and tests need no X server
 - [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need
 - [Packaging](/quest/m0/packaging.md) - signed installers for macOS and Windows and a Flatpak for Linux
