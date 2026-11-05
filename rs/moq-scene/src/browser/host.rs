@@ -114,12 +114,15 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 	// A crashed process is reported only once it is gone, and one dumping
 	// core is not gone yet: systemd-coredump took 20 to 70 seconds over a
 	// renderer, which left its page Starting meanwhile. CEF's subprocesses
-	// inherit the limit, so none of them dumps core.
+	// inherit the limit. 1, not 0: the kernel ignores the limit for a pipe
+	// core_pattern (systemd-coredump, Apport) except at 1, where it skips the
+	// handler, and a core file needs a page. A hard limit of 0 forbids 1, so
+	// a pipe handler then dumps unless it honours the 0 it is passed.
 	let core = getrlimit(Resource::Core);
 	setrlimit(
 		Resource::Core,
 		Rlimit {
-			current: Some(0),
+			current: Some(core.maximum.map_or(1, |maximum| maximum.min(1))),
 			maximum: core.maximum,
 		},
 	)
