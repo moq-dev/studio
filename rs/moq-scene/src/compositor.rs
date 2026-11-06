@@ -563,7 +563,8 @@ impl Compositor {
 	/// since its timeline started: the program scene, which `program_start`
 	/// went on at, or else the preview scene, at `preview_start`, as their
 	/// keyframes do. Preview and program share one timeline, so a preview
-	/// never restarts an overlay program shows.
+	/// never restarts an overlay program shows, through the scene a
+	/// transition leaves or the top layer included.
 	fn restart(&mut self, collection: &Collection, preview_start: Instant, program_start: Instant) {
 		let restarts = |layer: &Layer| matches!(layer.source, Source::Overlay { restart: true, .. });
 		if !self
@@ -573,12 +574,15 @@ impl Compositor {
 		{
 			return;
 		}
-		let program = self.drawn(collection, &[self.program_scene.as_deref()]);
-		let preview = self.drawn(collection, &[self.preview_scene.as_deref()]);
+		let program = self.drawn(collection, self.program_scene.as_deref().map(Some));
+		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
+		let on_air = self.drawn(collection, [leaving.map(Some), Some(None)].into_iter().flatten());
+		let preview = self.drawn(collection, self.preview_scene.as_deref().map(Some));
 		for (name, layer) in &mut self.layers {
-			let start = if program.contains(name.as_str()) {
+			let name = name.as_str();
+			let start = if program.contains(name) {
 				program_start
-			} else if preview.contains(name.as_str()) {
+			} else if preview.contains(name) && !on_air.contains(name) {
 				preview_start
 			} else {
 				continue;
@@ -640,7 +644,7 @@ impl Compositor {
 	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
 		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
 		let scenes = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving];
-		let mut shown = self.drawn(collection, &scenes);
+		let mut shown = self.drawn(collection, scenes.into_iter().flatten().map(Some).chain([None]));
 		// Drawn through its source's filters alone.
 		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
 			shown.insert(name);
@@ -651,25 +655,23 @@ impl Compositor {
 				video.into_iter().flat_map(|video| &video.filters),
 			);
 		}
-		for canvas in std::iter::once(None).chain(self.extras.keys().map(Some)) {
-			let top = Place {
-				canvas: canvas.cloned(),
-				scene: None,
-			};
-			drawn(collection, &mut shown, &top);
-		}
 		shown
 	}
 
-	/// The sources whose pictures `scenes` draw on any canvas, a `None` scene
-	/// drawing nothing: each visible item's and each mask's, through clones.
-	fn drawn<'a>(&self, collection: &'a Collection, scenes: &[Option<&str>]) -> HashSet<&'a str> {
+	/// The sources whose pictures `scenes` draw on any canvas, `None` being
+	/// the top layer: each visible item's and each mask's, through clones.
+	fn drawn<'a, 'b>(
+		&self,
+		collection: &'a Collection,
+		scenes: impl IntoIterator<Item = Option<&'b str>>,
+	) -> HashSet<&'a str> {
+		let scenes: Vec<Option<String>> = scenes.into_iter().map(|scene| scene.map(str::to_string)).collect();
 		let mut shown = HashSet::new();
 		for canvas in std::iter::once(None).chain(self.extras.keys().map(Some)) {
-			for scene in scenes.iter().flatten() {
+			for scene in &scenes {
 				let place = Place {
 					canvas: canvas.cloned(),
-					scene: Some(scene.to_string()),
+					scene: scene.clone(),
 				};
 				drawn(collection, &mut shown, &place);
 			}
@@ -2953,7 +2955,8 @@ mod tests {
 
 	/// An overlay set to restart starts its CSS timeline over when its scene
 	/// goes into preview while program does not show it, and when it goes on
-	/// program, but a preview never restarts it under program. One that does
+	/// program, but a preview never restarts it under program, the top layer
+	/// included. One that does
 	/// not restart runs on from when it opened.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
@@ -3022,6 +3025,15 @@ mod tests {
 				let actual = pixel(&picture, 3, 1);
 				assert!(near(actual, quarter), "{output}: {actual:?}");
 			}
+
+			// Nor does it restart one the top layer shows on program.
+			studio.collection.top = vec![Item::new("third", fill)];
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.sources);
+			studio.render(cut + Duration::from_secs(1));
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(cut + Duration::from_millis(1100));
+			assert_eq!(pixel(&studio.program(), 3, 1), BLUE, "the top layer's ran on");
 		})
 		.await;
 	}
