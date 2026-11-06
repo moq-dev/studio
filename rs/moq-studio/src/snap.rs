@@ -228,8 +228,11 @@ pub struct Snap {
 	pub reach: f32,
 	/// The spacing of a grid to snap to, in canvas pixels, if any.
 	pub grid: Option<f32>,
-	/// The width over height a resize keeps, if any.
+	/// The width over height a resize keeps, if any, of the item at rest.
 	pub aspect: Option<f32>,
+	/// How far keyframes have the item from where it rests, added to each
+	/// field of its rect. It snaps where it shows, but keeps its shape at rest.
+	pub posed: Rect,
 }
 
 /// A dragged item once snapped, and the hints to draw while it is held.
@@ -264,19 +267,27 @@ pub struct Gap {
 }
 
 impl Snap {
-	/// Snap `rect`, which `grab` has dragged, to the canvas, the `others`, and
-	/// the grid. Along each axis, the nearest line within reach of a moving
-	/// edge or center wins, as does the spacing of a neighboring pair when the
-	/// whole item moves.
+	/// Snap `rect`, the item at rest once `grab` has dragged it, to the
+	/// canvas, the `others`, and the grid, where it shows. Along each axis,
+	/// the nearest line within reach of a moving edge or center wins, as does
+	/// the spacing of a neighboring pair when the whole item moves.
 	///
 	/// A resize keeping an aspect snaps only the axis whose snap is nearer,
-	/// and the other follows its shape.
+	/// and the other follows its shape. The snapped rect is at rest.
 	pub fn apply(&self, grab: Grab, rect: Rect, others: &[Rect], canvas: &Canvas) -> Snapped {
+		// An edge shown is the edge at rest plus a constant, so a shift
+		// measured where it shows moves it as far at rest.
+		let shown = |rect: &Rect| Rect {
+			x: rect.x + self.posed.x,
+			y: rect.y + self.posed.y,
+			width: rect.width + self.posed.width,
+			height: rect.height + self.posed.height,
+		};
 		let mut rect = rect;
 		match self.aspect.filter(|_| grab != Grab::Move) {
 			None => {
 				for axis in Axis::ALL {
-					if let Some(best) = self.nearest(grab, axis, &rect, others, canvas) {
+					if let Some(best) = self.nearest(grab, axis, &shown(&rect), others, canvas) {
 						shift(&mut rect, axis, grab.moves(axis), best);
 					}
 				}
@@ -284,7 +295,7 @@ impl Snap {
 			Some(aspect) => {
 				let best = Axis::ALL
 					.into_iter()
-					.filter_map(|axis| Some((axis, self.nearest(grab, axis, &rect, others, canvas)?)))
+					.filter_map(|axis| Some((axis, self.nearest(grab, axis, &shown(&rect), others, canvas)?)))
 					.min_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()));
 				if let Some((axis, best)) = best {
 					shift(&mut rect, axis, grab.moves(axis), best);
@@ -295,11 +306,12 @@ impl Snap {
 
 		let mut guides = Vec::new();
 		let mut gaps = Vec::new();
+		let showing = shown(&rect);
 		for axis in Axis::ALL {
 			let moves = grab.moves(axis);
-			guides.extend(lined_up(axis, &rect, &points(axis.span(&rect), moves), others, canvas));
+			guides.extend(lined_up(axis, &showing, &points(axis.span(&showing), moves), others, canvas));
 			if moves == Moves::Both {
-				gaps.extend(equal_gaps(axis, &rect, others));
+				gaps.extend(equal_gaps(axis, &showing, others));
 			}
 		}
 		Snapped { rect, guides, gaps }
@@ -483,7 +495,7 @@ mod tests {
 		framerate: 30,
 	};
 
-	fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+	const fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
 		Rect { x, y, width, height }
 	}
 
@@ -491,6 +503,7 @@ mod tests {
 		reach: 10.0,
 		grid: None,
 		aspect: None,
+		posed: rect(0.0, 0.0, 0.0, 0.0),
 	};
 
 	#[test]
@@ -595,6 +608,34 @@ mod tests {
 		// With nothing in reach it stays as dragged.
 		let item = rect(100.0, 100.0, 300.0, 150.0);
 		assert_eq!(snap.apply(bottom_right, item, &[], &CANVAS).rect, item);
+	}
+
+	#[test]
+	fn a_posed_item_snaps_where_it_shows_and_keeps_its_shape_at_rest() {
+		// Resting at 200x100, with a keyframe adding 100 to the height.
+		let snap = Snap {
+			aspect: Some(2.0),
+			posed: rect(0.0, 0.0, 0.0, 100.0),
+			..SNAP
+		};
+		let right = Grab::Resize {
+			x: Some(Side::End),
+			y: None,
+		};
+		let dragged = right.drag(rect(100.0, 100.0, 200.0, 100.0), [20.0, 0.0], snap.aspect);
+		assert_eq!(dragged, rect(100.0, 95.0, 220.0, 110.0));
+		// Its right edge already lies on the other item's left edge.
+		let others = [rect(320.0, 600.0, 100.0, 100.0)];
+		let snapped = snap.apply(right, dragged, &others, &CANVAS);
+		assert_eq!(snapped.rect, dragged);
+		assert_eq!(snapped.guides.len(), 1);
+		// Offset where it shows, it snaps there and keeps its shape at rest.
+		let snap = Snap {
+			posed: rect(4.0, 0.0, 0.0, 100.0),
+			..snap
+		};
+		let snapped = snap.apply(right, dragged, &others, &CANVAS);
+		assert_eq!(snapped.rect, rect(100.0, 96.0, 216.0, 108.0));
 	}
 
 	#[test]

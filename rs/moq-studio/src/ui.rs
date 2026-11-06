@@ -999,30 +999,29 @@ impl Panels {
 				.items(&drag.layer)
 				.and_then(|items| items.get(drag.index))
 				.cloned();
-			// How far the keyframes have the item from where it rests, which
-			// snapping, done where the item shows, leaves alone.
-			let shown = item.as_ref().map_or(drag.rect, |item| item.posed(since).rect);
-			let rest = item.as_ref().map_or(drag.rect, |item| item.rect);
-			let away = |rect: Rect, sign: f32| Rect {
-				x: rect.x + sign * (shown.x - rest.x),
-				y: rect.y + sign * (shown.y - rest.y),
-				width: rect.width + sign * (shown.width - rest.width),
-				height: rect.height + sign * (shown.height - rest.height),
-			};
 			let held = ui.input(|input| input.modifiers);
 			// Shift flips whether a resize keeps the item's shape.
 			let aspect = (drag.fixed != held.shift).then(|| snap::aspect(&drag.rect)).flatten();
 			let rect = drag.grab.drag(drag.rect, delta, aspect);
 			drag.hints = (self.snapping.on && !held.command).then(|| {
+				// How far the keyframes have the item from where it rests.
+				let shown = item.as_ref().map_or(drag.rect, |item| item.posed(since).rect);
+				let rest = item.as_ref().map_or(drag.rect, |item| item.rect);
 				let snap = Snap {
 					reach,
 					grid: self.snapping.grid.then_some(self.snapping.spacing as f32),
 					aspect,
+					posed: Rect {
+						x: shown.x - rest.x,
+						y: shown.y - rest.y,
+						width: shown.width - rest.width,
+						height: shown.height - rest.height,
+					},
 				};
 				let others = others(state, &drag.layer, drag.index, since);
-				snap.apply(drag.grab, away(rect, 1.0), &others, &canvas)
+				snap.apply(drag.grab, rect, &others, &canvas)
 			});
-			let rect = drag.hints.as_ref().map_or(rect, |snapped| away(snapped.rect, -1.0));
+			let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
 			if let Some(item) = item
 				&& item.rect != rect
 			{

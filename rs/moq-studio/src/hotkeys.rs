@@ -232,7 +232,7 @@ impl Hotkeys {
 				else {
 					return true;
 				};
-				let pressed = KeyboardShortcut::new(*modifiers, physical_key.unwrap_or(*key));
+				let pressed = KeyboardShortcut::new(*modifiers, heard(*key, *physical_key));
 				let Some((action, _)) = self.bindings.iter().find(|(_, key)| pressed == **key) else {
 					return true;
 				};
@@ -321,13 +321,25 @@ pub fn pressed(event: &egui::Event) -> Option<KeyboardShortcut> {
 			pressed: true,
 			repeat: false,
 			modifiers,
-		} => Some(KeyboardShortcut::new(*modifiers, physical_key.unwrap_or(*key))),
+		} => Some(KeyboardShortcut::new(*modifiers, heard(*key, *physical_key))),
 		_ => None,
 	}
 }
 
-/// `key` as the platform's hotkeys name it, if they can hear it: by where it
-/// sits on the keyboard, as egui reports it.
+/// The key the platform's hotkeys hear for a press of `key`, as the layout
+/// names it, at `physical`, where it sits on a US keyboard. macOS registers
+/// a key by where it sits. Windows' virtual keys and the keysyms X11 and the
+/// Wayland portal bind name what the layout prints on it, so a key only
+/// Shift makes, such as `!`, is named by where it sits instead.
+fn heard(key: Key, physical: Option<Key>) -> Key {
+	let physical = physical.unwrap_or(key);
+	match cfg!(target_os = "macos") || code(key).is_none() {
+		true => physical,
+		false => key,
+	}
+}
+
+/// `key` as the platform's hotkeys name it, if they can hear it.
 fn hotkey(key: &KeyboardShortcut) -> Option<HotKey> {
 	let held = key.modifiers;
 	let mut mods = Modifiers::empty();
@@ -344,7 +356,8 @@ fn hotkey(key: &KeyboardShortcut) -> Option<HotKey> {
 	Some(HotKey::new(Some(mods), code(key.logical_key)?))
 }
 
-/// Where `key` sits on a US keyboard, which is how the platforms name keys.
+/// `key` as the platforms name it: where it sits on a US keyboard, which
+/// Windows and X11 take for the key the layout prints that on.
 fn code(key: Key) -> Option<Code> {
 	Some(match key {
 		Key::ArrowDown => Code::ArrowDown,
@@ -440,6 +453,19 @@ fn code(key: Key) -> Option<Code> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn keys_bind_as_the_platform_hears_them() {
+		// On AZERTY, the key printed A sits where a US keyboard has Q.
+		let a = heard(Key::A, Some(Key::Q));
+		match cfg!(target_os = "macos") {
+			true => assert_eq!(a, Key::Q),
+			false => assert_eq!(a, Key::A),
+		}
+		// Shift and the key printed 1 make `!`, which no platform binds.
+		assert_eq!(heard(Key::Exclamationmark, Some(Key::Num1)), Key::Num1);
+		assert_eq!(heard(Key::F9, None), Key::F9);
+	}
 
 	#[test]
 	fn bindings_follow_renames_at_once() {

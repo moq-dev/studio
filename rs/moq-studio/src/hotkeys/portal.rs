@@ -34,8 +34,14 @@ impl Portal {
 		Self { bindings, reach }
 	}
 
+	/// Ask the desktop for `bindings`, unless it already holds them: a new
+	/// session brings its dialog back, and declining it loses every key.
 	pub fn set(&self, bindings: Bindings) {
-		self.bindings.send_replace(bindings);
+		self.bindings.send_if_modified(|wanted| {
+			let changed = *wanted != bindings;
+			*wanted = bindings;
+			changed
+		});
 	}
 
 	pub fn reach(&self) -> Reach {
@@ -193,6 +199,22 @@ fn keysym(key: Key) -> Option<String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn unchanged_bindings_keep_the_session() {
+		let (bindings, mut wanted) = watch::channel(Bindings::new());
+		let portal = Portal {
+			bindings,
+			reach: Arc::new(Mutex::new(Reach::Asking)),
+		};
+		let key = KeyboardShortcut::new(egui::Modifiers::CTRL, Key::R);
+		portal.set(Bindings::from([(Action::Cut, key)]));
+		assert!(wanted.has_changed().unwrap());
+		wanted.mark_unchanged();
+		// What the Hotkeys panel sets when it starts and stops waiting for a key.
+		portal.set(Bindings::from([(Action::Cut, key)]));
+		assert!(!wanted.has_changed().unwrap());
+	}
 
 	#[test]
 	fn ids_round_trip() {
