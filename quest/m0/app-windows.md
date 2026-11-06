@@ -15,6 +15,10 @@ the studio landed.
 - Build with `--features capture`, since a default build has image, color,
   and broadcast sources only.
 
+## Required
+
+- [nixos2 boots Windows for agents](/quest/m0/windows-host.md) - the Windows machine this runs on
+
 ## Related
 
 - [Hardware validation](https://github.com/moq-dev/moq/blob/main/quest/m5/video-hardware.md) - capture paths not yet run on real machines

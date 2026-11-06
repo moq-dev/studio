@@ -38,9 +38,14 @@ When the capturer cannot allocate, CEF never paints and never says so. Fail
 the page loudly instead, from a signal CEF or Chromium gives (no first-paint
 timeout).
 
-## Waiting
+Decided 2026-11-06 (maintainer, /quest-unblock): this trial runs before
+nixos2 switches to Windows ([windows-host](/quest/m0/windows-host.md)), which
+then leaves no Mesa machine on NixOS.
 
-- Maintainer: log into a Wayland desktop session (GNOME or KDE) on a Mesa GPU,
-  such as nixos2's Intel, so an agent can run `binary(browser)` there with that
-  session's `WAYLAND_DISPLAY`. An agent cannot start a logged-in session on a
-  greeter. Check: `loginctl list-sessions` shows a user session on `seat0`.
+Since 2026-11-06 ([kixelated/nixos#31](https://github.com/kixelated/nixos/pull/31)),
+GDM logs `kixelated` into GNOME at boot on nixos2. Its GNOME Shell runs on
+the Intel GPU (`card1`, `renderD128`) with no monitor attached, so an agent
+runs `binary(browser)` there over ssh with `WAYLAND_DISPLAY=wayland-0` and
+`XDG_RUNTIME_DIR=/run/user/1000`. If a page paints only with a display
+connected, say so and ask the maintainer for an HDMI dummy plug on the
+motherboard's port.
