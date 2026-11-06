@@ -309,7 +309,13 @@ impl Snap {
 		let showing = shown(&rect);
 		for axis in Axis::ALL {
 			let moves = grab.moves(axis);
-			guides.extend(lined_up(axis, &showing, &points(axis.span(&showing), moves), others, canvas));
+			guides.extend(lined_up(
+				axis,
+				&showing,
+				&points(axis.span(&showing), moves),
+				others,
+				canvas,
+			));
 			if moves == Moves::Both {
 				gaps.extend(equal_gaps(axis, &showing, others));
 			}
