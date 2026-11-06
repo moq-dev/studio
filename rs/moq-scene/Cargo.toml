@@ -35,12 +35,15 @@ cef = ["dep:cef"]
 # Overlays: Blitz lays HTML and CSS out and paints it into a Vello scene, which
 # Vello renders on the compositor's device. Pinned to the beta whose Vello and
 # wgpu match moq-video's: the stable 0.2 line is on wgpu 26, which cannot share
-# the device. Fonts and network access are left off, so an overlay loads nothing.
+# the device. System fonts and network access are left off, so an overlay loads
+# only its own assets; `woff` decodes the WOFF and WOFF2 fonts it loads.
 anyrender_vello = "0.15"
-blitz-dom = { version = "=0.3.0-beta.4", default-features = false }
+blitz-dom = { version = "=0.3.0-beta.4", default-features = false, features = ["woff"] }
 blitz-html = "=0.3.0-beta.4"
 blitz-paint = { version = "=0.3.0-beta.4", default-features = false }
 blitz-traits = "=0.3.0-beta.4"
+# Decodes an overlay's base64 `data:` URLs.
+base64 = "0.23"
 bytemuck = { version = "1", features = ["derive"] }
 bytes = { workspace = true }
 # Reads the declarations an overlay's CSS checks, as Stylo serializes them.
@@ -61,6 +64,8 @@ moq-net = { workspace = true }
 # `render` is the compositor's whole input path: it turns every decoded or
 # captured frame into a texture on the studio's device.
 moq-video = { workspace = true, features = ["render"] }
+# Decodes an overlay's `data:` URLs.
+percent-encoding = "2"
 serde = { workspace = true }
 serde_with = { workspace = true }
 # Stylo, Blitz's style engine, which parses an overlay's CSS to check it.
@@ -74,6 +79,9 @@ tracing = { workspace = true }
 tract-onnx = { version = "0.23.10", default-features = false }
 url = { workspace = true }
 vello = "0.11"
+# Decompresses an overlay's WOFF and WOFF2 fonts to check them. Already in the
+# graph through Blitz's `woff` feature.
+wuff = "0.2"
 
 # The helper process a browser source runs CEF in, and the socket between them.
 [target.'cfg(target_os = "linux")'.dependencies]
