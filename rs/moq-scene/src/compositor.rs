@@ -564,7 +564,7 @@ impl Compositor {
 	/// went on at, or else the preview scene, at `preview_start`, as their
 	/// keyframes do. Preview and program share one timeline, so a preview
 	/// never restarts an overlay program shows, through the scene a
-	/// transition leaves or the top layer included.
+	/// transition leaves, the top layer, or a stinger's masks included.
 	fn restart(&mut self, collection: &Collection, preview_start: Instant, program_start: Instant) {
 		let restarts = |layer: &Layer| matches!(layer.source, Source::Overlay { restart: true, .. });
 		if !self
@@ -575,8 +575,7 @@ impl Compositor {
 			return;
 		}
 		let program = self.drawn(collection, self.program_scene.as_deref().map(Some));
-		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
-		let on_air = self.drawn(collection, [leaving.map(Some), Some(None)].into_iter().flatten());
+		let on_air = self.on_air_sources(collection);
 		let preview = self.drawn(collection, self.preview_scene.as_deref().map(Some));
 		for (name, layer) in &mut self.layers {
 			let name = name.as_str();
@@ -642,9 +641,16 @@ impl Compositor {
 	/// each visible item's, a stinger's clip under way, and each mask's,
 	/// through clones.
 	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
-		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
-		let scenes = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving];
-		let mut shown = self.drawn(collection, scenes.into_iter().flatten().map(Some).chain([None]));
+		let mut shown = self.on_air_sources(collection);
+		shown.extend(self.drawn(collection, self.preview_scene.as_deref().map(Some)));
+		shown
+	}
+
+	/// The sources whose pictures program draws on any canvas: each visible
+	/// item's in the scene on program, the scene a transition leaves, and the
+	/// top layer, a stinger's clip under way, and each mask's, through clones.
+	fn on_air_sources<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
+		let mut shown = self.drawn(collection, self.on_air().map(Some).chain([None]));
 		// Drawn through its source's filters alone.
 		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
 			shown.insert(name);
@@ -3034,6 +3040,48 @@ mod tests {
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.render(cut + Duration::from_millis(1100));
 			assert_eq!(pixel(&studio.program(), 3, 1), BLUE, "the top layer's ran on");
+		})
+		.await;
+	}
+
+	/// A preview never restarts an overlay a stinger under way masks its clip
+	/// with on program, though no scene on air shows it.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stinger_mask_runs_on_under_a_preview() {
+		local(async {
+			let mut studio = stinging(crate::media::tests::CLIP).await;
+			let overlay = Source::Overlay {
+				html: "<body style=\"margin: 0; background: lime\"></body>".into(),
+				width: 8,
+				height: 8,
+				restart: true,
+			};
+			studio.collection.sources.insert("third".into(), overlay);
+			let fill = Rect::fill(&studio.collection.canvas);
+			studio.collection.scenes.push(Scene {
+				items: vec![Item::new("third", fill)],
+				..Scene::new("third")
+			});
+			let mask = Filter::Mask {
+				source: "third".into(),
+				mode: MaskMode::Alpha,
+			};
+			sting(&mut studio, mask);
+			let drivers = studio.sources.sync(&studio.collection);
+			start(&studio.sources, drivers).await;
+
+			let now = Instant::now();
+			let transition = studio.collection.transition.clone();
+			studio.compositor.transition(transition, &studio.sources, now);
+			studio.render(now);
+			let opened = studio.compositor.layers["third"].overlay.as_ref().unwrap().start();
+
+			studio.compositor.set_preview(Some("third".into()));
+			studio.render(now + Duration::from_millis(100));
+			assert_eq!(studio.compositor.stinger(), Some("sting"));
+			let overlay = studio.compositor.layers["third"].overlay.as_ref().unwrap();
+			assert_eq!(overlay.start(), opened, "the stinger's mask ran on");
 		})
 		.await;
 	}
