@@ -11,8 +11,8 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::browser::Paint;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
-	Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode, Rect,
-	Scene, Source, Transition, Video, wgpu,
+	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode,
+	Rect, Scene, Source, Transition, Video, wgpu,
 };
 
 use crate::autosave::Conflict;
@@ -393,6 +393,8 @@ enum Selection {
 /// What the Filters panel sets on a selection.
 #[derive(Clone, Debug, PartialEq)]
 struct Look {
+	/// A source's background, where it can be removed; an item has none.
+	background: Option<Background>,
 	crop: Crop,
 	filters: Vec<Filter>,
 	/// An item's blend mode; a source has none.
@@ -404,9 +406,10 @@ impl Selection {
 	fn look(&self, collection: &Collection) -> Option<Look> {
 		match self {
 			Self::Source(name) => {
-				collection.sources.get(name).filter(|source| source.has_video())?;
+				let source = collection.sources.get(name).filter(|source| source.has_video())?;
 				let video = collection.video.get(name).cloned().unwrap_or_default();
 				Some(Look {
+					background: source.removes_background().then_some(video.background),
 					crop: video.crop,
 					filters: video.filters,
 					blend: None,
@@ -415,6 +418,7 @@ impl Selection {
 			Self::Item(layer, index) => {
 				let item = collection.items(layer)?.get(*index)?;
 				Some(Look {
+					background: None,
 					crop: item.crop,
 					filters: item.filters.clone(),
 					blend: Some(item.blend),
@@ -429,9 +433,21 @@ impl Selection {
 	}
 
 	fn set_look(&self, draft: &mut Draft, look: Look) -> Result<(), moq_scene::Error> {
-		let Look { crop, filters, blend } = look;
+		let Look {
+			background,
+			crop,
+			filters,
+			blend,
+		} = look;
 		match self {
-			Self::Source(name) => draft.set_video(name, Some(Video { crop, filters })),
+			Self::Source(name) => draft.set_video(
+				name,
+				Some(Video {
+					background: background.unwrap_or_default(),
+					crop,
+					filters,
+				}),
+			),
 			Self::Item(layer, index) => {
 				let item = draft
 					.collection()
@@ -1846,6 +1862,19 @@ impl Panels {
 		let mut next = look.clone();
 		let mut action: Option<(String, Option<u64>)> = None;
 		egui::Grid::new("look").show(ui, |ui| {
+			if let Some(background) = &mut next.background {
+				ui.label("Background");
+				let mut removed = *background == Background::Remove;
+				let response = ui
+					.checkbox(&mut removed, "Remove")
+					.on_hover_text("Cut the person out of the picture, leaving the rest transparent, before the crop and every filter. Each picture shows a frame late, and the source's own track keeps the background.");
+				if response.changed() {
+					*background = if removed { Background::Remove } else { Background::Keep };
+					let verb = if removed { "Remove" } else { "Keep" };
+					action = Some((format!("{verb} the background of {what}"), None));
+				}
+				ui.end_row();
+			}
 			ui.label("Crop");
 			ui.horizontal(|ui| {
 				let crop = &mut next.crop;

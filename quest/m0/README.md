@@ -91,7 +91,6 @@ repository.
 - [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
-- [ML video effects](/quest/m0/effects.md) - background removal and other ML effects, baked into their source's track
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Composable scenes](/quest/m0/scenes/README.md) - scenes nest scenes and the program, any scene publishes at its own size, and mixes become audio scenes
 - [The join page is live](/quest/m0/join-page-live.md) - `join.studio.moq.dev` serves the join page `--join-page` defaults to

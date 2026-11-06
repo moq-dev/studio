@@ -10,9 +10,10 @@ use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
 use crate::collection::{
-	Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Rect, Settled, Source, Transition,
+	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Rect, Settled, Source, Transition,
 };
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
+use crate::matte::Matte;
 use crate::overlay::{Overlay, Overlays};
 use crate::source::{self, Feed, Sources, Status};
 
@@ -149,7 +150,15 @@ struct Layer {
 	source: Source,
 	/// Converts video frames, created on the first one.
 	renderer: Option<Renderer>,
-	/// The newest picture; `None` until the first arrives.
+	/// The newest picture as the source delivered it, and whether it is newer
+	/// than what `picture` shows or `matte` started on.
+	raw: Option<wgpu::Texture>,
+	fresh: bool,
+	/// Cuts the person out of each picture, while the source's background is
+	/// removed.
+	matte: Option<Matte>,
+	/// The newest picture drawn; `None` until the first arrives, and while the
+	/// first cut-out is under way.
 	picture: Option<Picture>,
 	/// A LUT source's table; `None` until it is read.
 	lut: Option<Lut>,
@@ -157,6 +166,63 @@ struct Layer {
 	overlay: Option<Overlay>,
 	/// Why the newest picture failed to draw, logged when it first does.
 	error: Option<String>,
+}
+
+impl Layer {
+	/// Bring the picture drawn up to date with the newest one delivered,
+	/// through its matte while `background` is removed.
+	fn develop(
+		&mut self,
+		name: &str,
+		background: Background,
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+		effects: &Effects,
+	) {
+		if background == Background::Keep {
+			// One switched back shows the picture it held back.
+			if self.matte.take().is_some() || self.fresh {
+				self.fresh = false;
+				self.picture = self.raw.as_ref().map(|raw| effects.picture(raw));
+			}
+			return;
+		}
+
+		let matte = match &mut self.matte {
+			Some(matte) => matte,
+			None => match Matte::new(device, queue) {
+				Ok(matte) => {
+					// What was drawn shows the background, so nothing is until
+					// the first cut-out.
+					self.picture = None;
+					self.fresh = self.raw.is_some();
+					self.matte.insert(matte)
+				}
+				Err(err) => {
+					self.error = Some(err.to_string());
+					return;
+				}
+			},
+		};
+		match matte.finish() {
+			Some(Ok(cut)) => self.picture = Some(effects.picture(cut)),
+			Some(Err(err)) => {
+				if self.error.is_none() {
+					tracing::warn!(source = %name, %err, "cannot remove the background");
+				}
+				self.error = Some(err.to_string());
+				self.picture = None;
+			}
+			None => {}
+		}
+		if self.fresh
+			&& !matte.busy()
+			&& let Some(raw) = &self.raw
+		{
+			matte.start(raw);
+			self.fresh = false;
+		}
+	}
 }
 
 /// The pictures and tables of the compositor's layers, for filters to read.
@@ -484,72 +550,93 @@ impl Compositor {
 			let Some(feed) = sources.get(name).filter(|feed| feed.source() == source) else {
 				continue;
 			};
-			let Some(picture) = feed.take() else {
-				continue;
+			let picture = feed.take();
+			let mut layer = match self.layers.remove(name) {
+				Some(layer) => layer,
+				None if picture.is_some() => Layer {
+					source: source.clone(),
+					renderer: None,
+					raw: None,
+					fresh: false,
+					matte: None,
+					picture: None,
+					lut: None,
+					overlay: None,
+					error: None,
+				},
+				None => continue,
 			};
-			let layer = self.layers.entry(name.clone()).or_insert_with(|| Layer {
-				source: source.clone(),
-				renderer: None,
-				picture: None,
-				lut: None,
-				overlay: None,
-				error: None,
-			});
-			// Every picture lands premultiplied, so scaling it mixes no
-			// transparent texel's color: a page arrives so, moq-video renders
-			// a frame opaque, a still is premultiplied here, and an overlay's
-			// paint as it lands.
-			let texture = match picture {
-				source::Picture::Frame(frame) => {
-					let renderer = match layer.renderer.as_mut() {
-						Some(renderer) => Ok(renderer),
-						None => Renderer::new(&self.device, &self.queue, Default::default())
-							.map(|renderer| layer.renderer.insert(renderer)),
-					};
-					renderer
-						.and_then(|renderer| renderer.render(&frame))
-						.map_err(Error::from)
-				}
-				source::Picture::Rgba { size, mut pixels } => {
-					premultiply(&mut pixels);
-					upload(&self.device, &self.queue, size, &pixels)
-				}
-				source::Picture::Texture(texture) => Ok(texture),
-				source::Picture::Lut(cube) => {
-					layer.lut = Some(self.effects.lut(&cube));
-					continue;
-				}
-				source::Picture::Overlay => {
-					let Source::Overlay { html, width, height } = source else {
-						unreachable!("only an overlay source shows an overlay")
-					};
-					let overlays = match &mut self.overlays {
-						Some(overlays) => Ok(overlays),
-						None => Overlays::new(&self.device, &self.queue).map(|overlays| self.overlays.insert(overlays)),
-					};
-					match overlays {
-						Ok(overlays) => {
-							let overlay = overlays.open(html, *width, *height, now);
-							layer.picture = Some(self.effects.picture(overlay.texture()));
-							layer.overlay = Some(overlay);
-						}
-						Err(err) => layer.error = Some(err.to_string()),
-					}
-					continue;
-				}
-			};
+			if let Some(picture) = picture {
+				self.take(name, source, &mut layer, picture, now);
+			}
+			let background = collection
+				.video
+				.get(name)
+				.map(|video| video.background)
+				.unwrap_or_default();
+			layer.develop(name, background, &self.device, &self.queue, &self.effects);
+			self.layers.insert(name.clone(), layer);
+		}
+	}
 
-			match texture {
-				Ok(texture) => {
-					layer.error = None;
-					layer.picture = Some(self.effects.picture(&texture));
-				}
-				Err(err) => {
-					if layer.error.is_none() {
-						tracing::warn!(source = %name, %err, "cannot draw source");
+	/// Put `picture` from source `name` on the GPU as `layer`'s newest. An
+	/// overlay that arrives now starts its CSS timeline at `now`.
+	fn take(&mut self, name: &str, source: &Source, layer: &mut Layer, picture: source::Picture, now: Instant) {
+		// Every picture lands premultiplied, so scaling it mixes no
+		// transparent texel's color: a page arrives so, moq-video renders
+		// a frame opaque, a still is premultiplied here, and an overlay's
+		// paint as it lands.
+		let texture = match picture {
+			source::Picture::Frame(frame) => {
+				let renderer = match layer.renderer.as_mut() {
+					Some(renderer) => Ok(renderer),
+					None => Renderer::new(&self.device, &self.queue, Default::default())
+						.map(|renderer| layer.renderer.insert(renderer)),
+				};
+				renderer
+					.and_then(|renderer| renderer.render(&frame))
+					.map_err(Error::from)
+			}
+			source::Picture::Rgba { size, mut pixels } => {
+				premultiply(&mut pixels);
+				upload(&self.device, &self.queue, size, &pixels)
+			}
+			source::Picture::Texture(texture) => Ok(texture),
+			source::Picture::Lut(cube) => {
+				layer.lut = Some(self.effects.lut(&cube));
+				return;
+			}
+			source::Picture::Overlay => {
+				let Source::Overlay { html, width, height } = source else {
+					unreachable!("only an overlay source shows an overlay")
+				};
+				let overlays = match &mut self.overlays {
+					Some(overlays) => Ok(overlays),
+					None => Overlays::new(&self.device, &self.queue).map(|overlays| self.overlays.insert(overlays)),
+				};
+				match overlays {
+					Ok(overlays) => {
+						let overlay = overlays.open(html, *width, *height, now);
+						layer.picture = Some(self.effects.picture(overlay.texture()));
+						layer.overlay = Some(overlay);
 					}
-					layer.error = Some(err.to_string());
+					Err(err) => layer.error = Some(err.to_string()),
 				}
+				return;
+			}
+		};
+
+		match texture {
+			Ok(texture) => {
+				layer.error = None;
+				layer.raw = Some(texture);
+				layer.fresh = true;
+			}
+			Err(err) => {
+				if layer.error.is_none() {
+					tracing::warn!(source = %name, %err, "cannot draw source");
+				}
+				layer.error = Some(err.to_string());
 			}
 		}
 	}
@@ -1173,7 +1260,7 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
-	use crate::collection::{Blend, Extra, MaskMode, Rgba, Scene};
+	use crate::collection::{Blend, Extra, MaskMode, Rgba, Scene, Video};
 	use crate::source::test::{context, listen, local, start};
 
 	/// A fade over a second.
@@ -2239,6 +2326,67 @@ mod tests {
 			let err = studio.compositor.error("red").expect("the picture failed");
 			assert!(err.contains("texture limit"), "{err}");
 			assert!(studio.compositor.error("blue").is_none());
+		})
+		.await;
+	}
+
+	/// A source with its background removed draws only the person, each
+	/// picture once the model has it, and its whole picture again once kept.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn removes_the_background() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("person.jpg"), include_bytes!("test_data/person.jpg")).unwrap();
+			let mut collection = Collection::new();
+			collection.canvas.width = 256;
+			collection.canvas.height = 144;
+			collection.sources.insert(
+				"person".into(),
+				Source::Image {
+					path: "person.jpg".into(),
+				},
+			);
+			let removed = Video {
+				background: Background::Remove,
+				..Video::default()
+			};
+			collection.video.insert("person".into(), removed.clone());
+			collection.scenes[0].items = vec![Item::new("person", Rect::fill(&collection.canvas))];
+			collection.validate().unwrap();
+			let scene = collection.scenes[0].name.clone();
+
+			let mut studio = Studio::with_files(collection, dir).await;
+			studio.compositor.set_preview(Some(scene));
+			studio.compositor.cut(&studio.sources);
+			let at = |rgba: &[u8], x: usize, y: usize| -> [u8; 4] {
+				let at = (y * 256 + x) * 4;
+				rgba[at..at + 4].try_into().unwrap()
+			};
+			let face = (128, 50);
+			let flag = (30, 100);
+			let cut = |studio: &mut Studio| {
+				studio.render(Instant::now());
+				let program = studio.program();
+				// Nothing shows until the cut-out is ready, not even the background.
+				assert_eq!(at(&program, face.0, face.1), BLACK);
+				let layer = studio.compositor.layers.get_mut("person").unwrap();
+				layer.matte.as_mut().expect("removing the background").wait();
+				studio.render(Instant::now());
+				let program = studio.program();
+				assert_ne!(at(&program, face.0, face.1), BLACK);
+				assert_eq!(at(&program, flag.0, flag.1), BLACK);
+			};
+			cut(&mut studio);
+			assert!(studio.compositor.error("person").is_none());
+
+			studio.collection.video.remove("person");
+			studio.render(Instant::now());
+			let program = studio.program();
+			assert_ne!(at(&program, flag.0, flag.1), BLACK);
+
+			studio.collection.video.insert("person".into(), removed);
+			cut(&mut studio);
 		})
 		.await;
 	}
