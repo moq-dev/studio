@@ -7,7 +7,14 @@ The `moq` submodule includes moq-audio's platform AAC encoders, from
 [Media Foundation AAC encode](https://github.com/moq-dev/moq/blob/main/quest/m5/audio-encode-mediafoundation.md) on
 Windows, which destinations whose ingest requires AAC use.
 
-Check: both quests' PRs have merged on moq's `main`, deleting their files, and
-moq-audio's AAC encoders are there. A quest file that moved, or went away
-without its work landing, does not count. Advance it with `just upgrade-moq`
-in its own PR, fixing whatever the new API breaks here.
+## Plan
+
+Once the wait clears, advance it with `just upgrade-moq` in its own PR,
+fixing whatever the new API breaks here.
+
+## Waiting
+
+- moq-dev/moq: both upstream quests above land. Check: both quests' PRs have
+  merged on moq's `main`, deleting their files, and moq-audio's AAC encoders
+  are there. A quest file that moved, or went away without its work landing,
+  does not count.

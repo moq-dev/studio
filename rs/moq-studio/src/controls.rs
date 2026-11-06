@@ -98,16 +98,13 @@ impl Controls {
 		match action {
 			Action::Cut => {
 				let mut state = self.engine.state.lock().unwrap();
-				let state = &mut *state;
-				state.compositor.cut(&state.sources);
+				state.cut()?;
 				Ok(format!("cut to {}", on_program(state.compositor.program_scene())))
 			}
 			Action::Transition => {
 				let mut state = self.engine.state.lock().unwrap();
-				let state = &mut *state;
 				let transition = state.collection().transition.clone();
-				let now = kio::clock::Instant::now();
-				state.compositor.transition(transition, &state.sources, now);
+				state.transition(transition, kio::clock::Instant::now())?;
 				Ok(format!("took {}", on_program(state.compositor.program_scene())))
 			}
 			Action::Scene(name) => {

@@ -191,8 +191,8 @@ impl State {
 	/// the one drawn, once the compositor takes its canvas. The scenes in
 	/// preview and on program follow the renames and removals `made` holds,
 	/// each edit read against the collection it was made to, and any
-	/// `collection` lacks is dropped. Edits that remove a scene on air are
-	/// refused, changing nothing.
+	/// `collection` lacks is dropped. Edits that remove a scene on air, or
+	/// leave one drawing the program, are refused, changing nothing.
 	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<()> {
 		let mut before = self.collection.clone();
 		let mut renames = Vec::with_capacity(made.len());
@@ -200,7 +200,7 @@ impl State {
 			renames.push(before.renames(edit));
 			before.apply(edit)?;
 		}
-		keep_on_air(self.compositor.on_air(), &renames)?;
+		keep_on_air(self.compositor.on_air(), &renames, &collection)?;
 		self.compositor.set_canvases(&collection)?;
 		for renames in &renames {
 			self.compositor.rename(renames);
@@ -234,24 +234,36 @@ impl State {
 	/// The sources whose pictures the scenes on air place on any canvas's
 	/// program, through clones: each visible item's of the scenes on air,
 	/// including one leaving in a transition, and of the top layers over them,
-	/// and each mask's it reads.
+	/// and of the scenes they draw, and each mask's it reads.
 	fn placed(&self) -> BTreeSet<String> {
 		let collection = &self.collection;
 		let scenes: Vec<Option<&str>> = self.compositor.on_air().map(Some).chain([None]).collect();
 		let canvases = std::iter::once(None).chain(collection.canvases.keys().map(Some));
-		let items = canvases
-			.flat_map(|canvas| {
-				scenes.iter().map(move |scene| moq_scene::Layer {
-					canvas: canvas.cloned(),
-					scene: scene.map(str::to_string),
-				})
+		let layers = canvases.flat_map(|canvas| {
+			scenes.iter().map(move |scene| moq_scene::Layer {
+				canvas: canvas.cloned(),
+				scene: scene.map(str::to_string),
 			})
-			.flat_map(|layer| collection.items(&layer).unwrap_or_default())
-			.filter(|item| item.visible);
+		});
+		let items = collection.drawn(layers);
 		items
+			.into_iter()
 			.flat_map(|item| std::iter::once(&item.source).chain(masks(collection.filters(item))))
 			.map(|source| collection.capture(source).to_string())
 			.collect()
+	}
+
+	/// Put the preview on program at once; see [`Compositor::cut`].
+	pub fn cut(&mut self) -> anyhow::Result<()> {
+		Ok(self.compositor.cut(&self.collection, &self.sources)?)
+	}
+
+	/// Take the preview to program by `transition`, starting at `now`; see
+	/// [`Compositor::transition`].
+	pub fn transition(&mut self, transition: moq_scene::Transition, now: Instant) -> anyhow::Result<()> {
+		Ok(self
+			.compositor
+			.transition(&self.collection, transition, &self.sources, now)?)
 	}
 
 	/// Restart the source called `name`, as an edit would, such as to reload a
@@ -303,11 +315,14 @@ impl autosave::Document for State {
 }
 
 /// Refuse edits, each read as its [`Collection::renames`], that remove a
-/// scene `on_air` program draws, so a slip cannot put black on air. A reload
-/// that leaves one out still drops it, having nothing to show instead.
+/// scene `on_air` program draws, so a slip cannot put black on air, or that
+/// leave one drawing the program in `collection`, which it would draw into
+/// itself. A reload that leaves one out still drops it, having nothing to
+/// show instead.
 fn keep_on_air<'a>(
 	on_air: impl IntoIterator<Item = &'a str>,
 	renames: &'a [BTreeMap<String, Option<String>>],
+	collection: &Collection,
 ) -> anyhow::Result<()> {
 	for mut scene in on_air {
 		for renames in renames {
@@ -317,6 +332,10 @@ fn keep_on_air<'a>(
 				None => {}
 			}
 		}
+		anyhow::ensure!(
+			!collection.draws_program(scene),
+			"`{scene}` is on air, so it cannot draw the program, which it would draw into itself"
+		);
 	}
 	Ok(())
 }
@@ -786,8 +805,13 @@ impl Engine {
 		});
 		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
 		compositor.set_canvases(&collection)?;
-		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
-		compositor.cut(&sources);
+		// The first scene that can go on program starts there, and in preview.
+		let first = collection
+			.scenes
+			.iter()
+			.find(|scene| !collection.draws_program(&scene.name));
+		compositor.set_preview(first.map(|scene| scene.name.clone()));
+		compositor.cut(&collection, &sources)?;
 
 		let engine = Arc::new(Self {
 			state: Mutex::new(State {
@@ -2858,9 +2882,7 @@ mod tests {
 			let mut state = engine.state.lock().unwrap();
 			let transition = state.collection().transition.clone();
 			let state = &mut *state;
-			state
-				.compositor
-				.transition(transition, &state.sources, kio::clock::now());
+			state.transition(transition, kio::clock::now()).unwrap();
 			let shown = state.shown();
 			assert!(shown.contains("sting") && shown.contains("matte"), "{shown:?}");
 		}
@@ -2929,16 +2951,36 @@ mod tests {
 			collection.renames(&draft.finish().unwrap())
 		};
 		let removed = [remove(&collection, 0)];
-		assert!(keep_on_air([live.as_str()], &removed).is_err());
-		assert!(keep_on_air(["Renamed", live.as_str()], &removed).is_err(), "leaving");
-		keep_on_air([live.as_str()], &[remove(&collection, 1)]).unwrap();
-		keep_on_air([], &removed).unwrap();
+		assert!(keep_on_air([live.as_str()], &removed, &collection).is_err());
+		assert!(
+			keep_on_air(["Renamed", live.as_str()], &removed, &collection).is_err(),
+			"leaving"
+		);
+		keep_on_air([live.as_str()], &[remove(&collection, 1)], &collection).unwrap();
+		keep_on_air([], &removed, &collection).unwrap();
 
 		// Undoing both edits, newest first, removes `Other` once renamed.
 		let undo = [collection.renames(&rename.inverse()), added.renames(&add.inverse())];
-		let err = keep_on_air(["Renamed"], &undo).unwrap_err();
+		let err = keep_on_air(["Renamed"], &undo, &collection).unwrap_err();
 		assert!(err.to_string().contains("`Other` is on air"), "{err}");
-		keep_on_air([live.as_str()], &undo).unwrap();
+		keep_on_air([live.as_str()], &undo, &collection).unwrap();
+
+		// Nor does one leave a scene on air drawing the program, which only a
+		// scene off air may.
+		let mut draft = collection.draft("Show the program");
+		draft.set_source("on air", Some(moq_scene::Source::Program)).unwrap();
+		let fill = moq_scene::Rect::fill(&collection.canvas);
+		let item = moq_scene::Item::new("on air", fill);
+		draft
+			.insert_item(&moq_scene::Layer::scene(live.clone()), 0, item)
+			.unwrap();
+		let edit = draft.finish().unwrap();
+		let mut drawing = collection.clone();
+		drawing.apply(&edit).unwrap();
+		let renames = [collection.renames(&edit)];
+		let err = keep_on_air([live.as_str()], &renames, &drawing).unwrap_err();
+		assert!(err.to_string().contains("cannot draw the program"), "{err}");
+		keep_on_air(["Renamed"], &renames, &drawing).unwrap();
 	}
 
 	async fn subscribe(

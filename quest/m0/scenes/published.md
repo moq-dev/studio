@@ -7,7 +7,7 @@ broadcast at `<--broadcast>/<scene>`, at its own size, with the audio scene it
 picks (the one on program by default). This replaces canvases: further
 canvases, their per-scene layouts, and the canvas picker are removed, and a
 portrait broadcast is a published portrait scene that draws the program
-through a [scene source](/quest/m0/scenes/scene-source.md).
+through a program source (`kind = "program"`).
 
 ## Plan
 
@@ -15,7 +15,8 @@ Decided 2026-11-05 with the maintainer (/quest-plan); see the
 [epic](/quest/m0/scenes/README.md).
 
 - Every scene has a size, defaulting to the program's; the switcher offers
-  only scenes of the program's size.
+  only scenes of the program's size. A scene source then draws its scene at
+  that size, rather than the main canvas's as it does now.
 - The program keeps one switcher at `<--broadcast>`. A published scene is
   always live and never switched.
 - Each published scene gets the program's two sizes (full and half) and the
@@ -26,7 +27,3 @@ Decided 2026-11-05 with the maintainer (/quest-plan); see the
   and no output reads skips drawing.
 - Remove `[canvases]` from the scene file with no migration; nothing is
   released. `README.md` documents published scenes.
-
-## Required
-
-- [Scene source](/quest/m0/scenes/scene-source.md) - a portrait scene follows the program through it

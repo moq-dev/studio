@@ -8,5 +8,5 @@ update installs the new extension without a reboot.
 
 ## Required
 
-- [Signing identities are available](/quest/m0/signing.md) - system extensions only load when signed
+- [The Apple signing identity is available](/quest/m0/signing.md) - system extensions only load when signed
 - [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac
