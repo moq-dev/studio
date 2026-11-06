@@ -2,17 +2,21 @@
 
 ## Goal
 
-`https://join.studio.moq.dev/` serves the join page (`js/join`), so
-`--join-page` works without being passed. The maintainer:
+`https://join.studio.moq.dev/` serves the join page (`js/join`) over a valid
+certificate, so `--join-page` works without being passed.
 
-- enables GitHub Pages for moq-dev/studio with GitHub Actions as its source,
-  and limits the `github-pages` environment's deployment branches to `main`
-- protects `main` so only reviewed PRs reach it, since whatever lands there
-  deploys to the page every guest's token passes through
-- points `join.studio.moq.dev` at Pages in DNS, sets it as the custom domain,
-  and enforces HTTPS
-- runs the Join page workflow (`.github/workflows/join.yml`) once
+## Plan
 
-Check: `curl -sI https://join.studio.moq.dev/` answers 200 over a valid
-certificate, and the page loads. Then drop the README's note that the
-default is not live yet, and delete this quest.
+Done 2026-11-06 (maintainer and agent, /quest-unblock): Pages builds from
+GitHub Actions, the `github-pages` environment deploys only from `main`, a
+ruleset on `main` takes only PRs that pass `Check` and refuses force pushes
+and deletion, Cloudflare has `join.studio` as a DNS-only CNAME to
+`moq-dev.github.io`, Pages has `join.studio.moq.dev` as its custom domain, and
+the Join page workflow deployed. `http://join.studio.moq.dev/` answers 200.
+
+Left for an agent: once GitHub issues the certificate
+(`gh api repos/moq-dev/studio/pages` shows `https_certificate.state` as
+`approved`), enforce HTTPS (`gh api -X PUT repos/moq-dev/studio/pages -F
+https_enforced=true`), check that `curl -sI https://join.studio.moq.dev/`
+answers 200 and the page loads, drop the README's note that the default is
+not live yet, and delete this quest.
