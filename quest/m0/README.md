@@ -101,6 +101,8 @@ repository.
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
+- [One Vulkan loader for the studio and CEF](/quest/m0/cef-vulkan-loader.md) - NixOS builds and tests find the GPU without VK_DRIVER_FILES
+- [Browser sources on the GPU under X11 on NVIDIA](/quest/m0/cef-x11-nvidia.md) - the X11 GPU path paints on NVIDIA, or falls back to the CPU path loudly
 - [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need
 - [Packaging](/quest/m0/packaging.md) - signed installers for macOS and Windows and a Flatpak for Linux
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
