@@ -6,7 +6,8 @@ A creator adds any number of RTMP, RTMPS, and WHIP destinations alongside
 MoQ, each with its own codec and bitrate, and goes live to all of them at
 once. Destinations that take the same picture scene and audio scene with identical
 encode settings share one encoder. Each destination's status and errors show
-in the UI.
+in the UI. Going live and stopping are actions the Hotkeys panel can bind,
+as recording is.
 
 The fan-out lands here as a UI-free egress library, with the studio as its
 first consumer. The library subscribes once to a MoQ broadcast and remuxes it

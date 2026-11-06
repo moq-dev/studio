@@ -6,7 +6,7 @@ The work held until m0 ships. A studio broadcast can be composed by its
 viewers and by a server from the sources' own tracks and a layout track,
 matching the program the studio composites, so a viewer can toggle and
 prioritize elements. The studio gains features m0 left out: overlay assets
-and restarts, global hotkeys, and isolated guest recordings.
+and restarts, and isolated guest recordings.
 
 ## Plan
 
@@ -26,6 +26,5 @@ than opening an m2 for them.
 - [Viewer-side composition](/quest/m1/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers and by a server
 - [Overlays restart on air](/quest/m1/overlay-restart.md) - an overlay's CSS timeline restarts at each cut unless set to keep running
 - [Overlay assets](/quest/m1/overlay-assets.md) - overlays use fonts and images from data: URLs or files beside the scene
-- [Hotkeys and editor preferences](/quest/m1/hotkeys.md) - system-wide hotkeys, arrow nudge, aspect lock, and persisted editor settings
 - [Isolated guest recordings](/quest/m1/guest-recording.md) - record-each-source also writes each guest's tracks to its own file
 - [Scene graph view](/quest/m1/scene-graph.md) - a node view of picture and audio scenes, their routing, volume, pan, and waveforms

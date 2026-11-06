@@ -11,11 +11,13 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Context;
 
 mod autosave;
+mod controls;
 mod devices;
 mod engine;
 mod feed;
 mod guests;
 mod health;
+mod hotkeys;
 mod interact;
 mod ladder;
 mod mix;
@@ -241,7 +243,7 @@ impl eframe::App for Window {
 		};
 		let _ = self.started.set(engine.clone());
 		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
-		studio.load(frame.storage());
+		studio.load(frame);
 		self.app = App::Studio(Box::new(studio));
 		ui.ctx().request_repaint();
 	}

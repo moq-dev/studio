@@ -107,6 +107,7 @@ Every panel is a tab you can drag, split, or stack.
 | Output | Start and stop recording, pick the mix it records, set the canvas size and frame rate, add, resize, and remove further canvases, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each canvas's renditions' encoder work. |
 | Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
+| Hotkeys | Bind keys to cut, transition, preview a scene, replay, save a clip, and start or stop recording, and clear them (see [Hotkeys](#hotkeys)). |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over every scene, in preview and
@@ -191,7 +192,12 @@ edges and centers to the canvas's edges and center, to the other items shown,
 and to the grid while **Grid** is on, drawing a guide through what it lines up
 with. A moved item also snaps to the spacing of its neighbors, marking the
 equal spaces. Hold Ctrl (Cmd on macOS) to drag without snapping, or turn
-**Snap** off. The snap and grid settings last until the studio quits.
+**Snap** off. Resizing a camera, display, window, image, media file, broadcast,
+or replay keeps its shape, and resizing anything else does not; hold Shift to
+flip that. Click the preview, then the arrow keys nudge the selected item a
+pixel, or ten with Shift held, and a held key undoes as one step. The snap and
+grid settings are kept per user, with the [hotkeys](#hotkeys), not in the scene
+file.
 
 Items showing the same source are **linked**: one capture, with the source's
 filters, wherever it is shown. A **clone** is a new source showing another's
@@ -795,6 +801,38 @@ GPU that cannot import, and every still image delivers its frames from the
 CPU, which the compositor uploads. A browser source takes that path with no
 display at all too, and there renders its page in software, WebGL included, so
 a WebGL page runs slower.
+
+## Hotkeys
+
+The Hotkeys panel binds a key to **Cut**, **Transition**, **Replay**, **Save
+clip**, starting or stopping a recording, and putting each scene in preview.
+Press **Bind**, then the key with any modifiers; Escape cancels. Every action
+starts unbound, so no key a game uses is taken unasked, and a key bound to one
+action is refused for another until it is cleared there. Replay and Save clip
+use the Replay panel's picks, and a recording the Output panel's.
+
+Bound keys fire even while another app, such as a game in full screen, has
+focus, and the app does not see them:
+
+- **macOS** and **Windows** register them with the system, which needs no
+  permission. A key another app already registered is refused, saying so. On
+  macOS 15 and later, the system refuses a key whose only modifiers are Option,
+  or Option and Shift.
+- **Linux on X11** grabs them from the X server.
+- **Linux on Wayland**, where no app hears keys meant for another, asks the
+  desktop through its GlobalShortcuts portal (KDE Plasma, and GNOME 48 and
+  later). The desktop shows its own dialog, may bind other keys than those
+  asked, and lists them in its shortcut settings; the panel shows what it
+  bound. Without the portal, or if the dialog is declined, bound keys work only
+  while the studio has focus, and the panel says so.
+
+The bindings, the snap and grid settings, and the output **Listen** plays on
+are kept per user in the app's settings, `~/Library/Application
+Support/moq-studio` on macOS, `$XDG_DATA_HOME/moq-studio` (or
+`~/.local/share/moq-studio`) on Linux, and `%APPDATA%\moq-studio\data` on
+Windows, apart from the scene file, so a scene file moves between machines
+without one operator's keys. A key bound to a scene follows it when renamed in
+the studio.
 
 ## Replay
 
