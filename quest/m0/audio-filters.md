@@ -12,7 +12,7 @@ missing its deadline shows as failed on its source.
 
 Changed 2026-11-02 (maintainer), when the studio moved out of moq: the chain
 itself, its filters, and the out-of-process plugin host are moq-audio work in
-[moq-audio filter chain](https://github.com/moq-dev/moq/blob/main/quest/m3/audio-filters.md).
+[moq-audio filter chain](https://github.com/moq-dev/moq/blob/main/quest/m5/audio-filters.md).
 This quest is the studio's side: the panel, the scene-file shape, and wiring
 each source's chain into the program bus.
 

@@ -64,10 +64,7 @@ pub(crate) async fn run(
 	drop(opened);
 	// A stopped page leaves the canvas rather than freezing on its last
 	// picture, which for an alert or a ticker would show stale news.
-	*picture.lock().unwrap() = Some(Picture::Rgba {
-		size: moq_video::Size::new(1, 1),
-		pixels: vec![0; 4],
-	});
+	picture.lock().unwrap().clear();
 	Err(Error::Browser(reason))
 }
 
@@ -167,7 +164,7 @@ impl Routes {
 			Ok(None) => return,
 			Err(reason) => return self.end(id, reason),
 		};
-		*route.picture.lock().unwrap() = Some(Picture::Texture(texture));
+		route.picture.lock().unwrap().show(Picture::Texture(texture));
 		if !std::mem::replace(&mut route.live, true)
 			&& let Ok(mut status) = route.status.write()
 		{

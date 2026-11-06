@@ -448,6 +448,12 @@ impl Collection {
 					"video settings for `{name}`, which is not a source with a picture"
 				)));
 			}
+			if video.background == Background::Remove && !self.sources[name].removes_background() {
+				return Err(Error::Invalid(format!(
+					"`{name}` cannot have its background removed: only a camera, display, window, image, media, \
+					 broadcast, browser, or replay source can, and a clone shows its source's"
+				)));
+			}
 			let on = format!("`{name}`");
 			video
 				.crop
@@ -881,7 +887,7 @@ pub struct Item {
 	/// Where on the canvas, stretched to fill it.
 	pub rect: Rect,
 	/// Whether the item is drawn. A hidden item keeps its place.
-	#[serde(default = "visible")]
+	#[serde(default = "yes")]
 	pub visible: bool,
 	/// Trimmed from what its source's crop leaves, before every filter.
 	#[serde(default, skip_serializing_if = "Crop::is_none")]
@@ -1063,8 +1069,12 @@ fn is_zero(value: &f32) -> bool {
 	*value == 0.0
 }
 
-fn visible() -> bool {
+fn yes() -> bool {
 	true
+}
+
+fn is_true(value: &bool) -> bool {
+	*value
 }
 
 /// What a source or item is drawn through, in order.
@@ -1480,12 +1490,37 @@ pub(crate) fn validate_filters(filters: &[Filter], on: &str) -> Result<(), Error
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Video {
+	/// What happens behind the person in the picture, before the crop and
+	/// every filter.
+	#[serde(default, skip_serializing_if = "Background::is_kept")]
+	pub background: Background,
 	/// Trimmed before every filter and each item's own crop.
 	#[serde(default, skip_serializing_if = "Crop::is_none")]
 	pub crop: Crop,
 	/// Applied in order, before each item's own.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub filters: Vec<Filter>,
+}
+
+/// What happens to the background behind a person in a source's picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Background {
+	/// Shown as captured.
+	#[default]
+	Keep,
+	/// Made transparent, leaving the person a segmentation model finds in each
+	/// picture. Each picture draws once its own cut-out is ready, a frame or
+	/// more late, skipping pictures while the model is behind. The
+	/// source's own track keeps the background, since its encoding carries no
+	/// transparency.
+	Remove,
+}
+
+impl Background {
+	fn is_kept(&self) -> bool {
+		*self == Self::Keep
+	}
 }
 
 /// A rectangle in canvas pixels, from the top-left corner.
@@ -1611,6 +1646,12 @@ pub enum Source {
 		width: u32,
 		/// The overlay's viewport height in pixels.
 		height: u32,
+		/// Whether its CSS timeline starts over each time a scene showing it
+		/// goes on program, or into preview while program does not show it,
+		/// as keyframes do, rather than running on from when it opened, as a
+		/// clock should.
+		#[serde(default = "yes", skip_serializing_if = "is_true")]
+		restart: bool,
 	},
 	/// Another source's picture, captured once, with [`Collection::video`]
 	/// filters of its own. Its sound is not mixed a second time.
@@ -1668,6 +1709,22 @@ impl Source {
 	/// rather than showing another source's or a scene.
 	pub fn opens(&self) -> bool {
 		!matches!(self, Self::Clone { .. } | Self::Scene { .. } | Self::Program)
+	}
+
+	/// Whether the source's picture can have its background removed: a
+	/// picture of its own that may show a person.
+	pub fn removes_background(&self) -> bool {
+		matches!(
+			self,
+			Self::Camera { .. }
+				| Self::Display { .. }
+				| Self::Window { .. }
+				| Self::Image { .. }
+				| Self::Media { .. }
+				| Self::Broadcast { .. }
+				| Self::Browser { .. }
+				| Self::Replay
+		)
 	}
 
 	/// Whether the source feeds the program audio.
@@ -1879,6 +1936,18 @@ mod tests {
 				height: 800,
 			},
 		);
+		// Restarting is the default, written by leaving it out.
+		for (name, restart) in [("title", true), ("clock", false)] {
+			collection.sources.insert(
+				name.into(),
+				Source::Overlay {
+					html: "<h1>Live</h1>".into(),
+					width: 1920,
+					height: 1080,
+					restart,
+				},
+			);
+		}
 		collection.mixes = Mixes {
 			names: vec!["Stream".into(), "Recording".into()],
 			program: "Stream".into(),
@@ -2256,6 +2325,42 @@ path = "sting.webm"
 		] {
 			let mut collection = example();
 			collection.sources.insert("blank".into(), source.clone());
+			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{source:?}");
+		}
+	}
+
+	/// A background is removed only from a picture of the source's own that
+	/// may show a person.
+	#[test]
+	fn removes_a_background_only_from_a_picture_of_its_own() {
+		let text = r#"
+version = 1
+
+[canvas]
+width = 1280
+height = 720
+framerate = 30
+
+[sources.cam]
+kind = "camera"
+
+[video.cam]
+background = "remove"
+"#;
+		let collection = Collection::from_toml(text).unwrap();
+		assert_eq!(collection.video["cam"].background, Background::Remove);
+		assert_eq!(
+			Collection::from_toml(&collection.to_toml().unwrap()).unwrap(),
+			collection
+		);
+
+		let color = Source::Color {
+			color: Rgba([0, 0, 0, 255]),
+		};
+		for source in [Source::Clone { source: "cam".into() }, color] {
+			let mut collection = collection.clone();
+			collection.sources.insert("other".into(), source.clone());
+			collection.video.insert("other".into(), collection.video["cam"].clone());
 			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{source:?}");
 		}
 	}

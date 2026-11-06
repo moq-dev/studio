@@ -74,6 +74,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
+# Runs background removal's person segmentation model on the CPU. Pure Rust, so
+# it builds wherever the studio does with no runtime library to download.
+tract-onnx = { version = "0.23.10", default-features = false }
 url = { workspace = true }
 vello = "0.11"
 # Decompresses an overlay's WOFF and WOFF2 fonts to check them. Already in the
