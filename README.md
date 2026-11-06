@@ -287,9 +287,9 @@ machine's fonts, so it looks the same on every machine.
 An overlay's own images and fonts, such as a logo or a brand face, come from
 `data:` URLs or from files in the scene file's directory, named relative to
 it (`url(brand/logo.png)`), never from the web or anywhere else on disk. The
-studio reads them all as the overlay starts, so its first frame has them, and
-a file changed on disk changes nothing on air until the overlay starts again,
-as when it is edited. Images are PNG or JPEG, at most 4096 pixels a side;
+studio reads them all as the overlay opens, so its first frame has them, and
+a file changed on disk changes nothing on air until the overlay opens again,
+as when it is edited; a restart on program reuses what it read. Images are PNG or JPEG, at most 4096 pixels a side;
 fonts are TrueType, OpenType, WOFF, or WOFF2, loaded with `@font-face`:
 
 ```css
