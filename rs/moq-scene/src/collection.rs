@@ -265,8 +265,7 @@ impl Collection {
 			// The scenes drawing the one walked, each with how many of its
 			// items are walked.
 			let mut path = vec![(root, 0)];
-			while let Some((scene, walked)) = path.last_mut() {
-				let scene: &Scene = *scene;
+			while let Some(&mut (scene, ref mut walked)) = path.last_mut() {
 				let Some(item) = scene.items.get(*walked) else {
 					done.insert(scene.name.as_str());
 					path.pop();
