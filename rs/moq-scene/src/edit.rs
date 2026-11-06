@@ -663,10 +663,14 @@ impl Draft {
 	/// drawing it, as [`remove_source`](Self::remove_source) removes one.
 	pub fn remove_scene(&mut self, index: usize) -> Result<(), Error> {
 		self.scene_at(index)?;
-		for source in self.drawing(index) {
+		let drawing = self.drawing(index);
+		// Taken first, so the items its sources' removal finds by scene name
+		// are another scene's, even one that took its name in this draft.
+		self.take_scene(index)?;
+		for source in drawing {
 			self.remove_source(&source)?;
 		}
-		self.take_scene(index).map(drop)
+		Ok(())
 	}
 
 	/// Take the scene at `index` out, leaving what refers to it.
@@ -1462,15 +1466,18 @@ mod tests {
 		}
 
 		// Removing a scene whose name another just took removes only its own
-		// scene sources.
+		// scene sources, and the items showing them from the other.
 		let scene = "New".to_string();
 		collection.sources.insert("third".into(), Source::Scene { scene });
+		let fill = Rect::fill(&collection.canvas);
+		collection.scenes[1].items.push(Item::new("third", fill));
 		let mut draft = collection.draft("Take over");
-		draft.rename_scene(0, "Other").unwrap();
-		draft.remove_scene(1).unwrap();
+		draft.rename_scene(1, "New").unwrap();
+		draft.remove_scene(0).unwrap();
 		collection.apply(&draft.finish().unwrap()).unwrap();
-		assert_eq!(draws(&collection, "second"), None);
-		assert_eq!(draws(&collection, "third").as_deref(), Some("Other"));
+		assert_eq!(draws(&collection, "third"), None);
+		assert_eq!(draws(&collection, "second").as_deref(), Some("New"));
+		assert!(collection.scenes[0].items.is_empty());
 	}
 
 	/// The canvas and the transition are edits like any other: a drag of one
