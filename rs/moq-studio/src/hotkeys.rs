@@ -4,6 +4,7 @@
 //! Where neither is there, they work only while the studio has focus.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use egui::{Key, KeyboardShortcut};
@@ -25,8 +26,9 @@ pub struct Hotkeys {
 	backend: Backend,
 	/// Why the platform refused each binding it would not register.
 	refused: BTreeMap<Action, String>,
-	/// Whether bindings are held off while the Hotkeys panel waits for a key.
-	suspended: bool,
+	/// Whether bindings are held off while the Hotkeys panel waits for a key,
+	/// which the thread firing them reads too.
+	suspended: Arc<AtomicBool>,
 	fire: mpsc::Sender<Action>,
 }
 
@@ -82,8 +84,15 @@ impl Hotkeys {
 		bindings: Bindings,
 	) -> Self {
 		let (fire, fired) = mpsc::channel::<Action>();
+		let suspended = Arc::new(AtomicBool::new(false));
+		let held_off = suspended.clone();
 		std::thread::spawn(move || {
 			for action in fired {
+				// A key the desktop holds on Wayland still fires while the panel
+				// waits for one, and the panel never sees it.
+				if held_off.load(Ordering::Relaxed) {
+					continue;
+				}
 				let result = controls.fire(&action);
 				controls.report(&action, result);
 			}
@@ -93,7 +102,7 @@ impl Hotkeys {
 			bindings: Bindings::new(),
 			backend,
 			refused: BTreeMap::new(),
-			suspended: false,
+			suspended,
 			fire,
 		};
 		hotkeys.set(bindings);
@@ -124,11 +133,12 @@ impl Hotkeys {
 		Ok(())
 	}
 
-	/// Move a binding to a scene renamed from `from` to `to`.
-	pub fn rename(&mut self, from: &str, to: &str) {
-		let mut bindings = self.bindings.clone();
-		if let Some(key) = bindings.remove(&Action::Scene(from.into())) {
-			bindings.insert(Action::Scene(to.into()), key);
+	/// Move each binding to a scene `renames` renamed, all at once, so a swap
+	/// of two names swaps their keys. A removed scene keeps its key, which an
+	/// undo may bring back.
+	pub fn rename(&mut self, renames: &BTreeMap<String, Option<String>>) {
+		let bindings = renamed(&self.bindings, renames);
+		if bindings != self.bindings {
 			self.set(bindings);
 		}
 	}
@@ -136,8 +146,7 @@ impl Hotkeys {
 	/// Hold every binding off while the Hotkeys panel waits for a key, so the
 	/// key pressed binds rather than fires; or take them up again.
 	pub fn suspend(&mut self, suspended: bool) {
-		if self.suspended != suspended {
-			self.suspended = suspended;
+		if self.suspended.swap(suspended, Ordering::Relaxed) != suspended {
 			self.set(self.bindings.clone());
 		}
 	}
@@ -145,7 +154,7 @@ impl Hotkeys {
 	/// Hear `bindings` instead of the ones heard now.
 	fn set(&mut self, bindings: Bindings) {
 		self.refused.clear();
-		let heard = match self.suspended {
+		let heard = match self.suspended.load(Ordering::Relaxed) {
 			true => &Bindings::new(),
 			false => &bindings,
 		};
@@ -205,18 +214,23 @@ impl Hotkeys {
 	/// Fire the actions bound to keys pressed in the studio's window, where
 	/// nothing hears them outside it. A text field being typed in keeps its
 	/// keys, as the caller makes a page the preview passes the keyboard to.
+	/// A key that fires is taken, so nothing else in the window acts on it.
 	pub fn focused(&self, ctx: &egui::Context) {
-		if self.suspended || ctx.text_edit_focused() || !matches!(self.reach(), Reach::Focused(_)) {
+		let suspended = self.suspended.load(Ordering::Relaxed);
+		if suspended || ctx.text_edit_focused() || !matches!(self.reach(), Reach::Focused(_)) {
 			return;
 		}
-		ctx.input(|input| {
-			for event in &input.events {
-				let Some(pressed) = pressed(event) else { continue };
-				let bound = self.bindings.iter().find(|(_, key)| pressed == **key);
-				if let Some((action, _)) = bound {
-					let _ = self.fire.send(action.clone());
+		ctx.input_mut(|input| {
+			input.events.retain(|event| {
+				let bound = pressed(event).and_then(|pressed| self.bindings.iter().find(|(_, key)| pressed == **key));
+				match bound {
+					Some((action, _)) => {
+						let _ = self.fire.send(action.clone());
+						false
+					}
+					None => true,
 				}
-			}
+			});
 		});
 	}
 }
@@ -256,6 +270,20 @@ impl Backend {
 			registered,
 		}
 	}
+}
+
+/// `bindings` with each scene `renames` renamed bound by its new name.
+fn renamed(bindings: &Bindings, renames: &BTreeMap<String, Option<String>>) -> Bindings {
+	bindings
+		.iter()
+		.map(|(action, key)| match action {
+			Action::Scene(name) => match renames.get(name) {
+				Some(Some(to)) => (Action::Scene(to.clone()), *key),
+				_ => (action.clone(), *key),
+			},
+			action => (action.clone(), *key),
+		})
+		.collect()
 }
 
 /// What the platform said when it refused a key.
@@ -389,4 +417,31 @@ fn code(key: Key) -> Option<Code> {
 		Key::F24 => Code::F24,
 		_ => return None,
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn bindings_follow_renames_at_once() {
+		let key = |key| KeyboardShortcut::new(egui::Modifiers::NONE, key);
+		let scene = |name: &str| Action::Scene(name.into());
+		let bindings = Bindings::from([
+			(scene("A"), key(Key::F1)),
+			(scene("B"), key(Key::F2)),
+			(Action::Cut, key(Key::F3)),
+		]);
+		// Swapping two names swaps their keys, and a removed scene keeps its.
+		let renames = BTreeMap::from([
+			("A".to_string(), Some("B".to_string())),
+			("B".to_string(), Some("A".to_string())),
+		]);
+		let swapped = renamed(&bindings, &renames);
+		assert_eq!(swapped[&scene("A")], key(Key::F2));
+		assert_eq!(swapped[&scene("B")], key(Key::F1));
+		assert_eq!(swapped[&Action::Cut], key(Key::F3));
+		let removed = BTreeMap::from([("A".to_string(), None)]);
+		assert_eq!(renamed(&bindings, &removed), bindings);
+	}
 }

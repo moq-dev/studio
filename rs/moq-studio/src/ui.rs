@@ -198,7 +198,7 @@ impl eframe::App for Studio {
 			self.panels.view = view;
 			self.panels.deselect_item();
 		}
-		let state = engine.state.lock().unwrap();
+		let mut state = engine.state.lock().unwrap();
 		// One removed since, by an edit, undo, or reload, falls back to the main
 		// canvas.
 		if let Some(name) = &self.panels.view
@@ -220,6 +220,7 @@ impl eframe::App for Studio {
 		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 		self.panels.follow_reloads(&state);
+		let renames = state.take_renames();
 		// A page not painting through an X display copies through the
 		// studio's clipboard, even if the preview let go of the page before
 		// the copy came back.
@@ -234,6 +235,12 @@ impl eframe::App for Studio {
 		}
 		drop(state);
 
+		// A key bound to a scene follows it through renames, undos, and redos.
+		if let Some(hotkeys) = &mut self.panels.hotkeys {
+			for renames in &renames {
+				hotkeys.rename(renames);
+			}
+		}
 		if let Some(fired) = self.panels.controls.fired() {
 			self.panels.message = Some(fired);
 		}
@@ -1366,16 +1373,12 @@ impl Panels {
 		self.check(result);
 	}
 
-	/// Keep a selected item of the scene renamed from `from` selected, and a
-	/// key bound to it bound.
+	/// Keep a selected item of the scene renamed from `from` selected.
 	fn renamed(&mut self, from: &str, to: &str) {
 		if let Some(Selection::Item(Layer { scene: Some(scene), .. }, _)) = &mut self.selection
 			&& scene == from
 		{
 			*scene = to.to_string();
-		}
-		if let Some(hotkeys) = &mut self.hotkeys {
-			hotkeys.rename(from, to);
 		}
 	}
 
