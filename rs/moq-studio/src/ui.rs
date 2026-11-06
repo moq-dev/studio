@@ -191,6 +191,19 @@ impl eframe::App for Studio {
 		}
 	}
 
+	/// Run before each frame, and while the window is hidden, when `ui` is not.
+	fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+		// A wait for a key ends once the operator leaves the window, such as
+		// for a game, so the hotkeys are not held off while they play.
+		let left = ctx.input(|input| {
+			let viewport = input.viewport();
+			viewport.focused == Some(false) || viewport.minimized == Some(true) || viewport.occluded == Some(true)
+		});
+		if left {
+			self.panels.end_binding();
+		}
+	}
+
 	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
 		let engine = self.panels.engine.clone();
 		// A canvas picked last frame is shown from this one on, so every panel
@@ -2791,11 +2804,10 @@ impl Panels {
 		let (Some(action), Some(hotkeys)) = (self.binding.clone(), &mut self.hotkeys) else {
 			return;
 		};
-		// A wait the operator left, for another app or another panel, ends,
-		// so the hotkeys are not held off while they play.
-		if !shown || !ctx.input(|input| input.focused) {
-			self.binding = None;
-			hotkeys.suspend(false);
+		// A wait the operator left for another panel ends, so the hotkeys
+		// are not held off unseen.
+		if !shown {
+			self.end_binding();
 			return;
 		}
 		let pressed = ctx.input_mut(|input| {
@@ -2836,6 +2848,15 @@ impl Panels {
 				Some((action, format!("{key} is bound to {other}; clear it there first")))
 			}
 		};
+	}
+
+	/// Stop waiting for a key to bind, taking the hotkeys up again.
+	fn end_binding(&mut self) {
+		if self.binding.take().is_some()
+			&& let Some(hotkeys) = &mut self.hotkeys
+		{
+			hotkeys.suspend(false);
+		}
 	}
 
 	/// Bind keys to actions, heard even while another app has focus where the

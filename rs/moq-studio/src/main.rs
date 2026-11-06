@@ -235,6 +235,12 @@ struct Window {
 }
 
 impl eframe::App for Window {
+	fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+		if let App::Studio(studio) = &mut self.app {
+			studio.logic(ctx, frame);
+		}
+	}
+
 	fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
 		let engine = match &mut self.app {
 			App::Studio(studio) => return studio.ui(ui, frame),
