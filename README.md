@@ -785,17 +785,22 @@ audio records its own track into a file of its own beside it,
 `<scene file name> <UTC start time> <source>.mp4`, holding the capture before
 any filter, or the sound before its gain and mute; a source being recorded
 encodes whether or not it is on program.
-Broadcast sources, guests included, have no track of the studio's, so they get
-no file of their own. A source added while recording
+Each broadcast source, a guest's included, records its broadcast as it arrives
+from the relay, its largest video and its audio copied without a re-encode, on
+its publisher's timestamps, into a file named after it while it is live. A
+guest who leaves finishes their file, and one who joins again goes on in a new
+one, numbered after the first, since each join is a new broadcast with a
+timeline of its own. A source added while recording
 starts its file then, and one removed finishes its file then. A new canvas
 size or frame rate, or a capture that changes size or color space, moves the
 video to a new track, so the program or that source goes on in a new file,
 numbered after the first, since players show only one video track. A file
 starts with up to 2 s from before it opened, so a recording starts a little
 early, and a track that goes on into the next file, such as the program
-audio, repeats up to 2 s of the last. A
-recording reads the studio's own broadcasts, never what the relay serves, so it
-starts and stops without touching the live stream. The mix it holds is
+audio, repeats up to 2 s of the last. The
+program and local sources are read from the studio's own broadcasts, never what
+the relay serves, so a recording starts and stops without touching the live
+stream. The mix it holds is
 encoded a second time for it while recording: the mix on program, so the file
 holds what viewers hear, or the one the Output panel picks, which viewers never
 can. Without `--connect`, only the

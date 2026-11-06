@@ -2,7 +2,8 @@
 //! draws the canvas and mixes the audio, and the broadcast it encodes into:
 //! the program, at the canvas size and at half of it ([`crate::ladder`]). The
 //! relays serve that broadcast, and recordings read it. Each local source's own
-//! track stays in a broadcast of the studio's own, which recordings read too.
+//! track stays in a broadcast of the studio's own, which recordings read too,
+//! as they read each broadcast source from the relays.
 //!
 //! Threads:
 //! - **program** draws preview and program once per canvas frame and hands the
@@ -747,12 +748,12 @@ impl Engine {
 		let (program, publish) = publish(&gpu, &stats, origin, &path, canvas, live.as_ref()).await?;
 		// Nothing in either local broadcast refers to another.
 		let local = |broadcast: moq_net::broadcast::Consumer| moq_mux::Source::new(program.local.consume(), broadcast);
-		let recorder = record::Recorder::new(
-			local(program.recording.broadcast().consume()),
-			local(program.sources.consume()),
-			&recordings,
-			autosave.path(),
-		)?;
+		let inputs = record::Inputs {
+			program: local(program.recording.broadcast().consume()),
+			sources: local(program.sources.consume()),
+			origin: sources.clone(),
+		};
+		let recorder = record::Recorder::new(inputs, &recordings, autosave.path())?;
 		let output = live.map(|live| Output {
 			path: path.to_string(),
 			on_demand,
@@ -1155,6 +1156,7 @@ impl Engine {
 				let state = &mut *guard;
 				if std::mem::take(&mut state.stale) {
 					let drivers = state.sources.sync(&state.collection);
+					self.recorder.set_sources(&state.collection);
 					if !drivers.is_empty() {
 						let mut running = self.running.lock().unwrap();
 						// Forgets the threads that have ended.
