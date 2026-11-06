@@ -596,8 +596,8 @@ impl Compositor {
 					layer.lut = Some(self.effects.lut(&cube));
 					continue;
 				}
-				source::Picture::Overlay => {
-					let Source::Overlay { html, width, height } = source else {
+				source::Picture::Overlay(content) => {
+					let Source::Overlay { width, height, .. } = source else {
 						unreachable!("only an overlay source shows an overlay")
 					};
 					let overlays = match &mut self.overlays {
@@ -606,7 +606,7 @@ impl Compositor {
 					};
 					match overlays {
 						Ok(overlays) => {
-							let overlay = overlays.open(html, *width, *height, now);
+							let overlay = overlays.open(content, *width, *height, now);
 							layer.picture = Some(self.effects.picture(overlay.texture()));
 							layer.overlay = Some(overlay);
 						}
@@ -3151,6 +3151,37 @@ mod tests {
 				let actual = pixel(&program, 3, 3);
 				assert!(near(actual, rgb(expected)), "{blend:?} at {alpha}: {actual:?}");
 			}
+		})
+		.await;
+	}
+
+	/// An overlay's image, a file beside the scene file, is on the first
+	/// frame that shows the overlay.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn an_overlay_draws_its_image_on_its_first_frame() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			image::RgbaImage::from_pixel(1, 1, image::Rgba(BLUE))
+				.save(dir.path().join("logo.png"))
+				.unwrap();
+			let mut collection = collection();
+			collection.sources.insert(
+				"overlay".into(),
+				Source::Overlay {
+					html: "<style>
+						body { margin: 0 }
+						div { width: 4px; height: 4px; background: url(logo.png) 0 0 / 100% 100% }
+					</style><div></div>"
+						.into(),
+					width: 4,
+					height: 4,
+				},
+			);
+			let fill = Rect::fill(&collection.canvas);
+			collection.scenes[0].items = vec![Item::new("red", fill), Item::new("overlay", fill)];
+			let program = drawn(collection, dir).await;
+			assert_eq!(pixel(&program, 3, 3), BLUE);
 		})
 		.await;
 	}
