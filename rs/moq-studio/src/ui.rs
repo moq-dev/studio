@@ -2741,13 +2741,31 @@ impl Panels {
 			return;
 		};
 		let pressed = ctx.input_mut(|input| {
-			let pressed = input.events.iter().find_map(hotkeys::pressed);
+			let pressed = input.events.iter().find_map(|event| match event {
+				egui::Event::Key {
+					key,
+					pressed: true,
+					repeat: false,
+					..
+				} => Some((*key, hotkeys::pressed(event))),
+				_ => None,
+			});
 			if pressed.is_some() {
-				input.events.retain(|event| hotkeys::pressed(event).is_none());
+				input
+					.events
+					.retain(|event| !matches!(event, egui::Event::Key { pressed: true, .. }));
 			}
 			pressed
 		});
-		let Some(key) = pressed else { return };
+		let Some((name, pressed)) = pressed else { return };
+		let Some(key) = pressed else {
+			// Keypad keys among them, which egui names as their main keyboard twins.
+			self.refusal = Some((
+				action,
+				format!("{} cannot be bound: the studio cannot tell where it sits", name.name()),
+			));
+			return;
+		};
 		self.binding = None;
 		hotkeys.suspend(false);
 		if key.key.logical_key == egui::Key::Escape {

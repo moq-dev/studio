@@ -13,10 +13,12 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 use crate::controls::{Action, Controls};
 
+mod keypad;
 mod layout;
 #[cfg(target_os = "linux")]
 mod portal;
 
+pub use keypad::Keypad;
 use layout::Layout;
 
 /// The key bound to each action. Every action starts unbound, so a key

@@ -831,6 +831,8 @@ The key pressed is the key that fires, on any keyboard layout: the panel names
 it as the layout prints it, and the system hears the key where it sits, through
 the layout in use when the studio starts or a key is bound. On X11, a key that
 types only a letter outside A to Z, such as ö on a German layout, is refused.
+Keypad keys are refused everywhere, since the window hears keypad 1 as the 1
+above the letters.
 
 Bound keys fire even while another app, such as a game in full screen, has
 focus, and the app does not see them, so bind keys you do not type or play
