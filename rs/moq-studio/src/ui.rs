@@ -11,8 +11,8 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use moq_scene::browser::Paint;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
-	Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode, Rect,
-	Scene, Source, Transition, Video, wgpu,
+	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode,
+	Rect, Scene, Source, Transition, Video, wgpu,
 };
 
 use crate::autosave::Conflict;
@@ -393,6 +393,8 @@ enum Selection {
 /// What the Filters panel sets on a selection.
 #[derive(Clone, Debug, PartialEq)]
 struct Look {
+	/// A source's background, where it can be removed; an item has none.
+	background: Option<Background>,
 	crop: Crop,
 	filters: Vec<Filter>,
 	/// An item's blend mode; a source has none.
@@ -404,9 +406,10 @@ impl Selection {
 	fn look(&self, collection: &Collection) -> Option<Look> {
 		match self {
 			Self::Source(name) => {
-				collection.sources.get(name).filter(|source| source.has_video())?;
+				let source = collection.sources.get(name).filter(|source| source.has_video())?;
 				let video = collection.video.get(name).cloned().unwrap_or_default();
 				Some(Look {
+					background: source.removes_background().then_some(video.background),
 					crop: video.crop,
 					filters: video.filters,
 					blend: None,
@@ -415,6 +418,7 @@ impl Selection {
 			Self::Item(layer, index) => {
 				let item = collection.items(layer)?.get(*index)?;
 				Some(Look {
+					background: None,
 					crop: item.crop,
 					filters: item.filters.clone(),
 					blend: Some(item.blend),
@@ -429,9 +433,21 @@ impl Selection {
 	}
 
 	fn set_look(&self, draft: &mut Draft, look: Look) -> Result<(), moq_scene::Error> {
-		let Look { crop, filters, blend } = look;
+		let Look {
+			background,
+			crop,
+			filters,
+			blend,
+		} = look;
 		match self {
-			Self::Source(name) => draft.set_video(name, Some(Video { crop, filters })),
+			Self::Source(name) => draft.set_video(
+				name,
+				Some(Video {
+					background: background.unwrap_or_default(),
+					crop,
+					filters,
+				}),
+			),
 			Self::Item(layer, index) => {
 				let item = draft
 					.collection()
@@ -1621,13 +1637,8 @@ impl Panels {
 				draft.remove_source(&name)
 			})
 		} else if let Some(name) = clone {
-			// A clone of a clone shows the same capture, so it clones that, with
-			// a copy of the clone's filters.
 			let collection = state.collection();
-			let source = Source::Clone {
-				source: collection.capture(&name).to_string(),
-			};
-			let video = collection.video.get(&name).cloned();
+			let (source, video) = clone_of(collection, &name);
 			let clone = collection.unused_name(&format!("{name} clone"));
 			let layer = self.layer(&state).ok();
 			add(&mut state, layer, clone, source, video).map(drop)
@@ -1846,6 +1857,19 @@ impl Panels {
 		let mut next = look.clone();
 		let mut action: Option<(String, Option<u64>)> = None;
 		egui::Grid::new("look").show(ui, |ui| {
+			if let Some(background) = &mut next.background {
+				ui.label("Background");
+				let mut removed = *background == Background::Remove;
+				let response = ui
+					.checkbox(&mut removed, "Remove")
+					.on_hover_text("Cut the person out of the picture, leaving the rest transparent, before the crop and every filter. Each picture shows a frame or more late, and the source's own track keeps the background.");
+				if response.changed() {
+					*background = if removed { Background::Remove } else { Background::Keep };
+					let verb = if removed { "Remove" } else { "Keep" };
+					action = Some((format!("{verb} the background of {what}"), None));
+				}
+				ui.end_row();
+			}
 			ui.label("Crop");
 			ui.horizontal(|ui| {
 				let crop = &mut next.crop;
@@ -3253,6 +3277,20 @@ fn color_ui(ui: &mut Ui, color: &mut moq_scene::Rgba) -> egui::Response {
 	response
 }
 
+/// The source and video settings of a clone of `name`. A clone of a clone
+/// shows the same capture, so it clones that. It copies the crop and filters,
+/// but not a removed background: the clone already shows the cut-out.
+fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
+	let source = Source::Clone {
+		source: collection.capture(name).to_string(),
+	};
+	let video = collection.video.get(name).map(|video| Video {
+		background: Background::Keep,
+		..video.clone()
+	});
+	(source, video)
+}
+
 /// Add `source` as `name`, with `video` filters, and place it in front of
 /// `layer` if it has a picture. Returns the name.
 fn add(
@@ -4004,5 +4042,44 @@ impl Devices {
 				None
 			})
 			.inner
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A clone of a source with its background removed copies its filters,
+	/// and the edit adding it is valid.
+	#[test]
+	fn clones_a_source_with_its_background_removed() {
+		let collection = Collection::from_toml(
+			r#"
+version = 1
+
+[canvas]
+width = 1280
+height = 720
+framerate = 30
+
+[sources.cam]
+kind = "camera"
+
+[video.cam]
+background = "remove"
+filters = [{ kind = "opacity", amount = 0.5 }]
+"#,
+		)
+		.unwrap();
+
+		let (source, video) = clone_of(&collection, "cam");
+		let video = video.unwrap();
+		assert_eq!(video.background, Background::Keep);
+		assert_eq!(video.filters, collection.video["cam"].filters);
+
+		let mut draft = collection.draft("clone");
+		draft.set_source("clone", Some(source)).unwrap();
+		draft.set_video("clone", Some(video)).unwrap();
+		draft.finish().unwrap();
 	}
 }
