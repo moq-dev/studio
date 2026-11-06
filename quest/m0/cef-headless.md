@@ -38,6 +38,10 @@ When the capturer cannot allocate, CEF never paints and never says so. Fail
 the page loudly instead, from a signal CEF or Chromium gives (no first-paint
 timeout).
 
+Decided 2026-11-06 (maintainer, /quest-unblock): this trial runs before
+nixos2 switches to Windows ([windows-host](/quest/m0/windows-host.md)), which
+then leaves no Mesa machine on NixOS.
+
 ## Waiting
 
 - Maintainer: log into a Wayland desktop session (GNOME or KDE) on a Mesa GPU,
