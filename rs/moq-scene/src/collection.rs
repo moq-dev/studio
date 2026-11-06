@@ -743,7 +743,7 @@ pub struct Item {
 	/// Where on the canvas, stretched to fill it.
 	pub rect: Rect,
 	/// Whether the item is drawn. A hidden item keeps its place.
-	#[serde(default = "visible")]
+	#[serde(default = "yes")]
 	pub visible: bool,
 	/// Trimmed from what its source's crop leaves, before every filter.
 	#[serde(default, skip_serializing_if = "Crop::is_none")]
@@ -924,8 +924,12 @@ fn is_zero(value: &f32) -> bool {
 	*value == 0.0
 }
 
-fn visible() -> bool {
+fn yes() -> bool {
 	true
+}
+
+fn is_true(value: &bool) -> bool {
+	*value
 }
 
 /// What a source or item is drawn through, in order.
@@ -1497,6 +1501,12 @@ pub enum Source {
 		width: u32,
 		/// The overlay's viewport height in pixels.
 		height: u32,
+		/// Whether its CSS timeline starts over each time a scene showing it
+		/// goes on program, or into preview while program does not show it,
+		/// as keyframes do, rather than running on from when it opened, as a
+		/// clock should.
+		#[serde(default = "yes", skip_serializing_if = "is_true")]
+		restart: bool,
 	},
 	/// Another source's picture, captured once, with [`Collection::video`]
 	/// filters of its own. Its sound is not mixed a second time.
@@ -1769,6 +1779,18 @@ mod tests {
 				height: 800,
 			},
 		);
+		// Restarting is the default, written by leaving it out.
+		for (name, restart) in [("title", true), ("clock", false)] {
+			collection.sources.insert(
+				name.into(),
+				Source::Overlay {
+					html: "<h1>Live</h1>".into(),
+					width: 1920,
+					height: 1080,
+					restart,
+				},
+			);
+		}
 		collection.mixes = Mixes {
 			names: vec!["Stream".into(), "Recording".into()],
 			program: "Stream".into(),

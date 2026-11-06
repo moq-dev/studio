@@ -523,13 +523,15 @@ impl Compositor {
 		// Before the pictures are pulled, so a stinger's clip starting now is
 		// cleared in this frame rather than showing where its last play ended.
 		let progress = self.progress(sources, now);
+		let preview_start = *self.preview_start.get_or_insert(now);
+		let program_start = *self.program_start.get_or_insert(now);
 		self.update(collection, sources, now);
+		self.restart(collection, preview_start, program_start);
 		self.paint(collection, now);
 
-		let since = |start: &mut Option<Instant>| now.saturating_duration_since(*start.get_or_insert(now));
-		let preview_since = since(&mut self.preview_start);
+		let preview_since = now.saturating_duration_since(preview_start);
 		self.preview_shown = preview_since;
-		let program_since = since(&mut self.program_start);
+		let program_since = now.saturating_duration_since(program_start);
 
 		let mut frame = self.effects.frame();
 		let mut draw = Draw {
@@ -668,6 +670,42 @@ impl Compositor {
 		}
 	}
 
+	/// Start each overlay set to restart over when a scene showing it went on
+	/// since its timeline started: the program scene, which `program_start`
+	/// went on at, or else the preview scene, at `preview_start`, as their
+	/// keyframes do. Preview and program share one timeline, so a preview
+	/// never restarts an overlay program shows, through the scene a
+	/// transition leaves, the top layer, or a stinger's masks included.
+	fn restart(&mut self, collection: &Collection, preview_start: Instant, program_start: Instant) {
+		let restarts = |layer: &Layer| matches!(layer.source, Source::Overlay { restart: true, .. });
+		if !self
+			.layers
+			.values()
+			.any(|layer| layer.overlay.is_some() && restarts(layer))
+		{
+			return;
+		}
+		let program = self.drawn(collection, self.program_scene.as_deref().map(Some));
+		let on_air = self.on_air_sources(collection);
+		let preview = self.drawn(collection, self.preview_scene.as_deref().map(Some));
+		for (name, layer) in &mut self.layers {
+			let name = name.as_str();
+			let start = if program.contains(name) {
+				program_start
+			} else if preview.contains(name) && !on_air.contains(name) {
+				preview_start
+			} else {
+				continue;
+			};
+			if !restarts(layer) {
+				continue;
+			}
+			if let Some(overlay) = layer.overlay.as_mut().filter(|overlay| overlay.start() < start) {
+				overlay.restart(start);
+			}
+		}
+	}
+
 	/// Paint each overlay preview or program draws as of `now`, where it moved
 	/// since its last paint. One drawn nowhere waits: its CSS runs on the
 	/// program clock, so it lands where it should whenever it is drawn again.
@@ -714,42 +752,71 @@ impl Compositor {
 	/// each visible item's, a stinger's clip under way, and each mask's,
 	/// through clones.
 	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
-		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
-		let scenes: Vec<Option<String>> = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving]
-			.into_iter()
-			.flatten()
-			.map(|name| Some(name.to_string()))
-			.chain([None])
-			.collect();
-		let canvases = std::iter::once(None).chain(self.extras.keys().map(Some));
+		let mut shown = self.on_air_sources(collection);
+		shown.extend(self.drawn(collection, self.preview_scene.as_deref().map(Some)));
+		shown
+	}
+
+	/// The sources whose pictures program draws on any canvas: each visible
+	/// item's in the scene on program, the scene a transition leaves, and the
+	/// top layer, a stinger's clip under way, and each mask's, through clones.
+	fn on_air_sources<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
+		let mut shown = self.drawn(collection, self.on_air().map(Some).chain([None]));
+		// Drawn through its source's filters alone.
+		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
+			shown.insert(name);
+			let video = collection.video.get(name);
+			masks(
+				collection,
+				&mut shown,
+				video.into_iter().flat_map(|video| &video.filters),
+			);
+		}
+		shown
+	}
+
+	/// The sources whose pictures `scenes` draw on any canvas, `None` being
+	/// the top layer: each visible item's and each mask's, through clones.
+	fn drawn<'a, 'b>(
+		&self,
+		collection: &'a Collection,
+		scenes: impl IntoIterator<Item = Option<&'b str>>,
+	) -> HashSet<&'a str> {
+		let scenes: Vec<Option<String>> = scenes.into_iter().map(|scene| scene.map(str::to_string)).collect();
 		let mut shown = HashSet::new();
-		let masks = |shown: &mut HashSet<&'a str>, filters: &mut dyn Iterator<Item = &'a Filter>| {
-			for filter in filters {
-				if let Filter::Mask { source, .. } = filter {
-					shown.insert(collection.capture(source));
-				}
-			}
-		};
-		for canvas in canvases {
+		for canvas in std::iter::once(None).chain(self.extras.keys().map(Some)) {
 			for scene in &scenes {
 				let place = Place {
 					canvas: canvas.cloned(),
 					scene: scene.clone(),
 				};
-				let items = collection.items(&place).unwrap_or_default();
-				for item in items.iter().filter(|item| item.visible) {
-					shown.insert(collection.capture(&item.source));
-					masks(&mut shown, &mut collection.filters(item));
-				}
+				drawn(collection, &mut shown, &place);
 			}
 		}
-		// Drawn through its source's filters alone.
-		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
-			shown.insert(name);
-			let video = collection.video.get(name);
-			masks(&mut shown, &mut video.into_iter().flat_map(|video| &video.filters));
-		}
 		shown
+	}
+}
+
+/// Add the sources whose pictures `place` draws to `shown`: each visible
+/// item's and each mask's, through clones.
+fn drawn<'a>(collection: &'a Collection, shown: &mut HashSet<&'a str>, place: &Place) {
+	for item in collection
+		.items(place)
+		.unwrap_or_default()
+		.iter()
+		.filter(|item| item.visible)
+	{
+		shown.insert(collection.capture(&item.source));
+		masks(collection, shown, collection.filters(item));
+	}
+}
+
+/// Add the sources the masks among `filters` read to `shown`, through clones.
+fn masks<'a>(collection: &'a Collection, shown: &mut HashSet<&'a str>, filters: impl Iterator<Item = &'a Filter>) {
+	for filter in filters {
+		if let Filter::Mask { source, .. } = filter {
+			shown.insert(collection.capture(source));
+		}
 	}
 }
 
@@ -2872,6 +2939,7 @@ mod tests {
 						.into(),
 					width: 2,
 					height: 1,
+					restart: true,
 				},
 			);
 			let row = |source: &str, y| {
@@ -3094,6 +3162,7 @@ mod tests {
 						.into(),
 					width: 4,
 					height: 4,
+					restart: true,
 				},
 			);
 			let fill = Rect::fill(&collection.canvas);
@@ -3106,7 +3175,8 @@ mod tests {
 
 	/// An overlay's CSS animation runs on the program clock from when the
 	/// overlay opens: a frame shows it where the program time says, however late
-	/// that frame is drawn, even the first one to show it.
+	/// that frame is drawn, even the first one to show it. This one does not
+	/// restart, so going on program does not start it over.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn an_overlay_animates_on_the_program_clock() {
@@ -3123,6 +3193,7 @@ mod tests {
 						.into(),
 					width: 8,
 					height: 8,
+					restart: false,
 				},
 			);
 			collection.scenes[1].items = vec![Item::new("overlay", Rect::fill(&collection.canvas))];
@@ -3149,6 +3220,133 @@ mod tests {
 		.await;
 	}
 
+	/// An overlay set to restart starts its CSS timeline over when its scene
+	/// goes into preview while program does not show it, and when it goes on
+	/// program, but a preview never restarts it under program, the top layer
+	/// included. One that does
+	/// not restart runs on from when it opened.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn an_overlay_restarts_going_on() {
+		local(async {
+			let mut collection = collection();
+			// A bar fading from red to blue over a second, in the top half or
+			// the bottom half.
+			let overlay = |top: u32, restart| Source::Overlay {
+				html: format!(
+					"<style>
+						body {{ margin: 0 }}
+						div {{ margin-top: {top}px; width: 8px; height: 4px; animation: fade 1s linear both }}
+						@keyframes fade {{ from {{ background: red }} to {{ background: blue }} }}
+					</style><div></div>"
+				),
+				width: 8,
+				height: 8,
+				restart,
+			};
+			collection.sources.insert("third".into(), overlay(0, true));
+			collection.sources.insert("clock".into(), overlay(4, false));
+			let fill = Rect::fill(&collection.canvas);
+			collection.scenes[1].items = vec![Item::new("third", fill), Item::new("clock", fill)];
+			let mut studio = Studio::new(collection).await;
+			let half = [128, 0, 128, 255];
+			let near =
+				|actual: [u8; 4], expected: [u8; 4]| actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2);
+
+			// Both open here, drawn nowhere.
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.sources);
+			studio.render(start);
+
+			let previewed = start + Duration::from_secs(2);
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(previewed);
+			studio.render(previewed + Duration::from_millis(500));
+			let preview = studio.preview();
+			assert!(
+				near(pixel(&preview, 3, 1), half),
+				"in preview: {:?}",
+				pixel(&preview, 3, 1)
+			);
+			assert_eq!(pixel(&preview, 3, 6), BLUE, "the clock ran on");
+
+			let cut = previewed + Duration::from_secs(3);
+			studio.compositor.cut(&studio.sources);
+			studio.render(cut);
+			assert_eq!(pixel(&studio.program(), 3, 1), RED, "on program, from the start");
+			studio.render(cut + Duration::from_millis(500));
+			let program = studio.program();
+			assert!(
+				near(pixel(&program, 3, 1), half),
+				"on program: {:?}",
+				pixel(&program, 3, 1)
+			);
+			assert_eq!(pixel(&program, 3, 6), BLUE, "the clock ran on");
+
+			// Into preview again, but program shows it, so it runs on in both.
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(cut + Duration::from_millis(750));
+			let quarter = [64, 0, 191, 255];
+			for (output, picture) in [("program", studio.program()), ("preview", studio.preview())] {
+				let actual = pixel(&picture, 3, 1);
+				assert!(near(actual, quarter), "{output}: {actual:?}");
+			}
+
+			// Nor does it restart one the top layer shows on program.
+			studio.collection.top = vec![Item::new("third", fill)];
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.sources);
+			studio.render(cut + Duration::from_secs(1));
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(cut + Duration::from_millis(1100));
+			assert_eq!(pixel(&studio.program(), 3, 1), BLUE, "the top layer's ran on");
+		})
+		.await;
+	}
+
+	/// A preview never restarts an overlay a stinger under way masks its clip
+	/// with on program, though no scene on air shows it.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stinger_mask_runs_on_under_a_preview() {
+		local(async {
+			let mut studio = stinging(crate::media::tests::CLIP).await;
+			let overlay = Source::Overlay {
+				html: "<body style=\"margin: 0; background: lime\"></body>".into(),
+				width: 8,
+				height: 8,
+				restart: true,
+			};
+			studio.collection.sources.insert("third".into(), overlay);
+			let fill = Rect::fill(&studio.collection.canvas);
+			studio.collection.scenes.push(Scene {
+				items: vec![Item::new("third", fill)],
+				..Scene::new("third")
+			});
+			let mask = Filter::Mask {
+				source: "third".into(),
+				mode: MaskMode::Alpha,
+			};
+			sting(&mut studio, mask);
+			let drivers = studio.sources.sync(&studio.collection);
+			start(&studio.sources, drivers).await;
+
+			let now = Instant::now();
+			let transition = studio.collection.transition.clone();
+			studio.compositor.transition(transition, &studio.sources, now);
+			studio.render(now);
+			let opened = studio.compositor.layers["third"].overlay.as_ref().unwrap().start();
+
+			studio.compositor.set_preview(Some("third".into()));
+			studio.render(now + Duration::from_millis(100));
+			assert_eq!(studio.compositor.stinger(), Some("sting"));
+			let overlay = studio.compositor.layers["third"].overlay.as_ref().unwrap();
+			assert_eq!(overlay.start(), opened, "the stinger's mask ran on");
+		})
+		.await;
+	}
+
 	/// An overlay a move glides is painted on the program clock while both
 	/// scenes are on air, and drawn where the move has it.
 	#[tokio::test]
@@ -3162,6 +3360,7 @@ mod tests {
 					html: "<body style=\"margin: 0; background: lime\"></body>".into(),
 					width: 4,
 					height: 4,
+					restart: true,
 				},
 			);
 			let tile = |x, y| Rect {
@@ -3205,6 +3404,7 @@ mod tests {
 				html: format!("<body style=\"margin: 0; background: {color}\"></body>"),
 				width: 8,
 				height: 8,
+				restart: true,
 			};
 			collection.sources.insert("shown".into(), overlay("lime"));
 			collection.sources.insert("aside".into(), overlay("yellow"));

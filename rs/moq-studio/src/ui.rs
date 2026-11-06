@@ -3707,8 +3707,8 @@ struct AddSource {
 	/// A browser source's page size, or an overlay's.
 	width: u32,
 	height: u32,
-	/// Whether a media file loops, and plays from its start each time it goes
-	/// on program.
+	/// Whether a media file loops, and whether it or an overlay starts over
+	/// each time it goes on program.
 	looping: bool,
 	restart: bool,
 }
@@ -3837,6 +3837,13 @@ impl AddSource {
 				egui::color_picker::color_edit_button_srgba(ui, &mut self.color, egui::color_picker::Alpha::OnlyBlend);
 				ui.end_row();
 			}
+			if self.kind == Kind::Overlay {
+				ui.label("Animation");
+				ui.checkbox(&mut self.restart, "Restart on program").on_hover_text(
+					"Start its animations over each time its scene goes on program, rather than run on, as a clock should",
+				);
+				ui.end_row();
+			}
 			if self.kind == Kind::Media {
 				ui.label("Playback");
 				ui.horizontal(|ui| {
@@ -3882,6 +3889,7 @@ impl AddSource {
 				html: value,
 				width: self.width,
 				height: self.height,
+				restart: self.restart,
 			},
 			Kind::Replay => Source::Replay,
 		})

@@ -924,6 +924,8 @@ enum Request {
 		start: Instant,
 	},
 	Close(u64),
+	/// Start an overlay's CSS timeline over at this time on the program clock.
+	Restart(u64, Instant),
 	/// Paint these overlays as of this time on the program clock.
 	Paint(Instant, Vec<u64>),
 	/// Stop the thread the way a panic in Blitz would.
@@ -988,6 +990,7 @@ impl Overlays {
 		Overlay {
 			id,
 			texture,
+			start,
 			requests: self.requests.clone(),
 		}
 	}
@@ -1017,6 +1020,8 @@ impl Overlays {
 pub(crate) struct Overlay {
 	id: u64,
 	texture: wgpu::Texture,
+	/// Where its CSS timeline starts on the program clock.
+	start: Instant,
 	requests: mpsc::Sender<Request>,
 }
 
@@ -1029,6 +1034,19 @@ impl Overlay {
 	/// The texture each paint lands in, premultiplied.
 	pub fn texture(&self) -> &wgpu::Texture {
 		&self.texture
+	}
+
+	/// Where its CSS timeline starts on the program clock.
+	pub fn start(&self) -> Instant {
+		self.start
+	}
+
+	/// Start its CSS timeline over at `start` on the program clock, laid out
+	/// afresh, so the next paint shows it as of then.
+	pub fn restart(&mut self, start: Instant) {
+		self.start = start;
+		// A thread that stopped fails the next paint, which says so.
+		let _ = self.requests.send(Request::Restart(self.id, start));
 	}
 }
 
@@ -1072,6 +1090,14 @@ fn run(
 			}
 			Request::Close(id) => {
 				documents.remove(&id);
+			}
+			Request::Restart(id, start) => {
+				if let Some(document) = documents.get_mut(&id) {
+					let size = document.view.texture().size();
+					document.document = open(&document.assets, size.width, size.height);
+					document.start = start;
+					document.painted = false;
+				}
 			}
 			#[cfg(test)]
 			Request::Panic => panic!("a test stopped the overlay thread"),
@@ -1212,7 +1238,7 @@ impl Painter {
 /// An overlay's document on the overlay thread, and where it paints.
 struct Document {
 	document: BaseDocument,
-	/// What it fetches from.
+	/// What it fetches from, and lays out again from on a restart.
 	assets: Arc<Assets>,
 	/// Where Vello paints, straight.
 	paint: wgpu::TextureView,
@@ -1387,8 +1413,8 @@ mod tests {
 	}
 
 	/// Images and fonts load from `data:` URLs and files beside the scene
-	/// file, and are in place once the overlay opens, a background image an
-	/// animation brings in later included.
+	/// file, and are in place once the overlay opens or restarts, a background
+	/// image an animation brings in later included.
 	#[test]
 	fn assets_load_before_the_first_paint() {
 		let dir = tempfile::tempdir().unwrap();
@@ -1415,23 +1441,28 @@ mod tests {
 		assert_eq!(content.assets.len(), 4);
 
 		let assets = Assets::new(content);
-		let document = open(&assets, 400, 100);
-		assert_eq!(*assets.missing.lock().unwrap(), None);
+		// A restart lays the overlay out again from the same assets.
+		for _ in ["open", "restart"] {
+			let mut document = open(&assets, 400, 100);
+			assert_eq!(*assets.missing.lock().unwrap(), None);
 
-		assert_eq!(widths(&document, "img"), [20.0]);
-		let [regular, brand] = widths(&document, "span")[..] else {
-			panic!("two spans");
-		};
-		assert!(brand > regular * 1.05, "regular {regular}, brand {brand}");
-		assert!(backgrounds(&document)[0], "the background is in place");
+			assert_eq!(widths(&document, "img"), [20.0]);
+			let [regular, brand] = widths(&document, "span")[..] else {
+				panic!("two spans");
+			};
+			assert!(brand > regular * 1.05, "regular {regular}, brand {brand}");
+			assert_eq!(
+				backgrounds(&document),
+				[true, false],
+				"the first background is in place"
+			);
 
-		// One resolve, as a paint after the animation ends makes, draws the
-		// background it brings in.
-		let mut document = document;
-		assert!(!backgrounds(&document)[1]);
-		document.resolve(2.0);
-		assert_eq!(backgrounds(&document), [true, true]);
-		assert_eq!(*assets.missing.lock().unwrap(), None);
+			// One resolve, as a paint after the animation ends makes, draws
+			// the background it brings in.
+			document.resolve(2.0);
+			assert_eq!(backgrounds(&document), [true, true]);
+			assert_eq!(*assets.missing.lock().unwrap(), None);
+		}
 	}
 
 	/// Whether each `<div>` in `document` has its background image in place.

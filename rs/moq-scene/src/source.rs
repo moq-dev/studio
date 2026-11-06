@@ -2713,6 +2713,7 @@ mod tests {
 				html: html.into(),
 				width: 640,
 				height: 360,
+				restart: true,
 			};
 			let mut collection = Collection::new();
 			collection.sources.insert("title".into(), overlay("<h1>Live</h1>"));

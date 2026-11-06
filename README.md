@@ -287,9 +287,9 @@ machine's fonts, so it looks the same on every machine.
 An overlay's own images and fonts, such as a logo or a brand face, come from
 `data:` URLs or from files in the scene file's directory, named relative to
 it (`url(brand/logo.png)`), never from the web or anywhere else on disk. The
-studio reads them all as the overlay starts, so its first frame has them, and
-a file changed on disk changes nothing on air until the overlay starts again,
-as when it is edited. Images are PNG or JPEG, at most 4096 pixels a side;
+studio reads them all as the overlay opens, so its first frame has them, and
+a file changed on disk changes nothing on air until the overlay opens again,
+as when it is edited; a restart on program reuses what it read. Images are PNG or JPEG, at most 4096 pixels a side;
 fonts are TrueType, OpenType, WOFF, or WOFF2, loaded with `@font-face`:
 
 ```css
@@ -318,8 +318,15 @@ element, attribute, rule, property, or asset it refused:
   draws more.
 
 An overlay's animation starts when the overlay does: when the studio opens
-it, and again whenever it is edited. One that no preview or program shows
-costs nothing until it is shown again, where its animation has carried on.
+it, and again whenever it is edited. It also starts over each time a scene
+showing it goes on program, as an item's keyframes do, so a lower third plays
+its entrance at every cut, and when a scene showing it goes into preview while
+program does not show it, so the preview shows the entrance too. Preview and
+program share its timeline, so a preview never restarts one program shows.
+Set `restart = false` (**Restart on program**, off, in the add form) for one
+that runs on across cuts, such as a clock or a ticker. One that no preview or
+program shows costs nothing until it is shown again, where its animation has
+carried on unless it restarts.
 Overlays publish no track of their own, so viewers see them only in the
 program.
 
@@ -512,6 +519,7 @@ height = 600
 kind = "overlay"
 width = 1920 # the overlay's own size, like a page's
 height = 1080
+restart = true # start over each time it goes on program, the default
 html = '''
 <style>
   .third { position: absolute; left: 80px; bottom: 120px; padding: 16px 32px;
@@ -583,7 +591,7 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 (macOS), `image` (PNG or JPEG), `media` (a video or audio file; see
 [Media files](#media-files)), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
-`overlay` (its `html`, and a `width` and `height` up to 4096), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
+`overlay` (its `html`, a `width` and `height` up to 4096, and whether it `restart`s, true by default), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
 file, which no item places, but which grades what a `lut` filter names it in),
 and `replay`, where the Replay panel plays replays. The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
