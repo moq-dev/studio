@@ -578,11 +578,12 @@ impl Run {
 		let stopping = stop.subscribe();
 		let (name, read) = (name.to_string(), broadcast.clone());
 		files.spawn(async move {
-			let (outcome, replaced) = write(reading, file, &entry, stopping.clone()).await;
+			let (outcome, replaced) = write(reading, file, &entry, stopping).await;
 			let finished = match outcome.read {
-				// A broadcast that fails as its instance ends is the guest
-				// leaving, which ends the file as a stop does.
-				Err(err) if left(&read, stopping).await => {
+				// A broadcast that failed as its instance ended is the guest
+				// leaving, which ends the file as a stop does. One that fails
+				// while the guest stays is reported at once.
+				Err(err) if read.is_closed() => {
 					tracing::debug!(source = %name, error = format!("{err:#}"), "a broadcast source left");
 					outcome.file
 				}
@@ -974,16 +975,6 @@ async fn finish<S: Stream>(
 	Ok(Finished::Saved)
 }
 
-/// Whether `broadcast` has ended, or ends before `stop` is set: a broadcast
-/// source whose reading failed as it ended left, rather than failed.
-async fn left(broadcast: &moq_net::broadcast::Consumer, mut stop: watch::Receiver<bool>) -> bool {
-	tokio::select! {
-		biased;
-		() = broadcast.closed() => true,
-		() = stopped(&mut stop) => false,
-	}
-}
-
 /// Wait until the recording is asked to stop, or its recorder is gone.
 async fn stopped(stop: &mut watch::Receiver<bool>) {
 	let _ = stop.wait_for(|stop| *stop).await;
@@ -1127,11 +1118,19 @@ fn largest_video(mut media: hang::Catalog) -> hang::Catalog {
 	media
 }
 
-/// Whether `now` replaced the renditions of a kind the file already records.
-/// A kind that first appears joins the file instead, and a rendition's config
-/// changing under the same name stays on its track.
-fn replaced<T>(last: &BTreeMap<String, T>, now: &BTreeMap<String, T>) -> bool {
-	!last.is_empty() && !last.keys().eq(now.keys())
+/// Whether `now` replaced the renditions of a kind the file already records:
+/// a rendition added, removed, or pointed at another track, as a browser
+/// publisher does on a codec or size change while keeping its name. A kind
+/// that first appears joins the file instead, and a rendition's config
+/// changing on the same track stays on it.
+fn replaced<T: hang::catalog::Reference>(last: &BTreeMap<String, T>, now: &BTreeMap<String, T>) -> bool {
+	let tracks = |renditions: &BTreeMap<String, T>| {
+		renditions
+			.iter()
+			.map(|(id, config)| (id.clone(), config.track(id).to_string(), config.broadcast().cloned()))
+			.collect::<Vec<_>>()
+	};
+	!last.is_empty() && tracks(last) != tracks(now)
 }
 
 #[cfg(test)]
@@ -2193,6 +2192,24 @@ mod tests {
 			.collect();
 		assert_eq!(video, [("1.avc3", true)]);
 		assert_eq!(recorded.audio.renditions.len(), 1);
+	}
+
+	/// A rendition that keeps its name but points at another track, as a
+	/// browser publisher does on a codec change, is replaced; one whose config
+	/// changes on the same track is not.
+	#[test]
+	fn a_rendition_pointed_at_another_track_is_replaced() {
+		let audio = |track: Option<&str>, bitrate: Option<u64>| {
+			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+			config.track = track.map(str::to_string);
+			config.bitrate = bitrate;
+			BTreeMap::from([("audio".to_string(), config)])
+		};
+		assert!(!replaced(&audio(None, None), &audio(None, Some(64_000))));
+		assert!(!replaced(&audio(None, None), &audio(Some("audio"), None)));
+		assert!(replaced(&audio(Some("first"), None), &audio(Some("second"), None)));
+		assert!(replaced(&audio(None, None), &BTreeMap::new()));
+		assert!(!replaced(&BTreeMap::new(), &audio(None, None)));
 	}
 
 	/// A name already taken, such as by a recording started in the same
