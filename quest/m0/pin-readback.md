@@ -6,8 +6,11 @@ The `moq` submodule includes moq-video's public readback, which copies a
 wgpu texture into packed RGBA with no encoder, from
 [Read a texture back without an encoder](https://github.com/moq-dev/moq/blob/main/quest/m1/video-readback.md).
 
-Check: that quest file is gone from moq's `main`. Advance it with
-`just upgrade-moq` in its own PR, fixing whatever the new API breaks here.
+Check: that quest's PR has merged on moq's `main`, deleting its file, and
+`moq/rs/moq-video` there has a public readback with no encoder probe. A quest
+file that moved, or went away without its work landing, does not count.
+Advance it with `just upgrade-moq` in its own PR, fixing whatever the new API
+breaks here.
 
 ## Plan
 
