@@ -155,8 +155,9 @@ struct Layer {
 	raw: Option<wgpu::Texture>,
 	fresh: bool,
 	/// Cuts the person out of each picture, while the source's background is
-	/// removed.
-	matte: Option<Matte>,
+	/// removed, or why it cannot. A failure stays until the background is kept
+	/// or the source edited, since retrying the model would fail the same way.
+	matte: Option<Result<Matte, String>>,
 	/// The newest picture drawn; `None` until the first arrives, and while the
 	/// first cut-out is under way.
 	picture: Option<Picture>,
@@ -181,41 +182,47 @@ impl Layer {
 	) {
 		if background == Background::Keep {
 			// One switched back shows the picture it held back.
-			if self.matte.take().is_some() || self.fresh {
-				self.fresh = false;
-				self.picture = self.raw.as_ref().map(|raw| effects.picture(raw));
+			match self.matte.take() {
+				Some(Err(_)) => self.error = None,
+				Some(Ok(_)) => {}
+				None if !self.fresh => return,
+				None => {}
 			}
+			self.fresh = false;
+			self.picture = self.raw.as_ref().map(|raw| effects.picture(raw));
 			return;
 		}
 
-		let matte = match &mut self.matte {
-			Some(matte) => matte,
-			None => match Matte::new(device, queue) {
-				Ok(matte) => {
-					// What was drawn shows the background, so nothing is until
-					// the first cut-out.
-					self.picture = None;
-					self.fresh = self.raw.is_some();
-					self.matte.insert(matte)
+		if self.matte.is_none() {
+			// What was drawn shows the background, so nothing is until the
+			// first cut-out.
+			self.picture = None;
+			self.fresh = self.raw.is_some();
+			self.matte = Some(Matte::new(device, queue).map_err(|err| err.to_string()));
+		} else if let Some(Err(err)) = &self.matte {
+			self.error = Some(err.clone());
+			return;
+		}
+		let failed = match self.matte.as_mut().expect("set above") {
+			Err(err) => Some(err.clone()),
+			Ok(matte) => match matte.finish() {
+				Some(Ok(cut)) => {
+					self.picture = Some(effects.picture(cut));
+					None
 				}
-				Err(err) => {
-					self.error = Some(err.to_string());
-					return;
-				}
+				Some(Err(err)) => Some(err.to_string()),
+				None => None,
 			},
 		};
-		match matte.finish() {
-			Some(Ok(cut)) => self.picture = Some(effects.picture(cut)),
-			Some(Err(err)) => {
-				if self.error.is_none() {
-					tracing::warn!(source = %name, %err, "cannot remove the background");
-				}
-				self.error = Some(err.to_string());
-				self.picture = None;
-			}
-			None => {}
+		if let Some(err) = failed {
+			tracing::warn!(source = %name, %err, "cannot remove the background");
+			self.error = Some(err.clone());
+			self.picture = None;
+			self.matte = Some(Err(err));
+			return;
 		}
-		if self.fresh
+		if let Some(Ok(matte)) = &mut self.matte
+			&& self.fresh
 			&& !matte.busy()
 			&& let Some(raw) = &self.raw
 		{
@@ -2371,7 +2378,10 @@ mod tests {
 				// Nothing shows until the cut-out is ready, not even the background.
 				assert_eq!(at(&program, face.0, face.1), BLACK);
 				let layer = studio.compositor.layers.get_mut("person").unwrap();
-				layer.matte.as_mut().expect("removing the background").wait();
+				let Some(Ok(matte)) = &mut layer.matte else {
+					panic!("not removing the background")
+				};
+				matte.wait();
 				studio.render(Instant::now());
 				let program = studio.program();
 				assert_ne!(at(&program, face.0, face.1), BLACK);
