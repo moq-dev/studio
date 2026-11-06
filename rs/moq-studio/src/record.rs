@@ -3,8 +3,10 @@
 //!
 //! A recording reads the studio's broadcast the way a relay viewer does, so it
 //! shares the live encoders and starts and stops without touching what the
-//! relay serves, and each source's track from the studio's local broadcast,
-//! which its reading keeps encoding. Each file is an MP4 that plays while it
+//! relay serves, each local source's track from the studio's local broadcast,
+//! which its reading keeps encoding, and each broadcast source, a guest's
+//! included, as it arrives through the origin the studio subscribes through,
+//! copied without a re-encode. Each file is an MP4 that plays while it
 //! grows, so a crash still leaves a playable file, and becomes a regular MP4
 //! when the recording stops. A sidecar marks each file while it is written, so
 //! the next launch finds one a crash left unfinished and repairs it (see
@@ -33,10 +35,24 @@ pub use repair::{Repair, Repaired};
 /// before it started, since moq-mux reads from the oldest group within it.
 pub const MAX_DELAY: Duration = Duration::from_secs(2);
 
+/// What a recording reads.
+pub struct Inputs {
+	/// The studio's broadcast.
+	pub program: moq_mux::Source,
+	/// The local broadcast holding each local source's own track.
+	pub sources: moq_mux::Source,
+	/// What broadcast sources subscribe through.
+	pub origin: moq_net::origin::Consumer,
+}
+
 /// Records the program into a directory, one recording at a time.
 pub struct Recorder {
 	program: moq_mux::Source,
 	sources: moq_mux::Source,
+	origin: moq_net::origin::Consumer,
+	/// Each broadcast source, by name, and the path it subscribes to, as
+	/// [`set_sources`](Self::set_sources) last saw them.
+	broadcasts: watch::Sender<BTreeMap<String, String>>,
 	dir: PathBuf,
 	/// Each file's name starts with this: the scene file's.
 	name: String,
@@ -102,13 +118,17 @@ pub struct FileStatus {
 }
 
 impl Recorder {
-	/// Record `program`, the studio's broadcast, and from `sources`, the local
-	/// one, each source's own track, into `dir`, naming each file after the
+	/// Record what `inputs` names into `dir`, naming each file after the
 	/// `scenes` file, and repair in the background each file in `dir` a crash
 	/// left unfinished.
 	///
 	/// Call inside the tokio runtime the recordings write on.
-	pub fn new(program: moq_mux::Source, sources: moq_mux::Source, dir: &Path, scenes: &Path) -> anyhow::Result<Self> {
+	pub fn new(inputs: Inputs, dir: &Path, scenes: &Path) -> anyhow::Result<Self> {
+		let Inputs {
+			program,
+			sources,
+			origin,
+		} = inputs;
 		let name = scenes
 			.file_stem()
 			.context("the scene file has no name")?
@@ -119,6 +139,8 @@ impl Recorder {
 		Ok(Self {
 			program,
 			sources,
+			origin,
+			broadcasts: watch::channel(BTreeMap::new()).0,
 			repairs: repair::Repairs::start(&dir, &runtime),
 			dir,
 			name,
@@ -132,9 +154,27 @@ impl Recorder {
 		&self.dir
 	}
 
+	/// Record the broadcast sources `collection` has from now on, as each
+	/// recording that gives sources files of their own follows them.
+	pub fn set_sources(&self, collection: &moq_scene::Collection) {
+		let broadcasts: BTreeMap<String, String> = collection
+			.sources
+			.iter()
+			.filter_map(|(name, source)| match source {
+				moq_scene::Source::Broadcast { path } => Some((name.clone(), path.clone())),
+				_ => None,
+			})
+			.collect();
+		self.broadcasts.send_if_modified(|current| {
+			let changed = *current != broadcasts;
+			*current = broadcasts;
+			changed
+		});
+	}
+
 	/// Start recording the program, and with `sources`, each source that
-	/// publishes video or audio into a file of its own, unless a recording is
-	/// still running.
+	/// publishes video or audio and each broadcast source into a file of its
+	/// own, unless a recording is still running.
 	pub fn start(&self, sources: bool) -> anyhow::Result<()> {
 		let mut session = self.session.lock().unwrap();
 		anyhow::ensure!(
@@ -160,6 +200,8 @@ impl Recorder {
 		let run = Run {
 			program: self.program.clone(),
 			sources: self.sources.clone(),
+			origin: self.origin.clone(),
+			broadcasts: self.broadcasts.subscribe(),
 			dir: self.dir.clone(),
 			stem,
 			files: files.clone(),
@@ -289,9 +331,12 @@ impl File {
 }
 
 /// One recording, running on the runtime.
+#[derive(Clone)]
 struct Run {
 	program: moq_mux::Source,
 	sources: moq_mux::Source,
+	origin: moq_net::origin::Consumer,
+	broadcasts: watch::Receiver<BTreeMap<String, String>>,
 	dir: PathBuf,
 	/// Each file's name starts with this.
 	stem: String,
@@ -301,15 +346,34 @@ struct Run {
 	closing: kio::Consumer<bool>,
 }
 
-/// A recording's file writers, each ending with the file it wrote.
+/// A broadcast source's instance being recorded, whose file stops once this
+/// drops.
+struct Instance {
+	broadcast: moq_net::broadcast::Consumer,
+	/// The file's number within its follower.
+	file: u64,
+	stop: watch::Sender<bool>,
+}
+
+impl Drop for Instance {
+	fn drop(&mut self) {
+		self.stop.send_replace(true);
+	}
+}
+
+/// A recording's file writers, each ending with the file it wrote, and its
+/// broadcast sources' followers.
 type Writers = tokio::task::JoinSet<Ended>;
 
-/// A file that ended.
-struct Ended {
-	/// The source whose file it was, or `None` for the program's.
-	source: Option<String>,
-	/// Its tracks were replaced, so it goes on in another file.
-	replaced: bool,
+/// A writer or follower that ended.
+enum Ended {
+	/// The program's file; `replaced` when its tracks were replaced, so it goes
+	/// on in another file.
+	Program { replaced: bool },
+	/// A local source's file, as for the program.
+	Source { name: String, replaced: bool },
+	/// A broadcast source's follower, which ends only when told to.
+	Broadcast,
 }
 
 impl Run {
@@ -324,28 +388,28 @@ impl Run {
 		}
 		// Whatever ends the program's file ends the recording.
 		while let Some(joined) = writers.join_next().await {
-			if matches!(joined, Ok(Ended { source: None, .. })) {
+			if matches!(joined, Ok(Ended::Program { .. })) {
 				self.stop.send_replace(true);
 			}
 		}
 	}
 
 	/// Go on in a new file whenever the program's tracks are replaced, and with
-	/// `sources`, give each source that publishes video or audio a file of its
-	/// own while it is listed, until asked to stop or the program ends.
+	/// `sources`, give each local source that publishes video or audio a file
+	/// of its own while it is listed, and follow each broadcast source while
+	/// the collection has it, until asked to stop or the program ends.
 	///
-	/// A source removed while recording finishes its file; one added, or added
-	/// back, starts another, as does one whose tracks were replaced. One whose
-	/// file failed while it stays listed gets no other.
+	/// A local source removed while recording finishes its file; one added, or
+	/// added back, starts another, as does one whose tracks were replaced. One
+	/// whose file failed while it stays listed gets no other. A broadcast
+	/// source removed, or moved to another path, finishes its file too.
 	async fn follow(&self, writers: &mut Writers, sources: bool) -> anyhow::Result<()> {
 		let mut asked = self.stop.subscribe();
+		let mut broadcasts = self.broadcasts.clone();
 		// A catalog that fails ends following it, without stopping the files:
 		// each reads the same catalog, and its outcome says why.
 		let mut catalog = tokio::select! {
-			catalog = self.sources.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => match catalog {
-				Ok(catalog) => catalog,
-				Err(_) => return Ok(()),
-			},
+			catalog = self.sources.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => catalog.ok(),
 			() = stopped(&mut asked) => return Ok(()),
 		};
 		let mut listed = BTreeSet::new();
@@ -355,10 +419,42 @@ impl Run {
 		// Sources whose file ended, or could not be created, while their listing
 		// stayed, held back until they leave the catalog.
 		let mut ended = BTreeSet::new();
+		// Each broadcast source followed, the path it follows, and what tells
+		// its follower to finish once dropped.
+		let mut following: BTreeMap<String, (String, watch::Sender<bool>)> = BTreeMap::new();
 		loop {
+			// Before waiting, so what is already there starts at once.
+			if sources && !*asked.borrow() && !*self.closing.read() {
+				let start: Vec<String> = listed
+					.iter()
+					.filter(|name| !writing.contains_key(*name) && !ended.contains(*name))
+					.cloned()
+					.collect();
+				for name in start {
+					if self.file(Some(&name), writers) {
+						writing.insert(name, false);
+					} else {
+						ended.insert(name);
+					}
+				}
+
+				let wanted = broadcasts.borrow_and_update().clone();
+				following.retain(|name, (path, _)| wanted.get(name) == Some(path));
+				for (name, path) in wanted {
+					if following.contains_key(&name) {
+						continue;
+					}
+					let leave = watch::channel(false).0;
+					writers.spawn(self.clone().broadcast(name.clone(), path.clone(), leave.subscribe()));
+					following.insert(name, (path, leave));
+				}
+			}
 			tokio::select! {
-				snapshot = catalog.next() => {
-					let Ok(Some(snapshot)) = snapshot else { return Ok(()) };
+				snapshot = async { catalog.as_mut().expect("guarded").next().await }, if catalog.is_some() => {
+					let Ok(Some(snapshot)) = snapshot else {
+						catalog = None;
+						continue;
+					};
 					if !sources {
 						continue;
 					}
@@ -375,88 +471,199 @@ impl Run {
 						*gone |= !listed.contains(name);
 					}
 				}
+				// Fails only once the recorder is gone.
+				Ok(()) = broadcasts.changed() => {}
 				joined = writers.join_next() => match joined.context("no writer left")?? {
 					// A listing that went away and came back, or whose tracks were
 					// replaced, is recorded afresh.
-					Ended { source: Some(name), replaced } => {
+					Ended::Source { name, replaced } => {
 						let gone = writing.remove(&name).unwrap_or_default();
 						if !gone && !replaced && listed.contains(&name) {
 							ended.insert(name);
 						}
 					}
+					Ended::Broadcast => {}
 					// A new canvas size or frame rate moves the program video to a
 					// new track, which goes on in the next file.
-					Ended { source: None, replaced: true } if !*asked.borrow() && !*self.closing.read() => {
+					Ended::Program { replaced: true } if !*asked.borrow() && !*self.closing.read() => {
 						if !self.file(None, writers) {
 							self.stop.send_replace(true);
 							return Ok(());
 						}
 					}
 					// The program's writer ended, so the recording is over.
-					Ended { source: None, .. } => {
+					Ended::Program { .. } => {
 						self.stop.send_replace(true);
 						return Ok(());
 					}
 				},
 				() = stopped(&mut asked) => return Ok(()),
 			}
-			if *asked.borrow() || *self.closing.read() {
-				continue;
-			}
-			let start: Vec<String> = listed
-				.iter()
-				.filter(|name| !writing.contains_key(*name) && !ended.contains(*name))
-				.cloned()
-				.collect();
-			for name in start {
-				if self.file(Some(&name), writers) {
-					writing.insert(name, false);
-				} else {
-					ended.insert(name);
-				}
-			}
 		}
 	}
 
-	/// Start recording the program, or the source named, into a new file,
-	/// returning whether it started rather than failing to create the file.
+	/// Record the broadcast source `name`, at `path`, into a file of its own
+	/// for each publisher instance that serves it, until `leave` is dropped or
+	/// the recording stops. Each instance stamps its own timeline, so a guest
+	/// who leaves and joins again goes on in another file, as does one whose
+	/// tracks were replaced.
+	async fn broadcast(self, name: String, path: String, mut leave: watch::Receiver<bool>) -> Ended {
+		let mut asked = self.stop.subscribe();
+		let format = CatalogFormat::detect(&path).unwrap_or_default();
+		let mut files: tokio::task::JoinSet<(u64, bool)> = tokio::task::JoinSet::new();
+		let mut current: Option<Instance> = None;
+		let mut count = 0;
+		let failed = match moq_mux::follow::Instances::new(&self.origin, path.as_str(), None) {
+			Err(err) => Some(anyhow::Error::from(err)),
+			Ok(mut instances) => loop {
+				tokio::select! {
+					event = instances.next() => match event {
+						Ok(moq_mux::follow::Event::Start(broadcast)) => {
+							current = None;
+							if !*self.closing.read() {
+								count += 1;
+								current = self.instance(&name, format, broadcast, count, &mut files);
+							}
+						}
+						Ok(moq_mux::follow::Event::End) => current = None,
+						Err(err) => break Some(err.into()),
+					},
+					Some(joined) = files.join_next() => {
+						let Ok((file, replaced)) = joined else { continue };
+						let Some(instance) = current.take_if(|instance| instance.file == file) else { continue };
+						let broadcast = instance.broadcast.clone();
+						drop(instance);
+						if replaced && !*asked.borrow() && !*self.closing.read() {
+							count += 1;
+							current = self.instance(&name, format, broadcast, count, &mut files);
+						}
+					}
+					() = stopped(&mut leave) => break None,
+					() = stopped(&mut asked) => break None,
+				}
+			},
+		};
+		drop(current);
+		if let Some(err) = failed {
+			let stem = source_stem(&self.stem, &name);
+			self.fail(&stem, err.context(format!("following {path}")));
+			tokio::select! {
+				() = stopped(&mut leave) => {}
+				() = stopped(&mut asked) => {}
+			}
+		}
+		while files.join_next().await.is_some() {}
+		Ended::Broadcast
+	}
+
+	/// Record `broadcast`, an instance of the broadcast source `name`, into a
+	/// new file numbered `count` within its follower, unless the file could not
+	/// be created.
+	fn instance(
+		&self,
+		name: &str,
+		format: CatalogFormat,
+		broadcast: moq_net::broadcast::Consumer,
+		count: u64,
+		files: &mut tokio::task::JoinSet<(u64, bool)>,
+	) -> Option<Instance> {
+		let (entry, file) = self.create(&source_stem(&self.stem, name))?;
+		let stop = watch::channel(false).0;
+		let reading = Reading {
+			source: moq_mux::Source::new(self.origin.clone(), broadcast.clone()),
+			format,
+			pick: Box::new(|catalog: hang::Catalog| Some(largest_video(catalog))),
+			closing: None,
+		};
+		let stopping = stop.subscribe();
+		let (name, read) = (name.to_string(), broadcast.clone());
+		files.spawn(async move {
+			let (outcome, replaced) = write(reading, file, &entry, stopping.clone()).await;
+			let finished = match outcome.read {
+				// A broadcast that fails as its instance ends is the guest
+				// leaving, which ends the file as a stop does.
+				Err(err) if left(&read, stopping).await => {
+					tracing::debug!(source = %name, error = format!("{err:#}"), "a broadcast source left");
+					outcome.file
+				}
+				read => Outcome { read, ..outcome }.finished(),
+			};
+			entry.finish(finished);
+			(count, replaced)
+		});
+		Some(Instance {
+			broadcast,
+			file: count,
+			stop,
+		})
+	}
+
+	/// Start recording the program, or the local source named, into a new
+	/// file, returning whether it started rather than failing to create the
+	/// file.
 	fn file(&self, source: Option<&str>, writers: &mut Writers) -> bool {
 		let stem = match source {
 			None => self.stem.clone(),
 			Some(name) => source_stem(&self.stem, name),
 		};
-		let (path, file, marker) = match create(&self.dir, &stem) {
-			Ok(created) => created,
-			Err(err) => {
-				let entry = File::new(self.dir.join(format!("{stem}.mp4")), None);
-				entry.finish(Err(err));
-				self.files.lock().unwrap().push(Arc::new(entry));
-				return false;
-			}
+		let Some((entry, file)) = self.create(&stem) else {
+			return false;
 		};
-		let entry = Arc::new(File::new(path, Some(marker)));
-		self.files.lock().unwrap().push(entry.clone());
-		self.spawn(
-			source.map(str::to_string),
-			entry,
-			tokio::fs::File::from_std(file),
-			writers,
-		);
+		self.spawn(source.map(str::to_string), entry, file, writers);
 		true
 	}
 
-	/// Write the program, or the source named, into `file`.
+	/// Create a file named `stem` and list it, or list it as failed.
+	fn create(&self, stem: &str) -> Option<(Arc<File>, tokio::fs::File)> {
+		match create(&self.dir, stem) {
+			Ok((path, file, marker)) => {
+				let entry = Arc::new(File::new(path, Some(marker)));
+				self.files.lock().unwrap().push(entry.clone());
+				Some((entry, tokio::fs::File::from_std(file)))
+			}
+			Err(err) => {
+				self.fail(stem, err);
+				None
+			}
+		}
+	}
+
+	/// List the file named `stem` as failed with `err` before it was created.
+	fn fail(&self, stem: &str, err: anyhow::Error) {
+		let entry = File::new(self.dir.join(format!("{stem}.mp4")), None);
+		entry.finish(Err(err));
+		self.files.lock().unwrap().push(Arc::new(entry));
+	}
+
+	/// Write the program, or the local source named, into `file`.
 	fn spawn(&self, source: Option<String>, entry: Arc<File>, file: tokio::fs::File, writers: &mut Writers) {
-		let broadcast = match source {
-			Some(_) => self.sources.clone(),
-			None => self.program.clone(),
-		};
 		let asked = self.stop.subscribe();
-		let closing = self.closing.clone();
+		let reading = match &source {
+			None => Reading {
+				source: self.program.clone(),
+				format: CatalogFormat::Hang,
+				pick: Box::new(|studio: hang::Catalog<moq_scene::publish::Ext>| Some(largest_video(studio.media()))),
+				closing: Some(self.closing.clone()),
+			},
+			Some(name) => {
+				let name = name.clone();
+				Reading {
+					source: self.sources.clone(),
+					format: CatalogFormat::Hang,
+					pick: Box::new(move |studio: hang::Catalog<moq_scene::publish::Ext>| {
+						studio.ext.studio.sources.get(&name).cloned()
+					}),
+					closing: None,
+				}
+			}
+		};
 		writers.spawn(async move {
-			let (finished, replaced) = write(broadcast, source.as_deref(), file, &entry, asked, closing).await;
-			entry.finish(finished);
-			Ended { source, replaced }
+			let (outcome, replaced) = write(reading, file, &entry, asked).await;
+			entry.finish(outcome.finished());
+			match source {
+				None => Ended::Program { replaced },
+				Some(name) => Ended::Source { name, replaced },
+			}
 		});
 	}
 }
@@ -620,38 +827,76 @@ fn marker(path: &Path) -> PathBuf {
 	name.into()
 }
 
-/// Record the program's own tracks from `source`, or with `name` that
-/// source's, into `file` until they leave the catalog or are replaced, or
-/// `stop` is set, then finish the file. Also returns whether they were
-/// replaced.
-async fn write(
+/// What a file reads: a broadcast, and which of its tracks.
+struct Reading<E> {
 	source: moq_mux::Source,
-	name: Option<&str>,
+	/// The format of its catalog.
+	format: CatalogFormat,
+	/// The tracks a snapshot of its catalog lists for the file, or `None` while
+	/// it lists none, such as a local source not yet listed.
+	pick: Pick<E>,
+	/// Set by [`Recorder::close`], for the program's file alone; see
+	/// [`Listing::closing`].
+	closing: Option<kio::Consumer<bool>>,
+}
+
+/// What a [`Reading`] picks of each catalog snapshot.
+type Pick<E> = Box<dyn Fn(hang::Catalog<E>) -> Option<hang::Catalog> + Send>;
+
+/// Record the tracks `reading` picks into `file` until they leave the catalog
+/// or are replaced, or `stop` is set, then finish the file. Also returns
+/// whether they were replaced.
+async fn write<E: moq_mux::catalog::hang::CatalogExt>(
+	reading: Reading<E>,
 	file: tokio::fs::File,
 	entry: &File,
 	mut stop: watch::Receiver<bool>,
-	closing: kio::Consumer<bool>,
-) -> (anyhow::Result<Finished>, bool) {
+) -> (Outcome, bool) {
 	let catalog = tokio::select! {
 		// A failure already there is reported rather than lost to the stop.
 		biased;
-		catalog = source.catalog::<moq_scene::publish::Ext>(CatalogFormat::Hang) => catalog.context("the studio's catalog"),
-		() = stopped(&mut stop) => return (remove(file, entry).await, false),
+		catalog = reading.source.catalog::<E>(reading.format) => catalog,
+		() = stopped(&mut stop) => return (Outcome { file: remove(file, entry).await, read: Ok(()) }, false),
 	};
 	let catalog = match catalog {
 		Ok(catalog) => catalog,
-		Err(err) => return (Err(err), false),
+		Err(err) => {
+			let read = Err(anyhow::Error::from(err).context("reading the broadcast's catalog"));
+			return (
+				Outcome {
+					file: remove(file, entry).await,
+					read,
+				},
+				false,
+			);
+		}
 	};
 	let replaced = Arc::new(AtomicBool::new(false));
 	let listing = Listing {
 		catalog,
-		name: name.map(str::to_string),
+		pick: reading.pick,
 		last: None,
 		replaced: replaced.clone(),
-		closing,
+		closing: reading.closing,
 	};
-	let finished = record(mp4::Export::new(source, listing), file, entry, stop).await;
-	(finished, replaced.load(Ordering::Relaxed))
+	let outcome = record(mp4::Export::new(reading.source, listing), file, entry, stop).await;
+	(outcome, replaced.load(Ordering::Relaxed))
+}
+
+/// How a file ended: what became of it, and whether reading its broadcast
+/// failed first.
+struct Outcome {
+	file: anyhow::Result<Finished>,
+	read: anyhow::Result<()>,
+}
+
+impl Outcome {
+	/// The file's end, or why it failed, its own failure first.
+	fn finished(self) -> anyhow::Result<Finished> {
+		let finished = self.file?;
+		self.read?;
+		Ok(finished)
+	}
 }
 
 /// Write `export` into `file` until it ends or `stop` is set, then finish it.
@@ -663,10 +908,10 @@ async fn record<S: Stream>(
 	mut file: tokio::fs::File,
 	entry: &File,
 	mut stop: watch::Receiver<bool>,
-) -> anyhow::Result<Finished> {
+) -> Outcome {
 	let mut export = export.with_max_delay(MAX_DELAY);
 	let mut stopping = false;
-	let ended = loop {
+	let read = loop {
 		let next = if !stopping && *stop.borrow() {
 			// Checked on every chunk, so media that keeps arriving never holds a
 			// stop off. One look first, which reports a failure already waiting
@@ -686,19 +931,31 @@ async fn record<S: Stream>(
 		};
 		match next {
 			Ok(Some(data)) => {
-				file.write_all(&data).await.context("writing the recording")?;
+				if let Err(err) = file.write_all(&data).await {
+					let file = Err(anyhow::Error::from(err).context("writing the recording"));
+					return Outcome { file, read: Ok(()) };
+				}
 				entry.written.fetch_add(data.len() as u64, Ordering::Relaxed);
 			}
 			Ok(None) => break Ok(()),
-			Err(err) => break Err(err),
+			Err(err) => break Err(anyhow::Error::from(err).context("reading the broadcast")),
 		}
 	};
+	Outcome {
+		file: finish(export, file, entry).await,
+		read,
+	}
+}
 
+/// Make `file` a regular MP4 of what `export` wrote into it, or remove it
+/// when that was nothing.
+async fn finish<S: Stream>(
+	export: mp4::Export<S>,
+	mut file: tokio::fs::File,
+	entry: &File,
+) -> anyhow::Result<Finished> {
 	let Some(finish) = export.finish().context("finishing the recording")? else {
-		// Removed either way, but a broadcast that failed says why.
-		let removed = remove(file, entry).await;
-		ended.context("reading the broadcast")?;
-		return removed;
+		return remove(file, entry).await;
 	};
 	// The moov where the media ends, then the mdat header over the reserved box,
 	// which points readers past the media at the moov, so the moov must be on
@@ -714,9 +971,17 @@ async fn record<S: Stream>(
 	entry
 		.written
 		.store(finish.moov_offset + finish.moov.len() as u64, Ordering::Relaxed);
-
-	ended.context("reading the broadcast")?;
 	Ok(Finished::Saved)
+}
+
+/// Whether `broadcast` has ended, or ends before `stop` is set: a broadcast
+/// source whose reading failed as it ended left, rather than failed.
+async fn left(broadcast: &moq_net::broadcast::Consumer, mut stop: watch::Receiver<bool>) -> bool {
+	tokio::select! {
+		biased;
+		() = broadcast.closed() => true,
+		() = stopped(&mut stop) => false,
+	}
 }
 
 /// Wait until the recording is asked to stop, or its recorder is gone.
@@ -732,27 +997,25 @@ async fn remove(file: tokio::fs::File, entry: &File) -> anyhow::Result<Finished>
 	Ok(Finished::Empty)
 }
 
-/// The program's own tracks in the studio's catalog, or one source's catalog
-/// nested in it, which ends once the source leaves it or the tracks are
-/// replaced.
+/// The tracks a file records of a broadcast's catalog, which end once the
+/// catalog lists none of them or the tracks are replaced.
 ///
 /// A new canvas size or frame rate, or a capture that changes size or color
 /// space, moves the video to a new track, which an MP4 would hold as a second
 /// track that players skip, so the new one goes into another file instead.
-struct Listing {
-	catalog: moq_mux::catalog::Consumer<moq_scene::publish::Ext>,
-	/// The source, or `None` for the program.
-	name: Option<String>,
-	/// The source's catalog as last recorded, once it was listed.
+struct Listing<E: moq_mux::catalog::hang::CatalogExt> {
+	catalog: moq_mux::catalog::Consumer<E>,
+	pick: Pick<E>,
+	/// The tracks as last recorded, once picked.
 	last: Option<hang::Catalog>,
 	/// Set as the listing ends because its tracks were replaced.
 	replaced: Arc<AtomicBool>,
-	/// Set by [`Recorder::close`]: the program's listing then ends once the
-	/// tracks it recorded have all ended, adding and replacing none.
-	closing: kio::Consumer<bool>,
+	/// Set by [`Recorder::close`], for the program's listing: it then ends once
+	/// the tracks it recorded have all ended, adding and replacing none.
+	closing: Option<kio::Consumer<bool>>,
 }
 
-impl Stream for Listing {
+impl<E: moq_mux::catalog::hang::CatalogExt> Stream for Listing<E> {
 	type Ext = ();
 
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<moq_mux::Result<Option<hang::Catalog>>> {
@@ -760,18 +1023,19 @@ impl Stream for Listing {
 			return Poll::Ready(Ok(None));
 		}
 		// Polled for the program's listing, so closing wakes it.
-		let closing = self.name.is_none()
-			&& matches!(
-				self.closing.poll(waiter, |closing| if **closing {
+		let closing = self.closing.as_ref().is_some_and(|closing| {
+			matches!(
+				closing.poll(waiter, |closing| if **closing {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
 				}),
 				Poll::Ready(Ok(()))
-			);
+			)
+		});
 		loop {
-			let studio = match self.catalog.poll_next(waiter) {
-				Poll::Ready(studio) => studio?,
+			let snapshot = match self.catalog.poll_next(waiter) {
+				Poll::Ready(snapshot) => snapshot?,
 				// With nothing new, a closing program listing with nothing left to
 				// read ends without waiting for another catalog update. A catalog
 				// that failed is reported above instead.
@@ -784,14 +1048,10 @@ impl Stream for Listing {
 					return Poll::Pending;
 				}
 			};
-			let Some(studio) = studio else {
+			let Some(snapshot) = snapshot else {
 				return Poll::Ready(Ok(None));
 			};
-			let listing = match &self.name {
-				None => Some(canvas(studio.media())),
-				Some(name) => studio.ext.studio.sources.get(name).cloned(),
-			};
-			let Some(listing) = listing else {
+			let Some(listing) = (self.pick)(snapshot) else {
 				if self.last.is_some() {
 					return Poll::Ready(Ok(None));
 				}
@@ -845,10 +1105,12 @@ impl Stream for Listing {
 	}
 }
 
-/// The program's `media` narrowed to its canvas size, the largest video
-/// rendition, which stays in the file while the bandwidth grant disables it
-/// for viewers: its pictures stop, and resume, on the same track.
-fn canvas(mut media: hang::Catalog) -> hang::Catalog {
+/// `media` narrowed to its largest video rendition, since players show only
+/// one video track: the program's canvas size, or a broadcast source's best
+/// picture. It stays in the file while its publisher disables it, as the
+/// bandwidth grant does the program's for viewers: its pictures stop, and
+/// resume, on the same track.
+fn largest_video(mut media: hang::Catalog) -> hang::Catalog {
 	let pixels = |config: &hang::catalog::VideoConfig| {
 		u64::from(config.coded_width.unwrap_or(0)) * u64::from(config.coded_height.unwrap_or(0))
 	};
@@ -917,10 +1179,13 @@ mod tests {
 		}
 	}
 
-	/// The studio's broadcast with only program audio, which needs no GPU, and
-	/// sources listed in a local broadcast as the studio lists them.
+	/// The studio's broadcast with only program audio, which needs no GPU,
+	/// sources listed in a local broadcast as the studio lists them, and the
+	/// relay origin broadcast sources subscribe through.
 	struct Studio {
 		origin: moq_net::origin::Producer,
+		/// What the relays feed, where guests publish.
+		relay: moq_net::origin::Producer,
 		publication: moq_net::origin::Publication,
 		catalog: moq_scene::publish::Catalog,
 		/// The local broadcast the sources' tracks are in, and its catalog.
@@ -951,6 +1216,7 @@ mod tests {
 			let listed = moq_scene::publish::Catalog::new(&mut local, config).unwrap();
 			Self {
 				origin,
+				relay: moq_tokio::origin::spawn(),
 				publication,
 				catalog,
 				local,
@@ -964,7 +1230,12 @@ mod tests {
 		fn recorder(&self, dir: &Path) -> Recorder {
 			let program = moq_mux::Source::new(self.origin.consume(), self.publication.broadcast().consume());
 			let sources = moq_mux::Source::new(moq_tokio::origin::spawn().consume(), self.local.consume());
-			Recorder::new(program, sources, dir, Path::new("show.toml")).unwrap()
+			let inputs = Inputs {
+				program,
+				sources,
+				origin: self.relay.consume(),
+			};
+			Recorder::new(inputs, dir, Path::new("show.toml")).unwrap()
 		}
 
 		/// List a source `name` publishing a tone of its own.
@@ -1058,6 +1329,199 @@ mod tests {
 				kio::clock::sleep(PERIOD).await;
 			}
 		}
+	}
+
+	/// A guest's microphone, published through the relay as the join page
+	/// publishes it: Opus packets, as received, in a catalog of its own.
+	struct Guest {
+		_publication: moq_net::origin::Publication,
+		_catalog: moq_mux::catalog::Producer,
+		audio: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+		/// Each packet sent, in order.
+		sent: Vec<Bytes>,
+		/// How much audio was sent, on the guest's own timeline.
+		played: Duration,
+	}
+
+	/// One Opus packet's worth: a TOC byte of one 20 ms frame.
+	const PACKET: Duration = Duration::from_millis(20);
+
+	impl Guest {
+		/// Join at `path` on `relay`.
+		fn join(relay: &moq_net::origin::Producer, path: &str) -> Self {
+			let publication = relay.create_broadcast(path).unwrap();
+			let mut broadcast = publication.broadcast().clone();
+			let mut catalog =
+				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let track = broadcast
+				.create_track(
+					broadcast.unique_name(".opus"),
+					hang::container::track_info(hang::catalog::PRIORITY.audio),
+				)
+				.unwrap();
+			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, RATE, 2);
+			config.container = hang::catalog::Container::Legacy;
+			config.description = Some(moq_mux::codec::opus::Config::new(RATE, 2).encode().unwrap());
+			catalog
+				.mutate(|catalog| {
+					catalog.audio.renditions.insert(track.name().to_string(), config);
+				})
+				.unwrap();
+			let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+			publication.announce(Default::default()).unwrap();
+			Self {
+				_publication: publication,
+				_catalog: catalog,
+				audio: moq_mux::container::Producer::new(track, container),
+				sent: Vec::new(),
+				played: Duration::ZERO,
+			}
+		}
+
+		/// Send `duration` of packets, each distinct, in groups of 100 ms.
+		async fn play(&mut self, duration: Duration) {
+			let end = self.played + duration;
+			while self.played < end {
+				let count = self.sent.len() as u16;
+				let [high, low] = count.to_be_bytes();
+				let payload = Bytes::from(vec![0x08, high, low, 0xcc]);
+				self.audio
+					.write(moq_mux::container::Frame {
+						timestamp: moq_net::Timestamp::try_from(self.played).unwrap(),
+						payload: payload.clone(),
+						keyframe: count % 5 == 0,
+						duration: None,
+					})
+					.unwrap();
+				self.sent.push(payload);
+				self.played += PACKET;
+				kio::clock::sleep(PACKET).await;
+			}
+		}
+
+		/// Leave, ending the track cleanly, as closing the join page does.
+		fn leave(mut self) -> Vec<Bytes> {
+			self.audio.finish().unwrap();
+			self.sent
+		}
+	}
+
+	/// Each sample's bytes in the only track of the regular MP4 at `path`,
+	/// found through its sample tables.
+	fn samples(path: &Path) -> Vec<Bytes> {
+		let data = Bytes::from(std::fs::read(path).unwrap());
+		let mut cursor = std::io::Cursor::new(&data[..]);
+		let mut moov = None;
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moov(found) = atom {
+				moov = Some(found);
+			}
+		}
+		let [trak] = moov.expect("a moov").trak.try_into().unwrap();
+		let stbl = trak.mdia.minf.stbl;
+		let mut sizes = match stbl.stsz.samples {
+			mp4_atom::StszSamples::Identical { count, size } => vec![size; count as usize],
+			mp4_atom::StszSamples::Different { sizes } => sizes,
+		}
+		.into_iter();
+		let offsets: Vec<u64> = match (stbl.co64, stbl.stco) {
+			(Some(co64), _) => co64.entries,
+			(None, Some(stco)) => stco.entries.into_iter().map(u64::from).collect(),
+			(None, None) => panic!("no chunk offsets"),
+		};
+		let mut samples = Vec::new();
+		for (index, offset) in offsets.into_iter().enumerate() {
+			let chunk = index as u32 + 1;
+			let entry = stbl
+				.stsc
+				.entries
+				.iter()
+				.rev()
+				.find(|entry| entry.first_chunk <= chunk)
+				.unwrap();
+			let mut offset = offset as usize;
+			for size in sizes.by_ref().take(entry.samples_per_chunk as usize) {
+				samples.push(data.slice(offset..offset + size as usize));
+				offset += size as usize;
+			}
+		}
+		assert!(sizes.next().is_none(), "every sample is in a chunk");
+		samples
+	}
+
+	/// A collection with a broadcast source at each of `paths`, by name.
+	fn broadcasts(paths: &[(&str, &str)]) -> moq_scene::Collection {
+		let mut collection = moq_scene::Collection::default();
+		for (name, path) in paths {
+			let source = moq_scene::Source::Broadcast { path: path.to_string() };
+			collection.sources.insert(name.to_string(), source);
+		}
+		collection
+	}
+
+	/// Each guest live through the relay records into a file of its own, named
+	/// after them, holding the packets they sent unchanged, from up to
+	/// [`MAX_DELAY`] before the recording started. One who leaves finishes
+	/// their file, and joining again, as a new instance with a timeline of its
+	/// own, goes on in another. One never live, or removed before joining,
+	/// gets no file.
+	#[tokio::test(start_paused = true)]
+	async fn guests_record_into_their_own_files() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		let recorder = studio.recorder(dir.path());
+		recorder.set_sources(&broadcasts(&[
+			("alice", "room/alice"),
+			("bob", "room/bob"),
+			("carol", "room/carol"),
+		]));
+
+		let mut alice = Guest::join(&studio.relay, "room/alice");
+		alice.play(Duration::from_secs(1)).await;
+		recorder.start(true).unwrap();
+		tokio::join!(studio.play(Duration::from_secs(1)), alice.play(Duration::from_secs(1)));
+		let first = alice.leave();
+		// Carol leaves the collection before she joins.
+		recorder.set_sources(&broadcasts(&[("alice", "room/alice"), ("bob", "room/bob")]));
+		let _carol = Guest::join(&studio.relay, "room/carol");
+		studio.play(Duration::from_millis(500)).await;
+
+		let mut alice = Guest::join(&studio.relay, "room/alice");
+		tokio::join!(studio.play(Duration::from_secs(1)), alice.play(Duration::from_secs(1)));
+		recorder.finish().await;
+		let second = alice.leave();
+
+		let status = recorder.status().unwrap();
+		let files: Vec<_> = status
+			.files
+			.iter()
+			.map(|file| {
+				assert_eq!(file.finished, Some(Finished::Saved), "{}", file.path.display());
+				let name = file.path.file_name().unwrap().to_string_lossy().into_owned();
+				name.rsplit_once('Z').unwrap().1.to_string()
+			})
+			.collect();
+		assert_eq!(files, [".mp4", " alice.mp4", " alice (2).mp4"]);
+		assert_eq!(samples(&status.files[1].path), first, "everything sent before leaving");
+		assert_eq!(
+			samples(&status.files[2].path),
+			second,
+			"everything sent after joining again"
+		);
+	}
+
+	/// A recording without a file for each source records no guest either.
+	#[tokio::test(start_paused = true)]
+	async fn guests_record_only_with_the_sources() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		let recorder = studio.recorder(dir.path());
+		recorder.set_sources(&broadcasts(&[("alice", "room/alice")]));
+		let mut alice = Guest::join(&studio.relay, "room/alice");
+		recorder.start(false).unwrap();
+		tokio::join!(studio.play(Duration::from_secs(1)), alice.play(Duration::from_secs(1)));
+		recorder.finish().await;
+		assert_eq!(recorder.status().unwrap().files.len(), 1);
 	}
 
 	/// Every track in `path`, by handler, and its duration.
@@ -1429,7 +1893,12 @@ mod tests {
 		let _catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
 		let source = moq_mux::Source::new(origin.consume(), publication.broadcast().consume());
 		let local = moq_mux::Source::new(origin.consume(), moq_net::broadcast::Info::new().produce().consume());
-		let recorder = Recorder::new(source, local, dir.path(), Path::new("show.toml")).unwrap();
+		let inputs = Inputs {
+			program: source,
+			sources: local,
+			origin: origin.consume(),
+		};
+		let recorder = Recorder::new(inputs, dir.path(), Path::new("show.toml")).unwrap();
 		recorder.start(true).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		recorder.finish().await;
@@ -1453,7 +1922,12 @@ mod tests {
 		publication.announce(Default::default()).unwrap();
 		let source = moq_mux::Source::new(origin.consume(), publication.broadcast().consume());
 		let local = moq_mux::Source::new(origin.consume(), moq_net::broadcast::Info::new().produce().consume());
-		let recorder = Recorder::new(source, local, dir.path(), Path::new("show.toml")).unwrap();
+		let inputs = Inputs {
+			program: source,
+			sources: local,
+			origin: origin.consume(),
+		};
+		let recorder = Recorder::new(inputs, dir.path(), Path::new("show.toml")).unwrap();
 		recorder.start(false).unwrap();
 		kio::clock::sleep(Duration::from_millis(100)).await;
 		catalog.abort(moq_net::StreamError::Internal.into());
@@ -1710,7 +2184,7 @@ mod tests {
 		media.video.renditions.insert("1.avc3".into(), video(1920, 1080, false));
 		let audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		media.audio.renditions.insert("audio".into(), audio);
-		let recorded = canvas(media);
+		let recorded = largest_video(media);
 		let video: Vec<_> = recorded
 			.video
 			.renditions
