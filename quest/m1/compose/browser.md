@@ -10,13 +10,13 @@ matching the studio's picture. A broadcast without one plays its program as
 ## Plan
 
 The browser build comes from whichever line
-[JS-only @moq/net from Rust](https://github.com/moq-dev/moq/blob/main/quest/m2/rs2ts-js.md) lands (decided 2026-10-26; moq's WASM
+[JS-only @moq/net from Rust](https://github.com/moq-dev/moq/blob/main/quest/m5/rs2ts-js.md) lands (decided 2026-10-26; moq's WASM
 support was removed on 2026-10-31), so this quest does not fix the
 mechanism. A thin package published from this repository (e.g. `@moq/scene`)
 wraps it and layers on `@moq/watch`; `@moq/watch` never depends on it, so moq
 never depends on this repository (decided 2026-11-02, when the studio left
 moq). Frames reach it as WebCodecs `VideoFrame`s through the browser import
-path [moq-video in the browser](https://github.com/moq-dev/moq/blob/main/quest/m3/video-web.md) adds.
+path [moq-video in the browser](https://github.com/moq-dev/moq/blob/main/quest/m5/video-web.md) adds.
 
 Prove parity with a fixture: the same broadcast composited here and by the
 studio, compared within a stated tolerance.

@@ -12,7 +12,7 @@ sources capture only X11 and XWayland.
 Decided 2026-10-26 (maintainer):
 
 - **Token:** the portal restore token is persisted, which
-  [Linux capture parity](https://github.com/moq-dev/moq/blob/main/quest/m2/capture-linux.md) makes possible in
+  [Linux capture parity](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-linux.md) makes possible in
   moq-video. This quest consumes it.
 - **Storage:** the token lives in per-machine state (the XDG state directory,
   keyed by scene collection and source), never in the scene file, so the scene
