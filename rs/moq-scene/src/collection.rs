@@ -280,10 +280,7 @@ impl Collection {
 					continue;
 				};
 				if let Some(at) = path.iter().position(|(on, _)| on.name == nested.name) {
-					let through: Vec<String> = path[at + 1..]
-						.iter()
-						.map(|(on, _)| format!("`{}`", on.name))
-						.collect();
+					let through: Vec<String> = path[at + 1..].iter().map(|(on, _)| format!("`{}`", on.name)).collect();
 					let mut err = format!("scene `{}` draws itself", nested.name);
 					if !through.is_empty() {
 						err = format!("{err} through {}", through.join(", "));

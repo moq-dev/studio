@@ -3410,13 +3410,7 @@ mod tests {
 					..Item::new("red scene", fill)
 				},
 				// Again, over the top-left quarter.
-				Item::new(
-					"red scene",
-					Rect {
-						y: 0.0,
-						..CORNER
-					},
-				),
+				Item::new("red scene", Rect { y: 0.0, ..CORNER }),
 			]);
 			// Blue over the top-right quarter alone, transparent elsewhere.
 			collection.scenes.push(Scene {
