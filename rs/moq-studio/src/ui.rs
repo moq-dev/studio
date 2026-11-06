@@ -186,7 +186,7 @@ impl eframe::App for Studio {
 		eframe::set_value(storage, SPEAKER, &panels.speaker);
 		eframe::set_value(storage, SNAPPING, &panels.snapping);
 		if let Some(hotkeys) = &panels.hotkeys {
-			eframe::set_value(storage, HOTKEYS, hotkeys.bindings());
+			eframe::set_value(storage, HOTKEYS, &hotkeys.bindings());
 		}
 	}
 
@@ -220,7 +220,14 @@ impl eframe::App for Studio {
 		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 		self.panels.follow_reloads(&state);
+		// A key bound to a scene follows it through renames, undos, and redos,
+		// under this lock, so a key fired meanwhile names the scene it means.
 		let renames = state.take_renames();
+		if let Some(hotkeys) = &mut self.panels.hotkeys {
+			for renames in &renames {
+				hotkeys.rename(renames);
+			}
+		}
 		// A page not painting through an X display copies through the
 		// studio's clipboard, even if the preview let go of the page before
 		// the copy came back.
@@ -235,11 +242,10 @@ impl eframe::App for Studio {
 		}
 		drop(state);
 
-		// A key bound to a scene follows it through renames, undos, and redos.
-		if let Some(hotkeys) = &mut self.panels.hotkeys {
-			for renames in &renames {
-				hotkeys.rename(renames);
-			}
+		if !renames.is_empty()
+			&& let Some(hotkeys) = &mut self.panels.hotkeys
+		{
+			hotkeys.hear();
 		}
 		if let Some(fired) = self.panels.controls.fired() {
 			self.panels.message = Some(fired);
@@ -2851,9 +2857,9 @@ impl Panels {
 		};
 		let mut actions: Vec<Action> = Action::FIXED.to_vec();
 		actions.extend(scenes.iter().cloned().map(Action::Scene));
+		let bindings = hotkeys.bindings();
 		// A key bound to a scene the file no longer has, so it can be cleared.
-		let gone: Vec<Action> = hotkeys
-			.bindings()
+		let gone: Vec<Action> = bindings
 			.keys()
 			.filter(|action| matches!(action, Action::Scene(name) if !scenes.contains(name)))
 			.cloned()
@@ -2865,7 +2871,7 @@ impl Panels {
 		egui::Grid::new("hotkeys").striped(true).show(ui, |ui| {
 			for action in &actions {
 				ui.label(action.to_string());
-				let bound = hotkeys.bindings().get(action);
+				let bound = bindings.get(action);
 				if self.binding.as_ref() == Some(action) {
 					ui.strong("press a key, or Escape");
 				} else {
@@ -2906,6 +2912,11 @@ impl Panels {
 		}
 		if let Some(action) = clear {
 			self.refusal = None;
+			// Clearing the action waiting for a key stops the wait.
+			if self.binding.as_ref() == Some(&action) {
+				self.binding = None;
+				hotkeys.suspend(false);
+			}
 			// Unbinding never conflicts.
 			let _ = hotkeys.bind(&action, None);
 		}

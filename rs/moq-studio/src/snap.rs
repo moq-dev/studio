@@ -272,8 +272,9 @@ impl Snap {
 	/// the nearest line within reach of a moving edge or center wins, as does
 	/// the spacing of a neighboring pair when the whole item moves.
 	///
-	/// A resize keeping an aspect snaps only the axis whose snap is nearer,
-	/// and the other follows its shape. The snapped rect is at rest.
+	/// A resize keeping an aspect snaps only the axis whose snap moves the
+	/// item least, and the other follows its shape, as long as no edge moves
+	/// out of reach. The snapped rect is at rest.
 	pub fn apply(&self, grab: Grab, rect: Rect, others: &[Rect], canvas: &Canvas) -> Snapped {
 		// An edge shown is the edge at rest plus a constant, so a shift
 		// measured where it shows moves it as far at rest.
@@ -293,13 +294,34 @@ impl Snap {
 				}
 			}
 			Some(aspect) => {
+				// How far a snap moves any edge, the one that follows the
+				// shape included.
+				let moved = |snapped: &Rect| {
+					Axis::ALL
+						.into_iter()
+						.map(|axis| {
+							let ((start, end), (from, to)) = (axis.span(&rect), axis.span(snapped));
+							(from - start).abs().max((to - end).abs())
+						})
+						.fold(0.0, f32::max)
+				};
 				let best = Axis::ALL
 					.into_iter()
-					.filter_map(|axis| Some((axis, self.nearest(grab, axis, &shown(&rect), others, canvas)?)))
-					.min_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()));
-				if let Some((axis, best)) = best {
-					shift(&mut rect, axis, grab.moves(axis), best);
-					rect = grab.keep_aspect(rect, aspect, axis);
+					.filter_map(|axis| {
+						let mut snapped = rect;
+						shift(
+							&mut snapped,
+							axis,
+							grab.moves(axis),
+							self.nearest(grab, axis, &shown(&rect), others, canvas)?,
+						);
+						let snapped = grab.keep_aspect(snapped, aspect, axis);
+						let moved = moved(&snapped);
+						(moved <= self.reach).then_some((moved, snapped))
+					})
+					.min_by(|(a, _), (b, _)| a.total_cmp(b));
+				if let Some((_, snapped)) = best {
+					rect = snapped;
 				}
 			}
 		}
@@ -606,7 +628,8 @@ mod tests {
 			y: Some(Side::End),
 		};
 		// The right edge at 396 is 4 px from the other item's left edge, and
-		// the bottom at 247 is 3 px from its top, which is nearer and wins.
+		// the bottom at 247 is 3 px from its top, but snapping the bottom
+		// would move the right edge 6 px, so the right edge's snap wins.
 		let others = [rect(400.0, 250.0, 100.0, 50.0)];
 		let snapped = snap.apply(bottom_right, rect(100.0, 100.0, 296.0, 147.0), &others, &CANVAS);
 		assert_eq!(snapped.rect, rect(100.0, 100.0, 300.0, 150.0));
@@ -614,6 +637,28 @@ mod tests {
 		// With nothing in reach it stays as dragged.
 		let item = rect(100.0, 100.0, 300.0, 150.0);
 		assert_eq!(snap.apply(bottom_right, item, &[], &CANVAS).rect, item);
+	}
+
+	#[test]
+	fn a_locked_snap_moves_no_edge_out_of_reach() {
+		let snap = Snap {
+			aspect: Some(100.0),
+			..SNAP
+		};
+		let bottom_right = Grab::Resize {
+			x: Some(Side::End),
+			y: Some(Side::End),
+		};
+		// A thin strip's bottom is 5 px from the other item's top, and its right
+		// edge 8 px from its left. Snapping the bottom would widen it 500 px.
+		let strip = rect(100.0, 100.0, 1000.0, 10.0);
+		let others = [rect(1108.0, 115.0, 50.0, 50.0)];
+		let snapped = snap.apply(bottom_right, strip, &others, &CANVAS).rect;
+		assert_eq!((snapped.x, snapped.y, snapped.width), (100.0, 100.0, 1008.0));
+		assert!((snapped.height - 10.08).abs() < 1e-3);
+		// With only the bottom's snap near, it stays as dragged.
+		let others = [rect(1300.0, 115.0, 50.0, 50.0)];
+		assert_eq!(snap.apply(bottom_right, strip, &others, &CANVAS).rect, strip);
 	}
 
 	#[test]

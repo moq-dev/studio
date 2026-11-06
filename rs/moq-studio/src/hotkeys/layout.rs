@@ -49,6 +49,19 @@ impl Layout {
 		}
 		code(position)
 	}
+
+	/// Whether the platform, letting go of `code` registered for the key at
+	/// `position`, finds that key in this layout. global-hotkey looks an X11
+	/// grab's keysym up again to release it, so once the layout moves the
+	/// keysym it releases another key, or none.
+	pub fn releases(&self, position: Key, code: Code) -> bool {
+		#[cfg(target_os = "linux")]
+		if let Some(scancode) = scancode(position) {
+			return self.keymap.holds(code, scancode + 8);
+		}
+		let _ = (position, code);
+		true
+	}
 }
 
 /// The PC scancode of a key in the block whose keys a layout relabels,
@@ -207,6 +220,14 @@ impl Keymap {
 			.filter_map(|keysym| KEYSYMS.iter().find(|(_, named)| named == keysym))
 			.find(|(_, keysym)| self.first(*keysym) == Some(keycode))
 			.map(|(code, _)| *code)
+	}
+
+	/// Whether global-hotkey finds `code`'s keysym on `keycode`.
+	fn holds(&self, code: Code, keycode: u32) -> bool {
+		KEYSYMS
+			.iter()
+			.find(|(named, _)| *named == code)
+			.is_some_and(|(_, keysym)| self.first(*keysym) == Some(keycode))
 	}
 
 	fn keysyms(&self, keycode: u32) -> Option<&[u32]> {
@@ -434,5 +455,16 @@ mod tests {
 		// A keysym an earlier key carries grabs that key, so this one is refused.
 		let twice = keymap(&[(Key::Num1, [0x31, 0x21]), (Key::Num2, [0x31, 0x40])]);
 		assert_eq!(twice.code(Key::Num2), None);
+	}
+
+	#[test]
+	fn x11_grabs_are_released_only_where_the_layout_still_has_them() {
+		let keycode = |position| scancode(position).unwrap() + 8;
+		let german = keymap(&[(Key::Y, [0x7a, 0x5a]), (Key::Z, [0x79, 0x59])]);
+		let us = keymap(&[(Key::Y, [0x79, 0x59]), (Key::Z, [0x7a, 0x5a])]);
+		// German's Y position grabbed `z`, which US moves to the Z position.
+		assert!(german.holds(Code::KeyZ, keycode(Key::Y)));
+		assert!(!us.holds(Code::KeyZ, keycode(Key::Y)));
+		assert!(us.holds(Code::KeyY, keycode(Key::Y)));
 	}
 }

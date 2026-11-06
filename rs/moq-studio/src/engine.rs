@@ -217,6 +217,20 @@ impl State {
 		std::mem::take(&mut self.renamed)
 	}
 
+	/// What the renames not yet taken call `scene` now, or `None` if one
+	/// removed it.
+	pub fn follow(&self, scene: &str) -> Option<String> {
+		let mut scene = scene.to_string();
+		for renames in &self.renamed {
+			match renames.get(&scene) {
+				Some(Some(to)) => scene = to.clone(),
+				Some(None) => return None,
+				None => {}
+			}
+		}
+		Some(scene)
+	}
+
 	/// The sources whose pictures any canvas's program draws, through clones:
 	/// those [`placed`](Self::placed) there, and the clip a stinger under way
 	/// plays with each mask its source's filters read.

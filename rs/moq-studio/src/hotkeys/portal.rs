@@ -11,7 +11,7 @@ use egui::{Key, KeyboardShortcut};
 use futures_util::StreamExt;
 use tokio::sync::watch;
 
-use super::{Bindings, Reach};
+use super::{Binding, Bindings, Reach};
 use crate::controls::Action;
 
 /// A session with the portal, kept by a task of its own.
@@ -22,7 +22,7 @@ pub struct Portal {
 }
 
 impl Portal {
-	pub fn new(runtime: &tokio::runtime::Handle, fire: mpsc::Sender<Action>) -> Self {
+	pub fn new(runtime: &tokio::runtime::Handle, fire: mpsc::Sender<Binding>) -> Self {
 		let (bindings, wanted) = watch::channel(Bindings::new());
 		let reach = Arc::new(Mutex::new(Reach::Asking));
 		let task = reach.clone();
@@ -50,10 +50,10 @@ impl Portal {
 }
 
 /// Ask the desktop for each set of `wanted` bindings in turn, in a session of
-/// its own, and fire the actions it reports.
+/// its own, and fire the keys of the shortcuts it reports.
 async fn run(
 	mut wanted: watch::Receiver<Bindings>,
-	fire: mpsc::Sender<Action>,
+	fire: mpsc::Sender<Binding>,
 	reach: &Mutex<Reach>,
 ) -> anyhow::Result<()> {
 	let portal = GlobalShortcuts::new()
@@ -71,7 +71,8 @@ async fn run(
 			let shortcuts: Vec<NewShortcut> = bindings
 				.iter()
 				.map(|(action, binding)| {
-					NewShortcut::new(id(action), action.to_string()).preferred_trigger(trigger(&binding.key).as_deref())
+					NewShortcut::new(id(action, binding), action.to_string())
+						.preferred_trigger(trigger(&binding.key).as_deref())
 				})
 				.collect();
 			let bound = portal
@@ -84,7 +85,8 @@ async fn run(
 						.shortcuts()
 						.iter()
 						.filter_map(|shortcut| {
-							Some((action(shortcut.id())?, shortcut.trigger_description().to_string()))
+							let (action, _) = by_id(&bindings, shortcut.id())?;
+							Some((action.clone(), shortcut.trigger_description().to_string()))
 						})
 						.collect(),
 				),
@@ -95,9 +97,9 @@ async fn run(
 			tokio::select! {
 				event = activated.next() => {
 					let event = event.context("the global shortcuts portal went away")?;
-					// Only this session is open, so every activation is its own.
-					if let Some(action) = action(event.shortcut_id()) {
-						let _ = fire.send(action);
+					// Its key fires whatever it is bound to by then, if anything.
+					if let Some((_, key)) = by_id(&bindings, event.shortcut_id()) {
+						let _ = fire.send(*key);
 					}
 				}
 				changed = wanted.changed() => {
@@ -113,24 +115,39 @@ async fn run(
 }
 
 /// The id the desktop's settings keep `action`'s shortcut under, the same
-/// across runs so a key the operator picked there stays.
-fn id(action: &Action) -> String {
+/// across runs so a key the operator picked there stays. A scene's is named
+/// for the key bound to it, which follows the scene through renames.
+fn id(action: &Action, binding: &Binding) -> String {
 	match action {
 		Action::Cut => "cut".into(),
 		Action::Transition => "transition".into(),
-		Action::Scene(name) => format!("scene/{name}"),
+		Action::Scene(_) => {
+			let held = binding.key.modifiers;
+			let mut id = "scene/".to_string();
+			for (on, name) in [
+				(held.ctrl, "ctrl+"),
+				(held.alt, "alt+"),
+				(held.shift, "shift+"),
+				(held.mac_cmd, "logo+"),
+			] {
+				if on {
+					id.push_str(name);
+				}
+			}
+			id.push_str(&format!("{:?}", binding.position));
+			id
+		}
 		Action::Replay => "replay".into(),
 		Action::SaveClip => "save-clip".into(),
 		Action::Record => "record".into(),
 	}
 }
 
-/// The action a shortcut `id` is kept under.
-fn action(id: &str) -> Option<Action> {
-	if let Some(name) = id.strip_prefix("scene/") {
-		return Some(Action::Scene(name.into()));
-	}
-	Action::FIXED.into_iter().find(|action| self::id(action) == id)
+/// The binding among `bindings` whose shortcut is kept under `id`.
+fn by_id<'a>(bindings: &'a Bindings, id: &str) -> Option<(&'a Action, &'a Binding)> {
+	bindings
+		.iter()
+		.find(|(action, binding)| self::id(action, binding) == id)
 }
 
 /// `shortcut` as a trigger for the desktop to offer first, its key named by
@@ -221,11 +238,28 @@ mod tests {
 	}
 
 	#[test]
-	fn ids_round_trip() {
-		for action in Action::FIXED.into_iter().chain([Action::Scene("Live/Intro".into())]) {
-			assert_eq!(super::action(&id(&action)), Some(action));
-		}
-		assert_eq!(super::action("unknown"), None);
+	fn a_scene_keeps_its_id_through_renames() {
+		let key = |modifiers, key| Binding {
+			key: KeyboardShortcut::new(modifiers, key),
+			position: key,
+		};
+		let scene = |name: &str| Action::Scene(name.into());
+		let f1 = key(egui::Modifiers::NONE, Key::F1);
+		assert_eq!(id(&scene("Intro"), &f1), "scene/F1");
+		assert_eq!(id(&scene("Intro"), &f1), id(&scene("Opening"), &f1));
+		let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+		assert_eq!(
+			id(&scene("Intro"), &key(ctrl_shift, Key::Num1)),
+			"scene/ctrl+shift+Num1"
+		);
+		// An activation reads the bindings the session was opened with.
+		let bindings = Bindings::from([
+			(scene("Opening"), f1),
+			(Action::Cut, key(egui::Modifiers::CTRL, Key::F1)),
+		]);
+		assert_eq!(by_id(&bindings, "scene/F1"), Some((&scene("Opening"), &f1)));
+		assert_eq!(by_id(&bindings, "cut").map(|(action, _)| action), Some(&Action::Cut));
+		assert_eq!(by_id(&bindings, "unknown"), None);
 	}
 
 	#[test]

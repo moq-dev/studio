@@ -898,7 +898,9 @@ with, such as a function key or one with modifiers:
   permission. A key another app already registered is refused, saying so. On
   macOS 15 and later, the system refuses a key whose only modifiers are Option,
   or Option and Shift.
-- **Linux on X11** grabs them from the X server.
+- **Linux on X11** grabs them from the X server. Once a layout change moves
+  a key the studio holds, its keys stay as they are until it restarts, and the
+  panel says so beside each.
 - **Linux on Wayland**, where no app hears keys meant for another, asks the
   desktop through its GlobalShortcuts portal (KDE Plasma, and GNOME 48 and
   later). The desktop shows its own dialog, may bind other keys than those

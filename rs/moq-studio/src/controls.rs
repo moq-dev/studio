@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use moq_scene::Source;
 
-use crate::engine::Engine;
+use crate::engine::{Engine, State};
 use crate::replay;
 
 /// Something a hotkey can be bound to.
@@ -107,12 +107,7 @@ impl Controls {
 				state.transition(transition, kio::clock::Instant::now())?;
 				Ok(format!("took {}", on_program(state.compositor.program_scene())))
 			}
-			Action::Scene(name) => {
-				let mut state = self.engine.state.lock().unwrap();
-				anyhow::ensure!(state.collection().scene(name).is_some(), "no scene is called `{name}`");
-				state.compositor.set_preview(Some(name.clone()));
-				Ok(format!("previewing `{name}`"))
-			}
+			Action::Scene(name) => preview(&mut self.engine.state.lock().unwrap(), name),
 			Action::Replay => self.replay(true),
 			Action::SaveClip => self.replay(false),
 			Action::Record => {
@@ -137,14 +132,27 @@ impl Controls {
 	/// replays apply in the order they were asked for.
 	fn replay(&self, play: bool) -> anyhow::Result<String> {
 		let replay = self.replay.lock().unwrap();
-		let outcome = replay.outcome.clone();
-		let result = self.take(&replay, play);
-		let message = result.as_ref().map_err(|err| format!("{err:#}")).cloned();
-		*outcome.lock().unwrap() = Some(message);
-		result
+		let taken = self.take(&replay, play);
+		let message = taken.as_ref().map(|(message, _)| message.clone());
+		*replay.outcome.lock().unwrap() = Some(message.map_err(|err| format!("{err:#}")));
+		let (message, save) = taken?;
+		// Started once the message above is written, so how it went replaces it.
+		if let Some(save) = save {
+			let outcome = replay.outcome.clone();
+			self.runtime.spawn(async move {
+				let result = save.await;
+				*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
+			});
+		}
+		Ok(message)
 	}
 
-	fn take(&self, replay: &Replay, play: bool) -> anyhow::Result<String> {
+	/// What a replay or clip does at once, and the save a clip still runs.
+	fn take(
+		&self,
+		replay: &Replay,
+		play: bool,
+	) -> anyhow::Result<(String, Option<impl Future<Output = anyhow::Result<String>> + use<>>)> {
 		let into = match play {
 			true => Some(self.replay_source(replay.into.as_deref())?),
 			false => None,
@@ -153,18 +161,15 @@ impl Controls {
 		let of = replay.of.clone();
 		if let Some(into) = into {
 			replay::play(&self.engine, take, replay.speed, &into)?;
-			return Ok(format!("replaying {of} in `{into}`"));
+			return Ok((format!("replaying {of} in `{into}`"), None));
 		}
 		let saving = format!("saving {of}");
 		let engine = self.engine.clone();
-		let outcome = replay.outcome.clone();
-		self.runtime.spawn(async move {
-			let result = replay::save(take, engine.autosave.path())
-				.await
-				.map(|path| format!("saved {of} to {}", path.display()));
-			*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
-		});
-		Ok(saving)
+		let save = async move {
+			let path = replay::save(take, engine.autosave.path()).await?;
+			Ok(format!("saved {of} to {}", path.display()))
+		};
+		Ok((saving, Some(save)))
 	}
 
 	/// The replay source a replay plays in: `picked`, or the first there is
@@ -195,6 +200,17 @@ impl Controls {
 	pub fn fired(&self) -> Option<Result<String, String>> {
 		self.fired.lock().unwrap().take()
 	}
+}
+
+/// Put the scene called `name` in preview, under `state` locked by the
+/// caller, following any rename the window has yet to move its key through.
+pub fn preview(state: &mut State, name: &str) -> anyhow::Result<String> {
+	let scene = state
+		.follow(name)
+		.filter(|scene| state.collection().scene(scene).is_some())
+		.with_context(|| format!("no scene is called `{name}`"))?;
+	state.compositor.set_preview(Some(scene.clone()));
+	Ok(format!("previewing `{scene}`"))
 }
 
 fn on_program(scene: Option<&str>) -> String {

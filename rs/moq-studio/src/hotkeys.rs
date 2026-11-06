@@ -11,7 +11,7 @@ use egui::{Key, KeyboardShortcut};
 use global_hotkey::hotkey::{HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
-use crate::controls::{Action, Controls};
+use crate::controls::{self, Action, Controls};
 
 mod keypad;
 mod layout;
@@ -46,14 +46,18 @@ impl Binding {
 
 /// The bound keys, heard wherever the platform lets the studio hear them.
 pub struct Hotkeys {
-	bindings: Bindings,
+	/// The key bound to each action, which the thread firing them reads as
+	/// each key fires.
+	bound: Arc<Mutex<Bindings>>,
 	backend: Backend,
-	/// Why the platform refused each binding it would not register.
-	refused: BTreeMap<Action, String>,
+	/// The keys last handed to the backend.
+	heard: Vec<Binding>,
+	/// Why the platform refused each key it would not register.
+	refused: Vec<(Binding, String)>,
 	/// Whether bindings are held off while the Hotkeys panel waits for a key,
 	/// which the thread firing them reads too.
 	suspended: Arc<AtomicBool>,
-	fire: mpsc::Sender<Action>,
+	fire: mpsc::Sender<Binding>,
 }
 
 /// Where bound keys are heard.
@@ -62,11 +66,11 @@ enum Backend {
 	/// `RegisterHotKey` on Windows, and a key grab on X11.
 	Native {
 		manager: GlobalHotKeyManager,
-		/// The hotkeys registered now.
-		held: Vec<HotKey>,
-		/// The action each registered hotkey fires, by its id, which the
+		/// The hotkeys registered now, and the key each hears.
+		held: Vec<(Binding, HotKey)>,
+		/// The key each registered hotkey hears, by its id, which the
 		/// platform's event handler reads.
-		registered: Arc<Mutex<HashMap<u32, Action>>>,
+		registered: Arc<Mutex<HashMap<u32, Binding>>>,
 	},
 	/// The desktop's GlobalShortcuts portal, on Wayland.
 	#[cfg(target_os = "linux")]
@@ -107,25 +111,46 @@ impl Hotkeys {
 		runtime: &tokio::runtime::Handle,
 		bindings: Bindings,
 	) -> Self {
-		let (fire, fired) = mpsc::channel::<Action>();
+		let (fire, pressed) = mpsc::channel::<Binding>();
+		let bound: Arc<Mutex<Bindings>> = Arc::default();
 		let suspended = Arc::new(AtomicBool::new(false));
-		let held_off = suspended.clone();
+		let (held_off, reading) = (suspended.clone(), bound.clone());
 		std::thread::spawn(move || {
-			for action in fired {
+			for key in pressed {
 				// A key the desktop holds on Wayland still fires while the panel
 				// waits for one, and the panel never sees it.
 				if held_off.load(Ordering::Relaxed) {
 					continue;
 				}
-				let result = controls.fire(&action);
+				// What a key does is read as it fires, under the lock the window
+				// moves keys through renames under, so a key cleared since does
+				// nothing and one whose scene was renamed previews it by its new name.
+				let mut state = controls.engine.state.lock().unwrap();
+				let action = reading
+					.lock()
+					.unwrap()
+					.iter()
+					.find(|(_, bound)| bound.same(&key))
+					.map(|(action, _)| action.clone());
+				let Some(action) = action else {
+					continue;
+				};
+				let result = match &action {
+					Action::Scene(name) => controls::preview(&mut state, name),
+					action => {
+						drop(state);
+						controls.fire(action)
+					}
+				};
 				controls.report(&action, result);
 			}
 		});
 		let backend = Backend::new(window, runtime, fire.clone());
 		let mut hotkeys = Self {
-			bindings: Bindings::new(),
+			bound,
 			backend,
-			refused: BTreeMap::new(),
+			heard: Vec::new(),
+			refused: Vec::new(),
 			suspended,
 			fire,
 		};
@@ -133,22 +158,21 @@ impl Hotkeys {
 		hotkeys
 	}
 
-	pub fn bindings(&self) -> &Bindings {
-		&self.bindings
+	pub fn bindings(&self) -> Bindings {
+		self.bound.lock().unwrap().clone()
 	}
 
 	/// Bind `action` to `key`, or unbind it, unless `key` is bound to another
 	/// action, which is returned instead.
 	pub fn bind(&mut self, action: &Action, key: Option<Binding>) -> Result<(), Action> {
+		let mut bindings = self.bindings();
 		if let Some(key) = key
-			&& let Some((other, _)) = self
-				.bindings
+			&& let Some((other, _)) = bindings
 				.iter()
 				.find(|(other, bound)| bound.same(&key) && *other != action)
 		{
 			return Err(other.clone());
 		}
-		let mut bindings = self.bindings.clone();
 		match key {
 			Some(key) => bindings.insert(action.clone(), key),
 			None => bindings.remove(action),
@@ -159,45 +183,72 @@ impl Hotkeys {
 
 	/// Move each binding to a scene `renames` renamed, all at once, so a swap
 	/// of two names swaps their keys. A removed scene keeps its key, which an
-	/// undo may bring back.
+	/// undo may bring back. Called under the state lock `renames` was taken
+	/// under, so a key fired meanwhile reads the names on one side of them;
+	/// [`hear`](Self::hear) then follows outside it.
 	pub fn rename(&mut self, renames: &BTreeMap<String, Option<String>>) {
-		let bindings = renamed(&self.bindings, renames);
-		if bindings != self.bindings {
-			self.set(bindings);
-		}
+		let mut bound = self.bound.lock().unwrap();
+		*bound = renamed(&bound, renames);
 	}
 
 	/// Hold every binding off while the Hotkeys panel waits for a key, so the
 	/// key pressed binds rather than fires; or take them up again.
 	pub fn suspend(&mut self, suspended: bool) {
 		if self.suspended.swap(suspended, Ordering::Relaxed) != suspended {
-			self.set(self.bindings.clone());
+			self.set(self.bindings());
 		}
 	}
 
 	/// Hear `bindings` instead of the ones heard now.
 	fn set(&mut self, bindings: Bindings) {
-		self.refused.clear();
-		let heard = match self.suspended.load(Ordering::Relaxed) {
-			true => &Bindings::new(),
-			false => &bindings,
+		*self.bound.lock().unwrap() = bindings;
+		self.hear();
+	}
+
+	/// Have the platform hear the keys bound now. On X11, each key it takes
+	/// or lets go of waits on the platform's event thread.
+	pub fn hear(&mut self) {
+		let bindings = self.bindings();
+		let heard: Vec<Binding> = match self.suspended.load(Ordering::Relaxed) {
+			true => Vec::new(),
+			false => bindings.values().copied().collect(),
 		};
+		// A rename moves no key, so the platform is left alone.
+		let moved =
+			heard.len() != self.heard.len() || heard.iter().any(|key| !self.heard.iter().any(|was| was.same(key)));
 		match &mut self.backend {
 			Backend::Native {
 				manager,
 				held,
 				registered,
-			} => {
+			} if moved => {
+				let layout = Layout::current();
+				// Where the platform would let go of another key, or none, and keep
+				// holding these, they stay as they are.
+				let stuck = match &layout {
+					Ok(layout) => held
+						.iter()
+						.any(|(key, hotkey)| !layout.releases(key.position, hotkey.key))
+						.then(|| {
+							"the keyboard layout changed since the studio took its keys; restart it to change them"
+								.into()
+						}),
+					Err(err) => (!held.is_empty()).then(|| err.clone()),
+				};
+				if let Some(why) = stuck {
+					self.refused = bindings.values().map(|key| (*key, why.clone())).collect();
+					return;
+				}
+				self.refused.clear();
 				// `registered` is not locked while the manager works: on X11 it
 				// waits on the thread that runs the event handler, which locks it.
-				for hotkey in held.drain(..) {
+				for (_, hotkey) in held.drain(..) {
 					if let Err(err) = manager.unregister(hotkey) {
 						tracing::warn!(%hotkey, error = %err, "cannot unregister a hotkey");
 					}
 				}
 				let mut ids = HashMap::new();
-				let layout = Layout::current();
-				for (action, key) in heard {
+				for key in &heard {
 					let hotkey = match &layout {
 						Ok(layout) => {
 							hotkey(layout, key).ok_or_else(|| "this key cannot be heard outside the studio".into())
@@ -207,32 +258,38 @@ impl Hotkeys {
 					let hotkey = match hotkey {
 						Ok(hotkey) => hotkey,
 						Err(reason) => {
-							self.refused.insert(action.clone(), reason);
+							self.refused.push((*key, reason));
 							continue;
 						}
 					};
 					match manager.register(hotkey) {
 						Ok(()) => {
-							held.push(hotkey);
-							ids.insert(hotkey.id(), action.clone());
+							held.push((*key, hotkey));
+							ids.insert(hotkey.id(), *key);
 						}
-						Err(err) => drop(self.refused.insert(action.clone(), refusal(err))),
+						Err(err) => self.refused.push((*key, refusal(err))),
 					}
 				}
 				*registered.lock().unwrap() = ids;
 			}
+			Backend::Native { .. } => {}
 			// Held off, the desktop would be asked to bind them all again
 			// after each key the panel takes.
 			#[cfg(target_os = "linux")]
-			Backend::Portal(portal) => portal.set(bindings.clone()),
+			Backend::Portal(portal) => portal.set(bindings),
 			Backend::Focused(_) => {}
 		}
-		self.bindings = bindings;
+		self.heard = heard;
 	}
 
 	/// Why the platform would not hear `action`'s key, if it refused it.
 	pub fn refused(&self, action: &Action) -> Option<&str> {
-		self.refused.get(action).map(String::as_str)
+		let bindings = self.bound.lock().unwrap();
+		let key = bindings.get(action)?;
+		self.refused
+			.iter()
+			.find(|(refused, _)| refused.same(key))
+			.map(|(_, why)| why.as_str())
 	}
 
 	pub fn reach(&self) -> Reach {
@@ -253,17 +310,18 @@ impl Hotkeys {
 		if suspended || ctx.text_edit_focused() || !matches!(self.reach(), Reach::Focused(_)) {
 			return;
 		}
+		let bindings = self.bound.lock().unwrap();
 		ctx.input_mut(|input| {
 			input.events.retain(|event| {
 				let Some(pressed) = binding(event) else {
 					return true;
 				};
-				let Some((action, _)) = self.bindings.iter().find(|(_, key)| key.same(&pressed)) else {
+				if !bindings.values().any(|key| key.same(&pressed)) {
 					return true;
-				};
+				}
 				// A held key fires once, and its repeats are taken too.
 				if !matches!(event, egui::Event::Key { repeat: true, .. }) {
-					let _ = self.fire.send(action.clone());
+					let _ = self.fire.send(pressed);
 				}
 				false
 			});
@@ -273,7 +331,7 @@ impl Hotkeys {
 
 impl Backend {
 	/// Pick where keys are heard from what the platform offers.
-	fn new(window: &eframe::Frame, runtime: &tokio::runtime::Handle, fire: mpsc::Sender<Action>) -> Self {
+	fn new(window: &eframe::Frame, runtime: &tokio::runtime::Handle, fire: mpsc::Sender<Binding>) -> Self {
 		#[cfg(target_os = "linux")]
 		{
 			use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -290,14 +348,14 @@ impl Backend {
 			Ok(manager) => manager,
 			Err(err) => return Self::Focused(format!("the platform's global hotkeys are unavailable: {err}")),
 		};
-		let registered: Arc<Mutex<HashMap<u32, Action>>> = Arc::default();
+		let registered: Arc<Mutex<HashMap<u32, Binding>>> = Arc::default();
 		let heard = registered.clone();
 		GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
 			if event.state() != HotKeyState::Pressed {
 				return;
 			}
-			if let Some(action) = heard.lock().unwrap().get(&event.id()) {
-				let _ = fire.send(action.clone());
+			if let Some(key) = heard.lock().unwrap().get(&event.id()) {
+				let _ = fire.send(*key);
 			}
 		}));
 		Self::Native {
