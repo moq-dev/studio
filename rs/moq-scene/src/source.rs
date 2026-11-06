@@ -55,9 +55,47 @@ pub(crate) enum Picture {
 	Overlay(crate::overlay::Content),
 }
 
-/// The one picture a source holds for the compositor. A newer picture replaces
-/// an undrawn one, so a slow canvas skips pictures instead of queuing them.
-pub(crate) type Mailbox = Arc<Mutex<Option<Picture>>>;
+/// The one picture a source holds for the compositor, and whether it cleared
+/// its picture since the compositor last took one. A newer picture replaces an
+/// undrawn one, so a slow canvas skips pictures instead of queuing them, but
+/// not the clear before it.
+#[derive(Default)]
+pub(crate) struct Slot {
+	picture: Option<Picture>,
+	cleared: bool,
+}
+
+impl Slot {
+	/// Hold `picture` for the compositor, replacing one not yet drawn.
+	pub fn show(&mut self, picture: Picture) {
+		self.picture = Some(picture);
+	}
+
+	/// Show nothing, ending what the source showed before, such as a play
+	/// stopped or a page closed.
+	pub fn clear(&mut self) {
+		self.picture = Some(clear());
+		self.cleared = true;
+	}
+
+	fn take(&mut self) -> Option<Taken> {
+		let picture = self.picture.take()?;
+		Some(Taken {
+			picture,
+			cleared: std::mem::take(&mut self.cleared),
+		})
+	}
+}
+
+pub(crate) type Mailbox = Arc<Mutex<Slot>>;
+
+/// A picture the compositor takes from a source.
+pub(crate) struct Taken {
+	pub picture: Picture,
+	/// Whether the source cleared its picture since the last one taken, even
+	/// if `picture` came after the clear: nothing from before it may show.
+	pub cleared: bool,
+}
 
 /// When a source last delivered a picture or, for a microphone or system
 /// audio, a buffer of sound. `None` before its first.
@@ -457,7 +495,7 @@ impl Feed {
 		// Cleared before the driver hears of it, so the next frame drawn, such
 		// as the first of a scene going on program, shows nothing rather than
 		// where the last play was, and the new first picture replaces it.
-		*self.picture.lock().unwrap() = Some(clear());
+		self.picture.lock().unwrap().clear();
 		let cue = Cue {
 			play: latest.run.play,
 			stopped: false,
@@ -477,7 +515,7 @@ impl Feed {
 		let mut latest = self.runs.lock().unwrap();
 		latest.run.ended.get_or_insert_with(kio::clock::now);
 		latest.stopped = true;
-		*self.picture.lock().unwrap() = Some(clear());
+		self.picture.lock().unwrap().clear();
 		// Kept even with the driver gone, which plays nothing anyway.
 		cues.send_replace(Cue {
 			play: latest.run.play,
@@ -561,8 +599,14 @@ impl Feed {
 	}
 
 	/// The newest picture not yet drawn.
-	pub(crate) fn take(&self) -> Option<Picture> {
+	pub(crate) fn take(&self) -> Option<Taken> {
 		self.picture.lock().unwrap().take()
+	}
+
+	/// The newest picture not yet drawn, without whether it follows a clear.
+	#[cfg(test)]
+	pub(crate) fn next_picture(&self) -> Option<Picture> {
+		self.take().map(|taken| taken.picture)
 	}
 }
 
@@ -732,7 +776,7 @@ impl Driver {
 	}
 
 	fn show(&self, picture: Picture) {
-		*self.picture.lock().unwrap() = Some(picture);
+		self.picture.lock().unwrap().show(picture);
 		*self.delivered.lock().unwrap() = Some(kio::clock::now());
 		set(&self.status, Status::Live);
 	}
@@ -1194,7 +1238,7 @@ impl Driver {
 	/// Play each replay [`Feed::replay`] hands over, showing nothing between
 	/// them. A new one cuts off the one playing.
 	async fn replays(&self, mut plays: watch::Receiver<Next>, listing: Option<&Listing<'_>>) -> Result<(), Error> {
-		*self.picture.lock().unwrap() = Some(clear());
+		self.picture.lock().unwrap().clear();
 		set(&self.status, Status::Live);
 
 		let mut playing: Option<Playing<'_>> = None;
@@ -1211,13 +1255,13 @@ impl Driver {
 					// already, and clearing it again would show before the new
 					// one's first picture even when that is due at once.
 					if playing.is_some() {
-						*self.picture.lock().unwrap() = Some(clear());
+						self.picture.lock().unwrap().clear();
 					}
 					playing = play.map(|play| Box::pin(self.replay(play, listing)) as Playing<'_>);
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
-					*self.picture.lock().unwrap() = Some(clear());
+					self.picture.lock().unwrap().clear();
 					set(&self.status, match result {
 						Ok(()) => Status::Live,
 						Err(err) => Status::Failed(err.to_string()),
@@ -1267,7 +1311,7 @@ impl Driver {
 					moq_video::decode::Read::Gap { timestamp, .. }
 					| moq_video::decode::Read::End { end: timestamp } => {
 						kio::clock::sleep_until(at(timestamp.clamp(take.start, take.end))).await;
-						*self.picture.lock().unwrap() = Some(clear());
+						self.picture.lock().unwrap().clear();
 						if let Some(video) = &mut own.track
 							&& let Err(err) = video.discontinuity()
 						{
@@ -2044,6 +2088,26 @@ mod tests {
 		collection
 	}
 
+	/// A picture that replaces a clear before the compositor takes it still
+	/// says the source cleared, once.
+	#[test]
+	fn a_clear_outlives_the_picture_after_it() {
+		let mut slot = Slot::default();
+		slot.show(clear());
+		assert!(!slot.take().unwrap().cleared);
+		slot.clear();
+		slot.show(Picture::Rgba {
+			size: moq_video::Size::new(2, 1),
+			pixels: vec![255; 8],
+		});
+		let taken = slot.take().unwrap();
+		assert!(taken.cleared);
+		assert!(matches!(taken.picture, Picture::Rgba { size, .. } if size == moq_video::Size::new(2, 1)));
+		assert!(slot.take().is_none());
+		slot.show(clear());
+		assert!(!slot.take().unwrap().cleared);
+	}
+
 	#[tokio::test]
 	async fn a_color_shows_one_pixel() {
 		local(async {
@@ -2057,12 +2121,12 @@ mod tests {
 			let red = sources.get("red").unwrap();
 			assert_eq!(red.status(), Status::Live);
 			assert!(red.strip().is_none(), "a color is silent");
-			let Some(Picture::Rgba { size, pixels }) = red.take() else {
+			let Some(Picture::Rgba { size, pixels }) = red.next_picture() else {
 				panic!("a color shows a picture");
 			};
 			assert_eq!(size, moq_video::Size::new(1, 1));
 			assert_eq!(pixels, [255, 0, 0, 255]);
-			assert!(red.take().is_none(), "taken once");
+			assert!(red.next_picture().is_none(), "taken once");
 
 			let guest = sources.get("guest").unwrap();
 			assert_eq!(guest.status(), Status::Offline, "nothing is announced");
@@ -2212,7 +2276,7 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			assert_eq!(drivers.iter().map(Driver::name).collect::<Vec<_>>(), ["red"]);
 			start(&sources, drivers).await;
-			let Some(Picture::Rgba { pixels, .. }) = sources.get("red").unwrap().take() else {
+			let Some(Picture::Rgba { pixels, .. }) = sources.get("red").unwrap().next_picture() else {
 				panic!("the edited color shows");
 			};
 			assert_eq!(pixels, [0, 0, 255, 255]);
@@ -2405,7 +2469,7 @@ mod tests {
 
 	/// The picture a feed shows next, once it shows one.
 	async fn shown(feed: &Feed) -> Duration {
-		until(|| match feed.take() {
+		until(|| match feed.next_picture() {
 			Some(Picture::Frame(frame)) => Some(frame.timestamp.into()),
 			Some(_) => panic!("a broadcast shows only frames"),
 			None => None,
@@ -2433,7 +2497,7 @@ mod tests {
 			let stamp = moq_net::Timestamp::from_millis(1_000).unwrap();
 			let due = until(|| clock.due(stamp)).await;
 			assert_eq!(due, arrived + VIDEO_DELAY);
-			assert!(feed.take().is_none(), "shown on arrival");
+			assert!(feed.next_picture().is_none(), "shown on arrival");
 			until_time(due).await;
 			assert_eq!(shown(feed).await, Duration::from(stamp));
 			assert_eq!(feed.delay(), Some(VIDEO_DELAY));
@@ -2478,14 +2542,14 @@ mod tests {
 			until_time(kio::clock::now()).await;
 			let arrived = kio::clock::now();
 			picture(&mut live.video, &mut encoder, 0);
-			let moved = until(|| match feed.take() {
+			let moved = until(|| match feed.next_picture() {
 				Some(Picture::Frame(frame)) => panic!("{:?} shown on arrival", frame.timestamp),
 				_ => clock.due(first).filter(|at| *at != due),
 			})
 			.await;
 			assert!(moved > due, "the replacement re-anchored behind the first track");
 			until_time(arrived + VIDEO_DELAY - Duration::from_millis(1)).await;
-			assert!(feed.take().is_none(), "shown before its delay");
+			assert!(feed.next_picture().is_none(), "shown before its delay");
 			until_time(arrived + VIDEO_DELAY).await;
 			assert!(
 				shown(feed).await < Duration::from(first),
@@ -2521,7 +2585,7 @@ mod tests {
 			let due = arrived + target + crate::playout::BUS_LATENCY;
 			until(|| (clock.due(stamp) == Some(due)).then_some(())).await;
 			until_time(due - Duration::from_millis(1)).await;
-			assert!(feed.take().is_none(), "shown before its sound");
+			assert!(feed.next_picture().is_none(), "shown before its sound");
 			until_time(due).await;
 			assert_eq!(shown(feed).await, Duration::from(stamp));
 			assert_eq!(feed.delay(), Some(target));
@@ -2590,7 +2654,7 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 
-			let Some(Picture::Rgba { size, pixels }) = sources.get("logo").unwrap().take() else {
+			let Some(Picture::Rgba { size, pixels }) = sources.get("logo").unwrap().next_picture() else {
 				panic!("an image shows a picture");
 			};
 			assert_eq!(size, moq_video::Size::new(3, 2));
@@ -2663,7 +2727,7 @@ mod tests {
 
 			let title = sources.get("title").unwrap();
 			assert_eq!(title.status(), Status::Live);
-			assert!(matches!(title.take(), Some(Picture::Overlay(_))));
+			assert!(matches!(title.next_picture(), Some(Picture::Overlay(_))));
 			let Status::Failed(reason) = sources.get("shadow").unwrap().status() else {
 				panic!("an overlay outside the subset fails");
 			};
@@ -2707,7 +2771,7 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			let feed = sources.get("replay").unwrap();
-			assert!(matches!(feed.take(), Some(Picture::Rgba { pixels, .. }) if pixels == [0; 4]));
+			assert!(matches!(feed.next_picture(), Some(Picture::Rgba { pixels, .. }) if pixels == [0; 4]));
 
 			let (broadcast, video, _live) = video(None).await;
 			let target = Target {
@@ -2729,9 +2793,9 @@ mod tests {
 			for index in 45..75u64 {
 				let timestamp = moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap();
 				let due = begin + (Duration::from(timestamp) - Duration::from(start)).div_f32(speed);
-				assert!(feed.take().is_none(), "a picture before {timestamp:?} is due");
+				assert!(feed.next_picture().is_none(), "a picture before {timestamp:?} is due");
 				until_time(due).await;
-				let shown = until(|| match feed.take() {
+				let shown = until(|| match feed.next_picture() {
 					Some(Picture::Frame(frame)) => Some(frame.timestamp),
 					Some(_) => panic!("cleared before {timestamp:?}"),
 					None => None,
@@ -2742,12 +2806,15 @@ mod tests {
 
 			// Nothing more, and the replay ends once the span's second has
 			// played over two.
-			assert!(feed.take().is_none(), "the picture at the end shows for no time");
+			assert!(
+				feed.next_picture().is_none(),
+				"the picture at the end shows for no time"
+			);
 			let end = begin + Duration::from_secs(2);
 			until_time(end - Duration::from_millis(1)).await;
-			assert!(feed.take().is_none(), "cleared before the end");
+			assert!(feed.next_picture().is_none(), "cleared before the end");
 			until_time(end).await;
-			until(|| matches!(feed.take(), Some(Picture::Rgba { .. })).then_some(())).await;
+			until(|| matches!(feed.next_picture(), Some(Picture::Rgba { .. })).then_some(())).await;
 			assert_eq!(feed.status(), Status::Live, "ready for the next replay");
 		})
 		.await;
@@ -2779,10 +2846,10 @@ mod tests {
 			};
 			// Its first picture, at 1.5 s, is due at once.
 			feed.replay(take(2_500_000), 1.0).unwrap();
-			until(|| matches!(feed.take(), Some(Picture::Frame(_))).then_some(())).await;
+			until(|| matches!(feed.next_picture(), Some(Picture::Frame(_))).then_some(())).await;
 			// This one's first picture, at the same 1.5 s, is due 20 ms in.
 			feed.replay(take(2_480_000), 1.0).unwrap();
-			let shown = until(|| feed.take()).await;
+			let shown = until(|| feed.next_picture()).await;
 			assert!(matches!(shown, Picture::Rgba { pixels, .. } if pixels == [0; 4]));
 		})
 		.await;
@@ -2814,7 +2881,7 @@ mod media_tests {
 	/// The next picture `feed` shows, passing over the clear a restart puts up,
 	/// and when it showed.
 	async fn shown(feed: &Feed) -> (moq_net::Timestamp, Instant) {
-		let timestamp = until(|| match feed.take() {
+		let timestamp = until(|| match feed.next_picture() {
 			Some(Picture::Frame(frame)) => Some(frame.timestamp),
 			Some(Picture::Rgba { pixels, .. }) if pixels == [0; 4] => None,
 			Some(_) => panic!("not a decoded picture"),
@@ -2849,7 +2916,7 @@ mod media_tests {
 				let into = Duration::from_millis(index * 100);
 				// Within the timer wheel's millisecond of when the test saw the first.
 				until_time(begin + into - Duration::from_millis(2)).await;
-				assert!(feed.take().is_none(), "picture {index} before its moment");
+				assert!(feed.next_picture().is_none(), "picture {index} before its moment");
 				until_time(begin + into).await;
 				let (timestamp, _) = shown(feed).await;
 				assert_eq!(Duration::from(timestamp) - Duration::from(first), into);
@@ -2861,10 +2928,10 @@ mod media_tests {
 			assert_eq!(feed.status(), Status::Live);
 			until_time(begin + Duration::from_millis(1_100)).await;
 			until_status(&sources, "clip.mkv", Status::Ended).await;
-			assert!(feed.take().is_none(), "the last picture holds");
+			assert!(feed.next_picture().is_none(), "the last picture holds");
 
 			feed.play().unwrap();
-			let cleared = feed.take();
+			let cleared = feed.next_picture();
 			assert!(
 				matches!(cleared, Some(Picture::Rgba { pixels, .. }) if pixels == [0; 4]),
 				"the held picture is cleared at once"
@@ -2895,7 +2962,7 @@ mod media_tests {
 			let feed = sources.get("clip.mkv").unwrap();
 			assert_eq!(feed.status(), Status::Ended);
 			until_time(kio::clock::now() + Duration::from_millis(1_100)).await;
-			assert!(feed.take().is_none(), "nothing plays until asked");
+			assert!(feed.next_picture().is_none(), "nothing plays until asked");
 			assert_eq!(feed.run(), Run::default());
 
 			feed.play().unwrap();
@@ -2982,7 +3049,7 @@ mod media_tests {
 
 			feed.stop().unwrap();
 			let stopped = kio::clock::now();
-			let blank = feed.take();
+			let blank = feed.next_picture();
 			assert!(
 				matches!(blank, Some(Picture::Rgba { pixels, .. }) if pixels == [0; 4]),
 				"blank at once"
@@ -2992,7 +3059,7 @@ mod media_tests {
 			let heard = listen(&mut mixer, &program, &mut at, stopped + Duration::from_millis(500)).await;
 			assert_eq!(heard, 0.0, "nothing it queued plays");
 			assert!(
-				!matches!(feed.take(), Some(Picture::Frame(_))),
+				!matches!(feed.next_picture(), Some(Picture::Frame(_))),
 				"no picture after the stop"
 			);
 			assert_eq!(feed.run().ended, Some(stopped), "the play stays ended there");
@@ -3024,7 +3091,7 @@ mod media_tests {
 			let (last, _) = shown(feed).await;
 			assert_eq!(Duration::from(last) - Duration::from(first), Duration::from_millis(900));
 			until_time(begin + Duration::from_millis(998)).await;
-			assert!(feed.take().is_none(), "the start again before the end");
+			assert!(feed.next_picture().is_none(), "the start again before the end");
 			until_time(begin + Duration::from_millis(1_100)).await;
 			let (again, _) = shown(feed).await;
 			assert_eq!(again, first);
