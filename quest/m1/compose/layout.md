@@ -51,3 +51,12 @@ clock, and a viewer that joins late lands at the same point of them.
 Only sources the creator publishes independently
 ([Published independently](/quest/m2/publish-independently.md)) have tracks a
 viewer can fetch; the rest reach viewers only in the program.
+
+Decided 2026-11-05 (maintainer, /quest-plan): the layout waits for
+[Composable scenes](/quest/m0/scenes/README.md), which removes canvases and
+mixes and adds scene sources, published scenes, and audio scenes, so it
+serializes that model once instead of chasing it.
+
+## Required
+
+- [Composable scenes](/quest/m0/scenes/README.md) - the scene model the layout serializes
