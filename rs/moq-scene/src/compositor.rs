@@ -10,9 +10,10 @@ use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
 use crate::collection::{
-	Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Rect, Settled, Source, Transition,
+	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Rect, Settled, Source, Transition,
 };
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
+use crate::matte::Matte;
 use crate::overlay::{Overlay, Overlays};
 use crate::source::{self, Feed, Sources, Status};
 
@@ -149,7 +150,21 @@ struct Layer {
 	source: Source,
 	/// Converts video frames, created on the first one.
 	renderer: Option<Renderer>,
-	/// The newest picture; `None` until the first arrives.
+	/// The newest picture as the source delivered it, and whether it is newer
+	/// than what `picture` shows or `matte` started on.
+	raw: Option<wgpu::Texture>,
+	fresh: bool,
+	/// Whether the source cleared its picture since `matte` last looked, such
+	/// as a media source stopped or played again, so nothing from before may
+	/// show.
+	cleared: bool,
+	/// Cuts the person out of each picture, while the source's background is
+	/// removed, or why it cannot. A failure stays until the background is kept
+	/// or the source edited, since retrying the model would fail the same way,
+	/// and is reported over `error`.
+	matte: Option<Result<Matte, String>>,
+	/// The newest picture drawn; `None` until the first arrives, and while the
+	/// first cut-out is under way.
 	picture: Option<Picture>,
 	/// A LUT source's table; `None` until it is read.
 	lut: Option<Lut>,
@@ -157,6 +172,71 @@ struct Layer {
 	overlay: Option<Overlay>,
 	/// Why the newest picture failed to draw, logged when it first does.
 	error: Option<String>,
+}
+
+impl Layer {
+	/// Bring the picture drawn up to date with the newest one delivered,
+	/// through its matte while `background` is removed.
+	fn develop(
+		&mut self,
+		name: &str,
+		background: Background,
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+		effects: &Effects,
+	) {
+		let cleared = std::mem::take(&mut self.cleared);
+		if background == Background::Keep {
+			// One switched back shows the picture it held back.
+			if self.matte.take().is_none() && !self.fresh {
+				return;
+			}
+			self.fresh = false;
+			self.picture = self.raw.as_ref().map(|raw| effects.picture(raw));
+			return;
+		}
+
+		if self.matte.is_none() {
+			// What was drawn shows the background, so nothing is until the
+			// first cut-out.
+			self.picture = None;
+			self.fresh = self.raw.is_some();
+			self.matte = Some(Matte::new(device, queue).map_err(|err| err.to_string()));
+		} else if let Some(Err(_)) = &self.matte {
+			return;
+		}
+		// The cut-out in hand is from before the clear, such as a media
+		// source's last play, so it never shows.
+		if cleared && let Some(Ok(matte)) = &mut self.matte {
+			matte.discard();
+			self.picture = None;
+		}
+		let failed = match self.matte.as_mut().expect("set above") {
+			Err(err) => Some(err.clone()),
+			Ok(matte) => match matte.finish() {
+				Some(Ok(cut)) => {
+					self.picture = Some(effects.picture(cut));
+					None
+				}
+				Some(Err(err)) => Some(err.to_string()),
+				None => None,
+			},
+		};
+		if let Some(err) = failed {
+			tracing::warn!(source = %name, %err, "cannot remove the background");
+			self.picture = None;
+			self.matte = Some(Err(err));
+			return;
+		}
+		if let Some(Ok(matte)) = &mut self.matte
+			&& self.fresh
+			&& !matte.busy()
+			&& let Some(raw) = &self.raw
+		{
+			matte.start(raw);
+			self.fresh = false;
+		}
+	}
 }
 
 /// The pictures and tables of the compositor's layers, for filters to read.
@@ -285,9 +365,14 @@ impl Compositor {
 		self.program_scene.as_deref()
 	}
 
-	/// Why `source`'s newest picture could not be drawn, until one is.
+	/// Why `source`'s newest picture could not be drawn, until one is, or why
+	/// its background cannot be removed.
 	pub fn error(&self, source: &str) -> Option<&str> {
-		self.layers.get(source)?.error.as_deref()
+		let layer = self.layers.get(source)?;
+		match &layer.matte {
+			Some(Err(err)) => Some(err),
+			_ => layer.error.as_deref(),
+		}
 	}
 
 	/// Whether a transition is under way.
@@ -438,13 +523,15 @@ impl Compositor {
 		// Before the pictures are pulled, so a stinger's clip starting now is
 		// cleared in this frame rather than showing where its last play ended.
 		let progress = self.progress(sources, now);
+		let preview_start = *self.preview_start.get_or_insert(now);
+		let program_start = *self.program_start.get_or_insert(now);
 		self.update(collection, sources, now);
+		self.restart(collection, preview_start, program_start);
 		self.paint(collection, now);
 
-		let since = |start: &mut Option<Instant>| now.saturating_duration_since(*start.get_or_insert(now));
-		let preview_since = since(&mut self.preview_start);
+		let preview_since = now.saturating_duration_since(preview_start);
 		self.preview_shown = preview_since;
-		let program_since = since(&mut self.program_start);
+		let program_since = now.saturating_duration_since(program_start);
 
 		let mut frame = self.effects.frame();
 		let mut draw = Draw {
@@ -484,72 +571,137 @@ impl Compositor {
 			let Some(feed) = sources.get(name).filter(|feed| feed.source() == source) else {
 				continue;
 			};
-			let Some(picture) = feed.take() else {
+			let taken = feed.take();
+			let mut layer = match self.layers.remove(name) {
+				Some(layer) => layer,
+				None if taken.is_some() => Layer {
+					source: source.clone(),
+					renderer: None,
+					raw: None,
+					fresh: false,
+					cleared: false,
+					matte: None,
+					picture: None,
+					lut: None,
+					overlay: None,
+					error: None,
+				},
+				None => continue,
+			};
+			if let Some(taken) = taken {
+				if taken.cleared {
+					// Nothing from before the clear may show, even if the picture
+					// after it fails to draw.
+					layer.cleared = true;
+					layer.raw = None;
+					layer.fresh = true;
+				}
+				self.take(name, source, &mut layer, taken.picture, now);
+			}
+			let background = collection
+				.video
+				.get(name)
+				.map(|video| video.background)
+				.unwrap_or_default();
+			layer.develop(name, background, &self.device, &self.queue, &self.effects);
+			self.layers.insert(name.clone(), layer);
+		}
+	}
+
+	/// Put `picture` from source `name` on the GPU as `layer`'s newest. An
+	/// overlay that arrives now starts its CSS timeline at `now`.
+	fn take(&mut self, name: &str, source: &Source, layer: &mut Layer, picture: source::Picture, now: Instant) {
+		// Every picture lands premultiplied, so scaling it mixes no
+		// transparent texel's color: a page arrives so, moq-video renders
+		// a frame opaque, a still is premultiplied here, and an overlay's
+		// paint as it lands.
+		let texture = match picture {
+			source::Picture::Frame(frame) => {
+				let renderer = match layer.renderer.as_mut() {
+					Some(renderer) => Ok(renderer),
+					None => Renderer::new(&self.device, &self.queue, Default::default())
+						.map(|renderer| layer.renderer.insert(renderer)),
+				};
+				renderer
+					.and_then(|renderer| renderer.render(&frame))
+					.map_err(Error::from)
+			}
+			source::Picture::Rgba { size, mut pixels } => {
+				premultiply(&mut pixels);
+				upload(&self.device, &self.queue, size, &pixels)
+			}
+			source::Picture::Texture(texture) => Ok(texture),
+			source::Picture::Lut(cube) => {
+				layer.lut = Some(self.effects.lut(&cube));
+				return;
+			}
+			source::Picture::Overlay(content) => {
+				let Source::Overlay { width, height, .. } = source else {
+					unreachable!("only an overlay source shows an overlay")
+				};
+				let overlays = match &mut self.overlays {
+					Some(overlays) => Ok(overlays),
+					None => Overlays::new(&self.device, &self.queue).map(|overlays| self.overlays.insert(overlays)),
+				};
+				match overlays {
+					Ok(overlays) => {
+						let overlay = overlays.open(content, *width, *height, now);
+						layer.picture = Some(self.effects.picture(overlay.texture()));
+						layer.overlay = Some(overlay);
+					}
+					Err(err) => layer.error = Some(err.to_string()),
+				}
+				return;
+			}
+		};
+
+		match texture {
+			Ok(texture) => {
+				layer.error = None;
+				layer.raw = Some(texture);
+				layer.fresh = true;
+			}
+			Err(err) => {
+				if layer.error.is_none() {
+					tracing::warn!(source = %name, %err, "cannot draw source");
+				}
+				layer.error = Some(err.to_string());
+			}
+		}
+	}
+
+	/// Start each overlay set to restart over when a scene showing it went on
+	/// since its timeline started: the program scene, which `program_start`
+	/// went on at, or else the preview scene, at `preview_start`, as their
+	/// keyframes do. Preview and program share one timeline, so a preview
+	/// never restarts an overlay program shows, through the scene a
+	/// transition leaves, the top layer, or a stinger's masks included.
+	fn restart(&mut self, collection: &Collection, preview_start: Instant, program_start: Instant) {
+		let restarts = |layer: &Layer| matches!(layer.source, Source::Overlay { restart: true, .. });
+		if !self
+			.layers
+			.values()
+			.any(|layer| layer.overlay.is_some() && restarts(layer))
+		{
+			return;
+		}
+		let program = self.drawn(collection, self.program_scene.as_deref().map(Some));
+		let on_air = self.on_air_sources(collection);
+		let preview = self.drawn(collection, self.preview_scene.as_deref().map(Some));
+		for (name, layer) in &mut self.layers {
+			let name = name.as_str();
+			let start = if program.contains(name) {
+				program_start
+			} else if preview.contains(name) && !on_air.contains(name) {
+				preview_start
+			} else {
 				continue;
 			};
-			let layer = self.layers.entry(name.clone()).or_insert_with(|| Layer {
-				source: source.clone(),
-				renderer: None,
-				picture: None,
-				lut: None,
-				overlay: None,
-				error: None,
-			});
-			// Every picture lands premultiplied, so scaling it mixes no
-			// transparent texel's color: a page arrives so, moq-video renders
-			// a frame opaque, a still is premultiplied here, and an overlay's
-			// paint as it lands.
-			let texture = match picture {
-				source::Picture::Frame(frame) => {
-					let renderer = match layer.renderer.as_mut() {
-						Some(renderer) => Ok(renderer),
-						None => Renderer::new(&self.device, &self.queue, Default::default())
-							.map(|renderer| layer.renderer.insert(renderer)),
-					};
-					renderer
-						.and_then(|renderer| renderer.render(&frame))
-						.map_err(Error::from)
-				}
-				source::Picture::Rgba { size, mut pixels } => {
-					premultiply(&mut pixels);
-					upload(&self.device, &self.queue, size, &pixels)
-				}
-				source::Picture::Texture(texture) => Ok(texture),
-				source::Picture::Lut(cube) => {
-					layer.lut = Some(self.effects.lut(&cube));
-					continue;
-				}
-				source::Picture::Overlay(content) => {
-					let Source::Overlay { width, height, .. } = source else {
-						unreachable!("only an overlay source shows an overlay")
-					};
-					let overlays = match &mut self.overlays {
-						Some(overlays) => Ok(overlays),
-						None => Overlays::new(&self.device, &self.queue).map(|overlays| self.overlays.insert(overlays)),
-					};
-					match overlays {
-						Ok(overlays) => {
-							let overlay = overlays.open(content, *width, *height, now);
-							layer.picture = Some(self.effects.picture(overlay.texture()));
-							layer.overlay = Some(overlay);
-						}
-						Err(err) => layer.error = Some(err.to_string()),
-					}
-					continue;
-				}
-			};
-
-			match texture {
-				Ok(texture) => {
-					layer.error = None;
-					layer.picture = Some(self.effects.picture(&texture));
-				}
-				Err(err) => {
-					if layer.error.is_none() {
-						tracing::warn!(source = %name, %err, "cannot draw source");
-					}
-					layer.error = Some(err.to_string());
-				}
+			if !restarts(layer) {
+				continue;
+			}
+			if let Some(overlay) = layer.overlay.as_mut().filter(|overlay| overlay.start() < start) {
+				overlay.restart(start);
 			}
 		}
 	}
@@ -600,42 +752,71 @@ impl Compositor {
 	/// each visible item's, a stinger's clip under way, and each mask's,
 	/// through clones.
 	fn shown<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
-		let leaving = self.switch.as_ref().and_then(|switch| switch.from.as_deref());
-		let scenes: Vec<Option<String>> = [self.preview_scene.as_deref(), self.program_scene.as_deref(), leaving]
-			.into_iter()
-			.flatten()
-			.map(|name| Some(name.to_string()))
-			.chain([None])
-			.collect();
-		let canvases = std::iter::once(None).chain(self.extras.keys().map(Some));
+		let mut shown = self.on_air_sources(collection);
+		shown.extend(self.drawn(collection, self.preview_scene.as_deref().map(Some)));
+		shown
+	}
+
+	/// The sources whose pictures program draws on any canvas: each visible
+	/// item's in the scene on program, the scene a transition leaves, and the
+	/// top layer, a stinger's clip under way, and each mask's, through clones.
+	fn on_air_sources<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
+		let mut shown = self.drawn(collection, self.on_air().map(Some).chain([None]));
+		// Drawn through its source's filters alone.
+		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
+			shown.insert(name);
+			let video = collection.video.get(name);
+			masks(
+				collection,
+				&mut shown,
+				video.into_iter().flat_map(|video| &video.filters),
+			);
+		}
+		shown
+	}
+
+	/// The sources whose pictures `scenes` draw on any canvas, `None` being
+	/// the top layer: each visible item's and each mask's, through clones.
+	fn drawn<'a, 'b>(
+		&self,
+		collection: &'a Collection,
+		scenes: impl IntoIterator<Item = Option<&'b str>>,
+	) -> HashSet<&'a str> {
+		let scenes: Vec<Option<String>> = scenes.into_iter().map(|scene| scene.map(str::to_string)).collect();
 		let mut shown = HashSet::new();
-		let masks = |shown: &mut HashSet<&'a str>, filters: &mut dyn Iterator<Item = &'a Filter>| {
-			for filter in filters {
-				if let Filter::Mask { source, .. } = filter {
-					shown.insert(collection.capture(source));
-				}
-			}
-		};
-		for canvas in canvases {
+		for canvas in std::iter::once(None).chain(self.extras.keys().map(Some)) {
 			for scene in &scenes {
 				let place = Place {
 					canvas: canvas.cloned(),
 					scene: scene.clone(),
 				};
-				let items = collection.items(&place).unwrap_or_default();
-				for item in items.iter().filter(|item| item.visible) {
-					shown.insert(collection.capture(&item.source));
-					masks(&mut shown, &mut collection.filters(item));
-				}
+				drawn(collection, &mut shown, &place);
 			}
 		}
-		// Drawn through its source's filters alone.
-		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
-			shown.insert(name);
-			let video = collection.video.get(name);
-			masks(&mut shown, &mut video.into_iter().flat_map(|video| &video.filters));
-		}
 		shown
+	}
+}
+
+/// Add the sources whose pictures `place` draws to `shown`: each visible
+/// item's and each mask's, through clones.
+fn drawn<'a>(collection: &'a Collection, shown: &mut HashSet<&'a str>, place: &Place) {
+	for item in collection
+		.items(place)
+		.unwrap_or_default()
+		.iter()
+		.filter(|item| item.visible)
+	{
+		shown.insert(collection.capture(&item.source));
+		masks(collection, shown, collection.filters(item));
+	}
+}
+
+/// Add the sources the masks among `filters` read to `shown`, through clones.
+fn masks<'a>(collection: &'a Collection, shown: &mut HashSet<&'a str>, filters: impl Iterator<Item = &'a Filter>) {
+	for filter in filters {
+		if let Filter::Mask { source, .. } = filter {
+			shown.insert(collection.capture(source));
+		}
 	}
 }
 
@@ -1173,7 +1354,7 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
-	use crate::collection::{Blend, Extra, MaskMode, Rgba, Scene};
+	use crate::collection::{Blend, Extra, MaskMode, Rgba, Scene, Video};
 	use crate::source::test::{context, listen, local, start};
 
 	/// A fade over a second.
@@ -2243,6 +2424,124 @@ mod tests {
 		.await;
 	}
 
+	/// A source with its background removed draws only the person, each
+	/// picture once the model has it, and its whole picture again once kept.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn removes_the_background() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("person.jpg"), include_bytes!("test_data/person.jpg")).unwrap();
+			let mut collection = Collection::new();
+			collection.canvas.width = 256;
+			collection.canvas.height = 144;
+			collection.sources.insert(
+				"person".into(),
+				Source::Image {
+					path: "person.jpg".into(),
+				},
+			);
+			let removed = Video {
+				background: Background::Remove,
+				..Video::default()
+			};
+			collection.video.insert("person".into(), removed.clone());
+			collection.scenes[0].items = vec![Item::new("person", Rect::fill(&collection.canvas))];
+			collection.validate().unwrap();
+			let scene = collection.scenes[0].name.clone();
+
+			let mut studio = Studio::with_files(collection, dir).await;
+			studio.compositor.set_preview(Some(scene));
+			studio.compositor.cut(&studio.sources);
+			let at = |rgba: &[u8], x: usize, y: usize| -> [u8; 4] {
+				let at = (y * 256 + x) * 4;
+				rgba[at..at + 4].try_into().unwrap()
+			};
+			let face = (128, 50);
+			let flag = (30, 100);
+			let cut = |studio: &mut Studio| {
+				studio.render(Instant::now());
+				let program = studio.program();
+				// Nothing shows until the cut-out is ready, not even the background.
+				assert_eq!(at(&program, face.0, face.1), BLACK);
+				let layer = studio.compositor.layers.get_mut("person").unwrap();
+				let Some(Ok(matte)) = &mut layer.matte else {
+					panic!("not removing the background")
+				};
+				matte.wait();
+				studio.render(Instant::now());
+				let program = studio.program();
+				assert_ne!(at(&program, face.0, face.1), BLACK);
+				assert_eq!(at(&program, flag.0, flag.1), BLACK);
+			};
+			cut(&mut studio);
+			assert!(studio.compositor.error("person").is_none());
+
+			studio.collection.video.remove("person");
+			studio.render(Instant::now());
+			let program = studio.program();
+			assert_ne!(at(&program, flag.0, flag.1), BLACK);
+
+			studio.collection.video.insert("person".into(), removed);
+			cut(&mut studio);
+		})
+		.await;
+	}
+
+	/// A source that clears its picture, such as a media source played
+	/// again, never shows the cut-out of a picture from before, even when its
+	/// next picture overtakes the clear.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_clear_drops_the_cut_out_in_hand() {
+		let (device, queue) = gpu().await;
+		let effects = Effects::new(&device, &queue, 256, 144);
+		let person = image::load_from_memory(include_bytes!("test_data/person.jpg")).unwrap();
+		let picture = |width: u32, height: u32| {
+			let rgba = person.resize_exact(width, height, image::imageops::FilterType::Triangle);
+			upload(
+				&device,
+				&queue,
+				moq_video::Size::new(width, height),
+				rgba.to_rgba8().as_raw(),
+			)
+			.unwrap()
+		};
+		let mut layer = Layer {
+			source: Source::Replay,
+			renderer: None,
+			raw: Some(picture(256, 144)),
+			fresh: true,
+			cleared: false,
+			matte: None,
+			picture: None,
+			lut: None,
+			overlay: None,
+			error: None,
+		};
+		let develop = |layer: &mut Layer| layer.develop("replay", Background::Remove, &device, &queue, &effects);
+		let wait = |layer: &mut Layer| {
+			let Some(Ok(matte)) = &mut layer.matte else {
+				panic!("not removing the background")
+			};
+			matte.wait();
+		};
+		develop(&mut layer);
+		assert!(layer.picture.is_none(), "until the cut-out");
+		wait(&mut layer);
+
+		// The next play's first picture, smaller, replaced the clear unseen.
+		layer.raw = Some(picture(128, 72));
+		layer.fresh = true;
+		layer.cleared = true;
+		develop(&mut layer);
+		assert!(layer.picture.is_none(), "the old play's cut-out is dropped");
+		wait(&mut layer);
+		develop(&mut layer);
+		assert_eq!(layer.picture.as_ref().map(Picture::size), Some((128, 72)));
+		assert!(layer.error.is_none());
+	}
+
 	/// The program of `collection` with scene "red" cut to it, its files in `dir`.
 	async fn drawn(collection: Collection, dir: tempfile::TempDir) -> Vec<u8> {
 		let mut studio = Studio::with_files(collection, dir).await;
@@ -2640,6 +2939,7 @@ mod tests {
 						.into(),
 					width: 2,
 					height: 1,
+					restart: true,
 				},
 			);
 			let row = |source: &str, y| {
@@ -2862,6 +3162,7 @@ mod tests {
 						.into(),
 					width: 4,
 					height: 4,
+					restart: true,
 				},
 			);
 			let fill = Rect::fill(&collection.canvas);
@@ -2874,7 +3175,8 @@ mod tests {
 
 	/// An overlay's CSS animation runs on the program clock from when the
 	/// overlay opens: a frame shows it where the program time says, however late
-	/// that frame is drawn, even the first one to show it.
+	/// that frame is drawn, even the first one to show it. This one does not
+	/// restart, so going on program does not start it over.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn an_overlay_animates_on_the_program_clock() {
@@ -2891,6 +3193,7 @@ mod tests {
 						.into(),
 					width: 8,
 					height: 8,
+					restart: false,
 				},
 			);
 			collection.scenes[1].items = vec![Item::new("overlay", Rect::fill(&collection.canvas))];
@@ -2917,6 +3220,133 @@ mod tests {
 		.await;
 	}
 
+	/// An overlay set to restart starts its CSS timeline over when its scene
+	/// goes into preview while program does not show it, and when it goes on
+	/// program, but a preview never restarts it under program, the top layer
+	/// included. One that does
+	/// not restart runs on from when it opened.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn an_overlay_restarts_going_on() {
+		local(async {
+			let mut collection = collection();
+			// A bar fading from red to blue over a second, in the top half or
+			// the bottom half.
+			let overlay = |top: u32, restart| Source::Overlay {
+				html: format!(
+					"<style>
+						body {{ margin: 0 }}
+						div {{ margin-top: {top}px; width: 8px; height: 4px; animation: fade 1s linear both }}
+						@keyframes fade {{ from {{ background: red }} to {{ background: blue }} }}
+					</style><div></div>"
+				),
+				width: 8,
+				height: 8,
+				restart,
+			};
+			collection.sources.insert("third".into(), overlay(0, true));
+			collection.sources.insert("clock".into(), overlay(4, false));
+			let fill = Rect::fill(&collection.canvas);
+			collection.scenes[1].items = vec![Item::new("third", fill), Item::new("clock", fill)];
+			let mut studio = Studio::new(collection).await;
+			let half = [128, 0, 128, 255];
+			let near =
+				|actual: [u8; 4], expected: [u8; 4]| actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2);
+
+			// Both open here, drawn nowhere.
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.sources);
+			studio.render(start);
+
+			let previewed = start + Duration::from_secs(2);
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(previewed);
+			studio.render(previewed + Duration::from_millis(500));
+			let preview = studio.preview();
+			assert!(
+				near(pixel(&preview, 3, 1), half),
+				"in preview: {:?}",
+				pixel(&preview, 3, 1)
+			);
+			assert_eq!(pixel(&preview, 3, 6), BLUE, "the clock ran on");
+
+			let cut = previewed + Duration::from_secs(3);
+			studio.compositor.cut(&studio.sources);
+			studio.render(cut);
+			assert_eq!(pixel(&studio.program(), 3, 1), RED, "on program, from the start");
+			studio.render(cut + Duration::from_millis(500));
+			let program = studio.program();
+			assert!(
+				near(pixel(&program, 3, 1), half),
+				"on program: {:?}",
+				pixel(&program, 3, 1)
+			);
+			assert_eq!(pixel(&program, 3, 6), BLUE, "the clock ran on");
+
+			// Into preview again, but program shows it, so it runs on in both.
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(cut + Duration::from_millis(750));
+			let quarter = [64, 0, 191, 255];
+			for (output, picture) in [("program", studio.program()), ("preview", studio.preview())] {
+				let actual = pixel(&picture, 3, 1);
+				assert!(near(actual, quarter), "{output}: {actual:?}");
+			}
+
+			// Nor does it restart one the top layer shows on program.
+			studio.collection.top = vec![Item::new("third", fill)];
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.sources);
+			studio.render(cut + Duration::from_secs(1));
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.render(cut + Duration::from_millis(1100));
+			assert_eq!(pixel(&studio.program(), 3, 1), BLUE, "the top layer's ran on");
+		})
+		.await;
+	}
+
+	/// A preview never restarts an overlay a stinger under way masks its clip
+	/// with on program, though no scene on air shows it.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_stinger_mask_runs_on_under_a_preview() {
+		local(async {
+			let mut studio = stinging(crate::media::tests::CLIP).await;
+			let overlay = Source::Overlay {
+				html: "<body style=\"margin: 0; background: lime\"></body>".into(),
+				width: 8,
+				height: 8,
+				restart: true,
+			};
+			studio.collection.sources.insert("third".into(), overlay);
+			let fill = Rect::fill(&studio.collection.canvas);
+			studio.collection.scenes.push(Scene {
+				items: vec![Item::new("third", fill)],
+				..Scene::new("third")
+			});
+			let mask = Filter::Mask {
+				source: "third".into(),
+				mode: MaskMode::Alpha,
+			};
+			sting(&mut studio, mask);
+			let drivers = studio.sources.sync(&studio.collection);
+			start(&studio.sources, drivers).await;
+
+			let now = Instant::now();
+			let transition = studio.collection.transition.clone();
+			studio.compositor.transition(transition, &studio.sources, now);
+			studio.render(now);
+			let opened = studio.compositor.layers["third"].overlay.as_ref().unwrap().start();
+
+			studio.compositor.set_preview(Some("third".into()));
+			studio.render(now + Duration::from_millis(100));
+			assert_eq!(studio.compositor.stinger(), Some("sting"));
+			let overlay = studio.compositor.layers["third"].overlay.as_ref().unwrap();
+			assert_eq!(overlay.start(), opened, "the stinger's mask ran on");
+		})
+		.await;
+	}
+
 	/// An overlay a move glides is painted on the program clock while both
 	/// scenes are on air, and drawn where the move has it.
 	#[tokio::test]
@@ -2930,6 +3360,7 @@ mod tests {
 					html: "<body style=\"margin: 0; background: lime\"></body>".into(),
 					width: 4,
 					height: 4,
+					restart: true,
 				},
 			);
 			let tile = |x, y| Rect {
@@ -2973,6 +3404,7 @@ mod tests {
 				html: format!("<body style=\"margin: 0; background: {color}\"></body>"),
 				width: 8,
 				height: 8,
+				restart: true,
 			};
 			collection.sources.insert("shown".into(), overlay("lime"));
 			collection.sources.insert("aside".into(), overlay("yellow"));

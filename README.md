@@ -101,7 +101,7 @@ Every panel is a tab you can drag, split, or stack.
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
-| Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
+| Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
 | Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
 | Output | Start and stop recording, pick the mix it records, set the canvas size and frame rate, add, resize, and remove further canvases, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each canvas's renditions' encoder work. |
@@ -293,9 +293,9 @@ machine's fonts, so it looks the same on every machine.
 An overlay's own images and fonts, such as a logo or a brand face, come from
 `data:` URLs or from files in the scene file's directory, named relative to
 it (`url(brand/logo.png)`), never from the web or anywhere else on disk. The
-studio reads them all as the overlay starts, so its first frame has them, and
-a file changed on disk changes nothing on air until the overlay starts again,
-as when it is edited. Images are PNG or JPEG, at most 4096 pixels a side;
+studio reads them all as the overlay opens, so its first frame has them, and
+a file changed on disk changes nothing on air until the overlay opens again,
+as when it is edited; a restart on program reuses what it read. Images are PNG or JPEG, at most 4096 pixels a side;
 fonts are TrueType, OpenType, WOFF, or WOFF2, loaded with `@font-face`:
 
 ```css
@@ -324,8 +324,15 @@ element, attribute, rule, property, or asset it refused:
   draws more.
 
 An overlay's animation starts when the overlay does: when the studio opens
-it, and again whenever it is edited. One that no preview or program shows
-costs nothing until it is shown again, where its animation has carried on.
+it, and again whenever it is edited. It also starts over each time a scene
+showing it goes on program, as an item's keyframes do, so a lower third plays
+its entrance at every cut, and when a scene showing it goes into preview while
+program does not show it, so the preview shows the entrance too. Preview and
+program share its timeline, so a preview never restarts one program shows.
+Set `restart = false` (**Restart on program**, off, in the add form) for one
+that runs on across cuts, such as a clock or a ticker. One that no preview or
+program shows costs nothing until it is shown again, where its animation has
+carried on unless it restarts.
 Overlays publish no track of their own, so viewers see them only in the
 program.
 
@@ -518,6 +525,7 @@ height = 600
 kind = "overlay"
 width = 1920 # the overlay's own size, like a page's
 height = 1080
+restart = true # start over each time it goes on program, the default
 html = '''
 <style>
   .third { position: absolute; left: 80px; bottom: 120px; padding: 16px 32px;
@@ -549,6 +557,7 @@ kind = "lut"
 path = "teal-orange.cube"
 
 [video.camera]
+background = "remove" # cut the person out, leaving the rest transparent
 crop = { left = 0.1, right = 0.1 } # trim 10% of the picture off each side
 filters = [
     { kind = "chroma_key", color = "#00ff00", similarity = 0.4, smoothness = 0.08, spill = 0.1 },
@@ -588,7 +597,7 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 (macOS), `image` (PNG or JPEG), `media` (a video or audio file; see
 [Media files](#media-files)), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
-`overlay` (its `html`, and a `width` and `height` up to 4096), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
+`overlay` (its `html`, a `width` and `height` up to 4096, and whether it `restart`s, true by default), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
 file, which no item places, but which grades what a `lut` filter names it in),
 and `replay`, where the Replay panel plays replays. The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
@@ -604,8 +613,16 @@ without `[mixes]`, the collection has one mix, `Program`.
 `[audio.<source>]` sets a source's linear `gain`, `muted`, the mixes it is
 left out of (`exclude`), and its `delay`.
 
-`[video.<source>]` sets a source's `crop` and `filters`, wherever it is shown,
-and an item's `crop`, `filters`, and `blend` its own. A `crop` trims a fraction
+`[video.<source>]` sets a source's `background`, `crop`, and `filters`,
+wherever it is shown, and an item's `crop`, `filters`, and `blend` its own.
+`background = "remove"` cuts the person out of a camera, display, window,
+image, media, broadcast, browser, or replay source's picture before its crop
+and filters, leaving the rest transparent. A segmentation model finds them in
+each picture on the CPU, so each picture shows only once its cut-out is
+ready, a frame or more late, and a model that falls behind skips pictures
+rather than queue them. It is MediaPipe's selfie segmentation model, made for
+one or two people near the camera. A clone shows its source's cut-out, so it
+cannot remove a background of its own. A `crop` trims a fraction
 (0 to 1) of the picture off its `left`, `top`, `right`, and `bottom`, opposite
 sides together trimming less than the whole, and stretches the rest over the
 item; an item's crop trims what its source's
@@ -723,7 +740,9 @@ changes size or color space moves to a new track, which its catalog entry
 follows. Images and colors keep their picture once, as the image file and as a
 one-pixel PNG. Removing or editing a source ends its track. A track carries the
 plain capture, before any filter, and a clone has none, since it shows its
-source's capture. A browser source or an overlay has no track of its own, and a
+source's capture. A removed background stays in the track, since H.264 carries
+no transparency, so a replay of the source shows it unless the replay source
+removes it too. A browser source or an overlay has no track of its own, and a
 broadcast source is already its publisher's.
 
 A microphone, system audio, or media file's sound encodes its track as Opus,

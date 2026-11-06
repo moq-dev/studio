@@ -20,7 +20,9 @@
 //!   textures on the caller's `wgpu` device, one pair per canvas from one
 //!   upload of each source's picture, cutting or running a [`Transition`]
 //!   between them on every canvas together, and plays each item's
-//!   [`Keyframe`]s from when its scene went on. `moq_video::render::export` hands the
+//!   [`Keyframe`]s from when its scene went on. A source whose [`Background`]
+//!   is removed is cut out first, by a segmentation model on the CPU.
+//!   `moq_video::render::export` hands the
 //!   program to an encoder, on the GPU where the platform allows, and a
 //!   [`Scaler`] draws it smaller for a smaller rendition.
 //! - [`publish`] gives each local source its own track, in a broadcast the
@@ -38,6 +40,7 @@ mod compositor;
 mod edit;
 mod effect;
 mod lut;
+mod matte;
 mod media;
 mod overlay;
 mod playout;
@@ -48,8 +51,8 @@ pub mod source;
 
 pub use clip::Clip;
 pub use collection::{
-	Audio, Blend, Canvas, Collection, Crop, Direction, Ease, Extra, Filter, Item, Keyframe, Layer, MaskMode, Mixes,
-	Rect, Rgba, Scene, Source, Transition, Video,
+	Audio, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Extra, Filter, Item, Keyframe, Layer,
+	MaskMode, Mixes, Rect, Rgba, Scene, Source, Transition, Video,
 };
 pub use compositor::{Compositor, FORMAT};
 pub use edit::{Change, Draft, Edit, History};
@@ -131,4 +134,9 @@ pub enum Error {
 	/// failed to draw.
 	#[error("overlay: {0}")]
 	Overlay(String),
+
+	/// Removing a source's background failed: running the model, or reading
+	/// a picture back for it.
+	#[error("background removal: {0}")]
+	Matte(String),
 }

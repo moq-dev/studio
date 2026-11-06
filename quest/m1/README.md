@@ -24,6 +24,5 @@ than opening an m2 for them.
 ## Required
 
 - [Viewer-side composition](/quest/m1/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers and by a server
-- [Overlays restart on air](/quest/m1/overlay-restart.md) - an overlay's CSS timeline restarts at each cut unless set to keep running
 - [Isolated guest recordings](/quest/m1/guest-recording.md) - record-each-source also writes each guest's tracks to its own file
 - [Scene graph view](/quest/m1/scene-graph.md) - a node view of picture and audio scenes, their routing, volume, pan, and waveforms

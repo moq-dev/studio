@@ -88,6 +88,18 @@ opt-level = 3
 [profile.dev.package.rubato]
 opt-level = 3
 
+# Background removal's model, which runs on every picture of a source and is
+# ten times slower unoptimized: a camera would cut out a few pictures a
+# second rather than every one.
+[profile.dev.package.tract-core]
+opt-level = 3
+
+[profile.dev.package.tract-data]
+opt-level = 3
+
+[profile.dev.package.tract-linalg]
+opt-level = 3
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
