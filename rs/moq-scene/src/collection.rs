@@ -1361,7 +1361,8 @@ pub enum Background {
 	#[default]
 	Keep,
 	/// Made transparent, leaving the person a segmentation model finds in each
-	/// picture. Each picture draws a frame late, with its own cut-out. The
+	/// picture. Each picture draws once its own cut-out is ready, a frame or
+	/// more late, skipping pictures while the model is behind. The
 	/// source's own track keeps the background, since its encoding carries no
 	/// transparency.
 	Remove,

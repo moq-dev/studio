@@ -1637,13 +1637,8 @@ impl Panels {
 				draft.remove_source(&name)
 			})
 		} else if let Some(name) = clone {
-			// A clone of a clone shows the same capture, so it clones that, with
-			// a copy of the clone's filters.
 			let collection = state.collection();
-			let source = Source::Clone {
-				source: collection.capture(&name).to_string(),
-			};
-			let video = collection.video.get(&name).cloned();
+			let (source, video) = clone_of(collection, &name);
 			let clone = collection.unused_name(&format!("{name} clone"));
 			let layer = self.layer(&state).ok();
 			add(&mut state, layer, clone, source, video).map(drop)
@@ -1867,7 +1862,7 @@ impl Panels {
 				let mut removed = *background == Background::Remove;
 				let response = ui
 					.checkbox(&mut removed, "Remove")
-					.on_hover_text("Cut the person out of the picture, leaving the rest transparent, before the crop and every filter. Each picture shows a frame late, and the source's own track keeps the background.");
+					.on_hover_text("Cut the person out of the picture, leaving the rest transparent, before the crop and every filter. Each picture shows a frame or more late, and the source's own track keeps the background.");
 				if response.changed() {
 					*background = if removed { Background::Remove } else { Background::Keep };
 					let verb = if removed { "Remove" } else { "Keep" };
@@ -3282,6 +3277,20 @@ fn color_ui(ui: &mut Ui, color: &mut moq_scene::Rgba) -> egui::Response {
 	response
 }
 
+/// The source and video settings of a clone of `name`. A clone of a clone
+/// shows the same capture, so it clones that. It copies the crop and filters,
+/// but not a removed background: the clone already shows the cut-out.
+fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
+	let source = Source::Clone {
+		source: collection.capture(name).to_string(),
+	};
+	let video = collection.video.get(name).map(|video| Video {
+		background: Background::Keep,
+		..video.clone()
+	});
+	(source, video)
+}
+
 /// Add `source` as `name`, with `video` filters, and place it in front of
 /// `layer` if it has a picture. Returns the name.
 fn add(
@@ -4025,5 +4034,44 @@ impl Devices {
 				None
 			})
 			.inner
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A clone of a source with its background removed copies its filters,
+	/// and the edit adding it is valid.
+	#[test]
+	fn clones_a_source_with_its_background_removed() {
+		let collection = Collection::from_toml(
+			r#"
+version = 1
+
+[canvas]
+width = 1280
+height = 720
+framerate = 30
+
+[sources.cam]
+kind = "camera"
+
+[video.cam]
+background = "remove"
+filters = [{ kind = "opacity", amount = 0.5 }]
+"#,
+		)
+		.unwrap();
+
+		let (source, video) = clone_of(&collection, "cam");
+		let video = video.unwrap();
+		assert_eq!(video.background, Background::Keep);
+		assert_eq!(video.filters, collection.video["cam"].filters);
+
+		let mut draft = collection.draft("clone");
+		draft.set_source("clone", Some(source)).unwrap();
+		draft.set_video("clone", Some(video)).unwrap();
+		draft.finish().unwrap();
 	}
 }

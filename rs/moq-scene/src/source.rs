@@ -2095,8 +2095,13 @@ mod tests {
 		slot.show(clear());
 		assert!(!slot.take().unwrap().cleared);
 		slot.clear();
-		slot.show(clear());
-		assert!(slot.take().unwrap().cleared);
+		slot.show(Picture::Rgba {
+			size: moq_video::Size::new(2, 1),
+			pixels: vec![255; 8],
+		});
+		let taken = slot.take().unwrap();
+		assert!(taken.cleared);
+		assert!(matches!(taken.picture, Picture::Rgba { size, .. } if size == moq_video::Size::new(2, 1)));
 		assert!(slot.take().is_none());
 		slot.show(clear());
 		assert!(!slot.take().unwrap().cleared);

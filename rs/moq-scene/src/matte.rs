@@ -4,8 +4,9 @@
 //! The compositor shrinks each picture on the GPU to the model's size and
 //! reads that back. A thread of the matte's own runs the model on the CPU,
 //! with tract, and the compositor cuts the held full-size picture out with
-//! the result. Each picture is drawn with its own matte, a frame late, never
-//! with an older one.
+//! the result. Each picture is drawn with its own matte, a frame or more
+//! late, never with an older one; pictures that arrive while the model works
+//! are skipped for the newest.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, mpsc};

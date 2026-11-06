@@ -588,8 +588,9 @@ wherever it is shown, and an item's `crop`, `filters`, and `blend` its own.
 `background = "remove"` cuts the person out of a camera, display, window,
 image, media, broadcast, browser, or replay source's picture before its crop
 and filters, leaving the rest transparent. A segmentation model finds them in
-each picture on the CPU, so each picture shows a frame late, and only once
-its cut-out is ready. It is MediaPipe's selfie segmentation model, made for
+each picture on the CPU, so each picture shows only once its cut-out is
+ready, a frame or more late, and a model that falls behind skips pictures
+rather than queue them. It is MediaPipe's selfie segmentation model, made for
 one or two people near the camera. A clone shows its source's cut-out, so it
 cannot remove a background of its own. A `crop` trims a fraction
 (0 to 1) of the picture off its `left`, `top`, `right`, and `bottom`, opposite

@@ -160,7 +160,8 @@ struct Layer {
 	cleared: bool,
 	/// Cuts the person out of each picture, while the source's background is
 	/// removed, or why it cannot. A failure stays until the background is kept
-	/// or the source edited, since retrying the model would fail the same way.
+	/// or the source edited, since retrying the model would fail the same way,
+	/// and is reported over `error`.
 	matte: Option<Result<Matte, String>>,
 	/// The newest picture drawn; `None` until the first arrives, and while the
 	/// first cut-out is under way.
@@ -187,11 +188,8 @@ impl Layer {
 		let cleared = std::mem::take(&mut self.cleared);
 		if background == Background::Keep {
 			// One switched back shows the picture it held back.
-			match self.matte.take() {
-				Some(Err(_)) => self.error = None,
-				Some(Ok(_)) => {}
-				None if !self.fresh => return,
-				None => {}
+			if self.matte.take().is_none() && !self.fresh {
+				return;
 			}
 			self.fresh = false;
 			self.picture = self.raw.as_ref().map(|raw| effects.picture(raw));
@@ -204,8 +202,7 @@ impl Layer {
 			self.picture = None;
 			self.fresh = self.raw.is_some();
 			self.matte = Some(Matte::new(device, queue).map_err(|err| err.to_string()));
-		} else if let Some(Err(err)) = &self.matte {
-			self.error = Some(err.clone());
+		} else if let Some(Err(_)) = &self.matte {
 			return;
 		}
 		// The cut-out in hand is from before the clear, such as a media
@@ -227,7 +224,6 @@ impl Layer {
 		};
 		if let Some(err) = failed {
 			tracing::warn!(source = %name, %err, "cannot remove the background");
-			self.error = Some(err.clone());
 			self.picture = None;
 			self.matte = Some(Err(err));
 			return;
@@ -369,9 +365,14 @@ impl Compositor {
 		self.program_scene.as_deref()
 	}
 
-	/// Why `source`'s newest picture could not be drawn, until one is.
+	/// Why `source`'s newest picture could not be drawn, until one is, or why
+	/// its background cannot be removed.
 	pub fn error(&self, source: &str) -> Option<&str> {
-		self.layers.get(source)?.error.as_deref()
+		let layer = self.layers.get(source)?;
+		match &layer.matte {
+			Some(Err(err)) => Some(err),
+			_ => layer.error.as_deref(),
+		}
 	}
 
 	/// Whether a transition is under way.
@@ -586,7 +587,13 @@ impl Compositor {
 				None => continue,
 			};
 			if let Some(taken) = taken {
-				layer.cleared |= taken.cleared;
+				if taken.cleared {
+					// Nothing from before the clear may show, even if the picture
+					// after it fails to draw.
+					layer.cleared = true;
+					layer.raw = None;
+					layer.fresh = true;
+				}
 				self.take(name, source, &mut layer, taken.picture, now);
 			}
 			let background = collection
@@ -2454,15 +2461,12 @@ mod tests {
 		};
 		develop(&mut layer);
 		assert!(layer.picture.is_none(), "until the cut-out");
+		wait(&mut layer);
 
 		// The next play's first picture, smaller, replaced the clear unseen.
 		layer.raw = Some(picture(128, 72));
 		layer.fresh = true;
 		layer.cleared = true;
-		develop(&mut layer);
-		assert!(layer.picture.is_none());
-
-		wait(&mut layer);
 		develop(&mut layer);
 		assert!(layer.picture.is_none(), "the old play's cut-out is dropped");
 		wait(&mut layer);
