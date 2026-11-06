@@ -14,6 +14,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
+use blitz_dom::net::{Resource, ResourceLoadResponse};
+use blitz_dom::util::ImageType;
 use blitz_dom::{BaseDocument, DocumentConfig, FontContext, Node, ns};
 use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request as Fetch};
 use blitz_traits::shell::{ColorScheme, Viewport};
@@ -353,18 +355,35 @@ pub(crate) struct Content {
 	/// What its relative URLs resolve against: the scene file's directory.
 	base: Url,
 	/// Each image and font it loads, by the URL its document resolves to.
-	assets: HashMap<String, Bytes>,
+	assets: HashMap<String, Asset>,
 }
 
-/// What an asset is meant to be, to check that its bytes are one Blitz draws.
-#[derive(Clone, Copy)]
+/// An image or font an overlay loads, decoded as far as Blitz needs it.
+#[derive(Clone)]
+enum Asset {
+	/// Straight RGBA, as Blitz holds a decoded image.
+	Image {
+		width: u32,
+		height: u32,
+		pixels: Arc<Vec<u8>>,
+	},
+	/// A TrueType or OpenType font, a WOFF or WOFF2 one decompressed.
+	Font(Bytes),
+}
+
+/// What an asset is meant to be.
+#[derive(Clone, Copy, PartialEq)]
 enum Kind {
 	Image,
 	Font,
 }
 
-/// The first bytes of a font Blitz loads: TrueType, OpenType, WOFF, or WOFF2.
-const FONT_MAGIC: &[&[u8]] = &[b"\0\x01\0\0", b"true", b"OTTO", b"wOFF", b"wOF2"];
+/// The properties whose `url()` Blitz draws as an image. It draws none other,
+/// such as one in `content`.
+const IMAGE_PROPERTIES: &[(&str, Kind)] = &[("background", Kind::Image), ("background-image", Kind::Image)];
+
+/// The `@font-face` descriptor whose `url()` names a font.
+const FONT_SOURCES: &[(&str, Kind)] = &[("src", Kind::Font)];
 
 /// Refuse `html` unless every element, attribute, CSS rule, and CSS property
 /// in it is one an overlay draws, and every image and font it names loads
@@ -507,7 +526,7 @@ impl Loader {
 	fn check_block(&mut self, block: &PropertyDeclarationBlock) -> Result<(), Error> {
 		let mut css = String::new();
 		block.to_css(&mut css).expect("writing to a string");
-		self.check_declarations(&css, PROPERTIES, "property", Kind::Image)?;
+		self.check_declarations(&css, PROPERTIES, "property", IMAGE_PROPERTIES)?;
 		Ok(())
 	}
 
@@ -518,7 +537,7 @@ impl Loader {
 			.and_then(|(_, body)| body.rsplit_once('}'))
 			.ok_or_else(|| unreadable(css))?
 			.0;
-		let named = self.check_declarations(body, FONT_FACE, "`@font-face` descriptor", Kind::Font)?;
+		let named = self.check_declarations(body, FONT_FACE, "`@font-face` descriptor", FONT_SOURCES)?;
 		for needed in ["font-family", "src"] {
 			if !named.contains(needed) {
 				return Err(Error::Overlay(format!("an `@font-face` rule has no `{needed}`")));
@@ -528,14 +547,15 @@ impl Loader {
 	}
 
 	/// Check that `css`, a run of declarations, names only what `allowed`
-	/// lists or custom properties, loading each `url()` in their values as a
-	/// `kind`. Returns the names.
+	/// lists or custom properties, loading each `url()` in the values of those
+	/// `loads` lists as the kind it gives, and refusing any other. Returns the
+	/// names.
 	fn check_declarations(
 		&mut self,
 		css: &str,
 		allowed: &[&str],
 		what: &str,
-		kind: Kind,
+		loads: &[(&str, Kind)],
 	) -> Result<HashSet<String>, Error> {
 		let mut named = HashSet::new();
 		let mut parser = Parser::new(css);
@@ -545,6 +565,7 @@ impl Loader {
 			if !name.starts_with("--") && !allowed.contains(&name.as_ref()) {
 				return Err(refused(format!("the `{name}` {what}")));
 			}
+			let kind = loads.iter().find(|(loads, _)| *loads == &*name).map(|&(_, kind)| kind);
 			parser
 				.parse_until_after(cssparser::Delimiter::Semicolon, |value| {
 					self.load_value(&name, value, kind)
@@ -558,15 +579,14 @@ impl Loader {
 		Ok(named)
 	}
 
-	/// Load each `url()` in `name`'s value as a `kind`, refusing the functions
-	/// that load something else.
-	fn load_value(&mut self, name: &str, input: &mut Parser, kind: Kind) -> Result<(), ParseError<Error>> {
+	/// Load each `url()` in `name`'s value as a `kind`, refusing one where
+	/// there is none, and the functions that load something else.
+	fn load_value(&mut self, name: &str, input: &mut Parser, kind: Option<Kind>) -> Result<(), ParseError<Error>> {
 		while let Ok(token) = input.next() {
-			match token.clone() {
-				Token::UnquotedUrl(url) => self.load(&url, kind).map_err(ParseError::custom)?,
+			let url = match token.clone() {
+				Token::UnquotedUrl(url) => url,
 				Token::Function(function) if function.eq_ignore_ascii_case("url") => {
-					let url = input.parse_nested_block(|input| Ok(input.expect_string()?.clone()))?;
-					self.load(&url, kind).map_err(ParseError::custom)?;
+					input.parse_nested_block(|input| Ok(input.expect_string()?.clone()))?
 				}
 				Token::Function(function)
 					if ["local", "image-set", "-webkit-image-set", "src"]
@@ -580,36 +600,48 @@ impl Loader {
 				}
 				Token::Function(_) | Token::ParenthesisBlock | Token::SquareBracketBlock | Token::CurlyBracketBlock => {
 					input.parse_nested_block(|input| self.load_value(name, input, kind))?;
+					continue;
 				}
-				_ => {}
-			}
+				_ => continue,
+			};
+			let Some(kind) = kind else {
+				return Err(ParseError::custom(Error::Overlay(format!(
+					"`{name}` uses `url()`, but an overlay loads images only for `background`, \
+					`background-image`, and `<img>`, and fonts only for `@font-face`"
+				))));
+			};
+			self.load(&url, kind).map_err(ParseError::custom)?;
 		}
 		Ok(())
 	}
 
-	/// Read the asset `raw` names, resolved as the overlay's document will,
-	/// and check that it is a `kind` Blitz draws.
+	/// Read and decode the asset `raw` names, resolved as the overlay's
+	/// document will, as a `kind`.
 	fn load(&mut self, raw: &str, kind: Kind) -> Result<(), Error> {
 		let failed = |err: String| Error::Overlay(format!("cannot load `{}`: {err}", shorten(raw)));
 		let url = self.content.base.join(raw).map_err(|err| failed(err.to_string()))?;
-		let bytes = match self.content.assets.get(url.as_str()) {
-			Some(bytes) => bytes.clone(),
-			None => match url.scheme() {
-				"data" => data(&url),
-				"file" => self.file(&url),
-				_ => Err("an overlay loads only `data:` URLs and files under the scene file's directory".into()),
+		if let Some(asset) = self.content.assets.get(url.as_str()) {
+			let loaded = match asset {
+				Asset::Image { .. } => Kind::Image,
+				Asset::Font(_) => Kind::Font,
+			};
+			if loaded != kind {
+				return Err(failed("it is named as both an image and a font".into()));
 			}
-			.map_err(failed)?,
-		};
-		match kind {
-			Kind::Image => image(&bytes),
-			Kind::Font => match bytes.get(..4) {
-				Some(magic) if FONT_MAGIC.contains(&magic) => Ok(()),
-				_ => Err("it is not a TrueType, OpenType, WOFF, or WOFF2 font".into()),
-			},
+			return Ok(());
+		}
+		let bytes = match url.scheme() {
+			"data" => data(&url),
+			"file" => self.file(&url),
+			_ => Err("an overlay loads only `data:` URLs and files under the scene file's directory".into()),
 		}
 		.map_err(failed)?;
-		self.content.assets.insert(url.into(), bytes);
+		let asset = match kind {
+			Kind::Image => image(&bytes),
+			Kind::Font => font(bytes),
+		}
+		.map_err(failed)?;
+		self.content.assets.insert(url.into(), asset);
 		Ok(())
 	}
 
@@ -659,9 +691,9 @@ fn data(url: &Url) -> Result<Bytes, String> {
 		.map_err(|err| format!("its base64 is malformed: {err}"))
 }
 
-/// Check that `bytes` are a PNG or JPEG no larger than an overlay, so decoding
-/// it holds no more than an overlay's own texture.
-fn image(bytes: &[u8]) -> Result<(), String> {
+/// Decode `bytes`, a PNG or JPEG no larger than an overlay, so it holds no
+/// more than an overlay's own texture.
+fn image(bytes: &[u8]) -> Result<Asset, String> {
 	let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
 		.with_guessed_format()
 		.expect("reading from memory");
@@ -678,7 +710,36 @@ fn image(bytes: &[u8]) -> Result<(), String> {
 			"it is {width}x{height}; each side must be at most {max} pixels"
 		));
 	}
-	Ok(())
+	let pixels = image::load_from_memory(bytes).map_err(|err| err.to_string())?;
+	Ok(Asset::Image {
+		width,
+		height,
+		pixels: Arc::new(pixels.into_rgba8().into_raw()),
+	})
+}
+
+/// Decompress `bytes` if WOFF or WOFF2, and check that the font registers as
+/// Blitz will register it.
+fn font(bytes: Bytes) -> Result<Asset, String> {
+	use parley::fontique::{Blob, Collection, CollectionOptions};
+
+	let bytes = match bytes.get(..4) {
+		Some(b"wOFF") => wuff::decompress_woff1(&bytes).map(Bytes::from),
+		Some(b"wOF2") => wuff::decompress_woff2(&bytes).map(Bytes::from),
+		_ => Ok(bytes),
+	}
+	.map_err(|err| format!("it does not decompress: {err:?}"))?;
+	let mut collection = Collection::new(CollectionOptions {
+		shared: false,
+		system_fonts: false,
+	});
+	if collection
+		.register_fonts(Blob::new(Arc::new(bytes.clone())), None)
+		.is_empty()
+	{
+		return Err("it is not a TrueType, OpenType, WOFF, or WOFF2 font".into());
+	}
+	Ok(Asset::Font(bytes))
 }
 
 /// `url` as an error names it, a long `data:` URL cut short.
@@ -737,7 +798,10 @@ impl NetProvider for Assets {
 	fn fetch(&self, _document: usize, request: Fetch, handler: Box<dyn NetHandler>) {
 		let url = request.url.as_str();
 		match self.content.assets.get(url) {
-			Some(bytes) => handler.bytes(url.into(), bytes.clone()),
+			Some(Asset::Font(bytes)) => handler.bytes(url.into(), bytes.clone()),
+			// Already in the document's cache from [`open`], waiting nodes
+			// included.
+			Some(Asset::Image { .. }) => {}
 			None => {
 				self.missing.lock().unwrap().get_or_insert_with(|| shorten(url));
 			}
@@ -770,14 +834,29 @@ impl Assets {
 /// Lay out the overlay `assets` serves at `width` by `height`, at the start of
 /// its timeline.
 fn open(assets: &Arc<Assets>, width: u32, height: u32) -> BaseDocument {
-	let Content { html, base, .. } = &assets.content;
+	let Content {
+		html,
+		base,
+		assets: loaded,
+	} = &assets.content;
 	let mut document = document(html, width, height, base, Some(assets.clone()));
+	// Every image goes in the document's cache, decoded, so one any style
+	// names, now or later in an animation, draws without a fetch.
+	for (url, asset) in loaded {
+		if let Asset::Image { width, height, pixels } = asset {
+			document.load_resource(ResourceLoadResponse {
+				// No request's, so it settles none.
+				request_id: usize::MAX,
+				node_id: None,
+				resolved_url: Some(url.clone()),
+				result: Ok(Resource::Image(ImageType::Image, *width, *height, pixels.clone())),
+			});
+		}
+	}
 	// Stylo starts an animation at the time of the resolve that creates it, so
 	// this one starts every animation at the start of the timeline, however
-	// late the overlay is first drawn. Assets arrive as they are fetched, from
-	// memory, so each is in place by the first paint's resolve: fonts and
-	// `<img>` ones by this resolve, and background images, which it fetches,
-	// by the next.
+	// late the overlay is first drawn. The fonts its parse fetched land here
+	// too, served from memory.
 	document.resolve(0.0);
 	document
 }
@@ -1226,14 +1305,16 @@ mod tests {
 		base64::engine::general_purpose::STANDARD.encode(bytes)
 	}
 
-	/// The widths of `document`'s `tag` elements, in order.
-	fn widths(document: &BaseDocument, tag: &str) -> Vec<f32> {
-		document
-			.tree()
-			.iter()
-			.filter(|(_, node)| node.element_data().is_some_and(|element| &*element.name.local == tag))
-			.map(|(_, node)| node.final_layout().size.width)
-			.collect()
+	/// The elements `selector` matches in `document`, in order.
+	fn select<'a>(document: &'a BaseDocument, selector: &str) -> Vec<&'a Node> {
+		let ids = document.query_selector_all(selector).unwrap();
+		ids.into_iter().map(|id| document.get_node(id).unwrap()).collect()
+	}
+
+	/// The widths of the elements `selector` matches in `document`, in order.
+	fn widths(document: &BaseDocument, selector: &str) -> Vec<f32> {
+		let nodes = select(document, selector);
+		nodes.iter().map(|node| node.final_layout().size.width).collect()
 	}
 
 	#[test]
@@ -1284,9 +1365,10 @@ mod tests {
 				r#"<div style="background: url(https://example.com/a.png)">x</div>"#,
 				"`https://example.com/a.png`",
 			),
+			(r#"<div style="--logo: url(logo.png)">x</div>"#, "`--logo` uses `url()`"),
 			(
-				r#"<div style="--logo: url('//example.com/a.png')">x</div>"#,
-				"`//example.com/a.png`",
+				"<style>div::before { content: url(logo.png) }</style>",
+				"`content` uses `url()`",
 			),
 			(
 				"<style>@font-face { font-family: x; src: local(Arial) }</style>",
@@ -1305,12 +1387,14 @@ mod tests {
 	}
 
 	/// Images and fonts load from `data:` URLs and files beside the scene
-	/// file, and are in place by the first paint's resolve.
+	/// file, and are in place once the overlay opens, a background image an
+	/// animation brings in later included.
 	#[test]
 	fn assets_load_before_the_first_paint() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::create_dir(dir.path().join("brand")).unwrap();
 		std::fs::write(dir.path().join("brand/logo.png"), png(30, 10)).unwrap();
+		std::fs::write(dir.path().join("brand/later.png"), png(30, 10)).unwrap();
 		std::fs::write(dir.path().join("brand/face.ttf"), notosans::BOLD_TTF).unwrap();
 		let html = format!(
 			r#"<style>
@@ -1319,18 +1403,19 @@ mod tests {
 				span {{ display: inline-block; font: 16px sans-serif }}
 				.brand {{ font-family: Brand }}
 				div {{ width: 30px; height: 10px; background: url("./brand/logo.png") }}
+				.later {{ animation: later 1s steps(1, end) both }}
+				@keyframes later {{ from {{ background: none }} to {{ background: url(brand/later.png) }} }}
 			</style>
 			<img src="data:image/png;base64,{}" alt="">
 			<span>Lower third</span><span class="brand">Lower third</span>
-			<div></div>"#,
+			<div></div><div class="later"></div>"#,
 			base64(&png(20, 5)),
 		);
 		let content = check(&html, dir.path()).unwrap();
-		assert_eq!(content.assets.len(), 3);
+		assert_eq!(content.assets.len(), 4);
 
 		let assets = Assets::new(content);
-		let mut document = open(&assets, 400, 100);
-		document.resolve(0.0);
+		let document = open(&assets, 400, 100);
 		assert_eq!(*assets.missing.lock().unwrap(), None);
 
 		assert_eq!(widths(&document, "img"), [20.0]);
@@ -1338,16 +1423,29 @@ mod tests {
 			panic!("two spans");
 		};
 		assert!(brand > regular * 1.05, "regular {regular}, brand {brand}");
-		let (_, div) = document
-			.tree()
+		assert!(backgrounds(&document)[0], "the background is in place");
+
+		// One resolve, as a paint after the animation ends makes, draws the
+		// background it brings in.
+		let mut document = document;
+		assert!(!backgrounds(&document)[1]);
+		document.resolve(2.0);
+		assert_eq!(backgrounds(&document), [true, true]);
+		assert_eq!(*assets.missing.lock().unwrap(), None);
+	}
+
+	/// Whether each `<div>` in `document` has its background image in place.
+	fn backgrounds(document: &BaseDocument) -> Vec<bool> {
+		let nodes = select(document, "div");
+		nodes
 			.iter()
-			.find(|(_, node)| node.element_data().is_some_and(|element| &*element.name.local == "div"))
-			.unwrap();
-		let background = &div.element_data().unwrap().background_images;
-		assert!(
-			matches!(&background[..], [Some(image)] if image.status == blitz_dom::node::Status::Ok),
-			"the background image is in place"
-		);
+			.map(|node| {
+				matches!(
+					&node.element_data().unwrap().background_images[..],
+					[Some(image)] if image.status == blitz_dom::node::Status::Ok
+				)
+			})
+			.collect()
 	}
 
 	#[test]
@@ -1358,6 +1456,10 @@ mod tests {
 		std::fs::write(parent.path().join("secret.png"), png(1, 1)).unwrap();
 		std::fs::write(dir.join("big.png"), png(crate::browser::MAX_SIDE + 1, 1)).unwrap();
 		std::fs::write(dir.join("notes.txt"), "hello").unwrap();
+		let mut truncated = png(64, 64);
+		truncated.truncate(truncated.len() / 2);
+		std::fs::write(dir.join("truncated.png"), truncated).unwrap();
+		std::fs::write(dir.join("face.woff2"), b"wOF2 and nothing more").unwrap();
 		#[cfg(unix)]
 		std::os::unix::fs::symlink(parent.path().join("secret.png"), dir.join("link.png")).unwrap();
 		let secret = parent.path().join("secret.png");
@@ -1375,6 +1477,11 @@ mod tests {
 				"not a TrueType",
 			),
 			(r#"<img src="data:image/png;base64,%%%">"#.into(), "base64"),
+			(r#"<img src="truncated.png">"#.into(), "`truncated.png`"),
+			(
+				"<style>@font-face { font-family: x; src: url(face.woff2) }</style>".into(),
+				"does not decompress",
+			),
 		];
 		#[cfg(unix)]
 		cases.push((r#"<img src="link.png">"#.into(), "outside"));
