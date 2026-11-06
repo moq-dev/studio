@@ -19,6 +19,11 @@ found, or found in only one of the two, fails with the reason rather than
 setting a guess.
 
 The studio sees a source's audio only through its strip's level meter, read
-once a frame, which is too coarse to time a clap. Timing it needs the
-source's samples, or an onset, with their position on the bus clock, which is
-moq-audio work: land it there first and pin it.
+once a frame, which is too coarse to time a clap. Decided 2026-11-05
+(maintainer, /quest-plan): moq-audio exposes a tap of the source's samples
+before its delay, with their bus-clock positions, and the studio detects the
+clap's onset in them itself. Rejected: an onset detector in moq-audio.
+
+## Required
+
+- [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the microphone's samples on the bus clock the clap is timed from

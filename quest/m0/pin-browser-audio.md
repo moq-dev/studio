@@ -4,7 +4,7 @@
 
 The `moq` submodule includes moq-audio's browser backends (AudioWorklet
 capture and playback, WebCodecs Opus and AAC), from
-[moq-audio in the browser](https://github.com/moq-dev/moq/blob/main/quest/m3/audio-web.md).
+[moq-audio in the browser](https://github.com/moq-dev/moq/blob/main/quest/m5/audio-web.md).
 
 Check: that quest file is gone from moq's `main`. Advance it with
 `just upgrade-moq` in its own PR, fixing whatever the new API breaks here.

@@ -9,7 +9,7 @@ is verified to launch and list devices on its platform.
 ## Plan
 
 Decided 2026-10-26 (maintainer): as for the `moq` binary in
-[Ship capture and playback](https://github.com/moq-dev/moq/blob/main/quest/m2/cli-packaging.md), moq-studio's defaults
+[Ship capture and playback](https://github.com/moq-dev/moq/blob/main/quest/m3/cli-packaging.md), moq-studio's defaults
 skip any feature that is expensive to build or relies on a system library,
 and a `release` feature turns on every backend its platform can load without
 one (`capture`, `openh264`, `vaapi`, `nvidia`, and the platform frameworks).
@@ -27,4 +27,4 @@ compositor imports without a copy.
 
 ## Related
 
-- [Ship capture and playback](https://github.com/moq-dev/moq/blob/main/quest/m2/cli-packaging.md) - the same distribution checks for the `moq` binary
+- [Ship capture and playback](https://github.com/moq-dev/moq/blob/main/quest/m3/cli-packaging.md) - the same distribution checks for the `moq` binary

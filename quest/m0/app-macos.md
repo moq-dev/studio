@@ -19,4 +19,4 @@ prompts need a person to answer them, so an unattended agent cannot do this.
 
 ## Related
 
-- [Hardware validation](https://github.com/moq-dev/moq/blob/main/quest/m3/video-hardware.md) - capture paths not yet run on real machines
+- [Hardware validation](https://github.com/moq-dev/moq/blob/main/quest/m5/video-hardware.md) - capture paths not yet run on real machines

@@ -3,7 +3,7 @@
 ## Goal
 
 The `moq` submodule includes moq-audio's per-source filter chain and plugin
-host, from [moq-audio filter chain](https://github.com/moq-dev/moq/blob/main/quest/m3/audio-filters.md).
+host, from [moq-audio filter chain](https://github.com/moq-dev/moq/blob/main/quest/m5/audio-filters.md).
 
 Check: that quest file is gone from moq's `main`. Advance it with
 `just upgrade-moq` in its own PR, fixing whatever the new API breaks here.
