@@ -280,19 +280,35 @@ drawn by the studio itself (through [Blitz](https://github.com/DioxusLabs/blitz)
 rather than a browser, on every platform. Its CSS animations and transitions
 run on the program clock, so they land on the same frame in the program and in
 a recording or replay of it, whatever the studio's load. It runs no scripts
-and loads nothing: no images, stylesheets, or fonts from anywhere. Its text is
-set in the bundled Noto Sans, regular, bold, or italic, whatever `font-family`
-names, so it looks the same on every machine. An overlay outside what
-overlays draw fails to start, naming the first element, attribute, rule, or
-property it refused:
+and never touches the network. Its text is set in the bundled Noto Sans,
+regular, bold, or italic, unless it loads a face of its own, and never in the
+machine's fonts, so it looks the same on every machine.
+
+An overlay's own images and fonts, such as a logo or a brand face, come from
+`data:` URLs or from files in the scene file's directory, named relative to
+it (`url(brand/logo.png)`), never from the web or anywhere else on disk. The
+studio reads them all as the overlay starts, so its first frame has them, and
+reads them again only when the overlay is edited or reloaded. Images are PNG
+or JPEG, at most 4096 pixels a side; fonts are TrueType, OpenType, WOFF, or
+WOFF2, loaded with `@font-face`:
+
+```css
+@font-face { font-family: Brand; src: url(brand/face.woff2); font-weight: bold }
+.title { font-family: Brand; background: url(brand/logo.png) no-repeat }
+```
+
+An overlay outside what overlays draw fails to start, naming the first
+element, attribute, rule, property, or asset it refused:
 
 - Elements: text and the boxes around it (`div`, `span`, `p`, headings,
-  lists, tables, and the like), plus `style`, `title`, and `meta`. Not
-  `script`, `img`, `link`, `iframe`, `svg`, `canvas`, or form controls.
+  lists, tables, and the like), `img`, plus `style`, `title`, and `meta`. Not
+  `script`, `link`, `iframe`, `svg`, `canvas`, or form controls.
 - Attributes: `id`, `class`, `style`, `lang`, `dir`, `title`, `hidden`,
-  table and list numbering ones, and `data-*` and `aria-*`.
-- CSS rules: style rules, nested ones included, `@media`, and `@keyframes`.
-  Not `@import` or `@font-face`, nor any `url()` or `image-set()`.
+  table and list numbering ones, `data-*` and `aria-*`, and an `img`'s `src`
+  and `alt`.
+- CSS rules: style rules, nested ones included, `@media`, `@keyframes`, and
+  `@font-face` with `font-family`, `src`, `font-weight`, `font-style`, and
+  `font-display`. Not `@import`, nor `local()` or `image-set()`.
 - CSS properties: box layout, flexbox, grid, positioning, margins and
   padding, colors, opacity, gradients, borders and their radii, `box-shadow`,
   outlines, transforms, `clip-path`, fonts and text layout, text decoration,
