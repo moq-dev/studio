@@ -132,6 +132,30 @@ Each further canvas publishes a broadcast of its own beneath the main one, at
 encoding it again. Removing a canvas ends its broadcast, and removes its top
 layer and every scene's layout on it.
 
+### Scene sources
+
+A **scene source** draws another scene as one picture, which an item places,
+scales, crops, filters, and blends like any other: a lower third built once
+and shown in every scene, or a whole layout shrunk into a corner. Add one in
+the Sources panel as kind **Scene**, picking the scene it draws, or
+**Program**, which shows whatever is on air, a transition under way included,
+on the same frame, such as for a portrait canvas that follows the program,
+cropped.
+
+A nested scene is drawn at the main canvas's size, transparent where it draws
+nothing, once per frame however many items show it, and only while something
+drawn shows it. Its items' keyframes play from when the scene showing it goes
+on, as that scene's own items' do, so the top layer, which never goes on,
+cannot show a scene with keyframes. A media file or overlay in a nested scene
+set to restart starts over when the scene showing it goes on program.
+
+A scene cannot draw itself, even through other scenes, so an edit that would
+is refused. A scene showing the program cannot go on program, nor can the main
+canvas's top layer show it, since either would draw the program into itself:
+**Cut** and **Transition** refuse such a scene, and an edit making the scene on
+air show the program is refused. Renaming a scene renames what its scene
+sources draw, and removing one removes them, with the items showing them.
+
 ### Transitions
 
 | Transition | What it does |
@@ -543,6 +567,13 @@ delay = "80ms"
 kind = "clone"
 source = "camera"
 
+[sources.main-view]
+kind = "scene"
+scene = "Main" # draws the Main scene as one picture
+
+[sources.on-air]
+kind = "program" # whatever the program shows
+
 [video.camera-faded]
 filters = [{ kind = "opacity", amount = 0.5 }]
 
@@ -579,6 +610,7 @@ items = [
         { at = "0s", x = 700, filters = [{ kind = "blur", radius = 12 }] },
         { at = "500ms", ease = "out", filters = [{ kind = "blur", radius = 0 }] },
     ] },
+    { source = "main-view", rect = { x = 80, y = 80, width = 640, height = 360 } },
 ]
 
 [[top]]
@@ -593,7 +625,8 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
 `overlay` (its `html`, a `width` and `height` up to 4096, and whether it `restart`s, true by default), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
 file, which no item places, but which grades what a `lut` filter names it in),
-and `replay`, where the Replay panel plays replays. The Devices panel fills in
+`replay`, where the Replay panel plays replays, `scene` (with the `scene` it
+draws), and `program` (see [Scene sources](#scene-sources)). The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
 
 `[canvases.<name>]` adds a further canvas, with its `width` and `height` and

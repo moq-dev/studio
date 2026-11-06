@@ -190,6 +190,122 @@ impl Collection {
 		}
 	}
 
+	/// What the source called `name` draws if it is a scene or program
+	/// source, through a clone.
+	pub fn nested(&self, name: &str) -> Option<Nested<'_>> {
+		match self.sources.get(self.capture(name))? {
+			Source::Scene { scene } => Some(Nested::Scene(scene)),
+			Source::Program => Some(Nested::Program),
+			_ => None,
+		}
+	}
+
+	/// The visible items `layers` draw, then those of each scene they draw
+	/// through a scene source, and so on, each scene once.
+	pub fn drawn(&self, layers: impl IntoIterator<Item = Layer>) -> Vec<&Item> {
+		let mut items: Vec<&Item> = layers
+			.into_iter()
+			.flat_map(|layer| self.items(&layer).unwrap_or_default())
+			.filter(|item| item.visible)
+			.collect();
+		let mut nested = BTreeSet::new();
+		let mut next = 0;
+		while let Some(item) = items.get(next) {
+			if let Some(Nested::Scene(scene)) = self.nested(&item.source)
+				&& nested.insert(scene)
+				&& let Some(scene) = self.scene(scene)
+			{
+				items.extend(scene.items.iter().filter(|item| item.visible));
+			}
+			next += 1;
+		}
+		items
+	}
+
+	/// Whether the scene called `scene` places a program source, itself or in
+	/// a scene it draws, shown or hidden. It then cannot go on program, which
+	/// it would draw into itself.
+	pub fn draws_program(&self, scene: &str) -> bool {
+		let items = self.reached(scene);
+		items
+			.iter()
+			.any(|item| self.nested(&item.source) == Some(Nested::Program))
+	}
+
+	/// Every item of the scene called `scene` and of the scenes it draws,
+	/// shown or hidden, each scene once.
+	fn reached(&self, scene: &str) -> Vec<&Item> {
+		let mut scenes = vec![scene];
+		let mut seen = BTreeSet::new();
+		let mut items = Vec::new();
+		while let Some(scene) = scenes.pop() {
+			let Some(scene) = self.scene(scene).filter(|scene| seen.insert(&scene.name)) else {
+				continue;
+			};
+			for item in &scene.items {
+				if let Some(Nested::Scene(scene)) = self.nested(&item.source) {
+					scenes.push(scene);
+				}
+				items.push(item);
+			}
+		}
+		items
+	}
+
+	/// Refuse a scene that draws itself, directly or through other scenes,
+	/// shown or hidden, since it would never finish drawing.
+	fn validate_nesting(&self) -> Result<(), Error> {
+		// Walked with a stack of its own rather than the call stack, which a
+		// long enough chain of scenes would overflow.
+		let mut done = BTreeSet::new();
+		for root in &self.scenes {
+			if done.contains(root.name.as_str()) {
+				continue;
+			}
+			// The scenes drawing the one walked, each with how many of its
+			// items are walked.
+			let mut path = vec![(root, 0)];
+			while let Some(&mut (scene, ref mut walked)) = path.last_mut() {
+				let Some(item) = scene.items.get(*walked) else {
+					done.insert(scene.name.as_str());
+					path.pop();
+					continue;
+				};
+				*walked += 1;
+				let Some(Nested::Scene(nested)) = self.nested(&item.source) else {
+					continue;
+				};
+				let Some(nested) = self.scene(nested).filter(|nested| !done.contains(nested.name.as_str())) else {
+					continue;
+				};
+				if let Some(at) = path.iter().position(|(on, _)| on.name == nested.name) {
+					let through: Vec<String> = path[at + 1..].iter().map(|(on, _)| format!("`{}`", on.name)).collect();
+					let mut err = format!("scene `{}` draws itself", nested.name);
+					if !through.is_empty() {
+						err = format!("{err} through {}", through.join(", "));
+					}
+					return Err(Error::Invalid(err));
+				}
+				path.push((nested, 0));
+			}
+		}
+
+		for item in &self.top {
+			let draws = match self.nested(&item.source) {
+				Some(Nested::Program) => true,
+				Some(Nested::Scene(scene)) => self.draws_program(scene),
+				None => false,
+			};
+			if draws {
+				return Err(Error::Invalid(format!(
+					"the top layer places `{}`, which draws the program the top layer is drawn over",
+					item.source
+				)));
+			}
+		}
+		Ok(())
+	}
+
 	/// The filters `item` draws through: its source's, then its own.
 	pub fn filters<'a>(&'a self, item: &'a Item) -> impl Iterator<Item = &'a Filter> {
 		let source = self.video.get(&item.source).map(|video| video.filters.as_slice());
@@ -268,10 +384,20 @@ impl Collection {
 					.validate()
 					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 				self.validate_chain(&item.filters, &on)?;
-				if layer.scene.is_none() && !item.keyframes.is_empty() {
-					return Err(Error::Invalid(format!(
-						"{on} has keyframes, but the top layer never goes on to start them"
-					)));
+				if layer.scene.is_none() {
+					if !item.keyframes.is_empty() {
+						return Err(Error::Invalid(format!(
+							"{on} has keyframes, but the top layer never goes on to start them"
+						)));
+					}
+					if let Some(Nested::Scene(scene)) = self.nested(&item.source)
+						&& let Some(keyed) = self.reached(scene).into_iter().find(|item| !item.keyframes.is_empty())
+					{
+						return Err(Error::Invalid(format!(
+							"{on} draws `{}` with keyframes, but the top layer never goes on to start them",
+							keyed.source
+						)));
+					}
 				}
 				if !item.keyframes.is_sorted_by_key(|keyframe| keyframe.at) {
 					return Err(Error::Invalid(format!("{on} has keyframes out of order")));
@@ -293,6 +419,13 @@ impl Collection {
 		}
 		for (name, source) in &self.sources {
 			source.validate(name)?;
+			if let Source::Scene { scene } = source
+				&& self.scene(scene).is_none()
+			{
+				return Err(Error::Invalid(format!(
+					"`{name}` draws scene `{scene}`, which is not a scene"
+				)));
+			}
 			let Source::Clone { source } = source else { continue };
 			match self.sources.get(source) {
 				Some(Source::Clone { .. }) => {
@@ -328,6 +461,8 @@ impl Collection {
 				.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 			self.validate_chain(&video.filters, &on)?;
 		}
+
+		self.validate_nesting()?;
 
 		if let Some(name) = self.transition.stinger()
 			&& !matches!(self.sources.get(name), Some(Source::Media { .. }))
@@ -730,6 +865,15 @@ impl fmt::Display for Layer {
 	}
 }
 
+/// What a [`Source::Scene`] or [`Source::Program`] draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Nested<'a> {
+	/// The scene by this name.
+	Scene(&'a str),
+	/// The main canvas's program.
+	Program,
+}
+
 /// A source placed in a scene or the top layer.
 ///
 /// Every item naming the same source shows the same capture, with the
@@ -757,7 +901,8 @@ pub struct Item {
 	/// How the item moves away from and back to where it rests, from when its
 	/// scene goes on, in order of time. It plays once: before the first
 	/// keyframe the item holds that one, and after the last it holds the last.
-	/// A top-layer item has none, since the top layer never goes on.
+	/// A top-layer item has none, nor does a scene it draws, since the top
+	/// layer never goes on.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub keyframes: Vec<Keyframe>,
 }
@@ -1524,6 +1669,18 @@ pub enum Source {
 	/// source, on demand through [`Feed::replay`](crate::source::Feed::replay).
 	/// Transparent while nothing plays.
 	Replay,
+	/// Another scene, drawn whole at the main canvas's size, as a picture. Its
+	/// items' keyframes play from when the scene drawing it goes on, as that
+	/// scene's own items' do, so the top layer cannot draw one with keyframes.
+	/// A scene cannot draw itself, even through other scenes.
+	Scene {
+		/// The scene drawn.
+		scene: String,
+	},
+	/// What the main canvas's program shows, transitions included, on the
+	/// same frame. A scene drawing it cannot go on program, and the top layer
+	/// cannot draw it, since either would draw the program into itself.
+	Program,
 }
 
 impl Source {
@@ -1549,9 +1706,9 @@ impl Source {
 	}
 
 	/// Whether the source opens a capture, file, or subscription of its own,
-	/// rather than showing another source's.
+	/// rather than showing another source's or a scene.
 	pub fn opens(&self) -> bool {
-		!matches!(self, Self::Clone { .. })
+		!matches!(self, Self::Clone { .. } | Self::Scene { .. } | Self::Program)
 	}
 
 	/// Whether the source's picture can have its background removed: a
@@ -2526,6 +2683,149 @@ background = "remove"
 		let mut collection = example();
 		collection.scenes.push(Scene::new("Scene"));
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
+	}
+
+	/// `example()` with scenes `A`, `B`, and `C`, where `A` shows `B` through
+	/// the scene source `b`, and `on air` a program source placed nowhere.
+	fn nesting() -> Collection {
+		let mut collection = example();
+		let fill = Rect::fill(&collection.canvas);
+		for (name, source) in [("a", "A"), ("b", "B"), ("c", "C")] {
+			let scene = Source::Scene { scene: source.into() };
+			collection.sources.insert(name.into(), scene);
+			collection.scenes.push(Scene::new(source));
+		}
+		collection.sources.insert("on air".into(), Source::Program);
+		collection.scenes[1].items.push(Item::new("b", fill));
+		collection.validate().unwrap();
+		collection
+	}
+
+	/// The scene and program sources read as written.
+	#[test]
+	fn reads_a_scene_source() {
+		let text = "version = 1\n\n\
+			[canvas]\nwidth = 1920\nheight = 1080\nframerate = 30\n\n\
+			[sources.wide]\nkind = \"scene\"\nscene = \"Wide\"\n\n\
+			[sources.\"on air\"]\nkind = \"program\"\n\n\
+			[[scenes]]\nname = \"Wide\"\n";
+		let collection = Collection::from_toml(text).unwrap();
+		assert_eq!(collection.sources["wide"], Source::Scene { scene: "Wide".into() });
+		assert_eq!(collection.sources["on air"], Source::Program);
+		assert_eq!(
+			Collection::from_toml(&collection.to_toml().unwrap()).unwrap(),
+			collection
+		);
+		assert_eq!(collection.nested("wide"), Some(Nested::Scene("Wide")));
+	}
+
+	/// A scene source names a scene, and no scene draws itself, even through
+	/// others or a clone, shown or hidden. The top layer, drawn over the
+	/// program, cannot show it, nor a scene with keyframes, which it never
+	/// starts, and a mask cannot read a scene.
+	#[test]
+	fn refuses_a_scene_drawing_itself() {
+		let fill = Rect::fill(&Canvas::default());
+		let refused = |edit: &dyn Fn(&mut Collection), wanted: &str| {
+			let mut collection = nesting();
+			edit(&mut collection);
+			let err = collection.validate().unwrap_err().to_string();
+			assert!(err.contains(wanted), "{err}");
+		};
+		refused(
+			&|collection| {
+				collection
+					.sources
+					.insert("gone".into(), Source::Scene { scene: "Gone".into() });
+			},
+			"`gone` draws scene `Gone`, which is not a scene",
+		);
+		refused(
+			&|collection| {
+				collection.scenes[1].items.push(Item {
+					visible: false,
+					..Item::new("a", fill)
+				});
+			},
+			"scene `A` draws itself",
+		);
+		refused(
+			&|collection| {
+				collection
+					.sources
+					.insert("a copy".into(), Source::Clone { source: "a".into() });
+				collection.scenes[2].items.push(Item::new("c", fill));
+				collection.scenes[3].items.push(Item::new("a copy", fill));
+			},
+			"scene `A` draws itself through `B`, `C`",
+		);
+		refused(
+			&|collection| collection.top.push(Item::new("on air", fill)),
+			"the top layer places `on air`, which draws the program",
+		);
+		refused(
+			&|collection| {
+				collection.scenes[2].items.push(Item::new("on air", fill));
+				collection.top.push(Item::new("a", fill));
+			},
+			"the top layer places `a`, which draws the program",
+		);
+		refused(
+			&|collection| {
+				let source = collection.scenes[0].items[0].source.clone();
+				collection.scenes[2].items.push(Item {
+					keyframes: vec![Keyframe::new(Duration::ZERO)],
+					..Item::new(source, fill)
+				});
+				collection.top.push(Item::new("a", fill));
+			},
+			"with keyframes, but the top layer never goes on to start them",
+		);
+		refused(
+			&|collection| {
+				let mask = Filter::Mask {
+					source: "b".into(),
+					mode: MaskMode::Alpha,
+				};
+				collection.scenes[0].items[0].filters.push(mask);
+			},
+			"which is not a source with a picture of its own",
+		);
+
+		// Showing a scene is not drawing it: `B` and `C` both show `C`.
+		let mut collection = nesting();
+		collection.scenes[2].items.push(Item::new("c", fill));
+		collection.scenes[1].items.push(Item::new("c", fill));
+		collection.top.push(Item::new("c", fill));
+		collection.validate().unwrap();
+	}
+
+	/// What layers draw reaches through the scenes they show, each once, and
+	/// leaves hidden items out; whether a scene draws the program counts hidden
+	/// ones too, since showing one is an edit away.
+	#[test]
+	fn drawn_reaches_through_scenes() {
+		let fill = Rect::fill(&Canvas::default());
+		let mut collection = nesting();
+		collection.scenes[1].items.push(Item::new("b", fill));
+		collection.scenes[2].items = vec![Item::new("logo", fill), Item::new("c", fill)];
+		collection.scenes[3].items = vec![
+			Item::new("background", fill),
+			Item {
+				visible: false,
+				..Item::new("on air", fill)
+			},
+		];
+		collection.validate().unwrap();
+		let drawn: Vec<&str> = collection
+			.drawn([Layer::scene("A")])
+			.into_iter()
+			.map(|item| item.source.as_str())
+			.collect();
+		assert_eq!(drawn, ["b", "b", "logo", "c", "background"]);
+		assert!(collection.draws_program("A"));
+		assert!(collection.draws_program("C"));
+		assert!(!collection.draws_program("Scene"));
 	}
 
 	/// A further canvas is named as a path segment, since it names its

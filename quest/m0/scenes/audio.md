@@ -23,7 +23,3 @@ Decided 2026-11-05 with the maintainer (/quest-plan); see the
 - Switching or editing an audio scene never drops or repeats audio, as with
   mixes today.
 - `README.md` documents audio scenes.
-
-## Required
-
-- [Scene source](/quest/m0/scenes/scene-source.md) - shares the scene graph and its cycle check

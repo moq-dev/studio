@@ -306,13 +306,24 @@ fn mix_blend(backdrop: vec3<f32>, source: vec3<f32>, mode: u32) -> vec3<f32> {
 	}
 }
 
-// The input through the ops, mixed with the opaque backdrop in `aux` by the
-// draw's blend mode: (1 - αs) Cb + αs B(Cb, Cs).
+// The input through the ops, mixed with the premultiplied backdrop in `aux`
+// by the draw's blend mode, as the Compositing and Blending spec composites
+// over a backdrop that may be transparent, as a nested scene's is:
+// Cs' = (1 - αb) Cs + αb B(Cb, Cs), then Cs' over the backdrop. Over an opaque
+// backdrop that is (1 - αs) Cb + αs B(Cb, Cs).
 @fragment fn fs_blend(in: Varyings) -> @location(0) vec4<f32> {
 	let source = apply(straight(in.input), in.item);
-	let backdrop = textureLoad(aux, vec2<i32>(in.position.xy), 0).rgb;
-	let mixed = mix_blend(backdrop, source.rgb, draw.mode.z);
-	return vec4<f32>(mix(backdrop, mixed, source.a), 1.0);
+	let backdrop = textureLoad(aux, vec2<i32>(in.position.xy), 0);
+	var straight_backdrop = vec3<f32>(0.0);
+	if backdrop.a > 0.0 {
+		straight_backdrop = backdrop.rgb / backdrop.a;
+	}
+	let mixed = mix_blend(straight_backdrop, source.rgb, draw.mode.z);
+	let blended = mix(source.rgb, mixed, backdrop.a);
+	return vec4<f32>(
+		source.a * blended + (1.0 - source.a) * backdrop.rgb,
+		source.a + (1.0 - source.a) * backdrop.a,
+	);
 }
 
 // One direction of a separable Gaussian blur of a premultiplied raster. With

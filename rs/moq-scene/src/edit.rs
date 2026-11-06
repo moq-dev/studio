@@ -402,50 +402,105 @@ impl Collection {
 	/// is the same one moved. Whatever follows a scene by name, such as the one
 	/// in preview, looks its name up here once.
 	pub fn renames(&self, edit: &Edit) -> BTreeMap<String, Option<String>> {
-		// Each place's scene: its name here, or `None` for one the edit added.
-		let mut scenes: Vec<(Option<&str>, &str)> = self
+		let mut places = Places::new(self);
+		for change in &edit.changes {
+			places.change(change);
+		}
+		let now = self
 			.scenes
 			.iter()
-			.map(|scene| (Some(scene.name.as_str()), scene.name.as_str()))
-			.collect();
-		// Scenes the edit removed, with what each was, until one is put back.
-		let mut removed: Vec<(Option<&str>, &Scene)> = Vec::new();
-		for change in &edit.changes {
-			let Change::Scene { index, before, after } = change else {
-				continue;
-			};
-			match (before, after) {
-				(None, Some(after)) if *index <= scenes.len() => {
-					let back = removed.iter().position(|(_, scene)| *scene == after);
-					let was = back.and_then(|back| removed.remove(back).0);
-					scenes.insert(*index, (was, &after.name));
-				}
-				(Some(before), None) if *index < scenes.len() => {
-					let (was, _) = scenes.remove(*index);
-					removed.push((was, before));
-				}
-				(Some(_), Some(after)) if *index < scenes.len() => scenes[*index].1 = &after.name,
-				_ => {}
-			}
-		}
-		let kept = scenes
-			.into_iter()
-			.filter_map(|(was, now)| Some((was?, Some(now))))
-			.filter(|(was, now)| Some(*was) != *now);
-		let gone = removed.into_iter().filter_map(|(was, _)| Some((was?, None)));
-		kept.chain(gone)
-			.map(|(was, now)| (was.to_string(), now.map(str::to_string)))
+			.enumerate()
+			.map(|(id, scene)| (scene, places.name(id)));
+		now.filter(|(scene, now)| *now != Some(scene.name.as_str()))
+			.map(|(scene, now)| (scene.name.clone(), now.map(str::to_string)))
 			.collect()
 	}
 
 	/// Start an edit labelled `label` against this collection.
 	pub fn draft(&self, label: impl Into<String>) -> Draft {
+		let places = Places::new(self);
+		let drawing = self.sources.iter().filter_map(|(name, source)| match source {
+			Source::Scene { scene } => Some((name.clone(), places.id(scene)?)),
+			_ => None,
+		});
 		Draft {
 			collection: self.clone(),
 			edit: Edit {
 				label: label.into(),
 				changes: Vec::new(),
 			},
+			drawing: drawing.collect(),
+			places,
+		}
+	}
+}
+
+/// Which scene each place of a collection's scene list holds through a run of
+/// changes, by an id that follows it through renames and moves: its index in
+/// the list the run started from, or one past those for a scene the run adds.
+struct Places {
+	/// The id and name of the scene at each place.
+	scenes: Vec<(usize, String)>,
+	/// Scenes taken out, until one is put back unchanged, which is then the
+	/// same scene moved.
+	removed: Vec<(usize, Scene)>,
+	/// The id the next scene added takes.
+	next: usize,
+}
+
+impl Places {
+	fn new(collection: &Collection) -> Self {
+		let scenes: Vec<_> = collection
+			.scenes
+			.iter()
+			.map(|scene| scene.name.clone())
+			.enumerate()
+			.collect();
+		Self {
+			next: scenes.len(),
+			scenes,
+			removed: Vec::new(),
+		}
+	}
+
+	/// Follow `change`, which leaves the places alone unless it is a scene's.
+	fn change(&mut self, change: &Change) {
+		let Change::Scene { index, before, after } = change else {
+			return;
+		};
+		match (before, after) {
+			(None, Some(after)) if *index <= self.scenes.len() => {
+				let back = self.removed.iter().position(|(_, scene)| scene == after);
+				let id = match back {
+					Some(back) => self.removed.remove(back).0,
+					None => {
+						self.next += 1;
+						self.next - 1
+					}
+				};
+				self.scenes.insert(*index, (id, after.name.clone()));
+			}
+			(Some(before), None) if *index < self.scenes.len() => {
+				let (id, _) = self.scenes.remove(*index);
+				self.removed.push((id, before.clone()));
+			}
+			(Some(_), Some(after)) if *index < self.scenes.len() => self.scenes[*index].1 = after.name.clone(),
+			_ => {}
+		}
+	}
+
+	/// The name of scene `id`, or `None` once it is removed.
+	fn name(&self, id: usize) -> Option<&str> {
+		let scene = self.scenes.iter().find(|(at, _)| *at == id);
+		scene.map(|(_, name)| name.as_str())
+	}
+
+	/// The id of the scene called `name`, unless no scene or more than one is.
+	fn id(&self, name: &str) -> Option<usize> {
+		let mut called = self.scenes.iter().filter(|(_, at)| at == name);
+		match (called.next(), called.next()) {
+			(Some((id, _)), None) => Some(*id),
+			_ => None,
 		}
 	}
 }
@@ -455,6 +510,11 @@ impl Collection {
 pub struct Draft {
 	collection: Collection,
 	edit: Edit,
+	places: Places,
+	/// The scene each scene source draws, by its id in `places`, so renaming
+	/// or removing one reaches its own sources even while another scene has
+	/// the name it had or takes.
+	drawing: BTreeMap<String, usize>,
 }
 
 impl Draft {
@@ -466,6 +526,23 @@ impl Draft {
 	/// Make `change` and record it.
 	pub fn change(&mut self, change: Change) -> Result<(), Error> {
 		change.apply(&mut self.collection)?;
+		self.places.change(&change);
+		if let Change::Source { name, after, .. } = &change {
+			// A source still naming the scene it follows keeps following it;
+			// otherwise it follows the one scene by the name it gives.
+			let kept =
+				|id: &usize| matches!(after, Some(Source::Scene { scene }) if self.places.name(*id) == Some(scene));
+			if !self.drawing.get(name).is_some_and(kept) {
+				let id = match after {
+					Some(Source::Scene { scene }) => self.places.id(scene),
+					_ => None,
+				};
+				match id {
+					Some(id) => self.drawing.insert(name.clone(), id),
+					None => self.drawing.remove(name),
+				};
+			}
+		}
 		self.edit.changes.push(change);
 		Ok(())
 	}
@@ -582,14 +659,36 @@ impl Draft {
 		})
 	}
 
-	/// Remove the scene at `index`, with its items.
+	/// Remove the scene at `index`, with its items, and every scene source
+	/// drawing it, as [`remove_source`](Self::remove_source) removes one.
 	pub fn remove_scene(&mut self, index: usize) -> Result<(), Error> {
+		self.scene_at(index)?;
+		let drawing = self.drawing(index);
+		// Taken first, so the items its sources' removal finds by scene name
+		// are another scene's, even one that took its name in this draft.
+		self.take_scene(index)?;
+		for source in drawing {
+			self.remove_source(&source)?;
+		}
+		Ok(())
+	}
+
+	/// Take the scene at `index` out, leaving what refers to it.
+	fn take_scene(&mut self, index: usize) -> Result<Scene, Error> {
 		let before = self.scene_at(index)?;
 		self.change(Change::Scene {
 			index,
-			before: Some(before),
+			before: Some(before.clone()),
 			after: None,
-		})
+		})?;
+		Ok(before)
+	}
+
+	/// The scene sources drawing the scene at `index`.
+	fn drawing(&self, index: usize) -> Vec<String> {
+		let id = self.places.scenes[index].0;
+		let drawing = self.drawing.iter().filter(|(_, drawn)| **drawn == id);
+		drawing.map(|(name, _)| name.clone()).collect()
 	}
 
 	/// Replace the scene at `index`.
@@ -602,19 +701,28 @@ impl Draft {
 		})
 	}
 
-	/// Rename the scene at `index`, keeping what it shows.
+	/// Rename the scene at `index`, keeping what it shows, and every scene
+	/// source drawing it.
 	pub fn rename_scene(&mut self, index: usize, name: impl Into<String>) -> Result<(), Error> {
-		let scene = Scene {
-			name: name.into(),
-			..self.scene_at(index)?
-		};
-		self.set_scene(index, scene)
+		let before = self.scene_at(index)?;
+		let name = name.into();
+		self.set_scene(
+			index,
+			Scene {
+				name: name.clone(),
+				..before
+			},
+		)?;
+		for source in self.drawing(index) {
+			let scene = name.clone();
+			self.set_source(&source, Some(Source::Scene { scene }))?;
+		}
+		Ok(())
 	}
 
 	/// Move the scene at `from` to `to`, counted after its removal.
 	pub fn move_scene(&mut self, from: usize, to: usize) -> Result<(), Error> {
-		let scene = self.scene_at(from)?;
-		self.remove_scene(from)?;
+		let scene = self.take_scene(from)?;
 		self.insert_scene(to, scene)
 	}
 
@@ -1146,6 +1254,40 @@ mod tests {
 		assert_eq!(collection, before);
 	}
 
+	/// A scene source follows its scene through a rename and a move, and goes
+	/// with it, with the items showing it, when it is removed, all undone whole.
+	#[test]
+	fn a_scene_source_follows_its_scene() {
+		let mut collection = collection();
+		let fill = Rect::fill(&collection.canvas);
+		collection.scenes.push(Scene {
+			items: vec![Item::new("red", fill)],
+			..Scene::new("Inner")
+		});
+		let inner = Source::Scene { scene: "Inner".into() };
+		collection.sources.insert("inner".into(), inner);
+		collection.scenes[0].items.push(Item::new("inner", fill));
+		collection.validate().unwrap();
+		let mut history = History::new();
+
+		let mut draft = collection.draft("Rename `Inner`");
+		draft.rename_scene(1, "Nested").unwrap();
+		draft.move_scene(1, 0).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.sources["inner"], Source::Scene { scene: "Nested".into() });
+		assert_eq!(collection.scenes[0].name, "Nested");
+		let renamed = collection.clone();
+
+		let mut draft = collection.draft("Remove `Nested`");
+		draft.remove_scene(0).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert!(!collection.sources.contains_key("inner"));
+		assert_eq!(collection.scenes[0].items.len(), 1, "the item showing it went too");
+
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection, renamed);
+	}
+
 	/// A removed source's filters go with it, from items and other sources
 	/// alike, leaving their other filters.
 	#[test]
@@ -1239,11 +1381,19 @@ mod tests {
 
 	/// A rename keeps the scene's items and place, a move keeps its name, and
 	/// each scene maps to its own new name, even through names the edit
-	/// frees and reuses.
+	/// frees and reuses, as the scene sources drawing it follow it.
 	#[test]
 	fn renames_and_reorders_scenes() {
 		let mut collection = collection();
 		collection.scenes.push(Scene::new("Other"));
+		for (source, scene) in [("first", "Scene"), ("second", "Other")] {
+			let scene = scene.to_string();
+			collection.sources.insert(source.into(), Source::Scene { scene });
+		}
+		let draws = |collection: &Collection, source: &str| match collection.sources.get(source) {
+			Some(Source::Scene { scene }) => Some(scene.clone()),
+			_ => None,
+		};
 		let start = collection.clone();
 		let mut history = History::new();
 
@@ -1258,6 +1408,8 @@ mod tests {
 		history.record(edit, None);
 		assert_eq!(collection.scenes[0].name, "Other");
 		assert_eq!(collection.scenes[0].items, start.scenes[0].items);
+		assert_eq!(draws(&collection, "first").as_deref(), Some("Other"));
+		assert_eq!(draws(&collection, "second").as_deref(), Some("Scene"));
 
 		let mut draft = collection.draft("Move `Other` down");
 		draft.move_scene(0, 1).unwrap();
@@ -1285,6 +1437,8 @@ mod tests {
 			"an added scene renames nothing"
 		);
 		collection.apply(&edit).unwrap();
+		assert_eq!(draws(&collection, "first").as_deref(), Some("Other"));
+		assert_eq!(draws(&collection, "second").as_deref(), Some("Next"));
 		assert_eq!(
 			collection.renames(&edit.inverse()),
 			renamed(&[("Other", Some("Scene")), ("Next", Some("Other")), ("New", None)]),
@@ -1300,6 +1454,9 @@ mod tests {
 			collection.renames(&edit),
 			renamed(&[("Other", None), ("Next", Some("Other"))])
 		);
+		collection.apply(&edit).unwrap();
+		assert_eq!(draws(&collection, "first"), None, "it went with its scene");
+		assert_eq!(draws(&collection, "second").as_deref(), Some("Other"));
 
 		// Names stay unique and non-empty.
 		for name in ["Other", ""] {
@@ -1307,6 +1464,20 @@ mod tests {
 			draft.rename_scene(0, name).unwrap();
 			assert!(matches!(draft.finish(), Err(Error::Invalid(_))), "{name:?}");
 		}
+
+		// Removing a scene whose name another just took removes only its own
+		// scene sources, and the items showing them from the other.
+		let scene = "New".to_string();
+		collection.sources.insert("third".into(), Source::Scene { scene });
+		let fill = Rect::fill(&collection.canvas);
+		collection.scenes[1].items.push(Item::new("third", fill));
+		let mut draft = collection.draft("Take over");
+		draft.rename_scene(1, "New").unwrap();
+		draft.remove_scene(0).unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
+		assert_eq!(draws(&collection, "third"), None);
+		assert_eq!(draws(&collection, "second").as_deref(), Some("New"));
+		assert!(collection.scenes[0].items.is_empty());
 	}
 
 	/// The canvas and the transition are edits like any other: a drag of one

@@ -51,6 +51,5 @@ reads skips drawing. Per-scene cost grows only with what that scene draws;
 
 ## Required
 
-- [Scene source](/quest/m0/scenes/scene-source.md) - a scene draws another scene, or the live program, as a source
 - [Published scenes](/quest/m0/scenes/published.md) - any scene publishes as its own broadcast at its own size, replacing canvases
 - [Audio scenes](/quest/m0/scenes/audio.md) - mixes become audio-only scenes that nest
