@@ -2750,13 +2750,13 @@ impl Panels {
 		let Some(key) = pressed else { return };
 		self.binding = None;
 		hotkeys.suspend(false);
-		if key.logical_key == egui::Key::Escape {
+		if key.key.logical_key == egui::Key::Escape {
 			return;
 		}
 		self.refusal = match hotkeys.bind(&action, Some(key)) {
 			Ok(()) => None,
 			Err(other) => {
-				let key = ctx.format_shortcut(&key);
+				let key = ctx.format_shortcut(&key.key);
 				Some((action, format!("{key} is bound to {other}; clear it there first")))
 			}
 		};
@@ -2811,7 +2811,7 @@ impl Panels {
 					ui.strong("press a key, or Escape");
 				} else {
 					match bound {
-						Some(key) => ui.monospace(ui.ctx().format_shortcut(key)),
+						Some(bound) => ui.monospace(ui.ctx().format_shortcut(&bound.key)),
 						None => ui.weak("unbound"),
 					};
 				}

@@ -4320,6 +4320,8 @@ dependencies = [
  "tracing",
  "url",
  "usage-rs",
+ "windows-sys 0.61.2",
+ "x11rb 0.13.2",
 ]
 
 [[package]]

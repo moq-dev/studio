@@ -91,6 +91,14 @@ ashpd = { version = "0.13", default-features = false, features = ["global_shortc
 futures-util = "0.3"
 # Whether the window is on Wayland, where only the portal hears keys globally.
 raw-window-handle = "0.6"
+# Which keysyms the X11 layout puts on each key, so a hotkey grabs the key
+# pressed. 0.13, as global-hotkey uses, so default builds compile one.
+x11rb = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+# Which virtual key the Windows layout puts on each key, so a hotkey
+# registers the key pressed.
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [dev-dependencies]
 # A clock that moves wall time too, which renewed tokens' expiries read.

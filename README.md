@@ -827,6 +827,11 @@ starts unbound, so no key a game uses is taken unasked, and a key bound to one
 action is refused for another until it is cleared there. Replay and Save clip
 use the Replay panel's picks, and a recording the Output panel's.
 
+The key pressed is the key that fires, on any keyboard layout: the panel names
+it as the layout prints it, and the system hears the key where it sits, through
+the layout in use when the studio starts or a key is bound. On X11, a key that
+types only a letter outside A to Z, such as ö on a German layout, is refused.
+
 Bound keys fire even while another app, such as a game in full screen, has
 focus, and the app does not see them, so bind keys you do not type or play
 with, such as a function key or one with modifiers:

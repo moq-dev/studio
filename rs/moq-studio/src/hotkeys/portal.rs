@@ -70,8 +70,8 @@ async fn run(
 			*reach.lock().unwrap() = Reach::Asking;
 			let shortcuts: Vec<NewShortcut> = bindings
 				.iter()
-				.map(|(action, key)| {
-					NewShortcut::new(id(action), action.to_string()).preferred_trigger(trigger(key).as_deref())
+				.map(|(action, binding)| {
+					NewShortcut::new(id(action), action.to_string()).preferred_trigger(trigger(&binding.key).as_deref())
 				})
 				.collect();
 			let bound = portal
@@ -199,6 +199,7 @@ fn keysym(key: Key) -> Option<String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::hotkeys::Binding;
 
 	#[test]
 	fn unchanged_bindings_keep_the_session() {
@@ -207,7 +208,10 @@ mod tests {
 			bindings,
 			reach: Arc::new(Mutex::new(Reach::Asking)),
 		};
-		let key = KeyboardShortcut::new(egui::Modifiers::CTRL, Key::R);
+		let key = Binding {
+			key: KeyboardShortcut::new(egui::Modifiers::CTRL, Key::R),
+			position: Key::R,
+		};
 		portal.set(Bindings::from([(Action::Cut, key)]));
 		assert!(wanted.has_changed().unwrap());
 		wanted.mark_unchanged();

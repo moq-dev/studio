@@ -8,17 +8,39 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use egui::{Key, KeyboardShortcut};
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+use global_hotkey::hotkey::{HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 use crate::controls::{Action, Controls};
 
+mod layout;
 #[cfg(target_os = "linux")]
 mod portal;
 
+use layout::Layout;
+
 /// The key bound to each action. Every action starts unbound, so a key
 /// another app, such as a game, uses is never taken unasked.
-pub type Bindings = BTreeMap<Action, KeyboardShortcut>;
+pub type Bindings = BTreeMap<Action, Binding>;
+
+/// A key bound to an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Binding {
+	/// The key with its modifiers as the layout names it, which the panel
+	/// shows and the Wayland portal is asked for.
+	pub key: KeyboardShortcut,
+	/// Where the key sits, named for the key a US keyboard has there, which
+	/// the platform's hotkeys register through the layout in use.
+	pub position: Key,
+}
+
+impl Binding {
+	/// Whether `self` and `other` are the same key, held with the same
+	/// modifiers, whatever the layout called each.
+	fn same(&self, other: &Binding) -> bool {
+		self.position == other.position && self.key.modifiers == other.key.modifiers
+	}
+}
 
 /// The bound keys, heard wherever the platform lets the studio hear them.
 pub struct Hotkeys {
@@ -115,12 +137,12 @@ impl Hotkeys {
 
 	/// Bind `action` to `key`, or unbind it, unless `key` is bound to another
 	/// action, which is returned instead.
-	pub fn bind(&mut self, action: &Action, key: Option<KeyboardShortcut>) -> Result<(), Action> {
+	pub fn bind(&mut self, action: &Action, key: Option<Binding>) -> Result<(), Action> {
 		if let Some(key) = key
 			&& let Some((other, _)) = self
 				.bindings
 				.iter()
-				.find(|(other, bound)| **bound == key && *other != action)
+				.find(|(other, bound)| bound.same(&key) && *other != action)
 		{
 			return Err(other.clone());
 		}
@@ -172,11 +194,20 @@ impl Hotkeys {
 					}
 				}
 				let mut ids = HashMap::new();
+				let layout = Layout::current();
 				for (action, key) in heard {
-					let Some(hotkey) = hotkey(key) else {
-						let reason = "this key cannot be heard outside the studio".to_string();
-						self.refused.insert(action.clone(), reason);
-						continue;
+					let hotkey = match &layout {
+						Ok(layout) => {
+							hotkey(layout, key).ok_or_else(|| "this key cannot be heard outside the studio".into())
+						}
+						Err(err) => Err(err.clone()),
+					};
+					let hotkey = match hotkey {
+						Ok(hotkey) => hotkey,
+						Err(reason) => {
+							self.refused.insert(action.clone(), reason);
+							continue;
+						}
 					};
 					match manager.register(hotkey) {
 						Ok(()) => {
@@ -222,22 +253,14 @@ impl Hotkeys {
 		}
 		ctx.input_mut(|input| {
 			input.events.retain(|event| {
-				let egui::Event::Key {
-					key,
-					physical_key,
-					pressed: true,
-					repeat,
-					modifiers,
-				} = event
-				else {
+				let Some(pressed) = binding(event) else {
 					return true;
 				};
-				let pressed = KeyboardShortcut::new(*modifiers, heard(*key, *physical_key));
-				let Some((action, _)) = self.bindings.iter().find(|(_, key)| pressed == **key) else {
+				let Some((action, _)) = self.bindings.iter().find(|(_, key)| key.same(&pressed)) else {
 					return true;
 				};
 				// A held key fires once, and its repeats are taken too.
-				if !repeat {
+				if !matches!(event, egui::Event::Key { repeat: true, .. }) {
 					let _ = self.fire.send(action.clone());
 				}
 				false
@@ -312,36 +335,34 @@ fn refusal(err: global_hotkey::Error) -> String {
 	}
 }
 
-/// The key `event` presses, with the modifiers held, ignoring repeats.
-pub fn pressed(event: &egui::Event) -> Option<KeyboardShortcut> {
+/// The key `event` presses, ignoring repeats.
+pub fn pressed(event: &egui::Event) -> Option<Binding> {
 	match event {
-		egui::Event::Key {
-			key,
-			physical_key,
-			pressed: true,
-			repeat: false,
-			modifiers,
-		} => Some(KeyboardShortcut::new(*modifiers, heard(*key, *physical_key))),
+		egui::Event::Key { repeat: false, .. } => binding(event),
 		_ => None,
 	}
 }
 
-/// The key the platform's hotkeys hear for a press of `key`, as the layout
-/// names it, at `physical`, where it sits on a US keyboard. macOS registers
-/// a key by where it sits. Windows' virtual keys and the keysyms X11 and the
-/// Wayland portal bind name what the layout prints on it, so a key only
-/// Shift makes, such as `!`, is named by where it sits instead.
-fn heard(key: Key, physical: Option<Key>) -> Key {
-	let physical = physical.unwrap_or(key);
-	match cfg!(target_os = "macos") || code(key).is_none() {
-		true => physical,
-		false => key,
+/// The key `event` presses or repeats, if it says where the key sits.
+fn binding(event: &egui::Event) -> Option<Binding> {
+	match event {
+		egui::Event::Key {
+			key,
+			physical_key: Some(position),
+			pressed: true,
+			modifiers,
+			..
+		} => Some(Binding {
+			key: KeyboardShortcut::new(*modifiers, *key),
+			position: *position,
+		}),
+		_ => None,
 	}
 }
 
-/// `key` as the platform's hotkeys name it, if they can hear it.
-fn hotkey(key: &KeyboardShortcut) -> Option<HotKey> {
-	let held = key.modifiers;
+/// `key` as the platform's hotkeys register it in `layout`, if they can hear it.
+fn hotkey(layout: &Layout, key: &Binding) -> Option<HotKey> {
+	let held = key.key.modifiers;
 	let mut mods = Modifiers::empty();
 	for (on, modifier) in [
 		(held.shift, Modifiers::SHIFT),
@@ -353,101 +374,7 @@ fn hotkey(key: &KeyboardShortcut) -> Option<HotKey> {
 			mods |= modifier;
 		}
 	}
-	Some(HotKey::new(Some(mods), code(key.logical_key)?))
-}
-
-/// `key` as the platforms name it: where it sits on a US keyboard, which
-/// Windows and X11 take for the key the layout prints that on.
-fn code(key: Key) -> Option<Code> {
-	Some(match key {
-		Key::ArrowDown => Code::ArrowDown,
-		Key::ArrowLeft => Code::ArrowLeft,
-		Key::ArrowRight => Code::ArrowRight,
-		Key::ArrowUp => Code::ArrowUp,
-		Key::Escape => Code::Escape,
-		Key::Tab => Code::Tab,
-		Key::Backspace => Code::Backspace,
-		Key::Enter => Code::Enter,
-		Key::Space => Code::Space,
-		Key::Insert => Code::Insert,
-		Key::Delete => Code::Delete,
-		Key::Home => Code::Home,
-		Key::End => Code::End,
-		Key::PageUp => Code::PageUp,
-		Key::PageDown => Code::PageDown,
-		Key::Comma => Code::Comma,
-		Key::Backslash => Code::Backslash,
-		Key::Slash => Code::Slash,
-		Key::OpenBracket => Code::BracketLeft,
-		Key::CloseBracket => Code::BracketRight,
-		Key::Backtick => Code::Backquote,
-		Key::Minus => Code::Minus,
-		Key::Period => Code::Period,
-		Key::Equals => Code::Equal,
-		Key::Semicolon => Code::Semicolon,
-		Key::Quote => Code::Quote,
-		Key::Num0 => Code::Digit0,
-		Key::Num1 => Code::Digit1,
-		Key::Num2 => Code::Digit2,
-		Key::Num3 => Code::Digit3,
-		Key::Num4 => Code::Digit4,
-		Key::Num5 => Code::Digit5,
-		Key::Num6 => Code::Digit6,
-		Key::Num7 => Code::Digit7,
-		Key::Num8 => Code::Digit8,
-		Key::Num9 => Code::Digit9,
-		Key::A => Code::KeyA,
-		Key::B => Code::KeyB,
-		Key::C => Code::KeyC,
-		Key::D => Code::KeyD,
-		Key::E => Code::KeyE,
-		Key::F => Code::KeyF,
-		Key::G => Code::KeyG,
-		Key::H => Code::KeyH,
-		Key::I => Code::KeyI,
-		Key::J => Code::KeyJ,
-		Key::K => Code::KeyK,
-		Key::L => Code::KeyL,
-		Key::M => Code::KeyM,
-		Key::N => Code::KeyN,
-		Key::O => Code::KeyO,
-		Key::P => Code::KeyP,
-		Key::Q => Code::KeyQ,
-		Key::R => Code::KeyR,
-		Key::S => Code::KeyS,
-		Key::T => Code::KeyT,
-		Key::U => Code::KeyU,
-		Key::V => Code::KeyV,
-		Key::W => Code::KeyW,
-		Key::X => Code::KeyX,
-		Key::Y => Code::KeyY,
-		Key::Z => Code::KeyZ,
-		Key::F1 => Code::F1,
-		Key::F2 => Code::F2,
-		Key::F3 => Code::F3,
-		Key::F4 => Code::F4,
-		Key::F5 => Code::F5,
-		Key::F6 => Code::F6,
-		Key::F7 => Code::F7,
-		Key::F8 => Code::F8,
-		Key::F9 => Code::F9,
-		Key::F10 => Code::F10,
-		Key::F11 => Code::F11,
-		Key::F12 => Code::F12,
-		Key::F13 => Code::F13,
-		Key::F14 => Code::F14,
-		Key::F15 => Code::F15,
-		Key::F16 => Code::F16,
-		Key::F17 => Code::F17,
-		Key::F18 => Code::F18,
-		Key::F19 => Code::F19,
-		Key::F20 => Code::F20,
-		Key::F21 => Code::F21,
-		Key::F22 => Code::F22,
-		Key::F23 => Code::F23,
-		Key::F24 => Code::F24,
-		_ => return None,
-	})
+	Some(HotKey::new(Some(mods), layout.code(key.position)?))
 }
 
 #[cfg(test)]
@@ -455,21 +382,31 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn keys_bind_as_the_platform_hears_them() {
-		// On AZERTY, the key printed A sits where a US keyboard has Q.
-		let a = heard(Key::A, Some(Key::Q));
-		match cfg!(target_os = "macos") {
-			true => assert_eq!(a, Key::Q),
-			false => assert_eq!(a, Key::A),
-		}
-		// Shift and the key printed 1 make `!`, which no platform binds.
-		assert_eq!(heard(Key::Exclamationmark, Some(Key::Num1)), Key::Num1);
-		assert_eq!(heard(Key::F9, None), Key::F9);
+	fn a_key_is_the_same_wherever_the_layout_names_it() {
+		let press = |key, physical_key, modifiers| egui::Event::Key {
+			key,
+			physical_key,
+			pressed: true,
+			repeat: false,
+			modifiers,
+		};
+		// Shift and the key a US keyboard prints 7 on make `/` on German.
+		let german = pressed(&press(Key::Slash, Some(Key::Num7), egui::Modifiers::SHIFT)).unwrap();
+		assert_eq!(german.position, Key::Num7);
+		assert_eq!(german.key.logical_key, Key::Slash);
+		let us = pressed(&press(Key::Num7, Some(Key::Num7), egui::Modifiers::SHIFT)).unwrap();
+		assert!(us.same(&german));
+		assert!(!us.same(&pressed(&press(Key::Num7, Some(Key::Num7), egui::Modifiers::NONE)).unwrap()));
+		// A key whose position is unknown cannot be registered by it.
+		assert_eq!(pressed(&press(Key::Pipe, None, egui::Modifiers::NONE)), None);
 	}
 
 	#[test]
 	fn bindings_follow_renames_at_once() {
-		let key = |key| KeyboardShortcut::new(egui::Modifiers::NONE, key);
+		let key = |key| Binding {
+			key: KeyboardShortcut::new(egui::Modifiers::NONE, key),
+			position: key,
+		};
 		let scene = |name: &str| Action::Scene(name.into());
 		let bindings = Bindings::from([
 			(scene("A"), key(Key::F1)),
