@@ -50,9 +50,9 @@ pub(crate) enum Picture {
 	Texture(moq_video::render::wgpu::Texture),
 	/// A LUT source's table, which is not drawn but looked up.
 	Lut(Cube),
-	/// An overlay whose HTML passed [`crate::overlay::check`], which the
-	/// compositor lays out and paints itself, on the program clock.
-	Overlay,
+	/// An overlay's HTML and assets, which the compositor lays out and paints
+	/// itself, on the program clock.
+	Overlay(crate::overlay::Content),
 }
 
 /// The one picture a source holds for the compositor. A newer picture replaces
@@ -197,7 +197,8 @@ pub struct Context {
 	pub bus: Bus,
 	/// Where broadcast sources are announced: the studio's relay connection.
 	pub origin: moq_net::origin::Consumer,
-	/// What a relative image or LUT path is relative to: the scene file's directory.
+	/// What a relative image, LUT, or overlay asset path is relative to: the
+	/// scene file's directory.
 	pub dir: PathBuf,
 	/// What cameras, screens, and broadcasts deliver video as:
 	/// `moq_video::render::output` of the compositor's device.
@@ -696,8 +697,8 @@ impl Driver {
 				std::future::pending().await
 			}
 			Source::Overlay { html, .. } => {
-				crate::overlay::check(html)?;
-				self.show(Picture::Overlay);
+				let content = crate::overlay::check(html, &self.context.dir)?;
+				self.show(Picture::Overlay(content));
 				std::future::pending().await
 			}
 			Source::Media { path, looping, .. } => {
@@ -2662,7 +2663,7 @@ mod tests {
 
 			let title = sources.get("title").unwrap();
 			assert_eq!(title.status(), Status::Live);
-			assert!(matches!(title.take(), Some(Picture::Overlay)));
+			assert!(matches!(title.take(), Some(Picture::Overlay(_))));
 			let Status::Failed(reason) = sources.get("shadow").unwrap().status() else {
 				panic!("an overlay outside the subset fails");
 			};
