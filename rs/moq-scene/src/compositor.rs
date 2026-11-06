@@ -968,54 +968,94 @@ impl<'a> Nesting<'a> {
 	}
 
 	/// Add the scenes `items` show, from when the scene they are in went on
-	/// `since` ago. Returns whether any shows the program. `walked` holds each
-	/// scene and moment added, or being walked.
+	/// `since` ago. `walked` holds each scene and moment added, or being
+	/// walked.
 	fn walk(
 		&mut self,
 		collection: &'a Collection,
 		items: &'a [Item],
 		since: Duration,
 		walked: &mut HashMap<(&'a str, Option<Duration>), Option<usize>>,
-	) -> bool {
-		let mut program = false;
-		for item in items.iter().filter(|item| item.visible) {
+	) {
+		/// A run of items being walked, with the scene and moment they draw
+		/// unless they are the root's.
+		struct Walk<'a> {
+			nest: Option<(&'a str, Option<Duration>)>,
+			items: &'a [Item],
+			next: usize,
+			/// Whether any item walked shows the program.
+			program: bool,
+		}
+
+		// A stack of its own rather than the call stack, which a long enough
+		// chain of scenes would overflow.
+		let mut stack = vec![Walk {
+			nest: None,
+			items,
+			next: 0,
+			program: false,
+		}];
+		while let Some(walk) = stack.last_mut() {
+			let items = walk.items;
+			let Some(item) = items.get(walk.next) else {
+				let Some(Walk {
+					nest: Some((scene, moment)),
+					program,
+					..
+				}) = stack.pop()
+				else {
+					break;
+				};
+				self.order.push(Nest {
+					scene,
+					since,
+					moment,
+					program,
+				});
+				let index = self.order.len() - 1;
+				walked.insert((scene, moment), Some(index));
+				self.drawn.insert((scene, since), index);
+				stack.last_mut().expect("a nest is walked from items").program |= program;
+				continue;
+			};
+			walk.next += 1;
+			if !item.visible {
+				continue;
+			}
 			let scene = match collection.nested(&item.source) {
 				Some(Nested::Scene(scene)) => scene,
 				Some(Nested::Program) => {
-					program = true;
+					walk.program = true;
 					continue;
 				}
 				None => continue,
 			};
 			if let Some(&index) = self.drawn.get(&(scene, since)) {
-				program |= self.order[index].program;
+				walk.program |= self.order[index].program;
 				continue;
 			}
 			let moment = moment(collection, scene, since);
-			let index = match walked.get(&(scene, moment)) {
-				Some(Some(index)) => *index,
+			match walked.get(&(scene, moment)) {
+				Some(Some(index)) => {
+					let index = *index;
+					self.drawn.insert((scene, since), index);
+					walk.program |= self.order[index].program;
+				}
 				// A scene drawing itself, which validation refuses: it shows
-				// nothing there rather than recursing forever.
-				Some(None) => continue,
+				// nothing there rather than walking forever.
+				Some(None) => {}
 				None => {
 					walked.insert((scene, moment), None);
 					let items = collection.scene(scene).map_or(&[][..], |scene| scene.items.as_slice());
-					let shows = self.walk(collection, items, since, walked);
-					self.order.push(Nest {
-						scene,
-						since,
-						moment,
-						program: shows,
+					stack.push(Walk {
+						nest: Some((scene, moment)),
+						items,
+						next: 0,
+						program: false,
 					});
-					let index = self.order.len() - 1;
-					walked.insert((scene, moment), Some(index));
-					index
 				}
-			};
-			self.drawn.insert((scene, since), index);
-			program |= self.order[index].program;
+			}
 		}
-		program
 	}
 }
 
@@ -1298,20 +1338,29 @@ impl Draw<'_> {
 					let (old, new) = (&*leaving[at], &*entering[index]);
 					let own = Pose::of(collection, new);
 					let pose = Pose::of(collection, old).toward(&own, progress);
+					// A nested scene's picture cannot be mixed between the
+					// moments the two scenes are at, so it changes as the
+					// stacking does.
+					let since = match collection.nested(&new.source) {
+						Some(Nested::Scene(_)) if progress < 0.5 => from.1,
+						_ => to.1,
+					};
 					if old.filters == new.filters && old.blend == new.blend {
-						if pose == own {
+						// The preview never draws the incoming scene's item
+						// with the outgoing scene's picture.
+						if pose == own && since == to.1 {
 							// Shared with the preview when it draws the same.
-							let key = (place.clone(), index, self.settled(&resting[index], to.1));
-							self.item(target, key, new, to.1);
+							let key = (place.clone(), index, self.settled(&resting[index], since));
+							self.item(target, key, new, since);
 						} else {
-							self.posed(target, new, pose, to.1);
+							self.posed(target, new, pose, since);
 						}
 					} else if let Some(filters) = mixed(old, new, progress) {
 						let item = Item { filters, ..new.clone() };
-						self.posed(target, &item, pose, to.1);
+						self.posed(target, &item, pose, since);
 					} else {
 						// A look that cannot be mixed changes as the stacking does.
-						let (item, since) = if progress < 0.5 { (old, from.1) } else { (new, to.1) };
+						let item = if progress < 0.5 { old } else { new };
 						self.posed(target, item, pose, since);
 					}
 				}
@@ -3360,6 +3409,14 @@ mod tests {
 					visible: false,
 					..Item::new("red scene", fill)
 				},
+				// Again, over the top-left quarter.
+				Item::new(
+					"red scene",
+					Rect {
+						y: 0.0,
+						..CORNER
+					},
+				),
 			]);
 			// Blue over the top-right quarter alone, transparent elsewhere.
 			collection.scenes.push(Scene {
@@ -3379,6 +3436,7 @@ mod tests {
 			assert_eq!(pixel(&program, 0, 7), RED, "the red scene's red");
 			assert_eq!(pixel(&program, 3, 4), BLUE, "the red scene's corner");
 			assert_eq!(pixel(&program, 6, 6), BLUE, "under it");
+			assert_eq!(pixel(&program, 0, 0), RED, "shown twice");
 			assert_eq!(studio.compositor.nested.get("red").map(Vec::len), Some(1));
 
 			studio.compositor.set_preview(Some("blue".into()));
@@ -3428,6 +3486,111 @@ mod tests {
 			assert!(err.to_string().contains("draws the program"), "{err}");
 			assert_eq!(studio.compositor.program_scene(), Some("blue"));
 			assert!(studio.compositor.transitioning(), "the fade carries on");
+		})
+		.await;
+	}
+
+	/// A scene source showing a scene that shows the program, even through
+	/// another, is drawn after the program, on the same frame.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_scene_showing_the_program_is_drawn_after_it() {
+		local(async {
+			let fill = Rect::fill(&collection().canvas);
+			let mut collection = nesting(Vec::new());
+			collection.scenes[2].items = vec![Item::new("outer scene", fill)];
+			for (name, shows) in [("inner", "on air"), ("outer", "inner scene")] {
+				collection.scenes.push(Scene {
+					items: vec![Item::new(shows, fill)],
+					..Scene::new(name)
+				});
+				let source = Source::Scene { scene: name.into() };
+				collection.sources.insert(format!("{name} scene"), source);
+			}
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.compositor.set_preview(Some("scene".into()));
+			studio.render(Instant::now());
+			assert_eq!(pixel(&studio.preview(), 1, 1), BLUE);
+		})
+		.await;
+	}
+
+	/// An item showing a scene source in both scenes of a move shows the
+	/// nested scene at the moment the scene it leaves is at until halfway,
+	/// then at the moment the scene it lands on is at, as the stacking
+	/// changes.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_move_shows_a_nested_scene_as_the_scene_it_leaves_until_halfway() {
+		local(async {
+			let fill = Rect::fill(&collection().canvas);
+			let mut collection = nesting(vec![Item::new("blue scene", fill)]);
+			collection.scenes[1].items[0].keyframes = slide_in();
+			collection.scenes.push(Scene {
+				items: vec![Item::new("blue scene", fill)],
+				..Scene::new("again")
+			});
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			let at = |millis| start + Duration::from_millis(millis);
+
+			studio.compositor.set_preview(Some("scene".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(at(0));
+			studio.render(at(2000));
+			assert_eq!(pixel(&studio.program(), 7, 1), BLUE, "all the way in");
+
+			studio.compositor.set_preview(Some("again".into()));
+			let duration = Duration::from_secs(1);
+			studio
+				.compositor
+				.transition(
+					&studio.collection,
+					Transition::Move { duration },
+					&studio.sources,
+					at(2000),
+				)
+				.unwrap();
+			studio.render(at(2250));
+			assert_eq!(pixel(&studio.program(), 7, 1), BLUE, "as it was");
+			studio.render(at(2750));
+			let program = studio.program();
+			assert_eq!(
+				(pixel(&program, 5, 1), pixel(&program, 6, 1)),
+				(BLUE, BLACK),
+				"sliding in again"
+			);
+		})
+		.await;
+	}
+
+	/// A non-normal blend over a backdrop that is partly transparent, in a
+	/// nested scene, mixes with the backdrop as much as the backdrop covers,
+	/// as CSS does.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_blend_mode_over_a_partly_transparent_backdrop_mixes_partly() {
+		local(async {
+			let fill = Rect::fill(&collection().canvas);
+			let mut collection = nesting(vec![Item::new("blue scene", fill)]);
+			let half = Item {
+				filters: vec![Filter::Opacity { amount: 0.5 }],
+				..Item::new("red", fill)
+			};
+			collection.scenes[1].items[0].blend = Blend::Multiply;
+			collection.scenes[1].items.insert(0, half);
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("scene".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			// Half blue, half blue multiplied by red, which is black.
+			let actual = pixel(&studio.program(), 1, 1);
+			assert!(near(actual, [0, 0, 128, 255]), "{actual:?}");
 		})
 		.await;
 	}

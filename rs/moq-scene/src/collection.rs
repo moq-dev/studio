@@ -255,41 +255,43 @@ impl Collection {
 	/// Refuse a scene that draws itself, directly or through other scenes,
 	/// shown or hidden, since it would never finish drawing.
 	fn validate_nesting(&self) -> Result<(), Error> {
-		/// Walk what `scene` draws, refusing a scene already on `path`, the
-		/// scenes drawing it. `done` holds the scenes walked whole.
-		fn visit<'a>(
-			collection: &'a Collection,
-			scene: &'a Scene,
-			done: &mut BTreeSet<&'a str>,
-			path: &mut Vec<&'a str>,
-		) -> Result<(), Error> {
-			if done.contains(scene.name.as_str()) {
-				return Ok(());
-			}
-			if let Some(at) = path.iter().position(|name| *name == scene.name) {
-				let through: Vec<String> = path[at + 1..].iter().map(|name| format!("`{name}`")).collect();
-				let mut err = format!("scene `{}` draws itself", scene.name);
-				if !through.is_empty() {
-					err = format!("{err} through {}", through.join(", "));
-				}
-				return Err(Error::Invalid(err));
-			}
-			path.push(&scene.name);
-			for item in &scene.items {
-				if let Some(Nested::Scene(nested)) = collection.nested(&item.source)
-					&& let Some(nested) = collection.scene(nested)
-				{
-					visit(collection, nested, done, path)?;
-				}
-			}
-			path.pop();
-			done.insert(&scene.name);
-			Ok(())
-		}
-
+		// Walked with a stack of its own rather than the call stack, which a
+		// long enough chain of scenes would overflow.
 		let mut done = BTreeSet::new();
-		for scene in &self.scenes {
-			visit(self, scene, &mut done, &mut Vec::new())?;
+		for root in &self.scenes {
+			if done.contains(root.name.as_str()) {
+				continue;
+			}
+			// The scenes drawing the one walked, each with how many of its
+			// items are walked.
+			let mut path = vec![(root, 0)];
+			while let Some((scene, walked)) = path.last_mut() {
+				let scene: &Scene = *scene;
+				let Some(item) = scene.items.get(*walked) else {
+					done.insert(scene.name.as_str());
+					path.pop();
+					continue;
+				};
+				*walked += 1;
+				let Some(Nested::Scene(nested)) = self.nested(&item.source) else {
+					continue;
+				};
+				let Some(nested) = self.scene(nested).filter(|nested| !done.contains(nested.name.as_str())) else {
+					continue;
+				};
+				if let Some(at) = path.iter().position(|(on, _)| on.name == nested.name) {
+					let through: Vec<String> = path[at + 1..]
+						.iter()
+						.map(|(on, _)| format!("`{}`", on.name))
+						.collect();
+					let mut err = format!("scene `{}` draws itself", nested.name);
+					if !through.is_empty() {
+						err = format!("{err} through {}", through.join(", "));
+					}
+					return Err(Error::Invalid(err));
+				}
+				path.push((nested, 0));
+			}
 		}
 
 		for item in &self.top {
