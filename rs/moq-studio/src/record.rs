@@ -1389,7 +1389,7 @@ mod tests {
 					.write(moq_mux::container::Frame {
 						timestamp: moq_net::Timestamp::try_from(self.played).unwrap(),
 						payload: payload.clone(),
-						keyframe: count % 5 == 0,
+						keyframe: count.is_multiple_of(5),
 						duration: None,
 					})
 					.unwrap();
