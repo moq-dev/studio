@@ -425,9 +425,8 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   relay. Put its public half in the directory `moq auth serve --key-dir` reads.
 - `--join-page` is where the join page (`js/join`, `bun run --cwd js/join
   build`) is hosted. Browsers open the camera only on an `https://` page or
-  `localhost`, so the studio refuses any other. It defaults to `https://join.studio.moq.dev/`, which this
-  repository deploys from `main`, but that domain is not live yet, so for now
-  host the page yourself and pass its URL.
+  `localhost`, so the studio refuses any other. It defaults to
+  `https://join.studio.moq.dev/`, which this repository deploys from `main`.
 - `--guest-expiry` (default `4h`, at least `1m`) is how long a link works,
   and each token the studio renews it with. While a guest is in the room, the
   studio signs them a fresh token every half of it, over a session of its own
