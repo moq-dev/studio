@@ -1459,8 +1459,9 @@ pub enum Source {
 	/// A graphic written as HTML and CSS without scripts, such as a title or
 	/// lower third. Its CSS animations run on the program clock, so they land
 	/// on the same frame in the program and everything made from it. It loads
-	/// nothing, and HTML or CSS outside what overlays draw fails the source,
-	/// naming it.
+	/// only images and fonts from `data:` URLs and files under the scene
+	/// file's directory, and HTML, CSS, or an asset outside what overlays draw
+	/// fails the source, naming it.
 	Overlay {
 		/// The document, its CSS in `<style>` elements and `style` attributes.
 		html: String,
