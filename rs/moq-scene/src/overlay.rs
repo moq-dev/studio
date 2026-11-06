@@ -758,12 +758,18 @@ fn document(html: &str, width: u32, height: u32, base: &Url, assets: Option<Arc<
 	blitz_html::HtmlDocument::from_html(html, config).into_inner()
 }
 
-/// Lay `content` out at `width` by `height`, at the start of its timeline.
-fn open(content: Content, width: u32, height: u32) -> (BaseDocument, Arc<Assets>) {
-	let assets = Arc::new(Assets {
-		content,
-		missing: Mutex::default(),
-	});
+impl Assets {
+	fn new(content: Content) -> Arc<Self> {
+		Arc::new(Self {
+			content,
+			missing: Mutex::default(),
+		})
+	}
+}
+
+/// Lay out the overlay `assets` serves at `width` by `height`, at the start of
+/// its timeline.
+fn open(assets: &Arc<Assets>, width: u32, height: u32) -> BaseDocument {
 	let Content { html, base, .. } = &assets.content;
 	let mut document = document(html, width, height, base, Some(assets.clone()));
 	// Stylo starts an animation at the time of the resolve that creates it, so
@@ -773,7 +779,7 @@ fn open(content: Content, width: u32, height: u32) -> (BaseDocument, Arc<Assets>
 	// `<img>` ones by this resolve, and background images, which it fetches,
 	// by the next.
 	document.resolve(0.0);
-	(document, assets)
+	document
 }
 
 /// Noto Sans, regular, bold, and italic, as every generic family and any
@@ -831,7 +837,7 @@ pub(crate) struct Overlays {
 enum Request {
 	Open {
 		id: u64,
-		content: Content,
+		assets: Arc<Assets>,
 		/// Where Vello paints, straight.
 		paint: wgpu::TextureView,
 		/// Where the paint lands premultiplied, for the compositor to sample.
@@ -895,7 +901,7 @@ impl Overlays {
 		// A thread that stopped fails the next paint, which says so.
 		let _ = self.requests.send(Request::Open {
 			id,
-			content,
+			assets: Assets::new(content),
 			paint: paint.create_view(&Default::default()),
 			view: texture.create_view(&Default::default()),
 			start,
@@ -967,13 +973,13 @@ fn run(
 		match request {
 			Request::Open {
 				id,
-				content,
+				assets,
 				paint,
 				view,
 				start,
 			} => {
 				let size = view.texture().size();
-				let (document, assets) = open(content, size.width, size.height);
+				let document = open(&assets, size.width, size.height);
 				let document = Document {
 					document,
 					assets,
@@ -1322,7 +1328,8 @@ mod tests {
 		let content = check(&html, dir.path()).unwrap();
 		assert_eq!(content.assets.len(), 3);
 
-		let (mut document, assets) = open(content, 400, 100);
+		let assets = Assets::new(content);
+		let mut document = open(&assets, 400, 100);
 		document.resolve(0.0);
 		assert_eq!(*assets.missing.lock().unwrap(), None);
 
@@ -1445,7 +1452,7 @@ mod tests {
 			Path::new("."),
 		)
 		.unwrap();
-		let (document, _) = open(content, 400, 100);
+		let document = open(&Assets::new(content), 400, 100);
 		let [regular, bold] = widths(&document, "span")[..] else {
 			panic!("two spans");
 		};
