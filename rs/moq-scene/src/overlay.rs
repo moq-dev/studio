@@ -1451,7 +1451,11 @@ mod tests {
 				panic!("two spans");
 			};
 			assert!(brand > regular * 1.05, "regular {regular}, brand {brand}");
-			assert_eq!(backgrounds(&document), [true, false], "the first background is in place");
+			assert_eq!(
+				backgrounds(&document),
+				[true, false],
+				"the first background is in place"
+			);
 
 			// One resolve, as a paint after the animation ends makes, draws
 			// the background it brings in.
