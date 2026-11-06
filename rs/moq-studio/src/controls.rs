@@ -56,7 +56,7 @@ pub struct Controls {
 	/// Whether the next recording gives each source a file of its own too.
 	pub record_sources: AtomicBool,
 	/// How the last action a hotkey fired went, until the status bar takes it.
-	fired: Mutex<Option<Result<String, String>>>,
+	fired: Arc<Mutex<Option<Result<String, String>>>>,
 }
 
 /// The Replay panel's choices, and how the last replay or clip went.
@@ -89,7 +89,7 @@ impl Controls {
 			runtime,
 			replay: Mutex::default(),
 			record_sources: AtomicBool::new(false),
-			fired: Mutex::default(),
+			fired: Arc::default(),
 		}
 	}
 
@@ -108,8 +108,8 @@ impl Controls {
 				Ok(format!("took {}", on_program(state.compositor.program_scene())))
 			}
 			Action::Scene(name) => preview(&mut self.engine.state.lock().unwrap(), name),
-			Action::Replay => self.replay(true),
-			Action::SaveClip => self.replay(false),
+			Action::Replay => self.replay(true, false),
+			Action::SaveClip => self.replay(false, false),
 			Action::Record => {
 				let recorder = &self.engine.recorder;
 				match recorder.status().filter(|status| !status.done) {
@@ -127,21 +127,42 @@ impl Controls {
 		}
 	}
 
+	/// Do `action` for a hotkey, keeping how it went for the status bar.
+	pub fn press(&self, action: &Action) {
+		match action {
+			Action::Replay => drop(self.replay(true, true)),
+			Action::SaveClip => drop(self.replay(false, true)),
+			action => self.report(action, self.fire(action).map_err(|err| format!("{err:#}"))),
+		}
+	}
+
 	/// Play the Replay panel's pick in its replay source, or save it as a
 	/// clip. Copied now, without waiting on anything, so the span ends here and
-	/// replays apply in the order they were asked for.
-	fn replay(&self, play: bool) -> anyhow::Result<String> {
+	/// replays apply in the order they were asked for. How it went shows in
+	/// the Replay panel, and in the status bar too when a hotkey `pressed` it,
+	/// since the panel may be hidden.
+	fn replay(&self, play: bool, pressed: bool) -> anyhow::Result<String> {
 		let replay = self.replay.lock().unwrap();
+		let action = if play { Action::Replay } else { Action::SaveClip };
 		let taken = self.take(&replay, play);
-		let message = taken.as_ref().map(|(message, _)| message.clone());
-		*replay.outcome.lock().unwrap() = Some(message.map_err(|err| format!("{err:#}")));
+		let message = taken
+			.as_ref()
+			.map(|(message, _)| message.clone())
+			.map_err(|err| format!("{err:#}"));
+		*replay.outcome.lock().unwrap() = Some(message.clone());
+		if pressed {
+			self.report(&action, message);
+		}
 		let (message, save) = taken?;
-		// Started once the message above is written, so how it went replaces it.
+		// Started once the messages above are shown, so how it went replaces them.
 		if let Some(save) = save {
-			let outcome = replay.outcome.clone();
+			let (outcome, fired) = (replay.outcome.clone(), self.fired.clone());
 			self.runtime.spawn(async move {
-				let result = save.await;
-				*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
+				let result = save.await.map_err(|err| format!("{err:#}"));
+				*outcome.lock().unwrap() = Some(result.clone());
+				if pressed {
+					*fired.lock().unwrap() = Some(result.map_err(|err| format!("{action}: {err}")));
+				}
 			});
 		}
 		Ok(message)
@@ -191,9 +212,8 @@ impl Controls {
 	}
 
 	/// Keep how `action`, fired by a hotkey, went for the status bar.
-	pub fn report(&self, action: &Action, result: anyhow::Result<String>) {
-		let result = result.map_err(|err| format!("{action}: {err:#}"));
-		*self.fired.lock().unwrap() = Some(result);
+	pub fn report(&self, action: &Action, result: Result<String, String>) {
+		*self.fired.lock().unwrap() = Some(result.map_err(|err| format!("{action}: {err}")));
 	}
 
 	/// How the last action a hotkey fired went, once.

@@ -878,10 +878,11 @@ a WebGL page runs slower.
 
 The Hotkeys panel binds a key to **Cut**, **Transition**, **Replay**, **Save
 clip**, starting or stopping a recording, and putting each scene in preview.
-Press **Bind**, then the key with any modifiers; Escape cancels. Every action
-starts unbound, so no key a game uses is taken unasked, and a key bound to one
-action is refused for another until it is cleared there. Replay and Save clip
-use the Replay panel's picks, and a recording the Output panel's.
+Press **Bind**, then the key with any modifiers; Escape, or leaving the window
+or the panel, cancels. Every action starts unbound, so no key a game uses is
+taken unasked, and a key bound to one action is refused for another until it is
+cleared there. Replay and Save clip use the Replay panel's picks, and a
+recording the Output panel's.
 
 The key pressed is the key that fires, on any keyboard layout: the panel names
 it as the layout prints it, and the system hears the key where it sits, through
@@ -900,7 +901,7 @@ with, such as a function key or one with modifiers:
   or Option and Shift.
 - **Linux on X11** grabs them from the X server. Once a layout change moves
   a key the studio holds, its keys stay as they are until it restarts, and the
-  panel says so beside each.
+  panel says so.
 - **Linux on Wayland**, where no app hears keys meant for another, asks the
   desktop through its GlobalShortcuts portal (KDE Plasma, and GNOME 48 and
   later). The desktop shows its own dialog, may bind other keys than those

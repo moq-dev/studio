@@ -116,6 +116,7 @@ impl Studio {
 				controls,
 				hotkeys: None,
 				binding: None,
+				hotkeys_shown: false,
 				refusal: None,
 				preview,
 				program,
@@ -323,6 +324,8 @@ struct Panels {
 	hotkeys: Option<Hotkeys>,
 	/// The action the Hotkeys panel waits on a key for.
 	binding: Option<Action>,
+	/// Whether the Hotkeys panel was drawn since the last frame took this.
+	hotkeys_shown: bool,
 	/// The last key the Hotkeys panel would not bind, by the action it was
 	/// pressed for, and why.
 	refusal: Option<(Action, String)>,
@@ -2784,9 +2787,17 @@ impl Panels {
 	/// Bind the key pressed to the action the Hotkeys panel waits on, or cancel
 	/// on Escape.
 	fn take_binding(&mut self, ctx: &egui::Context) {
+		let shown = std::mem::take(&mut self.hotkeys_shown);
 		let (Some(action), Some(hotkeys)) = (self.binding.clone(), &mut self.hotkeys) else {
 			return;
 		};
+		// A wait the operator left, for another app or another panel, ends,
+		// so the hotkeys are not held off while they play.
+		if !shown || !ctx.input(|input| input.focused) {
+			self.binding = None;
+			hotkeys.suspend(false);
+			return;
+		}
 		let pressed = ctx.input_mut(|input| {
 			let pressed = input.events.iter().find_map(|event| match event {
 				egui::Event::Key {
@@ -2833,6 +2844,7 @@ impl Panels {
 		let Some(hotkeys) = &mut self.hotkeys else {
 			return;
 		};
+		self.hotkeys_shown = true;
 		let reach = hotkeys.reach();
 		match &reach {
 			Reach::Global => ui.label("Bound keys work even while another app, such as a game, has focus."),
@@ -2846,6 +2858,12 @@ impl Panels {
 				format!("Bound keys work only while the studio has focus: {why}"),
 			),
 		};
+		if let Some(why) = hotkeys.stuck() {
+			ui.colored_label(
+				ui.visuals().error_fg_color,
+				format!("The bound keys stay as they are until the studio restarts: {why}"),
+			);
+		}
 		let scenes: Vec<String> = {
 			let state = self.engine.state.lock().unwrap();
 			state

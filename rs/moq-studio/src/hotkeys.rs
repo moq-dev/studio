@@ -54,6 +54,8 @@ pub struct Hotkeys {
 	heard: Vec<Binding>,
 	/// Why the platform refused each key it would not register.
 	refused: Vec<(Binding, String)>,
+	/// Why the keys the platform holds cannot change, if they cannot.
+	stuck: Option<String>,
 	/// Whether bindings are held off while the Hotkeys panel waits for a key,
 	/// which the thread firing them reads too.
 	suspended: Arc<AtomicBool>,
@@ -135,14 +137,17 @@ impl Hotkeys {
 				let Some(action) = action else {
 					continue;
 				};
-				let result = match &action {
-					Action::Scene(name) => controls::preview(&mut state, name),
+				match &action {
+					Action::Scene(name) => {
+						let result = controls::preview(&mut state, name);
+						drop(state);
+						controls.report(&action, result.map_err(|err| format!("{err:#}")));
+					}
 					action => {
 						drop(state);
-						controls.fire(action)
+						controls.press(action);
 					}
-				};
-				controls.report(&action, result);
+				}
 			}
 		});
 		let backend = Backend::new(window, runtime, fire.clone());
@@ -151,6 +156,7 @@ impl Hotkeys {
 			backend,
 			heard: Vec::new(),
 			refused: Vec::new(),
+			stuck: None,
 			suspended,
 			fire,
 		};
@@ -229,14 +235,11 @@ impl Hotkeys {
 					Ok(layout) => held
 						.iter()
 						.any(|(key, hotkey)| !layout.releases(key.position, hotkey.key))
-						.then(|| {
-							"the keyboard layout changed since the studio took its keys; restart it to change them"
-								.into()
-						}),
+						.then(|| "the keyboard layout changed since it took them".into()),
 					Err(err) => (!held.is_empty()).then(|| err.clone()),
 				};
-				if let Some(why) = stuck {
-					self.refused = bindings.values().map(|key| (*key, why.clone())).collect();
+				self.stuck = stuck;
+				if self.stuck.is_some() {
 					return;
 				}
 				self.refused.clear();
@@ -290,6 +293,12 @@ impl Hotkeys {
 			.iter()
 			.find(|(refused, _)| refused.same(key))
 			.map(|(_, why)| why.as_str())
+	}
+
+	/// Why the keys the platform holds stay as they are, keys cleared since
+	/// included, until the studio restarts.
+	pub fn stuck(&self) -> Option<&str> {
+		self.stuck.as_deref()
 	}
 
 	pub fn reach(&self) -> Reach {
