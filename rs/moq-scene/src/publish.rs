@@ -795,7 +795,7 @@ mod tests {
 	/// threads the runtime cannot see, such as a decoder's or an encoder's,
 	/// finishing within any span of the clock.
 	async fn pictures(feed: &crate::source::Feed, first: kio::clock::Instant, count: u32) {
-		let shown = || matches!(feed.take(), Some(crate::source::Picture::Frame(_))).then_some(());
+		let shown = || matches!(feed.next_picture(), Some(crate::source::Picture::Frame(_))).then_some(());
 		for index in 0..count {
 			until_time(first + std::time::Duration::from_millis(100) * index).await;
 			until(shown).await;
