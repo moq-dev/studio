@@ -565,6 +565,8 @@ enum Request {
 		start: Instant,
 	},
 	Close(u64),
+	/// Start an overlay's CSS timeline over at this time on the program clock.
+	Restart(u64, Instant),
 	/// Paint these overlays as of this time on the program clock.
 	Paint(Instant, Vec<u64>),
 	/// Stop the thread the way a panic in Blitz would.
@@ -629,6 +631,7 @@ impl Overlays {
 		Overlay {
 			id,
 			texture,
+			start,
 			requests: self.requests.clone(),
 		}
 	}
@@ -658,6 +661,8 @@ impl Overlays {
 pub(crate) struct Overlay {
 	id: u64,
 	texture: wgpu::Texture,
+	/// Where its CSS timeline starts on the program clock.
+	start: Instant,
 	requests: mpsc::Sender<Request>,
 }
 
@@ -670,6 +675,19 @@ impl Overlay {
 	/// The texture each paint lands in, premultiplied.
 	pub fn texture(&self) -> &wgpu::Texture {
 		&self.texture
+	}
+
+	/// Where its CSS timeline starts on the program clock.
+	pub fn start(&self) -> Instant {
+		self.start
+	}
+
+	/// Start its CSS timeline over at `start` on the program clock, laid out
+	/// afresh, so the next paint shows it as of then.
+	pub fn restart(&mut self, start: Instant) {
+		self.start = start;
+		// A thread that stopped fails the next paint, which says so.
+		let _ = self.requests.send(Request::Restart(self.id, start));
 	}
 }
 
@@ -699,13 +717,9 @@ fn run(
 				start,
 			} => {
 				let size = view.texture().size();
-				let mut document = document(&html, size.width, size.height);
-				// Stylo starts an animation at the time of the resolve that
-				// creates it, so this one starts every animation at the start of
-				// the timeline, however late the overlay is first drawn.
-				document.resolve(0.0);
 				let document = Document {
-					document,
+					document: laid_out(&html, size.width, size.height),
+					html,
 					paint,
 					view,
 					premultiply: None,
@@ -716,6 +730,14 @@ fn run(
 			}
 			Request::Close(id) => {
 				documents.remove(&id);
+			}
+			Request::Restart(id, start) => {
+				if let Some(document) = documents.get_mut(&id) {
+					let size = document.view.texture().size();
+					document.document = laid_out(&document.html, size.width, size.height);
+					document.start = start;
+					document.painted = false;
+				}
 			}
 			#[cfg(test)]
 			Request::Panic => panic!("a test stopped the overlay thread"),
@@ -738,6 +760,17 @@ fn run(
 			}
 		}
 	}
+}
+
+/// `html` laid out at `width` by `height`, its animations at the start of its
+/// CSS timeline.
+fn laid_out(html: &str, width: u32, height: u32) -> BaseDocument {
+	let mut document = document(html, width, height);
+	// Stylo starts an animation at the time of the resolve that creates it, so
+	// this one starts every animation at the start of the timeline, however
+	// late the overlay is first drawn.
+	document.resolve(0.0);
+	document
 }
 
 /// Vello's compute pipelines on the compositor's device, and the pass that
@@ -856,6 +889,8 @@ impl Painter {
 /// An overlay's document on the overlay thread, and where it paints.
 struct Document {
 	document: BaseDocument,
+	/// What it was laid out from, to lay out again on a restart.
+	html: String,
 	/// Where Vello paints, straight.
 	paint: wgpu::TextureView,
 	/// Where the paint lands premultiplied.
