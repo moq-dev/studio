@@ -237,7 +237,9 @@ impl eframe::App for Studio {
 		if let Some(fired) = self.panels.controls.fired() {
 			self.panels.message = Some(fired);
 		}
-		if let Some(hotkeys) = &self.panels.hotkeys {
+		if let Some(hotkeys) = &self.panels.hotkeys
+			&& !self.panels.interact.has_keyboard()
+		{
 			hotkeys.focused(ui.ctx());
 		}
 		// Before the shortcuts, so the key pressed binds rather than undoes.
@@ -2467,14 +2469,13 @@ impl Panels {
 				}
 			}
 			None => {
+				let mut each = self.controls.record_sources.load(Ordering::Relaxed);
 				if ui.button("Start recording").clicked() {
-					let result = self.controls.fire(&Action::Record).map(drop);
+					let result = recorder.start(each);
 					self.check(result);
 				}
-				let sources = &self.controls.record_sources;
-				let mut each = sources.load(Ordering::Relaxed);
 				if ui.checkbox(&mut each, "each source too").changed() {
-					sources.store(each, Ordering::Relaxed);
+					self.controls.record_sources.store(each, Ordering::Relaxed);
 				}
 				ui.weak(format!("into {}", recorder.dir().display()));
 			}

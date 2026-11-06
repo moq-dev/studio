@@ -36,7 +36,10 @@ enum Backend {
 	/// `RegisterHotKey` on Windows, and a key grab on X11.
 	Native {
 		manager: GlobalHotKeyManager,
-		/// The action each registered hotkey fires, by its id.
+		/// The hotkeys registered now.
+		held: Vec<HotKey>,
+		/// The action each registered hotkey fires, by its id, which the
+		/// platform's event handler reads.
 		registered: Arc<Mutex<HashMap<u32, Action>>>,
 	},
 	/// The desktop's GlobalShortcuts portal, on Wayland.
@@ -147,15 +150,19 @@ impl Hotkeys {
 			false => &bindings,
 		};
 		match &mut self.backend {
-			Backend::Native { manager, registered } => {
-				let mut registered = registered.lock().unwrap();
-				for (id, action) in registered.drain() {
-					if let Some(hotkey) = self.bindings.get(&action).and_then(hotkey)
-						&& let Err(err) = manager.unregister(hotkey)
-					{
-						tracing::warn!(%id, error = %err, "cannot unregister a hotkey");
+			Backend::Native {
+				manager,
+				held,
+				registered,
+			} => {
+				// `registered` is not locked while the manager works: on X11 it
+				// waits on the thread that runs the event handler, which locks it.
+				for hotkey in held.drain(..) {
+					if let Err(err) = manager.unregister(hotkey) {
+						tracing::warn!(%hotkey, error = %err, "cannot unregister a hotkey");
 					}
 				}
+				let mut ids = HashMap::new();
 				for (action, key) in heard {
 					let Some(hotkey) = hotkey(key) else {
 						let reason = "this key cannot be heard outside the studio".to_string();
@@ -163,10 +170,14 @@ impl Hotkeys {
 						continue;
 					};
 					match manager.register(hotkey) {
-						Ok(()) => drop(registered.insert(hotkey.id(), action.clone())),
+						Ok(()) => {
+							held.push(hotkey);
+							ids.insert(hotkey.id(), action.clone());
+						}
 						Err(err) => drop(self.refused.insert(action.clone(), refusal(err))),
 					}
 				}
+				*registered.lock().unwrap() = ids;
 			}
 			// Held off, the desktop would be asked to bind them all again
 			// after each key the panel takes.
@@ -193,7 +204,7 @@ impl Hotkeys {
 
 	/// Fire the actions bound to keys pressed in the studio's window, where
 	/// nothing hears them outside it. A text field being typed in keeps its
-	/// keys.
+	/// keys, as the caller makes a page the preview passes the keyboard to.
 	pub fn focused(&self, ctx: &egui::Context) {
 		if self.suspended || ctx.text_edit_focused() || !matches!(self.reach(), Reach::Focused(_)) {
 			return;
@@ -231,16 +242,19 @@ impl Backend {
 		};
 		let registered: Arc<Mutex<HashMap<u32, Action>>> = Arc::default();
 		let heard = registered.clone();
-		let fire = Mutex::new(fire);
 		GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
 			if event.state() != HotKeyState::Pressed {
 				return;
 			}
 			if let Some(action) = heard.lock().unwrap().get(&event.id()) {
-				let _ = fire.lock().unwrap().send(action.clone());
+				let _ = fire.send(action.clone());
 			}
 		}));
-		Self::Native { manager, registered }
+		Self::Native {
+			manager,
+			held: Vec::new(),
+			registered,
+		}
 	}
 }
 

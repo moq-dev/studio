@@ -812,7 +812,8 @@ action is refused for another until it is cleared there. Replay and Save clip
 use the Replay panel's picks, and a recording the Output panel's.
 
 Bound keys fire even while another app, such as a game in full screen, has
-focus, and the app does not see them:
+focus, and the app does not see them, so bind keys you do not type or play
+with, such as a function key or one with modifiers:
 
 - **macOS** and **Windows** register them with the system, which needs no
   permission. A key another app already registered is refused, saying so. On
