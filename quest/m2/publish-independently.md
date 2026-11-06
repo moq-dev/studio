@@ -25,6 +25,11 @@ source among those on program (`Publish::set_on_program` in
 Moved to m2 on 2026-11-05 (maintainer, /quest-plan): no service places
 sources itself yet, so it waits behind m0 and m1.
 
+A source with its background removed (`background = "remove"`) keeps the
+background in its track, since H.264 carries no transparency. Publishing one
+independently needs its cut-out in the track, such as moq-video encoding
+alpha, or the option refused for it.
+
 Low priority: this is for services that move webcams and overlays themselves,
 and none exists yet. The option lives on the source, in the scene file, so it
 travels with the scene. The option and its effect on the program change what a

@@ -101,7 +101,7 @@ Every panel is a tab you can drag, split, or stack.
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
-| Filters | Crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
+| Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
 | Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
 | Output | Start and stop recording, pick the mix it records, set the canvas size and frame rate, add, resize, and remove further canvases, and see the broadcast path, whether the program is encoding, the encoder sessions open, and each canvas's renditions' encoder work. |
@@ -543,6 +543,7 @@ kind = "lut"
 path = "teal-orange.cube"
 
 [video.camera]
+background = "remove" # cut the person out, leaving the rest transparent
 crop = { left = 0.1, right = 0.1 } # trim 10% of the picture off each side
 filters = [
     { kind = "chroma_key", color = "#00ff00", similarity = 0.4, smoothness = 0.08, spill = 0.1 },
@@ -598,8 +599,16 @@ without `[mixes]`, the collection has one mix, `Program`.
 `[audio.<source>]` sets a source's linear `gain`, `muted`, the mixes it is
 left out of (`exclude`), and its `delay`.
 
-`[video.<source>]` sets a source's `crop` and `filters`, wherever it is shown,
-and an item's `crop`, `filters`, and `blend` its own. A `crop` trims a fraction
+`[video.<source>]` sets a source's `background`, `crop`, and `filters`,
+wherever it is shown, and an item's `crop`, `filters`, and `blend` its own.
+`background = "remove"` cuts the person out of a camera, display, window,
+image, media, broadcast, browser, or replay source's picture before its crop
+and filters, leaving the rest transparent. A segmentation model finds them in
+each picture on the CPU, so each picture shows only once its cut-out is
+ready, a frame or more late, and a model that falls behind skips pictures
+rather than queue them. It is MediaPipe's selfie segmentation model, made for
+one or two people near the camera. A clone shows its source's cut-out, so it
+cannot remove a background of its own. A `crop` trims a fraction
 (0 to 1) of the picture off its `left`, `top`, `right`, and `bottom`, opposite
 sides together trimming less than the whole, and stretches the rest over the
 item; an item's crop trims what its source's
@@ -717,7 +726,9 @@ changes size or color space moves to a new track, which its catalog entry
 follows. Images and colors keep their picture once, as the image file and as a
 one-pixel PNG. Removing or editing a source ends its track. A track carries the
 plain capture, before any filter, and a clone has none, since it shows its
-source's capture. A browser source or an overlay has no track of its own, and a
+source's capture. A removed background stays in the track, since H.264 carries
+no transparency, so a replay of the source shows it unless the replay source
+removes it too. A browser source or an overlay has no track of its own, and a
 broadcast source is already its publisher's.
 
 A microphone, system audio, or media file's sound encodes its track as Opus,
