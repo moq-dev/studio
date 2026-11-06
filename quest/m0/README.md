@@ -111,9 +111,10 @@ repository.
 - [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice and browser composition
 - [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
 - [moq-video's program readback is pinned](/quest/m0/pin-readback.md) - the readback the Linux virtual camera uses
+- [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
 
 ## Related
 
-- [OBS native codecs](https://github.com/moq-dev/moq/blob/main/quest/m2/obs-moq-video/README.md) - the OBS plugin stays the path for creators who stay on OBS
-- [Linux capture](https://github.com/moq-dev/moq/blob/main/quest/m2/capture-linux.md) - Wayland window, system audio, and app capture the studio's sources inherit
-- [Windows capture](https://github.com/moq-dev/moq/blob/main/quest/m2/capture-windows.md) - app capture and system audio the studio's sources inherit
+- [OBS native codecs](https://github.com/moq-dev/moq/blob/main/quest/m3/obs-moq-video/README.md) - the OBS plugin stays the path for creators who stay on OBS
+- [Linux capture](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-linux.md) - Wayland window, system audio, and app capture the studio's sources inherit
+- [Windows capture](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-windows.md) - app capture and system audio the studio's sources inherit
