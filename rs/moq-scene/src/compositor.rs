@@ -150,10 +150,12 @@ struct Layer {
 	source: Source,
 	/// Converts video frames, created on the first one.
 	renderer: Option<Renderer>,
-	/// The newest picture as the source delivered it, and whether it is newer
-	/// than what `picture` shows or `matte` started on.
+	/// The newest picture as the source delivered it, whether it is newer
+	/// than what `picture` shows or `matte` started on, and whether it is
+	/// wholly transparent, such as a media source cleared between plays.
 	raw: Option<wgpu::Texture>,
 	fresh: bool,
+	blank: bool,
 	/// Cuts the person out of each picture, while the source's background is
 	/// removed, or why it cannot. A failure stays until the background is kept
 	/// or the source edited, since retrying the model would fail the same way.
@@ -201,6 +203,18 @@ impl Layer {
 			self.matte = Some(Matte::new(device, queue).map_err(|err| err.to_string()));
 		} else if let Some(Err(err)) = &self.matte {
 			self.error = Some(err.clone());
+			return;
+		}
+		// Nobody is in a clear picture, and it shows at once, so a cut-out of
+		// what came before, such as a media source's last play, never shows
+		// after it.
+		if self.fresh
+			&& self.blank
+			&& let Some(Ok(matte)) = &mut self.matte
+		{
+			matte.discard();
+			self.fresh = false;
+			self.picture = self.raw.as_ref().map(|raw| effects.picture(raw));
 			return;
 		}
 		let failed = match self.matte.as_mut().expect("set above") {
@@ -565,6 +579,7 @@ impl Compositor {
 					renderer: None,
 					raw: None,
 					fresh: false,
+					blank: false,
 					matte: None,
 					picture: None,
 					lut: None,
@@ -593,6 +608,7 @@ impl Compositor {
 		// transparent texel's color: a page arrives so, moq-video renders
 		// a frame opaque, a still is premultiplied here, and an overlay's
 		// paint as it lands.
+		let mut blank = false;
 		let texture = match picture {
 			source::Picture::Frame(frame) => {
 				let renderer = match layer.renderer.as_mut() {
@@ -605,6 +621,7 @@ impl Compositor {
 					.map_err(Error::from)
 			}
 			source::Picture::Rgba { size, mut pixels } => {
+				blank = pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0);
 				premultiply(&mut pixels);
 				upload(&self.device, &self.queue, size, &pixels)
 			}
@@ -638,6 +655,7 @@ impl Compositor {
 				layer.error = None;
 				layer.raw = Some(texture);
 				layer.fresh = true;
+				layer.blank = blank;
 			}
 			Err(err) => {
 				if layer.error.is_none() {
@@ -2399,6 +2417,50 @@ mod tests {
 			cut(&mut studio);
 		})
 		.await;
+	}
+
+	/// A clear picture, such as a media source stopped or played again,
+	/// shows at once, and the cut-out of the picture before it never does.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_clear_picture_overtakes_a_cut_out() {
+		let (device, queue) = gpu().await;
+		let effects = Effects::new(&device, &queue, 256, 144);
+		let person = image::load_from_memory(include_bytes!("test_data/person.jpg"))
+			.unwrap()
+			.to_rgba8();
+		let mut layer = Layer {
+			source: Source::Replay,
+			renderer: None,
+			raw: Some(upload(&device, &queue, moq_video::Size::new(256, 144), &person).unwrap()),
+			fresh: true,
+			blank: false,
+			matte: None,
+			picture: None,
+			lut: None,
+			overlay: None,
+			error: None,
+		};
+		layer.develop("replay", Background::Remove, &device, &queue, &effects);
+		assert!(layer.picture.is_none(), "until the cut-out");
+
+		layer.raw = Some(upload(&device, &queue, moq_video::Size::new(1, 1), &[0; 4]).unwrap());
+		layer.fresh = true;
+		layer.blank = true;
+		layer.develop("replay", Background::Remove, &device, &queue, &effects);
+		assert_eq!(layer.picture.as_ref().map(Picture::size), Some((1, 1)));
+
+		let Some(Ok(matte)) = &mut layer.matte else {
+			panic!("not removing the background")
+		};
+		matte.wait();
+		layer.develop("replay", Background::Remove, &device, &queue, &effects);
+		assert_eq!(layer.picture.as_ref().map(Picture::size), Some((1, 1)));
+		let Some(Ok(matte)) = &layer.matte else {
+			panic!("not removing the background")
+		};
+		assert!(!matte.busy());
+		assert!(layer.error.is_none());
 	}
 
 	/// The program of `collection` with scene "red" cut to it, its files in `dir`.

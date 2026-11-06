@@ -86,6 +86,9 @@ pub(crate) struct Matte {
 	results: mpsc::Receiver<Result<Vec<u8>, String>>,
 	/// Whether the thread has a picture, which also has `readback` mapped.
 	busy: bool,
+	/// Whether the picture the thread has was overtaken, so its cut-out is
+	/// thrown away.
+	stale: bool,
 	/// The thread's result, once a test has waited for it.
 	#[cfg(test)]
 	ready: Option<Result<Vec<u8>, String>>,
@@ -232,6 +235,7 @@ impl Matte {
 			jobs,
 			results,
 			busy: false,
+			stale: false,
 			#[cfg(test)]
 			ready: None,
 		})
@@ -275,22 +279,29 @@ impl Matte {
 		self.busy = true;
 	}
 
+	/// Throw away the cut-out of the picture in hand, such as when the source
+	/// clears its picture, so it never shows after what overtook it.
+	pub fn discard(&mut self) {
+		self.stale = self.busy;
+	}
+
 	/// The cut-out of the picture last started, once the thread has its
-	/// matte; `None` while it works on it or when nothing is started.
+	/// matte; `None` while it works on it, when nothing is started, or when it
+	/// was discarded.
 	pub fn finish(&mut self) -> Option<Result<&wgpu::Texture, Error>> {
 		if !self.busy {
 			return None;
 		}
 		#[cfg(test)]
 		if let Some(result) = self.ready.take() {
-			return Some(self.cut(result));
+			return self.cut(result);
 		}
 		let result = match self.results.try_recv() {
 			Ok(result) => result,
 			Err(mpsc::TryRecvError::Empty) => return None,
 			Err(mpsc::TryRecvError::Disconnected) => Err("the background removal thread stopped".into()),
 		};
-		Some(self.cut(result))
+		self.cut(result)
 	}
 
 	/// Block until the thread is done with the picture last started, for
@@ -305,8 +316,15 @@ impl Matte {
 		self.ready = Some(result);
 	}
 
-	fn cut(&mut self, alpha: Result<Vec<u8>, String>) -> Result<&wgpu::Texture, Error> {
+	fn cut(&mut self, alpha: Result<Vec<u8>, String>) -> Option<Result<&wgpu::Texture, Error>> {
 		self.busy = false;
+		if std::mem::take(&mut self.stale) {
+			return None;
+		}
+		Some(self.paint(alpha))
+	}
+
+	fn paint(&mut self, alpha: Result<Vec<u8>, String>) -> Result<&wgpu::Texture, Error> {
 		let alpha = alpha.map_err(Error::Matte)?;
 		self.queue.write_texture(
 			self.mask.as_image_copy(),
