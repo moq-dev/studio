@@ -222,14 +222,25 @@ impl Hotkeys {
 		}
 		ctx.input_mut(|input| {
 			input.events.retain(|event| {
-				let bound = pressed(event).and_then(|pressed| self.bindings.iter().find(|(_, key)| pressed == **key));
-				match bound {
-					Some((action, _)) => {
-						let _ = self.fire.send(action.clone());
-						false
-					}
-					None => true,
+				let egui::Event::Key {
+					key,
+					physical_key,
+					pressed: true,
+					repeat,
+					modifiers,
+				} = event
+				else {
+					return true;
+				};
+				let pressed = KeyboardShortcut::new(*modifiers, physical_key.unwrap_or(*key));
+				let Some((action, _)) = self.bindings.iter().find(|(_, key)| pressed == **key) else {
+					return true;
+				};
+				// A held key fires once, and its repeats are taken too.
+				if !repeat {
+					let _ = self.fire.send(action.clone());
 				}
+				false
 			});
 		});
 	}
@@ -272,18 +283,25 @@ impl Backend {
 	}
 }
 
-/// `bindings` with each scene `renames` renamed bound by its new name.
+/// `bindings` with each scene `renames` renamed bound by its new name. A
+/// renamed scene's key wins over one kept for a removed scene of that name.
 fn renamed(bindings: &Bindings, renames: &BTreeMap<String, Option<String>>) -> Bindings {
-	bindings
-		.iter()
-		.map(|(action, key)| match action {
-			Action::Scene(name) => match renames.get(name) {
-				Some(Some(to)) => (Action::Scene(to.clone()), *key),
-				_ => (action.clone(), *key),
-			},
-			action => (action.clone(), *key),
-		})
-		.collect()
+	let mut renamed = Bindings::new();
+	let mut kept = Vec::new();
+	for (action, key) in bindings {
+		let to = match action {
+			Action::Scene(name) => renames.get(name).cloned().flatten(),
+			_ => None,
+		};
+		match to {
+			Some(to) => drop(renamed.insert(Action::Scene(to), *key)),
+			None => kept.push((action.clone(), *key)),
+		}
+	}
+	for (action, key) in kept {
+		renamed.entry(action).or_insert(key);
+	}
+	renamed
 }
 
 /// What the platform said when it refused a key.
@@ -443,5 +461,10 @@ mod tests {
 		assert_eq!(swapped[&Action::Cut], key(Key::F3));
 		let removed = BTreeMap::from([("A".to_string(), None)]);
 		assert_eq!(renamed(&bindings, &removed), bindings);
+		// B removed, then A renamed to B: A's key follows it over B's kept one.
+		let onto = BTreeMap::from([("A".to_string(), Some("B".to_string()))]);
+		let moved = renamed(&bindings, &onto);
+		assert_eq!(moved[&scene("B")], key(Key::F1));
+		assert!(!moved.contains_key(&scene("A")));
 	}
 }
