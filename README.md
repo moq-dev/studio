@@ -106,7 +106,7 @@ Every panel is a tab you can drag, split, or stack.
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
 | Audio | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. |
-| Output | Start and stop recording, pick the picture and the audio scene it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera on. |
+| Output | Start and stop recording, pick the picture and the audio scene it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
 | Health | See how the stream reaches viewers, relay by relay and, for the program and each published scene, track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 | Hotkeys | Bind keys to cut, transition, preview a scene, replay, save a clip, and start or stop recording, and clear them (see [Hotkeys](#hotkeys)). |
@@ -1070,19 +1070,26 @@ Each catalog asks viewers to report beneath its broadcast, under
 
 The **Virtual camera** toggle in the Output panel shows the program as a
 camera that video-call and conferencing apps can pick, at the canvas size and
-frame rate. It stays on until you turn it off or quit; it is not saved in the
-scene file. The program is copied for the camera only while an app reads it.
-Changing the canvas size or frame rate reopens the camera at the new one, so
-an app reading it opens it again. The Devices panel leaves the camera out
-while it is on, so it cannot be added as a source of the program it shows.
+frame rate. Each published scene has a toggle of its own beneath it in the
+panel, showing that scene at its own size as a camera of its own, so an app
+can pick the program or any published scene. A camera stays on until you
+turn it off or quit; it is not saved in the scene file. A scene's camera
+turns off when you stop publishing or rename the scene. A picture is copied
+for a camera only while an app reads it, and a scene's camera has the scene
+drawn only then. Changing the size or frame rate of what a camera
+shows reopens it at the new one, so an app reading it opens it again. The
+Devices panel leaves the studio's cameras out while they are on, so one
+cannot be added as a source of the picture it shows.
 
-- **Linux:** a PipeWire camera named "MoQ Studio" (needs the `pipewire`
-  feature), which browsers and other PipeWire-aware apps list beside your
-  other cameras. Without PipeWire, the studio writes to the first
+- **Linux:** a PipeWire camera named "MoQ Studio" for the program, and
+  "MoQ Studio: <scene>" for a scene (needs the `pipewire` feature), which
+  browsers and other PipeWire-aware apps list beside your other cameras.
+  Without PipeWire, each camera writes to the first
   [v4l2loopback](https://github.com/v4l2loopback/v4l2loopback) device that
-  takes the canvas size, for apps that open `/dev/video*` directly. The
-  studio never loads that module, since it needs root:
-  `sudo modprobe v4l2loopback exclusive_caps=1 card_label="MoQ Studio"`.
+  takes its size and that no other camera of the studio holds, for apps that
+  open `/dev/video*` directly. The studio never loads that module, since it
+  needs root. Load a device for each camera you turn on, such as two:
+  `sudo modprobe v4l2loopback devices=2 exclusive_caps=1,1 card_label="MoQ Studio","MoQ Studio 2"`.
 - **macOS and Windows:** not available yet.
 
 ## Development
