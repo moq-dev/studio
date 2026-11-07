@@ -147,6 +147,10 @@
                 runHook preInstall
                 mkdir $out
                 cp -r Release/. Resources/. CMakeLists.txt cmake include libcef_dll $out/
+                # cef-dll-sys copies every file here beside the binaries, where
+                # this loader would load first, in the studio too, and it knows
+                # no NixOS driver. Without it both find the shell's loader.
+                rm $out/libvulkan.so.1
                 # What cef-dll-sys checks the version against.
                 echo '{"type":"minimal","name":"${archive.name}.tar.bz2","sha1":"${archive.sha1}"}' > $out/archive.json
                 runHook postInstall
