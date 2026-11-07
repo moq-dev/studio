@@ -223,6 +223,9 @@ pub struct Local {
 	/// Sources a live broadcast shows or plays that ended or failed, and
 	/// where.
 	pub stopped: Vec<(String, Status, Reach)>,
+	/// Browser sources a live broadcast shows whose pages are uploaded from
+	/// memory, why, and where they are shown.
+	pub uploaded: Vec<(String, Arc<str>, Live)>,
 }
 
 impl Local {
@@ -995,6 +998,16 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 			Status::Failed(reason) => add(Verdict::Unhealthy, format!("Source `{name}` failed: {reason}.")),
 			_ => {}
 		}
+	}
+	for (name, why, live) in &local.uploaded {
+		let (subject, many) = live.subject();
+		let show = if many { "show" } else { "shows" };
+		add(
+			Verdict::Degraded,
+			format!(
+				"Source `{name}`, which {subject} {show}, is uploaded from memory every frame rather than copied on the GPU: {why}."
+			),
+		);
 	}
 
 	for (name, drops) in &facts.drops {
@@ -1792,9 +1805,9 @@ mod tests {
 	}
 
 	/// Problems list worst first: an unreachable relay and a frozen or silent
-	/// source above a slow round trip. A frozen, silent, or ended source names
-	/// the broadcasts that show or play it, including a published scene that
-	/// alone plays it.
+	/// source above a slow round trip. A frozen, silent, ended, or uploaded
+	/// source names the broadcasts that show or play it, including a published
+	/// scene that alone plays it.
 	#[test]
 	fn problems_list_worst_first() {
 		let program = Live {
@@ -1830,6 +1843,7 @@ mod tests {
 					Reach::default(),
 				),
 			],
+			uploaded: vec![("chat".into(), "there is no display to paint through".into(), tall.clone())],
 			..Default::default()
 		};
 		let uplink = Uplink {
@@ -1852,6 +1866,7 @@ mod tests {
 				"Source `outro` played to its end, so the program, scene `tall` and scene `wide` hold its last picture and play no sound for it.",
 				"Source `clip` played to its end, so the program holds its last picture and scene `tall` plays no sound for it.",
 				"Source `bed` played to its end, so scene `tall` plays no sound for it.",
+				"Source `chat`, which scene `tall` shows, is uploaded from memory every frame rather than copied on the GPU: there is no display to paint through.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
 		);

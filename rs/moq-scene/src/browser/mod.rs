@@ -12,7 +12,7 @@
 //! become one; CEF's own subprocesses start the same way. The helper paints
 //! into a shared GPU texture the studio copies on its device, or into memory
 //! the studio uploads when either side cannot share textures or there is no
-//! display to paint them through ([`Paint`] says which). Its popups, such as a
+//! display to paint them through ([`Paint`] says which, and why). Its popups, such as a
 //! `<select>`'s list, arrive the same way apart from the page, and the studio
 //! draws them over it. A page's sound joins the program bus at the bus's rate.
 //!
@@ -90,6 +90,9 @@ pub struct Helper {
 	/// Where pages paint.
 	#[cfg(target_os = "linux")]
 	raster: protocol::Raster,
+	/// Why a page that paints into memory does.
+	#[cfg(target_os = "linux")]
+	fallback: Arc<str>,
 	/// The helper, once a page has started it.
 	#[cfg(target_os = "linux")]
 	running: Arc<Mutex<Option<Arc<run::Instance>>>>,
@@ -113,13 +116,20 @@ impl Helper {
 	) -> Self {
 		#[cfg(not(target_os = "linux"))]
 		let _ = adapter;
+		#[cfg(target_os = "linux")]
+		let (raster, fallback) = match gpu(adapter, device) {
+			Ok(raster) => (raster, "its GPU process cannot share textures".into()),
+			Err(why) => (protocol::Raster::Cpu, why.into()),
+		};
 		Self {
 			program: program.into(),
 			profile: profile.into(),
 			device: device.clone(),
 			queue: queue.clone(),
 			#[cfg(target_os = "linux")]
-			raster: raster(adapter, device),
+			raster,
+			#[cfg(target_os = "linux")]
+			fallback,
 			#[cfg(target_os = "linux")]
 			running: Default::default(),
 		}
@@ -155,31 +165,39 @@ impl Helper {
 	}
 }
 
-/// Where pages paint, decided once from what the studio's device and session
-/// offer.
+/// The GPU path pages paint on, decided once from what the studio's device
+/// and session offer, or why they cannot take it.
 #[cfg(target_os = "linux")]
-fn raster(adapter: &wgpu::Adapter, device: &wgpu::Device) -> protocol::Raster {
+fn gpu(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Result<protocol::Raster, String> {
 	use protocol::{Display, Raster};
 
+	if !cfg!(feature = "cef") {
+		return Err("this build cannot share textures".into());
+	}
 	let info = adapter.get_info();
 	// A software device holds a shared texture in memory anyway, so there the
 	// page paints in software too.
-	let shared = cfg!(feature = "cef")
-		&& info.device_type != wgpu::DeviceType::Cpu
-		&& device
-			.features()
-			.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF);
-	if !shared {
-		return Raster::Cpu;
+	if info.device_type == wgpu::DeviceType::Cpu {
+		return Err(format!("the studio's GPU, {}, renders in software", info.name));
+	}
+	if !device
+		.features()
+		.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
+	{
+		return Err(format!(
+			"the studio's GPU, {}, cannot import shared textures",
+			info.name
+		));
 	}
 	let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
 	let display = if set("WAYLAND_DISPLAY") {
 		Display::Wayland
 	} else if set("DISPLAY") {
+		x11_gpu(&info)?;
 		Display::X11
 	} else {
 		// CEF's GPU process cannot allocate shared textures without one.
-		return Raster::Cpu;
+		return Err("there is no display to paint through".into());
 	};
 	// A machine with two GPUs would otherwise paint on whichever CEF picks,
 	// and the studio cannot import from another GPU.
@@ -187,18 +205,71 @@ fn raster(adapter: &wgpu::Adapter, device: &wgpu::Device) -> protocol::Raster {
 		.then(|| std::fs::canonicalize(format!("/dev/dri/by-path/pci-{}-render", info.device_pci_bus_id)).ok())
 		.flatten()
 		.and_then(|node| node.into_os_string().into_string().ok());
-	Raster::Gpu { render_node, display }
+	Ok(Raster::Gpu { render_node, display })
+}
+
+/// Check that the X server in `$DISPLAY` runs on the studio's GPU, `info`.
+/// On X11, CEF allocates shared textures on the device the X server hands out
+/// over DRI3, whatever `--render-node-override` says, and another GPU's
+/// tiling comes out scrambled on the studio's.
+#[cfg(target_os = "linux")]
+fn x11_gpu(info: &wgpu::AdapterInfo) -> Result<(), String> {
+	use std::os::unix::fs::MetadataExt;
+
+	use x11rb::connection::{Connection, RequestConnection};
+	use x11rb::protocol::dri3::{self, ConnectionExt};
+
+	let (connection, screen) = x11rb::connect(None).map_err(|err| format!("cannot connect to the X display: {err}"))?;
+	let extension = connection
+		.extension_information(dri3::X11_EXTENSION_NAME)
+		.map_err(|err| format!("the X display: {err}"))?;
+	if extension.is_none() {
+		return Err("the X server offers no DRI3 device to share textures on".into());
+	}
+	let root = connection.setup().roots[screen].root;
+	let device = connection
+		.dri3_open(root, x11rb::NONE)
+		.map_err(|err| format!("the X display: {err}"))?
+		.reply()
+		.map_err(|err| format!("the X server's DRI3 device: {err}"))?
+		.device_fd;
+	let rdev = std::fs::File::from(device)
+		.metadata()
+		.map_err(|err| format!("the X server's DRI3 device: {err}"))?
+		.rdev();
+	let sys = format!(
+		"/sys/dev/char/{}:{}/device",
+		rustix::fs::major(rdev),
+		rustix::fs::minor(rdev)
+	);
+	let bus = std::fs::canonicalize(&sys)
+		.ok()
+		.and_then(|path| Some(path.file_name()?.to_str()?.to_owned()))
+		.ok_or_else(|| format!("cannot tell which GPU the X server runs on from {sys}"))?;
+	if info.device_pci_bus_id.is_empty() {
+		return Err(format!(
+			"cannot tell whether the studio's GPU, {}, is the one the X server runs on ({bus})",
+			info.name
+		));
+	}
+	if bus != info.device_pci_bus_id {
+		return Err(format!(
+			"the X server runs on another GPU ({bus}) than the studio's, {} ({}), and under X11 pages paint only on the X server's",
+			info.name, info.device_pci_bus_id
+		));
+	}
+	Ok(())
 }
 
 /// How a page's pictures reach the compositor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Paint {
 	/// A shared texture, copied on the GPU.
 	Gpu,
-	/// Pixels in memory, uploaded every frame: the fallback when the studio
-	/// runs with no display, or the page's GPU process or the studio's device
-	/// cannot share textures.
-	Cpu,
+	/// Pixels in memory, uploaded every frame, and why: the fallback when the
+	/// studio's device, the session, or the page's GPU process cannot share
+	/// textures.
+	Cpu(Arc<str>),
 }
 
 /// A running browser source: how it paints, and the way to interact with it.
@@ -268,9 +339,9 @@ impl Page {
 		Arc::ptr_eq(&self.state, &other.state)
 	}
 
-	/// How the newest picture arrived, once one has.
+	/// How the newest picture arrived, while the page shows one.
 	pub fn paint(&self) -> Option<Paint> {
-		self.state.lock().unwrap().paint
+		self.state.lock().unwrap().paint.clone()
 	}
 
 	/// Paint at `rate`, the canvas's frame rate, from now on, without waiting on

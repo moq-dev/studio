@@ -88,9 +88,12 @@ wuff = "0.2"
 # `accelerated_osr` copies the page's shared texture into the studio's device.
 cef = { version = "156.3", default-features = false, features = ["accelerated_osr"], optional = true }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
-rustix = { version = "1", features = ["net", "process", "stdio"] }
+rustix = { version = "1", features = ["fs", "net", "process", "stdio"] }
 # The helper's CEF profile, removed once the helper has exited.
 tempfile = { workspace = true }
+# Which GPU the X server runs on, which CEF paints on under X11. Pure Rust, and
+# 0.13 as the studio's hotkeys use.
+x11rb = { version = "0.13", features = ["dri3"] }
 
 [dev-dependencies]
 # An encoder on every machine, for the source track and replay tests.

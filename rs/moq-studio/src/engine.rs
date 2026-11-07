@@ -1181,7 +1181,7 @@ impl Engine {
 		// Stalled sound matters only if an audio scene viewers hear plays it:
 		// the one on program or one a published scene carries, not one only
 		// listened to. A source that stopped matters either way.
-		let (stalled, stopped) = {
+		let (stalled, stopped, uploaded) = {
 			let state = self.state.lock().unwrap();
 			let on_program = state.on_program();
 			let beside = state.beside();
@@ -1250,7 +1250,18 @@ impl Engine {
 					stopped.then(|| (name.to_string(), status, reach))
 				})
 				.collect();
-			(stalled, stopped)
+			let uploaded = state
+				.sources
+				.iter()
+				.filter_map(|(name, feed)| match feed.page()?.paint()? {
+					moq_scene::browser::Paint::Cpu(why) => {
+						let live = shown(name);
+						live.any().then(|| (name.to_string(), why, live))
+					}
+					moq_scene::browser::Paint::Gpu => None,
+				})
+				.collect();
+			(stalled, stopped, uploaded)
 		};
 		let video = |video: &VideoStats, failed: Option<String>| {
 			let full = &video.renditions[Role::Canvas as usize];
@@ -1277,6 +1288,7 @@ impl Engine {
 			grants: stats.grants(),
 			stalled,
 			stopped,
+			uploaded,
 		}
 	}
 
