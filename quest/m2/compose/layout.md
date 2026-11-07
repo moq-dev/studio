@@ -56,19 +56,16 @@ Decided 2026-11-05 (maintainer, /quest-plan): the layout serializes the
 scene model with scene sources, published scenes, and audio scenes, not the
 canvases and mixes they replaced.
 
-## Waiting
+Decided 2026-11-07 (maintainer, on
+[moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97)): this quest
+waits on [Published independently](/quest/m2/publish-independently.md), since
+until then no viewer can fetch a track the layout names, and the epic moved to
+m2 with it. Once that lands, replan this quest around the epic's reference
+picture, which decides what the layout carries. Rejected: replanning now
+around the program with the independently published sources layered over it,
+and building the full-scene layout as written above while no viewer can use
+it.
 
-- Maintainer: replan this quest before it is built. Since 2026-11-04 no
-  source's track reaches viewers unless [Published independently](/quest/m2/publish-independently.md)
-  (m2) ticks it, and a source so published is left out of the program, so no
-  host can composite the frame this Goal promises, and the browser, server, and
-  controls quests that read the layout have no track to fetch. The epic
-  README asks for this replan when the epic starts. Options: (1) move this
-  epic to m2 with Published independently as this quest's first Required,
-  and replan the layout once it lands (recommended: nothing in m1 can read a
-  layout, and the reference picture decides what it carries); (2) replan now
-  to the reference picture the epic README suggests, the program with the
-  independently published sources layered over it, so the layout places only
-  those sources over the program; (3) build it as written, a full scene whose
-  tracks no viewer can fetch until m2. Done when this file's Goal, Plan, and
-  Required reflect the pick.
+## Required
+
+- [Published independently](/quest/m2/publish-independently.md) - the source tracks a viewer can fetch, which the layout names

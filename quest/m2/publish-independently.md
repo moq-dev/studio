@@ -37,4 +37,4 @@ user does, so `README.md` documents them.
 
 ## Related
 
-- [Viewer-side composition](/quest/m1/compose/README.md) - the m1 epic that composes from independently published sources
+- [Viewer-side composition](/quest/m2/compose/README.md) - the epic that composes from independently published sources
