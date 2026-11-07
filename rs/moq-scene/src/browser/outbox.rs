@@ -73,6 +73,8 @@ struct Outbox {
 	painted: usize,
 	/// Open pages to close.
 	closes: Vec<Id>,
+	/// Whether the helper is to exit, after everything else.
+	quit: bool,
 	/// Whether the writer stopped, so nothing more is taken.
 	stopped: bool,
 }
@@ -142,6 +144,12 @@ impl Commands {
 		Ok(())
 	}
 
+	/// Have the helper close every page and exit, after what is queued, and
+	/// take nothing more.
+	pub(crate) fn quit(&self) {
+		self.push(|outbox| outbox.quit = true);
+	}
+
 	/// Stop taking commands, so [`next`](Self::next) returns `None`.
 	pub(crate) fn stop(&self) {
 		let (outbox, ready) = &*self.0;
@@ -175,6 +183,7 @@ impl Commands {
 			&& outbox.owed.is_empty()
 			&& outbox.painted == 0
 			&& outbox.closes.is_empty()
+			&& !outbox.quit
 	}
 
 	/// The commands waiting, without waiting for any.
@@ -185,7 +194,8 @@ impl Commands {
 }
 
 impl Outbox {
-	/// Everything waiting, each page's open ahead of anything else for it.
+	/// Everything waiting, each page's open ahead of anything else for it,
+	/// and the helper's exit last.
 	fn take(&mut self) -> Vec<Command> {
 		let mut batch = Vec::new();
 		for (id, open) in self.opens.drain(..) {
@@ -199,6 +209,10 @@ impl Outbox {
 		for id in self.closes.drain(..) {
 			self.open.remove(&id);
 			batch.push(Command::Close(id));
+		}
+		if self.quit {
+			batch.push(Command::Stop);
+			self.stopped = true;
 		}
 		batch
 	}

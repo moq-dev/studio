@@ -91,8 +91,6 @@ pub(crate) struct Instance {
 	routes: Arc<Mutex<Routes>>,
 	/// The next page's number.
 	next: AtomicU64,
-	/// The socket, shut down to stop the helper.
-	socket: Channel,
 	/// The thread delivering the helper's events, which ends once the helper
 	/// has exited.
 	reader: Mutex<Option<JoinHandle<()>>>,
@@ -207,8 +205,7 @@ impl Instance {
 
 		let (process, events) =
 			spawn(helper).map_err(|err| failed(&format!("cannot start {}", helper.program.display()), err))?;
-		let socket = events.try_clone().map_err(|err| failed("socket", err))?;
-		let commands = socket.try_clone().map_err(|err| failed("socket", err))?;
+		let commands = events.try_clone().map_err(|err| failed("socket", err))?;
 		commands
 			.send(&Command::Start(start), &[])
 			.map_err(|err| failed("the browser process's socket", err))?;
@@ -233,7 +230,6 @@ impl Instance {
 			commands,
 			routes,
 			next: AtomicU64::new(0),
-			socket,
 			reader: Mutex::new(Some(reader)),
 		})
 	}
@@ -282,7 +278,7 @@ impl Instance {
 
 	/// Ask the helper to exit, which it does once it has closed every page.
 	fn end(&self) {
-		let _ = rustix::net::shutdown(&self.socket, rustix::net::Shutdown::Write);
+		self.commands.quit();
 	}
 }
 
@@ -350,8 +346,9 @@ impl Drop for Process {
 /// Write the commands queued on the returned handle to `channel`, on a thread
 /// of its own, so a helper that stops reading blocks only that thread, never a
 /// sender holding the studio's state. The thread ends once the handle is
-/// stopped or a write fails, as one does when the helper exits, and ends the
-/// socket on its way out.
+/// stopped or quit, or a write fails, as one does when the helper exits.
+///
+/// It leaves the socket open: the helper reads its end as the studio dying.
 fn writer(channel: Channel) -> std::io::Result<Commands> {
 	let commands = Commands::default();
 	let outbox = commands.clone();
@@ -365,10 +362,7 @@ fn writer(channel: Channel) -> std::io::Result<Commands> {
 					}
 				}
 			}
-			// The helper exits once it reads the end, so one the studio can no
-			// longer reach never keeps running unheard.
 			outbox.stop();
-			let _ = rustix::net::shutdown(&channel, rustix::net::Shutdown::Write);
 		})?;
 	Ok(commands)
 }

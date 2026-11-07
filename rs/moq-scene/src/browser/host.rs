@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use cef::*;
-use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+use rustix::process::{
+	Resource, Rlimit, Signal, getpgrp, getpid, getrlimit, kill_current_process_group, setrlimit,
+};
 
 use super::outbox::Commands;
 use super::protocol::{Area, Channel, Command, Display, Event, Format, Id, Layer, Open, Plane, Raster, Start, Texture};
@@ -32,7 +34,7 @@ pub(super) fn subprocess() -> ExitCode {
 	ExitCode::from(code.clamp(0, 255) as u8)
 }
 
-/// Run the helper until the studio closes the socket or the page fails.
+/// Run the helper until the studio stops it or the page fails.
 pub(super) fn run() -> ExitCode {
 	match serve() {
 		Ok(()) => ExitCode::SUCCESS,
@@ -87,7 +89,7 @@ impl Paged {
 thread_local! {
 	/// The open pages, on CEF's UI thread, where input is delivered.
 	static PAGES: RefCell<HashMap<Id, (Browser, Arc<Paged>)>> = RefCell::new(HashMap::new());
-	/// Whether the studio is gone, so the helper quits once its last page
+	/// Whether the studio stopped the helper, so it quits once its last page
 	/// closes.
 	static QUITTING: Cell<bool> = const { Cell::new(false) };
 	/// The number of the last copy asked of a renderer.
@@ -131,8 +133,14 @@ fn serve() -> Result<(), String> {
 }
 
 /// Run CEF on the profile `start` names, opening and closing pages as the
-/// studio asks, until it closes the socket and the last page closes.
+/// studio asks, until it stops the helper and the last page closes.
 fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc::Sender<()>) -> Result<(), String> {
+	// The helper ends CEF's processes along with itself by killing the group
+	// it leads, which they join, and never the studio's.
+	if getpgrp() != getpid() {
+		return Err("the helper does not lead its own process group".into());
+	}
+
 	// A crashed process is reported only once it is gone, and one dumping
 	// core is not gone yet: systemd-coredump took 20 to 70 seconds over a
 	// renderer, which left its page Starting meanwhile. CEF's subprocesses
@@ -150,6 +158,21 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 		},
 	)
 	.map_err(|err| format!("cannot turn off core dumps: {err}"))?;
+
+	// Read before CEF starts, which can block for good, as on a display that
+	// never answers, so the studio's end is heard even then.
+	let inbox = Arc::new(Inbox {
+		pending: Commands::default(),
+		posted: AtomicBool::new(true),
+		up: AtomicBool::new(false),
+	});
+	{
+		let (shared, inbox) = (shared.clone(), inbox.clone());
+		std::thread::Builder::new()
+			.name("browser-commands".into())
+			.spawn(move || commands(shared, reader, painted_tx, inbox))
+			.map_err(|err| format!("cannot start the helper's command thread: {err}"))?;
+	}
 
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 	let args = args::Args::new();
@@ -186,17 +209,9 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 		});
 	}
 
-	let commands = {
-		let shared = shared.clone();
-		std::thread::Builder::new()
-			.name("browser-commands".into())
-			.spawn(move || commands(shared, reader, painted_tx))
-	};
-	if let Err(err) = commands {
-		shutdown();
-		return Err(format!("cannot start the helper's command thread: {err}"));
-	}
-
+	// Pages asked for meanwhile open now.
+	inbox.up.store(true, Ordering::Release);
+	inbox.post(shared);
 	run_message_loop();
 	PAGES.with_borrow_mut(HashMap::clear);
 	// Saves the profile, such as cookies not yet written.
@@ -204,44 +219,73 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 	Ok(())
 }
 
-/// Read the studio's commands until it closes the socket, then close every
+/// The studio's commands the UI thread has yet to apply.
+///
+/// They wait coalesced, as in the studio, with one task at a time posted to
+/// apply them, so a stalled UI thread holds what the pages open need rather
+/// than a task per command. Input past the backlog drops, as for a hung page.
+struct Inbox {
+	pending: Commands,
+	/// Whether a task applying `pending` is posted, or CEF is not up to run
+	/// one.
+	posted: AtomicBool,
+	/// Whether CEF is up.
+	up: AtomicBool,
+}
+
+impl Inbox {
+	/// Have the UI thread apply what is pending, unless a task already will.
+	fn schedule(self: &Arc<Self>, shared: &Arc<Shared>) {
+		if !self.posted.swap(true, Ordering::AcqRel) {
+			self.post(shared);
+		}
+	}
+
+	/// Post a task applying what is pending.
+	fn post(self: &Arc<Self>, shared: &Arc<Shared>) {
+		let (inbox, shared) = (self.clone(), shared.clone());
+		post(move || {
+			// Cleared first, so anything queued from here on posts again.
+			inbox.posted.store(false, Ordering::Release);
+			apply(&shared, inbox.pending.take());
+		});
+	}
+}
+
+/// Read the studio's commands until it stops the helper, then close every
 /// page, which ends the message loop.
 ///
-/// What the UI thread has yet to apply waits coalesced, as in the studio, with
-/// one task at a time posted to apply it, so a stalled UI thread holds what
-/// the pages open need rather than a task per command. Input past the
-/// backlog drops, as for a hung page.
-fn commands(shared: Arc<Shared>, reader: Channel, painted: mpsc::Sender<()>) {
-	let pending = Commands::default();
-	let posted = Arc::new(AtomicBool::new(false));
-	let schedule = || {
-		if !posted.swap(true, Ordering::AcqRel) {
-			let (shared, pending, posted) = (shared.clone(), pending.clone(), posted.clone());
-			post(move || {
-				// Cleared first, so anything queued from here on posts again.
-				posted.store(false, Ordering::Release);
-				apply(&shared, pending.take());
-			});
-		}
-	};
+/// The studio holds its end of the socket until the helper has exited, so
+/// the socket ends early only once the studio is gone, crashed or killed.
+/// Nobody is left then to show a page to or to wait for the profile, so the
+/// helper exits at once with every process CEF started, wherever CEF is.
+fn commands(shared: Arc<Shared>, reader: Channel, painted: mpsc::Sender<()>, inbox: Arc<Inbox>) {
 	loop {
-		match reader.recv::<Command>() {
-			Ok(Some((Command::Painted, _))) => {
+		match recv(&reader) {
+			Command::Painted => {
 				let _ = painted.send(());
 				continue;
 			}
-			Ok(Some((Command::Open(id, open), _))) => pending.open(id, open),
-			Ok(Some((Command::Close(id), _))) => pending.close(id),
-			Ok(Some((Command::Input(id, input), _))) => _ = pending.input(id, input),
-			Ok(Some((Command::FrameRate(id, rate), _))) => _ = pending.rate(id, rate),
-			Ok(Some((Command::Start(_), _))) | Ok(None) | Err(_) => break,
+			Command::Open(id, open) => inbox.pending.open(id, open),
+			Command::Close(id) => inbox.pending.close(id),
+			Command::Input(id, input) => _ = inbox.pending.input(id, input),
+			Command::FrameRate(id, rate) => _ = inbox.pending.rate(id, rate),
+			Command::Stop => break,
+			Command::Start(_) => {
+				eprintln!("browser source helper: a second Start");
+				exit_now();
+			}
 		}
-		schedule();
+		inbox.schedule(&shared);
 	}
-	// Unblocks a paint waiting on the studio.
+	// No page opens before CEF is up, so nothing waits to be saved.
+	if !inbox.up.load(Ordering::Acquire) {
+		exit_now();
+	}
+	// Unblocks a paint waiting on the studio, which answers no more.
 	drop(painted);
 	post(move || {
-		apply(&shared, pending.take());
+		apply(&shared, inbox.pending.take());
 		QUITTING.set(true);
 		let ids: Vec<Id> = PAGES.with_borrow(|pages| pages.keys().copied().collect());
 		if ids.is_empty() {
@@ -251,6 +295,29 @@ fn commands(shared: Arc<Shared>, reader: Channel, painted: mpsc::Sender<()>) {
 			close(id);
 		}
 	});
+	let command = recv(&reader);
+	eprintln!("browser source helper: {command:?} after Stop");
+	exit_now();
+}
+
+/// The studio's next command, or [`exit_now`] once the socket ends.
+fn recv(reader: &Channel) -> Command {
+	use std::io::ErrorKind::*;
+
+	match reader.recv::<Command>() {
+		Ok(Some((command, _))) => return command,
+		Ok(None) => {}
+		Err(err) if matches!(err.kind(), BrokenPipe | ConnectionReset | UnexpectedEof) => {}
+		Err(err) => eprintln!("browser source helper: the studio's socket: {err}"),
+	}
+	exit_now()
+}
+
+/// End the helper and every process CEF started, at once.
+fn exit_now() -> ! {
+	// The helper leads the group, so this ends it before returning.
+	let _ = kill_current_process_group(Signal::KILL);
+	std::process::abort()
 }
 
 /// Apply the studio's commands. Runs on the UI thread.
@@ -261,7 +328,7 @@ fn apply(shared: &Arc<Shared>, batch: Vec<Command>) {
 			Command::Close(id) => close(id),
 			Command::Input(id, input) => deliver(id, input),
 			Command::FrameRate(id, rate) => retime(id, rate),
-			Command::Start(_) | Command::Painted => unreachable!("never pending"),
+			Command::Start(_) | Command::Painted | Command::Stop => unreachable!("never pending"),
 		}
 	}
 }

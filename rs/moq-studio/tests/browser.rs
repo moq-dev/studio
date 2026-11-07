@@ -446,7 +446,7 @@ async fn a_crash_while_loading_drops_only_its_source() {
 		assert!(reason.contains("renderer"), "{reason}");
 
 		studio.until_center([255, 0, 0, 255], &["renderer"]).await;
-		let helper = helper().expect("the page's helper is running");
+		let helper = helper(std::process::id()).expect("the page's helper is running");
 		let killed = std::process::Command::new("kill")
 			.args(["-KILL", &helper.to_string()])
 			.status();
@@ -476,7 +476,7 @@ async fn a_crash_after_drawing_leaves_the_canvas() {
 		// Abort the page's renderer, and any spare one CEF keeps ready, which
 		// shows no page, as a failed assertion would: a crash that dumps core.
 		// (V8 takes a SIGSEGV that no fault raised and carries on.)
-		let helper = helper().expect("the page's helper is running");
+		let helper = helper(std::process::id()).expect("the page's helper is running");
 		let renderers = renderers(helper);
 		assert!(!renderers.is_empty(), "the page has a renderer");
 		for renderer in renderers {
@@ -571,13 +571,105 @@ async fn serve(html: &'static str) -> String {
 	url
 }
 
-/// The one helper this test process still runs: a child started with the
-/// helper's argument.
-fn helper() -> Option<u32> {
-	let ours = std::process::id();
+/// Where [`a_studio_that_dies`] keeps its pages' profile, which also tells it
+/// to run.
+const DYING: &str = "MOQ_STUDIO_TEST_DYING_PROFILE";
+
+/// A helper exits, with every process CEF started, once its studio dies
+/// without stopping it, as a crashed studio or a timed-out test does. That
+/// holds even while CEF is still starting, which can last for good, as on a
+/// display that never answers.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_helper_exits_with_its_studio() {
+	let profile = tempfile::tempdir().unwrap();
+	let _stall = stall(profile.path());
+	let mut studio = std::process::Command::new(std::env::current_exe().unwrap())
+		.args(["--exact", "a_studio_that_dies", "--ignored"])
+		.env(DYING, profile.path())
+		.stdout(std::process::Stdio::null())
+		.spawn()
+		.unwrap();
+	let helper = until_stalled(studio.id(), profile.path()).await;
+	studio.kill().unwrap();
+	studio.wait().unwrap();
+
+	// The helper leads a process group CEF's processes join.
+	let deadline = Instant::now() + TIMEOUT;
+	while processes().iter().any(|process| process.group == helper) {
+		assert!(Instant::now() < deadline, "the helper outlived its studio");
+		kio::clock::sleep(Duration::from_millis(30)).await;
+	}
+}
+
+/// Not a test alone: the studio [`a_helper_exits_with_its_studio`] starts and
+/// kills, which opens a page and waits.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run by a_helper_exits_with_its_studio"]
+async fn a_studio_that_dies() {
+	let Some(profile) = std::env::var_os(DYING) else {
+		return;
+	};
+	local(async {
+		let _studio = Studio::on(Path::new(&profile), &[("page", page("<body></body>"))]).await;
+		std::future::pending::<()>().await;
+	})
+	.await;
+}
+
+/// A studio stops a helper still starting CEF without waiting for it to
+/// finish starting, which can take forever.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_helper_stops_while_starting() {
+	local(async {
+		let profile = tempfile::tempdir().unwrap();
+		let _stall = stall(profile.path());
+		let studio = Studio::on(profile.path(), &[("page", page("<body></body>"))]).await;
+		until_stalled(std::process::id(), profile.path()).await;
+		drop(studio);
+	})
+	.await;
+}
+
+/// Leave CEF stuck starting on `profile` while the returned file is open: it
+/// reads the profile's `Local State` before `initialize` returns, and a FIFO
+/// with a writer and nothing written blocks that read.
+fn stall(profile: &Path) -> std::fs::File {
+	let state = profile.join("Local State");
+	let made = std::process::Command::new("mkfifo").arg(&state).status().unwrap();
+	assert!(made.success());
+	// Read and write, which Linux opens without waiting for a reader.
+	std::fs::OpenOptions::new()
+		.read(true)
+		.write(true)
+		.open(state)
+		.unwrap()
+}
+
+/// Wait until `studio`'s helper is stuck reading [`stall`]'s FIFO in
+/// `profile`, and return the helper.
+async fn until_stalled(studio: u32, profile: &Path) -> u32 {
+	let state = std::fs::canonicalize(profile).unwrap().join("Local State");
+	let deadline = Instant::now() + TIMEOUT;
+	loop {
+		if let Some(helper) = helper(studio) {
+			let fds = std::fs::read_dir(format!("/proc/{helper}/fd")).into_iter().flatten().flatten();
+			if fds.filter_map(|fd| std::fs::read_link(fd.path()).ok()).any(|path| path == state) {
+				return helper;
+			}
+		}
+		assert!(Instant::now() < deadline, "no helper reads {}", state.display());
+		kio::clock::sleep(Duration::from_millis(30)).await;
+	}
+}
+
+/// The one helper `studio` still runs: a child started with the helper's
+/// argument.
+fn helper(studio: u32) -> Option<u32> {
 	processes()
 		.into_iter()
-		.find(|process| process.parent == ours && process.args.iter().any(|arg| arg == b"--moq-browser-helper"))
+		.find(|process| process.parent == studio && process.args.iter().any(|arg| arg == b"--moq-browser-helper"))
 		.map(|process| process.pid)
 }
 
@@ -614,10 +706,11 @@ fn renderers(helper: u32) -> Vec<u32> {
 struct Process {
 	pid: u32,
 	parent: u32,
+	group: u32,
 	args: Vec<Vec<u8>>,
 }
 
-/// Every process running.
+/// Every process running, leaving out the dead ones waiting to be reaped.
 fn processes() -> Vec<Process> {
 	let Ok(entries) = std::fs::read_dir("/proc") else {
 		return Vec::new();
@@ -627,11 +720,21 @@ fn processes() -> Vec<Process> {
 		.filter_map(|entry| {
 			let pid = entry.file_name().to_str()?.parse().ok()?;
 			let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
-			// The parent is the second field after the parenthesized command.
-			let parent = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+			// The state, parent, and group follow the parenthesized command.
+			let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+			if fields.next()? == "Z" {
+				return None;
+			}
+			let parent = fields.next()?.parse().ok()?;
+			let group = fields.next()?.parse().ok()?;
 			let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
 			let args = cmdline.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect();
-			Some(Process { pid, parent, args })
+			Some(Process {
+				pid,
+				parent,
+				group,
+				args,
+			})
 		})
 		.collect()
 }

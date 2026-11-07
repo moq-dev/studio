@@ -45,6 +45,10 @@ pub(crate) enum Command {
 	Input(Id, Input),
 	/// The canvas's frame rate changed, so the page paints at this one.
 	FrameRate(Id, u32),
+	/// The last message: close every page, save the profile, and exit. The
+	/// studio holds the socket open until then, so the helper reads its end
+	/// as the studio dying and exits at once.
+	Stop,
 }
 
 /// How a helper runs every page it opens.
