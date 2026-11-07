@@ -40,15 +40,13 @@ pub async fn measure(
 ) -> anyhow::Result<Rate> {
 	let publish = moq_tokio::origin::spawn();
 	let publication = publish
-		.create_broadcast(path)
+		.route(path, moq_net::origin::RouteOptions::hidden())
 		.context("cannot create the probe broadcast")?;
 	let track = publication
 		.broadcast()
 		.create_track(TRACK, None)
 		.context("cannot create the probe track")?;
-	publication
-		.announce(moq_net::origin::Route::default())
-		.context("cannot announce the probe")?;
+	publication.announce().context("cannot announce the probe")?;
 
 	// One-shot, so a relay that refuses either side ends the probe with its reason
 	// instead of being redialed.
@@ -93,13 +91,17 @@ pub async fn measure(
 		Err(err) = fill(track, &reservation, ceiling) => Err(err),
 		result = measured => result,
 	};
-	publication.close();
+	publication.broadcast().close();
 	result
 }
 
 /// Wait for the probe through the relay, and subscribe to its track.
 async fn receive(origin: moq_net::origin::Consumer, path: &str) -> anyhow::Result<moq_net::track::Subscriber> {
-	let broadcast = origin.follow(path, None)?.available().await?;
+	let broadcast = origin
+		.follow(path, None)?
+		.available()
+		.await?
+		.expect("the first change is an instance");
 	let mut track = broadcast.track(TRACK)?.subscribe(None).await?;
 	// Wait for the first group, so the window measures data that flows.
 	track.recv_group().await?.context("the probe ended before it began")?;

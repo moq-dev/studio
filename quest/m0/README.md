@@ -108,7 +108,6 @@ repository.
 - [moq-audio's filter chain is pinned](/quest/m0/pin-audio-filters.md) - the chain audio filters configure
 - [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice and browser composition
 - [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
-- [moq-video's program readback is pinned](/quest/m0/pin-readback.md) - the readback the Linux virtual camera uses
 - [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
 
 ## Related
