@@ -3330,13 +3330,7 @@ mod tests {
 					None => panic!("the video ended"),
 				};
 				assert_eq!(frame.size(), size);
-				let rgba = frame.surface.to_rgba(&Default::default()).expect("rgba");
-				let center = ((size.height / 2 * size.width + size.width / 2) * 4) as usize;
-				let [r, g, b, _] = rgba.data()[center..center + 4] else {
-					unreachable!()
-				};
-				// H.264 and its 4:2:0 round trip shift a primary a little.
-				if r > 200 && g < 60 && b < 60 {
+				if shows(center(&frame), RED) {
 					return frame.timestamp;
 				}
 			}
@@ -3344,18 +3338,43 @@ mod tests {
 		.await
 	}
 
-	/// The broadcast of the published scene `tall` as `relay` routes it, its
-	/// catalogs, and the first that lists its video.
-	async fn routed_tall(
+	const RED: [u8; 3] = [255, 0, 0];
+	const GREEN: [u8; 3] = [0, 255, 0];
+
+	/// The color at the center of `frame`.
+	fn center(frame: &moq_video::Frame) -> [u8; 3] {
+		let size = frame.size();
+		let rgba = frame.surface.to_rgba(&Default::default()).expect("rgba");
+		let center = ((size.height / 2 * size.width + size.width / 2) * 4) as usize;
+		let [r, g, b, _] = rgba.data()[center..center + 4] else {
+			unreachable!()
+		};
+		[r, g, b]
+	}
+
+	/// Whether `color` is `primary`, whose channels are each full or empty,
+	/// as H.264 and its 4:2:0 round trip leave it: a little shifted.
+	fn shows(color: [u8; 3], primary: [u8; 3]) -> bool {
+		color
+			.iter()
+			.zip(primary)
+			.all(|(&channel, full)| channel.abs_diff(full) < 60)
+	}
+
+	/// The broadcast at `path` as `relay` routes it, its catalogs, and the
+	/// first that lists its video.
+	async fn routed(
 		relay: &moq_net::origin::Consumer,
+		path: &str,
 	) -> (
 		moq_net::broadcast::Consumer,
 		moq_mux::catalog::Consumer<()>,
 		hang::Catalog,
 	) {
-		// Until the scene's broadcast is announced, the program's route covers
-		// its path and cannot serve it; the follow moves on once it is.
-		let mut following = relay.follow("studio/tall", None).unwrap();
+		// Until a published scene's broadcast is announced, the program's
+		// route covers its path and cannot serve it; the follow moves on once
+		// it is.
+		let mut following = relay.follow(path, None).unwrap();
 		let (broadcast, mut catalogs) = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let broadcast = following.available().await.expect("broadcast").expect("an instance");
@@ -3366,7 +3385,7 @@ mod tests {
 			}
 		})
 		.await
-		.expect("the relay routes the canvas");
+		.expect("the relay routes the broadcast");
 		// Audio is listed from the start, and the video once its encoder opens.
 		let catalog = kio::clock::timeout(TIMEOUT, async {
 			loop {
@@ -3377,7 +3396,7 @@ mod tests {
 			}
 		})
 		.await
-		.expect("the canvas lists its video");
+		.expect("the broadcast lists its video");
 		(broadcast, catalogs, catalog)
 	}
 
@@ -3454,7 +3473,7 @@ mod tests {
 			.await
 			.expect("the studio starts");
 
-		let (broadcast, catalogs, catalog) = routed_tall(&relay).await;
+		let (broadcast, catalogs, catalog) = routed(&relay, "studio/tall").await;
 		let (audio, config) = catalog.audio.enabled().next().expect("its audio");
 		assert!(config.broadcast.is_none(), "its own, not the program's");
 		let mut options = moq_audio::decode::Options::new();
@@ -3547,7 +3566,7 @@ mod tests {
 
 		// Back again, quitting ends it as cleanly.
 		engine.state.lock().unwrap().undo().unwrap();
-		let (broadcast, catalogs, catalog) = routed_tall(&relay).await;
+		let (broadcast, catalogs, catalog) = routed(&relay, "studio/tall").await;
 		let (video, _) = canvas_size(&catalog);
 		let track = broadcast.track(&video).unwrap().subscribe(None).await.unwrap();
 		let stopping = engine.clone();
@@ -3560,6 +3579,283 @@ mod tests {
 			.await
 			.expect("the scene's broadcast ends");
 		assert_eq!(engine.stats.sessions.open(), 0);
+	}
+
+	/// What a viewer of one broadcast takes in, frame by frame as it arrives,
+	/// each stamped with its timestamp: the color at the center of each
+	/// picture, and the loudest channel of each sample.
+	struct Viewer {
+		pictures: tokio::sync::mpsc::UnboundedReceiver<(Duration, [u8; 3])>,
+		sound: tokio::sync::mpsc::UnboundedReceiver<(Duration, Vec<f32>)>,
+		/// Samples per second of the sound.
+		rate: u32,
+	}
+
+	impl Viewer {
+		/// Play `broadcast`'s video at `size` and its audio, as `catalog` lists
+		/// them. Each decodes on a task of its own, so neither falls behind and
+		/// skips media while the test reads the other.
+		async fn watch(
+			broadcast: &moq_net::broadcast::Consumer,
+			catalog: &hang::Catalog,
+			size: moq_video::Size,
+		) -> Self {
+			let (video, config) = catalog
+				.video
+				.renditions
+				.iter()
+				.find(|(_, config)| config.coded_width == Some(size.width) && config.coded_height == Some(size.height))
+				.expect("the video at its size");
+			let mut pictures = subscribe(broadcast, video, config).await;
+			let (seen, seeing) = tokio::sync::mpsc::unbounded_channel();
+			tokio::spawn(async move {
+				while let Some(read) = pictures.read().await.expect("decode") {
+					if let moq_video::decode::Read::Frame(frame) = read
+						&& seen.send((Duration::from(frame.timestamp), center(&frame))).is_err()
+					{
+						return;
+					}
+				}
+			});
+
+			let (audio, config) = catalog.audio.enabled().next().expect("its audio");
+			let rate = config.sample_rate;
+			let channels = config.channel_count as usize;
+			let mut options = moq_audio::decode::Options::new();
+			options.start = moq_audio::decode::Start::Latest;
+			let mut sound = moq_audio::decode::Consumer::new(broadcast, config, audio.clone(), options)
+				.await
+				.expect("audio decoder");
+			let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();
+			tokio::spawn(async move {
+				while let Some(read) = sound.read().await.expect("decode") {
+					let moq_audio::decode::Read::Frame(frame) = read else {
+						continue;
+					};
+					let samples: Vec<f32> = (frame.data.chunks_exact(4))
+						.map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()).abs())
+						.collect();
+					let loudest = samples
+						.chunks_exact(channels)
+						.map(|sample| sample.iter().copied().fold(0.0, f32::max));
+					if heard
+						.send((Duration::from(frame.timestamp), loudest.collect()))
+						.is_err()
+					{
+						return;
+					}
+				}
+			});
+
+			Self {
+				pictures: seeing,
+				sound: hearing,
+				rate,
+			}
+		}
+
+		/// When the viewer first sees `color` at the center.
+		async fn sees(&mut self, color: [u8; 3]) -> Duration {
+			kio::clock::timeout(TIMEOUT, async {
+				loop {
+					let (at, center) = self.pictures.recv().await.expect("the video ended");
+					if shows(center, color) {
+						return at;
+					}
+				}
+			})
+			.await
+			.expect("the viewer sees the color")
+		}
+
+		/// The first moment, from `from` on, the viewer hears a sample louder
+		/// than `level`, and the loudest it heard from `from` until then.
+		async fn hears(&mut self, from: Duration, level: f32) -> (Duration, f32) {
+			let rate = self.rate;
+			let mut before = 0.0f32;
+			kio::clock::timeout(TIMEOUT, async {
+				loop {
+					let (start, samples) = self.sound.recv().await.expect("the audio ended");
+					for (index, sample) in samples.into_iter().enumerate() {
+						let at = start + Duration::from_secs(index as u64) / rate;
+						if at < from {
+							continue;
+						}
+						if sample > level {
+							return (at, before);
+						}
+						before = before.max(sample);
+					}
+				}
+			})
+			.await
+			.expect("the viewer hears it")
+		}
+	}
+
+	/// Where `at` falls on `engine`'s program clock, which stamps every
+	/// picture and sample it publishes.
+	fn stamp(engine: &Engine, at: Instant) -> Duration {
+		let now = kio::clock::now();
+		let reading = Duration::from(engine.program.clock.capture(now).unwrap());
+		reading + at.saturating_duration_since(now) - now.saturating_duration_since(at)
+	}
+
+	/// One studio goes live with the program at its broadcast and, beneath
+	/// it, a portrait scene drawing the program, each carrying the audio
+	/// scene it picks. A cut reaches a viewer of each on the same frame, and
+	/// the tone that restarts with it at the same moment. The portrait's
+	/// audio scene nests the program's and adds a quiet bed, so only its
+	/// viewer hears anything before the cut.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
+	async fn the_program_and_a_portrait_cut_together() {
+		// The tone peaks near 0.1 (-20 dBFS): it is heard above half that,
+		// and the bed, at a fifth of it, above a tenth.
+		const LOUD: f32 = 0.05;
+		const QUIET: f32 = 0.01;
+		const BED: f32 = 0.2;
+
+		let _ = moq_tokio::crypto::install_default();
+		let fixture = moq_relay::test_relay().await.expect("test relay");
+		let ready = fixture.relay.ready();
+		let relay = fixture.relay.cluster().origin.consume();
+		tokio::spawn(fixture.relay.run());
+		ready.wait().await.expect("relay ready");
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
+		let client = client.init(Default::default()).expect("client");
+
+		let dir = tempfile::tempdir().unwrap();
+		let tone = include_bytes!("../../moq-scene/src/test_data/tone.webm");
+		std::fs::write(dir.path().join("tone.webm"), tone).unwrap();
+		let gpu = Gpu::new().await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let relays = vec![Relay {
+			client,
+			url: fixture.url.clone(),
+		}];
+
+		// Program starts on the red scene; the cut takes it to green, whose
+		// tone plays from its start as it goes on program.
+		let mut loaded = red_canvas();
+		let collection = &mut loaded.collection;
+		let tone = |looping, restart| moq_scene::Source::Media {
+			path: "tone.webm".into(),
+			looping,
+			restart,
+		};
+		let green = moq_scene::Source::Color {
+			color: moq_scene::Rgba([0, 255, 0, 255]),
+		};
+		collection.sources.insert("green".into(), green);
+		collection.sources.insert("tone".into(), tone(false, true));
+		collection.sources.insert("bed".into(), tone(true, false));
+		collection.sources.insert("program".into(), moq_scene::Source::Program);
+		let bed = moq_scene::Audio {
+			gain: BED,
+			..Default::default()
+		};
+		collection.audio.insert("bed".into(), bed);
+		let fill = moq_scene::Rect::fill(&collection.canvas);
+		collection.scenes.push(moq_scene::Scene {
+			items: vec![moq_scene::Item::new("green", fill), moq_scene::Item::new("tone", fill)],
+			..moq_scene::Scene::new("Cut")
+		});
+		let portrait = moq_scene::Size {
+			width: 360,
+			height: 640,
+		};
+		let tall = moq_scene::Rect {
+			x: 0.0,
+			y: 0.0,
+			width: 360.0,
+			height: 640.0,
+		};
+		collection.scenes.push(moq_scene::Scene {
+			size: Some(portrait),
+			published: true,
+			audio: Some("Portrait".into()),
+			items: vec![moq_scene::Item::new("program", tall)],
+			..moq_scene::Scene::new("tall")
+		});
+		collection.audio_scenes[0].sounds.insert("tone".into());
+		collection.audio_scenes.push(moq_scene::AudioScene {
+			scenes: [moq_scene::AudioScene::DEFAULT.to_string()].into(),
+			sounds: ["bed".to_string()].into(),
+			..moq_scene::AudioScene::new("Portrait")
+		});
+		let engine = Engine::start(launch(gpu, relays, dir.path()), autosave, loaded)
+			.await
+			.expect("the studio starts");
+
+		let (broadcast, _, catalog) = routed(&relay, "studio").await;
+		let mut program = Viewer::watch(&broadcast, &catalog, moq_video::Size::new(640, 360)).await;
+		let (broadcast, _, catalog) = routed(&relay, "studio/tall").await;
+		let mut tall = Viewer::watch(&broadcast, &catalog, moq_video::Size::new(360, 640)).await;
+		program.sees(RED).await;
+		tall.sees(RED).await;
+
+		// The tone plays once as it opens. From the first silence the
+		// program's viewer hears after that, what either viewer hears of it is
+		// the cut's.
+		let ended = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let run = engine.state.lock().unwrap().sources.get("tone").unwrap().run();
+				if let Some(ended) = run.ended {
+					return stamp(&engine, ended);
+				}
+				program.sound.recv().await.expect("the audio ended");
+			}
+		})
+		.await
+		.expect("the tone's first play ends");
+		let quiet = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let (start, samples) = program.sound.recv().await.expect("the audio ended");
+				if start >= ended && samples.iter().all(|sample| *sample < QUIET) {
+					return start;
+				}
+			}
+		})
+		.await
+		.expect("the program falls quiet");
+
+		{
+			let mut state = engine.state.lock().unwrap();
+			state.compositor.set_preview(Some("Cut".into()));
+			state.cut().unwrap();
+		}
+		let cut = program.sees(GREEN).await;
+		assert_eq!(
+			tall.sees(GREEN).await,
+			cut,
+			"the portrait shows the cut on the program's frame"
+		);
+		let (heard, before) = program.hears(quiet, LOUD).await;
+		assert!(
+			before < QUIET,
+			"the program's audio scene holds the tone alone: {before}"
+		);
+		assert!(
+			heard >= cut,
+			"the tone sounds with the cut, not before: {heard:?} < {cut:?}"
+		);
+		let (also, bed) = tall.hears(quiet, LOUD).await;
+		assert!(bed > QUIET, "the portrait's audio scene holds the bed too: {bed}");
+		assert!(
+			heard.abs_diff(also) < AUDIO_PERIOD,
+			"both hear the tone within a block of the bus: {heard:?} and {also:?}"
+		);
+
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+		let failed = engine.stats.error();
+		assert!(failed.is_none(), "{failed:?}");
 	}
 
 	/// A guest's return feed lists every size of `engine`'s program that
