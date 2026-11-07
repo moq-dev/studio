@@ -2971,7 +2971,10 @@ mod tests {
 			let take = Take::new(&target, Duration::from_secs(1)).unwrap();
 			let speed = 0.5;
 			feed.replay(take, speed).unwrap();
-			assert!(matches!(feed.next_picture(), Some(Picture::Rgba { .. })), "cleared as it is asked");
+			assert!(
+				matches!(feed.next_picture(), Some(Picture::Rgba { .. })),
+				"cleared as it is asked"
+			);
 			let begin = until(|| feed.run().begun).await;
 
 			// From the start, not from the keyframe of its group at 1 s, each
