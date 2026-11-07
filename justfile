@@ -24,6 +24,9 @@ check:
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --all-targets --features {{ features }} -- -D warnings
+    # The studio as `cargo run -p moq-studio` builds it: alone, so the features
+    # only its tests' dependencies turn on cannot hide one it needs.
+    cargo check --locked -p moq-studio --features {{ features }}
 
 # Run the tests.
 [positional-arguments]

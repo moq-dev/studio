@@ -101,7 +101,6 @@ repository.
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
 - [Browser sources make no outside requests](/quest/m0/browser-offline.md) - no component updates, spellcheck downloads, or network time from the helper
-- [moq-studio builds on its own](/quest/m0/studio-builds-alone.md) - `cargo build -p moq-studio` no longer leans on a test dependency's features
 - [A media file's sound plays with its pictures](/quest/m0/media-av-sync.md) - media sources write a bus latency ahead, as broadcast sources do
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
 - [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
