@@ -100,7 +100,6 @@ repository.
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
-- [Browser sources make no outside requests](/quest/m0/browser-offline.md) - no component updates, spellcheck downloads, or network time from the helper
 - [A media file's sound plays with its pictures](/quest/m0/media-av-sync.md) - media sources write a bus latency ahead, as broadcast sources do
 - [The UI keeps its frame rate while the program renders](/quest/m0/ui-frame-rate.md) - the editor draws without waiting on the program's render
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
