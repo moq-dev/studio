@@ -92,6 +92,12 @@ winit = { version = "0.30", default-features = false }
 # PipeWire capture uses, so the two share one D-Bus stack.
 ashpd = { version = "0.13", default-features = false, features = ["global_shortcuts", "tokio"] }
 futures-util = "0.3"
+# The virtual camera's v4l2loopback fallback. Pure Rust with its kernel bindings
+# checked in, and already in the graph through moq-video's capture.
+moq-v4l = { workspace = true }
+# The virtual camera's PipeWire node, behind `pipewire`. moq-video links the
+# same release; `v0_3_34` adds the trigger a driving stream paces frames with.
+pipewire = { version = "0.10", optional = true, features = ["v0_3_34"] }
 # Whether the window is on Wayland, where only the portal hears keys globally.
 raw-window-handle = "0.6"
 # Which keysyms the X11 layout puts on each key, so a hotkey grabs the key
@@ -102,14 +108,6 @@ x11rb = "0.13"
 # Which virtual key the Windows layout puts on each key, so a hotkey
 # registers the key pressed.
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-# The virtual camera's v4l2loopback fallback. Pure Rust with its kernel bindings
-# checked in, and already in the graph through moq-video's capture.
-moq-v4l = { workspace = true }
-# The virtual camera's PipeWire node, behind `pipewire`. moq-video links the
-# same release; `v0_3_34` adds the trigger a driving stream paces frames with.
-pipewire = { version = "0.10", optional = true, features = ["v0_3_34"] }
 
 [dev-dependencies]
 # A clock that moves wall time too, which renewed tokens' expiries read.

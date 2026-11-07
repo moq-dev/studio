@@ -2652,8 +2652,6 @@ impl Panels {
 		if let Some(error) = stats.recording_audio_error() {
 			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
 		}
-		ui.separator();
-		self.camera(ui);
 
 		for (name, video) in stats.canvases() {
 			ui.separator();
@@ -2673,6 +2671,9 @@ impl Panels {
 				ui.colored_label(ui.visuals().error_fg_color, error);
 			}
 		}
+
+		ui.separator();
+		self.camera(ui);
 	}
 
 	/// The main canvas's virtual camera: a toggle, and how it is doing while on.
