@@ -3463,11 +3463,34 @@ mod tests {
 		(broadcast, catalogs, catalog)
 	}
 
-	/// Read a published scene's `video` and `catalogs` to a clean end.
-	async fn ended(mut catalogs: moq_mux::catalog::Consumer<()>, mut video: moq_net::track::Subscriber) {
+	/// A viewer of `broadcast`'s `video`, and the first group the relay
+	/// handed it once it answered the subscription. The relay refuses one
+	/// still unanswered when the scene's broadcast goes, since the program's
+	/// broadcast still covers its path there.
+	async fn served(
+		broadcast: &moq_net::broadcast::Consumer,
+		video: &str,
+	) -> (moq_net::track::Subscriber, moq_net::group::Consumer) {
+		let mut track = broadcast.track(video).unwrap().subscribe(None).await.unwrap();
+		let first = kio::clock::timeout(TIMEOUT, track.recv_group())
+			.await
+			.expect("the relay serves the video")
+			.expect("the video")
+			.expect("a group");
+		(track, first)
+	}
+
+	/// Read a published scene's `video`, from the first group it was served,
+	/// and its `catalogs` to a clean end.
+	async fn ended(
+		mut catalogs: moq_mux::catalog::Consumer<()>,
+		(mut video, first): (moq_net::track::Subscriber, moq_net::group::Consumer),
+	) {
 		kio::clock::timeout(TIMEOUT, async {
-			while let Some(mut group) = video.recv_group().await.expect("the video finishes") {
-				while group.read_frame().await.expect("the video finishes").is_some() {}
+			let mut group = Some(first);
+			while let Some(mut current) = group {
+				while current.read_frame().await.expect("the video finishes").is_some() {}
+				group = video.recv_group().await.expect("the video finishes");
 			}
 			while catalogs.next().await.expect("the catalog finishes").is_some() {}
 		})
@@ -3480,8 +3503,9 @@ mod tests {
 	/// more encode session.
 	/// What only it shows is shown but not on program. Health grades its
 	/// video beside the program, with its own viewers. Unpublishing
-	/// it, or quitting, ends its video and then its catalog cleanly, then its
-	/// broadcast; unpublishing gives its session back.
+	/// it, or quitting, ends its video and then its catalog cleanly for a
+	/// viewer the relay serves, then its broadcast; unpublishing gives its
+	/// session back.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn a_published_scene_has_its_own_broadcast() {
@@ -3601,7 +3625,7 @@ mod tests {
 		.await
 		.expect("health grades the published scene");
 
-		let track = broadcast.track(&video).unwrap().subscribe(None).await.unwrap();
+		let track = served(&broadcast, &video).await;
 		{
 			let mut state = engine.state.lock().unwrap();
 			let scene = state.collection().scenes[1].clone();
@@ -3631,7 +3655,7 @@ mod tests {
 		engine.state.lock().unwrap().undo().unwrap();
 		let (broadcast, catalogs, catalog) = routed(&relay, "studio/tall").await;
 		let (video, _) = canvas_size(&catalog);
-		let track = broadcast.track(&video).unwrap().subscribe(None).await.unwrap();
+		let track = served(&broadcast, &video).await;
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 		kio::clock::timeout(TIMEOUT, engine.close())
