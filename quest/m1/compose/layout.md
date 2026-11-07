@@ -55,3 +55,20 @@ viewer can fetch; the rest reach viewers only in the program.
 Decided 2026-11-05 (maintainer, /quest-plan): the layout serializes the
 scene model with scene sources, published scenes, and audio scenes, not the
 canvases and mixes they replaced.
+
+## Waiting
+
+- Maintainer: replan this quest before it is built. Since 2026-11-04 no
+  source's track reaches viewers unless [Published independently](/quest/m2/publish-independently.md)
+  (m2) ticks it, and a source so published is left out of the program, so no
+  host can composite the frame this Goal promises, and the browser, server, and
+  controls quests that read the layout have no track to fetch. The epic
+  README asks for this replan when the epic starts. Options: (1) move this
+  epic to m2 with Published independently as this quest's first Required,
+  and replan the layout once it lands (recommended: nothing in m1 can read a
+  layout, and the reference picture decides what it carries); (2) replan now
+  to the reference picture the epic README suggests, the program with the
+  independently published sources layered over it, so the layout places only
+  those sources over the program; (3) build it as written, a full scene whose
+  tracks no viewer can fetch until m2. Done when this file's Goal, Plan, and
+  Required reflect the pick.
