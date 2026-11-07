@@ -626,15 +626,26 @@ const DYING: &str = "MOQ_STUDIO_TEST_DYING_PROFILE";
 async fn a_helper_exits_with_its_studio() {
 	let profile = tempfile::tempdir().unwrap();
 	let _stall = stall(profile.path());
-	let mut studio = std::process::Command::new(std::env::current_exe().unwrap())
-		.args(["--exact", "a_studio_that_dies", "--ignored"])
-		.env(DYING, profile.path())
-		.stdout(std::process::Stdio::null())
-		.spawn()
-		.unwrap();
-	let helper = until_stalled(studio.id(), profile.path()).await;
-	studio.kill().unwrap();
-	studio.wait().unwrap();
+	/// Killed and reaped once dropped, so a failing test leaves no studio
+	/// waiting forever.
+	struct Dying(std::process::Child);
+	impl Drop for Dying {
+		fn drop(&mut self) {
+			let _ = self.0.kill();
+			let _ = self.0.wait();
+		}
+	}
+
+	let studio = Dying(
+		std::process::Command::new(std::env::current_exe().unwrap())
+			.args(["--exact", "a_studio_that_dies", "--ignored"])
+			.env(DYING, profile.path())
+			.stdout(std::process::Stdio::null())
+			.spawn()
+			.unwrap(),
+	);
+	let helper = until_stalled(studio.0.id(), profile.path()).await;
+	drop(studio);
 
 	// The helper leads a process group CEF's processes join.
 	let deadline = Instant::now() + TIMEOUT;

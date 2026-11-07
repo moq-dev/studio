@@ -258,8 +258,9 @@ impl Instance {
 			page: page.clone(),
 			id,
 		};
-		// A closed queue means the writer lost the socket, so the helper is
-		// gone and the reader ends the page.
+		// An open the queue refuses, since the writer lost the socket or the
+		// helper is exiting, ends with the helper, when the reader ends the
+		// page.
 		self.commands.open(id, open);
 		// After the page opens, since the helper delivers only to an open page.
 		let mut state = page.state.lock().unwrap();

@@ -92,9 +92,13 @@ impl Commands {
 		true
 	}
 
-	/// Open page `id`.
+	/// Open page `id`, unless the helper is to exit, which would only close it.
 	pub(crate) fn open(&self, id: Id, open: Open) {
-		self.push(|outbox| outbox.opens.push((id, open)));
+		self.push(|outbox| {
+			if !outbox.quit {
+				outbox.opens.push((id, open));
+			}
+		});
 	}
 
 	/// Close page `id`, which drops what it has waiting, its open too if
@@ -145,7 +149,7 @@ impl Commands {
 	}
 
 	/// Have the helper close every page and exit, after what is queued, and
-	/// take nothing more.
+	/// open no more.
 	pub(crate) fn quit(&self) {
 		self.push(|outbox| outbox.quit = true);
 	}
@@ -316,5 +320,15 @@ mod tests {
 		));
 		commands.close(1);
 		assert!(matches!(commands.take()[..], [Command::Close(1)]));
+	}
+
+	/// A page opened once the helper is to exit never opens: the helper would
+	/// only close it again.
+	#[test]
+	fn a_page_opened_after_quit_never_opens() {
+		let commands = Commands::default();
+		commands.quit();
+		commands.open(0, open("late"));
+		assert!(matches!(commands.take()[..], [Command::Stop]));
 	}
 }
