@@ -18,10 +18,11 @@ categories = ["multimedia", "multimedia::video", "gui"]
 default = ["quic", "websocket", "nvidia"]
 quic = ["moq-tokio/quic"]
 websocket = ["moq-tokio/websocket"]
-# Camera, display, window, microphone, and system-audio sources. Off by default
-# like moq-cli's `capture`: on Linux the microphone links libasound at build
-# time. Enable with `cargo run -p moq-studio --features capture,openh264`.
-capture = ["moq-scene/capture"]
+# Camera, display, window, microphone, and system-audio sources, and playing a
+# mix to the speakers. Off by default like moq-cli's `capture`: on Linux the
+# microphone and the speakers link libasound at build time. Enable with
+# `cargo run -p moq-studio --features capture,openh264`.
+capture = ["moq-scene/capture", "moq-audio/playback"]
 # NVIDIA hardware codecs (NVENC + NVDEC) on Linux, as in moq-cli.
 nvidia = ["moq-video/nvidia"]
 # The vendored OpenH264 software H.264 fallback, opt-in like moq-video's.
@@ -32,28 +33,75 @@ vaapi = ["moq-video/vaapi"]
 # the virtual camera as a PipeWire node. Wayland screens and windows are not
 # reachable yet: display and window sources capture X11 only.
 pipewire = ["capture", "moq-scene/pipewire", "dep:pipewire"]
+# Browser sources, rendered by CEF in a helper process (Linux). Off by default:
+# the build downloads the CEF runtime (or takes it from `CEF_PATH`) and copies
+# it beside the binary, where the binary looks for it when it starts.
+cef = ["moq-scene/cef"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
 # The window, its event loop, and the egui integration. `wgpu` is the renderer
 # the compositor shares a device with; no glow, no system font discovery.
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wayland", "wgpu", "x11"] }
+# `persistence` keeps per-user picks, such as the output Listen plays on, out
+# of the shared scene file.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "persistence", "wayland", "wgpu", "x11"] }
 egui = "0.36"
 # Docked, rearrangeable panels. 0.21 is the newest release and pins egui 0.36.
 egui_dock = "0.21"
-kio = { workspace = true, features = ["runtime"] }
+# System-wide hotkeys on macOS, Windows, and X11; Wayland goes through the
+# GlobalShortcuts portal instead.
+global-hotkey = "0.9"
+hang = { workspace = true }
+# Stamps a recording's file name with when it started. Already in the graph
+# through moq-scene's humantime-serde.
+humantime = { workspace = true }
+kio = { workspace = true, features = ["async", "runtime"] }
 moq-audio = { workspace = true, features = ["bus"] }
+# Signs guest tokens with the room key.
+moq-auth = { workspace = true }
+moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
+# The guest room: its path convention, roster, and token claims.
+moq-room = { workspace = true, features = ["async"] }
 moq-scene = { workspace = true }
-moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "net"] }
+moq-stats = { workspace = true }
+moq-tokio = { workspace = true, default-features = false, features = ["net"] }
 moq-video = { workspace = true }
 pollster = { workspace = true }
+# The join link's QR code. No dependencies of its own.
+qrcodegen = "1.8"
+# Whether a recording's marker is still the file its holder locked, which std
+# cannot tell on Windows.
+same-file = "1.0.6"
+# The guests removed from scenes, kept beside the scene file.
+serde = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
+# The window's event loop, run here so keypad keys are noted before egui
+# folds them into their main keyboard twins. eframe's version and features.
+winit = { version = "0.30", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The GlobalShortcuts portal for hotkeys on Wayland. 0.13, as moq-video's
+# PipeWire capture uses, so the two share one D-Bus stack.
+ashpd = { version = "0.13", default-features = false, features = ["global_shortcuts", "tokio"] }
+futures-util = "0.3"
+# Whether the window is on Wayland, where only the portal hears keys globally.
+raw-window-handle = "0.6"
+# Which keysyms the X11 layout puts on each key, so a hotkey grabs the key
+# pressed. 0.13, as global-hotkey uses, so default builds compile one.
+x11rb = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+# Which virtual key the Windows layout puts on each key, so a hotkey
+# registers the key pressed.
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The virtual camera's v4l2loopback fallback. Pure Rust with its kernel bindings
@@ -64,8 +112,15 @@ moq-v4l = { workspace = true }
 pipewire = { version = "0.10", optional = true, features = ["v0_3_34"] }
 
 [dev-dependencies]
+# A clock that moves wall time too, which renewed tokens' expiries read.
+kio = { workspace = true, features = ["manual"] }
+# Reads a saved clip's timeline back; the version moq-mux writes it with.
+mp4-atom = "0.17.0"
+# The auth server a test relay verifies guest tokens with.
+moq-auth = { workspace = true, features = ["serve"] }
 moq-relay = { workspace = true, features = ["test-support"] }
-tempfile = { workspace = true }
+# A paused clock, so health tests sample without waiting.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -26,6 +26,9 @@ use super::{Shared, Sink};
 /// The node's name, which `pw-cli` and pickers that show ids print.
 const NAME: &str = "moq-studio";
 
+/// The id moq-video's camera capture lists the node by: `pipewire:` and its name.
+pub const ID: &str = "pipewire:moq-studio";
+
 /// What apps list the camera as.
 const DESCRIPTION: &str = "MoQ Studio";
 

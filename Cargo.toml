@@ -25,11 +25,15 @@ allow_attributes_without_reason = "warn"
 [workspace.dependencies]
 hang = { path = "moq/rs/hang" }
 kio = { path = "moq/rs/kio" }
+moq-auth = { path = "moq/rs/moq-auth", default-features = false }
 moq-audio = { path = "moq/rs/moq-audio", default-features = false }
+moq-json = { path = "moq/rs/moq-json" }
 moq-mux = { path = "moq/rs/moq-mux" }
 moq-net = { path = "moq/rs/moq-net" }
 moq-relay = { path = "moq/rs/moq-relay", default-features = false }
+moq-room = { path = "moq/rs/moq-room" }
 moq-scene = { path = "rs/moq-scene" }
+moq-stats = { path = "moq/rs/moq-stats" }
 moq-tokio = { path = "moq/rs/moq-tokio", default-features = false }
 moq-v4l = { path = "moq/rs/moq-v4l" }
 # Default features off, as in moq: each consumer opts into native codecs and
@@ -38,6 +42,7 @@ moq-video = { path = "moq/rs/moq-video", default-features = false }
 
 anyhow = "1"
 bytes = "1"
+humantime = "2.4"
 humantime-serde = "1.1.1"
 pollster = "1.0"
 serde = { version = "1", features = ["derive"] }
@@ -82,6 +87,18 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.rubato]
+opt-level = 3
+
+# Background removal's model, which runs on every picture of a source and is
+# ten times slower unoptimized: a camera would cut out a few pictures a
+# second rather than every one.
+[profile.dev.package.tract-core]
+opt-level = 3
+
+[profile.dev.package.tract-data]
+opt-level = 3
+
+[profile.dev.package.tract-linalg]
 opt-level = 3
 
 [profile.release]

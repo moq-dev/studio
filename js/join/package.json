@@ -1,0 +1,28 @@
+{
+	"name": "@moq/studio-join",
+	"private": true,
+	"type": "module",
+	"version": "0.0.0",
+	"description": "The page a guest opens to join a MoQ Studio room",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/studio",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"check": "tsc --noEmit",
+		"test": "bun test"
+	},
+	"dependencies": {
+		"@moq/net": "workspace:*",
+		"@moq/publish": "workspace:*",
+		"@moq/room": "workspace:*",
+		"@moq/signals": "workspace:*",
+		"@moq/watch": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.4",
+		"rolldown": "^1.2.15",
+		"typescript": "7.0.2",
+		"vite": "^8.3.5"
+	}
+}

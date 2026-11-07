@@ -6,41 +6,52 @@
 //! PipeWire it is an existing v4l2loopback device, since that kernel module
 //! needs root to load and so is never the first choice.
 //!
-//! The program clock offers every canvas frame; [`Camera::offer`] copies it
-//! into a staging buffer only while an app reads the camera, and the `vcam`
-//! thread waits for the copy and hands the pixels to the backend.
+//! The program clock offers every frame of the main canvas; [`Camera::offer`]
+//! has moq-video read it back only while an app reads the camera, and the
+//! `vcam` thread waits for the copy and hands the pixels to the backend.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Context;
 use moq_scene::{Canvas, wgpu};
+use moq_video::render::readback::{Pending, Readback};
 
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pipewire;
 #[cfg(target_os = "linux")]
 mod v4l2;
 
-/// Copies in flight at once: one being handed over, one being copied, and one
-/// spare, as the encoder's export keeps.
-const DEPTH: usize = 3;
-
-/// A canvas's program, published as a camera other apps can open.
+/// The main canvas's program, published as a camera other apps can open.
 ///
 /// Dropping it removes the camera.
 pub struct Camera {
-	/// Where the camera lives, for the Output panel.
-	backend: String,
+	device: wgpu::Device,
+	queue: wgpu::Queue,
+	/// The canvas the backend was opened for.
+	canvas: Canvas,
 	readback: Readback,
 	/// `None` once dropping.
-	frames: Option<mpsc::SyncSender<Staged>>,
+	work: Option<mpsc::Sender<Work>>,
 	worker: Option<std::thread::JoinHandle<()>>,
 	shared: Arc<Shared>,
+}
+
+/// What the program clock hands the `vcam` thread.
+enum Work {
+	/// A program copy on its way back from the GPU. Unbounded in the channel
+	/// only in name: the readback lends out at most [`Readback::DEPTH`] at once.
+	Picture(Pending),
+	/// The canvas changed size or frame rate: close the backend and open it
+	/// again for this one.
+	Reopen(Canvas),
 }
 
 /// What the camera's threads report to the program clock and the UI.
 #[derive(Default)]
 struct Shared {
+	/// Where the camera lives now.
+	opened: Mutex<Opened>,
 	/// Whether an app reads the camera, so frames are worth copying.
 	reading: AtomicBool,
 	/// Frames handed to the backend.
@@ -71,10 +82,25 @@ impl Shared {
 	}
 }
 
+/// Where an open camera lives.
+#[derive(Clone, Default)]
+struct Opened {
+	/// For the Output panel: `PipeWire`, or the v4l2loopback device's path.
+	backend: String,
+	/// The id moq-video's camera capture lists it by.
+	id: String,
+	/// The size and frame rate it shows.
+	canvas: Canvas,
+}
+
 /// How the camera is doing, for the Output panel.
 pub struct Status {
 	/// Where the camera lives, such as a PipeWire node or a `/dev/videoN` path.
 	pub backend: String,
+	/// The id the Devices panel would list the camera by, so it can leave it out.
+	pub id: String,
+	/// The size and frame rate it shows.
+	pub canvas: Canvas,
 	/// Whether an app reads the camera.
 	pub reading: bool,
 	pub sent: u64,
@@ -90,55 +116,72 @@ trait Sink: Send {
 }
 
 impl Camera {
-	/// Publish `canvas`-sized programs drawn on `device` as a camera.
+	/// Publish the `canvas` programs drawn on `device` as a camera.
 	///
 	/// Fails, naming why each backend refused, when this machine has no way to
 	/// publish one.
 	pub fn open(device: &wgpu::Device, queue: &wgpu::Queue, canvas: Canvas) -> anyhow::Result<Self> {
-		let size = moq_video::Size::new(canvas.width, canvas.height);
+		let readback = Readback::new(device, queue, size(canvas))?;
 		let shared = Arc::new(Shared::default());
-		let (sink, backend) = backend(size, canvas.framerate, &shared)?;
-		tracing::info!(%backend, "virtual camera on");
+		let sink = open(canvas, &shared)?;
 
-		let (frames, pending) = mpsc::sync_channel(DEPTH);
+		let (work, pending) = mpsc::channel();
 		let worker = {
-			let device = device.clone();
 			let shared = shared.clone();
 			std::thread::Builder::new()
 				.name("vcam".into())
-				.spawn(move || run(&device, pending, sink, &shared))
+				.spawn(move || run(pending, sink, &shared))
 				.context("cannot start the virtual camera thread")?
 		};
 		Ok(Self {
-			backend,
-			readback: Readback::new(device, queue, size),
-			frames: Some(frames),
+			device: device.clone(),
+			queue: queue.clone(),
+			canvas,
+			readback,
+			work: Some(work),
 			worker: Some(worker),
 			shared,
 		})
 	}
 
-	/// Copy `program` to the camera, if an app reads it.
+	/// Copy `program`, drawn at `canvas`, to the camera if an app reads it.
+	///
+	/// A canvas of a new size or frame rate reopens the camera for it, so an
+	/// app reading it opens it again.
 	///
 	/// The copy is submitted before this returns, so the caller draws into
 	/// `program` again freely. Never waits on the GPU.
-	pub fn offer(&mut self, program: &wgpu::Texture) {
+	pub fn offer(&mut self, program: &wgpu::Texture, canvas: Canvas) {
+		let Some(work) = &self.work else { return };
+		if canvas != self.canvas {
+			self.canvas = canvas;
+			match Readback::new(&self.device, &self.queue, size(canvas)) {
+				Ok(readback) => self.readback = readback,
+				Err(err) => return self.shared.fail(format!("{err:#}")),
+			}
+			// A send fails only once the thread stopped, having said why.
+			let _ = work.send(Work::Reopen(canvas));
+		}
 		if !self.shared.wanted() {
 			return;
 		}
-		let Some(frames) = &self.frames else { return };
-		let Some(staged) = self.readback.copy(program) else {
-			self.shared.dropped.fetch_add(1, Ordering::Relaxed);
-			return;
-		};
-		// The pool holds no more buffers than the channel, so it is never full;
-		// a send fails only once the thread stopped, having said why.
-		let _ = frames.try_send(staged);
+		match self.readback.copy(program) {
+			Ok(Some(pending)) => {
+				let _ = work.send(Work::Picture(pending));
+			}
+			Ok(None) => {
+				self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+			}
+			Err(err) => self.shared.fail(format!("{err:#}")),
+		}
 	}
 
 	pub fn status(&self) -> Status {
+		let Opened { backend, id, canvas } = self.shared.opened.lock().unwrap().clone();
 		Status {
-			backend: self.backend.clone(),
+			backend,
+			id,
+			canvas,
 			reading: self.shared.wanted(),
 			sent: self.shared.sent.load(Ordering::Relaxed),
 			dropped: self.shared.dropped.load(Ordering::Relaxed),
@@ -151,19 +194,37 @@ impl Drop for Camera {
 	fn drop(&mut self) {
 		// Ends the thread, which removes the camera before this returns, so
 		// turning it straight back on finds the device free.
-		self.frames.take();
+		self.work.take();
 		if let Some(worker) = self.worker.take() {
 			let _ = worker.join();
 		}
 	}
 }
 
-/// The first backend that takes a `size` camera at `framerate`.
+fn size(canvas: Canvas) -> moq_video::Size {
+	moq_video::Size::new(canvas.width, canvas.height)
+}
+
+/// Open the first backend that takes `canvas`, and say where it lives in
+/// `shared`.
+fn open(canvas: Canvas, shared: &Arc<Shared>) -> anyhow::Result<Box<dyn Sink>> {
+	let (sink, backend, id) = backend(size(canvas), canvas.framerate, shared)?;
+	tracing::info!(%backend, "virtual camera on");
+	*shared.opened.lock().unwrap() = Opened { backend, id, canvas };
+	Ok(sink)
+}
+
+/// The first backend that takes a `size` camera at `framerate`, with where it
+/// lives and its capture id.
 #[cfg(target_os = "linux")]
-fn backend(size: moq_video::Size, framerate: u32, shared: &Arc<Shared>) -> anyhow::Result<(Box<dyn Sink>, String)> {
+fn backend(
+	size: moq_video::Size,
+	framerate: u32,
+	shared: &Arc<Shared>,
+) -> anyhow::Result<(Box<dyn Sink>, String, String)> {
 	#[cfg(feature = "pipewire")]
 	let pipewire = match pipewire::Node::open(size, framerate, shared.clone()) {
-		Ok(node) => return Ok((Box::new(node), "PipeWire".to_string())),
+		Ok(node) => return Ok((Box::new(node), "PipeWire".to_string(), pipewire::ID.to_string())),
 		Err(err) => {
 			tracing::warn!(err = %format!("{err:#}"), "no PipeWire camera, trying v4l2loopback");
 			format!("{err:#}")
@@ -174,168 +235,49 @@ fn backend(size: moq_video::Size, framerate: u32, shared: &Arc<Shared>) -> anyho
 
 	match v4l2::Loopback::open(size, framerate) {
 		Ok(loopback) => {
-			let backend = loopback.name();
+			let path = loopback.name();
 			// The kernel keeps no count of readers to wait for.
 			shared.reading.store(true, Ordering::Relaxed);
-			Ok((Box::new(loopback), backend))
+			Ok((Box::new(loopback), path.clone(), path))
 		}
 		Err(err) => anyhow::bail!("no virtual camera. PipeWire: {pipewire}. v4l2loopback: {err:#}"),
 	}
 }
 
 #[cfg(not(target_os = "linux"))]
-fn backend(size: moq_video::Size, framerate: u32, shared: &Arc<Shared>) -> anyhow::Result<(Box<dyn Sink>, String)> {
+fn backend(
+	size: moq_video::Size,
+	framerate: u32,
+	shared: &Arc<Shared>,
+) -> anyhow::Result<(Box<dyn Sink>, String, String)> {
 	let _ = (size, framerate, shared);
 	anyhow::bail!("the virtual camera is not available on this platform yet")
 }
 
 /// Hand each copy to `sink` as it lands, until the camera is dropped or fails.
-fn run(device: &wgpu::Device, pending: mpsc::Receiver<Staged>, mut sink: Box<dyn Sink>, shared: &Shared) {
-	let mut rgba = Vec::new();
-	while let Ok(staged) = pending.recv() {
-		if let Err(err) = staged.read(device, &mut rgba).and_then(|()| sink.write(&rgba)) {
-			shared.fail(format!("{err:#}"));
-			return;
+fn run(pending: mpsc::Receiver<Work>, mut sink: Box<dyn Sink>, shared: &Arc<Shared>) {
+	while let Ok(work) = pending.recv() {
+		let result = match work {
+			Work::Picture(pending) => pending
+				.wait()
+				.context("reading the program back")
+				.and_then(|rgba| sink.write(rgba.data())),
+			Work::Reopen(canvas) => {
+				// Closed first, so the new one finds the device free.
+				drop(sink);
+				shared.reading.store(false, Ordering::Relaxed);
+				match open(canvas, shared) {
+					Ok(opened) => {
+						sink = opened;
+						continue;
+					}
+					Err(err) => return shared.fail(format!("{err:#}")),
+				}
+			}
+		};
+		if let Err(err) = result {
+			return shared.fail(format!("{err:#}"));
 		}
 		shared.sent.fetch_add(1, Ordering::Relaxed);
-	}
-}
-
-/// Copies the program into a small pool of staging buffers the CPU can map.
-struct Readback {
-	device: wgpu::Device,
-	queue: wgpu::Queue,
-	size: moq_video::Size,
-	/// Bytes per row in a staging buffer, padded to the copy alignment.
-	row: u32,
-	pool: Arc<Mutex<Pool>>,
-}
-
-/// Staging buffers not held by a [`Staged`].
-#[derive(Default)]
-struct Pool {
-	free: Vec<wgpu::Buffer>,
-	/// Buffers in existence, up to [`DEPTH`].
-	allocated: usize,
-}
-
-impl Readback {
-	fn new(device: &wgpu::Device, queue: &wgpu::Queue, size: moq_video::Size) -> Self {
-		Self {
-			device: device.clone(),
-			queue: queue.clone(),
-			size,
-			row: (size.width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
-			pool: Arc::default(),
-		}
-	}
-
-	/// Start copying `texture`, or `None` when every buffer is in flight.
-	fn copy(&mut self, texture: &wgpu::Texture) -> Option<Staged> {
-		let mut pool = self.pool.lock().unwrap();
-		let buffer = match pool.free.pop() {
-			Some(buffer) => buffer,
-			None if pool.allocated < DEPTH => {
-				pool.allocated += 1;
-				self.device.create_buffer(&wgpu::BufferDescriptor {
-					label: Some("moq-studio vcam"),
-					size: u64::from(self.row) * u64::from(self.size.height),
-					usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-					mapped_at_creation: false,
-				})
-			}
-			None => return None,
-		};
-		drop(pool);
-
-		let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-			label: Some("moq-studio vcam"),
-		});
-		encoder.copy_texture_to_buffer(
-			texture.as_image_copy(),
-			wgpu::TexelCopyBufferInfo {
-				buffer: &buffer,
-				layout: wgpu::TexelCopyBufferLayout {
-					offset: 0,
-					bytes_per_row: Some(self.row),
-					rows_per_image: Some(self.size.height),
-				},
-			},
-			wgpu::Extent3d {
-				width: self.size.width,
-				height: self.size.height,
-				depth_or_array_layers: 1,
-			},
-		);
-		let submission = self.queue.submit([encoder.finish()]);
-		Some(Staged {
-			buffer: Some(buffer),
-			submission,
-			size: self.size,
-			row: self.row,
-			pool: self.pool.clone(),
-			mapping: false,
-		})
-	}
-}
-
-/// One copy in flight. Dropping it returns its buffer to the pool.
-struct Staged {
-	buffer: Option<wgpu::Buffer>,
-	submission: wgpu::SubmissionIndex,
-	size: moq_video::Size,
-	row: u32,
-	pool: Arc<Mutex<Pool>>,
-	/// Set while a mapping was requested and not yet undone, so a read that
-	/// failed partway does not hand a mapped buffer to the next copy.
-	mapping: bool,
-}
-
-impl Staged {
-	/// Block until the copy lands, then fill `rgba` with tightly packed rows.
-	fn read(mut self, device: &wgpu::Device, rgba: &mut Vec<u8>) -> anyhow::Result<()> {
-		let buffer = self.buffer.as_ref().expect("held until drop");
-		let (send, recv) = mpsc::channel();
-		self.mapping = true;
-		buffer.map_async(wgpu::MapMode::Read, .., move |result| {
-			let _ = send.send(result);
-		});
-		device
-			.poll(wgpu::PollType::Wait {
-				submission_index: Some(self.submission.clone()),
-				timeout: None,
-			})
-			.map_err(|err| anyhow::anyhow!("waiting for the program copy: {err}"))?;
-		recv.recv()
-			.context("the program copy was dropped")?
-			.context("mapping the program copy")?;
-
-		let width = self.size.width as usize * 4;
-		rgba.clear();
-		{
-			let mapped = buffer
-				.slice(..)
-				.get_mapped_range()
-				.map_err(|err| anyhow::anyhow!("reading the program copy: {err}"))?;
-			for row in mapped.chunks_exact(self.row as usize) {
-				rgba.extend_from_slice(&row[..width]);
-			}
-		}
-		buffer.unmap();
-		self.mapping = false;
-		Ok(())
-	}
-}
-
-impl Drop for Staged {
-	fn drop(&mut self) {
-		let Some(buffer) = self.buffer.take() else { return };
-		let mut pool = self.pool.lock().unwrap();
-		// One a failed read left mapped is let go and replaced.
-		if self.mapping {
-			pool.allocated -= 1;
-		} else {
-			pool.free.push(buffer);
-		}
 	}
 }

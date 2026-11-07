@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<!-- The token is in the fragment, but keep the page itself out of every Referer. -->
+	<meta name="referrer" content="no-referrer">
+	<title>Join the studio</title>
+	<link rel="stylesheet" href="/src/index.css">
+</head>
+
+<body>
+	<main>
+		<h1>Join the studio</h1>
+		<p id="error" class="error" hidden></p>
+
+		<section id="ready" hidden>
+			<p>You are joining as <b id="name"></b>. The host sees your camera, microphone, and any screen you share.</p>
+			<button id="join" type="button">Join</button>
+		</section>
+
+		<section id="joined" hidden>
+			<p class="status"><span id="status-dot" class="dot"></span><span id="status">Connecting</span></p>
+			<p id="capture" class="error" hidden></p>
+			<canvas id="show"></canvas>
+			<p class="hint">The show, without your own voice. Wear headphones, so it does not reach your microphone.</p>
+			<canvas id="preview"></canvas>
+			<div class="controls">
+				<button id="camera" type="button">Camera</button>
+				<button id="microphone" type="button">Microphone</button>
+				<button id="screen" type="button">Share screen</button>
+				<button id="leave" type="button">Leave</button>
+			</div>
+		</section>
+	</main>
+
+	<script type="module" src="/src/index.ts"></script>
+</body>
+
+</html>

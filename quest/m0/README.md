@@ -5,7 +5,7 @@
 A native, cross-platform streaming studio (`rs/moq-studio`) for creators and
 teams who rely on OBS today, plus the same app built to wasm. It composites
 cameras, screens, media, browser sources, and remote MoQ guests into scenes
-on the GPU with moq-video and moq-audio, across several canvases at once
+on the GPU with moq-video and moq-audio, publishing several scenes at once
 (landscape and portrait), and goes live to a MoQ relay and directly to RTMP,
 RTMPS, and WHIP ingests.
 
@@ -37,7 +37,7 @@ Decided 2026-10-22 with the maintainer (/quest-plan):
   destination itself. It remuxes its own broadcast through a UI-free egress
   library that a hosted service can also run server-side. There is no
   gateway service and no moq-cli dependency, because a studio user does not
-  run a server. Destinations that take the same canvas and audio mix with
+  run a server. Destinations that take the same picture scene and audio scene with
   identical encode settings share one encoder. The studio picks codecs per destination: Opus by default, AAC
   where an ingest requires it, from platform encoders only.
 - **Extensibility:** first-party features plus browser sources (CEF
@@ -60,7 +60,7 @@ cameras, packaging, signing) that one monorepo no longer pays off.
 - **Pin:** moq is a `moq` git submodule whose crates are path dependencies,
   as in moq.pro, so the studio compiles against one moq checkout.
 - **moq-scene** moved here with the app, its only consumer. The
-  [viewer-side composition](/quest/m0/compose/README.md) epic moved whole:
+  [viewer-side composition](/quest/m1/compose/README.md) epic (now m1) moved whole:
   browser composition ships as a package from this repository layered on
   `@moq/watch`, and the server composite is a headless binary here rather
   than a moq-cli subcommand, so moq never depends on the studio.
@@ -72,6 +72,15 @@ cameras, packaging, signing) that one monorepo no longer pays off.
   waits on a pin quest here, which `just upgrade-moq` advances. This replaces
   "never ahead of the studio UI that consumes them" above.
 
+Changed 2026-11-04 with the maintainer: the program is how a studio
+broadcast reaches viewers, not the fallback. Sources are not published to the
+relay by default (decided 2026-11-03 on
+[moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), because
+each encoding costs an encoder session and consumer GPUs have few, so the
+[viewer-side composition](/quest/m1/compose/README.md) epic moved to m1.
+Overlays and animation render into the program here, and travel to viewers
+in the layout track only once that epic lands.
+
 Dropped from the first scoping round: relay fan-out ("encode once, the relay
 restreams") and its upload savings. Direct push with shared encoders matches
 OBS multistream, and the hosted version is product work outside this
@@ -79,41 +88,31 @@ repository.
 
 ## Required
 
-- [Studio on macOS and Windows](/quest/m0/app.md) - the studio runs on macOS and Windows, not only Linux
-- [Viewer-side composition](/quest/m0/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
-- [Undo and the scene model](/quest/m0/scene-model.md) - undo history, linked and cloned sources, copy and paste, a downstream keyer, and per-item filters
-- [Autosave](/quest/m0/autosave.md) - every edit is written to the scene file, with no save step or quit prompt
-- [Scene editing](/quest/m0/scene-editing.md) - rename and reorder scenes, and resize the canvas while live through a new rendition
-- [Broadcast sources play in sync](/quest/m0/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
+- [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
+- [nixos2 boots Windows for agents](/quest/m0/windows-host.md) - a Windows machine agents reach over ssh, with a camera and microphone
+- [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
-- [Live encode control](/quest/m0/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
-- [Stream health](/quest/m0/health.md) - per-track delivery, viewer reports, and latency, with causes named
-- [Relay failover](/quest/m0/failover.md) - the same epoch on two relays, so a relay failure does not drop the stream
-- [Instant replay and DVR](/quest/m0/replay.md) - replays and clips from held groups, and viewer scrubbing through the archive
-- [HTML/CSS overlays](/quest/m0/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
-- [Animation and transitions](/quest/m0/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
-- [Video effects](/quest/m0/effects.md) - a curated effect set with CSS meanings, and ML effects baked into their source
-- [Snapping and guides](/quest/m0/snapping.md) - preview moves snap to edges, centers, and other items
-- [Guided setup](/quest/m0/guided-setup.md) - first launch detects devices, measures the uplink, and proposes settings
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
-- [Multiple canvases](/quest/m0/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
-- [Guests](/quest/m0/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
-- [Audio mixes](/quest/m0/mixes.md) - per-output mixes, meters, monitoring, and sync offsets
+- [Composable scenes](/quest/m0/scenes/README.md) - scenes nest scenes and the program, any scene publishes at its own size, and mixes become audio scenes
+- [Clap-to-measure sync delay](/quest/m0/sync-clap.md) - a clap sets a microphone's delay against its camera
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
-- [Recording](/quest/m0/recording.md) - each canvas's program, and optionally each source, recorded to disk alongside live outputs
-- [Browser sources](/quest/m0/browser-source.md) - web overlays rendered by out-of-process CEF into the compositor through shared GPU textures
+- [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
-- [Virtual camera](/quest/m0/vcam/README.md) - a canvas's program exposed as a system camera on Linux, Windows, and macOS
-- [Signing identities are available](/quest/m0/signing.md) - the Apple and Windows code-signing credentials packaging and the macOS camera need
-- [Packaging](/quest/m0/packaging.md) - signed installers for macOS and Windows and a Flatpak for Linux
+- [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
+- [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
+- [One Vulkan loader for the studio and CEF](/quest/m0/cef-vulkan-loader.md) - NixOS builds and tests find the GPU without VK_DRIVER_FILES
+- [Browser sources on the GPU under X11 on NVIDIA](/quest/m0/cef-x11-nvidia.md) - the X11 GPU path paints on NVIDIA, or falls back to the CPU path loudly
+- [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
+- [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
 - [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - moq-audio's AAC encoders, for destinations
 - [moq-audio's filter chain is pinned](/quest/m0/pin-audio-filters.md) - the chain audio filters configure
 - [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice and browser composition
 - [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
+- [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
 
 ## Related
 
-- [OBS native codecs](https://github.com/moq-dev/moq/blob/main/quest/m2/obs-moq-video/README.md) - the OBS plugin stays the path for creators who stay on OBS
-- [Linux capture](https://github.com/moq-dev/moq/blob/main/quest/m2/capture-linux.md) - Wayland window, system audio, and app capture the studio's sources inherit
-- [Windows capture](https://github.com/moq-dev/moq/blob/main/quest/m2/capture-windows.md) - app capture and system audio the studio's sources inherit
+- [OBS native codecs](https://github.com/moq-dev/moq/blob/main/quest/m3/obs-moq-video/README.md) - the OBS plugin stays the path for creators who stay on OBS
+- [Linux capture](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-linux.md) - Wayland window, system audio, and app capture the studio's sources inherit
+- [Windows capture](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-windows.md) - app capture and system audio the studio's sources inherit

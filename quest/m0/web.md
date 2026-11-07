@@ -31,6 +31,10 @@ same PR as this page, and the page follows each pin bump. The page was
 planned for moq's demo/web; it now ships from this repository, and where it
 is hosted is settled in this quest.
 
+Decided 2026-11-04 (maintainer): a page has no local paths, so an image or
+media source's file comes from a browser file picker for the session, and
+resolving the scene file's paths in the browser is settled here.
+
 ## Required
 
 - [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the video slice's capture, codecs, and GPU import

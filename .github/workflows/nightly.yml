@@ -2,8 +2,10 @@ name: Nightly
 
 # The gates too slow or too specialized for a pull request: compositing,
 # publishing, and the virtual camera through wgpu on Mesa's software Vulkan
-# driver, the camera in a private PipeWire session; and the virtual camera's
-# v4l2loopback fallback, a module load no pull request job should make.
+# driver, the camera in a private PipeWire session; the virtual camera's
+# v4l2loopback fallback, a module load no pull request job should make; and
+# `just ci` on macOS, whose capture backends Check's Linux runner never
+# compiles.
 
 permissions:
   contents: read
@@ -65,3 +67,22 @@ jobs:
 
       - name: Test
         run: nix develop --command just v4l2loopback
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      NEXTEST_PROFILE: ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - uses: ./.github/actions/nix
+
+      - name: Check
+        run: nix develop --command just ci

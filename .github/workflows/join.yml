@@ -1,0 +1,68 @@
+name: Join page
+
+# Deploys the join page (js/join) to GitHub Pages from main, at the domain
+# `--join-page` defaults to. Check builds it on every ready PR.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "js/join/**"
+      - "package.json"
+      - "bun.lock"
+      - "bunfig.toml"
+      # The join page builds on the submodule's JS packages.
+      - "moq"
+      - "flake.lock"
+      - ".github/workflows/join.yml"
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one halfway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    if: github.repository_owner == 'moq-dev'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - uses: ./.github/actions/nix
+
+      - name: Build
+        run: |
+          nix develop --command bun install --frozen-lockfile
+          nix develop --command bun run --cwd js/join build
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: js/join/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    # The only job with write access. `github-pages` deploys only from main.
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
