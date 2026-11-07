@@ -1,0 +1,39 @@
+version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[transition]
+kind = "fade"
+duration = "300ms"
+
+[sources.backdrop]
+kind = "color"
+color = "#1e3a8a"
+
+[sources.person]
+kind = "image"
+path = "person.jpg"
+
+[sources.clip]
+kind = "media"
+path = "clip.mp4"
+loop = true
+
+[[scenes]]
+name = "Main"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "clip", rect = { x = 160, y = 90, width = 1600, height = 900 } },
+    { source = "person", rect = { x = 1400, y = 640, width = 400, height = 400 } },
+]
+
+[[scenes]]
+name = "Break"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "person", rect = { x = 120, y = 120, width = 800, height = 800 } },
+    { source = "clip", rect = { x = 1040, y = 540, width = 800, height = 450 } },
+]

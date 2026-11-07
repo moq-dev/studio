@@ -617,7 +617,7 @@ impl Gestures {
 }
 
 /// Build an edit labelled `label` with `build` and commit it.
-fn edit(
+pub(crate) fn edit(
 	state: &mut State,
 	label: impl Into<String>,
 	gesture: Option<u64>,
@@ -4218,7 +4218,7 @@ const REACH: f32 = 8.0;
 /// Where the visible items of the scene in preview and the top layer over it
 /// show `since` the scene went into preview, other than the one at `index` of
 /// `layer`: what a dragged item snaps to.
-fn others(state: &State, layer: &Layer, index: usize, since: Duration) -> Vec<Rect> {
+pub(crate) fn others(state: &State, layer: &Layer, index: usize, since: Duration) -> Vec<Rect> {
 	let scene = state.compositor.preview_scene();
 	let collection = state.collection();
 	// The top layer goes over a scene of the program's size alone.
@@ -4239,7 +4239,7 @@ fn others(state: &State, layer: &Layer, index: usize, since: Duration) -> Vec<Re
 
 /// Whether `source` draws a picture of its own shape, as a camera, a screen,
 /// an image, or a video does, rather than filling any shape.
-fn fixed_shape(source: Option<&Source>) -> bool {
+pub(crate) fn fixed_shape(source: Option<&Source>) -> bool {
 	matches!(
 		source,
 		Some(

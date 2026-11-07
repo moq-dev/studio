@@ -1,0 +1,101 @@
+diff --git a/crates/rune-taffy/src/style/mod.rs b/crates/rune-taffy/src/style/mod.rs
+index 2a602f57..11493f42 100644
+--- a/crates/rune-taffy/src/style/mod.rs
++++ b/crates/rune-taffy/src/style/mod.rs
+@@ -373,6 +373,10 @@ const fn encode_wrap(w: FlexWrap) -> u8 {
+         FlexWrap::NoWrap => 0,
+         FlexWrap::Wrap => 1,
+         FlexWrap::WrapReverse => 2,
++        // Another crate in the graph may enable taffy's `flexbox_balance`, whose
++        // balanced wraps Rune never builds; they lay out as plain wraps.
++        #[allow(unreachable_patterns)]
++        _ => 1,
+     }
+ }
+ 
+diff --git a/crates/rune/src/lib.rs b/crates/rune/src/lib.rs
+index 31a33233..8713b827 100644
+--- a/crates/rune/src/lib.rs
++++ b/crates/rune/src/lib.rs
+@@ -240,6 +240,7 @@ pub use recorder::Recording;
+ pub use render::MAX_BACKDROP_BLURS;
+ pub use render::gpu_events::GpuEvent;
+ pub use render::gpu_events::on_gpu;
++pub use render::adopt_gpu;
+ pub use render::prewarm_gpu;
+ pub use render::prewarm_gpu_on;
+ pub use render::warm_gpu;
+diff --git a/crates/rune/src/render.rs b/crates/rune/src/render.rs
+index b8e5f1de..38e97658 100644
+--- a/crates/rune/src/render.rs
++++ b/crates/rune/src/render.rs
+@@ -575,7 +575,11 @@ impl Gpu {
+     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+     pub(crate) fn for_surface<'w>(wanted: wgpu::Features, translucent: bool,
+         surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), String> {
+-        Self::for_surface_from(prewarm::take(), wanted, translucent, surface)
++        let adopted = warmup::adopted_gpu().map(|gpu| {
++            let renderer = Renderer::new(&gpu.device, wgpu::TextureFormat::Bgra8Unorm);
++            (gpu, renderer)
++        });
++        Self::for_surface_from(adopted.or_else(prewarm::take), wanted, translucent, surface)
+     }
+ 
+     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+@@ -669,8 +673,8 @@ mod prewarm {
+ }
+ 
+ mod warmup;
+-pub use warmup::{warm_gpu, warm_gpu_with};
+-pub(crate) use warmup::{park_gpu, probe_gpu, surface_gpu};
++pub use warmup::{adopt_gpu, warm_gpu, warm_gpu_with};
++pub(crate) use warmup::{adopted_gpu, park_gpu, probe_gpu, surface_gpu};
+ 
+ #[derive(Clone, Copy, PartialEq, Eq)]
+ enum BatchBind {
+diff --git a/crates/rune/src/render/warmup.rs b/crates/rune/src/render/warmup.rs
+index bbc299b0..398ed803 100644
+--- a/crates/rune/src/render/warmup.rs
++++ b/crates/rune/src/render/warmup.rs
+@@ -1,6 +1,27 @@
+ //! Making a GPU device ahead of a surface (`warm_gpu`) and looking at the GPUs once at launch
+ //! (`probe_gpu`), so a first surface waits less for its device.
+ 
++/// The device an app opened itself, which every surface and headless run draws with.
++static ADOPTED: std::sync::Mutex<Option<super::Gpu>> = std::sync::Mutex::new(None);
++
++/// Draws every window, overlay and headless run with `gpu`, a device the app opened itself, so
++/// textures the app renders on it draw in Rune's frames without leaving the GPU. Call it before
++/// the app runs. A surface still checks that `gpu`'s adapter presents to it.
++pub fn adopt_gpu(gpu: super::Gpu) {
++    *ADOPTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(gpu);
++}
++
++/// The device `adopt_gpu` gave, if any.
++pub(crate) fn adopted_gpu() -> Option<super::Gpu> {
++    let adopted = ADOPTED.lock().unwrap_or_else(|e| e.into_inner());
++    adopted.as_ref().map(|gpu| super::Gpu {
++        instance: gpu.instance.clone(),
++        adapter: gpu.adapter.clone(),
++        device: gpu.device.clone(),
++        queue: gpu.queue.clone(),
++    })
++}
++
+ /// A window's or overlay's surface draws with `gpu`, which `warm_gpu` then leaves alone.
+ pub(crate) fn surface_gpu(gpu: &std::sync::Arc<super::Gpu>) {
+     #[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
+diff --git a/crates/rune/src/tooling/headless.rs b/crates/rune/src/tooling/headless.rs
+index 8da2a8d7..4a2eae87 100644
+--- a/crates/rune/src/tooling/headless.rs
++++ b/crates/rune/src/tooling/headless.rs
+@@ -135,7 +135,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
+ 
+     let t0 = Instant::now();
+     let features = comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
+-    let gpu = Gpu::try_with_features(Gpu::instance_for(features), None, features).unwrap_or_else(|e| die(&e));
++    let gpu = crate::render::adopted_gpu()
++        .unwrap_or_else(|| Gpu::try_with_features(Gpu::instance_for(features), None, features).unwrap_or_else(|e| die(&e)));
+     let mut target_format = if srgb_blend { OFFSCREEN_FORMAT.remove_srgb_suffix() } else { OFFSCREEN_FORMAT };
+     let mut renderer = Renderer::new(&gpu.device, target_format);
+     renderer.set_srgb_blend(srgb_blend);

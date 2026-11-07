@@ -37,6 +37,9 @@ pipewire = ["capture", "moq-scene/pipewire", "dep:pipewire"]
 # the build downloads the CEF runtime (or takes it from `CEF_PATH`) and copies
 # it beside the binary, where the binary looks for it when it starts.
 cef = ["moq-scene/cef"]
+# The Rune spike's Preview and Program monitors, shown in place of the egui
+# window when `STUDIO_UI=rune` is set (quest/m1/rune-spike.md).
+rune = ["dep:rune", "dep:rune-kit"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
@@ -76,6 +79,8 @@ same-file = "1.0.6"
 serde = { workspace = true }
 # Glows, pulses, bursts, and fills in the UI, drawn on its wgpu device.
 rune-fx = { workspace = true }
+rune = { workspace = true, optional = true }
+rune-kit = { workspace = true, optional = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }

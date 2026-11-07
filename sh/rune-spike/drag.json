@@ -1,0 +1,6 @@
+[
+  {"t": 0.3, "type": "tap", "key": "segment1"},
+  {"t": 0.8, "type": "drag", "x": 199, "y": 479, "dx": 150, "dy": 20, "dur": 0.5},
+  {"t": 1.6, "type": "tap", "x": 747, "y": 64},
+  {"t": 2.6, "type": "mark", "name": "end"}
+]

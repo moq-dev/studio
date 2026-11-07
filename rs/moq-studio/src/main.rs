@@ -29,6 +29,8 @@ mod record;
 mod replay;
 mod setup;
 mod snap;
+#[cfg(feature = "rune")]
+mod spike;
 mod ui;
 mod uplink;
 mod vcam;
@@ -359,6 +361,14 @@ fn run(
 	runtime: tokio::runtime::Handle,
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
 ) -> anyhow::Result<()> {
+	#[cfg(feature = "rune")]
+	if std::env::var_os("STUDIO_UI").is_some_and(|ui| ui == "rune") {
+		let App::Starting(engine) = app else {
+			anyhow::bail!("the Rune spike opens an existing scene file; run setup in the egui window first");
+		};
+		let _ = started.set(engine.clone());
+		return spike::run(engine, gpu, runtime);
+	}
 	let options = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
 			.with_title("MoQ Studio")

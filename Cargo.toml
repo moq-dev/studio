@@ -48,6 +48,9 @@ pollster = "1.0"
 # The effects the studio UI draws inside egui. Rune is pre-release and asks for
 # a rev pin; its `dev` branch is never rewritten.
 rune-fx = { git = "https://github.com/anomalyco/rune", rev = "b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9" }
+# The Rune UI spike (quest/m1/rune-spike.md), at the rune-fx rev.
+rune = { git = "https://github.com/anomalyco/rune", rev = "b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9" }
 serde = { version = "1", features = ["derive"] }
 serde_with = "3"
 tempfile = "3"
@@ -108,3 +111,10 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+
+# The spike's Rune needs `adopt_gpu`, which Rune lacks: `sh/rune-spike/setup.sh` checks
+# out the pinned rev with `sh/rune-spike/rune.patch` applied where these point.
+[patch."https://github.com/anomalyco/rune"]
+rune = { path = ".tmp/rune/crates/rune" }
+rune-fx = { path = ".tmp/rune/crates/rune-fx" }
+rune-kit = { path = ".tmp/rune/crates/rune-kit" }
