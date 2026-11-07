@@ -218,7 +218,8 @@ fn no_spellcheck() -> Result<(), String> {
 	none.set_list(list_value_create().as_mut());
 	// CEF refuses to set anything without somewhere to say why it failed.
 	let mut error = CefString::from("unknown");
-	match context.set_preference(Some(&"spellcheck.dictionaries".into()), Some(&mut none), Some(&mut error)) {
+	let name = CefString::from("spellcheck.dictionaries");
+	match context.set_preference(Some(&name), Some(&mut none), Some(&mut error)) {
 		1 => Ok(()),
 		_ => Err(format!("cannot turn off spellcheck: {error}")),
 	}
