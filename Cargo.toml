@@ -35,6 +35,7 @@ moq-room = { path = "moq/rs/moq-room" }
 moq-scene = { path = "rs/moq-scene" }
 moq-stats = { path = "moq/rs/moq-stats" }
 moq-tokio = { path = "moq/rs/moq-tokio", default-features = false }
+moq-v4l = { path = "moq/rs/moq-v4l" }
 # Default features off, as in moq: each consumer opts into native codecs and
 # rendering explicitly.
 moq-video = { path = "moq/rs/moq-video", default-features = false }

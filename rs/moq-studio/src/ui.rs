@@ -1830,7 +1830,10 @@ impl Panels {
 			let refreshed = self.devices.refresh(&self.runtime).context("cannot list devices");
 			self.check(refreshed);
 		}
-		let Some(picked) = self.devices.ui(ui) else { return };
+		let camera = self.engine.state.lock().unwrap().camera();
+		let Some(picked) = self.devices.ui(ui, camera.as_ref().map(|camera| camera.id.as_str())) else {
+			return;
+		};
 		let mut state = self.engine.state.lock().unwrap();
 		// Two cameras of the same model share a name; number the later ones.
 		let name = state.collection().unused_name(&picked.name);
@@ -2667,6 +2670,46 @@ impl Panels {
 			if let Some(error) = video.error() {
 				ui.colored_label(ui.visuals().error_fg_color, error);
 			}
+		}
+
+		ui.separator();
+		self.camera(ui);
+	}
+
+	/// The main canvas's virtual camera: a toggle, and how it is doing while on.
+	fn camera(&mut self, ui: &mut Ui) {
+		let camera = self.engine.state.lock().unwrap().camera();
+		let mut on = camera.is_some();
+		if ui
+			.checkbox(&mut on, "Virtual camera")
+			.on_hover_text("Show the program as a camera that video-call apps can pick")
+			.changed()
+		{
+			let result = self.engine.set_camera(on);
+			let message = if on { "virtual camera on" } else { "virtual camera off" };
+			self.report(result.map(|()| message.to_string()));
+		}
+		let Some(camera) = camera else { return };
+		egui::Grid::new("camera").show(ui, |ui| {
+			ui.label("Camera");
+			ui.label(&camera.backend);
+			ui.end_row();
+			ui.label("Picture");
+			let canvas = camera.canvas;
+			ui.label(format!(
+				"{}x{} at {} fps",
+				canvas.width, canvas.height, canvas.framerate
+			));
+			ui.end_row();
+			ui.label("Apps");
+			ui.label(if camera.reading { "reading" } else { "none; not copying" });
+			ui.end_row();
+			ui.label("Sent");
+			ui.label(format!("{} frames, {} dropped", camera.sent, camera.dropped));
+			ui.end_row();
+		});
+		if let Some(error) = &camera.error {
+			ui.colored_label(ui.visuals().error_fg_color, error);
 		}
 	}
 
@@ -4357,8 +4400,10 @@ impl Devices {
 		}
 	}
 
-	/// Draw the listing; the device to add once the user picks one.
-	fn ui(&mut self, ui: &mut Ui) -> Option<Pick> {
+	/// Draw the listing, leaving out the camera `own` is the id of, the
+	/// studio's own virtual camera, so the program is not fed back into
+	/// itself; the device to add once the user picks one.
+	fn ui(&mut self, ui: &mut Ui, own: Option<&str>) -> Option<Pick> {
 		if self.pending.is_some() {
 			ui.spinner();
 		}
@@ -4377,6 +4422,11 @@ impl Devices {
 						}
 						Ok(devices) => {
 							for (index, device) in devices.iter().enumerate() {
+								if let Source::Camera { id: Some(id) } = &device.source
+									&& Some(id.as_str()) == own
+								{
+									continue;
+								}
 								ui.horizontal(|ui| {
 									if ui.small_button("Add").clicked() {
 										picked = Some(index);

@@ -29,10 +29,10 @@ nvidia = ["moq-video/nvidia"]
 openh264 = ["moq-video/openh264"]
 # Intel/AMD VAAPI hardware codecs (Linux); its bindgen needs libclang.
 vaapi = ["moq-video/vaapi"]
-# PipeWire cameras, drawn without a copy, and audio through the sound server.
-# Wayland screens and windows are not reachable yet: display and window sources
-# capture X11 only.
-pipewire = ["capture", "moq-scene/pipewire"]
+# PipeWire cameras, drawn without a copy, audio through the sound server, and
+# the virtual camera as a PipeWire node. Wayland screens and windows are not
+# reachable yet: display and window sources capture X11 only.
+pipewire = ["capture", "moq-scene/pipewire", "dep:pipewire"]
 # Browser sources, rendered by CEF in a helper process (Linux). Off by default:
 # the build downloads the CEF runtime (or takes it from `CEF_PATH`) and copies
 # it beside the binary, where the binary looks for it when it starts.
@@ -92,6 +92,12 @@ winit = { version = "0.30", default-features = false }
 # PipeWire capture uses, so the two share one D-Bus stack.
 ashpd = { version = "0.13", default-features = false, features = ["global_shortcuts", "tokio"] }
 futures-util = "0.3"
+# The virtual camera's v4l2loopback fallback. Pure Rust with its kernel bindings
+# checked in, and already in the graph through moq-video's capture.
+moq-v4l = { workspace = true }
+# The virtual camera's PipeWire node, behind `pipewire`. moq-video links the
+# same release; `v0_3_34` adds the trigger a driving stream paces frames with.
+pipewire = { version = "0.10", optional = true, features = ["v0_3_34"] }
 # Whether the window is on Wayland, where only the portal hears keys globally.
 raw-window-handle = "0.6"
 # Which keysyms the X11 layout puts on each key, so a hotkey grabs the key
