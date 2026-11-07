@@ -87,7 +87,9 @@ impl Fx {
 			.callback_resources
 			.insert(Renderer { fx, prepared: None });
 		Self {
-			picked: storage.and_then(|storage| eframe::get_value(storage, SETTING)).flatten(),
+			picked: storage
+				.and_then(|storage| eframe::get_value(storage, SETTING))
+				.flatten(),
 			system: motion::System::new(ctx, runtime),
 			effects: Effects::Full,
 			time: 0.0,
@@ -166,7 +168,10 @@ impl Fx {
 			frame: self.frame.clone(),
 			layers: start..self.layers.len(),
 		};
-		painter.set(at, egui_wgpu::Callback::new_paint_callback(painter.clip_rect(), callback));
+		painter.set(
+			at,
+			egui_wgpu::Callback::new_paint_callback(painter.clip_rect(), callback),
+		);
 	}
 
 	/// A first-launch screen's background.
@@ -189,7 +194,11 @@ impl Fx {
 	/// A panel's background: a faint grain over its fill, which never moves.
 	pub fn panel(&mut self, spot: &Spot, visuals: &egui::Visuals) {
 		let base = visuals.panel_fill;
-		let lift = if visuals.dark_mode { Color32::WHITE } else { Color32::BLACK };
+		let lift = if visuals.dark_mode {
+			Color32::WHITE
+		} else {
+			Color32::BLACK
+		};
 		let params = GrainGradientParams {
 			kind: GradientKind::Linear,
 			colors: Stops::new(&[linear(base), linear(mix(base, lift, 0.05))]),

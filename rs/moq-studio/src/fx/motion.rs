@@ -15,9 +15,7 @@ impl System {
 	/// Read the preference from the desktop portal, and follow its changes.
 	pub fn new(ctx: &egui::Context, runtime: &tokio::runtime::Handle) -> Self {
 		let reduced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-		let task = runtime
-			.spawn(portal(reduced.clone(), ctx.clone()))
-			.abort_handle();
+		let task = runtime.spawn(portal(reduced.clone(), ctx.clone())).abort_handle();
 		Self { reduced, task }
 	}
 
@@ -41,7 +39,10 @@ async fn portal(reduced: std::sync::Arc<std::sync::atomic::AtomicBool>, ctx: egu
 	use futures_util::StreamExt;
 
 	let set = |motion: ReducedMotion| {
-		reduced.store(motion == ReducedMotion::ReducedMotion, std::sync::atomic::Ordering::Relaxed);
+		reduced.store(
+			motion == ReducedMotion::ReducedMotion,
+			std::sync::atomic::Ordering::Relaxed,
+		);
 		ctx.request_repaint();
 	};
 	let followed = async {

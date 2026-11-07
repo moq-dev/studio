@@ -93,7 +93,6 @@ repository.
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
-- [Composable scenes](/quest/m0/scenes/README.md) - scenes nest scenes and the program, any scene publishes at its own size, and mixes become audio scenes
 - [Pan each sound](/quest/m0/audio-pan.md) - the Audio panel and `[audio.<source>]` pan each sound wherever it plays
 - [Clap-to-measure sync delay](/quest/m0/sync-clap.md) - a clap sets a microphone's delay against its camera
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
@@ -103,7 +102,9 @@ repository.
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
 - [The program reaches a relay on every runner](/quest/m0/relay-test-flake.md) - the relay engine test stops failing the nightly on GitHub's runner
 - [Browser sources make no outside requests](/quest/m0/browser-offline.md) - no component updates, spellcheck downloads, or network time from the helper
-- [A browser helper exits with the studio](/quest/m0/browser-helper-exit.md) - no orphaned CEF helper after a crash, kill, or timed-out test
+- [moq-studio builds on its own](/quest/m0/studio-builds-alone.md) - `cargo build -p moq-studio` no longer leans on a test dependency's features
+- [Unpublishing a scene ends its broadcast cleanly](/quest/m0/unpublish-clean.md) - viewers get a clean finish, not `Unroutable`, when a scene stops publishing
+- [A media file's sound plays with its pictures](/quest/m0/media-av-sync.md) - media sources write a bus latency ahead, as broadcast sources do
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
 - [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
