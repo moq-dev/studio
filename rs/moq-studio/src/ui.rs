@@ -1437,10 +1437,6 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let canvas = match self.top {
-			true => self.program_drawn,
-			false => self.drawn,
-		};
 		let scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
 		ui.horizontal(|ui| {
 			ui.selectable_value(&mut self.top, false, format!("Scene: {scene}"));
@@ -1460,6 +1456,9 @@ impl Panels {
 			ui.label(format!("There is no {layer}."));
 			return;
 		};
+		// The layer's own size as the collection has it now, rather than the
+		// preview's as last drawn, which a hidden preview leaves behind.
+		let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
 		let mut action = None;
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
