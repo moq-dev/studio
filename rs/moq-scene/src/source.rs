@@ -1706,7 +1706,9 @@ impl Driver {
 			let video = crate::publish::Video::new(listing, frame.size(), framerate(config), frame.surface.color());
 			// Pictures are stamped with when they show on `own`'s timeline,
 			// which may be ahead of when they encode.
-			let video = video.await.and_then(|mut video| video.anchor(own.origin).map(|()| video));
+			let video = video
+				.await
+				.and_then(|mut video| video.anchor(own.origin).map(|()| video));
 			own.track = self.publish(video);
 			// Only once it has, so a play cut off while it opens leaves the
 			// next picture to open it.
