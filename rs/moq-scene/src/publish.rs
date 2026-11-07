@@ -789,17 +789,20 @@ mod tests {
 		}
 	}
 
-	/// Walk a media source playing a 10 fps clip through `count` pictures, the
-	/// first due at `first`. The clock moves to each picture's moment and is
-	/// held while it decodes, encodes, and shows, so no wait counts on work in
-	/// threads the runtime cannot see, such as a decoder's or an encoder's,
-	/// finishing within any span of the clock.
-	async fn pictures(feed: &crate::source::Feed, first: kio::clock::Instant, count: u32) {
+	/// Walk a media source playing a 10 fps clip through `count` of its play's
+	/// pictures from the one at index `from`, returning when the play began.
+	/// The clock is held until the play begins, then moves to each picture's
+	/// moment and is held while it decodes, encodes, and shows, so no wait
+	/// counts on work in threads the runtime cannot see, such as a decoder's or
+	/// an encoder's, finishing within any span of the clock.
+	async fn pictures(feed: &crate::source::Feed, from: u32, count: u32) -> kio::clock::Instant {
+		let begun = until(|| feed.run().begun).await;
 		let shown = || matches!(feed.next_picture(), Some(crate::source::Picture::Frame(_))).then_some(());
-		for index in 0..count {
-			until_time(first + std::time::Duration::from_millis(100) * index).await;
+		for index in from..from + count {
+			until_time(begun + std::time::Duration::from_millis(100) * index).await;
 			until(shown).await;
 		}
+		begun
 	}
 
 	/// Yield until `f` holds of the local catalog's source listings.
@@ -976,7 +979,7 @@ mod tests {
 				tracks.push(consumer.track(name).unwrap().subscribe(subscription).await.unwrap());
 			}
 			let written = |id: &str| publish.stats().get(id).map_or(0, |rendition| rendition.frames);
-			pictures(sources.get("bed").unwrap(), kio::clock::now(), 4).await;
+			pictures(sources.get("bed").unwrap(), 0, 4).await;
 			until(|| names.iter().all(|name| written(name) > 0).then_some(())).await;
 
 			sources.stop();
@@ -1564,8 +1567,8 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 
-			// The first picture is due at once, so the clock stays put while
-			// the encoder opens.
+			// The pictures' track opens before the play begins, so the clock
+			// stays put while the encoder opens.
 			let listed = until(|| {
 				let listed = catalog.snapshot().ext.studio.sources.remove("clip");
 				listed.filter(|listed| !listed.video.renditions.is_empty())
@@ -1586,13 +1589,11 @@ mod tests {
 			let mut track = moq_mux::container::Consumer::new(track, container);
 
 			// Half way, five pictures in, it starts over, and plays to its end.
-			let first = kio::clock::now();
-			pictures(feed, first, 5).await;
+			let first = pictures(feed, 0, 5).await;
 			until_time(first + std::time::Duration::from_millis(450)).await;
 			let cut = publish.catalog.clock().now();
 			feed.play().unwrap();
-			let restarted = kio::clock::now();
-			pictures(feed, restarted, 10).await;
+			let restarted = pictures(feed, 0, 10).await;
 			until_time(restarted + std::time::Duration::from_millis(1_100)).await;
 			until(|| (feed.status() == Status::Ended).then_some(())).await;
 
@@ -1657,8 +1658,7 @@ mod tests {
 			let written = |id: &str| publish.stats().get(id).map_or(0, |rendition| rendition.frames);
 
 			let feed = sources.get("bed").unwrap();
-			let first = kio::clock::now();
-			pictures(feed, first, 4).await;
+			pictures(feed, 0, 4).await;
 			until(|| (written(&audio) > 0).then_some(())).await;
 			assert_eq!(written(&video), 0, "heard, not shown");
 			assert_eq!(sessions.open(), 0, "no encoder for the pictures");
@@ -1669,7 +1669,7 @@ mod tests {
 				shown: ["bed".to_string()].into(),
 				heard: ["bed".to_string()].into(),
 			});
-			pictures(feed, first + std::time::Duration::from_millis(400), 6).await;
+			pictures(feed, 4, 6).await;
 			until(|| (written(&video) > 0).then_some(())).await;
 		})
 		.await;
@@ -1715,7 +1715,7 @@ mod tests {
 			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 			let mut track = moq_mux::container::Consumer::new(track, container);
 			// Two and a half loops of a second, each with half a second of sound.
-			pictures(sources.get("bed").unwrap(), kio::clock::now(), 25).await;
+			pictures(sources.get("bed").unwrap(), 0, 25).await;
 			let now = kio::Waiter::noop();
 			let mut stamps = Vec::new();
 			let silences = until(|| {

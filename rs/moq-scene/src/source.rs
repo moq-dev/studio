@@ -1229,10 +1229,7 @@ impl Driver {
 			loop {
 				let now = kio::clock::now();
 				speaker.borrow_mut().commit(now);
-				let write = queue
-					.borrow()
-					.front()
-					.map(|(sounds, _)| *sounds - BUS_LATENCY);
+				let write = queue.borrow().front().map(|(sounds, _)| *sounds - BUS_LATENCY);
 				if write.is_some_and(|at| at <= now) {
 					let (sounds, frame) = queue.borrow_mut().pop_front().expect("peeked");
 					writer.write(sounds, &frame.data, now)?;
@@ -1451,7 +1448,9 @@ impl Driver {
 						sound.writer = Some(Writer::new(channel, bus.sample_rate, bus.layout.channels()));
 					}
 					let play = async {
-						let end = self.play_clip(&clip, sound.as_mut(), &mut own, &shows, next, cue.play).await?;
+						let end = self
+							.play_clip(&clip, sound.as_mut(), &mut own, &shows, next, cue.play)
+							.await?;
 						// A loop's next play hands its first over now, a bus
 						// latency ahead, as this one did.
 						if !looping {
