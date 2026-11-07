@@ -55,3 +55,17 @@ viewer can fetch; the rest reach viewers only in the program.
 Decided 2026-11-05 (maintainer, /quest-plan): the layout serializes the
 scene model with scene sources, published scenes, and audio scenes, not the
 canvases and mixes they replaced.
+
+Decided 2026-11-07 (maintainer, on
+[moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97)): this quest
+waits on [Published independently](/quest/m2/publish-independently.md), since
+until then no viewer can fetch a track the layout names, and the epic moved to
+m2 with it. Once that lands, replan this quest around the epic's reference
+picture, which decides what the layout carries. Rejected: replanning now
+around the program with the independently published sources layered over it,
+and building the full-scene layout as written above while no viewer can use
+it.
+
+## Required
+
+- [Published independently](/quest/m2/publish-independently.md) - the source tracks a viewer can fetch, which the layout names

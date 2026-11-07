@@ -60,7 +60,7 @@ cameras, packaging, signing) that one monorepo no longer pays off.
 - **Pin:** moq is a `moq` git submodule whose crates are path dependencies,
   as in moq.pro, so the studio compiles against one moq checkout.
 - **moq-scene** moved here with the app, its only consumer. The
-  [viewer-side composition](/quest/m1/compose/README.md) epic (now m1) moved whole:
+  [viewer-side composition](/quest/m2/compose/README.md) epic (now m2) moved whole:
   browser composition ships as a package from this repository layered on
   `@moq/watch`, and the server composite is a headless binary here rather
   than a moq-cli subcommand, so moq never depends on the studio.
@@ -77,7 +77,7 @@ broadcast reaches viewers, not the fallback. Sources are not published to the
 relay by default (decided 2026-11-03 on
 [moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), because
 each encoding costs an encoder session and consumer GPUs have few, so the
-[viewer-side composition](/quest/m1/compose/README.md) epic moved to m1.
+[viewer-side composition](/quest/m2/compose/README.md) epic moved to m1.
 Overlays and animation render into the program here, and travel to viewers
 in the layout track only once that epic lands.
 
@@ -100,7 +100,6 @@ repository.
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
-- [The UI keeps its frame rate while the program renders](/quest/m0/ui-frame-rate.md) - the editor draws without waiting on the program's render
 - [A replay's sound plays with its pictures](/quest/m0/replay-av-sync.md) - replay sources write a bus latency ahead, as media and broadcast sources do
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
 - [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux

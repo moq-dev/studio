@@ -6,6 +6,7 @@ MoQ Studio is a native, cross-platform streaming studio that composites scenes o
 # Required
 
 - Measure performance by frame time, GPU copies, and encoder load.
+- Measure the UI's frame time under a real compositor, such as headless sway (`WLR_BACKENDS=headless sway`), not Xvfb, whose present caps it at 12–25 fps on the NVIDIA test hosts.
 
 # Upstream
 
