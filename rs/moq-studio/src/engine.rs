@@ -3632,9 +3632,8 @@ mod tests {
 					let moq_audio::decode::Read::Frame(frame) = read else {
 						continue;
 					};
-					let samples: Vec<f32> = (frame.data.chunks_exact(4))
-						.map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()).abs())
-						.collect();
+					let (samples, _) = frame.data.as_chunks::<4>();
+					let samples: Vec<f32> = samples.iter().map(|bytes| f32::from_le_bytes(*bytes).abs()).collect();
 					let loudest = samples
 						.chunks_exact(channels)
 						.map(|sample| sample.iter().copied().fold(0.0, f32::max));
