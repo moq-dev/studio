@@ -305,8 +305,10 @@ background, and its sound joins the mixes. Every page shares one
 browser profile, kept in `$XDG_DATA_HOME/moq-studio/browser`
 (`~/.local/share/moq-studio/browser` by default) rather than beside the scene
 file, so cookies and logins, such as an alert service's, survive a reload and
-a restart of the studio. One studio at a time can use it: a second one's
-browser sources fail saying so. Each page renders in a process of its own, so
+a restart of the studio. They are not encrypted with the desktop's keyring,
+so a locked keyring never holds a page back, and anything that can read your
+home directory can read them. One studio at a time can use the profile: a
+second one's browser sources fail saying so. Each page renders in a process of its own, so
 a page that crashes fails only its own source, with the reason, while the
 stream carries on. A crash of the browser itself fails every browser source.
 Either shows at once, since the browser's processes dump no core.

@@ -139,6 +139,13 @@ impl Helper {
 		None
 	}
 
+	/// Whether a page's Copy and Cut come back through [`Helper::copied`],
+	/// rather than reaching the X clipboard through CEF itself.
+	#[cfg(target_os = "linux")]
+	pub fn relays_copies(&self) -> bool {
+		!self.raster.native_copy()
+	}
+
 	/// Stop the helper, failing every page, and wait for it to exit, so the
 	/// profile is saved and free for the next studio. The next page to start
 	/// starts a new helper.

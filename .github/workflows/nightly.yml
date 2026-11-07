@@ -36,6 +36,12 @@ jobs:
 
       - uses: ./.github/actions/nix
 
+      - name: Allow user namespaces
+        # The browser helper's Chromium sandboxes its processes in user
+        # namespaces, and aborts rather than run unsandboxed. Ubuntu's
+        # AppArmor lets only programs with a profile create them.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Render
         run: nix develop --command just render-sw
 
