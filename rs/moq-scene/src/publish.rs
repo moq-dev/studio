@@ -487,7 +487,7 @@ pub(crate) struct Video<'a> {
 	config: moq_video::encode::Config,
 	clock: moq_mux::Clock,
 	/// Where the capture's private timeline starts on the studio clock, in
-	/// microseconds, taken at the first frame.
+	/// microseconds, taken at the first frame unless [anchored](Self::anchor).
 	epoch: Option<u128>,
 }
 
@@ -519,6 +519,14 @@ impl<'a> Video<'a> {
 			clock: listing.studio.clock(),
 			epoch: None,
 		})
+	}
+
+	/// Start the private timeline at `origin` on the studio clock, rather than
+	/// where the first frame encodes, for a source that encodes its pictures
+	/// ahead of when they show.
+	pub(crate) fn anchor(&mut self, origin: kio::clock::Instant) -> Result<(), Error> {
+		self.epoch = Some(self.clock.capture(origin)?.as_micros());
+		Ok(())
 	}
 
 	/// Restamp `frame` onto the program's clock, and encode and publish it
@@ -667,10 +675,11 @@ impl<'a> Audio<'a> {
 		})
 	}
 
-	/// Encode and publish `samples`, whose first was captured at `captured`,
-	/// while the source is used: heard on program, or its track read. `gap`
-	/// says sound was lost just before them. Leaving use marks a gap, and the
-	/// sound after one is stamped afresh, so the track's timeline holds it.
+	/// Encode and publish `samples`, whose first was captured or sounds at
+	/// `captured`, while the source is used: heard on program, or its track
+	/// read. `gap` says sound was lost just before them. Leaving use marks a
+	/// gap, and the sound after one is stamped afresh, so the track's timeline
+	/// holds it.
 	pub(crate) fn write(&mut self, samples: &[f32], captured: kio::clock::Instant, gap: bool) -> Result<(), Error> {
 		let producer = self.producer.as_mut().expect("open until it ends");
 		let used = self.on_program.borrow().heard.contains(&self.claim.name) || producer.demand().wanted().is_some();
@@ -684,9 +693,13 @@ impl<'a> Audio<'a> {
 			producer.reanchor();
 		}
 		self.encoding = true;
-		// A device may stamp a buffer a moment ahead of the clock, which the
-		// clock refuses as not yet captured.
-		let timestamp = self.clock.capture(captured.min(kio::clock::now()))?;
+		// A media source writes its sound ahead of when it sounds, and a device
+		// may stamp a buffer a moment ahead of the clock, which maps only what
+		// has passed: the rest is counted on from now.
+		let now = kio::clock::now();
+		let ahead = captured.saturating_duration_since(now).as_micros();
+		let timestamp = self.clock.capture(captured.min(now))?.as_micros() + ahead;
+		let timestamp = moq_net::Timestamp::from_micros(timestamp as u64).map_err(moq_audio::Error::from)?;
 		let data = bytes::Bytes::copy_from_slice(bytemuck::cast_slice(samples));
 		producer.write(&moq_audio::Frame::new(data, timestamp))?;
 		Ok(())
@@ -1613,6 +1626,13 @@ mod tests {
 			.await;
 			assert!(stamps[0] < cut, "the first play's keyframe: {stamps:?}");
 			assert!(stamps.windows(2).all(|pair| pair[0] < pair[1]), "{stamps:?}");
+			// Stamped with when it showed, though encoded ahead of it.
+			let shown = publish.catalog.clock().capture(first).unwrap();
+			assert!(
+				stamps[0].as_micros().abs_diff(shown.as_micros()) <= 1,
+				"the first picture as it showed: {:?}, not {shown:?}",
+				stamps[0]
+			);
 
 			// Ended, it shows nothing new, yet gives its session back once off
 			// program and unread.
@@ -1715,7 +1735,7 @@ mod tests {
 			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 			let mut track = moq_mux::container::Consumer::new(track, container);
 			// Two and a half loops of a second, each with half a second of sound.
-			pictures(sources.get("bed").unwrap(), 0, 25).await;
+			let begun = pictures(sources.get("bed").unwrap(), 0, 25).await;
 			let now = kio::Waiter::noop();
 			let mut stamps = Vec::new();
 			let silences = until(|| {
@@ -1730,6 +1750,9 @@ mod tests {
 			})
 			.await;
 			assert_eq!(silences, 2, "each loop's silence is kept: {stamps:?}");
+			// Stamped with when it sounded, though written ahead of it.
+			let sounded = std::time::Duration::from(publish.catalog.clock().capture(begun).unwrap());
+			assert_eq!(stamps[0], sounded, "the first sound as it sounded");
 		})
 		.await;
 	}

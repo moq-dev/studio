@@ -1704,7 +1704,10 @@ impl Driver {
 	async fn open(&self, own: &mut Own<'_, '_>, frame: &moq_video::Frame, config: &VideoConfig) {
 		if let Some(listing) = own.listing.filter(|_| !own.opened) {
 			let video = crate::publish::Video::new(listing, frame.size(), framerate(config), frame.surface.color());
-			own.track = self.publish(video.await);
+			// Pictures are stamped with when they show on `own`'s timeline,
+			// which may be ahead of when they encode.
+			let video = video.await.and_then(|mut video| video.anchor(own.origin).map(|()| video));
+			own.track = self.publish(video);
 			// Only once it has, so a play cut off while it opens leaves the
 			// next picture to open it.
 			own.opened = true;
