@@ -364,23 +364,30 @@ async fn a_dropdown_draws_and_takes_clicks() {
 	.await;
 }
 
-/// Copy and Cut hand the page's selection to the studio for its clipboard,
-/// and Cut deletes it from the page. A password field's text is never taken.
+/// Copy and Cut put the page's selection on the clipboard, and Cut deletes it
+/// from the page. A password field's text is never taken.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
 async fn copy_and_cut_reach_the_clipboard() {
 	local(async {
-		// A text box over the whole page, and a password field below it. The
-		// page turns yellow once the text box is selected, lime once it is
-		// typed in, and blue and white for the same on the password.
-		let html = "<body style='margin:0;background:red'>\
-			<input value='hello world' style='width:100vw;height:100vh;background:transparent' \
-			onselect=\"document.body.style.background = 'yellow'\" \
-			oninput=\"document.body.style.background = 'lime'\">\
+		// A text box over the whole page, then a password field and a second
+		// text box below it. The page turns yellow once the first is
+		// selected, blue and white once the password is selected and typed
+		// in, and aqua and lime for the same on the second. This process's id
+		// tells its copies from whatever the X clipboard held before.
+		let id = std::process::id();
+		let html = format!(
+			"<body style='margin:0;background:red'>\
+			<input value='copy {id}' style='width:100vw;height:100vh;background:transparent' \
+			onselect=\"document.body.style.background = 'yellow'\">\
 			<input type=password value='hunter2' \
 			onselect=\"document.body.style.background = 'blue'\" \
-			oninput=\"document.body.style.background = 'white'\"></body>";
-		let mut studio = Studio::new(&[("page", page(html))]).await;
+			oninput=\"document.body.style.background = 'white'\">\
+			<input value='cut {id}' \
+			onselect=\"document.body.style.background = 'aqua'\" \
+			oninput=\"document.body.style.background = 'lime'\"></body>"
+		);
+		let mut studio = Studio::new(&[("page", page(&html))]).await;
 		studio.until_center([255, 0, 0, 255], &[]).await;
 
 		let page = studio.sources.get("page").unwrap().page().unwrap().clone();
@@ -397,21 +404,7 @@ async fn copy_and_cut_reach_the_clipboard() {
 			ctrl: true,
 			..Default::default()
 		};
-		let shift = Modifiers {
-			shift: true,
-			..Default::default()
-		};
-		let helper = studio.helper.clone();
-		let copied = async || {
-			let deadline = Instant::now() + TIMEOUT;
-			loop {
-				if let Some(copied) = helper.copied() {
-					return copied;
-				}
-				assert!(Instant::now() < deadline, "the copy never came back");
-				kio::clock::sleep(Duration::from_millis(30)).await;
-			}
-		};
+		let mut clipboard = Clipboard::new(studio.helper.clone());
 
 		page.send(Input::Focus(true));
 		for down in [true, false] {
@@ -429,7 +422,7 @@ async fn copy_and_cut_reach_the_clipboard() {
 		key(b'A', ctrl);
 		studio.until_center(YELLOW, &[]).await;
 		page.send(Input::Copy);
-		assert_eq!(copied().await, "hello world");
+		assert_eq!(clipboard.next().await, format!("copy {id}"));
 
 		// Text typed after the copy shows only once the copy has come back.
 		key(b'\t', Modifiers::default());
@@ -438,16 +431,109 @@ async fn copy_and_cut_reach_the_clipboard() {
 		page.send(Input::Copy);
 		page.send(Input::Text("x".into()));
 		studio.until_center([255, 255, 255, 255], &[]).await;
-		assert_eq!(helper.copied(), None, "a password was copied");
+		assert_eq!(clipboard.take(), None, "a password was copied");
 
-		key(b'\t', shift);
+		key(b'\t', Modifiers::default());
 		key(b'A', ctrl);
-		studio.until_center(YELLOW, &[]).await;
+		studio.until_center([0, 255, 255, 255], &[]).await;
 		page.send(Input::Cut);
 		studio.until_center(GREEN, &[]).await;
-		assert_eq!(copied().await, "hello world");
+		assert_eq!(clipboard.next().await, format!("cut {id}"));
 	})
 	.await;
+}
+
+/// Where a page's copies land: the X clipboard, where CEF copies itself, or
+/// else the studio's, through the helper.
+enum Clipboard {
+	Relay(Helper),
+	/// With the text it held when last read.
+	X11(Option<String>),
+}
+
+impl Clipboard {
+	fn new(helper: Helper) -> Self {
+		match helper.relays_copies() {
+			true => Self::Relay(helper),
+			false => Self::X11(x11_clipboard()),
+		}
+	}
+
+	/// What a page copied since this was last asked, if anything.
+	fn take(&mut self) -> Option<String> {
+		match self {
+			Self::Relay(helper) => helper.copied(),
+			Self::X11(held) => {
+				let text = x11_clipboard();
+				if text == *held {
+					return None;
+				}
+				held.clone_from(&text);
+				text
+			}
+		}
+	}
+
+	/// Wait for a page's next copy.
+	async fn next(&mut self) -> String {
+		let deadline = Instant::now() + TIMEOUT;
+		loop {
+			if let Some(text) = self.take() {
+				return text;
+			}
+			assert!(Instant::now() < deadline, "the copy never landed");
+			kio::clock::sleep(Duration::from_millis(30)).await;
+		}
+	}
+}
+
+/// The X clipboard's text, as a paste takes it: none with no owner, or one
+/// offering no text.
+fn x11_clipboard() -> Option<String> {
+	use x11rb::connection::Connection;
+	use x11rb::protocol::Event;
+	use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, WindowClass};
+
+	let (connection, screen) = x11rb::connect(None).expect("the X display");
+	let root = connection.setup().roots[screen].root;
+	let window = connection.generate_id().unwrap();
+	connection
+		.create_window(
+			0,
+			window,
+			root,
+			0,
+			0,
+			1,
+			1,
+			0,
+			WindowClass::INPUT_ONLY,
+			0,
+			&CreateWindowAux::new(),
+		)
+		.unwrap();
+	let atom = |name: &[u8]| connection.intern_atom(false, name).unwrap().reply().unwrap().atom;
+	let (selection, text, property) = (atom(b"CLIPBOARD"), atom(b"UTF8_STRING"), atom(b"MOQ_STUDIO_PASTE"));
+	connection
+		.convert_selection(window, selection, text, property, x11rb::CURRENT_TIME)
+		.unwrap();
+	connection.flush().unwrap();
+	loop {
+		if let Event::SelectionNotify(notify) = connection.wait_for_event().unwrap()
+			&& notify.requestor == window
+		{
+			if notify.property == x11rb::NONE {
+				return None;
+			}
+			let value = connection
+				.get_property(true, window, property, AtomEnum::ANY, 0, u32::MAX)
+				.unwrap()
+				.reply()
+				.unwrap()
+				.value;
+			return Some(String::from_utf8(value).unwrap());
+		}
+	}
 }
 
 /// A page that closes itself fails its own source and leaves the canvas,

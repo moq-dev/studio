@@ -1945,8 +1945,15 @@ impl Panels {
 			let refreshed = self.devices.refresh(&self.runtime).context("cannot list devices");
 			self.check(refreshed);
 		}
-		let camera = self.engine.state.lock().unwrap().camera();
-		let Some(picked) = self.devices.ui(ui, camera.as_ref().map(|camera| camera.id.as_str())) else {
+		let own: Vec<String> = self
+			.engine
+			.state
+			.lock()
+			.unwrap()
+			.cameras()
+			.map(|camera| camera.id)
+			.collect();
+		let Some(picked) = self.devices.ui(ui, &own) else {
 			return;
 		};
 		let mut state = self.engine.state.lock().unwrap();
@@ -2818,27 +2825,33 @@ impl Panels {
 			if let Some(error) = video.audio_error() {
 				ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
 			}
+			self.camera(ui, Some(&name));
 		}
 
 		ui.separator();
-		self.camera(ui);
+		self.camera(ui, None);
 	}
 
-	/// The program's virtual camera: a toggle, and how it is doing while on.
-	fn camera(&mut self, ui: &mut Ui) {
-		let camera = self.engine.state.lock().unwrap().camera();
+	/// The virtual camera of the program, or of the published scene `scene`:
+	/// a toggle, and how it is doing while on.
+	fn camera(&mut self, ui: &mut Ui, scene: Option<&str>) {
+		let camera = self.engine.state.lock().unwrap().camera(scene);
 		let mut on = camera.is_some();
+		let (shows, named) = match scene {
+			None => ("the program".to_string(), "virtual camera".to_string()),
+			Some(scene) => (format!("scene `{scene}`"), format!("scene `{scene}`'s virtual camera")),
+		};
 		if ui
 			.checkbox(&mut on, "Virtual camera")
-			.on_hover_text("Show the program as a camera that video-call apps can pick")
+			.on_hover_text(format!("Show {shows} as a camera that video-call apps can pick"))
 			.changed()
 		{
-			let result = self.engine.set_camera(on);
-			let message = if on { "virtual camera on" } else { "virtual camera off" };
-			self.report(result.map(|()| message.to_string()));
+			let result = self.engine.set_camera(scene, on);
+			let message = format!("{named} {}", if on { "on" } else { "off" });
+			self.report(result.map(|()| message));
 		}
 		let Some(camera) = camera else { return };
-		egui::Grid::new("camera").show(ui, |ui| {
+		egui::Grid::new(("camera", scene)).show(ui, |ui| {
 			ui.label("Camera");
 			ui.label(&camera.backend);
 			ui.end_row();
@@ -4544,10 +4557,10 @@ impl Devices {
 		}
 	}
 
-	/// Draw the listing, leaving out the camera `own` is the id of, the
-	/// studio's own virtual camera, so the program is not fed back into
+	/// Draw the listing, leaving out the cameras `own` holds the ids of, the
+	/// studio's own virtual cameras, so what one shows is not fed back into
 	/// itself; the device to add once the user picks one.
-	fn ui(&mut self, ui: &mut Ui, own: Option<&str>) -> Option<Pick> {
+	fn ui(&mut self, ui: &mut Ui, own: &[String]) -> Option<Pick> {
 		if self.pending.is_some() {
 			ui.spinner();
 		}
@@ -4567,7 +4580,7 @@ impl Devices {
 						Ok(devices) => {
 							for (index, device) in devices.iter().enumerate() {
 								if let Source::Camera { id: Some(id) } = &device.source
-									&& Some(id.as_str()) == own
+									&& own.contains(id)
 								{
 									continue;
 								}
