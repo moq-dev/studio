@@ -4,7 +4,8 @@
 
 A replay source's sound plays in step with its own pictures in every output
 (program, published scenes, recordings, and Listen), instead of a bus
-latency (50 ms) behind them.
+latency (50 ms) behind them. This is about replays at normal speed; a slowed
+replay stays silent, as it is today.
 
 ## Plan
 
