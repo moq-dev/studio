@@ -950,6 +950,8 @@ async fn read(origin: moq_net::origin::Consumer, path: moq_net::Path, slot: Slot
 				next = following.available().await;
 				continue;
 			}
+			// A closed origin answers every later call at once.
+			Err(err @ moq_net::Error::Closed) => return failed(&slot, &path, err.into()),
 			// The follow waits for the route to change before it asks again.
 			Err(err) => {
 				failed(&slot, &path, err.into());
@@ -1568,6 +1570,22 @@ mod tests {
 		assert_ne!(first.instance(), second.instance());
 		read_from(second.instance()).await;
 		reading.abort();
+	}
+
+	/// A reader stops, saying why, once its origin closes.
+	#[tokio::test(start_paused = true)]
+	async fn a_reader_stops_with_its_origin() {
+		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+		let slot = Slot::default();
+		let path = moq_net::Path::new("show/viewers/alice.echo").unwrap();
+		let reading = tokio::spawn(read(origin.consume(), path, slot.clone()));
+		tokio::task::yield_now().await;
+		drop(driver);
+		kio::clock::timeout(Duration::from_secs(30), reading)
+			.await
+			.expect("the reader stops")
+			.unwrap();
+		assert!(slot.lock().unwrap().error.is_some());
 	}
 
 	/// A relay that shares its stats counts each session watching the
