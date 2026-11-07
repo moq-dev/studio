@@ -118,13 +118,7 @@ fn serve() -> Result<(), String> {
 		writer: Mutex::new(writer),
 		painted: Mutex::new(painted),
 		accelerated: matches!(start.raster, Raster::Gpu { .. }),
-		native_copy: matches!(
-			start.raster,
-			Raster::Gpu {
-				display: Display::X11,
-				..
-			}
-		),
+		native_copy: start.raster.native_copy(),
 	});
 	// The studio shows why, rather than only that the helper exited.
 	browse(&shared, start, reader, painted_tx).inspect_err(|reason| _ = shared.send(&Event::Fatal(reason.clone()), &[]))
@@ -550,6 +544,17 @@ wrap_app! {
 				Some(&"autoplay-policy".into()),
 				Some(&"no-user-gesture-required".into()),
 			);
+			// Chromium otherwise reads the profile's cookies only once the
+			// desktop's keyring hands over its key, which a locked keyring holds
+			// behind an unlock prompt: every page that loads over the network
+			// stays Starting until someone answers it, and forever where no one
+			// can, as with no monitor attached.
+			command_line.append_switch_with_value(Some(&"password-store".into()), Some(&"basic".into()));
+			// Chromium's sandbox needs unprivileged user namespaces, which
+			// Ubuntu's AppArmor and a Flatpak deny, or a setuid-root helper,
+			// which a user build lacks. Without either, the browser aborts
+			// rather than run unsandboxed, so the sandbox is off, as in OBS.
+			command_line.append_switch(Some(&"no-sandbox".into()));
 			match &self.raster {
 				Raster::Gpu { render_node, display } => {
 					let platform = match display {

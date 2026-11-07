@@ -1,14 +1,15 @@
-//! The program as a system camera, for video-call and conferencing apps that
-//! offer no ingest.
+//! The program, or a published scene, as a system camera, for video-call and
+//! conferencing apps that offer no ingest.
 //!
 //! On Linux the camera is a PipeWire video node (with the `pipewire` feature),
 //! which PipeWire-aware apps such as browsers list as a camera. Without
 //! PipeWire it is an existing v4l2loopback device, since that kernel module
 //! needs root to load and so is never the first choice.
 //!
-//! The program clock offers every program frame; [`Camera::offer`]
-//! has moq-video read it back only while an app reads the camera, and the
-//! `vcam` thread waits for the copy and hands the pixels to the backend.
+//! The program clock offers every frame it draws of what a camera shows;
+//! [`Camera::offer`] has moq-video read it back only while an app reads the
+//! camera, and the `vcam` thread waits for the copy and hands the pixels to
+//! the backend.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -22,7 +23,7 @@ mod pipewire;
 #[cfg(target_os = "linux")]
 mod v4l2;
 
-/// The program, published as a camera other apps can open.
+/// The program, or a published scene, as a camera other apps can open.
 ///
 /// Dropping it removes the camera.
 pub struct Camera {
@@ -39,11 +40,11 @@ pub struct Camera {
 
 /// What the program clock hands the `vcam` thread.
 enum Work {
-	/// A program copy on its way back from the GPU. Unbounded in the channel
+	/// A copy on its way back from the GPU. Unbounded in the channel
 	/// only in name: the readback lends out at most [`Readback::DEPTH`] at once.
 	Picture(Pending),
-	/// The canvas changed size or frame rate: close the backend and open it
-	/// again for this one.
+	/// What the camera shows changed size or frame rate: close the backend
+	/// and open it again for this canvas.
 	Reopen(Canvas),
 }
 
@@ -116,21 +117,28 @@ trait Sink: Send {
 }
 
 impl Camera {
-	/// Publish the `canvas` programs drawn on `device` as a camera.
+	/// Publish the program, or the published scene called `scene`, drawn on
+	/// `device` at `canvas`, as a camera named after it.
 	///
 	/// Fails, naming why each backend refused, when this machine has no way to
 	/// publish one.
-	pub fn open(device: &wgpu::Device, queue: &wgpu::Queue, canvas: Canvas) -> anyhow::Result<Self> {
+	pub fn open(
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+		scene: Option<&str>,
+		canvas: Canvas,
+	) -> anyhow::Result<Self> {
 		let readback = Readback::new(device, queue, size(canvas))?;
 		let shared = Arc::new(Shared::default());
-		let sink = open(canvas, &shared)?;
+		let scene = scene.map(str::to_string);
+		let sink = open(scene.as_deref(), canvas, &shared)?;
 
 		let (work, pending) = mpsc::channel();
 		let worker = {
 			let shared = shared.clone();
 			std::thread::Builder::new()
 				.name("vcam".into())
-				.spawn(move || run(pending, sink, &shared))
+				.spawn(move || run(pending, sink, scene.as_deref(), &shared))
 				.context("cannot start the virtual camera thread")?
 		};
 		Ok(Self {
@@ -144,14 +152,21 @@ impl Camera {
 		})
 	}
 
-	/// Copy `program`, drawn at `canvas`, to the camera if an app reads it.
+	/// Whether an app reads the camera, so what it shows is worth drawing.
+	pub fn wanted(&self) -> bool {
+		self.shared.wanted()
+	}
+
+	/// Copy `picture`, what the camera shows as drawn at `canvas`, to the
+	/// camera if an app reads it, or show nothing new for `None`, when it was
+	/// not drawn.
 	///
 	/// A canvas of a new size or frame rate reopens the camera for it, so an
 	/// app reading it opens it again.
 	///
 	/// The copy is submitted before this returns, so the caller draws into
-	/// `program` again freely. Never waits on the GPU.
-	pub fn offer(&mut self, program: &wgpu::Texture, canvas: Canvas) {
+	/// `picture` again freely. Never waits on the GPU.
+	pub fn offer(&mut self, picture: Option<&wgpu::Texture>, canvas: Canvas) {
 		let Some(work) = &self.work else { return };
 		if canvas != self.canvas {
 			self.canvas = canvas;
@@ -162,10 +177,10 @@ impl Camera {
 			// A send fails only once the thread stopped, having said why.
 			let _ = work.send(Work::Reopen(canvas));
 		}
-		if !self.shared.wanted() {
+		let Some(picture) = picture.filter(|_| self.shared.wanted()) else {
 			return;
-		}
-		match self.readback.copy(program) {
+		};
+		match self.readback.copy(picture) {
 			Ok(Some(pending)) => {
 				let _ = work.send(Work::Picture(pending));
 			}
@@ -205,33 +220,41 @@ fn size(canvas: Canvas) -> moq_video::Size {
 	moq_video::Size::new(canvas.width, canvas.height)
 }
 
-/// Open the first backend that takes `canvas`, and say where it lives in
-/// `shared`.
-fn open(canvas: Canvas, shared: &Arc<Shared>) -> anyhow::Result<Box<dyn Sink>> {
-	let (sink, backend, id) = backend(size(canvas), canvas.framerate, shared)?;
+/// Open the first backend that takes `canvas` for the camera of the program,
+/// or of `scene`, and say where it lives in `shared`.
+fn open(scene: Option<&str>, canvas: Canvas, shared: &Arc<Shared>) -> anyhow::Result<Box<dyn Sink>> {
+	let (sink, backend, id) = backend(scene, size(canvas), canvas.framerate, shared)?;
 	tracing::info!(%backend, "virtual camera on");
 	*shared.opened.lock().unwrap() = Opened { backend, id, canvas };
 	Ok(sink)
 }
 
-/// The first backend that takes a `size` camera at `framerate`, with where it
-/// lives and its capture id.
+/// The first backend that takes a `size` camera of the program, or of
+/// `scene`, at `framerate`, with where it lives and its capture id.
 #[cfg(target_os = "linux")]
 fn backend(
+	scene: Option<&str>,
 	size: moq_video::Size,
 	framerate: u32,
 	shared: &Arc<Shared>,
 ) -> anyhow::Result<(Box<dyn Sink>, String, String)> {
 	#[cfg(feature = "pipewire")]
-	let pipewire = match pipewire::Node::open(size, framerate, shared.clone()) {
-		Ok(node) => return Ok((Box::new(node), "PipeWire".to_string(), pipewire::ID.to_string())),
+	let pipewire = match pipewire::Node::open(scene, size, framerate, shared.clone()) {
+		Ok(node) => {
+			let id = node.id();
+			return Ok((Box::new(node), "PipeWire".to_string(), id));
+		}
 		Err(err) => {
 			tracing::warn!(err = %format!("{err:#}"), "no PipeWire camera, trying v4l2loopback");
 			format!("{err:#}")
 		}
 	};
 	#[cfg(not(feature = "pipewire"))]
-	let pipewire = "this build has no `pipewire` feature".to_string();
+	let pipewire = {
+		// A loopback device is named when its module loads, not by the studio.
+		let _ = scene;
+		"this build has no `pipewire` feature".to_string()
+	};
 
 	match v4l2::Loopback::open(size, framerate) {
 		Ok(loopback) => {
@@ -246,27 +269,29 @@ fn backend(
 
 #[cfg(not(target_os = "linux"))]
 fn backend(
+	scene: Option<&str>,
 	size: moq_video::Size,
 	framerate: u32,
 	shared: &Arc<Shared>,
 ) -> anyhow::Result<(Box<dyn Sink>, String, String)> {
-	let _ = (size, framerate, shared);
+	let _ = (scene, size, framerate, shared);
 	anyhow::bail!("the virtual camera is not available on this platform yet")
 }
 
-/// Hand each copy to `sink` as it lands, until the camera is dropped or fails.
-fn run(pending: mpsc::Receiver<Work>, mut sink: Box<dyn Sink>, shared: &Arc<Shared>) {
+/// Hand each copy to `sink`, the camera of the program or of `scene`, as it
+/// lands, until the camera is dropped or fails.
+fn run(pending: mpsc::Receiver<Work>, mut sink: Box<dyn Sink>, scene: Option<&str>, shared: &Arc<Shared>) {
 	while let Ok(work) = pending.recv() {
 		let result = match work {
 			Work::Picture(pending) => pending
 				.wait()
-				.context("reading the program back")
+				.context("reading the picture back")
 				.and_then(|rgba| sink.write(rgba.data())),
 			Work::Reopen(canvas) => {
 				// Closed first, so the new one finds the device free.
 				drop(sink);
 				shared.reading.store(false, Ordering::Relaxed);
-				match open(canvas, shared) {
+				match open(scene, canvas, shared) {
 					Ok(opened) => {
 						sink = opened;
 						continue;

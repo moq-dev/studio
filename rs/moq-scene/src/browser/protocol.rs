@@ -77,6 +77,20 @@ pub(crate) enum Raster {
 	Cpu,
 }
 
+impl Raster {
+	/// Whether CEF's own copy reaches the desktop's clipboard: only through an
+	/// X display.
+	pub(crate) fn native_copy(&self) -> bool {
+		matches!(
+			self,
+			Raster::Gpu {
+				display: Display::X11,
+				..
+			}
+		)
+	}
+}
+
 /// The display server the GPU path connects to, the one the studio runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Display {
