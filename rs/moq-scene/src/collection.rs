@@ -12,8 +12,8 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use crate::Error;
 
-/// Everything a studio composes: the canvases, the sources, and the scenes
-/// that place them.
+/// Everything a studio composes: the program's canvas, the sources, and the
+/// scenes that place them.
 ///
 /// Saved with [`to_toml`](Self::to_toml) and loaded with
 /// [`from_toml`](Self::from_toml). The file names devices, files, and broadcast
@@ -21,14 +21,9 @@ use crate::Error;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Collection {
-	/// The main canvas every scene is drawn onto, whose frame rate every
-	/// canvas shares.
+	/// The program's size and frame rate: the size of every scene that sets
+	/// none, and the frame rate every scene is drawn at.
 	pub canvas: Canvas,
-	/// Further canvases by name, such as a portrait one beside a landscape
-	/// main canvas. Each draws its own layout of every scene from the same
-	/// sources, under its own top layer.
-	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-	pub canvases: BTreeMap<String, Extra>,
 	/// How the preview is taken to program, short of a cut.
 	#[serde(default)]
 	pub transition: Transition,
@@ -50,9 +45,10 @@ pub struct Collection {
 	/// The scenes, in the order the scene list shows them.
 	#[serde(default)]
 	pub scenes: Vec<Scene>,
-	/// The top layer: items drawn over whichever scene is in preview and on
-	/// program, back to front, so they stay on across scene switches (a
-	/// downstream keyer). They do not fade with a transition.
+	/// The top layer: items drawn over whichever scene is on program, and in
+	/// preview over one of the program's size, back to front, so they stay on
+	/// across scene switches (a downstream keyer). They do not fade with a
+	/// transition.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub top: Vec<Item>,
 }
@@ -68,7 +64,6 @@ impl Collection {
 	pub fn new() -> Self {
 		Self {
 			canvas: Canvas::default(),
-			canvases: BTreeMap::new(),
 			transition: Transition::default(),
 			sources: BTreeMap::new(),
 			mixes: Mixes::default(),
@@ -99,87 +94,71 @@ impl Collection {
 		self.scenes.iter().find(|scene| scene.name == name)
 	}
 
-	/// The canvas `canvas` names: the main one for `None`, or a further one,
-	/// at the main canvas's frame rate. `None` for a canvas that does not
-	/// exist.
-	pub fn canvas(&self, canvas: Option<&str>) -> Option<Canvas> {
-		match canvas {
+	/// The canvas the scene called `scene` is drawn on, or the top layer for
+	/// `None`: its own size, or the program's, at the program's frame rate.
+	/// `None` for a scene that does not exist.
+	pub fn canvas(&self, scene: Option<&str>) -> Option<Canvas> {
+		match scene {
 			None => Some(self.canvas),
-			Some(name) => self.canvases.get(name).map(|extra| extra.canvas(self.canvas.framerate)),
+			Some(name) => self.scene(name).map(|scene| scene.canvas(self.canvas)),
 		}
 	}
 
-	/// The items of `layer`, or `None` for a scene or canvas that does not
-	/// exist. A scene with no layout on a further canvas has none there.
+	/// The items of `layer`, or `None` for a scene that does not exist.
 	pub fn items(&self, layer: &Layer) -> Option<&[Item]> {
-		match (&layer.canvas, &layer.scene) {
-			(None, Some(scene)) => self.scene(scene).map(|scene| scene.items.as_slice()),
-			(None, None) => Some(&self.top),
-			(Some(canvas), scene) => {
-				let extra = self.canvases.get(canvas)?;
-				match scene {
-					Some(scene) => {
-						let layout = self.scene(scene)?.canvases.get(canvas);
-						Some(layout.map_or(&[], Vec::as_slice))
-					}
-					None => Some(&extra.top),
-				}
-			}
+		match &layer.scene {
+			Some(scene) => self.scene(scene).map(|scene| scene.items.as_slice()),
+			None => Some(&self.top),
 		}
 	}
 
-	/// Run `edit` on the items of `layer`, or return `None` for a scene or
-	/// canvas that does not exist. A scene's layout on a further canvas is
-	/// kept only while it holds items, so a scene has one way to say it has
-	/// none there, as [`validate`](Self::validate) requires.
+	/// Run `edit` on the items of `layer`, or return `None` for a scene that
+	/// does not exist.
 	pub(crate) fn edit_items<T>(&mut self, layer: &Layer, edit: impl FnOnce(&mut Vec<Item>) -> T) -> Option<T> {
-		if let Some(canvas) = &layer.canvas
-			&& !self.canvases.contains_key(canvas)
-		{
-			return None;
-		}
-		match (&layer.canvas, &layer.scene) {
-			(None, None) => Some(edit(&mut self.top)),
-			(Some(canvas), None) => self.canvases.get_mut(canvas).map(|extra| edit(&mut extra.top)),
-			(canvas, Some(name)) => {
+		match &layer.scene {
+			None => Some(edit(&mut self.top)),
+			Some(name) => {
 				let scene = self.scenes.iter_mut().find(|scene| &scene.name == name)?;
-				let Some(canvas) = canvas else {
-					return Some(edit(&mut scene.items));
-				};
-				let mut layout = scene.canvases.remove(canvas).unwrap_or_default();
-				let edited = edit(&mut layout);
-				if !layout.is_empty() {
-					scene.canvases.insert(canvas.clone(), layout);
-				}
-				Some(edited)
+				Some(edit(&mut scene.items))
 			}
 		}
 	}
 
-	/// Every layer: the main canvas's scenes in order, then its top layer,
-	/// then each further canvas's the same way.
+	/// Every layer: the scenes in order, then the top layer.
 	pub fn layers(&self) -> impl Iterator<Item = (Layer, &[Item])> {
-		let extras = self
-			.canvases
+		let scenes = self
+			.scenes
 			.iter()
-			.map(|(name, extra)| (Some(name), extra.top.as_slice()));
-		let canvases = std::iter::once((None, self.top.as_slice())).chain(extras);
-		canvases.flat_map(move |(canvas, top)| {
-			let scenes = self.scenes.iter().map(move |scene| {
-				let items = match canvas {
-					None => scene.items.as_slice(),
-					Some(name) => scene.canvases.get(name).map_or(&[][..], Vec::as_slice),
-				};
-				(Some(scene.name.clone()), items)
-			});
-			scenes.chain([(None, top)]).map(move |(scene, items)| {
-				let layer = Layer {
-					canvas: canvas.cloned(),
-					scene,
-				};
-				(layer, items)
-			})
-		})
+			.map(|scene| (Layer::scene(&scene.name), scene.items.as_slice()));
+		scenes.chain([(Layer::top(), self.top.as_slice())])
+	}
+
+	/// The scene recordings hold, or `None` for the program.
+	pub fn recorded(&self) -> Option<&str> {
+		let recorded = self.scenes.iter().find(|scene| scene.recorded);
+		recorded.map(|scene| scene.name.as_str())
+	}
+
+	/// Whether the scene called `scene` can go on program: it is the
+	/// program's size, and draws no program source, which it would draw into
+	/// itself. Refused with the reason otherwise, or for a scene that does
+	/// not exist.
+	pub fn takes(&self, scene: &str) -> Result<(), Error> {
+		let canvas = self
+			.canvas(Some(scene))
+			.ok_or_else(|| Error::Invalid(format!("there is no scene `{scene}`")))?;
+		if canvas.size() != self.canvas.size() {
+			return Err(Error::Invalid(format!(
+				"`{scene}` is {}x{}, not the program's {}x{}, so it cannot go on program",
+				canvas.width, canvas.height, self.canvas.width, self.canvas.height
+			)));
+		}
+		if self.draws_program(scene) {
+			return Err(Error::Invalid(format!(
+				"`{scene}` draws the program, so it cannot go on program"
+			)));
+		}
+		Ok(())
 	}
 
 	/// The source whose capture `name` shows: itself, or what it clones.
@@ -319,23 +298,13 @@ impl Collection {
 		source.unwrap_or_default().then(&item.crop)
 	}
 
-	/// Check what the types cannot: the canvas can be encoded, names are unique,
-	/// every item, clone, audio, and video entry names a source that exists, a
-	/// stinger names a media source, and every crop and filter's settings are
-	/// in range, each filter naming a source of the kind it reads.
+	/// Check what the types cannot: every canvas can be encoded, names are
+	/// unique, a published scene's names its broadcast, one scene at most is
+	/// recorded, every item, clone, audio, and video entry names a source that
+	/// exists, a stinger names a media source, and every crop and filter's
+	/// settings are in range, each filter naming a source of the kind it reads.
 	pub fn validate(&self) -> Result<(), Error> {
 		self.canvas.validate()?;
-		for (name, extra) in &self.canvases {
-			if name.is_empty() || name.contains('/') {
-				return Err(Error::Invalid(format!(
-					"canvas `{name}` must be named, without a `/`, since its name names its broadcast"
-				)));
-			}
-			extra
-				.canvas(self.canvas.framerate)
-				.validate()
-				.map_err(|err| Error::Invalid(format!("canvas `{name}`: {err}")))?;
-		}
 
 		let mut names = BTreeSet::new();
 		for scene in &self.scenes {
@@ -345,24 +314,23 @@ impl Collection {
 			if !names.insert(scene.name.as_str()) {
 				return Err(Error::Invalid(format!("two scenes are named `{}`", scene.name)));
 			}
-			if let Some(canvas) = scene
-				.canvases
-				.keys()
-				.find(|canvas| !self.canvases.contains_key(*canvas))
-			{
+			scene
+				.canvas(self.canvas)
+				.validate()
+				.map_err(|err| Error::Invalid(format!("scene `{}`: {err}", scene.name)))?;
+			if scene.published && scene.name.contains('/') {
 				return Err(Error::Invalid(format!(
-					"scene `{}` has a layout on `{canvas}`, which is not a canvas",
+					"scene `{}` is published, so its name names its broadcast and holds no `/`",
 					scene.name
 				)));
 			}
-			// One way to say a scene shows nothing there, so an edit snapshotting
-			// the scene and one emptying the layout agree on what it holds.
-			if let Some((canvas, _)) = scene.canvases.iter().find(|(_, items)| items.is_empty()) {
-				return Err(Error::Invalid(format!(
-					"scene `{}` has an empty layout on `{canvas}`; leave it out instead",
-					scene.name
-				)));
-			}
+		}
+		let mut recorded = self.scenes.iter().filter(|scene| scene.recorded);
+		if let (Some(first), Some(second)) = (recorded.next(), recorded.next()) {
+			return Err(Error::Invalid(format!(
+				"scenes `{}` and `{}` are both recorded, but recordings hold one",
+				first.name, second.name
+			)));
 		}
 		for (layer, items) in self.layers() {
 			for item in items {
@@ -599,39 +567,14 @@ impl Default for Canvas {
 	}
 }
 
-/// A canvas beside the main one: its size, and the items drawn over every
-/// scene on it. Each scene's layout on it is the scene's own
-/// [`Scene::canvases`] entry.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A scene's own size, in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Extra {
+pub struct Size {
 	/// Width in pixels. Even, since the encoder subsamples chroma.
 	pub width: u32,
 	/// Height in pixels. Even, since the encoder subsamples chroma.
 	pub height: u32,
-	/// Its top layer, as [`Collection::top`] is the main canvas's.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub top: Vec<Item>,
-}
-
-impl Extra {
-	/// An empty canvas of `width` by `height`.
-	pub fn new(width: u32, height: u32) -> Self {
-		Self {
-			width,
-			height,
-			top: Vec::new(),
-		}
-	}
-
-	/// This canvas drawn `framerate` times a second.
-	pub fn canvas(&self, framerate: u32) -> Canvas {
-		Canvas {
-			width: self.width,
-			height: self.height,
-			framerate,
-		}
-	}
 }
 
 /// How the program changes when the preview is taken to it, short of a cut.
@@ -676,8 +619,8 @@ pub enum Transition {
 	/// A media source's clip plays over the program from its start, and the
 	/// program switches scenes under it at `cut` into the clip, while it
 	/// covers the canvas. It lasts as long as the clip's first play, filling
-	/// each canvas it is drawn on, cropped to the canvas's shape, through the
-	/// source's own crop and filters.
+	/// the canvas, cropped to its shape, through the source's own crop and
+	/// filters.
 	Stinger {
 		/// The [`Source::Media`] whose clip plays.
 		source: String,
@@ -793,74 +736,83 @@ impl Direction {
 	pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
 }
 
-/// One arrangement of sources on the canvas.
+/// One arrangement of sources on a canvas of its own size.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scene {
 	/// Unique among the collection's scenes.
 	pub name: String,
-	/// What the scene draws on the main canvas, back to front.
+	/// Its size, or `None` for the program's. Only a scene of the program's
+	/// size goes on program.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub size: Option<Size>,
+	/// Whether it is always live as a broadcast of its own, beneath the
+	/// program's and named after it, whatever is on program.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub published: bool,
+	/// Whether recordings hold it rather than the program. One scene at most
+	/// is recorded.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub recorded: bool,
+	/// What the scene draws, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
-	/// What the scene draws on each further canvas, by the canvas's name, back
-	/// to front. A canvas without an entry shows only its top layer.
-	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-	pub canvases: BTreeMap<String, Vec<Item>>,
 }
 
 impl Scene {
-	/// An empty scene.
+	/// An empty scene of the program's size, neither published nor recorded.
 	pub fn new(name: impl Into<String>) -> Self {
 		Self {
 			name: name.into(),
+			size: None,
+			published: false,
+			recorded: false,
 			items: Vec::new(),
-			canvases: BTreeMap::new(),
+		}
+	}
+
+	/// The canvas it is drawn on: its own size, or `program`'s, at
+	/// `program`'s frame rate.
+	pub fn canvas(&self, program: Canvas) -> Canvas {
+		match self.size {
+			Some(Size { width, height }) => Canvas {
+				width,
+				height,
+				framerate: program.framerate,
+			},
+			None => program,
 		}
 	}
 }
 
-/// Where a list of items lives: a scene's layout, or the top layer over every
-/// scene, on one canvas.
+/// Where a list of items lives: a scene, or the top layer over the program.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
-	/// A further canvas by name, or `None` for the main canvas.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub canvas: Option<String>,
-	/// The scene, or `None` for the canvas's top layer.
+	/// The scene, or `None` for the top layer.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub scene: Option<String>,
 }
 
 impl Layer {
-	/// The scene called `name`, on the main canvas.
+	/// The scene called `name`.
 	pub fn scene(name: impl Into<String>) -> Self {
 		Self {
-			canvas: None,
 			scene: Some(name.into()),
 		}
 	}
 
-	/// The main canvas's top layer.
+	/// The top layer.
 	pub fn top() -> Self {
 		Self::default()
-	}
-
-	/// The same layer on `canvas` instead.
-	pub fn on(self, canvas: Option<String>) -> Self {
-		Self { canvas, ..self }
 	}
 }
 
 impl fmt::Display for Layer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match &self.scene {
-			Some(name) => write!(f, "scene `{name}`")?,
-			None => write!(f, "the top layer")?,
-		}
-		match &self.canvas {
-			Some(canvas) => write!(f, " on canvas `{canvas}`"),
-			None => Ok(()),
+			Some(name) => write!(f, "scene `{name}`"),
+			None => write!(f, "the top layer"),
 		}
 	}
 }
@@ -870,7 +822,7 @@ impl fmt::Display for Layer {
 pub enum Nested<'a> {
 	/// The scene by this name.
 	Scene(&'a str),
-	/// The main canvas's program.
+	/// The program.
 	Program,
 }
 
@@ -1071,6 +1023,10 @@ fn is_zero(value: &f32) -> bool {
 
 fn yes() -> bool {
 	true
+}
+
+fn is_false(value: &bool) -> bool {
+	!value
 }
 
 fn is_true(value: &bool) -> bool {
@@ -1669,7 +1625,7 @@ pub enum Source {
 	/// source, on demand through [`Feed::replay`](crate::source::Feed::replay).
 	/// Transparent while nothing plays.
 	Replay,
-	/// Another scene, drawn whole at the main canvas's size, as a picture. Its
+	/// Another scene, drawn whole at its own size, as a picture. Its
 	/// items' keyframes play from when the scene drawing it goes on, as that
 	/// scene's own items' do, so the top layer cannot draw one with keyframes.
 	/// A scene cannot draw itself, even through other scenes.
@@ -1677,7 +1633,7 @@ pub enum Source {
 		/// The scene drawn.
 		scene: String,
 	},
-	/// What the main canvas's program shows, transitions included, on the
+	/// What the program shows, transitions included, on the
 	/// same frame. A scene drawing it cannot go on program, and the top layer
 	/// cannot draw it, since either would draw the program into itself.
 	Program,
@@ -2087,6 +2043,13 @@ items = [
 	] },
 ]
 
+[[scenes]]
+name = "Portrait"
+size = { width = 720, height = 1280 }
+published = true
+recorded = true
+items = [{ source = "cam", rect = { x = 0, y = 0, width = 720, height = 1280 } }]
+
 [[top]]
 source = "bg"
 rect = { x = 0, y = 680, width = 1280, height = 40 }
@@ -2118,7 +2081,19 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 		);
 		assert_eq!(collection.mixes.program, "Stream");
 		assert_eq!(collection.mixes.recorded(), "Recording");
+		let portrait = collection.scene("Portrait").unwrap();
+		assert!(portrait.published);
+		assert_eq!(collection.recorded(), Some("Portrait"));
+		assert_eq!(
+			collection.canvas(Some("Portrait")),
+			Some(Canvas {
+				width: 720,
+				height: 1280,
+				framerate: 60
+			})
+		);
 		let main = collection.scene("Main").unwrap();
+		assert_eq!(main.size, None, "the program's");
 		assert!(main.items[0].visible);
 		assert!(!main.items[1].visible);
 		assert_eq!(
@@ -2828,34 +2803,50 @@ background = "remove"
 		assert!(!collection.draws_program("Scene"));
 	}
 
-	/// A further canvas is named as a path segment, since it names its
-	/// broadcast, is a size the encoder can take, and is the only canvas a
-	/// scene lays items out on.
+	/// A scene's own size is one the encoder can take, a published scene is
+	/// named as a path segment, since it names its broadcast, and recordings
+	/// hold one scene at most. Only a scene of the program's size that draws
+	/// no program goes on program.
 	#[test]
-	fn refuses_a_further_canvas_that_cannot_be() {
-		for (name, width) in [("", 1080), ("a/b", 1080), ("tall", 1081)] {
-			let mut collection = example();
-			collection.canvases.insert(name.into(), Extra::new(width, 1920));
-			assert!(
-				matches!(collection.validate(), Err(Error::Invalid(_))),
-				"{name} {width}"
-			);
-		}
+	fn a_scene_has_a_size_and_outputs() {
 		let mut collection = example();
-		let item = Item::new("camera", Rect::fill(&collection.canvas));
-		collection.scenes[0].canvases.insert("tall".into(), vec![item]);
-		assert!(
-			matches!(collection.validate(), Err(Error::Invalid(_))),
-			"no such canvas"
-		);
-		collection.canvases.insert("tall".into(), Extra::new(1080, 1920));
+		collection.scenes.push(Scene::new("a/b"));
 		collection.validate().unwrap();
-		// Leaving a layout out is the one way to say a scene shows nothing there.
-		collection.scenes[0].canvases.insert("tall".into(), Vec::new());
+		collection.scenes[1].published = true;
 		assert!(
 			matches!(collection.validate(), Err(Error::Invalid(_))),
-			"an empty layout"
+			"a / in a published name"
 		);
+		collection.scenes[1].name = "Tall".into();
+		collection.scenes[1].size = Some(Size {
+			width: 1081,
+			height: 1920,
+		});
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "an odd width");
+		collection.scenes[1].size = Some(Size {
+			width: 1080,
+			height: 1920,
+		});
+		collection.validate().unwrap();
+		assert_eq!(
+			collection.canvas(Some("Tall")).unwrap().size(),
+			moq_video::Size::new(1080, 1920)
+		);
+		assert_eq!(
+			collection.canvas(Some("Tall")).unwrap().framerate,
+			collection.canvas.framerate
+		);
+		assert!(
+			matches!(collection.takes("Tall"), Err(Error::Invalid(_))),
+			"another size"
+		);
+		collection.takes("Scene").unwrap();
+
+		assert_eq!(collection.recorded(), None, "the program");
+		collection.scenes[1].recorded = true;
+		assert_eq!(collection.recorded(), Some("Tall"));
+		collection.scenes[0].recorded = true;
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "two recorded");
 	}
 
 	#[test]

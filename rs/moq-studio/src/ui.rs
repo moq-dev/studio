@@ -120,9 +120,8 @@ impl Studio {
 				refusal: None,
 				preview,
 				program,
-				view: None,
-				picked: None,
 				drawn: Canvas::default(),
+				program_drawn: Canvas::default(),
 				top: false,
 				selection: None,
 				gestures: Gestures::default(),
@@ -138,8 +137,7 @@ impl Studio {
 				speaker: None,
 				speakers: Speakers::default(),
 				canvas: None,
-				extras: BTreeMap::new(),
-				new_canvas: (String::new(), 1080, 1920),
+				sizes: BTreeMap::new(),
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
@@ -155,9 +153,6 @@ impl Studio {
 		}
 	}
 }
-
-/// What the canvas picker calls the main canvas.
-const MAIN: &str = "Main";
 
 /// Where this user's picks are kept, in the app's settings rather than the
 /// scene file, which moves between machines without one operator's keys.
@@ -206,29 +201,15 @@ impl eframe::App for Studio {
 
 	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
 		let engine = self.panels.engine.clone();
-		// A canvas picked last frame is shown from this one on, so every panel
-		// sizes the same canvas whose textures are registered here.
-		if let Some(view) = self.panels.picked.take() {
-			self.panels.view = view;
-			self.panels.deselect_item();
-		}
 		let mut state = engine.state.lock().unwrap();
-		// One removed since, by an edit, undo, or reload, falls back to the main
-		// canvas.
-		if let Some(name) = &self.panels.view
-			&& !state.collection().canvases.contains_key(name)
-		{
-			self.panels.view = None;
-			self.panels.deselect_item();
-		}
-		let view = state.compositor.output(self.panels.view.as_deref());
-		let view = view.unwrap_or_else(|| state.compositor.output(None).expect("the main canvas"));
-		// The size the textures were drawn at, which an edit this frame, such
-		// as an undo removing the canvas, does not change until the next.
-		self.panels.drawn = view.canvas();
+		// The sizes the textures were drawn at, which an edit this frame, such
+		// as an undo resizing the scene in preview, does not change until the
+		// next.
+		self.panels.drawn = state.compositor.preview_canvas();
+		self.panels.program_drawn = state.compositor.canvas();
 		if let Some(render) = frame.wgpu_render_state() {
-			self.panels.preview.follow(render, view.preview());
-			self.panels.program.follow(render, view.program());
+			self.panels.preview.follow(render, state.compositor.preview());
+			self.panels.program.follow(render, state.compositor.program());
 		}
 		// Redraw at the canvas rate, so preview and program are live.
 		let framerate = state.compositor.canvas().framerate;
@@ -286,9 +267,9 @@ impl eframe::App for Studio {
 		if !self.panels.previewed {
 			self.panels.let_go();
 		}
-		if self.panels.picked.is_some() {
-			ui.ctx().request_repaint();
-		}
+		// A preview no tab shows is not drawn, until one shows it again.
+		let previewing = self.panels.previewed;
+		engine.state.lock().unwrap().compositor.set_previewing(previewing);
 	}
 }
 
@@ -344,15 +325,10 @@ struct Panels {
 	refusal: Option<(Action, String)>,
 	preview: Registered,
 	program: Registered,
-	/// The canvas Preview, Program, and Items show: a further one by name, or
-	/// `None` for the main one.
-	view: Option<String>,
-	/// The canvas the picker chose this frame, shown from the next, so a
-	/// frame never sizes one canvas and draws another.
-	picked: Option<Option<String>>,
-	/// The size of the canvas Preview, Program, and Items show this frame, as
-	/// its textures were drawn.
+	/// The size of the scene in preview this frame, as its texture was drawn.
 	drawn: Canvas,
+	/// The program's size this frame, as its texture was drawn.
+	program_drawn: Canvas,
 	/// Whether the Items panel shows the top layer rather than the scene in
 	/// preview.
 	top: bool,
@@ -384,10 +360,8 @@ struct Panels {
 	/// The canvas the Output panel's form holds until it is applied, or
 	/// `None` while it shows the collection's.
 	canvas: Option<Canvas>,
-	/// The size each further canvas's form holds until it is applied, by name.
-	extras: BTreeMap<String, (u32, u32)>,
-	/// The name and size typed for the next further canvas.
-	new_canvas: (String, u32, u32),
+	/// The size each scene's form holds until it is applied, by name.
+	sizes: BTreeMap<String, (u32, u32)>,
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
@@ -443,13 +417,6 @@ impl TabViewer for Panels {
 			Tab::Hotkeys => self.hotkeys(ui),
 		}
 	}
-}
-
-/// What the Output panel does to a further canvas.
-enum CanvasAction {
-	/// Add or resize the canvas of this name to this width and height.
-	Set(String, u32, u32),
-	Remove(String),
 }
 
 /// A source or an item: what the Filters panel edits.
@@ -770,43 +737,24 @@ impl Panels {
 		self.renaming = None;
 	}
 
-	/// The layer the Items panel shows, and new sources are placed in, on the
-	/// canvas shown.
+	/// The layer the Items panel shows, and new sources are placed in. The top
+	/// layer goes over a scene of the program's size alone, so it is edited
+	/// over one.
 	fn layer(&self, state: &State) -> Result<Layer, String> {
-		let layer = match (self.top, state.compositor.preview_scene()) {
-			(true, _) => Layer::top(),
-			(false, Some(name)) => Layer::scene(name),
-			(false, None) => return Err("Pick a scene to edit what it shows.".into()),
-		};
-		// A canvas an undo or a reload removed is not shown any more, though
-		// `view` follows only once Preview, Program, or Items draws.
-		let view = self
-			.view
-			.clone()
-			.filter(|name| state.collection().canvases.contains_key(name));
-		Ok(layer.on(view))
-	}
-
-	/// Pick which canvas Preview, Program, and Items show.
-	fn pick_view(&mut self, ui: &mut Ui, collection: &Collection) {
-		if collection.canvases.is_empty() {
-			return;
-		}
-		let name = |view: &Option<String>| view.clone().unwrap_or_else(|| MAIN.to_string());
-		let mut view = self.view.clone();
-		egui::ComboBox::from_id_salt("view")
-			.selected_text(name(&view))
-			.show_ui(ui, |ui| {
-				let views = std::iter::once(None).chain(collection.canvases.keys().cloned().map(Some));
-				for option in views {
-					let label = name(&option);
-					ui.selectable_value(&mut view, option, label);
+		let preview = state.compositor.preview_scene();
+		match (self.top, preview) {
+			(true, _) => {
+				let collection = state.collection();
+				let size = collection.canvas(preview).map(|canvas| canvas.size());
+				match size == Some(collection.canvas.size()) {
+					true => Ok(Layer::top()),
+					false => {
+						Err("The top layer goes over scenes of the program's size; preview one to edit it.".into())
+					}
 				}
-			})
-			.response
-			.on_hover_text("The canvas preview and program show, and the items edited are on");
-		if view != self.view {
-			self.picked = Some(view);
+			}
+			(false, Some(name)) => Ok(Layer::scene(name)),
+			(false, None) => Err("Pick a scene to edit what it shows.".into()),
 		}
 	}
 
@@ -911,7 +859,6 @@ impl Panels {
 		self.follow_reloads(&state);
 		let canvas = self.drawn;
 		ui.horizontal(|ui| {
-			self.pick_view(ui, state.collection());
 			ui.label(format!(
 				"Preview: {}",
 				state.compositor.preview_scene().unwrap_or("nothing")
@@ -950,9 +897,7 @@ impl Panels {
 			let since = state.compositor.preview_since();
 			let scene = state.compositor.preview_scene().map(|scene| (scene, since));
 			self.rebind(&state.sources);
-			let delivered = self
-				.interact
-				.update(ui, image, state.collection(), self.view.as_deref(), scene);
+			let delivered = self.interact.update(ui, image, state.collection(), scene);
 			deliver(&state.sources, delivered);
 			self.rebind(&state.sources);
 			return;
@@ -1180,7 +1125,7 @@ impl Panels {
 	fn program(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
-		let canvas = self.drawn;
+		let canvas = self.program_drawn;
 		let transition = state.collection().transition.clone();
 		let mut next = transition.clone();
 		let media: Vec<String> = state
@@ -1345,6 +1290,17 @@ impl Panels {
 					if program.as_deref() == Some(scene.name.as_str()) {
 						ui.colored_label(Color32::RED, "on program");
 					}
+					if let Some(size) = scene.size {
+						ui.weak(format!("{}x{}", size.width, size.height));
+					}
+					let mut published = scene.published;
+					if ui
+						.checkbox(&mut published, "Publish")
+						.on_hover_text("Live as its own broadcast beneath the program's, at its own size")
+						.changed()
+					{
+						action = Some(SceneAction::Publish(index, published));
+					}
 					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
 						action = Some(SceneAction::Move(index, index - 1));
 					}
@@ -1402,6 +1358,16 @@ impl Panels {
 			SceneAction::Move(from, to) => edit(&mut state, format!("Reorder scene `{name}`"), None, |draft| {
 				draft.move_scene(from, to)
 			}),
+			SceneAction::Publish(index, published) => {
+				let scene = state.collection().scenes[index].clone();
+				let label = match published {
+					true => format!("Publish scene `{name}`"),
+					false => format!("Stop publishing scene `{name}`"),
+				};
+				edit(&mut state, label, None, |draft| {
+					draft.set_scene(index, Scene { published, ..scene })
+				})
+			}
 			SceneAction::Remove(index) => {
 				let result = edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
 					draft.remove_scene(index)
@@ -1471,15 +1437,15 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let canvas = self.drawn;
-		let mut scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
-		if let Some(view) = &self.view {
-			scene = format!("{scene} on `{view}`");
-		}
+		let canvas = match self.top {
+			true => self.program_drawn,
+			false => self.drawn,
+		};
+		let scene = state.compositor.preview_scene().unwrap_or("no scene").to_string();
 		ui.horizontal(|ui| {
 			ui.selectable_value(&mut self.top, false, format!("Scene: {scene}"));
 			ui.selectable_value(&mut self.top, true, "Top layer")
-				.on_hover_text("Drawn over every scene, in preview and on program");
+				.on_hover_text("Drawn over program, and over a scene of the program's size in preview");
 		});
 		ui.separator();
 		let layer = match self.layer(&state) {
@@ -2544,6 +2510,7 @@ impl Panels {
 				ui.weak(format!("into {}", recorder.dir().display()));
 			}
 		});
+		self.recorded_scene(ui);
 		self.recorded_mix(ui);
 		for file in status.iter().flat_map(|status| &status.files) {
 			let name = file.path.file_name().unwrap_or_default().to_string_lossy();
@@ -2557,6 +2524,39 @@ impl Panels {
 				}
 			};
 		}
+	}
+
+	/// Pick the picture recordings hold, the program or any scene, even while
+	/// recording, which goes on in a new file when the size changes.
+	fn recorded_scene(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let current = state.collection().recorded().map(str::to_string);
+		let scenes = state.collection().scenes.iter();
+		let names: Vec<String> = scenes.map(|scene| scene.name.clone()).collect();
+		let mut picked = current.clone();
+		ui.horizontal(|ui| {
+			ui.label("Picture")
+				.on_hover_text("A scene of another size than the program's goes on in a new file");
+			egui::ComboBox::from_id_salt("recorded scene")
+				.selected_text(picked.as_deref().unwrap_or("the program"))
+				.show_ui(ui, |ui| {
+					ui.selectable_value(&mut picked, None, "the program");
+					for name in &names {
+						ui.selectable_value(&mut picked, Some(name.clone()), name);
+					}
+				});
+		});
+		if picked == current {
+			return;
+		}
+		let label = match &picked {
+			Some(name) => format!("Record scene `{name}`"),
+			None => "Record the program".into(),
+		};
+		let result = edit(&mut state, label, None, |draft| draft.set_recorded(picked.as_deref()));
+		drop(state);
+		self.check(result);
 	}
 
 	/// Pick the mix recordings hold, even while recording, which goes on
@@ -2599,7 +2599,7 @@ impl Panels {
 		self.record(ui);
 		ui.separator();
 		self.canvas_form(ui);
-		self.canvases_form(ui);
+		self.sizes_form(ui);
 		ui.separator();
 
 		let stats = &self.engine.stats;
@@ -2637,27 +2637,29 @@ impl Panels {
 			ui.end_row();
 			ui.label("Encoder sessions");
 			ui.label(format!("{} open", stats.sessions.open())).on_hover_text(
-				"Video encoders open now: every canvas's program and the sources'. A GPU caps them, and each canvas adds its own.",
+				"Video encoders open now: the program's, each published scene's, the recording's while recording, \
+				 and the sources'. A GPU caps them.",
 			);
 			ui.end_row();
 		});
 		ui.separator();
-		renditions(ui, None, &stats.video, true);
+		renditions(ui, None, &stats.video, false);
 		if let Some(error) = stats.error() {
 			ui.colored_label(ui.visuals().error_fg_color, error);
+		}
+		renditions(ui, None, &stats.recording, true);
+		if let Some(error) = stats.recording.error() {
+			ui.colored_label(ui.visuals().warn_fg_color, format!("recording {error}"));
 		}
 		if let Some(error) = stats.recording_audio_error() {
 			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
 		}
 
-		for (name, video) in stats.canvases() {
+		for (name, video) in stats.published() {
 			ui.separator();
-			ui.strong(format!("Canvas `{name}`"));
+			ui.strong(format!("Scene `{name}`"));
 			if let Some(output) = &self.engine.output {
-				ui.label(format!(
-					"Broadcast {}/{name}, with the main broadcast's audio",
-					output.path
-				));
+				ui.label(format!("Broadcast {}/{name}, with the program's audio", output.path));
 			}
 			ui.label(format!(
 				"Encoder: {}",
@@ -3002,90 +3004,66 @@ impl Panels {
 		self.check(result);
 	}
 
-	/// The further canvases: each one's size, applied at once as the main
-	/// canvas's is, and a form adding another. Each publishes a broadcast of
-	/// its own, with encoders of its own.
-	fn canvases_form(&mut self, ui: &mut Ui) {
+	/// Each scene's size, applied at once as the canvas's is: one without its
+	/// own is the program's. Only a scene of the program's size goes on
+	/// program; a published one publishes at its size.
+	fn sizes_form(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
-		let canvases = state.collection().canvases.clone();
-		self.extras.retain(|name, _| canvases.contains_key(name));
+		let program = state.collection().canvas;
+		let scenes = state.collection().scenes.clone();
+		self.sizes
+			.retain(|name, _| scenes.iter().any(|scene| scene.name == *name));
 		let mut action = None;
-		for (name, extra) in &canvases {
-			let current = (extra.width, extra.height);
-			let (mut width, mut height) = self.extras.get(name).copied().unwrap_or(current);
-			// By name, so an edit under way stays on its canvas as others come
-			// and go.
-			ui.push_id(name, |ui| {
-				ui.horizontal(|ui| {
-					ui.strong(name);
-					ui.add(egui::DragValue::new(&mut width).range(2..=u32::MAX));
-					ui.label("x");
-					ui.add(egui::DragValue::new(&mut height).range(2..=u32::MAX));
-					let edited = (width, height) != current;
-					if ui.add_enabled(edited, egui::Button::new("Apply")).clicked() {
-						action = Some(CanvasAction::Set(name.clone(), width, height));
-					}
-					if ui.add_enabled(edited, egui::Button::new("Reset")).clicked() {
-						(width, height) = current;
-					}
-					if ui
-						.button("Remove")
-						.on_hover_text("Remove the canvas, its top layer, and every scene's layout on it")
-						.clicked()
-					{
-						action = Some(CanvasAction::Remove(name.clone()));
-					}
-				})
-			});
-			match (width, height) == current {
-				true => self.extras.remove(name),
-				false => self.extras.insert(name.clone(), (width, height)),
-			};
-		}
-		ui.horizontal(|ui| {
-			let (name, width, height) = &mut self.new_canvas;
-			ui.add(
-				egui::TextEdit::singleline(name)
-					.hint_text("New canvas")
-					.desired_width(100.0),
-			);
-			ui.add(egui::DragValue::new(width).range(2..=u32::MAX));
-			ui.label("x");
-			ui.add(egui::DragValue::new(height).range(2..=u32::MAX));
-			// Viewers of the main broadcast report back beneath it, under
-			// `ECHO`, where this canvas would publish.
-			let named = !name.is_empty() && !canvases.contains_key(name.as_str()) && name != crate::health::ECHO;
-			if ui
-				.add_enabled(named, egui::Button::new("Add canvas"))
-				.on_hover_text("Another canvas with its own layout of each scene, published in its own broadcast")
-				.on_disabled_hover_text(format!(
-					"Name it something new, other than `{}`, where viewers report back",
-					crate::health::ECHO
-				))
-				.clicked()
-			{
-				action = Some(CanvasAction::Set(name.clone(), *width, *height));
+		egui::CollapsingHeader::new("Scene sizes").show(ui, |ui| {
+			for (index, scene) in scenes.iter().enumerate() {
+				let own = scene.size.map(|size| (size.width, size.height));
+				let current = own.unwrap_or((program.width, program.height));
+				let (mut width, mut height) = self.sizes.get(&scene.name).copied().unwrap_or(current);
+				// By name, so an edit under way stays on its scene as others
+				// come and go.
+				ui.push_id(&scene.name, |ui| {
+					ui.horizontal(|ui| {
+						ui.label(&scene.name);
+						ui.add(egui::DragValue::new(&mut width).range(2..=u32::MAX));
+						ui.label("x");
+						ui.add(egui::DragValue::new(&mut height).range(2..=u32::MAX));
+						let edited = (width, height) != current;
+						if ui.add_enabled(edited, egui::Button::new("Apply")).clicked() {
+							action = Some((index, Some(moq_scene::Size { width, height })));
+						}
+						if ui.add_enabled(edited, egui::Button::new("Reset")).clicked() {
+							(width, height) = current;
+						}
+						if ui
+							.add_enabled(own.is_some(), egui::Button::new("Program's"))
+							.on_hover_text("Follow the program's size")
+							.clicked()
+						{
+							action = Some((index, None));
+						}
+					})
+				});
+				match (width, height) == current {
+					true => self.sizes.remove(&scene.name),
+					false => self.sizes.insert(scene.name.clone(), (width, height)),
+				};
 			}
 		});
 
-		let result = match action {
-			None => return,
-			Some(CanvasAction::Set(name, width, height)) => {
-				let label = format!("Set canvas `{name}` to {width}x{height}");
-				let result = edit(&mut state, label, None, |draft| draft.set_extra(&name, width, height));
-				if result.is_ok() {
-					self.extras.remove(&name);
-					if self.new_canvas.0 == name {
-						self.new_canvas.0.clear();
-					}
-				}
-				result
-			}
-			Some(CanvasAction::Remove(name)) => edit(&mut state, format!("Remove canvas `{name}`"), None, |draft| {
-				draft.remove_extra(&name)
-			}),
+		let Some((index, size)) = action else { return };
+		let scene = scenes[index].clone();
+		let name = scene.name.clone();
+		let label = match size {
+			Some(size) => format!("Size scene `{name}` {}x{}", size.width, size.height),
+			None => format!("Size scene `{name}` as the program"),
 		};
+		let result = edit(&mut state, label, None, |draft| {
+			draft.set_scene(index, Scene { size, ..scene })
+		});
+		if result.is_ok() {
+			self.sizes.remove(&name);
+		}
 		drop(state);
 		self.check(result);
 	}
@@ -3133,7 +3111,6 @@ impl Panels {
 			ui.separator();
 
 			let uplink = &report.uplink;
-			let viewers = &report.viewers;
 			egui::Grid::new("uplink").show(ui, |ui| {
 				ui.label("Uplink");
 				ui.horizontal(|ui| {
@@ -3151,97 +3128,130 @@ impl Panels {
 				ui.label(or_unknown(uplink.capacity.map(health::rate)));
 				ui.end_row();
 				ui.label("Media written");
-				ui.label(or_unknown(uplink.media.map(health::rate)));
+				ui.label(or_unknown(uplink.media.map(health::rate)))
+					.on_hover_text("By every broadcast: the program's and each published scene's");
 				ui.end_row();
 				ui.label("Lost and resent");
 				ui.label(or_unknown(uplink.loss.map(|loss| format!("{:.2}%", loss * 100.0))));
 				ui.end_row();
-				ui.label("Watching");
-				match viewers.watching {
-					Some(watching) => ui.label(format!("{watching} sessions, by the relays' stats")),
-					None => ui.weak("unknown; no relay shares its stats with this studio"),
-				};
-				ui.end_row();
-				ui.label("Reporting");
-				ui.label(match viewers.unread {
-					0 => format!("{} viewers", viewers.reports.len()),
-					unread => format!("{} viewers read, {unread} more not", viewers.reports.len()),
-				});
-				ui.end_row();
 			});
-			ui.separator();
 
-			egui::Grid::new("tracks").striped(true).show(ui, |ui| {
-				for heading in [
-					"Source",
-					"Track",
-					"Granted",
-					"Sent",
-					"Frames",
-					"Viewers",
-					"Lowest received",
-					"Latency",
-					"Grade",
-				] {
-					ui.strong(heading);
-				}
-				ui.end_row();
-				// Each source named once, beside its first track. The program's
-				// tracks come first and name none, so no source name can pass
-				// for them.
-				let mut group = None;
-				for track in &report.tracks {
-					let source = track.source.as_deref();
-					ui.label(if source == group {
-						""
-					} else {
-						source.unwrap_or_default()
-					});
-					group = source;
-					ui.label(&track.label).on_hover_text(&track.id);
-					match (track.enabled, track.source.is_some()) {
-						(false, _) => ui
-							.label("off")
-							.on_hover_text("The grant cannot fund it, so viewers use another"),
-						(true, true) => ui.label(""),
-						(true, false) => ui.label(or_unknown(track.granted.map(health::rate))),
+			// Each broadcast, with its own viewers beneath it.
+			for broadcast in &report.broadcasts {
+				ui.separator();
+				if report.broadcasts.len() > 1 {
+					match &broadcast.name {
+						Some(name) => ui.strong(format!("Scene `{name}`")),
+						None => ui.strong("Program"),
 					};
-					ui.label(or_unknown(track.sent.map(health::rate)));
-					ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
-					ui.label(track.viewers.to_string());
-					ui.label(or_unknown(track.received.map(health::rate)));
-					ui.label(or_unknown(track.latency.map(millis)));
-					verdict(ui, track.verdict);
-					ui.end_row();
 				}
-			});
-
-			if viewers.reports.is_empty() {
-				return;
+				broadcast_health(ui, broadcast);
 			}
-			ui.separator();
-			egui::Grid::new("viewers").striped(true).show(ui, |ui| {
-				for heading in ["Viewer", "Grade", "Round trip", "Latency", "Playout"] {
-					ui.strong(heading);
-				}
-				ui.end_row();
-				for viewer in &viewers.reports {
-					ui.label(&viewer.name);
-					match &viewer.error {
-						Some(error) => {
-							ui.colored_label(ui.visuals().error_fg_color, "unreadable")
-								.on_hover_text(error);
-						}
-						None => verdict(ui, viewer.verdict),
-					}
-					ui.label(or_unknown(viewer.rtt.map(millis)));
-					ui.label(or_unknown(viewer.latency.map(millis)));
-					ui.label(or_unknown(viewer.playout.map(millis)));
-					ui.end_row();
-				}
-			});
+			if !report.sources.is_empty() {
+				ui.separator();
+				ui.strong("Sources");
+				tracks_health(ui, "sources", &report.sources, true);
+			}
 		});
 	}
+}
+
+/// Who watches one broadcast, how each of its tracks reaches them, and what
+/// each viewer reports.
+fn broadcast_health(ui: &mut Ui, broadcast: &health::Published) {
+	let viewers = &broadcast.viewers;
+	egui::Grid::new(("watching", &broadcast.name)).show(ui, |ui| {
+		ui.label("Watching");
+		match viewers.watching {
+			Some(watching) => ui.label(format!("{watching} sessions, by the relays' stats")),
+			None => ui.weak("unknown; no relay shares its stats with this studio"),
+		};
+		ui.end_row();
+		ui.label("Reporting");
+		ui.label(match viewers.unread {
+			0 => format!("{} viewers", viewers.reports.len()),
+			unread => format!("{} viewers read, {unread} more not", viewers.reports.len()),
+		});
+		ui.end_row();
+	});
+	tracks_health(ui, ("tracks", &broadcast.name), &broadcast.tracks, false);
+
+	if viewers.reports.is_empty() {
+		return;
+	}
+	egui::Grid::new(("viewers", &broadcast.name))
+		.striped(true)
+		.show(ui, |ui| {
+			for heading in ["Viewer", "Grade", "Round trip", "Latency", "Playout"] {
+				ui.strong(heading);
+			}
+			ui.end_row();
+			for viewer in &viewers.reports {
+				ui.label(&viewer.name);
+				match &viewer.error {
+					Some(error) => {
+						ui.colored_label(ui.visuals().error_fg_color, "unreadable")
+							.on_hover_text(error);
+					}
+					None => verdict(ui, viewer.verdict),
+				}
+				ui.label(or_unknown(viewer.rtt.map(millis)));
+				ui.label(or_unknown(viewer.latency.map(millis)));
+				ui.label(or_unknown(viewer.playout.map(millis)));
+				ui.end_row();
+			}
+		});
+}
+
+/// Each of `tracks`, under the source whose own it is when `sources`.
+fn tracks_health(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tracks: &[health::Track], sources: bool) {
+	egui::Grid::new(id).striped(true).show(ui, |ui| {
+		let headings = [
+			"Track",
+			"Granted",
+			"Sent",
+			"Frames",
+			"Viewers",
+			"Lowest received",
+			"Latency",
+			"Grade",
+		];
+		if sources {
+			ui.strong("Source");
+		}
+		for heading in headings {
+			ui.strong(heading);
+		}
+		ui.end_row();
+		// Each source named once, beside its first track.
+		let mut group = None;
+		for track in tracks {
+			if sources {
+				let source = track.source.as_deref();
+				ui.label(if source == group {
+					""
+				} else {
+					source.unwrap_or_default()
+				});
+				group = source;
+			}
+			ui.label(&track.label).on_hover_text(&track.id);
+			match (track.enabled, track.source.is_some()) {
+				(false, _) => ui
+					.label("off")
+					.on_hover_text("The grant cannot fund it, so viewers use another"),
+				(true, true) => ui.label(""),
+				(true, false) => ui.label(or_unknown(track.granted.map(health::rate))),
+			};
+			ui.label(or_unknown(track.sent.map(health::rate)));
+			ui.label(or_unknown(track.framerate.map(|framerate| format!("{framerate:.0}/s"))));
+			ui.label(track.viewers.to_string());
+			ui.label(or_unknown(track.received.map(health::rate)));
+			ui.label(or_unknown(track.latency.map(millis)));
+			verdict(ui, track.verdict);
+			ui.end_row();
+		}
+	});
 }
 
 /// The recordings a crash left unfinished, found at launch, and how each
@@ -3306,12 +3316,14 @@ enum SceneAction {
 	/// From one index to the other, counted after the removal.
 	Move(usize, usize),
 	Remove(usize),
+	/// Publish it, or stop.
+	Publish(usize, bool),
 }
 
 impl SceneAction {
 	fn index(&self) -> usize {
 		match self {
-			Self::Rename(index, _) | Self::Move(index, _) | Self::Remove(index) => *index,
+			Self::Rename(index, _) | Self::Move(index, _) | Self::Remove(index) | Self::Publish(index, _) => *index,
 		}
 	}
 }
@@ -3632,7 +3644,7 @@ fn add(
 	);
 	let canvas = layer
 		.as_ref()
-		.and_then(|layer| state.collection().canvas(layer.canvas.as_deref()));
+		.and_then(|layer| state.collection().canvas(layer.scene.as_deref()));
 	let canvas = canvas.unwrap_or(state.collection().canvas);
 	let place = source.has_video();
 	// A page or overlay, or a clone of one, lands at its own size, pixel for
@@ -3713,25 +3725,24 @@ fn expiry(expires: kio::clock::Wall, now: kio::clock::Wall) -> String {
 	}
 }
 
-/// What each of the program encoders of the canvas `name`, the main one for
-/// `None`, costs: the sizes it publishes, and its recording copy if
-/// `recording`.
+/// What each encoder of the published scene `name`, the program for `None`,
+/// costs: the sizes it publishes, or with `recording`, what the recording's
+/// own encoder costs.
 fn renditions(ui: &mut Ui, name: Option<&str>, video: &crate::engine::VideoStats, recording: bool) {
 	let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
 	let millis = |value: &std::sync::atomic::AtomicU64| format!("{:.1} ms", count(value) as f64 / 1000.0);
-	// Only the sizes the program publishes, since a small canvas, or an
-	// encoder that refused the half size, has the canvas size alone, and the
-	// recording's own encoder.
+	// Only the sizes published, since a small picture, or an encoder that
+	// refused the half size, has the full size alone.
 	let [canvas, half, record] = &video.renditions;
 	let published = video.sizes.load(Ordering::Relaxed);
-	let mut columns = vec![("Canvas size", canvas)];
-	if published > 1 {
+	let mut columns = match recording {
+		true => vec![("Recording", record)],
+		false => vec![("Full size", canvas)],
+	};
+	if !recording && published > 1 {
 		columns.push(("Half size", half));
 	}
-	if recording {
-		columns.push(("Recording", record));
-	}
-	egui::Grid::new(("renditions", name)).show(ui, |ui| {
+	egui::Grid::new(("renditions", name, recording)).show(ui, |ui| {
 		ui.strong("");
 		for (heading, _) in &columns {
 			ui.strong(*heading);
@@ -3757,11 +3768,12 @@ fn renditions(ui: &mut Ui, name: Option<&str>, video: &crate::engine::VideoStats
 			format!("{} frames, last {}", count(&load.encoded), millis(&load.encode_us))
 		});
 	});
-	if let Some(error) = half.error() {
-		ui.colored_label(ui.visuals().warn_fg_color, format!("half size off: {error}"));
-	}
-	if recording && let Some(error) = record.error() {
-		ui.colored_label(ui.visuals().warn_fg_color, format!("recording encoder off: {error}"));
+	let off = match recording {
+		true => record.error().map(|error| format!("recording encoder off: {error}")),
+		false => half.error().map(|error| format!("half size off: {error}")),
+	};
+	if let Some(off) = off {
+		ui.colored_label(ui.visuals().warn_fg_color, off);
 	}
 }
 
@@ -3820,15 +3832,18 @@ struct Drag {
 /// How far, in points on screen, the pointer reaches to an edge or a line.
 const REACH: f32 = 8.0;
 
-/// Where the visible items of the scene in preview and the top layer on
-/// `layer`'s canvas show `since` the scene went into preview, other than the
-/// one at `index` of `layer`: what a dragged item snaps to.
+/// Where the visible items of the scene in preview and the top layer over it
+/// show `since` the scene went into preview, other than the one at `index` of
+/// `layer`: what a dragged item snaps to.
 fn others(state: &State, layer: &Layer, index: usize, since: Duration) -> Vec<Rect> {
-	let scene = state.compositor.preview_scene().map(Layer::scene);
+	let scene = state.compositor.preview_scene();
 	let collection = state.collection();
+	// The top layer goes over a scene of the program's size alone.
+	let top = collection
+		.canvas(scene)
+		.is_some_and(|canvas| canvas.size() == collection.canvas.size());
 	let mut rects = Vec::new();
-	for shown in scene.into_iter().chain([Layer::top()]) {
-		let shown = shown.on(layer.canvas.clone());
+	for shown in scene.map(Layer::scene).into_iter().chain(top.then(Layer::top)) {
 		let items = collection.items(&shown).unwrap_or_default();
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == *layer && at == index) {

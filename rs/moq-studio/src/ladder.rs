@@ -133,6 +133,12 @@ impl Gate {
 		self.demand.wanted().is_some()
 	}
 
+	/// Whether the rendition would take the next frame, its grant allowing:
+	/// it encodes always, or anyone watches it.
+	pub fn wanted(&self) -> bool {
+		self.always || self.watched()
+	}
+
 	/// The rendition's share of the connection, as the allocator grants it.
 	pub fn grant(&self) -> bandwidth::Consumer {
 		self.grant.clone()
