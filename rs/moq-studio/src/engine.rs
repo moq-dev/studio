@@ -20,8 +20,9 @@
 //! - **encode**: one per program rendition, which waits for each program copy
 //!   and encodes it. A new canvas size or frame rate starts new renditions.
 //! - Recordings write their files on the tokio runtime.
-//! - **vcam** waits for each program copy the virtual camera takes, while it is
-//!   on, and hands it to the camera's backend.
+//! - **vcam**: one per virtual camera on, the program's or a published
+//!   scene's, which waits for each copy the camera takes and hands it to the
+//!   camera's backend.
 //! - **source-***: one per running source, since a capture stream may not
 //!   leave the thread that opened it.
 //! - **autosave** writes the collection and its history to their files once
@@ -100,8 +101,9 @@ pub struct State {
 	pub reloads: u64,
 	pub sources: Sources,
 	pub compositor: Compositor,
-	/// The program's virtual camera, while it is on.
-	camera: Option<crate::vcam::Camera>,
+	/// Each virtual camera on: the program's under `None`, and each published
+	/// scene's under its name.
+	cameras: BTreeMap<Option<String>, crate::vcam::Camera>,
 	/// Edited since the sources were last synced.
 	stale: bool,
 	/// For the autosave, which writes the collection once edits settle.
@@ -114,9 +116,17 @@ pub struct State {
 }
 
 impl State {
-	/// How the virtual camera is doing, or `None` while it is off.
-	pub fn camera(&self) -> Option<crate::vcam::Status> {
-		self.camera.as_ref().map(crate::vcam::Camera::status)
+	/// How the program's virtual camera, or the published scene `scene`'s,
+	/// is doing, or `None` while it is off.
+	pub fn camera(&self, scene: Option<&str>) -> Option<crate::vcam::Status> {
+		self.cameras
+			.get(&scene.map(str::to_string))
+			.map(crate::vcam::Camera::status)
+	}
+
+	/// How each virtual camera on is doing.
+	pub fn cameras(&self) -> impl Iterator<Item = crate::vcam::Status> {
+		self.cameras.values().map(crate::vcam::Camera::status)
 	}
 
 	pub fn collection(&self) -> &Collection {
@@ -897,7 +907,7 @@ impl Engine {
 				reloads: 0,
 				sources,
 				compositor,
-				camera: None,
+				cameras: BTreeMap::new(),
 				stale: true,
 				edits: autosave.edits(),
 				renamed: Vec::new(),
@@ -1292,17 +1302,32 @@ impl Engine {
 		}
 	}
 
-	/// Turn the program's virtual camera on or off. Turning it on fails,
-	/// saying why, when this machine has no way to publish one.
-	pub fn set_camera(&self, on: bool) -> anyhow::Result<()> {
-		let canvas = self.state.lock().unwrap().compositor.canvas();
+	/// Turn the program's virtual camera, or the published scene `scene`'s,
+	/// on or off. Turning it on fails, saying why, when the scene is not
+	/// published or this machine has no way to publish a camera. A scene's
+	/// camera turns off once the scene is no longer published under its name.
+	pub fn set_camera(&self, scene: Option<&str>, on: bool) -> anyhow::Result<()> {
+		let canvas = {
+			let state = self.state.lock().unwrap();
+			match scene {
+				None => state.compositor.canvas(),
+				Some(scene) => published(&state.collection)
+					.into_iter()
+					.find(|(name, _)| name == scene)
+					.map(|(_, canvas)| canvas)
+					.with_context(|| format!("scene `{scene}` is not published"))?,
+			}
+		};
 		// Opened and closed outside the lock, so the program clock does not
 		// wait on the camera's backend.
-		let camera = match on {
-			true => Some(crate::vcam::Camera::open(&self.gpu.device, &self.gpu.queue, canvas)?),
-			false => None,
+		let key = scene.map(str::to_string);
+		let previous = match on {
+			true => {
+				let camera = crate::vcam::Camera::open(&self.gpu.device, &self.gpu.queue, scene, canvas)?;
+				self.state.lock().unwrap().cameras.insert(key, camera)
+			}
+			false => self.state.lock().unwrap().cameras.remove(&key),
 		};
-		let previous = std::mem::replace(&mut self.state.lock().unwrap().camera, camera);
 		drop(previous);
 		Ok(())
 	}
@@ -1316,10 +1341,12 @@ impl Engine {
 	/// encodes only while recording.
 	///
 	/// A published or recorded scene is drawn only while one of its encoders
-	/// takes the frame, so one nobody reads costs no drawing. See [`Encoders`]
-	/// for what encodes each. Drawing outlives the encoders: a failed output
-	/// stops copying its picture, and the scenes keep moving. The virtual
-	/// camera, while on, takes every program frame an app reads.
+	/// or virtual camera takes the frame, so one nobody reads costs no
+	/// drawing. See [`Encoders`] for what encodes each. Drawing outlives the
+	/// encoders: a failed output stops copying its picture, and the scenes
+	/// keep moving. Each virtual camera on takes every frame of what it shows
+	/// while an app reads it, and one whose scene is no longer published
+	/// turns off.
 	///
 	/// Runs until the studio [stops](Self::stop), and returns once every
 	/// rendition's encode thread has finished its track.
@@ -1338,6 +1365,9 @@ impl Engine {
 
 		loop {
 			let tick = clock.tick().await;
+			// The cameras of scenes no longer published, closed once the lock
+			// is let go, so the UI does not wait on their backends.
+			let mut closed: Vec<crate::vcam::Camera> = Vec::new();
 			if self.stopped.load(Ordering::Relaxed) {
 				// Without a sender, each encoder publishes what it was sent and
 				// still holds, then finishes its track.
@@ -1404,8 +1434,24 @@ impl Engine {
 						broadcast.audio.set(mix.clone());
 					}
 				}
+				closed.extend(
+					state
+						.cameras
+						.extract_if(.., |scene, _| {
+							scene
+								.as_ref()
+								.is_some_and(|scene| !published.iter().any(|(name, _)| name == scene))
+						})
+						.map(|(_, camera)| camera),
+				);
 				let (recorded, recorded_canvas) = recorded(&state.collection);
-				let wants = |name: &str| matches!(lines.get(name), Some(Some((line, _))) if line.wants());
+				let cameras = &state.cameras;
+				let wants = |name: &str| {
+					matches!(lines.get(name), Some(Some((line, _))) if line.wants())
+						|| cameras
+							.get(&Some(name.to_string()))
+							.is_some_and(crate::vcam::Camera::wanted)
+				};
 				let mut outputs: BTreeMap<&str, bool> =
 					published.iter().map(|(name, _)| (name.as_str(), wants(name))).collect();
 				if let Some(scene) = &recorded {
@@ -1424,10 +1470,19 @@ impl Engine {
 					continue;
 				}
 				self.program.on_program(state, shown);
-				if let Some(camera) = &mut state.camera {
-					camera.offer(state.compositor.program(), state.compositor.canvas());
-				}
 				let compositor = &state.compositor;
+				for (scene, camera) in &mut state.cameras {
+					match scene {
+						None => camera.offer(Some(compositor.program()), compositor.canvas()),
+						Some(scene) => {
+							let Some((_, canvas)) = published.iter().find(|(name, _)| name == scene) else {
+								continue;
+							};
+							let picture = compositor.output(scene).and_then(moq_scene::Output::texture);
+							camera.offer(picture, *canvas);
+						}
+					}
+				}
 				let program = (compositor.program().clone(), compositor.canvas());
 				let texture = |scene: &str| compositor.output(scene).and_then(moq_scene::Output::texture).cloned();
 				Drawn {
@@ -1445,6 +1500,7 @@ impl Engine {
 					program,
 				}
 			};
+			drop(closed);
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
 			let timestamp = moq_net::Timestamp::try_from(epoch + tick.saturating_duration_since(start)).ok();
@@ -4153,63 +4209,129 @@ mod tests {
 		}
 	}
 
-	/// The virtual camera reaches an app that opens PipeWire cameras as the
-	/// picture the studio composed, and follows the canvas to a new size.
+	/// Each virtual camera reaches an app that opens PipeWire cameras: the
+	/// program's as the picture the studio composed, and a published scene's,
+	/// beside it, as that scene at its own size, each named after what it
+	/// shows. Each follows what it shows to a new size, and a scene's turns
+	/// off once the scene is no longer published.
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a PipeWire session and a Vulkan device; run by just render-sw"]
 	async fn the_virtual_camera_reaches_a_pipewire_app() {
-		/// Open the camera the way an app opens a PipeWire camera, by role and
-		/// class, and wait for the red picture the studio composes.
-		async fn red(engine: &Engine, width: u32, height: u32) -> moq_video::capture::Stream {
+		/// Open the camera of the program, or of `scene`, the way an app opens
+		/// a PipeWire camera, and wait for the `color` picture the studio
+		/// composes at `size`.
+		async fn shows(
+			engine: &Engine,
+			scene: Option<&str>,
+			size: moq_video::Size,
+			color: [u8; 3],
+		) -> moq_video::capture::Stream {
+			let id = engine.state.lock().unwrap().camera(scene).expect("a camera").id;
 			let mut config = moq_video::capture::Config::default();
-			config.source = moq_video::capture::Source::Camera(Some("pipewire:moq-studio".into()));
-			config.width = Some(width);
-			config.height = Some(height);
+			config.source = moq_video::capture::Source::Camera(Some(id));
+			config.width = Some(size.width);
+			config.height = Some(size.height);
 			let mut stream = kio::clock::timeout(TIMEOUT, moq_video::capture::open(&config))
 				.await
 				.expect("the camera opens")
 				.expect("a camera stream");
-			assert_eq!((stream.width(), stream.height()), (width, height));
+			assert_eq!((stream.width(), stream.height()), (size.width, size.height));
 			// The canvas is black until the color source delivers its first
 			// picture, so wait for the composed one rather than take the first.
 			kio::clock::timeout(TIMEOUT, async {
 				loop {
 					let frame = stream.read().await.expect("capture").expect("the camera ended");
 					let rgba = frame.surface.to_rgba(&Default::default()).expect("rgba");
-					let center = ((height / 2 * width + width / 2) * 4) as usize;
-					let [r, g, b, _] = rgba.data()[center..center + 4] else {
-						unreachable!()
-					};
+					let center = ((size.height / 2 * size.width + size.width / 2) * 4) as usize;
+					let got = &rgba.data()[center..center + 3];
 					// The reader converts to I420, which shifts a primary a little.
-					if r > 200 && g < 60 && b < 60 {
+					if got.iter().zip(color).all(|(got, want)| got.abs_diff(want) < 60) {
 						return;
 					}
 				}
 			})
 			.await
 			.expect("the composed picture arrives");
-			let status = engine.state.lock().unwrap().camera().expect("a camera");
+			let status = engine.state.lock().unwrap().camera(scene).expect("a camera");
 			assert!(status.reading, "the camera does not know an app reads it");
 			assert!(status.sent > 0);
 			assert_eq!(status.error, None);
 			stream
 		}
 
+		/// Wait until the camera of the program, or of `scene`, shows `canvas`.
+		async fn reopened(engine: &Engine, scene: Option<&str>, canvas: moq_scene::Canvas) {
+			kio::clock::timeout(TIMEOUT, async {
+				while engine.state.lock().unwrap().camera(scene).expect("a camera").canvas != canvas {
+					kio::clock::sleep(Duration::from_millis(100)).await;
+				}
+			})
+			.await
+			.expect("the camera reopens at the new size");
+		}
+
+		/// Make the scene `tall` `size`, published or not.
+		fn set_tall(engine: &Engine, size: moq_scene::Size, published: bool) {
+			let mut state = engine.state.lock().unwrap();
+			let scene = state.collection().scenes[1].clone();
+			let mut draft = state.collection().draft("Change the scene");
+			let scene = moq_scene::Scene {
+				size: Some(size),
+				published,
+				..scene
+			};
+			draft.set_scene(1, scene).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+
+		const RED: [u8; 3] = [255, 0, 0];
+		const BLUE: [u8; 3] = [0, 0, 255];
 		let dir = tempfile::tempdir().unwrap();
 		let gpu = Gpu::new().await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
-		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, red_canvas())
+		let mut loaded = red_canvas();
+		let blue = moq_scene::Source::Color {
+			color: moq_scene::Rgba([0, 0, 255, 255]),
+		};
+		loaded.collection.sources.insert("blue".into(), blue);
+		let fill = moq_scene::Rect {
+			x: 0.0,
+			y: 0.0,
+			width: 360.0,
+			height: 360.0,
+		};
+		let tall = moq_scene::Size {
+			width: 180,
+			height: 320,
+		};
+		loaded.collection.scenes.push(moq_scene::Scene {
+			size: Some(tall),
+			published: true,
+			items: vec![moq_scene::Item::new("blue", fill)],
+			..moq_scene::Scene::new("tall")
+		});
+		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
 			.await
 			.expect("the studio starts");
-		engine.set_camera(true).expect("the camera turns on");
-		let status = engine.state.lock().unwrap().camera().expect("a camera");
-		assert_eq!(status.backend, "PipeWire");
-		assert_eq!(status.id, "pipewire:moq-studio");
-		assert!(!status.reading, "nothing reads the camera yet");
+		engine.set_camera(None, true).expect("the camera turns on");
+		engine
+			.set_camera(Some("tall"), true)
+			.expect("the scene's camera turns on");
+		for (scene, id) in [
+			(None, "pipewire:moq-studio"),
+			(Some("tall"), "pipewire:moq-studio-tall"),
+		] {
+			let status = engine.state.lock().unwrap().camera(scene).expect("a camera");
+			assert_eq!(status.backend, "PipeWire");
+			assert_eq!(status.id, id);
+			assert!(!status.reading, "nothing reads the camera yet");
+		}
 
-		let stream = red(&engine, 640, 360).await;
-		drop(stream);
+		// Both at once, each showing its own picture.
+		let program = shows(&engine, None, moq_video::Size::new(640, 360), RED).await;
+		let scene = shows(&engine, Some("tall"), moq_video::Size::new(180, 320), BLUE).await;
+		drop((program, scene));
 
 		let canvas = moq_scene::Canvas {
 			width: 320,
@@ -4222,18 +4344,41 @@ mod tests {
 			draft.set_canvas(canvas).unwrap();
 			state.commit(draft, None).unwrap();
 		}
+		reopened(&engine, None, canvas).await;
+		drop(shows(&engine, None, moq_video::Size::new(320, 180), RED).await);
+
+		let square = moq_scene::Size {
+			width: 320,
+			height: 320,
+		};
+		set_tall(&engine, square, true);
+		let canvas = moq_scene::Canvas {
+			width: 320,
+			height: 320,
+			framerate: 30,
+		};
+		reopened(&engine, Some("tall"), canvas).await;
+		drop(shows(&engine, Some("tall"), moq_video::Size::new(320, 320), BLUE).await);
+
+		set_tall(&engine, square, false);
 		kio::clock::timeout(TIMEOUT, async {
-			while engine.state.lock().unwrap().camera().expect("a camera").canvas != canvas {
+			while engine.state.lock().unwrap().camera(Some("tall")).is_some() {
 				kio::clock::sleep(Duration::from_millis(100)).await;
 			}
 		})
 		.await
-		.expect("the camera reopens at the new size");
-		let stream = red(&engine, 320, 180).await;
+		.expect("the scene's camera turns off once it is not published");
+		assert!(
+			engine.set_camera(Some("tall"), true).is_err(),
+			"the scene is not published"
+		);
+		assert!(
+			engine.state.lock().unwrap().camera(None).is_some(),
+			"the program's stays on"
+		);
 
-		drop(stream);
-		engine.set_camera(false).expect("the camera turns off");
-		assert!(engine.state.lock().unwrap().camera().is_none());
+		engine.set_camera(None, false).expect("the camera turns off");
+		assert_eq!(engine.state.lock().unwrap().cameras().count(), 0);
 		engine.stop();
 	}
 }

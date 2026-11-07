@@ -1,10 +1,13 @@
 //! The fallback camera: an existing v4l2loopback device, written to as I420.
 //!
 //! v4l2loopback is a kernel module, so the studio never creates a device; it
-//! takes the first one it finds that accepts the program's size.
+//! takes the first one it finds that accepts the picture's size and that none
+//! of its other cameras holds.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::Context;
 use moq_v4l::video::Output;
@@ -18,6 +21,10 @@ const DRIVER: &str = "v4l2 loopback";
 /// I420, which every V4L2 camera reader takes.
 const FOURCC: &[u8; 4] = b"YU12";
 
+/// The devices this process's cameras write to. The kernel lets a second
+/// writer set the same format, which would show two cameras' pictures in turn.
+static HELD: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
 pub struct Loopback {
 	device: moq_v4l::Device,
 	path: PathBuf,
@@ -25,9 +32,13 @@ pub struct Loopback {
 }
 
 impl Loopback {
-	/// Open the first v4l2loopback device that takes `size` I420 frames.
+	/// Open the first v4l2loopback device that takes `size` I420 frames and
+	/// that no other camera holds.
 	pub fn open(size: Size, framerate: u32) -> anyhow::Result<Self> {
 		let mut refused = Vec::new();
+		// Held across the search, so two cameras opening at once never pick
+		// the same device.
+		let mut held = HELD.lock().unwrap();
 		for path in devices()? {
 			let Ok(device) = moq_v4l::Device::with_path(&path) else {
 				continue;
@@ -36,19 +47,32 @@ impl Loopback {
 				Ok(caps) if caps.driver == DRIVER => {}
 				_ => continue,
 			}
+			if held.contains(&path) {
+				refused.push(format!("{}: another virtual camera holds it", path.display()));
+				continue;
+			}
 			match configure(&device, size, framerate) {
-				Ok(()) => return Ok(Self { device, path, size }),
+				Ok(()) => {
+					held.insert(path.clone());
+					return Ok(Self { device, path, size });
+				}
 				Err(err) => refused.push(format!("{}: {err:#}", path.display())),
 			}
 		}
 		match refused.is_empty() {
 			true => anyhow::bail!("no device; load the v4l2loopback module to create one"),
-			false => anyhow::bail!("no device takes the program ({})", refused.join("; ")),
+			false => anyhow::bail!("no device takes the picture ({})", refused.join("; ")),
 		}
 	}
 
 	pub fn name(&self) -> String {
 		self.path.display().to_string()
+	}
+}
+
+impl Drop for Loopback {
+	fn drop(&mut self) {
+		HELD.lock().unwrap().remove(&self.path);
 	}
 }
 
@@ -118,7 +142,8 @@ mod tests {
 
 	use super::*;
 
-	/// A V4L2 app reading the loopback device gets the picture written to it.
+	/// A V4L2 app reading the loopback device gets the picture written to it,
+	/// and another camera never writes to the same device.
 	#[test]
 	#[ignore = "needs a v4l2loopback device; run by just v4l2loopback"]
 	fn a_v4l2_app_reads_the_program() {
@@ -146,5 +171,12 @@ mod tests {
 			y < 100 && u < 128 && v > 200,
 			"the reader got y={y} u={u} v={v}, not red"
 		);
+
+		if let Ok(other) = Loopback::open(size, 30) {
+			assert_ne!(other.path, loopback.path, "two cameras share a device");
+		}
+		let path = loopback.path.clone();
+		drop(loopback);
+		assert_eq!(Loopback::open(size, 30).expect("the device is free again").path, path);
 	}
 }

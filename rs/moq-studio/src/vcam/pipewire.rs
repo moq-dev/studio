@@ -3,7 +3,7 @@
 //! A `Video/Source` node with the `Camera` role is what PipeWire-aware apps
 //! (browsers through the camera portal, conferencing apps) list as a camera.
 //! It offers one format, the canvas's RGBA at its size and frame rate, so the
-//! program reaches an app without a conversion here.
+//! picture reaches an app without a conversion here.
 //!
 //! PipeWire objects stay on the thread that made them, so the node runs its
 //! own main loop. The `vcam` thread leaves the newest picture in a [`Slot`]
@@ -23,16 +23,16 @@ use spa::param::video::{VideoFormat, VideoInfoRaw};
 
 use super::{Shared, Sink};
 
-/// The node's name, which `pw-cli` and pickers that show ids print.
+/// The program camera's node name, which `pw-cli` and pickers that show ids
+/// print. A scene's camera adds `-<scene>`.
 const NAME: &str = "moq-studio";
 
-/// The id moq-video's camera capture lists the node by: `pipewire:` and its name.
-pub const ID: &str = "pipewire:moq-studio";
-
-/// What apps list the camera as.
+/// What apps list the program camera as. A scene's camera adds `: <scene>`.
 const DESCRIPTION: &str = "MoQ Studio";
 
 pub struct Node {
+	/// The node's name, for its capture id.
+	name: String,
 	slot: Arc<Slot>,
 	wake: pw::channel::Sender<Message>,
 	thread: Option<std::thread::JoinHandle<()>>,
@@ -55,21 +55,32 @@ enum Message {
 }
 
 impl Node {
-	/// Add a `size` camera node at `framerate` to the session's PipeWire.
+	/// Add a `size` camera node at `framerate`, for the program or the scene
+	/// called `scene`, to the session's PipeWire.
 	///
 	/// Fails when there is no PipeWire session to add it to.
-	pub fn open(size: Size, framerate: u32, shared: Arc<Shared>) -> anyhow::Result<Self> {
+	pub fn open(scene: Option<&str>, size: Size, framerate: u32, shared: Arc<Shared>) -> anyhow::Result<Self> {
+		let (name, description) = match scene {
+			None => (NAME.to_string(), DESCRIPTION.to_string()),
+			Some(scene) => (format!("{NAME}-{scene}"), format!("{DESCRIPTION}: {scene}")),
+		};
 		let slot = Arc::new(Slot::default());
 		let (wake, messages) = pw::channel::channel();
 		let (ready, opened) = mpsc::channel();
 		let thread = {
 			let slot = slot.clone();
 			let shared = shared.clone();
+			let node = Props {
+				name: name.clone(),
+				description,
+				size,
+				framerate,
+			};
 			std::thread::Builder::new()
 				.name("vcam-pipewire".into())
 				.spawn(move || {
 					let ready = Rc::new(RefCell::new(Some(ready)));
-					if let Err(err) = run(size, framerate, slot, shared, messages, ready.clone())
+					if let Err(err) = run(node, slot, shared, messages, ready.clone())
 						&& let Some(ready) = ready.take()
 					{
 						let _ = ready.send(Err(format!("{err:#}")));
@@ -79,6 +90,7 @@ impl Node {
 		};
 		match opened.recv() {
 			Ok(Ok(())) => Ok(Self {
+				name,
 				slot,
 				wake,
 				thread: Some(thread),
@@ -93,6 +105,14 @@ impl Node {
 				anyhow::bail!("the PipeWire thread stopped")
 			}
 		}
+	}
+}
+
+impl Node {
+	/// The id moq-video's camera capture lists the node by: `pipewire:` and
+	/// its name.
+	pub fn id(&self) -> String {
+		format!("pipewire:{}", self.name)
 	}
 }
 
@@ -125,12 +145,20 @@ impl Drop for Node {
 /// Whoever waits for the node to be added, until it is or PipeWire refuses it.
 type Ready = Rc<RefCell<Option<mpsc::Sender<Result<(), String>>>>>;
 
+/// The node to add: what it is called, and the one picture format it offers.
+struct Props {
+	name: String,
+	/// What apps list the camera as.
+	description: String,
+	size: Size,
+	framerate: u32,
+}
+
 /// Add the node and run it until it is dropped or PipeWire ends it, saying on
 /// `ready` whether PipeWire added it. A failure before then goes to `ready`
 /// rather than `shared`, so the caller can still fall back.
 fn run(
-	size: Size,
-	framerate: u32,
+	node: Props,
 	slot: Arc<Slot>,
 	shared: Arc<Shared>,
 	messages: pw::channel::Receiver<Message>,
@@ -140,16 +168,22 @@ fn run(
 	let mainloop = pw::main_loop::MainLoopRc::new(None).context("PipeWire main loop")?;
 	let context = pw::context::ContextRc::new(&mainloop, None).context("PipeWire context")?;
 	let core = context.connect_rc(None).context("connecting to PipeWire")?;
+	let Props {
+		name,
+		description,
+		size,
+		framerate,
+	} = node;
 	let stream = pw::stream::StreamRc::new(
 		core,
-		NAME,
+		&name,
 		pw::properties::properties! {
 			*pw::keys::MEDIA_TYPE => "Video",
 			*pw::keys::MEDIA_CATEGORY => "Capture",
 			*pw::keys::MEDIA_CLASS => "Video/Source",
 			*pw::keys::MEDIA_ROLE => "Camera",
-			*pw::keys::NODE_NAME => NAME,
-			*pw::keys::NODE_DESCRIPTION => DESCRIPTION,
+			*pw::keys::NODE_NAME => name.as_str(),
+			*pw::keys::NODE_DESCRIPTION => description.as_str(),
 		},
 	)
 	.context("PipeWire stream")?;
