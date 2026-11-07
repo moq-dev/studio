@@ -978,15 +978,15 @@ impl Driver {
 	/// Follow the broadcast at `path` for as long as the feed lives, playing
 	/// each instance of it that comes online.
 	async fn broadcast(&self, path: &str) -> Result<(), Error> {
-		let mut instances = moq_mux::follow::Instances::new(&self.context.origin, path, None)?;
+		let mut instances = self.context.origin.follow(path, None)?;
 		set(&self.status, Status::Offline);
 
 		let mut clock = self.clock.clone().expect("a broadcast source has a clock");
 		let mut playing: Option<Playing<'_>> = None;
 		loop {
 			tokio::select! {
-				event = instances.next() => match event {
-					Ok(moq_mux::follow::Event::Start(broadcast)) => {
+				event = instances.available() => match event {
+					Ok(Some(broadcast)) => {
 						set(&self.status, Status::Live);
 						*self.played.lock().unwrap() = Played {
 							broadcast: Some(broadcast.clone()),
@@ -996,7 +996,7 @@ impl Driver {
 						clock = clock.reset(VIDEO_DELAY);
 						playing = Some(Box::pin(self.play(broadcast, path, clock.clone())));
 					}
-					Ok(moq_mux::follow::Event::End) => {
+					Ok(None) => {
 						playing = None;
 						*self.played.lock().unwrap() = Played::default();
 						set(&self.status, Status::Offline);
@@ -2305,7 +2305,9 @@ mod tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
-			let publication = origin.create_broadcast("room/guest").unwrap();
+			let publication = origin
+				.route("room/guest", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let mut broadcast = publication.broadcast().clone();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 			// A known bitrate ranks a rendition above one without.
@@ -2324,7 +2326,7 @@ mod tests {
 					.unwrap()
 			};
 			let first = audio("first", None);
-			publication.announce(moq_net::origin::Route::default()).unwrap();
+			publication.announce().unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -2349,7 +2351,9 @@ mod tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
-			let publication = origin.create_broadcast("room/guest").unwrap();
+			let publication = origin
+				.route("room/guest", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let mut broadcast = publication.broadcast().clone();
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 			let info = catalog.track_info(hang::catalog::PRIORITY.audio);
@@ -2365,7 +2369,7 @@ mod tests {
 					.unwrap();
 			};
 			point(&mut catalog, "first");
-			publication.announce(moq_net::origin::Route::default()).unwrap();
+			publication.announce().unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -2390,7 +2394,9 @@ mod tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
-			let publication = origin.create_broadcast("room/guest").unwrap();
+			let publication = origin
+				.route("room/guest", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let mut broadcast = publication.broadcast().clone();
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
@@ -2400,7 +2406,7 @@ mod tests {
 					catalog.audio.renditions.insert("audio".into(), config);
 				})
 				.unwrap();
-			publication.announce(moq_net::origin::Route::default()).unwrap();
+			publication.announce().unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -2421,7 +2427,7 @@ mod tests {
 
 	/// A live broadcast at `room/guest`, writing nothing until the test does.
 	struct Live {
-		_publication: moq_net::origin::Publication,
+		_publication: moq_net::origin::Route,
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_video::encode::Producer,
@@ -2444,7 +2450,9 @@ mod tests {
 
 	/// A broadcast with a video track, and an audio one with `audio`.
 	async fn live(origin: &moq_net::origin::Producer, audio: bool) -> Live {
-		let publication = origin.create_broadcast("room/guest").unwrap();
+		let publication = origin
+			.route("room/guest", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let mut broadcast = publication.broadcast().clone();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let (video, encoder) = rendition(&broadcast, catalog.timebase()).await;
@@ -2454,7 +2462,7 @@ mod tests {
 			options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Pcm, &input);
 			moq_audio::encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap()
 		});
-		publication.announce(moq_net::origin::Route::default()).unwrap();
+		publication.announce().unwrap();
 		Live {
 			_publication: publication,
 			broadcast,

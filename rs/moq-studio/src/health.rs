@@ -859,51 +859,35 @@ impl Feedback {
 		let mut readers = BTreeMap::<moq_net::Path, Reader>::new();
 		let mut unread = 0usize;
 		while let Some(event) = announced.next().await {
-			let (announce, restart) = match event {
-				moq_net::announce::Event::Start(announce) => (announce, false),
-				moq_net::announce::Event::Restart(announce) => (announce, true),
-				moq_net::announce::Event::End(announce) => {
+			match event {
+				moq_net::announce::Event::Present(announce) => {
+					let path = announce.prefix;
+					let Some(name) = name(&prefix, &path).filter(|_| hang::echo::is_echo(&path)) else {
+						continue;
+					};
+					if readers.len() < MAX_VIEWERS {
+						let reader = self.read(origin.clone(), path.clone(), name);
+						readers.insert(path, reader);
+					} else {
+						unread += 1;
+					}
+				}
+				moq_net::announce::Event::Absent(announce) => {
 					if readers.remove(&announce.prefix).is_none() && hang::echo::is_echo(&announce.prefix) {
 						unread = unread.saturating_sub(1);
 					}
-					self.0.lock().unwrap().unread = unread;
-					continue;
 				}
-				// A takeover continues the same instance, and an update moves its route.
-				_ => continue,
-			};
-			let path = announce.prefix;
-			let Some(name) = name(&prefix, &path).filter(|_| hang::echo::is_echo(&path)) else {
-				continue;
-			};
-			// A new instance of a viewer being read replaces its reader; one not
-			// read was counted when it started.
-			let read = if restart {
-				readers.remove(&path).is_some()
-			} else if readers.len() < MAX_VIEWERS {
-				true
-			} else {
-				unread += 1;
-				false
-			};
-			if read {
-				let reader = self.read(
-					origin.clone(),
-					Observer::new(path.clone(), announce.route.instance),
-					name,
-				);
-				readers.insert(path, reader);
 			}
 			self.0.lock().unwrap().unread = unread;
 		}
 		Ok(())
 	}
 
-	/// Start reading the viewer `observer` names.
-	fn read(&self, origin: moq_net::origin::Consumer, observer: Observer, name: String) -> Reader {
+	/// Start reading the viewer at `path`, named `name`.
+	fn read(&self, origin: moq_net::origin::Consumer, path: moq_net::Path, name: String) -> Reader {
 		let slot = Slot::default();
 		self.0.lock().unwrap().slots.insert(name.clone(), slot.clone());
-		let task = tokio::spawn(read(origin, observer, slot.clone()));
+		let task = tokio::spawn(read(origin, path, slot.clone()));
 		Reader {
 			name,
 			slot,
@@ -949,27 +933,63 @@ fn name(prefix: &moq_net::Path, path: &moq_net::Path) -> Option<String> {
 	name.as_str().strip_suffix(hang::echo::SUFFIX).map(str::to_string)
 }
 
-/// Keep the latest reports of the viewer `observer` names in `slot`, until
-/// its broadcast ends or the report cannot be read.
-async fn read(origin: moq_net::origin::Consumer, observer: Observer, slot: Slot) {
-	let read = async {
-		let broadcast = origin.request(&observer.path, observer.instance.clone()).await?;
-		let track = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
-		let mut config = moq_json::snapshot::consumer::Config::default();
-		config.max_size = Some(MAX_REPORT);
-		let mut reports = moq_json::snapshot::Consumer::<hang::echo::Snapshot>::new(track, config);
-		while let Some(report) = reports.latest().await? {
-			let report = health::Report::new(observer.clone(), report.value);
-			let mut reports = slot.lock().unwrap();
-			reports.previous = reports.current.take();
-			reports.current = Some((report, kio::clock::now()));
-		}
-		anyhow::Ok(())
+/// Keep the latest reports of the viewer at `path` in `slot`, from each
+/// instance that serves it in turn, until dropped. A new instance starts its
+/// reports afresh.
+async fn read(origin: moq_net::origin::Consumer, path: moq_net::Path, slot: Slot) {
+	let mut following = match origin.follow(&path, None) {
+		Ok(following) => following,
+		Err(err) => return failed(&slot, &path, err.into()),
 	};
-	if let Err(err) = read.await {
-		tracing::debug!(%err, viewer = %observer.path, "stopped reading feedback");
-		slot.lock().unwrap().error = Some(format!("{err:#}"));
+	let mut next = following.available().await;
+	loop {
+		let broadcast = match next {
+			Ok(Some(broadcast)) => broadcast,
+			// Offline until another instance serves the path.
+			Ok(None) => {
+				next = following.available().await;
+				continue;
+			}
+			// The follow waits for the route to change before it asks again.
+			Err(err) => {
+				failed(&slot, &path, err.into());
+				next = following.available().await;
+				continue;
+			}
+		};
+		*slot.lock().unwrap() = Reports::default();
+		let observer = Observer::new(path.clone(), broadcast.info().instance.clone());
+		tokio::select! {
+			result = reports(&broadcast, observer, &slot) => {
+				if let Err(err) = result {
+					failed(&slot, &path, err);
+				}
+				next = following.available().await;
+			}
+			changed = following.available() => next = changed,
+		}
 	}
+}
+
+/// Keep the latest reports `broadcast` publishes in `slot`, until its track ends.
+async fn reports(broadcast: &moq_net::broadcast::Consumer, observer: Observer, slot: &Slot) -> anyhow::Result<()> {
+	let track = broadcast.track(hang::echo::TRACK)?;
+	let mut config = moq_json::snapshot::consumer::Config::default();
+	config.max_size = Some(MAX_REPORT);
+	let mut reports = moq_json::snapshot::Consumer::<hang::echo::Snapshot>::new(track, config);
+	while let Some(report) = reports.latest().await? {
+		let report = health::Report::new(observer.clone(), report.value);
+		let mut reports = slot.lock().unwrap();
+		reports.previous = reports.current.take();
+		reports.current = Some((report, kio::clock::now()));
+	}
+	Ok(())
+}
+
+/// Record why reading the viewer at `path` stopped.
+fn failed(slot: &Slot, path: &moq_net::Path, err: anyhow::Error) {
+	tracing::debug!(%err, viewer = %path, "stopped reading feedback");
+	slot.lock().unwrap().error = Some(format!("{err:#}"));
 }
 
 /// A running feedback reader, which forgets its viewer when it stops.
@@ -1418,7 +1438,7 @@ mod tests {
 	async fn viewer_feedback_times_each_track() {
 		let _ = moq_tokio::crypto::install_default();
 		let origin = moq_tokio::origin::spawn();
-		let publication = origin.create_broadcast("show").unwrap();
+		let publication = origin.route("show", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let mut broadcast = publication.broadcast().clone();
 		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 		let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
@@ -1458,10 +1478,12 @@ mod tests {
 				.unwrap(),
 		}));
 
-		let alice = origin.create_broadcast("show/viewers/alice.echo").unwrap();
-		let track = alice.create_track(hang::echo::TRACK, None).unwrap();
+		let alice = origin
+			.route("show/viewers/alice.echo", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = alice.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 		let mut reports = moq_json::snapshot::Producer::<hang::echo::Snapshot>::new(track, Default::default());
-		alice.announce(Default::default()).unwrap();
+		alice.announce().unwrap();
 
 		let timestamp = moq_net::Timestamp::from_millis(20_000).unwrap();
 		let wall = clock.wall_clock(timestamp).unwrap() + Duration::from_millis(250);
@@ -1494,9 +1516,58 @@ mod tests {
 		);
 		assert_eq!(viewer.latency, Some(latency));
 
-		alice.unannounce();
+		alice.withdraw();
 		until(&mut sampler, |report| report.viewers.reports.is_empty()).await;
 		follow.abort();
+	}
+
+	/// A viewer that restarts under a new instance is read from that
+	/// instance, its reports starting afresh.
+	#[tokio::test(start_paused = true)]
+	async fn a_restarted_viewer_is_read_afresh() {
+		let origin = moq_tokio::origin::spawn();
+		let path = moq_net::Path::new("show/viewers/alice.echo").unwrap();
+		let publish = || {
+			let route = origin.route(&path, moq_net::origin::RouteOptions::hidden()).unwrap();
+			let track = route.broadcast().create_track(hang::echo::TRACK, None).unwrap();
+			let mut reports = moq_json::snapshot::Producer::<hang::echo::Snapshot>::new(track, Default::default());
+			reports.update(&hang::echo::Snapshot::default()).unwrap();
+			route.announce().unwrap();
+			(route, reports)
+		};
+		let slot = Slot::default();
+		let reading = tokio::spawn(read(origin.consume(), path.clone(), slot.clone()));
+		let read_from = async |instance: moq_net::Instance| {
+			let wait = async {
+				loop {
+					let read = {
+						let reports = slot.lock().unwrap();
+						let observer = reports.current.as_ref().map(|(report, _)| &report.observer);
+						let read = observer.is_some_and(|observer| observer.instance.as_ref() == Some(&instance));
+						assert!(
+							!read || reports.previous.is_none(),
+							"a new instance keeps no older report"
+						);
+						read
+					};
+					if read {
+						return;
+					}
+					kio::clock::sleep(INTERVAL).await;
+				}
+			};
+			kio::clock::timeout(Duration::from_secs(30), wait)
+				.await
+				.expect("the instance is read");
+		};
+
+		let (first, _first_reports) = publish();
+		read_from(first.instance()).await;
+		// Creating the path again supersedes the first route.
+		let (second, _second_reports) = publish();
+		assert_ne!(first.instance(), second.instance());
+		read_from(second.instance()).await;
+		reading.abort();
 	}
 
 	/// A relay that shares its stats counts each session watching the
@@ -1523,9 +1594,11 @@ mod tests {
 		let client = client.init(Default::default()).unwrap();
 
 		let published = moq_tokio::origin::spawn();
-		let show = published.create_broadcast("show").unwrap();
-		let track = show.create_track("video", None).unwrap();
-		show.announce(Default::default()).unwrap();
+		let show = published
+			.route("show", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = show.broadcast().create_track("video", None).unwrap();
+		show.announce().unwrap();
 		let subscribe = moq_tokio::origin::spawn();
 		let watching = Watching::default();
 		tokio::spawn(
@@ -1548,7 +1621,8 @@ mod tests {
 				.unwrap()
 				.available()
 				.await
-				.unwrap();
+				.unwrap()
+				.expect("an instance");
 			let mut video = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 			track.append_group().unwrap().finish().unwrap();
 			video.recv_group().await.unwrap();
@@ -1572,8 +1646,13 @@ mod tests {
 		let follow = tokio::spawn(feedback.clone().follow(origin.consume(), prefix));
 
 		let announce = |n: usize| {
-			let viewer = origin.create_broadcast(format!("show/viewers/{n:03}.echo")).unwrap();
-			viewer.announce(Default::default()).unwrap();
+			let viewer = origin
+				.route(
+					format!("show/viewers/{n:03}.echo"),
+					moq_net::origin::RouteOptions::hidden(),
+				)
+				.unwrap();
+			viewer.announce().unwrap();
 			viewer
 		};
 		let read = |feedback: &Feedback, name: &str| {
@@ -1589,8 +1668,8 @@ mod tests {
 			while read(&feedback, "065") != (MAX_VIEWERS, 2, false) {
 				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
-			viewers[0].unannounce();
-			viewers[MAX_VIEWERS].unannounce();
+			viewers[0].withdraw();
+			viewers[MAX_VIEWERS].withdraw();
 			while read(&feedback, "000") != (MAX_VIEWERS - 1, 1, false) {
 				kio::clock::sleep(Duration::from_millis(10)).await;
 			}

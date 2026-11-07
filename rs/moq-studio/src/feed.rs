@@ -64,15 +64,15 @@ impl Feeds {
 		clock: moq_mux::Clock,
 		epoch: Duration,
 	) -> anyhow::Result<Self> {
-		let requests = origin
-			.requests(PROGRAM)
+		let route = origin
+			.route_prefix(PROGRAM, Default::default())
 			.context("cannot serve the program in the room")?;
 		let served = program.clone();
 		let serving = tokio::spawn(async move {
-			while let Ok(request) = requests.requested_broadcast().await {
+			while let Some(request) = route.requested().await {
 				// The route claims everything beneath it too, which holds nothing.
 				match request.path().as_str() == PROGRAM {
-					true => request.serve(&served),
+					true => request.serve(served.clone()),
 					false => request.reject(moq_net::Error::NotFound),
 				}
 			}
@@ -136,7 +136,7 @@ impl Feeds {
 		let program = Path::new(PROGRAM)?
 			.relative(&path)
 			.context("the program cannot be named from a feed")?;
-		let publication = self.origin.create_broadcast(path)?;
+		let publication = self.origin.route(path, moq_net::origin::RouteOptions::hidden())?;
 		let mut broadcast = publication.broadcast().clone();
 		let config = moq_mux::catalog::Config::default().with_clock(self.clock.clone());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
@@ -149,7 +149,7 @@ impl Feeds {
 		options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Opus, &input);
 		options.config.bitrate = Some(BITRATE);
 		let audio = moq_audio::encode::Producer::new(&mut broadcast, catalog.clone(), input, &options)?;
-		publication.announce(moq_net::origin::Route::default())?;
+		publication.announce()?;
 
 		let pick = mix::Pick::default();
 		let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -199,7 +199,7 @@ struct Feed {
 /// A feed's broadcast, as its task runs it.
 struct Running {
 	/// Ends the broadcast once the task returns.
-	_publication: moq_net::origin::Publication,
+	_publication: moq_net::origin::Route,
 	catalog: moq_mux::catalog::Producer,
 	audio: moq_audio::encode::Producer,
 	follow: mix::Follow,
@@ -429,7 +429,14 @@ mod tests {
 		std::thread::scope(|scope| scope.spawn(|| feeds.sync(&collection, &sources)).join().unwrap());
 
 		let path = Room::feed_path("alice", 0).unwrap();
-		let broadcast = origin.consume().follow(path, None).unwrap().available().await.unwrap();
+		let broadcast = origin
+			.consume()
+			.follow(path, None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.expect("an instance");
 		let catalog = listed(&broadcast).await;
 		let video = &catalog.video.renditions["video"];
 		assert_eq!(video.broadcast.as_ref().unwrap().as_str(), "../../.program");
@@ -450,7 +457,14 @@ mod tests {
 		assert_eq!(bob_hears.data[0], 0.25, "bob hears only alice");
 
 		let path = Room::feed_path("bob", 0).unwrap();
-		let bob = origin.consume().follow(path, None).unwrap().available().await.unwrap();
+		let bob = origin
+			.consume()
+			.follow(path, None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.expect("an instance");
 		room.stop_renewing("bob").unwrap();
 		feeds.sync(&collection, &sources);
 		assert_eq!(feeds.feeds.keys().collect::<Vec<_>>(), ["alice"]);
@@ -473,7 +487,10 @@ mod tests {
 		let read = moq_tokio::origin::spawn();
 		let link = room.invite("alice").unwrap().link;
 		let _alice = relay.join(&link, &moq_tokio::origin::spawn(), &read);
-		let follow = async |path: Path| read.consume().follow(path, None)?.available().await;
+		let follow = async |path: Path| {
+			let broadcast = read.consume().follow(path, None)?.available().await?;
+			moq_net::Result::Ok(broadcast.expect("the first change is an instance"))
+		};
 
 		let path = Room::feed_path("alice", 0).unwrap();
 		let feed = kio::clock::timeout(TIMEOUT, follow(path.clone()))
