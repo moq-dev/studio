@@ -2696,7 +2696,10 @@ impl Panels {
 			ui.end_row();
 			ui.label("Picture");
 			let canvas = camera.canvas;
-			ui.label(format!("{}x{} at {} fps", canvas.width, canvas.height, canvas.framerate));
+			ui.label(format!(
+				"{}x{} at {} fps",
+				canvas.width, canvas.height, canvas.framerate
+			));
 			ui.end_row();
 			ui.label("Apps");
 			ui.label(if camera.reading { "reading" } else { "none; not copying" });
