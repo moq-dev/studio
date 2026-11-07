@@ -100,8 +100,9 @@ repository.
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
-- [Unpublishing a scene ends its broadcast cleanly](/quest/m0/unpublish-clean.md) - viewers get a clean finish, not `Unroutable`, when a scene stops publishing
 - [A media file's sound plays with its pictures](/quest/m0/media-av-sync.md) - media sources write a bus latency ahead, as broadcast sources do
+- [Catalogs finish when the studio quits](/quest/m0/catalog-finish.md) - the program's and the recording's catalogs end with `finish()`, not a drop
+- [The UI keeps its frame rate while the program renders](/quest/m0/ui-frame-rate.md) - the editor draws without waiting on the program's render
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
 - [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
