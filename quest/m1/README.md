@@ -24,5 +24,7 @@ than opening an m2 for them.
 ## Required
 
 - [Viewer-side composition](/quest/m1/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers and by a server
-- [Keypad keys bind as hotkeys](/quest/m1/hotkeys-keypad.md) - scene and action keys on the keypad, apart from the main row
+- [Hotkeys bind by physical key](/quest/m1/hotkeys-keypad.md) - keypad keys apart from the main row, any X11 key, and every binding across layout changes
 - [Scene graph view](/quest/m1/scene-graph.md) - a node view of picture and audio scenes, their routing, volume, pan, and waveforms
+- [Effects in the studio UI](/quest/m1/ui-effects.md) - rune-fx glow, bursts, metal and gradient chrome, and alert effects in the egui UI
+- [Rune UI spike](/quest/m1/rune-spike.md) - the monitors prototyped on Rune, with a verdict on moving the UI off egui
