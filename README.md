@@ -106,6 +106,7 @@ Every panel is a tab you can drag, split, or stack.
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
 | Audio | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. |
+| Graph | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
 | Output | Start and stop recording, pick the picture and the audio scene it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
 | Health | See how the stream reaches viewers, relay by relay and, for the program and each published scene, track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
@@ -117,6 +118,25 @@ A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over program, and over the
 preview of a scene of the program's size, and stays on through a cut or
 transition: a downstream keyer for a logo or a lower third.
+
+### Scene graph
+
+The Graph panel, beside Preview, shows the collection as nodes: each source
+with a picture or sound, each scene and the top layer, and each audio scene.
+A wire runs from each source to every scene or layer placing it, and from
+each sound and audio scene to every audio scene holding it; one into a scene
+or clone source shows what it draws, and follows from that source. A wire
+whose items are all hidden, or whose sound is muted, is dimmed.
+
+Drag from a node's right edge onto a scene's, the top layer's, or an audio
+scene's left edge to wire them: a picture is placed filling the scene, and a
+sound or audio scene is sent into the audio scene. Click a wire, then
+**Remove**, to take every item of that source out of the scene, or stop the
+send. Each sound's node has its strip's mute, gain, and delay and a waveform
+of its last few seconds, each audio scene's node **On program**, **Listen**,
+and the waveform of its mix, and each scene's node **Publish** and the audio
+scene it carries. Clicking a scene previews it, and clicking a source picks
+it for Filters. Every edit lands in History, as from the other panels.
 
 ### Published scenes
 

@@ -2,10 +2,10 @@
 
 ## Goal
 
-Each sound's strip in the Audio panel has a pan beside its fader, saved as
-`pan` in `[audio.<source>]` and applied wherever the sound plays, in every
-audio scene holding it, as gain, mute, and delay are. `README.md` documents
-it.
+Each sound's strip in the Audio panel, and its node in the Graph panel, has
+a pan beside its fader, saved as `pan` in `[audio.<source>]` and applied
+wherever the sound plays, in every audio scene holding it, as gain, mute, and
+delay are. `README.md` documents it.
 
 ## Plan
 
@@ -23,6 +23,8 @@ the rest of audio scenes:
   stereo refuses a pan other than center.
 - Changing pan never drops or repeats audio, ramped across a block as gain
   is.
+- Both panels draw a sound's mute, gain, and delay with `strip_controls` in
+  `rs/moq-studio/src/ui.rs`; a pan added there shows in both.
 
 ## Required
 
