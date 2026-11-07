@@ -495,7 +495,7 @@ pub(crate) struct Video<'a> {
 	config: moq_video::encode::Config,
 	clock: moq_mux::Clock,
 	/// Where the capture's private timeline starts on the studio clock, in
-	/// microseconds, taken at the first frame.
+	/// microseconds, taken at the first frame unless [anchored](Self::anchor).
 	epoch: Option<u128>,
 }
 
@@ -527,6 +527,14 @@ impl<'a> Video<'a> {
 			clock: listing.studio.clock(),
 			epoch: None,
 		})
+	}
+
+	/// Start the private timeline at `origin` on the studio clock, rather than
+	/// where the first frame encodes, for a source that encodes its pictures
+	/// ahead of when they show.
+	pub(crate) fn anchor(&mut self, origin: kio::clock::Instant) -> Result<(), Error> {
+		self.epoch = Some(self.clock.capture(origin)?.as_micros());
+		Ok(())
 	}
 
 	/// Restamp `frame` onto the program's clock, and encode and publish it
@@ -675,10 +683,11 @@ impl<'a> Audio<'a> {
 		})
 	}
 
-	/// Encode and publish `samples`, whose first was captured at `captured`,
-	/// while the source is used: heard on program, or its track read. `gap`
-	/// says sound was lost just before them. Leaving use marks a gap, and the
-	/// sound after one is stamped afresh, so the track's timeline holds it.
+	/// Encode and publish `samples`, whose first was captured or sounds at
+	/// `captured`, while the source is used: heard on program, or its track
+	/// read. `gap` says sound was lost just before them. Leaving use marks a
+	/// gap, and the sound after one is stamped afresh, so the track's timeline
+	/// holds it.
 	pub(crate) fn write(&mut self, samples: &[f32], captured: kio::clock::Instant, gap: bool) -> Result<(), Error> {
 		let producer = self.producer.as_mut().expect("open until it ends");
 		let used = self.on_program.borrow().heard.contains(&self.claim.name) || producer.demand().wanted().is_some();
@@ -692,9 +701,13 @@ impl<'a> Audio<'a> {
 			producer.reanchor();
 		}
 		self.encoding = true;
-		// A device may stamp a buffer a moment ahead of the clock, which the
-		// clock refuses as not yet captured.
-		let timestamp = self.clock.capture(captured.min(kio::clock::now()))?;
+		// A media source writes its sound ahead of when it sounds, and a device
+		// may stamp a buffer a moment ahead of the clock, which maps only what
+		// has passed: the rest is counted on from now.
+		let now = kio::clock::now();
+		let ahead = captured.saturating_duration_since(now).as_micros();
+		let timestamp = self.clock.capture(captured.min(now))?.as_micros() + ahead;
+		let timestamp = moq_net::Timestamp::from_micros(timestamp as u64).map_err(moq_audio::Error::from)?;
 		let data = bytes::Bytes::copy_from_slice(bytemuck::cast_slice(samples));
 		producer.write(&moq_audio::Frame::new(data, timestamp))?;
 		Ok(())
@@ -797,17 +810,20 @@ mod tests {
 		}
 	}
 
-	/// Walk a media source playing a 10 fps clip through `count` pictures, the
-	/// first due at `first`. The clock moves to each picture's moment and is
-	/// held while it decodes, encodes, and shows, so no wait counts on work in
-	/// threads the runtime cannot see, such as a decoder's or an encoder's,
-	/// finishing within any span of the clock.
-	async fn pictures(feed: &crate::source::Feed, first: kio::clock::Instant, count: u32) {
+	/// Walk a media source playing a 10 fps clip through `count` of its play's
+	/// pictures from the one at index `from`, returning when the play began.
+	/// The clock is held until the play begins, then moves to each picture's
+	/// moment and is held while it decodes, encodes, and shows, so no wait
+	/// counts on work in threads the runtime cannot see, such as a decoder's or
+	/// an encoder's, finishing within any span of the clock.
+	async fn pictures(feed: &crate::source::Feed, from: u32, count: u32) -> kio::clock::Instant {
+		let begun = until(|| feed.run().begun).await;
 		let shown = || matches!(feed.next_picture(), Some(crate::source::Picture::Frame(_))).then_some(());
-		for index in 0..count {
-			until_time(first + std::time::Duration::from_millis(100) * index).await;
+		for index in from..from + count {
+			until_time(begun + std::time::Duration::from_millis(100) * index).await;
 			until(shown).await;
 		}
+		begun
 	}
 
 	/// Yield until `f` holds of the local catalog's source listings.
@@ -984,7 +1000,7 @@ mod tests {
 				tracks.push(consumer.track(name).unwrap().subscribe(subscription).await.unwrap());
 			}
 			let written = |id: &str| publish.stats().get(id).map_or(0, |rendition| rendition.frames);
-			pictures(sources.get("bed").unwrap(), kio::clock::now(), 4).await;
+			pictures(sources.get("bed").unwrap(), 0, 4).await;
 			until(|| names.iter().all(|name| written(name) > 0).then_some(())).await;
 
 			sources.stop();
@@ -1572,8 +1588,8 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 
-			// The first picture is due at once, so the clock stays put while
-			// the encoder opens.
+			// The pictures' track opens before the play begins, so the clock
+			// stays put while the encoder opens.
 			let listed = until(|| {
 				let listed = catalog.snapshot().ext.studio.sources.remove("clip");
 				listed.filter(|listed| !listed.video.renditions.is_empty())
@@ -1594,13 +1610,11 @@ mod tests {
 			let mut track = moq_mux::container::Consumer::new(track, container);
 
 			// Half way, five pictures in, it starts over, and plays to its end.
-			let first = kio::clock::now();
-			pictures(feed, first, 5).await;
+			let first = pictures(feed, 0, 5).await;
 			until_time(first + std::time::Duration::from_millis(450)).await;
 			let cut = publish.catalog.clock().now();
 			feed.play().unwrap();
-			let restarted = kio::clock::now();
-			pictures(feed, restarted, 10).await;
+			let restarted = pictures(feed, 0, 10).await;
 			until_time(restarted + std::time::Duration::from_millis(1_100)).await;
 			until(|| (feed.status() == Status::Ended).then_some(())).await;
 
@@ -1620,6 +1634,13 @@ mod tests {
 			.await;
 			assert!(stamps[0] < cut, "the first play's keyframe: {stamps:?}");
 			assert!(stamps.windows(2).all(|pair| pair[0] < pair[1]), "{stamps:?}");
+			// Stamped with when it showed, though encoded ahead of it.
+			let shown = publish.catalog.clock().capture(first).unwrap();
+			assert!(
+				stamps[0].as_micros().abs_diff(shown.as_micros()) <= 1,
+				"the first picture as it showed: {:?}, not {shown:?}",
+				stamps[0]
+			);
 
 			// Ended, it shows nothing new, yet gives its session back once off
 			// program and unread.
@@ -1665,8 +1686,7 @@ mod tests {
 			let written = |id: &str| publish.stats().get(id).map_or(0, |rendition| rendition.frames);
 
 			let feed = sources.get("bed").unwrap();
-			let first = kio::clock::now();
-			pictures(feed, first, 4).await;
+			pictures(feed, 0, 4).await;
 			until(|| (written(&audio) > 0).then_some(())).await;
 			assert_eq!(written(&video), 0, "heard, not shown");
 			assert_eq!(sessions.open(), 0, "no encoder for the pictures");
@@ -1677,7 +1697,7 @@ mod tests {
 				shown: ["bed".to_string()].into(),
 				heard: ["bed".to_string()].into(),
 			});
-			pictures(feed, first + std::time::Duration::from_millis(400), 6).await;
+			pictures(feed, 4, 6).await;
 			until(|| (written(&video) > 0).then_some(())).await;
 		})
 		.await;
@@ -1723,7 +1743,7 @@ mod tests {
 			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 			let mut track = moq_mux::container::Consumer::new(track, container);
 			// Two and a half loops of a second, each with half a second of sound.
-			pictures(sources.get("bed").unwrap(), kio::clock::now(), 25).await;
+			let begun = pictures(sources.get("bed").unwrap(), 0, 25).await;
 			let now = kio::Waiter::noop();
 			let mut stamps = Vec::new();
 			let silences = until(|| {
@@ -1738,6 +1758,9 @@ mod tests {
 			})
 			.await;
 			assert_eq!(silences, 2, "each loop's silence is kept: {stamps:?}");
+			// Stamped with when it sounded, though written ahead of it.
+			let sounded = std::time::Duration::from(publish.catalog.clock().capture(begun).unwrap());
+			assert_eq!(stamps[0], sounded, "the first sound as it sounded");
 		})
 		.await;
 	}
