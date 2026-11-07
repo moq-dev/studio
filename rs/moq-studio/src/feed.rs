@@ -212,8 +212,8 @@ struct Running {
 }
 
 impl Running {
-	/// List the program's video and encode the picked audio until `stopped`,
-	/// then finish the audio track.
+	/// List the program's video and encode the picked audio until `stopped`
+	/// or the program ends, then finish the audio track and the catalog.
 	async fn run(mut self, stopped: tokio::sync::oneshot::Receiver<()>) -> anyhow::Result<()> {
 		let Self {
 			catalog,
@@ -233,9 +233,11 @@ impl Running {
 		};
 		if let Err(err) = ended {
 			self.audio.abort(moq_net::StreamError::Internal.into());
+			self.catalog.abort(moq_net::StreamError::Internal.into());
 			return Err(err);
 		}
 		self.audio.finish()?;
+		self.catalog.finish()?;
 		Ok(())
 	}
 }
@@ -359,8 +361,8 @@ mod tests {
 	}
 
 	/// Each guest's feed lists the program's video by reference and audio of
-	/// its own, which hears everyone on program but that guest, and ends once
-	/// the guest is no longer renewed.
+	/// its own, which hears everyone on program but that guest, and ends
+	/// cleanly once the guest is no longer renewed.
 	#[tokio::test]
 	async fn each_guest_hears_the_program_without_themselves() {
 		let _clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
@@ -441,10 +443,13 @@ mod tests {
 			.await
 			.unwrap()
 			.expect("an instance");
+		let format = moq_mux::catalog::CatalogFormat::Hang;
+		let mut listings = moq_mux::catalog::Consumer::<()>::new(&bob, format).await.unwrap();
 		room.stop_renewing("bob").unwrap();
 		feeds.sync(&collection, &sources);
 		assert_eq!(feeds.feeds.keys().collect::<Vec<_>>(), ["alice"]);
-		// A guest who is not renewed has no feed.
+		// A guest who is not renewed has no feed, whose catalog ends cleanly.
+		while listings.next().await.expect("the catalog finishes").is_some() {}
 		bob.closed().await;
 	}
 

@@ -145,6 +145,12 @@ impl Publish {
 		self.catalog.snapshot()
 	}
 
+	/// End the local catalog, once every source has stopped, so whatever reads
+	/// it reaches its end rather than a cut.
+	pub fn finish(&self) -> Result<(), Error> {
+		Ok(self.catalog.clone().finish()?)
+	}
+
 	/// Encode the picture of each source `on_program` shows and the sound of
 	/// each it hears, whether or not anything reads their tracks; any other
 	/// track encodes only while read.
@@ -282,6 +288,8 @@ impl Drop for Listing<'_> {
 				root.ext.studio.sources.remove(&self.claim.name);
 			}
 		});
+		// Fails only once the source's catalog failed, which ended its tracks.
+		let _ = self.catalog.finish();
 	}
 }
 

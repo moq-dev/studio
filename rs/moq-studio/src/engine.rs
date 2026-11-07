@@ -657,8 +657,8 @@ pub struct Program {
 	/// What a recording reads the program from, on the same clock.
 	recording: moq_net::origin::Route,
 	/// The recording broadcast's catalog, held for as long as the engine runs,
-	/// so a recording still reading as the studio stops finds it open.
-	_recorded: moq_scene::publish::Catalog,
+	/// so a recording still reading as the studio stops reads it to its end.
+	recorded: moq_scene::publish::Catalog,
 	/// The origin the studio's own broadcasts are read through, which no relay
 	/// connection carries.
 	local: moq_net::origin::Producer,
@@ -674,6 +674,16 @@ impl Drop for Program {
 }
 
 impl Program {
+	/// Finish the program's catalog and the recording's, once every track
+	/// they list has ended, so a viewer or a recording reading either reaches
+	/// its end rather than a cut.
+	fn finish(&self) {
+		for catalog in [&self.catalog, &self.recorded] {
+			// Fails only once the catalog failed, which ended its tracks already.
+			let _ = catalog.clone().finish();
+		}
+	}
+
 	/// What a replay of the program could copy: its video at each size,
 	/// largest first, with its audio, up to now.
 	pub fn program(&self) -> Vec<moq_scene::replay::Target> {
@@ -1049,8 +1059,9 @@ impl Engine {
 	/// every picture, to publish the copies on their way to it and what it
 	/// still holds, and to end its video track, so quitting loses none of the
 	/// program's last pictures; a published scene's catalog then finishes too.
-	/// The program audio ends its track too, so a recording reading
-	/// the program reaches the end of each. Then stop every source, which
+	/// The program audio ends its track too, and then the program's catalog
+	/// and the recording's finish, so a viewer or a recording reading the
+	/// program reaches the end of each. Then stop every source, which
 	/// finishes its own track on its thread, and the browser sources' helper,
 	/// waiting for it to exit, so their profile is saved and free for the next
 	/// launch.
@@ -1063,6 +1074,7 @@ impl Engine {
 				tracing::error!(name, "the thread panicked");
 			}
 		}
+		self.program.finish();
 		// Taken out first, so the wait holds no lock the window draws with.
 		let browser = {
 			let mut state = self.state.lock().unwrap();
@@ -1077,8 +1089,8 @@ impl Engine {
 	/// Once [`stop`](Self::stop) has ended the tracks of every picture, close
 	/// each relay session once the relay has their tails, so a viewer or a
 	/// recording on the relay receives them rather than a cut. Meanwhile wait
-	/// for each source's thread to end, having finished its own track. Bounded
-	/// at [`CLOSE`].
+	/// for each source's thread to end, having finished its own track, and then
+	/// finish the sources' local catalog. Bounded at [`CLOSE`].
 	pub async fn close(&self) {
 		let running = std::mem::take(&mut *self.running.lock().unwrap());
 		let sources = async {
@@ -1086,6 +1098,9 @@ impl Engine {
 				// Fails once the thread ends, which is all it says.
 				let _ = ended.await;
 			}
+			// Every source has left the local catalog, so it lists nothing more.
+			// Fails only once it failed, which ended its tracks already.
+			let _ = self.program.sources.finish();
 		};
 		let relays = async {
 			if let Some(output) = &self.output {
@@ -1834,7 +1849,7 @@ async fn publish(
 			clock: clock.clone(),
 			sources: sources.clone(),
 			recording,
-			_recorded: recorded,
+			recorded,
 			local,
 			_audio: audio_reservation,
 		},
@@ -3184,15 +3199,33 @@ mod tests {
 		}
 
 		// Quitting while recording reads the program until stopping ends its
-		// tracks, into the one file.
+		// tracks, into the one file. Then the recording's catalog ends, and
+		// the sources' local one once they have stopped.
 		engine.recorder.start(false).expect("recording starts");
 		let frames = recorded(&engine);
 		encoded(&engine, frames + 30).await;
+		let recording = engine.program.recording.broadcast().consume();
+		let mut listed = moq_mux::catalog::Consumer::<()>::new(&recording, Default::default())
+			.await
+			.expect("the recording's catalog");
+		let local = engine.program.sources.consume();
+		let mut sources = moq_mux::catalog::Consumer::<moq_scene::publish::Ext>::new(&local, Default::default())
+			.await
+			.expect("the sources' catalog");
 		engine.recorder.close();
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 		let files = done(&engine.recorder).await;
 		assert_eq!(files, [["soun", "vide"]]);
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+		kio::clock::timeout(TIMEOUT, async {
+			while listed.next().await.expect("the recording's catalog finishes").is_some() {}
+			while sources.next().await.expect("the sources' catalog finishes").is_some() {}
+		})
+		.await
+		.expect("both catalogs end");
 		assert!(engine.stats.error().is_none());
 	}
 
@@ -3463,11 +3496,34 @@ mod tests {
 		(broadcast, catalogs, catalog)
 	}
 
-	/// Read a published scene's `video` and `catalogs` to a clean end.
-	async fn ended(mut catalogs: moq_mux::catalog::Consumer<()>, mut video: moq_net::track::Subscriber) {
+	/// A viewer of `broadcast`'s `video`, and the first group the relay
+	/// handed it once it answered the subscription. The relay refuses one
+	/// still unanswered when the scene's broadcast goes, since the program's
+	/// broadcast still covers its path there.
+	async fn served(
+		broadcast: &moq_net::broadcast::Consumer,
+		video: &str,
+	) -> (moq_net::track::Subscriber, moq_net::group::Consumer) {
+		let mut track = broadcast.track(video).unwrap().subscribe(None).await.unwrap();
+		let first = kio::clock::timeout(TIMEOUT, track.recv_group())
+			.await
+			.expect("the relay serves the video")
+			.expect("the video")
+			.expect("a group");
+		(track, first)
+	}
+
+	/// Read a broadcast's `video`, from the first group it was served, and its
+	/// `catalogs` to a clean end.
+	async fn ended(
+		mut catalogs: moq_mux::catalog::Consumer<()>,
+		(mut video, first): (moq_net::track::Subscriber, moq_net::group::Consumer),
+	) {
 		kio::clock::timeout(TIMEOUT, async {
-			while let Some(mut group) = video.recv_group().await.expect("the video finishes") {
-				while group.read_frame().await.expect("the video finishes").is_some() {}
+			let mut group = Some(first);
+			while let Some(mut current) = group {
+				while current.read_frame().await.expect("the video finishes").is_some() {}
+				group = video.recv_group().await.expect("the video finishes");
 			}
 			while catalogs.next().await.expect("the catalog finishes").is_some() {}
 		})
@@ -3480,8 +3536,9 @@ mod tests {
 	/// more encode session.
 	/// What only it shows is shown but not on program. Health grades its
 	/// video beside the program, with its own viewers. Unpublishing
-	/// it, or quitting, ends its video and then its catalog cleanly, then its
-	/// broadcast; unpublishing gives its session back.
+	/// it, or quitting, ends its video and then its catalog cleanly for a
+	/// viewer the relay serves, then its broadcast; unpublishing gives its
+	/// session back.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn a_published_scene_has_its_own_broadcast() {
@@ -3601,7 +3658,7 @@ mod tests {
 		.await
 		.expect("health grades the published scene");
 
-		let track = broadcast.track(&video).unwrap().subscribe(None).await.unwrap();
+		let track = served(&broadcast, &video).await;
 		{
 			let mut state = engine.state.lock().unwrap();
 			let scene = state.collection().scenes[1].clone();
@@ -3631,7 +3688,7 @@ mod tests {
 		engine.state.lock().unwrap().undo().unwrap();
 		let (broadcast, catalogs, catalog) = routed(&relay, "studio/tall").await;
 		let (video, _) = canvas_size(&catalog);
-		let track = broadcast.track(&video).unwrap().subscribe(None).await.unwrap();
+		let track = served(&broadcast, &video).await;
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 		kio::clock::timeout(TIMEOUT, engine.close())
@@ -4168,7 +4225,7 @@ mod tests {
 			draft.set_canvas(canvas).unwrap();
 			state.commit(draft, None).unwrap();
 		}
-		let ended = kio::clock::timeout(TIMEOUT, async {
+		let old = kio::clock::timeout(TIMEOUT, async {
 			let mut last = shown;
 			while let Some(read) = pictures.read().await.expect("decode") {
 				if let moq_video::decode::Read::Frame(frame) = read {
@@ -4200,7 +4257,7 @@ mod tests {
 			.expect("the resized picture arrives");
 		// Too small to halve, so one rendition, and one session.
 		assert_eq!(engine.stats.sessions.open(), 1);
-		assert!(ended < first, "the new rendition continues the old one's timeline");
+		assert!(old < first, "the new rendition continues the old one's timeline");
 		let next = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				match pictures.read().await.expect("decode") {
@@ -4294,24 +4351,29 @@ mod tests {
 		assert_eq!(clip, dir.path().join("show-clip-1.mp4"));
 
 		// Quitting ends the program's video and audio cleanly once the encoders
-		// published what they were handed, and closes the relay session only
-		// once the relay has it, rather than leaving viewers dropped tracks.
-		let video = broadcast.track(&resized).unwrap().subscribe(None).await.unwrap();
-		let sound = broadcast.track(audio).unwrap().subscribe(None).await.unwrap();
+		// published what they were handed, then its catalog in each format, and
+		// closes the relay session only once the relay has them, rather than
+		// leaving viewers dropped tracks.
+		let video = served(&broadcast, &resized).await;
+		let mut sound = broadcast.track(audio).unwrap().subscribe(None).await.unwrap();
+		let msf = moq_mux::catalog::CatalogFormat::Msf;
+		let mut listed = moq_mux::catalog::Consumer::<()>::new(&broadcast, msf)
+			.await
+			.expect("the MSF catalog");
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");
-		for mut track in [video, sound] {
-			kio::clock::timeout(TIMEOUT, async {
-				while let Some(mut group) = track.recv_group().await.expect("the track finishes") {
-					while group.read_frame().await.expect("the track finishes").is_some() {}
-				}
-			})
-			.await
-			.expect("the track ends");
-		}
+		kio::clock::timeout(TIMEOUT, async {
+			while let Some(mut group) = sound.recv_group().await.expect("the audio finishes") {
+				while group.read_frame().await.expect("the audio finishes").is_some() {}
+			}
+			while listed.next().await.expect("the MSF catalog finishes").is_some() {}
+		})
+		.await
+		.expect("the audio and the MSF catalog end");
+		ended(catalogs, video).await;
 		let failed = engine.stats.error();
 		assert!(failed.is_none(), "{failed:?}");
 	}
