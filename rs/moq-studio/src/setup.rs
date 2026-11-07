@@ -18,6 +18,7 @@ use moq_scene::{Canvas, Collection, Draft, Edit, History, Item, Rect, Scene, wgp
 use crate::autosave::{self, Autosave};
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{self, Engine, Launch};
+use crate::fx::{Fx, Mark};
 use crate::health::rate;
 use crate::uplink;
 
@@ -544,7 +545,7 @@ impl Setup {
 	}
 
 	/// Draw the screen; the engine once the creator has started the studio.
-	pub fn ui(&mut self, ui: &mut Ui) -> Option<Arc<Engine>> {
+	pub fn ui(&mut self, ui: &mut Ui, fx: &mut Fx) -> Option<Arc<Engine>> {
 		self.advance();
 		if self.choices.is_none() || self.starting.is_some() {
 			ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -563,6 +564,7 @@ impl Setup {
 
 		let mut start = None;
 		egui::CentralPanel::default().show(ui, |ui| {
+			let backdrop = fx.on().then(|| Mark::new(ui.painter()));
 			egui::ScrollArea::vertical().show(ui, |ui| {
 				ui.heading("Set up MoQ Studio");
 				ui.label(
@@ -574,6 +576,9 @@ impl Setup {
 				ui.separator();
 				start = self.proposal(ui);
 			});
+			if let Some(backdrop) = backdrop {
+				fx.backdrop(&backdrop.around(ui.clip_rect()), ui.visuals());
+			}
 		});
 		if let Some(empty) = start {
 			self.start(empty);

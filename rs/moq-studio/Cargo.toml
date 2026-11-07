@@ -63,7 +63,7 @@ moq-net = { workspace = true }
 # The guest room: its path convention, roster, and token claims.
 moq-room = { workspace = true, features = ["async"] }
 moq-scene = { workspace = true }
-moq-stats = { workspace = true }
+moq-stats = { workspace = true, features = ["async"] }
 moq-tokio = { workspace = true, default-features = false, features = ["net"] }
 moq-video = { workspace = true }
 pollster = { workspace = true }
@@ -74,6 +74,8 @@ qrcodegen = "1.8"
 same-file = "1.0.6"
 # The guests removed from scenes, kept beside the scene file.
 serde = { workspace = true }
+# Glows, pulses, bursts, and fills in the UI, drawn on its wgpu device.
+rune-fx = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
@@ -87,9 +89,10 @@ usage-rs = { workspace = true, features = ["completions", "config"] }
 winit = { version = "0.30", default-features = false, features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# The GlobalShortcuts portal for hotkeys on Wayland. 0.13, as moq-video's
-# PipeWire capture uses, so the two share one D-Bus stack.
-ashpd = { version = "0.13", default-features = false, features = ["global_shortcuts", "tokio"] }
+# The GlobalShortcuts portal for hotkeys on Wayland, and the Settings portal's
+# reduced motion for the effects. 0.13, as moq-video's PipeWire capture uses,
+# so the two share one D-Bus stack.
+ashpd = { version = "0.13", default-features = false, features = ["global_shortcuts", "settings", "tokio"] }
 futures-util = "0.3"
 # The virtual camera's v4l2loopback fallback. Pure Rust with its kernel bindings
 # checked in, and already in the graph through moq-video's capture.
@@ -108,9 +111,15 @@ x11rb = { version = "0.13", features = ["xkb"] }
 # goes through the GlobalShortcuts portal.
 global-hotkey = "0.9"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Whether the system asks apps to reduce motion, for the effects. eframe's
+# version, already in the graph through winit.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
+
 [target.'cfg(windows)'.dependencies]
 # Which virtual key the foreground window's layout puts on each key, so a
-# hotkey registers the key pressed.
+# hotkey registers the key pressed, and whether the system asks apps to
+# reduce motion, for the effects.
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
