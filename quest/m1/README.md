@@ -25,5 +25,4 @@ than opening an m2 for them.
 
 - [Viewer-side composition](/quest/m1/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers and by a server
 - [Scene graph view](/quest/m1/scene-graph.md) - a node view of picture and audio scenes, their routing, volume, pan, and waveforms
-- [Effects in the studio UI](/quest/m1/ui-effects.md) - rune-fx glow, bursts, metal and gradient chrome, and alert effects in the egui UI
 - [Rune UI spike](/quest/m1/rune-spike.md) - the monitors prototyped on Rune, with a verdict on moving the UI off egui

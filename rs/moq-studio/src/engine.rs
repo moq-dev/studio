@@ -99,6 +99,9 @@ pub struct State {
 	/// How many times the collection was reloaded from its files, so the UI
 	/// can let go of what a reload may have removed.
 	pub reloads: u64,
+	/// How many times the preview was taken to program, by a cut or a
+	/// transition, so the UI can mark each however it was fired.
+	pub takes: u64,
 	pub sources: Sources,
 	pub compositor: Compositor,
 	/// Each virtual camera on: the program's under `None`, and each published
@@ -302,15 +305,18 @@ impl State {
 
 	/// Put the preview on program at once; see [`Compositor::cut`].
 	pub fn cut(&mut self) -> anyhow::Result<()> {
-		Ok(self.compositor.cut(&self.collection, &self.sources)?)
+		self.compositor.cut(&self.collection, &self.sources)?;
+		self.takes += 1;
+		Ok(())
 	}
 
 	/// Take the preview to program by `transition`, starting at `now`; see
 	/// [`Compositor::transition`].
 	pub fn transition(&mut self, transition: moq_scene::Transition, now: Instant) -> anyhow::Result<()> {
-		Ok(self
-			.compositor
-			.transition(&self.collection, transition, &self.sources, now)?)
+		self.compositor
+			.transition(&self.collection, transition, &self.sources, now)?;
+		self.takes += 1;
+		Ok(())
 	}
 
 	/// Restart the source called `name`, as an edit would, such as to reload a
@@ -905,6 +911,7 @@ impl Engine {
 				history,
 				dropped,
 				reloads: 0,
+				takes: 0,
 				sources,
 				compositor,
 				cameras: BTreeMap::new(),
