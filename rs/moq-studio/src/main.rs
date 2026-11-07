@@ -17,6 +17,7 @@ mod controls;
 mod devices;
 mod engine;
 mod feed;
+mod fx;
 mod guests;
 mod health;
 mod hotkeys;
@@ -233,6 +234,8 @@ struct Window {
 	/// The engine once the studio is built, for the save on quit.
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
 	keypad: hotkeys::Keypad,
+	/// The window's own effects, on the setup screen and in the studio.
+	fx: fx::Fx,
 }
 
 impl eframe::App for Window {
@@ -243,9 +246,29 @@ impl eframe::App for Window {
 	}
 
 	fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+		self.fx.begin(ui.ctx());
+		self.show(ui, frame);
+		self.fx.finish();
+	}
+
+	fn save(&mut self, storage: &mut dyn eframe::Storage) {
+		self.fx.save(storage);
+		if let App::Studio(studio) = &mut self.app {
+			studio.save(storage);
+		}
+	}
+
+	fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+		self.keypad.forget(&mut raw_input.events);
+	}
+}
+
+impl Window {
+	/// Draw setup or the studio, building the studio once its engine starts.
+	fn show(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
 		let engine = match &mut self.app {
-			App::Studio(studio) => return studio.ui(ui, frame),
-			App::Setup(setup) => match setup.ui(ui) {
+			App::Studio(studio) => return studio.ui(ui, frame, &mut self.fx),
+			App::Setup(setup) => match setup.ui(ui, &mut self.fx) {
 				Some(engine) => engine,
 				None => return,
 			},
@@ -256,16 +279,6 @@ impl eframe::App for Window {
 		studio.load(frame);
 		self.app = App::Studio(Box::new(studio));
 		ui.ctx().request_repaint();
-	}
-
-	fn save(&mut self, storage: &mut dyn eframe::Storage) {
-		if let App::Studio(studio) = &mut self.app {
-			studio.save(storage);
-		}
-	}
-
-	fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-		self.keypad.forget(&mut raw_input.events);
 	}
 }
 
@@ -365,12 +378,14 @@ fn run(
 				.wgpu_render_state
 				.clone()
 				.context("the window is not drawn with wgpu")?;
+			let fx = fx::Fx::new(&render, cc.storage, &cc.egui_ctx, &runtime);
 			Ok(Box::new(Window {
 				app,
 				render,
 				runtime,
 				started,
 				keypad: window_keypad,
+				fx,
 			}))
 		}),
 		&event_loop,

@@ -19,6 +19,7 @@ use crate::autosave::Conflict;
 use crate::controls::{Action, Controls};
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
+use crate::fx::{Fx, Mark, Spot};
 use crate::health::{self, Verdict};
 use crate::hotkeys::{self, Bindings, Hotkeys, Reach};
 use crate::interact::Interact;
@@ -148,6 +149,8 @@ impl Studio {
 				shown: None,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
 				reloads: 0,
+				effects: false,
+				spots: Spots::default(),
 			},
 		}
 	}
@@ -175,8 +178,8 @@ impl Studio {
 	}
 }
 
-impl eframe::App for Studio {
-	fn save(&mut self, storage: &mut dyn eframe::Storage) {
+impl Studio {
+	pub fn save(&mut self, storage: &mut dyn eframe::Storage) {
 		let panels = &self.panels;
 		eframe::set_value(storage, SPEAKER, &panels.speaker);
 		eframe::set_value(storage, SNAPPING, &panels.snapping);
@@ -186,7 +189,7 @@ impl eframe::App for Studio {
 	}
 
 	/// Run before each frame, and while the window is hidden, when `ui` is not.
-	fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+	pub fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 		// A wait for a key ends once the operator leaves the window, such as
 		// for a game, so the hotkeys are not held off while they play.
 		let left = ctx.input(|input| {
@@ -198,9 +201,11 @@ impl eframe::App for Studio {
 		}
 	}
 
-	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+	/// Draw the window, with `fx` drawing its effects.
+	pub fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame, fx: &mut Fx) {
 		let engine = self.panels.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		let takes = state.takes;
 		// The sizes the textures were drawn at, which an edit this frame, such
 		// as an undo resizing the scene in preview, does not change until the
 		// next.
@@ -270,15 +275,17 @@ impl eframe::App for Studio {
 		// Before the shortcuts, so the key pressed binds rather than undoes.
 		self.panels.take_binding(ui.ctx());
 		self.panels.shortcuts(ui.ctx());
-		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui));
+		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui, fx));
 		if let Some(conflict) = self.panels.engine.autosave.conflict() {
 			egui::Panel::top("conflict").show(ui, |ui| self.panels.conflict(ui, conflict));
 		}
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
 		self.panels.previewed = false;
+		self.panels.effects = fx.on();
 		DockArea::new(&mut self.dock)
 			.style(Style::from_egui(ui.style()))
 			.show_inside(ui, &mut self.panels);
+		self.panels.draw_effects(ui, fx, takes);
 		// A hidden preview hears no input, so it lets go of the pages, as
 		// turning Interact off does.
 		if !self.panels.previewed {
@@ -397,6 +404,24 @@ struct Panels {
 	message: Option<Result<String, String>>,
 	/// The engine's reloads seen so far.
 	reloads: u64,
+	/// Whether this frame draws effects, which widgets on a fill leave their
+	/// own background out for.
+	effects: bool,
+	/// Where this frame's panels drew what effects go around.
+	spots: Spots,
+}
+
+/// Where the panels drew what effects go around, this frame.
+#[derive(Default)]
+struct Spots {
+	/// Each panel's body, drawn on.
+	panels: Vec<Spot>,
+	program: Option<Spot>,
+	recording: Option<Spot>,
+	cut: Option<Spot>,
+	keycaps: Vec<Spot>,
+	health: Option<Spot>,
+	health_tab: Option<Spot>,
 }
 
 impl TabViewer for Panels {
@@ -415,6 +440,7 @@ impl TabViewer for Panels {
 	}
 
 	fn ui(&mut self, ui: &mut Ui, tab: &mut Tab) {
+		let body = self.effects.then(|| Mark::new(ui.painter()));
 		match tab {
 			Tab::Preview => self.preview(ui),
 			Tab::Program => self.program(ui),
@@ -431,6 +457,20 @@ impl TabViewer for Panels {
 			Tab::Health => self.health(ui),
 			Tab::Replay => self.replay(ui),
 			Tab::Hotkeys => self.hotkeys(ui),
+		}
+		if let Some(body) = body {
+			let spot = body.around(ui.clip_rect());
+			if *tab == Tab::Health {
+				self.spots.health = Some(spot.clone().inset(4.0));
+			}
+			self.spots.panels.push(spot);
+		}
+	}
+
+	fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
+		if self.effects && *tab == Tab::Health {
+			let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, response.rect.expand(8.0));
+			self.spots.health_tab = Some(Mark::new(&painter).around(response.rect.shrink(2.0)));
 		}
 	}
 }
@@ -614,7 +654,7 @@ impl Panels {
 		}
 	}
 
-	fn menu(&mut self, ui: &mut Ui) {
+	fn menu(&mut self, ui: &mut Ui, fx: &mut Fx) {
 		egui::MenuBar::new().ui(ui, |ui| {
 			ui.menu_button("File", |ui| {
 				if ui.button("Reload").clicked() {
@@ -638,7 +678,39 @@ impl Panels {
 					ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
 				}
 			});
+			ui.menu_button("View", |ui| fx.menu(ui));
 		});
+	}
+
+	/// Draw the effects around what the panels drew this frame: the on-air
+	/// glow and take bursts on the Program monitor, the recording pulse, the
+	/// Cut button and keycaps, the panels' fills, and the Health alerts.
+	fn draw_effects(&mut self, ui: &Ui, fx: &mut Fx, takes: u64) {
+		let spots = std::mem::take(&mut self.spots);
+		for spot in &spots.panels {
+			fx.panel(spot, ui.visuals());
+		}
+		for spot in &spots.keycaps {
+			fx.keycap(spot);
+		}
+		if let Some(spot) = &spots.cut {
+			fx.button(spot);
+		}
+		if let Some(spot) = &spots.recording {
+			fx.recording(spot);
+		}
+		let (on_air, verdict) = {
+			let report = self.engine.health.lock().unwrap();
+			let on_air = report
+				.relays
+				.iter()
+				.any(|relay| relay.state == health::State::Connected);
+			let worst = report.problems.first().map_or(Verdict::Healthy, |problem| problem.verdict);
+			(on_air, worst)
+		};
+		fx.program(spots.program.as_ref(), on_air, takes);
+		let health: Vec<&Spot> = [&spots.health, &spots.health_tab].into_iter().flatten().collect();
+		fx.health(&health, verdict);
 	}
 
 	/// Report a reload, from File > Reload or an outside edit the autosave
@@ -1159,8 +1231,19 @@ impl Panels {
 			.collect();
 		let mut gesture = None;
 		let mut fire = None;
+		let recording = self.engine.recorder.status().is_some_and(|status| !status.done);
 		ui.horizontal(|ui| {
-			if ui.button("Cut").clicked() {
+			let cut = match self.effects {
+				true => {
+					let metal = Mark::new(ui.painter());
+					let text = egui::RichText::new("Cut").color(Fx::INK);
+					let cut = ui.add(egui::Button::new(text).fill(Color32::TRANSPARENT));
+					self.spots.cut = Some(metal.around(cut.rect));
+					cut
+				}
+				false => ui.button("Cut"),
+			};
+			if cut.clicked() {
 				fire = Some(Action::Cut);
 			}
 			if ui
@@ -1254,6 +1337,13 @@ impl Panels {
 			if state.compositor.transitioning() {
 				ui.weak("in transition");
 			}
+			if recording {
+				let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+				let pulse = self.effects.then(|| Mark::new(ui.painter()));
+				ui.painter().circle_filled(dot.center(), 4.0, RECORDING);
+				self.spots.recording = pulse.map(|pulse| pulse.around(dot));
+				ui.colored_label(RECORDING, "recording");
+			}
 		});
 		let result = if next == transition {
 			Ok(())
@@ -1268,7 +1358,9 @@ impl Panels {
 			let result = self.controls.fire(&action).map(drop);
 			self.check(result);
 		}
-		picture(ui, self.program.id, canvas, egui::Sense::hover());
+		let monitor = self.effects.then(|| Mark::new(ui.painter()));
+		let program = picture(ui, self.program.id, canvas, egui::Sense::hover());
+		self.spots.program = monitor.map(|monitor| monitor.around(program.rect));
 	}
 
 	fn scenes(&mut self, ui: &mut Ui) {
@@ -3121,7 +3213,10 @@ impl Panels {
 					ui.strong("press a key, or Escape");
 				} else {
 					match bound {
-						Some(bound) => ui.monospace(ui.ctx().format_shortcut(&bound.key)),
+						Some(bound) => {
+							let keycaps = self.effects.then_some(&mut self.spots.keycaps);
+							keycap(ui, ui.ctx().format_shortcut(&bound.key), keycaps)
+						}
 						None => ui.weak("unbound"),
 					};
 				}
@@ -3481,6 +3576,24 @@ fn repairs(ui: &mut Ui, repairs: &[record::Repair]) {
 	}
 	ui.separator();
 }
+
+/// A bound key, on a cap whose spot joins `keycaps` while effects draw.
+fn keycap(ui: &mut Ui, key: String, keycaps: Option<&mut Vec<Spot>>) -> egui::Response {
+	let Some(keycaps) = keycaps else {
+		return ui.monospace(key);
+	};
+	let cap = Mark::new(ui.painter());
+	let text = egui::RichText::new(key).monospace().color(Fx::INK);
+	let response = egui::Frame::new()
+		.inner_margin(egui::Margin::symmetric(6, 1))
+		.show(ui, |ui| ui.label(text))
+		.response;
+	keycaps.push(cap.around(response.rect));
+	response
+}
+
+/// The red of the recording dot.
+const RECORDING: Color32 = Color32::from_rgb(235, 50, 40);
 
 const HEALTHY: Color32 = Color32::from_rgb(80, 200, 120);
 const DEGRADED: Color32 = Color32::from_rgb(220, 180, 60);
