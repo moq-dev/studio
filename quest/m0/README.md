@@ -102,7 +102,6 @@ repository.
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
 - [Browser sources on the GPU under X11 on NVIDIA](/quest/m0/cef-x11-nvidia.md) - the X11 GPU path paints on NVIDIA, or falls back to the CPU path loudly
 - [A browser helper exits with the studio](/quest/m0/browser-helper-exit.md) - no orphaned CEF helper after a crash, kill, or timed-out test
-- [Nightly and the browser suite pass](/quest/m0/nightly-green.md) - render-sw, cookies, and the X11 clipboard test fixed at their causes
 - [GPU tests exit cleanly on NVIDIA](/quest/m0/gpu-tests-exit.md) - compositor tests no longer crash on exit on NVIDIA
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
 - [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
