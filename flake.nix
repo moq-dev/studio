@@ -148,9 +148,9 @@
                 mkdir $out
                 cp -r Release/. Resources/. CMakeLists.txt cmake include libcef_dll $out/
                 # cef-dll-sys copies every file here beside the binaries, where
-                # this loader would load first, in the studio too, and it knows
-                # no NixOS driver. Without it both find the shell's loader.
-                rm $out/libvulkan.so.1
+                # the studio loads the Vulkan loader first and ANGLE looks for
+                # nowhere else. CEF's own finds no NixOS driver; this one does.
+                ln -sf ${lib.getLib pkgs.vulkan-loader}/lib/libvulkan.so.1 $out/libvulkan.so.1
                 # What cef-dll-sys checks the version against.
                 echo '{"type":"minimal","name":"${archive.name}.tar.bz2","sha1":"${archive.sha1}"}' > $out/archive.json
                 runHook postInstall
