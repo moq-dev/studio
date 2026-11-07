@@ -14,6 +14,7 @@ use moq_scene::{
 	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode,
 	Rect, Scene, Source, Transition, Video, wgpu,
 };
+use winit::keyboard::{KeyCode, PhysicalKey};
 
 use crate::autosave::Conflict;
 use crate::controls::{Action, Controls};
@@ -162,9 +163,9 @@ const HOTKEYS: &str = "hotkeys";
 impl Studio {
 	/// Take up what this user picked last time, and start hearing the keys
 	/// they bound. Called from the window's thread, which `window` is.
-	pub fn load(&mut self, window: &eframe::Frame) {
+	pub fn load(&mut self, window: hotkeys::Window<'_>) {
 		let mut bindings = Bindings::new();
-		if let Some(storage) = window.storage() {
+		if let Some(storage) = window.frame.storage() {
 			let panels = &mut self.panels;
 			panels.speaker = eframe::get_value::<Option<String>>(storage, SPEAKER).flatten();
 			panels.snapping = eframe::get_value(storage, SNAPPING).unwrap_or_default();
@@ -195,6 +196,11 @@ impl eframe::App for Studio {
 		});
 		if left {
 			self.panels.end_binding();
+		}
+		// Before each frame, and while the window is hidden, so the keys
+		// follow a keyboard layout change while a game has focus.
+		if let Some(hotkeys) = &mut self.panels.hotkeys {
+			hotkeys.hear();
 		}
 	}
 
@@ -254,20 +260,12 @@ impl eframe::App for Studio {
 		}
 		drop(state);
 
-		if !renames.is_empty()
-			&& let Some(hotkeys) = &mut self.panels.hotkeys
-		{
-			hotkeys.hear();
-		}
 		if let Some(fired) = self.panels.controls.fired() {
 			self.panels.message = Some(fired);
 		}
-		if let Some(hotkeys) = &self.panels.hotkeys
-			&& !self.panels.interact.has_keyboard()
-		{
-			hotkeys.focused(ui.ctx());
+		if let Some(hotkeys) = &self.panels.hotkeys {
+			hotkeys.focused(self.panels.interact.has_keyboard() || ui.ctx().text_edit_focused());
 		}
-		// Before the shortcuts, so the key pressed binds rather than undoes.
 		self.panels.take_binding(ui.ctx());
 		self.panels.shortcuts(ui.ctx());
 		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui));
@@ -3003,43 +3001,16 @@ impl Panels {
 			self.end_binding();
 			return;
 		}
-		let pressed = ctx.input_mut(|input| {
-			let pressed = input.events.iter().find_map(|event| match event {
-				egui::Event::Key {
-					key,
-					pressed: true,
-					repeat: false,
-					..
-				} => Some((*key, hotkeys::pressed(event))),
-				_ => None,
-			});
-			if pressed.is_some() {
-				input
-					.events
-					.retain(|event| !matches!(event, egui::Event::Key { pressed: true, .. }));
-			}
-			pressed
-		});
-		let Some((name, pressed)) = pressed else { return };
-		let Some(key) = pressed else {
-			// Keypad keys among them, which egui names as their main keyboard twins.
-			self.refusal = Some((
-				action,
-				format!("{} cannot be bound: the studio cannot tell where it sits", name.name()),
-			));
-			return;
-		};
+		let Some(key) = hotkeys.taken() else { return };
 		self.binding = None;
 		hotkeys.suspend(false);
-		if key.key.logical_key == egui::Key::Escape {
+		if key.key == PhysicalKey::Code(KeyCode::Escape) {
 			return;
 		}
+		let shown = key.shown(ctx);
 		self.refusal = match hotkeys.bind(&action, Some(key)) {
 			Ok(()) => None,
-			Err(other) => {
-				let key = ctx.format_shortcut(&key.key);
-				Some((action, format!("{key} is bound to {other}; clear it there first")))
-			}
+			Err(other) => Some((action, format!("{shown} is bound to {other}; clear it there first"))),
 		};
 	}
 
@@ -3072,12 +3043,6 @@ impl Panels {
 				format!("Bound keys work only while the studio has focus: {why}"),
 			),
 		};
-		if let Some(why) = hotkeys.stuck() {
-			ui.colored_label(
-				ui.visuals().error_fg_color,
-				format!("The bound keys stay as they are until the studio restarts: {why}"),
-			);
-		}
 		let scenes: Vec<String> = {
 			let state = self.engine.state.lock().unwrap();
 			state
@@ -3108,7 +3073,7 @@ impl Panels {
 					ui.strong("press a key, or Escape");
 				} else {
 					match bound {
-						Some(bound) => ui.monospace(ui.ctx().format_shortcut(&bound.key)),
+						Some(bound) => ui.monospace(bound.shown(ui.ctx())),
 						None => ui.weak("unbound"),
 					};
 				}

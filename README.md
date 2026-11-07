@@ -942,24 +942,24 @@ taken unasked, and a key bound to one action is refused for another until it is
 cleared there. Replay and Save clip use the Replay panel's picks, and a
 recording the Output panel's.
 
-The key pressed is the key that fires, on any keyboard layout: the panel names
-it as the layout prints it, and the system hears the key where it sits, through
-the layout in use when the studio starts or a key is bound. On X11, a key that
-types only a letter outside A to Z, such as ö on a German layout, is refused.
-Keypad keys are refused everywhere, since the window hears keypad 1 as the 1
-above the letters.
+The key pressed is the key that fires, wherever it sits, on any keyboard layout
+and after a layout change: the panel names it as the layout printed it when it
+was bound. Keypad keys bind apart from the keys above the letters, so keypad 1
+and 1 can do different things; the panel calls them **Keypad 1** and **1**.
 
 Bound keys fire even while another app, such as a game in full screen, has
 focus, and the app does not see them, so bind keys you do not type or play
-with, such as a function key or one with modifiers:
+with, such as a function key, a keypad key, or one with modifiers:
 
 - **macOS** and **Windows** register them with the system, which needs no
-  permission. A key another app already registered is refused, saying so. On
-  macOS 15 and later, the system refuses a key whose only modifiers are Option,
-  or Option and Shift.
-- **Linux on X11** grabs them from the X server. Once a layout change moves
-  a key the studio holds, its keys stay as they are until it restarts, and the
-  panel says so.
+  permission. A key another app already registered is refused, saying so, as
+  is a key the system has no name for. On macOS 15 and later, the system
+  refuses a key whose only modifiers are Option, or Option and Shift. Windows
+  hears a keypad key only with NumLock on, cannot tell keypad Enter from Enter
+  so refuses it, and fires a binding on Enter for both.
+- **Linux on X11** grabs them from the X server by where they sit, so any key
+  binds, such as ö on a German layout or a key with no name, and fires
+  whatever NumLock and CapsLock are.
 - **Linux on Wayland**, where no app hears keys meant for another, asks the
   desktop through its GlobalShortcuts portal (KDE Plasma, and GNOME 48 and
   later). The desktop shows its own dialog, may bind other keys than those

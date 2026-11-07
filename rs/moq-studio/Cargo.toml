@@ -49,9 +49,6 @@ eframe = { version = "0.36", default-features = false, features = ["default_font
 egui = "0.36"
 # Docked, rearrangeable panels. 0.21 is the newest release and pins egui 0.36.
 egui_dock = "0.21"
-# System-wide hotkeys on macOS, Windows, and X11; Wayland goes through the
-# GlobalShortcuts portal instead.
-global-hotkey = "0.9"
 hang = { workspace = true }
 # Stamps a recording's file name with when it started. Already in the graph
 # through moq-scene's humantime-serde.
@@ -83,9 +80,11 @@ toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
-# The window's event loop, run here so keypad keys are noted before egui
-# folds them into their main keyboard twins. eframe's version and features.
-winit = { version = "0.30", default-features = false }
+# The window's event loop, run here so a hotkey is the key winit names by where
+# it sits, which egui folds into its main keyboard twin for a keypad key and
+# drops for a key outside its own list. eframe's version and features, with
+# `serde` to keep the key bound.
+winit = { version = "0.30", default-features = false, features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The GlobalShortcuts portal for hotkeys on Wayland. 0.13, as moq-video's
@@ -100,14 +99,19 @@ moq-v4l = { workspace = true }
 pipewire = { version = "0.10", optional = true, features = ["v0_3_34"] }
 # Whether the window is on Wayland, where only the portal hears keys globally.
 raw-window-handle = "0.6"
-# Which keysyms the X11 layout puts on each key, so a hotkey grabs the key
-# pressed. 0.13, as global-hotkey uses, so default builds compile one.
-x11rb = "0.13"
+# Hotkeys on X11, grabbed by keycode so any key binds on any layout. `xkb`
+# tells a held key's repeats from new presses.
+x11rb = { version = "0.13", features = ["xkb"] }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# System-wide hotkeys on macOS and Windows; X11 grabs keys itself, and Wayland
+# goes through the GlobalShortcuts portal.
+global-hotkey = "0.9"
 
 [target.'cfg(windows)'.dependencies]
-# Which virtual key the Windows layout puts on each key, so a hotkey
-# registers the key pressed.
-windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+# Which virtual key the foreground window's layout puts on each key, so a
+# hotkey registers the key pressed.
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 # A clock that moves wall time too, which renewed tokens' expiries read.
