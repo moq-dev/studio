@@ -10,7 +10,8 @@ moving or staying.
 ## Plan
 
 Decided 2026-11-07 with the maintainer (/quest-plan), after choosing
-[UI effects](/quest/m1/ui-effects.md) on rune-fx inside egui first:
+[UI effects](https://github.com/moq-dev/studio/pull/85) on rune-fx inside
+egui first, whose experience feeds the verdict:
 
 - ✅ **Prototype the Preview and Program monitors:** live compositor textures,
   drag-to-edit items, and the Cut button. They are the UI's hardest part, so
@@ -23,7 +24,3 @@ Decided 2026-11-07 with the maintainer (/quest-plan), after choosing
   report.
 - The prototype stays off `main`: the PR deletes this quest and links the
   prototype branch. A move to Rune, if picked, is planned with /quest-plan.
-
-## Required
-
-- [Effects in the studio UI](/quest/m1/ui-effects.md) - rune-fx inside egui first, whose experience feeds the verdict

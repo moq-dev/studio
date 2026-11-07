@@ -4380,10 +4380,12 @@ dependencies = [
  "moq-v4l",
  "moq-video",
  "mp4-atom",
+ "objc2-app-kit 0.3.2",
  "pipewire",
  "pollster 1.0.1",
  "qrcodegen",
  "raw-window-handle",
+ "rune-fx",
  "same-file",
  "serde",
  "tempfile",
@@ -6459,6 +6461,30 @@ dependencies = [
  "num-traits",
  "visibility",
  "windowfunctions",
+]
+
+[[package]]
+name = "rune-fx"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9#b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9"
+dependencies = [
+ "bytemuck",
+ "rune-motion",
+ "rune-staging",
+ "wgpu",
+]
+
+[[package]]
+name = "rune-motion"
+version = "0.1.0"
+source = "git+https://github.com/anomalyco/rune?rev=b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9#b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9"
+
+[[package]]
+name = "rune-staging"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9#b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9"
+dependencies = [
+ "wgpu",
 ]
 
 [[package]]

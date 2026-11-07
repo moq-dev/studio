@@ -111,6 +111,8 @@ Every panel is a tab you can drag, split, or stack.
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 | Hotkeys | Bind keys to cut, transition, preview a scene, replay, save a clip, and start or stop recording, and clear them (see [Hotkeys](#hotkeys)). |
 
+While recording, a red dot in the Program panel says so.
+
 A new source, from the Sources or Devices panel, is placed over whatever the
 Items panel shows. The **top layer** is drawn over program, and over the
 preview of a scene of the program's size, and stays on through a cut or
@@ -971,13 +973,32 @@ with, such as a function key, a keypad key, or one with modifiers:
   bound. Without the portal, or if the dialog is declined, bound keys work only
   while the studio has focus, and the panel says so.
 
-The bindings, the snap and grid settings, and the output **Listen** plays on
-are kept per user in the app's settings, `~/Library/Application
+The bindings, the snap and grid settings, the [effects](#effects) setting, and
+the output **Listen** plays on are kept per user in the app's settings, `~/Library/Application
 Support/moq-studio` on macOS, `$XDG_DATA_HOME/moq-studio` (or
 `~/.local/share/moq-studio`) on Linux, and `%APPDATA%\moq-studio\data` on
 Windows, apart from the scene file, so a scene file moves between machines
 without one operator's keys. A key bound to a scene follows it when renamed in
 the studio.
+
+## Effects
+
+The window draws effects of its own, which never reach the program, a
+published scene, or a recording:
+
+- The Program monitor glows red while the studio is connected to a relay,
+  the recording dot pulses, and each cut or transition, from its button or a
+  hotkey, bursts on the monitor.
+- The **Cut** button is polished metal that ripples under the pointer, the
+  Hotkeys panel shows each bound key on a keycap, each panel has a faint grain,
+  and first launch draws its screen over a soft gradient.
+- The Health panel and its tab pulse amber while the worst problem is
+  degraded, and flicker with electricity while it is unhealthy.
+
+**View > Effects** sets how they move: **Full**, **Reduced**, which holds each
+on one still pose, or **Off**. Until you pick one it follows the system's
+reduced-motion setting: Reduce motion on macOS, animation effects on Windows,
+and on Linux the desktop's, through its Settings portal.
 
 ## Replay
 
