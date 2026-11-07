@@ -3645,8 +3645,9 @@ mod tests {
 		sound: tokio::sync::mpsc::UnboundedReceiver<(Duration, Vec<f32>)>,
 		/// Samples per second of the sound.
 		rate: u32,
-		/// When the last picture read was shown.
-		seen: Option<Duration>,
+		/// When the last picture read was shown, and the color last looked
+		/// for, which it showed.
+		seen: Option<(Duration, [u8; 3])>,
 	}
 
 	impl Viewer {
@@ -3720,14 +3721,18 @@ mod tests {
 		}
 
 		/// When the viewer next sees `color` at the center, and the picture it
-		/// saw before that, if any.
+		/// saw before that, if any. Every picture between shows the color it
+		/// saw last.
 		async fn sees(&mut self, color: [u8; 3]) -> (Option<Duration>, Duration) {
 			kio::clock::timeout(TIMEOUT, async {
 				loop {
 					let (at, center) = self.pictures.recv().await.expect("the video ended");
-					let before = self.seen.replace(at);
 					if shows(center, color) {
-						return (before, at);
+						return (self.seen.replace((at, color)).map(|(before, _)| before), at);
+					}
+					if let Some((_, held)) = self.seen {
+						assert!(shows(center, held), "{center:?} at {at:?} before {color:?}");
+						self.seen = Some((at, held));
 					}
 				}
 			})
@@ -3913,12 +3918,23 @@ mod tests {
 			{program_green:?}; portrait red to {tall_red:?}, green from {tall_green:?}"
 		);
 
-		// The cut played the tone again, as its scene went on program: after
-		// the last red frame, once its file decoded, which takes as long as
-		// it takes.
-		let run = engine.state.lock().unwrap().sources.get("tone").unwrap().run();
+		// The cut played the tone again before drawing its first green
+		// frame, which begins once its file decodes, after the last red
+		// frame. Decoding takes as long as it takes, so the tone's run is read
+		// again at each picture the program's viewer sees until then.
+		let run = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let run = engine.state.lock().unwrap().sources.get("tone").unwrap().run();
+				if run.begun.is_some() {
+					return run;
+				}
+				program.pictures.recv().await.expect("the video ended");
+			}
+		})
+		.await
+		.expect("the tone's second play begins");
 		assert_eq!(run.play, 1, "the cut played the tone again, once");
-		let played = stamp(&engine, run.begun.expect("the tone's second play began"));
+		let played = stamp(&engine, run.begun.unwrap());
 		assert!(
 			played > program_red.max(tall_red),
 			"the tone plays with the cut, not before: {played:?}"
