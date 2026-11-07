@@ -1561,6 +1561,16 @@ mod tests {
 		assert_eq!(collection.recorded(), Some("Scene"), "one scene at most");
 		assert!(collection.draft("Record none").set_recorded(Some("None")).is_err());
 
+		let mut draft = collection.draft("Record the program");
+		draft.set_recorded(None).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.recorded(), None);
+		history.undo(&mut collection).unwrap();
+		assert_eq!(collection.recorded(), Some("Scene"));
+		history.redo(&mut collection).unwrap();
+		assert_eq!(collection.recorded(), None);
+		history.undo(&mut collection).unwrap();
+
 		let mut draft = collection.draft("Remove");
 		draft.remove_scene(0).unwrap();
 		commit(&mut collection, &mut history, draft, None);

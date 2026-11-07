@@ -233,29 +233,43 @@ impl State {
 		Some(scene)
 	}
 
-	/// The sources whose pictures program or a published scene draws, through
-	/// clones: those [`placed`](Self::placed) there, and the clip a stinger
-	/// under way plays with each mask its source's filters read.
-	fn shown(&self) -> BTreeSet<String> {
+	/// The sources whose pictures program draws, through clones: those the
+	/// scenes on air, including one leaving in a transition, and the top layer
+	/// [`place`](Self::placed), and the clip a stinger under way plays with
+	/// each mask its source's filters read.
+	fn on_program(&self) -> BTreeSet<String> {
 		let collection = &self.collection;
 		let stinger = self.compositor.stinger().into_iter().flat_map(|clip| {
 			let filters = collection.video.get(clip).into_iter().flat_map(|video| &video.filters);
 			std::iter::once(clip).chain(masks(filters).map(String::as_str))
 		});
-		let mut shown = self.placed();
+		let mut shown = self.placed(self.compositor.on_air().map(Some).chain([None]));
 		shown.extend(stinger.map(|source| collection.capture(source).to_string()));
 		shown
 	}
 
-	/// The sources whose pictures the scenes live place, through clones: each
-	/// visible item's of the scenes on air, including one leaving in a
-	/// transition, of the top layer over them, and of each published or
-	/// recorded scene drawn, and of the scenes they draw, and each mask's it
-	/// reads.
-	fn placed(&self) -> BTreeSet<String> {
+	/// Each published or recorded scene drawn beside program, not on air, and
+	/// the sources whose pictures it [places](Self::placed).
+	fn beside(&self) -> Vec<(&str, BTreeSet<String>)> {
+		let on_air: Vec<&str> = self.compositor.on_air().collect();
+		let scenes = self.compositor.live().filter(|scene| !on_air.contains(scene));
+		scenes.map(|scene| (scene, self.placed([Some(scene)]))).collect()
+	}
+
+	/// The sources whose pictures program or a scene [beside](Self::beside)
+	/// it shows.
+	fn shown(&self) -> BTreeSet<String> {
+		let mut shown = self.on_program();
+		shown.extend(self.beside().into_iter().flat_map(|(_, placed)| placed));
+		shown
+	}
+
+	/// The sources whose pictures `scenes` place, `None` being the top layer,
+	/// through clones: each visible item's, of the scenes they draw, and each
+	/// mask's it reads.
+	fn placed<'a>(&self, scenes: impl IntoIterator<Item = Option<&'a str>>) -> BTreeSet<String> {
 		let collection = &self.collection;
-		let scenes = self.compositor.live().map(Some).chain([None]);
-		let layers = scenes.map(|scene| moq_scene::Layer {
+		let layers = scenes.into_iter().map(|scene| moq_scene::Layer {
 			scene: scene.map(str::to_string),
 		});
 		let items = collection.drawn(layers);
@@ -409,6 +423,19 @@ pub struct VideoStats {
 	encoder: Mutex<EncoderName>,
 	/// Why the video stopped, if it did, until a new rendition starts.
 	error: Mutex<Option<String>>,
+	/// Which video this is, so a scene published again under its name is
+	/// told from the one before, whose counters it does not continue.
+	generation: Generation,
+}
+
+/// A number no other [`VideoStats`] has.
+struct Generation(u64);
+
+impl Default for Generation {
+	fn default() -> Self {
+		static NEXT: AtomicU64 = AtomicU64::new(0);
+		Self(NEXT.fetch_add(1, Ordering::Relaxed))
+	}
 }
 
 /// What one of the program's renditions costs.
@@ -1127,29 +1154,42 @@ impl Engine {
 		// only listened to. A source that stopped matters either way.
 		let (stalled, stopped) = {
 			let state = self.state.lock().unwrap();
-			let shown = state.shown();
+			let on_program = state.on_program();
+			let beside = state.beside();
+			let shown = |name: &str| health::Shown {
+				program: on_program.contains(name),
+				scenes: beside
+					.iter()
+					.filter(|(_, placed)| placed.contains(name))
+					.map(|(scene, _)| scene.to_string())
+					.collect(),
+			};
 			let heard = |name: &str| state.sources.plays(&state.collection.mixes.program, name);
 			let stalled = state
 				.sources
 				.iter()
 				.filter_map(|(name, feed)| {
 					let stall = feed.stalled(now)?;
+					let shown = shown(name);
 					let matters = match stall {
-						source::Stall::Picture(_) => shown.contains(name),
+						source::Stall::Picture(_) => shown.any(),
 						source::Stall::Sound(_) => heard(name),
 					};
-					matters.then(|| (name.to_string(), stall))
+					matters.then(|| (name.to_string(), stall, shown))
 				})
 				.collect();
-			// A stinger's clip rests ended between stingers, unless a scene on
-			// air places it.
+			// A stinger's clip rests ended between stingers, unless a live scene
+			// places it.
 			let stinger = state.collection.transition.stinger();
-			let placed = state.placed();
+			let placed = state.placed(state.compositor.live().map(Some).chain([None]));
 			let stopped = state
 				.sources
 				.iter()
-				.filter(|(name, _)| shown.contains(*name) || heard(name))
 				.filter_map(|(name, feed)| {
+					let shown = shown(name);
+					if !shown.any() && !heard(name) {
+						return None;
+					}
 					// A picture that fails to draw fails the source as the Sources panel shows it.
 					let status = match state.compositor.error(name) {
 						Some(err) => Status::Failed(err.to_string()),
@@ -1160,7 +1200,7 @@ impl Engine {
 						Status::Failed(_) => true,
 						_ => false,
 					};
-					stopped.then(|| (name.to_string(), status))
+					stopped.then(|| (name.to_string(), status, shown))
 				})
 				.collect();
 			(stalled, stopped)
@@ -1174,6 +1214,7 @@ impl Engine {
 				watched: video.watched.load(Ordering::Relaxed),
 				encoder: video.encoder(),
 				failed,
+				generation: video.generation.0,
 			}
 		};
 		// The program's output stops with the audio too.
@@ -1285,9 +1326,11 @@ impl Engine {
 				state.compositor.set_outputs(outputs);
 
 				// Before drawing, so a media file that restarts going on program
-				// is cleared in this frame rather than showing where it ended.
+				// is cleared in this frame rather than showing where it ended. A
+				// scene beside program starting to draw restarts none: its
+				// sound would start over in the program mix too.
+				state.sources.set_on_program(&state.on_program());
 				let shown = state.shown();
-				state.sources.set_on_program(&shown);
 				if let Err(err) = state.compositor.render(&state.collection, &state.sources, tick) {
 					tracing::error!(%err, "cannot draw the canvas");
 					continue;
@@ -1992,8 +2035,8 @@ impl Line {
 		Self::new(renditions, canvas, ladder.ok(), true)
 	}
 
-	/// Whether any rendition would take the next frame: one encoding always,
-	/// or one anyone reads. A probe done opens the renditions on the next
+	/// Whether any rendition would take the next frame: one its grant funds
+	/// that encodes always, or that anyone reads. A probe done opens the renditions on the next
 	/// feed, so their first frame is drawn then rather than one frame late.
 	/// Without renditions open or opening, none would.
 	fn wants(&self) -> bool {
@@ -3021,8 +3064,15 @@ mod tests {
 			}
 		};
 		kio::clock::timeout(TIMEOUT, ended()).await.expect("the bed ends");
+		let rested = |name: &str, program| {
+			let shown = health::Shown {
+				program,
+				scenes: Vec::new(),
+			};
+			(name.to_string(), Status::Ended, shown)
+		};
 		let stopped = engine.local(kio::clock::now()).stopped;
-		assert_eq!(stopped, [("bed".to_string(), Status::Ended)]);
+		assert_eq!(stopped, [rested("bed", false)]);
 
 		{
 			let mut state = engine.state.lock().unwrap();
@@ -3042,7 +3092,7 @@ mod tests {
 		assert!(!shown.contains("sting") && !shown.contains("matte"), "{shown:?}");
 		kio::clock::timeout(TIMEOUT, ended()).await.expect("the clip rests");
 		let stopped = engine.local(kio::clock::now()).stopped;
-		assert_eq!(stopped, [("bed".to_string(), Status::Ended)]);
+		assert_eq!(stopped, [rested("bed", false)]);
 
 		{
 			let mut state = engine.state.lock().unwrap();
@@ -3054,7 +3104,7 @@ mod tests {
 			state.commit(draft, None).unwrap();
 		}
 		let stopped = engine.local(kio::clock::now()).stopped;
-		let both = [("bed".to_string(), Status::Ended), ("sting".to_string(), Status::Ended)];
+		let both = [rested("bed", false), rested("sting", true)];
 		assert_eq!(stopped, both, "placed, it counts");
 
 		let stopping = engine.clone();
@@ -3222,7 +3272,8 @@ mod tests {
 	/// A published scene reaches the relay in a broadcast of its own beneath
 	/// the program's, at its own size, with the program's audio listed by
 	/// reference rather than encoded again, and holds one more encode session.
-	/// Health grades it beside the program, with its own viewers. Unpublishing
+	/// What only it shows is shown but not on program. Health grades its
+	/// video beside the program, with its own viewers. Unpublishing
 	/// it, or quitting, ends its video and then its catalog cleanly, then its
 	/// broadcast; unpublishing gives its session back.
 	#[tokio::test(flavor = "multi_thread")]
@@ -3257,10 +3308,22 @@ mod tests {
 			width: 360.0,
 			height: 640.0,
 		};
+		let corner = moq_scene::Source::Color {
+			color: moq_scene::Rgba([0, 0, 255, 255]),
+		};
+		loaded.collection.sources.insert("corner".into(), corner);
+		let corner = moq_scene::Rect {
+			width: 8.0,
+			height: 8.0,
+			..fill
+		};
 		loaded.collection.scenes.push(moq_scene::Scene {
 			size: Some(size),
 			published: true,
-			items: vec![moq_scene::Item::new("red", fill)],
+			items: vec![
+				moq_scene::Item::new("red", fill),
+				moq_scene::Item::new("corner", corner),
+			],
 			..moq_scene::Scene::new("tall")
 		});
 		let engine = Engine::start(launch(gpu, relays, dir.path()), autosave, loaded)
@@ -3290,6 +3353,13 @@ mod tests {
 			.expect("the scene arrives");
 		assert_eq!(engine.stats.sessions.open(), 2, "one full size each");
 		assert!(engine.stats.published()["tall"].error().is_none());
+		{
+			// Shown, so its track encodes, but not on program, where a media
+			// file going on would restart.
+			let state = engine.state.lock().unwrap();
+			assert!(state.shown().contains("corner"));
+			assert!(!state.on_program().contains("corner"));
+		}
 		assert!(catalog.echo.is_some(), "its viewers are asked for feedback");
 		// Health grades it beside the program, from what it writes.
 		let graded = |engine: &Engine| {
@@ -3301,7 +3371,7 @@ mod tests {
 			tall.map(|tall| {
 				tall.tracks
 					.iter()
-					.any(|track| track.sent.is_some_and(|sent| sent.as_bps() > 0))
+					.any(|track| track.id == video && track.sent.is_some_and(|sent| sent.as_bps() > 0))
 			})
 		};
 		kio::clock::timeout(TIMEOUT, async {

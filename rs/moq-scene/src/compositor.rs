@@ -385,7 +385,7 @@ impl Compositor {
 	/// output reads it. Each plays its keyframes from the first render after
 	/// it was named, drawn or not, and one left out is forgotten, so it starts
 	/// over when named again.
-	pub fn set_outputs<'a>(&mut self, outputs: impl IntoIterator<Item = (&'a str, bool)>) {
+	pub fn set_outputs(&mut self, outputs: BTreeMap<&str, bool>) {
 		let mut kept = BTreeMap::new();
 		for (scene, draw) in outputs {
 			let output = self.outputs.remove(scene).unwrap_or(Output {
@@ -614,6 +614,19 @@ impl Compositor {
 	/// through [`error`](Self::error); this fails only when a canvas itself
 	/// cannot be drawn.
 	pub fn render(&mut self, collection: &Collection, sources: &Sources, now: Instant) -> Result<(), Error> {
+		// A scene grown since the last `fit` would overrun what it sized.
+		let (width, height) = self.effects.fitted();
+		let grown = collection.scenes.iter().find(|scene| {
+			let canvas = scene.canvas(self.program.canvas);
+			canvas.width > width || canvas.height > height
+		});
+		if let Some(scene) = grown {
+			return Err(Error::Invalid(format!(
+				"scene `{}` is larger than the canvases the compositor was fit to",
+				scene.name
+			)));
+		}
+
 		// Before the pictures are pulled, so a stinger's clip starting now is
 		// cleared in this frame rather than showing where its last play ended.
 		let progress = self.progress(sources, now);
@@ -840,8 +853,8 @@ impl Compositor {
 
 	/// Start each overlay set to restart over when a scene showing it went on
 	/// since its timeline started: the program scene, which `program_start`
-	/// went on at, or else the output that went on first among those showing
-	/// it, or else the preview scene, at `preview_start`, as their keyframes
+	/// went on at, or else the output that went on first among those drawn
+	/// showing it, or else the preview scene, at `preview_start`, as their keyframes
 	/// do. Program, outputs, and preview share one timeline, so a preview
 	/// never restarts an overlay program or an output shows, through the scene
 	/// a transition leaves, the top layer, or a stinger's masks included, nor
@@ -858,9 +871,11 @@ impl Compositor {
 		let program = self.drawn(collection, self.program_scene.as_deref().map(Some));
 		let on_air = self.on_air_sources(collection);
 		let preview = self.drawn(collection, self.preview_scene.as_deref().map(Some));
+		// One not drawn shows nothing, so it leaves the overlay to the preview.
 		let outputs: Vec<(HashSet<&str>, Instant)> = self
 			.outputs
 			.iter()
+			.filter(|(_, output)| output.draw)
 			.filter_map(|(scene, output)| Some((self.drawn(collection, [Some(scene.as_str())]), output.start?)))
 			.collect();
 		for (name, layer) in &mut self.layers {
@@ -2151,7 +2166,7 @@ mod tests {
 			let start = Instant::now();
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
-			studio.compositor.set_outputs([("tall", true)]);
+			studio.compositor.set_outputs(BTreeMap::from([("tall", true)]));
 			studio.render(start);
 			let output = studio.compositor.output("tall").unwrap();
 			assert_eq!(output.canvas().unwrap().size(), moq_video::Size::new(4, 8));
@@ -2186,12 +2201,12 @@ mod tests {
 			let err = studio.compositor.cut(&studio.collection, &studio.sources).unwrap_err();
 			assert!(err.to_string().contains("not the program's"), "{err}");
 
-			studio.compositor.set_outputs([("tall", false)]);
+			studio.compositor.set_outputs(BTreeMap::from([("tall", false)]));
 			studio.compositor.set_previewing(false);
 			studio.render(start + Duration::from_secs(1));
 			assert!(studio.compositor.output("tall").unwrap().texture().is_none());
 			assert!(!studio.compositor.previewed());
-			studio.compositor.set_outputs([]);
+			studio.compositor.set_outputs(BTreeMap::new());
 			assert!(studio.compositor.output("tall").is_none());
 		})
 		.await;
@@ -2218,14 +2233,14 @@ mod tests {
 				tall_pixels(studio, &texture)
 			};
 
-			studio.compositor.set_outputs([("tall", false)]);
+			studio.compositor.set_outputs(BTreeMap::from([("tall", false)]));
 			studio.render(at(0));
-			studio.compositor.set_outputs([("tall", true)]);
+			studio.compositor.set_outputs(BTreeMap::from([("tall", true)]));
 			studio.render(at(500));
 			assert_eq!(drawn(&mut studio), (BLUE, BLACK), "halfway in");
 
-			studio.compositor.set_outputs([]);
-			studio.compositor.set_outputs([("tall", true)]);
+			studio.compositor.set_outputs(BTreeMap::new());
+			studio.compositor.set_outputs(BTreeMap::from([("tall", true)]));
 			studio.render(at(500));
 			assert_eq!(drawn(&mut studio), (BLACK, BLACK), "from the start again");
 			studio.render(at(1500));
@@ -3483,7 +3498,8 @@ mod tests {
 
 	/// A resize draws the next frame on textures of the new size, with items
 	/// where their pixels say, a blend mode and a blur reaching the canvas's
-	/// new width, and a canvas the GPU cannot hold changes nothing.
+	/// new width, a canvas the GPU cannot hold changes nothing, and a scene
+	/// grown since the last fit is not drawn.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn a_resize_draws_the_new_canvas() {
@@ -3549,6 +3565,12 @@ mod tests {
 			let empty = Canvas { width: 0, ..wide };
 			assert!(matches!(studio.compositor.fit(&refused(empty)), Err(Error::Invalid(_))));
 			assert_eq!(studio.compositor.canvas(), wide);
+
+			// A scene grown without a fit is refused rather than overrunning it.
+			let mut grown = studio.collection.clone();
+			grown.scenes[0].size = Some(Size { width: 32, height: 8 });
+			let render = studio.compositor.render(&grown, &studio.sources, Instant::now());
+			assert!(matches!(render, Err(Error::Invalid(_))));
 		})
 		.await;
 	}
@@ -3742,8 +3764,10 @@ mod tests {
 			let near =
 				|actual: [u8; 4], expected: [u8; 4]| actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2);
 
-			// Both open here, drawn nowhere.
+			// Both open here, drawn nowhere, an output not drawn included: its
+			// clock running from here leaves the preview to restart them.
 			let start = Instant::now();
+			studio.compositor.set_outputs(BTreeMap::from([("blue", false)]));
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
@@ -4380,7 +4404,7 @@ mod bench {
 			.collect();
 		studio
 			.compositor
-			.set_outputs(published.iter().map(|scene| (scene.as_str(), true)));
+			.set_outputs(published.iter().map(|scene| (scene.as_str(), true)).collect());
 		let scene = studio.collection.scenes[0].name.clone();
 		studio.compositor.set_preview(Some(scene));
 		studio.compositor.cut(&studio.collection, &studio.sources).unwrap();

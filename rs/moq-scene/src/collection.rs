@@ -318,9 +318,9 @@ impl Collection {
 				.canvas(self.canvas)
 				.validate()
 				.map_err(|err| Error::Invalid(format!("scene `{}`: {err}", scene.name)))?;
-			if scene.published && scene.name.contains('/') {
+			if scene.published && (scene.name.contains('/') || moq_net::Path::new(&scene.name).is_err()) {
 				return Err(Error::Invalid(format!(
-					"scene `{}` is published, so its name names its broadcast and holds no `/`",
+					"scene `{}` is published, so its name is one segment of its broadcast's path: no `/`, and a `\\` only before another",
 					scene.name
 				)));
 			}
@@ -2816,6 +2816,11 @@ background = "remove"
 		assert!(
 			matches!(collection.validate(), Err(Error::Invalid(_))),
 			"a / in a published name"
+		);
+		collection.scenes[1].name = r"cam\one".into();
+		assert!(
+			matches!(collection.validate(), Err(Error::Invalid(_))),
+			r"a \ escaping nothing in a published name"
 		);
 		collection.scenes[1].name = "Tall".into();
 		collection.scenes[1].size = Some(Size {

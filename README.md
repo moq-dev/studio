@@ -134,14 +134,15 @@ it; the top layer goes over the program alone. Its catalog lists the
 program's audio rather than encoding it again, so every published scene
 carries the program's mix for now. Unticking it, or removing the scene, ends
 its broadcast. A published scene's name is one segment of its broadcast path,
-so it holds no `/`, and a scene named `viewers`, where viewers report back,
+so it holds no `/`, and a `\` only before another `\`. A scene named `viewers`, where viewers report back,
 does not publish while live.
 
 A source captures or decodes once however many scenes show it. A published
 scene is drawn only while one of its encoders takes the frame, so with
 `--on-demand`, or without a relay, one nobody watches costs no drawing. An
-item's keyframes play in a published scene from when it was published or the
-studio started.
+item's keyframes play in a published scene from when it was published, picked
+for recording, or the studio started, whichever came first: a recording and a
+broadcast of one scene share one picture.
 
 ### Scene sources
 
@@ -647,7 +648,7 @@ ids. `[[top]]` items make up the top layer.
 
 A scene's `size` gives it a `width` and `height` of its own; without one it is
 the program's. `published = true` puts it live as its own broadcast (see
-[Published scenes](#published-scenes)), so its name holds no `/`, and
+[Published scenes](#published-scenes)), so its name is one path segment, and
 `recorded = true` has recordings hold it rather than the program, on one scene
 at most.
 
@@ -779,8 +780,8 @@ catalog under the `dev.moq.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
 A captured source encodes its track as H.264 only while it is used: while it
-is shown on program, so a replay of it has its recent past, or while a
-recording reads its track. Otherwise it holds no encoder. A display or window
+is shown on program or in a published or recorded scene being drawn, so a
+replay of it has its recent past, or while a recording reads its track. Otherwise it holds no encoder. A display or window
 that goes into use while its screen stands still, and so delivers nothing new,
 restarts its capture, so its track starts with the picture as it is. A capture that
 changes size or color space moves to a new track, which its catalog entry
@@ -811,11 +812,12 @@ encode engine for them all. The Output panel counts the sessions open:
 | Its half size | 1 while someone watches it |
 | Each published scene's own size and half size | as the program's |
 | The recording's own size | 1 while recording |
-| Each captured source or media file | 1 while on program or recorded |
+| Each captured source or media file | 1 while used, as [above](#source-tracks) |
 
 So a live scene showing a camera, a display, and a window holds 4 sessions, 5
 with the half size watched, and 6 while recording too. A published portrait
-scene beside it adds 1 more, 2 with its half size watched. When the program
+scene drawing the program beside it adds 1 more, 2 with its half size watched,
+plus 1 for each captured source it shows that program does not. When the program
 encodes on hardware, so do the sources, and a
 session the GPU refuses fails that source's track with the encoder's reason in
 the Sources panel rather than falling back to software. The source keeps

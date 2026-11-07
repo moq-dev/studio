@@ -217,16 +217,48 @@ pub struct Local {
 	/// Each program track's share of the connection's bandwidth, by name: a
 	/// published scene's prefixed with its name and a slash.
 	pub grants: BTreeMap<String, Option<Rate>>,
-	/// Sources the program shows or plays that stopped delivering, and what.
-	pub stalled: Vec<(String, Stall)>,
-	/// Sources the program shows or plays that ended or failed.
-	pub stopped: Vec<(String, Status)>,
+	/// Sources a live picture shows or the program plays that stopped
+	/// delivering, what, and where each is shown.
+	pub stalled: Vec<(String, Stall, Shown)>,
+	/// Sources a live picture shows or the program plays that ended or
+	/// failed, and where each is shown.
+	pub stopped: Vec<(String, Status, Shown)>,
 }
 
 impl Local {
 	/// Whether anyone subscribes to any broadcast's video.
 	fn watched(&self) -> bool {
 		self.broadcasts.values().any(|video| video.watched)
+	}
+}
+
+/// Where a source's picture is drawn live.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Shown {
+	/// On program, the top layer and a stinger included.
+	pub program: bool,
+	/// In each published or recorded scene drawn beside program, by name.
+	pub scenes: Vec<String>,
+}
+
+impl Shown {
+	/// Whether any live picture shows it.
+	pub fn any(&self) -> bool {
+		self.program || !self.scenes.is_empty()
+	}
+
+	/// What shows it, as a sentence's subject, such as "the program and scene
+	/// `tall`", and whether that is more than one.
+	fn subject(&self) -> (String, bool) {
+		let program = self.program.then(|| "the program".to_string());
+		let scenes = self.scenes.iter().map(|name| format!("scene `{name}`"));
+		let parts: Vec<String> = program.into_iter().chain(scenes).collect();
+		let subject = match parts.split_last() {
+			Some((last, [])) => last.clone(),
+			Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+			None => String::new(),
+		};
+		(subject, parts.len() > 1)
 	}
 }
 
@@ -246,6 +278,9 @@ pub struct Video {
 	pub encoder: Option<String>,
 	/// Why the output stopped, if it did.
 	pub failed: Option<String>,
+	/// Which video this is: a scene published again under its name counts
+	/// afresh, as another.
+	pub generation: u64,
 }
 
 /// What the studio publishes, for grading its delivery.
@@ -531,6 +566,9 @@ impl Sampler {
 				broadcasts
 					.filter_map(|(name, video)| {
 						let before = previous.local.broadcasts.get(name)?;
+						if before.generation != video.generation {
+							return None;
+						}
 						let drops = Drops {
 							drawn,
 							dropped: video.dropped.saturating_sub(before.dropped),
@@ -904,27 +942,35 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		}
 	}
 
-	for (name, stall) in &local.stalled {
+	for (name, stall, shown) in &local.stalled {
 		let instead = match stall {
-			Stall::Picture(_) => "repeats its last one",
-			Stall::Sound(_) => "plays silence for it",
+			Stall::Picture(_) => {
+				let (subject, many) = shown.subject();
+				let repeat = if many { "repeat" } else { "repeats" };
+				format!("{subject} {repeat} its last one")
+			}
+			Stall::Sound(_) => "the program plays silence for it".into(),
 		};
 		add(
 			Verdict::Unhealthy,
-			format!(
-				"Source `{name}` stalled: {}, so the program {instead}.",
-				without(*stall)
-			),
+			format!("Source `{name}` stalled: {}, so {instead}.", without(*stall)),
 		);
 	}
-	for (name, status) in &local.stopped {
+	for (name, status, shown) in &local.stopped {
 		match status {
-			Status::Ended => add(
-				Verdict::Degraded,
-				format!(
-					"Source `{name}` played to its end, so the program holds its last picture and plays no sound for it."
-				),
-			),
+			Status::Ended => {
+				let instead = if shown.any() {
+					let (subject, many) = shown.subject();
+					let (hold, play) = if many { ("hold", "play") } else { ("holds", "plays") };
+					format!("{subject} {hold} its last picture and {play} no sound for it")
+				} else {
+					"the program plays no sound for it".into()
+				};
+				add(
+					Verdict::Degraded,
+					format!("Source `{name}` played to its end, so {instead}."),
+				);
+			}
 			Status::Failed(reason) => add(Verdict::Unhealthy, format!("Source `{name}` failed: {reason}.")),
 			_ => {}
 		}
@@ -1497,6 +1543,33 @@ mod tests {
 		);
 	}
 
+	/// A scene published again under its name counts its frames afresh,
+	/// rather than from the counters of the one before.
+	#[test]
+	fn a_scene_published_again_counts_afresh() {
+		let mut sampler = Sampler::new(None);
+		let start = kio::clock::now();
+		let mut sample = |seconds: u32, generation: u64| {
+			let tall = Video {
+				encoding: true,
+				encoder: Some("vaapi".into()),
+				encoded: if generation == 0 { 300 } else { 0 },
+				generation,
+				..Default::default()
+			};
+			let mut local = local(Video::default(), Some(tall));
+			local.rendered = u64::from(seconds) * 30;
+			causes(sampler.sample(start + INTERVAL * seconds, local).problems)
+		};
+		sample(10, 0);
+		let republished = sample(11, 1);
+		assert!(republished.is_empty(), "{republished:?}");
+		assert_eq!(
+			sample(12, 1),
+			["On scene `tall`, the encoder is stuck: vaapi produced nothing in the last second."]
+		);
+	}
+
 	/// Stalling viewers are blamed on their own links while the uplink is
 	/// measured clear, on the uplink when it is congested or lossy, and on
 	/// nobody while it is unmeasured, counting each viewer once. A slow round
@@ -1698,17 +1771,36 @@ mod tests {
 	}
 
 	/// Problems list worst first: an unreachable relay and a frozen or silent
-	/// source above a slow round trip.
+	/// source above a slow round trip. A frozen or ended picture names what
+	/// shows it.
 	#[test]
 	fn problems_list_worst_first() {
+		let program = Shown {
+			program: true,
+			scenes: Vec::new(),
+		};
+		let tall = Shown {
+			program: false,
+			scenes: vec!["tall".into()],
+		};
+		let both = Shown {
+			program: true,
+			scenes: vec!["tall".into(), "wide".into()],
+		};
 		let local = Local {
 			stalled: vec![
-				("camera".into(), Stall::Picture(Duration::from_secs(3))),
-				("mic".into(), Stall::Sound(Duration::from_secs(2))),
+				("camera".into(), Stall::Picture(Duration::from_secs(3)), program.clone()),
+				("logo".into(), Stall::Picture(Duration::from_secs(3)), tall),
+				("mic".into(), Stall::Sound(Duration::from_secs(2)), Shown::default()),
 			],
 			stopped: vec![
-				("intro".into(), Status::Ended),
-				("music".into(), Status::Failed("the file is gone".into())),
+				("intro".into(), Status::Ended, program),
+				("outro".into(), Status::Ended, both),
+				(
+					"music".into(),
+					Status::Failed("the file is gone".into()),
+					Shown::default(),
+				),
 			],
 			..Default::default()
 		};
@@ -1725,9 +1817,11 @@ mod tests {
 			[
 				"The relay https://a is unreachable (timed out), so nothing reaches viewers until a relay reconnects.",
 				"Source `camera` stalled: no new picture for 3 s, so the program repeats its last one.",
+				"Source `logo` stalled: no new picture for 3 s, so scene `tall` repeats its last one.",
 				"Source `mic` stalled: no new sound for 2 s, so the program plays silence for it.",
 				"Source `music` failed: the file is gone.",
 				"Source `intro` played to its end, so the program holds its last picture and plays no sound for it.",
+				"Source `outro` played to its end, so the program, scene `tall` and scene `wide` hold its last picture and play no sound for it.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
 		);

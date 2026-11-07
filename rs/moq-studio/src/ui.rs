@@ -223,6 +223,24 @@ impl eframe::App for Studio {
 				hotkeys.rename(renames);
 			}
 		}
+		// So does a size being typed, a renamed scene's winning its new name.
+		for renames in &renames {
+			let pending = std::mem::take(&mut self.panels.sizes);
+			let (moved, kept): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(name, _)| renames.contains_key(name));
+			let moved = moved
+				.into_iter()
+				.filter_map(|(name, size)| Some((renames[&name].clone()?, size)));
+			self.panels.sizes = moved.collect();
+			for (name, size) in kept {
+				self.panels.sizes.entry(name).or_insert(size);
+			}
+		}
+		// Here rather than in the Output panel, which can draw after a rename
+		// this frame and before it is followed.
+		let scenes = &state.collection().scenes;
+		self.panels
+			.sizes
+			.retain(|name, _| scenes.iter().any(|scene| scene.name == *name));
 		// A page not painting through an X display copies through the
 		// studio's clipboard, even if the preview let go of the page before
 		// the copy came back.
@@ -891,6 +909,12 @@ impl Panels {
 					.suffix(" px"),
 			);
 		});
+		// Shown again, the texture holds what was last drawn, maybe another
+		// scene, until the next render draws this one: no input until then.
+		if !state.compositor.previewed() {
+			picture(ui, self.preview.id, canvas, egui::Sense::hover());
+			return;
+		}
 		// Interacting, the pointer belongs to the pages rather than to arranging.
 		if self.interacting {
 			let image = picture(ui, self.preview.id, canvas, egui::Sense::hover()).rect;
@@ -3011,8 +3035,6 @@ impl Panels {
 		let mut state = engine.state.lock().unwrap();
 		let program = state.collection().canvas;
 		let scenes = state.collection().scenes.clone();
-		self.sizes
-			.retain(|name, _| scenes.iter().any(|scene| scene.name == *name));
 		let mut action = None;
 		egui::CollapsingHeader::new("Scene sizes").show(ui, |ui| {
 			for (index, scene) in scenes.iter().enumerate() {
