@@ -7,7 +7,8 @@
 //!   [`Source`]s, and [`Scene`]s placing them, each at its own [`Size`] or
 //!   the program's, under a top layer that stays on across scene switches. A
 //!   scene can draw another, or the program, and can be published or recorded
-//!   on its own. It saves to a versioned TOML file that holds no credentials.
+//!   on its own. [`AudioScene`]s hold sounds and other audio scenes, apart
+//!   from cuts. It saves to a versioned TOML file that holds no credentials.
 //! - [`Edit`] is every change to a collection, built with a [`Draft`]. Each
 //!   one undoes itself, so a [`History`] undoes and redoes them and saves
 //!   beside the scene file. A [`Clip`] carries items or filters between
@@ -16,8 +17,8 @@
 //!   microphone, or system-audio capture (with the `capture` feature), a still
 //!   image, a video or audio file, a solid color, a broadcast subscribed over MoQ, or a web page
 //!   rendered by a browser engine (the [`browser`] module). Pictures go to the
-//!   compositor and sound goes to a `moq_audio::bus::Bus`, routed into its
-//!   program mix.
+//!   compositor and sound goes to a `moq_audio::bus::Bus`, routed into a mix
+//!   for each audio scene that reaches it.
 //! - [`Compositor`] draws the scene in preview, the scene on program, and each
 //!   scene an output reads on its own into textures on the caller's `wgpu`
 //!   device, from one upload of each source's picture, cutting or running a
@@ -54,8 +55,8 @@ pub mod source;
 
 pub use clip::Clip;
 pub use collection::{
-	Audio, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item, Keyframe, Layer, MaskMode,
-	Mixes, Nested, Rect, Rgba, Scene, Size, Source, Transition, Video,
+	Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item, Keyframe, Layer,
+	MaskMode, Nested, Rect, Rgba, Scene, Size, Source, Transition, Video,
 };
 pub use compositor::{Compositor, FORMAT, Output};
 pub use edit::{Change, Draft, Edit, History};

@@ -132,8 +132,7 @@ impl Studio {
 				drag: None,
 				new_scene: String::new(),
 				renaming: None,
-				new_mix: String::new(),
-				renaming_mix: None,
+				renaming_audio: None,
 				speaker: None,
 				speakers: Speakers::default(),
 				canvas: None,
@@ -368,9 +367,8 @@ struct Panels {
 	new_scene: String,
 	/// The scene being renamed, by index, and the name typed so far.
 	renaming: Option<(usize, String)>,
-	new_mix: String,
-	/// The mix being renamed, by its name, and the name typed so far.
-	renaming_mix: Option<(String, String)>,
+	/// The audio scene being renamed, by its name, and the name typed so far.
+	renaming_audio: Option<(String, String)>,
 	/// The output Listen plays on, by [`mix::Speaker::id`], or `None` for the
 	/// system default. Saved per user, not in the shared scene file.
 	speaker: Option<String>,
@@ -1282,7 +1280,10 @@ impl Panels {
 		let on_air: Vec<String> = state.compositor.on_air().map(str::to_owned).collect();
 		let mut pick = None;
 		let mut action = None;
+		let mut audio_action = None;
 		let count = state.collection().scenes.len();
+		let audio_scenes = state.collection().audio_scenes.clone();
+		let program_audio = state.collection().program_audio().unwrap_or_default().to_string();
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
 			for (index, scene) in state.collection().scenes.iter().enumerate() {
@@ -1325,6 +1326,23 @@ impl Panels {
 					{
 						action = Some(SceneAction::Publish(index, published));
 					}
+					if scene.published {
+						let on_program = format!("on program ({program_audio})");
+						let mut audio = scene.audio.clone();
+						egui::ComboBox::from_id_salt(("scene audio", index))
+							.selected_text(audio.as_deref().unwrap_or(&on_program))
+							.show_ui(ui, |ui| {
+								ui.selectable_value(&mut audio, None, &on_program);
+								for scene in &audio_scenes {
+									ui.selectable_value(&mut audio, Some(scene.name.clone()), &scene.name);
+								}
+							})
+							.response
+							.on_hover_text("The audio scene its broadcast carries");
+						if audio != scene.audio {
+							action = Some(SceneAction::Audio(index, audio));
+						}
+					}
 					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
 						action = Some(SceneAction::Move(index, index - 1));
 					}
@@ -1343,11 +1361,69 @@ impl Panels {
 					}
 				});
 			}
+			// Audio scenes, apart from cuts: Preview has nothing to show.
+			let count = audio_scenes.len();
+			for (index, scene) in audio_scenes.iter().enumerate() {
+				ui.horizontal(|ui| {
+					if let Some((renaming, name)) = &mut self.renaming_audio
+						&& *renaming == scene.name
+					{
+						let response = ui.text_edit_singleline(name);
+						if !response.has_focus() && !response.lost_focus() {
+							response.request_focus();
+						}
+						if response.lost_focus() {
+							// Escape cancels; Enter or a click away renames.
+							if !ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+								audio_action = Some(AudioAction::Rename(index, name.trim().to_string()));
+							}
+							self.renaming_audio = None;
+						}
+						return;
+					}
+					let label = ui.label(&scene.name);
+					ui.weak("audio");
+					if label.double_clicked() || ui.small_button("Rename").clicked() {
+						self.renaming_audio = Some((scene.name.clone(), scene.name.clone()));
+					}
+					if scene.program {
+						ui.colored_label(Color32::RED, "on program");
+					}
+					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
+						audio_action = Some(AudioAction::Move(index, index - 1));
+					}
+					if ui
+						.add_enabled(index + 1 < count, egui::Button::new("Down").small())
+						.clicked()
+					{
+						audio_action = Some(AudioAction::Move(index, index + 1));
+					}
+					if ui
+						.add_enabled(!scene.program, egui::Button::new("Remove").small())
+						.on_disabled_hover_text("On program; put another audio scene on program in Audio first")
+						.clicked()
+					{
+						audio_action = Some(AudioAction::Remove(index));
+					}
+				});
+			}
 		});
 
 		ui.separator();
 		ui.horizontal(|ui| {
 			ui.text_edit_singleline(&mut self.new_scene);
+			if ui.button("Add audio scene").clicked() {
+				let name = self.new_scene.trim().to_string();
+				let mut next = audio_scenes.clone();
+				next.push(moq_scene::AudioScene::new(name.clone()));
+				let result = edit(&mut state, format!("Add audio scene `{name}`"), None, |draft| {
+					draft.set_audio_scenes(next)
+				});
+				match result {
+					Ok(()) => self.new_scene.clear(),
+					Err(err) => self.report(Err(err)),
+				}
+			}
 			if ui.button("Add scene").clicked() {
 				let name = self.new_scene.trim().to_string();
 				let index = state.collection().scenes.len();
@@ -1366,6 +1442,10 @@ impl Panels {
 
 		if let Some(pick) = pick {
 			state.compositor.set_preview(Some(pick));
+		}
+		if let Some(action) = audio_action {
+			let result = self.audio_scene(&mut state, &audio_scenes, action);
+			self.check(result);
 		}
 		let Some(action) = action else { return };
 		let name = state.collection().scenes[action.index()].name.clone();
@@ -1392,6 +1472,16 @@ impl Panels {
 					draft.set_scene(index, Scene { published, ..scene })
 				})
 			}
+			SceneAction::Audio(index, audio) => {
+				let scene = state.collection().scenes[index].clone();
+				let label = match &audio {
+					Some(audio) => format!("Have scene `{name}` carry audio scene `{audio}`"),
+					None => format!("Have scene `{name}` carry the audio scene on program"),
+				};
+				edit(&mut state, label, None, |draft| {
+					draft.set_scene(index, Scene { audio, ..scene })
+				})
+			}
 			SceneAction::Remove(index) => {
 				let result = edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
 					draft.remove_scene(index)
@@ -1406,6 +1496,45 @@ impl Panels {
 		};
 		drop(state);
 		self.check(result);
+	}
+
+	/// Rename, reorder, or remove one of `scenes`, the audio scenes as the
+	/// Scenes panel listed them. Listening follows a renamed one.
+	fn audio_scene(
+		&self,
+		state: &mut State,
+		scenes: &[moq_scene::AudioScene],
+		action: AudioAction,
+	) -> anyhow::Result<()> {
+		match action {
+			AudioAction::Rename(index, to) => {
+				let from = &scenes[index].name;
+				if *from == to {
+					return Ok(());
+				}
+				edit(state, format!("Rename audio scene `{from}` to `{to}`"), None, |draft| {
+					draft.rename_audio_scene(from, &to)
+				})?;
+				let listening = self.engine.listening();
+				if listening.is_some_and(|(heard, _)| heard == *from) {
+					self.listen(state, Some(&to))?;
+				}
+				Ok(())
+			}
+			AudioAction::Move(from, to) => {
+				let mut next = scenes.to_vec();
+				let scene = next.remove(from);
+				let label = format!("Reorder audio scene `{}`", scene.name);
+				next.insert(to, scene);
+				edit(state, label, None, |draft| draft.set_audio_scenes(next))
+			}
+			AudioAction::Remove(index) => {
+				let name = &scenes[index].name;
+				edit(state, format!("Remove audio scene `{name}`"), None, |draft| {
+					draft.remove_audio_scene(name)
+				})
+			}
+		}
 	}
 
 	/// Keep a selected item of the scene renamed from `from` selected.
@@ -1695,10 +1824,9 @@ impl Panels {
 							Some(Paint::Gpu) => {
 								ui.weak("GPU").on_hover_text("The page is copied on the GPU");
 							}
-							Some(Paint::Cpu) => {
-								ui.colored_label(DEGRADED, "CPU").on_hover_text(
-									"The page is uploaded from memory every frame: there is no display, or its GPU process or this device cannot share textures",
-								);
+							Some(Paint::Cpu(why)) => {
+								ui.colored_label(DEGRADED, "CPU")
+									.on_hover_text(format!("The page is uploaded from memory every frame: {why}"));
 							}
 							None => {
 								ui.label("");
@@ -2324,64 +2452,39 @@ impl Panels {
 		self.check(result);
 	}
 
-	/// The mixes, which the program carries and which plays to the speakers,
-	/// and each source's gain, mute, delay, and routing.
+	/// The mixer: which audio scene the program carries and which plays to
+	/// the speakers, and a strip for each sound and each audio scene, with its
+	/// meter and a send to each audio scene. A sound's strip sets its gain,
+	/// mute, and delay too.
 	fn audio(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
-		let mixes = state.collection().mixes.clone();
+		let scenes = state.collection().audio_scenes.clone();
 		let listening = engine.listening();
-		let mut action = None;
+		let mut scenes_change = None;
 		let mut listen = None;
 
-		egui::Grid::new("mixes").show(ui, |ui| {
-			for name in &mixes.names {
-				if let Some((renaming, typed)) = &mut self.renaming_mix
-					&& renaming == name
-				{
-					let response = ui.text_edit_singleline(typed);
-					if !response.has_focus() && !response.lost_focus() {
-						response.request_focus();
-					}
-					if response.lost_focus() {
-						// Escape cancels; Enter or a click away renames.
-						if !ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-							action = Some(MixAction::Rename(name.clone(), typed.trim().to_string()));
-						}
-						self.renaming_mix = None;
-					}
-				} else if ui.label(name).double_clicked() {
-					self.renaming_mix = Some((name.clone(), name.clone()));
-				}
+		egui::Grid::new("audio scenes").show(ui, |ui| {
+			for scene in &scenes {
+				let name = &scene.name;
+				ui.label(name);
 				meter(ui, state.sources.mix(name).map(|mix| mix.level()).unwrap_or_default());
-				if ui.radio(mixes.program == *name, "On program").clicked() && mixes.program != *name {
-					action = Some(MixAction::Program(name.clone()));
+				if ui.radio(scene.program, "On program").clicked() && !scene.program {
+					let mut next = scenes.clone();
+					for scene in &mut next {
+						scene.program = scene.name == *name;
+					}
+					scenes_change = Some((next, format!("Put audio scene `{name}` on program")));
 				}
 				let heard = listening.as_ref().is_some_and(|(heard, _)| heard == name);
 				let response = ui
 					.add_enabled(mix::MONITOR, egui::Button::selectable(heard, "Listen"))
-					.on_hover_text("Play this mix to the speakers; use headphones")
+					.on_hover_text("Play this audio scene to the speakers; use headphones")
 					.on_disabled_hover_text("Needs a build with the `capture` feature");
 				if response.clicked() {
 					listen = Some((!heard).then(|| name.clone()));
 				}
-				if ui.small_button("Rename").clicked() {
-					self.renaming_mix = Some((name.clone(), name.clone()));
-				}
-				if ui
-					.add_enabled(mixes.program != *name, egui::Button::new("Remove").small())
-					.on_disabled_hover_text("On program; put another mix on program first")
-					.clicked()
-				{
-					action = Some(MixAction::Remove(name.clone()));
-				}
 				ui.end_row();
-			}
-		});
-		ui.horizontal(|ui| {
-			ui.text_edit_singleline(&mut self.new_mix);
-			if ui.button("Add mix").clicked() {
-				action = Some(MixAction::Add(self.new_mix.trim().to_string()));
 			}
 		});
 		if mix::MONITOR && self.speakers.ui(ui, &self.runtime, &mut self.speaker) {
@@ -2395,6 +2498,29 @@ impl Panels {
 		}
 		ui.separator();
 
+		// A send toggled from a sound or an audio scene into an audio scene.
+		let send = |from: Strip<'_>, to: &str, on: bool| {
+			let mut next = scenes.clone();
+			let into = next.iter_mut().find(|scene| scene.name == to).expect("listed");
+			let (held, what) = match from {
+				Strip::Sound(name) => (&mut into.sounds, format!("`{name}`")),
+				Strip::Scene(name) => (&mut into.scenes, format!("audio scene `{name}`")),
+			};
+			let name = match from {
+				Strip::Sound(name) | Strip::Scene(name) => name.to_string(),
+			};
+			let label = match on {
+				true => {
+					held.insert(name);
+					format!("Put {what} in `{to}`")
+				}
+				false => {
+					held.remove(&name);
+					format!("Take {what} out of `{to}`")
+				}
+			};
+			(next, label)
+		};
 		let mut change = None;
 		egui::Grid::new("audio").striped(true).show(ui, |ui| {
 			ui.label("");
@@ -2402,8 +2528,8 @@ impl Panels {
 			ui.label("Gain");
 			ui.label("Delay")
 				.on_hover_text("Hold the source back to line it up with a camera that lags it");
-			for name in &mixes.names {
-				ui.label(name);
+			for scene in &scenes {
+				ui.label(&scene.name);
 			}
 			ui.end_row();
 			for (name, feed) in state.sources.iter() {
@@ -2431,21 +2557,34 @@ impl Panels {
 					audio.delay = Duration::from_millis(millis);
 					change = Some((name.to_string(), audio, format!("Set `{name}` delay"), gesture));
 				}
-				for mix in &mixes.names {
-					let mut routed = !audio.exclude.contains(mix);
-					if ui.checkbox(&mut routed, "").changed() {
-						let mut audio = audio.clone();
-						let label = if routed {
-							audio.exclude.remove(mix);
-							format!("Add `{name}` to `{mix}`")
-						} else {
-							audio.exclude.insert(mix.clone());
-							format!("Leave `{name}` out of `{mix}`")
-						};
-						change = Some((name.to_string(), audio, label, None));
+				for scene in &scenes {
+					let mut sent = scene.sounds.contains(name);
+					if ui.checkbox(&mut sent, "").changed() {
+						scenes_change = Some(send(Strip::Sound(name), &scene.name, sent));
 					}
 				}
 				meter(ui, strip.level());
+				ui.end_row();
+			}
+			// Each audio scene sends into others too, never into itself, even
+			// through others.
+			for from in &scenes {
+				let name = &from.name;
+				ui.label(name).on_hover_text("An audio scene");
+				ui.weak("audio scene");
+				ui.label("");
+				ui.label("");
+				for scene in &scenes {
+					let mut sent = scene.scenes.contains(name);
+					let loops = scene.name == *name || state.collection().nests(name, &scene.name);
+					let response = ui
+						.add_enabled(!loops, egui::Checkbox::without_text(&mut sent))
+						.on_disabled_hover_text("It would hold itself");
+					if response.changed() {
+						scenes_change = Some(send(Strip::Scene(name), &scene.name, sent));
+					}
+				}
+				meter(ui, state.sources.mix(name).map(|mix| mix.level()).unwrap_or_default());
 				ui.end_row();
 			}
 		});
@@ -2454,53 +2593,24 @@ impl Panels {
 		if let Some((name, audio, label, gesture)) = change {
 			result = edit(&mut state, label, gesture, |draft| draft.set_audio(&name, Some(audio)));
 		}
-		if let Some(action) = action {
-			result = result.and(match action {
-				MixAction::Add(name) => {
-					let mut next = mixes.clone();
-					next.names.push(name.clone());
-					let added = edit(&mut state, format!("Add mix `{name}`"), None, |draft| {
-						draft.set_mixes(next)
-					});
-					if added.is_ok() {
-						self.new_mix.clear();
-					}
-					added
-				}
-				MixAction::Rename(from, to) if from == to => Ok(()),
-				MixAction::Rename(from, to) => {
-					let renamed = edit(&mut state, format!("Rename mix `{from}` to `{to}`"), None, |draft| {
-						draft.rename_mix(&from, &to)
-					});
-					// Listening follows the mix to its new name.
-					if renamed.is_ok() && listening.as_ref().is_some_and(|(heard, _)| *heard == from) {
-						listen = Some(Some(to));
-					}
-					renamed
-				}
-				MixAction::Program(name) => {
-					let next = moq_scene::Mixes {
-						program: name.clone(),
-						..mixes.clone()
-					};
-					edit(&mut state, format!("Put mix `{name}` on program"), None, |draft| {
-						draft.set_mixes(next)
-					})
-				}
-				MixAction::Remove(name) => edit(&mut state, format!("Remove mix `{name}`"), None, |draft| {
-					draft.remove_mix(&name)
-				}),
-			});
+		if let Some((next, label)) = scenes_change {
+			result = result.and(edit(&mut state, label, None, |draft| draft.set_audio_scenes(next)));
 		}
 		if let Some(listen) = listen {
-			let listen = listen.as_deref().map(|mix| mix::Listen {
-				mix,
-				speaker: self.speaker.as_deref(),
-			});
-			result = result.and(engine.listen(&mut state, &self.runtime, listen));
+			result = result.and(self.listen(&mut state, listen.as_deref()));
 		}
 		drop(state);
 		self.check(result);
+	}
+
+	/// Play the audio scene called `scene` to the speakers picked, or stop
+	/// with `None`.
+	fn listen(&self, state: &mut State, scene: Option<&str>) -> anyhow::Result<()> {
+		let listen = scene.map(|scene| mix::Listen {
+			scene,
+			speaker: self.speaker.as_deref(),
+		});
+		self.engine.listen(state, &self.runtime, listen)
 	}
 
 	/// Start and stop recording, and see what the recording wrote.
@@ -2537,7 +2647,7 @@ impl Panels {
 			}
 		});
 		self.recorded_scene(ui);
-		self.recorded_mix(ui);
+		self.recorded_audio(ui);
 		for file in status.iter().flat_map(|status| &status.files) {
 			let name = file.path.file_name().unwrap_or_default().to_string_lossy();
 			let size = format!("{:.1} MB", file.written as f64 / 1e6);
@@ -2585,38 +2695,43 @@ impl Panels {
 		self.check(result);
 	}
 
-	/// Pick the mix recordings hold, even while recording, which goes on
-	/// with the new mix from its next block.
-	fn recorded_mix(&mut self, ui: &mut Ui) {
+	/// Pick the audio scene recordings hold, even while recording, which goes
+	/// on with the new one from its next block.
+	fn recorded_audio(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
-		let mixes = state.collection().mixes.clone();
-		let on_program = format!("on program ({})", mixes.program);
-		let mut picked = mixes.recording.clone();
+		let scenes = state.collection().audio_scenes.clone();
+		let program = state.collection().program_audio().unwrap_or_default();
+		let on_program = format!("on program ({program})");
+		let current = scenes
+			.iter()
+			.find(|scene| scene.recorded)
+			.map(|scene| scene.name.clone());
+		let mut picked = current.clone();
 		ui.horizontal(|ui| {
-			ui.label("Mix")
-				.on_hover_text("A mix other than the one on program stays off the relay");
-			egui::ComboBox::from_id_salt("recorded mix")
+			ui.label("Audio")
+				.on_hover_text("An audio scene nothing else carries stays off the relay");
+			egui::ComboBox::from_id_salt("recorded audio")
 				.selected_text(picked.as_deref().unwrap_or(&on_program))
 				.show_ui(ui, |ui| {
 					ui.selectable_value(&mut picked, None, &on_program);
-					for name in &mixes.names {
-						ui.selectable_value(&mut picked, Some(name.clone()), name);
+					for scene in &scenes {
+						ui.selectable_value(&mut picked, Some(scene.name.clone()), &scene.name);
 					}
 				});
 		});
-		if picked == mixes.recording {
+		if picked == current {
 			return;
 		}
 		let label = match &picked {
-			Some(name) => format!("Record mix `{name}`"),
-			None => "Record the mix on program".into(),
+			Some(name) => format!("Record audio scene `{name}`"),
+			None => "Record the audio scene on program".into(),
 		};
-		let next = moq_scene::Mixes {
-			recording: picked,
-			..mixes
-		};
-		let result = edit(&mut state, label, None, |draft| draft.set_mixes(next));
+		let mut next = scenes;
+		for scene in &mut next {
+			scene.recorded = picked.as_deref() == Some(scene.name.as_str());
+		}
+		let result = edit(&mut state, label, None, |draft| draft.set_audio_scenes(next));
 		drop(state);
 		self.check(result);
 	}
@@ -2685,7 +2800,14 @@ impl Panels {
 			ui.separator();
 			ui.strong(format!("Scene `{name}`"));
 			if let Some(output) = &self.engine.output {
-				ui.label(format!("Broadcast {}/{name}, with the program's audio", output.path));
+				let state = self.engine.state.lock().unwrap();
+				let audio = state
+					.collection()
+					.published_audio(&name)
+					.unwrap_or_default()
+					.to_string();
+				drop(state);
+				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", output.path));
 			}
 			ui.label(format!(
 				"Encoder: {}",
@@ -2694,6 +2816,9 @@ impl Panels {
 			renditions(ui, Some(&name), &video, false);
 			if let Some(error) = video.error() {
 				ui.colored_label(ui.visuals().error_fg_color, error);
+			}
+			if let Some(error) = video.audio_error() {
+				ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
 			}
 		}
 
@@ -3382,24 +3507,37 @@ enum SceneAction {
 	Remove(usize),
 	/// Publish it, or stop.
 	Publish(usize, bool),
+	/// Carry the audio scene by this name while published, or the one on
+	/// program.
+	Audio(usize, Option<String>),
 }
 
 impl SceneAction {
 	fn index(&self) -> usize {
 		match self {
-			Self::Rename(index, _) | Self::Move(index, _) | Self::Remove(index) | Self::Publish(index, _) => *index,
+			Self::Rename(index, _)
+			| Self::Move(index, _)
+			| Self::Remove(index)
+			| Self::Publish(index, _)
+			| Self::Audio(index, _) => *index,
 		}
 	}
 }
 
-/// An edit the Audio panel makes to the mixes, each named.
-enum MixAction {
-	Add(String),
-	/// From one name to the other.
-	Rename(String, String),
-	/// Put the mix on program.
-	Program(String),
-	Remove(String),
+/// An edit the Scenes panel makes to the audio scenes, each by its place.
+enum AudioAction {
+	/// To the name typed.
+	Rename(usize, String),
+	Move(usize, usize),
+	Remove(usize),
+}
+
+/// A strip of the mixer, which sends into audio scenes: a source's sound, or
+/// an audio scene, each by name.
+#[derive(Clone, Copy)]
+enum Strip<'a> {
+	Sound(&'a str),
+	Scene(&'a str),
 }
 
 /// An edit the Items panel makes.
@@ -3692,8 +3830,9 @@ fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
 	(source, video)
 }
 
-/// Add `source` as `name`, with `video` filters, and place it in front of
-/// `layer` if it has a picture. Returns the name.
+/// Add `source` as `name`, with `video` filters, place it in front of
+/// `layer` if it has a picture, and put its sound in the audio scene on
+/// program if it has sound. Returns the name.
 fn add(
 	state: &mut State,
 	layer: Option<Layer>,
@@ -3711,6 +3850,7 @@ fn add(
 		.and_then(|layer| state.collection().canvas(layer.scene.as_deref()));
 	let canvas = canvas.unwrap_or(state.collection().canvas);
 	let place = source.has_video();
+	let heard = source.has_audio();
 	// A page or overlay, or a clone of one, lands at its own size, pixel for
 	// pixel; anything else fills the canvas.
 	let shown = match &source {
@@ -3729,6 +3869,9 @@ fn add(
 	edit(state, format!("Add `{name}`"), None, |draft| {
 		draft.set_source(&name, Some(source))?;
 		draft.set_video(&name, video)?;
+		if heard {
+			draft.hear(&name)?;
+		}
 		if place && let Some(layer) = layer {
 			let index = draft.collection().items(&layer).map_or(0, <[Item]>::len);
 			draft.insert_item(&layer, index, Item::new(name.clone(), rect))?;

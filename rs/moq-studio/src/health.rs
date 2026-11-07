@@ -217,12 +217,15 @@ pub struct Local {
 	/// Each program track's share of the connection's bandwidth, by name: a
 	/// published scene's prefixed with its name and a slash.
 	pub grants: BTreeMap<String, Option<Rate>>,
-	/// Sources a live picture shows or the program plays that stopped
-	/// delivering, what, and where each is shown.
-	pub stalled: Vec<(String, Stall, Shown)>,
-	/// Sources a live picture shows or the program plays that ended or
-	/// failed, and where each is shown.
-	pub stopped: Vec<(String, Status, Shown)>,
+	/// Sources whose stalled picture or sound a live broadcast carries, what
+	/// stalled, and which broadcasts carry it.
+	pub stalled: Vec<(String, Stall, Live)>,
+	/// Sources a live broadcast shows or plays that ended or failed, and
+	/// where.
+	pub stopped: Vec<(String, Status, Reach)>,
+	/// Browser sources a live broadcast shows whose pages are uploaded from
+	/// memory, why, and where they are shown.
+	pub uploaded: Vec<(String, Arc<str>, Live)>,
 }
 
 impl Local {
@@ -232,22 +235,38 @@ impl Local {
 	}
 }
 
-/// Where a source's picture is drawn live.
+/// Where a source's picture and sound reach live broadcasts.
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct Shown {
-	/// On program, the top layer and a stinger included.
+pub struct Reach {
+	/// Where its picture is drawn.
+	pub shown: Live,
+	/// Where its sound is played.
+	pub heard: Live,
+}
+
+impl Reach {
+	/// Whether any live broadcast shows or plays it.
+	pub fn any(&self) -> bool {
+		self.shown.any() || self.heard.any()
+	}
+}
+
+/// The live broadcasts something reaches.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Live {
+	/// The program, the top layer and a stinger included.
 	pub program: bool,
-	/// In each published or recorded scene drawn beside program, by name.
+	/// Each published or recorded scene apart from program, by name.
 	pub scenes: Vec<String>,
 }
 
-impl Shown {
-	/// Whether any live picture shows it.
+impl Live {
+	/// Whether it reaches any.
 	pub fn any(&self) -> bool {
 		self.program || !self.scenes.is_empty()
 	}
 
-	/// What shows it, as a sentence's subject, such as "the program and scene
+	/// The broadcasts as a sentence's subject, such as "the program and scene
 	/// `tall`", and whether that is more than one.
 	fn subject(&self) -> (String, bool) {
 		let program = self.program.then(|| "the program".to_string());
@@ -942,29 +961,34 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		}
 	}
 
-	for (name, stall, shown) in &local.stalled {
+	// A clause saying what `live` does instead, as a verb that agrees with it.
+	let clause = |live: &Live, one: &str, many: &str, rest: &str| {
+		let (subject, plural) = live.subject();
+		format!("{subject} {} {rest}", if plural { many } else { one })
+	};
+	for (name, stall, live) in &local.stalled {
 		let instead = match stall {
-			Stall::Picture(_) => {
-				let (subject, many) = shown.subject();
-				let repeat = if many { "repeat" } else { "repeats" };
-				format!("{subject} {repeat} its last one")
-			}
-			Stall::Sound(_) => "the program plays silence for it".into(),
+			Stall::Picture(_) => clause(live, "repeats", "repeat", "its last one"),
+			Stall::Sound(_) => clause(live, "plays", "play", "silence for it"),
 		};
 		add(
 			Verdict::Unhealthy,
 			format!("Source `{name}` stalled: {}, so {instead}.", without(*stall)),
 		);
 	}
-	for (name, status, shown) in &local.stopped {
+	for (name, status, reach) in &local.stopped {
 		match status {
 			Status::Ended => {
-				let instead = if shown.any() {
+				let Reach { shown, heard } = reach;
+				let instead = if shown == heard {
 					let (subject, many) = shown.subject();
 					let (hold, play) = if many { ("hold", "play") } else { ("holds", "plays") };
 					format!("{subject} {hold} its last picture and {play} no sound for it")
 				} else {
-					"the program plays no sound for it".into()
+					let hold = shown.any().then(|| clause(shown, "holds", "hold", "its last picture"));
+					let silent = heard.any().then(|| clause(heard, "plays", "play", "no sound for it"));
+					let parts: Vec<String> = hold.into_iter().chain(silent).collect();
+					parts.join(" and ")
 				};
 				add(
 					Verdict::Degraded,
@@ -974,6 +998,16 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 			Status::Failed(reason) => add(Verdict::Unhealthy, format!("Source `{name}` failed: {reason}.")),
 			_ => {}
 		}
+	}
+	for (name, why, live) in &local.uploaded {
+		let (subject, many) = live.subject();
+		let show = if many { "show" } else { "shows" };
+		add(
+			Verdict::Degraded,
+			format!(
+				"Source `{name}`, which {subject} {show}, is uploaded from memory every frame rather than copied on the GPU: {why}."
+			),
+		);
 	}
 
 	for (name, drops) in &facts.drops {
@@ -1771,37 +1805,49 @@ mod tests {
 	}
 
 	/// Problems list worst first: an unreachable relay and a frozen or silent
-	/// source above a slow round trip. A frozen or ended picture names what
-	/// shows it.
+	/// source above a slow round trip. A frozen, silent, ended, or uploaded
+	/// source names the broadcasts that show or play it, including a published
+	/// scene that alone plays it.
 	#[test]
 	fn problems_list_worst_first() {
-		let program = Shown {
+		let program = Live {
 			program: true,
 			scenes: Vec::new(),
 		};
-		let tall = Shown {
+		let tall = Live {
 			program: false,
 			scenes: vec!["tall".into()],
 		};
-		let both = Shown {
+		let both = Live {
 			program: true,
 			scenes: vec!["tall".into(), "wide".into()],
+		};
+		let reach = |shown: &Live, heard: &Live| Reach {
+			shown: shown.clone(),
+			heard: heard.clone(),
 		};
 		let local = Local {
 			stalled: vec![
 				("camera".into(), Stall::Picture(Duration::from_secs(3)), program.clone()),
-				("logo".into(), Stall::Picture(Duration::from_secs(3)), tall),
-				("mic".into(), Stall::Sound(Duration::from_secs(2)), Shown::default()),
+				("logo".into(), Stall::Picture(Duration::from_secs(3)), tall.clone()),
+				("mic".into(), Stall::Sound(Duration::from_secs(2)), tall.clone()),
 			],
 			stopped: vec![
-				("intro".into(), Status::Ended, program),
-				("outro".into(), Status::Ended, both),
+				("intro".into(), Status::Ended, reach(&program, &program)),
+				("outro".into(), Status::Ended, reach(&both, &both)),
+				("clip".into(), Status::Ended, reach(&program, &tall)),
+				("bed".into(), Status::Ended, reach(&Live::default(), &tall)),
 				(
 					"music".into(),
 					Status::Failed("the file is gone".into()),
-					Shown::default(),
+					Reach::default(),
 				),
 			],
+			uploaded: vec![(
+				"chat".into(),
+				"there is no display to paint through".into(),
+				tall.clone(),
+			)],
 			..Default::default()
 		};
 		let uplink = Uplink {
@@ -1818,10 +1864,13 @@ mod tests {
 				"The relay https://a is unreachable (timed out), so nothing reaches viewers until a relay reconnects.",
 				"Source `camera` stalled: no new picture for 3 s, so the program repeats its last one.",
 				"Source `logo` stalled: no new picture for 3 s, so scene `tall` repeats its last one.",
-				"Source `mic` stalled: no new sound for 2 s, so the program plays silence for it.",
+				"Source `mic` stalled: no new sound for 2 s, so scene `tall` plays silence for it.",
 				"Source `music` failed: the file is gone.",
 				"Source `intro` played to its end, so the program holds its last picture and plays no sound for it.",
 				"Source `outro` played to its end, so the program, scene `tall` and scene `wide` hold its last picture and play no sound for it.",
+				"Source `clip` played to its end, so the program holds its last picture and scene `tall` plays no sound for it.",
+				"Source `bed` played to its end, so scene `tall` plays no sound for it.",
+				"Source `chat`, which scene `tall` shows, is uploaded from memory every frame rather than copied on the GPU: there is no display to paint through.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
 		);

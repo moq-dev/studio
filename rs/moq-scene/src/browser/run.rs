@@ -65,6 +65,7 @@ pub(crate) async fn run(
 	// A stopped page leaves the canvas rather than freezing on its last
 	// picture, which for an alert or a ticker would show stale news.
 	picture.lock().unwrap().clear();
+	page.state.lock().unwrap().paint = None;
 	Err(Error::Browser(reason))
 }
 
@@ -105,6 +106,8 @@ struct Routes {
 	/// What a page last copied or cut, until the studio takes it. One slot
 	/// for every page, so a newer copy always replaces an older one.
 	copied: Option<String>,
+	/// Why a page that paints into memory does.
+	fallback: Arc<str>,
 }
 
 /// One open page's source.
@@ -209,7 +212,10 @@ impl Instance {
 		commands
 			.send(&Command::Start(start), &[])
 			.map_err(|err| failed("the browser process's socket", err))?;
-		let routes = Arc::new(Mutex::new(Routes::default()));
+		let routes = Arc::new(Mutex::new(Routes {
+			fallback: helper.fallback.clone(),
+			..Default::default()
+		}));
 		let commands = writer(commands).map_err(|err| failed("cannot start the page writer", err))?;
 		let reader = {
 			// Not the helper, whose hold on this instance would keep it running
@@ -409,6 +415,7 @@ fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Rout
 	use std::io::ErrorKind::*;
 
 	let Gpu { device, queue, .. } = gpu;
+	let fallback = routes.lock().unwrap().fallback.clone();
 
 	loop {
 		let (event, fds) = match events.recv::<Event>() {
@@ -434,7 +441,7 @@ fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Rout
 				page,
 				layer,
 				super::upload(device, queue, width, height, &data),
-				Paint::Cpu,
+				Paint::Cpu(fallback.clone()),
 			),
 			Event::Popup(id, area) => {
 				routes.lock().unwrap().place(gpu, id, area);

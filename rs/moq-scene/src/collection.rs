@@ -31,11 +31,9 @@ pub struct Collection {
 	/// so one camera can appear in many scenes while being opened once.
 	#[serde(default)]
 	pub sources: BTreeMap<String, Source>,
-	/// The audio mixes, and which ones the program and recordings carry.
-	#[serde(default, skip_serializing_if = "Mixes::is_default")]
-	pub mixes: Mixes,
-	/// Gain, mute, routing, and sync delay of each audio-carrying source, by
-	/// source name. A source without an entry plays at unity in every mix.
+	/// The gain, mute, and sync delay of each source with sound, by source
+	/// name, in every audio scene that holds it. A source without an entry
+	/// plays at unity.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub audio: BTreeMap<String, Audio>,
 	/// The filters on each picture-carrying source, by source name, applied
@@ -45,6 +43,11 @@ pub struct Collection {
 	/// The scenes, in the order the scene list shows them.
 	#[serde(default)]
 	pub scenes: Vec<Scene>,
+	/// The audio scenes, in the order the scene list shows them after the
+	/// scenes: one on program, and any others for recordings, published
+	/// scenes, headphones, or to nest. Independent of cuts.
+	#[serde(default = "AudioScene::defaults", skip_serializing_if = "AudioScene::are_default")]
+	pub audio_scenes: Vec<AudioScene>,
 	/// The top layer: items drawn over whichever scene is on program, and in
 	/// preview over one of the program's size, back to front, so they stay on
 	/// across scene switches (a downstream keyer). They do not fade with a
@@ -66,10 +69,10 @@ impl Collection {
 			canvas: Canvas::default(),
 			transition: Transition::default(),
 			sources: BTreeMap::new(),
-			mixes: Mixes::default(),
 			audio: BTreeMap::new(),
 			video: BTreeMap::new(),
 			scenes: vec![Scene::new("Scene")],
+			audio_scenes: AudioScene::defaults(),
 			top: Vec::new(),
 		}
 	}
@@ -137,6 +140,67 @@ impl Collection {
 	pub fn recorded(&self) -> Option<&str> {
 		let recorded = self.scenes.iter().find(|scene| scene.recorded);
 		recorded.map(|scene| scene.name.as_str())
+	}
+
+	/// The audio scene called `name`.
+	pub fn audio_scene(&self, name: &str) -> Option<&AudioScene> {
+		self.audio_scenes.iter().find(|scene| scene.name == name)
+	}
+
+	/// The audio scene the program broadcast carries. Only an invalid
+	/// collection, such as one an edit is part way through, has none.
+	pub fn program_audio(&self) -> Option<&str> {
+		let program = self.audio_scenes.iter().find(|scene| scene.program);
+		program.map(|scene| scene.name.as_str())
+	}
+
+	/// The audio scene recordings hold: the one picked for them, or the one
+	/// on program.
+	pub fn recorded_audio(&self) -> Option<&str> {
+		let recorded = self.audio_scenes.iter().find(|scene| scene.recorded);
+		recorded
+			.map(|scene| scene.name.as_str())
+			.or_else(|| self.program_audio())
+	}
+
+	/// The audio scene the scene called `scene` carries while published: the
+	/// one it picks, or the one on program.
+	pub fn published_audio(&self, scene: &str) -> Option<&str> {
+		let picked = self.scene(scene).and_then(|scene| scene.audio.as_deref());
+		picked.or_else(|| self.program_audio())
+	}
+
+	/// The sources whose sound the audio scene called `scene` plays: those it
+	/// holds, and those of the audio scenes it holds, and so on, each once.
+	pub fn heard(&self, scene: &str) -> BTreeSet<&str> {
+		let mut heard = BTreeSet::new();
+		for scene in self.reached_audio(scene) {
+			heard.extend(scene.sounds.iter().map(String::as_str));
+		}
+		heard
+	}
+
+	/// Whether the audio scene called `scene` holds the one called `nested`,
+	/// directly or through others.
+	pub fn nests(&self, scene: &str, nested: &str) -> bool {
+		let mut reached = self.reached_audio(scene).into_iter();
+		reached.any(|scene| scene.scenes.contains(nested))
+	}
+
+	/// The audio scene called `scene` and every one it holds, directly or
+	/// through others, each once.
+	fn reached_audio(&self, scene: &str) -> Vec<&AudioScene> {
+		let mut scenes = vec![scene];
+		let mut seen = BTreeSet::new();
+		let mut reached = Vec::new();
+		while let Some(scene) = scenes.pop() {
+			let Some(scene) = self.audio_scene(scene).filter(|scene| seen.insert(&scene.name)) else {
+				continue;
+			};
+			scenes.extend(scene.scenes.iter().map(String::as_str));
+			reached.push(scene);
+		}
+		reached
 	}
 
 	/// Whether the scene called `scene` can go on program: it is the
@@ -440,7 +504,7 @@ impl Collection {
 			)));
 		}
 
-		self.mixes.validate()?;
+		self.validate_audio_scenes()?;
 		for (name, audio) in &self.audio {
 			if !self.sources.contains_key(name) {
 				return Err(Error::Invalid(format!(
@@ -449,11 +513,6 @@ impl Collection {
 			}
 			if !audio.gain.is_finite() || audio.gain < 0.0 {
 				return Err(Error::Invalid(format!("`{name}` has gain {}", audio.gain)));
-			}
-			if let Some(mix) = audio.exclude.iter().find(|mix| !self.mixes.names.contains(mix)) {
-				return Err(Error::Invalid(format!(
-					"`{name}` is left out of `{mix}`, which is not a mix"
-				)));
 			}
 			if audio.delay > moq_audio::bus::MAX_DELAY {
 				return Err(Error::Invalid(format!(
@@ -464,6 +523,68 @@ impl Collection {
 			}
 		}
 
+		Ok(())
+	}
+
+	/// Check the audio scenes: each named once, one on program and one at
+	/// most recorded, each holding sources with sound and other audio scenes
+	/// but never itself, and each scene's pick naming one.
+	fn validate_audio_scenes(&self) -> Result<(), Error> {
+		let mut names = BTreeSet::new();
+		for scene in &self.audio_scenes {
+			if scene.name.is_empty() {
+				return Err(Error::Invalid("an audio scene has an empty name".into()));
+			}
+			if !names.insert(scene.name.as_str()) {
+				return Err(Error::Invalid(format!("two audio scenes are named `{}`", scene.name)));
+			}
+		}
+		let flagged = |flag: fn(&AudioScene) -> bool| -> Vec<String> {
+			let scenes = self.audio_scenes.iter().filter(|scene| flag(scene));
+			scenes.map(|scene| format!("`{}`", scene.name)).collect()
+		};
+		let program = flagged(|scene| scene.program);
+		if program.len() != 1 {
+			let found = match program.is_empty() {
+				true => "none".to_string(),
+				false => program.join(" and "),
+			};
+			return Err(Error::Invalid(format!("one audio scene is on program, not {found}")));
+		}
+		let recorded = flagged(|scene| scene.recorded);
+		if recorded.len() > 1 {
+			return Err(Error::Invalid(format!(
+				"audio scenes {} are recorded, but recordings hold one",
+				recorded.join(" and ")
+			)));
+		}
+		for scene in &self.audio_scenes {
+			let on = &scene.name;
+			let silent = |sound: &&String| !self.sources.get(*sound).is_some_and(Source::has_audio);
+			if let Some(sound) = scene.sounds.iter().find(silent) {
+				return Err(Error::Invalid(format!(
+					"audio scene `{on}` holds `{sound}`, which is not a source with sound"
+				)));
+			}
+			if let Some(nested) = scene.scenes.iter().find(|nested| !names.contains(nested.as_str())) {
+				return Err(Error::Invalid(format!(
+					"audio scene `{on}` holds `{nested}`, which is not an audio scene"
+				)));
+			}
+			if self.nests(on, on) {
+				return Err(Error::Invalid(format!("audio scene `{on}` holds itself")));
+			}
+		}
+		for scene in &self.scenes {
+			if let Some(audio) = &scene.audio
+				&& !names.contains(audio.as_str())
+			{
+				return Err(Error::Invalid(format!(
+					"scene `{}` carries `{audio}`, which is not an audio scene",
+					scene.name
+				)));
+			}
+		}
 		Ok(())
 	}
 
@@ -754,19 +875,25 @@ pub struct Scene {
 	/// is recorded.
 	#[serde(default, skip_serializing_if = "is_false")]
 	pub recorded: bool,
+	/// The audio scene its broadcast carries while published, or `None` for
+	/// the one on program.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub audio: Option<String>,
 	/// What the scene draws, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
 }
 
 impl Scene {
-	/// An empty scene of the program's size, neither published nor recorded.
+	/// An empty scene of the program's size, neither published nor recorded,
+	/// carrying the audio scene on program.
 	pub fn new(name: impl Into<String>) -> Self {
 		Self {
 			name: name.into(),
 			size: None,
 			published: false,
 			recorded: false,
+			audio: None,
 			items: Vec::new(),
 		}
 	}
@@ -1717,84 +1844,70 @@ impl Source {
 	}
 }
 
-/// The audio mixes every source with sound feeds, and which ones the program
-/// and recordings carry.
+/// An audio-only scene: the sum of the sounds it holds, as their sources
+/// play them, and of the audio scenes it holds. A sound it reaches more than
+/// one way plays in it once.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Mixes {
-	/// Each mix's unique name, in the order the studio lists them.
-	pub names: Vec<String>,
-	/// The mix the program broadcast carries.
-	pub program: String,
-	/// The mix recordings hold, when not the one on program. It never
-	/// reaches a relay.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub recording: Option<String>,
+pub struct AudioScene {
+	/// Unique among the collection's audio scenes.
+	pub name: String,
+	/// Whether the program broadcast carries it, as exactly one does.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub program: bool,
+	/// Whether recordings hold it rather than the one on program. One at
+	/// most is recorded.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub recorded: bool,
+	/// The sources whose sound it holds, by name.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	pub sounds: BTreeSet<String>,
+	/// The other audio scenes it holds, by name, never itself, even through
+	/// others.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	pub scenes: BTreeSet<String>,
 }
 
-impl Mixes {
-	/// The one mix a new collection has, which the program carries.
+impl AudioScene {
+	/// The audio scene a new collection has on program.
 	pub const DEFAULT: &str = "Program";
 
-	fn is_default(&self) -> bool {
-		*self == Self::default()
-	}
-
-	/// The mix recordings hold.
-	pub fn recorded(&self) -> &str {
-		self.recording.as_deref().unwrap_or(&self.program)
-	}
-
-	fn validate(&self) -> Result<(), Error> {
-		let mut names = BTreeSet::new();
-		for name in &self.names {
-			if name.is_empty() {
-				return Err(Error::Invalid("a mix has an empty name".into()));
-			}
-			if !names.insert(name.as_str()) {
-				return Err(Error::Invalid(format!("two mixes are named `{name}`")));
-			}
-		}
-		if !names.contains(self.program.as_str()) {
-			return Err(Error::Invalid(format!(
-				"the program carries `{}`, which is not a mix",
-				self.program
-			)));
-		}
-		if !names.contains(self.recorded()) {
-			return Err(Error::Invalid(format!(
-				"recordings hold `{}`, which is not a mix",
-				self.recorded()
-			)));
-		}
-		Ok(())
-	}
-}
-
-impl Default for Mixes {
-	fn default() -> Self {
+	/// An audio scene holding nothing, neither on program nor recorded.
+	pub fn new(name: impl Into<String>) -> Self {
 		Self {
-			names: vec![Self::DEFAULT.into()],
-			program: Self::DEFAULT.into(),
-			recording: None,
+			name: name.into(),
+			program: false,
+			recorded: false,
+			sounds: BTreeSet::new(),
+			scenes: BTreeSet::new(),
 		}
+	}
+
+	/// What a collection has without audio scenes of its own: one on
+	/// program, holding nothing.
+	pub fn defaults() -> Vec<Self> {
+		vec![Self {
+			program: true,
+			..Self::new(Self::DEFAULT)
+		}]
+	}
+
+	fn are_default(scenes: &Vec<Self>) -> bool {
+		*scenes == Self::defaults()
 	}
 }
 
-/// The gain, mute, routing, and sync delay of one source with sound.
+/// The gain, mute, and sync delay of one source with sound, in every audio
+/// scene that holds it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Audio {
 	/// Linear gain: 1.0 is unity.
 	pub gain: f32,
-	/// Whether the source is silenced in every mix, keeping its gain.
+	/// Whether the source is silenced in every audio scene, keeping its gain.
 	#[serde(default)]
 	pub muted: bool,
-	/// The mixes the source is left out of. It feeds every other one,
-	/// including a mix added later.
-	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-	pub exclude: BTreeSet<String>,
-	/// How long the source is held back in every mix, so a microphone lines up
+	/// How long the source is held back in every audio scene, so a microphone lines up
 	/// with a camera that lags it. At most the bus's
 	/// [`MAX_DELAY`](moq_audio::bus::MAX_DELAY).
 	#[serde(default, with = "humantime_serde", skip_serializing_if = "Duration::is_zero")]
@@ -1806,7 +1919,6 @@ impl Default for Audio {
 		Self {
 			gain: 1.0,
 			muted: false,
-			exclude: BTreeSet::new(),
 			delay: Duration::ZERO,
 		}
 	}
@@ -1904,17 +2016,24 @@ mod tests {
 				},
 			);
 		}
-		collection.mixes = Mixes {
-			names: vec!["Stream".into(), "Recording".into()],
-			program: "Stream".into(),
-			recording: Some("Recording".into()),
-		};
+		collection.audio_scenes = vec![
+			AudioScene {
+				program: true,
+				sounds: ["mic".to_string()].into(),
+				..AudioScene::new("Stream")
+			},
+			AudioScene {
+				recorded: true,
+				sounds: ["intro".to_string()].into(),
+				scenes: ["Stream".to_string()].into(),
+				..AudioScene::new("Recording")
+			},
+		];
 		collection.audio.insert(
 			"mic".into(),
 			Audio {
 				gain: 0.5,
 				muted: true,
-				exclude: ["Recording".to_string()].into(),
 				delay: Duration::from_millis(80),
 			},
 		);
@@ -2001,14 +2120,8 @@ kind = "camera"
 kind = "color"
 color = "#ff000080"
 
-[mixes]
-names = ["Stream", "Recording"]
-program = "Stream"
-recording = "Recording"
-
 [audio.cam2]
 gain = 2.0
-exclude = ["Stream"]
 delay = "120ms"
 
 [sources.cam2]
@@ -2048,7 +2161,22 @@ name = "Portrait"
 size = { width = 720, height = 1280 }
 published = true
 recorded = true
+audio = "Recording"
 items = [{ source = "cam", rect = { x = 0, y = 0, width = 720, height = 1280 } }]
+
+[[audio_scenes]]
+name = "Guests"
+sounds = ["cam2"]
+
+[[audio_scenes]]
+name = "Stream"
+program = true
+scenes = ["Guests"]
+
+[[audio_scenes]]
+name = "Recording"
+recorded = true
+scenes = ["Stream", "Guests"]
 
 [[top]]
 source = "bg"
@@ -2075,12 +2203,15 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			Audio {
 				gain: 2.0,
 				muted: false,
-				exclude: ["Stream".to_string()].into(),
 				delay: Duration::from_millis(120),
 			}
 		);
-		assert_eq!(collection.mixes.program, "Stream");
-		assert_eq!(collection.mixes.recorded(), "Recording");
+		assert_eq!(collection.program_audio(), Some("Stream"));
+		assert_eq!(collection.recorded_audio(), Some("Recording"));
+		assert_eq!(collection.published_audio("Portrait"), Some("Recording"));
+		assert_eq!(collection.published_audio("Main"), Some("Stream"));
+		// Reached two ways, played once.
+		assert_eq!(collection.heard("Recording"), ["cam2"].into());
 		let portrait = collection.scene("Portrait").unwrap();
 		assert!(portrait.published);
 		assert_eq!(collection.recorded(), Some("Portrait"));
@@ -2217,23 +2348,49 @@ path = "sting.webm"
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
 	}
 
-	/// The program carries one of the mixes, each named once, and a source is
-	/// left out of mixes that exist, held back no longer than the bus can.
+	/// One audio scene is on program and one at most recorded, each named
+	/// once, holding sources with sound and audio scenes that exist, never
+	/// itself; and a source is held back no longer than the bus can.
 	#[test]
-	fn refuses_a_mix_that_does_not_add_up() {
+	fn refuses_audio_scenes_that_do_not_add_up() {
 		let refused = |edit: fn(&mut Collection)| {
 			let mut collection = example();
 			edit(&mut collection);
 			matches!(collection.validate(), Err(Error::Invalid(_)))
 		};
-		assert!(refused(|collection| collection.mixes.program = "Monitor".into()));
-		assert!(refused(|collection| collection.mixes.recording = Some("Monitor".into())));
-		assert!(refused(|collection| collection.mixes.names.push("Stream".into())));
-		assert!(refused(|collection| collection.mixes.names.push(String::new())));
+		fn scene<'a>(collection: &'a mut Collection, name: &str) -> &'a mut AudioScene {
+			let mut scenes = collection.audio_scenes.iter_mut();
+			scenes.find(|scene| scene.name == name).unwrap()
+		}
+		assert!(!refused(|_| {}));
+		assert!(refused(|collection| scene(collection, "Stream").program = false));
+		assert!(refused(|collection| scene(collection, "Recording").program = true));
+		assert!(refused(|collection| scene(collection, "Stream").recorded = true));
+		assert!(refused(|collection| collection
+			.audio_scenes
+			.push(AudioScene::new("Stream"))));
+		assert!(refused(|collection| collection.audio_scenes.push(AudioScene::new(""))));
 		assert!(refused(|collection| {
-			let mic = collection.audio.get_mut("mic").unwrap();
-			mic.exclude.insert("Monitor".into());
+			scene(collection, "Stream").sounds.insert("nobody".into());
 		}));
+		// A picture without sound.
+		assert!(refused(|collection| {
+			scene(collection, "Stream").sounds.insert("camera".into());
+		}));
+		assert!(refused(|collection| {
+			scene(collection, "Stream").scenes.insert("Monitor".into());
+		}));
+		assert!(refused(|collection| {
+			scene(collection, "Stream").scenes.insert("Stream".into());
+		}));
+		// Through `Recording`, which holds `Stream`.
+		assert!(refused(|collection| {
+			scene(collection, "Stream").scenes.insert("Recording".into());
+		}));
+		assert!(refused(|collection| collection.scenes[0].audio = Some("Monitor".into())));
+		assert!(!refused(
+			|collection| collection.scenes[0].audio = Some("Recording".into())
+		));
 		assert!(refused(|collection| {
 			let mic = collection.audio.get_mut("mic").unwrap();
 			mic.delay = moq_audio::bus::MAX_DELAY + Duration::from_millis(1);

@@ -1,5 +1,6 @@
-//! Outputs that read one of the collection's mixes: the program audio, the
-//! headphone monitor, and each guest's return feed, which reads a mix-minus.
+//! Outputs that read the mix of one of the collection's audio scenes: the
+//! program audio, the recording's, each published scene's, the headphone
+//! monitor, and each guest's return feed, which reads a mix-minus.
 //!
 //! Each output follows a [`Pick`], which the program clock sets from the
 //! collection, and reads the picked mix on its own thread or task. A mix's
@@ -8,10 +9,13 @@
 
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
+use std::time::Duration;
+
+use bytes::Bytes;
 
 use moq_audio::bus::{Block, Minus, Mix, Reader};
 
-/// What an output reads: one of the collection's mixes, or a mix-minus of one.
+/// What an output reads: an audio scene's mix, or a mix-minus of one.
 #[derive(Clone)]
 pub enum Mixed {
 	/// A mix, as the collection names it.
@@ -175,6 +179,33 @@ impl Follow {
 	}
 }
 
+/// Encode what `follow` reads into `audio`, stamped `epoch` past the bus's
+/// start at `rate`, as the program audio is, until the bus stops: a guest's
+/// return feed or a published scene's own audio.
+pub async fn encode(
+	follow: &mut Follow,
+	audio: &mut moq_audio::encode::Producer,
+	epoch: Duration,
+	rate: u32,
+) -> anyhow::Result<()> {
+	let rate = u128::from(rate);
+	let mut next = None;
+	while let Some(block) = follow.read().await {
+		// Audio this encoder fell too far behind to read leaves a gap.
+		if next.is_some_and(|next| next != block.position) {
+			audio.reanchor();
+		}
+		next = Some(block.position + block.frames() as u64);
+		let micros = epoch.as_micros() + u128::from(block.position) * 1_000_000 / rate;
+		let Ok(timestamp) = moq_net::Timestamp::from_micros(micros as u64) else {
+			continue;
+		};
+		let data: Vec<u8> = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+		audio.write(&moq_audio::Frame::new(Bytes::from(data), timestamp))?;
+	}
+	Ok(())
+}
+
 /// Whether this build can play a mix to the speakers: the `capture` feature
 /// brings the device's audio library.
 pub const MONITOR: bool = cfg!(feature = "capture");
@@ -182,8 +213,8 @@ pub const MONITOR: bool = cfg!(feature = "capture");
 /// What to listen to, and where.
 #[derive(Clone, Copy, Debug)]
 pub struct Listen<'a> {
-	/// The mix, by name.
-	pub mix: &'a str,
+	/// The audio scene, by name.
+	pub scene: &'a str,
 	/// The [`Speaker::id`] to play on, or `None` for the system default.
 	pub speaker: Option<&'a str>,
 }

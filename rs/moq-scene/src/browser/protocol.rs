@@ -80,10 +80,10 @@ pub(crate) enum Raster {
 /// The display server the GPU path connects to, the one the studio runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Display {
-	/// `$WAYLAND_DISPLAY`, preferred: under XWayland, CEF's GPU process finds
-	/// no GBM device on some drivers, NVIDIA's among them, and never paints.
+	/// `$WAYLAND_DISPLAY`, preferred: CEF paints there on the studio's GPU.
 	Wayland,
-	/// `$DISPLAY`.
+	/// `$DISPLAY`, whose X server must run on the studio's GPU, since CEF
+	/// paints on the X server's.
 	X11,
 }
 

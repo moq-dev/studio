@@ -94,15 +94,14 @@ repository.
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Composable scenes](/quest/m0/scenes/README.md) - scenes nest scenes and the program, any scene publishes at its own size, and mixes become audio scenes
+- [Pan each sound](/quest/m0/audio-pan.md) - the Audio panel and `[audio.<source>]` pan each sound wherever it plays
 - [Clap-to-measure sync delay](/quest/m0/sync-clap.md) - a clap sets a microphone's delay against its camera
 - [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
 - [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
-- [Browser sources on the GPU under X11 on NVIDIA](/quest/m0/cef-x11-nvidia.md) - the X11 GPU path paints on NVIDIA, or falls back to the CPU path loudly
 - [Nightly and the browser suite pass](/quest/m0/nightly-green.md) - render-sw, cookies, and the X11 clipboard test fixed at their causes
-- [GPU tests exit cleanly on NVIDIA](/quest/m0/gpu-tests-exit.md) - compositor tests no longer crash on exit on NVIDIA
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
 - [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
@@ -111,6 +110,7 @@ repository.
 - [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice and browser composition
 - [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
 - [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
+- [moq-audio's strip pan is pinned](/quest/m0/pin-audio-pan.md) - the bus strip pan the studio's pan sets
 
 ## Related
 
