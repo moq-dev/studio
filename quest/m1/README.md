@@ -24,5 +24,4 @@ than opening an m2 for them.
 ## Required
 
 - [Viewer-side composition](/quest/m1/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers and by a server
-- [Scene graph view](/quest/m1/scene-graph.md) - a node view of picture and audio scenes, their routing, volume, pan, and waveforms
 - [Rune UI spike](/quest/m1/rune-spike.md) - the monitors prototyped on Rune, with a verdict on moving the UI off egui
