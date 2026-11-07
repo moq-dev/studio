@@ -5,6 +5,7 @@
 #![cfg(all(target_os = "linux", feature = "cef"))]
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kio::clock::Instant;
@@ -44,6 +45,12 @@ impl Studio {
 
 	/// A studio whose pages keep their cookies in `profile`.
 	async fn on(profile: &Path, sources: &[(&str, Source)]) -> Self {
+		Self::start(Path::new(env!("CARGO_BIN_EXE_moq-studio")), profile, sources).await
+	}
+
+	/// A studio whose helper is `program`, with its pages' cookies in
+	/// `profile`.
+	async fn start(program: &Path, profile: &Path, sources: &[(&str, Source)]) -> Self {
 		let instance = wgpu::Instance::default();
 		let adapter = instance
 			.request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -73,7 +80,7 @@ impl Studio {
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
-		let helper = Helper::new(env!("CARGO_BIN_EXE_moq-studio"), profile, &adapter, &device, &queue);
+		let helper = Helper::new(program, profile, &adapter, &device, &queue);
 		let mut sources = Sources::new(Context {
 			bus,
 			origin: origin.consume(),
@@ -697,6 +704,60 @@ async fn serve(html: &'static str) -> String {
 		}
 	});
 	url
+}
+
+/// The helper requests only what its pages load: nothing of its own, such as
+/// component updates, a spellcheck dictionary, the network time, or
+/// autofill's guesses at a page's text field.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn the_helper_requests_only_its_pages() {
+	use std::os::unix::fs::PermissionsExt;
+	use tokio::io::AsyncBufReadExt;
+
+	// Everything off loopback goes through this proxy, which answers nothing
+	// and keeps each request's first line: `CONNECT host:443` for HTTPS, or
+	// the method and URL. Chromium sends loopback past a proxy, so the page
+	// still loads.
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let proxy = listener.local_addr().unwrap();
+	let requests = Arc::new(Mutex::new(Vec::new()));
+	tokio::spawn({
+		let requests = requests.clone();
+		async move {
+			while let Ok((stream, _)) = listener.accept().await {
+				let mut line = String::new();
+				if tokio::io::BufReader::new(stream).read_line(&mut line).await.is_ok() {
+					requests.lock().unwrap().push(line.trim_end().to_string());
+				}
+			}
+		}
+	});
+	// The helper, told to use the proxy.
+	let dir = tempfile::tempdir().unwrap();
+	let program = dir.path().join("helper");
+	let script = format!(
+		"#!/bin/sh\nexec '{}' \"$@\" --proxy-server=http://{proxy}\n",
+		env!("CARGO_BIN_EXE_moq-studio")
+	);
+	std::fs::write(&program, script).unwrap();
+	std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+	local(async {
+		let url = serve("<body style='margin:0;background:lime'><textarea autofocus></textarea></body>").await;
+		let page = Source::Browser {
+			url,
+			width: 320,
+			height: 240,
+		};
+		let mut studio = Studio::start(&program, &dir.path().join("profile"), &[("page", page)]).await;
+		studio.until_center(GREEN, &[]).await;
+		// The browser asks for what it wants as it starts and as the page
+		// loads, so every request seen had begun by the time the page drew.
+		kio::clock::sleep(Duration::from_secs(2)).await;
+	})
+	.await;
+	assert_eq!(*requests.lock().unwrap(), Vec::<String>::new());
 }
 
 /// Where [`a_studio_that_dies`] keeps its pages' profile, which also tells it
