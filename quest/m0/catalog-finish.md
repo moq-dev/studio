@@ -17,5 +17,6 @@ On quit the studio logs that warning for `catalog.json` and `catalog`, twice.
 `Program::drop` (`rs/moq-studio/src/engine.rs`) closes the program's broadcast
 without finishing its catalog, and the recording's catalog is dropped the same
 way. First confirm from the viewer's side what a viewer reading the catalog
-sees today, then finish each catalog before its broadcast closes. A test
-reads the program's catalog through a relay, quits, and sees it finish.
+sees today, then finish each catalog before its broadcast closes. Tests read
+the program's catalog through a relay and the recording's catalog from the
+local broadcast, quit, and see each one finish.
