@@ -112,6 +112,12 @@ impl Studio {
 
 	/// The program's center pixel, freshly drawn.
 	fn center(&mut self) -> [u8; 4] {
+		let canvas = self.collection.canvas;
+		self.frame()[(canvas.height / 2 * canvas.width + canvas.width / 2) as usize]
+	}
+
+	/// The program's pixels, row by row, freshly drawn.
+	fn frame(&mut self) -> Vec<[u8; 4]> {
 		self.compositor
 			.render(&self.collection, &self.sources, Instant::now())
 			.unwrap();
@@ -141,8 +147,11 @@ impl Studio {
 		buffer.map_async(wgpu::MapMode::Read, .., |result| result.unwrap());
 		self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 		let mapped = buffer.slice(..).get_mapped_range().unwrap();
-		let at = (canvas.height / 2 * row + canvas.width / 2 * 4) as usize;
-		mapped[at..at + 4].try_into().unwrap()
+		mapped
+			.chunks(row as usize)
+			.flat_map(|line| line[..(canvas.width * 4) as usize].chunks(4))
+			.map(|pixel| pixel.try_into().unwrap())
+			.collect()
 	}
 
 	/// Redraw until the center pixel is within a step of `expected`.
@@ -234,6 +243,35 @@ async fn a_page_draws_and_plays() {
 			assert!(Instant::now() < deadline, "the page's tone never reached the bus");
 			studio.mixer.advance(480);
 			kio::clock::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await;
+}
+
+/// A page arrives laid out as it painted, not only in the right colors: a
+/// shared texture from a GPU whose tiling the studio's cannot read scrambles
+/// its rows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_page_keeps_its_layout() {
+	local(async {
+		const RED: [u8; 4] = [255, 0, 0, 255];
+		const GREEN: [u8; 4] = [0, 255, 0, 255];
+		// A red strip down the left fifth, over green.
+		let html = "<body style='margin:0;background:rgb(0,255,0)'>\
+			<div style='width:64px;height:240px;background:rgb(255,0,0)'></div></body>";
+		let mut studio = Studio::new(&[("page", page(html))]).await;
+		studio.until_center(GREEN, &[]).await;
+		let width = studio.collection.canvas.width as usize;
+		for (at, pixel) in studio.frame().into_iter().enumerate() {
+			let (x, y) = (at % width, at / width);
+			// The strip ends at 12.8, where scaling blends the two.
+			let expected = match x {
+				..11 => RED,
+				15.. => GREEN,
+				_ => continue,
+			};
+			assert!(near(pixel, expected), "({x}, {y}) is {pixel:?}, not {expected:?}");
 		}
 	})
 	.await;

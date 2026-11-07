@@ -1120,7 +1120,7 @@ impl Engine {
 		// including one leaving in a transition, or the top layer over them.
 		// Stalled sound matters only if the mix on program plays it, not one
 		// only listened to. A source that stopped matters either way.
-		let (stalled, stopped) = {
+		let (stalled, stopped, uploaded) = {
 			let state = self.state.lock().unwrap();
 			let shown = state.shown();
 			let heard = |name: &str| state.sources.plays(&state.collection.mixes.program, name);
@@ -1158,7 +1158,16 @@ impl Engine {
 					stopped.then(|| (name.to_string(), status))
 				})
 				.collect();
-			(stalled, stopped)
+			let uploaded = state
+				.sources
+				.iter()
+				.filter(|(name, _)| shown.contains(*name))
+				.filter_map(|(name, feed)| match feed.page()?.paint()? {
+					moq_scene::browser::Paint::Cpu(why) => Some((name.to_string(), why)),
+					moq_scene::browser::Paint::Gpu => None,
+				})
+				.collect();
+			(stalled, stopped, uploaded)
 		};
 		let video = &stats.video;
 		let canvas = &video.renditions[0];
@@ -1173,6 +1182,7 @@ impl Engine {
 			failed: stats.error(),
 			stalled,
 			stopped,
+			uploaded,
 		}
 	}
 

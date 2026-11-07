@@ -100,7 +100,7 @@ Every panel is a tab you can drag, split, or stack.
 | Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws on the canvas shown, back to front. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU, saying why on hover), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
@@ -870,7 +870,8 @@ driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
 macOS. A browser source's page is copied on the GPU from the shared texture CEF
 paints, given the same Vulkan DMA-BUF import and a display to paint through:
 the Wayland one when `$WAYLAND_DISPLAY` is set, needing no XWayland, or else
-the X one in `$DISPLAY`. Every other source, every source on Windows or on a
+the X one in `$DISPLAY`, when the X server runs on the studio's GPU, since
+CEF paints on the X server's there. Every other source, every source on Windows or on a
 GPU that cannot import, and every still image delivers its frames from the
 CPU, which the compositor uploads. A browser source takes that path with no
 display at all too, and there renders its page in software, WebGL included, so
@@ -966,7 +967,8 @@ congested or losing packets, the relay is far away, the encoder is behind or
 stuck, a source stalled (a camera or broadcast the program draws, or a
 microphone or system audio the mix on program plays: unmuted and not left
 out of it), a source the program shows or plays failed or, as a media file
-that does not loop, played to its end, or viewers are late, stalling, or cannot
+that does not loop, played to its end, a browser source the program shows is
+uploaded from memory rather than copied on the GPU, or viewers are late, stalling, or cannot
 decode a track. A relay lost while the other serves is
 degraded, since viewers have nothing left to fall back to; with none serving
 it is unhealthy. Below that it shows:
