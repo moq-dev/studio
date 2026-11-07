@@ -1528,10 +1528,9 @@ mod tests {
 			};
 			let take = crate::replay::Take::new(&target, std::time::Duration::from_millis(2_500)).unwrap();
 			let feed = sources.get("replay").unwrap();
-			let begin = kio::clock::now();
 			feed.replay(take, 1.0).unwrap();
-			// The first picture is due at once, so the clock stays put while
-			// the encoder opens.
+			// The track opens before the replay begins, so the clock stays put
+			// while the encoder opens.
 			let listed = until(|| {
 				let listed = catalog.snapshot().ext.studio.sources.remove("replay");
 				listed.filter(|listed| !listed.video.renditions.is_empty())
@@ -1551,6 +1550,7 @@ mod tests {
 				.unwrap();
 			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 			let mut track = moq_mux::container::Consumer::new(track, container);
+			let begin = until(|| feed.run().begun).await;
 			until_time(begin + std::time::Duration::from_millis(1_500)).await;
 			let now = kio::Waiter::noop();
 			until(|| match track.poll_read(&now) {
