@@ -2630,6 +2630,7 @@ mod tests {
 			restart: false,
 		};
 		collection.sources.insert("sting".into(), media);
+		collection.audio_scenes[0].sounds.insert("sting".into());
 		collection.transition = Transition::Stinger {
 			source: "sting".into(),
 			cut: Duration::from_millis(300),
@@ -2785,7 +2786,7 @@ mod tests {
 	async fn a_stinger_stops_its_clip() {
 		local(async {
 			let mut studio = stinging(crate::media::tests::CLIP).await;
-			let program = studio.sources.mix(crate::Mixes::DEFAULT).unwrap().clone();
+			let program = studio.sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
 			let mut at = Instant::now();
 			studio.mixer.advance(480);
 			let transition = studio.collection.transition.clone();

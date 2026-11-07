@@ -6,7 +6,8 @@
 //! under its own `<identity>/`, and hands it to the join page in a link's
 //! fragment, which no server logs. The guest publishes moq-room's
 //! `<identity>/camera.hang` and `<identity>/screen.hang`, and the studio adds
-//! each as a muted [`Source::Broadcast`] when it is announced. Only the room key
+//! each as a [`Source::Broadcast`] in no scene or audio scene when it is
+//! announced. Only the room key
 //! mints those tokens, so guests can make the studio hold at most two sources
 //! per name it signed for.
 //!
@@ -512,8 +513,8 @@ impl Room {
 
 	/// Take the guest called `identity` off the program in `draft`: their
 	/// items, the items showing a clone of their sources, and the masks
-	/// reading them leave every layer, and their sources are muted. Returns
-	/// whether that changed anything.
+	/// reading them leave every layer, and their sound leaves every audio
+	/// scene. Returns whether that changed anything.
 	pub fn take_off(&self, draft: &mut Draft, identity: &str) -> Result<bool, moq_scene::Error> {
 		let before = draft.collection().clone();
 		let sources = self.sources_of(&before, identity);
@@ -561,10 +562,11 @@ impl Room {
 			draft.set_video(&name, Some(video))?;
 		}
 
-		for source in &sources {
-			let audio = before.audio.get(source).cloned().unwrap_or_default();
-			draft.set_audio(source, Some(moq_scene::Audio { muted: true, ..audio }))?;
+		let mut scenes = draft.collection().audio_scenes.clone();
+		for scene in &mut scenes {
+			scene.sounds.retain(|sound| !ours(sound));
 		}
+		draft.set_audio_scenes(scenes)?;
 		Ok(*draft.collection() != before)
 	}
 
@@ -658,9 +660,12 @@ pub async fn run(engine: Arc<Engine>, origin: moq_net::origin::Consumer) {
 		let Some((name, source)) = room.observe(&event.path, online, state.collection(), state.history()) else {
 			continue;
 		};
-		// Not the host's edit, so it stays out of what they undo and redo.
+		// Not the host's edit, so it stays out of what they undo and redo. It
+		// is in no scene or audio scene, so the guest reaches the program only
+		// once the host places them or puts their sound in an audio scene.
 		let mut draft = state.collection().draft(format!("Add guest `{name}`"));
-		let added = admit(&mut draft, &name, source)
+		let added = draft
+			.set_source(&name, Some(source))
 			.map_err(anyhow::Error::from)
 			.and_then(|()| state.apply_outside(draft));
 		match added {
@@ -824,17 +829,6 @@ impl Renewals {
 		renewed.track.write_frame(None, token)?;
 		Ok(())
 	}
-}
-
-/// Add a guest's broadcast as the source `name`, muted: it is in no scene, so
-/// the guest reaches the program only once the host places or unmutes them.
-fn admit(draft: &mut Draft, name: &str, source: Source) -> Result<(), moq_scene::Error> {
-	let muted = moq_scene::Audio {
-		muted: true,
-		..Default::default()
-	};
-	draft.set_source(name, Some(source))?;
-	draft.set_audio(name, Some(muted))
 }
 
 #[cfg(test)]
@@ -1055,7 +1049,7 @@ pub(crate) mod tests {
 	}
 
 	#[test]
-	fn a_guest_becomes_a_muted_source_once() {
+	fn a_guest_becomes_a_source_once() {
 		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
 		let mut collection = Collection::new();
 		let history = History::new();
@@ -1079,11 +1073,14 @@ pub(crate) mod tests {
 			}
 		);
 		let mut draft = collection.draft("Add guest");
-		admit(&mut draft, &name, source).unwrap();
+		draft.set_source(&name, Some(source)).unwrap();
 		history
 			.apply_outside(&mut collection, &draft.finish().unwrap())
 			.unwrap();
-		assert!(collection.audio["alice"].muted);
+		assert!(
+			collection.heard(moq_scene::AudioScene::DEFAULT).is_empty(),
+			"not on air"
+		);
 		assert_eq!(
 			room.participants()["alice"],
 			Participant {
@@ -1438,7 +1435,7 @@ pub(crate) mod tests {
 				.observe(&path(&format!("{guest}/camera.hang")), true, collection, history)
 				.unwrap();
 			let mut draft = collection.draft("Add guest");
-			admit(&mut draft, &name, source).unwrap();
+			draft.set_source(&name, Some(source)).unwrap();
 			history.apply_outside(collection, &draft.finish().unwrap()).unwrap();
 			name
 		};
@@ -1493,6 +1490,11 @@ pub(crate) mod tests {
 		collection
 			.sources
 			.insert("alice clone".into(), Source::Clone { source: "alice".into() });
+		collection.audio_scenes[0].sounds.insert("alice".into());
+		collection.audio_scenes.push(moq_scene::AudioScene {
+			sounds: ["alice".to_string()].into(),
+			..moq_scene::AudioScene::new("Headphones")
+		});
 		collection.sources.insert(
 			"bg".into(),
 			Source::Color {
@@ -1523,7 +1525,9 @@ pub(crate) mod tests {
 		);
 		assert!(collection.top.is_empty());
 		assert!(!collection.video.contains_key("bg"));
-		assert!(collection.audio["alice"].muted);
+		for scene in &collection.audio_scenes {
+			assert!(scene.sounds.is_empty(), "{} still holds alice", scene.name);
+		}
 		assert!(collection.sources.contains_key("alice clone"), "a clone stays a source");
 
 		let mut again = collection.draft("Remove from scenes");
