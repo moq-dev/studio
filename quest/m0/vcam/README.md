@@ -18,8 +18,15 @@ Decided 2026-10-22:
 - **macOS:** a CoreMediaIO Camera Extension, which needs signing.
 - **Order:** the first backend to land adds the studio toggle.
 
+The Linux backend landed the toggle: **Virtual camera** in the Output panel,
+for the program, not saved in the scene file. Each OS backend is a
+`vcam::backend` in `rs/moq-studio`, fed tightly packed RGBA program frames on
+the `vcam` thread only while an app reads the camera. Each published scene
+gets a toggle of its own once [published scenes](/quest/m0/scenes/published.md)
+land.
+
 ## Required
 
-- [Linux virtual camera](/quest/m0/vcam/linux.md) - a PipeWire video node carrying the program
+- [Linux virtual camera for each published scene](/quest/m0/vcam/linux.md) - a PipeWire camera per published scene, beside the program's
 - [Windows virtual camera](/quest/m0/vcam/windows.md) - a Media Foundation virtual camera on Windows 11
 - [macOS virtual camera](/quest/m0/vcam/macos.md) - a CoreMediaIO Camera Extension inside the app bundle
