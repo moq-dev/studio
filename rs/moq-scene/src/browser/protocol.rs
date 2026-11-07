@@ -25,7 +25,7 @@ pub(crate) const MAX_PLANES: usize = 4;
 /// The longest message either side accepts: the largest page's pixels, with
 /// room for the rest of the message. Bounds what a misbehaving peer can make
 /// the other allocate.
-const MAX_MESSAGE: usize = (super::MAX_SIDE * super::MAX_SIDE * 4) as usize + 1024;
+pub(crate) const MAX_MESSAGE: usize = (super::MAX_SIDE * super::MAX_SIDE * 4) as usize + 1024;
 
 /// A page's number, unique among those one helper opens.
 pub(crate) type Id = u64;
@@ -45,6 +45,10 @@ pub(crate) enum Command {
 	Input(Id, Input),
 	/// The canvas's frame rate changed, so the page paints at this one.
 	FrameRate(Id, u32),
+	/// The last message: close every page, save the profile, and exit. The
+	/// studio holds the socket open until then, so the helper reads its end
+	/// as the studio dying and exits at once.
+	Stop,
 }
 
 /// How a helper runs every page it opens.
