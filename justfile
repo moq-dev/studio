@@ -51,9 +51,8 @@ render-sw:
     #!/usr/bin/env bash
     set -euo pipefail
     mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
-    loader=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#vulkan-loader)
     icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
-    export LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}"
+    export VK_DRIVER_FILES="${icd[0]}"
     cargo nextest run --locked -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/) | test(/^browser::layers::tests::/)'
     cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E 'test(/^engine::tests::the_program_/) | test(=setup::tests::times_every_canvas)'
     cargo nextest run --locked -p moq-studio --features cef --run-ignored only -E 'binary(browser)'
