@@ -22,8 +22,7 @@ The Linux backend landed the toggle: **Virtual camera** in the Output panel,
 for the program, not saved in the scene file. Each OS backend is a
 `vcam::backend` in `rs/moq-studio`, fed tightly packed RGBA program frames on
 the `vcam` thread only while an app reads the camera. Each published scene
-gets a toggle of its own once [published scenes](/quest/m0/scenes/published.md)
-land.
+gets a toggle of its own, starting on Linux.
 
 ## Required
 

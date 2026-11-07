@@ -133,6 +133,13 @@ impl Gate {
 		self.demand.wanted().is_some()
 	}
 
+	/// Whether the rendition would take the next frame: its grant funded it
+	/// at the last [`step`](Self::step), and it encodes always, or anyone
+	/// watches it.
+	pub fn wanted(&self) -> bool {
+		self.control.target() != rate::Target::Disabled && (self.always || self.watched())
+	}
+
 	/// The rendition's share of the connection, as the allocator grants it.
 	pub fn grant(&self) -> bandwidth::Consumer {
 		self.grant.clone()
@@ -235,7 +242,8 @@ mod tests {
 		assert_eq!(watched.step(), Step::Idle, "the viewer left");
 	}
 
-	/// A rendition left alone stops disabling below the smaller one it had.
+	/// A rendition disabled wants no frame, and one left alone stops disabling
+	/// below the smaller one it had.
 	#[tokio::test(start_paused = true)]
 	async fn a_gate_left_alone_never_disables() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -250,8 +258,10 @@ mod tests {
 			gate.control.target()
 		};
 		assert_eq!(low(&mut gate), rate::Target::Disabled);
+		assert!(!gate.wanted(), "though it encodes always");
 		gate.alone();
 		assert_eq!(low(&mut gate), rate::Target::Enabled(Rate::from_kbps(500)));
+		assert!(gate.wanted());
 	}
 
 	/// A join past the newest group asks for one cut, however many pictures

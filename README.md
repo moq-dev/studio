@@ -96,44 +96,55 @@ Every panel is a tab you can drag, split, or stack.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing and the one that is live, and drag items in the preview to place them. With more than one canvas, pick the canvas they show, and that the Items panel edits, beside the preview. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
-| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, or remove one. A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
+| Preview, Program | See the scene you are editing, at its own size, and the one that is live, and drag items in the preview to place them. A preview no tab shows is not drawn. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
+| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, remove, or tick **Publish** on one (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
 | History | See every edit, and undo or redo back to any of them. |
-| Items | Place, show, hide, and order what the preview scene or the top layer draws on the canvas shown, back to front. Select an item to filter or copy it. |
+| Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. The top layer is edited over a scene of the program's size. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU, saying why on hover), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
 | Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
-| Output | Start and stop recording, pick the mix it records, set the canvas size and frame rate, add, resize, and remove further canvases, see the broadcast path, whether the program is encoding, the encoder sessions open, and each canvas's renditions' encoder work, and turn the virtual camera on. |
-| Health | See how the stream reaches viewers, relay by relay and track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
+| Output | Start and stop recording, pick the picture and the mix it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera on. |
+| Health | See how the stream reaches viewers, relay by relay and, for the program and each published scene, track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 | Hotkeys | Bind keys to cut, transition, preview a scene, replay, save a clip, and start or stop recording, and clear them (see [Hotkeys](#hotkeys)). |
 
 A new source, from the Sources or Devices panel, is placed over whatever the
-Items panel shows. The **top layer** is drawn over every scene, in preview and
-on program, and stays on through a cut or transition: a downstream keyer for a
-logo or a lower third.
+Items panel shows. The **top layer** is drawn over program, and over the
+preview of a scene of the program's size, and stays on through a cut or
+transition: a downstream keyer for a logo or a lower third.
 
-### Canvases
+### Published scenes
 
-Beside the main canvas, the studio can draw further canvases at once, such as
-a 1080x1920 portrait one for a vertical stream beside a 1920x1080 landscape
-main canvas. Add one by name in the Output panel. Each scene has its own
-layout on each canvas, and each canvas its own top layer; a scene without a
-layout on a canvas shows only that canvas's top layer there. Every canvas
-shares the main canvas's frame rate, and the canvases are linked: one scene is
-in preview and one on program on all of them, and a cut or transition takes
-every canvas together. An item's keyframes play on every canvas from when its
-scene goes on, as on the main one. A source captures or decodes once however many canvases
-show it, and a canvas draws only the items it places.
+Every scene has a size, the program's unless the Output panel's **Scene
+sizes** gives it its own, such as 1080x1920 for a portrait scene beside a
+1920x1080 program. Every scene is drawn at the program's frame rate. Only a
+scene of the program's size goes on program: **Cut** and **Transition**
+refuse another, and an edit resizing the scene on air is refused. The preview
+shows a scene at its own size.
 
-Each further canvas publishes a broadcast of its own beneath the main one, at
-`<--broadcast>/<canvas name>`, with renditions and encoders of its own (see
-[Output](#output)). Its catalog lists the main broadcast's audio rather than
-encoding it again. Removing a canvas ends its broadcast, and removes its top
-layer and every scene's layout on it.
+Tick **Publish** on a scene in the Scenes panel to put it live as a broadcast
+of its own beneath the program's, at `<--broadcast>/<scene name>`, at its own
+size, with renditions and encoders of its own (see [Output](#output)). A
+published scene is always live and never switched: it shows what its items
+show, whatever is on program. For a portrait stream that follows the program,
+publish a portrait scene drawing the program through a program source (see
+[Scene sources](#scene-sources)), with any overlay of its own placed beside
+it; the top layer goes over the program alone. Its catalog lists the
+program's audio rather than encoding it again, so every published scene
+carries the program's mix for now. Unticking it, or removing the scene, ends
+its broadcast. A published scene's name is one segment of its broadcast path,
+so it holds no `/`, and a `\` only before another `\`. A scene named `viewers`, where viewers report back,
+does not publish while live.
+
+A source captures or decodes once however many scenes show it. A published
+scene is drawn only while one of its encoders takes the frame, so with
+`--on-demand`, or without a relay, one nobody watches costs no drawing. An
+item's keyframes play in a published scene from when it was published, picked
+for recording, or the studio started, whichever came first: a recording and a
+broadcast of one scene share one picture.
 
 ### Scene sources
 
@@ -142,10 +153,10 @@ scales, crops, filters, and blends like any other: a lower third built once
 and shown in every scene, or a whole layout shrunk into a corner. Add one in
 the Sources panel as kind **Scene**, picking the scene it draws, or
 **Program**, which shows whatever is on air, a transition under way included,
-on the same frame, such as for a portrait canvas that follows the program,
+on the same frame, such as for a portrait scene that follows the program,
 cropped.
 
-A nested scene is drawn at the main canvas's size, transparent where it draws
+A nested scene is drawn at its own size, transparent where it draws
 nothing, once per frame however many items show it, and only while something
 drawn shows it. Its items' keyframes play from when the scene showing it goes
 on, as that scene's own items' do, so the top layer, which never goes on,
@@ -153,8 +164,8 @@ cannot show a scene with keyframes. A media file or overlay in a nested scene
 set to restart starts over when the scene showing it goes on program.
 
 A scene cannot draw itself, even through other scenes, so an edit that would
-is refused. A scene showing the program cannot go on program, nor can the main
-canvas's top layer show it, since either would draw the program into itself:
+is refused. A scene showing the program cannot go on program, nor can the top
+layer show it, since either would draw the program into itself:
 **Cut** and **Transition** refuse such a scene, and an edit making the scene on
 air show the program is refused. Renaming a scene renames what its scene
 sources draw, and removing one removes them, with the items showing them.
@@ -515,11 +526,6 @@ width = 1920
 height = 1080
 framerate = 30
 
-[canvases.portrait] # a further canvas, at the main one's frame rate
-width = 1080
-height = 1920
-top = [{ source = "logo", rect = { x = 780, y = 40, width = 280, height = 120 } }]
-
 [transition]
 kind = "slide"      # fade, slide, wipe, move, or stinger
 duration = "300ms"  # all but a stinger
@@ -603,10 +609,6 @@ items = [
     { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, filters = [{ kind = "drop_shadow", x = 8, y = 8, blur = 12, color = "#00000080" }] },
     { source = "logo", rect = { x = 0, y = 0, width = 1920, height = 1080 }, blend = "multiply", filters = [{ kind = "opacity", amount = 0.3 }] },
 ]
-canvases.portrait = [ # the same scene laid out on the portrait canvas
-    { source = "camera", rect = { x = 0, y = 0, width = 1080, height = 1920 }, crop = { left = 0.34, right = 0.34 } },
-    { source = "guest", rect = { x = 0, y = 1312, width = 1080, height = 608 } },
-]
 
 [[scenes]]
 name = "Break"
@@ -618,6 +620,16 @@ items = [
         { at = "500ms", ease = "out", filters = [{ kind = "blur", radius = 0 }] },
     ] },
     { source = "main-view", rect = { x = 80, y = 80, width = 640, height = 360 } },
+]
+
+[[scenes]]
+name = "Portrait"
+size = { width = 1080, height = 1920 } # its own size; the program's without one
+published = true # live at <--broadcast>/Portrait
+recorded = true  # recordings hold this scene rather than the program
+items = [
+    { source = "on-air", rect = { x = 0, y = 0, width = 1080, height = 1920 }, crop = { left = 0.34, right = 0.34 } },
+    { source = "logo", rect = { x = 780, y = 40, width = 280, height = 120 } },
 ]
 
 [[top]]
@@ -636,10 +648,11 @@ file, which no item places, but which grades what a `lut` filter names it in),
 draws), and `program` (see [Scene sources](#scene-sources)). The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
 
-`[canvases.<name>]` adds a further canvas, with its `width` and `height` and
-its own `top` layer, and a scene's `canvases.<name>` lists its items on that
-canvas; leave it out, rather than empty, for a scene that shows nothing there.
-A canvas name is one segment of its broadcast path, so it holds no `/`.
+A scene's `size` gives it a `width` and `height` of its own; without one it is
+the program's. `published = true` puts it live as its own broadcast (see
+[Published scenes](#published-scenes)), so its name is one path segment, and
+`recorded = true` has recordings hold it rather than the program, on one scene
+at most.
 
 `[mixes]` names every mix, in the order the Audio panel lists them, the one
 on `program`, and the one a `recording` holds, the mix on program without it;
@@ -721,7 +734,10 @@ before sharing.
 
 The program publishes as two H.264 renditions, at the canvas size and at half
 of it, at the canvas frame rate, with the mix on program as Opus stereo audio,
-under the `--broadcast` path. A canvas under 360 lines has no half size.
+under the `--broadcast` path. A canvas under 360 lines has no half size. Each
+published scene publishes the same way at `<--broadcast>/<scene name>`, at
+its own size and half of it, its tracks sharing the connection's bandwidth
+with the program's.
 Timestamps come from the studio's own clock, so a source that stalls repeats
 its last picture instead of holding up the stream.
 
@@ -766,8 +782,8 @@ catalog under the `dev.moq.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
 A captured source encodes its track as H.264 only while it is used: while it
-is shown on program, so a replay of it has its recent past, or while a
-recording reads its track. Otherwise it holds no encoder. A display or window
+is shown on program or in a published or recorded scene being drawn, so a
+replay of it has its recent past, or while a recording reads its track. Otherwise it holds no encoder. A display or window
 that goes into use while its screen stands still, and so delivers nothing new,
 restarts its capture, so its track starts with the picture as it is. A capture that
 changes size or color space moves to a new track, which its catalog entry
@@ -796,25 +812,28 @@ encode engine for them all. The Output panel counts the sessions open:
 |---|---|
 | The program's canvas size, live | 1, or none without `--connect` |
 | Its half size | 1 while someone watches it |
-| Each further canvas's canvas size and half size | as the program's |
-| The recording's own canvas size | 1 while recording |
-| Each captured source or media file | 1 while on program or recorded |
+| Each published scene's own size and half size | as the program's |
+| The recording's own size | 1 while recording |
+| Each captured source or media file | 1 while used, as [above](#source-tracks) |
 
 So a live scene showing a camera, a display, and a window holds 4 sessions, 5
-with the half size watched, and 6 while recording too. A portrait canvas beside
-it adds 1 more, 2 with its half size watched. When the program
+with the half size watched, and 6 while recording too. A published portrait
+scene drawing the program beside it adds 1 more, 2 with its half size watched,
+plus 1 for each captured source it shows that program does not. When the program
 encodes on hardware, so do the sources, and a
 session the GPU refuses fails that source's track with the encoder's reason in
 the Sources panel rather than falling back to software. The source keeps
 drawing in the studio's own scenes. The program opens its session before any
 source, even with `--on-demand`, so the sources past the cap fail rather than
-the program; so does each canvas in the scene file at startup. A canvas added
-later, past the cap, draws without video and says why in the Output panel. When the program encodes in software, a source takes hardware
+the program; so does each scene published in the scene file at startup. A
+scene published later, past the cap, publishes without video and says why in
+the Output panel. When the program encodes in software, a source takes hardware
 where it can and software otherwise.
 
 ### Recording
 
-**Start recording** in the Output panel saves the program, at the canvas size,
+**Start recording** in the Output panel saves the program at the canvas size,
+or the scene picked beside it at its own size,
 to `<scene file name> <UTC start time>.mp4` in the `--recordings` directory,
 live or not. The recording has an encoder of its own, opened only while it
 records, at full quality whatever the uplink grants the live stream, as OBS's
@@ -832,8 +851,9 @@ guest who leaves finishes their file, and one who joins again goes on in a new
 one, numbered after the first, since each join is a new broadcast with a
 timeline of its own. A source added while recording
 starts its file then, and one removed finishes its file then. A new canvas
-size or frame rate, or a capture that changes size or color space, moves the
-video to a new track, so the program or that source goes on in a new file,
+size or frame rate, a recorded scene of another size, or a capture that
+changes size or color space, moves the video to a new track, so the recording
+or that source goes on in a new file,
 numbered after the first, since players show only one video track. A file
 starts with up to 2 s from before it opened, so a recording starts a little
 early, and a track that goes on into the next file, such as the program
@@ -968,18 +988,23 @@ stuck, a source stalled (a camera or broadcast the program draws, or a
 microphone or system audio the mix on program plays: unmuted and not left
 out of it), a source the program shows or plays failed or, as a media file
 that does not loop, played to its end, a browser source the program shows is
-uploaded from memory rather than copied on the GPU, or viewers are late, stalling, or cannot
-decode a track. A relay lost while the other serves is
+uploaded from memory rather than copied on the GPU, or viewers are late,
+stalling, or cannot decode a track. A relay lost while the other serves is
 degraded, since viewers have nothing left to fall back to; with none serving
-it is unhealthy. Below that it shows:
+it is unhealthy. A problem with a published scene's broadcast names the scene.
+Below that it shows:
 
 - **Relays**: each relay's state, and the protocol its session negotiated.
 - **Uplink**: the round trip to the first connected relay, the bandwidth the
-  connection estimates it can carry, the media the program's tracks write, and
+  connection estimates it can carry, the media every broadcast's tracks write, and
   the share lost and resent. Loss and headroom are graded only while someone
   watches, since the relay pulls nothing otherwise. Source tracks never reach
   the relay, so they are left out of the media.
-- **Watching**: the sessions subscribed to the broadcast, from the relays'
+
+Then, for the program's broadcast and each published scene's, each with its
+own viewers:
+
+- **Watching**: the sessions subscribed to it, from the relays'
   `.stats` broadcasts. A relay shares those only with a connection allowed to
   read them, so most show "unknown". In a cluster, a relay forwarding the
   stream to another counts as one session. Two relays whose stats use the
@@ -988,18 +1013,21 @@ it is unhealthy. Below that it shows:
 - **Tracks**: each track's share of the connection's bandwidth (**Granted**,
   or "off" for a rendition the share cannot fund), its bitrate and frame rate,
   and, from viewers that report, the lowest bitrate any received, its worst
-  grade, and the latency from the program clock to the slowest viewer. The
-  program's tracks come first, then each source's own tracks, grouped by
-  source; a still image or
-  color carries no media to grade. Latency compares the two hosts' wall
+  grade, and the latency from the program clock to the slowest viewer. A
+  published scene lists the program's audio, graded where the program writes
+  it. Latency compares the two hosts' wall
   clocks, so keep both synced.
 - **Viewers**: each viewer that reports, with its round trip, latency, and
-  playout delay. The studio reads 64 at most, a sample the grades rest on: it
-  counts the rest, and a reader one frees goes to the next viewer to arrive.
+  playout delay. The studio reads 64 at most per broadcast, a sample the grades
+  rest on: it counts the rest, and a reader one frees goes to the next viewer
+  to arrive.
 
-The catalog asks viewers to report under `<broadcast>/viewers/`: a viewer
-publishes `<broadcast>/viewers/<name>.echo`, as `moq export --echo <name>`
-does. The relay decides who may publish there, as for any broadcast.
+Last, **Sources** lists each source's own tracks, grouped by source; a still
+image or color carries no media to grade.
+
+Each catalog asks viewers to report beneath its broadcast, under
+`<broadcast>/viewers/` or `<broadcast>/<scene>/viewers/`: a viewer publishes
+`<broadcast>/viewers/<name>.echo`, as `moq export --echo <name>` does. The relay decides who may publish there, as for any broadcast.
 
 ## Virtual camera
 
