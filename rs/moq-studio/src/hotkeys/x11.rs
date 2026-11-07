@@ -177,7 +177,7 @@ fn mask(modifiers: egui::Modifiers) -> ModMask {
 		(modifiers.mac_cmd, ModMask::M4),
 	] {
 		if on {
-			mask = mask | modifier;
+			mask |= modifier;
 		}
 	}
 	mask
