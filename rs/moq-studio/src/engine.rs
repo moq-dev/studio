@@ -3950,15 +3950,17 @@ mod tests {
 		// heard the bed.
 		assert!(bed < played, "the bed is heard before the cut");
 		// The viewer hears the tone as it plays: a media source writes each
-		// sound the bus's latency ahead, which places it within the block the
-		// bus mixes it in.
-		let (heard, before) = program.hears(quiet, played - AUDIO_PERIOD, LOUD).await;
+		// sound the bus's latency ahead. The bus holds a first write that long
+		// from the block it last mixed, so the tone may be heard up to a block
+		// early, or two while the audio clock's tick runs late.
+		let early = 2 * AUDIO_PERIOD;
+		let (heard, before) = program.hears(quiet, played - early, LOUD).await;
 		assert!(
 			before < QUIET,
 			"the program's audio scene holds the tone alone: {before}"
 		);
 		assert!(
-			heard.abs_diff(played) < AUDIO_PERIOD,
+			heard + early > played && heard < played + AUDIO_PERIOD,
 			"the tone is heard as it plays: played {played:?}, heard {heard:?}"
 		);
 		let (also, _) = tall.hears(quiet, played, LOUD).await;
