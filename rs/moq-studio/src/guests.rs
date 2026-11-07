@@ -752,14 +752,14 @@ struct Renewals {
 /// One guest's token track, ended when dropped.
 struct Renewed {
 	generation: u64,
-	publication: moq_net::origin::Publication,
+	publication: moq_net::origin::Route,
 	track: moq_net::track::Producer,
 }
 
 impl Drop for Renewed {
 	fn drop(&mut self) {
 		let _ = self.track.finish();
-		self.publication.close();
+		self.publication.broadcast().close();
 	}
 }
 
@@ -793,17 +793,18 @@ impl Renewals {
 
 	/// The token track for `identity` in `generation`, holding a fresh token.
 	fn publish(&self, identity: &str, generation: u64) -> anyhow::Result<Renewed> {
-		let publication = self
-			.origin
-			.create_broadcast(Room::renewal_path(identity, generation)?)?;
-		let track = publication.create_track(TOKEN_TRACK, None)?;
+		let publication = self.origin.route(
+			Room::renewal_path(identity, generation)?,
+			moq_net::origin::RouteOptions::hidden(),
+		)?;
+		let track = publication.broadcast().create_track(TOKEN_TRACK, None)?;
 		let mut renewed = Renewed {
 			generation,
 			publication,
 			track,
 		};
 		self.write(identity, &mut renewed)?;
-		renewed.publication.announce(Default::default())?;
+		renewed.publication.announce()?;
 		Ok(renewed)
 	}
 
@@ -1255,8 +1256,7 @@ pub(crate) mod tests {
 		);
 
 		let guest = moq_tokio::origin::spawn();
-		let camera = guest.create_broadcast("alice/camera.hang").unwrap();
-		camera.announce(moq_net::origin::Route::default()).unwrap();
+		let _camera = guest.route("alice/camera.hang", Default::default()).unwrap();
 		let renewals = moq_tokio::origin::spawn();
 		let alice = relay.join(&room.invite("alice").unwrap().link, &guest, &renewals);
 
@@ -1302,7 +1302,8 @@ pub(crate) mod tests {
 		let broadcast = origin
 			.follow(Room::renewal_path(identity, generation)?, None)?
 			.available()
-			.await?;
+			.await?
+			.expect("the first change is an instance");
 		read_token(broadcast).await
 	}
 
