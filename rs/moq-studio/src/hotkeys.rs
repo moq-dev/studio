@@ -1,47 +1,210 @@
 //! Keys the operator binds to studio actions, heard system-wide, so a replay
-//! fires from inside a game: through the platform's global hotkeys on macOS,
-//! Windows, and X11, and the desktop's GlobalShortcuts portal on Wayland.
-//! Where neither is there, they work only while the studio has focus.
+//! fires from inside a game: through the platform's global hotkeys on macOS
+//! and Windows, a key grab on X11, and the desktop's GlobalShortcuts portal on
+//! Wayland. Where neither is there, they work only while the studio has focus.
+//!
+//! A key is where it sits, as winit names it from the window's own key event:
+//! egui names a keypad key as its main keyboard twin and drops a key it cannot
+//! name, so the window hears keys before egui does.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-use egui::{Key, KeyboardShortcut};
-use global_hotkey::hotkey::{HotKey, Modifiers};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NativeKeyCode, PhysicalKey};
 
 use crate::controls::{self, Action, Controls};
 
-mod keypad;
+// Tested on macOS too, which global-hotkey builds for.
+#[cfg(any(windows, all(test, target_os = "macos")))]
 mod layout;
+#[cfg(any(target_os = "macos", windows))]
+mod native;
 #[cfg(target_os = "linux")]
 mod portal;
-
-pub use keypad::Keypad;
-use layout::Layout;
+#[cfg(target_os = "linux")]
+mod x11;
 
 /// The key bound to each action. Every action starts unbound, so a key
 /// another app, such as a game, uses is never taken unasked.
 pub type Bindings = BTreeMap<Action, Binding>;
 
 /// A key bound to an action.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
-	/// The key with its modifiers as the layout names it, which the panel
-	/// shows and the Wayland portal is asked for.
-	pub key: KeyboardShortcut,
-	/// Where the key sits, named for the key a US keyboard has there, which
-	/// the platform's hotkeys register through the layout in use.
-	pub position: Key,
+	/// The modifiers held with the key.
+	pub modifiers: egui::Modifiers,
+	/// Where the key sits, which the platform hears whatever the layout.
+	pub key: PhysicalKey,
+	/// What the layout put on the key when it was bound, ignoring modifiers,
+	/// which the panel shows and the Wayland portal is asked for.
+	pub name: Key,
 }
 
 impl Binding {
 	/// Whether `self` and `other` are the same key, held with the same
 	/// modifiers, whatever the layout called each.
 	fn same(&self, other: &Binding) -> bool {
-		self.position == other.position && self.key.modifiers == other.key.modifiers
+		self.key == other.key && self.modifiers == other.modifiers
 	}
+
+	/// The key with its modifiers, as the panel shows it.
+	pub fn shown(&self, ctx: &egui::Context) -> String {
+		let modifiers = egui::ModifierNames::NAMES.format(&self.modifiers, ctx.os().is_mac());
+		match modifiers.is_empty() {
+			true => self.label(),
+			false => format!("{modifiers}+{}", self.label()),
+		}
+	}
+
+	/// The key alone, as the layout printed it, and a keypad key by its place
+	/// on the keypad, which NumLock relabels.
+	fn label(&self) -> String {
+		if let Some((_, label, _)) = keypad(self.key) {
+			return format!("Keypad {label}");
+		}
+		match (&self.name, self.key) {
+			(Key::Character(text), _) => text.to_uppercase(),
+			(Key::Named(named), _) => format!("{named:?}"),
+			(_, PhysicalKey::Code(code)) => format!("{code:?}"),
+			(_, PhysicalKey::Unidentified(native)) => match native {
+				NativeKeyCode::Xkb(code) => format!("Key {code}"),
+				NativeKeyCode::Windows(code) => format!("Key {code}"),
+				NativeKeyCode::MacOS(code) => format!("Key {code}"),
+				NativeKeyCode::Android(code) => format!("Key {code}"),
+				NativeKeyCode::Unidentified => "Unknown key".into(),
+			},
+		}
+	}
+}
+
+/// The keypad keys, each with what the panel calls it and its XKB keysym.
+const KEYPAD: [(KeyCode, &str, &str); 18] = [
+	(KeyCode::Numpad0, "0", "KP_0"),
+	(KeyCode::Numpad1, "1", "KP_1"),
+	(KeyCode::Numpad2, "2", "KP_2"),
+	(KeyCode::Numpad3, "3", "KP_3"),
+	(KeyCode::Numpad4, "4", "KP_4"),
+	(KeyCode::Numpad5, "5", "KP_5"),
+	(KeyCode::Numpad6, "6", "KP_6"),
+	(KeyCode::Numpad7, "7", "KP_7"),
+	(KeyCode::Numpad8, "8", "KP_8"),
+	(KeyCode::Numpad9, "9", "KP_9"),
+	(KeyCode::NumpadAdd, "+", "KP_Add"),
+	(KeyCode::NumpadSubtract, "-", "KP_Subtract"),
+	(KeyCode::NumpadMultiply, "*", "KP_Multiply"),
+	(KeyCode::NumpadDivide, "/", "KP_Divide"),
+	(KeyCode::NumpadDecimal, ".", "KP_Decimal"),
+	(KeyCode::NumpadComma, ",", "KP_Separator"),
+	(KeyCode::NumpadEqual, "=", "KP_Equal"),
+	(KeyCode::NumpadEnter, "Enter", "KP_Enter"),
+];
+
+/// `key`'s entry in [`KEYPAD`], if it is on the keypad.
+fn keypad(key: PhysicalKey) -> Option<&'static (KeyCode, &'static str, &'static str)> {
+	KEYPAD.iter().find(|(code, ..)| key == PhysicalKey::Code(*code))
+}
+
+/// The keys pressed in the studio's window, which winit hands it before egui.
+#[derive(Clone, Default)]
+pub struct Keyboard(Arc<Mutex<Pressing>>);
+
+#[derive(Default)]
+struct Pressing {
+	/// The modifiers held now, as egui names them.
+	modifiers: egui::Modifiers,
+	taking: Taking,
+}
+
+/// What a key pressed in the window does besides reaching egui.
+#[derive(Default)]
+enum Taking {
+	#[default]
+	Nothing,
+	/// The Hotkeys panel waits for a key: the first pressed, other than a
+	/// modifier, is kept for it, and no key reaches egui meanwhile, so the
+	/// key binds rather than acts.
+	Binding(Option<Binding>),
+	/// Bound keys fire instead of reaching egui, where nothing hears them
+	/// outside the window.
+	Firing {
+		bound: Arc<Mutex<Bindings>>,
+		fire: mpsc::Sender<Binding>,
+	},
+}
+
+impl Keyboard {
+	/// Note the modifiers held from now on.
+	pub fn modifiers(&self, state: ModifiersState) {
+		let mac = cfg!(target_os = "macos");
+		self.0.lock().unwrap().modifiers = egui::Modifiers {
+			alt: state.alt_key(),
+			ctrl: state.control_key(),
+			shift: state.shift_key(),
+			mac_cmd: mac && state.super_key(),
+			command: match mac {
+				true => state.super_key(),
+				false => state.control_key(),
+			},
+		};
+	}
+
+	/// Hear `key` pressed in the window, where the layout puts `name` on it,
+	/// returning whether egui hears it too.
+	pub fn pressed(&self, key: PhysicalKey, name: Key, repeat: bool) -> bool {
+		let mut pressing = self.0.lock().unwrap();
+		let pressed = Binding {
+			modifiers: pressing.modifiers,
+			key,
+			name,
+		};
+		match &mut pressing.taking {
+			Taking::Nothing => true,
+			// A modifier is held with the key it waits for.
+			Taking::Binding(_) if modifier(key) => true,
+			Taking::Binding(taken) => {
+				if taken.is_none() && !repeat {
+					*taken = Some(pressed);
+				}
+				false
+			}
+			Taking::Firing { bound, fire } => {
+				if !bound.lock().unwrap().values().any(|bound| bound.same(&pressed)) {
+					return true;
+				}
+				// A held key fires once, and its repeats are taken too.
+				if !repeat {
+					let _ = fire.send(pressed);
+				}
+				false
+			}
+		}
+	}
+
+	fn take(&self, taking: Taking) {
+		self.0.lock().unwrap().taking = taking;
+	}
+}
+
+/// Whether `key` is a modifier, held with a key rather than bound itself.
+fn modifier(key: PhysicalKey) -> bool {
+	matches!(
+		key,
+		PhysicalKey::Code(
+			KeyCode::ShiftLeft
+				| KeyCode::ShiftRight
+				| KeyCode::ControlLeft
+				| KeyCode::ControlRight
+				| KeyCode::AltLeft
+				| KeyCode::AltRight
+				| KeyCode::SuperLeft
+				| KeyCode::SuperRight
+				| KeyCode::Meta
+				| KeyCode::Hyper
+				| KeyCode::Fn
+				| KeyCode::FnLock
+		)
+	)
 }
 
 /// The bound keys, heard wherever the platform lets the studio hear them.
@@ -52,28 +215,24 @@ pub struct Hotkeys {
 	backend: Backend,
 	/// The keys last handed to the backend.
 	heard: Vec<Binding>,
-	/// Why the platform refused each key it would not register.
+	/// Why the platform refused each key it would not hear.
 	refused: Vec<(Binding, String)>,
-	/// Why the keys the platform holds cannot change, if they cannot.
-	stuck: Option<String>,
 	/// Whether bindings are held off while the Hotkeys panel waits for a key,
 	/// which the thread firing them reads too.
 	suspended: Arc<AtomicBool>,
+	keyboard: Keyboard,
 	fire: mpsc::Sender<Binding>,
 }
 
 /// Where bound keys are heard.
 enum Backend {
-	/// The platform's global hotkeys: `RegisterEventHotKey` on macOS,
-	/// `RegisterHotKey` on Windows, and a key grab on X11.
-	Native {
-		manager: GlobalHotKeyManager,
-		/// The hotkeys registered now, and the key each hears.
-		held: Vec<(Binding, HotKey)>,
-		/// The key each registered hotkey hears, by its id, which the
-		/// platform's event handler reads.
-		registered: Arc<Mutex<HashMap<u32, Binding>>>,
-	},
+	/// The system's global hotkeys: `RegisterEventHotKey` on macOS, and
+	/// `RegisterHotKey` on Windows.
+	#[cfg(any(target_os = "macos", windows))]
+	Native(native::Native),
+	/// Key grabs from the X server.
+	#[cfg(target_os = "linux")]
+	X11(x11::X11),
 	/// The desktop's GlobalShortcuts portal, on Wayland.
 	#[cfg(target_os = "linux")]
 	Portal(portal::Portal),
@@ -103,12 +262,20 @@ pub enum Reach {
 	Focused(String),
 }
 
+/// What `Hotkeys::new` takes from the window it hears keys for.
+pub struct Window<'a> {
+	pub frame: &'a eframe::Frame,
+	pub ctx: &'a egui::Context,
+	/// The keys the window hears before egui.
+	pub keyboard: Keyboard,
+}
+
 impl Hotkeys {
 	/// Hear `bindings` from now on, firing each action on `controls` from a
 	/// thread of its own. Called on the window's thread, which the platform's
 	/// hotkeys must be registered from.
 	pub fn new(
-		window: &eframe::Frame,
+		window: Window<'_>,
 		controls: Arc<Controls>,
 		runtime: &tokio::runtime::Handle,
 		bindings: Bindings,
@@ -150,14 +317,14 @@ impl Hotkeys {
 				}
 			}
 		});
-		let backend = Backend::new(window, runtime, fire.clone());
+		let backend = Backend::new(&window, runtime, fire.clone());
 		let mut hotkeys = Self {
 			bound,
 			backend,
 			heard: Vec::new(),
 			refused: Vec::new(),
-			stuck: None,
 			suspended,
+			keyboard: window.keyboard,
 			fire,
 		};
 		hotkeys.set(bindings);
@@ -172,10 +339,10 @@ impl Hotkeys {
 	/// action, which is returned instead.
 	pub fn bind(&mut self, action: &Action, key: Option<Binding>) -> Result<(), Action> {
 		let mut bindings = self.bindings();
-		if let Some(key) = key
+		if let Some(key) = &key
 			&& let Some((other, _)) = bindings
 				.iter()
-				.find(|(other, bound)| bound.same(&key) && *other != action)
+				.find(|(other, bound)| bound.same(key) && *other != action)
 		{
 			return Err(other.clone());
 		}
@@ -200,8 +367,21 @@ impl Hotkeys {
 	/// Hold every binding off while the Hotkeys panel waits for a key, so the
 	/// key pressed binds rather than fires; or take them up again.
 	pub fn suspend(&mut self, suspended: bool) {
+		self.keyboard.take(match suspended {
+			true => Taking::Binding(None),
+			false => Taking::Nothing,
+		});
 		if self.suspended.swap(suspended, Ordering::Relaxed) != suspended {
 			self.set(self.bindings());
+		}
+	}
+
+	/// The key pressed in the window since the Hotkeys panel began waiting
+	/// for one, if any.
+	pub fn taken(&self) -> Option<Binding> {
+		match &mut self.keyboard.0.lock().unwrap().taking {
+			Taking::Binding(taken) => taken.take(),
+			_ => None,
 		}
 	}
 
@@ -211,71 +391,31 @@ impl Hotkeys {
 		self.hear();
 	}
 
-	/// Have the platform hear the keys bound now. On X11, each key it takes
-	/// or lets go of waits on the platform's event thread.
+	/// Have the platform hear the keys bound now, through the keyboard layout
+	/// in use where the platform matches keys through one. Called before each
+	/// frame too, so the keys follow a layout change.
 	pub fn hear(&mut self) {
 		let bindings = self.bindings();
 		let heard: Vec<Binding> = match self.suspended.load(Ordering::Relaxed) {
 			true => Vec::new(),
-			false => bindings.values().copied().collect(),
+			false => bindings.values().cloned().collect(),
 		};
 		// A rename moves no key, so the platform is left alone.
 		let moved =
 			heard.len() != self.heard.len() || heard.iter().any(|key| !self.heard.iter().any(|was| was.same(key)));
 		match &mut self.backend {
-			Backend::Native {
-				manager,
-				held,
-				registered,
-			} if moved => {
-				let layout = Layout::current();
-				// Where the platform would let go of another key, or none, and keep
-				// holding these, they stay as they are.
-				let stuck = match &layout {
-					Ok(layout) => held
-						.iter()
-						.any(|(key, hotkey)| !layout.releases(key.position, hotkey.key))
-						.then(|| "the keyboard layout changed since it took them".into()),
-					Err(err) => (!held.is_empty()).then(|| err.clone()),
-				};
-				self.stuck = stuck;
-				if self.stuck.is_some() {
-					return;
+			#[cfg(any(target_os = "macos", windows))]
+			Backend::Native(native) => {
+				if moved || native.relaid() {
+					self.refused = native.hear(&heard);
 				}
-				self.refused.clear();
-				// `registered` is not locked while the manager works: on X11 it
-				// waits on the thread that runs the event handler, which locks it.
-				for (_, hotkey) in held.drain(..) {
-					if let Err(err) = manager.unregister(hotkey) {
-						tracing::warn!(%hotkey, error = %err, "cannot unregister a hotkey");
-					}
-				}
-				let mut ids = HashMap::new();
-				for key in &heard {
-					let hotkey = match &layout {
-						Ok(layout) => {
-							hotkey(layout, key).ok_or_else(|| "this key cannot be heard outside the studio".into())
-						}
-						Err(err) => Err(err.clone()),
-					};
-					let hotkey = match hotkey {
-						Ok(hotkey) => hotkey,
-						Err(reason) => {
-							self.refused.push((*key, reason));
-							continue;
-						}
-					};
-					match manager.register(hotkey) {
-						Ok(()) => {
-							held.push((*key, hotkey));
-							ids.insert(hotkey.id(), *key);
-						}
-						Err(err) => self.refused.push((*key, refusal(err))),
-					}
-				}
-				*registered.lock().unwrap() = ids;
 			}
-			Backend::Native { .. } => {}
+			#[cfg(target_os = "linux")]
+			Backend::X11(x11) => {
+				if moved {
+					self.refused = x11.hear(&heard);
+				}
+			}
 			// Held off, the desktop would be asked to bind them all again
 			// after each key the panel takes.
 			#[cfg(target_os = "linux")]
@@ -295,15 +435,12 @@ impl Hotkeys {
 			.map(|(_, why)| why.as_str())
 	}
 
-	/// Why the keys the platform holds stay as they are, keys cleared since
-	/// included, until the studio restarts.
-	pub fn stuck(&self) -> Option<&str> {
-		self.stuck.as_deref()
-	}
-
 	pub fn reach(&self) -> Reach {
 		match &self.backend {
-			Backend::Native { .. } => Reach::Global,
+			#[cfg(any(target_os = "macos", windows))]
+			Backend::Native(_) => Reach::Global,
+			#[cfg(target_os = "linux")]
+			Backend::X11(_) => Reach::Global,
 			#[cfg(target_os = "linux")]
 			Backend::Portal(portal) => portal.reach(),
 			Backend::Focused(reason) => Reach::Focused(reason.clone()),
@@ -311,66 +448,55 @@ impl Hotkeys {
 	}
 
 	/// Fire the actions bound to keys pressed in the studio's window, where
-	/// nothing hears them outside it. A text field being typed in keeps its
-	/// keys, as the caller makes a page the preview passes the keyboard to.
-	/// A key that fires is taken, so nothing else in the window acts on it.
-	pub fn focused(&self, ctx: &egui::Context) {
-		let suspended = self.suspended.load(Ordering::Relaxed);
-		if suspended || ctx.text_edit_focused() || !matches!(self.reach(), Reach::Focused(_)) {
+	/// nothing hears them outside it, unless `typing`, as into a text field
+	/// or a page the preview passes the keyboard to. A key that fires is
+	/// taken, so nothing else in the window acts on it. Called each frame.
+	pub fn focused(&self, typing: bool) {
+		if self.suspended.load(Ordering::Relaxed) {
 			return;
 		}
-		let bindings = self.bound.lock().unwrap();
-		ctx.input_mut(|input| {
-			input.events.retain(|event| {
-				let Some(pressed) = binding(event) else {
-					return true;
-				};
-				if !bindings.values().any(|key| key.same(&pressed)) {
-					return true;
-				}
-				// A held key fires once, and its repeats are taken too.
-				if !matches!(event, egui::Event::Key { repeat: true, .. }) {
-					let _ = self.fire.send(pressed);
-				}
-				false
-			});
+		let firing = !typing && matches!(self.reach(), Reach::Focused(_));
+		self.keyboard.take(match firing {
+			true => Taking::Firing {
+				bound: self.bound.clone(),
+				fire: self.fire.clone(),
+			},
+			false => Taking::Nothing,
 		});
 	}
 }
 
 impl Backend {
 	/// Pick where keys are heard from what the platform offers.
-	fn new(window: &eframe::Frame, runtime: &tokio::runtime::Handle, fire: mpsc::Sender<Binding>) -> Self {
+	fn new(window: &Window<'_>, runtime: &tokio::runtime::Handle, fire: mpsc::Sender<Binding>) -> Self {
 		#[cfg(target_os = "linux")]
 		{
 			use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+			let _ = window.ctx;
 			let wayland = window
+				.frame
 				.window_handle()
 				.is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)));
 			if wayland {
 				return Self::Portal(portal::Portal::new(runtime, fire));
 			}
+			match x11::X11::new(fire) {
+				Ok(x11) => Self::X11(x11),
+				Err(err) => Self::Focused(format!("cannot grab keys from the X server: {err:#}")),
+			}
 		}
-		#[cfg(not(target_os = "linux"))]
-		let _ = (window, runtime);
-		let manager = match GlobalHotKeyManager::new() {
-			Ok(manager) => manager,
-			Err(err) => return Self::Focused(format!("the platform's global hotkeys are unavailable: {err}")),
-		};
-		let registered: Arc<Mutex<HashMap<u32, Binding>>> = Arc::default();
-		let heard = registered.clone();
-		GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-			if event.state() != HotKeyState::Pressed {
-				return;
+		#[cfg(any(target_os = "macos", windows))]
+		{
+			let _ = window.frame;
+			match native::Native::new(window.ctx, runtime, fire) {
+				Ok(native) => Self::Native(native),
+				Err(err) => Self::Focused(format!("the platform's global hotkeys are unavailable: {err}")),
 			}
-			if let Some(key) = heard.lock().unwrap().get(&event.id()) {
-				let _ = fire.send(*key);
-			}
-		}));
-		Self::Native {
-			manager,
-			held: Vec::new(),
-			registered,
+		}
+		#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+		{
+			let _ = (window, runtime, fire);
+			Self::Focused("this platform has no global hotkeys".into())
 		}
 	}
 }
@@ -386,8 +512,8 @@ fn renamed(bindings: &Bindings, renames: &BTreeMap<String, Option<String>>) -> B
 			_ => None,
 		};
 		match to {
-			Some(to) => drop(renamed.insert(Action::Scene(to), *key)),
-			None => kept.push((action.clone(), *key)),
+			Some(to) => drop(renamed.insert(Action::Scene(to), key.clone())),
+			None => kept.push((action.clone(), key.clone())),
 		}
 	}
 	for (action, key) in kept {
@@ -396,91 +522,94 @@ fn renamed(bindings: &Bindings, renames: &BTreeMap<String, Option<String>>) -> B
 	renamed
 }
 
-/// What the platform said when it refused a key.
-fn refusal(err: global_hotkey::Error) -> String {
-	match err {
-		global_hotkey::Error::AlreadyRegistered(_) => "another app holds this key".into(),
-		err => format!("the platform refused this key: {err}"),
-	}
-}
-
-/// The key `event` presses, ignoring repeats.
-pub fn pressed(event: &egui::Event) -> Option<Binding> {
-	match event {
-		egui::Event::Key { repeat: false, .. } => binding(event),
-		_ => None,
-	}
-}
-
-/// The key `event` presses or repeats, if it says where the key sits.
-fn binding(event: &egui::Event) -> Option<Binding> {
-	match event {
-		egui::Event::Key {
-			key,
-			physical_key: Some(position),
-			pressed: true,
-			modifiers,
-			..
-		} => Some(Binding {
-			key: KeyboardShortcut::new(*modifiers, *key),
-			position: *position,
-		}),
-		_ => None,
-	}
-}
-
-/// `key` as the platform's hotkeys register it in `layout`, if they can hear it.
-fn hotkey(layout: &Layout, key: &Binding) -> Option<HotKey> {
-	let held = key.key.modifiers;
-	let mut mods = Modifiers::empty();
-	for (on, modifier) in [
-		(held.shift, Modifiers::SHIFT),
-		(held.alt, Modifiers::ALT),
-		(held.ctrl, Modifiers::CONTROL),
-		(held.mac_cmd, Modifiers::META),
-	] {
-		if on {
-			mods |= modifier;
-		}
-	}
-	Some(HotKey::new(Some(mods), layout.code(key.position)?))
-}
-
 #[cfg(test)]
 mod tests {
+	use winit::keyboard::NamedKey;
+
 	use super::*;
 
+	fn key(code: KeyCode, name: &str) -> Binding {
+		Binding {
+			modifiers: egui::Modifiers::NONE,
+			key: PhysicalKey::Code(code),
+			name: Key::Character(name.into()),
+		}
+	}
+
 	#[test]
-	fn a_key_is_the_same_wherever_the_layout_names_it() {
-		let press = |key, physical_key, modifiers| egui::Event::Key {
-			key,
-			physical_key,
-			pressed: true,
-			repeat: false,
-			modifiers,
-		};
+	fn a_key_is_where_it_sits() {
 		// Shift and the key a US keyboard prints 7 on make `/` on German.
-		let german = pressed(&press(Key::Slash, Some(Key::Num7), egui::Modifiers::SHIFT)).unwrap();
-		assert_eq!(german.position, Key::Num7);
-		assert_eq!(german.key.logical_key, Key::Slash);
-		let us = pressed(&press(Key::Num7, Some(Key::Num7), egui::Modifiers::SHIFT)).unwrap();
+		let mut german = key(KeyCode::Digit7, "7");
+		german.modifiers = egui::Modifiers::SHIFT;
+		let mut us = key(KeyCode::Digit7, "7");
+		us.modifiers = egui::Modifiers::SHIFT;
+		us.name = Key::Character("&".into());
 		assert!(us.same(&german));
-		assert!(!us.same(&pressed(&press(Key::Num7, Some(Key::Num7), egui::Modifiers::NONE)).unwrap()));
-		// A key whose position is unknown cannot be registered by it.
-		assert_eq!(pressed(&press(Key::Pipe, None, egui::Modifiers::NONE)), None);
+		assert!(!us.same(&key(KeyCode::Digit7, "7")));
+		// Keypad 1 is not the 1 above the letters, whatever NumLock makes it.
+		let keypad = key(KeyCode::Numpad1, "1");
+		assert!(!keypad.same(&key(KeyCode::Digit1, "1")));
+		assert_eq!(keypad.label(), "Keypad 1");
+		let mut end = keypad.clone();
+		end.name = Key::Named(NamedKey::End);
+		assert!(end.same(&keypad));
+		assert_eq!(end.label(), "Keypad 1");
+		assert_eq!(key(KeyCode::Digit1, "1").label(), "1");
+		// A letter outside A to Z shows as the layout prints it.
+		assert_eq!(key(KeyCode::Semicolon, "ö").label(), "Ö");
+		let unnamed = Binding {
+			modifiers: egui::Modifiers::NONE,
+			key: PhysicalKey::Unidentified(NativeKeyCode::Xkb(200)),
+			name: Key::Unidentified(winit::keyboard::NativeKey::Unidentified),
+		};
+		assert_eq!(unnamed.label(), "Key 200");
+	}
+
+	#[test]
+	fn the_panel_takes_the_key_pressed() {
+		let keyboard = Keyboard::default();
+		let press =
+			|code, name: &str, repeat| keyboard.pressed(PhysicalKey::Code(code), Key::Character(name.into()), repeat);
+		// Nothing is taken unless the panel waits for a key.
+		assert!(press(KeyCode::KeyA, "a", false));
+		keyboard.take(Taking::Binding(None));
+		keyboard.modifiers(ModifiersState::CONTROL);
+		// A modifier is held for the key, which egui hears no more of.
+		assert!(keyboard.pressed(
+			PhysicalKey::Code(KeyCode::ControlLeft),
+			Key::Named(NamedKey::Control),
+			false
+		));
+		assert!(!press(KeyCode::Numpad1, "1", false));
+		assert!(!press(KeyCode::Digit1, "1", false));
+		let Taking::Binding(Some(taken)) = &keyboard.0.lock().unwrap().taking else {
+			panic!("no key was taken");
+		};
+		assert_eq!(taken.key, PhysicalKey::Code(KeyCode::Numpad1));
+		assert!(taken.modifiers.ctrl);
+	}
+
+	#[test]
+	fn focused_keys_fire_once_and_are_taken() {
+		let keyboard = Keyboard::default();
+		let (fire, fired) = mpsc::channel();
+		let bound = Arc::new(Mutex::new(Bindings::from([(Action::Cut, key(KeyCode::Numpad1, "1"))])));
+		keyboard.take(Taking::Firing { bound, fire });
+		let press = |code, repeat| keyboard.pressed(PhysicalKey::Code(code), Key::Character("1".into()), repeat);
+		assert!(press(KeyCode::Digit1, false), "an unbound key reaches egui");
+		assert!(!press(KeyCode::Numpad1, false));
+		assert!(!press(KeyCode::Numpad1, true));
+		assert_eq!(fired.try_iter().count(), 1);
 	}
 
 	#[test]
 	fn bindings_follow_renames_at_once() {
-		let key = |key| Binding {
-			key: KeyboardShortcut::new(egui::Modifiers::NONE, key),
-			position: key,
-		};
 		let scene = |name: &str| Action::Scene(name.into());
+		let (f1, f2, f3) = (key(KeyCode::F1, "F1"), key(KeyCode::F2, "F2"), key(KeyCode::F3, "F3"));
 		let bindings = Bindings::from([
-			(scene("A"), key(Key::F1)),
-			(scene("B"), key(Key::F2)),
-			(Action::Cut, key(Key::F3)),
+			(scene("A"), f1.clone()),
+			(scene("B"), f2.clone()),
+			(Action::Cut, f3.clone()),
 		]);
 		// Swapping two names swaps their keys, and a removed scene keeps its.
 		let renames = BTreeMap::from([
@@ -488,15 +617,15 @@ mod tests {
 			("B".to_string(), Some("A".to_string())),
 		]);
 		let swapped = renamed(&bindings, &renames);
-		assert_eq!(swapped[&scene("A")], key(Key::F2));
-		assert_eq!(swapped[&scene("B")], key(Key::F1));
-		assert_eq!(swapped[&Action::Cut], key(Key::F3));
+		assert_eq!(swapped[&scene("A")], f2);
+		assert_eq!(swapped[&scene("B")], f1);
+		assert_eq!(swapped[&Action::Cut], f3);
 		let removed = BTreeMap::from([("A".to_string(), None)]);
 		assert_eq!(renamed(&bindings, &removed), bindings);
 		// B removed, then A renamed to B: A's key follows it over B's kept one.
 		let onto = BTreeMap::from([("A".to_string(), Some("B".to_string()))]);
 		let moved = renamed(&bindings, &onto);
-		assert_eq!(moved[&scene("B")], key(Key::F1));
+		assert_eq!(moved[&scene("B")], f1);
 		assert!(!moved.contains_key(&scene("A")));
 	}
 }
