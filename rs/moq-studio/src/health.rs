@@ -1843,7 +1843,11 @@ mod tests {
 					Reach::default(),
 				),
 			],
-			uploaded: vec![("chat".into(), "there is no display to paint through".into(), tall.clone())],
+			uploaded: vec![(
+				"chat".into(),
+				"there is no display to paint through".into(),
+				tall.clone(),
+			)],
 			..Default::default()
 		};
 		let uplink = Uplink {
