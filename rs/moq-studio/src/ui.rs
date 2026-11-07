@@ -469,7 +469,7 @@ impl TabViewer for Panels {
 
 	fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
 		if self.effects && *tab == Tab::Health {
-			let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, response.rect.expand(8.0));
+			let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, response.rect.expand(12.0));
 			self.spots.health_tab = Some(Mark::new(&painter).around(response.rect.shrink(2.0)));
 		}
 	}

@@ -226,7 +226,10 @@ impl Fx {
 		ripple.set(self.time, hovered);
 		let params = LiquidMetalParams {
 			flow: 0.6 * ripple.at(self.time),
-			bevel: 6.0,
+			// Flat, so one reflection lies under the label rather than a
+			// horizon crossing it.
+			dome: 0.0,
+			bevel: 3.0,
 			..LiquidMetalParams::chrome()
 		};
 		self.draw(&spot.painter, spot.under, [Effect::fill(params).on(spot.shape(4.0))]);
@@ -247,12 +250,17 @@ impl Fx {
 		let Some(spot) = spot else {
 			return;
 		};
+		// Kept off the controls above the monitor.
+		let mut clip = spot.painter.clip_rect();
+		clip.min.y = clip.min.y.max(spot.rect.top() - 3.0);
+		let painter = spot.painter.with_clip_rect(clip);
 		let shape = spot.shape(2.0);
 		let glow = Effect::glow(GlowParams {
 			style: GlowStyle::Neon,
 			color: tally(),
 			core: rgb(0xffe2dc),
-			radius: 10.0,
+			radius: 8.0,
+			occlusion: 0.0,
 			breathe: 0.25,
 			heat: look.on_air.at(time),
 			..GlowParams::default()
@@ -284,8 +292,8 @@ impl Fx {
 				[ripple.on(shape).over(), sparkles.on(shape).over()].map(|layer| layer.seed(seed))
 			})
 			.collect();
-		self.draw(&spot.painter, spot.under, [glow.on(shape)]);
-		self.draw(&spot.painter, spot.over, bursts);
+		self.draw(&painter, spot.under, [glow.on(shape)]);
+		self.draw(&painter, spot.over, bursts);
 	}
 
 	/// The dot that says the studio records, which pulses.
@@ -299,6 +307,7 @@ impl Fx {
 			period: 1.6,
 			reach: 10.0,
 			width: 1.2,
+			occlusion: 0.0,
 			..PulseParams::default()
 		});
 		let shape = Shape::circle(center.x, center.y, spot.rect.width() / 2.0);
@@ -404,6 +413,7 @@ impl Alerts {
 				core: rgb(0xfff1c4),
 				period: 1.8,
 				reach: 8.0,
+				occlusion: 0.0,
 				intensity: degraded,
 				..PulseParams::default()
 			});
@@ -420,6 +430,9 @@ impl Alerts {
 				glow: 3.0,
 				strands: 1,
 				gap: 0.0,
+				forks: 0.25,
+				fork_len: 8.0,
+				occlusion: 0.0,
 				intensity: unhealthy,
 				..ElectricParams::default()
 			});
