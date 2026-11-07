@@ -318,11 +318,15 @@ background, and its sound joins the audio scenes that hold it. Every page shares
 browser profile, kept in `$XDG_DATA_HOME/moq-studio/browser`
 (`~/.local/share/moq-studio/browser` by default) rather than beside the scene
 file, so cookies and logins, such as an alert service's, survive a reload and
-a restart of the studio. One studio at a time can use it: a second one's
-browser sources fail saying so. Each page renders in a process of its own, so
+a restart of the studio. They are not encrypted with the desktop's keyring,
+so a locked keyring never holds a page back, and anything that can read your
+home directory can read them. One studio at a time can use the profile: a
+second one's browser sources fail saying so. Each page renders in a process of its own, so
 a page that crashes fails only its own source, with the reason, while the
 stream carries on. A crash of the browser itself fails every browser source.
-Either shows at once, since the browser's processes dump no core.
+Either shows at once, since the browser's processes dump no core. On Linux,
+pages run without Chromium's sandbox, as in OBS, so a page that exploits a
+browser bug can do anything you can: add only pages you trust.
 **Reload** in Sources restarts a page, failed or not. A page's dropdown
 lists, such as a `<select>`'s, draw over it and take clicks under
 **Interact**, but it opens no other windows (`window.open` and new-tab links
