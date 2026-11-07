@@ -23,7 +23,8 @@ source among those on program (`Publish::set_on_program` in
 `rs/moq-scene/src/publish.rs`) keeps it encoding.
 
 Moved to m2 on 2026-11-05 (maintainer, /quest-plan): no service places
-sources itself yet, so it waits behind m0 and m1.
+sources itself yet, so it waits behind m0 and m1. Moved on to m3 on
+2026-11-07 (maintainer, /quest-spawn): it drives no customer demand.
 
 A source with its background removed (`background = "remove"`) keeps the
 background in its track, since H.264 carries no transparency. Publishing one
@@ -37,4 +38,4 @@ user does, so `README.md` documents them.
 
 ## Related
 
-- [Viewer-side composition](/quest/m2/compose/README.md) - the epic that composes from independently published sources
+- [Viewer-side composition](/quest/m3/compose/README.md) - the epic that composes from independently published sources

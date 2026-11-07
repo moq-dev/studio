@@ -21,3 +21,4 @@ there first. A quest here that needs it waits on a pin quest, which
 - [m0: the studio](/quest/m0/README.md) - the native and wasm studio for creators who rely on OBS today
 - [m1: after the studio ships](/quest/m1/README.md) - viewers and a server compose a broadcast from its sources and a layout track, plus studio features held past m0
 - [m2: later](/quest/m2/README.md) - work with no consumer yet
+- [m3: someday](/quest/m3/README.md) - work no customer asks for, kept so its plans are not lost
