@@ -3913,10 +3913,16 @@ mod tests {
 			{program_green:?}; portrait red to {tall_red:?}, green from {tall_green:?}"
 		);
 
-		// The cut played the tone again, as its scene went on program.
+		// The cut played the tone again, as its scene went on program: after
+		// the last red frame, once its file decoded, which takes as long as
+		// it takes.
 		let run = engine.state.lock().unwrap().sources.get("tone").unwrap().run();
 		assert_eq!(run.play, 1, "the cut played the tone again, once");
 		let played = stamp(&engine, run.begun.expect("the tone's second play began"));
+		assert!(
+			played > program_red.max(tall_red),
+			"the tone plays with the cut, not before: {played:?}"
+		);
 		// Until then, the program's viewer heard nothing while the portrait's
 		// heard the bed.
 		assert!(bed < played, "the bed is heard before the cut");
