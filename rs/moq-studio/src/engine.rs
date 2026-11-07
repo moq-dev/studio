@@ -1185,7 +1185,7 @@ impl Engine {
 			let state = self.state.lock().unwrap();
 			let on_program = state.on_program();
 			let beside = state.beside();
-			let shown = |name: &str| health::Shown {
+			let shown = |name: &str| health::Live {
 				program: on_program.contains(name),
 				scenes: beside
 					.iter()
@@ -1194,24 +1194,32 @@ impl Engine {
 					.collect(),
 			};
 			let collection = &state.collection;
-			let published = collection.scenes.iter().filter(|scene| scene.published);
-			let carried: BTreeSet<&str> = collection
-				.program_audio()
-				.into_iter()
-				.chain(published.filter_map(|scene| collection.published_audio(&scene.name)))
+			let program_audio = collection.program_audio();
+			let published: Vec<(&str, Option<&str>)> = collection
+				.scenes
+				.iter()
+				.filter(|scene| scene.published)
+				.map(|scene| (scene.name.as_str(), collection.published_audio(&scene.name)))
 				.collect();
-			let heard = |name: &str| carried.iter().any(|scene| state.sources.plays(scene, name));
+			let plays = |audio: Option<&str>, name: &str| audio.is_some_and(|audio| state.sources.plays(audio, name));
+			let heard = |name: &str| health::Live {
+				program: plays(program_audio, name),
+				scenes: published
+					.iter()
+					.filter(|(_, audio)| plays(*audio, name))
+					.map(|(scene, _)| scene.to_string())
+					.collect(),
+			};
 			let stalled = state
 				.sources
 				.iter()
 				.filter_map(|(name, feed)| {
 					let stall = feed.stalled(now)?;
-					let shown = shown(name);
-					let matters = match stall {
-						source::Stall::Picture(_) => shown.any(),
+					let live = match stall {
+						source::Stall::Picture(_) => shown(name),
 						source::Stall::Sound(_) => heard(name),
 					};
-					matters.then(|| (name.to_string(), stall, shown))
+					live.any().then(|| (name.to_string(), stall, live))
 				})
 				.collect();
 			// A stinger's clip rests ended between stingers, unless a live scene
@@ -1222,8 +1230,11 @@ impl Engine {
 				.sources
 				.iter()
 				.filter_map(|(name, feed)| {
-					let shown = shown(name);
-					if !shown.any() && !heard(name) {
+					let reach = health::Reach {
+						shown: shown(name),
+						heard: heard(name),
+					};
+					if !reach.any() {
 						return None;
 					}
 					// A picture that fails to draw fails the source as the Sources panel shows it.
@@ -1236,7 +1247,7 @@ impl Engine {
 						Status::Failed(_) => true,
 						_ => false,
 					};
-					stopped.then(|| (name.to_string(), status, shown))
+					stopped.then(|| (name.to_string(), status, reach))
 				})
 				.collect();
 			(stalled, stopped)
@@ -3160,12 +3171,17 @@ mod tests {
 			}
 		};
 		kio::clock::timeout(TIMEOUT, ended()).await.expect("the bed ends");
-		let rested = |name: &str, program| {
-			let shown = health::Shown {
+		// Both clips are heard on program.
+		let rested = |name: &str, shown| {
+			let live = |program| health::Live {
 				program,
 				scenes: Vec::new(),
 			};
-			(name.to_string(), Status::Ended, shown)
+			let reach = health::Reach {
+				shown: live(shown),
+				heard: live(true),
+			};
+			(name.to_string(), Status::Ended, reach)
 		};
 		let stopped = engine.local(kio::clock::now()).stopped;
 		assert_eq!(stopped, [rested("bed", false)]);

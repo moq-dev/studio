@@ -1,4 +1,4 @@
-# Composable scenes
+# [M] Composable scenes
 
 ## Goal
 
@@ -49,6 +49,7 @@ picks a picture scene and an audio scene; a scene no panel shows and no output
 reads skips drawing. Per-scene cost grows only with what that scene draws;
 `compositor::bench` measures it.
 
-## Required
-
-- [Pan in audio scenes](/quest/m0/scenes/audio.md) - each sound's strip pans, once moq's bus strip can
+Changed 2026-11-07 with the maintainer, on
+[moq-dev/studio#77](https://github.com/moq-dev/studio/pull/77): pan left
+this epic for [its own quest](/quest/m0/audio-pan.md), since it waits on
+moq-audio, so it no longer holds up this end-to-end test.

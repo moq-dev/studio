@@ -411,7 +411,8 @@ loop = true          # start over at the end
 ```
 
 Without `loop`, it plays once, then holds its last picture, silent, and reads
-as ended in Sources and, while the program shows or plays it, in Health.
+as ended in Sources and, while the program or a published scene shows or
+plays it, in Health.
 **Play** in Sources plays it from its start again, as does going on program
 with `restart`, in a scene on air or the top layer, when it was not on program
 before. Either clears its picture at once, so the end of the last play never
@@ -1017,13 +1018,15 @@ The Health panel grades the stream every second on the thresholds moq's
 `hang::health` shares with the rest of the stack, and lists each problem
 with its cause in plain words: a relay is unreachable, the uplink is
 congested or losing packets, the relay is far away, the encoder is behind or
-stuck, a source stalled (a camera or broadcast the program draws, or a
-microphone or system audio the audio scene on program plays: unmuted and
-held by it), a source the program shows or plays failed or, as a media file
-that does not loop, played to its end, or viewers are late, stalling, or cannot
-decode a track. A relay lost while the other serves is
+stuck, a source stalled (a camera or broadcast the program or a published
+scene draws, or a microphone or system audio that the audio scene on program
+or one a published scene carries plays: unmuted and held by it), a source
+one of them shows or plays failed or, as a media file that does not loop,
+played to its end, or viewers are late, stalling, or cannot decode a track.
+A relay lost while the other serves is
 degraded, since viewers have nothing left to fall back to; with none serving
-it is unhealthy. A problem with a published scene's broadcast names the scene.
+it is unhealthy. A problem with a published scene's broadcast, or a source
+only it shows or plays, names the scene.
 Below that it shows:
 
 - **Relays**: each relay's state, and the protocol its session negotiated.
