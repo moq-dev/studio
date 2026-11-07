@@ -102,6 +102,8 @@ repository.
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
 - [The program reaches a relay on every runner](/quest/m0/relay-test-flake.md) - the relay engine test stops failing the nightly on GitHub's runner
 - [Browser sources make no outside requests](/quest/m0/browser-offline.md) - no component updates, spellcheck downloads, or network time from the helper
+- [Unpublishing a scene ends its broadcast cleanly](/quest/m0/unpublish-clean.md) - viewers get a clean finish, not `Unroutable`, when a scene stops publishing
+- [A media file's sound plays with its pictures](/quest/m0/media-av-sync.md) - media sources write a bus latency ahead, as broadcast sources do
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
 - [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
