@@ -1,14 +1,15 @@
 //! Everything behind the window: the GPU, the sources, the program clock that
 //! draws the canvas and mixes the audio, and the broadcast it encodes into:
-//! the program, at the canvas size and at half of it ([`crate::ladder`]). The
-//! relays serve that broadcast, and recordings read it. Each local source's own
+//! the program, at the canvas size and at half of it ([`crate::ladder`]), and
+//! each published scene's beneath it, at its own size and half. The relays
+//! serve those broadcasts, and recordings read the program or a scene. Each local source's own
 //! track stays in a broadcast of the studio's own, which recordings read too,
 //! as they read each broadcast source from the relays.
 //!
 //! Threads:
-//! - **program** draws preview and program once per canvas frame and hands the
-//!   program to each rendition's encoder its gate lets encode, scaled to the
-//!   rendition and stamped with the program clock.
+//! - **program** draws preview, program, and each published scene once per
+//!   canvas frame and hands each to each rendition's encoder its gate lets
+//!   encode, scaled to the rendition and stamped with the program clock.
 //! - **audio** advances the audio bus, and with it every mix, on the same
 //!   clock.
 //! - **audio-encode** encodes the mix on program into the program audio, and
@@ -98,7 +99,7 @@ pub struct State {
 	pub reloads: u64,
 	pub sources: Sources,
 	pub compositor: Compositor,
-	/// The main canvas's virtual camera, while it is on.
+	/// The program's virtual camera, while it is on.
 	camera: Option<crate::vcam::Camera>,
 	/// Edited since the sources were last synced.
 	stale: bool,
@@ -197,11 +198,12 @@ impl State {
 	}
 
 	/// Make `collection`, which the edits `made` led to from the current one,
-	/// the one drawn, once the compositor takes its canvas. The scenes in
-	/// preview and on program follow the renames and removals `made` holds,
+	/// the one drawn, once the compositor fits its scenes' sizes. The scenes
+	/// in preview and on program follow the renames and removals `made` holds,
 	/// each edit read against the collection it was made to, and any
-	/// `collection` lacks is dropped. Edits that remove a scene on air, or
-	/// leave one drawing the program, are refused, changing nothing.
+	/// `collection` lacks is dropped. Edits that remove a scene on air, leave
+	/// one drawing the program, or make one another size than the program,
+	/// are refused, changing nothing.
 	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<()> {
 		let mut before = self.collection.clone();
 		let mut renames = Vec::with_capacity(made.len());
@@ -210,7 +212,7 @@ impl State {
 			before.apply(edit)?;
 		}
 		keep_on_air(self.compositor.on_air(), &renames, &collection)?;
-		self.compositor.set_canvases(&collection)?;
+		self.compositor.fit(&collection)?;
 		for renames in &renames {
 			self.compositor.rename(renames);
 		}
@@ -240,33 +242,44 @@ impl State {
 		Some(scene)
 	}
 
-	/// The sources whose pictures any canvas's program draws, through clones:
-	/// those [`placed`](Self::placed) there, and the clip a stinger under way
-	/// plays with each mask its source's filters read.
-	fn shown(&self) -> BTreeSet<String> {
+	/// The sources whose pictures program draws, through clones: those the
+	/// scenes on air, including one leaving in a transition, and the top layer
+	/// [`place`](Self::placed), and the clip a stinger under way plays with
+	/// each mask its source's filters read.
+	fn on_program(&self) -> BTreeSet<String> {
 		let collection = &self.collection;
 		let stinger = self.compositor.stinger().into_iter().flat_map(|clip| {
 			let filters = collection.video.get(clip).into_iter().flat_map(|video| &video.filters);
 			std::iter::once(clip).chain(masks(filters).map(String::as_str))
 		});
-		let mut shown = self.placed();
+		let mut shown = self.placed(self.compositor.on_air().map(Some).chain([None]));
 		shown.extend(stinger.map(|source| collection.capture(source).to_string()));
 		shown
 	}
 
-	/// The sources whose pictures the scenes on air place on any canvas's
-	/// program, through clones: each visible item's of the scenes on air,
-	/// including one leaving in a transition, and of the top layers over them,
-	/// and of the scenes they draw, and each mask's it reads.
-	fn placed(&self) -> BTreeSet<String> {
+	/// Each published or recorded scene drawn beside program, not on air, and
+	/// the sources whose pictures it [places](Self::placed).
+	fn beside(&self) -> Vec<(&str, BTreeSet<String>)> {
+		let on_air: Vec<&str> = self.compositor.on_air().collect();
+		let scenes = self.compositor.live().filter(|scene| !on_air.contains(scene));
+		scenes.map(|scene| (scene, self.placed([Some(scene)]))).collect()
+	}
+
+	/// The sources whose pictures program or a scene [beside](Self::beside)
+	/// it shows.
+	fn shown(&self) -> BTreeSet<String> {
+		let mut shown = self.on_program();
+		shown.extend(self.beside().into_iter().flat_map(|(_, placed)| placed));
+		shown
+	}
+
+	/// The sources whose pictures `scenes` place, `None` being the top layer,
+	/// through clones: each visible item's, of the scenes they draw, and each
+	/// mask's it reads.
+	fn placed<'a>(&self, scenes: impl IntoIterator<Item = Option<&'a str>>) -> BTreeSet<String> {
 		let collection = &self.collection;
-		let scenes: Vec<Option<&str>> = self.compositor.on_air().map(Some).chain([None]).collect();
-		let canvases = std::iter::once(None).chain(collection.canvases.keys().map(Some));
-		let layers = canvases.flat_map(|canvas| {
-			scenes.iter().map(move |scene| moq_scene::Layer {
-				canvas: canvas.cloned(),
-				scene: scene.map(str::to_string),
-			})
+		let layers = scenes.into_iter().map(|scene| moq_scene::Layer {
+			scene: scene.map(str::to_string),
 		});
 		let items = collection.drawn(layers);
 		items
@@ -338,9 +351,10 @@ impl autosave::Document for State {
 }
 
 /// Refuse edits, each read as its [`Collection::renames`], that remove a
-/// scene `on_air` program draws, so a slip cannot put black on air, or that
+/// scene `on_air` program draws, so a slip cannot put black on air, that
 /// leave one drawing the program in `collection`, which it would draw into
-/// itself. A reload that leaves one out still drops it, having nothing to
+/// itself, or that make one another size than the program, which it would
+/// not fill. A reload that leaves one out still drops it, having nothing to
 /// show instead.
 fn keep_on_air<'a>(
 	on_air: impl IntoIterator<Item = &'a str>,
@@ -359,6 +373,11 @@ fn keep_on_air<'a>(
 			!collection.draws_program(scene),
 			"`{scene}` is on air, so it cannot draw the program, which it would draw into itself"
 		);
+		let size = collection.canvas(Some(scene)).map(|canvas| canvas.size());
+		anyhow::ensure!(
+			size.is_none_or(|size| size == collection.canvas.size()),
+			"`{scene}` is on air, so it stays the program's size; cut to another scene first"
+		);
 	}
 	Ok(())
 }
@@ -366,17 +385,21 @@ fn keep_on_air<'a>(
 /// How the output is doing, for the stream panel.
 #[derive(Default)]
 pub struct Stats {
-	/// Canvas frames drawn.
+	/// Program frames drawn.
 	pub rendered: AtomicU64,
-	/// The main canvas's program video.
+	/// The program video.
 	pub video: Arc<VideoStats>,
-	/// Each further canvas's program video, by the canvas's name, while it is
-	/// drawn.
-	canvases: Mutex<BTreeMap<String, Arc<VideoStats>>>,
-	/// The video encoders open: every canvas's program and the sources'.
+	/// The recording's own video, of the program or the scene recordings
+	/// hold.
+	pub recording: Arc<VideoStats>,
+	/// Each published scene's video, by the scene's name, while it is
+	/// published.
+	published: Mutex<BTreeMap<String, Arc<VideoStats>>>,
+	/// The video encoders open: the program's, each published scene's, the
+	/// recording's, and the sources'.
 	pub sessions: Sessions,
-	/// Each program track's share of the connection's bandwidth, by name: a
-	/// further canvas's prefixed with its own.
+	/// Each published track's share of the connection's bandwidth, by name: a
+	/// published scene's prefixed with its own.
 	grants: Mutex<BTreeMap<String, bandwidth::Consumer>>,
 	/// Why the audio stopped, if it did.
 	audio_error: Mutex<Option<String>>,
@@ -385,11 +408,12 @@ pub struct Stats {
 	recording_audio_error: Mutex<Option<String>>,
 }
 
-/// How one canvas's program video is doing.
+/// How the program's video, a published scene's, or the recording's is
+/// doing.
 #[derive(Default)]
 pub struct VideoStats {
-	/// What each of its video encoders costs: the canvas size, the half size,
-	/// and, for the main canvas, the recording's own canvas size.
+	/// What each of its video encoders costs: a published video's full size
+	/// and half size, or, third, the recording's.
 	pub renditions: [Load; 3],
 	/// Whether the encoder reads the program on the GPU, rather than each frame
 	/// being read back to the CPU.
@@ -408,6 +432,19 @@ pub struct VideoStats {
 	encoder: Mutex<EncoderName>,
 	/// Why the video stopped, if it did, until a new rendition starts.
 	error: Mutex<Option<String>>,
+	/// Which video this is, so a scene published again under its name is
+	/// told from the one before, whose counters it does not continue.
+	generation: Generation,
+}
+
+/// A number no other [`VideoStats`] has.
+struct Generation(u64);
+
+impl Default for Generation {
+	fn default() -> Self {
+		static NEXT: AtomicU64 = AtomicU64::new(0);
+		Self(NEXT.fetch_add(1, Ordering::Relaxed))
+	}
 }
 
 /// What one of the program's renditions costs.
@@ -493,12 +530,12 @@ impl VideoStats {
 }
 
 impl Stats {
-	/// Each further canvas's program video, by the canvas's name.
-	pub fn canvases(&self) -> BTreeMap<String, Arc<VideoStats>> {
-		self.canvases.lock().unwrap().clone()
+	/// Each published scene's video, by the scene's name.
+	pub fn published(&self) -> BTreeMap<String, Arc<VideoStats>> {
+		self.published.lock().unwrap().clone()
 	}
 
-	/// Each program track's share of the connection's bandwidth now, by name:
+	/// Each published track's share of the connection's bandwidth now, by name:
 	/// `None` while the connection has no estimate.
 	pub fn grants(&self) -> BTreeMap<String, Option<bandwidth::Rate>> {
 		let grants = self.grants.lock().unwrap();
@@ -508,7 +545,7 @@ impl Stats {
 			.collect()
 	}
 
-	/// Why the main canvas's output stopped, if it did.
+	/// Why the program's output stopped, if it did.
 	pub fn error(&self) -> Option<String> {
 		let video = self.video.error();
 		let audio = self.audio_error.lock().unwrap().clone();
@@ -661,8 +698,9 @@ impl Program {
 
 	/// Encode the local sources' tracks on program, whether or not anything
 	/// reads them, so a replay of one has its past: the pictures `shown` in a
-	/// scene on air on any canvas, and the sound the program mix plays. A media file heard
-	/// and not shown encodes only its sound.
+	/// scene on air or a published or recorded scene drawn, and the sound the
+	/// program mix plays. A media file heard and not shown encodes only its
+	/// sound.
 	fn on_program(&self, state: &State, shown: BTreeSet<String>) {
 		let program = &state.collection.mixes.program;
 		let heard = state
@@ -829,12 +867,12 @@ impl Engine {
 			browser: browser(&gpu)?,
 		});
 		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
-		compositor.set_canvases(&collection)?;
+		compositor.fit(&collection)?;
 		// The first scene that can go on program starts there, and in preview.
 		let first = collection
 			.scenes
 			.iter()
-			.find(|scene| !collection.draws_program(&scene.name));
+			.find(|scene| collection.takes(&scene.name).is_ok());
 		compositor.set_preview(first.map(|scene| scene.name.clone()));
 		compositor.cut(&collection, &sources)?;
 
@@ -871,6 +909,7 @@ impl Engine {
 		let Publish {
 			renditions,
 			ladder,
+			recording,
 			extras,
 			audio,
 			recorded_audio,
@@ -891,22 +930,21 @@ impl Engine {
 			*engine.feeds.lock().unwrap() = Some(feeds);
 		}
 		let main = Line::new(renditions, canvas, ladder, true);
-		// Opened before the program clock starts the sources, as the main
-		// canvas's encoder is, so each holds its encode session first.
+		// Opened before the program clock starts the sources, as the
+		// program's encoder is, so each holds its encode session first.
 		let mut lines = Lines::new();
-		let canvases: Vec<(String, Canvas)> = {
+		let (published, recorded): (Vec<(String, Canvas)>, Canvas) = {
 			let state = engine.state.lock().unwrap();
-			let collection = state.collection();
-			let canvases = collection.canvases.keys();
-			canvases
-				.filter_map(|name| Some((name.clone(), collection.canvas(Some(name))?)))
-				.collect()
+			(published(state.collection()), recorded(state.collection()).1)
 		};
-		for (name, canvas) in canvases {
+		// Probed now too, so a scene a recording cannot encode says so before
+		// anyone records it. It opens its session only once recorded.
+		let recording = Line::open(recording, recorded).await;
+		for (name, canvas) in published {
 			let video = Arc::new(VideoStats::default());
 			engine
 				.stats
-				.canvases
+				.published
 				.lock()
 				.unwrap()
 				.insert(name.clone(), video.clone());
@@ -919,8 +957,14 @@ impl Engine {
 		// publication alive beside a retry's.
 		let starting = Starting(Some(engine.clone()));
 		let program = engine.clone();
+		let encoders = Encoders {
+			main,
+			recording,
+			extras,
+			lines,
+		};
 		let thread = clocked("program".into(), async move || {
-			program.run_program(start, epoch, main, extras, lines).await
+			program.run_program(start, epoch, encoders).await
 		})?;
 		engine.threads.lock().unwrap().push(thread);
 		let mix = engine.clone();
@@ -971,10 +1015,10 @@ impl Engine {
 		Ok(engine)
 	}
 
-	/// Stop the program clock, then wait for each rendition's encoder, on
-	/// every canvas, to publish the copies on their way to it and what it
+	/// Stop the program clock, then wait for each rendition's encoder, of
+	/// every picture, to publish the copies on their way to it and what it
 	/// still holds, and to end its video track, so quitting loses none of the
-	/// program's last pictures; a further canvas's catalog then finishes too.
+	/// program's last pictures; a published scene's catalog then finishes too.
 	/// The program audio ends its track too, so a recording reading
 	/// the program reaches the end of each. Then stop every source, which
 	/// finishes its own track on its thread, and the browser sources' helper,
@@ -1000,7 +1044,7 @@ impl Engine {
 		}
 	}
 
-	/// Once [`stop`](Self::stop) has ended the tracks of every canvas, close
+	/// Once [`stop`](Self::stop) has ended the tracks of every picture, close
 	/// each relay session once the relay has their tails, so a viewer or a
 	/// recording on the relay receives them rather than a cut. Meanwhile wait
 	/// for each source's thread to end, having finished its own track. Bounded
@@ -1116,35 +1160,49 @@ impl Engine {
 	/// What only the studio knows about its stream at `now`.
 	fn local(&self, now: Instant) -> health::Local {
 		let stats = &self.stats;
-		// A stalled picture matters where any canvas's program draws it: a scene on air,
-		// including one leaving in a transition, or the top layer over them.
+		// A stalled picture matters where a live scene draws it: a scene on air,
+		// including one leaving in a transition, the top layer over them, or a
+		// published or recorded scene drawn.
 		// Stalled sound matters only if the mix on program plays it, not one
 		// only listened to. A source that stopped matters either way.
 		let (stalled, stopped) = {
 			let state = self.state.lock().unwrap();
-			let shown = state.shown();
+			let on_program = state.on_program();
+			let beside = state.beside();
+			let shown = |name: &str| health::Shown {
+				program: on_program.contains(name),
+				scenes: beside
+					.iter()
+					.filter(|(_, placed)| placed.contains(name))
+					.map(|(scene, _)| scene.to_string())
+					.collect(),
+			};
 			let heard = |name: &str| state.sources.plays(&state.collection.mixes.program, name);
 			let stalled = state
 				.sources
 				.iter()
 				.filter_map(|(name, feed)| {
 					let stall = feed.stalled(now)?;
+					let shown = shown(name);
 					let matters = match stall {
-						source::Stall::Picture(_) => shown.contains(name),
+						source::Stall::Picture(_) => shown.any(),
 						source::Stall::Sound(_) => heard(name),
 					};
-					matters.then(|| (name.to_string(), stall))
+					matters.then(|| (name.to_string(), stall, shown))
 				})
 				.collect();
-			// A stinger's clip rests ended between stingers, unless a scene on
-			// air places it.
+			// A stinger's clip rests ended between stingers, unless a live scene
+			// places it.
 			let stinger = state.collection.transition.stinger();
-			let placed = state.placed();
+			let placed = state.placed(state.compositor.live().map(Some).chain([None]));
 			let stopped = state
 				.sources
 				.iter()
-				.filter(|(name, _)| shown.contains(*name) || heard(name))
 				.filter_map(|(name, feed)| {
+					let shown = shown(name);
+					if !shown.any() && !heard(name) {
+						return None;
+					}
 					// A picture that fails to draw fails the source as the Sources panel shows it.
 					let status = match state.compositor.error(name) {
 						Some(err) => Status::Failed(err.to_string()),
@@ -1155,28 +1213,37 @@ impl Engine {
 						Status::Failed(_) => true,
 						_ => false,
 					};
-					stopped.then(|| (name.to_string(), status))
+					stopped.then(|| (name.to_string(), status, shown))
 				})
 				.collect();
 			(stalled, stopped)
 		};
-		let video = &stats.video;
-		let canvas = &video.renditions[0];
+		let video = |video: &VideoStats, failed: Option<String>| {
+			let full = &video.renditions[Role::Canvas as usize];
+			health::Video {
+				dropped: full.dropped.load(Ordering::Relaxed),
+				encoded: full.encoded.load(Ordering::Relaxed),
+				encoding: video.encoding.load(Ordering::Relaxed),
+				watched: video.watched.load(Ordering::Relaxed),
+				encoder: video.encoder(),
+				failed,
+				generation: video.generation.0,
+			}
+		};
+		// The program's output stops with the audio too.
+		let program = (None, video(&stats.video, stats.error()));
+		let published = stats.published().into_iter();
+		let published = published.map(|(name, stats)| (Some(name), video(&stats, stats.error())));
 		health::Local {
 			rendered: stats.rendered.load(Ordering::Relaxed),
-			dropped: canvas.dropped.load(Ordering::Relaxed),
-			encoded: canvas.encoded.load(Ordering::Relaxed),
-			encoding: video.encoding.load(Ordering::Relaxed),
+			broadcasts: std::iter::once(program).chain(published).collect(),
 			grants: stats.grants(),
-			watched: video.watched.load(Ordering::Relaxed),
-			encoder: video.encoder(),
-			failed: stats.error(),
 			stalled,
 			stopped,
 		}
 	}
 
-	/// Turn the main canvas's virtual camera on or off. Turning it on fails,
+	/// Turn the program's virtual camera on or off. Turning it on fails,
 	/// saying why, when this machine has no way to publish one.
 	pub fn set_camera(&self, on: bool) -> anyhow::Result<()> {
 		let canvas = self.state.lock().unwrap().compositor.canvas();
@@ -1191,23 +1258,29 @@ impl Engine {
 		Ok(())
 	}
 
-	/// Draw every canvas once per tick of the program clock, and hand each
-	/// canvas's program to its renditions' encoders, stamped `epoch` past
-	/// `start`, while their gates let them encode: the canvas size every frame
+	/// Draw the program and each published scene once per tick of the program
+	/// clock, and hand each to its renditions' encoders, stamped `epoch` past
+	/// `start`, while their gates let them encode: the full size every frame
 	/// while live and not on demand, otherwise only while anyone watches it,
-	/// the half size only while anyone watches it, and the main canvas's
-	/// recording copy only while recording.
+	/// and the half size only while anyone watches it. The program, or the
+	/// scene recordings hold, goes to the recording's own encoder too, which
+	/// encodes only while recording.
 	///
-	/// `main` encodes the main canvas, and `lines` the further canvases the
-	/// studio started with. Each further canvas added since gets a [`Line`] of
-	/// its own from `extras` once drawn, in a broadcast of its own, and each
-	/// ends once the collection drops its canvas. Drawing outlives the encoders: a failed
-	/// output stops copying its program, and the canvases keep moving. The
-	/// virtual camera, while on, takes every main canvas frame an app reads.
+	/// A published or recorded scene is drawn only while one of its encoders
+	/// takes the frame, so one nobody reads costs no drawing. See [`Encoders`]
+	/// for what encodes each. Drawing outlives the encoders: a failed output
+	/// stops copying its picture, and the scenes keep moving. The virtual
+	/// camera, while on, takes every program frame an app reads.
 	///
 	/// Runs until the studio [stops](Self::stop), and returns once every
 	/// rendition's encode thread has finished its track.
-	async fn run_program(&self, start: Instant, epoch: Duration, mut main: Line, extras: Extras, mut lines: Lines) {
+	async fn run_program(&self, start: Instant, epoch: Duration, encoders: Encoders) {
+		let Encoders {
+			mut main,
+			mut recording,
+			extras,
+			mut lines,
+		} = encoders;
 		let mut framerate = self.state.lock().unwrap().compositor.canvas().framerate;
 		let mut clock = program_clock(start, framerate);
 		// The encoders of lines since ended, waited on as the studio stops so
@@ -1220,6 +1293,7 @@ impl Engine {
 				// Without a sender, each encoder publishes what it was sent and
 				// still holds, then finishes its track.
 				retired.push(main.end(None));
+				retired.push(recording.end(None));
 				retired.extend(
 					lines
 						.into_values()
@@ -1231,7 +1305,8 @@ impl Engine {
 				}
 				return;
 			}
-			let drawn: Vec<(Option<String>, wgpu::Texture, Canvas)> = {
+			retired.retain(|ended| !ended.is_finished());
+			let drawn = {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
 				if std::mem::take(&mut state.stale) {
@@ -1245,10 +1320,46 @@ impl Engine {
 					}
 					self.pick_mixes(state);
 				}
+
+				// Each published scene's line starts once it is published, in a
+				// broadcast of its own, and ends once it no longer is.
+				let published = published(&state.collection);
+				let gone: Vec<String> = lines
+					.keys()
+					.filter(|line| !published.iter().any(|(name, _)| name == *line))
+					.cloned()
+					.collect();
+				for name in gone {
+					if let Some(Some((line, broadcast))) = lines.remove(&name) {
+						retired.push(line.end(Some(broadcast)));
+					}
+					self.stats.published.lock().unwrap().remove(&name);
+				}
+				for (name, canvas) in &published {
+					lines.entry(name.clone()).or_insert_with(|| {
+						let video = Arc::new(VideoStats::default());
+						self.stats.published.lock().unwrap().insert(name.clone(), video.clone());
+						extras
+							.start(name, *canvas, video.clone(), &self.program)
+							.inspect_err(|err| video.fail(format!("{err:#}")))
+							.ok()
+					});
+				}
+				let (recorded, recorded_canvas) = recorded(&state.collection);
+				let wants = |name: &str| matches!(lines.get(name), Some(Some((line, _))) if line.wants());
+				let mut outputs: BTreeMap<&str, bool> =
+					published.iter().map(|(name, _)| (name.as_str(), wants(name))).collect();
+				if let Some(scene) = &recorded {
+					*outputs.entry(scene).or_default() |= recording.wants();
+				}
+				state.compositor.set_outputs(outputs);
+
 				// Before drawing, so a media file that restarts going on program
-				// is cleared in this frame rather than showing where it ended.
+				// is cleared in this frame rather than showing where it ended. A
+				// scene beside program starting to draw restarts none: its
+				// sound would start over in the program mix too.
+				state.sources.set_on_program(&state.on_program());
 				let shown = state.shown();
-				state.sources.set_on_program(&shown);
 				if let Err(err) = state.compositor.render(&state.collection, &state.sources, tick) {
 					tracing::error!(%err, "cannot draw the canvas");
 					continue;
@@ -1257,52 +1368,40 @@ impl Engine {
 				if let Some(camera) = &mut state.camera {
 					camera.offer(state.compositor.program(), state.compositor.canvas());
 				}
-				state
-					.compositor
-					.outputs()
-					.map(|(name, output)| (name.map(str::to_string), output.program().clone(), output.canvas()))
-					.collect()
+				let compositor = &state.compositor;
+				let program = (compositor.program().clone(), compositor.canvas());
+				let texture = |scene: &str| compositor.output(scene).and_then(moq_scene::Output::texture).cloned();
+				Drawn {
+					published: published
+						.into_iter()
+						.map(|(name, canvas)| {
+							let texture = texture(&name);
+							(name, texture, canvas)
+						})
+						.collect(),
+					recorded: match recorded {
+						Some(scene) => (texture(&scene), recorded_canvas),
+						None => (Some(program.0.clone()), program.1),
+					},
+					program,
+				}
 			};
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
 			let timestamp = moq_net::Timestamp::try_from(epoch + tick.saturating_duration_since(start)).ok();
-			// Every canvas shares the main one's frame rate.
-			let drawing = drawn[0].2.framerate;
-			if drawing != framerate {
-				framerate = drawing;
+			// Every scene shares the program's frame rate.
+			let (program, canvas) = drawn.program;
+			if canvas.framerate != framerate {
+				framerate = canvas.framerate;
 				clock = program_clock(tick + period(framerate), framerate);
 			}
-
-			retired.retain(|ended| !ended.is_finished());
-			let gone: Vec<String> = lines
-				.keys()
-				.filter(|line| !drawn.iter().any(|(name, _, _)| name.as_ref() == Some(*line)))
-				.cloned()
-				.collect();
-			for name in gone {
-				if let Some(Some((line, broadcast))) = lines.remove(&name) {
-					retired.push(line.end(Some(broadcast)));
+			main.feed(Some(&program), canvas, timestamp);
+			let (texture, canvas) = drawn.recorded;
+			recording.feed(texture.as_ref(), canvas, timestamp);
+			for (name, texture, canvas) in drawn.published {
+				if let Some(Some((line, _))) = lines.get_mut(&name) {
+					line.feed(texture.as_ref(), canvas, timestamp);
 				}
-				self.stats.canvases.lock().unwrap().remove(&name);
-			}
-
-			for (name, program, canvas) in drawn {
-				let line = match &name {
-					None => &mut main,
-					Some(name) => {
-						let started = lines.entry(name.clone()).or_insert_with(|| {
-							let video = Arc::new(VideoStats::default());
-							self.stats.canvases.lock().unwrap().insert(name.clone(), video.clone());
-							extras
-								.start(name, canvas, video.clone(), &self.program)
-								.inspect_err(|err| video.fail(format!("{err:#}")))
-								.ok()
-						});
-						let Some((line, _)) = started else { continue };
-						line
-					}
-				};
-				line.feed(&program, canvas, timestamp);
 			}
 		}
 	}
@@ -1439,7 +1538,10 @@ struct Publish {
 	/// The renditions of the canvas the studio started with, unless the canvas
 	/// could not be encoded without a relay.
 	ladder: Option<Ladder>,
-	/// What publishes each further canvas.
+	/// Where the recording's own video goes, of the program or the scene it
+	/// holds.
+	recording: Renditions,
+	/// What publishes each published scene.
 	extras: Extras,
 	/// The program audio's encoder.
 	audio: moq_audio::encode::Producer,
@@ -1484,7 +1586,7 @@ async fn publish(
 	// Probed now, so a machine that cannot encode the canvas fails at startup
 	// rather than once the program clock starts. Without a relay the studio
 	// still composes, previews, and records audio, and a new canvas tries again.
-	let probe = match Probe::new(gpu, canvas, true).await {
+	let probe = match Probe::new(gpu, canvas, false).await {
 		Ok(probe) => Some(probe),
 		Err(err) if live.is_none() => {
 			stats.video.fail(format!("{err:#}"));
@@ -1505,22 +1607,14 @@ async fn publish(
 	// both and any solicitation.
 	let reserved = catalog.reserve();
 	// Viewers report back beneath the broadcast, which only a relay carries.
-	let viewers = match live {
-		Some(_) => {
-			let (echo, viewers) = health::echo(path)?;
-			let mut soliciting = catalog.clone();
-			let mut section = soliciting.modify()?;
-			section.echo = Some(hang::catalog::Echo::new(echo));
-			section.commit()?;
-			Some(viewers)
-		}
-		None => None,
-	};
-	// What a recording reads the program from: its own canvas-size encoder,
-	// at full quality whatever the grant, and the mix it holds, in a
-	// broadcast no relay sees: announced on an origin of its own, which no
-	// relay connection carries, so a recording reads it as it would the
-	// published program.
+	if live.is_some() {
+		health::solicit(&mut catalog.clone(), path)?;
+	}
+	// What a recording reads the program from: its own full-size encoder, of
+	// the program or the scene it holds, at full quality whatever the grant,
+	// and the mix it holds, in a broadcast no relay sees: announced on an
+	// origin of its own, which no relay connection carries, so a recording
+	// reads it as it would the published program.
 	let local = moq_tokio::origin::spawn();
 	let recording = local
 		.route("recording", moq_net::origin::RouteOptions::hidden())
@@ -1537,10 +1631,7 @@ async fn publish(
 		gpu: gpu.clone(),
 		broadcast: broadcast.clone(),
 		timebase: catalog.timebase(),
-		recording: Some(Recording {
-			broadcast: recorder.clone(),
-			timebase: recorded.timebase(),
-		}),
+		record: false,
 		bandwidth: bandwidth.clone(),
 		// Live on a relay and not on demand; otherwise only a viewer asks for
 		// the video.
@@ -1548,6 +1639,18 @@ async fn publish(
 		live: live.is_some(),
 		stats: stats.clone(),
 		video: stats.video.clone(),
+		grants: String::new(),
+	};
+	let recorded_video = Renditions {
+		gpu: gpu.clone(),
+		broadcast: recorder.clone(),
+		timebase: recorded.timebase(),
+		record: true,
+		bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+		on_demand: true,
+		live: false,
+		stats: stats.clone(),
+		video: stats.recording.clone(),
 		grants: String::new(),
 	};
 	let ladder = match probe {
@@ -1589,27 +1692,21 @@ async fn publish(
 	let instance = publication.instance();
 	publication.announce().context("cannot announce the broadcast")?;
 
-	let health = live.zip(viewers).map(|(live, viewers)| {
-		let feedback = health::Feedback::default();
-		let watching = health::Watching::default();
-		tokio::spawn(log(
-			"viewer feedback",
-			feedback.clone().follow(live.reports.clone(), viewers),
-		));
-		tokio::spawn(log(
-			"relay stats",
-			watching.clone().follow(live.reports.clone(), path.clone()),
-		));
-		health::Publisher {
-			observer: hang::health::Observer::new(path.clone(), Some(instance.clone())),
-			catalog: graded,
-			clock: clock.clone(),
-			relays: live.links.clone(),
-			feedback,
-			watching,
-			sources: sources.clone(),
+	let health = match live {
+		Some(live) => {
+			let observer = hang::health::Observer::new(path.clone(), Some(instance.clone()));
+			Some(health::Publisher {
+				main: health::Broadcast::follow(observer, graded, &live.reports)?,
+				scenes: health::Scenes::new(live.reports.clone()),
+				clock: clock.clone(),
+				relays: live.links.clone(),
+				sources: sources.clone(),
+			})
 		}
-	});
+		None => None,
+	};
+	// Each published scene is graded beside the program, with its own viewers.
+	let graded = health.as_ref().map(|health| health.scenes.clone());
 
 	Ok((
 		Program {
@@ -1634,9 +1731,11 @@ async fn publish(
 				on_demand: renditions.on_demand,
 				live: renditions.live,
 				stats: stats.clone(),
+				graded,
 			},
 			renditions,
 			ladder,
+			recording: recorded_video,
 			audio,
 			recorded_audio,
 			clock,
@@ -1666,26 +1765,24 @@ impl Role {
 	}
 }
 
-/// Where a recording reads the program from: a broadcast the studio keeps to
-/// itself, holding the recording's own canvas-size video and its own encoding
-/// of the mix it holds, listed in a catalog of its own on the program's clock.
-#[derive(Clone)]
-struct Recording {
-	broadcast: moq_net::broadcast::Producer,
-	timebase: moq_mux::catalog::Timebase<moq_scene::publish::Ext>,
-}
-
-/// Where a canvas's program video is published, a canvas at a time, each
-/// rendition its own track, since a track never changes what it carries.
+/// Where the program's or a published scene's video is published, a canvas
+/// at a time, each rendition its own track, since a track never changes what
+/// it carries; or where the recording's own video goes, of the program or the
+/// scene it holds.
 #[derive(Clone)]
 struct Renditions {
 	gpu: Gpu,
+	/// A published broadcast, or the recording's: one the studio keeps to
+	/// itself, holding the recording's video and its own encoding of the mix
+	/// it holds, listed in a catalog of its own on the program's clock.
 	broadcast: moq_net::broadcast::Producer,
 	/// Shared by every rendition, so each lands on the catalog's clock the same
 	/// way and a switch keeps the video in step with the audio.
 	timebase: moq_mux::catalog::Timebase<moq_scene::publish::Ext>,
-	/// Where the recording's own encoder writes: the main canvas's alone.
-	recording: Option<Recording>,
+	/// Whether this is the recording's: its one rendition the full size, at
+	/// full quality whatever the grant, rather than the published full and
+	/// half sizes.
+	record: bool,
 	/// The connection's bandwidth, which each published rendition follows its
 	/// share of.
 	bandwidth: bandwidth::Allocator,
@@ -1694,14 +1791,25 @@ struct Renditions {
 	/// Whether the program goes out on a relay, where viewers can watch it.
 	live: bool,
 	stats: Arc<Stats>,
-	/// How this canvas's video is doing.
+	/// How this video is doing.
 	video: Arc<VideoStats>,
 	/// What each track's grant is listed under in [`Stats::grants`], before
-	/// its name: empty for the main canvas, and a further one's name.
+	/// its name: empty for the program, and a published scene's name and a
+	/// slash.
 	grants: String,
 }
 
 impl Renditions {
+	/// Probe for `canvas`'s renditions and [`start`](Self::start) them, waiting
+	/// for the full size's encoder to open, as at startup, so it holds its
+	/// encode session before any source opens one.
+	async fn open(&self, canvas: Canvas) -> anyhow::Result<Ladder> {
+		let probe = Probe::new(&self.gpu, canvas, self.record).await?;
+		let (ladder, opened) = self.start(probe)?;
+		opened.await.context("the encode thread stopped")??;
+		Ok(ladder)
+	}
+
 	/// List each of `probe`'s renditions in its catalog under a new track, and
 	/// start their encode threads. The receiver reports once the canvas size's
 	/// encoder opens; the half size opens its own once watched, and the
@@ -1737,11 +1845,7 @@ impl Renditions {
 				config,
 				video,
 			} = probed;
-			let (broadcast, timebase) = match (role, &self.recording) {
-				(Role::Record, Some(recording)) => (&recording.broadcast, &recording.timebase),
-				(Role::Record, None) => anyhow::bail!("only the main canvas is recorded"),
-				_ => (&self.broadcast, &self.timebase),
-			};
+			let (broadcast, timebase) = (&self.broadcast, &self.timebase);
 			let reserved = timebase.reserve().with_interval(config.gop.duration(config.framerate));
 			let suffix = match &video.codec {
 				hang::catalog::VideoCodec::H264(_) => ".avc3",
@@ -1845,17 +1949,19 @@ struct Probed {
 
 impl Probe {
 	/// Open a throwaway encoder of each of `canvas`'s renditions on what `gpu`
-	/// exports, the recording's copy only if `record`, which also settles
-	/// whether the encoder reads the program on the GPU. The canvas size picks
-	/// the encoder, which the others use too.
+	/// exports, the published sizes or, if `record`, the recording's alone,
+	/// which also settles whether the encoder reads the program on the GPU.
+	/// The first picks the encoder, which the other uses too.
 	async fn new(gpu: &Gpu, canvas: Canvas, record: bool) -> anyhow::Result<Self> {
 		let framerate = canvas.framerate();
 		let size = moq_video::Size::new(canvas.width, canvas.height);
-		let sizes = ladder::sizes(size);
-		let roles = [Role::Canvas, Role::Half]
-			.into_iter()
-			.zip(sizes)
-			.chain(record.then_some((Role::Record, size)));
+		let roles: Vec<(Role, moq_video::Size)> = match record {
+			true => vec![(Role::Record, size)],
+			false => [Role::Canvas, Role::Half]
+				.into_iter()
+				.zip(ladder::sizes(size))
+				.collect(),
+		};
 		let mut kind = moq_video::encode::Kind::Auto;
 		let mut rungs = Vec::new();
 		let mut refused = Vec::new();
@@ -1868,7 +1974,7 @@ impl Probe {
 				.with_context(|| format!("cannot encode a {}x{} canvas", size.width, size.height));
 			let (exporter, video) = match probed {
 				Ok(probed) => probed,
-				Err(err) if role == Role::Canvas => return Err(err),
+				Err(err) if role != Role::Half => return Err(err),
 				// The program goes on without it.
 				Err(err) => {
 					refused.push((role, format!("{err:#}")));
@@ -1929,7 +2035,7 @@ struct Ended {
 	threads: Vec<std::thread::JoinHandle<()>>,
 	/// Holds the encode threads it was waiting on.
 	probe: Option<std::thread::JoinHandle<anyhow::Result<Probe>>>,
-	/// A further canvas's broadcast, dropped only after the threads, so its
+	/// A published scene's broadcast, dropped only after the threads, so its
 	/// catalog finishes after the video it lists.
 	_broadcast: Option<Broadcast>,
 }
@@ -1953,6 +2059,24 @@ impl Ended {
 }
 
 impl Line {
+	/// `renditions` of `canvas`, opened at once, as at startup. One whose
+	/// encoder cannot open draws on without video, saying why.
+	async fn open(renditions: Renditions, canvas: Canvas) -> Self {
+		let ladder = renditions.open(canvas).await;
+		let ladder = ladder.inspect_err(|err| renditions.video.fail(format!("{err:#}")));
+		Self::new(renditions, canvas, ladder.ok(), true)
+	}
+
+	/// Whether any rendition would take the next frame: one its grant funds
+	/// that encodes always, or that anyone reads. A probe done opens the renditions on the next
+	/// feed, so their first frame is drawn then rather than one frame late.
+	/// Without renditions open or opening, none would.
+	fn wants(&self) -> bool {
+		let opening = self.probing.as_ref().is_some_and(|(_, probe)| probe.is_finished());
+		let rungs = self.ladder.iter().flat_map(|ladder| &ladder.rungs);
+		opening || rungs.into_iter().any(|rung| rung.gate.wanted())
+	}
+
 	/// `renditions` of `canvas`: `ladder` when already open, or `None` to probe
 	/// for them on the first feed unless `settled`, as a canvas that failed
 	/// to open at startup is.
@@ -1971,10 +2095,11 @@ impl Line {
 	}
 
 	/// Hand `program`, drawn at `drawn`, to each rendition its gate lets
-	/// encode, stamped `timestamp`. A new canvas size or frame rate ends the
-	/// renditions and probes for others, since a track never changes what it
-	/// carries.
-	fn feed(&mut self, program: &wgpu::Texture, drawn: Canvas, timestamp: Option<moq_net::Timestamp>) {
+	/// encode, stamped `timestamp`; with no `program`, as for a scene not
+	/// drawn since none [wanted](Self::wants) it, each skips the frame. A new
+	/// canvas size or frame rate ends the renditions and probes for others,
+	/// since a track never changes what it carries.
+	fn feed(&mut self, program: Option<&wgpu::Texture>, drawn: Canvas, timestamp: Option<moq_net::Timestamp>) {
 		let renditions = &self.renditions;
 		let video = &renditions.video;
 		if drawn != self.canvas {
@@ -2005,8 +2130,7 @@ impl Line {
 		}
 		if self.probing.is_none() && !self.settled {
 			let ending = std::mem::take(&mut self.ending);
-			let record = renditions.recording.is_some();
-			match Probe::spawn(renditions.gpu.clone(), self.canvas, record, ending) {
+			match Probe::spawn(renditions.gpu.clone(), self.canvas, renditions.record, ending) {
 				Ok(probe) => self.probing = Some((self.canvas, probe)),
 				Err(err) => {
 					self.settled = true;
@@ -2049,7 +2173,7 @@ impl Line {
 	}
 
 	/// Stop handing the renditions frames, so each encode thread publishes
-	/// what it holds and finishes its track, then ends a further canvas's
+	/// what it holds and finishes its track, then ends a published scene's
 	/// `broadcast`.
 	fn end(mut self, broadcast: Option<Broadcast>) -> Ended {
 		let mut threads = std::mem::take(&mut self.ending);
@@ -2069,16 +2193,57 @@ impl Line {
 	}
 }
 
-/// Each further canvas's line and broadcast, by name, or `None` once it failed
-/// to start, which is not retried until the canvas is removed and added again.
+/// Each published scene's line and broadcast, by name, or `None` once it
+/// failed to start, which is not retried until the scene is published again.
 type Lines = BTreeMap<String, Option<(Line, Broadcast)>>;
 
-/// A further canvas's broadcast, whose catalog finishes and which closes
+/// What one tick drew, for the encoders.
+struct Drawn {
+	/// The program, at its canvas.
+	program: (wgpu::Texture, Canvas),
+	/// Each published scene by name, unless not drawn, at its canvas.
+	published: Vec<(String, Option<wgpu::Texture>, Canvas)>,
+	/// What recordings hold, unless not drawn, at its canvas.
+	recorded: (Option<wgpu::Texture>, Canvas),
+}
+
+/// What the program clock hands each picture to.
+struct Encoders {
+	/// The program's.
+	main: Line,
+	/// The recording's own, fed the program or the scene recordings hold,
+	/// which a change of size probes for again as any line does.
+	recording: Line,
+	/// What starts the line of a scene published while the studio runs.
+	extras: Extras,
+	/// The published scenes' lines, those the studio started with first.
+	lines: Lines,
+}
+
+/// Each published scene in `collection`, with its canvas.
+fn published(collection: &Collection) -> Vec<(String, Canvas)> {
+	let published = collection.scenes.iter().filter(|scene| scene.published);
+	published
+		.map(|scene| (scene.name.clone(), scene.canvas(collection.canvas)))
+		.collect()
+}
+
+/// What recordings hold in `collection`: the scene it records, or `None` for
+/// the program, with its canvas.
+fn recorded(collection: &Collection) -> (Option<String>, Canvas) {
+	let scene = collection.recorded();
+	let canvas = collection.canvas(scene).unwrap_or(collection.canvas);
+	(scene.map(str::to_string), canvas)
+}
+
+/// A published scene's broadcast, whose catalog finishes and which closes
 /// when dropped.
 struct Broadcast {
 	publication: moq_net::origin::Route,
-	/// Lists the canvas's video and the main broadcast's audio.
+	/// Lists the scene's video and the program broadcast's audio.
 	catalog: moq_scene::publish::Catalog,
+	/// Its grading, while live, which stops with it.
+	_graded: Option<health::Graded>,
 }
 
 impl Drop for Broadcast {
@@ -2089,7 +2254,7 @@ impl Drop for Broadcast {
 	}
 }
 
-/// What starts each further canvas's broadcast: beneath the main one's path,
+/// What starts each published scene's broadcast: beneath the program's path,
 /// on its clock, sharing its connection's bandwidth.
 struct Extras {
 	origin: moq_net::origin::Producer,
@@ -2102,13 +2267,15 @@ struct Extras {
 	on_demand: bool,
 	live: bool,
 	stats: Arc<Stats>,
+	/// Where each published scene's broadcast is graded, while live.
+	graded: Option<health::Scenes>,
 }
 
 impl Extras {
-	/// Publish the further canvas `name`, first drawn at `canvas`, and the
-	/// [`Line`] that encodes its video, reporting in `video`. Its encoders are
-	/// probed for on the line's first feed, off the program clock, for a canvas
-	/// added while the studio runs.
+	/// Publish the scene `name`, drawn at `canvas`, and the [`Line`] that
+	/// encodes its video, reporting in `video`. Its encoders are probed for on
+	/// the line's first feed, off the program clock, for a scene published
+	/// while the studio runs.
 	fn start(
 		&self,
 		name: &str,
@@ -2120,10 +2287,11 @@ impl Extras {
 		Ok((Line::new(renditions, canvas, None, false), broadcast))
 	}
 
-	/// [`start`](Self::start), opening the canvas size's encoder before
-	/// returning, as the main canvas does at startup, so a canvas in the scene
-	/// file holds its encode session before any source opens one. A canvas
-	/// whose encoder cannot open draws on without video, saying why in `video`.
+	/// [`start`](Self::start), opening the full size's encoder before
+	/// returning, as the program does at startup, so a scene published in the
+	/// scene file holds its encode session before any source opens one. A
+	/// scene whose encoder cannot open draws on without video, saying why in
+	/// `video`.
 	async fn open(
 		&self,
 		name: &str,
@@ -2131,26 +2299,13 @@ impl Extras {
 		video: Arc<VideoStats>,
 		program: &Program,
 	) -> anyhow::Result<(Line, Broadcast)> {
-		let (renditions, broadcast) = self.publish(name, video.clone(), program)?;
-		let opened = async {
-			let probe = Probe::new(&self.gpu, canvas, false).await?;
-			let (ladder, opened) = renditions.start(probe)?;
-			opened.await.context("the encode thread stopped")??;
-			anyhow::Ok(ladder)
-		};
-		let ladder = match opened.await {
-			Ok(ladder) => Some(ladder),
-			Err(err) => {
-				video.fail(format!("{err:#}"));
-				None
-			}
-		};
-		Ok((Line::new(renditions, canvas, ladder, true), broadcast))
+		let (renditions, broadcast) = self.publish(name, video, program)?;
+		Ok((Line::open(renditions, canvas).await, broadcast))
 	}
 
-	/// Publish the further canvas `name` at its own path beneath the main
-	/// broadcast's, listing the main broadcast's audio by reference so it is
-	/// encoded once, and where its video goes, reporting in `video`.
+	/// Publish the scene `name` at its own path beneath the program's
+	/// broadcast, listing the program's audio by reference so it is encoded
+	/// once, and where its video goes, reporting in `video`.
 	fn publish(
 		&self,
 		name: &str,
@@ -2159,23 +2314,23 @@ impl Extras {
 	) -> anyhow::Result<(Renditions, Broadcast)> {
 		let path = moq_net::Path::new(name)
 			.and_then(|name| self.path.join(&name))
-			.with_context(|| format!("cannot publish canvas `{name}`"))?;
+			.with_context(|| format!("cannot publish scene `{name}`"))?;
 		if self.live {
 			let (_, echo) = health::echo(&self.path)?;
 			anyhow::ensure!(
 				path != echo,
-				"canvas `{name}` would publish where viewers report back; remove it and add it under another name"
+				"scene `{name}` would publish where viewers report back; rename it to publish it"
 			);
 		}
 		let audio = self
 			.path
 			.relative(&path)
-			.with_context(|| format!("canvas `{name}` cannot refer to the main broadcast"))?;
+			.with_context(|| format!("scene `{name}` cannot refer to the program's broadcast"))?;
 
 		let publication = self
 			.origin
 			.route(&path, moq_net::origin::RouteOptions::hidden())
-			.with_context(|| format!("cannot create the broadcast of canvas `{name}`"))?;
+			.with_context(|| format!("cannot create the broadcast of scene `{name}`"))?;
 		let mut broadcast = publication.broadcast().clone();
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(Default::default())
@@ -2190,15 +2345,26 @@ impl Extras {
 				catalog.audio.renditions.insert(id, config);
 			}
 		})?;
+		// Its viewers report back beneath it, as the program's do.
+		if self.graded.is_some() {
+			health::solicit(&mut catalog, &path)?;
+		}
 		publication
 			.announce()
-			.with_context(|| format!("cannot announce the broadcast of canvas `{name}`"))?;
+			.with_context(|| format!("cannot announce the broadcast of scene `{name}`"))?;
+		let graded = match &self.graded {
+			Some(scenes) => {
+				let observer = hang::health::Observer::new(path.clone(), Some(publication.instance()));
+				Some(scenes.follow(name, observer, catalog.clone())?)
+			}
+			None => None,
+		};
 
 		let renditions = Renditions {
 			gpu: self.gpu.clone(),
 			broadcast,
 			timebase: catalog.timebase(),
-			recording: None,
+			record: false,
 			bandwidth: self.bandwidth.clone(),
 			on_demand: self.on_demand,
 			live: self.live,
@@ -2206,7 +2372,11 @@ impl Extras {
 			video,
 			grants: format!("{name}/"),
 		};
-		let broadcast = Broadcast { publication, catalog };
+		let broadcast = Broadcast {
+			publication,
+			catalog,
+			_graded: graded,
+		};
 		Ok((renditions, broadcast))
 	}
 }
@@ -2283,12 +2453,16 @@ struct Rung {
 
 impl Rung {
 	/// Hand the encoder `program` at `timestamp`, or tell it why not, counting
-	/// in `load`. Returns what the gate decided, or `None` once the encoder
-	/// stopped, having reported why.
-	fn feed(&mut self, load: &Load, program: &wgpu::Texture, timestamp: moq_net::Timestamp) -> Option<Step> {
+	/// in `load`: with no `program`, it hears nothing new. Returns what the gate decided,
+	/// or `None` once the encoder stopped, having reported why.
+	fn feed(&mut self, load: &Load, program: Option<&wgpu::Texture>, timestamp: moq_net::Timestamp) -> Option<Step> {
 		let step = self.gate.step();
-		let message = match step {
-			Step::Encode(bitrate) => {
+		let message = match (step, program) {
+			// Wanted only since the picture went undrawn, as when the
+			// renditions opened this frame: the next frame is drawn, and
+			// nothing is skipped meanwhile.
+			(Step::Encode(_), None) => None,
+			(Step::Encode(bitrate), Some(program)) => {
 				self.skipped = None;
 				let texture = match &self.scaler {
 					Some(scaler) => scaler.scale(program),
@@ -2311,7 +2485,7 @@ impl Rung {
 					}
 				}
 			}
-			skip => (self.skipped.replace(skip) != Some(skip)).then_some(Video::Skip(skip)),
+			(skip, _) => (self.skipped.replace(skip) != Some(skip)).then_some(Video::Skip(skip)),
 		};
 		match message {
 			Some(message) => self.frames.send(message).ok().map(|()| step),
@@ -2367,13 +2541,6 @@ fn connect(
 			(connection, health::Link { endpoint, monitor })
 		})
 		.unzip()
-}
-
-/// Run a background reader, logging why it stopped.
-async fn log(what: &'static str, task: impl Future<Output = anyhow::Result<()>>) {
-	if let Err(err) = task.await {
-		tracing::warn!(%err, "stopped reading {what}");
-	}
 }
 
 /// What the program clock hands a rendition's encoder.
@@ -2741,9 +2908,9 @@ mod tests {
 		}
 	}
 
-	/// Program frames the recording's own encoder encoded.
+	/// Frames the recording's own encoder encoded.
 	fn recorded(engine: &Engine) -> u64 {
-		engine.stats.video.renditions[Role::Record as usize]
+		engine.stats.recording.renditions[Role::Record as usize]
 			.encoded
 			.load(Ordering::Relaxed)
 	}
@@ -2806,9 +2973,9 @@ mod tests {
 
 	/// Without a relay, a recording encodes the program on its own and saves it
 	/// as a regular MP4 holding its video and audio. The color source publishes
-	/// a still, which has no file of its own. A new canvas goes on in another
-	/// file, holding the new rendition's video. A recording holding a mix
-	/// other than the one on program records its audio.
+	/// a still, which has no file of its own. Recording a scene of another
+	/// size goes on in another file, holding its video. A recording holding a
+	/// mix other than the one on program records its audio.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn the_program_records_without_a_relay() {
@@ -2834,13 +3001,20 @@ mod tests {
 		assert_eq!(engine.stats.sessions.open(), 1);
 		{
 			let mut state = engine.state.lock().unwrap();
-			let mut draft = state.collection().draft("Resize the canvas");
-			let canvas = moq_scene::Canvas {
-				width: 160,
-				height: 90,
-				framerate: 15,
+			let mut draft = state.collection().draft("Record a portrait scene");
+			let fill = moq_scene::Rect {
+				x: 0.0,
+				y: 0.0,
+				width: 90.0,
+				height: 160.0,
 			};
-			draft.set_canvas(canvas).unwrap();
+			let tall = moq_scene::Scene {
+				size: Some(moq_scene::Size { width: 90, height: 160 }),
+				items: vec![moq_scene::Item::new("red", fill)],
+				..moq_scene::Scene::new("Tall")
+			};
+			draft.insert_scene(1, tall).unwrap();
+			draft.set_recorded(Some("Tall")).unwrap();
 			state.commit(draft, None).unwrap();
 		}
 		encoded(&engine, 90 + 45).await;
@@ -2922,8 +3096,15 @@ mod tests {
 			}
 		};
 		kio::clock::timeout(TIMEOUT, ended()).await.expect("the bed ends");
+		let rested = |name: &str, program| {
+			let shown = health::Shown {
+				program,
+				scenes: Vec::new(),
+			};
+			(name.to_string(), Status::Ended, shown)
+		};
 		let stopped = engine.local(kio::clock::now()).stopped;
-		assert_eq!(stopped, [("bed".to_string(), Status::Ended)]);
+		assert_eq!(stopped, [rested("bed", false)]);
 
 		{
 			let mut state = engine.state.lock().unwrap();
@@ -2943,7 +3124,7 @@ mod tests {
 		assert!(!shown.contains("sting") && !shown.contains("matte"), "{shown:?}");
 		kio::clock::timeout(TIMEOUT, ended()).await.expect("the clip rests");
 		let stopped = engine.local(kio::clock::now()).stopped;
-		assert_eq!(stopped, [("bed".to_string(), Status::Ended)]);
+		assert_eq!(stopped, [rested("bed", false)]);
 
 		{
 			let mut state = engine.state.lock().unwrap();
@@ -2955,7 +3136,7 @@ mod tests {
 			state.commit(draft, None).unwrap();
 		}
 		let stopped = engine.local(kio::clock::now()).stopped;
-		let both = [("bed".to_string(), Status::Ended), ("sting".to_string(), Status::Ended)];
+		let both = [rested("bed", false), rested("sting", true)];
 		assert_eq!(stopped, both, "placed, it counts");
 
 		let stopping = engine.clone();
@@ -3071,7 +3252,7 @@ mod tests {
 		.await
 	}
 
-	/// The broadcast of the further canvas `tall` as `relay` routes it, its
+	/// The broadcast of the published scene `tall` as `relay` routes it, its
 	/// catalogs, and the first that lists its video.
 	async fn routed_tall(
 		relay: &moq_net::origin::Consumer,
@@ -3080,7 +3261,7 @@ mod tests {
 		moq_mux::catalog::Consumer<()>,
 		hang::Catalog,
 	) {
-		// Until the canvas's broadcast is announced, the main one's route covers
+		// Until the scene's broadcast is announced, the program's route covers
 		// its path and cannot serve it; the follow moves on once it is.
 		let mut following = relay.follow("studio/tall", None).unwrap();
 		let (broadcast, mut catalogs) = kio::clock::timeout(TIMEOUT, async {
@@ -3108,7 +3289,7 @@ mod tests {
 		(broadcast, catalogs, catalog)
 	}
 
-	/// Read a further canvas's `video` and `catalogs` to a clean end.
+	/// Read a published scene's `video` and `catalogs` to a clean end.
 	async fn ended(mut catalogs: moq_mux::catalog::Consumer<()>, mut video: moq_net::track::Subscriber) {
 		kio::clock::timeout(TIMEOUT, async {
 			while let Some(mut group) = video.recv_group().await.expect("the video finishes") {
@@ -3120,14 +3301,16 @@ mod tests {
 		.expect("the canvas's tracks end");
 	}
 
-	/// A further canvas reaches the relay in a broadcast of its own beneath the
-	/// main one, at its own size, with the main broadcast's audio listed by
+	/// A published scene reaches the relay in a broadcast of its own beneath
+	/// the program's, at its own size, with the program's audio listed by
 	/// reference rather than encoded again, and holds one more encode session.
-	/// Removing it, or quitting, ends its video and then its catalog cleanly,
-	/// then its broadcast; removing it gives its session back.
+	/// What only it shows is shown but not on program. Health grades its
+	/// video beside the program, with its own viewers. Unpublishing
+	/// it, or quitting, ends its video and then its catalog cleanly, then its
+	/// broadcast; unpublishing gives its session back.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
-	async fn the_program_of_a_further_canvas_has_its_own_broadcast() {
+	async fn a_published_scene_has_its_own_broadcast() {
 		let _ = moq_tokio::crypto::install_default();
 		let fixture = moq_relay::test_relay().await.expect("test relay");
 		let ready = fixture.relay.ready();
@@ -3147,12 +3330,34 @@ mod tests {
 			url: fixture.url.clone(),
 		}];
 		let mut loaded = red_canvas();
-		let tall = moq_scene::Extra::new(360, 640);
-		let fill = moq_scene::Rect::fill(&tall.canvas(30));
-		loaded.collection.canvases.insert("tall".into(), tall);
-		loaded.collection.scenes[0]
-			.canvases
-			.insert("tall".into(), vec![moq_scene::Item::new("red", fill)]);
+		let size = moq_scene::Size {
+			width: 360,
+			height: 640,
+		};
+		let fill = moq_scene::Rect {
+			x: 0.0,
+			y: 0.0,
+			width: 360.0,
+			height: 640.0,
+		};
+		let corner = moq_scene::Source::Color {
+			color: moq_scene::Rgba([0, 0, 255, 255]),
+		};
+		loaded.collection.sources.insert("corner".into(), corner);
+		let corner = moq_scene::Rect {
+			width: 8.0,
+			height: 8.0,
+			..fill
+		};
+		loaded.collection.scenes.push(moq_scene::Scene {
+			size: Some(size),
+			published: true,
+			items: vec![
+				moq_scene::Item::new("red", fill),
+				moq_scene::Item::new("corner", corner),
+			],
+			..moq_scene::Scene::new("tall")
+		});
 		let engine = Engine::start(launch(gpu, relays, dir.path()), autosave, loaded)
 			.await
 			.expect("the studio starts");
@@ -3177,23 +3382,63 @@ mod tests {
 		let mut pictures = subscribe(&broadcast, &video, &config).await;
 		red(&mut pictures, moq_video::Size::new(360, 640))
 			.await
-			.expect("the canvas's own layout arrives");
-		assert_eq!(engine.stats.sessions.open(), 2, "one canvas size each");
-		assert!(engine.stats.canvases()["tall"].error().is_none());
+			.expect("the scene arrives");
+		assert_eq!(engine.stats.sessions.open(), 2, "one full size each");
+		assert!(engine.stats.published()["tall"].error().is_none());
+		{
+			// Shown, so its track encodes, but not on program, where a media
+			// file going on would restart.
+			let state = engine.state.lock().unwrap();
+			assert!(state.shown().contains("corner"));
+			assert!(!state.on_program().contains("corner"));
+		}
+		assert!(catalog.echo.is_some(), "its viewers are asked for feedback");
+		// Health grades it beside the program, from what it writes.
+		let graded = |engine: &Engine| {
+			let report = engine.health.lock().unwrap();
+			let tall = report
+				.broadcasts
+				.iter()
+				.find(|broadcast| broadcast.name.as_deref() == Some("tall"));
+			tall.map(|tall| {
+				tall.tracks
+					.iter()
+					.any(|track| track.id == video && track.sent.is_some_and(|sent| sent.as_bps() > 0))
+			})
+		};
+		kio::clock::timeout(TIMEOUT, async {
+			while graded(&engine) != Some(true) {
+				kio::clock::sleep(health::INTERVAL).await;
+			}
+		})
+		.await
+		.expect("health grades the published scene");
 
 		let track = broadcast.track(&video).unwrap().subscribe(None).await.unwrap();
 		{
 			let mut state = engine.state.lock().unwrap();
-			let mut draft = state.collection().draft("Remove the canvas");
-			draft.remove_extra("tall").unwrap();
+			let scene = state.collection().scenes[1].clone();
+			let mut draft = state.collection().draft("Stop publishing the scene");
+			let scene = moq_scene::Scene {
+				published: false,
+				..scene
+			};
+			draft.set_scene(1, scene).unwrap();
 			state.commit(draft, None).unwrap();
 		}
 		ended(catalogs, track).await;
 		kio::clock::timeout(TIMEOUT, broadcast.closed())
 			.await
-			.expect("the canvas's broadcast ends");
-		assert!(engine.stats.canvases().is_empty());
-		assert_eq!(engine.stats.sessions.open(), 1, "the canvas's session given back");
+			.expect("the scene's broadcast ends");
+		assert!(engine.stats.published().is_empty());
+		assert_eq!(engine.stats.sessions.open(), 1, "the scene's session given back");
+		kio::clock::timeout(TIMEOUT, async {
+			while graded(&engine).is_some() {
+				kio::clock::sleep(health::INTERVAL).await;
+			}
+		})
+		.await
+		.expect("health forgets the scene no longer published");
 
 		// Back again, quitting ends it as cleanly.
 		engine.state.lock().unwrap().undo().unwrap();
@@ -3208,7 +3453,7 @@ mod tests {
 		ended(catalogs, track).await;
 		kio::clock::timeout(TIMEOUT, broadcast.closed())
 			.await
-			.expect("the canvas's broadcast ends");
+			.expect("the scene's broadcast ends");
 		assert_eq!(engine.stats.sessions.open(), 0);
 	}
 
@@ -3487,9 +3732,10 @@ mod tests {
 			loop {
 				{
 					let report = engine.health.lock().unwrap();
-					let sending = report.tracks.len() == 2
-						&& report
-							.tracks
+					let tracks = report.broadcasts.first().map_or(&[][..], |program| &program.tracks);
+					let sending = report.sources.is_empty()
+						&& tracks.len() == 2
+						&& tracks
 							.iter()
 							.all(|track| track.sent.is_some_and(|sent| sent.as_bps() > 0));
 					let connected = matches!(&report.relays[..], [relay] if relay.state == health::State::Connected);

@@ -682,6 +682,11 @@ impl Effects {
 		}
 	}
 
+	/// The largest canvas [`fit`](Self::fit) last made room for.
+	pub fn fitted(&self) -> (u32, u32) {
+		(self.backdrop.width(), self.backdrop.height())
+	}
+
 	/// `texture`, a source's picture or a canvas-sized target with
 	/// premultiplied alpha, bound to sample.
 	pub fn picture(&self, texture: &wgpu::Texture) -> Picture {

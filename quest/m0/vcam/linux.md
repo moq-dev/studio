@@ -12,12 +12,16 @@ publishes, so picking one cannot feed it back into itself.
 
 The program's camera landed in
 [moq-dev/studio#9](https://github.com/moq-dev/studio/pull/9): `vcam::Camera`
-in `rs/moq-studio` reads the main canvas back through moq-video's
+in `rs/moq-studio` reads the program back through moq-video's
 `render::readback` and reopens when the canvas changes size or frame rate.
 Its PipeWire node name (`moq-studio`) and description ("MoQ Studio") are
 fixed, so a camera per scene needs a name of its own, such as
 `moq-studio-<scene>`.
 
-## Required
-
-- [Published scenes](/quest/m0/scenes/published.md) - any scene publishes as its own broadcast at its own size, replacing canvases
+Published scenes landed in
+[moq-dev/studio#71](https://github.com/moq-dev/studio/pull/71): the program
+clock names each published scene as a compositor output
+(`Compositor::set_outputs`), drawn at the scene's own size only while
+something wants its frame, and reads its texture from `Compositor::output`.
+A scene's camera is one more reader: it asks for the scene to be drawn while
+an app reads it, and reopens when the scene's size changes.

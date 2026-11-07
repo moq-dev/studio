@@ -6,7 +6,7 @@
 //! PipeWire it is an existing v4l2loopback device, since that kernel module
 //! needs root to load and so is never the first choice.
 //!
-//! The program clock offers every frame of the main canvas; [`Camera::offer`]
+//! The program clock offers every program frame; [`Camera::offer`]
 //! has moq-video read it back only while an app reads the camera, and the
 //! `vcam` thread waits for the copy and hands the pixels to the backend.
 
@@ -22,7 +22,7 @@ mod pipewire;
 #[cfg(target_os = "linux")]
 mod v4l2;
 
-/// The main canvas's program, published as a camera other apps can open.
+/// The program, published as a camera other apps can open.
 ///
 /// Dropping it removes the camera.
 pub struct Camera {
