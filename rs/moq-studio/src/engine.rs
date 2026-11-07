@@ -573,7 +573,7 @@ pub struct Relay {
 pub struct Program {
 	/// Where the broadcast is announced, which the relay connections publish.
 	_origin: moq_net::origin::Producer,
-	publication: moq_net::origin::Publication,
+	publication: moq_net::origin::Route,
 	/// What the broadcast lists and the clock its timestamps are on, for a
 	/// replay of the program or a source.
 	catalog: moq_scene::publish::Catalog,
@@ -581,7 +581,7 @@ pub struct Program {
 	/// Where the local sources keep their own tracks, on the same clock.
 	sources: moq_scene::publish::Publish,
 	/// What a recording reads the program from, on the same clock.
-	recording: moq_net::origin::Publication,
+	recording: moq_net::origin::Route,
 	/// The recording broadcast's catalog, held for as long as the engine runs,
 	/// so a recording still reading as the studio stops finds it open.
 	_recorded: moq_scene::publish::Catalog,
@@ -595,7 +595,7 @@ pub struct Program {
 
 impl Drop for Program {
 	fn drop(&mut self) {
-		self.publication.close();
+		self.publication.broadcast().close();
 	}
 }
 
@@ -1432,7 +1432,9 @@ async fn publish(
 	canvas: Canvas,
 	live: Option<&Live>,
 ) -> anyhow::Result<(Program, Publish)> {
-	let publication = origin.create_broadcast(path).context("cannot create the broadcast")?;
+	let publication = origin
+		.route(path, moq_net::origin::RouteOptions::hidden())
+		.context("cannot create the broadcast")?;
 	let mut broadcast = publication.broadcast().clone();
 	// Each track reserves its ceiling on the first relay's estimate, which
 	// that connection then probes to fund: the bandwidth the stream is granted.
@@ -1489,10 +1491,10 @@ async fn publish(
 	// published program.
 	let local = moq_tokio::origin::spawn();
 	let recording = local
-		.create_broadcast("recording")
+		.route("recording", moq_net::origin::RouteOptions::hidden())
 		.context("cannot create the recording broadcast")?;
 	recording
-		.announce(Default::default())
+		.announce()
 		.context("cannot announce the recording broadcast")?;
 	let mut recorder = recording.broadcast().clone();
 	let config = moq_mux::catalog::Config::default()
@@ -1552,10 +1554,8 @@ async fn publish(
 
 	// One instance on every relay, so a viewer moving between them resumes
 	// mid-group rather than restarting.
-	let instance = moq_net::Instance::random();
-	publication
-		.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
-		.context("cannot announce the broadcast")?;
+	let instance = publication.instance();
+	publication.announce().context("cannot announce the broadcast")?;
 
 	let health = live.zip(viewers).map(|(live, viewers)| {
 		let feedback = health::Feedback::default();
@@ -2044,7 +2044,7 @@ type Lines = BTreeMap<String, Option<(Line, Broadcast)>>;
 /// A further canvas's broadcast, whose catalog finishes and which closes
 /// when dropped.
 struct Broadcast {
-	publication: moq_net::origin::Publication,
+	publication: moq_net::origin::Route,
 	/// Lists the canvas's video and the main broadcast's audio.
 	catalog: moq_scene::publish::Catalog,
 }
@@ -2053,7 +2053,7 @@ impl Drop for Broadcast {
 	fn drop(&mut self) {
 		// Fails only once the catalog failed, which ended its track already.
 		let _ = self.catalog.finish();
-		self.publication.close();
+		self.publication.broadcast().close();
 	}
 }
 
@@ -2142,7 +2142,7 @@ impl Extras {
 
 		let publication = self
 			.origin
-			.create_broadcast(&path)
+			.route(&path, moq_net::origin::RouteOptions::hidden())
 			.with_context(|| format!("cannot create the broadcast of canvas `{name}`"))?;
 		let mut broadcast = publication.broadcast().clone();
 		let config = moq_mux::catalog::Config::default()
@@ -2159,7 +2159,7 @@ impl Extras {
 			}
 		})?;
 		publication
-			.announce(moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0))
+			.announce()
 			.with_context(|| format!("cannot announce the broadcast of canvas `{name}`"))?;
 
 		let renditions = Renditions {
@@ -2666,6 +2666,7 @@ fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::R
 #[cfg(test)]
 mod tests {
 	use moq_mux::catalog::Stream;
+	use moq_net::origin::RouteEvent;
 
 	use super::*;
 
@@ -3052,7 +3053,7 @@ mod tests {
 		let mut following = relay.follow("studio/tall", None).unwrap();
 		let (broadcast, mut catalogs) = kio::clock::timeout(TIMEOUT, async {
 			loop {
-				let broadcast = following.available().await.expect("broadcast");
+				let broadcast = following.available().await.expect("broadcast").expect("an instance");
 				let format = moq_mux::catalog::CatalogFormat::default();
 				if let Ok(catalogs) = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await {
 					return (broadcast, catalogs);
@@ -3202,7 +3203,14 @@ mod tests {
 
 		let format = moq_mux::catalog::CatalogFormat::Hang;
 		let feed = Room::feed_path("alice", 0).unwrap();
-		let broadcast = origin.consume().follow(feed, None).unwrap().available().await.unwrap();
+		let broadcast = origin
+			.consume()
+			.follow(feed, None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.expect("an instance");
 		let mut listings = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await.unwrap();
 		let listed = kio::clock::timeout(TIMEOUT, async {
 			loop {
@@ -3264,7 +3272,8 @@ mod tests {
 		let broadcast = kio::clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
 			.expect("the relay routes the program")
-			.expect("broadcast");
+			.expect("broadcast")
+			.expect("an instance");
 		let format = moq_mux::catalog::CatalogFormat::default();
 		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, format)
 			.await
@@ -3537,32 +3546,31 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let subscribe = moq_tokio::origin::spawn();
 		let (_connections, links) = connect(relays, &origin, &subscribe);
-		let publication = origin.create_broadcast("studio").unwrap();
-		let instance = moq_net::Instance::random();
-		publication
-			.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
-			.unwrap();
+		let publication = origin.route("studio", Default::default()).unwrap();
+		let instance = publication.instance();
 
 		// Publish `path` under `instance` through one relay's guest.
 		let publish = |path: &str, instance: &moq_net::Instance, (client, url): &(moq_tokio::Client, url::Url)| {
 			let origin = moq_tokio::origin::spawn();
-			let source = origin.create_broadcast(path).unwrap();
-			source
-				.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
+			let source = origin
+				.route(
+					path,
+					moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0),
+				)
 				.unwrap();
 			let connection = client.clone().with_publisher(&origin).connect(url.clone());
 			(origin, source, connection)
 		};
 		let _guest = publish("guest", &moq_net::Instance::random(), &guests[1]);
-		let mut sources = subscribe.consume().announced();
+		let mut sources = subscribe.consume().routes();
 
 		let routed = async {
 			for relay in &routes {
 				let mut announced = relay.announced();
 				loop {
 					match announced.next().await.expect("announcements") {
-						moq_net::announce::Event::Start(announce) if announce.prefix.as_str() == "studio" => {
-							assert_eq!(announce.route.instance, Some(instance.clone()));
+						moq_net::announce::Event::Present(announce) if announce.prefix.as_str() == "studio" => {
+							assert_eq!(announce.route.instance(), &instance);
 							break;
 						}
 						_ => continue,
@@ -3594,7 +3602,7 @@ mod tests {
 			let first = publish("show", &older, &guests[0]);
 			routed_at(&mut sources, &older).await;
 			let _restarted = publish("show", &newer, &guests[1]);
-			routed_at(&mut routes[1].announced(), &newer).await;
+			routed_at(&mut routes[1].routes(), &newer).await;
 			// Announced after the restart on the failover's one announce
 			// stream, so once it reaches the studio the restart has too.
 			let _marker = publish("marker", &moq_net::Instance::random(), &guests[1]);
@@ -3606,13 +3614,13 @@ mod tests {
 				.await
 				.expect("the marker");
 			while let Some(event) = sources.try_next() {
-				if let moq_net::announce::Event::Start(announce)
-				| moq_net::announce::Event::Update(announce)
-				| moq_net::announce::Event::Restart(announce)
-				| moq_net::announce::Event::Takeover { announce, .. } = event
+				if let RouteEvent::Start(announce)
+				| RouteEvent::Update(announce)
+				| RouteEvent::Restart(announce)
+				| RouteEvent::Takeover { announce, .. } = event
 				{
 					assert!(
-						announce.prefix.as_str() != "show" || announce.route.instance.as_ref() != Some(&newer),
+						announce.prefix.as_str() != "show" || announce.route.instance() != &newer,
 						"the failover's instance won while the first relay has one"
 					);
 				}
@@ -3663,10 +3671,9 @@ mod tests {
 			connections,
 			clients: vec![client],
 		};
-		let publication = origin.create_broadcast("studio").unwrap();
-		publication.announce(Default::default()).unwrap();
+		let publication = origin.route("studio", Default::default()).unwrap();
 		let info = || moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let tracks = ["video", "audio"].map(|name| publication.create_track(name, info()).unwrap());
+		let tracks = ["video", "audio"].map(|name| publication.broadcast().create_track(name, info()).unwrap());
 
 		// Wait for an event `want` picks on `announced`.
 		let routed = async |announced: &mut moq_net::announce::Consumer, want: fn(&Event) -> bool| {
@@ -3678,14 +3685,15 @@ mod tests {
 		let mut announced = relay.announced();
 		routed(
 			&mut announced,
-			|event| matches!(event, Event::Start(announce) if announce.prefix.as_str() == "studio"),
+			|event| matches!(event, Event::Present(announce) if announce.prefix.as_str() == "studio"),
 		)
 		.await
 		.expect("the relay routes the broadcast");
 		let broadcast = kio::clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
 			.expect("the relay routes the broadcast")
-			.expect("broadcast");
+			.expect("broadcast")
+			.expect("an instance");
 		let mut subscriptions = Vec::new();
 		for (name, track) in ["video", "audio"].into_iter().zip(&tracks) {
 			let mut subscription = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
@@ -3742,22 +3750,21 @@ mod tests {
 		}
 		routed(
 			&mut announced,
-			|event| matches!(event, Event::End(announce) if announce.prefix.as_str() == "studio"),
+			|event| matches!(event, Event::Absent(announce) if announce.prefix.as_str() == "studio"),
 		)
 		.await
 		.expect("the broadcast is withdrawn");
 	}
 
-	/// Wait until `announced` routes `show` under `instance`.
-	async fn routed_at(announced: &mut moq_net::announce::Consumer, instance: &moq_net::Instance) {
-		use moq_net::announce::Event;
+	/// Wait until `routes` routes `show` under `instance`.
+	async fn routed_at(routes: &mut moq_net::origin::Routes, instance: &moq_net::Instance) {
 		loop {
-			let announce = match announced.next().await.expect("announcements") {
-				Event::Start(announce) | Event::Update(announce) | Event::Restart(announce) => announce,
-				Event::Takeover { announce, .. } => announce,
-				Event::End(_) => continue,
+			let announce = match routes.next().await.expect("routes") {
+				RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) => announce,
+				RouteEvent::Takeover { announce, .. } => announce,
+				RouteEvent::End(_) => continue,
 			};
-			if announce.prefix.as_str() == "show" && announce.route.instance.as_ref() == Some(instance) {
+			if announce.prefix.as_str() == "show" && announce.route.instance() == instance {
 				return;
 			}
 		}
