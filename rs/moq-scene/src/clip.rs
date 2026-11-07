@@ -7,9 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{
-	Audio, Collection, Filter, Item, Layer, Mixes, Scene, Source, Video, validate_filters, versioned,
-};
+use crate::collection::{Audio, Collection, Filter, Item, Layer, Scene, Source, Video, validate_filters, versioned};
 use crate::edit::Draft;
 
 /// What a copy holds: items, or a filter chain.
@@ -101,13 +99,9 @@ impl Clip {
 		let clip = Self::deserialize(table).map_err(|err| Error::Format(err.to_string()))?;
 		match &clip {
 			// The rules a collection holding just the clip would break, such as
-			// an item showing a source the clip lacks. It has whatever mixes the
-			// clip's sources are left out of, and an empty scene for each its
-			// scene sources draw, which pasting checks.
+			// an item showing a source the clip lacks. It has an empty scene for
+			// each its scene sources draw, which pasting checks.
 			Self::Items(items) => {
-				let excluded = items.audio.values().flat_map(|audio| &audio.exclude);
-				let mut names: BTreeSet<String> = excluded.cloned().collect();
-				names.insert(Mixes::DEFAULT.into());
 				let drawn: BTreeSet<&str> = items
 					.sources
 					.values()
@@ -124,11 +118,6 @@ impl Clip {
 				let drawn = drawn.into_iter().map(Scene::new);
 				Collection {
 					sources: items.sources.clone(),
-					mixes: Mixes {
-						names: names.into_iter().collect(),
-						program: Mixes::DEFAULT.into(),
-						recording: None,
-					},
 					audio: items.audio.clone(),
 					video: items.video.clone(),
 					// In a scene, where keyframes play; pasting into the top
@@ -172,8 +161,8 @@ impl Draft {
 	/// one shown, so items pasted within a collection are linked to the ones
 	/// copied. A source whose name is taken by a different one is added under
 	/// a new name, which clones and filters naming it follow, and an added
-	/// source brings its audio and video settings, left out of only the mixes
-	/// both collections have. An image or LUT under `dir`
+	/// source brings its audio and video settings, its sound joining the
+	/// audio scene on program. An image or LUT under `dir`
 	/// is named relative to it, as the scene file would.
 	pub fn paste(&mut self, layer: &Layer, items: &Items, dir: &Path) -> Result<(), Error> {
 		let mut names = BTreeMap::new();
@@ -225,11 +214,10 @@ impl Draft {
 		};
 		for (name, renamed) in added {
 			if let Some(audio) = items.audio.get(name) {
-				// Left out only of the mixes this collection has too.
-				let mut audio = audio.clone();
-				let mixes = &self.collection().mixes.names;
-				audio.exclude.retain(|mix| mixes.contains(mix));
-				self.set_audio(&renamed, Some(audio))?;
+				self.set_audio(&renamed, Some(audio.clone()))?;
+			}
+			if items.sources[name].has_audio() {
+				self.hear(&renamed)?;
 			}
 			if let Some(video) = items.video.get(name) {
 				let filters = rename(&video.filters);
@@ -391,12 +379,12 @@ mod tests {
 		assert_eq!(pasted.scenes[0].items, source.scenes[0].items);
 	}
 
-	/// A pasted source keeps its sound's settings, left out of only the mixes
-	/// the collection it lands in has.
+	/// A pasted source keeps its sound's settings, and is heard on program
+	/// wherever it lands.
 	#[test]
-	fn pastes_audio_into_the_mixes_there() {
+	fn pastes_audio_into_the_audio_scene_on_program() {
 		let mut source = Collection::new();
-		source.mixes.names.push("Stream".into());
+		source.audio_scenes[0].name = "Stream".into();
 		source.sources.insert(
 			"guest".into(),
 			Source::Broadcast {
@@ -405,7 +393,6 @@ mod tests {
 		);
 		let audio = crate::Audio {
 			gain: 0.5,
-			exclude: ["Program".to_string(), "Stream".to_string()].into(),
 			..Default::default()
 		};
 		source.audio.insert("guest".into(), audio.clone());
@@ -418,11 +405,8 @@ mod tests {
 			.unwrap();
 
 		let pasted = paste(&Collection::new(), &Layer::top(), &text, DIR);
-		let expected = crate::Audio {
-			exclude: ["Program".to_string()].into(),
-			..audio
-		};
-		assert_eq!(pasted.audio["guest"], expected);
+		assert_eq!(pasted.audio["guest"], audio);
+		assert_eq!(pasted.heard(crate::AudioScene::DEFAULT), ["guest"].into());
 	}
 
 	/// A relative image path names the same file wherever the clip is pasted,

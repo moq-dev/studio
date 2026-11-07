@@ -438,10 +438,14 @@ fn proposal(collection: &Collection, listing: &Listing, choices: &Choices) -> Re
 	draft.finish()
 }
 
-/// Add `pick` under its device name, numbered past any source already called that.
+/// Add `pick` under its device name, numbered past any source already called
+/// that, its sound in the audio scene on program.
 fn add(draft: &mut Draft, pick: &Pick) -> Result<String, moq_scene::Error> {
 	let name = draft.collection().unused_name(&pick.name);
 	draft.set_source(&name, Some(pick.source.clone()))?;
+	if pick.source.has_audio() {
+		draft.hear(&name)?;
+	}
 	Ok(name)
 }
 
@@ -1017,6 +1021,11 @@ mod tests {
 		);
 		assert!(corner.x + corner.width < 1280.0 && corner.y + corner.height < 720.0);
 		assert!(collection.sources.contains_key("Mic"), "the input is a source");
+		assert_eq!(
+			collection.heard(moq_scene::AudioScene::DEFAULT),
+			["Mic"].into(),
+			"heard on program"
+		);
 
 		// One edit, which undoes to what starting empty opens.
 		assert_eq!(history.entries().len(), 1);
