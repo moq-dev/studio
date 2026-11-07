@@ -184,7 +184,10 @@ fn gpu(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Result<protocol::Raste
 		.features()
 		.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
 	{
-		return Err(format!("the studio's GPU, {}, cannot import shared textures", info.name));
+		return Err(format!(
+			"the studio's GPU, {}, cannot import shared textures",
+			info.name
+		));
 	}
 	let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
 	let display = if set("WAYLAND_DISPLAY") {
@@ -216,8 +219,7 @@ fn x11_gpu(info: &wgpu::AdapterInfo) -> Result<(), String> {
 	use x11rb::connection::{Connection, RequestConnection};
 	use x11rb::protocol::dri3::{self, ConnectionExt};
 
-	let (connection, screen) =
-		x11rb::connect(None).map_err(|err| format!("cannot connect to the X display: {err}"))?;
+	let (connection, screen) = x11rb::connect(None).map_err(|err| format!("cannot connect to the X display: {err}"))?;
 	let extension = connection
 		.extension_information(dri3::X11_EXTENSION_NAME)
 		.map_err(|err| format!("the X display: {err}"))?;
@@ -235,7 +237,11 @@ fn x11_gpu(info: &wgpu::AdapterInfo) -> Result<(), String> {
 		.metadata()
 		.map_err(|err| format!("the X server's DRI3 device: {err}"))?
 		.rdev();
-	let sys = format!("/sys/dev/char/{}:{}/device", rustix::fs::major(rdev), rustix::fs::minor(rdev));
+	let sys = format!(
+		"/sys/dev/char/{}:{}/device",
+		rustix::fs::major(rdev),
+		rustix::fs::minor(rdev)
+	);
 	let bus = std::fs::canonicalize(&sys)
 		.ok()
 		.and_then(|path| Some(path.file_name()?.to_str()?.to_owned()))
