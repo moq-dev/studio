@@ -11,9 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use cef::*;
-use rustix::process::{
-	Resource, Rlimit, Signal, getpgrp, getpid, getrlimit, kill_current_process_group, setrlimit,
-};
+use rustix::process::{Resource, Rlimit, Signal, getpid, getrlimit, kill_process_group, setrlimit};
 
 use super::outbox::Commands;
 use super::protocol::{Area, Channel, Command, Display, Event, Format, Id, Layer, Open, Plane, Raster, Start, Texture};
@@ -135,12 +133,6 @@ fn serve() -> Result<(), String> {
 /// Run CEF on the profile `start` names, opening and closing pages as the
 /// studio asks, until it stops the helper and the last page closes.
 fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc::Sender<()>) -> Result<(), String> {
-	// The helper ends CEF's processes along with itself by killing the group
-	// it leads, which they join, and never the studio's.
-	if getpgrp() != getpid() {
-		return Err("the helper does not lead its own process group".into());
-	}
-
 	// A crashed process is reported only once it is gone, and one dumping
 	// core is not gone yet: systemd-coredump took 20 to 70 seconds over a
 	// renderer, which left its page Starting meanwhile. CEF's subprocesses
@@ -315,8 +307,10 @@ fn recv(reader: &Channel) -> Command {
 
 /// End the helper and every process CEF started, at once.
 fn exit_now() -> ! {
-	// The helper leads the group, so this ends it before returning.
-	let _ = kill_current_process_group(Signal::KILL);
+	// The studio starts the helper leading a group of its own, which CEF's
+	// processes join; a group with the helper's id is only ever that one.
+	// The kill ends the helper too, before returning.
+	let _ = kill_process_group(getpid(), Signal::KILL);
 	std::process::abort()
 }
 
