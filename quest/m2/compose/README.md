@@ -56,9 +56,15 @@ viewer composes from fetchable tracks matches the program today. When this
 epic starts, define the reference picture (such as the program with the
 independent sources layered over it) and replan those bullets.
 
+Moved to m2 on 2026-11-07 (maintainer, on
+[moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97)): nothing in m1
+can fetch a source's track, so nothing can read a layout. The layout waits on
+[Published independently](/quest/m2/publish-independently.md), and the
+browser, server, and controls quests wait on it through the layout.
+
 ## Required
 
-- [Layout track](/quest/m1/compose/layout.md) - the live scene state as a hang JSON track on the media clock, specified in the hang draft
-- [Browser composition](/quest/m1/compose/browser.md) - `@moq/watch` composes a broadcast with a layout track through moq-scene's browser build
-- [Server composition](/quest/m1/compose/server.md) - a headless compositor renders the program from sources and layout, headless
-- [Viewer controls](/quest/m1/compose/controls.md) - viewers toggle elements and the layout's priorities steer what they fetch
+- [Layout track](/quest/m2/compose/layout.md) - the live scene state as a hang JSON track on the media clock, specified in the hang draft
+- [Browser composition](/quest/m2/compose/browser.md) - `@moq/watch` composes a broadcast with a layout track through moq-scene's browser build
+- [Server composition](/quest/m2/compose/server.md) - a headless compositor renders the program from sources and layout, headless
+- [Viewer controls](/quest/m2/compose/controls.md) - viewers toggle elements and the layout's priorities steer what they fetch
