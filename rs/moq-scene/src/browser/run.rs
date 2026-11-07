@@ -65,6 +65,7 @@ pub(crate) async fn run(
 	// A stopped page leaves the canvas rather than freezing on its last
 	// picture, which for an alert or a ticker would show stale news.
 	picture.lock().unwrap().clear();
+	page.state.lock().unwrap().paint = None;
 	Err(Error::Browser(reason))
 }
 

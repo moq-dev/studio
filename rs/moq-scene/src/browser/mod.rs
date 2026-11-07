@@ -339,7 +339,7 @@ impl Page {
 		Arc::ptr_eq(&self.state, &other.state)
 	}
 
-	/// How the newest picture arrived, once one has.
+	/// How the newest picture arrived, while the page shows one.
 	pub fn paint(&self) -> Option<Paint> {
 		self.state.lock().unwrap().paint.clone()
 	}

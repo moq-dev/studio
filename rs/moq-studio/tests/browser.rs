@@ -257,18 +257,19 @@ async fn a_page_keeps_its_layout() {
 	local(async {
 		const RED: [u8; 4] = [255, 0, 0, 255];
 		const GREEN: [u8; 4] = [0, 255, 0, 255];
-		// A red strip down the left fifth, over green.
+		// A red strip down the left fifth of the top half, over green.
 		let html = "<body style='margin:0;background:rgb(0,255,0)'>\
-			<div style='width:64px;height:240px;background:rgb(255,0,0)'></div></body>";
+			<div style='width:64px;height:120px;background:rgb(255,0,0)'></div></body>";
 		let mut studio = Studio::new(&[("page", page(html))]).await;
 		studio.until_center(GREEN, &[]).await;
 		let width = studio.collection.canvas.width as usize;
 		for (at, pixel) in studio.frame().into_iter().enumerate() {
 			let (x, y) = (at % width, at / width);
-			// The strip ends at 12.8, where scaling blends the two.
-			let expected = match x {
-				..11 => RED,
-				15.. => GREEN,
+			// The strip ends at 12.8 across and 32 down, where scaling blends
+			// the two.
+			let expected = match (x, y) {
+				(..11, ..30) => RED,
+				(15.., _) | (_, 34..) => GREEN,
 				_ => continue,
 			};
 			assert!(near(pixel, expected), "({x}, {y}) is {pixel:?}, not {expected:?}");
@@ -501,8 +502,9 @@ async fn a_crash_while_loading_drops_only_its_source() {
 	.await;
 }
 
-/// A page whose renderer crashes after it has drawn fails its source and
-/// leaves the canvas, and a reload draws it again.
+/// A page whose renderer crashes after it has drawn fails its source,
+/// leaves the canvas, and no longer reports a paint path, and a reload draws
+/// it again.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
 async fn a_crash_after_drawing_leaves_the_canvas() {
@@ -526,6 +528,8 @@ async fn a_crash_after_drawing_leaves_the_canvas() {
 		let reason = studio.until_failed("page").await;
 		assert!(reason.contains("renderer"), "{reason}");
 		studio.until_center(BLUE, &["page"]).await;
+		let page = studio.sources.get("page").unwrap().page().unwrap();
+		assert_eq!(page.paint(), None, "a stopped page paints nothing");
 
 		studio.reload("page");
 		studio.until_center([255, 0, 0, 255], &[]).await;
