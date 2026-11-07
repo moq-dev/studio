@@ -15,6 +15,11 @@ From [moq-dev/studio#59](https://github.com/moq-dev/studio/pull/59), picked
 - On nixos (RTX 3070 Ti, NVIDIA 580), the GPU path under X11 never paints:
   CEF's GPU process logs "Can't create buffer -- gbm device is missing".
   Wayland sessions avoid it since #59, but X11-only sessions still hit it.
+- Since [moq-dev/studio#73](https://github.com/moq-dev/studio/pull/73) the X11
+  path passes `--use-angle=gl-egl`, which made it paint on Mesa; rerun nixos
+  with it first. On nixos2 under GNOME's XWayland, with the studio on the RTX
+  2070, CEF still allocated on the Intel GPU that runs the X server (Intel
+  X-tiled modifier) despite `--render-node-override`.
 - First find why. Likely suspects: the NVIDIA GBM backend
   (`nvidia-drm_gbm.so`) is not on CEF's search path (`GBM_BACKENDS_PATH`), or
   `nvidia-drm` modeset is off. Fix it if the studio can, for example by
