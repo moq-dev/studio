@@ -1178,8 +1178,9 @@ impl Engine {
 		// A stalled picture matters where a live scene draws it: a scene on air,
 		// including one leaving in a transition, the top layer over them, or a
 		// published or recorded scene drawn.
-		// Stalled sound matters only if the audio scene on program plays it,
-		// not one only listened to. A source that stopped matters either way.
+		// Stalled sound matters only if an audio scene viewers hear plays it:
+		// the one on program or one a published scene carries, not one only
+		// listened to. A source that stopped matters either way.
 		let (stalled, stopped) = {
 			let state = self.state.lock().unwrap();
 			let on_program = state.on_program();
@@ -1192,8 +1193,14 @@ impl Engine {
 					.map(|(scene, _)| scene.to_string())
 					.collect(),
 			};
-			let program = state.collection.program_audio().unwrap_or_default();
-			let heard = |name: &str| state.sources.plays(program, name);
+			let collection = &state.collection;
+			let published = collection.scenes.iter().filter(|scene| scene.published);
+			let carried: BTreeSet<&str> = collection
+				.program_audio()
+				.into_iter()
+				.chain(published.filter_map(|scene| collection.published_audio(&scene.name)))
+				.collect();
+			let heard = |name: &str| carried.iter().any(|scene| state.sources.plays(scene, name));
 			let stalled = state
 				.sources
 				.iter()

@@ -2801,7 +2801,14 @@ impl Panels {
 			ui.separator();
 			ui.strong(format!("Scene `{name}`"));
 			if let Some(output) = &self.engine.output {
-				ui.label(format!("Broadcast {}/{name}, with the program's audio", output.path));
+				let state = self.engine.state.lock().unwrap();
+				let audio = state
+					.collection()
+					.published_audio(&name)
+					.unwrap_or_default()
+					.to_string();
+				drop(state);
+				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", output.path));
 			}
 			ui.label(format!(
 				"Encoder: {}",
@@ -2810,6 +2817,9 @@ impl Panels {
 			renditions(ui, Some(&name), &video, false);
 			if let Some(error) = video.error() {
 				ui.colored_label(ui.visuals().error_fg_color, error);
+			}
+			if let Some(error) = video.audio_error() {
+				ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
 			}
 		}
 
