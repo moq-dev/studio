@@ -354,7 +354,8 @@ impl Drop for Process {
 /// sender holding the studio's state. The thread ends once the handle is
 /// stopped or quit, or a write fails, as one does when the helper exits.
 ///
-/// It leaves the socket open: the helper reads its end as the studio dying.
+/// Once quit it leaves the socket open, since the helper reads its end as the
+/// studio dying, and exits at once.
 fn writer(channel: Channel) -> std::io::Result<Commands> {
 	let commands = Commands::default();
 	let outbox = commands.clone();
@@ -364,6 +365,10 @@ fn writer(channel: Channel) -> std::io::Result<Commands> {
 			'write: while let Some(batch) = outbox.next() {
 				for command in batch {
 					if channel.send(&command, &[]).is_err() {
+						// Such as a command too long to send: a helper the
+						// studio can no longer reach never keeps running
+						// unheard.
+						let _ = rustix::net::shutdown(&channel, rustix::net::Shutdown::Write);
 						break 'write;
 					}
 				}
@@ -479,6 +484,23 @@ fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Rout
 mod tests {
 	use super::*;
 	use crate::browser::Input;
+
+	/// A command the writer cannot send ends the socket, which the helper
+	/// reads as the studio gone, rather than leave it waiting unheard.
+	#[test]
+	fn a_command_too_long_to_send_ends_the_socket() {
+		let (ours, theirs) = UnixStream::pair().unwrap();
+		let ours = Channel::new(ours);
+		// Held open, as the studio's reader does.
+		let _events = ours.try_clone().unwrap();
+		let commands = writer(ours).unwrap();
+		let long = Open {
+			url: "x".repeat(crate::browser::protocol::MAX_MESSAGE),
+			..Default::default()
+		};
+		commands.open(0, long);
+		assert!(Channel::new(theirs).recv::<Command>().unwrap().is_none());
+	}
 
 	/// A helper that stops reading costs dropped input, never a sender stuck
 	/// on a full socket while it holds the studio's state. Pages still open
