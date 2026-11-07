@@ -613,7 +613,8 @@ mod tests {
 	use super::*;
 
 	/// The pointer lands on the topmost visible page, scaled into its own
-	/// pixels however it is stretched on the canvas.
+	/// pixels however it is stretched on the canvas, the top layer's only over
+	/// a scene of the program's size.
 	#[test]
 	fn the_pointer_lands_on_the_topmost_page() {
 		let mut collection = Collection::new();
@@ -664,6 +665,14 @@ mod tests {
 			page_at(&collection, None, 1720.0, 680.0).map(|hit| hit.page),
 			Some("chat".into())
 		);
+		// But not over a scene of another size, which the preview draws
+		// without it.
+		collection.scenes[0].size = Some(moq_scene::Size {
+			width: 1920,
+			height: 1200,
+		});
+		assert_eq!(at(&collection, 1720.0, 680.0), Some(("alerts".into(), 716, 377)));
+		collection.scenes[0].size = None;
 
 		// A captured pointer maps onto its page past the edges.
 		let place = Place {
