@@ -496,6 +496,11 @@ wrap_app! {
 						Display::X11 => "x11",
 					};
 					command_line.append_switch_with_value(Some(&"ozone-platform".into()), Some(&platform.into()));
+					// On X11, ANGLE otherwise draws through GLX, which on Mesa
+					// leaves shared textures blank. Wayland is always EGL.
+					if *display == Display::X11 {
+						command_line.append_switch_with_value(Some(&"use-angle".into()), Some(&"gl-egl".into()));
+					}
 					// Paint on the studio's GPU, which is the only one it
 					// imports from.
 					if let Some(node) = render_node {
