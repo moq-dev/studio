@@ -102,7 +102,6 @@ repository.
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
 - [A browser helper exits with the studio](/quest/m0/browser-helper-exit.md) - no orphaned CEF helper after a crash, kill, or timed-out test
-- [Nightly and the browser suite pass](/quest/m0/nightly-green.md) - render-sw, cookies, and the X11 clipboard test fixed at their causes
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
 - [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
