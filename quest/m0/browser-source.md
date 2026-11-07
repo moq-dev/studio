@@ -35,6 +35,12 @@ directory instead. What the other platforms need on top:
   with CEF's helper apps (`cef-rs`'s `bundle-cef-app`) and its own
   NSApplication. An IOSurface crosses processes only as a Mach port
   (`IOSurfaceCreateMachPort`), so the channel needs a Mach port rendezvous.
+- **Exiting with the studio:** the studio holds the channel open until the
+  helper exits and stops it with `Command::Stop`, so the helper reads the
+  channel's end, from before CEF starts, as the studio dying, and kills the
+  process group it leads with CEF's processes. macOS keeps that as is.
+  Windows has no process groups: start the helper in a job object with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, which the studio's handle keeps alive.
 
 ## Required
 
