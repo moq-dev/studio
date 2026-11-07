@@ -682,11 +682,7 @@ fn stall(profile: &Path) -> std::fs::File {
 	let made = std::process::Command::new("mkfifo").arg(&state).status().unwrap();
 	assert!(made.success());
 	// Read and write, which Linux opens without waiting for a reader.
-	std::fs::OpenOptions::new()
-		.read(true)
-		.write(true)
-		.open(state)
-		.unwrap()
+	std::fs::OpenOptions::new().read(true).write(true).open(state).unwrap()
 }
 
 /// Wait until `studio`'s helper is stuck reading [`stall`]'s FIFO in
@@ -696,8 +692,14 @@ async fn until_stalled(studio: u32, profile: &Path) -> u32 {
 	let deadline = Instant::now() + TIMEOUT;
 	loop {
 		if let Some(helper) = helper(studio) {
-			let fds = std::fs::read_dir(format!("/proc/{helper}/fd")).into_iter().flatten().flatten();
-			if fds.filter_map(|fd| std::fs::read_link(fd.path()).ok()).any(|path| path == state) {
+			let fds = std::fs::read_dir(format!("/proc/{helper}/fd"))
+				.into_iter()
+				.flatten()
+				.flatten();
+			if fds
+				.filter_map(|fd| std::fs::read_link(fd.path()).ok())
+				.any(|path| path == state)
+			{
 				return helper;
 			}
 		}
