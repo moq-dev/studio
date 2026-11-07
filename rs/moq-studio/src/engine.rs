@@ -4006,19 +4006,19 @@ mod tests {
 		// Until then, the program's viewer heard nothing while the portrait's
 		// heard the bed.
 		assert!(bed < played, "the bed is heard before the cut");
-		let (heard, before) = program.hears(quiet, played, LOUD).await;
+		// The viewer hears the tone as it plays: a media source writes each
+		// sound the bus's latency ahead. The bus holds a first write that long
+		// from the block it last mixed, so the tone may be heard up to a block
+		// early, or two while the audio clock's tick runs late.
+		let early = 2 * AUDIO_PERIOD;
+		let (heard, before) = program.hears(quiet, played - early, LOUD).await;
 		assert!(
 			before < QUIET,
 			"the program's audio scene holds the tone alone: {before}"
 		);
-		// The viewer hears the tone once the bus mixes it: a media source
-		// writes each sound when it is due, and the bus holds every source
-		// 50 ms (moq-audio's `bus::LATENCY`) before mixing it, give or take a
-		// block.
-		let mixed = Duration::from_millis(50) + AUDIO_PERIOD;
 		assert!(
-			heard >= played && heard - played < mixed,
-			"the tone is heard as the bus mixes it: played {played:?}, heard {heard:?}"
+			heard + early > played && heard < played + AUDIO_PERIOD,
+			"the tone is heard as it plays: played {played:?}, heard {heard:?}"
 		);
 		let (also, _) = tall.hears(quiet, played, LOUD).await;
 		assert!(

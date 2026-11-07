@@ -2,11 +2,8 @@
 
 ## Goal
 
-The work held until m0 ships. A studio broadcast can be composed by its
-viewers and by a server from the sources' own tracks and a layout track,
-matching the program the studio composites, so a viewer can toggle and
-prioritize elements. The studio gains features m0 left out: overlay assets
-and restarts, and isolated guest recordings.
+The work held until m0 ships. The studio gains features m0 left out:
+overlay assets and restarts, and isolated guest recordings.
 
 ## Plan
 
@@ -17,11 +14,15 @@ default (decided 2026-11-03 on
 encoding every source for viewers costs more encoder sessions than a consumer
 GPU has. Viewer-side composition waits until m0 ships.
 
+Viewer-side composition moved to m2 on 2026-11-07 (maintainer, on
+[moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97)): no viewer
+can fetch a source's track until a source is published independently, which
+is m2.
+
 Broadened 2026-11-04 (maintainer, /quest-plan): m1 also holds studio
 features planned as follow-ups of m0 work but not needed to ship it, rather
 than opening an m2 for them.
 
 ## Required
 
-- [Viewer-side composition](/quest/m1/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers and by a server
 - [Rune UI spike](/quest/m1/rune-spike.md) - the monitors prototyped on Rune, with a verdict on moving the UI off egui
