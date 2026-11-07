@@ -60,7 +60,7 @@ cameras, packaging, signing) that one monorepo no longer pays off.
 - **Pin:** moq is a `moq` git submodule whose crates are path dependencies,
   as in moq.pro, so the studio compiles against one moq checkout.
 - **moq-scene** moved here with the app, its only consumer. The
-  [viewer-side composition](/quest/m2/compose/README.md) epic (now m2) moved whole:
+  [viewer-side composition](/quest/m3/compose/README.md) epic (now m3) moved whole:
   browser composition ships as a package from this repository layered on
   `@moq/watch`, and the server composite is a headless binary here rather
   than a moq-cli subcommand, so moq never depends on the studio.
@@ -77,7 +77,7 @@ broadcast reaches viewers, not the fallback. Sources are not published to the
 relay by default (decided 2026-11-03 on
 [moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), because
 each encoding costs an encoder session and consumer GPUs have few, so the
-[viewer-side composition](/quest/m2/compose/README.md) epic moved to m1.
+[viewer-side composition](/quest/m3/compose/README.md) epic moved to m1.
 Overlays and animation render into the program here, and travel to viewers
 in the layout track only once that epic lands.
 
