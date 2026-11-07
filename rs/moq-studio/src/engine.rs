@@ -4175,8 +4175,11 @@ mod tests {
 		let (resized, config) = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let catalog = catalogs.next().await.expect("catalog").expect("a catalog");
+				// The old sizes end one at a time, so a catalog between them can
+				// list the half size alone.
 				if let [(name, config)] = catalog.video.enabled().collect::<Vec<_>>().as_slice()
 					&& **name != video
+					&& *name != half
 				{
 					return ((*name).clone(), (*config).clone());
 				}
