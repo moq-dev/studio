@@ -4313,6 +4313,7 @@ dependencies = [
  "url",
  "vello",
  "wuff",
+ "x11rb 0.13.2",
 ]
 
 [[package]]

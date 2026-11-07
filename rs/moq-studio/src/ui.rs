@@ -1695,10 +1695,9 @@ impl Panels {
 							Some(Paint::Gpu) => {
 								ui.weak("GPU").on_hover_text("The page is copied on the GPU");
 							}
-							Some(Paint::Cpu) => {
-								ui.colored_label(DEGRADED, "CPU").on_hover_text(
-									"The page is uploaded from memory every frame: there is no display, or its GPU process or this device cannot share textures",
-								);
+							Some(Paint::Cpu(why)) => {
+								ui.colored_label(DEGRADED, "CPU")
+									.on_hover_text(format!("The page is uploaded from memory every frame: {why}"));
 							}
 							None => {
 								ui.label("");

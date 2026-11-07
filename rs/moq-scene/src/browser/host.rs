@@ -496,8 +496,9 @@ wrap_app! {
 						Display::X11 => "x11",
 					};
 					command_line.append_switch_with_value(Some(&"ozone-platform".into()), Some(&platform.into()));
-					// On X11, ANGLE otherwise draws through GLX, which on Mesa
-					// leaves shared textures blank. Wayland is always EGL.
+					// On X11, ANGLE otherwise draws through GLX, which leaves
+					// shared textures blank on Mesa, and on NVIDIA finds no GBM
+					// device to allocate them. Wayland is always EGL.
 					if *display == Display::X11 {
 						command_line.append_switch_with_value(Some(&"use-angle".into()), Some(&"gl-egl".into()));
 					}
