@@ -223,6 +223,9 @@ pub struct Local {
 	/// Sources a live picture shows or the program plays that ended or
 	/// failed, and where each is shown.
 	pub stopped: Vec<(String, Status, Shown)>,
+	/// Browser sources a live picture shows whose pages are uploaded from
+	/// memory, and why.
+	pub uploaded: Vec<(String, Arc<str>)>,
 }
 
 impl Local {
@@ -974,6 +977,12 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 			Status::Failed(reason) => add(Verdict::Unhealthy, format!("Source `{name}` failed: {reason}.")),
 			_ => {}
 		}
+	}
+	for (name, why) in &local.uploaded {
+		add(
+			Verdict::Degraded,
+			format!("Source `{name}` is uploaded from memory every frame rather than copied on the GPU: {why}."),
+		);
 	}
 
 	for (name, drops) in &facts.drops {
@@ -1802,6 +1811,7 @@ mod tests {
 					Shown::default(),
 				),
 			],
+			uploaded: vec![("chat".into(), "there is no display to paint through".into())],
 			..Default::default()
 		};
 		let uplink = Uplink {
@@ -1822,6 +1832,7 @@ mod tests {
 				"Source `music` failed: the file is gone.",
 				"Source `intro` played to its end, so the program holds its last picture and plays no sound for it.",
 				"Source `outro` played to its end, so the program, scene `tall` and scene `wide` hold its last picture and play no sound for it.",
+				"Source `chat` is uploaded from memory every frame rather than copied on the GPU: there is no display to paint through.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
 		);
