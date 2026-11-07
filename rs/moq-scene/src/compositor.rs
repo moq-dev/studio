@@ -1064,10 +1064,11 @@ fn stinger(feed: Option<&Feed>, cut: Duration, played: &mut Option<u64>, now: In
 	if run.ended.is_some_and(|ended| ended <= now) {
 		return Ok(None);
 	}
-	Ok(Some(
-		run.begun
-			.is_some_and(|begun| now.saturating_duration_since(begun) >= cut),
-	))
+	// A play begins a moment after it is asked, once its first picture and
+	// sound can play together, so even a cut at its start waits for it.
+	Ok(Some(run.begun.is_some_and(|begun| {
+		now.checked_duration_since(begun).is_some_and(|into| into >= cut)
+	})))
 }
 
 /// The crop that trims what `crop` leaves of a `size` picture evenly from two
@@ -1799,7 +1800,7 @@ mod tests {
 
 	use super::*;
 	use crate::collection::{Blend, MaskMode, Rgba, Scene, Size, Video};
-	use crate::source::test::{context, listen, local, start};
+	use crate::source::test::{context, listen, local, start, until, until_time};
 
 	/// A fade over a second.
 	const FADE: Transition = Transition::Fade {
@@ -2853,6 +2854,42 @@ mod tests {
 			let until = at + Duration::from_millis(500);
 			let heard = listen(&mut studio.mixer, &program, &mut at, until).await;
 			assert_eq!(heard, 0.0, "the loop stops with the stinger");
+		})
+		.await;
+	}
+
+	/// A stinger cut at its clip's very start switches the scenes no sooner
+	/// than the clip's first picture shows, which is a moment after it plays.
+	#[tokio::test(start_paused = true)]
+	async fn a_stinger_cuts_no_sooner_than_its_clip_begins() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("sting.mkv"), crate::media::tests::CLIP).unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = crate::source::Sources::new(context);
+			let mut collection = Collection::new();
+			let media = Source::Media {
+				path: "sting.mkv".into(),
+				looping: false,
+				restart: false,
+			};
+			collection.sources.insert("sting".into(), media);
+			collection.transition = Transition::Stinger {
+				source: "sting".into(),
+				cut: Duration::ZERO,
+			};
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let feed = sources.get("sting");
+
+			let mut played = None;
+			let cut = |played: &mut Option<u64>| stinger(feed, Duration::ZERO, played, kio::clock::now()).unwrap();
+			assert_eq!(cut(&mut played), Some(false), "it plays the clip");
+			let begun = until(|| feed.unwrap().run().begun).await;
+			assert!(begun > kio::clock::now(), "the clip begins ahead");
+			assert_eq!(cut(&mut played), Some(false), "not before the clip begins");
+			until_time(begun).await;
+			assert_eq!(cut(&mut played), Some(true), "as the clip begins");
 		})
 		.await;
 	}
