@@ -35,8 +35,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   a second, so viewers and recordings on the relay see the broadcast end
   rather than cut off.
 - `capture` adds camera, display, window, microphone, and system-audio
-  sources, and listening to a mix. On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
-  is the software H.264 fallback for a machine without a hardware encoder.
+  sources, and listening to a mix. On Linux it links ALSA; add `pipewire` for
+  PipeWire cameras and the [virtual camera](#virtual-camera)'s PipeWire node.
+  `openh264` is the software H.264 fallback for a machine without a hardware
+  encoder.
 - `cef` adds browser sources, on Linux only for now. The build takes CEF from
   `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
   loads `libcef.so` from beside itself or from that `CEF_PATH`.
@@ -104,7 +106,7 @@ Every panel is a tab you can drag, split, or stack.
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
 | Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
-| Output | Start and stop recording, pick the picture and the mix it records, set the canvas size and frame rate and each scene's size, and see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene. |
+| Output | Start and stop recording, pick the picture and the mix it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera on. |
 | Health | See how the stream reaches viewers, relay by relay and, for the program and each published scene, track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 | Hotkeys | Bind keys to cut, transition, preview a scene, replay, save a clip, and start or stop recording, and clear them (see [Hotkeys](#hotkeys)). |
@@ -1024,6 +1026,25 @@ image or color carries no media to grade.
 Each catalog asks viewers to report beneath its broadcast, under
 `<broadcast>/viewers/` or `<broadcast>/<scene>/viewers/`: a viewer publishes
 `<broadcast>/viewers/<name>.echo`, as `moq export --echo <name>` does. The relay decides who may publish there, as for any broadcast.
+
+## Virtual camera
+
+The **Virtual camera** toggle in the Output panel shows the program as a
+camera that video-call and conferencing apps can pick, at the canvas size and
+frame rate. It stays on until you turn it off or quit; it is not saved in the
+scene file. The program is copied for the camera only while an app reads it.
+Changing the canvas size or frame rate reopens the camera at the new one, so
+an app reading it opens it again. The Devices panel leaves the camera out
+while it is on, so it cannot be added as a source of the program it shows.
+
+- **Linux:** a PipeWire camera named "MoQ Studio" (needs the `pipewire`
+  feature), which browsers and other PipeWire-aware apps list beside your
+  other cameras. Without PipeWire, the studio writes to the first
+  [v4l2loopback](https://github.com/v4l2loopback/v4l2loopback) device that
+  takes the canvas size, for apps that open `/dev/video*` directly. The
+  studio never loads that module, since it needs root:
+  `sudo modprobe v4l2loopback exclusive_caps=1 card_label="MoQ Studio"`.
+- **macOS and Windows:** not available yet.
 
 ## Development
 

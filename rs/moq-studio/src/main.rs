@@ -29,6 +29,7 @@ mod setup;
 mod snap;
 mod ui;
 mod uplink;
+mod vcam;
 
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
