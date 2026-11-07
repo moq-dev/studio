@@ -3463,25 +3463,34 @@ mod tests {
 		(broadcast, catalogs, catalog)
 	}
 
-	/// A viewer of `broadcast`'s `video`, once the relay has answered its
-	/// subscription and handed it a group. The relay refuses one still
-	/// unanswered when the scene's broadcast goes, since the program's
+	/// A viewer of `broadcast`'s `video`, and the first group the relay
+	/// handed it once it answered the subscription. The relay refuses one
+	/// still unanswered when the scene's broadcast goes, since the program's
 	/// broadcast still covers its path there.
-	async fn served(broadcast: &moq_net::broadcast::Consumer, video: &str) -> moq_net::track::Subscriber {
+	async fn served(
+		broadcast: &moq_net::broadcast::Consumer,
+		video: &str,
+	) -> (moq_net::track::Subscriber, moq_net::group::Consumer) {
 		let mut track = broadcast.track(video).unwrap().subscribe(None).await.unwrap();
-		kio::clock::timeout(TIMEOUT, track.recv_group())
+		let first = kio::clock::timeout(TIMEOUT, track.recv_group())
 			.await
 			.expect("the relay serves the video")
 			.expect("the video")
 			.expect("a group");
-		track
+		(track, first)
 	}
 
-	/// Read a published scene's `video` and `catalogs` to a clean end.
-	async fn ended(mut catalogs: moq_mux::catalog::Consumer<()>, mut video: moq_net::track::Subscriber) {
+	/// Read a published scene's `video`, from the first group it was served,
+	/// and its `catalogs` to a clean end.
+	async fn ended(
+		mut catalogs: moq_mux::catalog::Consumer<()>,
+		(mut video, first): (moq_net::track::Subscriber, moq_net::group::Consumer),
+	) {
 		kio::clock::timeout(TIMEOUT, async {
-			while let Some(mut group) = video.recv_group().await.expect("the video finishes") {
-				while group.read_frame().await.expect("the video finishes").is_some() {}
+			let mut group = Some(first);
+			while let Some(mut current) = group {
+				while current.read_frame().await.expect("the video finishes").is_some() {}
+				group = video.recv_group().await.expect("the video finishes");
 			}
 			while catalogs.next().await.expect("the catalog finishes").is_some() {}
 		})
