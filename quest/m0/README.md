@@ -101,6 +101,8 @@ repository.
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under Wayland, and a page that cannot paint fails loudly
+- [The program reaches a relay on every runner](/quest/m0/relay-test-flake.md) - the relay engine test stops failing the nightly on GitHub's runner
+- [Browser sources make no outside requests](/quest/m0/browser-offline.md) - no component updates, spellcheck downloads, or network time from the helper
 - [A browser helper exits with the studio](/quest/m0/browser-helper-exit.md) - no orphaned CEF helper after a crash, kill, or timed-out test
 - [Nightly and the browser suite pass](/quest/m0/nightly-green.md) - render-sw, cookies, and the X11 clipboard test fixed at their causes
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
