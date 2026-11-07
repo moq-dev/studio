@@ -55,7 +55,7 @@ render-sw:
     icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
     export VK_DRIVER_FILES="${icd[0]}"
     cargo nextest run --locked -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/) | test(/^browser::layers::tests::/)'
-    cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E 'test(/^engine::tests::the_program_/) | test(=setup::tests::times_every_canvas)'
+    cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E '(test(/^engine::tests::/) - test(=engine::tests::the_virtual_camera_reaches_a_pipewire_app)) | test(=setup::tests::times_every_canvas)'
     cargo nextest run --locked -p moq-studio --features cef --run-ignored only -E 'binary(browser)'
     sh/pipewire-session.sh cargo nextest run --locked -p moq-studio --features pipewire --run-ignored only -E 'test(=engine::tests::the_virtual_camera_reaches_a_pipewire_app)'
 
