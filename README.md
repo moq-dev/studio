@@ -327,6 +327,9 @@ stream carries on. A crash of the browser itself fails every browser source.
 Either shows at once, since the browser's processes dump no core. On Linux,
 pages run without Chromium's sandbox, as in OBS, so a page that exploits a
 browser bug can do anything you can: add only pages you trust.
+The browser requests only what its pages load, never asking Google for
+updates, the time, or autofill suggestions on its own, so pages are not
+spellchecked, which would need a dictionary from Google.
 **Reload** in Sources restarts a page, failed or not. A page's dropdown
 lists, such as a `<select>`'s, draw over it and take clicks under
 **Interact**, but it opens no other windows (`window.open` and new-tab links

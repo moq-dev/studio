@@ -195,6 +195,11 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 		});
 	}
 
+	if let Err(err) = no_spellcheck() {
+		shutdown();
+		return Err(err);
+	}
+
 	// Pages asked for meanwhile open now.
 	inbox.up.store(true, Ordering::Release);
 	inbox.post(shared);
@@ -203,6 +208,20 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 	// Saves the profile, such as cookies not yet written.
 	shutdown();
 	Ok(())
+}
+
+/// Spellcheck in no language. Chromium otherwise fetches the dictionary for
+/// the profile's language from Google, which no switch stops.
+fn no_spellcheck() -> Result<(), String> {
+	let context = request_context_get_global_context().ok_or("CEF has no profile")?;
+	let mut none = value_create().ok_or("CEF cannot create a value")?;
+	none.set_list(list_value_create().as_mut());
+	// CEF refuses to set anything without somewhere to say why it failed.
+	let mut error = CefString::from("unknown");
+	match context.set_preference(Some(&"spellcheck.dictionaries".into()), Some(&mut none), Some(&mut error)) {
+		1 => Ok(()),
+		_ => Err(format!("cannot turn off spellcheck: {error}")),
+	}
 }
 
 /// The studio's commands the UI thread has yet to apply.
@@ -555,6 +574,22 @@ wrap_app! {
 			// which a user build lacks. Without either, the browser aborts
 			// rather than run unsandboxed, so the sandbox is off, as in OBS.
 			command_line.append_switch(Some(&"no-sandbox".into()));
+			// The browser requests only what its pages load. Otherwise it asks
+			// Google, unprompted, for the network time, for autofill's guesses
+			// at each form a page shows, and for whether AI Mode is offered.
+			// CEF disables features of its own, which ours join.
+			let disable = CefString::from("disable-features");
+			let theirs = CefString::from(&command_line.switch_value(Some(&disable))).to_string();
+			let ours = "NetworkTimeServiceQuerying,AutofillServerCommunication,AimEnabled";
+			let features = match theirs.is_empty() {
+				true => ours.to_string(),
+				false => format!("{theirs},{ours}"),
+			};
+			command_line.append_switch_with_value(Some(&disable), Some(&features.as_str().into()));
+			// Nor does it install components from Google: the updater's server is
+			// nowhere. `--disable-component-update` would leave the installers that
+			// ask for themselves, such as the on-device AI model's.
+			command_line.append_switch_with_value(Some(&"component-updater".into()), Some(&"url-source=data:".into()));
 			match &self.raster {
 				Raster::Gpu { render_node, display } => {
 					let platform = match display {
