@@ -51,4 +51,4 @@ reads skips drawing. Per-scene cost grows only with what that scene draws;
 
 ## Required
 
-- [Audio scenes](/quest/m0/scenes/audio.md) - mixes become audio-only scenes that nest
+- [Pan in audio scenes](/quest/m0/scenes/audio.md) - each sound's strip pans, once moq's bus strip can

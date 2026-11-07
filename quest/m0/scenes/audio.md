@@ -1,25 +1,23 @@
-# [M] Audio scenes
+# [S] Pan in audio scenes
 
 ## Goal
 
-The audio mixes become audio-only scenes. An audio scene holds sounds
-(sources' audio, with gain, pan, mute, and delay) and other audio scenes, so a
-"Mics" scene can feed both "Stream" and "Headphones". **On program** picks the
-audio scene the broadcast carries; each published scene and each recording
-picks one. Audio stays independent of cuts.
+Each sound's strip in the Audio panel has a pan beside its fader, saved as
+`pan` in `[audio.<source>]` and applied in every audio scene holding the
+sound, as gain, mute, and delay are. The rest of audio scenes landed in
+[moq-dev/studio#77](https://github.com/moq-dev/studio/pull/77).
 
 ## Plan
 
 Decided 2026-11-05 with the maintainer (/quest-plan); see the
 [epic](/quest/m0/scenes/README.md).
 
-- Replaces `[mixes]` and `[audio.<source>]` in the scene file with no
-  migration; nothing is released.
-- An audio scene cannot contain itself, directly or through others.
-- The Audio panel stays a mixer: a strip per sound with fader, pan, meter,
-  and a send to each audio scene. Listen and On program work as today.
-- The guest return feed (a mix-minus) and the sync delay keep working; a
-  guest hears the audio scene on program without their own sound.
-- Switching or editing an audio scene never drops or repeats audio, as with
-  mixes today.
-- `README.md` documents audio scenes.
+- Pan is a property of the source's bus strip, like its gain, so it needs
+  `moq_audio::bus::Strip` to pan; the studio only sets it and saves it.
+- Changing pan never drops or repeats audio, ramped across a block as gain is.
+
+## Waiting
+
+- moq-dev/moq: `moq_audio::bus::Strip` gains a pan (with a moq-side test),
+  and the studio's `moq` gitlink is bumped to a commit carrying it; check for
+  a `set_pan` on `Strip` in the pinned `moq/rs/moq-audio/src/bus.rs`.

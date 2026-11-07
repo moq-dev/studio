@@ -18,7 +18,7 @@ rendition, as every source track does, while the program keeps its
 two sizes. It counts as used, so it encodes for as long as it is published
 (decided 2026-11-04, maintainer): a source encodes while it is on program
 (shown in a scene on air, or, for a microphone or system audio, played by the
-mix on program) or while something reads its track, and naming a published
+audio scene on program) or while something reads its track, and naming a published
 source among those on program (`Publish::set_on_program` in
 `rs/moq-scene/src/publish.rs`) keeps it encoding.
 

@@ -5,7 +5,7 @@
 //! read. Its video is the program's: the studio's session in the room serves the
 //! program broadcast once at `.program`, and each feed's catalog lists its video
 //! renditions by reference, so a guest costs no video encode. Its audio is its
-//! own: a mix-minus of the mix on program without the guest's microphone, so
+//! own: a mix-minus of the audio scene on program without the guest's microphone, so
 //! they follow the show without hearing themselves back.
 //!
 //! The studio's session in the room publishes them, holding only what the room
@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use bytes::Bytes;
 use moq_mux::catalog::Stream;
 use moq_net::Path;
 use moq_scene::Collection;
@@ -90,15 +89,16 @@ impl Feeds {
 	}
 
 	/// Publish a feed for each renewed guest and end the others', and point
-	/// each at the mix `collection` puts on program, without the guest's
-	/// microphone as `sources` runs it.
+	/// each at the audio scene `collection` puts on program, without the
+	/// guest's microphone as `sources` runs it.
 	pub fn sync(&mut self, collection: &Collection, sources: &Sources) {
 		let renewed = self.room.renewed();
 		// A feed whose task stopped, having logged why, opens again below.
 		self.feeds.retain(|identity, feed| {
 			renewed.contains(&(identity.clone(), feed.generation)) && !feed.task.is_finished()
 		});
-		let program = sources.mix(&collection.mixes.program);
+		let on_program = collection.program_audio().unwrap_or_default();
+		let program = sources.mix(on_program);
 		for (identity, generation) in renewed {
 			if !self.feeds.contains_key(&identity) {
 				match self.open(&identity, generation) {
@@ -118,7 +118,7 @@ impl Feeds {
 			let heard = voices.iter().find(|name| {
 				let strip = sources.get(name).and_then(|source| source.strip());
 				let audible = strip.is_some_and(|strip| strip.gain() > 0.0);
-				audible && sources.plays(&collection.mixes.program, name)
+				audible && sources.plays(on_program, name)
 			});
 			let voice = heard.or(voices.first());
 			match voice.and_then(|name| sources.get(name)?.strip()) {
@@ -227,7 +227,7 @@ impl Running {
 		} = &mut self;
 		let ended = tokio::select! {
 			listed = list(program, catalog, reference) => listed,
-			encoded = encode(follow, audio, *epoch, *rate) => encoded,
+			encoded = mix::encode(follow, audio, *epoch, *rate) => encoded,
 			// Dropped with the feed.
 			_ = stopped => Ok(()),
 		};
@@ -257,32 +257,6 @@ async fn list(
 			rendition.broadcast = Some(reference.clone());
 		}
 		catalog.mutate(|catalog| catalog.video = video)?;
-	}
-	Ok(())
-}
-
-/// Encode what `follow` reads into `audio`, stamped `epoch` past the bus's
-/// start at `rate`, as the program audio is, until the bus stops.
-async fn encode(
-	follow: &mut mix::Follow,
-	audio: &mut moq_audio::encode::Producer,
-	epoch: Duration,
-	rate: u32,
-) -> anyhow::Result<()> {
-	let rate = u128::from(rate);
-	let mut next = None;
-	while let Some(block) = follow.read().await {
-		// Audio this encoder fell too far behind to read leaves a gap.
-		if next.is_some_and(|next| next != block.position) {
-			audio.reanchor();
-		}
-		next = Some(block.position + block.frames() as u64);
-		let micros = epoch.as_micros() + u128::from(block.position) * 1_000_000 / rate;
-		let Ok(timestamp) = moq_net::Timestamp::from_micros(micros as u64) else {
-			continue;
-		};
-		let data: Vec<u8> = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-		audio.write(&moq_audio::Frame::new(Bytes::from(data), timestamp))?;
 	}
 	Ok(())
 }
@@ -341,6 +315,7 @@ mod tests {
 			room.observe(&Path::new(&camera).unwrap(), true, &collection, &History::new());
 			let path = format!("guests/{camera}");
 			collection.sources.insert(guest.into(), Source::Broadcast { path });
+			collection.audio_scenes[0].sounds.insert(guest.into());
 		}
 		let origin = moq_tokio::origin::spawn();
 		let mut sources = Sources::new(moq_scene::source::Context {
@@ -420,6 +395,7 @@ mod tests {
 			let copy = collection.sources["alice"].clone();
 			collection.sources.insert(name.into(), copy);
 			collection.audio.insert(name.into(), audio);
+			collection.audio_scenes[0].sounds.insert(name.into());
 		}
 		drop(sources.sync(&collection));
 		let mut alice = channel(&bus, &sources, "alice");

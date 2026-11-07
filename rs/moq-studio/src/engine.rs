@@ -10,12 +10,13 @@
 //! - **program** draws preview, program, and each published scene once per
 //!   canvas frame and hands each to each rendition's encoder its gate lets
 //!   encode, scaled to the rendition and stamped with the program clock.
-//! - **audio** advances the audio bus, and with it every mix, on the same
-//!   clock.
-//! - **audio-encode** encodes the mix on program into the program audio, and
-//!   **audio-record** the mix recordings hold into the recording broadcast's
-//!   own audio while a recording reads it.
-//! - Each guest's return feed encodes its mix-minus on the tokio runtime.
+//! - **audio** advances the audio bus, and with it each audio scene's mix, on
+//!   the same clock.
+//! - **audio-encode** encodes the audio scene on program into the program
+//!   audio, and **audio-record** the one recordings hold into the recording
+//!   broadcast's own audio while a recording reads it.
+//! - Each published scene's audio, and each guest's return feed, a
+//!   mix-minus, encodes on the tokio runtime.
 //! - **encode**: one per program rendition, which waits for each program copy
 //!   and encodes it. A new canvas size or frame rate starts new renditions.
 //! - Recordings write their files on the tokio runtime.
@@ -432,6 +433,8 @@ pub struct VideoStats {
 	encoder: Mutex<EncoderName>,
 	/// Why the video stopped, if it did, until a new rendition starts.
 	error: Mutex<Option<String>>,
+	/// Why a published scene's own audio stopped, if it did.
+	audio_error: Mutex<Option<String>>,
 	/// Which video this is, so a scene published again under its name is
 	/// told from the one before, whose counters it does not continue.
 	generation: Generation,
@@ -526,6 +529,15 @@ impl VideoStats {
 	fn fail(&self, err: impl std::fmt::Display) {
 		tracing::error!(%err, "video stopped");
 		*self.error.lock().unwrap() = Some(format!("video: {err}"));
+	}
+
+	/// Why a published scene's own audio stopped, if it did.
+	pub fn audio_error(&self) -> Option<String> {
+		self.audio_error.lock().unwrap().clone()
+	}
+
+	fn fail_audio(&self, err: impl std::fmt::Display) {
+		*self.audio_error.lock().unwrap() = Some(format!("audio: {err}"));
 	}
 }
 
@@ -699,10 +711,10 @@ impl Program {
 	/// Encode the local sources' tracks on program, whether or not anything
 	/// reads them, so a replay of one has its past: the pictures `shown` in a
 	/// scene on air or a published or recorded scene drawn, and the sound the
-	/// program mix plays. A media file heard and not shown encodes only its
-	/// sound.
+	/// audio scene on program plays. A media file heard and not shown encodes
+	/// only its sound.
 	fn on_program(&self, state: &State, shown: BTreeSet<String>) {
-		let program = &state.collection.mixes.program;
+		let program = state.collection.program_audio().unwrap_or_default();
 		let heard = state
 			.sources
 			.iter()
@@ -723,11 +735,11 @@ pub struct Engine {
 	pub stats: Arc<Stats>,
 	/// How the stream is delivered, graded every [`health::INTERVAL`].
 	pub health: Mutex<health::Report>,
-	/// The mix the program audio carries, as the collection picks it.
+	/// The audio scene the program audio carries, as the collection picks it.
 	program_audio: mix::Pick,
-	/// The mix recordings hold, as the collection picks it.
+	/// The audio scene recordings hold, as the collection picks it.
 	recorded_audio: mix::Pick,
-	/// Plays a mix to the speakers while the creator listens.
+	/// Plays an audio scene to the speakers while the creator listens.
 	monitor: Mutex<Option<mix::Monitor>>,
 	/// `None` when running without a relay.
 	pub output: Option<Output>,
@@ -910,7 +922,7 @@ impl Engine {
 			renditions,
 			ladder,
 			recording,
-			extras,
+			mut extras,
 			audio,
 			recorded_audio,
 			clock,
@@ -922,6 +934,7 @@ impl Engine {
 		// Where the program clock starts on the catalog's, so the wall time the
 		// catalog advertises for a frame is when the program drew it.
 		let epoch = Duration::from(clock.capture(start)?);
+		extras.epoch = epoch;
 		if let Some(room) = &engine.room
 			&& let Some(origin) = room.origin()
 		{
@@ -948,7 +961,7 @@ impl Engine {
 				.lock()
 				.unwrap()
 				.insert(name.clone(), video.clone());
-			let opened = extras.open(&name, canvas, video.clone(), &engine.program).await;
+			let opened = extras.open(&name, canvas, video.clone()).await;
 			let opened = opened.inspect_err(|err| video.fail(format!("{err:#}"))).ok();
 			lines.insert(name, opened);
 		}
@@ -1000,7 +1013,7 @@ impl Engine {
 			tokio::spawn(crate::guests::run(engine.clone(), guests));
 		}
 		if let Some(room) = &engine.room {
-			// Who has a return feed follows who is renewed, synced with the mixes.
+			// Who has a return feed follows who is renewed, synced with the audio.
 			let mut changes = room.changes();
 			// Including any made since the feeds started.
 			changes.mark_changed();
@@ -1087,12 +1100,13 @@ impl Engine {
 		self.autosave.keep(&self.state)
 	}
 
-	/// Play a mix to an output on `runtime`, from the next frame, or stop with
-	/// `None`. A monitored mix that leaves the collection hands over to the one
-	/// the program carries, and another output takes over from the old one.
+	/// Play an audio scene to an output on `runtime`, from the next frame, or
+	/// stop with `None`. A monitored audio scene that leaves the collection
+	/// hands over to the one the program carries, and another output takes
+	/// over from the old one.
 	///
-	/// Takes the `state` already locked, so an edit renaming the mix and the
-	/// pick that follows it land before the next frame's sync.
+	/// Takes the `state` already locked, so an edit renaming the audio scene
+	/// and the pick that follows it land before the next frame's sync.
 	pub fn listen(
 		&self,
 		state: &mut State,
@@ -1103,18 +1117,18 @@ impl Engine {
 		match (listen, monitor.as_mut()) {
 			(None, _) => *monitor = None,
 			(Some(listen), Some(monitor)) if monitor.failed().is_none() => {
-				monitor.set_name(listen.mix);
+				monitor.set_name(listen.scene);
 				monitor.set_speaker(listen.speaker);
 			}
 			// Listening again after a failure starts over.
-			(Some(listen), _) => *monitor = Some(mix::Monitor::start(runtime, listen.mix, listen.speaker)?),
+			(Some(listen), _) => *monitor = Some(mix::Monitor::start(runtime, listen.scene, listen.speaker)?),
 		}
-		// Synced on the next frame, which picks the mix by its name.
+		// Synced on the next frame, which picks the audio scene by its name.
 		state.stale = true;
 		Ok(())
 	}
 
-	/// The mix played to the speakers, and why it stopped if it did.
+	/// The audio scene played to the speakers, and why it stopped if it did.
 	pub fn listening(&self) -> Option<(String, Option<String>)> {
 		let monitor = self.monitor.lock().unwrap();
 		monitor
@@ -1123,22 +1137,23 @@ impl Engine {
 	}
 
 	/// Point the program audio, the recorded audio, the monitor, and each
-	/// guest's return feed at the mixes `state` now has.
-	fn pick_mixes(&self, state: &State) {
-		let mixes = &state.collection.mixes;
-		if let Some(mix) = state.sources.mix(&mixes.program) {
+	/// guest's return feed at the audio scenes `state` now has.
+	fn pick_audio(&self, state: &State) {
+		let collection = &state.collection;
+		let program = collection.program_audio().unwrap_or_default();
+		if let Some(mix) = state.sources.mix(program) {
 			self.program_audio.set(mix.clone());
 		}
-		if let Some(mix) = state.sources.mix(mixes.recorded()) {
+		if let Some(mix) = collection.recorded_audio().and_then(|scene| state.sources.mix(scene)) {
 			self.recorded_audio.set(mix.clone());
 		}
-		// From the mix on program, which is what each guest follows.
+		// From the audio scene on program, which is what each guest follows.
 		if let Some(feeds) = self.feeds.lock().unwrap().as_mut() {
-			feeds.sync(&state.collection, &state.sources);
+			feeds.sync(collection, &state.sources);
 		}
 		if let Some(monitor) = self.monitor.lock().unwrap().as_mut() {
-			if !mixes.names.iter().any(|name| name == monitor.name()) {
-				monitor.set_name(&mixes.program);
+			if collection.audio_scene(monitor.name()).is_none() {
+				monitor.set_name(program);
 			}
 			if let Some(mix) = state.sources.mix(monitor.name()) {
 				monitor.play(mix.clone());
@@ -1163,8 +1178,8 @@ impl Engine {
 		// A stalled picture matters where a live scene draws it: a scene on air,
 		// including one leaving in a transition, the top layer over them, or a
 		// published or recorded scene drawn.
-		// Stalled sound matters only if the mix on program plays it, not one
-		// only listened to. A source that stopped matters either way.
+		// Stalled sound matters only if the audio scene on program plays it,
+		// not one only listened to. A source that stopped matters either way.
 		let (stalled, stopped) = {
 			let state = self.state.lock().unwrap();
 			let on_program = state.on_program();
@@ -1177,7 +1192,8 @@ impl Engine {
 					.map(|(scene, _)| scene.to_string())
 					.collect(),
 			};
-			let heard = |name: &str| state.sources.plays(&state.collection.mixes.program, name);
+			let program = state.collection.program_audio().unwrap_or_default();
+			let heard = |name: &str| state.sources.plays(program, name);
 			let stalled = state
 				.sources
 				.iter()
@@ -1233,7 +1249,10 @@ impl Engine {
 		// The program's output stops with the audio too.
 		let program = (None, video(&stats.video, stats.error()));
 		let published = stats.published().into_iter();
-		let published = published.map(|(name, stats)| (Some(name), video(&stats, stats.error())));
+		let published = published.map(|(name, stats)| {
+			let failed = stats.error().or_else(|| stats.audio_error());
+			(Some(name), video(&stats, failed))
+		});
 		health::Local {
 			rendered: stats.rendered.load(Ordering::Relaxed),
 			broadcasts: std::iter::once(program).chain(published).collect(),
@@ -1309,7 +1328,8 @@ impl Engine {
 			let drawn = {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
-				if std::mem::take(&mut state.stale) {
+				let synced = std::mem::take(&mut state.stale);
+				if synced {
 					let drivers = state.sources.sync(&state.collection);
 					self.recorder.set_sources(&state.collection);
 					if !drivers.is_empty() {
@@ -1318,7 +1338,7 @@ impl Engine {
 						running.retain_mut(|ended| ended.try_recv() == Err(TryRecvError::Empty));
 						running.extend(drivers.into_iter().map(spawn));
 					}
-					self.pick_mixes(state);
+					self.pick_audio(state);
 				}
 
 				// Each published scene's line starts once it is published, in a
@@ -1336,14 +1356,23 @@ impl Engine {
 					self.stats.published.lock().unwrap().remove(&name);
 				}
 				for (name, canvas) in &published {
-					lines.entry(name.clone()).or_insert_with(|| {
+					let started = !lines.contains_key(name);
+					let line = lines.entry(name.clone()).or_insert_with(|| {
 						let video = Arc::new(VideoStats::default());
 						self.stats.published.lock().unwrap().insert(name.clone(), video.clone());
 						extras
-							.start(name, *canvas, video.clone(), &self.program)
+							.start(name, *canvas, video.clone())
 							.inspect_err(|err| video.fail(format!("{err:#}")))
 							.ok()
 					});
+					// Its audio follows the audio scene it carries from now on.
+					if (synced || started)
+						&& let Some((_, broadcast)) = line
+						&& let Some(audio) = state.collection.published_audio(name)
+						&& let Some(mix) = state.sources.mix(audio)
+					{
+						broadcast.audio.set(mix.clone());
+					}
 				}
 				let (recorded, recorded_canvas) = recorded(&state.collection);
 				let wants = |name: &str| matches!(lines.get(name), Some(Some((line, _))) if line.wants());
@@ -1668,13 +1697,7 @@ async fn publish(
 		None => None,
 	};
 
-	let bus = moq_audio::bus::Config::default();
-	let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
-	input.format = moq_audio::Format::F32;
-	let mut options = moq_audio::encode::Options::default();
-	options.track = Some("audio".into());
-	options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Opus, &input);
-	options.config.bitrate = Some(AUDIO_BITRATE);
+	let (input, options) = audio_options();
 	let graded = catalog.clone();
 	let listed = catalog.clone();
 	let recorded_audio = moq_audio::encode::Producer::new(&mut recorder, recorded.clone(), input.clone(), &options)?;
@@ -1690,6 +1713,8 @@ async fn publish(
 	// One instance on every relay, so a viewer moving between them resumes
 	// mid-group rather than restarting.
 	let instance = publication.instance();
+	// Set once the program clock starts.
+	let epoch = Duration::ZERO;
 	publication.announce().context("cannot announce the broadcast")?;
 
 	let health = match live {
@@ -1725,7 +1750,8 @@ async fn publish(
 				origin: origin.clone(),
 				path: path.clone(),
 				clock: clock.clone(),
-				instance,
+				epoch,
+				runtime: tokio::runtime::Handle::current(),
 				gpu: gpu.clone(),
 				bandwidth,
 				on_demand: renditions.on_demand,
@@ -1743,6 +1769,19 @@ async fn publish(
 			sources,
 		},
 	))
+}
+
+/// What the program audio, the recording's, and each published scene's encode:
+/// the bus's mix, as Opus at [`AUDIO_BITRATE`] on a track called `audio`.
+fn audio_options() -> (moq_audio::encode::Input, moq_audio::encode::Options) {
+	let bus = moq_audio::bus::Config::default();
+	let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
+	input.format = moq_audio::Format::F32;
+	let mut options = moq_audio::encode::Options::default();
+	options.track = Some("audio".into());
+	options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Opus, &input);
+	options.config.bitrate = Some(AUDIO_BITRATE);
+	(input, options)
 }
 
 /// What one of the program's video encoders is for, and its place in
@@ -2240,8 +2279,15 @@ fn recorded(collection: &Collection) -> (Option<String>, Canvas) {
 /// when dropped.
 struct Broadcast {
 	publication: moq_net::origin::Route,
-	/// Lists the scene's video and the program broadcast's audio.
+	/// Lists the scene's video and audio.
 	catalog: moq_scene::publish::Catalog,
+	/// The audio scene its audio carries, as the collection picks it.
+	audio: mix::Pick,
+	/// Dropped to finish its audio track.
+	_audio_stop: tokio::sync::oneshot::Sender<()>,
+	/// Its audio's claim on the connection's bandwidth, which it does not
+	/// follow, as the program's.
+	_audio_grant: bandwidth::Reservation,
 	/// Its grading, while live, which stops with it.
 	_graded: Option<health::Graded>,
 }
@@ -2260,8 +2306,12 @@ struct Extras {
 	origin: moq_net::origin::Producer,
 	path: moq_net::Path,
 	clock: moq_mux::Clock,
-	/// The main broadcast's, which its audio is listed by.
-	instance: moq_net::Instance,
+	/// Where the program audio's timestamps start on that clock, which each
+	/// scene's audio is stamped against too.
+	epoch: Duration,
+	/// Where each scene's audio encodes: never the program thread that
+	/// starts it, so encoding never holds up a frame.
+	runtime: tokio::runtime::Handle,
 	gpu: Gpu,
 	bandwidth: bandwidth::Allocator,
 	on_demand: bool,
@@ -2276,14 +2326,8 @@ impl Extras {
 	/// encodes its video, reporting in `video`. Its encoders are probed for on
 	/// the line's first feed, off the program clock, for a scene published
 	/// while the studio runs.
-	fn start(
-		&self,
-		name: &str,
-		canvas: Canvas,
-		video: Arc<VideoStats>,
-		program: &Program,
-	) -> anyhow::Result<(Line, Broadcast)> {
-		let (renditions, broadcast) = self.publish(name, video, program)?;
+	fn start(&self, name: &str, canvas: Canvas, video: Arc<VideoStats>) -> anyhow::Result<(Line, Broadcast)> {
+		let (renditions, broadcast) = self.publish(name, video)?;
 		Ok((Line::new(renditions, canvas, None, false), broadcast))
 	}
 
@@ -2292,26 +2336,18 @@ impl Extras {
 	/// scene file holds its encode session before any source opens one. A
 	/// scene whose encoder cannot open draws on without video, saying why in
 	/// `video`.
-	async fn open(
-		&self,
-		name: &str,
-		canvas: Canvas,
-		video: Arc<VideoStats>,
-		program: &Program,
-	) -> anyhow::Result<(Line, Broadcast)> {
-		let (renditions, broadcast) = self.publish(name, video, program)?;
+	async fn open(&self, name: &str, canvas: Canvas, video: Arc<VideoStats>) -> anyhow::Result<(Line, Broadcast)> {
+		let (renditions, broadcast) = self.publish(name, video)?;
 		Ok((Line::open(renditions, canvas).await, broadcast))
 	}
 
 	/// Publish the scene `name` at its own path beneath the program's
-	/// broadcast, listing the program's audio by reference so it is encoded
-	/// once, and where its video goes, reporting in `video`.
-	fn publish(
-		&self,
-		name: &str,
-		video: Arc<VideoStats>,
-		program: &Program,
-	) -> anyhow::Result<(Renditions, Broadcast)> {
+	/// broadcast, with audio of its own, which encodes the audio scene it is
+	/// [picked](Broadcast::audio) on the runtime, and where its video goes,
+	/// reporting in `video`. Its own, rather than the program's by
+	/// reference, so picking another audio scene never changes the track its
+	/// viewers play.
+	fn publish(&self, name: &str, video: Arc<VideoStats>) -> anyhow::Result<(Renditions, Broadcast)> {
 		let path = moq_net::Path::new(name)
 			.and_then(|name| self.path.join(&name))
 			.with_context(|| format!("cannot publish scene `{name}`"))?;
@@ -2322,11 +2358,6 @@ impl Extras {
 				"scene `{name}` would publish where viewers report back; rename it to publish it"
 			);
 		}
-		let audio = self
-			.path
-			.relative(&path)
-			.with_context(|| format!("scene `{name}` cannot refer to the program's broadcast"))?;
-
 		let publication = self
 			.origin
 			.route(&path, moq_net::origin::RouteOptions::hidden())
@@ -2336,15 +2367,35 @@ impl Extras {
 			.with_catalog(Default::default())
 			.with_clock(self.clock.clone());
 		let mut catalog = moq_scene::publish::Catalog::new(&mut broadcast, config)?;
-		let listed = program.catalog.snapshot().audio.renditions;
-		catalog.mutate(|catalog| {
-			for (id, mut config) in listed {
-				config.broadcast = Some(audio.clone());
-				config.instance = Some(self.instance.clone());
-				config.track.get_or_insert_with(|| id.clone());
-				catalog.audio.renditions.insert(id, config);
+		let (input, options) = audio_options();
+		let rate = input.sample_rate;
+		let mut audio = moq_audio::encode::Producer::new(&mut broadcast, catalog.clone(), input, &options)?;
+		let audio_grant = self.bandwidth.reserve(&audio.demand(), AUDIO_BITRATE);
+		let pick = mix::Pick::default();
+		let mut follow = pick.follow();
+		let (audio_stop, stopped) = tokio::sync::oneshot::channel::<()>();
+		let epoch = self.epoch;
+		let failed = video.clone();
+		let scene = name.to_string();
+		self.runtime.spawn(async move {
+			let encoded = tokio::select! {
+				encoded = mix::encode(&mut follow, &mut audio, epoch, rate) => encoded,
+				// Dropped with the broadcast.
+				_ = stopped => Ok(()),
+			};
+			match encoded {
+				Ok(()) => {
+					// Fails only once the broadcast closed, which ended the track.
+					let _ = audio.finish();
+				}
+				Err(err) => {
+					tracing::error!(%scene, error = format!("{err:#}"), "a published scene's audio stopped");
+					failed.fail_audio(format!("{err:#}"));
+					// Readers see the audio fail rather than go away unfinished.
+					audio.abort(moq_net::StreamError::Internal.into());
+				}
 			}
-		})?;
+		});
 		// Its viewers report back beneath it, as the program's do.
 		if self.graded.is_some() {
 			health::solicit(&mut catalog, &path)?;
@@ -2375,6 +2426,9 @@ impl Extras {
 		let broadcast = Broadcast {
 			publication,
 			catalog,
+			audio: pick,
+			_audio_stop: audio_stop,
+			_audio_grant: audio_grant,
 			_graded: graded,
 		};
 		Ok((renditions, broadcast))
@@ -3026,11 +3080,13 @@ mod tests {
 
 		{
 			let mut state = engine.state.lock().unwrap();
-			let mut mixes = state.collection().mixes.clone();
-			mixes.names.push("Full".into());
-			mixes.recording = Some("Full".into());
+			let mut scenes = state.collection().audio_scenes.clone();
+			scenes.push(moq_scene::AudioScene {
+				recorded: true,
+				..moq_scene::AudioScene::new("Full")
+			});
 			let mut draft = state.collection().draft("Record `Full`");
-			draft.set_mixes(mixes).unwrap();
+			draft.set_audio_scenes(scenes).unwrap();
 			state.commit(draft, None).unwrap();
 		}
 
@@ -3066,6 +3122,7 @@ mod tests {
 				restart: false,
 			};
 			loaded.collection.sources.insert(name.into(), media);
+			loaded.collection.audio_scenes[0].sounds.insert(name.into());
 		}
 		loaded.collection.transition = moq_scene::Transition::Stinger {
 			source: "sting".into(),
@@ -3302,8 +3359,8 @@ mod tests {
 	}
 
 	/// A published scene reaches the relay in a broadcast of its own beneath
-	/// the program's, at its own size, with the program's audio listed by
-	/// reference rather than encoded again, and holds one more encode session.
+	/// the program's, at its own size, with audio of its own, and holds one
+	/// more encode session.
 	/// What only it shows is shown but not on program. Health grades its
 	/// video beside the program, with its own viewers. Unpublishing
 	/// it, or quitting, ends its video and then its catalog cleanly, then its
@@ -3363,11 +3420,24 @@ mod tests {
 			.expect("the studio starts");
 
 		let (broadcast, catalogs, catalog) = routed_tall(&relay).await;
-		let (_, audio) = catalog.audio.renditions.iter().next().expect("the program audio");
-		let main = audio.broadcast.as_ref().expect("a reference to the main broadcast");
-		let main = moq_net::Path::new("studio/tall").unwrap().try_resolve(main);
-		assert_eq!(main.as_ref().map(moq_net::Path::as_str), Some("studio"));
-		assert!(audio.instance.is_some(), "the main broadcast's instance");
+		let (audio, config) = catalog.audio.enabled().next().expect("its audio");
+		assert!(config.broadcast.is_none(), "its own, not the program's");
+		let mut options = moq_audio::decode::Options::new();
+		options.start = moq_audio::decode::Start::Latest;
+		let mut decoder = moq_audio::decode::Consumer::new(&broadcast, config, audio.clone(), options)
+			.await
+			.expect("audio decoder");
+		kio::clock::timeout(TIMEOUT, async {
+			loop {
+				match decoder.read().await.expect("decode") {
+					Some(moq_audio::decode::Read::Frame(_)) => return,
+					Some(_) => continue,
+					None => panic!("the audio ended"),
+				}
+			}
+		})
+		.await
+		.expect("its audio arrives");
 		let canvas_size = |catalog: &hang::Catalog| {
 			let (video, config) = catalog
 				.video

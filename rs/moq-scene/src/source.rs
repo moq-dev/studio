@@ -231,7 +231,7 @@ pub enum Status {
 #[derive(Clone)]
 pub struct Context {
 	/// Where microphones, system audio, and broadcasts feed their sound, and
-	/// where the collection's mixes are made.
+	/// where each of the collection's audio scenes is mixed.
 	pub bus: Bus,
 	/// Where broadcast sources are announced: the studio's relay connection.
 	pub origin: moq_net::origin::Consumer,
@@ -247,10 +247,11 @@ pub struct Context {
 	pub publish: Option<Publish>,
 }
 
-/// The running sources of a collection, and its mixes.
+/// The running sources of a collection, and the mix of each audio scene.
 pub struct Sources {
 	context: Context,
 	feeds: BTreeMap<String, Feed>,
+	/// Each audio scene's mix, by its name.
 	mixes: BTreeMap<String, Mix>,
 	/// The sources on program, as last set.
 	on_program: BTreeSet<String>,
@@ -290,16 +291,17 @@ impl Sources {
 		&self.context
 	}
 
-	/// Run exactly the sources and mixes `collection` has: start new and edited
+	/// Run exactly the sources and audio scenes `collection` has: start new and edited
 	/// sources and stop removed and edited ones. A clone shares the feed of the
 	/// source it clones rather than opening one. Returns a driver for each
 	/// source started, which does nothing until run. The media source a
 	/// stinger plays opens silent and blank, waiting for its first
 	/// [play](Feed::play), rather than playing once at the start.
 	///
-	/// Also applies the collection's gain, mute, delay, and routing to every
-	/// audio strip, and its frame rate to every web page, which never restarts
-	/// a source. A removed or edited source leaves every mix at once, so its
+	/// Also applies the collection's gain, mute, and delay to every audio
+	/// strip, routes each into the mix of every audio scene that reaches it,
+	/// and applies the frame rate to every web page, which never restarts a
+	/// source. A removed or edited source leaves every mix at once, so its
 	/// replacement never plays over it. Panics on a gain or delay
 	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
@@ -312,12 +314,19 @@ impl Sources {
 			keep
 		});
 		// A mix ends once its last handle drops, which may be a reader's.
-		self.mixes.retain(|name, _| collection.mixes.names.contains(name));
-		for name in &collection.mixes.names {
-			if !self.mixes.contains_key(name) {
-				self.mixes.insert(name.clone(), self.context.bus.mix());
+		self.mixes.retain(|name, _| collection.audio_scene(name).is_some());
+		for scene in &collection.audio_scenes {
+			if !self.mixes.contains_key(&scene.name) {
+				self.mixes.insert(scene.name.clone(), self.context.bus.mix());
 			}
 		}
+		// Nested audio scenes are flattened: a mix sums every source an audio
+		// scene reaches, each once, so a sound reached two ways is not doubled.
+		let heard: BTreeMap<&str, BTreeSet<&str>> = collection
+			.audio_scenes
+			.iter()
+			.map(|scene| (scene.name.as_str(), collection.heard(&scene.name)))
+			.collect();
 
 		let mut drivers = Vec::new();
 		for (name, source) in collection.sources.iter().filter(|(_, source)| source.opens()) {
@@ -337,8 +346,10 @@ impl Sources {
 				strip.set_gain(audio.gain);
 				strip.set_muted(audio.muted);
 				strip.set_delay(audio.delay);
-				for (mix_name, mix) in &self.mixes {
-					let routed = !audio.exclude.contains(mix_name);
+				for (scene, mix) in &self.mixes {
+					let routed = heard
+						.get(scene.as_str())
+						.is_some_and(|heard| heard.contains(name.as_str()));
 					if mix.routes(strip) == routed {
 						continue;
 					}
@@ -376,16 +387,17 @@ impl Sources {
 		self.feeds.get(name)
 	}
 
-	/// The mix called `name`, as the collection last synced had it.
-	pub fn mix(&self, name: &str) -> Option<&Mix> {
-		self.mixes.get(name)
+	/// The mix of the audio scene called `scene`, as the collection last
+	/// synced had it.
+	pub fn mix(&self, scene: &str) -> Option<&Mix> {
+		self.mixes.get(scene)
 	}
 
-	/// Whether the mix called `mix` plays the source called `name`: it has
-	/// sound, is not muted, and is routed into that mix.
-	pub fn plays(&self, mix: &str, name: &str) -> bool {
+	/// Whether the audio scene called `scene` plays the source called `name`:
+	/// it has sound, is not muted, and the audio scene reaches it.
+	pub fn plays(&self, scene: &str, name: &str) -> bool {
 		let strip = self.feeds.get(name).and_then(Feed::strip);
-		let mix = self.mixes.get(mix);
+		let mix = self.mixes.get(scene);
 		strip
 			.zip(mix)
 			.is_some_and(|(strip, mix)| !strip.muted() && mix.routes(strip))
@@ -553,7 +565,7 @@ impl Feed {
 	/// an overlay, or a LUT.
 	///
 	/// A failed track leaves the source drawing and playing in the studio's
-	/// own scenes and mixes.
+	/// own scenes and audio scenes.
 	pub fn track(&self) -> Option<Status> {
 		self.track.as_ref().map(|track| track.read().clone())
 	}
@@ -2091,6 +2103,7 @@ mod tests {
 				path: "room/guest".into(),
 			},
 		);
+		collection.audio_scenes[0].sounds.insert("guest".into());
 		collection
 	}
 
@@ -2179,21 +2192,27 @@ mod tests {
 		.await;
 	}
 
-	/// A mix plays a source with sound that is routed into it and not muted, so
-	/// one left out of the program's mix is heard only in the others.
+	/// An audio scene plays a source with sound that it reaches and that is
+	/// not muted: one it holds, or one an audio scene it holds holds, once.
 	#[tokio::test]
-	async fn a_mix_plays_only_what_is_routed_into_it() {
+	async fn an_audio_scene_plays_only_what_it_reaches() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, _origin) = context(dir.path());
 			let mut sources = Sources::new(context);
 			let mut collection = collection();
-			collection.mixes.names.push("Headphones".into());
-			let program = crate::Mixes::DEFAULT;
+			let program = crate::AudioScene::DEFAULT;
+			collection.audio_scenes.push(crate::AudioScene {
+				scenes: [program.to_string()].into(),
+				..crate::AudioScene::new("Headphones")
+			});
+			collection.audio_scenes.push(crate::AudioScene::new("Music"));
+			collection.validate().unwrap();
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			assert!(sources.plays(program, "guest"));
-			assert!(sources.plays("Headphones", "guest"));
+			assert!(sources.plays("Headphones", "guest"), "through the one it holds");
+			assert!(!sources.plays("Music", "guest"), "held by none it reaches");
 			assert!(!sources.plays(program, "red"), "a color is silent");
 			assert!(!sources.plays(program, "nobody"));
 			assert!(!sources.plays("Nothing", "guest"));
@@ -2202,18 +2221,19 @@ mod tests {
 			// the source comes back in under its new strip.
 			let before = sources.get("guest").unwrap().strip().unwrap().clone();
 			sources.restart("guest");
-			for mix in [program, "Headphones"] {
-				assert!(!sources.mix(mix).unwrap().routes(&before), "{mix} keeps the old strip");
+			for scene in [program, "Headphones"] {
+				assert!(
+					!sources.mix(scene).unwrap().routes(&before),
+					"{scene} keeps the old strip"
+				);
 			}
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			assert!(sources.plays(program, "guest"));
 
-			let left_out = Audio {
-				exclude: [program.to_string()].into(),
-				..Audio::default()
-			};
-			collection.audio.insert("guest".into(), left_out);
+			// Held directly too, it still plays once.
+			collection.audio_scenes[1].sounds.insert("guest".into());
+			collection.audio_scenes[0].sounds.clear();
 			assert!(sources.sync(&collection).is_empty());
 			assert!(!sources.plays(program, "guest"), "left out of the program");
 			assert!(sources.plays("Headphones", "guest"));
@@ -2224,7 +2244,6 @@ mod tests {
 			};
 			collection.audio.insert("guest".into(), muted);
 			assert!(sources.sync(&collection).is_empty());
-			assert!(!sources.plays(program, "guest"), "muted");
 			assert!(!sources.plays("Headphones", "guest"), "muted everywhere");
 		})
 		.await;
@@ -2232,8 +2251,8 @@ mod tests {
 
 	/// Editing a source restarts it, removing one stops it, and an untouched one
 	/// keeps running. Gain, delay, and routing changes reach the strip without
-	/// restarting anything, and a source plays in every mix it is not left out
-	/// of until it is removed.
+	/// restarting anything, and a source plays in every audio scene holding it
+	/// until it is removed.
 	#[tokio::test]
 	async fn sync_restarts_only_what_changed() {
 		local(async {
@@ -2244,16 +2263,15 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			let guest = sources.get("guest").unwrap().strip().unwrap().clone();
-			let program = sources.mix(crate::Mixes::DEFAULT).unwrap().clone();
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
 			assert!(program.routes(&guest));
 
-			collection.mixes.names.push("Stream".into());
+			collection.audio_scenes.push(crate::AudioScene::new("Stream"));
 			collection.audio.insert(
 				"guest".into(),
 				Audio {
 					gain: 0.25,
 					muted: true,
-					exclude: ["Stream".to_string()].into(),
 					delay: Duration::from_millis(120),
 				},
 			);
@@ -2263,13 +2281,13 @@ mod tests {
 			assert_eq!(guest.delay(), Duration::from_millis(120));
 			let stream = sources.mix("Stream").unwrap().clone();
 			assert!(program.routes(&guest));
-			assert!(!stream.routes(&guest), "left out of the new mix");
+			assert!(!stream.routes(&guest), "not held by the new audio scene");
 
-			collection.audio.get_mut("guest").unwrap().exclude.clear();
+			collection.audio_scenes[1].sounds.insert("guest".into());
 			assert!(sources.sync(&collection).is_empty());
-			assert!(stream.routes(&guest), "put back in");
+			assert!(stream.routes(&guest), "held");
 
-			collection.mixes.names.retain(|name| name != "Stream");
+			collection.audio_scenes.retain(|scene| scene.name != "Stream");
 			assert!(sources.sync(&collection).is_empty());
 			assert!(sources.mix("Stream").is_none());
 
@@ -2292,6 +2310,7 @@ mod tests {
 			assert!(sources.get("red").is_none());
 
 			collection.sources.remove("guest");
+			collection.audio_scenes[0].sounds.clear();
 			assert!(sources.sync(&collection).is_empty());
 			assert!(!program.routes(&guest), "a removed source leaves at once");
 		})
@@ -2889,6 +2908,7 @@ mod media_tests {
 				restart: *restart,
 			};
 			collection.sources.insert(name.to_string(), source);
+			collection.audio_scenes[0].sounds.insert(name.to_string());
 		}
 		collection
 	}
@@ -3056,7 +3076,7 @@ mod media_tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			let feed = sources.get("clip.mkv").unwrap();
-			let program = sources.mix(crate::Mixes::DEFAULT).unwrap().clone();
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
 
 			let (first, begun) = shown(feed).await;
 			let heard = listen(&mut mixer, &program, &mut at, begun + Duration::from_millis(300)).await;
@@ -3176,7 +3196,7 @@ mod media_tests {
 			let collection = media(dir.path(), &files);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
-			let program = crate::Mixes::DEFAULT;
+			let program = crate::AudioScene::DEFAULT;
 			assert!(sources.plays(program, "tone.webm"));
 			assert!(!sources.plays(program, "silent.mkv"));
 			assert!(sources.get("silent.mkv").unwrap().strip().is_none());

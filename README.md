@@ -35,7 +35,7 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   a second, so viewers and recordings on the relay see the broadcast end
   rather than cut off.
 - `capture` adds camera, display, window, microphone, and system-audio
-  sources, and listening to a mix. On Linux it links ALSA; add `pipewire` for
+  sources, and listening to an audio scene. On Linux it links ALSA; add `pipewire` for
   PipeWire cameras and the [virtual camera](#virtual-camera)'s PipeWire node.
   `openh264` is the software H.264 fallback for a machine without a hardware
   encoder.
@@ -97,7 +97,7 @@ Every panel is a tab you can drag, split, or stack.
 | Panel | Use it to |
 | --- | --- |
 | Preview, Program | See the scene you are editing, at its own size, and the one that is live, and drag items in the preview to place them. A preview no tab shows is not drawn. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
-| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, remove, or tick **Publish** on one (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. |
+| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, remove, or tick **Publish** on one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. The top layer is edited over a scene of the program's size. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
@@ -105,8 +105,8 @@ Every panel is a tab you can drag, split, or stack.
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
-| Audio | Add, rename (double-click), and remove mixes, pick the one on program and the one to listen to and on which output, and set each audio source's gain, mute, delay, and the mixes it feeds, with a meter on every mix and source. |
-| Output | Start and stop recording, pick the picture and the mix it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera on. |
+| Audio | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. |
+| Output | Start and stop recording, pick the picture and the audio scene it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera on. |
 | Health | See how the stream reaches viewers, relay by relay and, for the program and each published scene, track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 | Hotkeys | Bind keys to cut, transition, preview a scene, replay, save a clip, and start or stop recording, and clear them (see [Hotkeys](#hotkeys)). |
@@ -132,9 +132,10 @@ published scene is always live and never switched: it shows what its items
 show, whatever is on program. For a portrait stream that follows the program,
 publish a portrait scene drawing the program through a program source (see
 [Scene sources](#scene-sources)), with any overlay of its own placed beside
-it; the top layer goes over the program alone. Its catalog lists the
-program's audio rather than encoding it again, so every published scene
-carries the program's mix for now. Unticking it, or removing the scene, ends
+it; the top layer goes over the program alone. It carries the audio scene
+on program, or the one picked beside its **Publish** box, encoded as audio of
+its own, so picking another never changes the track its viewers play.
+Unticking it, or removing the scene, ends
 its broadcast. A published scene's name is one segment of its broadcast path,
 so it holds no `/`, and a `\` only before another `\`. A scene named `viewers`, where viewers report back,
 does not publish while live.
@@ -270,38 +271,50 @@ after a stall skips ahead to the delay. Without audio, the
 picture plays 100 ms behind. Sources shows how far behind each broadcast
 plays.
 
-### Audio mixes
+### Audio scenes
 
-Audio from every source is mixed whether or not its scene is live. A
-collection has one or more **mixes**, each the sum of the sources it is fed:
-for example, a stream mix that leaves out music you may not broadcast, and a
-monitor mix for your headphones. A source feeds every mix, a new one included,
-until you untick that mix in its row of the Audio panel; mute a source to take
-it out of every mix. **On program** picks the mix the broadcast carries, and
-switching it, or editing a mix, never drops or repeats audio. A recording
-holds the mix on program unless the Output panel picks another, such as one
-keeping music the stream leaves out; that mix never reaches the relay, and
-switching it while recording never drops or repeats audio either. The mix on
-program cannot be removed; removing the one a recording picks returns the
-recording to the mix on program.
+Audio from every source is mixed whether or not its scene is live, and cuts
+never change it. A collection has one or more **audio scenes**, each the sum
+of the sounds it holds and of the audio scenes it holds: for example a "Mics"
+audio scene holding every microphone, which both a "Stream" audio scene (Mics,
+without music you may not broadcast) and a "Headphones" one (Mics and the
+music) hold. A sound an audio scene reaches more than one way plays in it
+once, and an audio scene never holds itself, even through others. Add,
+rename, reorder, and remove audio scenes in the Scenes panel, where they are
+tagged `audio` and listed after the scenes.
 
-**Listen** plays a mix to an audio output, from the `capture` feature's
-build: the system default, or the one picked under **Listen on**, which the
-studio remembers for you rather than in the scene file. Use headphones: a
-microphone that hears the speakers feeds the mix back into itself.
+The Audio panel is a mixer. Each sound has a strip, with its gain, mute,
+delay, and meter, which apply in every audio scene holding it, and a send to
+each audio scene; each audio scene has a strip with its meter and a send to
+each other audio scene. A source added from the Sources or Devices panel, or
+pasted, is sent to the audio scene on program, so it is heard at once.
+**On program** picks the audio scene the broadcast carries, and switching
+it, or editing an audio scene, never drops or repeats audio. A recording holds
+the audio scene on program unless the Output panel picks another, such as one
+keeping music the stream leaves out, and each published scene carries the one
+on program unless the Scenes panel picks another beside its **Publish** box;
+switching either while it runs never drops or repeats audio either. The audio
+scene on program cannot be removed; removing one a recording or published
+scene picks returns it to the one on program.
 
-A source's **delay** holds it back in every mix, up to 2 s, so a microphone
+**Listen** plays an audio scene to an audio output, from the `capture`
+feature's build: the system default, or the one picked under **Listen on**,
+which the studio remembers for you rather than in the scene file. Use
+headphones: a microphone that hears the speakers feeds its audio scene back
+into itself.
+
+A source's **delay** holds it back in every audio scene, up to 2 s, so a microphone
 lines up with a camera that lags it. A broadcast's picture already follows its
 sound, so its delay holds the sound back from its own picture: use it only for
 a publisher whose sound leads their picture.
 
-Each mix is advanced on the program clock, and each output reads its mix on
-its own, so an output that falls behind skips ahead in its own audio rather
-than holding up the mixes or another output.
+Each audio scene is mixed on the program clock, and each output reads its
+audio scene on its own, so an output that falls behind skips ahead in its own
+audio rather than holding up the mixing or another output.
 
 A browser source renders a web page, such as an overlay, alert box, or chat
 widget, at the canvas frame rate (CEF caps it at 60) over a transparent
-background, and its sound joins the mixes. Every page shares one
+background, and its sound joins the audio scenes that hold it. Every page shares one
 browser profile, kept in `$XDG_DATA_HOME/moq-studio/browser`
 (`~/.local/share/moq-studio/browser` by default) rather than beside the scene
 file, so cookies and logins, such as an alert service's, survive a reload and
@@ -376,7 +389,7 @@ program.
 ### Media files
 
 A `media` source plays a video or audio file, such as an intro clip or a music
-bed, on the program clock, and its sound joins the mixes like any other
+bed, on the program clock, and its sound joins the audio scenes like any other
 source's. It reads fragmented MP4, MKV or WebM, MPEG-TS, and FLV, as moq's
 importers do, and fails to start on a codec this machine cannot decode. A
 regular MP4 fails to start with a remux to fragmented MP4 that makes it readable:
@@ -409,7 +422,7 @@ The source a [stinger](#transitions) plays waits, blank and silent, for the
 first stinger instead of playing as it opens. Its pictures and its sound each have a track of their own (see [Source
 tracks](#source-tracks)), its pictures on one timeline across plays. Each is
 used apart, as a camera's and a microphone's are: the pictures while a scene on
-air shows it, the sound while the mix on program plays it, and either while
+air shows it, the sound while the audio scene on program plays it, and either while
 read. So a music bed that no scene shows encodes its sound alone. A file with
 no sound has no strip in the Audio panel.
 
@@ -478,8 +491,9 @@ and read only their own renewals, their return feed, and the program.
 Treat the link like a password: anyone holding it can join as that guest
 before it expires, and is then renewed for as long as they stay, until you
 remove them. A guest's broadcasts become sources named after them (`alice`,
-`alice screen`) when they first appear, muted and in no scene: place them from
-the Items panel and unmute them in Audio to put them on air. That includes a
+`alice screen`) when they first appear, in no scene or audio scene: place
+them from the Items panel and send them to the audio scene on program in Audio
+to put them on air. That includes a
 guest invited before a restart whose link still works. A guest's source is
 saved to the scene file but is not your edit: it stays out of History, so undo
 never removes it and a guest joining never loses what you could redo. A guest
@@ -497,7 +511,7 @@ renewal; **New link** lets them back in and renews them again, under a new
 generation, so a link from before the removal cannot read their renewals.
 
 While a guest is in the room, the join page plays their return feed: the
-program's video, and the mix on program without that guest's microphone (a
+program's video, and the audio scene on program without that guest's microphone (a
 mix-minus), so they follow the show without hearing themselves back. Ask
 guests to wear headphones, so the show does not reach their microphone. The
 studio publishes it over its session in the room, never with its own
@@ -567,13 +581,13 @@ html = '''
 <div class="third">Ada Lovelace</div>
 '''
 
-[mixes]
-names = ["Stream", "Headphones"]
-program = "Stream" # the mix the broadcast carries
+[sources.music]
+kind = "media"
+path = "music.webm"
+loop = true
 
 [audio.guest]
 gain = 0.5
-exclude = ["Headphones"] # feeds every other mix
 delay = "80ms"
 
 [sources.camera-faded]
@@ -632,6 +646,21 @@ items = [
     { source = "logo", rect = { x = 780, y = 40, width = 280, height = 120 } },
 ]
 
+[[audio_scenes]]
+name = "Voices"
+sounds = ["guest"]
+
+[[audio_scenes]]
+name = "Stream"
+program = true # the audio scene the broadcast carries
+scenes = ["Voices"]
+
+[[audio_scenes]]
+name = "Headphones"
+recorded = true # recordings hold it rather than the one on program
+scenes = ["Voices"]
+sounds = ["music"]
+
 [[top]]
 source = "logo"
 rect = { x = 1600, y = 40, width = 280, height = 120 }
@@ -654,11 +683,16 @@ the program's. `published = true` puts it live as its own broadcast (see
 `recorded = true` has recordings hold it rather than the program, on one scene
 at most.
 
-`[mixes]` names every mix, in the order the Audio panel lists them, the one
-on `program`, and the one a `recording` holds, the mix on program without it;
-without `[mixes]`, the collection has one mix, `Program`.
-`[audio.<source>]` sets a source's linear `gain`, `muted`, the mixes it is
-left out of (`exclude`), and its `delay`.
+A scene's `audio` names the audio scene it carries while published, the
+one on program without it.
+
+`[[audio_scenes]]` lists the audio scenes, in the order the Scenes panel lists
+them, each with its `name`, the sources whose `sounds` it holds, and the other
+audio `scenes` it holds. Exactly one is on `program = true`, and
+`recorded = true` has recordings hold one rather than the one on program.
+Without `[[audio_scenes]]`, the collection has one audio scene, `Program`, on
+program and holding nothing. `[audio.<source>]` sets a source's linear `gain`,
+`muted`, and `delay`, in every audio scene holding it.
 
 `[video.<source>]` sets a source's `background`, `crop`, and `filters`,
 wherever it is shown, and an item's `crop`, `filters`, and `blend` its own.
@@ -733,11 +767,11 @@ before sharing.
 ## Output
 
 The program publishes as two H.264 renditions, at the canvas size and at half
-of it, at the canvas frame rate, with the mix on program as Opus stereo audio,
+of it, at the canvas frame rate, with the audio scene on program as Opus stereo audio,
 under the `--broadcast` path. A canvas under 360 lines has no half size. Each
 published scene publishes the same way at `<--broadcast>/<scene name>`, at
 its own size and half of it, its tracks sharing the connection's bandwidth
-with the program's.
+with the program's, and its own encode of the audio scene it carries.
 Timestamps come from the studio's own clock, so a source that stalls repeats
 its last picture instead of holding up the stream.
 
@@ -796,10 +830,10 @@ removes it too. A browser source or an overlay has no track of its own, and a
 broadcast source is already its publisher's.
 
 A microphone, system audio, or media file's sound encodes its track as Opus,
-from the same sound the mixes hear, only while it is used: while the mix on program plays it
-(unmuted and not left out of it), so a replay of it has its recent past, or
+from the same sound the audio scenes hear, only while it is used: while the audio scene on program plays it
+(unmuted and held by it), so a replay of it has its recent past, or
 while a recording reads its track. The track carries the sound as captured,
-before its gain, mute, and delay, which stay the mixes'. A buffer the capture
+before its gain, mute, and delay, which stay the audio scenes'. A buffer the capture
 lost, or a stretch the source was out of use, is a gap on its track. Opus
 encodes on the CPU, about 1% of one Apple M4 core for a stereo source and
 half that for mono, and holds no encode session.
@@ -860,8 +894,8 @@ early, and a track that goes on into the next file, such as the program
 audio, repeats up to 2 s of the last. The
 program and local sources are read from the studio's own broadcasts, never what
 the relay serves, so a recording starts and stops without touching the live
-stream. The mix it holds is
-encoded a second time for it while recording: the mix on program, so the file
+stream. The audio scene it holds is
+encoded a second time for it while recording: the one on program, so the file
 holds what viewers hear, or the one the Output panel picks, which viewers never
 can. Without `--connect`, only the
 recording's encoder encodes the program.
@@ -964,8 +998,8 @@ it is written, shortly after the click.
 
 Nothing records in the background for this. The program's tracks keep their
 last 30 seconds for late viewers anyway, and each source's track while it is on
-program (a picture shown in a scene on air, or a sound played by the mix on
-program) or recorded, and a replay copies from those, so a replay
+program (a picture shown in a scene on air, or a sound played by the audio
+scene on program) or recorded, and a replay copies from those, so a replay
 goes back at most that far. A replay of the program needs `--connect`; a local
 source keeps its track without a relay. With `--on-demand`, the program has
 no past from before someone watched it, and a source has none from before it
@@ -984,8 +1018,8 @@ The Health panel grades the stream every second on the thresholds moq's
 with its cause in plain words: a relay is unreachable, the uplink is
 congested or losing packets, the relay is far away, the encoder is behind or
 stuck, a source stalled (a camera or broadcast the program draws, or a
-microphone or system audio the mix on program plays: unmuted and not left
-out of it), a source the program shows or plays failed or, as a media file
+microphone or system audio the audio scene on program plays: unmuted and
+held by it), a source the program shows or plays failed or, as a media file
 that does not loop, played to its end, or viewers are late, stalling, or cannot
 decode a track. A relay lost while the other serves is
 degraded, since viewers have nothing left to fall back to; with none serving
