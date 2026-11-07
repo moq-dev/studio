@@ -22,7 +22,3 @@ is m2.
 Broadened 2026-11-04 (maintainer, /quest-plan): m1 also holds studio
 features planned as follow-ups of m0 work but not needed to ship it, rather
 than opening an m2 for them.
-
-## Required
-
-- [Rune UI spike](/quest/m1/rune-spike.md) - the monitors prototyped on Rune, with a verdict on moving the UI off egui
