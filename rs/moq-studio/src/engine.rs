@@ -3669,8 +3669,8 @@ mod tests {
 		}
 
 		/// The first moment, from `from` on, the viewer hears a sample louder
-		/// than `level`, and the loudest it heard from `from` until then.
-		async fn hears(&mut self, from: Duration, level: f32) -> (Duration, f32) {
+		/// than `level`, and the loudest it heard from `from` until `until`.
+		async fn hears(&mut self, from: Duration, until: Duration, level: f32) -> (Duration, f32) {
 			let rate = self.rate;
 			let mut before = 0.0f32;
 			kio::clock::timeout(TIMEOUT, async {
@@ -3684,7 +3684,9 @@ mod tests {
 						if sample > level {
 							return (at, before);
 						}
-						before = before.max(sample);
+						if at < until {
+							before = before.max(sample);
+						}
 					}
 				}
 			})
@@ -3833,7 +3835,8 @@ mod tests {
 			cut,
 			"the portrait shows the cut on the program's frame"
 		);
-		let (heard, before) = program.hears(quiet, LOUD).await;
+		// Before the cut, only the portrait's viewer hears anything: its bed.
+		let (heard, before) = program.hears(quiet, cut, LOUD).await;
 		assert!(
 			before < QUIET,
 			"the program's audio scene holds the tone alone: {before}"
@@ -3842,7 +3845,7 @@ mod tests {
 			heard >= cut,
 			"the tone sounds with the cut, not before: {heard:?} < {cut:?}"
 		);
-		let (also, bed) = tall.hears(quiet, LOUD).await;
+		let (also, bed) = tall.hears(quiet, cut, LOUD).await;
 		assert!(bed > QUIET, "the portrait's audio scene holds the bed too: {bed}");
 		assert!(
 			heard.abs_diff(also) < AUDIO_PERIOD,
