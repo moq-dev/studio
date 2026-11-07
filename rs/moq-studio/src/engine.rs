@@ -3589,12 +3589,15 @@ mod tests {
 		sound: tokio::sync::mpsc::UnboundedReceiver<(Duration, Vec<f32>)>,
 		/// Samples per second of the sound.
 		rate: u32,
+		/// When the last picture read was shown.
+		seen: Option<Duration>,
 	}
 
 	impl Viewer {
 		/// Play `broadcast`'s video at `size` and its audio, as `catalog` lists
-		/// them. Each decodes on a task of its own, so neither falls behind and
-		/// skips media while the test reads the other.
+		/// them, from the newest group on. Each decodes on a task of its own,
+		/// and neither skips a group it falls behind on, as a player would, so
+		/// a loaded host slows the test rather than losing what it measures.
 		async fn watch(
 			broadcast: &moq_net::broadcast::Consumer,
 			catalog: &hang::Catalog,
@@ -3606,7 +3609,12 @@ mod tests {
 				.iter()
 				.find(|(_, config)| config.coded_width == Some(size.width) && config.coded_height == Some(size.height))
 				.expect("the video at its size");
-			let mut pictures = subscribe(broadcast, video, config).await;
+			let mut options = moq_video::decode::Options::new();
+			options.start = moq_video::decode::Start::Latest;
+			options.delay.max = None;
+			let mut pictures = moq_video::decode::Consumer::new(broadcast, config, video.clone(), options)
+				.await
+				.expect("video decoder");
 			let (seen, seeing) = tokio::sync::mpsc::unbounded_channel();
 			tokio::spawn(async move {
 				while let Some(read) = pictures.read().await.expect("decode") {
@@ -3623,6 +3631,7 @@ mod tests {
 			let channels = config.channel_count as usize;
 			let mut options = moq_audio::decode::Options::new();
 			options.start = moq_audio::decode::Start::Latest;
+			options.delay.max = None;
 			let mut sound = moq_audio::decode::Consumer::new(broadcast, config, audio.clone(), options)
 				.await
 				.expect("audio decoder");
@@ -3650,16 +3659,19 @@ mod tests {
 				pictures: seeing,
 				sound: hearing,
 				rate,
+				seen: None,
 			}
 		}
 
-		/// When the viewer first sees `color` at the center.
-		async fn sees(&mut self, color: [u8; 3]) -> Duration {
+		/// When the viewer next sees `color` at the center, and the picture it
+		/// saw before that, if any.
+		async fn sees(&mut self, color: [u8; 3]) -> (Option<Duration>, Duration) {
 			kio::clock::timeout(TIMEOUT, async {
 				loop {
 					let (at, center) = self.pictures.recv().await.expect("the video ended");
+					let before = self.seen.replace(at);
 					if shows(center, color) {
-						return at;
+						return (before, at);
 					}
 				}
 			})
@@ -3822,30 +3834,51 @@ mod tests {
 		})
 		.await
 		.expect("the program falls quiet");
+		// The portrait's viewer hears its bed meanwhile, once it plays.
+		let (bed, _) = tall.hears(quiet, quiet, QUIET).await;
 
 		{
 			let mut state = engine.state.lock().unwrap();
 			state.compositor.set_preview(Some("Cut".into()));
 			state.cut().unwrap();
 		}
-		let cut = program.sees(GREEN).await;
-		assert_eq!(
-			tall.sees(GREEN).await,
-			cut,
-			"the portrait shows the cut on the program's frame"
+		// Both show the cut from the same frame: neither shows red where the
+		// other shows green. An encoder still busy with the frame before
+		// drops the cut's own, so the first green each shows may differ.
+		let (Some(program_red), program_green) = program.sees(GREEN).await else {
+			unreachable!("the program showed red first")
+		};
+		let (Some(tall_red), tall_green) = tall.sees(GREEN).await else {
+			unreachable!("the portrait showed red first")
+		};
+		assert!(
+			program_red < tall_green && tall_red < program_green,
+			"the portrait cuts on the program's frame: program red to {program_red:?}, green from \
+			{program_green:?}; portrait red to {tall_red:?}, green from {tall_green:?}"
 		);
-		// Before the cut, only the portrait's viewer hears anything: its bed.
-		let (heard, before) = program.hears(quiet, cut, LOUD).await;
+
+		// The cut played the tone again, as its scene went on program.
+		let run = engine.state.lock().unwrap().sources.get("tone").unwrap().run();
+		assert_eq!(run.play, 1, "the cut played the tone again, once");
+		let played = stamp(&engine, run.begun.expect("the tone's second play began"));
+		// Until then, the program's viewer heard nothing while the portrait's
+		// heard the bed.
+		assert!(bed < played, "the bed is heard before the cut");
+		let (heard, before) = program.hears(quiet, played, LOUD).await;
 		assert!(
 			before < QUIET,
 			"the program's audio scene holds the tone alone: {before}"
 		);
+		// The viewer hears the tone once the bus mixes it: a media source
+		// writes each sound when it is due, and the bus holds every source
+		// 50 ms (moq-audio's `bus::LATENCY`) before mixing it, give or take a
+		// block.
+		let mixed = Duration::from_millis(50) + AUDIO_PERIOD;
 		assert!(
-			heard >= cut,
-			"the tone sounds with the cut, not before: {heard:?} < {cut:?}"
+			heard >= played && heard - played < mixed,
+			"the tone is heard as the bus mixes it: played {played:?}, heard {heard:?}"
 		);
-		let (also, bed) = tall.hears(quiet, cut, LOUD).await;
-		assert!(bed > QUIET, "the portrait's audio scene holds the bed too: {bed}");
+		let (also, _) = tall.hears(quiet, played, LOUD).await;
 		assert!(
 			heard.abs_diff(also) < AUDIO_PERIOD,
 			"both hear the tone within a block of the bus: {heard:?} and {also:?}"
