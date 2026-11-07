@@ -28,6 +28,11 @@ use crate::replay::{self, Of};
 use crate::snap::{self, Grab, Snap};
 use crate::{mix, record};
 
+mod graph;
+mod levels;
+
+use levels::{Levels, meter};
+
 /// The panels, each a tab the user can move, split, or stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Tab {
@@ -42,6 +47,7 @@ enum Tab {
 	Filters,
 	Keyframes,
 	Audio,
+	Graph,
 	Output,
 	Health,
 	Replay,
@@ -62,6 +68,7 @@ impl Tab {
 			Self::Filters => "Filters",
 			Self::Keyframes => "Keyframes",
 			Self::Audio => "Audio",
+			Self::Graph => "Graph",
 			Self::Output => "Output",
 			Self::Health => "Health",
 			Self::Replay => "Replay",
@@ -89,7 +96,8 @@ impl Studio {
 			)
 		};
 
-		let mut dock = DockState::new(vec![Tab::Preview]);
+		// The graph wants room, and is for building rather than for the show.
+		let mut dock = DockState::new(vec![Tab::Preview, Tab::Graph]);
 		let tree = dock.main_surface_mut();
 		let [top, bottom] = tree.split_below(NodeIndex::root(), 0.62, vec![Tab::Scenes, Tab::History]);
 		tree.split_right(top, 0.5, vec![Tab::Program]);
@@ -152,6 +160,8 @@ impl Studio {
 				reloads: 0,
 				effects: false,
 				spots: Spots::default(),
+				levels: Levels::default(),
+				graph: graph::View::default(),
 			},
 		}
 	}
@@ -225,6 +235,7 @@ impl Studio {
 		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 		self.panels.follow_reloads(&state);
+		self.panels.levels.take(&state.sources, state.collection());
 		// A key bound to a scene follows it through renames, undos, and redos,
 		// under this lock, so a key fired meanwhile names the scene it means.
 		let renames = state.take_renames();
@@ -407,6 +418,9 @@ struct Panels {
 	effects: bool,
 	/// Where this frame's panels drew what effects go around.
 	spots: Spots,
+	/// Each sound's and audio scene's recent levels, for the meters.
+	levels: Levels,
+	graph: graph::View,
 }
 
 /// Where the panels drew what effects go around, this frame.
@@ -451,6 +465,7 @@ impl TabViewer for Panels {
 			Tab::Filters => self.filters(ui),
 			Tab::Keyframes => self.keyframes(ui),
 			Tab::Audio => self.audio(ui),
+			Tab::Graph => self.graph(ui),
 			Tab::Output => self.output(ui),
 			Tab::Health => self.health(ui),
 			Tab::Replay => self.replay(ui),
@@ -1411,30 +1426,8 @@ impl Panels {
 					if let Some(size) = scene.size {
 						ui.weak(format!("{}x{}", size.width, size.height));
 					}
-					let mut published = scene.published;
-					if ui
-						.checkbox(&mut published, "Publish")
-						.on_hover_text("Live as its own broadcast beneath the program's, at its own size")
-						.changed()
-					{
-						action = Some(SceneAction::Publish(index, published));
-					}
-					if scene.published {
-						let on_program = format!("on program ({program_audio})");
-						let mut audio = scene.audio.clone();
-						egui::ComboBox::from_id_salt(("scene audio", index))
-							.selected_text(audio.as_deref().unwrap_or(&on_program))
-							.show_ui(ui, |ui| {
-								ui.selectable_value(&mut audio, None, &on_program);
-								for scene in &audio_scenes {
-									ui.selectable_value(&mut audio, Some(scene.name.clone()), &scene.name);
-								}
-							})
-							.response
-							.on_hover_text("The audio scene its broadcast carries");
-						if audio != scene.audio {
-							action = Some(SceneAction::Audio(index, audio));
-						}
+					if let Some(settings) = scene_settings(ui, index, scene, &audio_scenes, &program_audio) {
+						action = Some(settings);
 					}
 					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
 						action = Some(SceneAction::Move(index, index - 1));
@@ -1541,10 +1534,17 @@ impl Panels {
 			self.check(result);
 		}
 		let Some(action) = action else { return };
+		let result = self.scene_action(&mut state, action);
+		drop(state);
+		self.check(result);
+	}
+
+	/// Make the edit the Scenes or Graph panel picked for a scene.
+	fn scene_action(&mut self, state: &mut State, action: SceneAction) -> anyhow::Result<()> {
 		let name = state.collection().scenes[action.index()].name.clone();
-		let result = match action {
+		match action {
 			SceneAction::Rename(index, to) => {
-				let result = edit(&mut state, format!("Rename scene `{name}` to `{to}`"), None, |draft| {
+				let result = edit(state, format!("Rename scene `{name}` to `{to}`"), None, |draft| {
 					draft.rename_scene(index, to.clone())
 				});
 				if result.is_ok() {
@@ -1552,7 +1552,7 @@ impl Panels {
 				}
 				result
 			}
-			SceneAction::Move(from, to) => edit(&mut state, format!("Reorder scene `{name}`"), None, |draft| {
+			SceneAction::Move(from, to) => edit(state, format!("Reorder scene `{name}`"), None, |draft| {
 				draft.move_scene(from, to)
 			}),
 			SceneAction::Publish(index, published) => {
@@ -1561,7 +1561,7 @@ impl Panels {
 					true => format!("Publish scene `{name}`"),
 					false => format!("Stop publishing scene `{name}`"),
 				};
-				edit(&mut state, label, None, |draft| {
+				edit(state, label, None, |draft| {
 					draft.set_scene(index, Scene { published, ..scene })
 				})
 			}
@@ -1571,12 +1571,12 @@ impl Panels {
 					Some(audio) => format!("Have scene `{name}` carry audio scene `{audio}`"),
 					None => format!("Have scene `{name}` carry the audio scene on program"),
 				};
-				edit(&mut state, label, None, |draft| {
+				edit(state, label, None, |draft| {
 					draft.set_scene(index, Scene { audio, ..scene })
 				})
 			}
 			SceneAction::Remove(index) => {
-				let result = edit(&mut state, format!("Remove scene `{name}`"), None, |draft| {
+				let result = edit(state, format!("Remove scene `{name}`"), None, |draft| {
 					draft.remove_scene(index)
 				});
 				if result.is_ok() {
@@ -1586,9 +1586,7 @@ impl Panels {
 				}
 				result
 			}
-		};
-		drop(state);
-		self.check(result);
+		}
 	}
 
 	/// Rename, reorder, or remove one of `scenes`, the audio scenes as the
@@ -2568,13 +2566,9 @@ impl Panels {
 			for scene in &scenes {
 				let name = &scene.name;
 				ui.label(name);
-				meter(ui, state.sources.mix(name).map(|mix| mix.level()).unwrap_or_default());
+				meter(ui, self.levels.mix(name));
 				if ui.radio(scene.program, "On program").clicked() && !scene.program {
-					let mut next = scenes.clone();
-					for scene in &mut next {
-						scene.program = scene.name == *name;
-					}
-					scenes_change = Some((next, format!("Put audio scene `{name}` on program")));
+					scenes_change = Some(on_program(&scenes, name));
 				}
 				let heard = listening.as_ref().is_some_and(|(heard, _)| heard == name);
 				let response = ui
@@ -2601,25 +2595,8 @@ impl Panels {
 		// A send toggled from a sound or an audio scene into an audio scene.
 		let send = |from: Strip<'_>, to: &str, on: bool| {
 			let mut next = scenes.clone();
-			let into = next.iter_mut().find(|scene| scene.name == to).expect("listed");
-			let (held, what) = match from {
-				Strip::Sound(name) => (&mut into.sounds, format!("`{name}`")),
-				Strip::Scene(name) => (&mut into.scenes, format!("audio scene `{name}`")),
-			};
-			let name = match from {
-				Strip::Sound(name) | Strip::Scene(name) => name.to_string(),
-			};
-			let label = match on {
-				true => {
-					held.insert(name);
-					format!("Put {what} in `{to}`")
-				}
-				false => {
-					held.remove(&name);
-					format!("Take {what} out of `{to}`")
-				}
-			};
-			(next, label)
+			from.send(&mut next, to, on);
+			(next, from.label(to, on))
 		};
 		let mut change = None;
 		egui::Grid::new("audio").striped(true).show(ui, |ui| {
@@ -2633,29 +2610,13 @@ impl Panels {
 			}
 			ui.end_row();
 			for (name, feed) in state.sources.iter() {
-				let Some(strip) = feed.strip() else { continue };
-				let mut audio = state.collection().audio.get(name).cloned().unwrap_or_default();
-				let mut db = decibels(audio.gain);
+				if feed.strip().is_none() {
+					continue;
+				}
+				let audio = state.collection().audio.get(name).cloned().unwrap_or_default();
 				ui.label(name);
-				if ui.checkbox(&mut audio.muted, "Mute").changed() {
-					let verb = if audio.muted { "Mute" } else { "Unmute" };
-					change = Some((name.to_string(), audio.clone(), format!("{verb} `{name}`"), None));
-				}
-				let response = ui.add(egui::Slider::new(&mut db, MUTE_DB..=12.0).suffix(" dB"));
-				let gesture = self.gestures.of(&response);
-				if response.changed() {
-					let mut audio = audio.clone();
-					audio.gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
-					change = Some((name.to_string(), audio, format!("Set `{name}` gain"), gesture));
-				}
-				let max = moq_audio::bus::MAX_DELAY.as_millis() as u64;
-				let mut millis = audio.delay.as_millis() as u64;
-				let response = ui.add(egui::DragValue::new(&mut millis).range(0..=max).suffix(" ms"));
-				let gesture = self.gestures.of(&response);
-				if response.changed() {
-					let mut audio = audio.clone();
-					audio.delay = Duration::from_millis(millis);
-					change = Some((name.to_string(), audio, format!("Set `{name}` delay"), gesture));
+				if let Some((audio, label, gesture)) = strip_controls(ui, &mut self.gestures, name, &audio) {
+					change = Some((name.to_string(), audio, label, gesture));
 				}
 				for scene in &scenes {
 					let mut sent = scene.sounds.contains(name);
@@ -2663,7 +2624,7 @@ impl Panels {
 						scenes_change = Some(send(Strip::Sound(name), &scene.name, sent));
 					}
 				}
-				meter(ui, strip.level());
+				meter(ui, self.levels.sound(name));
 				ui.end_row();
 			}
 			// Each audio scene sends into others too, never into itself, even
@@ -2684,7 +2645,7 @@ impl Panels {
 						scenes_change = Some(send(Strip::Scene(name), &scene.name, sent));
 					}
 				}
-				meter(ui, state.sources.mix(name).map(|mix| mix.level()).unwrap_or_default());
+				meter(ui, self.levels.mix(name));
 				ui.end_row();
 			}
 		});
@@ -3634,6 +3595,127 @@ enum Strip<'a> {
 	Scene(&'a str),
 }
 
+impl Strip<'_> {
+	/// The strip as an edit's label names it.
+	fn what(self) -> String {
+		match self {
+			Self::Sound(name) => format!("`{name}`"),
+			Self::Scene(name) => format!("audio scene `{name}`"),
+		}
+	}
+
+	/// What sending it into the audio scene `to`, or stopping, is called in
+	/// the history.
+	fn label(self, to: &str, on: bool) -> String {
+		let what = self.what();
+		match on {
+			true => format!("Put {what} in `{to}`"),
+			false => format!("Take {what} out of `{to}`"),
+		}
+	}
+
+	/// Send it into the audio scene `to` of `scenes`, or stop; whether that
+	/// changed them.
+	fn send(self, scenes: &mut [moq_scene::AudioScene], to: &str, on: bool) -> bool {
+		let Some(into) = scenes.iter_mut().find(|scene| scene.name == to) else {
+			return false;
+		};
+		let (held, name) = match self {
+			Self::Sound(name) => (&mut into.sounds, name),
+			Self::Scene(name) => (&mut into.scenes, name),
+		};
+		match on {
+			true => held.insert(name.to_string()),
+			false => held.remove(name),
+		}
+	}
+}
+
+/// `scenes` with the one called `name` on program instead, and the edit's
+/// label.
+fn on_program(scenes: &[moq_scene::AudioScene], name: &str) -> (Vec<moq_scene::AudioScene>, String) {
+	let mut next = scenes.to_vec();
+	for scene in &mut next {
+		scene.program = scene.name == name;
+	}
+	(next, format!("Put audio scene `{name}` on program"))
+}
+
+/// A sound's mute, gain, and delay, as its Audio panel strip and Graph node
+/// show them, and the change made to `audio` with its label and gesture.
+fn strip_controls(
+	ui: &mut Ui,
+	gestures: &mut Gestures,
+	name: &str,
+	audio: &moq_scene::Audio,
+) -> Option<(moq_scene::Audio, String, Option<u64>)> {
+	let mut change = None;
+	let mut muted = audio.muted;
+	if ui.checkbox(&mut muted, "Mute").changed() {
+		let verb = if muted { "Mute" } else { "Unmute" };
+		let audio = moq_scene::Audio { muted, ..audio.clone() };
+		change = Some((audio, format!("{verb} `{name}`"), None));
+	}
+	let mut db = decibels(audio.gain);
+	let response = ui.add(egui::Slider::new(&mut db, MUTE_DB..=12.0).suffix(" dB"));
+	let gesture = gestures.of(&response);
+	if response.changed() {
+		let gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
+		let audio = moq_scene::Audio { gain, ..audio.clone() };
+		change = Some((audio, format!("Set `{name}` gain"), gesture));
+	}
+	let max = moq_audio::bus::MAX_DELAY.as_millis() as u64;
+	let mut millis = audio.delay.as_millis() as u64;
+	let response = ui
+		.add(egui::DragValue::new(&mut millis).range(0..=max).suffix(" ms"))
+		.on_hover_text("Delay: hold the source back to line it up with a camera that lags it");
+	let gesture = gestures.of(&response);
+	if response.changed() {
+		let delay = Duration::from_millis(millis);
+		let audio = moq_scene::Audio { delay, ..audio.clone() };
+		change = Some((audio, format!("Set `{name}` delay"), gesture));
+	}
+	change
+}
+
+/// A scene's Publish setting, and the audio scene its broadcast carries
+/// while published, as its Scenes panel row and Graph node show them.
+fn scene_settings(
+	ui: &mut Ui,
+	index: usize,
+	scene: &Scene,
+	audio_scenes: &[moq_scene::AudioScene],
+	program_audio: &str,
+) -> Option<SceneAction> {
+	let mut action = None;
+	let mut published = scene.published;
+	if ui
+		.checkbox(&mut published, "Publish")
+		.on_hover_text("Live as its own broadcast beneath the program's, at its own size")
+		.changed()
+	{
+		action = Some(SceneAction::Publish(index, published));
+	}
+	if scene.published {
+		let on_program = format!("on program ({program_audio})");
+		let mut audio = scene.audio.clone();
+		egui::ComboBox::from_id_salt(("scene audio", index))
+			.selected_text(audio.as_deref().unwrap_or(&on_program))
+			.show_ui(ui, |ui| {
+				ui.selectable_value(&mut audio, None, &on_program);
+				for scene in audio_scenes {
+					ui.selectable_value(&mut audio, Some(scene.name.clone()), &scene.name);
+				}
+			})
+			.response
+			.on_hover_text("The audio scene its broadcast carries");
+		if audio != scene.audio {
+			action = Some(SceneAction::Audio(index, audio));
+		}
+	}
+	action
+}
+
 /// An edit the Items panel makes.
 enum ItemAction {
 	/// Replace the item at an index, labelled, as part of a gesture.
@@ -4341,24 +4423,6 @@ fn decibels(gain: f32) -> f32 {
 	} else {
 		(20.0 * gain.log10()).max(MUTE_DB)
 	}
-}
-
-/// A level meter: RMS filled, peak as a tick, on a decibel scale.
-fn meter(ui: &mut Ui, level: moq_audio::Level) {
-	let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 12.0), egui::Sense::hover());
-	let position = |amplitude: f32| (1.0 - decibels(amplitude) / MUTE_DB).clamp(0.0, 1.0);
-	let painter = ui.painter_at(rect);
-	painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-	let color = if level.peak() >= 1.0 {
-		Color32::RED
-	} else {
-		Color32::from_rgb(80, 200, 120)
-	};
-	let mut filled = rect;
-	filled.set_width(rect.width() * position(level.rms()));
-	painter.rect_filled(filled, 2.0, color);
-	let x = rect.left() + rect.width() * position(level.peak());
-	painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, color));
 }
 
 /// The form that adds a source by hand.
