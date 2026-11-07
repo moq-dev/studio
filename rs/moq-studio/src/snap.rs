@@ -122,13 +122,68 @@ impl Grab {
 
 	/// `rect` with what this grab holds dragged by `delta`. A resized edge
 	/// stops at the opposite one rather than turning the item inside out.
-	pub fn drag(self, rect: Rect, delta: [f32; 2]) -> Rect {
-		let mut rect = rect;
+	///
+	/// With an `aspect`, the width over height, a resize keeps that shape: the
+	/// held edge along one axis leads, as the one held alone or, at a corner,
+	/// the one dragged further for its size, and the other axis follows.
+	pub fn drag(self, rect: Rect, delta: [f32; 2], aspect: Option<f32>) -> Rect {
+		let mut dragged = rect;
 		for axis in Axis::ALL {
-			shift(&mut rect, axis, self.moves(axis), axis.of(delta));
+			shift(&mut dragged, axis, self.moves(axis), axis.of(delta));
 		}
+		let lead = match self {
+			Self::Move | Self::Resize { x: None, y: None } => return dragged,
+			Self::Resize { x: Some(_), y: None } => Axis::X,
+			Self::Resize { x: None, y: Some(_) } => Axis::Y,
+			Self::Resize { .. } => {
+				// How far each axis grew or shrank, for its size.
+				let change = |axis: Axis| {
+					let (start, end) = axis.span(&rect);
+					let (from, to) = axis.span(&dragged);
+					((to - from) - (end - start)).abs() / (end - start).max(1.0)
+				};
+				if change(Axis::X) >= change(Axis::Y) {
+					Axis::X
+				} else {
+					Axis::Y
+				}
+			}
+		};
+		match aspect {
+			Some(aspect) => self.keep_aspect(dragged, aspect, lead),
+			None => dragged,
+		}
+	}
+
+	/// `rect` reshaped to `aspect`, the width over height, keeping its span
+	/// along `lead`. The other axis moves the edge this grab holds on it, or
+	/// stays centered where it holds none.
+	fn keep_aspect(self, rect: Rect, aspect: f32, lead: Axis) -> Rect {
+		let mut rect = rect;
+		let (start, end) = lead.span(&rect);
+		let follow = lead.other();
+		let length = match lead {
+			Axis::X => (end - start) / aspect,
+			Axis::Y => (end - start) * aspect,
+		};
+		let (from, to) = follow.span(&rect);
+		let span = match self.moves(follow) {
+			Moves::Edge(Side::Start) => (to - length, to),
+			Moves::Edge(Side::End) => (from, from + length),
+			Moves::Both | Moves::Neither => {
+				let center = (from + to) / 2.0;
+				(center - length / 2.0, center + length / 2.0)
+			}
+		};
+		follow.set_span(&mut rect, span);
 		rect
 	}
+}
+
+/// The width over height of `rect`, if it has a shape to keep.
+pub fn aspect(rect: &Rect) -> Option<f32> {
+	let aspect = rect.width / rect.height;
+	(aspect.is_finite() && aspect > 0.0).then_some(aspect)
 }
 
 /// Move what `moves` names of `rect` along `axis` by `by`.
@@ -173,6 +228,11 @@ pub struct Snap {
 	pub reach: f32,
 	/// The spacing of a grid to snap to, in canvas pixels, if any.
 	pub grid: Option<f32>,
+	/// The width over height a resize keeps, if any, of the item at rest.
+	pub aspect: Option<f32>,
+	/// How far keyframes have the item from where it rests, added to each
+	/// field of its rect. It snaps where it shows, but keeps its shape at rest.
+	pub posed: Rect,
 }
 
 /// A dragged item once snapped, and the hints to draw while it is held.
@@ -207,46 +267,105 @@ pub struct Gap {
 }
 
 impl Snap {
-	/// Snap `rect`, which `grab` has dragged, to the canvas, the `others`, and
-	/// the grid. Along each axis, the nearest line within reach of a moving
-	/// edge or center wins, as does the spacing of a neighboring pair when the
-	/// whole item moves.
+	/// Snap `rect`, the item at rest once `grab` has dragged it, to the
+	/// canvas, the `others`, and the grid, where it shows. Along each axis,
+	/// the nearest line within reach of a moving edge or center wins, as does
+	/// the spacing of a neighboring pair when the whole item moves.
+	///
+	/// A resize keeping an aspect snaps only the axis whose snap moves the
+	/// item least, and the other follows its shape, as long as no edge moves
+	/// out of reach. The snapped rect is at rest.
 	pub fn apply(&self, grab: Grab, rect: Rect, others: &[Rect], canvas: &Canvas) -> Snapped {
+		// An edge shown is the edge at rest plus a constant, so a shift
+		// measured where it shows moves it as far at rest.
+		let shown = |rect: &Rect| Rect {
+			x: rect.x + self.posed.x,
+			y: rect.y + self.posed.y,
+			width: rect.width + self.posed.width,
+			height: rect.height + self.posed.height,
+		};
 		let mut rect = rect;
-		for axis in Axis::ALL {
-			let moves = grab.moves(axis);
-			let points = points(axis.span(&rect), moves);
-			let mut shifts: Vec<f32> = Vec::new();
-			for line in lines(axis, others, canvas) {
-				shifts.extend(points.iter().map(|point| line - point));
+		match self.aspect.filter(|_| grab != Grab::Move) {
+			None => {
+				for axis in Axis::ALL {
+					if let Some(best) = self.nearest(grab, axis, &shown(&rect), others, canvas) {
+						shift(&mut rect, axis, grab.moves(axis), best);
+					}
+				}
 			}
-			if let Some(grid) = self.grid {
-				shifts.extend(points.iter().map(|point| (point / grid).round() * grid - point));
-			}
-			// Spacing places the whole item, so a resize never takes it. An
-			// alignment wins a tie, since it comes first.
-			if moves == Moves::Both {
-				shifts.extend(spacings(axis, &rect, others));
-			}
-			let best = shifts
-				.into_iter()
-				.filter(|shift| shift.abs() <= self.reach)
-				.min_by(|a, b| a.abs().total_cmp(&b.abs()));
-			if let Some(best) = best {
-				shift(&mut rect, axis, moves, best);
+			Some(aspect) => {
+				// How far a snap moves any edge, the one that follows the
+				// shape included.
+				let moved = |snapped: &Rect| {
+					Axis::ALL
+						.into_iter()
+						.map(|axis| {
+							let ((start, end), (from, to)) = (axis.span(&rect), axis.span(snapped));
+							(from - start).abs().max((to - end).abs())
+						})
+						.fold(0.0, f32::max)
+				};
+				let best = Axis::ALL
+					.into_iter()
+					.filter_map(|axis| {
+						let mut snapped = rect;
+						shift(
+							&mut snapped,
+							axis,
+							grab.moves(axis),
+							self.nearest(grab, axis, &shown(&rect), others, canvas)?,
+						);
+						let snapped = grab.keep_aspect(snapped, aspect, axis);
+						let moved = moved(&snapped);
+						(moved <= self.reach).then_some((moved, snapped))
+					})
+					.min_by(|(a, _), (b, _)| a.total_cmp(b));
+				if let Some((_, snapped)) = best {
+					rect = snapped;
+				}
 			}
 		}
 
 		let mut guides = Vec::new();
 		let mut gaps = Vec::new();
+		let showing = shown(&rect);
 		for axis in Axis::ALL {
 			let moves = grab.moves(axis);
-			guides.extend(lined_up(axis, &rect, &points(axis.span(&rect), moves), others, canvas));
+			guides.extend(lined_up(
+				axis,
+				&showing,
+				&points(axis.span(&showing), moves),
+				others,
+				canvas,
+			));
 			if moves == Moves::Both {
-				gaps.extend(equal_gaps(axis, &rect, others));
+				gaps.extend(equal_gaps(axis, &showing, others));
 			}
 		}
 		Snapped { rect, guides, gaps }
+	}
+
+	/// The shortest shift along `axis`, within reach, that snaps what `grab`
+	/// moves of `rect`.
+	fn nearest(&self, grab: Grab, axis: Axis, rect: &Rect, others: &[Rect], canvas: &Canvas) -> Option<f32> {
+		let moves = grab.moves(axis);
+		let points = points(axis.span(rect), moves);
+		let mut shifts: Vec<f32> = Vec::new();
+		for line in lines(axis, others, canvas) {
+			shifts.extend(points.iter().map(|point| line - point));
+		}
+		if let Some(grid) = self.grid {
+			shifts.extend(points.iter().map(|point| (point / grid).round() * grid - point));
+		}
+		// Spacing places the whole item, so a resize never takes it. An
+		// alignment wins a tie, since it comes first.
+		if moves == Moves::Both {
+			shifts.extend(spacings(axis, rect, others));
+		}
+		shifts
+			.into_iter()
+			.filter(|shift| shift.abs() <= self.reach)
+			.min_by(|a, b| a.abs().total_cmp(&b.abs()))
 	}
 }
 
@@ -404,13 +523,15 @@ mod tests {
 		framerate: 30,
 	};
 
-	fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+	const fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
 		Rect { x, y, width, height }
 	}
 
 	const SNAP: Snap = Snap {
 		reach: 10.0,
 		grid: None,
+		aspect: None,
+		posed: rect(0.0, 0.0, 0.0, 0.0),
 	};
 
 	#[test]
@@ -449,12 +570,123 @@ mod tests {
 			x: Some(Side::Start),
 			y: None,
 		};
-		assert_eq!(left.drag(item, [500.0, 40.0]), rect(300.0, 100.0, 0.0, 100.0));
+		assert_eq!(left.drag(item, [500.0, 40.0], None), rect(300.0, 100.0, 0.0, 100.0));
 		let bottom_right = Grab::Resize {
 			x: Some(Side::End),
 			y: Some(Side::End),
 		};
-		assert_eq!(bottom_right.drag(item, [10.0, -20.0]), rect(100.0, 100.0, 210.0, 80.0));
+		assert_eq!(
+			bottom_right.drag(item, [10.0, -20.0], None),
+			rect(100.0, 100.0, 210.0, 80.0)
+		);
+	}
+
+	#[test]
+	fn a_locked_resize_keeps_the_shape() {
+		let item = rect(100.0, 100.0, 200.0, 100.0);
+		let shape = aspect(&item);
+		// A corner follows the axis dragged further for its size, here the
+		// width, and the height grows from the top edge it does not hold.
+		let bottom_right = Grab::Resize {
+			x: Some(Side::End),
+			y: Some(Side::End),
+		};
+		assert_eq!(
+			bottom_right.drag(item, [100.0, 10.0], shape),
+			rect(100.0, 100.0, 300.0, 150.0)
+		);
+		let top_left = Grab::Resize {
+			x: Some(Side::Start),
+			y: Some(Side::Start),
+		};
+		assert_eq!(
+			top_left.drag(item, [10.0, 40.0], shape),
+			rect(180.0, 140.0, 120.0, 60.0)
+		);
+		// An edge alone grows the other axis about its center.
+		let right = Grab::Resize {
+			x: Some(Side::End),
+			y: None,
+		};
+		assert_eq!(right.drag(item, [50.0, 30.0], shape), rect(100.0, 87.5, 250.0, 125.0));
+		// Moving keeps the shape anyway.
+		assert_eq!(
+			Grab::Move.drag(item, [5.0, 5.0], shape),
+			rect(105.0, 105.0, 200.0, 100.0)
+		);
+		assert_eq!(aspect(&rect(0.0, 0.0, 10.0, 0.0)), None);
+	}
+
+	#[test]
+	fn a_locked_resize_snaps_one_axis_and_keeps_the_shape() {
+		let snap = Snap {
+			aspect: Some(2.0),
+			..SNAP
+		};
+		let bottom_right = Grab::Resize {
+			x: Some(Side::End),
+			y: Some(Side::End),
+		};
+		// The right edge at 396 is 4 px from the other item's left edge, and
+		// the bottom at 247 is 3 px from its top, but snapping the bottom
+		// would move the right edge 6 px, so the right edge's snap wins.
+		let others = [rect(400.0, 250.0, 100.0, 50.0)];
+		let snapped = snap.apply(bottom_right, rect(100.0, 100.0, 296.0, 147.0), &others, &CANVAS);
+		assert_eq!(snapped.rect, rect(100.0, 100.0, 300.0, 150.0));
+		assert_eq!(snapped.guides.len(), 2, "both edges land on the other item's");
+		// With nothing in reach it stays as dragged.
+		let item = rect(100.0, 100.0, 300.0, 150.0);
+		assert_eq!(snap.apply(bottom_right, item, &[], &CANVAS).rect, item);
+	}
+
+	#[test]
+	fn a_locked_snap_moves_no_edge_out_of_reach() {
+		let snap = Snap {
+			aspect: Some(100.0),
+			..SNAP
+		};
+		let bottom_right = Grab::Resize {
+			x: Some(Side::End),
+			y: Some(Side::End),
+		};
+		// A thin strip's bottom is 5 px from the other item's top, and its right
+		// edge 8 px from its left. Snapping the bottom would widen it 500 px.
+		let strip = rect(100.0, 100.0, 1000.0, 10.0);
+		let others = [rect(1108.0, 115.0, 50.0, 50.0)];
+		let snapped = snap.apply(bottom_right, strip, &others, &CANVAS).rect;
+		assert_eq!((snapped.x, snapped.y, snapped.width), (100.0, 100.0, 1008.0));
+		assert!((snapped.height - 10.08).abs() < 1e-3);
+		// With only the bottom's snap near, it stays as dragged.
+		let others = [rect(1300.0, 115.0, 50.0, 50.0)];
+		assert_eq!(snap.apply(bottom_right, strip, &others, &CANVAS).rect, strip);
+	}
+
+	#[test]
+	fn a_posed_item_snaps_where_it_shows_and_keeps_its_shape_at_rest() {
+		// Resting at 200x100, with a keyframe adding 100 to the height.
+		let snap = Snap {
+			aspect: Some(2.0),
+			posed: rect(0.0, 0.0, 0.0, 100.0),
+			..SNAP
+		};
+		let right = Grab::Resize {
+			x: Some(Side::End),
+			y: None,
+		};
+		let dragged = right.drag(rect(100.0, 100.0, 200.0, 100.0), [20.0, 0.0], snap.aspect);
+		assert_eq!(dragged, rect(100.0, 95.0, 220.0, 110.0));
+		// Its right edge already lies on the other item's left edge.
+		let others = [rect(320.0, 600.0, 100.0, 100.0)];
+		let snapped = snap.apply(right, dragged, &others, &CANVAS);
+		assert_eq!(snapped.rect, dragged);
+		assert_eq!(snapped.guides.len(), 1);
+		// Offset where it shows, it snaps there and keeps its shape at rest.
+		let snap = Snap {
+			posed: rect(4.0, 0.0, 0.0, 100.0),
+			..snap
+		};
+		let snapped = snap.apply(right, dragged, &others, &CANVAS);
+		assert_eq!(snapped.rect, rect(100.0, 96.0, 216.0, 108.0));
 	}
 
 	#[test]
@@ -521,8 +753,8 @@ mod tests {
 	#[test]
 	fn the_grid() {
 		let snap = Snap {
-			reach: 10.0,
 			grid: Some(64.0),
+			..SNAP
 		};
 		// The left edge is 6 px from 256, and the top 2 px from 320.
 		let snapped = snap.apply(Grab::Move, rect(250.0, 322.0, 100.0, 100.0), &[], &CANVAS);

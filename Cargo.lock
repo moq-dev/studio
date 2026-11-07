@@ -2619,6 +2619,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "global-hotkey"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adda8c76a5139df3bae0eb0413c2cd746f66594e0bb66231a4daa0be3172da70"
+dependencies = [
+ "crossbeam-channel",
+ "keyboard-types",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "once_cell",
+ "thiserror 2.0.21",
+ "windows-sys 0.59.0",
+ "x11rb 0.13.2",
+ "xkeysym",
+]
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4388,10 +4405,13 @@ name = "moq-studio"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ashpd",
  "bytes",
  "eframe",
  "egui",
  "egui_dock",
+ "futures-util",
+ "global-hotkey",
  "hang",
  "humantime",
  "kio",
@@ -4409,6 +4429,7 @@ dependencies = [
  "mp4-atom",
  "pollster 1.0.1",
  "qrcodegen",
+ "raw-window-handle",
  "same-file",
  "serde",
  "tempfile",
@@ -4417,6 +4438,9 @@ dependencies = [
  "tracing",
  "url",
  "usage-rs",
+ "windows-sys 0.61.2",
+ "winit",
+ "x11rb 0.13.2",
 ]
 
 [[package]]
@@ -9292,6 +9316,15 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

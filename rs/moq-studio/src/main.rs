@@ -9,13 +9,17 @@ use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, EventLoop};
 
 mod autosave;
+mod controls;
 mod devices;
 mod engine;
 mod feed;
 mod guests;
 mod health;
+mod hotkeys;
 mod interact;
 mod ladder;
 mod mix;
@@ -227,9 +231,16 @@ struct Window {
 	runtime: tokio::runtime::Handle,
 	/// The engine once the studio is built, for the save on quit.
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
+	keypad: hotkeys::Keypad,
 }
 
 impl eframe::App for Window {
+	fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+		if let App::Studio(studio) = &mut self.app {
+			studio.logic(ctx, frame);
+		}
+	}
+
 	fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
 		let engine = match &mut self.app {
 			App::Studio(studio) => return studio.ui(ui, frame),
@@ -241,7 +252,7 @@ impl eframe::App for Window {
 		};
 		let _ = self.started.set(engine.clone());
 		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
-		studio.load(frame.storage());
+		studio.load(frame);
 		self.app = App::Studio(Box::new(studio));
 		ui.ctx().request_repaint();
 	}
@@ -250,6 +261,68 @@ impl eframe::App for Window {
 		if let App::Studio(studio) = &mut self.app {
 			studio.save(storage);
 		}
+	}
+
+	fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+		self.keypad.forget(&mut raw_input.events);
+	}
+}
+
+/// eframe's handler for the window's events, noting keypad keys before egui
+/// folds them into their twins.
+struct Events<'a> {
+	eframe: eframe::EframeWinitApplication<'a>,
+	keypad: hotkeys::Keypad,
+	/// Whether the window was asked to close, since eframe only logs the error
+	/// that stops it otherwise.
+	closed: bool,
+}
+
+impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
+	fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+		self.eframe.new_events(event_loop, cause);
+	}
+
+	fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+		self.eframe.resumed(event_loop);
+	}
+
+	fn user_event(&mut self, event_loop: &ActiveEventLoop, event: eframe::UserEvent) {
+		self.eframe.user_event(event_loop, event);
+	}
+
+	fn window_event(&mut self, event_loop: &ActiveEventLoop, id: winit::window::WindowId, event: WindowEvent) {
+		match &event {
+			WindowEvent::KeyboardInput { event, .. } => self.keypad.note(event.physical_key),
+			WindowEvent::CloseRequested => self.closed = true,
+			_ => {}
+		}
+		self.eframe.window_event(event_loop, id, event);
+	}
+
+	fn device_event(
+		&mut self,
+		event_loop: &ActiveEventLoop,
+		id: winit::event::DeviceId,
+		event: winit::event::DeviceEvent,
+	) {
+		self.eframe.device_event(event_loop, id, event);
+	}
+
+	fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+		self.eframe.about_to_wait(event_loop);
+	}
+
+	fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+		self.eframe.suspended(event_loop);
+	}
+
+	fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+		self.eframe.exiting(event_loop);
+	}
+
+	fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+		self.eframe.memory_warning(event_loop);
 	}
 }
 
@@ -278,7 +351,12 @@ fn run(
 		},
 		..Default::default()
 	};
-	eframe::run_native(
+	let event_loop = EventLoop::<eframe::UserEvent>::with_user_event()
+		.build()
+		.context("cannot open the window")?;
+	let keypad = hotkeys::Keypad::default();
+	let window_keypad = keypad.clone();
+	let eframe = eframe::create_native(
 		"moq-studio",
 		options,
 		Box::new(move |cc| {
@@ -291,11 +369,19 @@ fn run(
 				render,
 				runtime,
 				started,
+				keypad: window_keypad,
 			}))
 		}),
-	)
-	.map_err(|err| anyhow::anyhow!("{err}"))
-	.context("the window failed")
+		&event_loop,
+	);
+	let mut events = Events {
+		eframe,
+		keypad,
+		closed: false,
+	};
+	event_loop.run_app(&mut events).context("the window failed")?;
+	anyhow::ensure!(events.closed, "the window failed; the error is logged above");
+	Ok(())
 }
 
 #[cfg(test)]

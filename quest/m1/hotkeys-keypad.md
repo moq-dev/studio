@@ -18,7 +18,3 @@ refuses keypad keys rather than binding them; picked 2026-11-06 (maintainer,
 - Register global-hotkey's `Numpad*` codes on macOS, Windows, and X11, and
   ask the GlobalShortcuts portal for `KP_*` keysyms on Wayland.
 - `README.md` drops the note that keypad keys are refused.
-
-## Required
-
-- [Hotkeys and editor preferences](/quest/m1/hotkeys.md) - the bindings and settings store this extends

@@ -49,6 +49,9 @@ eframe = { version = "0.36", default-features = false, features = ["default_font
 egui = "0.36"
 # Docked, rearrangeable panels. 0.21 is the newest release and pins egui 0.36.
 egui_dock = "0.21"
+# System-wide hotkeys on macOS, Windows, and X11; Wayland goes through the
+# GlobalShortcuts portal instead.
+global-hotkey = "0.9"
 hang = { workspace = true }
 # Stamps a recording's file name with when it started. Already in the graph
 # through moq-scene's humantime-serde.
@@ -80,6 +83,25 @@ toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
+# The window's event loop, run here so keypad keys are noted before egui
+# folds them into their main keyboard twins. eframe's version and features.
+winit = { version = "0.30", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The GlobalShortcuts portal for hotkeys on Wayland. 0.13, as moq-video's
+# PipeWire capture uses, so the two share one D-Bus stack.
+ashpd = { version = "0.13", default-features = false, features = ["global_shortcuts", "tokio"] }
+futures-util = "0.3"
+# Whether the window is on Wayland, where only the portal hears keys globally.
+raw-window-handle = "0.6"
+# Which keysyms the X11 layout puts on each key, so a hotkey grabs the key
+# pressed. 0.13, as global-hotkey uses, so default builds compile one.
+x11rb = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+# Which virtual key the Windows layout puts on each key, so a hotkey
+# registers the key pressed.
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [dev-dependencies]
 # A clock that moves wall time too, which renewed tokens' expiries read.

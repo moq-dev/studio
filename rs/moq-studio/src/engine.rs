@@ -100,6 +100,11 @@ pub struct State {
 	stale: bool,
 	/// For the autosave, which writes the collection once edits settle.
 	edits: autosave::Edits,
+	/// What became of each scene the edits, undos, and redos since the window
+	/// last took them renamed or removed, one map per edit as
+	/// [`Collection::renames`] reads it, so what the window follows a scene by
+	/// name with, such as a hotkey, follows it too.
+	renamed: Vec<BTreeMap<String, Option<String>>>,
 }
 
 impl State {
@@ -202,7 +207,28 @@ impl State {
 		}
 		self.compositor.retain(&collection);
 		self.collection = collection;
+		self.renamed
+			.extend(renames.into_iter().filter(|renames| !renames.is_empty()));
 		Ok(())
+	}
+
+	/// The scene renames and removals since the last call, oldest first.
+	pub fn take_renames(&mut self) -> Vec<BTreeMap<String, Option<String>>> {
+		std::mem::take(&mut self.renamed)
+	}
+
+	/// What the renames not yet taken call `scene` now, or `None` if one
+	/// removed it.
+	pub fn follow(&self, scene: &str) -> Option<String> {
+		let mut scene = scene.to_string();
+		for renames in &self.renamed {
+			match renames.get(&scene) {
+				Some(Some(to)) => scene = to.clone(),
+				Some(None) => return None,
+				None => {}
+			}
+		}
+		Some(scene)
 	}
 
 	/// The sources whose pictures any canvas's program draws, through clones:
@@ -811,6 +837,7 @@ impl Engine {
 				compositor,
 				stale: true,
 				edits: autosave.edits(),
+				renamed: Vec::new(),
 			}),
 			autosave,
 			stats,

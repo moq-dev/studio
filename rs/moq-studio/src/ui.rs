@@ -1,8 +1,8 @@
 //! The window: docked panels over the engine's state.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -16,9 +16,11 @@ use moq_scene::{
 };
 
 use crate::autosave::Conflict;
+use crate::controls::{Action, Controls};
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
 use crate::health::{self, Verdict};
+use crate::hotkeys::{self, Bindings, Hotkeys, Reach};
 use crate::interact::Interact;
 use crate::replay::{self, Of};
 use crate::snap::{self, Grab, Snap};
@@ -41,6 +43,7 @@ enum Tab {
 	Output,
 	Health,
 	Replay,
+	Hotkeys,
 }
 
 impl Tab {
@@ -60,6 +63,7 @@ impl Tab {
 			Self::Output => "Output",
 			Self::Health => "Health",
 			Self::Replay => "Replay",
+			Self::Hotkeys => "Hotkeys",
 		}
 	}
 }
@@ -99,14 +103,21 @@ impl Studio {
 				Tab::Health,
 				Tab::Audio,
 				Tab::Output,
+				Tab::Hotkeys,
 			],
 		);
 
+		let controls = Arc::new(Controls::new(engine.clone(), runtime.clone()));
 		Self {
 			dock,
 			panels: Panels {
 				engine,
 				runtime,
+				controls,
+				hotkeys: None,
+				binding: None,
+				hotkeys_shown: false,
+				refusal: None,
 				preview,
 				program,
 				view: None,
@@ -132,12 +143,10 @@ impl Studio {
 				new_item: None,
 				add: AddSource::default(),
 				devices: Devices::default(),
-				record_sources: false,
 				interacting: false,
 				interact: Interact::default(),
 				previewed: false,
 				bound: BTreeMap::new(),
-				replay: Replay::default(),
 				guest: String::new(),
 				shown: None,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
@@ -150,21 +159,49 @@ impl Studio {
 /// What the canvas picker calls the main canvas.
 const MAIN: &str = "Main";
 
-/// Where the output Listen plays on is kept, per user.
+/// Where this user's picks are kept, in the app's settings rather than the
+/// scene file, which moves between machines without one operator's keys.
 const SPEAKER: &str = "speaker";
+const SNAPPING: &str = "snapping";
+const HOTKEYS: &str = "hotkeys";
 
 impl Studio {
-	/// Take up what this user picked last time, from `storage`.
-	pub fn load(&mut self, storage: Option<&dyn eframe::Storage>) {
-		if let Some(storage) = storage {
-			self.panels.speaker = eframe::get_value::<Option<String>>(storage, SPEAKER).flatten();
+	/// Take up what this user picked last time, and start hearing the keys
+	/// they bound. Called from the window's thread, which `window` is.
+	pub fn load(&mut self, window: &eframe::Frame) {
+		let mut bindings = Bindings::new();
+		if let Some(storage) = window.storage() {
+			let panels = &mut self.panels;
+			panels.speaker = eframe::get_value::<Option<String>>(storage, SPEAKER).flatten();
+			panels.snapping = eframe::get_value(storage, SNAPPING).unwrap_or_default();
+			bindings = eframe::get_value(storage, HOTKEYS).unwrap_or_default();
 		}
+		let hotkeys = Hotkeys::new(window, self.panels.controls.clone(), &self.panels.runtime, bindings);
+		self.panels.hotkeys = Some(hotkeys);
 	}
 }
 
 impl eframe::App for Studio {
 	fn save(&mut self, storage: &mut dyn eframe::Storage) {
-		eframe::set_value(storage, SPEAKER, &self.panels.speaker);
+		let panels = &self.panels;
+		eframe::set_value(storage, SPEAKER, &panels.speaker);
+		eframe::set_value(storage, SNAPPING, &panels.snapping);
+		if let Some(hotkeys) = &panels.hotkeys {
+			eframe::set_value(storage, HOTKEYS, &hotkeys.bindings());
+		}
+	}
+
+	/// Run before each frame, and while the window is hidden, when `ui` is not.
+	fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+		// A wait for a key ends once the operator leaves the window, such as
+		// for a game, so the hotkeys are not held off while they play.
+		let left = ctx.input(|input| {
+			let viewport = input.viewport();
+			viewport.focused == Some(false) || viewport.minimized == Some(true) || viewport.occluded == Some(true)
+		});
+		if left {
+			self.panels.end_binding();
+		}
 	}
 
 	fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
@@ -175,7 +212,7 @@ impl eframe::App for Studio {
 			self.panels.view = view;
 			self.panels.deselect_item();
 		}
-		let state = engine.state.lock().unwrap();
+		let mut state = engine.state.lock().unwrap();
 		// One removed since, by an edit, undo, or reload, falls back to the main
 		// canvas.
 		if let Some(name) = &self.panels.view
@@ -197,6 +234,14 @@ impl eframe::App for Studio {
 		let framerate = state.compositor.canvas().framerate;
 		ui.ctx().request_repaint_after(Duration::from_secs(1) / framerate);
 		self.panels.follow_reloads(&state);
+		// A key bound to a scene follows it through renames, undos, and redos,
+		// under this lock, so a key fired meanwhile names the scene it means.
+		let renames = state.take_renames();
+		if let Some(hotkeys) = &mut self.panels.hotkeys {
+			for renames in &renames {
+				hotkeys.rename(renames);
+			}
+		}
 		// A page not painting through an X display copies through the
 		// studio's clipboard, even if the preview let go of the page before
 		// the copy came back.
@@ -211,6 +256,21 @@ impl eframe::App for Studio {
 		}
 		drop(state);
 
+		if !renames.is_empty()
+			&& let Some(hotkeys) = &mut self.panels.hotkeys
+		{
+			hotkeys.hear();
+		}
+		if let Some(fired) = self.panels.controls.fired() {
+			self.panels.message = Some(fired);
+		}
+		if let Some(hotkeys) = &self.panels.hotkeys
+			&& !self.panels.interact.has_keyboard()
+		{
+			hotkeys.focused(ui.ctx());
+		}
+		// Before the shortcuts, so the key pressed binds rather than undoes.
+		self.panels.take_binding(ui.ctx());
 		self.panels.shortcuts(ui.ctx());
 		egui::Panel::top("menu").show(ui, |ui| self.panels.menu(ui));
 		if let Some(conflict) = self.panels.engine.autosave.conflict() {
@@ -271,6 +331,17 @@ impl Registered {
 struct Panels {
 	engine: Arc<Engine>,
 	runtime: tokio::runtime::Handle,
+	/// What buttons and hotkeys both do, with the picks they share.
+	controls: Arc<Controls>,
+	/// The bound keys, once the window can register them.
+	hotkeys: Option<Hotkeys>,
+	/// The action the Hotkeys panel waits on a key for.
+	binding: Option<Action>,
+	/// Whether the Hotkeys panel was drawn since the last frame took this.
+	hotkeys_shown: bool,
+	/// The last key the Hotkeys panel would not bind, by the action it was
+	/// pressed for, and why.
+	refusal: Option<(Action, String)>,
 	preview: Registered,
 	program: Registered,
 	/// The canvas Preview, Program, and Items show: a further one by name, or
@@ -320,8 +391,6 @@ struct Panels {
 	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
-	/// Whether the next recording gives each source a file of its own too.
-	record_sources: bool,
 	/// Whether the preview passes the mouse and keyboard to browser sources.
 	interacting: bool,
 	interact: Interact,
@@ -330,7 +399,6 @@ struct Panels {
 	/// The page `interact` holds state for under each name, so one stopped or
 	/// restarted under it, as an edit or a reload does, is forgotten.
 	bound: BTreeMap<String, moq_scene::browser::Page>,
-	replay: Replay,
 	/// The name typed for the next guest.
 	guest: String,
 	/// The join link on screen.
@@ -372,6 +440,7 @@ impl TabViewer for Panels {
 			Tab::Output => self.output(ui),
 			Tab::Health => self.health(ui),
 			Tab::Replay => self.replay(ui),
+			Tab::Hotkeys => self.hotkeys(ui),
 		}
 	}
 }
@@ -502,6 +571,12 @@ impl Gestures {
 			self.0 += 1;
 		}
 		(response.dragged() || response.has_focus()).then_some(self.0)
+	}
+
+	/// A gesture of its own.
+	fn next(&mut self) -> u64 {
+		self.0 += 1;
+		self.0
 	}
 }
 
@@ -853,8 +928,12 @@ impl Panels {
 			}
 			ui.separator();
 			let free = ui.ctx().format_modifiers(egui::Modifiers::COMMAND);
+			let flip = ui.ctx().format_modifiers(egui::Modifiers::SHIFT);
 			ui.checkbox(&mut self.snapping.on, "Snap").on_hover_text(format!(
-				"Snap a dragged item to the canvas, other items, and the grid. Hold {free} to drag freely."
+				"Snap a dragged item to the canvas, other items, and the grid. Hold {free} to drag freely.\n\
+				 Resizing keeps the shape of a camera, screen, image, or video, but not of other sources; hold \
+				 {flip} to flip that. With the preview focused, arrow keys nudge the selected item, ten pixels \
+				 with {flip}."
 			));
 			ui.checkbox(&mut self.snapping.grid, "Grid");
 			let largest = canvas.width.max(canvas.height);
@@ -917,6 +996,10 @@ impl Panels {
 		let reach = view.canvas(REACH);
 		let hit = |pos: egui::Pos2| snap::hit(&items, selected, view.point(pos), reach);
 
+		// Focused, the preview takes the arrow keys, which nudge.
+		if response.clicked() || response.drag_started() {
+			response.request_focus();
+		}
 		if response.clicked() {
 			match response.interact_pointer_pos().and_then(hit) {
 				Some((index, _)) => self.selection = Some(Selection::Item(layer.clone(), index)),
@@ -928,12 +1011,15 @@ impl Panels {
 			&& let Some((index, grab)) = hit(origin)
 		{
 			self.selection = Some(Selection::Item(layer.clone(), index));
+			let collection = state.collection();
+			let source = collection.sources.get(collection.capture(&resting[index].source));
 			self.drag = Some(Drag {
 				layer: layer.clone(),
 				index,
 				grab,
 				rect: resting[index].rect,
 				origin: view.point(origin),
+				fixed: fixed_shape(source),
 				gesture,
 				hints: None,
 			});
@@ -951,27 +1037,29 @@ impl Panels {
 				.items(&drag.layer)
 				.and_then(|items| items.get(drag.index))
 				.cloned();
-			// How far the keyframes have the item from where it rests, which
-			// snapping, done where the item shows, leaves alone.
-			let shown = item.as_ref().map_or(drag.rect, |item| item.posed(since).rect);
-			let rest = item.as_ref().map_or(drag.rect, |item| item.rect);
-			let away = |rect: Rect, sign: f32| Rect {
-				x: rect.x + sign * (shown.x - rest.x),
-				y: rect.y + sign * (shown.y - rest.y),
-				width: rect.width + sign * (shown.width - rest.width),
-				height: rect.height + sign * (shown.height - rest.height),
-			};
-			let rect = drag.grab.drag(drag.rect, delta);
-			let free = ui.input(|input| input.modifiers.command);
-			drag.hints = (self.snapping.on && !free).then(|| {
+			let held = ui.input(|input| input.modifiers);
+			// Shift flips whether a resize keeps the item's shape.
+			let aspect = (drag.fixed != held.shift).then(|| snap::aspect(&drag.rect)).flatten();
+			let rect = drag.grab.drag(drag.rect, delta, aspect);
+			drag.hints = (self.snapping.on && !held.command).then(|| {
+				// How far the keyframes have the item from where it rests.
+				let shown = item.as_ref().map_or(drag.rect, |item| item.posed(since).rect);
+				let rest = item.as_ref().map_or(drag.rect, |item| item.rect);
 				let snap = Snap {
 					reach,
 					grid: self.snapping.grid.then_some(self.snapping.spacing as f32),
+					aspect,
+					posed: Rect {
+						x: shown.x - rest.x,
+						y: shown.y - rest.y,
+						width: shown.width - rest.width,
+						height: shown.height - rest.height,
+					},
 				};
 				let others = others(state, &drag.layer, drag.index, since);
-				snap.apply(drag.grab, away(rect, 1.0), &others, &canvas)
+				snap.apply(drag.grab, rect, &others, &canvas)
 			});
-			let rect = drag.hints.as_ref().map_or(rect, |snapped| away(snapped.rect, -1.0));
+			let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
 			if let Some(item) = item
 				&& item.rect != rect
 			{
@@ -984,6 +1072,9 @@ impl Panels {
 		}
 		if !response.dragged() {
 			self.drag = None;
+		}
+		if response.has_focus() && self.drag.is_none() && result.is_ok() {
+			result = self.nudge(ui, state, &layer, response.id);
 		}
 
 		// Drawn from the collection and selection as this frame left them.
@@ -1020,6 +1111,72 @@ impl Panels {
 		result
 	}
 
+	/// Move the selected item of `layer` a canvas pixel for each arrow key
+	/// pressed while the preview, `id`, has focus, or ten with Shift held. A
+	/// held key undoes as one move.
+	fn nudge(&mut self, ui: &Ui, state: &mut State, layer: &Layer, id: egui::Id) -> anyhow::Result<()> {
+		let arrows = egui::EventFilter {
+			horizontal_arrows: true,
+			vertical_arrows: true,
+			..Default::default()
+		};
+		ui.memory_mut(|memory| memory.set_focus_lock_filter(id, arrows));
+		let index = match &self.selection {
+			Some(Selection::Item(selected, index)) if selected == layer => *index,
+			_ => return Ok(()),
+		};
+		let mut delta = [0.0_f32; 2];
+		let mut fresh = false;
+		ui.input(|input| {
+			for event in &input.events {
+				let egui::Event::Key {
+					key,
+					pressed: true,
+					repeat,
+					modifiers,
+					..
+				} = event
+				else {
+					continue;
+				};
+				let step = if modifiers.shift { 10.0 } else { 1.0 };
+				let [x, y] = match key {
+					egui::Key::ArrowLeft => [-step, 0.0],
+					egui::Key::ArrowRight => [step, 0.0],
+					egui::Key::ArrowUp => [0.0, -step],
+					egui::Key::ArrowDown => [0.0, step],
+					_ => continue,
+				};
+				delta = [delta[0] + x, delta[1] + y];
+				fresh |= !repeat;
+			}
+		});
+		let Some(item) = state
+			.collection()
+			.items(layer)
+			.and_then(|items| items.get(index))
+			.cloned()
+		else {
+			return Ok(());
+		};
+		if delta == [0.0; 2] {
+			return Ok(());
+		}
+		let gesture = match fresh {
+			true => self.gestures.next(),
+			false => self.gestures.0,
+		};
+		let rect = Rect {
+			x: item.rect.x + delta[0],
+			y: item.rect.y + delta[1],
+			..item.rect
+		};
+		let label = format!("Move `{}`", item.source);
+		edit(state, label, Some(gesture), |draft| {
+			draft.set_item(layer, index, Item { rect, ..item })
+		})
+	}
+
 	fn program(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -1034,18 +1191,17 @@ impl Panels {
 			.map(|(name, _)| name.clone())
 			.collect();
 		let mut gesture = None;
+		let mut fire = None;
 		ui.horizontal(|ui| {
 			if ui.button("Cut").clicked() {
-				let cut = state.cut();
-				self.check(cut);
+				fire = Some(Action::Cut);
 			}
 			if ui
 				.button("Transition")
 				.on_hover_text("Take the preview to program by the transition set beside it")
 				.clicked()
 			{
-				let taken = state.transition(transition.clone(), kio::clock::Instant::now());
-				self.check(taken);
+				fire = Some(Action::Transition);
 			}
 			match &next {
 				Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } => self.direction = *direction,
@@ -1141,6 +1297,10 @@ impl Panels {
 		};
 		drop(state);
 		self.check(result);
+		if let Some(action) = fire {
+			let result = self.controls.fire(&action).map(drop);
+			self.check(result);
+		}
 		picture(ui, self.program.id, canvas, egui::Sense::hover());
 	}
 
@@ -2373,11 +2533,14 @@ impl Panels {
 				}
 			}
 			None => {
+				let mut each = self.controls.record_sources.load(Ordering::Relaxed);
 				if ui.button("Start recording").clicked() {
-					let result = recorder.start(self.record_sources);
+					let result = recorder.start(each);
 					self.check(result);
 				}
-				ui.checkbox(&mut self.record_sources, "each source too");
+				if ui.checkbox(&mut each, "each source too").changed() {
+					self.controls.record_sources.store(each, Ordering::Relaxed);
+				}
 				ui.weak(format!("into {}", recorder.dir().display()));
 			}
 		});
@@ -2543,7 +2706,11 @@ impl Panels {
 				.collect::<Vec<_>>();
 			(replayable, named(|source| matches!(source, Source::Replay)))
 		};
-		let panel = &mut self.replay;
+		let controls = self.controls.clone();
+		// Held while drawing, never with the engine's state, which a replay
+		// locks under it.
+		let mut guard = controls.replay.lock().unwrap();
+		let panel = &mut *guard;
 		if panel.into.as_ref().is_none_or(|into| !replays.contains(into)) {
 			panel.into = replays.first().cloned();
 		}
@@ -2620,36 +2787,178 @@ impl Panels {
 				Err(err) => ui.colored_label(ui.visuals().error_fg_color, err),
 			};
 		}
-		if !play && !save {
+		let action = match (play, save) {
+			(true, _) => Action::Replay,
+			(_, true) => Action::SaveClip,
+			_ => return,
+		};
+		drop(guard);
+		// How it went shows above, from the next frame.
+		let _ = controls.fire(&action);
+	}
+
+	/// Bind the key pressed to the action the Hotkeys panel waits on, or cancel
+	/// on Escape.
+	fn take_binding(&mut self, ctx: &egui::Context) {
+		let shown = std::mem::take(&mut self.hotkeys_shown);
+		let (Some(action), Some(hotkeys)) = (self.binding.clone(), &mut self.hotkeys) else {
+			return;
+		};
+		// A wait the operator left for another panel ends, so the hotkeys
+		// are not held off unseen.
+		if !shown {
+			self.end_binding();
 			return;
 		}
-
-		// Copied at the click, without waiting on anything, so the span ends
-		// there and replays apply in the order they were asked for.
-		let outcome = panel.outcome.clone();
-		let into = panel.into.as_ref().filter(|_| play);
-		let take = replay::take(&self.engine, &panel.of, panel.length, into.is_some());
-		let take = match take {
-			Ok(take) => take,
-			Err(err) => {
-				*outcome.lock().unwrap() = Some(Err(format!("{err:#}")));
-				return;
+		let pressed = ctx.input_mut(|input| {
+			let pressed = input.events.iter().find_map(|event| match event {
+				egui::Event::Key {
+					key,
+					pressed: true,
+					repeat: false,
+					..
+				} => Some((*key, hotkeys::pressed(event))),
+				_ => None,
+			});
+			if pressed.is_some() {
+				input
+					.events
+					.retain(|event| !matches!(event, egui::Event::Key { pressed: true, .. }));
+			}
+			pressed
+		});
+		let Some((name, pressed)) = pressed else { return };
+		let Some(key) = pressed else {
+			// Keypad keys among them, which egui names as their main keyboard twins.
+			self.refusal = Some((
+				action,
+				format!("{} cannot be bound: the studio cannot tell where it sits", name.name()),
+			));
+			return;
+		};
+		self.binding = None;
+		hotkeys.suspend(false);
+		if key.key.logical_key == egui::Key::Escape {
+			return;
+		}
+		self.refusal = match hotkeys.bind(&action, Some(key)) {
+			Ok(()) => None,
+			Err(other) => {
+				let key = ctx.format_shortcut(&key.key);
+				Some((action, format!("{key} is bound to {other}; clear it there first")))
 			}
 		};
-		let of = panel.of.clone();
-		if let Some(into) = into {
-			let result =
-				replay::play(&self.engine, take, panel.speed, into).map(|()| format!("replaying {of} in `{into}`"));
-			*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
-			return;
+	}
+
+	/// Stop waiting for a key to bind, taking the hotkeys up again.
+	fn end_binding(&mut self) {
+		if self.binding.take().is_some()
+			&& let Some(hotkeys) = &mut self.hotkeys
+		{
+			hotkeys.suspend(false);
 		}
-		let engine = self.engine.clone();
-		self.runtime.spawn(async move {
-			let result = replay::save(take, engine.autosave.path())
-				.await
-				.map(|path| format!("saved {of} to {}", path.display()));
-			*outcome.lock().unwrap() = Some(result.map_err(|err| format!("{err:#}")));
+	}
+
+	/// Bind keys to actions, heard even while another app has focus where the
+	/// platform lets the studio hear them.
+	fn hotkeys(&mut self, ui: &mut Ui) {
+		let Some(hotkeys) = &mut self.hotkeys else {
+			return;
+		};
+		self.hotkeys_shown = true;
+		let reach = hotkeys.reach();
+		match &reach {
+			Reach::Global => ui.label("Bound keys work even while another app, such as a game, has focus."),
+			Reach::Desktop(_) => ui.label(
+				"Bound keys work even while another app has focus. The desktop's shortcut settings decide the \
+				 keys, shown beside each.",
+			),
+			Reach::Asking => ui.label("Asking the desktop to bind the keys."),
+			Reach::Focused(why) => ui.colored_label(
+				ui.visuals().warn_fg_color,
+				format!("Bound keys work only while the studio has focus: {why}"),
+			),
+		};
+		if let Some(why) = hotkeys.stuck() {
+			ui.colored_label(
+				ui.visuals().error_fg_color,
+				format!("The bound keys stay as they are until the studio restarts: {why}"),
+			);
+		}
+		let scenes: Vec<String> = {
+			let state = self.engine.state.lock().unwrap();
+			state
+				.collection()
+				.scenes
+				.iter()
+				.map(|scene| scene.name.clone())
+				.collect()
+		};
+		let mut actions: Vec<Action> = Action::FIXED.to_vec();
+		actions.extend(scenes.iter().cloned().map(Action::Scene));
+		let bindings = hotkeys.bindings();
+		// A key bound to a scene the file no longer has, so it can be cleared.
+		let gone: Vec<Action> = bindings
+			.keys()
+			.filter(|action| matches!(action, Action::Scene(name) if !scenes.contains(name)))
+			.cloned()
+			.collect();
+		actions.extend(gone.iter().cloned());
+
+		let mut bind = None;
+		let mut clear = None;
+		egui::Grid::new("hotkeys").striped(true).show(ui, |ui| {
+			for action in &actions {
+				ui.label(action.to_string());
+				let bound = bindings.get(action);
+				if self.binding.as_ref() == Some(action) {
+					ui.strong("press a key, or Escape");
+				} else {
+					match bound {
+						Some(bound) => ui.monospace(ui.ctx().format_shortcut(&bound.key)),
+						None => ui.weak("unbound"),
+					};
+				}
+				if ui.small_button("Bind").clicked() {
+					bind = Some(action.clone());
+				}
+				if ui
+					.add_enabled(bound.is_some(), egui::Button::new("Clear").small())
+					.clicked()
+				{
+					clear = Some(action.clone());
+				}
+				let refusal = self.refusal.as_ref().filter(|(refused, _)| refused == action);
+				if let Some((_, why)) = refusal {
+					ui.colored_label(ui.visuals().error_fg_color, why);
+				} else if let Some(why) = hotkeys.refused(action) {
+					ui.colored_label(ui.visuals().error_fg_color, why);
+				} else if gone.contains(action) {
+					ui.weak("no such scene");
+				} else if let (Reach::Desktop(triggers), Some(_)) = (&reach, bound) {
+					match triggers.get(action) {
+						Some(trigger) => ui.label(format!("the desktop bound {trigger}")),
+						None => ui.weak("the desktop bound no key"),
+					};
+				}
+				ui.end_row();
+			}
 		});
+		if let Some(action) = bind {
+			self.refusal = None;
+			self.binding = Some(action);
+			hotkeys.suspend(true);
+		}
+		if let Some(action) = clear {
+			self.refusal = None;
+			// Clearing the action waiting for a key stops the wait.
+			if self.binding.as_ref() == Some(&action) {
+				self.binding = None;
+				hotkeys.suspend(false);
+			}
+			// Unbinding never conflicts.
+			let _ = hotkeys.bind(&action, None);
+		}
 	}
 
 	/// The canvas's size and frame rate, applied at once rather than as each
@@ -3468,7 +3777,9 @@ fn picture(ui: &mut Ui, texture: egui::TextureId, canvas: Canvas, sense: egui::S
 		.inner
 }
 
-/// How the preview snaps a dragged item, for this session.
+/// How the preview snaps a dragged item, kept in this user's settings.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct Snapping {
 	on: bool,
 	/// Whether the grid is drawn and snapped to.
@@ -3496,6 +3807,9 @@ struct Drag {
 	/// drag started. Each frame drags from these, so snaps never accumulate.
 	rect: Rect,
 	origin: [f32; 2],
+	/// Whether the item's source draws a picture of its own shape, which a
+	/// resize keeps unless Shift is held.
+	fixed: bool,
 	/// Kept from the start, since the frame that releases the drag no longer
 	/// reports it but still moves the item.
 	gesture: Option<u64>,
@@ -3523,6 +3837,23 @@ fn others(state: &State, layer: &Layer, index: usize, since: Duration) -> Vec<Re
 		}
 	}
 	rects
+}
+
+/// Whether `source` draws a picture of its own shape, as a camera, a screen,
+/// an image, or a video does, rather than filling any shape.
+fn fixed_shape(source: Option<&Source>) -> bool {
+	matches!(
+		source,
+		Some(
+			Source::Camera { .. }
+				| Source::Display { .. }
+				| Source::Window { .. }
+				| Source::Image { .. }
+				| Source::Media { .. }
+				| Source::Broadcast { .. }
+				| Source::Replay
+		)
+	)
 }
 
 fn cursor(grab: Grab) -> egui::CursorIcon {
@@ -3939,29 +4270,6 @@ impl AddSource {
 				None => Source::Program,
 			},
 		})
-	}
-}
-
-/// The Replay panel's choices, and how the last replay or clip went.
-struct Replay {
-	of: Of,
-	length: Duration,
-	speed: f32,
-	/// The replay source a replay plays in.
-	into: Option<String>,
-	/// Set by the replay or save running in the background.
-	outcome: Arc<Mutex<Option<Result<String, String>>>>,
-}
-
-impl Default for Replay {
-	fn default() -> Self {
-		Self {
-			of: Of::Program,
-			length: replay::LENGTHS[1],
-			speed: replay::SPEEDS[0],
-			into: None,
-			outcome: Arc::default(),
-		}
 	}
 }
 
