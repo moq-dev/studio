@@ -489,6 +489,11 @@ wrap_app! {
 			// stays Starting until someone answers it, and forever where no one
 			// can, as with no monitor attached.
 			command_line.append_switch_with_value(Some(&"password-store".into()), Some(&"basic".into()));
+			// Chromium's sandbox needs unprivileged user namespaces, which
+			// Ubuntu's AppArmor and a Flatpak deny, or a setuid-root helper,
+			// which a user build lacks. Without either, the browser aborts
+			// rather than run unsandboxed, so the sandbox is off, as in OBS.
+			command_line.append_switch(Some(&"no-sandbox".into()));
 			match &self.raster {
 				Raster::Gpu { render_node, display } => {
 					let platform = match display {
