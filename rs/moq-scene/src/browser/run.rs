@@ -16,7 +16,7 @@ use moq_audio::bus::Channel as Sound;
 
 use super::layers::{Gpu, Layers};
 use super::outbox::Commands;
-use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Start};
+use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Raster, Start};
 use super::{ARG, Helper, Page, Paint};
 use crate::Error;
 use crate::source::{Mailbox, Picture, Status};
@@ -382,12 +382,25 @@ fn writer(channel: Channel) -> std::io::Result<Commands> {
 /// Start a helper, handing it one end of a socket as its stdin.
 fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 	let (ours, theirs) = UnixStream::pair()?;
-	let child = std::process::Command::new(&helper.program)
+	let mut command = std::process::Command::new(&helper.program);
+	command
 		.arg(ARG)
 		.stdin(OwnedFd::from(theirs))
 		.stdout(Stdio::null())
-		.process_group(0)
-		.spawn()?;
+		.process_group(0);
+	// Given a Wayland compositor's modifiers, Mesa's Intel driver picks a
+	// compressed layout with a second, auxiliary plane, and Chromium cannot
+	// hand a two-plane buffer out as a shared texture: the page never paints.
+	// Without compression, the texture is a single plane.
+	if let Raster::Gpu { .. } = helper.raster {
+		let mut debug = std::env::var_os("INTEL_DEBUG").unwrap_or_default();
+		if !debug.is_empty() {
+			debug.push(",");
+		}
+		debug.push("noccs");
+		command.env("INTEL_DEBUG", debug);
+	}
+	let child = command.spawn()?;
 	Ok((Process { child, exit: None }, Channel::new(ours)))
 }
 
