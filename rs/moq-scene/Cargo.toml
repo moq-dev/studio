@@ -94,6 +94,9 @@ tempfile = { workspace = true }
 # Which GPU the X server runs on, which CEF paints on under X11. Pure Rust, and
 # 0.13 as the studio's hotkeys use.
 x11rb = { version = "0.13", features = ["dri3"] }
+# Whether the Wayland display has an output, without which CEF's `initialize`
+# hangs. Pure Rust, and 0.31 as eframe's winit uses.
+wayland-client = "0.31"
 
 [dev-dependencies]
 # An encoder on every machine, for the source track and replay tests.
