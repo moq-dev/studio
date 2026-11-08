@@ -2,13 +2,19 @@
 
 ## Goal
 
-A headless compositor binary in this repository subscribes to a studio broadcast's sources and
-layout track and publishes the composited program, headless (a GPU, or
-lavapipe without one). It can push that program to RTMP and WHIP through the
-studio's egress library, so a hosted service makes the fallback composite and
-the creator saves the upload.
+A headless compositor binary in this repository subscribes to a studio
+broadcast's program, its independently published sources, and its layer
+layout, and publishes the flattened program, headless (a GPU, or lavapipe
+without one). It can push that program to RTMP and WHIP through the studio's
+egress library. So destinations that cannot compose, such as RTMP, WHIP, HLS,
+and legacy players, still see the sources the creator published
+independently.
 
 ## Plan
+
+Replanned 2026-11-08 (maintainer, /quest-plan): it flattens the program and
+its layers, since a source published independently leaves the program; see
+the [epic](/quest/m2/compose/README.md).
 
 Decided 2026-10-26 (maintainer): its own command, not a mode of
 `moq transcode`. A hosted service embeds the same library. It publishes its
@@ -22,4 +28,4 @@ and document it in `README.md`.
 
 ## Required
 
-- [Layout track](/quest/m2/compose/layout.md) - what the server composes
+- [Layer layout track](/quest/m2/compose/layout.md) - what the server flattens

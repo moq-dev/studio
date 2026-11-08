@@ -2,69 +2,57 @@
 
 ## Goal
 
-A `moq-studio` broadcast carries each source as its own track plus a layout
-track describing the live scene. Viewers compose the picture themselves:
-they prioritize sources and toggle elements on and off. A composited program
-remains for protocols and devices that cannot compose (RTMP and WHIP
-destinations, HLS, legacy players), produced by the studio or by a server.
+A studio broadcast carries each independently published source as its own
+track, plus a layer layout track that says where and when each one shows.
+Players composite those sources over the program and mix their audio in, so
+a viewer sees the creator's picture while those sources travel, and can be
+toggled, as their own tracks. The end goal is moq's own players, `moq play`
+and `@moq/watch`, playing a studio broadcast this way from a layer layout
+that hang specifies.
 
-This README's own work is the end-to-end test: a studio broadcast is composed
-by the browser, by the headless compositor, and by the studio itself, and all three
-pictures match.
+This README's own work is the end-to-end test: a studio broadcast with an
+independently published camera and microphone plays in `moq play` and
+`@moq/watch` with the camera placed and timed as the studio's preview shows
+it, within a stated tolerance, and with its sound mixed in.
 
 ## Plan
 
-Decided 2026-10-26 (maintainer), the studio's flagship and first in its epic:
+Replanned 2026-11-08 (maintainer, /quest-plan). This supersedes the
+2026-11-07 deferral on
+[moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97), which waited
+for [Published independently](/quest/m2/compose/publish-independently.md) to
+land before replanning:
 
-- **Delivery:** MoQ's value is per-track delivery, so the studio embraces
-  viewer composition. The program is the fallback, not the default.
-- **One compositor, three hosts:** moq-scene renders in the studio, headless
-  on a server (the headless compositor), and in the browser, so all three
-  pictures come from one implementation.
-- **Parity rule:** every scene feature (transitions, filters, effects,
-  overlays) renders in all three hosts with the same layout, timing, and
-  colors, within a tolerance. Each renderer keeps its own text antialiasing
-  and blur, so the browser can draw overlays as real DOM. A feature that
-  cannot meet this, such as a CEF browser source or an ML effect, is baked
-  into its source's own track before publishing rather than living in the
-  layout.
-- **Wire layout:** local sources are tracks in the studio's one broadcast.
-  Guests stay their own broadcasts, named through the hang catalog's
-  `contributions` references.
-- **Layout:** the live scene state (items, transforms, transitions, and each
-  element's priority and toggleable flag) as a hang JSON track on the media
-  clock, so any host composites the same frame the studio shows.
-- **Browser build:** whichever line [JS-only @moq/net from Rust](https://github.com/moq-dev/moq/blob/main/quest/m5/rs2ts-js.md)
-  lands. moq's WASM support was removed on 2026-10-31.
-- **Cost:** every source and the program encode whatever the subscriber
-  demand (decided 2026-10-28, from
-  [#7101](https://github.com/moq-dev/moq/issues/7101)), so a late viewer or a
-  replay finds their recent past. Upload follows MoQ's pull model, so a
-  fallback nobody uses costs its encode but no bandwidth.
+- **Reference picture:** ✅ the program with each independently published
+  source layered over it (rejected: the full scene rebuilt from every
+  source's track, which reverses the 2026-11-04 encoder-cost decision; both,
+  chosen per scene).
+- **Players:** ✅ native first (rejected: a browser player only; a browser
+  page layering sources without the studio's placement rules). The end goal
+  is moq's `moq play` and `@moq/watch`.
+- **Compositor:** ✅ hang's draft specifies the layer layout, and each player
+  implements it with its own code. Parity comes from a shared fixture within a
+  tolerance, not shared code. Rejected: moving moq-scene into moq, which
+  reverses the 2026-11-02 rule that moq never depends on this repository.
+  This replaces the 2026-10-26 "one compositor, three hosts" rule.
+- **Prototype:** ✅ a throwaway `moq-studio --watch` on moq-scene with a
+  provisional layer format, so the format settles without moq round trips
+  (rejected: straight to `moq play`). moq's spec quest starts from it.
+- **Audio:** ✅ players mix independently published audio sources with the
+  program's, at the gain and mute the layout carries (rejected: video only).
+- **Controls:** ✅ viewer toggles and priorities land in the native player
+  (rejected: browser only).
+- **Browser composition** (moq-scene's browser build layered on
+  `@moq/watch`): ✅ deleted, since `@moq/watch` layering supersedes it.
+  Server composition stays, replanned to flatten program and layers for
+  destinations that cannot compose.
+- **Milestone:** ✅ m2 (rejected: m1; staying in m3). The moq quests join
+  moq's m3.
 
-Changed 2026-11-04 (maintainer): this epic moved to m1, and the program is
-the default, not the fallback. Encoding every source for viewers would take
-more encoder sessions than a consumer GPU has (decided 2026-11-03 on
-[moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), so sources
-are not published to the relay by default: a source's own track encodes only
-while something in the studio uses it, such as an isolated recording or a
-replay, and reaches viewers only when the creator ticks
-[Published independently](/quest/m2/compose/publish-independently.md). The Delivery
-and Cost bullets above, and this epic's parity goal, are deferred with it: a
-source published independently is left out of the program, so no picture a
-viewer composes from fetchable tracks matches the program today. When this
-epic starts, define the reference picture (such as the program with the
-independent sources layered over it) and replan those bullets.
+Still settled from 2026-10-26: local sources are tracks in the studio's one
+broadcast, and guests stay their own broadcasts, named through the hang
+catalog's `contributions` references.
 
-Moved to m2 on 2026-11-07 (maintainer, on
-[moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97)): nothing in m1
-can fetch a source's track, so nothing can read a layout. The layout waits on
-[Published independently](/quest/m2/compose/publish-independently.md), and the
-browser, server, and controls quests wait on it through the layout.
+moq's side, in its own quest tree (m3): hang specifies a layer layout track,
+and `moq play` and `@moq/watch` composite it.
 
-## Required
-
-- [Layout track](/quest/m2/compose/layout.md) - the live scene state as a hang JSON track on the media clock, specified in the hang draft
-- [Browser composition](/quest/m2/compose/browser.md) - `@moq/watch` composes a broadcast with a layout track through moq-scene's browser build
-- [Server composition](/quest/m2/compose/server.md) - a headless compositor renders the program from sources and layout, headless
-- [Viewer controls](/quest/m2/compose/controls.md) - viewers toggle elements and the layout's priorities steer what they fetch

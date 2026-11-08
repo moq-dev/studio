@@ -60,9 +60,8 @@ cameras, packaging, signing) that one monorepo no longer pays off.
 - **Pin:** moq is a `moq` git submodule whose crates are path dependencies,
   as in moq.pro, so the studio compiles against one moq checkout.
 - **moq-scene** moved here with the app, its only consumer. The
-  [viewer-side composition](/quest/m2/compose/README.md) epic (now m3) moved whole:
-  browser composition ships as a package from this repository layered on
-  `@moq/watch`, and the server composite is a headless binary here rather
+  [viewer-side composition](/quest/m2/compose/README.md) epic (now m2) moved whole:
+  the server composite is a headless binary here rather
   than a moq-cli subcommand, so moq never depends on the studio.
 - **Egress library:** lives here first, beside its studio consumer, and moves
   to moq only when a hosted service adopts it.

@@ -1,71 +1,48 @@
-# [M] Layout track
+# [M] Layer layout track
 
 ## Goal
 
-A studio broadcast carries a layout track: moq-scene's live scene state
-(items, the tracks they show, transforms, transitions, and each element's
-priority and whether a viewer may toggle it) as a hang JSON track on the
-media clock. Any host that reads it composites the same frame the studio
-shows. The hang catalog and `drafts/draft-lcurley-moq-hang.md` specify it.
+A studio broadcast that publishes a source independently also carries a layer
+layout track. For each such source, it says where and when that source shows
+over the program: its transform, crop, z-order, opacity, and visibility, its
+item's keyframes and when its scene went on program, all on the media clock,
+and for audio its gain and mute. Until hang specifies it, the track is the
+provisional `dev.moq.studio.layers` in the studio catalog.
 
 ## Plan
 
-Serialize moq-scene's own model rather than a second layout schema, so the
-studio, server, and browser cannot drift. Version it and refuse an unknown
-version loudly. Keep it free of local paths and credentials: items name
-tracks and contribution references, never files. A viewer that refuses a
-layout version plays the program instead and says why. A late joiner needs the
-current state, so use the JSON track's snapshot mode.
+Replanned 2026-11-08 (maintainer, /quest-plan) around the program with
+independent layers over it, rather than the full scene state; see the
+[epic](/quest/m2/compose/README.md).
 
-Specify the source listings in the hang draft too, then move the studio to
-what it settles on. Until then sources are listed provisionally as
-`dev.moq.studio.sources.<name>` in the studio catalog, each a nested hang
-catalog (decided 2026-11-02, maintainer; `rs/moq-scene/src/publish.rs`).
+A JSON track in snapshot mode, so a late joiner gets the current state.
+Version it, and have a player refuse an unknown version loudly and play the
+program alone. Keep it free of local paths and credentials: layers name
+tracks and contribution references, never files.
 
-Clones and video filters travel in the layout, not as tracks: a picture
-source's track is its capture before any filter, and a clone publishes none,
-so the layout names the source a clone shows and the video filters each
-source and item applies (decided 2026-11-02, maintainer), with crops and
-blend modes. Only a video filter that cannot render the same way in every
-viewer is baked into a track of its own. A mask names a picture source's
-track, and a LUT a `lut` source, whose `.cube` table publishes no track yet,
-so a viewer needs one carrying it, as an image's file is. Audio is the other
-way round: an audio source's track carries its sound after its audio filters
-and before its gain and mute (decided 2026-11-02, maintainer), so
-the layout carries only what is applied after that point, such as gain and
-mute, and never names an audio filter for a viewer to apply again.
-
-A browser source publishes no track of its own (decided 2026-11-03,
-maintainer, on [moq-dev/studio#8](https://github.com/moq-dev/studio/pull/8)).
-Each has a "viewers load this page" option, off by default and refused for a
-localhost URL: on, the layout carries the page's URL and viewers load it
-themselves; off, viewers see the page only in the program. A replay source
-(`rs/moq-scene/src/replay.rs`) shows a span of another source's past, so the
-layout says when it is hidden and when its span has ended, rather than leaving
-a viewer on its last frame.
+Layers draw over the program in the layout's order, so the studio's preview
+of a scene with an independent source shows what viewers see. A layer carries
+only what every player can reproduce: transform, crop, z-order, opacity,
+visibility, and keyframes. A picture source's track is its capture before any
+filter (decided 2026-11-02, maintainer). So an item that applies anything
+more, such as a video filter, mask, LUT, blend mode, or background removal,
+needs that effect baked into its track, or the option refused for it. Settle
+which here, with
+[Published independently](/quest/m2/compose/publish-independently.md)'s
+background-removal note. An audio source's track already carries its sound
+after its filters (decided 2026-11-02), so its layer carries only gain and
+mute.
 
 Items carry their keyframes (`moq_scene::Keyframe`), which play from when
-their scene went on program, so the layout says when that was on the media
-clock, and a viewer that joins late lands at the same point of them.
+their scene went on program. The layout says when that was, so a late joiner
+lands at the same point.
 
-Only sources the creator publishes independently
-([Published independently](/quest/m2/compose/publish-independently.md)) have tracks a
-viewer can fetch; the rest reach viewers only in the program.
+Each layer also carries its priority and whether a viewer may toggle it, for
+[Viewer controls](/quest/m2/compose/controls.md).
 
-Decided 2026-11-05 (maintainer, /quest-plan): the layout serializes the
-scene model with scene sources, published scenes, and audio scenes, not the
-canvases and mixes they replaced.
-
-Decided 2026-11-07 (maintainer, on
-[moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97)): this quest
-waits on [Published independently](/quest/m2/compose/publish-independently.md), since
-until then no viewer can fetch a track the layout names, and the epic moved to
-m2 with it. Once that lands, replan this quest around the epic's reference
-picture, which decides what the layout carries. Rejected: replanning now
-around the program with the independently published sources layered over it,
-and building the full-scene layout as written above while no viewer can use
-it.
+The [watch prototype](/quest/m2/compose/watch.md) is this track's first
+reader. What the two settle becomes moq's hang spec draft.
 
 ## Required
 
-- [Published independently](/quest/m2/compose/publish-independently.md) - the source tracks a viewer can fetch, which the layout names
+- [Published independently](/quest/m2/compose/publish-independently.md) - the source tracks a layer names
