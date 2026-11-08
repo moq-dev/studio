@@ -21,22 +21,11 @@ Decided 2026-11-06 (maintainer, /quest-unblock):
   password), and `apple-api` (an App Store Connect API key, key ID
   `7WP7HJXJ4C`; its notes hold the issuer ID).
 - Renewed 2026-11-08, until 2027-11-08 (maintainer, /quest-unblock), after the
-  Account Holder signed the Apple Developer Program License Agreement. The API
-  key authenticates, but minutes after the renewal the notary API still answers
-  `FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED` (see `/business`).
-- Once the notary API accepts the key, an agent with the maintainer's `op`
-  session creates the Developer ID profile through the App Store Connect API
-  with that key, and stores everything with `gh secret set` (no secret passes
-  through chat or a file outside `.tmp/`). Confirm the `.p12` holds the
-  Developer ID key, not a distribution one, before storing it. Then delete
-  this quest.
-
-## Waiting
-
-- Maintainer: accept any pending agreement at App Store Connect > Business
-  (appstoreconnect.apple.com/business), which the notary API names after the
-  Program License Agreement was signed; only the Account Holder can accept.
-  If none is pending, Apple may still be propagating the signature. Check:
-  `xcrun notarytool history` with the `apple-api` key succeeds (or a GET of
-  `https://appstoreconnect.apple.com/notary/v2/submissions` with a JWT from
-  that key returns 200).
+  Account Holder signed the Apple Developer Program License Agreement and
+  accepted the agreements pending at App Store Connect > Business. On
+  2026-11-08 `xcrun notarytool history` with the `apple-api` key succeeds.
+- An agent with the maintainer's `op` session creates the Developer ID profile
+  through the App Store Connect API with that key, and stores everything with
+  `gh secret set` (no secret passes through chat or a file outside `.tmp/`).
+  Confirm the `.p12` holds the Developer ID key, not a distribution one, before
+  storing it. Then delete this quest.
