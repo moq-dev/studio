@@ -2603,6 +2603,7 @@ impl Panels {
 			ui.label("");
 			ui.label("");
 			ui.label("Gain");
+			ui.label("Pan");
 			ui.label("Delay")
 				.on_hover_text("Hold the source back to line it up with a camera that lags it");
 			for scene in &scenes {
@@ -2633,6 +2634,7 @@ impl Panels {
 				let name = &from.name;
 				ui.label(name).on_hover_text("An audio scene");
 				ui.weak("audio scene");
+				ui.label("");
 				ui.label("");
 				ui.label("");
 				for scene in &scenes {
@@ -3667,11 +3669,22 @@ fn strip_controls(
 	let mut pan = audio.pan;
 	let response = ui
 		.add(
-			egui::Slider::new(&mut pan, -1.0..=1.0).custom_formatter(|pan, _| match pan {
-				0.0 => "C".to_string(),
-				pan if pan < 0.0 => format!("L{:.0}", -pan * 100.0),
-				pan => format!("R{:.0}", pan * 100.0),
-			}),
+			egui::Slider::new(&mut pan, -1.0..=1.0)
+				.custom_formatter(|pan, _| match pan {
+					0.0 => "C".to_string(),
+					pan if pan < 0.0 => format!("L{:.0}", -pan * 100.0),
+					pan => format!("R{:.0}", pan * 100.0),
+				})
+				.custom_parser(|text| {
+					let text = text.trim().to_ascii_uppercase();
+					let percent = |side: &str| side.trim().parse::<f64>().ok().map(|n| n / 100.0);
+					match text.as_str() {
+						"C" => Some(0.0),
+						_ if let Some(side) = text.strip_prefix('L') => percent(side).map(|n| -n),
+						_ if let Some(side) = text.strip_prefix('R') => percent(side),
+						_ => text.parse().ok(),
+					}
+				}),
 		)
 		.on_hover_text("Pan: place the sound between left and right; double-click to center");
 	let gesture = gestures.of(&response);
