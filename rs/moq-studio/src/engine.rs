@@ -1993,7 +1993,7 @@ impl Renditions {
 				video,
 			} = probed;
 			let (broadcast, timebase) = (&self.broadcast, &self.timebase);
-			let reserved = timebase.reserve().with_interval(config.gop.duration(config.framerate));
+			let reserved = timebase.reserve().with_interval(config.effective_join());
 			let suffix = match &video.codec {
 				hang::catalog::VideoCodec::H264(_) => ".avc3",
 				hang::catalog::VideoCodec::H265(_) => ".hev1",
