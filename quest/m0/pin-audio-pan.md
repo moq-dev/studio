@@ -7,14 +7,7 @@ The `moq` submodule includes a pan on moq-audio's bus `Strip`, from
 
 ## Plan
 
-Once the wait clears, advance it with `just upgrade-moq` in its own PR,
-fixing whatever the new API breaks here.
-
-## Waiting
-
-- moq-dev/moq: the upstream quest above lands. Check: that quest's PR has
-  merged on moq's `main`, deleting its file, and `moq_audio::bus::Strip`
-  there has a pan. A quest file that moved, or went away without its work
-  landing, does not count. The quest itself is planned in
-  [moq-dev/moq#8133](https://github.com/moq-dev/moq/pull/8133), not merged
-  yet.
+The pan landed upstream in
+[moq-dev/moq#8180](https://github.com/moq-dev/moq/pull/8180)
+(`Strip::set_pan` and `Strip::pan` on moq's `main`). Advance the gitlink with
+`just upgrade-moq` in its own PR, fixing whatever the new API breaks here.
