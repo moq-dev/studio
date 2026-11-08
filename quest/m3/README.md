@@ -13,5 +13,5 @@ composition epic that requires it moved here from m2.
 
 ## Required
 
-- [Published independently](/quest/m3/publish-independently.md) - a source opts out of the program and publishes its own track for services that place it themselves
-- [Viewer-side composition](/quest/m3/compose/README.md) - independently published sources plus a layout track, composed by viewers and by a server
+- [Published independently](/quest/m2/compose/publish-independently.md) - a source opts out of the program and publishes its own track for services that place it themselves
+- [Viewer-side composition](/quest/m2/compose/README.md) - independently published sources plus a layout track, composed by viewers and by a server

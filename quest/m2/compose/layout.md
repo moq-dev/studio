@@ -49,7 +49,7 @@ their scene went on program, so the layout says when that was on the media
 clock, and a viewer that joins late lands at the same point of them.
 
 Only sources the creator publishes independently
-([Published independently](/quest/m3/publish-independently.md)) have tracks a
+([Published independently](/quest/m2/compose/publish-independently.md)) have tracks a
 viewer can fetch; the rest reach viewers only in the program.
 
 Decided 2026-11-05 (maintainer, /quest-plan): the layout serializes the
@@ -58,7 +58,7 @@ canvases and mixes they replaced.
 
 Decided 2026-11-07 (maintainer, on
 [moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97)): this quest
-waits on [Published independently](/quest/m3/publish-independently.md), since
+waits on [Published independently](/quest/m2/compose/publish-independently.md), since
 until then no viewer can fetch a track the layout names, and the epic moved to
 m2 with it. Once that lands, replan this quest around the epic's reference
 picture, which decides what the layout carries. Rejected: replanning now
@@ -68,4 +68,4 @@ it.
 
 ## Required
 
-- [Published independently](/quest/m3/publish-independently.md) - the source tracks a viewer can fetch, which the layout names
+- [Published independently](/quest/m2/compose/publish-independently.md) - the source tracks a viewer can fetch, which the layout names
