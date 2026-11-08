@@ -89,7 +89,13 @@ pub struct Publish {
 	owners: Arc<Mutex<Owners>>,
 	/// The sources on program, which each source's track follows.
 	on_program: Arc<tokio::sync::watch::Sender<OnProgram>>,
+	/// The bandwidth granted each source published independently, by name,
+	/// which its video encodes at.
+	grants: Grants,
 }
+
+/// The bandwidth granted each source published independently, by name.
+type Grants = Arc<Mutex<BTreeMap<String, moq_net::bandwidth::Consumer>>>;
 
 /// The sources on program, by name, apart for pictures and sound: a media
 /// file heard in the program mix but shown in no scene on air encodes its
@@ -132,6 +138,7 @@ impl Publish {
 			sessions,
 			owners: Default::default(),
 			on_program: Default::default(),
+			grants: Default::default(),
 		})
 	}
 
@@ -188,7 +195,10 @@ impl Publish {
 				let sources = sources.filter(|(name, _)| published.contains(*name));
 				sources.map(|(name, source)| (name.clone(), source.clone())).collect()
 			};
-			let tracks: BTreeMap<String, Option<moq_net::bandwidth::Rate>> = listed.values().flat_map(tracks).collect();
+			let tracks: BTreeMap<String, (String, Option<(moq_net::bandwidth::Rate, bool)>)> = listed
+				.iter()
+				.flat_map(|(source, catalog)| tracks(catalog).map(move |(name, rate)| (name, (source.clone(), rate))))
+				.collect();
 			copies.retain(|name, copy| {
 				let keep = tracks.contains_key(name);
 				if !keep {
@@ -196,11 +206,17 @@ impl Publish {
 				}
 				keep
 			});
-			for (name, rate) in tracks {
+			for (name, (source, rate)) in tracks {
 				if copies.contains_key(&name) {
 					continue;
 				}
-				let bandwidth = rate.map(|rate| (bandwidth.clone(), rate));
+				let bandwidth = rate.map(|(rate, video)| Grant {
+					bandwidth: bandwidth.clone(),
+					rate,
+					video,
+					grants: self.grants.clone(),
+					source,
+				});
 				let copy = copy(self.consume(), broadcast.clone(), name.clone(), bandwidth);
 				copies.insert(name, tokio::spawn(copy));
 			}
@@ -268,12 +284,14 @@ const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_k
 
 /// Every track `source`'s catalog lists, by its name in the local broadcast,
 /// with the bitrate it claims of the connection: none for a still, sent once.
-fn tracks(source: &hang::Catalog) -> impl Iterator<Item = (String, Option<moq_net::bandwidth::Rate>)> + '_ {
-	let rate = |bitrate: Option<u64>, default| Some(bitrate.map_or(default, moq_net::bandwidth::Rate::from_bps));
+/// Video is marked, since only its grant is followed: Opus at this rate is
+/// never what congests the uplink, as the program's audio.
+fn tracks(source: &hang::Catalog) -> impl Iterator<Item = (String, Option<(moq_net::bandwidth::Rate, bool)>)> + '_ {
+	let rate = |bitrate: Option<u64>, default| bitrate.map_or(default, moq_net::bandwidth::Rate::from_bps);
 	let video = source.video.renditions.iter();
-	let video = video.map(move |(name, config)| (name.clone(), rate(config.bitrate, VIDEO_BITRATE)));
+	let video = video.map(move |(name, config)| (name.clone(), Some((rate(config.bitrate, VIDEO_BITRATE), true))));
 	let audio = source.audio.renditions.iter();
-	let audio = audio.map(move |(name, config)| (name.clone(), rate(config.bitrate, AUDIO_BITRATE)));
+	let audio = audio.map(move |(name, config)| (name.clone(), Some((rate(config.bitrate, AUDIO_BITRATE), false))));
 	let binary = source.binary.tracks.keys().map(|name| (name.clone(), None));
 	video.chain(audio).chain(binary)
 }
@@ -294,17 +312,57 @@ fn renamed(mut source: hang::Catalog) -> hang::Catalog {
 
 /// Copy the local track `name` into `broadcast` under [`FORWARDED`], group by
 /// group, until it ends. A failure ends the copy, failed, with the reason.
+/// How a copied track claims its bitrate of the connection, and where its
+/// source's video finds what it was granted.
+struct Grant {
+	bandwidth: moq_net::bandwidth::Allocator,
+	rate: moq_net::bandwidth::Rate,
+	/// Whether the track is video, whose source follows the grant.
+	video: bool,
+	grants: Grants,
+	source: String,
+}
+
+/// A source's grant, listed for its video to follow while held.
+struct Granted {
+	_reservation: moq_net::bandwidth::Reservation,
+	grants: Grants,
+	source: String,
+}
+
+impl Drop for Granted {
+	fn drop(&mut self) {
+		self.grants.lock().unwrap().remove(&self.source);
+	}
+}
+
 async fn copy(
 	local: moq_net::broadcast::Consumer,
 	broadcast: moq_net::broadcast::Producer,
 	name: String,
-	bandwidth: Option<(moq_net::bandwidth::Allocator, moq_net::bandwidth::Rate)>,
+	grant: Option<Grant>,
 ) {
 	let copied = async {
 		let mut track = local.track(&name)?.subscribe(None).await?;
 		let out = broadcast.create_track(format!("{FORWARDED}{name}"), track.info().clone())?;
 		// Held for as long as the copy runs.
-		let _grant = bandwidth.map(|(bandwidth, rate)| bandwidth.reserve(&out.demand(), rate));
+		// Held for as long as the copy runs. A video's grant is what its source
+		// encodes at, so the source follows the connection as the program does.
+		let _grant = grant.map(|grant| {
+			let reservation = grant.bandwidth.reserve(&out.demand(), grant.rate);
+			if grant.video {
+				grant
+					.grants
+					.lock()
+					.unwrap()
+					.insert(grant.source.clone(), reservation.consume());
+			}
+			Granted {
+				_reservation: reservation,
+				grants: grant.grants,
+				source: grant.source,
+			}
+		});
 		let result: Result<(), moq_net::Error> = async {
 			while let Some(mut group) = track.recv_group().await? {
 				let mut copy = out.create_group(moq_net::group::Info {
@@ -363,6 +421,7 @@ pub(crate) struct Listing<'a> {
 	kind: moq_video::encode::Kind,
 	sessions: Sessions,
 	on_program: tokio::sync::watch::Receiver<OnProgram>,
+	grants: Grants,
 	broadcast: moq_net::broadcast::Producer,
 	studio: Catalog,
 	catalog: moq_mux::catalog::Producer,
@@ -383,6 +442,7 @@ impl<'a> Listing<'a> {
 			kind: publish.kind.clone(),
 			sessions: publish.sessions.clone(),
 			on_program: publish.on_program.subscribe(),
+			grants: publish.grants.clone(),
 			broadcast: publish.broadcast.clone(),
 			studio: publish.catalog.clone(),
 			catalog,
@@ -629,6 +689,10 @@ impl<E: Encode> Drop for Encoding<E> {
 pub(crate) struct Video<'a> {
 	track: Encoding,
 	claim: &'a Claim,
+	/// Where a grant is listed while the source is published independently.
+	grants: Grants,
+	/// The grant the open encoder encodes at, if any.
+	granted: Option<moq_net::bandwidth::Rate>,
 	/// The sources on program.
 	on_program: tokio::sync::watch::Receiver<OnProgram>,
 	config: moq_video::encode::Config,
@@ -658,6 +722,8 @@ impl<'a> Video<'a> {
 		Ok(Self {
 			track: Encoding::new(producer, listing.sessions.clone()),
 			claim: listing.claim,
+			grants: listing.grants.clone(),
+			granted: None,
 			on_program: listing.on_program.clone(),
 			config,
 			clock: listing.studio.clock(),
@@ -700,6 +766,20 @@ impl<'a> Video<'a> {
 		}
 		if !self.track.is_open() {
 			self.track.open(moq_video::encode::Encoder::new(&self.config)?)?;
+			self.granted = None;
+		}
+		// Published independently, it encodes at what the connection grants.
+		let grant = self
+			.grants
+			.lock()
+			.unwrap()
+			.get(&self.claim.name)
+			.and_then(|grant| grant.peek());
+		if let Some(rate) = grant
+			&& self.granted != Some(rate)
+		{
+			self.track.set_bitrate(rate)?;
+			self.granted = Some(rate);
 		}
 		if frame.size() == size {
 			self.track.encode(frame)
