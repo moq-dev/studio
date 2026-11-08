@@ -1703,7 +1703,13 @@ impl Driver {
 		if let (Some(frame), Some((_, config))) = (&picture, &video) {
 			self.open(own, frame, config).await;
 		}
-		let begin = begin.unwrap_or_else(|| kio::clock::now() + BUS_LATENCY);
+		// A cut's play begins after the last picture already published, even
+		// one cut off before it showed, so the track's time never repeats.
+		let begin = begin.unwrap_or_else(|| {
+			let soonest = kio::clock::now() + BUS_LATENCY;
+			own.stamped
+				.map_or(soonest, |stamped| soonest.max(stamped + Duration::from_millis(1)))
+		});
 		self.ran(play, |run| {
 			run.begun.get_or_insert(begin);
 		});
@@ -1798,6 +1804,7 @@ impl Driver {
 	) -> Result<(), Error> {
 		self.open(own, frame, config).await;
 		if let Some(video) = &mut own.track {
+			own.stamped = Some(shows);
 			let stamp = shows.saturating_duration_since(own.origin);
 			frame.timestamp =
 				moq_net::Timestamp::from_micros(stamp.as_micros() as u64).map_err(moq_video::Error::from)?;
@@ -1865,6 +1872,8 @@ struct Own<'a, 'b> {
 	/// Whether the track was opened, or failed to, so it is tried once.
 	opened: bool,
 	origin: Instant,
+	/// When the last picture encoded onto the track shows.
+	stamped: Option<Instant>,
 }
 
 impl<'a, 'b> Own<'a, 'b> {
@@ -1874,6 +1883,7 @@ impl<'a, 'b> Own<'a, 'b> {
 			track: None,
 			opened: false,
 			origin,
+			stamped: None,
 		}
 	}
 }
