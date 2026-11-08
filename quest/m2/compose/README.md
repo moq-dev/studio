@@ -20,7 +20,7 @@ it, within a stated tolerance, and with its sound mixed in.
 Replanned 2026-11-08 (maintainer, /quest-plan). This supersedes the
 2026-11-07 deferral on
 [moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97), which waited
-for [Published independently](/quest/m2/compose/publish-independently.md) to
+for Published independently to
 land before replanning:
 
 - **Reference picture:** ✅ the program with each independently published

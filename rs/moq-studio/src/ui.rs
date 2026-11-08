@@ -1860,6 +1860,7 @@ impl Panels {
 		let mut reload = None;
 		let mut play = None;
 		let mut stop = None;
+		let mut publish = None;
 		let now = kio::clock::now();
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1972,6 +1973,21 @@ impl Panels {
 						{
 							reload = Some(name.clone());
 						}
+						if source.publishes() {
+							let mut published = collection.published.contains(name);
+							if ui
+								.checkbox(&mut published, "Published independently")
+								.on_hover_text(
+									"Publish this source's own track to the relay beside the program, for viewers and \
+									 services to place themselves, and leave it out of the program. It encodes for as \
+									 long as it is published. Not for a source with its background removed, since its \
+									 track keeps the background.",
+								)
+								.changed()
+							{
+								publish = Some((name.clone(), published));
+							}
+						}
 						if ui.small_button("Remove").clicked() {
 							remove = Some(name.clone());
 						}
@@ -2018,6 +2034,11 @@ impl Panels {
 			self.deselect_item();
 			edit(&mut state, format!("Remove `{name}`"), None, |draft| {
 				draft.remove_source(&name)
+			})
+		} else if let Some((name, published)) = publish {
+			let verb = if published { "Publish" } else { "Stop publishing" };
+			edit(&mut state, format!("{verb} `{name}` independently"), None, |draft| {
+				draft.set_published(&name, published)
 			})
 		} else if let Some(name) = clone {
 			let collection = state.collection();

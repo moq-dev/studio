@@ -20,6 +20,13 @@ Version it, and have a player refuse an unknown version loudly and play the
 program alone. Keep it free of local paths and credentials: layers name
 tracks and contribution references, never files.
 
+Decided 2026-11-08 (maintainer, on
+[moq-dev/studio#117](https://github.com/moq-dev/studio/pull/117)): a
+published source stays hidden everywhere the studio composites until this
+track lands. Drawing published sources as layers over the program in the
+studio's preview is this quest's work, and so is whether recordings include
+those layers.
+
 Layers draw over the program in the layout's order, so the studio's preview
 of a scene with an independent source shows what viewers see. A layer carries
 only what every player can reproduce: transform, crop, z-order, opacity,
@@ -27,9 +34,9 @@ visibility, and keyframes. A picture source's track is its capture before any
 filter (decided 2026-11-02, maintainer). So an item that applies anything
 more, such as a video filter, mask, LUT, blend mode, or background removal,
 needs that effect baked into its track, or the option refused for it. Settle
-which here, with
-[Published independently](/quest/m2/compose/publish-independently.md)'s
-background-removal note. An audio source's track already carries its sound
+which here. Publishing a source independently refuses one with its
+background removed for now, since H.264 carries no transparency, so lifting
+that refusal is this track's call too. An audio source's track already carries its sound
 after its filters (decided 2026-11-02), so its layer carries only gain and
 mute.
 
@@ -42,7 +49,3 @@ Each layer also carries its priority and whether a viewer may toggle it, for
 
 The [watch prototype](/quest/m2/compose/watch.md) is this track's first
 reader. What the two settle becomes moq's hang spec draft.
-
-## Required
-
-- [Published independently](/quest/m2/compose/publish-independently.md) - the source tracks a layer names

@@ -40,6 +40,14 @@ pub struct Collection {
 	/// wherever the source is placed. A source without an entry is unfiltered.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub video: BTreeMap<String, Video>,
+	/// The sources published independently, by name: each one's own track
+	/// goes to the relay beside the program, for viewers and services to
+	/// place themselves, and the source is left out of every picture and mix
+	/// the studio composites. Only a source with a track of its own can be,
+	/// and not one with its background removed, since its track would show
+	/// the background.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	pub published: BTreeSet<String>,
 	/// The scenes, in the order the scene list shows them.
 	#[serde(default)]
 	pub scenes: Vec<Scene>,
@@ -71,6 +79,7 @@ impl Collection {
 			sources: BTreeMap::new(),
 			audio: BTreeMap::new(),
 			video: BTreeMap::new(),
+			published: BTreeSet::new(),
 			scenes: vec![Scene::new("Scene")],
 			audio_scenes: AudioScene::defaults(),
 			top: Vec::new(),
@@ -492,6 +501,30 @@ impl Collection {
 				.validate()
 				.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 			self.validate_chain(&video.filters, &on)?;
+		}
+
+		for name in &self.published {
+			let Some(source) = self.sources.get(name) else {
+				return Err(Error::Invalid(format!(
+					"`{name}` is published, but there is no such source"
+				)));
+			};
+			if !source.publishes() {
+				return Err(Error::Invalid(format!(
+					"`{name}` cannot be published independently: only a camera, display, window, microphone, \
+					 system audio, color, image, media, or replay source has a track of its own"
+				)));
+			}
+			if self
+				.video
+				.get(name)
+				.is_some_and(|video| video.background == Background::Remove)
+			{
+				return Err(Error::Invalid(format!(
+					"`{name}` cannot be published independently with its background removed, since its track \
+					 carries no transparency and would show the background"
+				)));
+			}
 		}
 
 		self.validate_nesting()?;
@@ -2476,6 +2509,37 @@ path = "sting.webm"
 			collection.sources.insert("blank".into(), source.clone());
 			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{source:?}");
 		}
+	}
+
+	/// Only a source with a track of its own, its background kept, is
+	/// published independently.
+	#[test]
+	fn publishes_only_a_source_with_a_track_of_its_own() {
+		let mut collection = Collection::new();
+		collection.sources.insert("cam".into(), Source::Camera { id: None });
+		collection
+			.sources
+			.insert("cut".into(), Source::Clone { source: "cam".into() });
+		collection.published.insert("cam".into());
+		collection.validate().unwrap();
+
+		let mut missing = collection.clone();
+		missing.published.insert("gone".into());
+		assert!(missing.validate().is_err());
+
+		let mut clone = collection.clone();
+		clone.published.insert("cut".into());
+		assert!(clone.validate().is_err(), "a clone has no track of its own");
+
+		let mut removed = collection.clone();
+		removed.video.insert(
+			"cam".into(),
+			Video {
+				background: Background::Remove,
+				..Default::default()
+			},
+		);
+		assert!(removed.validate().is_err(), "its track would show the background");
 	}
 
 	/// A background is removed only from a picture of the source's own that
