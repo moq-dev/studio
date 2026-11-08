@@ -20,6 +20,13 @@ Version it, and have a player refuse an unknown version loudly and play the
 program alone. Keep it free of local paths and credentials: layers name
 tracks and contribution references, never files.
 
+Decided 2026-11-08 (maintainer, on
+[moq-dev/studio#117](https://github.com/moq-dev/studio/pull/117)): a
+published source stays hidden everywhere the studio composites until this
+track lands. Drawing published sources as layers over the program in the
+studio's preview is this quest's work, and so is whether recordings include
+those layers.
+
 Layers draw over the program in the layout's order, so the studio's preview
 of a scene with an independent source shows what viewers see. A layer carries
 only what every player can reproduce: transform, crop, z-order, opacity,
