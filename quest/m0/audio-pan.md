@@ -25,7 +25,3 @@ the rest of audio scenes:
   is.
 - Both panels draw a sound's mute, gain, and delay with `strip_controls` in
   `rs/moq-studio/src/ui.rs`; a pan added there shows in both.
-
-## Required
-
-- [moq-audio's strip pan is pinned](/quest/m0/pin-audio-pan.md) - the `Strip` pan the studio sets

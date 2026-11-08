@@ -517,7 +517,7 @@ impl<'a> Video<'a> {
 		let reserved = listing
 			.catalog
 			.reserve()
-			.with_interval(config.gop.duration(config.framerate));
+			.with_interval(config.effective_join());
 		let producer = moq_video::encode::Producer::new(listing.broadcast.clone(), reserved, rendition)?;
 		Ok(Self {
 			track: Encoding::new(producer, listing.sessions.clone()),
