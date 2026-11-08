@@ -1699,6 +1699,8 @@ impl Draw<'_> {
 				self.scenes.get(index).cloned()
 			}
 			Some(Nested::Program) => self.program.clone(),
+			// Its own track carries it to viewers instead.
+			None if self.collection.published.contains(&item.source) => None,
 			None => {
 				let layer = self.library.0.get(self.collection.capture(&item.source))?;
 				layer.picture.clone()

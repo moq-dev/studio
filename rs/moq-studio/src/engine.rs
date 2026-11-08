@@ -654,6 +654,9 @@ pub struct Program {
 	clock: moq_mux::Clock,
 	/// Where the local sources keep their own tracks, on the same clock.
 	sources: moq_scene::publish::Publish,
+	/// The sources published independently, whose tracks the broadcast
+	/// carries beside the program's.
+	published: tokio::sync::watch::Sender<BTreeSet<String>>,
 	/// What a recording reads the program from, on the same clock.
 	recording: moq_net::origin::Route,
 	/// The recording broadcast's catalog, held for as long as the engine runs,
@@ -747,6 +750,17 @@ impl Program {
 			.filter(|(name, _)| state.sources.plays(program, name))
 			.map(|(name, _)| name.to_string())
 			.collect();
+		let published = &state.collection.published;
+		self.published.send_if_modified(|current| {
+			let changed = current != published;
+			current.clone_from(published);
+			changed
+		});
+		// Published, a source encodes as though on program.
+		let mut shown = shown;
+		let mut heard: BTreeSet<String> = heard;
+		shown.extend(published.iter().cloned());
+		heard.extend(published.iter().cloned());
 		self.sources
 			.set_on_program(moq_scene::publish::OnProgram { shown, heard });
 	}
@@ -1825,6 +1839,15 @@ async fn publish(
 	let epoch = Duration::ZERO;
 	publication.announce().context("cannot announce the broadcast")?;
 
+	let (published, follow) = tokio::sync::watch::channel(BTreeSet::new());
+	let forward = (sources.clone(), broadcast.clone(), listed.clone());
+	tokio::spawn(async move {
+		let (sources, broadcast, catalog) = forward;
+		if let Err(err) = sources.forward(follow, broadcast, catalog).await {
+			tracing::warn!(%err, "stopped publishing sources independently");
+		}
+	});
+
 	let health = match live {
 		Some(live) => {
 			let observer = hang::health::Observer::new(path.clone(), Some(instance.clone()));
@@ -1848,6 +1871,7 @@ async fn publish(
 			catalog: listed,
 			clock: clock.clone(),
 			sources: sources.clone(),
+			published,
 			recording,
 			recorded,
 			local,

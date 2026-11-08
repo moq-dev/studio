@@ -724,6 +724,9 @@ Without `[[audio_scenes]]`, the collection has one audio scene, `Program`, on
 program and holding nothing. `[audio.<source>]` sets a source's linear `gain`,
 `muted`, and `delay`, in every audio scene holding it.
 
+`published = ["camera", "mic"]`, a top-level key, names the sources
+[published independently](#published-independently).
+
 `[video.<source>]` sets a source's `background`, `crop`, and `filters`,
 wherever it is shown, and an item's `crop`, `filters`, and `blend` its own.
 `background = "remove"` cuts the person out of a camera, display, window,
@@ -841,7 +844,7 @@ stream.
 
 Each camera, display, window, image, media file, color, microphone, and system
 audio also has a track of its own, so the studio can replay or record it on its
-own. These tracks stay in the studio: the program is all it publishes to a relay. They are listed in a local
+own. These tracks stay in the studio unless a source is [published independently](#published-independently): otherwise the program is all it publishes to a relay. They are listed in a local
 catalog under the `dev.moq.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
@@ -893,6 +896,24 @@ the program; so does each scene published in the scene file at startup. A
 scene published later, past the cap, publishes without video and says why in
 the Output panel. When the program encodes in software, a source takes hardware
 where it can and software otherwise.
+
+### Published independently
+
+A source with a track of its own can be **Published independently**, a
+checkbox in the Sources panel, off by default and kept in the scene file's
+`published` list. Its track then goes to the relay beside the program, in the
+same broadcast: the program's catalog lists it under the `dev.moq.studio`
+section's `sources`, by source name, as a hang catalog of its own whose track
+names start with `source/`. Viewers and services fetch it and place it
+themselves.
+
+A published source is left out of everything the studio composites: the
+program, the preview, published and recorded scenes, and every audio scene's
+mix, wherever it is placed or held. Its track carries one rendition, the
+plain capture before any filter or gain, and encodes for as long as it is
+published, holding an encode session as one on program does. A source with
+its background removed cannot be published, since H.264 carries no
+transparency and its track would show the background.
 
 ### Recording
 

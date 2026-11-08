@@ -355,9 +355,12 @@ impl Sources {
 				strip.set_muted(audio.muted);
 				strip.set_delay(audio.delay);
 				for (scene, mix) in &self.mixes {
-					let routed = heard
-						.get(scene.as_str())
-						.is_some_and(|heard| heard.contains(name.as_str()));
+					// A source published independently reaches viewers by its own
+					// track, never through a mix.
+					let routed = !collection.published.contains(name)
+						&& heard
+							.get(scene.as_str())
+							.is_some_and(|heard| heard.contains(name.as_str()));
 					if mix.routes(strip) == routed {
 						continue;
 					}
@@ -1964,7 +1967,7 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 	let track = context
 		.publish
 		.clone()
-		.filter(|_| publishes(source))
+		.filter(|_| source.publishes())
 		.map(|publish| Track {
 			claim: publish.claim(name),
 			publish,
@@ -2028,34 +2031,36 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 	(feed, driver)
 }
 
-/// Whether `source` publishes its own track: a picture the studio captures or
-/// loads itself, before the scene's filters, or the sound of a microphone,
-/// system audio, or media file as captured or decoded, before its gain and
-/// mute.
-///
-/// A broadcast is already published by its own publisher, and a clone shows
-/// its source's track, its filters carried by the layout rather than encoded
-/// again. Web pages and overlays are seen only in the program, since H.264
-/// would encode their transparency over black, a LUT is looked up, never
-/// shown, and a scene is drawn from other sources.
-fn publishes(source: &Source) -> bool {
-	match source {
-		Source::Camera { .. }
-		| Source::Display { .. }
-		| Source::Window { .. }
-		| Source::Microphone { .. }
-		| Source::SystemAudio
-		| Source::Color { .. }
-		| Source::Image { .. }
-		| Source::Media { .. }
-		| Source::Replay => true,
-		Source::Broadcast { .. }
-		| Source::Browser { .. }
-		| Source::Overlay { .. }
-		| Source::Clone { .. }
-		| Source::Lut { .. }
-		| Source::Scene { .. }
-		| Source::Program => false,
+impl Source {
+	/// Whether the source publishes its own track: a picture the studio captures or
+	/// loads itself, before the scene's filters, or the sound of a microphone,
+	/// system audio, or media file as captured or decoded, before its gain and
+	/// mute.
+	///
+	/// A broadcast is already published by its own publisher, and a clone shows
+	/// its source's track, its filters carried by the layout rather than encoded
+	/// again. Web pages and overlays are seen only in the program, since H.264
+	/// would encode their transparency over black, a LUT is looked up, never
+	/// shown, and a scene is drawn from other sources.
+	pub fn publishes(&self) -> bool {
+		match self {
+			Source::Camera { .. }
+			| Source::Display { .. }
+			| Source::Window { .. }
+			| Source::Microphone { .. }
+			| Source::SystemAudio
+			| Source::Color { .. }
+			| Source::Image { .. }
+			| Source::Media { .. }
+			| Source::Replay => true,
+			Source::Broadcast { .. }
+			| Source::Browser { .. }
+			| Source::Overlay { .. }
+			| Source::Clone { .. }
+			| Source::Lut { .. }
+			| Source::Scene { .. }
+			| Source::Program => false,
+		}
 	}
 }
 
