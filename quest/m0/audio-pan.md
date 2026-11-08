@@ -17,7 +17,7 @@ the rest of audio scenes:
   moq-audio; the studio only sets it and saves it. Rejected: a pan per audio
   scene a sound is sent to.
 - ✅ Settled moq-side in
-  [Pan a bus source](https://github.com/moq-dev/moq/blob/main/quest/m3/audio-strip-pan.md):
+  [Pan a bus source](https://github.com/moq-dev/moq/pull/8180):
   a constant-power law, -3 dB at center; a stereo source is balanced, the
   far side attenuated and each channel kept where it is; a bus that is not
   stereo refuses a pan other than center.
