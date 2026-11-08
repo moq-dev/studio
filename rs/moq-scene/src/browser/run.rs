@@ -389,9 +389,9 @@ fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 		.stdout(Stdio::null())
 		.process_group(0);
 	// Given a Wayland compositor's modifiers, Mesa's Intel driver picks a
-	// compressed layout with a second, auxiliary plane, and Chromium cannot
-	// hand a two-plane buffer out as a shared texture: the page never paints.
-	// Without compression, the texture is a single plane.
+	// compressed layout with a second, auxiliary plane, and Chromium's frame
+	// capturer drops multi-plane buffers: the page never paints. Without
+	// compression, the texture is a single plane.
 	if let Raster::Gpu { .. } = helper.raster {
 		let mut debug = std::env::var_os("INTEL_DEBUG").unwrap_or_default();
 		if !debug.is_empty() {
