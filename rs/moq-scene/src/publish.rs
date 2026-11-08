@@ -94,8 +94,9 @@ pub struct Publish {
 	grants: Grants,
 }
 
-/// The bandwidth granted each source published independently, by name.
-type Grants = Arc<Mutex<BTreeMap<String, moq_net::bandwidth::Consumer>>>;
+/// The bandwidth granted each source published independently, by name, with
+/// the forwarded video track it was reserved for.
+type Grants = Arc<Mutex<BTreeMap<String, (String, moq_net::bandwidth::Consumer)>>>;
 
 /// The sources on program, by name, apart for pictures and sound: a media
 /// file heard in the program mix but shown in no scene on air encodes its
@@ -323,16 +324,22 @@ struct Grant {
 	source: String,
 }
 
-/// A source's grant, listed for its video to follow while held.
+/// A copy's reservation, and for a video, its listing for the source to
+/// follow, taken out once the copy ends unless a newer copy replaced it.
 struct Granted {
 	_reservation: moq_net::bandwidth::Reservation,
 	grants: Grants,
-	source: String,
+	/// The source and the copied track, for a video.
+	listed: Option<(String, String)>,
 }
 
 impl Drop for Granted {
 	fn drop(&mut self) {
-		self.grants.lock().unwrap().remove(&self.source);
+		let Some((source, track)) = &self.listed else { return };
+		let mut grants = self.grants.lock().unwrap();
+		if grants.get(source).is_some_and(|(listed, _)| listed == track) {
+			grants.remove(source);
+		}
 	}
 }
 
@@ -350,17 +357,15 @@ async fn copy(
 		// encodes at, so the source follows the connection as the program does.
 		let _grant = grant.map(|grant| {
 			let reservation = grant.bandwidth.reserve(&out.demand(), grant.rate);
-			if grant.video {
-				grant
-					.grants
-					.lock()
-					.unwrap()
-					.insert(grant.source.clone(), reservation.consume());
-			}
+			let listed = grant.video.then(|| {
+				let entry = (out.name().to_string(), reservation.consume());
+				grant.grants.lock().unwrap().insert(grant.source.clone(), entry);
+				(grant.source, out.name().to_string())
+			});
 			Granted {
 				_reservation: reservation,
 				grants: grant.grants,
-				source: grant.source,
+				listed,
 			}
 		});
 		let result: Result<(), moq_net::Error> = async {
@@ -774,12 +779,20 @@ impl<'a> Video<'a> {
 			.lock()
 			.unwrap()
 			.get(&self.claim.name)
-			.and_then(|grant| grant.peek());
+			.and_then(|(_, grant)| grant.peek());
 		if let Some(rate) = grant
 			&& self.granted != Some(rate)
 		{
-			self.track.set_bitrate(rate)?;
 			self.granted = Some(rate);
+			match self.track.set_bitrate(rate) {
+				Ok(()) => {}
+				// Not fatal: it keeps encoding at its ceiling, and only stops
+				// following the grant, as the program does.
+				Err(Error::Video(moq_video::Error::BitrateUnsupported(name))) => {
+					tracing::warn!(source = %self.claim.name, encoder = name, "the encoder cannot follow the bandwidth grant");
+				}
+				Err(err) => return Err(err),
+			}
 		}
 		if frame.size() == size {
 			self.track.encode(frame)
