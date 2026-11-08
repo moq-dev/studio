@@ -39,10 +39,15 @@ Decided with the maintainer:
 
 Recommendations, not settled:
 
+- Trim against the later of the already-mixed position and the previous
+  write's end, so a frame overlapping queued audio writes its playable tail
+  instead of failing whole.
 - Keep consecutive writes contiguous: a frame that starts within the
   existing one-millisecond `CONTIGUOUS` stamp rounding of where the last one
   ended is written at that end, since a one-frame overlap from rounding fails
-  the write.
+  the write. The snap only absorbs stamp rounding: confirm the source's stamp
+  resolution and shrink the tolerance to it (e.g. a sample or two) if that is
+  tighter, so a genuine sub-millisecond gap stays silent.
 - A frame the writer holds earlier than `REACH` ahead waits until it is in
   reach rather than failing.
 - Test on the scene's driver-stepped bus, as `a_write_sounds_when_placed`
