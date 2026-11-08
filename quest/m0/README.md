@@ -109,7 +109,6 @@ repository.
 - [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
 - [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
 - [moq-audio's strip pan is pinned](/quest/m0/pin-audio-pan.md) - the bus strip pan the studio's pan sets
-- [A replayed media file never repeats a timestamp](/quest/m0/media-replay-timestamps.md) - a media source that starts over publishes strictly increasing timestamps, and its flaky test passes every run
 
 ## Related
 
