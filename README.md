@@ -105,7 +105,7 @@ Every panel is a tab you can drag, split, or stack.
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
-| Audio | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. |
+| Audio | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, pan, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. |
 | Graph | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
 | Output | Start and stop recording, pick the picture and the audio scene it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
 | Health | See how the stream reaches viewers, relay by relay and, for the program and each published scene, track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
@@ -132,7 +132,7 @@ Drag from a node's right edge onto a scene's, the top layer's, or an audio
 scene's left edge to wire them: a picture is placed filling the scene, and a
 sound or audio scene is sent into the audio scene. Click a wire, then
 **Remove**, to take every item of that source out of the scene, or stop the
-send. Each sound's node has its strip's mute, gain, and delay and a waveform
+send. Each sound's node has its strip's mute, gain, pan, and delay and a waveform
 of its last few seconds, each audio scene's node **On program**, **Listen**,
 and the waveform of its mix, and each scene's node **Publish** and the audio
 scene it carries. Clicking a scene previews it, and clicking a source picks
@@ -305,7 +305,7 @@ once, and an audio scene never holds itself, even through others. Add,
 rename, reorder, and remove audio scenes in the Scenes panel, where they are
 tagged `audio` and listed after the scenes.
 
-The Audio panel is a mixer. Each sound has a strip, with its gain, mute,
+The Audio panel is a mixer. Each sound has a strip, with its gain, pan, mute,
 delay, and meter, which apply in every audio scene holding it, and a send to
 each audio scene; each audio scene has a strip with its meter and a send to
 each other audio scene. A source added from the Sources or Devices panel, or
@@ -618,6 +618,7 @@ loop = true
 
 [audio.guest]
 gain = 0.5
+pan = -0.5
 delay = "80ms"
 
 [sources.camera-faded]
@@ -722,7 +723,8 @@ audio `scenes` it holds. Exactly one is on `program = true`, and
 `recorded = true` has recordings hold one rather than the one on program.
 Without `[[audio_scenes]]`, the collection has one audio scene, `Program`, on
 program and holding nothing. `[audio.<source>]` sets a source's linear `gain`,
-`muted`, and `delay`, in every audio scene holding it.
+`muted`, `pan` (`-1.0` hard left to `1.0` hard right, centered by
+default), and `delay`, in every audio scene holding it.
 
 `[video.<source>]` sets a source's `background`, `crop`, and `filters`,
 wherever it is shown, and an item's `crop`, `filters`, and `blend` its own.
