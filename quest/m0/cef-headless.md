@@ -56,4 +56,7 @@ Decided 2026-11-07 (maintainer, /quest-unblock): ✅ a display on the Intel
 GPU's own motherboard port (rejected: one on the NVIDIA card's DisplayPort,
 which tests a hybrid desktop rather than a Mesa one; skipping the Wayland
 trial). It is on `card1-DP-1`, and GNOME on `wayland-0` lists a `wl_output`
-named `DP-1`.
+named `DP-1`. This supersedes the same day's choice to skip the trial
+([moq-dev/studio#105](https://github.com/moq-dev/studio/pull/105)), made
+before the display was connected: the trial runs first, then nixos2 switches
+to Windows.
