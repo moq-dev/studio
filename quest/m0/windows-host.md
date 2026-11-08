@@ -28,6 +28,15 @@ Manager); NixOS boots through systemd-boot on `nvme0n1p4`. The switch:
 
 ## Waiting
 
+- Maintainer: say nixos2 is free to reboot. On 2026-11-07 an agent found an
+  interactive `codex` session on pts/0 (open a day, idle 5h41m), a rind
+  `astro dev` server (`worktrees/rind/t3-f902812c`, up 5h38m), and a leftover
+  studio-cef CI wait loop, and did not reboot. An agent cannot tell whether
+  that work is finished. Check: the maintainer says so, or `w` on nixos2
+  shows no other session. The agent then runs step 1:
+  `sudo efibootmgr -o 0003,0006,0000,0004,0005,0007,0001,0002,0008,0009,000A,000B,000C`
+  (current order `0006,0000,0003,...`; `efibootmgr` comes from
+  `nix shell nixpkgs#efibootmgr`) and reboots.
 - Maintainer: at nixos2's console once it boots Windows, turn on OpenSSH
   Server (Settings > System > Optional features), add the Mac's public key to
   `C:\ProgramData\ssh\administrators_authorized_keys`, and plug in a USB
