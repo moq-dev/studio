@@ -20,9 +20,9 @@ Decided 2026-11-06 (maintainer, /quest-unblock):
   valid until 2027-02-01), `apple-certificate` (`hang.live.p12` and its
   password), and `apple-api` (an App Store Connect API key, key ID
   `7WP7HJXJ4C`; its notes hold the issuer ID).
-- Renewed 2026-11-07 (maintainer, /quest-unblock), and the Account Holder
-  signed the Apple Developer Program License Agreement that day. The API key
-  authenticates, but the notary API still answers
+- Renewed 2026-11-08, until 2027-11-08 (maintainer, /quest-unblock), after the
+  Account Holder signed the Apple Developer Program License Agreement. The API
+  key authenticates, but minutes after the renewal the notary API still answers
   `FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED` (see `/business`).
 - Once the notary API accepts the key, an agent with the maintainer's `op`
   session creates the Developer ID profile through the App Store Connect API
