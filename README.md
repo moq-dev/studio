@@ -909,7 +909,7 @@ themselves.
 
 A published source is left out of everything the studio composites: the
 program, the preview, published and recorded scenes, and every audio scene's
-mix, wherever it is placed or held. Its track carries one rendition, the
+mix, wherever it or a clone of it is placed or held. While viewers read its track, it claims its bitrate of the connection beside the program's. Its track carries one rendition, the
 plain capture before any filter or gain, and encodes for as long as it is
 published, holding an encode session as one on program does. A source with
 its background removed cannot be published, since H.264 carries no

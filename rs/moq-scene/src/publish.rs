@@ -167,12 +167,15 @@ impl Publish {
 	/// as long as it stays named, until `published` closes: its tracks are
 	/// copied in under [`FORWARDED`] and its catalog listed under `catalog`'s
 	/// [`SECTION`] section, renamed to match. Reading its tracks keeps each
-	/// source encoding while it is published.
+	/// source encoding while it is published. Each copied audio or video
+	/// track claims its bitrate from `bandwidth` while subscribed, as the
+	/// program's tracks do.
 	pub async fn forward(
 		&self,
 		mut published: tokio::sync::watch::Receiver<BTreeSet<String>>,
 		broadcast: moq_net::broadcast::Producer,
 		mut catalog: Catalog,
+		bandwidth: moq_net::bandwidth::Allocator,
 	) -> Result<(), Error> {
 		let mut updates = self.catalog.consume()?;
 		let mut local = self.catalog.snapshot();
@@ -185,19 +188,20 @@ impl Publish {
 				let sources = sources.filter(|(name, _)| published.contains(*name));
 				sources.map(|(name, source)| (name.clone(), source.clone())).collect()
 			};
-			let tracks: BTreeSet<String> = listed.values().flat_map(tracks).collect();
+			let tracks: BTreeMap<String, Option<moq_net::bandwidth::Rate>> = listed.values().flat_map(tracks).collect();
 			copies.retain(|name, copy| {
-				let keep = tracks.contains(name);
+				let keep = tracks.contains_key(name);
 				if !keep {
 					copy.abort();
 				}
 				keep
 			});
-			for name in tracks {
+			for (name, rate) in tracks {
 				if copies.contains_key(&name) {
 					continue;
 				}
-				let copy = copy(self.consume(), broadcast.clone(), name.clone());
+				let bandwidth = rate.map(|rate| (bandwidth.clone(), rate));
+				let copy = copy(self.consume(), broadcast.clone(), name.clone(), bandwidth);
 				copies.insert(name, tokio::spawn(copy));
 			}
 			let listed: BTreeMap<String, hang::Catalog> = listed
@@ -255,12 +259,23 @@ impl Publish {
 /// of its name in the local one, so it never meets one of the program's own.
 pub const FORWARDED: &str = "source/";
 
-/// Every track `source`'s catalog lists, by its name in the local broadcast.
-fn tracks(source: &hang::Catalog) -> impl Iterator<Item = String> + '_ {
-	let video = source.video.renditions.keys();
-	let audio = source.audio.renditions.keys();
-	let binary = source.binary.tracks.keys();
-	video.chain(audio).chain(binary).cloned()
+/// What a source's video claims of the connection when its catalog names
+/// no bitrate.
+const VIDEO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(6000);
+
+/// What a source's sound claims when its catalog names no bitrate.
+const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(128);
+
+/// Every track `source`'s catalog lists, by its name in the local broadcast,
+/// with the bitrate it claims of the connection: none for a still, sent once.
+fn tracks(source: &hang::Catalog) -> impl Iterator<Item = (String, Option<moq_net::bandwidth::Rate>)> + '_ {
+	let rate = |bitrate: Option<u64>, default| Some(bitrate.map_or(default, moq_net::bandwidth::Rate::from_bps));
+	let video = source.video.renditions.iter();
+	let video = video.map(move |(name, config)| (name.clone(), rate(config.bitrate, VIDEO_BITRATE)));
+	let audio = source.audio.renditions.iter();
+	let audio = audio.map(move |(name, config)| (name.clone(), rate(config.bitrate, AUDIO_BITRATE)));
+	let binary = source.binary.tracks.keys().map(|name| (name.clone(), None));
+	video.chain(audio).chain(binary)
 }
 
 /// `source`'s catalog with each track named as the program's broadcast has it.
@@ -279,10 +294,17 @@ fn renamed(mut source: hang::Catalog) -> hang::Catalog {
 
 /// Copy the local track `name` into `broadcast` under [`FORWARDED`], group by
 /// group, until it ends. A failure ends the copy, failed, with the reason.
-async fn copy(local: moq_net::broadcast::Consumer, broadcast: moq_net::broadcast::Producer, name: String) {
+async fn copy(
+	local: moq_net::broadcast::Consumer,
+	broadcast: moq_net::broadcast::Producer,
+	name: String,
+	bandwidth: Option<(moq_net::bandwidth::Allocator, moq_net::bandwidth::Rate)>,
+) {
 	let copied = async {
 		let mut track = local.track(&name)?.subscribe(None).await?;
 		let out = broadcast.create_track(format!("{FORWARDED}{name}"), track.info().clone())?;
+		// Held for as long as the copy runs.
+		let _grant = bandwidth.map(|(bandwidth, rate)| bandwidth.reserve(&out.demand(), rate));
 		let result: Result<(), moq_net::Error> = async {
 			while let Some(mut group) = track.recv_group().await? {
 				let mut copy = out.create_group(moq_net::group::Info {
@@ -1067,7 +1089,12 @@ mod tests {
 			let (published, follow) = tokio::sync::watch::channel(collection.published.clone());
 			let forward = publish.clone();
 			let (broadcast, listing) = (program.clone(), catalog.clone());
-			tokio::spawn(async move { forward.forward(follow, broadcast, listing).await.unwrap() });
+			tokio::spawn(async move {
+				forward
+					.forward(follow, broadcast, listing, moq_net::bandwidth::Allocator::unlimited())
+					.await
+					.unwrap()
+			});
 
 			let snapshot = listed(&catalog, |sources| sources.contains_key("red")).await;
 			let red = &snapshot.ext.studio.sources["red"];

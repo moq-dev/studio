@@ -1840,10 +1840,10 @@ async fn publish(
 	publication.announce().context("cannot announce the broadcast")?;
 
 	let (published, follow) = tokio::sync::watch::channel(BTreeSet::new());
-	let forward = (sources.clone(), broadcast.clone(), listed.clone());
+	let forward = (sources.clone(), broadcast.clone(), listed.clone(), bandwidth.clone());
 	tokio::spawn(async move {
-		let (sources, broadcast, catalog) = forward;
-		if let Err(err) = sources.forward(follow, broadcast, catalog).await {
+		let (sources, broadcast, catalog, bandwidth) = forward;
+		if let Err(err) = sources.forward(follow, broadcast, catalog, bandwidth).await {
 			tracing::warn!(%err, "stopped publishing sources independently");
 		}
 	});
