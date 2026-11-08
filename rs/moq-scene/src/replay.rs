@@ -364,7 +364,7 @@ fn copy_held(
 	let copied: Vec<u64> = held.into_keys().collect();
 	for pair in copied.windows(2) {
 		if pair[1] > pair[0] + 1 {
-			track.drop_groups(pair[0] + 1..pair[1], moq_net::StreamError::NotFound);
+			track.skip_groups(pair[0] + 1..pair[1]);
 		}
 	}
 	Ok(media.then_some(covered))
@@ -406,7 +406,7 @@ mod tests {
 			.unwrap();
 		for sequence in 0..groups {
 			match lost == Some(sequence) {
-				true => track.drop_groups(sequence..sequence + 1, moq_net::StreamError::Cancel),
+				true => track.skip_groups(sequence..sequence + 1),
 				false => write(&track, sequence, &second(sequence)),
 			}
 		}

@@ -643,7 +643,9 @@ impl Run {
 			None => Reading {
 				source: self.program.clone(),
 				format: CatalogFormat::Hang,
-				pick: Box::new(|studio: hang::Catalog<moq_scene::publish::Ext>| Some(largest_video(studio.media()))),
+				pick: Box::new(|studio: hang::Catalog<moq_scene::publish::Ext>| {
+					Some(largest_video(studio.without_ext()))
+				}),
 				closing: Some(self.closing.clone()),
 			},
 			Some(name) => {
