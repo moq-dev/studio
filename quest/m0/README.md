@@ -106,6 +106,8 @@ repository.
 - [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice and browser composition
 - [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
 - [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
+- [Playout writes land on positioned bus channels](/quest/m0/playout-positioned.md) - broadcast, media, and replay sound at the bus position its pictures are timed for
+- [moq-audio's positioned bus channel is pinned](/quest/m0/pin-bus-positioned.md) - `Bus::positioned`, which playout writes through
 
 ## Related
 
