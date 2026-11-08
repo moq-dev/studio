@@ -9,8 +9,8 @@ a camera and a microphone to capture, so Windows quests run on real hardware.
 ## Plan
 
 Decided 2026-11-06 (maintainer, /quest-unblock): nixos2 becomes the Windows
-host, after the Mesa trial on its Intel GPU
-([cef-headless](/quest/m0/cef-headless.md)), which needs NixOS there.
+host. Decided 2026-11-07 (maintainer, /quest-unblock): it no longer waits for
+a Wayland trial on its Intel GPU, which was skipped.
 
 nixos2 already dual-boots: Windows sits on its own partition (`nvme0n1p3`,
 600 GB, last booted 2026-09-14) with firmware entry `Boot0003` (Windows Boot
@@ -33,7 +33,3 @@ Manager); NixOS boots through systemd-boot on `nvme0n1p4`. The switch:
   `C:\ProgramData\ssh\administrators_authorized_keys`, and plug in a USB
   camera and a microphone, which nixos2 lacks. An agent cannot reach Windows
   before sshd runs. Check: `ssh nixos2 ver` prints a Windows version.
-
-## Required
-
-- [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - the Mesa trial runs on nixos2's Intel GPU first
