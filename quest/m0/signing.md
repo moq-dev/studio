@@ -21,22 +21,36 @@ Decided 2026-11-06 (maintainer, /quest-unblock):
   password), and `apple-api` (an App Store Connect API key, key ID
   `7WP7HJXJ4C`; its notes hold the issuer ID).
 - Renewed 2026-11-08, until 2027-11-08 (maintainer, /quest-unblock), after the
-  Account Holder signed the Apple Developer Program License Agreement. The API
-  key authenticates, but minutes after the renewal the notary API still answers
-  `FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED` (see `/business`).
-- Once the notary API accepts the key, an agent with the maintainer's `op`
-  session creates the Developer ID profile through the App Store Connect API
-  with that key, and stores everything with `gh secret set` (no secret passes
-  through chat or a file outside `.tmp/`). Confirm the `.p12` holds the
-  Developer ID key, not a distribution one, before storing it. Then delete
-  this quest.
+  Account Holder signed the Apple Developer Program License Agreement and
+  accepted the agreements pending at App Store Connect > Business. On
+  2026-11-08 `xcrun notarytool history` with the `apple-api` key succeeds.
+
+Done 2026-11-08:
+
+- `hang.live.p12` holds one certificate and its key: `Developer ID
+  Application: Luke Curley (D7D5SDDB5Z)`, serial `4B518DF1A7AFBB24` (App Store
+  Connect certificate `QMD585S65S`), the same certificate as
+  `apple-developer-id`. It uses legacy (RC2/3DES) encryption, which macOS
+  `security import` reads.
+- The `release` environment exists, deployable only from protected branches,
+  and holds `APPLE_CERTIFICATE` (the `.p12`, base64), `APPLE_API_KEY` (the key
+  ID), and `APPLE_API_PRIVATE_KEY` (the `.p8` text).
+
+Remaining, for an agent with the maintainer's `op` session (no secret passes
+through chat or a file outside `.tmp/`):
+
+- Store `APPLE_CERTIFICATE_PASSWORD` and `APPLE_API_ISSUER` (the issuer ID in
+  the `apple-api` notes) in the `release` environment.
+- Through the App Store Connect API with the `apple-api` key, register the
+  macOS bundle ID `dev.moq.studio` (it matches the catalog's `dev.moq.studio`
+  section), enable `SYSTEM_EXTENSION_INSTALL` on it, create a `MAC_APP_DIRECT`
+  profile for it with certificate `QMD585S65S`, and store it base64 as
+  `APPLE_PROVISIONING_PROFILE`. Then delete this quest.
 
 ## Waiting
 
-- Maintainer: accept any pending agreement at App Store Connect > Business
-  (appstoreconnect.apple.com/business), which the notary API names after the
-  Program License Agreement was signed; only the Account Holder can accept.
-  If none is pending, Apple may still be propagating the signature. Check:
-  `xcrun notarytool history` with the `apple-api` key succeeds (or a GET of
-  `https://appstoreconnect.apple.com/notary/v2/submissions` with a JWT from
-  that key returns 200).
+- Maintainer: unlock 1Password on the Mac, or approve its CLI prompt. On
+  2026-11-08 every `op read` from an agent failed with `error initializing
+  client: authorization timeout` after the first few succeeded; the desktop
+  app integration needs the maintainer's approval, which no agent can give.
+  Check: `op read op://hang.live/apple-api/notesPlain >/dev/null` exits 0.

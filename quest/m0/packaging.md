@@ -23,6 +23,21 @@ Decided 2026-11-06 (maintainer, /quest-unblock): Windows ships unsigned
 until a release needs SmartScreen reputation; see
 [signing](/quest/m0/signing.md).
 
+The macOS signing material lives in the `release` Actions environment, which
+only protected branches can deploy from, for team `D7D5SDDB5Z` and bundle ID
+`dev.moq.studio`:
+
+- `APPLE_CERTIFICATE`: the Developer ID Application `.p12`, base64, legacy
+  encryption so `security import` reads it.
+- `APPLE_CERTIFICATE_PASSWORD`: its password.
+- `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_PRIVATE_KEY`: the App Store
+  Connect key ID, issuer ID, and `.p8` text, for `notarytool --key`.
+- `APPLE_PROVISIONING_PROFILE`: the Developer ID profile for `dev.moq.studio`
+  with the System Extension capability, base64, embedded as
+  `Contents/embedded.provisionprofile`.
+
+The certificate expires 2027-02-01, and the profile with it.
+
 ## Required
 
 - [The Apple signing identity is available](/quest/m0/signing.md) - the credentials macOS signing needs
