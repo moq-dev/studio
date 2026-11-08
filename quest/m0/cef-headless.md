@@ -52,13 +52,8 @@ Decided 2026-11-06 (maintainer, /quest-unblock): this trial runs before
 nixos2 switches to Windows ([windows-host](/quest/m0/windows-host.md)), which
 then leaves no Mesa machine on NixOS.
 
-## Waiting
-
-- Maintainer: connect an HDMI dummy plug (or a monitor) to nixos2's
-  motherboard HDMI port, which the Intel GPU drives, since GNOME offers
-  Chromium no Wayland output without one. An agent cannot plug hardware, and
-  a virtual monitor would test a different setup from a real desktop. Check
-  that `cat /sys/class/drm/card1-HDMI-A-*/status` shows `connected` and that
-  `wayland-info` on `wayland-0` lists a `wl_output`. Alternative: skip the
-  Wayland trial on Mesa and let nixos2 switch to Windows, leaving the Wayland
-  result unknown. Recommended: the dummy plug.
+Decided 2026-11-07 (maintainer, /quest-unblock): ✅ a display on the Intel
+GPU's own motherboard port (rejected: one on the NVIDIA card's DisplayPort,
+which tests a hybrid desktop rather than a Mesa one; skipping the Wayland
+trial). It is on `card1-DP-1`, and GNOME on `wayland-0` lists a `wl_output`
+named `DP-1`.
