@@ -197,11 +197,17 @@ fn gpu(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Result<protocol::Raste
 		));
 	}
 	let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
-	let display = if set("WAYLAND_DISPLAY") {
+	// Chromium waits in `initialize` until the Wayland display advertises an
+	// output, forever on a session with no monitor, so such a display is
+	// passed over for X11 or the CPU path.
+	let wayland = set("WAYLAND_DISPLAY").then(wayland_output);
+	let display = if let Some(Ok(())) = wayland {
 		Display::Wayland
 	} else if set("DISPLAY") {
 		x11_gpu(&info)?;
 		Display::X11
+	} else if let Some(Err(why)) = wayland {
+		return Err(why);
 	} else {
 		// CEF's GPU process cannot allocate shared textures without one.
 		return Err("there is no display to paint through".into());
@@ -213,6 +219,47 @@ fn gpu(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Result<protocol::Raste
 		.flatten()
 		.and_then(|node| node.into_os_string().into_string().ok());
 	Ok(Raster::Gpu { render_node, display })
+}
+
+/// Check that the Wayland display in `$WAYLAND_DISPLAY` advertises an output,
+/// which Chromium's Wayland platform waits for before CEF's `initialize`
+/// returns.
+#[cfg(target_os = "linux")]
+fn wayland_output() -> Result<(), String> {
+	use wayland_client::protocol::wl_registry;
+	use wayland_client::{Connection, Dispatch, QueueHandle};
+
+	struct Globals {
+		output: bool,
+	}
+
+	impl Dispatch<wl_registry::WlRegistry, ()> for Globals {
+		fn event(
+			state: &mut Self,
+			_: &wl_registry::WlRegistry,
+			event: wl_registry::Event,
+			_: &(),
+			_: &Connection,
+			_: &QueueHandle<Self>,
+		) {
+			if let wl_registry::Event::Global { interface, .. } = event {
+				state.output |= interface == "wl_output";
+			}
+		}
+	}
+
+	let connection =
+		Connection::connect_to_env().map_err(|err| format!("cannot connect to the Wayland display: {err}"))?;
+	let mut queue = connection.new_event_queue();
+	let _registry = connection.display().get_registry(&queue.handle(), ());
+	let mut globals = Globals { output: false };
+	queue
+		.roundtrip(&mut globals)
+		.map_err(|err| format!("the Wayland display: {err}"))?;
+	if !globals.output {
+		return Err("the Wayland display has no output, such as a monitor, to paint through".into());
+	}
+	Ok(())
 }
 
 /// Check that the X server in `$DISPLAY` runs on the studio's GPU, `info`.

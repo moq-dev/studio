@@ -4298,6 +4298,7 @@ dependencies = [
  "tract-onnx",
  "url",
  "vello",
+ "wayland-client",
  "wuff",
  "x11rb 0.13.2",
 ]
