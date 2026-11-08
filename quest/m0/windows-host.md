@@ -40,4 +40,4 @@ Manager); NixOS boots through systemd-boot on `nvme0n1p4`. The switch:
 
 ## Required
 
-- [Browser sources on the GPU under Mesa](/quest/m0/cef-headless.md) - the Mesa trial runs on nixos2's Intel GPU first
+- [Browser sources on the GPU under Mesa Wayland](/quest/m0/cef-headless.md) - the Mesa trial runs on nixos2's Intel GPU first
