@@ -17,7 +17,7 @@ the rest of audio scenes:
   moq-audio; the studio only sets it and saves it. Rejected: a pan per audio
   scene a sound is sent to.
 - ✅ Settled moq-side in
-  [Pan a bus source](https://github.com/moq-dev/moq/blob/main/quest/m3/audio-strip-pan.md):
+  [Pan a bus source](https://github.com/moq-dev/moq/pull/8180):
   a constant-power law, -3 dB at center; a stereo source is balanced, the
   far side attenuated and each channel kept where it is; a bus that is not
   stereo refuses a pan other than center.
@@ -25,7 +25,3 @@ the rest of audio scenes:
   is.
 - Both panels draw a sound's mute, gain, and delay with `strip_controls` in
   `rs/moq-studio/src/ui.rs`; a pan added there shows in both.
-
-## Required
-
-- [moq-audio's strip pan is pinned](/quest/m0/pin-audio-pan.md) - the `Strip` pan the studio sets

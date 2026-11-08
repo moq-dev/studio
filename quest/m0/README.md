@@ -60,9 +60,8 @@ cameras, packaging, signing) that one monorepo no longer pays off.
 - **Pin:** moq is a `moq` git submodule whose crates are path dependencies,
   as in moq.pro, so the studio compiles against one moq checkout.
 - **moq-scene** moved here with the app, its only consumer. The
-  [viewer-side composition](/quest/m3/compose/README.md) epic (now m3) moved whole:
-  browser composition ships as a package from this repository layered on
-  `@moq/watch`, and the server composite is a headless binary here rather
+  [viewer-side composition](/quest/m2/compose/README.md) epic (now m2) moved whole:
+  the server composite is a headless binary here rather
   than a moq-cli subcommand, so moq never depends on the studio.
 - **Egress library:** lives here first, beside its studio consumer, and moves
   to moq only when a hosted service adopts it.
@@ -77,7 +76,7 @@ broadcast reaches viewers, not the fallback. Sources are not published to the
 relay by default (decided 2026-11-03 on
 [moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), because
 each encoding costs an encoder session and consumer GPUs have few, so the
-[viewer-side composition](/quest/m3/compose/README.md) epic moved to m1.
+[viewer-side composition](/quest/m2/compose/README.md) epic moved to m1.
 Overlays and animation render into the program here, and travel to viewers
 in the layout track only once that epic lands.
 
@@ -99,7 +98,6 @@ repository.
 - [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
-- [Browser sources on the GPU under Mesa Wayland](/quest/m0/cef-headless.md) - shared-texture pages paint on Intel and AMD under GNOME on Wayland, or the failing allocation is found
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
 - [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
@@ -108,7 +106,6 @@ repository.
 - [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice and browser composition
 - [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
 - [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
-- [moq-audio's strip pan is pinned](/quest/m0/pin-audio-pan.md) - the bus strip pan the studio's pan sets
 - [Playout writes land on positioned bus channels](/quest/m0/playout-positioned.md) - broadcast, media, and replay sound at the bus position its pictures are timed for
 - [moq-audio's positioned bus channel is pinned](/quest/m0/pin-bus-positioned.md) - `Bus::positioned`, which playout writes through
 - [A replayed media file never repeats a timestamp](/quest/m0/media-replay-timestamps.md) - a media source that starts over publishes strictly increasing timestamps, and its flaky test passes every run

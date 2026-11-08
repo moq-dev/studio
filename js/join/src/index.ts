@@ -74,8 +74,8 @@ function join(link: Link): () => void {
 	const show = new Watch.Player({
 		origin: connection.origin,
 		name: Feed.path(link.name, link.generation),
-		// The guest's receive rate, so the player drops to the half size their link can carry.
-		probe: connection.probe,
+		// Claim the guest's receive rate, so the player drops to the half size their link can carry.
+		viewer: { viewers: connection.viewers },
 		video: { canvas: element<HTMLCanvasElement>("show") },
 	});
 	signals.cleanup(() => show.close());
