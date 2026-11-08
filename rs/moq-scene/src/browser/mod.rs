@@ -248,7 +248,8 @@ fn wayland_output() -> Result<(), String> {
 		}
 	}
 
-	let connection = Connection::connect_to_env().map_err(|err| format!("cannot connect to the Wayland display: {err}"))?;
+	let connection =
+		Connection::connect_to_env().map_err(|err| format!("cannot connect to the Wayland display: {err}"))?;
 	let mut queue = connection.new_event_queue();
 	let _registry = connection.display().get_registry(&queue.handle(), ());
 	let mut globals = Globals { output: false };

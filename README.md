@@ -953,7 +953,8 @@ lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
 driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
 macOS. A browser source's page is copied on the GPU from the shared texture CEF
 paints, given the same Vulkan DMA-BUF import and a display to paint through:
-the Wayland one when `$WAYLAND_DISPLAY` is set, needing no XWayland, or else
+the Wayland one when `$WAYLAND_DISPLAY` is set and has an output, such as a
+monitor, needing no XWayland, or else
 the X one in `$DISPLAY`, when the X server runs on the studio's GPU, since
 CEF paints on the X server's there. Every other source, every source on Windows or on a
 GPU that cannot import, and every still image delivers its frames from the
