@@ -533,7 +533,7 @@ impl Draft {
 		})
 	}
 
-	/// Set or clear the gain, mute, and delay of the source called `name`.
+	/// Set or clear the gain, mute, pan, and delay of the source called `name`.
 	pub fn set_audio(&mut self, name: &str, audio: Option<Audio>) -> Result<(), Error> {
 		let before = self.collection.audio.get(name).cloned();
 		self.change(Change::Audio {

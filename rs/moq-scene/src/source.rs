@@ -306,11 +306,11 @@ impl Sources {
 	/// stinger plays opens silent and blank, waiting for its first
 	/// [play](Feed::play), rather than playing once at the start.
 	///
-	/// Also applies the collection's gain, mute, and delay to every audio
+	/// Also applies the collection's gain, mute, pan, and delay to every audio
 	/// strip, routes each into the mix of every audio scene that reaches it,
 	/// and applies the frame rate to every web page, which never restarts a
 	/// source. A removed or edited source leaves every mix at once, so its
-	/// replacement never plays over it. Panics on a gain or delay
+	/// replacement never plays over it. Panics on a gain, pan, or delay
 	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		let mixes = &self.mixes;
@@ -353,6 +353,8 @@ impl Sources {
 				let audio = collection.audio.get(name).cloned().unwrap_or_default();
 				strip.set_gain(audio.gain);
 				strip.set_muted(audio.muted);
+				// The bus is stereo, the one layout that refuses no pan.
+				strip.set_pan(audio.pan).expect("stereo bus pans");
 				strip.set_delay(audio.delay);
 				for (scene, mix) in &self.mixes {
 					let routed = heard
@@ -2404,7 +2406,7 @@ mod tests {
 	}
 
 	/// Editing a source restarts it, removing one stops it, and an untouched one
-	/// keeps running. Gain, delay, and routing changes reach the strip without
+	/// keeps running. Gain, pan, delay, and routing changes reach the strip without
 	/// restarting anything, and a source plays in every audio scene holding it
 	/// until it is removed.
 	#[tokio::test]
@@ -2426,12 +2428,14 @@ mod tests {
 				Audio {
 					gain: 0.25,
 					muted: true,
+					pan: -0.5,
 					delay: Duration::from_millis(120),
 				},
 			);
 			assert!(sources.sync(&collection).is_empty());
 			assert_eq!(guest.gain(), 0.25);
 			assert!(guest.muted());
+			assert_eq!(guest.pan(), -0.5);
 			assert_eq!(guest.delay(), Duration::from_millis(120));
 			let stream = sources.mix("Stream").unwrap().clone();
 			assert!(program.routes(&guest));

@@ -3641,7 +3641,7 @@ fn on_program(scenes: &[moq_scene::AudioScene], name: &str) -> (Vec<moq_scene::A
 	(next, format!("Put audio scene `{name}` on program"))
 }
 
-/// A sound's mute, gain, and delay, as its Audio panel strip and Graph node
+/// A sound's mute, gain, pan, and delay, as its Audio panel strip and Graph node
 /// show them, and the change made to `audio` with its label and gesture.
 fn strip_controls(
 	ui: &mut Ui,
@@ -3663,6 +3663,24 @@ fn strip_controls(
 		let gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
 		let audio = moq_scene::Audio { gain, ..audio.clone() };
 		change = Some((audio, format!("Set `{name}` gain"), gesture));
+	}
+	let mut pan = audio.pan;
+	let response = ui
+		.add(
+			egui::Slider::new(&mut pan, -1.0..=1.0).custom_formatter(|pan, _| match pan {
+				0.0 => "C".to_string(),
+				pan if pan < 0.0 => format!("L{:.0}", -pan * 100.0),
+				pan => format!("R{:.0}", pan * 100.0),
+			}),
+		)
+		.on_hover_text("Pan: place the sound between left and right; double-click to center");
+	let gesture = gestures.of(&response);
+	if response.double_clicked() {
+		pan = 0.0;
+	}
+	if pan != audio.pan {
+		let audio = moq_scene::Audio { pan, ..audio.clone() };
+		change = Some((audio, format!("Set `{name}` pan"), gesture));
 	}
 	let max = moq_audio::bus::MAX_DELAY.as_millis() as u64;
 	let mut millis = audio.delay.as_millis() as u64;

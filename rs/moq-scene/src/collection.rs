@@ -514,6 +514,12 @@ impl Collection {
 			if !audio.gain.is_finite() || audio.gain < 0.0 {
 				return Err(Error::Invalid(format!("`{name}` has gain {}", audio.gain)));
 			}
+			if !(-1.0..=1.0).contains(&audio.pan) {
+				return Err(Error::Invalid(format!(
+					"`{name}` has pan {}, outside -1 to 1",
+					audio.pan
+				)));
+			}
 			if audio.delay > moq_audio::bus::MAX_DELAY {
 				return Err(Error::Invalid(format!(
 					"`{name}` is held back {:?}, past the longest, {:?}",
@@ -1897,7 +1903,7 @@ impl AudioScene {
 	}
 }
 
-/// The gain, mute, and sync delay of one source with sound, in every audio
+/// The gain, mute, pan, and sync delay of one source with sound, in every audio
 /// scene that holds it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1907,6 +1913,10 @@ pub struct Audio {
 	/// Whether the source is silenced in every audio scene, keeping its gain.
 	#[serde(default)]
 	pub muted: bool,
+	/// Where the source sits between left (`-1.0`) and right (`1.0`), as
+	/// [`Strip::set_pan`](moq_audio::bus::Strip::set_pan) places it.
+	#[serde(default, skip_serializing_if = "is_center")]
+	pub pan: f32,
 	/// How long the source is held back in every audio scene, so a microphone lines up
 	/// with a camera that lags it. At most the bus's
 	/// [`MAX_DELAY`](moq_audio::bus::MAX_DELAY).
@@ -1919,9 +1929,14 @@ impl Default for Audio {
 		Self {
 			gain: 1.0,
 			muted: false,
+			pan: 0.0,
 			delay: Duration::ZERO,
 		}
 	}
+}
+
+fn is_center(pan: &f32) -> bool {
+	*pan == 0.0
 }
 
 /// An sRGB color with straight alpha, written `#rrggbb` or `#rrggbbaa`.
@@ -2034,6 +2049,7 @@ mod tests {
 			Audio {
 				gain: 0.5,
 				muted: true,
+				pan: 0.25,
 				delay: Duration::from_millis(80),
 			},
 		);
@@ -2203,6 +2219,7 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			Audio {
 				gain: 2.0,
 				muted: false,
+				pan: 0.0,
 				delay: Duration::from_millis(120),
 			}
 		);
