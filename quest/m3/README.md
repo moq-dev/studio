@@ -9,9 +9,6 @@ is offered for work until a customer need moves it up.
 
 Opened 2026-11-07 (maintainer, /quest-spawn): publishing a source
 independently drives no customer demand, so it and the viewer-side
-composition epic that requires it moved here from m2.
+composition epic that requires it moved here from m2. Both went back to
+[m2](/quest/m2/README.md) on 2026-11-08 (maintainer, /quest-plan).
 
-## Required
-
-- [Published independently](/quest/m3/publish-independently.md) - a source opts out of the program and publishes its own track for services that place it themselves
-- [Viewer-side composition](/quest/m3/compose/README.md) - independently published sources plus a layout track, composed by viewers and by a server

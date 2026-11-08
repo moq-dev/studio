@@ -25,6 +25,17 @@ Decided 2026-11-06 (maintainer, /quest-unblock):
   accepted the agreements pending at App Store Connect > Business. On
   2026-11-08 `xcrun notarytool history` with the `apple-api` key succeeds.
 
+Decided 2026-11-08 (maintainer):
+
+- ✅ Bundle ID `live.kixel.studio`, on the kixel.live domain (rejected:
+  `dev.moq.studio`; `studio.moq.app`; kixel.studio, held by another party).
+  The camera extension's ID derives from it.
+- ✅ Keep the secret names listed in [packaging](/quest/m0/packaging.md).
+- ✅ The `release` environment deploys from protected branches only
+  (rejected: a `v*` tag rule now).
+- ✅ Keep the Developer ID certificate in 1Password, expiring 2027-02-01
+  (rejected: the G2 certificate `GX6RZQJ764`, whose key is not in 1Password).
+
 Done 2026-11-08:
 
 - `hang.live.p12` holds one certificate and its key: `Developer ID
@@ -42,8 +53,7 @@ through chat or a file outside `.tmp/`):
 - Store `APPLE_CERTIFICATE_PASSWORD` and `APPLE_API_ISSUER` (the issuer ID in
   the `apple-api` notes) in the `release` environment.
 - Through the App Store Connect API with the `apple-api` key, register the
-  macOS bundle ID `dev.moq.studio` (it matches the catalog's `dev.moq.studio`
-  section), enable `SYSTEM_EXTENSION_INSTALL` on it, create a `MAC_APP_DIRECT`
+  macOS bundle ID `live.kixel.studio`, enable `SYSTEM_EXTENSION_INSTALL` on it, create a `MAC_APP_DIRECT`
   profile for it with certificate `QMD585S65S`, and store it base64 as
   `APPLE_PROVISIONING_PROFILE`. Then delete this quest.
 

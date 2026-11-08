@@ -24,18 +24,18 @@ source among those on program (`Publish::set_on_program` in
 
 Moved to m2 on 2026-11-05 (maintainer, /quest-plan): no service places
 sources itself yet, so it waits behind m0 and m1. Moved on to m3 on
-2026-11-07 (maintainer, /quest-spawn): it drives no customer demand.
+2026-11-07 (maintainer, /quest-spawn): it drives no customer demand. Back to
+m2 on 2026-11-08 (maintainer, /quest-plan) in the
+[viewer-side composition](/quest/m2/compose/README.md) epic, whose players
+composite independently published sources over the program and mix their
+audio back in.
 
 A source with its background removed (`background = "remove"`) keeps the
 background in its track, since H.264 carries no transparency. Publishing one
 independently needs its cut-out in the track, such as moq-video encoding
 alpha, or the option refused for it.
 
-Low priority: this is for services that move webcams and overlays themselves,
-and none exists yet. The option lives on the source, in the scene file, so it
+The option lives on the source, in the scene file, so it
 travels with the scene. The option and its effect on the program change what a
 user does, so `README.md` documents them.
 
-## Related
-
-- [Viewer-side composition](/quest/m3/compose/README.md) - the epic that composes from independently published sources

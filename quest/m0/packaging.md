@@ -25,14 +25,14 @@ until a release needs SmartScreen reputation; see
 
 The macOS signing material lives in the `release` Actions environment, which
 only protected branches can deploy from, for team `D7D5SDDB5Z` and bundle ID
-`dev.moq.studio`:
+`live.kixel.studio`:
 
 - `APPLE_CERTIFICATE`: the Developer ID Application `.p12`, base64, legacy
   encryption so `security import` reads it.
 - `APPLE_CERTIFICATE_PASSWORD`: its password.
 - `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_PRIVATE_KEY`: the App Store
   Connect key ID, issuer ID, and `.p8` text, for `notarytool --key`.
-- `APPLE_PROVISIONING_PROFILE`: the Developer ID profile for `dev.moq.studio`
+- `APPLE_PROVISIONING_PROFILE`: the Developer ID profile for `live.kixel.studio`
   with the System Extension capability, base64, embedded as
   `Contents/embedded.provisionprofile`.
 
