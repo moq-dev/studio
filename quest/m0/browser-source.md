@@ -39,7 +39,3 @@ directory instead. What the other platforms need on top:
 ## Required
 
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs there at all; it already runs on macOS
-
-## Related
-
-- [Studio on macOS with capture granted](/quest/m0/app-macos.md) - the rest of the macOS app, which pages do not need

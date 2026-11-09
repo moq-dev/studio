@@ -26,7 +26,6 @@ until a release needs SmartScreen reputation; see
 ## Required
 
 - [The Apple signing identity is available](/quest/m0/signing.md) - the credentials macOS signing needs
-- [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio running on Windows
 
 ## Related
