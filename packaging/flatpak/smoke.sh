@@ -58,7 +58,8 @@ SWAYSOCK=$(compgen -G "$runtime/sway-ipc.*.sock")
 WAYLAND_DISPLAY=$(basename "$(compgen -G "$runtime/wayland-*[0-9]")")
 export SWAYSOCK WAYLAND_DISPLAY
 
-flatpak run --env=NO_COLOR=1 --command=moq-studio-desktop live.kixel.studio 2>"$log" &
+# The document portal's mount would outlive the session and its directory.
+flatpak run --no-documents-portal --env=NO_COLOR=1 --command=moq-studio-desktop live.kixel.studio 2>"$log" &
 studio=$!
 pids+=("$studio")
 
