@@ -18,7 +18,7 @@ independent layers over it, rather than the full scene state; see the
 A JSON track in snapshot mode, so a late joiner gets the current state.
 Version it, and have a player refuse an unknown version loudly and play the
 program alone. Keep it free of local paths and credentials: layers name
-tracks and catalog `include` references, never files.
+tracks and broadcasts, never files.
 
 Decided 2026-11-08 (maintainer, on
 [moq-dev/studio#117](https://github.com/moq-dev/studio/pull/117)): a
@@ -44,8 +44,10 @@ Decided 2026-11-09 (maintainer, /quest-audit): ✅ an audio layer carries pan
 and delay as well as gain and mute (rejected: stating that a player drops
 them). Without the delay, a delayed microphone published independently plays
 out of sync with its camera. moq's
-[layer spec](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/spec.md) names only gain and mute today,
-and starts from the format the prototype settles.
+[layer spec](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/spec.md)
+starts from the format the prototype settles;
+[moq-dev/moq#8421](https://github.com/moq-dev/moq/pull/8421) adds pan and
+delay to it and has both players apply them.
 
 Items carry their keyframes (`moq_scene::Keyframe`), which play from when
 their scene went on program. The layout says when that was, so a late joiner
@@ -56,3 +58,28 @@ Each layer also carries its priority and whether a viewer may toggle it, for
 
 The [watch prototype](/quest/m2/compose/watch.md) is this track's first
 reader. What the two settle becomes moq's hang spec draft.
+
+## Waiting
+
+- Maintainer: decide how the layout names a guest's broadcast. The epic
+  settled on 2026-10-26 that guests stay their own broadcasts, named through
+  hang's catalog references, then `contributions`, now `include`
+  ([moq-dev/moq#7943](https://github.com/moq-dev/moq/pull/7943)). The hang
+  draft at the pin requires an include to share the listing catalog's PTS
+  timeline, `media.clock`, and `media.join.interval`, and a guest's broadcast
+  keeps its own, so a player that takes `include` at its word places a
+  guest's frames at the wrong time. Options:
+  - The layout names each guest's broadcast itself and carries the offset
+    from the guest's timeline onto the program's media clock, the one the
+    studio applies when it plays the guest (recommended): `include` keeps
+    its meaning, and the timing stays in the track that already says when
+    each layer shows.
+  - moq relaxes `include`, or adds a sibling map, for broadcasts on their own
+    timeline, with the offset in the catalog: a moq quest and a pin, and every
+    hang consumer learns a second kind of include.
+  - The studio republishes each guest's tracks in its own broadcast, restamped
+    onto the program's clock: no spec change, but it reverses the settled
+    "guests stay their own broadcasts" and relays every guest twice.
+
+  Check: the maintainer answers in /quest-unblock, and the choice is recorded
+  in this Plan and the epic's.

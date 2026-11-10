@@ -42,7 +42,14 @@ browser-backend quests
 [audio](https://github.com/moq-dev/moq/blob/main/quest/m5/audio-web.md)) are
 deferred in its m5 with no other consumer. Nothing in moq's tree plans a
 browser WebTransport session for moq-net either, which the page publishes
-through: that needs a moq quest and a pin here before this is ready.
+through, so this waits on one (see Waiting).
+
+## Waiting
+
+- moq-dev/moq: plans a browser WebTransport session for moq-net, the
+  transport the page publishes through. Check: a quest in moq's tree names
+  it. Then this quest gains a pin quest for it under `Required`, and this
+  item goes.
 
 ## Required
 

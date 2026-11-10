@@ -27,8 +27,9 @@ quests (rejected: "both quests", unnamed, which left out `@moq/watch`).
   and
   [The watch player composites layers](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/watch.md),
   which the [epic](/quest/m2/compose/README.md)'s test plays in. Check: all
-  three quests' PRs have merged on moq's `main`, deleting their files, and
-  hang exposes the layer layout. A quest file that moved, or went away
+  three quests' PRs have merged on moq's `main`, deleting their files, hang
+  exposes a layer layout whose audio layers carry gain, mute, pan, and delay,
+  and both players apply all four. A quest file that moved, or went away
   without its work landing, does not count.
 
 ## Required
