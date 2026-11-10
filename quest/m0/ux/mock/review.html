@@ -9,12 +9,13 @@
 <link rel="stylesheet" href="kit.css">
 <style>
 /* REVIEW: the recent past to replay or clip on the left, this show's recordings on the right. */
-.R{grid-template:48px minmax(0,1fr)/minmax(0,1fr) 384px}
-.rv{position:relative;display:flex;flex-direction:column;gap:16px;padding:18px 24px 22px;min-width:0;min-height:0;background:radial-gradient(120% 90% at 50% 0,#15151d,var(--bg))}
+.R{grid-template:48px minmax(0,1fr) 150px/minmax(0,1fr) 384px}
+.R .dock{grid-column:1/-1}
+.rv{position:relative;display:flex;flex-direction:column;gap:12px;padding:14px 24px 14px;min-width:0;min-height:0;background:radial-gradient(120% 90% at 50% 0,#15151d,var(--bg))}
 .pv{position:relative;width:min(100cqw - 12px,(100cqh - 12px)*16/9);aspect-ratio:16/9;border-radius:10px;outline:2px solid #3f3f4d;outline-offset:3px}
 .topa{flex:1;min-height:0;display:flex;gap:18px}
-.srcs{width:176px;flex:none;display:flex;flex-direction:column;justify-content:center;gap:8px}
-.srcc{position:relative;height:99px;border-radius:9px;overflow:hidden;outline:1px solid var(--line)}
+.srcs{width:160px;flex:none;display:flex;flex-direction:column;justify-content:center;gap:8px}
+.srcc{position:relative;height:90px;border-radius:9px;overflow:hidden;outline:1px solid var(--line)}
 .srcc b{position:absolute;left:0;right:0;bottom:0;z-index:3;padding:14px 8px 6px;font:700 13px/1 var(--disp);letter-spacing:.08em;text-transform:uppercase;background:linear-gradient(transparent,#000d)}
 .srcc.on{outline:3px solid var(--text)}
 .srcc .tg2{position:absolute;left:6px;top:6px;z-index:3;padding:0 5px;border-radius:3px;background:var(--air);color:#fff;font:700 11px/16px var(--disp);letter-spacing:.12em}
@@ -46,22 +47,22 @@
 .ruler span:first-child{transform:none}.ruler span:last-child{transform:translateX(-100%)}
 
 .rv .seg{border-radius:10px}
-.rv .seg span{padding:0 15px;height:36px;display:flex;align-items:center;font:600 12.5px/1 var(--ui)}
+.rv .seg span{padding:0 15px;height:30px;display:flex;align-items:center;font:600 12.5px/1 var(--ui)}
 .rv .seg span.on{background:var(--text);color:#111}
-.ctl{display:flex;flex-direction:column;gap:9px}
-.bigb{flex:1;height:78px;border-radius:13px;display:flex;align-items:center;gap:16px;padding:0 22px;background:var(--p2);border:1px solid #3f3f4d;min-width:0}
+.ctl{display:flex;flex-direction:column;gap:6px}
+.bigb{flex:1;height:70px;border-radius:13px;display:flex;align-items:center;gap:16px;padding:0 22px;background:var(--p2);border:1px solid #3f3f4d;min-width:0}
 .bigb svg.i{width:26px;height:26px}
 .bigb b{display:block;font:700 28px/1 var(--disp);letter-spacing:.1em}
 .bigb small{display:block;margin-top:5px;font-size:12px;color:var(--dim);white-space:nowrap}
 .bigb.go{flex:1.25;background:var(--text);color:#111;border-color:transparent;box-shadow:0 10px 30px #0008}
 .bigb.go small{color:#111b}
 
-.recs{background:var(--p1);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;padding:18px 16px 16px;gap:12px}
+.recs{background:var(--p1);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;padding:14px 16px 14px;gap:8px}
 .recs h2{margin:0;font:700 22px/1 var(--disp);letter-spacing:.1em}
-.rc{display:flex;gap:12px;padding:8px;border-radius:12px;background:var(--p2);border:1px solid var(--line)}
-.rc .th{position:relative;width:138px;height:78px;border-radius:7px;overflow:hidden;flex:none}
+.rc{display:flex;gap:12px;padding:7px;border-radius:12px;background:var(--p2);border:1px solid var(--line)}
+.rc .th{position:relative;width:128px;height:72px;border-radius:7px;overflow:hidden;flex:none}
 .rc .len{position:absolute;right:5px;bottom:5px;z-index:3;padding:3px 5px;border-radius:4px;background:#000c;font:500 10.5px/1 var(--mono);color:#fff}
-.rc .tx{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:7px}
+.rc .tx{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:6px}
 .rc b{font:600 13.5px/1.1 var(--ui);white-space:nowrap}
 .rc .m{font-size:11.5px;color:var(--dim);white-space:nowrap}
 .rt{display:inline-flex;align-items:center;gap:5px;height:19px;padding:0 7px;border-radius:4px;background:var(--p3);font:700 11px/1 var(--disp);letter-spacing:.1em;text-transform:uppercase;color:var(--text);white-space:nowrap;align-self:flex-start}
@@ -86,7 +87,7 @@ const A=(30-14)/30*100,B=(30-6)/30*100,H=(30-9)/30*100;
 const wave=Array.from({length:150},(_,i)=>{const h=18+78*Math.abs(Math.sin(i*1.31)*Math.cos(i*.173)*Math.sin(i*.049+1));const p=i/150*100;
   return `<i style="--h:${h.toFixed(0)}%${p>A&&p<B?';background:var(--text)':''}"></i>`}).join('');
 const past=()=>`<div>
-  <div class="row" style="margin:0 2px 12px"><span class="cap">The last 30 seconds</span><span class="grow"></span><span class="mono dim">8.0 s picked</span></div>
+  <div class="row" style="margin:0 2px 10px"><span class="cap">The last 30 seconds</span><span class="grow"></span><span class="mono dim">8.0 s picked</span></div>
   <div class="tl">
     <div class="thumbs">${['chat','chat','game','game','game','game'].map(k=>`<div data-pic="${k}"></div>`).join('')}</div>
     <div class="wave">${wave}</div>
@@ -120,9 +121,9 @@ const recs=()=>`<div class="recs">
   <div class="row"><div class="btn" style="height:36px;padding:0 14px">${I('folder','sm')}Open the folder</div><span class="grow"></span><span class="dim" style="font-size:12px">212 GB free</span></div>
 </div>`;
 const V={
- 'review':{label:'REVIEW',cls:'R',note:'<b>REVIEW.</b> The last 30 seconds as a strip to scrub, with amber handles around the stretch picked and the frame under the head shown large; beside it what to replay, picked by its live picture, and below it the speed and the two actions. On the right, this show\'s recordings and clips as cards, one marked as repaired after a crash. The program\'s own card stays live, so looking back never hides what is on air.',
-   html:()=>topbar('REVIEW')+`<div class="rv"><div class="topa"><div class="stage"><div class="pv"><span class="tag cue">9 S AGO</span>${pic('game')}</div></div>${srcs()}</div>${past()}${controls()}</div>`+recs(),
-   after:f=>{const r=f.querySelector('.top .ib.b');r.classList.add('recclock');r.insertAdjacentHTML('beforeend','52:10')}},
+ 'review':{label:'REVIEW',cls:'R',note:'<b>REVIEW.</b> The last 30 seconds as a strip to scrub, with amber handles around the stretch picked and the frame under the head shown large; beside it what to replay, picked by its live picture, and below it the speed and the two actions. On the right, this show\'s recordings and clips as cards, one marked as repaired after a crash. The program\'s own card stays live and the dock stays underneath, so the scenes, the panic key, the sound, and the live picture stay on screen and looking back never hides what is on air.',
+   html:()=>topbar('REVIEW')+`<div class="rv"><div class="topa"><div class="stage"><div class="pv"><span class="tag cue">9 S AGO</span>${pic('game')}</div></div>${srcs()}</div>${past()}${controls()}</div>`+recs()+dock(),
+   after:f=>{air(f,'game');const r=f.querySelector('.top .ib.b');r.classList.add('recclock');r.insertAdjacentHTML('beforeend','52:10')}},
 };
 mount(V);
 </script>

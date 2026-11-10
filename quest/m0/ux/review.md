@@ -10,6 +10,9 @@ show's recordings and clips as cards with a picture, a length, and a size,
 one that was repaired after a crash marked as such, and a button that opens
 their folder.
 
+The bottom strip stays, and the program's card in "replay what" is the live
+picture, so looking back never hides what is on air.
+
 The title bar's record button starts and stops a recording from any page and
 shows its clock while recording.
 

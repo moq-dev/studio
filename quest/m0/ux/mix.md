@@ -14,7 +14,9 @@ Audio panel:
 - The same sends as a matrix, for someone who thinks in routing.
 
 The LIVE page's sound strip is the same meters and mutes for the sounds the
-stream carries.
+stream carries. On this page the bottom strip keeps the scene pads and the
+panic key and shows a small live picture where that sound strip sits
+elsewhere, so an operator riding a fader still sees what is on air.
 
 ## Plan
 

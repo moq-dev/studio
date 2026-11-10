@@ -22,6 +22,9 @@ The studio opens to the LIVE page of the
   [narrow window](/quest/m0/ux/mock/shell-compact.webp) stacks them. Nothing
   clips at any size the window allows.
 
+The title bar and the bottom strip are on every page, so the scenes, the
+sound, the panic key, and a live picture never leave the window while on air.
+
 BUILD, MIX, and REVIEW exist as pages holding today's panels in the new look,
 so nothing the studio does is lost before its own quest redesigns it.
 egui_dock, or whatever the toolkit's dock is, is removed.

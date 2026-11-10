@@ -79,6 +79,11 @@ the mock-up in the same PR.
 
 ### What is where
 
+The first column holds on every page, not only LIVE. The bottom strip of
+scene pads, panic key, and sound is on all four. On MIX, which is the sound,
+its sound slot holds a small live picture instead, and on REVIEW the
+program's card is the live picture.
+
 | Always on screen | On a page | In Settings |
 | --- | --- | --- |
 | The live picture and its tally frame | BUILD: layers, adding a source, the inspector, keyframes | Format, canvas size, frame rate, scene sizes |
