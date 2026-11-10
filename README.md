@@ -906,16 +906,74 @@ checkbox in the Sources panel, off by default and kept in the scene file's
 `published` list. Its track then goes to the relay beside the program, in the
 same broadcast: the program's catalog lists it under the `dev.moq.studio`
 section's `sources`, by source name, as a hang catalog of its own whose track
-names start with `source/`. Viewers and services fetch it and place it
-themselves.
+names start with `source/`. Viewers fetch it and place it over the program
+themselves, as the [layer layout](#layer-layout) says.
 
-A published source is left out of everything the studio composites: the
-program, the preview, published and recorded scenes, and every audio scene's
-mix, wherever it or a clone of it is placed or held. While viewers read its track, it claims its bitrate of the connection beside the program's, and its video encodes at what the connection grants it. Its track carries one rendition, the
+The program leaves a published source out, wherever it or a clone of it is
+placed, and so does every audio scene's mix. The studio draws it only as
+viewers will: over the program, in the Program panel and the program's
+virtual camera, and over the scene in preview, so both show what viewers
+see. It goes over every other item of its scene, and over the top layer,
+however the scene stacks it. Recordings hold the program as published,
+without it, and recording **each source too** gives a published camera,
+display, window, or microphone a file of its own. Published and recorded
+scenes, and a scene that shows the program, leave it out too. While viewers read its track, it claims its bitrate of the connection beside the program's, and its video encodes at what the connection grants it. Its track carries one rendition, the
 plain capture before any filter or gain, and encodes for as long as it is
-published, holding an encode session as one on program does. A source with
+published, holding an encode session as one on program does.
+
+Every player must reproduce how it is placed, so an item showing it takes no
+filter but opacity and no blend mode, nor do its source's filters or its
+keyframes, and no scene that another scene draws can place it. A source with
 its background removed cannot be published, since H.264 carries no
 transparency and its track would show the background.
+
+#### Layer layout
+
+While a source is published independently, the program's broadcast also
+carries a JSON track, `dev.moq.studio.layers`, listed in its catalog's `json`
+section. It is a snapshot: each change is a new group, stamped on the media
+clock with the frame it takes effect on, so a viewer who joins late reads the
+layout in force. The format is the studio's own until hang specifies a layer
+layout:
+
+```json
+{
+  "version": 1,
+  "canvas": { "width": 1920, "height": 1080 },
+  "start": 10000000,
+  "pictures": [
+    {
+      "item": {
+        "source": "camera",
+        "rect": { "x": 1440.0, "y": 760.0, "width": 400.0, "height": 225.0 },
+        "visible": true,
+        "filters": [{ "kind": "opacity", "amount": 0.9 }],
+        "keyframes": [{ "at": "1s", "x": 600.0 }]
+      }
+    }
+  ],
+  "sounds": [{ "source": "mic", "audio": { "gain": 1.0, "muted": false, "delay": "80ms" } }]
+}
+```
+
+- `version` is 1. A player refuses any other loudly and plays the program
+  alone.
+- `canvas` is the program's size, which pictures are placed on in pixels.
+- `start` is when the scene on program went on, in microseconds on the media
+  clock: the moment its pictures' keyframes play from.
+- `pictures` lists each item of the scene on program, then of the top layer,
+  showing a published source, back to front over the program, shown or
+  hidden. Each `item` is a scene file item: its `source` names the source's
+  entry under the catalog's `dev.moq.studio` `sources` (the source a clone
+  shows), and its `crop` and `filters` fold in its source's own.
+- `sounds` lists each published source the audio scene on program holds,
+  with the `gain`, `muted`, `pan`, and `delay` it plays at.
+- Each picture and sound may carry a subscription `priority` (0 if absent)
+  and whether a viewer may `toggle` it off (`false` if absent).
+
+A take changes the layout on the frame the program starts showing the new
+scene, so the published sources of the scene leaving go off and those of the
+scene coming in go on at once, even through a transition.
 
 ### Recording
 
@@ -1142,7 +1200,8 @@ Each catalog asks viewers to report beneath its broadcast, under
 
 The **Virtual camera** toggle in the Output panel shows the program as a
 camera that video-call and conferencing apps can pick, at the canvas size and
-frame rate. Each published scene has a toggle of its own beneath it in the
+frame rate, with each [published source](#published-independently) drawn
+over it as viewers see it. Each published scene has a toggle of its own beneath it in the
 panel, showing that scene at its own size as a camera of its own, so an app
 can pick the program or any published scene. A camera stays on until you
 turn it off or quit; it is not saved in the scene file. A scene's camera

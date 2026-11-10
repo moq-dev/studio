@@ -657,6 +657,9 @@ pub struct Program {
 	/// The sources published independently, whose tracks the broadcast
 	/// carries beside the program's.
 	published: tokio::sync::watch::Sender<BTreeSet<String>>,
+	/// Where and when the broadcast's viewers show those sources, and the
+	/// media time it last changed, while any is published.
+	layout: tokio::sync::watch::Sender<Option<(moq_scene::layout::Layout, moq_net::Timestamp)>>,
 	/// What a recording reads the program from, on the same clock.
 	recording: moq_net::origin::Route,
 	/// The recording broadcast's catalog, held for as long as the engine runs,
@@ -763,6 +766,26 @@ impl Program {
 		heard.extend(published.iter().cloned());
 		self.sources
 			.set_on_program(moq_scene::publish::OnProgram { shown, heard });
+	}
+
+	/// Publish the layer layout of what `state` drew on program at `at` on
+	/// the media clock, while any source is published independently.
+	fn lay_out(&self, state: &State, at: Duration) {
+		let collection = &state.collection;
+		let layout = (!collection.published.is_empty()).then(|| {
+			let start = at.saturating_sub(state.compositor.program_since());
+			moq_scene::layout::Layout::new(collection, state.compositor.program_scene(), start)
+		});
+		let Ok(at) = moq_net::Timestamp::try_from(at) else {
+			return;
+		};
+		self.layout.send_if_modified(|current| {
+			if current.as_ref().map(|(current, _)| current) == layout.as_ref() {
+				return false;
+			}
+			*current = layout.map(|layout| (layout, at));
+			true
+		});
 	}
 }
 
@@ -1421,6 +1444,8 @@ impl Engine {
 				return;
 			}
 			retired.retain(|ended| !ended.is_finished());
+			// Where this frame lands on the media clock.
+			let at = epoch + tick.saturating_duration_since(start);
 			let drawn = {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
@@ -1506,10 +1531,12 @@ impl Engine {
 					continue;
 				}
 				self.program.on_program(state, shown);
+				self.program.lay_out(state, at);
 				let compositor = &state.compositor;
 				for (scene, camera) in &mut state.cameras {
 					match scene {
-						None => camera.offer(Some(compositor.program()), compositor.canvas()),
+						// An app reading it cannot place the layers itself.
+						None => camera.offer(Some(compositor.layered()), compositor.canvas()),
 						Some(scene) => {
 							let Some((_, canvas)) = published.iter().find(|(name, _)| name == scene) else {
 								continue;
@@ -1539,7 +1566,7 @@ impl Engine {
 			drop(closed);
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
-			let timestamp = moq_net::Timestamp::try_from(epoch + tick.saturating_duration_since(start)).ok();
+			let timestamp = moq_net::Timestamp::try_from(at).ok();
 			// Every scene shares the program's frame rate.
 			let (program, canvas) = drawn.program;
 			if canvas.framerate != framerate {
@@ -1847,6 +1874,13 @@ async fn publish(
 			tracing::warn!(%err, "stopped publishing sources independently");
 		}
 	});
+	let (layout, follow) = tokio::sync::watch::channel(None);
+	let (laid_out, catalog) = (broadcast.clone(), listed.clone());
+	tokio::spawn(async move {
+		if let Err(err) = moq_scene::layout::publish(follow, laid_out, catalog).await {
+			tracing::warn!(%err, "stopped publishing the layer layout");
+		}
+	});
 
 	let health = match live {
 		Some(live) => {
@@ -1872,6 +1906,7 @@ async fn publish(
 			clock: clock.clone(),
 			sources: sources.clone(),
 			published,
+			layout,
 			recording,
 			recorded,
 			local,
@@ -3162,6 +3197,84 @@ mod tests {
 	/// a still, which has no file of its own. Recording a scene of another
 	/// size goes on in another file, holding its video. A recording holding a
 	/// mix other than the one on program records its audio.
+	/// A source published independently goes on the program broadcast's
+	/// layer layout, from when its scene went on program: a cut's layout
+	/// takes effect on the frame its scene starts. Once nothing is published,
+	/// the catalog stops listing the layout.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn the_program_carries_a_layer_layout() {
+		use moq_scene::layout::{Layout, TRACK};
+
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new().await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let mut loaded = red_canvas();
+		loaded.collection.published.insert("red".into());
+		let mut two = loaded.collection.scenes[0].clone();
+		two.name = "Two".into();
+		loaded.collection.scenes.push(two);
+		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
+			.await
+			.expect("the studio starts");
+
+		let broadcast = engine.program.publication.broadcast().consume();
+		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default())
+			.await
+			.expect("the program's catalog");
+		let listed = |catalog: &hang::Catalog| catalog.json.tracks.contains_key(TRACK);
+		kio::clock::timeout(TIMEOUT, async {
+			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		})
+		.await
+		.expect("the catalog lists the layout");
+		let track = broadcast.track(TRACK).unwrap();
+		let mut layouts = moq_json::snapshot::Consumer::<Layout>::new(track, Default::default());
+		let mut next = async || {
+			kio::clock::timeout(TIMEOUT, layouts.next())
+				.await
+				.expect("a layout")
+				.unwrap()
+				.expect("the layout goes on")
+		};
+		let first = next().await;
+		let sources: Vec<&str> = first
+			.value
+			.pictures
+			.iter()
+			.map(|picture| picture.item.source.as_str())
+			.collect();
+		assert_eq!(sources, ["red"]);
+
+		{
+			let mut state = engine.state.lock().unwrap();
+			state.compositor.set_preview(Some("Two".into()));
+			state.cut().unwrap();
+		}
+		let cut = next().await;
+		let at = Duration::from(cut.at.expect("stamped"));
+		assert_eq!(cut.value.start, at, "on from the frame the cut drew");
+		assert!(cut.value.start > first.value.start);
+
+		{
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft("Stop publishing `red`");
+			draft.set_published("red", false).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		kio::clock::timeout(TIMEOUT, async {
+			while catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		})
+		.await
+		.expect("the catalog stops listing the layout");
+
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn the_program_records_without_a_relay() {

@@ -40,8 +40,7 @@ land before replanning:
   (rejected: straight to `moq play`). moq's spec quest starts from it.
 - **Audio:** ✅ players mix independently published audio sources with the
   program's, at the gain and mute the layout carries (rejected: video only).
-  Since 2026-11-09 the layout carries pan and delay too; see
-  [layout](/quest/m2/compose/layout.md).
+  Since 2026-11-09 the layout carries pan and delay too.
 - **Controls:** ✅ viewer toggles and priorities land in the native player
   (rejected: browser only). Since 2026-11-09 that includes `moq play`; see
   [controls](/quest/m2/compose/controls.md).

@@ -86,12 +86,13 @@ pub struct Studio {
 impl Studio {
 	pub fn new(render: &eframe::egui_wgpu::RenderState, engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> Self {
 		// egui samples whatever the compositor's textures hold each frame, so
-		// they are registered again only when a resize replaces them.
+		// they are registered again only when a resize replaces them, or the
+		// program starts or stops showing layers over it.
 		let (preview, program, dropped) = {
 			let state = engine.state.lock().unwrap();
 			(
 				Registered::new(render, state.compositor.preview()),
-				Registered::new(render, state.compositor.program()),
+				Registered::new(render, state.compositor.layered()),
 				state.dropped,
 			)
 		};
@@ -229,7 +230,7 @@ impl Studio {
 		self.panels.program_drawn = state.compositor.canvas();
 		if let Some(render) = frame.wgpu_render_state() {
 			self.panels.preview.follow(render, state.compositor.preview());
-			self.panels.program.follow(render, state.compositor.program());
+			self.panels.program.follow(render, state.compositor.layered());
 		}
 		// Redraw at the canvas rate, so preview and program are live.
 		let framerate = state.compositor.canvas().framerate;
@@ -1978,10 +1979,11 @@ impl Panels {
 							if ui
 								.checkbox(&mut published, "Published independently")
 								.on_hover_text(
-									"Publish this source's own track to the relay beside the program, for viewers and \
-									 services to place themselves, and leave it out of the program. It encodes for as \
-									 long as it is published. Not for a source with its background removed, since its \
-									 track keeps the background.",
+									"Publish this source's own track to the relay beside the program, for viewers to \
+									 place over it as the layer layout says, and leave it out of the program. It \
+									 encodes for as long as it is published. Every player must reproduce how it is \
+									 placed, so it takes no filter but opacity and no blend mode, and not its \
+									 background removed, since its track keeps the background.",
 								)
 								.changed()
 							{
