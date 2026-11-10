@@ -185,50 +185,62 @@ fn is_zero(priority: &i8) -> bool {
 	*priority == 0
 }
 
-/// Publish each layout `layouts` holds on [`TRACK`] in `broadcast`, listed in
-/// `catalog`, stamped with the media time it took effect, until `layouts`
-/// closes. While it holds `None`, the track and its listing are gone.
-pub async fn publish(
-	mut layouts: tokio::sync::watch::Receiver<Option<(Layout, moq_net::Timestamp)>>,
+/// Publishes the layout on [`TRACK`] in a broadcast, listed in its catalog,
+/// while there is one.
+pub struct Publisher {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Catalog,
-) -> Result<(), Error> {
-	let mut track: Option<moq_mux::json::Snapshot<Layout>> = None;
-	loop {
-		let next = layouts.borrow_and_update().clone();
-		match next {
-			Some((layout, at)) => {
-				let snapshot = match &mut track {
-					Some(snapshot) => snapshot,
-					None => {
-						let info = moq_net::track::Info::default()
-							.with_timescale(moq_mux::Clock::TIMESCALE)
-							.with_priority(hang::catalog::PRIORITY.catalog)
-							.with_compress(true);
-						let created = broadcast.create_track(TRACK, info)?;
-						// Each layout whole in a group of its own, so a joiner
-						// needs no refresh to read it.
-						let options = moq_mux::json::Options::default().with_deltas(false);
-						let config = moq_mux::json::Config::default();
-						track.insert(catalog.json_snapshot(created, config, options)?)
-					}
-				};
-				snapshot.update(&layout, at)?;
-			}
+	/// The track, and the layout last written to it, while there is one.
+	track: Option<(moq_mux::json::Snapshot<Layout>, Option<Layout>)>,
+}
+
+impl Publisher {
+	/// Publish in `broadcast`, listed in `catalog`, from the first
+	/// [`update`](Self::update).
+	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: Catalog) -> Self {
+		Self {
+			broadcast,
+			catalog,
+			track: None,
+		}
+	}
+
+	/// Publish `layout`, stamped `at` on the media clock, when it took
+	/// effect, unless it is the one published already, starting the track and
+	/// its listing if there is none.
+	pub fn update(&mut self, layout: Layout, at: moq_net::Timestamp) -> Result<(), Error> {
+		let (snapshot, published) = match &mut self.track {
+			Some(track) => track,
 			None => {
-				if let Some(snapshot) = track.take() {
-					snapshot.finish()?;
-				}
+				let info = moq_net::track::Info::default()
+					.with_timescale(moq_mux::Clock::TIMESCALE)
+					.with_priority(hang::catalog::PRIORITY.catalog)
+					.with_compress(true);
+				let created = self.broadcast.create_track(TRACK, info)?;
+				// Each layout whole in a group of its own, so a joiner needs no
+				// refresh to read it.
+				let options = moq_mux::json::Options::default().with_deltas(false);
+				let config = moq_mux::json::Config::default();
+				let snapshot = self.catalog.json_snapshot(created, config, options)?;
+				self.track.insert((snapshot, None))
 			}
+		};
+		if published.as_ref() == Some(&layout) {
+			return Ok(());
 		}
-		if layouts.changed().await.is_err() {
-			break;
+		snapshot.update(&layout, at)?;
+		*published = Some(layout);
+		Ok(())
+	}
+
+	/// End the track, so a reader reaches its end, and take it out of the
+	/// catalog, until the next [`update`](Self::update).
+	pub fn finish(&mut self) -> Result<(), Error> {
+		match self.track.take() {
+			Some((snapshot, _)) => Ok(snapshot.finish()?),
+			None => Ok(()),
 		}
 	}
-	if let Some(snapshot) = track {
-		snapshot.finish()?;
-	}
-	Ok(())
 }
 
 #[cfg(test)]
@@ -401,10 +413,10 @@ mod tests {
 	}
 
 	/// The layout track carries each new layout at the media time it took
-	/// effect, listed in the catalog while there is one, and goes away with
-	/// it.
+	/// effect, listed in the catalog while there is one; finishing ends it
+	/// for a reader and takes it out of the catalog.
 	#[tokio::test]
-	async fn publishes_the_newest_layout() {
+	async fn publishes_each_new_layout() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 		let catalog = Catalog::new(&mut broadcast, config).unwrap();
@@ -412,12 +424,11 @@ mod tests {
 		let first = Layout::new(&collection, None, Duration::ZERO);
 		let second = Layout::new(&collection, Some("live"), Duration::from_secs(1));
 		let stamp = |secs| moq_net::Timestamp::try_from(Duration::from_secs(secs)).unwrap();
-		let (layouts, follow) = tokio::sync::watch::channel(Some((first.clone(), stamp(1))));
-		let task = tokio::spawn(publish(follow, broadcast.clone(), catalog.clone()));
-
-		let mut updates = catalog.consume().unwrap();
+		let mut publisher = Publisher::new(broadcast.clone(), catalog.clone());
+		publisher.update(first.clone(), stamp(1)).unwrap();
 		let listed = |catalog: &hang::Catalog<crate::publish::Ext>| catalog.json.tracks.contains_key(TRACK);
-		while !updates.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		assert!(listed(&catalog.snapshot()));
+
 		let track = broadcast.consume().track(TRACK).unwrap();
 		let mut reader = moq_json::snapshot::Consumer::<Layout>::new(track, Default::default());
 		let read = reader.next().await.unwrap().expect("a layout");
@@ -425,16 +436,19 @@ mod tests {
 			(read.value, read.at.map(Duration::from)),
 			(first, Some(Duration::from_secs(1)))
 		);
-		layouts.send(Some((second.clone(), stamp(2)))).unwrap();
+		publisher.update(second.clone(), stamp(2)).unwrap();
+		publisher.update(second.clone(), stamp(3)).unwrap();
 		let read = reader.next().await.unwrap().expect("a layout");
 		assert_eq!(
 			(read.value, read.at.map(Duration::from)),
 			(second, Some(Duration::from_secs(2)))
 		);
 
-		layouts.send(None).unwrap();
-		while updates.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
-		drop(layouts);
-		task.await.unwrap().unwrap();
+		publisher.finish().unwrap();
+		assert!(
+			reader.next().await.unwrap().is_none(),
+			"the unchanged layout wrote nothing"
+		);
+		assert!(!listed(&catalog.snapshot()));
 	}
 }

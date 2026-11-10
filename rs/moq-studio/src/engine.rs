@@ -657,9 +657,9 @@ pub struct Program {
 	/// The sources published independently, whose tracks the broadcast
 	/// carries beside the program's.
 	published: tokio::sync::watch::Sender<BTreeSet<String>>,
-	/// Where and when the broadcast's viewers show those sources, and the
-	/// media time it last changed, while any is published.
-	layout: tokio::sync::watch::Sender<Option<(moq_scene::layout::Layout, moq_net::Timestamp)>>,
+	/// Where and when the broadcast's viewers show those sources, while any
+	/// is published.
+	layout: Mutex<moq_scene::layout::Publisher>,
 	/// What a recording reads the program from, on the same clock.
 	recording: moq_net::origin::Route,
 	/// The recording broadcast's catalog, held for as long as the engine runs,
@@ -680,10 +680,13 @@ impl Drop for Program {
 }
 
 impl Program {
-	/// Finish the program's catalog and the recording's, once every track
-	/// they list has ended, so a viewer or a recording reading either reaches
-	/// its end rather than a cut.
+	/// End the layer layout, then finish the program's catalog and the
+	/// recording's, once every track they list has ended, so a viewer or a
+	/// recording reading either reaches its end rather than a cut.
 	fn finish(&self) {
+		if let Err(err) = self.layout.lock().unwrap().finish() {
+			tracing::warn!(%err, "cannot finish the layer layout");
+		}
 		for catalog in [&self.catalog, &self.recorded] {
 			// Fails only once the catalog failed, which ended its tracks already.
 			let _ = catalog.clone().finish();
@@ -771,21 +774,23 @@ impl Program {
 	/// Publish the layer layout of what `state` drew on program at `at` on
 	/// the media clock, while any source is published independently.
 	fn lay_out(&self, state: &State, at: Duration) {
-		let collection = &state.collection;
-		let layout = (!collection.published.is_empty()).then(|| {
-			let start = at.saturating_sub(state.compositor.program_since());
-			moq_scene::layout::Layout::new(collection, state.compositor.program_scene(), start)
-		});
-		let Ok(at) = moq_net::Timestamp::try_from(at) else {
+		// Past what a timestamp holds, the frame goes unstamped too.
+		let Ok(stamp) = moq_net::Timestamp::try_from(at) else {
 			return;
 		};
-		self.layout.send_if_modified(|current| {
-			if current.as_ref().map(|(current, _)| current) == layout.as_ref() {
-				return false;
+		let collection = &state.collection;
+		let mut publisher = self.layout.lock().unwrap();
+		let published = match collection.published.is_empty() {
+			true => publisher.finish(),
+			false => {
+				let start = at.saturating_sub(state.compositor.program_since());
+				let layout = moq_scene::layout::Layout::new(collection, state.compositor.program_scene(), start);
+				publisher.update(layout, stamp)
 			}
-			*current = layout.map(|layout| (layout, at));
-			true
-		});
+		};
+		if let Err(err) = published {
+			tracing::warn!(%err, "cannot publish the layer layout");
+		}
 	}
 }
 
@@ -1874,13 +1879,7 @@ async fn publish(
 			tracing::warn!(%err, "stopped publishing sources independently");
 		}
 	});
-	let (layout, follow) = tokio::sync::watch::channel(None);
-	let (laid_out, catalog) = (broadcast.clone(), listed.clone());
-	tokio::spawn(async move {
-		if let Err(err) = moq_scene::layout::publish(follow, laid_out, catalog).await {
-			tracing::warn!(%err, "stopped publishing the layer layout");
-		}
-	});
+	let layout = Mutex::new(moq_scene::layout::Publisher::new(broadcast.clone(), listed.clone()));
 
 	let health = match live {
 		Some(live) => {
@@ -3192,15 +3191,11 @@ mod tests {
 			.collect()
 	}
 
-	/// Without a relay, a recording encodes the program on its own and saves it
-	/// as a regular MP4 holding its video and audio. The color source publishes
-	/// a still, which has no file of its own. Recording a scene of another
-	/// size goes on in another file, holding its video. A recording holding a
-	/// mix other than the one on program records its audio.
 	/// A source published independently goes on the program broadcast's
 	/// layer layout, from when its scene went on program: a cut's layout
 	/// takes effect on the frame its scene starts. Once nothing is published,
-	/// the catalog stops listing the layout.
+	/// the layout ends and the catalog stops listing it, and quitting ends a
+	/// layout published again.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn the_program_carries_a_layer_layout() {
@@ -3228,16 +3223,15 @@ mod tests {
 		})
 		.await
 		.expect("the catalog lists the layout");
-		let track = broadcast.track(TRACK).unwrap();
-		let mut layouts = moq_json::snapshot::Consumer::<Layout>::new(track, Default::default());
-		let mut next = async || {
+		let read = || moq_json::snapshot::Consumer::<Layout>::new(broadcast.track(TRACK).unwrap(), Default::default());
+		let next = async |layouts: &mut moq_json::snapshot::Consumer<Layout>| {
 			kio::clock::timeout(TIMEOUT, layouts.next())
 				.await
-				.expect("a layout")
+				.expect("a layout or its end")
 				.unwrap()
-				.expect("the layout goes on")
 		};
-		let first = next().await;
+		let mut layouts = read();
+		let first = next(&mut layouts).await.expect("a layout");
 		let sources: Vec<&str> = first
 			.value
 			.pictures
@@ -3251,29 +3245,46 @@ mod tests {
 			state.compositor.set_preview(Some("Two".into()));
 			state.cut().unwrap();
 		}
-		let cut = next().await;
+		let cut = next(&mut layouts).await.expect("a layout");
 		let at = Duration::from(cut.at.expect("stamped"));
 		assert_eq!(cut.value.start, at, "on from the frame the cut drew");
 		assert!(cut.value.start > first.value.start);
 
-		{
+		let publish = |published: bool| {
 			let mut state = engine.state.lock().unwrap();
-			let mut draft = state.collection().draft("Stop publishing `red`");
-			draft.set_published("red", false).unwrap();
+			let mut draft = state.collection().draft("Publish `red`");
+			draft.set_published("red", published).unwrap();
 			state.commit(draft, None).unwrap();
-		}
+		};
+		publish(false);
+		assert!(next(&mut layouts).await.is_none(), "the layout ends");
 		kio::clock::timeout(TIMEOUT, async {
 			while catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
 		})
 		.await
 		.expect("the catalog stops listing the layout");
 
+		publish(true);
+		kio::clock::timeout(TIMEOUT, async {
+			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		})
+		.await
+		.expect("the catalog lists the layout again");
+		let mut layouts = read();
+		next(&mut layouts).await.expect("a layout");
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		assert!(next(&mut layouts).await.is_none(), "quitting ends the layout");
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");
 	}
+
+	/// Without a relay, a recording encodes the program on its own and saves it
+	/// as a regular MP4 holding its video and audio. The color source publishes
+	/// a still, which has no file of its own. Recording a scene of another
+	/// size goes on in another file, holding its video. A recording holding a
+	/// mix other than the one on program records its audio.
 
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
