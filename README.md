@@ -3,8 +3,24 @@
 `moq-studio` is a native streaming studio for Linux, macOS, and Windows. It
 composes cameras, screens, windows, images, colors, web pages, HTML and CSS
 overlays, and broadcasts from a relay into scenes on the GPU, mixes their audio, and publishes the result to a
-[MoQ](https://github.com/moq-dev/moq) relay. It is early and not packaged yet,
-so build it from source. The moq crates come from the `moq` submodule:
+[MoQ](https://github.com/moq-dev/moq) relay. It is early.
+
+On Linux, each [release](https://github.com/moq-dev/studio/releases) ships a
+Flatpak bundle for x86_64 and aarch64:
+
+```bash
+flatpak install --user moq-studio-x86_64.flatpak
+flatpak run live.kixel.studio show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
+```
+
+Its menu entry opens the scene collection kept in the app's own data
+directory and saves recordings to your Videos folder. The sandbox reaches
+cameras through the camera portal, which asks once, and files under your home
+directory. The virtual camera is its PipeWire node only, since the sandbox
+has no `/dev/video*`.
+
+Elsewhere, build it from source. The moq crates come from the `moq`
+submodule:
 
 ```bash
 git clone --recurse-submodules https://github.com/moq-dev/studio
@@ -39,6 +55,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   PipeWire cameras and the [virtual camera](#virtual-camera)'s PipeWire node.
   `openh264` is the software H.264 fallback for a machine without a hardware
   encoder.
+- `release` is what the packages build: `capture`, `openh264`, and the
+  hardware codecs. The Flatpak adds `pipewire`.
 - `cef` adds browser sources, on Linux only for now. The build takes CEF from
   `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
   loads `libcef.so` from beside itself or from that `CEF_PATH`.

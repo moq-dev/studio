@@ -30,8 +30,25 @@ impl Listing {
 	}
 }
 
-#[cfg(feature = "capture")]
+/// List every kind of device, logging what each listing found.
 pub async fn list() -> Listing {
+	fn found(devices: &Result<Vec<Pick>, String>) -> Result<usize, &str> {
+		devices.as_ref().map(Vec::len).map_err(String::as_str)
+	}
+
+	let listing = find().await;
+	tracing::info!(
+		cameras = ?found(&listing.cameras),
+		displays = ?found(&listing.displays),
+		windows = ?found(&listing.windows),
+		audio = ?found(&listing.audio),
+		"listed devices"
+	);
+	listing
+}
+
+#[cfg(feature = "capture")]
+async fn find() -> Listing {
 	fn picks<T>(result: Result<Vec<T>, impl std::fmt::Display>, pick: impl Fn(T) -> Pick) -> Result<Vec<Pick>, String> {
 		result
 			.map(|devices| devices.into_iter().map(pick).collect())
@@ -72,7 +89,7 @@ pub async fn list() -> Listing {
 }
 
 #[cfg(not(feature = "capture"))]
-pub async fn list() -> Listing {
+async fn find() -> Listing {
 	let unsupported = || Err("this build cannot capture; rebuild with `--features capture`".to_string());
 	Listing {
 		cameras: unsupported(),
