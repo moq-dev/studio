@@ -5,9 +5,9 @@
 A creator adds any number of RTMP, RTMPS, and WHIP destinations alongside
 MoQ, each with its own codec and bitrate, and goes live to all of them at
 once. Destinations that take the same picture scene and audio scene with identical
-encode settings share one encoder. Each destination's status and errors show
-in the UI. Going live and stopping are actions the Hotkeys panel can bind,
-as recording is. Audio is Opus here; AAC is
+encode settings share one encoder. Each destination is a row in the go-live
+sheet and in the health dot's list, with its status and errors. Audio is Opus
+here; AAC is
 [AAC for destinations](/quest/m0/destinations-aac.md).
 
 The fan-out lands here as a UI-free egress library, with the studio as its
@@ -71,8 +71,15 @@ Decided 2026-11-09 (maintainer, /quest-audit):
   here, with no moq quest or pin). This quest uses them through
   [the pin](/quest/m0/pin-egress-dial.md).
 
+Changed 2026-11-09 (maintainer, /quest-plan): going live and stopping, as
+actions and as hotkeys, are
+[Going live from inside the app](/quest/m0/ux/go-live.md), which lands them
+for MoQ relays. This quest adds its destinations to that sheet rather than
+building a second way to start a stream.
+
 ## Required
 
+- [Going live from inside the app](/quest/m0/ux/go-live.md) - the go-live sheet, the live control, and the health list its destinations join
 - [moq's egress dial changes are pinned](/quest/m0/pin-egress-dial.md) - RTMPS that keeps `tcUrl`, and a dial policy the caller supplies
 
 ## Related

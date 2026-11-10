@@ -69,4 +69,4 @@ and opening the app from a file manager with no terminal.
 ## Related
 
 - [Destinations](/quest/m0/destinations.md) - RTMP and WHIP rows in this sheet
-- [Packaging](/quest/m0/packaging.md) - an app opened by a double click has no flags
+- [Packaging](/quest/m0/packaging/README.md) - an app opened by a double click has no flags

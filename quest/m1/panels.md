@@ -41,4 +41,4 @@ Human check: a real chat page, logged in, typed into during a stream.
 
 ## Related
 
-- [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the browser panels render with on the other desktops
+- [Browser sources on macOS and Windows](/quest/m0/browser-source/README.md) - the browser panels render with on the other desktops

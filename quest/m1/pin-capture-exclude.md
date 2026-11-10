@@ -17,4 +17,4 @@ Planned 2026-11-09 (maintainer, /quest-plan) for
 
 ## Required
 
-- [The pin crosses the timeline removal](/quest/m0/pin-sync.md) - no later pin can skip that commit
+- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - no later pin can skip that commit

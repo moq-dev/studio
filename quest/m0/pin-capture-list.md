@@ -20,4 +20,4 @@ the new API breaks in `rs/moq-studio/src/devices.rs`.
 
 ## Required
 
-- [The pin crosses the timeline removal](/quest/m0/pin-sync.md) - no later pin can skip that commit
+- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - no later pin can skip that commit
