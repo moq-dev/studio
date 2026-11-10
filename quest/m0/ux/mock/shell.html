@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio shell</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="kit.css">
+</head>
+<body>
+<script src="kit.js"></script>
+<script>
+const V={
+ 'live':{label:'LIVE',cls:'L',note:'<b>LIVE.</b> The picture, the scenes, the sound, and the panic key. One control is the stream: it reads LIVE with the clock and becomes END STREAM under the pointer. One dot is the health of everything. Undo, search, record, and settings are icons with tooltips. Chat is its own window.',
+   html:()=>topbar('LIVE')+stage()+dock(),after:f=>air(f,'game')},
+ 'hover':{label:'LIVE · hover states',cls:'L',note:'<b>What hides behind a hover.</b> The health dot opens every destination with its rate and state, the viewers, and the encoder. The live control turns into END STREAM, held to confirm. Each icon names itself and its key.',
+   html:()=>topbar('LIVE',{end:true})+stage({extra:`<div class="pop" style="top:6px;right:16px"><div class="r"><i class="dot"></i><span class="grow">Relay</span><b>6.0 Mb/s · 18 ms</b></div><div class="r"><i class="dot"></i><span class="grow">RTMP 1</span><b>6.0 Mb/s</b></div><div class="r"><i class="dot" style="background:var(--cue)"></i><span class="grow">RTMP 2 <span class="dim">reconnecting</span></span><b>0.0 Mb/s</b></div><div class="r">${I('eye','sm')}<span class="grow">Watching</span><b>1,284</b></div><div class="r">${I('cam','sm')}<span class="grow">Encoder <span class="dim">NVENC</span></span><b>3.1 ms · 0 dropped</b></div></div><div class="tip" style="left:196px;top:2px">Undo <kbd>Ctrl Z</kbd></div>`})+dock(),after:f=>air(f,'game')},
+ 'build':{label:'BUILD',cls:'Bd',note:'<b>BUILD.</b> The same picture with its tools open: layers on the left, the selected layer\'s inspector on the right. It is still the live picture, so the red frame stays. Canvas size, formats, and safe areas live in Settings, not here.',
+   html:()=>topbar('BUILD')+layersCol()+stage({sel:true})+T('inspector')+dock(),after:f=>air(f,'game')},
+ 'studio':{label:'LIVE · Studio mode',cls:'L',note:'<b>Studio mode: cue and take.</b> The amber switch at the end of the scene strip turns it on. A scene click then cues instead of taking: NEXT docks on the stage with TAKE and AUTO.',
+   html:()=>topbar('LIVE')+stage({extra:`<div class="cuecard"><div class="row" style="padding:2px 4px 8px"><span class="cap" style="color:var(--cue)">Next</span><span class="grow" style="font:600 15px var(--disp);letter-spacing:.06em">JUST CHATTING</span><span class="chip sm">Edit</span></div><div class="th">${pic('chat')}</div><div class="take"><span class="t">TAKE</span><span class="a">AUTO</span></div><div class="row dim" style="justify-content:center;padding-top:7px;font-size:11px"><kbd>Enter</kbd> take <kbd>Space</kbd> auto · Fade 300 ms</div></div>`})+dock(true),after:f=>{air(f,'game');cue(f,'chat')}},
+ 'offair':{label:'BUILD · off air',cls:'Bd',note:'<b>Editing a scene that is not on air.</b> The frame turns amber, the live picture shrinks to a corner, and one button takes the edited scene live or returns to the live one.',
+   html:()=>topbar('BUILD')+layersCol()+stage({pic:'brb',cue:true,extra:`<div class="banner" style="top:14px">EDITING BRB, NOT ON AIR <span>Back to live</span><span style="background:var(--air);color:#fff">Take it live</span></div><div class="pip" style="width:200px;height:112px;right:18px;top:14px"><span class="tag">ON AIR</span>${pic('game')}</div>`})+T('inspector')+dock(),after:f=>{air(f,'game');cue(f,'brb');f.querySelector('.side:not(.l) .tabs span').textContent='BRB text'}},
+ 'portrait':{label:'LIVE · portrait show',cls:'P',note:'<b>A portrait show in the same window.</b> The layout follows the picture: a tall canvas moves the pages to a sidebar, the scenes to a column beside it, and the sound to a column on the right. What is left over can dock a private panel such as chat. The picture always gets the largest rectangle.',
+   html:()=>topbar('LIVE',{nav:false})+snav('LIVE')+`<div class="vs">${['soon','close','chat','brb'].map((k,i)=>`<div class="pad ${i==1?'air':''}">${i==1?'<span class="tg">ON AIR</span>':''}<div class="th">${pic(k)}</div><div class="nm">${['Soon','Close-up','Chatting','BRB'][i]}</div></div>`).join('')}<div class="pad add">${I('plus')}</div></div>`+stage({port:true,pic:'sell'})+`<div class="mixcol"><span class="cap">Sound</span>${T('mix')}<div class="grow"></div><div class="q panic">${I('shield')}BRB</div><div class="row" style="gap:6px"><div class="ib b">${I('clip')}</div><div class="ib b">${I('eyeoff')}</div><div class="grow"></div><div class="ib b">${I('cue')}</div></div></div>`+T('chatpanel')},
+ 'compact':{label:'LIVE · half a screen',cls:'K',note:'<b>Snapped beside a game on one monitor.</b> A narrow window stacks: picture, scenes, sound. The title bar keeps the pages, the health dot, and the live control; nothing is cut off.',
+   html:()=>`<div class="gamewin">${pic('game').replace('<div class="cam"></div>','').replace(/<div class="l3">.*?<\/div>/s,'')}</div><div class="win">${topbar('LIVE',{compact:true})}${stage()}<div class="dock">${T('scenes')}${quick}</div>${T('mix')}</div>`,after:f=>{air(f,'game');f.querySelectorAll('.win .pad').forEach((p,i)=>{if(i>3&&!p.classList.contains('add'))p.remove()});const t=f.querySelector('.win .tr');t&&t.remove()}},
+};
+mount(V);
+</script>
+</body>
+</html>

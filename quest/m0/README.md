@@ -86,6 +86,13 @@ replanned 2026-11-08 around independently published sources layered over the
 program). Overlays and animation render into the program here; that epic's
 layout track carries only the layers of independently published sources.
 
+Changed 2026-11-09 with the maintainer (/quest-plan): the studio gets one
+designed layout, a live picture with pages around it, in place of sixteen
+dockable panels; see [Broadcaster UX](/quest/m0/ux/README.md). Docking no
+longer argues for a toolkit, so that epic's spike decides it again between
+egui and Slint, the two that draw the compositor's textures with no copy on
+the studio's own device.
+
 Dropped from the first scoping round: relay fan-out ("encode once, the relay
 restreams") and its upload savings. Direct push with shared encoders matches
 OBS multistream, and the hosted version is product work outside this
@@ -104,6 +111,8 @@ repository.
 - [Browser sources on macOS and Windows](/quest/m0/browser-source/README.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
 - [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials the macOS app and its camera need; Windows ships unsigned
+- [Broadcaster UX](/quest/m0/ux/README.md) - one live picture with pages around it, in place of the dock of panels and the launch flags
+- [moq-video's capture listing is pinned](/quest/m0/pin-capture-list.md) - icons and live pictures of windows and devices, for the Add page
 - [Packaging](/quest/m0/packaging/README.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux, each its own quest
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
 - [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - moq-audio's AAC encoders, for AAC destinations

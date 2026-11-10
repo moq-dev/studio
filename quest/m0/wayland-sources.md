@@ -29,3 +29,7 @@ X11-only.
 ## Required
 
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - the token this quest stores
+
+## Related
+
+- [Adding a source by picking a picture](/quest/m0/ux/add.md) - the Add page whose Apps and Screens sections open this picker

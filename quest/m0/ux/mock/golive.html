@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio go live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Going live from inside the app: off air, the go-live sheet, health details, and the show library. */
+.tally.off{outline-color:#44444f;box-shadow:none}
+.golive{height:34px;padding:0 22px;border-radius:7px;background:var(--text);color:#111;font:700 20px/34px var(--disp);letter-spacing:.14em;white-space:nowrap;box-shadow:0 6px 24px #ffffff2e}
+.golive.down{background:transparent;color:var(--text);box-shadow:inset 0 0 0 2px var(--text)}
+.pill.open{border-color:var(--cue);background:#ffb0201a}
+
+/* the sheet drops from the live control and shades only what is near it */
+.sheet{position:absolute;z-index:20;right:14px;top:56px;width:452px;border-radius:14px;background:#17171ef9;border:1px solid #44444f;box-shadow:0 0 0 1px #000,0 30px 140px 40px #000c;display:flex;flex-direction:column}
+.sheet .hd{display:flex;align-items:center;gap:10px;padding:16px 10px 14px 18px}
+.sheet .hd b{display:block;font:700 24px/1 var(--disp);letter-spacing:.1em}
+.sheet .hd small{display:block;margin-top:6px;font-size:12px;color:var(--dim)}
+.sheet .blk{padding:12px 18px 8px;border-top:1px solid var(--line);display:flex;flex-direction:column}
+.sheet .blk>.cap{margin-bottom:6px}
+.ln{display:flex;align-items:center;gap:10px;min-height:38px;font-size:13px}
+.ln+.ln{border-top:1px solid var(--line)}
+.ln b{font-weight:600;white-space:nowrap}
+.ln .st{font-size:12px;color:var(--dim);white-space:nowrap}
+.ln.offd b{color:var(--dim)}
+.ok{width:20px;height:20px;border-radius:50%;flex:none;display:grid;place-items:center;background:#35d07f26;color:var(--ok)}
+.ok svg.i{width:12px;height:12px;stroke-width:3}
+.ok.bad{background:var(--cue);color:#1a1200}
+.fail{align-items:flex-start;padding:10px 0 8px}
+.fail .tx{flex:1;display:flex;flex-direction:column;gap:9px}
+.fail p{margin:0;font-size:13px;line-height:1.4}
+.fix{height:30px;padding:0 12px;border-radius:8px;background:var(--cue);color:#1a1200;font:600 12px/30px var(--ui);white-space:nowrap}
+.miniled{width:74px;flex:none}
+.sheet .ft{padding:14px 18px 16px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:10px}
+.confirm{height:56px;border-radius:11px;background:var(--text);color:#111;display:grid;place-items:center;font:700 25px/1 var(--disp);letter-spacing:.14em;box-shadow:0 10px 30px #0009}
+
+/* health details, from the health dot */
+.hpan{position:absolute;z-index:20;right:14px;top:56px;width:452px;border-radius:14px;background:#17171ef9;border:1px solid #44444f;box-shadow:0 0 0 1px #000,0 24px 70px #000c;padding:12px 16px 8px}
+.prob{display:flex;gap:12px;padding:14px;border-radius:11px;background:#ffb02014;box-shadow:inset 3px 0 0 var(--cue)}
+.prob svg.i{color:var(--cue);margin-top:1px}
+.prob p{margin:0;font:600 15.5px/1.35 var(--ui)}
+.prob small{display:block;margin-top:7px;font-size:12px;line-height:1.45;color:var(--dim)}
+.spark{display:flex;align-items:flex-end;gap:2px;height:26px;margin-top:11px}
+.spark i{flex:1;border-radius:1px;background:var(--faint);height:var(--h)}
+.spark i.w{background:var(--cue)}
+.hpan .also{display:flex;align-items:center;gap:10px;padding:11px 14px 5px;font-size:12.5px}
+.hpan .cap{display:block;margin:14px 0 2px}
+.hr2{display:flex;align-items:center;gap:9px;height:34px;border-bottom:1px solid var(--line);font-size:12.5px}
+.hr2:last-child{border:0}
+.hr2 b{font:500 12px/1 var(--mono);white-space:nowrap}
+.hr2 em{font-style:normal;color:var(--dim)}
+.hr2 svg.i{color:var(--dim)}
+.dot.warn{background:var(--cue)}
+.dot.idle{background:transparent;box-shadow:inset 0 0 0 2px var(--faint)}
+
+/* the library: the app opened with no show */
+.Lb{grid-template:48px minmax(0,1fr)/minmax(0,1fr)}
+.libw{padding:70px 110px 0;background:radial-gradient(110% 80% at 50% 0,#181822,var(--bg));display:flex;flex-direction:column;gap:26px;min-height:0}
+.libw h1{margin:0;font:700 46px/1 var(--disp);letter-spacing:.06em}
+.libw .sub{margin-top:9px;font-size:13.5px;color:var(--dim)}
+.shows{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px}
+.sc2{border-radius:14px;background:var(--p1);border:1px solid var(--line);overflow:hidden;display:flex;flex-direction:column}
+.sc2 .th{aspect-ratio:16/9;background:#050508;display:flex;justify-content:center;overflow:hidden}
+.sc2 .th>div{height:100%;aspect-ratio:16/9;border-radius:0}
+.sc2 .th.pt>div{aspect-ratio:9/16}
+.sc2 .bt{display:flex;align-items:center;gap:10px;padding:13px 14px 14px}
+.sc2 .bt b{display:block;font:700 19px/1 var(--disp);letter-spacing:.06em;text-transform:uppercase;white-space:nowrap}
+.sc2 .bt small{display:block;margin-top:6px;font-size:12px;color:var(--dim)}
+.sc2 .fm{flex:none;border:2px solid var(--faint);border-radius:3px}
+.sc2.first{border-color:#44444f;box-shadow:0 0 0 1px #44444f}
+.sc2.new{border:2px dashed #44444f;background:transparent;align-items:center;justify-content:center;gap:14px;color:var(--text)}
+.sc2.new .plus{width:60px;height:60px;border-radius:50%;background:var(--text);color:#111;display:grid;place-items:center}
+.sc2.new .plus svg.i{width:28px;height:28px;stroke-width:2.5}
+.sc2.new b{font:700 26px/1 var(--disp);letter-spacing:.12em}
+.sc2.new small{font-size:12.5px;color:var(--dim);margin-top:-6px}
+</style>
+</head>
+<body>
+<script src="kit.js"></script>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+<symbol id="check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></symbol>
+<symbol id="alert" viewBox="0 0 24 24"><path d="M12 4 2.500 20h19L12 4ZM12 10v5M12 17.500h.01"/></symbol>
+<symbol id="folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/></symbol>
+<symbol id="cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol>
+<symbol id="up" viewBox="0 0 24 24"><path d="M12 20V5m0 0-6 6m6-6 6 6"/></symbol>
+</defs></svg>
+<script>
+// off air: a neutral frame, GO LIVE in place of the clock, and the first scene marked
+const offair=(down)=>f=>{
+  f.querySelector('.tally').classList.replace('cue','off');
+  f.querySelector('.top .onair').outerHTML=`<div class="golive ${down?'down':''}">GO LIVE</div>`;
+  f.querySelector('.top .pill').innerHTML='<i class="dot"></i>Ready';
+  cue(f,'soon');f.querySelector('.pad.cued .tg').textContent='FIRST';
+};
+const dest=(on,dot,name,st)=>`<div class="ln ${on?'':'offd'}"><i class="tog ${on?'on':''}"></i><i class="dot ${dot}"></i><b class="grow">${name}</b><span class="st">${st}</span></div>`;
+const ok=(icon,name,st,extra='')=>`<div class="ln"><span class="ok">${I('check')}</span>${I(icon,'sm dim')}<b>${name}</b><span class="grow"></span>${extra}<span class="st">${st}</span></div>`;
+const sheet=()=>`<div class="sheet">
+  <div class="hd"><div class="grow"><b>GO LIVE</b><small>Friday Night Ranked opens on Starting soon</small></div><div class="ib">${I('x')}</div></div>
+  <div class="blk"><span class="cap">Where it goes</span>
+    ${dest(1,'','Relay','Connected, 18 ms away')}${dest(1,'','RTMP 1','Ready')}${dest(1,'','RTMP 2','Ready')}${dest(0,'idle','WHIP 1','Off')}
+  </div>
+  <div class="blk"><span class="cap">Checks</span>
+    ${ok('cam','Camera','Facecam has a picture')}
+    ${ok('mic','Microphone','Desk mic is moving','<div class="led miniled" style="--v:58%"></div>')}
+    ${ok('cpu','Encoder','Keeps up with 1080p at 60')}
+    <div class="ln fail"><span class="ok bad">${I('x')}</span><div class="tx"><p><b>The connection carries 4.1 Mb/s and this stream needs 6.</b> Viewers would see it stall.</p>
+      <div class="row"><span class="fix">Send 720p instead</span><span class="chip" style="height:30px">Check again</span></div></div></div>
+  </div>
+  <div class="ft"><div class="confirm">GO LIVE TO 3</div></div>
+</div>`;
+
+const spark=Array.from({length:60},(_,i)=>{const w=i>41;const h=w?38+58*Math.abs(Math.sin(i*1.9)):8+14*Math.abs(Math.sin(i*.7));return `<i class="${w?'w':''}" style="--h:${h.toFixed(0)}%"></i>`}).join('');
+const hr=(lead,name,val)=>`<div class="hr2">${lead}<span class="grow">${name}</span><b>${val}</b></div>`;
+const health=()=>`<div class="hpan">
+  <div class="prob">${I('alert')}<div class="grow"><p>The uplink is losing packets, so the video dropped to 720p.</p>
+    <small>2.4% lost over the last 3 minutes. It returns to 1080p by itself when the loss clears.</small><div class="spark">${spark}</div></div></div>
+  <div class="also"><i class="dot warn"></i><span class="grow">RTMP 2 dropped and is reconnecting, third try.</span><span class="dim">1 more</span></div>
+  <span class="cap">Destinations</span>
+  ${hr('<i class="dot warn"></i>','Relay <em>losing packets</em>','3.4 Mb/s · 41 ms')}
+  ${hr('<i class="dot"></i>','RTMP 1','3.5 Mb/s')}
+  ${hr('<i class="dot warn"></i>','RTMP 2 <em>reconnecting</em>','0.0 Mb/s')}
+  ${hr('<i class="dot idle"></i>','Failover relay <em>standing by</em>','')}
+  <span class="cap">Tracks and viewers</span>
+  ${hr(I('cam','sm'),'Video <em>720p at 60, down from 1080p</em>','3.2 Mb/s')}
+  ${hr(I('vol','sm'),'Sound <em>Stream</em>','128 kb/s')}
+  ${hr(I('eye','sm'),'Watching <em>9 are stalling</em>','1,284')}
+  ${hr(I('cpu','sm'),'Encoder <em>graphics card</em>','3.1 ms · 0 dropped')}
+</div>`;
+
+const show=(k,name,meta,o={})=>`<div class="sc2 ${o.first?'first':''}"><div class="th ${o.port?'pt':''}"><div data-pic="${k}"></div></div><div class="bt"><div class="grow"><b>${name}</b><small>${meta}</small></div><i class="fm" style="${o.port?'width:11px;height:18px':'width:22px;height:14px'}"></i></div></div>`;
+const library=()=>`<div class="top"><div class="logo"></div><div class="grow"></div><div class="ib">${I('gear')}</div><div class="wc"><i></i><i></i><i></i></div></div>
+<div class="libw">
+  <div class="row" style="align-items:flex-end"><div class="grow"><h1>YOUR SHOWS</h1><div class="sub">Open one to pick up where it ended. Nothing goes live until you say so.</div></div><div class="btn" style="height:38px;padding:0 16px;font-size:13px">${I('folder','sm')}Open a show file</div></div>
+  <div class="shows">
+    <div class="sc2 new"><div class="plus">${I('plus')}</div><b>NEW SHOW</b><small>Pick a shape, a camera, and a layout</small></div>
+    ${show('game','Friday Night Ranked','Live 3 days ago, for 3 h 2 min',{first:1})}
+    ${show('chat','Sunday Chill','Live last Sunday, for 1 h 40 min')}
+    ${show('sell','Garage Sale Live','Live 2 weeks ago, for 55 min',{port:1})}
+    ${show('duo','Podcast with Sam','Recorded 3 weeks ago, never live')}
+    ${show('close','Workbench Close-ups','Live last month, for 2 h 15 min')}
+  </div>
+</div>`;
+
+const V={
+ 'ready':{label:'Off air',cls:'L',note:'<b>Off air.</b> The same LIVE page before the show: the frame around the picture is neutral instead of red, the tag reads OFF AIR, and the live control is one large GO LIVE button. Nothing else on the page changes, so there is no separate setup screen to learn.',
+   html:()=>topbar('LIVE')+stage({pic:'soon',cue:true})+dock(),after:offair()},
+ 'preflight':{label:'GO LIVE pressed',cls:'L',note:'<b>The go-live sheet.</b> It drops from the button and shades only what is near it: where the stream is going, each destination with a switch and its state, then four checks that fill in as they finish. A failed check is one plain sentence with its fix, and the confirm button counts the destinations.',
+   html:()=>topbar('LIVE')+stage({pic:'soon',cue:true})+dock()+sheet(),after:offair(true)},
+ 'health':{label:'Health details',cls:'L',note:'<b>Health details, from the health dot.</b> The worst problem comes first, in plain words with its cause and what happens next; then every destination, then the tracks, the viewers, and the encoder as compact rows. It is today\'s Health panel, opened only when the dot is not green or someone asks.',
+   html:()=>topbar('LIVE')+stage()+dock()+health(),after:f=>{air(f,'game');const p=f.querySelector('.top .pill');p.classList.add('open');p.innerHTML='<i class="dot warn"></i>Degraded'}},
+ 'library':{label:'No show open',cls:'Lb',note:'<b>Opened with no show.</b> Recent shows as cards, each with the last picture of its program, beside a New show card and Open a show file. A double click on the app lands here, with no terminal and no flags.',
+   html:()=>library()},
+};
+mount(V);
+</script>
+</body>
+</html>

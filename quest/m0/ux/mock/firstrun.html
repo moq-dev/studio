@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Registered so a level meter can animate; the kit always sets --v where it reads it. */
+@property --v{syntax:'<percentage>';inherits:true;initial-value:0%}
+
+/* One step fills the window: title bar, the step, and a foot with Back, progress, Next. */
+.F{grid-template:48px 1fr 92px/1fr;background:radial-gradient(120% 90% at 50% 0,#15151d,var(--bg))}
+.step{min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 80px}
+.h1{margin:0;font:700 64px/1 var(--disp);letter-spacing:.005em;text-align:center}
+.sub{margin:14px 0 0;font:400 16px/1.45 var(--ui);color:var(--dim);text-align:center}
+.foot{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:0 40px 20px}
+.b2{height:48px;padding:0 22px;border-radius:12px;display:inline-flex;align-items:center;gap:9px;font:600 15px/1 var(--ui);justify-self:start;color:var(--dim)}
+.b2.pri{justify-self:end;background:var(--text);color:#0b0b0f;min-width:128px;justify-content:center}
+.b2.start{min-width:200px;height:56px;font:700 24px/1 var(--disp);letter-spacing:.14em}
+.prog{display:flex;gap:6px}
+.prog i{width:40px;height:4px;border-radius:2px;background:var(--p3)}
+.prog i.done{background:var(--dim)}.prog i.on{background:var(--text)}
+.tick{position:absolute;right:14px;top:14px;z-index:3;width:26px;height:26px;border-radius:50%;background:var(--sel);display:grid;place-items:center;color:#fff}
+.tick svg.i{width:15px;height:15px;stroke-width:3}
+
+/* format */
+.fmt{display:flex;gap:28px;margin-top:40px}
+.opt{position:relative;width:452px;border-radius:20px;background:var(--p1);border:2px solid var(--line);padding:26px 26px 24px}
+.opt.on{border-color:var(--sel);background:#4f8cff12;box-shadow:0 0 0 5px #4f8cff1f}
+.opt .art{height:292px;display:grid;place-items:center}
+.scr{position:relative;padding:8px;background:#000;border:2px solid #3b3b48}
+.scr.wide{width:396px;border-radius:14px;margin-bottom:30px}
+.scr.wide::after{content:"";position:absolute;left:50%;bottom:-30px;width:120px;height:28px;margin-left:-60px;background:#3b3b48;clip-path:polygon(34% 0,66% 0,72% 78%,100% 78%,100% 100%,0 100%,0 78%,28% 78%)}
+.scr.tall{width:166px;border-radius:26px}
+.scr.tall::before{content:"";position:absolute;left:50%;top:14px;width:40px;height:8px;margin-left:-20px;border-radius:4px;background:#000;z-index:2}
+.scr .ph{border-radius:7px;overflow:hidden;aspect-ratio:16/9}
+.scr.tall .ph{aspect-ratio:9/16;border-radius:17px}
+.opt h3{margin:22px 0 7px;font:700 32px/1 var(--disp);letter-spacing:.02em;display:flex;align-items:center;gap:12px}
+.opt h3 .chip{font:500 12px/1 var(--mono)}
+.opt p{margin:0;font-size:14px;line-height:1.4;color:var(--dim)}
+.later{margin-top:26px;font-size:13px;color:var(--faint)}
+
+/* sources */
+.srcs{display:grid;grid-template-columns:repeat(3,400px);gap:24px;margin-top:38px}
+.src{border-radius:20px;background:var(--p1);border:1px solid var(--line);padding:16px}
+.src .hd{display:flex;align-items:center;gap:10px;height:30px;margin:0 2px 14px}
+.src .hd b{font:700 24px/1 var(--disp);letter-spacing:.03em}
+.src .hd span{font-size:13px;color:var(--dim)}
+.prev{position:relative;aspect-ratio:16/9;border-radius:11px;overflow:hidden;background:#000}
+.prev.mic{background:var(--p2);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}
+.prev.mic b{font:700 40px/1 var(--disp);letter-spacing:.02em}
+.prev.mic small{font-size:12.5px;color:var(--dim)}
+.led.xl{flex:none;width:292px;height:20px;border-radius:3px;-webkit-mask:repeating-linear-gradient(90deg,#000 0 8px,transparent 8px 11px);mask:repeating-linear-gradient(90deg,#000 0 8px,transparent 8px 11px);
+  background:linear-gradient(90deg,var(--ok) 0 var(--v),transparent var(--v)),var(--p3)}
+.led.live{animation:lv var(--t,1.3s) steps(6) infinite alternate}
+@keyframes lv{from{--v:var(--lo)}to{--v:var(--hi)}}
+.opts{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:14px}
+.o{min-width:0}
+.o .th{position:relative;aspect-ratio:16/9;border-radius:7px;background:var(--p2)}
+.o .th::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 1px #ffffff1c}
+.o.on .th{outline:2px solid var(--sel);outline-offset:2px}
+.o span{display:block;margin-top:8px;font:500 11.5px/1.2 var(--ui);color:var(--dim);text-align:center;white-space:nowrap}
+.o.on span{color:var(--text)}
+.o .th.c{display:grid;place-items:center;color:var(--dim)}
+.o .th.none{background:transparent;color:var(--faint)}
+.o .th.none::after{box-shadow:none;border:1.5px dashed var(--line)}
+.o .th .led{position:absolute;left:9px;right:9px;bottom:8px;height:5px}
+.o .th.m svg.i{margin-bottom:9px}
+.ai{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;color:#fff;font:700 11px/1 var(--disp);position:absolute;left:4px;bottom:4px;z-index:2}
+.ai svg.i{width:11px;height:11px}
+.ai.dv{border-radius:50%;background:#000a}
+
+/* fake pictures, sized in cqw like the kit's */
+.web{background:#eef0f5}
+.web .tb{left:0;right:0;top:0;height:11%;background:#cfd3de}
+.web .hero{left:6%;top:19%;width:88%;height:32%;border-radius:1.6cqw;background:linear-gradient(120deg,#5a1f6e,#ff7a3d)}
+.web .tx{left:6%;top:59%;width:54%;height:36%;background:repeating-linear-gradient(#b9bdca 0 2.4cqw,transparent 2.4cqw 6.5cqw)}
+.web .bx{right:6%;top:59%;width:28%;height:29%;border-radius:1.6cqw;background:#d5d9e4}
+.desk{background:linear-gradient(135deg,#16324f,#5b2a6b)}
+.desk .w1{left:7%;top:9%;width:58%;height:64%;border-radius:1.2cqw;background:linear-gradient(#1b0b3a,#5a1f6e 50%,#ff7a3d 70%,#12061f 71%)}
+.desk .w2{right:6%;top:24%;width:30%;height:56%;border-radius:1.2cqw;background:#eef0f5}
+.desk .bar{left:0;right:0;bottom:0;height:9%;background:#000a}
+.face{background:radial-gradient(circle at 84% 16%,#ffb0203d,transparent 38%),linear-gradient(160deg,var(--room,#34406a),#1c2136)}
+.face::before{content:"";position:absolute;left:41%;top:17%;width:18%;aspect-ratio:1;border-radius:50%;background:var(--skin,#e9b48f)}
+.face::after{content:"";position:absolute;left:27%;top:56%;width:46%;height:60%;border-radius:45% 45% 0 0;background:var(--shirt,#3b6cf6)}
+.plat{background:linear-gradient(#4aa8ff 0,#a8dcff 64%,#3d9a4a 64%,#2c6e36)}
+.plat .s{right:11%;top:12%;width:11%;aspect-ratio:1;border-radius:50%;background:#fff6c2}
+.plat .b1{left:16%;top:41%;width:24%;height:8%;border-radius:.8cqw;background:#c7772e}
+.plat .h{left:25%;top:27%;width:5%;height:14%;border-radius:1.2cqw;background:#e23b3b}
+.table .obj{left:39%;top:20%;width:22%;height:56%}
+.table .price{right:auto;left:4%;top:7%;font-size:5cqw;padding:1cqw 2cqw;border-radius:1.2cqw}
+.table .cam{width:17%}
+
+/* check */
+.chk{flex-direction:row;gap:72px;padding:0 100px}
+.verdict{width:620px}
+.verdict .h1{font-size:104px;line-height:.94;text-align:left;margin-top:22px}
+.verdict .sub{text-align:left;font-size:17px;margin-top:18px}
+.okc{width:56px;height:56px;border-radius:50%;background:#35d07f24;color:var(--ok);display:grid;place-items:center}
+.okc svg.i{width:30px;height:30px;stroke-width:2.6}
+.cks{margin-top:30px}
+.ck{display:flex;align-items:center;gap:14px;min-height:50px;padding:10px 0;border-top:1px solid var(--line);font-size:14.5px}
+.ck .st{width:24px;height:24px;border-radius:50%;flex:none;display:grid;place-items:center;background:#35d07f24;color:var(--ok)}
+.ck .st svg.i{width:14px;height:14px;stroke-width:3}
+.ck.bad .st{background:#ffb02026;color:var(--cue)}
+.ck b{width:104px;flex:none;font-weight:600}
+.ck span{color:var(--dim);line-height:1.35}
+.ck.bad span{color:var(--text)}
+.ck .fix{height:32px;padding:0 13px;border-radius:9px;background:var(--text);color:#0b0b0f;font:600 12.5px/32px var(--ui);white-space:nowrap;flex:none}
+.disc{display:flex;align-items:center;gap:8px;height:46px;border-top:1px solid var(--line);color:var(--dim);font-size:14px}
+.spec{width:508px;border-radius:20px;border:1.5px dashed #3a3a48;padding:20px 24px 12px}
+.spec h2{margin:16px 0 4px;font:700 46px/1 var(--disp);color:var(--cue);display:flex;align-items:center;gap:12px}
+.spec h2 svg.i{width:34px;height:34px}
+.spec .cks{margin-top:18px}
+.spec .ck b{width:92px}
+.spec .ck:first-child{border-top-color:var(--line)}
+
+/* layout */
+.tpls{display:grid;grid-template-columns:repeat(4,298px);gap:20px;margin-top:40px}
+.tpl{position:relative;border-radius:18px;background:var(--p1);border:2px solid var(--line);padding:10px 10px 18px}
+.tpl.on{border-color:var(--sel);background:#4f8cff12;box-shadow:0 0 0 5px #4f8cff1f}
+.tpl .th{aspect-ratio:16/9;border-radius:10px;overflow:hidden}
+.tpl .th.empty{border:2px dashed var(--line);display:grid;place-items:center;color:var(--faint)}
+.tpl .th.empty svg.i{width:28px;height:28px}
+.tpl h3{margin:16px 8px 7px;font:700 26px/1 var(--disp);letter-spacing:.02em}
+.tpl p{margin:0 8px;font-size:13px;line-height:1.45;color:var(--dim);min-height:38px}
+.tpl .tick{right:16px;top:178px}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="webcam" viewBox="0 0 24 24"><circle cx="12" cy="10" r="6.5"/><circle cx="12" cy="10" r="2"/><path d="M12 16.5V21M8 21h8"/></symbol>
+<symbol id="capcard" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 12h6M10.500 9.500 13 12l-2.500 2.500M17 10.500v3"/></symbol>
+<symbol id="phone" viewBox="0 0 24 24"><rect x="7" y="2.500" width="10" height="19" rx="2.500"/><path d="M11 18h2"/></symbol>
+<symbol id="headset" viewBox="0 0 24 24"><path d="M4 14a8 8 0 0 1 16 0M4 14h3v5H6a2 2 0 0 1-2-2v-3ZM20 14h-3v5h1a2 2 0 0 0 2-2v-3ZM20 17v1.500a2.500 2.500 0 0 1-2.500 2.500H13"/></symbol>
+<symbol id="none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.500"/><path d="m6 6 12 12"/></symbol>
+<symbol id="check" viewBox="0 0 24 24"><path d="m5 12.500 4.500 4.500L19 7.500"/></symbol>
+<symbol id="back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+<symbol id="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+<symbol id="warn" viewBox="0 0 24 24"><path d="M12 4 2.500 20h19L12 4ZM12 10v4.500M12 17.500h.01"/></symbol>
+<symbol id="bang" viewBox="0 0 24 24"><path d="M12 5v9M12 18.500h.01"/></symbol>
+</defs></svg>
+<script src="kit.js"></script>
+<script>
+const face=(shirt,room)=>`<div class="pic face" style="${shirt?'--shirt:'+shirt+';':''}${room?'--room:'+room:''}"></div>`;
+const P={
+  game:pic('game').replace('<div class="cam"></div>','').replace(/<div class="l3">.*?<\/div>/s,''),
+  web:'<div class="pic web"><div class="tb"></div><div class="hero"></div><div class="tx"></div><div class="bx"></div></div>',
+  desk:'<div class="pic desk"><div class="w1"></div><div class="w2"></div><div class="bar"></div></div>',
+  usb:face(),
+  card:'<div class="pic plat"><div class="s"></div><div class="b1"></div><div class="h"></div></div>',
+  phone:pic('close'),
+  talk:`<div class="pic face"><div class="l3">KIXELATED<small>Talking it over</small></div></div>`,
+  table:`<div class="pic close table"><div class="obj"></div><div class="price">$42</div><div class="cam"></div></div>`,
+};
+const bar=`<div class="top"><div class="logo"></div><div class="show">New show</div><div class="grow"></div><div class="wc"><i></i><i></i><i></i></div></div>`;
+const foot=(n,start)=>`<div class="foot">${n>1?`<div class="b2">${I('back')}Back</div>`:'<span></span>'}<div class="prog">${[1,2,3,4].map(i=>`<i class="${i<n?'done':i==n?'on':''}"></i>`).join('')}</div><div class="b2 pri ${start?'start':''}">${start?'START':'Next'}</div></div>`;
+const tick=`<span class="tick">${I('check')}</span>`;
+const dv=i=>`<span class="ai dv">${I(i)}</span>`;
+const app=(c,g)=>`<span class="ai" style="background:${c}">${g}</span>`;
+const o=(name,th,on)=>`<div class="o ${on?'on':''}">${th}<span>${name}</span></div>`;
+const none=o('None',`<div class="th c none">${I('none')}</div>`);
+const mic=(icon,v,live)=>`<div class="th c m">${I(icon)}<div class="led ${live?'live':''}" style="--v:${v}%;--lo:3%;--hi:${v}%"></div></div>`;
+const ck=(b,t,fix)=>`<div class="ck ${fix?'bad':''}"><i class="st">${I(fix?'bang':'check')}</i><b>${b}</b><span class="grow">${t}</span>${fix?`<i class="fix" style="font-style:normal">${fix}</i>`:''}</div>`;
+
+const V={
+ 'format':{label:'1 · Format',cls:'F',note:'<b>Step 1: the format.</b> The first launch opens with one question and two pictures, not a page of text. A show has one format, so this is asked once and can be changed later in Settings.',
+   html:()=>bar+`<div class="step"><h1 class="h1">What are you making?</h1>
+     <div class="fmt">
+       <div class="opt on">${tick}<div class="art"><div class="scr wide"><div class="ph">${pic('game')}</div></div></div><h3>Landscape <span class="chip">16:9</span></h3><p>Wide, for monitors and TVs. Games, desktops, talk shows.</p></div>
+       <div class="opt"><div class="art"><div class="scr tall"><div class="ph">${pic('sell')}</div></div></div><h3>Portrait <span class="chip">9:16</span></h3><p>Tall, for phones. Selling, close-ups, short clips.</p></div>
+     </div><p class="later">One show has one format. You can change it later in Settings.</p></div>`+foot(1)},
+ 'sources':{label:'2 · Sources',cls:'F',note:'<b>Step 2: camera, screen, microphone.</b> Each is chosen from pictures: the camera\'s live preview, a thumbnail of the window or screen, and a level meter that asks you to say something. None is always an answer, so a show with no camera or no screen is not an error.',
+   html:()=>bar+`<div class="step"><h1 class="h1">Pick your camera, screen, and mic</h1><p class="sub">You can add more later. Pick None for anything you do not have.</p>
+     <div class="srcs">
+       <div class="src"><div class="hd">${I('webcam')}<b class="grow">Camera</b><span>USB camera</span></div><div class="prev">${P.usb}</div>
+         <div class="opts">${o('USB camera',`<div class="th">${P.usb}${dv('webcam')}</div>`,1)}${o('Capture card',`<div class="th">${P.card}${dv('capcard')}</div>`)}${o('Phone',`<div class="th">${P.phone}${dv('phone')}</div>`)}${none}</div></div>
+       <div class="src"><div class="hd">${I('mon')}<b class="grow">Screen or window</b><span>Neon Drift</span></div><div class="prev">${P.game}</div>
+         <div class="opts">${o('Neon Drift',`<div class="th">${P.game}${app('#e2574c','N')}</div>`,1)}${o('Browser',`<div class="th">${P.web}${app('#2f7df6',I('globe'))}</div>`)}${o('Main display',`<div class="th">${P.desk}${dv('mon')}</div>`)}${none}</div></div>
+       <div class="src"><div class="hd">${I('mic')}<b class="grow">Microphone</b><span>Desk mic</span></div><div class="prev mic"><b>Say something</b><div class="led xl live" style="--lo:2%;--hi:9%;--v:9%;--t:1.6s"></div><small>The bar moves when this microphone hears you.</small></div>
+         <div class="opts">${o('Desk mic',mic('mic',14,1),1)}${o('Headset',mic('headset',4))}${o('USB camera',mic('webcam',8))}${none}</div></div>
+     </div></div>`+foot(2)},
+ 'check':{label:'3 · Check',cls:'F',note:'<b>Step 3: one verdict.</b> The checks end in a single sentence in large type, with devices, encoder, and connection as three short lines and the numbers folded under Details. The dashed panel on the right is not part of the screen: it shows how the same step reads when checks fail, one plain sentence and one button that fixes or skips each.',
+   html:()=>bar+`<div class="step chk">
+     <div class="verdict"><div class="okc">${I('check')}</div><h1 class="h1">Ready for<br>1080p at 60</h1><p class="sub">Full HD at 60 frames a second, with room to spare.</p>
+       <div class="cks">${ck('Devices','Camera, window, and microphone are all working')}${ck('Encoder','Your graphics card does the encoding')}${ck('Connection','Fast and steady enough for this quality')}
+       <div class="disc">${I('chev','sm')}Details</div></div></div>
+     <div class="spec"><span class="cap">How a failed check reads</span><h2>${I('warn')}Two things to fix</h2>
+       <div class="cks">${ck('Devices','Another app is using the camera.','Go on without it')}${ck('Encoder','Your graphics card does the encoding')}${ck('Connection','Your connection is too slow for 1080p.','Use 720p')}
+       <div class="disc">${I('chev','sm')}Details</div></div></div>
+   </div>`+foot(3)},
+ 'layout':{label:'4 · Layout',cls:'F',note:'<b>Step 4: a starting layout.</b> Four templates drawn with the camera and window just chosen, so the pick is a picture of the result. Start opens the studio with that scene built; nothing goes live until the stream is started there.',
+   html:()=>bar+`<div class="step"><h1 class="h1">Pick a starting layout</h1><p class="sub">It is only a start. Everything can be moved later.</p>
+     <div class="tpls">
+       <div class="tpl on">${tick}<div class="th">${pic('game')}</div><h3>Game with camera</h3><p>Your game fills the picture, you sit in the corner.</p></div>
+       <div class="tpl"><div class="th">${P.talk}</div><h3>Just talking</h3><p>You, full frame, with your name underneath.</p></div>
+       <div class="tpl"><div class="th">${P.table}</div><h3>Product table</h3><p>A view of the table for showing things, with a price tag.</p></div>
+       <div class="tpl"><div class="th empty">${I('plus')}</div><h3>Empty</h3><p>A blank picture to build from.</p></div>
+     </div></div>`+foot(4,true)},
+};
+mount(V);
+</script>
+</body>
+</html>
