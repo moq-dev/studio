@@ -6,13 +6,17 @@
 # xdg-desktop-portal on the host.
 set -euo pipefail
 
-# The portal starts on the session bus when the studio first calls it.
+# The portal starts on the session bus when the studio first calls it, and
+# finds PipeWire in the runtime directory the bus was started with.
 if [[ -z ${STUDIO_SMOKE:-} ]]; then
-    exec env STUDIO_SMOKE=1 dbus-run-session -- "$0" "$@"
+    XDG_RUNTIME_DIR=$(mktemp -d)
+    export XDG_RUNTIME_DIR STUDIO_SMOKE=1
+    trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+    dbus-run-session -- "$0" "$@"
+    exit
 fi
 
-runtime=$(mktemp -d)
-export XDG_RUNTIME_DIR=$runtime
+runtime=$XDG_RUNTIME_DIR
 log=$runtime/studio.log
 pids=()
 cleanup() {
@@ -20,9 +24,17 @@ cleanup() {
         kill "${pids[@]}" 2>/dev/null || true
         wait "${pids[@]}" 2>/dev/null || true
     fi
-    rm -rf "$runtime"
+    if [[ -f $log ]]; then
+        echo "--- the studio's log"
+        cat "$log"
+    fi
 }
 trap cleanup EXIT
+
+fail() {
+    echo "$1" >&2
+    exit 1
+}
 
 # Wait for a socket, failing as soon as the daemon that should create it exits.
 await() {
@@ -48,27 +60,23 @@ export SWAYSOCK WAYLAND_DISPLAY
 
 flatpak run --env=NO_COLOR=1 --command=moq-studio-desktop live.kixel.studio 2>"$log" &
 studio=$!
+pids+=("$studio")
 
 # Guided setup lists the devices on the first launch. The log ends when the
 # studio exits, and the timeout ends a launch that hangs.
-status=0
-timeout 300 grep -m1 -q 'listed devices' <(tail --pid="$studio" -n +1 -F "$log" 2>/dev/null) || status=$?
-if ((status == 0)); then
-    swaymsg '[app_id="moq-studio"] kill' >/dev/null
-    wait "$studio" || status=$?
-else
-    kill "$studio" 2>/dev/null || true
-fi
-cat "$log"
-((status == 0)) || {
-    echo "the studio did not list devices and quit cleanly (status $status)" >&2
-    exit 1
-}
-
+timeout 300 grep -m1 -q 'listed devices' <(tail --pid="$studio" -n +1 -F "$log" 2>/dev/null) ||
+    fail "the studio never listed its devices"
 listing=$(grep 'listed devices' "$log")
 for kind in cameras audio; do
-    [[ $listing == *"$kind=Ok("* ]] || {
-        echo "the studio could not list $kind" >&2
-        exit 1
-    }
+    [[ $listing == *"$kind=Ok("* ]] || fail "the studio could not list $kind"
 done
+
+# Setup lists the devices before its window opens.
+deadline=$((SECONDS + 120))
+until swaymsg -t get_tree | grep -q '"app_id": "moq-studio"'; do
+    kill -0 "$studio" || fail "the studio exited before its window opened"
+    ((SECONDS < deadline)) || fail "the studio's window never opened"
+    sleep 0.1
+done
+swaymsg '[app_id="moq-studio"] kill' >/dev/null
+wait "$studio" || fail "the studio did not quit cleanly when its window closed"
