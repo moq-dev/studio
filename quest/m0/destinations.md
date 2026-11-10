@@ -37,12 +37,13 @@ Decided 2026-10-22 with the maintainer:
   - **RTMPS:** dials `rtmps://` through moq-rtmp, whose TLS route sends no
     `tcUrl` today, which several ingest servers reject. moq's
     [RTMPS keeps `tcUrl`](https://github.com/moq-dev/moq/blob/main/quest/m3/rtmp-rtmps-tcurl.md)
-    fixes that.
+    fixes that, planned in
+    [moq-dev/moq#8421](https://github.com/moq-dev/moq/pull/8421).
   - **Untrusted destination URLs:** a server-side host must be able to
     refuse private and loopback addresses, so dialing goes through the
     policy moq's
     [caller-supplied dial policy](https://github.com/moq-dev/moq/blob/main/quest/m3/webrtc-dial-policy.md)
-    adds, rather than resolving any URL it is handed.
+    adds (also planned in #8421), rather than resolving any URL it is handed.
 - **The studio chooses codecs, not a server:**
   - Opus by default.
   - E-RTMP HEVC or AV1 only when the creator picks it for a destination that

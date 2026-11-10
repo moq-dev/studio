@@ -53,8 +53,10 @@ land before replanning:
   moq's m3.
 
 Still settled from 2026-10-26: local sources are tracks in the studio's one
-broadcast, and guests stay their own broadcasts, named through the hang
-catalog's `include` references.
+broadcast, and guests stay their own broadcasts. How the layout names a
+guest is open in the [layer layout](/quest/m2/compose/layout.md)'s Waiting:
+hang's `include` requires an included broadcast to share the listing
+catalog's timeline, clock, and join interval, which a guest's does not.
 
 moq's side, in its own quest tree (m3): hang specifies a layer layout track,
 and `moq play` and `@moq/watch` composite it.
