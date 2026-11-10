@@ -22,7 +22,3 @@ On top of what Linux landed:
 ## Required
 
 - [macOS app](/quest/m0/packaging/macos.md) - the app bundle CEF's helper apps join
-
-## Related
-
-- [Studio on macOS with capture granted](/quest/m0/app-macos.md) - the rest of the macOS app, which pages do not need

@@ -16,4 +16,3 @@ its signing (rejected: a Related link only; leaving the quests unlinked).
 
 - [macOS app](/quest/m0/packaging/macos.md) - the app bundle that carries and signs the extension
 - [The Apple signing identity is available](/quest/m0/signing.md) - system extensions only load when signed
-- [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac

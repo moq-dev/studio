@@ -93,7 +93,6 @@ repository.
 
 ## Required
 
-- [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
 - [nixos2 boots Windows for agents](/quest/m0/windows-host.md) - a Windows machine agents reach over ssh, with a camera and microphone
 - [The studio builds for Windows in CI](/quest/m0/windows-build.md) - a nightly `windows-latest` build, which needs no Windows host
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux

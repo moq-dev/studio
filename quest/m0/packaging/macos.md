@@ -24,7 +24,10 @@ Lay the bundle out and order the signing so nested code can be added: a
 system extension and CEF's helper apps are each signed before the app that
 holds them.
 
+## Waiting
+
+- moq-dev/moq: a Mac camera renders only once AVFoundation asks for NV12 instead of `2vuy`, in review as [moq-dev/moq#8251](https://github.com/moq-dev/moq/pull/8251); done when it merges, `just upgrade-moq` bumps the gitlink here, and a Mac camera shows its picture in program
+
 ## Required
 
 - [The Apple signing identity is available](/quest/m0/signing.md) - the credentials macOS signing needs
-- [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac
