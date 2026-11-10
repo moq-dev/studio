@@ -1,5 +1,6 @@
 //! Draw scenes on the GPU: a preview, a program and the transition between
-//! scenes on it, and each scene an output reads on its own.
+//! scenes on it, each scene an output reads on its own, and a thumbnail of
+//! each scene or source the UI shows.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -51,6 +52,14 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// textures show it at different moments of them, it is drawn once for each.
 /// A [`Source::Program`] shows the program texture itself, drawn before
 /// anything showing it.
+///
+/// A [`Thumbnail`] is drawn only while [`set_thumbnails`](Self::set_thumbnails)
+/// names it, into a texture of its own of at most 256 pixels a
+/// side, redrawn about five times a second on the program
+/// clock, each on a render of its own so a strip of them spreads its cost. A
+/// scene on program, or drawn for an output, is sampled from that texture
+/// rather than drawn again. Thumbnails reach nothing else, and open no
+/// source: one shows what the collection's sources already deliver.
 pub struct Compositor {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
@@ -74,6 +83,13 @@ pub struct Compositor {
 	nested: HashMap<String, Vec<Target>>,
 	/// Lays out and paints overlays, started with the first one.
 	overlays: Option<Overlays>,
+	/// The thumbnails shown, by what they show.
+	thumbnails: BTreeMap<Thumbnail, Thumb>,
+	/// How many renders have run, which picks the thumbnails each draws.
+	renders: u64,
+	/// How many thumbnails have been named, which spreads a strip named at
+	/// once over the renders between redraws.
+	named: u64,
 	preview_scene: Option<String>,
 	program_scene: Option<String>,
 	/// When the preview scene went into preview, or `None` until the next
@@ -143,6 +159,52 @@ impl Output {
 	}
 }
 
+/// The longest side of a thumbnail, in pixels: a scene pad's picture at twice
+/// its size, for a HiDPI screen.
+const THUMBNAIL_SIDE: u32 = 256;
+
+/// How many times a second each thumbnail is redrawn, at most.
+const THUMBNAIL_RATE: u32 = 5;
+
+/// A small live picture the UI shows, by what it shows.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Thumbnail {
+	/// The scene called this, at its own shape.
+	Scene(String),
+	/// The source called this: its newest picture through its own crop and
+	/// filters, or what a scene or program source shows.
+	Source(String),
+}
+
+/// A thumbnail named by [`Compositor::set_thumbnails`].
+struct Thumb {
+	/// What it was last drawn into, or `None` until it is, or while it shows
+	/// nothing.
+	target: Option<Target>,
+	/// When it was named, which a scene's keyframes play from, or `None` until
+	/// the next render, which starts it.
+	start: Option<Instant>,
+	/// Drawn on the renders whose count plus this divides by the period.
+	phase: u64,
+	/// Whether a render has drawn it yet, which the first does.
+	drawn: bool,
+	/// Whether this render draws it.
+	due: bool,
+}
+
+/// What a thumbnail shows this render.
+enum Shows<'a> {
+	/// The scene called this, drawn on its own.
+	Scene(&'a str),
+	/// The program, sampled.
+	Program,
+	/// The output reading the scene called this, sampled.
+	Output(&'a str),
+	/// The source called this.
+	Source(&'a str),
+	Nothing,
+}
+
 /// A transition under way from `from` to the program scene.
 struct Switch {
 	from: Option<String>,
@@ -170,10 +232,11 @@ impl Switch {
 	}
 }
 
-/// A canvas-sized texture drawn into, and bound to sample.
+/// A texture drawn into at a canvas's coordinates, and bound to sample:
+/// canvas-sized, or smaller for a thumbnail.
 #[derive(Clone)]
 struct Target {
-	/// Its size, at the program's frame rate.
+	/// The canvas drawn, at the program's frame rate.
 	canvas: Canvas,
 	texture: wgpu::Texture,
 	picture: Picture,
@@ -310,6 +373,9 @@ impl Compositor {
 			layers: HashMap::new(),
 			nested: HashMap::new(),
 			overlays: None,
+			thumbnails: BTreeMap::new(),
+			renders: 0,
+			named: 0,
 			preview_scene: None,
 			program_scene: None,
 			preview_start: None,
@@ -403,6 +469,36 @@ impl Compositor {
 	/// [`render`](Self::render), or `None` if it is not one.
 	pub fn output(&self, scene: &str) -> Option<&Output> {
 		self.outputs.get(scene)
+	}
+
+	/// Draw a thumbnail of each of `shown` from now on, and forget the rest,
+	/// so one named again starts over. Call it with what the UI shows, as
+	/// [`set_previewing`](Self::set_previewing) is: a thumbnail no one shows
+	/// costs nothing.
+	pub fn set_thumbnails(&mut self, shown: impl IntoIterator<Item = Thumbnail>) {
+		let mut kept = BTreeMap::new();
+		for thumbnail in shown {
+			let thumb = self.thumbnails.remove(&thumbnail).unwrap_or_else(|| {
+				self.named += 1;
+				Thumb {
+					target: None,
+					start: None,
+					phase: self.named,
+					drawn: false,
+					due: false,
+				}
+			});
+			kept.insert(thumbnail, thumb);
+		}
+		self.thumbnails = kept;
+	}
+
+	/// The texture `thumbnail` was last drawn into: `None` until a render
+	/// draws it, and while it shows nothing, such as a source with no picture
+	/// yet. Premultiplied, transparent where a source's picture is.
+	pub fn thumbnail(&self, thumbnail: &Thumbnail) -> Option<&wgpu::Texture> {
+		let target = self.thumbnails.get(thumbnail)?.target.as_ref()?;
+		Some(&target.texture)
 	}
 
 	/// The scene in preview.
@@ -635,9 +731,17 @@ impl Compositor {
 		for output in self.outputs.values_mut() {
 			output.start.get_or_insert(now);
 		}
+		let period = u64::from((self.program.canvas.framerate / THUMBNAIL_RATE).max(1));
+		for thumb in self.thumbnails.values_mut() {
+			thumb.due = !thumb.drawn || (self.renders + thumb.phase).is_multiple_of(period);
+			thumb.drawn = true;
+			thumb.start.get_or_insert(now);
+		}
+		self.renders += 1;
 		self.update(collection, sources, now);
 		self.restart(collection, preview_start, program_start);
 		self.paint(collection, now);
+		let thumbnails = self.thumbnail_targets(collection, now);
 
 		let preview_since = now.saturating_duration_since(preview_start);
 		self.preview_shown = preview_since;
@@ -700,6 +804,11 @@ impl Compositor {
 		for (On(scene, since), _) in &outputs {
 			roots.extend(scene.map(|scene| (Place::scene(scene), *since)));
 		}
+		for (shows, since, _) in &thumbnails {
+			if let Shows::Scene(scene) = shows {
+				roots.push((Place::scene(*scene), *since));
+			}
+		}
 		let nesting = Nesting::of(collection, roots);
 		let targets = nested_targets(&mut self.nested, &self.device, &self.effects, collection, &nesting);
 
@@ -734,6 +843,32 @@ impl Compositor {
 			draw.size = target.canvas;
 			draw.target(target);
 			draw.scene(target, *on);
+		}
+		for (shows, since, target) in &thumbnails {
+			draw.size = target.canvas;
+			let fill = Rect::fill(&target.canvas);
+			match *shows {
+				Shows::Scene(scene) => {
+					draw.target(target);
+					draw.scene(target, On(Some(scene), *since));
+				}
+				Shows::Program => {
+					draw.target(target);
+					draw.picture(target, &self.program.program, fill, fill, 1.0);
+				}
+				Shows::Output(scene) => {
+					let output = outputs.iter().find(|(on, _)| on.0 == Some(scene));
+					let (_, output) = output.expect("an output drawn this render");
+					draw.target(target);
+					draw.picture(target, output, fill, fill, 1.0);
+				}
+				Shows::Source(source) => {
+					draw.frame
+						.target(&target.picture, target.canvas, wgpu::Color::TRANSPARENT);
+					draw.source(target, source);
+				}
+				Shows::Nothing => unreachable!("a thumbnail showing nothing is not drawn"),
+			}
 		}
 		self.previewed = previewing;
 
@@ -956,7 +1091,102 @@ impl Compositor {
 		}
 		let outputs = self.outputs.iter().filter(|(_, output)| output.draw);
 		shown.extend(self.drawn(collection, outputs.map(|(scene, _)| Some(scene.as_str()))));
+		let thumbnails = self.thumbnails.iter().filter(|(_, thumb)| thumb.due);
+		for (thumbnail, _) in thumbnails {
+			match self.shows(collection, thumbnail) {
+				Shows::Scene(scene) => shown.extend(self.drawn(collection, [Some(scene)])),
+				Shows::Source(source) => {
+					shown.insert(collection.capture(source));
+					let video = collection.video.get(source);
+					masks(
+						collection,
+						&mut shown,
+						video.into_iter().flat_map(|video| &video.filters),
+					);
+				}
+				Shows::Program | Shows::Output(_) | Shows::Nothing => {}
+			}
+		}
 		shown
+	}
+
+	/// What `thumbnail` shows this render: a scene on program or drawn for an
+	/// output is sampled from its texture, and a scene or program source shows
+	/// what it draws.
+	fn shows<'a>(&self, collection: &'a Collection, thumbnail: &Thumbnail) -> Shows<'a> {
+		let scene = match thumbnail {
+			Thumbnail::Scene(scene) => scene.as_str(),
+			Thumbnail::Source(source) => match collection.nested(source) {
+				Some(Nested::Scene(scene)) => scene,
+				Some(Nested::Program) => return Shows::Program,
+				None => {
+					return match collection.sources.get_key_value(source) {
+						Some((source, _)) => Shows::Source(source),
+						None => Shows::Nothing,
+					};
+				}
+			},
+		};
+		let Some(scene) = collection.scene(scene).map(|scene| scene.name.as_str()) else {
+			return Shows::Nothing;
+		};
+		if self.program_scene.as_deref() == Some(scene) {
+			Shows::Program
+		} else if self.outputs.get(scene).is_some_and(|output| output.draw) {
+			Shows::Output(scene)
+		} else {
+			Shows::Scene(scene)
+		}
+	}
+
+	/// What each thumbnail due this render shows, from how long ago it was
+	/// named, and the texture it draws into, sized to what it shows. One
+	/// showing nothing lets its texture go.
+	fn thumbnail_targets<'a>(
+		&mut self,
+		collection: &'a Collection,
+		now: Instant,
+	) -> Vec<(Shows<'a>, Duration, Target)> {
+		let due: Vec<(Thumbnail, Shows)> = self
+			.thumbnails
+			.iter()
+			.filter(|(_, thumb)| thumb.due)
+			.map(|(thumbnail, _)| (thumbnail.clone(), self.shows(collection, thumbnail)))
+			.collect();
+		let program = self.program.canvas;
+		let mut jobs = Vec::with_capacity(due.len());
+		for (thumbnail, shows) in due {
+			let thumb = self.thumbnails.get_mut(&thumbnail).expect("listed above");
+			let since = now.saturating_duration_since(thumb.start.unwrap_or(now));
+			let canvas = match shows {
+				Shows::Scene(scene) | Shows::Output(scene) => collection.canvas(Some(scene)),
+				Shows::Program => Some(program),
+				Shows::Source(source) => {
+					let layer = self.layers.get(collection.capture(source));
+					let picture = layer.and_then(|layer| layer.picture.as_ref());
+					picture.map(|picture| {
+						let crop = collection.video.get(source).map(|video| video.crop);
+						cropped(picture.size(), crop.unwrap_or_default(), program.framerate)
+					})
+				}
+				Shows::Nothing => None,
+			};
+			let Some(canvas) = canvas else {
+				thumb.target = None;
+				continue;
+			};
+			let size = thumbnail_size(canvas);
+			let target = match thumb.target.take() {
+				Some(mut target) if (target.texture.width(), target.texture.height()) == size => {
+					target.canvas = canvas;
+					target
+				}
+				_ => Target::sized(&self.device, &self.effects, canvas, size, "moq-scene thumbnail"),
+			};
+			thumb.target = Some(target.clone());
+			jobs.push((shows, since, target));
+		}
+		jobs
 	}
 
 	/// The sources whose pictures program draws: each visible item's in the
@@ -1004,6 +1234,26 @@ fn resize(target: &mut Target, device: &wgpu::Device, effects: &Effects, canvas:
 		target.canvas = canvas;
 	} else {
 		*target = Target::new(device, effects, canvas, label);
+	}
+}
+
+/// The pixels of a thumbnail of `canvas`: its shape, at most
+/// [`THUMBNAIL_SIDE`] a side, and never larger than the canvas.
+fn thumbnail_size(canvas: Canvas) -> (u32, u32) {
+	let scale = (THUMBNAIL_SIDE as f32 / canvas.width.max(canvas.height) as f32).min(1.0);
+	let side = |length: u32| ((length as f32 * scale).round() as u32).max(1);
+	(side(canvas.width), side(canvas.height))
+}
+
+/// The canvas a picture of `size` shows through `crop`, a pixel of it to a
+/// pixel of the canvas, so a filter reaches as far as in a scene showing it
+/// whole.
+fn cropped(size: (u32, u32), crop: Crop, framerate: u32) -> Canvas {
+	let side = |length: u32, shown: f32| ((length as f32 * shown).round() as u32).max(1);
+	Canvas {
+		width: side(size.0, 1.0 - crop.left - crop.right),
+		height: side(size.1, 1.0 - crop.top - crop.bottom),
+		framerate,
 	}
 }
 
@@ -1543,6 +1793,28 @@ impl Draw<'_> {
 		self.posed(target, &item, pose, Duration::ZERO);
 	}
 
+	/// Draw the newest picture of the source called `name` over the whole of
+	/// `target`, through the source's crop and filters, even one published,
+	/// which scenes leave to viewers. Nothing before its first picture.
+	fn source(&mut self, target: &Target, name: &str) {
+		let collection = self.collection;
+		let layer = self.library.0.get(collection.capture(name));
+		let Some(picture) = layer.and_then(|layer| layer.picture.clone()) else {
+			return;
+		};
+		let whole = Item::new(name, Rect::fill(&target.canvas));
+		let item = effect::Item {
+			picture: &picture,
+			rect: whole.rect,
+			crop: collection.crop(&whole),
+			filters: collection.filters(&whole).collect(),
+			blend: whole.blend,
+		};
+		if let Some(prepared) = self.effects.prepare(self.frame, item, &self.library) {
+			self.effects.draw(self.frame, &target.texture, &prepared);
+		}
+	}
+
 	/// Draw `item`, posed `since` its scene went on, where it is placed onto
 	/// `target`, shared with every other draw of it under `key`.
 	fn item(&mut self, target: &Target, key: (Place, usize, Settled), item: &Item, since: Duration) {
@@ -1776,11 +2048,16 @@ fn upload(
 impl Target {
 	/// A target of `canvas`'s size, labeled `label`.
 	fn new(device: &wgpu::Device, effects: &Effects, canvas: Canvas, label: &str) -> Self {
+		Self::sized(device, effects, canvas, (canvas.width, canvas.height), label)
+	}
+
+	/// A target drawing `canvas` into `size` pixels, labeled `label`.
+	fn sized(device: &wgpu::Device, effects: &Effects, canvas: Canvas, size: (u32, u32), label: &str) -> Self {
 		let texture = device.create_texture(&wgpu::TextureDescriptor {
 			label: Some(label),
 			size: wgpu::Extent3d {
-				width: canvas.width,
-				height: canvas.height,
+				width: size.0,
+				height: size.1,
 				depth_or_array_layers: 1,
 			},
 			mip_level_count: 1,
@@ -4366,6 +4643,228 @@ mod tests {
 		})
 		.await;
 	}
+
+	/// The texel at `x`, `y` of a `width`-wide texture's rows.
+	fn texel(rgba: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+		let at = (y * width + x) * 4;
+		rgba[at..at + 4].try_into().unwrap()
+	}
+
+	/// `collection()` with a 512x256 scene "wide": red, under blue over its
+	/// right half, which mixes in by `blend`.
+	fn wide(blend: Blend) -> Collection {
+		let mut collection = collection();
+		let size = Size {
+			width: 512,
+			height: 256,
+		};
+		let right = Rect {
+			x: 256.0,
+			y: 0.0,
+			width: 256.0,
+			height: 256.0,
+		};
+		let fill = Rect {
+			x: 0.0,
+			y: 0.0,
+			width: 512.0,
+			height: 256.0,
+		};
+		collection.scenes.push(Scene {
+			size: Some(size),
+			items: vec![
+				Item::new("red", fill),
+				Item {
+					blend,
+					..Item::new("blue", right)
+				},
+			],
+			..Scene::new("wide")
+		});
+		collection.validate().unwrap();
+		collection
+	}
+
+	/// A thumbnail shows its scene at the scene's shape, scaled down, from the
+	/// first render after it is named until it is left out; one of a scene
+	/// that does not exist shows nothing.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_thumbnail_shows_its_scene_scaled_down_while_shown() {
+		local(async {
+			let mut studio = Studio::new(wide(Blend::Normal)).await;
+			studio.compositor.fit(&studio.collection).unwrap();
+			let wide = Thumbnail::Scene("wide".into());
+			let missing = Thumbnail::Scene("missing".into());
+			studio.compositor.set_thumbnails([wide.clone(), missing.clone()]);
+			assert!(studio.compositor.thumbnail(&wide).is_none(), "not drawn yet");
+
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&wide).expect("drawn").clone();
+			assert_eq!(
+				(texture.width(), texture.height()),
+				(THUMBNAIL_SIDE, THUMBNAIL_SIDE / 2)
+			);
+			let rgba = studio.read(&texture);
+			assert_eq!(texel(&rgba, 256, 64, 64), RED);
+			assert_eq!(texel(&rgba, 256, 192, 64), BLUE);
+			assert!(studio.compositor.thumbnail(&missing).is_none());
+
+			studio.compositor.set_thumbnails([]);
+			assert!(studio.compositor.thumbnail(&wide).is_none(), "forgotten");
+		})
+		.await;
+	}
+
+	/// Each thumbnail is redrawn a few times a second on the program clock,
+	/// and two named at once on different renders.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn thumbnails_redraw_a_few_times_a_second_on_renders_of_their_own() {
+		local(async {
+			let mut studio = Studio::new(collection()).await;
+			let period = (studio.collection.canvas.framerate / THUMBNAIL_RATE) as usize;
+			assert!(period > 2, "a period long enough to tell the renders apart");
+			let (first, second) = (Thumbnail::Scene("blue".into()), Thumbnail::Scene("red".into()));
+			studio.compositor.set_thumbnails([first.clone(), second.clone()]);
+			studio.render(Instant::now());
+			let corner = |studio: &mut Studio, thumbnail: &Thumbnail| {
+				let texture = studio.compositor.thumbnail(thumbnail).unwrap().clone();
+				pixel(&studio.read(&texture), 1, 1)
+			};
+			assert_eq!(corner(&mut studio, &first), BLUE);
+			assert_eq!(corner(&mut studio, &second), RED);
+
+			// Both scenes turn green, and each thumbnail shows it on its own
+			// render, a period apart from its last.
+			studio
+				.collection
+				.sources
+				.insert("green".into(), Source::Color { color: Rgba(GREEN) });
+			let fill = Rect::fill(&studio.collection.canvas);
+			for scene in &mut studio.collection.scenes {
+				scene.items = vec![Item::new("green", fill)];
+			}
+			let drivers = studio.sources.sync(&studio.collection);
+			start(&studio.sources, drivers).await;
+			let mut redrawn = Vec::new();
+			for render in 1..=period {
+				studio.render(Instant::now());
+				for (name, thumbnail) in [("first", &first), ("second", &second)] {
+					if corner(&mut studio, thumbnail) == GREEN && !redrawn.iter().any(|(at, _)| at == &name) {
+						redrawn.push((name, render));
+					}
+				}
+			}
+			assert_eq!(redrawn.len(), 2, "each redrawn within a period: {redrawn:?}");
+			assert_ne!(redrawn[0].1, redrawn[1].1, "on different renders: {redrawn:?}");
+			assert!(
+				redrawn.iter().all(|(_, render)| *render > 1),
+				"not at once: {redrawn:?}"
+			);
+		})
+		.await;
+	}
+
+	/// The scene on program is sampled from the program, top layer and all,
+	/// rather than drawn again; a scene off program is drawn alone.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_thumbnail_of_the_scene_on_program_samples_the_program() {
+		local(async {
+			let mut collection = collection();
+			let corner = Rect {
+				x: 0.0,
+				y: 0.0,
+				width: 4.0,
+				height: 4.0,
+			};
+			collection.top.push(Item::new("blue", corner));
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			let (on, off) = (Thumbnail::Scene("red".into()), Thumbnail::Scene("blue".into()));
+			studio.compositor.set_thumbnails([on.clone(), off.clone()]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&on).unwrap().clone();
+			let rgba = studio.read(&texture);
+			assert_eq!(pixel(&rgba, 1, 1), BLUE, "the top layer");
+			assert_eq!(pixel(&rgba, 1, 6), RED);
+			let texture = studio.compositor.thumbnail(&off).unwrap().clone();
+			assert!(studio.read(&texture).chunks(4).all(|texel| texel == BLUE));
+		})
+		.await;
+	}
+
+	/// A source's thumbnail shows its newest picture through its crop and
+	/// filters, at the cropped picture's shape, transparent where it is; one
+	/// with no picture yet shows nothing, and a scene source shows its scene.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_source_thumbnail_shows_its_picture_through_its_crop_and_filters() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let mut image = image::RgbaImage::from_pixel(4, 2, image::Rgba(RED));
+			for y in 0..2 {
+				for x in 2..4 {
+					image.put_pixel(x, y, image::Rgba(BLUE));
+				}
+			}
+			image.save(dir.path().join("halves.png")).unwrap();
+			let mut collection = collection();
+			let image = |path: &str| Source::Image { path: path.into() };
+			collection.sources.insert("halves".into(), image("halves.png"));
+			collection.sources.insert("missing".into(), image("missing.png"));
+			let nested = Source::Scene { scene: "blue".into() };
+			collection.sources.insert("blue scene".into(), nested);
+			let video = Video {
+				crop: Crop {
+					right: 0.5,
+					..Crop::default()
+				},
+				filters: vec![Filter::Opacity { amount: 0.5 }],
+				..Video::default()
+			};
+			collection.video.insert("halves".into(), video);
+			collection.validate().unwrap();
+
+			let mut studio = Studio::with_files(collection, dir).await;
+			let thumbnail = |name: &str| Thumbnail::Source(name.into());
+			let names = ["halves", "missing", "blue scene"];
+			studio.compositor.set_thumbnails(names.map(thumbnail));
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&thumbnail("halves")).unwrap().clone();
+			assert_eq!((texture.width(), texture.height()), (2, 2));
+			let half = [128, 0, 0, 128];
+			for texel in studio.read(&texture).chunks(4) {
+				assert!(near(texel.try_into().unwrap(), half), "{texel:?}");
+			}
+			assert!(studio.compositor.thumbnail(&thumbnail("missing")).is_none());
+			let texture = studio.compositor.thumbnail(&thumbnail("blue scene")).unwrap().clone();
+			assert_eq!(pixel(&studio.read(&texture), 1, 1), BLUE);
+		})
+		.await;
+	}
+
+	/// A blend mode in a thumbnail smaller than its scene mixes with what is
+	/// under it there.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_blend_mode_draws_in_a_thumbnail_smaller_than_its_scene() {
+		local(async {
+			let mut studio = Studio::new(wide(Blend::Multiply)).await;
+			studio.compositor.fit(&studio.collection).unwrap();
+			let wide = Thumbnail::Scene("wide".into());
+			studio.compositor.set_thumbnails([wide.clone()]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&wide).unwrap().clone();
+			let rgba = studio.read(&texture);
+			assert_eq!(texel(&rgba, 256, 64, 64), RED);
+			assert_eq!(texel(&rgba, 256, 192, 64), BLACK, "blue multiplied over red");
+		})
+		.await;
+	}
 }
 
 /// What drawing more published scenes costs, against how many sources the
@@ -4509,6 +5008,55 @@ mod bench {
 					let (frame, (passes, copies)) = cost(collection, preview).await;
 					println!("{sources:>7} {case:<8} {frame:>7.2?} {passes:>6} {copies:>6}");
 				}
+			}
+		})
+		.await;
+	}
+
+	/// What a strip of scene thumbnails costs: none, six, and thirty, each of
+	/// a scene off program placing four of the sixteen sources the program
+	/// places. Prints the mean and worst frame, and the render passes and
+	/// texture copies of the worst.
+	#[tokio::test]
+	#[ignore = "a benchmark; run by hand on a GPU"]
+	async fn thumbnails() {
+		local(async {
+			println!("thumbnails    mean   worst passes copies");
+			for shown in [0, 6, 30] {
+				let mut collection = collection(16, 0, 16);
+				let items = collection.scenes[0].items.clone();
+				for scene in 0..30 {
+					collection.scenes.push(crate::Scene {
+						items: (0..4).map(|at| items[(scene + at * 4) % items.len()].clone()).collect(),
+						..crate::Scene::new(format!("scene {scene}"))
+					});
+				}
+				collection.validate().unwrap();
+				let mut studio = Studio::new(collection).await;
+				let scene = studio.collection.scenes[0].name.clone();
+				studio.compositor.set_preview(Some(scene));
+				studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+				let thumbnails = (0..shown).map(|scene| Thumbnail::Scene(format!("scene {scene}")));
+				studio.compositor.set_thumbnails(thumbnails);
+
+				let (mut total, mut worst, mut ran) = (Duration::ZERO, Duration::ZERO, (0, 0));
+				for frame in 0..FRAMES * 2 {
+					let start = Instant::now();
+					studio.render(Instant::now());
+					studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+					let took = Instant::now().saturating_duration_since(start);
+					if frame < FRAMES {
+						continue;
+					}
+					total += took;
+					if took > worst {
+						worst = took;
+						ran = studio.compositor.effects.ran;
+					}
+				}
+				let (passes, copies) = ran;
+				let mean = total / FRAMES;
+				println!("{shown:>10} {mean:>7.2?} {worst:>7.2?} {passes:>6} {copies:>6}");
 			}
 		})
 		.await;
