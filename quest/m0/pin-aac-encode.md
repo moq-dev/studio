@@ -3,8 +3,8 @@
 ## Goal
 
 The `moq` submodule includes moq-audio's platform AAC encoders, from
-[AudioToolbox AAC encode](https://github.com/moq-dev/moq/blob/main/quest/m5/audio-encode-audiotoolbox.md) on macOS and
-[Media Foundation AAC encode](https://github.com/moq-dev/moq/blob/main/quest/m5/audio-encode-mediafoundation.md) on
+[AudioToolbox AAC encode](https://github.com/moq-dev/moq/blob/main/quest/m3/audio-encode-audiotoolbox.md) on macOS and
+[Media Foundation AAC encode](https://github.com/moq-dev/moq/blob/main/quest/m3/audio-encode-mediafoundation.md) on
 Windows, which destinations whose ingest requires AAC use.
 
 ## Plan
@@ -18,3 +18,7 @@ fixing whatever the new API breaks here.
   merged on moq's `main`, deleting their files, and moq-audio's AAC encoders
   are there. A quest file that moved, or went away without its work landing,
   does not count.
+
+## Required
+
+- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - moq-dev/moq#8272, which no later pin can skip

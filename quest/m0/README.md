@@ -3,7 +3,7 @@
 ## Goal
 
 A native, cross-platform streaming studio (`rs/moq-studio`) for creators and
-teams who rely on OBS today, plus the same app built to wasm. It composites
+teams who rely on OBS today. It composites
 cameras, screens, media, browser sources, and remote MoQ guests into scenes
 on the GPU with moq-video and moq-audio, publishing several scenes at once
 (landscape and portrait), and goes live to a MoQ relay and directly to RTMP,
@@ -46,6 +46,12 @@ Decided 2026-10-22 with the maintainer (/quest-plan):
   control. Its media runs on new browser backends in moq-video and moq-audio
   (getUserMedia, getDisplayMedia, WebCodecs) rather than a bridge to
   js/publish and js/watch, so one Rust media path drives both builds.
+  Changed 2026-11-09 (maintainer, /quest-audit): ✅ the
+  [web studio](/quest/m2/web.md) and its two pins moved to m2 (rejected:
+  keeping them in m0), so m0 ships the native studio alone. moq removed all
+  WASM support on 2026-10-31, its browser-backend quests are deferred with
+  no other consumer, and nothing plans a browser WebTransport session for
+  moq-net.
 - **Guests:** guests and phone cameras join a moq-room prefix the studio
   owns, through a web join link or QR code.
 - **Naming:** quests name no streaming platforms; ingest requirements are
@@ -89,24 +95,25 @@ repository.
 
 - [Studio on macOS with capture granted](/quest/m0/app-macos.md) - camera, screen, and audio capture run on a Mac, not only Linux
 - [nixos2 boots Windows for agents](/quest/m0/windows-host.md) - a Windows machine agents reach over ssh, with a camera and microphone
+- [The studio builds for Windows in CI](/quest/m0/windows-build.md) - a nightly `windows-latest` build, which needs no Windows host
 - [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
 - [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
+- [AAC for destinations](/quest/m0/destinations-aac.md) - AAC for the ingests that require it, from the platform encoders
 - [Clap-to-measure sync delay](/quest/m0/sync-clap.md) - a clap sets a microphone's delay against its camera
-- [Audio filters](/quest/m0/audio-filters.md) - per-source noise suppression, gate, compressor, limiter, and plugins, configured from the studio
-- [Browser sources on macOS and Windows](/quest/m0/browser-source.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
-- [Web studio](/quest/m0/web.md) - the full studio in wasm on WebGPU and WebCodecs, served from this repository
+- [Audio filters](/quest/m0/audio-filters.md) - noise suppression, gate, compressor, limiter, and plugins on each microphone and system audio source, configured from the studio
+- [Browser sources on macOS and Windows](/quest/m0/browser-source/README.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
 - [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
-- [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials packaging and the macOS camera need; Windows ships unsigned
-- [Packaging](/quest/m0/packaging.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux
+- [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials the macOS app and its camera need; Windows ships unsigned
+- [Packaging](/quest/m0/packaging/README.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux, each its own quest
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
-- [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - moq-audio's AAC encoders, for destinations
+- [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - moq-audio's AAC encoders, for AAC destinations
 - [moq-audio's filter chain is pinned](/quest/m0/pin-audio-filters.md) - the chain audio filters configure
-- [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice
-- [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
+- [moq's egress dial changes are pinned](/quest/m0/pin-egress-dial.md) - RTMPS that keeps `tcUrl` and a caller-supplied dial policy, for destinations
 - [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
 - [Playout writes land on positioned bus channels](/quest/m0/playout-positioned.md) - broadcast, media, and replay sound at the bus position its pictures are timed for
 - [moq-audio's positioned bus channel is pinned](/quest/m0/pin-bus-positioned.md) - `Bus::positioned`, which playout writes through
+- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - `moq_mux::sync` in place of `moq_mux::timeline`, which every later pin crosses
 
 ## Related
 

@@ -7,7 +7,8 @@ MoQ, each with its own codec and bitrate, and goes live to all of them at
 once. Destinations that take the same picture scene and audio scene with identical
 encode settings share one encoder. Each destination's status and errors show
 in the UI. Going live and stopping are actions the Hotkeys panel can bind,
-as recording is.
+as recording is. Audio is Opus here; AAC is
+[AAC for destinations](/quest/m0/destinations-aac.md).
 
 The fan-out lands here as a UI-free egress library, with the studio as its
 first consumer. The library subscribes once to a MoQ broadcast and remuxes it
@@ -33,22 +34,19 @@ Decided 2026-10-22 with the maintainer:
   - **Redials:** a dropped destination redials with backoff and can be
     cancelled. A refusal such as a rejected stream key is terminal and is
     reported instead of retried.
-  - **RTMPS:** moq-rtmp dials `rtmps://` natively and keeps the URL-derived
-    `tcUrl` that plaintext `Client::connect` advertises. Today the TLS route,
-    `Client::with_stream`, sends no `tcUrl`, and several ingest servers
-    reject that.
+  - **RTMPS:** dials `rtmps://` through moq-rtmp, whose TLS route sends no
+    `tcUrl` today, which several ingest servers reject. moq's
+    [RTMPS keeps `tcUrl`](https://github.com/moq-dev/moq/blob/main/quest/m3/rtmp-rtmps-tcurl.md)
+    fixes that.
   - **Untrusted destination URLs:** a server-side host must be able to
-    refuse private and loopback addresses, so dialing goes through a
-    caller-supplied policy rather than resolving any URL it is handed.
+    refuse private and loopback addresses, so dialing goes through the
+    policy moq's
+    [caller-supplied dial policy](https://github.com/moq-dev/moq/blob/main/quest/m3/webrtc-dial-policy.md)
+    adds, rather than resolving any URL it is handed.
 - **The studio chooses codecs, not a server:**
   - Opus by default.
-  - AAC for RTMP ingests, which commonly require H.264 and AAC.
   - E-RTMP HEVC or AV1 only when the creator picks it for a destination that
     accepts it.
-- **AAC encoders:** platform encoders only, from the AudioToolbox and Media
-  Foundation quests. moq-audio has no software AAC tier, and none is
-  planned. On Linux, choosing AAC for a destination fails loudly when no
-  encoder is available. It never silently falls back to another codec.
 - **Stream keys** go in the OS credential store, never in the scene file,
   which is meant to be shared and versioned. Prefer a maintained crate such
   as `keyring`.
@@ -63,9 +61,19 @@ Decided 2026-10-22 with the maintainer:
   CBR) for common ingest constraints without naming platforms. The creator
   can override every field.
 
+Decided 2026-11-09 (maintainer, /quest-audit):
+
+- ✅ **Unblock it from AAC** (rejected: leave it blocked on AAC). RTMP with
+  Opus and WHIP work at today's pin, so AAC, its codec decisions, and the
+  wait on moq's platform encoders moved to
+  [AAC for destinations](/quest/m0/destinations-aac.md).
+- ✅ **The two moq changes are moq's quests** (rejected: planning them inline
+  here, with no moq quest or pin). This quest uses them through
+  [the pin](/quest/m0/pin-egress-dial.md).
+
 ## Required
 
-- [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - AAC on macOS and Windows
+- [moq's egress dial changes are pinned](/quest/m0/pin-egress-dial.md) - RTMPS that keeps `tcUrl`, and a dial policy the caller supplies
 
 ## Related
 

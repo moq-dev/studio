@@ -15,16 +15,24 @@ the wait clears, advance the gitlink with `just upgrade-moq` in this PR, move
 the studio to hang's types, and delete the
 [watch prototype](/quest/m2/compose/watch.md) and its flag.
 
+Decided 2026-11-09 (maintainer, /quest-audit): ✅ the wait names moq's three
+quests (rejected: "both quests", unnamed, which left out `@moq/watch`).
+
 ## Waiting
 
-- moq-dev/moq: hang's layer layout spec and `moq play`'s layer compositing
-  land, planned in moq's m3 from the
-  [watch prototype](/quest/m2/compose/watch.md)'s format. Check: both quests'
-  PRs have merged on moq's `main`, deleting their files, and hang exposes the
-  layer layout. A quest file that moved, or went away without its work
-  landing, does not count.
+- moq-dev/moq: its three layer quests land, planned in moq's m3 from the
+  [watch prototype](/quest/m2/compose/watch.md)'s format:
+  [hang specifies a layer layout track](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/spec.md),
+  [moq play composites layers](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/play.md),
+  and
+  [The watch player composites layers](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/watch.md),
+  which the [epic](/quest/m2/compose/README.md)'s test plays in. Check: all
+  three quests' PRs have merged on moq's `main`, deleting their files, and
+  hang exposes the layer layout. A quest file that moved, or went away
+  without its work landing, does not count.
 
 ## Required
 
 - [moq-studio watch prototype](/quest/m2/compose/watch.md) - the format moq specifies
 - [Viewer controls](/quest/m2/compose/controls.md) - toggles and priorities the spec carries
+- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - moq-dev/moq#8272, which no later pin can skip

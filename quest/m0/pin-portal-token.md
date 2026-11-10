@@ -15,3 +15,7 @@ fixing whatever the new API breaks here.
 - moq-dev/moq: Linux capture parity lands the persistable token. Check:
   moq-video on moq's `main` exposes the persistable restore token (the quest
   no longer lists it because it landed, not because it moved).
+
+## Required
+
+- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - moq-dev/moq#8272, which no later pin can skip

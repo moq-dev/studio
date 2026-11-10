@@ -15,12 +15,12 @@ buffers, so the browser helper now starts with `INTEL_DEBUG=noccs`
 the same way. Run `binary(browser)` on an AMD Mesa host, and only if it fails
 the same way, add `AMD_DEBUG=nodcc` beside `noccs`.
 
-Planned 2026-11-08 (maintainer, /quest-plan): ✅ m2, waiting on a host
-(rejected: m0; dropping it), since no user has reported AMD failing.
+Planned 2026-11-08 (maintainer, /quest-plan): ✅ m2 (rejected: m0; dropping
+it), since no user has reported AMD failing. It waited on a host then.
 
-## Waiting
-
-- Maintainer: provide an AMD GPU host running Mesa with GNOME on Wayland,
-  reachable over ssh. No known host has one, and an agent cannot acquire
-  hardware. Check: `ssh <host> glxinfo -B` (or `vulkaninfo --summary`) names an
-  AMD device on the radeonsi or RADV driver.
+Decided 2026-11-09 (maintainer, /quest-audit): ✅ agents may run the check on
+the host named `desktop`, in its live GNOME Wayland session (rejected: wait
+for a dedicated host). It has an RX 9070 on radeonsi. It also has an Intel
+integrated GPU (`lspci`), so the run confirms the helper paints on the AMD
+one. The check opens browser windows in the maintainer's session for a few
+minutes.
