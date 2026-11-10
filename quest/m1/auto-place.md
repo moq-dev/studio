@@ -22,7 +22,9 @@ ready; local first with a hosted model as an opt-in tie-breaker).
   on the GPU a few times a second: where it moves, where it is dense with
   edges and text, and what stays put while the rest moves, which is a HUD.
   Where [the foreground app](/quest/m1/pin-capture-foreground.md) is known,
-  its window counts as mattering.
+  its window counts as mattering, as does the pointer where a capture
+  reports it. The inspector says which of these it stays clear of, and each
+  can be switched off.
 - **What it decides:** the slot whose area matters least, among the corners
   and edge middles that fit the layer, inside the canvas's margins.
 - **When it moves:** when the scene changes, when the content under it

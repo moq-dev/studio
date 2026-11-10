@@ -15,6 +15,9 @@ It is the operator's view a broadcast studio expects beside Studio mode.
 - The tiles are [scene thumbnails](/quest/m0/ux/scene-thumbs.md) at a larger
   size and the program's own rate for the tiles on air and cued, a lower one
   for the rest. Measure the cost of a 4x4 grid.
+- The grid is uniform, since the main window already shows the live picture
+  large. A source the live picture shows carries a red dot, never a frame:
+  the red frame is the scene on air alone.
 - It goes full screen on the monitor it is on, and its place is remembered
   per user.
 - It is the studio's own window, so

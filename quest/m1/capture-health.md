@@ -23,6 +23,10 @@ simply black and the cause is a forum search away.
 - Each fix is an action the studio can take itself; where it cannot (a
   permission was revoked, a game refuses capture), the popover says what the
   streamer must do, and where.
+- Recommended, not decided, what viewers see meanwhile: the last good
+  picture for a few seconds, then the black capture as it is, so a hiccup is
+  invisible but a stale frame never passes for live. The alternatives are
+  black at once, as today, or a placeholder the show chooses.
 - A source that is meant to be black can dismiss the badge for good.
 
 ## Required

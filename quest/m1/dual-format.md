@@ -27,6 +27,8 @@ program source, cropped. This quest makes that one switch.
   streamer's to move.
 - Each format is its own encode, so it costs an encoder session and its
   bitrate; the checklist says whether the machine and the uplink carry both.
+- Where a layer is shown is said under the pictures and in the inspector,
+  never on the layer, so nothing covers either picture.
 - The pages follow: BUILD edits one arrangement at a time with the other
   beside it, and Studio mode cues both.
 

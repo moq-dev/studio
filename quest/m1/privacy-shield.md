@@ -22,6 +22,10 @@ a lock where the window was. See the `shield` frame of
   it cannot give: support is decided per desktop at startup, and a display
   source on an unprotected desktop carries a note in its inspector.
 
+Settle here whether it also hides notification pop-ups, the commonest leak
+in a whole-screen capture, where a desktop lets an app silence or exclude
+them.
+
 Human check: a second capture tool on each desktop, to see what it sees.
 
 ## Required
