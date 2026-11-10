@@ -23,6 +23,10 @@ Decided 2026-11-06 (maintainer, /quest-unblock): Windows ships unsigned
 until a release needs SmartScreen reputation; see
 [signing](/quest/m0/signing.md).
 
+## Waiting
+
+- moq-dev/moq: a Mac camera renders only once AVFoundation asks for NV12 instead of `2vuy`, in review as [moq-dev/moq#8251](https://github.com/moq-dev/moq/pull/8251); done when it merges, `just upgrade-moq` bumps the gitlink here, and a Mac camera shows its picture in program
+
 ## Required
 
 - [The Apple signing identity is available](/quest/m0/signing.md) - the credentials macOS signing needs
