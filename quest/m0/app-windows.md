@@ -31,7 +31,7 @@ since a hosted runner does it without the host this quest waits on.
 ## Required
 
 - [The studio builds for Windows in CI](/quest/m0/windows-build.md) - the crate compiling for Windows before it is run there
-- [nixos2 boots Windows for agents](/quest/m0/windows-host.md) - the Windows machine this runs on
+- [The windows PC hosts Windows agents](/quest/m0/windows-host.md) - the Windows machine this runs on
 
 ## Related
 
