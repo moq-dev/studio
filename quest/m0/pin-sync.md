@@ -52,8 +52,8 @@ Not crossed here: [moq-dev/moq#8270](https://github.com/moq-dev/moq/pull/8270)
 (`147327e14`), and
 [moq-dev/moq#8220](https://github.com/moq-dev/moq/pull/8220) (`16a673036`,
 kio's `Instant` loses `+` and `-` with a `Duration`, which `playout.rs` and
-`source.rs` use throughout) all merged after #8272. The first pin past them
-fixes them.
+`source.rs` use throughout) all merged after #8272.
+[pin-main](/quest/m0/pin-main.md) fixes them.
 
 ## Waiting
 
