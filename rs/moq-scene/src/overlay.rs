@@ -904,13 +904,18 @@ fn fonts() -> FontContext {
 
 /// The overlays a compositor draws. Their documents live on a thread of their
 /// own, since a Blitz document cannot leave the thread that made it, and a
-/// panic there fails the overlays rather than the compositor.
+/// panic there fails the overlays rather than the compositor. Dropping it
+/// stops the thread and waits for it.
 pub(crate) struct Overlays {
 	device: wgpu::Device,
 	requests: mpsc::Sender<Request>,
 	/// What each paint failed on, by overlay.
 	painted: mpsc::Receiver<Vec<(u64, String)>>,
 	next: u64,
+	/// Joined on drop, since the thread frees GPU objects on its way out: one
+	/// left running past `main` does so while the driver tears down, which
+	/// crashes NVIDIA's.
+	thread: Option<std::thread::JoinHandle<()>>,
 }
 
 enum Request {
@@ -928,6 +933,8 @@ enum Request {
 	Restart(u64, Instant),
 	/// Paint these overlays as of this time on the program clock.
 	Paint(Instant, Vec<u64>),
+	/// End the thread, though an [`Overlay`] may still hold a sender.
+	Stop,
 	/// Stop the thread the way a panic in Blitz would.
 	#[cfg(test)]
 	Panic,
@@ -939,7 +946,7 @@ impl Overlays {
 		let (requests, received) = mpsc::channel();
 		let (reply, painted) = mpsc::channel();
 		let (device, queue) = (device.clone(), queue.clone());
-		std::thread::Builder::new()
+		let thread = std::thread::Builder::new()
 			.name("overlays".into())
 			.spawn({
 				let device = device.clone();
@@ -951,6 +958,7 @@ impl Overlays {
 			requests,
 			painted,
 			next: 0,
+			thread: Some(thread),
 		})
 	}
 
@@ -1008,6 +1016,17 @@ impl Overlays {
 	}
 }
 
+impl Drop for Overlays {
+	fn drop(&mut self) {
+		// A thread that already stopped has nothing left to free, and one
+		// that panicked already failed every overlay.
+		let _ = self.requests.send(Request::Stop);
+		if let Some(thread) = self.thread.take() {
+			let _ = thread.join();
+		}
+	}
+}
+
 #[cfg(test)]
 impl Overlays {
 	/// Stop the thread as a panic in Blitz would.
@@ -1056,7 +1075,7 @@ impl Drop for Overlay {
 	}
 }
 
-/// The overlay thread: serve requests until every sender is gone.
+/// The overlay thread: serve requests until told to stop.
 fn run(
 	device: &wgpu::Device,
 	queue: &wgpu::Queue,
@@ -1099,6 +1118,7 @@ fn run(
 					document.painted = false;
 				}
 			}
+			Request::Stop => return,
 			#[cfg(test)]
 			Request::Panic => panic!("a test stopped the overlay thread"),
 			Request::Paint(now, ids) => {

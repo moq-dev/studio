@@ -14,9 +14,7 @@ use std::collections::{BTreeMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{
-	Audio, Canvas, Collection, Extra, Filter, Item, Layer, Mixes, Scene, Source, Transition, Video,
-};
+use crate::collection::{Audio, AudioScene, Canvas, Collection, Filter, Item, Layer, Scene, Source, Transition, Video};
 
 /// One part of a collection, before and after an edit.
 ///
@@ -48,6 +46,8 @@ pub enum Change {
 		#[serde(default, skip_serializing_if = "Option::is_none")]
 		after: Option<Video>,
 	},
+	/// Whether [`Collection::published`] names the source `name`.
+	Published { name: String, before: bool, after: bool },
 	/// The scene at `index` of [`Collection::scenes`]. Adding one inserts it
 	/// there, shifting the later ones back, and replacing one with another
 	/// name renames it.
@@ -72,16 +72,11 @@ pub enum Change {
 	Transition { before: Transition, after: Transition },
 	/// [`Collection::canvas`].
 	Canvas { before: Canvas, after: Canvas },
-	/// A [`Collection::canvases`] entry.
-	Extra {
-		name: String,
-		#[serde(default, skip_serializing_if = "Option::is_none")]
-		before: Option<Extra>,
-		#[serde(default, skip_serializing_if = "Option::is_none")]
-		after: Option<Extra>,
+	/// [`Collection::audio_scenes`], whole.
+	AudioScenes {
+		before: Vec<AudioScene>,
+		after: Vec<AudioScene>,
 	},
-	/// [`Collection::mixes`].
-	Mixes { before: Mixes, after: Mixes },
 }
 
 impl Change {
@@ -99,6 +94,11 @@ impl Change {
 				after: before,
 			},
 			Self::Video { name, before, after } => Self::Video {
+				name,
+				before: after,
+				after: before,
+			},
+			Self::Published { name, before, after } => Self::Published {
 				name,
 				before: after,
 				after: before,
@@ -127,12 +127,7 @@ impl Change {
 				before: after,
 				after: before,
 			},
-			Self::Extra { name, before, after } => Self::Extra {
-				name,
-				before: after,
-				after: before,
-			},
-			Self::Mixes { before, after } => Self::Mixes {
+			Self::AudioScenes { before, after } => Self::AudioScenes {
 				before: after,
 				after: before,
 			},
@@ -142,13 +137,15 @@ impl Change {
 	/// The name of the source, audio, or video entry the change makes.
 	fn entry(&self) -> Option<&str> {
 		match self {
-			Self::Source { name, .. } | Self::Audio { name, .. } | Self::Video { name, .. } => Some(name),
+			Self::Source { name, .. }
+			| Self::Audio { name, .. }
+			| Self::Video { name, .. }
+			| Self::Published { name, .. } => Some(name),
 			Self::Scene { .. }
 			| Self::Item { .. }
 			| Self::Transition { .. }
 			| Self::Canvas { .. }
-			| Self::Extra { .. }
-			| Self::Mixes { .. } => None,
+			| Self::AudioScenes { .. } => None,
 		}
 	}
 
@@ -158,12 +155,12 @@ impl Change {
 			Self::Source { before, after, .. } => before == after,
 			Self::Audio { before, after, .. } => before == after,
 			Self::Video { before, after, .. } => before == after,
+			Self::Published { before, after, .. } => before == after,
 			Self::Scene { before, after, .. } => before == after,
 			Self::Item { before, after, .. } => before == after,
 			Self::Transition { before, after } => before == after,
 			Self::Canvas { before, after } => before == after,
-			Self::Extra { before, after, .. } => before == after,
-			Self::Mixes { before, after } => before == after,
+			Self::AudioScenes { before, after } => before == after,
 		}
 	}
 
@@ -205,6 +202,18 @@ impl Change {
 				name,
 				before,
 				after: a.clone(),
+			},
+			(
+				Self::Published { name, before, after },
+				Self::Published {
+					name: n,
+					before: b,
+					after: a,
+				},
+			) if name == *n && after == *b => Self::Published {
+				name,
+				before,
+				after: *a,
 			},
 			// Only a replacement in place, so an index means the same scene or
 			// item on both sides.
@@ -252,22 +261,12 @@ impl Change {
 			(Self::Canvas { before, after }, Self::Canvas { before: b, after: a }) if after == *b => {
 				Self::Canvas { before, after: *a }
 			}
-			(
-				Self::Extra { name, before, after },
-				Self::Extra {
-					name: n,
-					before: b,
-					after: a,
-				},
-			) if name == *n && after == *b => Self::Extra {
-				name,
-				before,
-				after: a.clone(),
-			},
-			(Self::Mixes { before, after }, Self::Mixes { before: b, after: a }) if after == *b => Self::Mixes {
-				before,
-				after: a.clone(),
-			},
+			(Self::AudioScenes { before, after }, Self::AudioScenes { before: b, after: a }) if after == *b => {
+				Self::AudioScenes {
+					before,
+					after: a.clone(),
+				}
+			}
 			_ => return None,
 		};
 		Some(merged)
@@ -280,6 +279,17 @@ impl Change {
 			Self::Source { name, before, after } => replace(&mut collection.sources, name, before, after, "source"),
 			Self::Audio { name, before, after } => replace(&mut collection.audio, name, before, after, "audio"),
 			Self::Video { name, before, after } => replace(&mut collection.video, name, before, after, "video"),
+			Self::Published { name, before, after } => {
+				if collection.published.contains(name) != *before {
+					return Err(conflict(format!("whether `{name}` is published changed")));
+				}
+				if *after {
+					collection.published.insert(name.clone());
+				} else {
+					collection.published.remove(name);
+				}
+				Ok(())
+			}
 			Self::Scene { index, before, after } => {
 				splice(&mut collection.scenes, *index, before, after).map_err(|err| conflict(format!("scene {err}")))
 			}
@@ -307,12 +317,11 @@ impl Change {
 				collection.canvas = *after;
 				Ok(())
 			}
-			Self::Extra { name, before, after } => replace(&mut collection.canvases, name, before, after, "canvas"),
-			Self::Mixes { before, after } => {
-				if collection.mixes != *before {
-					return Err(conflict("the mixes changed".into()));
+			Self::AudioScenes { before, after } => {
+				if collection.audio_scenes != *before {
+					return Err(conflict("the audio scenes changed".into()));
 				}
-				collection.mixes = after.clone();
+				collection.audio_scenes = after.clone();
 				Ok(())
 			}
 		}
@@ -558,8 +567,7 @@ impl Draft {
 		})
 	}
 
-	/// Set or clear the gain, mute, routing, and delay of the source called
-	/// `name`.
+	/// Set or clear the gain, mute, pan, and delay of the source called `name`.
 	pub fn set_audio(&mut self, name: &str, audio: Option<Audio>) -> Result<(), Error> {
 		let before = self.collection.audio.get(name).cloned();
 		self.change(Change::Audio {
@@ -580,10 +588,19 @@ impl Draft {
 		})
 	}
 
+	/// Publish the source called `name` independently, or stop.
+	pub fn set_published(&mut self, name: &str, published: bool) -> Result<(), Error> {
+		self.change(Change::Published {
+			name: name.to_string(),
+			before: self.collection.published.contains(name),
+			after: published,
+		})
+	}
+
 	/// Remove the source called `name` and everything that refers to it: its
 	/// clones, the items showing either, their audio and video settings, the
-	/// filters reading it, such as a mask, and a stinger playing it, which
-	/// becomes the default fade.
+	/// audio scenes holding its sound, the filters reading it, such as a mask,
+	/// and a stinger playing it, which becomes the default fade.
 	pub fn remove_source(&mut self, name: &str) -> Result<(), Error> {
 		let clones: Vec<String> = self
 			.collection
@@ -641,12 +658,18 @@ impl Draft {
 		if self.collection.audio.contains_key(name) {
 			self.set_audio(name, None)?;
 		}
+		let mut scenes = self.collection.audio_scenes.clone();
+		for scene in &mut scenes {
+			scene.sounds.remove(name);
+		}
+		self.set_audio_scenes(scenes)?;
 		if self.collection.video.contains_key(name) {
 			self.set_video(name, None)?;
 		}
 		if self.collection.transition.stinger() == Some(name) {
 			self.set_transition(Transition::default())?;
 		}
+		self.set_published(name, false)?;
 		self.set_source(name, None)
 	}
 
@@ -784,109 +807,96 @@ impl Draft {
 		})
 	}
 
-	/// Set the canvas's size and frame rate. Items keep their place in canvas
-	/// pixels.
+	/// Set the program's size and frame rate, which every scene without a
+	/// size of its own follows. Items keep their place in canvas pixels.
 	pub fn set_canvas(&mut self, canvas: Canvas) -> Result<(), Error> {
 		let before = self.collection.canvas;
 		self.change(Change::Canvas { before, after: canvas })
 	}
 
-	/// Add or resize the further canvas called `name`, keeping its top layer
-	/// and every scene's layout on it. Items keep their place in canvas
-	/// pixels.
-	pub fn set_extra(&mut self, name: &str, width: u32, height: u32) -> Result<(), Error> {
-		let before = self.collection.canvases.get(name).cloned();
-		let after = match &before {
-			Some(extra) => Extra {
-				width,
-				height,
-				..extra.clone()
-			},
-			None => Extra::new(width, height),
-		};
-		self.change(Change::Extra {
-			name: name.to_string(),
-			before,
-			after: Some(after),
-		})
+	/// Have recordings hold the scene called `scene`, or the program with
+	/// `None`, rather than the one they hold now.
+	pub fn set_recorded(&mut self, scene: Option<&str>) -> Result<(), Error> {
+		let scenes = self.collection.scenes.iter().enumerate();
+		let changed: Vec<(usize, Scene)> = scenes
+			.filter(|(_, at)| at.recorded != (Some(at.name.as_str()) == scene))
+			.map(|(index, at)| (index, at.clone()))
+			.collect();
+		if let Some(scene) = scene
+			&& self.collection.scene(scene).is_none()
+		{
+			return Err(conflict(format!("there is no scene `{scene}`")));
+		}
+		for (index, at) in changed {
+			let recorded = !at.recorded;
+			self.set_scene(index, Scene { recorded, ..at })?;
+		}
+		Ok(())
 	}
 
-	/// Remove the further canvas called `name`, with its top layer and every
-	/// scene's layout on it.
-	pub fn remove_extra(&mut self, name: &str) -> Result<(), Error> {
-		let laid: Vec<(usize, Scene)> = self
+	/// Set the audio scenes, and nothing else: see
+	/// [`rename_audio_scene`](Self::rename_audio_scene) and
+	/// [`remove_audio_scene`](Self::remove_audio_scene) for what refers to one.
+	pub fn set_audio_scenes(&mut self, scenes: Vec<AudioScene>) -> Result<(), Error> {
+		let before = self.collection.audio_scenes.clone();
+		self.change(Change::AudioScenes { before, after: scenes })
+	}
+
+	/// Have the audio scene on program hold the sound of the source called
+	/// `name`, as a source added by hand does, so it is heard at once.
+	pub fn hear(&mut self, name: &str) -> Result<(), Error> {
+		let mut scenes = self.collection.audio_scenes.clone();
+		let program = scenes.iter_mut().find(|scene| scene.program);
+		let program = program.ok_or_else(|| conflict("no audio scene is on program".into()))?;
+		program.sounds.insert(name.to_string());
+		self.set_audio_scenes(scenes)
+	}
+
+	/// Rename the audio scene `from` to `to`, keeping its place, what it
+	/// holds, whether the program or recordings carry it, and every audio
+	/// scene holding it and scene carrying it.
+	pub fn rename_audio_scene(&mut self, from: &str, to: &str) -> Result<(), Error> {
+		self.retarget_audio_scene(from, Some(to))
+	}
+
+	/// Remove the audio scene `name`, taking it out of every audio scene
+	/// holding it. A scene carrying it goes back to the one on program, as
+	/// do recordings holding it. The one on program cannot be removed.
+	pub fn remove_audio_scene(&mut self, name: &str) -> Result<(), Error> {
+		self.retarget_audio_scene(name, None)
+	}
+
+	/// Rename the audio scene `from` to `to`, or remove it with `None`, and
+	/// every reference to it.
+	fn retarget_audio_scene(&mut self, from: &str, to: Option<&str>) -> Result<(), Error> {
+		let mut scenes = self.collection.audio_scenes.clone();
+		let index = scenes.iter().position(|scene| scene.name == from);
+		let index = index.ok_or_else(|| conflict(format!("there is no audio scene `{from}`")))?;
+		match to {
+			Some(to) => scenes[index].name = to.to_string(),
+			None => {
+				scenes.remove(index);
+			}
+		}
+		for scene in &mut scenes {
+			if scene.scenes.remove(from)
+				&& let Some(to) = to
+			{
+				scene.scenes.insert(to.to_string());
+			}
+		}
+		self.set_audio_scenes(scenes)?;
+		let carrying: Vec<(usize, Scene)> = self
 			.collection
 			.scenes
 			.iter()
 			.enumerate()
-			.filter(|(_, scene)| scene.canvases.contains_key(name))
+			.filter(|(_, scene)| scene.audio.as_deref() == Some(from))
 			.map(|(index, scene)| (index, scene.clone()))
 			.collect();
-		for (index, mut scene) in laid {
-			scene.canvases.remove(name);
-			self.set_scene(index, scene)?;
-		}
-		let before = self.collection.canvases.get(name).cloned();
-		self.change(Change::Extra {
-			name: name.to_string(),
-			before,
-			after: None,
-		})
-	}
-
-	/// Set the mixes and which ones the program and recordings carry, and
-	/// nothing else: see [`rename_mix`](Self::rename_mix) and
-	/// [`remove_mix`](Self::remove_mix) for what refers to a mix.
-	pub fn set_mixes(&mut self, mixes: Mixes) -> Result<(), Error> {
-		let before = self.collection.mixes.clone();
-		self.change(Change::Mixes { before, after: mixes })
-	}
-
-	/// Rename the mix `from` to `to`, keeping its place, its routing, and
-	/// whether the program or recordings carry it.
-	pub fn rename_mix(&mut self, from: &str, to: &str) -> Result<(), Error> {
-		self.retarget_mix(from, Some(to))
-	}
-
-	/// Remove the mix `name`, and every source's exclusion from it. The mix the
-	/// program carries cannot be removed; recordings holding it go back to
-	/// holding the mix on program.
-	pub fn remove_mix(&mut self, name: &str) -> Result<(), Error> {
-		self.retarget_mix(name, None)
-	}
-
-	/// Rename the mix `from` to `to`, or remove it with `None`, and every
-	/// reference to it.
-	fn retarget_mix(&mut self, from: &str, to: Option<&str>) -> Result<(), Error> {
-		let mut mixes = self.collection.mixes.clone();
-		let index = mixes.names.iter().position(|name| name == from);
-		let index = index.ok_or_else(|| conflict(format!("there is no mix `{from}`")))?;
-		match to {
-			Some(to) => mixes.names[index] = to.to_string(),
-			None => {
-				mixes.names.remove(index);
-			}
-		}
-		if mixes.program == from {
-			mixes.program = to.unwrap_or_default().to_string();
-		}
-		if mixes.recording.as_deref() == Some(from) {
-			mixes.recording = to.map(str::to_string);
-		}
-		let routed: Vec<(String, Audio)> = self
-			.collection
-			.audio
-			.iter()
-			.filter(|(_, audio)| audio.exclude.contains(from))
-			.map(|(name, audio)| (name.clone(), audio.clone()))
-			.collect();
-		self.set_mixes(mixes)?;
-		for (name, mut audio) in routed {
-			audio.exclude.remove(from);
-			if let Some(to) = to {
-				audio.exclude.insert(to.to_string());
-			}
-			self.set_audio(&name, Some(audio))?;
+		for (index, scene) in carrying {
+			let audio = to.map(str::to_string);
+			self.set_scene(index, Scene { audio, ..scene })?;
 		}
 		Ok(())
 	}
@@ -1568,106 +1578,78 @@ mod tests {
 		assert_eq!(collection, start);
 	}
 
-	/// A further canvas is added, laid out, and resized as edits; removing a
-	/// source takes its items off every canvas; and removing the canvas takes
-	/// its top layer and every scene's layout on it, undoing whole. A layout
-	/// emptied item by item reads as no layout, and the file round-trips.
+	/// A scene's size, whether it is published, and the scene recordings hold
+	/// are edits like any other, kept through a rename. Recording another
+	/// scene moves the pick, and removing the recorded scene sends recordings
+	/// back to the program, undoing whole.
 	#[test]
-	fn a_further_canvas_edits_and_removes_whole() {
+	fn a_scene_resizes_publishes_and_records() {
 		let mut collection = collection();
-		collection.sources.insert("blue".into(), color([0, 0, 255, 255]));
-		let mut history = History::new();
-		let tall = Layer::scene("Scene").on(Some("tall".into()));
-		let over = Layer::top().on(Some("tall".into()));
-		let fill = Rect::fill(&Canvas {
-			width: 1080,
-			height: 1920,
-			framerate: 30,
-		});
-
-		let mut draft = collection.draft("Add a canvas");
-		assert!(
-			draft.insert_item(&tall, 0, Item::new("red", fill)).is_err(),
-			"no canvas yet"
-		);
-		draft.set_extra("tall", 1080, 1920).unwrap();
-		draft.insert_item(&tall, 0, Item::new("red", fill)).unwrap();
-		draft.insert_item(&tall, 1, Item::new("blue", fill)).unwrap();
-		draft.insert_item(&over, 0, Item::new("blue", fill)).unwrap();
-		commit(&mut collection, &mut history, draft, None);
-		let added = collection.clone();
-		assert_eq!(collection.items(&tall).unwrap().len(), 2);
-		assert_eq!(collection.canvas(Some("tall")).unwrap().framerate, 30);
-		assert_eq!(
-			Collection::from_toml(&collection.to_toml().unwrap()).unwrap(),
-			collection
-		);
-
-		let mut draft = collection.draft("Resize");
-		draft.set_extra("tall", 720, 1280).unwrap();
-		commit(&mut collection, &mut history, draft, None);
-		assert_eq!(collection.canvases["tall"].top.len(), 1, "the top layer stays");
-
-		let mut draft = collection.draft("Remove blue");
-		draft.remove_source("blue").unwrap();
-		commit(&mut collection, &mut history, draft, None);
-		assert_eq!(collection.items(&tall).unwrap().len(), 1);
-		assert!(collection.items(&over).unwrap().is_empty());
-
-		let mut draft = collection.draft("Remove red there");
-		draft.remove_item(&tall, 0).unwrap();
-		commit(&mut collection, &mut history, draft, None);
-		assert!(collection.scenes[0].canvases.is_empty(), "an empty layout is dropped");
-
-		history.seek(&mut collection, 1).unwrap();
-		assert_eq!(collection, added);
-		let mut draft = collection.draft("Remove the canvas");
-		draft.remove_extra("tall").unwrap();
-		commit(&mut collection, &mut history, draft, None);
-		assert!(collection.canvases.is_empty());
-		assert!(collection.scenes[0].canvases.is_empty());
-		assert_eq!(collection.items(&tall), None);
-		history.undo(&mut collection).unwrap();
-		assert_eq!(collection, added);
-	}
-
-	/// Emptying a scene's layout on a further canvas changes only that layer,
-	/// so a scene snapshot taken before still undoes: rename the scene, empty
-	/// its layout, then undo both. A refused item edit leaves no empty layout
-	/// behind in the draft.
-	#[test]
-	fn emptying_a_layout_keeps_earlier_scene_edits_undoable() {
-		let mut collection = collection();
-		let fill = Rect::fill(&collection.canvas);
-		collection.canvases.insert("tall".into(), Extra::new(1080, 1920));
-		collection.scenes[0]
-			.canvases
-			.insert("tall".into(), vec![Item::new("red", fill)]);
+		collection.scenes.push(Scene::new("Tall"));
 		collection.validate().unwrap();
 		let start = collection.clone();
 		let mut history = History::new();
 
-		let mut draft = collection.draft("Rename");
-		draft.rename_scene(0, "Renamed").unwrap();
+		let tall = collection.scenes[1].clone();
+		let mut draft = collection.draft("Publish a portrait scene");
+		let size = Some(crate::collection::Size {
+			width: 1080,
+			height: 1920,
+		});
+		draft
+			.set_scene(
+				1,
+				Scene {
+					size,
+					published: true,
+					..tall
+				},
+			)
+			.unwrap();
+		draft.set_recorded(Some("Tall")).unwrap();
 		commit(&mut collection, &mut history, draft, None);
-		let tall = Layer::scene("Renamed").on(Some("tall".into()));
-		let mut draft = collection.draft("Remove red there");
-		draft.remove_item(&tall, 0).unwrap();
-		assert!(draft.insert_item(&tall, 5, Item::new("red", fill)).is_err());
-		commit(&mut collection, &mut history, draft, None);
-		assert!(collection.scenes[0].canvases.is_empty());
+		assert_eq!(collection.canvas(Some("Tall")).unwrap().height, 1920);
+		assert_eq!(collection.recorded(), Some("Tall"));
 
+		let mut draft = collection.draft("Rename");
+		draft.rename_scene(1, "Portrait").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		let portrait = collection.scene("Portrait").unwrap();
+		assert!(portrait.published && portrait.size == size);
+		assert_eq!(collection.recorded(), Some("Portrait"));
+
+		let mut draft = collection.draft("Record Scene");
+		draft.set_recorded(Some("Scene")).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.recorded(), Some("Scene"), "one scene at most");
+		assert!(collection.draft("Record none").set_recorded(Some("None")).is_err());
+
+		let mut draft = collection.draft("Record the program");
+		draft.set_recorded(None).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.recorded(), None);
 		history.undo(&mut collection).unwrap();
+		assert_eq!(collection.recorded(), Some("Scene"));
+		history.redo(&mut collection).unwrap();
+		assert_eq!(collection.recorded(), None);
 		history.undo(&mut collection).unwrap();
+
+		let mut draft = collection.draft("Remove");
+		draft.remove_scene(0).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert_eq!(collection.recorded(), None, "the program");
+
+		history.seek(&mut collection, 0).unwrap();
 		assert_eq!(collection, start);
 	}
 
-	/// A renamed mix keeps its place, the program's and recordings' picks, and
-	/// every source left out of it; a removed one takes those exclusions with
-	/// it, sends recordings back to the mix on program, and undoes whole; and
-	/// the mix the program carries stays.
+	/// A renamed audio scene keeps its place, the program's and recordings'
+	/// picks, and every audio scene holding it and scene carrying it; a
+	/// removed one leaves those, sends recordings and the scene back to the
+	/// one on program, and undoes whole; the one on program stays; and a
+	/// removed source leaves every audio scene.
 	#[test]
-	fn a_mix_renames_and_removes_with_its_routing() {
+	fn an_audio_scene_renames_and_removes_with_its_references() {
 		let mut collection = collection();
 		collection.sources.insert(
 			"guest".into(),
@@ -1675,55 +1657,59 @@ mod tests {
 				path: "room/guest".into(),
 			},
 		);
-		collection.mixes = Mixes {
-			names: vec!["Program".into(), "Stream".into(), "Full".into()],
-			program: "Stream".into(),
-			recording: Some("Full".into()),
-		};
-		let left_out = Audio {
-			exclude: ["Stream".to_string()].into(),
-			..Audio::default()
-		};
-		collection.audio.insert("guest".into(), left_out);
+		collection.audio_scenes = vec![
+			AudioScene::new("Program"),
+			AudioScene {
+				program: true,
+				sounds: ["guest".to_string()].into(),
+				..AudioScene::new("Stream")
+			},
+			AudioScene {
+				recorded: true,
+				scenes: ["Stream".to_string()].into(),
+				..AudioScene::new("Full")
+			},
+		];
+		collection.scenes[0].audio = Some("Full".into());
 		collection.validate().unwrap();
 		let start = collection.clone();
 		let mut history = History::new();
+		let names = |collection: &Collection| -> Vec<String> {
+			collection.audio_scenes.iter().map(|scene| scene.name.clone()).collect()
+		};
 
-		let mut draft = collection.draft("Rename mix");
-		draft.rename_mix("Stream", "Live").unwrap();
+		let mut draft = collection.draft("Rename audio scene");
+		draft.rename_audio_scene("Stream", "Live").unwrap();
 		commit(&mut collection, &mut history, draft, None);
-		assert_eq!(collection.mixes.names, ["Program", "Live", "Full"]);
-		assert_eq!(collection.mixes.program, "Live");
-		assert_eq!(collection.audio["guest"].exclude, ["Live".to_string()].into());
+		assert_eq!(names(&collection), ["Program", "Live", "Full"]);
+		assert_eq!(collection.program_audio(), Some("Live"));
+		assert_eq!(collection.audio_scenes[2].scenes, ["Live".to_string()].into());
+		assert_eq!(collection.heard("Full"), ["guest"].into());
 
-		let mut draft = collection.draft("Rename mix");
-		draft.rename_mix("Full", "Everything").unwrap();
+		let mut draft = collection.draft("Rename audio scene");
+		draft.rename_audio_scene("Full", "Everything").unwrap();
 		commit(&mut collection, &mut history, draft, None);
-		assert_eq!(collection.mixes.recorded(), "Everything");
+		assert_eq!(collection.recorded_audio(), Some("Everything"));
+		assert_eq!(collection.scenes[0].audio.as_deref(), Some("Everything"));
 
-		let mut draft = collection.draft("Remove mix");
-		draft.remove_mix("Everything").unwrap();
+		let mut draft = collection.draft("Remove audio scene");
+		draft.remove_audio_scene("Everything").unwrap();
 		commit(&mut collection, &mut history, draft, None);
-		assert_eq!(collection.mixes.recording, None);
-		assert_eq!(collection.mixes.recorded(), "Live", "the mix on program");
+		assert_eq!(collection.recorded_audio(), Some("Live"), "the one on program");
+		assert_eq!(collection.scenes[0].audio, None);
+		assert_eq!(collection.published_audio("Scene"), Some("Live"));
 
-		let mut draft = collection.draft("Remove mix");
-		draft.remove_mix("Live").unwrap();
+		let mut draft = collection.draft("Remove audio scene");
+		draft.remove_audio_scene("Live").unwrap();
 		assert!(
 			matches!(draft.finish(), Err(Error::Invalid(_))),
 			"the program carries it"
 		);
 
-		let mut draft = collection.draft("Pick mix");
-		let mixes = Mixes {
-			program: "Program".into(),
-			..collection.mixes.clone()
-		};
-		draft.set_mixes(mixes).unwrap();
-		draft.remove_mix("Live").unwrap();
+		let mut draft = collection.draft("Remove guest");
+		draft.remove_source("guest").unwrap();
 		commit(&mut collection, &mut history, draft, None);
-		assert_eq!(collection.mixes, Mixes::default());
-		assert!(collection.audio["guest"].exclude.is_empty());
+		assert!(collection.heard("Live").is_empty());
 
 		for _ in 0..4 {
 			history.undo(&mut collection).unwrap();

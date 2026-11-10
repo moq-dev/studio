@@ -9,7 +9,9 @@
 //! `moq play` holds its jitter buffer in the speaker. The bus holds only
 //! [`BUS_LATENCY`] of a source, so a [`Speaker`] holds the rest: it places each
 //! frame the playout target moq-audio's decoder estimates after it arrives,
-//! and a [`Writer`] writes it the bus's latency ahead of then.
+//! and a [`Writer`] writes it the bus's latency ahead of then. A media or
+//! replay source's sound goes through a [`Writer`] too, so it sounds with the
+//! pictures it shows.
 
 use std::time::Duration;
 

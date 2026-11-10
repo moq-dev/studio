@@ -6,6 +6,7 @@ MoQ Studio is a native, cross-platform streaming studio that composites scenes o
 # Required
 
 - Measure performance by frame time, GPU copies, and encoder load.
+- Measure the UI's frame time under a real compositor, such as headless sway (`WLR_BACKENDS=headless sway`), not Xvfb, whose present caps it at 12–25 fps on the NVIDIA test hosts.
 
 # Upstream
 
@@ -34,5 +35,5 @@ just fix     # Auto-fix formatting
 
 `README.md` is the user guide. A change to what a user does (flags, panels, the scene file, outputs) updates it in the same PR.
 
-Quests: before any work, run `quest context` and follow it.
+Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
 The `quest` binary comes from the moq-dev/quest flake input, so outside the dev shell run it as `nix develop --command quest ...`. It serves the quest skills; change them upstream and bump the input.

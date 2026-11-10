@@ -11,12 +11,14 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Context;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 mod autosave;
 mod controls;
 mod devices;
 mod engine;
 mod feed;
+mod fx;
 mod guests;
 mod health;
 mod hotkeys;
@@ -29,6 +31,7 @@ mod setup;
 mod snap;
 mod ui;
 mod uplink;
+mod vcam;
 
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -231,7 +234,9 @@ struct Window {
 	runtime: tokio::runtime::Handle,
 	/// The engine once the studio is built, for the save on quit.
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
-	keypad: hotkeys::Keypad,
+	keyboard: hotkeys::Keyboard,
+	/// The window's own effects, on the setup screen and in the studio.
+	fx: fx::Fx,
 }
 
 impl eframe::App for Window {
@@ -242,9 +247,25 @@ impl eframe::App for Window {
 	}
 
 	fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+		self.fx.begin(ui.ctx());
+		self.show(ui, frame);
+		self.fx.finish();
+	}
+
+	fn save(&mut self, storage: &mut dyn eframe::Storage) {
+		self.fx.save(storage);
+		if let App::Studio(studio) = &mut self.app {
+			studio.save(storage);
+		}
+	}
+}
+
+impl Window {
+	/// Draw setup or the studio, building the studio once its engine starts.
+	fn show(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
 		let engine = match &mut self.app {
-			App::Studio(studio) => return studio.ui(ui, frame),
-			App::Setup(setup) => match setup.ui(ui) {
+			App::Studio(studio) => return studio.ui(ui, frame, &mut self.fx),
+			App::Setup(setup) => match setup.ui(ui, &mut self.fx) {
 				Some(engine) => engine,
 				None => return,
 			},
@@ -252,27 +273,21 @@ impl eframe::App for Window {
 		};
 		let _ = self.started.set(engine.clone());
 		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
-		studio.load(frame);
+		studio.load(hotkeys::Window {
+			frame,
+			ctx: ui.ctx(),
+			keyboard: self.keyboard.clone(),
+		});
 		self.app = App::Studio(Box::new(studio));
 		ui.ctx().request_repaint();
 	}
-
-	fn save(&mut self, storage: &mut dyn eframe::Storage) {
-		if let App::Studio(studio) = &mut self.app {
-			studio.save(storage);
-		}
-	}
-
-	fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-		self.keypad.forget(&mut raw_input.events);
-	}
 }
 
-/// eframe's handler for the window's events, noting keypad keys before egui
-/// folds them into their twins.
+/// eframe's handler for the window's events, which hears keys before egui,
+/// so a hotkey is the key where it sits.
 struct Events<'a> {
 	eframe: eframe::EframeWinitApplication<'a>,
-	keypad: hotkeys::Keypad,
+	keyboard: hotkeys::Keyboard,
 	/// Whether the window was asked to close, since eframe only logs the error
 	/// that stops it otherwise.
 	closed: bool,
@@ -293,7 +308,18 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 
 	fn window_event(&mut self, event_loop: &ActiveEventLoop, id: winit::window::WindowId, event: WindowEvent) {
 		match &event {
-			WindowEvent::KeyboardInput { event, .. } => self.keypad.note(event.physical_key),
+			// A synthetic press is a key held as the window gained focus.
+			WindowEvent::KeyboardInput {
+				event,
+				is_synthetic: false,
+				..
+			} if event.state.is_pressed() => {
+				let name = event.key_without_modifiers();
+				if !self.keyboard.pressed(event.physical_key, name, event.repeat) {
+					return;
+				}
+			}
+			WindowEvent::ModifiersChanged(modifiers) => self.keyboard.modifiers(modifiers.state()),
 			WindowEvent::CloseRequested => self.closed = true,
 			_ => {}
 		}
@@ -354,8 +380,8 @@ fn run(
 	let event_loop = EventLoop::<eframe::UserEvent>::with_user_event()
 		.build()
 		.context("cannot open the window")?;
-	let keypad = hotkeys::Keypad::default();
-	let window_keypad = keypad.clone();
+	let keyboard = hotkeys::Keyboard::default();
+	let window_keyboard = keyboard.clone();
 	let eframe = eframe::create_native(
 		"moq-studio",
 		options,
@@ -364,19 +390,21 @@ fn run(
 				.wgpu_render_state
 				.clone()
 				.context("the window is not drawn with wgpu")?;
+			let fx = fx::Fx::new(&render, cc.storage, &cc.egui_ctx, &runtime);
 			Ok(Box::new(Window {
 				app,
 				render,
 				runtime,
 				started,
-				keypad: window_keypad,
+				keyboard: window_keyboard,
+				fx,
 			}))
 		}),
 		&event_loop,
 	);
 	let mut events = Events {
 		eframe,
-		keypad,
+		keyboard,
 		closed: false,
 	};
 	event_loop.run_app(&mut events).context("the window failed")?;

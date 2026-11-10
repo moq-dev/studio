@@ -25,7 +25,7 @@ pub(crate) const MAX_PLANES: usize = 4;
 /// The longest message either side accepts: the largest page's pixels, with
 /// room for the rest of the message. Bounds what a misbehaving peer can make
 /// the other allocate.
-const MAX_MESSAGE: usize = (super::MAX_SIDE * super::MAX_SIDE * 4) as usize + 1024;
+pub(crate) const MAX_MESSAGE: usize = (super::MAX_SIDE * super::MAX_SIDE * 4) as usize + 1024;
 
 /// A page's number, unique among those one helper opens.
 pub(crate) type Id = u64;
@@ -45,6 +45,10 @@ pub(crate) enum Command {
 	Input(Id, Input),
 	/// The canvas's frame rate changed, so the page paints at this one.
 	FrameRate(Id, u32),
+	/// The last message: close every page, save the profile, and exit. The
+	/// studio holds the socket open until then, so the helper reads its end
+	/// as the studio dying and exits at once.
+	Stop,
 }
 
 /// How a helper runs every page it opens.
@@ -73,13 +77,27 @@ pub(crate) enum Raster {
 	Cpu,
 }
 
+impl Raster {
+	/// Whether CEF's own copy reaches the desktop's clipboard: only through an
+	/// X display.
+	pub(crate) fn native_copy(&self) -> bool {
+		matches!(
+			self,
+			Raster::Gpu {
+				display: Display::X11,
+				..
+			}
+		)
+	}
+}
+
 /// The display server the GPU path connects to, the one the studio runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Display {
-	/// `$WAYLAND_DISPLAY`, preferred: under XWayland, CEF's GPU process finds
-	/// no GBM device on some drivers, NVIDIA's among them, and never paints.
+	/// `$WAYLAND_DISPLAY`, preferred: CEF paints there on the studio's GPU.
 	Wayland,
-	/// `$DISPLAY`.
+	/// `$DISPLAY`, whose X server must run on the studio's GPU, since CEF
+	/// paints on the X server's.
 	X11,
 }
 

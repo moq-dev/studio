@@ -21,7 +21,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/4be350816f2a5c1157f799773ee1594f199fd9a7";
+      url = "github:moq-dev/quest/6a18b8a815c2d15d37d7433a619f961ec5a07165";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -147,6 +147,10 @@
                 runHook preInstall
                 mkdir $out
                 cp -r Release/. Resources/. CMakeLists.txt cmake include libcef_dll $out/
+                # cef-dll-sys copies every file here beside the binaries, where
+                # the studio loads the Vulkan loader first and ANGLE looks for
+                # nowhere else. CEF's own finds no NixOS driver; this one does.
+                ln -sf ${lib.getLib pkgs.vulkan-loader}/lib/libvulkan.so.1 $out/libvulkan.so.1
                 # What cef-dll-sys checks the version against.
                 echo '{"type":"minimal","name":"${archive.name}.tar.bz2","sha1":"${archive.sha1}"}' > $out/archive.json
                 runHook postInstall

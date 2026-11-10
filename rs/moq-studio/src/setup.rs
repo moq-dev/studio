@@ -18,6 +18,7 @@ use moq_scene::{Canvas, Collection, Draft, Edit, History, Item, Rect, Scene, wgp
 use crate::autosave::{self, Autosave};
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{self, Engine, Launch};
+use crate::fx::{Fx, Mark};
 use crate::health::rate;
 use crate::uplink;
 
@@ -438,10 +439,14 @@ fn proposal(collection: &Collection, listing: &Listing, choices: &Choices) -> Re
 	draft.finish()
 }
 
-/// Add `pick` under its device name, numbered past any source already called that.
+/// Add `pick` under its device name, numbered past any source already called
+/// that, its sound in the audio scene on program.
 fn add(draft: &mut Draft, pick: &Pick) -> Result<String, moq_scene::Error> {
 	let name = draft.collection().unused_name(&pick.name);
 	draft.set_source(&name, Some(pick.source.clone()))?;
+	if pick.source.has_audio() {
+		draft.hear(&name)?;
+	}
 	Ok(name)
 }
 
@@ -540,7 +545,7 @@ impl Setup {
 	}
 
 	/// Draw the screen; the engine once the creator has started the studio.
-	pub fn ui(&mut self, ui: &mut Ui) -> Option<Arc<Engine>> {
+	pub fn ui(&mut self, ui: &mut Ui, fx: &mut Fx) -> Option<Arc<Engine>> {
 		self.advance();
 		if self.choices.is_none() || self.starting.is_some() {
 			ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -559,6 +564,7 @@ impl Setup {
 
 		let mut start = None;
 		egui::CentralPanel::default().show(ui, |ui| {
+			let backdrop = fx.on().then(|| Mark::new(ui.painter()));
 			egui::ScrollArea::vertical().show(ui, |ui| {
 				ui.heading("Set up MoQ Studio");
 				ui.label(
@@ -570,6 +576,9 @@ impl Setup {
 				ui.separator();
 				start = self.proposal(ui);
 			});
+			if let Some(backdrop) = backdrop {
+				fx.backdrop(&backdrop.around(ui.clip_rect()), ui.visuals());
+			}
 		});
 		if let Some(empty) = start {
 			self.start(empty);
@@ -1017,6 +1026,11 @@ mod tests {
 		);
 		assert!(corner.x + corner.width < 1280.0 && corner.y + corner.height < 720.0);
 		assert!(collection.sources.contains_key("Mic"), "the input is a source");
+		assert_eq!(
+			collection.heard(moq_scene::AudioScene::DEFAULT),
+			["Mic"].into(),
+			"heard on program"
+		);
 
 		// One edit, which undoes to what starting empty opens.
 		assert_eq!(history.entries().len(), 1);

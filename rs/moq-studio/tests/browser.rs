@@ -5,6 +5,7 @@
 #![cfg(all(target_os = "linux", feature = "cef"))]
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kio::clock::Instant;
@@ -44,6 +45,12 @@ impl Studio {
 
 	/// A studio whose pages keep their cookies in `profile`.
 	async fn on(profile: &Path, sources: &[(&str, Source)]) -> Self {
+		Self::start(Path::new(env!("CARGO_BIN_EXE_moq-studio")), profile, sources).await
+	}
+
+	/// A studio whose helper is `program`, with its pages' cookies in
+	/// `profile`.
+	async fn start(program: &Path, profile: &Path, sources: &[(&str, Source)]) -> Self {
 		let instance = wgpu::Instance::default();
 		let adapter = instance
 			.request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -73,7 +80,7 @@ impl Studio {
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
-		let helper = Helper::new(env!("CARGO_BIN_EXE_moq-studio"), profile, &adapter, &device, &queue);
+		let helper = Helper::new(program, profile, &adapter, &device, &queue);
 		let mut sources = Sources::new(Context {
 			bus,
 			origin: origin.consume(),
@@ -112,6 +119,12 @@ impl Studio {
 
 	/// The program's center pixel, freshly drawn.
 	fn center(&mut self) -> [u8; 4] {
+		let canvas = self.collection.canvas;
+		self.frame()[(canvas.height / 2 * canvas.width + canvas.width / 2) as usize]
+	}
+
+	/// The program's pixels, row by row, freshly drawn.
+	fn frame(&mut self) -> Vec<[u8; 4]> {
 		self.compositor
 			.render(&self.collection, &self.sources, Instant::now())
 			.unwrap();
@@ -141,8 +154,11 @@ impl Studio {
 		buffer.map_async(wgpu::MapMode::Read, .., |result| result.unwrap());
 		self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 		let mapped = buffer.slice(..).get_mapped_range().unwrap();
-		let at = (canvas.height / 2 * row + canvas.width / 2 * 4) as usize;
-		mapped[at..at + 4].try_into().unwrap()
+		mapped
+			.chunks(row as usize)
+			.flat_map(|line| line[..(canvas.width * 4) as usize].chunks(4))
+			.map(|pixel| pixel.try_into().unwrap())
+			.collect()
 	}
 
 	/// Redraw until the center pixel is within a step of `expected`.
@@ -239,6 +255,36 @@ async fn a_page_draws_and_plays() {
 	.await;
 }
 
+/// A page arrives laid out as it painted, not only in the right colors: a
+/// shared texture from a GPU whose tiling the studio's cannot read scrambles
+/// its rows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_page_keeps_its_layout() {
+	local(async {
+		const RED: [u8; 4] = [255, 0, 0, 255];
+		const GREEN: [u8; 4] = [0, 255, 0, 255];
+		// A red strip down the left fifth of the top half, over green.
+		let html = "<body style='margin:0;background:rgb(0,255,0)'>\
+			<div style='width:64px;height:120px;background:rgb(255,0,0)'></div></body>";
+		let mut studio = Studio::new(&[("page", page(html))]).await;
+		studio.until_center(GREEN, &[]).await;
+		let width = studio.collection.canvas.width as usize;
+		for (at, pixel) in studio.frame().into_iter().enumerate() {
+			let (x, y) = (at % width, at / width);
+			// The strip ends at 12.8 across and 32 down, where scaling blends
+			// the two.
+			let expected = match (x, y) {
+				(..11, ..30) => RED,
+				(15.., _) | (_, 34..) => GREEN,
+				_ => continue,
+			};
+			assert!(near(pixel, expected), "({x}, {y}) is {pixel:?}, not {expected:?}");
+		}
+	})
+	.await;
+}
+
 /// A page gets WebGL and WebGL2 contexts, and what it draws with them shows.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
@@ -325,23 +371,30 @@ async fn a_dropdown_draws_and_takes_clicks() {
 	.await;
 }
 
-/// Copy and Cut hand the page's selection to the studio for its clipboard,
-/// and Cut deletes it from the page. A password field's text is never taken.
+/// Copy and Cut put the page's selection on the clipboard, and Cut deletes it
+/// from the page. A password field's text is never taken.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
 async fn copy_and_cut_reach_the_clipboard() {
 	local(async {
-		// A text box over the whole page, and a password field below it. The
-		// page turns yellow once the text box is selected, lime once it is
-		// typed in, and blue and white for the same on the password.
-		let html = "<body style='margin:0;background:red'>\
-			<input value='hello world' style='width:100vw;height:100vh;background:transparent' \
-			onselect=\"document.body.style.background = 'yellow'\" \
-			oninput=\"document.body.style.background = 'lime'\">\
+		// A text box over the whole page, then a password field and a second
+		// text box below it. The page turns yellow once the first is
+		// selected, blue and white once the password is selected and typed
+		// in, and aqua and lime for the same on the second. This process's id
+		// tells its copies from whatever the X clipboard held before.
+		let id = std::process::id();
+		let html = format!(
+			"<body style='margin:0;background:red'>\
+			<input value='copy {id}' style='width:100vw;height:100vh;background:transparent' \
+			onselect=\"document.body.style.background = 'yellow'\">\
 			<input type=password value='hunter2' \
 			onselect=\"document.body.style.background = 'blue'\" \
-			oninput=\"document.body.style.background = 'white'\"></body>";
-		let mut studio = Studio::new(&[("page", page(html))]).await;
+			oninput=\"document.body.style.background = 'white'\">\
+			<input value='cut {id}' \
+			onselect=\"document.body.style.background = 'aqua'\" \
+			oninput=\"document.body.style.background = 'lime'\"></body>"
+		);
+		let mut studio = Studio::new(&[("page", page(&html))]).await;
 		studio.until_center([255, 0, 0, 255], &[]).await;
 
 		let page = studio.sources.get("page").unwrap().page().unwrap().clone();
@@ -358,21 +411,7 @@ async fn copy_and_cut_reach_the_clipboard() {
 			ctrl: true,
 			..Default::default()
 		};
-		let shift = Modifiers {
-			shift: true,
-			..Default::default()
-		};
-		let helper = studio.helper.clone();
-		let copied = async || {
-			let deadline = Instant::now() + TIMEOUT;
-			loop {
-				if let Some(copied) = helper.copied() {
-					return copied;
-				}
-				assert!(Instant::now() < deadline, "the copy never came back");
-				kio::clock::sleep(Duration::from_millis(30)).await;
-			}
-		};
+		let mut clipboard = Clipboard::new(studio.helper.clone());
 
 		page.send(Input::Focus(true));
 		for down in [true, false] {
@@ -390,7 +429,7 @@ async fn copy_and_cut_reach_the_clipboard() {
 		key(b'A', ctrl);
 		studio.until_center(YELLOW, &[]).await;
 		page.send(Input::Copy);
-		assert_eq!(copied().await, "hello world");
+		assert_eq!(clipboard.next().await, format!("copy {id}"));
 
 		// Text typed after the copy shows only once the copy has come back.
 		key(b'\t', Modifiers::default());
@@ -399,16 +438,109 @@ async fn copy_and_cut_reach_the_clipboard() {
 		page.send(Input::Copy);
 		page.send(Input::Text("x".into()));
 		studio.until_center([255, 255, 255, 255], &[]).await;
-		assert_eq!(helper.copied(), None, "a password was copied");
+		assert_eq!(clipboard.take(), None, "a password was copied");
 
-		key(b'\t', shift);
+		key(b'\t', Modifiers::default());
 		key(b'A', ctrl);
-		studio.until_center(YELLOW, &[]).await;
+		studio.until_center([0, 255, 255, 255], &[]).await;
 		page.send(Input::Cut);
 		studio.until_center(GREEN, &[]).await;
-		assert_eq!(copied().await, "hello world");
+		assert_eq!(clipboard.next().await, format!("cut {id}"));
 	})
 	.await;
+}
+
+/// Where a page's copies land: the X clipboard, where CEF copies itself, or
+/// else the studio's, through the helper.
+enum Clipboard {
+	Relay(Helper),
+	/// With the text it held when last read.
+	X11(Option<String>),
+}
+
+impl Clipboard {
+	fn new(helper: Helper) -> Self {
+		match helper.relays_copies() {
+			true => Self::Relay(helper),
+			false => Self::X11(x11_clipboard()),
+		}
+	}
+
+	/// What a page copied since this was last asked, if anything.
+	fn take(&mut self) -> Option<String> {
+		match self {
+			Self::Relay(helper) => helper.copied(),
+			Self::X11(held) => {
+				let text = x11_clipboard();
+				if text == *held {
+					return None;
+				}
+				held.clone_from(&text);
+				text
+			}
+		}
+	}
+
+	/// Wait for a page's next copy.
+	async fn next(&mut self) -> String {
+		let deadline = Instant::now() + TIMEOUT;
+		loop {
+			if let Some(text) = self.take() {
+				return text;
+			}
+			assert!(Instant::now() < deadline, "the copy never landed");
+			kio::clock::sleep(Duration::from_millis(30)).await;
+		}
+	}
+}
+
+/// The X clipboard's text, as a paste takes it: none with no owner, or one
+/// offering no text.
+fn x11_clipboard() -> Option<String> {
+	use x11rb::connection::Connection;
+	use x11rb::protocol::Event;
+	use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, WindowClass};
+
+	let (connection, screen) = x11rb::connect(None).expect("the X display");
+	let root = connection.setup().roots[screen].root;
+	let window = connection.generate_id().unwrap();
+	connection
+		.create_window(
+			0,
+			window,
+			root,
+			0,
+			0,
+			1,
+			1,
+			0,
+			WindowClass::INPUT_ONLY,
+			0,
+			&CreateWindowAux::new(),
+		)
+		.unwrap();
+	let atom = |name: &[u8]| connection.intern_atom(false, name).unwrap().reply().unwrap().atom;
+	let (selection, text, property) = (atom(b"CLIPBOARD"), atom(b"UTF8_STRING"), atom(b"MOQ_STUDIO_PASTE"));
+	connection
+		.convert_selection(window, selection, text, property, x11rb::CURRENT_TIME)
+		.unwrap();
+	connection.flush().unwrap();
+	loop {
+		if let Event::SelectionNotify(notify) = connection.wait_for_event().unwrap()
+			&& notify.requestor == window
+		{
+			if notify.property == x11rb::NONE {
+				return None;
+			}
+			let value = connection
+				.get_property(true, window, property, AtomEnum::ANY, 0, u32::MAX)
+				.unwrap()
+				.reply()
+				.unwrap()
+				.value;
+			return Some(String::from_utf8(value).unwrap());
+		}
+	}
 }
 
 /// A page that closes itself fails its own source and leaves the canvas,
@@ -446,7 +578,7 @@ async fn a_crash_while_loading_drops_only_its_source() {
 		assert!(reason.contains("renderer"), "{reason}");
 
 		studio.until_center([255, 0, 0, 255], &["renderer"]).await;
-		let helper = helper().expect("the page's helper is running");
+		let helper = helper(std::process::id()).expect("the page's helper is running");
 		let killed = std::process::Command::new("kill")
 			.args(["-KILL", &helper.to_string()])
 			.status();
@@ -463,8 +595,9 @@ async fn a_crash_while_loading_drops_only_its_source() {
 	.await;
 }
 
-/// A page whose renderer crashes after it has drawn fails its source and
-/// leaves the canvas, and a reload draws it again.
+/// A page whose renderer crashes after it has drawn fails its source,
+/// leaves the canvas, and no longer reports a paint path, and a reload draws
+/// it again.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
 async fn a_crash_after_drawing_leaves_the_canvas() {
@@ -476,7 +609,7 @@ async fn a_crash_after_drawing_leaves_the_canvas() {
 		// Abort the page's renderer, and any spare one CEF keeps ready, which
 		// shows no page, as a failed assertion would: a crash that dumps core.
 		// (V8 takes a SIGSEGV that no fault raised and carries on.)
-		let helper = helper().expect("the page's helper is running");
+		let helper = helper(std::process::id()).expect("the page's helper is running");
 		let renderers = renderers(helper);
 		assert!(!renderers.is_empty(), "the page has a renderer");
 		for renderer in renderers {
@@ -488,6 +621,8 @@ async fn a_crash_after_drawing_leaves_the_canvas() {
 		let reason = studio.until_failed("page").await;
 		assert!(reason.contains("renderer"), "{reason}");
 		studio.until_center(BLUE, &["page"]).await;
+		let page = studio.sources.get("page").unwrap().page().unwrap();
+		assert_eq!(page.paint(), None, "a stopped page paints nothing");
 
 		studio.reload("page");
 		studio.until_center([255, 0, 0, 255], &[]).await;
@@ -571,13 +706,172 @@ async fn serve(html: &'static str) -> String {
 	url
 }
 
-/// The one helper this test process still runs: a child started with the
-/// helper's argument.
-fn helper() -> Option<u32> {
-	let ours = std::process::id();
+/// The helper requests only what its pages load: nothing of its own, such as
+/// component updates, a spellcheck dictionary, the network time, or
+/// autofill's guesses at a page's text field.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn the_helper_requests_only_its_pages() {
+	use std::os::unix::fs::PermissionsExt;
+	use tokio::io::AsyncBufReadExt;
+
+	// Everything off loopback goes through this proxy, which answers nothing
+	// and keeps each request's first line: `CONNECT host:443` for HTTPS, or
+	// the method and URL. Chromium sends loopback past a proxy, so the page
+	// still loads.
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let proxy = listener.local_addr().unwrap();
+	let requests = Arc::new(Mutex::new(Vec::new()));
+	tokio::spawn({
+		let requests = requests.clone();
+		async move {
+			while let Ok((stream, _)) = listener.accept().await {
+				let mut line = String::new();
+				if tokio::io::BufReader::new(stream).read_line(&mut line).await.is_ok() {
+					requests.lock().unwrap().push(line.trim_end().to_string());
+				}
+			}
+		}
+	});
+	// The helper, told to use the proxy.
+	let dir = tempfile::tempdir().unwrap();
+	let program = dir.path().join("helper");
+	let script = format!(
+		"#!/bin/sh\nexec '{}' \"$@\" --proxy-server=http://{proxy}\n",
+		env!("CARGO_BIN_EXE_moq-studio")
+	);
+	std::fs::write(&program, script).unwrap();
+	std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+	local(async {
+		let url = serve("<body style='margin:0;background:lime'><textarea autofocus></textarea></body>").await;
+		let page = Source::Browser {
+			url,
+			width: 320,
+			height: 240,
+		};
+		let mut studio = Studio::start(&program, &dir.path().join("profile"), &[("page", page)]).await;
+		studio.until_center(GREEN, &[]).await;
+		// The browser asks for what it wants as it starts and as the page
+		// loads, so every request seen had begun by the time the page drew.
+		kio::clock::sleep(Duration::from_secs(2)).await;
+	})
+	.await;
+	assert_eq!(*requests.lock().unwrap(), Vec::<String>::new());
+}
+
+/// Where [`a_studio_that_dies`] keeps its pages' profile, which also tells it
+/// to run.
+const DYING: &str = "MOQ_STUDIO_TEST_DYING_PROFILE";
+
+/// A helper exits, with every process CEF started, once its studio dies
+/// without stopping it, as a crashed studio or a timed-out test does. That
+/// holds even while CEF is still starting, which can last for good, as on a
+/// display that never answers.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_helper_exits_with_its_studio() {
+	let profile = tempfile::tempdir().unwrap();
+	let _stall = stall(profile.path());
+	/// Killed and reaped once dropped, so a failing test leaves no studio
+	/// waiting forever.
+	struct Dying(std::process::Child);
+	impl Drop for Dying {
+		fn drop(&mut self) {
+			let _ = self.0.kill();
+			let _ = self.0.wait();
+		}
+	}
+
+	let studio = Dying(
+		std::process::Command::new(std::env::current_exe().unwrap())
+			.args(["--exact", "a_studio_that_dies", "--ignored"])
+			.env(DYING, profile.path())
+			.stdout(std::process::Stdio::null())
+			.spawn()
+			.unwrap(),
+	);
+	let helper = until_stalled(studio.0.id(), profile.path()).await;
+	drop(studio);
+
+	// The helper leads a process group CEF's processes join.
+	let deadline = Instant::now() + TIMEOUT;
+	while processes().iter().any(|process| process.group == helper) {
+		assert!(Instant::now() < deadline, "the helper outlived its studio");
+		kio::clock::sleep(Duration::from_millis(30)).await;
+	}
+}
+
+/// Not a test alone: the studio [`a_helper_exits_with_its_studio`] starts and
+/// kills, which opens a page and waits.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run by a_helper_exits_with_its_studio"]
+async fn a_studio_that_dies() {
+	let Some(profile) = std::env::var_os(DYING) else {
+		return;
+	};
+	local(async {
+		let _studio = Studio::on(Path::new(&profile), &[("page", page("<body></body>"))]).await;
+		std::future::pending::<()>().await;
+	})
+	.await;
+}
+
+/// A studio stops a helper still starting CEF without waiting for it to
+/// finish starting, which can take forever.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+async fn a_helper_stops_while_starting() {
+	local(async {
+		let profile = tempfile::tempdir().unwrap();
+		let _stall = stall(profile.path());
+		let studio = Studio::on(profile.path(), &[("page", page("<body></body>"))]).await;
+		until_stalled(std::process::id(), profile.path()).await;
+		drop(studio);
+	})
+	.await;
+}
+
+/// Leave CEF stuck starting on `profile` while the returned file is open: it
+/// reads the profile's `Local State` before `initialize` returns, and a FIFO
+/// with a writer and nothing written blocks that read.
+fn stall(profile: &Path) -> std::fs::File {
+	let state = profile.join("Local State");
+	let made = std::process::Command::new("mkfifo").arg(&state).status().unwrap();
+	assert!(made.success());
+	// Read and write, which Linux opens without waiting for a reader.
+	std::fs::OpenOptions::new().read(true).write(true).open(state).unwrap()
+}
+
+/// Wait until `studio`'s helper is stuck reading [`stall`]'s FIFO in
+/// `profile`, and return the helper.
+async fn until_stalled(studio: u32, profile: &Path) -> u32 {
+	let state = std::fs::canonicalize(profile).unwrap().join("Local State");
+	let deadline = Instant::now() + TIMEOUT;
+	loop {
+		if let Some(helper) = helper(studio) {
+			let fds = std::fs::read_dir(format!("/proc/{helper}/fd"))
+				.into_iter()
+				.flatten()
+				.flatten();
+			if fds
+				.filter_map(|fd| std::fs::read_link(fd.path()).ok())
+				.any(|path| path == state)
+			{
+				return helper;
+			}
+		}
+		assert!(Instant::now() < deadline, "no helper reads {}", state.display());
+		kio::clock::sleep(Duration::from_millis(30)).await;
+	}
+}
+
+/// The one helper `studio` still runs: a child started with the helper's
+/// argument.
+fn helper(studio: u32) -> Option<u32> {
 	processes()
 		.into_iter()
-		.find(|process| process.parent == ours && process.args.iter().any(|arg| arg == b"--moq-browser-helper"))
+		.find(|process| process.parent == studio && process.args.iter().any(|arg| arg == b"--moq-browser-helper"))
 		.map(|process| process.pid)
 }
 
@@ -614,10 +908,11 @@ fn renderers(helper: u32) -> Vec<u32> {
 struct Process {
 	pid: u32,
 	parent: u32,
+	group: u32,
 	args: Vec<Vec<u8>>,
 }
 
-/// Every process running.
+/// Every process running, leaving out the dead ones waiting to be reaped.
 fn processes() -> Vec<Process> {
 	let Ok(entries) = std::fs::read_dir("/proc") else {
 		return Vec::new();
@@ -627,11 +922,21 @@ fn processes() -> Vec<Process> {
 		.filter_map(|entry| {
 			let pid = entry.file_name().to_str()?.parse().ok()?;
 			let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
-			// The parent is the second field after the parenthesized command.
-			let parent = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+			// The state, parent, and group follow the parenthesized command.
+			let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+			if fields.next()? == "Z" {
+				return None;
+			}
+			let parent = fields.next()?.parse().ok()?;
+			let group = fields.next()?.parse().ok()?;
 			let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
 			let args = cmdline.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect();
-			Some(Process { pid, parent, args })
+			Some(Process {
+				pid,
+				parent,
+				group,
+				args,
+			})
 		})
 		.collect()
 }

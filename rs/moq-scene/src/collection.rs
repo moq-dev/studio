@@ -12,8 +12,8 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use crate::Error;
 
-/// Everything a studio composes: the canvases, the sources, and the scenes
-/// that place them.
+/// Everything a studio composes: the program's canvas, the sources, and the
+/// scenes that place them.
 ///
 /// Saved with [`to_toml`](Self::to_toml) and loaded with
 /// [`from_toml`](Self::from_toml). The file names devices, files, and broadcast
@@ -21,14 +21,9 @@ use crate::Error;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Collection {
-	/// The main canvas every scene is drawn onto, whose frame rate every
-	/// canvas shares.
+	/// The program's size and frame rate: the size of every scene that sets
+	/// none, and the frame rate every scene is drawn at.
 	pub canvas: Canvas,
-	/// Further canvases by name, such as a portrait one beside a landscape
-	/// main canvas. Each draws its own layout of every scene from the same
-	/// sources, under its own top layer.
-	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-	pub canvases: BTreeMap<String, Extra>,
 	/// How the preview is taken to program, short of a cut.
 	#[serde(default)]
 	pub transition: Transition,
@@ -36,23 +31,35 @@ pub struct Collection {
 	/// so one camera can appear in many scenes while being opened once.
 	#[serde(default)]
 	pub sources: BTreeMap<String, Source>,
-	/// The audio mixes, and which ones the program and recordings carry.
-	#[serde(default, skip_serializing_if = "Mixes::is_default")]
-	pub mixes: Mixes,
-	/// Gain, mute, routing, and sync delay of each audio-carrying source, by
-	/// source name. A source without an entry plays at unity in every mix.
+	/// The gain, mute, and sync delay of each source with sound, by source
+	/// name, in every audio scene that holds it. A source without an entry
+	/// plays at unity.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub audio: BTreeMap<String, Audio>,
 	/// The filters on each picture-carrying source, by source name, applied
 	/// wherever the source is placed. A source without an entry is unfiltered.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub video: BTreeMap<String, Video>,
+	/// The sources published independently, by name: each one's own track
+	/// goes to the relay beside the program, for viewers and services to
+	/// place themselves, and the source is left out of every picture and mix
+	/// the studio composites. Only a source with a track of its own can be,
+	/// and not one with its background removed, since its track would show
+	/// the background.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	pub published: BTreeSet<String>,
 	/// The scenes, in the order the scene list shows them.
 	#[serde(default)]
 	pub scenes: Vec<Scene>,
-	/// The top layer: items drawn over whichever scene is in preview and on
-	/// program, back to front, so they stay on across scene switches (a
-	/// downstream keyer). They do not fade with a transition.
+	/// The audio scenes, in the order the scene list shows them after the
+	/// scenes: one on program, and any others for recordings, published
+	/// scenes, headphones, or to nest. Independent of cuts.
+	#[serde(default = "AudioScene::defaults", skip_serializing_if = "AudioScene::are_default")]
+	pub audio_scenes: Vec<AudioScene>,
+	/// The top layer: items drawn over whichever scene is on program, and in
+	/// preview over one of the program's size, back to front, so they stay on
+	/// across scene switches (a downstream keyer). They do not fade with a
+	/// transition.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub top: Vec<Item>,
 }
@@ -68,13 +75,13 @@ impl Collection {
 	pub fn new() -> Self {
 		Self {
 			canvas: Canvas::default(),
-			canvases: BTreeMap::new(),
 			transition: Transition::default(),
 			sources: BTreeMap::new(),
-			mixes: Mixes::default(),
 			audio: BTreeMap::new(),
 			video: BTreeMap::new(),
+			published: BTreeSet::new(),
 			scenes: vec![Scene::new("Scene")],
+			audio_scenes: AudioScene::defaults(),
 			top: Vec::new(),
 		}
 	}
@@ -99,87 +106,132 @@ impl Collection {
 		self.scenes.iter().find(|scene| scene.name == name)
 	}
 
-	/// The canvas `canvas` names: the main one for `None`, or a further one,
-	/// at the main canvas's frame rate. `None` for a canvas that does not
-	/// exist.
-	pub fn canvas(&self, canvas: Option<&str>) -> Option<Canvas> {
-		match canvas {
+	/// The canvas the scene called `scene` is drawn on, or the top layer for
+	/// `None`: its own size, or the program's, at the program's frame rate.
+	/// `None` for a scene that does not exist.
+	pub fn canvas(&self, scene: Option<&str>) -> Option<Canvas> {
+		match scene {
 			None => Some(self.canvas),
-			Some(name) => self.canvases.get(name).map(|extra| extra.canvas(self.canvas.framerate)),
+			Some(name) => self.scene(name).map(|scene| scene.canvas(self.canvas)),
 		}
 	}
 
-	/// The items of `layer`, or `None` for a scene or canvas that does not
-	/// exist. A scene with no layout on a further canvas has none there.
+	/// The items of `layer`, or `None` for a scene that does not exist.
 	pub fn items(&self, layer: &Layer) -> Option<&[Item]> {
-		match (&layer.canvas, &layer.scene) {
-			(None, Some(scene)) => self.scene(scene).map(|scene| scene.items.as_slice()),
-			(None, None) => Some(&self.top),
-			(Some(canvas), scene) => {
-				let extra = self.canvases.get(canvas)?;
-				match scene {
-					Some(scene) => {
-						let layout = self.scene(scene)?.canvases.get(canvas);
-						Some(layout.map_or(&[], Vec::as_slice))
-					}
-					None => Some(&extra.top),
-				}
-			}
+		match &layer.scene {
+			Some(scene) => self.scene(scene).map(|scene| scene.items.as_slice()),
+			None => Some(&self.top),
 		}
 	}
 
-	/// Run `edit` on the items of `layer`, or return `None` for a scene or
-	/// canvas that does not exist. A scene's layout on a further canvas is
-	/// kept only while it holds items, so a scene has one way to say it has
-	/// none there, as [`validate`](Self::validate) requires.
+	/// Run `edit` on the items of `layer`, or return `None` for a scene that
+	/// does not exist.
 	pub(crate) fn edit_items<T>(&mut self, layer: &Layer, edit: impl FnOnce(&mut Vec<Item>) -> T) -> Option<T> {
-		if let Some(canvas) = &layer.canvas
-			&& !self.canvases.contains_key(canvas)
-		{
-			return None;
-		}
-		match (&layer.canvas, &layer.scene) {
-			(None, None) => Some(edit(&mut self.top)),
-			(Some(canvas), None) => self.canvases.get_mut(canvas).map(|extra| edit(&mut extra.top)),
-			(canvas, Some(name)) => {
+		match &layer.scene {
+			None => Some(edit(&mut self.top)),
+			Some(name) => {
 				let scene = self.scenes.iter_mut().find(|scene| &scene.name == name)?;
-				let Some(canvas) = canvas else {
-					return Some(edit(&mut scene.items));
-				};
-				let mut layout = scene.canvases.remove(canvas).unwrap_or_default();
-				let edited = edit(&mut layout);
-				if !layout.is_empty() {
-					scene.canvases.insert(canvas.clone(), layout);
-				}
-				Some(edited)
+				Some(edit(&mut scene.items))
 			}
 		}
 	}
 
-	/// Every layer: the main canvas's scenes in order, then its top layer,
-	/// then each further canvas's the same way.
+	/// Every layer: the scenes in order, then the top layer.
 	pub fn layers(&self) -> impl Iterator<Item = (Layer, &[Item])> {
-		let extras = self
-			.canvases
+		let scenes = self
+			.scenes
 			.iter()
-			.map(|(name, extra)| (Some(name), extra.top.as_slice()));
-		let canvases = std::iter::once((None, self.top.as_slice())).chain(extras);
-		canvases.flat_map(move |(canvas, top)| {
-			let scenes = self.scenes.iter().map(move |scene| {
-				let items = match canvas {
-					None => scene.items.as_slice(),
-					Some(name) => scene.canvases.get(name).map_or(&[][..], Vec::as_slice),
-				};
-				(Some(scene.name.clone()), items)
-			});
-			scenes.chain([(None, top)]).map(move |(scene, items)| {
-				let layer = Layer {
-					canvas: canvas.cloned(),
-					scene,
-				};
-				(layer, items)
-			})
-		})
+			.map(|scene| (Layer::scene(&scene.name), scene.items.as_slice()));
+		scenes.chain([(Layer::top(), self.top.as_slice())])
+	}
+
+	/// The scene recordings hold, or `None` for the program.
+	pub fn recorded(&self) -> Option<&str> {
+		let recorded = self.scenes.iter().find(|scene| scene.recorded);
+		recorded.map(|scene| scene.name.as_str())
+	}
+
+	/// The audio scene called `name`.
+	pub fn audio_scene(&self, name: &str) -> Option<&AudioScene> {
+		self.audio_scenes.iter().find(|scene| scene.name == name)
+	}
+
+	/// The audio scene the program broadcast carries. Only an invalid
+	/// collection, such as one an edit is part way through, has none.
+	pub fn program_audio(&self) -> Option<&str> {
+		let program = self.audio_scenes.iter().find(|scene| scene.program);
+		program.map(|scene| scene.name.as_str())
+	}
+
+	/// The audio scene recordings hold: the one picked for them, or the one
+	/// on program.
+	pub fn recorded_audio(&self) -> Option<&str> {
+		let recorded = self.audio_scenes.iter().find(|scene| scene.recorded);
+		recorded
+			.map(|scene| scene.name.as_str())
+			.or_else(|| self.program_audio())
+	}
+
+	/// The audio scene the scene called `scene` carries while published: the
+	/// one it picks, or the one on program.
+	pub fn published_audio(&self, scene: &str) -> Option<&str> {
+		let picked = self.scene(scene).and_then(|scene| scene.audio.as_deref());
+		picked.or_else(|| self.program_audio())
+	}
+
+	/// The sources whose sound the audio scene called `scene` plays: those it
+	/// holds, and those of the audio scenes it holds, and so on, each once.
+	pub fn heard(&self, scene: &str) -> BTreeSet<&str> {
+		let mut heard = BTreeSet::new();
+		for scene in self.reached_audio(scene) {
+			heard.extend(scene.sounds.iter().map(String::as_str));
+		}
+		heard
+	}
+
+	/// Whether the audio scene called `scene` holds the one called `nested`,
+	/// directly or through others.
+	pub fn nests(&self, scene: &str, nested: &str) -> bool {
+		let mut reached = self.reached_audio(scene).into_iter();
+		reached.any(|scene| scene.scenes.contains(nested))
+	}
+
+	/// The audio scene called `scene` and every one it holds, directly or
+	/// through others, each once.
+	fn reached_audio(&self, scene: &str) -> Vec<&AudioScene> {
+		let mut scenes = vec![scene];
+		let mut seen = BTreeSet::new();
+		let mut reached = Vec::new();
+		while let Some(scene) = scenes.pop() {
+			let Some(scene) = self.audio_scene(scene).filter(|scene| seen.insert(&scene.name)) else {
+				continue;
+			};
+			scenes.extend(scene.scenes.iter().map(String::as_str));
+			reached.push(scene);
+		}
+		reached
+	}
+
+	/// Whether the scene called `scene` can go on program: it is the
+	/// program's size, and draws no program source, which it would draw into
+	/// itself. Refused with the reason otherwise, or for a scene that does
+	/// not exist.
+	pub fn takes(&self, scene: &str) -> Result<(), Error> {
+		let canvas = self
+			.canvas(Some(scene))
+			.ok_or_else(|| Error::Invalid(format!("there is no scene `{scene}`")))?;
+		if canvas.size() != self.canvas.size() {
+			return Err(Error::Invalid(format!(
+				"`{scene}` is {}x{}, not the program's {}x{}, so it cannot go on program",
+				canvas.width, canvas.height, self.canvas.width, self.canvas.height
+			)));
+		}
+		if self.draws_program(scene) {
+			return Err(Error::Invalid(format!(
+				"`{scene}` draws the program, so it cannot go on program"
+			)));
+		}
+		Ok(())
 	}
 
 	/// The source whose capture `name` shows: itself, or what it clones.
@@ -319,23 +371,13 @@ impl Collection {
 		source.unwrap_or_default().then(&item.crop)
 	}
 
-	/// Check what the types cannot: the canvas can be encoded, names are unique,
-	/// every item, clone, audio, and video entry names a source that exists, a
-	/// stinger names a media source, and every crop and filter's settings are
-	/// in range, each filter naming a source of the kind it reads.
+	/// Check what the types cannot: every canvas can be encoded, names are
+	/// unique, a published scene's names its broadcast, one scene at most is
+	/// recorded, every item, clone, audio, and video entry names a source that
+	/// exists, a stinger names a media source, and every crop and filter's
+	/// settings are in range, each filter naming a source of the kind it reads.
 	pub fn validate(&self) -> Result<(), Error> {
 		self.canvas.validate()?;
-		for (name, extra) in &self.canvases {
-			if name.is_empty() || name.contains('/') {
-				return Err(Error::Invalid(format!(
-					"canvas `{name}` must be named, without a `/`, since its name names its broadcast"
-				)));
-			}
-			extra
-				.canvas(self.canvas.framerate)
-				.validate()
-				.map_err(|err| Error::Invalid(format!("canvas `{name}`: {err}")))?;
-		}
 
 		let mut names = BTreeSet::new();
 		for scene in &self.scenes {
@@ -345,24 +387,23 @@ impl Collection {
 			if !names.insert(scene.name.as_str()) {
 				return Err(Error::Invalid(format!("two scenes are named `{}`", scene.name)));
 			}
-			if let Some(canvas) = scene
-				.canvases
-				.keys()
-				.find(|canvas| !self.canvases.contains_key(*canvas))
-			{
+			scene
+				.canvas(self.canvas)
+				.validate()
+				.map_err(|err| Error::Invalid(format!("scene `{}`: {err}", scene.name)))?;
+			if scene.published && (scene.name.contains('/') || moq_net::Path::new(&scene.name).is_err()) {
 				return Err(Error::Invalid(format!(
-					"scene `{}` has a layout on `{canvas}`, which is not a canvas",
+					"scene `{}` is published, so its name is one segment of its broadcast's path: no `/`, and a `\\` only before another",
 					scene.name
 				)));
 			}
-			// One way to say a scene shows nothing there, so an edit snapshotting
-			// the scene and one emptying the layout agree on what it holds.
-			if let Some((canvas, _)) = scene.canvases.iter().find(|(_, items)| items.is_empty()) {
-				return Err(Error::Invalid(format!(
-					"scene `{}` has an empty layout on `{canvas}`; leave it out instead",
-					scene.name
-				)));
-			}
+		}
+		let mut recorded = self.scenes.iter().filter(|scene| scene.recorded);
+		if let (Some(first), Some(second)) = (recorded.next(), recorded.next()) {
+			return Err(Error::Invalid(format!(
+				"scenes `{}` and `{}` are both recorded, but recordings hold one",
+				first.name, second.name
+			)));
 		}
 		for (layer, items) in self.layers() {
 			for item in items {
@@ -462,6 +503,30 @@ impl Collection {
 			self.validate_chain(&video.filters, &on)?;
 		}
 
+		for name in &self.published {
+			let Some(source) = self.sources.get(name) else {
+				return Err(Error::Invalid(format!(
+					"`{name}` is published, but there is no such source"
+				)));
+			};
+			if !source.publishes() {
+				return Err(Error::Invalid(format!(
+					"`{name}` cannot be published independently: only a camera, display, window, microphone, \
+					 system audio, color, image, media, or replay source has a track of its own"
+				)));
+			}
+			if self
+				.video
+				.get(name)
+				.is_some_and(|video| video.background == Background::Remove)
+			{
+				return Err(Error::Invalid(format!(
+					"`{name}` cannot be published independently with its background removed, since its track \
+					 carries no transparency and would show the background"
+				)));
+			}
+		}
+
 		self.validate_nesting()?;
 
 		if let Some(name) = self.transition.stinger()
@@ -472,7 +537,7 @@ impl Collection {
 			)));
 		}
 
-		self.mixes.validate()?;
+		self.validate_audio_scenes()?;
 		for (name, audio) in &self.audio {
 			if !self.sources.contains_key(name) {
 				return Err(Error::Invalid(format!(
@@ -482,9 +547,10 @@ impl Collection {
 			if !audio.gain.is_finite() || audio.gain < 0.0 {
 				return Err(Error::Invalid(format!("`{name}` has gain {}", audio.gain)));
 			}
-			if let Some(mix) = audio.exclude.iter().find(|mix| !self.mixes.names.contains(mix)) {
+			if !(-1.0..=1.0).contains(&audio.pan) {
 				return Err(Error::Invalid(format!(
-					"`{name}` is left out of `{mix}`, which is not a mix"
+					"`{name}` has pan {}, outside -1 to 1",
+					audio.pan
 				)));
 			}
 			if audio.delay > moq_audio::bus::MAX_DELAY {
@@ -496,6 +562,68 @@ impl Collection {
 			}
 		}
 
+		Ok(())
+	}
+
+	/// Check the audio scenes: each named once, one on program and one at
+	/// most recorded, each holding sources with sound and other audio scenes
+	/// but never itself, and each scene's pick naming one.
+	fn validate_audio_scenes(&self) -> Result<(), Error> {
+		let mut names = BTreeSet::new();
+		for scene in &self.audio_scenes {
+			if scene.name.is_empty() {
+				return Err(Error::Invalid("an audio scene has an empty name".into()));
+			}
+			if !names.insert(scene.name.as_str()) {
+				return Err(Error::Invalid(format!("two audio scenes are named `{}`", scene.name)));
+			}
+		}
+		let flagged = |flag: fn(&AudioScene) -> bool| -> Vec<String> {
+			let scenes = self.audio_scenes.iter().filter(|scene| flag(scene));
+			scenes.map(|scene| format!("`{}`", scene.name)).collect()
+		};
+		let program = flagged(|scene| scene.program);
+		if program.len() != 1 {
+			let found = match program.is_empty() {
+				true => "none".to_string(),
+				false => program.join(" and "),
+			};
+			return Err(Error::Invalid(format!("one audio scene is on program, not {found}")));
+		}
+		let recorded = flagged(|scene| scene.recorded);
+		if recorded.len() > 1 {
+			return Err(Error::Invalid(format!(
+				"audio scenes {} are recorded, but recordings hold one",
+				recorded.join(" and ")
+			)));
+		}
+		for scene in &self.audio_scenes {
+			let on = &scene.name;
+			let silent = |sound: &&String| !self.sources.get(*sound).is_some_and(Source::has_audio);
+			if let Some(sound) = scene.sounds.iter().find(silent) {
+				return Err(Error::Invalid(format!(
+					"audio scene `{on}` holds `{sound}`, which is not a source with sound"
+				)));
+			}
+			if let Some(nested) = scene.scenes.iter().find(|nested| !names.contains(nested.as_str())) {
+				return Err(Error::Invalid(format!(
+					"audio scene `{on}` holds `{nested}`, which is not an audio scene"
+				)));
+			}
+			if self.nests(on, on) {
+				return Err(Error::Invalid(format!("audio scene `{on}` holds itself")));
+			}
+		}
+		for scene in &self.scenes {
+			if let Some(audio) = &scene.audio
+				&& !names.contains(audio.as_str())
+			{
+				return Err(Error::Invalid(format!(
+					"scene `{}` carries `{audio}`, which is not an audio scene",
+					scene.name
+				)));
+			}
+		}
 		Ok(())
 	}
 
@@ -599,39 +727,14 @@ impl Default for Canvas {
 	}
 }
 
-/// A canvas beside the main one: its size, and the items drawn over every
-/// scene on it. Each scene's layout on it is the scene's own
-/// [`Scene::canvases`] entry.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A scene's own size, in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Extra {
+pub struct Size {
 	/// Width in pixels. Even, since the encoder subsamples chroma.
 	pub width: u32,
 	/// Height in pixels. Even, since the encoder subsamples chroma.
 	pub height: u32,
-	/// Its top layer, as [`Collection::top`] is the main canvas's.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub top: Vec<Item>,
-}
-
-impl Extra {
-	/// An empty canvas of `width` by `height`.
-	pub fn new(width: u32, height: u32) -> Self {
-		Self {
-			width,
-			height,
-			top: Vec::new(),
-		}
-	}
-
-	/// This canvas drawn `framerate` times a second.
-	pub fn canvas(&self, framerate: u32) -> Canvas {
-		Canvas {
-			width: self.width,
-			height: self.height,
-			framerate,
-		}
-	}
 }
 
 /// How the program changes when the preview is taken to it, short of a cut.
@@ -676,8 +779,8 @@ pub enum Transition {
 	/// A media source's clip plays over the program from its start, and the
 	/// program switches scenes under it at `cut` into the clip, while it
 	/// covers the canvas. It lasts as long as the clip's first play, filling
-	/// each canvas it is drawn on, cropped to the canvas's shape, through the
-	/// source's own crop and filters.
+	/// the canvas, cropped to its shape, through the source's own crop and
+	/// filters.
 	Stinger {
 		/// The [`Source::Media`] whose clip plays.
 		source: String,
@@ -793,74 +896,89 @@ impl Direction {
 	pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
 }
 
-/// One arrangement of sources on the canvas.
+/// One arrangement of sources on a canvas of its own size.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scene {
 	/// Unique among the collection's scenes.
 	pub name: String,
-	/// What the scene draws on the main canvas, back to front.
+	/// Its size, or `None` for the program's. Only a scene of the program's
+	/// size goes on program.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub size: Option<Size>,
+	/// Whether it is always live as a broadcast of its own, beneath the
+	/// program's and named after it, whatever is on program.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub published: bool,
+	/// Whether recordings hold it rather than the program. One scene at most
+	/// is recorded.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub recorded: bool,
+	/// The audio scene its broadcast carries while published, or `None` for
+	/// the one on program.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub audio: Option<String>,
+	/// What the scene draws, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
-	/// What the scene draws on each further canvas, by the canvas's name, back
-	/// to front. A canvas without an entry shows only its top layer.
-	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-	pub canvases: BTreeMap<String, Vec<Item>>,
 }
 
 impl Scene {
-	/// An empty scene.
+	/// An empty scene of the program's size, neither published nor recorded,
+	/// carrying the audio scene on program.
 	pub fn new(name: impl Into<String>) -> Self {
 		Self {
 			name: name.into(),
+			size: None,
+			published: false,
+			recorded: false,
+			audio: None,
 			items: Vec::new(),
-			canvases: BTreeMap::new(),
+		}
+	}
+
+	/// The canvas it is drawn on: its own size, or `program`'s, at
+	/// `program`'s frame rate.
+	pub fn canvas(&self, program: Canvas) -> Canvas {
+		match self.size {
+			Some(Size { width, height }) => Canvas {
+				width,
+				height,
+				framerate: program.framerate,
+			},
+			None => program,
 		}
 	}
 }
 
-/// Where a list of items lives: a scene's layout, or the top layer over every
-/// scene, on one canvas.
+/// Where a list of items lives: a scene, or the top layer over the program.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
-	/// A further canvas by name, or `None` for the main canvas.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub canvas: Option<String>,
-	/// The scene, or `None` for the canvas's top layer.
+	/// The scene, or `None` for the top layer.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub scene: Option<String>,
 }
 
 impl Layer {
-	/// The scene called `name`, on the main canvas.
+	/// The scene called `name`.
 	pub fn scene(name: impl Into<String>) -> Self {
 		Self {
-			canvas: None,
 			scene: Some(name.into()),
 		}
 	}
 
-	/// The main canvas's top layer.
+	/// The top layer.
 	pub fn top() -> Self {
 		Self::default()
-	}
-
-	/// The same layer on `canvas` instead.
-	pub fn on(self, canvas: Option<String>) -> Self {
-		Self { canvas, ..self }
 	}
 }
 
 impl fmt::Display for Layer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match &self.scene {
-			Some(name) => write!(f, "scene `{name}`")?,
-			None => write!(f, "the top layer")?,
-		}
-		match &self.canvas {
-			Some(canvas) => write!(f, " on canvas `{canvas}`"),
-			None => Ok(()),
+			Some(name) => write!(f, "scene `{name}`"),
+			None => write!(f, "the top layer"),
 		}
 	}
 }
@@ -870,7 +988,7 @@ impl fmt::Display for Layer {
 pub enum Nested<'a> {
 	/// The scene by this name.
 	Scene(&'a str),
-	/// The main canvas's program.
+	/// The program.
 	Program,
 }
 
@@ -1071,6 +1189,10 @@ fn is_zero(value: &f32) -> bool {
 
 fn yes() -> bool {
 	true
+}
+
+fn is_false(value: &bool) -> bool {
+	!value
 }
 
 fn is_true(value: &bool) -> bool {
@@ -1669,7 +1791,7 @@ pub enum Source {
 	/// source, on demand through [`Feed::replay`](crate::source::Feed::replay).
 	/// Transparent while nothing plays.
 	Replay,
-	/// Another scene, drawn whole at the main canvas's size, as a picture. Its
+	/// Another scene, drawn whole at its own size, as a picture. Its
 	/// items' keyframes play from when the scene drawing it goes on, as that
 	/// scene's own items' do, so the top layer cannot draw one with keyframes.
 	/// A scene cannot draw itself, even through other scenes.
@@ -1677,7 +1799,7 @@ pub enum Source {
 		/// The scene drawn.
 		scene: String,
 	},
-	/// What the main canvas's program shows, transitions included, on the
+	/// What the program shows, transitions included, on the
 	/// same frame. A scene drawing it cannot go on program, and the top layer
 	/// cannot draw it, since either would draw the program into itself.
 	Program,
@@ -1761,84 +1883,74 @@ impl Source {
 	}
 }
 
-/// The audio mixes every source with sound feeds, and which ones the program
-/// and recordings carry.
+/// An audio-only scene: the sum of the sounds it holds, as their sources
+/// play them, and of the audio scenes it holds. A sound it reaches more than
+/// one way plays in it once.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Mixes {
-	/// Each mix's unique name, in the order the studio lists them.
-	pub names: Vec<String>,
-	/// The mix the program broadcast carries.
-	pub program: String,
-	/// The mix recordings hold, when not the one on program. It never
-	/// reaches a relay.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub recording: Option<String>,
+pub struct AudioScene {
+	/// Unique among the collection's audio scenes.
+	pub name: String,
+	/// Whether the program broadcast carries it, as exactly one does.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub program: bool,
+	/// Whether recordings hold it rather than the one on program. One at
+	/// most is recorded.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub recorded: bool,
+	/// The sources whose sound it holds, by name.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	pub sounds: BTreeSet<String>,
+	/// The other audio scenes it holds, by name, never itself, even through
+	/// others.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	pub scenes: BTreeSet<String>,
 }
 
-impl Mixes {
-	/// The one mix a new collection has, which the program carries.
+impl AudioScene {
+	/// The audio scene a new collection has on program.
 	pub const DEFAULT: &str = "Program";
 
-	fn is_default(&self) -> bool {
-		*self == Self::default()
-	}
-
-	/// The mix recordings hold.
-	pub fn recorded(&self) -> &str {
-		self.recording.as_deref().unwrap_or(&self.program)
-	}
-
-	fn validate(&self) -> Result<(), Error> {
-		let mut names = BTreeSet::new();
-		for name in &self.names {
-			if name.is_empty() {
-				return Err(Error::Invalid("a mix has an empty name".into()));
-			}
-			if !names.insert(name.as_str()) {
-				return Err(Error::Invalid(format!("two mixes are named `{name}`")));
-			}
-		}
-		if !names.contains(self.program.as_str()) {
-			return Err(Error::Invalid(format!(
-				"the program carries `{}`, which is not a mix",
-				self.program
-			)));
-		}
-		if !names.contains(self.recorded()) {
-			return Err(Error::Invalid(format!(
-				"recordings hold `{}`, which is not a mix",
-				self.recorded()
-			)));
-		}
-		Ok(())
-	}
-}
-
-impl Default for Mixes {
-	fn default() -> Self {
+	/// An audio scene holding nothing, neither on program nor recorded.
+	pub fn new(name: impl Into<String>) -> Self {
 		Self {
-			names: vec![Self::DEFAULT.into()],
-			program: Self::DEFAULT.into(),
-			recording: None,
+			name: name.into(),
+			program: false,
+			recorded: false,
+			sounds: BTreeSet::new(),
+			scenes: BTreeSet::new(),
 		}
+	}
+
+	/// What a collection has without audio scenes of its own: one on
+	/// program, holding nothing.
+	pub fn defaults() -> Vec<Self> {
+		vec![Self {
+			program: true,
+			..Self::new(Self::DEFAULT)
+		}]
+	}
+
+	fn are_default(scenes: &Vec<Self>) -> bool {
+		*scenes == Self::defaults()
 	}
 }
 
-/// The gain, mute, routing, and sync delay of one source with sound.
+/// The gain, mute, pan, and sync delay of one source with sound, in every audio
+/// scene that holds it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Audio {
 	/// Linear gain: 1.0 is unity.
 	pub gain: f32,
-	/// Whether the source is silenced in every mix, keeping its gain.
+	/// Whether the source is silenced in every audio scene, keeping its gain.
 	#[serde(default)]
 	pub muted: bool,
-	/// The mixes the source is left out of. It feeds every other one,
-	/// including a mix added later.
-	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-	pub exclude: BTreeSet<String>,
-	/// How long the source is held back in every mix, so a microphone lines up
+	/// Where the source sits between left (`-1.0`) and right (`1.0`), as
+	/// [`Strip::set_pan`](moq_audio::bus::Strip::set_pan) places it.
+	#[serde(default, skip_serializing_if = "is_center")]
+	pub pan: f32,
+	/// How long the source is held back in every audio scene, so a microphone lines up
 	/// with a camera that lags it. At most the bus's
 	/// [`MAX_DELAY`](moq_audio::bus::MAX_DELAY).
 	#[serde(default, with = "humantime_serde", skip_serializing_if = "Duration::is_zero")]
@@ -1850,10 +1962,14 @@ impl Default for Audio {
 		Self {
 			gain: 1.0,
 			muted: false,
-			exclude: BTreeSet::new(),
+			pan: 0.0,
 			delay: Duration::ZERO,
 		}
 	}
+}
+
+fn is_center(pan: &f32) -> bool {
+	*pan == 0.0
 }
 
 /// An sRGB color with straight alpha, written `#rrggbb` or `#rrggbbaa`.
@@ -1948,17 +2064,25 @@ mod tests {
 				},
 			);
 		}
-		collection.mixes = Mixes {
-			names: vec!["Stream".into(), "Recording".into()],
-			program: "Stream".into(),
-			recording: Some("Recording".into()),
-		};
+		collection.audio_scenes = vec![
+			AudioScene {
+				program: true,
+				sounds: ["mic".to_string()].into(),
+				..AudioScene::new("Stream")
+			},
+			AudioScene {
+				recorded: true,
+				sounds: ["intro".to_string()].into(),
+				scenes: ["Stream".to_string()].into(),
+				..AudioScene::new("Recording")
+			},
+		];
 		collection.audio.insert(
 			"mic".into(),
 			Audio {
 				gain: 0.5,
 				muted: true,
-				exclude: ["Recording".to_string()].into(),
+				pan: 0.25,
 				delay: Duration::from_millis(80),
 			},
 		);
@@ -2045,14 +2169,8 @@ kind = "camera"
 kind = "color"
 color = "#ff000080"
 
-[mixes]
-names = ["Stream", "Recording"]
-program = "Stream"
-recording = "Recording"
-
 [audio.cam2]
 gain = 2.0
-exclude = ["Stream"]
 delay = "120ms"
 
 [sources.cam2]
@@ -2087,6 +2205,28 @@ items = [
 	] },
 ]
 
+[[scenes]]
+name = "Portrait"
+size = { width = 720, height = 1280 }
+published = true
+recorded = true
+audio = "Recording"
+items = [{ source = "cam", rect = { x = 0, y = 0, width = 720, height = 1280 } }]
+
+[[audio_scenes]]
+name = "Guests"
+sounds = ["cam2"]
+
+[[audio_scenes]]
+name = "Stream"
+program = true
+scenes = ["Guests"]
+
+[[audio_scenes]]
+name = "Recording"
+recorded = true
+scenes = ["Stream", "Guests"]
+
 [[top]]
 source = "bg"
 rect = { x = 0, y = 680, width = 1280, height = 40 }
@@ -2112,13 +2252,29 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			Audio {
 				gain: 2.0,
 				muted: false,
-				exclude: ["Stream".to_string()].into(),
+				pan: 0.0,
 				delay: Duration::from_millis(120),
 			}
 		);
-		assert_eq!(collection.mixes.program, "Stream");
-		assert_eq!(collection.mixes.recorded(), "Recording");
+		assert_eq!(collection.program_audio(), Some("Stream"));
+		assert_eq!(collection.recorded_audio(), Some("Recording"));
+		assert_eq!(collection.published_audio("Portrait"), Some("Recording"));
+		assert_eq!(collection.published_audio("Main"), Some("Stream"));
+		// Reached two ways, played once.
+		assert_eq!(collection.heard("Recording"), ["cam2"].into());
+		let portrait = collection.scene("Portrait").unwrap();
+		assert!(portrait.published);
+		assert_eq!(collection.recorded(), Some("Portrait"));
+		assert_eq!(
+			collection.canvas(Some("Portrait")),
+			Some(Canvas {
+				width: 720,
+				height: 1280,
+				framerate: 60
+			})
+		);
 		let main = collection.scene("Main").unwrap();
+		assert_eq!(main.size, None, "the program's");
 		assert!(main.items[0].visible);
 		assert!(!main.items[1].visible);
 		assert_eq!(
@@ -2242,23 +2398,49 @@ path = "sting.webm"
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))));
 	}
 
-	/// The program carries one of the mixes, each named once, and a source is
-	/// left out of mixes that exist, held back no longer than the bus can.
+	/// One audio scene is on program and one at most recorded, each named
+	/// once, holding sources with sound and audio scenes that exist, never
+	/// itself; and a source is held back no longer than the bus can.
 	#[test]
-	fn refuses_a_mix_that_does_not_add_up() {
+	fn refuses_audio_scenes_that_do_not_add_up() {
 		let refused = |edit: fn(&mut Collection)| {
 			let mut collection = example();
 			edit(&mut collection);
 			matches!(collection.validate(), Err(Error::Invalid(_)))
 		};
-		assert!(refused(|collection| collection.mixes.program = "Monitor".into()));
-		assert!(refused(|collection| collection.mixes.recording = Some("Monitor".into())));
-		assert!(refused(|collection| collection.mixes.names.push("Stream".into())));
-		assert!(refused(|collection| collection.mixes.names.push(String::new())));
+		fn scene<'a>(collection: &'a mut Collection, name: &str) -> &'a mut AudioScene {
+			let mut scenes = collection.audio_scenes.iter_mut();
+			scenes.find(|scene| scene.name == name).unwrap()
+		}
+		assert!(!refused(|_| {}));
+		assert!(refused(|collection| scene(collection, "Stream").program = false));
+		assert!(refused(|collection| scene(collection, "Recording").program = true));
+		assert!(refused(|collection| scene(collection, "Stream").recorded = true));
+		assert!(refused(|collection| collection
+			.audio_scenes
+			.push(AudioScene::new("Stream"))));
+		assert!(refused(|collection| collection.audio_scenes.push(AudioScene::new(""))));
 		assert!(refused(|collection| {
-			let mic = collection.audio.get_mut("mic").unwrap();
-			mic.exclude.insert("Monitor".into());
+			scene(collection, "Stream").sounds.insert("nobody".into());
 		}));
+		// A picture without sound.
+		assert!(refused(|collection| {
+			scene(collection, "Stream").sounds.insert("camera".into());
+		}));
+		assert!(refused(|collection| {
+			scene(collection, "Stream").scenes.insert("Monitor".into());
+		}));
+		assert!(refused(|collection| {
+			scene(collection, "Stream").scenes.insert("Stream".into());
+		}));
+		// Through `Recording`, which holds `Stream`.
+		assert!(refused(|collection| {
+			scene(collection, "Stream").scenes.insert("Recording".into());
+		}));
+		assert!(refused(|collection| collection.scenes[0].audio = Some("Monitor".into())));
+		assert!(!refused(
+			|collection| collection.scenes[0].audio = Some("Recording".into())
+		));
 		assert!(refused(|collection| {
 			let mic = collection.audio.get_mut("mic").unwrap();
 			mic.delay = moq_audio::bus::MAX_DELAY + Duration::from_millis(1);
@@ -2327,6 +2509,37 @@ path = "sting.webm"
 			collection.sources.insert("blank".into(), source.clone());
 			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{source:?}");
 		}
+	}
+
+	/// Only a source with a track of its own, its background kept, is
+	/// published independently.
+	#[test]
+	fn publishes_only_a_source_with_a_track_of_its_own() {
+		let mut collection = Collection::new();
+		collection.sources.insert("cam".into(), Source::Camera { id: None });
+		collection
+			.sources
+			.insert("cut".into(), Source::Clone { source: "cam".into() });
+		collection.published.insert("cam".into());
+		collection.validate().unwrap();
+
+		let mut missing = collection.clone();
+		missing.published.insert("gone".into());
+		assert!(missing.validate().is_err());
+
+		let mut clone = collection.clone();
+		clone.published.insert("cut".into());
+		assert!(clone.validate().is_err(), "a clone has no track of its own");
+
+		let mut removed = collection.clone();
+		removed.video.insert(
+			"cam".into(),
+			Video {
+				background: Background::Remove,
+				..Default::default()
+			},
+		);
+		assert!(removed.validate().is_err(), "its track would show the background");
 	}
 
 	/// A background is removed only from a picture of the source's own that
@@ -2828,34 +3041,55 @@ background = "remove"
 		assert!(!collection.draws_program("Scene"));
 	}
 
-	/// A further canvas is named as a path segment, since it names its
-	/// broadcast, is a size the encoder can take, and is the only canvas a
-	/// scene lays items out on.
+	/// A scene's own size is one the encoder can take, a published scene is
+	/// named as a path segment, since it names its broadcast, and recordings
+	/// hold one scene at most. Only a scene of the program's size that draws
+	/// no program goes on program.
 	#[test]
-	fn refuses_a_further_canvas_that_cannot_be() {
-		for (name, width) in [("", 1080), ("a/b", 1080), ("tall", 1081)] {
-			let mut collection = example();
-			collection.canvases.insert(name.into(), Extra::new(width, 1920));
-			assert!(
-				matches!(collection.validate(), Err(Error::Invalid(_))),
-				"{name} {width}"
-			);
-		}
+	fn a_scene_has_a_size_and_outputs() {
 		let mut collection = example();
-		let item = Item::new("camera", Rect::fill(&collection.canvas));
-		collection.scenes[0].canvases.insert("tall".into(), vec![item]);
-		assert!(
-			matches!(collection.validate(), Err(Error::Invalid(_))),
-			"no such canvas"
-		);
-		collection.canvases.insert("tall".into(), Extra::new(1080, 1920));
+		collection.scenes.push(Scene::new("a/b"));
 		collection.validate().unwrap();
-		// Leaving a layout out is the one way to say a scene shows nothing there.
-		collection.scenes[0].canvases.insert("tall".into(), Vec::new());
+		collection.scenes[1].published = true;
 		assert!(
 			matches!(collection.validate(), Err(Error::Invalid(_))),
-			"an empty layout"
+			"a / in a published name"
 		);
+		collection.scenes[1].name = r"cam\one".into();
+		assert!(
+			matches!(collection.validate(), Err(Error::Invalid(_))),
+			r"a \ escaping nothing in a published name"
+		);
+		collection.scenes[1].name = "Tall".into();
+		collection.scenes[1].size = Some(Size {
+			width: 1081,
+			height: 1920,
+		});
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "an odd width");
+		collection.scenes[1].size = Some(Size {
+			width: 1080,
+			height: 1920,
+		});
+		collection.validate().unwrap();
+		assert_eq!(
+			collection.canvas(Some("Tall")).unwrap().size(),
+			moq_video::Size::new(1080, 1920)
+		);
+		assert_eq!(
+			collection.canvas(Some("Tall")).unwrap().framerate,
+			collection.canvas.framerate
+		);
+		assert!(
+			matches!(collection.takes("Tall"), Err(Error::Invalid(_))),
+			"another size"
+		);
+		collection.takes("Scene").unwrap();
+
+		assert_eq!(collection.recorded(), None, "the program");
+		collection.scenes[1].recorded = true;
+		assert_eq!(collection.recorded(), Some("Tall"));
+		collection.scenes[0].recorded = true;
+		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "two recorded");
 	}
 
 	#[test]

@@ -31,7 +31,7 @@ use crate::browser::Page;
 use crate::collection::{Collection, Source};
 use crate::lut::Cube;
 use crate::media::Clip;
-use crate::playout::{MAX_DELAY, Place, Speaker, VIDEO_DELAY, Writer};
+use crate::playout::{BUS_LATENCY, MAX_DELAY, Place, Speaker, VIDEO_DELAY, Writer};
 use crate::publish::{Claim, Listing, Publish, Still};
 use crate::replay::{MIN_SPEED, Take, Target};
 
@@ -114,28 +114,36 @@ struct Played {
 
 type Playback = Arc<Mutex<Played>>;
 
-/// A take for a replay source to play, and how fast.
+/// A take for a replay source to play, how fast, and which play it is, as
+/// [`Run::play`] counts them.
 struct Play {
 	take: Take,
 	speed: f32,
+	play: u64,
 }
 
 /// A replay source's next replay, until its driver takes it, so a replay that
 /// ended holds its take no longer.
 type Next = Arc<Mutex<Option<Play>>>;
 
-/// A media source's latest play: which it is, and when it began and ended on
-/// the program clock.
+/// A media or replay source's latest play: which it is, and when it began and
+/// ended on the program clock.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Run {
-	/// Which play it is: 0 for the one the source opens with, and one more
-	/// for each [`Feed::play`] since.
+	/// Which play it is: 0 for the one the source opens with, in which a
+	/// replay source plays nothing, and one more for each [`Feed::play`] or
+	/// [`Feed::replay`] since.
 	pub play: u64,
-	/// When its first picture or sound was due, or `None` until it is decoded.
+	/// When it begins, or `None` until its first picture and sound are
+	/// decoded: a media file's earlier of the two shows or sounds then, and a
+	/// replay's span starts then, even where it starts in a gap. Set a little
+	/// ahead: the bus sounds a write 50 ms later, so a play begins that long
+	/// after it is decoded.
 	pub begun: Option<Instant>,
-	/// When its last picture or sound finished, a looping one's first pass
-	/// did, or [`Feed::stop`] stopped it, or `None` until then. A play cut off
-	/// by the next never ends.
+	/// When its last picture or sound finishes, a looping one's first pass
+	/// does, a replay's span does, or [`Feed::stop`] stopped it, or `None`
+	/// until known. A looping one's is known 50 ms ahead. A play cut off by
+	/// the next never ends.
 	pub ended: Option<Instant>,
 }
 
@@ -231,7 +239,7 @@ pub enum Status {
 #[derive(Clone)]
 pub struct Context {
 	/// Where microphones, system audio, and broadcasts feed their sound, and
-	/// where the collection's mixes are made.
+	/// where each of the collection's audio scenes is mixed.
 	pub bus: Bus,
 	/// Where broadcast sources are announced: the studio's relay connection.
 	pub origin: moq_net::origin::Consumer,
@@ -247,10 +255,11 @@ pub struct Context {
 	pub publish: Option<Publish>,
 }
 
-/// The running sources of a collection, and its mixes.
+/// The running sources of a collection, and the mix of each audio scene.
 pub struct Sources {
 	context: Context,
 	feeds: BTreeMap<String, Feed>,
+	/// Each audio scene's mix, by its name.
 	mixes: BTreeMap<String, Mix>,
 	/// The sources on program, as last set.
 	on_program: BTreeSet<String>,
@@ -290,17 +299,18 @@ impl Sources {
 		&self.context
 	}
 
-	/// Run exactly the sources and mixes `collection` has: start new and edited
+	/// Run exactly the sources and audio scenes `collection` has: start new and edited
 	/// sources and stop removed and edited ones. A clone shares the feed of the
 	/// source it clones rather than opening one. Returns a driver for each
 	/// source started, which does nothing until run. The media source a
 	/// stinger plays opens silent and blank, waiting for its first
 	/// [play](Feed::play), rather than playing once at the start.
 	///
-	/// Also applies the collection's gain, mute, delay, and routing to every
-	/// audio strip, and its frame rate to every web page, which never restarts
-	/// a source. A removed or edited source leaves every mix at once, so its
-	/// replacement never plays over it. Panics on a gain or delay
+	/// Also applies the collection's gain, mute, pan, and delay to every audio
+	/// strip, routes each into the mix of every audio scene that reaches it,
+	/// and applies the frame rate to every web page, which never restarts a
+	/// source. A removed or edited source leaves every mix at once, so its
+	/// replacement never plays over it. Panics on a gain, pan, or delay
 	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		let mixes = &self.mixes;
@@ -312,12 +322,19 @@ impl Sources {
 			keep
 		});
 		// A mix ends once its last handle drops, which may be a reader's.
-		self.mixes.retain(|name, _| collection.mixes.names.contains(name));
-		for name in &collection.mixes.names {
-			if !self.mixes.contains_key(name) {
-				self.mixes.insert(name.clone(), self.context.bus.mix());
+		self.mixes.retain(|name, _| collection.audio_scene(name).is_some());
+		for scene in &collection.audio_scenes {
+			if !self.mixes.contains_key(&scene.name) {
+				self.mixes.insert(scene.name.clone(), self.context.bus.mix());
 			}
 		}
+		// Nested audio scenes are flattened: a mix sums every source an audio
+		// scene reaches, each once, so a sound reached two ways is not doubled.
+		let heard: BTreeMap<&str, BTreeSet<&str>> = collection
+			.audio_scenes
+			.iter()
+			.map(|scene| (scene.name.as_str(), collection.heard(&scene.name)))
+			.collect();
 
 		let mut drivers = Vec::new();
 		for (name, source) in collection.sources.iter().filter(|(_, source)| source.opens()) {
@@ -336,9 +353,16 @@ impl Sources {
 				let audio = collection.audio.get(name).cloned().unwrap_or_default();
 				strip.set_gain(audio.gain);
 				strip.set_muted(audio.muted);
+				// The bus is stereo, the one layout that refuses no pan.
+				strip.set_pan(audio.pan).expect("stereo bus pans");
 				strip.set_delay(audio.delay);
-				for (mix_name, mix) in &self.mixes {
-					let routed = !audio.exclude.contains(mix_name);
+				for (scene, mix) in &self.mixes {
+					// A source published independently reaches viewers by its own
+					// track, never through a mix.
+					let routed = !collection.published.contains(name)
+						&& heard
+							.get(scene.as_str())
+							.is_some_and(|heard| heard.contains(name.as_str()));
 					if mix.routes(strip) == routed {
 						continue;
 					}
@@ -376,16 +400,17 @@ impl Sources {
 		self.feeds.get(name)
 	}
 
-	/// The mix called `name`, as the collection last synced had it.
-	pub fn mix(&self, name: &str) -> Option<&Mix> {
-		self.mixes.get(name)
+	/// The mix of the audio scene called `scene`, as the collection last
+	/// synced had it.
+	pub fn mix(&self, scene: &str) -> Option<&Mix> {
+		self.mixes.get(scene)
 	}
 
-	/// Whether the mix called `mix` plays the source called `name`: it has
-	/// sound, is not muted, and is routed into that mix.
-	pub fn plays(&self, mix: &str, name: &str) -> bool {
+	/// Whether the audio scene called `scene` plays the source called `name`:
+	/// it has sound, is not muted, and the audio scene reaches it.
+	pub fn plays(&self, scene: &str, name: &str) -> bool {
 		let strip = self.feeds.get(name).and_then(Feed::strip);
-		let mix = self.mixes.get(mix);
+		let mix = self.mixes.get(scene);
 		strip
 			.zip(mix)
 			.is_some_and(|(strip, mix)| !strip.muted() && mix.routes(strip))
@@ -464,8 +489,27 @@ impl Feed {
 				"a replay of sound alone plays only in real time".into(),
 			));
 		}
-		let play = Play { take, speed };
-		// Fails once the driver is gone, which leaves the reason in the status.
+		if plays.is_closed() {
+			return Err(self.stopped());
+		}
+		// Counted before the driver hears of it, so whatever the replay before
+		// still reports or shows is not taken for this one's.
+		let mut latest = self.runs.lock().unwrap();
+		*latest = Latest {
+			run: Run {
+				play: latest.run.play + 1,
+				..Run::default()
+			},
+			stopped: false,
+		};
+		// Cleared before the driver hears of it, so the replay cut off leaves
+		// nothing up until the new one's first picture.
+		self.picture.lock().unwrap().clear();
+		let play = Play {
+			take,
+			speed,
+			play: latest.run.play,
+		};
 		plays.send(Arc::new(Mutex::new(Some(play)))).map_err(|_| self.stopped())
 	}
 
@@ -525,7 +569,8 @@ impl Feed {
 	}
 
 	/// A media source's latest play, from its start or the latest
-	/// [`play`](Self::play). Never begins for any other source.
+	/// [`play`](Self::play), or a replay source's latest
+	/// [`replay`](Self::replay). Never begins for any other source.
 	pub fn run(&self) -> Run {
 		self.runs.lock().unwrap().run
 	}
@@ -553,7 +598,7 @@ impl Feed {
 	/// an overlay, or a LUT.
 	///
 	/// A failed track leaves the source drawing and playing in the studio's
-	/// own scenes and mixes.
+	/// own scenes and audio scenes.
 	pub fn track(&self) -> Option<Status> {
 		self.track.as_ref().map(|track| track.read().clone())
 	}
@@ -978,15 +1023,15 @@ impl Driver {
 	/// Follow the broadcast at `path` for as long as the feed lives, playing
 	/// each instance of it that comes online.
 	async fn broadcast(&self, path: &str) -> Result<(), Error> {
-		let mut instances = moq_mux::follow::Instances::new(&self.context.origin, path, None)?;
+		let mut instances = self.context.origin.follow(path, None)?;
 		set(&self.status, Status::Offline);
 
 		let mut clock = self.clock.clone().expect("a broadcast source has a clock");
 		let mut playing: Option<Playing<'_>> = None;
 		loop {
 			tokio::select! {
-				event = instances.next() => match event {
-					Ok(moq_mux::follow::Event::Start(broadcast)) => {
+				event = instances.available() => match event {
+					Ok(Some(broadcast)) => {
 						set(&self.status, Status::Live);
 						*self.played.lock().unwrap() = Played {
 							broadcast: Some(broadcast.clone()),
@@ -996,7 +1041,7 @@ impl Driver {
 						clock = clock.reset(VIDEO_DELAY);
 						playing = Some(Box::pin(self.play(broadcast, path, clock.clone())));
 					}
-					Ok(moq_mux::follow::Event::End) => {
+					Ok(None) => {
 						playing = None;
 						*self.played.lock().unwrap() = Played::default();
 						set(&self.status, Status::Offline);
@@ -1215,10 +1260,7 @@ impl Driver {
 			loop {
 				let now = kio::clock::now();
 				speaker.borrow_mut().commit(now);
-				let write = queue
-					.borrow()
-					.front()
-					.map(|(sounds, _)| *sounds - crate::playout::BUS_LATENCY);
+				let write = queue.borrow().front().map(|(sounds, _)| *sounds - BUS_LATENCY);
 				if write.is_some_and(|at| at <= now) {
 					let (sounds, frame) = queue.borrow_mut().pop_front().expect("peeked");
 					writer.write(sounds, &frame.data, now)?;
@@ -1254,14 +1296,7 @@ impl Driver {
 						return std::future::pending().await;
 					}
 					let play = plays.borrow_and_update().lock().unwrap().take();
-					// A replay cut off must not leave its last picture up until
-					// the new one's first. Between replays the picture is clear
-					// already, and clearing it again would show before the new
-					// one's first picture even when that is due at once.
-					if playing.is_some() {
-						self.picture.lock().unwrap().clear();
-					}
-					playing = play.map(|play| Box::pin(self.replay(play, listing)) as Playing<'_>);
+					playing =play.map(|play| Box::pin(self.replay(play, listing)) as Playing<'_>);
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
@@ -1275,39 +1310,100 @@ impl Driver {
 		}
 	}
 
-	/// Play one take at its speed, each picture and sound when its moment
-	/// comes: one `t` into the span plays `t / speed` after the replay starts.
-	/// Ends once the whole span has played.
+	/// Play one take at its speed, each picture and sound at its moment: one
+	/// `t` into the span plays `t / speed` after the replay begins, once the
+	/// first of each is decoded and the bus can sound it. Ends once the whole
+	/// span has played.
+	///
+	/// The bus sounds a write [`BUS_LATENCY`] later, so each sound is written
+	/// that far ahead of its moment.
 	///
 	/// With `listing`, the pictures are also encoded onto the source's own
 	/// track as they show, while it is used.
 	async fn replay(&self, play: Play, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		set(&self.status, Status::Live);
 		let take = &play.take;
-		let begin = kio::clock::now();
-		let at = |timestamp: moq_net::Timestamp| {
-			let into = Duration::from(timestamp).saturating_sub(Duration::from(take.start));
-			begin + into.div_f32(play.speed)
-		};
 		let broadcast = take.consume();
+		let mut video = match &take.video {
+			Some((name, config)) => {
+				let consumer = moq_video::decode::Consumer::new(&broadcast, config, name, self.pictures()).await?;
+				Some((consumer, config))
+			}
+			None => None,
+		};
+		// Slowed down, sound would need stretching, so it plays only in real time.
+		let mut audio = match (&take.audio, &self.strip) {
+			(Some((name, config)), Some(strip)) if play.speed == 1.0 => {
+				let consumer =
+					moq_audio::decode::Consumer::new(&broadcast, config, name.clone(), self.sounds()).await?;
+				let bus = self.context.bus.config();
+				let writer = Writer::new(self.channel(strip.clone())?, bus.sample_rate, bus.layout.channels());
+				Some((consumer, writer))
+			}
+			_ => None,
+		};
 
-		let video = async {
-			let Some((name, config)) = &take.video else {
+		// The first of each from the start on is decoded before the clock
+		// starts, so neither is late. The group in progress at the start
+		// decodes from its keyframe, but plays only from the start on. A gap
+		// or end before the first picture leaves nothing to clear or mark.
+		let mut picture = None;
+		if let Some((consumer, _)) = &mut video {
+			while let Some(read) = consumer.read().await? {
+				if let moq_video::decode::Read::Frame(frame) = &read
+					&& frame.timestamp >= take.start
+				{
+					picture = Some(read);
+					break;
+				}
+			}
+		}
+		// A sound across the start is written whole: the writer drops what
+		// is due before the replay begins.
+		let mut samples = None;
+		if let Some((consumer, _)) = &mut audio {
+			let bus = self.context.bus.config();
+			let stride = bus.layout.channels() as usize * size_of::<f32>();
+			while let Some(frame) = next_samples(consumer).await? {
+				let length = (frame.data.len() / stride) as f64 / f64::from(bus.sample_rate);
+				if Duration::from(frame.timestamp) + Duration::from_secs_f64(length) > Duration::from(take.start) {
+					samples = Some(frame);
+					break;
+				}
+			}
+		}
+		// The pictures' track opens before the clock starts too, so the
+		// encoder's probe holds back neither the first picture nor the sound
+		// beside it.
+		let mut own = Own::new(listing, kio::clock::now());
+		if let (Some(moq_video::decode::Read::Frame(frame)), Some((_, config))) = (&picture, &video) {
+			self.open(&mut own, frame, config).await;
+		}
+		let begin = kio::clock::now() + BUS_LATENCY;
+		self.ran(play.play, |run| {
+			run.begun.get_or_insert(begin);
+		});
+		let at = |timestamp: moq_net::Timestamp| {
+			let (timestamp, start) = (Duration::from(timestamp), Duration::from(take.start));
+			match timestamp.checked_sub(start) {
+				Some(into) => begin + into.div_f32(play.speed),
+				None => begin - (start - timestamp).div_f32(play.speed),
+			}
+		};
+
+		let pictures = async {
+			let Some((consumer, config)) = &mut video else {
 				return Ok(());
 			};
-			let mut consumer = moq_video::decode::Consumer::new(&broadcast, config, name, self.pictures()).await?;
-			let mut own = Own::new(listing, begin);
-			while let Some(read) = consumer.read().await? {
+			while let Some(read) = picture.take() {
 				match read {
-					// The group in progress at the start decodes from its
-					// keyframe, but shows only from the start on.
 					moq_video::decode::Read::Frame(frame) if frame.timestamp < take.start => {}
 					// One at the end would show for no time at all.
 					moq_video::decode::Read::Frame(frame) if frame.timestamp >= take.end => break,
 					moq_video::decode::Read::Frame(mut frame) => {
 						kio::clock::sleep_until(at(frame.timestamp)).await;
-						self.encode(&mut own, &mut frame, config).await?;
-						self.show(Picture::Frame(frame));
+						self.encode(&mut own, &mut frame, config, kio::clock::now()).await?;
+						self.show_play(play.play, Picture::Frame(frame));
 					}
 					// A stretch the broadcast was offline, paused, or lost
 					// replays as the gap it was, on its own track too. Past
@@ -1323,46 +1419,43 @@ impl Driver {
 						}
 					}
 				}
+				picture = consumer.read().await?;
 			}
 			Ok::<_, Error>(())
 		};
-
-		// Slowed down, sound would need stretching, so it plays only in real time.
-		let audio = async {
-			let (Some((name, config)), Some(strip), true) = (&take.audio, &self.strip, play.speed == 1.0) else {
+		let sounds = async {
+			let Some((consumer, writer)) = &mut audio else {
 				return Ok(());
 			};
-			let mut consumer =
-				moq_audio::decode::Consumer::new(&broadcast, config, name.clone(), self.sounds()).await?;
-			let mut channel = self.channel(strip.clone())?;
-			while let Some(read) = consumer.read().await? {
-				match read {
-					moq_audio::decode::Read::Frame(frame) if frame.timestamp < take.start => {}
-					moq_audio::decode::Read::Frame(frame) if frame.timestamp >= take.end => break,
-					moq_audio::decode::Read::Frame(frame) => {
-						kio::clock::sleep_until(at(frame.timestamp)).await;
-						channel.write(&frame.data)?;
-					}
-					_ => {}
-				}
+			while let Some(frame) = samples.take()
+				&& frame.timestamp < take.end
+			{
+				let due = at(frame.timestamp);
+				ahead(due).await;
+				writer.write(due, &frame.data, kio::clock::now())?;
+				samples = next_samples(consumer).await?;
 			}
-			// The bus plays what is written after a buffer's delay, and drops
-			// what a closed channel has not played, so it stays open until the
-			// replay ends.
+			// The bus drops what a closed channel has not played, so it stays
+			// open until the replay ends, by when the last sound has played.
 			std::future::pending().await
 		};
 
 		// The span ends where it does even when its tracks have not ended yet.
 		let played = async {
-			tokio::try_join!(video, audio)?;
+			tokio::try_join!(pictures, sounds)?;
 			std::future::pending().await
 		};
+		let end = at(take.end);
 		// Played first, so a picture due at the very end shows before it does.
 		tokio::select! {
 			biased;
-			result = played => result,
-			() = kio::clock::sleep_until(at(take.end)) => Ok(()),
+			result = played => return result,
+			() = kio::clock::sleep_until(end) => {}
 		}
+		self.ran(play.play, |run| {
+			run.ended.get_or_insert(end);
+		});
+		Ok(())
 	}
 
 	/// Play the media file at `path` as `cues` asks: from its start for each
@@ -1371,7 +1464,8 @@ impl Driver {
 	/// picture, silent, until the next.
 	///
 	/// With `listing`, the pictures are also encoded onto the source's own
-	/// track as they show, while it is used, on one timeline across plays.
+	/// track, stamped when they show, while it is used, on one timeline across
+	/// plays.
 	async fn media(
 		&self,
 		path: &Path,
@@ -1392,7 +1486,7 @@ impl Driver {
 					self.publish(crate::publish::Audio::new(listing, input))
 				});
 				Some(Sound {
-					channel: None,
+					writer: None,
 					track,
 					ended: None,
 				})
@@ -1400,69 +1494,110 @@ impl Driver {
 			_ => None,
 		};
 		let mut own = Own::new(listing, kio::clock::now());
+		let shows = Shows::default();
 		// The last channel on a strip to close drops what it has not played
 		// yet, so a loop keeps its channel, sounding on, while a new cue drops
-		// it, cutting off what the play before still had queued; the next play
-		// takes a new one. Its pictures start a group there too, a cut to the
-		// clip's start.
+		// it, cutting off what the play before still had queued, pictures
+		// included; the next play takes a new one. Its pictures start a group
+		// there too, a cut to the clip's start.
 		let cut = |sound: &mut Option<Sound<'_>>, own: &mut Own<'_, '_>| {
 			if let Some(sound) = sound {
-				sound.channel = None;
+				sound.writer = None;
 				sound.ended = None;
 			}
+			shows.queue.borrow_mut().clear();
 			if let Some(video) = &mut own.track
 				&& let Err(err) = video.cut()
 			{
 				self.fail_encoding(&mut own.track, err);
 			}
 		};
-		let mut cue = *cues.borrow_and_update();
-		// Where a loop's next play starts: where the last one ended, so loops
-		// keep exact time whatever opening the decoders takes.
-		let mut next = None;
-		loop {
-			// Whether to rest until the next cue, rather than take it at once.
-			let rest = if cue.stopped {
-				true
-			} else {
-				if let (Some(sound), Some(strip)) = (&mut sound, &self.strip)
-					&& sound.channel.is_none()
-				{
-					sound.channel = Some(self.channel(strip.clone())?);
-				}
-				let played = tokio::select! {
-					result = self.play_clip(&clip, sound.as_mut(), &mut own, next, cue.play) => Some(result?),
-					changed = cues.changed() => {
-						// The feed is gone, which stops this driver anyway.
-						if changed.is_err() {
-							return std::future::pending().await;
+		let plays = async {
+			let mut cue = *cues.borrow_and_update();
+			// Where a loop's next play starts: where the last one ended, so
+			// loops keep exact time whatever opening the decoders takes.
+			let mut next = None;
+			loop {
+				// Whether to rest until the next cue, rather than take it at once.
+				let rest = if cue.stopped {
+					true
+				} else {
+					if let (Some(sound), Some(strip)) = (&mut sound, &self.strip)
+						&& sound.writer.is_none()
+					{
+						let bus = self.context.bus.config();
+						let channel = self.channel(strip.clone())?;
+						sound.writer = Some(Writer::new(channel, bus.sample_rate, bus.layout.channels()));
+					}
+					let play = async {
+						let end = self
+							.play_clip(&clip, sound.as_mut(), &mut own, &shows, next, cue.play)
+							.await?;
+						// A loop's next play hands its first over now, a bus
+						// latency ahead, as this one did.
+						if !looping {
+							kio::clock::sleep_until(end).await;
 						}
-						None
+						Ok::<_, Error>(end)
+					};
+					let played = tokio::select! {
+						result = play => Some(result?),
+						changed = cues.changed() => {
+							// The feed is gone, which stops this driver anyway.
+							if changed.is_err() {
+								return std::future::pending().await;
+							}
+							None
+						}
+					};
+					if let Some(end) = played {
+						self.ran(cue.play, |run| {
+							run.ended.get_or_insert(end);
+						});
+						next = Some(end);
+						if looping {
+							continue;
+						}
 					}
+					played.is_some()
 				};
-				if let Some(end) = played {
-					self.ran(cue.play, |run| {
-						run.ended.get_or_insert(end);
-					});
-					next = Some(end);
-					if looping {
-						continue;
-					}
+				if rest {
+					set(&self.status, Status::Ended);
+					self.ended(&mut cues, &mut own).await;
 				}
-				played.is_some()
-			};
-			if rest {
-				set(&self.status, Status::Ended);
-				self.ended(&mut cues, &mut own).await;
+				cut(&mut sound, &mut own);
+				cue = *cues.borrow_and_update();
+				next = None;
 			}
-			cut(&mut sound, &mut own);
-			cue = *cues.borrow_and_update();
-			next = None;
+		};
+		// Shows each picture handed over at its moment, across plays, so a
+		// loop's next play can hand its first over before this one's last
+		// has shown.
+		let present = async {
+			loop {
+				let now = kio::clock::now();
+				let due = shows.queue.borrow().front().map(|(due, ..)| *due);
+				match due {
+					Some(due) if due <= now => {
+						let (_, play, frame) = shows.queue.borrow_mut().pop_front().expect("peeked");
+						self.show_play(play, Picture::Frame(frame));
+					}
+					Some(due) => tokio::select! {
+						() = kio::clock::sleep_until(due) => {}
+						() = shows.handed.notified() => {}
+					},
+					None => shows.handed.notified().await,
+				}
+			}
+		};
+		tokio::select! {
+			result = plays => result,
+			() = present => unreachable!("pictures show for as long as the source plays"),
 		}
 	}
 
-	/// Note how a media source's `play` runs, unless the feed has asked for
-	/// another since or stopped it.
+	/// Note how a media or replay source's `play` runs, unless the feed has
+	/// asked for another since or stopped it.
 	fn ran(&self, play: u64, note: impl FnOnce(&mut Run)) {
 		let mut latest = self.runs.lock().unwrap();
 		if latest.run.play == play && latest.run.ended.is_none() {
@@ -1470,8 +1605,8 @@ impl Driver {
 		}
 	}
 
-	/// Show a picture of a media source's `play`, unless the feed has asked
-	/// for another or stopped it since.
+	/// Show a picture of a media or replay source's `play`, unless the feed
+	/// has asked for another or stopped it since.
 	fn show_play(&self, play: u64, picture: Picture) {
 		let latest = self.runs.lock().unwrap();
 		if latest.run.play == play && !latest.stopped {
@@ -1509,16 +1644,24 @@ impl Driver {
 		}
 	}
 
-	/// Play `clip` once, each picture and sound when its moment comes, the
-	/// first at `begin`, or at once, as part of the feed's `play`. Returns
-	/// where it ends, once the last has played for as long as it lasts: a
-	/// sound for its samples, and a picture for as long as the one before it.
-	/// A clip that decodes to nothing fails.
+	/// Play `clip` once, each picture and sound at its moment, the first at
+	/// `begin`, or as soon as the bus can sound it, as part of the feed's
+	/// `play`.
+	///
+	/// The bus sounds a write [`BUS_LATENCY`] later, so each sound is written
+	/// that far ahead of its moment, and each picture handed to `shows` then
+	/// too, to show at the same moment.
+	///
+	/// Returns where it ends, once all is handed over and the bus latency
+	/// before the end has come, so a loop's next play hands its own first over
+	/// in time. A sound lasts for its samples, and the last picture as long as
+	/// the one before it. A clip that decodes to nothing fails.
 	async fn play_clip(
 		&self,
 		clip: &Clip,
 		mut sound: Option<&mut Sound<'_>>,
 		own: &mut Own<'_, '_>,
+		shows: &Shows,
 		begin: Option<Instant>,
 		play: u64,
 	) -> Result<Instant, Error> {
@@ -1563,7 +1706,13 @@ impl Driver {
 		if let (Some(frame), Some((_, config))) = (&picture, &video) {
 			self.open(own, frame, config).await;
 		}
-		let begin = begin.unwrap_or_else(kio::clock::now);
+		// A cut's play begins after the last picture already published, even
+		// one cut off before it showed, so the track's time never repeats.
+		let begin = begin.unwrap_or_else(|| {
+			let soonest = kio::clock::now() + BUS_LATENCY;
+			own.stamped
+				.map_or(soonest, |stamped| soonest.max(stamped + Duration::from_millis(1)))
+		});
 		self.ran(play, |run| {
 			run.begun.get_or_insert(begin);
 		});
@@ -1578,11 +1727,12 @@ impl Driver {
 			let mut previous = None;
 			while let Some(mut frame) = picture.take() {
 				let due = at(frame.timestamp);
-				kio::clock::sleep_until(due).await;
+				ahead(due).await;
 				last(due + previous.map_or(Duration::ZERO, |previous| due - previous));
 				previous = Some(due);
-				self.encode(own, &mut frame, config).await?;
-				self.show_play(play, Picture::Frame(frame));
+				self.encode(own, &mut frame, config, due).await?;
+				shows.queue.borrow_mut().push_back((due, play, frame));
+				shows.handed.notify_one();
 				picture = next_picture(consumer).await?;
 			}
 			Ok::<_, Error>(())
@@ -1600,16 +1750,16 @@ impl Driver {
 			let mut first = true;
 			while let Some(frame) = samples.take() {
 				let due = at(frame.timestamp);
-				kio::clock::sleep_until(due).await;
+				ahead(due).await;
 				let length = (frame.data.len() / bytes) as u64 * 1_000_000_000 / u64::from(bus.sample_rate);
 				last(due + Duration::from_nanos(length));
 				let gap = std::mem::take(&mut first) && sound.ended != Some(due);
 				sound.ended = Some(due + Duration::from_nanos(length));
 				sound
-					.channel
+					.writer
 					.as_mut()
 					.expect("a channel while playing")
-					.write(&frame.data)?;
+					.write(due, &frame.data, kio::clock::now())?;
 				if let Some(track) = &mut sound.track {
 					let samples: Vec<f32> = bytemuck::pod_collect_to_vec(&frame.data);
 					if let Err(err) = track.write(&samples, due, gap) {
@@ -1623,8 +1773,9 @@ impl Driver {
 			Ok::<_, Error>(())
 		};
 		tokio::try_join!(pictures, sounds)?;
-		kio::clock::sleep_until(end.get()).await;
-		Ok(end.get())
+		let end = end.get();
+		ahead(end).await;
+		Ok(end)
 	}
 
 	/// Open the source's own track for pictures like `frame`, which says their
@@ -1632,7 +1783,12 @@ impl Driver {
 	async fn open(&self, own: &mut Own<'_, '_>, frame: &moq_video::Frame, config: &VideoConfig) {
 		if let Some(listing) = own.listing.filter(|_| !own.opened) {
 			let video = crate::publish::Video::new(listing, frame.size(), framerate(config), frame.surface.color());
-			own.track = self.publish(video.await);
+			// Pictures are stamped with when they show on `own`'s timeline,
+			// which may be ahead of when they encode.
+			let video = video
+				.await
+				.and_then(|mut video| video.anchor(own.origin).map(|()| video));
+			own.track = self.publish(video);
 			// Only once it has, so a play cut off while it opens leaves the
 			// next picture to open it.
 			own.opened = true;
@@ -1640,18 +1796,21 @@ impl Driver {
 	}
 
 	/// Encode a played picture onto the source's own track, opened at the
-	/// first picture if not before. Stamped when it shows, on the timeline
-	/// `own` keeps.
+	/// first picture if not before. Stamped with when it `shows`, on the
+	/// timeline `own` keeps.
 	async fn encode(
 		&self,
 		own: &mut Own<'_, '_>,
 		frame: &mut moq_video::Frame,
 		config: &VideoConfig,
+		shows: Instant,
 	) -> Result<(), Error> {
 		self.open(own, frame, config).await;
 		if let Some(video) = &mut own.track {
-			frame.timestamp = moq_net::Timestamp::from_micros(own.origin.elapsed().as_micros() as u64)
-				.map_err(moq_video::Error::from)?;
+			own.stamped = Some(shows);
+			let stamp = shows.saturating_duration_since(own.origin);
+			frame.timestamp =
+				moq_net::Timestamp::from_micros(stamp.as_micros() as u64).map_err(moq_video::Error::from)?;
 			if let Err(err) = video.encode(frame) {
 				self.fail_encoding(&mut own.track, err);
 			}
@@ -1693,11 +1852,19 @@ impl Driver {
 /// A media source's sound: the bus channel it plays into, taken anew on a
 /// restart, and its own track.
 struct Sound<'a> {
-	channel: Option<moq_audio::bus::Channel>,
+	writer: Option<Writer>,
 	track: Option<crate::publish::Audio<'a>>,
 	/// When the last sound written ends, or `None` after a break, such as a
 	/// restart, so the next sound's track starts its timeline afresh.
 	ended: Option<Instant>,
+}
+
+/// A media source's pictures, handed over a bus latency ahead of their moments
+/// with their plays, and woken whenever one is.
+#[derive(Default)]
+struct Shows {
+	queue: RefCell<VecDeque<(Instant, u64, moq_video::Frame)>>,
+	handed: Notify,
 }
 
 /// A played source's own track, opened at its first picture, and the timeline
@@ -1708,6 +1875,8 @@ struct Own<'a, 'b> {
 	/// Whether the track was opened, or failed to, so it is tried once.
 	opened: bool,
 	origin: Instant,
+	/// When the last picture encoded onto the track shows.
+	stamped: Option<Instant>,
 }
 
 impl<'a, 'b> Own<'a, 'b> {
@@ -1717,7 +1886,19 @@ impl<'a, 'b> Own<'a, 'b> {
 			track: None,
 			opened: false,
 			origin,
+			stamped: None,
 		}
+	}
+}
+
+/// Wait to hand over what is due at `due`: a bus latency ahead, so a sound
+/// written then is heard when due. One due at once is handed over without a
+/// timer, which the timer wheel would round up to its next millisecond, a
+/// moment too late.
+async fn ahead(due: Instant) {
+	let at = due - BUS_LATENCY;
+	if at > kio::clock::now() {
+		kio::clock::sleep_until(at).await;
 	}
 }
 
@@ -1798,7 +1979,7 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 	let track = context
 		.publish
 		.clone()
-		.filter(|_| publishes(source))
+		.filter(|_| source.publishes())
 		.map(|publish| Track {
 			claim: publish.claim(name),
 			publish,
@@ -1862,34 +2043,36 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 	(feed, driver)
 }
 
-/// Whether `source` publishes its own track: a picture the studio captures or
-/// loads itself, before the scene's filters, or the sound of a microphone,
-/// system audio, or media file as captured or decoded, before its gain and
-/// mute.
-///
-/// A broadcast is already published by its own publisher, and a clone shows
-/// its source's track, its filters carried by the layout rather than encoded
-/// again. Web pages and overlays are seen only in the program, since H.264
-/// would encode their transparency over black, a LUT is looked up, never
-/// shown, and a scene is drawn from other sources.
-fn publishes(source: &Source) -> bool {
-	match source {
-		Source::Camera { .. }
-		| Source::Display { .. }
-		| Source::Window { .. }
-		| Source::Microphone { .. }
-		| Source::SystemAudio
-		| Source::Color { .. }
-		| Source::Image { .. }
-		| Source::Media { .. }
-		| Source::Replay => true,
-		Source::Broadcast { .. }
-		| Source::Browser { .. }
-		| Source::Overlay { .. }
-		| Source::Clone { .. }
-		| Source::Lut { .. }
-		| Source::Scene { .. }
-		| Source::Program => false,
+impl Source {
+	/// Whether the source publishes its own track: a picture the studio captures or
+	/// loads itself, before the scene's filters, or the sound of a microphone,
+	/// system audio, or media file as captured or decoded, before its gain and
+	/// mute.
+	///
+	/// A broadcast is already published by its own publisher, and a clone shows
+	/// its source's track, its filters carried by the layout rather than encoded
+	/// again. Web pages and overlays are seen only in the program, since H.264
+	/// would encode their transparency over black, a LUT is looked up, never
+	/// shown, and a scene is drawn from other sources.
+	pub fn publishes(&self) -> bool {
+		match self {
+			Source::Camera { .. }
+			| Source::Display { .. }
+			| Source::Window { .. }
+			| Source::Microphone { .. }
+			| Source::SystemAudio
+			| Source::Color { .. }
+			| Source::Image { .. }
+			| Source::Media { .. }
+			| Source::Replay => true,
+			Source::Broadcast { .. }
+			| Source::Browser { .. }
+			| Source::Overlay { .. }
+			| Source::Clone { .. }
+			| Source::Lut { .. }
+			| Source::Scene { .. }
+			| Source::Program => false,
+		}
 	}
 }
 
@@ -1993,7 +2176,7 @@ pub(crate) mod test {
 		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 		let rendition = config.probe().await.unwrap();
-		let reserved = catalog.reserve().with_interval(config.gop.duration(config.framerate));
+		let reserved = catalog.reserve().with_interval(config.effective_join());
 		let mut producer = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition).unwrap();
 		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
 		let gray = vec![0x80; 64 * 64 * 4];
@@ -2091,6 +2274,7 @@ mod tests {
 				path: "room/guest".into(),
 			},
 		);
+		collection.audio_scenes[0].sounds.insert("guest".into());
 		collection
 	}
 
@@ -2179,21 +2363,27 @@ mod tests {
 		.await;
 	}
 
-	/// A mix plays a source with sound that is routed into it and not muted, so
-	/// one left out of the program's mix is heard only in the others.
+	/// An audio scene plays a source with sound that it reaches and that is
+	/// not muted: one it holds, or one an audio scene it holds holds, once.
 	#[tokio::test]
-	async fn a_mix_plays_only_what_is_routed_into_it() {
+	async fn an_audio_scene_plays_only_what_it_reaches() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, _origin) = context(dir.path());
 			let mut sources = Sources::new(context);
 			let mut collection = collection();
-			collection.mixes.names.push("Headphones".into());
-			let program = crate::Mixes::DEFAULT;
+			let program = crate::AudioScene::DEFAULT;
+			collection.audio_scenes.push(crate::AudioScene {
+				scenes: [program.to_string()].into(),
+				..crate::AudioScene::new("Headphones")
+			});
+			collection.audio_scenes.push(crate::AudioScene::new("Music"));
+			collection.validate().unwrap();
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			assert!(sources.plays(program, "guest"));
-			assert!(sources.plays("Headphones", "guest"));
+			assert!(sources.plays("Headphones", "guest"), "through the one it holds");
+			assert!(!sources.plays("Music", "guest"), "held by none it reaches");
 			assert!(!sources.plays(program, "red"), "a color is silent");
 			assert!(!sources.plays(program, "nobody"));
 			assert!(!sources.plays("Nothing", "guest"));
@@ -2202,18 +2392,19 @@ mod tests {
 			// the source comes back in under its new strip.
 			let before = sources.get("guest").unwrap().strip().unwrap().clone();
 			sources.restart("guest");
-			for mix in [program, "Headphones"] {
-				assert!(!sources.mix(mix).unwrap().routes(&before), "{mix} keeps the old strip");
+			for scene in [program, "Headphones"] {
+				assert!(
+					!sources.mix(scene).unwrap().routes(&before),
+					"{scene} keeps the old strip"
+				);
 			}
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			assert!(sources.plays(program, "guest"));
 
-			let left_out = Audio {
-				exclude: [program.to_string()].into(),
-				..Audio::default()
-			};
-			collection.audio.insert("guest".into(), left_out);
+			// Held directly too, it still plays once.
+			collection.audio_scenes[1].sounds.insert("guest".into());
+			collection.audio_scenes[0].sounds.clear();
 			assert!(sources.sync(&collection).is_empty());
 			assert!(!sources.plays(program, "guest"), "left out of the program");
 			assert!(sources.plays("Headphones", "guest"));
@@ -2224,16 +2415,15 @@ mod tests {
 			};
 			collection.audio.insert("guest".into(), muted);
 			assert!(sources.sync(&collection).is_empty());
-			assert!(!sources.plays(program, "guest"), "muted");
 			assert!(!sources.plays("Headphones", "guest"), "muted everywhere");
 		})
 		.await;
 	}
 
 	/// Editing a source restarts it, removing one stops it, and an untouched one
-	/// keeps running. Gain, delay, and routing changes reach the strip without
-	/// restarting anything, and a source plays in every mix it is not left out
-	/// of until it is removed.
+	/// keeps running. Gain, pan, delay, and routing changes reach the strip without
+	/// restarting anything, and a source plays in every audio scene holding it
+	/// until it is removed.
 	#[tokio::test]
 	async fn sync_restarts_only_what_changed() {
 		local(async {
@@ -2244,32 +2434,33 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			let guest = sources.get("guest").unwrap().strip().unwrap().clone();
-			let program = sources.mix(crate::Mixes::DEFAULT).unwrap().clone();
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
 			assert!(program.routes(&guest));
 
-			collection.mixes.names.push("Stream".into());
+			collection.audio_scenes.push(crate::AudioScene::new("Stream"));
 			collection.audio.insert(
 				"guest".into(),
 				Audio {
 					gain: 0.25,
 					muted: true,
-					exclude: ["Stream".to_string()].into(),
+					pan: -0.5,
 					delay: Duration::from_millis(120),
 				},
 			);
 			assert!(sources.sync(&collection).is_empty());
 			assert_eq!(guest.gain(), 0.25);
 			assert!(guest.muted());
+			assert_eq!(guest.pan(), -0.5);
 			assert_eq!(guest.delay(), Duration::from_millis(120));
 			let stream = sources.mix("Stream").unwrap().clone();
 			assert!(program.routes(&guest));
-			assert!(!stream.routes(&guest), "left out of the new mix");
+			assert!(!stream.routes(&guest), "not held by the new audio scene");
 
-			collection.audio.get_mut("guest").unwrap().exclude.clear();
+			collection.audio_scenes[1].sounds.insert("guest".into());
 			assert!(sources.sync(&collection).is_empty());
-			assert!(stream.routes(&guest), "put back in");
+			assert!(stream.routes(&guest), "held");
 
-			collection.mixes.names.retain(|name| name != "Stream");
+			collection.audio_scenes.retain(|scene| scene.name != "Stream");
 			assert!(sources.sync(&collection).is_empty());
 			assert!(sources.mix("Stream").is_none());
 
@@ -2292,6 +2483,7 @@ mod tests {
 			assert!(sources.get("red").is_none());
 
 			collection.sources.remove("guest");
+			collection.audio_scenes[0].sounds.clear();
 			assert!(sources.sync(&collection).is_empty());
 			assert!(!program.routes(&guest), "a removed source leaves at once");
 		})
@@ -2305,7 +2497,9 @@ mod tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
-			let publication = origin.create_broadcast("room/guest").unwrap();
+			let publication = origin
+				.route("room/guest", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let mut broadcast = publication.broadcast().clone();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 			// A known bitrate ranks a rendition above one without.
@@ -2324,7 +2518,7 @@ mod tests {
 					.unwrap()
 			};
 			let first = audio("first", None);
-			publication.announce(moq_net::origin::Route::default()).unwrap();
+			publication.announce().unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -2349,7 +2543,9 @@ mod tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
-			let publication = origin.create_broadcast("room/guest").unwrap();
+			let publication = origin
+				.route("room/guest", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let mut broadcast = publication.broadcast().clone();
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 			let info = catalog.track_info(hang::catalog::PRIORITY.audio);
@@ -2365,7 +2561,7 @@ mod tests {
 					.unwrap();
 			};
 			point(&mut catalog, "first");
-			publication.announce(moq_net::origin::Route::default()).unwrap();
+			publication.announce().unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -2390,7 +2586,9 @@ mod tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
-			let publication = origin.create_broadcast("room/guest").unwrap();
+			let publication = origin
+				.route("room/guest", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let mut broadcast = publication.broadcast().clone();
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
@@ -2400,7 +2598,7 @@ mod tests {
 					catalog.audio.renditions.insert("audio".into(), config);
 				})
 				.unwrap();
-			publication.announce(moq_net::origin::Route::default()).unwrap();
+			publication.announce().unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -2421,7 +2619,7 @@ mod tests {
 
 	/// A live broadcast at `room/guest`, writing nothing until the test does.
 	struct Live {
-		_publication: moq_net::origin::Publication,
+		_publication: moq_net::origin::Route,
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_video::encode::Producer,
@@ -2437,14 +2635,16 @@ mod tests {
 		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 		let rendition = config.probe().await.unwrap();
-		let reserved = timebase.reserve().with_interval(config.gop.duration(config.framerate));
+		let reserved = timebase.reserve().with_interval(config.effective_join());
 		let video = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition).unwrap();
 		(video, moq_video::encode::Encoder::new(&config).unwrap())
 	}
 
 	/// A broadcast with a video track, and an audio one with `audio`.
 	async fn live(origin: &moq_net::origin::Producer, audio: bool) -> Live {
-		let publication = origin.create_broadcast("room/guest").unwrap();
+		let publication = origin
+			.route("room/guest", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let mut broadcast = publication.broadcast().clone();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let (video, encoder) = rendition(&broadcast, catalog.timebase()).await;
@@ -2454,7 +2654,7 @@ mod tests {
 			options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Pcm, &input);
 			moq_audio::encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap()
 		});
-		publication.announce(moq_net::origin::Route::default()).unwrap();
+		publication.announce().unwrap();
 		Live {
 			_publication: publication,
 			broadcast,
@@ -2789,13 +2989,18 @@ mod tests {
 			};
 			let take = Take::new(&target, Duration::from_secs(1)).unwrap();
 			let speed = 0.5;
-			let begin = kio::clock::now();
 			feed.replay(take, speed).unwrap();
+			assert!(
+				matches!(feed.next_picture(), Some(Picture::Rgba { .. })),
+				"cleared as it is asked"
+			);
+			let begin = until(|| feed.run().begun).await;
 
 			// From the start, not from the keyframe of its group at 1 s, each
 			// picture `t / speed` into the replay, and none sooner. The clock
-			// moves only to each picture's moment, which the timer wheel rounds
-			// up to its millisecond.
+			// is held until the replay begins, then moves only to each
+			// picture's moment, which the timer wheel rounds up to its
+			// millisecond.
 			let start = moq_net::Timestamp::from_micros(1_500_000).unwrap();
 			for index in 45..75u64 {
 				let timestamp = moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap();
@@ -2822,6 +3027,7 @@ mod tests {
 			assert!(feed.next_picture().is_none(), "cleared before the end");
 			until_time(end).await;
 			until(|| matches!(feed.next_picture(), Some(Picture::Rgba { .. })).then_some(())).await;
+			assert_eq!(feed.run().ended, Some(end));
 			assert_eq!(feed.status(), Status::Live, "ready for the next replay");
 		})
 		.await;
@@ -2851,13 +3057,53 @@ mod tests {
 				};
 				Take::new(&target, Duration::from_secs(1)).unwrap()
 			};
-			// Its first picture, at 1.5 s, is due at once.
+			// Its first picture, at 1.5 s, is due as it begins.
 			feed.replay(take(2_500_000), 1.0).unwrap();
+			until_time(until(|| feed.run().begun).await).await;
 			until(|| matches!(feed.next_picture(), Some(Picture::Frame(_))).then_some(())).await;
-			// This one's first picture, at the same 1.5 s, is due 20 ms in.
+			// This one's first picture, at the same 1.5 s, is due 20 ms in. The
+			// one playing is cleared as it is asked, before the driver hears
+			// of it, so nothing it shows meanwhile is drawn.
 			feed.replay(take(2_480_000), 1.0).unwrap();
-			let shown = until(|| feed.next_picture()).await;
+			let shown = feed.next_picture().expect("cleared at once");
 			assert!(matches!(shown, Picture::Rgba { pixels, .. } if pixels == [0; 4]));
+		})
+		.await;
+	}
+
+	/// A replay that starts in a gap, just before the broadcast resumed,
+	/// decodes the first picture after it before it begins, so that picture
+	/// shows on time.
+	#[tokio::test(start_paused = true)]
+	async fn a_replay_from_a_gap_shows_its_first_picture_on_time() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let mut collection = Collection::new();
+			collection.sources.insert("replay".into(), Source::Replay);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let feed = sources.get("replay").unwrap();
+
+			// Paused through its second second, resuming with a picture at 2 s,
+			// a millisecond after the span starts.
+			let (broadcast, video, _live) = video(Some(1)).await;
+			let target = Target {
+				broadcast: broadcast.consume(),
+				video: Some(video),
+				audio: None,
+				end: moq_net::Timestamp::from_micros(2_500_000).unwrap(),
+			};
+			let take = Take::new(&target, Duration::from_micros(501_000)).unwrap();
+			feed.replay(take, 1.0).unwrap();
+			let begun = until(|| feed.run().begun).await;
+			// Past its moment, without holding the clock for a decode.
+			until_time(begun + Duration::from_millis(2)).await;
+			let Some(Picture::Frame(frame)) = feed.next_picture() else {
+				panic!("the first picture is not up on time");
+			};
+			assert_eq!(frame.timestamp, moq_net::Timestamp::from_micros(2_000_000).unwrap());
 		})
 		.await;
 	}
@@ -2881,21 +3127,28 @@ mod media_tests {
 				restart: *restart,
 			};
 			collection.sources.insert(name.to_string(), source);
+			collection.audio_scenes[0].sounds.insert(name.to_string());
 		}
 		collection
 	}
 
 	/// The next picture `feed` shows, passing over the clear a restart puts up,
-	/// and when it showed.
+	/// and when it showed. The clock moves only to a play's beginning, which
+	/// comes a bus latency after its first picture decodes.
 	async fn shown(feed: &Feed) -> (moq_net::Timestamp, Instant) {
-		let timestamp = until(|| match feed.next_picture() {
-			Some(Picture::Frame(frame)) => Some(frame.timestamp),
-			Some(Picture::Rgba { pixels, .. }) if pixels == [0; 4] => None,
-			Some(_) => panic!("not a decoded picture"),
-			None => None,
-		})
-		.await;
-		(timestamp, kio::clock::now())
+		loop {
+			let next = until(|| match feed.next_picture() {
+				Some(Picture::Frame(frame)) => Some(Ok(frame.timestamp)),
+				Some(Picture::Rgba { pixels, .. }) if pixels == [0; 4] => None,
+				Some(_) => panic!("not a decoded picture"),
+				None => feed.run().begun.filter(|begun| *begun > kio::clock::now()).map(Err),
+			})
+			.await;
+			match next {
+				Ok(timestamp) => return (timestamp, kio::clock::now()),
+				Err(begun) => until_time(begun).await,
+			}
+		}
 	}
 
 	/// Wait until `name` reads as `status`, without moving the clock.
@@ -3048,7 +3301,7 @@ mod media_tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			let feed = sources.get("clip.mkv").unwrap();
-			let program = sources.mix(crate::Mixes::DEFAULT).unwrap().clone();
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
 
 			let (first, begun) = shown(feed).await;
 			let heard = listen(&mut mixer, &program, &mut at, begun + Duration::from_millis(300)).await;
@@ -3156,6 +3409,247 @@ mod media_tests {
 		.await;
 	}
 
+	/// One bus block: how often the bus mixes, and so how finely a mix places
+	/// a sound in time.
+	const BLOCK: Duration = Duration::from_millis(10);
+
+	/// The bus mixed along with a paused clock a block at a time, as an audio
+	/// clock would, keeping the first channel of what one mix heard.
+	struct Ear {
+		mixer: moq_audio::bus::Driver,
+		reader: moq_audio::bus::Reader,
+		/// When the clock read the bus's start, so a frame `n` in sounds `n`
+		/// samples after it.
+		origin: Instant,
+		at: Instant,
+		heard: Vec<f32>,
+	}
+
+	impl Ear {
+		/// Start mixing now, a block of which the bus mixes at once, so a
+		/// channel keeps what is written to it from here on.
+		fn new(mixer: moq_audio::bus::Driver, mix: &Mix) -> Self {
+			let now = kio::clock::now();
+			let mut ear = Self {
+				mixer,
+				reader: mix.reader(),
+				origin: now - BLOCK,
+				at: now,
+				heard: Vec::new(),
+			};
+			ear.mix();
+			ear
+		}
+
+		/// Move the clock a block on, and mix that block.
+		async fn step(&mut self) {
+			self.at += BLOCK;
+			until_time(self.at).await;
+			self.mix();
+		}
+
+		fn mix(&mut self) {
+			self.mixer.advance(Self::frames(BLOCK));
+			while let std::task::Poll::Ready(Some(block)) = self.reader.poll_read(&kio::Waiter::noop()) {
+				let channels = block.data.len() / block.frames();
+				assert_eq!(block.position as usize, self.heard.len(), "a block skipped");
+				self.heard.extend(block.data.iter().step_by(channels));
+			}
+		}
+
+		/// The frames the bus mixes over `duration`.
+		fn frames(duration: Duration) -> usize {
+			let rate = moq_audio::bus::Config::default().sample_rate;
+			(duration.as_nanos() * u128::from(rate) / 1_000_000_000) as usize
+		}
+
+		/// When the mix first heard anything.
+		fn onset(&self) -> Option<Instant> {
+			let index = self.heard.iter().position(|sample| sample.abs() > 0.01)?;
+			let rate = moq_audio::bus::Config::default().sample_rate;
+			Some(self.origin + Duration::from_secs_f64(index as f64 / f64::from(rate)))
+		}
+
+		/// The loudest the mix heard over `duration` from `from`.
+		fn peak(&self, from: Instant, duration: Duration) -> f32 {
+			let start = Self::frames(from - self.origin);
+			let heard = &self.heard[start..start + Self::frames(duration)];
+			heard.iter().fold(0.0, |peak, sample| peak.max(sample.abs()))
+		}
+	}
+
+	/// A file's first picture shows as its first sound is heard, within a bus
+	/// block, rather than a bus latency ahead of it.
+	#[tokio::test(start_paused = true)]
+	async fn a_media_files_sound_plays_with_its_pictures() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (mut context, _origin) = context(dir.path());
+			let (bus, mixer) = Bus::new(Default::default()).unwrap();
+			context.bus = bus;
+			let mut sources = Sources::new(context);
+			let collection = media(dir.path(), &[("clip.mkv", CLIP, false, false)]);
+			let drivers = sources.sync(&collection);
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
+			let mut ear = Ear::new(mixer, &program);
+			start(&sources, drivers).await;
+			in_step(&mut ear, sources.get("clip.mkv").unwrap()).await;
+		})
+		.await;
+	}
+
+	/// A replay's first picture shows as its first sound is heard, within a
+	/// bus block, rather than a bus latency ahead of it.
+	#[tokio::test(start_paused = true)]
+	async fn a_replays_sound_plays_with_its_pictures() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (mut context, _origin) = context(dir.path());
+			let (bus, mixer) = Bus::new(Default::default()).unwrap();
+			context.bus = bus;
+			let mut sources = Sources::new(context);
+			let mut collection = Collection::new();
+			collection.sources.insert("replay".into(), Source::Replay);
+			collection.audio_scenes[0].sounds.insert("replay".into());
+			let drivers = sources.sync(&collection);
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
+			let mut ear = Ear::new(mixer, &program);
+			start(&sources, drivers).await;
+
+			// The clip's whole second, pictures and sound from its start.
+			std::fs::write(dir.path().join("clip.mkv"), CLIP).unwrap();
+			let clip = Clip::open(&dir.path().join("clip.mkv")).unwrap();
+			let target = Target {
+				broadcast: clip.consume(),
+				video: clip.video.clone(),
+				audio: clip.audio.clone(),
+				end: moq_net::Timestamp::from_secs(1).unwrap(),
+			};
+			let take = Take::new(&target, Duration::from_secs(1)).unwrap();
+			let feed = sources.get("replay").unwrap();
+			feed.replay(take, 1.0).unwrap();
+			in_step(&mut ear, feed).await;
+		})
+		.await;
+	}
+
+	/// A replay that starts part way through a sound plays the rest of it as
+	/// it begins, rather than silence until the next.
+	#[tokio::test(start_paused = true)]
+	async fn a_replay_plays_the_sound_across_its_start() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (mut context, _origin) = context(dir.path());
+			let (bus, mixer) = Bus::new(Default::default()).unwrap();
+			context.bus = bus;
+			let mut sources = Sources::new(context);
+			let mut collection = Collection::new();
+			collection.sources.insert("replay".into(), Source::Replay);
+			collection.audio_scenes[0].sounds.insert("replay".into());
+			let drivers = sources.sync(&collection);
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
+			let mut ear = Ear::new(mixer, &program);
+			start(&sources, drivers).await;
+
+			// The clip's sound alone, from 5 ms in: inside its first 20 ms frame.
+			std::fs::write(dir.path().join("clip.mkv"), CLIP).unwrap();
+			let clip = Clip::open(&dir.path().join("clip.mkv")).unwrap();
+			let target = Target {
+				broadcast: clip.consume(),
+				video: None,
+				audio: clip.audio.clone(),
+				end: moq_net::Timestamp::from_millis(505).unwrap(),
+			};
+			let take = Take::new(&target, Duration::from_millis(500)).unwrap();
+			let feed = sources.get("replay").unwrap();
+			feed.replay(take, 1.0).unwrap();
+			// Held until it begins, so the first sound is written as the bus
+			// last mixed, and is heard just as the replay begins.
+			let begun = until(|| feed.run().begun).await;
+			while ear.at < begun + Duration::from_millis(50) {
+				ear.step().await;
+			}
+			let onset = ear.onset().expect("it sounds");
+			assert!(
+				onset < begun + Duration::from_millis(2),
+				"heard as it begins: {:?} after",
+				onset.saturating_duration_since(begun)
+			);
+		})
+		.await;
+	}
+
+	/// Mix along with `feed`'s latest play until its first picture shows and
+	/// its first sound is heard, and check both do as it begins: the picture
+	/// at once, and the sound within a bus block.
+	async fn in_step(ear: &mut Ear, feed: &Feed) {
+		while !matches!(feed.next_picture(), Some(Picture::Frame(_))) {
+			ear.step().await;
+		}
+		// Seen at the step after it showed, which may be the block after,
+		// when the step woke before the picture's timer at the same moment.
+		let shown = ear.at;
+		let begun = feed.run().begun.unwrap();
+		assert!(
+			begun <= shown && shown - begun <= BLOCK,
+			"the first picture shows when it begins: {:?} after",
+			shown - begun
+		);
+		while ear.at < begun + Duration::from_millis(100) {
+			ear.step().await;
+		}
+		let onset = ear.onset().expect("it sounds");
+		let apart = onset
+			.saturating_duration_since(begun)
+			.max(begun.saturating_duration_since(onset));
+		assert!(
+			apart < BLOCK,
+			"its first sound is heard with its first picture: {onset:?} and {begun:?}"
+		);
+	}
+
+	/// A looping file's sound runs on from its end into its start again, as
+	/// loud as the first time and as its pass begins, each pass heard from
+	/// when it begins.
+	#[tokio::test(start_paused = true)]
+	async fn a_looping_files_sound_runs_on() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (mut context, _origin) = context(dir.path());
+			let (bus, mixer) = Bus::new(Default::default()).unwrap();
+			context.bus = bus;
+			let mut sources = Sources::new(context);
+			let collection = media(dir.path(), &[("tone.webm", TONE, true, false)]);
+			let drivers = sources.sync(&collection);
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
+			let mut ear = Ear::new(mixer, &program);
+			start(&sources, drivers).await;
+			let feed = sources.get("tone.webm").unwrap();
+
+			let ended = loop {
+				if let Some(ended) = feed.run().ended {
+					break ended;
+				}
+				ear.step().await;
+			};
+			let begun = feed.run().begun.unwrap();
+			while ear.at < ended + Duration::from_millis(100) {
+				ear.step().await;
+			}
+			// Past a block that either may be heard early by, and the start of
+			// the tone the codec fades in.
+			let into = Duration::from_millis(15);
+			let first = ear.peak(begun + into, Duration::from_millis(30));
+			let again = ear.peak(ended + into, Duration::from_millis(30));
+			assert!(first > 0.05, "the tone sounds: {first}");
+			assert!(
+				again > first / 2.0,
+				"the loop starts again as loud: {again} after {first}"
+			);
+		})
+		.await;
+	}
+
 	/// A file of sound alone shows nothing, and goes silent at its end. One of
 	/// pictures alone has no sound for a mix to play.
 	#[tokio::test(start_paused = true)]
@@ -3168,7 +3662,7 @@ mod media_tests {
 			let collection = media(dir.path(), &files);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
-			let program = crate::Mixes::DEFAULT;
+			let program = crate::AudioScene::DEFAULT;
 			assert!(sources.plays(program, "tone.webm"));
 			assert!(!sources.plays(program, "silent.mkv"));
 			assert!(sources.get("silent.mkv").unwrap().strip().is_none());

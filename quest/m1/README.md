@@ -2,27 +2,24 @@
 
 ## Goal
 
-The work held until m0 ships. A studio broadcast can be composed by its
-viewers and by a server from the sources' own tracks and a layout track,
-matching the program the studio composites, so a viewer can toggle and
-prioritize elements. The studio gains features m0 left out: overlay assets
-and restarts, and isolated guest recordings.
+The work held until m0 ships: studio features planned as follow-ups of m0
+work but not needed to ship it. Nothing is planned here now.
 
 ## Plan
 
-Moved out of m0 on 2026-11-04 (maintainer): the program is how a studio
+Viewer-side composition moved out of m0 on 2026-11-04 (maintainer): the program is how a studio
 broadcast reaches viewers, and sources are not published to the relay by
 default (decided 2026-11-03 on
 [moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), since
 encoding every source for viewers costs more encoder sessions than a consumer
 GPU has. Viewer-side composition waits until m0 ships.
 
+Viewer-side composition moved to m2 on 2026-11-07 (maintainer, on
+[moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97)): no viewer
+can fetch a source's track until a source is published independently, which
+was m2 then and shipped in
+[moq-dev/studio#117](https://github.com/moq-dev/studio/pull/117).
+
 Broadened 2026-11-04 (maintainer, /quest-plan): m1 also holds studio
 features planned as follow-ups of m0 work but not needed to ship it, rather
 than opening an m2 for them.
-
-## Required
-
-- [Viewer-side composition](/quest/m1/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers and by a server
-- [Keypad keys bind as hotkeys](/quest/m1/hotkeys-keypad.md) - scene and action keys on the keypad, apart from the main row
-- [Scene graph view](/quest/m1/scene-graph.md) - a node view of picture and audio scenes, their routing, volume, pan, and waveforms

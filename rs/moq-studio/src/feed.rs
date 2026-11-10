@@ -5,7 +5,7 @@
 //! read. Its video is the program's: the studio's session in the room serves the
 //! program broadcast once at `.program`, and each feed's catalog lists its video
 //! renditions by reference, so a guest costs no video encode. Its audio is its
-//! own: a mix-minus of the mix on program without the guest's microphone, so
+//! own: a mix-minus of the audio scene on program without the guest's microphone, so
 //! they follow the show without hearing themselves back.
 //!
 //! The studio's session in the room publishes them, holding only what the room
@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use bytes::Bytes;
 use moq_mux::catalog::Stream;
 use moq_net::Path;
 use moq_scene::Collection;
@@ -64,15 +63,15 @@ impl Feeds {
 		clock: moq_mux::Clock,
 		epoch: Duration,
 	) -> anyhow::Result<Self> {
-		let requests = origin
-			.requests(PROGRAM)
+		let route = origin
+			.route_prefix(PROGRAM, Default::default())
 			.context("cannot serve the program in the room")?;
 		let served = program.clone();
 		let serving = tokio::spawn(async move {
-			while let Ok(request) = requests.requested_broadcast().await {
+			while let Some(request) = route.requested().await {
 				// The route claims everything beneath it too, which holds nothing.
 				match request.path().as_str() == PROGRAM {
-					true => request.serve(&served),
+					true => request.serve(served.clone()),
 					false => request.reject(moq_net::Error::NotFound),
 				}
 			}
@@ -90,15 +89,16 @@ impl Feeds {
 	}
 
 	/// Publish a feed for each renewed guest and end the others', and point
-	/// each at the mix `collection` puts on program, without the guest's
-	/// microphone as `sources` runs it.
+	/// each at the audio scene `collection` puts on program, without the
+	/// guest's microphone as `sources` runs it.
 	pub fn sync(&mut self, collection: &Collection, sources: &Sources) {
 		let renewed = self.room.renewed();
 		// A feed whose task stopped, having logged why, opens again below.
 		self.feeds.retain(|identity, feed| {
 			renewed.contains(&(identity.clone(), feed.generation)) && !feed.task.is_finished()
 		});
-		let program = sources.mix(&collection.mixes.program);
+		let on_program = collection.program_audio().unwrap_or_default();
+		let program = sources.mix(on_program);
 		for (identity, generation) in renewed {
 			if !self.feeds.contains_key(&identity) {
 				match self.open(&identity, generation) {
@@ -118,7 +118,7 @@ impl Feeds {
 			let heard = voices.iter().find(|name| {
 				let strip = sources.get(name).and_then(|source| source.strip());
 				let audible = strip.is_some_and(|strip| strip.gain() > 0.0);
-				audible && sources.plays(&collection.mixes.program, name)
+				audible && sources.plays(on_program, name)
 			});
 			let voice = heard.or(voices.first());
 			match voice.and_then(|name| sources.get(name)?.strip()) {
@@ -136,7 +136,7 @@ impl Feeds {
 		let program = Path::new(PROGRAM)?
 			.relative(&path)
 			.context("the program cannot be named from a feed")?;
-		let publication = self.origin.create_broadcast(path)?;
+		let publication = self.origin.route(path, moq_net::origin::RouteOptions::hidden())?;
 		let mut broadcast = publication.broadcast().clone();
 		let config = moq_mux::catalog::Config::default().with_clock(self.clock.clone());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
@@ -149,7 +149,7 @@ impl Feeds {
 		options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Opus, &input);
 		options.config.bitrate = Some(BITRATE);
 		let audio = moq_audio::encode::Producer::new(&mut broadcast, catalog.clone(), input, &options)?;
-		publication.announce(moq_net::origin::Route::default())?;
+		publication.announce()?;
 
 		let pick = mix::Pick::default();
 		let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -199,7 +199,7 @@ struct Feed {
 /// A feed's broadcast, as its task runs it.
 struct Running {
 	/// Ends the broadcast once the task returns.
-	_publication: moq_net::origin::Publication,
+	_publication: moq_net::origin::Route,
 	catalog: moq_mux::catalog::Producer,
 	audio: moq_audio::encode::Producer,
 	follow: mix::Follow,
@@ -212,8 +212,8 @@ struct Running {
 }
 
 impl Running {
-	/// List the program's video and encode the picked audio until `stopped`,
-	/// then finish the audio track.
+	/// List the program's video and encode the picked audio until `stopped`
+	/// or the program ends, then finish the audio track and the catalog.
 	async fn run(mut self, stopped: tokio::sync::oneshot::Receiver<()>) -> anyhow::Result<()> {
 		let Self {
 			catalog,
@@ -227,15 +227,17 @@ impl Running {
 		} = &mut self;
 		let ended = tokio::select! {
 			listed = list(program, catalog, reference) => listed,
-			encoded = encode(follow, audio, *epoch, *rate) => encoded,
+			encoded = mix::encode(follow, audio, *epoch, *rate) => encoded,
 			// Dropped with the feed.
 			_ = stopped => Ok(()),
 		};
 		if let Err(err) = ended {
 			self.audio.abort(moq_net::StreamError::Internal.into());
+			self.catalog.abort(moq_net::StreamError::Internal.into());
 			return Err(err);
 		}
 		self.audio.finish()?;
+		self.catalog.finish()?;
 		Ok(())
 	}
 }
@@ -257,32 +259,6 @@ async fn list(
 			rendition.broadcast = Some(reference.clone());
 		}
 		catalog.mutate(|catalog| catalog.video = video)?;
-	}
-	Ok(())
-}
-
-/// Encode what `follow` reads into `audio`, stamped `epoch` past the bus's
-/// start at `rate`, as the program audio is, until the bus stops.
-async fn encode(
-	follow: &mut mix::Follow,
-	audio: &mut moq_audio::encode::Producer,
-	epoch: Duration,
-	rate: u32,
-) -> anyhow::Result<()> {
-	let rate = u128::from(rate);
-	let mut next = None;
-	while let Some(block) = follow.read().await {
-		// Audio this encoder fell too far behind to read leaves a gap.
-		if next.is_some_and(|next| next != block.position) {
-			audio.reanchor();
-		}
-		next = Some(block.position + block.frames() as u64);
-		let micros = epoch.as_micros() + u128::from(block.position) * 1_000_000 / rate;
-		let Ok(timestamp) = moq_net::Timestamp::from_micros(micros as u64) else {
-			continue;
-		};
-		let data: Vec<u8> = block.data.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-		audio.write(&moq_audio::Frame::new(Bytes::from(data), timestamp))?;
 	}
 	Ok(())
 }
@@ -341,6 +317,7 @@ mod tests {
 			room.observe(&Path::new(&camera).unwrap(), true, &collection, &History::new());
 			let path = format!("guests/{camera}");
 			collection.sources.insert(guest.into(), Source::Broadcast { path });
+			collection.audio_scenes[0].sounds.insert(guest.into());
 		}
 		let origin = moq_tokio::origin::spawn();
 		let mut sources = Sources::new(moq_scene::source::Context {
@@ -384,8 +361,8 @@ mod tests {
 	}
 
 	/// Each guest's feed lists the program's video by reference and audio of
-	/// its own, which hears everyone on program but that guest, and ends once
-	/// the guest is no longer renewed.
+	/// its own, which hears everyone on program but that guest, and ends
+	/// cleanly once the guest is no longer renewed.
 	#[tokio::test]
 	async fn each_guest_hears_the_program_without_themselves() {
 		let _clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
@@ -420,6 +397,7 @@ mod tests {
 			let copy = collection.sources["alice"].clone();
 			collection.sources.insert(name.into(), copy);
 			collection.audio.insert(name.into(), audio);
+			collection.audio_scenes[0].sounds.insert(name.into());
 		}
 		drop(sources.sync(&collection));
 		let mut alice = channel(&bus, &sources, "alice");
@@ -429,7 +407,14 @@ mod tests {
 		std::thread::scope(|scope| scope.spawn(|| feeds.sync(&collection, &sources)).join().unwrap());
 
 		let path = Room::feed_path("alice", 0).unwrap();
-		let broadcast = origin.consume().follow(path, None).unwrap().available().await.unwrap();
+		let broadcast = origin
+			.consume()
+			.follow(path, None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.expect("an instance");
 		let catalog = listed(&broadcast).await;
 		let video = &catalog.video.renditions["video"];
 		assert_eq!(video.broadcast.as_ref().unwrap().as_str(), "../../.program");
@@ -450,11 +435,21 @@ mod tests {
 		assert_eq!(bob_hears.data[0], 0.25, "bob hears only alice");
 
 		let path = Room::feed_path("bob", 0).unwrap();
-		let bob = origin.consume().follow(path, None).unwrap().available().await.unwrap();
+		let bob = origin
+			.consume()
+			.follow(path, None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.expect("an instance");
+		let format = moq_mux::catalog::CatalogFormat::Hang;
+		let mut listings = moq_mux::catalog::Consumer::<()>::new(&bob, format).await.unwrap();
 		room.stop_renewing("bob").unwrap();
 		feeds.sync(&collection, &sources);
 		assert_eq!(feeds.feeds.keys().collect::<Vec<_>>(), ["alice"]);
-		// A guest who is not renewed has no feed.
+		// A guest who is not renewed has no feed, whose catalog ends cleanly.
+		while listings.next().await.expect("the catalog finishes").is_some() {}
 		bob.closed().await;
 	}
 
@@ -473,7 +468,10 @@ mod tests {
 		let read = moq_tokio::origin::spawn();
 		let link = room.invite("alice").unwrap().link;
 		let _alice = relay.join(&link, &moq_tokio::origin::spawn(), &read);
-		let follow = async |path: Path| read.consume().follow(path, None)?.available().await;
+		let follow = async |path: Path| {
+			let broadcast = read.consume().follow(path, None)?.available().await?;
+			moq_net::Result::Ok(broadcast.expect("the first change is an instance"))
+		};
 
 		let path = Room::feed_path("alice", 0).unwrap();
 		let feed = kio::clock::timeout(TIMEOUT, follow(path.clone()))

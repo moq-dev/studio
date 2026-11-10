@@ -3,12 +3,13 @@
 //!
 //! Every [`INTERVAL`] the studio grades its stream with `hang::health`, the
 //! grader the rest of the stack shares, from three points of view:
-//! - its own: what each track of the broadcast wrote, each relay connection's
-//!   state, and the serving one's round trip, estimated capacity, and loss;
-//! - its viewers': the feedback each publishes under the broadcast's `echo`
-//!   path, which the catalog solicits (`moq export --echo` answers it);
-//! - the relay's: how many sessions watch the broadcast, read from the relay's
-//!   stats broadcasts when it shares them with this connection.
+//! - its own: what each track of every broadcast wrote, the program's and
+//!   each published scene's, each relay connection's state, and the serving
+//!   one's round trip, estimated capacity, and loss, which they all share;
+//! - its viewers': the feedback each publishes under the broadcast's
+//!   `echo` path, which the catalog solicits (`moq export --echo` answers it);
+//! - the relay's: how many sessions watch each broadcast, read from the
+//!   relay's stats broadcasts when it shares them with this connection.
 //!
 //! It adds what only the studio knows (program frames the encoder had no room
 //! for, sources that stopped delivering) and names the cause of each problem.
@@ -55,13 +56,26 @@ pub struct Report {
 	/// Each relay the broadcast goes to, the preferred first; empty when the
 	/// studio publishes nothing.
 	pub relays: Vec<Relay>,
+	/// The connection every broadcast shares.
 	pub uplink: Uplink,
-	pub viewers: Viewers,
-	/// Each track of the broadcast in catalog order, then each source's own
-	/// local track by source name.
-	pub tracks: Vec<Track>,
+	/// Each broadcast, the program's first; empty when the studio
+	/// publishes nothing.
+	pub broadcasts: Vec<Published>,
+	/// Each source's own local track, by source name.
+	pub sources: Vec<Track>,
 	/// What is wrong, worst first, each naming its cause.
 	pub problems: Vec<Problem>,
+}
+
+/// One broadcast: who watches it, and how each of its tracks reaches
+/// them.
+#[derive(Debug, Default)]
+pub struct Published {
+	/// The published scene's name, or `None` for the program's.
+	pub name: Option<String>,
+	pub viewers: Viewers,
+	/// Each track it lists, in catalog order.
+	pub tracks: Vec<Track>,
 }
 
 /// One relay connection.
@@ -95,7 +109,7 @@ pub struct Uplink {
 	pub rtt: Option<Duration>,
 	/// What the congestion controller estimates the connection can carry.
 	pub capacity: Option<Rate>,
-	/// The media the program's tracks wrote over the last interval. Source
+	/// The media every broadcast's tracks wrote over the last interval. Source
 	/// tracks are left out: they stay in the studio, and never reach a relay.
 	pub media: Option<Rate>,
 	/// Transport bytes lost per media byte written over the last interval.
@@ -197,41 +211,256 @@ pub struct Problem {
 pub struct Local {
 	/// Canvas frames drawn.
 	pub rendered: u64,
+	/// Each broadcast's video: the program's as `None`, then each
+	/// published scene's by name.
+	pub broadcasts: BTreeMap<Option<String>, Video>,
+	/// Each program track's share of the connection's bandwidth, by name: a
+	/// published scene's prefixed with its name and a slash.
+	pub grants: BTreeMap<String, Option<Rate>>,
+	/// Sources whose stalled picture or sound a live broadcast carries, what
+	/// stalled, and which broadcasts carry it.
+	pub stalled: Vec<(String, Stall, Live)>,
+	/// Sources a live broadcast shows or plays that ended or failed, and
+	/// where.
+	pub stopped: Vec<(String, Status, Reach)>,
+	/// Browser sources a live broadcast shows whose pages are uploaded from
+	/// memory, why, and where they are shown.
+	pub uploaded: Vec<(String, Arc<str>, Live)>,
+}
+
+impl Local {
+	/// Whether anyone subscribes to any broadcast's video.
+	fn watched(&self) -> bool {
+		self.broadcasts.values().any(|video| video.watched)
+	}
+}
+
+/// Where a source's picture and sound reach live broadcasts.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Reach {
+	/// Where its picture is drawn.
+	pub shown: Live,
+	/// Where its sound is played.
+	pub heard: Live,
+}
+
+impl Reach {
+	/// Whether any live broadcast shows or plays it.
+	pub fn any(&self) -> bool {
+		self.shown.any() || self.heard.any()
+	}
+}
+
+/// The live broadcasts something reaches.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Live {
+	/// The program, the top layer and a stinger included.
+	pub program: bool,
+	/// Each published or recorded scene apart from program, by name.
+	pub scenes: Vec<String>,
+}
+
+impl Live {
+	/// Whether it reaches any.
+	pub fn any(&self) -> bool {
+		self.program || !self.scenes.is_empty()
+	}
+
+	/// The broadcasts as a sentence's subject, such as "the program and scene
+	/// `tall`", and whether that is more than one.
+	fn subject(&self) -> (String, bool) {
+		let program = self.program.then(|| "the program".to_string());
+		let scenes = self.scenes.iter().map(|name| format!("scene `{name}`"));
+		let parts: Vec<String> = program.into_iter().chain(scenes).collect();
+		let subject = match parts.split_last() {
+			Some((last, [])) => last.clone(),
+			Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+			None => String::new(),
+		};
+		(subject, parts.len() > 1)
+	}
+}
+
+/// What only the studio knows about one broadcast's video.
+#[derive(Debug, Default, Clone)]
+pub struct Video {
 	/// Program frames the encoder had no room for.
 	pub dropped: u64,
 	/// Program frames encoded.
 	pub encoded: u64,
-	/// Whether the program's canvas size should be encoding: always, or while
-	/// watched when on demand, and while its grant funds it.
+	/// Whether the full size should be encoding: always, or while watched
+	/// when on demand, and while its grant funds it.
 	pub encoding: bool,
-	/// Each program track's share of the connection's bandwidth, by name.
-	pub grants: BTreeMap<String, Option<Rate>>,
-	/// Whether anyone subscribes to the program video.
+	/// Whether anyone subscribes to the video.
 	pub watched: bool,
 	/// The encoder backend, once one opened.
 	pub encoder: Option<String>,
 	/// Why the output stopped, if it did.
 	pub failed: Option<String>,
-	/// Sources the program shows or plays that stopped delivering, and what.
-	pub stalled: Vec<(String, Stall)>,
-	/// Sources the program shows or plays that ended or failed.
-	pub stopped: Vec<(String, Status)>,
+	/// Which video this is: a scene published again under its name counts
+	/// afresh, as another.
+	pub generation: u64,
 }
 
 /// What the studio publishes, for grading its delivery.
 pub struct Publisher {
-	/// The broadcast's path and the instance it was announced with.
-	pub observer: Observer,
-	pub catalog: moq_scene::publish::Catalog,
-	/// The catalog's clock, which maps a track's timestamps to the wall time
+	/// The program's broadcast.
+	pub main: Broadcast,
+	/// Each published scene's, while it is published.
+	pub scenes: Scenes,
+	/// The catalogs' clock, which maps a track's timestamps to the wall time
 	/// the program drew them.
 	pub clock: moq_mux::Clock,
-	/// Each relay the broadcast goes to, the preferred first.
+	/// Each relay the broadcasts go to, the preferred first.
 	pub relays: Vec<Link>,
-	pub feedback: Feedback,
-	pub watching: Watching,
 	/// Where the sources keep their own tracks, for what those wrote.
 	pub sources: moq_scene::publish::Publish,
+}
+
+/// One broadcast, graded: what it lists, and what its viewers and
+/// the relays say of it.
+#[derive(Clone)]
+pub struct Broadcast {
+	/// Its path and the instance it was announced with.
+	pub observer: Observer,
+	pub catalog: moq_scene::publish::Catalog,
+	pub feedback: Feedback,
+	pub watching: Watching,
+	/// Read for as long as any clone is held.
+	followers: Arc<Followers>,
+}
+
+impl Broadcast {
+	/// Grade the broadcast `observer` names, which `catalog` lists, reading
+	/// its viewers' feedback beneath it and the relays' count of who watches
+	/// it from `reports`, until the last clone drops. The catalog must solicit
+	/// that feedback, as [`solicit`] has it.
+	pub fn follow(
+		observer: Observer,
+		catalog: moq_scene::publish::Catalog,
+		reports: &moq_net::origin::Consumer,
+	) -> anyhow::Result<Self> {
+		let (_, viewers) = echo(&observer.path)?;
+		let feedback = Feedback::default();
+		let watching = Watching::default();
+		let followers = Followers(vec![
+			tokio::spawn(log(
+				"viewer feedback",
+				feedback.clone().follow(reports.clone(), viewers),
+			)),
+			tokio::spawn(log(
+				"relay stats",
+				watching.clone().follow(reports.clone(), observer.path.clone()),
+			)),
+		]);
+		Ok(Self {
+			observer,
+			catalog,
+			feedback,
+			watching,
+			followers: Arc::new(followers),
+		})
+	}
+}
+
+/// Have the broadcast at `path`, which `catalog` lists, ask its viewers for
+/// feedback beneath it.
+pub fn solicit(catalog: &mut moq_scene::publish::Catalog, path: &moq_net::Path) -> anyhow::Result<()> {
+	let (echo, _) = echo(path)?;
+	let mut section = catalog.modify()?;
+	section.echo = Some(hang::catalog::Echo::new(echo));
+	section.commit()?;
+	Ok(())
+}
+
+/// Tasks that stop when dropped.
+struct Followers(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for Followers {
+	fn drop(&mut self) {
+		for task in &self.0 {
+			task.abort();
+		}
+	}
+}
+
+/// Run a background reader, logging why it stopped.
+async fn log(what: &'static str, task: impl Future<Output = anyhow::Result<()>>) {
+	if let Err(err) = task.await {
+		tracing::warn!(%err, "stopped reading {what}");
+	}
+}
+
+/// The published scenes' broadcasts graded, by scene name, shared with what
+/// publishes them.
+#[derive(Clone)]
+pub struct Scenes {
+	graded: Arc<Mutex<BTreeMap<String, Broadcast>>>,
+	/// Where viewers' reports and the relays' stats arrive.
+	reports: moq_net::origin::Consumer,
+	/// Where their readers run, rather than on the thread that publishes one,
+	/// such as the program clock's.
+	runtime: tokio::runtime::Handle,
+}
+
+impl Scenes {
+	/// Published scenes graded from what arrives on `reports`, read on the
+	/// tokio runtime this is called inside.
+	pub fn new(reports: moq_net::origin::Consumer) -> Self {
+		Self {
+			graded: Arc::default(),
+			reports,
+			runtime: tokio::runtime::Handle::current(),
+		}
+	}
+
+	/// Grade scene `name`'s broadcast, which `observer` names and `catalog`
+	/// lists, as [`Broadcast::follow`] does, until the returned handle drops.
+	pub fn follow(
+		&self,
+		name: &str,
+		observer: Observer,
+		catalog: moq_scene::publish::Catalog,
+	) -> anyhow::Result<Graded> {
+		let broadcast = {
+			let _runtime = self.runtime.enter();
+			Broadcast::follow(observer, catalog, &self.reports)?
+		};
+		let followers = broadcast.followers.clone();
+		self.graded.lock().unwrap().insert(name.to_string(), broadcast);
+		Ok(Graded {
+			graded: self.graded.clone(),
+			name: name.to_string(),
+			followers,
+		})
+	}
+
+	fn snapshot(&self) -> Vec<(String, Broadcast)> {
+		let graded = self.graded.lock().unwrap();
+		graded
+			.iter()
+			.map(|(name, broadcast)| (name.clone(), broadcast.clone()))
+			.collect()
+	}
+}
+
+/// A published scene's broadcast being graded, until dropped.
+pub struct Graded {
+	graded: Arc<Mutex<BTreeMap<String, Broadcast>>>,
+	name: String,
+	/// Its readers, which tell it from a scene published again under its name
+	/// before it ended.
+	followers: Arc<Followers>,
+}
+
+impl Drop for Graded {
+	fn drop(&mut self) {
+		let mut graded = self.graded.lock().unwrap();
+		let ours = graded.get(&self.name);
+		if ours.is_some_and(|broadcast| Arc::ptr_eq(&broadcast.followers, &self.followers)) {
+			graded.remove(&self.name);
+		}
+	}
 }
 
 /// The connection to one relay.
@@ -277,16 +506,23 @@ impl Sampler {
 			.map(|previous| now.saturating_duration_since(previous.at));
 
 		let mut report = Report::default();
-		let mut graded = Graded::default();
+		// Each broadcast's viewers, as graded, beside `report.broadcasts`.
+		let mut watched = Vec::new();
 		let (mut current, mut sources) = (None, None);
 		let mut serving = None;
 		if let Some(publisher) = &self.publisher {
 			report.relays = publisher.relays.iter().map(relay).collect();
 			serving = report.relays.iter().position(|relay| relay.state == State::Connected);
 			let link = serving.map(|index| &publisher.relays[index]);
+			let extras = publisher.scenes.snapshot().into_iter();
+			let broadcasts: Vec<(Option<String>, Broadcast)> = std::iter::once((None, publisher.main.clone()))
+				.chain(extras.map(|(name, broadcast)| (Some(name), broadcast)))
+				.collect();
+			// Every broadcast's tracks share the connection, so the uplink is graded
+			// on all of them.
 			let ours = health::Report::new(
-				publisher.observer.clone(),
-				snapshot(publisher, link.map(|link| &link.monitor)),
+				publisher.main.observer.clone(),
+				snapshot(&broadcasts, link.map(|link| &link.monitor)),
 			);
 			// Another relay's link counted its transport from another start.
 			let previous_ours = previous
@@ -294,42 +530,85 @@ impl Sampler {
 				.filter(|previous| previous.serving == serving)
 				.and_then(|previous| previous.report.as_ref());
 			let graded_ours = self.grade(&ours, previous_ours.zip(interval));
-			report.uplink = uplink(&ours.snapshot, &graded_ours, local.watched);
+			report.uplink = uplink(&ours.snapshot, &graded_ours, local.watched());
 			report.uplink.relay = link.map(|link| link.endpoint.clone());
-			graded.publisher = Some(graded_ours);
 			// Graded apart from the program's, so their media stays out of the
 			// uplink's; see [`Uplink::media`].
 			let mut snapshot = hang::stats::Snapshot::default();
 			snapshot.renditions = publisher.sources.stats();
-			let theirs = health::Report::new(publisher.observer.clone(), snapshot);
+			let theirs = health::Report::new(publisher.main.observer.clone(), snapshot);
 			let previous_theirs = previous.as_ref().and_then(|previous| previous.sources.as_ref());
-			graded.sources = Some(self.grade(&theirs, previous_theirs.zip(interval)));
-			graded.viewers = publisher.feedback.grade(now, &self.thresholds);
-			report.viewers.unread = publisher.feedback.unread();
-			report.viewers.watching = publisher.watching.get();
-			let listed = Listed {
-				program: publisher.catalog.snapshot(),
-				sources: publisher.sources.catalog(),
-				grants: &local.grants,
-			};
-			report.tracks = tracks(&listed, &publisher.clock, &graded);
-			report.viewers.reports = viewers(publisher, &graded.viewers);
+			let graded_theirs = self.grade(&theirs, previous_theirs.zip(interval));
+
+			for (name, broadcast) in broadcasts {
+				let graded = broadcast.feedback.grade(now, &self.thresholds);
+				let listed = Listed {
+					renditions: renditions(&broadcast.catalog.snapshot()).collect(),
+					prefix: prefix(name.as_deref()),
+					source: None,
+					sent: &graded_ours,
+					viewers: &graded,
+					grants: &local.grants,
+				};
+				report.broadcasts.push(Published {
+					viewers: Viewers {
+						watching: broadcast.watching.get(),
+						reports: viewers(&graded, &publisher.clock),
+						unread: broadcast.feedback.unread(),
+					},
+					tracks: tracks(&listed, &publisher.clock),
+					name,
+				});
+				watched.push(graded);
+			}
+			let listed = publisher.sources.catalog();
+			for (name, catalog) in &listed.ext.studio.sources {
+				let listed = Listed {
+					renditions: renditions(catalog).collect(),
+					prefix: String::new(),
+					source: Some(name),
+					sent: &graded_theirs,
+					viewers: &[],
+					grants: &local.grants,
+				};
+				report.sources.extend(tracks(&listed, &publisher.clock));
+			}
 			current = Some(ours);
 			sources = Some(theirs);
 		}
 
-		let drops = previous.as_ref().map(|previous| Drops {
-			drawn: local.rendered.saturating_sub(previous.local.rendered),
-			dropped: local.dropped.saturating_sub(previous.local.dropped),
-			encoded: local.encoded.saturating_sub(previous.local.encoded),
+		let drops = previous
+			.as_ref()
+			.map(|previous| {
+				let drawn = local.rendered.saturating_sub(previous.local.rendered);
+				let broadcasts = local.broadcasts.iter();
+				broadcasts
+					.filter_map(|(name, video)| {
+						let before = previous.local.broadcasts.get(name)?;
+						if before.generation != video.generation {
+							return None;
+						}
+						let drops = Drops {
+							drawn,
+							dropped: video.dropped.saturating_sub(before.dropped),
+							encoded: video.encoded.saturating_sub(before.encoded),
+						};
+						Some((name.clone(), drops))
+					})
+					.collect()
+			})
+			.unwrap_or_default();
+		let seen = report.broadcasts.iter().zip(&watched).map(|(broadcast, viewers)| Seen {
+			name: broadcast.name.as_deref(),
+			viewers,
+			tracks: &broadcast.tracks,
 		});
 		report.problems = problems(&Facts {
 			relays: &report.relays,
 			local: &local,
 			drops,
 			uplink: &report.uplink,
-			viewers: &graded.viewers,
-			labels: &report.tracks,
+			broadcasts: seen.collect(),
 			thresholds: &self.thresholds,
 		});
 
@@ -376,11 +655,27 @@ fn relay(link: &Link) -> Relay {
 	}
 }
 
-/// What the studio's tracks have written, and the transport of the link
-/// `monitor` watches.
-fn snapshot(publisher: &Publisher, monitor: Option<&moq_tokio::connection::Monitor>) -> hang::stats::Snapshot {
+/// What a published scene's tracks are graded under, before each ID, since
+/// two broadcasts can list the same one: its name and a slash, as its grants
+/// are listed; nothing for the program's.
+fn prefix(scene: Option<&str>) -> String {
+	scene.map(|name| format!("{name}/")).unwrap_or_default()
+}
+
+/// What every broadcast's tracks have written, each graded under its
+/// [`prefix`], and the transport of the link `monitor` watches.
+fn snapshot(
+	broadcasts: &[(Option<String>, Broadcast)],
+	monitor: Option<&moq_tokio::connection::Monitor>,
+) -> hang::stats::Snapshot {
 	let mut snapshot = hang::stats::Snapshot::default();
-	snapshot.renditions = publisher.catalog.stats();
+	for (name, broadcast) in broadcasts {
+		let prefix = prefix(name.as_deref());
+		let renditions = broadcast.catalog.stats().into_iter();
+		snapshot
+			.renditions
+			.extend(renditions.map(|(id, rendition)| (format!("{prefix}{id}"), rendition)));
+	}
 	if let Some(stats) = monitor.and_then(moq_tokio::connection::Monitor::stats) {
 		snapshot.transport.rtt = stats.rtt;
 		snapshot.transport.rate = stats.estimated_send_rate.map(Rate::as_bps);
@@ -424,85 +719,120 @@ fn uplink(snapshot: &hang::stats::Snapshot, graded: &Health, watched: bool) -> U
 	}
 }
 
-/// What the studio's catalogs list now.
+/// What one catalog lists now, to grade each of its tracks.
 struct Listed<'a> {
-	/// The program's broadcast.
-	program: hang::Catalog<moq_scene::publish::Ext>,
-	/// The sources' local one, nesting each source's catalog.
-	sources: hang::Catalog<moq_scene::publish::Ext>,
+	/// Each video and audio rendition, as [`renditions`] reads them.
+	renditions: Vec<Rendition>,
+	/// What its tracks are graded and granted under, before each ID.
+	prefix: String,
+	/// The source whose own catalog it is, or `None` for a broadcast's.
+	source: Option<&'a String>,
+	/// What its tracks wrote, as graded.
+	sent: &'a Health,
+	/// Its viewers, as graded: a broadcast's alone.
+	viewers: &'a [GradedViewer],
 	/// Each program track's share of the connection, by name.
 	grants: &'a BTreeMap<String, Option<Rate>>,
 }
 
-/// Each media track `listed`, the program's and then each source's, with
-/// what it sent and what its viewers received. A source's stills carry no
-/// media to grade, so they are left out.
-fn tracks(listed: &Listed, clock: &moq_mux::Clock, graded: &Graded) -> Vec<Track> {
-	let program =
-		renditions(&listed.program).map(|(id, label, enabled)| (None, id, label, enabled, graded.publisher.as_ref()));
-	let sources = listed.sources.ext.studio.sources.iter().flat_map(|(name, catalog)| {
-		renditions(catalog).map(move |(id, label, enabled)| (Some(name), id, label, enabled, graded.sources.as_ref()))
-	});
-	program
-		.chain(sources)
-		.map(|(source, id, label, enabled, sent)| {
-			let ours = sent.and_then(|health| health.renditions.get(id));
-			let interval = sent.and_then(|health| health.interval);
-			// A source's track is in the local broadcast, whose names can repeat
-			// the program's, and no relay viewer or grant reaches it.
-			let program = source.is_none();
-			let mut track = Track {
-				source: source.cloned(),
-				id: id.clone(),
-				label,
-				granted: listed.grants.get(id).copied().flatten().filter(|_| program),
-				enabled,
-				sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
-				framerate: ours
-					.and_then(|rendition| rendition.frames)
-					.zip(interval)
-					.map(|(frames, interval)| frames as f64 / interval.as_secs_f64()),
-				viewers: 0,
-				received: None,
-				verdict: Verdict::Unknown,
-				latency: None,
-			};
-			for viewer in graded.viewers.iter().filter(|_| program) {
-				let Some(health) = &viewer.health else { continue };
-				let Some(rendition) = health.renditions.get(id) else {
-					continue;
+/// Each media track `listed`, with what it sent and what its viewers
+/// received. A source's stills carry no media to grade, so they are left out.
+fn tracks(listed: &Listed, clock: &moq_mux::Clock) -> Vec<Track> {
+	listed
+		.renditions
+		.iter()
+		.map(
+			|Rendition {
+			     id,
+			     label,
+			     enabled,
+			     main,
+			 }| {
+				// One listed by reference to the program's broadcast, as a published
+				// scene lists the audio, is graded and granted there.
+				let graded = match main {
+					Some(track) => track.clone(),
+					None => format!("{}{id}", listed.prefix),
 				};
-				track.viewers += 1;
-				track.verdict = track.verdict.max(rendition.verdict);
-				if let Some(bitrate) = rendition.bitrate.map(Rate::from_bps) {
-					track.received = Some(track.received.map_or(bitrate, |received| received.min(bitrate)));
+				let ours = listed.sent.renditions.get(&graded);
+				let interval = listed.sent.interval;
+				// A source's track is in the local broadcast, whose names can repeat
+				// the program's, and no relay viewer or grant reaches it.
+				let program = listed.source.is_none();
+				let mut track = Track {
+					source: listed.source.cloned(),
+					id: id.clone(),
+					label: label.clone(),
+					granted: listed.grants.get(&graded).copied().flatten().filter(|_| program),
+					enabled: *enabled,
+					sent: ours.and_then(|rendition| rendition.bitrate).map(Rate::from_bps),
+					framerate: ours
+						.and_then(|rendition| rendition.frames)
+						.zip(interval)
+						.map(|(frames, interval)| frames as f64 / interval.as_secs_f64()),
+					viewers: 0,
+					received: None,
+					verdict: Verdict::Unknown,
+					latency: None,
+				};
+				for viewer in listed.viewers {
+					let Some(health) = &viewer.health else { continue };
+					let Some(rendition) = health.renditions.get(id) else {
+						continue;
+					};
+					track.viewers += 1;
+					track.verdict = track.verdict.max(rendition.verdict);
+					if let Some(bitrate) = rendition.bitrate.map(Rate::from_bps) {
+						track.received = Some(track.received.map_or(bitrate, |received| received.min(bitrate)));
+					}
+					let latency = viewer.latency(id, clock);
+					track.latency = track.latency.max(latency);
 				}
-				let latency = viewer.latency(id, clock);
-				track.latency = track.latency.max(latency);
-			}
-			track
-		})
+				track
+			},
+		)
 		.collect()
+}
+
+/// One video or audio rendition a catalog lists.
+struct Rendition {
+	id: String,
+	/// What it carries, such as `video H.264 1920x1080`.
+	label: String,
+	enabled: bool,
+	/// Its track in the main broadcast, when listed there by reference: the
+	/// only broadcast the studio's catalogs refer to.
+	main: Option<String>,
 }
 
 /// Each video and audio rendition `catalog` lists, by ID, with what it
 /// carries and whether it is enabled.
-fn renditions<E>(catalog: &hang::Catalog<E>) -> impl Iterator<Item = (&String, String, bool)> {
-	let video = catalog.video.renditions.iter().map(|(id, config)| {
+fn renditions<E>(catalog: &hang::Catalog<E>) -> impl Iterator<Item = Rendition> {
+	let main = |id: &String, broadcast: bool, track: &Option<String>| {
+		broadcast.then(|| track.clone().unwrap_or_else(|| id.clone()))
+	};
+	let video = catalog.video.renditions.iter().map(move |(id, config)| {
 		let size = match (config.coded_width, config.coded_height) {
 			(Some(width), Some(height)) => format!(" {width}x{height}"),
 			_ => String::new(),
 		};
-		(id, format!("video {}{size}", config.codec), config.enabled)
+		Rendition {
+			id: id.clone(),
+			label: format!("video {}{size}", config.codec),
+			enabled: config.enabled,
+			main: main(id, config.broadcast.is_some(), &config.track),
+		}
 	});
-	let audio = catalog.audio.renditions.iter().map(|(id, config)| {
-		let label = format!("audio {} {} ch", config.codec, config.channel_count);
-		(id, label, config.enabled)
+	let audio = catalog.audio.renditions.iter().map(move |(id, config)| Rendition {
+		id: id.clone(),
+		label: format!("audio {} {} ch", config.codec, config.channel_count),
+		enabled: config.enabled,
+		main: main(id, config.broadcast.is_some(), &config.track),
 	});
 	video.chain(audio)
 }
 
-fn viewers(publisher: &Publisher, graded: &[GradedViewer]) -> Vec<Viewer> {
+fn viewers(graded: &[GradedViewer], clock: &moq_mux::Clock) -> Vec<Viewer> {
 	graded
 		.iter()
 		.map(|viewer| {
@@ -515,7 +845,7 @@ fn viewers(publisher: &Publisher, graded: &[GradedViewer]) -> Vec<Viewer> {
 					snapshot
 						.renditions
 						.keys()
-						.filter_map(|id| viewer.latency(id, &publisher.clock))
+						.filter_map(|id| viewer.latency(id, clock))
 						.max()
 				}),
 				playout: current.and_then(|snapshot| {
@@ -529,16 +859,6 @@ fn viewers(publisher: &Publisher, graded: &[GradedViewer]) -> Vec<Viewer> {
 			}
 		})
 		.collect()
-}
-
-/// The grades of one interval.
-#[derive(Default)]
-struct Graded {
-	/// The program's tracks and the uplink.
-	publisher: Option<Health>,
-	/// The sources' own tracks.
-	sources: Option<Health>,
-	viewers: Vec<GradedViewer>,
 }
 
 /// One viewer's latest report and its grade.
@@ -573,12 +893,30 @@ struct Drops {
 struct Facts<'a> {
 	relays: &'a [Relay],
 	local: &'a Local,
-	drops: Option<Drops>,
+	/// Each broadcast's frames over the last interval, once there was
+	/// one.
+	drops: BTreeMap<Option<String>, Drops>,
 	uplink: &'a Uplink,
-	viewers: &'a [GradedViewer],
-	/// The tracks, for naming one a viewer reports on.
-	labels: &'a [Track],
+	/// What each broadcast's viewers report, the program's first.
+	broadcasts: Vec<Seen<'a>>,
 	thresholds: &'a Thresholds,
+}
+
+/// One broadcast's viewers, as graded.
+struct Seen<'a> {
+	/// The published scene's name, or `None` for the program's.
+	name: Option<&'a str>,
+	viewers: &'a [GradedViewer],
+	/// Its tracks, for naming one a viewer reports on.
+	tracks: &'a [Track],
+}
+
+/// `cause` said of the broadcast `scene` names: a published scene's names it.
+fn on(scene: Option<&str>, cause: String) -> String {
+	let Some(name) = scene else { return cause };
+	let mut chars = cause.chars();
+	let first = chars.next().map(|first| first.to_lowercase().to_string());
+	format!("On scene `{name}`, {}{}", first.unwrap_or_default(), chars.as_str())
 }
 
 /// Name each problem the facts show, worst first.
@@ -614,54 +952,91 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 			(State::Connected, _) => {}
 		}
 	}
-	if let Some(failed) = &local.failed {
-		add(Verdict::Unhealthy, format!("The output stopped: {failed}."));
+	for (name, video) in &local.broadcasts {
+		if let Some(failed) = &video.failed {
+			add(
+				Verdict::Unhealthy,
+				on(name.as_deref(), format!("The output stopped: {failed}.")),
+			);
+		}
 	}
 
-	for (name, stall) in &local.stalled {
+	// A clause saying what `live` does instead, as a verb that agrees with it.
+	let clause = |live: &Live, one: &str, many: &str, rest: &str| {
+		let (subject, plural) = live.subject();
+		format!("{subject} {} {rest}", if plural { many } else { one })
+	};
+	for (name, stall, live) in &local.stalled {
 		let instead = match stall {
-			Stall::Picture(_) => "repeats its last one",
-			Stall::Sound(_) => "plays silence for it",
+			Stall::Picture(_) => clause(live, "repeats", "repeat", "its last one"),
+			Stall::Sound(_) => clause(live, "plays", "play", "silence for it"),
 		};
 		add(
 			Verdict::Unhealthy,
-			format!(
-				"Source `{name}` stalled: {}, so the program {instead}.",
-				without(*stall)
-			),
+			format!("Source `{name}` stalled: {}, so {instead}.", without(*stall)),
 		);
 	}
-	for (name, status) in &local.stopped {
+	for (name, status, reach) in &local.stopped {
 		match status {
-			Status::Ended => add(
-				Verdict::Degraded,
-				format!(
-					"Source `{name}` played to its end, so the program holds its last picture and plays no sound for it."
-				),
-			),
+			Status::Ended => {
+				let Reach { shown, heard } = reach;
+				let instead = if shown == heard {
+					let (subject, many) = shown.subject();
+					let (hold, play) = if many { ("hold", "play") } else { ("holds", "plays") };
+					format!("{subject} {hold} its last picture and {play} no sound for it")
+				} else {
+					let hold = shown.any().then(|| clause(shown, "holds", "hold", "its last picture"));
+					let silent = heard.any().then(|| clause(heard, "plays", "play", "no sound for it"));
+					let parts: Vec<String> = hold.into_iter().chain(silent).collect();
+					parts.join(" and ")
+				};
+				add(
+					Verdict::Degraded,
+					format!("Source `{name}` played to its end, so {instead}."),
+				);
+			}
 			Status::Failed(reason) => add(Verdict::Unhealthy, format!("Source `{name}` failed: {reason}.")),
 			_ => {}
 		}
 	}
+	for (name, why, live) in &local.uploaded {
+		let (subject, many) = live.subject();
+		let show = if many { "show" } else { "shows" };
+		add(
+			Verdict::Degraded,
+			format!(
+				"Source `{name}`, which {subject} {show}, is uploaded from memory every frame rather than copied on the GPU: {why}."
+			),
+		);
+	}
 
-	if let Some(drops) = facts.drops
-		&& local.encoding
-		&& local.failed.is_none()
-	{
-		let encoder = local.encoder.as_deref().unwrap_or("the encoder");
+	for (name, drops) in &facts.drops {
+		let Some(video) = local.broadcasts.get(name) else {
+			continue;
+		};
+		if !video.encoding || video.failed.is_some() {
+			continue;
+		}
+		let encoder = video.encoder.as_deref().unwrap_or("the encoder");
 		let share = ratio(drops.dropped, drops.drawn);
 		let limits = &facts.thresholds.publisher.skipped;
-		if drops.drawn > 0 && drops.encoded == 0 && drops.dropped == 0 && local.encoder.is_some() {
+		if drops.drawn > 0 && drops.encoded == 0 && drops.dropped == 0 && video.encoder.is_some() {
 			add(
 				Verdict::Unhealthy,
-				format!("The encoder is stuck: {encoder} produced nothing in the last second."),
+				on(
+					name.as_deref(),
+					format!("The encoder is stuck: {encoder} produced nothing in the last second."),
+				),
 			);
 		} else if let Some(share) = share {
 			add(
 				grade_above(share, limits.degraded, limits.unhealthy),
-				format!(
-					"The encoder is behind: {encoder} had no room for {} of {} program frames in the last second.",
-					drops.dropped, drops.drawn
+				on(
+					name.as_deref(),
+					format!(
+						"The encoder is behind: {encoder} had no room for {} of {} program frames in the last second.",
+						drops.dropped, drops.drawn
+					),
 				),
 			);
 		}
@@ -701,20 +1076,22 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		);
 	}
 
-	viewer_problems(facts, &mut add);
+	for seen in &facts.broadcasts {
+		viewer_problems(uplink, seen, &mut |verdict, cause| add(verdict, on(seen.name, cause)));
+	}
 
 	problems.sort_by_key(|problem| std::cmp::Reverse(problem.verdict));
 	problems
 }
 
-/// What viewers' reports show, one problem per kind of trouble across them.
-fn viewer_problems(facts: &Facts<'_>, add: &mut impl FnMut(Verdict, String)) {
-	let reporting = facts.viewers.iter().filter(|viewer| viewer.health.is_some()).count();
+/// What one broadcast's viewers report, one problem per kind of trouble across
+/// them, beside the `uplink` they share.
+fn viewer_problems(uplink: &Uplink, seen: &Seen<'_>, add: &mut impl FnMut(Verdict, String)) {
+	let reporting = seen.viewers.iter().filter(|viewer| viewer.health.is_some()).count();
 	// A congested or lossy uplink starves every viewer, and one measured
 	// clear of both leaves the blame with the viewers' own links. With either
 	// unmeasured, as headroom is under a controller without an estimate, the
 	// cause goes unnamed.
-	let uplink = facts.uplink;
 	let (headroom, loss) = (uplink.grade(Input::Headroom), uplink.grade(Input::Loss));
 	let cause = if headroom >= Verdict::Degraded || loss >= Verdict::Degraded {
 		": the uplink cannot keep up"
@@ -727,7 +1104,7 @@ fn viewer_problems(facts: &Facts<'_>, add: &mut impl FnMut(Verdict, String)) {
 	// Each input's worst grade, how many viewers it troubles, and the track
 	// the worst grade is on.
 	let mut worst: Vec<(Input, Verdict, usize, Option<&str>)> = Vec::new();
-	for viewer in facts.viewers {
+	for viewer in seen.viewers {
 		let Some(health) = &viewer.health else { continue };
 		let transport = health.transport.evidence.iter().map(|evidence| (evidence, None));
 		let renditions = health.renditions.iter().flat_map(|(id, rendition)| {
@@ -761,7 +1138,7 @@ fn viewer_problems(facts: &Facts<'_>, add: &mut impl FnMut(Verdict, String)) {
 	}
 
 	let track = |id: Option<&str>| {
-		id.and_then(|id| facts.labels.iter().find(|track| track.id == id))
+		id.and_then(|id| seen.tracks.iter().find(|track| track.id == id))
 			.map_or_else(|| "the stream".to_string(), Track::name)
 	};
 	for (input, verdict, count, id) in worst {
@@ -859,51 +1236,35 @@ impl Feedback {
 		let mut readers = BTreeMap::<moq_net::Path, Reader>::new();
 		let mut unread = 0usize;
 		while let Some(event) = announced.next().await {
-			let (announce, restart) = match event {
-				moq_net::announce::Event::Start(announce) => (announce, false),
-				moq_net::announce::Event::Restart(announce) => (announce, true),
-				moq_net::announce::Event::End(announce) => {
+			match event {
+				moq_net::announce::Event::Present(announce) => {
+					let path = announce.prefix;
+					let Some(name) = name(&prefix, &path).filter(|_| hang::echo::is_echo(&path)) else {
+						continue;
+					};
+					if readers.len() < MAX_VIEWERS {
+						let reader = self.read(origin.clone(), path.clone(), name);
+						readers.insert(path, reader);
+					} else {
+						unread += 1;
+					}
+				}
+				moq_net::announce::Event::Absent(announce) => {
 					if readers.remove(&announce.prefix).is_none() && hang::echo::is_echo(&announce.prefix) {
 						unread = unread.saturating_sub(1);
 					}
-					self.0.lock().unwrap().unread = unread;
-					continue;
 				}
-				// A takeover continues the same instance, and an update moves its route.
-				_ => continue,
-			};
-			let path = announce.prefix;
-			let Some(name) = name(&prefix, &path).filter(|_| hang::echo::is_echo(&path)) else {
-				continue;
-			};
-			// A new instance of a viewer being read replaces its reader; one not
-			// read was counted when it started.
-			let read = if restart {
-				readers.remove(&path).is_some()
-			} else if readers.len() < MAX_VIEWERS {
-				true
-			} else {
-				unread += 1;
-				false
-			};
-			if read {
-				let reader = self.read(
-					origin.clone(),
-					Observer::new(path.clone(), announce.route.instance),
-					name,
-				);
-				readers.insert(path, reader);
 			}
 			self.0.lock().unwrap().unread = unread;
 		}
 		Ok(())
 	}
 
-	/// Start reading the viewer `observer` names.
-	fn read(&self, origin: moq_net::origin::Consumer, observer: Observer, name: String) -> Reader {
+	/// Start reading the viewer at `path`, named `name`.
+	fn read(&self, origin: moq_net::origin::Consumer, path: moq_net::Path, name: String) -> Reader {
 		let slot = Slot::default();
 		self.0.lock().unwrap().slots.insert(name.clone(), slot.clone());
-		let task = tokio::spawn(read(origin, observer, slot.clone()));
+		let task = tokio::spawn(read(origin, path, slot.clone()));
 		Reader {
 			name,
 			slot,
@@ -949,27 +1310,65 @@ fn name(prefix: &moq_net::Path, path: &moq_net::Path) -> Option<String> {
 	name.as_str().strip_suffix(hang::echo::SUFFIX).map(str::to_string)
 }
 
-/// Keep the latest reports of the viewer `observer` names in `slot`, until
-/// its broadcast ends or the report cannot be read.
-async fn read(origin: moq_net::origin::Consumer, observer: Observer, slot: Slot) {
-	let read = async {
-		let broadcast = origin.request(&observer.path, observer.instance.clone()).await?;
-		let track = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
-		let mut config = moq_json::snapshot::consumer::Config::default();
-		config.max_size = Some(MAX_REPORT);
-		let mut reports = moq_json::snapshot::Consumer::<hang::echo::Snapshot>::new(track, config);
-		while let Some(report) = reports.latest().await? {
-			let report = health::Report::new(observer.clone(), report.value);
-			let mut reports = slot.lock().unwrap();
-			reports.previous = reports.current.take();
-			reports.current = Some((report, kio::clock::now()));
-		}
-		anyhow::Ok(())
+/// Keep the latest reports of the viewer at `path` in `slot`, from each
+/// instance that serves it in turn, until dropped. A new instance starts its
+/// reports afresh.
+async fn read(origin: moq_net::origin::Consumer, path: moq_net::Path, slot: Slot) {
+	let mut following = match origin.follow(&path, None) {
+		Ok(following) => following,
+		Err(err) => return failed(&slot, &path, err.into()),
 	};
-	if let Err(err) = read.await {
-		tracing::debug!(%err, viewer = %observer.path, "stopped reading feedback");
-		slot.lock().unwrap().error = Some(format!("{err:#}"));
+	let mut next = following.available().await;
+	loop {
+		let broadcast = match next {
+			Ok(Some(broadcast)) => broadcast,
+			// Offline until another instance serves the path.
+			Ok(None) => {
+				next = following.available().await;
+				continue;
+			}
+			// A closed origin answers every later call at once.
+			Err(err @ moq_net::Error::Closed) => return failed(&slot, &path, err.into()),
+			// The follow waits for the route to change before it asks again.
+			Err(err) => {
+				failed(&slot, &path, err.into());
+				next = following.available().await;
+				continue;
+			}
+		};
+		*slot.lock().unwrap() = Reports::default();
+		let observer = Observer::new(path.clone(), broadcast.info().instance.clone());
+		tokio::select! {
+			result = reports(&broadcast, observer, &slot) => {
+				if let Err(err) = result {
+					failed(&slot, &path, err);
+				}
+				next = following.available().await;
+			}
+			changed = following.available() => next = changed,
+		}
 	}
+}
+
+/// Keep the latest reports `broadcast` publishes in `slot`, until its track ends.
+async fn reports(broadcast: &moq_net::broadcast::Consumer, observer: Observer, slot: &Slot) -> anyhow::Result<()> {
+	let track = broadcast.track(hang::echo::TRACK)?;
+	let mut config = moq_json::snapshot::consumer::Config::default();
+	config.max_size = Some(MAX_REPORT);
+	let mut reports = moq_json::snapshot::Consumer::<hang::echo::Snapshot>::new(track, config);
+	while let Some(report) = reports.latest().await? {
+		let report = health::Report::new(observer.clone(), report.value);
+		let mut reports = slot.lock().unwrap();
+		reports.previous = reports.current.take();
+		reports.current = Some((report, kio::clock::now()));
+	}
+	Ok(())
+}
+
+/// Record why reading the viewer at `path` stopped.
+fn failed(slot: &Slot, path: &moq_net::Path, err: anyhow::Error) {
+	tracing::debug!(%err, viewer = %path, "stopped reading feedback");
+	slot.lock().unwrap().error = Some(format!("{err:#}"));
 }
 
 /// A running feedback reader, which forgets its viewer when it stops.
@@ -1029,16 +1428,30 @@ fn watching(frame: &moq_stats::PrefixFrame) -> u64 {
 mod tests {
 	use super::*;
 
+	/// What the program's broadcast alone shows: `viewers` reporting on `tracks`.
 	fn facts<'a>(local: &'a Local, uplink: &'a Uplink, viewers: &'a [GradedViewer], tracks: &'a [Track]) -> Facts<'a> {
 		static THRESHOLDS: std::sync::LazyLock<Thresholds> = std::sync::LazyLock::new(Thresholds::default);
 		Facts {
 			relays: &[],
 			local,
-			drops: None,
+			drops: BTreeMap::new(),
 			uplink,
-			viewers,
-			labels: tracks,
+			broadcasts: vec![Seen {
+				name: None,
+				viewers,
+				tracks,
+			}],
 			thresholds: &THRESHOLDS,
+		}
+	}
+
+	/// A studio whose program video is `main`, and the published scene
+	/// `tall`'s, if any, `tall`.
+	fn local(main: Video, tall: Option<Video>) -> Local {
+		let tall = tall.map(|video| (Some("tall".to_string()), video));
+		Local {
+			broadcasts: std::iter::once((None, main)).chain(tall).collect(),
+			..Default::default()
 		}
 	}
 
@@ -1103,10 +1516,7 @@ mod tests {
 		let sample = health::Sample::new(&current, Duration::ZERO).with_previous(&previous, INTERVAL);
 		let graded = health::publisher(&sample, &Thresholds::default());
 
-		let mut local = Local {
-			watched: true,
-			..Default::default()
-		};
+		let local = Local::default();
 		let mut watched = uplink(&current.snapshot, &graded, true);
 		watched.relay = Some("https://a".into());
 		assert_eq!(watched.verdict, Verdict::Unhealthy);
@@ -1116,51 +1526,82 @@ mod tests {
 				"The uplink to the relay https://a is congested: the connection carries about 2.5 Mb/s and the stream needs 3.0 Mb/s."
 			]
 		);
-		local.watched = false;
 		let idle = uplink(&current.snapshot, &graded, false);
 		assert_eq!(idle.verdict, Verdict::Unknown);
 		assert!(problems(&facts(&local, &idle, &[], &[])).is_empty());
 	}
 
 	/// Program frames the encoder had no room for, and an encoder that
-	/// produces nothing at all, both blame the encoder by name.
+	/// produces nothing at all, both blame the encoder by name, on the broadcast
+	/// it encodes; one that stopped says why, and one not encoding is not
+	/// blamed.
 	#[test]
 	fn the_encoder_falling_behind_is_named() {
-		let local = Local {
+		let encoding = |encoder: &str| Video {
 			encoding: true,
-			encoder: Some("nvenc".into()),
+			encoder: Some(encoder.into()),
 			..Default::default()
 		};
+		let local = local(encoding("nvenc"), Some(encoding("vaapi")));
 		let uplink = Uplink::default();
 		let mut facts = facts(&local, &uplink, &[], &[]);
-		facts.drops = Some(Drops {
+		let drops = |dropped, encoded| Drops {
 			drawn: 30,
-			dropped: 3,
-			encoded: 27,
-		});
+			dropped,
+			encoded,
+		};
+		facts.drops = BTreeMap::from([(None, drops(3, 27)), (Some("tall".into()), drops(0, 0))]);
 		let problems = problems(&facts);
 		assert_eq!(problems[0].verdict, Verdict::Unhealthy);
 		assert_eq!(
-			problems[0].cause,
-			"The encoder is behind: nvenc had no room for 3 of 30 program frames in the last second."
+			causes(problems),
+			[
+				"The encoder is behind: nvenc had no room for 3 of 30 program frames in the last second.",
+				"On scene `tall`, the encoder is stuck: vaapi produced nothing in the last second.",
+			]
 		);
 
-		facts.drops = Some(Drops {
-			drawn: 30,
-			dropped: 0,
-			encoded: 0,
-		});
+		facts.drops = BTreeMap::from([(None, drops(0, 30)), (Some("tall".into()), drops(0, 30))]);
+		assert!(super::problems(&facts).is_empty());
+
+		let stopped = Video {
+			failed: Some("video: the encoder failed".into()),
+			..encoding("vaapi")
+		};
+		let local = super::tests::local(Video::default(), Some(stopped));
+		let mut facts = super::tests::facts(&local, &uplink, &[], &[]);
+		facts.drops = BTreeMap::from([(None, drops(0, 0)), (Some("tall".into()), drops(0, 0))]);
 		assert_eq!(
 			causes(super::problems(&facts)),
-			["The encoder is stuck: nvenc produced nothing in the last second."]
+			["On scene `tall`, the output stopped: video: the encoder failed."]
 		);
+	}
 
-		facts.drops = Some(Drops {
-			drawn: 30,
-			dropped: 0,
-			encoded: 30,
-		});
-		assert!(super::problems(&facts).is_empty());
+	/// A scene published again under its name counts its frames afresh,
+	/// rather than from the counters of the one before.
+	#[test]
+	fn a_scene_published_again_counts_afresh() {
+		let mut sampler = Sampler::new(None);
+		let start = kio::clock::now();
+		let mut sample = |seconds: u32, generation: u64| {
+			let tall = Video {
+				encoding: true,
+				encoder: Some("vaapi".into()),
+				encoded: if generation == 0 { 300 } else { 0 },
+				generation,
+				..Default::default()
+			};
+			let mut local = local(Video::default(), Some(tall));
+			local.rendered = u64::from(seconds) * 30;
+			causes(sampler.sample(start + INTERVAL * seconds, local).problems)
+		};
+		sample(10, 0);
+		let republished = sample(11, 1);
+		assert!(republished.is_empty(), "{republished:?}");
+		assert_eq!(
+			sample(12, 1),
+			["On scene `tall`, the encoder is stuck: vaapi produced nothing in the last second."]
+		);
 	}
 
 	/// Stalling viewers are blamed on their own links while the uplink is
@@ -1225,12 +1666,16 @@ mod tests {
 		health::publisher(&sample, &Thresholds::default())
 	}
 
-	/// Each source's media tracks are graded like the program's, after them and
-	/// by source name, from what the source wrote; a still has no media to
-	/// grade. A source's track stays in the studio, so no viewer report or
-	/// grant applies to it, even under a name the program's track shares.
+	/// Each broadcast's tracks are graded from what they wrote under the
+	/// broadcast's prefix, beside its own viewers, and each source's media
+	/// tracks the same way, by source name; a still has no media to grade. A
+	/// source's track stays in the studio, so no viewer report or grant
+	/// applies to it, and a published scene's tracks take its own grants and
+	/// viewers, though each can share a track name with the program's,
+	/// but the main broadcast's audio it lists by reference is graded where
+	/// the main broadcast writes it.
 	#[test]
-	fn source_tracks_are_graded_by_source() {
+	fn tracks_are_graded_by_broadcast_and_source() {
 		let video = |width: u32, height: u32| {
 			let codec: hang::catalog::VideoCodec = "avc3.42c01f".parse().unwrap();
 			let mut config = hang::catalog::VideoConfig::new(codec);
@@ -1238,81 +1683,171 @@ mod tests {
 			config.coded_height = Some(height);
 			config
 		};
-		let mut program = hang::Catalog::<moq_scene::publish::Ext>::default();
-		program.video.renditions.insert("0.avc3".into(), video(1920, 1080));
+		let mut main = hang::Catalog::<moq_scene::publish::Ext>::default();
+		main.video.renditions.insert("0.avc3".into(), video(1920, 1080));
 		let mut half = video(960, 540);
 		half.enabled = false;
-		program.video.renditions.insert("3.avc3".into(), half);
-		let mut camera = hang::Catalog::default();
+		main.video.renditions.insert("3.avc3".into(), half);
+		let opus = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		main.audio.renditions.insert("audio".into(), opus.clone());
+		let mut tall = hang::Catalog::<moq_scene::publish::Ext>::default();
+		tall.video.renditions.insert("0.avc3".into(), video(1080, 1920));
+		// The main broadcast's audio, listed by reference.
+		let mut shared = opus;
+		shared.broadcast = Some(moq_net::path::Relative::new("..").unwrap());
+		shared.track = Some("audio".into());
+		tall.audio.renditions.insert("audio".into(), shared);
+		let mut camera = hang::Catalog::<()>::default();
 		camera.video.renditions.insert("0.avc3".into(), video(1280, 720));
-		let mut logo = hang::Catalog::default();
+		let mut logo = hang::Catalog::<()>::default();
 		let png = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
 		logo.binary.tracks.insert("1.png".into(), png);
-		let mut local = hang::Catalog::<moq_scene::publish::Ext>::default();
-		let sources = &mut local.ext.studio.sources;
-		sources.insert("logo".into(), logo);
-		sources.insert("camera".into(), camera);
-		let grants = [("0.avc3".to_string(), Some(Rate::from_mbps(4)))].into();
-		let listed = Listed {
-			program,
-			sources: local,
-			grants: &grants,
-		};
+		let grants = [
+			("0.avc3".to_string(), Some(Rate::from_mbps(4))),
+			("tall/0.avc3".to_string(), Some(Rate::from_mbps(2))),
+		]
+		.into();
 
-		// 375 kB in a second is 3 Mb/s, and 125 kB is 1 Mb/s.
-		let graded = Graded {
-			publisher: Some(wrote(&[("0.avc3", 375_000)])),
-			sources: Some(wrote(&[("0.avc3", 125_000)])),
-			viewers: vec![stalling("alice", "0.avc3", Duration::from_millis(100))],
+		// 375 kB in a second is 3 Mb/s, 250 kB is 2 Mb/s, 125 kB is 1 Mb/s,
+		// and 16 kB is 128 kb/s.
+		let ours = wrote(&[("0.avc3", 375_000), ("tall/0.avc3", 250_000), ("audio", 16_000)]);
+		let theirs = wrote(&[("0.avc3", 125_000)]);
+		let main_viewers = [stalling("alice", "3.avc3", Duration::from_millis(100))];
+		let tall_viewers = [stalling("bob", "0.avc3", Duration::from_millis(100))];
+		let clock = moq_mux::Clock::new();
+		let broadcast = |catalog: &hang::Catalog<moq_scene::publish::Ext>, prefix: &str, viewers| {
+			let listed = Listed {
+				renditions: renditions(catalog).collect(),
+				prefix: prefix.into(),
+				source: None,
+				sent: &ours,
+				viewers,
+				grants: &grants,
+			};
+			tracks(&listed, &clock)
 		};
-		let tracks = tracks(&listed, &moq_mux::Clock::new(), &graded);
-		let rows: Vec<_> = tracks
+		let main = broadcast(&main, "", &main_viewers);
+		let tall = broadcast(&tall, "tall/", &tall_viewers);
+		let source = |name: &String, catalog: &hang::Catalog<()>| {
+			let listed = Listed {
+				renditions: renditions(catalog).collect(),
+				prefix: String::new(),
+				source: Some(name),
+				sent: &theirs,
+				viewers: &[],
+				grants: &grants,
+			};
+			tracks(&listed, &clock)
+		};
+		let sources: Vec<Track> = [("camera".to_string(), camera), ("logo".to_string(), logo)]
 			.iter()
+			.flat_map(|(name, catalog)| source(name, catalog))
+			.collect();
+
+		let rows: Vec<_> = main
+			.iter()
+			.chain(&tall)
+			.chain(&sources)
 			.map(|track| {
-				let granted = track.granted.map(rate);
 				(
 					track.source.as_deref(),
 					track.id.as_str(),
 					track.sent.map(rate),
-					granted,
+					track.granted.map(rate),
 					track.enabled,
+					track.viewers,
 				)
 			})
 			.collect();
 		assert_eq!(
 			rows,
 			[
-				(None, "0.avc3", Some("3.0 Mb/s".into()), Some("4.0 Mb/s".into()), true),
-				(None, "3.avc3", None, None, false),
-				(Some("camera"), "0.avc3", Some("1.0 Mb/s".into()), None, true),
+				(
+					None,
+					"0.avc3",
+					Some("3.0 Mb/s".into()),
+					Some("4.0 Mb/s".into()),
+					true,
+					0
+				),
+				(None, "3.avc3", None, None, false, 1),
+				(None, "audio", Some("128 kb/s".into()), None, true, 0),
+				(
+					None,
+					"0.avc3",
+					Some("2.0 Mb/s".into()),
+					Some("2.0 Mb/s".into()),
+					true,
+					1
+				),
+				(None, "audio", Some("128 kb/s".into()), None, true, 0),
+				(Some("camera"), "0.avc3", Some("1.0 Mb/s".into()), None, true, 0),
 			]
 		);
-		let camera = &tracks[2];
-		assert_eq!(camera.framerate, Some(30.0));
-		assert_eq!((camera.viewers, camera.verdict), (0, Verdict::Unknown));
-		assert_eq!((tracks[0].viewers, tracks[0].verdict), (1, Verdict::Unhealthy));
+		assert_eq!(sources[0].framerate, Some(30.0));
+		assert_eq!(tall[0].verdict, Verdict::Unhealthy);
 
 		let local = Local::default();
 		let uplink = Uplink::default();
+		let mut facts = facts(&local, &uplink, &main_viewers, &main);
+		facts.broadcasts.push(Seen {
+			name: Some("tall"),
+			viewers: &tall_viewers,
+			tracks: &tall,
+		});
 		assert_eq!(
-			causes(problems(&facts(&local, &uplink, &graded.viewers, &tracks))),
-			["1 of 1 viewers are stalling on video avc3.42c01f 1920x1080."]
+			causes(problems(&facts)),
+			[
+				"1 of 1 viewers are stalling on video avc3.42c01f 960x540.",
+				"On scene `tall`, 1 of 1 viewers are stalling on video avc3.42c01f 1080x1920.",
+			]
 		);
 	}
 
 	/// Problems list worst first: an unreachable relay and a frozen or silent
-	/// source above a slow round trip.
+	/// source above a slow round trip. A frozen, silent, ended, or uploaded
+	/// source names the broadcasts that show or play it, including a published
+	/// scene that alone plays it.
 	#[test]
 	fn problems_list_worst_first() {
+		let program = Live {
+			program: true,
+			scenes: Vec::new(),
+		};
+		let tall = Live {
+			program: false,
+			scenes: vec!["tall".into()],
+		};
+		let both = Live {
+			program: true,
+			scenes: vec!["tall".into(), "wide".into()],
+		};
+		let reach = |shown: &Live, heard: &Live| Reach {
+			shown: shown.clone(),
+			heard: heard.clone(),
+		};
 		let local = Local {
 			stalled: vec![
-				("camera".into(), Stall::Picture(Duration::from_secs(3))),
-				("mic".into(), Stall::Sound(Duration::from_secs(2))),
+				("camera".into(), Stall::Picture(Duration::from_secs(3)), program.clone()),
+				("logo".into(), Stall::Picture(Duration::from_secs(3)), tall.clone()),
+				("mic".into(), Stall::Sound(Duration::from_secs(2)), tall.clone()),
 			],
 			stopped: vec![
-				("intro".into(), Status::Ended),
-				("music".into(), Status::Failed("the file is gone".into())),
+				("intro".into(), Status::Ended, reach(&program, &program)),
+				("outro".into(), Status::Ended, reach(&both, &both)),
+				("clip".into(), Status::Ended, reach(&program, &tall)),
+				("bed".into(), Status::Ended, reach(&Live::default(), &tall)),
+				(
+					"music".into(),
+					Status::Failed("the file is gone".into()),
+					Reach::default(),
+				),
 			],
+			uploaded: vec![(
+				"chat".into(),
+				"there is no display to paint through".into(),
+				tall.clone(),
+			)],
 			..Default::default()
 		};
 		let uplink = Uplink {
@@ -1328,9 +1863,14 @@ mod tests {
 			[
 				"The relay https://a is unreachable (timed out), so nothing reaches viewers until a relay reconnects.",
 				"Source `camera` stalled: no new picture for 3 s, so the program repeats its last one.",
-				"Source `mic` stalled: no new sound for 2 s, so the program plays silence for it.",
+				"Source `logo` stalled: no new picture for 3 s, so scene `tall` repeats its last one.",
+				"Source `mic` stalled: no new sound for 2 s, so scene `tall` plays silence for it.",
 				"Source `music` failed: the file is gone.",
 				"Source `intro` played to its end, so the program holds its last picture and plays no sound for it.",
+				"Source `outro` played to its end, so the program, scene `tall` and scene `wide` hold its last picture and play no sound for it.",
+				"Source `clip` played to its end, so the program holds its last picture and scene `tall` plays no sound for it.",
+				"Source `bed` played to its end, so scene `tall` plays no sound for it.",
+				"Source `chat`, which scene `tall` shows, is uploaded from memory every frame rather than copied on the GPU: there is no display to paint through.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
 		);
@@ -1411,92 +1951,203 @@ mod tests {
 		}
 	}
 
-	/// A viewer's feedback is read as it arrives, grades the track it
-	/// reports, and times the track from the program clock to the viewer. The
-	/// viewer is forgotten when its broadcast ends.
-	#[tokio::test(start_paused = true)]
-	async fn viewer_feedback_times_each_track() {
-		let _ = moq_tokio::crypto::install_default();
-		let origin = moq_tokio::origin::spawn();
-		let publication = origin.create_broadcast("show").unwrap();
+	/// A broadcast at `path` on `origin` whose catalog lists one audio track,
+	/// soliciting feedback, and that track's ID.
+	fn listing(origin: &moq_net::origin::Producer, path: &str) -> (moq_scene::publish::Catalog, String, impl Sized) {
+		let publication = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
 		let mut broadcast = publication.broadcast().clone();
 		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
-		let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
+		let mut catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
 		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		let track = broadcast
 			.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		let _audio = catalog
+		let audio = catalog
 			.audio(
 				track,
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 				config,
 			)
 			.unwrap();
+		solicit(&mut catalog, &moq_net::Path::new(path).unwrap()).unwrap();
 		let id = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		(catalog, id, audio)
+	}
 
-		let path = moq_net::Path::new("show").unwrap();
-		let (_, prefix) = echo(&path).unwrap();
-		let feedback = Feedback::default();
-		let follow = tokio::spawn(feedback.clone().follow(origin.consume(), prefix));
-
-		// Connecting nowhere, so the connection only ever redials.
-		let client = moq_tokio::connect::Config::default().init(Default::default()).unwrap();
-		let connection = client.connect("https://127.0.0.1:1".parse::<url::Url>().unwrap());
-		let clock = catalog.clock();
-		let mut sampler = Sampler::new(Some(Publisher {
-			observer: Observer::new(path, None),
-			catalog: catalog.clone(),
-			clock: clock.clone(),
-			relays: vec![Link {
-				endpoint: "https://127.0.0.1:1".into(),
-				monitor: connection.monitor(),
-			}],
-			feedback: feedback.clone(),
-			watching: Watching::default(),
-			sources: moq_scene::publish::Publish::new(clock.clone(), moq_video::encode::Kind::Auto, Default::default())
-				.unwrap(),
-		}));
-
-		let alice = origin.create_broadcast("show/viewers/alice.echo").unwrap();
-		let track = alice.create_track(hang::echo::TRACK, None).unwrap();
+	/// A viewer `name` reporting under `prefix` that rendition `id`'s frame at
+	/// 20 s arrived 250 ms after the program drew it, by `clock`.
+	fn report(
+		origin: &moq_net::origin::Producer,
+		prefix: &str,
+		name: &str,
+		id: &str,
+		clock: &moq_mux::Clock,
+	) -> (
+		moq_net::origin::Route,
+		moq_json::snapshot::Producer<hang::echo::Snapshot>,
+	) {
+		let viewer = origin
+			.route(
+				format!("{prefix}/viewers/{name}.echo"),
+				moq_net::origin::RouteOptions::hidden(),
+			)
+			.unwrap();
+		let track = viewer.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 		let mut reports = moq_json::snapshot::Producer::<hang::echo::Snapshot>::new(track, Default::default());
-		alice.announce(Default::default()).unwrap();
-
+		viewer.announce().unwrap();
 		let timestamp = moq_net::Timestamp::from_millis(20_000).unwrap();
 		let wall = clock.wall_clock(timestamp).unwrap() + Duration::from_millis(250);
 		let mut report = hang::echo::Snapshot::default();
 		let mut rendition = hang::echo::Rendition::default();
 		rendition.frames = 50;
 		rendition.arrival = Some(hang::echo::Arrival::new(timestamp, wall));
-		report.renditions.insert(id.clone(), rendition);
+		report.renditions.insert(id.to_string(), rendition);
 		reports.update(&report).unwrap();
+		(viewer, reports)
+	}
 
-		let sampled = until(&mut sampler, |report| {
-			report
+	/// A viewer's feedback is read as it arrives, grades the track it
+	/// reports, and times the track from the program clock to the viewer, on
+	/// the broadcast it reports beneath. A viewer is forgotten
+	/// when its broadcast ends, and a published scene when it is no longer
+	/// graded.
+	#[tokio::test(start_paused = true)]
+	async fn viewer_feedback_times_each_track() {
+		let _ = moq_tokio::crypto::install_default();
+		let origin = moq_tokio::origin::spawn();
+		let (catalog, id, _audio) = listing(&origin, "show");
+		let (tall, tall_id, _tall_audio) = listing(&origin, "show/tall");
+		let observer = |path: &str| Observer::new(moq_net::Path::new(path).unwrap(), None);
+		let main = Broadcast::follow(observer("show"), catalog.clone(), &origin.consume()).unwrap();
+		let scenes = Scenes::new(origin.consume());
+		// Added back under its name before it ended, as an undo can, so the
+		// one ending leaves the one added back.
+		let ended = scenes.follow("tall", observer("show/tall"), tall.clone()).unwrap();
+		let graded = scenes.follow("tall", observer("show/tall"), tall).unwrap();
+		drop(ended);
+
+		// Connecting nowhere, so the connection only ever redials.
+		let client = moq_tokio::connect::Config::default().init(Default::default()).unwrap();
+		let connection = client.connect("https://127.0.0.1:1".parse::<url::Url>().unwrap());
+		let clock = catalog.clock();
+		let mut sampler = Sampler::new(Some(Publisher {
+			main,
+			scenes,
+			clock: clock.clone(),
+			relays: vec![Link {
+				endpoint: "https://127.0.0.1:1".into(),
+				monitor: connection.monitor(),
+			}],
+			sources: moq_scene::publish::Publish::new(clock.clone(), moq_video::encode::Kind::Auto, Default::default())
+				.unwrap(),
+		}));
+
+		let (alice, _reports) = report(&origin, "show", "alice", &id, &clock);
+		let (_bob, _reports) = report(&origin, "show/tall", "bob", &tall_id, &clock);
+		let timed = |broadcast: &Published| {
+			broadcast
 				.viewers
 				.reports
 				.first()
 				.is_some_and(|viewer| viewer.latency.is_some())
-		})
-		.await;
-		let viewer = &sampled.viewers.reports[0];
-		assert_eq!(viewer.name, "alice");
-		let audio = sampled.tracks.iter().find(|track| track.id == id).unwrap();
-		assert_eq!(audio.label, "audio opus 2 ch");
-		assert_eq!(audio.viewers, 1);
-		// The report carries milliseconds, so the program clock's sub-millisecond
-		// wall mapping can floor it by one.
-		let latency = audio.latency.unwrap();
-		assert!(
-			(Duration::from_millis(249)..=Duration::from_millis(250)).contains(&latency),
-			"{latency:?}"
-		);
-		assert_eq!(viewer.latency, Some(latency));
+		};
+		let sampled = until(&mut sampler, |report| report.broadcasts.iter().all(timed)).await;
+		let names: Vec<_> = sampled
+			.broadcasts
+			.iter()
+			.map(|broadcast| broadcast.name.as_deref())
+			.collect();
+		assert_eq!(names, [None, Some("tall")]);
+		for (broadcast, viewer, id) in [
+			(&sampled.broadcasts[0], "alice", &id),
+			(&sampled.broadcasts[1], "bob", &tall_id),
+		] {
+			let reported = &broadcast.viewers.reports;
+			assert_eq!(reported.len(), 1, "{viewer} reports beneath its broadcast alone");
+			assert_eq!(reported[0].name, viewer);
+			let audio = broadcast.tracks.iter().find(|track| track.id == *id).unwrap();
+			assert_eq!(audio.label, "audio opus 2 ch");
+			assert_eq!(audio.viewers, 1);
+			// The report carries milliseconds, so the program clock's
+			// sub-millisecond wall mapping can floor it by one.
+			let latency = audio.latency.unwrap();
+			assert!(
+				(Duration::from_millis(249)..=Duration::from_millis(250)).contains(&latency),
+				"{latency:?}"
+			);
+			assert_eq!(reported[0].latency, Some(latency));
+		}
 
-		alice.unannounce();
-		until(&mut sampler, |report| report.viewers.reports.is_empty()).await;
-		follow.abort();
+		alice.withdraw();
+		until(&mut sampler, |report| report.broadcasts[0].viewers.reports.is_empty()).await;
+		drop(graded);
+		let sampled = sampler.sample(kio::clock::now(), Local::default());
+		assert_eq!(sampled.broadcasts.len(), 1, "a scene no longer graded is left out");
+	}
+
+	/// A viewer that restarts under a new instance is read from that
+	/// instance, its reports starting afresh.
+	#[tokio::test(start_paused = true)]
+	async fn a_restarted_viewer_is_read_afresh() {
+		let origin = moq_tokio::origin::spawn();
+		let path = moq_net::Path::new("show/viewers/alice.echo").unwrap();
+		let publish = || {
+			let route = origin.route(&path, moq_net::origin::RouteOptions::hidden()).unwrap();
+			let track = route.broadcast().create_track(hang::echo::TRACK, None).unwrap();
+			let mut reports = moq_json::snapshot::Producer::<hang::echo::Snapshot>::new(track, Default::default());
+			reports.update(&hang::echo::Snapshot::default()).unwrap();
+			route.announce().unwrap();
+			(route, reports)
+		};
+		let slot = Slot::default();
+		let reading = tokio::spawn(read(origin.consume(), path.clone(), slot.clone()));
+		let read_from = async |instance: moq_net::Instance| {
+			let wait = async {
+				loop {
+					let read = {
+						let reports = slot.lock().unwrap();
+						let observer = reports.current.as_ref().map(|(report, _)| &report.observer);
+						let read = observer.is_some_and(|observer| observer.instance.as_ref() == Some(&instance));
+						assert!(
+							!read || reports.previous.is_none(),
+							"a new instance keeps no older report"
+						);
+						read
+					};
+					if read {
+						return;
+					}
+					kio::clock::sleep(INTERVAL).await;
+				}
+			};
+			kio::clock::timeout(Duration::from_secs(30), wait)
+				.await
+				.expect("the instance is read");
+		};
+
+		let (first, _first_reports) = publish();
+		read_from(first.instance()).await;
+		// Creating the path again supersedes the first route.
+		let (second, _second_reports) = publish();
+		assert_ne!(first.instance(), second.instance());
+		read_from(second.instance()).await;
+		reading.abort();
+	}
+
+	/// A reader stops, saying why, once its origin closes.
+	#[tokio::test(start_paused = true)]
+	async fn a_reader_stops_with_its_origin() {
+		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+		let slot = Slot::default();
+		let path = moq_net::Path::new("show/viewers/alice.echo").unwrap();
+		let reading = tokio::spawn(read(origin.consume(), path, slot.clone()));
+		tokio::task::yield_now().await;
+		drop(driver);
+		kio::clock::timeout(Duration::from_secs(30), reading)
+			.await
+			.expect("the reader stops")
+			.unwrap();
+		assert!(slot.lock().unwrap().error.is_some());
 	}
 
 	/// A relay that shares its stats counts each session watching the
@@ -1523,9 +2174,11 @@ mod tests {
 		let client = client.init(Default::default()).unwrap();
 
 		let published = moq_tokio::origin::spawn();
-		let show = published.create_broadcast("show").unwrap();
-		let track = show.create_track("video", None).unwrap();
-		show.announce(Default::default()).unwrap();
+		let show = published
+			.route("show", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = show.broadcast().create_track("video", None).unwrap();
+		show.announce().unwrap();
 		let subscribe = moq_tokio::origin::spawn();
 		let watching = Watching::default();
 		tokio::spawn(
@@ -1548,7 +2201,8 @@ mod tests {
 				.unwrap()
 				.available()
 				.await
-				.unwrap();
+				.unwrap()
+				.expect("an instance");
 			let mut video = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 			track.append_group().unwrap().finish().unwrap();
 			video.recv_group().await.unwrap();
@@ -1572,8 +2226,13 @@ mod tests {
 		let follow = tokio::spawn(feedback.clone().follow(origin.consume(), prefix));
 
 		let announce = |n: usize| {
-			let viewer = origin.create_broadcast(format!("show/viewers/{n:03}.echo")).unwrap();
-			viewer.announce(Default::default()).unwrap();
+			let viewer = origin
+				.route(
+					format!("show/viewers/{n:03}.echo"),
+					moq_net::origin::RouteOptions::hidden(),
+				)
+				.unwrap();
+			viewer.announce().unwrap();
 			viewer
 		};
 		let read = |feedback: &Feedback, name: &str| {
@@ -1589,8 +2248,8 @@ mod tests {
 			while read(&feedback, "065") != (MAX_VIEWERS, 2, false) {
 				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
-			viewers[0].unannounce();
-			viewers[MAX_VIEWERS].unannounce();
+			viewers[0].withdraw();
+			viewers[MAX_VIEWERS].withdraw();
 			while read(&feedback, "000") != (MAX_VIEWERS - 1, 1, false) {
 				kio::clock::sleep(Duration::from_millis(10)).await;
 			}

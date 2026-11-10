@@ -66,8 +66,8 @@ fn segment(model: &Model, rgba: &[u8]) -> Result<Vec<u8>, String> {
 	run().map_err(|err| format!("the segmentation model: {err}"))
 }
 
-/// Cuts a person out of one source's pictures. Dropping it stops its thread
-/// once the picture in hand is done.
+/// Cuts a person out of one source's pictures. Dropping it waits for the
+/// picture in hand, then stops its thread.
 pub(crate) struct Matte {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
@@ -83,8 +83,13 @@ pub(crate) struct Matte {
 	mask_bind: wgpu::BindGroup,
 	/// The newest picture started, and its cut-out, at its size.
 	held: Option<Held>,
-	jobs: mpsc::Sender<wgpu::SubmissionIndex>,
+	/// Dropped first on drop, which ends the thread.
+	jobs: Option<mpsc::Sender<wgpu::SubmissionIndex>>,
 	results: mpsc::Receiver<Result<Vec<u8>, String>>,
+	/// Joined on drop, since the thread frees GPU objects on its way out: one
+	/// left running past `main` does so while the driver tears down, which
+	/// crashes NVIDIA's.
+	thread: Option<std::thread::JoinHandle<()>>,
 	/// Whether the thread has a picture, which also has `readback` mapped.
 	busy: bool,
 	/// Whether the picture the thread has was overtaken, so its cut-out is
@@ -211,13 +216,13 @@ impl Matte {
 
 		let (jobs, inbox) = mpsc::channel();
 		let (outbox, results) = mpsc::channel();
-		let thread = Thread {
+		let worker = Thread {
 			device: device.clone(),
 			readback: readback.clone(),
 		};
-		std::thread::Builder::new()
+		let thread = std::thread::Builder::new()
 			.name("moq-scene matte".into())
-			.spawn(move || thread.run(inbox, outbox))
+			.spawn(move || worker.run(inbox, outbox))
 			.map_err(|err| Error::Unsupported(format!("cannot start background removal: {err}")))?;
 
 		Ok(Self {
@@ -233,8 +238,9 @@ impl Matte {
 			mask,
 			mask_bind,
 			held: None,
-			jobs,
+			jobs: Some(jobs),
 			results,
+			thread: Some(thread),
 			busy: false,
 			stale: false,
 			#[cfg(test)]
@@ -276,7 +282,8 @@ impl Matte {
 		let submission = self.queue.submit([encoder.finish()]);
 		self.held = Some(held);
 		// A thread that is gone reports so through `finish`.
-		let _ = self.jobs.send(submission);
+		let jobs = self.jobs.as_ref().expect("the job sender lives until drop");
+		let _ = jobs.send(submission);
 		self.busy = true;
 	}
 
@@ -410,6 +417,15 @@ impl Matte {
 			pass.set_bind_group(index as u32, *bind, &[]);
 		}
 		pass.draw(0..3, 0..1);
+	}
+}
+
+impl Drop for Matte {
+	fn drop(&mut self) {
+		drop(self.jobs.take());
+		if let Some(thread) = self.thread.take() {
+			let _ = thread.join();
+		}
 	}
 }
 

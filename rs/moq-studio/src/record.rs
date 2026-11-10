@@ -513,19 +513,19 @@ impl Run {
 		let mut files: tokio::task::JoinSet<(u64, bool)> = tokio::task::JoinSet::new();
 		let mut current: Option<Instance> = None;
 		let mut count = 0;
-		let failed = match moq_mux::follow::Instances::new(&self.origin, path.as_str(), None) {
+		let failed = match self.origin.follow(path.as_str(), None) {
 			Err(err) => Some(anyhow::Error::from(err)),
 			Ok(mut instances) => loop {
 				tokio::select! {
-					event = instances.next() => match event {
-						Ok(moq_mux::follow::Event::Start(broadcast)) => {
+					event = instances.available() => match event {
+						Ok(Some(broadcast)) => {
 							current = None;
 							if !*self.closing.read() {
 								count += 1;
 								current = self.instance(&name, format, broadcast, count, &mut files);
 							}
 						}
-						Ok(moq_mux::follow::Event::End) => current = None,
+						Ok(None) => current = None,
 						Err(err) => break Some(err.into()),
 					},
 					Some(joined) = files.join_next() => {
@@ -643,7 +643,9 @@ impl Run {
 			None => Reading {
 				source: self.program.clone(),
 				format: CatalogFormat::Hang,
-				pick: Box::new(|studio: hang::Catalog<moq_scene::publish::Ext>| Some(largest_video(studio.media()))),
+				pick: Box::new(|studio: hang::Catalog<moq_scene::publish::Ext>| {
+					Some(largest_video(studio.without_ext()))
+				}),
 				closing: Some(self.closing.clone()),
 			},
 			Some(name) => {
@@ -1185,7 +1187,7 @@ mod tests {
 		origin: moq_net::origin::Producer,
 		/// What the relays feed, where guests publish.
 		relay: moq_net::origin::Producer,
-		publication: moq_net::origin::Publication,
+		publication: moq_net::origin::Route,
 		catalog: moq_scene::publish::Catalog,
 		/// The local broadcast the sources' tracks are in, and its catalog.
 		local: moq_net::broadcast::Producer,
@@ -1202,12 +1204,12 @@ mod tests {
 	impl Studio {
 		fn new() -> Self {
 			let origin = moq_tokio::origin::spawn();
-			let publication = origin.create_broadcast("studio").unwrap();
+			let publication = origin.route("studio", moq_net::origin::RouteOptions::hidden()).unwrap();
 			let mut broadcast = publication.broadcast().clone();
 			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 			let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
 			let program = Some(Tone::new(&mut broadcast, catalog.clone()));
-			publication.announce(Default::default()).unwrap();
+			publication.announce().unwrap();
 			let mut local = moq_net::broadcast::Info::new().produce();
 			let config = moq_mux::catalog::Config::default()
 				.with_catalog(Default::default())
@@ -1333,7 +1335,7 @@ mod tests {
 	/// A guest's microphone, published through the relay as the join page
 	/// publishes it: Opus packets, as received, in a catalog of its own.
 	struct Guest {
-		_publication: moq_net::origin::Publication,
+		_publication: moq_net::origin::Route,
 		_catalog: moq_mux::catalog::Producer,
 		audio: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 		/// Each packet sent, in order.
@@ -1348,7 +1350,7 @@ mod tests {
 	impl Guest {
 		/// Join at `path` on `relay`.
 		fn join(relay: &moq_net::origin::Producer, path: &str) -> Self {
-			let publication = relay.create_broadcast(path).unwrap();
+			let publication = relay.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
 			let mut broadcast = publication.broadcast().clone();
 			let mut catalog =
 				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -1367,7 +1369,7 @@ mod tests {
 				})
 				.unwrap();
 			let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
-			publication.announce(Default::default()).unwrap();
+			publication.announce().unwrap();
 			Self {
 				_publication: publication,
 				_catalog: catalog,
@@ -1886,7 +1888,7 @@ mod tests {
 	async fn an_empty_recording_is_removed() {
 		let dir = tempfile::tempdir().unwrap();
 		let origin = moq_tokio::origin::spawn();
-		let publication = origin.create_broadcast("studio").unwrap();
+		let publication = origin.route("studio", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let mut broadcast = publication.broadcast().clone();
 		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 		let _catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
@@ -1914,11 +1916,11 @@ mod tests {
 	async fn a_failure_before_any_media_says_why() {
 		let dir = tempfile::tempdir().unwrap();
 		let origin = moq_tokio::origin::spawn();
-		let publication = origin.create_broadcast("studio").unwrap();
+		let publication = origin.route("studio", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let mut broadcast = publication.broadcast().clone();
 		let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 		let catalog = moq_scene::publish::Catalog::new(&mut broadcast, config).unwrap();
-		publication.announce(Default::default()).unwrap();
+		publication.announce().unwrap();
 		let source = moq_mux::Source::new(origin.consume(), publication.broadcast().consume());
 		let local = moq_mux::Source::new(origin.consume(), moq_net::broadcast::Info::new().produce().consume());
 		let inputs = Inputs {

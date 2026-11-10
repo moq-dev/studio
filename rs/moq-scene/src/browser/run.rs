@@ -16,7 +16,7 @@ use moq_audio::bus::Channel as Sound;
 
 use super::layers::{Gpu, Layers};
 use super::outbox::Commands;
-use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Start};
+use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Raster, Start};
 use super::{ARG, Helper, Page, Paint};
 use crate::Error;
 use crate::source::{Mailbox, Picture, Status};
@@ -65,6 +65,7 @@ pub(crate) async fn run(
 	// A stopped page leaves the canvas rather than freezing on its last
 	// picture, which for an alert or a ticker would show stale news.
 	picture.lock().unwrap().clear();
+	page.state.lock().unwrap().paint = None;
 	Err(Error::Browser(reason))
 }
 
@@ -91,8 +92,6 @@ pub(crate) struct Instance {
 	routes: Arc<Mutex<Routes>>,
 	/// The next page's number.
 	next: AtomicU64,
-	/// The socket, shut down to stop the helper.
-	socket: Channel,
 	/// The thread delivering the helper's events, which ends once the helper
 	/// has exited.
 	reader: Mutex<Option<JoinHandle<()>>>,
@@ -107,6 +106,8 @@ struct Routes {
 	/// What a page last copied or cut, until the studio takes it. One slot
 	/// for every page, so a newer copy always replaces an older one.
 	copied: Option<String>,
+	/// Why a page that paints into memory does.
+	fallback: Arc<str>,
 }
 
 /// One open page's source.
@@ -207,12 +208,14 @@ impl Instance {
 
 		let (process, events) =
 			spawn(helper).map_err(|err| failed(&format!("cannot start {}", helper.program.display()), err))?;
-		let socket = events.try_clone().map_err(|err| failed("socket", err))?;
-		let commands = socket.try_clone().map_err(|err| failed("socket", err))?;
+		let commands = events.try_clone().map_err(|err| failed("socket", err))?;
 		commands
 			.send(&Command::Start(start), &[])
 			.map_err(|err| failed("the browser process's socket", err))?;
-		let routes = Arc::new(Mutex::new(Routes::default()));
+		let routes = Arc::new(Mutex::new(Routes {
+			fallback: helper.fallback.clone(),
+			..Default::default()
+		}));
 		let commands = writer(commands).map_err(|err| failed("cannot start the page writer", err))?;
 		let reader = {
 			// Not the helper, whose hold on this instance would keep it running
@@ -233,7 +236,6 @@ impl Instance {
 			commands,
 			routes,
 			next: AtomicU64::new(0),
-			socket,
 			reader: Mutex::new(Some(reader)),
 		})
 	}
@@ -256,8 +258,9 @@ impl Instance {
 			page: page.clone(),
 			id,
 		};
-		// A closed queue means the writer lost the socket, so the helper is
-		// gone and the reader ends the page.
+		// An open the queue refuses, since the writer lost the socket or the
+		// helper is exiting, ends with the helper, when the reader ends the
+		// page.
 		self.commands.open(id, open);
 		// After the page opens, since the helper delivers only to an open page.
 		let mut state = page.state.lock().unwrap();
@@ -282,7 +285,7 @@ impl Instance {
 
 	/// Ask the helper to exit, which it does once it has closed every page.
 	fn end(&self) {
-		let _ = rustix::net::shutdown(&self.socket, rustix::net::Shutdown::Write);
+		self.commands.quit();
 	}
 }
 
@@ -350,8 +353,10 @@ impl Drop for Process {
 /// Write the commands queued on the returned handle to `channel`, on a thread
 /// of its own, so a helper that stops reading blocks only that thread, never a
 /// sender holding the studio's state. The thread ends once the handle is
-/// stopped or a write fails, as one does when the helper exits, and ends the
-/// socket on its way out.
+/// stopped or quit, or a write fails, as one does when the helper exits.
+///
+/// Once quit it leaves the socket open, since the helper reads its end as the
+/// studio dying, and exits at once.
 fn writer(channel: Channel) -> std::io::Result<Commands> {
 	let commands = Commands::default();
 	let outbox = commands.clone();
@@ -361,14 +366,15 @@ fn writer(channel: Channel) -> std::io::Result<Commands> {
 			'write: while let Some(batch) = outbox.next() {
 				for command in batch {
 					if channel.send(&command, &[]).is_err() {
+						// Such as a command too long to send: a helper the
+						// studio can no longer reach never keeps running
+						// unheard.
+						let _ = rustix::net::shutdown(&channel, rustix::net::Shutdown::Write);
 						break 'write;
 					}
 				}
 			}
-			// The helper exits once it reads the end, so one the studio can no
-			// longer reach never keeps running unheard.
 			outbox.stop();
-			let _ = rustix::net::shutdown(&channel, rustix::net::Shutdown::Write);
 		})?;
 	Ok(commands)
 }
@@ -376,12 +382,25 @@ fn writer(channel: Channel) -> std::io::Result<Commands> {
 /// Start a helper, handing it one end of a socket as its stdin.
 fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 	let (ours, theirs) = UnixStream::pair()?;
-	let child = std::process::Command::new(&helper.program)
+	let mut command = std::process::Command::new(&helper.program);
+	command
 		.arg(ARG)
 		.stdin(OwnedFd::from(theirs))
 		.stdout(Stdio::null())
-		.process_group(0)
-		.spawn()?;
+		.process_group(0);
+	// Given a Wayland compositor's modifiers, Mesa's Intel driver picks a
+	// compressed layout with a second, auxiliary plane, and Chromium's frame
+	// capturer drops multi-plane buffers: the page never paints. Without
+	// compression, the texture is a single plane.
+	if let Raster::Gpu { .. } = helper.raster {
+		let mut debug = std::env::var_os("INTEL_DEBUG").unwrap_or_default();
+		if !debug.is_empty() {
+			debug.push(",");
+		}
+		debug.push("noccs");
+		command.env("INTEL_DEBUG", debug);
+	}
+	let child = command.spawn()?;
 	Ok((Process { child, exit: None }, Channel::new(ours)))
 }
 
@@ -415,6 +434,7 @@ fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Rout
 	use std::io::ErrorKind::*;
 
 	let Gpu { device, queue, .. } = gpu;
+	let fallback = routes.lock().unwrap().fallback.clone();
 
 	loop {
 		let (event, fds) = match events.recv::<Event>() {
@@ -440,7 +460,7 @@ fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Rout
 				page,
 				layer,
 				super::upload(device, queue, width, height, &data),
-				Paint::Cpu,
+				Paint::Cpu(fallback.clone()),
 			),
 			Event::Popup(id, area) => {
 				routes.lock().unwrap().place(gpu, id, area);
@@ -478,6 +498,23 @@ fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Rout
 mod tests {
 	use super::*;
 	use crate::browser::Input;
+
+	/// A command the writer cannot send ends the socket, which the helper
+	/// reads as the studio gone, rather than leave it waiting unheard.
+	#[test]
+	fn a_command_too_long_to_send_ends_the_socket() {
+		let (ours, theirs) = UnixStream::pair().unwrap();
+		let ours = Channel::new(ours);
+		// Held open, as the studio's reader does.
+		let _events = ours.try_clone().unwrap();
+		let commands = writer(ours).unwrap();
+		let long = Open {
+			url: "x".repeat(crate::browser::protocol::MAX_MESSAGE),
+			..Default::default()
+		};
+		commands.open(0, long);
+		assert!(Channel::new(theirs).recv::<Command>().unwrap().is_none());
+	}
 
 	/// A helper that stops reading costs dropped input, never a sender stuck
 	/// on a full socket while it holds the studio's state. Pages still open

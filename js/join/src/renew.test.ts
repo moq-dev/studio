@@ -25,12 +25,12 @@ test("each token the studio publishes reaches the page, and only for its own nam
 		["bob", 0],
 		["alice", 1],
 	] as const) {
-		const other = origin.createBroadcast(path(name, generation));
+		const other = origin.route(path(name, generation), { hidden: true });
 		other.broadcast.createTrack("token").writeFrame({ payload: encode(`${name} ${generation}`) });
 		other.announce();
 	}
 
-	const publication = origin.createBroadcast(path("alice", 0));
+	const publication = origin.route(path("alice", 0), { hidden: true });
 	const track = publication.broadcast.createTrack("token");
 	track.writeFrame({ payload: encode("first") });
 	publication.announce();
@@ -50,7 +50,7 @@ test("a group superseded before it completes does not end the renewals", async (
 		tokens.update((all) => [...all, token]),
 	);
 
-	const publication = origin.createBroadcast(path("alice", 0));
+	const publication = origin.route(path("alice", 0), { hidden: true });
 	const track = publication.broadcast.createTrack("token");
 	track.writeFrame({ payload: encode("first") });
 	publication.announce();
