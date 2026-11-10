@@ -10,22 +10,35 @@ is gone.
 
 ## Plan
 
-Found 2026-11-09 while taking screenshots for /quest-plan: 1 of about 11
-launches under headless sway on radv, and 2 of 3 on lavapipe, each on the
-launch that opens a scene file. Reproduce it first. The trigger is a guess to
-confirm or discard: the compositor resizes the window right after it maps,
-while the studio's own render thread keeps the shared device busy, so
-eframe's reconfigure cannot get the device idle.
+Reproduced 2026-11-10 under a private headless sway: with the output resized
+200 times in the first seconds, 8 of 10 launches crash on lavapipe and 0 of
+10 on an NVIDIA GPU; without resizes, 0 of 10. The claim PR holds the script.
 
-Fix the cause, not the symptom: no retry around `configure`. The compositor
-and the UI share one device (`engine::Gpu`, handed to eframe as
-`WgpuSetup::Existing` in `rs/moq-studio/src/main.rs`), so the fix likely
-orders the engine's submissions against the surface's reconfigure.
+The cause is in wgpu-core 30.0.1, not the studio. `Surface::configure` waits
+for the queue to drain, then fails with `GpuWaitTimeout` if it is not empty,
+which only happens when another thread submitted during the wait: here the
+compositor and encoder on the device the UI shares (`engine::Gpu`). A local
+wgpu-core patch accepting that case took lavapipe to 0 of 30, confirming the
+cause, but is not the fix: configure's `vkDeviceWaitIdle` also needs every
+queue externally synchronized, so no submit may land during it either. The
+fix belongs in wgpu: hold `Device::command_indices` across the idle wait and
+the hal configure, as `Queue::present` already does.
+[gfx-rs/wgpu#10799](https://github.com/gfx-rs/wgpu/pull/10799) took that lock
+around the hal configure but was closed unmerged.
 
-No single PR caused it: the shared device is as old as the app. It does not
-wait on the [toolkit spike](/quest/m0/ux/spike.md), since it is today's
-studio that crashes, but say in the PR whether the fix would survive a move
-off eframe.
+A studio-side lock would have to wrap every submit on the shared device, in
+moq-scene, moq-video's export and readback, and every future caller, so it is
+the fallback only if wgpu declines.
+
+The fix survives a move off eframe: any toolkit that shares the device and
+configures a wgpu surface goes through the same `Surface::configure`.
+
+## Waiting
+
+- Maintainer: approve posting the fix to gfx-rs/wgpu, outside the orgs an
+  agent may post to. Options: (a) fix wgpu upstream, then bump wgpu and egui
+  here; (b) a studio-wide submit lock, after a moq-video change. Recommend
+  (a); check by the approval comment on the claim PR.
 
 ## Related
 
