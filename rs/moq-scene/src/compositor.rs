@@ -809,7 +809,19 @@ impl Compositor {
 				roots.push((Place::scene(*scene), *since));
 			}
 		}
-		let nesting = Nesting::of(collection, roots);
+		// A source's thumbnail draws it whole, as an item of its own.
+		let wholes: Vec<(Item, Duration)> = thumbnails
+			.iter()
+			.filter_map(|(shows, since, target)| match shows {
+				Shows::Source(source) => Some((Item::new(*source, Rect::fill(&target.canvas)), *since)),
+				_ => None,
+			})
+			.collect();
+		let roots = roots
+			.iter()
+			.map(|(place, since)| (collection.items(place).unwrap_or_default(), *since));
+		let wholes = wholes.iter().map(|(item, since)| (std::slice::from_ref(item), *since));
+		let nesting = Nesting::of(collection, roots.chain(wholes));
 		let targets = nested_targets(&mut self.nested, &self.device, &self.effects, collection, &nesting);
 
 		let mut frame = self.effects.frame();
@@ -865,7 +877,7 @@ impl Compositor {
 				Shows::Source(source) => {
 					draw.frame
 						.target(&target.picture, target.canvas, wgpu::Color::TRANSPARENT);
-					draw.source(target, source);
+					draw.source(target, source, *since);
 				}
 				Shows::Nothing => unreachable!("a thumbnail showing nothing is not drawn"),
 			}
@@ -1096,6 +1108,9 @@ impl Compositor {
 			match self.shows(collection, thumbnail) {
 				Shows::Scene(scene) => shown.extend(self.drawn(collection, [Some(scene)])),
 				Shows::Source(source) => {
+					if let Some(Nested::Scene(scene)) = collection.nested(source) {
+						shown.extend(self.drawn(collection, [Some(scene)]));
+					}
 					shown.insert(collection.capture(source));
 					let video = collection.video.get(source);
 					masks(
@@ -1111,21 +1126,16 @@ impl Compositor {
 	}
 
 	/// What `thumbnail` shows this render: a scene on program or drawn for an
-	/// output is sampled from its texture, and a scene or program source shows
-	/// what it draws.
+	/// output is sampled from its texture.
 	fn shows<'a>(&self, collection: &'a Collection, thumbnail: &Thumbnail) -> Shows<'a> {
 		let scene = match thumbnail {
-			Thumbnail::Scene(scene) => scene.as_str(),
-			Thumbnail::Source(source) => match collection.nested(source) {
-				Some(Nested::Scene(scene)) => scene,
-				Some(Nested::Program) => return Shows::Program,
-				None => {
-					return match collection.sources.get_key_value(source) {
-						Some((source, _)) => Shows::Source(source),
-						None => Shows::Nothing,
-					};
-				}
-			},
+			Thumbnail::Scene(scene) => scene,
+			Thumbnail::Source(source) => {
+				return match collection.sources.get_key_value(source) {
+					Some((source, _)) => Shows::Source(source),
+					None => Shows::Nothing,
+				};
+			}
 		};
 		let Some(scene) = collection.scene(scene).map(|scene| scene.name.as_str()) else {
 			return Shows::Nothing;
@@ -1162,11 +1172,20 @@ impl Compositor {
 				Shows::Scene(scene) | Shows::Output(scene) => collection.canvas(Some(scene)),
 				Shows::Program => Some(program),
 				Shows::Source(source) => {
-					let layer = self.layers.get(collection.capture(source));
-					let picture = layer.and_then(|layer| layer.picture.as_ref());
-					picture.map(|picture| {
+					let size = match collection.nested(source) {
+						Some(Nested::Scene(scene)) => collection
+							.canvas(Some(scene))
+							.map(|canvas| (canvas.width, canvas.height)),
+						Some(Nested::Program) => Some((program.width, program.height)),
+						None => {
+							let layer = self.layers.get(collection.capture(source));
+							let picture = layer.and_then(|layer| layer.picture.as_ref());
+							picture.map(Picture::size)
+						}
+					};
+					size.map(|size| {
 						let crop = collection.video.get(source).map(|video| video.crop);
-						cropped(picture.size(), crop.unwrap_or_default(), program.framerate)
+						cropped(size, crop.unwrap_or_default(), program.framerate)
 					})
 				}
 				Shows::Nothing => None,
@@ -1505,16 +1524,18 @@ struct Nest<'a> {
 }
 
 impl<'a> Nesting<'a> {
-	/// The scenes the items of each of `roots` draw, from when its scene went
-	/// on, and those they draw in turn.
-	fn of(collection: &'a Collection, roots: impl IntoIterator<Item = (Place, Duration)>) -> Self {
+	/// The scenes each of `roots`, a run of items, draws, from when the scene
+	/// they are in went on, and those they draw in turn.
+	fn of<'r>(collection: &'a Collection, roots: impl IntoIterator<Item = (&'r [Item], Duration)>) -> Self
+	where
+		'a: 'r,
+	{
 		let mut nesting = Self {
 			order: Vec::new(),
 			drawn: HashMap::new(),
 		};
 		let mut walked = HashMap::new();
-		for (place, since) in roots {
-			let items = collection.items(&place).unwrap_or_default();
+		for (items, since) in roots {
 			nesting.walk(collection, items, since, &mut walked);
 		}
 		nesting
@@ -1523,18 +1544,20 @@ impl<'a> Nesting<'a> {
 	/// Add the scenes `items` show, from when the scene they are in went on
 	/// `since` ago. `walked` holds each scene and moment added, or being
 	/// walked.
-	fn walk(
+	fn walk<'r>(
 		&mut self,
 		collection: &'a Collection,
-		items: &'a [Item],
+		items: &'r [Item],
 		since: Duration,
 		walked: &mut HashMap<(&'a str, Option<Duration>), Option<usize>>,
-	) {
+	) where
+		'a: 'r,
+	{
 		/// A run of items being walked, with the scene and moment they draw
 		/// unless they are the root's.
-		struct Walk<'a> {
+		struct Walk<'a, 'r> {
 			nest: Option<(&'a str, Option<Duration>)>,
-			items: &'a [Item],
+			items: &'r [Item],
 			next: usize,
 			/// Whether any item walked shows the program.
 			program: bool,
@@ -1793,16 +1816,22 @@ impl Draw<'_> {
 		self.posed(target, &item, pose, Duration::ZERO);
 	}
 
-	/// Draw the newest picture of the source called `name` over the whole of
-	/// `target`, through the source's crop and filters, even one published,
-	/// which scenes leave to viewers. Nothing before its first picture.
-	fn source(&mut self, target: &Target, name: &str) {
+	/// Draw the picture of the source called `name` over the whole of
+	/// `target`, through the source's crop and filters: its newest, even one
+	/// published, which scenes leave to viewers, or what a scene or program
+	/// source shows, `since` the thumbnail was named. Nothing before its first
+	/// picture.
+	fn source(&mut self, target: &Target, name: &str, since: Duration) {
 		let collection = self.collection;
-		let layer = self.library.0.get(collection.capture(name));
-		let Some(picture) = layer.and_then(|layer| layer.picture.clone()) else {
-			return;
-		};
 		let whole = Item::new(name, Rect::fill(&target.canvas));
+		let picture = match collection.nested(name) {
+			Some(_) => self.shows(&whole, since),
+			None => {
+				let layer = self.library.0.get(collection.capture(name));
+				layer.and_then(|layer| layer.picture.clone())
+			}
+		};
+		let Some(picture) = picture else { return };
 		let item = effect::Item {
 			picture: &picture,
 			rect: whole.rect,
@@ -4798,8 +4827,9 @@ mod tests {
 	}
 
 	/// A source's thumbnail shows its newest picture through its crop and
-	/// filters, at the cropped picture's shape, transparent where it is; one
-	/// with no picture yet shows nothing, and a scene source shows its scene.
+	/// filters, at the cropped picture's shape, transparent where it is, and a
+	/// scene source shows its scene so too; one with no picture yet shows
+	/// nothing.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn a_source_thumbnail_shows_its_picture_through_its_crop_and_filters() {
@@ -4816,8 +4846,9 @@ mod tests {
 			let image = |path: &str| Source::Image { path: path.into() };
 			collection.sources.insert("halves".into(), image("halves.png"));
 			collection.sources.insert("missing".into(), image("missing.png"));
-			let nested = Source::Scene { scene: "blue".into() };
-			collection.sources.insert("blue scene".into(), nested);
+			// The red scene, without the blue over its top-right quarter.
+			let nested = Source::Scene { scene: "red".into() };
+			collection.sources.insert("red scene".into(), nested);
 			let video = Video {
 				crop: Crop {
 					right: 0.5,
@@ -4826,23 +4857,24 @@ mod tests {
 				filters: vec![Filter::Opacity { amount: 0.5 }],
 				..Video::default()
 			};
-			collection.video.insert("halves".into(), video);
+			collection.video.insert("halves".into(), video.clone());
+			collection.video.insert("red scene".into(), video);
 			collection.validate().unwrap();
 
 			let mut studio = Studio::with_files(collection, dir).await;
 			let thumbnail = |name: &str| Thumbnail::Source(name.into());
-			let names = ["halves", "missing", "blue scene"];
+			let names = ["halves", "missing", "red scene"];
 			studio.compositor.set_thumbnails(names.map(thumbnail));
 			studio.render(Instant::now());
-			let texture = studio.compositor.thumbnail(&thumbnail("halves")).unwrap().clone();
-			assert_eq!((texture.width(), texture.height()), (2, 2));
 			let half = [128, 0, 0, 128];
-			for texel in studio.read(&texture).chunks(4) {
-				assert!(near(texel.try_into().unwrap(), half), "{texel:?}");
+			for (name, size) in [("halves", (2, 2)), ("red scene", (4, 8))] {
+				let texture = studio.compositor.thumbnail(&thumbnail(name)).unwrap().clone();
+				assert_eq!((texture.width(), texture.height()), size, "{name}");
+				for texel in studio.read(&texture).chunks(4) {
+					assert!(near(texel.try_into().unwrap(), half), "{name}: {texel:?}");
+				}
 			}
 			assert!(studio.compositor.thumbnail(&thumbnail("missing")).is_none());
-			let texture = studio.compositor.thumbnail(&thumbnail("blue scene")).unwrap().clone();
-			assert_eq!(pixel(&studio.read(&texture), 1, 1), BLUE);
 		})
 		.await;
 	}
