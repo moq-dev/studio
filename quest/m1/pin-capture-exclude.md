@@ -1,0 +1,20 @@
+# [XS] moq-video's capture exclusion is pinned
+
+## Goal
+
+The `moq` submodule includes moq-video's display capture that leaves chosen
+apps out, on the desktops that can.
+
+## Plan
+
+Planned 2026-11-09 (maintainer, /quest-plan) for
+[the privacy shield](/quest/m1/privacy-shield.md). Advance it with
+`just upgrade-moq` in its own PR.
+
+## Waiting
+
+- moq-dev/moq: [the capture exclusion quest](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-exclude.md) lands on moq's `main`. Check that quest's PR has merged.
+
+## Required
+
+- [The pin crosses the timeline removal](/quest/m0/pin-sync.md) - no later pin can skip that commit
