@@ -13,7 +13,7 @@ Planned 2026-11-09 (maintainer, /quest-plan) for
 
 ## Waiting
 
-- moq-dev/moq: [the foreground app quest](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-foreground.md) lands on moq's `main`. Check that quest's PR has merged.
+- moq-dev/moq: [the foreground app quest](https://github.com/moq-dev/moq/blob/main/quest/m4/capture-foreground.md) lands on moq's `main`. Check that quest's PR has merged.
 
 ## Required
 

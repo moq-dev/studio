@@ -16,7 +16,7 @@ OBS users ask for this by name, and get it from a plugin or another app.
 - The foreground app and its window come from moq-video, through
   [its pin](/quest/m1/pin-capture-foreground.md). The source is a new kind
   in moq-scene beside `window`.
-- It can be narrowed: any app, only full-screen ones, or a list.
+- It can be narrowed from any app to a list of them.
 - A switch between apps is a cut inside the source, keeping the layer's
   place and fitting the new window by the layer's fit rule.
 - Where the desktop does not report the foreground app, the card says so and

@@ -3,7 +3,8 @@
 ## Goal
 
 The `moq` submodule includes moq-video's display capture that leaves chosen
-apps out, on the desktops that can.
+apps out. moq plans it for macOS alone, the one desktop whose capture can
+filter, and an Unsupported error elsewhere.
 
 ## Plan
 
@@ -13,7 +14,7 @@ Planned 2026-11-09 (maintainer, /quest-plan) for
 
 ## Waiting
 
-- moq-dev/moq: [the capture exclusion quest](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-exclude.md) lands on moq's `main`. Check that quest's PR has merged.
+- moq-dev/moq: [the capture exclusion quest](https://github.com/moq-dev/moq/blob/main/quest/m4/capture-exclude.md) lands on moq's `main`. Check that quest's PR has merged.
 
 ## Required
 

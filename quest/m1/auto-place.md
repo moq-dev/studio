@@ -21,14 +21,15 @@ ready; local first with a hosted model as an opt-in tie-breaker).
 - **What it reads:** the composited picture under the layer, scaled far down
   on the GPU a few times a second: where it moves, where it is dense with
   edges and text, and what stays put while the rest moves, which is a HUD.
-  Where [the foreground app](/quest/m1/pin-capture-foreground.md) is known,
-  its window counts as mattering, as does the pointer where a capture
-  reports it. The inspector says which of these it stays clear of, and each
-  can be switched off.
+  The inspector says which of these it stays clear of, and each can be
+  switched off. The frame also draws the pointer and the focused window as
+  signals; moq reports neither a pointer nor a window's place on its
+  display, so they are left out unless its listing gains them.
 - **What it decides:** the slot whose area matters least, among the corners
   and edge middles that fit the layer, inside the canvas's margins.
 - **When it moves:** when the scene changes, when the content under it
-  changes kind (another app, another layout), or when its slot has been the
+  changes kind (another layout, or another app in front where
+  [moq reports it](/quest/m1/pin-capture-foreground.md)), or when its slot has been the
   worst for a sustained time. Never on a single busy frame, and never while
   the streamer is dragging it. A manual move wins and holds until the content
   changes.
@@ -51,5 +52,5 @@ a judgment no test makes.
 
 ## Related
 
-- [moq-video's foreground app is pinned](/quest/m1/pin-capture-foreground.md) - a stronger signal where the desktop gives it
+- [moq-video's foreground app is pinned](/quest/m1/pin-capture-foreground.md) - when the app in front changes, and the key its slot is remembered under
 - [Scenes that lay themselves out](/quest/m1/auto-layout.md) - slots chosen by role rather than by content

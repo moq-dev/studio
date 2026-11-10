@@ -4,9 +4,8 @@
 
 The studio's own windows never appear in a display capture, its own or
 another app's. Apps the streamer marks private, such as a password manager
-or a messenger, are blanked in every display capture the studio makes, with
-a lock where the window was. See the `shield` frame of
-[`mock/later.html`](/quest/m0/ux/mock/later.html).
+or a messenger, are left out of every display capture the studio makes. See
+the `shield` frame of [`mock/later.html`](/quest/m0/ux/mock/later.html).
 
 ## Plan
 
@@ -14,7 +13,12 @@ a lock where the window was. See the `shield` frame of
   capture, where it offers that: the window sharing type on macOS and the
   display affinity on Windows. This needs no moq change.
 - **Private apps** are left out by moq-video's capture, which reaches here
-  through [its pin](/quest/m1/pin-capture-exclude.md).
+  through [its pin](/quest/m1/pin-capture-exclude.md). moq plans that for
+  macOS alone: no other desktop's capture can filter, and painting over a
+  window instead would show it for a frame whenever it moves.
+- The frame draws a lock where the private window was. A filtered capture
+  shows what is behind the window instead, and a window's place on its
+  display is not something moq reports, so there is no lock.
 - The list of private apps is the operator's, kept per user, not in the scene
   file. Add marks an app private from its card.
 - Where the desktop offers neither, as on X11 and for a portal-picked screen
