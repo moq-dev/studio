@@ -12,7 +12,6 @@ title bar's gear, as in
 - **Stream:** the relay, failover, and options from
   [go live](/quest/m0/ux/go-live.md).
 - **Recording:** the folder, what a recording holds, and each source too.
-- **Sound:** the output Listen plays on.
 - **Hotkeys:** today's Hotkeys panel, on keycaps.
 - **Guests:** the room, its key, the join page, and how long a link lasts.
 - **Advanced:** publishing a scene as its own broadcast, publishing a source
@@ -25,6 +24,9 @@ bar.
 
 ## Plan
 
+- The mock-up lists a Sound pane. Its one setting, the output Listen plays
+  on, is on the [MIX page](/quest/m0/ux/mix.md) instead, so there is none.
+  The Guests pane has no frame; it follows the Stream pane's shape.
 - Each setting keeps its home on disk: the scene file for what belongs to
   the show (canvas, scene sizes, published scenes), per-user settings for
   what belongs to the operator (hotkeys, snapping, effects, the listen

@@ -24,6 +24,10 @@ section has them. "Audio scene" stays the word, since it was chosen over
 "mix" on 2026-11-06
 ([moq-dev/studio#77](https://github.com/moq-dev/studio/pull/77)).
 
+- A strip opens in place and its neighbours narrow, so no meter is ever
+  covered during a show. Strips and the matrix are two views of one page.
+- The output Listen plays on is picked on the listened audio scene's strip,
+  not in Settings.
 - A fader is gain in decibels, with unity marked and a double click
   returning to it, as pan returns to center today.
 - The meter keeps the peak tick and the red at full scale of

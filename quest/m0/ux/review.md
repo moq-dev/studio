@@ -15,11 +15,17 @@ shows its clock while recording.
 
 ## Plan
 
-Replay, Save clip, recording, and repair behave as `README.md` has them; this
-is their place and look. The strip's pictures are frames the program's track
+Recording and repair behave as `README.md` has them; this is their place and
+look. Recommended, not decided: Replay and Save clip take any stretch of the
+last 30 seconds, picked with two handles, where today they take the last N
+seconds up to the click. The track already holds the 30 seconds. The
+alternative pins the right handle to now. The strip's pictures are frames the program's track
 already keeps for late viewers, decoded at a low rate while the page is
 shown, and nothing records in the background for it.
 
+- The large picture is the frame under the scrub head, so the choice is
+  seen before it is replayed. The program's card keeps its ON AIR tag, so the
+  live picture never leaves the screen.
 - A replay that cannot play says why where the button is: off air with no
   relay, a source with no past, a speed that drops the sound.
 - A recording's card comes from the files in the recordings folder that

@@ -17,8 +17,9 @@ hard-codes a handful of colors.
 its classes are the widgets.
 
 - **Tokens:** near-black surfaces in three steps, one line color, text in
-  three strengths. Red is the program and nothing else. Amber is off air or
-  cued and nothing else. Green is a healthy level. Blue is selection.
+  three strengths. Red is the program and nothing else. Amber is
+  everything that is not right and not on air: cued, off air, degraded, or
+  needing attention. Green is a healthy level. Blue is selection.
 - **Type:** three bundled faces under an open license: a condensed face for
   state and names (ON AIR, scene names, page names), a plain face for
   everything else, and a monospace for clocks and rates, whose digits must

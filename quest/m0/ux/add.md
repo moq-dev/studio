@@ -15,9 +15,10 @@ BUILD's Add tab shows what can be added as pictures, in the frames of
   each a card.
 
 A search field filters all of it, and a Recent row holds what was added
-lately. A card is added by a click or by dragging it onto the picture, where
-it lands under the pointer. The list refreshes itself when a device is
-plugged in or a window opens. No id is ever typed.
+lately. A card is added by dragging it onto the picture, where it lands under
+the pointer, or by selecting it and pressing one Add button. The list
+refreshes itself when a device is plugged in or a window opens. No id is ever
+typed.
 
 It replaces the Devices panel and the add-source form, where a window is
 chosen by typing its id.
@@ -33,6 +34,13 @@ chosen by typing its id.
   Screens sections are one button that opens the system's picker, and the
   choice is remembered: see the `system` frame and
   [Wayland sources](/quest/m0/wayland-sources.md).
+- Recommended, not decided: a click selects and a button adds, rather than a
+  click adding at once. A new layer is on air the moment it is added, and the
+  selected card's picture is the last check against airing the wrong window.
+- The inspector folds away while Add is open, since nothing is selected, so
+  the picture keeps its width.
+- The `apps` frame draws a "With its sound" switch. An app's own sound is not
+  captured today, so the switch is left out until moq can.
 - A card for something that cannot be added says why in its place (a kind
   this build lacks, a permission not granted) with the step that fixes it,
   rather than being absent.

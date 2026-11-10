@@ -31,6 +31,10 @@ The probes and the canvas choice are guided setup's
 - The templates are scene files in the repository with places for the
   picked camera, picture, and microphone, and each works with any of them
   missing.
+- Where the operating system owns the picker, step 2's screen or window is
+  the Add page's one button that opens it, not a row of thumbnails.
+- The `check` frame draws a failed check beside a passing one to show how it
+  reads; the screen shows one verdict.
 - Nothing is written until Start, as today, and the proposed scene is the
   first edit in the history.
 

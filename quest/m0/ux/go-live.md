@@ -47,6 +47,11 @@ opened by a double click, so none of that can stay a flag only.
   devices, the encoder's pace, and the uplink. The uplink probe runs against
   the relay about to be used and is skipped with its reason when a
   connection reports no estimate.
+- Recommended, not decided: a failed check never blocks going live. Its
+  sentence and its fix are advice, since a streamer on a bad connection may
+  still choose to go. Only having nothing to send, no destination switched
+  on, disables the confirm.
+- GO LIVE is not red. Red stays the on-air state alone.
 - **A replay of the program** needs the relay's cache, so off air it says so
   rather than failing.
 - **Recent shows** are kept per user. A show's picture is the last frame of
