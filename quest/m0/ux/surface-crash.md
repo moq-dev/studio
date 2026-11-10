@@ -22,10 +22,13 @@ and the UI share one device (`engine::Gpu`, handed to eframe as
 `WgpuSetup::Existing` in `rs/moq-studio/src/main.rs`), so the fix likely
 orders the engine's submissions against the surface's reconfigure.
 
-No single PR caused it: the shared device is as old as the app. It does not
-wait on the [toolkit spike](/quest/m0/ux/spike.md), since it is today's
-studio that crashes, but say in the PR whether the fix would survive a move
-off eframe.
+No single PR caused it: the shared device is as old as the app. It is not
+eframe's alone: the toolkit spike
+([moq-dev/studio#126](https://github.com/moq-dev/studio/pull/126)) hit the
+same error once in about 30 launches of its Slint page on `nixos`, whose
+winit window configures its own surface on the shared device. So fix it
+where the engine's submissions meet any window's reconfigure, and say in
+the PR how the fix carries to the toolkit chosen there.
 
 ## Related
 

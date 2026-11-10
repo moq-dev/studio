@@ -47,5 +47,4 @@ against amber.
 
 ## Required
 
-- [Toolkit spike](/quest/m0/ux/spike.md) - the toolkit the widgets are written for
 - [UI screenshots](/quest/m0/ux/shots.md) - the gallery's pictures

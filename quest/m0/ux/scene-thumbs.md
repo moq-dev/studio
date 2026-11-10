@@ -32,5 +32,5 @@ Measure, per AGENTS.md: frame time and GPU copies with zero, six, and thirty
 thumbnails shown, and that the program's render time does not move. Settle the
 size and rate from that.
 
-It does not wait on the [toolkit spike](/quest/m0/ux/spike.md): the texture is
-toolkit-free, and today's Scenes panel is its first consumer.
+It does not wait on the toolkit choice: the texture is toolkit-free, and
+today's Scenes panel is its first consumer.

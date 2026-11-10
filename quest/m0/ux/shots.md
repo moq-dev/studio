@@ -28,9 +28,13 @@ harness on 2026-11-09 that proves the shape and shows what is missing:
 
 So the app takes the view to show as an argument or an environment variable,
 and runs on a paused `kio::clock` with still sources for a screenshot. Which
-mechanism draws the picture follows the
-[toolkit spike](/quest/m0/ux/spike.md): a headless render inside the toolkit
-where it has one, a headless compositor otherwise. Either way the views are
+mechanism draws the picture follows the toolkit the
+[epic](/quest/m0/ux/README.md) chose: a headless render inside the toolkit
+where it has one, a headless compositor otherwise. The spike
+([moq-dev/studio#126](https://github.com/moq-dev/studio/pull/126)) found
+egui_kittest for egui, and Slint's testing backend with its wgpu renderer's
+`render_to_texture` for Slint; it built neither, and shot through headless
+sway with grim. Either way the views are
 named in one table that quests add to.
 
 AGENTS.md's rule stands: frame time is measured under a real compositor.
@@ -40,5 +44,4 @@ Human check: none. The maintainer reads the pictures in later PRs.
 
 ## Required
 
-- [Toolkit spike](/quest/m0/ux/spike.md) - which toolkit draws the views, and what its headless run can do
 - [The studio starts every time](/quest/m0/ux/surface-crash.md) - a launch that can crash cannot run in CI

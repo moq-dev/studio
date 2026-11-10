@@ -65,8 +65,9 @@ the mock-up in the same PR.
 - **Layout follows the picture:** the picture gets the largest rectangle the
   window allows, and the scenes and the sound take whichever side is left
   over. See the portrait and half-screen frames.
-- **Toolkit:** ✅ decided by [a spike](/quest/m0/ux/spike.md) of the LIVE page
-  in egui and in Slint before any page is built (rejected: staying on egui
+- **Toolkit:** ✅ decided by a spike of the LIVE page
+  ([moq-dev/studio#126](https://github.com/moq-dev/studio/pull/126)) in egui
+  and in Slint before any page is built (rejected: staying on egui
   unasked; egui against Rune, which
   [moq-dev/studio#98](https://github.com/moq-dev/studio/pull/98) already
   spiked). Only those two draw the compositor's own textures with no copy on
