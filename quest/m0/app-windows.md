@@ -24,8 +24,13 @@ the studio landed.
   [moq-dev/studio#85](https://github.com/moq-dev/studio/pull/85)) has not run
   there either.
 
+Decided 2026-11-09 (maintainer, /quest-audit): ✅ compiling for Windows is
+[its own quest](/quest/m0/windows-build.md) (rejected: folding it in here),
+since a hosted runner does it without the host this quest waits on.
+
 ## Required
 
+- [The studio builds for Windows in CI](/quest/m0/windows-build.md) - the crate compiling for Windows before it is run there
 - [nixos2 boots Windows for agents](/quest/m0/windows-host.md) - the Windows machine this runs on
 
 ## Related

@@ -6,7 +6,7 @@ A studio broadcast that publishes a source independently also carries a layer
 layout track. For each such source, it says where and when that source shows
 over the program: its transform, crop, z-order, opacity, and visibility, its
 item's keyframes and when its scene went on program, all on the media clock,
-and for audio its gain and mute. Until hang specifies it, the track is the
+and for audio its gain, mute, pan, and delay. Until hang specifies it, the track is the
 provisional `dev.moq.studio.layers` in the studio catalog.
 
 ## Plan
@@ -37,8 +37,15 @@ needs that effect baked into its track, or the option refused for it. Settle
 which here. Publishing a source independently refuses one with its
 background removed for now, since H.264 carries no transparency, so lifting
 that refusal is this track's call too. An audio source's track already carries its sound
-after its filters (decided 2026-11-02), so its layer carries only gain and
-mute.
+after its filters (decided 2026-11-02), so its layer carries what its strip
+applies after them: gain, mute, pan, and delay.
+
+Decided 2026-11-09 (maintainer, /quest-audit): ✅ an audio layer carries pan
+and delay as well as gain and mute (rejected: stating that a player drops
+them). Without the delay, a delayed microphone published independently plays
+out of sync with its camera. moq's
+[layer spec](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/spec.md) names only gain and mute today,
+and starts from the format the prototype settles.
 
 Items carry their keyframes (`moq_scene::Keyframe`), which play from when
 their scene went on program. The layout says when that was, so a late joiner

@@ -14,6 +14,14 @@ Decided 2026-11-08 (maintainer, /quest-plan): the controls land in the native
 player, the [watch prototype](/quest/m2/compose/watch.md) (rejected: browser
 only). moq's players take them from hang's layer spec.
 
+Decided 2026-11-09 (maintainer, /quest-audit): ✅ viewer toggles also land in
+moq's native player,
+[moq play composites layers](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/play.md)
+(rejected: leaving them to the prototype alone, which
+[hang-layers](/quest/m2/compose/hang-layers.md) deletes, so the native
+player's toggles would have no home). moq adds the toggles to that quest in
+its own tree.
+
 Map layer priority onto the subscription priorities moq-lite already has
 (`moq/doc/concept/moq-lite.md`), rather than a second mechanism. A toggled-off
 layer is unsubscribed, so it costs the viewer and the relay nothing. The

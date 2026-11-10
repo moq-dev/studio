@@ -4,8 +4,11 @@
 
 A broadcast, media, or replay source's sound plays at exactly the bus
 position its pictures are timed for. `rs/moq-scene`'s playout writes it
-through moq-audio's `Bus::positioned`, and its private copy of moq-audio's bus
-latency (`BUS_LATENCY`) and of the live ring's pad rule are deleted.
+through moq-audio's `Bus::positioned`, and its copy of the live ring's pad
+rule is deleted. How far ahead of its moment a sound is handed to the bus
+stays a constant the studio owns: today's `BUS_LATENCY`, renamed for what it
+is (such as `WRITE_LEAD`) and no longer a copy of moq-audio's private
+`bus::LATENCY`.
 
 Non-goals: the `Speaker`'s jitter targeting stays as it is, and live inputs
 (microphones, capture, guests) stay on `Bus::live`.
@@ -36,6 +39,20 @@ Decided with the maintainer:
   mixed, overlaps earlier audio, or lands past `bus::REACH`. The writer cuts
   the frames whose position has passed and writes the rest at its position,
   as today's writer does with a late part.
+
+Decided 2026-11-09 (maintainer, /quest-audit):
+
+- ✅ **Keep a studio-owned write lead** (rejected: deleting `BUS_LATENCY`
+  outright). The Goal deleted it while the `Speaker`'s targeting, a non-goal,
+  is built on it: `Speaker::place` sounds a frame `target + BUS_LATENCY`
+  after it arrives and re-buffers one that would follow less than half of it
+  away, and `source.rs` hands each sound over that far ahead of its moment
+  (`ahead`, the broadcast write loop, and where a media or replay play
+  begins). A positioned write needs that lead too: the bus mixes a block at a
+  time, and a write with any part already mixed fails. So the constant stays,
+  within `bus::REACH`. What goes is the `Writer`'s pad rule and the claim
+  that the constant is moq-audio's `bus::LATENCY`, which
+  `a_write_sounds_when_placed` pins today.
 
 Recommendations, not settled:
 
