@@ -271,20 +271,19 @@ const preset=(name,blocks,on)=>`<div class="al-pre ${on?'on':''}"><div>${blocks.
 const mvt=(name,inner,o={})=>`<div class="mv-t ${o.st||''}"><div class="th">${inner}</div><div class="mv-n">${o.key?`<kbd>${o.key}</kbd>`:I(o.icon,'sm')}<span class="grow">${name}</span>${o.st=='air'?'<em>ON AIR</em>':o.st=='cued'?'<em>NEXT</em>':o.live?'<i class="dot" style="background:var(--air)"></i>':''}</div></div>`;
 
 const V={
- 'autoplace':{label:'Camera auto-placement',cls:'Bd',note:'<b>Camera auto-placement.</b> With Keep out of the way on, the camera weighs a few slots against what matters on screen (the pointer, the focused window, motion, text) and glides to the clearest one. It decides on this machine and moves only when the content changes, so it never jitters.',
+ 'autoplace':{label:'Camera auto-placement',cls:'Bd',note:'<b>Camera auto-placement.</b> With Keep out of the way on, the camera weighs a few slots against what matters on screen (motion, text, a HUD that holds still) and glides to the clearest one. It decides on this machine and moves only when the content changes, so it never jitters.',
    html:()=>topbar('BUILD')+layersCol()+stg(pic('game'),{cls:'ap',
      over:`<div class="ap-o">
        <i class="ap-heat" style="left:-1%;top:4%;width:26%;height:21%"></i><i class="ap-heat" style="right:-2%;top:-3%;width:21%;height:36%"></i>
        <i class="ap-heat" style="left:32%;top:11%;width:36%;height:64%;opacity:.75"></i><i class="ap-heat" style="left:38%;bottom:-3%;width:25%;height:19%"></i>
-       <i class="ap-heat" style="left:-2%;bottom:0;width:31%;height:24%"></i><i class="ap-heat" style="left:13%;top:39%;width:14%;height:25%"></i>
+       <i class="ap-heat" style="left:-2%;bottom:0;width:31%;height:24%"></i>
        <i class="ap-slot" style="left:3%;top:6%"></i><i class="ap-slot" style="left:42.5%;top:6%"></i>
        <i class="ap-slot" style="left:3%;top:36.67%"></i><i class="ap-slot" style="right:3%;top:36.67%"></i>
        <i class="ap-slot" style="left:3%;bottom:6%"></i><i class="ap-slot" style="left:42.5%;bottom:6%"></i>
        <i class="ap-slot was" style="right:3%;top:6%"></i>
-       <span class="ap-hl" style="left:3%;top:18.5%">TEXT</span><span class="ap-hl" style="right:19%;top:3.5%">MOVING</span>
+       <span class="ap-hl" style="left:3%;top:18.5%">HUD</span><span class="ap-hl" style="right:19%;top:3.5%">MOVING</span>
        <span class="ap-hl" style="left:47%;top:67%">MOVING</span><span class="ap-hl" style="left:59.5%;bottom:5.5%">TEXT</span>
-       <span class="ap-hl" style="left:22%;bottom:21%">LAYER</span><span class="ap-hl" style="left:15.5%;top:59%">POINTER</span>
-       <div style="position:absolute;left:19%;top:48%">${CUR}</div>
+       <span class="ap-hl" style="left:22%;bottom:21%">LAYER</span>
        <svg class="ap-arrow" viewBox="0 0 1600 900" preserveAspectRatio="none"><path d="M1372 282C1240 380 1240 520 1364 614M1349.700 583.200 1364 614 1330.400 608.600"/></svg>
      </div>
      <span class="ap-note" style="right:19.500%;top:12%">Was here, over the map</span>
@@ -296,7 +295,7 @@ const V={
      const s=f.querySelectorAll('.side:not(.l) .sec');
      s[0].querySelector('.f').innerHTML='<span><em>X</em>1574</span><span><em>Y</em>727</span><span><em>W</em>288</span><span><em>H</em>288</span>';
      s[0].insertAdjacentHTML('beforeend',`<div class="ap-box"><span class="dim">Stays clear of</span>
-       <div class="ap-chips">${['Pointer','Focused window','Motion','Text'].map(n=>`<span class="chip">${I('check','sm')}${n}</span>`).join('')}</div>
+       <div class="ap-chips">${['Motion','Text','HUD'].map(n=>`<span class="chip">${I('check','sm')}${n}</span>`).join('')}</div>
        <div class="row" style="gap:10px"><div class="ap-grid"><i></i><i></i><i></i><i></i><i class="x"></i><i></i><i></i><i></i><i class="on"></i></div><div class="grow">Bottom right<small>Corners first</small></div><span class="chip">Glide · 0.4 s ▾</span></div>
        <span class="dim">Moves only when the content changes.</span></div>`);
      s[3].remove();s[2].style.border=0}},

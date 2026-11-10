@@ -22,9 +22,8 @@ ready; local first with a hosted model as an opt-in tie-breaker).
   on the GPU a few times a second: where it moves, where it is dense with
   edges and text, and what stays put while the rest moves, which is a HUD.
   The inspector says which of these it stays clear of, and each can be
-  switched off. The frame also draws the pointer and the focused window as
-  signals; moq reports neither a pointer nor a window's place on its
-  display, so they are left out unless its listing gains them.
+  switched off. It reads neither the pointer nor the focused window, since
+  moq reports neither a pointer nor a window's place on its display.
 - **What it decides:** the slot whose area matters least, among the corners
   and edge middles that fit the layer, inside the canvas's margins.
 - **When it moves:** when the scene changes, when the content under it
