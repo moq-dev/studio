@@ -4502,10 +4502,8 @@ mod tests {
 				.await
 				.expect("the marker");
 			while let Some(event) = sources.try_next() {
-				if let RouteEvent::Start(announce)
-				| RouteEvent::Update(announce)
-				| RouteEvent::Restart(announce)
-				| RouteEvent::Takeover { announce, .. } = event
+				if let RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) =
+					event
 				{
 					assert!(
 						announce.prefix.as_str() != "show" || announce.route.instance() != &newer,
@@ -4649,7 +4647,6 @@ mod tests {
 		loop {
 			let announce = match routes.next().await.expect("routes") {
 				RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) => announce,
-				RouteEvent::Takeover { announce, .. } => announce,
 				RouteEvent::End(_) => continue,
 			};
 			if announce.prefix.as_str() == "show" && announce.route.instance() == instance {

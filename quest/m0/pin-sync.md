@@ -14,8 +14,8 @@ stall does on it.
 Decided 2026-11-09 (maintainer, /quest-audit): ✅ crossing #8272 is this
 quest, after
 [Playout writes land on positioned bus channels](/quest/m0/playout-positioned.md)
-(rejected: crossing it in
-[pin-bus-positioned](/quest/m0/pin-bus-positioned.md)). Both rewrite
+(rejected: crossing it in the
+positioned bus pin). Both rewrite
 `playout.rs`, so the positioned work finishes on the API it was planned
 against, then this crosses.
 
