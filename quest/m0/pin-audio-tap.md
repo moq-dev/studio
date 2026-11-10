@@ -17,3 +17,7 @@ fixing whatever the new API breaks here.
   merged on moq's `main`, deleting its file, and `moq_audio::bus` there offers
   a tap of a source's samples with bus positions. A quest file that moved, or
   went away without its work landing, does not count.
+
+## Required
+
+- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - moq-dev/moq#8272, which no later pin can skip

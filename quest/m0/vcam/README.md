@@ -4,7 +4,7 @@
 
 The studio exposes the program or a published scene as a system camera, so video-call and
 conferencing apps, which offer no ingest API, can use it. The studio has one
-toggle per published scene, and each OS backend lands on its own.
+toggle for the program and one per published scene, and each OS backend lands on its own.
 
 ## Plan
 

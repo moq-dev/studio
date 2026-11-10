@@ -10,7 +10,7 @@ serves:
 - publishing over WebTransport through moq-net
 
 Browser sources are absent. So are RTMP and WHIP destinations. A page cannot
-open raw TCP, and moq-rtc's WHIP client binds native UDP sockets, so only MoQ
+open raw TCP, and moq-webrtc's WHIP client binds native UDP sockets, so only MoQ
 output remains. Each missing feature is hidden, not shown broken.
 
 The page lands in vertical slices: video first (camera and screen sources on
@@ -35,7 +35,23 @@ Decided 2026-11-04 (maintainer): a page has no local paths, so an image or
 media source's file comes from a browser file picker for the session, and
 resolving the scene file's paths in the browser is settled here.
 
+Decided 2026-11-09 (maintainer, /quest-audit): ✅ m2, with both pins
+(rejected: keep in m0). moq removed all WASM support on 2026-10-31, and its
+browser-backend quests
+([video](https://github.com/moq-dev/moq/blob/main/quest/m5/video-web.md),
+[audio](https://github.com/moq-dev/moq/blob/main/quest/m5/audio-web.md)) are
+deferred in its m5 with no other consumer. Nothing in moq's tree plans a
+browser WebTransport session for moq-net either, which the page publishes
+through, so this waits on one (see Waiting).
+
+## Waiting
+
+- moq-dev/moq: plans a browser WebTransport session for moq-net, the
+  transport the page publishes through. Check: a quest in moq's tree names
+  it. Then this quest gains a pin quest for it under `Required`, and this
+  item goes.
+
 ## Required
 
-- [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the video slice's capture, codecs, and GPU import
-- [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the audio slice's capture, playback, and codecs
+- [moq-video's browser backends are pinned](/quest/m2/pin-browser-video.md) - the video slice's capture, codecs, and GPU import
+- [moq-audio's browser backends are pinned](/quest/m2/pin-browser-audio.md) - the audio slice's capture, playback, and codecs

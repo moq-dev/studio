@@ -12,16 +12,25 @@ the studio landed.
 - System audio is `Unsupported` there until
   [Windows capture parity](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-windows.md)
   adds WASAPI loopback, so that quest runs it.
-- Build with `--features capture`, since a default build has image, color,
-  and broadcast sources only.
+- Build with `--features capture`, since a default build has no camera,
+  display, window, microphone, or system-audio sources.
 - Hotkeys, from [moq-dev/studio#84](https://github.com/moq-dev/studio/pull/84),
   only compiled for Windows so far: run the keypad keys, the refusal of
   keypad Enter (Windows' hotkey API cannot tell it from Enter), and a
   keyboard layout switch while a game has focus, which re-registers every
   binding on its physical key.
+- The effects setting's read of Windows' animation setting
+  (`rs/moq-studio/src/fx/motion.rs`, from
+  [moq-dev/studio#85](https://github.com/moq-dev/studio/pull/85)) has not run
+  there either.
+
+Decided 2026-11-09 (maintainer, /quest-audit): ✅ compiling for Windows is
+[its own quest](/quest/m0/windows-build.md) (rejected: folding it in here),
+since a hosted runner does it without the host this quest waits on.
 
 ## Required
 
+- [The studio builds for Windows in CI](/quest/m0/windows-build.md) - the crate compiling for Windows before it is run there
 - [nixos2 boots Windows for agents](/quest/m0/windows-host.md) - the Windows machine this runs on
 
 ## Related

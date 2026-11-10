@@ -29,3 +29,4 @@ and document it in `README.md`.
 ## Required
 
 - [Layer layout track](/quest/m2/compose/layout.md) - what the server flattens
+- [Destinations](/quest/m0/destinations.md) - the egress library the server pushes RTMP and WHIP through
