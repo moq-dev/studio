@@ -2,7 +2,7 @@
 
 ## Goal
 
-Each audio source's filter chain (gain, noise suppression, noise gate,
+Each audio source's filter chain (noise suppression, noise gate,
 compressor, limiter, ducking, and VST3 and CLAP plugins) is configured from
 the studio and saved with the scene collection. Ducking lowers one source
 (music) when another (the microphone) is active. A plugin that fails or keeps
@@ -19,8 +19,8 @@ each source's chain into the program bus.
 Each microphone's and system audio's own track encodes its capture, before
 the bus applies gain and mute (`Driver::listen` in
 `rs/moq-scene/src/source.rs`). The chain goes before that tap, so the track
-carries filtered sound, as video bakes in its ML effects (decided 2026-11-02,
-maintainer).
+carries filtered sound (decided 2026-11-02, maintainer), unlike a picture's
+track, which is its capture before any filter.
 
 The scene file names filters and their settings, never a plugin's absolute
 path, so a collection stays portable; a missing plugin loads as failed rather

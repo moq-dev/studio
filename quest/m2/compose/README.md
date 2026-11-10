@@ -51,7 +51,7 @@ land before replanning:
 
 Still settled from 2026-10-26: local sources are tracks in the studio's one
 broadcast, and guests stay their own broadcasts, named through the hang
-catalog's `contributions` references.
+catalog's `include` references.
 
 moq's side, in its own quest tree (m3): hang specifies a layer layout track,
 and `moq play` and `@moq/watch` composite it.

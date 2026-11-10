@@ -18,7 +18,7 @@ independent layers over it, rather than the full scene state; see the
 A JSON track in snapshot mode, so a late joiner gets the current state.
 Version it, and have a player refuse an unknown version loudly and play the
 program alone. Keep it free of local paths and credentials: layers name
-tracks and contribution references, never files.
+tracks and catalog `include` references, never files.
 
 Decided 2026-11-08 (maintainer, on
 [moq-dev/studio#117](https://github.com/moq-dev/studio/pull/117)): a

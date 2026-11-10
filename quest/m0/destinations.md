@@ -66,3 +66,7 @@ Decided 2026-10-22 with the maintainer:
 ## Required
 
 - [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - AAC on macOS and Windows
+
+## Related
+
+- [Server composition](/quest/m2/compose/server.md) - a source published independently leaves the program, so a destination shows it only once the server flattens it

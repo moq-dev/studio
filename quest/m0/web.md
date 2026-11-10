@@ -10,7 +10,7 @@ serves:
 - publishing over WebTransport through moq-net
 
 Browser sources are absent. So are RTMP and WHIP destinations. A page cannot
-open raw TCP, and moq-rtc's WHIP client binds native UDP sockets, so only MoQ
+open raw TCP, and moq-webrtc's WHIP client binds native UDP sockets, so only MoQ
 output remains. Each missing feature is hidden, not shown broken.
 
 The page lands in vertical slices: video first (camera and screen sources on

@@ -32,9 +32,8 @@ Manager); NixOS boots through systemd-boot on `nvme0n1p4`. The switch:
 
 ## Waiting
 
-- Maintainer: say nixos2 is free to reboot, once the Mesa trial is done. On
-  2026-11-08 it ran an interactive `codex` session (open since 2026-11-06), a
-  `codex app-server`, and a rind `astro dev` server, and an agent cannot tell
+- Maintainer: say nixos2 is free to reboot. On 2026-11-09 it ran a Claude
+  Code session and a rind worktree's node process, and an agent cannot tell
   whether such work is finished. Check: the maintainer says so, or `w` and
   `ps` on nixos2 show no other session's work.
 - Maintainer: at nixos2's console once it boots Windows, turn on OpenSSH

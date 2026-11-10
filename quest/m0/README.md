@@ -29,9 +29,8 @@ Decided 2026-10-22 with the maintainer (/quest-plan):
   feature, gpui has no wgpu on macOS or Windows, and Tauri is a webview. The
   app owns the wgpu device.
 - **Compositor:** a UI-free crate, `rs/moq-scene`: scene graph, sources,
-  transforms, transitions, and canvases on wgpu. The program audio bus goes
-  in moq-audio, whose only mixer today is output-only
-  (`rs/moq-audio/src/playback/mixer.rs`). Both grow slice by slice with the
+  transforms, transitions, and canvases on wgpu. The program audio bus is
+  moq-audio's `bus` module. Both grow slice by slice with the
   studio UI that consumes them, never ahead of it.
 - **Outputs:** the studio publishes to MoQ and pushes every RTMP(S) and WHIP
   destination itself. It remuxes its own broadcast through a UI-free egress
@@ -76,9 +75,10 @@ broadcast reaches viewers, not the fallback. Sources are not published to the
 relay by default (decided 2026-11-03 on
 [moq-dev/studio#21](https://github.com/moq-dev/studio/pull/21)), because
 each encoding costs an encoder session and consumer GPUs have few, so the
-[viewer-side composition](/quest/m2/compose/README.md) epic moved to m1.
-Overlays and animation render into the program here, and travel to viewers
-in the layout track only once that epic lands.
+[viewer-side composition](/quest/m2/compose/README.md) epic left m0 (now m2,
+replanned 2026-11-08 around independently published sources layered over the
+program). Overlays and animation render into the program here; that epic's
+layout track carries only the layers of independently published sources.
 
 Dropped from the first scoping round: relay fan-out ("encode once, the relay
 restreams") and its upload savings. Direct push with shared encoders matches
@@ -102,7 +102,7 @@ repository.
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
 - [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - moq-audio's AAC encoders, for destinations
 - [moq-audio's filter chain is pinned](/quest/m0/pin-audio-filters.md) - the chain audio filters configure
-- [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice and browser composition
+- [moq-video's browser backends are pinned](/quest/m0/pin-browser-video.md) - the web studio's video slice
 - [moq-audio's browser backends are pinned](/quest/m0/pin-browser-audio.md) - the web studio's audio slice
 - [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
 - [Playout writes land on positioned bus channels](/quest/m0/playout-positioned.md) - broadcast, media, and replay sound at the bus position its pictures are timed for

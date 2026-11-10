@@ -12,7 +12,8 @@ when a consumer appears. Publishing a source independently and viewer-side
 composition moved on to [m3](/quest/m3/README.md) on 2026-11-07 (maintainer):
 no customer asks for them. They came back to m2 on 2026-11-08 (maintainer,
 /quest-plan), replanned around players that composite independent sources
-over the program.
+over the program. Publishing a source independently shipped the same day
+([moq-dev/studio#117](https://github.com/moq-dev/studio/pull/117)).
 
 ## Required
 
