@@ -12,7 +12,8 @@ sdk-extensions:
 command: moq-studio
 finish-args:
   - --socket=wayland
-  - --socket=fallback-x11
+  # X11 even on Wayland, since display and window sources capture XWayland.
+  - --socket=x11
   - --share=ipc
   # The GPU, for compositing and the VAAPI and NVIDIA codecs.
   - --device=dri
