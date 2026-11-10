@@ -66,10 +66,11 @@ the mock-up in the same PR.
   window allows, and the scenes and the sound take whichever side is left
   over. See the portrait and half-screen frames.
 - **Toolkit:** ✅ decided by [a spike](/quest/m0/ux/spike.md) of the LIVE page
-  in egui and in Rune before any page is built (rejected: staying on egui
-  unasked; moving to Rune unasked). Dropping the dock removes one of the costs
-  [moq-dev/studio#98](https://github.com/moq-dev/studio/pull/98) found in
-  Rune, and none of the others.
+  in egui and in Slint before any page is built (rejected: staying on egui
+  unasked; egui against Rune, which
+  [moq-dev/studio#98](https://github.com/moq-dev/studio/pull/98) already
+  spiked). Only those two draw the compositor's own textures with no copy on
+  the studio's own device today.
 - **Milestones:** ✅ redesigning what exists is m0, here. Features that do not
   exist yet are [m1](/quest/m1/README.md), and three more are
   [m2](/quest/m2/README.md) (rejected: all in m0; all in m1).

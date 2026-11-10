@@ -90,7 +90,8 @@ Changed 2026-11-09 with the maintainer (/quest-plan): the studio gets one
 designed layout, a live picture with pages around it, in place of sixteen
 dockable panels; see [Broadcaster UX](/quest/m0/ux/README.md). Docking no
 longer argues for a toolkit, so that epic's spike decides it again between
-egui and Rune.
+egui and Slint, the two that draw the compositor's textures with no copy on
+the studio's own device.
 
 Dropped from the first scoping round: relay fan-out ("encode once, the relay
 restreams") and its upload savings. Direct push with shared encoders matches
