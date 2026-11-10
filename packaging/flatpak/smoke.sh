@@ -11,7 +11,9 @@ set -euo pipefail
 if [[ -z ${STUDIO_SMOKE:-} ]]; then
     XDG_RUNTIME_DIR=$(mktemp -d)
     export XDG_RUNTIME_DIR STUDIO_SMOKE=1
-    trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+    # The document portal mounts itself in the runtime directory and can still
+    # be unmounting as the bus ends; it may also be gone already.
+    trap 'fusermount3 -uz "$XDG_RUNTIME_DIR/doc" 2>/dev/null || true; rm -rf "$XDG_RUNTIME_DIR"' EXIT
     dbus-run-session -- "$0" "$@"
     exit
 fi
@@ -58,8 +60,7 @@ SWAYSOCK=$(compgen -G "$runtime/sway-ipc.*.sock")
 WAYLAND_DISPLAY=$(basename "$(compgen -G "$runtime/wayland-*[0-9]")")
 export SWAYSOCK WAYLAND_DISPLAY
 
-# The document portal's mount would outlive the session and its directory.
-flatpak run --no-documents-portal --env=NO_COLOR=1 --command=moq-studio-desktop live.kixel.studio 2>"$log" &
+flatpak run --env=NO_COLOR=1 --command=moq-studio-desktop live.kixel.studio 2>"$log" &
 studio=$!
 pids+=("$studio")
 
