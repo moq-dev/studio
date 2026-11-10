@@ -24,4 +24,4 @@ Moved to m2 with the [web studio](/quest/m2/web.md) on 2026-11-09
 
 ## Required
 
-- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - moq-dev/moq#8272, which no later pin can skip
+- [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes since moq-dev/moq#8272, so this pin takes only its own
