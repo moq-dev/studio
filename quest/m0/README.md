@@ -114,6 +114,7 @@ repository.
 - [Playout writes land on positioned bus channels](/quest/m0/playout-positioned.md) - broadcast, media, and replay sound at the bus position its pictures are timed for
 - [moq-audio's positioned bus channel is pinned](/quest/m0/pin-bus-positioned.md) - `Bus::positioned`, which playout writes through
 - [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - `moq_mux::sync` in place of `moq_mux::timeline`, which every later pin crosses
+- [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes past #8272 in one PR, so each later pin stays small
 
 ## Related
 
