@@ -83,6 +83,7 @@ impl Studio {
 		let helper = Helper::new(program, profile, &adapter, &device, &queue);
 		let mut sources = Sources::new(Context {
 			bus,
+			bus_start: kio::clock::now(),
 			origin: origin.consume(),
 			dir: dir.path().to_path_buf(),
 			output: moq_video::render::output(&device),

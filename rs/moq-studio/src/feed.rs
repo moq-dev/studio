@@ -322,6 +322,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let mut sources = Sources::new(moq_scene::source::Context {
 			bus: bus.clone(),
+			bus_start: kio::clock::now(),
 			origin: origin.consume(),
 			dir: ".".into(),
 			output: moq_video::Output::Cpu,

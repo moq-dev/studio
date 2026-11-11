@@ -2195,7 +2195,7 @@ mod tests {
 
 	use super::*;
 	use crate::collection::{Blend, MaskMode, Rgba, Scene, Size, Video};
-	use crate::source::test::{context, listen, local, start, until, until_time};
+	use crate::source::test::{context, local, start, until, until_time};
 
 	/// A fade over a second.
 	const FADE: Transition = Transition::Fade {
@@ -2256,15 +2256,29 @@ mod tests {
 		collection
 	}
 
-	/// A compositor over running sources, read back to check pixels.
+	/// Mix the bus sample-exact on the clock from `start`, as the program's
+	/// audio clock does.
+	async fn mix(mut mixer: moq_audio::bus::Driver, start: Instant) {
+		let rate = u128::from(moq_audio::bus::Config::default().sample_rate);
+		let mut clock = kio::clock::interval_at(start, Duration::from_millis(10));
+		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
+		let mut mixed = 0;
+		loop {
+			let tick = clock.tick().await;
+			let due = tick.saturating_duration_since(start).as_nanos() * rate / 1_000_000_000;
+			mixer.advance((due - mixed) as usize);
+			mixed = due;
+		}
+	}
+
+	/// A compositor over running sources, read back to check pixels, whose
+	/// sound mixes along with the clock.
 	pub(super) struct Studio {
 		pub(super) collection: Collection,
 		pub(super) sources: Sources,
 		pub(super) compositor: Compositor,
 		pub(super) device: wgpu::Device,
 		queue: wgpu::Queue,
-		/// Mixes the sources' sound, only as a test advances it.
-		mixer: moq_audio::bus::Driver,
 		_origin: moq_net::origin::Producer,
 		_dir: tempfile::TempDir,
 	}
@@ -2281,6 +2295,7 @@ mod tests {
 			context.output = moq_video::render::output(&device);
 			let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
 			context.bus = bus;
+			tokio::task::spawn_local(mix(mixer, context.bus_start));
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
@@ -2290,10 +2305,20 @@ mod tests {
 				queue,
 				collection,
 				sources,
-				mixer,
 				_origin: origin,
 				_dir: dir,
 			}
+		}
+
+		/// The loudest `mix` gets from now until `until`.
+		async fn hear(mix: &moq_audio::bus::Mix, until: Instant) -> f32 {
+			mix.level();
+			let mut loudest = 0.0f32;
+			while Instant::now() < until {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+				loudest = loudest.max(mix.level().peak());
+			}
+			loudest
 		}
 
 		pub(super) fn render(&mut self, now: Instant) {
@@ -3219,8 +3244,6 @@ mod tests {
 		local(async {
 			let mut studio = stinging(crate::media::tests::CLIP).await;
 			let program = studio.sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
-			let mut at = Instant::now();
-			studio.mixer.advance(480);
 			let transition = studio.collection.transition.clone();
 			studio
 				.compositor
@@ -3228,8 +3251,7 @@ mod tests {
 				.unwrap();
 			loop {
 				studio.render(Instant::now());
-				let until = at + Duration::from_millis(10);
-				if listen(&mut studio.mixer, &program, &mut at, until).await > 0.0 {
+				if Studio::hear(&program, Instant::now() + Duration::from_millis(10)).await > 0.0 {
 					break;
 				}
 			}
@@ -3239,8 +3261,7 @@ mod tests {
 			while feed.status() != Status::Ended {
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			}
-			let until = at + Duration::from_millis(500);
-			let heard = listen(&mut studio.mixer, &program, &mut at, until).await;
+			let heard = Studio::hear(&program, Instant::now() + Duration::from_millis(500)).await;
 			assert_eq!(heard, 0.0, "the clip's sound stops with the cut");
 
 			// Stopped from the Sources panel, the stinger ends with it.
@@ -3274,16 +3295,14 @@ mod tests {
 				.unwrap();
 			while studio.compositor.transitioning() {
 				studio.render(Instant::now());
-				let until = at + Duration::from_millis(10);
-				listen(&mut studio.mixer, &program, &mut at, until).await;
+				Studio::hear(&program, Instant::now() + Duration::from_millis(10)).await;
 			}
 			let feed = studio.sources.get("sting").unwrap();
 			assert!(feed.run().ended.is_some(), "after its first pass");
 			while feed.status() != Status::Ended {
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			}
-			let until = at + Duration::from_millis(500);
-			let heard = listen(&mut studio.mixer, &program, &mut at, until).await;
+			let heard = Studio::hear(&program, Instant::now() + Duration::from_millis(500)).await;
 			assert_eq!(heard, 0.0, "the loop stops with the stinger");
 		})
 		.await;
