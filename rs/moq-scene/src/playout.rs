@@ -172,14 +172,28 @@ impl Drop for Speaker<'_> {
 	}
 }
 
+/// How soon a picture waiting on a stalled playhead looks at it again: a
+/// playhead fed by nothing moves only when audio arrives, which tells no one
+/// reading the clock but the broadcast's own pictures.
+const RECHECK: Duration = Duration::from_millis(10);
+
 /// Whether a picture stamped `timestamp` may show at `now` on `schedule`:
 /// while audio plays, only once the sound stamped with it has played, so a
 /// stall in the audio alone holds the picture too.
-pub(crate) fn heard(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: Instant) -> bool {
+pub fn heard(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: Instant) -> bool {
 	schedule.target().is_none()
 		|| schedule
 			.playhead(now)
 			.is_some_and(|head| Duration::from(timestamp) <= head + CONTIGUOUS)
+}
+
+/// When to look again at whether a picture stamped `timestamp`, which
+/// [`heard`] holds at `now`, may show: once the playhead could have reached it
+/// at wall rate, and at least [`RECHECK`] later while it does not move.
+pub(crate) fn hearing(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: Instant) -> Instant {
+	let head = schedule.playhead(now).unwrap_or_default();
+	let ahead = Duration::from(timestamp).saturating_sub(head + CONTIGUOUS);
+	now + ahead.max(RECHECK)
 }
 
 /// Writes placed frames into a bus channel, so each sounds when it was placed.

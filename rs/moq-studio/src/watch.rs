@@ -89,7 +89,6 @@ pub fn run(client: moq_tokio::connect::Config, quic: moq_tokio::quic::Config, ur
 		collection,
 		synced: false,
 		layout: None,
-		start: None,
 		size: None,
 		sources,
 		compositor,
@@ -160,6 +159,15 @@ struct Read {
 }
 
 impl Read {
+	/// Forget what an instance of the broadcast said, as another replaces it
+	/// or it goes offline: its stamps are not the next one's.
+	fn reset(&mut self) {
+		self.size = None;
+		self.refused = None;
+		self.pending.clear();
+		self.pending.push_back((None, None));
+	}
+
 	/// Queue `layout` to take effect at `at`. The program plays at most
 	/// [`MAX_DELAY`] behind what arrives, so of the layouts stamped that far
 	/// before it, all due by now, only the newest is kept.
@@ -190,8 +198,14 @@ async fn follow(origin: moq_net::origin::Consumer, read: watch::Sender<Read>) {
 	loop {
 		tokio::select! {
 			event = instances.available() => match event {
-				Ok(Some(broadcast)) => playing = Some(Box::pin(instance(broadcast, read.clone()))),
-				Ok(None) => playing = None,
+				Ok(Some(broadcast)) => {
+					read.send_modify(Read::reset);
+					playing = Some(Box::pin(instance(broadcast, read.clone())));
+				}
+				Ok(None) => {
+					read.send_modify(Read::reset);
+					playing = None;
+				}
 				Err(err) => {
 					tracing::error!(%err, "the broadcast's announcements failed");
 					return;
@@ -317,9 +331,6 @@ struct Watch {
 	synced: bool,
 	/// The layout in effect, or `None` for the program alone.
 	layout: Option<Layout>,
-	/// When the program scene's keyframes play from, as the layout in effect
-	/// set it.
-	start: Option<Duration>,
 	/// The program's size, from its catalog.
 	size: Option<(u32, u32)>,
 	sources: Sources,
@@ -343,10 +354,9 @@ impl Watch {
 			while let Some((_, at)) = read.pending.front() {
 				let due = match at {
 					None => true,
-					Some(at) => schedule
-						.as_ref()
-						.and_then(|schedule| schedule.due(*at))
-						.is_some_and(|due| due <= now),
+					Some(at) => schedule.as_ref().is_some_and(|schedule| {
+						schedule.due(*at).is_some_and(|due| due <= now) && source::heard(schedule, *at, now)
+					}),
 				};
 				if !due {
 					break;
@@ -389,15 +399,18 @@ impl Watch {
 			self.synced = true;
 		}
 
-		// A new start is a scene taken, whose keyframes play from it.
-		let start = self.layout.as_ref().map(|layout| layout.start);
-		if start != self.start
-			&& let Some(start) = start
-			&& let Ok(stamp) = moq_net::Timestamp::try_from(start)
-			&& let Some(due) = schedule.as_ref().and_then(|schedule| schedule.due(stamp))
-		{
-			self.compositor.set_program_start(due);
-			self.start = Some(start);
+		// The keyframes play from `start` as far as the program has played,
+		// following the clock as it re-anchors or stalls with the sound.
+		if let (Some(layout), Some(schedule)) = (&self.layout, &schedule) {
+			let went_on = match schedule.playhead(now) {
+				Some(head) => now.checked_sub(head.saturating_sub(layout.start)),
+				None => moq_net::Timestamp::try_from(layout.start)
+					.ok()
+					.and_then(|start| schedule.due(start)),
+			};
+			if let Some(went_on) = went_on {
+				self.compositor.set_program_start(went_on);
+			}
 		}
 
 		self.compositor.render(&self.collection, &self.sources, now)?;
@@ -552,6 +565,19 @@ mod tests {
 		read.push(None, Some(stamp(5)));
 		let stamps: Vec<_> = read.pending.iter().map(|(_, at)| *at).collect();
 		assert_eq!(stamps, [Some(stamp(3)), Some(stamp(4)), Some(stamp(5))]);
+	}
+
+	/// Another instance of the broadcast starts from nothing: the last one's
+	/// stamps and refusal are not its own.
+	#[test]
+	fn a_new_instance_forgets_the_last() {
+		let mut read = Read::default();
+		read.push(None, Some(stamp(1)));
+		read.refused = Some("another version".into());
+		read.reset();
+		assert_eq!(read.pending.len(), 1);
+		assert!(read.pending[0].0.is_none() && read.pending[0].1.is_none());
+		assert!(read.size.is_none() && read.refused.is_none());
 	}
 
 	/// A layout of another version, as a newer studio would publish.

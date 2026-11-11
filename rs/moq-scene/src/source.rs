@@ -31,8 +31,8 @@ use crate::browser::Page;
 use crate::collection::{Collection, Source};
 use crate::lut::Cube;
 use crate::media::Clip;
-pub use crate::playout::MAX_DELAY;
 use crate::playout::{BUS_LATENCY, Place, Speaker, VIDEO_DELAY, Writer};
+pub use crate::playout::{MAX_DELAY, heard};
 use crate::publish::{Claim, Listing, Publish, Still};
 use crate::replay::{MIN_SPEED, Take, Target};
 
@@ -1213,9 +1213,8 @@ impl Driver {
 	}
 
 	/// Show each picture once `schedule`, another track's clock, says it is
-	/// due, the newest due one when several are, as
-	/// [`play_video`](Self::play_video) does, except that a picture waits only
-	/// for its moment, not for its sound.
+	/// due and its sound stamped alike has played, the newest such one when
+	/// several are, as [`play_video`](Self::play_video) does.
 	async fn follow_video(
 		&self,
 		broadcast: &moq_net::broadcast::Consumer,
@@ -1235,24 +1234,34 @@ impl Driver {
 		let mut ended = false;
 		loop {
 			let now = kio::clock::now();
-			if let Some(index) = schedule.present(queue.iter().map(|frame| frame.timestamp), now) {
+			// Counted first: `present` holds the clock's lock while it iterates.
+			let heard_count = queue
+				.iter()
+				.take_while(|frame| heard(schedule, frame.timestamp, now))
+				.count();
+			let ready = queue.iter().take(heard_count).map(|frame| frame.timestamp);
+			if let Some(index) = schedule.present(ready, now) {
 				let frame = queue.drain(..=index).next_back().expect("an index into the queue");
 				self.show(Picture::Frame(frame));
 			}
 			if ended && queue.is_empty() {
 				return Ok(());
 			}
-			let due = queue
-				.front()
-				.and_then(|frame| schedule.due(frame.timestamp))
-				.filter(|due| *due > now);
+			// Its moment, or once due, when its sound may have played.
+			let wake = queue.front().and_then(|frame| match schedule.due(frame.timestamp) {
+				Some(due) if due > now => Some(due),
+				_ if !heard(schedule, frame.timestamp, now) => {
+					Some(crate::playout::hearing(schedule, frame.timestamp, now))
+				}
+				_ => None,
+			});
 			tokio::select! {
 				read = consumer.read(), if !ended && queue.len() < QUEUED => match read? {
 					Some(moq_video::decode::Read::Frame(frame)) => queue.push_back(frame),
 					Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => {}
 					None => ended = true,
 				},
-				() = kio::clock::sleep_until(due.unwrap_or(now)), if due.is_some() => {}
+				() = kio::clock::sleep_until(wake.unwrap_or(now)), if wake.is_some() => {}
 			}
 		}
 	}
