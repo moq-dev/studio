@@ -4,7 +4,7 @@
 
 A guest's broadcast source can be published independently, like a local
 source: the program leaves it out, and the provisional
-`dev.moq.studio.layers` layout track names the guest's broadcast so a player
+`live.kixel.studio.layers` layout track names the guest's broadcast so a player
 places it over the program, and mixes its sound, at the right time.
 
 ## Plan
@@ -12,7 +12,7 @@ places it over the program, and mixes its sound, at the right time.
 The layout track itself landed for local sources: `rs/moq-scene/src/layout.rs`
 and the README's "Layer layout". A guest stays its own broadcast (settled
 2026-10-26), so its layer names that broadcast rather than an entry under the
-catalog's `dev.moq.studio` `sources`, and carries what a player needs to put
+catalog's `live.kixel.studio` `sources`, and carries what a player needs to put
 the guest's frames on the program's media clock. Today
 `Source::publishes` refuses a broadcast source, since it has no track in the
 studio's broadcast.
