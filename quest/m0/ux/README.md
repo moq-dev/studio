@@ -65,13 +65,15 @@ the mock-up in the same PR.
 - **Layout follows the picture:** the picture gets the largest rectangle the
   window allows, and the scenes and the sound take whichever side is left
   over. See the portrait and half-screen frames.
-- **Toolkit:** ✅ decided by a spike of the LIVE page
-  ([moq-dev/studio#126](https://github.com/moq-dev/studio/pull/126)) in egui
-  and in Slint before any page is built (rejected: staying on egui
-  unasked; egui against Rune, which
-  [moq-dev/studio#98](https://github.com/moq-dev/studio/pull/98) already
-  spiked). Only those two draw the compositor's own textures with no copy on
-  the studio's own device today.
+- **Toolkit:** ✅ egui draws the views, without `egui_dock` (rejected:
+  Slint; defer until a Slint release takes femtovg 0.28). A spike of the LIVE
+  page in both ([moq-dev/studio#126](https://github.com/moq-dev/studio/pull/126))
+  measured egui's UI CPU at about 0.5 ms a frame, against Slint's 12 to 16 ms
+  as released and 3 to 5 ms with femtovg's pipeline cache patched. Patched
+  Slint also made the program render about four times slower, and Slint's
+  licenses require GPLv3 or attribution with an embedded ban. egui's gaps
+  (SVG icons, gradients) are painter work the [kit](/quest/m0/ux/kit.md)
+  owns.
 - **Milestones:** ✅ redesigning what exists is m0, here. Features that do not
   exist yet are [m1](/quest/m1/README.md), and three more are
   [m2](/quest/m2/README.md) (rejected: all in m0; all in m1).

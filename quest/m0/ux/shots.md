@@ -27,14 +27,13 @@ harness on 2026-11-09 that proves the shape and shows what is missing:
   [The studio starts every time](/quest/m0/ux/surface-crash.md).
 
 So the app takes the view to show as an argument or an environment variable,
-and runs on a paused `kio::clock` with still sources for a screenshot. Which
-mechanism draws the picture follows the toolkit the
-[epic](/quest/m0/ux/README.md) chose: a headless render inside the toolkit
-where it has one, a headless compositor otherwise. The spike
-([moq-dev/studio#126](https://github.com/moq-dev/studio/pull/126)) found
-egui_kittest for egui, and Slint's testing backend with its wgpu renderer's
-`render_to_texture` for Slint; it built neither, and shot through headless
-sway with grim. Either way the views are
+and runs on a paused `kio::clock` with still sources for a screenshot. The
+[epic](/quest/m0/ux/README.md) chose egui, so the picture comes from
+[`egui_kittest`](https://crates.io/crates/egui_kittest), which renders
+headless on wgpu, finds widgets through the AccessKit tree, and compares
+snapshots. It needs egui 0.37, which the studio reaches once `egui_dock`
+(pinned to 0.36) is gone; until then the spike's headless sway with grim
+still works. Either way the views are
 named in one table that quests add to.
 
 AGENTS.md's rule stands: frame time is measured under a real compositor.
