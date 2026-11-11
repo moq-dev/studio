@@ -8,8 +8,8 @@ from one set of tokens, and its controls are its own widgets, drawn as the
 it at once, and a gallery view shows every widget in every state, in the
 [screenshots](/quest/m0/ux/shots.md).
 
-Today the app sets no fonts, style, or visuals, has no icon anywhere, and
-hard-codes a handful of colors.
+Today the app sets no fonts, style, or visuals, draws no icons in its panels,
+and hard-codes a handful of colors.
 
 ## Plan
 

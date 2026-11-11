@@ -46,6 +46,10 @@ await() {
     done
 }
 
+# The menu entry finds its icon only where Flatpak exports it.
+icon=$(flatpak info --show-location live.kixel.studio)/export/share/icons/hicolor/scalable/apps/live.kixel.studio.svg
+[[ -f $icon ]] || fail "the Flatpak exports no icon at $icon"
+
 pipewire &
 pids+=("$!")
 await "$!" "$runtime/pipewire-0"
@@ -75,10 +79,10 @@ done
 
 # Setup lists the devices before its window opens.
 deadline=$((SECONDS + 120))
-until swaymsg -t get_tree | grep -q '"app_id": "moq-studio"'; do
+until swaymsg -t get_tree | grep -q '"app_id": "live.kixel.studio"'; do
     kill -0 "$studio" || fail "the studio exited before its window opened"
     ((SECONDS < deadline)) || fail "the studio's window never opened"
     sleep 0.1
 done
-swaymsg '[app_id="moq-studio"] kill' >/dev/null
+swaymsg '[app_id="live.kixel.studio"] kill' >/dev/null
 wait "$studio" || fail "the studio did not quit cleanly when its window closed"

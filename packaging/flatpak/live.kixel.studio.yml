@@ -40,6 +40,7 @@ modules:
       - install -Dm755 target/release/moq-studio /app/bin/moq-studio
       - install -Dm755 packaging/flatpak/moq-studio-desktop.sh /app/bin/moq-studio-desktop
       - install -Dm644 packaging/flatpak/live.kixel.studio.desktop /app/share/applications/live.kixel.studio.desktop
+      - install -Dm644 packaging/live.kixel.studio.svg /app/share/icons/hicolor/scalable/apps/live.kixel.studio.svg
     sources:
       - type: dir
         path: ../..

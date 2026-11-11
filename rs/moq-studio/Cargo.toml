@@ -126,6 +126,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # reduce motion, for the effects.
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
+[build-dependencies]
+# Rasterizes the app icon's SVG for the window. No text or embedded images, so
+# neither feature.
+resvg = { version = "0.50", default-features = false }
+
 [dev-dependencies]
 # A clock that moves wall time too, which renewed tokens' expiries read.
 kio = { workspace = true, features = ["manual"] }

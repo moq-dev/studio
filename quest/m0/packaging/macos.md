@@ -24,6 +24,10 @@ Lay the bundle out and order the signing so nested code can be added: a
 system extension and CEF's helper apps are each signed before the app that
 holds them.
 
+The bundle's icon is an `.icns` that the build generates from
+`packaging/live.kixel.studio.svg`, the only drawn copy, and `Info.plist`
+names; never check the `.icns` in.
+
 ## Waiting
 
 - moq-dev/moq: a Mac camera renders only once AVFoundation asks for NV12 instead of `2vuy`, in review as [moq-dev/moq#8251](https://github.com/moq-dev/moq/pull/8251); done when it merges, `just upgrade-moq` bumps the gitlink here, and a Mac camera shows its picture in program
