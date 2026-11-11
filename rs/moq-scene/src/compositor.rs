@@ -53,12 +53,17 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// A [`Source::Program`] shows the program texture itself, drawn before
 /// anything showing it.
 ///
+/// A source published independently is left out of every texture, and drawn
+/// only as its [layer layout](crate::layout) places it: over the program, in
+/// [`layered`](Self::layered), and over the scene in preview, so each shows
+/// what viewers see.
+///
 /// A [`Thumbnail`] is drawn only while [`set_thumbnails`](Self::set_thumbnails)
 /// names it, into a texture of its own of at most 256 pixels a
 /// side, redrawn about five times a second on the program
 /// clock, each on a render of its own so a strip of them spreads its cost. A
-/// scene on program, or drawn for an output, is sampled from that texture
-/// rather than drawn again. Thumbnails reach nothing else, and open no
+/// scene on program is sampled from [`layered`](Self::layered), and one drawn
+/// for an output from that output's texture, rather than drawn again. Thumbnails reach nothing else, and open no
 /// source: one shows what the collection's sources already deliver.
 pub struct Compositor {
 	device: wgpu::Device,
@@ -100,6 +105,10 @@ pub struct Compositor {
 	/// How long the preview scene had been in preview as of the last render:
 	/// the moment of its keyframes the preview texture shows.
 	preview_shown: Duration,
+	/// How long the program scene had been on program as of the last render.
+	program_shown: Duration,
+	/// Whether the last render drew layers over the program.
+	layered: bool,
 	switch: Option<Switch>,
 }
 
@@ -113,6 +122,9 @@ struct Program {
 	incoming: Target,
 	/// The scene going out, drawn whole to slide it off the canvas.
 	outgoing: Target,
+	/// The program with the layers of each source published independently
+	/// over it, made once a render first draws one.
+	layered: Option<Target>,
 }
 
 impl Program {
@@ -123,6 +135,7 @@ impl Program {
 			program: target("moq-scene program"),
 			incoming: target("moq-scene incoming"),
 			outgoing: target("moq-scene outgoing"),
+			layered: None,
 		}
 	}
 }
@@ -381,6 +394,8 @@ impl Compositor {
 			preview_start: None,
 			program_start: None,
 			preview_shown: Duration::ZERO,
+			program_shown: Duration::ZERO,
+			layered: false,
 			switch: None,
 		})
 	}
@@ -417,7 +432,8 @@ impl Compositor {
 
 	/// The scene in preview, at its own size, as of the last
 	/// [`render`](Self::render), under the top layer when it is the program's
-	/// size.
+	/// size, with the pictures of their [layer layout](crate::layout) over
+	/// both.
 	pub fn preview(&self) -> &wgpu::Texture {
 		&self.preview.texture
 	}
@@ -444,6 +460,24 @@ impl Compositor {
 	/// encoder.
 	pub fn program(&self) -> &wgpu::Texture {
 		&self.program.program.texture
+	}
+
+	/// The program as viewers see it, as of the last [`render`](Self::render):
+	/// with each picture of its [layer layout](crate::layout) over it, or the
+	/// [`program`](Self::program) itself while it has none showing. Created
+	/// as the program is.
+	pub fn layered(&self) -> &wgpu::Texture {
+		match &self.program.layered {
+			Some(layered) if self.layered => &layered.texture,
+			_ => self.program(),
+		}
+	}
+
+	/// How long the program scene had been on program as of the last
+	/// [`render`](Self::render): the moment of its items' keyframes the
+	/// program shows, and the layer layout's pictures play from.
+	pub fn program_since(&self) -> Duration {
+		self.program_shown
 	}
 
 	/// Keep the scenes `outputs` names as outputs from now on, each with
@@ -746,6 +780,7 @@ impl Compositor {
 		let preview_since = now.saturating_duration_since(preview_start);
 		self.preview_shown = preview_since;
 		let program_since = now.saturating_duration_since(program_start);
+		self.program_shown = program_since;
 
 		let preview = On(self.preview_scene.as_deref(), preview_since);
 		let program = On(self.program_scene.as_deref(), program_since);
@@ -824,6 +859,16 @@ impl Compositor {
 		let nesting = Nesting::of(collection, roots.chain(wholes));
 		let targets = nested_targets(&mut self.nested, &self.device, &self.effects, collection, &nesting);
 
+		// The pictures viewers draw over the program, which the preview draws
+		// over its scene too, so both show what viewers would see.
+		let program_layers = crate::layout::pictures(collection, program.0, true);
+		let preview_layers = crate::layout::pictures(collection, preview.0, preview_top);
+		self.layered = program_layers.iter().any(|item| item.visible);
+		if self.layered && self.program.layered.is_none() {
+			let target = Target::new(&self.device, &self.effects, program_canvas, "moq-scene layered");
+			self.program.layered = Some(target);
+		}
+
 		let mut frame = self.effects.frame();
 		let mut draw = Draw {
 			collection,
@@ -848,8 +893,16 @@ impl Compositor {
 		for (index, (nest, target)) in late {
 			draw.nest(index, nest, target);
 		}
+		if let Some(layered) = self.program.layered.as_ref().filter(|_| self.layered) {
+			draw.size = program_canvas;
+			draw.target(layered);
+			let canvas = Rect::fill(&program_canvas);
+			draw.picture(layered, &self.program.program, canvas, canvas, 1.0);
+			draw.layers(layered, &program_layers, program_since);
+		}
 		if previewing {
 			draw.draw_preview(&self.preview, preview, preview_top);
+			draw.layers(&self.preview, &preview_layers, preview_since);
 		}
 		for (on, target) in &outputs {
 			draw.size = target.canvas;
@@ -865,8 +918,11 @@ impl Compositor {
 					draw.scene(target, On(Some(scene), *since));
 				}
 				Shows::Program => {
+					// What viewers see, as the Program panel shows it: with the
+					// published layers over it.
+					let program = self.program.layered.as_ref().filter(|_| self.layered);
 					draw.target(target);
-					draw.picture(target, &self.program.program, fill, fill, 1.0);
+					draw.picture(target, program.unwrap_or(&self.program.program), fill, fill, 1.0);
 				}
 				Shows::Output(scene) => {
 					let output = outputs.iter().find(|(on, _)| on.0 == Some(scene));
@@ -1780,6 +1836,29 @@ impl Draw<'_> {
 		}
 	}
 
+	/// Draw `layers`, pictures of the layer layout, onto `target`, back to
+	/// front, each posed `since` its scene went on. Each names the source it
+	/// shows and carries its source's crop and filters already, so it draws as
+	/// a player reading the layout would.
+	fn layers(&mut self, target: &Target, layers: &[Item], since: Duration) {
+		for item in layers.iter().filter(|item| item.visible) {
+			let item = item.posed(since);
+			let Some(picture) = effect::Library::picture(&self.library, &item.source) else {
+				continue;
+			};
+			let item = effect::Item {
+				picture: &picture,
+				rect: item.rect,
+				crop: item.crop,
+				filters: item.filters.iter().collect(),
+				blend: item.blend,
+			};
+			if let Some(prepared) = self.effects.prepare(self.frame, item, &self.library) {
+				self.effects.draw(self.frame, &target.texture, &prepared);
+			}
+		}
+	}
+
 	/// Where `since` falls among `item`'s keyframes, as [`Item::settled`], but
 	/// at that moment itself while a scene it shows moves, so a draw of it is
 	/// shared only with draws showing the scene alike.
@@ -2001,7 +2080,8 @@ impl Draw<'_> {
 			}
 			Some(Nested::Program) => self.program.clone(),
 			// Its own track carries a published source to viewers instead,
-			// as it does a clone's, which shows the same capture.
+			// as it does a clone's, which shows the same capture, and only
+			// `layers` draws it, over the rest.
 			None if self
 				.collection
 				.published
@@ -2273,6 +2353,42 @@ mod tests {
 
 	fn near(actual: [u8; 4], expected: [u8; 4]) -> bool {
 		actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 1)
+	}
+
+	/// A source published independently is left out of the program and drawn
+	/// over it as its layer, as it is over the scene in preview, wherever its
+	/// scene stacks it; without one showing, the layered program is the
+	/// program itself.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_published_source_draws_over_the_program() {
+		local(async {
+			let mut collection = collection();
+			collection.scenes[0].items.reverse();
+			collection.published.insert("blue".into());
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			assert_eq!(pixel(&studio.program(), 6, 1), RED, "left out of the program");
+			let layered = studio.compositor.layered().clone();
+			let layered = studio.read(&layered);
+			assert_eq!(pixel(&layered, 6, 1), BLUE, "over the red it is under");
+			assert_eq!(pixel(&layered, 1, 1), RED);
+			assert_eq!(studio.preview(), layered, "preview shows what viewers see");
+			let thumbnail = Thumbnail::Scene(studio.collection.scenes[0].name.clone());
+			studio.compositor.set_thumbnails([thumbnail.clone()]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&thumbnail).unwrap().clone();
+			assert_eq!(studio.read(&texture), layered, "its thumbnail shows what viewers see");
+
+			studio.collection.scenes[0].items[0].visible = false;
+			studio.render(Instant::now());
+			assert_eq!(studio.compositor.layered(), studio.compositor.program());
+			assert_eq!(pixel(&studio.preview(), 6, 1), RED);
+		})
+		.await;
 	}
 
 	/// Items draw where their rect says, later items over earlier ones, and
@@ -5039,6 +5155,29 @@ mod bench {
 				] {
 					let (frame, (passes, copies)) = cost(collection, preview).await;
 					println!("{sources:>7} {case:<8} {frame:>7.2?} {passes:>6} {copies:>6}");
+				}
+			}
+		})
+		.await;
+	}
+
+	/// What drawing sources published independently as layers costs, over the
+	/// program and the same scene in preview: none, then the last of the
+	/// sources, then the last four.
+	#[tokio::test]
+	#[ignore = "a benchmark; run by hand on a GPU"]
+	async fn published_layers() {
+		local(async {
+			println!("sources published  frame   passes copies");
+			for sources in [4, 16] {
+				for published in [0, 1, 4] {
+					let mut collection = collection(sources, 0, sources);
+					let names = (sources - published..sources).map(|index| format!("color {index}"));
+					collection.published.extend(names);
+					collection.validate().unwrap();
+					let scene = collection.scenes[0].name.clone();
+					let (frame, (passes, copies)) = cost(collection, &scene).await;
+					println!("{sources:>7} {published:>9} {frame:>7.2?} {passes:>6} {copies:>6}");
 				}
 			}
 		})
