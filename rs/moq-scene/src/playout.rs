@@ -28,7 +28,7 @@ pub(crate) const VIDEO_DELAY: Duration = Duration::from_millis(100);
 /// represent, and so how long a stalled group is waited on before it is
 /// skipped, as under `moq play --delay auto`. A shorter wait would cap the
 /// estimate at it, since a skipped group is never measured.
-pub(crate) const MAX_DELAY: Duration = Duration::from_secs(2);
+pub const MAX_DELAY: Duration = Duration::from_secs(2);
 
 /// What a bus channel holds between a write and the mix that plays it, while
 /// it is kept fed.

@@ -19,6 +19,11 @@ studio's broadcast.
 
 Bump the layout's `version` if the change is not additive.
 
+The `moq-studio --watch` prototype (`rs/moq-studio/src/watch.rs`) plays only
+local sources' layers today: its layers play tracks of the program's own
+broadcast on the program's clock, so a guest's layer needs the prototype to
+follow the named broadcast, on the offset the layout carries.
+
 ## Waiting
 
 - Maintainer: decide how the layout names a guest's broadcast. The epic
@@ -43,7 +48,3 @@ Bump the layout's `version` if the change is not additive.
 
   Check: the maintainer answers in /quest-unblock, and the choice is recorded
   in this Plan and the epic's.
-
-## Related
-
-- [moq-studio watch prototype](/quest/m2/compose/watch.md) - the first player of the layout

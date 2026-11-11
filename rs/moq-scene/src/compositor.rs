@@ -655,6 +655,12 @@ impl Compositor {
 		Ok(())
 	}
 
+	/// Play the program scene's keyframes as if it went on program at
+	/// `start`, such as one a viewer joined after it went on.
+	pub fn set_program_start(&mut self, start: Instant) {
+		self.program_start = Some(start);
+	}
+
 	/// Refuse to take a preview scene to program that cannot go there.
 	fn can_take(&self, collection: &Collection) -> Result<(), Error> {
 		match self.preview_scene.as_deref() {

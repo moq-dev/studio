@@ -13,7 +13,7 @@ Decided 2026-11-08 (maintainer, /quest-plan): the layer layout becomes
 official moq, so `moq play` and `@moq/watch` play a studio broadcast. Once
 the wait clears, advance the gitlink with `just upgrade-moq` in this PR, move
 the studio to hang's types, and delete the
-[watch prototype](/quest/m2/compose/watch.md) and its flag.
+`moq-studio --watch` prototype (`rs/moq-studio/src/watch.rs`) and its flag.
 
 Decided 2026-11-09 (maintainer, /quest-audit): ✅ the wait names moq's three
 quests (rejected: "both quests", unnamed, which left out `@moq/watch`).
@@ -21,7 +21,7 @@ quests (rejected: "both quests", unnamed, which left out `@moq/watch`).
 ## Waiting
 
 - moq-dev/moq: its three layer quests land, planned in moq's m3 from the
-  [watch prototype](/quest/m2/compose/watch.md)'s format:
+  `moq-studio --watch` prototype's format, the README's "Layer layout":
   [hang specifies a layer layout track](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/spec.md),
   [moq play composites layers](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/play.md),
   and
@@ -34,6 +34,5 @@ quests (rejected: "both quests", unnamed, which left out `@moq/watch`).
 
 ## Required
 
-- [moq-studio watch prototype](/quest/m2/compose/watch.md) - the format moq specifies
 - [Viewer controls](/quest/m2/compose/controls.md) - toggles and priorities the spec carries
 - [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes since moq-dev/moq#8272, so this pin takes only its own

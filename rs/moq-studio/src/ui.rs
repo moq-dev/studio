@@ -314,13 +314,13 @@ impl Studio {
 }
 
 /// A compositor texture as egui shows it.
-struct Registered {
-	id: egui::TextureId,
+pub(crate) struct Registered {
+	pub(crate) id: egui::TextureId,
 	texture: wgpu::Texture,
 }
 
 impl Registered {
-	fn new(render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) -> Self {
+	pub(crate) fn new(render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) -> Self {
 		let view = texture.create_view(&Default::default());
 		let id = render
 			.renderer
@@ -333,7 +333,7 @@ impl Registered {
 	}
 
 	/// Show `texture` from now on, if a resize replaced the one shown.
-	fn follow(&mut self, render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) {
+	pub(crate) fn follow(&mut self, render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) {
 		if self.texture == *texture {
 			return;
 		}
@@ -4508,6 +4508,7 @@ fn describe(source: &Source) -> String {
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
 		Source::Scene { scene } => format!("scene: {scene}"),
+		Source::Layer { broadcast, source } => format!("{source}, published in {broadcast}"),
 		Source::Program => "program".into(),
 	}
 }

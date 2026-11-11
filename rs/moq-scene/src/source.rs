@@ -31,7 +31,8 @@ use crate::browser::Page;
 use crate::collection::{Collection, Source};
 use crate::lut::Cube;
 use crate::media::Clip;
-use crate::playout::{BUS_LATENCY, MAX_DELAY, Place, Speaker, VIDEO_DELAY, Writer};
+pub use crate::playout::MAX_DELAY;
+use crate::playout::{BUS_LATENCY, Place, Speaker, VIDEO_DELAY, Writer};
 use crate::publish::{Claim, Listing, Publish, Still};
 use crate::replay::{MIN_SPEED, Take, Target};
 
@@ -321,6 +322,20 @@ impl Sources {
 			}
 			keep
 		});
+		// A layer plays on its broadcast source's clock, so it stops with it
+		// and starts again on the replacement's.
+		let orphaned: Vec<String> = self
+			.feeds
+			.iter()
+			.filter(
+				|(_, feed)| matches!(&feed.source, Source::Layer { broadcast, .. } if !self.feeds.contains_key(broadcast)),
+			)
+			.map(|(name, _)| name.clone())
+			.collect();
+		for name in orphaned {
+			let feed = self.feeds.remove(&name).expect("listed above");
+			leave(&self.mixes, &feed);
+		}
 		// A mix ends once its last handle drops, which may be a reader's.
 		self.mixes.retain(|name, _| collection.audio_scene(name).is_some());
 		for scene in &collection.audio_scenes {
@@ -337,10 +352,25 @@ impl Sources {
 			.collect();
 
 		let mut drivers = Vec::new();
-		for (name, source) in collection.sources.iter().filter(|(_, source)| source.opens()) {
+		// Layers last, once the broadcast sources whose clocks they play on run.
+		let (layers, opens): (Vec<_>, Vec<_>) = collection
+			.sources
+			.iter()
+			.filter(|(_, source)| source.opens())
+			.partition(|(_, source)| matches!(source, Source::Layer { .. }));
+		for (name, source) in opens.into_iter().chain(layers) {
 			if !self.feeds.contains_key(name) {
 				let held = collection.transition.stinger() == Some(name.as_str());
-				let (feed, driver) = open(name, source, &self.context, held);
+				let follows = match source {
+					Source::Layer { broadcast, .. } => match collection.sources.get(broadcast) {
+						Some(Source::Broadcast { path }) => {
+							self.feeds[broadcast].clock.clone().map(|clock| (path.clone(), clock))
+						}
+						_ => None,
+					},
+					_ => None,
+				};
+				let (feed, driver) = open(name, source, &self.context, held, follows);
 				self.feeds.insert(name.clone(), feed);
 				drivers.push(driver);
 			}
@@ -449,7 +479,7 @@ pub struct Feed {
 	runs: Runs,
 	/// Set once a media source's file turns out to hold no sound.
 	silent: Arc<AtomicBool>,
-	/// A broadcast source's playout clock.
+	/// A broadcast source's playout clock, or the one a layer plays on.
 	clock: Option<timeline::Consumer>,
 }
 
@@ -612,7 +642,7 @@ impl Feed {
 	/// picture alone.
 	pub fn stalled(&self, now: Instant) -> Option<Stall> {
 		let stall = match self.source {
-			Source::Camera { .. } | Source::Broadcast { .. } => Stall::Picture,
+			Source::Camera { .. } | Source::Broadcast { .. } | Source::Layer { .. } => Stall::Picture,
 			Source::Microphone { .. } | Source::SystemAudio => Stall::Sound,
 			_ => return None,
 		};
@@ -630,6 +660,13 @@ impl Feed {
 	pub fn delay(&self) -> Option<Duration> {
 		let clock = self.clock.as_ref()?;
 		(self.status() == Status::Live).then(|| clock.target().unwrap_or(VIDEO_DELAY))
+	}
+
+	/// When a broadcast source plays what its broadcast stamps, or a layer
+	/// what its broadcast source's does, so what else that broadcast carries
+	/// can play on the same clock. `None` for any other source.
+	pub fn clock(&self) -> Option<&timeline::Consumer> {
+		self.clock.as_ref()
 	}
 
 	/// The source's gain, mute, delay, and meter in every mix, if it has sound.
@@ -678,6 +715,9 @@ pub struct Driver {
 	runs: Runs,
 	silent: Arc<AtomicBool>,
 	clock: Option<timeline::Producer>,
+	/// A layer's broadcast path, and the clock of the broadcast source it
+	/// plays on.
+	follows: Option<(String, timeline::Consumer)>,
 }
 
 /// Where a source's own track goes, its claim on the local catalog's listing
@@ -795,6 +835,7 @@ impl Driver {
 				self.media(&self.context.dir.join(path), *looping, cues, listing).await
 			}
 			Source::Broadcast { path } => self.broadcast(path).await,
+			Source::Layer { source, .. } => self.layer(source).await,
 			Source::Browser { url, width, height } => self.browser(url, *width, *height).await,
 			Source::Replay => {
 				let plays = self.plays.clone().expect("a replay source has plays");
@@ -845,6 +886,7 @@ impl Driver {
 			| Source::Image { .. }
 			| Source::Media { .. }
 			| Source::Broadcast { .. }
+			| Source::Layer { .. }
 			| Source::Browser { .. }
 			| Source::Overlay { .. }
 			| Source::Clone { .. }
@@ -1023,23 +1065,52 @@ impl Driver {
 	/// Follow the broadcast at `path` for as long as the feed lives, playing
 	/// each instance of it that comes online.
 	async fn broadcast(&self, path: &str) -> Result<(), Error> {
+		let mut clock = self.clock.clone().expect("a broadcast source has a clock");
+		self.follow(path, |broadcast| {
+			*self.played.lock().unwrap() = Played {
+				broadcast: Some(broadcast.clone()),
+				..Played::default()
+			};
+			// Each instance's timestamps are its own.
+			clock = clock.clone().reset(VIDEO_DELAY);
+			Box::pin(self.play(broadcast, path, clock.clone()))
+		})
+		.await
+	}
+
+	/// Play the source called `source` that the broadcast this layer follows
+	/// publishes independently, from each instance of it, on the clock of the
+	/// broadcast source playing it.
+	async fn layer(&self, source: &str) -> Result<(), Error> {
+		let Some((path, schedule)) = &self.follows else {
+			return Err(Error::Invalid(format!(
+				"layer `{}` follows no broadcast source",
+				self.name
+			)));
+		};
+		self.follow(path, |broadcast| {
+			Box::pin(self.play_layer(broadcast, path, source, schedule))
+		})
+		.await
+	}
+
+	/// Play each instance of the broadcast at `path` with `start` as it comes
+	/// online, until the next replaces it or it goes offline.
+	async fn follow<'a>(
+		&'a self,
+		path: &str,
+		mut start: impl FnMut(moq_net::broadcast::Consumer) -> Playing<'a>,
+	) -> Result<(), Error> {
 		let mut instances = self.context.origin.follow(path, None)?;
 		set(&self.status, Status::Offline);
 
-		let mut clock = self.clock.clone().expect("a broadcast source has a clock");
 		let mut playing: Option<Playing<'_>> = None;
 		loop {
 			tokio::select! {
 				event = instances.available() => match event {
 					Ok(Some(broadcast)) => {
 						set(&self.status, Status::Live);
-						*self.played.lock().unwrap() = Played {
-							broadcast: Some(broadcast.clone()),
-							..Played::default()
-						};
-						// Each instance's timestamps are its own.
-						clock = clock.reset(VIDEO_DELAY);
-						playing = Some(Box::pin(self.play(broadcast, path, clock.clone())));
+						playing = Some(start(broadcast));
 					}
 					Ok(None) => {
 						playing = None;
@@ -1055,6 +1126,175 @@ impl Driver {
 						Err(err) => Status::Failed(err.to_string()),
 					});
 				}
+			}
+		}
+	}
+
+	/// Decode one instance of a studio broadcast's source called `source`:
+	/// the first video and audio renditions its entry under the catalog's
+	/// [`SECTION`](crate::publish::SECTION) `sources` offers, switching as
+	/// the catalog changes them, until the catalog ends. Both play on
+	/// `schedule`, the program's clock, without moving it.
+	async fn play_layer(
+		&self,
+		broadcast: moq_net::broadcast::Consumer,
+		path: &str,
+		source: &str,
+		schedule: &timeline::Consumer,
+	) -> Result<(), Error> {
+		let format = moq_mux::catalog::CatalogFormat::detect(path).unwrap_or_default();
+		let mut catalogs = moq_mux::catalog::Consumer::<crate::publish::Ext>::new(&broadcast, format).await?;
+		let mut video: Option<String> = None;
+		let mut audio: Option<String> = None;
+		let mut video_playing: Playing<'_> = Box::pin(std::future::pending());
+		let mut audio_playing: Playing<'_> = Box::pin(std::future::pending());
+		loop {
+			tokio::select! {
+				catalog = catalogs.next() => {
+					let Some(catalog) = catalog? else {
+						return Ok(());
+					};
+					let listed = catalog.ext.studio.sources.get(source);
+					let next_video = listed.map(|listed| pick(listed.video.enabled())).transpose()?.flatten();
+					let next_audio = listed.map(|listed| pick(listed.audio.enabled())).transpose()?.flatten();
+					let track = next_video.as_ref().map(|(id, config)| Reference::track(config, id).to_string());
+					if track != video {
+						video = track;
+						video_playing = match next_video {
+							Some((id, config)) => Box::pin(self.follow_video(&broadcast, id, config, schedule)),
+							None => {
+								self.picture.lock().unwrap().clear();
+								Box::pin(std::future::pending())
+							}
+						};
+					}
+					let track = next_audio.as_ref().map(|(id, config)| Reference::track(config, id).to_string());
+					if track != audio {
+						audio = track;
+						audio_playing = match next_audio {
+							Some((id, config)) => Box::pin(self.follow_audio(&broadcast, id, config, schedule)),
+							None => Box::pin(std::future::pending()),
+						};
+					}
+				}
+				result = &mut video_playing => {
+					result?;
+					video_playing = Box::pin(std::future::pending());
+				}
+				result = &mut audio_playing => {
+					result?;
+					audio_playing = Box::pin(std::future::pending());
+				}
+			}
+		}
+	}
+
+	/// Show each picture once `schedule`, another track's clock, says it is
+	/// due, the newest due one when several are, as
+	/// [`play_video`](Self::play_video) does, except that a picture waits only
+	/// for its moment, not for its sound.
+	async fn follow_video(
+		&self,
+		broadcast: &moq_net::broadcast::Consumer,
+		name: String,
+		config: hang::catalog::VideoConfig,
+		schedule: &timeline::Consumer,
+	) -> Result<(), Error> {
+		let mut options = moq_video::decode::Options::new();
+		options.start = moq_video::decode::Start::Latest;
+		options.decoder.output = self.context.output;
+		options.delay = moq_video::decode::Delay {
+			min: Some(VIDEO_DELAY),
+			max: Some(MAX_DELAY),
+		};
+		let mut consumer = moq_video::decode::Consumer::new(broadcast, &config, name, options).await?;
+		let mut queue = VecDeque::<moq_video::Frame>::new();
+		let mut ended = false;
+		loop {
+			let now = kio::clock::now();
+			if let Some(index) = schedule.present(queue.iter().map(|frame| frame.timestamp), now) {
+				let frame = queue.drain(..=index).next_back().expect("an index into the queue");
+				self.show(Picture::Frame(frame));
+			}
+			if ended && queue.is_empty() {
+				return Ok(());
+			}
+			let due = queue
+				.front()
+				.and_then(|frame| schedule.due(frame.timestamp))
+				.filter(|due| *due > now);
+			tokio::select! {
+				read = consumer.read(), if !ended && queue.len() < QUEUED => match read? {
+					Some(moq_video::decode::Read::Frame(frame)) => queue.push_back(frame),
+					Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => {}
+					None => ended = true,
+				},
+				() = kio::clock::sleep_until(due.unwrap_or(now)), if due.is_some() => {}
+			}
+		}
+	}
+
+	/// Play a track's sound into the bus when `schedule`, another track's
+	/// clock, says each frame sounds, dropping a frame that arrives too late
+	/// for its moment, or before the clock has one.
+	async fn follow_audio(
+		&self,
+		broadcast: &moq_net::broadcast::Consumer,
+		name: String,
+		config: hang::catalog::AudioConfig,
+		schedule: &timeline::Consumer,
+	) -> Result<(), Error> {
+		let Some(strip) = self.strip.clone() else {
+			return Ok(());
+		};
+		let bus = self.context.bus.config();
+		let mut options = moq_audio::decode::Options::new();
+		options.start = moq_audio::decode::Start::Latest;
+		options.delay = moq_audio::decode::Delay {
+			min: None,
+			max: Some(MAX_DELAY),
+		};
+		options.output.format = moq_audio::Format::F32;
+		options.output.sample_rate = Some(bus.sample_rate);
+		options.output.layout = Some(bus.layout);
+		let mut consumer = moq_audio::decode::Consumer::new(broadcast, &config, name, options).await?;
+		let channel = self.channel(strip)?;
+		let mut writer = Writer::new(channel, bus.sample_rate, bus.layout.channels());
+
+		// Each frame waits here until the bus's latency before it sounds.
+		let mut queue = VecDeque::<(Instant, moq_audio::Frame)>::new();
+		let mut ended = false;
+		loop {
+			let now = kio::clock::now();
+			while let Some((sounds, _)) = queue.front()
+				&& *sounds - BUS_LATENCY <= now
+			{
+				let (sounds, frame) = queue.pop_front().expect("peeked");
+				writer.write(sounds, &frame.data, now)?;
+			}
+			if ended && queue.is_empty() {
+				return Ok(());
+			}
+			let write = queue.front().map(|(sounds, _)| *sounds - BUS_LATENCY);
+			tokio::select! {
+				read = consumer.read(), if !ended => match read? {
+					Some(moq_audio::decode::Read::Frame(frame)) => {
+						// A write half the bus's latency late finds nothing queued
+						// ahead of it, and one due past the longest target would
+						// hold whatever a peer stamps.
+						let now = kio::clock::now();
+						let placed = schedule.due(frame.timestamp).filter(|sounds| {
+							*sounds >= now + BUS_LATENCY / 2 && *sounds <= now + MAX_DELAY + BUS_LATENCY
+						});
+						if let Some(sounds) = placed {
+							queue.push_back((sounds, frame));
+						}
+					}
+					// A hole or an encoder restart shows in the stamps that follow.
+					Some(_) => {}
+					None => ended = true,
+				},
+				() = kio::clock::sleep_until(write.unwrap_or(now)), if write.is_some() => {}
 			}
 		}
 	}
@@ -1967,8 +2207,15 @@ pub(crate) fn pick<'a, C: Reference + Clone + 'a>(
 }
 
 /// Start the feed for `source`, and the driver that fills it, `held` from
-/// playing a media file until the first [`Feed::play`].
-fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Driver) {
+/// playing a media file until the first [`Feed::play`]. A layer `follows` its
+/// broadcast's path and the clock of the broadcast source playing it.
+fn open(
+	name: &str,
+	source: &Source,
+	context: &Context,
+	held: bool,
+	follows: Option<(String, timeline::Consumer)>,
+) -> (Feed, Driver) {
 	let picture = Mailbox::default();
 	let delivered = Delivered::default();
 	let strip = source.has_audio().then(Strip::default);
@@ -2021,7 +2268,10 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 		cues,
 		runs: runs.clone(),
 		silent: silent.clone(),
-		clock: clock.as_ref().map(timeline::Producer::consume),
+		clock: match &follows {
+			Some((_, schedule)) => Some(schedule.clone()),
+			None => clock.as_ref().map(timeline::Producer::consume),
+		},
 	};
 	let driver = Driver {
 		name: name.to_string(),
@@ -2039,6 +2289,7 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 		runs,
 		silent,
 		clock,
+		follows,
 	};
 	(feed, driver)
 }
@@ -2049,11 +2300,12 @@ impl Source {
 	/// system audio, or media file as captured or decoded, before its gain and
 	/// mute.
 	///
-	/// A broadcast is already published by its own publisher, and a clone shows
-	/// its source's track, its filters carried by the layout rather than encoded
-	/// again. Web pages and overlays are seen only in the program, since H.264
-	/// would encode their transparency over black, a LUT is looked up, never
-	/// shown, and a scene is drawn from other sources.
+	/// A broadcast, or a layer of one, is already published by its own
+	/// publisher, and a clone shows its source's track, its filters carried by
+	/// the layout rather than encoded again. Web pages and overlays are seen
+	/// only in the program, since H.264 would encode their transparency over
+	/// black, a LUT is looked up, never shown, and a scene is drawn from other
+	/// sources.
 	pub fn publishes(&self) -> bool {
 		match self {
 			Source::Camera { .. }
@@ -2066,6 +2318,7 @@ impl Source {
 			| Source::Media { .. }
 			| Source::Replay => true,
 			Source::Broadcast { .. }
+			| Source::Layer { .. }
 			| Source::Browser { .. }
 			| Source::Overlay { .. }
 			| Source::Clone { .. }
@@ -2335,7 +2588,7 @@ mod tests {
 			let (context, _origin) = context(dir.path());
 			let start = kio::clock::now();
 			let opened = |source: Source| {
-				let (feed, driver) = open("source", &source, &context, false);
+				let (feed, driver) = open("source", &source, &context, false, None);
 				set(&driver.status, Status::Live);
 				(feed, driver)
 			};
@@ -2628,9 +2881,9 @@ mod tests {
 	}
 
 	/// A video track on its own timestamp base.
-	async fn rendition(
+	async fn rendition<E: moq_mux::catalog::hang::CatalogExt>(
 		broadcast: &moq_net::broadcast::Producer,
-		timebase: moq_mux::catalog::Timebase,
+		timebase: moq_mux::catalog::Timebase<E>,
 	) -> (moq_video::encode::Producer, moq_video::encode::Encoder) {
 		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
@@ -2707,6 +2960,104 @@ mod tests {
 			until_time(due).await;
 			assert_eq!(shown(feed).await, Duration::from(stamp));
 			assert_eq!(feed.delay(), Some(VIDEO_DELAY));
+		})
+		.await;
+	}
+
+	/// A layer shows each picture when its broadcast source's clock says, as
+	/// the program's picture stamped alike shows, not its own delay after it
+	/// arrives.
+	#[tokio::test(start_paused = true)]
+	async fn a_layer_plays_on_its_broadcasts_clock() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let publication = origin
+				.route("room/guest", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let mut broadcast = publication.broadcast().clone();
+			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
+			let mut catalog = crate::publish::Catalog::new(&mut broadcast, config).unwrap();
+			let (mut program, mut encoder) = rendition(&broadcast, catalog.timebase()).await;
+			// The camera's track is in the program's broadcast, listed under its
+			// name in the catalog's own section rather than as the program's.
+			let mut local = moq_net::broadcast::Info::new().produce();
+			let listing = moq_mux::catalog::Producer::new(&mut local, Default::default()).unwrap();
+			let (mut cam, mut cam_encoder) = rendition(&broadcast, listing.timebase()).await;
+			publication.announce().unwrap();
+
+			let mut collection = collection();
+			collection.sources.insert(
+				"cam".into(),
+				Source::Layer {
+					broadcast: "guest".into(),
+					source: "cam".into(),
+				},
+			);
+			collection.validate().unwrap();
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let layer = sources.get("cam").unwrap();
+			let clock = sources.get("guest").unwrap().clock.clone().unwrap();
+
+			until_time(kio::clock::now()).await;
+			let arrived = kio::clock::now();
+			picture(&mut program, &mut encoder, 1_000);
+			let stamp = moq_net::Timestamp::from_millis(1_000).unwrap();
+			let due = until(|| clock.due(stamp)).await;
+			assert_eq!(due, arrived + VIDEO_DELAY);
+
+			// Half the delay later, so on a clock of its own it would show late.
+			until_time(arrived + VIDEO_DELAY / 2).await;
+			picture(&mut cam, &mut cam_encoder, 1_000);
+			let listed = until(|| Some(listing.snapshot()).filter(|listed| !listed.video.renditions.is_empty())).await;
+			catalog
+				.mutate(|root| {
+					root.ext.studio.sources.insert("cam".into(), listed);
+				})
+				.unwrap();
+			until_time(due - Duration::from_millis(1)).await;
+			assert!(layer.next_picture().is_none(), "shown before its moment");
+			until_time(due).await;
+			assert_eq!(shown(layer).await, Duration::from(stamp));
+			assert_eq!(layer.delay(), Some(VIDEO_DELAY), "the program's");
+		})
+		.await;
+	}
+
+	/// A layer stops with its broadcast source, and starts again on its
+	/// replacement's clock.
+	#[tokio::test]
+	async fn a_layer_follows_its_broadcast_sources_replacement() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut collection = collection();
+			collection.sources.insert(
+				"cam".into(),
+				Source::Layer {
+					broadcast: "guest".into(),
+					source: "cam".into(),
+				},
+			);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			assert_eq!(drivers.len(), 3);
+			start(&sources, drivers).await;
+			collection.sources.insert(
+				"guest".into(),
+				Source::Broadcast {
+					path: "room/other".into(),
+				},
+			);
+			let mut names: Vec<String> = sources
+				.sync(&collection)
+				.iter()
+				.map(|driver| driver.name().to_string())
+				.collect();
+			names.sort();
+			assert_eq!(names, ["cam", "guest"]);
 		})
 		.await;
 	}
