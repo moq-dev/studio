@@ -1011,7 +1011,7 @@ impl Driver {
 		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
 		input.format = moq_audio::Format::F32;
 		let strip = self.strip.clone().expect("browser sources have a strip");
-		let sound = self.context.bus.channel(input, strip)?;
+		let sound = self.context.bus.live(input, strip)?;
 		crate::browser::run(helper, open, page, &self.picture, Some(sound), &self.status).await
 	}
 
@@ -1841,11 +1841,11 @@ impl Driver {
 
 	/// A channel into the bus for decoded sound, as [`sounds`](Self::sounds)
 	/// and broadcasts decode it, through `strip`.
-	fn channel(&self, strip: Strip) -> Result<moq_audio::bus::Channel, Error> {
+	fn channel(&self, strip: Strip) -> Result<moq_audio::bus::Live, Error> {
 		let bus = self.context.bus.config();
 		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
 		input.format = moq_audio::Format::F32;
-		Ok(self.context.bus.channel(input, strip)?)
+		Ok(self.context.bus.live(input, strip)?)
 	}
 }
 
