@@ -8,6 +8,10 @@ Application certificate `QMD585S65S` and the "MoQ Studio Developer ID" profile
 
 ## Plan
 
+Decided 2026-11-11 (maintainer, /quest-merge pick of moq-dev/studio#112):
+✅ keep this quest, with the 2027-01-15 deadline about two weeks before expiry
+(rejected: drop it and renew from memory; another deadline).
+
 Once the maintainer has the new certificate, an agent exports it as a
 legacy-encrypted `.p12` (macOS `security import` can reject OpenSSL 3's AES
 default), regenerates the profile through the App Store Connect API with the
