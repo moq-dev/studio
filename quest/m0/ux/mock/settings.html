@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio settings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Settings: one window over the dimmed app, categories on the left, one short pane on the right. */
+.scrim{position:absolute;inset:0;z-index:30;background:#06060bc7;display:grid;place-items:center}
+.swin{width:960px;height:664px;display:grid;grid-template-columns:216px minmax(0,1fr);border-radius:16px;background:var(--p1);border:1px solid #3b3b4a;box-shadow:0 40px 120px #000,0 0 0 1px #000;overflow:hidden}
+.snv{background:#0c0c11;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:2px;padding:20px 10px 14px}
+.snv h2{margin:0 10px 14px;font:700 22px/1 var(--disp);letter-spacing:.1em}
+.snv a{display:flex;align-items:center;gap:11px;height:38px;padding:0 10px;border-radius:9px;font:600 13.5px/1 var(--ui);color:var(--dim)}
+.snv a.on{background:var(--p3);color:var(--text)}
+.snv small{margin:0 10px;font-size:11px;line-height:1.45;color:var(--faint)}
+.pane{position:relative;display:flex;flex-direction:column;padding:24px 32px 22px;min-height:0}
+.pane h1{margin:0;font:700 30px/1 var(--disp);letter-spacing:.06em}
+.pane .lead{margin:8px 0 14px;font-size:12.5px;color:var(--dim)}
+.pane .shut{position:absolute;right:16px;top:16px}
+.sr{display:flex;align-items:center;gap:20px;padding:14px 0;border-top:1px solid var(--line)}
+.sr .l{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.sr .l b{font:600 13.5px/1.2 var(--ui)}
+.sr .l span,.hl{font-size:12px;line-height:1.4;color:var(--dim)}
+.pane .seg{border-radius:9px}
+.pane .seg span{padding:9px 15px;font:600 12.5px/1 var(--ui)}
+.pane .seg span.on{background:var(--text);color:#111}
+.fmt{width:176px;height:84px;border-radius:11px;background:var(--p2);border:1px solid var(--line);display:flex;align-items:center;gap:12px;padding:0 14px;position:relative}
+.fmt i{flex:none;border-radius:4px;border:2px solid var(--dim)}
+.fmt b{display:block;font:600 13.5px/1 var(--ui)}
+.fmt small{display:block;margin-top:6px;font-size:11.5px;color:var(--dim)}
+.fmt.on{border-color:var(--sel);background:#4f8cff1f;box-shadow:0 0 0 1px var(--sel)}
+.fmt.on i{border-color:var(--text);background:#fff2}
+.disc{display:flex;align-items:center;gap:8px;font:600 13.5px/1 var(--ui)}
+.box{border-radius:11px;background:var(--p2);border:1px solid var(--line)}
+.inp{height:32px;border-radius:8px;background:var(--bg);border:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 10px;font:500 12px/1 var(--mono);color:var(--text);min-width:0;white-space:nowrap}
+.inp.bind{border-color:var(--sel);box-shadow:0 0 0 2px #4f8cff40;font:500 12px/1 var(--ui);color:var(--dim)}
+.lab{font:500 11.5px/1 var(--ui);color:var(--dim)}
+.fld{display:flex;flex-direction:column;gap:7px;min-width:0}
+.dots{letter-spacing:.18em;color:var(--dim)}
+.dr{display:flex;align-items:center;gap:10px;height:40px;padding:0 12px;border-top:1px solid var(--line);font-size:12.5px}
+.dr:first-child{border-top:0}
+.dr b{font-weight:600;width:62px}
+.dr .url{font:500 11.5px/1 var(--mono);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot.idle{background:transparent;box-shadow:inset 0 0 0 2px var(--faint)}
+.dot.warn{background:var(--cue)}
+.kc{min-width:26px;height:24px;padding:0 7px;border-radius:6px;background:linear-gradient(#30303c,#1e1e27);border:1px solid #ffffff26;box-shadow:0 2px 0 #000;display:inline-grid;place-items:center;font:500 11px/1 var(--mono);color:var(--text)}
+.hk{display:flex;align-items:center;gap:6px;height:36px;border-top:1px solid var(--line);font-size:13px}
+.hk .n{flex:1;min-width:0;white-space:nowrap}
+.hk .n em{font-style:normal;font-size:11.5px;color:var(--dim);margin-left:6px}
+.hk .clr{color:var(--faint);margin-left:4px}
+.hk .btn{height:26px;font-size:11.5px;line-height:24px;color:var(--dim)}
+.hkcap{margin:14px 0 8px}
+.hkgrid{display:grid;grid-template-columns:1fr 1fr;column-gap:28px}
+.banner2{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;background:var(--p2);border:1px solid var(--line);font-size:12.5px;line-height:1.4}
+.tagc{display:flex;align-items:center;gap:7px;height:28px;padding:0 6px 0 10px;border-radius:8px;background:var(--p2);border:1px solid var(--line);font:500 12px/1 var(--ui);white-space:nowrap}
+.tagc svg.i{color:var(--faint)}
+.sdot{width:20px;height:20px;border-radius:50%;flex:none;display:grid;place-items:center;font:700 11px/1 var(--disp);background:var(--text);color:#111}
+.gearon{background:var(--p3);color:var(--text)}
+</style>
+</head>
+<body>
+<script src="kit.js"></script>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="cast" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M7.800 16.200a6 6 0 0 1 0-8.400M16.200 7.800a6 6 0 0 1 0 8.400M4.900 19.100a10 10 0 0 1 0-14.200M19.100 4.900a10 10 0 0 1 0 14.200"/></symbol>
+<symbol id="rec" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="keys" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
+<symbol id="folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/></symbol>
+<symbol id="x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+<symbol id="down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.500h.01"/></symbol>
+<symbol id="out" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+</defs></svg>
+<script>
+const CATS=[['show','Show','film'],['stream','Stream','cast'],['recording','Recording','rec'],['sound','Sound','vol'],['hotkeys','Hotkeys','keys'],['guests','Guests','users'],['advanced','Advanced','sliders']];
+const win=(cat,title,lead,body)=>`<div class="scrim"><div class="swin">
+  <div class="snv"><h2>SETTINGS</h2>${CATS.map(([k,n,i])=>`<a class="${k==cat?'on':''}">${I(i)}${n}</a>`).join('')}<div class="grow"></div><small>Changes apply at once.</small></div>
+  <div class="pane"><div class="ib shut">${I('x')}</div><h1>${title}</h1><p class="lead">${lead}</p>${body}</div>
+</div></div>`;
+const app=()=>topbar('LIVE')+stage()+dock();
+const live=f=>{air(f,'game');const g=f.querySelector('.top .ib:has(use[href="#gear"])');g&&g.classList.add('gearon')};
+const sr=(b,help,ctl,st='')=>`<div class="sr" style="${st}"><div class="l"><b>${b}</b>${help?`<span>${help}</span>`:''}</div>${ctl}</div>`;
+const seg=(a,on)=>`<div class="seg">${a.map(x=>`<span class="${x==on?'on':''}">${x}</span>`).join('')}</div>`;
+const kc=(...k)=>k.map(x=>`<span class="kc">${x}</span>`).join('');
+const hk=(n,keys,em='')=>`<div class="hk"><span class="n">${n}${em?`<em>${em}</em>`:''}</span>${keys?kc(...keys)+I('x','sm clr'):'<span class="btn">Bind</span>'}</div>`;
+
+const P={
+ show:()=>win('show','SHOW','The shape of the picture. It is saved in the show file.',
+  sr('Format','One format for the whole show. The layout of this window follows it.',
+    `<div class="row" style="gap:10px"><div class="fmt on"><i style="width:46px;height:26px"></i><div><b>Landscape</b><small>Desks and TVs</small></div></div><div class="fmt"><i style="width:22px;height:38px"></i><div><b>Portrait</b><small>Phones</small></div></div></div>`)+
+  sr('Canvas size','Bigger needs a faster encoder and more upload: 1080p wants about 6 Mb/s.',seg(['720p','1080p','1440p','4K','Custom'],'1080p'))+
+  sr('Frame rate','60 is smoother for games and doubles the encoder\'s work.',seg(['30','60','Custom'],'60'))+
+  `<div class="sr" style="flex-direction:column;align-items:stretch;gap:12px">
+    <div class="disc">${I('down','sm')}Advanced<span class="grow"></span><span class="hl">1 scene has its own size</span></div>
+    <div class="box">
+      <div class="dr">${I('layers','sm dim')}<span class="grow">Phone cut</span><div class="f" style="grid-template-columns:92px 92px"><span><em>W</em>1080</span><span><em>H</em>1920</span></div><div class="ib" style="width:24px;height:24px">${I('x','sm')}</div></div>
+      <div class="dr dim">${I('plus','sm')}Give a scene its own size</div>
+    </div>
+    <span class="hl">A scene of another size cannot go on air. Publish it as its own broadcast instead, under Advanced.</span>
+  </div>
+  <div class="grow"></div><div class="row hl">${I('info','sm')}You are on air. A new size or frame rate restarts the video for a moment.</div>`),
+
+ stream:()=>win('stream','STREAM','Where the stream goes. Keys stay in the system keychain, never in a file.',
+  `<div class="box" style="padding:14px 14px 4px">
+    <div class="row" style="margin-bottom:12px"><i class="dot"></i><b style="font:600 13.5px/1 var(--ui)">Relay</b><span class="hl">Connected, 18 ms away</span><span class="grow"></span><span class="chip">Test</span></div>
+    <div style="display:grid;grid-template-columns:1.25fr 1fr;gap:12px">
+      <div class="fld"><span class="lab">Address</span><div class="inp">relay.example.net</div></div>
+      <div class="fld"><span class="lab">Broadcast name</span><div class="inp">friday-night-ranked</div></div>
+      <div class="fld" style="grid-column:1/-1"><span class="lab">Key</span><div class="inp">${I('lock','sm dim')}<span class="dots grow">••••••••••••••••••••</span><span class="hl" style="font-family:var(--ui)">In the system keychain</span><span class="chip" style="height:22px;margin-right:-5px">Replace</span></div></div>
+    </div>
+    <div class="dr" style="margin:12px -14px 0;padding:0 14px;height:46px;border-top:1px solid var(--line)"><i class="tog on"></i><b style="width:auto">Failover relay</b><div class="inp grow" style="height:28px">backup.example.net</div><i class="dot idle"></i><span class="hl">Standing by</span></div>
+  </div>
+  <div class="row" style="margin:16px 0 8px"><span class="cap grow">More destinations</span><span class="hl">Each one is another upload of the whole stream.</span></div>
+  <div class="box">
+    <div class="dr"><i class="dot"></i><b>RTMP 1</b><span class="url grow">rtmp://live.example.com/app</span><span class="hl">Ready</span><i class="tog on"></i></div>
+    <div class="dr"><i class="dot warn"></i><b>RTMP 2</b><span class="url grow">rtmp://ingest.example.org/live</span><span class="hl" style="color:var(--cue)">The key was refused</span><span class="chip" style="height:22px">Fix</span><i class="tog on"></i></div>
+    <div class="dr"><i class="dot idle"></i><b class="dim">WHIP 1</b><span class="url grow">https://whip.example.com/in</span><span class="hl">Off</span><i class="tog"></i></div>
+    <div class="dr dim">${I('plus','sm')}<span class="grow">Add a destination</span><span class="chip" style="height:22px">RTMP</span><span class="chip" style="height:22px">WHIP</span></div>
+  </div>`+
+  sr('Encode only while someone watches','Spares the encoder when nobody is watching. A replay then has no past from before the first viewer.','<i class="tog"></i>','border:0;padding-bottom:0')),
+
+ recording:()=>win('recording','RECORDING','What the record button saves, from any page.',
+  `<div class="sr"><div class="ic" style="background:var(--p3);width:38px;height:38px;border-radius:10px">${I('folder')}</div><div class="l"><b>Videos <span class="dim">›</span> Friday Night Ranked</b><span>212 GB free, about 30 hours of this show</span></div><span class="btn">Change</span><span class="btn">${I('out','sm')}Open</span></div>`+
+  sr('Picture','The program is what viewers see. A scene records at its own size.',seg(['The program','A scene ▾'],'The program'))+
+  sr('Sound','The audio scene the recording holds. It can differ from the stream\'s, to keep music out.',`<div class="tagc"><i class="sdot">R</i>Recording${I('down','sm')}</div>`)+
+  sr('Each source too','Every camera, screen, and microphone also saves a file of its own, before its filters. Each costs an encoder and its share of the disk.','<i class="tog on"></i>')+
+  `<div class="sr" style="border-top:1px solid var(--line)"><div class="l"><b>Saving now</b><span>The program and 5 sources, about 14 GB an hour</span></div><div class="row" style="gap:6px">${['mic','cam','win','vol','users'].map(i=>`<div class="ic" style="background:var(--p3);width:28px;height:28px">${I(i,'sm')}</div>`).join('')}</div></div>
+  <div class="grow"></div><div class="row hl">${I('shield','sm')}A recording cut short by a crash is repaired the next time the studio opens.</div>`),
+
+ hotkeys:()=>win('hotkeys','HOTKEYS','Kept on this computer, not in the show.',
+  `<div class="banner2">${I('keys')}<span><b style="font-weight:600">Hotkeys work while a game has focus.</b> <span class="dim">Bind keys you do not play or type with.</span></span></div>
+  <span class="cap hkcap">Live</span>
+  <div class="hkgrid"><div>${hk('Go live',['Ctrl','Shift','L'])}${hk('End stream','', 'held')}</div><div>${hk('Panic',['F9'],'safe scene, mics muted')}${hk('Start or stop recording',['Ctrl','Shift','R'])}</div></div>
+  <span class="cap hkcap">Scenes</span>
+  <div class="hkgrid"><div>${hk('Starting soon',['F1'])}${hk('Gameplay',['F2'])}${hk('Just chatting',['F3'])}</div><div>${hk('Guest duo',['F4'])}${hk('BRB',['F5'])}${hk('Phone cut','')}</div></div>
+  <span class="cap hkcap">Review</span>
+  <div class="hkgrid"><div><div class="hk"><span class="n">Replay</span><div class="inp bind" style="height:26px">Press the keys now<span class="kc" style="height:18px;min-width:0;padding:0 5px;font-size:10px;box-shadow:none">Esc</span>cancels</div></div></div><div>${hk('Save clip',['Ctrl','Shift','C'])}</div></div>
+  <div class="grow"></div><div class="row hl">${I('info','sm')}A key bound to one action is refused for another until it is cleared there.</div>`),
+
+ advanced:()=>win('advanced','ADVANCED','Things most shows never touch.',
+  sr('Publish a scene as its own broadcast','It stays live whatever is on air. Each one costs an encoder of its own.',`<div class="row" style="gap:6px"><div class="tagc">Phone cut${I('x','sm')}</div><div class="ib b">${I('plus','sm')}</div></div>`)+
+  sr('Publish a source independently','Viewers and services fetch it on its own. It leaves the program and every audio scene.',`<div class="row" style="gap:6px"><div class="ib b">${I('plus','sm')}</div></div>`)+
+  sr('Virtual camera','Shows the program as a camera that other apps can pick.','<i class="tog"></i>')+
+  sr('Effects','How this window moves and glows. It never reaches the stream.',seg(['Full','Reduced','Off'],'Full'))+
+  sr('Scene graph','Every scene, source, and audio scene, drawn as one map.',`<span class="btn">${I('out','sm')}Open</span>`)+
+  sr('Edit history','Every change to this show, to step back through.',`<span class="btn">${I('out','sm')}Open</span>`)),
+};
+
+const V={
+ 'show':{label:'Show',cls:'L',note:'<b>Settings, Show.</b> The format, the canvas size, and the frame rate are named choices, with the exact numbers behind Custom; per-scene sizes sit behind Advanced. They left the home page because a broadcaster sets them once, and each line of help names what the choice costs.',
+   html:()=>app()+P.show(),after:live},
+ 'stream':{label:'Stream',cls:'L',note:'<b>Settings, Stream.</b> Where the stream goes: the relay with its address and a key that is only ever dots, the failover relay, and the RTMP and WHIP destinations as rows with a state dot. It replaces the command-line flags, so the app can go live after a double click.',
+   html:()=>app()+P.stream(),after:live},
+ 'recording':{label:'Recording',cls:'L',note:'<b>Settings, Recording.</b> The folder, the picture and audio scene a recording holds, and whether each source saves a file of its own. The record button in the title bar then needs no questions.',
+   html:()=>app()+P.recording(),after:live},
+ 'hotkeys':{label:'Hotkeys',cls:'L',note:'<b>Settings, Hotkeys.</b> Each action with its keys on keycaps, one row waiting for a key, and unbound actions offering Bind. The note that they fire while a game has focus is the first thing on the pane, because it decides which keys are safe to pick.',
+   html:()=>app()+P.hotkeys(),after:live},
+ 'advanced':{label:'Advanced',cls:'L',note:'<b>Settings, Advanced.</b> Publishing a scene or a source on its own, the virtual camera, the effects level, and the two inspection windows. Everything here is off the pages on purpose: most shows never open it.',
+   html:()=>app()+P.advanced(),after:live},
+};
+mount(V);
+</script>
+</body>
+</html>

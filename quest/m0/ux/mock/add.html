@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add a source</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Registered so a level meter can animate; the kit always sets --v where it reads it. */
+@property --v{syntax:'<percentage>';inherits:true;initial-value:0%}
+
+/* BUILD with the Add tab open: the left column widens and pushes the picture; the inspector folds away, nothing is selected. */
+.Ad{grid-template:48px 1fr 150px/560px 1fr}
+.Ad .dock{grid-column:1/-1}
+.Ad .side.l{border-left:0;border-right:1px solid var(--line)}
+
+.find{margin:12px 14px 0;height:36px;flex:none;border-radius:9px;background:var(--p2);border:1px solid var(--line);display:flex;align-items:center;gap:9px;padding:0 10px;color:var(--faint);font-size:13px}
+.cols{flex:1;min-height:0;display:grid;grid-template-columns:72px 1fr;margin-top:12px;border-top:1px solid var(--line)}
+.idx{display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 0;border-right:1px solid var(--line)}
+.idx a{width:60px;height:50px;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;color:var(--dim);font:500 10px/1 var(--ui);white-space:nowrap}
+.idx a.on{background:var(--p3);color:var(--text)}
+.list{position:relative;min-width:0;min-height:0;overflow:hidden;padding:0 14px}
+.list.more::after{content:"";position:absolute;left:0;right:0;bottom:0;height:34px;background:linear-gradient(transparent,var(--p1));z-index:3}
+.list .sb{position:absolute;right:3px;width:3px;border-radius:2px;background:var(--p3);z-index:4}
+.sh{display:flex;align-items:center;gap:10px;min-height:22px;margin:12px 0 7px;font:600 14px/1 var(--disp);letter-spacing:.14em;text-transform:uppercase}
+.sh small{font:400 12px/1 var(--ui);letter-spacing:0;text-transform:none;color:var(--faint)}
+.sh .btn{height:28px;font-size:12px;letter-spacing:0;text-transform:none}
+
+.g2,.g3,.g4{display:grid;gap:10px}
+.g2{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
+.tray{min-width:0;border-radius:11px;background:var(--p2);padding:6px 6px 9px;display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:22px}
+.tray.s2{grid-column:span 2}
+.card{position:relative;min-width:0;display:flex;flex-direction:column}
+.card .th{position:relative;aspect-ratio:16/9;border-radius:7px;background:#000}
+.card .th::after,.rec .th::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 1px #ffffff1c;z-index:1}
+.card .tx{display:flex;flex-direction:column;gap:3px;margin:14px 2px 0;min-width:0}
+.g2 .card .tx{flex-direction:row;align-items:baseline;justify-content:space-between;gap:8px;margin:9px 2px 0 38px}
+.card b{font:600 12.5px/1.2 var(--ui);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card small{flex:none;font:400 11.5px/1.2 var(--ui);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px}
+.card.on .th{outline:2px solid var(--sel);outline-offset:2px}
+.card.lift{opacity:.3}
+.card.lift .th{outline:2px dashed var(--dim);outline-offset:2px}
+.bd{position:absolute;left:6px;bottom:-10px;z-index:2;box-shadow:0 0 0 2px var(--p2)}
+.ai{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;color:#fff;font:700 14px/1 var(--disp);flex:none}
+.ai svg.i{width:14px;height:14px}
+.ai.dv{border-radius:50%;background:#34343f}
+.inq{position:absolute;right:5px;top:5px;z-index:2;padding:3px 6px;border-radius:5px;background:#000c;font:600 10px/1 var(--ui);color:#fff}
+.rec .th{position:relative;aspect-ratio:16/9;border-radius:7px;background:var(--p2)}
+.rec span{display:block;margin:7px 1px 0;font:500 12px/1.2 var(--ui);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rec .bd{left:5px;bottom:5px;width:20px;height:20px;border-radius:6px;box-shadow:none;font-size:12px}
+.rec .bd svg.i{width:12px;height:12px}
+.mth{display:grid;place-items:center;color:var(--dim)}
+.mth .led{position:absolute;left:30px;right:8px;bottom:11px;height:6px}
+
+/* sound: one row per thing that can be heard, the meter is the picture */
+.snd{display:flex;align-items:center;gap:10px;height:42px;padding:0 12px 0 8px;border-radius:11px;background:var(--p2);margin-top:5px}
+.snd .ai{width:26px;height:26px}
+.snd .n{width:132px;font:600 12.5px/1.2 var(--ui)}
+.snd .n small{display:block;font:400 11.5px/1.2 var(--ui);color:var(--dim);margin-top:2px}
+.snd .led{height:10px}
+.snd .say{width:74px;text-align:right;font:600 11.5px/1 var(--ui);color:var(--ok)}
+.led.live{animation:lv var(--t,1.3s) steps(9) infinite alternate}
+@keyframes lv{from{--v:var(--lo)}to{--v:var(--hi)}}
+
+/* what is picked, and the one action */
+.pick{display:flex;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--line);background:var(--p2);flex:none}
+.pick .th{width:64px;height:36px;border-radius:6px;flex:none;outline:2px solid var(--sel);outline-offset:1px}
+.pick .n{font:600 13px/1.2 var(--ui);min-width:0}
+.pick .n small{display:block;font:400 11.5px/1.2 var(--ui);color:var(--dim);margin-top:3px}
+.pick .opt{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim);white-space:nowrap}
+.btn.pri{background:var(--sel);border-color:transparent;color:#fff;height:34px;padding:0 14px;font-size:13px}
+
+/* drag onto the picture */
+.land{position:absolute;left:3%;top:21%;width:40%;aspect-ratio:16/10;border:2px dashed var(--sel);border-radius:6px;background:#4f8cff2e;z-index:6}
+.land i{position:absolute;width:8px;height:8px;background:var(--sel);border-radius:50%}
+.land i:nth-child(1){left:-5px;top:-5px}.land i:nth-child(2){right:-5px;top:-5px}.land i:nth-child(3){left:-5px;bottom:-5px}.land i:nth-child(4){right:-5px;bottom:-5px}
+.vg{position:absolute;left:3%;top:10%;bottom:4%;width:1px;background:#ff3df0;z-index:7}
+.snap{position:absolute;left:calc(3% + 10px);top:calc(21% + 40% * 10 / 16 * 16 / 9 + 10px);z-index:7;padding:4px 7px;border-radius:6px;background:#000d;color:#ff7af5;font:600 11px/1 var(--ui);white-space:nowrap}
+.ghost{position:absolute;z-index:30;width:176px;padding:6px 6px 9px;border-radius:11px;background:#1c1c25;border:1px solid var(--sel);box-shadow:0 22px 44px #000d;opacity:.94;transform:rotate(-3deg)}
+.ptr{position:absolute;z-index:31;width:22px;height:22px}
+.hint{position:absolute;left:0;right:0;bottom:22px;display:flex;justify-content:center;gap:8px;align-items:center;color:var(--dim);font-size:12px}
+
+/* a desktop that owns the picker */
+.sysbtn{height:84px;border-radius:14px;background:var(--sel);color:#fff;display:flex;align-items:center;gap:14px;padding:0 20px;font:700 26px/1 var(--disp);letter-spacing:.03em}
+.sysbtn svg.i{width:26px;height:26px}
+.sysbtn .go{width:20px;height:20px;opacity:.8}
+.sysnote{display:flex;gap:9px;align-items:flex-start;margin-top:12px;color:var(--dim);font-size:12.5px;line-height:1.45}
+.sysnote svg.i{margin-top:1px}
+.sysnote b{color:var(--text);font-weight:600}
+
+/* guests */
+.invite{display:flex;gap:14px;padding:12px;border-radius:12px;background:var(--p2);border:1px solid var(--line);margin-bottom:10px}
+.qr{width:104px;height:104px;flex:none;border-radius:8px}
+.invite .t{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.invite .t b{font:600 14px/1.2 var(--ui)}
+.invite .t span{color:var(--dim);font-size:12px;line-height:1.4}
+.lnk{display:flex;gap:6px;margin-top:auto}
+.lnk .u{flex:1;min-width:0;height:30px;border-radius:8px;background:var(--p1);border:1px solid var(--line);display:flex;align-items:center;padding:0 10px;font:500 11.5px/1 var(--mono);color:var(--dim);white-space:nowrap;overflow:hidden}
+.btn.on{background:var(--p3);border-color:var(--dim)}
+.gdot{width:7px;height:7px;border-radius:50%;background:var(--ok);flex:none}
+.draghint{display:flex;align-items:center;gap:7px;margin-top:10px;color:var(--faint);font-size:12px}
+
+/* fake window and camera pictures, sized in cqw like the kit's so one markup is any size */
+.web,.mail{background:#eef0f5}
+.web .tb,.mail .tb{left:0;right:0;top:0;height:11%;background:#cfd3de}
+.web .tb::after,.mail .tb::after{content:"";position:absolute;left:4%;bottom:0;width:24%;height:70%;border-radius:1.6cqw 1.6cqw 0 0;background:#eef0f5}
+.web .hero{left:6%;top:19%;width:88%;height:32%;border-radius:1.6cqw;background:linear-gradient(120deg,#5a1f6e,#ff7a3d)}
+.web .tx{left:6%;top:59%;width:54%;height:36%;background:repeating-linear-gradient(#b9bdca 0 2.4cqw,transparent 2.4cqw 6.5cqw)}
+.web .bx{right:6%;top:59%;width:28%;height:29%;border-radius:1.6cqw;background:#d5d9e4}
+.mail .nv{left:0;top:11%;bottom:0;width:22%;background:#dfe3ec}
+.mail .rw{left:27%;right:5%;top:19%;bottom:0;background:repeating-linear-gradient(#cdd2df 0 6cqw,transparent 6cqw 8.5cqw)}
+.notes{background:#fff6d8}
+.notes .hd{left:8%;top:13%;width:42%;height:8%;border-radius:1cqw;background:#4a4023}
+.notes .tx{left:8%;top:31%;width:76%;height:60%;background:repeating-linear-gradient(#cfc293 0 2.4cqw,transparent 2.4cqw 7cqw)}
+.music{background:#0f1218}
+.music .art{left:6%;top:11%;width:30%;aspect-ratio:1;border-radius:2cqw;background:linear-gradient(135deg,#ff3d7f,#7b2ff7)}
+.music .tx{left:42%;top:15%;width:46%;height:40%;background:repeating-linear-gradient(#ffffff38 0 2.4cqw,transparent 2.4cqw 7cqw)}
+.music .pr{left:6%;right:6%;bottom:11%;height:2.4cqw;border-radius:2cqw;background:linear-gradient(90deg,#35d07f 40%,#ffffff26 40%)}
+.voice{background:#191b2c}
+.voice i{top:28%;width:19%;aspect-ratio:1;border-radius:50%}
+.voice i:nth-child(1){left:13%;background:#ff9f43}.voice i:nth-child(2){left:40.5%;background:#54a0ff;box-shadow:0 0 0 1cqw #35d07f}.voice i:nth-child(3){left:68%;background:#ff6b9d}
+.desk{background:linear-gradient(135deg,#16324f,#5b2a6b)}
+.desk .w1{left:7%;top:9%;width:58%;height:64%;border-radius:1.2cqw;background:linear-gradient(#1b0b3a,#5a1f6e 50%,#ff7a3d 70%,#12061f 71%)}
+.desk .w2{right:6%;top:24%;width:30%;height:56%;border-radius:1.2cqw;background:#eef0f5}
+.desk .bar{left:0;right:0;bottom:0;height:9%;background:#000a}
+.desk.b{background:linear-gradient(135deg,#1f3d2f,#16324f)}
+.desk.b .w1{background:#fff6d8;width:40%}.desk.b .w2{background:#191b2c;width:38%;top:14%}
+.face{background:radial-gradient(circle at 84% 16%,#ffb0203d,transparent 38%),linear-gradient(160deg,var(--room,#34406a),#1c2136)}
+.face::before{content:"";position:absolute;left:41%;top:17%;width:18%;aspect-ratio:1;border-radius:50%;background:var(--skin,#e9b48f)}
+.face::after{content:"";position:absolute;left:27%;top:56%;width:46%;height:60%;border-radius:45% 45% 0 0;background:var(--shirt,#3b6cf6)}
+.plat{background:linear-gradient(#4aa8ff 0,#a8dcff 64%,#3d9a4a 64%,#2c6e36)}
+.plat .s{right:11%;top:12%;width:11%;aspect-ratio:1;border-radius:50%;background:#fff6c2}
+.plat .b1{left:16%;top:41%;width:24%;height:8%;border-radius:.8cqw;background:#c7772e}
+.plat .b2{left:52%;top:27%;width:17%;height:8%;border-radius:.8cqw;background:#c7772e}
+.plat .h{left:25%;top:27%;width:5%;height:14%;border-radius:1.2cqw;background:#e23b3b}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="webcam" viewBox="0 0 24 24"><circle cx="12" cy="10" r="6.5"/><circle cx="12" cy="10" r="2"/><path d="M12 16.5V21M8 21h8"/></symbol>
+<symbol id="capcard" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 12h6M10.500 9.500 13 12l-2.500 2.500M17 10.500v3"/></symbol>
+<symbol id="phone" viewBox="0 0 24 24"><rect x="7" y="2.500" width="10" height="19" rx="2.500"/><path d="M11 18h2"/></symbol>
+<symbol id="headset" viewBox="0 0 24 24"><path d="M4 14a8 8 0 0 1 16 0M4 14h3v5H6a2 2 0 0 1-2-2v-3ZM20 14h-3v5h1a2 2 0 0 0 2-2v-3ZM20 17v1.500a2.500 2.500 0 0 1-2.500 2.500H13"/></symbol>
+<symbol id="folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.500h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></symbol>
+<symbol id="scene" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="11" width="6" height="5" rx="1"/></symbol>
+<symbol id="tune" viewBox="0 0 24 24"><circle cx="7" cy="17" r="3"/><circle cx="17" cy="15" r="3"/><path d="M10 17V5l10-2v12"/></symbol>
+<symbol id="lines" viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h9"/></symbol>
+<symbol id="copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+<symbol id="grip" viewBox="0 0 24 24"><path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01"/></symbol>
+<symbol id="userplus" viewBox="0 0 24 24"><circle cx="10" cy="8" r="3.500"/><path d="M3.500 20c.600-3.600 3.200-5.500 6.500-5.500 1.300 0 2.500.300 3.500.900M18 14v6M15 17h6"/></symbol>
+<symbol id="open" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-8 8M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></symbol>
+</defs></svg>
+<script src="kit.js"></script>
+<script>
+// Every app is a color and a glyph here; the app shows the real icon the desktop gives it.
+const APP={
+  drift:{n:'Neon Drift',c:'#e2574c',g:'N'},
+  browser:{n:'Browser',c:'#2f7df6',g:I('globe')},
+  notes:{n:'Notes',c:'#f2c230',g:I('lines'),ink:'#2a2000'},
+  music:{n:'Music',c:'#1db954',g:I('tune')},
+  voice:{n:'Voice chat',c:'#5865f2',g:I('phones')},
+};
+const ai=(k,c='')=>{const a=APP[k];return `<span class="ai ${c}" style="background:${a.c};${a.ink?'color:'+a.ink:''}">${a.g}</span>`};
+const dv=(icon,c='')=>`<span class="ai dv ${c}">${I(icon)}</span>`;
+const face=(shirt,room,skin)=>`<div class="pic face" style="${shirt?'--shirt:'+shirt+';':''}${room?'--room:'+room+';':''}${skin?'--skin:'+skin:''}"></div>`;
+const P={
+  game:pic('game').replace('<div class="cam"></div>','').replace(/<div class="l3">.*?<\/div>/s,''),
+  web:'<div class="pic web"><div class="tb"></div><div class="hero"></div><div class="tx"></div><div class="bx"></div></div>',
+  mail:'<div class="pic mail"><div class="tb"></div><div class="nv"></div><div class="rw"></div></div>',
+  notes:'<div class="pic notes"><div class="hd"></div><div class="tx"></div></div>',
+  music:'<div class="pic music"><div class="art"></div><div class="tx"></div><div class="pr"></div></div>',
+  voice:'<div class="pic voice"><i></i><i></i><i></i></div>',
+  desk:'<div class="pic desk"><div class="w1"></div><div class="w2"></div><div class="bar"></div></div>',
+  desk2:'<div class="pic desk b"><div class="w1"></div><div class="w2"></div><div class="bar"></div></div>',
+  usb:face(),
+  laptop:face('#2aa198','#3a2b3f'),
+  card:'<div class="pic plat"><div class="s"></div><div class="b1"></div><div class="b2"></div><div class="h"></div></div>',
+  phone:pic('close'),
+  robin:face('#e2574c','#23403a','#c98d6b'),
+  sam:face('#8e5cf7','#40302a','#f0c6a4'),
+  soon:pic('soon'),chat:pic('chat'),brb:pic('brb'),
+};
+const card=o=>`<div class="card ${o.on?'on':''} ${o.lift?'lift':''}"><div class="th">${o.pic}${o.badge}${o.tag?`<span class="inq">${o.tag}</span>`:''}</div><div class="tx"><b>${o.name}</b><small>${o.sub}</small></div></div>`;
+const win=(app,title,p,o={})=>card({pic:P[p],badge:ai(app,'bd'),name:APP[app].n,sub:title,...o});
+const dev=(icon,name,sub,p,o={})=>card({pic:P[p],badge:dv(icon,'bd'),name,sub,...o});
+const tray=(...c)=>`<div class="tray ${c.length>1?'s'+c.length:''}">${c.join('')}</div>`;
+const sh=(t,s='',x='')=>`<div class="sh">${t}${s?`<small>${s}</small>`:''}<span class="grow"></span>${x}</div>`;
+const meter=(lo,hi,t)=>`<div class="led live grow ${hi>80?'hot':''}" style="--lo:${lo}%;--hi:${hi}%;--v:${hi}%;--t:${t}s"></div>`;
+const snd=(badge,name,sub,lo,hi,t,say='')=>`<div class="snd">${badge}<div class="n">${name}<small>${sub}</small></div>${meter(lo,hi,t)}<span class="say">${say}</span></div>`;
+
+const S={
+  recent:()=>sh('Recent')+`<div class="g4 rec">
+    <div><div class="th">${P.usb}${dv('webcam','bd')}</div><span>USB camera</span></div>
+    <div><div class="th">${P.game}${ai('drift','bd')}</div><span>Neon Drift</span></div>
+    <div><div class="th mth">${dv('mic','bd')}<div class="led" style="--v:55%"></div></div><span>Desk mic</span></div>
+    <div><div class="th">${P.desk}${dv('mon','bd')}</div><span>Main display</span></div></div>`,
+  apps:(o={})=>sh('Apps','6 windows open')+`<div class="g3">
+    ${tray(win('drift','Season 4','game',{tag:'In this scene'}))}
+    ${tray(win('browser','Patch notes','web',{on:o.sel}),win('browser','Mail','mail'))}
+    ${tray(win('notes','Run of show','notes',{lift:o.lift}))}
+    ${tray(win('music','Late night mix','music'))}
+    ${tray(win('voice','Squad room','voice'))}</div>`,
+  screens:()=>sh('Screens')+`<div class="g3">${tray(dev('mon','Main display','The one you are on','desk'))}${tray(dev('mon','Side display','On the left','desk2'))}</div>`,
+  cameras:()=>sh('Cameras')+`<div class="g2">
+    ${tray(dev('webcam','USB camera','Webcam','usb',{tag:'In this scene'}))}
+    ${tray(dev('webcam','Laptop camera','Built in','laptop'))}
+    ${tray(dev('capcard','Capture card','Game console','card'))}
+    ${tray(dev('phone','Phone','Over Wi-Fi','phone'))}</div>`,
+  sound:()=>sh('Sound','Talk, and watch which one moves')+
+    snd(dv('mic'),'Desk mic','Microphone',58,94,.9,'Hearing you')+
+    snd(dv('headset'),'Headset','Microphone',2,7,1.7)+
+    snd(dv('webcam'),'USB camera','Its microphone',10,24,1.1)+
+    snd(dv('vol'),'System sound','Everything you hear',34,52,1.4),
+  system:()=>sh('Windows and screens')+`<div class="sysbtn">${I('win')}<span class="grow">Choose a window or screen</span>${I('open','go')}</div>
+    <div class="sysnote">${I('lock','sm')}<span>This desktop shows its own picker, so no app can look at your windows without asking. <b>Your choice is remembered next time.</b></span></div>`+
+    sh('Chosen before','One click, no picker')+`<div class="g3">${tray(win('drift','Season 4','game',{tag:'In this scene'}))}${tray(dev('mon','Main display','Whole screen','desk'))}</div>`,
+  guests:()=>sh('Guests','2 here',`<div class="btn on sm">${I('userplus')}Invite</div>`)+`<div class="invite">${qr()}<div class="t"><b>Invite a guest</b><span>They scan this or open the link in any browser. Nothing to install.</span><div class="lnk"><div class="u">join.example/amber-fox-27</div><div class="btn sm">${I('copy')}Copy link</div></div></div></div>
+    <div class="g2">${tray(card({pic:P.robin,badge:dv('users','bd'),name:'Robin',sub:'<i class="gdot"></i>Good connection',tag:'In Guest duo'}))}${tray(card({pic:P.sam,badge:dv('users','bd'),name:'Sam',sub:'<i class="gdot"></i>Good connection'}))}</div>
+    <div class="draghint">${I('grip','sm')}Drag a guest onto the picture, like any other source.</div>`,
+  scenes:()=>sh('Scenes','Put a whole scene inside this one')+`<div class="g3">${tray(dev('scene','Starting soon','Scene','soon'))}${tray(dev('scene','Just chatting','Scene','chat'))}${tray(dev('scene','BRB','Scene','brb'))}</div>`,
+};
+// A stand-in for the code, not a real one.
+function qr(){let s='';const n=21,fin=(x,y)=>(x<8&&y<8)||(x>=n-8&&y<8)||(x<8&&y>=n-8);
+  for(let y=0;y<n;y++)for(let x=0;x<n;x++)if(!fin(x,y)&&((x*7+y*13+x*y*3+(x^y))%5<2))s+=`<rect x="${x}" y="${y}" width="1" height="1"/>`;
+  const f=(x,y)=>`<rect x="${x+.5}" y="${y+.5}" width="6" height="6" fill="none" stroke="#111"/><rect x="${x+2}" y="${y+2}" width="3" height="3"/>`;
+  return `<svg class="qr" viewBox="-2 -2 25 25"><rect x="-2" y="-2" width="25" height="25" fill="#fff"/><g fill="#111">${s}${f(0,0)}${f(14,0)}${f(0,14)}</g></svg>`}
+
+const IDX=[['Apps','win'],['Screens','mon'],['Cameras','webcam'],['Sound','mic'],['Files','folder'],['Web page','globe'],['Text','type'],['Guests','users'],['Scenes','scene']];
+// The Add tab. `on` names the section the list is scrolled to; `sb` draws where the scroll thumb sits.
+function panel(on,body,o={}){
+  const idx=(o.idx||IDX).map(([n,i])=>`<a class="${on.includes(n)?'on':''}">${I(i)}${n}</a>`).join('');
+  return `<div class="side l"><div class="tabs"><span>Layers</span><span class="on">Add</span></div>
+    <div class="find">${I('search')}<span class="grow">Search apps, devices, and files</span><kbd>/</kbd></div>
+    <div class="cols"><div class="idx">${idx}</div><div class="list ${o.more?'more':''}">${body}<i class="sb" style="top:${o.sb[0]}px;height:${o.sb[1]}px"></i></div></div>${o.foot||''}</div>`;
+}
+const pickbar=`<div class="pick"><div class="th">${P.web}</div><div class="n grow">Browser<small>Patch notes</small></div><div class="opt">With its sound<i class="tog on"></i></div><div class="btn pri">${I('plus')}Add to picture</div></div>`;
+const page=(left,st={})=>topbar('BUILD')+left+stage(st)+dock();
+
+const V={
+ 'apps':{label:'Apps',cls:'Ad',note:'<b>Adding an app\'s window.</b> The Add tab widens the left column and pushes the picture; the inspector folds away because nothing is selected. Every open window is a live thumbnail under its app\'s icon, so you pick by looking, never by typing an id. One click selects it and shows the single action; the thumbnail is the check on what is about to go on air.',
+   html:()=>page(panel(['Apps'],S.recent()+S.apps({sel:true})+S.screens(),{more:true,sb:[6,150],foot:pickbar})),after:f=>air(f,'game')},
+ 'cameras':{label:'Cameras and sound',cls:'Ad',note:'<b>Cameras and sound.</b> Each camera is its own live preview with an icon for what kind of device it is. Each microphone, and the computer\'s own sound, is a moving level meter: talk, and the right one is the one that moves.',
+   html:()=>page(panel(['Cameras'],S.cameras()+S.sound(),{sb:[190,190]})),after:f=>air(f,'game')},
+ 'drop':{label:'Drag onto the picture',cls:'Ad',note:'<b>Dragging a card onto the picture.</b> The card lifts out of the list and follows the pointer; a dashed outline shows where and how big it will land, and a guide appears when it lines up with a layer already there. Letting go adds it, on air, in that place.',
+   html:()=>page(panel(['Apps'],S.recent()+S.apps({lift:true})+S.screens(),{more:true,sb:[6,150]}),{extra:''}),
+   after:f=>{air(f,'game');
+     f.querySelector('.tally').insertAdjacentHTML('beforeend','<div class="vg"></div><div class="land"><i></i><i></i><i></i><i></i></div><div class="snap">Lines up with Lower third</div>');
+     f.querySelector('.stagewrap').insertAdjacentHTML('beforeend',`<div class="hint">Let go to add it here <kbd>Alt</kbd> place freely <kbd>Esc</kbd> cancel</div>`);
+     f.insertAdjacentHTML('beforeend',`<div class="ghost" style="left:716px;top:300px">${win('notes','Run of show','notes')}</div><svg class="ptr" style="left:762px;top:338px" viewBox="0 0 24 24"><path d="M5 3v16l4.500-4 2.800 6.500 2.700-1.200-2.800-6.300H18L5 3Z" fill="#fff" stroke="#000" stroke-width="1.500" stroke-linejoin="round"/></svg>`)}},
+ 'system':{label:'System picker',cls:'Ad',note:'<b>A desktop where only the system may show windows.</b> Apps and Screens become one section with one large button that opens the desktop\'s own picker. What was chosen before stays as a card, so the next time is one click with no picker. Everything else in the panel is unchanged.',
+   html:()=>page(panel(['Windows'],S.system()+S.cameras(),{more:true,sb:[6,300],idx:[['Windows','win'],...IDX.slice(2)]})),after:f=>air(f,'game')},
+ 'guests':{label:'Guests',cls:'Ad',note:'<b>Guests.</b> Invite shows a code to scan and a link to copy; a guest joins from a browser. Each guest who has joined is a card with a live thumbnail, dragged onto the picture like any other source. Scenes sit last: a whole scene can go inside another.',
+   html:()=>page(panel(['Guests'],S.guests()+S.scenes(),{sb:[360,200]})),after:f=>air(f,'game')},
+};
+mount(V);
+</script>
+</body>
+</html>

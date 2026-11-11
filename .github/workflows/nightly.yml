@@ -3,9 +3,9 @@ name: Nightly
 # The gates too slow or too specialized for a pull request: compositing,
 # publishing, and the virtual camera through wgpu on Mesa's software Vulkan
 # driver, the camera in a private PipeWire session; the virtual camera's
-# v4l2loopback fallback, a module load no pull request job should make; and
+# v4l2loopback fallback, a module load no pull request job should make;
 # `just ci` on macOS, whose capture backends Check's Linux runner never
-# compiles.
+# compiles; and the Flatpak, a release build of everything.
 
 permissions:
   contents: read
@@ -86,3 +86,7 @@ jobs:
 
       - name: Check
         run: nix develop --command just ci
+
+  flatpak:
+    name: Flatpak
+    uses: ./.github/workflows/flatpak.yml

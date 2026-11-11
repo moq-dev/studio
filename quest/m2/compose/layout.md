@@ -1,48 +1,49 @@
-# [M] Layer layout track
+# [M] Guests in the layer layout
 
 ## Goal
 
-A studio broadcast that publishes a source independently also carries a layer
-layout track. For each such source, it says where and when that source shows
-over the program: its transform, crop, z-order, opacity, and visibility, its
-item's keyframes and when its scene went on program, all on the media clock,
-and for audio its gain and mute. Until hang specifies it, the track is the
-provisional `dev.moq.studio.layers` in the studio catalog.
+A guest's broadcast source can be published independently, like a local
+source: the program leaves it out, and the provisional
+`dev.moq.studio.layers` layout track names the guest's broadcast so a player
+places it over the program, and mixes its sound, at the right time.
 
 ## Plan
 
-Replanned 2026-11-08 (maintainer, /quest-plan) around the program with
-independent layers over it, rather than the full scene state; see the
-[epic](/quest/m2/compose/README.md).
+The layout track itself landed for local sources: `rs/moq-scene/src/layout.rs`
+and the README's "Layer layout". A guest stays its own broadcast (settled
+2026-10-26), so its layer names that broadcast rather than an entry under the
+catalog's `dev.moq.studio` `sources`, and carries what a player needs to put
+the guest's frames on the program's media clock. Today
+`Source::publishes` refuses a broadcast source, since it has no track in the
+studio's broadcast.
 
-A JSON track in snapshot mode, so a late joiner gets the current state.
-Version it, and have a player refuse an unknown version loudly and play the
-program alone. Keep it free of local paths and credentials: layers name
-tracks and contribution references, never files.
+Bump the layout's `version` if the change is not additive.
 
-Layers draw over the program in the layout's order, so the studio's preview
-of a scene with an independent source shows what viewers see. A layer carries
-only what every player can reproduce: transform, crop, z-order, opacity,
-visibility, and keyframes. A picture source's track is its capture before any
-filter (decided 2026-11-02, maintainer). So an item that applies anything
-more, such as a video filter, mask, LUT, blend mode, or background removal,
-needs that effect baked into its track, or the option refused for it. Settle
-which here, with
-[Published independently](/quest/m2/compose/publish-independently.md)'s
-background-removal note. An audio source's track already carries its sound
-after its filters (decided 2026-11-02), so its layer carries only gain and
-mute.
+## Waiting
 
-Items carry their keyframes (`moq_scene::Keyframe`), which play from when
-their scene went on program. The layout says when that was, so a late joiner
-lands at the same point.
+- Maintainer: decide how the layout names a guest's broadcast. The epic
+  settled on 2026-10-26 that guests stay their own broadcasts, named through
+  hang's catalog references, then `contributions`, now `include`
+  ([moq-dev/moq#7943](https://github.com/moq-dev/moq/pull/7943)). The hang
+  draft at the pin requires an include to share the listing catalog's PTS
+  timeline, `media.clock`, and `media.join.interval`, and a guest's broadcast
+  keeps its own, so a player that takes `include` at its word places a
+  guest's frames at the wrong time. Options:
+  - The layout names each guest's broadcast itself and carries the offset
+    from the guest's timeline onto the program's media clock, the one the
+    studio applies when it plays the guest (recommended): `include` keeps
+    its meaning, and the timing stays in the track that already says when
+    each layer shows.
+  - moq relaxes `include`, or adds a sibling map, for broadcasts on their own
+    timeline, with the offset in the catalog: a moq quest and a pin, and every
+    hang consumer learns a second kind of include.
+  - The studio republishes each guest's tracks in its own broadcast, restamped
+    onto the program's clock: no spec change, but it reverses the settled
+    "guests stay their own broadcasts" and relays every guest twice.
 
-Each layer also carries its priority and whether a viewer may toggle it, for
-[Viewer controls](/quest/m2/compose/controls.md).
+  Check: the maintainer answers in /quest-unblock, and the choice is recorded
+  in this Plan and the epic's.
 
-The [watch prototype](/quest/m2/compose/watch.md) is this track's first
-reader. What the two settle becomes moq's hang spec draft.
+## Related
 
-## Required
-
-- [Published independently](/quest/m2/compose/publish-independently.md) - the source tracks a layer names
+- [moq-studio watch prototype](/quest/m2/compose/watch.md) - the first player of the layout

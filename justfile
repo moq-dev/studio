@@ -13,8 +13,8 @@ check:
     sh/check-moq-pin.sh
     quest check
     actionlint
-    shellcheck .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh
-    shfmt -d .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh
+    shellcheck .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh
+    shfmt -d .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh
     taplo format --check
     nixfmt --check flake.nix
     bun install --frozen-lockfile
@@ -42,7 +42,7 @@ ci:
 
 # Apply formatters without changing program behavior.
 fix:
-    shfmt -w .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh
+    shfmt -w .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh
     taplo format
     nixfmt flake.nix
     bun biome check --write .

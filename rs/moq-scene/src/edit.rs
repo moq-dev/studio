@@ -46,6 +46,8 @@ pub enum Change {
 		#[serde(default, skip_serializing_if = "Option::is_none")]
 		after: Option<Video>,
 	},
+	/// Whether [`Collection::published`] names the source `name`.
+	Published { name: String, before: bool, after: bool },
 	/// The scene at `index` of [`Collection::scenes`]. Adding one inserts it
 	/// there, shifting the later ones back, and replacing one with another
 	/// name renames it.
@@ -96,6 +98,11 @@ impl Change {
 				before: after,
 				after: before,
 			},
+			Self::Published { name, before, after } => Self::Published {
+				name,
+				before: after,
+				after: before,
+			},
 			Self::Scene { index, before, after } => Self::Scene {
 				index,
 				before: after,
@@ -130,7 +137,10 @@ impl Change {
 	/// The name of the source, audio, or video entry the change makes.
 	fn entry(&self) -> Option<&str> {
 		match self {
-			Self::Source { name, .. } | Self::Audio { name, .. } | Self::Video { name, .. } => Some(name),
+			Self::Source { name, .. }
+			| Self::Audio { name, .. }
+			| Self::Video { name, .. }
+			| Self::Published { name, .. } => Some(name),
 			Self::Scene { .. }
 			| Self::Item { .. }
 			| Self::Transition { .. }
@@ -145,6 +155,7 @@ impl Change {
 			Self::Source { before, after, .. } => before == after,
 			Self::Audio { before, after, .. } => before == after,
 			Self::Video { before, after, .. } => before == after,
+			Self::Published { before, after, .. } => before == after,
 			Self::Scene { before, after, .. } => before == after,
 			Self::Item { before, after, .. } => before == after,
 			Self::Transition { before, after } => before == after,
@@ -191,6 +202,18 @@ impl Change {
 				name,
 				before,
 				after: a.clone(),
+			},
+			(
+				Self::Published { name, before, after },
+				Self::Published {
+					name: n,
+					before: b,
+					after: a,
+				},
+			) if name == *n && after == *b => Self::Published {
+				name,
+				before,
+				after: *a,
 			},
 			// Only a replacement in place, so an index means the same scene or
 			// item on both sides.
@@ -256,6 +279,17 @@ impl Change {
 			Self::Source { name, before, after } => replace(&mut collection.sources, name, before, after, "source"),
 			Self::Audio { name, before, after } => replace(&mut collection.audio, name, before, after, "audio"),
 			Self::Video { name, before, after } => replace(&mut collection.video, name, before, after, "video"),
+			Self::Published { name, before, after } => {
+				if collection.published.contains(name) != *before {
+					return Err(conflict(format!("whether `{name}` is published changed")));
+				}
+				if *after {
+					collection.published.insert(name.clone());
+				} else {
+					collection.published.remove(name);
+				}
+				Ok(())
+			}
 			Self::Scene { index, before, after } => {
 				splice(&mut collection.scenes, *index, before, after).map_err(|err| conflict(format!("scene {err}")))
 			}
@@ -533,7 +567,7 @@ impl Draft {
 		})
 	}
 
-	/// Set or clear the gain, mute, and delay of the source called `name`.
+	/// Set or clear the gain, mute, pan, and delay of the source called `name`.
 	pub fn set_audio(&mut self, name: &str, audio: Option<Audio>) -> Result<(), Error> {
 		let before = self.collection.audio.get(name).cloned();
 		self.change(Change::Audio {
@@ -551,6 +585,15 @@ impl Draft {
 			name: name.to_string(),
 			before,
 			after,
+		})
+	}
+
+	/// Publish the source called `name` independently, or stop.
+	pub fn set_published(&mut self, name: &str, published: bool) -> Result<(), Error> {
+		self.change(Change::Published {
+			name: name.to_string(),
+			before: self.collection.published.contains(name),
+			after: published,
 		})
 	}
 
@@ -626,6 +669,7 @@ impl Draft {
 		if self.collection.transition.stinger() == Some(name) {
 			self.set_transition(Transition::default())?;
 		}
+		self.set_published(name, false)?;
 		self.set_source(name, None)
 	}
 

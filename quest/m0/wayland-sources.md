@@ -18,13 +18,18 @@ Decided 2026-10-26 (maintainer):
   keyed by scene collection and source), never in the scene file, so the scene
   file stays portable and diffable. On another machine, or when the portal
   rejects the token, the picker shows once and the new token is stored.
-- **Scene file:** the scene item records that the source is portal-picked, not
+- **Scene file:** the source records that it is portal-picked, not
   which monitor or window was picked, since only the portal knows that.
 
-Add the source kinds next to the X11 ones in moq-scene and the Sources panel,
-and update `README.md`, which says display and window sources are
+Add portal-picked display and window sources beside the id-selected
+`Source::Display` and `Source::Window` (`rs/moq-scene/src/collection.rs`), in
+the Sources and Devices panels and guided setup, and update `README.md`, which says display and window sources are
 X11-only.
 
 ## Required
 
 - [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - the token this quest stores
+
+## Related
+
+- [Adding a source by picking a picture](/quest/m0/ux/add.md) - the Add page whose Apps and Screens sections open this picker

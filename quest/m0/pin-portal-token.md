@@ -15,3 +15,7 @@ fixing whatever the new API breaks here.
 - moq-dev/moq: Linux capture parity lands the persistable token. Check:
   moq-video on moq's `main` exposes the persistable restore token (the quest
   no longer lists it because it landed, not because it moved).
+
+## Required
+
+- [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes since moq-dev/moq#8272, so this pin takes only its own

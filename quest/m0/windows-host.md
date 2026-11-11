@@ -9,12 +9,7 @@ a camera and a microphone to capture, so Windows quests run on real hardware.
 ## Plan
 
 Decided 2026-11-06 (maintainer, /quest-unblock): nixos2 becomes the Windows
-host, after the Mesa trial on its Intel GPU
-([cef-headless](/quest/m0/cef-headless.md)), which needs NixOS there.
-Decided 2026-11-07 (maintainer, /quest-unblock): the trial runs first after
-all, superseding
-[moq-dev/studio#105](https://github.com/moq-dev/studio/pull/105)'s skip, since
-a display is now on the Intel GPU.
+host.
 
 nixos2 already dual-boots: Windows sits on its own partition (`nvme0n1p3`,
 600 GB, last booted 2026-09-14) with firmware entry `Boot0003` (Windows Boot
@@ -37,9 +32,8 @@ Manager); NixOS boots through systemd-boot on `nvme0n1p4`. The switch:
 
 ## Waiting
 
-- Maintainer: say nixos2 is free to reboot, once the Mesa trial is done. On
-  2026-11-08 it ran an interactive `codex` session (open since 2026-11-06), a
-  `codex app-server`, and a rind `astro dev` server, and an agent cannot tell
+- Maintainer: say nixos2 is free to reboot. On 2026-11-09 it ran a Claude
+  Code session and a rind worktree's node process, and an agent cannot tell
   whether such work is finished. Check: the maintainer says so, or `w` and
   `ps` on nixos2 show no other session's work.
 - Maintainer: at nixos2's console once it boots Windows, turn on OpenSSH
@@ -47,7 +41,3 @@ Manager); NixOS boots through systemd-boot on `nvme0n1p4`. The switch:
   `C:\ProgramData\ssh\administrators_authorized_keys`, and plug in a USB
   camera and a microphone, which nixos2 lacks. An agent cannot reach Windows
   before sshd runs. Check: `ssh nixos2 ver` prints a Windows version.
-
-## Required
-
-- [Browser sources on the GPU under Mesa Wayland](/quest/m0/cef-headless.md) - the Mesa trial runs on nixos2's Intel GPU first

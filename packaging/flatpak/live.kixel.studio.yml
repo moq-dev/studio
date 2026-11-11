@@ -1,0 +1,50 @@
+# The Flatpak of moq-studio. `flatpak-builder` builds it from this checkout,
+# moq submodule included; .github/workflows/flatpak.yml builds, bundles, and
+# smoke-tests it.
+id: live.kixel.studio
+runtime: org.freedesktop.Platform
+runtime-version: "26.08"
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang, for the bindgen that libpipewire's bindings run.
+  - org.freedesktop.Sdk.Extension.llvm22
+command: moq-studio
+finish-args:
+  - --socket=wayland
+  # X11 even on Wayland, since display and window sources capture XWayland.
+  - --socket=x11
+  - --share=ipc
+  # The GPU, for compositing and the VAAPI and NVIDIA codecs.
+  - --device=dri
+  # Relays, and broadcast and web sources.
+  - --share=network
+  # Audio and the virtual camera's node. Cameras come through the camera portal.
+  - --filesystem=xdg-run/pipewire-0
+  # Scene files, image sources, and recordings wherever the creator keeps them.
+  - --filesystem=home
+modules:
+  - name: moq-studio
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
+      prepend-ld-library-path: /usr/lib/sdk/llvm22/lib
+      env:
+        CARGO_HOME: /run/build/moq-studio/cargo
+      # Cargo fetches the crates itself, instead of from a generated source
+      # list that every Cargo.lock change would have to regenerate.
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --locked --release -p moq-studio --features release,pipewire
+      - install -Dm755 target/release/moq-studio /app/bin/moq-studio
+      - install -Dm755 packaging/flatpak/moq-studio-desktop.sh /app/bin/moq-studio-desktop
+      - install -Dm644 packaging/flatpak/live.kixel.studio.desktop /app/share/applications/live.kixel.studio.desktop
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - .tmp
+          - node_modules
+          - target

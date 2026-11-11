@@ -3,8 +3,24 @@
 `moq-studio` is a native streaming studio for Linux, macOS, and Windows. It
 composes cameras, screens, windows, images, colors, web pages, HTML and CSS
 overlays, and broadcasts from a relay into scenes on the GPU, mixes their audio, and publishes the result to a
-[MoQ](https://github.com/moq-dev/moq) relay. It is early and not packaged yet,
-so build it from source. The moq crates come from the `moq` submodule:
+[MoQ](https://github.com/moq-dev/moq) relay. It is early.
+
+On Linux, each [release](https://github.com/moq-dev/studio/releases) ships a
+Flatpak bundle for x86_64 and aarch64:
+
+```bash
+flatpak install --user moq-studio-x86_64.flatpak
+flatpak run live.kixel.studio show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
+```
+
+Its menu entry opens the scene collection kept in the app's own data
+directory and saves recordings to your Videos folder. The sandbox reaches
+cameras through the camera portal, which asks once, and files under your home
+directory. The virtual camera is its PipeWire node only, since the sandbox
+has no `/dev/video*`.
+
+Elsewhere, build it from source. The moq crates come from the `moq`
+submodule:
 
 ```bash
 git clone --recurse-submodules https://github.com/moq-dev/studio
@@ -39,6 +55,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   PipeWire cameras and the [virtual camera](#virtual-camera)'s PipeWire node.
   `openh264` is the software H.264 fallback for a machine without a hardware
   encoder.
+- `release` is what the packages build: `capture`, `openh264`, and the
+  hardware codecs. The Flatpak adds `pipewire`.
 - `cef` adds browser sources, on Linux only for now. The build takes CEF from
   `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
   loads `libcef.so` from beside itself or from that `CEF_PATH`.
@@ -97,7 +115,7 @@ Every panel is a tab you can drag, split, or stack.
 | Panel | Use it to |
 | --- | --- |
 | Preview, Program | See the scene you are editing, at its own size, and the one that is live, and drag items in the preview to place them. A preview no tab shows is not drawn. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
-| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, remove, or tick **Publish** on one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
+| Scenes | See each scene live in a small picture beside its name, redrawn a few times a second while it is on screen. Pick the scene in preview, and add, rename (double-click), reorder, remove, or tick **Publish** on one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. The top layer is edited over a scene of the program's size. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU, saying why on hover), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
@@ -105,7 +123,7 @@ Every panel is a tab you can drag, split, or stack.
 | Guests | Invite a guest, show their join link as a QR code, see who joined, and take a guest out of every scene. |
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
 | Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
-| Audio | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. |
+| Audio | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, pan, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. |
 | Graph | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
 | Output | Start and stop recording, pick the picture and the audio scene it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
 | Health | See how the stream reaches viewers, relay by relay and, for the program and each published scene, track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
@@ -132,7 +150,7 @@ Drag from a node's right edge onto a scene's, the top layer's, or an audio
 scene's left edge to wire them: a picture is placed filling the scene, and a
 sound or audio scene is sent into the audio scene. Click a wire, then
 **Remove**, to take every item of that source out of the scene, or stop the
-send. Each sound's node has its strip's mute, gain, and delay and a waveform
+send. Each sound's node has its strip's mute, gain, pan, and delay and a waveform
 of its last few seconds, each audio scene's node **On program**, **Listen**,
 and the waveform of its mix, and each scene's node **Publish** and the audio
 scene it carries. Clicking a scene previews it, and clicking a source picks
@@ -305,7 +323,7 @@ once, and an audio scene never holds itself, even through others. Add,
 rename, reorder, and remove audio scenes in the Scenes panel, where they are
 tagged `audio` and listed after the scenes.
 
-The Audio panel is a mixer. Each sound has a strip, with its gain, mute,
+The Audio panel is a mixer. Each sound has a strip, with its gain, pan, mute,
 delay, and meter, which apply in every audio scene holding it, and a send to
 each audio scene; each audio scene has a strip with its meter and a send to
 each other audio scene. A source added from the Sources or Devices panel, or
@@ -618,6 +636,7 @@ loop = true
 
 [audio.guest]
 gain = 0.5
+pan = -0.5
 delay = "80ms"
 
 [sources.camera-faded]
@@ -722,7 +741,11 @@ audio `scenes` it holds. Exactly one is on `program = true`, and
 `recorded = true` has recordings hold one rather than the one on program.
 Without `[[audio_scenes]]`, the collection has one audio scene, `Program`, on
 program and holding nothing. `[audio.<source>]` sets a source's linear `gain`,
-`muted`, and `delay`, in every audio scene holding it.
+`muted`, `pan` (`-1.0` hard left to `1.0` hard right, centered by
+default), and `delay`, in every audio scene holding it.
+
+`published = ["camera", "mic"]`, a top-level key, names the sources
+[published independently](#published-independently).
 
 `[video.<source>]` sets a source's `background`, `crop`, and `filters`,
 wherever it is shown, and an item's `crop`, `filters`, and `blend` its own.
@@ -841,7 +864,7 @@ stream.
 
 Each camera, display, window, image, media file, color, microphone, and system
 audio also has a track of its own, so the studio can replay or record it on its
-own. These tracks stay in the studio: the program is all it publishes to a relay. They are listed in a local
+own. These tracks stay in the studio unless a source is [published independently](#published-independently): otherwise the program is all it publishes to a relay. They are listed in a local
 catalog under the `dev.moq.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
@@ -893,6 +916,82 @@ the program; so does each scene published in the scene file at startup. A
 scene published later, past the cap, publishes without video and says why in
 the Output panel. When the program encodes in software, a source takes hardware
 where it can and software otherwise.
+
+### Published independently
+
+A source with a track of its own can be **Published independently**, a
+checkbox in the Sources panel, off by default and kept in the scene file's
+`published` list. Its track then goes to the relay beside the program, in the
+same broadcast: the program's catalog lists it under the `dev.moq.studio`
+section's `sources`, by source name, as a hang catalog of its own whose track
+names start with `source/`. Viewers fetch it and place it over the program
+themselves, as the [layer layout](#layer-layout) says.
+
+The program leaves a published source out, wherever it or a clone of it is
+placed, and so does every audio scene's mix. The studio draws it only as
+viewers will: over the program, in the Program panel and the program's
+virtual camera, and over the scene in preview, so both show what viewers
+see. It goes over every other item of its scene, and over the top layer,
+however the scene stacks it. Recordings hold the program as published,
+without it, and recording **each source too** gives a published camera,
+display, window, or microphone a file of its own. Published and recorded
+scenes, and a scene that shows the program, leave it out too. While viewers read its track, it claims its bitrate of the connection beside the program's, and its video encodes at what the connection grants it. Its track carries one rendition, the
+plain capture before any filter or gain, and encodes for as long as it is
+published, holding an encode session as one on program does.
+
+Every player must reproduce how it is placed, so an item showing it takes no
+filter but opacity and no blend mode, nor do its source's filters or its
+keyframes, and no scene that another scene draws can place it. A source with
+its background removed cannot be published, since H.264 carries no
+transparency and its track would show the background.
+
+#### Layer layout
+
+While a source is published independently, the program's broadcast also
+carries a JSON track, `dev.moq.studio.layers`, listed in its catalog's `json`
+section. It is a snapshot: each change is a new group, stamped on the media
+clock with the frame it takes effect on, so a viewer who joins late reads the
+layout in force. The format is the studio's own until hang specifies a layer
+layout:
+
+```json
+{
+  "version": 1,
+  "canvas": { "width": 1920, "height": 1080 },
+  "start": 10000000,
+  "pictures": [
+    {
+      "item": {
+        "source": "camera",
+        "rect": { "x": 1440.0, "y": 760.0, "width": 400.0, "height": 225.0 },
+        "visible": true,
+        "filters": [{ "kind": "opacity", "amount": 0.9 }],
+        "keyframes": [{ "at": "1s", "x": 600.0 }]
+      }
+    }
+  ],
+  "sounds": [{ "source": "mic", "audio": { "gain": 1.0, "muted": false, "delay": "80ms" } }]
+}
+```
+
+- `version` is 1. A player refuses any other loudly and plays the program
+  alone.
+- `canvas` is the program's size, which pictures are placed on in pixels.
+- `start` is when the scene on program went on, in microseconds on the media
+  clock: the moment its pictures' keyframes play from.
+- `pictures` lists each item of the scene on program, then of the top layer,
+  showing a published source, back to front over the program, shown or
+  hidden. Each `item` is a scene file item: its `source` names the source's
+  entry under the catalog's `dev.moq.studio` `sources` (the source a clone
+  shows), and its `crop` and `filters` fold in its source's own.
+- `sounds` lists each published source the audio scene on program holds,
+  with the `gain`, `muted`, `pan`, and `delay` it plays at.
+- Each picture and sound may carry a subscription `priority` (0 if absent)
+  and whether a viewer may `toggle` it off (`false` if absent).
+
+A take changes the layout on the frame the program starts showing the new
+scene, so the published sources of the scene leaving go off and those of the
+scene coming in go on at once, even through a transition.
 
 ### Recording
 
@@ -1119,7 +1218,8 @@ Each catalog asks viewers to report beneath its broadcast, under
 
 The **Virtual camera** toggle in the Output panel shows the program as a
 camera that video-call and conferencing apps can pick, at the canvas size and
-frame rate. Each published scene has a toggle of its own beneath it in the
+frame rate, with each [published source](#published-independently) drawn
+over it as viewers see it. Each published scene has a toggle of its own beneath it in the
 panel, showing that scene at its own size as a camera of its own, so an app
 can pick the program or any published scene. A camera stays on until you
 turn it off or quit; it is not saved in the scene file. A scene's camera

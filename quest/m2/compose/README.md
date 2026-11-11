@@ -20,7 +20,7 @@ it, within a stated tolerance, and with its sound mixed in.
 Replanned 2026-11-08 (maintainer, /quest-plan). This supersedes the
 2026-11-07 deferral on
 [moq-dev/studio#97](https://github.com/moq-dev/studio/pull/97), which waited
-for [Published independently](/quest/m2/compose/publish-independently.md) to
+for Published independently to
 land before replanning:
 
 - **Reference picture:** ✅ the program with each independently published
@@ -40,8 +40,10 @@ land before replanning:
   (rejected: straight to `moq play`). moq's spec quest starts from it.
 - **Audio:** ✅ players mix independently published audio sources with the
   program's, at the gain and mute the layout carries (rejected: video only).
+  Since 2026-11-09 the layout carries pan and delay too.
 - **Controls:** ✅ viewer toggles and priorities land in the native player
-  (rejected: browser only).
+  (rejected: browser only). Since 2026-11-09 that includes `moq play`; see
+  [controls](/quest/m2/compose/controls.md).
 - **Browser composition** (moq-scene's browser build layered on
   `@moq/watch`): ✅ deleted, since `@moq/watch` layering supersedes it.
   Server composition stays, replanned to flatten program and layers for
@@ -50,8 +52,10 @@ land before replanning:
   moq's m3.
 
 Still settled from 2026-10-26: local sources are tracks in the studio's one
-broadcast, and guests stay their own broadcasts, named through the hang
-catalog's `contributions` references.
+broadcast, and guests stay their own broadcasts. How the layout names a
+guest is open in the [layer layout](/quest/m2/compose/layout.md)'s Waiting:
+hang's `include` requires an included broadcast to share the listing
+catalog's timeline, clock, and join interval, which a guest's does not.
 
 moq's side, in its own quest tree (m3): hang specifies a layer layout track,
 and `moq play` and `@moq/watch` composite it.

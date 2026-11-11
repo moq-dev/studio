@@ -12,7 +12,7 @@ use moq_scene::browser::Paint;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
 	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode,
-	Rect, Scene, Source, Transition, Video, wgpu,
+	Rect, Scene, Source, Thumbnail, Transition, Video, wgpu,
 };
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -86,12 +86,13 @@ pub struct Studio {
 impl Studio {
 	pub fn new(render: &eframe::egui_wgpu::RenderState, engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> Self {
 		// egui samples whatever the compositor's textures hold each frame, so
-		// they are registered again only when a resize replaces them.
+		// they are registered again only when a resize replaces them, or the
+		// program starts or stops showing layers over it.
 		let (preview, program, dropped) = {
 			let state = engine.state.lock().unwrap();
 			(
 				Registered::new(render, state.compositor.preview()),
-				Registered::new(render, state.compositor.program()),
+				Registered::new(render, state.compositor.layered()),
 				state.dropped,
 			)
 		};
@@ -153,6 +154,8 @@ impl Studio {
 				interacting: false,
 				interact: Interact::default(),
 				previewed: false,
+				thumbnails: BTreeMap::new(),
+				thumbnails_shown: BTreeSet::new(),
 				bound: BTreeMap::new(),
 				guest: String::new(),
 				shown: None,
@@ -229,7 +232,8 @@ impl Studio {
 		self.panels.program_drawn = state.compositor.canvas();
 		if let Some(render) = frame.wgpu_render_state() {
 			self.panels.preview.follow(render, state.compositor.preview());
-			self.panels.program.follow(render, state.compositor.program());
+			self.panels.program.follow(render, state.compositor.layered());
+			self.panels.follow_thumbnails(render, &state.compositor);
 		}
 		// Redraw at the canvas rate, so preview and program are live.
 		let framerate = state.compositor.canvas().framerate;
@@ -300,9 +304,12 @@ impl Studio {
 		if !self.panels.previewed {
 			self.panels.let_go();
 		}
-		// A preview no tab shows is not drawn, until one shows it again.
-		let previewing = self.panels.previewed;
-		engine.state.lock().unwrap().compositor.set_previewing(previewing);
+		// A preview or thumbnail nothing shows is not drawn, until it is again.
+		let mut state = engine.state.lock().unwrap();
+		state.compositor.set_previewing(self.panels.previewed);
+		state
+			.compositor
+			.set_thumbnails(self.panels.thumbnails_shown.iter().cloned());
 	}
 }
 
@@ -340,6 +347,9 @@ impl Registered {
 		self.texture = texture.clone();
 	}
 }
+
+/// How tall a thumbnail is in the Scenes panel, in points.
+const THUMBNAIL_HEIGHT: f32 = 36.0;
 
 /// What every panel draws from, plus the half-typed forms.
 struct Panels {
@@ -402,6 +412,10 @@ struct Panels {
 	interact: Interact,
 	/// Whether this frame drew the preview, which a stacked tab can hide.
 	previewed: bool,
+	/// Each thumbnail the compositor drew of those shown last frame.
+	thumbnails: BTreeMap<Thumbnail, Registered>,
+	/// The thumbnails this frame shows, which the compositor draws from now on.
+	thumbnails_shown: BTreeSet<Thumbnail>,
 	/// The page `interact` holds state for under each name, so one stopped or
 	/// restarted under it, as an edit or a reload does, is forgotten.
 	bound: BTreeMap<String, moq_scene::browser::Page>,
@@ -1379,6 +1393,47 @@ impl Panels {
 		self.spots.program = monitor.map(|monitor| monitor.around(program.rect));
 	}
 
+	/// Show each thumbnail the compositor drew of those shown last frame, and
+	/// let go of the rest, so this frame starts with none shown.
+	fn follow_thumbnails(&mut self, render: &eframe::egui_wgpu::RenderState, compositor: &moq_scene::Compositor) {
+		let mut gone = std::mem::take(&mut self.thumbnails);
+		for thumbnail in std::mem::take(&mut self.thumbnails_shown) {
+			let Some(texture) = compositor.thumbnail(&thumbnail) else {
+				continue;
+			};
+			let registered = match gone.remove(&thumbnail) {
+				Some(mut registered) => {
+					registered.follow(render, texture);
+					registered
+				}
+				None => Registered::new(render, texture),
+			};
+			self.thumbnails.insert(thumbnail, registered);
+		}
+		let mut renderer = render.renderer.write();
+		for registered in gone.into_values() {
+			renderer.free_texture(&registered.id);
+		}
+	}
+
+	/// Draw `thumbnail` in a box of `canvas`'s shape, or a blank box until the
+	/// compositor has drawn it, and have it drawn while the box is on screen.
+	fn thumbnail(&mut self, ui: &mut Ui, thumbnail: Thumbnail, canvas: Canvas) {
+		let aspect = canvas.width as f32 / canvas.height as f32;
+		let size = egui::vec2(THUMBNAIL_HEIGHT * aspect, THUMBNAIL_HEIGHT);
+		let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+		if !ui.is_rect_visible(rect) {
+			return;
+		}
+		match self.thumbnails.get(&thumbnail) {
+			Some(registered) => egui::Image::new((registered.id, size)).paint_at(ui, rect),
+			None => {
+				ui.painter().rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+			}
+		}
+		self.thumbnails_shown.insert(thumbnail);
+	}
+
 	fn scenes(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -1390,6 +1445,7 @@ impl Panels {
 		let mut action = None;
 		let mut audio_action = None;
 		let count = state.collection().scenes.len();
+		let program_canvas = state.collection().canvas;
 		let audio_scenes = state.collection().audio_scenes.clone();
 		let program_audio = state.collection().program_audio().unwrap_or_default().to_string();
 
@@ -1412,6 +1468,8 @@ impl Panels {
 						}
 						return;
 					}
+					let canvas = scene.canvas(program_canvas);
+					self.thumbnail(ui, Thumbnail::Scene(scene.name.clone()), canvas);
 					let selected = preview.as_deref() == Some(scene.name.as_str());
 					let label = ui.selectable_label(selected, &scene.name);
 					if label.clicked() {
@@ -1860,6 +1918,7 @@ impl Panels {
 		let mut reload = None;
 		let mut play = None;
 		let mut stop = None;
+		let mut publish = None;
 		let now = kio::clock::now();
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1972,6 +2031,22 @@ impl Panels {
 						{
 							reload = Some(name.clone());
 						}
+						if source.publishes() {
+							let mut published = collection.published.contains(name);
+							if ui
+								.checkbox(&mut published, "Published independently")
+								.on_hover_text(
+									"Publish this source's own track to the relay beside the program, for viewers to \
+									 place over it as the layer layout says, and leave it out of the program. It \
+									 encodes for as long as it is published. Every player must reproduce how it is \
+									 placed, so it takes no filter but opacity and no blend mode, and not its \
+									 background removed, since its track keeps the background.",
+								)
+								.changed()
+							{
+								publish = Some((name.clone(), published));
+							}
+						}
 						if ui.small_button("Remove").clicked() {
 							remove = Some(name.clone());
 						}
@@ -2018,6 +2093,11 @@ impl Panels {
 			self.deselect_item();
 			edit(&mut state, format!("Remove `{name}`"), None, |draft| {
 				draft.remove_source(&name)
+			})
+		} else if let Some((name, published)) = publish {
+			let verb = if published { "Publish" } else { "Stop publishing" };
+			edit(&mut state, format!("{verb} `{name}` independently"), None, |draft| {
+				draft.set_published(&name, published)
 			})
 		} else if let Some(name) = clone {
 			let collection = state.collection();
@@ -2603,6 +2683,7 @@ impl Panels {
 			ui.label("");
 			ui.label("");
 			ui.label("Gain");
+			ui.label("Pan");
 			ui.label("Delay")
 				.on_hover_text("Hold the source back to line it up with a camera that lags it");
 			for scene in &scenes {
@@ -2633,6 +2714,7 @@ impl Panels {
 				let name = &from.name;
 				ui.label(name).on_hover_text("An audio scene");
 				ui.weak("audio scene");
+				ui.label("");
 				ui.label("");
 				ui.label("");
 				for scene in &scenes {
@@ -3641,7 +3723,7 @@ fn on_program(scenes: &[moq_scene::AudioScene], name: &str) -> (Vec<moq_scene::A
 	(next, format!("Put audio scene `{name}` on program"))
 }
 
-/// A sound's mute, gain, and delay, as its Audio panel strip and Graph node
+/// A sound's mute, gain, pan, and delay, as its Audio panel strip and Graph node
 /// show them, and the change made to `audio` with its label and gesture.
 fn strip_controls(
 	ui: &mut Ui,
@@ -3663,6 +3745,35 @@ fn strip_controls(
 		let gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
 		let audio = moq_scene::Audio { gain, ..audio.clone() };
 		change = Some((audio, format!("Set `{name}` gain"), gesture));
+	}
+	let mut pan = audio.pan;
+	let response = ui
+		.add(
+			egui::Slider::new(&mut pan, -1.0..=1.0)
+				.custom_formatter(|pan, _| match pan {
+					0.0 => "C".to_string(),
+					pan if pan < 0.0 => format!("L{:.0}", -pan * 100.0),
+					pan => format!("R{:.0}", pan * 100.0),
+				})
+				.custom_parser(|text| {
+					let text = text.trim().to_ascii_uppercase();
+					let percent = |side: &str| side.trim().parse::<f64>().ok().map(|n| n / 100.0);
+					match text.as_str() {
+						"C" => Some(0.0),
+						_ if let Some(side) = text.strip_prefix('L') => percent(side).map(|n| -n),
+						_ if let Some(side) = text.strip_prefix('R') => percent(side),
+						_ => text.parse().ok(),
+					}
+				}),
+		)
+		.on_hover_text("Pan: place the sound between left and right; double-click to center");
+	let gesture = gestures.of(&response);
+	if response.double_clicked() {
+		pan = 0.0;
+	}
+	if pan != audio.pan {
+		let audio = moq_scene::Audio { pan, ..audio.clone() };
+		change = Some((audio, format!("Set `{name}` pan"), gesture));
 	}
 	let max = moq_audio::bus::MAX_DELAY.as_millis() as u64;
 	let mut millis = audio.delay.as_millis() as u64;

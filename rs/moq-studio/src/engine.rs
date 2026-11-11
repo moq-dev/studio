@@ -654,6 +654,12 @@ pub struct Program {
 	clock: moq_mux::Clock,
 	/// Where the local sources keep their own tracks, on the same clock.
 	sources: moq_scene::publish::Publish,
+	/// The sources published independently, whose tracks the broadcast
+	/// carries beside the program's.
+	published: tokio::sync::watch::Sender<BTreeSet<String>>,
+	/// Where and when the broadcast's viewers show those sources, while any
+	/// is published.
+	layout: Mutex<moq_scene::layout::Publisher>,
 	/// What a recording reads the program from, on the same clock.
 	recording: moq_net::origin::Route,
 	/// The recording broadcast's catalog, held for as long as the engine runs,
@@ -674,10 +680,13 @@ impl Drop for Program {
 }
 
 impl Program {
-	/// Finish the program's catalog and the recording's, once every track
-	/// they list has ended, so a viewer or a recording reading either reaches
-	/// its end rather than a cut.
+	/// End the layer layout, then finish the program's catalog and the
+	/// recording's, once every track they list has ended, so a viewer or a
+	/// recording reading either reaches its end rather than a cut.
 	fn finish(&self) {
+		if let Err(err) = self.layout.lock().unwrap().finish() {
+			tracing::warn!(%err, "cannot finish the layer layout");
+		}
 		for catalog in [&self.catalog, &self.recorded] {
 			// Fails only once the catalog failed, which ended its tracks already.
 			let _ = catalog.clone().finish();
@@ -747,8 +756,41 @@ impl Program {
 			.filter(|(name, _)| state.sources.plays(program, name))
 			.map(|(name, _)| name.to_string())
 			.collect();
+		let published = &state.collection.published;
+		self.published.send_if_modified(|current| {
+			let changed = current != published;
+			current.clone_from(published);
+			changed
+		});
+		// Published, a source encodes as though on program.
+		let mut shown = shown;
+		let mut heard: BTreeSet<String> = heard;
+		shown.extend(published.iter().cloned());
+		heard.extend(published.iter().cloned());
 		self.sources
 			.set_on_program(moq_scene::publish::OnProgram { shown, heard });
+	}
+
+	/// Publish the layer layout of what `state` drew on program at `at` on
+	/// the media clock, while any source is published independently.
+	fn lay_out(&self, state: &State, at: Duration) {
+		// Past what a timestamp holds, the frame goes unstamped too.
+		let Ok(stamp) = moq_net::Timestamp::try_from(at) else {
+			return;
+		};
+		let collection = &state.collection;
+		let mut publisher = self.layout.lock().unwrap();
+		let published = match collection.published.is_empty() {
+			true => publisher.finish(),
+			false => {
+				let start = at.saturating_sub(state.compositor.program_since());
+				let layout = moq_scene::layout::Layout::new(collection, state.compositor.program_scene(), start);
+				publisher.update(layout, stamp)
+			}
+		};
+		if let Err(err) = published {
+			tracing::warn!(%err, "cannot publish the layer layout");
+		}
 	}
 }
 
@@ -1407,6 +1449,8 @@ impl Engine {
 				return;
 			}
 			retired.retain(|ended| !ended.is_finished());
+			// Where this frame lands on the media clock.
+			let at = epoch + tick.saturating_duration_since(start);
 			let drawn = {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
@@ -1492,10 +1536,12 @@ impl Engine {
 					continue;
 				}
 				self.program.on_program(state, shown);
+				self.program.lay_out(state, at);
 				let compositor = &state.compositor;
 				for (scene, camera) in &mut state.cameras {
 					match scene {
-						None => camera.offer(Some(compositor.program()), compositor.canvas()),
+						// An app reading it cannot place the layers itself.
+						None => camera.offer(Some(compositor.layered()), compositor.canvas()),
 						Some(scene) => {
 							let Some((_, canvas)) = published.iter().find(|(name, _)| name == scene) else {
 								continue;
@@ -1525,7 +1571,7 @@ impl Engine {
 			drop(closed);
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
-			let timestamp = moq_net::Timestamp::try_from(epoch + tick.saturating_duration_since(start)).ok();
+			let timestamp = moq_net::Timestamp::try_from(at).ok();
 			// Every scene shares the program's frame rate.
 			let (program, canvas) = drawn.program;
 			if canvas.framerate != framerate {
@@ -1825,6 +1871,16 @@ async fn publish(
 	let epoch = Duration::ZERO;
 	publication.announce().context("cannot announce the broadcast")?;
 
+	let (published, follow) = tokio::sync::watch::channel(BTreeSet::new());
+	let forward = (sources.clone(), broadcast.clone(), listed.clone(), bandwidth.clone());
+	tokio::spawn(async move {
+		let (sources, broadcast, catalog, bandwidth) = forward;
+		if let Err(err) = sources.forward(follow, broadcast, catalog, bandwidth).await {
+			tracing::warn!(%err, "stopped publishing sources independently");
+		}
+	});
+	let layout = Mutex::new(moq_scene::layout::Publisher::new(broadcast.clone(), listed.clone()));
+
 	let health = match live {
 		Some(live) => {
 			let observer = hang::health::Observer::new(path.clone(), Some(instance.clone()));
@@ -1848,6 +1904,8 @@ async fn publish(
 			catalog: listed,
 			clock: clock.clone(),
 			sources: sources.clone(),
+			published,
+			layout,
 			recording,
 			recorded,
 			local,
@@ -3133,11 +3191,101 @@ mod tests {
 			.collect()
 	}
 
+	/// A source published independently goes on the program broadcast's
+	/// layer layout, from when its scene went on program: a cut's layout
+	/// takes effect on the frame its scene starts. Once nothing is published,
+	/// the layout ends and the catalog stops listing it, and quitting ends a
+	/// layout published again.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn the_program_carries_a_layer_layout() {
+		use moq_scene::layout::{Layout, TRACK};
+
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new().await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let mut loaded = red_canvas();
+		loaded.collection.published.insert("red".into());
+		let mut two = loaded.collection.scenes[0].clone();
+		two.name = "Two".into();
+		loaded.collection.scenes.push(two);
+		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
+			.await
+			.expect("the studio starts");
+
+		let broadcast = engine.program.publication.broadcast().consume();
+		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default())
+			.await
+			.expect("the program's catalog");
+		let listed = |catalog: &hang::Catalog| catalog.json.tracks.contains_key(TRACK);
+		kio::clock::timeout(TIMEOUT, async {
+			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		})
+		.await
+		.expect("the catalog lists the layout");
+		let read = || moq_json::snapshot::Consumer::<Layout>::new(broadcast.track(TRACK).unwrap(), Default::default());
+		let next = async |layouts: &mut moq_json::snapshot::Consumer<Layout>| {
+			kio::clock::timeout(TIMEOUT, layouts.next())
+				.await
+				.expect("a layout or its end")
+				.unwrap()
+		};
+		let mut layouts = read();
+		let first = next(&mut layouts).await.expect("a layout");
+		let sources: Vec<&str> = first
+			.value
+			.pictures
+			.iter()
+			.map(|picture| picture.item.source.as_str())
+			.collect();
+		assert_eq!(sources, ["red"]);
+
+		{
+			let mut state = engine.state.lock().unwrap();
+			state.compositor.set_preview(Some("Two".into()));
+			state.cut().unwrap();
+		}
+		let cut = next(&mut layouts).await.expect("a layout");
+		let at = Duration::from(cut.at.expect("stamped"));
+		assert_eq!(cut.value.start, at, "on from the frame the cut drew");
+		assert!(cut.value.start > first.value.start);
+
+		let publish = |published: bool| {
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft("Publish `red`");
+			draft.set_published("red", published).unwrap();
+			state.commit(draft, None).unwrap();
+		};
+		publish(false);
+		assert!(next(&mut layouts).await.is_none(), "the layout ends");
+		kio::clock::timeout(TIMEOUT, async {
+			while catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		})
+		.await
+		.expect("the catalog stops listing the layout");
+
+		publish(true);
+		kio::clock::timeout(TIMEOUT, async {
+			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		})
+		.await
+		.expect("the catalog lists the layout again");
+		let mut layouts = read();
+		next(&mut layouts).await.expect("a layout");
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		assert!(next(&mut layouts).await.is_none(), "quitting ends the layout");
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
 	/// Without a relay, a recording encodes the program on its own and saves it
 	/// as a regular MP4 holding its video and audio. The color source publishes
 	/// a still, which has no file of its own. Recording a scene of another
 	/// size goes on in another file, holding its video. A recording holding a
 	/// mix other than the one on program records its audio.
+
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn the_program_records_without_a_relay() {
@@ -4478,10 +4626,8 @@ mod tests {
 				.await
 				.expect("the marker");
 			while let Some(event) = sources.try_next() {
-				if let RouteEvent::Start(announce)
-				| RouteEvent::Update(announce)
-				| RouteEvent::Restart(announce)
-				| RouteEvent::Takeover { announce, .. } = event
+				if let RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) =
+					event
 				{
 					assert!(
 						announce.prefix.as_str() != "show" || announce.route.instance() != &newer,
@@ -4625,7 +4771,6 @@ mod tests {
 		loop {
 			let announce = match routes.next().await.expect("routes") {
 				RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) => announce,
-				RouteEvent::Takeover { announce, .. } => announce,
 				RouteEvent::End(_) => continue,
 			};
 			if announce.prefix.as_str() == "show" && announce.route.instance() == instance {

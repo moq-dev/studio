@@ -40,6 +40,16 @@ pub struct Collection {
 	/// wherever the source is placed. A source without an entry is unfiltered.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub video: BTreeMap<String, Video>,
+	/// The sources published independently, by name: each one's own track
+	/// goes to the relay beside the program, and the
+	/// [layer layout](crate::layout) says where viewers show it over the
+	/// program and how they play its sound. The program and every audio
+	/// scene's mix leave it out. Only a source with a track of its own can
+	/// be, and not one with its background removed, since its track would
+	/// show the background. Wherever it is placed, it takes only what every
+	/// player can reproduce, and no scene that another scene draws holds it.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	pub published: BTreeSet<String>,
 	/// The scenes, in the order the scene list shows them.
 	#[serde(default)]
 	pub scenes: Vec<Scene>,
@@ -71,6 +81,7 @@ impl Collection {
 			sources: BTreeMap::new(),
 			audio: BTreeMap::new(),
 			video: BTreeMap::new(),
+			published: BTreeSet::new(),
 			scenes: vec![Scene::new("Scene")],
 			audio_scenes: AudioScene::defaults(),
 			top: Vec::new(),
@@ -494,7 +505,32 @@ impl Collection {
 			self.validate_chain(&video.filters, &on)?;
 		}
 
+		for name in &self.published {
+			let Some(source) = self.sources.get(name) else {
+				return Err(Error::Invalid(format!(
+					"`{name}` is published, but there is no such source"
+				)));
+			};
+			if !source.publishes() {
+				return Err(Error::Invalid(format!(
+					"`{name}` cannot be published independently: only a camera, display, window, microphone, \
+					 system audio, color, image, media, or replay source has a track of its own"
+				)));
+			}
+			if self
+				.video
+				.get(name)
+				.is_some_and(|video| video.background == Background::Remove)
+			{
+				return Err(Error::Invalid(format!(
+					"`{name}` cannot be published independently with its background removed, since its track \
+					 carries no transparency and would show the background"
+				)));
+			}
+		}
+
 		self.validate_nesting()?;
+		self.validate_published()?;
 
 		if let Some(name) = self.transition.stinger()
 			&& !matches!(self.sources.get(name), Some(Source::Media { .. }))
@@ -513,6 +549,12 @@ impl Collection {
 			}
 			if !audio.gain.is_finite() || audio.gain < 0.0 {
 				return Err(Error::Invalid(format!("`{name}` has gain {}", audio.gain)));
+			}
+			if !(-1.0..=1.0).contains(&audio.pan) {
+				return Err(Error::Invalid(format!(
+					"`{name}` has pan {}, outside -1 to 1",
+					audio.pan
+				)));
 			}
 			if audio.delay > moq_audio::bus::MAX_DELAY {
 				return Err(Error::Invalid(format!(
@@ -583,6 +625,48 @@ impl Collection {
 					"scene `{}` carries `{audio}`, which is not an audio scene",
 					scene.name
 				)));
+			}
+		}
+		Ok(())
+	}
+
+	/// Refuse an item showing a source published independently that the
+	/// layer layout cannot carry: one blended or filtered past opacity, which
+	/// not every player can reproduce, or one in a scene another scene draws,
+	/// which the layout cannot place.
+	fn validate_published(&self) -> Result<(), Error> {
+		let nested: BTreeSet<&str> = self
+			.sources
+			.values()
+			.filter_map(|source| match source {
+				Source::Scene { scene } => Some(scene.as_str()),
+				_ => None,
+			})
+			.collect();
+		for (layer, items) in self.layers() {
+			for item in items {
+				let source = self.capture(&item.source);
+				if !self.published.contains(source) {
+					continue;
+				}
+				let on = format!(
+					"`{}` in {layer} shows `{source}`, which is published independently, so it",
+					item.source
+				);
+				if let Some(scene) = &layer.scene
+					&& nested.contains(scene.as_str())
+				{
+					return Err(Error::Invalid(format!(
+						"{on} cannot be in a scene another scene draws, since viewers place it over the program"
+					)));
+				}
+				let keyframed = item.keyframes.iter().flat_map(|keyframe| &keyframe.filters);
+				let mut filters = self.filters(item).chain(keyframed);
+				if item.blend != Blend::Normal || filters.any(|filter| !matches!(filter, Filter::Opacity { .. })) {
+					return Err(Error::Invalid(format!(
+						"{on} takes no filter but opacity and no blend mode, which every player must reproduce"
+					)));
+				}
 			}
 		}
 		Ok(())
@@ -1897,7 +1981,7 @@ impl AudioScene {
 	}
 }
 
-/// The gain, mute, and sync delay of one source with sound, in every audio
+/// The gain, mute, pan, and sync delay of one source with sound, in every audio
 /// scene that holds it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1907,6 +1991,10 @@ pub struct Audio {
 	/// Whether the source is silenced in every audio scene, keeping its gain.
 	#[serde(default)]
 	pub muted: bool,
+	/// Where the source sits between left (`-1.0`) and right (`1.0`), as
+	/// [`Strip::set_pan`](moq_audio::bus::Strip::set_pan) places it.
+	#[serde(default, skip_serializing_if = "is_center")]
+	pub pan: f32,
 	/// How long the source is held back in every audio scene, so a microphone lines up
 	/// with a camera that lags it. At most the bus's
 	/// [`MAX_DELAY`](moq_audio::bus::MAX_DELAY).
@@ -1919,9 +2007,14 @@ impl Default for Audio {
 		Self {
 			gain: 1.0,
 			muted: false,
+			pan: 0.0,
 			delay: Duration::ZERO,
 		}
 	}
+}
+
+fn is_center(pan: &f32) -> bool {
+	*pan == 0.0
 }
 
 /// An sRGB color with straight alpha, written `#rrggbb` or `#rrggbbaa`.
@@ -2034,6 +2127,7 @@ mod tests {
 			Audio {
 				gain: 0.5,
 				muted: true,
+				pan: 0.25,
 				delay: Duration::from_millis(80),
 			},
 		);
@@ -2203,6 +2297,7 @@ rect = { x = 0, y = 680, width = 1280, height = 40 }
 			Audio {
 				gain: 2.0,
 				muted: false,
+				pan: 0.0,
 				delay: Duration::from_millis(120),
 			}
 		);
@@ -2459,6 +2554,37 @@ path = "sting.webm"
 			collection.sources.insert("blank".into(), source.clone());
 			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{source:?}");
 		}
+	}
+
+	/// Only a source with a track of its own, its background kept, is
+	/// published independently.
+	#[test]
+	fn publishes_only_a_source_with_a_track_of_its_own() {
+		let mut collection = Collection::new();
+		collection.sources.insert("cam".into(), Source::Camera { id: None });
+		collection
+			.sources
+			.insert("cut".into(), Source::Clone { source: "cam".into() });
+		collection.published.insert("cam".into());
+		collection.validate().unwrap();
+
+		let mut missing = collection.clone();
+		missing.published.insert("gone".into());
+		assert!(missing.validate().is_err());
+
+		let mut clone = collection.clone();
+		clone.published.insert("cut".into());
+		assert!(clone.validate().is_err(), "a clone has no track of its own");
+
+		let mut removed = collection.clone();
+		removed.video.insert(
+			"cam".into(),
+			Video {
+				background: Background::Remove,
+				..Default::default()
+			},
+		);
+		assert!(removed.validate().is_err(), "its track would show the background");
 	}
 
 	/// A background is removed only from a picture of the source's own that

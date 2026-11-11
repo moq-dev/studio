@@ -306,11 +306,11 @@ impl Sources {
 	/// stinger plays opens silent and blank, waiting for its first
 	/// [play](Feed::play), rather than playing once at the start.
 	///
-	/// Also applies the collection's gain, mute, and delay to every audio
+	/// Also applies the collection's gain, mute, pan, and delay to every audio
 	/// strip, routes each into the mix of every audio scene that reaches it,
 	/// and applies the frame rate to every web page, which never restarts a
 	/// source. A removed or edited source leaves every mix at once, so its
-	/// replacement never plays over it. Panics on a gain or delay
+	/// replacement never plays over it. Panics on a gain, pan, or delay
 	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		let mixes = &self.mixes;
@@ -353,11 +353,16 @@ impl Sources {
 				let audio = collection.audio.get(name).cloned().unwrap_or_default();
 				strip.set_gain(audio.gain);
 				strip.set_muted(audio.muted);
+				// The bus is stereo, the one layout that refuses no pan.
+				strip.set_pan(audio.pan).expect("stereo bus pans");
 				strip.set_delay(audio.delay);
 				for (scene, mix) in &self.mixes {
-					let routed = heard
-						.get(scene.as_str())
-						.is_some_and(|heard| heard.contains(name.as_str()));
+					// A source published independently reaches viewers by its own
+					// track, never through a mix.
+					let routed = !collection.published.contains(name)
+						&& heard
+							.get(scene.as_str())
+							.is_some_and(|heard| heard.contains(name.as_str()));
 					if mix.routes(strip) == routed {
 						continue;
 					}
@@ -1006,7 +1011,7 @@ impl Driver {
 		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
 		input.format = moq_audio::Format::F32;
 		let strip = self.strip.clone().expect("browser sources have a strip");
-		let sound = self.context.bus.channel(input, strip)?;
+		let sound = self.context.bus.live(input, strip)?;
 		crate::browser::run(helper, open, page, &self.picture, Some(sound), &self.status).await
 	}
 
@@ -1701,7 +1706,13 @@ impl Driver {
 		if let (Some(frame), Some((_, config))) = (&picture, &video) {
 			self.open(own, frame, config).await;
 		}
-		let begin = begin.unwrap_or_else(|| kio::clock::now() + BUS_LATENCY);
+		// A cut's play begins after the last picture already published, even
+		// one cut off before it showed, so the track's time never repeats.
+		let begin = begin.unwrap_or_else(|| {
+			let soonest = kio::clock::now() + BUS_LATENCY;
+			own.stamped
+				.map_or(soonest, |stamped| soonest.max(stamped + Duration::from_millis(1)))
+		});
 		self.ran(play, |run| {
 			run.begun.get_or_insert(begin);
 		});
@@ -1796,6 +1807,7 @@ impl Driver {
 	) -> Result<(), Error> {
 		self.open(own, frame, config).await;
 		if let Some(video) = &mut own.track {
+			own.stamped = Some(shows);
 			let stamp = shows.saturating_duration_since(own.origin);
 			frame.timestamp =
 				moq_net::Timestamp::from_micros(stamp.as_micros() as u64).map_err(moq_video::Error::from)?;
@@ -1829,11 +1841,11 @@ impl Driver {
 
 	/// A channel into the bus for decoded sound, as [`sounds`](Self::sounds)
 	/// and broadcasts decode it, through `strip`.
-	fn channel(&self, strip: Strip) -> Result<moq_audio::bus::Channel, Error> {
+	fn channel(&self, strip: Strip) -> Result<moq_audio::bus::Live, Error> {
 		let bus = self.context.bus.config();
 		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
 		input.format = moq_audio::Format::F32;
-		Ok(self.context.bus.channel(input, strip)?)
+		Ok(self.context.bus.live(input, strip)?)
 	}
 }
 
@@ -1863,6 +1875,8 @@ struct Own<'a, 'b> {
 	/// Whether the track was opened, or failed to, so it is tried once.
 	opened: bool,
 	origin: Instant,
+	/// When the last picture encoded onto the track shows.
+	stamped: Option<Instant>,
 }
 
 impl<'a, 'b> Own<'a, 'b> {
@@ -1872,6 +1886,7 @@ impl<'a, 'b> Own<'a, 'b> {
 			track: None,
 			opened: false,
 			origin,
+			stamped: None,
 		}
 	}
 }
@@ -1964,7 +1979,7 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 	let track = context
 		.publish
 		.clone()
-		.filter(|_| publishes(source))
+		.filter(|_| source.publishes())
 		.map(|publish| Track {
 			claim: publish.claim(name),
 			publish,
@@ -2028,34 +2043,36 @@ fn open(name: &str, source: &Source, context: &Context, held: bool) -> (Feed, Dr
 	(feed, driver)
 }
 
-/// Whether `source` publishes its own track: a picture the studio captures or
-/// loads itself, before the scene's filters, or the sound of a microphone,
-/// system audio, or media file as captured or decoded, before its gain and
-/// mute.
-///
-/// A broadcast is already published by its own publisher, and a clone shows
-/// its source's track, its filters carried by the layout rather than encoded
-/// again. Web pages and overlays are seen only in the program, since H.264
-/// would encode their transparency over black, a LUT is looked up, never
-/// shown, and a scene is drawn from other sources.
-fn publishes(source: &Source) -> bool {
-	match source {
-		Source::Camera { .. }
-		| Source::Display { .. }
-		| Source::Window { .. }
-		| Source::Microphone { .. }
-		| Source::SystemAudio
-		| Source::Color { .. }
-		| Source::Image { .. }
-		| Source::Media { .. }
-		| Source::Replay => true,
-		Source::Broadcast { .. }
-		| Source::Browser { .. }
-		| Source::Overlay { .. }
-		| Source::Clone { .. }
-		| Source::Lut { .. }
-		| Source::Scene { .. }
-		| Source::Program => false,
+impl Source {
+	/// Whether the source publishes its own track: a picture the studio captures or
+	/// loads itself, before the scene's filters, or the sound of a microphone,
+	/// system audio, or media file as captured or decoded, before its gain and
+	/// mute.
+	///
+	/// A broadcast is already published by its own publisher, and a clone shows
+	/// its source's track, its filters carried by the layout rather than encoded
+	/// again. Web pages and overlays are seen only in the program, since H.264
+	/// would encode their transparency over black, a LUT is looked up, never
+	/// shown, and a scene is drawn from other sources.
+	pub fn publishes(&self) -> bool {
+		match self {
+			Source::Camera { .. }
+			| Source::Display { .. }
+			| Source::Window { .. }
+			| Source::Microphone { .. }
+			| Source::SystemAudio
+			| Source::Color { .. }
+			| Source::Image { .. }
+			| Source::Media { .. }
+			| Source::Replay => true,
+			Source::Broadcast { .. }
+			| Source::Browser { .. }
+			| Source::Overlay { .. }
+			| Source::Clone { .. }
+			| Source::Lut { .. }
+			| Source::Scene { .. }
+			| Source::Program => false,
+		}
 	}
 }
 
@@ -2404,7 +2421,7 @@ mod tests {
 	}
 
 	/// Editing a source restarts it, removing one stops it, and an untouched one
-	/// keeps running. Gain, delay, and routing changes reach the strip without
+	/// keeps running. Gain, pan, delay, and routing changes reach the strip without
 	/// restarting anything, and a source plays in every audio scene holding it
 	/// until it is removed.
 	#[tokio::test]
@@ -2426,12 +2443,14 @@ mod tests {
 				Audio {
 					gain: 0.25,
 					muted: true,
+					pan: -0.5,
 					delay: Duration::from_millis(120),
 				},
 			);
 			assert!(sources.sync(&collection).is_empty());
 			assert_eq!(guest.gain(), 0.25);
 			assert!(guest.muted());
+			assert_eq!(guest.pan(), -0.5);
 			assert_eq!(guest.delay(), Duration::from_millis(120));
 			let stream = sources.mix("Stream").unwrap().clone();
 			assert!(program.routes(&guest));

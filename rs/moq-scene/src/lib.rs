@@ -31,6 +31,9 @@
 //!   [`Scaler`] draws it smaller for a smaller rendition.
 //! - [`publish`] gives each local source its own track, in a broadcast the
 //!   studio keeps to itself, to replay or record the source on its own.
+//! - [`layout`] says where and when each source published independently
+//!   shows over the program, and how its sound plays, for viewers to place
+//!   its track themselves.
 //!
 //! Every picture is drawn on the program clock the caller ticks
 //! [`Compositor::render`] with, from whatever each source delivered last: a
@@ -43,6 +46,7 @@ mod collection;
 mod compositor;
 mod edit;
 mod effect;
+pub mod layout;
 mod lut;
 mod matte;
 mod media;
@@ -58,7 +62,7 @@ pub use collection::{
 	Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item, Keyframe, Layer,
 	MaskMode, Nested, Rect, Rgba, Scene, Size, Source, Transition, Video,
 };
-pub use compositor::{Compositor, FORMAT, Output};
+pub use compositor::{Compositor, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
 pub use scale::Scaler;
 

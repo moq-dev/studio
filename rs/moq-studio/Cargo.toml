@@ -27,12 +27,16 @@ capture = ["moq-scene/capture", "moq-audio/playback"]
 nvidia = ["moq-video/nvidia"]
 # The vendored OpenH264 software H.264 fallback, opt-in like moq-video's.
 openh264 = ["moq-video/openh264"]
-# Intel/AMD VAAPI hardware codecs (Linux); its bindgen needs libclang.
+# Intel/AMD VAAPI hardware codecs (Linux), with libva loaded at runtime.
 vaapi = ["moq-video/vaapi"]
 # PipeWire cameras, drawn without a copy, audio through the sound server, and
 # the virtual camera as a PipeWire node. Wayland screens and windows are not
 # reachable yet: display and window sources capture X11 only.
 pipewire = ["capture", "moq-scene/pipewire", "dep:pipewire"]
+# What every packaged build ships: each backend its platform loads without a
+# system library at startup. `pipewire` is not one; the Flatpak, which bundles
+# libpipewire, adds it.
+release = ["capture", "nvidia", "openh264", "vaapi"]
 # Browser sources, rendered by CEF in a helper process (Linux). Off by default:
 # the build downloads the CEF runtime (or takes it from `CEF_PATH`) and copies
 # it beside the binary, where the binary looks for it when it starts.

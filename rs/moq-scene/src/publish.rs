@@ -89,7 +89,14 @@ pub struct Publish {
 	owners: Arc<Mutex<Owners>>,
 	/// The sources on program, which each source's track follows.
 	on_program: Arc<tokio::sync::watch::Sender<OnProgram>>,
+	/// The bandwidth granted each source published independently, by name,
+	/// which its video encodes at.
+	grants: Grants,
 }
+
+/// The bandwidth granted each source published independently, by name, with
+/// the forwarded video track it was reserved for.
+type Grants = Arc<Mutex<BTreeMap<String, (String, moq_net::bandwidth::Consumer)>>>;
 
 /// The sources on program, by name, apart for pictures and sound: a media
 /// file heard in the program mix but shown in no scene on air encodes its
@@ -132,6 +139,7 @@ impl Publish {
 			sessions,
 			owners: Default::default(),
 			on_program: Default::default(),
+			grants: Default::default(),
 		})
 	}
 
@@ -163,6 +171,81 @@ impl Publish {
 		});
 	}
 
+	/// Publish each source `published` names in `broadcast`, the program's,
+	/// as long as it stays named, until `published` closes: its tracks are
+	/// copied in under [`FORWARDED`] and its catalog listed under `catalog`'s
+	/// [`SECTION`] section, renamed to match. Reading its tracks keeps each
+	/// source encoding while it is published. Each copied audio or video
+	/// track claims its bitrate from `bandwidth` while subscribed, as the
+	/// program's tracks do.
+	pub async fn forward(
+		&self,
+		mut published: tokio::sync::watch::Receiver<BTreeSet<String>>,
+		broadcast: moq_net::broadcast::Producer,
+		mut catalog: Catalog,
+		bandwidth: moq_net::bandwidth::Allocator,
+	) -> Result<(), Error> {
+		let mut updates = self.catalog.consume()?;
+		let mut local = self.catalog.snapshot();
+		// Each copied track's copy, by its local name, aborted once dropped.
+		let mut copies: BTreeMap<String, tokio::task::JoinHandle<()>> = BTreeMap::new();
+		loop {
+			let listed: BTreeMap<String, hang::Catalog> = {
+				let published = published.borrow_and_update();
+				let sources = local.ext.studio.sources.iter();
+				let sources = sources.filter(|(name, _)| published.contains(*name));
+				sources.map(|(name, source)| (name.clone(), source.clone())).collect()
+			};
+			let tracks: BTreeMap<String, (String, Option<(moq_net::bandwidth::Rate, bool)>)> = listed
+				.iter()
+				.flat_map(|(source, catalog)| tracks(catalog).map(move |(name, rate)| (name, (source.clone(), rate))))
+				.collect();
+			copies.retain(|name, copy| {
+				let keep = tracks.contains_key(name);
+				if !keep {
+					copy.abort();
+				}
+				keep
+			});
+			for (name, (source, rate)) in tracks {
+				if copies.contains_key(&name) {
+					continue;
+				}
+				let bandwidth = rate.map(|(rate, video)| Grant {
+					bandwidth: bandwidth.clone(),
+					rate,
+					video,
+					grants: self.grants.clone(),
+					source,
+				});
+				let copy = copy(self.consume(), broadcast.clone(), name.clone(), bandwidth);
+				copies.insert(name, tokio::spawn(copy));
+			}
+			let listed: BTreeMap<String, hang::Catalog> = listed
+				.into_iter()
+				.map(|(name, source)| (name, renamed(source)))
+				.collect();
+			catalog.mutate(|root| {
+				if root.ext.studio.sources != listed {
+					root.ext.studio.sources = listed;
+				}
+			})?;
+
+			tokio::select! {
+				next = updates.next() => match next? {
+					Some(next) => local = next,
+					None => break,
+				},
+				changed = published.changed() => if changed.is_err() { break },
+			}
+		}
+		for copy in copies.into_values() {
+			copy.abort();
+		}
+		catalog.mutate(|root| root.ext.studio.sources.clear())?;
+		Ok(())
+	}
+
 	/// What each source track the local catalog lists has written, keyed by
 	/// rendition ID, as [`Catalog::stats`](moq_mux::catalog::Producer::stats)
 	/// reports the program's. The broadcast names every track uniquely, so all
@@ -186,6 +269,125 @@ impl Publish {
 			id,
 			owners: self.owners.clone(),
 		}
+	}
+}
+
+/// The prefix of each source track's name in the program's broadcast, ahead
+/// of its name in the local one, so it never meets one of the program's own.
+pub const FORWARDED: &str = "source/";
+
+/// What a source's video claims of the connection when its catalog names
+/// no bitrate.
+const VIDEO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(6000);
+
+/// What a source's sound claims when its catalog names no bitrate.
+const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(128);
+
+/// Every track `source`'s catalog lists, by its name in the local broadcast,
+/// with the bitrate it claims of the connection: none for a still, sent once.
+/// Video is marked, since only its grant is followed: Opus at this rate is
+/// never what congests the uplink, as the program's audio.
+fn tracks(source: &hang::Catalog) -> impl Iterator<Item = (String, Option<(moq_net::bandwidth::Rate, bool)>)> + '_ {
+	let rate = |bitrate: Option<u64>, default| bitrate.map_or(default, moq_net::bandwidth::Rate::from_bps);
+	let video = source.video.renditions.iter();
+	let video = video.map(move |(name, config)| (name.clone(), Some((rate(config.bitrate, VIDEO_BITRATE), true))));
+	let audio = source.audio.renditions.iter();
+	let audio = audio.map(move |(name, config)| (name.clone(), Some((rate(config.bitrate, AUDIO_BITRATE), false))));
+	let binary = source.binary.tracks.keys().map(|name| (name.clone(), None));
+	video.chain(audio).chain(binary)
+}
+
+/// `source`'s catalog with each track named as the program's broadcast has it.
+fn renamed(mut source: hang::Catalog) -> hang::Catalog {
+	fn rename<T>(map: &mut BTreeMap<String, T>) {
+		*map = std::mem::take(map)
+			.into_iter()
+			.map(|(name, config)| (format!("{FORWARDED}{name}"), config))
+			.collect();
+	}
+	rename(&mut source.video.renditions);
+	rename(&mut source.audio.renditions);
+	rename(&mut source.binary.tracks);
+	source
+}
+
+/// Copy the local track `name` into `broadcast` under [`FORWARDED`], group by
+/// group, until it ends. A failure ends the copy, failed, with the reason.
+/// How a copied track claims its bitrate of the connection, and where its
+/// source's video finds what it was granted.
+struct Grant {
+	bandwidth: moq_net::bandwidth::Allocator,
+	rate: moq_net::bandwidth::Rate,
+	/// Whether the track is video, whose source follows the grant.
+	video: bool,
+	grants: Grants,
+	source: String,
+}
+
+/// A copy's reservation, and for a video, its listing for the source to
+/// follow, taken out once the copy ends unless a newer copy replaced it.
+struct Granted {
+	_reservation: moq_net::bandwidth::Reservation,
+	grants: Grants,
+	/// The source and the copied track, for a video.
+	listed: Option<(String, String)>,
+}
+
+impl Drop for Granted {
+	fn drop(&mut self) {
+		let Some((source, track)) = &self.listed else { return };
+		let mut grants = self.grants.lock().unwrap();
+		if grants.get(source).is_some_and(|(listed, _)| listed == track) {
+			grants.remove(source);
+		}
+	}
+}
+
+async fn copy(
+	local: moq_net::broadcast::Consumer,
+	broadcast: moq_net::broadcast::Producer,
+	name: String,
+	grant: Option<Grant>,
+) {
+	let copied = async {
+		let mut track = local.track(&name)?.subscribe(None).await?;
+		let out = broadcast.create_track(format!("{FORWARDED}{name}"), track.info().clone())?;
+		// Held for as long as the copy runs.
+		// Held for as long as the copy runs. A video's grant is what its source
+		// encodes at, so the source follows the connection as the program does.
+		let _grant = grant.map(|grant| {
+			let reservation = grant.bandwidth.reserve(&out.demand(), grant.rate);
+			let listed = grant.video.then(|| {
+				let entry = (out.name().to_string(), reservation.consume());
+				grant.grants.lock().unwrap().insert(grant.source.clone(), entry);
+				(grant.source, out.name().to_string())
+			});
+			Granted {
+				_reservation: reservation,
+				grants: grant.grants,
+				listed,
+			}
+		});
+		let result: Result<(), moq_net::Error> = async {
+			while let Some(mut group) = track.recv_group().await? {
+				let mut copy = out.create_group(moq_net::group::Info {
+					sequence: group.sequence,
+				})?;
+				while let Some(frame) = group.read_frame().await? {
+					copy.write_frame(frame.timestamp, frame.payload)?;
+				}
+				copy.finish()?;
+			}
+			out.finish()
+		}
+		.await;
+		if let Err(err) = &result {
+			let _ = out.clone().abort(err.clone());
+		}
+		result
+	};
+	if let Err(err) = copied.await {
+		tracing::warn!(track = %name, %err, "cannot publish a source's track");
 	}
 }
 
@@ -224,6 +426,7 @@ pub(crate) struct Listing<'a> {
 	kind: moq_video::encode::Kind,
 	sessions: Sessions,
 	on_program: tokio::sync::watch::Receiver<OnProgram>,
+	grants: Grants,
 	broadcast: moq_net::broadcast::Producer,
 	studio: Catalog,
 	catalog: moq_mux::catalog::Producer,
@@ -244,6 +447,7 @@ impl<'a> Listing<'a> {
 			kind: publish.kind.clone(),
 			sessions: publish.sessions.clone(),
 			on_program: publish.on_program.subscribe(),
+			grants: publish.grants.clone(),
 			broadcast: publish.broadcast.clone(),
 			studio: publish.catalog.clone(),
 			catalog,
@@ -490,6 +694,10 @@ impl<E: Encode> Drop for Encoding<E> {
 pub(crate) struct Video<'a> {
 	track: Encoding,
 	claim: &'a Claim,
+	/// Where a grant is listed while the source is published independently.
+	grants: Grants,
+	/// The grant the open encoder encodes at, if any.
+	granted: Option<moq_net::bandwidth::Rate>,
 	/// The sources on program.
 	on_program: tokio::sync::watch::Receiver<OnProgram>,
 	config: moq_video::encode::Config,
@@ -519,6 +727,8 @@ impl<'a> Video<'a> {
 		Ok(Self {
 			track: Encoding::new(producer, listing.sessions.clone()),
 			claim: listing.claim,
+			grants: listing.grants.clone(),
+			granted: None,
 			on_program: listing.on_program.clone(),
 			config,
 			clock: listing.studio.clock(),
@@ -561,6 +771,28 @@ impl<'a> Video<'a> {
 		}
 		if !self.track.is_open() {
 			self.track.open(moq_video::encode::Encoder::new(&self.config)?)?;
+			self.granted = None;
+		}
+		// Published independently, it encodes at what the connection grants.
+		let grant = self
+			.grants
+			.lock()
+			.unwrap()
+			.get(&self.claim.name)
+			.and_then(|(_, grant)| grant.peek());
+		if let Some(rate) = grant
+			&& self.granted != Some(rate)
+		{
+			self.granted = Some(rate);
+			match self.track.set_bitrate(rate) {
+				Ok(()) => {}
+				// Not fatal: it keeps encoding at its ceiling, and only stops
+				// following the grant, as the program does.
+				Err(Error::Video(moq_video::Error::BitrateUnsupported(name))) => {
+					tracing::warn!(source = %self.claim.name, encoder = name, "the encoder cannot follow the bandwidth grant");
+				}
+				Err(err) => return Err(err),
+			}
 		}
 		if frame.size() == size {
 			self.track.encode(frame)
@@ -918,6 +1150,59 @@ mod tests {
 			sources.sync(&collection);
 			let snapshot = listed(&catalog, |sources| !sources.contains_key("red")).await;
 			assert!(snapshot.ext.studio.sources.contains_key("logo"));
+		})
+		.await;
+	}
+
+	/// A source published independently is listed in the program's catalog,
+	/// its track readable from the program's broadcast under [`FORWARDED`],
+	/// for as long as it is published; another stays in the studio.
+	#[tokio::test]
+	async fn a_published_source_is_forwarded_to_the_program() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (publish, _, _) = studio();
+			let (mut context, _origin) = context(dir.path());
+			context.publish = Some(publish.clone());
+			let mut collection = Collection::new();
+			for (name, color) in [("red", [255, 0, 0, 255]), ("blue", [0, 0, 255, 255])] {
+				collection
+					.sources
+					.insert(name.into(), Source::Color { color: Rgba(color) });
+			}
+			collection.published.insert("red".into());
+			collection.validate().unwrap();
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+
+			let mut program = moq_net::broadcast::Info::new().produce();
+			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
+			let catalog = Catalog::new(&mut program, config).unwrap();
+			let (published, follow) = tokio::sync::watch::channel(collection.published.clone());
+			let forward = publish.clone();
+			let (broadcast, listing) = (program.clone(), catalog.clone());
+			tokio::spawn(async move {
+				forward
+					.forward(follow, broadcast, listing, moq_net::bandwidth::Allocator::unlimited())
+					.await
+					.unwrap()
+			});
+
+			let snapshot = listed(&catalog, |sources| sources.contains_key("red")).await;
+			let red = &snapshot.ext.studio.sources["red"];
+			assert!(
+				!snapshot.ext.studio.sources.contains_key("blue"),
+				"only what is published"
+			);
+			assert!(red.binary.tracks.keys().all(|name| name.starts_with(FORWARDED)));
+			let (payload, mime) = still(&program.consume(), red).await;
+			assert_eq!(mime, "image/png");
+			let red = image::load_from_memory(&payload).unwrap().into_rgba8();
+			assert_eq!(red.into_raw(), [255, 0, 0, 255]);
+
+			published.send(BTreeSet::new()).unwrap();
+			listed(&catalog, |sources| sources.is_empty()).await;
 		})
 		.await;
 	}
