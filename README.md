@@ -3,8 +3,24 @@
 `moq-studio` is a native streaming studio for Linux, macOS, and Windows. It
 composes cameras, screens, windows, images, colors, web pages, HTML and CSS
 overlays, and broadcasts from a relay into scenes on the GPU, mixes their audio, and publishes the result to a
-[MoQ](https://github.com/moq-dev/moq) relay. It is early and not packaged yet,
-so build it from source. The moq crates come from the `moq` submodule:
+[MoQ](https://github.com/moq-dev/moq) relay. It is early.
+
+On Linux, each [release](https://github.com/moq-dev/studio/releases) ships a
+Flatpak bundle for x86_64 and aarch64:
+
+```bash
+flatpak install --user moq-studio-x86_64.flatpak
+flatpak run live.kixel.studio show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
+```
+
+Its menu entry opens the scene collection kept in the app's own data
+directory and saves recordings to your Videos folder. The sandbox reaches
+cameras through the camera portal, which asks once, and files under your home
+directory. The virtual camera is its PipeWire node only, since the sandbox
+has no `/dev/video*`.
+
+Elsewhere, build it from source. The moq crates come from the `moq`
+submodule:
 
 ```bash
 git clone --recurse-submodules https://github.com/moq-dev/studio
@@ -39,6 +55,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   PipeWire cameras and the [virtual camera](#virtual-camera)'s PipeWire node.
   `openh264` is the software H.264 fallback for a machine without a hardware
   encoder.
+- `release` is what the packages build: `capture`, `openh264`, and the
+  hardware codecs. The Flatpak adds `pipewire`.
 - `cef` adds browser sources, on Linux only for now. The build takes CEF from
   `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
   loads `libcef.so` from beside itself or from that `CEF_PATH`.
@@ -97,7 +115,7 @@ Every panel is a tab you can drag, split, or stack.
 | Panel | Use it to |
 | --- | --- |
 | Preview, Program | See the scene you are editing, at its own size, and the one that is live, and drag items in the preview to place them. A preview no tab shows is not drawn. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
-| Scenes | Pick the scene in preview, and add, rename (double-click), reorder, remove, or tick **Publish** on one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
+| Scenes | See each scene live in a small picture beside its name, redrawn a few times a second while it is on screen. Pick the scene in preview, and add, rename (double-click), reorder, remove, or tick **Publish** on one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show, hide, and order what the preview scene or the top layer draws, back to front. The top layer is edited over a scene of the program's size. Select an item to filter or copy it. |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU, saying why on hover), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |

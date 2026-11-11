@@ -1,0 +1,51 @@
+name: Release
+
+# Cuts a release from main: builds every artifact, then tags
+# `v<moq-studio's version>` and attaches them to a GitHub release. Bump the
+# version in rs/moq-studio/Cargo.toml first; a tag that exists already fails.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  flatpak:
+    uses: ./.github/workflows/flatpak.yml
+
+  publish:
+    name: Publish
+    needs: [flatpak]
+    runs-on: ubuntu-24.04
+    # The only job with a write token, and the environment admits protected
+    # branches only.
+    environment: release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: rs/moq-studio/Cargo.toml
+          sparse-checkout-cone-mode: false
+
+      - name: Download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' rs/moq-studio/Cargo.toml)
+          [[ -n $version ]]
+          gh release create "v$version" --target "$GITHUB_SHA" --title "MoQ Studio $version" --generate-notes dist/*
