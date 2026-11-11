@@ -1849,7 +1849,12 @@ impl Driver {
 		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
 		input.format = moq_audio::Format::F32;
 		let channel = self.context.bus.positioned(input, strip)?;
-		Ok(Writer::new(channel, self.context.bus_start, bus.sample_rate, bus.layout.channels()))
+		Ok(Writer::new(
+			channel,
+			self.context.bus_start,
+			bus.sample_rate,
+			bus.layout.channels(),
+		))
 	}
 }
 

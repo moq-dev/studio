@@ -492,7 +492,10 @@ mod tests {
 		writer.write(at(60), &frame(1.0, 20)).await.unwrap();
 		ear.until(at(30)).await;
 		// Stamped half a millisecond after the last ended.
-		writer.write(at(80) + Duration::from_micros(500), &frame(2.0, 20)).await.unwrap();
+		writer
+			.write(at(80) + Duration::from_micros(500), &frame(2.0, 20))
+			.await
+			.unwrap();
 		// Overlapping the last by 5 ms.
 		writer.write(at(95), &frame(3.0, 20)).await.unwrap();
 
