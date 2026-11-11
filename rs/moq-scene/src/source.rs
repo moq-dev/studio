@@ -1157,12 +1157,22 @@ impl Driver {
 					let listed = catalog.ext.studio.sources.get(source);
 					let next_video = listed.map(|listed| pick(listed.video.enabled())).transpose()?.flatten();
 					let next_audio = listed.map(|listed| pick(listed.audio.enabled())).transpose()?.flatten();
-					let track = next_video.as_ref().map(|(id, config)| Reference::track(config, id).to_string());
+					// A source without video, such as an image or a color, is a still.
+					let still = listed.and_then(|listed| {
+						let mut stills = listed.binary.tracks.iter();
+						let (id, config) = stills.find(|(_, config)| config.broadcast.is_none() && config.mime.as_deref().is_some_and(|mime| mime.starts_with("image/")))?;
+						Some(Reference::track(config, id).to_string())
+					});
+					let track = match &next_video {
+						Some((id, config)) => Some(Reference::track(config, id).to_string()),
+						None => still.clone(),
+					};
 					if track != video {
 						video = track;
-						video_playing = match next_video {
-							Some((id, config)) => Box::pin(self.follow_video(&broadcast, id, config, schedule)),
-							None => {
+						video_playing = match (next_video, still) {
+							(Some((id, config)), _) => Box::pin(self.follow_video(&broadcast, id, config, schedule)),
+							(None, Some(still)) => Box::pin(self.follow_still(&broadcast, still)),
+							(None, None) => {
 								self.picture.lock().unwrap().clear();
 								Box::pin(std::future::pending())
 							}
@@ -1187,6 +1197,19 @@ impl Driver {
 				}
 			}
 		}
+	}
+
+	/// Show the newest picture of the track `name`, a PNG or JPEG file per
+	/// group, as [`Still`] publishes one, whenever it arrives: a still has no
+	/// moment.
+	async fn follow_still(&self, broadcast: &moq_net::broadcast::Consumer, name: String) -> Result<(), Error> {
+		let mut track = broadcast.track(&name)?.subscribe(None).await?;
+		while let Some(mut group) = track.recv_group().await? {
+			if let Some(frame) = group.read_frame().await? {
+				self.show(decode(&frame.payload).map_err(|err| Error::Image(format!("{name}: {err}")))?);
+			}
+		}
+		Ok(())
 	}
 
 	/// Show each picture once `schedule`, another track's clock, says it is
@@ -2367,14 +2390,17 @@ async fn capture(source: moq_audio::capture::Source) -> Result<moq_audio::captur
 /// Read a still image, decoded to straight-alpha RGBA, and the file it came from.
 fn image(path: &Path) -> Result<(Picture, bytes::Bytes), Error> {
 	let bytes = std::fs::read(path).map_err(|err| Error::Image(format!("{}: {err}", path.display())))?;
-	let image = image::load_from_memory(&bytes)
-		.map_err(|err| Error::Image(format!("{}: {err}", path.display())))?
-		.into_rgba8();
-	let picture = Picture::Rgba {
+	let picture = decode(&bytes).map_err(|err| Error::Image(format!("{}: {err}", path.display())))?;
+	Ok((picture, bytes.into()))
+}
+
+/// A PNG or JPEG file's picture, within the image crate's default limits.
+fn decode(bytes: &[u8]) -> Result<Picture, image::ImageError> {
+	let image = image::load_from_memory(bytes)?.into_rgba8();
+	Ok(Picture::Rgba {
 		size: moq_video::Size::new(image.width(), image.height()),
 		pixels: image.into_raw(),
-	};
-	Ok((picture, bytes.into()))
+	})
 }
 
 /// Helpers for tests across the crate.
@@ -3022,6 +3048,57 @@ mod tests {
 			until_time(due).await;
 			assert_eq!(shown(layer).await, Duration::from(stamp));
 			assert_eq!(layer.delay(), Some(VIDEO_DELAY), "the program's");
+		})
+		.await;
+	}
+
+	/// A layer whose source is a still, an image file on a binary track,
+	/// shows it as it arrives.
+	#[tokio::test]
+	async fn a_layer_shows_a_still() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let publication = origin
+				.route("room/guest", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let mut broadcast = publication.broadcast().clone();
+			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
+			let mut catalog = crate::publish::Catalog::new(&mut broadcast, config).unwrap();
+			let mut track = broadcast.create_track("source/logo.png", None).unwrap();
+			let pixel = image::RgbaImage::from_raw(1, 1, vec![255, 0, 0, 255]).unwrap();
+			let mut png = std::io::Cursor::new(Vec::new());
+			pixel.write_to(&mut png, image::ImageFormat::Png).unwrap();
+			track.write_frame(None, bytes::Bytes::from(png.into_inner())).unwrap();
+			let mut still = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
+			still.mime = Some("image/png".into());
+			let mut logo = hang::Catalog::default();
+			logo.binary.tracks.insert("source/logo.png".into(), still);
+			catalog
+				.mutate(|root| {
+					root.ext.studio.sources.insert("logo".into(), logo);
+				})
+				.unwrap();
+			publication.announce().unwrap();
+
+			let mut collection = collection();
+			collection.sources.insert(
+				"logo".into(),
+				Source::Layer {
+					broadcast: "guest".into(),
+					source: "logo".into(),
+				},
+			);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let layer = sources.get("logo").unwrap();
+			let pixels = until(|| match layer.next_picture() {
+				Some(Picture::Rgba { pixels, .. }) => Some(pixels),
+				_ => None,
+			})
+			.await;
+			assert_eq!(pixels, [255, 0, 0, 255]);
 		})
 		.await;
 	}
