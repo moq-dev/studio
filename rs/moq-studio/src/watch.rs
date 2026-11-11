@@ -610,7 +610,7 @@ mod tests {
 	/// plays alone.
 	#[tokio::test]
 	async fn refuses_another_version() {
-		let (mut broadcast, catalog, read, reader) = broadcast();
+		let (broadcast, catalog, read, reader) = broadcast();
 		let info = moq_net::track::Info::default().with_timescale(moq_mux::Clock::TIMESCALE);
 		let track = broadcast.create_track(layout::TRACK, info).unwrap();
 		let options = moq_mux::json::Options::default().with_deltas(false);
