@@ -98,31 +98,6 @@ restreams") and its upload savings. Direct push with shared encoders matches
 OBS multistream, and the hosted version is product work outside this
 repository.
 
-## Required
-
-- [nixos2 boots Windows for agents](/quest/m0/windows-host.md) - a Windows machine agents reach over ssh, with a camera and microphone
-- [The studio builds for Windows in CI](/quest/m0/windows-build.md) - a nightly `windows-latest` build, which needs no Windows host
-- [Studio on Windows](/quest/m0/app-windows.md) - the studio runs on Windows, not only Linux
-- [Wayland display and window sources](/quest/m0/wayland-sources.md) - portal-picked sources that reopen without the picker
-- [Destinations](/quest/m0/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
-- [AAC for destinations](/quest/m0/destinations-aac.md) - AAC for the ingests that require it, from the platform encoders
-- [Clap-to-measure sync delay](/quest/m0/sync-clap.md) - a clap sets a microphone's delay against its camera
-- [Audio filters](/quest/m0/audio-filters.md) - noise suppression, gate, compressor, limiter, and plugins on each microphone and system audio source, configured from the studio
-- [Browser sources on macOS and Windows](/quest/m0/browser-source/README.md) - the out-of-process CEF pages Linux has, with shared GPU textures on the other desktops
-- [Virtual camera](/quest/m0/vcam/README.md) - the program or a published scene exposed as a system camera on Linux, Windows, and macOS
-- [The Apple signing identity is available](/quest/m0/signing.md) - the Apple credentials the macOS app and its camera need; Windows ships unsigned
-- [Broadcaster UX](/quest/m0/ux/README.md) - one live picture with pages around it, in place of the dock of panels and the launch flags
-- [moq-video's capture listing is pinned](/quest/m0/pin-capture-list.md) - icons and live pictures of windows and devices, for the Add page
-- [Packaging](/quest/m0/packaging/README.md) - a signed macOS app, a Windows installer, and a Flatpak for Linux, each its own quest
-- [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - moq-video's restore token, for Wayland sources
-- [Platform AAC encoders are pinned](/quest/m0/pin-aac-encode.md) - moq-audio's AAC encoders, for AAC destinations
-- [moq-audio's filter chain is pinned](/quest/m0/pin-audio-filters.md) - the chain audio filters configure
-- [moq's egress dial changes are pinned](/quest/m0/pin-egress-dial.md) - RTMPS that keeps `tcUrl` and a caller-supplied dial policy, for destinations
-- [moq-audio's source tap is pinned](/quest/m0/pin-audio-tap.md) - the samples clap-to-measure sync times a clap from
-- [Playout writes land on positioned bus channels](/quest/m0/playout-positioned.md) - broadcast, media, and replay sound at the bus position its pictures are timed for
-- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - `moq_mux::sync` in place of `moq_mux::timeline`, which every later pin crosses
-- [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes past #8272 in one PR, so each later pin stays small
-
 ## Related
 
 - [OBS native codecs](https://github.com/moq-dev/moq/blob/main/quest/m3/obs-moq-video/README.md) - the OBS plugin stays the path for creators who stay on OBS
