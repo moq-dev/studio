@@ -1029,8 +1029,17 @@ impl Effects {
 		}
 
 		// A blend mode reads what is under it, which a pass cannot while drawing
-		// it: copy that much aside, then carry on in a new pass.
-		let area = bounds.pixels().expect("prepared bounds are not empty");
+		// it: copy that much aside, then carry on in a new pass. The copy is in
+		// the texture's pixels, fewer than the canvas's for a thumbnail.
+		let (texels_x, texels_y) = (texture.width() as f32, texture.height() as f32);
+		let (scale_x, scale_y) = (texels_x / width, texels_y / height);
+		let texels = Area {
+			x0: bounds.x0 * scale_x,
+			y0: bounds.y0 * scale_y,
+			x1: (bounds.x1 * scale_x).min(texels_x),
+			y1: (bounds.y1 * scale_y).min(texels_y),
+		};
+		let area = texels.pixels().expect("prepared bounds are not empty");
 		let Some(Command::Pass { view, .. }) = frame.targets.last() else {
 			unreachable!("a draw follows its target");
 		};
