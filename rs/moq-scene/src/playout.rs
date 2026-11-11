@@ -189,7 +189,7 @@ pub(crate) fn heard(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp
 /// when what it wrote runs out, and puts silence ahead of a frame for however
 /// much of the latency has drained.
 pub(crate) struct Writer {
-	channel: bus::Channel,
+	channel: bus::Live,
 	/// Bytes per sample frame of the channel's `f32` input.
 	stride: usize,
 	rate: u32,
@@ -203,7 +203,7 @@ pub(crate) struct Writer {
 
 impl Writer {
 	/// Write into a new `channel`, taking interleaved `f32` at `rate` in `channels`.
-	pub(crate) fn new(channel: bus::Channel, rate: u32, channels: u32) -> Self {
+	pub(crate) fn new(channel: bus::Live, rate: u32, channels: u32) -> Self {
 		Self {
 			channel,
 			stride: channels as usize * size_of::<f32>(),
@@ -403,7 +403,7 @@ mod tests {
 		let strip = moq_audio::bus::Strip::default();
 		let mut input = moq_audio::encode::Input::new(config.sample_rate, config.layout);
 		input.format = moq_audio::Format::F32;
-		let channel = bus.channel(input, strip.clone()).unwrap();
+		let channel = bus.live(input, strip.clone()).unwrap();
 		let mut writer = Writer::new(channel, config.sample_rate, config.layout.channels());
 		let mix = bus.mix();
 		mix.route(&strip);

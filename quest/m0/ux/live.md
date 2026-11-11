@@ -77,4 +77,3 @@ full-screen behavior on each desktop, which no headless run exercises.
 ## Required
 
 - [The studio's look](/quest/m0/ux/kit.md) - the widgets the page is built from
-- [A small live picture of every scene and source](/quest/m0/ux/scene-thumbs.md) - the scene pads' thumbnails

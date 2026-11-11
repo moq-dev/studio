@@ -70,7 +70,3 @@ Recommendations, not settled:
 - Test on the scene's driver-stepped bus, as `a_write_sounds_when_placed`
   does: frames written ahead, late, and across a stall sound at the expected
   bus positions, sample-exact.
-
-## Required
-
-- [moq-audio's positioned bus channel is pinned](/quest/m0/pin-bus-positioned.md) - `Bus::positioned`, which the writer writes through
