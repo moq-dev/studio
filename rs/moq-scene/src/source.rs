@@ -241,10 +241,9 @@ pub struct Context {
 	/// Where microphones, system audio, and broadcasts feed their sound, and
 	/// where each of the collection's audio scenes is mixed.
 	pub bus: Bus,
-	/// When `bus` mixes its position 0: its driver advances sample-exact on
-	/// the clock from here, so a sound due at `t` plays at bus position
-	/// `(t - bus_start) * rate`, and never mixes past where the clock is.
-	pub bus_start: Instant,
+	/// How far `bus`'s [`Mixer`] has mixed it, on which broadcast, media, and
+	/// replay sources place their sound.
+	pub mixed: Mixed,
 	/// Where broadcast sources are announced: the studio's relay connection.
 	pub origin: moq_net::origin::Consumer,
 	/// What a relative image, LUT, or overlay asset path is relative to: the
@@ -257,6 +256,48 @@ pub struct Context {
 	pub browser: Option<crate::browser::Helper>,
 	/// Where local sources publish their own tracks, or `None` to publish nothing.
 	pub publish: Option<Publish>,
+}
+
+/// Advances a bus sample-exact on the clock from its start, as the clock's
+/// owner moves it, telling the sources how far it has mixed.
+pub struct Mixer {
+	driver: moq_audio::bus::Driver,
+	position: watch::Sender<u64>,
+}
+
+impl Mixer {
+	/// Advance `driver`'s bus, which mixes its position 0 at `start`, and
+	/// follow it with the returned [`Mixed`].
+	pub fn new(driver: moq_audio::bus::Driver, start: Instant) -> (Self, Mixed) {
+		let (position, follow) = watch::channel(driver.position());
+		let mixed = Mixed {
+			start,
+			position: follow,
+		};
+		(Self { driver, position }, mixed)
+	}
+
+	/// Mix the next `frames` of every mix, as the clock moves by that much.
+	pub fn advance(&mut self, frames: usize) {
+		self.driver.advance(frames);
+		self.position.send_replace(self.driver.position());
+	}
+}
+
+/// How far a [`Mixer`] has mixed its bus, and when it mixes position 0.
+#[derive(Clone)]
+pub struct Mixed {
+	pub(crate) start: Instant,
+	/// The bus position of the next frame mixed.
+	pub(crate) position: watch::Receiver<u64>,
+}
+
+impl Mixed {
+	/// When the bus mixes its position 0, so a sound due at `t` plays at bus
+	/// position `(t - start) * rate`.
+	pub fn start(&self) -> Instant {
+		self.start
+	}
 }
 
 /// The running sources of a collection, and the mix of each audio scene.
@@ -1851,7 +1892,7 @@ impl Driver {
 		let channel = self.context.bus.positioned(input, strip)?;
 		Ok(Writer::new(
 			channel,
-			self.context.bus_start,
+			self.context.mixed.clone(),
 			bus.sample_rate,
 			bus.layout.channels(),
 		))
@@ -2144,10 +2185,11 @@ pub(crate) mod test {
 	pub(crate) fn context(dir: &Path) -> (Context, moq_net::origin::Producer) {
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::task::spawn_local(moq_net::time::run(driver));
-		let (bus, _) = Bus::new(Default::default()).unwrap();
+		let (bus, driver) = Bus::new(Default::default()).unwrap();
+		let (_, mixed) = Mixer::new(driver, kio::clock::now());
 		let context = Context {
 			bus,
-			bus_start: kio::clock::now(),
+			mixed,
 			origin: origin.consume(),
 			dir: dir.to_path_buf(),
 			output: moq_video::Output::Cpu,
@@ -2245,7 +2287,7 @@ pub(crate) mod test {
 	/// Mix `mixer` along with the clock from `at` to `until`, 10 ms at a time,
 	/// each block once the clock has passed it, returning the loudest `mix`
 	/// got. A bus started at `at` mixes on the clock as the program's does.
-	pub(crate) async fn listen(mixer: &mut moq_audio::bus::Driver, mix: &Mix, at: &mut Instant, until: Instant) -> f32 {
+	pub(crate) async fn listen(mixer: &mut Mixer, mix: &Mix, at: &mut Instant, until: Instant) -> f32 {
 		const STEP: Duration = Duration::from_millis(10);
 		let frames =
 			(STEP.as_nanos() * u128::from(moq_audio::bus::Config::default().sample_rate) / 1_000_000_000) as usize;
@@ -3300,9 +3342,11 @@ mod media_tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (mut context, _origin) = context(dir.path());
-			let (bus, mut mixer) = Bus::new(Default::default()).unwrap();
+			let (bus, driver) = Bus::new(Default::default()).unwrap();
+			let mut at = kio::clock::now();
+			let (mut mixer, mixed) = Mixer::new(driver, at);
 			context.bus = bus;
-			let mut at = context.bus_start;
+			context.mixed = mixed;
 			let mut sources = Sources::new(context);
 			let mut collection = media(dir.path(), &[("clip.mkv", CLIP, false, false)]);
 			let red = Source::Color {
@@ -3428,7 +3472,7 @@ mod media_tests {
 	/// the clock has passed it, as the program's audio clock mixes it, keeping
 	/// the first channel of what one mix heard.
 	struct Ear {
-		mixer: moq_audio::bus::Driver,
+		mixer: Mixer,
 		reader: moq_audio::bus::Reader,
 		/// When the bus starts, so a frame `n` in sounds `n` samples after it.
 		origin: Instant,
@@ -3438,8 +3482,8 @@ mod media_tests {
 
 	impl Ear {
 		/// Mix along with the clock from `sources`' bus start.
-		fn new(mixer: moq_audio::bus::Driver, sources: &Sources, mix: &Mix) -> Self {
-			let origin = sources.context().bus_start;
+		fn new(mixer: Mixer, sources: &Sources, mix: &Mix) -> Self {
+			let origin = sources.context().mixed.start();
 			Self {
 				mixer,
 				reader: mix.reader(),
@@ -3493,8 +3537,10 @@ mod media_tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (mut context, _origin) = context(dir.path());
-			let (bus, mixer) = Bus::new(Default::default()).unwrap();
+			let (bus, driver) = Bus::new(Default::default()).unwrap();
+			let (mixer, mixed) = Mixer::new(driver, kio::clock::now());
 			context.bus = bus;
+			context.mixed = mixed;
 			let mut sources = Sources::new(context);
 			let collection = media(dir.path(), &[("clip.mkv", CLIP, false, false)]);
 			let drivers = sources.sync(&collection);
@@ -3513,8 +3559,10 @@ mod media_tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (mut context, _origin) = context(dir.path());
-			let (bus, mixer) = Bus::new(Default::default()).unwrap();
+			let (bus, driver) = Bus::new(Default::default()).unwrap();
+			let (mixer, mixed) = Mixer::new(driver, kio::clock::now());
 			context.bus = bus;
+			context.mixed = mixed;
 			let mut sources = Sources::new(context);
 			let mut collection = Collection::new();
 			collection.sources.insert("replay".into(), Source::Replay);
@@ -3548,8 +3596,10 @@ mod media_tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (mut context, _origin) = context(dir.path());
-			let (bus, mixer) = Bus::new(Default::default()).unwrap();
+			let (bus, driver) = Bus::new(Default::default()).unwrap();
+			let (mixer, mixed) = Mixer::new(driver, kio::clock::now());
 			context.bus = bus;
+			context.mixed = mixed;
 			let mut sources = Sources::new(context);
 			let mut collection = Collection::new();
 			collection.sources.insert("replay".into(), Source::Replay);
@@ -3624,8 +3674,10 @@ mod media_tests {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (mut context, _origin) = context(dir.path());
-			let (bus, mixer) = Bus::new(Default::default()).unwrap();
+			let (bus, driver) = Bus::new(Default::default()).unwrap();
+			let (mixer, mixed) = Mixer::new(driver, kio::clock::now());
 			context.bus = bus;
+			context.mixed = mixed;
 			let mut sources = Sources::new(context);
 			let collection = media(dir.path(), &[("tone.webm", TONE, true, false)]);
 			let drivers = sources.sync(&collection);

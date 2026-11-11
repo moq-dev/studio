@@ -882,7 +882,7 @@ impl Engine {
 			recordings,
 			room,
 		} = launch;
-		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default())?;
+		let (bus, driver) = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
 		// Every relay feeds `subscribe`, so a guest either one routes is seen.
 		let guests = match &room {
@@ -944,9 +944,10 @@ impl Engine {
 		// The program clock's start, from which the audio clock advances the
 		// bus too, so the sources place their sound on it.
 		let start = Instant::now();
+		let (mixer, mixed) = source::Mixer::new(driver, start);
 		let sources = Sources::new(source::Context {
 			bus: bus.clone(),
-			bus_start: start,
+			mixed,
 			origin: sources,
 			dir,
 			output: moq_video::render::output(&gpu.device),
@@ -1044,8 +1045,9 @@ impl Engine {
 		// already running, which would otherwise keep this engine and its
 		// publication alive beside a retry's.
 		let starting = Starting(Some(engine.clone()));
-		// The audio clock first, so the bus keeps up with the program clock
-		// by the time the program starts the sources writing to it.
+		// The audio clock first, so the bus keeps up with the program clock by
+		// the time the program starts the sources, whose sound otherwise waits
+		// for it.
 		let mix = engine.clone();
 		let config = bus.config().clone();
 		let rate = config.sample_rate;
@@ -1602,7 +1604,7 @@ impl Engine {
 	/// Runs without a relay too, so the meters move and sources never back up,
 	/// until the studio [stops](Self::stop), which ends every mix, so each
 	/// output reads its mix to the end.
-	async fn run_audio(&self, start: Instant, config: moq_audio::bus::Config, mut mixer: moq_audio::bus::Driver) {
+	async fn run_audio(&self, start: Instant, config: moq_audio::bus::Config, mut mixer: source::Mixer) {
 		let rate = u128::from(config.sample_rate);
 		let mut clock = kio::clock::interval_at(start, AUDIO_PERIOD);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);

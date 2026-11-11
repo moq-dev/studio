@@ -2258,7 +2258,7 @@ mod tests {
 
 	/// Mix the bus sample-exact on the clock from `start`, as the program's
 	/// audio clock does.
-	async fn mix(mut mixer: moq_audio::bus::Driver, start: Instant) {
+	async fn mix(mut mixer: crate::source::Mixer, start: Instant) {
 		let rate = u128::from(moq_audio::bus::Config::default().sample_rate);
 		let mut clock = kio::clock::interval_at(start, Duration::from_millis(10));
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
@@ -2293,9 +2293,12 @@ mod tests {
 			let (device, queue) = gpu().await;
 			let (mut context, origin) = context(dir.path());
 			context.output = moq_video::render::output(&device);
-			let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
+			let (bus, driver) = moq_audio::bus::Bus::new(Default::default()).unwrap();
+			let begin = Instant::now();
+			let (mixer, mixed) = crate::source::Mixer::new(driver, begin);
 			context.bus = bus;
-			tokio::task::spawn_local(mix(mixer, context.bus_start));
+			context.mixed = mixed;
+			tokio::task::spawn_local(mix(mixer, begin));
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
