@@ -12,10 +12,9 @@ stall does on it.
 ## Plan
 
 Decided 2026-11-09 (maintainer, /quest-audit): ✅ crossing #8272 is this
-quest, after
-[Playout writes land on positioned bus channels](/quest/m0/playout-positioned.md)
-(rejected: crossing it in the
-positioned bus pin). Both rewrite
+quest, after playout's writes moved onto positioned bus channels
+([moq-dev/studio#137](https://github.com/moq-dev/studio/pull/137))
+(rejected: crossing it in the positioned bus pin). Both rewrite
 `playout.rs`, so the positioned work finishes on the API it was planned
 against, then this crosses.
 
@@ -81,7 +80,3 @@ kio's `Instant` loses `+` and `-` with a `Duration`, which `playout.rs` and
 
   Check: the maintainer answers in `/quest-unblock`, and the choice is
   recorded here.
-
-## Required
-
-- [Playout writes land on positioned bus channels](/quest/m0/playout-positioned.md) - the `playout.rs` rewrite this crosses on top of
