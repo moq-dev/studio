@@ -19,9 +19,12 @@ Build it on moq-scene, which already plays remote broadcasts as sources for
 guests (`rs/moq-studio/src/guests.rs`): a scene that the layout drives rather
 than a scene file. `README.md` documents the flag while it exists.
 
-Its working format is the starting point for moq's hang layer spec, which
-waits on this quest.
+It plays the layer layout the studio publishes on `dev.moq.studio.layers`
+(`rs/moq-scene/src/layout.rs`, and the README's "Layer layout"), refusing a
+layout of another `version` loudly and playing the program alone. Its working
+format is the starting point for moq's hang layer spec, which waits on this
+quest.
 
-## Required
+## Related
 
-- [Layer layout track](/quest/m2/compose/layout.md) - what the prototype plays
+- [Guests in the layer layout](/quest/m2/compose/layout.md) - guests' layers, once the maintainer decides how the layout names their broadcasts

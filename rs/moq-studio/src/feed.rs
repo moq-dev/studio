@@ -265,7 +265,7 @@ async fn list(
 
 #[cfg(test)]
 mod tests {
-	use moq_audio::bus::{Bus, Channel};
+	use moq_audio::bus::{Bus, Live};
 	use moq_scene::{History, Source};
 	use url::Url;
 
@@ -334,14 +334,14 @@ mod tests {
 	}
 
 	/// A stereo channel into `bus` under the strip of the source `name`.
-	fn channel(bus: &Bus, sources: &Sources, name: &str) -> Channel {
+	fn channel(bus: &Bus, sources: &Sources, name: &str) -> Live {
 		let strip = sources.get(name).unwrap().strip().unwrap().clone();
 		let mut input = moq_audio::encode::Input::new(48_000, moq_audio::Layout::Stereo);
 		input.format = moq_audio::Format::F32;
-		bus.channel(input, strip).unwrap()
+		bus.live(input, strip).unwrap()
 	}
 
-	fn feed(channel: &mut Channel, value: f32) {
+	fn feed(channel: &mut Live, value: f32) {
 		let data: Vec<u8> = std::iter::repeat_n(value, BLOCK * 2)
 			.flat_map(f32::to_le_bytes)
 			.collect();

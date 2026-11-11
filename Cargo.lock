@@ -4270,6 +4270,7 @@ dependencies = [
  "image",
  "kio",
  "moq-audio",
+ "moq-json",
  "moq-mux",
  "moq-net",
  "moq-video",

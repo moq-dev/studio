@@ -26,7 +26,13 @@ moq-cli, but moq-scene moved here with the studio, so the command lives here
 too and moq never depends on this repository. Settle its name in this quest
 and document it in `README.md`.
 
+It flattens the layer layout the studio publishes on `dev.moq.studio.layers`
+(`rs/moq-scene/src/layout.rs`, and the README's "Layer layout").
+
 ## Required
 
-- [Layer layout track](/quest/m2/compose/layout.md) - what the server flattens
 - [Destinations](/quest/m0/destinations.md) - the egress library the server pushes RTMP and WHIP through
+
+## Related
+
+- [Guests in the layer layout](/quest/m2/compose/layout.md) - guests' layers, which it flattens once they land
