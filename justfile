@@ -73,6 +73,7 @@ shots *views:
     mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
     icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
     export VK_DRIVER_FILES="${icd[0]}"
+    custom=${SHOTS_DIR:+1}
     SHOTS_DIR=$(realpath -ms "${SHOTS_DIR:-target/shots}")
     export SHOTS_DIR
     filter='test(/^shots::/)'
@@ -81,8 +82,9 @@ shots *views:
         filter=${filter% | }
         # A name no test has would otherwise be skipped without a word.
         for view in "$@"; do rm -f "$SHOTS_DIR/$view.png"; done
-    else
-        # A view removed from the table must not leave its old picture behind.
+    elif [[ -z $custom ]]; then
+        # A view removed from the table must not leave its old picture behind;
+        # only the default directory is ours to clear.
         rm -f "$SHOTS_DIR"/*.png
     fi
     cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E "$filter"

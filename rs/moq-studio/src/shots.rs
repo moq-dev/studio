@@ -52,7 +52,8 @@ macro_rules! views {
 	)*};
 }
 
-// Every view. A quest that adds a page or a state adds its row.
+// Every view. A quest that adds a page or a state adds its row, and an
+// `Open` variant for a state no existing one reaches.
 views! {
 	/// Once its checks are done: this machine's encoder timings, and the
 	/// capture errors of a build without `capture`, which keeps the view off
