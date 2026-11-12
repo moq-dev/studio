@@ -1,43 +1,75 @@
-# [S] nixos2 boots Windows for agents
+# [S] The windows PC hosts Windows agents
 
 ## Goal
 
-nixos2 boots Windows by default, and an agent on the maintainer's Mac reaches
-it with `ssh nixos2`, builds `moq-studio --features capture` there, and finds
-a camera and a microphone to capture, so Windows quests run on real hardware.
+An agent running natively on the maintainer's Windows PC (Tailscale name
+`windows`) builds `moq-studio --features capture` there and lists a camera
+and a microphone to capture, so Windows quests run on real hardware.
 
 ## Plan
 
-Decided 2026-11-06 (maintainer, /quest-unblock): nixos2 becomes the Windows
-host.
+Decided 2026-11-10 (maintainer): ✅ the `windows` PC is the Windows host
+(rejected: rebooting nixos2 into its Windows partition, the 2026-11-06 plan).
+Agents (Claude Code, Codex) already run on it natively through T3 Code, so no
+ssh hop is needed, and nixos2 stays a Linux host.
 
-nixos2 already dual-boots: Windows sits on its own partition (`nvme0n1p3`,
-600 GB, last booted 2026-09-14) with firmware entry `Boot0003` (Windows Boot
-Manager); NixOS boots through systemd-boot on `nvme0n1p4`. The switch:
+The host, as found on 2026-11-10:
 
-1. From NixOS, an agent moves `Boot0003` to the front of the firmware boot
-   order and reboots: `sudo efibootmgr -o
-   0003,0006,0000,0004,0005,0007,0001,0002,0008,0009,000A,000B,000C`, from
-   `nix shell nixpkgs#efibootmgr` since nixos2 lacks it (passwordless sudo).
-   The order before the switch, and its revert, is
-   `0006,0000,0003,0004,0005,0007,0001,0002,0008,0009,000A,000B,000C`
-   (`0006` is systemd-boot). NixOS stays
-   installed; boot it once with `bcdedit /set {fwbootmgr} bootsequence
-   {<entry>}` from Windows when a Linux run needs it.
-2. The maintainer turns on OpenSSH Server (see Waiting).
-3. Over ssh, an agent installs the toolchain with `winget`: rustup with the
-   MSVC target, Visual Studio Build Tools with the C++ workload, Git, and
-   `just`. It records the host key change for `nixos2` and what it installed
-   in this PR.
+- Hostname `WINDOWS`, Tailscale `windows` (100.73.17.32), Windows 11 Home
+  10.0.26200, i7-8700, 16 GB RAM, NVIDIA RTX 2070 (driver 32.0.15.9186), one
+  2560x1440 display.
+- Toolchain: rustup with `stable-x86_64-pc-windows-msvc` as default, plus
+  1.98.1, which rustup installed from `rust-toolchain.toml` on first use;
+  Visual Studio Build Tools 2022 17.14 with the VC x86/x64 tools; CMake 4.3;
+  Git 2.43; just 1.52; `quest` 0.2.0 built from source (no Nix). No nasm or
+  clang, which nothing has yet shown the build needs.
+- Capture devices: no camera. Audio inputs are virtual only: Steam Streaming
+  Microphone and VB-Audio Virtual Cable (`CABLE Output` records what is
+  played to `CABLE Input`).
+- SSH (2026-11-12): an OpenSSH server runs (ED25519 host key) but rejects the
+  Linux host's key (publickey denied), so other hosts cannot reach it by ssh;
+  agents run on it directly instead.
+
+No real microphone is needed: VB-Audio's `CABLE Output` is a WASAPI capture
+endpoint like a USB microphone's, so playing a tone into `CABLE Input` drives
+the same capture path [Studio on Windows](/quest/m0/app-windows.md) runs, with
+a known signal to check. A camera has no such stand-in (see Waiting).
+
+There is no Nix dev shell, so agents here run cargo and `just` natively;
+`just check` steps that call Nix tools cannot run.
+
+The remaining agent step: build with
+`quest gate cargo build -p moq-studio --features capture`, then list devices
+by starting the studio, whose setup and Devices panel enumerate cameras,
+displays, windows, and audio inputs (`rs/moq-studio/src/devices.rs`).
+Whatever fails to build on this host is this quest's to fix.
+
+Decided 2026-11-12 (maintainer, /quest-review checkpoint): ✅ this quest owns
+every build error on the host (rejected: handing errors CI also shows to the
+CI build quest, which would make that quest this one's prerequisite; merging
+that split as is).
+
+## Hosts
+
+- windows - the work is setting up this host
 
 ## Waiting
 
-- Maintainer: say nixos2 is free to reboot. On 2026-11-09 it ran a Claude
-  Code session and a rind worktree's node process, and an agent cannot tell
-  whether such work is finished. Check: the maintainer says so, or `w` and
-  `ps` on nixos2 show no other session's work.
-- Maintainer: at nixos2's console once it boots Windows, turn on OpenSSH
-  Server (Settings > System > Optional features), add the Mac's public key to
-  `C:\ProgramData\ssh\administrators_authorized_keys`, and plug in a USB
-  camera and a microphone, which nixos2 lacks. An agent cannot reach Windows
-  before sshd runs. Check: `ssh nixos2 ver` prints a Windows version.
+- Maintainer: leave 4 GiB of memory available on `windows` while an agent
+  builds there. `quest gate` admits a build only once available memory
+  reaches min(4 GiB, RAM/4), and with the desktop apps running (OneDrive's
+  sync service alone held 3 GB) the PC sat at 2.6 to 3.1 GB available for two
+  hours on 2026-11-10, so the build never started. An agent cannot close the
+  maintainer's apps, and building outside the gate is against the repo's
+  rules. Options: quit OneDrive, ChatGPT, and Discord during agent runs, or add
+  RAM (recommended: add RAM, since 16 GB leaves a linker little room beside a
+  desktop). Check: `(Get-Counter '\Memory\Available MBytes').CounterSamples`
+  reads above 4096.
+- Maintainer: plug a USB camera into `windows`. It has none, and Media
+  Foundation's camera source, the path [Studio on Windows](/quest/m0/app-windows.md)
+  runs, needs a device; no virtual camera ships with Windows. An agent could
+  register a Media Foundation virtual camera (`MFCreateVirtualCamera`) only
+  with a media source of its own, which is
+  [the Windows virtual camera](/quest/m0/vcam/windows.md)'s deliverable and
+  not built yet; a USB camera also covers the formats real hardware sends.
+  Check: the studio's Devices panel lists a camera.
