@@ -5,19 +5,17 @@ kixel.live Studio is a native, cross-platform streaming studio that composites s
 
 # Required
 
-- Measure performance by frame time, GPU copies, and encoder load.
-- Measure the UI's frame time under a real compositor, such as headless sway (`WLR_BACKENDS=headless sway`), not Xvfb, whose present caps it at 12–25 fps on the NVIDIA test hosts.
+- Measure performance by frame time, GPU copies, and encoder load, and the UI's frame time under a real compositor, such as headless sway (`WLR_BACKENDS=headless sway`), not Xvfb, whose present caps it at 12–25 fps on the NVIDIA test hosts.
 
 # Upstream
 
 Media, transport, and protocol work belongs in moq-dev/moq, not here: capture, codecs, rendering import and export (moq-video), audio capture, mixing, and filters (moq-audio), the catalog (hang), and the transport (moq-net, moq-tokio).
-A studio feature that needs a moq change lands that change in moq first, with a moq-side test proving it, then bumps the `moq` gitlink here (`just upgrade-moq`) in its own PR.
+A studio feature that needs a moq change lands that change in moq first, with a moq-side test proving it, then bumps the `moq` gitlink here.
 Never point the submodule at an unmerged moq branch on `main`.
 
 # Rust
 
 - Every moq crate is a path dependency into `moq/`, declared once in the root `Cargo.toml`. `sh/check-moq-pin.sh` fails `just check` if a moq git dependency appears or the checkout drifts from the gitlink.
-- Follow moq's Rust conventions (`moq/rs/AGENTS.md`).
 - Read the clock through `kio::clock` (`clippy.toml` bans direct reads), so tests can pause it.
 - `moq-scene` stays UI-free: no egui types, so a headless compositor and the wasm build can reuse it.
 - Defaults skip anything needing a system library (`capture`, `pipewire`, `vaapi`, `openh264`); `just check` covers them explicitly.
@@ -25,13 +23,7 @@ Never point the submodule at an unmerged moq branch on `main`.
 # Development
 
 PRs target `main`.
-
-```bash
-just check   # Lint everything, including the quest tree
-just test    # Run the tests
-just ci      # Both, as CI runs them; run before every push
-just fix     # Auto-fix formatting
-```
+Run `just ci` before every push.
 
 `README.md` is the user guide. A change to what a user does (flags, panels, the scene file, outputs) updates it in the same PR.
 
