@@ -954,11 +954,16 @@ impl Compositor {
 	/// sources the collection no longer has or has since edited. An overlay
 	/// that arrives now starts its CSS timeline at `now`.
 	fn update(&mut self, collection: &Collection, sources: &Sources, now: Instant) {
-		self.layers
-			.retain(|name, layer| collection.sources.get(name) == Some(&layer.source));
+		// A layer only moved on its clock keeps its picture until the next.
+		self.layers.retain(|name, layer| {
+			collection
+				.sources
+				.get(name)
+				.is_some_and(|source| source.plays_alike(&layer.source))
+		});
 
 		for (name, source) in &collection.sources {
-			let Some(feed) = sources.get(name).filter(|feed| feed.source() == source) else {
+			let Some(feed) = sources.get(name).filter(|feed| feed.source().plays_alike(source)) else {
 				continue;
 			};
 			let taken = feed.take();
@@ -978,6 +983,7 @@ impl Compositor {
 				},
 				None => continue,
 			};
+			layer.source = source.clone();
 			if let Some(taken) = taken {
 				if taken.cleared {
 					// Nothing from before the clear may show, even if the picture
@@ -2201,7 +2207,7 @@ mod tests {
 
 	use super::*;
 	use crate::collection::{Blend, MaskMode, Rgba, Scene, Size, Video};
-	use crate::source::test::{context, local, start, until, until_time};
+	use crate::source::test::{Still, context, local, start, until, until_time};
 
 	/// A fade over a second.
 	const FADE: Transition = Transition::Fade {
@@ -2285,7 +2291,7 @@ mod tests {
 		pub(super) compositor: Compositor,
 		pub(super) device: wgpu::Device,
 		queue: wgpu::Queue,
-		_origin: moq_net::origin::Producer,
+		origin: moq_net::origin::Producer,
 		_dir: tempfile::TempDir,
 	}
 
@@ -2314,7 +2320,7 @@ mod tests {
 				queue,
 				collection,
 				sources,
-				_origin: origin,
+				origin,
 				_dir: dir,
 			}
 		}
@@ -3080,6 +3086,46 @@ mod tests {
 			studio.collection.scenes.clear();
 			studio.render(Instant::now());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
+		})
+		.await;
+	}
+
+	/// A layer whose offset alone changes keeps showing its picture, rather
+	/// than going blank until its broadcast sends another.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_layer_moved_on_its_clock_keeps_its_picture() {
+		local(async {
+			let mut collection = collection();
+			collection.sources.insert(
+				"guest".into(),
+				Source::Broadcast {
+					path: "room/offline".into(),
+				},
+			);
+			let layer = |offset| Source::Layer {
+				clock: "guest".into(),
+				path: "room/logo".into(),
+				instance: None,
+				offset,
+			};
+			collection.sources.insert("logo".into(), layer(0));
+			collection.scenes[1].items = vec![Item::new("logo", Rect::fill(&collection.canvas))];
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			let _still = Still::new(&studio.origin, "room/logo", GREEN);
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			until(|| {
+				studio.render(Instant::now());
+				(pixel(&studio.program(), 1, 1) == GREEN).then_some(())
+			})
+			.await;
+
+			studio.collection.sources.insert("logo".into(), layer(250_000));
+			assert!(studio.sources.sync(&studio.collection).is_empty(), "it plays on");
+			studio.render(Instant::now());
+			assert_eq!(pixel(&studio.program(), 1, 1), GREEN);
 		})
 		.await;
 	}

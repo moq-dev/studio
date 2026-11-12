@@ -365,28 +365,17 @@ impl Sources {
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		let mixes = &self.mixes;
 		self.feeds.retain(|name, feed| {
-			let keep = match (collection.sources.get(name), &mut feed.source) {
+			let keep = match collection.sources.get(name) {
 				// A layer moved onto its clock anew plays on, so a guest's offset
 				// changing never opens their broadcast again.
-				(
-					Some(Source::Layer {
-						clock,
-						path,
-						instance,
-						offset,
-					}),
-					Source::Layer {
-						clock: playing,
-						path: played,
-						instance: serving,
-						offset: was,
-					},
-				) if clock == playing && path == played && instance == serving => {
-					*was = *offset;
-					feed.offset.store(*offset, Ordering::Relaxed);
+				Some(source) if source.plays_alike(&feed.source) => {
+					if let Source::Layer { offset, .. } = source {
+						feed.offset.store(*offset, Ordering::Relaxed);
+					}
+					feed.source = source.clone();
 					true
 				}
-				(source, playing) => source == Some(&*playing),
+				_ => false,
 			};
 			if !keep {
 				leave(mixes, feed);
@@ -2514,6 +2503,25 @@ impl Source {
 	pub fn independent(&self) -> bool {
 		self.publishes() || matches!(self, Source::Broadcast { .. })
 	}
+
+	/// Whether what plays `self` plays `other` as is: the same source, or a
+	/// layer only moved on its clock, which its feed and picture follow.
+	pub fn plays_alike(&self, other: &Source) -> bool {
+		match (self, other) {
+			(
+				Source::Layer {
+					clock, path, instance, ..
+				},
+				Source::Layer {
+					clock: other_clock,
+					path: other_path,
+					instance: other_instance,
+					..
+				},
+			) => clock == other_clock && path == other_path && instance == other_instance,
+			_ => self == other,
+		}
+	}
 }
 
 /// `timestamp` moved `offset` microseconds, or `None` off a timestamp's range.
@@ -2714,11 +2722,45 @@ pub(crate) mod test {
 	pub(crate) async fn local<F: Future>(f: F) -> F::Output {
 		tokio::task::LocalSet::new().run_until(f).await
 	}
+
+	/// A broadcast at `path` of a one-pixel `rgba` PNG still, as a layer
+	/// reads it, published while this lives.
+	pub(crate) struct Still {
+		_publication: moq_net::origin::Route,
+		_catalog: moq_mux::catalog::Producer,
+		_track: moq_net::track::Producer,
+	}
+
+	impl Still {
+		pub(crate) fn new(origin: &moq_net::origin::Producer, path: &str, rgba: [u8; 4]) -> Self {
+			let publication = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
+			let mut broadcast = publication.broadcast().clone();
+			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut track = broadcast.create_track("still.png", None).unwrap();
+			let pixel = image::RgbaImage::from_raw(1, 1, rgba.to_vec()).unwrap();
+			let mut png = std::io::Cursor::new(Vec::new());
+			pixel.write_to(&mut png, image::ImageFormat::Png).unwrap();
+			track.write_frame(None, bytes::Bytes::from(png.into_inner())).unwrap();
+			let mut still = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
+			still.mime = Some("image/png".into());
+			catalog
+				.mutate(|root| {
+					root.binary.tracks.insert("still.png".into(), still);
+				})
+				.unwrap();
+			publication.announce().unwrap();
+			Self {
+				_publication: publication,
+				_catalog: catalog,
+				_track: track,
+			}
+		}
+	}
 }
 
 #[cfg(test)]
 mod tests {
-	use super::test::{context, local, start, until, until_time, video};
+	use super::test::{Still, context, local, start, until, until_time, video};
 	use super::*;
 	use crate::collection::{Audio, Rgba};
 
@@ -3264,24 +3306,7 @@ mod tests {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
 			let _live = live(&origin, false).await;
-			let publication = origin
-				.route("room/logo", moq_net::origin::RouteOptions::hidden())
-				.unwrap();
-			let mut broadcast = publication.broadcast().clone();
-			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-			let mut track = broadcast.create_track("logo.png", None).unwrap();
-			let pixel = image::RgbaImage::from_raw(1, 1, vec![255, 0, 0, 255]).unwrap();
-			let mut png = std::io::Cursor::new(Vec::new());
-			pixel.write_to(&mut png, image::ImageFormat::Png).unwrap();
-			track.write_frame(None, bytes::Bytes::from(png.into_inner())).unwrap();
-			let mut still = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
-			still.mime = Some("image/png".into());
-			catalog
-				.mutate(|root| {
-					root.binary.tracks.insert("logo.png".into(), still);
-				})
-				.unwrap();
-			publication.announce().unwrap();
+			let _still = Still::new(&origin, "room/logo", [255, 0, 0, 255]);
 
 			let mut collection = collection();
 			collection.sources.insert(
