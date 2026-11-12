@@ -58,6 +58,24 @@ tracing = "0.1"
 url = "2"
 usage-rs = "7.1.0"
 
+# wgpu-core 30.0.1 with Surface::configure holding command indices across its
+# wait and the hal configure, so a submit from the compositor or encoder on the
+# shared device no longer crashes the UI's resize. Drop it once a wgpu release
+# carries the fix (quest/m0/wgpu-unpatch.md). The patched wgpu-core
+# depends on its siblings by path in the fork, so they come from the same rev,
+# or crates.io copies would split every wgpu type in two.
+[patch.crates-io]
+naga = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+naga-types = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+wgpu-core = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+wgpu-core-deps-apple = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+wgpu-core-deps-emscripten = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+wgpu-core-deps-wasm = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+wgpu-core-deps-windows-linux-android = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+wgpu-hal = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+wgpu-naga-bridge = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+wgpu-types = { git = "https://github.com/moq-dev/wgpu", rev = "45f2dc6d5c2f755b3c1d6aac59a045db7e58d931" }
+
 [profile.dev]
 # Line tables keep file and line in every backtrace and panic, without the
 # variable and type records that make a debug build of this graph enormous.

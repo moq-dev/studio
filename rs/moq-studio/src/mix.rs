@@ -366,7 +366,7 @@ async fn play(_follow: Follow, _speakers: tokio::sync::watch::Receiver<Option<St
 
 #[cfg(test)]
 mod tests {
-	use moq_audio::bus::{Bus, Channel, Driver, Strip};
+	use moq_audio::bus::{Bus, Driver, Live, Strip};
 
 	use super::*;
 
@@ -374,14 +374,14 @@ mod tests {
 	const BLOCK: usize = 480;
 
 	/// A stereo source the test feeds `value` one block per advance.
-	fn source(bus: &Bus) -> (Channel, Strip) {
+	fn source(bus: &Bus) -> (Live, Strip) {
 		let strip = Strip::default();
 		let mut input = moq_audio::encode::Input::new(48_000, moq_audio::Layout::Stereo);
 		input.format = moq_audio::Format::F32;
-		(bus.channel(input, strip.clone()).unwrap(), strip)
+		(bus.live(input, strip.clone()).unwrap(), strip)
 	}
 
-	fn feed(channel: &mut Channel, value: f32) {
+	fn feed(channel: &mut Live, value: f32) {
 		let data: Vec<u8> = std::iter::repeat_n(value, BLOCK * 2)
 			.flat_map(f32::to_le_bytes)
 			.collect();
@@ -398,7 +398,7 @@ mod tests {
 
 	/// Two mixes of one source each, `a` playing 0.25 and `b` 0.5, run past
 	/// the bus's latency so each mix carries its source.
-	fn mixes() -> (Driver, Mix, Mix, [Channel; 2]) {
+	fn mixes() -> (Driver, Mix, Mix, [Live; 2]) {
 		let (bus, mut driver) = Bus::new(Default::default()).unwrap();
 		let (mut quiet, quiet_strip) = source(&bus);
 		let (mut loud, loud_strip) = source(&bus);

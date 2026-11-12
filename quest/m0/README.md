@@ -23,11 +23,15 @@ Decided 2026-10-22 with the maintainer (/quest-plan):
 
 - **Home:** first `rs/moq-studio` in moq, beside moq-cli. Changed
   2026-11-02 (below).
-- **UI:** egui with egui_dock. It is the only Rust toolkit with all of
-  same-device zero-copy wgpu textures, multiple native windows, docking, and
-  a proven wasm build. Slint has no docking and an unstable wgpu interop
-  feature, gpui has no wgpu on macOS or Windows, and Tauri is a webview. The
-  app owns the wgpu device.
+- **UI:** egui, without egui_dock. It has same-device zero-copy wgpu
+  textures, multiple native windows, and a proven wasm build; gpui has no wgpu
+  on macOS or Windows, and Tauri is a webview. The app owns the wgpu device.
+  Decided again 2026-11-11 by the
+  [spike](https://github.com/moq-dev/studio/pull/126) of the LIVE page:
+  ✅ egui (rejected: Slint, defer). egui's UI CPU was about 0.5 ms a frame,
+  against Slint's 12 to 16 ms as released and 3 to 5 ms with femtovg's cache
+  patched; patched Slint also quadrupled the program render, and Slint's
+  licenses demand GPLv3 or attribution with an embedded ban.
 - **Compositor:** a UI-free crate, `rs/moq-scene`: scene graph, sources,
   transforms, transitions, and canvases on wgpu. The program audio bus is
   moq-audio's `bus` module. Both grow slice by slice with the
@@ -89,9 +93,9 @@ layout track carries only the layers of independently published sources.
 Changed 2026-11-09 with the maintainer (/quest-plan): the studio gets one
 designed layout, a live picture with pages around it, in place of sixteen
 dockable panels; see [Broadcaster UX](/quest/m0/ux/README.md). Docking no
-longer argues for a toolkit, so that epic's spike decides it again between
+longer argues for a toolkit, so that epic's spike decided it again between
 egui and Slint, the two that draw the compositor's textures with no copy on
-the studio's own device.
+the studio's own device: egui stays (above).
 
 Dropped from the first scoping round: relay fan-out ("encode once, the relay
 restreams") and its upload savings. Direct push with shared encoders matches

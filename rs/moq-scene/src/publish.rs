@@ -21,13 +21,13 @@ use crate::Error;
 
 /// The local catalog's own root section, namespaced as hang asks of
 /// application sections.
-pub const SECTION: &str = "dev.moq.studio";
+pub const SECTION: &str = "live.kixel.studio";
 
 /// The application sections of the local catalog.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Ext {
 	/// The [`SECTION`] section, left off the wire while nothing is listed.
-	#[serde(rename = "dev.moq.studio", default, skip_serializing_if = "Section::is_empty")]
+	#[serde(rename = "live.kixel.studio", default, skip_serializing_if = "Section::is_empty")]
 	pub studio: Section,
 }
 

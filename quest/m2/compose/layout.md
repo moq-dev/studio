@@ -1,85 +1,53 @@
-# [M] Layer layout track
+# [L] The studio publishes a composition
 
 ## Goal
 
-A studio broadcast that publishes a source independently also carries a layer
-layout track. For each such source, it says where and when that source shows
-over the program: its transform, crop, z-order, opacity, and visibility, its
-item's keyframes and when its scene went on program, all on the media clock,
-and for audio its gain, mute, pan, and delay. Until hang specifies it, the track is the
-provisional `dev.moq.studio.layers` in the studio catalog.
+The studio publishes a composition: a broadcast of its own whose catalog
+lists other broadcasts, the program and each independently published source,
+local or guest, with where and when each shows and how its sound mixes. Each
+listed broadcast keeps its own timeline, and the composition carries the
+offset that puts it on the composition's media clock. The `moq-studio --watch`
+prototype (`rs/moq-studio/src/watch.rs`) plays a composition, guests
+included, and it replaces the provisional `live.kixel.studio.layers` track
+(`rs/moq-scene/src/layout.rs`, and the README's "Layer layout").
 
 ## Plan
 
-Replanned 2026-11-08 (maintainer, /quest-plan) around the program with
-independent layers over it, rather than the full scene state; see the
-[epic](/quest/m2/compose/README.md).
+Decided 2026-11-12 (maintainer, /quest-unblock), settling how the layout
+names a guest:
 
-A JSON track in snapshot mode, so a late joiner gets the current state.
-Version it, and have a player refuse an unknown version loudly and play the
-program alone. Keep it free of local paths and credentials: layers name
-tracks and broadcasts, never files.
+- **Naming:** ✅ a composition, a catalog of catalogs (rejected: the layer
+  layout naming each guest's broadcast with an offset; moq relaxing hang's
+  `include` for broadcasts on their own timeline; republishing guests'
+  tracks in the studio's broadcast). hang's `include`
+  ([moq-dev/moq#7943](https://github.com/moq-dev/moq/pull/7943)) requires an
+  included broadcast to share the listing catalog's PTS timeline,
+  `media.clock`, and `media.join.interval`, which a guest's does not; a
+  composition keeps `include`'s meaning and says how each timeline maps.
+- **Home:** ✅ its own broadcast (rejected: a section of the program's
+  catalog, which is `include` with a different clock). The program is one of
+  its children, and a player that knows no compositions still plays the
+  program.
+- **Local sources:** ✅ every independently published source is its own
+  broadcast (rejected: layers naming a broadcast and track, with local
+  sources staying tracks of the program's broadcast at offset zero). This
+  reverses the 2026-10-26 rule that local sources are tracks in the studio's
+  one broadcast, so the composition lists only catalogs.
+- **Format:** ✅ the studio prototypes it, provisional and versioned, before
+  moq's hang specifies it (rejected: straight to hang's spec), as the
+  2026-11-08 layer layout did.
 
-Decided 2026-11-08 (maintainer, on
-[moq-dev/studio#117](https://github.com/moq-dev/studio/pull/117)): a
-published source stays hidden everywhere the studio composites until this
-track lands. Drawing published sources as layers over the program in the
-studio's preview is this quest's work, and so is whether recordings include
-those layers.
+Recommended, not decided: the composition's media clock is the program's, so
+the program's offset is zero; each child's entry carries what the provisional
+layer format carries per layer today (placement, crop, opacity, visibility,
+keyframes, toggleability, priority, and gain, mute, pan, and delay for
+sound); and a change is a new snapshot group stamped on the composition's
+clock, as the layers track is now.
 
-Layers draw over the program in the layout's order, so the studio's preview
-of a scene with an independent source shows what viewers see. A layer carries
-only what every player can reproduce: transform, crop, z-order, opacity,
-visibility, and keyframes. A picture source's track is its capture before any
-filter (decided 2026-11-02, maintainer). So an item that applies anything
-more, such as a video filter, mask, LUT, blend mode, or background removal,
-needs that effect baked into its track, or the option refused for it. Settle
-which here. Publishing a source independently refuses one with its
-background removed for now, since H.264 carries no transparency, so lifting
-that refusal is this track's call too. An audio source's track already carries its sound
-after its filters (decided 2026-11-02), so its layer carries what its strip
-applies after them: gain, mute, pan, and delay.
+`Source::publishes` refuses a broadcast source today, since it has no track
+in the studio's broadcast; under a composition a guest needs no track of the
+studio's. `README.md`'s "Published independently" and "Layer layout" become
+the composition's.
 
-Decided 2026-11-09 (maintainer, /quest-audit): ✅ an audio layer carries pan
-and delay as well as gain and mute (rejected: stating that a player drops
-them). Without the delay, a delayed microphone published independently plays
-out of sync with its camera. moq's
-[layer spec](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/spec.md)
-starts from the format the prototype settles;
-[moq-dev/moq#8421](https://github.com/moq-dev/moq/pull/8421) adds pan and
-delay to it and has both players apply them.
-
-Items carry their keyframes (`moq_scene::Keyframe`), which play from when
-their scene went on program. The layout says when that was, so a late joiner
-lands at the same point.
-
-Each layer also carries its priority and whether a viewer may toggle it, for
-[Viewer controls](/quest/m2/compose/controls.md).
-
-The [watch prototype](/quest/m2/compose/watch.md) is this track's first
-reader. What the two settle becomes moq's hang spec draft.
-
-## Waiting
-
-- Maintainer: decide how the layout names a guest's broadcast. The epic
-  settled on 2026-10-26 that guests stay their own broadcasts, named through
-  hang's catalog references, then `contributions`, now `include`
-  ([moq-dev/moq#7943](https://github.com/moq-dev/moq/pull/7943)). The hang
-  draft at the pin requires an include to share the listing catalog's PTS
-  timeline, `media.clock`, and `media.join.interval`, and a guest's broadcast
-  keeps its own, so a player that takes `include` at its word places a
-  guest's frames at the wrong time. Options:
-  - The layout names each guest's broadcast itself and carries the offset
-    from the guest's timeline onto the program's media clock, the one the
-    studio applies when it plays the guest (recommended): `include` keeps
-    its meaning, and the timing stays in the track that already says when
-    each layer shows.
-  - moq relaxes `include`, or adds a sibling map, for broadcasts on their own
-    timeline, with the offset in the catalog: a moq quest and a pin, and every
-    hang consumer learns a second kind of include.
-  - The studio republishes each guest's tracks in its own broadcast, restamped
-    onto the program's clock: no spec change, but it reverses the settled
-    "guests stay their own broadcasts" and relays every guest twice.
-
-  Check: the maintainer answers in /quest-unblock, and the choice is recorded
-  in this Plan and the epic's.
+Bump the format's `version`, since naming broadcasts instead of tracks is not
+additive.

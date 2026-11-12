@@ -2,13 +2,13 @@
 
 ## Goal
 
-A studio broadcast carries each independently published source as its own
-track, plus a layer layout track that says where and when each one shows.
-Players composite those sources over the program and mix their audio in, so
-a viewer sees the creator's picture while those sources travel, and can be
-toggled, as their own tracks. The end goal is moq's own players, `moq play`
-and `@moq/watch`, playing a studio broadcast this way from a layer layout
-that hang specifies.
+The studio publishes a composition: a broadcast whose catalog lists the
+program and each independently published source, local or guest, as
+broadcasts of their own, and says where and when each one shows. Players
+composite those sources over the program and mix their audio in, so a viewer
+sees the creator's picture while those sources travel, and can be toggled, as
+their own broadcasts. The end goal is moq's own players, `moq play` and
+`@moq/watch`, playing a composition that hang specifies.
 
 This README's own work is the end-to-end test: a studio broadcast with an
 independently published camera and microphone plays in `moq play` and
@@ -40,8 +40,7 @@ land before replanning:
   (rejected: straight to `moq play`). moq's spec quest starts from it.
 - **Audio:** ✅ players mix independently published audio sources with the
   program's, at the gain and mute the layout carries (rejected: video only).
-  Since 2026-11-09 the layout carries pan and delay too; see
-  [layout](/quest/m2/compose/layout.md).
+  Since 2026-11-09 the layout carries pan and delay too.
 - **Controls:** ✅ viewer toggles and priorities land in the native player
   (rejected: browser only). Since 2026-11-09 that includes `moq play`; see
   [controls](/quest/m2/compose/controls.md).
@@ -52,12 +51,15 @@ land before replanning:
 - **Milestone:** ✅ m2 (rejected: m1; staying in m3). The moq quests join
   moq's m3.
 
-Still settled from 2026-10-26: local sources are tracks in the studio's one
-broadcast, and guests stay their own broadcasts. How the layout names a
-guest is open in the [layer layout](/quest/m2/compose/layout.md)'s Waiting:
-hang's `include` requires an included broadcast to share the listing
-catalog's timeline, clock, and join interval, which a guest's does not.
+Decided 2026-11-12 (maintainer, /quest-unblock): ✅ a composition, its own
+broadcast listing a catalog per source, each on its own timeline with an
+offset onto the composition's clock, and every independently published
+source, local or guest, its own broadcast (rejected: a layer layout track in
+the program's broadcast naming tracks; local sources as tracks of the
+program's broadcast, the 2026-10-26 rule this reverses). The studio
+prototypes the format first. See [the composition](/quest/m2/compose/layout.md).
 
-moq's side, in its own quest tree (m3): hang specifies a layer layout track,
-and `moq play` and `@moq/watch` composite it.
+moq's side, in its own quest tree (m3): hang specifies the composition, and
+`moq play` and `@moq/watch` composite it. moq's three layers quests were
+planned for a layer layout track and need replanning there.
 

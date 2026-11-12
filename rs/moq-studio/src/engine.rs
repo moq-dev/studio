@@ -657,6 +657,9 @@ pub struct Program {
 	/// The sources published independently, whose tracks the broadcast
 	/// carries beside the program's.
 	published: tokio::sync::watch::Sender<BTreeSet<String>>,
+	/// Where and when the broadcast's viewers show those sources, while any
+	/// is published.
+	layout: Mutex<moq_scene::layout::Publisher>,
 	/// What a recording reads the program from, on the same clock.
 	recording: moq_net::origin::Route,
 	/// The recording broadcast's catalog, held for as long as the engine runs,
@@ -677,10 +680,13 @@ impl Drop for Program {
 }
 
 impl Program {
-	/// Finish the program's catalog and the recording's, once every track
-	/// they list has ended, so a viewer or a recording reading either reaches
-	/// its end rather than a cut.
+	/// End the layer layout, then finish the program's catalog and the
+	/// recording's, once every track they list has ended, so a viewer or a
+	/// recording reading either reaches its end rather than a cut.
 	fn finish(&self) {
+		if let Err(err) = self.layout.lock().unwrap().finish() {
+			tracing::warn!(%err, "cannot finish the layer layout");
+		}
 		for catalog in [&self.catalog, &self.recorded] {
 			// Fails only once the catalog failed, which ended its tracks already.
 			let _ = catalog.clone().finish();
@@ -764,6 +770,31 @@ impl Program {
 		self.sources
 			.set_on_program(moq_scene::publish::OnProgram { shown, heard });
 	}
+
+	/// Publish the layer layout of what `state` drew on program at `at` on
+	/// the media clock, while any source is published independently.
+	fn lay_out(&self, state: &State, at: Duration) {
+		// Past what a timestamp holds, the frame goes unstamped too.
+		let Ok(stamp) = moq_net::Timestamp::try_from(at) else {
+			return;
+		};
+		let collection = &state.collection;
+		let mut publisher = self.layout.lock().unwrap();
+		let published = match collection.published.is_empty() {
+			true => publisher.finish(),
+			false => {
+				// To the whole microsecond as the frame's stamp is, rather than
+				// rounded as the wire would, so a cut's layout starts on its frame.
+				let start = at.saturating_sub(state.compositor.program_since()).as_micros();
+				let start = Duration::from_micros(start as u64);
+				let layout = moq_scene::layout::Layout::new(collection, state.compositor.program_scene(), start);
+				publisher.update(layout, stamp)
+			}
+		};
+		if let Err(err) = published {
+			tracing::warn!(%err, "cannot publish the layer layout");
+		}
+	}
 }
 
 /// The running studio.
@@ -807,7 +838,7 @@ pub const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::fr
 
 /// How often the audio thread advances the bus. Short enough that a block is never
 /// close to the bus's buffering, long enough to cost nothing.
-const AUDIO_PERIOD: Duration = Duration::from_millis(10);
+pub(crate) const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
 /// The longest [`Engine::close`] waits for the sources to stop and the relays
 /// to drain, so a source or relay that never answers cannot hold up quitting.
@@ -851,7 +882,7 @@ impl Engine {
 			recordings,
 			room,
 		} = launch;
-		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default())?;
+		let (bus, driver) = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
 		// Every relay feeds `subscribe`, so a guest either one routes is seen.
 		let guests = match &room {
@@ -910,8 +941,13 @@ impl Engine {
 		// Absolute, so a copied image names the same file in another collection.
 		let dir = autosave.path().parent().filter(|dir| !dir.as_os_str().is_empty());
 		let dir = std::path::absolute(dir.unwrap_or(Path::new(".")))?;
+		// The program clock's start, from which the audio clock advances the
+		// bus too, so the sources place their sound on it.
+		let start = Instant::now();
+		let (mixer, mixed) = source::Mixer::new(driver, start);
 		let sources = Sources::new(source::Context {
 			bus: bus.clone(),
+			mixed,
 			origin: sources,
 			dir,
 			output: moq_video::render::output(&gpu.device),
@@ -971,7 +1007,6 @@ impl Engine {
 			sources: _,
 		} = publish;
 
-		let start = Instant::now();
 		// Where the program clock starts on the catalog's, so the wall time the
 		// catalog advertises for a frame is when the program drew it.
 		let epoch = Duration::from(clock.capture(start)?);
@@ -1010,6 +1045,14 @@ impl Engine {
 		// already running, which would otherwise keep this engine and its
 		// publication alive beside a retry's.
 		let starting = Starting(Some(engine.clone()));
+		// The audio clock first, so the bus keeps up with the program clock by
+		// the time the program starts the sources, whose sound otherwise waits
+		// for it.
+		let mix = engine.clone();
+		let config = bus.config().clone();
+		let rate = config.sample_rate;
+		let thread = clocked("audio".into(), async move || mix.run_audio(start, config, mixer).await)?;
+		engine.threads.lock().unwrap().push(thread);
 		let program = engine.clone();
 		let encoders = Encoders {
 			main,
@@ -1020,11 +1063,6 @@ impl Engine {
 		let thread = clocked("program".into(), async move || {
 			program.run_program(start, epoch, encoders).await
 		})?;
-		engine.threads.lock().unwrap().push(thread);
-		let mix = engine.clone();
-		let config = bus.config().clone();
-		let rate = config.sample_rate;
-		let thread = clocked("audio".into(), async move || mix.run_audio(start, config, mixer).await)?;
 		engine.threads.lock().unwrap().push(thread);
 		// Each on its own thread, so an encoder that falls behind skips its own
 		// audio rather than holding up the bus or the other.
@@ -1421,6 +1459,8 @@ impl Engine {
 				return;
 			}
 			retired.retain(|ended| !ended.is_finished());
+			// Where this frame lands on the media clock.
+			let at = epoch + tick.saturating_duration_since(start);
 			let drawn = {
 				let mut guard = self.state.lock().unwrap();
 				let state = &mut *guard;
@@ -1506,10 +1546,12 @@ impl Engine {
 					continue;
 				}
 				self.program.on_program(state, shown);
+				self.program.lay_out(state, at);
 				let compositor = &state.compositor;
 				for (scene, camera) in &mut state.cameras {
 					match scene {
-						None => camera.offer(Some(compositor.program()), compositor.canvas()),
+						// An app reading it cannot place the layers itself.
+						None => camera.offer(Some(compositor.layered()), compositor.canvas()),
 						Some(scene) => {
 							let Some((_, canvas)) = published.iter().find(|(name, _)| name == scene) else {
 								continue;
@@ -1539,7 +1581,7 @@ impl Engine {
 			drop(closed);
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
-			let timestamp = moq_net::Timestamp::try_from(epoch + tick.saturating_duration_since(start)).ok();
+			let timestamp = moq_net::Timestamp::try_from(at).ok();
 			// Every scene shares the program's frame rate.
 			let (program, canvas) = drawn.program;
 			if canvas.framerate != framerate {
@@ -1562,7 +1604,7 @@ impl Engine {
 	/// Runs without a relay too, so the meters move and sources never back up,
 	/// until the studio [stops](Self::stop), which ends every mix, so each
 	/// output reads its mix to the end.
-	async fn run_audio(&self, start: Instant, config: moq_audio::bus::Config, mut mixer: moq_audio::bus::Driver) {
+	async fn run_audio(&self, start: Instant, config: moq_audio::bus::Config, mut mixer: source::Mixer) {
 		let rate = u128::from(config.sample_rate);
 		let mut clock = kio::clock::interval_at(start, AUDIO_PERIOD);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
@@ -1847,6 +1889,7 @@ async fn publish(
 			tracing::warn!(%err, "stopped publishing sources independently");
 		}
 	});
+	let layout = Mutex::new(moq_scene::layout::Publisher::new(broadcast.clone(), listed.clone()));
 
 	let health = match live {
 		Some(live) => {
@@ -1872,6 +1915,7 @@ async fn publish(
 			clock: clock.clone(),
 			sources: sources.clone(),
 			published,
+			layout,
 			recording,
 			recorded,
 			local,
@@ -3000,7 +3044,7 @@ fn browser_profile() -> anyhow::Result<PathBuf> {
 /// Run a source on its own thread until its feed is dropped, or fail the
 /// source when its thread cannot start. Returns what closes as the source
 /// ends, having finished its own track.
-fn spawn(driver: Driver) -> tokio::sync::oneshot::Receiver<()> {
+pub(crate) fn spawn(driver: Driver) -> tokio::sync::oneshot::Receiver<()> {
 	// Handed over once the thread exists, since a failed spawn drops what it
 	// was given and the driver must stay here to report why.
 	let (handoff, received) = mpsc::sync_channel::<Driver>(1);
@@ -3025,7 +3069,10 @@ fn spawn(driver: Driver) -> tokio::sync::oneshot::Receiver<()> {
 
 /// Start a thread called `name` that runs `task` with its own clock and IO,
 /// returning why if either cannot start.
-fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::Result<std::thread::JoinHandle<()>> {
+pub(crate) fn clocked(
+	name: String,
+	task: impl AsyncFnOnce() + Send + 'static,
+) -> anyhow::Result<std::thread::JoinHandle<()>> {
 	// The thread starts before its runtime is built and handed over, since a
 	// runtime dropped in the async caller, as a refused spawn would, panics.
 	let (handoff, received) = mpsc::sync_channel::<tokio::runtime::Runtime>(1);
@@ -3157,11 +3204,101 @@ mod tests {
 			.collect()
 	}
 
+	/// A source published independently goes on the program broadcast's
+	/// layer layout, from when its scene went on program: a cut's layout
+	/// takes effect on the frame its scene starts. Once nothing is published,
+	/// the layout ends and the catalog stops listing it, and quitting ends a
+	/// layout published again.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn the_program_carries_a_layer_layout() {
+		use moq_scene::layout::{Layout, TRACK};
+
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new().await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let mut loaded = red_canvas();
+		loaded.collection.published.insert("red".into());
+		let mut two = loaded.collection.scenes[0].clone();
+		two.name = "Two".into();
+		loaded.collection.scenes.push(two);
+		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
+			.await
+			.expect("the studio starts");
+
+		let broadcast = engine.program.publication.broadcast().consume();
+		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default())
+			.await
+			.expect("the program's catalog");
+		let listed = |catalog: &hang::Catalog| catalog.json.tracks.contains_key(TRACK);
+		kio::clock::timeout(TIMEOUT, async {
+			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		})
+		.await
+		.expect("the catalog lists the layout");
+		let read = || moq_json::snapshot::Consumer::<Layout>::new(broadcast.track(TRACK).unwrap(), Default::default());
+		let next = async |layouts: &mut moq_json::snapshot::Consumer<Layout>| {
+			kio::clock::timeout(TIMEOUT, layouts.next())
+				.await
+				.expect("a layout or its end")
+				.unwrap()
+		};
+		let mut layouts = read();
+		let first = next(&mut layouts).await.expect("a layout");
+		let sources: Vec<&str> = first
+			.value
+			.pictures
+			.iter()
+			.map(|picture| picture.item.source.as_str())
+			.collect();
+		assert_eq!(sources, ["red"]);
+
+		{
+			let mut state = engine.state.lock().unwrap();
+			state.compositor.set_preview(Some("Two".into()));
+			state.cut().unwrap();
+		}
+		let cut = next(&mut layouts).await.expect("a layout");
+		let at = Duration::from(cut.at.expect("stamped"));
+		assert_eq!(cut.value.start, at, "on from the frame the cut drew");
+		assert!(cut.value.start > first.value.start);
+
+		let publish = |published: bool| {
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft("Publish `red`");
+			draft.set_published("red", published).unwrap();
+			state.commit(draft, None).unwrap();
+		};
+		publish(false);
+		assert!(next(&mut layouts).await.is_none(), "the layout ends");
+		kio::clock::timeout(TIMEOUT, async {
+			while catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		})
+		.await
+		.expect("the catalog stops listing the layout");
+
+		publish(true);
+		kio::clock::timeout(TIMEOUT, async {
+			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		})
+		.await
+		.expect("the catalog lists the layout again");
+		let mut layouts = read();
+		next(&mut layouts).await.expect("a layout");
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		assert!(next(&mut layouts).await.is_none(), "quitting ends the layout");
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
 	/// Without a relay, a recording encodes the program on its own and saves it
 	/// as a regular MP4 holding its video and audio. The color source publishes
 	/// a still, which has no file of its own. Recording a scene of another
 	/// size goes on in another file, holding its video. A recording holding a
 	/// mix other than the one on program records its audio.
+
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn the_program_records_without_a_relay() {
@@ -4502,10 +4639,8 @@ mod tests {
 				.await
 				.expect("the marker");
 			while let Some(event) = sources.try_next() {
-				if let RouteEvent::Start(announce)
-				| RouteEvent::Update(announce)
-				| RouteEvent::Restart(announce)
-				| RouteEvent::Takeover { announce, .. } = event
+				if let RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) =
+					event
 				{
 					assert!(
 						announce.prefix.as_str() != "show" || announce.route.instance() != &newer,
@@ -4649,7 +4784,6 @@ mod tests {
 		loop {
 			let announce = match routes.next().await.expect("routes") {
 				RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) => announce,
-				RouteEvent::Takeover { announce, .. } => announce,
 				RouteEvent::End(_) => continue,
 			};
 			if announce.prefix.as_str() == "show" && announce.route.instance() == instance {

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=kixel.live Studio
+Comment=Compose scenes on the GPU and go live over MoQ
+Exec=moq-studio-desktop
+Terminal=false
+Icon=live.kixel.studio
+Categories=AudioVideo;Video;
