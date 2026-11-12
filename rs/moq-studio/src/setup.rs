@@ -566,7 +566,7 @@ impl Setup {
 		egui::CentralPanel::default().show(ui, |ui| {
 			let backdrop = fx.on().then(|| Mark::new(ui.painter()));
 			egui::ScrollArea::vertical().show(ui, |ui| {
-				ui.heading("Set up MoQ Studio");
+				ui.heading("Set up kixel.live Studio");
 				ui.label(
 					"Setup checks this machine and proposes a first scene and canvas. Change anything here, \
 					 or later: sources and scenes in their panels, the canvas in the scene file.",

@@ -28,7 +28,7 @@ use super::{Shared, Sink};
 const NAME: &str = "moq-studio";
 
 /// What apps list the program camera as. A scene's camera adds `: <scene>`.
-const DESCRIPTION: &str = "MoQ Studio";
+const DESCRIPTION: &str = "kixel.live Studio";
 
 pub struct Node {
 	/// The node's name, for its capture id.

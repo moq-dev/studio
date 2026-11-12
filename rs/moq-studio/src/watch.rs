@@ -98,7 +98,7 @@ pub fn run(client: moq_tokio::connect::Config, quic: moq_tokio::quic::Config, ur
 	};
 	let options = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
-			.with_title("MoQ Studio")
+			.with_title("kixel.live Studio")
 			.with_app_id("moq-studio")
 			.with_inner_size([1280.0, 720.0]),
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {

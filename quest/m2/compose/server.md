@@ -26,7 +26,7 @@ moq-cli, but moq-scene moved here with the studio, so the command lives here
 too and moq never depends on this repository. Settle its name in this quest
 and document it in `README.md`.
 
-It flattens the layer layout the studio publishes on `dev.moq.studio.layers`
+It flattens the layer layout the studio publishes on `live.kixel.studio.layers`
 (`rs/moq-scene/src/layout.rs`, and the README's "Layer layout").
 
 ## Required

@@ -1,5 +1,5 @@
 {
-  description = "MoQ Studio: a native streaming studio over Media over QUIC";
+  description = "kixel.live Studio: a native streaming studio over Media over QUIC";
 
   # moq's binary cache also holds the toolchain and tools this shell shares
   # with moq's. `fallback` builds whatever is missing instead of failing.

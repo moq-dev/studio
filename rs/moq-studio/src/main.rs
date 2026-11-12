@@ -1,4 +1,4 @@
-//! MoQ Studio: compose scenes from cameras, screens, images, and other
+//! kixel.live Studio: compose scenes from cameras, screens, images, and other
 //! broadcasts on the GPU, and go live over MoQ.
 //!
 //! The scenes, sources, and compositor live in `moq-scene`; this binary is the
@@ -398,7 +398,7 @@ fn run(
 ) -> anyhow::Result<()> {
 	let options = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
-			.with_title("MoQ Studio")
+			.with_title("kixel.live Studio")
 			.with_app_id("moq-studio")
 			.with_inner_size([1440.0, 900.0]),
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
