@@ -107,4 +107,4 @@ jobs:
       # No Nix on Windows: rustup installs the toolchain rust-toolchain.toml
       # names on first use.
       - name: Build
-        run: cargo build --locked -p moq-studio --features capture
+        run: cargo build --locked -p moq-studio --features release
