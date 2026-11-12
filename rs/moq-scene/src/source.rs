@@ -279,8 +279,12 @@ impl Mixer {
 
 	/// Mix the next `frames` of every mix, as the clock moves by that much.
 	pub fn advance(&mut self, frames: usize) {
-		self.driver.advance(frames);
-		self.position.send_replace(self.driver.position());
+		// Under the position's lock, so no source writes in between reading
+		// it and the bus moving past it.
+		self.position.send_modify(|position| {
+			self.driver.advance(frames);
+			*position = self.driver.position();
+		});
 	}
 }
 
@@ -288,7 +292,7 @@ impl Mixer {
 #[derive(Clone)]
 pub struct Mixed {
 	pub(crate) start: Instant,
-	/// The bus position of the next frame mixed.
+	/// The bus position of the next frame mixed, which holds while borrowed.
 	pub(crate) position: watch::Receiver<u64>,
 }
 
@@ -1272,10 +1276,13 @@ impl Driver {
 		let stride = bus.layout.channels() as usize * size_of::<f32>();
 		let rate = f64::from(bus.sample_rate);
 
-		// Frames wait here for their moment, bounded by the target the speaker
-		// holds, while every arrival is read at once: the jitter estimate times
-		// each one as `read` hands it over.
-		let queue = RefCell::new(VecDeque::new());
+		// Frames wait here for their moment while every arrival is read at
+		// once: the jitter estimate times each one as `read` hands it over. The
+		// speaker places none past its target, and a frame that has finished
+		// sounding by the time another arrives is dropped as too late, so
+		// however long a write waits on the bus, this holds no more than the
+		// longest target.
+		let queue = RefCell::new(VecDeque::<(Instant, Instant, moq_audio::Frame)>::new());
 		let queued = Notify::new();
 		let received = Cell::new(false);
 		let receive = async {
@@ -1290,7 +1297,11 @@ impl Driver {
 					.borrow_mut()
 					.place(frame.timestamp.into(), duration, consumer.delay(), now);
 				if let Place::Play(sounds) = place {
-					queue.borrow_mut().push_back((sounds, frame));
+					let mut queue = queue.borrow_mut();
+					while queue.front().is_some_and(|(_, ends, _)| *ends <= now) {
+						queue.pop_front();
+					}
+					queue.push_back((sounds, sounds + duration, frame));
 					queued.notify_one();
 				}
 			}
@@ -1304,9 +1315,9 @@ impl Driver {
 			loop {
 				let now = kio::clock::now();
 				speaker.borrow_mut().commit(now);
-				let write = queue.borrow().front().map(|(sounds, _)| *sounds - WRITE_LEAD);
+				let write = queue.borrow().front().map(|(sounds, ..)| *sounds - WRITE_LEAD);
 				if write.is_some_and(|at| at <= now) {
-					let (sounds, frame) = queue.borrow_mut().pop_front().expect("peeked");
+					let (sounds, _, frame) = queue.borrow_mut().pop_front().expect("peeked");
 					writer.write(sounds, &frame.data).await?;
 					continue;
 				}

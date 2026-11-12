@@ -192,9 +192,8 @@ pub(crate) fn heard(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp
 /// Writes placed frames into a positioned bus channel, each at the bus
 /// position its moment maps to, so it sounds exactly then.
 ///
-/// The bus's [`Mixer`](crate::source::Mixer) advances it sample-exact on the clock from its start,
-/// so a moment `t` is bus position `(t - start) * rate`, and the bus has never
-/// mixed past the position of the clock's reading.
+/// The bus's [`Mixer`](crate::source::Mixer) advances it sample-exact on the
+/// clock from its start, so a moment `t` is bus position `(t - start) * rate`.
 pub(crate) struct Writer {
 	channel: bus::Positioned,
 	/// Bytes per sample frame of the channel's `f32` input.
@@ -221,11 +220,11 @@ impl Writer {
 	/// Write `data` to sound at `sounds`, handed over [`WRITE_LEAD`] ahead.
 	///
 	/// A frame that starts within [`CONTIGUOUS`] of where the last one ended
-	/// continues it. The part already mixed, or overlapping the last frame, is
-	/// cut, so the rest still sounds on schedule. The part past what the bus
-	/// holds waits until the bus has mixed far enough to hold it, however far
-	/// behind the clock it runs. Once the bus's mixer is gone, nothing mixes,
-	/// and what is left is dropped.
+	/// continues it. The part the bus has already mixed, or overlapping the
+	/// last frame, is cut, so the rest still sounds on schedule. The part past
+	/// what the bus holds waits until the bus has mixed far enough to hold it,
+	/// however far behind the clock it runs. Once the bus's mixer is gone,
+	/// nothing mixes, and what is left is dropped.
 	pub(crate) async fn write(&mut self, sounds: Instant, data: &[u8]) -> Result<(), moq_audio::Error> {
 		let mut position = self.position(sounds);
 		if position.abs_diff(self.end) <= self.frames(CONTIGUOUS) {
@@ -234,18 +233,20 @@ impl Writer {
 		let end = position + (data.len() / self.stride) as i128;
 		let reach = self.frames(bus::REACH) as i128;
 		loop {
-			let from = position.max(self.end).max(self.ceiling(kio::clock::now()));
+			// The bus cannot advance while its position is borrowed, so what
+			// is written lands where it has not mixed.
+			let next = self.mixed.position.borrow_and_update();
+			let from = position.max(self.end).max(*next as i128);
 			if from >= end {
 				return Ok(());
 			}
-			// The bus may have mixed further since, which only adds room.
-			let next = *self.mixed.position.borrow_and_update() as i128;
-			let until = end.min(next + reach);
+			let until = end.min(*next as i128 + reach);
 			if from < until {
 				let bytes = |at: i128| (at - position) as usize * self.stride;
 				self.channel.write(from as u64, &data[bytes(from)..bytes(until)])?;
 				self.end = until;
 			}
+			drop(next);
 			if until >= end || self.mixed.position.changed().await.is_err() {
 				return Ok(());
 			}
@@ -260,13 +261,6 @@ impl Writer {
 			None => -(start.duration_since(at).as_nanos() as i128),
 		};
 		(nanos * i128::from(self.rate) + 500_000_000).div_euclid(1_000_000_000)
-	}
-
-	/// The first bus position the bus cannot have mixed by `now`: rounded up,
-	/// since it mixes a frame only once the clock has passed it.
-	fn ceiling(&self, now: Instant) -> i128 {
-		let nanos = now.saturating_duration_since(self.mixed.start).as_nanos();
-		(nanos * u128::from(self.rate)).div_ceil(1_000_000_000) as i128
 	}
 
 	/// The whole frames `duration` spans.
@@ -446,17 +440,22 @@ mod tests {
 					return;
 				}
 				kio::clock::sleep_until(due).await;
-				self.mixer.advance(Self::BLOCK as usize);
-				self.next = next;
-				let std::task::Poll::Ready(Some(read)) = self.reader.poll_read(&kio::Waiter::noop()) else {
-					panic!("an advance publishes a block");
-				};
-				let mut last = self.heard.last().map_or(0.0, |(_, value)| *value);
-				for (index, sample) in read.data.chunks(2).enumerate() {
-					if sample[0] != last {
-						last = sample[0];
-						self.heard.push((read.position + index as u64, last));
-					}
+				self.block();
+			}
+		}
+
+		/// Mix the next block now, whatever the clock says.
+		fn block(&mut self) {
+			self.mixer.advance(Self::BLOCK as usize);
+			self.next += Self::BLOCK;
+			let std::task::Poll::Ready(Some(read)) = self.reader.poll_read(&kio::Waiter::noop()) else {
+				panic!("an advance publishes a block");
+			};
+			let mut last = self.heard.last().map_or(0.0, |(_, value)| *value);
+			for (index, sample) in read.data.chunks(2).enumerate() {
+				if sample[0] != last {
+					last = sample[0];
+					self.heard.push((read.position + index as u64, last));
 				}
 			}
 		}
@@ -527,6 +526,14 @@ mod tests {
 		let (written, ()) = tokio::join!(writer.write(at(5_050), &short), ear.until(at(5_200)));
 		written.unwrap();
 
+		// The bus mixes the block the clock reaches just as a late frame is
+		// handed over: its tail lands after that block.
+		ear.until(at(5_990)).await;
+		kio::clock::sleep_until(at(5_995)).await;
+		ear.block();
+		writer.write(at(5_990), &frame(9.0, 20)).await.unwrap();
+		ear.until(at(6_100)).await;
+
 		assert_eq!(
 			ear.heard,
 			[
@@ -542,6 +549,8 @@ mod tests {
 				(48 * 4_350, 0.0),
 				(48 * 5_050, 8.0),
 				(48 * 5_070, 0.0),
+				(48 * 6_000, 9.0),
+				(48 * 6_010, 0.0),
 			]
 		);
 	}
