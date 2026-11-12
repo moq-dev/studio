@@ -44,6 +44,13 @@ protected branches can deploy from, for team `D7D5SDDB5Z` and bundle ID
 The certificate (`6WWG279G9M`, G2) expires 2027-12-11, and the profile with it;
 see [renewal](/quest/m0/signing-renew.md).
 
-A Mac camera renders since AVFoundation asks for NV12 instead of `2vuy`
-([moq-dev/moq#8251](https://github.com/moq-dev/moq/pull/8251), pinned here);
-the launch check confirms a Mac camera shows its picture in program.
+A Mac camera renders only once AVFoundation asks for NV12 instead of `2vuy`,
+which [moq-dev/moq#8251](https://github.com/moq-dev/moq/pull/8251) did on moq's
+`main` (`2be959ba9`) after the studio's pin; [pin-main](/quest/m0/pin-main.md)
+brings it here. Check by hand on a Mac that a camera shows its picture in
+program, since the launch check only lists devices and hosted runners have no
+camera.
+
+## Required
+
+- [The studio is caught up to moq's main](/quest/m0/pin-main.md) - brings moq-dev/moq#8251's NV12 camera fix

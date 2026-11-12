@@ -25,17 +25,17 @@ layer layout track and are replanned in moq's tree.
 
 ## Waiting
 
-- moq-dev/moq: its three layer quests land, planned in moq's m3 from the
-  `moq-studio --watch` prototype's format, the README's "Layer layout":
+- moq-dev/moq: hang specifies the composition, and `moq play` and
+  `@moq/watch` composite it, which the [epic](/quest/m2/compose/README.md)'s
+  test plays in. moq's m3 plans this today as three layer quests,
   [hang specifies a layer layout track](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/spec.md),
   [moq play composites layers](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/play.md),
   and
   [The watch player composites layers](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/watch.md),
-  which the [epic](/quest/m2/compose/README.md)'s test plays in. Check: all
-  three quests' PRs have merged on moq's `main`, deleting their files, hang
-  exposes a layer layout whose audio layers carry gain, mute, pan, and delay,
-  and both players apply all four. A quest file that moved, or went away
-  without its work landing, does not count.
+  to be replanned there for the composition. Check: moq's `main` has hang's
+  composition, whose sound entries carry gain, mute, pan, and delay, and both
+  players apply all four. A quest file that moved or was replanned, without
+  that work landing, does not count.
 
 ## Required
 

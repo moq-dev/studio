@@ -27,8 +27,8 @@ too and moq never depends on this repository. Settle its name in this quest
 and document it in `README.md`.
 
 It flattens the composition the studio publishes
-([the composition](/quest/m2/compose/layout.md)); until that lands, the
-provisional `live.kixel.studio.layers` track (`rs/moq-scene/src/layout.rs`,
+([the composition](/quest/m2/compose/layout.md)); until that lands, it
+flattens the provisional `live.kixel.studio.layers` track (`rs/moq-scene/src/layout.rs`,
 and the README's "Layer layout").
 
 ## Required
