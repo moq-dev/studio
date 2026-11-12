@@ -54,7 +54,9 @@ macro_rules! views {
 
 // Every view. A quest that adds a page or a state adds its row.
 views! {
-	/// It lists this machine's devices and times its encoders.
+	/// Once its checks are done: this machine's encoder timings, and the
+	/// capture errors of a build without `capture`, which keeps the view off
+	/// the host's devices.
 	setup: Live, Open::Setup;
 	studio: Still, Open::Studio(None);
 	graph: Still, Open::Studio(Some(Tab::Graph));
@@ -150,7 +152,9 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		});
 
 	let &Open::Studio(tab) = open else {
-		harness.run_steps(4);
+		runtime
+			.block_on(kio::clock::timeout(SETTLE, checked(&mut harness)))
+			.expect("setup finishes its checks");
 		return harness.render().unwrap();
 	};
 	harness.step();
@@ -172,12 +176,33 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	image
 }
 
-/// Draw until every source has started and the program has drawn a second of
-/// frames since, enough to redraw every thumbnail the window shows.
-async fn settle(harness: &mut Harness<'_, Window>, engine: &engine::Engine) {
-	let mut since: Option<u64> = None;
+/// Draw until setup has finished its checks and proposes a scene.
+async fn checked(harness: &mut Harness<'_, Window>) {
 	loop {
 		harness.step();
+		let App::Setup(setup) = &harness.state().app else {
+			panic!("setup starts nothing on its own")
+		};
+		if setup.proposing() {
+			break;
+		}
+		kio::clock::sleep(Duration::from_millis(20)).await;
+	}
+	harness.run_steps(2);
+}
+
+/// Wait until every source has started and the program has drawn a second of
+/// frames since, enough to redraw every thumbnail the window shows, then draw.
+///
+/// The window is not drawn while it waits: egui's clock moves a step a frame,
+/// and the effects with it, so a still view takes the same steps however
+/// long the program takes.
+async fn settle(harness: &mut Harness<'_, Window>, engine: &engine::Engine) {
+	// The thumbnails and preview the view shows, which the compositor draws
+	// only once a frame asks for them.
+	harness.step();
+	let mut since: Option<u64> = None;
+	loop {
 		let rendered = engine.stats.rendered.load(Ordering::Relaxed);
 		let (started, framerate) = {
 			let state = engine.state.lock().unwrap();

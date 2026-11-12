@@ -64,7 +64,8 @@ render-sw:
 
 # Render named views of the window to PNG in `target/shots`, or in `$SHOTS_DIR`,
 # with no display: every view, or those named (`just shots studio audio`). It
-# draws on Mesa's software Vulkan driver, so every machine uses the same one.
+# draws on Mesa's software Vulkan driver, so every machine uses the same one,
+# which makes it Linux only.
 [positional-arguments]
 shots *views:
     #!/usr/bin/env bash
