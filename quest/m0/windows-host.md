@@ -11,7 +11,7 @@ and a microphone to capture, so Windows quests run on real hardware.
 Decided 2026-11-10 (maintainer): ✅ the `windows` PC is the Windows host
 (rejected: rebooting nixos2 into its Windows partition, the 2026-11-06 plan).
 Agents (Claude Code, Codex) already run on it natively through T3 Code, so no
-ssh hop or OpenSSH Server is needed, and nixos2 stays a Linux host.
+ssh hop is needed, and nixos2 stays a Linux host.
 
 The host, as found on 2026-11-10:
 
@@ -26,6 +26,9 @@ The host, as found on 2026-11-10:
 - Capture devices: no camera. Audio inputs are virtual only: Steam Streaming
   Microphone and VB-Audio Virtual Cable (`CABLE Output` records what is
   played to `CABLE Input`).
+- SSH (2026-11-12): an OpenSSH server runs (ED25519 host key) but rejects the
+  Linux host's key (publickey denied), so other hosts cannot reach it by ssh;
+  agents run on it directly instead.
 
 No real microphone is needed: VB-Audio's `CABLE Output` is a WASAPI capture
 endpoint like a USB microphone's, so playing a tone into `CABLE Input` drives
