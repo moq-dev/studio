@@ -41,9 +41,9 @@ There is no Nix dev shell, so agents here run cargo and `just` natively;
 The remaining agent step: build with
 `quest gate cargo build -p moq-studio --features capture`, then list devices
 by starting the studio, whose setup and Devices panel enumerate cameras,
-displays, windows, and audio inputs (`rs/moq-studio/src/devices.rs`). Compile
-errors that only Windows shows are
-[the CI build quest's](/quest/m0/windows-build.md) to fix, not this one's.
+displays, windows, and audio inputs (`rs/moq-studio/src/devices.rs`). The
+nightly's Windows job (`.github/workflows/nightly.yml`) compiles the studio in
+CI, so a build error here is this host's, and this quest's to fix.
 
 ## Hosts
 
@@ -63,5 +63,9 @@ errors that only Windows shows are
   reads above 4096.
 - Maintainer: plug a USB camera into `windows`. It has none, and Media
   Foundation's camera source, the path [Studio on Windows](/quest/m0/app-windows.md)
-  runs, needs a device; no virtual camera ships with Windows. Check: the
-  studio's Devices panel lists a camera.
+  runs, needs a device; no virtual camera ships with Windows. An agent could
+  register a Media Foundation virtual camera (`MFCreateVirtualCamera`) only
+  with a media source of its own, which is
+  [the Windows virtual camera](/quest/m0/vcam/windows.md)'s deliverable and
+  not built yet; a USB camera also covers the formats real hardware sends.
+  Check: the studio's Devices panel lists a camera.
