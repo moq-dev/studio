@@ -4,7 +4,7 @@
 
 The `moq` submodule includes hang's layer layout track and `moq play`'s layer
 compositing. The studio publishes hang's format instead of the provisional
-`dev.moq.studio.layers`, and the `moq-studio --watch` prototype is gone, with
+`live.kixel.studio.layers`, and the `moq-studio --watch` prototype is gone, with
 `README.md` pointing viewers at `moq play` instead.
 
 ## Plan

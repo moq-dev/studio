@@ -24,7 +24,7 @@ use crate::publish::Catalog;
 
 /// The program broadcast's track carrying the layout, listed in its catalog's
 /// `json` section.
-pub const TRACK: &str = "dev.moq.studio.layers";
+pub const TRACK: &str = "live.kixel.studio.layers";
 
 /// Each source published independently that the program shows or plays, and
 /// how.
@@ -142,7 +142,7 @@ impl TryFrom<u32> for Version {
 #[serde(deny_unknown_fields)]
 pub struct Picture {
 	/// Where and how it shows: its `source` names the source's entry under the
-	/// catalog's `dev.moq.studio` `sources`, its filters are only opacity, and
+	/// catalog's `live.kixel.studio` `sources`, its filters are only opacity, and
 	/// its keyframes play from the layout's `start`.
 	pub item: Item,
 	/// The subscription priority a viewer fetches its track at, as moq-lite
@@ -168,7 +168,7 @@ impl Picture {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sound {
-	/// The source's entry under the catalog's `dev.moq.studio` `sources`.
+	/// The source's entry under the catalog's `live.kixel.studio` `sources`.
 	pub source: String,
 	/// Its gain, mute, pan, and delay, applied to its track's sound.
 	pub audio: Audio,

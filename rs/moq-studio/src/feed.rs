@@ -266,6 +266,7 @@ async fn list(
 #[cfg(test)]
 mod tests {
 	use moq_audio::bus::{Bus, Live};
+	use moq_scene::source::{Mixed, Mixer};
 	use moq_scene::{History, Source};
 	use url::Url;
 
@@ -309,8 +310,8 @@ mod tests {
 	}
 
 	/// Alice and bob in `room` with their cameras on, and a collection playing
-	/// each camera, whose sources run on `bus`.
-	fn guests(room: &Room, bus: &Bus) -> (Collection, Sources) {
+	/// each camera, whose sources run on `bus`, which `mixed` follows.
+	fn guests(room: &Room, bus: &Bus, mixed: Mixed) -> (Collection, Sources) {
 		let mut collection = Collection::new();
 		for guest in ["alice", "bob"] {
 			let camera = format!("{guest}/camera.hang");
@@ -322,6 +323,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let mut sources = Sources::new(moq_scene::source::Context {
 			bus: bus.clone(),
+			mixed,
 			origin: origin.consume(),
 			dir: ".".into(),
 			output: moq_video::Output::Cpu,
@@ -372,8 +374,9 @@ mod tests {
 		let room = Arc::new(Room::new(&connect, "guests", key, page, EXPIRY).unwrap());
 		let origin = moq_tokio::origin::spawn();
 		let (mut feeds, _program) = feeds(&room, &origin);
-		let (bus, mut driver) = Bus::new(Default::default()).unwrap();
-		let (mut collection, mut sources) = guests(&room, &bus);
+		let (bus, driver) = Bus::new(Default::default()).unwrap();
+		let (mut driver, mixed) = Mixer::new(driver, kio::clock::now());
+		let (mut collection, mut sources) = guests(&room, &bus, mixed);
 		// Copies of alice's camera listed first, one muted and one with its
 		// fader down, which nobody hears on program, so her mix-minus takes
 		// out the copy they do.
@@ -461,8 +464,9 @@ mod tests {
 		let room = relay.room();
 		let origin = room.origin().unwrap().clone();
 		let (mut feeds, _program) = feeds(&room, &origin);
-		let (bus, _driver) = Bus::new(Default::default()).unwrap();
-		let (collection, sources) = guests(&room, &bus);
+		let (bus, driver) = Bus::new(Default::default()).unwrap();
+		let (_driver, mixed) = Mixer::new(driver, kio::clock::now());
+		let (collection, sources) = guests(&room, &bus, mixed);
 		feeds.sync(&collection, &sources);
 
 		let read = moq_tokio::origin::spawn();

@@ -48,4 +48,4 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' rs/moq-studio/Cargo.toml)
           [[ -n $version ]]
-          gh release create "v$version" --target "$GITHUB_SHA" --title "MoQ Studio $version" --generate-notes dist/*
+          gh release create "v$version" --target "$GITHUB_SHA" --title "kixel.live Studio $version" --generate-notes dist/*

@@ -1,4 +1,4 @@
-//! MoQ Studio: compose scenes from cameras, screens, images, and other
+//! kixel.live Studio: compose scenes from cameras, screens, images, and other
 //! broadcasts on the GPU, and go live over MoQ.
 //!
 //! The scenes, sources, and compositor live in `moq-scene`; this binary is the
@@ -372,7 +372,7 @@ fn run(
 ) -> anyhow::Result<()> {
 	let options = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
-			.with_title("MoQ Studio")
+			.with_title("kixel.live Studio")
 			// The Wayland app id and X11 class, which the desktop finds the
 			// app's entry and icon by: the entry's file name, without `.desktop`.
 			.with_app_id("live.kixel.studio")

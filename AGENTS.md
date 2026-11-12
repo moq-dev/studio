@@ -1,4 +1,4 @@
-MoQ Studio is a native, cross-platform streaming studio that composites scenes on the GPU and goes live over MoQ (Media over QUIC).
+kixel.live Studio is a native, cross-platform streaming studio that composites scenes on the GPU and goes live over MoQ (Media over QUIC).
 `rs/moq-scene` is the UI-free scene graph and wgpu compositor; `rs/moq-studio` is the egui app. Both build on the moq crates in the `moq` submodule.
 
 `moq/` is moq-dev/moq at a pinned commit. Its own `AGENTS.md` files apply to the moq crates you read there, but never edit them here; see Upstream below.

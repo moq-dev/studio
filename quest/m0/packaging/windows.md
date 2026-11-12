@@ -15,8 +15,7 @@ from `packaging/live.kixel.studio.svg`, the only drawn copy; never check the
 `.ico` in.
 
 Decided 2026-11-06 (maintainer, /quest-unblock): Windows ships unsigned
-until a release needs SmartScreen reputation; see
-[signing](/quest/m0/signing.md).
+until a release needs SmartScreen reputation.
 
 ## Required
 

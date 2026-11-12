@@ -27,7 +27,7 @@ struct Studio {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
 	/// Advances the bus, which meters each source's strip.
-	mixer: moq_audio::bus::Driver,
+	mixer: moq_scene::source::Mixer,
 	helper: Helper,
 	_origin: moq_net::origin::Producer,
 	_dir: tempfile::TempDir,
@@ -79,10 +79,12 @@ impl Studio {
 		let dir = tempfile::tempdir().unwrap();
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default()).unwrap();
+		let (bus, driver) = moq_audio::bus::Bus::new(Default::default()).unwrap();
+		let (mixer, mixed) = moq_scene::source::Mixer::new(driver, kio::clock::now());
 		let helper = Helper::new(program, profile, &adapter, &device, &queue);
 		let mut sources = Sources::new(Context {
 			bus,
+			mixed,
 			origin: origin.consume(),
 			dir: dir.path().to_path_buf(),
 			output: moq_video::render::output(&device),
