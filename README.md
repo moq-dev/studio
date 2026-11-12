@@ -985,7 +985,7 @@ format is the studio's own until hang specifies a composition:
     "alice": {
       "broadcast": "../guests/alice/camera.hang",
       "instance": "9e4b7c21d0a3f6e85b1c2d4f7a9e0b36",
-      "offset": -1731412345678901,
+      "offset": -1500000,
       "sound": { "gain": 0.8, "pan": -0.5 }
     }
   },

@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -113,6 +113,8 @@ struct Played {
 	newest: Option<moq_net::Timestamp>,
 	/// Whether it shows a still, which has no moment, rather than video.
 	still: bool,
+	/// Where this stream last landed on a timeline, as [`Feed::lands`] found.
+	landed: Option<i64>,
 }
 
 type Playback = Arc<Mutex<Played>>;
@@ -372,7 +374,8 @@ impl Sources {
 				// changing never opens their broadcast again.
 				Some(source) if source.plays_alike(&feed.source) => {
 					if let Source::Layer { offset, .. } = source {
-						feed.offset.store(*offset, Ordering::Relaxed);
+						feed.offset
+							.send_if_modified(|moved| std::mem::replace(moved, *offset) != *offset);
 					}
 					feed.source = source.clone();
 					true
@@ -540,9 +543,9 @@ pub struct Feed {
 	silent: Arc<AtomicBool>,
 	/// A broadcast source's playout clock, or the one a layer plays on.
 	clock: Option<timeline::Consumer>,
-	/// A layer's offset onto its clock, in microseconds, which its driver
-	/// reads as it plays.
-	offset: Arc<AtomicI64>,
+	/// A layer's offset onto its clock, in microseconds, which wakes its
+	/// driver as it changes.
+	offset: watch::Sender<i64>,
 	/// Whether any mix plays a layer's sound, which its driver fetches only
 	/// while one does.
 	sound: Option<watch::Sender<bool>>,
@@ -755,8 +758,10 @@ impl Feed {
 	/// Where a broadcast source's timestamps land on a timeline that reads
 	/// `at` at `now`: where what the stream online now shows lands there. A
 	/// still has no moment, so without sound to anchor it, it lands at 0.
-	/// `None` while it shows nothing of that stream, such as offline, failed,
-	/// or before its clock anchors, and for any other source.
+	/// While a new video track of the same stream has shown nothing yet, its
+	/// last picture stays, so where that stream last landed. `None` while it
+	/// shows nothing of a stream, such as offline, failed, or before its clock
+	/// anchors, and for any other source.
 	pub fn lands(&self, at: Duration, now: Instant) -> Option<Landing> {
 		if !matches!(self.source, Source::Broadcast { .. }) || self.status() != Status::Live {
 			return None;
@@ -770,7 +775,7 @@ impl Feed {
 			(Some(newest), _) => newest,
 			(None, Some(head)) => moq_net::Timestamp::try_from(head).ok()?,
 			(None, None) if played.still => return Some(Landing { instance, offset: 0 }),
-			(None, None) => return None,
+			(None, None) => return played.landed.map(|offset| Landing { instance, offset }),
 		};
 		drop(played);
 		let due = clock.due(reference)?;
@@ -781,6 +786,15 @@ impl Feed {
 			None => micros(at)?.checked_sub(micros(now.duration_since(due))?)?,
 		};
 		let offset = lands.checked_sub(micros(Duration::from(reference))?)?;
+		let mut played = self.played.lock().unwrap();
+		// Unless another stream replaced it meanwhile.
+		if played
+			.broadcast
+			.as_ref()
+			.is_some_and(|broadcast| broadcast.info().instance == instance)
+		{
+			played.landed = Some(offset);
+		}
 		Some(Landing { instance, offset })
 	}
 
@@ -833,7 +847,7 @@ pub struct Driver {
 	/// The clock of the broadcast source a layer plays on.
 	follows: Option<timeline::Consumer>,
 	/// A layer's offset onto that clock, in microseconds.
-	offset: Arc<AtomicI64>,
+	offset: watch::Receiver<i64>,
 	/// Whether any mix plays a layer's sound.
 	sound: Option<watch::Receiver<bool>>,
 }
@@ -1371,11 +1385,12 @@ impl Driver {
 			max: Some(MAX_DELAY),
 		};
 		let mut consumer = moq_video::decode::Consumer::new(broadcast, &config, name, options).await?;
+		let mut offsets = self.offset.clone();
 		let mut queue = VecDeque::<moq_video::Frame>::new();
 		let mut ended = false;
 		loop {
 			let now = kio::clock::now();
-			let offset = self.offset.load(Ordering::Relaxed);
+			let offset = *offsets.borrow_and_update();
 			// A picture moved off the clock's timeline never plays.
 			while queue
 				.front()
@@ -1410,6 +1425,8 @@ impl Driver {
 					None => ended = true,
 				},
 				() = kio::clock::sleep_until(wake.unwrap_or(now)), if wake.is_some() => {}
+				// A new offset moves every moment, so the wake is found again.
+				Ok(()) = offsets.changed() => {}
 			}
 		}
 	}
@@ -1440,13 +1457,14 @@ impl Driver {
 		options.output.layout = Some(bus.layout);
 		let mut consumer = moq_audio::decode::Consumer::new(broadcast, &config, name, options).await?;
 		let mut writer = self.writer(strip)?;
+		let mut offsets = self.offset.clone();
 
 		// Each frame waits here until its lead before it sounds.
 		let mut queue = VecDeque::<moq_audio::Frame>::new();
 		let mut ended = false;
 		loop {
 			let now = kio::clock::now();
-			let offset = self.offset.load(Ordering::Relaxed);
+			let offset = *offsets.borrow_and_update();
 			let mut write = None;
 			while let Some(frame) = queue.front() {
 				// A sound moved off the clock's timeline never plays.
@@ -1477,7 +1495,7 @@ impl Driver {
 						// One due past the longest target would hold whatever a
 						// peer stamps.
 						let now = kio::clock::now();
-						let at = shift(frame.timestamp, self.offset.load(Ordering::Relaxed));
+						let at = shift(frame.timestamp, *offsets.borrow());
 						let placed = at.and_then(|at| schedule.due(at)).is_some_and(|sounds| {
 							sounds >= now && sounds <= now + MAX_DELAY + WRITE_LEAD
 						});
@@ -1490,6 +1508,7 @@ impl Driver {
 					None => ended = true,
 				},
 				() = kio::clock::sleep_until(write.unwrap_or(now)), if write.is_some() => {}
+				Ok(()) = offsets.changed() => {}
 			}
 		}
 	}
@@ -2466,10 +2485,10 @@ fn open(
 		_ => (None, None),
 	};
 	let silent = Arc::<AtomicBool>::default();
-	let offset = Arc::new(AtomicI64::new(match source {
+	let (offset, offsets) = watch::channel(match source {
 		Source::Layer { offset, .. } => *offset,
 		_ => 0,
-	}));
+	});
 	// Silent until a sync routes it into a mix.
 	let sound = matches!(source, Source::Layer { .. }).then(|| watch::channel(false));
 	let runs = Runs::new(Mutex::new(Latest {
@@ -2494,7 +2513,7 @@ fn open(
 			Some(schedule) => Some(schedule.clone()),
 			None => clock.as_ref().map(timeline::Producer::consume),
 		},
-		offset: offset.clone(),
+		offset,
 		sound: sound.as_ref().map(|(sender, _)| sender.clone()),
 	};
 	let driver = Driver {
@@ -2514,7 +2533,7 @@ fn open(
 		silent,
 		clock,
 		follows,
-		offset,
+		offset: offsets,
 		sound: sound.map(|(_, receiver)| receiver),
 	};
 	(feed, driver)
@@ -3516,7 +3535,8 @@ mod tests {
 	}
 
 	/// A video track replaced by one stamped earlier starts its own delay over,
-	/// rather than showing every picture on arrival against the old track's.
+	/// rather than showing every picture on arrival against the old track's,
+	/// and lands where the old one did until it shows a picture.
 	#[tokio::test(start_paused = true)]
 	async fn a_replacement_track_keeps_its_delay() {
 		local(async {
@@ -3533,6 +3553,7 @@ mod tests {
 			let due = until(|| clock.due(first)).await;
 			until_time(due).await;
 			assert_eq!(shown(feed).await, Duration::from(first));
+			let landed = feed.lands(Duration::from_secs(5), kio::clock::now()).unwrap();
 
 			// Its stamps sit half a second before the first track's clock reading.
 			let timebase = live.catalog.timebase();
@@ -3560,6 +3581,9 @@ mod tests {
 			assert!(moved > due, "the replacement re-anchored behind the first track");
 			until_time(arrived + VIDEO_DELAY - Duration::from_millis(1)).await;
 			assert!(feed.next_picture().is_none(), "shown before its delay");
+			// The first track's last picture stays meanwhile, so it lands
+			// where that did.
+			assert_eq!(feed.lands(Duration::ZERO, kio::clock::now()), Some(landed));
 			until_time(arrived + VIDEO_DELAY).await;
 			assert!(
 				shown(feed).await < Duration::from(first),
