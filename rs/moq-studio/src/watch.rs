@@ -409,7 +409,6 @@ fn collection(composition: Option<&Composition>, size: Canvas, paths: &Paths) ->
 					path: path.to_string(),
 					instance: child.instance.clone(),
 					offset: child.offset,
-					sound: child.sound.is_some(),
 				},
 			);
 			if let Some(audio) = &child.sound {
@@ -686,7 +685,6 @@ mod tests {
 				path: "show/source/program".into(),
 				instance: None,
 				offset: 0,
-				sound: false,
 			}
 		);
 		assert_eq!(
@@ -696,7 +694,6 @@ mod tests {
 				path: "guests/alice".into(),
 				instance: Some("abc".parse().unwrap()),
 				offset: -1_500,
-				sound: true,
 			}
 		);
 		let heard = driven.heard(AudioScene::DEFAULT);
@@ -1074,7 +1071,6 @@ mod tests {
 				path: "guests/alice".into(),
 				instance: alice.instance.clone(),
 				offset: alice.offset,
-				sound: alice.sound.is_some(),
 			}
 		);
 		kio::clock::timeout(TIMEOUT, async {

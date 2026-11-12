@@ -3108,7 +3108,6 @@ mod tests {
 				path: "room/logo".into(),
 				instance: None,
 				offset,
-				sound: false,
 			};
 			collection.sources.insert("logo".into(), layer(0));
 			collection.scenes[1].items = vec![Item::new("logo", Rect::fill(&collection.canvas))];

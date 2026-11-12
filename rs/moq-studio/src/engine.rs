@@ -819,7 +819,7 @@ impl Program {
 
 	/// Publish the composition of what `state` drew on program at `at` on
 	/// the media clock, at `now`: the program, and each source published
-	/// independently, a broadcast source once it has shown anything, where
+	/// independently, a broadcast source while it shows its stream, where
 	/// what it showed lands on the program's clock.
 	fn compose(&self, state: &State, at: Duration, now: Instant) {
 		// Past what a timestamp holds, the frame goes unstamped too.
@@ -832,8 +832,8 @@ impl Program {
 		for name in &collection.published {
 			let child = match collection.sources.get(name) {
 				Some(Source::Broadcast { path }) => {
-					// Before it ever shows, it shows nothing here either; offline
-					// after, both hold its last picture where it landed.
+					// While it shows nothing of a stream, such as offline, the
+					// studio shows nothing of it, so viewers drop it too.
 					let Some(feed) = state.sources.get(name) else { continue };
 					let Some(landing) = feed.lands(at, now) else { continue };
 					let Some(broadcast) = composed.child(name, Some(path)) else {

@@ -300,9 +300,12 @@ broadcast through the first relay while that relay has a route to it, and
 through the failover otherwise, so a publisher restarted behind only the
 failover replaces the first relay's copy once that copy ends. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
-comes back on its own when the publisher restarts. A broadcast without video
-but with an image, such as a studio's image or color published
-independently, shows that image.
+comes back on its own when the publisher restarts. While it is offline, or
+once a new stream replaces the one it played, it shows nothing until the new
+stream's first picture, rather than freezing on the last one. A broadcast
+without video but with an image, such as a studio's image or color published
+independently, shows that image, and never reads as stalled, since it sends
+a picture only when it changes.
 
 A broadcast source, a guest's included, plays on its publisher's timestamps,
 so its sound and picture stay in sync through network jitter and stalls. Its
@@ -1015,9 +1018,8 @@ format is the studio's own until hang specifies a composition:
   is stamped on that clock, at 0. A guest keeps a timeline of its own, so its
   offset is where the studio played it: a new composition follows it once it
   moves more than 10 ms, and a guest who joins again, as a new instance, gets
-  a new one. A guest the studio has not played yet, such as one offline from
-  the start, is left out with its pictures. One that goes offline after keeps
-  its entry, as the studio and every viewer hold its last picture. A still,
+  a new one. A guest the studio shows nothing of, such as one offline, is
+  left out with its pictures until it shows again. A still,
   such as another studio's published image, has no moment, so without sound
   its offset is 0.
 - A source's `sound`, when the audio scene on program holds it, is the
@@ -1053,7 +1055,9 @@ goes once `moq play` plays compositions.
   moved by its `offset`: a picture shows when the program's picture stamped
   alike does, and a sound plays with the program's sound stamped alike, at
   its `gain`, `muted`, `pan`, and `delay`. A frame too late for its moment is
-  dropped. A new offset plays on without fetching the broadcast again.
+  dropped. A new offset plays on without fetching the broadcast again. A
+  source's sound is fetched only while the composition gives it a `sound`,
+  and gaining or losing one does not fetch its picture again.
 - A source whose `instance` another stream replaced shows nothing until a
   composition names the new one, and a composition naming another program
   stream waits for it, so neither plays on a timeline its offset is not for.

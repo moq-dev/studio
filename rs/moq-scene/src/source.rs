@@ -457,6 +457,10 @@ impl Sources {
 						mix.unroute(strip);
 					}
 				}
+				if let Some(sound) = &self.feeds[name].sound {
+					let heard = self.mixes.values().any(|mix| mix.routes(strip));
+					sound.send_if_modified(|playing| std::mem::replace(playing, heard) != heard);
+				}
 			}
 		}
 		drivers
@@ -539,8 +543,9 @@ pub struct Feed {
 	/// A layer's offset onto its clock, in microseconds, which its driver
 	/// reads as it plays.
 	offset: Arc<AtomicI64>,
-	/// Where a broadcast source last landed on a timeline.
-	landed: Mutex<Option<Landing>>,
+	/// Whether any mix plays a layer's sound, which its driver fetches only
+	/// while one does.
+	sound: Option<watch::Sender<bool>>,
 }
 
 /// Where a broadcast source's timestamps land on another timeline, as
@@ -707,7 +712,8 @@ impl Feed {
 	/// without delivering, once that is at least [`STALL`] at `now`.
 	///
 	/// Displays and windows are never stalled: a capture of a still screen
-	/// delivers nothing until it changes. Neither are sources that have not
+	/// delivers nothing until it changes. Nor is a broadcast showing a still,
+	/// which sends a picture only when it changes. Neither are sources that have not
 	/// delivered yet, such as an audio-only broadcast: a broadcast stalls by its
 	/// picture alone.
 	pub fn stalled(&self, now: Instant) -> Option<Stall> {
@@ -716,7 +722,7 @@ impl Feed {
 			Source::Microphone { .. } | Source::SystemAudio => Stall::Sound,
 			_ => return None,
 		};
-		if self.status() != Status::Live {
+		if self.status() != Status::Live || self.played.lock().unwrap().still {
 			return None;
 		}
 		let delivered = (*self.delivered.lock().unwrap())?;
@@ -747,25 +753,12 @@ impl Feed {
 	}
 
 	/// Where a broadcast source's timestamps land on a timeline that reads
-	/// `at` at `now`: where what it shows lands there. While that cannot be
-	/// found, such as offline, failed, or before a new stream shows anything,
-	/// where it last landed, since its last picture stays until another
-	/// replaces it. `None` before it ever lands, and for any other source.
+	/// `at` at `now`: where what the stream online now shows lands there. A
+	/// still has no moment, so without sound to anchor it, it lands at 0.
+	/// `None` while it shows nothing of that stream, such as offline, failed,
+	/// or before its clock anchors, and for any other source.
 	pub fn lands(&self, at: Duration, now: Instant) -> Option<Landing> {
-		if !matches!(self.source, Source::Broadcast { .. }) {
-			return None;
-		}
-		let mut landed = self.landed.lock().unwrap();
-		if let Some(landing) = self.landing(at, now) {
-			*landed = Some(landing);
-		}
-		landed.clone()
-	}
-
-	/// Where the stream online now lands, once its clock is anchored. A still
-	/// has no moment, so without sound to anchor it, it lands at 0.
-	fn landing(&self, at: Duration, now: Instant) -> Option<Landing> {
-		if self.status() != Status::Live {
+		if !matches!(self.source, Source::Broadcast { .. }) || self.status() != Status::Live {
 			return None;
 		}
 		let clock = self.clock.as_ref()?;
@@ -841,6 +834,8 @@ pub struct Driver {
 	follows: Option<timeline::Consumer>,
 	/// A layer's offset onto that clock, in microseconds.
 	offset: Arc<AtomicI64>,
+	/// Whether any mix plays a layer's sound.
+	sound: Option<watch::Receiver<bool>>,
 }
 
 /// Where a source's own track goes, its claim on the local catalog's listing
@@ -1219,7 +1214,6 @@ impl Driver {
 				.zip(serving)
 				.is_some_and(|(named, serving)| !serving.is_minted() && named != serving);
 			if other {
-				self.picture.lock().unwrap().clear();
 				return Box::pin(std::future::pending());
 			}
 			Box::pin(self.play_layer(broadcast, path, schedule))
@@ -1228,7 +1222,9 @@ impl Driver {
 	}
 
 	/// Play each instance of the broadcast at `path` with `start` as it comes
-	/// online, until the next replaces it or it goes offline.
+	/// online, until the next replaces it or it goes offline. What one showed
+	/// clears as it ends, so nothing holds a frozen picture of a stream
+	/// that is gone, which a viewer joining later could not see.
 	async fn follow<'a>(
 		&'a self,
 		path: &str,
@@ -1242,11 +1238,18 @@ impl Driver {
 			tokio::select! {
 				event = instances.available() => match event {
 					Ok(Some(broadcast)) => {
+						// The last stream's picture is not this one's, and it
+						// stops before the clear, so it shows nothing after.
+						if playing.take().is_some() {
+							self.picture.lock().unwrap().clear();
+						}
 						set(&self.status, Status::Live);
 						playing = Some(start(broadcast));
 					}
 					Ok(None) => {
-						playing = None;
+						if playing.take().is_some() {
+							self.picture.lock().unwrap().clear();
+						}
 						*self.played.lock().unwrap() = Played::default();
 						set(&self.status, Status::Offline);
 					}
@@ -1254,6 +1257,8 @@ impl Driver {
 				},
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
+					*self.played.lock().unwrap() = Played::default();
+					self.picture.lock().unwrap().clear();
 					set(&self.status, match result {
 						Ok(()) => Status::Offline,
 						Err(err) => Status::Failed(err.to_string()),
@@ -1275,8 +1280,10 @@ impl Driver {
 	) -> Result<(), Error> {
 		let format = moq_mux::catalog::CatalogFormat::detect(path).unwrap_or_default();
 		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
+		let mut sound = self.sound.clone().expect("a layer has a sound flag");
 		let mut video: Option<String> = None;
 		let mut audio: Option<String> = None;
+		let mut audios = None;
 		let mut video_playing: Playing<'_> = Box::pin(std::future::pending());
 		let mut audio_playing: Playing<'_> = Box::pin(std::future::pending());
 		loop {
@@ -1286,11 +1293,6 @@ impl Driver {
 						return Ok(());
 					};
 					let next_video = pick(catalog.video.enabled())?;
-					// Sound it does not play, it never fetches.
-					let next_audio = match self.strip {
-						Some(_) => pick(catalog.audio.enabled())?,
-						None => None,
-					};
 					let still = still(&catalog.binary);
 					let track = match &next_video {
 						Some((id, config)) => Some(Reference::track(config, id).to_string()),
@@ -1298,6 +1300,7 @@ impl Driver {
 					};
 					if track != video {
 						video = track;
+						self.played.lock().unwrap().still = next_video.is_none() && still.is_some();
 						video_playing = match (next_video, still) {
 							(Some((id, config)), _) => Box::pin(self.follow_video(&broadcast, id, config, schedule)),
 							(None, Some(still)) => Box::pin(self.follow_still(&broadcast, still)),
@@ -1307,15 +1310,9 @@ impl Driver {
 							}
 						};
 					}
-					let track = next_audio.as_ref().map(|(id, config)| Reference::track(config, id).to_string());
-					if track != audio {
-						audio = track;
-						audio_playing = match next_audio {
-							Some((id, config)) => Box::pin(self.follow_audio(&broadcast, id, config, schedule)),
-							None => Box::pin(std::future::pending()),
-						};
-					}
+					audios = Some(catalog.audio);
 				}
+				Ok(()) = sound.changed() => {}
 				result = &mut video_playing => {
 					result?;
 					video_playing = Box::pin(std::future::pending());
@@ -1324,6 +1321,21 @@ impl Driver {
 					result?;
 					audio_playing = Box::pin(std::future::pending());
 				}
+			}
+			// Sound no mix plays, it never fetches.
+			let next_audio = match (*sound.borrow_and_update(), &audios) {
+				(true, Some(audios)) => pick(audios.enabled())?,
+				_ => None,
+			};
+			let track = next_audio
+				.as_ref()
+				.map(|(id, config)| Reference::track(config, id).to_string());
+			if track != audio {
+				audio = track;
+				audio_playing = match next_audio {
+					Some((id, config)) => Box::pin(self.follow_audio(&broadcast, id, config, schedule)),
+					None => Box::pin(std::future::pending()),
+				};
 			}
 		}
 	}
@@ -1539,7 +1551,10 @@ impl Driver {
 						video_playing = match (next_video, still) {
 							(Some((id, config)), _) => Box::pin(self.play_video(&broadcast, id, config, &clock, max)),
 							(None, Some(still)) => Box::pin(self.follow_still(&broadcast, still)),
-							(None, None) => Box::pin(std::future::pending()),
+							(None, None) => {
+								self.picture.lock().unwrap().clear();
+								Box::pin(std::future::pending())
+							}
 						};
 					}
 					let track = next_audio.as_ref().map(|(id, config)| Reference::track(config, id).to_string());
@@ -2455,6 +2470,8 @@ fn open(
 		Source::Layer { offset, .. } => *offset,
 		_ => 0,
 	}));
+	// Silent until a sync routes it into a mix.
+	let sound = matches!(source, Source::Layer { .. }).then(|| watch::channel(false));
 	let runs = Runs::new(Mutex::new(Latest {
 		run: Run::default(),
 		stopped: held,
@@ -2478,7 +2495,7 @@ fn open(
 			None => clock.as_ref().map(timeline::Producer::consume),
 		},
 		offset: offset.clone(),
-		landed: Mutex::new(None),
+		sound: sound.as_ref().map(|(sender, _)| sender.clone()),
 	};
 	let driver = Driver {
 		name: name.to_string(),
@@ -2498,6 +2515,7 @@ fn open(
 		clock,
 		follows,
 		offset,
+		sound: sound.map(|(_, receiver)| receiver),
 	};
 	(feed, driver)
 }
@@ -2549,20 +2567,15 @@ impl Source {
 		match (self, other) {
 			(
 				Source::Layer {
-					clock,
-					path,
-					instance,
-					sound,
-					..
+					clock, path, instance, ..
 				},
 				Source::Layer {
 					clock: other_clock,
 					path: other_path,
 					instance: other_instance,
-					sound: other_sound,
 					..
 				},
-			) => clock == other_clock && path == other_path && instance == other_instance && sound == other_sound,
+			) => clock == other_clock && path == other_path && instance == other_instance,
 			_ => self == other,
 		}
 	}
@@ -3177,7 +3190,7 @@ mod tests {
 		.await;
 	}
 
-	/// A live broadcast at `room/guest`, writing nothing until the test does.
+	/// A live broadcast, writing nothing until the test does.
 	struct Live {
 		_publication: moq_net::origin::Route,
 		broadcast: moq_net::broadcast::Producer,
@@ -3202,9 +3215,12 @@ mod tests {
 
 	/// A broadcast with a video track, and an audio one with `audio`.
 	async fn live(origin: &moq_net::origin::Producer, audio: bool) -> Live {
-		let publication = origin
-			.route("room/guest", moq_net::origin::RouteOptions::hidden())
-			.unwrap();
+		live_at(origin, "room/guest", audio).await
+	}
+
+	/// A live broadcast at `path`, as [`live`] publishes one.
+	async fn live_at(origin: &moq_net::origin::Producer, path: &str, audio: bool) -> Live {
+		let publication = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
 		let mut broadcast = publication.broadcast().clone();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let (video, encoder) = rendition(&broadcast, catalog.timebase()).await;
@@ -3298,7 +3314,6 @@ mod tests {
 				path: "room/cam".into(),
 				instance: None,
 				offset,
-				sound: false,
 			};
 			collection.sources.insert("cam".into(), layer(250_000));
 			collection.validate().unwrap();
@@ -3373,7 +3388,6 @@ mod tests {
 					path: "room/logo".into(),
 					instance: None,
 					offset: 0,
-					sound: false,
 				},
 			);
 			let mut sources = Sources::new(context);
@@ -3391,7 +3405,8 @@ mod tests {
 	}
 
 	/// A broadcast without video, such as another studio's published image,
-	/// shows its still, which has no moment, so it lands on any timeline at 0.
+	/// shows its still, which has no moment, so it never stalls and lands on
+	/// any timeline at 0.
 	#[tokio::test]
 	async fn a_broadcast_shows_a_still() {
 		local(async {
@@ -3408,6 +3423,8 @@ mod tests {
 			})
 			.await;
 			assert_eq!(pixels, [255, 0, 0, 255]);
+			// It sends nothing until it changes, which is no stall.
+			assert_eq!(feed.stalled(kio::clock::now() + STALL * 3), None);
 			let landing = feed.lands(Duration::from_secs(5), kio::clock::now()).unwrap();
 			assert_eq!(landing.offset, 0);
 			assert!(landing.instance.is_some());
@@ -3415,32 +3432,39 @@ mod tests {
 		.await;
 	}
 
-	/// A layer whose sound plays nowhere has no strip, so it never fetches
-	/// its broadcast's sound.
+	/// A layer fetches its broadcast's sound only while a mix plays it, and
+	/// that starting or stopping never opens the layer again.
 	#[tokio::test]
 	async fn a_layer_fetches_only_the_sound_it_plays() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
-			let (context, _origin) = context(dir.path());
+			let (context, origin) = context(dir.path());
+			let _live = live(&origin, false).await;
+			let cam = live_at(&origin, "room/cam", true).await;
+			let demand = cam.audio.as_ref().unwrap().demand();
 			let mut collection = collection();
-			let layer = |sound| Source::Layer {
-				clock: "guest".into(),
-				path: "room/cam".into(),
-				instance: None,
-				offset: 0,
-				sound,
-			};
-			collection.sources.insert("cam".into(), layer(false));
+			collection.sources.insert(
+				"cam".into(),
+				Source::Layer {
+					clock: "guest".into(),
+					path: "room/cam".into(),
+					instance: None,
+					offset: 0,
+				},
+			);
+			collection.audio_scenes[0].sounds.insert("cam".into());
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
-			assert!(sources.get("cam").unwrap().strip().is_none());
+			until(|| demand.wanted().is_some().then_some(())).await;
 
-			collection.sources.insert("cam".into(), layer(true));
-			let drivers = sources.sync(&collection);
-			assert_eq!(drivers.len(), 1, "opened again to play its sound");
-			start(&sources, drivers).await;
-			assert!(sources.get("cam").unwrap().strip().is_some());
+			collection.audio_scenes[0].sounds.remove("cam");
+			assert!(sources.sync(&collection).is_empty(), "opened again");
+			until(|| demand.wanted().is_none().then_some(())).await;
+
+			collection.audio_scenes[0].sounds.insert("cam".into());
+			assert!(sources.sync(&collection).is_empty(), "opened again");
+			until(|| demand.wanted().is_some().then_some(())).await;
 		})
 		.await;
 	}
@@ -3458,7 +3482,6 @@ mod tests {
 				path: path.into(),
 				instance: instance.map(|instance| instance.parse().unwrap()),
 				offset: 0,
-				sound: false,
 			};
 			collection.sources.insert("cam".into(), layer("room/cam", None));
 			let mut sources = Sources::new(context);
@@ -3548,7 +3571,8 @@ mod tests {
 
 	/// A broadcast source's offset onto a timeline puts the picture it shows
 	/// where that timeline reads when it shows it, signed either way, and
-	/// there is none before its clock anchors.
+	/// there is none before its clock anchors, or once it goes offline and
+	/// clears its picture.
 	#[tokio::test(start_paused = true)]
 	async fn a_broadcast_lands_on_a_timeline() {
 		local(async {
@@ -3588,21 +3612,17 @@ mod tests {
 			assert_eq!(
 				feed.lands(Duration::from_secs(5), later),
 				Some(Landing {
-					instance: instance.clone(),
-					offset: 3_990_000
-				})
-			);
-
-			// Offline, its last picture stays, so it lands where it last did.
-			drop(live);
-			until(|| (feed.status() == Status::Offline).then_some(())).await;
-			assert_eq!(
-				feed.lands(Duration::from_secs(6), later + Duration::from_secs(1)),
-				Some(Landing {
 					instance,
 					offset: 3_990_000
 				})
 			);
+
+			// Offline, it clears its picture, so it lands nowhere.
+			drop(live);
+			until(|| (feed.status() == Status::Offline).then_some(())).await;
+			let taken = feed.take().unwrap();
+			assert!(taken.cleared, "held its last picture");
+			assert_eq!(feed.lands(Duration::from_secs(6), later + Duration::from_secs(1)), None);
 		})
 		.await;
 	}

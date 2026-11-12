@@ -1880,8 +1880,6 @@ pub enum Source {
 		/// Microseconds added to its timestamps to put them on `clock`'s
 		/// timeline. A change plays on without opening the broadcast again.
 		offset: i64,
-		/// Whether its sound plays; without it, its sound is never fetched.
-		sound: bool,
 	},
 }
 
@@ -1931,18 +1929,16 @@ impl Source {
 
 	/// Whether the source feeds the program audio.
 	pub fn has_audio(&self) -> bool {
-		match self {
-			Self::Layer { sound, .. } => *sound,
-			_ => matches!(
-				self,
-				Self::Microphone { .. }
-					| Self::SystemAudio
-					| Self::Media { .. }
-					| Self::Broadcast { .. }
-					| Self::Browser { .. }
-					| Self::Replay
-			),
-		}
+		matches!(
+			self,
+			Self::Microphone { .. }
+				| Self::SystemAudio
+				| Self::Media { .. }
+				| Self::Broadcast { .. }
+				| Self::Browser { .. }
+				| Self::Replay
+				| Self::Layer { .. }
+		)
 	}
 
 	fn validate(&self, name: &str) -> Result<(), Error> {
