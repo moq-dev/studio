@@ -187,6 +187,40 @@ pub fn heard(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: 
 			.is_some_and(|head| Duration::from(timestamp) <= head + CONTIGUOUS)
 }
 
+/// What to do at `now` with a sound stamped `timestamp` that plays on
+/// `schedule`, another track's clock.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Follow {
+	/// Write it to sound at this moment.
+	Write(Instant),
+	/// Look again at this moment.
+	Wait(Instant),
+	/// Too late for its moment, or the clock has none.
+	Drop,
+}
+
+/// Decide what to do with a followed sound from the clock as it is now, not
+/// as it was when the sound arrived, so a re-anchor moves it. The clock's own
+/// sound stamped alike must have been written first: when that stalls, this
+/// one waits with the pictures, until its moment is too close to write.
+pub(crate) fn follow(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: Instant) -> Follow {
+	let Some(sounds) = schedule.due(timestamp) else {
+		return Follow::Drop;
+	};
+	// A write half the bus's latency late finds nothing queued ahead of it.
+	if sounds < now + BUS_LATENCY / 2 {
+		return Follow::Drop;
+	}
+	let write = sounds - BUS_LATENCY;
+	if write > now {
+		return Follow::Wait(write);
+	}
+	if !heard(schedule, timestamp, sounds) {
+		return Follow::Wait(now + RECHECK);
+	}
+	Follow::Write(sounds)
+}
+
 /// Writes placed frames into a bus channel, so each sounds when it was placed.
 ///
 /// A channel plays a write [`BUS_LATENCY`] later only while it holds that much:
@@ -309,6 +343,25 @@ mod tests {
 		assert!(clock.due(stamp(1_100)).is_some_and(|due| due < at(500)));
 		assert!(heard(&schedule, stamp(1_020), at(500)));
 		assert!(!heard(&schedule, stamp(1_100), at(500)), "shown past its sound");
+	}
+
+	/// A followed sound is written the bus's latency before its moment once
+	/// the clock's own sound stamped alike has been, waits while that has
+	/// not, and is dropped once its moment is too close to write.
+	#[test]
+	fn a_followed_sound_waits_for_the_clocks_own() {
+		let clock = timeline::Producer::new(VIDEO_DELAY);
+		let schedule = clock.consume();
+		let changed = Notify::new();
+		let mut speaker = Speaker::new(clock.clone(), &changed);
+		speaker.place(ms(1_000), FRAME, TARGET, at(0));
+		assert_eq!(follow(&schedule, stamp(1_000), at(0)), Follow::Wait(at(100)));
+		assert_eq!(follow(&schedule, stamp(1_000), at(100)), Follow::Write(at(150)));
+		// Past what the clock's own sound has written: it stalled.
+		assert_eq!(follow(&schedule, stamp(1_100), at(200)), Follow::Wait(at(210)));
+		assert_eq!(follow(&schedule, stamp(1_100), at(226)), Follow::Drop);
+		let fresh = clock.clone().reset(VIDEO_DELAY).consume();
+		assert_eq!(follow(&fresh, stamp(1_000), at(0)), Follow::Drop, "no moment yet");
 	}
 
 	/// A stall longer than the target re-buffers: the next frame sounds the

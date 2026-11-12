@@ -31,7 +31,7 @@ use crate::browser::Page;
 use crate::collection::{Collection, Source};
 use crate::lut::Cube;
 use crate::media::Clip;
-use crate::playout::{BUS_LATENCY, Place, Speaker, VIDEO_DELAY, Writer};
+use crate::playout::{BUS_LATENCY, Follow, Place, Speaker, VIDEO_DELAY, Writer, follow};
 pub use crate::playout::{MAX_DELAY, heard};
 use crate::publish::{Claim, Listing, Publish, Still};
 use crate::replay::{MIN_SPEED, Take, Target};
@@ -1265,8 +1265,9 @@ impl Driver {
 	}
 
 	/// Play a track's sound into the bus when `schedule`, another track's
-	/// clock, says each frame sounds, dropping a frame that arrives too late
-	/// for its moment, or before the clock has one.
+	/// clock, says each frame sounds and its own sound stamped alike has been
+	/// written, dropping a frame too late for its moment, or before the clock
+	/// has one.
 	async fn follow_audio(
 		&self,
 		broadcast: &moq_net::broadcast::Consumer,
@@ -1292,20 +1293,29 @@ impl Driver {
 		let mut writer = Writer::new(channel, bus.sample_rate, bus.layout.channels());
 
 		// Each frame waits here until the bus's latency before it sounds.
-		let mut queue = VecDeque::<(Instant, moq_audio::Frame)>::new();
+		let mut queue = VecDeque::<moq_audio::Frame>::new();
 		let mut ended = false;
 		loop {
 			let now = kio::clock::now();
-			while let Some((sounds, _)) = queue.front()
-				&& *sounds - BUS_LATENCY <= now
-			{
-				let (sounds, frame) = queue.pop_front().expect("peeked");
-				writer.write(sounds, &frame.data, now)?;
+			let mut write = None;
+			while let Some(frame) = queue.front() {
+				match follow(schedule, frame.timestamp, now) {
+					Follow::Write(sounds) => {
+						let frame = queue.pop_front().expect("peeked");
+						writer.write(sounds, &frame.data, now)?;
+					}
+					Follow::Wait(at) => {
+						write = Some(at);
+						break;
+					}
+					Follow::Drop => {
+						queue.pop_front();
+					}
+				}
 			}
 			if ended && queue.is_empty() {
 				return Ok(());
 			}
-			let write = queue.front().map(|(sounds, _)| *sounds - BUS_LATENCY);
 			tokio::select! {
 				read = consumer.read(), if !ended => match read? {
 					Some(moq_audio::decode::Read::Frame(frame)) => {
@@ -1313,11 +1323,11 @@ impl Driver {
 						// ahead of it, and one due past the longest target would
 						// hold whatever a peer stamps.
 						let now = kio::clock::now();
-						let placed = schedule.due(frame.timestamp).filter(|sounds| {
-							*sounds >= now + BUS_LATENCY / 2 && *sounds <= now + MAX_DELAY + BUS_LATENCY
+						let placed = schedule.due(frame.timestamp).is_some_and(|sounds| {
+							sounds >= now + BUS_LATENCY / 2 && sounds <= now + MAX_DELAY + BUS_LATENCY
 						});
-						if let Some(sounds) = placed {
-							queue.push_back((sounds, frame));
+						if placed {
+							queue.push_back(frame);
 						}
 					}
 					// A hole or an encoder restart shows in the stamps that follow.
