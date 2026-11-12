@@ -23,8 +23,6 @@ harness on 2026-11-09 that proves the shape and shows what is missing:
   variables.
 - Meters, clocks, and playing clips never settle, so a capture catches an
   arbitrary moment.
-- One launch in ten crashed; see
-  [The studio starts every time](/quest/m0/ux/surface-crash.md).
 
 So the app takes the view to show as an argument or an environment variable,
 and runs on a paused `kio::clock` with still sources for a screenshot. The
@@ -40,7 +38,3 @@ AGENTS.md's rule stands: frame time is measured under a real compositor.
 Screenshots are for looking, not timing.
 
 Human check: none. The maintainer reads the pictures in later PRs.
-
-## Required
-
-- [The studio starts every time](/quest/m0/ux/surface-crash.md) - a launch that can crash cannot run in CI
