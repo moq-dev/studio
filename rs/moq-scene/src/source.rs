@@ -1546,28 +1546,42 @@ impl Driver {
 		// has sounded through by the time another arrives is dropped, so
 		// however long a write waits on the bus, this holds only what is
 		// still to sound within the longest delay.
-		let queue = RefCell::new(VecDeque::<moq_audio::Frame>::new());
+		//
+		// Each frame sounds when the clock says, or at the moment frozen for it
+		// when the timeline broke after it, which the clock no longer holds.
+		let queue = RefCell::new(VecDeque::<(moq_audio::Frame, Option<Instant>)>::new());
+		let due =
+			|(frame, frozen): &(moq_audio::Frame, Option<Instant>)| frozen.or_else(|| schedule.due(frame.timestamp));
 		let queued = Notify::new();
 		let received = Cell::new(false);
 		let receive = async {
+			// The stamps after lost media or an encoder restart need not
+			// continue the ones before. The hold resets only once the next frame
+			// arrives, so the clock keeps the moments of the tail still queued
+			// for as long as nothing replaces it.
+			let mut broke = false;
 			while let Some(next) = consumer.read().await? {
 				let moq_audio::decode::Read::Frame(frame) = next else {
-					// The stamps after lost media or an encoder restart need not
-					// continue the ones before.
-					hold.reset();
+					broke = true;
 					continue;
 				};
 				let now = kio::clock::now();
+				let mut queue = queue.borrow_mut();
+				if std::mem::take(&mut broke) {
+					for queued in queue.iter_mut() {
+						queued.1 = due(queued);
+					}
+					hold.reset();
+				}
 				hold.received(frame.timestamp, now);
 				hold.set_target(consumer.delay());
-				let mut queue = queue.borrow_mut();
 				while queue
 					.front()
-					.is_some_and(|front| follow(schedule.due(front.timestamp), length(front, bus), now) == Follow::Drop)
+					.is_some_and(|front| follow(due(front), length(&front.0, bus), now) == Follow::Drop)
 				{
 					queue.pop_front();
 				}
-				queue.push_back(frame);
+				queue.push_back((frame, None));
 				queued.notify_one();
 			}
 			received.set(true);
@@ -1583,10 +1597,10 @@ impl Driver {
 				let next = queue
 					.borrow()
 					.front()
-					.map(|frame| follow(schedule.due(frame.timestamp), length(frame, bus), now));
+					.map(|front| follow(due(front), length(&front.0, bus), now));
 				match next {
 					Some(Follow::Write(sounds)) => {
-						let frame = queue.borrow_mut().pop_front().expect("peeked");
+						let (frame, _) = queue.borrow_mut().pop_front().expect("peeked");
 						writer.write(sounds, &frame.data).await?;
 					}
 					Some(Follow::Drop) => {
@@ -3338,6 +3352,36 @@ mod tests {
 			let due = until(|| clock.due(stamp(at))).await;
 			until_time(due).await;
 			assert_eq!(shown(feed).await, Duration::from(stamp(at)));
+		})
+		.await;
+	}
+
+	/// A sound that breaks off keeps the moments of the tail it queued until
+	/// the media replacing it arrives, rather than dropping it unplayed.
+	#[tokio::test(start_paused = true)]
+	async fn a_broken_off_sound_keeps_its_tail() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let mut live = live(&origin, true).await;
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection());
+			start(&sources, drivers).await;
+			let feed = sources.get("guest").unwrap();
+			let clock = feed.clock.clone().unwrap();
+			let stamp = |millis: u64| moq_net::Timestamp::from_millis(millis).unwrap();
+			let silence =
+				|millis: u64| moq_audio::Frame::new(vec![0u8; 960 * 2 * size_of::<f32>()].into(), stamp(millis));
+
+			until_time(kio::clock::now()).await;
+			let audio = live.audio.as_mut().unwrap();
+			for at in (1_000..1_100).step_by(20) {
+				audio.write(&silence(at)).unwrap();
+			}
+			let due = until(|| clock.due(stamp(1_080))).await;
+			audio.discontinuity().unwrap();
+			until_time(kio::clock::now() + Duration::from_millis(10)).await;
+			assert_eq!(clock.due(stamp(1_080)), Some(due), "the tail lost its moment");
 		})
 		.await;
 	}
