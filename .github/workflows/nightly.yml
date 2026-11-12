@@ -5,8 +5,9 @@ name: Nightly
 # driver, the camera in a private PipeWire session, and `just shots`, the
 # window's named views drawn there; the virtual camera's
 # v4l2loopback fallback, a module load no pull request job should make;
-# `just ci` on macOS, whose capture backends Check's Linux runner never
-# compiles; and the Flatpak, a release build of everything.
+# `just ci` on macOS and the studio's Windows build, whose capture backends
+# Check's Linux runner never compiles; and the Flatpak, a release build of
+# everything.
 
 permissions:
   contents: read
@@ -94,3 +95,20 @@ jobs:
   flatpak:
     name: Flatpak
     uses: ./.github/workflows/flatpak.yml
+
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      # No Nix on Windows: rustup installs the toolchain rust-toolchain.toml
+      # names on first use.
+      - name: Build
+        run: cargo build --locked -p moq-studio --features release
