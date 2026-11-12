@@ -42,10 +42,11 @@ The remaining agent step: build with
 `quest gate cargo build -p moq-studio --features capture`, then list devices
 by starting the studio, whose setup and Devices panel enumerate cameras,
 displays, windows, and audio inputs (`rs/moq-studio/src/devices.rs`).
-[moq-dev/studio#129](https://github.com/moq-dev/studio/pull/129) adds a
-nightly Windows job that compiles the studio in CI, and its run on
-windows-latest built it. A build error that job also shows is fixed in CI's
-quest or PR; one only this host shows is this quest's to fix.
+Whatever fails to build on this host is this quest's to fix.
+
+Decided 2026-11-12 (maintainer, /quest-review checkpoint): ✅ this quest owns
+every build error on the host (rejected: handing errors CI also shows to the
+CI build quest, which needs it as a prerequisite; merging that split as is).
 
 ## Hosts
 
