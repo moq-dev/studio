@@ -871,4 +871,220 @@ mod tests {
 		assert!(refused.contains("composition version 3 is not supported"), "{refused}");
 		reader.abort();
 	}
+
+	/// A guest's broadcast, published independently, reaches a viewer through
+	/// a relay as the studio played it: the composition lists it where it is,
+	/// at the offset its timeline sat from the program's when the studio
+	/// showed it, which its catalog's clock and the studio's playout delay
+	/// predict, and a player of that composition shows each of its pictures
+	/// beside the program picture that offset puts it with.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	async fn plays_a_guest_where_the_studio_did() {
+		use moq_mux::catalog::Stream;
+		const TIMEOUT: Duration = Duration::from_secs(30);
+		const PERIOD: Duration = Duration::from_millis(33);
+
+		let _ = moq_tokio::crypto::install_default();
+		let fixture = moq_relay::test_relay().await.expect("test relay");
+		let ready = fixture.relay.ready();
+		let relay = fixture.relay.cluster().origin.clone();
+		tokio::spawn(fixture.relay.run());
+		ready.wait().await.expect("relay ready");
+
+		// The guest, on a clock of its own started well before the program's.
+		let guest = moq_mux::Clock::new();
+		kio::clock::sleep(Duration::from_millis(1_500)).await;
+		let publication = relay
+			.route("guests/alice", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let mut broadcast = publication.broadcast().clone();
+		let config = moq_mux::catalog::Config::default().with_clock(guest.clone());
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+		// Its encoder stays on the thread that made it.
+		let stamping = guest.clone();
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			runtime.block_on(async move {
+				let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
+				config.kind = moq_video::encode::Kind::Software;
+				let rendition = config.probe().await.unwrap();
+				let reserved = catalog.timebase().reserve().with_interval(config.effective_join());
+				let mut video = moq_video::encode::Producer::new(broadcast, reserved, rendition).unwrap();
+				let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
+				let gray = vec![0x80; 64 * 64 * 4];
+				let mut pace = kio::clock::interval(PERIOD);
+				loop {
+					pace.tick().await;
+					let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(64, 64)).unwrap();
+					let frame = moq_video::Frame::new(surface, stamping.now());
+					if video.publish(&encoder.encode(&frame).unwrap()).is_err() {
+						return;
+					}
+				}
+			});
+		});
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
+		let client = client.init(Default::default()).expect("client");
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new().await.expect("a GPU");
+		let (autosave, _) = crate::autosave::Autosave::open(dir.path().join("show.toml")).unwrap();
+		let mut studio = Collection::new();
+		studio.canvas = Canvas {
+			width: 640,
+			height: 360,
+			framerate: 30,
+		};
+		studio.sources.insert(
+			"bg".into(),
+			Source::Color {
+				color: moq_scene::Rgba([0, 0, 255, 255]),
+			},
+		);
+		studio.sources.insert(
+			"alice".into(),
+			Source::Broadcast {
+				path: "guests/alice".into(),
+			},
+		);
+		studio.scenes[0].items = vec![
+			Item::new("bg", Rect::fill(&studio.canvas)),
+			Item::new(
+				"alice",
+				Rect {
+					x: 16.0,
+					y: 16.0,
+					width: 160.0,
+					height: 90.0,
+				},
+			),
+		];
+		studio.published.insert("alice".into());
+		studio.validate().unwrap();
+		let launch = engine::Launch {
+			gpu,
+			relays: vec![engine::Relay {
+				client,
+				url: fixture.url.clone(),
+			}],
+			broadcast: "studio".into(),
+			on_demand: false,
+			recordings: dir.path().to_path_buf(),
+			room: None,
+		};
+		let loaded = crate::autosave::Loaded {
+			collection: studio,
+			history: moq_scene::History::new(),
+			dropped: 0,
+		};
+		let engine = engine::Engine::start(launch, autosave, loaded)
+			.await
+			.expect("the studio starts");
+
+		// The composition, as a viewer on the relay reads it.
+		let viewer = relay.consume();
+		let follow = |path: &'static str| {
+			let viewer = viewer.clone();
+			async move {
+				kio::clock::timeout(TIMEOUT, viewer.follow(path, None).unwrap().available())
+					.await
+					.expect("the relay routes it")
+					.unwrap()
+					.expect("an instance")
+			}
+		};
+		let program = follow("studio").await;
+		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&program, Default::default())
+			.await
+			.unwrap();
+		let program_clock = catalogs.next().await.unwrap().expect("a catalog").media.clock.unwrap();
+		let composed = follow("studio/composition").await;
+		let mut compositions = moq_json::snapshot::Consumer::<Composition>::new(
+			composed.track(composition::TRACK).unwrap(),
+			Default::default(),
+		);
+		let composition = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let read = compositions.next().await.unwrap().expect("a composition");
+				if read.value.sources.contains_key("alice") {
+					return read.value;
+				}
+			}
+		})
+		.await
+		.expect("the composition lists the guest once the studio plays it");
+		let alice = &composition.sources["alice"];
+		assert_eq!(alice.broadcast.as_str(), "../guests/alice");
+		assert!(alice.instance.as_ref().is_none_or(|instance| !instance.is_minted()));
+		assert_eq!(composition.pictures.len(), 1);
+
+		// Where the two clocks put one moment, and so the offset with no delay.
+		let micros = |clock: hang::catalog::Clock| Duration::from(clock.wall).as_micros() as i64;
+		let apart = micros(guest.wall().unwrap()) - micros(program_clock);
+		let delay = alice.offset - apart;
+		let playout = engine
+			.state
+			.lock()
+			.unwrap()
+			.sources
+			.get("alice")
+			.and_then(|feed| feed.delay());
+		let expected = playout.expect("the studio plays the guest").as_micros() as i64;
+		let drift = composition::DRIFT.as_micros() as i64;
+		let tick = PERIOD.as_micros() as i64;
+		tracing::info!(offset = alice.offset, apart, delay, "the guest's offset");
+		assert!(
+			(expected - drift..=expected + tick + drift).contains(&delay),
+			"the studio showed the guest {delay} us after its stamp, not its playout delay"
+		);
+
+		// A player of the composition, on the relay.
+		let gpu = Gpu::new().await.expect("a GPU");
+		let (bus, driver) = moq_audio::bus::Bus::new(Default::default()).unwrap();
+		let (_mixer, mixed) = source::Mixer::new(driver, Instant::now());
+		let mut sources = Sources::new(source::Context {
+			bus,
+			mixed,
+			origin: viewer.clone(),
+			dir: dir.path().to_path_buf(),
+			output: moq_video::render::output(&gpu.device),
+			publish: None,
+			browser: None,
+		});
+		let paths = Paths {
+			program: moq_net::Path::new("studio").unwrap(),
+			at: moq_net::Path::new("studio/composition").unwrap(),
+		};
+		let played = collection(Some(&composition), CANVAS, &paths).unwrap();
+		for driver in sources.sync(&played) {
+			engine::spawn(driver);
+		}
+		assert_eq!(
+			played.sources["layer/alice"],
+			Source::Layer {
+				clock: PROGRAM.into(),
+				path: "guests/alice".into(),
+				instance: alice.instance.clone(),
+				offset: alice.offset,
+			}
+		);
+		kio::clock::timeout(TIMEOUT, async {
+			while sources.get("layer/alice").unwrap().status() != Status::Live {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the player reads the guest from the relay");
+
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
 }
