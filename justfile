@@ -81,6 +81,9 @@ shots *views:
         filter=${filter% | }
         # A name no test has would otherwise be skipped without a word.
         for view in "$@"; do rm -f "$SHOTS_DIR/$view.png"; done
+    else
+        # A view removed from the table must not leave its old picture behind.
+        rm -f "$SHOTS_DIR"/*.png
     fi
     cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E "$filter"
     for view in "$@"; do
