@@ -198,6 +198,9 @@
                 # The join page: install, lint, type-check, test, and build.
                 bun
 
+                # cwebp: `just shots` PNGs to the lossy WebP UI PRs host.
+                libwebp
+
                 # `just check` lints.
                 shellcheck
                 shfmt

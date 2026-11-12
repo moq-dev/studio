@@ -30,7 +30,7 @@ Run `just ci` before every push.
 
 `just shots` renders named views of the window to PNG with no display, on Linux (the table in `rs/moq-studio/src/shots.rs`).
 A PR that changes what the window shows adds a view for each page or state it builds, and shows the views it changes in its body, beside the mock-up frames they implement.
-To host them, commit the views as lossy WebP in a commit of their own, link them by that commit's SHA, and delete them in the next commit.
+To host them, convert the views to lossy WebP (`cwebp -q 80`), commit them in a commit of their own, link them by that commit's SHA, and delete them in the next commit.
 
 Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
 The `quest` binary comes from the moq-dev/quest flake input, so outside the dev shell run it as `nix develop --command quest ...`. It serves the quest skills; change them upstream and bump the input.
