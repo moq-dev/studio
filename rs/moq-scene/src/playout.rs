@@ -211,9 +211,11 @@ pub(crate) fn follow(schedule: &timeline::Consumer, timestamp: moq_net::Timestam
 	if sounds < now + BUS_LATENCY / 2 {
 		return Follow::Drop;
 	}
+	// The clock re-anchors without telling its readers, so a wait for a
+	// moment it may yet move earlier is rechecked too.
 	let write = sounds - BUS_LATENCY;
 	if write > now {
-		return Follow::Wait(write);
+		return Follow::Wait(write.min(now + RECHECK));
 	}
 	if !heard(schedule, timestamp, sounds) {
 		return Follow::Wait(now + RECHECK);
@@ -345,9 +347,10 @@ mod tests {
 		assert!(!heard(&schedule, stamp(1_100), at(500)), "shown past its sound");
 	}
 
-	/// A followed sound is written the bus's latency before its moment once
-	/// the clock's own sound stamped alike has been, waits while that has
-	/// not, and is dropped once its moment is too close to write.
+	/// A followed sound, rechecked until then, is written the bus's latency
+	/// before its moment once the clock's own sound stamped alike has been,
+	/// waits while that has not, and is dropped once its moment is too close
+	/// to write.
 	#[test]
 	fn a_followed_sound_waits_for_the_clocks_own() {
 		let clock = timeline::Producer::new(VIDEO_DELAY);
@@ -355,7 +358,8 @@ mod tests {
 		let changed = Notify::new();
 		let mut speaker = Speaker::new(clock.clone(), &changed);
 		speaker.place(ms(1_000), FRAME, TARGET, at(0));
-		assert_eq!(follow(&schedule, stamp(1_000), at(0)), Follow::Wait(at(100)));
+		assert_eq!(follow(&schedule, stamp(1_000), at(0)), Follow::Wait(at(10)), "rechecked");
+		assert_eq!(follow(&schedule, stamp(1_000), at(95)), Follow::Wait(at(100)));
 		assert_eq!(follow(&schedule, stamp(1_000), at(100)), Follow::Write(at(150)));
 		// Past what the clock's own sound has written: it stalled.
 		assert_eq!(follow(&schedule, stamp(1_100), at(200)), Follow::Wait(at(210)));
