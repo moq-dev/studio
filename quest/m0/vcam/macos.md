@@ -15,4 +15,3 @@ its signing (rejected: a Related link only; leaving the quests unlinked).
 ## Required
 
 - [macOS app](/quest/m0/packaging/macos.md) - the app bundle that carries and signs the extension
-- [The Apple signing identity is available](/quest/m0/signing.md) - system extensions only load when signed

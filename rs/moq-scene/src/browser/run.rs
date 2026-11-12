@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use moq_audio::bus::Channel as Sound;
+use moq_audio::bus::Live as Sound;
 
 use super::layers::{Gpu, Layers};
 use super::outbox::Commands;

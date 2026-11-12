@@ -1,63 +1,28 @@
-# [M] Layer layout track
+# [M] Guests in the layer layout
 
 ## Goal
 
-A studio broadcast that publishes a source independently also carries a layer
-layout track. For each such source, it says where and when that source shows
-over the program: its transform, crop, z-order, opacity, and visibility, its
-item's keyframes and when its scene went on program, all on the media clock,
-and for audio its gain, mute, pan, and delay. Until hang specifies it, the track is the
-provisional `dev.moq.studio.layers` in the studio catalog.
+A guest's broadcast source can be published independently, like a local
+source: the program leaves it out, and the provisional
+`live.kixel.studio.layers` layout track names the guest's broadcast so a player
+places it over the program, and mixes its sound, at the right time.
 
 ## Plan
 
-Replanned 2026-11-08 (maintainer, /quest-plan) around the program with
-independent layers over it, rather than the full scene state; see the
-[epic](/quest/m2/compose/README.md).
+The layout track itself landed for local sources: `rs/moq-scene/src/layout.rs`
+and the README's "Layer layout". A guest stays its own broadcast (settled
+2026-10-26), so its layer names that broadcast rather than an entry under the
+catalog's `live.kixel.studio` `sources`, and carries what a player needs to put
+the guest's frames on the program's media clock. Today
+`Source::publishes` refuses a broadcast source, since it has no track in the
+studio's broadcast.
 
-A JSON track in snapshot mode, so a late joiner gets the current state.
-Version it, and have a player refuse an unknown version loudly and play the
-program alone. Keep it free of local paths and credentials: layers name
-tracks and broadcasts, never files.
+Bump the layout's `version` if the change is not additive.
 
-Decided 2026-11-08 (maintainer, on
-[moq-dev/studio#117](https://github.com/moq-dev/studio/pull/117)): a
-published source stays hidden everywhere the studio composites until this
-track lands. Drawing published sources as layers over the program in the
-studio's preview is this quest's work, and so is whether recordings include
-those layers.
-
-Layers draw over the program in the layout's order, so the studio's preview
-of a scene with an independent source shows what viewers see. A layer carries
-only what every player can reproduce: transform, crop, z-order, opacity,
-visibility, and keyframes. A picture source's track is its capture before any
-filter (decided 2026-11-02, maintainer). So an item that applies anything
-more, such as a video filter, mask, LUT, blend mode, or background removal,
-needs that effect baked into its track, or the option refused for it. Settle
-which here. Publishing a source independently refuses one with its
-background removed for now, since H.264 carries no transparency, so lifting
-that refusal is this track's call too. An audio source's track already carries its sound
-after its filters (decided 2026-11-02), so its layer carries what its strip
-applies after them: gain, mute, pan, and delay.
-
-Decided 2026-11-09 (maintainer, /quest-audit): ✅ an audio layer carries pan
-and delay as well as gain and mute (rejected: stating that a player drops
-them). Without the delay, a delayed microphone published independently plays
-out of sync with its camera. moq's
-[layer spec](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/spec.md)
-starts from the format the prototype settles;
-[moq-dev/moq#8421](https://github.com/moq-dev/moq/pull/8421) adds pan and
-delay to it and has both players apply them.
-
-Items carry their keyframes (`moq_scene::Keyframe`), which play from when
-their scene went on program. The layout says when that was, so a late joiner
-lands at the same point.
-
-Each layer also carries its priority and whether a viewer may toggle it, for
-[Viewer controls](/quest/m2/compose/controls.md).
-
-The [watch prototype](/quest/m2/compose/watch.md) is this track's first
-reader. What the two settle becomes moq's hang spec draft.
+The `moq-studio --watch` prototype (`rs/moq-studio/src/watch.rs`) plays only
+local sources' layers today: its layers play tracks of the program's own
+broadcast on the program's clock, so a guest's layer needs the prototype to
+follow the named broadcast, on the offset the layout carries.
 
 ## Waiting
 

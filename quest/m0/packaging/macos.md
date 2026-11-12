@@ -24,10 +24,26 @@ Lay the bundle out and order the signing so nested code can be added: a
 system extension and CEF's helper apps are each signed before the app that
 holds them.
 
+The bundle's icon is an `.icns` that the build generates from
+`packaging/live.kixel.studio.svg`, the only drawn copy, and `Info.plist`
+names; never check the `.icns` in.
+
+The signing material lives in the `release` Actions environment, which only
+protected branches can deploy from, for team `D7D5SDDB5Z` and bundle ID
+`live.kixel.studio`:
+
+- `APPLE_CERTIFICATE`: the Developer ID Application `.p12`, base64, legacy
+  encryption so `security import` reads it.
+- `APPLE_CERTIFICATE_PASSWORD`: its password.
+- `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_PRIVATE_KEY`: the App Store
+  Connect key ID, issuer ID, and `.p8` text, for `notarytool --key`.
+- `APPLE_PROVISIONING_PROFILE`: the Developer ID profile for `live.kixel.studio`
+  with the System Extension capability, base64, embedded as
+  `Contents/embedded.provisionprofile`.
+
+The certificate (`6WWG279G9M`, G2) expires 2027-12-11, and the profile with it;
+see [renewal](/quest/m0/signing-renew.md).
+
 ## Waiting
 
 - moq-dev/moq: a Mac camera renders only once AVFoundation asks for NV12 instead of `2vuy`, in review as [moq-dev/moq#8251](https://github.com/moq-dev/moq/pull/8251); done when it merges, `just upgrade-moq` bumps the gitlink here, and a Mac camera shows its picture in program
-
-## Required
-
-- [The Apple signing identity is available](/quest/m0/signing.md) - the credentials macOS signing needs

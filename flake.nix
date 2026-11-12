@@ -1,5 +1,5 @@
 {
-  description = "MoQ Studio: a native streaming studio over Media over QUIC";
+  description = "kixel.live Studio: a native streaming studio over Media over QUIC";
 
   # moq's binary cache also holds the toolchain and tools this shell shares
   # with moq's. `fallback` builds whatever is missing instead of failing.
@@ -21,7 +21,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/6a18b8a815c2d15d37d7433a619f961ec5a07165";
+      url = "github:moq-dev/quest";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };

@@ -13,8 +13,7 @@ Decided 2026-10-26 (maintainer): as for the `moq` binary in
 skip any feature that is expensive to build or relies on a system library,
 and a `release` feature turns on every backend its platform can load without
 one (`capture`, `openh264`, `vaapi`, `nvidia`, and the platform frameworks).
-Every artifact builds with `release`, and the first one to land adds the
-feature. `pipewire` stays out of `release` because it links libpipewire at
+Every artifact builds with `release`, which the Flatpak added. `pipewire` stays out of `release` because it links libpipewire at
 load time.
 
 Decided 2026-11-09 (maintainer, /quest-audit): ✅ one quest per platform
@@ -23,6 +22,11 @@ leaving one packaging quest). One quest held all three artifacts behind the
 Apple identity and the Windows host, though the Flatpak needs neither, and
 three quests shaped the macOS app bundle with no link between them. The
 [macOS app](/quest/m0/packaging/macos.md) owns that bundle.
+
+A release is cut by running `.github/workflows/release.yml` on main, which
+publishes from the `release` environment. Each artifact's workflow is called
+there and its files attached; `packaging/flatpak/smoke.sh` is the Linux
+launch-and-list check the others mirror on their platform.
 
 ## Related
 

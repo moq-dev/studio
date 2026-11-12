@@ -41,11 +41,13 @@ pub struct Collection {
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub video: BTreeMap<String, Video>,
 	/// The sources published independently, by name: each one's own track
-	/// goes to the relay beside the program, for viewers and services to
-	/// place themselves, and the source is left out of every picture and mix
-	/// the studio composites. Only a source with a track of its own can be,
-	/// and not one with its background removed, since its track would show
-	/// the background.
+	/// goes to the relay beside the program, and the
+	/// [layer layout](crate::layout) says where viewers show it over the
+	/// program and how they play its sound. The program and every audio
+	/// scene's mix leave it out. Only a source with a track of its own can
+	/// be, and not one with its background removed, since its track would
+	/// show the background. Wherever it is placed, it takes only what every
+	/// player can reproduce, and no scene that another scene draws holds it.
 	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
 	pub published: BTreeSet<String>,
 	/// The scenes, in the order the scene list shows them.
@@ -467,6 +469,13 @@ impl Collection {
 					"`{name}` draws scene `{scene}`, which is not a scene"
 				)));
 			}
+			if let Source::Layer { broadcast, .. } = source
+				&& !matches!(self.sources.get(broadcast), Some(Source::Broadcast { .. }))
+			{
+				return Err(Error::Invalid(format!(
+					"`{name}` plays on `{broadcast}`, which is not a broadcast source"
+				)));
+			}
 			let Source::Clone { source } = source else { continue };
 			match self.sources.get(source) {
 				Some(Source::Clone { .. }) => {
@@ -528,6 +537,7 @@ impl Collection {
 		}
 
 		self.validate_nesting()?;
+		self.validate_published()?;
 
 		if let Some(name) = self.transition.stinger()
 			&& !matches!(self.sources.get(name), Some(Source::Media { .. }))
@@ -622,6 +632,48 @@ impl Collection {
 					"scene `{}` carries `{audio}`, which is not an audio scene",
 					scene.name
 				)));
+			}
+		}
+		Ok(())
+	}
+
+	/// Refuse an item showing a source published independently that the
+	/// layer layout cannot carry: one blended or filtered past opacity, which
+	/// not every player can reproduce, or one in a scene another scene draws,
+	/// which the layout cannot place.
+	fn validate_published(&self) -> Result<(), Error> {
+		let nested: BTreeSet<&str> = self
+			.sources
+			.values()
+			.filter_map(|source| match source {
+				Source::Scene { scene } => Some(scene.as_str()),
+				_ => None,
+			})
+			.collect();
+		for (layer, items) in self.layers() {
+			for item in items {
+				let source = self.capture(&item.source);
+				if !self.published.contains(source) {
+					continue;
+				}
+				let on = format!(
+					"`{}` in {layer} shows `{source}`, which is published independently, so it",
+					item.source
+				);
+				if let Some(scene) = &layer.scene
+					&& nested.contains(scene.as_str())
+				{
+					return Err(Error::Invalid(format!(
+						"{on} cannot be in a scene another scene draws, since viewers place it over the program"
+					)));
+				}
+				let keyframed = item.keyframes.iter().flat_map(|keyframe| &keyframe.filters);
+				let mut filters = self.filters(item).chain(keyframed);
+				if item.blend != Blend::Normal || filters.any(|filter| !matches!(filter, Filter::Opacity { .. })) {
+					return Err(Error::Invalid(format!(
+						"{on} takes no filter but opacity and no blend mode, which every player must reproduce"
+					)));
+				}
 			}
 		}
 		Ok(())
@@ -1803,6 +1855,19 @@ pub enum Source {
 	/// same frame. A scene drawing it cannot go on program, and the top layer
 	/// cannot draw it, since either would draw the program into itself.
 	Program,
+	/// A source a studio broadcast publishes independently, played from the
+	/// broadcast the [`Source::Broadcast`] called `broadcast` plays, on that
+	/// source's playout clock, so it lands with the program as the
+	/// [layer layout](crate::layout) places it. Never in a scene file: only
+	/// a player of the layout makes one.
+	#[serde(skip)]
+	Layer {
+		/// The broadcast source whose broadcast and clock it plays on.
+		broadcast: String,
+		/// Its entry under the broadcast catalog's
+		/// [`SECTION`](crate::publish::SECTION) `sources`.
+		source: String,
+	},
 }
 
 impl Source {
@@ -1859,6 +1924,7 @@ impl Source {
 				| Self::Broadcast { .. }
 				| Self::Browser { .. }
 				| Self::Replay
+				| Self::Layer { .. }
 		)
 	}
 
