@@ -41,9 +41,11 @@ There is no Nix dev shell, so agents here run cargo and `just` natively;
 The remaining agent step: build with
 `quest gate cargo build -p moq-studio --features capture`, then list devices
 by starting the studio, whose setup and Devices panel enumerate cameras,
-displays, windows, and audio inputs (`rs/moq-studio/src/devices.rs`). The
-nightly's Windows job (`.github/workflows/nightly.yml`) compiles the studio in
-CI, so a build error here is this host's, and this quest's to fix.
+displays, windows, and audio inputs (`rs/moq-studio/src/devices.rs`).
+[moq-dev/studio#129](https://github.com/moq-dev/studio/pull/129) adds a
+nightly Windows job that compiles the studio in CI, and its run on
+windows-latest built it. A build error that job also shows is fixed in CI's
+quest or PR; one only this host shows is this quest's to fix.
 
 ## Hosts
 
