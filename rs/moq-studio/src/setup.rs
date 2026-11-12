@@ -630,6 +630,12 @@ impl Setup {
 		}
 	}
 
+	/// Whether every check is done, so the screen proposes a scene.
+	#[cfg(test)]
+	pub fn proposing(&self) -> bool {
+		self.choices.is_some()
+	}
+
 	fn findings(&mut self, ui: &mut Ui) {
 		ui.strong("This machine");
 		egui::Grid::new("findings").num_columns(2).show(ui, |ui| {
@@ -958,7 +964,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn times_every_canvas() {
-		let gpu = engine::Gpu::new().await.expect("a GPU");
+		let gpu = engine::Gpu::new(moq_scene::wgpu::Backends::all()).await.expect("a GPU");
 		for (canvas, result) in probe_encoders(gpu).await {
 			let encoding = result.unwrap_or_else(|err| panic!("{}: {err}", describe(canvas)));
 			assert!(encoding.frame > Duration::ZERO, "{}", describe(canvas));

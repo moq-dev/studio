@@ -54,7 +54,7 @@ pub fn run(client: moq_tokio::connect::Config, quic: moq_tokio::quic::Config, ur
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), "watching");
 	let connection = client.with_subscriber(origin.clone()).connect(url.clone());
 
-	let gpu = pollster::block_on(Gpu::new())?;
+	let gpu = pollster::block_on(Gpu::new(moq_scene::wgpu::Backends::all()))?;
 	let (bus, driver) = moq_audio::bus::Bus::new(Default::default())?;
 	let config = bus.config().clone();
 	let start = Instant::now();

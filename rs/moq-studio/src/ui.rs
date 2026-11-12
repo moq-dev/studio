@@ -35,7 +35,7 @@ use levels::{Levels, meter};
 
 /// The panels, each a tab the user can move, split, or stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Tab {
+pub(crate) enum Tab {
 	Preview,
 	Program,
 	Scenes,
@@ -167,6 +167,15 @@ impl Studio {
 				graph: graph::View::default(),
 			},
 		}
+	}
+}
+
+#[cfg(test)]
+impl Studio {
+	/// Bring `tab` to the front of its group, as clicking it would.
+	pub(crate) fn front(&mut self, tab: Tab) {
+		let path = self.dock.find_tab(&tab).expect("every panel is docked");
+		self.dock.set_active_tab(path).expect("a docked tab");
 	}
 }
 

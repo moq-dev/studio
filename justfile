@@ -62,6 +62,37 @@ render-sw:
     cargo nextest run --locked -p moq-studio --features cef --run-ignored only -E 'binary(browser)'
     sh/pipewire-session.sh cargo nextest run --locked -p moq-studio --features pipewire --run-ignored only -E 'test(=engine::tests::the_virtual_camera_reaches_a_pipewire_app)'
 
+# Render named views of the window to PNG in `target/shots`, or in `$SHOTS_DIR`,
+# with no display: every view, or those named (`just shots studio audio`). It
+# draws on Mesa's software Vulkan driver, so every machine uses the same one,
+# which makes it Linux only.
+[positional-arguments]
+shots *views:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
+    icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
+    export VK_DRIVER_FILES="${icd[0]}"
+    custom=${SHOTS_DIR:+1}
+    SHOTS_DIR=$(realpath -ms "${SHOTS_DIR:-target/shots}")
+    export SHOTS_DIR
+    filter='test(/^shots::/)'
+    if (($#)); then
+        filter=$(printf 'test(=shots::%s) | ' "$@")
+        filter=${filter% | }
+        # A name no test has would otherwise be skipped without a word.
+        for view in "$@"; do rm -f "$SHOTS_DIR/$view.png"; done
+    elif [[ -z $custom ]]; then
+        # A view removed from the table must not leave its old picture behind;
+        # only the default directory is ours to clear.
+        rm -f "$SHOTS_DIR"/*.png
+    fi
+    cargo nextest run --locked -p moq-studio --features openh264 --run-ignored only -E "$filter"
+    for view in "$@"; do
+        [[ -f $SHOTS_DIR/$view.png ]] || { echo "no view named $view" >&2; exit 1; }
+    done
+    echo "shots in $SHOTS_DIR"
+
 # Show the program through a v4l2loopback device, which needs the module loaded
 # (`sudo modprobe v4l2loopback exclusive_caps=1`) and the device writable.
 v4l2loopback:

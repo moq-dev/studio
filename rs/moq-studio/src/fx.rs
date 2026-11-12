@@ -104,6 +104,12 @@ impl Fx {
 		}
 	}
 
+	/// Pick `effects`, as View > Effects does.
+	#[cfg(test)]
+	pub fn pick(&mut self, effects: Effects) {
+		self.picked = Some(effects);
+	}
+
 	pub fn save(&self, storage: &mut dyn eframe::Storage) {
 		eframe::set_value(storage, SETTING, &self.picked);
 	}

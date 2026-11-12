@@ -1,0 +1,47 @@
+# The show `just shots` renders every view on: still sources only, so a
+# still view draws the same picture each run. Add what a new view needs.
+version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.host]
+kind = "image"
+path = "person.jpg"
+
+[sources.backdrop]
+kind = "color"
+color = "#101828"
+
+[sources.bar]
+kind = "color"
+color = "#2563ebe6"
+
+[sources.guest]
+kind = "broadcast"
+path = "room/guest"
+
+[[scenes]]
+name = "Main"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "host", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "bar", rect = { x = 80, y = 860, width = 900, height = 120 } },
+]
+
+[[scenes]]
+name = "Interview"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "host", rect = { x = 60, y = 270, width = 880, height = 495 } },
+    { source = "guest", rect = { x = 980, y = 270, width = 880, height = 495 } },
+]
+
+[[scenes]]
+name = "Break"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "bar", rect = { x = 460, y = 480, width = 1000, height = 120 } },
+]

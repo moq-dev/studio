@@ -28,6 +28,8 @@ mod mix;
 mod record;
 mod replay;
 mod setup;
+#[cfg(test)]
+mod shots;
 mod snap;
 mod ui;
 mod uplink;
@@ -193,7 +195,7 @@ fn main() -> anyhow::Result<ExitCode> {
 	// The QUIC client binds its socket on the current runtime.
 	let _runtime = runtime.enter();
 	let relays = config.relays()?;
-	let gpu = pollster::block_on(engine::Gpu::new())?;
+	let gpu = pollster::block_on(engine::Gpu::new(moq_scene::wgpu::Backends::all()))?;
 	let recordings = match &config.recordings {
 		Some(dir) => dir.clone(),
 		None => scenes

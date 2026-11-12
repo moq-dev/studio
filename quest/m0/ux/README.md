@@ -17,9 +17,9 @@ reach the studio as [private panels](/quest/m1/panels.md), any web page shown
 beside the show and never in it.
 
 This README's own work, once every child has merged: `README.md`'s Panels
-section is rewritten around the pages, with a picture of each from the
-[screenshots](/quest/m0/ux/shots.md), and the maintainer runs one real show
-start to finish on the finished UI.
+section is rewritten around the pages, with a picture of each from
+`just shots`, and the maintainer runs one real show start to finish on the
+finished UI.
 
 ## Plan
 
@@ -30,6 +30,9 @@ pages drawn at 1440x900, each frame rendered beside it as
 tone. The app is native, so a child matches them in what is where and how it
 reads, not pixel for pixel, and a child that has to depart from one changes
 the mock-up in the same PR.
+Each child adds a view to `just shots` (the table in
+`rs/moq-studio/src/shots.rs`) for every page and state it builds, and its PR
+shows those pictures beside the frames they implement.
 
 ![LIVE](/quest/m0/ux/mock/shell-live.webp)
 

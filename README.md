@@ -1277,7 +1277,15 @@ just test    # Run the tests
 just ci      # Both, as CI runs them
 just fix     # Auto-fix formatting
 just join    # Serve the join page locally
+just shots   # Render views of the window to PNG in target/shots
 ```
+
+`just shots studio audio` renders only the views named, each a test in
+`rs/moq-studio/src/shots.rs` that draws one state of the window, the studio
+views on `rs/moq-studio/shots/show.toml` and `setup` as a first launch shows
+it. They draw on Mesa's software Vulkan driver, so need no display or GPU, and
+run on Linux only, where that driver builds. `SHOTS_DIR` picks another output
+directory; a full run clears old PNGs only from the default one.
 
 `rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
 `js/join` the join page, built on `@moq/room`, `@moq/publish`, and

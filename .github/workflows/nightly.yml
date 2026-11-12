@@ -2,7 +2,8 @@ name: Nightly
 
 # The gates too slow or too specialized for a pull request: compositing,
 # publishing, and the virtual camera through wgpu on Mesa's software Vulkan
-# driver, the camera in a private PipeWire session; the virtual camera's
+# driver, the camera in a private PipeWire session, and `just shots`, the
+# window's named views drawn there; the virtual camera's
 # v4l2loopback fallback, a module load no pull request job should make;
 # `just ci` on macOS and the studio's Windows build, whose capture backends
 # Check's Linux runner never compiles; and the Flatpak, a release build of
@@ -39,6 +40,9 @@ jobs:
 
       - name: Render
         run: nix develop --command just render-sw
+
+      - name: Shots
+        run: nix develop --command just shots
 
   v4l2loopback:
     name: v4l2loopback camera
