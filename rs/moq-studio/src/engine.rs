@@ -819,8 +819,8 @@ impl Program {
 
 	/// Publish the composition of what `state` drew on program at `at` on
 	/// the media clock, at `now`: the program, and each source published
-	/// independently that is online, a broadcast source where what it showed
-	/// then lands on the program's clock.
+	/// independently, a broadcast source once it has shown anything, where
+	/// what it showed lands on the program's clock.
 	fn compose(&self, state: &State, at: Duration, now: Instant) {
 		// Past what a timestamp holds, the frame goes unstamped too.
 		let Ok(stamp) = moq_net::Timestamp::try_from(at) else {
@@ -832,13 +832,14 @@ impl Program {
 		for name in &collection.published {
 			let child = match collection.sources.get(name) {
 				Some(Source::Broadcast { path }) => {
-					// Offline, or not yet playing, it shows nothing here either.
+					// Before it ever shows, it shows nothing here either; offline
+					// after, both hold its last picture where it landed.
 					let Some(feed) = state.sources.get(name) else { continue };
-					let Some(offset) = feed.offset(at, now) else { continue };
+					let Some(landing) = feed.lands(at, now) else { continue };
 					let Some(broadcast) = composed.child(name, Some(path)) else {
 						continue;
 					};
-					moq_scene::composition::Child::new(broadcast, feed.instance(), offset)
+					moq_scene::composition::Child::new(broadcast, landing.instance, landing.offset)
 				}
 				Some(_) => match composed.child(name, None) {
 					Some(broadcast) => moq_scene::composition::Child::new(broadcast, None, 0),

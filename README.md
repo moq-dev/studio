@@ -300,7 +300,9 @@ broadcast through the first relay while that relay has a route to it, and
 through the failover otherwise, so a publisher restarted behind only the
 failover replaces the first relay's copy once that copy ends. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
-comes back on its own when the publisher restarts.
+comes back on its own when the publisher restarts. A broadcast without video
+but with an image, such as a studio's image or color published
+independently, shows that image.
 
 A broadcast source, a guest's included, plays on its publisher's timestamps,
 so its sound and picture stay in sync through network jitter and stalls. Its
@@ -1013,8 +1015,11 @@ format is the studio's own until hang specifies a composition:
   is stamped on that clock, at 0. A guest keeps a timeline of its own, so its
   offset is where the studio played it: a new composition follows it once it
   moves more than 10 ms, and a guest who joins again, as a new instance, gets
-  a new one. A guest the studio cannot play yet, such as one offline, is left
-  out with its pictures.
+  a new one. A guest the studio has not played yet, such as one offline from
+  the start, is left out with its pictures. One that goes offline after keeps
+  its entry, as the studio and every viewer hold its last picture. A still,
+  such as another studio's published image, has no moment, so without sound
+  its offset is 0.
 - A source's `sound`, when the audio scene on program holds it, is the
   `gain`, `muted`, `pan`, and `delay` it plays at.
 - Each source may carry a subscription `priority` (0 if absent) and whether a

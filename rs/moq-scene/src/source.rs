@@ -111,6 +111,8 @@ struct Played {
 	audio: Option<(String, AudioConfig)>,
 	/// The newest picture shown from it, where a replay of it ends.
 	newest: Option<moq_net::Timestamp>,
+	/// Whether it shows a still, which has no moment, rather than video.
+	still: bool,
 }
 
 type Playback = Arc<Mutex<Played>>;
@@ -537,6 +539,18 @@ pub struct Feed {
 	/// A layer's offset onto its clock, in microseconds, which its driver
 	/// reads as it plays.
 	offset: Arc<AtomicI64>,
+	/// Where a broadcast source last landed on a timeline.
+	landed: Mutex<Option<Landing>>,
+}
+
+/// Where a broadcast source's timestamps land on another timeline, as
+/// [`Feed::lands`] finds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Landing {
+	/// The stream it holds for, `None` when the origin names none.
+	pub instance: Option<moq_net::Instance>,
+	/// Microseconds to add to its timestamps to put them on the timeline.
+	pub offset: i64,
 }
 
 impl Feed {
@@ -732,21 +746,40 @@ impl Feed {
 		played.broadcast.as_ref()?.info().instance.clone()
 	}
 
-	/// Microseconds to add to a broadcast source's timestamps to put them on
-	/// a timeline that reads `at` at `now`: where what it plays lands on that
-	/// timeline. `None` until its clock is anchored, and for any other source.
-	pub fn offset(&self, at: Duration, now: Instant) -> Option<i64> {
-		if !matches!(self.source, Source::Broadcast { .. }) || self.status() != Status::Live {
+	/// Where a broadcast source's timestamps land on a timeline that reads
+	/// `at` at `now`: where what it shows lands there. While that cannot be
+	/// found, such as offline, failed, or before a new stream shows anything,
+	/// where it last landed, since its last picture stays until another
+	/// replaces it. `None` before it ever lands, and for any other source.
+	pub fn lands(&self, at: Duration, now: Instant) -> Option<Landing> {
+		if !matches!(self.source, Source::Broadcast { .. }) {
+			return None;
+		}
+		let mut landed = self.landed.lock().unwrap();
+		if let Some(landing) = self.landing(at, now) {
+			*landed = Some(landing);
+		}
+		landed.clone()
+	}
+
+	/// Where the stream online now lands, once its clock is anchored. A still
+	/// has no moment, so without sound to anchor it, it lands at 0.
+	fn landing(&self, at: Duration, now: Instant) -> Option<Landing> {
+		if self.status() != Status::Live {
 			return None;
 		}
 		let clock = self.clock.as_ref()?;
+		let played = self.played.lock().unwrap();
+		let instance = played.broadcast.as_ref()?.info().instance.clone();
 		// Any stamp maps through the one anchor: the newest picture shown, or
 		// without one, the sound playing now.
-		let newest = self.played.lock().unwrap().newest;
-		let reference = match newest {
-			Some(newest) => newest,
-			None => moq_net::Timestamp::try_from(clock.playhead(now)?).ok()?,
+		let reference = match (played.newest, clock.playhead(now)) {
+			(Some(newest), _) => newest,
+			(None, Some(head)) => moq_net::Timestamp::try_from(head).ok()?,
+			(None, None) if played.still => return Some(Landing { instance, offset: 0 }),
+			(None, None) => return None,
 		};
+		drop(played);
 		let due = clock.due(reference)?;
 		let micros = |duration: Duration| i64::try_from(duration.as_micros()).ok();
 		// When the reference plays, on the timeline.
@@ -754,7 +787,8 @@ impl Feed {
 			Some(ahead) => micros(at)?.checked_add(micros(ahead)?)?,
 			None => micros(at)?.checked_sub(micros(now.duration_since(due))?)?,
 		};
-		lands.checked_sub(micros(Duration::from(reference))?)
+		let offset = lands.checked_sub(micros(Duration::from(reference))?)?;
+		Some(Landing { instance, offset })
 	}
 
 	/// The source's gain, mute, delay, and meter in every mix, if it has sound.
@@ -1252,14 +1286,12 @@ impl Driver {
 						return Ok(());
 					};
 					let next_video = pick(catalog.video.enabled())?;
-					let next_audio = pick(catalog.audio.enabled())?;
-					// A source without video, such as an image or a color, is a still.
-					let still = {
-						let mut stills = catalog.binary.tracks.iter();
-						stills
-							.find(|(_, config)| config.broadcast.is_none() && config.mime.as_deref().is_some_and(|mime| mime.starts_with("image/")))
-							.map(|(id, config)| Reference::track(config, id).to_string())
+					// Sound it does not play, it never fetches.
+					let next_audio = match self.strip {
+						Some(_) => pick(catalog.audio.enabled())?,
+						None => None,
 					};
+					let still = still(&catalog.binary);
 					let track = match &next_video {
 						Some((id, config)) => Some(Reference::track(config, id).to_string()),
 						None => still.clone(),
@@ -1485,9 +1517,13 @@ impl Driver {
 					};
 					let next_video = pick(catalog.video.enabled())?;
 					let next_audio = pick(catalog.audio.enabled())?;
-					let track = next_video
-						.as_ref()
-						.map(|(id, config)| (Reference::track(config, id).to_string(), next_audio.is_some()));
+					// A broadcast without video, such as another studio's
+					// published image, shows a still, as a layer of it does.
+					let still = still(&catalog.binary);
+					let track = match &next_video {
+						Some((id, config)) => Some((Reference::track(config, id).to_string(), next_audio.is_some())),
+						None => still.clone().map(|still| (still, false)),
+					};
 					if track != video {
 						video = track;
 						let mut played = self.played.lock().unwrap();
@@ -1495,13 +1531,15 @@ impl Driver {
 						// The newest picture was the old track's, a moment the
 						// new one may not hold.
 						played.newest = None;
+						played.still = next_video.is_none() && still.is_some();
 						drop(played);
 						// Video waits for its audio as long as audio's target can
 						// grow; alone, it waits only its own delay.
 						let max = if next_audio.is_some() { MAX_DELAY } else { VIDEO_DELAY };
-						video_playing = match next_video {
-							Some((id, config)) => Box::pin(self.play_video(&broadcast, id, config, &clock, max)),
-							None => Box::pin(std::future::pending()),
+						video_playing = match (next_video, still) {
+							(Some((id, config)), _) => Box::pin(self.play_video(&broadcast, id, config, &clock, max)),
+							(None, Some(still)) => Box::pin(self.follow_still(&broadcast, still)),
+							(None, None) => Box::pin(std::future::pending()),
 						};
 					}
 					let track = next_audio.as_ref().map(|(id, config)| Reference::track(config, id).to_string());
@@ -2440,6 +2478,7 @@ fn open(
 			None => clock.as_ref().map(timeline::Producer::consume),
 		},
 		offset: offset.clone(),
+		landed: Mutex::new(None),
 	};
 	let driver = Driver {
 		name: name.to_string(),
@@ -2510,18 +2549,35 @@ impl Source {
 		match (self, other) {
 			(
 				Source::Layer {
-					clock, path, instance, ..
+					clock,
+					path,
+					instance,
+					sound,
+					..
 				},
 				Source::Layer {
 					clock: other_clock,
 					path: other_path,
 					instance: other_instance,
+					sound: other_sound,
 					..
 				},
-			) => clock == other_clock && path == other_path && instance == other_instance,
+			) => clock == other_clock && path == other_path && instance == other_instance && sound == other_sound,
 			_ => self == other,
 		}
 	}
+}
+
+/// The image track a broadcast without video shows as a still, such as a
+/// published image or color.
+fn still(binary: &hang::catalog::Binary) -> Option<String> {
+	binary
+		.tracks
+		.iter()
+		.find(|(_, config)| {
+			config.broadcast.is_none() && config.mime.as_deref().is_some_and(|mime| mime.starts_with("image/"))
+		})
+		.map(|(id, config)| Reference::track(config, id).to_string())
 }
 
 /// `timestamp` moved `offset` microseconds, or `None` off a timestamp's range.
@@ -3242,6 +3298,7 @@ mod tests {
 				path: "room/cam".into(),
 				instance: None,
 				offset,
+				sound: false,
 			};
 			collection.sources.insert("cam".into(), layer(250_000));
 			collection.validate().unwrap();
@@ -3316,6 +3373,7 @@ mod tests {
 					path: "room/logo".into(),
 					instance: None,
 					offset: 0,
+					sound: false,
 				},
 			);
 			let mut sources = Sources::new(context);
@@ -3328,6 +3386,61 @@ mod tests {
 			})
 			.await;
 			assert_eq!(pixels, [255, 0, 0, 255]);
+		})
+		.await;
+	}
+
+	/// A broadcast without video, such as another studio's published image,
+	/// shows its still, which has no moment, so it lands on any timeline at 0.
+	#[tokio::test]
+	async fn a_broadcast_shows_a_still() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let _still = Still::new(&origin, "room/guest", [255, 0, 0, 255]);
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection());
+			start(&sources, drivers).await;
+			let feed = sources.get("guest").unwrap();
+			let pixels = until(|| match feed.next_picture() {
+				Some(Picture::Rgba { pixels, .. }) => Some(pixels),
+				_ => None,
+			})
+			.await;
+			assert_eq!(pixels, [255, 0, 0, 255]);
+			let landing = feed.lands(Duration::from_secs(5), kio::clock::now()).unwrap();
+			assert_eq!(landing.offset, 0);
+			assert!(landing.instance.is_some());
+		})
+		.await;
+	}
+
+	/// A layer whose sound plays nowhere has no strip, so it never fetches
+	/// its broadcast's sound.
+	#[tokio::test]
+	async fn a_layer_fetches_only_the_sound_it_plays() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut collection = collection();
+			let layer = |sound| Source::Layer {
+				clock: "guest".into(),
+				path: "room/cam".into(),
+				instance: None,
+				offset: 0,
+				sound,
+			};
+			collection.sources.insert("cam".into(), layer(false));
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			assert!(sources.get("cam").unwrap().strip().is_none());
+
+			collection.sources.insert("cam".into(), layer(true));
+			let drivers = sources.sync(&collection);
+			assert_eq!(drivers.len(), 1, "opened again to play its sound");
+			start(&sources, drivers).await;
+			assert!(sources.get("cam").unwrap().strip().is_some());
 		})
 		.await;
 	}
@@ -3345,6 +3458,7 @@ mod tests {
 				path: path.into(),
 				instance: instance.map(|instance| instance.parse().unwrap()),
 				offset: 0,
+				sound: false,
 			};
 			collection.sources.insert("cam".into(), layer("room/cam", None));
 			let mut sources = Sources::new(context);
@@ -3447,12 +3561,12 @@ mod tests {
 			let feed = sources.get("guest").unwrap();
 			let clock = feed.clock.clone().unwrap();
 			assert_eq!(
-				feed.offset(Duration::from_secs(5), kio::clock::now()),
+				feed.lands(Duration::from_secs(5), kio::clock::now()),
 				None,
 				"unanchored"
 			);
 			assert_eq!(
-				sources.get("red").unwrap().offset(Duration::ZERO, kio::clock::now()),
+				sources.get("red").unwrap().lands(Duration::ZERO, kio::clock::now()),
 				None
 			);
 
@@ -3462,14 +3576,33 @@ mod tests {
 			let due = until(|| clock.due(stamp)).await;
 			until_time(due).await;
 			assert_eq!(shown(feed).await, Duration::from(stamp));
-			assert!(feed.instance().is_some(), "an origin names the stream");
+			let instance = feed.instance();
+			assert!(instance.is_some(), "an origin names the stream");
 			let now = kio::clock::now();
+			let offset = |at, now| feed.lands(at, now).map(|landing| landing.offset);
 			// Shown now, as the timeline reads 5 s: 4 s after its own stamp.
-			assert_eq!(feed.offset(Duration::from_secs(5), now), Some(4_000_000));
-			assert_eq!(feed.offset(Duration::from_millis(400), now), Some(-600_000));
+			assert_eq!(offset(Duration::from_secs(5), now), Some(4_000_000));
+			assert_eq!(offset(Duration::from_millis(400), now), Some(-600_000));
 			// Read 10 ms later, it was shown 10 ms before then.
 			let later = now + Duration::from_millis(10);
-			assert_eq!(feed.offset(Duration::from_secs(5), later), Some(3_990_000));
+			assert_eq!(
+				feed.lands(Duration::from_secs(5), later),
+				Some(Landing {
+					instance: instance.clone(),
+					offset: 3_990_000
+				})
+			);
+
+			// Offline, its last picture stays, so it lands where it last did.
+			drop(live);
+			until(|| (feed.status() == Status::Offline).then_some(())).await;
+			assert_eq!(
+				feed.lands(Duration::from_secs(6), later + Duration::from_secs(1)),
+				Some(Landing {
+					instance,
+					offset: 3_990_000
+				})
+			);
 		})
 		.await;
 	}
