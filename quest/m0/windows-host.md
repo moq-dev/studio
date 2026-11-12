@@ -46,7 +46,8 @@ Whatever fails to build on this host is this quest's to fix.
 
 Decided 2026-11-12 (maintainer, /quest-review checkpoint): ✅ this quest owns
 every build error on the host (rejected: handing errors CI also shows to the
-CI build quest, which needs it as a prerequisite; merging that split as is).
+CI build quest, which would make that quest this one's prerequisite; merging
+that split as is).
 
 ## Hosts
 
