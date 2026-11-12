@@ -27,9 +27,13 @@ the studio landed.
 The nightly `windows-latest` job (`.github/workflows/nightly.yml`) compiles
 `moq-studio --features release` for Windows; this quest runs it.
 
+## Hosts
+
+- windows - it runs the studio on real Windows hardware
+
 ## Required
 
-- [nixos2 boots Windows for agents](/quest/m0/windows-host.md) - the Windows machine this runs on
+- [The windows PC hosts Windows agents](/quest/m0/windows-host.md) - the Windows machine this runs on
 
 ## Related
 
