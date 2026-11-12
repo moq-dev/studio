@@ -389,6 +389,17 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 	}
 }
 
+/// The app icon, which the build rasterizes from its SVG, for the systems
+/// that take it from the window rather than the desktop entry or bundle.
+fn icon() -> egui::IconData {
+	let size = env!("ICON_SIZE").parse().expect("the build sets a numeric icon size");
+	egui::IconData {
+		rgba: include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba")).to_vec(),
+		width: size,
+		height: size,
+	}
+}
+
 /// Show the window until it is closed.
 fn run(
 	app: App,
@@ -399,7 +410,10 @@ fn run(
 	let options = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
 			.with_title("kixel.live Studio")
-			.with_app_id("moq-studio")
+			// The Wayland app id and X11 class, which the desktop finds the
+			// app's entry and icon by: the entry's file name, without `.desktop`.
+			.with_app_id("live.kixel.studio")
+			.with_icon(icon())
 			.with_inner_size([1440.0, 900.0]),
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
 			// The window draws on the device the compositor does, so preview and
@@ -412,6 +426,9 @@ fn run(
 			}),
 			..Default::default()
 		},
+		// eframe would otherwise name the settings directory after the app id;
+		// keep it beside the browser profile, under the app's name.
+		persistence_path: eframe::storage_dir("moq-studio").map(|dir| dir.join("app.ron")),
 		..Default::default()
 	};
 	let event_loop = EventLoop::<eframe::UserEvent>::with_user_event()

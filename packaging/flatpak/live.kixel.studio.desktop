@@ -4,6 +4,5 @@ Name=kixel.live Studio
 Comment=Compose scenes on the GPU and go live over MoQ
 Exec=moq-studio-desktop
 Terminal=false
+Icon=live.kixel.studio
 Categories=AudioVideo;Video;
-# The Wayland app id and X11 class the window sets.
-StartupWMClass=moq-studio

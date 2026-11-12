@@ -24,6 +24,10 @@ Lay the bundle out and order the signing so nested code can be added: a
 system extension and CEF's helper apps are each signed before the app that
 holds them.
 
+The bundle's icon is an `.icns` that the build generates from
+`packaging/live.kixel.studio.svg`, the only drawn copy, and `Info.plist`
+names; never check the `.icns` in.
+
 The signing material lives in the `release` Actions environment, which only
 protected branches can deploy from, for team `D7D5SDDB5Z` and bundle ID
 `live.kixel.studio`:
