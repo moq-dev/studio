@@ -783,7 +783,10 @@ impl Program {
 		let published = match collection.published.is_empty() {
 			true => publisher.finish(),
 			false => {
-				let start = at.saturating_sub(state.compositor.program_since());
+				// To the whole microsecond as the frame's stamp is, rather than
+				// rounded as the wire would, so a cut's layout starts on its frame.
+				let start = at.saturating_sub(state.compositor.program_since()).as_micros();
+				let start = Duration::from_micros(start as u64);
 				let layout = moq_scene::layout::Layout::new(collection, state.compositor.program_scene(), start);
 				publisher.update(layout, stamp)
 			}
@@ -879,7 +882,7 @@ impl Engine {
 			recordings,
 			room,
 		} = launch;
-		let (bus, mixer) = moq_audio::bus::Bus::new(Default::default())?;
+		let (bus, driver) = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
 		// Every relay feeds `subscribe`, so a guest either one routes is seen.
 		let guests = match &room {
@@ -938,8 +941,13 @@ impl Engine {
 		// Absolute, so a copied image names the same file in another collection.
 		let dir = autosave.path().parent().filter(|dir| !dir.as_os_str().is_empty());
 		let dir = std::path::absolute(dir.unwrap_or(Path::new(".")))?;
+		// The program clock's start, from which the audio clock advances the
+		// bus too, so the sources place their sound on it.
+		let start = Instant::now();
+		let (mixer, mixed) = source::Mixer::new(driver, start);
 		let sources = Sources::new(source::Context {
 			bus: bus.clone(),
+			mixed,
 			origin: sources,
 			dir,
 			output: moq_video::render::output(&gpu.device),
@@ -999,7 +1007,6 @@ impl Engine {
 			sources: _,
 		} = publish;
 
-		let start = Instant::now();
 		// Where the program clock starts on the catalog's, so the wall time the
 		// catalog advertises for a frame is when the program drew it.
 		let epoch = Duration::from(clock.capture(start)?);
@@ -1038,6 +1045,14 @@ impl Engine {
 		// already running, which would otherwise keep this engine and its
 		// publication alive beside a retry's.
 		let starting = Starting(Some(engine.clone()));
+		// The audio clock first, so the bus keeps up with the program clock by
+		// the time the program starts the sources, whose sound otherwise waits
+		// for it.
+		let mix = engine.clone();
+		let config = bus.config().clone();
+		let rate = config.sample_rate;
+		let thread = clocked("audio".into(), async move || mix.run_audio(start, config, mixer).await)?;
+		engine.threads.lock().unwrap().push(thread);
 		let program = engine.clone();
 		let encoders = Encoders {
 			main,
@@ -1048,11 +1063,6 @@ impl Engine {
 		let thread = clocked("program".into(), async move || {
 			program.run_program(start, epoch, encoders).await
 		})?;
-		engine.threads.lock().unwrap().push(thread);
-		let mix = engine.clone();
-		let config = bus.config().clone();
-		let rate = config.sample_rate;
-		let thread = clocked("audio".into(), async move || mix.run_audio(start, config, mixer).await)?;
 		engine.threads.lock().unwrap().push(thread);
 		// Each on its own thread, so an encoder that falls behind skips its own
 		// audio rather than holding up the bus or the other.
@@ -1594,7 +1604,7 @@ impl Engine {
 	/// Runs without a relay too, so the meters move and sources never back up,
 	/// until the studio [stops](Self::stop), which ends every mix, so each
 	/// output reads its mix to the end.
-	async fn run_audio(&self, start: Instant, config: moq_audio::bus::Config, mut mixer: moq_audio::bus::Driver) {
+	async fn run_audio(&self, start: Instant, config: moq_audio::bus::Config, mut mixer: source::Mixer) {
 		let rate = u128::from(config.sample_rate);
 		let mut clock = kio::clock::interval_at(start, AUDIO_PERIOD);
 		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
