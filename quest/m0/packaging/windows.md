@@ -11,8 +11,7 @@ Windows.
 The feature policy is the [epic](/quest/m0/packaging/README.md)'s.
 
 Decided 2026-11-06 (maintainer, /quest-unblock): Windows ships unsigned
-until a release needs SmartScreen reputation; see
-[signing](/quest/m0/signing.md).
+until a release needs SmartScreen reputation.
 
 ## Required
 
