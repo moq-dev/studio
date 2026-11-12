@@ -139,8 +139,8 @@ async fn probe_encoders(gpu: engine::Gpu) -> Encoders {
 async fn probe_encoder(gpu: &engine::Gpu, picture: &Picture, canvas: Canvas) -> anyhow::Result<Encoding> {
 	use moq_video::render::export::{Exporter, Route};
 
-	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
-	let (mut exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config).await?;
+	let config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
+	let (mut exporter, config, rendition) = Exporter::new(&gpu.device, &gpu.queue, &config).await?;
 	let bitrate = rendition.bitrate.context("the encoder reports no bitrate")?;
 	let encoder = match &config.kind {
 		moq_video::encode::Kind::Named(name) => name.clone(),
