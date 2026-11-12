@@ -1247,12 +1247,10 @@ impl Driver {
 			if ended && queue.is_empty() {
 				return Ok(());
 			}
-			// Its moment, or once due, when its sound may have played.
+			// Its moment, or once due, soon to see whether its sound has played.
 			let wake = queue.front().and_then(|frame| match schedule.due(frame.timestamp) {
 				Some(due) if due > now => Some(due),
-				_ if !heard(schedule, frame.timestamp, now) => {
-					Some(crate::playout::hearing(schedule, frame.timestamp, now))
-				}
+				_ if !heard(schedule, frame.timestamp, now) => Some(now + crate::playout::RECHECK),
 				_ => None,
 			});
 			tokio::select! {
