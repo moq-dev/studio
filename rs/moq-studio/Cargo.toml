@@ -132,6 +132,10 @@ windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse",
 resvg = { version = "0.50", default-features = false }
 
 [dev-dependencies]
+# `just shots`: the window drawn headless on the compositor's GPU, saved as
+# PNG. The release for eframe's egui.
+egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 # A clock that moves wall time too, which renewed tokens' expiries read.
 kio = { workspace = true, features = ["manual"] }
 # Reads a saved clip's timeline back; the version moq-mux writes it with.

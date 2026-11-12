@@ -5,8 +5,8 @@
 The studio has a look of its own: its colors, type, spacing, and icons come
 from one set of tokens, and its controls are its own widgets, drawn as the
 [mock-ups](/quest/m0/ux/mock/shell-live.webp) draw them. Today's panels wear
-it at once, and a gallery view shows every widget in every state, in the
-[screenshots](/quest/m0/ux/shots.md).
+it at once, and a gallery view of `just shots` shows every widget in every
+state.
 
 Today the app sets no fonts, style, or visuals, draws no icons in its panels,
 and hard-codes a handful of colors.
@@ -47,7 +47,3 @@ draw, as `Studio::ui` does today.
 
 Human check: taste, on the gallery's screenshots, and readability of red
 against amber.
-
-## Required
-
-- [UI screenshots](/quest/m0/ux/shots.md) - the gallery's pictures

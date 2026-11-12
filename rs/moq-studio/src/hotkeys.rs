@@ -473,16 +473,14 @@ impl Backend {
 		{
 			use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 			let _ = window.ctx;
-			let wayland = window
-				.frame
-				.window_handle()
-				.is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)));
-			if wayland {
-				return Self::Portal(portal::Portal::new(runtime, fire));
-			}
-			match x11::X11::new(fire) {
-				Ok(x11) => Self::X11(x11),
-				Err(err) => Self::Focused(format!("cannot grab keys from the X server: {err:#}")),
+			match window.frame.window_handle().map(|handle| handle.as_raw()) {
+				Ok(RawWindowHandle::Wayland(_)) => Self::Portal(portal::Portal::new(runtime, fire)),
+				Ok(_) => match x11::X11::new(fire) {
+					Ok(x11) => Self::X11(x11),
+					Err(err) => Self::Focused(format!("cannot grab keys from the X server: {err:#}")),
+				},
+				// Such as a window drawn headless, with no display to hear keys on.
+				Err(err) => Self::Focused(format!("the studio has no window: {err}")),
 			}
 		}
 		#[cfg(any(target_os = "macos", windows))]

@@ -28,5 +28,8 @@ Run `just ci` before every push.
 
 `README.md` is the user guide. A change to what a user does (flags, panels, the scene file, outputs) updates it in the same PR.
 
+`just shots` renders named views of the window to PNG with no display (the table in `rs/moq-studio/src/shots.rs`).
+A PR that changes what the window shows adds a view for each page or state it builds, and shows the views it changes in its body, beside the mock-up frames they implement.
+
 Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
 The `quest` binary comes from the moq-dev/quest flake input, so outside the dev shell run it as `nix develop --command quest ...`. It serves the quest skills; change them upstream and bump the input.

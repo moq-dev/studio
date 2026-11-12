@@ -28,6 +28,8 @@ mod mix;
 mod record;
 mod replay;
 mod setup;
+#[cfg(test)]
+mod shots;
 mod snap;
 mod ui;
 mod uplink;
