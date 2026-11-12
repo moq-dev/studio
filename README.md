@@ -943,8 +943,11 @@ it as a broadcast of its own and place it over the program themselves, as the
   The studio publishes nothing more of it.
 
 The program leaves a published source out, wherever it or a clone of it is
-placed, and so does every audio scene's mix, guests' return feeds included.
-The studio draws it only as viewers will: over the program, in the Program
+placed, and so does every audio scene's mix the studio encodes: the
+program's audio, recordings, and published scenes. People in the studio
+still hear it as viewers do: **Listen** and guests' return feeds mix it in
+where its audio scene reaches it, at its gain, mute, pan, and delay. The
+studio draws it only as viewers will: over the program, in the Program
 panel and the program's virtual camera, and over the scene in preview, so
 both show what viewers see. It goes over every other item of its scene, and
 over the top layer, however the scene stacks it. Recordings hold the program

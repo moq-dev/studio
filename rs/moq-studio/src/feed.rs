@@ -98,7 +98,9 @@ impl Feeds {
 			renewed.contains(&(identity.clone(), feed.generation)) && !feed.task.is_finished()
 		});
 		let on_program = collection.program_audio().unwrap_or_default();
-		let program = sources.mix(on_program);
+		// As the studio hears it, so a guest hears every other guest, even one
+		// published independently.
+		let program = sources.listened(on_program);
 		for (identity, generation) in renewed {
 			if !self.feeds.contains_key(&identity) {
 				match self.open(&identity, generation) {
@@ -117,8 +119,7 @@ impl Feeds {
 			let voices: Vec<&str> = self.room.voices(collection, &identity).collect();
 			let heard = voices.iter().find(|name| {
 				let strip = sources.get(name).and_then(|source| source.strip());
-				let audible = strip.is_some_and(|strip| strip.gain() > 0.0);
-				audible && sources.plays(on_program, name)
+				strip.is_some_and(|strip| strip.gain() > 0.0 && !strip.muted() && program.routes(strip))
 			});
 			let voice = heard.or(voices.first());
 			match voice.and_then(|name| sources.get(name)?.strip()) {

@@ -1310,7 +1310,8 @@ impl Engine {
 			if collection.audio_scene(monitor.name()).is_none() {
 				monitor.set_name(program);
 			}
-			if let Some(mix) = state.sources.mix(monitor.name()) {
+			// What viewers hear, published sources included.
+			if let Some(mix) = state.sources.listened(monitor.name()) {
 				monitor.play(mix.clone());
 			}
 		}

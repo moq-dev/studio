@@ -313,8 +313,12 @@ impl Mixed {
 pub struct Sources {
 	context: Context,
 	feeds: BTreeMap<String, Feed>,
-	/// Each audio scene's mix, by its name.
+	/// Each audio scene's mix, by its name, which leaves out the sources
+	/// published independently.
 	mixes: BTreeMap<String, Mix>,
+	/// The mix people in the studio hear of each audio scene that reaches a
+	/// source published independently, by its name: its mix with those in.
+	listened: BTreeMap<String, Mix>,
 	/// The sources on program, as last set.
 	on_program: BTreeSet<String>,
 }
@@ -326,6 +330,7 @@ impl Sources {
 			context,
 			feeds: BTreeMap::new(),
 			mixes: BTreeMap::new(),
+			listened: BTreeMap::new(),
 			on_program: BTreeSet::new(),
 		}
 	}
@@ -367,7 +372,7 @@ impl Sources {
 	/// replacement never plays over it. Panics on a gain, pan, or delay
 	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
-		let mixes = &self.mixes;
+		let mixes = [&self.mixes, &self.listened];
 		self.feeds.retain(|name, feed| {
 			let keep = match collection.sources.get(name) {
 				// A layer moved onto its clock anew plays on, so a guest's offset
@@ -383,7 +388,7 @@ impl Sources {
 				_ => false,
 			};
 			if !keep {
-				leave(mixes, feed);
+				leave(&mixes, feed);
 			}
 			keep
 		});
@@ -397,14 +402,7 @@ impl Sources {
 			.collect();
 		for name in orphaned {
 			let feed = self.feeds.remove(&name).expect("listed above");
-			leave(&self.mixes, &feed);
-		}
-		// A mix ends once its last handle drops, which may be a reader's.
-		self.mixes.retain(|name, _| collection.audio_scene(name).is_some());
-		for scene in &collection.audio_scenes {
-			if !self.mixes.contains_key(&scene.name) {
-				self.mixes.insert(scene.name.clone(), self.context.bus.mix());
-			}
+			leave(&[&self.mixes, &self.listened], &feed);
 		}
 		// Nested audio scenes are flattened: a mix sums every source an audio
 		// scene reaches, each once, so a sound reached two ways is not doubled.
@@ -413,6 +411,24 @@ impl Sources {
 			.iter()
 			.map(|scene| (scene.name.as_str(), collection.heard(&scene.name)))
 			.collect();
+		// A mix ends once its last handle drops, which may be a reader's. Only
+		// an audio scene reaching a published source sounds otherwise to people
+		// in the studio, so only it costs a second mix.
+		let listened = |scene: &str| {
+			heard
+				.get(scene)
+				.is_some_and(|heard| heard.iter().any(|name| collection.published.contains(*name)))
+		};
+		self.mixes.retain(|name, _| collection.audio_scene(name).is_some());
+		self.listened.retain(|name, _| listened(name));
+		for scene in &collection.audio_scenes {
+			if !self.mixes.contains_key(&scene.name) {
+				self.mixes.insert(scene.name.clone(), self.context.bus.mix());
+			}
+			if listened(&scene.name) && !self.listened.contains_key(&scene.name) {
+				self.listened.insert(scene.name.clone(), self.context.bus.mix());
+			}
+		}
 
 		let mut drivers = Vec::new();
 		// Layers last, once the broadcast sources whose clocks they play on run.
@@ -444,21 +460,16 @@ impl Sources {
 				// The bus is stereo, the one layout that refuses no pan.
 				strip.set_pan(audio.pan).expect("stereo bus pans");
 				strip.set_delay(audio.delay);
+				let reached = |scene: &str| heard.get(scene).is_some_and(|heard| heard.contains(name.as_str()));
+				// A source published independently reaches viewers by its own
+				// track, never through a mix they get, but people in the studio
+				// hear it.
+				let published = collection.published.contains(name);
 				for (scene, mix) in &self.mixes {
-					// A source published independently reaches viewers by its own
-					// track, never through a mix.
-					let routed = !collection.published.contains(name)
-						&& heard
-							.get(scene.as_str())
-							.is_some_and(|heard| heard.contains(name.as_str()));
-					if mix.routes(strip) == routed {
-						continue;
-					}
-					if routed {
-						mix.route(strip);
-					} else {
-						mix.unroute(strip);
-					}
+					route(mix, strip, !published && reached(scene));
+				}
+				for (scene, mix) in &self.listened {
+					route(mix, strip, reached(scene));
 				}
 				if let Some(sound) = &self.feeds[name].sound {
 					let heard = self.mixes.values().any(|mix| mix.routes(strip));
@@ -474,7 +485,7 @@ impl Sources {
 	/// every mix at once, as an edited source does.
 	pub fn restart(&mut self, name: &str) {
 		if let Some(feed) = self.feeds.remove(name) {
-			leave(&self.mixes, &feed);
+			leave(&[&self.mixes, &self.listened], &feed);
 		}
 	}
 
@@ -483,7 +494,7 @@ impl Sources {
 	/// and the next [`sync`](Self::sync) starts the sources again.
 	pub fn stop(&mut self) {
 		for feed in std::mem::take(&mut self.feeds).into_values() {
-			leave(&self.mixes, &feed);
+			leave(&[&self.mixes, &self.listened], &feed);
 		}
 	}
 
@@ -493,9 +504,19 @@ impl Sources {
 	}
 
 	/// The mix of the audio scene called `scene`, as the collection last
-	/// synced had it.
+	/// synced had it, which the program, recordings, and published scenes
+	/// encode: without the sources published independently, which viewers
+	/// mix in from their own broadcasts.
 	pub fn mix(&self, scene: &str) -> Option<&Mix> {
 		self.mixes.get(scene)
+	}
+
+	/// The mix people in the studio hear of the audio scene called `scene`,
+	/// such as on **Listen** or in a guest's return feed: its
+	/// [`mix`](Self::mix) with the sources published independently it
+	/// reaches in too, as viewers hear them.
+	pub fn listened(&self, scene: &str) -> Option<&Mix> {
+		self.listened.get(scene).or_else(|| self.mixes.get(scene))
 	}
 
 	/// Whether the audio scene called `scene` plays the source called `name`:
@@ -516,9 +537,21 @@ impl Sources {
 
 /// Take a stopping `feed` out of every one of `mixes`, so it leaves nothing
 /// behind in them, nor plays over a replacement.
-fn leave(mixes: &BTreeMap<String, Mix>, feed: &Feed) {
+fn leave(mixes: &[&BTreeMap<String, Mix>], feed: &Feed) {
 	let Some(strip) = &feed.strip else { return };
-	for mix in mixes.values() {
+	for mix in mixes.iter().flat_map(|mixes| mixes.values()) {
+		mix.unroute(strip);
+	}
+}
+
+/// Route `strip` into `mix` or out of it.
+fn route(mix: &Mix, strip: &Strip, routed: bool) {
+	if mix.routes(strip) == routed {
+		return;
+	}
+	if routed {
+		mix.route(strip);
+	} else {
 		mix.unroute(strip);
 	}
 }
@@ -3008,6 +3041,43 @@ mod tests {
 			collection.audio.insert("guest".into(), muted);
 			assert!(sources.sync(&collection).is_empty());
 			assert!(!sources.plays("Headphones", "guest"), "muted everywhere");
+		})
+		.await;
+	}
+
+	/// A source published independently leaves the mix the studio encodes,
+	/// but people in the studio still hear it in the mix they listen to, and
+	/// leave that too once it stops.
+	#[tokio::test]
+	async fn a_published_source_is_heard_but_not_encoded() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut collection = collection();
+			let program = collection.program_audio().unwrap().to_string();
+			let program = program.as_str();
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let strip = sources.get("guest").unwrap().strip().unwrap().clone();
+			assert!(sources.mix(program).unwrap().routes(&strip));
+			assert!(sources.listened(program).unwrap().routes(&strip), "the mix itself");
+
+			collection.published.insert("guest".into());
+			assert!(sources.sync(&collection).is_empty());
+			assert!(!sources.mix(program).unwrap().routes(&strip), "encoded");
+			let listened = sources.listened(program).unwrap().clone();
+			assert!(listened.routes(&strip), "not heard in the studio");
+
+			sources.restart("guest");
+			assert!(!listened.routes(&strip), "kept the old strip");
+
+			collection.published.clear();
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let strip = sources.get("guest").unwrap().strip().unwrap().clone();
+			assert!(sources.mix(program).unwrap().routes(&strip));
+			assert!(sources.listened.is_empty(), "a second mix with nothing published");
 		})
 		.await;
 	}

@@ -45,7 +45,8 @@ pub struct Collection {
 	/// publishes and a broadcast source as its publisher's, and the
 	/// [composition](crate::composition) says where viewers show it over the
 	/// program and how they play its sound. The program and every audio
-	/// scene's mix leave it out. Only a broadcast or a source with a track of
+	/// scene's encoded mix leave it out, but the mix people in the studio
+	/// hear holds it ([`Sources::listened`](crate::source::Sources::listened)). Only a broadcast or a source with a track of
 	/// its own can be, and not one with its background removed, since its
 	/// track would show the background. Wherever it is placed, it takes only what every
 	/// player can reproduce, and no scene that another scene draws holds it.
