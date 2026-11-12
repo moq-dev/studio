@@ -16,6 +16,7 @@ Never point the submodule at an unmerged moq branch on `main`.
 # Rust
 
 - Every moq crate is a path dependency into `moq/`, declared once in the root `Cargo.toml`. `sh/check-moq-pin.sh` fails `just check` if a moq git dependency appears or the checkout drifts from the gitlink.
+- Follow moq's Rust conventions (`moq/rs/AGENTS.md`).
 - Read the clock through `kio::clock` (`clippy.toml` bans direct reads), so tests can pause it.
 - `moq-scene` stays UI-free: no egui types, so a headless compositor and the wasm build can reuse it.
 - Defaults skip anything needing a system library (`capture`, `pipewire`, `vaapi`, `openh264`); `just check` covers them explicitly.
