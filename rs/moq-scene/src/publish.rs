@@ -266,8 +266,15 @@ struct Independent {
 
 impl Independent {
 	/// A broadcast at `<base>/<name>` on `origin`, its catalog on `clock`.
-	fn new(origin: &moq_net::origin::Producer, base: &moq_net::Path, name: &str, clock: moq_mux::Clock) -> Result<Self, Error> {
-		let path = moq_net::Path::new(name).and_then(|name| base.join(&name)).map_err(moq_net::Error::from)?;
+	fn new(
+		origin: &moq_net::origin::Producer,
+		base: &moq_net::Path,
+		name: &str,
+		clock: moq_mux::Clock,
+	) -> Result<Self, Error> {
+		let path = moq_net::Path::new(name)
+			.and_then(|name| base.join(&name))
+			.map_err(moq_net::Error::from)?;
 		let route = origin.route(path, moq_net::origin::RouteOptions::hidden())?;
 		let mut broadcast = route.broadcast().clone();
 		let config = moq_mux::catalog::Config::default().with_clock(clock);
@@ -1251,7 +1258,10 @@ mod tests {
 			assert_eq!(red.into_raw(), [255, 0, 0, 255]);
 
 			published.send(BTreeSet::new()).unwrap();
-			assert!(catalogs.next().await.unwrap().is_none(), "unpublished, its catalog ends");
+			assert!(
+				catalogs.next().await.unwrap().is_none(),
+				"unpublished, its catalog ends"
+			);
 		})
 		.await;
 	}

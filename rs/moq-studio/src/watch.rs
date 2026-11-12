@@ -267,10 +267,17 @@ async fn size(origin: moq_net::origin::Consumer, path: moq_net::Path, read: watc
 }
 
 /// Hand `set` the picture size of each catalog of `broadcast`.
-async fn catalogs(broadcast: moq_net::broadcast::Consumer, set: impl Fn(Option<(u32, u32)>) -> bool) -> anyhow::Result<()> {
+async fn catalogs(
+	broadcast: moq_net::broadcast::Consumer,
+	set: impl Fn(Option<(u32, u32)>) -> bool,
+) -> anyhow::Result<()> {
 	let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default()).await?;
 	while let Some(catalog) = moq_mux::catalog::Stream::next(&mut catalogs).await? {
-		let size = catalog.video.renditions.values().find_map(|config| config.coded_width.zip(config.coded_height));
+		let size = catalog
+			.video
+			.renditions
+			.values()
+			.find_map(|config| config.coded_width.zip(config.coded_height));
 		set(size);
 	}
 	Ok(())
@@ -670,10 +677,7 @@ mod tests {
 		let sources: Vec<&str> = items.iter().map(|item| item.source.as_str()).collect();
 		assert_eq!(sources, [PROGRAM, "layer/program", "layer/program"]);
 		assert_eq!(items[1].keyframes, composition.pictures[0].keyframes);
-		assert_eq!(
-			driven.sources[PROGRAM],
-			Source::Broadcast { path: "show".into() }
-		);
+		assert_eq!(driven.sources[PROGRAM], Source::Broadcast { path: "show".into() });
 		assert_eq!(
 			driven.sources["layer/program"],
 			Source::Layer {
@@ -694,7 +698,10 @@ mod tests {
 		);
 		let heard = driven.heard(AudioScene::DEFAULT);
 		assert_eq!(heard, BTreeSet::from([PROGRAM, "layer/alice"]));
-		assert_eq!(Some(&driven.audio["layer/alice"]), composition.sources["alice"].sound.as_ref());
+		assert_eq!(
+			Some(&driven.audio["layer/alice"]),
+			composition.sources["alice"].sound.as_ref()
+		);
 
 		let alone = collection(None, CANVAS, &paths()).unwrap();
 		assert_eq!(alone.sources.len(), 1, "the program alone");
@@ -814,7 +821,9 @@ mod tests {
 		let mut reads = read.subscribe();
 		let read = reads.wait_for(|read| read.pending.len() >= count).await.unwrap();
 		let pending = read.pending.iter().cloned();
-		pending.map(|(composition, at)| (composition, at.map(Duration::from))).collect()
+		pending
+			.map(|(composition, at)| (composition, at.map(Duration::from)))
+			.collect()
 	}
 
 	/// Wait until the newest thing `read` holds is the program alone.

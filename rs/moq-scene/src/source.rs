@@ -398,9 +398,7 @@ impl Sources {
 		let orphaned: Vec<String> = self
 			.feeds
 			.iter()
-			.filter(
-				|(_, feed)| matches!(&feed.source, Source::Layer { clock, .. } if !self.feeds.contains_key(clock)),
-			)
+			.filter(|(_, feed)| matches!(&feed.source, Source::Layer { clock, .. } if !self.feeds.contains_key(clock)))
 			.map(|(name, _)| name.clone())
 			.collect();
 		for name in orphaned {
@@ -1346,7 +1344,10 @@ impl Driver {
 			let now = kio::clock::now();
 			let offset = self.offset.load(Ordering::Relaxed);
 			// A picture moved off the clock's timeline never plays.
-			while queue.front().is_some_and(|frame| shift(frame.timestamp, offset).is_none()) {
+			while queue
+				.front()
+				.is_some_and(|frame| shift(frame.timestamp, offset).is_none())
+			{
 				queue.pop_front();
 			}
 			let on = |frame: &moq_video::Frame| shift(frame.timestamp, offset);
@@ -3185,7 +3186,9 @@ mod tests {
 			let mut live = live(&origin, false).await;
 			// The camera's own broadcast, on a timeline 250 ms behind the
 			// program's.
-			let publication = origin.route("room/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let publication = origin
+				.route("room/cam", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let mut broadcast = publication.broadcast().clone();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 			let (mut cam, mut cam_encoder) = rendition(&broadcast, catalog.timebase()).await;
@@ -3244,7 +3247,10 @@ mod tests {
 	fn a_timestamp_shifts() {
 		let stamp = moq_net::Timestamp::from_millis(1_000).unwrap();
 		assert_eq!(shift(stamp, 0), Some(stamp));
-		assert_eq!(shift(stamp, 1_500).map(Duration::from), Some(Duration::from_micros(1_001_500)));
+		assert_eq!(
+			shift(stamp, 1_500).map(Duration::from),
+			Some(Duration::from_micros(1_001_500))
+		);
 		assert_eq!(shift(stamp, -1_000_000).map(Duration::from), Some(Duration::ZERO));
 		assert_eq!(shift(stamp, -1_000_001), None);
 		assert_eq!(shift(stamp, i64::MIN), None);
@@ -3415,8 +3421,15 @@ mod tests {
 			start(&sources, drivers).await;
 			let feed = sources.get("guest").unwrap();
 			let clock = feed.clock.clone().unwrap();
-			assert_eq!(feed.offset(Duration::from_secs(5), kio::clock::now()), None, "unanchored");
-			assert_eq!(sources.get("red").unwrap().offset(Duration::ZERO, kio::clock::now()), None);
+			assert_eq!(
+				feed.offset(Duration::from_secs(5), kio::clock::now()),
+				None,
+				"unanchored"
+			);
+			assert_eq!(
+				sources.get("red").unwrap().offset(Duration::ZERO, kio::clock::now()),
+				None
+			);
 
 			until_time(kio::clock::now()).await;
 			picture(&mut live.video, &mut live.encoder, 1_000);

@@ -1874,7 +1874,8 @@ pub enum Source {
 		clock: String,
 		/// Its broadcast's path.
 		path: String,
-		/// The stream it must be, or `None` for whichever serves the path.
+		/// The stream `offset` is for, or `None` for whichever serves the
+		/// path: another stream shows nothing, unless a relay minted it.
 		instance: Option<moq_net::Instance>,
 		/// Microseconds added to its timestamps to put them on `clock`'s
 		/// timeline. A change plays on without opening the broadcast again.

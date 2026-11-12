@@ -835,7 +835,9 @@ impl Program {
 					// Offline, or not yet playing, it shows nothing here either.
 					let Some(feed) = state.sources.get(name) else { continue };
 					let Some(offset) = feed.offset(at, now) else { continue };
-					let Some(broadcast) = composed.child(name, Some(path)) else { continue };
+					let Some(broadcast) = composed.child(name, Some(path)) else {
+						continue;
+					};
 					moq_scene::composition::Child::new(broadcast, feed.instance(), offset)
 				}
 				Some(_) => match composed.child(name, None) {
@@ -847,7 +849,10 @@ impl Program {
 			children.insert(name.clone(), child);
 		}
 		let program = moq_scene::composition::Program {
-			broadcast: composed.program.relative(&composed.path).expect("the program is above it"),
+			broadcast: composed
+				.program
+				.relative(&composed.path)
+				.expect("the program is above it"),
 			instance: Some(self.publication.instance()),
 		};
 		// To the whole microsecond as the frame's stamp is, rather than
@@ -1948,7 +1953,12 @@ async fn publish(
 
 	let composition = Composed::new(&origin, path, clock.clone())?;
 	let (published, follow) = tokio::sync::watch::channel(BTreeSet::new());
-	let forward = (sources.clone(), origin.clone(), composition.sources.clone(), bandwidth.clone());
+	let forward = (
+		sources.clone(),
+		origin.clone(),
+		composition.sources.clone(),
+		bandwidth.clone(),
+	);
 	tokio::spawn(async move {
 		let (sources, origin, base, bandwidth) = forward;
 		if let Err(err) = sources.forward(follow, origin, base, bandwidth).await {
@@ -3315,10 +3325,8 @@ mod tests {
 		.expect("the catalog lists the composition");
 		assert_eq!(catalog.media.clock, engine.program.clock.wall(), "the program's clock");
 
-		let mut compositions = moq_json::snapshot::Consumer::<Composition>::new(
-			composed.track(TRACK).unwrap(),
-			Default::default(),
-		);
+		let mut compositions =
+			moq_json::snapshot::Consumer::<Composition>::new(composed.track(TRACK).unwrap(), Default::default());
 		let next = async |compositions: &mut moq_json::snapshot::Consumer<Composition>| {
 			kio::clock::timeout(TIMEOUT, compositions.next())
 				.await
@@ -3327,11 +3335,17 @@ mod tests {
 		};
 		let first = next(&mut compositions).await.expect("a composition");
 		assert_eq!(first.value.program.broadcast.as_str(), ".");
-		assert_eq!(first.value.program.instance, Some(engine.program.publication.instance()));
+		assert_eq!(
+			first.value.program.instance,
+			Some(engine.program.publication.instance())
+		);
 		let sources: Vec<&str> = first.value.pictures.iter().map(|item| item.source.as_str()).collect();
 		assert_eq!(sources, ["red"]);
 		let red = &first.value.sources["red"];
-		assert_eq!((red.broadcast.as_str(), red.offset, &red.instance), ("source/red", 0, &None));
+		assert_eq!(
+			(red.broadcast.as_str(), red.offset, &red.instance),
+			("source/red", 0, &None)
+		);
 
 		// Its own broadcast, on the program's clock.
 		let origin = engine.program._origin.consume();
@@ -3365,7 +3379,10 @@ mod tests {
 			state.commit(draft, None).unwrap();
 		}
 		let alone = next(&mut compositions).await.expect("a composition");
-		assert!(alone.value.sources.is_empty() && alone.value.pictures.is_empty(), "the program alone");
+		assert!(
+			alone.value.sources.is_empty() && alone.value.pictures.is_empty(),
+			"the program alone"
+		);
 		kio::clock::timeout(TIMEOUT, async { while own.next().await.unwrap().is_some() {} })
 			.await
 			.expect("the source's broadcast ends");

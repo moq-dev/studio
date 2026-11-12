@@ -308,7 +308,9 @@ impl Publisher {
 fn steady(composition: &mut Composition, published: &Composition) {
 	let drift = DRIFT.as_micros() as i64;
 	for (name, child) in &mut composition.sources {
-		let Some(before) = published.sources.get(name) else { continue };
+		let Some(before) = published.sources.get(name) else {
+			continue;
+		};
 		if before.broadcast == child.broadcast
 			&& before.instance == child.instance
 			&& before.offset.abs_diff(child.offset) <= drift.unsigned_abs()
@@ -406,7 +408,11 @@ mod tests {
 			("mic".into(), Child::new(relative("source/mic"), None, 0)),
 			(
 				"alice".into(),
-				Child::new(relative("../guests/alice/camera.hang"), Some("abc".parse().unwrap()), -1_500),
+				Child::new(
+					relative("../guests/alice/camera.hang"),
+					Some("abc".parse().unwrap()),
+					-1_500,
+				),
 			),
 		])
 	}
@@ -545,7 +551,8 @@ mod tests {
 		let text = toml::to_string(&composition).unwrap();
 		assert!(text.starts_with("version = 2\n"), "{text}");
 		assert!(text.contains("start = 1500\n"), "{text}");
-		let alice = "[sources.alice]\nbroadcast = \"../guests/alice/camera.hang\"\ninstance = \"abc\"\noffset = -1500\n";
+		let alice =
+			"[sources.alice]\nbroadcast = \"../guests/alice/camera.hang\"\ninstance = \"abc\"\noffset = -1500\n";
 		assert!(text.contains(alice), "{text}");
 		assert_eq!(toml::from_str::<Composition>(&text).unwrap(), composition);
 
@@ -568,7 +575,11 @@ mod tests {
 			let mut children = children();
 			children.insert(
 				"alice".into(),
-				Child::new(relative("../guests/alice/camera.hang"), Some(instance.parse().unwrap()), offset),
+				Child::new(
+					relative("../guests/alice/camera.hang"),
+					Some(instance.parse().unwrap()),
+					offset,
+				),
 			);
 			Composition::new(&collection, Some("live"), Duration::ZERO, program(), children)
 		};
