@@ -69,6 +69,8 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   Security.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
   [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
+- `moq-studio --watch <url>` opens no scene file and plays a studio broadcast
+  instead, as a viewer sees it; see [Watching](#watching).
 
 ## First launch
 
@@ -992,6 +994,29 @@ layout:
 A take changes the layout on the frame the program starts showing the new
 scene, so the published sources of the scene leaving go off and those of the
 scene coming in go on at once, even through a transition.
+
+#### Watching
+
+`moq-studio --watch https://relay.example/anon/my-show` plays a studio
+broadcast in a window as a viewer sees it: the program, with each picture of
+its layer layout over it and each sound mixed with it. The URL's path names
+the broadcast, as `moq play`'s does, and `--connect-token` and the `--quic-*`
+flags apply to it; `--connect`, `--failover`, and `--room` are refused
+beside it. It is a prototype for settling the layout's format, which goes
+once `moq play` plays layers.
+
+- Each layout takes effect when the program plays the frame it is stamped
+  with, and its pictures' keyframes play from its `start`.
+- Each source plays its own track on the program's clock: a picture shows
+  when the program's picture stamped alike does, and a sound plays with the
+  program's sound stamped alike, at its `gain`, `muted`, `pan`, and `delay`.
+  A frame too late for its moment is dropped.
+- A broadcast without a layout, or with a layout of another `version`, plays
+  its program alone; the window says why for the latter.
+- Guests' broadcasts are not in the layout yet, so only sources local to the
+  studio play as layers. `priority` and `toggle` are not applied.
+- Sound needs a build with `capture`; without it the window says so in the
+  log and plays the pictures alone.
 
 ### Recording
 

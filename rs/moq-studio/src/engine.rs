@@ -838,7 +838,7 @@ pub const AUDIO_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::fr
 
 /// How often the audio thread advances the bus. Short enough that a block is never
 /// close to the bus's buffering, long enough to cost nothing.
-const AUDIO_PERIOD: Duration = Duration::from_millis(10);
+pub(crate) const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
 /// The longest [`Engine::close`] waits for the sources to stop and the relays
 /// to drain, so a source or relay that never answers cannot hold up quitting.
@@ -3044,7 +3044,7 @@ fn browser_profile() -> anyhow::Result<PathBuf> {
 /// Run a source on its own thread until its feed is dropped, or fail the
 /// source when its thread cannot start. Returns what closes as the source
 /// ends, having finished its own track.
-fn spawn(driver: Driver) -> tokio::sync::oneshot::Receiver<()> {
+pub(crate) fn spawn(driver: Driver) -> tokio::sync::oneshot::Receiver<()> {
 	// Handed over once the thread exists, since a failed spawn drops what it
 	// was given and the driver must stay here to report why.
 	let (handoff, received) = mpsc::sync_channel::<Driver>(1);
@@ -3069,7 +3069,10 @@ fn spawn(driver: Driver) -> tokio::sync::oneshot::Receiver<()> {
 
 /// Start a thread called `name` that runs `task` with its own clock and IO,
 /// returning why if either cannot start.
-fn clocked(name: String, task: impl AsyncFnOnce() + Send + 'static) -> anyhow::Result<std::thread::JoinHandle<()>> {
+pub(crate) fn clocked(
+	name: String,
+	task: impl AsyncFnOnce() + Send + 'static,
+) -> anyhow::Result<std::thread::JoinHandle<()>> {
 	// The thread starts before its runtime is built and handed over, since a
 	// runtime dropped in the async caller, as a refused spawn would, panics.
 	let (handoff, received) = mpsc::sync_channel::<tokio::runtime::Runtime>(1);

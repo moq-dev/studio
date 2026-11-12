@@ -30,7 +30,7 @@ pub(crate) const VIDEO_DELAY: Duration = Duration::from_millis(100);
 /// represent, and so how long a stalled group is waited on before it is
 /// skipped, as under `moq play --delay auto`. A shorter wait would cap the
 /// estimate at it, since a skipped group is never measured.
-pub(crate) const MAX_DELAY: Duration = Duration::from_secs(2);
+pub const MAX_DELAY: Duration = Duration::from_secs(2);
 
 /// How far ahead of its moment a sound is handed to the bus.
 ///
@@ -179,14 +179,54 @@ impl Drop for Speaker<'_> {
 	}
 }
 
+/// How soon a picture held by [`heard`] looks at the playhead again: another
+/// broadcast's playhead moves, or re-anchors across a gap, without telling
+/// anyone reading its clock, so a held picture polls it.
+pub const RECHECK: Duration = Duration::from_millis(10);
+
 /// Whether a picture stamped `timestamp` may show at `now` on `schedule`:
 /// while audio plays, only once the sound stamped with it has played, so a
 /// stall in the audio alone holds the picture too.
-pub(crate) fn heard(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: Instant) -> bool {
+pub fn heard(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: Instant) -> bool {
 	schedule.target().is_none()
 		|| schedule
 			.playhead(now)
 			.is_some_and(|head| Duration::from(timestamp) <= head + CONTIGUOUS)
+}
+
+/// What to do at `now` with a sound stamped `timestamp` that plays on
+/// `schedule`, another track's clock.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Follow {
+	/// Write it to sound at this moment.
+	Write(Instant),
+	/// Look again at this moment.
+	Wait(Instant),
+	/// Its moment has passed, or the clock has none.
+	Drop,
+}
+
+/// Decide what to do with a followed sound from the clock as it is now, not
+/// as it was when the sound arrived, so a re-anchor moves it. The clock's own
+/// sound stamped alike must have been written first: when that stalls, this
+/// one waits with the pictures, until its moment has passed.
+pub(crate) fn follow(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: Instant) -> Follow {
+	let Some(sounds) = schedule.due(timestamp) else {
+		return Follow::Drop;
+	};
+	if sounds < now {
+		return Follow::Drop;
+	}
+	// The clock re-anchors without telling its readers, so a wait for a
+	// moment it may yet move earlier is rechecked too.
+	let write = sounds - WRITE_LEAD;
+	if write > now {
+		return Follow::Wait(write.min(now + RECHECK));
+	}
+	if !heard(schedule, timestamp, sounds) {
+		return Follow::Wait(now + RECHECK);
+	}
+	Follow::Write(sounds)
 }
 
 /// Writes placed frames into a positioned bus channel, each at the bus
@@ -328,6 +368,31 @@ mod tests {
 		assert!(clock.due(stamp(1_100)).is_some_and(|due| due < at(500)));
 		assert!(heard(&schedule, stamp(1_020), at(500)));
 		assert!(!heard(&schedule, stamp(1_100), at(500)), "shown past its sound");
+	}
+
+	/// A followed sound, rechecked until then, is written the bus's latency
+	/// before its moment once the clock's own sound stamped alike has been,
+	/// waits while that has not, and is dropped once its moment has passed.
+	#[test]
+	fn a_followed_sound_waits_for_the_clocks_own() {
+		let clock = timeline::Producer::new(VIDEO_DELAY);
+		let schedule = clock.consume();
+		let changed = Notify::new();
+		let mut speaker = Speaker::new(clock.clone(), &changed);
+		speaker.place(ms(1_000), FRAME, TARGET, at(0));
+		assert_eq!(
+			follow(&schedule, stamp(1_000), at(0)),
+			Follow::Wait(at(10)),
+			"rechecked"
+		);
+		assert_eq!(follow(&schedule, stamp(1_000), at(95)), Follow::Wait(at(100)));
+		assert_eq!(follow(&schedule, stamp(1_000), at(100)), Follow::Write(at(150)));
+		// Past what the clock's own sound has written: it stalled.
+		assert_eq!(follow(&schedule, stamp(1_100), at(200)), Follow::Wait(at(210)));
+		assert_eq!(follow(&schedule, stamp(1_100), at(250)), Follow::Wait(at(260)));
+		assert_eq!(follow(&schedule, stamp(1_100), at(251)), Follow::Drop);
+		let fresh = clock.clone().reset(VIDEO_DELAY).consume();
+		assert_eq!(follow(&fresh, stamp(1_000), at(0)), Follow::Drop, "no moment yet");
 	}
 
 	/// A stall longer than the target re-buffers: the next frame sounds the

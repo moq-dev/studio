@@ -32,6 +32,7 @@ mod snap;
 mod ui;
 mod uplink;
 mod vcam;
+mod watch;
 
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -41,7 +42,15 @@ pub struct Config {
 	/// The scene collection to open, saved as it changes. If it does not exist,
 	/// guided setup proposes one and creates it.
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
-	pub scenes: PathBuf,
+	pub scenes: Option<PathBuf>,
+
+	/// Play a studio broadcast instead, as a viewer sees it: the program with
+	/// each source published independently over it. The URL's path names the
+	/// broadcast, as `moq play`'s does, such as
+	/// `https://relay.example/anon/studio`. A prototype, until `moq play` plays
+	/// the layer layout.
+	#[usage(long)]
+	pub watch: Option<url::Url>,
 
 	/// The broadcast path the program is published at.
 	#[usage(long, default = "studio")]
@@ -85,6 +94,30 @@ pub struct Config {
 }
 
 impl Config {
+	/// The scene file to open, refusing `--watch` beside the studio's own flags.
+	fn scenes(&self) -> anyhow::Result<Option<&Path>> {
+		if self.watch.is_none() {
+			let scenes = self
+				.scenes
+				.as_deref()
+				.context("name a scene file to open, or --watch a broadcast")?;
+			return Ok(Some(scenes));
+		}
+		anyhow::ensure!(
+			self.scenes.is_none(),
+			"--watch plays a broadcast, so it opens no scene file"
+		);
+		anyhow::ensure!(
+			self.client.url.is_none() && self.failover.is_none(),
+			"--watch names the relay in its URL, so it takes no --connect or --failover"
+		);
+		anyhow::ensure!(
+			self.guests.room.is_none(),
+			"--watch publishes nothing, so it has no --room"
+		);
+		Ok(None)
+	}
+
 	/// Refuse a config parsed from released spellings, naming what replaced each.
 	fn check_deprecated(&self) -> anyhow::Result<()> {
 		let mut deprecated = self.client.deprecated();
@@ -149,6 +182,12 @@ fn main() -> anyhow::Result<ExitCode> {
 	config.log.init()?;
 	config.check_deprecated()?;
 	moq_tokio::cli::check_env(&[Config::spec()], &[])?;
+	let Some(scenes) = config.scenes()? else {
+		let url = config.watch.clone().expect("checked by scenes");
+		watch::run(config.client.clone(), config.quic.clone(), url)?;
+		return Ok(ExitCode::SUCCESS);
+	};
+	let scenes = scenes.to_path_buf();
 
 	let runtime = tokio::runtime::Runtime::new()?;
 	// The QUIC client binds its socket on the current runtime.
@@ -157,8 +196,7 @@ fn main() -> anyhow::Result<ExitCode> {
 	let gpu = pollster::block_on(engine::Gpu::new())?;
 	let recordings = match &config.recordings {
 		Some(dir) => dir.clone(),
-		None => config
-			.scenes
+		None => scenes
 			.parent()
 			.filter(|dir| !dir.as_os_str().is_empty())
 			.unwrap_or(Path::new("."))
@@ -177,20 +215,19 @@ fn main() -> anyhow::Result<ExitCode> {
 		recordings,
 		room,
 	};
-	let exists = config
-		.scenes
+	let exists = scenes
 		.try_exists()
-		.with_context(|| format!("reading {}", config.scenes.display()))?;
+		.with_context(|| format!("reading {}", scenes.display()))?;
 	let app = match exists {
 		true => {
-			let (autosave, loaded) = autosave::Autosave::open(config.scenes.clone())?;
+			let (autosave, loaded) = autosave::Autosave::open(scenes.clone())?;
 			App::Starting(runtime.block_on(engine::Engine::start(launch, autosave, loaded))?)
 		}
 		// Nothing is saved until setup starts the studio, so quitting before then
 		// leaves no file and the next launch runs setup again.
 		false => App::Setup(Box::new(setup::Setup::new(
 			launch,
-			config.scenes.clone(),
+			scenes.clone(),
 			runtime.handle().clone(),
 		)?)),
 	};
@@ -427,7 +464,7 @@ mod tests {
 		])
 		.expect("a scene file and a relay should parse");
 		config.check_deprecated().unwrap();
-		assert_eq!(config.scenes, PathBuf::from("show.toml"));
+		assert_eq!(config.scenes().unwrap(), Some(Path::new("show.toml")));
 		assert_eq!(config.broadcast, "studio");
 		assert!(!config.on_demand, "the program encodes whatever the demand by default");
 		assert!(config.guests.room.is_none(), "guests are opt-in");
@@ -461,6 +498,26 @@ mod tests {
 			&[&lite07[..], &["--connect-bind", "127.0.0.1:4444"]].concat(),
 		] {
 			assert!(check(refused).is_err(), "{refused:?} was accepted");
+		}
+	}
+
+	/// `--watch` opens no scene file and names its own relay, and the studio
+	/// needs a scene file.
+	#[test]
+	fn watch_takes_no_scene_file_or_relay() {
+		let parse = |args: &[&str]| {
+			let args: Vec<_> = args.iter().map(std::ffi::OsStr::new).collect();
+			Config::parse_from(&args).unwrap()
+		};
+		let watch = parse(&["--watch", "https://relay.example/anon/studio"]);
+		assert_eq!(watch.scenes().unwrap(), None);
+		for refused in [
+			&["show.toml", "--watch", "https://a/b"][..],
+			&["--watch", "https://a/b", "--connect", "https://a/"],
+			&["--watch", "https://a/b", "--room", "guests"],
+			&[],
+		] {
+			assert!(parse(refused).scenes().is_err(), "{refused:?} was accepted");
 		}
 	}
 }

@@ -469,6 +469,13 @@ impl Collection {
 					"`{name}` draws scene `{scene}`, which is not a scene"
 				)));
 			}
+			if let Source::Layer { broadcast, .. } = source
+				&& !matches!(self.sources.get(broadcast), Some(Source::Broadcast { .. }))
+			{
+				return Err(Error::Invalid(format!(
+					"`{name}` plays on `{broadcast}`, which is not a broadcast source"
+				)));
+			}
 			let Source::Clone { source } = source else { continue };
 			match self.sources.get(source) {
 				Some(Source::Clone { .. }) => {
@@ -1848,6 +1855,19 @@ pub enum Source {
 	/// same frame. A scene drawing it cannot go on program, and the top layer
 	/// cannot draw it, since either would draw the program into itself.
 	Program,
+	/// A source a studio broadcast publishes independently, played from the
+	/// broadcast the [`Source::Broadcast`] called `broadcast` plays, on that
+	/// source's playout clock, so it lands with the program as the
+	/// [layer layout](crate::layout) places it. Never in a scene file: only
+	/// a player of the layout makes one.
+	#[serde(skip)]
+	Layer {
+		/// The broadcast source whose broadcast and clock it plays on.
+		broadcast: String,
+		/// Its entry under the broadcast catalog's
+		/// [`SECTION`](crate::publish::SECTION) `sources`.
+		source: String,
+	},
 }
 
 impl Source {
@@ -1904,6 +1924,7 @@ impl Source {
 				| Self::Broadcast { .. }
 				| Self::Browser { .. }
 				| Self::Replay
+				| Self::Layer { .. }
 		)
 	}
 
