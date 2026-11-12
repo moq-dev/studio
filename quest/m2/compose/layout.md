@@ -1,53 +1,41 @@
-# [L] The studio publishes a composition
+# [M] The composition is in its broadcast's hang catalog
 
 ## Goal
 
-The studio publishes a composition: a broadcast of its own whose catalog
-lists other broadcasts, the program and each independently published source,
-local or guest, with where and when each shows and how its sound mixes. Each
-listed broadcast keeps its own timeline, and the composition carries the
-offset that puts it on the composition's media clock. The `moq-studio --watch`
-prototype (`rs/moq-studio/src/watch.rs`) plays a composition, guests
-included, and it replaces the provisional `live.kixel.studio.layers` track
-(`rs/moq-scene/src/layout.rs`, and the README's "Layer layout").
+The composition the studio publishes (`rs/moq-scene/src/composition.rs`, the
+README's "Composition") travels in the composition broadcast's hang catalog,
+each update applied at its timestamp on the program's clock, in place of the
+interim `live.kixel.studio.composition` JSON snapshot track. `moq-studio
+--watch` (`rs/moq-studio/src/watch.rs`) reads it from that catalog, and
+`README.md`'s "Composition" and "Watching" say so.
 
 ## Plan
 
-Decided 2026-11-12 (maintainer, /quest-unblock), settling how the layout
-names a guest:
+Decided 2026-11-12 (maintainer, /quest-complete on
+[moq-dev/studio#146](https://github.com/moq-dev/studio/pull/146)), which
+landed the composition on the interim track:
 
-- **Naming:** ✅ a composition, a catalog of catalogs (rejected: the layer
-  layout naming each guest's broadcast with an offset; moq relaxing hang's
-  `include` for broadcasts on their own timeline; republishing guests'
-  tracks in the studio's broadcast). hang's `include`
-  ([moq-dev/moq#7943](https://github.com/moq-dev/moq/pull/7943)) requires an
-  included broadcast to share the listing catalog's PTS timeline,
-  `media.clock`, and `media.join.interval`, which a guest's does not; a
-  composition keeps `include`'s meaning and says how each timeline maps.
-- **Home:** ✅ its own broadcast (rejected: a section of the program's
-  catalog, which is `include` with a different clock). The program is one of
-  its children, and a player that knows no compositions still plays the
-  program.
-- **Local sources:** ✅ every independently published source is its own
-  broadcast (rejected: layers naming a broadcast and track, with local
-  sources staying tracks of the program's broadcast at offset zero). This
-  reverses the 2026-10-26 rule that local sources are tracks in the studio's
-  one broadcast, so the composition lists only catalogs.
-- **Format:** ✅ the studio prototypes it, provisional and versioned, before
-  moq's hang specifies it (rejected: straight to hang's spec), as the
-  2026-11-08 layer layout did.
+- **Home:** ✅ the composition broadcast's hang catalog, applied at each
+  update's timestamp (rejected: shipping the interim JSON snapshot track as
+  the format). moq plans timed catalogs in
+  [catalog-at-timestamp](https://github.com/moq-dev/moq/blob/main/quest/m2/catalog-at-timestamp.md)
+  (m2, on lite-07's time addressing), and the rest of its composition plan in
+  [composed broadcasts](https://github.com/moq-dev/moq/blob/main/quest/m3/layers/README.md).
+- **Shape:** ✅ kept as #146 has it: each child entry carries `sound`,
+  `priority`, and `toggle`, and placements live in `pictures`, each naming a
+  child, so one broadcast can show in several places (rejected: one
+  placement per child, as moq's spec quest said; moq's
+  `quest/m3/layers/spec.md` is updated to match).
 
-Recommended, not decided: the composition's media clock is the program's, so
-the program's offset is zero; each child's entry carries what the provisional
-layer format carries per layer today (placement, crop, opacity, visibility,
-keyframes, toggleability, priority, and gain, mute, pan, and delay for
-sound); and a change is a new snapshot group stamped on the composition's
-clock, as the layers track is now.
+Recommended, not decided: the composition goes in a section of the catalog
+under the studio's own name until hang specifies one, with `version` kept,
+since moq's spec may still change it; the catalog also lists the program's
+renditions, as moq's plan has a composition list its main's, so a player
+that knows no compositions plays the program from it. A child's offset and
+each placement then change with one timed catalog update, and the watcher
+applies each when the program plays the frame stamped alike, as it applies
+the track's groups now.
 
-`Source::publishes` refuses a broadcast source today, since it has no track
-in the studio's broadcast; under a composition a guest needs no track of the
-studio's. `README.md`'s "Published independently" and "Layer layout" become
-the composition's.
+## Required
 
-Bump the format's `version`, since naming broadcasts instead of tracks is not
-additive.
+- [hang's timed catalog is pinned](/quest/m2/compose/pin-timed-catalog.md) - hands the studio each catalog update with its timestamp

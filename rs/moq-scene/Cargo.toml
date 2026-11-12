@@ -99,7 +99,7 @@ x11rb = { version = "0.13", features = ["dri3"] }
 wayland-client = "0.31"
 
 [dev-dependencies]
-# Reads the layer layout track back as a player would.
+# Reads the composition track back as a player would.
 moq-json = { workspace = true, features = ["async"] }
 # An encoder on every machine, for the source track and replay tests.
 moq-video = { workspace = true, features = ["openh264"] }

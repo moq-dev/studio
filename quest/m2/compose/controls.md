@@ -2,10 +2,10 @@
 
 ## Goal
 
-A viewer watching a studio broadcast can switch off any layer the layout
-marks toggleable (a facecam, a screen share), and stops fetching its track.
-The layout's per-layer priorities steer delivery, so under congestion the
-least important sources degrade first. The creator sets both per source in
+A viewer watching a studio broadcast can switch off any source the
+composition marks toggleable (a facecam, a screen share), and stops fetching
+its broadcast. The composition's per-source priorities steer delivery, so
+under congestion the least important sources degrade first. The creator sets both per source in
 the studio.
 
 ## Plan
@@ -26,5 +26,6 @@ Map layer priority onto the subscription priorities moq-lite already has
 (`moq/doc/concept/moq-lite.md`), rather than a second mechanism. A toggled-off
 layer is unsubscribed, so it costs the viewer and the relay nothing. The
 studio keeps encoding it, so toggling it back on can reach its recent past.
-Subscriptions are per track, not per layer: a source shown by several layers
-stays subscribed while any of them is on, at the highest priority among them.
+The composition carries `priority` and `toggle` on each source's entry
+(`rs/moq-scene/src/composition.rs`), not on each picture, so a source shown by
+several pictures is one subscription, on or off as a whole.

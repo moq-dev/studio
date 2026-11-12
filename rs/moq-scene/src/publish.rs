@@ -1,10 +1,11 @@
 //! Each local source's own track, kept in a broadcast of the studio's own.
 //!
 //! A source's track is for the studio's own use, such as replaying the source
-//! or recording it on its own, and is never announced to a relay: the program
-//! is the only video the studio publishes, which keeps it within the encode
-//! sessions a GPU allows. Its renditions are listed in a hang catalog of its
-//! own, nested by source name under the local catalog's [`SECTION`] section.
+//! or recording it on its own, and is never announced to a relay unless the
+//! source is published independently ([`Publish::forward`]), which keeps the
+//! studio within the encode sessions a GPU allows. Its renditions are listed in
+//! a hang catalog of its own, nested by source name under the local catalog's
+//! [`SECTION`] section.
 //!
 //! A track encodes only while it is used: while it is on program
 //! ([`Publish::set_on_program`]), a picture shown in a scene on air or a sound
@@ -171,24 +172,24 @@ impl Publish {
 		});
 	}
 
-	/// Publish each source `published` names in `broadcast`, the program's,
-	/// as long as it stays named, until `published` closes: its tracks are
-	/// copied in under [`FORWARDED`] and its catalog listed under `catalog`'s
-	/// [`SECTION`] section, renamed to match. Reading its tracks keeps each
-	/// source encoding while it is published. Each copied audio or video
-	/// track claims its bitrate from `bandwidth` while subscribed, as the
-	/// program's tracks do.
+	/// Publish each source `published` names as a broadcast of its own at
+	/// `<base>/<name>` on `origin`, as long as it stays named, until
+	/// `published` closes: its tracks are copied in, and its catalog published
+	/// there on the program's clock, so a [composition](crate::composition)
+	/// lists it at offset zero. Reading its tracks keeps each source encoding
+	/// while it is published. Each copied audio or video track claims its
+	/// bitrate from `bandwidth` while subscribed, as the program's tracks do.
 	pub async fn forward(
 		&self,
 		mut published: tokio::sync::watch::Receiver<BTreeSet<String>>,
-		broadcast: moq_net::broadcast::Producer,
-		mut catalog: Catalog,
+		origin: moq_net::origin::Producer,
+		base: moq_net::Path,
 		bandwidth: moq_net::bandwidth::Allocator,
 	) -> Result<(), Error> {
 		let mut updates = self.catalog.consume()?;
 		let mut local = self.catalog.snapshot();
-		// Each copied track's copy, by its local name, aborted once dropped.
-		let mut copies: BTreeMap<String, tokio::task::JoinHandle<()>> = BTreeMap::new();
+		// Each source's broadcast, by name, finished once dropped.
+		let mut broadcasts: BTreeMap<String, Independent> = BTreeMap::new();
 		loop {
 			let listed: BTreeMap<String, hang::Catalog> = {
 				let published = published.borrow_and_update();
@@ -196,40 +197,25 @@ impl Publish {
 				let sources = sources.filter(|(name, _)| published.contains(*name));
 				sources.map(|(name, source)| (name.clone(), source.clone())).collect()
 			};
-			let tracks: BTreeMap<String, (String, Option<(moq_net::bandwidth::Rate, bool)>)> = listed
-				.iter()
-				.flat_map(|(source, catalog)| tracks(catalog).map(move |(name, rate)| (name, (source.clone(), rate))))
-				.collect();
-			copies.retain(|name, copy| {
-				let keep = tracks.contains_key(name);
-				if !keep {
-					copy.abort();
+			broadcasts.retain(|name, _| listed.contains_key(name));
+			for (name, source) in listed {
+				let independent = match broadcasts.entry(name.clone()) {
+					std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+					std::collections::btree_map::Entry::Vacant(entry) => {
+						match Independent::new(&origin, &base, &name, self.catalog.clock()) {
+							Ok(independent) => entry.insert(independent),
+							Err(err) => {
+								tracing::warn!(source = %name, %err, "cannot publish a source independently");
+								continue;
+							}
+						}
+					}
+				};
+				if let Err(err) = independent.sync(&name, &source, self, &bandwidth) {
+					tracing::warn!(source = %name, %err, "cannot publish a source independently");
+					broadcasts.remove(&name);
 				}
-				keep
-			});
-			for (name, (source, rate)) in tracks {
-				if copies.contains_key(&name) {
-					continue;
-				}
-				let bandwidth = rate.map(|(rate, video)| Grant {
-					bandwidth: bandwidth.clone(),
-					rate,
-					video,
-					grants: self.grants.clone(),
-					source,
-				});
-				let copy = copy(self.consume(), broadcast.clone(), name.clone(), bandwidth);
-				copies.insert(name, tokio::spawn(copy));
 			}
-			let listed: BTreeMap<String, hang::Catalog> = listed
-				.into_iter()
-				.map(|(name, source)| (name, renamed(source)))
-				.collect();
-			catalog.mutate(|root| {
-				if root.ext.studio.sources != listed {
-					root.ext.studio.sources = listed;
-				}
-			})?;
 
 			tokio::select! {
 				next = updates.next() => match next? {
@@ -239,10 +225,6 @@ impl Publish {
 				changed = published.changed() => if changed.is_err() { break },
 			}
 		}
-		for copy in copies.into_values() {
-			copy.abort();
-		}
-		catalog.mutate(|root| root.ext.studio.sources.clear())?;
 		Ok(())
 	}
 
@@ -272,9 +254,93 @@ impl Publish {
 	}
 }
 
-/// The prefix of each source track's name in the program's broadcast, ahead
-/// of its name in the local one, so it never meets one of the program's own.
-pub const FORWARDED: &str = "source/";
+/// A source published independently: its broadcast, announced once its
+/// catalog lists what it carries, and the copy of each of its tracks, by
+/// name, aborted once dropped.
+struct Independent {
+	route: moq_net::origin::Route,
+	catalog: moq_mux::catalog::Producer,
+	copies: BTreeMap<String, tokio::task::JoinHandle<()>>,
+	announced: bool,
+}
+
+impl Independent {
+	/// A broadcast at `<base>/<name>` on `origin`, its catalog on `clock`.
+	fn new(
+		origin: &moq_net::origin::Producer,
+		base: &moq_net::Path,
+		name: &str,
+		clock: moq_mux::Clock,
+	) -> Result<Self, Error> {
+		let path = moq_net::Path::new(name)
+			.and_then(|name| base.join(&name))
+			.map_err(moq_net::Error::from)?;
+		let route = origin.route(path, moq_net::origin::RouteOptions::hidden())?;
+		let mut broadcast = route.broadcast().clone();
+		let config = moq_mux::catalog::Config::default().with_clock(clock);
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+		Ok(Self {
+			route,
+			catalog,
+			copies: BTreeMap::new(),
+			announced: false,
+		})
+	}
+
+	/// Carry what `source`, the local catalog's entry for the source called
+	/// `name`, lists: copy each track it names from `publish`'s local
+	/// broadcast, stop copying each it no longer does, and list them.
+	fn sync(
+		&mut self,
+		name: &str,
+		source: &hang::Catalog,
+		publish: &Publish,
+		bandwidth: &moq_net::bandwidth::Allocator,
+	) -> Result<(), Error> {
+		let tracks: BTreeMap<String, Option<(moq_net::bandwidth::Rate, bool)>> = tracks(source).collect();
+		self.copies.retain(|track, copy| {
+			let keep = tracks.contains_key(track);
+			if !keep {
+				copy.abort();
+			}
+			keep
+		});
+		for (track, rate) in tracks {
+			if self.copies.contains_key(&track) {
+				continue;
+			}
+			let grant = rate.map(|(rate, video)| Grant {
+				bandwidth: bandwidth.clone(),
+				rate,
+				video,
+				grants: publish.grants.clone(),
+				source: name.to_string(),
+			});
+			let copy = copy(publish.consume(), self.route.broadcast().clone(), track.clone(), grant);
+			self.copies.insert(track, tokio::spawn(copy));
+		}
+		self.catalog.mutate(|root| {
+			root.video = source.video.clone();
+			root.audio = source.audio.clone();
+			root.binary = source.binary.clone();
+		})?;
+		if !self.announced {
+			self.route.announce()?;
+			self.announced = true;
+		}
+		Ok(())
+	}
+}
+
+impl Drop for Independent {
+	fn drop(&mut self) {
+		for copy in self.copies.values() {
+			copy.abort();
+		}
+		// Fails only once the catalog failed, which ended its tracks already.
+		let _ = self.catalog.finish();
+	}
+}
 
 /// What a source's video claims of the connection when its catalog names
 /// no bitrate.
@@ -297,22 +363,6 @@ fn tracks(source: &hang::Catalog) -> impl Iterator<Item = (String, Option<(moq_n
 	video.chain(audio).chain(binary)
 }
 
-/// `source`'s catalog with each track named as the program's broadcast has it.
-fn renamed(mut source: hang::Catalog) -> hang::Catalog {
-	fn rename<T>(map: &mut BTreeMap<String, T>) {
-		*map = std::mem::take(map)
-			.into_iter()
-			.map(|(name, config)| (format!("{FORWARDED}{name}"), config))
-			.collect();
-	}
-	rename(&mut source.video.renditions);
-	rename(&mut source.audio.renditions);
-	rename(&mut source.binary.tracks);
-	source
-}
-
-/// Copy the local track `name` into `broadcast` under [`FORWARDED`], group by
-/// group, until it ends. A failure ends the copy, failed, with the reason.
 /// How a copied track claims its bitrate of the connection, and where its
 /// source's video finds what it was granted.
 struct Grant {
@@ -343,6 +393,8 @@ impl Drop for Granted {
 	}
 }
 
+/// Copy the local track `name` into `broadcast`, under the same name, group
+/// by group, until it ends. A failure ends the copy, failed, with the reason.
 async fn copy(
 	local: moq_net::broadcast::Consumer,
 	broadcast: moq_net::broadcast::Producer,
@@ -351,8 +403,7 @@ async fn copy(
 ) {
 	let copied = async {
 		let mut track = local.track(&name)?.subscribe(None).await?;
-		let out = broadcast.create_track(format!("{FORWARDED}{name}"), track.info().clone())?;
-		// Held for as long as the copy runs.
+		let out = broadcast.create_track(name.clone(), track.info().clone())?;
 		// Held for as long as the copy runs. A video's grant is what its source
 		// encodes at, so the source follows the connection as the program does.
 		let _grant = grant.map(|grant| {
@@ -1154,15 +1205,16 @@ mod tests {
 		.await;
 	}
 
-	/// A source published independently is listed in the program's catalog,
-	/// its track readable from the program's broadcast under [`FORWARDED`],
-	/// for as long as it is published; another stays in the studio.
+	/// A source published independently is a broadcast of its own beneath
+	/// the given path, announced with its catalog on the program's clock and
+	/// its tracks readable there, for as long as it is published; another
+	/// stays in the studio.
 	#[tokio::test]
-	async fn a_published_source_is_forwarded_to_the_program() {
+	async fn a_published_source_is_a_broadcast_of_its_own() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (publish, _, _) = studio();
-			let (mut context, _origin) = context(dir.path());
+			let (mut context, origin) = context(dir.path());
 			context.publish = Some(publish.clone());
 			let mut collection = Collection::new();
 			for (name, color) in [("red", [255, 0, 0, 255]), ("blue", [0, 0, 255, 255])] {
@@ -1176,33 +1228,40 @@ mod tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 
-			let mut program = moq_net::broadcast::Info::new().produce();
-			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
-			let catalog = Catalog::new(&mut program, config).unwrap();
 			let (published, follow) = tokio::sync::watch::channel(collection.published.clone());
 			let forward = publish.clone();
-			let (broadcast, listing) = (program.clone(), catalog.clone());
+			let base = moq_net::Path::new("show/source").unwrap();
+			let publishing = origin.clone();
 			tokio::spawn(async move {
 				forward
-					.forward(follow, broadcast, listing, moq_net::bandwidth::Allocator::unlimited())
+					.forward(follow, publishing, base, moq_net::bandwidth::Allocator::unlimited())
 					.await
 					.unwrap()
 			});
 
-			let snapshot = listed(&catalog, |sources| sources.contains_key("red")).await;
-			let red = &snapshot.ext.studio.sources["red"];
-			assert!(
-				!snapshot.ext.studio.sources.contains_key("blue"),
-				"only what is published"
-			);
-			assert!(red.binary.tracks.keys().all(|name| name.starts_with(FORWARDED)));
-			let (payload, mime) = still(&program.consume(), red).await;
+			let consumer = origin.consume();
+			let mut announced = consumer.announced();
+			let Some(moq_net::announce::Event::Present(first)) = announced.next().await else {
+				panic!("nothing announced");
+			};
+			assert_eq!(first.prefix.as_str(), "show/source/red", "only what is published");
+			let mut following = consumer.follow("show/source/red", None).unwrap();
+			let broadcast = following.available().await.unwrap().expect("the broadcast");
+			let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default())
+				.await
+				.unwrap();
+			let red = catalogs.next().await.unwrap().expect("a catalog");
+			assert_eq!(red.media.clock, publish.catalog.clock().wall(), "the program's clock");
+			let (payload, mime) = still(&broadcast, &red).await;
 			assert_eq!(mime, "image/png");
 			let red = image::load_from_memory(&payload).unwrap().into_rgba8();
 			assert_eq!(red.into_raw(), [255, 0, 0, 255]);
 
 			published.send(BTreeSet::new()).unwrap();
-			listed(&catalog, |sources| sources.is_empty()).await;
+			assert!(
+				catalogs.next().await.unwrap().is_none(),
+				"unpublished, its catalog ends"
+			);
 		})
 		.await;
 	}

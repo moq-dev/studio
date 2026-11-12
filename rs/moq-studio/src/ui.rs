@@ -2031,17 +2031,26 @@ impl Panels {
 						{
 							reload = Some(name.clone());
 						}
-						if source.publishes() {
+						if source.independent() {
 							let mut published = collection.published.contains(name);
+							let hover = match source {
+								Source::Broadcast { .. } => {
+									"Leave this broadcast out of the program and list it in the composition, for \
+									 viewers to play from its publisher and place over the program as the studio \
+									 does. Every player must reproduce how it is placed, so it takes no filter but \
+									 opacity and no blend mode, and not its background removed."
+								}
+								_ => {
+									"Publish this source's own track to the relay as a broadcast of its own, for \
+									 viewers to place over the program as the composition says, and leave it out \
+									 of the program. It encodes for as long as it is published. Every player must \
+									 reproduce how it is placed, so it takes no filter but opacity and no blend \
+									 mode, and not its background removed, since its track keeps the background."
+								}
+							};
 							if ui
 								.checkbox(&mut published, "Published independently")
-								.on_hover_text(
-									"Publish this source's own track to the relay beside the program, for viewers to \
-									 place over it as the layer layout says, and leave it out of the program. It \
-									 encodes for as long as it is published. Every player must reproduce how it is \
-									 placed, so it takes no filter but opacity and no blend mode, and not its \
-									 background removed, since its track keeps the background.",
-								)
+								.on_hover_text(hover)
 								.changed()
 							{
 								publish = Some((name.clone(), published));
@@ -4508,7 +4517,7 @@ fn describe(source: &Source) -> String {
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
 		Source::Scene { scene } => format!("scene: {scene}"),
-		Source::Layer { broadcast, source } => format!("{source}, published in {broadcast}"),
+		Source::Layer { path, .. } => format!("composed: {path}"),
 		Source::Program => "program".into(),
 	}
 }

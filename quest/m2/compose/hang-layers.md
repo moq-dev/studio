@@ -19,8 +19,8 @@ quests (rejected: "both quests", unnamed, which left out `@moq/watch`).
 
 Decided 2026-11-12 (maintainer, /quest-unblock): hang specifies a
 composition, a broadcast listing a catalog per source, rather than a layer
-layout track; see [the composition](/quest/m2/compose/layout.md), whose
-prototype moq's spec starts from. moq's three quests below were planned for a
+layout track. The studio's prototype, which moq's spec starts from, is
+`rs/moq-scene/src/composition.rs`, documented in the README's "Composition". moq's three quests below were planned for a
 layer layout track and are replanned in moq's tree.
 
 ## Waiting
@@ -39,6 +39,5 @@ layer layout track and are replanned in moq's tree.
 
 ## Required
 
-- [The studio publishes a composition](/quest/m2/compose/layout.md) - the prototype hang's spec starts from
 - [Viewer controls](/quest/m2/compose/controls.md) - toggles and priorities the spec carries
 - [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes since moq-dev/moq#8272, so this pin takes only its own
