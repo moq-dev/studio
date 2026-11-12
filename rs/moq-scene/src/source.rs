@@ -292,7 +292,7 @@ impl Mixer {
 #[derive(Clone)]
 pub struct Mixed {
 	pub(crate) start: Instant,
-	/// The bus position of the next frame mixed, which holds while borrowed.
+	/// The bus position of the next frame mixed, which cannot move while borrowed.
 	pub(crate) position: watch::Receiver<u64>,
 }
 
@@ -1280,8 +1280,8 @@ impl Driver {
 		// once: the jitter estimate times each one as `read` hands it over. The
 		// speaker places none past its target, and a frame that has finished
 		// sounding by the time another arrives is dropped as too late, so
-		// however long a write waits on the bus, this holds no more than the
-		// longest target.
+		// however long a write waits on the bus, this holds only what is
+		// still to sound within the longest target.
 		let queue = RefCell::new(VecDeque::<(Instant, Instant, moq_audio::Frame)>::new());
 		let queued = Notify::new();
 		let received = Cell::new(false);
