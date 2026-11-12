@@ -19,7 +19,7 @@ Build it on moq-scene, which already plays remote broadcasts as sources for
 guests (`rs/moq-studio/src/guests.rs`): a scene that the layout drives rather
 than a scene file. `README.md` documents the flag while it exists.
 
-It plays the layer layout the studio publishes on `dev.moq.studio.layers`
+It plays the layer layout the studio publishes on `live.kixel.studio.layers`
 (`rs/moq-scene/src/layout.rs`, and the README's "Layer layout"), refusing a
 layout of another `version` loudly and playing the program alone. Its working
 format is the starting point for moq's hang layer spec, which waits on this

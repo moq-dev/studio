@@ -1,4 +1,4 @@
-# MoQ Studio
+# kixel.live Studio
 
 `moq-studio` is a native streaming studio for Linux, macOS, and Windows. It
 composes cameras, screens, windows, images, colors, web pages, HTML and CSS
@@ -865,7 +865,7 @@ stream.
 Each camera, display, window, image, media file, color, microphone, and system
 audio also has a track of its own, so the studio can replay or record it on its
 own. These tracks stay in the studio unless a source is [published independently](#published-independently): otherwise the program is all it publishes to a relay. They are listed in a local
-catalog under the `dev.moq.studio` section's `sources`, by source name, each
+catalog under the `live.kixel.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
 A captured source encodes its track as H.264 only while it is used: while it
@@ -922,7 +922,7 @@ where it can and software otherwise.
 A source with a track of its own can be **Published independently**, a
 checkbox in the Sources panel, off by default and kept in the scene file's
 `published` list. Its track then goes to the relay beside the program, in the
-same broadcast: the program's catalog lists it under the `dev.moq.studio`
+same broadcast: the program's catalog lists it under the `live.kixel.studio`
 section's `sources`, by source name, as a hang catalog of its own whose track
 names start with `source/`. Viewers fetch it and place it over the program
 themselves, as the [layer layout](#layer-layout) says.
@@ -948,7 +948,7 @@ transparency and its track would show the background.
 #### Layer layout
 
 While a source is published independently, the program's broadcast also
-carries a JSON track, `dev.moq.studio.layers`, listed in its catalog's `json`
+carries a JSON track, `live.kixel.studio.layers`, listed in its catalog's `json`
 section. It is a snapshot: each change is a new group, stamped on the media
 clock with the frame it takes effect on, so a viewer who joins late reads the
 layout in force. The format is the studio's own until hang specifies a layer
@@ -982,7 +982,7 @@ layout:
 - `pictures` lists each item of the scene on program, then of the top layer,
   showing a published source, back to front over the program, shown or
   hidden. Each `item` is a scene file item: its `source` names the source's
-  entry under the catalog's `dev.moq.studio` `sources` (the source a clone
+  entry under the catalog's `live.kixel.studio` `sources` (the source a clone
   shows), and its `crop` and `filters` fold in its source's own.
 - `sounds` lists each published source the audio scene on program holds,
   with the `gain`, `muted`, `pan`, and `delay` it plays at.
@@ -1230,15 +1230,15 @@ shows reopens it at the new one, so an app reading it opens it again. The
 Devices panel leaves the studio's cameras out while they are on, so one
 cannot be added as a source of the picture it shows.
 
-- **Linux:** a PipeWire camera named "MoQ Studio" for the program, and
-  "MoQ Studio: <scene>" for a scene (needs the `pipewire` feature), which
+- **Linux:** a PipeWire camera named "kixel.live Studio" for the program, and
+  "kixel.live Studio: <scene>" for a scene (needs the `pipewire` feature), which
   browsers and other PipeWire-aware apps list beside your other cameras.
   Without PipeWire, each camera writes to the first
   [v4l2loopback](https://github.com/v4l2loopback/v4l2loopback) device that
   takes its size and that no other camera of the studio holds, for apps that
   open `/dev/video*` directly. The studio never loads that module, since it
   needs root. Load a device for each camera you turn on, such as two:
-  `sudo modprobe v4l2loopback devices=2 exclusive_caps=1,1 card_label="MoQ Studio","MoQ Studio 2"`.
+  `sudo modprobe v4l2loopback devices=2 exclusive_caps=1,1 card_label="kixel.live Studio","kixel.live Studio 2"`.
 - **macOS and Windows:** not available yet.
 
 ## Development

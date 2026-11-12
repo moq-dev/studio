@@ -3,7 +3,7 @@
 	"private": true,
 	"type": "module",
 	"version": "0.0.0",
-	"description": "The page a guest opens to join a MoQ Studio room",
+	"description": "The page a guest opens to join a kixel.live Studio room",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/studio",
 	"scripts": {
