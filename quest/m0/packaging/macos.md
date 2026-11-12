@@ -37,8 +37,8 @@ protected branches can deploy from, for team `D7D5SDDB5Z` and bundle ID
   with the System Extension capability, base64, embedded as
   `Contents/embedded.provisionprofile`.
 
-The certificate expires 2027-02-01, and the profile with it; see
-[renewal](/quest/m0/signing-renew.md).
+The certificate (`6WWG279G9M`, G2) expires 2027-12-11, and the profile with it;
+see [renewal](/quest/m0/signing-renew.md).
 
 ## Waiting
 
