@@ -77,7 +77,10 @@ impl Levels {
 
 		let mut mixes = BTreeMap::new();
 		for scene in &collection.audio_scenes {
-			let Some(mix) = sources.mix(&scene.name) else { continue };
+			// As Listen plays it and viewers hear it, published sources included.
+			let Some(mix) = sources.listened(&scene.name) else {
+				continue;
+			};
 			let mut history = self.mixes.remove(&scene.name).unwrap_or_default();
 			push(&mut history, mix.level(), steps);
 			mixes.insert(scene.name.clone(), history);

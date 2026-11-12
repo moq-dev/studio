@@ -332,8 +332,9 @@ tagged `audio` and listed after the scenes.
 
 The Audio panel is a mixer. Each sound has a strip, with its gain, pan, mute,
 delay, and meter, which apply in every audio scene holding it, and a send to
-each audio scene; each audio scene has a strip with its meter and a send to
-each other audio scene. A source added from the Sources or Devices panel, or
+each audio scene; each audio scene has a strip with its meter, which reads
+it as **Listen** plays it, published sources included, and a send to each
+other audio scene. A source added from the Sources or Devices panel, or
 pasted, is sent to the audio scene on program, so it is heard at once.
 **On program** picks the audio scene the broadcast carries, and switching
 it, or editing an audio scene, never drops or repeats audio. A recording holds
