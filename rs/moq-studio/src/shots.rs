@@ -95,7 +95,16 @@ fn shot(name: &str, motion: Motion, open: Open) {
 
 	let runtime = tokio::runtime::Runtime::new().unwrap();
 	let _entered = runtime.enter();
-	let gpu = pollster::block_on(engine::Gpu::new()).expect("a GPU");
+	// Vulkan only, where `just shots` names lavapipe the sole driver: any other
+	// backend would find the host's hardware and draw a different picture.
+	let gpu = pollster::block_on(engine::Gpu::new(moq_scene::wgpu::Backends::VULKAN)).expect("a GPU");
+	let info = gpu.adapter.get_info();
+	assert_eq!(
+		info.device_type,
+		moq_scene::wgpu::DeviceType::Cpu,
+		"views draw on lavapipe, not {}",
+		info.name
+	);
 	let image = shoot(&open, &gpu, &runtime, &fixture.join("shots/show.toml"));
 	if motion == Motion::Still {
 		let again = shoot(&open, &gpu, &runtime, &fixture.join("shots/show.toml"));

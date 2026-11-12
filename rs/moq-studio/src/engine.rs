@@ -60,8 +60,12 @@ pub struct Gpu {
 }
 
 impl Gpu {
-	pub async fn new() -> anyhow::Result<Self> {
-		let instance = wgpu::Instance::default();
+	/// Open the best adapter among `backends`.
+	pub async fn new(backends: wgpu::Backends) -> anyhow::Result<Self> {
+		let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+			backends,
+			..wgpu::InstanceDescriptor::new_without_display_handle()
+		});
 		let adapter = instance
 			.request_adapter(&wgpu::RequestAdapterOptions {
 				power_preference: wgpu::PowerPreference::HighPerformance,
@@ -3215,7 +3219,7 @@ mod tests {
 		use moq_scene::layout::{Layout, TRACK};
 
 		let dir = tempfile::tempdir().unwrap();
-		let gpu = Gpu::new().await.expect("a GPU");
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let mut loaded = red_canvas();
 		loaded.collection.published.insert("red".into());
@@ -3303,7 +3307,7 @@ mod tests {
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
 	async fn the_program_records_without_a_relay() {
 		let dir = tempfile::tempdir().unwrap();
-		let gpu = Gpu::new().await.expect("a GPU");
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, red_canvas())
 			.await
@@ -3428,7 +3432,7 @@ mod tests {
 			..Default::default()
 		};
 		loaded.collection.video.insert("sting".into(), video);
-		let gpu = Gpu::new().await.expect("a GPU");
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
 			.await
@@ -3715,7 +3719,7 @@ mod tests {
 		let client = client.init(Default::default()).expect("client");
 
 		let dir = tempfile::tempdir().unwrap();
-		let gpu = Gpu::new().await.expect("a GPU");
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let relays = vec![Relay {
 			client,
@@ -4029,7 +4033,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let tone = include_bytes!("../../moq-scene/src/test_data/tone.webm");
 		std::fs::write(dir.path().join("tone.webm"), tone).unwrap();
-		let gpu = Gpu::new().await.expect("a GPU");
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let relays = vec![Relay {
 			client,
@@ -4271,7 +4275,7 @@ mod tests {
 		let client = client.init(Default::default()).expect("client");
 
 		let dir = tempfile::tempdir().unwrap();
-		let gpu = Gpu::new().await.expect("a GPU");
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let relays = vec![Relay {
 			client,
@@ -4871,7 +4875,7 @@ mod tests {
 		const RED: [u8; 3] = [255, 0, 0];
 		const BLUE: [u8; 3] = [0, 0, 255];
 		let dir = tempfile::tempdir().unwrap();
-		let gpu = Gpu::new().await.expect("a GPU");
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let mut loaded = red_canvas();
 		let blue = moq_scene::Source::Color {
