@@ -54,29 +54,15 @@ kio's `Instant` loses `+` and `-` with a `Duration`, which `playout.rs` and
 `source.rs` use throughout) all merged after #8272.
 [pin-main](/quest/m0/pin-main.md) fixes them.
 
-## Waiting
-
-- Maintainer: decide what a sound stall does to a broadcast source's picture.
-  `README.md` says "A sound stall longer than that delay pauses the picture
-  too and starts both again together", which rested on audio owning the
-  clock's anchor and on `Consumer::playhead()`. #8272 removed both, after the
-  2026-11-05 ruling on
-  [moq-dev/moq#7941](https://github.com/moq-dev/moq/pull/7941): lip sync in
-  the steady state, desync under congestion, and one slow track never stalls
-  or moves another. An agent cannot pick: it changes what a creator sees when
-  a guest's audio stalls. Options:
-  1. Adopt moq's decoupled rule (recommended). The picture keeps playing
-     through a sound stall, and the sound comes back on the clock: each frame
-     is written at the bus position `due` gives it, and the late part of a
-     burst is trimmed, as the positioned writer already does. The studio
-     plays a broadcast as `moq play` and the browser do, which `playout.rs`
-     sets out to, and `README.md` drops "Each picture waits for the sound
-     stamped with it" and the pause sentence.
-  2. Keep the studio's rule. The `Speaker` keeps a playhead of its own,
-     `heard` holds pictures on it, and the studio holds the picture back
-     itself after a stall, since `sync` no longer lets audio hold video. Sound
-     and picture never part, at the cost of studio-only coupling over an API
-     built to prevent it.
-
-  Check: the maintainer answers in `/quest-unblock`, and the choice is
-  recorded here.
+Decided 2026-11-12 (maintainer, /quest-unblock): ✅ adopt moq's decoupled
+rule for a sound stall (rejected: keeping the studio's rule, with a `Speaker`
+playhead of its own that holds the picture after a stall). The picture keeps
+playing through a sound stall, and the sound comes back on the clock: each
+frame is written at the bus position `due` gives it, and the late part of a
+burst is trimmed, as the positioned writer already does. The studio plays a
+broadcast as `moq play` and the browser do, following the 2026-11-05 ruling on
+[moq-dev/moq#7941](https://github.com/moq-dev/moq/pull/7941): lip sync in the
+steady state, desync under congestion, and one slow track never stalls or
+moves another. `README.md` drops "Each picture waits for the sound stamped
+with it" and "A sound stall longer than that delay pauses the picture too and
+starts both again together", and says the picture plays on through a stall.

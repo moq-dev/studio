@@ -1,10 +1,9 @@
-# [S] The studio publishes hang's layer layout
+# [S] The studio publishes hang's composition
 
 ## Goal
 
-The `moq` submodule includes hang's layer layout track and `moq play`'s layer
-compositing. The studio publishes hang's format instead of the provisional
-`live.kixel.studio.layers`, and the `moq-studio --watch` prototype is gone, with
+The `moq` submodule includes hang's composition and `moq play`'s compositing
+of it. The studio publishes hang's format instead of its provisional one, and the `moq-studio --watch` prototype is gone, with
 `README.md` pointing viewers at `moq play` instead.
 
 ## Plan
@@ -17,6 +16,12 @@ the studio to hang's types, and delete the
 
 Decided 2026-11-09 (maintainer, /quest-audit): ✅ the wait names moq's three
 quests (rejected: "both quests", unnamed, which left out `@moq/watch`).
+
+Decided 2026-11-12 (maintainer, /quest-unblock): hang specifies a
+composition, a broadcast listing a catalog per source, rather than a layer
+layout track; see [the composition](/quest/m2/compose/layout.md), whose
+prototype moq's spec starts from. moq's three quests below were planned for a
+layer layout track and are replanned in moq's tree.
 
 ## Waiting
 
@@ -34,5 +39,6 @@ quests (rejected: "both quests", unnamed, which left out `@moq/watch`).
 
 ## Required
 
+- [The studio publishes a composition](/quest/m2/compose/layout.md) - the prototype hang's spec starts from
 - [Viewer controls](/quest/m2/compose/controls.md) - toggles and priorities the spec carries
 - [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes since moq-dev/moq#8272, so this pin takes only its own
