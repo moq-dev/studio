@@ -25,7 +25,7 @@ the studio landed.
   there either.
 
 The nightly `windows-latest` job (`.github/workflows/nightly.yml`) compiles
-`moq-studio --features capture` for Windows; this quest runs it.
+`moq-studio --features release` for Windows; this quest runs it.
 
 ## Required
 
