@@ -55,9 +55,10 @@ pub fn run(client: moq_tokio::connect::Config, quic: moq_tokio::quic::Config, ur
 	let connection = client.with_subscriber(origin.clone()).connect(url.clone());
 
 	let gpu = pollster::block_on(Gpu::new())?;
-	let (bus, mixer) = moq_audio::bus::Bus::new(Default::default())?;
+	let (bus, driver) = moq_audio::bus::Bus::new(Default::default())?;
 	let config = bus.config().clone();
 	let start = Instant::now();
+	let (mixer, mixed) = source::Mixer::new(driver, start);
 	engine::clocked("audio".into(), async move || advance(start, config, mixer).await)?;
 	let monitor = match mix::Monitor::start(runtime.handle(), AudioScene::DEFAULT, None) {
 		Ok(monitor) => Some(monitor),
@@ -69,6 +70,7 @@ pub fn run(client: moq_tokio::connect::Config, quic: moq_tokio::quic::Config, ur
 
 	let sources = Sources::new(source::Context {
 		bus,
+		mixed,
 		origin: origin.consume(),
 		dir: std::env::current_dir()?,
 		output: moq_video::render::output(&gpu.device),
@@ -131,7 +133,7 @@ pub fn run(client: moq_tokio::connect::Config, quic: moq_tokio::quic::Config, ur
 }
 
 /// Advance the bus on the wall clock from `start`, so each mix plays.
-async fn advance(start: Instant, config: moq_audio::bus::Config, mut mixer: moq_audio::bus::Driver) {
+async fn advance(start: Instant, config: moq_audio::bus::Config, mut mixer: source::Mixer) {
 	let rate = u128::from(config.sample_rate);
 	let mut clock = kio::clock::interval_at(start, engine::AUDIO_PERIOD);
 	clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
