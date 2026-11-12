@@ -19,6 +19,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
+/// The track-name suffix a video rendition of `codec` is published under, or
+/// an error for a codec the studio does not publish.
+pub fn suffix(codec: &hang::catalog::VideoCodec) -> Result<&'static str, Error> {
+	match codec {
+		hang::catalog::VideoCodec::H264(_) => Ok(".avc3"),
+		hang::catalog::VideoCodec::H265(_) => Ok(".hev1"),
+		other => Err(Error::Unsupported(format!(
+			"{other} is not a codec the studio publishes"
+		))),
+	}
+}
+
 /// The local catalog's own root section, namespaced as hang asks of
 /// application sections.
 pub const SECTION: &str = "live.kixel.studio";
@@ -723,18 +735,10 @@ impl<'a> Video<'a> {
 		config.kind = listing.kind.clone();
 		let rendition = config.probe().await?;
 		let reserved = listing.catalog.reserve().with_interval(config.effective_join());
-		let suffix = match &rendition.codec {
-			hang::catalog::VideoCodec::H264(_) => ".avc3",
-			hang::catalog::VideoCodec::H265(_) => ".hev1",
-			other => {
-				return Err(Error::Unsupported(format!(
-					"{other} is not a codec the studio publishes"
-				)));
-			}
-		};
-		let track = listing
-			.broadcast
-			.unique_track(suffix, reserved.track_info(hang::catalog::PRIORITY.video))?;
+		let track = listing.broadcast.unique_track(
+			suffix(&rendition.codec)?,
+			reserved.track_info(hang::catalog::PRIORITY.video),
+		)?;
 		let producer = moq_video::encode::Producer::new(track, reserved, rendition)?;
 		Ok(Self {
 			track: Encoding::new(producer, listing.sessions.clone()),

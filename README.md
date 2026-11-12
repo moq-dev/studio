@@ -304,8 +304,9 @@ comes back on its own when the publisher restarts.
 
 A broadcast source, a guest's included, plays on its publisher's timestamps,
 so its sound and picture stay in sync through network jitter. It plays as far
-behind what arrives as the network's jitter needs, measured as it goes, the
-same delay `moq play --delay auto` holds, up to 2 s. Sound and picture each
+behind what arrives as the network's jitter needs, measured as it goes as
+`moq play --delay auto` does, plus 50 ms to hand its sound to the mix, up to
+2 s in all. Sound and picture each
 keep that schedule on their own: a sound stall leaves the picture playing,
 and the sound comes back on the clock, skipping what it missed; a picture
 stall leaves the sound playing, with the canvas showing the last picture

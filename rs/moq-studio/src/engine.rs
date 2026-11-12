@@ -2062,11 +2062,7 @@ impl Renditions {
 			} = probed;
 			let (broadcast, timebase) = (&self.broadcast, &self.timebase);
 			let reserved = timebase.reserve().with_interval(config.effective_join());
-			let suffix = match &video.codec {
-				hang::catalog::VideoCodec::H264(_) => ".avc3",
-				hang::catalog::VideoCodec::H265(_) => ".hev1",
-				other => anyhow::bail!("{other} is not a codec the studio publishes"),
-			};
+			let suffix = moq_scene::publish::suffix(&video.codec)?;
 			let rank = role as usize;
 			let priority = match role {
 				Role::Record => hang::catalog::PRIORITY.video,
