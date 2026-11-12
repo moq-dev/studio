@@ -1967,7 +1967,7 @@ impl Panels {
 						// behind its publisher it plays.
 						None if let Some(delay) = feed.and_then(Feed::delay) => {
 							ui.weak(format!("{} ms behind", delay.as_millis())).on_hover_text(
-								"Plays this far behind what arrives, to ride out the network's jitter; the picture waits for its sound",
+								"Plays this far behind what arrives, to ride out the network's jitter, with the picture and sound on one clock",
 							);
 						}
 						None => match feed.and_then(Feed::page).and_then(|page| page.paint()) {
