@@ -3,8 +3,8 @@
 ## Goal
 
 A headless compositor binary in this repository subscribes to a studio
-broadcast's program, its independently published sources, and its layer
-layout, and publishes the flattened program, headless (a GPU, or lavapipe
+composition's program and its independently published sources, and
+publishes the flattened program, headless (a GPU, or lavapipe
 without one). It can push that program to RTMP and WHIP through the studio's
 egress library. So destinations that cannot compose, such as RTMP, WHIP, HLS,
 and legacy players, still see the sources the creator published
@@ -26,8 +26,10 @@ moq-cli, but moq-scene moved here with the studio, so the command lives here
 too and moq never depends on this repository. Settle its name in this quest
 and document it in `README.md`.
 
-It flattens the layer layout the studio publishes on `live.kixel.studio.layers`
-(`rs/moq-scene/src/layout.rs`, and the README's "Layer layout").
+It flattens the composition the studio publishes
+([the composition](/quest/m2/compose/layout.md)); until that lands, it
+flattens the provisional `live.kixel.studio.layers` track (`rs/moq-scene/src/layout.rs`,
+and the README's "Layer layout").
 
 ## Required
 
@@ -35,4 +37,4 @@ It flattens the layer layout the studio publishes on `live.kixel.studio.layers`
 
 ## Related
 
-- [Guests in the layer layout](/quest/m2/compose/layout.md) - guests' layers, which it flattens once they land
+- [The studio publishes a composition](/quest/m2/compose/layout.md) - the format it flattens

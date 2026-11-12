@@ -14,9 +14,7 @@ fixing whatever the new API breaks here.
 
 ## Waiting
 
-- moq-dev/moq: both upstream quests above land. They move to moq's m3 in
-  [moq-dev/moq#8421](https://github.com/moq-dev/moq/pull/8421), so each link
-  resolves once that merges. Check: both quests' PRs have
+- moq-dev/moq: both upstream quests above land. Check: both quests' PRs have
   merged on moq's `main`, deleting their files, and moq-audio's AAC encoders
   are there. A quest file that moved, or went away without its work landing,
   does not count.

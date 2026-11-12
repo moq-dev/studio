@@ -15,7 +15,7 @@ Guest, broadcast, media, browser, and replay sound stays unfiltered.
 Changed 2026-11-02 (maintainer), when the studio moved out of moq: the chain
 itself, its filters, and the out-of-process plugin host are moq-audio work in
 [moq-audio filter chain](https://github.com/moq-dev/moq/blob/main/quest/m3/audio-filters.md),
-which moves to moq's m3 in [moq-dev/moq#8421](https://github.com/moq-dev/moq/pull/8421).
+in moq's m3.
 This quest is the studio's side: the panel, the scene-file shape, and wiring
 each source's chain into the program bus.
 
