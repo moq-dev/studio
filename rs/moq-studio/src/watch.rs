@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use kio::clock::Instant;
+use moq_mux::timeline;
 use moq_scene::layout::{self, Layout};
 use moq_scene::publish::Ext;
 use moq_scene::source::{self, MAX_DELAY, Sources, Status};
@@ -168,18 +169,42 @@ impl Read {
 		self.pending.push_back((None, None));
 	}
 
-	/// Queue `layout` to take effect at `at`. The program plays at most
-	/// [`MAX_DELAY`] behind what arrives, so of the layouts stamped that far
-	/// before it, all due by now, only the newest is kept.
+	/// Queue `layout` to take effect at `at`, or at once for `None`, which
+	/// supersedes every layout still waiting so a stalled program cannot hold
+	/// them up. The program plays at most [`MAX_DELAY`] behind what arrives,
+	/// so of the layouts stamped that far before it, all due by now, only the
+	/// newest is kept.
 	fn push(&mut self, layout: Option<Layout>, at: Option<moq_net::Timestamp>) {
-		let due = |stamp: Option<moq_net::Timestamp>| match (stamp, at) {
-			(None, _) => true,
-			(Some(_), None) => true,
-			(Some(stamp), Some(at)) => Duration::from(stamp) + MAX_DELAY <= Duration::from(at),
-		};
-		let passed = self.pending.iter().take_while(|(_, stamp)| due(*stamp)).count();
-		self.pending.drain(..passed.saturating_sub(1));
+		match at {
+			None => self.pending.clear(),
+			Some(at) => {
+				let passed = self.pending.iter().take_while(|(_, stamp)| {
+					stamp.is_none_or(|stamp| Duration::from(stamp) + MAX_DELAY <= Duration::from(at))
+				});
+				self.pending.drain(..passed.count().saturating_sub(1));
+			}
+		}
 		self.pending.push_back((layout, at));
+	}
+
+	/// Take the newest layout due at `now`: each takes effect once the program
+	/// plays the frame it is stamped with on `schedule`, and its sound has
+	/// played. `None` while none is due; `Some(None)` for the program alone.
+	fn take_due(&mut self, schedule: Option<&timeline::Consumer>, now: Instant) -> Option<Option<Layout>> {
+		let mut taken = None;
+		while let Some((_, at)) = self.pending.front() {
+			let due = match at {
+				None => true,
+				Some(at) => schedule.is_some_and(|schedule| {
+					schedule.due(*at).is_some_and(|due| due <= now) && source::heard(schedule, *at, now)
+				}),
+			};
+			if !due {
+				break;
+			}
+			taken = self.pending.pop_front().map(|(layout, _)| layout);
+		}
+		taken
 	}
 }
 
@@ -350,18 +375,7 @@ impl Watch {
 				self.size = read.size;
 				changed = true;
 			}
-			// Each layout once the program plays the frame it takes effect on.
-			while let Some((_, at)) = read.pending.front() {
-				let due = match at {
-					None => true,
-					Some(at) => schedule.as_ref().is_some_and(|schedule| {
-						schedule.due(*at).is_some_and(|due| due <= now) && source::heard(schedule, *at, now)
-					}),
-				};
-				if !due {
-					break;
-				}
-				let (layout, _) = read.pending.pop_front().expect("peeked");
+			if let Some(layout) = read.take_due(schedule.as_ref(), now) {
 				self.layout = layout;
 				changed = true;
 			}
@@ -580,6 +594,42 @@ mod tests {
 		assert!(read.size.is_none() && read.refused.is_none());
 	}
 
+	/// Once the layout track is unlisted, the program plays alone at once,
+	/// even while a stalled program holds back a layout still waiting.
+	#[tokio::test(start_paused = true)]
+	async fn unlisting_supersedes_a_waiting_layout() {
+		let clock = timeline::Producer::new(Duration::from_millis(100));
+		let audio = timeline::Audio {
+			end: Duration::from_secs(1),
+			buffered: Duration::ZERO,
+			target: Duration::from_millis(100),
+		};
+		clock.audio(audio, Instant::now());
+		let schedule = clock.consume();
+
+		let (broadcast, catalog, read, reader) = broadcast();
+		let mut publisher = layout::Publisher::new(broadcast.clone(), catalog.clone());
+		publisher.update(layout(Duration::ZERO), stamp(5)).unwrap();
+		pending(&read, 1).await;
+		tokio::time::advance(Duration::from_secs(60)).await;
+		let later = Instant::now();
+		let take = || {
+			let mut taken = None;
+			read.send_if_modified(|read| {
+				taken = read.take_due(Some(&schedule), later);
+				false
+			});
+			taken
+		};
+		assert_eq!(take(), None, "the program stalled before it");
+
+		publisher.finish().unwrap();
+		alone(&read).await;
+		assert_eq!(take(), Some(None), "the program alone");
+		assert!(read.borrow().pending.is_empty());
+		reader.abort();
+	}
+
 	/// A layout of another version, as a newer studio would publish.
 	#[derive(serde::Serialize)]
 	struct Newer {
@@ -610,6 +660,13 @@ mod tests {
 		pending.map(|(layout, at)| (layout, at.map(Duration::from))).collect()
 	}
 
+	/// Wait until the newest thing `read` holds is the program alone.
+	async fn alone(read: &watch::Sender<Read>) {
+		let mut reads = read.subscribe();
+		let alone = |read: &Read| read.pending.back().is_some_and(|(_, at)| at.is_none());
+		reads.wait_for(alone).await.unwrap();
+	}
+
 	/// The reader hands over each layout at the media time it took effect,
 	/// and the program alone once the catalog stops listing the track, until
 	/// it lists it again.
@@ -621,14 +678,15 @@ mod tests {
 		let first = (Some(layout(Duration::ZERO)), Some(Duration::from_secs(1)));
 		assert_eq!(pending(&read, 1).await, [first]);
 		publisher.finish().unwrap();
+		alone(&read).await;
 		assert_eq!(
-			pending(&read, 2).await[1],
-			(None, None),
+			pending(&read, 1).await,
+			[(None, None)],
 			"the program alone once unlisted"
 		);
 		publisher.update(layout(Duration::from_secs(2)), stamp(2)).unwrap();
 		let again = (Some(layout(Duration::from_secs(2))), Some(Duration::from_secs(2)));
-		assert_eq!(pending(&read, 3).await[2], again, "listed again");
+		assert_eq!(pending(&read, 2).await[1], again, "listed again");
 		reader.abort();
 	}
 
