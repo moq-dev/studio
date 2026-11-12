@@ -303,15 +303,15 @@ best video and audio its catalog lists, switches when the catalog changes, and
 comes back on its own when the publisher restarts.
 
 A broadcast source, a guest's included, plays on its publisher's timestamps,
-so its sound and picture stay in sync through network jitter and stalls. Its
-audio plays as far behind what arrives as the network's jitter needs, measured
-as it goes, the same delay `moq play --delay auto` holds, up to 2 s. Each
-picture waits for the sound stamped with it, and the canvas shows the last one
-meanwhile. A sound stall longer than that delay pauses the picture too and
-starts both again together; a picture stall leaves the sound playing. A burst
-after a stall skips ahead to the delay. Without audio, the
-picture plays 100 ms behind. Sources shows how far behind each broadcast
-plays.
+so its sound and picture stay in sync through network jitter. It plays as far
+behind what arrives as the network's jitter needs, measured as it goes as
+`moq play --delay auto` does, plus 50 ms to hand its sound to the mix, up to
+2 s in all. Sound and picture each
+keep that schedule on their own: a sound stall leaves the picture playing,
+and the sound comes back on the clock, skipping what it missed; a picture
+stall leaves the sound playing, with the canvas showing the last picture
+meanwhile. Without audio, the picture plays 100 ms behind. Sources shows how
+far behind each broadcast plays.
 
 ### Audio scenes
 

@@ -122,7 +122,7 @@ impl Feeds {
 			});
 			let voice = heard.or(voices.first());
 			match voice.and_then(|name| sources.get(name)?.strip()) {
-				Some(strip) => pick.set(program.minus(strip)),
+				Some(strip) => pick.set(program.minus([strip])),
 				None => pick.set(program.clone()),
 			}
 		}

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use kio::clock::Instant;
-use moq_mux::timeline;
+use moq_mux::sync;
 use moq_scene::layout::{self, Layout};
 use moq_scene::publish::Ext;
 use moq_scene::source::{self, MAX_DELAY, Sources, Status};
@@ -190,16 +190,14 @@ impl Read {
 	}
 
 	/// Take the newest layout due at `now`: each takes effect once the program
-	/// plays the frame it is stamped with on `schedule`, and its sound has
-	/// played. `None` while none is due; `Some(None)` for the program alone.
-	fn take_due(&mut self, schedule: Option<&timeline::Consumer>, now: Instant) -> Option<Option<Layout>> {
+	/// plays the frame it is stamped with on `schedule`. `None` while none is
+	/// due; `Some(None)` for the program alone.
+	fn take_due(&mut self, schedule: Option<&sync::Consumer>, now: Instant) -> Option<Option<Layout>> {
 		let mut taken = None;
 		while let Some((_, at)) = self.pending.front() {
 			let due = match at {
 				None => true,
-				Some(at) => schedule.is_some_and(|schedule| {
-					schedule.due(*at).is_some_and(|due| due <= now) && source::heard(schedule, *at, now)
-				}),
+				Some(at) => schedule.is_some_and(|schedule| schedule.due(*at).is_some_and(|due| due <= now)),
 			};
 			if !due {
 				break;
@@ -415,15 +413,12 @@ impl Watch {
 			self.synced = true;
 		}
 
-		// The keyframes play from `start` as far as the program has played,
-		// following the clock as it re-anchors or stalls with the sound.
+		// The keyframes play from when the program plays `start`, following
+		// the clock as it moves.
 		if let (Some(layout), Some(schedule)) = (&self.layout, &schedule) {
-			let went_on = match schedule.playhead(now) {
-				Some(head) => now.checked_sub(head.saturating_sub(layout.start)),
-				None => moq_net::Timestamp::try_from(layout.start)
-					.ok()
-					.and_then(|start| schedule.due(start)),
-			};
+			let went_on = moq_net::Timestamp::try_from(layout.start)
+				.ok()
+				.and_then(|start| schedule.due(start));
 			if let Some(went_on) = went_on {
 				self.compositor.set_program_start(went_on);
 			}
@@ -597,17 +592,10 @@ mod tests {
 	}
 
 	/// Once the layout track is unlisted, the program plays alone at once,
-	/// even while a stalled program holds back a layout still waiting.
+	/// even while a program not playing yet holds back a layout still waiting.
 	#[tokio::test(start_paused = true)]
 	async fn unlisting_supersedes_a_waiting_layout() {
-		let clock = timeline::Producer::new(Duration::from_millis(100));
-		let audio = timeline::Audio {
-			end: Duration::from_secs(1),
-			buffered: Duration::ZERO,
-			target: Duration::from_millis(100),
-		};
-		clock.audio(audio, Instant::now());
-		let schedule = clock.consume();
+		let schedule = sync::Producer::new(Duration::from_millis(100)).consume();
 
 		let (broadcast, catalog, read, reader) = broadcast();
 		let mut publisher = layout::Publisher::new(broadcast.clone(), catalog.clone());
@@ -623,7 +611,7 @@ mod tests {
 			});
 			taken
 		};
-		assert_eq!(take(), None, "the program stalled before it");
+		assert_eq!(take(), None, "the program has no moment for it");
 
 		publisher.finish().unwrap();
 		alone(&read).await;

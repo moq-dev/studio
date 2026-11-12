@@ -202,7 +202,10 @@ mod tests {
 		config.kind = moq_video::encode::Kind::Software;
 		let rendition = config.probe().await.unwrap();
 		let reserved = catalog.reserve().with_interval(config.effective_join());
-		let mut producer = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition).unwrap();
+		let track = broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut producer = moq_video::encode::Producer::new(track, reserved, rendition).unwrap();
 		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
 		let gray = vec![0x80; 64 * 64 * 4];
 		let at = |index: u64| moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap();
