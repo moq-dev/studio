@@ -2074,7 +2074,7 @@ impl Renditions {
 			};
 			let info = reserved.track_info(priority).with_refresh(ladder::REFRESH);
 			let track = broadcast.unique_track(suffix, info)?;
-			let producer = moq_video::encode::Producer::with_track(track.clone(), reserved, video)?;
+			let producer = moq_video::encode::Producer::new(track.clone(), reserved, video)?;
 			let (gate, grant) = match role {
 				// Reads nothing from the connection, so it always encodes at its
 				// ceiling, and only while recorded.
@@ -2184,10 +2184,10 @@ impl Probe {
 			let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
 			config.bitrate = Some(ladder::ceiling(size, framerate));
 			config.kind = kind.clone();
-			let probed = Exporter::new(&gpu.device, &gpu.queue, &mut config)
+			let probed = Exporter::new(&gpu.device, &gpu.queue, &config)
 				.await
 				.with_context(|| format!("cannot encode a {}x{} canvas", size.width, size.height));
-			let (exporter, video) = match probed {
+			let (exporter, config, video) = match probed {
 				Ok(probed) => probed,
 				Err(err) if role != Role::Half => return Err(err),
 				// The program goes on without it.

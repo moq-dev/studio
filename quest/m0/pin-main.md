@@ -3,8 +3,9 @@
 ## Goal
 
 The `moq` submodule is at moq's `main` as of the day this quest starts, and
-`just ci` passes on it. Every breaking change between `644d48996` (where
-[pin-sync](/quest/m0/pin-sync.md) leaves it) and that commit is fixed in one
+`just ci` passes on it. Every breaking change between `644d48996`
+([moq-dev/moq#8272](https://github.com/moq-dev/moq/pull/8272), where the
+studio's pin sits) and that commit is fixed in one
 PR, so each later wait-gated pin moves past only its own upstream change.
 
 ## Plan
@@ -36,7 +37,3 @@ On 2026-11-09, moq's `main` (`103052ed0`) was 117 first-parent commits past
 Each change's PR has an Impact section with the migration. If an upstream
 change a pin waits for is already on `main` when this starts, this PR also
 does that pin's work and deletes the pin quest.
-
-## Required
-
-- [moq-mux's decoupled playout clock is pinned](/quest/m0/pin-sync.md) - the playout rewrite onto `moq_mux::sync`, which this builds on

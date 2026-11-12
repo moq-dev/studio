@@ -723,7 +723,15 @@ impl<'a> Video<'a> {
 		config.kind = listing.kind.clone();
 		let rendition = config.probe().await?;
 		let reserved = listing.catalog.reserve().with_interval(config.effective_join());
-		let producer = moq_video::encode::Producer::new(listing.broadcast.clone(), reserved, rendition)?;
+		let suffix = match &rendition.codec {
+			hang::catalog::VideoCodec::H264(_) => ".avc3",
+			hang::catalog::VideoCodec::H265(_) => ".hev1",
+			other => return Err(Error::Unsupported(format!("{other} is not a codec the studio publishes"))),
+		};
+		let track = listing
+			.broadcast
+			.unique_track(suffix, reserved.track_info(hang::catalog::PRIORITY.video))?;
+		let producer = moq_video::encode::Producer::new(track, reserved, rendition)?;
 		Ok(Self {
 			track: Encoding::new(producer, listing.sessions.clone()),
 			claim: listing.claim,
@@ -1668,8 +1676,12 @@ mod tests {
 		let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
 		config.kind = moq_video::encode::Kind::Named("openh264".into());
 		let rendition = config.probe().await.unwrap();
-		let producer =
-			moq_video::encode::Producer::new(listing.broadcast.clone(), listing.catalog.reserve(), rendition).unwrap();
+		let reserved = listing.catalog.reserve();
+		let track = listing
+			.broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let producer = moq_video::encode::Producer::new(track, reserved, rendition).unwrap();
 		let (name, rendition) = listing.catalog.snapshot().video.renditions.pop_first().unwrap();
 		// Every group, however far behind the newest, since this reads only once
 		// the track has ended.
