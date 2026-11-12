@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -365,7 +365,29 @@ impl Sources {
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		let mixes = &self.mixes;
 		self.feeds.retain(|name, feed| {
-			let keep = collection.sources.get(name) == Some(&feed.source);
+			let keep = match (collection.sources.get(name), &mut feed.source) {
+				// A layer moved onto its clock anew plays on, so a guest's offset
+				// changing never opens their broadcast again.
+				(
+					Some(Source::Layer {
+						clock,
+						path,
+						instance,
+						offset,
+					}),
+					Source::Layer {
+						clock: playing,
+						path: played,
+						instance: serving,
+						offset: was,
+					},
+				) if clock == playing && path == played && instance == serving => {
+					*was = *offset;
+					feed.offset.store(*offset, Ordering::Relaxed);
+					true
+				}
+				(source, playing) => source == Some(&*playing),
+			};
 			if !keep {
 				leave(mixes, feed);
 			}
@@ -377,7 +399,7 @@ impl Sources {
 			.feeds
 			.iter()
 			.filter(
-				|(_, feed)| matches!(&feed.source, Source::Layer { broadcast, .. } if !self.feeds.contains_key(broadcast)),
+				|(_, feed)| matches!(&feed.source, Source::Layer { clock, .. } if !self.feeds.contains_key(clock)),
 			)
 			.map(|(name, _)| name.clone())
 			.collect();
@@ -411,12 +433,7 @@ impl Sources {
 			if !self.feeds.contains_key(name) {
 				let held = collection.transition.stinger() == Some(name.as_str());
 				let follows = match source {
-					Source::Layer { broadcast, .. } => match collection.sources.get(broadcast) {
-						Some(Source::Broadcast { path }) => {
-							self.feeds[broadcast].clock.clone().map(|clock| (path.clone(), clock))
-						}
-						_ => None,
-					},
+					Source::Layer { clock, .. } => self.feeds[clock].clock.clone(),
 					_ => None,
 				};
 				let (feed, driver) = open(name, source, &self.context, held, follows);
@@ -530,6 +547,9 @@ pub struct Feed {
 	silent: Arc<AtomicBool>,
 	/// A broadcast source's playout clock, or the one a layer plays on.
 	clock: Option<timeline::Consumer>,
+	/// A layer's offset onto its clock, in microseconds, which its driver
+	/// reads as it plays.
+	offset: Arc<AtomicI64>,
 }
 
 impl Feed {
@@ -718,6 +738,38 @@ impl Feed {
 		self.clock.as_ref()
 	}
 
+	/// The stream of the broadcast a broadcast source plays now, or `None`
+	/// while none is online, and for any other source.
+	pub fn instance(&self) -> Option<moq_net::Instance> {
+		let played = self.played.lock().unwrap();
+		played.broadcast.as_ref()?.info().instance.clone()
+	}
+
+	/// Microseconds to add to a broadcast source's timestamps to put them on
+	/// a timeline that reads `at` at `now`: where what it plays lands on that
+	/// timeline. `None` until its clock is anchored, and for any other source.
+	pub fn offset(&self, at: Duration, now: Instant) -> Option<i64> {
+		if !matches!(self.source, Source::Broadcast { .. }) || self.status() != Status::Live {
+			return None;
+		}
+		let clock = self.clock.as_ref()?;
+		// Any stamp maps through the one anchor: the newest picture shown, or
+		// without one, the sound playing now.
+		let newest = self.played.lock().unwrap().newest;
+		let reference = match newest {
+			Some(newest) => newest,
+			None => moq_net::Timestamp::try_from(clock.playhead(now)?).ok()?,
+		};
+		let due = clock.due(reference)?;
+		let micros = |duration: Duration| i64::try_from(duration.as_micros()).ok();
+		// When the reference plays, on the timeline.
+		let lands = match due.checked_duration_since(now) {
+			Some(ahead) => micros(at)?.checked_add(micros(ahead)?)?,
+			None => micros(at)?.checked_sub(micros(now.duration_since(due))?)?,
+		};
+		lands.checked_sub(micros(Duration::from(reference))?)
+	}
+
 	/// The source's gain, mute, delay, and meter in every mix, if it has sound.
 	/// A media file without any has none once it opens.
 	pub fn strip(&self) -> Option<&Strip> {
@@ -764,9 +816,10 @@ pub struct Driver {
 	runs: Runs,
 	silent: Arc<AtomicBool>,
 	clock: Option<timeline::Producer>,
-	/// A layer's broadcast path, and the clock of the broadcast source it
-	/// plays on.
-	follows: Option<(String, timeline::Consumer)>,
+	/// The clock of the broadcast source a layer plays on.
+	follows: Option<timeline::Consumer>,
+	/// A layer's offset onto that clock, in microseconds.
+	offset: Arc<AtomicI64>,
 }
 
 /// Where a source's own track goes, its claim on the local catalog's listing
@@ -884,7 +937,7 @@ impl Driver {
 				self.media(&self.context.dir.join(path), *looping, cues, listing).await
 			}
 			Source::Broadcast { path } => self.broadcast(path).await,
-			Source::Layer { source, .. } => self.layer(source).await,
+			Source::Layer { path, instance, .. } => self.layer(path, instance.as_ref()).await,
 			Source::Browser { url, width, height } => self.browser(url, *width, *height).await,
 			Source::Replay => {
 				let plays = self.plays.clone().expect("a replay source has plays");
@@ -1127,18 +1180,28 @@ impl Driver {
 		.await
 	}
 
-	/// Play the source called `source` that the broadcast this layer follows
-	/// publishes independently, from each instance of it, on the clock of the
-	/// broadcast source playing it.
-	async fn layer(&self, source: &str) -> Result<(), Error> {
-		let Some((path, schedule)) = &self.follows else {
+	/// Play the broadcast at `path` on the clock of the broadcast source this
+	/// layer plays on, from each instance of it, showing nothing of one
+	/// other than the stream `instance` names, whose timeline its offset is
+	/// not for. An instance a relay minted can neither match nor contradict
+	/// it, so it plays.
+	async fn layer(&self, path: &str, instance: Option<&moq_net::Instance>) -> Result<(), Error> {
+		let Some(schedule) = &self.follows else {
 			return Err(Error::Invalid(format!(
-				"layer `{}` follows no broadcast source",
+				"layer `{}` plays on no broadcast source",
 				self.name
 			)));
 		};
 		self.follow(path, |broadcast| {
-			Box::pin(self.play_layer(broadcast, path, source, schedule))
+			let serving = broadcast.info().instance.as_ref();
+			let other = instance
+				.zip(serving)
+				.is_some_and(|(named, serving)| !serving.is_minted() && named != serving);
+			if other {
+				self.picture.lock().unwrap().clear();
+				return Box::pin(std::future::pending());
+			}
+			Box::pin(self.play_layer(broadcast, path, schedule))
 		})
 		.await
 	}
@@ -1179,20 +1242,18 @@ impl Driver {
 		}
 	}
 
-	/// Decode one instance of a studio broadcast's source called `source`:
-	/// the first video and audio renditions its entry under the catalog's
-	/// [`SECTION`](crate::publish::SECTION) `sources` offers, switching as
-	/// the catalog changes them, until the catalog ends. Both play on
-	/// `schedule`, the program's clock, without moving it.
+	/// Decode one instance of a broadcast a composition lists: the first
+	/// video and audio renditions its catalog offers, or a still when it has
+	/// no video, switching as the catalog changes them, until the catalog
+	/// ends. Both play on `schedule`, the program's clock, without moving it.
 	async fn play_layer(
 		&self,
 		broadcast: moq_net::broadcast::Consumer,
 		path: &str,
-		source: &str,
 		schedule: &timeline::Consumer,
 	) -> Result<(), Error> {
 		let format = moq_mux::catalog::CatalogFormat::detect(path).unwrap_or_default();
-		let mut catalogs = moq_mux::catalog::Consumer::<crate::publish::Ext>::new(&broadcast, format).await?;
+		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
 		let mut video: Option<String> = None;
 		let mut audio: Option<String> = None;
 		let mut video_playing: Playing<'_> = Box::pin(std::future::pending());
@@ -1203,15 +1264,15 @@ impl Driver {
 					let Some(catalog) = catalog? else {
 						return Ok(());
 					};
-					let listed = catalog.ext.studio.sources.get(source);
-					let next_video = listed.map(|listed| pick(listed.video.enabled())).transpose()?.flatten();
-					let next_audio = listed.map(|listed| pick(listed.audio.enabled())).transpose()?.flatten();
+					let next_video = pick(catalog.video.enabled())?;
+					let next_audio = pick(catalog.audio.enabled())?;
 					// A source without video, such as an image or a color, is a still.
-					let still = listed.and_then(|listed| {
-						let mut stills = listed.binary.tracks.iter();
-						let (id, config) = stills.find(|(_, config)| config.broadcast.is_none() && config.mime.as_deref().is_some_and(|mime| mime.starts_with("image/")))?;
-						Some(Reference::track(config, id).to_string())
-					});
+					let still = {
+						let mut stills = catalog.binary.tracks.iter();
+						stills
+							.find(|(_, config)| config.broadcast.is_none() && config.mime.as_deref().is_some_and(|mime| mime.starts_with("image/")))
+							.map(|(id, config)| Reference::track(config, id).to_string())
+					};
 					let track = match &next_video {
 						Some((id, config)) => Some(Reference::track(config, id).to_string()),
 						None => still.clone(),
@@ -1283,12 +1344,18 @@ impl Driver {
 		let mut ended = false;
 		loop {
 			let now = kio::clock::now();
+			let offset = self.offset.load(Ordering::Relaxed);
+			// A picture moved off the clock's timeline never plays.
+			while queue.front().is_some_and(|frame| shift(frame.timestamp, offset).is_none()) {
+				queue.pop_front();
+			}
+			let on = |frame: &moq_video::Frame| shift(frame.timestamp, offset);
 			// Counted first: `present` holds the clock's lock while it iterates.
 			let heard_count = queue
 				.iter()
-				.take_while(|frame| heard(schedule, frame.timestamp, now))
+				.take_while(|frame| on(frame).is_some_and(|at| heard(schedule, at, now)))
 				.count();
-			let ready = queue.iter().take(heard_count).map(|frame| frame.timestamp);
+			let ready = queue.iter().take(heard_count).filter_map(on);
 			if let Some(index) = schedule.present(ready, now) {
 				let frame = queue.drain(..=index).next_back().expect("an index into the queue");
 				self.show(Picture::Frame(frame));
@@ -1297,9 +1364,9 @@ impl Driver {
 				return Ok(());
 			}
 			// Its moment, or once due, soon to see whether its sound has played.
-			let wake = queue.front().and_then(|frame| match schedule.due(frame.timestamp) {
+			let wake = queue.front().and_then(on).and_then(|at| match schedule.due(at) {
 				Some(due) if due > now => Some(due),
-				_ if !heard(schedule, frame.timestamp, now) => Some(now + crate::playout::RECHECK),
+				_ if !heard(schedule, at, now) => Some(now + crate::playout::RECHECK),
 				_ => None,
 			});
 			tokio::select! {
@@ -1345,9 +1412,15 @@ impl Driver {
 		let mut ended = false;
 		loop {
 			let now = kio::clock::now();
+			let offset = self.offset.load(Ordering::Relaxed);
 			let mut write = None;
 			while let Some(frame) = queue.front() {
-				match follow(schedule, frame.timestamp, now) {
+				// A sound moved off the clock's timeline never plays.
+				let Some(at) = shift(frame.timestamp, offset) else {
+					queue.pop_front();
+					continue;
+				};
+				match follow(schedule, at, now) {
 					Follow::Write(sounds) => {
 						let frame = queue.pop_front().expect("peeked");
 						writer.write(sounds, &frame.data).await?;
@@ -1370,7 +1443,8 @@ impl Driver {
 						// One due past the longest target would hold whatever a
 						// peer stamps.
 						let now = kio::clock::now();
-						let placed = schedule.due(frame.timestamp).is_some_and(|sounds| {
+						let at = shift(frame.timestamp, self.offset.load(Ordering::Relaxed));
+						let placed = at.and_then(|at| schedule.due(at)).is_some_and(|sounds| {
 							sounds >= now && sounds <= now + MAX_DELAY + WRITE_LEAD
 						});
 						if placed {
@@ -2306,14 +2380,14 @@ pub(crate) fn pick<'a, C: Reference + Clone + 'a>(
 }
 
 /// Start the feed for `source`, and the driver that fills it, `held` from
-/// playing a media file until the first [`Feed::play`]. A layer `follows` its
-/// broadcast's path and the clock of the broadcast source playing it.
+/// playing a media file until the first [`Feed::play`]. A layer `follows`
+/// the clock of the broadcast source it plays on.
 fn open(
 	name: &str,
 	source: &Source,
 	context: &Context,
 	held: bool,
-	follows: Option<(String, timeline::Consumer)>,
+	follows: Option<timeline::Consumer>,
 ) -> (Feed, Driver) {
 	let picture = Mailbox::default();
 	let delivered = Delivered::default();
@@ -2349,6 +2423,10 @@ fn open(
 		_ => (None, None),
 	};
 	let silent = Arc::<AtomicBool>::default();
+	let offset = Arc::new(AtomicI64::new(match source {
+		Source::Layer { offset, .. } => *offset,
+		_ => 0,
+	}));
 	let runs = Runs::new(Mutex::new(Latest {
 		run: Run::default(),
 		stopped: held,
@@ -2368,9 +2446,10 @@ fn open(
 		runs: runs.clone(),
 		silent: silent.clone(),
 		clock: match &follows {
-			Some((_, schedule)) => Some(schedule.clone()),
+			Some(schedule) => Some(schedule.clone()),
 			None => clock.as_ref().map(timeline::Producer::consume),
 		},
+		offset: offset.clone(),
 	};
 	let driver = Driver {
 		name: name.to_string(),
@@ -2389,6 +2468,7 @@ fn open(
 		silent,
 		clock,
 		follows,
+		offset,
 	};
 	(feed, driver)
 }
@@ -2401,7 +2481,7 @@ impl Source {
 	///
 	/// A broadcast, or a layer of one, is already published by its own
 	/// publisher, and a clone shows its source's track, its filters carried by
-	/// the layout rather than encoded again. Web pages and overlays are seen
+	/// the composition rather than encoded again. Web pages and overlays are seen
 	/// only in the program, since H.264 would encode their transparency over
 	/// black, a LUT is looked up, never shown, and a scene is drawn from other
 	/// sources.
@@ -2426,6 +2506,28 @@ impl Source {
 			| Source::Program => false,
 		}
 	}
+
+	/// Whether the source can be published independently, reaching viewers
+	/// as a broadcast of its own: one with a track of its own, which the
+	/// studio publishes, or a broadcast, already its publisher's.
+	pub fn independent(&self) -> bool {
+		self.publishes() || matches!(self, Source::Broadcast { .. })
+	}
+}
+
+/// `timestamp` moved `offset` microseconds, or `None` off a timestamp's range.
+fn shift(timestamp: moq_net::Timestamp, offset: i64) -> Option<moq_net::Timestamp> {
+	// Unmoved, it keeps its own timescale.
+	if offset == 0 {
+		return Some(timestamp);
+	}
+	let at = Duration::from(timestamp);
+	let by = Duration::from_micros(offset.unsigned_abs());
+	let moved = match offset > 0 {
+		true => at.checked_add(by)?,
+		false => at.checked_sub(by)?,
+	};
+	moq_net::Timestamp::try_from(moved).ok()
 }
 
 /// The frame rate a capture is encoded at when the device reports none.
@@ -3070,93 +3172,107 @@ mod tests {
 		.await;
 	}
 
-	/// A layer shows each picture when its broadcast source's clock says, as
-	/// the program's picture stamped alike shows, not its own delay after it
-	/// arrives.
+	/// A layer, a broadcast of its own, shows each picture when its broadcast
+	/// source's clock says the picture its offset puts it beside does, as the
+	/// program's picture stamped alike shows, not its own delay after it
+	/// arrives; a new offset moves the next picture without opening the
+	/// broadcast again.
 	#[tokio::test(start_paused = true)]
 	async fn a_layer_plays_on_its_broadcasts_clock() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
-			let publication = origin
-				.route("room/guest", moq_net::origin::RouteOptions::hidden())
-				.unwrap();
+			let mut live = live(&origin, false).await;
+			// The camera's own broadcast, on a timeline 250 ms behind the
+			// program's.
+			let publication = origin.route("room/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
 			let mut broadcast = publication.broadcast().clone();
-			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
-			let mut catalog = crate::publish::Catalog::new(&mut broadcast, config).unwrap();
-			let (mut program, mut encoder) = rendition(&broadcast, catalog.timebase()).await;
-			// The camera's track is in the program's broadcast, listed under its
-			// name in the catalog's own section rather than as the program's.
-			let mut local = moq_net::broadcast::Info::new().produce();
-			let listing = moq_mux::catalog::Producer::new(&mut local, Default::default()).unwrap();
-			let (mut cam, mut cam_encoder) = rendition(&broadcast, listing.timebase()).await;
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let (mut cam, mut cam_encoder) = rendition(&broadcast, catalog.timebase()).await;
 			publication.announce().unwrap();
 
 			let mut collection = collection();
-			collection.sources.insert(
-				"cam".into(),
-				Source::Layer {
-					broadcast: "guest".into(),
-					source: "cam".into(),
-				},
-			);
+			let layer = |offset| Source::Layer {
+				clock: "guest".into(),
+				path: "room/cam".into(),
+				instance: None,
+				offset,
+			};
+			collection.sources.insert("cam".into(), layer(250_000));
 			collection.validate().unwrap();
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
-			let layer = sources.get("cam").unwrap();
 			let clock = sources.get("guest").unwrap().clock.clone().unwrap();
 
 			until_time(kio::clock::now()).await;
 			let arrived = kio::clock::now();
-			picture(&mut program, &mut encoder, 1_000);
+			picture(&mut live.video, &mut live.encoder, 1_000);
 			let stamp = moq_net::Timestamp::from_millis(1_000).unwrap();
 			let due = until(|| clock.due(stamp)).await;
 			assert_eq!(due, arrived + VIDEO_DELAY);
 
 			// Half the delay later, so on a clock of its own it would show late.
 			until_time(arrived + VIDEO_DELAY / 2).await;
-			picture(&mut cam, &mut cam_encoder, 1_000);
-			let listed = until(|| Some(listing.snapshot()).filter(|listed| !listed.video.renditions.is_empty())).await;
-			catalog
-				.mutate(|root| {
-					root.ext.studio.sources.insert("cam".into(), listed);
-				})
-				.unwrap();
+			picture(&mut cam, &mut cam_encoder, 750);
+			let layer_feed = sources.get("cam").unwrap();
 			until_time(due - Duration::from_millis(1)).await;
-			assert!(layer.next_picture().is_none(), "shown before its moment");
+			assert!(layer_feed.next_picture().is_none(), "shown before its moment");
 			until_time(due).await;
-			assert_eq!(shown(layer).await, Duration::from(stamp));
-			assert_eq!(layer.delay(), Some(VIDEO_DELAY), "the program's");
+			assert_eq!(shown(layer_feed).await, Duration::from_millis(750));
+			assert_eq!(layer_feed.delay(), Some(VIDEO_DELAY), "the program's");
+
+			// Moved 100 ms later onto the clock, it plays on.
+			collection.sources.insert("cam".into(), layer(350_000));
+			assert!(sources.sync(&collection).is_empty(), "opened again");
+			let layer_feed = sources.get("cam").unwrap();
+			picture(&mut live.video, &mut live.encoder, 1_200);
+			picture(&mut cam, &mut cam_encoder, 850);
+			let later = moq_net::Timestamp::from_millis(1_200).unwrap();
+			let due = until(|| clock.due(later)).await;
+			until_time(due - Duration::from_millis(1)).await;
+			assert!(layer_feed.next_picture().is_none(), "shown on its old offset");
+			until_time(due).await;
+			assert_eq!(shown(layer_feed).await, Duration::from_millis(850));
 		})
 		.await;
 	}
 
-	/// A layer whose source is a still, an image file on a binary track,
+	/// A timestamp moves by an offset either way, keeping its own timescale
+	/// unmoved, and one moved off a timestamp's range has no place.
+	#[test]
+	fn a_timestamp_shifts() {
+		let stamp = moq_net::Timestamp::from_millis(1_000).unwrap();
+		assert_eq!(shift(stamp, 0), Some(stamp));
+		assert_eq!(shift(stamp, 1_500).map(Duration::from), Some(Duration::from_micros(1_001_500)));
+		assert_eq!(shift(stamp, -1_000_000).map(Duration::from), Some(Duration::ZERO));
+		assert_eq!(shift(stamp, -1_000_001), None);
+		assert_eq!(shift(stamp, i64::MIN), None);
+	}
+
+	/// A layer whose broadcast is a still, an image file on a binary track,
 	/// shows it as it arrives.
 	#[tokio::test]
 	async fn a_layer_shows_a_still() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
+			let _live = live(&origin, false).await;
 			let publication = origin
-				.route("room/guest", moq_net::origin::RouteOptions::hidden())
+				.route("room/logo", moq_net::origin::RouteOptions::hidden())
 				.unwrap();
 			let mut broadcast = publication.broadcast().clone();
-			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
-			let mut catalog = crate::publish::Catalog::new(&mut broadcast, config).unwrap();
-			let mut track = broadcast.create_track("source/logo.png", None).unwrap();
+			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut track = broadcast.create_track("logo.png", None).unwrap();
 			let pixel = image::RgbaImage::from_raw(1, 1, vec![255, 0, 0, 255]).unwrap();
 			let mut png = std::io::Cursor::new(Vec::new());
 			pixel.write_to(&mut png, image::ImageFormat::Png).unwrap();
 			track.write_frame(None, bytes::Bytes::from(png.into_inner())).unwrap();
 			let mut still = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
 			still.mime = Some("image/png".into());
-			let mut logo = hang::Catalog::default();
-			logo.binary.tracks.insert("source/logo.png".into(), still);
 			catalog
 				.mutate(|root| {
-					root.ext.studio.sources.insert("logo".into(), logo);
+					root.binary.tracks.insert("logo.png".into(), still);
 				})
 				.unwrap();
 			publication.announce().unwrap();
@@ -3165,8 +3281,10 @@ mod tests {
 			collection.sources.insert(
 				"logo".into(),
 				Source::Layer {
-					broadcast: "guest".into(),
-					source: "logo".into(),
+					clock: "guest".into(),
+					path: "room/logo".into(),
+					instance: None,
+					offset: 0,
 				},
 			);
 			let mut sources = Sources::new(context);
@@ -3184,20 +3302,20 @@ mod tests {
 	}
 
 	/// A layer stops with its broadcast source, and starts again on its
-	/// replacement's clock.
+	/// replacement's clock, and opens again for another broadcast or stream.
 	#[tokio::test]
 	async fn a_layer_follows_its_broadcast_sources_replacement() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, _origin) = context(dir.path());
 			let mut collection = collection();
-			collection.sources.insert(
-				"cam".into(),
-				Source::Layer {
-					broadcast: "guest".into(),
-					source: "cam".into(),
-				},
-			);
+			let layer = |path: &str, instance: Option<&str>| Source::Layer {
+				clock: "guest".into(),
+				path: path.into(),
+				instance: instance.map(|instance| instance.parse().unwrap()),
+				offset: 0,
+			};
+			collection.sources.insert("cam".into(), layer("room/cam", None));
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection);
 			assert_eq!(drivers.len(), 3);
@@ -3215,6 +3333,16 @@ mod tests {
 				.collect();
 			names.sort();
 			assert_eq!(names, ["cam", "guest"]);
+
+			for edited in [layer("room/cam", Some("abc")), layer("room/screen", Some("abc"))] {
+				collection.sources.insert("cam".into(), edited);
+				let names: Vec<String> = sources
+					.sync(&collection)
+					.iter()
+					.map(|driver| driver.name().to_string())
+					.collect();
+				assert_eq!(names, ["cam"]);
+			}
 		})
 		.await;
 	}
@@ -3269,6 +3397,41 @@ mod tests {
 				shown(feed).await < Duration::from(first),
 				"stamped before the first track"
 			);
+		})
+		.await;
+	}
+
+	/// A broadcast source's offset onto a timeline puts the picture it shows
+	/// where that timeline reads when it shows it, signed either way, and
+	/// there is none before its clock anchors.
+	#[tokio::test(start_paused = true)]
+	async fn a_broadcast_lands_on_a_timeline() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let mut live = live(&origin, false).await;
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection());
+			start(&sources, drivers).await;
+			let feed = sources.get("guest").unwrap();
+			let clock = feed.clock.clone().unwrap();
+			assert_eq!(feed.offset(Duration::from_secs(5), kio::clock::now()), None, "unanchored");
+			assert_eq!(sources.get("red").unwrap().offset(Duration::ZERO, kio::clock::now()), None);
+
+			until_time(kio::clock::now()).await;
+			picture(&mut live.video, &mut live.encoder, 1_000);
+			let stamp = moq_net::Timestamp::from_millis(1_000).unwrap();
+			let due = until(|| clock.due(stamp)).await;
+			until_time(due).await;
+			assert_eq!(shown(feed).await, Duration::from(stamp));
+			assert!(feed.instance().is_some(), "an origin names the stream");
+			let now = kio::clock::now();
+			// Shown now, as the timeline reads 5 s: 4 s after its own stamp.
+			assert_eq!(feed.offset(Duration::from_secs(5), now), Some(4_000_000));
+			assert_eq!(feed.offset(Duration::from_millis(400), now), Some(-600_000));
+			// Read 10 ms later, it was shown 10 ms before then.
+			let later = now + Duration::from_millis(10);
+			assert_eq!(feed.offset(Duration::from_secs(5), later), Some(3_990_000));
 		})
 		.await;
 	}

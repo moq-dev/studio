@@ -54,7 +54,7 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// anything showing it.
 ///
 /// A source published independently is left out of every texture, and drawn
-/// only as its [layer layout](crate::layout) places it: over the program, in
+/// only as its [composition](crate::composition) places it: over the program, in
 /// [`layered`](Self::layered), and over the scene in preview, so each shows
 /// what viewers see.
 ///
@@ -432,7 +432,7 @@ impl Compositor {
 
 	/// The scene in preview, at its own size, as of the last
 	/// [`render`](Self::render), under the top layer when it is the program's
-	/// size, with the pictures of their [layer layout](crate::layout) over
+	/// size, with the pictures of their [composition](crate::composition) over
 	/// both.
 	pub fn preview(&self) -> &wgpu::Texture {
 		&self.preview.texture
@@ -463,7 +463,7 @@ impl Compositor {
 	}
 
 	/// The program as viewers see it, as of the last [`render`](Self::render):
-	/// with each picture of its [layer layout](crate::layout) over it, or the
+	/// with each picture of its [composition](crate::composition) over it, or the
 	/// [`program`](Self::program) itself while it has none showing. Created
 	/// as the program is.
 	pub fn layered(&self) -> &wgpu::Texture {
@@ -475,7 +475,7 @@ impl Compositor {
 
 	/// How long the program scene had been on program as of the last
 	/// [`render`](Self::render): the moment of its items' keyframes the
-	/// program shows, and the layer layout's pictures play from.
+	/// program shows, and the composition's pictures play from.
 	pub fn program_since(&self) -> Duration {
 		self.program_shown
 	}
@@ -867,8 +867,8 @@ impl Compositor {
 
 		// The pictures viewers draw over the program, which the preview draws
 		// over its scene too, so both show what viewers would see.
-		let program_layers = crate::layout::pictures(collection, program.0, true);
-		let preview_layers = crate::layout::pictures(collection, preview.0, preview_top);
+		let program_layers = crate::composition::pictures(collection, program.0, true);
+		let preview_layers = crate::composition::pictures(collection, preview.0, preview_top);
 		self.layered = program_layers.iter().any(|item| item.visible);
 		if self.layered && self.program.layered.is_none() {
 			let target = Target::new(&self.device, &self.effects, program_canvas, "moq-scene layered");
@@ -1842,10 +1842,10 @@ impl Draw<'_> {
 		}
 	}
 
-	/// Draw `layers`, pictures of the layer layout, onto `target`, back to
+	/// Draw `layers`, pictures of the composition, onto `target`, back to
 	/// front, each posed `since` its scene went on. Each names the source it
 	/// shows and carries its source's crop and filters already, so it draws as
-	/// a player reading the layout would.
+	/// a player reading the composition would.
 	fn layers(&mut self, target: &Target, layers: &[Item], since: Duration) {
 		for item in layers.iter().filter(|item| item.visible) {
 			let item = item.posed(since);

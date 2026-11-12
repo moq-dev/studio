@@ -44,15 +44,16 @@ pub struct Config {
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub scenes: Option<PathBuf>,
 
-	/// Play a studio broadcast instead, as a viewer sees it: the program with
-	/// each source published independently over it. The URL's path names the
-	/// broadcast, as `moq play`'s does, such as
-	/// `https://relay.example/anon/studio`. A prototype, until `moq play` plays
-	/// the layer layout.
+	/// Play a studio broadcast instead, as a viewer sees it: its composition,
+	/// the program with each source published independently over it. The URL
+	/// names the relay, as `--connect` does, and `--broadcast` the studio's
+	/// broadcast under it, such as `https://relay.example/anon` and `studio`.
+	/// A prototype, until `moq play` plays compositions.
 	#[usage(long)]
 	pub watch: Option<url::Url>,
 
-	/// The broadcast path the program is published at.
+	/// The broadcast path the program is published at, or with `--watch`, is
+	/// played from.
 	#[usage(long, default = "studio")]
 	pub broadcast: String,
 
@@ -184,7 +185,7 @@ fn main() -> anyhow::Result<ExitCode> {
 	moq_tokio::cli::check_env(&[Config::spec()], &[])?;
 	let Some(scenes) = config.scenes()? else {
 		let url = config.watch.clone().expect("checked by scenes");
-		watch::run(config.client.clone(), config.quic.clone(), url)?;
+		watch::run(config.client.clone(), config.quic.clone(), url, &config.broadcast)?;
 		return Ok(ExitCode::SUCCESS);
 	};
 	let scenes = scenes.to_path_buf();
@@ -526,7 +527,7 @@ mod tests {
 			let args: Vec<_> = args.iter().map(std::ffi::OsStr::new).collect();
 			Config::parse_from(&args).unwrap()
 		};
-		let watch = parse(&["--watch", "https://relay.example/anon/studio"]);
+		let watch = parse(&["--watch", "https://relay.example/anon", "--broadcast", "studio"]);
 		assert_eq!(watch.scenes().unwrap(), None);
 		for refused in [
 			&["show.toml", "--watch", "https://a/b"][..],

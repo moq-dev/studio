@@ -41,7 +41,7 @@ use kio::clock::Instant;
 use moq_net::bandwidth;
 use moq_scene::publish::{Encoding, Sessions};
 use moq_scene::source::{self, Driver, Sources, Status};
-use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler, wgpu};
+use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler, Source, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
 use tokio::sync::oneshot::error::TryRecvError;
 
@@ -654,12 +654,12 @@ pub struct Program {
 	clock: moq_mux::Clock,
 	/// Where the local sources keep their own tracks, on the same clock.
 	sources: moq_scene::publish::Publish,
-	/// The sources published independently, whose tracks the broadcast
-	/// carries beside the program's.
+	/// The sources published independently, each a broadcast of its own
+	/// beside the program's when it is local.
 	published: tokio::sync::watch::Sender<BTreeSet<String>>,
-	/// Where and when the broadcast's viewers show those sources, while any
-	/// is published.
-	layout: Mutex<moq_scene::layout::Publisher>,
+	/// The composition: where and when viewers show those sources over the
+	/// program.
+	composition: Mutex<Composed>,
 	/// What a recording reads the program from, on the same clock.
 	recording: moq_net::origin::Route,
 	/// The recording broadcast's catalog, held for as long as the engine runs,
@@ -673,19 +673,65 @@ pub struct Program {
 	_audio: bandwidth::Reservation,
 }
 
+/// The composition's broadcast, and where it finds what it lists.
+struct Composed {
+	/// The composition's broadcast, announced beside the program's.
+	route: moq_net::origin::Route,
+	publisher: moq_scene::composition::Publisher,
+	/// The composition's path, which each child's is relative to.
+	path: moq_net::Path,
+	/// The program's path.
+	program: moq_net::Path,
+	/// Where each local source published independently has its broadcast.
+	sources: moq_net::Path,
+}
+
+impl Composed {
+	/// Announce the composition beneath the program's broadcast at `program`
+	/// on `origin`, its catalog on the program's `clock`.
+	fn new(origin: &moq_net::origin::Producer, program: &moq_net::Path, clock: moq_mux::Clock) -> anyhow::Result<Self> {
+		let below = |name: &'static str| program.join(&moq_net::Path::from_static(name));
+		let path = below(moq_scene::composition::PATH)?;
+		let route = origin
+			.route(&path, moq_net::origin::RouteOptions::hidden())
+			.context("cannot create the composition's broadcast")?;
+		let publisher = moq_scene::composition::Publisher::new(&mut route.broadcast().clone(), clock)?;
+		route.announce().context("cannot announce the composition")?;
+		Ok(Self {
+			route,
+			publisher,
+			path,
+			program: program.clone(),
+			sources: below(moq_scene::composition::SOURCES)?,
+		})
+	}
+
+	/// Where the source called `name` is, relative to the composition: the
+	/// broadcast it plays at `path` for a broadcast source, else the local
+	/// one it is published to. `None` for a path no reference can name.
+	fn child(&self, name: &str, path: Option<&str>) -> Option<moq_net::path::Relative> {
+		let path = match path {
+			Some(path) => moq_net::Path::new(path).ok()?,
+			None => self.sources.join(&moq_net::Path::new(name).ok()?).ok()?,
+		};
+		path.relative(&self.path)
+	}
+}
+
 impl Drop for Program {
 	fn drop(&mut self) {
 		self.publication.broadcast().close();
+		self.composition.lock().unwrap().route.broadcast().close();
 	}
 }
 
 impl Program {
-	/// End the layer layout, then finish the program's catalog and the
+	/// End the composition, then finish the program's catalog and the
 	/// recording's, once every track they list has ended, so a viewer or a
 	/// recording reading either reaches its end rather than a cut.
 	fn finish(&self) {
-		if let Err(err) = self.layout.lock().unwrap().finish() {
-			tracing::warn!(%err, "cannot finish the layer layout");
+		if let Err(err) = self.composition.lock().unwrap().publisher.finish() {
+			tracing::warn!(%err, "cannot finish the composition");
 		}
 		for catalog in [&self.catalog, &self.recorded] {
 			// Fails only once the catalog failed, which ended its tracks already.
@@ -771,28 +817,47 @@ impl Program {
 			.set_on_program(moq_scene::publish::OnProgram { shown, heard });
 	}
 
-	/// Publish the layer layout of what `state` drew on program at `at` on
-	/// the media clock, while any source is published independently.
-	fn lay_out(&self, state: &State, at: Duration) {
+	/// Publish the composition of what `state` drew on program at `at` on
+	/// the media clock, at `now`: the program, and each source published
+	/// independently that is online, a broadcast source where what it showed
+	/// then lands on the program's clock.
+	fn compose(&self, state: &State, at: Duration, now: Instant) {
 		// Past what a timestamp holds, the frame goes unstamped too.
 		let Ok(stamp) = moq_net::Timestamp::try_from(at) else {
 			return;
 		};
 		let collection = &state.collection;
-		let mut publisher = self.layout.lock().unwrap();
-		let published = match collection.published.is_empty() {
-			true => publisher.finish(),
-			false => {
-				// To the whole microsecond as the frame's stamp is, rather than
-				// rounded as the wire would, so a cut's layout starts on its frame.
-				let start = at.saturating_sub(state.compositor.program_since()).as_micros();
-				let start = Duration::from_micros(start as u64);
-				let layout = moq_scene::layout::Layout::new(collection, state.compositor.program_scene(), start);
-				publisher.update(layout, stamp)
-			}
+		let mut composed = self.composition.lock().unwrap();
+		let mut children = BTreeMap::new();
+		for name in &collection.published {
+			let child = match collection.sources.get(name) {
+				Some(Source::Broadcast { path }) => {
+					// Offline, or not yet playing, it shows nothing here either.
+					let Some(feed) = state.sources.get(name) else { continue };
+					let Some(offset) = feed.offset(at, now) else { continue };
+					let Some(broadcast) = composed.child(name, Some(path)) else { continue };
+					moq_scene::composition::Child::new(broadcast, feed.instance(), offset)
+				}
+				Some(_) => match composed.child(name, None) {
+					Some(broadcast) => moq_scene::composition::Child::new(broadcast, None, 0),
+					None => continue,
+				},
+				None => continue,
+			};
+			children.insert(name.clone(), child);
+		}
+		let program = moq_scene::composition::Program {
+			broadcast: composed.program.relative(&composed.path).expect("the program is above it"),
+			instance: Some(self.publication.instance()),
 		};
-		if let Err(err) = published {
-			tracing::warn!(%err, "cannot publish the layer layout");
+		// To the whole microsecond as the frame's stamp is, rather than
+		// rounded as the wire would, so a cut's composition starts on its frame.
+		let start = at.saturating_sub(state.compositor.program_since()).as_micros();
+		let start = Duration::from_micros(start as u64);
+		let scene = state.compositor.program_scene();
+		let composition = moq_scene::composition::Composition::new(collection, scene, start, program, children);
+		if let Err(err) = composed.publisher.update(composition, stamp) {
+			tracing::warn!(%err, "cannot publish the composition");
 		}
 	}
 }
@@ -1546,7 +1611,7 @@ impl Engine {
 					continue;
 				}
 				self.program.on_program(state, shown);
-				self.program.lay_out(state, at);
+				self.program.compose(state, at, tick);
 				let compositor = &state.compositor;
 				for (scene, camera) in &mut state.cameras {
 					match scene {
@@ -1881,15 +1946,15 @@ async fn publish(
 	let epoch = Duration::ZERO;
 	publication.announce().context("cannot announce the broadcast")?;
 
+	let composition = Composed::new(&origin, path, clock.clone())?;
 	let (published, follow) = tokio::sync::watch::channel(BTreeSet::new());
-	let forward = (sources.clone(), broadcast.clone(), listed.clone(), bandwidth.clone());
+	let forward = (sources.clone(), origin.clone(), composition.sources.clone(), bandwidth.clone());
 	tokio::spawn(async move {
-		let (sources, broadcast, catalog, bandwidth) = forward;
-		if let Err(err) = sources.forward(follow, broadcast, catalog, bandwidth).await {
+		let (sources, origin, base, bandwidth) = forward;
+		if let Err(err) = sources.forward(follow, origin, base, bandwidth).await {
 			tracing::warn!(%err, "stopped publishing sources independently");
 		}
 	});
-	let layout = Mutex::new(moq_scene::layout::Publisher::new(broadcast.clone(), listed.clone()));
 
 	let health = match live {
 		Some(live) => {
@@ -1915,7 +1980,7 @@ async fn publish(
 			clock: clock.clone(),
 			sources: sources.clone(),
 			published,
-			layout,
+			composition: Mutex::new(composition),
 			recording,
 			recorded,
 			local,
@@ -2534,6 +2599,10 @@ impl Extras {
 				"scene `{name}` would publish where viewers report back; rename it to publish it"
 			);
 		}
+		anyhow::ensure!(
+			name != moq_scene::composition::PATH,
+			"scene `{name}` would publish where the composition is; rename it to publish it"
+		);
 		let publication = self
 			.origin
 			.route(&path, moq_net::origin::RouteOptions::hidden())
@@ -3204,15 +3273,18 @@ mod tests {
 			.collect()
 	}
 
-	/// A source published independently goes on the program broadcast's
-	/// layer layout, from when its scene went on program: a cut's layout
-	/// takes effect on the frame its scene starts. Once nothing is published,
-	/// the layout ends and the catalog stops listing it, and quitting ends a
-	/// layout published again.
+	/// The studio publishes a composition beside the program, on its clock:
+	/// the program, and each source published independently as a broadcast
+	/// of its own beneath it at offset zero, from when its scene went on
+	/// program, so a cut's composition takes effect on the frame its scene
+	/// starts. Once nothing is published, the composition lists the program
+	/// alone and the source's broadcast ends, and quitting ends the
+	/// composition.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
-	async fn the_program_carries_a_layer_layout() {
-		use moq_scene::layout::{Layout, TRACK};
+	async fn the_studio_publishes_a_composition() {
+		use moq_mux::catalog::Stream;
+		use moq_scene::composition::{Composition, TRACK};
 
 		let dir = tempfile::tempdir().unwrap();
 		let gpu = Gpu::new().await.expect("a GPU");
@@ -3226,68 +3298,81 @@ mod tests {
 			.await
 			.expect("the studio starts");
 
-		let broadcast = engine.program.publication.broadcast().consume();
-		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default())
+		let composed = engine.program.composition.lock().unwrap().route.broadcast().consume();
+		assert_eq!(composed.info().path.as_str(), "studio/composition");
+		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&composed, Default::default())
 			.await
-			.expect("the program's catalog");
-		let listed = |catalog: &hang::Catalog| catalog.json.tracks.contains_key(TRACK);
-		kio::clock::timeout(TIMEOUT, async {
-			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+			.expect("the composition's catalog");
+		let catalog = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let catalog = catalogs.next().await.unwrap().expect("a catalog");
+				if catalog.json.tracks.contains_key(TRACK) {
+					return catalog;
+				}
+			}
 		})
 		.await
-		.expect("the catalog lists the layout");
-		let read = || moq_json::snapshot::Consumer::<Layout>::new(broadcast.track(TRACK).unwrap(), Default::default());
-		let next = async |layouts: &mut moq_json::snapshot::Consumer<Layout>| {
-			kio::clock::timeout(TIMEOUT, layouts.next())
+		.expect("the catalog lists the composition");
+		assert_eq!(catalog.media.clock, engine.program.clock.wall(), "the program's clock");
+
+		let mut compositions = moq_json::snapshot::Consumer::<Composition>::new(
+			composed.track(TRACK).unwrap(),
+			Default::default(),
+		);
+		let next = async |compositions: &mut moq_json::snapshot::Consumer<Composition>| {
+			kio::clock::timeout(TIMEOUT, compositions.next())
 				.await
-				.expect("a layout or its end")
+				.expect("a composition or its end")
 				.unwrap()
 		};
-		let mut layouts = read();
-		let first = next(&mut layouts).await.expect("a layout");
-		let sources: Vec<&str> = first
-			.value
-			.pictures
-			.iter()
-			.map(|picture| picture.item.source.as_str())
-			.collect();
+		let first = next(&mut compositions).await.expect("a composition");
+		assert_eq!(first.value.program.broadcast.as_str(), ".");
+		assert_eq!(first.value.program.instance, Some(engine.program.publication.instance()));
+		let sources: Vec<&str> = first.value.pictures.iter().map(|item| item.source.as_str()).collect();
 		assert_eq!(sources, ["red"]);
+		let red = &first.value.sources["red"];
+		assert_eq!((red.broadcast.as_str(), red.offset, &red.instance), ("source/red", 0, &None));
+
+		// Its own broadcast, on the program's clock.
+		let origin = engine.program._origin.consume();
+		let mut following = origin.follow("studio/source/red", None).unwrap();
+		let broadcast = kio::clock::timeout(TIMEOUT, following.available())
+			.await
+			.expect("the source's broadcast")
+			.unwrap()
+			.expect("online");
+		let mut own = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default())
+			.await
+			.expect("the source's catalog");
+		let listed = own.next().await.unwrap().expect("a catalog");
+		assert_eq!(listed.media.clock, engine.program.clock.wall(), "the program's clock");
+		assert!(!listed.binary.tracks.is_empty(), "the color's still");
 
 		{
 			let mut state = engine.state.lock().unwrap();
 			state.compositor.set_preview(Some("Two".into()));
 			state.cut().unwrap();
 		}
-		let cut = next(&mut layouts).await.expect("a layout");
+		let cut = next(&mut compositions).await.expect("a composition");
 		let at = Duration::from(cut.at.expect("stamped"));
 		assert_eq!(cut.value.start, at, "on from the frame the cut drew");
 		assert!(cut.value.start > first.value.start);
 
-		let publish = |published: bool| {
+		{
 			let mut state = engine.state.lock().unwrap();
-			let mut draft = state.collection().draft("Publish `red`");
-			draft.set_published("red", published).unwrap();
+			let mut draft = state.collection().draft("Stop publishing `red`");
+			draft.set_published("red", false).unwrap();
 			state.commit(draft, None).unwrap();
-		};
-		publish(false);
-		assert!(next(&mut layouts).await.is_none(), "the layout ends");
-		kio::clock::timeout(TIMEOUT, async {
-			while catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
-		})
-		.await
-		.expect("the catalog stops listing the layout");
+		}
+		let alone = next(&mut compositions).await.expect("a composition");
+		assert!(alone.value.sources.is_empty() && alone.value.pictures.is_empty(), "the program alone");
+		kio::clock::timeout(TIMEOUT, async { while own.next().await.unwrap().is_some() {} })
+			.await
+			.expect("the source's broadcast ends");
 
-		publish(true);
-		kio::clock::timeout(TIMEOUT, async {
-			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
-		})
-		.await
-		.expect("the catalog lists the layout again");
-		let mut layouts = read();
-		next(&mut layouts).await.expect("a layout");
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
-		assert!(next(&mut layouts).await.is_none(), "quitting ends the layout");
+		assert!(next(&mut compositions).await.is_none(), "quitting ends the composition");
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");

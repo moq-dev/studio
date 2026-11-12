@@ -40,13 +40,14 @@ pub struct Collection {
 	/// wherever the source is placed. A source without an entry is unfiltered.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub video: BTreeMap<String, Video>,
-	/// The sources published independently, by name: each one's own track
-	/// goes to the relay beside the program, and the
-	/// [layer layout](crate::layout) says where viewers show it over the
+	/// The sources published independently, by name: each reaches viewers
+	/// as a broadcast of its own, a local source's track in one the studio
+	/// publishes and a broadcast source as its publisher's, and the
+	/// [composition](crate::composition) says where viewers show it over the
 	/// program and how they play its sound. The program and every audio
-	/// scene's mix leave it out. Only a source with a track of its own can
-	/// be, and not one with its background removed, since its track would
-	/// show the background. Wherever it is placed, it takes only what every
+	/// scene's mix leave it out. Only a broadcast or a source with a track of
+	/// its own can be, and not one with its background removed, since its
+	/// track would show the background. Wherever it is placed, it takes only what every
 	/// player can reproduce, and no scene that another scene draws holds it.
 	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
 	pub published: BTreeSet<String>,
@@ -469,11 +470,11 @@ impl Collection {
 					"`{name}` draws scene `{scene}`, which is not a scene"
 				)));
 			}
-			if let Source::Layer { broadcast, .. } = source
-				&& !matches!(self.sources.get(broadcast), Some(Source::Broadcast { .. }))
+			if let Source::Layer { clock, .. } = source
+				&& !matches!(self.sources.get(clock), Some(Source::Broadcast { .. }))
 			{
 				return Err(Error::Invalid(format!(
-					"`{name}` plays on `{broadcast}`, which is not a broadcast source"
+					"`{name}` plays on `{clock}`, which is not a broadcast source"
 				)));
 			}
 			let Source::Clone { source } = source else { continue };
@@ -518,10 +519,17 @@ impl Collection {
 					"`{name}` is published, but there is no such source"
 				)));
 			};
-			if !source.publishes() {
+			if !source.independent() {
 				return Err(Error::Invalid(format!(
-					"`{name}` cannot be published independently: only a camera, display, window, microphone, \
-					 system audio, color, image, media, or replay source has a track of its own"
+					"`{name}` cannot be published independently: only a broadcast, or a camera, display, window, \
+					 microphone, system audio, color, image, media, or replay source with a track of its own, can be"
+				)));
+			}
+			let segment = !name.contains('/') && moq_net::Path::new(name).is_ok() && name != "." && name != "..";
+			if source.publishes() && !segment {
+				return Err(Error::Invalid(format!(
+					"`{name}` is published independently, so its name is one segment of its broadcast's path: no \
+					 `/`, not `.` or `..`, and a `\\` only before another"
 				)));
 			}
 			if self
@@ -638,9 +646,9 @@ impl Collection {
 	}
 
 	/// Refuse an item showing a source published independently that the
-	/// layer layout cannot carry: one blended or filtered past opacity, which
+	/// composition cannot carry: one blended or filtered past opacity, which
 	/// not every player can reproduce, or one in a scene another scene draws,
-	/// which the layout cannot place.
+	/// which the composition cannot place.
 	fn validate_published(&self) -> Result<(), Error> {
 		let nested: BTreeSet<&str> = self
 			.sources
@@ -1254,7 +1262,7 @@ fn is_true(value: &bool) -> bool {
 /// What a source or item is drawn through, in order.
 ///
 /// Every filter is a pure function of the picture, so every host that composes
-/// a scene with moq-scene draws it the same way, and it travels in a layout as
+/// a scene with moq-scene draws it the same way, and it travels in a composition as
 /// its name and settings. The CSS ones mean what the CSS Filter Effects
 /// function of the same name does, in the gamma-encoded sRGB the canvas holds,
 /// with lengths in canvas pixels. A filter naming another source uses that
@@ -1855,18 +1863,22 @@ pub enum Source {
 	/// same frame. A scene drawing it cannot go on program, and the top layer
 	/// cannot draw it, since either would draw the program into itself.
 	Program,
-	/// A source a studio broadcast publishes independently, played from the
-	/// broadcast the [`Source::Broadcast`] called `broadcast` plays, on that
-	/// source's playout clock, so it lands with the program as the
-	/// [layer layout](crate::layout) places it. Never in a scene file: only
-	/// a player of the layout makes one.
+	/// A broadcast a [composition](crate::composition) lists, played on the
+	/// playout clock of the [`Source::Broadcast`] called `clock`, its
+	/// timestamps moved `offset` onto that clock's, so it lands with the
+	/// program as the composition places it. Never in a scene file: only a
+	/// player of the composition makes one.
 	#[serde(skip)]
 	Layer {
-		/// The broadcast source whose broadcast and clock it plays on.
-		broadcast: String,
-		/// Its entry under the broadcast catalog's
-		/// [`SECTION`](crate::publish::SECTION) `sources`.
-		source: String,
+		/// The broadcast source whose clock it plays on: the program.
+		clock: String,
+		/// Its broadcast's path.
+		path: String,
+		/// The stream it must be, or `None` for whichever serves the path.
+		instance: Option<moq_net::Instance>,
+		/// Microseconds added to its timestamps to put them on `clock`'s
+		/// timeline. A change plays on without opening the broadcast again.
+		offset: i64,
 	},
 }
 
