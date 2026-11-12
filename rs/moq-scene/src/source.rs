@@ -31,8 +31,8 @@ use crate::browser::Page;
 use crate::collection::{Collection, Source};
 use crate::lut::Cube;
 use crate::media::Clip;
-use crate::playout::{Follow, Hold, RECHECK, VIDEO_DELAY, WRITE_LEAD, Writer, follow};
 pub use crate::playout::MAX_DELAY;
+use crate::playout::{Follow, Hold, RECHECK, VIDEO_DELAY, WRITE_LEAD, Writer, follow};
 use crate::publish::{Claim, Listing, Publish, Still};
 use crate::replay::{MIN_SPEED, Take, Target};
 
@@ -3295,7 +3295,8 @@ mod tests {
 			let clock = feed.clock.clone().unwrap();
 			let stamp = |millis: u64| moq_net::Timestamp::from_millis(millis).unwrap();
 			// 20 ms of silence at the bus's 48 kHz stereo.
-			let silence = |millis: u64| moq_audio::Frame::new(vec![0u8; 960 * 2 * size_of::<f32>()].into(), stamp(millis));
+			let silence =
+				|millis: u64| moq_audio::Frame::new(vec![0u8; 960 * 2 * size_of::<f32>()].into(), stamp(millis));
 
 			until_time(kio::clock::now()).await;
 			let arrived = kio::clock::now();
@@ -3320,7 +3321,11 @@ mod tests {
 				until_time(due - Duration::from_millis(1)).await;
 				assert!(feed.next_picture().is_none(), "{at} shown before its moment");
 				until_time(due).await;
-				assert_eq!(shown(feed).await, Duration::from(stamp(at)), "held by the stalled sound");
+				assert_eq!(
+					shown(feed).await,
+					Duration::from(stamp(at)),
+					"held by the stalled sound"
+				);
 			}
 
 			// The backlog lands at once, late, and the pictures play on.

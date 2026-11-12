@@ -726,7 +726,11 @@ impl<'a> Video<'a> {
 		let suffix = match &rendition.codec {
 			hang::catalog::VideoCodec::H264(_) => ".avc3",
 			hang::catalog::VideoCodec::H265(_) => ".hev1",
-			other => return Err(Error::Unsupported(format!("{other} is not a codec the studio publishes"))),
+			other => {
+				return Err(Error::Unsupported(format!(
+					"{other} is not a codec the studio publishes"
+				)));
+			}
 		};
 		let track = listing
 			.broadcast
