@@ -14,10 +14,10 @@ From studio's trimmed Pullfrog learnings (2026-11-12, maintainer,
 the submodule is clean, and that no moq git dependency appears beside it.
 `sh/upgrade-moq.sh` fetches moq's `main` but checks out any revision given.
 
-- Add a script that fetches moq's `main` into the submodule, with its whole
-  commit history (`--filter=tree:0` keeps it small, and CI's submodule
-  checkout is shallow), and fails unless `git merge-base --is-ancestor
-  <gitlink> FETCH_HEAD` holds.
+- Add a script that fetches moq's `main` into the submodule with its whole
+  commit history, since CI's submodule checkout is shallow (`--unshallow`
+  where it is, with `--filter=tree:0` to keep it small), and fails unless
+  `git merge-base --is-ancestor <gitlink> FETCH_HEAD` holds.
 - Run it as its own step in `.github/workflows/check.yml`, not from
   `just check`, so a local `just check` stays offline and an unchanged pin
   never fails on a network error.
