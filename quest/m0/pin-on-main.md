@@ -19,8 +19,10 @@ the submodule is clean, and that no moq git dependency appears beside it.
   where it is, with `--filter=tree:0` to keep it small), and fails unless
   `git merge-base --is-ancestor <gitlink> FETCH_HEAD` holds.
 - Run it as its own step in `.github/workflows/check.yml`, not from
-  `just check`, so a local `just check` stays offline and an unchanged pin
-  never fails on a network error.
+  `just check`, so a local `just check` stays offline, and only on a pull
+  request whose `moq` gitlink differs from its base's
+  (`github.event.pull_request.base.sha`), so an unchanged pin fetches
+  nothing and never fails on a network error.
 - `just upgrade-moq <rev>` runs the same ancestry test after its fetch and
   refuses a revision off `main`.
 
