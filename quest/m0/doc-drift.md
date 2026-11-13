@@ -29,9 +29,13 @@ learnings:
   another with the wrong name and edits the recipe. Check on a PR tests its
   merge with `main` as of its last run, so if this lands first, #146's next
   Check runs the lint, and if #146 lands first, this fixes its reason too.
-  If #146 has already passed Check when this lands, update its branch with
-  `main` (`gh pr update-branch 146`), or ask the session holding it to, so
-  it cannot land on a Check that predates the lint.
+  `main`'s ruleset does not require an up-to-date branch, so a Check that
+  predates the lint still counts. #146 is a draft held until moq's timed
+  catalog is pinned, so it cannot merge before this lands; right after this
+  lands, update its branch with `main` (`gh pr update-branch 146`), or ask
+  the session holding it to, so its next Check runs the lint before it can
+  be marked ready. If #146 is ready for review by then, hold it from merging
+  until that Check passes.
 - `rs/moq-studio/src/record.rs:4-6` says a recording of the program shares
   the live encoders, but `rs/moq-studio/src/engine.rs:1811-1852` gives the
   recording its own full-size encoder (`recorded_video`, `record: true`) in

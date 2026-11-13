@@ -22,7 +22,11 @@ the submodule is clean, and that no moq git dependency appears beside it.
   `just check`, so a local `just check` stays offline, and only on a pull
   request whose `moq` gitlink differs from its base's
   (`github.event.pull_request.base.sha`), so an unchanged pin fetches
-  nothing and never fails on a network error.
+  nothing and never fails on a network error. The checkout is shallow
+  (depth 1, the merge commit only), so the step first runs
+  `git fetch --no-tags --depth=1 origin <base sha>` and compares
+  `git rev-parse <base sha>:moq` with `git rev-parse HEAD:moq`; that fetch
+  is one small commit and reads no submodule.
 - `just upgrade-moq <rev>` runs the same ancestry test after its fetch and
   refuses a revision off `main`.
 
