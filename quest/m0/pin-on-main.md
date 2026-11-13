@@ -7,15 +7,22 @@ fails a check, as `AGENTS.md:14` already requires in prose.
 
 ## Plan
 
-Decided 2026-11-12 (user, /quest-plan), from studio's trimmed Pullfrog
-learnings.
+From studio's trimmed Pullfrog learnings (2026-11-12, maintainer,
+/quest-plan).
 
 `sh/check-moq-pin.sh` checks only that the checkout matches the gitlink, that
 the submodule is clean, and that no moq git dependency appears beside it.
 `sh/upgrade-moq.sh` fetches moq's `main` but checks out any revision given.
 
-Recommended: in `sh/check-moq-pin.sh`, fetch moq's `main` and fail unless
-`git merge-base --is-ancestor <gitlink> origin/main` holds; run it where a
-fetch is allowed, and make `just upgrade-moq <rev>` refuse a revision off
-`main` the same way. [pin-main](/quest/m0/pin-main.md) catches the studio up
-to moq's `main` and is unaffected.
+- Add a script that fetches moq's `main` into the submodule, with its whole
+  commit history (`--filter=tree:0` keeps it small, and CI's submodule
+  checkout is shallow), and fails unless `git merge-base --is-ancestor
+  <gitlink> FETCH_HEAD` holds.
+- Run it as its own step in `.github/workflows/check.yml`, not from
+  `just check`, so a local `just check` stays offline and an unchanged pin
+  never fails on a network error.
+- `just upgrade-moq <rev>` runs the same ancestry test after its fetch and
+  refuses a revision off `main`.
+
+[pin-main](/quest/m0/pin-main.md) catches the studio up to moq's `main` and
+is unaffected: the current pin, `644d48996`, is on `main`.
