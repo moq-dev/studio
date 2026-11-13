@@ -19,7 +19,11 @@ audio mixing is moq's (`AGENTS.md`'s Upstream), and this quest pins it. ✅ m0,
 beside the other pins (rejected: m2).
 
 Advance with `just upgrade-moq` in its own PR, fixing whatever the new API
-breaks here. Take the bound `moq play` defaults to (2 s, its `--stretch`)
+breaks here. Playout's `Writer` (`rs/moq-scene/src/playout.rs`) changes with
+it: today it cuts the part of a frame overlapping the last one and lets a
+later position leave a gap, so a step down would still skip audio. With a
+bound it writes each frame after the last and hands the channel the position
+it is due at, for the channel to converge on. Take the bound `moq play` defaults to (2 s, its `--stretch`)
 unless a measurement here argues for another, and say which in the PR.
 
 ## Waiting
