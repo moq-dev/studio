@@ -62,6 +62,11 @@ picture's shape, tested without a window: for every size from the minimum up,
 no region overlaps another and the picture is the largest rectangle. The
 mock-up's three arrangements are its cases.
 
+Build the page from the kit (`rs/moq-studio/src/kit`): its pads, tally frame,
+stage wash, meters, pill and popover, icon buttons, and tokens, which
+`just shots kit` shows. Its widgets keep no state, so they draw from the
+snapshot below.
+
 Draw the pages from a snapshot of the engine, not while holding its lock
 (`Studio::ui` holds `engine.state` across the whole dock today, and the
 render thread wants the same lock). Split `ui.rs`, 4,900 lines behind one
@@ -73,7 +78,3 @@ that the program's render time is unchanged.
 Human check: taste and feel on the maintainer's machine, a second monitor and
 mixed display scales, and the custom frame's drag, resize, snap, and
 full-screen behavior on each desktop, which no headless run exercises.
-
-## Required
-
-- [The studio's look](/quest/m0/ux/kit.md) - the widgets the page is built from

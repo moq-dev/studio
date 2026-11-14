@@ -75,8 +75,8 @@ shows those pictures beside the frames they implement.
   as released and 3 to 5 ms with femtovg's pipeline cache patched. Patched
   Slint also made the program render about four times slower, and Slint's
   licenses require GPLv3 or attribution with an embedded ban. egui's gaps
-  (SVG icons, gradients) are painter work the [kit](/quest/m0/ux/kit.md)
-  owns.
+  (SVG icons, gradients) are painter work, done in the kit
+  (`rs/moq-studio/src/kit`).
 - **Milestones:** ✅ redesigning what exists is m0, here. Features that do not
   exist yet are [m1](/quest/m1/README.md), and three more are
   [m2](/quest/m2/README.md) (rejected: all in m0; all in m1).

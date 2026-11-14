@@ -1156,3 +1156,51 @@ pub fn wash(painter: &egui::Painter, rect: Rect) {
 	}
 	painter.with_clip_rect(rect).add(mesh);
 }
+
+#[cfg(test)]
+mod tests {
+	use egui::accesskit::Role;
+	use egui_kittest::Harness;
+	use egui_kittest::kittest::Queryable;
+
+	use super::*;
+
+	/// A click puts a slider where the pointer is, and with focus the arrow
+	/// keys step it, never past its end.
+	#[test]
+	fn a_slider_follows_the_pointer_and_the_keys() {
+		let mut harness = Harness::new_ui_state(
+			|ui, value: &mut f32| {
+				ui.add(Slider::new(value).width(214.0));
+			},
+			0.0,
+		);
+		harness.get_by_role(Role::Slider).click();
+		harness.run();
+		assert!((harness.state() - 0.5).abs() < 0.01, "{}", harness.state());
+		harness.get_by_role(Role::Slider).focus();
+		harness.run();
+		for _ in 0..30 {
+			harness.key_press(egui::Key::ArrowRight);
+			harness.run();
+		}
+		assert_eq!(*harness.state(), 1.0);
+	}
+
+	/// A toggle flips on each click, and says which way it is.
+	#[test]
+	fn a_toggle_flips() {
+		let mut harness = Harness::new_ui_state(
+			|ui, on: &mut bool| {
+				ui.add(Toggle::new(on).label("Snap"));
+			},
+			false,
+		);
+		harness.get_by_label("Snap").click();
+		harness.run();
+		assert!(harness.state());
+		harness.get_by_label("Snap").click();
+		harness.run();
+		assert!(!harness.state());
+	}
+}
