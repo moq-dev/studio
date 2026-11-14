@@ -4,7 +4,8 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-rev="${1:-origin/main}"
+# FETCH_HEAD is moq-dev/moq's main once check-moq-main.sh has fetched it.
+rev="${1:-FETCH_HEAD}"
 
 # Fetches main, then refuses a revision off it.
 "$root/sh/check-moq-main.sh" "$rev"

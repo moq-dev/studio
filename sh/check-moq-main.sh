@@ -12,12 +12,16 @@ else
     rev="$(git -C "$root" ls-tree HEAD moq --object-only)"
 fi
 
-# A shallow checkout, such as CI's, lacks main's history: fetch every commit
-# but no trees or blobs, since the ancestry test reads only commits.
+# Fetch from moq-dev/moq itself, not `origin`, which may name a fork.
+url=https://github.com/moq-dev/moq.git
+
+# A shallow checkout, such as CI's, lacks main's history. No `--filter`: git
+# 2.56 hits a BUG in pack-objects when unshallowing a repo that is not
+# already a partial clone with one.
 if [ "$(git -C "$moq" rev-parse --is-shallow-repository)" = true ]; then
-    git -C "$moq" fetch --quiet --no-tags --unshallow --filter=tree:0 origin main
+    git -C "$moq" fetch --quiet --no-tags --unshallow "$url" main
 else
-    git -C "$moq" fetch --quiet origin main
+    git -C "$moq" fetch --quiet --no-tags "$url" main
 fi
 
 if ! commit="$(git -C "$moq" rev-parse --quiet --verify "$rev^{commit}")"; then
