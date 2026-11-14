@@ -481,7 +481,7 @@ no sound has no strip in the Audio panel.
 Guests and phones join a room the studio owns on its relay, from a web page,
 and their camera and screen appear as broadcast sources. The page plays the
 show back to them, without their own voice. The room follows
-[moq-room](https://github.com/moq-dev/moq/tree/main/rs/moq-room): a guest
+[`@moq/room`](https://github.com/moq-dev/moq/tree/main/js/room): a guest
 named `alice` publishes `alice/camera.hang` and `alice/screen.hang` under it.
 Guests need a relay that verifies tokens, so run your own with
 [`moq auth serve`](https://doc.moq.dev/bin/cli) behind it, and a key that can
@@ -1227,8 +1227,8 @@ own viewers:
   published scene lists the program's audio, graded where the program writes
   it. Latency compares the two hosts' wall
   clocks, so keep both synced.
-- **Viewers**: each viewer that reports, with its round trip, latency, and
-  playout delay. The studio reads 64 at most per broadcast, a sample the grades
+- **Viewers**: each viewer that reports, with its round trip and latency.
+  The studio reads 64 at most per broadcast, a sample the grades
   rest on: it counts the rest, and a reader one frees goes to the next viewer
   to arrive.
 

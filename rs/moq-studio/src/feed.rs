@@ -64,7 +64,7 @@ impl Feeds {
 		epoch: Duration,
 	) -> anyhow::Result<Self> {
 		let route = origin
-			.route_prefix(PROGRAM, Default::default())
+			.claim(PROGRAM, Default::default())
 			.context("cannot serve the program in the room")?;
 		let served = program.clone();
 		let serving = tokio::spawn(async move {
@@ -236,7 +236,8 @@ impl Running {
 			self.catalog.abort(moq_net::StreamError::Internal.into());
 			return Err(err);
 		}
-		self.audio.finish()?;
+		// Held while the catalog finishes, which lists the track until then.
+		let _audio = self.audio.finish()?;
 		self.catalog.finish()?;
 		Ok(())
 	}

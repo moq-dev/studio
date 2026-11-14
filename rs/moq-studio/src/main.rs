@@ -39,7 +39,7 @@ mod watch;
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-studio")]
-#[usage(completion, settings)]
+#[usage(completion, settings, unknown_env(prefix = "MOQ_"))]
 pub struct Config {
 	/// The scene collection to open, saved as it changes. If it does not exist,
 	/// guided setup proposes one and creates it.
@@ -183,7 +183,6 @@ fn main() -> anyhow::Result<ExitCode> {
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
-	moq_tokio::cli::check_env(&[Config::spec()], &[])?;
 	let Some(scenes) = config.scenes()? else {
 		let url = config.watch.clone().expect("checked by scenes");
 		watch::run(config.client.clone(), config.quic.clone(), url)?;

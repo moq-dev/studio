@@ -166,7 +166,7 @@ impl Studio {
 	/// Redraw until the center pixel is within a step of `expected`.
 	/// Fails at once if a source other than `crashing` ones fails.
 	async fn until_center(&mut self, expected: [u8; 4], crashing: &[&str]) {
-		let deadline = Instant::now() + TIMEOUT;
+		let deadline = Instant::now().saturating_add(TIMEOUT);
 		loop {
 			for (name, feed) in self.sources.iter() {
 				if let Status::Failed(reason) = feed.status()
@@ -189,7 +189,7 @@ impl Studio {
 
 	/// Wait until `name` leaves `Starting` and `Live` for good, and say why.
 	async fn until_failed(&self, name: &str) -> String {
-		let deadline = Instant::now() + TIMEOUT;
+		let deadline = Instant::now().saturating_add(TIMEOUT);
 		loop {
 			if let Status::Failed(reason) = self.sources.get(name).unwrap().status() {
 				return reason;
@@ -247,7 +247,7 @@ async fn a_page_draws_and_plays() {
 		assert!(feed.page().unwrap().paint().is_some(), "the paint path shows");
 
 		let strip = feed.strip().unwrap().clone();
-		let deadline = Instant::now() + TIMEOUT;
+		let deadline = Instant::now().saturating_add(TIMEOUT);
 		while strip.level().peak() <= 0.0 {
 			assert!(Instant::now() < deadline, "the page's tone never reached the bus");
 			studio.mixer.advance(480);
@@ -485,7 +485,7 @@ impl Clipboard {
 
 	/// Wait for a page's next copy.
 	async fn next(&mut self) -> String {
-		let deadline = Instant::now() + TIMEOUT;
+		let deadline = Instant::now().saturating_add(TIMEOUT);
 		loop {
 			if let Some(text) = self.take() {
 				return text;
@@ -797,7 +797,7 @@ async fn a_helper_exits_with_its_studio() {
 	drop(studio);
 
 	// The helper leads a process group CEF's processes join.
-	let deadline = Instant::now() + TIMEOUT;
+	let deadline = Instant::now().saturating_add(TIMEOUT);
 	while processes().iter().any(|process| process.group == helper) {
 		assert!(Instant::now() < deadline, "the helper outlived its studio");
 		kio::clock::sleep(Duration::from_millis(30)).await;
@@ -849,7 +849,7 @@ fn stall(profile: &Path) -> std::fs::File {
 /// `profile`, and return the helper.
 async fn until_stalled(studio: u32, profile: &Path) -> u32 {
 	let state = std::fs::canonicalize(profile).unwrap().join("Local State");
-	let deadline = Instant::now() + TIMEOUT;
+	let deadline = Instant::now().saturating_add(TIMEOUT);
 	loop {
 		if let Some(helper) = helper(studio) {
 			let fds = std::fs::read_dir(format!("/proc/{helper}/fd"))
