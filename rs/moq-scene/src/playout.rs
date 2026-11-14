@@ -168,8 +168,10 @@ pub(crate) struct Writer {
 	/// opened with; zero places each write exactly.
 	stretch: Duration,
 	/// The bus position the last write ended at, which the next follows.
-	/// With a stretch, where the channel's sound runs to as written, which its
-	/// speeding up or slowing down moves a little.
+	/// With a stretch, where the channel's sound runs to at least: the
+	/// earlier of its written audio played at speed and the position the
+	/// channel glides onto, so a channel that sped up is never thought fuller
+	/// than it is.
 	end: i128,
 }
 
@@ -241,7 +243,10 @@ impl Writer {
 			if take > 0 {
 				let bytes = written as usize * self.stride..(written + take) as usize * self.stride;
 				self.channel.write(at.max(0) as u64, &data[bytes])?;
-				self.end = self.end.max(next) + take;
+				// The channel's sound runs on from its end as counted, unless
+				// it sped up, and settles onto the end handed over, unless it
+				// slows down: it runs at least to the earlier of the two.
+				self.end = (self.end.max(next) + take).min(at + take);
 				written += take;
 			}
 			if written >= frames || self.mixed.position.changed().await.is_err() {
@@ -545,7 +550,7 @@ mod tests {
 	}
 
 	/// What a broadcast's sound did through a schedule that moves at 1 s and
-	/// back at 3 s, as a jitter target steps.
+	/// again at 3 s, as a jitter target steps.
 	struct Stepped {
 		/// Frames dropped as sounded through.
 		dropped: usize,
@@ -583,9 +588,9 @@ mod tests {
 
 	/// Play five seconds of a ramp in 20 ms frames, through a writer whose
 	/// channel stretches by `stretch`, each frame when the writer says, as a
-	/// broadcast source plays one, while the schedule is `moved` ms later from
-	/// 1 s to 3 s.
-	async fn stepped(stretch: Duration, moved: i64) -> Stepped {
+	/// broadcast source plays one, while the schedule is `moved.0` ms later
+	/// from 1 s and `moved.1` ms later from 3 s.
+	async fn stepped(stretch: Duration, moved: (i64, i64)) -> Stepped {
 		let (bus, driver) = bus::Bus::new(Default::default()).unwrap();
 		let config = bus.config().clone();
 		let strip = bus::Strip::default();
@@ -609,9 +614,12 @@ mod tests {
 
 		// Frame `index` sounds 100 ms in, plus 20 ms for each before it.
 		let moment = |index: u64, now: Instant| {
-			let stepped = now >= start.saturating_add(ms(1_000)) && now < start.saturating_add(ms(3_000));
-			let millis = 100 + index as i64 * 20 + if stepped { moved } else { 0 };
-			start.saturating_add(ms(millis as u64))
+			let moved = match now.saturating_duration_since(start).as_millis() {
+				..1_000 => 0,
+				1_000..3_000 => moved.0,
+				_ => moved.1,
+			};
+			start.saturating_add(ms((100 + index as i64 * 20 + moved) as u64))
 		};
 		// Never zero, so silence shows.
 		let ramp = |index: u64| {
@@ -667,7 +675,7 @@ mod tests {
 	/// steps drop frames and leave a silence.
 	#[tokio::test(start_paused = true)]
 	async fn a_stretched_sound_glides_onto_a_moved_schedule() {
-		let glided = stepped(STRETCH, -100).await;
+		let glided = stepped(STRETCH, (-100, 0)).await;
 		assert_eq!(glided.dropped, 0, "frames dropped");
 		assert_eq!(glided.silent, 0, "samples of silence");
 		// 5 ms, as a time stretch converges.
@@ -688,9 +696,23 @@ mod tests {
 			glided.ended
 		);
 
-		let exact = stepped(Duration::ZERO, -100).await;
+		let exact = stepped(Duration::ZERO, (-100, 0)).await;
 		assert!(exact.dropped > 0, "an exact channel drops a step down");
 		assert!(exact.silent >= 48 * 80, "an exact channel falls silent on a step up");
+	}
+
+	/// A step later after one earlier glides too: the sound the channel sped
+	/// through is not counted as still to play.
+	#[tokio::test(start_paused = true)]
+	async fn a_sound_glides_through_consecutive_steps() {
+		let glided = stepped(STRETCH, (-150, -50)).await;
+		assert_eq!(glided.dropped, 0, "frames dropped");
+		assert_eq!(glided.silent, 0, "samples of silence");
+		// 150 ms takes nearly 2 s, so it is within 10 ms by the next step.
+		for (span, moved, near) in [(2_800..3_000, -150, 480), (4_400..4_900, -50, 240)] {
+			let lag = glided.lag(span.clone(), moved);
+			assert!(lag.abs() <= near, "{lag} frames behind over {span:?} ms");
+		}
 	}
 
 	/// A step later than the bus holds cannot glide: the sound runs out, then
@@ -698,7 +720,7 @@ mod tests {
 	/// back past the stretch skips onto it.
 	#[tokio::test(start_paused = true)]
 	async fn a_step_past_the_reach_falls_silent_then_sounds_on_schedule() {
-		let stepped = stepped(STRETCH, 500).await;
+		let stepped = stepped(STRETCH, (500, 0)).await;
 		assert!(stepped.silent < 48 * 500, "{} samples of silence", stepped.silent);
 		for (span, moved) in [(500..900, 0), (1_600..2_900, 500), (4_500..4_900, 0)] {
 			let lag = stepped.lag(span.clone(), moved);
