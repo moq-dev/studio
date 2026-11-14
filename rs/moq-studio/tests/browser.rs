@@ -11,7 +11,7 @@ use std::time::Duration;
 use kio::clock::Instant;
 use moq_scene::browser::{Button, Helper, Input, Modifiers};
 use moq_scene::source::{Context, Sources, Status};
-use moq_scene::{Canvas, Collection, Compositor, Item, Rect, Rgba, Scene, Source, wgpu};
+use moq_scene::{Canvas, Collection, Compositor, Item, Rect, Rgba, Scene, Source};
 
 /// Bounds each wait: CEF's first start on a cold disk takes seconds.
 const TIMEOUT: Duration = Duration::from_secs(20);

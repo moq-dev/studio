@@ -4594,6 +4594,7 @@ dependencies = [
  "url",
  "vello",
  "wayland-client",
+ "wgpu",
  "wuff",
  "x11rb 0.13.2",
 ]
@@ -4672,6 +4673,7 @@ dependencies = [
  "tracing",
  "url",
  "usage-rs",
+ "wgpu",
  "windows-sys 0.61.2",
  "winit",
  "x11rb 0.13.2",

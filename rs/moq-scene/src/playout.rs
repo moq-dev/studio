@@ -121,10 +121,10 @@ pub(crate) fn follow(due: Option<Instant>, duration: Duration, now: Instant) -> 
 	let Some(sounds) = due else {
 		return Follow::Drop;
 	};
-	if sounds + duration <= now {
+	if sounds.saturating_add(duration) <= now {
 		return Follow::Drop;
 	}
-	let write = sounds - WRITE_LEAD;
+	let write = sounds.saturating_sub(WRITE_LEAD);
 	if write > now {
 		return Follow::Wait(write);
 	}
@@ -220,7 +220,7 @@ mod tests {
 	const TARGET: Duration = Duration::from_millis(100);
 
 	fn at(millis: u64) -> Instant {
-		Instant::ZERO + Duration::from_secs(10) + Duration::from_millis(millis)
+		Instant::ZERO.saturating_add(Duration::from_secs(10)).saturating_add(Duration::from_millis(millis))
 	}
 
 	fn ms(millis: u64) -> Duration {
@@ -313,7 +313,7 @@ mod tests {
 		async fn until(&mut self, until: Instant) {
 			loop {
 				let next = self.next + Self::BLOCK;
-				let due = self.start + Duration::from_nanos(next * 1_000_000_000 / self.rate);
+				let due = self.start.saturating_add(Duration::from_nanos(next * 1_000_000_000 / self.rate));
 				if due > until {
 					return;
 				}
@@ -351,7 +351,7 @@ mod tests {
 		let strip = bus::Strip::default();
 		let mut input = moq_audio::encode::Input::new(config.sample_rate, config.layout);
 		input.format = moq_audio::Format::F32;
-		let channel = bus.positioned(input, strip.clone()).unwrap();
+		let channel = bus.positioned(input, strip.clone(), Duration::ZERO).unwrap();
 		let mix = bus.mix();
 		mix.route(&strip);
 		let start = kio::clock::now();
@@ -365,7 +365,7 @@ mod tests {
 			rate: u64::from(config.sample_rate),
 			heard: Vec::new(),
 		};
-		let at = |millis: u64| start + ms(millis);
+		let at = |millis: u64| start.saturating_add(ms(millis));
 		// `millis` of a frame of `value`, at 48 frames a millisecond.
 		let frame = |value: f32, millis: usize| bytemuck::cast_slice::<f32, u8>(&vec![value; 2 * 48 * millis]).to_vec();
 
@@ -374,7 +374,7 @@ mod tests {
 		ear.until(at(30)).await;
 		// Stamped half a millisecond after the last ended.
 		writer
-			.write(at(80) + Duration::from_micros(500), &frame(2.0, 20))
+			.write(at(80).saturating_add(Duration::from_micros(500)), &frame(2.0, 20))
 			.await
 			.unwrap();
 		// Overlapping the last by 5 ms.

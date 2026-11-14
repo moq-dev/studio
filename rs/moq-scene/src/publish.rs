@@ -390,7 +390,7 @@ async fn copy(
 				}
 				copy.finish()?;
 			}
-			out.finish()
+			out.clone().finish().map(drop)
 		}
 		.await;
 		if let Err(err) = &result {
@@ -514,11 +514,11 @@ impl Drop for Listing<'_> {
 /// way a pipelined hardware backend does.
 pub trait Encode {
 	/// [`Encoder::encode`](moq_video::encode::Encoder::encode).
-	fn encode(&mut self, frame: &moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
+	fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), moq_video::Error>;
+	/// [`Encoder::receive`](moq_video::encode::Encoder::receive).
+	fn receive(&mut self) -> Result<Option<moq_video::encode::Encoded>, moq_video::Error>;
 	/// [`Encoder::flush`](moq_video::encode::Encoder::flush).
-	fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
-	/// [`Encoder::finish`](moq_video::encode::Encoder::finish).
-	fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
+	fn flush(&mut self) -> Result<(), moq_video::Error>;
 	/// [`Encoder::cut`](moq_video::encode::Encoder::cut).
 	fn cut(&mut self) -> Result<(), moq_video::Error>;
 	/// [`Encoder::set_bitrate`](moq_video::encode::Encoder::set_bitrate).
@@ -526,16 +526,16 @@ pub trait Encode {
 }
 
 impl Encode for moq_video::encode::Encoder {
-	fn encode(&mut self, frame: &moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
+	fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), moq_video::Error> {
 		self.encode(frame)
 	}
 
-	fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-		self.flush()
+	fn receive(&mut self) -> Result<Option<moq_video::encode::Encoded>, moq_video::Error> {
+		self.receive()
 	}
 
-	fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-		self.finish()
+	fn flush(&mut self) -> Result<(), moq_video::Error> {
+		self.flush()
 	}
 
 	fn cut(&mut self) -> Result<(), moq_video::Error> {
@@ -545,6 +545,14 @@ impl Encode for moq_video::encode::Encoder {
 	fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), moq_video::Error> {
 		self.set_bitrate(bitrate)
 	}
+}
+
+/// Publish every access unit `encoder` has ready into `producer`.
+fn publish_ready<E: Encode>(encoder: &mut E, producer: &mut moq_video::encode::Producer) -> Result<(), Error> {
+	while let Some(encoded) = encoder.receive()? {
+		producer.publish(&encoded)?;
+	}
+	Ok(())
 }
 
 /// An encoder and the video track it publishes into.
@@ -603,9 +611,8 @@ impl<E: Encode> Encoding<E> {
 	/// When no encoder is [open](Self::open).
 	pub fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), Error> {
 		let (encoder, _) = self.encoder.as_mut().expect("an encoder is open");
-		let encoded = encoder.encode(frame)?;
-		self.producer.as_mut().expect("open until it ends").publish(&encoded)?;
-		Ok(())
+		encoder.encode(frame)?;
+		publish_ready(encoder, self.producer.as_mut().expect("open until it ends"))
 	}
 
 	/// Open a group with the next picture, as a keyframe.
@@ -638,8 +645,9 @@ impl<E: Encode> Encoding<E> {
 
 	/// Close the encoder, publishing what it still holds.
 	pub fn drain(&mut self) -> Result<(), Error> {
-		if let (Some((encoder, _session)), Some(producer)) = (self.encoder.take(), &mut self.producer) {
-			producer.publish(&encoder.finish()?)?;
+		if let (Some((mut encoder, _session)), Some(producer)) = (self.encoder.take(), &mut self.producer) {
+			encoder.flush()?;
+			publish_ready(&mut encoder, producer)?;
 		}
 		Ok(())
 	}
@@ -660,7 +668,8 @@ impl<E: Encode> Encoding<E> {
 	pub fn pause(&mut self) -> Result<(), Error> {
 		let producer = self.producer.as_mut().expect("open until it ends");
 		if let Some((encoder, _)) = &mut self.encoder {
-			producer.publish(&encoder.flush()?)?;
+			encoder.flush()?;
+			publish_ready(encoder, producer)?;
 			encoder.cut()?;
 		}
 		producer.discontinuity()?;
@@ -970,10 +979,9 @@ impl Drop for Audio<'_> {
 	/// End the track cleanly, after publishing what the encoder still holds,
 	/// or failed with the reason that could not be done.
 	fn drop(&mut self) {
-		if let Some(mut producer) = self.producer.take()
-			&& let Err(err) = producer.finish()
-		{
-			producer.abort(moq_net::Error::Transport(err.to_string()));
+		// A finish that fails ends the track with an error itself.
+		if let Some(producer) = self.producer.take() {
+			let _ = producer.finish();
 		}
 	}
 }
@@ -1018,7 +1026,7 @@ impl Still {
 
 impl Drop for Still {
 	fn drop(&mut self) {
-		let _ = self.track.finish();
+		let _ = self.track.clone().finish();
 	}
 }
 
@@ -1065,7 +1073,7 @@ mod tests {
 		let begun = until(|| feed.run().begun).await;
 		let shown = || matches!(feed.next_picture(), Some(crate::source::Picture::Frame(_))).then_some(());
 		for index in from..from + count {
-			until_time(begun + std::time::Duration::from_millis(100) * index).await;
+			until_time(begun.saturating_add(std::time::Duration::from_millis(100) * index)).await;
 			until(shown).await;
 		}
 		begun
@@ -1631,11 +1639,13 @@ mod tests {
 	}
 
 	/// Holds its newest pictures back the way a pipelined hardware encoder
-	/// does, handing them over only on a flush or finish. openh264, the encoder
-	/// on every machine, holds nothing.
+	/// does, handing them over only on a flush. openh264, the encoder on every
+	/// machine, holds nothing.
 	struct Pipelined {
 		encoder: moq_video::encode::Encoder,
-		held: Vec<moq_video::encode::Encoded>,
+		held: std::collections::VecDeque<moq_video::encode::Encoded>,
+		/// Whether a flush asked for every held picture.
+		flushed: bool,
 	}
 
 	impl Pipelined {
@@ -1643,22 +1653,29 @@ mod tests {
 	}
 
 	impl Encode for Pipelined {
-		fn encode(&mut self, frame: &moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-			self.held.extend(self.encoder.encode(frame)?);
-			let ready = self.held.len().saturating_sub(Self::DEPTH);
-			Ok(self.held.drain(..ready).collect())
+		fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), moq_video::Error> {
+			self.flushed = false;
+			self.encoder.encode(frame)?;
+			while let Some(encoded) = self.encoder.receive()? {
+				self.held.push_back(encoded);
+			}
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-			let mut encoded = std::mem::take(&mut self.held);
-			encoded.extend(self.encoder.flush()?);
-			Ok(encoded)
+		fn receive(&mut self) -> Result<Option<moq_video::encode::Encoded>, moq_video::Error> {
+			match self.flushed || self.held.len() > Self::DEPTH {
+				true => Ok(self.held.pop_front()),
+				false => Ok(None),
+			}
 		}
 
-		fn finish(mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-			let mut encoded = std::mem::take(&mut self.held);
-			encoded.extend(self.encoder.finish()?);
-			Ok(encoded)
+		fn flush(&mut self) -> Result<(), moq_video::Error> {
+			self.encoder.flush()?;
+			while let Some(encoded) = self.encoder.receive()? {
+				self.held.push_back(encoded);
+			}
+			self.flushed = true;
+			Ok(())
 		}
 
 		fn cut(&mut self) -> Result<(), moq_video::Error> {
@@ -1704,7 +1721,8 @@ mod tests {
 		track
 			.open(Pipelined {
 				encoder,
-				held: Vec::new(),
+				held: Default::default(),
+				flushed: false,
 			})
 			.unwrap();
 		for millis in [0, 33, 66] {
@@ -1853,7 +1871,7 @@ mod tests {
 			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 			let mut track = moq_mux::container::Consumer::new(track, container);
 			let begin = until(|| feed.run().begun).await;
-			until_time(begin + std::time::Duration::from_millis(1_500)).await;
+			until_time(begin.saturating_add(std::time::Duration::from_millis(1_500))).await;
 			let now = kio::Waiter::noop();
 			until(|| match track.poll_read(&now) {
 				std::task::Poll::Ready(read) => match read.unwrap().expect("open while the replay plays") {
@@ -1913,11 +1931,11 @@ mod tests {
 
 			// Half way, five pictures in, it starts over, and plays to its end.
 			let first = pictures(feed, 0, 5).await;
-			until_time(first + std::time::Duration::from_millis(450)).await;
+			until_time(first.saturating_add(std::time::Duration::from_millis(450))).await;
 			let cut = publish.catalog.clock().now();
 			feed.play().unwrap();
 			let restarted = pictures(feed, 0, 10).await;
-			until_time(restarted + std::time::Duration::from_millis(1_100)).await;
+			until_time(restarted.saturating_add(std::time::Duration::from_millis(1_100))).await;
 			until(|| (feed.status() == Status::Ended).then_some(())).await;
 
 			// How many pictures land depends on the encoder, which may skip

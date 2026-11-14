@@ -25,7 +25,6 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use crate::wgpu;
 
 #[cfg(target_os = "linux")]
 mod layers;

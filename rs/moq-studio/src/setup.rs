@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::Context;
 use egui::Ui;
 use moq_net::bandwidth::Rate;
-use moq_scene::{Canvas, Collection, Draft, Edit, History, Item, Rect, Scene, wgpu};
+use moq_scene::{Canvas, Collection, Draft, Edit, History, Item, Rect, Scene};
 
 use crate::autosave::{self, Autosave};
 use crate::devices::{self, Listing, Pick};
@@ -964,7 +964,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn times_every_canvas() {
-		let gpu = engine::Gpu::new(moq_scene::wgpu::Backends::all()).await.expect("a GPU");
+		let gpu = engine::Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		for (canvas, result) in probe_encoders(gpu).await {
 			let encoding = result.unwrap_or_else(|err| panic!("{}: {err}", describe(canvas)));
 			assert!(encoding.frame > Duration::ZERO, "{}", describe(canvas));

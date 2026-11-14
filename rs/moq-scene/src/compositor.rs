@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use kio::clock::Instant;
-use moq_video::render::{Renderer, wgpu};
+use moq_video::render::Renderer;
 
 use crate::Error;
 use crate::collection::{
@@ -2488,7 +2488,7 @@ mod tests {
 				.unwrap();
 			assert_eq!(studio.compositor.program_scene(), Some("blue"));
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			assert!(studio.compositor.transitioning());
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
@@ -2496,7 +2496,7 @@ mod tests {
 			assert_eq!(pixel(&program, 6, 1), BLUE, "blue under blue stays blue");
 			assert_eq!(pixel(&studio.preview(), 1, 1), BLUE);
 
-			studio.render(start + Duration::from_secs(1));
+			studio.render(start.saturating_add(Duration::from_secs(1)));
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
 		})
@@ -2566,13 +2566,13 @@ mod tests {
 				.compositor
 				.transition(&studio.collection, FADE, &studio.sources, start)
 				.unwrap();
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "{actual:?}");
 			assert_eq!(pixel(&program, 1, 6), BLUE, "the top layer does not fade");
 			studio.collection.scenes[1].items.clear();
-			studio.render(start + Duration::from_millis(600));
+			studio.render(start.saturating_add(Duration::from_millis(600)));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE);
 			assert_eq!(pixel(&studio.preview(), 6, 1), BLACK);
 		})
@@ -2649,14 +2649,14 @@ mod tests {
 				.compositor
 				.transition(&studio.collection, FADE, &studio.sources, start)
 				.unwrap();
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let texture = studio.compositor.output("tall").unwrap().texture().unwrap().clone();
 			let rgba = studio.read(&texture);
 			let faded = rgba[..4].try_into().unwrap();
 			assert!(near(faded, [128, 0, 127, 255]), "the program as it fades: {faded:?}");
 
 			studio.compositor.set_preview(Some("tall".into()));
-			studio.render(start + Duration::from_secs(1));
+			studio.render(start.saturating_add(Duration::from_secs(1)));
 			assert_eq!(studio.compositor.preview_canvas().size(), moq_video::Size::new(4, 8));
 			let preview = studio.compositor.preview().clone();
 			assert_eq!(
@@ -2669,7 +2669,7 @@ mod tests {
 
 			studio.compositor.set_outputs(BTreeMap::from([("tall", false)]));
 			studio.compositor.set_previewing(false);
-			studio.render(start + Duration::from_secs(1));
+			studio.render(start.saturating_add(Duration::from_secs(1)));
 			assert!(studio.compositor.output("tall").unwrap().texture().is_none());
 			assert!(!studio.compositor.previewed());
 			studio.compositor.set_outputs(BTreeMap::new());
@@ -2693,7 +2693,7 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.fit(&studio.collection).unwrap();
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 			let drawn = |studio: &mut Studio| {
 				let texture = studio.compositor.output("tall").unwrap().texture().unwrap().clone();
 				tall_pixels(studio, &texture)
@@ -2730,11 +2730,11 @@ mod tests {
 				.compositor
 				.transition(&studio.collection, FADE, &studio.sources, start)
 				.unwrap();
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			assert!(!studio.compositor.transitioning());
-			studio.render(start + Duration::from_millis(600));
+			studio.render(start.saturating_add(Duration::from_millis(600)));
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
 		})
 		.await;
@@ -2797,7 +2797,7 @@ mod tests {
 					.compositor
 					.transition(&studio.collection, transition.clone(), &studio.sources, start)
 					.unwrap();
-				studio.render(start + Duration::from_millis(500));
+				studio.render(start.saturating_add(Duration::from_millis(500)));
 				let program = studio.program();
 				let actual = [(1, 1), (1, 6), (6, 1), (6, 6)].map(|(x, y)| pixel(&program, x, y));
 				assert_eq!(actual, expected, "{transition:?}");
@@ -2856,7 +2856,7 @@ mod tests {
 				.unwrap();
 
 			// Eased halfway, blue is at (2, 2) and both fades are at half.
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert_eq!(pixel(&program, 3, 3), BLUE, "blue in between");
 			assert_eq!(pixel(&program, 5, 4), BLUE);
@@ -2867,7 +2867,7 @@ mod tests {
 			let actual = pixel(&program, 7, 0);
 			assert!(near(actual, [64, 128, 0, 255]), "green half over half red: {actual:?}");
 
-			studio.render(start + duration);
+			studio.render(start.saturating_add(duration));
 			assert!(!studio.compositor.transitioning());
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 6), BLUE);
@@ -2902,7 +2902,7 @@ mod tests {
 			collection.scenes[1].items[0].keyframes = slide_in();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
@@ -2962,7 +2962,7 @@ mod tests {
 			studio.render(start);
 			// Program has reached the jump; preview starts over before it.
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.render(start + jump);
+			studio.render(start.saturating_add(jump));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK, "before the jump");
 			assert_eq!(pixel(&studio.program(), 1, 6), BLUE, "after the jump");
 		})
@@ -2980,7 +2980,7 @@ mod tests {
 			collection.scenes[1].items[0].keyframes = slide_in();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("red".into()));
@@ -3038,13 +3038,13 @@ mod tests {
 			assert_eq!(pixel(&program, 1, 6), BLUE, "blue over red, as the outgoing scene");
 			assert_eq!(pixel(&program, 6, 1), BLUE);
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 6), RED, "red over blue from halfway");
 			let actual = pixel(&program, 6, 1);
 			assert!(near(actual, [128, 128, 128, 255]), "half inverted: {actual:?}");
 
-			studio.render(start + duration);
+			studio.render(start.saturating_add(duration));
 			assert_eq!(pixel(&studio.program(), 6, 1), [255, 255, 0, 255]);
 		})
 		.await;
@@ -3169,9 +3169,9 @@ mod tests {
 
 			// Seen through, the outgoing scene shows until the cut point.
 			sting(&mut studio, Filter::Opacity { amount: 0.0 });
-			studio.render(begun + Duration::from_millis(299));
+			studio.render(begun.saturating_add(Duration::from_millis(299)));
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
-			studio.render(begun + Duration::from_millis(300));
+			studio.render(begun.saturating_add(Duration::from_millis(300)));
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
 			assert!(studio.compositor.transitioning(), "until the clip ends");
 
@@ -3181,7 +3181,7 @@ mod tests {
 				}
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			};
-			assert!(ended >= begun + Duration::from_secs(1), "{:?}", ended - begun);
+			assert!(ended >= begun.saturating_add(Duration::from_secs(1)), "{:?}", ended - begun);
 			studio.render(ended);
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(studio.compositor.stinger(), None);
@@ -3260,7 +3260,7 @@ mod tests {
 				.unwrap();
 			loop {
 				studio.render(Instant::now());
-				if Studio::hear(&program, Instant::now() + Duration::from_millis(10)).await > 0.0 {
+				if Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(10))).await > 0.0 {
 					break;
 				}
 			}
@@ -3270,7 +3270,7 @@ mod tests {
 			while feed.status() != Status::Ended {
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			}
-			let heard = Studio::hear(&program, Instant::now() + Duration::from_millis(500)).await;
+			let heard = Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(500))).await;
 			assert_eq!(heard, 0.0, "the clip's sound stops with the cut");
 
 			// Stopped from the Sources panel, the stinger ends with it.
@@ -3304,14 +3304,14 @@ mod tests {
 				.unwrap();
 			while studio.compositor.transitioning() {
 				studio.render(Instant::now());
-				Studio::hear(&program, Instant::now() + Duration::from_millis(10)).await;
+				Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(10))).await;
 			}
 			let feed = studio.sources.get("sting").unwrap();
 			assert!(feed.run().ended.is_some(), "after its first pass");
 			while feed.status() != Status::Ended {
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			}
-			let heard = Studio::hear(&program, Instant::now() + Duration::from_millis(500)).await;
+			let heard = Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(500))).await;
 			assert_eq!(heard, 0.0, "the loop stops with the stinger");
 		})
 		.await;
@@ -4098,7 +4098,7 @@ mod tests {
 			studio.collection.apply(&edit).unwrap();
 			assert_eq!(studio.compositor.preview_scene(), Some("red"));
 			assert_eq!(studio.compositor.program_scene(), Some("red"));
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let actual = pixel(&studio.program(), 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "still fading from red: {actual:?}");
 
@@ -4215,7 +4215,7 @@ mod tests {
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 
 			for (at, expected) in [(500, [128, 0, 128, 255]), (750, [64, 0, 191, 255]), (2000, BLUE)] {
-				studio.render(start + Duration::from_millis(at));
+				studio.render(start.saturating_add(Duration::from_millis(at)));
 				let program = studio.program();
 				let actual = pixel(&program, 3, 1);
 				assert!(
@@ -4269,10 +4269,10 @@ mod tests {
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 
-			let previewed = start + Duration::from_secs(2);
+			let previewed = start.saturating_add(Duration::from_secs(2));
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.render(previewed);
-			studio.render(previewed + Duration::from_millis(500));
+			studio.render(previewed.saturating_add(Duration::from_millis(500)));
 			let preview = studio.preview();
 			assert!(
 				near(pixel(&preview, 3, 1), half),
@@ -4281,11 +4281,11 @@ mod tests {
 			);
 			assert_eq!(pixel(&preview, 3, 6), BLUE, "the clock ran on");
 
-			let cut = previewed + Duration::from_secs(3);
+			let cut = previewed.saturating_add(Duration::from_secs(3));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(cut);
 			assert_eq!(pixel(&studio.program(), 3, 1), RED, "on program, from the start");
-			studio.render(cut + Duration::from_millis(500));
+			studio.render(cut.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert!(
 				near(pixel(&program, 3, 1), half),
@@ -4296,7 +4296,7 @@ mod tests {
 
 			// Into preview again, but program shows it, so it runs on in both.
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.render(cut + Duration::from_millis(750));
+			studio.render(cut.saturating_add(Duration::from_millis(750)));
 			let quarter = [64, 0, 191, 255];
 			for (output, picture) in [("program", studio.program()), ("preview", studio.preview())] {
 				let actual = pixel(&picture, 3, 1);
@@ -4307,9 +4307,9 @@ mod tests {
 			studio.collection.top = vec![Item::new("third", fill)];
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
-			studio.render(cut + Duration::from_secs(1));
+			studio.render(cut.saturating_add(Duration::from_secs(1)));
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.render(cut + Duration::from_millis(1100));
+			studio.render(cut.saturating_add(Duration::from_millis(1100)));
 			assert_eq!(pixel(&studio.program(), 3, 1), BLUE, "the top layer's ran on");
 		})
 		.await;
@@ -4354,12 +4354,12 @@ mod tests {
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 
-			let cut = start + Duration::from_secs(2);
+			let cut = start.saturating_add(Duration::from_secs(2));
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(cut);
 			assert_eq!(pixel(&studio.program(), 3, 1), RED, "on program, from the start");
-			studio.render(cut + Duration::from_millis(500));
+			studio.render(cut.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert!(
 				near(pixel(&program, 3, 1), [128, 0, 128, 255]),
@@ -4368,7 +4368,7 @@ mod tests {
 			);
 
 			studio.compositor.set_preview(Some("lower".into()));
-			studio.render(cut + Duration::from_millis(750));
+			studio.render(cut.saturating_add(Duration::from_millis(750)));
 			for (output, picture) in [("program", studio.program()), ("preview", studio.preview())] {
 				let actual = pixel(&picture, 3, 1);
 				assert!(near(actual, [64, 0, 191, 255]), "{output} ran on: {actual:?}");
@@ -4414,7 +4414,7 @@ mod tests {
 			let opened = studio.compositor.layers["third"].overlay.as_ref().unwrap().start();
 
 			studio.compositor.set_preview(Some("third".into()));
-			studio.render(now + Duration::from_millis(100));
+			studio.render(now.saturating_add(Duration::from_millis(100)));
 			assert_eq!(studio.compositor.stinger(), Some("sting"));
 			let overlay = studio.compositor.layers["third"].overlay.as_ref().unwrap();
 			assert_eq!(overlay.start(), opened, "the stinger's mask ran on");
@@ -4462,13 +4462,13 @@ mod tests {
 				)
 				.unwrap();
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert_eq!(pixel(&program, 2, 2), GREEN, "halfway, at (2, 2)");
 			assert_eq!(pixel(&program, 0, 0), BLACK);
 			assert_eq!(pixel(&program, 5, 5), BLACK);
 
-			studio.render(start + duration);
+			studio.render(start.saturating_add(duration));
 			assert_eq!(pixel(&studio.program(), 5, 5), GREEN);
 		})
 		.await;
@@ -4607,7 +4607,7 @@ mod tests {
 				.unwrap();
 			studio.compositor.set_preview(Some("scene".into()));
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let faded = pixel(&studio.program(), 1, 1);
 			assert!(near(faded, [128, 0, 127, 255]), "{faded:?}");
 			let preview = studio.preview();
@@ -4674,7 +4674,7 @@ mod tests {
 			collection.validate().unwrap();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 
 			studio.compositor.set_preview(Some("scene".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
@@ -4745,7 +4745,7 @@ mod tests {
 			collection.scenes[1].items[0].keyframes = slide_in();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 
 			studio.compositor.set_preview(Some("scene".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();

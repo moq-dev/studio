@@ -56,6 +56,8 @@ toml = "1.1"
 tracing = "0.1"
 url = "2"
 usage-rs = "7.1.0"
+# moq-video's release, so its textures and the compositor's are one type.
+wgpu = "30"
 
 # wgpu-core 30.0.1 with Surface::configure holding command indices across its
 # wait and the hal configure, so a submit from the compositor or encoder on the

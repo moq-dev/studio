@@ -21,7 +21,6 @@ use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request as Fetch};
 use blitz_traits::shell::{ColorScheme, Viewport};
 use cssparser::{ParseError, ParseErrorKind, Parser, Token};
 use kio::clock::Instant;
-use moq_video::render::wgpu;
 use style::context::QuirksMode;
 use style::error_reporting::{ContextualParseError, ParseErrorReporter};
 use style::properties::PropertyDeclarationBlock;

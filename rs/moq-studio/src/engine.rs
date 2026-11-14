@@ -41,7 +41,7 @@ use kio::clock::Instant;
 use moq_net::bandwidth;
 use moq_scene::publish::{Encoding, Sessions};
 use moq_scene::source::{self, Driver, Sources, Status};
-use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler, wgpu};
+use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler};
 use moq_video::render::export::{Exporter, Pending, Route};
 use tokio::sync::oneshot::error::TryRecvError;
 

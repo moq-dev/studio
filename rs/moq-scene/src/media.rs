@@ -17,7 +17,7 @@ use crate::Error;
 pub(crate) struct Clip {
 	broadcast: moq_net::broadcast::Producer,
 	/// Keeps the imported tracks readable.
-	_import: moq_mux::import::Container,
+	_import: moq_mux::import::container::Finished,
 	_catalog: moq_mux::catalog::Producer,
 	/// The video rendition, by catalog name.
 	pub video: Option<(String, VideoConfig)>,
@@ -40,9 +40,10 @@ impl Clip {
 		let config = moq_mux::catalog::Config::default().with_max_age(None);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let init = moq_mux::import::ContainerInit::new(format, bytes);
-		let mut import = moq_mux::import::Container::new(broadcast.clone(), catalog.reserve(), &init)
+		let import = moq_mux::import::Container::new(broadcast.clone(), catalog.reserve(), &init)
+			.map_err(|err| failed(err.to_string()))?
+			.finish()
 			.map_err(|err| failed(err.to_string()))?;
-		import.finish().map_err(|err| failed(err.to_string()))?;
 
 		let listed = catalog.snapshot();
 		let video = crate::source::pick(listed.video.enabled())?;
