@@ -2049,8 +2049,9 @@ impl Driver {
 		// one cut off before it showed, so the track's time never repeats.
 		let begin = begin.unwrap_or_else(|| {
 			let soonest = kio::clock::now().saturating_add(WRITE_LEAD);
-			own.stamped
-				.map_or(soonest, |stamped| soonest.max(stamped.saturating_add(Duration::from_millis(1))))
+			own.stamped.map_or(soonest, |stamped| {
+				soonest.max(stamped.saturating_add(Duration::from_millis(1)))
+			})
 		});
 		self.ran(play, |run| {
 			run.begun.get_or_insert(begin);
@@ -2722,21 +2723,35 @@ mod tests {
 			assert_eq!(camera.stalled(start.saturating_add(STALL)), None, "no picture yet");
 			*driver.delivered.lock().unwrap() = Some(start);
 			assert_eq!(camera.stalled(start.saturating_add(STALL / 2)), None);
-			assert_eq!(camera.stalled(start.saturating_add(STALL * 3)), Some(Stall::Picture(STALL * 3)));
+			assert_eq!(
+				camera.stalled(start.saturating_add(STALL * 3)),
+				Some(Stall::Picture(STALL * 3))
+			);
 			set(&driver.status, Status::Failed("unplugged".into()));
-			assert_eq!(camera.stalled(start.saturating_add(STALL * 3)), None, "a failure says why on its own");
+			assert_eq!(
+				camera.stalled(start.saturating_add(STALL * 3)),
+				None,
+				"a failure says why on its own"
+			);
 
 			for source in [Source::Microphone { id: None }, Source::SystemAudio] {
 				let (audio, driver) = opened(source);
 				assert_eq!(audio.stalled(start.saturating_add(STALL)), None, "no sound yet");
 				*driver.delivered.lock().unwrap() = Some(start);
 				assert_eq!(audio.stalled(start.saturating_add(STALL / 2)), None);
-				assert_eq!(audio.stalled(start.saturating_add(STALL * 3)), Some(Stall::Sound(STALL * 3)));
+				assert_eq!(
+					audio.stalled(start.saturating_add(STALL * 3)),
+					Some(Stall::Sound(STALL * 3))
+				);
 			}
 
 			let (display, driver) = opened(Source::Display { id: None });
 			*driver.delivered.lock().unwrap() = Some(start);
-			assert_eq!(display.stalled(start.saturating_add(STALL * 3)), None, "a still screen sends nothing");
+			assert_eq!(
+				display.stalled(start.saturating_add(STALL * 3)),
+				None,
+				"a still screen sends nothing"
+			);
 		})
 		.await;
 	}
@@ -3287,7 +3302,12 @@ mod tests {
 			})
 			.await;
 			assert!(moved > due, "the replacement re-anchored behind the first track");
-			until_time(arrived.saturating_add(VIDEO_DELAY).saturating_sub(Duration::from_millis(1))).await;
+			until_time(
+				arrived
+					.saturating_add(VIDEO_DELAY)
+					.saturating_sub(Duration::from_millis(1)),
+			)
+			.await;
 			assert!(feed.next_picture().is_none(), "shown before its delay");
 			until_time(arrived.saturating_add(VIDEO_DELAY)).await;
 			assert!(
@@ -3898,7 +3918,13 @@ mod media_tests {
 			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
 
 			let (first, begun) = shown(feed).await;
-			let heard = listen(&mut mixer, &program, &mut at, begun.saturating_add(Duration::from_millis(300))).await;
+			let heard = listen(
+				&mut mixer,
+				&program,
+				&mut at,
+				begun.saturating_add(Duration::from_millis(300)),
+			)
+			.await;
 			assert!(heard > 0.0, "the clip sounds before it stops");
 
 			feed.stop().unwrap();
@@ -3910,7 +3936,13 @@ mod media_tests {
 			);
 			assert_eq!(feed.run().ended, Some(stopped));
 			until_status(&sources, "clip.mkv", Status::Ended).await;
-			let heard = listen(&mut mixer, &program, &mut at, stopped.saturating_add(Duration::from_millis(500))).await;
+			let heard = listen(
+				&mut mixer,
+				&program,
+				&mut at,
+				stopped.saturating_add(Duration::from_millis(500)),
+			)
+			.await;
 			assert_eq!(heard, 0.0, "nothing it queued plays");
 			assert!(
 				!matches!(feed.next_picture(), Some(Picture::Frame(_))),
@@ -4058,7 +4090,10 @@ mod media_tests {
 		fn onset(&self) -> Option<Instant> {
 			let index = self.heard.iter().position(|sample| sample.abs() > 0.01)?;
 			let rate = moq_audio::bus::Config::default().sample_rate;
-			Some(self.origin.saturating_add(Duration::from_secs_f64(index as f64 / f64::from(rate))))
+			Some(
+				self.origin
+					.saturating_add(Duration::from_secs_f64(index as f64 / f64::from(rate))),
+			)
 		}
 
 		/// The loudest the mix heard over `duration` from `from`.

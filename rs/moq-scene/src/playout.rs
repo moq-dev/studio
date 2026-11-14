@@ -220,7 +220,9 @@ mod tests {
 	const TARGET: Duration = Duration::from_millis(100);
 
 	fn at(millis: u64) -> Instant {
-		Instant::ZERO.saturating_add(Duration::from_secs(10)).saturating_add(Duration::from_millis(millis))
+		Instant::ZERO
+			.saturating_add(Duration::from_secs(10))
+			.saturating_add(Duration::from_millis(millis))
 	}
 
 	fn ms(millis: u64) -> Duration {
@@ -313,7 +315,9 @@ mod tests {
 		async fn until(&mut self, until: Instant) {
 			loop {
 				let next = self.next + Self::BLOCK;
-				let due = self.start.saturating_add(Duration::from_nanos(next * 1_000_000_000 / self.rate));
+				let due = self
+					.start
+					.saturating_add(Duration::from_nanos(next * 1_000_000_000 / self.rate));
 				if due > until {
 					return;
 				}

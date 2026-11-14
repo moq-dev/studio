@@ -25,7 +25,6 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-
 #[cfg(target_os = "linux")]
 mod layers;
 #[cfg(target_os = "linux")]

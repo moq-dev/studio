@@ -3181,7 +3181,11 @@ mod tests {
 				}
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			};
-			assert!(ended >= begun.saturating_add(Duration::from_secs(1)), "{:?}", ended - begun);
+			assert!(
+				ended >= begun.saturating_add(Duration::from_secs(1)),
+				"{:?}",
+				ended - begun
+			);
 			studio.render(ended);
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(studio.compositor.stinger(), None);

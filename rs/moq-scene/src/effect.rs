@@ -11,7 +11,6 @@
 
 use std::num::NonZeroU64;
 
-
 use crate::collection::{Blend, Canvas, Crop, Filter, MaskMode, Rect, Rgba};
 use crate::compositor::FORMAT;
 use crate::lut::Cube;

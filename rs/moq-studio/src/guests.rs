@@ -84,9 +84,11 @@ impl Kind {
 fn guest(path: &Path) -> Option<(Path, Kind)> {
 	// None when the first `/` is escaped, so it separates nothing.
 	let identity = path.head(1)?;
-	let kind = [Kind::Camera, Kind::Screen]
-		.into_iter()
-		.find(|kind| identity.join(&Path::from_static(kind.segment())).is_ok_and(|joined| joined == *path))?;
+	let kind = [Kind::Camera, Kind::Screen].into_iter().find(|kind| {
+		identity
+			.join(&Path::from_static(kind.segment()))
+			.is_ok_and(|joined| joined == *path)
+	})?;
 	Some((identity, kind))
 }
 
@@ -1093,7 +1095,13 @@ pub(crate) mod tests {
 		let path = |text: &str| Path::new(text).unwrap();
 
 		// Anything else under a guest's own path is not a guest.
-		for other in ["alice/1/camera.hang", "alice/camera", "alice/mic.hang", "camera.hang", r"alice\/camera.hang"] {
+		for other in [
+			"alice/1/camera.hang",
+			"alice/camera",
+			"alice/mic.hang",
+			"camera.hang",
+			r"alice\/camera.hang",
+		] {
 			assert_eq!(room.observe(&path(other), true, &collection, &history), None, "{other}");
 		}
 		assert!(room.participants().is_empty());

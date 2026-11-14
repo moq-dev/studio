@@ -4604,7 +4604,8 @@ mod tests {
 			}
 			for link in &links {
 				let mut state = link.monitor.state();
-				while !matches!(state.phase, moq_tokio::connection::Phase::Connected { version: v, .. } if v == version) {
+				while !matches!(state.phase, moq_tokio::connection::Phase::Connected { version: v, .. } if v == version)
+				{
 					state = link
 						.monitor
 						.state_changed(state.revision)
