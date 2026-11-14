@@ -31,7 +31,6 @@ moq-json = { path = "moq/rs/moq-json" }
 moq-mux = { path = "moq/rs/moq-mux" }
 moq-net = { path = "moq/rs/moq-net" }
 moq-relay = { path = "moq/rs/moq-relay", default-features = false }
-moq-room = { path = "moq/rs/moq-room" }
 moq-scene = { path = "rs/moq-scene" }
 moq-stats = { path = "moq/rs/moq-stats" }
 moq-tokio = { path = "moq/rs/moq-tokio", default-features = false }
