@@ -22,7 +22,7 @@ curl -sfL -o "$work/mono.ttf" "$ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf"
 curl -sfL -o "$work/display-semibold.ttf" "$ofl/barlowcondensed/BarlowCondensed-SemiBold.ttf"
 curl -sfL -o "$work/display-bold.ttf" "$ofl/barlowcondensed/BarlowCondensed-Bold.ttf"
 for family in inter jetbrainsmono barlowcondensed; do
-	curl -sfL -o "$assets/fonts/$family.OFL.txt" "$ofl/$family/OFL.txt"
+    curl -sfL -o "$assets/fonts/$family.OFL.txt" "$ofl/$family/OFL.txt"
 done
 
 # Inter keeps its weight axis, which egui sets per family; its optical size
@@ -31,8 +31,8 @@ fonttools varLib.instancer -q "$work/inter.ttf" opsz=14 -o "$work/inter-text.ttf
 fonttools varLib.instancer -q "$work/mono.ttf" wght=500 -o "$work/mono-medium.ttf"
 unicodes="U+0000-024F,U+0300-036F,U+0370-03FF,U+0400-04FF,U+1E00-1EFF,U+2000-206F,U+20A0-20CF,U+2100-214F,U+2190-21FF,U+2212,U+2215,U+FFFD"
 subset() {
-	fonttools subset "$work/$1" --unicodes="$unicodes" --no-hinting \
-		--layout-features="kern,liga,calt,tnum,case,ccmp,locl,mark,mkmk" --output-file="$assets/fonts/$2"
+    fonttools subset "$work/$1" --unicodes="$unicodes" --no-hinting \
+        --layout-features="kern,liga,calt,tnum,case,ccmp,locl,mark,mkmk" --output-file="$assets/fonts/$2"
 }
 subset inter-text.ttf Inter.ttf
 subset mono-medium.ttf JetBrainsMono-Medium.ttf
@@ -44,8 +44,8 @@ tar -xzf "$work/lucide.tgz" -C "$work"
 cp "$work/package/LICENSE" "$assets/icons/LICENSE"
 names=("$@")
 for svg in "$assets"/icons/*.svg; do
-	[[ -e $svg ]] && names+=("$(basename "$svg" .svg)")
+    [[ -e $svg ]] && names+=("$(basename "$svg" .svg)")
 done
 for name in "${names[@]}"; do
-	sed -e 's/currentColor/#fff/' -e '/class="lucide/d' "$work/package/icons/$name.svg" >"$assets/icons/$name.svg"
+    sed -e 's/currentColor/#fff/' -e '/class="lucide/d' "$work/package/icons/$name.svg" >"$assets/icons/$name.svg"
 done
