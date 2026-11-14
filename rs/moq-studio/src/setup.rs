@@ -577,7 +577,7 @@ impl Setup {
 				start = self.proposal(ui);
 			});
 			if let Some(backdrop) = backdrop {
-				fx.backdrop(&backdrop.around(ui.clip_rect()), ui.visuals());
+				fx.backdrop(&backdrop.around(ui.clip_rect()));
 			}
 		});
 		if let Some(empty) = start {

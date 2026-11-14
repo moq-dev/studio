@@ -20,10 +20,11 @@ use crate::autosave::Conflict;
 use crate::controls::{Action, Controls};
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, State};
-use crate::fx::{Fx, Mark, Spot};
+use crate::fx::{Fx, Mark};
 use crate::health::{self, Verdict};
 use crate::hotkeys::{self, Bindings, Hotkeys, Reach};
 use crate::interact::Interact;
+use crate::kit::{self, Icon, IconButton, Tally, TallyFrame};
 use crate::replay::{self, Of};
 use crate::snap::{self, Grab, Snap};
 use crate::{mix, record};
@@ -161,8 +162,6 @@ impl Studio {
 				shown: None,
 				message: (dropped > 0).then(|| Err(dropped_message(dropped))),
 				reloads: 0,
-				effects: false,
-				spots: Spots::default(),
 				levels: Levels::default(),
 				graph: graph::View::default(),
 			},
@@ -303,11 +302,28 @@ impl Studio {
 		}
 		egui::Panel::bottom("status").show(ui, |ui| self.panels.status(ui));
 		self.panels.previewed = false;
-		self.panels.effects = fx.on();
+		let (on_air, verdict) = {
+			let report = self.panels.engine.health.lock().unwrap();
+			let on_air = report
+				.relays
+				.iter()
+				.any(|relay| relay.state == health::State::Connected);
+			let worst = report
+				.problems
+				.first()
+				.map_or(Verdict::Healthy, |problem| problem.verdict);
+			(on_air, worst)
+		};
+		fx.follow(on_air, takes, verdict);
 		DockArea::new(&mut self.dock)
 			.style(Style::from_egui(ui.style()))
-			.show_inside(ui, &mut self.panels);
-		self.panels.draw_effects(ui, fx, takes);
+			.show_inside(
+				ui,
+				&mut Viewer {
+					panels: &mut self.panels,
+					fx,
+				},
+			);
 		// A hidden preview hears no input, so it lets go of the pages, as
 		// turning Interact off does.
 		if !self.panels.previewed {
@@ -357,8 +373,8 @@ impl Registered {
 	}
 }
 
-/// How tall a thumbnail is in the Scenes panel, in points.
-const THUMBNAIL_HEIGHT: f32 = 36.0;
+/// How wide a scene's pad is in the Scenes panel, in points.
+const PAD_WIDTH: f32 = 112.0;
 
 /// What every panel draws from, plus the half-typed forms.
 struct Panels {
@@ -436,30 +452,18 @@ struct Panels {
 	message: Option<Result<String, String>>,
 	/// The engine's reloads seen so far.
 	reloads: u64,
-	/// Whether this frame draws effects, which widgets on a fill leave their
-	/// own background out for.
-	effects: bool,
-	/// Where this frame's panels drew what effects go around.
-	spots: Spots,
 	/// Each sound's and audio scene's recent levels, for the meters.
 	levels: Levels,
 	graph: graph::View,
 }
 
-/// Where the panels drew what effects go around, this frame.
-#[derive(Default)]
-struct Spots {
-	/// Each panel's body, drawn on.
-	panels: Vec<Spot>,
-	program: Option<Spot>,
-	recording: Option<Spot>,
-	cut: Option<Spot>,
-	keycaps: Vec<Spot>,
-	health: Option<Spot>,
-	health_tab: Option<Spot>,
+/// The panels as the dock draws them, with the effects they draw as they go.
+struct Viewer<'a> {
+	panels: &'a mut Panels,
+	fx: &'a mut Fx,
 }
 
-impl TabViewer for Panels {
+impl TabViewer for Viewer<'_> {
 	type Tab = Tab;
 
 	fn id(&mut self, tab: &mut Tab) -> egui::Id {
@@ -475,38 +479,44 @@ impl TabViewer for Panels {
 	}
 
 	fn ui(&mut self, ui: &mut Ui, tab: &mut Tab) {
-		let body = self.effects.then(|| Mark::new(ui.painter()));
+		let (panels, fx) = (&mut *self.panels, &mut *self.fx);
+		// A picture sits on the stage's wash; the other panels on a faint grain.
+		let stage = matches!(tab, Tab::Preview | Tab::Program);
+		if stage {
+			kit::wash(ui.painter(), ui.max_rect());
+		}
+		let body = (fx.on() && !stage).then(|| Mark::new(ui.painter()));
 		match tab {
-			Tab::Preview => self.preview(ui),
-			Tab::Program => self.program(ui),
-			Tab::Scenes => self.scenes(ui),
-			Tab::History => self.history(ui),
-			Tab::Items => self.items(ui),
-			Tab::Sources => self.sources(ui),
-			Tab::Devices => self.devices(ui),
-			Tab::Guests => self.guests(ui),
-			Tab::Filters => self.filters(ui),
-			Tab::Keyframes => self.keyframes(ui),
-			Tab::Audio => self.audio(ui),
-			Tab::Graph => self.graph(ui),
-			Tab::Output => self.output(ui),
-			Tab::Health => self.health(ui),
-			Tab::Replay => self.replay(ui),
-			Tab::Hotkeys => self.hotkeys(ui),
+			Tab::Preview => panels.preview(ui),
+			Tab::Program => panels.program(ui, fx),
+			Tab::Scenes => panels.scenes(ui),
+			Tab::History => panels.history(ui),
+			Tab::Items => panels.items(ui),
+			Tab::Sources => panels.sources(ui),
+			Tab::Devices => panels.devices(ui),
+			Tab::Guests => panels.guests(ui),
+			Tab::Filters => panels.filters(ui),
+			Tab::Keyframes => panels.keyframes(ui),
+			Tab::Audio => panels.audio(ui),
+			Tab::Graph => panels.graph(ui),
+			Tab::Output => panels.output(ui),
+			Tab::Health => panels.health(ui),
+			Tab::Replay => panels.replay(ui),
+			Tab::Hotkeys => panels.hotkeys(ui, fx),
 		}
 		if let Some(body) = body {
 			let spot = body.around(ui.clip_rect());
+			fx.panel(&spot);
 			if *tab == Tab::Health {
-				self.spots.health = Some(spot.clone().inset(4.0));
+				fx.health(&spot.inset(4.0));
 			}
-			self.spots.panels.push(spot);
 		}
 	}
 
 	fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
-		if self.effects && *tab == Tab::Health {
+		if self.fx.on() && *tab == Tab::Health {
 			let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, response.rect.expand(12.0));
-			self.spots.health_tab = Some(Mark::new(&painter).around(response.rect.shrink(2.0)));
+			self.fx.health(&Mark::new(&painter).around(response.rect.shrink(2.0)));
 		}
 	}
 }
@@ -693,20 +703,20 @@ impl Panels {
 	fn menu(&mut self, ui: &mut Ui, fx: &mut Fx) {
 		egui::MenuBar::new().ui(ui, |ui| {
 			ui.menu_button("File", |ui| {
-				if ui.button("Reload").clicked() {
+				if ui.add(kit::button(Icon::Reload, "Reload")).clicked() {
 					let result = self.engine.reload();
 					self.check(result);
 				}
 			});
 			ui.menu_button("Edit", |ui| {
-				if ui.button("Undo").clicked() {
+				if ui.add(kit::button(Icon::Undo, "Undo")).clicked() {
 					self.undo();
 				}
-				if ui.button("Redo").clicked() {
+				if ui.add(kit::button(Icon::Redo, "Redo")).clicked() {
 					self.redo();
 				}
 				ui.separator();
-				if ui.button("Copy item").clicked() {
+				if ui.add(kit::button(Icon::Copy, "Copy item")).clicked() {
 					self.copy(ui.ctx());
 				}
 				if ui.button("Paste").clicked() {
@@ -715,41 +725,55 @@ impl Panels {
 				}
 			});
 			ui.menu_button("View", |ui| fx.menu(ui));
+			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+				self.health_pill(ui)
+			});
 		});
 	}
 
-	/// Draw the effects around what the panels drew this frame: the on-air
-	/// glow and take bursts on the Program monitor, the recording pulse, the
-	/// Cut button and keycaps, the panels' fills, and the Health alerts.
-	fn draw_effects(&mut self, ui: &Ui, fx: &mut Fx, takes: u64) {
-		let spots = std::mem::take(&mut self.spots);
-		for spot in &spots.panels {
-			fx.panel(spot, ui.visuals());
-		}
-		for spot in &spots.keycaps {
-			fx.keycap(spot);
-		}
-		if let Some(spot) = &spots.cut {
-			fx.button(spot);
-		}
-		if let Some(spot) = &spots.recording {
-			fx.recording(spot);
-		}
-		let (on_air, verdict) = {
-			let report = self.engine.health.lock().unwrap();
-			let on_air = report
-				.relays
-				.iter()
-				.any(|relay| relay.state == health::State::Connected);
-			let worst = report
-				.problems
-				.first()
-				.map_or(Verdict::Healthy, |problem| problem.verdict);
-			(on_air, worst)
+	/// The stream's health in one pill, with each relay and problem in its
+	/// popover.
+	fn health_pill(&mut self, ui: &mut Ui) {
+		let report = self.engine.health.lock().unwrap();
+		let worst = report
+			.problems
+			.first()
+			.map_or(Verdict::Healthy, |problem| problem.verdict);
+		let (name, dot) = match (report.relays.is_empty(), worst) {
+			(true, _) => ("Not live", kit::DIM),
+			(false, Verdict::Healthy) => ("Healthy", kit::OK),
+			(false, Verdict::Degraded) => ("Degraded", kit::CUE),
+			(false, Verdict::Unhealthy) => ("Unhealthy", kit::CUE),
+			(false, Verdict::Unknown) => ("Starting", kit::DIM),
 		};
-		fx.program(spots.program.as_ref(), on_air, takes);
-		let health: Vec<&Spot> = [&spots.health, &spots.health_tab].into_iter().flatten().collect();
-		fx.health(&health, verdict);
+		let pill = ui.add(kit::Pill::new(name).dot(dot).clickable());
+		kit::popover(&pill).show(|ui| {
+			let rows = report.relays.len() + report.problems.len();
+			if rows == 0 {
+				kit::popover_row(ui, true, |ui| ui.label("Not publishing; start with --connect."));
+			}
+			for (index, relay) in report.relays.iter().enumerate() {
+				let (dot, state) = match &relay.state {
+					health::State::Connecting => (kit::DIM, "connecting"),
+					health::State::Connected => (kit::OK, "connected"),
+					health::State::Disconnected(_) => (kit::CUE, "unreachable"),
+				};
+				kit::popover_row(ui, index + 1 == rows, |ui| {
+					let (at, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+					ui.painter().circle_filled(at.center(), 4.0, dot);
+					ui.label(&relay.endpoint);
+					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.weak(state));
+				});
+			}
+			for (index, problem) in report.problems.iter().enumerate() {
+				let last = report.relays.len() + index + 1 == rows;
+				kit::popover_row(ui, last, |ui| {
+					let (at, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+					ui.painter().circle_filled(at.center(), 4.0, color(problem.verdict));
+					ui.add(egui::Label::new(&problem.cause).wrap());
+				});
+			}
+		});
 	}
 
 	/// Report a reload, from File > Reload or an outside edit the autosave
@@ -1003,13 +1027,14 @@ impl Panels {
 			ui.separator();
 			let free = ui.ctx().format_modifiers(egui::Modifiers::COMMAND);
 			let flip = ui.ctx().format_modifiers(egui::Modifiers::SHIFT);
-			ui.checkbox(&mut self.snapping.on, "Snap").on_hover_text(format!(
-				"Snap a dragged item to the canvas, other items, and the grid. Hold {free} to drag freely.\n\
+			ui.add(kit::Toggle::new(&mut self.snapping.on).label("Snap"))
+				.on_hover_text(format!(
+					"Snap a dragged item to the canvas, other items, and the grid. Hold {free} to drag freely.\n\
 				 Resizing keeps the shape of a camera, screen, image, or video, but not of other sources; hold \
 				 {flip} to flip that. With the preview focused, arrow keys nudge the selected item, ten pixels \
 				 with {flip}."
-			));
-			ui.checkbox(&mut self.snapping.grid, "Grid");
+				));
+			ui.add(kit::Toggle::new(&mut self.snapping.grid).label("Grid"));
 			let largest = canvas.width.max(canvas.height);
 			ui.add_enabled(
 				self.snapping.grid,
@@ -1018,15 +1043,24 @@ impl Panels {
 					.suffix(" px"),
 			);
 		});
+		// The scene on air is red; another, which a cut would take, amber.
+		let on_air = state.compositor.preview_scene() == state.compositor.program_scene();
+		let frame = match on_air {
+			true => TallyFrame::new(Tally::Air).tag("On air"),
+			false => TallyFrame::new(Tally::Cue).tag("Next"),
+		};
+		let id = self.preview.id;
 		// Shown again, the texture holds what was last drawn, maybe another
 		// scene, until the next render draws this one: no input until then.
 		if !state.compositor.previewed() {
-			picture(ui, self.preview.id, canvas, egui::Sense::hover());
+			frame.show(ui, None, |ui| picture(ui, id, canvas, egui::Sense::hover()));
 			return;
 		}
 		// Interacting, the pointer belongs to the pages rather than to arranging.
 		if self.interacting {
-			let image = picture(ui, self.preview.id, canvas, egui::Sense::hover()).rect;
+			let image = frame
+				.show(ui, None, |ui| picture(ui, id, canvas, egui::Sense::hover()))
+				.rect;
 			let since = state.compositor.preview_since();
 			let scene = state.compositor.preview_scene().map(|scene| (scene, since));
 			self.rebind(&state.sources);
@@ -1035,7 +1069,7 @@ impl Panels {
 			self.rebind(&state.sources);
 			return;
 		}
-		let response = picture(ui, self.preview.id, canvas, egui::Sense::click_and_drag());
+		let response = frame.show(ui, None, |ui| picture(ui, id, canvas, egui::Sense::click_and_drag()));
 		let result = self.arrange(ui, &mut state, &response, canvas);
 		drop(state);
 		self.check(result);
@@ -1255,7 +1289,7 @@ impl Panels {
 		})
 	}
 
-	fn program(&mut self, ui: &mut Ui) {
+	fn program(&mut self, ui: &mut Ui, fx: &mut Fx) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let canvas = self.program_drawn;
@@ -1272,12 +1306,12 @@ impl Panels {
 		let mut fire = None;
 		let recording = self.engine.recorder.status().is_some_and(|status| !status.done);
 		ui.horizontal(|ui| {
-			let cut = match self.effects {
+			let cut = match fx.on() {
 				true => {
 					let metal = Mark::new(ui.painter());
 					let text = egui::RichText::new("Cut").color(Fx::INK);
 					let cut = ui.add(egui::Button::new(text).fill(Color32::TRANSPARENT));
-					self.spots.cut = Some(metal.around(cut.rect));
+					fx.button(&metal.around(cut.rect));
 					cut
 				}
 				false => ui.button("Cut"),
@@ -1378,10 +1412,12 @@ impl Panels {
 			}
 			if recording {
 				let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-				let pulse = self.effects.then(|| Mark::new(ui.painter()));
-				ui.painter().circle_filled(dot.center(), 4.0, RECORDING);
-				self.spots.recording = pulse.map(|pulse| pulse.around(dot));
-				ui.colored_label(RECORDING, "recording");
+				let pulse = fx.on().then(|| Mark::new(ui.painter()));
+				ui.painter().circle_filled(dot.center(), 4.0, kit::AIR);
+				if let Some(pulse) = pulse {
+					fx.recording(&pulse.around(dot));
+				}
+				ui.colored_label(kit::AIR, "recording");
 			}
 		});
 		let result = if next == transition {
@@ -1397,9 +1433,9 @@ impl Panels {
 			let result = self.controls.fire(&action).map(drop);
 			self.check(result);
 		}
-		let monitor = self.effects.then(|| Mark::new(ui.painter()));
-		let program = picture(ui, self.program.id, canvas, egui::Sense::hover());
-		self.spots.program = monitor.map(|monitor| monitor.around(program.rect));
+		TallyFrame::new(Tally::Air).tag("Program").show(ui, Some(fx), |ui| {
+			picture(ui, self.program.id, canvas, egui::Sense::hover())
+		});
 	}
 
 	/// Show each thumbnail the compositor drew of those shown last frame, and
@@ -1425,22 +1461,30 @@ impl Panels {
 		}
 	}
 
-	/// Draw `thumbnail` in a box of `canvas`'s shape, or a blank box until the
-	/// compositor has drawn it, and have it drawn while the box is on screen.
-	fn thumbnail(&mut self, ui: &mut Ui, thumbnail: Thumbnail, canvas: Canvas) {
-		let aspect = canvas.width as f32 / canvas.height as f32;
-		let size = egui::vec2(THUMBNAIL_HEIGHT * aspect, THUMBNAIL_HEIGHT);
-		let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-		if !ui.is_rect_visible(rect) {
-			return;
+	/// A scene's pad, with its thumbnail once the compositor has drawn it,
+	/// which it draws while the pad is on screen.
+	fn pad(&mut self, ui: &mut Ui, scene: &Scene, canvas: Canvas, tally: Tally) -> egui::Response {
+		let thumbnail = Thumbnail::Scene(scene.name.clone());
+		let size = egui::vec2(canvas.width as f32, canvas.height as f32);
+		let picture = self
+			.thumbnails
+			.get(&thumbnail)
+			.map(|registered| egui::load::SizedTexture::new(registered.id, size));
+		let key = self.hotkeys.as_ref().and_then(|hotkeys| {
+			let bindings = hotkeys.bindings();
+			let bound = bindings.get(&Action::Scene(scene.name.clone()))?;
+			Some(bound.shown(ui.ctx()))
+		});
+		let pad = kit::Pad::new(&scene.name)
+			.picture(picture)
+			.key(key.as_deref())
+			.tally(tally)
+			.width(PAD_WIDTH);
+		let response = ui.add(pad);
+		if ui.is_rect_visible(response.rect) {
+			self.thumbnails_shown.insert(thumbnail);
 		}
-		match self.thumbnails.get(&thumbnail) {
-			Some(registered) => egui::Image::new((registered.id, size)).paint_at(ui, rect),
-			None => {
-				ui.painter().rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-			}
-		}
-		self.thumbnails_shown.insert(thumbnail);
+		response
 	}
 
 	fn scenes(&mut self, ui: &mut Ui) {
@@ -1478,40 +1522,51 @@ impl Panels {
 						return;
 					}
 					let canvas = scene.canvas(program_canvas);
-					self.thumbnail(ui, Thumbnail::Scene(scene.name.clone()), canvas);
-					let selected = preview.as_deref() == Some(scene.name.as_str());
-					let label = ui.selectable_label(selected, &scene.name);
-					if label.clicked() {
+					// On air is red; the scene a cut would take next, amber.
+					let tally = if program.as_deref() == Some(scene.name.as_str()) {
+						Tally::Air
+					} else if preview.as_deref() == Some(scene.name.as_str()) {
+						Tally::Cue
+					} else {
+						Tally::Off
+					};
+					let pad = self.pad(ui, scene, canvas, tally);
+					if pad.clicked() {
 						pick = Some(scene.name.clone());
 					}
-					if label.double_clicked() || ui.small_button("Rename").clicked() {
+					if pad.double_clicked() {
 						self.renaming = Some((index, scene.name.clone()));
 					}
-					if program.as_deref() == Some(scene.name.as_str()) {
-						ui.colored_label(Color32::RED, "on program");
-					}
-					if let Some(size) = scene.size {
-						ui.weak(format!("{}x{}", size.width, size.height));
-					}
-					if let Some(settings) = scene_settings(ui, index, scene, &audio_scenes, &program_audio) {
-						action = Some(settings);
-					}
-					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
-						action = Some(SceneAction::Move(index, index - 1));
-					}
-					if ui
-						.add_enabled(index + 1 < count, egui::Button::new("Down").small())
-						.clicked()
-					{
-						action = Some(SceneAction::Move(index, index + 1));
-					}
-					if ui
-						.add_enabled(!on_air.contains(&scene.name), egui::Button::new("Remove").small())
-						.on_disabled_hover_text("On air; cut to another scene first")
-						.clicked()
-					{
-						action = Some(SceneAction::Remove(index));
-					}
+					ui.vertical(|ui| {
+						if let Some(size) = scene.size {
+							ui.weak(format!("{}x{}", size.width, size.height));
+						}
+						if let Some(settings) = scene_settings(ui, index, scene, &audio_scenes, &program_audio) {
+							action = Some(settings);
+						}
+						ui.horizontal(|ui| {
+							if ui.add(IconButton::new(Icon::Rename, "Rename").small()).clicked() {
+								self.renaming = Some((index, scene.name.clone()));
+							}
+							if ui
+								.add_enabled(index > 0, IconButton::new(Icon::Up, "Move up").small())
+								.clicked()
+							{
+								action = Some(SceneAction::Move(index, index - 1));
+							}
+							let down = IconButton::new(Icon::Down, "Move down").small();
+							if ui.add_enabled(index + 1 < count, down).clicked() {
+								action = Some(SceneAction::Move(index, index + 1));
+							}
+							let live = on_air.contains(&scene.name);
+							let remove = IconButton::new(Icon::Remove, "Remove")
+								.small()
+								.note(live.then_some("On air; cut to another scene first"));
+							if ui.add_enabled(!live, remove).clicked() {
+								action = Some(SceneAction::Remove(index));
+							}
+						});
+					});
 				});
 			}
 			// Audio scenes, apart from cuts: Preview has nothing to show.
@@ -1534,28 +1589,31 @@ impl Panels {
 						}
 						return;
 					}
-					let label = ui.label(&scene.name);
-					ui.weak("audio");
-					if label.double_clicked() || ui.small_button("Rename").clicked() {
+					let label = ui.label(kit::caps(&scene.name, kit::display(14.0)));
+					ui.add(kit::Tag::new("Audio", Tally::Off));
+					if scene.program {
+						ui.add(kit::Tag::new("On air", Tally::Air));
+					}
+					let rename = ui.add(IconButton::new(Icon::Rename, "Rename").small());
+					if label.double_clicked() || rename.clicked() {
 						self.renaming_audio = Some((scene.name.clone(), scene.name.clone()));
 					}
-					if scene.program {
-						ui.colored_label(Color32::RED, "on program");
-					}
-					if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() {
+					if ui
+						.add_enabled(index > 0, IconButton::new(Icon::Up, "Move up").small())
+						.clicked()
+					{
 						audio_action = Some(AudioAction::Move(index, index - 1));
 					}
-					if ui
-						.add_enabled(index + 1 < count, egui::Button::new("Down").small())
-						.clicked()
-					{
+					let down = IconButton::new(Icon::Down, "Move down").small();
+					if ui.add_enabled(index + 1 < count, down).clicked() {
 						audio_action = Some(AudioAction::Move(index, index + 1));
 					}
-					if ui
-						.add_enabled(!scene.program, egui::Button::new("Remove").small())
-						.on_disabled_hover_text("On program; put another audio scene on program in Audio first")
-						.clicked()
-					{
+					let remove = IconButton::new(Icon::Remove, "Remove").small().note(
+						scene
+							.program
+							.then_some("On program; put another audio scene on program in Audio first"),
+					);
+					if ui.add_enabled(!scene.program, remove).clicked() {
 						audio_action = Some(AudioAction::Remove(index));
 					}
 				});
@@ -1577,7 +1635,7 @@ impl Panels {
 					Err(err) => self.report(Err(err)),
 				}
 			}
-			if ui.button("Add scene").clicked() {
+			if ui.add(kit::button(Icon::Add, "Add scene")).clicked() {
 				let name = self.new_scene.trim().to_string();
 				let index = state.collection().scenes.len();
 				let result = edit(&mut state, format!("Add scene `{name}`"), None, |draft| {
@@ -1774,8 +1832,8 @@ impl Panels {
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
 			egui::Grid::new("items").striped(true).show(ui, |ui| {
-				for heading in ["Source", "Shown", "x", "y", "Width", "Height", ""] {
-					ui.strong(heading);
+				for heading in ["Source", "Shown", "Place", "", "Size", "", ""] {
+					ui.label(kit::caps(heading, kit::display(11.0)).color(kit::DIM));
 				}
 				ui.end_row();
 
@@ -1790,8 +1848,12 @@ impl Panels {
 						linked(ui, collection, &layer, index, item);
 					});
 
-					let mut visible = item.visible;
-					if ui.checkbox(&mut visible, "").changed() {
+					let (icon, name) = match item.visible {
+						true => (Icon::Shown, "Hide"),
+						false => (Icon::Hidden, "Show"),
+					};
+					if ui.add(IconButton::new(icon, name).small()).clicked() {
+						let visible = !item.visible;
 						let verb = if visible { "Show" } else { "Hide" };
 						let label = format!("{verb} `{}`", item.source);
 						action = Some(ItemAction::Set(
@@ -1806,16 +1868,18 @@ impl Panels {
 					}
 
 					let mut rect = item.rect;
+					let field = |drag, label| kit::Number::new(drag).label(label).width(64.0);
+					let size = 0.0..=f32::MAX;
 					let responses = [
-						("Move", ui.add(egui::DragValue::new(&mut rect.x))),
-						("Move", ui.add(egui::DragValue::new(&mut rect.y))),
+						("Move", ui.add(field(egui::DragValue::new(&mut rect.x), "X"))),
+						("Move", ui.add(field(egui::DragValue::new(&mut rect.y), "Y"))),
 						(
 							"Resize",
-							ui.add(egui::DragValue::new(&mut rect.width).range(0.0..=f32::MAX)),
+							ui.add(field(egui::DragValue::new(&mut rect.width).range(size.clone()), "W")),
 						),
 						(
 							"Resize",
-							ui.add(egui::DragValue::new(&mut rect.height).range(0.0..=f32::MAX)),
+							ui.add(field(egui::DragValue::new(&mut rect.height).range(size), "H")),
 						),
 					];
 					for (verb, response) in responses {
@@ -1841,7 +1905,7 @@ impl Panels {
 						{
 							action = Some(ItemAction::Move(index, index + 1));
 						}
-						if ui.small_button("Remove").clicked() {
+						if ui.add(IconButton::new(Icon::Remove, "Remove").small()).clicked() {
 							action = Some(ItemAction::Remove(index));
 						}
 					});
@@ -1868,7 +1932,7 @@ impl Panels {
 							ui.selectable_value(&mut self.new_item, Some(name.clone()), name);
 						}
 					});
-				if ui.button("Add").clicked()
+				if ui.add(kit::button(Icon::Add, "Add")).clicked()
 					&& let Some(source) = self.new_item.take()
 				{
 					action = Some(ItemAction::Add(Item::new(source, Rect::fill(&canvas))));
@@ -1950,7 +2014,7 @@ impl Panels {
 					) {
 						(Some(err), _, _) => status(ui, &Status::Failed(err.to_string())),
 						(None, _, Some(stall)) => {
-							ui.colored_label(DEGRADED, "stalled")
+							ui.colored_label(kit::CUE, "stalled")
 								.on_hover_text(health::without(stall));
 						}
 						(None, Some(feed), None) => status(ui, &feed.status()),
@@ -1984,7 +2048,7 @@ impl Panels {
 								ui.weak("GPU").on_hover_text("The page is copied on the GPU");
 							}
 							Some(Paint::Cpu(why)) => {
-								ui.colored_label(DEGRADED, "CPU")
+								ui.colored_label(kit::CUE, "CPU")
 									.on_hover_text(format!("The page is uploaded from memory every frame: {why}"));
 							}
 							None => {
@@ -2014,17 +2078,15 @@ impl Panels {
 						}
 						if matches!(source, Source::Media { .. }) {
 							if ui
-								.small_button("Play")
-								.on_hover_text("Play the file from its start")
+								.add(IconButton::new(Icon::Play, "Play from the start").small())
 								.clicked()
 							{
 								play = Some(name.clone());
 							}
-							if ui
-								.small_button("Stop")
-								.on_hover_text("Stop the file now, blank and silent until played again")
-								.clicked()
-							{
+							let stopping = IconButton::new(Icon::Stop, "Stop")
+								.small()
+								.note(Some("Blank and silent until played again"));
+							if ui.add(stopping).clicked() {
 								stop = Some(name.clone());
 							}
 						}
@@ -2036,14 +2098,16 @@ impl Panels {
 							_ => None,
 						};
 						if let Some(hover) = reloads
-							&& ui.small_button("Reload").on_hover_text(hover).clicked()
+							&& ui
+								.add(IconButton::new(Icon::Reload, "Reload").small().note(Some(hover)))
+								.clicked()
 						{
 							reload = Some(name.clone());
 						}
 						if source.publishes() {
 							let mut published = collection.published.contains(name);
 							if ui
-								.checkbox(&mut published, "Published independently")
+								.add(kit::Toggle::new(&mut published).label("Published independently"))
 								.on_hover_text(
 									"Publish this source's own track to the relay beside the program, for viewers to \
 									 place over it as the layer layout says, and leave it out of the program. It \
@@ -2159,7 +2223,7 @@ impl Panels {
 			ui.label("Name");
 			let field = ui.text_edit_singleline(&mut self.guest);
 			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-			if ui.button("Invite").clicked() || entered {
+			if ui.add(kit::button(Icon::Add, "Invite")).clicked() || entered {
 				let name = self.guest.trim().to_string();
 				match room.invite(&name) {
 					Ok(invite) => {
@@ -2173,29 +2237,25 @@ impl Panels {
 
 		let now = kio::clock::wall();
 		if let Some(shown) = &self.shown {
-			ui.separator();
-			ui.horizontal(|ui| {
-				ui.strong(format!("Join link for {}", shown.name));
-				ui.label(expiry(shown.invite.expires, now));
-			});
-			let mut hide = false;
-			ui.horizontal(|ui| {
-				if ui.button("Copy link").clicked() {
+			let title = format!("Invite {}", shown.name);
+			let close = kit::Sheet::new(egui::Id::new("join link"), &title).show(ui.ctx(), |ui| {
+				ui.label(format!("Their join link {}.", expiry(shown.invite.expires, now)));
+				ui.add_space(8.0);
+				// The link is the guest's credential, so it shows only as a code to scan.
+				match &shown.qr {
+					Ok(qr) => {
+						ui.vertical_centered(|ui| ui.image((qr.id(), egui::vec2(240.0, 240.0))));
+					}
+					Err(err) => {
+						ui.colored_label(ui.visuals().error_fg_color, format!("{err}; copy the link instead."));
+					}
+				}
+				ui.add_space(8.0);
+				if ui.add(kit::button(Icon::Copy, "Copy link")).clicked() {
 					ui.ctx().copy_text(shown.invite.link.to_string());
 				}
-				hide = ui.button("Hide").clicked();
 			});
-			// The link is the guest's credential, so it shows only as a code to scan.
-			match &shown.qr {
-				Ok(qr) => {
-					let side = ui.available_width().min(240.0);
-					ui.image((qr.id(), egui::vec2(side, side)));
-				}
-				Err(err) => {
-					ui.colored_label(ui.visuals().error_fg_color, format!("{err}; copy the link instead."));
-				}
-			}
-			if hide {
+			if close {
 				self.shown = None;
 			}
 		}
@@ -2225,7 +2285,7 @@ impl Panels {
 					ui.label(name);
 					for online in [participant.camera, participant.screen] {
 						if online {
-							ui.colored_label(HEALTHY, "live");
+							ui.colored_label(kit::OK, "live");
 						} else {
 							ui.weak("offline");
 						}
@@ -2343,7 +2403,7 @@ impl Panels {
 				ui.label("Background");
 				let mut removed = *background == Background::Remove;
 				let response = ui
-					.checkbox(&mut removed, "Remove")
+					.add(kit::Toggle::new(&mut removed).label("Remove"))
 					.on_hover_text("Cut the person out of the picture, leaving the rest transparent, before the crop and every filter. Each picture shows a frame or more late, and the source's own track keeps the background.");
 				if response.changed() {
 					*background = if removed { Background::Remove } else { Background::Keep };
@@ -2660,10 +2720,15 @@ impl Panels {
 					scenes_change = Some(on_program(&scenes, name));
 				}
 				let heard = listening.as_ref().is_some_and(|(heard, _)| heard == name);
-				let response = ui
-					.add_enabled(mix::MONITOR, egui::Button::selectable(heard, "Listen"))
-					.on_hover_text("Play this audio scene to the speakers; use headphones")
-					.on_disabled_hover_text("Needs a build with the `capture` feature");
+				let note = match mix::MONITOR {
+					true => "Play this audio scene to the speakers; use headphones",
+					false => "Needs a build with the `capture` feature",
+				};
+				let button = IconButton::new(Icon::Listen, "Listen")
+					.lit(heard, kit::SEL)
+					.small()
+					.note(Some(note));
+				let response = ui.add_enabled(mix::MONITOR, button);
 				if response.clicked() {
 					listen = Some((!heard).then(|| name.clone()));
 				}
@@ -2710,7 +2775,7 @@ impl Panels {
 				}
 				for scene in &scenes {
 					let mut sent = scene.sounds.contains(name);
-					if ui.checkbox(&mut sent, "").changed() {
+					if ui.add(kit::Toggle::new(&mut sent)).changed() {
 						scenes_change = Some(send(Strip::Sound(name), &scene.name, sent));
 					}
 				}
@@ -2792,7 +2857,7 @@ impl Panels {
 					let result = recorder.start(each);
 					self.check(result);
 				}
-				if ui.checkbox(&mut each, "each source too").changed() {
+				if ui.add(kit::Toggle::new(&mut each).label("each source too")).changed() {
 					self.controls.record_sources.store(each, Ordering::Relaxed);
 				}
 				ui.weak(format!("into {}", recorder.dir().display()));
@@ -2989,7 +3054,7 @@ impl Panels {
 			Some(scene) => (format!("scene `{scene}`"), format!("scene `{scene}`'s virtual camera")),
 		};
 		if ui
-			.checkbox(&mut on, "Virtual camera")
+			.add(kit::Toggle::new(&mut on).label("Virtual camera"))
 			.on_hover_text(format!("Show {shows} as a camera that video-call apps can pick"))
 			.changed()
 		{
@@ -3123,7 +3188,7 @@ impl Panels {
 					.on_hover_text("Play the last moments in the replay source")
 					.clicked();
 				let save = ui
-					.button("Save clip")
+					.add(kit::button(Icon::Clip, "Save clip"))
 					.on_hover_text(
 						"Save the last moments, in real time, beside the scene file. Copied without re-encoding, a \
 						 clip starts at the keyframe before them, and video with B-frames can end early.",
@@ -3185,7 +3250,7 @@ impl Panels {
 
 	/// Bind keys to actions, heard even while another app has focus where the
 	/// platform lets the studio hear them.
-	fn hotkeys(&mut self, ui: &mut Ui) {
+	fn hotkeys(&mut self, ui: &mut Ui, fx: &mut Fx) {
 		let Some(hotkeys) = &mut self.hotkeys else {
 			return;
 		};
@@ -3233,18 +3298,15 @@ impl Panels {
 					ui.strong("press a key, or Escape");
 				} else {
 					match bound {
-						Some(bound) => {
-							let keycaps = self.effects.then_some(&mut self.spots.keycaps);
-							keycap(ui, bound.shown(ui.ctx()), keycaps)
-						}
+						Some(bound) => ui.add(kit::Keycap::new(&bound.shown(ui.ctx())).fx(fx)),
 						None => ui.weak("unbound"),
 					};
 				}
-				if ui.small_button("Bind").clicked() {
+				if ui.add(IconButton::new(Icon::Hotkeys, "Bind a key").small()).clicked() {
 					bind = Some(action.clone());
 				}
 				if ui
-					.add_enabled(bound.is_some(), egui::Button::new("Clear").small())
+					.add_enabled(bound.is_some(), IconButton::new(Icon::Close, "Clear the key").small())
 					.clicked()
 				{
 					clear = Some(action.clone());
@@ -3393,17 +3455,17 @@ impl Panels {
 		if report.relays.is_empty() {
 			ui.label("Not publishing; start with --connect to see how the stream is delivered.");
 			for problem in &report.problems {
-				ui.colored_label(color(ui, problem.verdict), &problem.cause);
+				ui.colored_label(color(problem.verdict), &problem.cause);
 			}
 			return;
 		};
 
 		egui::ScrollArea::vertical().show(ui, |ui| {
 			if report.problems.is_empty() {
-				ui.colored_label(HEALTHY, "No problems.");
+				ui.colored_label(kit::OK, "No problems.");
 			}
 			for problem in &report.problems {
-				ui.colored_label(color(ui, problem.verdict), &problem.cause);
+				ui.colored_label(color(problem.verdict), &problem.cause);
 			}
 			ui.separator();
 
@@ -3416,7 +3478,7 @@ impl Panels {
 					ui.label(&relay.endpoint);
 					match &relay.state {
 						health::State::Connecting => ui.weak("connecting"),
-						health::State::Connected => ui.colored_label(HEALTHY, "connected"),
+						health::State::Connected => ui.colored_label(kit::OK, "connected"),
 						health::State::Disconnected(reason) => ui
 							.colored_label(ui.visuals().error_fg_color, "unreachable")
 							.on_hover_text(reason),
@@ -3583,7 +3645,7 @@ fn repairs(ui: &mut Ui, repairs: &[record::Repair]) {
 		match &repair.outcome {
 			None => ui.weak(format!("Repairing {name}, which the studio left unfinished")),
 			Some(record::Repaired::Saved(repaired)) => ui.colored_label(
-				DEGRADED,
+				kit::CUE,
 				format!("{name} was left unfinished; repaired as {}", file(repaired)),
 			),
 			Some(record::Repaired::Finished) => ui.weak(format!("{name} was already finished")),
@@ -3597,44 +3659,23 @@ fn repairs(ui: &mut Ui, repairs: &[record::Repair]) {
 	ui.separator();
 }
 
-/// A bound key, on a cap whose spot joins `keycaps` while effects draw.
-fn keycap(ui: &mut Ui, key: String, keycaps: Option<&mut Vec<Spot>>) -> egui::Response {
-	let Some(keycaps) = keycaps else {
-		return ui.monospace(key);
-	};
-	let cap = Mark::new(ui.painter());
-	let text = egui::RichText::new(key).monospace().color(Fx::INK);
-	let response = egui::Frame::new()
-		.inner_margin(egui::Margin::symmetric(6, 1))
-		.show(ui, |ui| ui.label(text))
-		.response;
-	keycaps.push(cap.around(response.rect));
-	response
-}
-
-/// The red of the recording dot.
-const RECORDING: Color32 = Color32::from_rgb(235, 50, 40);
-
-const HEALTHY: Color32 = Color32::from_rgb(80, 200, 120);
-const DEGRADED: Color32 = Color32::from_rgb(220, 180, 60);
-
-fn color(ui: &Ui, verdict: Verdict) -> Color32 {
+/// A verdict's color: green while healthy, amber for anything wrong.
+fn color(verdict: Verdict) -> Color32 {
 	match verdict {
-		Verdict::Healthy => HEALTHY,
-		Verdict::Degraded => DEGRADED,
-		Verdict::Unhealthy => ui.visuals().error_fg_color,
-		Verdict::Unknown => ui.visuals().weak_text_color(),
+		Verdict::Healthy => kit::OK,
+		Verdict::Degraded | Verdict::Unhealthy => kit::CUE,
+		Verdict::Unknown => kit::DIM,
 	}
 }
 
 fn verdict(ui: &mut Ui, verdict: Verdict) {
 	let text = match verdict {
-		Verdict::Unknown => "unknown",
-		Verdict::Healthy => "healthy",
-		Verdict::Degraded => "degraded",
-		Verdict::Unhealthy => "unhealthy",
+		Verdict::Unknown => "Unknown",
+		Verdict::Healthy => "Healthy",
+		Verdict::Degraded => "Degraded",
+		Verdict::Unhealthy => "Unhealthy",
 	};
-	ui.colored_label(color(ui, verdict), text);
+	ui.add(kit::Pill::new(text).dot(color(verdict)));
 }
 
 fn or_unknown(value: Option<String>) -> String {
@@ -3741,20 +3782,37 @@ fn strip_controls(
 	audio: &moq_scene::Audio,
 ) -> Option<(moq_scene::Audio, String, Option<u64>)> {
 	let mut change = None;
-	let mut muted = audio.muted;
-	if ui.checkbox(&mut muted, "Mute").changed() {
-		let verb = if muted { "Mute" } else { "Unmute" };
-		let audio = moq_scene::Audio { muted, ..audio.clone() };
+	let (icon, verb) = match audio.muted {
+		true => (Icon::Muted, "Unmute"),
+		false => (Icon::Sound, "Mute"),
+	};
+	if ui
+		.add(IconButton::new(icon, verb).lit(audio.muted, kit::CUE).small())
+		.clicked()
+	{
+		let audio = moq_scene::Audio {
+			muted: !audio.muted,
+			..audio.clone()
+		};
 		change = Some((audio, format!("{verb} `{name}`"), None));
 	}
-	let mut db = decibels(audio.gain);
-	let response = ui.add(egui::Slider::new(&mut db, MUTE_DB..=12.0).suffix(" dB"));
+	// The slider runs over decibels, from silence to 12 dB of boost.
+	let db = decibels(audio.gain);
+	let mut at = (db - MUTE_DB) / (12.0 - MUTE_DB);
+	let response = ui.add(kit::Slider::new(&mut at).width(120.0)).on_hover_text("Gain");
 	let gesture = gestures.of(&response);
 	if response.changed() {
+		let db = MUTE_DB + at * (12.0 - MUTE_DB);
 		let gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
 		let audio = moq_scene::Audio { gain, ..audio.clone() };
 		change = Some((audio, format!("Set `{name}` gain"), gesture));
 	}
+	let shown = if db <= MUTE_DB {
+		"-inf dB".to_string()
+	} else {
+		format!("{db:+.1} dB")
+	};
+	ui.label(egui::RichText::new(shown).font(kit::mono(11.0)).color(kit::DIM));
 	let mut pan = audio.pan;
 	let response = ui
 		.add(
@@ -3787,7 +3845,7 @@ fn strip_controls(
 	let max = moq_audio::bus::MAX_DELAY.as_millis() as u64;
 	let mut millis = audio.delay.as_millis() as u64;
 	let response = ui
-		.add(egui::DragValue::new(&mut millis).range(0..=max).suffix(" ms"))
+		.add(kit::Number::new(egui::DragValue::new(&mut millis).range(0..=max)).unit("ms"))
 		.on_hover_text("Delay: hold the source back to line it up with a camera that lags it");
 	let gesture = gestures.of(&response);
 	if response.changed() {
@@ -3810,7 +3868,7 @@ fn scene_settings(
 	let mut action = None;
 	let mut published = scene.published;
 	if ui
-		.checkbox(&mut published, "Publish")
+		.add(kit::Toggle::new(&mut published).label("Publish"))
 		.on_hover_text("Live as its own broadcast beneath the program's, at its own size")
 		.changed()
 	{
@@ -4494,7 +4552,7 @@ impl View {
 }
 
 /// Smart guides and spacing hints, bright enough to read over any picture.
-const GUIDE: Color32 = Color32::from_rgb(255, 64, 160);
+const GUIDE: Color32 = Color32::from_rgb(0xff, 0x3d, 0xf0);
 
 fn describe(source: &Source) -> String {
 	let or_default = |id: &Option<String>| id.clone().unwrap_or_else(|| "default".into());
@@ -4525,9 +4583,9 @@ fn describe(source: &Source) -> String {
 fn status(ui: &mut Ui, status: &Status) {
 	match status {
 		Status::Starting => ui.weak("starting"),
-		Status::Live => ui.colored_label(HEALTHY, "live"),
-		Status::Offline => ui.colored_label(DEGRADED, "offline"),
-		Status::Ended => ui.colored_label(DEGRADED, "ended"),
+		Status::Live => ui.colored_label(kit::OK, "live"),
+		Status::Offline => ui.colored_label(kit::CUE, "offline"),
+		Status::Ended => ui.colored_label(kit::CUE, "ended"),
 		Status::Failed(reason) => ui
 			.colored_label(ui.visuals().error_fg_color, "failed")
 			.on_hover_text(reason),
@@ -4713,22 +4771,23 @@ impl AddSource {
 			}
 			if self.kind == Kind::Overlay {
 				ui.label("Animation");
-				ui.checkbox(&mut self.restart, "Restart on program").on_hover_text(
-					"Start its animations over each time its scene goes on program, rather than run on, as a clock should",
-				);
+				ui.add(kit::Toggle::new(&mut self.restart).label("Restart on program"))
+					.on_hover_text(
+						"Start its animations over each time its scene goes on program, rather than run on, as a clock should",
+					);
 				ui.end_row();
 			}
 			if self.kind == Kind::Media {
 				ui.label("Playback");
 				ui.horizontal(|ui| {
-					ui.checkbox(&mut self.looping, "Loop")
+					ui.add(kit::Toggle::new(&mut self.looping).label("Loop"))
 						.on_hover_text("Start over at the end, rather than hold the last picture");
-					ui.checkbox(&mut self.restart, "Restart on program")
+					ui.add(kit::Toggle::new(&mut self.restart).label("Restart on program"))
 						.on_hover_text("Play from the start each time it goes on program");
 				});
 				ui.end_row();
 			}
-			add = ui.button("Add source").clicked();
+			add = ui.add(kit::button(Icon::Add, "Add source")).clicked();
 			ui.end_row();
 		});
 		if !add {

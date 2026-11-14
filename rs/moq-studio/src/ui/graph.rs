@@ -14,6 +14,7 @@ use super::{
 	Panels, SceneAction, Selection, Strip, describe, edit, on_program, scene_settings, status, strip_controls,
 };
 use crate::engine::State;
+use crate::kit;
 use crate::mix;
 
 /// Something that draws, holds, or is drawn or held.
@@ -50,8 +51,8 @@ enum Kind {
 impl Kind {
 	fn color(self) -> Color32 {
 		match self {
-			Self::Picture => Color32::from_rgb(100, 160, 240),
-			Self::Sound => Color32::from_rgb(80, 200, 120),
+			Self::Picture => kit::SEL,
+			Self::Sound => kit::OK,
 		}
 	}
 }
@@ -624,7 +625,7 @@ impl Panels {
 				pass.action = Some(Action::Preview(name.to_string()));
 			}
 			if state.compositor.program_scene() == Some(name) {
-				ui.colored_label(Color32::RED, "on program");
+				ui.add(kit::Tag::new("On air", kit::Tally::Air));
 			}
 		});
 		if let Some(size) = scene.size {
