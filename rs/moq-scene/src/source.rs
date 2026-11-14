@@ -32,7 +32,7 @@ use crate::collection::{Collection, Source};
 use crate::lut::Cube;
 use crate::media::Clip;
 pub use crate::playout::MAX_DELAY;
-use crate::playout::{Follow, Hold, RECHECK, VIDEO_DELAY, WRITE_LEAD, Writer, follow};
+use crate::playout::{Follow, Hold, RECHECK, STRETCH, VIDEO_DELAY, WRITE_LEAD, Writer, gone};
 use crate::publish::{Claim, Listing, Publish, Still};
 use crate::replay::{MIN_SPEED, Take, Target};
 
@@ -1306,8 +1306,9 @@ impl Driver {
 	}
 
 	/// Play a track's sound into the bus when `schedule`, another track's
-	/// clock, says each frame sounds, dropping a frame that has sounded
-	/// through, or that arrives before the clock has a moment for it.
+	/// clock, says each frame sounds, dropping a frame that sounded through
+	/// more than [`STRETCH`] ago, or that arrives before the clock has a
+	/// moment for it.
 	async fn follow_audio(
 		&self,
 		broadcast: &moq_net::broadcast::Consumer,
@@ -1329,7 +1330,7 @@ impl Driver {
 		options.output.sample_rate = Some(bus.sample_rate);
 		options.output.layout = Some(bus.layout);
 		let mut consumer = moq_audio::decode::Consumer::new(broadcast, &config, name, options).await?;
-		let mut writer = self.writer(strip)?;
+		let mut writer = self.writer(strip, STRETCH)?;
 
 		// Each frame waits here until its lead before it sounds.
 		let mut queue = VecDeque::<moq_audio::Frame>::new();
@@ -1338,7 +1339,7 @@ impl Driver {
 			let now = kio::clock::now();
 			let mut write = None;
 			while let Some(frame) = queue.front() {
-				match follow(schedule.due(frame.timestamp), length(frame, bus), now) {
+				match writer.follow(schedule.due(frame.timestamp), length(frame, bus), now) {
 					Follow::Write(sounds) => {
 						let frame = queue.pop_front().expect("peeked");
 						writer.write(sounds, &frame.data).await?;
@@ -1362,7 +1363,7 @@ impl Driver {
 						// peer stamps.
 						let now = kio::clock::now();
 						let due = schedule.due(frame.timestamp);
-						let placed = follow(due, length(&frame, bus), now) != Follow::Drop
+						let placed = !gone(due, length(&frame, bus), now, STRETCH)
 							&& due.is_some_and(|sounds| sounds <= now.saturating_add(MAX_DELAY));
 						if placed {
 							queue.push_back(frame);
@@ -1536,16 +1537,16 @@ impl Driver {
 		options.output.layout = Some(bus.layout);
 		let mut consumer = moq_audio::decode::Consumer::new(broadcast, &config, name, options).await?;
 
-		let mut writer = self.writer(strip)?;
+		let mut writer = self.writer(strip, STRETCH)?;
 		let hold = Hold::new(&clock.schedule, moq_mux::container::Kind::Audio, &clock.moved);
 		let schedule = &clock.schedule;
 
 		// Frames wait here for their moment while every arrival is read at
 		// once: the jitter estimate times each one as `read` hands it over. A
 		// frame is due no later than the delay after it arrives, and one that
-		// has sounded through by the time another arrives is dropped, so
-		// however long a write waits on the bus, this holds only what is
-		// still to sound within the longest delay.
+		// sounded through more than the stretch ago by the time another
+		// arrives is dropped, so however long a write waits on the bus, this
+		// holds only what is still to sound within the longest delay.
 		//
 		// Each frame sounds when the clock says, or at the moment frozen for it
 		// when the timeline broke after it, which the clock no longer holds.
@@ -1577,7 +1578,7 @@ impl Driver {
 				hold.set_target(consumer.delay());
 				while queue
 					.front()
-					.is_some_and(|front| follow(due(front), length(&front.0, bus), now) == Follow::Drop)
+					.is_some_and(|front| gone(due(front), length(&front.0, bus), now, STRETCH))
 				{
 					queue.pop_front();
 				}
@@ -1597,7 +1598,7 @@ impl Driver {
 				let next = queue
 					.borrow()
 					.front()
-					.map(|front| follow(due(front), length(&front.0, bus), now));
+					.map(|front| writer.follow(due(front), length(&front.0, bus), now));
 				match next {
 					Some(Follow::Write(sounds)) => {
 						let (frame, _) = queue.borrow_mut().pop_front().expect("peeked");
@@ -1675,7 +1676,7 @@ impl Driver {
 			(Some((name, config)), Some(strip)) if play.speed == 1.0 => {
 				let consumer =
 					moq_audio::decode::Consumer::new(&broadcast, config, name.clone(), self.sounds()).await?;
-				Some((consumer, self.writer(strip.clone())?))
+				Some((consumer, self.writer(strip.clone(), Duration::ZERO)?))
 			}
 			_ => None,
 		};
@@ -1867,7 +1868,7 @@ impl Driver {
 					if let (Some(sound), Some(strip)) = (&mut sound, &self.strip)
 						&& sound.writer.is_none()
 					{
-						sound.writer = Some(self.writer(strip.clone())?);
+						sound.writer = Some(self.writer(strip.clone(), Duration::ZERO)?);
 					}
 					let play = async {
 						let end = self
@@ -2181,17 +2182,19 @@ impl Driver {
 	}
 
 	/// A writer into the bus for decoded sound, as [`sounds`](Self::sounds)
-	/// and broadcasts decode it, through `strip`.
-	fn writer(&self, strip: Strip) -> Result<Writer, Error> {
+	/// and broadcasts decode it, through `strip`, whose sound may trail its
+	/// moments by `stretch`.
+	fn writer(&self, strip: Strip, stretch: Duration) -> Result<Writer, Error> {
 		let bus = self.context.bus.config();
 		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
 		input.format = moq_audio::Format::F32;
-		let channel = self.context.bus.positioned(input, strip, Duration::ZERO)?;
+		let channel = self.context.bus.positioned(input, strip, stretch)?;
 		Ok(Writer::new(
 			channel,
 			self.context.mixed.clone(),
 			bus.sample_rate,
 			bus.layout.channels(),
+			stretch,
 		))
 	}
 }
