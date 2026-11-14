@@ -98,7 +98,7 @@ shots *views:
 v4l2loopback:
     cargo nextest run --locked -p moq-studio --run-ignored only -E 'test(=vcam::v4l2::tests::a_v4l2_app_reads_the_program)'
 
-# Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock and bun.lock.
+# Move the moq submodule to moq's latest main (or a given commit on it) and refresh Cargo.lock and bun.lock.
 upgrade-moq rev="origin/main":
     sh/upgrade-moq.sh {{ rev }}
 
