@@ -30,5 +30,4 @@ the submodule is clean, and that no moq git dependency appears beside it.
 - `just upgrade-moq <rev>` runs the same ancestry test after its fetch and
   refuses a revision off `main`.
 
-[pin-main](/quest/m0/pin-main.md) catches the studio up to moq's `main` and
-is unaffected: the current pin, `644d48996`, is on `main`.
+The current pin, `51611bd83`, is on `main`.
