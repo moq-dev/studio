@@ -23,6 +23,7 @@ mod guests;
 mod health;
 mod hotkeys;
 mod interact;
+mod kit;
 mod ladder;
 mod mix;
 mod record;
@@ -487,6 +488,7 @@ fn run(app: App, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::R
 				.wgpu_render_state
 				.clone()
 				.context("the window is not drawn with wgpu")?;
+			kit::install(&cc.egui_ctx);
 			let fx = fx::Fx::new(&render, cc.storage, &cc.egui_ctx, &window_runtime);
 			Ok(Box::new(Window {
 				app,

@@ -75,8 +75,16 @@ shows those pictures beside the frames they implement.
   as released and 3 to 5 ms with femtovg's pipeline cache patched. Patched
   Slint also made the program render about four times slower, and Slint's
   licenses require GPLv3 or attribution with an embedded ban. egui's gaps
-  (SVG icons, gradients) are painter work the [kit](/quest/m0/ux/kit.md)
-  owns.
+  (SVG icons, gradients) are painter work, done in the kit
+  (`rs/moq-studio/src/kit`).
+- **Color:** ✅ one shared accent (`kit::ACCENT`, `--accent` in
+  `mock/kit.css`), blue until proper branding replaces that one value, for
+  what is on air (the ON AIR tag, the tally frame, the live control) and for
+  selection, toggles, and sliders (rejected: a separate token for on air).
+  Red is errors alone, a clipping meter among them; amber is cued, off air,
+  muted, and degraded (rejected: red for the program, as hardware switchers
+  do; red or amber for both a mute and a clip). Decided by the maintainer in
+  [moq-dev/studio#164](https://github.com/moq-dev/studio/pull/164#issuecomment-6887308961).
 - **Milestones:** ✅ redesigning what exists is m0, here. Features that do not
   exist yet are [m1](/quest/m1/README.md), and three more are
   [m2](/quest/m2/README.md) (rejected: all in m0; all in m1).
@@ -115,7 +123,8 @@ quest links its own.
 
 - Editing the live picture, with layers beside it: Meld Studio and StreamYard,
   which stay safe by constraining what a click can do.
-- Cue and take, red for program and amber for preview: hardware switchers.
+- Cue and take, a tally for program and amber for preview: hardware switchers,
+  which draw the program red where this draws it in the accent.
   vMix and OBS Studio Mode show the cost of the split this plan rejects.
 - Selection handles, smart guides, a toolbar on the selected thing, and an
   inspector that follows the selection: Figma and Keynote.
@@ -144,7 +153,8 @@ PR hands them to the maintainer as `## Waiting` with what to look at:
   credentials, and ending it.
 - **Other apps in front:** hotkeys, and later the mini controller, while a
   full-screen game has focus.
-- **Readability:** contrast, and red against amber for a color-blind reader.
+- **Readability:** contrast, and the accent, amber, and red told apart by a
+  color-blind reader.
 
 ## Related
 

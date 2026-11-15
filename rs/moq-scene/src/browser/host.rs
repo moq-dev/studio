@@ -591,6 +591,11 @@ wrap_app! {
 			// nowhere. `--disable-component-update` would leave the installers that
 			// ask for themselves, such as the on-device AI model's.
 			command_line.append_switch_with_value(Some(&"component-updater".into()), Some(&"url-source=data:".into()));
+			// Nor does it install the extensions a distribution leaves for every
+			// Chromium, such as Fedora's GNOME Shell integration in
+			// `/usr/share/chromium/extensions`, each from the server its file
+			// names.
+			command_line.append_switch(Some(&"disable-extensions".into()));
 			match &self.raster {
 				Raster::Gpu { render_node, display } => {
 					let platform = match display {

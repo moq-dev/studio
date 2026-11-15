@@ -51,7 +51,8 @@ opened by a double click, so none of that can stay a flag only.
   sentence and its fix are advice, since a streamer on a bad connection may
   still choose to go. Only having nothing to send, no destination switched
   on, disables the confirm.
-- GO LIVE is not red. Red stays the on-air state alone.
+- GO LIVE is not in the accent, which stays the on-air state, nor red, which
+  is errors alone.
 - **A replay of the program** needs the relay's cache, so off air it says so
   rather than failing.
 - **Recent shows** are kept per user. A show's picture is the last frame of
