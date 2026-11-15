@@ -13,14 +13,18 @@ use std::time::Duration;
 
 use eframe::egui_wgpu;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use moq_scene::source::Status;
 
 use crate::fx::Effects;
-use crate::ui::Tab;
+use crate::ui::{Page, Setting, Tool};
 use crate::{App, Window, autosave, engine, fx, hotkeys, setup};
 
 /// The window's size, the mock-ups'.
 const SIZE: egui::Vec2 = egui::vec2(1440.0, 900.0);
+
+/// A window snapped to half of a 1440x900 screen, as the compact mock-up's.
+const HALF: egui::Vec2 = egui::vec2(711.0, 872.0);
 
 /// The longest a view waits for its sources and pictures to settle.
 const SETTLE: Duration = Duration::from_secs(20);
@@ -29,10 +33,38 @@ const SETTLE: Duration = Duration::from_secs(20);
 enum Open {
 	/// Guided setup, as the first launch shows it.
 	Setup,
-	/// The studio, with a panel at the front of its group.
-	Studio(Option<Tab>),
+	/// The studio on the show in `shots/<show>`, in a window `size` large,
+	/// turned to `view`.
+	Studio {
+		view: View,
+		size: egui::Vec2,
+		show: &'static str,
+	},
 	/// The kit's gallery, with a sheet open over it or not.
 	Kit { sheet: bool },
+}
+
+/// Where a view turns the studio.
+enum View {
+	Page(Page),
+	/// The BUILD page, showing a tool.
+	Tool(Tool),
+	/// Settings, at a tab.
+	Setting(Setting),
+	/// The stream's health in detail.
+	Health,
+	/// The LIVE page after a mute, with the health dot's popover open and the
+	/// pointer on undo, which names the mute.
+	Hover,
+}
+
+/// The studio on the shots' show, at the mock-ups' size, turned to `view`.
+fn studio(view: View) -> Open {
+	Open::Studio {
+		view,
+		size: SIZE,
+		show: "show.toml",
+	}
 }
 
 /// Whether a view draws the same picture every time.
@@ -65,18 +97,30 @@ views! {
 	/// capture errors of a build without `capture`, which keeps the view off
 	/// the host's devices.
 	setup: Live, Open::Setup;
-	studio: Still, Open::Studio(None);
-	graph: Still, Open::Studio(Some(Tab::Graph));
-	history: Still, Open::Studio(Some(Tab::History));
-	devices: Still, Open::Studio(Some(Tab::Devices));
-	guests: Still, Open::Studio(Some(Tab::Guests));
-	keyframes: Still, Open::Studio(Some(Tab::Keyframes));
-	replay: Still, Open::Studio(Some(Tab::Replay));
-	health: Still, Open::Studio(Some(Tab::Health));
-	audio: Still, Open::Studio(Some(Tab::Audio));
-	/// The encoders' timings.
-	output: Live, Open::Studio(Some(Tab::Output));
-	hotkeys: Still, Open::Studio(Some(Tab::Hotkeys));
+	/// The LIVE page: the picture as large as the window allows, the pads, the
+	/// panic key, and the sound.
+	live: Still, studio(View::Page(Page::Live));
+	/// What the title bar's controls show under the pointer.
+	live_hover: Still, studio(View::Hover);
+	/// A portrait show: the pages in a sidebar, and the scenes and the sound
+	/// in columns beside the picture.
+	live_portrait: Still, Open::Studio { view: View::Page(Page::Live), size: SIZE, show: "portrait.toml" };
+	/// A window snapped beside a game stacks the picture, the scenes, and the
+	/// sound.
+	live_compact: Still, Open::Studio { view: View::Page(Page::Live), size: HALF, show: "show.toml" };
+	build: Still, studio(View::Page(Page::Build));
+	/// MIX holds the mixer, and a small live picture in the sound's place.
+	mix: Still, studio(View::Page(Page::Mix));
+	review: Still, studio(View::Page(Page::Review));
+	graph: Still, studio(View::Setting(Setting::Graph));
+	history: Still, studio(View::Setting(Setting::History));
+	devices: Still, studio(View::Tool(Tool::Devices));
+	guests: Still, studio(View::Tool(Tool::Guests));
+	keyframes: Still, studio(View::Tool(Tool::Keyframes));
+	health: Still, studio(View::Health);
+	/// Settings' Show tab, with the encoders' timings.
+	output: Live, studio(View::Setting(Setting::Show));
+	hotkeys: Still, studio(View::Setting(Setting::Hotkeys));
 }
 
 /// Draw the view `name` opens into `$SHOTS_DIR/<name>.png`, twice if it is
@@ -111,19 +155,31 @@ fn shot(name: &str, motion: Motion, open: Open) {
 		"views draw on lavapipe, not {}",
 		info.name
 	);
-	let image = shoot(&open, &gpu, &runtime, &fixture.join("shots/show.toml"));
-	if motion == Motion::Still {
-		let again = shoot(&open, &gpu, &runtime, &fixture.join("shots/show.toml"));
-		assert!(image == again, "the still view `{name}` drew a different picture twice");
-	}
+	let image = shoot(&open, &gpu, &runtime, &fixture.join("shots"));
 	let path = out.join(format!("{name}.png"));
+	if motion == Motion::Still {
+		let again = shoot(&open, &gpu, &runtime, &fixture.join("shots"));
+		if image != again {
+			// Both, to see what moved.
+			let again_path = out.join(format!("{name}.again.png"));
+			image::DynamicImage::ImageRgba8(again)
+				.to_rgb8()
+				.save(&again_path)
+				.unwrap();
+			image::DynamicImage::ImageRgba8(image).to_rgb8().save(&path).unwrap();
+			panic!(
+				"the still view `{name}` drew a different picture twice: {}",
+				again_path.display()
+			);
+		}
+	}
 	// The window is opaque, and a quarter smaller without the alpha.
 	image::DynamicImage::ImageRgba8(image).to_rgb8().save(&path).unwrap();
 	println!("{}", path.display());
 }
 
-/// Draw what `open` opens on a fresh engine, from the scene file `show`.
-fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show: &Path) -> image::RgbaImage {
+/// Draw what `open` opens on a fresh engine, from a scene file in `shows`.
+fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, shows: &Path) -> image::RgbaImage {
 	if let &Open::Kit { sheet } = open {
 		return gallery(gpu, runtime, sheet);
 	}
@@ -140,9 +196,9 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			setup::Setup::new(launch, "show.toml".into(), runtime.handle().clone()).unwrap(),
 		)),
 		Open::Kit { .. } => unreachable!("drawn without an engine"),
-		Open::Studio(_) => {
+		Open::Studio { show, .. } => {
 			// Afresh, without the history an earlier draw's edits left.
-			std::fs::copy(show, "show.toml").unwrap();
+			std::fs::copy(shows.join(show), "show.toml").unwrap();
 			let _ = std::fs::remove_file("show.history.toml");
 			let (autosave, loaded) = autosave::Autosave::open("show.toml".into()).unwrap();
 			App::Starting(
@@ -154,8 +210,12 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	};
 	let render = render_state(gpu);
 	let started = Arc::new(OnceLock::new());
+	let size = match open {
+		Open::Studio { size, .. } => *size,
+		_ => SIZE,
+	};
 	let mut harness = Harness::builder()
-		.with_size(SIZE)
+		.with_size(size)
 		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
 		.build_eframe(|cc| {
 			crate::kit::install(&cc.egui_ctx);
@@ -169,10 +229,11 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				started: started.clone(),
 				keyboard: hotkeys::Keyboard::default(),
 				fx,
+				framed: true,
 			}
 		});
 
-	let &Open::Studio(tab) = open else {
+	let Open::Studio { view, .. } = open else {
 		runtime
 			.block_on(kio::clock::timeout(SETTLE, checked(&mut harness)))
 			.expect("setup finishes its checks");
@@ -182,15 +243,26 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	let App::Studio(studio) = &mut harness.state_mut().app else {
 		panic!("the studio starts on its first frame")
 	};
-	if let Some(tab) = tab {
-		studio.front(tab);
+	match view {
+		View::Page(page) => studio.turn(*page),
+		View::Tool(tool) => studio.tool(*tool),
+		View::Setting(setting) => studio.open(*setting),
+		View::Health => studio.details(),
+		View::Hover => {}
 	}
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
 		.expect("the sources and pictures settle");
+	if let View::Hover = view {
+		hover(&mut harness);
+	}
 	let image = harness.render().unwrap();
 	drop(harness);
+	// Now, while the scene file is this draw's: the autosave's thread outlives
+	// the engine, and would otherwise write an edit made here over the next
+	// draw's copy.
+	engine.save().expect("the show saves");
 	engine.recorder.close();
 	engine.stop();
 	runtime.block_on(async { tokio::join!(engine.close(), engine.recorder.done()) });
@@ -212,6 +284,22 @@ fn gallery(gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, sheet: bool) ->
 	// Enough for the popover and the sheet to settle where they open.
 	harness.run_steps(4);
 	harness.render().unwrap()
+}
+
+/// Mute the first sound, open the health dot's popover, and rest the pointer
+/// on undo until its tooltip shows.
+fn hover(harness: &mut Harness<'_, Window>) {
+	harness
+		.get_all_by_label("Mute")
+		.next()
+		.expect("a sound to mute")
+		.click();
+	harness.run_steps(2);
+	harness.get_by_label("Not live").click();
+	harness.run_steps(2);
+	harness.get_by_label_contains("Undo: Mute").hover();
+	// egui shows a tooltip once the pointer rests half a second.
+	harness.run_steps(4);
 }
 
 /// Draw until setup has finished its checks and proposes a scene.

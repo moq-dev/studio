@@ -44,7 +44,7 @@ pub struct Binding {
 impl Binding {
 	/// Whether `self` and `other` are the same key, held with the same
 	/// modifiers, whatever the layout called each.
-	fn same(&self, other: &Binding) -> bool {
+	pub fn same(&self, other: &Binding) -> bool {
 		self.key == other.key && self.modifiers == other.modifiers
 	}
 
@@ -293,7 +293,7 @@ impl Hotkeys {
 				}
 				// What a key does is read as it fires, under the lock the window
 				// moves keys through renames under, so a key cleared since does
-				// nothing and one whose scene was renamed previews it by its new name.
+				// nothing and one whose scene was renamed takes it by its new name.
 				let mut state = controls.engine.state.lock().unwrap();
 				let action = reading
 					.lock()
@@ -306,7 +306,7 @@ impl Hotkeys {
 				};
 				match &action {
 					Action::Scene(name) => {
-						let result = controls::preview(&mut state, name);
+						let result = controls::take(&mut state, name);
 						drop(state);
 						controls.report(&action, result.map_err(|err| format!("{err:#}")));
 					}
@@ -591,7 +591,10 @@ mod tests {
 	fn focused_keys_fire_once_and_are_taken() {
 		let keyboard = Keyboard::default();
 		let (fire, fired) = mpsc::channel();
-		let bound = Arc::new(Mutex::new(Bindings::from([(Action::Cut, key(KeyCode::Numpad1, "1"))])));
+		let bound = Arc::new(Mutex::new(Bindings::from([(
+			Action::Panic,
+			key(KeyCode::Numpad1, "1"),
+		)])));
 		keyboard.take(Taking::Firing { bound, fire });
 		let press = |code, repeat| keyboard.pressed(PhysicalKey::Code(code), Key::Character("1".into()), repeat);
 		assert!(press(KeyCode::Digit1, false), "an unbound key reaches egui");
@@ -607,7 +610,7 @@ mod tests {
 		let bindings = Bindings::from([
 			(scene("A"), f1.clone()),
 			(scene("B"), f2.clone()),
-			(Action::Cut, f3.clone()),
+			(Action::Panic, f3.clone()),
 		]);
 		// Swapping two names swaps their keys, and a removed scene keeps its.
 		let renames = BTreeMap::from([
@@ -617,7 +620,7 @@ mod tests {
 		let swapped = renamed(&bindings, &renames);
 		assert_eq!(swapped[&scene("A")], f2);
 		assert_eq!(swapped[&scene("B")], f1);
-		assert_eq!(swapped[&Action::Cut], f3);
+		assert_eq!(swapped[&Action::Panic], f3);
 		let removed = BTreeMap::from([("A".to_string(), None)]);
 		assert_eq!(renamed(&bindings, &removed), bindings);
 		// B removed, then A renamed to B: A's key follows it over B's kept one.

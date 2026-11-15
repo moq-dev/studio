@@ -118,8 +118,15 @@ fn color(level: Level) -> Color32 {
 
 /// A level meter of the latest step: RMS lit, peak held, on a decibel scale.
 pub(super) fn meter(ui: &mut Ui, history: Option<&History>) {
+	let (level, peak) = reading(history);
+	ui.add(kit::Meter::new(level, peak));
+}
+
+/// The latest step's RMS and peak where they fall on a meter, from 0 at
+/// [`MUTE_DB`] to 1 at full scale, as [`kit::Meter::new`] takes them.
+pub(super) fn reading(history: Option<&History>) -> (f32, f32) {
 	let level = history.and_then(|history| history.back().copied()).unwrap_or_default();
-	ui.add(kit::Meter::new(position(level.rms()), position(level.peak())));
+	(position(level.rms()), position(level.peak()))
 }
 
 /// The last few seconds, newest on the right, mirrored about the middle on a

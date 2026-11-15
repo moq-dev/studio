@@ -276,6 +276,9 @@ struct Window {
 	keyboard: hotkeys::Keyboard,
 	/// The window's own effects, on the setup screen and in the studio.
 	fx: fx::Fx,
+	/// Whether the studio's title bar is the window's frame, rather than the
+	/// desktop's, which guided setup keeps.
+	framed: bool,
 }
 
 impl eframe::App for Window {
@@ -311,7 +314,13 @@ impl Window {
 			App::Starting(engine) => engine.clone(),
 		};
 		let _ = self.started.set(engine.clone());
-		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
+		// After setup, the desktop's frame goes. macOS cannot draw under its
+		// title bar once the window is open, so it keeps it until a restart.
+		if !self.framed && !cfg!(target_os = "macos") {
+			ui.ctx().send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+			self.framed = true;
+		}
+		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone(), self.framed);
 		studio.load(hotkeys::Window {
 			frame,
 			ctx: ui.ctx(),
@@ -409,14 +418,29 @@ fn run(
 	runtime: tokio::runtime::Handle,
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
 ) -> anyhow::Result<()> {
+	// The studio's title bar is the window's: the desktop draws no frame, and
+	// macOS draws its buttons over the studio's bar. Guided setup keeps the
+	// desktop's until it starts the studio.
+	let framed = matches!(app, App::Starting(_));
+	let mut viewport = egui::ViewportBuilder::default()
+		.with_title("kixel.live Studio")
+		// The Wayland app id and X11 class, which the desktop finds the
+		// app's entry and icon by: the entry's file name, without `.desktop`.
+		.with_app_id("live.kixel.studio")
+		.with_icon(icon())
+		.with_inner_size([1440.0, 900.0])
+		.with_min_inner_size(ui::MIN_SIZE);
+	if framed {
+		viewport = match cfg!(target_os = "macos") {
+			true => viewport
+				.with_fullsize_content_view(true)
+				.with_titlebar_shown(false)
+				.with_title_shown(false),
+			false => viewport.with_decorations(false),
+		};
+	}
 	let options = eframe::NativeOptions {
-		viewport: egui::ViewportBuilder::default()
-			.with_title("kixel.live Studio")
-			// The Wayland app id and X11 class, which the desktop finds the
-			// app's entry and icon by: the entry's file name, without `.desktop`.
-			.with_app_id("live.kixel.studio")
-			.with_icon(icon())
-			.with_inner_size([1440.0, 900.0]),
+		viewport,
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
 			// The window draws on the device the compositor does, so preview and
 			// program reach the screen without leaving the GPU.
@@ -455,6 +479,7 @@ fn run(
 				started,
 				keyboard: window_keyboard,
 				fx,
+				framed,
 			}))
 		}),
 		&event_loop,

@@ -1,4 +1,4 @@
-//! What the operator does from a panel's button or a hotkey: switch scenes,
+//! What the operator does from a button or a hotkey: take a scene, panic,
 //! replay, save a clip, and record. Hotkeys fire from outside the window's
 //! frames, so a key pressed while a game has focus acts at once, even while
 //! the window is hidden and draws nothing.
@@ -15,11 +15,14 @@ use crate::replay;
 /// Something a hotkey can be bound to.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Action {
-	/// Put the preview on program at once.
+	/// Put the preview on program at once. Studio mode's TAKE
+	/// (quest/m0/ux/studio-mode.md); until then the preview is always the
+	/// scene on program, so it is not offered.
 	Cut,
-	/// Take the preview to program by the transition the Program panel sets.
+	/// Take the preview to program by the show's transition: Studio mode's
+	/// AUTO, not offered until then either.
 	Transition,
-	/// Put a scene, by name, in preview.
+	/// Take a scene, by name, on program by the show's transition.
 	Scene(String),
 	/// Play the recent past the Replay panel picks in its replay source.
 	Replay,
@@ -27,11 +30,18 @@ pub enum Action {
 	SaveClip,
 	/// Start recording, or stop the recording under way.
 	Record,
+	/// Cut to the safe scene and mute every microphone.
+	Panic,
 }
 
 impl Action {
 	/// The actions every scene file has, as the Hotkeys panel lists them.
-	pub const FIXED: [Self; 5] = [Self::Cut, Self::Transition, Self::Replay, Self::SaveClip, Self::Record];
+	pub const FIXED: [Self; 4] = [Self::Panic, Self::Replay, Self::SaveClip, Self::Record];
+
+	/// Whether a key can be bound to it: a fixed action, or a scene.
+	pub fn offered(&self) -> bool {
+		matches!(self, Self::Scene(_)) || Self::FIXED.contains(self)
+	}
 }
 
 impl std::fmt::Display for Action {
@@ -39,10 +49,11 @@ impl std::fmt::Display for Action {
 		match self {
 			Self::Cut => write!(f, "Cut"),
 			Self::Transition => write!(f, "Transition"),
-			Self::Scene(name) => write!(f, "Preview scene `{name}`"),
+			Self::Scene(name) => write!(f, "Take scene `{name}`"),
 			Self::Replay => write!(f, "Replay"),
 			Self::SaveClip => write!(f, "Save clip"),
 			Self::Record => write!(f, "Start or stop recording"),
+			Self::Panic => write!(f, "Panic"),
 		}
 	}
 }
@@ -107,7 +118,8 @@ impl Controls {
 				state.transition(transition, kio::clock::Instant::now())?;
 				Ok(format!("took {}", on_program(state.compositor.program_scene())))
 			}
-			Action::Scene(name) => preview(&mut self.engine.state.lock().unwrap(), name),
+			Action::Scene(name) => take(&mut self.engine.state.lock().unwrap(), name),
+			Action::Panic => self.engine.state.lock().unwrap().panic(),
 			Action::Replay => self.replay(true, false),
 			Action::SaveClip => self.replay(false, false),
 			Action::Record => {
@@ -222,15 +234,11 @@ impl Controls {
 	}
 }
 
-/// Put the scene called `name` in preview, under `state` locked by the
+/// Take the scene called `name` on program, under `state` locked by the
 /// caller, following any rename the window has yet to move its key through.
-pub fn preview(state: &mut State, name: &str) -> anyhow::Result<String> {
-	let scene = state
-		.follow(name)
-		.filter(|scene| state.collection().scene(scene).is_some())
-		.with_context(|| format!("no scene is called `{name}`"))?;
-	state.compositor.set_preview(Some(scene.clone()));
-	Ok(format!("previewing `{scene}`"))
+pub fn take(state: &mut State, name: &str) -> anyhow::Result<String> {
+	let scene = state.take(name, kio::clock::Instant::now())?;
+	Ok(format!("took `{scene}`"))
 }
 
 fn on_program(scene: Option<&str>) -> String {

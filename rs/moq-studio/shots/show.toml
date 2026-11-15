@@ -23,6 +23,10 @@ color = "#2563ebe6"
 kind = "broadcast"
 path = "room/guest"
 
+[sources.caller]
+kind = "broadcast"
+path = "room/caller"
+
 [[scenes]]
 name = "Main"
 items = [
@@ -41,7 +45,22 @@ items = [
 
 [[scenes]]
 name = "Break"
+safe = true # the scene the panic key cuts to
 items = [
     { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
     { source = "bar", rect = { x = 460, y = 480, width = 1000, height = 120 } },
 ]
+
+# A scene the program refuses, at a size of its own, whose pad says why.
+[[scenes]]
+name = "Vertical"
+size = { width = 1080, height = 1920 }
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1080, height = 1920 } },
+    { source = "host", rect = { x = 0, y = 656, width = 1080, height = 608 } },
+]
+
+[[audio_scenes]]
+name = "Program"
+program = true
+sounds = ["caller", "guest"]

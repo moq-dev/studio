@@ -323,6 +323,66 @@ impl State {
 		Ok(())
 	}
 
+	/// Take the scene called `scene` on program by the show's transition, as
+	/// its pad or hotkey does, following any rename the window has yet to move
+	/// a key through; the name it went on by. The scene on program stays as it
+	/// is. The preview follows, so the scene in preview is always the one
+	/// last taken.
+	///
+	/// Refused, changing nothing, unless the scene can go on program, as
+	/// [`Collection::takes`] says.
+	pub fn take(&mut self, scene: &str, now: Instant) -> anyhow::Result<String> {
+		let scene = self
+			.follow(scene)
+			.filter(|scene| self.collection.scene(scene).is_some())
+			.with_context(|| format!("no scene is called `{scene}`"))?;
+		if self.compositor.program_scene() == Some(scene.as_str()) {
+			return Ok(scene);
+		}
+		self.collection.takes(&scene)?;
+		let previewed = self.compositor.preview_scene().map(str::to_string);
+		self.compositor.set_preview(Some(scene.clone()));
+		let transition = self.collection.transition.clone();
+		if let Err(err) = self.transition(transition, now) {
+			self.compositor.set_preview(previewed);
+			return Err(err);
+		}
+		Ok(scene)
+	}
+
+	/// The panic key: mute every microphone, in one edit undo takes back, and
+	/// cut at once to the scene the show marks safe, if it marks one. Says
+	/// what it did, or fails saying what it did before it failed.
+	pub fn panic(&mut self) -> anyhow::Result<String> {
+		let mut done = Vec::new();
+		match mute_microphones(&self.collection)? {
+			Some((draft, muted)) => {
+				self.commit(draft, None)?;
+				done.push(match muted {
+					1 => "muted the microphone".to_string(),
+					muted => format!("muted {muted} microphones"),
+				});
+			}
+			None => done.push("no microphone was on".to_string()),
+		}
+		match self.collection.safe().map(str::to_string) {
+			None => done.push("no scene is marked safe to cut to".into()),
+			Some(safe) if self.compositor.program_scene() == Some(safe.as_str()) => {
+				done.push(format!("`{safe}` is on program"));
+			}
+			Some(safe) => {
+				let previewed = self.compositor.preview_scene().map(str::to_string);
+				self.compositor.set_preview(Some(safe.clone()));
+				if let Err(err) = self.cut() {
+					self.compositor.set_preview(previewed);
+					anyhow::bail!("{}, but cannot cut to `{safe}`: {err:#}", done.join(", "));
+				}
+				done.push(format!("cut to `{safe}`"));
+			}
+		}
+		Ok(done.join(", and "))
+	}
+
 	/// Restart the source called `name`, as an edit would, such as to reload a
 	/// web page.
 	pub fn restart(&mut self, name: &str) {
@@ -336,6 +396,27 @@ impl State {
 		self.stale = true;
 		self.edits.record();
 	}
+}
+
+/// The edit muting every microphone `collection` has that is not muted, and
+/// how many it mutes, or `None` when none is on.
+fn mute_microphones(collection: &Collection) -> Result<Option<(Draft, usize)>, moq_scene::Error> {
+	let on: Vec<&String> = collection
+		.sources
+		.iter()
+		.filter(|(_, source)| matches!(source, moq_scene::Source::Microphone { .. }))
+		.map(|(name, _)| name)
+		.filter(|name| !collection.audio.get(*name).is_some_and(|audio| audio.muted))
+		.collect();
+	if on.is_empty() {
+		return Ok(None);
+	}
+	let mut draft = collection.draft("Panic: mute every microphone");
+	for name in &on {
+		let audio = collection.audio.get(*name).cloned().unwrap_or_default();
+		draft.set_audio(name, Some(moq_scene::Audio { muted: true, ..audio }))?;
+	}
+	Ok(Some((draft, on.len())))
 }
 
 /// The sources the masks among `filters` read: a mask's picture shapes what
@@ -3490,6 +3571,103 @@ mod tests {
 
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+	}
+
+	/// A pad takes its scene by the show's transition, and takes nothing for
+	/// the scene already on program, one that cannot go there, or one that
+	/// is not there at all. The panic key then cuts at once to the safe scene,
+	/// even part way through the transition.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_pad_takes_and_the_panic_key_cuts_to_safety() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut loaded = red_canvas();
+		let collection = &mut loaded.collection;
+		collection.transition = moq_scene::Transition::Fade {
+			duration: Duration::from_secs(60),
+		};
+		let main = collection.scenes[0].name.clone();
+		let mut brb = moq_scene::Scene::new("BRB");
+		brb.safe = true;
+		let mut portrait = moq_scene::Scene::new("Portrait");
+		portrait.size = Some(moq_scene::Size {
+			width: 360,
+			height: 640,
+		});
+		collection
+			.scenes
+			.extend([moq_scene::Scene::new("Guest"), brb, portrait]);
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
+			.await
+			.expect("the studio starts");
+		{
+			let mut state = engine.state.lock().unwrap();
+			let now = kio::clock::now();
+			let takes = state.takes;
+			assert_eq!(state.take(&main, now).unwrap(), main, "already on program");
+			let refused = state.take("Portrait", now).unwrap_err();
+			assert!(format!("{refused:#}").contains("cannot go on program"), "{refused:#}");
+			assert!(state.take("Nobody", now).is_err());
+			assert_eq!(state.takes, takes, "none of them took anything");
+			assert_eq!(state.compositor.program_scene(), Some(main.as_str()));
+
+			assert_eq!(state.take("Guest", now).unwrap(), "Guest");
+			assert_eq!(state.compositor.program_scene(), Some("Guest"));
+			assert!(state.compositor.transitioning(), "by the show's fade");
+			assert_eq!(state.takes, takes + 1);
+
+			let said = state.panic().unwrap();
+			assert_eq!(said, "no microphone was on, and cut to `BRB`");
+			assert_eq!(state.compositor.program_scene(), Some("BRB"));
+			assert!(!state.compositor.transitioning(), "a cut, at once");
+			assert_eq!(state.takes, takes + 2);
+			let said = state.panic().unwrap();
+			assert_eq!(said, "no microphone was on, and `BRB` is on program");
+			assert_eq!(state.takes, takes + 2);
+		}
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+	}
+
+	/// The panic key's edit mutes each microphone that is on, keeping the
+	/// rest of its settings, and no other source. With every one muted, there
+	/// is nothing left to edit.
+	#[test]
+	fn the_panic_key_mutes_every_microphone() {
+		let mut collection = Collection::new();
+		let mic = |id: Option<&str>| moq_scene::Source::Microphone {
+			id: id.map(str::to_string),
+		};
+		collection.sources.insert("desk".into(), mic(None));
+		collection.sources.insert("lav".into(), mic(Some("usb")));
+		collection.sources.insert("spare".into(), mic(Some("spare")));
+		collection
+			.sources
+			.insert("music".into(), moq_scene::Source::SystemAudio);
+		let quiet = moq_scene::Audio {
+			gain: 0.5,
+			..Default::default()
+		};
+		collection.audio.insert("lav".into(), quiet);
+		let muted = moq_scene::Audio {
+			muted: true,
+			..Default::default()
+		};
+		collection.audio.insert("spare".into(), muted);
+
+		let (draft, muted) = mute_microphones(&collection).unwrap().expect("two microphones are on");
+		assert_eq!(muted, 2);
+		let edit = draft.finish().unwrap();
+		assert_eq!(edit.label, "Panic: mute every microphone");
+		collection.apply(&edit).unwrap();
+		for name in ["desk", "lav", "spare"] {
+			assert!(collection.audio[name].muted, "{name}");
+		}
+		assert_eq!(collection.audio["lav"].gain, 0.5, "kept");
+		assert!(!collection.audio.get("music").is_some_and(|audio| audio.muted));
+		assert!(mute_microphones(&collection).unwrap().is_none());
 	}
 
 	/// A rendition a resize retired while its encoder was still opening must

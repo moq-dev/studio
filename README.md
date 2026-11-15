@@ -96,7 +96,7 @@ The scene has the first display filling the canvas, the first camera in the
 bottom-right corner over it (or filling the canvas alone), and the first audio
 input. Swap any of them for another device or leave it out. The canvas is the
 largest one whose encoder keeps up and whose video and audio fit in two thirds
-of the measured uplink, the most the Health panel grades healthy. Without a
+of the measured uplink, the most the [Health](#health) window grades healthy. Without a
 measurement, it is the default 1080p at 30 fps. If no encoder keeps up, it is
 the canvas closest to keeping up.
 
@@ -106,48 +106,116 @@ empty scene** both create the scene file at once, the second with the chosen
 canvas and no sources. The proposed scene is the first edit in the history, so
 undoing it leaves that empty scene.
 
-Setup writes an ordinary scene file. Change its sources and scenes in their
-panels, and its canvas in the Output panel. The Health panel shows how the
-uplink holds up once you are live.
+Setup writes an ordinary scene file. Change its sources and scenes on the
+BUILD page, and its canvas in Settings. The health dot shows how the uplink
+holds up once you are live.
 
-## Panels
+Setup sits in the desktop's own window frame, and the studio then draws its
+own (see [The window](#the-window)). On macOS the system's title bar stays
+until the next launch.
 
-Every panel is a tab you can drag, split, or stack. Blue, the studio's accent,
-means on air (and marks what is picked or switched on), amber anything cued,
-off air, muted, or degraded, and red an error, such as a failure or a
-clipping meter. An icon-only button
-names itself, and its key, under the pointer.
+## The window
+
+The studio opens to its **LIVE** page: the program in a blue tally frame, as
+large as the window allows. The title bar and the strip along the bottom stay
+on every page, so the scenes, the sound, and the panic key never leave the
+window while you are on air.
+
+Blue, the studio's accent, means on air (and marks what is picked or switched
+on), amber anything cued, off air, muted, or degraded, and red an error, such
+as a failure or a clipping meter. An icon-only button names itself, and its
+key, under the pointer.
+
+The **title bar** is the window's own: drag it to move the window,
+double-click it to maximize, and drag the window's edges to resize it. On
+macOS the system's buttons and edges stay. It holds, from the left:
+
+- The show's name. Its menu has the scene file's path, **Reload the scene
+  file**, **Copy the selected item**, and **Paste**.
+- Undo and redo, each naming under the pointer the edit it would step.
+- The pages: **LIVE**, **BUILD**, **MIX**, and **REVIEW**.
+- The health dot, the stream's worst grade at a glance. Click it for each
+  relay, who is watching, the encoder, and each problem, and **Details** for
+  the [Health](#health) window. It reads **Not live** without `--connect`.
+- Record, which starts or stops a [recording](#recording) with REVIEW's
+  picks. Its dot pulses while recording, and says for how long under the
+  pointer.
+- The live control: **LIVE** and how long the studio has been live, with
+  `--connect`, or **NOT LIVE** without it. The studio goes live at launch,
+  so it starts and ends nothing yet.
+- The gear, which opens [Settings](#settings).
+- Minimize, maximize, and close, except on macOS.
+
+The **strip** holds:
+
+- A **pad** for each scene, its picture redrawn a few times a second, with its
+  name, its hotkey, and an ON AIR tag on the scene on program. Click a pad to
+  take its scene on air by the show's transition (see
+  [Transitions](#transitions)); taking the scene already on air does nothing.
+  A scene that cannot go on air, of another size or showing the program, has
+  a dimmed pad that says why under the pointer. Right-click a pad to take its
+  scene, mark it the safe scene, rename it, or remove it. The last pad, **+**,
+  adds an empty scene without taking it.
+- The **panic key**, amber and named for the safe scene: it mutes every
+  microphone, in one edit undo takes back, and cuts at once to the scene
+  marked safe, if one is. Mark one from its pad's menu, the Scenes panel, or
+  the scene graph. The scissors beside it save a replay clip (see
+  [Replay](#replay)).
+- A row for each sound the stream carries, with its meter and mute, and the
+  **STREAM** meter of the audio scene on program, with **Listen** (the
+  headphones) to hear it (see [Audio scenes](#audio-scenes)).
+
+| Page | Use it to |
+| --- | --- |
+| LIVE | Watch the program while on air. |
+| BUILD | Edit the scene on program, shown in the middle, with the panels below beside it: Layers, Scenes, Sources, Devices, and Guests on the left, and Filters and Keyframes on the right, or all on the left in a narrow window. |
+| MIX | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, pan, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. The program shows small in the strip's place for the sound. |
+| REVIEW | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip (see [Replay](#replay)), and start and stop recording and pick the picture and the audio scene it records (see [Recording](#recording)), beside the program. |
+
+BUILD's panels:
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing, at its own size, and the one that is live, and drag items in the preview to place them. The program is framed in blue; the preview blue while it shows the scene on program and amber, NEXT, while it shows another. A preview no tab shows is not drawn. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
-| Scenes | See each scene live on its pad, redrawn a few times a second while it is on screen, with its hotkey and an ON AIR or NEXT tag. Click a pad to pick the scene in preview, and add, rename (double-click), reorder, remove, or switch on **Publish** for one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
-| History | See every edit, and undo or redo back to any of them. |
-| Items | Place, show or hide (the eye), and order what the preview scene or the top layer draws, back to front. Drag a position or size field sideways to change it, or click it to type. The top layer is edited over a scene of the program's size. Select an item to filter or copy it. |
+| Layers | Place, show or hide (the eye), and order what the scene on program or the top layer draws, back to front. Drag a position or size field sideways to change it, or click it to type. Select an item to filter or copy it. |
+| Scenes | Pick the show's transition and how long it takes, or for a stinger its media source and cut point (see [Transitions](#transitions)). Add, rename (double-click), reorder, and remove scenes, mark one **Safe**, and switch on **Publish** for one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
 | Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU, saying why on hover), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code in a sheet over the window, see who joined, and take a guest out of every scene. |
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
-| Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the preview scene's keyframes again. |
-| Audio | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, pan, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. |
-| Graph | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
-| Output | Start and stop recording, pick the picture and the audio scene it records, set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
-| Health | See how the stream reaches viewers, relay by relay and, for the program and each published scene, track by track, and the cause of each problem, and which recordings a crash left unfinished were repaired at launch. |
-| Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
-| Hotkeys | Bind keys to cut, transition, preview a scene, replay, save a clip, and start or stop recording, and clear them (see [Hotkeys](#hotkeys)). |
+| Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the scene on program's keyframes again. |
 
-While recording, a blue dot in the Program panel says so. The pill at the right
-of the menu bar is the stream's health at a glance; click it for each relay
-and problem.
+Over the picture, **Interact** passes the mouse to the browser source under it
+instead, and the keyboard to the one last clicked; **Snap** and **Grid** set
+how a drag lines items up (see [Keyframes](#keyframes)). BUILD edits the scene
+on air as viewers see it: every change is live at once.
 
 A new source, from the Sources or Devices panel, is placed over whatever the
-Items panel shows. The **top layer** is drawn over program, and over the
-preview of a scene of the program's size, and stays on through a cut or
-transition: a downstream keyer for a logo or a lower third.
+Layers panel shows. The **top layer** is drawn over program and stays on
+through a cut or transition: a downstream keyer for a logo or a lower third.
+
+The layout follows the program's shape and the window's size, giving the
+picture the most room it can. A landscape program sits above the strip; a
+portrait one moves the pages to a sidebar on the left and the scenes and sound
+to columns beside the picture; and a narrow window stacks the scenes, the
+panic key, and the sound under the picture. The window is at least 640x600.
+
+A message about what the last action did shows over the bottom of the page
+for a few seconds, an error a little longer. A conflict with an outside edit
+to the scene file, or a failed save, shows over its top until it is settled.
+
+### Settings
+
+| Tab | Use it to |
+| --- | --- |
+| Show | Set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
+| Hotkeys | Bind keys to the panic key, replay, save a clip, start or stop recording, and take each scene, and clear them (see [Hotkeys](#hotkeys)). |
+| Effects | Pick how the window's [effects](#effects) move. |
+| Graph | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
+| History | See every edit, and undo or redo back to any of them. |
 
 ### Scene graph
 
-The Graph panel, beside Preview, shows the collection as nodes: each source
+The Graph tab, in Settings, shows the collection as nodes: each source
 with a picture or sound, each scene and the top layer, and each audio scene.
 A wire runs from each source to every scene or layer placing it, and from
 each sound and audio scene to every audio scene holding it; one into a scene
@@ -160,18 +228,17 @@ sound or audio scene is sent into the audio scene. Click a wire, then
 **Remove**, to take every item of that source out of the scene, or stop the
 send. Each sound's node has its strip's mute, gain, pan, and delay and a waveform
 of its last few seconds, each audio scene's node **On program**, **Listen**,
-and the waveform of its mix, and each scene's node **Publish** and the audio
-scene it carries. Clicking a scene previews it, and clicking a source picks
+and the waveform of its mix, and each scene's node **Safe**, **Publish**, and the audio
+scene it carries. Clicking a scene takes it on air, and clicking a source picks
 it for Filters. Every edit lands in History, as from the other panels.
 
 ### Published scenes
 
-Every scene has a size, the program's unless the Output panel's **Scene
-sizes** gives it its own, such as 1080x1920 for a portrait scene beside a
+Every scene has a size, the program's unless **Scene sizes**, in Settings'
+Show tab, gives it its own, such as 1080x1920 for a portrait scene beside a
 1920x1080 program. Every scene is drawn at the program's frame rate. Only a
-scene of the program's size goes on program: **Cut** and **Transition**
-refuse another, and an edit resizing the scene on air is refused. The preview
-shows a scene at its own size.
+scene of the program's size goes on program: its pad refuses another, saying
+why, and an edit resizing the scene on air is refused.
 
 Tick **Publish** on a scene in the Scenes panel to put it live as a broadcast
 of its own beneath the program's, at `<--broadcast>/<scene name>`, at its own
@@ -215,7 +282,7 @@ set to restart starts over when the scene showing it goes on program.
 A scene cannot draw itself, even through other scenes, so an edit that would
 is refused. A scene showing the program cannot go on program, nor can the top
 layer show it, since either would draw the program into itself:
-**Cut** and **Transition** refuse such a scene, and an edit making the scene on
+its pad refuses such a scene, and an edit making the scene on
 air show the program is refused. Renaming a scene renames what its scene
 sources draw, and removing one removes them, with the items showing them.
 
@@ -230,8 +297,8 @@ sources draw, and removing one removes them, with the items showing them.
 | Stinger | A media source's clip plays over the program from its start, and the program switches scenes under it at the cut point, the time into the clip when it covers the canvas. It lasts as long as the clip. |
 
 A slide, wipe, or move eases in and out. A transition is drawn on the program
-clock, so the stream and a recording show the same frames of it, and a second
-**Transition** while one runs starts from the scene it was heading to. A
+clock, so the stream and a recording show the same frames of it, and taking
+another scene while one runs starts from the scene it was heading to. A
 transition set to 0 ms is a cut.
 
 A stinger's clip fills the canvas, cropped evenly to the canvas's shape rather
@@ -240,13 +307,13 @@ alpha channel can be keyed. The cut point counts from the clip's first picture
 or sound, however long the file takes to start decoding. Its sound joins the
 mixes as its source's does. Its source waits blank and silent for the first
 stinger rather than playing once when it opens, and rests ended between
-stingers, which the Health panel does not count unless a scene on air places
+stingers, which the Health window does not count unless a scene on air places
 it. A clip played to its end holds its last picture, as any media file does,
 and a looping one stops, blank and silent, after one pass. A
 clip that cannot play, or that is played again from the Sources panel or
 reloaded while a stinger plays it, cuts at once; one stopped there ends the
-stinger at once. A **Cut**, or another kind of transition, while a stinger
-runs stops its clip, sound included; another stinger plays the clip again from
+stinger at once. A cut, such as the panic key's, or another kind of
+transition, while a stinger runs stops its clip, sound included; another stinger plays the clip again from
 its start.
 
 ### Keyframes
@@ -262,17 +329,16 @@ a LUT or a mask.
 
 Keyframes play once, from when the item's scene goes on program, and hold the
 last keyframe; before the first, the item holds the first. A cut or transition
-starts them again, even to the scene already on program, while a scene leaving
-in a transition carries on with its own. The preview plays them from when the
-scene went into preview; pick the scene again, or press **Play**, to watch them
-again. They are drawn on the program clock, so the stream, a recording, and a
-replay of the program show the same frames. Top-layer items have none, since
+starts them again, while a scene leaving in a transition carries on with its
+own. Press **Play** in the Keyframes panel to play the scene on program's again
+from now. They are drawn on the program clock, so the stream, a recording, and
+a replay of the program show the same frames. Top-layer items have none, since
 the top layer never goes on.
 
-Dragging an item in the preview grabs it where its keyframes have it and moves
+Dragging an item on BUILD grabs it where its keyframes have it and moves
 where it rests, so its whole animation moves with it.
 
-In the preview, click an item of whatever the Items panel shows to select it,
+On BUILD, click an item of whatever the Layers panel shows to select it,
 drag it to move it, and drag its edges or corners to resize it. A drag snaps
 edges and centers to the canvas's edges and center, to the other items shown,
 and to the grid while **Grid** is on, drawing a guide through what it lines up
@@ -280,7 +346,7 @@ with. A moved item also snaps to the spacing of its neighbors, marking the
 equal spaces. Hold Ctrl (Cmd on macOS) to drag without snapping, or turn
 **Snap** off. Resizing a camera, display, window, image, media file, broadcast,
 or replay keeps its shape, and resizing anything else does not; hold Shift to
-flip that. Click the preview, then the arrow keys nudge the selected item a
+flip that. Click the picture, then the arrow keys nudge the selected item a
 pixel, or ten with Shift held, and a held key undoes as one step. The snap and
 grid settings are kept per user, with the [hotkeys](#hotkeys), not in the scene
 file.
@@ -291,11 +357,11 @@ capture with filters of its own, so a camera can be shown faded in one scene
 and plain in another while being opened once. An item's own filters apply
 after its source's.
 
-**Edit > Undo** (Ctrl+Z) and **Redo** (Ctrl+Shift+Z or Ctrl+Y) step through the
-history, and a drag undoes as one step; on macOS each shortcut uses Cmd in
-place of Ctrl. **Copy** (Ctrl+C) takes the selected
+Undo (Ctrl+Z) and redo (Ctrl+Shift+Z or Ctrl+Y), in the title bar, step
+through the history, and a drag undoes as one step; on macOS each shortcut
+uses Cmd in place of Ctrl. **Copy** (Ctrl+C) takes the selected
 item with the source it shows; **Paste** (Ctrl+V) adds it over whatever the
-Items panel shows, in this studio or another. Pasted where the same source
+Layers panel shows, in this studio or another. Pasted where the same source
 exists under the same name, the item is linked to it; otherwise the source
 comes along, renamed if its name is taken. Copied filters paste onto the
 selected source or item, after its own. The clipboard holds text in the scene
@@ -335,14 +401,14 @@ once, and an audio scene never holds itself, even through others. Add,
 rename, reorder, and remove audio scenes in the Scenes panel, where they are
 tagged `audio` and listed after the scenes.
 
-The Audio panel is a mixer. Each sound has a strip, with its gain, pan, mute,
+The MIX page is a mixer. Each sound has a strip, with its gain, pan, mute,
 delay, and meter, which apply in every audio scene holding it, and a send to
 each audio scene; each audio scene has a strip with its meter and a send to
 each other audio scene. A source added from the Sources or Devices panel, or
 pasted, is sent to the audio scene on program, so it is heard at once.
 **On program** picks the audio scene the broadcast carries, and switching
 it, or editing an audio scene, never drops or repeats audio. A recording holds
-the audio scene on program unless the Output panel picks another, such as one
+the audio scene on program unless REVIEW picks another, such as one
 keeping music the stream leaves out, and each published scene carries the one
 on program unless the Scenes panel picks another beside its **Publish** box;
 switching either while it runs never drops or repeats audio either. The audio
@@ -350,7 +416,7 @@ scene on program cannot be removed; removing one a recording or published
 scene picks returns it to the one on program.
 
 **Listen** plays an audio scene to an audio output, from the `capture`
-feature's build: the system default, or the one picked under **Listen on**,
+feature's build, as the strip's **Listen** plays the audio scene on program: the system default, or the one picked under **Listen on**,
 which the studio remembers for you rather than in the scene file. Use
 headphones: a microphone that hears the speakers feeds its audio scene back
 into itself.
@@ -436,12 +502,10 @@ element, attribute, rule, property, or asset it refused:
 An overlay's animation starts when the overlay does: when the studio opens
 it, and again whenever it is edited. It also starts over each time a scene
 showing it goes on program, as an item's keyframes do, so a lower third plays
-its entrance at every cut, and when a scene showing it goes into preview while
-program does not show it, so the preview shows the entrance too. Preview and
-program share its timeline, so a preview never restarts one program shows.
+its entrance at every cut.
 Set `restart = false` (**Restart on program**, off, in the add form) for one
-that runs on across cuts, such as a clock or a ticker. One that no preview or
-program shows costs nothing until it is shown again, where its animation has
+that runs on across cuts, such as a clock or a ticker. One that program does
+not show costs nothing until it is shown again, where its animation has
 carried on unless it restarts.
 Overlays publish no track of their own, so viewers see them only in the
 program.
@@ -485,7 +549,7 @@ tracks](#source-tracks)), its pictures on one timeline across plays. Each is
 used apart, as a camera's and a microphone's are: the pictures while a scene on
 air shows it, the sound while the audio scene on program plays it, and either while
 read. So a music bed that no scene shows encodes its sound alone. A file with
-no sound has no strip in the Audio panel.
+no sound has no strip on the MIX page.
 
 ## Guests
 
@@ -553,7 +617,7 @@ Treat the link like a password: anyone holding it can join as that guest
 before it expires, and is then renewed for as long as they stay, until you
 remove them. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, in no scene or audio scene: place
-them from the Items panel and send them to the audio scene on program in Audio
+them from the Layers panel and send them to the audio scene on program on MIX
 to put them on air. That includes a
 guest invited before a restart whose link still works. A guest's source is
 saved to the scene file but is not your edit: it stays out of History, so undo
@@ -735,7 +799,7 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
 `overlay` (its `html`, a `width` and `height` up to 4096, and whether it `restart`s, true by default), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
 file, which no item places, but which grades what a `lut` filter names it in),
-`replay`, where the Replay panel plays replays, `scene` (with the `scene` it
+`replay`, where REVIEW plays replays, `scene` (with the `scene` it
 draws), and `program` (see [Scene sources](#scene-sources)). The Devices panel fills in
 ids. `[[top]]` items make up the top layer.
 
@@ -743,7 +807,8 @@ A scene's `size` gives it a `width` and `height` of its own; without one it is
 the program's. `published = true` puts it live as its own broadcast (see
 [Published scenes](#published-scenes)), so its name is one path segment, and
 `recorded = true` has recordings hold it rather than the program, on one scene
-at most.
+at most. `safe = true` marks the scene the panic key cuts to, on one scene at
+most, which must be able to go on program.
 
 A scene's `audio` names the audio scene it carries while published, the
 one on program without it.
@@ -754,7 +819,7 @@ audio `scenes` it holds. Exactly one is on `program = true`, and
 `recorded = true` has recordings hold one rather than the one on program.
 Without `[[audio_scenes]]`, the collection has one audio scene, `Program`, on
 program and holding nothing. `[audio.<source>]` sets a source's linear `gain`,
-`muted`, `pan` (`-1.0` hard left to `1.0` hard right, centered by
+`muted` (which the strip's mute and the panic key set), `pan` (`-1.0` hard left to `1.0` hard right, centered by
 default), and `delay`, in every audio scene holding it.
 
 `published = ["camera", "mic"]`, a top-level key, names the sources
@@ -806,13 +871,13 @@ second are written five seconds after the first, so a crash loses at most the
 last five seconds of edits. Each write replaces the whole file at once, never
 leaving half of it, and a collection that has not changed is not rewritten, so
 a hand-written file keeps its comments and layout until the next edit in the
-studio. A failed write shows in the status bar and
+studio. A failed write shows over the page and
 is retried every second; until one succeeds, a crash loses every edit since the
 last write.
 
 The file can be edited by hand, or by another studio, while the studio runs.
 The studio looks at it every second and before each write. With no edits of
-its own unsaved, it reloads the change, as **File > Reload** does, which
+its own unsaved, it reloads the change, as **Reload the scene file** does, which
 replaces even unsaved edits. If both sides changed, or the change cannot be
 loaded, the studio saves nothing until you pick **Keep the studio's**, which
 writes its version over the file, or **Take the file's**; quitting before you
@@ -825,7 +890,7 @@ The last 100 edits are written the same way beside the scene file, as
 scene file restores them, so undo reaches back past a restart. An undo or redo
 is saved like any other edit. An edit that no longer matches the scene file,
 such as after editing it by hand, is dropped with every older one, and the
-status bar says how many. A history file that cannot be read stops the
+studio says how many as it opens. A history file that cannot be read stops the
 studio, naming the file; delete it to start a new history. The history holds
 whatever the scene file held, including removed sources, so check it too
 before sharing.
@@ -850,7 +915,7 @@ disabled and viewers move to the half size until the uplink recovers. A viewer
 joining a track whose newest group has grown heavy asks for a keyframe, and
 the encoder cuts one, so later viewers start near it.
 
-A new canvas size or frame rate, from the Output panel, an undo, or a reload,
+A new canvas size or frame rate, from Settings, an undo, or a reload,
 takes effect live. A track never changes what it carries, so the old
 renditions' tracks end and new ones are listed in their place in a catalog
 update, on the same timeline, and viewers switch to them; the video pauses
@@ -869,7 +934,7 @@ the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
 takes each frame there when it can read the GPU the studio draws on. When it
 cannot, such as NVENC while the studio draws on a laptop's integrated GPU, the
 studio passes over it for an encoder that reads each frame back to the CPU
-(the opt-in `vaapi` or `openh264` features), which the Output panel counts.
+(the opt-in `vaapi` or `openh264` features), which Settings' Show tab counts.
 Frames the encoder cannot keep up with are dropped rather than delaying the
 stream.
 
@@ -906,7 +971,7 @@ half that for mono, and holds no encode session.
 
 Every encoder holds an encode session, and consumer GPUs allow only a few
 hardware sessions at once: 8 on a GeForce card, while a base Apple M4 has one
-encode engine for them all. The Output panel counts the sessions open:
+encode engine for them all. Settings' Show tab counts the sessions open:
 
 | Encoder | Sessions |
 |---|---|
@@ -927,7 +992,7 @@ drawing in the studio's own scenes. The program opens its session before any
 source, even with `--on-demand`, so the sources past the cap fail rather than
 the program; so does each scene published in the scene file at startup. A
 scene published later, past the cap, publishes without video and says why in
-the Output panel. When the program encodes in software, a source takes hardware
+Settings' Show tab. When the program encodes in software, a source takes hardware
 where it can and software otherwise.
 
 ### Published independently
@@ -942,9 +1007,8 @@ themselves, as the [layer layout](#layer-layout) says.
 
 The program leaves a published source out, wherever it or a clone of it is
 placed, and so does every audio scene's mix. The studio draws it only as
-viewers will: over the program, in the Program panel and the program's
-virtual camera, and over the scene in preview, so both show what viewers
-see. It goes over every other item of its scene, and over the top layer,
+viewers will: over the program, on every page and in the program's
+virtual camera, so both show what viewers see. It goes over every other item of its scene, and over the top layer,
 however the scene stacks it. Recordings hold the program as published,
 without it, and recording **each source too** gives a published camera,
 display, window, or microphone a file of its own. Published and recorded
@@ -1031,7 +1095,7 @@ once `moq play` plays layers.
 
 ### Recording
 
-**Start recording** in the Output panel saves the program at the canvas size,
+**Start recording** on REVIEW, or record in the title bar, saves the program at the canvas size,
 or the scene picked beside it at its own size,
 to `<scene file name> <UTC start time>.mp4` in the `--recordings` directory,
 live or not. The recording has an encoder of its own, opened only while it
@@ -1061,7 +1125,7 @@ program and local sources are read from the studio's own broadcasts, never what
 the relay serves, so a recording starts and stops without touching the live
 stream. The audio scene it holds is
 encoded a second time for it while recording: the one on program, so the file
-holds what viewers hear, or the one the Output panel picks, which viewers never
+holds what viewers hear, or the one REVIEW picks, which viewers never
 can. Without `--connect`, only the
 recording's encoder encodes the program.
 
@@ -1078,7 +1142,7 @@ beside it, numbered if a file already has that name, a regular MP4 of
 everything the file holds up to its last complete fragment, leaves the
 original untouched, and removes the marker, so the file is repaired
 only once. The repair runs in the background and appears at the top of the
-Health panel and in the log. A file another studio is still recording into the
+Health window and in the log. A file another studio is still recording into the
 same directory is left alone.
 
 ### Source frames
@@ -1099,18 +1163,19 @@ a WebGL page runs slower.
 
 ## Hotkeys
 
-The Hotkeys panel binds a key to **Cut**, **Transition**, **Replay**, **Save
-clip**, starting or stopping a recording, and putting each scene in preview.
-Press **Bind**, then the key with any modifiers; Escape, or leaving the window
-or the panel, cancels. Every action starts unbound, so no key a game uses is
-taken unasked, and a key bound to one action is refused for another until it is
-cleared there. Replay and Save clip use the Replay panel's picks, and a
-recording the Output panel's.
+The Hotkeys tab in Settings binds a key to the **Panic** key, **Replay**,
+**Save clip**, starting or stopping a recording, and taking each scene, as its
+pad does. Press **Bind**, then the key with any modifiers; Escape, or leaving
+the window or the tab, cancels. Every action starts unbound, so no key a game
+uses is taken unasked, and a key bound to one action is refused for another
+until it is cleared there. Replay, Save clip, and a recording use REVIEW's
+picks. A key bound to **Cut** or **Transition**, which have no preview to act
+on, is kept in the settings but neither shown nor fired.
 
 The key pressed is the key that fires, wherever it sits, on any keyboard layout
-and after a layout change: the panel names it as the layout printed it when it
+and after a layout change: the tab names it as the layout printed it when it
 was bound. Keypad keys bind apart from the keys above the letters, so keypad 1
-and 1 can do different things; the panel calls them **Keypad 1** and **1**.
+and 1 can do different things; the tab calls them **Keypad 1** and **1**.
 
 Bound keys fire even while another app, such as a game in full screen, has
 focus, and the app does not see them, so bind keys you do not type or play
@@ -1128,9 +1193,9 @@ with, such as a function key, a keypad key, or one with modifiers:
 - **Linux on Wayland**, where no app hears keys meant for another, asks the
   desktop through its GlobalShortcuts portal (KDE Plasma, and GNOME 48 and
   later). The desktop shows its own dialog, may bind other keys than those
-  asked, and lists them in its shortcut settings; the panel shows what it
+  asked, and lists them in its shortcut settings; the tab shows what it
   bound. Without the portal, or if the dialog is declined, bound keys work only
-  while the studio has focus, and the panel says so.
+  while the studio has focus, and the tab says so.
 
 The bindings, the snap and grid settings, the [effects](#effects) setting, and
 the output **Listen** plays on are kept per user in the app's settings, `~/Library/Application
@@ -1145,17 +1210,16 @@ the studio.
 The window draws effects of its own, which never reach the program, a
 published scene, or a recording:
 
-- The Program monitor glows blue while the studio is connected to a relay,
-  the recording dot pulses, and each cut or transition, from its button or a
-  hotkey, bursts on the monitor.
-- The **Cut** button is polished metal that ripples under the pointer, the
-  Hotkeys panel shows each bound key on a dark plastic keycap, each panel but
-  the two monitors has a faint grain, and first launch draws its screen over a
-  soft gradient.
-- The Health panel and its tab pulse amber while the worst problem is
-  degraded, and flicker red with electricity while it is unhealthy.
+- The program's tally frame glows blue while the studio is connected to a
+  relay, the record dot pulses, and each cut or transition, from a pad, the
+  panic key, or a hotkey, bursts on the frame.
+- The Hotkeys tab shows each bound key on a dark plastic keycap, the title
+  bar, the strip, and BUILD's panels have a faint grain, and first launch
+  draws its screen over a soft gradient.
+- The health dot pulses amber while the worst problem is degraded, and
+  flickers red with electricity while it is unhealthy.
 
-**View > Effects** sets how they move: **Full**, **Reduced**, which holds each
+The Effects tab in Settings sets how they move: **Full**, **Reduced**, which holds each
 on one still pose, or **Off**. Until you pick one it follows the system's
 reduced-motion setting: Reduce motion on macOS, animation effects on Windows,
 and on Linux the desktop's, through its Settings portal.
@@ -1163,11 +1227,11 @@ and on Linux the desktop's, through its Settings portal.
 ## Replay
 
 Add a `replay` source and place it like any other, such as full screen in a
-scene of its own. In the Replay panel, pick the program or a source, a length
+scene of its own. On REVIEW, pick the program or a source, a length
 up to 30 seconds, and a speed of 100%, 50%, or 25%, then **Replay** plays that
 many seconds up to the click in the replay source, which is transparent before
-and after. **Cut** to its scene to put it on program. Sound replays only at
-100%, through the replay source's strip in the Audio panel, so a replay of a
+and after. Take its scene to put it on program. Sound replays only at
+100%, through the replay source's strip on MIX, so a replay of a
 microphone or system audio, which has only sound, plays only at 100%. A new
 replay cuts
 off the one playing, and a stretch the source was offline or paused replays
@@ -1180,8 +1244,8 @@ seconds, up to one keyframe interval earlier. It shows nothing after them, so
 video with B-frames can end early: the pictures shown before the end that refer
 to one shown after it are left out, along with everything decoded after that
 one. That is usually a fraction of a second, but it can reach back as far as
-the keyframe for a slow or deeply reordered source. The panel says where once
-it is written, shortly after the click.
+the keyframe for a slow or deeply reordered source. The studio says where
+once it is written, shortly after the click.
 
 Nothing records in the background for this. The program's tracks keep their
 last 30 seconds for late viewers anyway, and each source's track while it is on
@@ -1193,14 +1257,14 @@ no past from before someone watched it, and a source has none from before it
 was last on program or recorded; a replay of nothing is refused, saying why. A
 broadcast source replays from what the studio received of it, and only over a
 relay connection whose protocol version can address a track by time; an older
-one refuses with the reason in the panel. An image, a color, or a web page has
+one refuses with the reason on REVIEW. An image, a color, or a web page has
 no past to replay: a page publishes no track of its own, so replay the program
 to show it. A replay source on program encodes each replay as its own track
 while it plays, like a camera.
 
 ## Health
 
-The Health panel grades the stream every second on the thresholds moq's
+The Health window, from the health dot's **Details**, grades the stream every second on the thresholds moq's
 `hang::health` shares with the rest of the stack, and lists each problem
 with its cause in plain words: a relay is unreachable, the uplink is
 congested or losing packets, the relay is far away, the encoder is behind or
@@ -1253,11 +1317,11 @@ Each catalog asks viewers to report beneath its broadcast, under
 
 ## Virtual camera
 
-The **Virtual camera** toggle in the Output panel shows the program as a
+The **Virtual camera** toggle in Settings' Show tab shows the program as a
 camera that video-call and conferencing apps can pick, at the canvas size and
 frame rate, with each [published source](#published-independently) drawn
 over it as viewers see it. Each published scene has a toggle of its own beneath it in the
-panel, showing that scene at its own size as a camera of its own, so an app
+tab, showing that scene at its own size as a camera of its own, so an app
 can pick the program or any published scene. A camera stays on until you
 turn it off or quit; it is not saved in the scene file. A scene's camera
 turns off when you stop publishing or rename the scene. A picture is copied

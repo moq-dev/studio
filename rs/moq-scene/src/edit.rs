@@ -834,6 +834,26 @@ impl Draft {
 		Ok(())
 	}
 
+	/// Have the panic key cut to the scene called `scene`, or to none with
+	/// `None`, rather than the one it cuts to now.
+	pub fn set_safe(&mut self, scene: Option<&str>) -> Result<(), Error> {
+		if let Some(scene) = scene
+			&& self.collection.scene(scene).is_none()
+		{
+			return Err(conflict(format!("there is no scene `{scene}`")));
+		}
+		let scenes = self.collection.scenes.iter().enumerate();
+		let changed: Vec<(usize, Scene)> = scenes
+			.filter(|(_, at)| at.safe != (Some(at.name.as_str()) == scene))
+			.map(|(index, at)| (index, at.clone()))
+			.collect();
+		for (index, at) in changed {
+			let safe = !at.safe;
+			self.set_scene(index, Scene { safe, ..at })?;
+		}
+		Ok(())
+	}
+
 	/// Set the audio scenes, and nothing else: see
 	/// [`rename_audio_scene`](Self::rename_audio_scene) and
 	/// [`remove_audio_scene`](Self::remove_audio_scene) for what refers to one.
