@@ -261,6 +261,12 @@ impl Stream {
 	/// outside an async task. Call it inside the tokio runtime, where each
 	/// client binds its socket.
 	pub fn relays(&self, switched: Switched) -> anyhow::Result<Vec<Relay>> {
+		// Each relay's client binds its own socket, so a fixed port would be
+		// bound twice, by the one watched and the one gone live to.
+		anyhow::ensure!(
+			self.client.bind.is_none_or(|bind| bind.port() == 0) || self.relay().is_none() || self.failover().is_none(),
+			"a failover relay cannot share a fixed --connect-bind port with the relay; leave the port 0, or remove the failover"
+		);
 		let dials = self.dials(switched)?;
 		let mut clients = self.clients.lock().unwrap();
 		// A relay no longer set, or set with other tokens, lets go of its
@@ -360,12 +366,6 @@ impl Stream {
 			matches!(version, moq_net::Version::Lite(lite) if lite.has_instance()),
 			"a failover relay needs a --connect-version with broadcast instances (moq-lite-07-wip today), not {version}, \
 			 or a viewer moving between relays restarts the stream rather than resuming it"
-		);
-		// Each relay's client binds its own socket, so a fixed port would be
-		// bound twice.
-		anyhow::ensure!(
-			self.client.bind.is_none_or(|bind| bind.port() == 0),
-			"a failover relay cannot share a fixed --connect-bind port with the relay; leave the port 0"
 		);
 		Ok(())
 	}
@@ -665,7 +665,8 @@ mod tests {
 	}
 
 	/// Watching, measuring, and going live share one client per relay, so a
-	/// fixed `--connect-bind` port is bound once.
+	/// fixed `--connect-bind` port is bound once, and a failover, which
+	/// would bind it again, is refused.
 	#[tokio::test]
 	async fn a_relay_is_set_up_once() {
 		let dir = tempfile::tempdir().unwrap();
@@ -696,5 +697,18 @@ mod tests {
 		stream.relays(only).expect("the bound port is reused");
 		stream.clone().destination(only).expect("so is going live's");
 		assert_eq!(stream.clients.lock().unwrap().len(), 1);
+
+		// A failover beside it would bind the port a second time, so the
+		// pair is refused, whichever is switched on.
+		let mut paired = stream.clone();
+		paired
+			.save(Saved {
+				relay: Some(relay),
+				failover: Some("https://b.example/".parse().unwrap()),
+				..Default::default()
+			})
+			.unwrap();
+		let refused = paired.relays(only).err().expect("a fixed port with a failover");
+		assert!(format!("{refused:#}").contains("--connect-bind"), "{refused:#}");
 	}
 }

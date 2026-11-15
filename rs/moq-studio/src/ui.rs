@@ -315,6 +315,7 @@ impl Studio {
 		if let Some(hotkeys) = &mut self.panels.hotkeys {
 			hotkeys.hear();
 		}
+		self.panels.follow_stream_save();
 	}
 
 	/// Draw the window, with `fx` drawing its effects.
@@ -332,7 +333,6 @@ impl Studio {
 		}
 		panels.take_binding(ui.ctx());
 		panels.shortcuts(ui.ctx());
-		panels.follow_stream_save();
 		panels.staged = false;
 		let verdict = {
 			let report = panels.engine.health.lock().unwrap();

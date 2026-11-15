@@ -247,6 +247,11 @@ impl Engine {
 		self.on_air.borrow().clone()
 	}
 
+	/// Whether the program is on air, as it changes.
+	pub fn on_air_changes(&self) -> tokio::sync::watch::Receiver<OnAir> {
+		self.on_air.subscribe()
+	}
+
 	/// The GPU the program is drawn on, which going live's encoder check
 	/// times encoders on.
 	pub fn gpu(&self) -> &Gpu {

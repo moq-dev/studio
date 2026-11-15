@@ -106,22 +106,13 @@ impl Going {
 }
 
 /// The connection being measured, which stops, withdrawing its probe, when
-/// this is dropped or [stopped](Self::stop), so it never competes with the
+/// this is dropped, and on its own once the stream starts going live, from
+/// the sheet or a hotkey, window shown or not, so it never competes with the
 /// stream for the uplink.
 struct Measuring {
 	task: Task<Result<Rate, String>>,
 	/// Dropping it ends the measurement.
-	stop: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-impl Measuring {
-	/// Stop measuring, as the stream goes live.
-	fn stop(&mut self) {
-		self.stop = None;
-		if self.task.poll().is_none() {
-			self.task = Task::Done(Err("stopped as the stream went live".into()));
-		}
-	}
+	_stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// `canvas` as a broadcaster names it, such as `1080p at 60`.
@@ -392,14 +383,6 @@ impl Panels {
 	fn advance_going(&mut self) {
 		let Some(going) = &mut self.going else { return };
 		going.encoder.poll();
-		// Going live, from the sheet or a hotkey, ends the measurement, which
-		// would otherwise take uplink from the stream's first seconds.
-		if self.engine.on_air() != OnAir::Off {
-			if let Some(uplink) = &mut going.uplink {
-				uplink.stop();
-			}
-			return;
-		}
 		if going.uplink.is_none()
 			&& let Task::Done(encoder) = &going.encoder
 		{
@@ -412,7 +395,7 @@ impl Panels {
 				}
 				Err(_) => Measuring {
 					task: Task::Done(Err("nothing encodes, so nothing would be sent".into())),
-					stop: None,
+					_stop: None,
 				},
 			});
 		}
@@ -855,12 +838,13 @@ impl Panels {
 		}
 	}
 
-	/// Apply a Stream settings save once it finished, every frame, so one
-	/// still running when Settings closes or the tab changes applies too.
+	/// Apply a Stream settings save once it finished, before every frame and
+	/// while the window is hidden, so one still running when Settings closes,
+	/// the tab changes, or the window hides applies before a hotkey goes live.
 	pub(super) fn follow_stream_save(&mut self) {
 		let Some(form) = &mut self.stream_form else { return };
 		let Some(saving) = &mut form.saving else { return };
-		// The window redraws at the canvas rate, which polls it again.
+		// The save asks for a frame once it finishes, which polls it again.
 		let Some(saved) = saving.poll() else { return };
 		match saved.clone() {
 			Ok(saved) => {
@@ -990,7 +974,7 @@ impl Panels {
 				match form.saved(stream.saved()) {
 					Ok(saved) => {
 						let tokens = form.tokens();
-						form.saving = Some(save(stream, saved, tokens, &self.runtime));
+						form.saving = Some(save(stream, saved, tokens, ui.ctx(), &self.runtime));
 						form.note = None;
 					}
 					Err(err) => form.note = Some(err),
@@ -1018,6 +1002,7 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 	let switched = *controls.switched.lock().unwrap();
 	let handle = runtime.clone();
 	let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+	let mut on_air = controls.engine.on_air_changes();
 	let task = Task::spawn(runtime, move || {
 		let relays = {
 			// Each client binds its socket on the runtime.
@@ -1030,15 +1015,18 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 			let relay = relays.into_iter().next().ok_or("no relay is switched on")?;
 			let measured = uplink::measure(&relay.client, relay.url, &path, ceiling, uplink::WINDOW);
 			tokio::select! {
-				result = measured => result.map_err(|err| format!("{err:#}")),
+				biased;
+				// Fails only once the engine is gone, which ends this anyway.
+				_ = on_air.wait_for(|on_air| *on_air != OnAir::Off) => Err("stopped as the stream went live".into()),
 				// Sent never: the sender is dropped to stop.
 				_ = stopped => Err("stopped".into()),
+				result = measured => result.map_err(|err| format!("{err:#}")),
 			}
 		}
 	});
 	Measuring {
 		task: task.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the measurement: {err}")))),
-		stop: Some(stop),
+		_stop: Some(stop),
 	}
 }
 
@@ -1230,13 +1218,16 @@ impl Form {
 }
 
 /// Keep `tokens` and save `saved` as `stream`'s, on a thread of their own,
-/// since the credential store blocks.
+/// since the credential store blocks, asking `ctx` for a frame once done,
+/// which applies it even while the window is hidden.
 fn save(
 	mut stream: Stream,
 	saved: Saved,
 	tokens: Vec<Token>,
+	ctx: &egui::Context,
 	runtime: &tokio::runtime::Handle,
 ) -> Task<Result<Stream, String>> {
+	let ctx = ctx.clone();
 	let task = Task::spawn(runtime, move || {
 		let result = (|| -> anyhow::Result<Stream> {
 			for (url, token) in &tokens {
@@ -1245,6 +1236,7 @@ fn save(
 			stream.save(saved)?;
 			Ok(stream)
 		})();
+		ctx.request_repaint();
 		let result = result.map_err(|err| format!("{err:#}"));
 		async move { result }
 	});

@@ -25,10 +25,10 @@ const RATE: u32 = 30;
 /// The probe's one track.
 const TRACK: &str = "probe";
 
-/// Where the probe publishes beneath the broadcast: a path of its own, so a
-/// viewer of the show never resolves the probe, yet one the relay's token for
-/// the broadcast covers. A scene published as `probe` publishes only on air,
-/// which stops any probe first. Not dot-prefixed, which moq hides from
+/// The start of the path the probe publishes at beneath the broadcast, with a
+/// random suffix: a path of its own, so neither a viewer of the show nor one
+/// of a scene published beneath it resolves the probe, yet one the relay's
+/// token for the broadcast covers. Not dot-prefixed, which moq hides from
 /// subscribers that do not opt in.
 const PROBE: &str = "probe";
 
@@ -46,8 +46,11 @@ pub async fn measure(
 	ceiling: Rate,
 	window: Duration,
 ) -> anyhow::Result<Rate> {
+	// Random without a dependency: each `RandomState` is seeded anew.
+	let suffix = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), ());
+	let probe = format!("{PROBE}-{suffix:016x}");
 	let path = moq_net::Path::new(path)
-		.and_then(|path| path.join(&moq_net::Path::new(PROBE)?))
+		.and_then(|path| path.join(&moq_net::Path::new(&probe)?))
 		.with_context(|| format!("cannot probe beneath `{path}`"))?;
 	let publish = moq_tokio::origin::spawn();
 	let publication = publish
