@@ -398,7 +398,8 @@ impl Widget for Slider<'_> {
 		// Drag alone, so a press starts the drag: its jump and the drag are one gesture.
 		let (rect, mut response) = ui.allocate_exact_size(vec2(width, 18.0), Sense::drag());
 		let track = egui::Rangef::new(rect.left() + 7.0, rect.right() - 7.0);
-		if response.dragged()
+		// The release too, so a move in its frame is kept.
+		if (response.dragged() || response.drag_stopped())
 			&& let Some(pos) = response.interact_pointer_pos()
 			&& set(self.value, fraction(pos.x, track))
 		{
@@ -456,7 +457,8 @@ impl Widget for Fader<'_> {
 	fn ui(self, ui: &mut Ui) -> Response {
 		let (rect, mut response) = ui.allocate_exact_size(vec2(28.0, self.height), Sense::drag());
 		let travel = egui::Rangef::new(rect.top() + 8.0, rect.bottom() - 8.0);
-		if response.dragged()
+		// The release too, so a move in its frame is kept.
+		if (response.dragged() || response.drag_stopped())
 			&& let Some(pos) = response.interact_pointer_pos()
 			&& set(self.value, 1.0 - fraction(pos.y, travel))
 		{
@@ -1244,7 +1246,7 @@ mod tests {
 		let mut harness = Harness::new_ui_state(
 			|ui, (value, loose): &mut (f32, bool)| {
 				let response = ui.add(Slider::new(value).width(214.0));
-				*loose |= response.changed() && !response.dragged();
+				*loose |= response.changed() && !(response.dragged() || response.drag_stopped());
 			},
 			(0.0, false),
 		);
@@ -1258,6 +1260,30 @@ mod tests {
 		let (value, loose) = *harness.state();
 		assert!((value - 0.25).abs() < 0.05, "{value}");
 		assert!(!loose, "the press changed the value before its drag started");
+	}
+
+	/// A release in the frame the pointer last moves keeps that move, and the
+	/// edit it makes belongs to the drag.
+	#[test]
+	fn a_slider_keeps_the_move_its_release_makes() {
+		// The value, and whether it ever changed outside a drag.
+		let mut harness = Harness::new_ui_state(
+			|ui, (value, loose): &mut (f32, bool)| {
+				let response = ui.add(Slider::new(value).width(214.0));
+				*loose |= response.changed() && !(response.dragged() || response.drag_stopped());
+			},
+			(0.0, false),
+		);
+		let rect = harness.get_by_role(Role::Slider).rect();
+		let at = |fraction| egui::pos2(egui::lerp(rect.x_range(), fraction), rect.center().y);
+		harness.drag_at(at(0.75));
+		harness.run();
+		harness.hover_at(at(0.5));
+		harness.drop_at(at(0.25));
+		harness.run();
+		let (value, loose) = *harness.state();
+		assert!((value - 0.25).abs() < 0.05, "{value}");
+		assert!(!loose, "the release changed the value outside its drag");
 	}
 
 	/// A toggle flips on each click, and says which way it is.

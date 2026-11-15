@@ -639,7 +639,8 @@ impl Gestures {
 		if response.drag_started() || response.gained_focus() {
 			self.0 += 1;
 		}
-		(response.dragged() || response.has_focus()).then_some(self.0)
+		// The release is the drag's last frame, and can still edit.
+		(response.dragged() || response.drag_stopped() || response.has_focus()).then_some(self.0)
 	}
 
 	/// A gesture of its own.
@@ -4978,6 +4979,41 @@ impl Devices {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Every edit a slider drag makes, the one its release makes included,
+	/// is one gesture, so it undoes as one.
+	#[test]
+	fn a_drag_and_its_release_are_one_gesture() {
+		use egui::accesskit::Role;
+		use egui_kittest::kittest::Queryable;
+
+		// The value, the gestures of the edits made, and the gesture counter.
+		let mut harness = egui_kittest::Harness::new_ui_state(
+			|ui, (value, edits, gestures): &mut (f32, Vec<Option<u64>>, Gestures)| {
+				let response = ui.add(kit::Slider::new(value).width(214.0));
+				if let Some(gesture) = changed(&response, gestures) {
+					edits.push(gesture);
+				}
+			},
+			(0.0, Vec::new(), Gestures::default()),
+		);
+		let rect = harness.get_by_role(Role::Slider).rect();
+		let at = |fraction| egui::pos2(egui::lerp(rect.x_range(), fraction), rect.center().y);
+		harness.drag_at(at(0.75));
+		harness.run();
+		harness.hover_at(at(0.5));
+		harness.run();
+		harness.hover_at(at(0.4));
+		harness.drop_at(at(0.25));
+		harness.run();
+		let (value, edits, _) = harness.state();
+		assert!((value - 0.25).abs() < 0.05, "{value}");
+		assert!(edits.len() >= 2, "{edits:?}");
+		assert!(
+			edits[0].is_some() && edits.iter().all(|edit| *edit == edits[0]),
+			"{edits:?}"
+		);
+	}
 
 	/// A clone of a source with its background removed copies its filters,
 	/// and the edit adding it is valid.
