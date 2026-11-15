@@ -740,12 +740,13 @@ impl Panels {
 			.problems
 			.first()
 			.map_or(Verdict::Healthy, |problem| problem.verdict);
-		let (name, dot) = match (report.relays.is_empty(), worst) {
-			(true, _) => ("Not live", kit::DIM),
-			(false, Verdict::Healthy) => ("Healthy", kit::OK),
-			(false, Verdict::Degraded) => ("Degraded", kit::CUE),
-			(false, Verdict::Unhealthy) => ("Unhealthy", kit::ERR),
-			(false, Verdict::Unknown) => ("Starting", kit::DIM),
+		// A problem shows even when not publishing, such as a failed source.
+		let (name, dot) = match (worst, report.relays.is_empty()) {
+			(Verdict::Unhealthy, _) => ("Unhealthy", kit::ERR),
+			(Verdict::Degraded, _) => ("Degraded", kit::CUE),
+			(_, true) => ("Not live", kit::DIM),
+			(Verdict::Healthy, false) => ("Healthy", kit::OK),
+			(Verdict::Unknown, false) => ("Starting", kit::DIM),
 		};
 		let pill = ui.add(kit::Pill::new(name).dot(dot).clickable());
 		kit::popover(&pill).show(|ui| {
@@ -3799,29 +3800,40 @@ fn strip_controls(
 		};
 		change = Some((audio, format!("{verb} `{name}`"), None));
 	}
-	// The slider runs over decibels, from silence to 12 dB of boost.
+	// The slider runs over decibels, from silence to 12 dB of boost, and the
+	// field beside it takes an exact level.
 	let db = decibels(audio.gain);
 	let mut at = (db - MUTE_DB) / (12.0 - MUTE_DB);
-	let shown = if db <= MUTE_DB {
-		"-inf dB".to_string()
-	} else {
-		format!("{db:+.1} dB")
-	};
-	// The slider and its readout share one cell, so a grid's columns stay
+	let mut typed = db;
+	// The slider and its field share one cell, so a grid's columns stay
 	// under their headings.
-	let response = ui
+	let (slid, field) = ui
 		.horizontal(|ui| {
-			let response = ui.add(kit::Slider::new(&mut at).width(120.0)).on_hover_text("Gain");
-			ui.label(egui::RichText::new(shown).font(kit::mono(11.0)).color(kit::DIM));
-			response
+			let slid = ui.add(kit::Slider::new(&mut at).width(120.0)).on_hover_text("Gain");
+			let level = egui::DragValue::new(&mut typed)
+				.range(MUTE_DB..=12.0)
+				.speed(0.1)
+				.custom_formatter(|db, _| match db <= f64::from(MUTE_DB) {
+					true => "-inf".to_string(),
+					false => format!("{db:+.1}"),
+				})
+				.custom_parser(|text| match text.trim() {
+					"-inf" => Some(f64::from(MUTE_DB)),
+					text => text.parse().ok(),
+				});
+			let field = ui
+				.add(kit::Number::new(level).unit("dB").width(84.0))
+				.on_hover_text("Gain in decibels: drag, or type a level such as 0");
+			(slid, field)
 		})
 		.inner;
-	let gesture = gestures.of(&response);
-	if response.changed() {
-		let db = MUTE_DB + at * (12.0 - MUTE_DB);
-		let gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
-		let audio = moq_scene::Audio { gain, ..audio.clone() };
-		change = Some((audio, format!("Set `{name}` gain"), gesture));
+	for (response, db) in [(slid, MUTE_DB + at * (12.0 - MUTE_DB)), (field, typed)] {
+		let gesture = gestures.of(&response);
+		if response.changed() {
+			let gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
+			let audio = moq_scene::Audio { gain, ..audio.clone() };
+			change = Some((audio, format!("Set `{name}` gain"), gesture));
+		}
 	}
 	let mut pan = audio.pan;
 	let response = ui
@@ -4979,6 +4991,40 @@ impl Devices {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The gain field takes an exact level, so a sound dragged off unity can
+	/// go back to exactly 0 dB.
+	#[test]
+	fn a_typed_gain_is_exact() {
+		use egui::accesskit::Role;
+		use egui_kittest::kittest::Queryable;
+
+		let audio = moq_scene::Audio {
+			gain: 1.7,
+			..Default::default()
+		};
+		// The kit's faces take effect a frame after they are installed.
+		let mut harness = egui_kittest::Harness::new_ui_state(
+			|ui, (audio, gestures, ready): &mut (moq_scene::Audio, Gestures, bool)| {
+				if !std::mem::replace(ready, true) {
+					kit::install(ui.ctx());
+					return;
+				}
+				if let Some((changed, ..)) = strip_controls(ui, gestures, "tone", audio) {
+					*audio = changed;
+				}
+			},
+			(audio, Gestures::default(), false),
+		);
+		harness.run();
+		harness.get_all_by_role(Role::SpinButton).next().unwrap().click();
+		harness.run();
+		harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+		harness.get_all_by_role(Role::SpinButton).next().unwrap().type_text("0");
+		harness.key_press(egui::Key::Enter);
+		harness.run();
+		assert_eq!(harness.state().0.gain, 1.0);
+	}
 
 	/// Every edit a slider drag makes, the one its release makes included,
 	/// is one gesture, so it undoes as one.
