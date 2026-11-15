@@ -156,7 +156,7 @@ impl Controls {
 	fn replay(&self, play: bool, pressed: bool) -> anyhow::Result<String> {
 		let replay = self.replay.lock().unwrap();
 		let action = if play { Action::Replay } else { Action::SaveClip };
-		let taken = self.take(&replay, play);
+		let taken = self.take(&replay, play, pressed);
 		let message = taken
 			.as_ref()
 			.map(|(message, _)| message.clone())
@@ -180,17 +180,23 @@ impl Controls {
 		Ok(message)
 	}
 
-	/// What a replay or clip does at once, and the save a clip still runs.
+	/// What a replay or clip does at once, and the save a clip still runs. A
+	/// hotkey `pressed` takes the last stretch as long as the one picked.
 	fn take(
 		&self,
 		replay: &Replay,
 		play: bool,
+		pressed: bool,
 	) -> anyhow::Result<(String, Option<impl Future<Output = anyhow::Result<String>> + use<>>)> {
 		let into = match play {
 			true => Some(self.replay_source(replay.into.as_deref())?),
 			false => None,
 		};
-		let (ago, length) = replay.stretch.span(kio::clock::Instant::now())?;
+		let stretch = match pressed {
+			true => replay.stretch.last(),
+			false => replay.stretch,
+		};
+		let (ago, length) = stretch.span(kio::clock::Instant::now())?;
 		let take = replay::take(&self.engine, &replay.of, ago, length, into.is_some())?;
 		let of = replay.of.clone();
 		if let Some(into) = into {

@@ -413,7 +413,7 @@ each other audio scene. A source added from the Sources or Devices panel, or
 pasted, is sent to the audio scene on program, so it is heard at once.
 **On program** picks the audio scene the broadcast carries, and switching
 it, or editing an audio scene, never drops or repeats audio. A recording holds
-the audio scene on program unless REVIEW picks another, such as one
+the audio scene on program unless Settings' Recording tab picks another, such as one
 keeping music the stream leaves out, and each published scene carries the one
 on program unless the Scenes panel picks another beside its **Publish** box;
 switching either while it runs never drops or repeats audio either. The audio
@@ -1198,8 +1198,10 @@ The Hotkeys tab in Settings binds a key to the **Panic** key, **Replay**,
 pad does. Press **Bind**, then the key with any modifiers; Escape, or leaving
 the window or the tab, cancels. Every action starts unbound, so no key a game
 uses is taken unasked, and a key bound to one action is refused for another
-until it is cleared there. Replay, Save clip, and a recording use REVIEW's
-picks. A key bound to **Cut** or **Transition**, which have no preview to act
+until it is cleared there. Replay and Save clip use REVIEW's picks, but take
+the last seconds as long as the stretch picked there, so a key pressed from
+another page acts on what just happened; a recording uses Settings' Recording
+tab. A key bound to **Cut** or **Transition**, which have no preview to act
 on, is kept in the settings but neither shown nor fired.
 
 The key pressed is the key that fires, wherever it sits, on any keyboard layout
@@ -1266,7 +1268,8 @@ picture is the one under the head. With the right handle at the strip's right
 edge, the stretch is the last that many seconds up to the click; dragged
 left of it, the stretch stays on the moments picked as time goes on, until it
 ages out of the 30 seconds. **Replay** plays the stretch in the replay source,
-which is transparent before and after. Take its scene to put it on program.
+which is transparent before and after; with more than one replay source,
+pick which one under the speed. Take its scene to put it on program.
 Sound replays only at 100%, through the replay source's strip on MIX, so a
 replay of a microphone or system audio, which has only sound, plays only at
 100%. A new replay cuts off the one playing, and a stretch the source was

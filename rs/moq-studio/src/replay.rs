@@ -54,6 +54,16 @@ impl Stretch {
 		anyhow::ensure!(!length.is_zero(), "the picked stretch is empty");
 		Ok((to, length))
 	}
+
+	/// The last stretch as long as this one, as a hotkey fires it: a key
+	/// pressed away from REVIEW means what just happened, not a moment
+	/// picked there earlier, which would age out of the window.
+	pub fn last(self) -> Self {
+		match self {
+			Self::Between(from, to) => Self::Last(to.saturating_duration_since(from).min(WINDOW)),
+			last => last,
+		}
+	}
 }
 
 /// What a replay or clip is of.
@@ -253,6 +263,19 @@ mod stretch_tests {
 		assert!(picked.span(gone).is_err(), "aged out");
 		let empty = Stretch::Between(ago(3), ago(3));
 		assert!(empty.span(now).is_err(), "empty");
+	}
+
+	/// A hotkey takes the last stretch as long as the one picked, even once
+	/// the picked one has aged out.
+	#[test]
+	fn a_hotkey_takes_the_last_stretch_as_long() {
+		let secs = Duration::from_secs;
+		let now = Instant::now().saturating_add(secs(100));
+		let picked = Stretch::Between(now.saturating_sub(secs(14)), now.saturating_sub(secs(6)));
+		assert_eq!(picked.last(), Stretch::Last(secs(8)));
+		let later = now.saturating_add(secs(60));
+		assert_eq!(picked.last().span(later).unwrap(), (Duration::ZERO, secs(8)));
+		assert_eq!(Stretch::Last(secs(5)).last(), Stretch::Last(secs(5)));
 	}
 }
 
