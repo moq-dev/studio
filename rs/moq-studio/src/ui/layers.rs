@@ -489,7 +489,9 @@ impl Panels {
 				.sources
 				.values()
 				.any(|source| matches!(source, Source::Clone { source } if source == name));
-			cloned || read.any(|source| source == name)
+			// Removing the stinger's source would quietly reset the transition.
+			let stinger = collection.transition.stinger() == Some(name);
+			cloned || stinger || read.any(|source| source == name)
 		};
 		let unused: Vec<String> = collection
 			.sources

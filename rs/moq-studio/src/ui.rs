@@ -246,6 +246,11 @@ impl Studio {
 		self.panels.details = true;
 	}
 
+	/// Whether a layer is selected.
+	pub(crate) fn selected(&self) -> bool {
+		self.panels.selection.is_some()
+	}
+
 	/// Turn to BUILD with `side` and `inspect` shown, and the layer at
 	/// `index` of the scene on program selected, front first, as a click on
 	/// its row would.
@@ -752,7 +757,22 @@ impl Panels {
 	/// took, and let go of a selected item, a drag, and a scene rename under
 	/// way, whose index it may have given to another. Called under every lock
 	/// that uses one, since the autosave can reload between two.
+	///
+	/// Let go of a layer of a scene no longer on program too, which a pad or
+	/// hotkey took away from BUILD, so a paste, the inspector, and the picture
+	/// never act on a scene the picture does not show.
 	fn follow_reloads(&mut self, state: &State) {
+		if let Some(Picked {
+			layer: Layer { scene: Some(scene) },
+			..
+		}) = &self.selection
+			&& state.compositor.program_scene() != Some(scene.as_str())
+		{
+			self.selection = None;
+			self.drag = None;
+			self.moving = None;
+			self.cropping = false;
+		}
 		if state.reloads == self.reloads {
 			return;
 		}

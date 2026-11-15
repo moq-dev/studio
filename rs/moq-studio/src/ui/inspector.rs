@@ -40,7 +40,9 @@ impl Panels {
 	/// name with no layer selected, and the one shown.
 	pub(super) fn inspector_body(&mut self, ui: &mut Ui) {
 		let (layer, scene) = {
-			let state = self.engine.state.lock().unwrap();
+			let engine = self.engine.clone();
+			let state = engine.state.lock().unwrap();
+			self.follow_reloads(&state);
 			let collection = state.collection();
 			let layer = self.selection.as_ref().and_then(|picked| picked.item(collection));
 			let layer = layer.map(|item| item.source.clone());

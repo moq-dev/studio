@@ -331,7 +331,8 @@ fn a_click_takes_and_the_panic_key_cuts() {
 
 /// On BUILD, a layer row's menu hides, locks, reorders, and duplicates its
 /// layer, a scene's pad's duplicates the scene with its own copies, and
-/// undo takes each back. It draws no view.
+/// undo takes each back, and a take lets go of a layer of the scene it
+/// leaves. It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn a_layer_menu_edits_its_layer() {
@@ -407,6 +408,20 @@ fn a_layer_menu_edits_its_layer() {
 			.scene("Interview copy")
 			.is_none()
 	);
+
+	// A take moves BUILD to another scene, letting go of a layer of this one.
+	let selected = |harness: &mut Harness<'_, Window>| {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!()
+		};
+		studio.selected()
+	};
+	harness.get_all_by_label("bar").next().unwrap().click();
+	harness.run_steps(2);
+	assert!(selected(&mut harness), "the click selected the bar");
+	harness.get_by_label("Interview").click();
+	harness.run_steps(2);
+	assert!(!selected(&mut harness), "the take let go of Main's bar");
 
 	drop(harness);
 	quit(&engine, &runtime);
