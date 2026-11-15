@@ -55,9 +55,9 @@ impl Stretch {
 		Ok((to, length))
 	}
 
-	/// The last stretch as long as this one, as a hotkey fires it: a key
-	/// pressed away from REVIEW means what just happened, not a moment
-	/// picked there earlier, which would age out of the window.
+	/// The last stretch as long as this one, as a hotkey or the shell's clip
+	/// button fires it: pressed away from REVIEW's strip, it means what just
+	/// happened, not a moment picked there earlier, which would age out.
 	pub fn last(self) -> Self {
 		match self {
 			Self::Between(from, to) => Self::Last(to.saturating_duration_since(from).min(WINDOW)),

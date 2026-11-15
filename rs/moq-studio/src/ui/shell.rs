@@ -825,7 +825,7 @@ impl Panels {
 			.look(kit::Look::Boxed)
 			.key(clip_key.as_deref())
 			.note(Some(
-				"Save the stretch REVIEW picks as a clip, into the recordings folder",
+				"Save the last seconds, as many as REVIEW picks, as a clip into the recordings folder",
 			));
 		let (panic_at, clip_at) = match tall {
 			true => (

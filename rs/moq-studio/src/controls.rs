@@ -180,8 +180,9 @@ impl Controls {
 		Ok(message)
 	}
 
-	/// What a replay or clip does at once, and the save a clip still runs. A
-	/// hotkey `pressed` takes the last stretch as long as the one picked.
+	/// What a replay or clip does at once, and the save a clip still runs.
+	/// One `pressed` from outside REVIEW's own buttons, by a hotkey or the
+	/// shell's clip button, takes the last stretch as long as the one picked.
 	fn take(
 		&self,
 		replay: &Replay,

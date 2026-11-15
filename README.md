@@ -1200,8 +1200,8 @@ the window or the tab, cancels. Every action starts unbound, so no key a game
 uses is taken unasked, and a key bound to one action is refused for another
 until it is cleared there. Replay and Save clip use REVIEW's picks, but take
 the last seconds as long as the stretch picked there, so a key pressed from
-another page acts on what just happened; a recording uses Settings' Recording
-tab. A key bound to **Cut** or **Transition**, which have no preview to act
+another page acts on what just happened, as the clip button beside the panic
+key does; a recording uses Settings' Recording tab. A key bound to **Cut** or **Transition**, which have no preview to act
 on, is kept in the settings but neither shown nor fired.
 
 The key pressed is the key that fires, wherever it sits, on any keyboard layout
