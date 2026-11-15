@@ -125,6 +125,8 @@ views! {
 	/// A scene that cannot go on air opens off air too, its Take it live
 	/// dimmed, saying why under the pointer.
 	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
+	/// Too narrow for the banner beside the live picture, it goes under it.
+	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml" };
 	/// MIX holds the mixer, and a small live picture in the sound's place.
 	mix: Still, studio(View::Page(Page::Mix));
 	/// MIX in a stacked window, its live picture as tall as the sound's slot

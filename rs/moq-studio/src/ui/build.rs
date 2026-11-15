@@ -88,13 +88,18 @@ impl Panels {
 			.cued()
 			.filter(|cued| self.editing.as_deref() == Some(*cued))
 			.map(|cued| {
-				state
-					.collection()
-					.canvas(Some(cued))
-					.unwrap_or(state.collection().canvas)
+				let collection = state.collection();
+				let canvas = collection.canvas(Some(cued)).unwrap_or(collection.canvas);
+				// Viewers may see it anyway, such as a published scene.
+				let tag = if state.seen(cued).is_some() {
+					"Not on program"
+				} else {
+					"Off air"
+				};
+				(canvas, tag)
 			});
 		let (canvas, id, frame) = match off_air {
-			Some(canvas) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag("Off air")),
+			Some((canvas, tag)) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag(tag)),
 			// It is the live picture, so the accent frame stays while editing it.
 			None => (
 				self.program_drawn,
@@ -1649,7 +1654,12 @@ impl Panels {
 		}
 
 		if play {
-			state.compositor.set_program_start(kio::clock::now());
+			let off_air = state.cued().filter(|cued| self.editing.as_deref() == Some(*cued));
+			match off_air.map(str::to_string) {
+				// Replayed where it is drawn, never on program.
+				Some(cued) => state.compositor.set_preview(Some(cued)),
+				None => state.compositor.set_program_start(kio::clock::now()),
+			}
 		}
 		let Some((label, gesture)) = action else { return };
 		let result = edit(&mut state, label, gesture, |draft| {

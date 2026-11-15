@@ -15,6 +15,8 @@ pub(super) struct Cued {
 	pub(super) canvas: Canvas,
 	/// Whether it is open for editing off air, rather than only cued.
 	pub(super) off_air: bool,
+	/// Why viewers see it anyway, if they do, such as being published.
+	pub(super) live: Option<String>,
 	/// The show's transition, which AUTO takes it by, in words.
 	pub(super) transition: String,
 }
@@ -58,6 +60,9 @@ enum Ask {
 	BackToLive,
 }
 
+/// The least room the off-air banner's words get beside the live picture
+/// before it moves under it.
+const MIN_TEXT: f32 = 160.0;
 /// Room inside the card around what it holds.
 const PADDING: f32 = 10.0;
 /// How far in from the picture's edges the card docks.
@@ -207,23 +212,63 @@ impl Panels {
 		let back = kit::caps_galley(painter, "Back to live", kit::ui_strong(12.5), kit::CUE, None);
 		let take = kit::caps_galley(painter, "Take it live", kit::ui_strong(12.5), Color32::WHITE, None);
 		let buttons = back.size().x + take.size().x + 2.0 * 20.0 + 8.0;
-		let room_for_text = (live.left() - 24.0 - room.left()) - buttons - 3.0 * 12.0;
-		let text = format!("Editing {}, not on air", cued.name);
+		// One row beside the live picture where it fits; or else under it, the
+		// words over the buttons, as in a narrow window.
+		let beside = Rect::from_min_max(room.left_top(), pos2(live.left() - 24.0, live.bottom()));
+		let one_row = beside.width() >= 12.0 + MIN_TEXT + 12.0 + buttons + 6.0;
+		let area = match one_row {
+			true => beside,
+			false => Rect::from_min_size(pos2(room.left(), live.bottom() + 18.0), vec2(room.width(), 68.0)),
+		};
+		let room_for_text = match one_row {
+			true => area.width() - buttons - 12.0 - 12.0 - 6.0,
+			false => area.width() - 24.0,
+		};
+		let text = match cued.live {
+			None => format!("Editing {}, not on air", cued.name),
+			Some(_) => format!("Editing {}, not on program", cued.name),
+		};
 		let text = kit::caps_galley(painter, &text, font, kit::ON_CUE, Some(room_for_text.max(40.0)));
-		let width = 12.0 + text.size().x + 12.0 + buttons + 6.0;
-		let center =
-			pos2((room.left() + live.left() - 24.0) / 2.0, live.center().y).max(pos2(room.left() + width / 2.0, 0.0));
-		let banner = Rect::from_center_size(center, vec2(width, 38.0));
+		let width = match one_row {
+			true => 12.0 + text.size().x + 12.0 + buttons + 6.0,
+			false => (12.0 + text.size().x + 12.0).max(buttons + 12.0),
+		};
+		let height = if one_row { 38.0 } else { 68.0 };
+		let banner = Rect::from_center_size(area.center(), vec2(width.min(area.width()), height));
 		painter.rect_filled(banner, 8, kit::CUE);
-		painter.galley(
-			pos2(banner.left() + 12.0, banner.center().y - text.size().y / 2.0),
-			text,
-			kit::ON_CUE,
-		);
+		// An edit here reaches viewers anyway, so say how.
+		let mut bottom = banner.bottom().max(live.bottom());
+		if let Some(why) = &cued.live {
+			let why = painter.layout(
+				format!("Viewers still see it: {why}."),
+				kit::ui(12.0),
+				kit::CUE,
+				area.width(),
+			);
+			let at = pos2(banner.center().x - why.size().x / 2.0, banner.bottom() + 6.0);
+			bottom = bottom.max(at.y + why.size().y);
+			painter.galley(at, why, kit::CUE);
+		}
+		let (text_at, buttons_right, buttons_top) = match one_row {
+			true => (
+				pos2(banner.left() + 12.0, banner.center().y - text.size().y / 2.0),
+				banner.right() - 6.0,
+				banner.top() + 6.0,
+			),
+			false => (
+				pos2(
+					banner.center().x - text.size().x / 2.0,
+					banner.top() + 15.0 - text.size().y / 2.0,
+				),
+				banner.center().x + buttons / 2.0,
+				banner.top() + 32.0,
+			),
+		};
+		painter.galley(text_at, text, kit::ON_CUE);
 		let mut ask = None;
 		let take_at = Rect::from_min_size(
-			pos2(banner.right() - 6.0 - take.size().x - 20.0, banner.top() + 6.0),
-			vec2(take.size().x + 20.0, banner.height() - 12.0),
+			pos2(buttons_right - take.size().x - 20.0, buttons_top),
+			vec2(take.size().x + 20.0, 26.0),
 		);
 		let back_at = Rect::from_min_size(
 			pos2(take_at.left() - 8.0 - back.size().x - 20.0, take_at.top()),
@@ -266,7 +311,7 @@ impl Panels {
 		if let Some(ask) = ask {
 			self.ask(ask, &cued.name);
 		}
-		live.bottom() + 22.0
+		bottom + 22.0
 	}
 
 	/// Studio mode's switch at `at`, lit while it is `on`.

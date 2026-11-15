@@ -381,6 +381,43 @@ impl State {
 		Ok(scene)
 	}
 
+	/// Why viewers see the scene called `scene`, which is not on program, if
+	/// they do, so an edit to it off air reaches them: it is leaving program
+	/// in a transition, published or recorded on its own, or drawn through a
+	/// scene source by a scene they see or by the top layer.
+	pub fn seen(&self, scene: &str) -> Option<String> {
+		let collection = &self.collection;
+		let program = self.compositor.program_scene();
+		if self.compositor.on_air().any(|on| on == scene) && program != Some(scene) {
+			return Some("it is leaving program in a transition".into());
+		}
+		if collection.scene(scene).is_some_and(|found| found.published) {
+			return Some("it is published as a broadcast of its own".into());
+		}
+		if self.compositor.live().any(|drawn| drawn == scene) {
+			return Some("it is recorded".into());
+		}
+		let published = collection.scenes.iter().filter(|found| found.published);
+		let roots = self.compositor.live().chain(published.map(|found| found.name.as_str()));
+		let roots = roots.map(Some).chain([None]);
+		for root in roots {
+			let layer = moq_scene::Layer {
+				scene: root.map(str::to_string),
+			};
+			let items = collection.drawn([layer]);
+			if items
+				.iter()
+				.any(|item| collection.nested(&item.source) == Some(moq_scene::Nested::Scene(scene)))
+			{
+				return Some(match root {
+					Some(root) => format!("`{root}` shows it"),
+					None => "the top layer shows it".into(),
+				});
+			}
+		}
+		None
+	}
+
 	/// Leave nothing cued, back to editing the scene on program.
 	pub fn uncue(&mut self) {
 		if self.cued().is_some() {
@@ -3797,6 +3834,42 @@ mod tests {
 			state.uncue();
 			assert_eq!(state.cued(), None);
 			assert_eq!(state.compositor.program_scene(), Some(main.as_str()));
+
+			// Viewers still see a scene leaving in a transition, a published
+			// one, and one a scene they see shows, so an edit off air would
+			// reach them.
+			assert_eq!(state.seen("Guest"), None);
+			state.take("Guest", now).unwrap();
+			let leaving = state.seen(&main).expect("leaving in the fade");
+			assert!(leaving.contains("transition"), "{leaving}");
+			state.cue(&main).unwrap();
+			state.take_cued(None).unwrap();
+			let collection = state.collection();
+			let index = collection
+				.scenes
+				.iter()
+				.position(|scene| scene.name == "Guest")
+				.unwrap();
+			let guest = moq_scene::Scene {
+				published: true,
+				..collection.scenes[index].clone()
+			};
+			let mut draft = collection.draft("Publish `Guest`");
+			draft.set_scene(index, guest).unwrap();
+			state.commit(draft, None).unwrap();
+			let published = state.seen("Guest").expect("published");
+			assert!(published.contains("published"), "{published}");
+			assert_eq!(state.seen("Portrait"), None);
+			let mut draft = state.collection().draft("Show `Portrait` in the program");
+			let nested = moq_scene::Source::Scene {
+				scene: "Portrait".into(),
+			};
+			draft.set_source("portrait", Some(nested)).unwrap();
+			let fill = moq_scene::Rect::fill(&state.collection().canvas);
+			let item = moq_scene::Item::new("portrait", fill);
+			draft.insert_item(&moq_scene::Layer::scene(&main), 0, item).unwrap();
+			state.commit(draft, None).unwrap();
+			assert_eq!(state.seen("Portrait"), Some(format!("`{main}` shows it")));
 		}
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();

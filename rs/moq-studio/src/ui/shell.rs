@@ -182,6 +182,7 @@ impl Panels {
 			refused: collection.refuses(&name),
 			canvas: collection.canvas(Some(name.as_str())).unwrap_or(collection.canvas),
 			off_air: self.editing.as_ref() == Some(&name),
+			live: state.seen(&name),
 			transition: transition_words(&collection.transition),
 			name,
 		});

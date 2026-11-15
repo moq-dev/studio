@@ -187,7 +187,7 @@ BUILD's panels:
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code in a sheet over the window, see who joined, and take a guest out of every scene. |
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
-| Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the scene on program's keyframes again. |
+| Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the edited scene's keyframes again: on program, or only in its picture while it is open off air. |
 
 Over the picture, **Interact** passes the mouse to the browser source under it
 instead, and the keyboard to the one last clicked; **Snap** and **Grid** set
@@ -215,7 +215,10 @@ to the scene file, or a failed save, shows over its top until it is settled.
 the frame turns amber and reads OFF AIR, and the program shrinks to a corner
 beside a banner. **Take it live** puts the scene on air by the show's
 transition; **Back to live** goes back to editing the scene on air. Any scene
-opens off air, even one that cannot go on air.
+opens off air, even one that cannot go on air. One viewers see anyway, still
+leaving program in a transition, published or recorded on its own, or shown
+by a scene they see through a scene source, reads NOT ON PROGRAM instead, and
+the banner says how they see it, since an edit reaches them.
 
 **Studio mode**, off by default, is for an operator running a show: with its
 switch at the end of the scene strip on, a pad or a scene's hotkey cues its
