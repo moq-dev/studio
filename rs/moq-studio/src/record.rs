@@ -1,10 +1,12 @@
 //! Recording the program, and optionally each source, to disk beside any live
 //! output.
 //!
-//! A recording reads the studio's broadcast the way a relay viewer does, so it
-//! shares the live encoders and starts and stops without touching what the
-//! relay serves, each local source's track from the studio's local broadcast,
-//! which its reading keeps encoding, and each broadcast source, a guest's
+//! A recording reads, the way a relay viewer does, the program from a hidden
+//! broadcast no relay sees, holding its own full-size encode of the video, at
+//! full quality whatever the grant, and of the mix, so it starts and stops
+//! without touching what the relay serves; each local source's track from the
+//! studio's local broadcast, which its reading keeps encoding; and each
+//! broadcast source, a guest's
 //! included, as it arrives through the origin the studio subscribes through,
 //! copied without a re-encode. Each file is an MP4 that plays while it
 //! grows, so a crash still leaves a playable file, and becomes a regular MP4

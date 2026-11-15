@@ -3210,7 +3210,7 @@ mod tests {
 	/// the layout ends and the catalog stops listing it, and quitting ends a
 	/// layout published again.
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn the_program_carries_a_layer_layout() {
 		use moq_scene::layout::{Layout, TRACK};
 
@@ -3300,7 +3300,7 @@ mod tests {
 	/// mix other than the one on program records its audio.
 
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn the_program_records_without_a_relay() {
 		let dir = tempfile::tempdir().unwrap();
 		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
@@ -3395,7 +3395,7 @@ mod tests {
 	/// as does the clip once a scene on air places it. The program shows the
 	/// clip, and what its source's mask reads, while a stinger plays it.
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn the_program_rests_a_stinger_clip() {
 		let dir = tempfile::tempdir().unwrap();
 		let clip = include_bytes!("../../moq-scene/src/test_data/clip.mkv");
@@ -3701,7 +3701,7 @@ mod tests {
 	/// viewer the relay serves, then its broadcast; unpublishing gives its
 	/// session back.
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn a_published_scene_has_its_own_broadcast() {
 		let _ = moq_tokio::crypto::install_default();
 		let fixture = moq_relay::test_relay().await.expect("test relay");
@@ -4257,7 +4257,7 @@ mod tests {
 	/// at the canvas size and at half of it, with its audio alongside. The half
 	/// size holds an encode session only once watched.
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn the_program_reaches_a_relay() {
 		let _ = moq_tokio::crypto::install_default();
 		let fixture = moq_relay::test_relay().await.expect("test relay");

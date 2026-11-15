@@ -7,12 +7,14 @@ Start with the [README](README.md) for what the studio does and how to build it.
 PRs into `main` are squash-merged, so the PR title becomes the commit subject in `git log`.
 
 - Use conventional-commit subjects (`feat(scene): ...`, `fix: ...`, `chore: ...`, `docs: ...`).
+  A PR that only adds or edits quests uses the `quest` type, with or without a scope (`quest: ...`, `quest(m0/ux): ...`).
 - Never commit binaries or build artifacts. Keep other binary files, such as images and fixtures, under 500 KiB.
 
 # PRs
 
 Keep the body short and structured, not narrated.
-Have at least these sections:
+A PR that only adds or edits quests follows the quest guide's format (`quest guide`) instead of these sections.
+Every other PR has at least these sections:
 
 - **Problem**: a summary of the problem and why this PR is needed.
 - **Approach**: a summary of the approach taken to solve the problem.
