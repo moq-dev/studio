@@ -3,18 +3,23 @@
 # arguments, and check that it lists cameras and audio, opens its window, and
 # quits when asked without crashing. A fresh home directory makes it open a
 # new scene collection, so guided setup lists the devices.
+# Given a disk image instead, it mounts it as a download is and launches the
+# app inside, after checking the image offers the drag to Applications.
 set -euo pipefail
 
-app=$(cd "$1" && pwd)
-executable=$app/Contents/MacOS/moq-studio
-home=$(mktemp -d)
+# Resolved, since /var is a link and the process lists its real path.
+home=$(cd "$(mktemp -d)" && pwd -P)
 log=$home/studio.log
 touch "$log"
 pid=
+volume=
 
 cleanup() {
     if [[ -n $pid ]]; then
         kill "$pid" 2>/dev/null || true
+    fi
+    if [[ -n $volume ]]; then
+        hdiutil detach -force "$volume" >/dev/null || true
     fi
     echo "--- the studio's log"
     cat "$log"
@@ -26,6 +31,19 @@ fail() {
     echo "$1" >&2
     exit 1
 }
+
+if [[ $1 == *.dmg ]]; then
+    volume=$home/volume
+    mkdir "$volume"
+    hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$volume" "$1" >/dev/null
+    [[ $(readlink "$volume/Applications") == /Applications ]] || fail "the image has no link to Applications"
+    apps=("$volume"/*.app)
+    ((${#apps[@]} == 1)) && [[ -d ${apps[0]} ]] || fail "the image holds no single app"
+    app=${apps[0]}
+else
+    app=$(cd "$1" && pwd -P)
+fi
+executable=$app/Contents/MacOS/moq-studio
 
 # Whether the studio has a window on screen. Listing windows by owner needs
 # no permission, unlike reading their titles.

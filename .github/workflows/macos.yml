@@ -1,10 +1,11 @@
 name: macOS
 
 # Builds the macOS app bundle for each architecture, signs it ad hoc with the
-# release's hardened runtime and entitlements, and checks it launches and
-# lists devices. Pull requests that change the packaging run it; nightly runs
-# it against main. release.yml calls it with `sign`, which signs the bundles as
-# the Developer ID, notarizes them, checks them again, and ships what it packs.
+# release's hardened runtime and entitlements, packs it into a disk image, and
+# checks the app in the image launches and lists devices. Pull requests that
+# change the packaging run it; nightly runs it against main. release.yml calls
+# it with `sign`, which signs and notarizes the app as the Developer ID, then
+# the disk image holding it, checks them again, and ships the images.
 
 permissions:
   contents: read
@@ -62,18 +63,23 @@ jobs:
       - name: Sign ad hoc
         run: packaging/macos/sign.sh "kixel.live Studio.app" -
 
-      - name: Smoke test
-        run: packaging/macos/smoke.sh "kixel.live Studio.app"
+      # dmg.sh's builder needs a newer Python than macOS ships.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
 
-      # ditto keeps the bundle's symlinks and signature intact, unlike zip.
       - name: Pack
-        run: ditto -c -k --keepParent "kixel.live Studio.app" "moq-studio-macos-${{ matrix.arch }}.zip"
+        run: packaging/macos/dmg.sh "kixel.live Studio.app" "moq-studio-macos-${{ matrix.arch }}.dmg"
+
+      - name: Smoke test
+        run: packaging/macos/smoke.sh "moq-studio-macos-${{ matrix.arch }}.dmg"
 
       - name: Upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: unsigned-macos-${{ matrix.arch }}
-          path: moq-studio-macos-${{ matrix.arch }}.zip
+          path: moq-studio-macos-${{ matrix.arch }}.dmg
           if-no-files-found: error
 
   sign:
@@ -113,10 +119,23 @@ jobs:
         with:
           name: unsigned-macos-${{ matrix.arch }}
 
+      # The app out of the image, to sign again; the image is packed anew.
       - name: Unpack
         run: |
-          ditto -x -k "moq-studio-macos-${{ matrix.arch }}.zip" .
-          rm "moq-studio-macos-${{ matrix.arch }}.zip"
+          image=moq-studio-macos-${{ matrix.arch }}.dmg
+          volume=$RUNNER_TEMP/unsigned
+          mkdir "$volume"
+          hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$volume" "$image"
+          ditto "$volume/kixel.live Studio.app" "kixel.live Studio.app"
+          hdiutil detach "$volume"
+          rm "$image"
+
+      # dmg.sh's builder needs a newer Python than macOS ships.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
 
       # A keychain of its own, holding the Developer ID certificate and the
       # intermediate that chains it to Apple's root, which runner images may
@@ -149,22 +168,22 @@ jobs:
       - name: Sign
         run: packaging/macos/sign.sh "kixel.live Studio.app" "$IDENTITY" "$KEYCHAIN"
 
-      - name: Notarize
+      - name: Notarize the app
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-        run: |
-          key=$RUNNER_TEMP/notary.p8
-          printf '%s\n' "$APPLE_API_PRIVATE_KEY" >"$key"
-          notary=(--key "$key" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
-          ditto -c -k --keepParent "kixel.live Studio.app" "$RUNNER_TEMP/notarize.zip"
-          result=$(xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" "${notary[@]}" --wait --timeout 1h --output-format json)
-          echo "$result"
-          # The log lists every issue, warnings included, even when accepted.
-          xcrun notarytool log "$(jq -r .id <<<"$result")" "${notary[@]}"
-          [[ $(jq -r .status <<<"$result") == Accepted ]]
-          xcrun stapler staple "kixel.live Studio.app"
+        run: packaging/macos/notarize.sh "kixel.live Studio.app"
+
+      - name: Pack
+        run: packaging/macos/dmg.sh "kixel.live Studio.app" "moq-studio-macos-${{ matrix.arch }}.dmg" "$IDENTITY" "$KEYCHAIN"
+
+      - name: Notarize the image
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: packaging/macos/notarize.sh "moq-studio-macos-${{ matrix.arch }}.dmg"
 
       - name: Remove the credentials
         if: always()
@@ -172,27 +191,32 @@ jobs:
           if [[ -n ${KEYCHAIN:-} ]]; then
             security delete-keychain "$KEYCHAIN"
           fi
-          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/identity.p12"
+          rm -f "$RUNNER_TEMP/identity.p12"
 
-      # What Gatekeeper decides for a download: a Developer ID signature with
-      # its notarization ticket stapled, so a first launch offline passes too.
+      # What Gatekeeper decides for a download, for the image opened and for
+      # the app run: a Developer ID signature with its notarization ticket
+      # stapled, so a first launch offline passes too.
       - name: Verify
         run: |
+          image=moq-studio-macos-${{ matrix.arch }}.dmg
+          codesign --verify --strict --verbose=2 "$image"
+          xcrun stapler validate "$image"
+          assessment=$(spctl --assess --type open --context context:primary-signature --verbose=2 "$image" 2>&1)
+          echo "$assessment"
+          [[ $assessment == *"source=Notarized Developer ID"* ]]
           codesign --verify --strict --deep --verbose=2 "kixel.live Studio.app"
           xcrun stapler validate "kixel.live Studio.app"
           assessment=$(spctl --assess --type execute --verbose=2 "kixel.live Studio.app" 2>&1)
           echo "$assessment"
           [[ $assessment == *"source=Notarized Developer ID"* ]]
 
+      # The app as the image holds it, which is what users run.
       - name: Smoke test
-        run: packaging/macos/smoke.sh "kixel.live Studio.app"
-
-      - name: Pack
-        run: ditto -c -k --keepParent "kixel.live Studio.app" "moq-studio-macos-${{ matrix.arch }}.zip"
+        run: packaging/macos/smoke.sh "moq-studio-macos-${{ matrix.arch }}.dmg"
 
       - name: Upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: macos-${{ matrix.arch }}
-          path: moq-studio-macos-${{ matrix.arch }}.zip
+          path: moq-studio-macos-${{ matrix.arch }}.dmg
           if-no-files-found: error

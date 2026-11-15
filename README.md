@@ -20,8 +20,8 @@ directory. The virtual camera is its PipeWire node only, since the sandbox
 has no `/dev/video*`.
 
 On macOS 13 or later, each release ships the app for Apple silicon
-(`moq-studio-macos-arm64.zip`) and Intel (`moq-studio-macos-x86_64.zip`),
-signed and notarized. Unzip it and drag **kixel.live Studio** to
+(`moq-studio-macos-arm64.dmg`) and Intel (`moq-studio-macos-x86_64.dmg`),
+signed and notarized. Open the disk image and drag **kixel.live Studio** to
 Applications. Opened from Finder or the Dock, it opens the scene collection
 in `~/Library/Application Support/moq-studio` and saves recordings to your
 Movies folder. macOS asks you to grant it the camera, microphone, and Screen &
