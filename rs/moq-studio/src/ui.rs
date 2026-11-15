@@ -1825,6 +1825,8 @@ fn fixed_shape(source: Option<&Source>) -> bool {
 			Source::Camera { .. }
 				| Source::Display { .. }
 				| Source::Window { .. }
+				| Source::PickedDisplay
+				| Source::PickedWindow
 				| Source::Image { .. }
 				| Source::Media { .. }
 				| Source::Broadcast { .. }
@@ -1961,6 +1963,8 @@ fn describe(source: &Source) -> String {
 		Source::Camera { id } => format!("camera: {}", or_default(id)),
 		Source::Display { id } => format!("display: {}", or_default(id)),
 		Source::Window { id } => format!("window: {id}"),
+		Source::PickedDisplay => "display: picked".into(),
+		Source::PickedWindow => "window: picked".into(),
 		Source::Microphone { id } => format!("microphone: {}", or_default(id)),
 		Source::SystemAudio => "system audio".into(),
 		Source::Image { path } => format!("image: {}", path.display()),
@@ -2051,6 +2055,8 @@ enum Kind {
 	Camera,
 	Display,
 	Window,
+	PickedDisplay,
+	PickedWindow,
 	Microphone,
 	SystemAudio,
 	Browser,
@@ -2061,7 +2067,7 @@ enum Kind {
 }
 
 impl Kind {
-	const ALL: [Self; 14] = [
+	const ALL: [Self; 16] = [
 		Self::Color,
 		Self::Image,
 		Self::Media,
@@ -2069,6 +2075,8 @@ impl Kind {
 		Self::Camera,
 		Self::Display,
 		Self::Window,
+		Self::PickedDisplay,
+		Self::PickedWindow,
 		Self::Microphone,
 		Self::SystemAudio,
 		Self::Browser,
@@ -2087,6 +2095,8 @@ impl Kind {
 			Self::Camera => "Camera",
 			Self::Display => "Display",
 			Self::Window => "Window",
+			Self::PickedDisplay => "Display (system picker)",
+			Self::PickedWindow => "Window (system picker)",
 			Self::Microphone => "Microphone",
 			Self::SystemAudio => "System audio",
 			Self::Browser => "Browser",
@@ -2100,7 +2110,9 @@ impl Kind {
 	/// What the value field holds, if this kind takes one.
 	fn value(self) -> Option<&'static str> {
 		match self {
-			Self::Color | Self::SystemAudio | Self::Replay | Self::Scene => None,
+			Self::Color | Self::SystemAudio | Self::Replay | Self::Scene | Self::PickedDisplay | Self::PickedWindow => {
+				None
+			}
 			Self::Image | Self::Media => Some("file"),
 			Self::Lut => Some(".cube file"),
 			Self::Broadcast => Some("path"),
@@ -2125,7 +2137,11 @@ impl AddSource {
 			egui::ComboBox::from_id_salt("kind")
 				.selected_text(self.kind.label())
 				.show_ui(ui, |ui| {
-					for kind in Kind::ALL {
+					// Only Linux has the system picker.
+					let picker = |kind: &Kind| {
+						cfg!(target_os = "linux") || !matches!(kind, Kind::PickedDisplay | Kind::PickedWindow)
+					};
+					for kind in Kind::ALL.into_iter().filter(picker) {
 						ui.selectable_value(&mut self.kind, kind, kind.label());
 					}
 				});
@@ -2212,6 +2228,8 @@ impl AddSource {
 			Kind::Camera => Source::Camera { id },
 			Kind::Display => Source::Display { id },
 			Kind::Window => Source::Window { id: value },
+			Kind::PickedDisplay => Source::PickedDisplay,
+			Kind::PickedWindow => Source::PickedWindow,
 			Kind::Microphone => Source::Microphone { id },
 			Kind::SystemAudio => Source::SystemAudio,
 			Kind::Browser => Source::Browser {

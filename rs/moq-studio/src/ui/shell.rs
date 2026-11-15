@@ -834,7 +834,9 @@ impl Panels {
 			let mut safe = snapshot.safe.as_deref() == Some(pad.name.as_str());
 			let toggle = ui
 				.add_enabled(takeable || safe, kit::Toggle::new(&mut safe).label("Safe scene"))
-				.on_hover_text("The scene the panic key cuts to, as it mutes every microphone and guest");
+				.on_hover_text(
+					"The scene the panic key cuts to, as it mutes every microphone and guest and hides the top layer",
+				);
 			if toggle.changed() {
 				action = Some(PadAction::Safe(pad.name.clone(), safe));
 			}
@@ -889,8 +891,8 @@ impl Panels {
 	fn panic_key(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, tall: bool) {
 		let room = rect.shrink(MARGIN);
 		let note = match &snapshot.safe {
-			Some(safe) => format!("Cut to `{safe}` and mute every microphone and guest"),
-			None => "Mute every microphone and guest. Mark a scene safe in its pad's menu to cut to it too.".into(),
+			Some(safe) => format!("Cut to `{safe}`, mute every microphone and guest, and hide the top layer"),
+			None => "Mute every microphone and guest and hide the top layer. Mark a scene safe in its pad's menu to cut to it too.".into(),
 		};
 		let key = self.key(&Action::Panic, ui.ctx());
 		let clip_key = self.key(&Action::SaveClip, ui.ctx());
