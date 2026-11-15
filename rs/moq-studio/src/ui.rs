@@ -38,7 +38,9 @@ mod review;
 mod settings;
 mod shell;
 
-use levels::{Levels, meter};
+use levels::Levels;
+#[cfg(test)]
+pub(crate) use mixer::View as MixView;
 
 /// The smallest the window gets, at which every part still has room.
 pub const MIN_SIZE: egui::Vec2 = layout::MIN;
@@ -164,7 +166,8 @@ impl Studio {
 			title_needs: 0.0,
 			renaming_audio: None,
 			speaker: None,
-			speakers: Speakers::default(),
+			speakers: mixer::Speakers::default(),
+			desk: mixer::Desk::default(),
 			canvas: None,
 			sizes: BTreeMap::new(),
 			new_item: None,
@@ -198,6 +201,13 @@ impl Studio {
 	/// Turn to `page`, as its button in the title bar would.
 	pub(crate) fn turn(&mut self, page: Page) {
 		self.panels.page = page;
+	}
+
+	/// Turn to MIX in `view`, with the strip of the sound called `opened`
+	/// open, as clicking its name would.
+	pub(crate) fn mix(&mut self, view: mixer::View, opened: Option<&str>) {
+		self.panels.page = Page::Mix;
+		self.panels.desk = mixer::Desk::new(view, opened);
 	}
 
 	/// Open Settings at `setting`, as the gear would.
@@ -460,7 +470,9 @@ struct Panels {
 	/// The output Listen plays on, by [`mix::Speaker::id`], or `None` for the
 	/// system default. Saved per user, not in the shared scene file.
 	speaker: Option<String>,
-	speakers: Speakers,
+	speakers: mixer::Speakers,
+	/// The MIX page's view and the strip open on it.
+	desk: mixer::Desk,
 	/// The canvas the Show tab's form holds until it is applied, or `None`
 	/// while it shows the collection's.
 	canvas: Option<Canvas>,
@@ -1136,21 +1148,8 @@ fn strip_controls(
 	let (slid, field) = ui
 		.horizontal(|ui| {
 			let slid = ui.add(kit::Slider::new(&mut at).width(120.0)).on_hover_text("Gain");
-			let level = egui::DragValue::new(&mut typed)
-				.range(MUTE_DB..=12.0)
-				// A scene file may hold more boost; showing it must not cut it.
-				.clamp_existing_to_range(false)
-				.speed(0.1)
-				.custom_formatter(|db, _| match db <= f64::from(MUTE_DB) {
-					true => "-inf".to_string(),
-					false => format!("{db:+.1}"),
-				})
-				.custom_parser(|text| match text.trim() {
-					"-inf" => Some(f64::from(MUTE_DB)),
-					text => text.parse().ok(),
-				});
 			let field = ui
-				.add(kit::Number::new(level).unit("dB").width(84.0))
+				.add(kit::Number::new(gain_field(&mut typed)).unit("dB").width(84.0))
 				.on_hover_text("Gain in decibels: drag, or type a level such as 0");
 			(slid, field)
 		})
@@ -1158,8 +1157,10 @@ fn strip_controls(
 	for (response, db) in [(slid, MUTE_DB + at * (12.0 - MUTE_DB)), (field, typed)] {
 		let gesture = gestures.of(&response);
 		if response.changed() {
-			let gain = if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) };
-			let audio = moq_scene::Audio { gain, ..audio.clone() };
+			let audio = moq_scene::Audio {
+				gain: gain(db),
+				..audio.clone()
+			};
 			change = Some((audio, format!("Set `{name}` gain"), gesture));
 		}
 	}
@@ -1958,6 +1959,29 @@ fn decibels(gain: f32) -> f32 {
 	}
 }
 
+/// The linear gain of `db` decibels, silence at or below [`MUTE_DB`].
+fn gain(db: f32) -> f32 {
+	if db <= MUTE_DB { 0.0 } else { 10f32.powf(db / 20.0) }
+}
+
+/// A field for a gain in decibels, `-inf` at [`MUTE_DB`], that drags or
+/// takes an exact level typed.
+fn gain_field(db: &mut f32) -> egui::DragValue<'_> {
+	egui::DragValue::new(db)
+		.range(MUTE_DB..=12.0)
+		// A scene file may hold more boost; showing it must not cut it.
+		.clamp_existing_to_range(false)
+		.speed(0.1)
+		.custom_formatter(|db, _| match db <= f64::from(MUTE_DB) {
+			true => "-inf".to_string(),
+			false => format!("{db:+.1}"),
+		})
+		.custom_parser(|text| match text.trim() {
+			"-inf" => Some(f64::from(MUTE_DB)),
+			text => text.parse().ok(),
+		})
+}
+
 /// The form that adds a source by hand.
 struct AddSource {
 	name: String,
@@ -2184,60 +2208,6 @@ impl AddSource {
 				None => Source::Program,
 			},
 		})
-	}
-}
-
-/// The audio outputs Listen can play on, listed once the Audio panel is shown
-/// and again on Refresh.
-#[derive(Default)]
-struct Speakers {
-	listing: Option<Result<Vec<mix::Speaker>, String>>,
-	pending: Option<std::sync::mpsc::Receiver<Result<Vec<mix::Speaker>, String>>>,
-}
-
-impl Speakers {
-	/// Pick the output `speaker` names, or `None` for the system default.
-	/// Returns whether the pick changed.
-	fn ui(&mut self, ui: &mut Ui, runtime: &tokio::runtime::Handle, speaker: &mut Option<String>) -> bool {
-		if let Some(listing) = self.pending.as_ref().and_then(|pending| pending.try_recv().ok()) {
-			self.listing = Some(listing);
-			self.pending = None;
-		}
-		let mut refresh = self.listing.is_none() && self.pending.is_none();
-		let before = speaker.clone();
-		ui.horizontal(|ui| {
-			ui.label("Listen on");
-			let speakers = self.listing.as_ref().and_then(|listing| listing.as_ref().ok());
-			let named = |id: &str| {
-				let found = speakers.and_then(|speakers| speakers.iter().find(|speaker| speaker.id == id));
-				found.map_or_else(|| format!("{id} (not found)"), |speaker| speaker.name.clone())
-			};
-			let shown = speaker.as_deref().map_or_else(|| "System default".to_string(), named);
-			egui::ComboBox::from_id_salt("speaker")
-				.selected_text(shown)
-				.show_ui(ui, |ui| {
-					ui.selectable_value(speaker, None, "System default");
-					for found in speakers.into_iter().flatten() {
-						ui.selectable_value(speaker, Some(found.id.clone()), &found.name);
-					}
-				});
-			if self.pending.is_some() {
-				ui.spinner();
-			} else if ui.small_button("Refresh").clicked() {
-				refresh = true;
-			}
-		});
-		if let Some(Err(err)) = &self.listing {
-			ui.colored_label(ui.visuals().error_fg_color, format!("Cannot list the outputs: {err}"));
-		}
-		if refresh {
-			let (send, recv) = std::sync::mpsc::channel();
-			runtime.spawn(async move {
-				let _ = send.send(mix::speakers().await);
-			});
-			self.pending = Some(recv);
-		}
-		*speaker != before
 	}
 }
 

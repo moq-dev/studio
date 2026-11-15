@@ -219,7 +219,7 @@ impl Panels {
 			}
 			Page::Build => self.build(ui, fx, stage, snapshot.shape),
 			// The sound slot holds the live picture instead.
-			Page::Mix => region(ui, stage, |ui| self.audio(ui)),
+			Page::Mix => self.mix(ui, stage),
 			Page::Review => {
 				// The live picture beside replays and recordings.
 				let side = (stage.width() * 0.32).clamp(220.0, 420.0);

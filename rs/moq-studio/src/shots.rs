@@ -14,11 +14,11 @@ use std::time::Duration;
 
 use eframe::egui_wgpu;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use moq_scene::source::Status;
 
 use crate::fx::Effects;
-use crate::ui::{Page, Setting, Tool};
+use crate::ui::{MixView, Page, Setting, Tool};
 use crate::{App, Window, autosave, engine, fx, hotkeys, setup};
 
 /// The window's size, the mock-ups'.
@@ -48,6 +48,8 @@ enum Open {
 /// Where a view turns the studio.
 enum View {
 	Page(Page),
+	/// The MIX page in a view, with the strip of the sound named open.
+	Mix(MixView, Option<&'static str>),
 	/// The BUILD page, showing a tool.
 	Tool(Tool),
 	/// Settings, at a tab.
@@ -65,6 +67,16 @@ fn studio(view: View) -> Open {
 		view,
 		size: SIZE,
 		show: "show.toml",
+	}
+}
+
+/// The studio on the MIX views' show, `size` large, turned to MIX in `view`
+/// with the strip of the sound called `opened` open.
+fn mixing(view: MixView, opened: Option<&'static str>, size: egui::Vec2) -> Open {
+	Open::Studio {
+		view: View::Mix(view, opened),
+		size,
+		show: "mix.toml",
 	}
 }
 
@@ -110,11 +122,17 @@ views! {
 	/// sound.
 	live_compact: Still, Open::Studio { view: View::Page(Page::Live), size: HALF, show: "show.toml" };
 	build: Still, studio(View::Page(Page::Build));
-	/// MIX holds the mixer, and a small live picture in the sound's place.
-	mix: Still, studio(View::Page(Page::Mix));
-	/// MIX in a stacked window, its live picture as tall as the sound's slot
-	/// allows.
-	mix_compact: Still, Open::Studio { view: View::Page(Page::Mix), size: HALF, show: "show.toml" };
+	/// MIX: a strip per sound and per audio scene, with their sends, and a
+	/// small live picture in the sound's place.
+	mix: Still, mixing(MixView::Strips, None, SIZE);
+	/// A sound's strip opened to its gain, pan, delay, and where it is heard,
+	/// its neighbours narrowed.
+	mix_strip: Still, mixing(MixView::Strips, Some("mic"), SIZE);
+	/// The same sends as a matrix.
+	mix_routes: Still, mixing(MixView::Routes, None, SIZE);
+	/// MIX in a stacked window, its strips scrolling, its live picture as
+	/// tall as the sound's slot allows.
+	mix_compact: Still, mixing(MixView::Strips, None, HALF);
 	review: Still, studio(View::Page(Page::Review));
 	graph: Still, studio(View::Setting(Setting::Graph));
 	history: Still, studio(View::Setting(Setting::History));
@@ -299,6 +317,95 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	quit(&engine, &runtime);
 }
 
+/// MIX's send dots, an opened strip's switches, a mute, and the audio scene
+/// tags edit the show as a person clicking them does, each an edit undo
+/// names: on the MIX views' show, on a real engine. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn mix_sends_and_mutes() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/mix.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(start(launch(&gpu), &runtime), &gpu, &runtime, SIZE);
+	harness.step();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.mix(MixView::Strips, None);
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let scene = |name: &str| {
+		let state = engine.state.lock().unwrap();
+		state.collection().audio_scene(name).cloned().expect("the audio scene")
+	};
+	let undo = || {
+		let state = engine.state.lock().unwrap();
+		let history = state.history();
+		let at = history.position().checked_sub(1)?;
+		history.entries().nth(at).map(|edit| edit.label.clone())
+	};
+
+	// A dot sends a sound in, and again takes it out.
+	assert!(!scene("Recording").sounds.contains("music"));
+	harness.get_by_label("Send music to Recording").click();
+	harness.run_steps(2);
+	assert!(scene("Recording").sounds.contains("music"), "sent");
+	assert_eq!(undo().as_deref(), Some("Put `music` in `Recording`"));
+	harness.get_by_label("Send music to Recording").click();
+	harness.run_steps(2);
+	assert!(!scene("Recording").sounds.contains("music"), "taken out");
+
+	// A sound heard only through Stream is sent straight in, and still
+	// reaches Headphones once it leaves Stream.
+	harness.get_by_label("Send guest to Headphones").click();
+	harness.run_steps(2);
+	assert!(scene("Headphones").sounds.contains("guest"));
+
+	// An audio scene sends into another, but never into one it holds.
+	harness.get_by_label("Send Recording to Headphones").click();
+	harness.run_steps(2);
+	assert!(scene("Headphones").scenes.contains("Recording"));
+	assert!(
+		harness
+			.get_by_label("Send Headphones to Stream")
+			.accesskit_node()
+			.is_disabled(),
+		"Headphones holds Stream"
+	);
+
+	// A strip's name opens it to its controls, and again closes it.
+	assert!(harness.query_by_label("Delay").is_none());
+	harness.get_by_label("Open mic").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Delay").is_some(), "opened");
+	harness.get_by_label("Close mic").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Delay").is_none(), "closed");
+
+	// The mute, and putting another audio scene on the stream.
+	harness.get_all_by_label("Mute").next().expect("a mute").click();
+	harness.run_steps(2);
+	assert_eq!(undo().as_deref(), Some("Mute `guest`"));
+	harness
+		.get_all_by_label("Put on stream")
+		.next()
+		.expect("one off the stream")
+		.click();
+	harness.run_steps(2);
+	assert!(scene("Headphones").program && !scene("Stream").program);
+
+	// A new audio scene, with nothing in it.
+	harness.get_by_label("Add an audio scene").click();
+	harness.run_steps(2);
+	assert_eq!(scene("Audio scene 4").sounds.len(), 0);
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// Draw what `open` opens on a fresh engine, from a scene file in `shows`.
 fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, shows: &Path) -> image::RgbaImage {
 	if let &Open::Kit { sheet } = open {
@@ -332,6 +439,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	};
 	match view {
 		View::Page(page) => studio.turn(*page),
+		View::Mix(view, opened) => studio.mix(*view, *opened),
 		View::Tool(tool) => studio.tool(*tool),
 		View::Setting(setting) => studio.open(*setting),
 		View::Health => studio.details(),

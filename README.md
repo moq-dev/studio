@@ -171,7 +171,7 @@ The **strip** holds:
 | --- | --- |
 | LIVE | Watch the program while on air. |
 | BUILD | Edit the scene on program, shown in the middle, with the panels below beside it: Layers, Scenes, Sources, Devices, and Guests on the left, and Filters and Keyframes on the right, or all on the left in a narrow window. |
-| MIX | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, pan, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. The program shows small in the strip's place for the sound. |
+| MIX | Ride each sound's fader and mute it, open its strip for its pan and delay, and send each sound and audio scene into audio scenes, from dots under the strips or as a matrix under **Routes**. Put an audio scene on the stream, and listen to one on the output you pick (see [Audio scenes](#audio-scenes)). The program shows small in the strip's place for the sound. |
 | REVIEW | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip (see [Replay](#replay)), and start and stop recording and pick the picture and the audio scene it records (see [Recording](#recording)), beside the program. |
 
 BUILD's panels:
@@ -403,25 +403,43 @@ once, and an audio scene never holds itself, even through others. Add,
 rename, reorder, and remove audio scenes in the Scenes panel, where they are
 tagged `audio` and listed after the scenes.
 
-The MIX page is a mixer. Each sound has a strip, with its gain, pan, mute,
-delay, and meter, which apply in every audio scene holding it, and a send to
-each audio scene; each audio scene has a strip with its meter and a send to
-each other audio scene. A source added from the Sources or Devices panel, or
-pasted, is sent to the audio scene on program, so it is heard at once.
-**On program** picks the audio scene the broadcast carries, and switching
-it, or editing an audio scene, never drops or repeats audio. A recording holds
-the audio scene on program unless REVIEW picks another, such as one
-keeping music the stream leaves out, and each published scene carries the one
-on program unless the Scenes panel picks another beside its **Publish** box;
-switching either while it runs never drops or repeats audio either. The audio
-scene on program cannot be removed; removing one a recording or published
-scene picks returns it to the one on program.
+The MIX page is a mixing desk. Each sound has a strip: its name, a meter, a
+fader for its gain in decibels (unity is marked, and a double click returns
+to it), its gain to read or type, and its mute, which turns amber while it
+is on. These apply in every audio scene holding the sound. Click a sound's
+name to open its strip to its gain, pan (a double click centers it), and
+delay, and the audio scenes it is heard in; the other strips narrow beside it
+rather than hide. Each audio scene has a strip after the sounds with its
+meter, on the same scale, and **Listen**. A meter's top is full scale, where
+its last segment turns red: the sound clips.
 
-**Listen** plays an audio scene to an audio output, from the `capture`
-feature's build, as the strip's **Listen** plays the audio scene on program: the system default, or the one picked under **Listen on**,
-which the studio remembers for you rather than in the scene file. Use
-headphones: a microphone that hears the speakers feeds its audio scene back
-into itself.
+Under each strip is a dot for each audio scene, marked with its initial:
+filled where the strip is sent into it, the accent's color for the one the
+stream carries; ringed where it is heard there only through another audio
+scene; and faint where it is not heard. A click sends it in or takes it out.
+An audio scene shows a dash under its own strip and under any it holds, which
+it cannot be sent back into. **Routes** shows the same sends as a matrix, a
+row for each sound and audio scene and a column for each audio scene, with
+what each one holds at its foot.
+
+A source added from the Sources or Devices panel, or pasted, is sent to the
+audio scene on program, so it is heard at once. The audio scene on program is
+tagged **Stream hears this**; **Put on stream** on another's strip puts that
+one on program instead, and switching it, or editing an audio scene, never
+drops or repeats audio. **+** after the audio scenes adds one, holding
+nothing. A recording holds the audio scene on program unless REVIEW picks
+another, such as one keeping music the stream leaves out, which is tagged
+**In the recording**, and each published scene carries the one on program
+unless the Scenes panel picks another beside its **Publish** box; switching
+either while it runs never drops or repeats audio either. The audio scene on
+program cannot be removed; removing one a recording or published scene picks
+returns it to the one on program.
+
+**Listen** on an audio scene's strip plays it to an audio output, from the
+`capture` feature's build: the system default, or the one picked from the tag
+on the strip while it plays, which the studio remembers for you rather than
+in the scene file. Use headphones: a microphone that hears the speakers feeds
+its audio scene back into itself.
 
 A source's **delay** holds it back in every audio scene, up to 2 s, so a microphone
 lines up with a camera that lags it. A broadcast's picture already follows its
