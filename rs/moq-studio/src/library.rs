@@ -383,7 +383,8 @@ impl Library {
 			});
 			ui.with_layout(egui::Layout::right_to_left(Align::Max), |ui| {
 				let open = kit::button(Icon::Open, "Open a show file").min_size(vec2(0.0, 38.0));
-				ui.add_enabled(self.dialog.is_none(), open).clicked()
+				ui.add_enabled(self.dialog.is_none() && self.opening.is_none(), open)
+					.clicked()
 			})
 			.inner
 		})

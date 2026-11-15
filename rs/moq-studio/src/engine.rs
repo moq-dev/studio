@@ -1404,11 +1404,14 @@ impl Engine {
 			if let Some(reply) = end {
 				// The stream on air, or one handed over since that never drew a
 				// frame, such as one ended at once at a low frame rate.
-				let ending = air
+				let mut ending = air
 					.take()
 					.or_else(|| starting.take())
 					.map(air::Lines::end)
 					.unwrap_or_default();
+				// The scenes unpublished on air too, so each finishes its
+				// track before the stream's sessions close.
+				ending.ended.append(&mut retired);
 				if let Err(ending) = reply.send(ending) {
 					retired.extend(ending.ended);
 				}

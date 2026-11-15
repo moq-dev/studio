@@ -425,11 +425,17 @@ impl Credentials {
 		Self(Ok(store))
 	}
 
-	/// The token kept for the relay at `url`, if any.
+	/// The token kept for the relay at `url`, if any. Without a store, none:
+	/// a relay that needs no token still connects, one that does refuses the
+	/// connection, and saving a token says why it cannot.
 	///
 	/// Blocks on the store, which may ask the user to unlock it: call it off
 	/// the window's thread, and outside an async task.
 	pub fn get(&self, url: &Url) -> anyhow::Result<Option<String>> {
+		if let Err(err) = &self.0 {
+			tracing::warn!(%err, "no credential store, so the relay is dialed without a token");
+			return Ok(None);
+		}
 		match self.entry(url)?.get_password() {
 			Ok(token) => Ok(Some(token)),
 			Err(keyring_core::Error::NoEntry) => Ok(None),
@@ -662,6 +668,33 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(stream.dials(Switched::default()).unwrap(), [(relay, Vec::new())]);
+	}
+
+	/// Without a credential store, a relay that needs no token still dials,
+	/// tokenless, while saving a token says why it cannot.
+	#[test]
+	fn a_relay_without_a_token_needs_no_store() {
+		let dir = tempfile::tempdir().unwrap();
+		let relay: Url = "https://a.example/".parse().unwrap();
+		let flags = Flags {
+			relay: Some(relay.clone()),
+			..Default::default()
+		};
+		let broken = Credentials(Err("no Secret Service".into()));
+		let stream = Stream::load(
+			&dir.path().join("show.toml"),
+			flags,
+			Default::default(),
+			Default::default(),
+			broken,
+		)
+		.unwrap();
+		assert_eq!(
+			stream.dials(Switched::default()).unwrap(),
+			[(relay.clone(), Vec::new())]
+		);
+		let refused = stream.credentials().set(&relay, Some("secret")).unwrap_err();
+		assert!(format!("{refused:#}").contains("no Secret Service"), "{refused:#}");
 	}
 
 	/// Watching, measuring, and going live share one client per relay, so a

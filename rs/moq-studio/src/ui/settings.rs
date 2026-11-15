@@ -105,7 +105,11 @@ impl Panels {
 		// Every published scene, on air or not, since its virtual camera works
 		// off air too; its encoder runs only on air.
 		let encoding = stats.published();
-		let published = self.engine.state.lock().unwrap().collection().published.clone();
+		let published: Vec<String> = {
+			let state = self.engine.state.lock().unwrap();
+			let scenes = state.collection().scenes.iter().filter(|scene| scene.published);
+			scenes.map(|scene| scene.name.clone()).collect()
+		};
 		for name in published {
 			ui.separator();
 			ui.strong(format!("Scene `{name}`"));

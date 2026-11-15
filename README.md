@@ -238,8 +238,8 @@ to the scene file, or a failed save, shows over its top until it is settled.
 - **Checks**, filled in as they finish: whether each camera has a picture,
   whether a microphone's level moves, whether the encoder keeps up with the
   canvas (timed as [setup](#first-launch) times it), and whether the
-  connection to the first relay switched on carries what the stream sends
-  (measured as setup measures it). A failed check is one sentence and its fix,
+  connection to the first relay switched on carries the program (measured as
+  setup measures it; published scenes and sources share what is left). A failed check is one sentence and its fix,
   such as **Send 720p instead**, which changes the canvas, or **Check again**.
 - **GO LIVE TO** the number of destinations switched on. A failed check never
   stops you; only having none switched on does.
@@ -270,7 +270,8 @@ shared:
 Tokens are kept in the system's credential store (the Secret Service on Linux,
 the login keychain on macOS, the Credential Manager on Windows), one per relay
 address, never in a file: a `?jwt=` typed into an address moves there when
-saved. A setting a flag overrides for this run says so. A change applies the
+saved. Without a credential store, a relay that needs no token still
+connects, and saving a token says why it cannot. A setting a flag overrides for this run says so. A change applies the
 next time you go live; a change to the room the guests join applies once the
 show is opened again. The recordings folder and the guests' room are kept in
 the same file, as `recordings`, `room`, `room_key`, `join_page`, and

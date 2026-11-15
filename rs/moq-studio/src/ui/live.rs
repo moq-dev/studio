@@ -637,7 +637,8 @@ impl Panels {
 			},
 		});
 
-		// The connection carries what the stream sends.
+		// The connection carries the program. Published scenes and sources
+		// share what is left, following the connection as it changes.
 		let again = ("Check again".to_string(), Fix::Again);
 		checks.push(match (going.uplink.as_ref().map(|uplink| &uplink.task), &encoding) {
 			(None, _) | (Some(Task::Running(_)), _) => Check {
@@ -672,7 +673,7 @@ impl Panels {
 						icon: Icon::Uplink,
 						name: "Connection",
 						said: format!(
-							"Carries {}, and this stream needs {}",
+							"Carries {}, and the program needs {}",
 							health::rate(*carries),
 							health::rate(needs)
 						),
@@ -684,7 +685,7 @@ impl Panels {
 						icon: Icon::Uplink,
 						name: "Connection",
 						said: format!(
-							"The connection carries {} and this stream needs {}. Viewers would see it stall.",
+							"The connection carries {} and the program needs {}. Viewers would see it stall.",
 							health::rate(*carries),
 							health::rate(needs)
 						),
@@ -857,6 +858,12 @@ impl Panels {
 				let retokened =
 					!form.tokens().is_empty() || [&form.relay, &form.failover].iter().any(|url| url.contains("jwt="));
 				let deferred = self.controls.set_stream(saved.clone(), moved || retokened);
+				// A measurement under way is of the relay as it was.
+				if (moved || retokened)
+					&& let Some(going) = &mut self.going
+				{
+					going.uplink = None;
+				}
 				*form = Form::new(&saved);
 				form.note = Some(match deferred {
 					true => "Saved. It applies the next time you go live; broadcast sources and guests follow the new relays once this stream ends.".into(),

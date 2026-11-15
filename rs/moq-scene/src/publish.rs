@@ -207,6 +207,8 @@ impl Publish {
 		// finishing its track, once dropped.
 		let mut copies: BTreeMap<String, (tokio::task::JoinHandle<()>, tokio::sync::watch::Sender<()>)> =
 			BTreeMap::new();
+		// The copies of tracks no longer listed, still finishing them.
+		let mut retiring: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 		loop {
 			let listed: BTreeMap<String, hang::Catalog> = {
 				let published = published.borrow_and_update();
@@ -218,8 +220,19 @@ impl Publish {
 				.iter()
 				.flat_map(|(source, catalog)| tracks(catalog).map(move |(name, rate)| (name, (source.clone(), rate))))
 				.collect();
-			// Dropped, a copy finishes its track on its own.
-			copies.retain(|name, _| tracks.contains_key(name));
+			// Its stopper dropped, a copy finishes its track on its own, and is
+			// still waited on below should forwarding stop first.
+			retiring.retain(|copy| !copy.is_finished());
+			let gone: Vec<String> = copies
+				.keys()
+				.filter(|name| !tracks.contains_key(*name))
+				.cloned()
+				.collect();
+			for name in gone {
+				if let Some((copy, _stopper)) = copies.remove(&name) {
+					retiring.push(copy);
+				}
+			}
 			for (name, (source, rate)) in tracks {
 				if copies.contains_key(&name) {
 					continue;
@@ -257,7 +270,7 @@ impl Publish {
 		// Each stopped as its stopper drops, and waited on, so the broadcast
 		// holds every copied track's end before the listing goes.
 		let copies: Vec<_> = copies.into_values().map(|(copy, _stopper)| copy).collect();
-		for copy in copies {
+		for copy in copies.into_iter().chain(retiring) {
 			let _ = copy.await;
 		}
 		catalog.mutate(|root| root.ext.studio.sources.clear())?;
