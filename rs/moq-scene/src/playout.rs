@@ -721,7 +721,13 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_step_past_the_reach_falls_silent_then_sounds_on_schedule() {
 		let stepped = stepped(STRETCH, (500, 0)).await;
-		assert!(stepped.silent < 48 * 500, "{} samples of silence", stepped.silent);
+		// It falls silent for the step less what the stretch could have reached.
+		let reach = 48 * (500 - STRETCH.as_millis() as usize);
+		assert!(
+			(reach..48 * 500).contains(&stepped.silent),
+			"{} samples of silence",
+			stepped.silent
+		);
 		for (span, moved) in [(500..900, 0), (1_600..2_900, 500), (4_500..4_900, 0)] {
 			let lag = stepped.lag(span.clone(), moved);
 			assert!(lag.abs() <= 240, "{lag} frames behind over {span:?} ms");
