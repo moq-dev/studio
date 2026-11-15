@@ -272,10 +272,10 @@ fn holds(scene: &AudioScene) -> String {
 
 /// An edit the page asked for this frame, made once it is drawn.
 enum Change {
-	/// The sound called `name`'s gain, mute, pan, or delay.
+	/// One of the sound called `name`'s settings.
 	Audio {
 		name: String,
-		audio: moq_scene::Audio,
+		set: Setting,
 		label: String,
 		gesture: Option<u64>,
 	},
@@ -295,6 +295,32 @@ enum Change {
 	Listen(Option<String>),
 	/// Listen on this output, or the system default.
 	Speaker(Option<String>),
+}
+
+/// One setting of a sound's audio, as one control changes it.
+///
+/// An edit carries only the setting its control changed, made on the sound's
+/// audio as it is when applied: a whole copy from when the page was drawn
+/// would undo an edit made in between, such as the panic key's mute from a
+/// hotkey's thread.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Setting {
+	Gain(f32),
+	Muted(bool),
+	Pan(f32),
+	Delay(Duration),
+}
+
+impl Setting {
+	/// Make it on `audio`.
+	fn on(self, audio: &mut moq_scene::Audio) {
+		match self {
+			Self::Gain(gain) => audio.gain = gain,
+			Self::Muted(muted) => audio.muted = muted,
+			Self::Pan(pan) => audio.pan = pan,
+			Self::Delay(delay) => audio.delay = delay,
+		}
+	}
 }
 
 /// Room around the page's contents.
@@ -582,13 +608,9 @@ impl Panels {
 			.lit(muted, kit::CUE)
 			.width(parts.buttons.width());
 		if ui.put(parts.buttons, button).clicked() {
-			let audio = moq_scene::Audio {
-				muted: !muted,
-				..sound.audio.clone()
-			};
 			changes.push(Change::Audio {
 				name: name.clone(),
-				audio,
+				set: Setting::Muted(!muted),
 				label: format!("{verb} `{name}`"),
 				gesture: None,
 			});
@@ -781,7 +803,7 @@ impl Panels {
 					if pan != audio.pan {
 						changes.push(Change::Audio {
 							name: name.clone(),
-							audio: moq_scene::Audio { pan, ..audio.clone() },
+							set: Setting::Pan(pan),
 							label: format!("Set `{name}` pan"),
 							gesture: gesture.or(field_gesture),
 						});
@@ -813,10 +835,7 @@ impl Panels {
 					if millis != audio.delay.as_millis() as u64 {
 						changes.push(Change::Audio {
 							name: name.clone(),
-							audio: moq_scene::Audio {
-								delay: Duration::from_millis(millis),
-								..audio.clone()
-							},
+							set: Setting::Delay(Duration::from_millis(millis)),
 							label: format!("Set `{name}` delay"),
 							gesture: gesture.or(field_gesture),
 						});
@@ -1102,10 +1121,14 @@ impl Panels {
 			let done = match change {
 				Change::Audio {
 					name,
-					audio,
+					set,
 					label,
 					gesture,
-				} => edit(&mut state, label, gesture, |draft| draft.set_audio(&name, Some(audio))),
+				} => {
+					let mut audio = state.collection().audio.get(&name).cloned().unwrap_or_default();
+					set.on(&mut audio);
+					edit(&mut state, label, gesture, |draft| draft.set_audio(&name, Some(audio)))
+				}
 				Change::Send { scene, from, to, on } => {
 					let strip = if scene {
 						Strip::Scene(&from)
@@ -1258,10 +1281,7 @@ fn gain_change(sound: &Channel, db: f32, gesture: Option<u64>) -> Change {
 	let name = &sound.name;
 	Change::Audio {
 		name: name.clone(),
-		audio: moq_scene::Audio {
-			gain: gain(db),
-			..sound.audio.clone()
-		},
+		set: Setting::Gain(gain(db)),
 		label: format!("Set `{name}` gain"),
 		gesture,
 	}
