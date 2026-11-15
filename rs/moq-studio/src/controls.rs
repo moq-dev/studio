@@ -193,20 +193,18 @@ impl Controls {
 		let spawned = std::thread::Builder::new().name("go live".into()).spawn(move || {
 			// Each relay's client binds its socket on the runtime.
 			let _runtime = controls.runtime.enter();
-			// Relays saved since the last stream are followed before this one
-			// dials, after any follow already under way.
-			{
+			// One snapshot of the settings, both followed, if their relays wait
+			// to be, and gone live with, after any follow already under way.
+			// A save after it waits for this stream to end.
+			let stream = {
 				let _following = controls.following.lock().unwrap();
-				if controls.rewatch.swap(false, Ordering::AcqRel) {
-					let stream = controls.stream.lock().unwrap().clone();
+				let (stream, waiting) = controls.snapshot();
+				if waiting {
 					crate::show::follow(&controls.engine, &stream);
 				}
-			}
+				stream
+			};
 			let switched = *controls.switched.lock().unwrap();
-			// Cloned in a statement of its own, so the lock is not held
-			// while the credential store blocks, which would freeze the
-			// window reading the settings.
-			let stream = controls.stream.lock().unwrap().clone();
 			let destination = stream.destination(switched);
 			let result = destination.and_then(|destination| {
 				let to = destination.broadcast.clone();
@@ -237,13 +235,32 @@ impl Controls {
 		self.going.load(Ordering::Acquire)
 	}
 
-	/// The stream settings' relays were saved: follow them now when off air,
-	/// or once the stream ends. Says whether it waits for the stream.
-	pub fn relays_saved(self: &Arc<Self>) -> bool {
-		self.rewatch.store(true, Ordering::Release);
+	/// Take `stream` as the settings, as Settings saved them. When
+	/// `relays_changed`, follow the new relays now if off air, or once the
+	/// stream ends; says whether they wait for it.
+	pub fn set_stream(self: &Arc<Self>, stream: Stream, relays_changed: bool) -> bool {
+		{
+			// Marked with the settings it belongs to, so a snapshot never
+			// holds the new relays without knowing they wait to be followed.
+			let mut current = self.stream.lock().unwrap();
+			*current = stream;
+			if relays_changed {
+				self.rewatch.store(true, Ordering::Release);
+			}
+		}
+		if !relays_changed {
+			return false;
+		}
 		let waits = self.going() || self.engine.on_air() != OnAir::Off;
 		self.follow_saved_relays();
 		waits
+	}
+
+	/// The settings, and whether their relays wait to be followed, which
+	/// this takes on, as one, so a save never falls between the two.
+	fn snapshot(&self) -> (Stream, bool) {
+		let stream = self.stream.lock().unwrap();
+		(stream.clone(), self.rewatch.swap(false, Ordering::AcqRel))
 	}
 
 	/// Follow the saved relays, if any wait to be, on a thread of its own,
@@ -253,13 +270,15 @@ impl Controls {
 		let controls = self.clone();
 		let spawned = std::thread::Builder::new().name("follow".into()).spawn(move || {
 			let _following = controls.following.lock().unwrap();
-			let off = !controls.going() && controls.engine.on_air() == OnAir::Off;
-			if !off || !controls.rewatch.swap(false, Ordering::AcqRel) {
+			if controls.going() || controls.engine.on_air() != OnAir::Off {
+				return;
+			}
+			let (stream, waiting) = controls.snapshot();
+			if !waiting {
 				return;
 			}
 			// Each relay's client binds its socket on the runtime.
 			let _runtime = controls.runtime.enter();
-			let stream = controls.stream.lock().unwrap().clone();
 			crate::show::follow(&controls.engine, &stream);
 		});
 		if let Err(err) = spawned {

@@ -849,14 +849,14 @@ impl Panels {
 		let Some(saved) = saving.poll() else { return };
 		match saved.clone() {
 			Ok(saved) => {
-				let before = std::mem::replace(&mut *self.controls.stream.lock().unwrap(), saved.clone());
+				let before = self.controls.stream.lock().unwrap().clone();
 				// Only a new address or token follows the relays anew, which
 				// cuts the broadcast sources and guests they carry, so not on
 				// air: then once the stream ends.
 				let moved = before.relay() != saved.relay() || before.failover() != saved.failover();
 				let retokened =
 					!form.tokens().is_empty() || [&form.relay, &form.failover].iter().any(|url| url.contains("jwt="));
-				let deferred = (moved || retokened) && self.controls.relays_saved();
+				let deferred = self.controls.set_stream(saved.clone(), moved || retokened);
 				*form = Form::new(&saved);
 				form.note = Some(match deferred {
 					true => "Saved. It applies the next time you go live; broadcast sources and guests follow the new relays once this stream ends.".into(),
