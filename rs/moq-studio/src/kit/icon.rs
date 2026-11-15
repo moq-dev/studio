@@ -48,12 +48,20 @@ pub enum Icon {
 	Build,
 	Mix,
 	Review,
+	Open,
+	Check,
+	Encoder,
+	Warning,
+	Landscape,
+	Portrait,
+	Uplink,
+	Camera,
 }
 
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 32] = [
+	pub const ALL: [Self; 40] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -86,6 +94,14 @@ impl Icon {
 		Self::Build,
 		Self::Mix,
 		Self::Review,
+		Self::Open,
+		Self::Check,
+		Self::Encoder,
+		Self::Warning,
+		Self::Landscape,
+		Self::Portrait,
+		Self::Uplink,
+		Self::Camera,
 	];
 
 	fn source(self) -> ImageSource<'static> {
@@ -122,6 +138,14 @@ impl Icon {
 			Self::Build => include_image!("../../assets/icons/layers.svg"),
 			Self::Mix => include_image!("../../assets/icons/sliders-vertical.svg"),
 			Self::Review => include_image!("../../assets/icons/film.svg"),
+			Self::Open => include_image!("../../assets/icons/folder-open.svg"),
+			Self::Check => include_image!("../../assets/icons/check.svg"),
+			Self::Encoder => include_image!("../../assets/icons/cpu.svg"),
+			Self::Warning => include_image!("../../assets/icons/triangle-alert.svg"),
+			Self::Landscape => include_image!("../../assets/icons/rectangle-horizontal.svg"),
+			Self::Portrait => include_image!("../../assets/icons/rectangle-vertical.svg"),
+			Self::Uplink => include_image!("../../assets/icons/upload.svg"),
+			Self::Camera => include_image!("../../assets/icons/video.svg"),
 		}
 	}
 

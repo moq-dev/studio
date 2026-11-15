@@ -17,7 +17,7 @@ use moq_scene::{Canvas, Collection, Draft, Edit, History, Item, Rect, Scene};
 
 use crate::autosave::{self, Autosave};
 use crate::devices::{self, Listing, Pick};
-use crate::engine::{self, Engine, Launch};
+use crate::engine::{self, Engine, Launch, Relay};
 use crate::fx::{Fx, Mark};
 use crate::health::rate;
 use crate::uplink;
@@ -44,7 +44,7 @@ const fn canvas(width: u32, height: u32, framerate: u32) -> Canvas {
 /// Health panel's headroom grade healthy, so a proposal is not flagged the
 /// moment it goes live. The rest absorbs the estimate's error and whatever else
 /// shares the connection.
-fn headroom() -> f64 {
+pub(crate) fn headroom() -> f64 {
 	1.0 / hang::health::Thresholds::default().transport.headroom.degraded
 }
 
@@ -79,12 +79,12 @@ pub struct Encoding {
 
 impl Encoding {
 	/// What the program sends: this video plus the audio.
-	fn total(&self) -> Rate {
+	pub(crate) fn total(&self) -> Rate {
 		Rate::from_bps(self.bitrate.as_bps() + engine::AUDIO_BITRATE.as_bps())
 	}
 
 	/// Whether the encoder keeps up with `canvas` in real time, within [`PACE`].
-	fn keeps_up(&self, canvas: Canvas) -> bool {
+	pub(crate) fn keeps_up(&self, canvas: Canvas) -> bool {
 		self.frame <= budget(canvas)
 	}
 
@@ -134,6 +134,15 @@ async fn probe_encoders(gpu: engine::Gpu) -> Encoders {
 		probed.push((canvas, result));
 	}
 	probed
+}
+
+/// How `canvas` encodes on this machine, as going live checks it: the probe
+/// setup runs for each canvas it could propose.
+pub(crate) async fn probe(gpu: engine::Gpu, canvas: Canvas) -> Result<Encoding, String> {
+	let picture = Picture::new(&gpu);
+	probe_encoder(&gpu, &picture, canvas)
+		.await
+		.map_err(|err| format!("{err:#}"))
 }
 
 async fn probe_encoder(gpu: &engine::Gpu, picture: &Picture, canvas: Canvas) -> anyhow::Result<Encoding> {
@@ -465,7 +474,7 @@ fn corner(canvas: &Canvas) -> Rect {
 }
 
 /// A result being worked out in the background.
-enum Task<T> {
+pub(crate) enum Task<T> {
 	Running(mpsc::Receiver<T>),
 	Done(T),
 }
@@ -476,7 +485,7 @@ impl<T: Send + 'static> Task<T> {
 	/// blocking pool, which dropping the runtime waits out, so a probe that never
 	/// ends, such as one waiting on a camera permission prompt, cannot hold the
 	/// studio open once its window closes.
-	fn spawn<F, Fut>(runtime: &tokio::runtime::Handle, task: F) -> std::io::Result<Self>
+	pub(crate) fn spawn<F, Fut>(runtime: &tokio::runtime::Handle, task: F) -> std::io::Result<Self>
 	where
 		F: FnOnce() -> Fut + Send + 'static,
 		Fut: Future<Output = T>,
@@ -493,7 +502,7 @@ impl<T: Send + 'static> Task<T> {
 	///
 	/// Panics if the task did, rather than waiting forever on a result that
 	/// will never come.
-	fn poll(&mut self) -> Option<&T> {
+	pub(crate) fn poll(&mut self) -> Option<&T> {
 		if let Self::Running(recv) = self {
 			match recv.try_recv() {
 				Ok(done) => *self = Self::Done(done),
@@ -512,6 +521,8 @@ impl<T: Send + 'static> Task<T> {
 pub struct Setup {
 	runtime: tokio::runtime::Handle,
 	launch: Launch,
+	/// The relay the uplink is measured to, and the broadcast measured as.
+	relay: Option<(Relay, String)>,
 	/// The scene file, which does not exist until setup starts the studio.
 	path: PathBuf,
 	devices: Task<Listing>,
@@ -526,14 +537,21 @@ pub struct Setup {
 }
 
 impl Setup {
-	/// Start probing for `launch`, to create the scene file at `path`.
-	pub fn new(launch: Launch, path: PathBuf, runtime: tokio::runtime::Handle) -> std::io::Result<Self> {
+	/// Start probing for `launch`, to create the scene file at `path`, with
+	/// the uplink measured to `relay` as the broadcast it names.
+	pub fn new(
+		launch: Launch,
+		relay: Option<(Relay, String)>,
+		path: PathBuf,
+		runtime: tokio::runtime::Handle,
+	) -> std::io::Result<Self> {
 		let devices = Task::spawn(&runtime, devices::list)?;
 		let gpu = launch.gpu.clone();
 		let encoders = Task::spawn(&runtime, move || probe_encoders(gpu))?;
 		Ok(Self {
 			runtime,
 			launch,
+			relay,
 			path,
 			devices,
 			encoders,
@@ -598,15 +616,14 @@ impl Setup {
 				.map(|(_, encoding)| encoding.total())
 				.max()
 				.map(|top| top.scaled(1.0 / headroom()));
-			// The first relay's: the stream's tracks claim their bitrate on its
+			// The show's relay: the stream's tracks claim their bitrate on its
 			// link alone, so it is the one probed toward the stream's rate.
 			let connect = self
-				.launch
-				.relays
-				.first()
-				.map(|relay| (relay.client.clone(), relay.url.clone(), self.launch.broadcast.clone()));
+				.relay
+				.as_ref()
+				.map(|(relay, path)| (relay.client.clone(), relay.url.clone(), path.clone()));
 			self.uplink = Some(match (connect, ceiling) {
-				(None, _) => Task::Done(Err("no relay is configured; start with --connect to measure it".into())),
+				(None, _) => Task::Done(Err("no relay is set yet, so it was not measured".into())),
 				(Some(_), None) => Task::Done(Err("nothing encodes on this machine, so nothing would be sent".into())),
 				(Some((client, url, path)), Some(ceiling)) => {
 					let measured = Task::spawn(&self.runtime, move || async move {

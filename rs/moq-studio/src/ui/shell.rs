@@ -203,6 +203,7 @@ impl Panels {
 		self.toast(ui.ctx(), layout.stage);
 		self.settings(ui.ctx(), fx, layout.stage);
 		self.details(ui.ctx(), layout.stage);
+		self.going_sheet(ui.ctx());
 		// macOS keeps its own frame's edges, and resizes by them.
 		if self.framed && !cfg!(target_os = "macos") {
 			edges(ui, window);
@@ -244,10 +245,9 @@ impl Panels {
 		let id = self.program.id;
 		let canvas = self.program_drawn;
 		let builder = UiBuilder::new().max_rect(picture.expand(10.0));
+		let frame = self.program_frame();
 		ui.scope_builder(builder, |ui| {
-			TallyFrame::new(Tally::Air)
-				.tag("On air")
-				.show(ui, fx, |ui| super::picture(ui, id, canvas, Sense::hover()))
+			frame.show(ui, fx, |ui| super::picture(ui, id, canvas, Sense::hover()))
 		})
 		.inner
 	}
@@ -462,72 +462,6 @@ impl Panels {
 		}
 	}
 
-	/// The stream's health as one dot, its name beside it unless `compact`,
-	/// with each relay, the viewers, the encoder, and each problem in its
-	/// popover, which opens the details.
-	fn health_dot(&mut self, ui: &mut Ui, fx: &mut Fx, compact: bool) {
-		let report = self.engine.health.lock().unwrap();
-		let worst = report
-			.problems
-			.first()
-			.map_or(Verdict::Healthy, |problem| problem.verdict);
-		// A problem shows even when not publishing, such as a failed source.
-		let (name, dot) = match (worst, report.relays.is_empty()) {
-			(Verdict::Unhealthy, _) => ("Unhealthy", kit::ERR),
-			(Verdict::Degraded, _) => ("Degraded", kit::CUE),
-			(_, true) => ("Not live", kit::DIM),
-			(Verdict::Healthy, false) => ("Healthy", kit::OK),
-			(Verdict::Unknown, false) => ("Starting", kit::DIM),
-		};
-		let mark = fx.on().then(|| Mark::new(ui.painter()));
-		let text = if compact { "" } else { name };
-		let pill = ui.add(kit::Pill::new(text).dot(dot).clickable());
-		let pill = kit::tip(pill, &format!("Health: {name}"), None);
-		if let Some(mark) = mark {
-			fx.health(&mark.around(pill.rect).inset(2.0));
-		}
-		let mut details = false;
-		kit::popover(&pill).show(|ui| {
-			let row = |ui: &mut Ui, dot: Option<Color32>, name: &str, value: &str| {
-				kit::popover_row(ui, false, |ui| {
-					let (at, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-					if let Some(dot) = dot {
-						ui.painter().circle_filled(at.center(), 4.0, dot);
-					}
-					ui.add(egui::Label::new(name).wrap());
-					ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-						ui.label(egui::RichText::new(value).font(kit::mono(12.0)).color(kit::TEXT))
-					});
-				});
-			};
-			if report.relays.is_empty() {
-				row(ui, None, "Not publishing; start with --connect", "");
-			}
-			for relay in &report.relays {
-				let (dot, state) = match &relay.state {
-					health::State::Connecting => (kit::DIM, "connecting"),
-					health::State::Connected => (kit::OK, "connected"),
-					health::State::Disconnected(_) => (kit::ERR, "unreachable"),
-				};
-				row(ui, Some(dot), &relay.endpoint, state);
-			}
-			if let Some(watching) = report.broadcasts.first().and_then(|program| program.viewers.watching) {
-				row(ui, None, "Watching", &watching.to_string());
-			}
-			let encoder = self.engine.stats.video.encoder();
-			row(ui, None, "Encoder", encoder.as_deref().unwrap_or("not open"));
-			for problem in &report.problems {
-				row(ui, Some(color(problem.verdict)), &problem.cause, "");
-			}
-			ui.add_space(4.0);
-			details = ui.button("Details").clicked();
-		});
-		drop(report);
-		if details {
-			self.details = true;
-		}
-	}
-
 	/// Start or stop recording, pulsing while it records.
 	fn record_button(&mut self, ui: &mut Ui, fx: &mut Fx) {
 		let status = self.engine.recorder.status().filter(|status| !status.done);
@@ -565,51 +499,6 @@ impl Panels {
 		if response.clicked() {
 			self.controls.press(&Action::Record);
 		}
-	}
-
-	/// The live control: LIVE with the clock while the studio publishes, or
-	/// not live without `--connect`. Ending the stream comes with going live
-	/// (quest/m0/ux/go-live.md), so it has no END STREAM face yet.
-	fn live_control(&mut self, ui: &mut Ui) {
-		let Some(output) = &self.engine.output else {
-			let galley = kit::caps_galley(ui.painter(), "Not live", kit::display_bold(15.0), kit::DIM, None);
-			let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 24.0, 30.0), Sense::hover());
-			kit::tip(response, "Not live: start the studio with --connect to publish", None);
-			ui.painter()
-				.rect(rect, 6, kit::P2, Stroke::new(1.0, kit::LINE), egui::StrokeKind::Inside);
-			ui.painter()
-				.galley(rect.center() - galley.size() / 2.0, galley, kit::DIM);
-			return;
-		};
-		let elapsed = kio::clock::now().saturating_duration_since(self.launched);
-		let word = kit::caps_galley(ui.painter(), "Live", kit::display_bold(17.0), Color32::WHITE, None);
-		let time = ui
-			.painter()
-			.layout_no_wrap(clock(elapsed), kit::mono(14.0), Color32::WHITE);
-		let width = 12.0 + word.size().x + 10.0 + time.size().x + 12.0;
-		let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
-		kit::tip(
-			response,
-			&format!("Live at {} since the studio started", output.path),
-			None,
-		);
-		let painter = ui.painter();
-		let glow = egui::Shadow {
-			offset: [0, 0],
-			blur: 22,
-			spread: 0,
-			color: kit::ACCENT.gamma_multiply(0.4),
-		};
-		painter.add(glow.as_shape(rect, egui::CornerRadius::same(6)));
-		painter.rect_filled(rect, 6, kit::ACCENT);
-		let x = rect.left() + 12.0;
-		painter.galley(
-			pos2(x, rect.center().y - word.size().y / 2.0),
-			word.clone(),
-			Color32::WHITE,
-		);
-		let x = x + word.size().x + 10.0;
-		painter.galley(pos2(x, rect.center().y - time.size().y / 2.0), time, Color32::WHITE);
 	}
 
 	/// The strip: the scene pads, the panic key, and the sound, along the
@@ -749,8 +638,14 @@ impl Panels {
 			return response.clicked().then_some(PadAction::Add);
 		};
 		let on_air = snapshot.program.as_deref() == Some(pad.name.as_str());
-		let tally = if on_air { Tally::Air } else { Tally::Off };
-		let response = self.pad(ui, pad, tally, width, snapshot.shape);
+		// Off air, the scene on program is the one the stream opens on.
+		let live = self.engine.on_air().live().is_some();
+		let (tally, tag) = match (on_air, live) {
+			(true, true) => (Tally::Air, None),
+			(true, false) => (Tally::Cue, Some("First")),
+			(false, _) => (Tally::Off, None),
+		};
+		let response = self.pad(ui, pad, tally, tag, width, snapshot.shape);
 		let mut action = (response.clicked() && pad.refused.is_none()).then(|| PadAction::Take(pad.name.clone()));
 		response.context_menu(|ui| {
 			let takeable = pad.refused.is_none() || on_air;
@@ -783,7 +678,15 @@ impl Panels {
 
 	/// A scene's pad, `width` wide, with its thumbnail once the compositor
 	/// has drawn it, which it draws while the pad is on screen.
-	fn pad(&mut self, ui: &mut Ui, pad: &ScenePad, tally: Tally, width: f32, shape: f32) -> egui::Response {
+	fn pad(
+		&mut self,
+		ui: &mut Ui,
+		pad: &ScenePad,
+		tally: Tally,
+		tag: Option<&str>,
+		width: f32,
+		shape: f32,
+	) -> egui::Response {
 		let thumbnail = Thumbnail::Scene(pad.name.clone());
 		let size = vec2(pad.canvas.width as f32, pad.canvas.height as f32);
 		let picture = self
@@ -795,6 +698,7 @@ impl Panels {
 			.picture(picture)
 			.key(key.as_deref())
 			.tally(tally)
+			.tag(tag)
 			.refused(pad.refused.as_deref())
 			.width(width)
 			.shape(shape);
@@ -806,7 +710,7 @@ impl Panels {
 	}
 
 	/// The key bound to `action`, as its tooltip shows it.
-	fn key(&self, action: &Action, ctx: &egui::Context) -> Option<String> {
+	pub(super) fn key(&self, action: &Action, ctx: &egui::Context) -> Option<String> {
 		let hotkeys = self.hotkeys.as_ref()?;
 		let bindings = hotkeys.bindings();
 		Some(bindings.get(action)?.shown(ctx))
@@ -1092,6 +996,9 @@ impl Panels {
 					Setting::Show => {
 						egui::ScrollArea::vertical().show(ui, |ui| self.output(ui));
 					}
+					Setting::Stream => {
+						egui::ScrollArea::vertical().show(ui, |ui| self.stream_settings(ui));
+					}
 					Setting::Hotkeys => {
 						egui::ScrollArea::vertical().show(ui, |ui| self.hotkeys(ui, fx));
 					}
@@ -1154,7 +1061,7 @@ impl Panels {
 		repairs(ui, &self.engine.recorder.repairs());
 		let report = self.engine.health.lock().unwrap();
 		if report.relays.is_empty() {
-			ui.label("Not publishing; start with --connect to see how the stream is delivered.");
+			ui.label("Off air. Once live, this shows how the stream reaches viewers.");
 			for problem in &report.problems {
 				ui.colored_label(color(problem.verdict), &problem.cause);
 			}
@@ -1360,13 +1267,13 @@ fn edges(ui: &mut Ui, window: Rect) {
 }
 
 /// `elapsed` as a clock, hours first.
-fn clock(elapsed: Duration) -> String {
+pub(super) fn clock(elapsed: Duration) -> String {
 	let seconds = elapsed.as_secs();
 	format!("{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
 }
 
 /// A dashed outline around `rect`, as the pad that adds a scene has.
-fn dashed(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
+pub(crate) fn dashed(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
 	let corners = [
 		rect.left_top(),
 		rect.right_top(),

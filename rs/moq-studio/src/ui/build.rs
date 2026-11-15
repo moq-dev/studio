@@ -106,8 +106,8 @@ impl Panels {
 					.suffix(" px"),
 			);
 		});
-		// It is the live picture, so the accent frame stays while editing it.
-		let frame = TallyFrame::new(Tally::Air).tag("On air");
+		// It is the live picture, so its frame says whether it is on air.
+		let frame = self.program_frame();
 		let id = self.program.id;
 		let builder = egui::UiBuilder::new().max_rect(at.expand(10.0));
 		// Interacting, the pointer belongs to the pages rather than to arranging.

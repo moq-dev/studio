@@ -35,5 +35,4 @@ twenty scenes to try a new tool.
 
 ## Required
 
-- [Going live from inside the app](/quest/m0/ux/go-live.md) - the show library it opens from
 - [Adding a source by picking a picture](/quest/m0/ux/add.md) - where a missing device is picked again

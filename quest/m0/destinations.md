@@ -74,13 +74,12 @@ Decided 2026-11-09 (maintainer, /quest-audit):
 
 Changed 2026-11-09 (maintainer, /quest-plan): going live and stopping, as
 actions and as hotkeys, are
-[Going live from inside the app](/quest/m0/ux/go-live.md), which lands them
-for MoQ relays. This quest adds its destinations to that sheet rather than
+the go-live sheet and live control the studio has, which land them for MoQ
+relays. This quest adds its destinations to that sheet rather than
 building a second way to start a stream.
 
 ## Required
 
-- [Going live from inside the app](/quest/m0/ux/go-live.md) - the go-live sheet, the live control, and the health list its destinations join
 - [moq's egress dial changes are pinned](/quest/m0/pin-egress-dial.md) - RTMPS that keeps `tcUrl`, and a dial policy the caller supplies
 
 ## Related

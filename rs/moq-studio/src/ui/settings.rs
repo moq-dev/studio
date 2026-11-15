@@ -52,14 +52,15 @@ impl Panels {
 		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
 		let watched = stats.video.watched.load(Ordering::Relaxed);
 
+		let on_air = self.engine.on_air();
 		egui::Grid::new("output").show(ui, |ui| {
-			match &self.engine.output {
-				Some(output) => {
+			match on_air.live() {
+				Some(live) => {
 					ui.label("Broadcast");
-					ui.label(&output.path);
+					ui.label(&live.path);
 					ui.end_row();
 					ui.label("Encoding");
-					ui.label(match (output.on_demand, watched) {
+					ui.label(match (live.on_demand, watched) {
 						(false, _) => "the canvas size always, half size while watched",
 						(true, true) => "while watched; watched now",
 						(true, false) => "while watched; idle now",
@@ -67,8 +68,8 @@ impl Panels {
 					ui.end_row();
 				}
 				None => {
-					ui.label("Relay");
-					ui.label("none; start with --connect to publish");
+					ui.label("On air");
+					ui.label("no; GO LIVE sends the program to the relays in Settings, Stream");
 					ui.end_row();
 					ui.label("Encoding");
 					ui.label("only the recording's encoder, while recording");
@@ -104,7 +105,7 @@ impl Panels {
 		for (name, video) in stats.published() {
 			ui.separator();
 			ui.strong(format!("Scene `{name}`"));
-			if let Some(output) = &self.engine.output {
+			if let Some(live) = on_air.live() {
 				let state = self.engine.state.lock().unwrap();
 				let audio = state
 					.collection()
@@ -112,7 +113,7 @@ impl Panels {
 					.unwrap_or_default()
 					.to_string();
 				drop(state);
-				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", output.path));
+				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", live.path));
 			}
 			ui.label(format!(
 				"Encoder: {}",

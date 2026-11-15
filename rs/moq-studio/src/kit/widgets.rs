@@ -300,10 +300,7 @@ impl<'a> Pill<'a> {
 
 	#[cfg_attr(
 		not(test),
-		expect(
-			dead_code,
-			reason = "the pages draw with it: the rest of quest/m0/ux, such as go-live.md"
-		)
+		expect(dead_code, reason = "the pages draw with it: the rest of quest/m0/ux")
 	)]
 	pub fn value(mut self, value: &'a str) -> Self {
 		self.value = Some(value);
@@ -992,6 +989,9 @@ pub struct Pad<'a> {
 	picture: Option<egui::load::SizedTexture>,
 	key: Option<&'a str>,
 	tally: Tally,
+	/// The tag over the tally's own, such as FIRST for the scene a stream
+	/// opens on.
+	tag: Option<&'a str>,
 	/// Why the scene cannot be taken, if it cannot.
 	refused: Option<&'a str>,
 	width: f32,
@@ -1007,6 +1007,7 @@ impl<'a> Pad<'a> {
 			picture: None,
 			key: None,
 			tally: Tally::Off,
+			tag: None,
 			refused: None,
 			width: 124.0,
 			shape: 16.0 / 9.0,
@@ -1028,6 +1029,12 @@ impl<'a> Pad<'a> {
 
 	pub fn tally(mut self, tally: Tally) -> Self {
 		self.tally = tally;
+		self
+	}
+
+	/// Tagged `tag` in its tally's color, rather than the tally's own word.
+	pub fn tag(mut self, tag: Option<&'a str>) -> Self {
+		self.tag = tag;
 		self
 	}
 
@@ -1096,8 +1103,8 @@ impl Widget for Pad<'_> {
 			}
 			let tag_text = match self.tally {
 				Tally::Off => None,
-				Tally::Air => Some("On air"),
-				Tally::Cue => Some("Next"),
+				Tally::Air => Some(self.tag.unwrap_or("On air")),
+				Tally::Cue => Some(self.tag.unwrap_or("Next")),
 			};
 			if let Some(text) = tag_text {
 				tag(painter, thumb.min + vec2(4.0, 4.0), text, self.tally, 11.0);
@@ -1144,11 +1151,14 @@ fn shadow(painter: &egui::Painter, rect: Rect, corner: u8, color: Color32, blur:
 }
 
 /// The frame around the live picture: the accent while on air, amber and striped
-/// while it shows a scene that is not, with a tag naming which.
+/// while it shows a scene that is not, neutral off air, with a tag naming which.
 pub struct TallyFrame<'a> {
 	tally: Tally,
-	tag: Option<&'a str>,
+	tag: Option<(&'a str, Tally)>,
 }
+
+/// The neutral frame's outline, off air.
+const NEUTRAL: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x46);
 
 impl<'a> TallyFrame<'a> {
 	pub fn new(tally: Tally) -> Self {
@@ -1157,7 +1167,14 @@ impl<'a> TallyFrame<'a> {
 
 	/// The tag in the picture's corner, such as ON AIR.
 	pub fn tag(mut self, tag: &'a str) -> Self {
-		self.tag = Some(tag);
+		self.tag = Some((tag, self.tally));
+		self
+	}
+
+	/// The tag in `tally`'s color rather than the frame's, such as OFF AIR
+	/// in amber on the neutral frame.
+	pub fn tag_as(mut self, tag: &'a str, tally: Tally) -> Self {
+		self.tag = Some((tag, tally));
 		self
 	}
 
@@ -1192,9 +1209,11 @@ impl<'a> TallyFrame<'a> {
 				painter.with_clip_rect(clip).set(band, Shape::Vec(stripes));
 			}
 			painter.rect_stroke(outline, 12, Stroke::new(3.0, color), StrokeKind::Middle);
+		} else {
+			painter.rect_stroke(rect.expand(4.5), 12, Stroke::new(3.0, NEUTRAL), StrokeKind::Middle);
 		}
-		if let Some(text) = self.tag {
-			tag(painter, rect.min + vec2(12.0, 12.0), text, self.tally, 15.0);
+		if let Some((text, tally)) = self.tag {
+			tag(painter, rect.min + vec2(12.0, 12.0), text, tally, 15.0);
 		}
 		if let (Some(fx), Some(mark)) = (effects, mark) {
 			fx.program(&mark.around(rect));

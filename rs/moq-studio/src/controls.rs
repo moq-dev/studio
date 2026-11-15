@@ -1,7 +1,7 @@
 //! What the operator does from a button or a hotkey: take a scene, panic,
-//! replay, save a clip, and record. Hotkeys fire from outside the window's
-//! frames, so a key pressed while a game has focus acts at once, even while
-//! the window is hidden and draws nothing.
+//! replay, save a clip, record, and go live and end the stream. Hotkeys fire
+//! from outside the window's frames, so a key pressed while a game has focus
+//! acts at once, even while the window is hidden and draws nothing.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use moq_scene::Source;
 
-use crate::engine::{Engine, State};
+use crate::engine::{Engine, OnAir, State};
 use crate::replay;
+use crate::stream::{Stream, Switched};
 
 /// Something a hotkey can be bound to.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -32,11 +33,22 @@ pub enum Action {
 	Record,
 	/// Cut to the safe scene and mute every microphone and guest.
 	Panic,
+	/// Go live to the relays switched on, skipping the go-live sheet's checks.
+	GoLive,
+	/// End the stream, handing the relays its tail first.
+	EndStream,
 }
 
 impl Action {
 	/// The actions every scene file has, as the Hotkeys panel lists them.
-	pub const FIXED: [Self; 4] = [Self::Panic, Self::Replay, Self::SaveClip, Self::Record];
+	pub const FIXED: [Self; 6] = [
+		Self::Panic,
+		Self::Replay,
+		Self::SaveClip,
+		Self::Record,
+		Self::GoLive,
+		Self::EndStream,
+	];
 
 	/// Whether a key can be bound to it: a fixed action, or a scene.
 	pub fn offered(&self) -> bool {
@@ -54,6 +66,8 @@ impl std::fmt::Display for Action {
 			Self::SaveClip => write!(f, "Save clip"),
 			Self::Record => write!(f, "Start or stop recording"),
 			Self::Panic => write!(f, "Panic"),
+			Self::GoLive => write!(f, "Go live"),
+			Self::EndStream => write!(f, "End stream"),
 		}
 	}
 }
@@ -62,6 +76,13 @@ impl std::fmt::Display for Action {
 pub struct Controls {
 	pub engine: Arc<Engine>,
 	runtime: tokio::runtime::Handle,
+	/// Where the show streams, as Settings edits it.
+	pub stream: Mutex<Stream>,
+	/// Which relays going live sends to, as the go-live sheet switches them.
+	pub switched: Mutex<Switched>,
+	/// Why the last go-live failed, until the go-live sheet or the status bar
+	/// shows it.
+	pub refused: Mutex<Option<String>>,
 	/// The Replay panel's picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
 	/// Whether the next recording gives each source a file of its own too.
@@ -94,10 +115,13 @@ impl Default for Replay {
 }
 
 impl Controls {
-	pub fn new(engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> Self {
+	pub fn new(engine: Arc<Engine>, stream: Stream, runtime: tokio::runtime::Handle) -> Self {
 		Self {
 			engine,
 			runtime,
+			stream: Mutex::new(stream),
+			switched: Mutex::default(),
+			refused: Mutex::default(),
 			replay: Mutex::default(),
 			record_sources: AtomicBool::new(false),
 			fired: Arc::default(),
@@ -105,7 +129,7 @@ impl Controls {
 	}
 
 	/// Do `action`, saying what it did.
-	pub fn fire(&self, action: &Action) -> anyhow::Result<String> {
+	pub fn fire(self: &Arc<Self>, action: &Action) -> anyhow::Result<String> {
 		match action {
 			Action::Cut => {
 				let mut state = self.engine.state.lock().unwrap();
@@ -136,11 +160,58 @@ impl Controls {
 					}
 				}
 			}
+			Action::GoLive => self.go_live(),
+			Action::EndStream => self.end_stream(),
 		}
 	}
 
+	/// Go live to the relays switched on, in the background: reading their
+	/// tokens blocks on the credential store, and dialing them takes a while.
+	/// How it went shows in the status bar, and a refusal in the go-live
+	/// sheet too.
+	pub fn go_live(self: &Arc<Self>) -> anyhow::Result<String> {
+		anyhow::ensure!(
+			self.engine.on_air() == OnAir::Off,
+			"the program is already on air, or on its way on or off"
+		);
+		*self.refused.lock().unwrap() = None;
+		let controls = self.clone();
+		std::thread::Builder::new()
+			.name("go live".into())
+			.spawn(move || {
+				// Each relay's client binds its socket on the runtime.
+				let _runtime = controls.runtime.enter();
+				let switched = *controls.switched.lock().unwrap();
+				let destination = controls.stream.lock().unwrap().clone().destination(switched);
+				let result = destination.and_then(|destination| {
+					let to = destination.broadcast.clone();
+					controls.runtime.block_on(controls.engine.go_live(destination))?;
+					Ok(format!("live as {to}"))
+				});
+				let result = result.map_err(|err| format!("{err:#}"));
+				if let Err(err) = &result {
+					*controls.refused.lock().unwrap() = Some(err.clone());
+				}
+				controls.report(&Action::GoLive, result);
+			})
+			.context("cannot go live")?;
+		Ok("going live".into())
+	}
+
+	/// End the stream in the background, handing the relays its tail first.
+	pub fn end_stream(self: &Arc<Self>) -> anyhow::Result<String> {
+		anyhow::ensure!(self.engine.on_air().live().is_some(), "the program is not on air");
+		let controls = self.clone();
+		self.runtime.spawn(async move {
+			let result = controls.engine.end_stream().await;
+			let result = result.map(|()| "the stream ended".to_string());
+			controls.report(&Action::EndStream, result.map_err(|err| format!("{err:#}")));
+		});
+		Ok("ending the stream".into())
+	}
+
 	/// Do `action` for a hotkey, keeping how it went for the status bar.
-	pub fn press(&self, action: &Action) {
+	pub fn press(self: &Arc<Self>, action: &Action) {
 		match action {
 			Action::Replay => drop(self.replay(true, true)),
 			Action::SaveClip => drop(self.replay(false, true)),

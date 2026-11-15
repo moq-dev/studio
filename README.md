@@ -10,11 +10,11 @@ Flatpak bundle for x86_64 and aarch64:
 
 ```bash
 flatpak install --user moq-studio-x86_64.flatpak
-flatpak run live.kixel.studio show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
+flatpak run live.kixel.studio
 ```
 
-Its menu entry opens the scene collection kept in the app's own data
-directory and saves recordings to your Videos folder. The sandbox reaches
+Its menu entry opens [your shows](#your-shows) and saves recordings to your
+Videos folder. The sandbox reaches
 cameras through the camera portal, which asks once, and files under your home
 directory. The virtual camera is its PipeWire node only, since the sandbox
 has no `/dev/video*`.
@@ -25,31 +25,37 @@ submodule:
 ```bash
 git clone --recurse-submodules https://github.com/moq-dev/studio
 cd studio
-cargo run --release -p moq-studio --features capture,openh264 -- \
-    show.toml --connect https://cdn.moq.dev/anon --broadcast my-show
+cargo run --release -p moq-studio --features capture,openh264
 ```
 
-- `show.toml` is the scene collection. If it does not exist yet,
-  [guided setup](#first-launch) proposes one and creates it. Changes are saved
-  to it a second after you stop editing, with no save step.
-- `--recordings <dir>` is where recordings are saved, by default beside
-  `show.toml`.
-- Without `--connect`, the studio composes, previews, and records but
-  publishes nothing, and broadcast sources stay offline.
-- `--failover <url>` publishes the same broadcast to a second relay under the
+- With no arguments, the window opens on [your shows](#your-shows). Name a
+  show to open it at once: `moq-studio show.toml`. A show is its scene file;
+  if it does not exist yet, [guided setup](#first-launch) proposes one and
+  creates it. Changes are saved to it a second after you stop editing, with
+  no save step.
+- Nothing is published until you [go live](#going-live) from the window, and
+  you end the stream from it too. Until then the studio composes, previews,
+  and records, and broadcast sources and guests play through the show's
+  relays.
+- Where a show streams is in Settings, Stream (see
+  [Stream settings](#stream-settings)), kept beside the show. A flag sets one
+  for a single run, over the show's own, and is never saved: `--connect` (the
+  relay) with `--connect-token`, `--failover`, `--broadcast`, `--on-demand`,
+  `--recordings <dir>` (by default beside the show), and the guest flags.
+- A failover relay publishes the same broadcast to a second relay under the
   same broadcast instance, so a viewer linked to both resumes mid-group from
   it when the first fails. Both relays must speak the one `--connect-version`,
   which must carry instances (`moq-lite-07-wip` today, which a relay
-  accepts only when configured to), or the studio refuses to start; it also
+  accepts only when configured to), or going live with both refuses; it also
   refuses a fixed `--connect-bind` port, since each relay's connection binds
-  its own. Its credential rides its URL's `?jwt=`; `--connect-token` goes to
-  the first relay only. The stream's tracks claim their bitrate on the first
+  its own. Each relay's token is its own: `--connect-token` goes to the
+  `--connect` relay only. The stream's tracks claim their bitrate on the first
   relay's link alone, so only that link is probed toward the stream's rate,
   and the video follows that link's estimate alone.
-- Quitting while live ends every track after its last pictures and sound,
-  then closes each relay session once the relay has them, waiting up to about
-  a second, so viewers and recordings on the relay see the broadcast end
-  rather than cut off.
+- Quitting while live ends the stream as **END STREAM** does: every track
+  ends after its last pictures and sound, then each relay session closes once
+  the relay has them, waiting up to about a second, so viewers and recordings
+  on the relay see the broadcast end rather than cut off.
 - `capture` adds camera, display, window, microphone, and system-audio
   sources, and listening to an audio scene. On Linux it links ALSA; add `pipewire` for
   PipeWire cameras and the [virtual camera](#virtual-camera)'s PipeWire node.
@@ -72,10 +78,21 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - `moq-studio --watch <url>` opens no scene file and plays a studio broadcast
   instead, as a viewer sees it; see [Watching](#watching).
 
+## Your shows
+
+Opened with no show, the window lists the shows you have opened, the latest
+first, each with the last picture of its program, its shape, and when it was
+last live and for how long. Click one to pick up where it ended; nothing goes
+live until you say so. **New show** asks where to keep a new show's file and
+starts [guided setup](#first-launch) there, and **Open a show file** opens
+any other. Right-click a show to forget it; one whose file has moved says so.
+The list and the pictures are yours, kept with the app's settings rather than
+beside any show, and a show's picture is saved as the window closes.
+
 ## First launch
 
-Opening a scene file that does not exist yet starts guided setup instead of
-the studio. It runs three checks, and a check that fails shows its reason:
+Opening a show whose scene file does not exist yet starts guided setup instead
+of the studio. It runs three checks, and a check that fails shows its reason:
 
 - **Devices:** the cameras, displays, and audio inputs this machine has.
 - **Encoders:** for each canvas setup can propose (1080p and 720p at 60 or 30
@@ -84,12 +101,13 @@ the studio. It runs three checks, and a check that fails shows its reason:
   short burst of moving frames. An encoder keeps up when a frame takes at most
   three quarters of the frame period, leaving the rest for sources and the
   compositor.
-- **Uplink:** with `--connect`, setup publishes a probe at the `--broadcast`
-  path for about six seconds and subscribes to it through the relay, so the
-  relay pulls it. The congestion controller's send-rate estimate is the
-  measurement. With `--failover`, only the `--connect` relay is measured,
-  since only its link is probed toward the stream's rate. A connection that
-  reports no estimate, such as WebSocket, fails the check.
+- **Uplink:** with a relay, from `--connect` or the show's stream settings,
+  setup publishes a probe at the broadcast's path for about six seconds and
+  subscribes to it through the relay, so the relay pulls it. The congestion
+  controller's send-rate estimate is the measurement. With a failover relay,
+  only the first is measured, since only its link is probed toward the
+  stream's rate. A connection that reports no estimate, such as WebSocket,
+  fails the check.
 
 Setup then proposes a scene named Main and a canvas, explaining each choice.
 The scene has the first display filling the canvas, the first camera in the
@@ -107,17 +125,18 @@ canvas and no sources. The proposed scene is the first edit in the history, so
 undoing it leaves that empty scene.
 
 Setup writes an ordinary scene file. Change its sources and scenes on the
-BUILD page, and its canvas in Settings. The health dot shows how the uplink
-holds up once you are live.
+BUILD page, its canvas in Settings, and where it streams in Settings, Stream.
+The health dot shows how the uplink holds up once you are live.
 
-Setup sits in the desktop's own window frame, and the studio then draws its
-own (see [The window](#the-window)). On macOS the system's title bar stays
+Your shows and setup sit in the desktop's own window frame, and the studio
+then draws its own (see [The window](#the-window)). On macOS the system's title bar stays
 until the next launch.
 
 ## The window
 
-The studio opens to its **LIVE** page: the program in a blue tally frame, as
-large as the window allows. The title bar and the strip along the bottom stay
+The studio opens to its **LIVE** page: the program as large as the window
+allows, in a neutral frame tagged **OFF AIR** until you go live, then a blue
+one tagged **ON AIR**. The title bar and the strip along the bottom stay
 on every page, so the scenes, the sound, and the panic key never leave the
 window while you are on air.
 
@@ -134,22 +153,24 @@ macOS the system's buttons and edges stay. It holds, from the left:
   file**, **Copy the selected item**, and **Paste**.
 - Undo and redo, each naming under the pointer the edit it would step.
 - The pages: **LIVE**, **BUILD**, **MIX**, and **REVIEW**.
-- The health dot, the stream's worst grade at a glance. Click it for each
-  relay, who is watching, the encoder, and each problem, and **Details** for
-  the [Health](#health) window. It reads **Not live** without `--connect`.
+- The health dot, the stream's worst grade at a glance. Click it for the
+  worst problem first, then each destination, who is watching, and the
+  encoder, and **Details** for the [Health](#health) window. Off air it reads
+  **Ready** once the show has a relay, and **No relay** until then.
 - Record, which starts or stops a [recording](#recording) with REVIEW's
   picks. Its dot pulses while recording, and says for how long under the
   pointer.
-- The live control: **LIVE** and how long the studio has been live, with
-  `--connect`, or **NOT LIVE** without it. The studio goes live at launch,
-  so it starts and ends nothing yet.
+- The live control: **GO LIVE** off air, which opens the
+  [go-live sheet](#going-live); on air, **LIVE** and how long the stream has
+  run, which reads **END STREAM** under the pointer.
 - The gear, which opens [Settings](#settings).
 - Minimize, maximize, and close, except on macOS.
 
 The **strip** holds:
 
 - A **pad** for each scene, its picture redrawn a few times a second, with its
-  name, its hotkey, and an ON AIR tag on the scene on program. Click a pad to
+  name, its hotkey, and an ON AIR tag on the scene on program; off air, the
+  scene on program is tagged **FIRST** in amber, the one the stream opens on. Click a pad to
   take its scene on air by the show's transition (see
   [Transitions](#transitions)); taking the scene already on air does nothing.
   A scene that cannot go on air, of another size or showing the program, has
@@ -205,12 +226,61 @@ A message about what the last action did shows over the bottom of the page
 for a few seconds, an error a little longer. A conflict with an outside edit
 to the scene file, or a failed save, shows over its top until it is settled.
 
+### Going live
+
+**GO LIVE** opens a sheet that says which scene the stream opens on, then:
+
+- **Where it goes:** the show's relay and its failover relay, each with a
+  switch and its state, such as *Connected, 18 ms away*. A relay switched off
+  is left out of this stream.
+- **Checks**, filled in as they finish: whether each camera has a picture,
+  whether a microphone's level moves, whether the encoder keeps up with the
+  canvas (timed as [setup](#first-launch) times it), and whether the
+  connection to the first relay switched on carries what the stream sends
+  (measured as setup measures it). A failed check is one sentence and its fix,
+  such as **Send 720p instead**, which changes the canvas, or **Check again**.
+- **GO LIVE TO** the number of destinations switched on. A failed check never
+  stops you; only having none switched on does.
+
+Going live dials each relay, failing with why if none answers within 15
+seconds, then opens the program's encoders and announces its broadcast. Each
+time on air is a broadcast of its own. On air, the live control is the clock;
+under the pointer it reads **END STREAM**, and holding it down for a moment
+ends the stream, handing the relays its tail first, as quitting does. The
+**Go live** and **End stream** hotkeys do the same at once, going live to the
+relays switched on without the sheet.
+
+Off air, the program has no past to replay, and a replay of it says so.
+
+### Stream settings
+
+Settings, Stream holds where the show streams, saved in `show.stream.toml`
+beside `show.toml` rather than in it, since a scene file is meant to be
+shared:
+
+- **Relay**, the one the stream goes to, and its **Token**.
+- **Failover relay** and its token: a second relay the same broadcast goes
+  to, which needs one `--connect-version` with broadcast instances.
+- **Broadcast name**, the path on the relays, `studio` until set.
+- **On demand**, which encodes the canvas size only while someone watches
+  (see [Output](#output)).
+
+Tokens are kept in the system's credential store (the Secret Service on Linux,
+the login keychain on macOS, the Credential Manager on Windows), one per relay
+address, never in a file: a `?jwt=` typed into an address moves there when
+saved. A setting a flag overrides for this run says so. A change applies the
+next time you go live; a change to the room the guests join applies once the
+show is opened again. The recordings folder and the guests' room are kept in
+the same file, as `recordings`, `room`, `room_key`, `join_page`, and
+`guest_expiry`, set there by hand until Settings has panes for them.
+
 ### Settings
 
 | Tab | Use it to |
 | --- | --- |
 | Show | Set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
-| Hotkeys | Bind keys to the panic key, replay, save a clip, start or stop recording, and take each scene, and clear them (see [Hotkeys](#hotkeys)). |
+| Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)). |
+| Hotkeys | Bind keys to the panic key, replay, save a clip, start or stop recording, go live, end the stream, and take each scene, and clear them (see [Hotkeys](#hotkeys)). |
 | Effects | Pick how the window's [effects](#effects) move. |
 | Graph | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
 | History | See every edit, and undo or redo back to any of them. |
@@ -243,9 +313,9 @@ scene of the program's size goes on program: its pad refuses another, saying
 why, and an edit resizing the scene on air is refused.
 
 Tick **Publish** on a scene in the Scenes panel to put it live as a broadcast
-of its own beneath the program's, at `<--broadcast>/<scene name>`, at its own
-size, with renditions and encoders of its own (see [Output](#output)). A
-published scene is always live and never switched: it shows what its items
+of its own beneath the program's, at `<broadcast>/<scene name>`, at its own
+size, with renditions and encoders of its own (see [Output](#output)), while
+the program is on air. A published scene is never switched: it shows what its items
 show, whatever is on program. For a portrait stream that follows the program,
 publish a portrait scene drawing the program through a program source (see
 [Scene sources](#scene-sources)), with any overlay of its own placed beside
@@ -259,7 +329,7 @@ does not publish while live.
 
 A source captures or decodes once however many scenes show it. A published
 scene is drawn only while one of its encoders takes the frame, so with
-`--on-demand`, or without a relay, one nobody watches costs no drawing. An
+on demand, or off air, one nobody watches costs no drawing. An
 item's keyframes play in a published scene from when it was published, picked
 for recording, or the studio started, whichever came first: a recording and a
 broadcast of one scene share one picture.
@@ -369,8 +439,9 @@ comes along, renamed if its name is taken. Copied filters paste onto the
 selected source or item, after its own. The clipboard holds text in the scene
 file's format.
 
-A broadcast source subscribes through the same relay connections. It plays its
-broadcast through the first relay while that relay has a route to it, and
+A broadcast source subscribes through the show's relays, on air or off,
+over sessions of their own that only subscribe. It plays its broadcast
+through the first relay while that relay has a route to it, and
 through the failover otherwise, so a publisher restarted behind only the
 failover replaces the first relay's copy once that copy ends. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
@@ -575,9 +646,12 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
     --room guests --room-key room.jwk --join-page https://join.example.com/
 ```
 
-- `--room` is a path under the `--connect` URL's, here `show/guests` on the
+The guest flags set the room for one run; `room`, `room_key`, `join_page`, and
+`guest_expiry` in the show's [stream settings](#stream-settings) file keep it.
+
+- `--room` is a path under the relay's URL, here `show/guests` on the
   relay. The studio's own token must let it subscribe there. A guest's browser
-  dials the same relay, so `--connect` must be `https://`, or `http://` only to
+  dials the same relay, so it must be `https://`, or `http://` only to
   this machine or the local network.
 - `--room-key` signs each guest's token. The studio refuses a key whose scope
   reaches outside the room, so a stolen key cannot sign for the rest of the
@@ -602,13 +676,13 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   Links from before let their holder subscribe to the whole room, renewals
   included, so they must die with the old key, and a relay keeps a session
   it already admitted until its token expires.
-- With `--failover`, a link still names only the `--connect` relay: the join
+- With a failover relay, a link still names only the first relay: the join
   page dials one relay, and a guest's token is rooted at the room there, so
   guests drop while that relay is down. The studio follows the room through
   both relays, like any broadcast source, so a guest the failover routes at
   the same path, as a relay in the same cluster does, keeps reaching it.
   Anyone the failover lets publish in the room joins as a guest, so guard the
-  room there as on the `--connect` relay.
+  room there as on the first relay.
 
 **Invite** in the Guests panel makes a link for one guest name and shows it as
 a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
@@ -767,7 +841,7 @@ items = [
 [[scenes]]
 name = "Portrait"
 size = { width = 1080, height = 1920 } # its own size; the program's without one
-published = true # live at <--broadcast>/Portrait
+published = true # live at <broadcast>/Portrait
 recorded = true  # recordings hold this scene rather than the program
 items = [
     { source = "on-air", rect = { x = 0, y = 0, width = 1080, height = 1920 }, crop = { left = 0.34, right = 0.34 } },
@@ -901,8 +975,9 @@ before sharing.
 
 The program publishes as two H.264 renditions, at the canvas size and at half
 of it, at the canvas frame rate, with the audio scene on program as Opus stereo audio,
-under the `--broadcast` path. A canvas under 360 lines has no half size. Each
-published scene publishes the same way at `<--broadcast>/<scene name>`, at
+under the broadcast's path, while on air. A canvas under 360 lines has no
+half size. Each published scene publishes the same way at
+`<broadcast>/<scene name>`, at
 its own size and half of it, its tracks sharing the connection's bandwidth
 with the program's, and its own encode of the audio scene it carries.
 Timestamps come from the studio's own clock, so a source that stalls repeats
@@ -923,12 +998,11 @@ renditions' tracks end and new ones are listed in their place in a catalog
 update, on the same timeline, and viewers switch to them; the video pauses
 while the new encoders open. Items keep their place in canvas pixels. A canvas
 the encoder cannot take stops the video, saying why, until the canvas changes
-again. At startup, it stops the studio when live; without `--connect`, the
-studio starts without video.
+again. Going live with one fails, saying why.
 
 The canvas size encodes whether or not anyone watches, so a viewer who arrives
 late can fetch the recent past. The half size encodes only while someone
-watches it. `--on-demand` copies and encodes the canvas size only while someone
+watches it. On demand copies and encodes the canvas size only while someone
 watches it too, which saves that work but leaves nothing from before the first
 viewer; audio encodes either way. A recording has an encoder of its own (see
 Recording). A hardware encoder that reads
@@ -977,7 +1051,7 @@ encode engine for them all. Settings' Show tab counts the sessions open:
 
 | Encoder | Sessions |
 |---|---|
-| The program's canvas size, live | 1, or none without `--connect` |
+| The program's canvas size | 1 while on air |
 | Its half size | 1 while someone watches it |
 | Each published scene's own size and half size | as the program's |
 | The recording's own size | 1 while recording |
@@ -991,7 +1065,7 @@ encodes on hardware, so do the sources, and a
 session the GPU refuses fails that source's track with the encoder's reason in
 the Sources panel rather than falling back to software. The source keeps
 drawing in the studio's own scenes. The program opens its session before any
-source, even with `--on-demand`, so the sources past the cap fail rather than
+source, even with on demand, so the sources past the cap fail rather than
 the program; so does each scene published in the scene file at startup. A
 scene published later, past the cap, publishes without video and says why in
 Settings' Show tab. When the program encodes in software, a source takes hardware
@@ -1128,7 +1202,7 @@ the relay serves, so a recording starts and stops without touching the live
 stream. The audio scene it holds is
 encoded a second time for it while recording: the one on program, so the file
 holds what viewers hear, or the one REVIEW picks, which viewers never
-can. Without `--connect`, only the
+can. Off air, only the
 recording's encoder encodes the program.
 
 Each file plays while it grows, so a crash leaves a playable fragmented MP4,
@@ -1166,8 +1240,8 @@ a WebGL page runs slower.
 ## Hotkeys
 
 The Hotkeys tab in Settings binds a key to the **Panic** key, **Replay**,
-**Save clip**, starting or stopping a recording, and taking each scene, as its
-pad does. Press **Bind**, then the key with any modifiers; Escape, or leaving
+**Save clip**, starting or stopping a recording, **Go live**, **End stream**,
+and taking each scene, as its pad does. Press **Bind**, then the key with any modifiers; Escape, or leaving
 the window or the tab, cancels. Every action starts unbound, so no key a game
 uses is taken unasked, and a key bound to one action is refused for another
 until it is cleared there. Replay, Save clip, and a recording use REVIEW's
@@ -1253,8 +1327,9 @@ Nothing records in the background for this. The program's tracks keep their
 last 30 seconds for late viewers anyway, and each source's track while it is on
 program (a picture shown in a scene on air, or a sound played by the audio
 scene on program) or recorded, and a replay copies from those, so a replay
-goes back at most that far. A replay of the program needs `--connect`; a local
-source keeps its track without a relay. With `--on-demand`, the program has
+goes back at most that far. A replay of the program needs it on air, and
+reaches back no further than going live; a local source keeps its track off
+air. With on demand, the program has
 no past from before someone watched it, and a source has none from before it
 was last on program or recorded; a replay of nothing is refused, saying why. A
 broadcast source replays from what the studio received of it, and only over a

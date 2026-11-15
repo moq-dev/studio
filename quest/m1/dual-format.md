@@ -37,4 +37,3 @@ Human check: a phone and a desktop viewer watching the same show.
 ## Required
 
 - [The BUILD page](/quest/m0/ux/build.md) - editing an arrangement per format
-- [Going live from inside the app](/quest/m0/ux/go-live.md) - a format per destination

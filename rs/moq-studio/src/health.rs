@@ -634,7 +634,8 @@ impl Sampler {
 	}
 }
 
-fn relay(link: &Link) -> Relay {
+/// How `link` is doing now.
+pub(crate) fn relay(link: &Link) -> Relay {
 	use moq_tokio::connection::Phase;
 	let (state, version) = match link.monitor.state().phase {
 		Phase::Connecting { .. } => (State::Connecting, None),
