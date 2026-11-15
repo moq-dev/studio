@@ -627,7 +627,7 @@ impl Panels {
 		if scene.program {
 			tag(ui, tags, "Stream hears this", kit::ACCENT, kit::TEXT);
 		} else {
-			let response = tag_button(ui, tags, "Put on stream");
+			let response = tag_button(ui, tags, "Put on stream", ("put on stream", name));
 			let response = kit::tip(
 				response,
 				&format!("Put {name} on the stream, without dropping or repeating audio"),
@@ -696,7 +696,7 @@ impl Panels {
 	fn listen_tag(&mut self, ui: &mut Ui, rect: Rect, changes: &mut Vec<Change>) {
 		let output = self.speakers.named(self.speaker.as_deref());
 		let text = format!("On {output}");
-		let response = tag_button(ui, rect, &text);
+		let response = tag_button(ui, rect, &text, "listen on");
 		let response = kit::tip(response, "The output Listen plays on: pick another", None);
 		if response.clicked() {
 			self.speakers.refresh(&self.runtime);
@@ -878,7 +878,6 @@ impl Panels {
 				.auto_shrink(false)
 				.show(ui, |ui| {
 					let left = (ui.available_width() - width).max(0.0) / 2.0;
-					ui.add_space(0.0);
 					let (area, _) = ui.allocate_exact_size(vec2(width + left, height), Sense::hover());
 					let table = Rect::from_min_size(area.min + vec2(left, 0.0), size);
 					let painter = ui.painter();
@@ -1035,7 +1034,7 @@ impl Panels {
 		} else if master.recorded {
 			tag(ui, tags, "In the recording", kit::P3, kit::DIM);
 		} else {
-			let response = tag_button(ui, tags, "Put on stream");
+			let response = tag_button(ui, tags, "Put on stream", ("put on stream", &master.name));
 			if response.clicked() {
 				changes.push(Change::Program(master.name.clone()));
 			}
@@ -1311,8 +1310,9 @@ fn tag(ui: &Ui, rect: Rect, text: &str, fill: egui::Color32, ink: egui::Color32)
 	ui.painter().galley(at.center() - galley.size() / 2.0, galley, ink);
 }
 
-/// A tag reading `text` in `rect` that does something when clicked.
-fn tag_button(ui: &mut Ui, rect: Rect, text: &str) -> egui::Response {
+/// A tag reading `text` in `rect` that does something when clicked, known by
+/// `id` wherever the strips move it.
+fn tag_button(ui: &mut Ui, rect: Rect, text: &str, id: impl egui::AsIdSalt) -> egui::Response {
 	let galley = kit::caps_galley(
 		ui.painter(),
 		text,
@@ -1321,11 +1321,7 @@ fn tag_button(ui: &mut Ui, rect: Rect, text: &str) -> egui::Response {
 		Some(rect.width() - 14.0),
 	);
 	let at = Rect::from_center_size(rect.center(), vec2(galley.size().x + 14.0, rect.height()));
-	let response = ui.interact(
-		at,
-		ui.id().with(("tag", rect.min.x as i32, rect.min.y as i32)),
-		Sense::click(),
-	);
+	let response = ui.interact(at, ui.id().with(id), Sense::click());
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text));
 	let (fill, ink) = match response.hovered() {
 		true => (kit::P3, kit::TEXT),

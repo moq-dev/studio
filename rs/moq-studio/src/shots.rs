@@ -358,8 +358,7 @@ fn mix_sends_and_mutes() {
 	harness.run_steps(2);
 	assert!(!scene("Recording").sounds.contains("music"), "taken out");
 
-	// A sound heard only through Stream is sent straight in, and still
-	// reaches Headphones once it leaves Stream.
+	// A sound heard only through Stream, its dot a ring, is sent straight in.
 	harness.get_by_label("Send guest to Headphones").click();
 	harness.run_steps(2);
 	assert!(scene("Headphones").sounds.contains("guest"));
