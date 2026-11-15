@@ -364,6 +364,9 @@ impl Panels {
 						Some("Restart the page, keeping the cookies and logins every page shares")
 					}
 					Source::Media { .. } => Some("Read the file again, such as after it changed"),
+					Source::PickedDisplay | Source::PickedWindow => {
+						Some("Open again, asking the system picker if it holds no grant")
+					}
 					_ => None,
 				};
 				if let Some(hover) = reloads

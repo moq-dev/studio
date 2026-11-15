@@ -402,8 +402,8 @@ pub(super) fn status_of(state: &State, name: &str, now: kio::clock::Instant) -> 
 pub(super) fn kind(collection: &Collection, name: &str) -> Icon {
 	match collection.sources.get(collection.capture(name)) {
 		Some(Source::Camera { .. }) => Icon::Camera,
-		Some(Source::Display { .. }) => Icon::Display,
-		Some(Source::Window { .. }) => Icon::Window,
+		Some(Source::Display { .. } | Source::PickedDisplay) => Icon::Display,
+		Some(Source::Window { .. } | Source::PickedWindow) => Icon::Window,
 		Some(Source::Browser { .. }) => Icon::Web,
 		Some(Source::Overlay { .. }) => Icon::Text,
 		Some(Source::Image { .. }) => Icon::Image,
@@ -421,7 +421,9 @@ pub(super) fn words(collection: &Collection, name: &str) -> String {
 	let what = match collection.sources.get(collection.capture(name)) {
 		Some(Source::Camera { .. }) => "Camera".to_string(),
 		Some(Source::Display { .. }) => "Screen".to_string(),
+		Some(Source::PickedDisplay) => "Screen, picked".to_string(),
 		Some(Source::Window { .. }) => "Window".to_string(),
+		Some(Source::PickedWindow) => "Window, picked".to_string(),
 		Some(Source::Browser { .. }) => "Web page".to_string(),
 		Some(Source::Overlay { .. }) => "Overlay".to_string(),
 		Some(Source::Image { .. }) => "Image".to_string(),

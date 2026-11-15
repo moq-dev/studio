@@ -60,8 +60,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - `cef` adds browser sources, on Linux only for now. The build takes CEF from
   `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
   loads `libcef.so` from beside itself or from that `CEF_PATH`.
-- On Linux, display and window sources capture X11 and XWayland only; a
-  Wayland screen or window cannot be picked yet.
+- On Linux, display and window sources capture X11 and XWayland by id. With
+  `pipewire`, a display or window can also be picked in the desktop's
+  screen-sharing picker, the only way to share a Wayland screen; see
+  [Picked displays and windows](#picked-displays-and-windows).
 - On macOS, the studio is not an app bundle yet, so the camera, microphone,
   and Screen & System Audio Recording permissions are asked of, and granted
   to, the app that launched it, such as your terminal. Display, window, and
@@ -250,7 +252,7 @@ is named for it, with these sections:
 | Shape | Pick its outline, square, rounded, circle, or arch, give it a border inside that outline and the border's color, and give it a soft shadow, which follows the outline and is the layer's first drop shadow filter. |
 | Look | Remove its source's background, which every layer showing the source loses (make it independent to cut out here alone); grade its color through a LUT source; add, order, set, and remove its filters, copy them, or paste copied filters after its own; and set its blend mode. |
 | Shown in | See how many places show its source, **Linked in 3 scenes**, and **Make independent**, which points this layer at a copy of the source of its own, keeping its look, so editing that look no longer edits the others. A copy says what it copies. |
-| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page. Publish it independently (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. |
+| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. Publish it independently (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. |
 
 Its **Animate** tab holds the layer's keyframes (see [Keyframes](#keyframes)).
 With no layer selected, the inspector shows the scene on program: rename it,
@@ -616,6 +618,29 @@ air shows it, the sound while the audio scene on program plays it, and either wh
 read. So a music bed that no scene shows encodes its sound alone. A file with
 no sound has no strip on the MIX page.
 
+### Picked displays and windows
+
+On Linux with the `pipewire` feature, a `picked_display` or `picked_window`
+source opens the desktop's screen-sharing picker (xdg-desktop-portal) the
+first time it opens, and shows whichever display or window you choose there.
+It is the way to share a screen or window on a Wayland desktop, where the
+studio cannot list them itself. BUILD's Add, among this machine's devices,
+and guided setup offer them as **Picked display** and **Picked window**, first
+on a Wayland desktop, and Add's form for any source as **Display (system
+picker)** and **Window (system picker)**.
+
+The scene file records only that the source is picked, not what you picked,
+so it stays portable. What you picked is the portal's grant, kept per machine
+in `$XDG_STATE_HOME/moq-studio/portal.toml` (`~/.local/state` by default),
+readable by you alone, under the scene file's path and the source's name. So
+the source reopens without the picker, across restarts, on a desktop that
+keeps grants. The picker shows once again when the grant cannot be used: on
+another machine, after the scene file moves or the source is renamed, when
+the desktop refuses the grant, or after you stop sharing from the desktop,
+which revokes it. Cancelling the picker or stopping sharing fails the source
+until its **Reload**, in the inspector, asks again. Removing a source
+forgets its grant. Studios open at once share the file safely.
+
 ## Guests
 
 Guests and phones join a room the studio owns on its relay, from a web page,
@@ -858,7 +883,9 @@ rect = { x = 1600, y = 40, width = 280, height = 120 }
 ```
 
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
-`id`, the default device without one), `window` (with an `id`), `system_audio`
+`id`, the default device without one), `window` (with an `id`),
+`picked_display` and `picked_window` (no fields; see
+[Picked displays and windows](#picked-displays-and-windows)), `system_audio`
 (macOS), `image` (PNG or JPEG), `media` (a video or audio file; see
 [Media files](#media-files)), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
