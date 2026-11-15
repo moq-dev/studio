@@ -795,6 +795,10 @@ pub struct Driver {
 	/// A layer's broadcast path, and the clock of the broadcast source it
 	/// plays on.
 	follows: Option<(String, sync::Consumer)>,
+	/// A picked source's right to keep its grant, taken as it opens, so a
+	/// newer one supersedes it whatever order the drivers run in.
+	#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
+	grant: Option<crate::grant::Claim>,
 }
 
 /// Where a source's own track goes, its claim on the local catalog's listing
@@ -990,8 +994,7 @@ impl Driver {
 			Source::PickedDisplay => Kind::Screen,
 			_ => Kind::Window,
 		};
-		let claim = self.context.grants.as_ref().map(|grants| grants.claim(&self.name));
-		let claim = claim.as_ref();
+		let claim = self.grant.as_ref();
 		let selection = picker::seeded(kind, claim)?;
 		let mut watch = selection.restore_token();
 		let mut config = moq_video::capture::Config::default();
@@ -2479,6 +2482,11 @@ fn open(
 		silent,
 		clock,
 		follows,
+		#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
+		grant: match source {
+			Source::PickedDisplay | Source::PickedWindow => context.grants.as_ref().map(|grants| grants.claim(name)),
+			_ => None,
+		},
 	};
 	(feed, driver)
 }
