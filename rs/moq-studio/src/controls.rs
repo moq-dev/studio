@@ -90,6 +90,9 @@ pub struct Controls {
 	/// Whether relays saved on air wait for the stream to end to be
 	/// followed, which would cut the broadcast sources and guests on program.
 	rewatch: AtomicBool,
+	/// Held while saved relays are followed, and by a go-live while it
+	/// follows any still waiting, so none is followed once it is on air.
+	following: Mutex<()>,
 	/// The Replay panel's picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
 	/// Whether the next recording gives each source a file of its own too.
@@ -131,6 +134,7 @@ impl Controls {
 			refused: Mutex::default(),
 			going: AtomicBool::new(false),
 			rewatch: AtomicBool::new(false),
+			following: Mutex::new(()),
 			replay: Mutex::default(),
 			record_sources: AtomicBool::new(false),
 			fired: Arc::default(),
@@ -189,6 +193,15 @@ impl Controls {
 		let spawned = std::thread::Builder::new().name("go live".into()).spawn(move || {
 			// Each relay's client binds its socket on the runtime.
 			let _runtime = controls.runtime.enter();
+			// Relays saved since the last stream are followed before this one
+			// dials, after any follow already under way.
+			{
+				let _following = controls.following.lock().unwrap();
+				if controls.rewatch.swap(false, Ordering::AcqRel) {
+					let stream = controls.stream.lock().unwrap().clone();
+					crate::show::follow(&controls.engine, &stream);
+				}
+			}
 			let switched = *controls.switched.lock().unwrap();
 			// Cloned in a statement of its own, so the lock is not held
 			// while the credential store blocks, which would freeze the
@@ -226,20 +239,32 @@ impl Controls {
 
 	/// The stream settings' relays were saved: follow them now when off air,
 	/// or once the stream ends. Says whether it waits for the stream.
-	pub fn relays_saved(&self) -> bool {
+	pub fn relays_saved(self: &Arc<Self>) -> bool {
 		self.rewatch.store(true, Ordering::Release);
+		let waits = self.going() || self.engine.on_air() != OnAir::Off;
 		self.follow_saved_relays();
-		self.rewatch.load(Ordering::Acquire)
+		waits
 	}
 
-	/// Follow the saved relays, if any wait to be, unless a stream is on air
-	/// or on its way.
-	fn follow_saved_relays(&self) {
-		if self.going() || self.engine.on_air() != OnAir::Off || !self.rewatch.swap(false, Ordering::AcqRel) {
-			return;
+	/// Follow the saved relays, if any wait to be, on a thread of its own,
+	/// since the credential store blocks, unless a stream is on air or on its
+	/// way, which follows them itself.
+	fn follow_saved_relays(self: &Arc<Self>) {
+		let controls = self.clone();
+		let spawned = std::thread::Builder::new().name("follow".into()).spawn(move || {
+			let _following = controls.following.lock().unwrap();
+			let off = !controls.going() && controls.engine.on_air() == OnAir::Off;
+			if !off || !controls.rewatch.swap(false, Ordering::AcqRel) {
+				return;
+			}
+			// Each relay's client binds its socket on the runtime.
+			let _runtime = controls.runtime.enter();
+			let stream = controls.stream.lock().unwrap().clone();
+			crate::show::follow(&controls.engine, &stream);
+		});
+		if let Err(err) = spawned {
+			tracing::warn!(error = format!("{err:#}"), "cannot follow the saved relays");
 		}
-		let stream = self.stream.lock().unwrap().clone();
-		crate::show::watch(&self.engine, &stream, &self.runtime);
 	}
 
 	/// End the stream in the background, handing the relays its tail first.

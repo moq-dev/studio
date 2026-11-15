@@ -111,17 +111,23 @@ pub fn watch(engine: &Arc<Engine>, stream: &Stream, runtime: &tokio::runtime::Ha
 	let spawned = std::thread::Builder::new().name("watch".into()).spawn(move || {
 		// Each client binds its socket on the runtime.
 		let _runtime = runtime.enter();
-		let each = [(true, false), (false, true)].map(|(relay, failover)| stream::Switched { relay, failover });
-		let mut relays = Vec::new();
-		for switched in each {
-			match stream.relays(switched) {
-				Ok(set) => relays.extend(set),
-				Err(err) => tracing::warn!(error = format!("{err:#}"), "cannot follow a relay"),
-			}
-		}
-		engine.watch(&relays);
+		follow(&engine, &stream);
 	});
 	if let Err(err) = spawned {
 		tracing::warn!(error = format!("{err:#}"), "cannot follow the relays");
 	}
+}
+
+/// [`watch`] on this thread, which blocks on the credential store: call it
+/// off the window's thread, outside an async task, inside the tokio runtime.
+pub fn follow(engine: &Engine, stream: &Stream) {
+	let each = [(true, false), (false, true)].map(|(relay, failover)| stream::Switched { relay, failover });
+	let mut relays = Vec::new();
+	for switched in each {
+		match stream.relays(switched) {
+			Ok(set) => relays.extend(set),
+			Err(err) => tracing::warn!(error = format!("{err:#}"), "cannot follow a relay"),
+		}
+	}
+	engine.watch(&relays);
 }
