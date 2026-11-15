@@ -60,8 +60,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - `cef` adds browser sources, on Linux only for now. The build takes CEF from
   `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
   loads `libcef.so` from beside itself or from that `CEF_PATH`.
-- On Linux, display and window sources capture X11 and XWayland only; a
-  Wayland screen or window cannot be picked yet.
+- On Linux, display and window sources capture X11 and XWayland by id. With
+  `pipewire`, a display or window can also be picked in the desktop's
+  screen-sharing picker, the only way to share a Wayland screen; see
+  [Picked displays and windows](#picked-displays-and-windows).
 - On macOS, the studio is not an app bundle yet, so the camera, microphone,
   and Screen & System Audio Recording permissions are asked of, and granted
   to, the app that launched it, such as your terminal. Display, window, and
@@ -487,6 +489,27 @@ air shows it, the sound while the audio scene on program plays it, and either wh
 read. So a music bed that no scene shows encodes its sound alone. A file with
 no sound has no strip in the Audio panel.
 
+### Picked displays and windows
+
+On Linux with the `pipewire` feature, a `picked_display` or `picked_window`
+source opens the desktop's screen-sharing picker (xdg-desktop-portal) the
+first time it opens, and shows whichever display or window you choose there.
+It is the way to share a screen or window on a Wayland desktop, where the
+studio cannot list them itself. The Devices panel and guided setup offer them
+as **Picked display** and **Picked window**, first on a Wayland desktop, and
+the Sources panel's Add form as **Display (system picker)** and **Window
+(system picker)**.
+
+The scene file records only that the source is picked, not what you picked,
+so it stays portable. What you picked is the portal's grant, kept per machine
+in `$XDG_STATE_HOME/moq-studio/portal.toml` (`~/.local/state` by default),
+readable by you alone, under the scene file's path and the source's name. So
+the source reopens without the picker, across restarts, on a desktop that
+keeps grants. The picker shows once again when the grant cannot be used: on
+another machine, after the scene file moves or the source is renamed, when
+the desktop refuses the grant, or after you stop sharing from the desktop,
+which revokes it. Removing a source forgets its grant.
+
 ## Guests
 
 Guests and phones join a room the studio owns on its relay, from a web page,
@@ -729,7 +752,9 @@ rect = { x = 1600, y = 40, width = 280, height = 120 }
 ```
 
 Source kinds are `camera`, `display`, and `microphone` (each with an optional
-`id`, the default device without one), `window` (with an `id`), `system_audio`
+`id`, the default device without one), `window` (with an `id`),
+`picked_display` and `picked_window` (no fields; see
+[Picked displays and windows](#picked-displays-and-windows)), `system_audio`
 (macOS), `image` (PNG or JPEG), `media` (a video or audio file; see
 [Media files](#media-files)), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),

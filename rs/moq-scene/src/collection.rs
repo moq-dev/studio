@@ -1757,6 +1757,14 @@ pub enum Source {
 		/// The window's id.
 		id: String,
 	},
+	/// A whole display the user picks in the system's screen-sharing picker,
+	/// as a Wayland desktop has no other way to share one. The file records
+	/// only that it is picked; this machine's [`Grants`](crate::Grants)
+	/// remember the grant, so it reopens without the picker. Linux only.
+	PickedDisplay,
+	/// One window the user picks in the system's screen-sharing picker, as
+	/// [`Source::PickedDisplay`] is.
+	PickedWindow,
 	/// A microphone or other audio input.
 	Microphone {
 		/// The input's id, or the default input.
@@ -1906,6 +1914,8 @@ impl Source {
 			Self::Camera { .. }
 				| Self::Display { .. }
 				| Self::Window { .. }
+				| Self::PickedDisplay
+				| Self::PickedWindow
 				| Self::Image { .. }
 				| Self::Media { .. }
 				| Self::Broadcast { .. }

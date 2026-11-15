@@ -957,6 +957,7 @@ impl Engine {
 			output: moq_video::render::output(&gpu.device),
 			publish: Some(publish.sources.clone()),
 			browser: browser(&gpu)?,
+			grants: grants(autosave.path())?,
 		});
 		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
 		compositor.fit(&collection)?;
@@ -3027,18 +3028,33 @@ fn browser(gpu: &Gpu) -> anyhow::Result<Option<moq_scene::browser::Helper>> {
 }
 
 /// Where browser sources keep their cookies and logins, whichever scene file
-/// is open: `moq-studio/browser` in the user's data directory, as the XDG base
-/// directories name it, since browser sources run on Linux only for now.
+/// is open: `moq-studio/browser` in the user's data directory, since browser
+/// sources run on Linux only for now.
 fn browser_profile() -> anyhow::Result<PathBuf> {
-	let data = match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+	Ok(xdg("XDG_DATA_HOME", ".local/share")?.join("moq-studio/browser"))
+}
+
+/// Where the system picker's grants for the scene file at `scene` are kept:
+/// `moq-studio/portal.toml` in the user's state directory, on Linux, the one
+/// platform with the picker.
+fn grants(scene: &Path) -> anyhow::Result<Option<moq_scene::Grants>> {
+	if !cfg!(target_os = "linux") {
+		return Ok(None);
+	}
+	let file = xdg("XDG_STATE_HOME", ".local/state")?.join("moq-studio/portal.toml");
+	Ok(Some(moq_scene::Grants::new(file, &std::path::absolute(scene)?)))
+}
+
+/// The XDG base directory `var` names, or `fallback` under the home directory.
+fn xdg(var: &str, fallback: &str) -> anyhow::Result<PathBuf> {
+	match std::env::var_os(var).map(PathBuf::from) {
 		// The spec ignores a relative one.
-		Some(data) if data.is_absolute() => data,
+		Some(dir) if dir.is_absolute() => Ok(dir),
 		_ => {
-			let home = std::env::var_os("HOME").context("no HOME to keep the browser profile in")?;
-			PathBuf::from(home).join(".local/share")
+			let home = std::env::var_os("HOME").with_context(|| format!("no HOME to find {var}'s default in"))?;
+			Ok(PathBuf::from(home).join(fallback))
 		}
-	};
-	Ok(data.join("moq-studio/browser"))
+	}
 }
 
 /// Run a source on its own thread until its feed is dropped, or fail the

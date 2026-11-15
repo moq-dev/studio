@@ -160,4 +160,3 @@ PR hands them to the maintainer as `## Waiting` with what to look at:
 
 - [m1](/quest/m1/README.md) - the features that follow the redesign
 - [Destinations](/quest/m0/destinations.md) - RTMP and WHIP rows in the go-live sheet this epic builds
-- [Wayland display and window sources](/quest/m0/wayland-sources.md) - the system picker the Add page opens
