@@ -340,11 +340,28 @@ fn fraction(pos: f32, range: egui::Rangef) -> f32 {
 	((pos - range.min) / range.span()).clamp(0.0, 1.0)
 }
 
-/// Step a 0-to-1 `value` by the arrow keys while `response` has focus.
+/// Put `to` in `value`, saying whether that changed it, so a drag that holds
+/// still edits nothing.
+fn set(value: &mut f32, to: f32) -> bool {
+	let changed = *value != to;
+	*value = to;
+	changed
+}
+
+/// Step a 0-to-1 `value` by the arrow keys while `response` has focus, which
+/// keeps the arrows from moving focus to the next control.
 fn arrows(ui: &Ui, response: &Response, value: &mut f32) -> bool {
 	if !response.has_focus() {
 		return false;
 	}
+	ui.memory_mut(|memory| {
+		let filter = egui::EventFilter {
+			horizontal_arrows: true,
+			vertical_arrows: true,
+			..Default::default()
+		};
+		memory.set_focus_lock_filter(response.id, filter);
+	});
 	let step = ui.input(|input| {
 		let up = input.key_pressed(egui::Key::ArrowUp) || input.key_pressed(egui::Key::ArrowRight);
 		let down = input.key_pressed(egui::Key::ArrowDown) || input.key_pressed(egui::Key::ArrowLeft);
@@ -378,10 +395,13 @@ impl<'a> Slider<'a> {
 impl Widget for Slider<'_> {
 	fn ui(self, ui: &mut Ui) -> Response {
 		let width = self.width.unwrap_or_else(|| ui.spacing().slider_width);
-		let (rect, mut response) = ui.allocate_exact_size(vec2(width, 18.0), Sense::click_and_drag());
+		// Drag alone, so a press starts the drag: its jump and the drag are one gesture.
+		let (rect, mut response) = ui.allocate_exact_size(vec2(width, 18.0), Sense::drag());
 		let track = egui::Rangef::new(rect.left() + 7.0, rect.right() - 7.0);
-		if let Some(pos) = response.interact_pointer_pos() {
-			*self.value = fraction(pos.x, track);
+		if response.dragged()
+			&& let Some(pos) = response.interact_pointer_pos()
+			&& set(self.value, fraction(pos.x, track))
+		{
 			response.mark_changed();
 		}
 		if arrows(ui, &response, self.value) {
@@ -434,10 +454,12 @@ impl<'a> Fader<'a> {
 
 impl Widget for Fader<'_> {
 	fn ui(self, ui: &mut Ui) -> Response {
-		let (rect, mut response) = ui.allocate_exact_size(vec2(28.0, self.height), Sense::click_and_drag());
+		let (rect, mut response) = ui.allocate_exact_size(vec2(28.0, self.height), Sense::drag());
 		let travel = egui::Rangef::new(rect.top() + 8.0, rect.bottom() - 8.0);
-		if let Some(pos) = response.interact_pointer_pos() {
-			*self.value = 1.0 - fraction(pos.y, travel);
+		if response.dragged()
+			&& let Some(pos) = response.interact_pointer_pos()
+			&& set(self.value, 1.0 - fraction(pos.y, travel))
+		{
 			response.mark_changed();
 		}
 		if arrows(ui, &response, self.value) {
@@ -1188,6 +1210,54 @@ mod tests {
 			harness.run();
 		}
 		assert_eq!(*harness.state(), 1.0);
+	}
+
+	/// With focus on one of two sliders side by side, the arrow keys step it
+	/// alone, rather than moving focus to the next.
+	#[test]
+	fn a_focused_slider_keeps_the_arrow_keys() {
+		let mut harness = Harness::new_ui_state(
+			|ui, values: &mut [f32; 2]| {
+				ui.horizontal(|ui| {
+					for value in values {
+						ui.add(Slider::new(value).width(100.0));
+					}
+				});
+			},
+			[0.0; 2],
+		);
+		harness.get_all_by_role(Role::Slider).next().unwrap().focus();
+		harness.run();
+		for _ in 0..60 {
+			harness.key_press(egui::Key::ArrowRight);
+			harness.run();
+		}
+		assert_eq!(*harness.state(), [1.0, 0.0]);
+	}
+
+	/// A press on the track starts the drag at once, and its release edits
+	/// nothing, so the jump to the pointer and the drag after it are one
+	/// gesture to undo.
+	#[test]
+	fn a_press_on_a_slider_starts_its_drag() {
+		// The value, and whether it ever changed outside a drag.
+		let mut harness = Harness::new_ui_state(
+			|ui, (value, loose): &mut (f32, bool)| {
+				let response = ui.add(Slider::new(value).width(214.0));
+				*loose |= response.changed() && !response.dragged();
+			},
+			(0.0, false),
+		);
+		let rect = harness.get_by_role(Role::Slider).rect();
+		harness.drag_at(egui::pos2(egui::lerp(rect.x_range(), 0.75), rect.center().y));
+		harness.run();
+		harness.hover_at(egui::pos2(egui::lerp(rect.x_range(), 0.25), rect.center().y));
+		harness.run();
+		harness.drop_at(egui::pos2(egui::lerp(rect.x_range(), 0.25), rect.center().y));
+		harness.run();
+		let (value, loose) = *harness.state();
+		assert!((value - 0.25).abs() < 0.05, "{value}");
+		assert!(!loose, "the press changed the value before its drag started");
 	}
 
 	/// A toggle flips on each click, and says which way it is.

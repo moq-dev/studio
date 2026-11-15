@@ -3801,7 +3801,20 @@ fn strip_controls(
 	// The slider runs over decibels, from silence to 12 dB of boost.
 	let db = decibels(audio.gain);
 	let mut at = (db - MUTE_DB) / (12.0 - MUTE_DB);
-	let response = ui.add(kit::Slider::new(&mut at).width(120.0)).on_hover_text("Gain");
+	let shown = if db <= MUTE_DB {
+		"-inf dB".to_string()
+	} else {
+		format!("{db:+.1} dB")
+	};
+	// The slider and its readout share one cell, so a grid's columns stay
+	// under their headings.
+	let response = ui
+		.horizontal(|ui| {
+			let response = ui.add(kit::Slider::new(&mut at).width(120.0)).on_hover_text("Gain");
+			ui.label(egui::RichText::new(shown).font(kit::mono(11.0)).color(kit::DIM));
+			response
+		})
+		.inner;
 	let gesture = gestures.of(&response);
 	if response.changed() {
 		let db = MUTE_DB + at * (12.0 - MUTE_DB);
@@ -3809,12 +3822,6 @@ fn strip_controls(
 		let audio = moq_scene::Audio { gain, ..audio.clone() };
 		change = Some((audio, format!("Set `{name}` gain"), gesture));
 	}
-	let shown = if db <= MUTE_DB {
-		"-inf dB".to_string()
-	} else {
-		format!("{db:+.1} dB")
-	};
-	ui.label(egui::RichText::new(shown).font(kit::mono(11.0)).color(kit::DIM));
 	let mut pan = audio.pan;
 	let response = ui
 		.add(
