@@ -658,25 +658,30 @@ impl Widget for Number<'_> {
 		let field = ui.painter().add(Shape::Noop);
 		let mut child = ui.new_child(
 			egui::UiBuilder::new()
-				.max_rect(rect.shrink2(vec2(8.0, 0.0)))
+				.max_rect(rect)
 				.layout(egui::Layout::left_to_right(egui::Align::Center)),
 		);
-		child.spacing_mut().item_spacing.x = 6.0;
-		child.spacing_mut().interact_size.x = 0.0;
-		child.spacing_mut().button_padding = Vec2::ZERO;
+		// One button the size of the field, its label and unit inside it, so a
+		// press anywhere on the field, not just on the numeral, drags or types.
+		child.spacing_mut().interact_size = rect.size();
+		child.spacing_mut().button_padding = vec2(8.0, 0.0);
 		let visuals = &mut child.visuals_mut().widgets;
 		for state in [&mut visuals.inactive, &mut visuals.hovered, &mut visuals.active] {
 			state.weak_bg_fill = Color32::TRANSPARENT;
 			state.bg_stroke = Stroke::NONE;
 		}
 		child.style_mut().drag_value_text_style = egui::TextStyle::Monospace;
+		let faint = |text| egui::RichText::new(text).font(super::ui_medium(10.0)).color(FAINT);
+		let gap = |side| egui::Atom::custom(egui::Id::new(("number gap", side)), vec2(6.0, 0.0));
+		let mut drag = self.drag;
 		if let Some(label) = self.label {
-			child.label(egui::RichText::new(label).font(super::ui_medium(10.0)).color(FAINT));
+			drag = drag.prefix((faint(label), gap("label")));
 		}
-		let response = child.add(self.drag);
 		if let Some(unit) = self.unit {
-			child.label(egui::RichText::new(unit).font(super::ui_medium(10.0)).color(FAINT));
+			drag = drag.suffix((gap("unit"), faint(unit)));
 		}
+		// The blank after the text grows, keeping the text at the field's start.
+		let response = child.add(drag.suffix(egui::Atom::grow()));
 		let stroke = match (response.has_focus() || response.dragged(), response.hovered()) {
 			(true, _) => ACCENT,
 			(false, true) => LINE_HOVER,
@@ -1284,6 +1289,36 @@ mod tests {
 		let (value, loose) = *harness.state();
 		assert!((value - 0.25).abs() < 0.05, "{value}");
 		assert!(!loose, "the release changed the value outside its drag");
+	}
+
+	/// A drag from the field's blank middle, well past a short numeral, edits
+	/// the value.
+	#[test]
+	fn a_number_drags_from_anywhere_on_its_field() {
+		// The value, the field's rect, and whether the kit's faces, which take
+		// effect a frame later, are installed.
+		let mut harness = Harness::new_ui_state(
+			|ui, (value, field, ready): &mut (i32, egui::Rect, bool)| {
+				if !std::mem::replace(ready, true) {
+					super::super::install(ui.ctx());
+					return;
+				}
+				*field = ui
+					.add(Number::new(egui::DragValue::new(value)).unit("ms").width(120.0))
+					.rect;
+			},
+			(0, egui::Rect::NOTHING, false),
+		);
+		harness.run();
+		let field = harness.state().1;
+		let at = |fraction| egui::pos2(egui::lerp(field.x_range(), fraction), field.center().y);
+		harness.drag_at(at(0.6));
+		harness.run();
+		harness.hover_at(at(0.8));
+		harness.run();
+		harness.drop_at(at(0.8));
+		harness.run();
+		assert!(harness.state().0 > 0, "{}", harness.state().0);
 	}
 
 	/// A toggle flips on each click, and says which way it is.
