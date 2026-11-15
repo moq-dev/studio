@@ -167,7 +167,7 @@ The **strip** holds:
   adds an empty scene without taking it.
 - The **panic key**, amber and named for the safe scene: it mutes every
   microphone and every guest (their camera's sound and their screen's), hides
-  every item of the top layer, whatever it shows, in one edit undo takes back,
+  every always-on-top layer, whatever it shows, in one edit undo takes back,
   and cuts at once to the scene marked safe, if one is. Other remote feeds and
   media stay on. Mark one from its pad's menu, BUILD's inspector with no layer
   selected, or the scene graph. The scissors beside it save a replay clip (see
@@ -1163,7 +1163,7 @@ layout:
   clock: the moment its pictures' keyframes play from.
 - `pictures` lists each layer of the scene on program, then of the always-on-top ones,
   showing a published source, back to front over the program, shown or
-  hidden. Each `item` is a scene file item: its `source` names the source's
+  hidden. Each `item` is a layer as the scene file writes it: its `source` names the source's
   entry under the catalog's `live.kixel.studio` `sources` (the source a clone
   shows), and its `crop` and `filters` fold in its source's own.
 - `sounds` lists each published source the audio scene on program holds,
