@@ -990,19 +990,20 @@ impl Driver {
 			Source::PickedDisplay => Kind::Screen,
 			_ => Kind::Window,
 		};
-		let grants = self.context.grants.as_ref();
-		let selection = picker::seeded(kind, grants, &self.name)?;
+		let claim = self.context.grants.as_ref().map(|grants| grants.claim(&self.name));
+		let claim = claim.as_ref();
+		let selection = picker::seeded(kind, claim)?;
 		let mut watch = selection.restore_token();
 		let mut config = moq_video::capture::Config::default();
 		config.source = moq_video::capture::Source::Portal(selection);
 
 		let result = tokio::select! {
 			result = self.capture(config, listing) => result,
-			err = picker::keep(&mut watch, grants, &self.name) => err,
+			err = picker::keep(&mut watch, claim) => err,
 		};
 		// The capture can end on a change not yet kept, such as the user
 		// stopping the share, which spends the grant.
-		let kept = picker::store(grants, &self.name, watch.token());
+		let kept = picker::store(claim, watch.token());
 		result.and(kept)
 	}
 
@@ -2487,34 +2488,30 @@ fn open(
 mod picker {
 	use moq_video::capture::portal::{Kind, RestoreToken, RestoreTokenConsumer, Selection};
 
-	use crate::{Error, Grants};
+	use crate::Error;
+	use crate::grant::Claim;
 
-	/// A selection of `kind` for the source called `name`, seeded with the
-	/// grant `grants` keeps for it.
-	pub(super) fn seeded(kind: Kind, grants: Option<&Grants>, name: &str) -> Result<Selection, Error> {
+	/// A selection of `kind`, seeded with the grant `claim` holds.
+	pub(super) fn seeded(kind: Kind, claim: Option<&Claim>) -> Result<Selection, Error> {
 		let selection = Selection::new(kind);
-		Ok(match grants.map(|grants| grants.get(name)).transpose()?.flatten() {
+		Ok(match claim.map(Claim::get).transpose()?.flatten() {
 			Some(grant) => selection.with_restore_token(RestoreToken::new(grant)),
 			None => selection,
 		})
 	}
 
-	/// Keep each grant `watch` sees in `grants`, until the selection is gone.
-	pub(super) async fn keep(
-		watch: &mut RestoreTokenConsumer,
-		grants: Option<&Grants>,
-		name: &str,
-	) -> Result<(), Error> {
+	/// Keep each grant `watch` sees under `claim`, until the selection is gone.
+	pub(super) async fn keep(watch: &mut RestoreTokenConsumer, claim: Option<&Claim>) -> Result<(), Error> {
 		while let Some(grant) = watch.changed().await {
-			store(grants, name, grant)?;
+			store(claim, grant)?;
 		}
 		std::future::pending().await
 	}
 
-	/// Keep `grant` for the source called `name`, or forget its grant on `None`.
-	pub(super) fn store(grants: Option<&Grants>, name: &str, grant: Option<RestoreToken>) -> Result<(), Error> {
-		match grants {
-			Some(grants) => grants.set(name, grant.as_ref().map(RestoreToken::as_str)),
+	/// Keep `grant` under `claim`, or forget the grant on `None`.
+	pub(super) fn store(claim: Option<&Claim>, grant: Option<RestoreToken>) -> Result<(), Error> {
+		match claim {
+			Some(claim) => claim.set(grant.as_ref().map(RestoreToken::as_str)),
 			None => Ok(()),
 		}
 	}
@@ -2528,15 +2525,17 @@ mod picker {
 		#[tokio::test]
 		async fn a_picked_source_keeps_each_grant_across_opens() {
 			let dir = tempfile::tempdir().unwrap();
-			let grants = Grants::new(dir.path().join("portal.toml"), Path::new("/scene.toml"));
-			grants.set("Screen", Some("kept")).unwrap();
+			let grants = crate::Grants::new(dir.path().join("portal.toml"), Path::new("/scene.toml"));
+			let claim = grants.claim("Screen");
+			claim.set(Some("kept")).unwrap();
 
 			// The grant kept by an earlier run seeds the next.
-			let selection = seeded(Kind::Screen, Some(&grants), "Screen").unwrap();
+			let selection = seeded(Kind::Screen, Some(&claim)).unwrap();
 			let mut watch = selection.restore_token();
 			assert_eq!(watch.token(), Some(RestoreToken::new("kept")));
+			let other = grants.claim("Other");
 			assert!(
-				seeded(Kind::Window, Some(&grants), "Other")
+				seeded(Kind::Window, Some(&other))
 					.unwrap()
 					.restore_token()
 					.token()
@@ -2544,7 +2543,7 @@ mod picker {
 			);
 
 			// The portal replacing it, as a grant does, is kept at once.
-			let keeping = keep(&mut watch, Some(&grants), "Screen");
+			let keeping = keep(&mut watch, Some(&claim));
 			tokio::pin!(keeping);
 			selection.clone().with_restore_token(RestoreToken::new("replaced"));
 			tokio::select! {
@@ -2552,11 +2551,11 @@ mod picker {
 				_ = &mut keeping => unreachable!("keeps until the selection is gone"),
 				() = tokio::task::yield_now() => {}
 			}
-			assert_eq!(grants.get("Screen").unwrap().as_deref(), Some("replaced"));
+			assert_eq!(claim.get().unwrap().as_deref(), Some("replaced"));
 
 			// A spent grant is forgotten.
-			store(Some(&grants), "Screen", None).unwrap();
-			assert_eq!(grants.get("Screen").unwrap(), None);
+			store(Some(&claim), None).unwrap();
+			assert_eq!(claim.get().unwrap(), None);
 		}
 	}
 }
@@ -3725,7 +3724,7 @@ mod tests {
 			let dir = tempfile::tempdir().unwrap();
 			let grants = crate::Grants::new(dir.path().join("portal.toml"), Path::new("/scene.toml"));
 			for name in ["Screen", "Window", "Camera"] {
-				grants.set(name, Some(name)).unwrap();
+				grants.claim(name).set(Some(name)).unwrap();
 			}
 			let (mut context, _origin) = context(dir.path());
 			context.grants = Some(grants.clone());
@@ -3735,7 +3734,9 @@ mod tests {
 			collection.sources.insert("Window".into(), Source::PickedWindow);
 			collection.sources.insert("Camera".into(), Source::Camera { id: None });
 			drop(sources.sync(&collection));
-			let kept = |name| grants.get(name).unwrap().is_some();
+			// Read through another studio's claims, which this one's do not affect.
+			let reader = crate::Grants::new(dir.path().join("portal.toml"), Path::new("/scene.toml"));
+			let kept = |name| reader.claim(name).get().unwrap().is_some();
 			assert!(kept("Screen") && kept("Window"));
 			assert!(!kept("Camera"), "only a picked source holds a grant");
 

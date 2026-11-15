@@ -126,7 +126,7 @@ names itself, and its key, under the pointer.
 | Scenes | See each scene live on its pad, redrawn a few times a second while it is on screen, with its hotkey and an ON AIR or NEXT tag. Click a pad to pick the scene in preview, and add, rename (double-click), reorder, remove, or switch on **Publish** for one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show or hide (the eye), and order what the preview scene or the top layer draws, back to front. Drag a position or size field sideways to change it, or click it to type. The top layer is edited over a scene of the program's size. Select an item to filter or copy it. |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU, saying why on hover), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
+| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU, saying why on hover), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. A picked display or window's **Reload** opens it again, as after the picker was cancelled or sharing stopped. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Guests | Invite a guest, show their join link as a QR code in a sheet over the window, see who joined, and take a guest out of every scene. |
 | Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
@@ -508,7 +508,9 @@ the source reopens without the picker, across restarts, on a desktop that
 keeps grants. The picker shows once again when the grant cannot be used: on
 another machine, after the scene file moves or the source is renamed, when
 the desktop refuses the grant, or after you stop sharing from the desktop,
-which revokes it. Removing a source forgets its grant.
+which revokes it. Cancelling the picker or stopping sharing fails the source
+until its **Reload** in the Sources panel asks again. Removing a source
+forgets its grant. Studios open at once share the file safely.
 
 ## Guests
 
