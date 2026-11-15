@@ -83,6 +83,10 @@ pub struct Controls {
 	/// Why the last go-live failed, until the go-live sheet or the status bar
 	/// shows it.
 	pub refused: Mutex<Option<String>>,
+	/// Whether a go-live is under way, from the press until it is live or
+	/// refused, which covers reading the tokens before the engine says
+	/// Starting, so a second press is refused at once.
+	going: AtomicBool,
 	/// The Replay panel's picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
 	/// Whether the next recording gives each source a file of its own too.
@@ -122,6 +126,7 @@ impl Controls {
 			stream: Mutex::new(stream),
 			switched: Mutex::default(),
 			refused: Mutex::default(),
+			going: AtomicBool::new(false),
 			replay: Mutex::default(),
 			record_sources: AtomicBool::new(false),
 			fired: Arc::default(),
@@ -174,32 +179,41 @@ impl Controls {
 			self.engine.on_air() == OnAir::Off,
 			"the program is already on air, or on its way on or off"
 		);
+		anyhow::ensure!(!self.going.swap(true, Ordering::AcqRel), "already going live");
 		*self.refused.lock().unwrap() = None;
 		let controls = self.clone();
-		std::thread::Builder::new()
-			.name("go live".into())
-			.spawn(move || {
-				// Each relay's client binds its socket on the runtime.
-				let _runtime = controls.runtime.enter();
-				let switched = *controls.switched.lock().unwrap();
-				// Cloned in a statement of its own, so the lock is not held
-				// while the credential store blocks, which would freeze the
-				// window reading the settings.
-				let stream = controls.stream.lock().unwrap().clone();
-				let destination = stream.destination(switched);
-				let result = destination.and_then(|destination| {
-					let to = destination.broadcast.clone();
-					controls.runtime.block_on(controls.engine.go_live(destination))?;
-					Ok(format!("live as {to}"))
-				});
-				let result = result.map_err(|err| format!("{err:#}"));
-				if let Err(err) = &result {
-					*controls.refused.lock().unwrap() = Some(err.clone());
-				}
-				controls.report(&Action::GoLive, result);
-			})
-			.context("cannot go live")?;
+		let spawned = std::thread::Builder::new().name("go live".into()).spawn(move || {
+			// Each relay's client binds its socket on the runtime.
+			let _runtime = controls.runtime.enter();
+			let switched = *controls.switched.lock().unwrap();
+			// Cloned in a statement of its own, so the lock is not held
+			// while the credential store blocks, which would freeze the
+			// window reading the settings.
+			let stream = controls.stream.lock().unwrap().clone();
+			let destination = stream.destination(switched);
+			let result = destination.and_then(|destination| {
+				let to = destination.broadcast.clone();
+				controls.runtime.block_on(controls.engine.go_live(destination))?;
+				Ok(format!("live as {to}"))
+			});
+			let result = result.map_err(|err| format!("{err:#}"));
+			if let Err(err) = &result {
+				*controls.refused.lock().unwrap() = Some(err.clone());
+			}
+			controls.going.store(false, Ordering::Release);
+			controls.report(&Action::GoLive, result);
+		});
+		if let Err(err) = spawned {
+			self.going.store(false, Ordering::Release);
+			return Err(err).context("cannot go live");
+		}
 		Ok("going live".into())
+	}
+
+	/// Whether a go-live is under way, from the press until it is live or
+	/// refused.
+	pub fn going(&self) -> bool {
+		self.going.load(Ordering::Acquire)
 	}
 
 	/// End the stream in the background, handing the relays its tail first.

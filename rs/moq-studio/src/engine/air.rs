@@ -18,8 +18,8 @@ const DIAL: Duration = Duration::from_secs(15);
 /// Where the program goes live.
 #[derive(Clone)]
 pub struct Destination {
-	/// The relays to publish to, the preferred first. Ending the stream
-	/// closes each one's client, so going live again takes new ones.
+	/// The relays to publish to, the preferred first. Their clients are the
+	/// show's, which outlive the stream, so going live again dials from them.
 	pub relays: Vec<Relay>,
 	/// The broadcast path on them.
 	pub broadcast: String,

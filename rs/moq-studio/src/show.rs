@@ -45,10 +45,17 @@ impl Opener {
 			self.credentials.clone(),
 		)?;
 		let room = stream.guests().load(stream.relay())?.map(Arc::new);
-		if let Some(room) = &room {
-			let renewal = guests::Renewal::connect(room.clone(), &stream.client(), stream.quic().clone())?;
-			self.runtime.spawn(renewal.run());
-		}
+		// Set up now, so a room that cannot be fails the open, and run only
+		// once the show opened, so a show that fails to open, which the
+		// library lets the operator try again, leaves none renewing.
+		let renewal = match &room {
+			Some(room) => Some(guests::Renewal::connect(
+				room.clone(),
+				&stream.client(),
+				stream.quic().clone(),
+			)?),
+			None => None,
+		};
 		let launch = Launch {
 			gpu: self.gpu.clone(),
 			recordings: stream.recordings(&path),
@@ -60,6 +67,9 @@ impl Opener {
 		if exists {
 			let (autosave, loaded) = Autosave::open(path)?;
 			let engine = Engine::start(launch, autosave, loaded).await?;
+			if let Some(renewal) = renewal {
+				self.runtime.spawn(renewal.run());
+			}
 			return Ok(Opened::Studio(engine, stream));
 		}
 		// The relay setup measures the uplink to, with its token, read off
@@ -85,6 +95,9 @@ impl Opener {
 			}
 		};
 		let setup = setup::Setup::new(launch, uplink, path, self.runtime.clone())?;
+		if let Some(renewal) = renewal {
+			self.runtime.spawn(renewal.run());
+		}
 		Ok(Opened::Setup(Box::new(setup), stream))
 	}
 }

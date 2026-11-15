@@ -329,13 +329,14 @@ impl Panels {
 				});
 				ui.add_space(8.0);
 			}
-			let waiting = confirmed && matches!(on_air, OnAir::Starting);
+			let going = self.controls.going();
+			let waiting = confirmed && (going || matches!(on_air, OnAir::Starting));
 			let text = match (waiting, count) {
 				(true, _) => "Going live".to_string(),
 				(false, 0) => "Switch a destination on".to_string(),
 				(false, count) => format!("Go live to {count}"),
 			};
-			let enabled = count > 0 && on_air == OnAir::Off;
+			let enabled = count > 0 && on_air == OnAir::Off && !going;
 			confirm = confirm_button(ui, &text, enabled, waiting).clicked();
 		});
 		close |= asked;
@@ -842,16 +843,35 @@ impl Panels {
 	/// while the window is hidden, so one still running when Settings closes,
 	/// the tab changes, or the window hides applies before a hotkey goes live.
 	pub(super) fn follow_stream_save(&mut self) {
+		// A relay change saved on air, once the stream ended.
+		if self.rewatch && self.engine.on_air() == OnAir::Off {
+			self.rewatch = false;
+			let stream = self.controls.stream.lock().unwrap().clone();
+			show::watch(&self.engine, &stream, &self.runtime);
+		}
 		let Some(form) = &mut self.stream_form else { return };
 		let Some(saving) = &mut form.saving else { return };
 		// The save asks for a frame once it finishes, which polls it again.
 		let Some(saved) = saving.poll() else { return };
 		match saved.clone() {
 			Ok(saved) => {
-				*self.controls.stream.lock().unwrap() = saved.clone();
-				show::watch(&self.engine, &saved, &self.runtime);
+				let before = std::mem::replace(&mut *self.controls.stream.lock().unwrap(), saved.clone());
+				// Only a new address or token follows the relays anew, which
+				// cuts the broadcast sources and guests they carry, so not on
+				// air: then once the stream ends.
+				let moved = before.relay() != saved.relay() || before.failover() != saved.failover();
+				let retokened =
+					!form.tokens().is_empty() || [&form.relay, &form.failover].iter().any(|url| url.contains("jwt="));
+				let deferred = (moved || retokened) && self.engine.on_air() != OnAir::Off;
+				if (moved || retokened) && !deferred {
+					show::watch(&self.engine, &saved, &self.runtime);
+				}
+				self.rewatch |= deferred;
 				*form = Form::new(&saved);
-				form.note = Some("Saved. It applies the next time you go live.".into());
+				form.note = Some(match deferred {
+					true => "Saved. It applies the next time you go live; broadcast sources and guests follow the new relays once this stream ends.".into(),
+					false => "Saved. It applies the next time you go live.".into(),
+				});
 			}
 			Err(err) => {
 				form.saving = None;

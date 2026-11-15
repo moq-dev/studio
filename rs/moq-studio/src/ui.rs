@@ -168,6 +168,7 @@ impl Studio {
 			going: None,
 			ending: None,
 			stream_form: None,
+			rewatch: false,
 			top: false,
 			selection: None,
 			gestures: Gestures::default(),
@@ -467,6 +468,9 @@ struct Panels {
 	ending: Option<kio::clock::Instant>,
 	/// The Stream tab's form, while it has edits not yet saved.
 	stream_form: Option<live::Form>,
+	/// Whether a relay change saved on air waits for the stream to end to
+	/// follow the new relays.
+	rewatch: bool,
 	/// Whether the Layers tab shows the top layer rather than the scene on
 	/// program.
 	top: bool,
