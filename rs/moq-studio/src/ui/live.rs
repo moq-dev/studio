@@ -12,7 +12,7 @@ use super::*;
 use crate::engine::OnAir;
 use crate::setup::{self, Encoding, Task};
 use crate::stream::{Saved, Stream};
-use crate::{show, uplink};
+use crate::uplink;
 
 /// How long END STREAM is held down to end the stream.
 const HOLD: Duration = Duration::from_millis(1200);
@@ -843,12 +843,6 @@ impl Panels {
 	/// while the window is hidden, so one still running when Settings closes,
 	/// the tab changes, or the window hides applies before a hotkey goes live.
 	pub(super) fn follow_stream_save(&mut self) {
-		// A relay change saved on air, once the stream ended.
-		if self.rewatch && self.engine.on_air() == OnAir::Off {
-			self.rewatch = false;
-			let stream = self.controls.stream.lock().unwrap().clone();
-			show::watch(&self.engine, &stream, &self.runtime);
-		}
 		let Some(form) = &mut self.stream_form else { return };
 		let Some(saving) = &mut form.saving else { return };
 		// The save asks for a frame once it finishes, which polls it again.
@@ -862,11 +856,7 @@ impl Panels {
 				let moved = before.relay() != saved.relay() || before.failover() != saved.failover();
 				let retokened =
 					!form.tokens().is_empty() || [&form.relay, &form.failover].iter().any(|url| url.contains("jwt="));
-				let deferred = (moved || retokened) && self.engine.on_air() != OnAir::Off;
-				if (moved || retokened) && !deferred {
-					show::watch(&self.engine, &saved, &self.runtime);
-				}
-				self.rewatch |= deferred;
+				let deferred = (moved || retokened) && self.controls.relays_saved();
 				*form = Form::new(&saved);
 				form.note = Some(match deferred {
 					true => "Saved. It applies the next time you go live; broadcast sources and guests follow the new relays once this stream ends.".into(),

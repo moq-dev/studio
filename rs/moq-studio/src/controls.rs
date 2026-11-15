@@ -87,6 +87,9 @@ pub struct Controls {
 	/// refused, which covers reading the tokens before the engine says
 	/// Starting, so a second press is refused at once.
 	going: AtomicBool,
+	/// Whether relays saved on air wait for the stream to end to be
+	/// followed, which would cut the broadcast sources and guests on program.
+	rewatch: AtomicBool,
 	/// The Replay panel's picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
 	/// Whether the next recording gives each source a file of its own too.
@@ -127,6 +130,7 @@ impl Controls {
 			switched: Mutex::default(),
 			refused: Mutex::default(),
 			going: AtomicBool::new(false),
+			rewatch: AtomicBool::new(false),
 			replay: Mutex::default(),
 			record_sources: AtomicBool::new(false),
 			fired: Arc::default(),
@@ -183,6 +187,9 @@ impl Controls {
 		*self.refused.lock().unwrap() = None;
 		let controls = self.clone();
 		let spawned = std::thread::Builder::new().name("go live".into()).spawn(move || {
+			// Relays saved on air whose stream ended without END STREAM, such
+			// as one that failed to start, are followed before the next one.
+			controls.follow_saved_relays();
 			// Each relay's client binds its socket on the runtime.
 			let _runtime = controls.runtime.enter();
 			let switched = *controls.switched.lock().unwrap();
@@ -216,12 +223,30 @@ impl Controls {
 		self.going.load(Ordering::Acquire)
 	}
 
+	/// The stream settings' relays were saved: follow them now when off air,
+	/// or once the stream ends. Says whether it waits for the stream.
+	pub fn relays_saved(&self) -> bool {
+		self.rewatch.store(true, Ordering::Release);
+		self.follow_saved_relays();
+		self.rewatch.load(Ordering::Acquire)
+	}
+
+	/// Follow the saved relays, if any wait to be, unless a stream is on air.
+	fn follow_saved_relays(&self) {
+		if self.engine.on_air() != OnAir::Off || !self.rewatch.swap(false, Ordering::AcqRel) {
+			return;
+		}
+		let stream = self.stream.lock().unwrap().clone();
+		crate::show::watch(&self.engine, &stream, &self.runtime);
+	}
+
 	/// End the stream in the background, handing the relays its tail first.
 	pub fn end_stream(self: &Arc<Self>) -> anyhow::Result<String> {
 		anyhow::ensure!(self.engine.on_air().live().is_some(), "the program is not on air");
 		let controls = self.clone();
 		self.runtime.spawn(async move {
 			let result = controls.engine.end_stream().await;
+			controls.follow_saved_relays();
 			let result = result.map(|()| "the stream ended".to_string());
 			controls.report(&Action::EndStream, result.map_err(|err| format!("{err:#}")));
 		});
