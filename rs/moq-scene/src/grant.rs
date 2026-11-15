@@ -132,6 +132,11 @@ impl Grants {
 		temp.write_all(text.as_bytes()).map_err(|err| self.failed(err))?;
 		temp.as_file().sync_all().map_err(|err| self.failed(err))?;
 		temp.persist(&self.file).map_err(|err| self.failed(err.error))?;
+		// The rename is durable only once its directory is synced.
+		#[cfg(unix)]
+		std::fs::File::open(dir)
+			.and_then(|dir| dir.sync_all())
+			.map_err(|err| self.failed(err))?;
 		Ok(())
 	}
 
@@ -243,7 +248,7 @@ mod tests {
 		let removed = grants.claim("Screen");
 		grants.retain(&BTreeSet::new()).unwrap();
 		removed.set(Some("resurrected")).unwrap();
-		assert_eq!(grants.claim("Probe").get().unwrap(), None);
+		assert_eq!(removed.get().unwrap(), None);
 
 		// A capture superseded by its source's restart.
 		let old = grants.claim("Screen");

@@ -3042,7 +3042,23 @@ fn grants(scene: &Path) -> anyhow::Result<Option<moq_scene::Grants>> {
 		return Ok(None);
 	}
 	let file = xdg("XDG_STATE_HOME", ".local/state")?.join("moq-studio/portal.toml");
-	Ok(Some(moq_scene::Grants::new(file, &std::path::absolute(scene)?)))
+	Ok(Some(moq_scene::Grants::new(file, &grant_key(scene)?)))
+}
+
+/// The one path the scene file at `scene` keeps its grants under, however
+/// it was named: with `..` and symlinks resolved, so opening it another way
+/// shows no picker again. A scene file not written yet resolves through its
+/// directory, so it keeps the key it gets once written.
+fn grant_key(scene: &Path) -> std::io::Result<PathBuf> {
+	let scene = std::path::absolute(scene)?;
+	if let Ok(scene) = std::fs::canonicalize(&scene) {
+		return Ok(scene);
+	}
+	let resolved = scene
+		.parent()
+		.zip(scene.file_name())
+		.and_then(|(dir, name)| Some(std::fs::canonicalize(dir).ok()?.join(name)));
+	Ok(resolved.unwrap_or(scene))
 }
 
 /// The XDG base directory `var` names, or `fallback` under the home directory.
@@ -3120,6 +3136,31 @@ mod tests {
 
 	/// Bounds each step, so a stall fails rather than hangs.
 	const TIMEOUT: Duration = Duration::from_secs(30);
+
+	/// One scene file keeps one grant key however it is named, written yet
+	/// or not.
+	#[cfg(unix)]
+	#[test]
+	fn a_scene_file_has_one_grant_key_however_it_is_named() {
+		let dir = tempfile::tempdir().unwrap();
+		let dir = std::fs::canonicalize(dir.path()).unwrap();
+		std::fs::create_dir(dir.join("sub")).unwrap();
+		std::os::unix::fs::symlink(dir.join("sub"), dir.join("link")).unwrap();
+		let scene = dir.join("show.toml");
+		let names = [
+			scene.clone(),
+			dir.join("sub/../show.toml"),
+			dir.join("link/../show.toml"),
+		];
+
+		let unwritten: Vec<_> = names.iter().map(|name| grant_key(name).unwrap()).collect();
+		std::fs::write(&scene, "").unwrap();
+		std::os::unix::fs::symlink(&scene, dir.join("alias.toml")).unwrap();
+		for name in names.iter().chain([&dir.join("alias.toml")]) {
+			assert_eq!(grant_key(name).unwrap(), scene, "{name:?}");
+		}
+		assert!(unwritten.iter().all(|key| *key == scene), "{unwritten:?}");
+	}
 
 	/// How the tests start a studio, live on `relays`.
 	fn launch(gpu: Gpu, relays: Vec<Relay>, recordings: &Path) -> Launch {

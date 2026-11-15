@@ -10,10 +10,12 @@ restarts. If they don't, the quest is rewritten to say what failed.
 ## Plan
 
 Build with `--features capture,pipewire`. On GNOME or KDE, both of which keep
-grants, add **Picked display** from the Devices panel, choose a screen, quit,
-and start again. The picker must not show the second time, and
-`~/.local/state/moq-studio/portal.toml` holds one grant under the scene file.
-Then stop sharing from the desktop's own indicator: the source fails, the
+grants, add **Picked display** and **Picked window** from the Devices panel,
+choose a screen for one and a window for the other, quit, and start again.
+Neither picker may show the second time, both sources show what was chosen,
+and `$XDG_STATE_HOME/moq-studio/portal.toml` (`~/.local/state` when
+`XDG_STATE_HOME` is unset) holds one grant for each under the scene file.
+Then stop sharing each from the desktop's own indicator: the source fails, its
 grant is gone from the file, and restarting the source shows the picker again.
 
 An agent exercised the picker through xdg-desktop-portal-wlr with a scripted
