@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Move the moq submodule to a moq commit (default: origin/main) and refresh
+# Move the moq submodule to a commit on moq's main (default: its tip) and refresh
 # Cargo.lock and bun.lock to match. Commit the gitlink and both locks together.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-rev="${1:-origin/main}"
+# FETCH_HEAD is moq-dev/moq's main once check-moq-main.sh has fetched it.
+rev="${1:-FETCH_HEAD}"
 
-git -C "$root/moq" fetch --quiet origin main
-git -C "$root/moq" checkout --quiet --detach "$rev"
+# Fetches main, refuses a revision off it, and prints the commit it checked:
+# check out that ID, since checkout resolves a name tagging one commit and
+# naming a branch at another to the branch, not the tag the check saw.
+commit="$("$root/sh/check-moq-main.sh" "$rev")"
+git -C "$root/moq" checkout --quiet --detach "$commit"
 # Resolve without --locked: Cargo adds and prunes only what the new moq needs.
 cargo metadata --manifest-path "$root/Cargo.toml" --format-version 1 >/dev/null
 
