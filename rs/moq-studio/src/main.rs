@@ -4,7 +4,7 @@
 //! The scenes, sources, and compositor live in `moq-scene`; this binary is the
 //! window around them and the program clock that publishes the result.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 
@@ -42,7 +42,8 @@ mod watch;
 #[usage(completion, settings, unknown_env(prefix = "MOQ_"))]
 pub struct Config {
 	/// The scene collection to open, saved as it changes. If it does not exist,
-	/// guided setup proposes one and creates it.
+	/// guided setup proposes one and creates it. Defaults to `scenes.toml` in
+	/// the studio's data directory, which a launch from the desktop opens.
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub scenes: Option<PathBuf>,
 
@@ -65,7 +66,8 @@ pub struct Config {
 	#[usage(long)]
 	pub on_demand: bool,
 
-	/// The directory recordings are saved in. Defaults to the scene file's.
+	/// The directory recordings are saved in. Defaults to a named scene file's,
+	/// or else to the user's videos folder.
 	#[usage(long, value_hint = usage_rs::ValueHint::DirPath)]
 	pub recordings: Option<PathBuf>,
 
@@ -96,14 +98,11 @@ pub struct Config {
 }
 
 impl Config {
-	/// The scene file to open, refusing `--watch` beside the studio's own flags.
-	fn scenes(&self) -> anyhow::Result<Option<&Path>> {
+	/// The scene file to open and the directory recordings go to, or `None` to
+	/// `--watch` a broadcast, refusing the studio's own flags beside it.
+	fn files(&self) -> anyhow::Result<Option<Files>> {
 		if self.watch.is_none() {
-			let scenes = self
-				.scenes
-				.as_deref()
-				.context("name a scene file to open, or --watch a broadcast")?;
-			return Ok(Some(scenes));
+			return Files::new(self.scenes.clone(), self.recordings.clone()).map(Some);
 		}
 		anyhow::ensure!(
 			self.scenes.is_none(),
@@ -173,6 +172,46 @@ impl Config {
 	}
 }
 
+/// Where the studio keeps its own files: the window's settings, and the scene
+/// collection when none is named.
+fn data_dir() -> Option<PathBuf> {
+	eframe::storage_dir("moq-studio")
+}
+
+/// The files the studio opens and writes.
+#[derive(Debug, PartialEq)]
+struct Files {
+	scenes: PathBuf,
+	recordings: PathBuf,
+}
+
+impl Files {
+	/// A named scene file keeps its recordings beside it. With none named, as
+	/// from the desktop, which passes no arguments, the collection is the one
+	/// in the data directory, where nobody looks for a recording, so they go to
+	/// the videos folder instead.
+	fn new(scenes: Option<PathBuf>, recordings: Option<PathBuf>) -> anyhow::Result<Self> {
+		if let Some(scenes) = scenes {
+			let recordings = recordings.unwrap_or_else(|| match scenes.parent() {
+				Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+				_ => PathBuf::from("."),
+			});
+			return Ok(Self { scenes, recordings });
+		}
+		let data = data_dir().context("this system has no data directory to keep scenes in; name a scene file")?;
+		let recordings = match recordings {
+			Some(dir) => dir,
+			None => dirs::video_dir()
+				.or_else(std::env::home_dir)
+				.context("this system has no videos folder; pass --recordings")?,
+		};
+		Ok(Self {
+			scenes: data.join("scenes.toml"),
+			recordings,
+		})
+	}
+}
+
 fn main() -> anyhow::Result<ExitCode> {
 	// A browser source's helper, and CEF's subprocesses, are this executable
 	// started again.
@@ -183,26 +222,17 @@ fn main() -> anyhow::Result<ExitCode> {
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
-	let Some(scenes) = config.scenes()? else {
-		let url = config.watch.clone().expect("checked by scenes");
+	let Some(Files { scenes, recordings }) = config.files()? else {
+		let url = config.watch.clone().expect("checked by files");
 		watch::run(config.client.clone(), config.quic.clone(), url)?;
 		return Ok(ExitCode::SUCCESS);
 	};
-	let scenes = scenes.to_path_buf();
 
 	let runtime = tokio::runtime::Runtime::new()?;
 	// The QUIC client binds its socket on the current runtime.
 	let _runtime = runtime.enter();
 	let relays = config.relays()?;
 	let gpu = pollster::block_on(engine::Gpu::new(wgpu::Backends::all()))?;
-	let recordings = match &config.recordings {
-		Some(dir) => dir.clone(),
-		None => scenes
-			.parent()
-			.filter(|dir| !dir.as_os_str().is_empty())
-			.unwrap_or(Path::new("."))
-			.to_path_buf(),
-	};
 	let room = config.guests.load(config.client.url.as_ref())?.map(Arc::new);
 	if let Some(room) = &room {
 		let renewal = guests::Renewal::connect(room.clone(), &config.client, config.quic.clone())?;
@@ -219,6 +249,11 @@ fn main() -> anyhow::Result<ExitCode> {
 	let exists = scenes
 		.try_exists()
 		.with_context(|| format!("reading {}", scenes.display()))?;
+	if !exists && let Some(dir) = scenes.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+		// Setup creates the file, but not the data directory a first launch
+		// from the desktop names.
+		std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+	}
 	let app = match exists {
 		true => {
 			let (autosave, loaded) = autosave::Autosave::open(scenes.clone())?;
@@ -429,7 +464,7 @@ fn run(
 		},
 		// eframe would otherwise name the settings directory after the app id;
 		// keep it beside the browser profile, under the app's name.
-		persistence_path: eframe::storage_dir("moq-studio").map(|dir| dir.join("app.ron")),
+		persistence_path: data_dir().map(|dir| dir.join("app.ron")),
 		..Default::default()
 	};
 	let event_loop = EventLoop::<eframe::UserEvent>::with_user_event()
@@ -469,6 +504,7 @@ fn run(
 
 #[cfg(test)]
 mod tests {
+	use std::path::Path;
 	use std::time::Duration;
 
 	use super::*;
@@ -482,7 +518,9 @@ mod tests {
 		])
 		.expect("a scene file and a relay should parse");
 		config.check_deprecated().unwrap();
-		assert_eq!(config.scenes().unwrap(), Some(Path::new("show.toml")));
+		let files = config.files().unwrap().unwrap();
+		assert_eq!(files.scenes, Path::new("show.toml"));
+		assert_eq!(files.recordings, Path::new("."), "recordings go beside the scene file");
 		assert_eq!(config.broadcast, "studio");
 		assert!(!config.on_demand, "the program encodes whatever the demand by default");
 		assert!(config.guests.room.is_none(), "guests are opt-in");
@@ -519,8 +557,7 @@ mod tests {
 		}
 	}
 
-	/// `--watch` opens no scene file and names its own relay, and the studio
-	/// needs a scene file.
+	/// `--watch` opens no scene file and names its own relay.
 	#[test]
 	fn watch_takes_no_scene_file_or_relay() {
 		let parse = |args: &[&str]| {
@@ -528,14 +565,29 @@ mod tests {
 			Config::parse_from(&args).unwrap()
 		};
 		let watch = parse(&["--watch", "https://relay.example/anon/studio"]);
-		assert_eq!(watch.scenes().unwrap(), None);
+		assert_eq!(watch.files().unwrap(), None);
 		for refused in [
 			&["show.toml", "--watch", "https://a/b"][..],
 			&["--watch", "https://a/b", "--connect", "https://a/"],
 			&["--watch", "https://a/b", "--room", "guests"],
-			&[],
 		] {
-			assert!(parse(refused).scenes().is_err(), "{refused:?} was accepted");
+			assert!(parse(refused).files().is_err(), "{refused:?} was accepted");
 		}
+	}
+
+	/// With no scene file named, as from the desktop, the studio opens the one
+	/// in its data directory and records to the videos folder, unless told
+	/// where.
+	#[test]
+	fn defaults_to_the_collection_in_the_data_directory() {
+		let files = Files::new(None, None).unwrap();
+		assert!(files.scenes.is_absolute());
+		assert!(files.recordings.is_absolute());
+		assert_ne!(Some(files.recordings.as_path()), files.scenes.parent());
+
+		let files = Files::new(None, Some("clips".into())).unwrap();
+		assert_eq!(files.recordings, Path::new("clips"));
+		let files = Files::new(Some("shows/main.toml".into()), None).unwrap();
+		assert_eq!(files.recordings, Path::new("shows"));
 	}
 }

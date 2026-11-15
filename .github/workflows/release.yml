@@ -18,9 +18,14 @@ jobs:
   flatpak:
     uses: ./.github/workflows/flatpak.yml
 
+  macos:
+    uses: ./.github/workflows/macos.yml
+    with:
+      sign: true
+
   publish:
     name: Publish
-    needs: [flatpak]
+    needs: [flatpak, macos]
     runs-on: ubuntu-24.04
     # The only job with a write token, and the environment admits protected
     # branches only.
@@ -39,6 +44,8 @@ jobs:
       - name: Download
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
+          # Not the macOS bundles before signing.
+          pattern: "{flatpak,macos}-*"
           path: dist
           merge-multiple: true
 
