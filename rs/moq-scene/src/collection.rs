@@ -153,6 +153,12 @@ impl Collection {
 		recorded.map(|scene| scene.name.as_str())
 	}
 
+	/// The scene the panic key cuts to, if one is marked safe.
+	pub fn safe(&self) -> Option<&str> {
+		let safe = self.scenes.iter().find(|scene| scene.safe);
+		safe.map(|scene| scene.name.as_str())
+	}
+
 	/// The audio scene called `name`.
 	pub fn audio_scene(&self, name: &str) -> Option<&AudioScene> {
 		self.audio_scenes.iter().find(|scene| scene.name == name)
@@ -219,21 +225,28 @@ impl Collection {
 	/// itself. Refused with the reason otherwise, or for a scene that does
 	/// not exist.
 	pub fn takes(&self, scene: &str) -> Result<(), Error> {
-		let canvas = self
-			.canvas(Some(scene))
-			.ok_or_else(|| Error::Invalid(format!("there is no scene `{scene}`")))?;
+		match self.refuses(scene) {
+			Some(why) => Err(Error::Invalid(why)),
+			None => Ok(()),
+		}
+	}
+
+	/// Why the scene called `scene` cannot go on program, if it cannot, as
+	/// its pad says.
+	pub fn refuses(&self, scene: &str) -> Option<String> {
+		let Some(canvas) = self.canvas(Some(scene)) else {
+			return Some(format!("there is no scene `{scene}`"));
+		};
 		if canvas.size() != self.canvas.size() {
-			return Err(Error::Invalid(format!(
+			return Some(format!(
 				"`{scene}` is {}x{}, not the program's {}x{}, so it cannot go on program",
 				canvas.width, canvas.height, self.canvas.width, self.canvas.height
-			)));
+			));
 		}
 		if self.draws_program(scene) {
-			return Err(Error::Invalid(format!(
-				"`{scene}` draws the program, so it cannot go on program"
-			)));
+			return Some(format!("`{scene}` draws the program, so it cannot go on program"));
 		}
-		Ok(())
+		None
 	}
 
 	/// The source whose capture `name` shows: itself, or what it clones.
@@ -375,9 +388,10 @@ impl Collection {
 
 	/// Check what the types cannot: every canvas can be encoded, names are
 	/// unique, a published scene's names its broadcast, one scene at most is
-	/// recorded, every item, clone, audio, and video entry names a source that
-	/// exists, a stinger names a media source, and every crop and filter's
-	/// settings are in range, each filter naming a source of the kind it reads.
+	/// recorded and one at most safe, which can go on program, every item,
+	/// clone, audio, and video entry names a source that exists, a stinger
+	/// names a media source, and every crop and filter's settings are in
+	/// range, each filter naming a source of the kind it reads.
 	pub fn validate(&self) -> Result<(), Error> {
 		self.canvas.validate()?;
 
@@ -404,6 +418,13 @@ impl Collection {
 		if let (Some(first), Some(second)) = (recorded.next(), recorded.next()) {
 			return Err(Error::Invalid(format!(
 				"scenes `{}` and `{}` are both recorded, but recordings hold one",
+				first.name, second.name
+			)));
+		}
+		let mut safe = self.scenes.iter().filter(|scene| scene.safe);
+		if let (Some(first), Some(second)) = (safe.next(), safe.next()) {
+			return Err(Error::Invalid(format!(
+				"scenes `{}` and `{}` are both safe, but the panic key cuts to one",
 				first.name, second.name
 			)));
 		}
@@ -538,6 +559,14 @@ impl Collection {
 
 		self.validate_nesting()?;
 		self.validate_published()?;
+		// Checked once the scenes it draws are, so a panic never finds out.
+		if let Some(safe) = self.safe()
+			&& let Some(why) = self.refuses(safe)
+		{
+			return Err(Error::Invalid(format!(
+				"{why}, but it is the safe scene the panic key cuts to"
+			)));
+		}
 
 		if let Some(name) = self.transition.stinger()
 			&& !matches!(self.sources.get(name), Some(Source::Media { .. }))
@@ -970,14 +999,18 @@ pub struct Scene {
 	/// the one on program.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub audio: Option<String>,
+	/// Whether the panic key cuts to it. One scene at most is safe, and it
+	/// must be able to go on program.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub safe: bool,
 	/// What the scene draws, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
 }
 
 impl Scene {
-	/// An empty scene of the program's size, neither published nor recorded,
-	/// carrying the audio scene on program.
+	/// An empty scene of the program's size, neither published, recorded,
+	/// nor safe, carrying the audio scene on program.
 	pub fn new(name: impl Into<String>) -> Self {
 		Self {
 			name: name.into(),
@@ -985,6 +1018,7 @@ impl Scene {
 			published: false,
 			recorded: false,
 			audio: None,
+			safe: false,
 			items: Vec::new(),
 		}
 	}
@@ -2266,6 +2300,7 @@ path = "grade.cube"
 
 [[scenes]]
 name = "Main"
+safe = true
 items = [
 	{ source = "bg", rect = { x = 0, y = 0, width = 1280, height = 720 } },
 	{ source = "cam", rect = { x = 10, y = 10, width = 320, height = 180 }, visible = false, keyframes = [
@@ -3166,6 +3201,61 @@ background = "remove"
 		assert_eq!(collection.recorded(), Some("Tall"));
 		collection.scenes[0].recorded = true;
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "two recorded");
+	}
+
+	/// One scene at most is safe, and it goes on program: the program's size,
+	/// drawing no program source. Marking another moves the mark, and the
+	/// file names it once.
+	#[test]
+	fn the_safe_scene_goes_on_program() {
+		let mut collection = example();
+		assert_eq!(collection.safe(), None);
+		collection.scenes.push(Scene::new("Break"));
+		let mut draft = collection.draft("Mark `Break` safe");
+		draft.set_safe(Some("Break")).unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
+		assert_eq!(collection.safe(), Some("Break"));
+		let text = collection.to_toml().unwrap();
+		assert_eq!(text.matches("safe = true").count(), 1, "{text}");
+		assert_eq!(Collection::from_toml(&text).unwrap(), collection);
+
+		let mut draft = collection.draft("Mark `Scene` safe");
+		draft.set_safe(Some("Scene")).unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
+		assert_eq!(collection.safe(), Some("Scene"), "the mark moves");
+		let mut draft = collection.draft("Mark no scene safe");
+		draft.set_safe(None).unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
+		assert_eq!(collection.safe(), None);
+		assert!(collection.draft("").set_safe(Some("Nowhere")).is_err());
+
+		let refused = |edit: fn(&mut Collection)| {
+			let mut collection = example();
+			collection.scenes.push(Scene {
+				safe: true,
+				..Scene::new("Break")
+			});
+			collection.validate().unwrap();
+			edit(&mut collection);
+			matches!(collection.validate(), Err(Error::Invalid(_)))
+		};
+		assert!(refused(|collection| collection.scenes[0].safe = true), "two safe");
+		assert!(
+			refused(|collection| collection.scenes[1].size = Some(Size {
+				width: 1080,
+				height: 1920
+			})),
+			"another size"
+		);
+		assert!(
+			refused(|collection| {
+				collection.sources.insert("program".into(), Source::Program);
+				collection.scenes[1]
+					.items
+					.push(Item::new("program", Rect::fill(&collection.canvas)));
+			}),
+			"drawing the program"
+		);
 	}
 
 	#[test]

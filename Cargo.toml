@@ -6,8 +6,8 @@ exclude = ["moq"]
 resolver = "2"
 
 [workspace.package]
-# egui 0.36 and egui_dock 0.21 need 1.92 and 1.95, and moq-relay (a test
-# dependency) needs 1.95. rust-toolchain.toml pins the build toolchain above it.
+# egui 0.36 needs 1.92, and moq-relay (a test dependency) needs 1.95.
+# rust-toolchain.toml pins the build toolchain above it.
 rust-version = "1.95"
 edition = "2024"
 authors = ["Luke Curley <kixelated@gmail.com>"]

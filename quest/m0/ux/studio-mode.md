@@ -31,10 +31,11 @@ studio had; no mode at all, leaving only off-air editing).
   it moves to the opposite one.
 - Keyframes and overlays restart in the cued scene as they do today when a
   scene goes into preview, so NEXT shows the entrance the audience will see.
+- The LIVE page left two things ready: the compositor draws no preview
+  (`set_previewing(false)` in `Studio::new`, `rs/moq-studio/src/ui.rs`), and
+  keys bound to Cut and Transition are kept unshown (`Studio::hidden`). Turn
+  the preview on while a scene is cued, and show both actions again. The
+  metal TAKE button's effect (`Fx::button`) waits in `rs/moq-studio/src/fx.rs`.
 
 Human check: an operator's judgment that cue, TAKE, and AUTO feel like a
 switcher, on a real show with several scenes.
-
-## Required
-
-- [One live picture](/quest/m0/ux/live.md) - the stage, the pads, and the tally frame this extends

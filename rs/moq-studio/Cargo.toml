@@ -53,8 +53,6 @@ eframe = { version = "0.36", default-features = false, features = ["default_font
 egui = "0.36"
 # The kit's icons, Lucide's SVGs, drawn at whatever size and scale they are shown.
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
-# Docked, rearrangeable panels. 0.21 is the newest release and pins egui 0.36.
-egui_dock = "0.21"
 hang = { workspace = true }
 # Stamps a recording's file name with when it started. Already in the graph
 # through moq-scene's humantime-serde.

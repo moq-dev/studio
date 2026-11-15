@@ -48,7 +48,3 @@ do not change.
 
 Human check: feel of dragging, resizing, and reordering on a real machine,
 and whether the inspector's grouping is where a streamer looks first.
-
-## Required
-
-- [One live picture](/quest/m0/ux/live.md) - the frame, the stage, and the page this fills
