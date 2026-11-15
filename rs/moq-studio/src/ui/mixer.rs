@@ -115,6 +115,9 @@ enum Reach {
 	Through(String),
 	/// Not heard in it.
 	Not,
+	/// A sound published independently, which reaches viewers by its own
+	/// track and so no audio scene hears, whatever sends it.
+	Published,
 	/// The audio scene itself.
 	Own,
 	/// An audio scene the sender holds, which would then hold itself.
@@ -125,6 +128,7 @@ impl Reach {
 	/// How the strip `from` reaches the audio scene `to` of `collection`.
 	fn of(collection: &Collection, from: Strip<'_>, to: &AudioScene) -> Self {
 		match from {
+			Strip::Sound(name) if collection.published.contains(name) => Self::Published,
 			Strip::Sound(name) if to.sounds.contains(name) => Self::Sent,
 			Strip::Sound(name) => {
 				let through = to.scenes.iter().find(|held| collection.heard(held).contains(name));
@@ -156,6 +160,9 @@ impl Reach {
 			Self::Not => format!("{from} is left out of {to}; click to send it in"),
 			Self::Own => format!("{to} itself"),
 			Self::Loop => format!("{from} holds {to}, so {to} cannot hear it back"),
+			Self::Published => {
+				format!("{from} is published independently, so no audio scene hears it; stop publishing it in Build")
+			}
 		}
 	}
 }
@@ -849,6 +856,13 @@ impl Panels {
 			ui.add_space(10.0);
 			ui.separator();
 			ui.label(kit::caps("Heard in", kit::display(11.0)).color(kit::DIM));
+			let published = sound.reach.contains(&Reach::Published);
+			if published {
+				ui.label(
+					egui::RichText::new("Published independently, so no audio scene hears it until it stops, in Build")
+						.color(kit::DIM),
+				);
+			}
 			for (master, reach) in board.masters.iter().zip(&sound.reach) {
 				ui.horizontal(|ui| {
 					let (at, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
@@ -860,7 +874,7 @@ impl Panels {
 					}
 					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 						let mut sent = *reach == Reach::Sent;
-						let response = ui.add(kit::Toggle::new(&mut sent));
+						let response = ui.add_enabled(!published, kit::Toggle::new(&mut sent));
 						let response = kit::tip(response, &reach.says(name, &master.name), None);
 						if response.changed() {
 							changes.push(Change::Send {
@@ -1097,30 +1111,33 @@ impl Panels {
 				false
 			}
 		};
+		// The name, cut short where it would run into the Muted tag or the
+		// meter, and then shown whole under the pointer.
+		let along = (rect.width() * 0.37).min(190.0);
+		let meter_left = rect.right() - along - 24.0;
+		let left = tile.right() + 14.0;
+		let room = meter_left - 16.0 - left - if muted { 10.0 + 54.0 } else { 0.0 };
 		let ink = if muted { kit::DIM } else { kit::TEXT };
-		let text = painter.layout_no_wrap(name.to_string(), kit::ui_medium(14.0), ink);
-		let text_width = text.size().x;
-		painter.galley(
-			pos2(tile.right() + 14.0, rect.center().y - text.size().y / 2.0),
-			text,
-			ink,
-		);
+		let mut job = egui::text::LayoutJob::simple_singleline(name.to_string(), kit::ui_medium(14.0), ink);
+		job.wrap = egui::text::TextWrapping::truncate_at_width(room.max(0.0));
+		let text = painter.layout_job(job);
+		let shown = Rect::from_min_size(pos2(left, rect.center().y - text.size().y / 2.0), text.size());
+		let elided = text.elided;
+		painter.galley(shown.min, text, ink);
+		if elided {
+			let scene = matches!(icon, RowIcon::Scene(_));
+			let response = ui.interact(shown, ui.id().with(("route label", name, scene)), Sense::hover());
+			kit::tip(response, name, None);
+		}
 		if muted {
-			let at = Rect::from_min_size(
-				pos2(tile.right() + 24.0 + text_width, rect.center().y - 9.0),
-				vec2(54.0, 18.0),
-			);
+			let at = Rect::from_min_size(pos2(shown.right() + 10.0, rect.center().y - 9.0), vec2(54.0, 18.0));
 			tag(ui, at, "Muted", kit::CUE, kit::ON_CUE);
 		}
 		let (level, peak) = match muted {
 			true => (0.0, 0.0),
 			false => reading(history),
 		};
-		let along = (rect.width() * 0.37).min(190.0);
-		let at = Rect::from_min_size(
-			pos2(rect.right() - along - 24.0, rect.center().y - 4.0),
-			vec2(along, 8.0),
-		);
+		let at = Rect::from_min_size(pos2(meter_left, rect.center().y - 4.0), vec2(along, 8.0));
 		ui.put(at, desk_meter(level, peak).run(kit::Run::Across, along, 8.0));
 	}
 
@@ -1413,7 +1430,7 @@ impl Dot<'_> {
 	fn ui(self, ui: &mut Ui, at: Rect, changes: &mut Vec<Change>) {
 		let (from, to, reach) = (self.from(), &self.to.name, self.reach);
 		let scene = matches!(self.from, Strip::Scene(_));
-		let enabled = !matches!(reach, Reach::Own | Reach::Loop);
+		let enabled = !matches!(reach, Reach::Own | Reach::Loop | Reach::Published);
 		let sense = if enabled { Sense::click() } else { Sense::hover() };
 		let response = ui.interact(at, ui.id().with(("send", from, scene, to)), sense);
 		response.widget_info(|| {
@@ -1519,7 +1536,7 @@ fn paint_dot(painter: &egui::Painter, at: Rect, reach: &Reach, letter: &str, pro
 			painter.circle_filled(center, radius, kit::P2);
 			kit::FAINT
 		}
-		Reach::Own | Reach::Loop => {
+		Reach::Own | Reach::Loop | Reach::Published => {
 			let half = (radius * 0.4).max(3.0);
 			painter.hline(center.x - half..=center.x + half, center.y, Stroke::new(2.0, kit::LINE));
 			return;
@@ -1717,6 +1734,19 @@ mod tests {
 		assert_eq!(reach(&collection, music, "Headphones"), Reach::Through("Stream".into()));
 		assert_eq!(reach(&collection, music, "Mics"), Reach::Not);
 		assert!(!reach(&collection, Strip::Sound("other"), "Stream").heard());
+	}
+
+	/// A sound published independently is heard in no audio scene, however
+	/// it is sent, as the mixes leave it out; nor through one that holds it.
+	#[test]
+	fn a_published_sound_is_heard_nowhere() {
+		let mut collection = collection();
+		collection.published.insert("mic".into());
+		for to in ["Mics", "Stream", "Headphones", "Recording"] {
+			assert_eq!(reach(&collection, Strip::Sound("mic"), to), Reach::Published, "{to}");
+		}
+		let music = Strip::Sound("music");
+		assert_eq!(reach(&collection, music, "Stream"), Reach::Sent, "others are as before");
 	}
 
 	/// An audio scene cannot be sent into itself, nor into one it holds,
