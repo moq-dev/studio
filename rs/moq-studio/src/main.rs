@@ -268,27 +268,23 @@ fn main() -> anyhow::Result<ExitCode> {
 		)?)),
 	};
 
-	let started = Arc::new(OnceLock::new());
-	let ran = run(app, gpu, runtime.handle().clone(), started.clone());
-	let Some(engine) = started.get() else {
-		return ran.map(|()| ExitCode::SUCCESS);
-	};
+	run(app, gpu, runtime.handle().clone())?;
+	Ok(ExitCode::SUCCESS)
+}
+
+/// End the studio on the way out: finish a recording, save the edits since
+/// the last autosave, and close each relay session.
+fn shutdown(engine: &engine::Engine, runtime: &tokio::runtime::Handle) -> anyhow::Result<()> {
 	// A recording still running reads the program until stopping ends its
 	// tracks, so it holds what the encoders publish on the way out, and then
 	// finishes as a regular MP4.
 	engine.recorder.close();
-	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
 	engine.stop();
 	// Before the runtime goes, which would drop each relay session with the
 	// tail of the broadcast still on its way.
 	runtime.block_on(async { tokio::join!(engine.close(), engine.recorder.done()) });
-	if let (Err(err), Err(_)) = (&saved, &ran) {
-		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
-	}
-	ran?;
-	saved?;
-	Ok(ExitCode::SUCCESS)
+	saved
 }
 
 /// What the window shows.
@@ -305,7 +301,7 @@ struct Window {
 	app: App,
 	render: eframe::egui_wgpu::RenderState,
 	runtime: tokio::runtime::Handle,
-	/// The engine once the studio is built, for the save on quit.
+	/// The engine once the studio is built, for ending it on quit.
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
 	keyboard: hotkeys::Keyboard,
 	/// The window's own effects, on the setup screen and in the studio.
@@ -364,6 +360,11 @@ struct Events<'a> {
 	/// Whether the window was asked to close, since eframe only logs the error
 	/// that stops it otherwise.
 	closed: bool,
+	/// The engine once the studio is built, to end on the way out.
+	started: Arc<OnceLock<Arc<engine::Engine>>>,
+	runtime: tokio::runtime::Handle,
+	/// Whether ending the studio could not save it.
+	unsaved: bool,
 }
 
 impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
@@ -418,6 +419,14 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 
 	fn exiting(&mut self, event_loop: &ActiveEventLoop) {
 		self.eframe.exiting(event_loop);
+		// Here rather than once the loop returns: quitting from the macOS app
+		// menu or Dock, or logging out, ends the process as this returns.
+		if let Some(engine) = self.started.get()
+			&& let Err(err) = shutdown(engine, &self.runtime)
+		{
+			tracing::error!(error = format!("{err:#}"), "cannot save on quit");
+			self.unsaved = true;
+		}
 	}
 
 	fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
@@ -436,13 +445,9 @@ fn icon() -> egui::IconData {
 	}
 }
 
-/// Show the window until it is closed.
-fn run(
-	app: App,
-	gpu: engine::Gpu,
-	runtime: tokio::runtime::Handle,
-	started: Arc<OnceLock<Arc<engine::Engine>>>,
-) -> anyhow::Result<()> {
+/// Show the window until it is closed, then end the studio.
+fn run(app: App, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::Result<()> {
+	let started = Arc::new(OnceLock::new());
 	let options = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
 			.with_title("kixel.live Studio")
@@ -472,6 +477,8 @@ fn run(
 		.context("cannot open the window")?;
 	let keyboard = hotkeys::Keyboard::default();
 	let window_keyboard = keyboard.clone();
+	let window_started = started.clone();
+	let window_runtime = runtime.clone();
 	let eframe = eframe::create_native(
 		"moq-studio",
 		options,
@@ -480,12 +487,12 @@ fn run(
 				.wgpu_render_state
 				.clone()
 				.context("the window is not drawn with wgpu")?;
-			let fx = fx::Fx::new(&render, cc.storage, &cc.egui_ctx, &runtime);
+			let fx = fx::Fx::new(&render, cc.storage, &cc.egui_ctx, &window_runtime);
 			Ok(Box::new(Window {
 				app,
 				render,
-				runtime,
-				started,
+				runtime: window_runtime,
+				started: window_started,
 				keyboard: window_keyboard,
 				fx,
 			}))
@@ -496,9 +503,13 @@ fn run(
 		eframe,
 		keyboard,
 		closed: false,
+		started,
+		runtime,
+		unsaved: false,
 	};
 	event_loop.run_app(&mut events).context("the window failed")?;
 	anyhow::ensure!(events.closed, "the window failed; the error is logged above");
+	anyhow::ensure!(!events.unsaved, "cannot save on quit; the error is logged above");
 	Ok(())
 }
 

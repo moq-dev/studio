@@ -83,7 +83,12 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 60
     # The signing identity and the notary key, which only protected branches
-    # can deploy from. Nothing built runs until they are gone from the runner.
+    # can deploy from, for team D7D5SDDB5Z: APPLE_CERTIFICATE, the Developer ID
+    # Application .p12 (base64, legacy encryption so `security import` reads
+    # it) and APPLE_CERTIFICATE_PASSWORD; APPLE_API_KEY, APPLE_API_ISSUER, and
+    # APPLE_API_PRIVATE_KEY, the App Store Connect key ID, issuer ID, and .p8
+    # text. quest/m0/signing-renew.md renews them. Nothing built runs until
+    # they are gone from the runner.
     environment: release
 
     strategy:

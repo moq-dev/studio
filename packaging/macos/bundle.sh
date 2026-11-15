@@ -21,8 +21,11 @@ version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.package
 # Nested code, such as helpers, frameworks, and system extensions, goes under
 # Contents in the directory macOS expects it in, and sign.sh signs it first.
 rm -rf "$app"
+# Readable by every user, whatever this checkout's own modes.
+umask 022
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$packaging/Info.plist" "$app/Contents/Info.plist"
+chmod 644 "$app/Contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$version" "$app/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$version" "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
