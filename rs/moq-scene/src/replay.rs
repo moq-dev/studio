@@ -239,6 +239,12 @@ fn copy(
 		Poll::Ready(source) => source?,
 		Poll::Pending => return Ok(None),
 	};
+	// The range was keyed before the track described itself.
+	if source.info().timescale != Some(hang::container::TIMESCALE) {
+		return Err(Error::Unsupported(format!(
+			"replaying {name}, which is not on hang's media timescale"
+		)));
+	}
 	// Never stale: the take keeps its groups for as long as it lives.
 	let info = source.info().clone().with_max_age(None);
 	let mut track = broadcast.create_track(name, info)?;
