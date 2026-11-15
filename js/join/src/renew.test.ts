@@ -3,7 +3,11 @@ import * as Net from "@moq/net";
 import { Signal } from "@moq/signals";
 import { follow, path } from "./renew.ts";
 
-const encode = (text: string) => new TextEncoder().encode(text);
+/** A token frame starting the group at `key`, since the token track has no timescale. */
+const frame = (text: string, key: number) => ({
+	payload: new TextEncoder().encode(text),
+	timestamp: Net.Time.Timestamp.unscaled(key),
+});
 
 /** Resolve once `tokens` holds `count` entries. */
 async function received(tokens: Signal<string[]>, count: number): Promise<string[]> {
@@ -26,17 +30,17 @@ test("each token the studio publishes reaches the page, and only for its own nam
 		["alice", 1],
 	] as const) {
 		const other = origin.route(path(name, generation), { hidden: true });
-		other.broadcast.createTrack("token").writeFrame({ payload: encode(`${name} ${generation}`) });
+		other.broadcast.createTrack("token").writeFrame(frame(`${name} ${generation}`, 0));
 		other.announce();
 	}
 
 	const publication = origin.route(path("alice", 0), { hidden: true });
 	const track = publication.broadcast.createTrack("token");
-	track.writeFrame({ payload: encode("first") });
+	track.writeFrame(frame("first", 0));
 	publication.announce();
 	expect(await received(tokens, 1)).toEqual(["first"]);
 
-	track.writeFrame({ payload: encode("second") });
+	track.writeFrame(frame("second", 1));
 	expect(await received(tokens, 2)).toEqual(["first", "second"]);
 
 	renewal.close();
@@ -52,16 +56,16 @@ test("a group superseded before it completes does not end the renewals", async (
 
 	const publication = origin.route(path("alice", 0), { hidden: true });
 	const track = publication.broadcast.createTrack("token");
-	track.writeFrame({ payload: encode("first") });
+	track.writeFrame(frame("first", 0));
 	publication.announce();
 	expect(await received(tokens, 1)).toEqual(["first"]);
 	// Opened but never written, as when the studio stops partway through one,
 	// so the page is reading it when the next arrives.
 	const partial = track.appendGroup();
 	for (let turn = 0; turn < 10; turn++) await new Promise((resolve) => setTimeout(resolve));
-	track.writeFrame({ payload: encode("next") });
+	track.writeFrame(frame("next", 2));
 	expect(await received(tokens, 2)).toEqual(["first", "next"]);
-	track.writeFrame({ payload: encode("last") });
+	track.writeFrame(frame("last", 3));
 	expect(await received(tokens, 3)).toEqual(["first", "next", "last"]);
 
 	partial.finish();

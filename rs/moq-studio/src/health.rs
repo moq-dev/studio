@@ -1993,7 +1993,9 @@ mod tests {
 		rendition.frames = 50;
 		rendition.arrival = Some(hang::echo::Arrival::new(timestamp, wall));
 		report.renditions.insert(id.to_string(), rendition);
-		reports.update(&report).unwrap();
+		reports
+			.update(moq_json::Timed::new(&report, moq_net::Timestamp::unscaled(0)))
+			.unwrap();
 		(viewer, reports)
 	}
 
@@ -2086,7 +2088,12 @@ mod tests {
 			let route = origin.route(&path, moq_net::origin::RouteOptions::hidden()).unwrap();
 			let track = route.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 			let mut reports = moq_json::snapshot::Producer::<hang::echo::Snapshot>::new(track, Default::default());
-			reports.update(&hang::echo::Snapshot::default()).unwrap();
+			reports
+				.update(moq_json::Timed::new(
+					&hang::echo::Snapshot::default(),
+					moq_net::Timestamp::unscaled(0),
+				))
+				.unwrap();
 			route.announce().unwrap();
 			(route, reports)
 		};
@@ -2195,7 +2202,7 @@ mod tests {
 				.unwrap()
 				.expect("an instance");
 			let mut video = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
-			track.append_group().unwrap().finish().unwrap();
+			track.append_group(0).unwrap().close().unwrap();
 			video.recv_group().await.unwrap();
 			while watching.get() != Some(1) {
 				kio::clock::sleep(INTERVAL / 4).await;

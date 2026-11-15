@@ -808,6 +808,8 @@ struct Renewed {
 	generation: u64,
 	publication: moq_net::origin::Route,
 	track: moq_net::track::Producer,
+	/// The key of the next token's group, since the token track has no timescale.
+	next: u64,
 }
 
 impl Drop for Renewed {
@@ -856,6 +858,7 @@ impl Renewals {
 			generation,
 			publication,
 			track,
+			next: 0,
 		};
 		self.write(identity, &mut renewed)?;
 		renewed.publication.announce()?;
@@ -875,7 +878,10 @@ impl Renewals {
 
 	fn write(&self, identity: &str, renewed: &mut Renewed) -> anyhow::Result<()> {
 		let (token, _) = self.room.sign(identity, renewed.generation)?;
-		renewed.track.write_frame(None, token)?;
+		renewed
+			.track
+			.write_frame(moq_net::Timestamp::unscaled(renewed.next), token)?;
+		renewed.next += 1;
 		Ok(())
 	}
 }

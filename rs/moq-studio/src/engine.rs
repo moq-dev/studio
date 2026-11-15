@@ -1131,7 +1131,7 @@ impl Engine {
 
 		// Where the program clock starts on the catalog's, so the wall time the
 		// catalog advertises for a frame is when the program drew it.
-		let epoch = Duration::from(clock.capture(start)?);
+		let epoch = Duration::try_from(clock.capture(start)?)?;
 		extras.epoch = epoch;
 		if let Some(room) = &engine.room
 			&& let Some(origin) = room.origin()
@@ -3438,7 +3438,7 @@ mod tests {
 			state.cut().unwrap();
 		}
 		let cut = next(&mut layouts).await.expect("a layout");
-		let at = Duration::from(cut.at.expect("stamped"));
+		let at = Duration::try_from(cut.at).unwrap();
 		assert_eq!(cut.value.start, at, "on from the frame the cut drew");
 		assert!(cut.value.start > first.value.start);
 
@@ -4254,7 +4254,9 @@ mod tests {
 			tokio::spawn(async move {
 				while let Some(read) = pictures.read().await.expect("decode") {
 					if let moq_video::decode::Read::Frame(frame) = read
-						&& seen.send((Duration::from(frame.timestamp), center(&frame))).is_err()
+						&& seen
+							.send((Duration::try_from(frame.timestamp).unwrap(), center(&frame)))
+							.is_err()
 					{
 						return;
 					}
@@ -4282,7 +4284,7 @@ mod tests {
 						.chunks_exact(channels)
 						.map(|sample| sample.iter().copied().fold(0.0, f32::max));
 					if heard
-						.send((Duration::from(frame.timestamp), loudest.collect()))
+						.send((Duration::try_from(frame.timestamp).unwrap(), loudest.collect()))
 						.is_err()
 					{
 						return;
@@ -4349,7 +4351,7 @@ mod tests {
 	/// picture and sample it publishes.
 	fn stamp(engine: &Engine, at: Instant) -> Duration {
 		let now = kio::clock::now();
-		let reading = Duration::from(engine.program.clock.capture(now).unwrap());
+		let reading = Duration::try_from(engine.program.clock.capture(now).unwrap()).unwrap();
 		reading + at.saturating_duration_since(now) - now.saturating_duration_since(at)
 	}
 
@@ -4784,7 +4786,7 @@ mod tests {
 		.await
 		.expect("a second resized picture arrives");
 		// At least 1/15 s apart, as the old 30 fps clock would not be.
-		let gap = Duration::from(next) - Duration::from(first);
+		let gap = Duration::try_from(next).unwrap() - Duration::try_from(first).unwrap();
 		assert!(
 			gap > Duration::from_millis(50),
 			"the program clock follows the frame rate: {gap:?}"
@@ -5074,9 +5076,11 @@ mod tests {
 		for (name, track) in ["video", "audio"].into_iter().zip(&tracks) {
 			let mut subscription = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
 			// A head group read through the relay, so only the tail is at stake.
-			let mut group = track.append_group().unwrap();
-			group.write_frame(moq_net::Timestamp::ZERO, vec![0; 1]).unwrap();
-			group.finish().unwrap();
+			let mut group = track.append_group(0).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), vec![0; 1])
+				.unwrap();
+			group.close().unwrap();
 			let mut head = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 				.await
 				.expect("the head group arrives")
@@ -5108,11 +5112,13 @@ mod tests {
 			})
 			.collect();
 		for track in &tracks {
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_group(1).unwrap();
 			for _ in 0..FRAMES {
-				group.write_frame(moq_net::Timestamp::ZERO, vec![0; PADDING]).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), vec![0; PADDING])
+					.unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 			// The kept producer holds the finished track listed.
 			drop(track.clone().finish().unwrap());
 		}

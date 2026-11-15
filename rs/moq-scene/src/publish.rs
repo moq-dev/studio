@@ -382,13 +382,12 @@ async fn copy(
 		});
 		let result: Result<(), moq_net::Error> = async {
 			while let Some(mut group) = track.recv_group().await? {
-				let mut copy = out.create_group(moq_net::group::Info {
-					sequence: group.sequence,
-				})?;
+				let mut copy = out.create_group(moq_net::group::Info { start: group.start })?;
 				while let Some(frame) = group.read_frame().await? {
 					copy.write_frame(frame.timestamp, frame.payload)?;
 				}
-				copy.finish()?;
+				// A relayed group's end is not ours to state.
+				copy.close()?;
 			}
 			out.clone().finish().map(drop)
 		}
@@ -765,7 +764,12 @@ impl<'a> Video<'a> {
 	/// where the first frame encodes, for a source that encodes its pictures
 	/// ahead of when they show.
 	pub(crate) fn anchor(&mut self, origin: kio::clock::Instant) -> Result<(), Error> {
-		self.epoch = Some(self.clock.capture(origin)?.as_micros());
+		self.epoch = Some(
+			self.clock
+				.capture(origin)?
+				.as_micros()
+				.map_err(moq_video::Error::from)?,
+		);
 		Ok(())
 	}
 
@@ -775,10 +779,14 @@ impl<'a> Video<'a> {
 	/// the gap, and reopens when the picture's size or color space changes,
 	/// which moves the rendition to a new track.
 	pub(crate) fn encode(&mut self, frame: &mut moq_video::Frame) -> Result<(), Error> {
-		let captured = frame.timestamp.as_micros();
-		let epoch = *self
-			.epoch
-			.get_or_insert_with(|| self.clock.now().as_micros().saturating_sub(captured));
+		let captured = frame.timestamp.as_micros().map_err(moq_video::Error::from)?;
+		let epoch = match self.epoch {
+			Some(epoch) => epoch,
+			None => {
+				let now = self.clock.now().as_micros().map_err(moq_video::Error::from)?;
+				*self.epoch.insert(now.saturating_sub(captured))
+			}
+		};
 		frame.timestamp = moq_net::Timestamp::from_micros((epoch + captured) as u64).map_err(moq_video::Error::from)?;
 
 		if !self.used() {
@@ -960,7 +968,12 @@ impl<'a> Audio<'a> {
 		// has passed: the rest is counted on from now.
 		let now = kio::clock::now();
 		let ahead = captured.saturating_duration_since(now).as_micros();
-		let timestamp = self.clock.capture(captured.min(now))?.as_micros() + ahead;
+		let timestamp = self
+			.clock
+			.capture(captured.min(now))?
+			.as_micros()
+			.map_err(moq_audio::Error::from)?
+			+ ahead;
 		let timestamp = moq_net::Timestamp::from_micros(timestamp as u64).map_err(moq_audio::Error::from)?;
 		let data = bytes::Bytes::copy_from_slice(bytemuck::cast_slice(samples));
 		producer.write(&moq_audio::Frame::new(data, timestamp))?;
@@ -1480,7 +1493,7 @@ mod tests {
 					assert!(video.track.is_open(), "a subscriber gets pictures");
 					let mut group = track.recv_group().await.unwrap().expect("a group");
 					assert!(group.read_frame().await.unwrap().is_some());
-					let first = group.sequence;
+					let first = group.start;
 
 					drop(group);
 					drop(track);
@@ -1496,7 +1509,7 @@ mod tests {
 					video.encode(&mut gray(size, 100)).unwrap();
 					assert!(video.track.is_open(), "a new subscriber reopens the encoder");
 					let mut group = track.recv_group().await.unwrap().expect("a group");
-					assert!(group.sequence > first, "{} after {first}", group.sequence);
+					assert!(group.start > first, "{} after {first}", group.start);
 					assert!(group.read_frame().await.unwrap().is_some());
 				} => {}
 			}
@@ -1624,7 +1637,7 @@ mod tests {
 					let (_, config) = take.audio.as_ref().unwrap();
 					let read = packets(&take.consume(), name, config).await;
 					let near = |at: moq_net::Timestamp, to: moq_net::Timestamp| {
-						at.as_micros().abs_diff(to.as_micros()) <= 20_000
+						at.as_micros().unwrap().abs_diff(to.as_micros().unwrap()) <= 20_000
 					};
 					let first = read.first().copied().flatten().expect("a packet first");
 					assert!(near(first, heard), "{first:?} for {heard:?}");
@@ -1752,7 +1765,7 @@ mod tests {
 					if current.replace(group) != Some(group) {
 						seen.push(Seen::Group);
 					}
-					seen.push(Seen::Picture(frame.timestamp.as_micros() / 1000));
+					seen.push(Seen::Picture(frame.timestamp.as_micros().unwrap() / 1000));
 				}
 				moq_mux::container::Read::End { .. } => seen.push(Seen::End),
 				moq_mux::container::Read::Gap { .. } => panic!("pictures went missing"),
@@ -1957,7 +1970,7 @@ mod tests {
 			// Stamped with when it showed, though encoded ahead of it.
 			let shown = publish.catalog.clock().capture(first).unwrap();
 			assert!(
-				stamps[0].as_micros().abs_diff(shown.as_micros()) <= 1,
+				stamps[0].as_micros().unwrap().abs_diff(shown.as_micros().unwrap()) <= 1,
 				"the first picture as it showed: {:?}, not {shown:?}",
 				stamps[0]
 			);
@@ -2069,7 +2082,7 @@ mod tests {
 			let silences = until(|| {
 				while let std::task::Poll::Ready(read) = track.poll_read(&now) {
 					if let moq_mux::container::Read::Frame { frame, .. } = read.unwrap().expect("open") {
-						stamps.push(std::time::Duration::from(frame.timestamp));
+						stamps.push(std::time::Duration::try_from(frame.timestamp).unwrap());
 					}
 				}
 				let gaps = stamps.windows(2).map(|pair| pair[1].saturating_sub(pair[0]));
@@ -2079,7 +2092,7 @@ mod tests {
 			.await;
 			assert_eq!(silences, 2, "each loop's silence is kept: {stamps:?}");
 			// Stamped with when it sounded, though written ahead of it.
-			let sounded = std::time::Duration::from(publish.catalog.clock().capture(begun).unwrap());
+			let sounded = std::time::Duration::try_from(publish.catalog.clock().capture(begun).unwrap()).unwrap();
 			assert_eq!(stamps[0], sounded, "the first sound as it sounded");
 		})
 		.await;
