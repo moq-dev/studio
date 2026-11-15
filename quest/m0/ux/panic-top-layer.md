@@ -15,18 +15,14 @@ Raised by Pullfrog's review of
 `State::panic` (`rs/moq-studio/src/engine.rs`) makes one undoable edit and a
 cut; hiding top-layer items would join that edit (`Draft::set_item` with
 `visible: false` on each `Layer::top()` item), so one undo brings back the
-microphones, the guests, and the items together. Whichever option is picked,
-the panic key's tooltip (`rs/moq-studio/src/ui/shell.rs`) and its README
-entry say what stays on, and the engine test covers it.
+microphones, the guests, and the items together. The panic key's tooltip
+(`rs/moq-studio/src/ui/shell.rs`) and its README entry (which today say the
+top layer stays on) say what it hides, and the engine test covers it.
 
-## Waiting
-
-- Maintainer: should the panic key also take the top layer off program?
-  Options: (a) hide every visible top-layer item in the panic edit; (b) hide
-  only top-layer items showing a live capture (camera, display, window,
-  browser, broadcast), keeping images, colors, and text such as a logo;
-  (c) leave the top layer on, as now, and only document it. Recommendation:
-  (a), since panic exists for what is said or shown on air, a safe scene
-  usually carries its own branding, and a rule about which sources count as
-  live is one more thing to get wrong under pressure. An agent cannot pick
-  what a broadcaster expects to stay on screen.
+Decided by the maintainer
+([comment](https://github.com/moq-dev/studio/pull/171#issuecomment-6898166608),
+2026-11-15): the panic edit hides every visible top-layer item, whatever it
+shows. Rejected: hiding only live captures and keeping a logo (a rule about
+which sources count as live is one more thing to get wrong under pressure);
+leaving the top layer on and documenting it. A safe scene usually carries its
+own branding.
