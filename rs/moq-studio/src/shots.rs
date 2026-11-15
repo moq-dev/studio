@@ -4,7 +4,8 @@
 //! engine and draws one state of the window through egui_kittest, on the GPU
 //! the compositor uses. A still view draws the same picture every time, which
 //! its test checks by drawing it twice; a live one shows something that moves,
-//! such as an encoder's timings.
+//! such as an encoder's timings. One more test drives the window the same way,
+//! clicking as a person does, and draws nothing.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -131,30 +132,9 @@ fn shot(name: &str, motion: Motion, open: Open) {
 	let out = std::path::absolute(out).unwrap();
 	std::fs::create_dir_all(&out).unwrap();
 
-	// The show is opened as `show.toml` from a directory of its own, so the
-	// status bar names it the same on every machine. nextest runs each test
-	// in a process of its own, which the change of directory relies on.
-	let show = tempfile::tempdir().unwrap();
-	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
-	std::fs::copy(
-		fixture.join("../moq-scene/src/test_data/person.jpg"),
-		show.path().join("person.jpg"),
-	)
-	.unwrap();
-	std::env::set_current_dir(show.path()).unwrap();
-
-	let runtime = tokio::runtime::Runtime::new().unwrap();
+	let (_show, runtime, gpu) = lavapipe();
 	let _entered = runtime.enter();
-	// Vulkan only, where `just shots` names lavapipe the sole driver: any other
-	// backend would find the host's hardware and draw a different picture.
-	let gpu = pollster::block_on(engine::Gpu::new(wgpu::Backends::VULKAN)).expect("a GPU");
-	let info = gpu.adapter.get_info();
-	assert_eq!(
-		info.device_type,
-		wgpu::DeviceType::Cpu,
-		"views draw on lavapipe, not {}",
-		info.name
-	);
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	let image = shoot(&open, &gpu, &runtime, &fixture.join("shots"));
 	let path = out.join(format!("{name}.png"));
 	if motion == Motion::Still {
@@ -178,60 +158,132 @@ fn shot(name: &str, motion: Motion, open: Open) {
 	println!("{}", path.display());
 }
 
-/// Draw what `open` opens on a fresh engine, from a scene file in `shows`.
-fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, shows: &Path) -> image::RgbaImage {
-	if let &Open::Kit { sheet } = open {
-		return gallery(gpu, runtime, sheet);
-	}
-	let launch = engine::Launch {
+/// A directory of its own to open the show from, made the current one, a
+/// runtime, and Mesa's software GPU.
+///
+/// The show is opened as `show.toml` from there, so the window names it the
+/// same on every machine. nextest runs each test in a process of its own,
+/// which the change of directory relies on.
+fn lavapipe() -> (tempfile::TempDir, tokio::runtime::Runtime, engine::Gpu) {
+	let show = tempfile::tempdir().unwrap();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(
+		fixture.join("../moq-scene/src/test_data/person.jpg"),
+		show.path().join("person.jpg"),
+	)
+	.unwrap();
+	std::env::set_current_dir(show.path()).unwrap();
+
+	let runtime = tokio::runtime::Runtime::new().unwrap();
+	// Vulkan only, where `just shots` names lavapipe the sole driver: any other
+	// backend would find the host's hardware and draw a different picture.
+	let gpu = pollster::block_on(engine::Gpu::new(wgpu::Backends::VULKAN)).expect("a GPU");
+	let info = gpu.adapter.get_info();
+	assert_eq!(
+		info.device_type,
+		wgpu::DeviceType::Cpu,
+		"views draw on lavapipe, not {}",
+		info.name
+	);
+	(show, runtime, gpu)
+}
+
+/// How a view starts the studio: with no relay, recording beside the show.
+fn launch(gpu: &engine::Gpu) -> engine::Launch {
+	engine::Launch {
 		gpu: gpu.clone(),
 		relays: Vec::new(),
 		broadcast: "studio".into(),
 		on_demand: false,
 		recordings: ".".into(),
 		room: None,
+	}
+}
+
+/// Start the studio on `show.toml`, without the history an earlier draw's
+/// edits left.
+fn start(gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime) -> App {
+	let _ = std::fs::remove_file("show.history.toml");
+	let (autosave, loaded) = autosave::Autosave::open("show.toml".into()).unwrap();
+	App::Starting(
+		runtime
+			.block_on(engine::Engine::start(launch(gpu), autosave, loaded))
+			.unwrap(),
+	)
+}
+
+/// A click on a pad takes its scene on air, and the panic key mutes every
+/// microphone, in an edit undo takes back, and cuts to the safe scene: the
+/// window as a person uses it, on a real engine. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_click_takes_and_the_panic_key_cuts() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let mut show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	// Failed in a build without `capture`, which leaves it a microphone to mute.
+	show.push_str("\n[sources.mic]\nkind = \"microphone\"\n");
+	std::fs::write("show.toml", show).unwrap();
+	let (mut harness, started) = window(start(&gpu, &runtime), &gpu, &runtime, SIZE);
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let program = || {
+		engine
+			.state
+			.lock()
+			.unwrap()
+			.compositor
+			.program_scene()
+			.map(str::to_string)
 	};
+	let muted = || {
+		let state = engine.state.lock().unwrap();
+		state.collection().audio.get("mic").is_some_and(|audio| audio.muted)
+	};
+	assert_eq!(program().as_deref(), Some("Main"));
+
+	harness.get_by_label("Interview").click();
+	harness.run_steps(2);
+	assert_eq!(program().as_deref(), Some("Interview"), "the pad took its scene");
+
+	harness.get_by_label("Panic").click();
+	harness.run_steps(2);
+	assert_eq!(program().as_deref(), Some("Break"), "cut to the safe scene");
+	assert!(muted(), "the microphone is muted");
+
+	harness.get_by_label("Undo: Panic: mute every microphone").click();
+	harness.run_steps(2);
+	assert!(!muted(), "undo takes the mute back");
+	assert_eq!(program().as_deref(), Some("Break"), "and leaves program where it is");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// Draw what `open` opens on a fresh engine, from a scene file in `shows`.
+fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, shows: &Path) -> image::RgbaImage {
+	if let &Open::Kit { sheet } = open {
+		return gallery(gpu, runtime, sheet);
+	}
 	let app = match open {
 		Open::Setup => App::Setup(Box::new(
-			setup::Setup::new(launch, "show.toml".into(), runtime.handle().clone()).unwrap(),
+			setup::Setup::new(launch(gpu), "show.toml".into(), runtime.handle().clone()).unwrap(),
 		)),
 		Open::Kit { .. } => unreachable!("drawn without an engine"),
 		Open::Studio { show, .. } => {
-			// Afresh, without the history an earlier draw's edits left.
 			std::fs::copy(shows.join(show), "show.toml").unwrap();
-			let _ = std::fs::remove_file("show.history.toml");
-			let (autosave, loaded) = autosave::Autosave::open("show.toml".into()).unwrap();
-			App::Starting(
-				runtime
-					.block_on(engine::Engine::start(launch, autosave, loaded))
-					.unwrap(),
-			)
+			start(gpu, runtime)
 		}
 	};
-	let render = render_state(gpu);
-	let started = Arc::new(OnceLock::new());
 	let size = match open {
 		Open::Studio { size, .. } => *size,
 		_ => SIZE,
 	};
-	let mut harness = Harness::builder()
-		.with_size(size)
-		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
-		.build_eframe(|cc| {
-			crate::kit::install(&cc.egui_ctx);
-			let mut fx = fx::Fx::new(&render, None, &cc.egui_ctx, runtime.handle());
-			// Not the system's reduced motion, which differs between machines.
-			fx.pick(Effects::Full);
-			Window {
-				app,
-				render: render.clone(),
-				runtime: runtime.handle().clone(),
-				started: started.clone(),
-				keyboard: hotkeys::Keyboard::default(),
-				fx,
-				framed: true,
-			}
-		});
+	let (mut harness, started) = window(app, gpu, runtime, size);
 
 	let Open::Studio { view, .. } = open else {
 		runtime
@@ -259,14 +311,50 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	}
 	let image = harness.render().unwrap();
 	drop(harness);
-	// Now, while the scene file is this draw's: the autosave's thread outlives
+	quit(&engine, runtime);
+	image
+}
+
+/// A window on `app`, `size` large, and where the studio it starts is kept.
+fn window<'a>(
+	app: App,
+	gpu: &engine::Gpu,
+	runtime: &'a tokio::runtime::Runtime,
+	size: egui::Vec2,
+) -> (Harness<'a, Window>, Arc<OnceLock<Arc<engine::Engine>>>) {
+	let render = render_state(gpu);
+	let started = Arc::new(OnceLock::new());
+	let kept = started.clone();
+	let harness = Harness::builder()
+		.with_size(size)
+		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
+		.build_eframe(move |cc| {
+			crate::kit::install(&cc.egui_ctx);
+			let mut fx = fx::Fx::new(&render, None, &cc.egui_ctx, runtime.handle());
+			// Not the system's reduced motion, which differs between machines.
+			fx.pick(Effects::Full);
+			Window {
+				app,
+				render: render.clone(),
+				runtime: runtime.handle().clone(),
+				started: kept,
+				keyboard: hotkeys::Keyboard::default(),
+				fx,
+				framed: true,
+			}
+		});
+	(harness, started)
+}
+
+/// Stop `engine` as quitting does.
+fn quit(engine: &engine::Engine, runtime: &tokio::runtime::Runtime) {
+	// Now, while the scene file is this test's: the autosave's thread outlives
 	// the engine, and would otherwise write an edit made here over the next
 	// draw's copy.
 	engine.save().expect("the show saves");
 	engine.recorder.close();
 	engine.stop();
 	runtime.block_on(async { tokio::join!(engine.close(), engine.recorder.done()) });
-	image
 }
 
 /// Draw the kit's gallery, with a sheet over it if `sheet`.

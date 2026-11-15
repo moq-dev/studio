@@ -244,6 +244,16 @@ impl Studio {
 	}
 }
 
+/// Put back in `bindings` the key of each action not offered, which `hidden`
+/// held, unless another action took that key meanwhile.
+fn keep_hidden(bindings: &mut Bindings, hidden: &Bindings) {
+	for (action, key) in hidden {
+		if !bindings.values().any(|bound| bound.same(key)) {
+			bindings.insert(action.clone(), key.clone());
+		}
+	}
+}
+
 impl Studio {
 	pub fn save(&mut self, storage: &mut dyn eframe::Storage) {
 		let panels = &self.panels;
@@ -251,12 +261,7 @@ impl Studio {
 		eframe::set_value(storage, SNAPPING, &panels.snapping);
 		if let Some(hotkeys) = &panels.hotkeys {
 			let mut bindings = hotkeys.bindings();
-			// A hidden action keeps its key, unless another action took it.
-			for (action, hidden) in &self.hidden {
-				if !bindings.values().any(|bound| bound.same(hidden)) {
-					bindings.insert(action.clone(), hidden.clone());
-				}
-			}
+			keep_hidden(&mut bindings, &self.hidden);
 			eframe::set_value(storage, HOTKEYS, &bindings);
 		}
 	}
@@ -2314,6 +2319,33 @@ impl Devices {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A key bound to Cut or Transition, which the window no longer offers,
+	/// is kept across a save for when they come back, unless the operator
+	/// bound that key to something else meanwhile.
+	#[test]
+	fn a_hidden_action_keeps_its_key() {
+		let key = |code| hotkeys::Binding {
+			modifiers: egui::Modifiers::NONE,
+			key: PhysicalKey::Code(code),
+			name: winit::keyboard::Key::Named(winit::keyboard::NamedKey::F1),
+		};
+		let saved = Bindings::from([
+			(Action::Cut, key(KeyCode::F5)),
+			(Action::Transition, key(KeyCode::F6)),
+			(Action::Panic, key(KeyCode::F1)),
+		]);
+		let (mut bindings, hidden): (Bindings, Bindings) = saved.into_iter().partition(|(action, _)| action.offered());
+		assert_eq!(bindings, Bindings::from([(Action::Panic, key(KeyCode::F1))]));
+		bindings.insert(Action::Replay, key(KeyCode::F6));
+		keep_hidden(&mut bindings, &hidden);
+		let kept = Bindings::from([
+			(Action::Panic, key(KeyCode::F1)),
+			(Action::Replay, key(KeyCode::F6)),
+			(Action::Cut, key(KeyCode::F5)),
+		]);
+		assert_eq!(bindings, kept, "Transition lost F6 to Replay");
+	}
 
 	/// The gain field shows a boost past its range without cutting it, and
 	/// takes an exact level, so a sound can go back to exactly 0 dB.
