@@ -57,6 +57,11 @@ enum View {
 	/// The LIVE page after a mute, with the health dot's popover open and the
 	/// pointer on undo, which names the mute.
 	Hover,
+	/// REVIEW, with this show's recordings and clips, and if `picked`, the
+	/// last 30 seconds held and a stretch picked.
+	Review {
+		picked: bool,
+	},
 }
 
 /// The studio on the shots' show, at the mock-ups' size, turned to `view`.
@@ -115,7 +120,15 @@ views! {
 	/// MIX in a stacked window, its live picture as tall as the sound's slot
 	/// allows.
 	mix_compact: Still, Open::Studio { view: View::Page(Page::Mix), size: HALF, show: "show.toml" };
-	review: Still, studio(View::Page(Page::Review));
+	/// REVIEW off air: without a relay the program keeps no past, which the
+	/// strip and both actions say, beside this show's recordings and clips.
+	review: Still, studio(View::Review { picked: false });
+	/// REVIEW with the last 30 seconds held: a stretch picked between the
+	/// handles, the head inside it, the picture under the head large, and
+	/// Replay saying why it cannot play without a replay source.
+	review_picked: Still, studio(View::Review { picked: true });
+	/// Settings' Recording tab: the folder, and what a recording holds.
+	recording: Still, studio(View::Setting(Setting::Recording));
 	graph: Still, studio(View::Setting(Setting::Graph));
 	history: Still, studio(View::Setting(Setting::History));
 	devices: Still, studio(View::Tool(Tool::Devices));
@@ -336,6 +349,15 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Setting(setting) => studio.open(*setting),
 		View::Health => studio.details(),
 		View::Hover => {}
+		View::Review { picked } => {
+			studio.turn(Page::Review);
+			studio.seed_shelf(shelf());
+			if *picked {
+				let secs = Duration::from_secs;
+				let now = kio::clock::Instant::now();
+				studio.seed_past(past(now), now, (secs(14), secs(6)), secs(9));
+			}
+		}
 	}
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -427,6 +449,97 @@ fn hover(harness: &mut Harness<'_, Window>) {
 	harness.get_by_label_contains("Undo: Mute").hover();
 	// egui shows a tooltip once the pointer rests half a second.
 	harness.run_steps(4);
+}
+
+/// The last 30 seconds as of `now`: a keyframe every 2.5 s, a sun setting
+/// across a gradient, drawn rather than decoded so the view is the same on
+/// every machine.
+fn past(now: kio::clock::Instant) -> crate::past::View {
+	let (width, height) = (480usize, 270usize);
+	let pictures = (0..12u64)
+		.map(|index| {
+			let mut rgba = vec![0u8; width * height * 4];
+			let sun = (60.0 + index as f32 * 30.0, 70.0 + index as f32 * 6.0);
+			for (at, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+				let (x, y) = ((at % width) as f32, (at / width) as f32);
+				let sky = y / height as f32;
+				let mut color = [
+					(40.0 + 160.0 * sky) as u8,
+					(20.0 + 40.0 * sky) as u8,
+					(90.0 - 40.0 * sky) as u8,
+				];
+				if (x - sun.0).powi(2) + (y - sun.1).powi(2) < 45.0_f32.powi(2) {
+					color = [255, 170, 80];
+				}
+				pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
+			}
+			Arc::new(crate::past::Picture {
+				id: index + 1,
+				at: now.saturating_sub(Duration::from_millis(29_000 - index * 2_500)),
+				size: [width, height],
+				rgba,
+			})
+		})
+		.collect::<Vec<_>>();
+	// A packet each 20 ms, swelling and fading as speech does.
+	let sound = (0..1450u64)
+		.map(|index| {
+			let at = now.saturating_sub(Duration::from_millis(29_000 - index * 20));
+			let t = index as f32 / 50.0;
+			let peak = ((t * 1.3).sin() * (t * 0.17).cos() * (t * 0.049 + 1.0).sin()).abs();
+			(at, peak)
+		})
+		.collect();
+	crate::past::View {
+		of: crate::replay::Of::Program,
+		held: Some(Ok(crate::past::Held {
+			oldest: pictures[0].at,
+			video: true,
+		})),
+		pictures,
+		sound: Ok(sound),
+	}
+}
+
+/// This show's recordings and clips, as the mock-up lists them.
+fn shelf() -> crate::shelf::Listing {
+	use crate::shelf::{Card, Kind, Listing};
+	let wall = kio::clock::wall();
+	let ago = |seconds: u64| Some(wall - Duration::from_secs(seconds));
+	let length = |seconds: u64| Some(Duration::from_secs(seconds));
+	let recording = |sources, repaired| Kind::Recording {
+		stamp: String::new(),
+		sources,
+		repaired,
+	};
+	let card = |kind, modified, bytes, length| Card {
+		kind,
+		path: "show.mp4".into(),
+		modified,
+		bytes,
+		length,
+	};
+	Listing {
+		cards: vec![
+			card(Kind::Clip(3), ago(150), 11_000_000, length(8)),
+			card(Kind::Clip(2), ago(41 * 60), 18_000_000, length(12)),
+			card(
+				recording(0, true),
+				ago(2 * 86_400 + 600),
+				14_200_000_000,
+				length(2 * 3600 + 10 * 60 + 44),
+			),
+			card(
+				recording(4, false),
+				ago(6 * 86_400 + 600),
+				21_000_000_000,
+				length(3 * 3600 + 2 * 60 + 10),
+			),
+			card(Kind::Clip(1), ago(6 * 86_400 + 900), 22_000_000, length(15)),
+		],
+		error: None,
+		free: Some(212_000_000_000),
+	}
 }
 
 /// Draw until setup has finished its checks and proposes a scene.

@@ -1,42 +1,31 @@
-# [M] The REVIEW page
+# [S] Pictures on REVIEW's recording and clip cards
 
 ## Goal
 
-The REVIEW page of [`mock/review.html`](/quest/m0/ux/mock/review.html)
-replaces the Replay panel and the recording half of the Output panel: the
-last 30 seconds as a strip to pick a stretch from, what to replay (the
-program or a source), the speed, and Replay and Save clip; beside it, this
-show's recordings and clips as cards with a picture, a length, and a size,
-one that was repaired after a crash marked as such, and a button that opens
-their folder.
-
-The bottom strip stays, and the program's card in "replay what" is the live
-picture, so looking back never hides what is on air.
-
-The title bar's record button starts and stops a recording from any page and
-shows its clock while recording.
+Each finished recording's and clip's card on the REVIEW page of
+[`mock/review.html`](/quest/m0/ux/mock/review.html) shows the file's first
+picture, where it shows a placeholder tile today. The rest of the page is
+built.
 
 ## Plan
 
-Recording and repair behave as `README.md` has them; this is their place and
-look. Recommended, not decided: Replay and Save clip take any stretch of the
-last 30 seconds, picked with two handles, where today they take the last N
-seconds up to the click. The track already holds the 30 seconds. The
-alternative pins the right handle to now. The strip's pictures are frames the program's track
-already keeps for late viewers, decoded at a low rate while the page is
-shown, and nothing records in the background for it.
+- A finished recording or clip is a regular MP4, which moq-mux does not read
+  yet. The picture is its first video sample, decoded small once per file in
+  the shelf's background listing (`rs/moq-studio/src/shelf.rs`), as the
+  strip decodes keyframes (`rs/moq-studio/src/past.rs`). A recording under way
+  already shows the live picture.
 
-- The large picture is the frame under the scrub head, so the choice is
-  seen before it is replayed. The program's card keeps its ON AIR tag, so the
-  live picture never leaves the screen.
-- A replay that cannot play says why where the button is: off air with no
-  relay, a source with no past, a speed that drops the sound.
-- A recording's card comes from the files in the recordings folder that
-  carry this show's name. Reading their length and a first picture must not
-  hold up the page.
-- Which picture and audio scene a recording holds are Settings, Recording.
+Human check: scrubbing and picking a stretch by feel, on a show with a relay.
 
-[Markers and clips](/quest/m2/markers.md) later adds markers to the strip
-and chapters to a recording.
+## Waiting
 
-Human check: scrubbing and picking a stretch by feel.
+- Maintainer: how a card gets its picture. (a) Pull moq-dev/moq's
+  [regular MP4 import](https://github.com/moq-dev/moq/blob/main/quest/m3/mp4-import.md)
+  forward from m3 and decode through it (recommended: demuxing belongs in moq,
+  and the media source needs the same import); (b) read the first sample here
+  with `mp4-atom`, about 60 lines the import later replaces; (c) keep the
+  placeholder tile and drop pictures from the mock-up.
+
+## Related
+
+- [Markers and clips](/quest/m2/markers.md) - adds markers to the strip and chapters to a recording

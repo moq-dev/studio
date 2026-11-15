@@ -48,12 +48,15 @@ pub enum Icon {
 	Build,
 	Mix,
 	Review,
+	Folder,
+	Save,
+	Repaired,
 }
 
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 32] = [
+	pub const ALL: [Self; 35] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -86,6 +89,9 @@ impl Icon {
 		Self::Build,
 		Self::Mix,
 		Self::Review,
+		Self::Folder,
+		Self::Save,
+		Self::Repaired,
 	];
 
 	fn source(self) -> ImageSource<'static> {
@@ -122,6 +128,9 @@ impl Icon {
 			Self::Build => include_image!("../../assets/icons/layers.svg"),
 			Self::Mix => include_image!("../../assets/icons/sliders-vertical.svg"),
 			Self::Review => include_image!("../../assets/icons/film.svg"),
+			Self::Folder => include_image!("../../assets/icons/folder.svg"),
+			Self::Save => include_image!("../../assets/icons/download.svg"),
+			Self::Repaired => include_image!("../../assets/icons/shield.svg"),
 		}
 	}
 

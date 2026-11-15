@@ -32,7 +32,7 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - `show.toml` is the scene collection. If it does not exist yet,
   [guided setup](#first-launch) proposes one and creates it. Changes are saved
   to it a second after you stop editing, with no save step.
-- `--recordings <dir>` is where recordings are saved, by default beside
+- `--recordings <dir>` is where recordings and clips are saved, by default beside
   `show.toml`.
 - Without `--connect`, the studio composes, previews, and records but
   publishes nothing, and broadcast sources stay offline.
@@ -137,9 +137,9 @@ macOS the system's buttons and edges stay. It holds, from the left:
 - The health dot, the stream's worst grade at a glance. Click it for each
   relay, who is watching, the encoder, and each problem, and **Details** for
   the [Health](#health) window. It reads **Not live** without `--connect`.
-- Record, which starts or stops a [recording](#recording) with REVIEW's
-  picks. Its dot pulses while recording, and says for how long under the
-  pointer.
+- Record, which starts or stops a [recording](#recording) from any page, with
+  the picks in Settings' Recording tab. Its dot pulses while recording, with
+  how long it has been recording beside it.
 - The live control: **LIVE** and how long the studio has been live, with
   `--connect`, or **NOT LIVE** without it. The studio goes live at launch,
   so it starts and ends nothing yet.
@@ -172,7 +172,7 @@ The **strip** holds:
 | LIVE | Watch the program while on air. |
 | BUILD | Edit the scene on program, shown in the middle, with the panels below beside it: Layers, Scenes, Sources, Devices, and Guests on the left, and Filters and Keyframes on the right, or all on the left in a narrow window. |
 | MIX | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, pan, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. The program shows small in the strip's place for the sound. |
-| REVIEW | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip (see [Replay](#replay)), and start and stop recording and pick the picture and the audio scene it records (see [Recording](#recording)), beside the program. |
+| REVIEW | Pick a stretch of the last 30 seconds of the program or a source from a strip of its pictures, and replay it in a replay source, slowed down if you like, or save it as a clip (see [Replay](#replay)). Beside it, this show's recordings and clips as cards with their length and size, one repaired after a crash marked so, and **Open the folder**. The program's card is the live picture. |
 
 BUILD's panels:
 
@@ -210,6 +210,7 @@ to the scene file, or a failed save, shows over its top until it is settled.
 | Tab | Use it to |
 | --- | --- |
 | Show | Set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
+| Recording | See and open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
 | Hotkeys | Bind keys to the panic key, replay, save a clip, start or stop recording, and take each scene, and clear them (see [Hotkeys](#hotkeys)). |
 | Effects | Pick how the window's [effects](#effects) move. |
 | Graph | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
@@ -1012,7 +1013,7 @@ placed, and so does every audio scene's mix. The studio draws it only as
 viewers will: over the program, on every page and in the program's
 virtual camera, so both show what viewers see. It goes over every other item of its scene, and over the top layer,
 however the scene stacks it. Recordings hold the program as published,
-without it, and recording **each source too** gives a published camera,
+without it, and recording **Each source too** gives a published camera,
 display, window, or microphone a file of its own. Published and recorded
 scenes, and a scene that shows the program, leave it out too. While viewers read its track, it claims its bitrate of the connection beside the program's, and its video encodes at what the connection grants it. Its track carries one rendition, the
 plain capture before any filter or gain, and encodes for as long as it is
@@ -1097,14 +1098,14 @@ once `moq play` plays layers.
 
 ### Recording
 
-**Start recording** on REVIEW, or record in the title bar, saves the program at the canvas size,
-or the scene picked beside it at its own size,
+The record button in the title bar, on any page, saves the program at the
+canvas size, or the scene picked in Settings' Recording tab at its own size,
 to `<scene file name> <UTC start time>.mp4` in the `--recordings` directory,
 live or not. The recording has an encoder of its own, opened only while it
 records, at full quality whatever the uplink grants the live stream, as OBS's
 advanced output mode records apart from streaming. It costs one more encode
 session and one more copy of each program frame while recording. With
-**each source too**, every camera, display, window, microphone, and system
+**Each source too** in Settings' Recording tab, every camera, display, window, microphone, and system
 audio records its own track into a file of its own beside it,
 `<scene file name> <UTC start time> <source>.mp4`, holding the capture before
 any filter, or the sound before its gain and mute; a source being recorded
@@ -1127,7 +1128,7 @@ program and local sources are read from the studio's own broadcasts, never what
 the relay serves, so a recording starts and stops without touching the live
 stream. The audio scene it holds is
 encoded a second time for it while recording: the one on program, so the file
-holds what viewers hear, or the one REVIEW picks, which viewers never
+holds what viewers hear, or the one Settings' Recording tab picks, which viewers never
 can. Without `--connect`, only the
 recording's encoder encodes the program.
 
@@ -1144,7 +1145,7 @@ beside it, numbered if a file already has that name, a regular MP4 of
 everything the file holds up to its last complete fragment, leaves the
 original untouched, and removes the marker, so the file is repaired
 only once. The repair runs in the background and appears at the top of the
-Health window and in the log. A file another studio is still recording into the
+Health window and in the log, and REVIEW marks its card **Repaired after a crash**. A file another studio is still recording into the
 same directory is left alone.
 
 ### Source frames
@@ -1229,19 +1230,26 @@ and on Linux the desktop's, through its Settings portal.
 ## Replay
 
 Add a `replay` source and place it like any other, such as full screen in a
-scene of its own. On REVIEW, pick the program or a source, a length
-up to 30 seconds, and a speed of 100%, 50%, or 25%, then **Replay** plays that
-many seconds up to the click in the replay source, which is transparent before
-and after. Take its scene to put it on program. Sound replays only at
-100%, through the replay source's strip on MIX, so a replay of a
-microphone or system audio, which has only sound, plays only at 100%. A new
-replay cuts
-off the one playing, and a stretch the source was offline or paused replays
-as the gap it was.
+scene of its own. On REVIEW, pick what to replay, the program or a source, by
+its card, and a speed of 100%, 50%, or 25%. The strip shows the last 30
+seconds of what is picked, a picture each time its track starts a group,
+which is each keyframe. Drag the amber handles to pick any stretch of it,
+and click or drag elsewhere on the strip to move the scrub head: the large
+picture is the one under the head. With the right handle at the strip's right
+edge, the stretch is the last that many seconds up to the click; dragged
+left of it, the stretch stays on the moments picked as time goes on, until it
+ages out of the 30 seconds. **Replay** plays the stretch in the replay source,
+which is transparent before and after. Take its scene to put it on program.
+Sound replays only at 100%, through the replay source's strip on MIX, so a
+replay of a microphone or system audio, which has only sound, plays only at
+100%. A new replay cuts off the one playing, and a stretch the source was
+offline or paused replays as the gap it was. When Replay or Save clip cannot
+act, such as off air with no relay or for a source with no past, it says why
+in place of what it would do.
 
-**Save clip** writes the same seconds, in real time, beside the scene file as a
-regular MP4: `show-clip-1.mp4` for `show.toml`, then `show-clip-2.mp4`, and so
-on. Nothing is re-encoded, so a clip starts at the keyframe before those
+**Save clip** writes the same stretch, in real time, into the recordings
+folder as a regular MP4: `show-clip-1.mp4` for `show.toml`, then
+`show-clip-2.mp4`, and so on. Nothing is re-encoded, so a clip starts at the keyframe before those
 seconds, up to one keyframe interval earlier. It shows nothing after them, so
 video with B-frames can end early: the pictures shown before the end that refer
 to one shown after it are left out, along with everything decoded after that

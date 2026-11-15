@@ -4728,14 +4728,44 @@ mod tests {
 		assert!(engine.stats.error().is_none());
 
 		// The program's recent past saves as a clip, from the groups it holds.
-		let take = crate::replay::take(&engine, &crate::replay::Of::Program, Duration::from_secs(1), false)
+		let of = crate::replay::Of::Program;
+		let take = crate::replay::take(&engine, &of, Duration::ZERO, Duration::from_secs(1), false)
 			.expect("the program's past");
 		assert!(take.video.is_some(), "the canvas size holds video");
-		let clip = kio::clock::timeout(TIMEOUT, crate::replay::save(take, engine.autosave.path()))
+		let (folder, show) = (engine.recorder.dir(), engine.recorder.show());
+		let clip = kio::clock::timeout(TIMEOUT, crate::replay::save(take, folder, show))
 			.await
 			.expect("the clip saves")
 			.expect("a clip");
 		assert_eq!(clip, dir.path().join("show-clip-1.mp4"));
+
+		// REVIEW's strip decodes the keyframe each held group opens with, small,
+		// and it is the picture composed: the red canvas.
+		let view = tokio::task::spawn_blocking({
+			let engine = engine.clone();
+			move || crate::past::sample(&engine, &of)
+		})
+		.await
+		.unwrap();
+		let held = view.held.expect("sampled").expect("the program's past");
+		assert!(held.video);
+		assert!(!view.pictures.is_empty(), "a keyframe of the past");
+		for picture in &view.pictures {
+			assert_eq!(picture.size[0], 480, "decoded small");
+			assert!(held.oldest <= picture.at && picture.at <= kio::clock::Instant::now());
+			let middle = (picture.size[1] / 2 * picture.size[0] + picture.size[0] / 2) * 4;
+			let [r, g, b, _] = picture.rgba[middle..middle + 4] else {
+				unreachable!()
+			};
+			assert!(r > 200 && g < 60 && b < 60, "red, not {r} {g} {b}");
+		}
+		let times: Vec<_> = view.pictures.iter().map(|picture| picture.at).collect();
+		assert!(times.is_sorted(), "oldest first");
+		// And its sound, a packet at a time: the program's mix, silent here.
+		let sound = view.sound.expect("the program's sound");
+		assert!(sound.len() > 10, "{} packets", sound.len());
+		assert!(sound.iter().all(|(_, peak)| (0.0..=1.0).contains(peak)));
+		assert!(sound.iter().map(|(at, _)| *at).is_sorted(), "oldest first");
 
 		// Quitting ends the program's video and audio cleanly once the encoders
 		// published what they were handed, then its catalog in each format, and

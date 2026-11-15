@@ -1,5 +1,5 @@
-//! Settings: what a broadcaster sets once, such as the canvas and the
-//! hotkeys, and the edit history.
+//! Settings: what a broadcaster sets once, such as the canvas, recording, and
+//! the hotkeys, and the edit history.
 
 use super::*;
 
@@ -404,6 +404,114 @@ impl Panels {
 		if result.is_ok() {
 			self.sizes.remove(&name);
 		}
+		drop(state);
+		self.check(result);
+	}
+
+	/// What the record button saves, from any page: the folder, the picture,
+	/// the sound, and whether each source gets a file of its own too.
+	pub(super) fn recording(&mut self, ui: &mut Ui) {
+		let dir = self.engine.recorder.dir().to_path_buf();
+		ui.weak("What the record button saves, from any page.");
+		ui.add_space(8.0);
+		ui.horizontal(|ui| {
+			ui.label("Folder");
+			ui.monospace(dir.display().to_string());
+			if ui.add(kit::button(Icon::Folder, "Open")).clicked() {
+				let result = crate::shelf::open(&dir);
+				self.check(result);
+			}
+		});
+		ui.weak("Set with --recordings. Clips are saved here too.");
+		ui.add_space(8.0);
+		self.recorded_scene(ui);
+		ui.weak("The program is what viewers see. A scene records at its own size.");
+		ui.add_space(8.0);
+		self.recorded_audio(ui);
+		ui.weak("The audio scene the recording holds. It can differ from the stream's, to keep music out.");
+		ui.add_space(8.0);
+		let mut each = self.controls.record_sources.load(Ordering::Relaxed);
+		if ui.add(kit::Toggle::new(&mut each).label("Each source too")).changed() {
+			self.controls.record_sources.store(each, Ordering::Relaxed);
+		}
+		ui.weak(
+			"Every camera, screen, and microphone also saves a file of its own, before its filters. Each costs an \
+			 encoder and its share of the disk.",
+		);
+		ui.add_space(12.0);
+		ui.weak("A recording cut short by a crash is repaired the next time the studio opens.");
+	}
+
+	/// Pick the picture recordings hold, the program or any scene, even while
+	/// recording, which goes on in a new file when the size changes.
+	fn recorded_scene(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let current = state.collection().recorded().map(str::to_string);
+		let scenes = state.collection().scenes.iter();
+		let names: Vec<String> = scenes.map(|scene| scene.name.clone()).collect();
+		let mut picked = current.clone();
+		ui.horizontal(|ui| {
+			ui.label("Picture")
+				.on_hover_text("A scene of another size than the program's goes on in a new file");
+			egui::ComboBox::from_id_salt("recorded scene")
+				.selected_text(picked.as_deref().unwrap_or("The program"))
+				.show_ui(ui, |ui| {
+					ui.selectable_value(&mut picked, None, "The program");
+					for name in &names {
+						ui.selectable_value(&mut picked, Some(name.clone()), name);
+					}
+				});
+		});
+		if picked == current {
+			return;
+		}
+		let label = match &picked {
+			Some(name) => format!("Record scene `{name}`"),
+			None => "Record the program".into(),
+		};
+		let result = edit(&mut state, label, None, |draft| draft.set_recorded(picked.as_deref()));
+		drop(state);
+		self.check(result);
+	}
+
+	/// Pick the audio scene recordings hold, even while recording, which goes
+	/// on with the new one from its next block.
+	fn recorded_audio(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let scenes = state.collection().audio_scenes.clone();
+		let program = state.collection().program_audio().unwrap_or_default();
+		let on_program = format!("On program ({program})");
+		let current = scenes
+			.iter()
+			.find(|scene| scene.recorded)
+			.map(|scene| scene.name.clone());
+		let mut picked = current.clone();
+		ui.horizontal(|ui| {
+			ui.label("Sound")
+				.on_hover_text("An audio scene nothing else carries stays off the relay");
+			egui::ComboBox::from_id_salt("recorded audio")
+				.selected_text(picked.as_deref().unwrap_or(&on_program))
+				.show_ui(ui, |ui| {
+					ui.selectable_value(&mut picked, None, &on_program);
+					for scene in &scenes {
+						ui.selectable_value(&mut picked, Some(scene.name.clone()), &scene.name);
+					}
+				});
+		});
+		if picked == current {
+			return;
+		}
+		let label = match &picked {
+			Some(name) => format!("Record audio scene `{name}`"),
+			None => "Record the audio scene on program".into(),
+		};
+		let mut next = scenes;
+		for scene in &mut next {
+			scene.recorded = picked.as_deref() == Some(scene.name.as_str());
+		}
+		let result = edit(&mut state, label, None, |draft| draft.set_audio_scenes(next));
 		drop(state);
 		self.check(result);
 	}

@@ -24,9 +24,9 @@ pub enum Action {
 	Transition,
 	/// Take a scene, by name, on program by the show's transition.
 	Scene(String),
-	/// Play the recent past the Replay panel picks in its replay source.
+	/// Play the stretch of the recent past REVIEW picks in its replay source.
 	Replay,
-	/// Save the recent past the Replay panel picks as a clip.
+	/// Save the stretch of the recent past REVIEW picks as a clip.
 	SaveClip,
 	/// Start recording, or stop the recording under way.
 	Record,
@@ -62,7 +62,7 @@ impl std::fmt::Display for Action {
 pub struct Controls {
 	pub engine: Arc<Engine>,
 	runtime: tokio::runtime::Handle,
-	/// The Replay panel's picks, which a replay or clip from a hotkey takes too.
+	/// REVIEW's replay picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
 	/// Whether the next recording gives each source a file of its own too.
 	pub record_sources: AtomicBool,
@@ -70,10 +70,10 @@ pub struct Controls {
 	fired: Arc<Mutex<Option<Result<String, String>>>>,
 }
 
-/// The Replay panel's choices, and how the last replay or clip went.
+/// REVIEW's replay choices, and how the last replay or clip went.
 pub struct Replay {
 	pub of: replay::Of,
-	pub length: std::time::Duration,
+	pub stretch: replay::Stretch,
 	pub speed: f32,
 	/// The replay source a replay plays in.
 	pub into: Option<String>,
@@ -85,7 +85,7 @@ impl Default for Replay {
 	fn default() -> Self {
 		Self {
 			of: replay::Of::Program,
-			length: replay::LENGTHS[1],
+			stretch: replay::Stretch::default(),
 			speed: replay::SPEEDS[0],
 			into: None,
 			outcome: Arc::default(),
@@ -148,10 +148,10 @@ impl Controls {
 		}
 	}
 
-	/// Play the Replay panel's pick in its replay source, or save it as a
+	/// Play REVIEW's pick in its replay source, or save it as a
 	/// clip. Copied now, without waiting on anything, so the span ends here and
 	/// replays apply in the order they were asked for. How it went shows in
-	/// the Replay panel, and in the status bar too when a hotkey `pressed` it,
+	/// REVIEW, and in the status bar too when a hotkey `pressed` it,
 	/// since the panel may be hidden.
 	fn replay(&self, play: bool, pressed: bool) -> anyhow::Result<String> {
 		let replay = self.replay.lock().unwrap();
@@ -190,7 +190,8 @@ impl Controls {
 			true => Some(self.replay_source(replay.into.as_deref())?),
 			false => None,
 		};
-		let take = replay::take(&self.engine, &replay.of, replay.length, into.is_some())?;
+		let (ago, length) = replay.stretch.span(kio::clock::Instant::now())?;
+		let take = replay::take(&self.engine, &replay.of, ago, length, into.is_some())?;
 		let of = replay.of.clone();
 		if let Some(into) = into {
 			replay::play(&self.engine, take, replay.speed, &into)?;
@@ -199,7 +200,8 @@ impl Controls {
 		let saving = format!("saving {of}");
 		let engine = self.engine.clone();
 		let save = async move {
-			let path = replay::save(take, engine.autosave.path()).await?;
+			let recorder = &engine.recorder;
+			let path = replay::save(take, recorder.dir(), recorder.show()).await?;
 			Ok(format!("saved {of} to {}", path.display()))
 		};
 		Ok((saving, Some(save)))
