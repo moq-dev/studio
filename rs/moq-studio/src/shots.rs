@@ -303,9 +303,7 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	assert!(muted("alice"), "the guest is muted");
 	assert!(!muted("guest") && !muted("caller"), "other remote feeds stay on");
 
-	harness
-		.get_by_label("Undo: Panic: mute every microphone and guest")
-		.click();
+	harness.get_by_label_contains("Undo: Panic: ").click();
 	harness.run_steps(2);
 	assert!(!muted("mic") && !muted("alice"), "undo takes the mute back");
 	assert_eq!(program().as_deref(), Some("Break"), "and leaves program where it is");
