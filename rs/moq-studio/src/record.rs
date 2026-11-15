@@ -2220,8 +2220,8 @@ mod tests {
 		assert!(!replaced(&BTreeMap::new(), &audio(None, None)));
 	}
 
-	/// A name already taken, such as by a recording started in the same
-	/// second, is numbered rather than replaced.
+	/// A recording's folder, such as a videos folder not yet made, is created
+	/// when missing.
 	#[test]
 	fn a_missing_folder_is_created() {
 		let dir = tempfile::tempdir().unwrap();
@@ -2231,6 +2231,8 @@ mod tests {
 		assert!(path.is_file());
 	}
 
+	/// A name already taken, such as by a recording started in the same
+	/// second, is numbered rather than replaced.
 	#[test]
 	fn a_taken_name_is_numbered() {
 		let dir = tempfile::tempdir().unwrap();
