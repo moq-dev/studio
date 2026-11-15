@@ -6,7 +6,7 @@ use egui::{
 	Align, Align2, CursorIcon, Rect, ResizeDirection, Sense, Stroke, UiBuilder, Vec2, ViewportCommand, pos2, vec2,
 };
 
-use super::layout::{self, Arrangement, Layout, SOUND_ROW, fit};
+use super::layout::{Arrangement, Layout, SOUND_ROW, fit};
 use super::levels::reading;
 use super::*;
 
@@ -185,13 +185,13 @@ impl Panels {
 	/// messages over them.
 	pub(super) fn window(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot) {
 		let window = ui.max_rect();
-		// MIX puts a live picture in the sound's slot, which wants all the
-		// room the slot gets rather than a row per sound.
-		let sounds = match self.page {
-			Page::Mix => layout::SOUND_ROWS,
-			_ => snapshot.sounds.len(),
+		let (size, shape, sounds) = (window.size(), snapshot.shape, snapshot.sounds.len());
+		let layout = match self.page {
+			// MIX puts a live picture in the sound's slot.
+			Page::Mix => Layout::monitor(size, shape, sounds),
+			_ => Layout::new(size, shape, sounds),
 		};
-		let layout = Layout::new(window.size(), snapshot.shape, sounds).translate(window.min.to_vec2());
+		let layout = layout.translate(window.min.to_vec2());
 		ui.painter().rect_filled(window, 0, kit::BG);
 		self.page(ui, fx, snapshot, &layout);
 		self.title(ui, fx, snapshot, &layout);

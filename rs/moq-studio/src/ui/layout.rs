@@ -40,7 +40,7 @@ const SCENES_ROW: f32 = 118.0;
 /// window gives room to before they scroll, fewer when the picture needs it.
 pub const SOUND_ROW: f32 = 29.0;
 const SOUND_PAD: f32 = 20.0;
-pub const SOUND_ROWS: usize = 4;
+const SOUND_ROWS: usize = 4;
 
 /// The narrowest the scenes get beside the panic key and the sound in the
 /// wide arrangement: two pads and the one that adds a scene.
@@ -94,12 +94,7 @@ impl Layout {
 	/// gives the picture the most room while it is the largest part, or the
 	/// most room at all if none keeps it the largest.
 	pub fn new(window: Vec2, shape: f32, sounds: usize) -> Self {
-		let window = window.max(MIN);
-		let shape = if shape.is_finite() && shape > 0.0 {
-			shape
-		} else {
-			16.0 / 9.0
-		};
+		let (window, shape) = clean(window, shape);
 		let mut best: Option<Self> = None;
 		for arrangement in Arrangement::ALL {
 			let Some(layout) = Self::arrange(arrangement, window, shape, sounds) else {
@@ -112,6 +107,19 @@ impl Layout {
 			}
 		}
 		best.expect("the stacked arrangement fits any window of at least MIN")
+	}
+
+	/// As [`new`](Self::new), with the sound's slot holding a live picture
+	/// rather than a row per sound, as on MIX: the same arrangement, so the
+	/// window keeps its shape between pages, with a stacked slot as tall as
+	/// the most rows.
+	pub fn monitor(window: Vec2, shape: f32, sounds: usize) -> Self {
+		let layout = Self::new(window, shape, sounds);
+		if layout.arrangement != Arrangement::Stacked {
+			return layout;
+		}
+		let (window, shape) = clean(window, shape);
+		Self::stacked(window, shape, SOUND_ROWS).expect("the most rows fit any window of at least MIN")
 	}
 
 	/// The parts the picture shares the window with, beside the title bar,
@@ -189,22 +197,8 @@ impl Layout {
 				// picture smaller than another part: they scroll instead.
 				let mut layout = None;
 				for rows in (1..=sounds.clamp(1, SOUND_ROWS)).rev() {
-					let sound = rows as f32 * SOUND_ROW + SOUND_PAD;
-					let stage = h - TITLE_STACKED - SCENES_ROW - sound;
-					if stage < STAGE_MIN {
+					let Some(stacked) = Self::stacked(window, shape, rows) else {
 						continue;
-					}
-					let row = TITLE_STACKED + stage;
-					let stage = at(0.0, TITLE_STACKED, w, stage);
-					let stacked = Self {
-						arrangement,
-						title: at(0.0, 0.0, w, TITLE_STACKED),
-						sidebar: None,
-						stage,
-						picture: fit(stage.shrink(FRAME), shape),
-						scenes: at(0.0, row, w - PANIC, SCENES_ROW),
-						panic: at(w - PANIC, row, PANIC, SCENES_ROW),
-						sound: at(0.0, row + SCENES_ROW, w, sound),
 					};
 					layout = Some(stacked);
 					if stacked.largest() {
@@ -219,6 +213,41 @@ impl Layout {
 			..layout
 		})
 	}
+
+	/// The stacked arrangement in `window` with `rows` rows of sound, or
+	/// `None` if that leaves the stage too little room.
+	fn stacked(window: Vec2, shape: f32, rows: usize) -> Option<Self> {
+		let at = |x: f32, y: f32, width: f32, height: f32| Rect::from_min_size(pos2(x, y), vec2(width, height));
+		let w = window.x;
+		let sound = rows as f32 * SOUND_ROW + SOUND_PAD;
+		let stage = window.y - TITLE_STACKED - SCENES_ROW - sound;
+		if stage < STAGE_MIN {
+			return None;
+		}
+		let row = TITLE_STACKED + stage;
+		let stage = at(0.0, TITLE_STACKED, w, stage);
+		Some(Self {
+			arrangement: Arrangement::Stacked,
+			title: at(0.0, 0.0, w, TITLE_STACKED),
+			sidebar: None,
+			stage,
+			picture: fit(stage.shrink(FRAME), shape),
+			scenes: at(0.0, row, w - PANIC, SCENES_ROW),
+			panic: at(w - PANIC, row, PANIC, SCENES_ROW),
+			sound: at(0.0, row + SCENES_ROW, w, sound),
+		})
+	}
+}
+
+/// `window` at least [`MIN`], and `shape` a picture's, landscape if it is
+/// none.
+fn clean(window: Vec2, shape: f32) -> (Vec2, f32) {
+	let shape = if shape.is_finite() && shape > 0.0 {
+		shape
+	} else {
+		16.0 / 9.0
+	};
+	(window.max(MIN), shape)
 }
 
 /// The largest rectangle of `shape` (width over height) centered in `rect`.
@@ -261,7 +290,8 @@ mod tests {
 	/// count of sounds: every part is inside the window, none overlaps
 	/// another, the picture is inside its stage and larger than every part
 	/// beside the title bar, and no other arrangement that keeps it so would
-	/// give it more room.
+	/// give it more room. MIX's layout fits too, with the room of the most
+	/// rows for its live picture.
 	#[test]
 	fn nothing_overlaps_and_the_picture_is_largest() {
 		let shapes = [LANDSCAPE, PORTRAIT, 1.0, 4.0 / 3.0, 3.0 / 4.0, 21.0 / 9.0, 9.0 / 21.0];
@@ -274,19 +304,16 @@ mod tests {
 				for shape in shapes {
 					for sounds in 0..=6 {
 						let layout = Layout::new(window, shape, sounds);
-						let parts: Vec<Rect> = [layout.title, layout.stage, layout.scenes, layout.panic, layout.sound]
-							.into_iter()
-							.chain(layout.sidebar)
-							.collect();
 						let case = format!("{window:?} {shape} {sounds}: {layout:?}");
-						for (index, part) in parts.iter().enumerate() {
-							assert!(part.is_positive(), "an empty part, {case}");
-							assert!(bounds.contains_rect(*part), "a part outside the window, {case}");
-							for other in &parts[index + 1..] {
-								assert!(!part.intersects(*other) || touching(*part, *other), "overlap, {case}");
-							}
-						}
-						assert!(layout.stage.contains_rect(layout.picture), "{case}");
+						fits(&layout, bounds, &case);
+						// MIX keeps the arrangement, and its live picture gets
+						// the room of the most rows.
+						let monitor = Layout::monitor(window, shape, sounds);
+						let mix = format!("MIX, {case}: {monitor:?}");
+						fits(&monitor, bounds, &mix);
+						assert_eq!(monitor.arrangement, layout.arrangement, "{mix}");
+						let rows = SOUND_ROWS as f32 * SOUND_ROW + SOUND_PAD;
+						assert!(monitor.sound.height() >= rows, "{mix}");
 						assert!(layout.largest(), "the picture is not the largest, {case}");
 						for arrangement in Arrangement::ALL {
 							let other = Layout::arrange(arrangement, window, shape, sounds);
@@ -313,6 +340,23 @@ mod tests {
 			Layout::new(vec2(100.0, 50.0), LANDSCAPE, 2),
 			Layout::new(MIN, LANDSCAPE, 2)
 		);
+	}
+
+	/// Every part of `layout` inside `bounds`, none overlapping another, and
+	/// the picture inside its stage.
+	fn fits(layout: &Layout, bounds: Rect, case: &str) {
+		let parts: Vec<Rect> = [layout.title, layout.stage, layout.scenes, layout.panic, layout.sound]
+			.into_iter()
+			.chain(layout.sidebar)
+			.collect();
+		for (index, part) in parts.iter().enumerate() {
+			assert!(part.is_positive(), "an empty part, {case}");
+			assert!(bounds.contains_rect(*part), "a part outside the window, {case}");
+			for other in &parts[index + 1..] {
+				assert!(!part.intersects(*other) || touching(*part, *other), "overlap, {case}");
+			}
+		}
+		assert!(layout.stage.contains_rect(layout.picture), "{case}");
 	}
 
 	/// Whether `a` and `b` only share an edge.
