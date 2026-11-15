@@ -4,8 +4,8 @@
 use egui::{Color32, RichText, Ui, vec2};
 
 use super::{
-	AIR, BG, CUE, DIM, FAINT, Fader, Icon, IconButton, Keycap, LINE, Look, Meter, Number, OK, P1, P2, P3, POPOVER, Pad,
-	Pill, Pose, Run, SEL, Sheet, Slider, TEXT, Tag, Tally, TallyFrame, Toggle,
+	ACCENT, BG, CUE, DIM, ERR, FAINT, Fader, Icon, IconButton, Keycap, LINE, Look, Meter, Number, OK, P1, P2, P3,
+	POPOVER, Pad, Pill, Pose, Run, Sheet, Slider, TEXT, Tag, Tally, TallyFrame, Toggle,
 };
 use crate::fx::Fx;
 
@@ -111,10 +111,10 @@ fn tokens(ui: &mut Ui) {
 		("text", TEXT),
 		("dim", DIM),
 		("faint", FAINT),
-		("air", AIR),
+		("accent", ACCENT),
 		("cue", CUE),
 		("ok", OK),
-		("sel", SEL),
+		("err", ERR),
 	];
 	ui.horizontal_wrapped(|ui| {
 		ui.spacing_mut().item_spacing.x = 6.0;
@@ -132,7 +132,7 @@ fn tokens(ui: &mut Ui) {
 fn type_scale(ui: &mut Ui) {
 	caption(ui, "Type");
 	ui.horizontal(|ui| {
-		ui.label(super::caps("On air", super::display_bold(22.0)).color(AIR));
+		ui.label(super::caps("On air", super::display_bold(22.0)).color(ACCENT));
 		ui.label(super::caps("Gameplay", super::display(16.0)).color(TEXT));
 		ui.label(RichText::new("01:24:07").font(super::mono(15.0)).color(TEXT));
 	});
@@ -178,6 +178,7 @@ fn buttons(ui: &mut Ui) {
 	ui.horizontal_wrapped(|ui| {
 		ui.add(Pill::new("Excellent").dot(OK));
 		ui.add(Pill::new("Degraded").dot(CUE));
+		ui.add(Pill::new("Unhealthy").dot(ERR));
 		ui.add(Pill::new("Encoder").value("3.1 ms"));
 	});
 	caption(ui, "Tags");

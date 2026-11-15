@@ -743,7 +743,7 @@ impl Panels {
 			(true, _) => ("Not live", kit::DIM),
 			(false, Verdict::Healthy) => ("Healthy", kit::OK),
 			(false, Verdict::Degraded) => ("Degraded", kit::CUE),
-			(false, Verdict::Unhealthy) => ("Unhealthy", kit::CUE),
+			(false, Verdict::Unhealthy) => ("Unhealthy", kit::ERR),
 			(false, Verdict::Unknown) => ("Starting", kit::DIM),
 		};
 		let pill = ui.add(kit::Pill::new(name).dot(dot).clickable());
@@ -756,7 +756,7 @@ impl Panels {
 				let (dot, state) = match &relay.state {
 					health::State::Connecting => (kit::DIM, "connecting"),
 					health::State::Connected => (kit::OK, "connected"),
-					health::State::Disconnected(_) => (kit::CUE, "unreachable"),
+					health::State::Disconnected(_) => (kit::ERR, "unreachable"),
 				};
 				kit::popover_row(ui, index + 1 == rows, |ui| {
 					let (at, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
@@ -1043,7 +1043,7 @@ impl Panels {
 					.suffix(" px"),
 			);
 		});
-		// The scene on air is red; another, which a cut would take, amber.
+		// The scene on air is in the accent; another, which a cut would take, amber.
 		let on_air = state.compositor.preview_scene() == state.compositor.program_scene();
 		let frame = match on_air {
 			true => TallyFrame::new(Tally::Air).tag("On air"),
@@ -1413,11 +1413,11 @@ impl Panels {
 			if recording {
 				let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
 				let pulse = fx.on().then(|| Mark::new(ui.painter()));
-				ui.painter().circle_filled(dot.center(), 4.0, kit::AIR);
+				ui.painter().circle_filled(dot.center(), 4.0, kit::ACCENT);
 				if let Some(pulse) = pulse {
 					fx.recording(&pulse.around(dot));
 				}
-				ui.colored_label(kit::AIR, "recording");
+				ui.colored_label(kit::ACCENT, "recording");
 			}
 		});
 		let result = if next == transition {
@@ -1522,7 +1522,7 @@ impl Panels {
 						return;
 					}
 					let canvas = scene.canvas(program_canvas);
-					// On air is red; the scene a cut would take next, amber.
+					// On air is in the accent; the scene a cut would take next, amber.
 					let tally = if program.as_deref() == Some(scene.name.as_str()) {
 						Tally::Air
 					} else if preview.as_deref() == Some(scene.name.as_str()) {
@@ -2725,7 +2725,7 @@ impl Panels {
 					false => "Needs a build with the `capture` feature",
 				};
 				let button = IconButton::new(Icon::Listen, "Listen")
-					.lit(heard, kit::SEL)
+					.lit(heard, kit::ACCENT)
 					.small()
 					.note(Some(note));
 				let response = ui.add_enabled(mix::MONITOR, button);
@@ -2848,7 +2848,7 @@ impl Panels {
 				} else {
 					let elapsed = kio::clock::now().saturating_duration_since(status.started).as_secs();
 					let elapsed = format!("{}:{:02}:{:02}", elapsed / 3600, elapsed / 60 % 60, elapsed % 60);
-					ui.colored_label(ui.visuals().error_fg_color, format!("recording {elapsed}"));
+					ui.colored_label(kit::ACCENT, format!("recording {elapsed}"));
 				}
 			}
 			None => {
@@ -3659,11 +3659,13 @@ fn repairs(ui: &mut Ui, repairs: &[record::Repair]) {
 	ui.separator();
 }
 
-/// A verdict's color: green while healthy, amber for anything wrong.
+/// A verdict's color: green while healthy, amber while degraded, red once
+/// unhealthy, which is a failure.
 fn color(verdict: Verdict) -> Color32 {
 	match verdict {
 		Verdict::Healthy => kit::OK,
-		Verdict::Degraded | Verdict::Unhealthy => kit::CUE,
+		Verdict::Degraded => kit::CUE,
+		Verdict::Unhealthy => kit::ERR,
 		Verdict::Unknown => kit::DIM,
 	}
 }

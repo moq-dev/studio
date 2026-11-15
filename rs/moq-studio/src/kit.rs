@@ -36,17 +36,19 @@ pub const DIM: Color32 = Color32::from_rgb(0x8d, 0x8d, 0x9c);
 /// Text that hints: placeholders, unlit segments' numbers.
 pub const FAINT: Color32 = Color32::from_rgb(0x5b, 0x5b, 0x69);
 
-/// The program, and nothing else: what is on air.
-pub const AIR: Color32 = Color32::from_rgb(0xff, 0x2d, 0x46);
-/// Everything not right and not on air: cued, off air, degraded, failed, or
-/// needing attention.
+/// The studio's own color: what is on air (the tally, its tag, the live
+/// control), the layer picked, a toggle on, a slider's fill. Branding changes
+/// this one value.
+pub const ACCENT: Color32 = Color32::from_rgb(0x4f, 0x8c, 0xff);
+/// An error, and nothing else: a failure, a clipping meter.
+pub const ERR: Color32 = Color32::from_rgb(0xff, 0x2d, 0x46);
+/// Everything not on air that is not an error: cued, off air, muted,
+/// degraded, or needing attention.
 pub const CUE: Color32 = Color32::from_rgb(0xff, 0xb0, 0x20);
 /// Text on [`CUE`], which white does not read on.
 pub const ON_CUE: Color32 = Color32::from_rgb(0x1a, 0x12, 0x00);
 /// A healthy level or link.
 pub const OK: Color32 = Color32::from_rgb(0x35, 0xd0, 0x7f);
-/// Selection: the layer picked, a toggle on, a slider's fill.
-pub const SEL: Color32 = Color32::from_rgb(0x4f, 0x8c, 0xff);
 
 /// The corner of a control: a button, a field, a pad's picture.
 pub const RADIUS: u8 = 8;
@@ -152,13 +154,12 @@ fn style() -> egui::Style {
 	visuals.text_edit_bg_color = Some(P2);
 	visuals.faint_bg_color = P2;
 	visuals.code_bg_color = P2;
-	visuals.hyperlink_color = SEL;
+	visuals.hyperlink_color = ACCENT;
 	visuals.warn_fg_color = CUE;
-	// Red is the program's, so an error reads as needing attention instead.
-	visuals.error_fg_color = CUE;
+	visuals.error_fg_color = ERR;
 	visuals.weak_text_color = Some(DIM);
-	visuals.selection.bg_fill = SEL.gamma_multiply(0.35);
-	visuals.selection.stroke = Stroke::new(1.0, SEL);
+	visuals.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+	visuals.selection.stroke = Stroke::new(1.0, ACCENT);
 	visuals.slider_trailing_fill = true;
 	visuals.handle_shape = egui::style::HandleShape::Circle;
 	visuals.striped = false;
@@ -174,7 +175,7 @@ fn style() -> egui::Style {
 	for (state, fill, stroke) in [
 		(&mut widgets.inactive, P2, LINE),
 		(&mut widgets.hovered, P3, Color32::from_rgb(0x3a, 0x3a, 0x48)),
-		(&mut widgets.active, P3, SEL),
+		(&mut widgets.active, P3, ACCENT),
 		(&mut widgets.open, P3, LINE),
 	] {
 		state.weak_bg_fill = fill;

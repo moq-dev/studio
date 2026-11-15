@@ -187,9 +187,9 @@ impl Fx {
 		let params = MeshGradientParams {
 			colors: Stops::new(&[
 				linear(base),
-				linear(mix(base, kit::SEL, 0.12)),
+				linear(mix(base, kit::ACCENT, 0.12)),
 				linear(kit::BG),
-				linear(mix(base, kit::SEL, 0.06)),
+				linear(mix(base, kit::ACCENT, 0.06)),
 			]),
 			// Still: the screen repaints only while setup probes the machine.
 			drift: 0.0,
@@ -269,8 +269,8 @@ impl Fx {
 		let shape = spot.shape(2.0);
 		let glow = Effect::glow(GlowParams {
 			style: GlowStyle::Neon,
-			color: linear(kit::AIR),
-			core: rgb(0xffe2dc),
+			color: linear(kit::ACCENT),
+			core: rgb(0xdce8ff),
 			radius: 8.0,
 			occlusion: 0.0,
 			breathe: 0.25,
@@ -313,8 +313,8 @@ impl Fx {
 		let center = spot.rect.center();
 		let pulse = Effect::pulse(PulseParams {
 			style: PulseStyle::Radar,
-			color: linear(kit::AIR),
-			core: rgb(0xffd0c8),
+			color: linear(kit::ACCENT),
+			core: rgb(0xd0e0ff),
 			count: 2,
 			period: 1.6,
 			reach: 10.0,
@@ -433,10 +433,10 @@ impl Alerts {
 		if unhealthy > 0.0 {
 			let electric = Effect::electric(ElectricParams {
 				style: ElectricStyle::Border,
-				// Amber, as everything wrong is: red is the program's.
-				color: linear(kit::CUE),
-				core: rgb(0xfff4dc),
-				cool: rgb(0x9b5a1c),
+				// Red, as an error is: unhealthy means something failed.
+				color: linear(kit::ERR),
+				core: rgb(0xffdce0),
+				cool: rgb(0x9b1c2a),
 				amplitude: 2.5,
 				glow: 3.0,
 				strands: 1,

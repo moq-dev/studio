@@ -5,7 +5,7 @@
 The studio opens to the LIVE page of the
 [mock-up](/quest/m0/ux/mock/shell-live.webp), in its own frame:
 
-- **The picture** is the program, in a red tally frame, as large as the
+- **The picture** is the program, in a tally frame in the accent, as large as the
   window allows. The Preview monitor and the Program monitor are gone.
 - **Scene pads** show each scene's live thumbnail, name, and key. A click
   takes the scene on air by the show's transition.

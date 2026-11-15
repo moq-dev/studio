@@ -33,7 +33,8 @@ section has them. "Audio scene" stays the word, since it was chosen over
 - A fader is gain in decibels, with unity marked and a double click
   returning to it, as pan returns to center today.
 - The meter keeps the peak tick and the red at full scale of
-  `rs/moq-studio/src/ui/levels.rs`, drawn as segments.
+  `rs/moq-studio/src/ui/levels.rs`, drawn as `kit::Meter`'s segments: red is
+  a clip, an error. A muted sound's control is amber, as `kit.css` draws it.
 - A sound heard twice by construction cannot happen here, since an audio
   scene plays a sound once however it reaches it. Show that: a dot is filled
   when the sound reaches the audio scene by any route, and hollow-ringed when

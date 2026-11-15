@@ -6,7 +6,7 @@ use egui::{
 	WidgetInfo, WidgetType, emath::Rot2, epaint::Mesh, pos2, vec2,
 };
 
-use super::{AIR, BG, CUE, DIM, FAINT, Icon, LINE, OK, ON_CUE, P1, P2, P3, POPOVER, RADIUS, SEL, TEXT};
+use super::{ACCENT, BG, CUE, DIM, ERR, FAINT, Icon, LINE, OK, ON_CUE, P1, P2, P3, POPOVER, RADIUS, TEXT};
 use crate::fx::{Fx, Mark};
 
 /// How a control is being touched, which picks how it is drawn.
@@ -320,7 +320,7 @@ impl Widget for Toggle<'_> {
 			let painter = ui.painter();
 			let dim = if ui.is_enabled() { 1.0 } else { 0.4 };
 			let track = Rect::from_min_size(pos2(rect.left(), rect.center().y - 9.0), track);
-			let fill = if on { SEL } else { P3 };
+			let fill = if on { ACCENT } else { P3 };
 			let fill = if response.hovered() && !on { LINE_HOVER } else { fill };
 			painter.rect_filled(track, 9, fill.gamma_multiply(dim));
 			let how_on = ui.ctx().animate_bool_responsive(response.id, on);
@@ -395,7 +395,7 @@ impl Widget for Slider<'_> {
 			let x = egui::lerp(track.min..=track.max, value);
 			let rail = Rect::from_min_max(pos2(track.min, y - 2.0), pos2(track.max, y + 2.0));
 			painter.rect_filled(rail, 2, P3);
-			painter.rect_filled(Rect::from_min_max(rail.min, pos2(x, rail.max.y)), 2, SEL);
+			painter.rect_filled(Rect::from_min_max(rail.min, pos2(x, rail.max.y)), 2, ACCENT);
 			let knob = if response.hovered() || response.dragged() {
 				8.0
 			} else {
@@ -510,8 +510,9 @@ pub enum Run {
 	Up,
 }
 
-/// A level meter in segments: green while healthy, amber once hot, with the
-/// peak held as a lit segment. Levels run from 0 (silence) to 1 (full scale).
+/// A level meter in segments: green while healthy, amber once hot, and the
+/// top segment red once the peak clips, with the peak held as a lit segment.
+/// Levels run from 0 (silence) to 1 (full scale).
 pub struct Meter {
 	level: f32,
 	peak: f32,
@@ -566,6 +567,7 @@ impl Widget for Meter {
 		};
 		let count = ((along + gap) / (segment + gap)).floor().max(1.0) as usize;
 		let peak = (self.peak.clamp(0.0, 1.0) * count as f32).ceil() as usize;
+		let clipped = self.peak >= 1.0;
 		let painter = ui.painter();
 		for index in 0..count {
 			let at = (index as f32 + 0.5) / count as f32;
@@ -573,6 +575,7 @@ impl Widget for Meter {
 			let color = match (lit || index + 1 == peak, at >= HOT) {
 				(false, _) => P3,
 				(true, false) => OK,
+				(true, true) if clipped && index + 1 == count => ERR,
 				(true, true) => CUE,
 			};
 			let start = index as f32 * (segment + gap);
@@ -651,7 +654,7 @@ impl Widget for Number<'_> {
 			child.label(egui::RichText::new(unit).font(super::ui_medium(10.0)).color(FAINT));
 		}
 		let stroke = match (response.has_focus() || response.dragged(), response.hovered()) {
-			(true, _) => SEL,
+			(true, _) => ACCENT,
 			(false, true) => LINE_HOVER,
 			(false, false) => LINE,
 		};
@@ -811,7 +814,7 @@ impl Widget for Keycap<'_> {
 pub enum Tally {
 	/// Not on air, nor next.
 	Off,
-	/// On air: red.
+	/// On air: the accent.
 	Air,
 	/// Cued, or open off air for editing: amber.
 	Cue,
@@ -821,7 +824,7 @@ impl Tally {
 	fn color(self) -> Option<Color32> {
 		match self {
 			Self::Off => None,
-			Self::Air => Some(AIR),
+			Self::Air => Some(ACCENT),
 			Self::Cue => Some(CUE),
 		}
 	}
@@ -1043,7 +1046,7 @@ fn shadow(painter: &egui::Painter, rect: Rect, corner: u8, color: Color32, blur:
 	painter.add(shadow.as_shape(rect, CornerRadius::same(corner)));
 }
 
-/// The frame around the live picture: red while on air, amber and striped
+/// The frame around the live picture: the accent while on air, amber and striped
 /// while it shows a scene that is not, with a tag naming which.
 pub struct TallyFrame<'a> {
 	tally: Tally,

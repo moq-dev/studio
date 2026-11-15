@@ -51,7 +51,7 @@ enum Kind {
 impl Kind {
 	fn color(self) -> Color32 {
 		match self {
-			Self::Picture => kit::SEL,
+			Self::Picture => kit::ACCENT,
 			Self::Sound => kit::OK,
 		}
 	}

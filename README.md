@@ -112,13 +112,15 @@ uplink holds up once you are live.
 
 ## Panels
 
-Every panel is a tab you can drag, split, or stack. Red always means on air,
-and amber anything that is not right or not on air yet. An icon-only button
+Every panel is a tab you can drag, split, or stack. Blue, the studio's accent,
+means on air (and marks what is picked or switched on), amber anything cued,
+off air, muted, or degraded, and red an error, such as a failure or a
+clipping meter. An icon-only button
 names itself, and its key, under the pointer.
 
 | Panel | Use it to |
 | --- | --- |
-| Preview, Program | See the scene you are editing, at its own size, and the one that is live, and drag items in the preview to place them. The program is framed red; the preview red while it shows the scene on program and amber, NEXT, while it shows another. A preview no tab shows is not drawn. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
+| Preview, Program | See the scene you are editing, at its own size, and the one that is live, and drag items in the preview to place them. The program is framed in blue; the preview blue while it shows the scene on program and amber, NEXT, while it shows another. A preview no tab shows is not drawn. **Cut** puts the preview on program at once; **Transition** takes it there by the transition picked beside it, over the time set there, or for a stinger by the media source and cut point set there (see [Transitions](#transitions)). **Interact** passes the mouse over the preview to the browser source under it instead, and the keyboard to the one last clicked. |
 | Scenes | See each scene live on its pad, redrawn a few times a second while it is on screen, with its hotkey and an ON AIR or NEXT tag. Click a pad to pick the scene in preview, and add, rename (double-click), reorder, remove, or switch on **Publish** for one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
 | History | See every edit, and undo or redo back to any of them. |
 | Items | Place, show or hide (the eye), and order what the preview scene or the top layer draws, back to front. Drag a position or size field sideways to change it, or click it to type. The top layer is edited over a scene of the program's size. Select an item to filter or copy it. |
@@ -134,7 +136,7 @@ names itself, and its key, under the pointer.
 | Replay | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip. |
 | Hotkeys | Bind keys to cut, transition, preview a scene, replay, save a clip, and start or stop recording, and clear them (see [Hotkeys](#hotkeys)). |
 
-While recording, a red dot in the Program panel says so. The pill at the right
+While recording, a blue dot in the Program panel says so. The pill at the right
 of the menu bar is the stream's health at a glance; click it for each relay
 and problem.
 
@@ -1138,7 +1140,7 @@ the studio.
 The window draws effects of its own, which never reach the program, a
 published scene, or a recording:
 
-- The Program monitor glows red while the studio is connected to a relay,
+- The Program monitor glows blue while the studio is connected to a relay,
   the recording dot pulses, and each cut or transition, from its button or a
   hotkey, bursts on the monitor.
 - The **Cut** button is polished metal that ripples under the pointer, the
@@ -1146,7 +1148,7 @@ published scene, or a recording:
   the two monitors has a faint grain, and first launch draws its screen over a
   soft gradient.
 - The Health panel and its tab pulse amber while the worst problem is
-  degraded, and flicker amber with electricity while it is unhealthy.
+  degraded, and flicker red with electricity while it is unhealthy.
 
 **View > Effects** sets how they move: **Full**, **Reduced**, which holds each
 on one still pose, or **Off**. Until you pick one it follows the system's

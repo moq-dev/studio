@@ -111,9 +111,9 @@ fn position(amplitude: f32) -> f32 {
 	(1.0 - decibels(amplitude) / MUTE_DB).clamp(0.0, 1.0)
 }
 
-/// Green, or amber once a level reaches full scale.
+/// Green, or red once a level clips at full scale.
 fn color(level: Level) -> Color32 {
-	if level.peak() >= 1.0 { kit::CUE } else { kit::OK }
+	if level.peak() >= 1.0 { kit::ERR } else { kit::OK }
 }
 
 /// A level meter of the latest step: RMS lit, peak held, on a decibel scale.
