@@ -40,6 +40,15 @@ bar.
   says so before it applies while on air.
 - The scene graph (`rs/moq-studio/src/ui/graph.rs`) opens from Advanced in a
   window of its own.
+- The Recording pane's folder and the Guests pane's room, key, join page, and
+  link lifetime are already fields of `<show>.stream.toml` (`recordings`,
+  `room`, `room_key`, `join_page`, `guest_expiry`), which go live
+  ([moq-dev/studio#175](https://github.com/moq-dev/studio/pull/175)) saves
+  but gives no UI; these panes edit them there, and a flag that overrides one
+  shows it as the flag's, as the Stream pane does.
+- A room or relay change reaches the open show's guests at once: the guest
+  room renews its links against the new room and relay, instead of only after
+  the show is reopened, as go live left it.
 
 Human check: whether each setting is where a streamer would look for it, and
 the words on each pane.
