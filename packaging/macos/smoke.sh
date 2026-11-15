@@ -97,6 +97,9 @@ while kill -0 "$pid" 2>/dev/null; do
     sleep 0.1
 done
 pid=
-crashed=$(find "$reports" -name 'moq-studio*' -newer "$marker" 2>/dev/null)
+crashed=
+if [[ -d $reports ]]; then
+    crashed=$(find "$reports" -name 'moq-studio*' -newer "$marker")
+fi
 [[ -z $crashed ]] || fail "the studio crashed: $crashed"
 ! grep -q 'panicked' "$log" || fail "the studio panicked"

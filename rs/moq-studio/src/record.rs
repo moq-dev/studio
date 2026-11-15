@@ -738,6 +738,9 @@ fn numbered(stem: &str, number: u32) -> String {
 /// Create a file named `stem` in `dir`, numbering it rather than replacing
 /// one already there, and mark it unfinished before it exists.
 fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File, Marker)> {
+	// A default folder, such as the videos folder the platform names, may not
+	// exist yet.
+	std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
 	let mut number: u32 = 1;
 	loop {
 		let path = dir.join(numbered(stem, number));
@@ -2220,6 +2223,15 @@ mod tests {
 	/// A name already taken, such as by a recording started in the same
 	/// second, is numbered rather than replaced.
 	#[test]
+	fn a_missing_folder_is_created() {
+		let dir = tempfile::tempdir().unwrap();
+		let folder = dir.path().join("Movies");
+		let (path, ..) = create(&folder, "show").unwrap();
+		assert_eq!(path, folder.join("show.mp4"));
+		assert!(path.is_file());
+	}
+
+	#[test]
 	fn a_taken_name_is_numbered() {
 		let dir = tempfile::tempdir().unwrap();
 		let (first, ..) = create(dir.path(), "show").unwrap();
@@ -2262,12 +2274,14 @@ mod tests {
 		assert!(!Marker::named(&path, &file).unwrap());
 	}
 
-	/// Starting into a directory that does not exist fails at once.
+	/// Starting into a directory that cannot be created fails at once.
 	#[tokio::test(start_paused = true)]
-	async fn a_missing_directory_fails_to_start() {
+	async fn an_uncreatable_directory_fails_to_start() {
 		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join("file");
+		std::fs::write(&file, b"").unwrap();
 		let studio = Studio::new();
-		let recorder = studio.recorder(&dir.path().join("missing"));
+		let recorder = studio.recorder(&file.join("missing"));
 		let err = recorder.start(false).unwrap_err();
 		assert!(format!("{err:#}").contains("cannot create"), "{err:#}");
 		assert!(recorder.status().is_none());
