@@ -131,8 +131,10 @@ double-click it to maximize, and drag the window's edges to resize it. On
 macOS the system's buttons and edges stay. It holds, from the left:
 
 - The show's name. Its menu has the scene file's path, **Reload the scene
-  file**, **Copy the selected item**, and **Paste**.
-- Undo and redo, each naming under the pointer the edit it would step.
+  file**, **Copy the selected layer**, and **Paste**.
+- Undo and redo, each naming under the pointer the edit it would step, and
+  the history (the clock), which lists every edit, newest first: pick one to
+  undo or redo back to just after it.
 - The pages: **LIVE**, **BUILD**, **MIX**, and **REVIEW**.
 - The health dot, the stream's worst grade at a glance. Click it for each
   relay, who is watching, the encoder, and each problem, and **Details** for
@@ -154,14 +156,19 @@ The **strip** holds:
   [Transitions](#transitions)); taking the scene already on air does nothing.
   A scene that cannot go on air, of another size or showing the program, has
   a dimmed pad that says why under the pointer. Right-click a pad to take its
-  scene, mark it the safe scene, rename it, or remove it. The last pad, **+**,
+  scene, mark it the safe scene, rename it, duplicate it, move it left or
+  right, or remove it. **Duplicate** adds a scene after it showing the same
+  sources, linked, so an edit to a source's look shows in both; **Duplicate
+  with its own copies** gives each of its layers a copy of its source to edit
+  apart (a scene or the program drawn in it stays one picture). A pad ringed
+  in red says what just failed on it under the pointer. The last pad, **+**,
   adds an empty scene without taking it.
 - The **panic key**, amber and named for the safe scene: it mutes every
   microphone and every guest (their camera's sound and their screen's), in
   one edit undo takes back, and cuts at once to the scene marked safe, if one
-  is. Other remote feeds and media stay on, and so does the top layer, as
-  through any cut. Mark one from its pad's menu, the Scenes panel, or
-  the scene graph. The scissors beside it save a replay clip (see
+  is. Other remote feeds and media stay on, and so do the always-on-top
+  layers, as through any cut. Mark one from its pad's menu, BUILD's inspector
+  with no layer selected, or the scene graph. The scissors beside it save a replay clip (see
   [Replay](#replay)).
 - A row for each sound the stream carries, with its meter and mute, and the
   **STREAM** meter of the audio scene on program, with **Listen** (the
@@ -170,30 +177,9 @@ The **strip** holds:
 | Page | Use it to |
 | --- | --- |
 | LIVE | Watch the program while on air. |
-| BUILD | Edit the scene on program, shown in the middle, with the panels below beside it: Layers, Scenes, Sources, Devices, and Guests on the left, and Filters and Keyframes on the right, or all on the left in a narrow window. |
-| MIX | Pick the audio scene on program and the one to listen to and on which output, set each sound's gain, pan, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. The program shows small in the strip's place for the sound. |
+| BUILD | Edit the scene on program, shown in the middle, with its layers and what can be added on the left and the inspector on the right (see [BUILD](#build)). |
+| MIX | Add, rename, reorder, and remove audio scenes, pick the audio scene on program and the one to listen to and on which output, set each sound's gain, pan, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. The program shows small in the strip's place for the sound. |
 | REVIEW | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip (see [Replay](#replay)), and start and stop recording and pick the picture and the audio scene it records (see [Recording](#recording)), beside the program. |
-
-BUILD's panels:
-
-| Panel | Use it to |
-| --- | --- |
-| Layers | Place, show or hide (the eye), and order what the scene on program or the top layer draws, back to front. Drag a position or size field sideways to change it, or click it to type. Select an item to filter or copy it. |
-| Scenes | Pick the show's transition and how long it takes, or for a stinger its media source and cut point (see [Transitions](#transitions)). Add, rename (double-click), reorder, and remove scenes, mark one **Safe**, and switch on **Publish** for one and pick the audio scene it carries (see [Published scenes](#published-scenes)). A scene on program, or still leaving it in a transition, cannot be removed, even by an undo, until program cuts away from it. Add, rename, reorder, and remove audio scenes too (see [Audio scenes](#audio-scenes)). |
-| Sources | Add a source by hand, see whether each and its own track are live and where it is shown, clone one, and remove one. Select a source to filter it. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled. A browser source shows whether its page is copied on the GPU or, as a fallback, uploaded from memory (CPU, saying why on hover), in place of a track, and **Reload** restarts its page. A media file reads as ended once it plays to its end without looping, **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again. |
-| Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
-| Guests | Invite a guest, show their join link as a QR code in a sheet over the window, see who joined, and take a guest out of every scene. |
-| Filters | Remove the selected source's background, crop the selected source or item, add, order, and set its filters, set an item's blend mode, and copy or paste filters. |
-| Keyframes | Animate the selected item: add, time, ease, and remove its keyframes, and set how far each moves, resizes, crops, and filters it (see [Keyframes](#keyframes)). **Play** plays the scene on program's keyframes again. |
-
-Over the picture, **Interact** passes the mouse to the browser source under it
-instead, and the keyboard to the one last clicked; **Snap** and **Grid** set
-how a drag lines items up (see [Keyframes](#keyframes)). BUILD edits the scene
-on air as viewers see it: every change is live at once.
-
-A new source, from the Sources or Devices panel, is placed over whatever the
-Layers panel shows. The **top layer** is drawn over program and stays on
-through a cut or transition: a downstream keyer for a logo or a lower third.
 
 The layout follows the program's shape and the window's size, giving the
 picture the most room it can. A landscape program sits above the strip; a
@@ -204,6 +190,77 @@ panic key, and the sound under the picture. The window is at least 640x600.
 A message about what the last action did shows over the bottom of the page
 for a few seconds, an error a little longer. A conflict with an outside edit
 to the scene file, or a failed save, shows over its top until it is settled.
+An error with a place shows there instead: on the layer's row and in the
+inspector, on a scene's pad, or in Add, for ten seconds or until the next
+edit there succeeds.
+
+### BUILD
+
+BUILD edits the scene on air as viewers see it: every change is live at once.
+What a scene draws is a stack of **layers**, each placing one source.
+
+**Layers**, on the left, lists them front first in two groups: **Always on
+top**, drawn over every scene on program and staying on through a cut or
+transition (a downstream keyer for a logo or a lower third), and **This
+scene**, the scene on program's own. Each row has an icon for the source's
+kind, its name, what it shows (and **linked ×3** when three layers show the
+source), and its eye, which shows or hides it. A lock shows on a locked row,
+and on the selected or pointed-at one to lock it. A dot says a source is not
+live, such as starting, stalled, offline, ended, or failed, with the words on
+hover, and an error on the layer replaces what it shows, in red. Click a row
+to select its layer, drag it up or down its group to restack it, and
+right-click it for its menu: hide or show, lock or unlock, interact with a web
+page, bring it to the front or forward or send it backward or to the back,
+keep it always on top or move it into this scene, duplicate it (linked, or as
+its own copy), make it independent, copy it, or remove it. **Add a layer**
+(A) turns to Add.
+
+**Add** lists what can be placed: the sources no layer shows, no audio scene
+hears, and nothing reads, each with **Add**, to place it in the scene on
+program, or the bin, to remove it for good; this machine's cameras, displays,
+windows, and audio inputs; any source by hand; and, with a room, guests:
+invite one, show their join link as a QR code in a sheet over the window, see
+who joined, and take a guest out of every scene. A new source with a picture
+is placed in front of the scene on program, and selected.
+
+On the **picture**, click a layer to select it, drag it to move it, and drag
+its edges or corners to resize it (see [Placing layers](#placing-layers)). A
+locked layer stays put: clicks pass through it to what is under it. A small
+toolbar beside the selected layer offers **Crop**, after which dragging an edge
+trims the picture without scaling it and dragging inside moves the picture
+under the frame, with the whole picture outlined; **Fit**, as large as fits on
+the canvas, keeping its shape; **Fill**, covering the canvas, keeping its shape
+and cropping the rest evenly; **Shape**, square, rounded, circle, or arch;
+**Cut out**, removing the background of a source that can lose it;
+**Interact**, on a web page; and **...**, the row's menu. Right-click a layer
+for the same menu, or the picture elsewhere to add a layer, paste, or set
+**Snap**, **Grid**, and the grid's spacing. Escape ends cropping, then the
+selection.
+
+**Interact** passes the mouse and keyboard to the selected layer's web page
+alone, even where another layer is over it, while the picture says so; Escape
+or **Stop** ends it.
+
+The **inspector**, on the right, follows the selection. For a layer, its tab
+is named for it, with these sections:
+
+| Section | Use it to |
+| --- | --- |
+| Place | Type or drag its position and size, and its crop, in percent off each edge, fit or fill it, and lock it. |
+| Shape | Pick its outline, square, rounded, circle, or arch, give it a border inside that outline and the border's color, and give it a soft shadow, which follows the outline and is the layer's first drop shadow filter. |
+| Look | Remove its source's background, which every layer showing the source loses (make it independent to cut out here alone); grade its color through a LUT source; add, order, set, and remove its filters, copy them, or paste copied filters after its own; and set its blend mode. |
+| Shown in | See how many places show its source, **Linked in 3 scenes**, and **Make independent**, which points this layer at a copy of the source of its own, keeping its look, so editing that look no longer edits the others. A copy says what it copies. |
+| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page. Publish it independently (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. |
+
+Its **Animate** tab holds the layer's keyframes (see [Keyframes](#keyframes)).
+With no layer selected, the inspector shows the scene on program: rename it,
+see its size, mark it **Safe**, switch on **Publish** and pick the audio scene
+it carries (see [Published scenes](#published-scenes)), and pick the show's
+transition and how long it takes, or for a stinger its media source and cut
+point (see [Transitions](#transitions)). A scene on program, or still leaving
+it in a transition, cannot be removed, even by an undo, until program cuts
+away from it. In a narrow window, the inspector is a tab beside Layers and
+Add.
 
 ### Settings
 
@@ -212,27 +269,27 @@ to the scene file, or a failed save, shows over its top until it is settled.
 | Show | Set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
 | Hotkeys | Bind keys to the panic key, replay, save a clip, start or stop recording, and take each scene, and clear them (see [Hotkeys](#hotkeys)). |
 | Effects | Pick how the window's [effects](#effects) move. |
-| Graph | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
-| History | See every edit, and undo or redo back to any of them. |
+| Advanced | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
 
 ### Scene graph
 
-The Graph tab, in Settings, shows the collection as nodes: each source
-with a picture or sound, each scene and the top layer, and each audio scene.
+The Advanced tab, in Settings, shows the collection as nodes: each source
+with a picture or sound, each scene and the always-on-top layers, and each
+audio scene.
 A wire runs from each source to every scene or layer placing it, and from
 each sound and audio scene to every audio scene holding it; one into a scene
 or clone source shows what it draws, and follows from that source. A wire
-whose items are all hidden, or whose sound is muted, is dimmed.
+whose layers are all hidden, or whose sound is muted, is dimmed.
 
-Drag from a node's right edge onto a scene's, the top layer's, or an audio
-scene's left edge to wire them: a picture is placed filling the scene, and a
-sound or audio scene is sent into the audio scene. Click a wire, then
-**Remove**, to take every item of that source out of the scene, or stop the
+Drag from a node's right edge onto a scene's, the always-on-top layers', or an
+audio scene's left edge to wire them: a picture is placed filling the scene,
+and a sound or audio scene is sent into the audio scene. Click a wire, then
+**Remove**, to take every layer of that source out of the scene, or stop the
 send. Each sound's node has its strip's mute, gain, pan, and delay and a waveform
 of its last few seconds, each audio scene's node **On program**, **Listen**,
 and the waveform of its mix, and each scene's node **Safe**, **Publish**, and the audio
-scene it carries. Clicking a scene takes it on air, and clicking a source picks
-it for Filters. Every edit lands in History, as from the other panels.
+scene it carries. Clicking a scene takes it on air. Every edit lands in the
+history, as from anywhere else.
 
 ### Published scenes
 
@@ -242,14 +299,15 @@ Show tab, gives it its own, such as 1080x1920 for a portrait scene beside a
 scene of the program's size goes on program: its pad refuses another, saying
 why, and an edit resizing the scene on air is refused.
 
-Tick **Publish** on a scene in the Scenes panel to put it live as a broadcast
+Switch on **Publish** for a scene, in BUILD's inspector with no layer selected
+or in the scene graph, to put it live as a broadcast
 of its own beneath the program's, at `<--broadcast>/<scene name>`, at its own
 size, with renditions and encoders of its own (see [Output](#output)). A
-published scene is always live and never switched: it shows what its items
+published scene is always live and never switched: it shows what its layers
 show, whatever is on program. For a portrait stream that follows the program,
 publish a portrait scene drawing the program through a program source (see
 [Scene sources](#scene-sources)), with any overlay of its own placed beside
-it; the top layer goes over the program alone. It carries the audio scene
+it; the always-on-top layers go over the program alone. It carries the audio scene
 on program, or the one picked beside its **Publish** box, encoded as audio of
 its own, so picking another never changes the track its viewers play.
 Unticking it, or removing the scene, ends
@@ -259,34 +317,34 @@ does not publish while live.
 
 A source captures or decodes once however many scenes show it. A published
 scene is drawn only while one of its encoders takes the frame, so with
-`--on-demand`, or without a relay, one nobody watches costs no drawing. An
-item's keyframes play in a published scene from when it was published, picked
+`--on-demand`, or without a relay, one nobody watches costs no drawing. A
+layer's keyframes play in a published scene from when it was published, picked
 for recording, or the studio started, whichever came first: a recording and a
 broadcast of one scene share one picture.
 
 ### Scene sources
 
-A **scene source** draws another scene as one picture, which an item places,
+A **scene source** draws another scene as one picture, which a layer places,
 scales, crops, filters, and blends like any other: a lower third built once
 and shown in every scene, or a whole layout shrunk into a corner. Add one in
-the Sources panel as kind **Scene**, picking the scene it draws, or
+BUILD's Add as kind **Scene**, picking the scene it draws, or
 **Program**, which shows whatever is on air, a transition under way included,
 on the same frame, such as for a portrait scene that follows the program,
 cropped.
 
 A nested scene is drawn at its own size, transparent where it draws
-nothing, once per frame however many items show it, and only while something
-drawn shows it. Its items' keyframes play from when the scene showing it goes
-on, as that scene's own items' do, so the top layer, which never goes on,
-cannot show a scene with keyframes. A media file or overlay in a nested scene
+nothing, once per frame however many layers show it, and only while something
+drawn shows it. Its layers' keyframes play from when the scene showing it goes
+on, as that scene's own layers' do, so an always-on-top layer, which never
+goes on, cannot show a scene with keyframes. A media file or overlay in a nested scene
 set to restart starts over when the scene showing it goes on program.
 
 A scene cannot draw itself, even through other scenes, so an edit that would
-is refused. A scene showing the program cannot go on program, nor can the top
-layer show it, since either would draw the program into itself:
+is refused. A scene showing the program cannot go on program, nor can an
+always-on-top layer show it, since either would draw the program into itself:
 its pad refuses such a scene, and an edit making the scene on
 air show the program is refused. Renaming a scene renames what its scene
-sources draw, and removing one removes them, with the items showing them.
+sources draw, and removing one removes them, with the layers showing them.
 
 ### Transitions
 
@@ -295,7 +353,7 @@ sources draw, and removing one removes them, with the items showing them.
 | Fade | The incoming scene fades in over the outgoing one, at an even pace. |
 | Slide | The incoming scene pushes the outgoing one off the canvas, both moving left, right, up, or down. |
 | Wipe | An edge sweeps across the canvas left, right, up, or down, uncovering the incoming scene behind it. |
-| Move | Each item showing a source both scenes place glides from its place in the outgoing scene to its place in the incoming one, resizing, recropping, and mixing its filters' settings on the way. If its blend mode or kinds of filter differ, it changes look halfway. The rest of the outgoing scene fades out and the rest of the incoming scene fades in. Items stack as the outgoing scene has them until halfway, then as the incoming one does. A source placed more than once pairs up in order, back to front. |
+| Move | Each layer showing a source both scenes place glides from its place in the outgoing scene to its place in the incoming one, resizing, recropping, and mixing its filters' settings on the way. If its blend mode or kinds of filter differ, it changes look halfway. The rest of the outgoing scene fades out and the rest of the incoming scene fades in. Layers stack as the outgoing scene has them until halfway, then as the incoming one does. A source placed more than once pairs up in order, back to front. |
 | Stinger | A media source's clip plays over the program from its start, and the program switches scenes under it at the cut point, the time into the clip when it covers the canvas. It lasts as long as the clip. |
 
 A slide, wipe, or move eases in and out. A transition is drawn on the program
@@ -312,7 +370,7 @@ stinger rather than playing once when it opens, and rests ended between
 stingers, which the Health window does not count unless a scene on air places
 it. A clip played to its end holds its last picture, as any media file does,
 and a looping one stops, blank and silent, after one pass. A
-clip that cannot play, or that is played again from the Sources panel or
+clip that cannot play, or that is played again from the inspector or
 reloaded while a stinger plays it, cuts at once; one stopped there ends the
 stinger at once. A cut, such as the panic key's, or another kind of
 transition, while a stinger runs stops its clip, sound included; another stinger plays the clip again from
@@ -320,53 +378,59 @@ its start.
 
 ### Keyframes
 
-An item's keyframes animate it: an item can fly in, fade in, or blur into
-focus, and a camera can push in. Each keyframe is a time after the item's
-scene goes on and how far the item is from where it rests then: moved and
+A layer's keyframes animate it: a layer can fly in, fade in, or blur into
+focus, and a camera can push in. Each keyframe is a time after the layer's
+scene goes on and how far the layer is from where it rests then: moved and
 resized by canvas pixels, cropped further, and drawn through filters after its
-own. Between two keyframes the item eases from one to the next, linearly or
+own. Between two keyframes the layer eases from one to the next, linearly or
 easing in, out, or (by default) both. Filters of the same kinds, in order,
 mix their settings, and others change halfway. A keyframe's filters cannot be
-a LUT or a mask.
+a LUT or a mask. Set them in the inspector's **Animate** tab: add, time, ease,
+and remove keyframes, and set how far each moves, resizes, crops, and filters
+the layer.
 
-Keyframes play once, from when the item's scene goes on program, and hold the
-last keyframe; before the first, the item holds the first. A cut or transition
+Keyframes play once, from when the layer's scene goes on program, and hold the
+last keyframe; before the first, the layer holds the first. A cut or transition
 starts them again, while a scene leaving in a transition carries on with its
-own. Press **Play** in the Keyframes panel to play the scene on program's again
+own. Press **Play** in the Animate tab to play the scene on program's again
 from now. They are drawn on the program clock, so the stream, a recording, and
-a replay of the program show the same frames. Top-layer items have none, since
-the top layer never goes on.
+a replay of the program show the same frames. Always-on-top layers have none,
+since they never go on.
 
-Dragging an item on BUILD grabs it where its keyframes have it and moves
+Dragging a layer on BUILD grabs it where its keyframes have it and moves
 where it rests, so its whole animation moves with it.
 
-On BUILD, click an item of whatever the Layers panel shows to select it,
-drag it to move it, and drag its edges or corners to resize it. A drag snaps
-edges and centers to the canvas's edges and center, to the other items shown,
-and to the grid while **Grid** is on, drawing a guide through what it lines up
-with. A moved item also snaps to the spacing of its neighbors, marking the
-equal spaces. Hold Ctrl (Cmd on macOS) to drag without snapping, or turn
-**Snap** off. Resizing a camera, display, window, image, media file, broadcast,
-or replay keeps its shape, and resizing anything else does not; hold Shift to
-flip that. Click the picture, then the arrow keys nudge the selected item a
-pixel, or ten with Shift held, and a held key undoes as one step. The snap and
-grid settings are kept per user, with the [hotkeys](#hotkeys), not in the scene
-file.
+### Placing layers
 
-Items showing the same source are **linked**: one capture, with the source's
-filters, wherever it is shown. A **clone** is a new source showing another's
-capture with filters of its own, so a camera can be shown faded in one scene
-and plain in another while being opened once. An item's own filters apply
+On BUILD, click a layer of the scene on program, or an always-on-top one, to
+select it, drag it to move it, and drag its edges or corners to resize it. A
+drag snaps edges and centers to the canvas's edges and center, to the other
+layers shown, and to the grid while **Grid** is on, drawing a guide through
+what it lines up with. A moved layer also snaps to the spacing of its
+neighbors, marking the equal spaces. Hold Ctrl (Cmd on macOS) to drag without
+snapping, or turn **Snap** off, in the picture's right-click menu. Resizing a
+camera, display, window, image, media file, broadcast, or replay keeps its
+shape, and resizing anything else does not; hold Shift to flip that. Click the
+picture, then the arrow keys nudge the selected layer a pixel, or ten with
+Shift held, and a held key undoes as one step; a locked layer stays put. The
+snap and grid settings are kept per user, with the [hotkeys](#hotkeys), not in
+the scene file.
+
+Layers showing the same source are **linked**: one capture, with the source's
+look, wherever it is shown. A **clone** is a new source showing another's
+capture with a look of its own, so a camera can be shown faded in one scene
+and plain in another while being opened once: **Make independent** and
+**Duplicate as its own copy** make one. A layer's own crop and filters apply
 after its source's.
 
 Undo (Ctrl+Z) and redo (Ctrl+Shift+Z or Ctrl+Y), in the title bar, step
 through the history, and a drag undoes as one step; on macOS each shortcut
-uses Cmd in place of Ctrl. **Copy** (Ctrl+C) takes the selected
-item with the source it shows; **Paste** (Ctrl+V) adds it over whatever the
-Layers panel shows, in this studio or another. Pasted where the same source
-exists under the same name, the item is linked to it; otherwise the source
-comes along, renamed if its name is taken. Copied filters paste onto the
-selected source or item, after its own. The clipboard holds text in the scene
+uses Cmd in place of Ctrl. **Copy** (Ctrl+C) takes the selected layer with the
+source it shows; **Paste** (Ctrl+V) adds it in front of the selected layer's
+group, or the scene on program, in this studio or another. Pasted where the
+same source exists under the same name, the layer is linked to it; otherwise
+the source comes along, renamed if its name is taken. Copied filters paste
+onto the selected layer, after its own. The clipboard holds text in the scene
 file's format.
 
 A broadcast source subscribes through the same relay connections. It plays its
@@ -388,7 +452,7 @@ falls silent until the sound is due. Sound and picture each keep that
 schedule on their own: a sound stall leaves the picture playing, and the
 sound comes back on the clock, skipping what it missed by more than 200 ms
 and speeding up through the rest; a picture stall leaves the sound playing,
-with the canvas showing the last picture meanwhile. Without audio, the picture plays 100 ms behind. Sources shows how
+with the canvas showing the last picture meanwhile. Without audio, the picture plays 100 ms behind. The inspector's Source section shows how
 far behind each broadcast plays.
 
 ### Audio scenes
@@ -400,19 +464,18 @@ audio scene holding every microphone, which both a "Stream" audio scene (Mics,
 without music you may not broadcast) and a "Headphones" one (Mics and the
 music) hold. A sound an audio scene reaches more than one way plays in it
 once, and an audio scene never holds itself, even through others. Add,
-rename, reorder, and remove audio scenes in the Scenes panel, where they are
-tagged `audio` and listed after the scenes.
+rename, reorder, and remove audio scenes at the top of the MIX page.
 
 The MIX page is a mixer. Each sound has a strip, with its gain, pan, mute,
 delay, and meter, which apply in every audio scene holding it, and a send to
 each audio scene; each audio scene has a strip with its meter and a send to
-each other audio scene. A source added from the Sources or Devices panel, or
+each other audio scene. A source added from BUILD's Add, or
 pasted, is sent to the audio scene on program, so it is heard at once.
 **On program** picks the audio scene the broadcast carries, and switching
 it, or editing an audio scene, never drops or repeats audio. A recording holds
 the audio scene on program unless REVIEW picks another, such as one
 keeping music the stream leaves out, and each published scene carries the one
-on program unless the Scenes panel picks another beside its **Publish** box;
+on program unless BUILD's inspector picks another beside its **Publish** switch;
 switching either while it runs never drops or repeats audio either. The audio
 scene on program cannot be removed; removing one a recording or published
 scene picks returns it to the one on program.
@@ -503,7 +566,7 @@ element, attribute, rule, property, or asset it refused:
 
 An overlay's animation starts when the overlay does: when the studio opens
 it, and again whenever it is edited. It also starts over each time a scene
-showing it goes on program, as an item's keyframes do, so a lower third plays
+showing it goes on program, as a layer's keyframes do, so a lower third plays
 its entrance at every cut.
 Set `restart = false` (**Restart on program**, off, in the add form) for one
 that runs on across cuts, such as a clock or a ticker. One that program does
@@ -537,12 +600,12 @@ loop = true          # start over at the end
 ```
 
 Without `loop`, it plays once, then holds its last picture, silent, and reads
-as ended in Sources and, while the program or a published scene shows or
+as ended on its layer and in the inspector and, while the program or a published scene shows or
 plays it, in Health.
-**Play** in Sources plays it from its start again, as does going on program
-with `restart`, in a scene on air or the top layer, when it was not on program
+**Play** in the inspector plays it from its start again, as does going on program
+with `restart`, in a scene on air or always on top, when it was not on program
 before. Either clears its picture at once, so the end of the last play never
-shows on program. **Stop** in Sources stops it at once: blank, silent, sound
+shows on program. **Stop** in the inspector stops it at once: blank, silent, sound
 already queued included, and reading as ended until played again. A file that
 cannot be read or decoded fails, with the reason.
 The source a [stinger](#transitions) plays waits, blank and silent, for the
@@ -595,7 +658,7 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   in the room, and the program at `.program`, but anything else the relay lets
   subscribe there can read every guest's, so grant that only to the studio. A guest who
   leaves needs a link, or a renewed token, that has not expired to come back.
-  The Guests panel says when renewal is failing.
+  BUILD's Add says, under Guests, when renewal is failing.
 - **Upgrading from a studio without renewal:** generate a new room key, drop
   the old one's public half from `--key-dir`, then restart the relay (or wait
   out the old links' `--guest-expiry`) before starting the upgraded studio.
@@ -610,7 +673,7 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
   Anyone the failover lets publish in the room joins as a guest, so guard the
   room there as on the `--connect` relay.
 
-**Invite** in the Guests panel makes a link for one guest name and shows it as
+**Invite**, under Guests in BUILD's Add, makes a link for one guest name and shows it as
 a QR code; **Copy link** puts it on the clipboard instead. The guest's token is
 in the link's fragment, which the browser never sends to a server, and lets
 them publish only under their own name, so they cannot appear as someone else,
@@ -619,7 +682,7 @@ Treat the link like a password: anyone holding it can join as that guest
 before it expires, and is then renewed for as long as they stay, until you
 remove them. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, in no scene or audio scene: place
-them from the Layers panel and send them to the audio scene on program on MIX
+them from BUILD's Add and send them to the audio scene on program on MIX
 to put them on air. That includes a
 guest invited before a restart whose link still works. A guest's source is
 saved to the scene file but is not your edit: it stays out of History, so undo
@@ -690,7 +753,7 @@ path = "room/guest"
 [sources.alerts]
 kind = "browser"
 url = "https://example.com/alerts"
-width = 800 # the page's own size, whatever its items stretch it to
+width = 800 # the page's own size, whatever its layers stretch it to
 height = 600
 
 [sources.name]
@@ -747,8 +810,8 @@ filters = [
 [[scenes]]
 name = "Main"
 items = [
-    { source = "camera", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
-    { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, filters = [{ kind = "drop_shadow", x = 8, y = 8, blur = 12, color = "#00000080" }] },
+    { source = "camera", rect = { x = 0, y = 0, width = 1920, height = 1080 }, locked = true },
+    { source = "guest", rect = { x = 1280, y = 720, width = 640, height = 360 }, shape = { corners = [0.12, 0.12, 0.12, 0.12], border = 4 }, filters = [{ kind = "drop_shadow", x = 8, y = 8, blur = 12, color = "#00000080" }] },
     { source = "logo", rect = { x = 0, y = 0, width = 1920, height = 1080 }, blend = "multiply", filters = [{ kind = "opacity", amount = 0.3 }] },
 ]
 
@@ -800,10 +863,10 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 [Media files](#media-files)), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
 `overlay` (its `html`, a `width` and `height` up to 4096, and whether it `restart`s, true by default), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
-file, which no item places, but which grades what a `lut` filter names it in),
+file, which no layer places, but which grades what a `lut` filter names it in),
 `replay`, where REVIEW plays replays, `scene` (with the `scene` it
-draws), and `program` (see [Scene sources](#scene-sources)). The Devices panel fills in
-ids. `[[top]]` items make up the top layer.
+draws), and `program` (see [Scene sources](#scene-sources)). BUILD's Add fills in
+ids.
 
 A scene's `size` gives it a `width` and `height` of its own; without one it is
 the program's. `published = true` puts it live as its own broadcast (see
@@ -815,7 +878,7 @@ most, which must be able to go on program.
 A scene's `audio` names the audio scene it carries while published, the
 one on program without it.
 
-`[[audio_scenes]]` lists the audio scenes, in the order the Scenes panel lists
+`[[audio_scenes]]` lists the audio scenes, in the order MIX lists
 them, each with its `name`, the sources whose `sounds` it holds, and the other
 audio `scenes` it holds. Exactly one is on `program = true`, and
 `recorded = true` has recordings hold one rather than the one on program.
@@ -827,8 +890,21 @@ default), and `delay`, in every audio scene holding it.
 `published = ["camera", "mic"]`, a top-level key, names the sources
 [published independently](#published-independently).
 
+Each entry of a scene's `items` is one of its layers, back to front, and each
+`[[top]]` an always-on-top layer: the `source` it shows and its `rect` on the
+canvas, in pixels, and optionally `visible = false`, `locked = true`, which
+the picture's pointer passes through, and its `crop`, `filters`, `blend`,
+`shape`, and `keyframes`.
+
+A layer's `shape` cuts it to an outline, before its filters, so a drop shadow
+follows it: `corners`, how round each corner is (top-left, top-right,
+bottom-right, then bottom-left) as a fraction of the layer's shorter side,
+from 0, square, to 0.5, and a `border` that many canvas pixels wide inside the
+outline, white unless its `color` says otherwise. A layer showing a source
+published independently takes no shape.
+
 `[video.<source>]` sets a source's `background`, `crop`, and `filters`,
-wherever it is shown, and an item's `crop`, `filters`, and `blend` its own.
+wherever it is shown, and a layer's `crop`, `filters`, and `blend` its own.
 `background = "remove"` cuts the person out of a camera, display, window,
 image, media, broadcast, browser, or replay source's picture before its crop
 and filters, leaving the rest transparent. A segmentation model finds them in
@@ -839,8 +915,8 @@ one or two people near the camera. A clone shows its source's cut-out, so it
 cannot remove a background of its own. A `crop` trims a fraction
 (0 to 1) of the picture off its `left`, `top`, `right`, and `bottom`, opposite
 sides together trimming less than the whole, and stretches the rest over the
-item; an item's crop trims what its source's
-leaves. Filters apply in order, the source's then the item's, with lengths in
+layer; a layer's crop trims what its source's
+leaves. Filters apply in order, the source's then the layer's, with lengths in
 canvas pixels:
 
 | Filter | Settings |
@@ -853,19 +929,19 @@ canvas pixels:
 | `chroma_key` | `color` keyed out, and `similarity`, `smoothness`, and `spill` from 0 to 1 |
 | `luma_key` | `min` and `max` luma kept, `min` at most `max`, and `smoothness`, all from 0 to 1 |
 | `lut` | the `lut` `source` to grade through, and `amount` from 0 to 1 |
-| `mask` | a `source` whose picture, stretched over the item, keeps what it covers: by its alpha, or `mode = "luminance"` |
+| `mask` | a `source` whose picture, stretched over the layer, keeps what it covers: by its alpha, or `mode = "luminance"` |
 
-An item's `blend` mixes it with what is under it by a CSS `mix-blend-mode`:
+A layer's `blend` mixes it with what is under it by a CSS `mix-blend-mode`:
 `multiply`, `screen`, `overlay`, `darken`, `lighten`, `color_dodge`,
 `color_burn`, `hard_light`, `soft_light`, `difference`, `exclusion`, `hue`,
 `saturation`, `color`, or `luminosity`. Removing a source removes the filters
 that name it.
 
-An item's `keyframes`, in order of time, each have an `at`, how long after the
+A layer's `keyframes`, in order of time, each have an `at`, how long after the
 scene goes on, and optionally an `ease` into it from the one before (`linear`,
 `in`, `out`, or `in_out`, the default), `x`, `y`, `width`, and `height` added
-to the item's `rect`, a `crop` of what the item's crop leaves, and `filters`
-applied after the item's own.
+to the layer's `rect`, a `crop` of what the layer's crop leaves, and `filters`
+applied after the layer's own.
 
 The studio writes the file a second after the last change, so a burst such as a
 slider drag is one write, and once more on quit. Edits that never pause for a
@@ -988,8 +1064,8 @@ with the half size watched, and 6 while recording too. A published portrait
 scene drawing the program beside it adds 1 more, 2 with its half size watched,
 plus 1 for each captured source it shows that program does not. When the program
 encodes on hardware, so do the sources, and a
-session the GPU refuses fails that source's track with the encoder's reason in
-the Sources panel rather than falling back to software. The source keeps
+session the GPU refuses fails that source's track with the encoder's reason on
+its layer rather than falling back to software. The source keeps
 drawing in the studio's own scenes. The program opens its session before any
 source, even with `--on-demand`, so the sources past the cap fail rather than
 the program; so does each scene published in the scene file at startup. A
@@ -1000,7 +1076,7 @@ where it can and software otherwise.
 ### Published independently
 
 A source with a track of its own can be **Published independently**, a
-checkbox in the Sources panel, off by default and kept in the scene file's
+switch in the inspector's Source section, off by default and kept in the scene file's
 `published` list. Its track then goes to the relay beside the program, in the
 same broadcast: the program's catalog lists it under the `live.kixel.studio`
 section's `sources`, by source name, as a hang catalog of its own whose track
@@ -1010,7 +1086,7 @@ themselves, as the [layer layout](#layer-layout) says.
 The program leaves a published source out, wherever it or a clone of it is
 placed, and so does every audio scene's mix. The studio draws it only as
 viewers will: over the program, on every page and in the program's
-virtual camera, so both show what viewers see. It goes over every other item of its scene, and over the top layer,
+virtual camera, so both show what viewers see. It goes over every other layer of its scene, and over the always-on-top layers,
 however the scene stacks it. Recordings hold the program as published,
 without it, and recording **each source too** gives a published camera,
 display, window, or microphone a file of its own. Published and recorded
@@ -1018,9 +1094,9 @@ scenes, and a scene that shows the program, leave it out too. While viewers read
 plain capture before any filter or gain, and encodes for as long as it is
 published, holding an encode session as one on program does.
 
-Every player must reproduce how it is placed, so an item showing it takes no
-filter but opacity and no blend mode, nor do its source's filters or its
-keyframes, and no scene that another scene draws can place it. A source with
+Every player must reproduce how it is placed, so a layer showing it takes no
+filter but opacity, no blend mode, and no shape, nor do its source's filters or
+its keyframes, and no scene that another scene draws can place it. A source with
 its background removed cannot be published, since H.264 carries no
 transparency and its track would show the background.
 
@@ -1058,7 +1134,7 @@ layout:
 - `canvas` is the program's size, which pictures are placed on in pixels.
 - `start` is when the scene on program went on, in microseconds on the media
   clock: the moment its pictures' keyframes play from.
-- `pictures` lists each item of the scene on program, then of the top layer,
+- `pictures` lists each layer of the scene on program, then of the always-on-top ones,
   showing a published source, back to front over the program, shown or
   hidden. Each `item` is a scene file item: its `source` names the source's
   entry under the catalog's `live.kixel.studio` `sources` (the source a clone
@@ -1216,7 +1292,7 @@ published scene, or a recording:
   relay, the record dot pulses, and each cut or transition, from a pad, the
   panic key, or a hotkey, bursts on the frame.
 - The Hotkeys tab shows each bound key on a dark plastic keycap, the title
-  bar, the strip, and BUILD's panels have a faint grain, and first launch
+  bar, the strip, and BUILD's columns have a faint grain, and first launch
   draws its screen over a soft gradient.
 - The health dot pulses amber while the worst problem is degraded, and
   flickers red with electricity while it is unhealthy.
@@ -1329,8 +1405,8 @@ turn it off or quit; it is not saved in the scene file. A scene's camera
 turns off when you stop publishing or rename the scene. A picture is copied
 for a camera only while an app reads it, and a scene's camera has the scene
 drawn only then. Changing the size or frame rate of what a camera
-shows reopens it at the new one, so an app reading it opens it again. The
-Devices panel leaves the studio's cameras out while they are on, so one
+shows reopens it at the new one, so an app reading it opens it again. BUILD's
+Add leaves the studio's cameras out while they are on, so one
 cannot be added as a source of the picture it shows.
 
 - **Linux:** a PipeWire camera named "kixel.live Studio" for the program, and

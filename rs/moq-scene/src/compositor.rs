@@ -555,6 +555,13 @@ impl Compositor {
 		}
 	}
 
+	/// The width and height in pixels of `source`'s newest picture, a capture
+	/// named as [`Collection::capture`] names it, once one is drawn.
+	pub fn picture_size(&self, source: &str) -> Option<(u32, u32)> {
+		let picture = self.layers.get(source)?.picture.as_ref()?;
+		Some(picture.size())
+	}
+
 	/// Whether a transition is under way.
 	pub fn transitioning(&self) -> bool {
 		self.switch.is_some()
@@ -1858,6 +1865,7 @@ impl Draw<'_> {
 				crop: item.crop,
 				filters: item.filters.iter().collect(),
 				blend: item.blend,
+				shape: item.shape,
 			};
 			if let Some(prepared) = self.effects.prepare(self.frame, item, &self.library) {
 				self.effects.draw(self.frame, &target.texture, &prepared);
@@ -1923,6 +1931,7 @@ impl Draw<'_> {
 			crop: collection.crop(&whole),
 			filters: collection.filters(&whole).collect(),
 			blend: whole.blend,
+			shape: whole.shape,
 		};
 		if let Some(prepared) = self.effects.prepare(self.frame, item, &self.library) {
 			self.effects.draw(self.frame, &target.texture, &prepared);
@@ -2069,6 +2078,7 @@ impl Draw<'_> {
 			crop: pose.crop,
 			filters,
 			blend: item.blend,
+			shape: item.shape,
 		};
 		self.effects.prepare(self.frame, item, &self.library)
 	}
@@ -2444,6 +2454,38 @@ mod tests {
 			studio.collection.scenes[0].items[1].visible = false;
 			studio.render(Instant::now());
 			assert_eq!(pixel(&studio.program(), 6, 1), RED);
+		})
+		.await;
+	}
+
+	/// A shape cuts its item's corners away, showing what is under them, and
+	/// draws its border inside the outline.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_shape_cuts_the_corners() {
+		local(async {
+			let mut collection = collection();
+			let blue = &mut collection.scenes[0].items[1];
+			blue.rect = Rect::fill(&collection.canvas);
+			blue.shape.corners = [0.5; 4];
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			let program = studio.program();
+			for (x, y) in [(0, 0), (7, 0), (7, 7), (0, 7)] {
+				assert_eq!(pixel(&program, x, y), RED, "the corner at {x},{y} is cut away");
+			}
+			assert_eq!(pixel(&program, 4, 4), BLUE);
+			assert_eq!(pixel(&program, 4, 1), BLUE);
+
+			studio.collection.scenes[0].items[1].shape.border = 2.0;
+			studio.render(Instant::now());
+			let program = studio.program();
+			assert_eq!(pixel(&program, 4, 1), [255; 4], "the border is inside the outline");
+			assert_eq!(pixel(&program, 4, 4), BLUE);
+			assert_eq!(pixel(&program, 0, 0), RED);
 		})
 		.await;
 	}

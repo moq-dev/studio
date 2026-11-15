@@ -301,7 +301,7 @@ impl Change {
 			} => {
 				let spliced = collection.edit_items(layer, |items| splice(items, *index, before, after));
 				let spliced = spliced.ok_or_else(|| conflict(format!("there is no {layer}")))?;
-				spliced.map_err(|err| conflict(format!("item {err} in {layer}")))
+				spliced.map_err(|err| conflict(format!("layer {err} in {layer}")))
 			}
 			Self::Transition { before, after } => {
 				if collection.transition != *before {
@@ -795,7 +795,7 @@ impl Draft {
 
 	fn item_at(&self, layer: &Layer, index: usize) -> Result<Item, Error> {
 		let item = self.collection.items(layer).and_then(|items| items.get(index)).cloned();
-		item.ok_or_else(|| conflict(format!("there is no item {index} in {layer}")))
+		item.ok_or_else(|| conflict(format!("there is no layer {index} in {layer}")))
 	}
 
 	/// Set how the preview is taken to program, short of a cut.

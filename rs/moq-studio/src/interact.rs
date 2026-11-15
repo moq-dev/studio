@@ -75,13 +75,15 @@ impl Interact {
 	/// `collection` at its size, under the top layer when it is the program's,
 	/// into what each page it touches should receive, by page name. `scene` is
 	/// the scene's name and how long it has been in the preview, which places
-	/// its items where their keyframes have them.
+	/// its items where their keyframes have them. With `only`, the pointer
+	/// reaches that page alone, through any in front of it.
 	pub fn update(
 		&mut self,
 		ui: &egui::Ui,
 		image: egui::Rect,
 		collection: &Collection,
 		scene: Option<(&str, Duration)>,
+		only: Option<&str>,
 	) -> Vec<(String, Input)> {
 		let Some(size) = collection.canvas(scene.map(|(name, _)| name)) else {
 			return Vec::new();
@@ -96,7 +98,7 @@ impl Interact {
 				return None;
 			}
 			let (x, y) = on_canvas(pos);
-			page_at(collection, scene, x, y)
+			page_at(collection, scene, only, x, y)
 		};
 		// Where `pos` falls on the captured page, even off its edges, where the
 		// pressed item shows it now.
@@ -438,13 +440,20 @@ fn shown<'a>(collection: &'a Collection, scene: Option<(&str, Duration)>) -> Vec
 /// The topmost visible browser source, or clone of one, at canvas point (`x`,
 /// `y`) in `scene` and the top layer over it, as [`shown`] places
 /// them, and the point on its page.
-fn page_at(collection: &Collection, scene: Option<(&str, Duration)>, x: f32, y: f32) -> Option<Hit> {
+fn page_at(
+	collection: &Collection,
+	scene: Option<(&str, Duration)>,
+	only: Option<&str>,
+	x: f32,
+	y: f32,
+) -> Option<Hit> {
 	let items = shown(collection, scene);
 	items
 		.iter()
 		.enumerate()
 		.rev()
 		.filter(|(_, item)| item.visible)
+		.filter(|(_, item)| only.is_none_or(|only| collection.capture(&item.source) == only))
 		.find_map(|(slot, item)| {
 			let rect = item.rect;
 			let inside = x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
@@ -641,7 +650,8 @@ mod tests {
 			..Scene::new("Main")
 		}];
 		let main = Some(("Main", Duration::ZERO));
-		let at = |collection: &Collection, x, y| page_at(collection, main, x, y).map(|hit| (hit.page, hit.x, hit.y));
+		let at =
+			|collection: &Collection, x, y| page_at(collection, main, None, x, y).map(|hit| (hit.page, hit.x, hit.y));
 
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(at(&collection, 960.0, 540.0), Some(("alerts".into(), 400, 300)));
@@ -652,7 +662,19 @@ mod tests {
 			Some(("alerts".into(), 716, 377)),
 			"a hidden page takes no input"
 		);
-		assert!(page_at(&collection, Some(("Other", Duration::ZERO)), 1.0, 1.0).is_none());
+		assert!(page_at(&collection, Some(("Other", Duration::ZERO)), None, 1.0, 1.0).is_none());
+
+		// Interacting with one layer's page passes input to it alone, even
+		// where another page is over it.
+		collection.scenes[0].items[1].visible = true;
+		let only = |name, x, y| page_at(&collection, main, Some(name), x, y).map(|hit| hit.page);
+		assert_eq!(
+			only("alerts", 1720.0, 680.0),
+			Some("alerts".into()),
+			"through the chat over it"
+		);
+		assert_eq!(only("chat", 960.0, 540.0), None, "not past the chat's own rect");
+		collection.scenes[0].items[1].visible = false;
 
 		// The top layer draws over every scene, and a clone shows its source's
 		// page, which runs under the source's name.
@@ -662,7 +684,7 @@ mod tests {
 		collection.top = vec![item("chat copy", corner, true)];
 		assert_eq!(at(&collection, 1720.0, 680.0), Some(("chat".into(), 200, 400)));
 		assert_eq!(
-			page_at(&collection, None, 1720.0, 680.0).map(|hit| hit.page),
+			page_at(&collection, None, None, 1720.0, 680.0).map(|hit| hit.page),
 			Some("chat".into())
 		);
 		// But not over a scene of another size, which the preview draws
@@ -709,7 +731,7 @@ mod tests {
 			..moq_scene::Keyframe::new(Duration::ZERO)
 		}];
 		assert_eq!(at(&collection, 1320.0, 680.0), Some(("chat".into(), 300, 600)));
-		let later = page_at(&collection, Some(("Main", Duration::from_secs(9))), 1320.0, 680.0);
+		let later = page_at(&collection, Some(("Main", Duration::from_secs(9))), None, 1320.0, 680.0);
 		assert_eq!(
 			later.map(|hit| hit.page),
 			Some("chat".into()),
@@ -734,7 +756,7 @@ mod tests {
 		};
 		let mut delivered = Vec::new();
 		let mut output = ctx.run_ui(input, |ui| {
-			delivered = interact.update(ui, image, collection, Some(("Main", Duration::ZERO)));
+			delivered = interact.update(ui, image, collection, Some(("Main", Duration::ZERO)), None);
 		});
 		// Nothing renders, so the font atlas egui uploaded goes nowhere.
 		output.textures_delta.clear();
@@ -852,7 +874,7 @@ mod tests {
 			};
 			let mut delivered = Vec::new();
 			let mut output = ctx.run_ui(input, |ui| {
-				delivered = interact.update(ui, image, &collection, Some(("Main", since)));
+				delivered = interact.update(ui, image, &collection, Some(("Main", since)), None);
 			});
 			output.textures_delta.clear();
 			delivered

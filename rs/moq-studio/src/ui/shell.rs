@@ -6,6 +6,7 @@ use egui::{
 	Align, Align2, CursorIcon, Rect, ResizeDirection, Sense, Stroke, UiBuilder, Vec2, ViewportCommand, pos2, vec2,
 };
 
+use super::build::duplicate_scene;
 use super::layout::{Arrangement, Layout, SOUND_ROW, fit};
 use super::levels::reading;
 use super::*;
@@ -70,7 +71,18 @@ enum PadAction {
 	/// Make it the safe scene, or stop.
 	Safe(String, bool),
 	Remove(String),
+	/// Ask for a new name.
 	Rename(String),
+	/// Name it the second.
+	Renamed(String, String),
+	/// A new scene after it showing what it shows: the same sources, linked,
+	/// or each its own copy.
+	Duplicate {
+		name: String,
+		independent: bool,
+	},
+	/// Move it this many places along the strip.
+	Move(String, isize),
 	Add,
 }
 
@@ -219,7 +231,11 @@ impl Panels {
 			}
 			Page::Build => self.build(ui, fx, stage, snapshot.shape),
 			// The sound slot holds the live picture instead.
-			Page::Mix => region(ui, stage, |ui| self.audio(ui)),
+			Page::Mix => region(ui, stage, |ui| {
+				self.audio_scenes(ui);
+				ui.separator();
+				self.audio(ui);
+			}),
 			Page::Review => {
 				// The live picture beside replays and recordings.
 				let side = (stage.width() * 0.32).clamp(220.0, 420.0);
@@ -366,7 +382,7 @@ impl Panels {
 				let result = self.engine.reload();
 				self.check(result);
 			}
-			if ui.add(kit::button(Icon::Copy, "Copy the selected item")).clicked() {
+			if ui.add(kit::button(Icon::Copy, "Copy the selected layer")).clicked() {
 				self.copy(ui.ctx());
 			}
 			if ui.button("Paste").clicked() {
@@ -403,6 +419,12 @@ impl Panels {
 		if ui.add_enabled(snapshot.redo.is_some(), button).clicked() {
 			self.redo();
 		}
+		let any = snapshot.undo.is_some() || snapshot.redo.is_some();
+		let history = ui.add_enabled(any, IconButton::new(Icon::History, "History"));
+		egui::Popup::menu(&history)
+			.id(egui::Id::new("history"))
+			.width(280.0)
+			.show(|ui| self.history(ui));
 	}
 
 	/// The pages, as one segmented control at `rect`.
@@ -689,6 +711,7 @@ impl Panels {
 				});
 			});
 		});
+		let action = action.or_else(|| self.rename_sheet(ui.ctx()));
 		let Some(action) = action else { return };
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -698,6 +721,16 @@ impl Panels {
 			let index = scenes.iter().position(|scene| scene.name == name);
 			index.with_context(|| format!("no scene is called `{name}`"))
 		};
+		let spot = match &action {
+			PadAction::Take(name)
+			| PadAction::Safe(name, _)
+			| PadAction::Remove(name)
+			| PadAction::Rename(name)
+			| PadAction::Renamed(name, _)
+			| PadAction::Duplicate { name, .. }
+			| PadAction::Move(name, _) => Some(Spot::Pad(name.clone())),
+			PadAction::Add => None,
+		};
 		let result = match action {
 			PadAction::Take(name) => crate::controls::take(&mut state, &name).map(drop),
 			PadAction::Safe(name, safe) => {
@@ -706,16 +739,28 @@ impl Panels {
 			PadAction::Remove(name) => {
 				at(&state, &name).and_then(|index| self.scene_action(&mut state, SceneAction::Remove(index)))
 			}
-			PadAction::Rename(name) => match at(&state, &name) {
-				Ok(index) => {
-					drop(state);
-					self.page = Page::Build;
-					self.left = Tool::Scenes;
-					self.renaming = Some((index, name));
-					return;
+			PadAction::Rename(name) => {
+				self.renaming_pad = Some((name.clone(), name));
+				Ok(())
+			}
+			PadAction::Renamed(name, to) => at(&state, &name).and_then(|index| {
+				let to = to.trim().to_string();
+				if to == name {
+					return Ok(());
 				}
-				Err(err) => Err(err),
-			},
+				self.scene_action(&mut state, SceneAction::Rename(index, to))
+			}),
+			PadAction::Move(name, by) => at(&state, &name).and_then(|from| {
+				let count = state.collection().scenes.len();
+				let to = from.saturating_add_signed(by).min(count.saturating_sub(1));
+				match to == from {
+					true => Ok(()),
+					false => self.scene_action(&mut state, SceneAction::Move(from, to)),
+				}
+			}),
+			PadAction::Duplicate { name, independent } => at(&state, &name)
+				.and_then(|index| duplicate_scene(&mut state, index, independent))
+				.map(|copy| self.say(Ok(format!("added scene `{copy}`")))),
 			PadAction::Add => {
 				let collection = state.collection();
 				let name = (collection.scenes.len() + 1..)
@@ -730,7 +775,36 @@ impl Panels {
 			}
 		};
 		drop(state);
-		self.check(result);
+		match spot {
+			Some(spot) => self.fail(spot, result),
+			None => self.check(result),
+		}
+	}
+
+	/// The sheet renaming a scene, while one is renamed, and the rename it
+	/// asked for.
+	fn rename_sheet(&mut self, ctx: &egui::Context) -> Option<PadAction> {
+		let (from, mut to) = self.renaming_pad.clone()?;
+		let mut asked = None;
+		let title = format!("Rename {from}");
+		let closed = kit::Sheet::new(egui::Id::new("rename scene"), &title).show(ctx, |ui| {
+			let field = ui.add(egui::TextEdit::singleline(&mut to).desired_width(f32::INFINITY));
+			if !field.has_focus() && !field.lost_focus() {
+				field.request_focus();
+			}
+			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+			ui.add_space(8.0);
+			ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+				if ui.button("Rename").clicked() || entered {
+					asked = Some(PadAction::Renamed(from.clone(), to.clone()));
+				}
+			});
+		});
+		self.renaming_pad = match closed || asked.is_some() {
+			true => None,
+			false => Some((from, to)),
+		};
+		asked
 	}
 
 	/// The pad of the scene at `index`, or the one that adds a scene past
@@ -768,6 +842,34 @@ impl Panels {
 			if ui.button("Rename").clicked() {
 				action = Some(PadAction::Rename(pad.name.clone()));
 			}
+			let duplicate = ui
+				.button("Duplicate")
+				.on_hover_text("A new scene showing the same sources: editing a layer's look edits both");
+			if duplicate.clicked() {
+				action = Some(PadAction::Duplicate {
+					name: pad.name.clone(),
+					independent: false,
+				});
+			}
+			let own = ui
+				.button("Duplicate with its own copies")
+				.on_hover_text("A new scene whose layers each show a copy of their own, to edit apart");
+			if own.clicked() {
+				action = Some(PadAction::Duplicate {
+					name: pad.name.clone(),
+					independent: true,
+				});
+			}
+			let count = snapshot.scenes.len();
+			if ui.add_enabled(index > 0, egui::Button::new("Move left")).clicked() {
+				action = Some(PadAction::Move(pad.name.clone(), -1));
+			}
+			if ui
+				.add_enabled(index + 1 < count, egui::Button::new("Move right"))
+				.clicked()
+			{
+				action = Some(PadAction::Move(pad.name.clone(), 1));
+			}
 			let remove = ui
 				.add_enabled(!on_air, egui::Button::new("Remove"))
 				.on_disabled_hover_text("On air; take another scene first");
@@ -791,11 +893,13 @@ impl Panels {
 			.get(&thumbnail)
 			.map(|registered| egui::load::SizedTexture::new(registered.id, size));
 		let key = self.key(&Action::Scene(pad.name.clone()), ui.ctx());
+		let fault = self.fault(&Spot::Pad(pad.name.clone()));
 		let widget = kit::Pad::new(&pad.name)
 			.picture(picture)
 			.key(key.as_deref())
 			.tally(tally)
 			.refused(pad.refused.as_deref())
+			.fault(fault)
 			.width(width)
 			.shape(shape);
 		let response = ui.add(widget);
@@ -1096,8 +1200,7 @@ impl Panels {
 						egui::ScrollArea::vertical().show(ui, |ui| self.hotkeys(ui, fx));
 					}
 					Setting::Effects => fx.menu(ui),
-					Setting::Graph => self.graph(ui),
-					Setting::History => self.history(ui),
+					Setting::Advanced => self.graph(ui),
 				}
 			});
 		self.setting = open.then_some(setting);
@@ -1412,14 +1515,16 @@ fn window_frame() -> egui::Frame {
 }
 
 /// A row of tabs, `current` underlined, each of `all` named by `name`.
-pub(super) fn tabs<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, all: &[T], name: fn(T) -> &'static str) {
+pub(super) fn tabs<T: Copy + PartialEq, S: AsRef<str>>(ui: &mut Ui, current: &mut T, all: &[T], name: impl Fn(T) -> S) {
 	ui.horizontal_wrapped(|ui| {
 		ui.spacing_mut().item_spacing.x = 16.0;
 		for &tab in all {
 			let on = *current == tab;
-			let galley = kit::caps_galley(ui.painter(), name(tab), kit::display(14.0), kit::TEXT, None);
+			let text = name(tab);
+			let text = text.as_ref();
+			let galley = kit::caps_galley(ui.painter(), text, kit::display(14.0), kit::TEXT, None);
 			let (rect, response) = ui.allocate_exact_size(galley.size() + vec2(0.0, 10.0), Sense::click());
-			response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, name(tab)));
+			response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, text));
 			let ink = if on || response.hovered() { kit::TEXT } else { kit::DIM };
 			ui.painter().galley(rect.left_top(), galley, ink);
 			if on {

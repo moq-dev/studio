@@ -365,7 +365,7 @@ impl Collection {
 			};
 			if draws {
 				return Err(Error::Invalid(format!(
-					"the top layer places `{}`, which draws the program the top layer is drawn over",
+					"an always-on-top layer shows `{}`, which draws the program the always-on-top layers are drawn over",
 					item.source
 				)));
 			}
@@ -444,6 +444,9 @@ impl Collection {
 				}
 				item.rect.validate(&layer, &item.source)?;
 				let on = format!("`{}` in {layer}", item.source);
+				item.shape
+					.validate()
+					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 				item.crop
 					.validate()
 					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
@@ -451,14 +454,14 @@ impl Collection {
 				if layer.scene.is_none() {
 					if !item.keyframes.is_empty() {
 						return Err(Error::Invalid(format!(
-							"{on} has keyframes, but the top layer never goes on to start them"
+							"{on} has keyframes, but an always-on-top layer never goes on to start them"
 						)));
 					}
 					if let Some(Nested::Scene(scene)) = self.nested(&item.source)
 						&& let Some(keyed) = self.reached(scene).into_iter().find(|item| !item.keyframes.is_empty())
 					{
 						return Err(Error::Invalid(format!(
-							"{on} draws `{}` with keyframes, but the top layer never goes on to start them",
+							"{on} draws `{}` with keyframes, but an always-on-top layer never goes on to start them",
 							keyed.source
 						)));
 					}
@@ -698,9 +701,12 @@ impl Collection {
 				}
 				let keyframed = item.keyframes.iter().flat_map(|keyframe| &keyframe.filters);
 				let mut filters = self.filters(item).chain(keyframed);
-				if item.blend != Blend::Normal || filters.any(|filter| !matches!(filter, Filter::Opacity { .. })) {
+				if item.blend != Blend::Normal
+					|| !item.shape.is_square()
+					|| filters.any(|filter| !matches!(filter, Filter::Opacity { .. }))
+				{
 					return Err(Error::Invalid(format!(
-						"{on} takes no filter but opacity and no blend mode, which every player must reproduce"
+						"{on} takes no filter but opacity, no blend mode, and no shape, which every player must reproduce"
 					)));
 				}
 			}
@@ -1064,7 +1070,7 @@ impl fmt::Display for Layer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match &self.scene {
 			Some(name) => write!(f, "scene `{name}`"),
-			None => write!(f, "the top layer"),
+			None => write!(f, "the always-on-top layers"),
 		}
 	}
 }
@@ -1093,6 +1099,15 @@ pub struct Item {
 	/// Whether the item is drawn. A hidden item keeps its place.
 	#[serde(default = "yes")]
 	pub visible: bool,
+	/// Whether the item stays where it is: an editor's pointer passes through
+	/// it, so what is in front of a backdrop is never missed for it. It draws
+	/// as any other item does.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub locked: bool,
+	/// The outline it is cut to and the border along it, applied to its rect
+	/// before every filter, so a shadow follows the shape.
+	#[serde(default, skip_serializing_if = "Shape::is_square")]
+	pub shape: Shape,
 	/// Trimmed from what its source's crop leaves, before every filter.
 	#[serde(default, skip_serializing_if = "Crop::is_none")]
 	pub crop: Crop,
@@ -1118,6 +1133,8 @@ impl Item {
 			source: source.into(),
 			rect,
 			visible: true,
+			locked: false,
+			shape: Shape::default(),
 			crop: Crop::default(),
 			filters: Vec::new(),
 			blend: Blend::Normal,
@@ -1143,6 +1160,8 @@ impl Item {
 				height: (self.rect.height + offset.height).max(0.0),
 			},
 			visible: self.visible,
+			locked: self.locked,
+			shape: self.shape,
 			crop: self.crop.then(&offset.crop),
 			filters,
 			blend: self.blend,
@@ -1183,6 +1202,65 @@ pub(crate) enum Settled {
 	Before,
 	At(Duration),
 	After,
+}
+
+/// The outline an item is cut to, and a border drawn inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shape {
+	/// How round each corner is, top-left, top-right, bottom-right, then
+	/// bottom-left, as a fraction of the item's shorter side: 0 is square,
+	/// and 0.5 on every corner makes a square item a circle.
+	#[serde(default, skip_serializing_if = "is_square")]
+	pub corners: [f32; 4],
+	/// How wide the border is in canvas pixels, inside the outline; 0 for none.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub border: f32,
+	/// The border's color.
+	#[serde(default = "white", skip_serializing_if = "is_white")]
+	pub color: Rgba,
+}
+
+impl Default for Shape {
+	fn default() -> Self {
+		Self {
+			corners: [0.0; 4],
+			border: 0.0,
+			color: white(),
+		}
+	}
+}
+
+impl Shape {
+	/// Square corners and no border, as an item is cut by default.
+	pub fn is_square(&self) -> bool {
+		is_square(&self.corners) && self.border == 0.0
+	}
+
+	fn validate(&self) -> Result<(), String> {
+		if !self.corners.iter().all(|corner| (0.0..=0.5).contains(corner)) {
+			return Err(format!(
+				"its corners are {:?}; each must be from 0 to 0.5 of its shorter side",
+				self.corners
+			));
+		}
+		if !self.border.is_finite() || self.border < 0.0 {
+			return Err(format!("its border is {} pixels wide", self.border));
+		}
+		Ok(())
+	}
+}
+
+fn is_square(corners: &[f32; 4]) -> bool {
+	*corners == [0.0; 4]
+}
+
+fn white() -> Rgba {
+	Rgba([u8::MAX; 4])
+}
+
+fn is_white(color: &Rgba) -> bool {
+	*color == white()
 }
 
 /// Where an item is at a moment after its scene goes on, as an offset from
@@ -2803,6 +2881,66 @@ background = "remove"
 		}
 	}
 
+	/// An item's lock and shape are written only when set, read back, and
+	/// refused out of range or on a source published independently.
+	#[test]
+	fn an_item_keeps_its_lock_and_shape() {
+		let mut collection = example();
+		let plain = collection.to_toml().unwrap();
+		assert!(!plain.contains("locked") && !plain.contains("shape"), "{plain}");
+
+		let item = &mut collection.scenes[0].items[0];
+		item.locked = true;
+		item.shape = Shape {
+			corners: [0.5, 0.5, 0.06, 0.06],
+			border: 4.0,
+			..Shape::default()
+		};
+		let text = collection.to_toml().unwrap();
+		assert!(text.contains("locked = true"), "{text}");
+		let shape = text
+			.lines()
+			.find(|line| line.contains("corners"))
+			.expect("the shape is written");
+		assert!(!shape.contains("color"), "a white border's color is left out: {shape}");
+		assert_eq!(Collection::from_toml(&text).unwrap(), collection);
+
+		let item = &collection.scenes[0].items[0];
+		for shape in [
+			Shape {
+				corners: [0.6, 0.0, 0.0, 0.0],
+				..item.shape
+			},
+			Shape {
+				border: -1.0,
+				..item.shape
+			},
+			Shape {
+				border: f32::NAN,
+				..item.shape
+			},
+		] {
+			let mut wrong = collection.clone();
+			wrong.scenes[0].items[0].shape = shape;
+			assert!(matches!(wrong.validate(), Err(Error::Invalid(_))), "{shape:?}");
+		}
+
+		let mut published = Collection::new();
+		published.sources.insert("cam".into(), Source::Camera { id: None });
+		published.published.insert("cam".into());
+		let shaped = Item {
+			shape: collection.scenes[0].items[0].shape,
+			..Item::new("cam", Rect::fill(&published.canvas))
+		};
+		published.scenes = vec![Scene {
+			items: vec![shaped],
+			..Scene::new("Main")
+		}];
+		assert!(published.validate().is_err(), "every player would have to cut it");
+		published.scenes[0].items[0].shape = Shape::default();
+		published.validate().unwrap();
+	}
+
 	/// A source's crop then an item's is one crop of the original picture.
 	#[test]
 	fn crops_compose() {
@@ -3075,14 +3213,14 @@ background = "remove"
 		);
 		refused(
 			&|collection| collection.top.push(Item::new("on air", fill)),
-			"the top layer places `on air`, which draws the program",
+			"an always-on-top layer shows `on air`, which draws the program",
 		);
 		refused(
 			&|collection| {
 				collection.scenes[2].items.push(Item::new("on air", fill));
 				collection.top.push(Item::new("a", fill));
 			},
-			"the top layer places `a`, which draws the program",
+			"an always-on-top layer shows `a`, which draws the program",
 		);
 		refused(
 			&|collection| {
@@ -3093,7 +3231,7 @@ background = "remove"
 				});
 				collection.top.push(Item::new("a", fill));
 			},
-			"with keyframes, but the top layer never goes on to start them",
+			"with keyframes, but an always-on-top layer never goes on to start them",
 		);
 		refused(
 			&|collection| {

@@ -45,10 +45,6 @@ small on-device model is a later quest, not a hosted one.
 Human check: living with it for a few streams. Whether it moves too often is
 a judgment no test makes.
 
-## Required
-
-- [The BUILD page](/quest/m0/ux/build.md) - the inspector's switch and the layer it moves
-
 ## Related
 
 - [moq-video's foreground app is pinned](/quest/m1/pin-capture-foreground.md) - when the app in front changes, and the key its slot is remembered under
