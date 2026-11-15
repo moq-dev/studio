@@ -1074,6 +1074,7 @@ impl Engine {
 			output: moq_video::render::output(&gpu.device),
 			publish: Some(publish.sources.clone()),
 			browser: browser(&gpu)?,
+			grants: grants(autosave.path())?,
 		});
 		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
 		compositor.fit(&collection)?;
@@ -3144,18 +3145,50 @@ fn browser(gpu: &Gpu) -> anyhow::Result<Option<moq_scene::browser::Helper>> {
 }
 
 /// Where browser sources keep their cookies and logins, whichever scene file
-/// is open: `moq-studio/browser` in the user's data directory, as the XDG base
-/// directories name it, since browser sources run on Linux only for now.
+/// is open: `moq-studio/browser` in the user's data directory, since browser
+/// sources run on Linux only for now.
 fn browser_profile() -> anyhow::Result<PathBuf> {
-	let data = match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+	Ok(xdg("XDG_DATA_HOME", ".local/share")?.join("moq-studio/browser"))
+}
+
+/// Where the system picker's grants for the scene file at `scene` are kept:
+/// `moq-studio/portal.toml` in the user's state directory, on Linux, the one
+/// platform with the picker.
+fn grants(scene: &Path) -> anyhow::Result<Option<moq_scene::Grants>> {
+	if !cfg!(target_os = "linux") {
+		return Ok(None);
+	}
+	let file = xdg("XDG_STATE_HOME", ".local/state")?.join("moq-studio/portal.toml");
+	Ok(Some(moq_scene::Grants::new(file, &grant_key(scene)?)))
+}
+
+/// The one path the scene file at `scene` keeps its grants under, however
+/// it was named: with `..` and symlinks resolved, so opening it another way
+/// shows no picker again. A scene file not written yet resolves as autosave
+/// will write it, through any dangling symlinks and then its directory, so it
+/// keeps the key it gets once written.
+fn grant_key(scene: &Path) -> std::io::Result<PathBuf> {
+	let scene = std::path::absolute(crate::autosave::resolve(scene)?)?;
+	if let Ok(scene) = std::fs::canonicalize(&scene) {
+		return Ok(scene);
+	}
+	let resolved = scene
+		.parent()
+		.zip(scene.file_name())
+		.and_then(|(dir, name)| Some(std::fs::canonicalize(dir).ok()?.join(name)));
+	Ok(resolved.unwrap_or(scene))
+}
+
+/// The XDG base directory `var` names, or `fallback` under the home directory.
+fn xdg(var: &str, fallback: &str) -> anyhow::Result<PathBuf> {
+	match std::env::var_os(var).map(PathBuf::from) {
 		// The spec ignores a relative one.
-		Some(data) if data.is_absolute() => data,
+		Some(dir) if dir.is_absolute() => Ok(dir),
 		_ => {
-			let home = std::env::var_os("HOME").context("no HOME to keep the browser profile in")?;
-			PathBuf::from(home).join(".local/share")
+			let home = std::env::var_os("HOME").with_context(|| format!("no HOME to find {var}'s default in"))?;
+			Ok(PathBuf::from(home).join(fallback))
 		}
-	};
-	Ok(data.join("moq-studio/browser"))
+	}
 }
 
 /// Run a source on its own thread until its feed is dropped, or fail the
@@ -3221,6 +3254,35 @@ mod tests {
 
 	/// Bounds each step, so a stall fails rather than hangs.
 	const TIMEOUT: Duration = Duration::from_secs(30);
+
+	/// One scene file keeps one grant key however it is named, written yet
+	/// or not.
+	#[cfg(unix)]
+	#[test]
+	fn a_scene_file_has_one_grant_key_however_it_is_named() {
+		let dir = tempfile::tempdir().unwrap();
+		let dir = std::fs::canonicalize(dir.path()).unwrap();
+		std::fs::create_dir(dir.join("sub")).unwrap();
+		std::os::unix::fs::symlink(dir.join("sub"), dir.join("link")).unwrap();
+		let scene = dir.join("show.toml");
+		// A dangling chain of links, which autosave creates the scene file through.
+		std::os::unix::fs::symlink("../show.toml", dir.join("sub/middle.toml")).unwrap();
+		std::os::unix::fs::symlink("link/middle.toml", dir.join("chain.toml")).unwrap();
+		let names = [
+			scene.clone(),
+			dir.join("sub/../show.toml"),
+			dir.join("link/../show.toml"),
+			dir.join("chain.toml"),
+		];
+
+		let unwritten: Vec<_> = names.iter().map(|name| grant_key(name).unwrap()).collect();
+		std::fs::write(&scene, "").unwrap();
+		std::os::unix::fs::symlink(&scene, dir.join("alias.toml")).unwrap();
+		for name in names.iter().chain([&dir.join("alias.toml")]) {
+			assert_eq!(grant_key(name).unwrap(), scene, "{name:?}");
+		}
+		assert!(unwritten.iter().all(|key| *key == scene), "{unwritten:?}");
+	}
 
 	/// How the tests start a studio, live on `relays`.
 	fn launch(gpu: Gpu, relays: Vec<Relay>, recordings: &Path) -> Launch {

@@ -89,6 +89,7 @@ impl Studio {
 			dir: dir.path().to_path_buf(),
 			output: moq_video::render::output(&device),
 			publish: None,
+			grants: None,
 			browser: Some(helper.clone()),
 		});
 		for driver in sources.sync(&collection) {
