@@ -11,6 +11,7 @@ default:
 # Lint the repository tooling, the quest tree, the join page, and the workspace.
 check:
     sh/check-moq-pin.sh
+    sh/check-ignore-recipes.sh
     quest check
     actionlint
     shellcheck .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh
