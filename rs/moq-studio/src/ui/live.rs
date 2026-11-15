@@ -974,7 +974,7 @@ impl Panels {
 				match form.saved(stream.saved()) {
 					Ok(saved) => {
 						let tokens = form.tokens();
-						form.saving = Some(save(stream, saved, tokens, ui.ctx(), &self.runtime));
+						form.saving = Some(save(stream, saved, tokens, ui.ctx()));
 						form.note = None;
 					}
 					Err(err) => form.note = Some(err),
@@ -1218,17 +1218,12 @@ impl Form {
 }
 
 /// Keep `tokens` and save `saved` as `stream`'s, on a thread of their own,
-/// since the credential store blocks, asking `ctx` for a frame once done,
-/// which applies it even while the window is hidden.
-fn save(
-	mut stream: Stream,
-	saved: Saved,
-	tokens: Vec<Token>,
-	ctx: &egui::Context,
-	runtime: &tokio::runtime::Handle,
-) -> Task<Result<Stream, String>> {
+/// since the credential store blocks, asking `ctx` for a frame once the
+/// result is in, which applies it even while the window is hidden.
+fn save(mut stream: Stream, saved: Saved, tokens: Vec<Token>, ctx: &egui::Context) -> Task<Result<Stream, String>> {
 	let ctx = ctx.clone();
-	let task = Task::spawn(runtime, move || {
+	let (send, recv) = std::sync::mpsc::channel();
+	let spawned = std::thread::Builder::new().name("save".into()).spawn(move || {
 		let result = (|| -> anyhow::Result<Stream> {
 			for (url, token) in &tokens {
 				stream.credentials().set(url, token.as_deref())?;
@@ -1236,9 +1231,12 @@ fn save(
 			stream.save(saved)?;
 			Ok(stream)
 		})();
+		let _ = send.send(result.map_err(|err| format!("{err:#}")));
+		// After the send, so the frame it asks for finds the result.
 		ctx.request_repaint();
-		let result = result.map_err(|err| format!("{err:#}"));
-		async move { result }
 	});
-	task.unwrap_or_else(|err| Task::Done(Err(format!("cannot save: {err}"))))
+	match spawned {
+		Ok(_) => Task::Running(recv),
+		Err(err) => Task::Done(Err(format!("cannot save: {err}"))),
+	}
 }
