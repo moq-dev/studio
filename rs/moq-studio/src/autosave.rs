@@ -612,7 +612,7 @@ fn sync(dir: &Path) -> std::io::Result<()> {
 
 /// The file a chain of symlinks at `path` ends in, which need not exist yet,
 /// so a save replaces that file and every link survives.
-fn resolve(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
 	let mut path = path.to_path_buf();
 	// Linux's own limit on links followed in one lookup.
 	for _ in 0..40 {
