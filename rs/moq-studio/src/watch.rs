@@ -75,6 +75,7 @@ pub fn run(client: moq_tokio::connect::Config, quic: moq_tokio::quic::Config, ur
 		dir: std::env::current_dir()?,
 		output: moq_video::render::output(&gpu.device),
 		publish: None,
+		grants: None,
 		browser: None,
 	});
 	let collection = collection(None, CANVAS)?;
