@@ -29,9 +29,9 @@ nvidia = ["moq-video/nvidia"]
 openh264 = ["moq-video/openh264"]
 # Intel/AMD VAAPI hardware codecs (Linux), with libva loaded at runtime.
 vaapi = ["moq-video/vaapi"]
-# PipeWire cameras, drawn without a copy, audio through the sound server, and
-# the virtual camera as a PipeWire node. Wayland screens and windows are not
-# reachable yet: display and window sources capture X11 only.
+# PipeWire cameras, drawn without a copy, audio through the sound server, the
+# virtual camera as a PipeWire node, and displays and windows picked in the
+# desktop's screen-sharing picker, the way to share a Wayland screen.
 pipewire = ["capture", "moq-scene/pipewire", "dep:pipewire"]
 # What every packaged build ships: each backend its platform loads without a
 # system library at startup. `pipewire` is not one; the Flatpak, which bundles

@@ -376,6 +376,7 @@ mod tests {
 			output: moq_video::Output::Cpu,
 			browser: None,
 			publish: None,
+			grants: None,
 		});
 		// Not run: the test feeds each guest's strip itself.
 		drop(sources.sync(&collection));
