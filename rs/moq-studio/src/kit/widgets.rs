@@ -67,13 +67,6 @@ pub(super) fn tooltip(response: &Response, open: bool, name: &str, key: Option<&
 }
 
 /// What an icon button looks like at rest.
-#[cfg_attr(
-	not(test),
-	expect(
-		dead_code,
-		reason = "the pages draw with it: quest/m0/ux/live.md and the rest of quest/m0/ux"
-	)
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Look {
 	/// Just the icon, dim, until the pointer is on it.
@@ -120,13 +113,6 @@ impl<'a> IconButton<'a> {
 		self
 	}
 
-	#[cfg_attr(
-		not(test),
-		expect(
-			dead_code,
-			reason = "the pages draw with it: quest/m0/ux/live.md and the rest of quest/m0/ux"
-		)
-	)]
 	pub fn look(mut self, look: Look) -> Self {
 		self.look = look;
 		self
@@ -187,6 +173,95 @@ impl Widget for IconButton<'_> {
 	}
 }
 
+/// A quick action: an icon and a word on a control, such as the panic key
+/// with the scene it cuts to, named by its tooltip with its key.
+pub struct Quick<'a> {
+	icon: Icon,
+	text: &'a str,
+	name: &'a str,
+	key: Option<&'a str>,
+	note: Option<&'a str>,
+	look: Look,
+	width: f32,
+	pose: Option<Pose>,
+}
+
+impl<'a> Quick<'a> {
+	/// `icon` and `text`, `width` points wide, named `name` in its tooltip.
+	pub fn new(icon: Icon, text: &'a str, name: &'a str, width: f32) -> Self {
+		Self {
+			icon,
+			text,
+			name,
+			key: None,
+			note: None,
+			look: Look::Boxed,
+			width,
+			pose: None,
+		}
+	}
+
+	/// The key that does the same, shown in the tooltip.
+	pub fn key(mut self, key: Option<&'a str>) -> Self {
+		self.key = key;
+		self
+	}
+
+	/// Say `note` under the name in the tooltip, such as what it does.
+	pub fn note(mut self, note: Option<&'a str>) -> Self {
+		self.note = note;
+		self
+	}
+
+	pub fn look(mut self, look: Look) -> Self {
+		self.look = look;
+		self
+	}
+
+	/// Draw it as though touched so, for the gallery.
+	#[cfg(test)]
+	pub fn pose(mut self, pose: Pose) -> Self {
+		self.pose = Some(pose);
+		self
+	}
+}
+
+impl Widget for Quick<'_> {
+	fn ui(self, ui: &mut Ui) -> Response {
+		let (rect, response) = ui.allocate_exact_size(vec2(self.width, 30.0), Sense::click());
+		response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.name));
+		if ui.is_rect_visible(rect) {
+			let pose = self.pose.unwrap_or_else(|| Pose::of(&response));
+			let (fill, stroke, ink) = match (self.look, pose) {
+				(Look::Cue, Pose::Press) => (CUE.gamma_multiply(0.25), CUE, CUE),
+				(Look::Cue, Pose::Hover) => (CUE.gamma_multiply(0.12), CUE, CUE),
+				(Look::Cue, _) => (Color32::TRANSPARENT, CUE, CUE),
+				(_, Pose::Hover | Pose::Press) => (P3, LINE_HOVER, TEXT),
+				(_, _) => (P2, LINE, TEXT),
+			};
+			let ink = if pose == Pose::Off {
+				ink.gamma_multiply(0.4)
+			} else {
+				ink
+			};
+			ui.painter()
+				.rect(rect, RADIUS, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+			let font = super::display(13.0);
+			let room = rect.width() - 22.0 - 16.0 - 6.0;
+			let galley = caps_galley(ui.painter(), self.text, font, ink, Some(room));
+			let width = 16.0 + 6.0 + galley.size().x;
+			let left = rect.center().x - width / 2.0;
+			let icon = Rect::from_center_size(pos2(left + 8.0, rect.center().y), Vec2::splat(16.0));
+			self.icon.paint(ui, icon, 16.0, ink);
+			let at = pos2(left + 22.0, rect.center().y - galley.size().y / 2.0);
+			ui.painter().galley(at, galley, ink);
+		}
+		let open = egui::Tooltip::should_show_tooltip(&response, true);
+		tooltip(&response, open, self.name, self.key, self.note);
+		response
+	}
+}
+
 /// egui's button, with `icon` before `text`.
 pub fn button(icon: Icon, text: &str) -> egui::Button<'_> {
 	egui::Button::image_and_text(icon.image(14.0, TEXT), text)
@@ -227,7 +302,7 @@ impl<'a> Pill<'a> {
 		not(test),
 		expect(
 			dead_code,
-			reason = "the pages draw with it: quest/m0/ux/live.md and the rest of quest/m0/ux"
+			reason = "the pages draw with it: the rest of quest/m0/ux, such as go-live.md"
 		)
 	)]
 	pub fn value(mut self, value: &'a str) -> Self {
@@ -519,13 +594,6 @@ fn gradient(painter: &egui::Painter, rect: Rect, corner: u8, top: Color32, botto
 }
 
 /// Which way a meter runs.
-#[cfg_attr(
-	not(test),
-	expect(
-		dead_code,
-		reason = "the pages draw with it: quest/m0/ux/live.md and the rest of quest/m0/ux"
-	)
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Run {
 	/// Left to right, as a strip's meter in a row.
@@ -558,13 +626,6 @@ impl Meter {
 	}
 
 	/// Run `run`, `size` points along it and across.
-	#[cfg_attr(
-		not(test),
-		expect(
-			dead_code,
-			reason = "the pages draw with it: quest/m0/ux/live.md and the rest of quest/m0/ux"
-		)
-	)]
 	pub fn run(mut self, run: Run, along: f32, across: f32) -> Self {
 		self.run = run;
 		self.size = match run {
@@ -867,7 +928,7 @@ impl Tally {
 }
 
 /// `text` laid out in capitals, spaced, in `font`, cut to `width` if given.
-fn caps_galley(
+pub fn caps_galley(
 	painter: &egui::Painter,
 	text: &str,
 	font: egui::FontId,
@@ -934,6 +995,8 @@ pub struct Pad<'a> {
 	/// Why the scene cannot be taken, if it cannot.
 	refused: Option<&'a str>,
 	width: f32,
+	/// The thumbnail's shape, width over height: the show's.
+	shape: f32,
 	pose: Option<Pose>,
 }
 
@@ -946,6 +1009,7 @@ impl<'a> Pad<'a> {
 			tally: Tally::Off,
 			refused: None,
 			width: 124.0,
+			shape: 16.0 / 9.0,
 			pose: None,
 		}
 	}
@@ -967,11 +1031,8 @@ impl<'a> Pad<'a> {
 		self
 	}
 
-	/// Shown, but not takeable, for `why`.
-	#[cfg_attr(
-		not(test),
-		expect(dead_code, reason = "the LIVE page's pads, where a click takes: quest/m0/ux/live.md")
-	)]
+	/// Shown, but not takeable, for `why`. It still hears a click, such as
+	/// for its menu, which its caller does not take it on.
 	pub fn refused(mut self, why: Option<&'a str>) -> Self {
 		self.refused = why;
 		self
@@ -983,6 +1044,19 @@ impl<'a> Pad<'a> {
 		self
 	}
 
+	/// The thumbnail's shape, width over height, such as a portrait show's.
+	pub fn shape(mut self, shape: f32) -> Self {
+		if shape.is_finite() && shape > 0.0 {
+			self.shape = shape;
+		}
+		self
+	}
+
+	/// How tall a pad `width` wide of a show of `shape` is.
+	pub fn height(width: f32, shape: f32) -> f32 {
+		4.0 + ((width - 8.0) / shape).round() + 29.0
+	}
+
 	#[cfg(test)]
 	pub fn pose(mut self, pose: Pose) -> Self {
 		self.pose = Some(pose);
@@ -992,17 +1066,11 @@ impl<'a> Pad<'a> {
 
 impl Widget for Pad<'_> {
 	fn ui(self, ui: &mut Ui) -> Response {
-		let picture = vec2(self.width - 8.0, ((self.width - 8.0) * 9.0 / 16.0).round());
+		let picture = vec2(self.width - 8.0, ((self.width - 8.0) / self.shape).round());
 		let size = vec2(self.width, 4.0 + picture.y + 29.0);
-		let sense = if self.refused.is_some() {
-			Sense::hover()
-		} else {
-			Sense::click()
-		};
-		let (rect, response) = ui.allocate_exact_size(size, sense);
-		response.widget_info(|| {
-			WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), self.tally == Tally::Air, self.name)
-		});
+		let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+		let enabled = ui.is_enabled() && self.refused.is_none();
+		response.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, self.tally == Tally::Air, self.name));
 		if ui.is_rect_visible(rect) {
 			let pose = self.pose.unwrap_or_else(|| Pose::of(&response));
 			let painter = ui.painter();

@@ -68,10 +68,6 @@ Human check: a real stream to a real relay with the maintainer's token,
 ended and started again; the credential store's own prompt on each desktop;
 and opening the app from a file manager with no terminal.
 
-## Required
-
-- [One live picture](/quest/m0/ux/live.md) - the live control, the health dot, and the frame this drives
-
 ## Related
 
 - [Destinations](/quest/m0/destinations.md) - RTMP and WHIP rows in this sheet

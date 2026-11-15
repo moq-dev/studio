@@ -28,5 +28,4 @@ see the bar.
 
 ## Required
 
-- [One live picture](/quest/m0/ux/live.md) - the widgets and state the bar repeats
 - [The studio hides itself and private apps from capture](/quest/m1/privacy-shield.md) - the bar must not appear on stream

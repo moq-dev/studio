@@ -360,7 +360,8 @@ enum Action {
 	AudioScenes(Vec<AudioScene>, String),
 	/// Listen to the audio scene by this name, or stop.
 	Listen(Option<String>),
-	Preview(String),
+	/// Take the scene by this name on air.
+	Take(String),
 }
 
 /// What a frame's nodes are drawn from, and what they leave for the wires.
@@ -499,10 +500,7 @@ impl Panels {
 			Action::Scene(action) => self.scene_action(&mut state, action),
 			Action::AudioScenes(scenes, label) => edit(&mut state, label, None, |draft| draft.set_audio_scenes(scenes)),
 			Action::Listen(scene) => self.listen(&mut state, scene.as_deref()),
-			Action::Preview(name) => {
-				state.compositor.set_preview(Some(name));
-				Ok(())
-			}
+			Action::Take(name) => crate::controls::take(&mut state, &name).map(drop),
 		};
 		drop(state);
 		self.check(result);
@@ -522,8 +520,7 @@ impl Panels {
 					Node::Scene(name) => self.scene_node(ui, pass, name),
 					Node::Top => {
 						let label = ui.strong("Top layer");
-						let label = label
-							.on_hover_text("Drawn over program, and over a scene of the program's size in preview");
+						let label = label.on_hover_text("Drawn over every scene on program");
 						(label.rect.center().y, None)
 					}
 					Node::Audio(name) => self.audio_node(ui, pass, name),
@@ -610,7 +607,7 @@ impl Panels {
 		(header.response.rect.center().y, Some(waveform.rect.center().y))
 	}
 
-	/// A scene's name, which picks it for preview, and its settings.
+	/// A scene's name, which takes it on air, and its settings.
 	fn scene_node(&mut self, ui: &mut Ui, pass: &mut Pass<'_>, name: &str) -> (f32, Option<f32>) {
 		let state = pass.state;
 		let collection = state.collection();
@@ -619,10 +616,10 @@ impl Panels {
 		};
 		let scene = &collection.scenes[index];
 		let header = ui.horizontal(|ui| {
-			let previewed = state.compositor.preview_scene() == Some(name);
-			let label = ui.selectable_label(previewed, egui::RichText::new(name).strong());
-			if label.on_hover_text("Preview it").clicked() {
-				pass.action = Some(Action::Preview(name.to_string()));
+			let on_air = state.compositor.program_scene() == Some(name);
+			let label = ui.selectable_label(on_air, egui::RichText::new(name).strong());
+			if label.on_hover_text("Take it on air").clicked() {
+				pass.action = Some(Action::Take(name.to_string()));
 			}
 			if state.compositor.program_scene() == Some(name) {
 				ui.add(kit::Tag::new("On air", kit::Tally::Air));

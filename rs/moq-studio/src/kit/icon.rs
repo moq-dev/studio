@@ -5,10 +5,6 @@
 use egui::{Color32, ImageSource, include_image};
 
 /// An icon, by its role in the studio.
-#[cfg_attr(
-	not(test),
-	expect(dead_code, reason = "the title bar and pages draw the rest: quest/m0/ux/live.md")
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
 	Undo,
@@ -22,6 +18,10 @@ pub enum Icon {
 	Shown,
 	Hidden,
 	Panic,
+	#[cfg_attr(
+		not(test),
+		expect(dead_code, reason = "Studio mode's switch: quest/m0/ux/studio-mode.md")
+	)]
 	StudioMode,
 	Add,
 	Close,
@@ -34,14 +34,26 @@ pub enum Icon {
 	Play,
 	Stop,
 	Reload,
+	#[cfg_attr(not(test), expect(dead_code, reason = "a guest's invite: quest/m0/ux/guests.md"))]
 	Link,
+	#[cfg_attr(
+		not(test),
+		expect(dead_code, reason = "the selection's toolbar: quest/m0/ux/build.md")
+	)]
 	More,
+	MicMuted,
+	Minimize,
+	Maximize,
+	Live,
+	Build,
+	Mix,
+	Review,
 }
 
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 25] = [
+	pub const ALL: [Self; 32] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -67,6 +79,13 @@ impl Icon {
 		Self::Reload,
 		Self::Link,
 		Self::More,
+		Self::MicMuted,
+		Self::Minimize,
+		Self::Maximize,
+		Self::Live,
+		Self::Build,
+		Self::Mix,
+		Self::Review,
 	];
 
 	fn source(self) -> ImageSource<'static> {
@@ -96,6 +115,13 @@ impl Icon {
 			Self::Reload => include_image!("../../assets/icons/rotate-ccw.svg"),
 			Self::Link => include_image!("../../assets/icons/link.svg"),
 			Self::More => include_image!("../../assets/icons/chevron-down.svg"),
+			Self::MicMuted => include_image!("../../assets/icons/mic-off.svg"),
+			Self::Minimize => include_image!("../../assets/icons/minus.svg"),
+			Self::Maximize => include_image!("../../assets/icons/square.svg"),
+			Self::Live => include_image!("../../assets/icons/video.svg"),
+			Self::Build => include_image!("../../assets/icons/layers.svg"),
+			Self::Mix => include_image!("../../assets/icons/sliders-vertical.svg"),
+			Self::Review => include_image!("../../assets/icons/film.svg"),
 		}
 	}
 
