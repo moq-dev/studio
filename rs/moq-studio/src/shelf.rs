@@ -31,8 +31,10 @@ pub struct Shelf {
 
 #[derive(Default)]
 struct Shared {
-	/// When the folder was last listed, or is being listed now.
+	/// When the folder was last listed.
 	listed: Option<Instant>,
+	/// Whether a listing runs now, so a slow disk never has two at once.
+	listing: bool,
 	cards: Arc<Listing>,
 	lengths: Lengths,
 	/// Never listed again, for the window's views.
@@ -101,8 +103,8 @@ impl Shelf {
 	/// is a [`PERIOD`] old.
 	pub fn cards(&self) -> Arc<Listing> {
 		let mut shared = self.shared.lock().unwrap();
-		if !shared.seeded && shared.listed.is_none_or(|listed| listed.elapsed() >= PERIOD) {
-			shared.listed = Some(Instant::now());
+		if !shared.seeded && !shared.listing && shared.listed.is_none_or(|listed| listed.elapsed() >= PERIOD) {
+			shared.listing = true;
 			let (dir, show, kept) = (self.dir.clone(), self.show.clone(), self.shared.clone());
 			let lengths = shared.lengths.clone();
 			self.runtime.spawn_blocking(move || {
@@ -110,6 +112,7 @@ impl Shelf {
 				let mut shared = kept.lock().unwrap();
 				shared.cards = Arc::new(listing);
 				shared.lengths = lengths;
+				shared.listing = false;
 				// Counted from when it finished, so a slow disk is not asked again at once.
 				shared.listed = Some(Instant::now());
 			});

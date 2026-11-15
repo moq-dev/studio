@@ -43,7 +43,7 @@ pub(super) struct Review {
 }
 
 /// What a drag on the strip moves.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Grip {
 	/// The stretch's start or end.
 	From,
@@ -619,12 +619,7 @@ impl Panels {
 		);
 		let pointer = response.interact_pointer_pos().or(response.hover_pos());
 		if let Some(pointer) = pointer {
-			let near = |x: f32| (pointer.x - x).abs() <= GRAB;
-			let over = match () {
-				_ if near(from_x) => Some(Grip::From),
-				_ if near(to_x) => Some(Grip::To),
-				_ => None,
-			};
+			let over = grip_at(pointer.x, from_x, to_x);
 			if over.is_some() || self.review.grip.is_some_and(|grip| grip != Grip::Head) {
 				ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
 			}
@@ -732,13 +727,33 @@ impl Panels {
 			ui.painter()
 				.text(cell.center(), Align2::CENTER_CENTER, label, kit::ui_medium(12.5), ink);
 		}
-		ui.painter().text(
-			segments.left_bottom() + vec2(0.0, 12.0),
-			Align2::LEFT_CENTER,
-			"No sound below 100%",
-			kit::ui(11.5),
-			kit::DIM,
-		);
+		// With more than one replay source, which one plays takes the note's
+		// row, and the Replay button's note says what the row said.
+		let replays = self.replay_sources(replay);
+		match (&mut replay.into, replays.len() > 1) {
+			(Some(into), true) => {
+				let row = Rect::from_min_size(segments.left_bottom() + vec2(0.0, 2.0), vec2(speed.width(), 20.0));
+				ui.scope_builder(UiBuilder::new().max_rect(row), |ui| {
+					egui::ComboBox::from_id_salt("replay into")
+						.selected_text(format!("Into {into}"))
+						.width(speed.width())
+						.show_ui(ui, |ui| {
+							for name in &replays {
+								ui.selectable_value(into, name.clone(), name.as_str());
+							}
+						});
+				});
+			}
+			_ => {
+				ui.painter().text(
+					segments.left_bottom() + vec2(0.0, 12.0),
+					Align2::LEFT_CENTER,
+					"No sound below 100%",
+					kit::ui(11.5),
+					kit::DIM,
+				);
+			}
+		}
 
 		let buttons = rect.with_min_x(speed.right() + 24.0);
 		let gap = 14.0;
@@ -747,13 +762,16 @@ impl Panels {
 		let save_rect = buttons.with_min_x(play_rect.right() + gap);
 		let (_, length) = replay.stretch.span(self.review.now()).unwrap_or_default();
 		let seconds = format!("{} s", length.as_secs_f32().round().max(1.0));
-		let into = self.replay_into(replay);
-		let pace = match replay.speed {
+		let into = replay.into.as_ref().map(|into| format!("`{into}`"));
+		let mut pace = match replay.speed {
 			1.0 => "at full speed".to_string(),
 			0.5 => "at half speed".to_string(),
 			0.25 => "at quarter speed".to_string(),
 			speed => format!("at {:.0}%", speed * 100.0),
 		};
+		if replays.len() > 1 && replay.speed < 1.0 {
+			pace.push_str(" with no sound");
+		}
 		let play_note = match &refusals.replay {
 			Some(why) => why.clone(),
 			None => format!(
@@ -791,23 +809,21 @@ impl Panels {
 		}
 	}
 
-	/// The replay source a replay plays in, named.
-	fn replay_into(&self, replay: &mut controls::Replay) -> Option<String> {
+	/// The show's replay sources, keeping what `replay` plays in one of them:
+	/// the first, unless it names another.
+	fn replay_sources(&self, replay: &mut controls::Replay) -> Vec<String> {
 		let state = self.engine.state.lock().unwrap();
-		let mut replays = state
+		let replays: Vec<String> = state
 			.collection()
 			.sources
 			.iter()
 			.filter(|(_, source)| matches!(source, Source::Replay))
-			.map(|(name, _)| name.clone());
-		let first = replays.next()?;
-		let picked = replay
-			.into
-			.clone()
-			.filter(|into| *into == first || replays.any(|name| name == *into));
-		let into = picked.unwrap_or(first);
-		replay.into = Some(into.clone());
-		Some(format!("`{into}`"))
+			.map(|(name, _)| name.clone())
+			.collect();
+		if replay.into.as_ref().is_none_or(|into| !replays.contains(into)) {
+			replay.into = replays.first().cloned();
+		}
+		replays
 	}
 
 	/// This show's recordings and clips as cards, with the folder below.
@@ -1182,6 +1198,20 @@ fn ages(stretch: replay::Stretch, now: Instant) -> (Duration, Duration) {
 	}
 }
 
+/// Which handle a press at `x` takes, given where the stretch's start and end
+/// are drawn. Where both are in reach, as when a stretch has aged out and both
+/// sit on the strip's oldest edge, the one on the press's side, so the end can
+/// always be dragged free.
+fn grip_at(x: f32, from_x: f32, to_x: f32) -> Option<Grip> {
+	let near = |at: f32| (x - at).abs() <= GRAB;
+	match (near(from_x), near(to_x)) {
+		(true, true) if x < (from_x + to_x) / 2.0 => Some(Grip::From),
+		(true, true) | (false, true) => Some(Grip::To),
+		(true, false) => Some(Grip::From),
+		(false, false) => None,
+	}
+}
+
 /// The part of a `texture` that covers a rect of `room`'s shape, centered.
 fn cover(texture: Vec2, room: Vec2) -> Rect {
 	let (texture, room) = (texture.x / texture.y.max(1.0), room.x / room.y.max(1.0));
@@ -1287,6 +1317,20 @@ mod tests {
 		assert_eq!(clock(Duration::from_secs(8)), "0:08");
 		assert_eq!(clock(Duration::from_secs(52 * 60 + 10)), "52:10");
 		assert_eq!(clock(Duration::from_secs(2 * 3600 + 10 * 60 + 44)), "2:10:44");
+	}
+
+	/// Each handle is taken near it, and where both are in reach, the one on
+	/// the press's side: an aged-out stretch's end, drawn on its start at the
+	/// strip's oldest edge, is still taken by a press just right of it.
+	#[test]
+	fn a_press_takes_the_handle_on_its_side() {
+		assert_eq!(grip_at(100.0, 100.0, 300.0), Some(Grip::From));
+		assert_eq!(grip_at(305.0, 100.0, 300.0), Some(Grip::To));
+		assert_eq!(grip_at(200.0, 100.0, 300.0), None);
+		assert_eq!(grip_at(24.0, 20.0, 20.0), Some(Grip::To));
+		assert_eq!(grip_at(16.0, 20.0, 20.0), Some(Grip::From));
+		assert_eq!(grip_at(98.0, 100.0, 106.0), Some(Grip::From));
+		assert_eq!(grip_at(104.0, 100.0, 106.0), Some(Grip::To));
 	}
 
 	/// A wide picture in a narrow room is cut at its sides, a tall one at its

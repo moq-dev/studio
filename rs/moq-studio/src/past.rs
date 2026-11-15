@@ -9,6 +9,7 @@
 //! loudest sample of each packet.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::Poll;
 use std::time::Duration;
@@ -25,6 +26,10 @@ const PERIOD: Duration = Duration::from_secs(1);
 
 /// How long the thread keeps going once the page stops asking.
 const LINGER: Duration = Duration::from_secs(2);
+
+/// The last [`Picture::id`] handed out, shared by every worker the page
+/// starts, since the window keeps textures across them.
+static LAST_ID: AtomicU64 = AtomicU64::new(0);
 
 /// How wide a picture is decoded: enough for the page's large picture.
 const WIDTH: u32 = 480;
@@ -182,7 +187,6 @@ struct Decoding {
 	decoder: Option<moq_video::decode::Decoder>,
 	/// By the keyframe's timestamp, in microseconds on its broadcast's timeline.
 	pictures: BTreeMap<u128, Arc<Picture>>,
-	next: u64,
 	/// The same for the sound: what it is of, its decoder, and each group's
 	/// peaks by the group's sequence.
 	sound_key: Option<(Of, String, hang::catalog::AudioConfig)>,
@@ -264,10 +268,9 @@ impl Decoding {
 					let Some(rgba) = self.decode(config, &frame)? else {
 						continue;
 					};
-					self.next += 1;
 					let size = rgba.size();
 					Arc::new(Picture {
-						id: self.next,
+						id: LAST_ID.fetch_add(1, Ordering::Relaxed) + 1,
 						at: at(frame.timestamp),
 						size: [size.width as usize, size.height as usize],
 						rgba: rgba.into_data(),

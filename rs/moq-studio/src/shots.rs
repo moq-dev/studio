@@ -15,6 +15,7 @@ use std::time::Duration;
 use eframe::egui_wgpu;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use moq_scene::Source;
 use moq_scene::source::Status;
 
 use crate::fx::Effects;
@@ -58,9 +59,11 @@ enum View {
 	/// pointer on undo, which names the mute.
 	Hover,
 	/// REVIEW, with this show's recordings and clips, and if `picked`, the
-	/// last 30 seconds held and a stretch picked.
+	/// last 30 seconds held and a stretch picked. With `replays`, the show
+	/// has two replay sources to pick between.
 	Review {
 		picked: bool,
+		replays: bool,
 	},
 }
 
@@ -122,11 +125,14 @@ views! {
 	mix_compact: Still, Open::Studio { view: View::Page(Page::Mix), size: HALF, show: "show.toml" };
 	/// REVIEW off air: without a relay the program keeps no past, which the
 	/// strip and both actions say, beside this show's recordings and clips.
-	review: Still, studio(View::Review { picked: false });
+	review: Still, studio(View::Review { picked: false, replays: false });
 	/// REVIEW with the last 30 seconds held: a stretch picked between the
 	/// handles, the head inside it, the picture under the head large, and
 	/// Replay saying why it cannot play without a replay source.
-	review_picked: Still, studio(View::Review { picked: true });
+	review_picked: Still, studio(View::Review { picked: true, replays: false });
+	/// REVIEW on a show with two replay sources: which one Replay plays in is
+	/// picked under the speed, in place of its note.
+	review_into: Still, studio(View::Review { picked: true, replays: true });
 	/// Settings' Recording tab: the folder, and what a recording holds.
 	recording: Still, studio(View::Setting(Setting::Recording));
 	graph: Still, studio(View::Setting(Setting::Graph));
@@ -322,8 +328,12 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			setup::Setup::new(launch(gpu), "show.toml".into(), runtime.handle().clone()).unwrap(),
 		)),
 		Open::Kit { .. } => unreachable!("drawn without an engine"),
-		Open::Studio { show, .. } => {
-			std::fs::copy(shows.join(show), "show.toml").unwrap();
+		Open::Studio { show, view, .. } => {
+			let mut text = std::fs::read_to_string(shows.join(show)).unwrap();
+			if let View::Review { replays: true, .. } = view {
+				text.push_str("\n[sources.replay]\nkind = \"replay\"\n\n[sources.slowmo]\nkind = \"replay\"\n");
+			}
+			std::fs::write("show.toml", text).unwrap();
 			start(launch(gpu), runtime)
 		}
 	};
@@ -349,7 +359,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Setting(setting) => studio.open(*setting),
 		View::Health => studio.details(),
 		View::Hover => {}
-		View::Review { picked } => {
+		View::Review { picked, .. } => {
 			studio.turn(Page::Review);
 			studio.seed_shelf(shelf());
 			if *picked {
@@ -572,8 +582,11 @@ async fn settle(harness: &mut Harness<'_, Window>, engine: &engine::Engine) {
 		let rendered = engine.stats.rendered.load(Ordering::Relaxed);
 		let (started, framerate) = {
 			let state = engine.state.lock().unwrap();
+			// A replay source's track starts with its first replay, so one that
+			// idles has nothing to wait for.
 			let started = state.sources.iter().all(|(_, feed)| {
-				!matches!(feed.status(), Status::Starting) && !matches!(feed.track(), Some(Status::Starting))
+				!matches!(feed.status(), Status::Starting)
+					&& (matches!(feed.source(), Source::Replay) || !matches!(feed.track(), Some(Status::Starting)))
 			});
 			(started, u64::from(state.compositor.canvas().framerate))
 		};
