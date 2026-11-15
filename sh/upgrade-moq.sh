@@ -7,9 +7,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # FETCH_HEAD is moq-dev/moq's main once check-moq-main.sh has fetched it.
 rev="${1:-FETCH_HEAD}"
 
-# Fetches main, then refuses a revision off it.
-"$root/sh/check-moq-main.sh" "$rev"
-git -C "$root/moq" checkout --quiet --detach "$rev"
+# Fetches main, refuses a revision off it, and prints the commit it checked:
+# check out that ID, since checkout resolves a name tagging one commit and
+# naming a branch at another to the branch, not the tag the check saw.
+commit="$("$root/sh/check-moq-main.sh" "$rev")"
+git -C "$root/moq" checkout --quiet --detach "$commit"
 # Resolve without --locked: Cargo adds and prunes only what the new moq needs.
 cargo metadata --manifest-path "$root/Cargo.toml" --format-version 1 >/dev/null
 
