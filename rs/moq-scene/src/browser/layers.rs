@@ -2,8 +2,7 @@
 //! apart from it, such as a `<select>`'s list, drawn over it.
 
 use super::protocol::{Area, Layer};
-use crate::wgpu;
-use crate::wgpu::util::DeviceExt;
+use wgpu::util::DeviceExt;
 
 /// The formats a page arrives in: CEF's shared textures, and the uploads.
 const FORMATS: [wgpu::TextureFormat; 2] = [wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Bgra8Unorm];

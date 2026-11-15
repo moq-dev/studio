@@ -1,7 +1,5 @@
 //! Scale a texture down on the GPU, for the program's smaller rendition.
 
-use moq_video::render::wgpu;
-
 use crate::compositor::FORMAT;
 
 const SHADER: &str = r#"

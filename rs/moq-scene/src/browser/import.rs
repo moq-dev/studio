@@ -3,7 +3,6 @@
 use std::os::fd::OwnedFd;
 
 use super::protocol::Texture;
-use crate::wgpu;
 
 /// Copy the DMA-BUF `texture` describes, whose plane descriptors are `fds`,
 /// into a texture of the studio's own on `device`, waiting until the copy is

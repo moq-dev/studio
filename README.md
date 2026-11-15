@@ -306,11 +306,15 @@ A broadcast source, a guest's included, plays on its publisher's timestamps,
 so its sound and picture stay in sync through network jitter. It plays as far
 behind what arrives as the network's jitter needs, measured as it goes as
 `moq play --delay auto` does, plus 50 ms to hand its sound to the mix, up to
-2 s in all. Sound and picture each
-keep that schedule on their own: a sound stall leaves the picture playing,
-and the sound comes back on the clock, skipping what it missed; a picture
-stall leaves the sound playing, with the canvas showing the last picture
-meanwhile. Without audio, the picture plays 100 ms behind. Sources shows how
+2 s in all. When that delay moves, the sound speeds up or slows down by about
+a tenth until it is back on schedule, as `moq play`'s does, rather than
+skipping or falling silent: a move of 100 ms takes about a second. A move
+earlier by more than 200 ms skips, and one later by more than about 130 ms
+falls silent until the sound is due. Sound and picture each keep that
+schedule on their own: a sound stall leaves the picture playing, and the
+sound comes back on the clock, skipping what it missed by more than 200 ms
+and speeding up through the rest; a picture stall leaves the sound playing,
+with the canvas showing the last picture meanwhile. Without audio, the picture plays 100 ms behind. Sources shows how
 far behind each broadcast plays.
 
 ### Audio scenes
@@ -481,7 +485,7 @@ no sound has no strip in the Audio panel.
 Guests and phones join a room the studio owns on its relay, from a web page,
 and their camera and screen appear as broadcast sources. The page plays the
 show back to them, without their own voice. The room follows
-[moq-room](https://github.com/moq-dev/moq/tree/main/rs/moq-room): a guest
+[`@moq/room`](https://github.com/moq-dev/moq/tree/main/js/room): a guest
 named `alice` publishes `alice/camera.hang` and `alice/screen.hang` under it.
 Guests need a relay that verifies tokens, so run your own with
 [`moq auth serve`](https://doc.moq.dev/bin/cli) behind it, and a key that can
@@ -1227,8 +1231,8 @@ own viewers:
   published scene lists the program's audio, graded where the program writes
   it. Latency compares the two hosts' wall
   clocks, so keep both synced.
-- **Viewers**: each viewer that reports, with its round trip, latency, and
-  playout delay. The studio reads 64 at most per broadcast, a sample the grades
+- **Viewers**: each viewer that reports, with its round trip and latency.
+  The studio reads 64 at most per broadcast, a sample the grades
   rest on: it counts the rest, and a reader one frees goes to the next viewer
   to arrive.
 

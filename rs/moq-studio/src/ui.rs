@@ -12,7 +12,7 @@ use moq_scene::browser::Paint;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
 	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode,
-	Rect, Scene, Source, Thumbnail, Transition, Video, wgpu,
+	Rect, Scene, Source, Thumbnail, Transition, Video,
 };
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -3499,7 +3499,7 @@ fn broadcast_health(ui: &mut Ui, broadcast: &health::Published) {
 	egui::Grid::new(("viewers", &broadcast.name))
 		.striped(true)
 		.show(ui, |ui| {
-			for heading in ["Viewer", "Grade", "Round trip", "Latency", "Playout"] {
+			for heading in ["Viewer", "Grade", "Round trip", "Latency"] {
 				ui.strong(heading);
 			}
 			ui.end_row();
@@ -3514,7 +3514,6 @@ fn broadcast_health(ui: &mut Ui, broadcast: &health::Published) {
 				}
 				ui.label(or_unknown(viewer.rtt.map(millis)));
 				ui.label(or_unknown(viewer.latency.map(millis)));
-				ui.label(or_unknown(viewer.playout.map(millis)));
 				ui.end_row();
 			}
 		});

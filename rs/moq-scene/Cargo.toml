@@ -78,6 +78,8 @@ tracing = { workspace = true }
 # it builds wherever the studio does with no runtime library to download.
 tract-onnx = { version = "0.23.10", default-features = false }
 url = { workspace = true }
+# The compositor's device; moq-video's release, so its decoded textures share it.
+wgpu = { workspace = true }
 vello = "0.11"
 # Decompresses an overlay's WOFF and WOFF2 fonts to check them. Already in the
 # graph through Blitz's `woff` feature.

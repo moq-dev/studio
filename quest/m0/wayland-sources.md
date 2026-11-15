@@ -11,9 +11,10 @@ sources capture only X11 and XWayland.
 
 Decided 2026-10-26 (maintainer):
 
-- **Token:** the portal restore token is persisted, which
-  [Linux capture parity](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-linux.md) makes possible in
-  moq-video. This quest consumes it.
+- **Token:** the portal restore token is persisted, through moq-video's
+  `capture::portal::Selection::restore_token` and `with_restore_token`
+  ([moq-dev/moq#8562](https://github.com/moq-dev/moq/pull/8562)), which the
+  studio's pin includes.
 - **Storage:** the token lives in per-machine state (the XDG state directory,
   keyed by scene collection and source), never in the scene file, so the scene
   file stays portable and diffable. On another machine, or when the portal
@@ -25,10 +26,6 @@ Add portal-picked display and window sources beside the id-selected
 `Source::Display` and `Source::Window` (`rs/moq-scene/src/collection.rs`), in
 the Sources and Devices panels and guided setup, and update `README.md`, which says display and window sources are
 X11-only.
-
-## Required
-
-- [The persistable portal restore token is pinned](/quest/m0/pin-portal-token.md) - the token this quest stores
 
 ## Related
 

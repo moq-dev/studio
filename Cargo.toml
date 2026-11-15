@@ -31,7 +31,6 @@ moq-json = { path = "moq/rs/moq-json" }
 moq-mux = { path = "moq/rs/moq-mux" }
 moq-net = { path = "moq/rs/moq-net" }
 moq-relay = { path = "moq/rs/moq-relay", default-features = false }
-moq-room = { path = "moq/rs/moq-room" }
 moq-scene = { path = "rs/moq-scene" }
 moq-stats = { path = "moq/rs/moq-stats" }
 moq-tokio = { path = "moq/rs/moq-tokio", default-features = false }
@@ -57,6 +56,8 @@ toml = "1.1"
 tracing = "0.1"
 url = "2"
 usage-rs = "7.1.0"
+# moq-video's release, so its textures and the compositor's are one type.
+wgpu = "30"
 
 # wgpu-core 30.0.1 with Surface::configure holding command indices across its
 # wait and the hal configure, so a submit from the compositor or encoder on the

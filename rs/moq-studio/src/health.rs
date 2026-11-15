@@ -152,8 +152,6 @@ pub struct Viewer {
 	pub rtt: Option<Duration>,
 	/// The longest any track took from the program clock to this viewer.
 	pub latency: Option<Duration>,
-	/// The longest playout delay it reports.
-	pub playout: Option<Duration>,
 	/// Why its report cannot be read, if it cannot.
 	pub error: Option<String>,
 }
@@ -638,20 +636,18 @@ impl Sampler {
 
 fn relay(link: &Link) -> Relay {
 	use moq_tokio::connection::Phase;
-	let observed = link.monitor.state();
-	let state = match observed.phase {
-		Phase::Connecting => State::Connecting,
-		Phase::Connected | Phase::Migrating => State::Connected,
-		Phase::Disconnected | Phase::Closed => State::Disconnected(
-			observed
-				.failure
-				.map_or_else(|| "the connection closed".to_string(), |err| err.to_string()),
+	let (state, version) = match link.monitor.state().phase {
+		Phase::Connecting { .. } => (State::Connecting, None),
+		Phase::Connected { version, .. } | Phase::Migrating { version, .. } => (State::Connected, Some(version)),
+		Phase::Disconnected { failure } | Phase::Closed { failure } => (
+			State::Disconnected(failure.map_or_else(|| "the connection closed".to_string(), |err| err.to_string())),
+			None,
 		),
 	};
 	Relay {
 		endpoint: link.endpoint.clone(),
 		state,
-		version: observed.version,
+		version,
 	}
 }
 
@@ -846,13 +842,6 @@ fn viewers(graded: &[GradedViewer], clock: &moq_mux::Clock) -> Vec<Viewer> {
 						.renditions
 						.keys()
 						.filter_map(|id| viewer.latency(id, clock))
-						.max()
-				}),
-				playout: current.and_then(|snapshot| {
-					snapshot
-						.renditions
-						.values()
-						.filter_map(|rendition| rendition.latency)
 						.max()
 				}),
 				error: viewer.error.clone(),
@@ -1249,11 +1238,13 @@ impl Feedback {
 						unread += 1;
 					}
 				}
-				moq_net::announce::Event::Absent(announce) => {
+				moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => {
 					if readers.remove(&announce.prefix).is_none() && hang::echo::is_echo(&announce.prefix) {
 						unread = unread.saturating_sub(1);
 					}
 				}
+				// A reader stays on a viewer whose route recovers.
+				moq_net::announce::Event::Unavailable(_) | moq_net::announce::Event::Available(_) => {}
 			}
 			self.0.lock().unwrap().unread = unread;
 		}
@@ -1593,7 +1584,7 @@ mod tests {
 			};
 			let mut local = local(Video::default(), Some(tall));
 			local.rendered = u64::from(seconds) * 30;
-			causes(sampler.sample(start + INTERVAL * seconds, local).problems)
+			causes(sampler.sample(start.saturating_add(INTERVAL * seconds), local).problems)
 		};
 		sample(10, 0);
 		let republished = sample(11, 1);

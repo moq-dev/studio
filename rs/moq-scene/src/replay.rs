@@ -60,7 +60,7 @@ pub struct Target {
 pub struct Take {
 	broadcast: moq_net::broadcast::Producer,
 	/// Keep the copies and their listing readable.
-	_tracks: Vec<moq_net::track::Producer>,
+	_tracks: Vec<moq_net::track::Finished>,
 	_listing: moq_mux::catalog::Producer,
 	/// The video rendition, under its catalog name.
 	pub video: Option<(String, VideoConfig)>,
@@ -214,7 +214,7 @@ fn copy(
 	start: moq_net::Timestamp,
 	cut: Cut,
 	container: &impl moq_mux::container::Container,
-) -> Result<Option<(moq_net::track::Producer, Duration)>, Error> {
+) -> Result<Option<(moq_net::track::Finished, Duration)>, Error> {
 	let range = moq_net::track::Range {
 		start: moq_net::track::Anchor::Time(start),
 		end: Some(moq_net::track::Anchor::Time(target.end)),
@@ -246,8 +246,7 @@ fn copy(
 			return Err(err);
 		}
 	};
-	track.finish()?;
-	Ok(Some((track, covered)))
+	Ok(Some((track.finish()?, covered)))
 }
 
 /// Whether `frame` is only the marker a publisher writes at a gap: one media
@@ -322,7 +321,7 @@ fn copy_held(
 			into.write_frame(frame.timestamp, frame.payload.clone())?;
 		}
 		match &held.read {
-			Ok(()) => into.finish()?,
+			Ok(()) => drop(into.finish()?),
 			Err(err) => into.abort(err.clone())?,
 		}
 	}

@@ -11,8 +11,6 @@
 
 use std::num::NonZeroU64;
 
-use moq_video::render::wgpu;
-
 use crate::collection::{Blend, Canvas, Crop, Filter, MaskMode, Rect, Rgba};
 use crate::compositor::FORMAT;
 use crate::lut::Cube;

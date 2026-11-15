@@ -215,7 +215,7 @@ impl Publisher {
 				let info = moq_net::track::Info::default()
 					.with_timescale(moq_mux::Clock::TIMESCALE)
 					.with_priority(hang::catalog::PRIORITY.catalog)
-					.with_compress(true);
+					.with_compression(moq_net::track::Compression::Deflate);
 				let created = self.broadcast.create_track(TRACK, info)?;
 				// Each layout whole in a group of its own, so a joiner needs no
 				// refresh to read it.

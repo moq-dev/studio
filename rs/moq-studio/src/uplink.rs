@@ -126,8 +126,8 @@ async fn fill(
 	loop {
 		clock.tick().await;
 		if frames % RATE == 0 {
-			if let Some(mut done) = group.take() {
-				moq_net::group::Producer::finish(&mut done)?;
+			if let Some(done) = group.take() {
+				moq_net::group::Producer::finish(done)?;
 			}
 			group = Some(track.append_group()?);
 		}

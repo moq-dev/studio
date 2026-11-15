@@ -55,7 +55,7 @@ impl Levels {
 		// across it.
 		let steps = match usize::try_from(steps) {
 			Ok(steps) if steps <= GAP => {
-				self.taken = Some(taken + STEP * steps as u32);
+				self.taken = Some(taken.saturating_add(STEP * steps as u32));
 				steps
 			}
 			_ => {

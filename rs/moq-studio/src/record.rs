@@ -914,7 +914,7 @@ async fn record<S: Stream>(
 	entry: &File,
 	mut stop: watch::Receiver<bool>,
 ) -> Outcome {
-	let mut export = export.with_max_delay(MAX_DELAY);
+	let mut export = export.with_delay(moq_net::track::Delay::default().with_max(MAX_DELAY));
 	let mut stopping = false;
 	let read = loop {
 		let next = if !stopping && *stop.borrow() {
@@ -1140,7 +1140,7 @@ fn replaced<T: hang::catalog::Reference>(last: &BTreeMap<String, T>, now: &BTree
 #[cfg(test)]
 mod tests {
 	use bytes::Bytes;
-	use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+	use mp4_atom::DecodeMaybe;
 
 	use super::*;
 
@@ -1164,6 +1164,11 @@ mod tests {
 			options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Opus, &input);
 			let audio = moq_audio::encode::Producer::new(broadcast, catalog, input, &options).unwrap();
 			Self { audio }
+		}
+
+		/// End the track cleanly, as the studio's sources do.
+		fn finish(self) {
+			drop(self.audio.finish().unwrap());
 		}
 
 		/// Write the 10 ms of tone starting at `at`.
@@ -1254,11 +1259,13 @@ mod tests {
 
 		/// Stop listing the source `name`.
 		fn remove(&mut self, name: &str) {
-			// A removed source ends its track cleanly, as the studio's do.
-			for (_, tone, ..) in self.sources.iter_mut().filter(|(source, ..)| source == name) {
-				tone.audio.finish().unwrap();
+			let (removed, kept) = std::mem::take(&mut self.sources)
+				.into_iter()
+				.partition::<Vec<_>, _>(|(source, ..)| source == name);
+			self.sources = kept;
+			for (_, tone, ..) in removed {
+				tone.finish();
 			}
-			self.sources.retain(|(source, ..)| source != name);
 			self.relist();
 		}
 
@@ -1268,9 +1275,7 @@ mod tests {
 			let mut broadcast = self.local.clone();
 			let (_, tone, _, listing) = self.sources.iter_mut().find(|(source, ..)| source == name).unwrap();
 			let old = listing.snapshot().audio.renditions;
-			let mut old_tone = std::mem::replace(tone, Tone::new(&mut broadcast, listing.clone()));
-			old_tone.audio.finish().unwrap();
-			drop(old_tone);
+			std::mem::replace(tone, Tone::new(&mut broadcast, listing.clone())).finish();
 			listing
 				.mutate(|catalog| catalog.audio.renditions.retain(|track, _| !old.contains_key(track)))
 				.unwrap();
@@ -1283,9 +1288,7 @@ mod tests {
 			let mut broadcast = self.publication.broadcast().clone();
 			let old = self.catalog.snapshot().audio.renditions;
 			let tone = Tone::new(&mut broadcast, self.catalog.clone());
-			let mut old_tone = self.program.replace(tone).unwrap();
-			old_tone.audio.finish().unwrap();
-			drop(old_tone);
+			self.program.replace(tone).unwrap().finish();
 			self.catalog
 				.mutate(|root| root.audio.renditions.retain(|track, _| !old.contains_key(track)))
 				.unwrap();
@@ -1294,9 +1297,7 @@ mod tests {
 		/// End the program's track, as stopping the studio does.
 		fn end_program(&mut self) {
 			let old = self.catalog.snapshot().audio.renditions;
-			let mut tone = self.program.take().unwrap();
-			tone.audio.finish().unwrap();
-			drop(tone);
+			self.program.take().unwrap().finish();
 			self.catalog
 				.mutate(|root| root.audio.renditions.retain(|track, _| !old.contains_key(track)))
 				.unwrap();
@@ -1403,8 +1404,8 @@ mod tests {
 		}
 
 		/// Leave, ending the track cleanly, as closing the join page does.
-		fn leave(mut self) -> Vec<Bytes> {
-			self.audio.finish().unwrap();
+		fn leave(self) -> Vec<Bytes> {
+			drop(self.audio.finish().unwrap());
 			self.sent
 		}
 	}
