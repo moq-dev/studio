@@ -30,7 +30,7 @@ pub enum Action {
 	SaveClip,
 	/// Start recording, or stop the recording under way.
 	Record,
-	/// Cut to the safe scene and mute every microphone.
+	/// Cut to the safe scene and mute every microphone and guest.
 	Panic,
 }
 
@@ -119,7 +119,7 @@ impl Controls {
 				Ok(format!("took {}", on_program(state.compositor.program_scene())))
 			}
 			Action::Scene(name) => take(&mut self.engine.state.lock().unwrap(), name),
-			Action::Panic => self.engine.state.lock().unwrap().panic(),
+			Action::Panic => self.engine.state.lock().unwrap().panic(self.engine.room.as_deref()),
 			Action::Replay => self.replay(true, false),
 			Action::SaveClip => self.replay(false, false),
 			Action::Record => {

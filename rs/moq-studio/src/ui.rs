@@ -1215,7 +1215,7 @@ fn scene_settings(
 	let mut safe = scene.safe;
 	if ui
 		.add(kit::Toggle::new(&mut safe).label("Safe"))
-		.on_hover_text("The scene the panic key cuts to, as it mutes every microphone")
+		.on_hover_text("The scene the panic key cuts to, as it mutes every microphone and guest")
 		.changed()
 	{
 		action = Some(SceneAction::Safe(index, safe));

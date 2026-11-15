@@ -1,11 +1,12 @@
 //! Where each part of the window goes: one pure function of the window's size
 //! and the picture's shape, so it is tested without a window.
 //!
-//! The picture gets the largest rectangle the window allows, and the scenes,
-//! the panic key, and the sound take whichever side is left over, in one of
-//! the mock-ups' three arrangements (`quest/m0/ux/mock/shell.html`): `live`,
-//! `portrait`, and `compact`. Each part gives way in a small window, so the
-//! picture stays the largest of them.
+//! The picture is larger than any other part of the window but the title bar,
+//! and as large as the window allows; the scenes, the panic key, and the sound
+//! take whichever side is left over, in one of the mock-ups' three
+//! arrangements (`quest/m0/ux/mock/shell.html`): `live`, `portrait`, and
+//! `compact`. Each part gives way in a small window, so the picture stays the
+//! largest of them.
 
 use egui::{Rect, Vec2, pos2, vec2};
 

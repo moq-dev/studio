@@ -200,21 +200,22 @@ fn launch(gpu: &engine::Gpu) -> engine::Launch {
 	}
 }
 
-/// Start the studio on `show.toml`, without the history an earlier draw's
-/// edits left.
-fn start(gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime) -> App {
+/// Start the studio by `launch` on `show.toml`, without the history an
+/// earlier draw's edits left.
+fn start(launch: engine::Launch, runtime: &tokio::runtime::Runtime) -> App {
 	let _ = std::fs::remove_file("show.history.toml");
 	let (autosave, loaded) = autosave::Autosave::open("show.toml".into()).unwrap();
 	App::Starting(
 		runtime
-			.block_on(engine::Engine::start(launch(gpu), autosave, loaded))
+			.block_on(engine::Engine::start(launch, autosave, loaded))
 			.unwrap(),
 	)
 }
 
 /// A click on a pad takes its scene on air, and the panic key mutes every
-/// microphone, in an edit undo takes back, and cuts to the safe scene: the
-/// window as a person uses it, on a real engine. It draws no view.
+/// microphone and guest, in an edit undo takes back, and cuts to the safe
+/// scene: the window as a person uses it, on a real engine. Remote feeds that
+/// are not guests stay on. It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn a_click_takes_and_the_panic_key_cuts() {
@@ -224,8 +225,19 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	let mut show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
 	// Failed in a build without `capture`, which leaves it a microphone to mute.
 	show.push_str("\n[sources.mic]\nkind = \"microphone\"\n");
+	// A guest in the room the show's `guest` and `caller` feeds are under,
+	// which are not guests' broadcasts.
+	show.push_str("\n[sources.alice]\nkind = \"broadcast\"\npath = \"room/alice/camera.hang\"\n");
 	std::fs::write("show.toml", show).unwrap();
-	let (mut harness, started) = window(start(&gpu, &runtime), &gpu, &runtime, SIZE);
+	let connect = url::Url::parse("https://relay.example/show").unwrap();
+	let page = url::Url::parse("https://studio.example/join/").unwrap();
+	let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+	let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+	let launch = engine::Launch {
+		room: Some(Arc::new(room)),
+		..launch(&gpu)
+	};
+	let (mut harness, started) = window(start(launch, &runtime), &gpu, &runtime, SIZE);
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -240,9 +252,9 @@ fn a_click_takes_and_the_panic_key_cuts() {
 			.program_scene()
 			.map(str::to_string)
 	};
-	let muted = || {
+	let muted = |name: &str| {
 		let state = engine.state.lock().unwrap();
-		state.collection().audio.get("mic").is_some_and(|audio| audio.muted)
+		state.collection().audio.get(name).is_some_and(|audio| audio.muted)
 	};
 	assert_eq!(program().as_deref(), Some("Main"));
 
@@ -253,11 +265,15 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	harness.get_by_label("Panic").click();
 	harness.run_steps(2);
 	assert_eq!(program().as_deref(), Some("Break"), "cut to the safe scene");
-	assert!(muted(), "the microphone is muted");
+	assert!(muted("mic"), "the microphone is muted");
+	assert!(muted("alice"), "the guest is muted");
+	assert!(!muted("guest") && !muted("caller"), "other remote feeds stay on");
 
-	harness.get_by_label("Undo: Panic: mute every microphone").click();
+	harness
+		.get_by_label("Undo: Panic: mute every microphone and guest")
+		.click();
 	harness.run_steps(2);
-	assert!(!muted(), "undo takes the mute back");
+	assert!(!muted("mic") && !muted("alice"), "undo takes the mute back");
 	assert_eq!(program().as_deref(), Some("Break"), "and leaves program where it is");
 
 	drop(harness);
@@ -276,7 +292,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		Open::Kit { .. } => unreachable!("drawn without an engine"),
 		Open::Studio { show, .. } => {
 			std::fs::copy(shows.join(show), "show.toml").unwrap();
-			start(gpu, runtime)
+			start(launch(gpu), runtime)
 		}
 	};
 	let size = match open {
