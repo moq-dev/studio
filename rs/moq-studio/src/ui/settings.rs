@@ -102,7 +102,11 @@ impl Panels {
 			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
 		}
 
-		for (name, video) in stats.published() {
+		// Every published scene, on air or not, since its virtual camera works
+		// off air too; its encoder runs only on air.
+		let encoding = stats.published();
+		let published = self.engine.state.lock().unwrap().collection().published.clone();
+		for name in published {
 			ui.separator();
 			ui.strong(format!("Scene `{name}`"));
 			if let Some(live) = on_air.live() {
@@ -115,16 +119,18 @@ impl Panels {
 				drop(state);
 				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", live.path));
 			}
-			ui.label(format!(
-				"Encoder: {}",
-				video.encoder().unwrap_or_else(|| "not open".into())
-			));
-			renditions(ui, Some(&name), &video, false);
-			if let Some(error) = video.error() {
-				ui.colored_label(ui.visuals().error_fg_color, error);
-			}
-			if let Some(error) = video.audio_error() {
-				ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
+			if let Some(video) = encoding.get(&name) {
+				ui.label(format!(
+					"Encoder: {}",
+					video.encoder().unwrap_or_else(|| "not open".into())
+				));
+				renditions(ui, Some(&name), video, false);
+				if let Some(error) = video.error() {
+					ui.colored_label(ui.visuals().error_fg_color, error);
+				}
+				if let Some(error) = video.audio_error() {
+					ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
+				}
 			}
 			self.camera(ui, Some(&name));
 		}

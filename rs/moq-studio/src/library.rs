@@ -189,11 +189,12 @@ impl Picture {
 	}
 }
 
-/// Read the program's last frame back from the GPU, shrunk for a card.
+/// Read the program's last frame back from the GPU as viewers see it, with
+/// its layer layout's pictures, shrunk for a card.
 pub fn capture(gpu: &Gpu, engine: &Engine) -> anyhow::Result<Picture> {
 	let (buffer, width, height, row) = {
 		let state = engine.state.lock().unwrap();
-		let texture = state.compositor.program();
+		let texture = state.compositor.layered();
 		let (width, height) = (texture.width(), texture.height());
 		let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
 		let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {

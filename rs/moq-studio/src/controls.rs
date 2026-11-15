@@ -182,7 +182,11 @@ impl Controls {
 				// Each relay's client binds its socket on the runtime.
 				let _runtime = controls.runtime.enter();
 				let switched = *controls.switched.lock().unwrap();
-				let destination = controls.stream.lock().unwrap().clone().destination(switched);
+				// Cloned in a statement of its own, so the lock is not held
+				// while the credential store blocks, which would freeze the
+				// window reading the settings.
+				let stream = controls.stream.lock().unwrap().clone();
+				let destination = stream.destination(switched);
 				let result = destination.and_then(|destination| {
 					let to = destination.broadcast.clone();
 					controls.runtime.block_on(controls.engine.go_live(destination))?;

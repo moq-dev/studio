@@ -30,7 +30,7 @@ pub(super) struct Going {
 	encoder: Task<Result<Encoding, String>>,
 	/// Started once the encoder is known, since what it sends is what the
 	/// connection is measured toward.
-	uplink: Option<Task<Result<Rate, String>>>,
+	uplink: Option<Measuring>,
 	/// The loudest each microphone was since the sheet opened, on the meter's
 	/// scale.
 	heard: BTreeMap<String, f32>,
@@ -94,7 +94,33 @@ impl Going {
 	/// Whether every check that runs in the background has finished.
 	#[cfg(test)]
 	pub(super) fn done(&self) -> bool {
-		matches!(self.encoder, Task::Done(_)) && matches!(self.uplink, Some(Task::Done(_)))
+		matches!(self.encoder, Task::Done(_))
+			&& matches!(
+				self.uplink,
+				Some(Measuring {
+					task: Task::Done(_),
+					..
+				})
+			)
+	}
+}
+
+/// The connection being measured, which stops, withdrawing its probe, when
+/// this is dropped or [stopped](Self::stop), so it never competes with the
+/// stream for the uplink.
+struct Measuring {
+	task: Task<Result<Rate, String>>,
+	/// Dropping it ends the measurement.
+	stop: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Measuring {
+	/// Stop measuring, as the stream goes live.
+	fn stop(&mut self) {
+		self.stop = None;
+		if self.task.poll().is_none() {
+			self.task = Task::Done(Err("stopped as the stream went live".into()));
+		}
 	}
 }
 
@@ -366,6 +392,14 @@ impl Panels {
 	fn advance_going(&mut self) {
 		let Some(going) = &mut self.going else { return };
 		going.encoder.poll();
+		// Going live, from the sheet or a hotkey, ends the measurement, which
+		// would otherwise take uplink from the stream's first seconds.
+		if self.engine.on_air() != OnAir::Off {
+			if let Some(uplink) = &mut going.uplink {
+				uplink.stop();
+			}
+			return;
+		}
 		if going.uplink.is_none()
 			&& let Task::Done(encoder) = &going.encoder
 		{
@@ -376,11 +410,14 @@ impl Panels {
 					let ceiling = encoding.total().scaled(1.0 / setup::headroom());
 					measure(&self.controls, &self.runtime, ceiling)
 				}
-				Err(_) => Task::Done(Err("nothing encodes, so nothing would be sent".into())),
+				Err(_) => Measuring {
+					task: Task::Done(Err("nothing encodes, so nothing would be sent".into())),
+					stop: None,
+				},
 			});
 		}
 		if let Some(uplink) = &mut going.uplink {
-			uplink.poll();
+			uplink.task.poll();
 		}
 	}
 
@@ -618,7 +655,7 @@ impl Panels {
 
 		// The connection carries what the stream sends.
 		let again = ("Check again".to_string(), Fix::Again);
-		checks.push(match (&going.uplink, &encoding) {
+		checks.push(match (going.uplink.as_ref().map(|uplink| &uplink.task), &encoding) {
 			(None, _) | (Some(Task::Running(_)), _) => Check {
 				mark: Outcome::Waiting,
 				icon: Icon::Uplink,
@@ -818,6 +855,27 @@ impl Panels {
 		}
 	}
 
+	/// Apply a Stream settings save once it finished, every frame, so one
+	/// still running when Settings closes or the tab changes applies too.
+	pub(super) fn follow_stream_save(&mut self) {
+		let Some(form) = &mut self.stream_form else { return };
+		let Some(saving) = &mut form.saving else { return };
+		// The window redraws at the canvas rate, which polls it again.
+		let Some(saved) = saving.poll() else { return };
+		match saved.clone() {
+			Ok(saved) => {
+				*self.controls.stream.lock().unwrap() = saved.clone();
+				show::watch(&self.engine, &saved, &self.runtime);
+				*form = Form::new(&saved);
+				form.note = Some("Saved. It applies the next time you go live.".into());
+			}
+			Err(err) => {
+				form.saving = None;
+				form.note = Some(err);
+			}
+		}
+	}
+
 	/// Settings, Stream: the relay and its token, a failover relay, the
 	/// broadcast's name, and on-demand encoding, kept beside the show. A
 	/// setting a flag overrides for this run says so.
@@ -825,22 +883,6 @@ impl Panels {
 		let stream = self.controls.stream.lock().unwrap().clone();
 		let overridden = stream.overridden();
 		let form = self.stream_form.get_or_insert_with(|| Form::new(&stream));
-		if let Some(saving) = &mut form.saving
-			&& let Some(saved) = saving.poll()
-		{
-			match saved.clone() {
-				Ok(saved) => {
-					*self.controls.stream.lock().unwrap() = saved.clone();
-					show::watch(&self.engine, &saved, &self.runtime);
-					*form = Form::new(&saved);
-					form.note = Some("Saved. It applies the next time you go live.".into());
-				}
-				Err(err) => {
-					form.saving = None;
-					form.note = Some(err);
-				}
-			}
-		}
 		let busy = form.saving.is_some();
 		if busy {
 			ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -971,10 +1013,11 @@ impl Panels {
 /// Measure the connection to the first relay switched on toward `ceiling`,
 /// reading its token on the task's own thread, since the credential store
 /// blocks.
-fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate) -> Task<Result<Rate, String>> {
+fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate) -> Measuring {
 	let stream = controls.stream.lock().unwrap().clone();
 	let switched = *controls.switched.lock().unwrap();
 	let handle = runtime.clone();
+	let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 	let task = Task::spawn(runtime, move || {
 		let relays = {
 			// Each client binds its socket on the runtime.
@@ -985,12 +1028,18 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 		async move {
 			let relays = relays.map_err(|err| format!("{err:#}"))?;
 			let relay = relays.into_iter().next().ok_or("no relay is switched on")?;
-			uplink::measure(&relay.client, relay.url, &path, ceiling, uplink::WINDOW)
-				.await
-				.map_err(|err| format!("{err:#}"))
+			let measured = uplink::measure(&relay.client, relay.url, &path, ceiling, uplink::WINDOW);
+			tokio::select! {
+				result = measured => result.map_err(|err| format!("{err:#}")),
+				// Sent never: the sender is dropped to stop.
+				_ = stopped => Err("stopped".into()),
+			}
 		}
 	});
-	task.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the measurement: {err}"))))
+	Measuring {
+		task: task.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the measurement: {err}")))),
+		stop: Some(stop),
+	}
 }
 
 /// A section's heading in a sheet or popover.

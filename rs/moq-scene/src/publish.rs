@@ -183,24 +183,30 @@ impl Publish {
 		});
 	}
 
-	/// Publish each source `published` names in `broadcast`, the program's,
-	/// as long as it stays named, until `published` closes: its tracks are
-	/// copied in under [`FORWARDED`] and its catalog listed under `catalog`'s
-	/// [`SECTION`] section, renamed to match. Reading its tracks keeps each
-	/// source encoding while it is published. Each copied audio or video
-	/// track claims its bitrate from `bandwidth` while subscribed, as the
-	/// program's tracks do.
-	pub async fn forward(
-		&self,
-		mut published: tokio::sync::watch::Receiver<BTreeSet<String>>,
-		broadcast: moq_net::broadcast::Producer,
-		mut catalog: Catalog,
-		bandwidth: moq_net::bandwidth::Allocator,
-	) -> Result<(), Error> {
+	/// Publish each source `forward.published` names in the program's
+	/// broadcast, as long as it stays named, until `published` closes or
+	/// `stop` is dropped: its tracks are copied in under [`FORWARDED`] and its
+	/// catalog listed under the catalog's [`SECTION`] section, renamed to
+	/// match. Reading its tracks keeps each source encoding while it is
+	/// published. Each copied audio or video track claims its bitrate from
+	/// `bandwidth` while subscribed, as the program's tracks do. A copied
+	/// track that ends, once its source is no longer named or forwarding
+	/// stops, is finished after what it copied, so its viewers see it end
+	/// rather than cut off; this returns once every one has.
+	pub async fn forward(&self, forward: Forward) -> Result<(), Error> {
+		let Forward {
+			mut published,
+			broadcast,
+			mut catalog,
+			bandwidth,
+			mut stop,
+		} = forward;
 		let mut updates = self.catalog.consume()?;
 		let mut local = self.catalog.snapshot();
-		// Each copied track's copy, by its local name, aborted once dropped.
-		let mut copies: BTreeMap<String, tokio::task::JoinHandle<()>> = BTreeMap::new();
+		// Each copied track's copy, by its local name, and what stops it,
+		// finishing its track, once dropped.
+		let mut copies: BTreeMap<String, (tokio::task::JoinHandle<()>, tokio::sync::watch::Sender<()>)> =
+			BTreeMap::new();
 		loop {
 			let listed: BTreeMap<String, hang::Catalog> = {
 				let published = published.borrow_and_update();
@@ -212,13 +218,8 @@ impl Publish {
 				.iter()
 				.flat_map(|(source, catalog)| tracks(catalog).map(move |(name, rate)| (name, (source.clone(), rate))))
 				.collect();
-			copies.retain(|name, copy| {
-				let keep = tracks.contains_key(name);
-				if !keep {
-					copy.abort();
-				}
-				keep
-			});
+			// Dropped, a copy finishes its track on its own.
+			copies.retain(|name, _| tracks.contains_key(name));
 			for (name, (source, rate)) in tracks {
 				if copies.contains_key(&name) {
 					continue;
@@ -230,8 +231,9 @@ impl Publish {
 					grants: self.grants.clone(),
 					source,
 				});
-				let copy = copy(self.consume(), broadcast.clone(), name.clone(), bandwidth);
-				copies.insert(name, tokio::spawn(copy));
+				let (stopper, stopped) = tokio::sync::watch::channel(());
+				let copy = copy(self.consume(), broadcast.clone(), name.clone(), bandwidth, stopped);
+				copies.insert(name, (tokio::spawn(copy), stopper));
 			}
 			let listed: BTreeMap<String, hang::Catalog> = listed
 				.into_iter()
@@ -249,10 +251,14 @@ impl Publish {
 					None => break,
 				},
 				changed = published.changed() => if changed.is_err() { break },
+				_ = stop.changed() => break,
 			}
 		}
-		for copy in copies.into_values() {
-			copy.abort();
+		// Each stopped as its stopper drops, and waited on, so the broadcast
+		// holds every copied track's end before the listing goes.
+		let copies: Vec<_> = copies.into_values().map(|(copy, _stopper)| copy).collect();
+		for copy in copies {
+			let _ = copy.await;
 		}
 		catalog.mutate(|root| root.ext.studio.sources.clear())?;
 		Ok(())
@@ -282,6 +288,20 @@ impl Publish {
 			owners: self.owners.clone(),
 		}
 	}
+}
+
+/// What [`Publish::forward`] copies into, and how long.
+pub struct Forward {
+	/// The names of the sources to publish.
+	pub published: tokio::sync::watch::Receiver<BTreeSet<String>>,
+	/// The program's broadcast, which each source's tracks are copied into.
+	pub broadcast: moq_net::broadcast::Producer,
+	/// The program's catalog, which lists each source.
+	pub catalog: Catalog,
+	/// What each copied audio or video track claims its bitrate from.
+	pub bandwidth: moq_net::bandwidth::Allocator,
+	/// Forwarding stops once its sender is dropped.
+	pub stop: tokio::sync::watch::Receiver<()>,
 }
 
 /// The prefix of each source track's name in the program's broadcast, ahead
@@ -323,8 +343,6 @@ fn renamed(mut source: hang::Catalog) -> hang::Catalog {
 	source
 }
 
-/// Copy the local track `name` into `broadcast` under [`FORWARDED`], group by
-/// group, until it ends. A failure ends the copy, failed, with the reason.
 /// How a copied track claims its bitrate of the connection, and where its
 /// source's video finds what it was granted.
 struct Grant {
@@ -355,16 +373,23 @@ impl Drop for Granted {
 	}
 }
 
+/// Copy the local track `name` into `broadcast` under [`FORWARDED`], group by
+/// group, until it ends or `stop`'s sender is dropped, when the copy finishes
+/// the group it is on and then its track. A failure ends the copy, failed,
+/// with the reason.
 async fn copy(
 	local: moq_net::broadcast::Consumer,
 	broadcast: moq_net::broadcast::Producer,
 	name: String,
 	grant: Option<Grant>,
+	mut stop: tokio::sync::watch::Receiver<()>,
 ) {
 	let copied = async {
-		let mut track = local.track(&name)?.subscribe(None).await?;
+		let mut track = tokio::select! {
+			track = async { local.track(&name)?.subscribe(None).await } => track?,
+			_ = stop.changed() => return Ok(()),
+		};
 		let out = broadcast.create_track(format!("{FORWARDED}{name}"), track.info().clone())?;
-		// Held for as long as the copy runs.
 		// Held for as long as the copy runs. A video's grant is what its source
 		// encodes at, so the source follows the connection as the program does.
 		let _grant = grant.map(|grant| {
@@ -381,11 +406,25 @@ async fn copy(
 			}
 		});
 		let result: Result<(), moq_net::Error> = async {
-			while let Some(mut group) = track.recv_group().await? {
+			'groups: loop {
+				let group = tokio::select! {
+					group = track.recv_group() => group?,
+					_ = stop.changed() => break,
+				};
+				let Some(mut group) = group else { break };
 				let mut copy = out.create_group(moq_net::group::Info {
 					sequence: group.sequence,
 				})?;
-				while let Some(frame) = group.read_frame().await? {
+				loop {
+					let frame = tokio::select! {
+						frame = group.read_frame() => frame?,
+						// The group ends at what it holds.
+						_ = stop.changed() => {
+							copy.finish()?;
+							break 'groups;
+						}
+					};
+					let Some(frame) = frame else { break };
 					copy.write_frame(frame.timestamp, frame.payload)?;
 				}
 				copy.finish()?;
@@ -1204,14 +1243,18 @@ mod tests {
 			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 			let catalog = Catalog::new(&mut program, config).unwrap();
 			let (published, follow) = tokio::sync::watch::channel(collection.published.clone());
-			let forward = publish.clone();
-			let (broadcast, listing) = (program.clone(), catalog.clone());
-			tokio::spawn(async move {
-				forward
-					.forward(follow, broadcast, listing, moq_net::bandwidth::Allocator::unlimited())
-					.await
-					.unwrap()
-			});
+			let (stop, stopped) = tokio::sync::watch::channel(());
+			let forward = Forward {
+				published: follow,
+				broadcast: program.clone(),
+				catalog: catalog.clone(),
+				bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+				stop: stopped,
+			};
+			let forwarding = {
+				let publish = publish.clone();
+				tokio::spawn(async move { publish.forward(forward).await.unwrap() })
+			};
 
 			let snapshot = listed(&catalog, |sources| sources.contains_key("red")).await;
 			let red = &snapshot.ext.studio.sources["red"];
@@ -1224,9 +1267,19 @@ mod tests {
 			assert_eq!(mime, "image/png");
 			let red = image::load_from_memory(&payload).unwrap().into_rgba8();
 			assert_eq!(red.into_raw(), [255, 0, 0, 255]);
+			let name = snapshot.ext.studio.sources["red"].binary.tracks.keys().next().unwrap();
+			let mut track = program.consume().track(name).unwrap().subscribe(None).await.unwrap();
 
 			published.send(BTreeSet::new()).unwrap();
 			listed(&catalog, |sources| sources.is_empty()).await;
+			// No longer published, its copy ends after what it copied rather
+			// than being cut off.
+			let mut group = track.recv_group().await.unwrap().expect("the still");
+			while group.read_frame().await.unwrap().is_some() {}
+			assert!(track.recv_group().await.unwrap().is_none(), "the copy finished");
+
+			drop(stop);
+			forwarding.await.expect("forwarding stops once told to");
 		})
 		.await;
 	}

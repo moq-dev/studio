@@ -75,10 +75,9 @@ pub(super) enum Slot {
 /// beside the video, which the program clock encodes ([`Lines`]).
 pub(super) struct Air {
 	live: Live,
-	/// A session to each relay, which reconnects on its own.
+	/// A session to each relay, which reconnects on its own. Their clients
+	/// are the show's, which its watching sessions and the next stream share.
 	connections: Vec<moq_tokio::Connection>,
-	/// The client that dialed each, whose endpoint sends the last close.
-	clients: Vec<moq_tokio::Client>,
 	/// The program's broadcast, which closes once dropped.
 	publication: moq_net::origin::Route,
 	catalog: moq_scene::publish::Catalog,
@@ -92,6 +91,8 @@ pub(super) struct Air {
 	audio_track: String,
 	/// Copies the sources published independently into the broadcast.
 	forward: tokio::task::JoinHandle<()>,
+	/// Dropped, the copies finish their tracks and the forwarding ends.
+	forward_stop: tokio::sync::watch::Sender<()>,
 	/// Where the broadcasts are announced, which the sessions publish.
 	_origin: moq_net::origin::Producer,
 }
@@ -173,14 +174,13 @@ pub(super) struct Watch {
 }
 
 /// Dial a session to each of `relays` that publishes what `origin` announces,
-/// such as the broadcast at `path`, with each one's client and link.
+/// such as the broadcast at `path`, with each one's link.
 pub(super) fn publish(
 	relays: Vec<Relay>,
 	origin: &moq_net::origin::Producer,
 	path: &moq_net::Path,
-) -> (Vec<moq_tokio::Connection>, Vec<moq_tokio::Client>, Vec<health::Link>) {
-	let clients = relays.iter().map(|relay| relay.client.clone()).collect();
-	let (connections, links) = relays
+) -> (Vec<moq_tokio::Connection>, Vec<health::Link>) {
+	relays
 		.into_iter()
 		.map(|Relay { client, url }| {
 			tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), broadcast = %path, "going live");
@@ -189,8 +189,7 @@ pub(super) fn publish(
 			let monitor = connection.monitor();
 			(connection, health::Link { endpoint, monitor })
 		})
-		.unzip();
-	(connections, clients, links)
+		.unzip()
 }
 
 /// Dial a session to each of `relays` that only subscribes, into
@@ -225,19 +224,13 @@ pub(super) fn subscribe(relays: &[Relay], subscribe: &moq_net::origin::Producer)
 		.collect()
 }
 
-/// Close each of `connections` once its relay has what it was sent, and its
-/// `clients`, bounded at [`CLOSE`].
-pub(super) async fn close(connections: &[moq_tokio::Connection], clients: &[moq_tokio::Client]) -> anyhow::Result<()> {
+/// Close each of `connections` once its relay has what it was sent, bounded
+/// at [`CLOSE`]. Their clients stay open: the show's watching sessions share
+/// them, and its endpoint, still running, sends each close to the relay.
+pub(super) async fn close(connections: &[moq_tokio::Connection]) -> anyhow::Result<()> {
 	let mut closing = tokio::task::JoinSet::new();
-	for (connection, client) in connections.iter().zip(clients) {
-		let (connection, client) = (connection.clone(), client.clone());
-		closing.spawn(async move {
-			let drained = connection.close().await;
-			// So the relay hears the close rather than waiting out an idle
-			// timeout.
-			client.close().await;
-			drained
-		});
+	for connection in connections {
+		closing.spawn(connection.clone().close());
 	}
 	let drained = kio::clock::timeout(CLOSE, closing.join_all())
 		.await
@@ -316,7 +309,7 @@ impl Engine {
 		let path =
 			moq_net::Path::new(broadcast.as_str()).with_context(|| format!("cannot publish at `{broadcast}`"))?;
 		let origin = moq_tokio::origin::spawn();
-		let (connections, clients, links) = publish(relays, &origin, &path);
+		let (connections, links) = publish(relays, &origin, &path);
 		dial(&connections, &links).await?;
 
 		// Each track reserves its ceiling on the first relay's estimate, which
@@ -381,16 +374,18 @@ impl Engine {
 			return Err(err).context("cannot announce the broadcast");
 		}
 
-		let published = self.program.published.subscribe();
+		let (forward_stop, stop) = tokio::sync::watch::channel(());
 		let forward = {
-			let (sources, broadcast, catalog, bandwidth) = (
-				self.program.sources.clone(),
-				broadcast.clone(),
-				catalog.clone(),
-				bandwidth.clone(),
-			);
+			let sources = self.program.sources.clone();
+			let forward = moq_scene::publish::Forward {
+				published: self.program.published.subscribe(),
+				broadcast: broadcast.clone(),
+				catalog: catalog.clone(),
+				bandwidth: bandwidth.clone(),
+				stop,
+			};
 			tokio::spawn(async move {
-				if let Err(err) = sources.forward(published, broadcast, catalog, bandwidth).await {
+				if let Err(err) = sources.forward(forward).await {
 					tracing::warn!(%err, "stopped publishing sources independently");
 				}
 			})
@@ -471,7 +466,6 @@ impl Engine {
 				relays: links.into_iter().map(|link| link.endpoint).collect(),
 			},
 			connections,
-			clients,
 			publication,
 			catalog,
 			audio_stop,
@@ -479,6 +473,7 @@ impl Engine {
 			_audio_grant: audio_grant,
 			audio_track,
 			forward,
+			forward_stop,
 			_origin: origin,
 		})
 	}
@@ -552,14 +547,21 @@ impl Engine {
 		if (&mut air.audio).await.is_err() {
 			tracing::error!("the program audio panicked");
 		}
-		air.forward.abort();
+		// Dropped, so each source's copied track finishes after what it has.
+		drop(std::mem::replace(
+			&mut air.forward_stop,
+			tokio::sync::watch::channel(()).0,
+		));
+		if (&mut air.forward).await.is_err() {
+			tracing::error!("publishing the sources independently panicked");
+		}
 		self.stats.grants.lock().unwrap().remove(&air.audio_track);
 		// Fails only once the catalog failed, which ended its tracks already.
 		let _ = air.catalog.clone().finish();
 		self.on_air_program.send_replace(None);
 		*self.sampler.lock().unwrap() = health::Sampler::new(None);
 
-		close(&air.connections, &air.clients).await
+		close(&air.connections).await
 	}
 
 	/// What a replay of the program could copy: its video at each size,

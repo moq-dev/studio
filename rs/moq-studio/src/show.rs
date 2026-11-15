@@ -91,16 +91,22 @@ impl Opener {
 
 /// Follow broadcast sources, guests, and viewers' reports through the show's
 /// relays, read with their tokens on a thread of its own since the credential
-/// store blocks. A relay that cannot be set up is logged; going live says why.
+/// store blocks. Each relay is set up on its own, so one that cannot be is
+/// logged and the other still followed; going live says why.
 pub fn watch(engine: &Arc<Engine>, stream: &Stream, runtime: &tokio::runtime::Handle) {
 	let (engine, stream, runtime) = (engine.clone(), stream.clone(), runtime.clone());
 	let spawned = std::thread::Builder::new().name("watch".into()).spawn(move || {
 		// Each client binds its socket on the runtime.
 		let _runtime = runtime.enter();
-		match stream.relays(stream::Switched::default()) {
-			Ok(relays) => engine.watch(&relays),
-			Err(err) => tracing::warn!(error = format!("{err:#}"), "cannot follow the relays"),
+		let each = [(true, false), (false, true)].map(|(relay, failover)| stream::Switched { relay, failover });
+		let mut relays = Vec::new();
+		for switched in each {
+			match stream.relays(switched) {
+				Ok(set) => relays.extend(set),
+				Err(err) => tracing::warn!(error = format!("{err:#}"), "cannot follow a relay"),
+			}
 		}
+		engine.watch(&relays);
 	});
 	if let Err(err) = spawned {
 		tracing::warn!(error = format!("{err:#}"), "cannot follow the relays");

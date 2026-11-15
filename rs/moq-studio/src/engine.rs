@@ -1400,9 +1400,15 @@ impl Engine {
 			retired.retain(|ended| !ended.is_finished());
 			// Ended before another starts, so the two never hold encode sessions
 			// at once.
-			let (starting, end) = self.handoff.lock().unwrap().take();
+			let (mut starting, end) = self.handoff.lock().unwrap().take();
 			if let Some(reply) = end {
-				let ending = air.take().map(air::Lines::end).unwrap_or_default();
+				// The stream on air, or one handed over since that never drew a
+				// frame, such as one ended at once at a low frame rate.
+				let ending = air
+					.take()
+					.or_else(|| starting.take())
+					.map(air::Lines::end)
+					.unwrap_or_default();
 				if let Err(ending) = reply.send(ending) {
 					retired.extend(ending.ended);
 				}
@@ -4543,7 +4549,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let subscribe = moq_tokio::origin::spawn();
 		let studio = moq_net::Path::new("studio").unwrap();
-		let (_connections, _clients, links) = air::publish(relays.clone(), &origin, &studio);
+		let (_connections, links) = air::publish(relays.clone(), &origin, &studio);
 		let _watching = air::subscribe(&relays, &subscribe);
 		let publication = origin.route("studio", Default::default()).unwrap();
 		let instance = publication.instance();
@@ -4630,6 +4636,42 @@ mod tests {
 			.expect("both relays route the program, the failover the sources");
 	}
 
+	/// A stream ended before the program drew a frame of it, as at a low
+	/// frame rate, ends with its encoders rather than running on off air.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
+	async fn ending_before_the_first_frame_ends_the_stream() {
+		let (relay, _routes, _config) = test_relay().await;
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let mut canvas = red_canvas();
+		canvas.collection.canvas.framerate = 1;
+		let engine = start(gpu, vec![relay], dir.path(), autosave, canvas)
+			.await
+			.expect("the studio goes live");
+		kio::clock::timeout(TIMEOUT, engine.end_stream())
+			.await
+			.expect("the stream ends in time")
+			.expect("each relay takes the stream's end");
+
+		let rendered = || engine.stats.rendered.load(Ordering::Relaxed);
+		let since = rendered();
+		kio::clock::timeout(TIMEOUT, async {
+			while rendered() < since + 2 {
+				kio::clock::sleep(Duration::from_millis(100)).await;
+			}
+		})
+		.await
+		.expect("the program draws on off air");
+		assert_eq!(engine.on_air(), OnAir::Off);
+		assert_eq!(engine.stats.sessions.open(), 0, "no encoder runs off air");
+		engine.stop();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
 	/// Ending the stream ends the program's video and then its catalog cleanly
 	/// for a viewer at the relay, rather than cutting them, and the studio
 	/// runs on off air, where a replay of the program has nothing to copy and
@@ -4637,11 +4679,11 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn ending_the_stream_delivers_its_end_and_goes_live_again() {
-		let (relay, routes, config) = test_relay().await;
+		let (relay, routes, _config) = test_relay().await;
 		let dir = tempfile::tempdir().unwrap();
 		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
-		let url = relay.url.clone();
+		let show = relay.clone();
 		let engine = start(gpu, vec![relay], dir.path(), autosave, red_canvas())
 			.await
 			.expect("the studio goes live");
@@ -4664,10 +4706,9 @@ mod tests {
 		assert!(format!("{refused:#}").contains("on air"), "{refused:#}");
 		assert!(engine.end_stream().await.is_err(), "nothing is on air to end");
 
-		// Ending closed the last stream's clients, so this one dials anew.
-		let client = config.init(Default::default()).expect("client");
+		// The show's client outlives the stream: the next one dials from it.
 		let destination = Destination {
-			relays: vec![Relay { client, url }],
+			relays: vec![show],
 			broadcast: "studio".into(),
 			on_demand: false,
 		};
@@ -4748,7 +4789,7 @@ mod tests {
 			client: client.clone(),
 			url: fixture.url.clone(),
 		}];
-		let (connections, clients, _links) = air::publish(relays, &origin, &studio);
+		let (connections, _links) = air::publish(relays, &origin, &studio);
 		let publication = origin.route("studio", Default::default()).unwrap();
 		let info = || moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let tracks = ["video", "audio"].map(|name| publication.broadcast().create_track(name, info()).unwrap());
@@ -4818,7 +4859,7 @@ mod tests {
 			// The kept producer holds the finished track listed.
 			drop(track.clone().finish().unwrap());
 		}
-		air::close(&connections, &clients)
+		air::close(&connections)
 			.await
 			.expect("each relay takes the tail before its session closes");
 		for reader in readers {

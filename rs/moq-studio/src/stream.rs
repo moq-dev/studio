@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -99,6 +99,17 @@ pub struct Stream {
 	client: moq_tokio::connect::Config,
 	quic: moq_tokio::quic::Config,
 	credentials: Credentials,
+	/// Each relay's client, shared by every clone, so watching, measuring,
+	/// and going live dial from one socket per relay, which a fixed
+	/// `--connect-bind` port can be bound for only once.
+	clients: Arc<Mutex<Vec<Cached>>>,
+}
+
+/// A relay's client, by the address and tokens it was set up with.
+struct Cached {
+	url: Url,
+	tokens: Vec<moq_net::auth::Token>,
+	client: moq_tokio::Client,
 }
 
 impl Stream {
@@ -125,6 +136,7 @@ impl Stream {
 			client,
 			quic,
 			credentials,
+			clients: Default::default(),
 		})
 	}
 
@@ -242,30 +254,52 @@ impl Stream {
 	}
 
 	/// Each relay `switched` on, the preferred first, with its token, as a
-	/// client ready to dial it. Refuses a failover beside a relay a viewer
-	/// could not move between without a restart.
+	/// client ready to dial it: the one set up before for the same address
+	/// and tokens, if any.
 	///
 	/// Blocks on the credential store: call it off the window's thread, and
 	/// outside an async task. Call it inside the tokio runtime, where each
 	/// client binds its socket.
 	pub fn relays(&self, switched: Switched) -> anyhow::Result<Vec<Relay>> {
-		self.dials(switched)?
+		let dials = self.dials(switched)?;
+		let mut clients = self.clients.lock().unwrap();
+		// A relay no longer set, or set with other tokens, lets go of its
+		// socket before another binds one.
+		let current = [self.relay(), self.failover()];
+		clients.retain(|cached| current.contains(&Some(&cached.url)));
+		dials
 			.into_iter()
 			.map(|(url, tokens)| {
-				let mut client = self.client.clone();
-				client.url = Some(url.clone());
-				client.tokens = tokens;
-				let client = client
+				if let Some(cached) = clients
+					.iter()
+					.find(|cached| cached.url == url && cached.tokens == tokens)
+				{
+					return Ok(Relay {
+						client: cached.client.clone(),
+						url,
+					});
+				}
+				clients.retain(|cached| cached.url != url);
+				let mut config = self.client.clone();
+				config.url = Some(url.clone());
+				config.tokens = tokens.clone();
+				let client = config
 					.init(self.quic.clone())
 					.with_context(|| format!("cannot set up the relay {}", crate::engine::air::endpoint(&url)))?;
+				clients.push(Cached {
+					url: url.clone(),
+					tokens,
+					client: client.clone(),
+				});
 				Ok(Relay { client, url })
 			})
 			.collect()
 	}
 
 	/// Each relay `switched` on, the preferred first, with the tokens it is
-	/// dialed with: the flags' for the relay they name, or its own from the
-	/// credential store, so one relay's never reach another.
+	/// dialed with: the flags' for the relay they name, none for an address
+	/// that carries its own `?jwt=`, or its own from the credential store, so
+	/// one relay's never reach another.
 	fn dials(&self, switched: Switched) -> anyhow::Result<Vec<(Url, Vec<moq_net::auth::Token>)>> {
 		let picked = [
 			(switched.relay, self.relay(), !self.flags.tokens.is_empty()),
@@ -275,15 +309,14 @@ impl Stream {
 			.into_iter()
 			.filter_map(|(on, url, flagged)| Some((on.then_some(url?)?, flagged)))
 			.collect();
-		if picked.len() > 1 {
-			self.check_failover()?;
-		}
 		picked
 			.into_iter()
 			.map(|(url, flagged)| {
-				let tokens = match flagged {
-					true => self.flags.tokens.clone(),
-					false => match self.credentials.get(url)? {
+				let carried = url.query_pairs().any(|(key, _)| key == "jwt");
+				let tokens = match (flagged, carried) {
+					(true, _) => self.flags.tokens.clone(),
+					(false, true) => Vec::new(),
+					(false, false) => match self.credentials.get(url)? {
 						Some(token) => vec![token.parse().map_err(|err| anyhow::anyhow!("{err}"))?],
 						None => Vec::new(),
 					},
@@ -294,9 +327,14 @@ impl Stream {
 	}
 
 	/// Where going live with the relays `switched` on sends the program.
+	/// Refuses a failover beside a relay a viewer could not move between
+	/// without a restart.
 	///
 	/// Blocks as [`relays`](Self::relays) does.
 	pub fn destination(&self, switched: Switched) -> anyhow::Result<Destination> {
+		if switched.relay && switched.failover && self.relay().is_some() && self.failover().is_some() {
+			self.check_failover()?;
+		}
 		let relays = self.relays(switched)?;
 		anyhow::ensure!(
 			!relays.is_empty(),
@@ -312,7 +350,7 @@ impl Stream {
 	/// Refuse relays a viewer could not move between without a restart: a
 	/// copy resumes mid-group only under the same instance, which needs both
 	/// links on one protocol version that carries it.
-	pub fn check_failover(&self) -> anyhow::Result<()> {
+	fn check_failover(&self) -> anyhow::Result<()> {
 		let [version] = self.client.version.as_slice() else {
 			anyhow::bail!(
 				"a failover relay needs exactly one --connect-version, so both relays negotiate the same protocol"
@@ -577,9 +615,15 @@ mod tests {
 			)
 			.unwrap()
 		};
+		let unversioned = load(client.clone());
 		assert!(
-			load(client.clone()).dials(Switched::default()).is_err(),
-			"no single version"
+			unversioned.destination(Switched::default()).is_err(),
+			"going live to both needs a single version"
+		);
+		assert_eq!(
+			unversioned.dials(Switched::default()).unwrap().len(),
+			2,
+			"watching both does not"
 		);
 		client.version = vec!["moq-lite-07-wip".parse().unwrap()];
 		let stream = load(client);
@@ -596,5 +640,61 @@ mod tests {
 			failover: false,
 		};
 		assert!(stream.destination(none).is_err(), "nothing to send");
+	}
+
+	/// An address carrying its own `?jwt=` dials with it, without the
+	/// credential store, which may not open at all.
+	#[test]
+	fn a_token_in_the_address_needs_no_store() {
+		let dir = tempfile::tempdir().unwrap();
+		let relay: Url = "https://a.example/?jwt=x".parse().unwrap();
+		let flags = Flags {
+			relay: Some(relay.clone()),
+			..Default::default()
+		};
+		let broken = Credentials(Err("no Secret Service".into()));
+		let stream = Stream::load(
+			&dir.path().join("show.toml"),
+			flags,
+			Default::default(),
+			Default::default(),
+			broken,
+		)
+		.unwrap();
+		assert_eq!(stream.dials(Switched::default()).unwrap(), [(relay, Vec::new())]);
+	}
+
+	/// Watching, measuring, and going live share one client per relay, so a
+	/// fixed `--connect-bind` port is bound once.
+	#[tokio::test]
+	async fn a_relay_is_set_up_once() {
+		let dir = tempfile::tempdir().unwrap();
+		let relay: Url = "https://a.example/".parse().unwrap();
+		let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		let mut client = moq_tokio::connect::Config::default();
+		client.bind = Some(free.local_addr().unwrap());
+		drop(free);
+		let mut stream = Stream::load(
+			&dir.path().join("show.toml"),
+			Flags::default(),
+			client,
+			Default::default(),
+			Credentials::memory(),
+		)
+		.unwrap();
+		stream
+			.save(Saved {
+				relay: Some(relay.clone()),
+				..Default::default()
+			})
+			.unwrap();
+		let only = Switched {
+			relay: true,
+			failover: false,
+		};
+		let _watching = stream.relays(Switched::default()).unwrap();
+		stream.relays(only).expect("the bound port is reused");
+		stream.clone().destination(only).expect("so is going live's");
+		assert_eq!(stream.clients.lock().unwrap().len(), 1);
 	}
 }

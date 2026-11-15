@@ -125,7 +125,7 @@ fn candidates(encoders: &Encoders) -> Vec<(Canvas, &Encoding)> {
 /// Open the exporter the program would for each canvas, the same probe that
 /// picks its encoder at startup, and time a burst through what it settled on.
 async fn probe_encoders(gpu: engine::Gpu) -> Encoders {
-	let picture = Picture::new(&gpu);
+	let picture = Picture::new(&gpu, &CANVASES);
 	let mut probed = Vec::new();
 	for canvas in CANVASES {
 		let result = probe_encoder(&gpu, &picture, canvas)
@@ -139,7 +139,7 @@ async fn probe_encoders(gpu: engine::Gpu) -> Encoders {
 /// How `canvas` encodes on this machine, as going live checks it: the probe
 /// setup runs for each canvas it could propose.
 pub(crate) async fn probe(gpu: engine::Gpu, canvas: Canvas) -> Result<Encoding, String> {
-	let picture = Picture::new(&gpu);
+	let picture = Picture::new(&gpu, &[canvas]);
 	probe_encoder(&gpu, &picture, canvas)
 		.await
 		.map_err(|err| format!("{err:#}"))
@@ -229,14 +229,14 @@ async fn time(budget: Duration, mut encode: impl AsyncFnMut(u32) -> anyhow::Resu
 	Ok(started.elapsed() / BURST)
 }
 
-/// A picture as large as the largest canvas plus a burst's panning, uploaded
-/// once and copied from for every canvas.
+/// A picture as large as the largest canvas it serves plus a burst's panning,
+/// uploaded once and copied from for each of them.
 struct Picture(wgpu::Texture);
 
 impl Picture {
-	fn new(gpu: &engine::Gpu) -> Self {
-		let width = CANVASES.iter().map(|canvas| canvas.width).max().unwrap_or_default() + PAN * BURST;
-		let height = CANVASES.iter().map(|canvas| canvas.height).max().unwrap_or_default();
+	fn new(gpu: &engine::Gpu, canvases: &[Canvas]) -> Self {
+		let width = canvases.iter().map(|canvas| canvas.width).max().unwrap_or_default() + PAN * BURST;
+		let height = canvases.iter().map(|canvas| canvas.height).max().unwrap_or_default();
 		let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
 			label: Some("setup picture"),
 			size: extent(width, height),
@@ -977,15 +977,19 @@ mod tests {
 	}
 
 	/// The burst runs on a real device and encoder, through the program's own
-	/// copy path.
+	/// copy path, for each canvas setup proposes and for a portrait show's,
+	/// taller than any of them, as going live checks it.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn times_every_canvas() {
 		let gpu = engine::Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
-		for (canvas, result) in probe_encoders(gpu).await {
+		for (canvas, result) in probe_encoders(gpu.clone()).await {
 			let encoding = result.unwrap_or_else(|err| panic!("{}: {err}", describe(canvas)));
 			assert!(encoding.frame > Duration::ZERO, "{}", describe(canvas));
 		}
+		let portrait = canvas(720, 1280, 30);
+		let encoding = probe(gpu, portrait).await.expect("a portrait canvas encodes");
+		assert!(encoding.frame > Duration::ZERO);
 	}
 
 	#[test]
