@@ -34,6 +34,18 @@ jobs:
           persist-credentials: false
           submodules: true
 
+      # Only a PR that moves the pin fetches moq's history, so an unchanged pin
+      # never fails on the network.
+      - name: The moq pin is on moq's main
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --quiet --no-tags --depth=1 origin "$BASE"
+          if [ "$(git rev-parse "$BASE:moq")" != "$(git rev-parse HEAD:moq)" ]; then
+            sh/check-moq-main.sh
+          fi
+
       - uses: ./.github/actions/nix
 
       - name: Check

@@ -11,6 +11,7 @@ default:
 # Lint the repository tooling, the quest tree, the join page, and the workspace.
 check:
     sh/check-moq-pin.sh
+    sh/check-ignore-recipes.sh
     quest check
     actionlint
     shellcheck .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh
@@ -98,8 +99,8 @@ shots *views:
 v4l2loopback:
     cargo nextest run --locked -p moq-studio --run-ignored only -E 'test(=vcam::v4l2::tests::a_v4l2_app_reads_the_program)'
 
-# Move the moq submodule to moq's latest main (or a given commit) and refresh Cargo.lock and bun.lock.
-upgrade-moq rev="origin/main":
+# Move the moq submodule to moq-dev/moq's main tip (FETCH_HEAD after the check fetches it) or a given commit on it, and refresh Cargo.lock and bun.lock.
+upgrade-moq rev="FETCH_HEAD":
     sh/upgrade-moq.sh {{ rev }}
 
 # Serve the join page locally while working on it.

@@ -66,10 +66,6 @@ pub use compositor::{Compositor, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
 pub use scale::Scaler;
 
-/// The `wgpu` the compositor draws with: `moq_video`'s, so its textures and
-/// the decoder's are the same type.
-pub use moq_video::render::wgpu;
-
 /// Errors from loading scenes, opening sources, and drawing them.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

@@ -66,8 +66,6 @@ moq-auth = { workspace = true }
 moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-# The guest room: its path convention, roster, and token claims.
-moq-room = { workspace = true, features = ["async"] }
 moq-scene = { workspace = true }
 moq-stats = { workspace = true, features = ["async"] }
 moq-tokio = { workspace = true, default-features = false, features = ["net"] }
@@ -88,6 +86,8 @@ toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
+# The compositor's device, shared with the window.
+wgpu = { workspace = true }
 # The window's event loop, run here so a hotkey is the key winit names by where
 # it sits, which egui folds into its main keyboard twin for a keypad key and
 # drops for a key outside its own list. eframe's version and features, with

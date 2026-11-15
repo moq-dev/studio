@@ -48,7 +48,7 @@ impl Unsaved {
 	/// [`QUIET`] after the last edit, but no later than [`LIMIT`] after the
 	/// first. Another edit only moves it later.
 	fn deadline(&self) -> Instant {
-		(self.last + QUIET).min(self.first + LIMIT)
+		(self.last.saturating_add(QUIET)).min(self.first.saturating_add(LIMIT))
 	}
 }
 

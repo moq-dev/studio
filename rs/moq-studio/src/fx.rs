@@ -12,7 +12,6 @@ use std::sync::{Arc, OnceLock};
 
 use eframe::egui_wgpu;
 use egui::{Color32, Rect, Ui};
-use moq_scene::wgpu;
 use rune_fx::{
 	ElectricParams, ElectricStyle, Fx as Effect, FxFrame, FxLayer, FxOptions, FxRenderer, GlowParams, GlowStyle,
 	GradientKind, GrainGradientParams, LiquidMetalParams, MeshGradientParams, PlasticParams, PulseParams, PulseStyle,

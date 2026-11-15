@@ -1,11 +1,11 @@
 //! Guests: people who join the studio's room from a web page, whose camera and
 //! screen become broadcast sources.
 //!
-//! The room is a moq-room prefix on the studio's relay. Inviting a guest signs
-//! a short-lived token with [`moq_room::claims`], so the guest publishes only
-//! under its own `<identity>/`, and hands it to the join page in a link's
-//! fragment, which no server logs. The guest publishes moq-room's
-//! `<identity>/camera.hang` and `<identity>/screen.hang`, and the studio adds
+//! The room is a path prefix on the studio's relay. Inviting a guest signs a
+//! short-lived token that publishes only under its own `<identity>/`, and
+//! hands it to the join page in a link's fragment, which no server logs. The
+//! guest publishes `<identity>/camera.hang` and `<identity>/screen.hang`, as
+//! [`@moq/room`](https://www.npmjs.com/package/@moq/room) does, and the studio adds
 //! each as a [`Source::Broadcast`] in no scene or audio scene when it is
 //! announced. Only the room key
 //! mints those tokens, so guests can make the studio hold at most two sources
@@ -30,7 +30,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use moq_net::Path;
-use moq_room::Kind;
 use moq_scene::{Collection, Draft, Filter, History, Item, Layer, Source, Video};
 use url::Url;
 
@@ -39,7 +38,7 @@ use crate::engine::Engine;
 /// The domain `.github/workflows/join.yml` deploys `js/join` to.
 const JOIN_PAGE: &str = "https://join.studio.moq.dev/";
 
-/// The prefix of each guest's renewed tokens, which moq-room's announcements
+/// The prefix of each guest's renewed tokens, which the room's announcements
 /// hide; [`Room::renewal_path`] names the rest. `js/join` reads the same path.
 const RENEW: &str = ".renew";
 
@@ -47,17 +46,51 @@ const RENEW: &str = ".renew";
 /// the same name.
 const TOKEN_TRACK: &str = "token";
 
-/// The prefix of each guest's return feed, which moq-room's announcements hide;
+/// The prefix of each guest's return feed, which the room's announcements hide;
 /// [`Room::feed_path`] names the rest. `js/join` reads the same path.
 const RETURN: &str = ".return";
 
 /// Where the studio's session in the room serves the program, which every
-/// guest's return feed shows. moq-room's announcements hide it.
+/// guest's return feed shows. The room's announcements hide it.
 pub const PROGRAM: &str = ".program";
 
 /// The shortest `--guest-expiry`: half of it must leave room for a renewal to
 /// reach the guest and the relay before the token it replaces expires.
 const MIN_EXPIRY: Duration = Duration::from_secs(60);
+
+/// The two broadcasts a guest publishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+	/// Camera and microphone, at `<identity>/camera.hang`.
+	Camera,
+	/// Screenshare, at `<identity>/screen.hang`.
+	Screen,
+}
+
+impl Kind {
+	/// The last segment of this kind's path.
+	const fn segment(self) -> &'static str {
+		match self {
+			Self::Camera => "camera.hang",
+			Self::Screen => "screen.hang",
+		}
+	}
+}
+
+/// The guest a room-relative broadcast `path` belongs to, and which of their
+/// broadcasts it is, when it is one a link publishes: `camera.hang` or
+/// `screen.hang` under a one-segment identity. Anything else the
+/// `<identity>/**` a token grants could publish names no guest or source.
+fn guest(path: &Path) -> Option<(Path, Kind)> {
+	// None when the first `/` is escaped, so it separates nothing.
+	let identity = path.head(1)?;
+	let kind = [Kind::Camera, Kind::Screen].into_iter().find(|kind| {
+		identity
+			.join(&Path::from_static(kind.segment()))
+			.is_ok_and(|joined| joined == *path)
+	})?;
+	Some((identity, kind))
+}
 
 /// The guest flags.
 #[derive(usage_rs::Args, Clone, Debug)]
@@ -405,19 +438,25 @@ impl Room {
 	/// Why the session publishing guests' renewed tokens is not connected, if it
 	/// is not.
 	pub fn renewal_failure(&self) -> Option<String> {
-		let failure = self.session.get()?.state().failure?;
+		use moq_tokio::connection::Phase;
+		let failure = match self.session.get()?.state().phase {
+			Phase::Connecting { failure } | Phase::Disconnected { failure } | Phase::Closed { failure } => failure?,
+			Phase::Connected { .. } | Phase::Migrating { .. } => return None,
+		};
 		Some(format!("{:#}", anyhow::Error::from(failure)))
 	}
 
-	/// A token for `identity`, and when it expires. It publishes moq-room's
-	/// paths but subscribes only to its own renewals and return feed, and the
+	/// A token for `identity`, and when it expires. It publishes under
+	/// `<identity>/` but subscribes only to its own renewals and return feed, and the
 	/// program that feed shows, so no guest reads another's.
 	fn sign(&self, identity: &str, generation: u64) -> anyhow::Result<(String, kio::clock::Wall)> {
 		let invalid = || format!("cannot invite `{identity}`");
 		let renewals = Self::renewal_path(identity, generation).with_context(invalid)?;
 		let feed = Self::feed_path(identity, generation).with_context(invalid)?;
-		let claims = moq_room::claims(self.root.as_str(), identity)
-			.with_context(invalid)?
+		anyhow::ensure!(!identity.is_empty(), "a guest's name cannot be empty");
+		let claims = moq_auth::Claims::default()
+			.with_root(self.root.as_str())
+			.with_publish([moq_auth::Pattern::subtree(identity).with_context(invalid)?])
 			.with_subscribe([
 				moq_auth::Pattern::literal(renewals.as_str())?,
 				moq_auth::Pattern::literal(feed.as_str())?,
@@ -474,24 +513,20 @@ impl Room {
 		collection: &Collection,
 		history: &History,
 	) -> Option<(String, Source)> {
-		let parsed = moq_room::parse(path)?;
-		// Only the two paths a link's one-segment identity publishes, so the
-		// `<identity>/**` its token grants cannot mint more guests or sources.
-		let canonical = moq_room::broadcast_path(parsed.identity.clone(), parsed.kind).ok()?;
-		if parsed.identity.parts().count() != 1 || canonical != *path {
+		let Some((identity, kind)) = guest(path) else {
 			tracing::debug!(%path, "ignoring a broadcast that is not a guest's camera or screen");
 			return None;
-		}
+		};
 		let source = self.path.join(path).ok()?.to_string();
 		let existing = collection
 			.sources
 			.values()
 			.any(|existing| matches!(existing, Source::Broadcast { path } if *path == source));
 
-		let identity = parsed.identity.to_string();
+		let identity = identity.to_string();
 		let mut participants = self.participants.lock().unwrap();
 		let participant = participants.entry(identity.clone()).or_default();
-		match parsed.kind {
+		match kind {
 			Kind::Camera => participant.camera = online,
 			Kind::Screen => participant.screen = online,
 		}
@@ -501,7 +536,7 @@ impl Room {
 			return None;
 		}
 
-		let base = match parsed.kind {
+		let base = match kind {
 			Kind::Camera => identity,
 			Kind::Screen => format!("{identity} screen"),
 		};
@@ -596,11 +631,8 @@ impl Room {
 			let Source::Broadcast { path } = source else {
 				return None;
 			};
-			let parsed = Path::new(path)
-				.ok()?
-				.strip_prefix(&self.path)
-				.and_then(moq_room::parse)?;
-			(parsed.identity.as_str() == identity).then_some((name, parsed.kind))
+			let (guest, kind) = guest(&Path::new(path).ok()?.strip_prefix(&self.path)?)?;
+			(guest.as_str() == identity).then_some((name, kind))
 		})
 	}
 }
@@ -653,11 +685,18 @@ fn check_scope(key: &moq_auth::Key, room: &Path) -> anyhow::Result<()> {
 /// guest's broadcasts as sources.
 pub async fn run(engine: Arc<Engine>, origin: moq_net::origin::Consumer) {
 	let room = engine.room.as_ref().expect("run only with a room");
-	let mut announced = moq_room::Room::new(&origin, None);
+	let mut announced = origin.announced();
 	while let Some(event) = announced.next().await {
+		use moq_net::announce::Event;
+		let (announce, online) = match event {
+			Event::Present(announce) => (announce, true),
+			Event::Absent(announce) | Event::Offline(announce) => (announce, false),
+			// A guest stays in the room while their route recovers.
+			Event::Unavailable(_) | Event::Available(_) => continue,
+		};
+		let path = announce.prefix;
 		let mut state = engine.state.lock().unwrap();
-		let online = event.broadcast.is_some();
-		let Some((name, source)) = room.observe(&event.path, online, state.collection(), state.history()) else {
+		let Some((name, source)) = room.observe(&path, online, state.collection(), state.history()) else {
 			continue;
 		};
 		// Not the host's edit, so it stays out of what they undo and redo. It
@@ -669,7 +708,7 @@ pub async fn run(engine: Arc<Engine>, origin: moq_net::origin::Consumer) {
 			.map_err(anyhow::Error::from)
 			.and_then(|()| state.apply_outside(draft));
 		match added {
-			Ok(()) => tracing::info!(source = %name, identity = %event.identity, "a guest joined"),
+			Ok(()) => tracing::info!(source = %name, %path, "a guest joined"),
 			Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot add a guest"),
 		}
 	}
@@ -724,7 +763,7 @@ impl Renewal {
 	pub async fn run(mut self) {
 		let room = self.renewals.room.clone();
 		let period = room.expiry / 2;
-		let mut renew = kio::clock::interval_at(kio::clock::now() + period, period);
+		let mut renew = kio::clock::interval_at(kio::clock::now().saturating_add(period), period);
 		let mut changes = room.changes();
 		loop {
 			self.renewals.sync();
@@ -763,7 +802,7 @@ struct Renewed {
 
 impl Drop for Renewed {
 	fn drop(&mut self) {
-		let _ = self.track.finish();
+		let _ = self.track.clone().finish();
 		self.publication.broadcast().close();
 	}
 }
@@ -1056,7 +1095,13 @@ pub(crate) mod tests {
 		let path = |text: &str| Path::new(text).unwrap();
 
 		// Anything else under a guest's own path is not a guest.
-		for other in ["alice/1/camera.hang", "alice/camera", "alice/mic.hang"] {
+		for other in [
+			"alice/1/camera.hang",
+			"alice/camera",
+			"alice/mic.hang",
+			"camera.hang",
+			r"alice\/camera.hang",
+		] {
 			assert_eq!(room.observe(&path(other), true, &collection, &history), None, "{other}");
 		}
 		assert!(room.participants().is_empty());
@@ -1240,7 +1285,7 @@ pub(crate) mod tests {
 
 		let subscribe = moq_tokio::origin::spawn();
 		let all = moq_auth::Pattern::all().into();
-		let mut announced = moq_room::Room::new(&subscribe.consume().scope("guests", &all).unwrap(), None);
+		let mut announced = subscribe.consume().scope("guests", &all).unwrap().announced();
 		let _studio = client.with_subscriber(subscribe).connect(relay.connect.clone());
 
 		let room = relay.room();
@@ -1261,10 +1306,12 @@ pub(crate) mod tests {
 			.await
 			.expect("the guest's camera reaches the studio")
 			.expect("an announcement");
-		assert_eq!(event.path.as_str(), "alice/camera.hang");
-		assert!(event.broadcast.is_some());
+		let moq_net::announce::Event::Present(announce) = event else {
+			panic!("{event:?} before the guest's camera");
+		};
+		assert_eq!(announce.prefix.as_str(), "alice/camera.hang");
 		let (name, source) = room
-			.observe(&event.path, true, &Collection::new(), &History::new())
+			.observe(&announce.prefix, true, &Collection::new(), &History::new())
 			.unwrap();
 		assert_eq!(name, "alice");
 		assert_eq!(

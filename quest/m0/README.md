@@ -56,7 +56,7 @@ Decided 2026-10-22 with the maintainer (/quest-plan):
   WASM support on 2026-10-31, its browser-backend quests are deferred with
   no other consumer, and nothing plans a browser WebTransport session for
   moq-net.
-- **Guests:** guests and phone cameras join a moq-room prefix the studio
+- **Guests:** guests and phone cameras join a room prefix the studio
   owns, through a web join link or QR code.
 - **Naming:** quests name no streaming platforms; ingest requirements are
   written as generic constraints.

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use kio::clock::Instant;
-use moq_video::render::{Renderer, wgpu};
+use moq_video::render::Renderer;
 
 use crate::Error;
 use crate::collection::{
@@ -2394,7 +2394,7 @@ mod tests {
 	/// scene stacks it; without one showing, the layered program is the
 	/// program itself.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_published_source_draws_over_the_program() {
 		local(async {
 			let mut collection = collection();
@@ -2428,7 +2428,7 @@ mod tests {
 	/// Items draw where their rect says, later items over earlier ones, and
 	/// a hidden item not at all.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn items_draw_in_place_and_in_order() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -2450,7 +2450,7 @@ mod tests {
 
 	/// Straight alpha blends over what is below, and the canvas stays opaque.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn alpha_blends_over_black() {
 		local(async {
 			let mut collection = collection();
@@ -2474,7 +2474,7 @@ mod tests {
 	/// A fade mixes the outgoing and incoming scenes by its progress on the
 	/// program clock, and lands on the incoming scene; preview never fades.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_fade_mixes_by_progress() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -2488,7 +2488,7 @@ mod tests {
 				.unwrap();
 			assert_eq!(studio.compositor.program_scene(), Some("blue"));
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			assert!(studio.compositor.transitioning());
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
@@ -2496,7 +2496,7 @@ mod tests {
 			assert_eq!(pixel(&program, 6, 1), BLUE, "blue under blue stays blue");
 			assert_eq!(pixel(&studio.preview(), 1, 1), BLUE);
 
-			studio.render(start + Duration::from_secs(1));
+			studio.render(start.saturating_add(Duration::from_secs(1)));
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
 		})
@@ -2514,7 +2514,7 @@ mod tests {
 	/// A clone draws its source's picture through its own filters, then the
 	/// item's, and leaves the source it clones as it was.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_clone_draws_through_its_own_filters() {
 		local(async {
 			let mut collection = collection();
@@ -2549,7 +2549,7 @@ mod tests {
 	/// The top layer draws over preview and program, and over a fade rather
 	/// than fading with it.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn the_top_layer_stays_over_a_fade() {
 		local(async {
 			let mut collection = collection();
@@ -2566,13 +2566,13 @@ mod tests {
 				.compositor
 				.transition(&studio.collection, FADE, &studio.sources, start)
 				.unwrap();
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "{actual:?}");
 			assert_eq!(pixel(&program, 1, 6), BLUE, "the top layer does not fade");
 			studio.collection.scenes[1].items.clear();
-			studio.render(start + Duration::from_millis(600));
+			studio.render(start.saturating_add(Duration::from_millis(600)));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE);
 			assert_eq!(pixel(&studio.preview(), 6, 1), BLACK);
 		})
@@ -2622,7 +2622,7 @@ mod tests {
 	/// not drawn has no picture, one left out is forgotten, and a preview no
 	/// one looks at is not drawn.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_output_draws_its_scene_at_its_own_size() {
 		local(async {
 			let mut collection = tall(vec![Item::new("red", BOTTOM)]);
@@ -2649,14 +2649,14 @@ mod tests {
 				.compositor
 				.transition(&studio.collection, FADE, &studio.sources, start)
 				.unwrap();
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let texture = studio.compositor.output("tall").unwrap().texture().unwrap().clone();
 			let rgba = studio.read(&texture);
 			let faded = rgba[..4].try_into().unwrap();
 			assert!(near(faded, [128, 0, 127, 255]), "the program as it fades: {faded:?}");
 
 			studio.compositor.set_preview(Some("tall".into()));
-			studio.render(start + Duration::from_secs(1));
+			studio.render(start.saturating_add(Duration::from_secs(1)));
 			assert_eq!(studio.compositor.preview_canvas().size(), moq_video::Size::new(4, 8));
 			let preview = studio.compositor.preview().clone();
 			assert_eq!(
@@ -2669,7 +2669,7 @@ mod tests {
 
 			studio.compositor.set_outputs(BTreeMap::from([("tall", false)]));
 			studio.compositor.set_previewing(false);
-			studio.render(start + Duration::from_secs(1));
+			studio.render(start.saturating_add(Duration::from_secs(1)));
 			assert!(studio.compositor.output("tall").unwrap().texture().is_none());
 			assert!(!studio.compositor.previewed());
 			studio.compositor.set_outputs(BTreeMap::new());
@@ -2681,7 +2681,7 @@ mod tests {
 	/// An output's items play their keyframes from when it was first named,
 	/// drawn or not, and from the start again once named anew.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_output_plays_keyframes_from_when_it_went_on() {
 		local(async {
 			let mut slide = slide_in();
@@ -2693,7 +2693,7 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.fit(&studio.collection).unwrap();
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 			let drawn = |studio: &mut Studio| {
 				let texture = studio.compositor.output("tall").unwrap().texture().unwrap().clone();
 				tall_pixels(studio, &texture)
@@ -2717,7 +2717,7 @@ mod tests {
 
 	/// A cut lands at once, even mid-fade, and an empty program is black.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_cut_ends_a_fade() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -2730,11 +2730,11 @@ mod tests {
 				.compositor
 				.transition(&studio.collection, FADE, &studio.sources, start)
 				.unwrap();
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			assert!(!studio.compositor.transitioning());
-			studio.render(start + Duration::from_millis(600));
+			studio.render(start.saturating_add(Duration::from_millis(600)));
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
 		})
 		.await;
@@ -2745,7 +2745,7 @@ mod tests {
 	/// left half on the right; a wipe leaves the outgoing scene in place and
 	/// uncovers the incoming one where the slide brought it in.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_slide_pushes_and_a_wipe_uncovers() {
 		local(async {
 			let mut collection = collection();
@@ -2797,7 +2797,7 @@ mod tests {
 					.compositor
 					.transition(&studio.collection, transition.clone(), &studio.sources, start)
 					.unwrap();
-				studio.render(start + Duration::from_millis(500));
+				studio.render(start.saturating_add(Duration::from_millis(500)));
 				let program = studio.program();
 				let actual = [(1, 1), (1, 6), (6, 1), (6, 6)].map(|(x, y)| pixel(&program, x, y));
 				assert_eq!(actual, expected, "{transition:?}");
@@ -2812,7 +2812,7 @@ mod tests {
 	/// over, and fades in what only the incoming one does, landing on the
 	/// incoming scene as drawn.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_move_glides_what_both_scenes_place() {
 		local(async {
 			let mut collection = collection();
@@ -2856,7 +2856,7 @@ mod tests {
 				.unwrap();
 
 			// Eased halfway, blue is at (2, 2) and both fades are at half.
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert_eq!(pixel(&program, 3, 3), BLUE, "blue in between");
 			assert_eq!(pixel(&program, 5, 4), BLUE);
@@ -2867,7 +2867,7 @@ mod tests {
 			let actual = pixel(&program, 7, 0);
 			assert!(near(actual, [64, 128, 0, 255]), "green half over half red: {actual:?}");
 
-			studio.render(start + duration);
+			studio.render(start.saturating_add(duration));
 			assert!(!studio.compositor.transitioning());
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 6), BLUE);
@@ -2895,14 +2895,14 @@ mod tests {
 	/// preview, and from when it went on program, for the program, so one scene
 	/// can be at two points of them at once.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn keyframes_play_from_when_the_scene_goes_on() {
 		local(async {
 			let mut collection = collection();
 			collection.scenes[1].items[0].keyframes = slide_in();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
@@ -2943,7 +2943,7 @@ mod tests {
 	/// Two outputs at either side of a jump, keyframes at the same moment, each
 	/// draw their own side of it rather than share one.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_jump_draws_each_side_on_its_own_output() {
 		local(async {
 			let mut collection = collection();
@@ -2962,7 +2962,7 @@ mod tests {
 			studio.render(start);
 			// Program has reached the jump; preview starts over before it.
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.render(start + jump);
+			studio.render(start.saturating_add(jump));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK, "before the jump");
 			assert_eq!(pixel(&studio.program(), 1, 6), BLUE, "after the jump");
 		})
@@ -2972,7 +2972,7 @@ mod tests {
 	/// A transition starts the incoming scene's keyframes, however long it was
 	/// in preview, while the outgoing scene's carry on.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_transition_starts_the_incoming_keyframes() {
 		local(async {
 			let mut collection = collection();
@@ -2980,7 +2980,7 @@ mod tests {
 			collection.scenes[1].items[0].keyframes = slide_in();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("red".into()));
@@ -3006,7 +3006,7 @@ mod tests {
 	/// incoming scene's halfway, and an item's filter settings mix from one
 	/// scene's to the other's as it goes.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_move_restacks_halfway_and_mixes_filters() {
 		local(async {
 			let mut collection = collection();
@@ -3038,13 +3038,13 @@ mod tests {
 			assert_eq!(pixel(&program, 1, 6), BLUE, "blue over red, as the outgoing scene");
 			assert_eq!(pixel(&program, 6, 1), BLUE);
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 6), RED, "red over blue from halfway");
 			let actual = pixel(&program, 6, 1);
 			assert!(near(actual, [128, 128, 128, 255]), "half inverted: {actual:?}");
 
-			studio.render(start + duration);
+			studio.render(start.saturating_add(duration));
 			assert_eq!(pixel(&studio.program(), 6, 1), [255, 255, 0, 255]);
 		})
 		.await;
@@ -3053,7 +3053,7 @@ mod tests {
 	/// A source with no new picture repeats its last one; an edited source never
 	/// shows the old one's picture, and a removed source disappears.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stalled_source_repeats_its_last_picture() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -3122,7 +3122,7 @@ mod tests {
 	/// switches the scenes under it at its cut point into the clip, and ends
 	/// with the clip, which holds its last picture.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stinger_cuts_under_its_clip() {
 		local(async {
 			let mut studio = stinging(crate::media::tests::CLIP).await;
@@ -3169,9 +3169,9 @@ mod tests {
 
 			// Seen through, the outgoing scene shows until the cut point.
 			sting(&mut studio, Filter::Opacity { amount: 0.0 });
-			studio.render(begun + Duration::from_millis(299));
+			studio.render(begun.saturating_add(Duration::from_millis(299)));
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
-			studio.render(begun + Duration::from_millis(300));
+			studio.render(begun.saturating_add(Duration::from_millis(300)));
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
 			assert!(studio.compositor.transitioning(), "until the clip ends");
 
@@ -3181,7 +3181,11 @@ mod tests {
 				}
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			};
-			assert!(ended >= begun + Duration::from_secs(1), "{:?}", ended - begun);
+			assert!(
+				ended >= begun.saturating_add(Duration::from_secs(1)),
+				"{:?}",
+				ended - begun
+			);
 			studio.render(ended);
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(studio.compositor.stinger(), None);
@@ -3214,7 +3218,7 @@ mod tests {
 	/// A stinger whose clip cannot play cuts at once, as does one whose clip
 	/// is played again from elsewhere, such as the Sources panel.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stinger_that_cannot_play_cuts() {
 		local(async {
 			let mut studio = stinging(b"not a video").await;
@@ -3248,7 +3252,7 @@ mod tests {
 	/// clip ends its stinger at once, and a looping clip stops with its
 	/// stinger after one pass.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stinger_stops_its_clip() {
 		local(async {
 			let mut studio = stinging(crate::media::tests::CLIP).await;
@@ -3260,7 +3264,7 @@ mod tests {
 				.unwrap();
 			loop {
 				studio.render(Instant::now());
-				if Studio::hear(&program, Instant::now() + Duration::from_millis(10)).await > 0.0 {
+				if Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(10))).await > 0.0 {
 					break;
 				}
 			}
@@ -3270,7 +3274,7 @@ mod tests {
 			while feed.status() != Status::Ended {
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			}
-			let heard = Studio::hear(&program, Instant::now() + Duration::from_millis(500)).await;
+			let heard = Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(500))).await;
 			assert_eq!(heard, 0.0, "the clip's sound stops with the cut");
 
 			// Stopped from the Sources panel, the stinger ends with it.
@@ -3304,14 +3308,14 @@ mod tests {
 				.unwrap();
 			while studio.compositor.transitioning() {
 				studio.render(Instant::now());
-				Studio::hear(&program, Instant::now() + Duration::from_millis(10)).await;
+				Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(10))).await;
 			}
 			let feed = studio.sources.get("sting").unwrap();
 			assert!(feed.run().ended.is_some(), "after its first pass");
 			while feed.status() != Status::Ended {
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			}
-			let heard = Studio::hear(&program, Instant::now() + Duration::from_millis(500)).await;
+			let heard = Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(500))).await;
 			assert_eq!(heard, 0.0, "the loop stops with the stinger");
 		})
 		.await;
@@ -3386,7 +3390,7 @@ mod tests {
 	/// A picture the GPU cannot hold says why, rather than leaving its source
 	/// live and missing from the canvas.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_picture_that_cannot_draw_reports_why() {
 		local(async {
 			let mut collection = collection();
@@ -3416,7 +3420,7 @@ mod tests {
 	/// picture once the model has it, and its whole picture again once kept,
 	/// in its scene or a scene that scene shows.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn removes_the_background() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -3496,7 +3500,7 @@ mod tests {
 	/// again, never shows the cut-out of a picture from before, even when its
 	/// next picture overtakes the clear.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_clear_drops_the_cut_out_in_hand() {
 		let (device, queue) = gpu().await;
 		let effects = Effects::new(&device, &queue, 256, 144);
@@ -3570,7 +3574,7 @@ mod tests {
 	/// Each CSS color filter maps a color as the spec's matrix does, clamping
 	/// after each filter rather than once at the end.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn color_filters_follow_css() {
 		let cases = [
 			(vec![Filter::Grayscale { amount: 1.0 }], [118, 118, 118]),
@@ -3610,7 +3614,7 @@ mod tests {
 	/// A crop trims the picture and stretches the rest over the item: an image
 	/// red on its left half and blue on its right shows blue where red was.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_crop_fills_the_item() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -3642,7 +3646,7 @@ mod tests {
 	/// its edges, as CSS's edge mode none: a blue square bleeds onto the black
 	/// around it by the discrete Gaussian's weights.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blur_spreads_past_the_edges() {
 		local(async {
 			let square = Rect {
@@ -3678,7 +3682,7 @@ mod tests {
 	/// A blur many pixels wide is drawn on halved rasters, still matching the
 	/// Gaussian of a square to within a few levels.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_wide_blur_matches_the_gaussian() {
 		local(async {
 			let mut collection = collection();
@@ -3711,7 +3715,7 @@ mod tests {
 
 	/// A drop shadow is the picture's shape, offset and filled, under it.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_drop_shadow_falls_under() {
 		local(async {
 			let square = Rect {
@@ -3744,7 +3748,7 @@ mod tests {
 	/// A chroma key hides its color and keeps the rest; a luma key hides what
 	/// is out of its range.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn keys_hide_what_they_key() {
 		local(async {
 			let mut collection = collection();
@@ -3790,7 +3794,7 @@ mod tests {
 
 	/// A LUT maps each color through its table, interpolating between points.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_lut_grades() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -3848,7 +3852,7 @@ mod tests {
 	/// A mask keeps the picture where its source is opaque, or bright in
 	/// luminance mode, and an item whose mask has no picture yet draws nothing.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_mask_keeps_what_it_covers() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -3907,7 +3911,7 @@ mod tests {
 	/// transparent texel bleeds into no edge, of a still, an overlay's
 	/// straight paint, or a luminance mask, while the edge still fades.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn scaling_bleeds_no_transparent_color() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -3998,7 +4002,7 @@ mod tests {
 	/// new width, a canvas the GPU cannot hold changes nothing, and a scene
 	/// grown since the last fit is not drawn.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_resize_draws_the_new_canvas() {
 		local(async {
 			let mut collection = collection();
@@ -4076,7 +4080,7 @@ mod tests {
 	/// even when another scene takes its old name in the same edit, and a scene
 	/// the collection lost leaves them.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_renamed_scene_stays_where_it_is() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -4098,7 +4102,7 @@ mod tests {
 			studio.collection.apply(&edit).unwrap();
 			assert_eq!(studio.compositor.preview_scene(), Some("red"));
 			assert_eq!(studio.compositor.program_scene(), Some("red"));
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let actual = pixel(&studio.program(), 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "still fading from red: {actual:?}");
 
@@ -4115,7 +4119,7 @@ mod tests {
 	/// A blend mode mixes an item with what is under it by the CSS formula,
 	/// weighted by the item's opacity.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn blend_modes_mix_with_what_is_under() {
 		let cases = [
 			(Blend::Multiply, 255, [0, 0, 0]),
@@ -4152,7 +4156,7 @@ mod tests {
 	/// An overlay's image, a file beside the scene file, is on the first
 	/// frame that shows the overlay.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_overlay_draws_its_image_on_its_first_frame() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -4186,7 +4190,7 @@ mod tests {
 	/// that frame is drawn, even the first one to show it. This one does not
 	/// restart, so going on program does not start it over.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_overlay_animates_on_the_program_clock() {
 		local(async {
 			let mut collection = collection();
@@ -4215,7 +4219,7 @@ mod tests {
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 
 			for (at, expected) in [(500, [128, 0, 128, 255]), (750, [64, 0, 191, 255]), (2000, BLUE)] {
-				studio.render(start + Duration::from_millis(at));
+				studio.render(start.saturating_add(Duration::from_millis(at)));
 				let program = studio.program();
 				let actual = pixel(&program, 3, 1);
 				assert!(
@@ -4234,7 +4238,7 @@ mod tests {
 	/// included. One that does
 	/// not restart runs on from when it opened.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_overlay_restarts_going_on() {
 		local(async {
 			let mut collection = collection();
@@ -4269,10 +4273,10 @@ mod tests {
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 
-			let previewed = start + Duration::from_secs(2);
+			let previewed = start.saturating_add(Duration::from_secs(2));
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.render(previewed);
-			studio.render(previewed + Duration::from_millis(500));
+			studio.render(previewed.saturating_add(Duration::from_millis(500)));
 			let preview = studio.preview();
 			assert!(
 				near(pixel(&preview, 3, 1), half),
@@ -4281,11 +4285,11 @@ mod tests {
 			);
 			assert_eq!(pixel(&preview, 3, 6), BLUE, "the clock ran on");
 
-			let cut = previewed + Duration::from_secs(3);
+			let cut = previewed.saturating_add(Duration::from_secs(3));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(cut);
 			assert_eq!(pixel(&studio.program(), 3, 1), RED, "on program, from the start");
-			studio.render(cut + Duration::from_millis(500));
+			studio.render(cut.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert!(
 				near(pixel(&program, 3, 1), half),
@@ -4296,7 +4300,7 @@ mod tests {
 
 			// Into preview again, but program shows it, so it runs on in both.
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.render(cut + Duration::from_millis(750));
+			studio.render(cut.saturating_add(Duration::from_millis(750)));
 			let quarter = [64, 0, 191, 255];
 			for (output, picture) in [("program", studio.program()), ("preview", studio.preview())] {
 				let actual = pixel(&picture, 3, 1);
@@ -4307,9 +4311,9 @@ mod tests {
 			studio.collection.top = vec![Item::new("third", fill)];
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
-			studio.render(cut + Duration::from_secs(1));
+			studio.render(cut.saturating_add(Duration::from_secs(1)));
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.render(cut + Duration::from_millis(1100));
+			studio.render(cut.saturating_add(Duration::from_millis(1100)));
 			assert_eq!(pixel(&studio.program(), 3, 1), BLUE, "the top layer's ran on");
 		})
 		.await;
@@ -4319,7 +4323,7 @@ mod tests {
 	/// showing it goes on program, and a preview showing it directly never
 	/// restarts it while program shows it through that scene.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_overlay_in_a_nested_scene_restarts_going_on() {
 		local(async {
 			let mut collection = collection();
@@ -4354,12 +4358,12 @@ mod tests {
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 
-			let cut = start + Duration::from_secs(2);
+			let cut = start.saturating_add(Duration::from_secs(2));
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(cut);
 			assert_eq!(pixel(&studio.program(), 3, 1), RED, "on program, from the start");
-			studio.render(cut + Duration::from_millis(500));
+			studio.render(cut.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert!(
 				near(pixel(&program, 3, 1), [128, 0, 128, 255]),
@@ -4368,7 +4372,7 @@ mod tests {
 			);
 
 			studio.compositor.set_preview(Some("lower".into()));
-			studio.render(cut + Duration::from_millis(750));
+			studio.render(cut.saturating_add(Duration::from_millis(750)));
 			for (output, picture) in [("program", studio.program()), ("preview", studio.preview())] {
 				let actual = pixel(&picture, 3, 1);
 				assert!(near(actual, [64, 0, 191, 255]), "{output} ran on: {actual:?}");
@@ -4380,7 +4384,7 @@ mod tests {
 	/// A preview never restarts an overlay a stinger under way masks its clip
 	/// with on program, though no scene on air shows it.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stinger_mask_runs_on_under_a_preview() {
 		local(async {
 			let mut studio = stinging(crate::media::tests::CLIP).await;
@@ -4414,7 +4418,7 @@ mod tests {
 			let opened = studio.compositor.layers["third"].overlay.as_ref().unwrap().start();
 
 			studio.compositor.set_preview(Some("third".into()));
-			studio.render(now + Duration::from_millis(100));
+			studio.render(now.saturating_add(Duration::from_millis(100)));
 			assert_eq!(studio.compositor.stinger(), Some("sting"));
 			let overlay = studio.compositor.layers["third"].overlay.as_ref().unwrap();
 			assert_eq!(overlay.start(), opened, "the stinger's mask ran on");
@@ -4425,7 +4429,7 @@ mod tests {
 	/// An overlay a move glides is painted on the program clock while both
 	/// scenes are on air, and drawn where the move has it.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_move_glides_an_overlay() {
 		local(async {
 			let mut collection = collection();
@@ -4462,13 +4466,13 @@ mod tests {
 				)
 				.unwrap();
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert_eq!(pixel(&program, 2, 2), GREEN, "halfway, at (2, 2)");
 			assert_eq!(pixel(&program, 0, 0), BLACK);
 			assert_eq!(pixel(&program, 5, 5), BLACK);
 
-			studio.render(start + duration);
+			studio.render(start.saturating_add(duration));
 			assert_eq!(pixel(&studio.program(), 5, 5), GREEN);
 		})
 		.await;
@@ -4477,7 +4481,7 @@ mod tests {
 	/// When the overlay thread stops, every overlay it held fails, including
 	/// one off air, rather than showing its last paint when cut to.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stopped_overlay_thread_fails_every_overlay() {
 		local(async {
 			let mut collection = collection();
@@ -4541,7 +4545,7 @@ mod tests {
 	/// picture, and transparent where the scene draws nothing. It is drawn once
 	/// however many items show it, and not at all once nothing drawn does.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_scene_source_draws_its_scene() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4593,7 +4597,7 @@ mod tests {
 	/// a transition under way included, and a scene showing it cannot go on
 	/// program.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_program_source_shows_the_program_on_the_same_frame() {
 		local(async {
 			let mut studio = Studio::new(nesting(vec![Item::new("on air", CORNER)])).await;
@@ -4607,7 +4611,7 @@ mod tests {
 				.unwrap();
 			studio.compositor.set_preview(Some("scene".into()));
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let faded = pixel(&studio.program(), 1, 1);
 			assert!(near(faded, [128, 0, 127, 255]), "{faded:?}");
 			let preview = studio.preview();
@@ -4631,7 +4635,7 @@ mod tests {
 	/// A scene source showing a scene that shows the program, even through
 	/// another, is drawn after the program, on the same frame.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_scene_showing_the_program_is_drawn_after_it() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4661,7 +4665,7 @@ mod tests {
 	/// then at the moment the scene it lands on is at, as the stacking
 	/// changes.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_move_shows_a_nested_scene_as_the_scene_it_leaves_until_halfway() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4674,7 +4678,7 @@ mod tests {
 			collection.validate().unwrap();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 
 			studio.compositor.set_preview(Some("scene".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
@@ -4710,7 +4714,7 @@ mod tests {
 	/// nested scene, mixes with the backdrop as much as the backdrop covers,
 	/// as CSS does.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blend_mode_over_a_partly_transparent_backdrop_mixes_partly() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4737,7 +4741,7 @@ mod tests {
 	/// on, so preview and program can show it at two moments, each drawn once,
 	/// and once both settle, drawn once for both.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_nested_scene_plays_its_keyframes_from_when_its_scene_goes_on() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4745,7 +4749,7 @@ mod tests {
 			collection.scenes[1].items[0].keyframes = slide_in();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 
 			studio.compositor.set_preview(Some("scene".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
@@ -4780,7 +4784,7 @@ mod tests {
 	/// A filter reading around each pixel, such as a blur, reads the nested
 	/// scene drawn this render, not the last one.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blur_reads_the_nested_scene_drawn_now() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4801,7 +4805,7 @@ mod tests {
 	/// A blend mode in a nested scene mixes with what the scene draws under it,
 	/// and where it draws nothing, leaves the picture as it is, as CSS does.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blend_mode_over_nothing_in_a_nested_scene_draws_the_picture() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4862,7 +4866,7 @@ mod tests {
 	/// first render after it is named until it is left out; one of a scene
 	/// that does not exist shows nothing.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_thumbnail_shows_its_scene_scaled_down_while_shown() {
 		local(async {
 			let mut studio = Studio::new(wide(Blend::Normal)).await;
@@ -4892,7 +4896,7 @@ mod tests {
 	/// Each thumbnail is redrawn a few times a second on the program clock,
 	/// and two named at once on different renders.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn thumbnails_redraw_a_few_times_a_second_on_renders_of_their_own() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -4942,7 +4946,7 @@ mod tests {
 	/// The scene on program is sampled from the program, top layer and all,
 	/// rather than drawn again; a scene off program is drawn alone.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_thumbnail_of_the_scene_on_program_samples_the_program() {
 		local(async {
 			let mut collection = collection();
@@ -4975,7 +4979,7 @@ mod tests {
 	/// scene source shows its scene so too; one with no picture yet shows
 	/// nothing.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_source_thumbnail_shows_its_picture_through_its_crop_and_filters() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -5026,7 +5030,7 @@ mod tests {
 	/// A blend mode in a thumbnail smaller than its scene mixes with what is
 	/// under it there.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blend_mode_draws_in_a_thumbnail_smaller_than_its_scene() {
 		local(async {
 			let mut studio = Studio::new(wide(Blend::Multiply)).await;

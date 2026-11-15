@@ -143,7 +143,8 @@ pub async fn save(take: Take, scenes: &Path) -> anyhow::Result<PathBuf> {
 		// resolves through this origin.
 		let source = moq_mux::Source::new(moq_tokio::origin::spawn().consume(), broadcast);
 		// A take is history, so nothing in it is late.
-		let mut export = moq_mux::container::mp4::Export::new(source, catalog).with_max_delay(Duration::MAX);
+		let mut export = moq_mux::container::mp4::Export::new(source, catalog)
+			.with_delay(moq_net::track::Delay::default().with_max(None));
 		while let Some(data) = export.next().await? {
 			file.write_all(&data).await?;
 		}
@@ -220,13 +221,12 @@ mod tests {
 				encoder.cut().unwrap();
 			}
 			let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(64, 64)).unwrap();
-			let mut encoded = encoder.encode(&moq_video::Frame::new(surface, at(index))).unwrap();
+			encoder.encode(&moq_video::Frame::new(surface, at(index))).unwrap();
 			// The software encoder writes each picture as it takes it.
-			let [unit] = encoded.as_mut_slice() else {
-				panic!("one access unit per picture");
-			};
+			let mut unit = encoder.receive().unwrap().expect("an access unit per picture");
+			assert!(encoder.receive().unwrap().is_none(), "one access unit per picture");
 			unit.timestamp = at(shown(index));
-			producer.publish(&encoded).unwrap();
+			producer.publish(&unit).unwrap();
 		}
 		// Between the pictures shown at 2.433 and 2.467 s, which are decoded the
 		// other way around.

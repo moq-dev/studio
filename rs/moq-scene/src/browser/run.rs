@@ -20,7 +20,6 @@ use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Raster, St
 use super::{ARG, Helper, Page, Paint};
 use crate::Error;
 use crate::source::{Mailbox, Picture, Status};
-use crate::wgpu;
 
 /// Run the page `open` describes until it fails or its helper stops,
 /// delivering pictures to `picture` and sound to `sound`. Dropping the future

@@ -15,7 +15,3 @@ Planned 2026-11-09 (maintainer, /quest-plan) for
 ## Waiting
 
 - moq-dev/moq: [the capture exclusion quest](https://github.com/moq-dev/moq/blob/main/quest/m4/capture-exclude.md) lands on moq's `main`. Check that quest's PR has merged.
-
-## Required
-
-- [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes since moq-dev/moq#8272, so this pin takes only its own

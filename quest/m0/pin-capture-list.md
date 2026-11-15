@@ -17,7 +17,3 @@ the new API breaks in `rs/moq-studio/src/devices.rs`.
 ## Waiting
 
 - moq-dev/moq: [the capture listing quest](https://github.com/moq-dev/moq/blob/main/quest/m3/capture-list.md) lands on moq's `main`. Check that quest's PR has merged.
-
-## Required
-
-- [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes since moq-dev/moq#8272, so this pin takes only its own

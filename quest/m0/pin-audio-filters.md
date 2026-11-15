@@ -16,7 +16,3 @@ fixing whatever the new API breaks here.
   merged on moq's `main`, deleting its file, and moq-audio's filter chain is
   there. A quest file that moved, or went away without its work landing, does
   not count.
-
-## Required
-
-- [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes since moq-dev/moq#8272, so this pin takes only its own

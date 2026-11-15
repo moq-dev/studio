@@ -103,11 +103,11 @@ fn shot(name: &str, motion: Motion, open: Open) {
 	let _entered = runtime.enter();
 	// Vulkan only, where `just shots` names lavapipe the sole driver: any other
 	// backend would find the host's hardware and draw a different picture.
-	let gpu = pollster::block_on(engine::Gpu::new(moq_scene::wgpu::Backends::VULKAN)).expect("a GPU");
+	let gpu = pollster::block_on(engine::Gpu::new(wgpu::Backends::VULKAN)).expect("a GPU");
 	let info = gpu.adapter.get_info();
 	assert_eq!(
 		info.device_type,
-		moq_scene::wgpu::DeviceType::Cpu,
+		wgpu::DeviceType::Cpu,
 		"views draw on lavapipe, not {}",
 		info.name
 	);

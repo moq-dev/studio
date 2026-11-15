@@ -41,7 +41,7 @@ use kio::clock::Instant;
 use moq_net::bandwidth;
 use moq_scene::publish::{Encoding, Sessions};
 use moq_scene::source::{self, Driver, Sources, Status};
-use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler, wgpu};
+use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler};
 use moq_video::render::export::{Exporter, Pending, Route};
 use tokio::sync::oneshot::error::TryRecvError;
 
@@ -1590,7 +1590,7 @@ impl Engine {
 			let (program, canvas) = drawn.program;
 			if canvas.framerate != framerate {
 				framerate = canvas.framerate;
-				clock = program_clock(tick + period(framerate), framerate);
+				clock = program_clock(tick.saturating_add(period(framerate)), framerate);
 			}
 			main.feed(Some(&program), canvas, timestamp);
 			let (texture, canvas) = drawn.recorded;
@@ -3098,7 +3098,7 @@ pub(crate) fn clocked(
 #[cfg(test)]
 mod tests {
 	use moq_mux::catalog::Stream;
-	use moq_net::origin::RouteEvent;
+	use moq_net::origin::RouteKind;
 
 	use super::*;
 
@@ -3173,7 +3173,7 @@ mod tests {
 			.await
 			.expect("the recording finishes");
 
-		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+		use mp4_atom::DecodeMaybe;
 		let status = recorder.status().expect("a recording");
 		status
 			.files
@@ -3210,7 +3210,7 @@ mod tests {
 	/// the layout ends and the catalog stops listing it, and quitting ends a
 	/// layout published again.
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn the_program_carries_a_layer_layout() {
 		use moq_scene::layout::{Layout, TRACK};
 
@@ -3300,7 +3300,7 @@ mod tests {
 	/// mix other than the one on program records its audio.
 
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn the_program_records_without_a_relay() {
 		let dir = tempfile::tempdir().unwrap();
 		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
@@ -3395,7 +3395,7 @@ mod tests {
 	/// as does the clip once a scene on air places it. The program shows the
 	/// clip, and what its source's mask reads, while a stinger plays it.
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn the_program_rests_a_stinger_clip() {
 		let dir = tempfile::tempdir().unwrap();
 		let clip = include_bytes!("../../moq-scene/src/test_data/clip.mkv");
@@ -3701,7 +3701,7 @@ mod tests {
 	/// viewer the relay serves, then its broadcast; unpublishing gives its
 	/// session back.
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn a_published_scene_has_its_own_broadcast() {
 		let _ = moq_tokio::crypto::install_default();
 		let fixture = moq_relay::test_relay().await.expect("test relay");
@@ -4257,7 +4257,7 @@ mod tests {
 	/// at the canvas size and at half of it, with its audio alongside. The half
 	/// size holds an encode session only once watched.
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn the_program_reaches_a_relay() {
 		let _ = moq_tokio::crypto::install_default();
 		let fixture = moq_relay::test_relay().await.expect("test relay");
@@ -4604,7 +4604,8 @@ mod tests {
 			}
 			for link in &links {
 				let mut state = link.monitor.state();
-				while state.version != Some(version) {
+				while !matches!(state.phase, moq_tokio::connection::Phase::Connected { version: v, .. } if v == version)
+				{
 					state = link
 						.monitor
 						.state_changed(state.revision)
@@ -4639,9 +4640,8 @@ mod tests {
 				.await
 				.expect("the marker");
 			while let Some(event) = sources.try_next() {
-				if let RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) =
-					event
-				{
+				if matches!(event.kind, RouteKind::Start | RouteKind::Update | RouteKind::Restart) {
+					let announce = event.announce;
 					assert!(
 						announce.prefix.as_str() != "show" || announce.route.instance() != &newer,
 						"the failover's instance won while the first relay has one"
@@ -4760,7 +4760,8 @@ mod tests {
 				group.write_frame(moq_net::Timestamp::ZERO, vec![0; PADDING]).unwrap();
 			}
 			group.finish().unwrap();
-			track.finish().unwrap();
+			// The kept producer holds the finished track listed.
+			drop(track.clone().finish().unwrap());
 		}
 		kio::clock::timeout(TIMEOUT, output.close())
 			.await
@@ -4782,10 +4783,11 @@ mod tests {
 	/// Wait until `routes` routes `show` under `instance`.
 	async fn routed_at(routes: &mut moq_net::origin::Routes, instance: &moq_net::Instance) {
 		loop {
-			let announce = match routes.next().await.expect("routes") {
-				RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) => announce,
-				RouteEvent::End(_) => continue,
-			};
+			let event = routes.next().await.expect("routes");
+			if !matches!(event.kind, RouteKind::Start | RouteKind::Update | RouteKind::Restart) {
+				continue;
+			}
+			let announce = event.announce;
 			if announce.prefix.as_str() == "show" && announce.route.instance() == instance {
 				return;
 			}
