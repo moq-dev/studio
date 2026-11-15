@@ -88,7 +88,10 @@ impl Panels {
 				let since = state.compositor.program_since();
 				let scene = state.compositor.program_scene().map(|scene| (scene, since));
 				self.rebind(&state.sources);
-				let delivered = self.interact.update(ui, image, state.collection(), scene, Some(&page));
+				// `interacted` found the page through the selection, so one is.
+				let picked = self.selection.clone().expect("interacting with the selected layer");
+				let only = Some((&picked.layer, picked.index));
+				let delivered = self.interact.update(ui, image, state.collection(), scene, only);
 				deliver(&state.sources, delivered);
 				self.rebind(&state.sources);
 				let stop = interacting_banner(ui, image, &page);
@@ -638,10 +641,9 @@ impl Panels {
 				result
 			}
 			LayerAction::Independent => make_independent(state, layer, index, &item),
-			LayerAction::Copy => {
-				self.copy(ctx);
-				Ok(())
-			}
+			// The caller holds the state, so this copies from it rather than
+			// through `copy`, which takes the lock.
+			LayerAction::Copy => clip(ctx, state, &item).map(|said| self.say(Ok(said))),
 			LayerAction::Remove => {
 				let label = format!("Remove `{name}` {}", place(layer));
 				let result = edit(state, label, None, |draft| draft.remove_item(layer, index).map(drop));

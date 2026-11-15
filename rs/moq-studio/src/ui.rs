@@ -538,8 +538,6 @@ enum Spot {
 	Scene,
 	/// The Add tab.
 	Add,
-	/// The picture itself, such as for a paste.
-	Picture,
 }
 
 /// A failure at a spot, and when, shown there for a while.
@@ -701,6 +699,14 @@ fn edit(
 	let mut draft = state.collection().draft(label);
 	build(&mut draft)?;
 	state.commit(draft, gesture)
+}
+
+/// Put `item`, with what it shows, on the clipboard; what to say.
+fn clip(ctx: &egui::Context, state: &State, item: &Item) -> anyhow::Result<String> {
+	let dir = &state.sources.context().dir;
+	let text = Clip::items(state.collection(), vec![item.clone()], dir).to_toml()?;
+	ctx.copy_text(text);
+	Ok(format!("copied `{}`", item.source))
 }
 
 fn dropped_message(dropped: usize) -> String {
@@ -865,14 +871,9 @@ impl Panels {
 			self.report(Err(anyhow::anyhow!("select a layer to copy it")));
 			return;
 		};
-		let dir = &state.sources.context().dir;
-		let result = Clip::items(collection, vec![item.clone()], dir).to_toml();
+		let result = clip(ctx, &state, &item);
 		drop(state);
-		let result = result.map(|text| {
-			ctx.copy_text(text);
-			format!("copied `{}`", item.source)
-		});
-		self.report(result.map_err(Into::into));
+		self.report(result);
 	}
 
 	/// Paste layers into the selected layer's list, or the scene on program,
@@ -881,7 +882,8 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let mut spot = Spot::Picture;
+		// A failure with no layer to show it on is the toast's.
+		let mut spot = None;
 		let result = (|| {
 			let clip = Clip::from_toml(text).context("the clipboard holds no layers or filters")?;
 			match clip {
@@ -899,7 +901,7 @@ impl Panels {
 				Clip::Filters(pasted) => {
 					let picked = self.selection.clone().context("select a layer to paste filters onto")?;
 					let item = picked.item(state.collection()).context("the selected layer is gone")?;
-					spot = Spot::Layer(picked.layer.clone(), item.source.clone());
+					spot = Some(Spot::Layer(picked.layer.clone(), item.source.clone()));
 					let selection = picked.look();
 					let mut filters = selection
 						.filters(state.collection())
@@ -913,7 +915,10 @@ impl Panels {
 			}
 		})();
 		drop(state);
-		self.fail(spot, result);
+		match spot {
+			Some(spot) => self.fail(spot, result),
+			None => self.check(result),
+		}
 	}
 
 	/// Let go of every page the picture passed input to.

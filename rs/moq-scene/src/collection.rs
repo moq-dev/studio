@@ -1237,6 +1237,16 @@ impl Shape {
 		is_square(&self.corners) && self.border == 0.0
 	}
 
+	/// `progress` of the way from this shape to `other`, which a mix of two
+	/// valid shapes is.
+	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Self {
+		Self {
+			corners: std::array::from_fn(|corner| mix(self.corners[corner], other.corners[corner], progress)),
+			border: mix(self.border, other.border, progress),
+			color: self.color.toward(&other.color, progress),
+		}
+	}
+
 	fn validate(&self) -> Result<(), String> {
 		if !self.corners.iter().all(|corner| (0.0..=0.5).contains(corner)) {
 			return Err(format!(
@@ -1504,11 +1514,7 @@ impl Filter {
 	/// mask modes. A mix of valid settings is valid.
 	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Option<Self> {
 		let mix = |from: f32, to: f32| mix(from, to, progress);
-		let color = |from: Rgba, to: Rgba| {
-			Rgba(std::array::from_fn(|channel| {
-				mix(f32::from(from.0[channel]), f32::from(to.0[channel])).round() as u8
-			}))
-		};
+		let color = |from: Rgba, to: Rgba| from.toward(&to, progress);
 		Some(match (self, other) {
 			(Self::Opacity { amount: a }, Self::Opacity { amount: b }) => Self::Opacity { amount: mix(*a, *b) },
 			(Self::Brightness { amount: a }, Self::Brightness { amount: b }) => {
@@ -2163,6 +2169,15 @@ fn is_center(pan: &f32) -> bool {
 /// An sRGB color with straight alpha, written `#rrggbb` or `#rrggbbaa`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerializeDisplay, DeserializeFromStr)]
 pub struct Rgba(pub [u8; 4]);
+
+impl Rgba {
+	/// `progress` of the way from this color to `other`, channel by channel.
+	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Self {
+		Self(std::array::from_fn(|channel| {
+			mix(f32::from(self.0[channel]), f32::from(other.0[channel]), progress).round() as u8
+		}))
+	}
+}
 
 impl fmt::Display for Rgba {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

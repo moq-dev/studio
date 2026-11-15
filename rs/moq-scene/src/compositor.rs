@@ -11,8 +11,8 @@ use moq_video::render::Renderer;
 
 use crate::Error;
 use crate::collection::{
-	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Nested, Rect, Settled, Source,
-	Transition,
+	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Nested, Rect, Settled, Shape,
+	Source, Transition,
 };
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::matte::Matte;
@@ -1463,6 +1463,7 @@ struct Pose {
 	rect: Rect,
 	crop: Crop,
 	opacity: f32,
+	shape: Shape,
 }
 
 impl Pose {
@@ -1472,6 +1473,7 @@ impl Pose {
 			rect: item.rect,
 			crop: collection.crop(item),
 			opacity: 1.0,
+			shape: item.shape,
 		}
 	}
 
@@ -1487,6 +1489,7 @@ impl Pose {
 			},
 			crop: self.crop.toward(&other.crop, progress),
 			opacity: mix(self.opacity, other.opacity),
+			shape: self.shape.toward(&other.shape, progress),
 		}
 	}
 }
@@ -2078,7 +2081,7 @@ impl Draw<'_> {
 			crop: pose.crop,
 			filters,
 			blend: item.blend,
-			shape: item.shape,
+			shape: pose.shape,
 		};
 		self.effects.prepare(self.frame, item, &self.library)
 	}
@@ -3088,6 +3091,47 @@ mod tests {
 
 			studio.render(start.saturating_add(duration));
 			assert_eq!(pixel(&studio.program(), 6, 1), [255, 255, 0, 255]);
+		})
+		.await;
+	}
+
+	/// A move mixes an item's shape from one scene's to the other's, starting
+	/// at the outgoing scene's.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_move_mixes_shapes() {
+		local(async {
+			let mut collection = collection();
+			let fill = Rect::fill(&collection.canvas);
+			let round = Item {
+				shape: Shape {
+					corners: [0.5; 4],
+					..Shape::default()
+				},
+				..Item::new("blue", fill)
+			};
+			collection.scenes[0].items = vec![Item::new("red", fill), Item::new("blue", fill)];
+			collection.scenes[1].items = vec![Item::new("red", fill), round];
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.compositor.set_preview(Some("blue".into()));
+			let duration = Duration::from_secs(1);
+			studio
+				.compositor
+				.transition(
+					&studio.collection,
+					Transition::Move { duration },
+					&studio.sources,
+					start,
+				)
+				.unwrap();
+
+			studio.render(start);
+			assert_eq!(pixel(&studio.program(), 0, 0), BLUE, "square, as the outgoing scene");
+			studio.render(start.saturating_add(duration));
+			assert_eq!(pixel(&studio.program(), 0, 0), RED, "round, as the incoming scene");
 		})
 		.await;
 	}

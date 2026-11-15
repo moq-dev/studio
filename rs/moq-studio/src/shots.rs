@@ -374,6 +374,9 @@ fn a_layer_menu_edits_its_layer() {
 	assert_eq!(items[3].source, "host copy", "the copy went in front of the host");
 	let cloned = engine.state.lock().unwrap().collection().sources["host copy"].clone();
 	assert_eq!(cloned, moq_scene::Source::Clone { source: "host".into() });
+	// The menu acts while it holds the engine's state, which copying reads.
+	menu(&mut harness, "bar", "Copy");
+	harness.get_by_label("copied `bar`");
 
 	harness.get_by_label("Interview").click_secondary();
 	harness.run_steps(2);
