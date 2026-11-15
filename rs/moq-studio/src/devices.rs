@@ -67,6 +67,14 @@ async fn find() -> Listing {
 		name: format!("{} ({})", window.title, window.app),
 		source: Source::Window { id: window.id },
 	});
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
+	let (displays, windows) = {
+		let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+		(
+			with_picker(displays, Source::PickedDisplay, wayland),
+			with_picker(windows, Source::PickedWindow, wayland),
+		)
+	};
 	let mut audio = picks(moq_audio::capture::devices().await, |device| Pick {
 		name: format!("{} ({})", device.name, device.host),
 		source: Source::Microphone { id: Some(device.id) },
@@ -86,6 +94,35 @@ async fn find() -> Listing {
 		windows,
 		audio,
 	}
+}
+
+/// Offer `picked`, the system picker, beside the X11 `listed`: first on a
+/// Wayland desktop, whose screens X11 cannot capture, so setup proposes it,
+/// and last otherwise. A Wayland desktop may have no X server to list at all,
+/// which leaves the picker.
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+fn with_picker(listed: Result<Vec<Pick>, String>, picked: Source, wayland: bool) -> Result<Vec<Pick>, String> {
+	let name = match picked {
+		Source::PickedDisplay => "Picked display",
+		_ => "Picked window",
+	};
+	let pick = Pick {
+		name: name.into(),
+		source: picked,
+	};
+	let mut picks = match listed {
+		Ok(picks) => picks,
+		Err(err) if wayland => {
+			tracing::info!(%err, "no X11 screens to list beside the system picker");
+			Vec::new()
+		}
+		Err(err) => return Err(err),
+	};
+	match wayland {
+		true => picks.insert(0, pick),
+		false => picks.push(pick),
+	}
+	Ok(picks)
 }
 
 #[cfg(not(feature = "capture"))]
