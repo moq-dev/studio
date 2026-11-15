@@ -187,9 +187,6 @@ impl Controls {
 		*self.refused.lock().unwrap() = None;
 		let controls = self.clone();
 		let spawned = std::thread::Builder::new().name("go live".into()).spawn(move || {
-			// Relays saved on air whose stream ended without END STREAM, such
-			// as one that failed to start, are followed before the next one.
-			controls.follow_saved_relays();
 			// Each relay's client binds its socket on the runtime.
 			let _runtime = controls.runtime.enter();
 			let switched = *controls.switched.lock().unwrap();
@@ -208,6 +205,10 @@ impl Controls {
 				*controls.refused.lock().unwrap() = Some(err.clone());
 			}
 			controls.going.store(false, Ordering::Release);
+			// Relays saved while this started, followed now if it failed;
+			// once live, when it ends. Whichever of a save and this runs
+			// last follows them.
+			controls.follow_saved_relays();
 			controls.report(&Action::GoLive, result);
 		});
 		if let Err(err) = spawned {
@@ -231,9 +232,10 @@ impl Controls {
 		self.rewatch.load(Ordering::Acquire)
 	}
 
-	/// Follow the saved relays, if any wait to be, unless a stream is on air.
+	/// Follow the saved relays, if any wait to be, unless a stream is on air
+	/// or on its way.
 	fn follow_saved_relays(&self) {
-		if self.engine.on_air() != OnAir::Off || !self.rewatch.swap(false, Ordering::AcqRel) {
+		if self.going() || self.engine.on_air() != OnAir::Off || !self.rewatch.swap(false, Ordering::AcqRel) {
 			return;
 		}
 		let stream = self.stream.lock().unwrap().clone();
