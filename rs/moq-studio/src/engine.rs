@@ -350,19 +350,30 @@ impl State {
 		Ok(scene)
 	}
 
-	/// The panic key: mute every microphone and every guest in `room`, in one
-	/// edit undo takes back, and cut at once to the scene the show marks safe,
-	/// if it marks one. Says what it did, or fails saying what it did before it
-	/// failed.
+	/// The panic key: mute every microphone and every guest in `room`, hide
+	/// every item of the top layer, in one edit undo takes back, and cut at
+	/// once to the scene the show marks safe, if it marks one. Says what it
+	/// did, or fails saying what it did before it failed.
 	pub fn panic(&mut self, room: Option<&crate::guests::Room>) -> anyhow::Result<String> {
 		let mut done = Vec::new();
-		match mute_voices(&self.collection, room)? {
-			Some((draft, muted)) => {
-				self.commit(draft, None)?;
-				let muted: Vec<String> = muted.iter().map(|name| format!("`{name}`")).collect();
-				done.push(format!("muted {}", muted.join(", ")));
-			}
-			None => done.push("no microphone or guest was on".to_string()),
+		let (draft, muted, hidden) = silence(&self.collection, room)?;
+		let named = |names: &[String]| {
+			names
+				.iter()
+				.map(|name| format!("`{name}`"))
+				.collect::<Vec<_>>()
+				.join(", ")
+		};
+		match muted.is_empty() {
+			true => done.push("no microphone or guest was on".to_string()),
+			false => done.push(format!("muted {}", named(&muted))),
+		}
+		match hidden.is_empty() {
+			true => done.push("the top layer showed nothing".to_string()),
+			false => done.push(format!("hid {} from the top layer", named(&hidden))),
+		}
+		if !muted.is_empty() || !hidden.is_empty() {
+			self.commit(draft, None)?;
 		}
 		match self.collection.safe().map(str::to_string) {
 			None => done.push("no scene is marked safe to cut to".into()),
@@ -401,17 +412,19 @@ impl State {
 	}
 }
 
-/// The edit muting every microphone `collection` has, and every source playing
-/// a guest in `room`, that is not muted, and the sources it mutes, or `None`
-/// when none is on. Other broadcasts and media stay on.
-fn mute_voices(
+/// The edit panic makes: it mutes every microphone `collection` has, and
+/// every source playing a guest in `room`, that is not muted, and hides every
+/// visible item of the top layer, whatever it shows. Also the sources it
+/// mutes, and the sources it hides, each once. Other broadcasts and media stay
+/// on. The edit is empty when there is nothing to do.
+fn silence(
 	collection: &Collection,
 	room: Option<&crate::guests::Room>,
-) -> Result<Option<(Draft, Vec<String>)>, moq_scene::Error> {
+) -> Result<(Draft, Vec<String>, Vec<String>), moq_scene::Error> {
 	let voice = |source: &moq_scene::Source| {
 		matches!(source, moq_scene::Source::Microphone { .. }) || room.is_some_and(|room| room.plays_guest(source))
 	};
-	let on: Vec<String> = collection
+	let muted: Vec<String> = collection
 		.sources
 		.iter()
 		.filter(|(_, source)| voice(source))
@@ -419,15 +432,27 @@ fn mute_voices(
 		.filter(|name| !collection.audio.get(*name).is_some_and(|audio| audio.muted))
 		.cloned()
 		.collect();
-	if on.is_empty() {
-		return Ok(None);
-	}
-	let mut draft = collection.draft("Panic: mute every microphone and guest");
-	for name in &on {
+	let mut draft = collection.draft("Panic: mute every microphone and guest, hide the top layer");
+	for name in &muted {
 		let audio = collection.audio.get(name).cloned().unwrap_or_default();
 		draft.set_audio(name, Some(moq_scene::Audio { muted: true, ..audio }))?;
 	}
-	Ok(Some((draft, on)))
+	let mut hidden: Vec<String> = Vec::new();
+	let top = moq_scene::Layer::top();
+	for (index, item) in collection.top.iter().enumerate().filter(|(_, item)| item.visible) {
+		draft.set_item(
+			&top,
+			index,
+			moq_scene::Item {
+				visible: false,
+				..item.clone()
+			},
+		)?;
+		if !hidden.contains(&item.source) {
+			hidden.push(item.source.clone());
+		}
+	}
+	Ok((draft, muted, hidden))
 }
 
 /// The sources the masks among `filters` read: a mask's picture shapes what
@@ -3659,6 +3684,8 @@ mod tests {
 		collection.transition = moq_scene::Transition::Fade {
 			duration: Duration::from_secs(60),
 		};
+		let logo = moq_scene::Item::new("red", moq_scene::Rect::fill(&collection.canvas));
+		collection.top.push(logo);
 		let main = collection.scenes[0].name.clone();
 		let mut brb = moq_scene::Scene::new("BRB");
 		brb.safe = true;
@@ -3692,13 +3719,22 @@ mod tests {
 			assert_eq!(state.takes, takes + 1);
 
 			let said = state.panic(None).unwrap();
-			assert_eq!(said, "no microphone or guest was on, and cut to `BRB`");
+			assert_eq!(
+				said,
+				"no microphone or guest was on, and hid `red` from the top layer, and cut to `BRB`"
+			);
 			assert_eq!(state.compositor.program_scene(), Some("BRB"));
 			assert!(!state.compositor.transitioning(), "a cut, at once");
 			assert_eq!(state.takes, takes + 2);
+			assert!(!state.collection.top[0].visible, "the top layer is off");
 			let said = state.panic(None).unwrap();
-			assert_eq!(said, "no microphone or guest was on, and `BRB` is on program");
+			assert_eq!(
+				said,
+				"no microphone or guest was on, and the top layer showed nothing, and `BRB` is on program"
+			);
 			assert_eq!(state.takes, takes + 2);
+			state.undo().unwrap();
+			assert!(state.collection.top[0].visible, "one undo brings it back");
 
 			// Mid-fade into the safe scene, the panic key still cuts, so what
 			// the fade leaves goes off at once.
@@ -3706,7 +3742,10 @@ mod tests {
 			assert_eq!(state.take("BRB", now).unwrap(), "BRB");
 			assert!(state.compositor.transitioning());
 			let said = state.panic(None).unwrap();
-			assert_eq!(said, "no microphone or guest was on, and cut to `BRB`");
+			assert_eq!(
+				said,
+				"no microphone or guest was on, and hid `red` from the top layer, and cut to `BRB`"
+			);
 			assert!(!state.compositor.transitioning(), "a cut, at once");
 			assert_eq!(state.takes, takes + 5);
 		}
@@ -3716,9 +3755,11 @@ mod tests {
 
 	/// The panic key's edit mutes each microphone and each source playing a
 	/// guest in the room that is on, keeping the rest of their settings, and
-	/// no other source. With every one muted, there is nothing left to edit.
+	/// no other source, and hides every visible top-layer item, whatever it
+	/// shows, keeping its place. With all of it done, there is nothing left to
+	/// edit.
 	#[test]
-	fn the_panic_key_mutes_every_microphone_and_guest() {
+	fn the_panic_key_mutes_every_microphone_and_guest_and_hides_the_top_layer() {
 		use crate::guests::{Room, tests};
 
 		let mut collection = Collection::new();
@@ -3756,18 +3797,37 @@ mod tests {
 		};
 		collection.audio.insert("spare".into(), muted);
 
+		// The top layer: a guest twice, a microphone's meter, and an item
+		// already hidden.
+		let place = |source: &str| moq_scene::Item::new(source, moq_scene::Rect::fill(&collection.canvas));
+		let off = moq_scene::Item {
+			visible: false,
+			..place("music")
+		};
+		let top = vec![place("alice"), place("desk"), place("alice"), off];
+		collection.top = top.clone();
+
 		// Without a room, nothing is a guest.
-		let (_, muted) = mute_voices(&collection, None).unwrap().expect("two microphones are on");
+		let (_, muted, shown) = silence(&collection, None).unwrap();
 		assert_eq!(muted, ["desk", "lav"]);
+		assert_eq!(shown, ["alice", "desk"], "each source once, not the hidden item");
 
 		let connect = url::Url::parse("https://relay.example/show").unwrap();
 		let page = url::Url::parse("https://studio.example/join/").unwrap();
 		let key = tests::key("show/guests", &["**"], &["**"]);
 		let room = Room::new(&connect, "guests", key, page, tests::EXPIRY).unwrap();
-		let (draft, muted) = mute_voices(&collection, Some(&room)).unwrap().expect("four are on");
+		let (draft, muted, _) = silence(&collection, Some(&room)).unwrap();
 		assert_eq!(muted, ["alice", "alice screen", "desk", "lav"]);
 		let edit = draft.finish().unwrap();
-		assert_eq!(edit.label, "Panic: mute every microphone and guest");
+		assert_eq!(edit.label, "Panic: mute every microphone and guest, hide the top layer");
+		collection.apply(&edit).unwrap();
+		assert!(collection.top.iter().all(|item| !item.visible), "all hidden");
+		for (now, before) in collection.top.iter().zip(&top) {
+			assert_eq!(now.rect, before.rect, "in place");
+			assert_eq!(now.source, before.source);
+		}
+		collection.apply(&edit.inverse()).unwrap();
+		assert_eq!(collection.top, top, "one undo brings it back");
 		collection.apply(&edit).unwrap();
 		for name in ["desk", "lav", "spare", "alice", "alice screen"] {
 			assert!(collection.audio[name].muted, "{name}");
@@ -3777,7 +3837,9 @@ mod tests {
 		for name in ["music", "feed", "elsewhere"] {
 			assert!(!collection.audio.get(name).is_some_and(|audio| audio.muted), "{name}");
 		}
-		assert!(mute_voices(&collection, Some(&room)).unwrap().is_none());
+		let (draft, muted, shown) = silence(&collection, Some(&room)).unwrap();
+		assert!(muted.is_empty() && shown.is_empty());
+		assert!(draft.finish().unwrap().changes.is_empty(), "nothing to edit");
 	}
 
 	/// A rendition a resize retired while its encoder was still opening must

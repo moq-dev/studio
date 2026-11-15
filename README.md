@@ -159,12 +159,11 @@ The **strip** holds:
   scene, mark it the safe scene, rename it, or remove it. The last pad, **+**,
   adds an empty scene without taking it.
 - The **panic key**, amber and named for the safe scene: it mutes every
-  microphone and every guest (their camera's sound and their screen's), in
-  one edit undo takes back, and cuts at once to the scene marked safe, if one
-  is. Other remote feeds and media stay on, and so does the top layer, as
-  through any cut. Mark one from its pad's menu, the Scenes panel, or
-  the scene graph. The scissors beside it save a replay clip (see
-  [Replay](#replay)).
+  microphone and every guest (their camera's sound and their screen's), hides
+  every item of the top layer, whatever it shows, in one edit undo takes back,
+  and cuts at once to the scene marked safe, if one is. Other remote feeds and
+  media stay on. Mark one from its pad's menu, the Scenes panel, or the scene
+  graph. The scissors beside it save a replay clip (see [Replay](#replay)).
 - A row for each sound the stream carries, with its meter and mute, and the
   **STREAM** meter of the audio scene on program, with **Listen** (the
   headphones) to hear it (see [Audio scenes](#audio-scenes)).
