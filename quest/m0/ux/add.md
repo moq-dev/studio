@@ -32,8 +32,9 @@ chosen by typing its id.
   and reaches here through [its pin](/quest/m0/pin-capture-list.md).
 - Where the operating system owns the picker, as on Wayland, the Apps and
   Screens sections are one button that opens the system's picker, and the
-  choice is remembered: see the `system` frame and
-  [Wayland sources](/quest/m0/wayland-sources.md).
+  choice is remembered: see the `system` frame. Those buttons add the
+  `picked_display` and `picked_window` sources, whose grants the studio
+  already keeps per machine (`README.md`, Picked displays and windows).
 - Recommended, not decided: a click selects and a button adds, rather than a
   click adding at once. A new layer is on air the moment it is added, and the
   selected card's picture is the last check against airing the wrong window.
@@ -57,7 +58,3 @@ its title.
 
 - [The BUILD page](/quest/m0/ux/build.md) - the column the Add tab lives in
 - [moq-video's capture listing is pinned](/quest/m0/pin-capture-list.md) - icons, live pictures, and change notices for windows and devices
-
-## Related
-
-- [Wayland display and window sources](/quest/m0/wayland-sources.md) - the remembered system pick the Apps and Screens sections open
