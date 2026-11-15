@@ -3047,10 +3047,11 @@ fn grants(scene: &Path) -> anyhow::Result<Option<moq_scene::Grants>> {
 
 /// The one path the scene file at `scene` keeps its grants under, however
 /// it was named: with `..` and symlinks resolved, so opening it another way
-/// shows no picker again. A scene file not written yet resolves through its
-/// directory, so it keeps the key it gets once written.
+/// shows no picker again. A scene file not written yet resolves as autosave
+/// will write it, through any dangling symlinks and then its directory, so it
+/// keeps the key it gets once written.
 fn grant_key(scene: &Path) -> std::io::Result<PathBuf> {
-	let scene = std::path::absolute(scene)?;
+	let scene = std::path::absolute(crate::autosave::resolve(scene)?)?;
 	if let Ok(scene) = std::fs::canonicalize(&scene) {
 		return Ok(scene);
 	}
@@ -3147,10 +3148,14 @@ mod tests {
 		std::fs::create_dir(dir.join("sub")).unwrap();
 		std::os::unix::fs::symlink(dir.join("sub"), dir.join("link")).unwrap();
 		let scene = dir.join("show.toml");
+		// A dangling chain of links, which autosave creates the scene file through.
+		std::os::unix::fs::symlink("../show.toml", dir.join("sub/middle.toml")).unwrap();
+		std::os::unix::fs::symlink("link/middle.toml", dir.join("chain.toml")).unwrap();
 		let names = [
 			scene.clone(),
 			dir.join("sub/../show.toml"),
 			dir.join("link/../show.toml"),
+			dir.join("chain.toml"),
 		];
 
 		let unwritten: Vec<_> = names.iter().map(|name| grant_key(name).unwrap()).collect();
