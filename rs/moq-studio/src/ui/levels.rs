@@ -107,7 +107,7 @@ fn push(history: &mut History, level: Level, steps: usize) {
 }
 
 /// Where `amplitude` falls on a meter, from 0 at [`MUTE_DB`] to 1 at full scale.
-fn position(amplitude: f32) -> f32 {
+pub(super) fn position(amplitude: f32) -> f32 {
 	(1.0 - decibels(amplitude) / MUTE_DB).clamp(0.0, 1.0)
 }
 

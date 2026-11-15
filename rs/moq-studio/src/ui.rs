@@ -1951,6 +1951,10 @@ fn status(ui: &mut Ui, status: &Status) {
 /// The quietest gain the slider offers, which it treats as silence.
 const MUTE_DB: f32 = -60.0;
 
+/// Where every page's meters turn from healthy to hot, in dB below full
+/// scale: broadcast's usual alignment level.
+const HOT_DB: f32 = -18.0;
+
 fn decibels(gain: f32) -> f32 {
 	if gain <= 0.0 {
 		MUTE_DB

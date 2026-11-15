@@ -99,6 +99,12 @@ fn lit(amplitude: f32) -> f32 {
 	(taper(decibels(amplitude)) / UNITY).clamp(0.0, 1.0)
 }
 
+/// A meter on the desk's scale, `level` and `peak` placed by [`lit`], hot
+/// from the same level as on every other page.
+fn desk_meter(level: f32, peak: f32) -> kit::Meter {
+	kit::Meter::new(level, peak).hot(lit(gain(HOT_DB)))
+}
+
 /// How a sound or an audio scene reaches an audio scene, as its send dot
 /// shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -710,7 +716,7 @@ impl Panels {
 	/// The tag on the audio scene Listen plays, which names the output it
 	/// plays on and picks another.
 	fn listen_tag(&mut self, ui: &mut Ui, rect: Rect, changes: &mut Vec<Change>) {
-		let output = self.speakers.named(self.speaker.as_deref());
+		let output = self.speakers.named(&self.runtime, self.speaker.as_deref());
 		let text = format!("On {output}");
 		let response = tag_button(ui, rect, &text, "listen on");
 		let response = kit::tip(response, "The output Listen plays on: pick another", None);
@@ -1069,7 +1075,7 @@ impl Panels {
 		self.master_tags(ui, tags, master, board, changes);
 		let (level, peak) = reading(self.levels.mix(&master.name));
 		let at = Rect::from_center_size(pos2(head.center().x, head.top() + 88.0), vec2(head.width() - 24.0, 8.0));
-		ui.put(at, kit::Meter::new(level, peak).run(kit::Run::Across, at.width(), 8.0));
+		ui.put(at, desk_meter(level, peak).run(kit::Run::Across, at.width(), 8.0));
 	}
 
 	/// A row's label: its icon, name, and meter.
@@ -1115,7 +1121,7 @@ impl Panels {
 			pos2(rect.right() - along - 24.0, rect.center().y - 4.0),
 			vec2(along, 8.0),
 		);
-		ui.put(at, kit::Meter::new(level, peak).run(kit::Run::Across, along, 8.0));
+		ui.put(at, desk_meter(level, peak).run(kit::Run::Across, along, 8.0));
 	}
 
 	/// Make the edits the page asked for, under one lock.
@@ -1262,7 +1268,7 @@ fn meter(ui: &mut Ui, room: Rect, left: f32, width: f32, level: f32, peak: f32) 
 	let top = fader_y(room, UNITY);
 	let bottom = fader_y(room, 0.0);
 	let at = Rect::from_min_max(pos2(left, top), pos2(left + width, bottom));
-	ui.put(at, kit::Meter::new(level, peak).run(kit::Run::Up, at.height(), width));
+	ui.put(at, desk_meter(level, peak).run(kit::Run::Up, at.height(), width));
 }
 
 /// Where `at` on the scale sits in a fader's room, as [`kit::Fader`] places
@@ -1524,8 +1530,8 @@ fn paint_dot(painter: &egui::Painter, at: Rect, reach: &Reach, letter: &str, pro
 	}
 }
 
-/// The audio outputs Listen can play on, listed when its tag's menu opens
-/// and again on asking.
+/// The audio outputs Listen can play on, listed when its tag first names a
+/// picked output or its menu opens, and again on asking.
 #[derive(Default)]
 pub(super) struct Speakers {
 	listing: Option<Result<Vec<mix::Speaker>, String>>,
@@ -1553,15 +1559,25 @@ impl Speakers {
 		}
 	}
 
-	/// The output `speaker` names, as the listing calls it.
-	fn named(&mut self, speaker: Option<&str>) -> String {
+	/// The output `speaker` names, as the listing calls it, listing the
+	/// outputs first if nothing has yet; marked if the listing lacks it,
+	/// such as a headset since unplugged.
+	fn named(&mut self, runtime: &tokio::runtime::Handle, speaker: Option<&str>) -> String {
 		self.poll();
 		let Some(id) = speaker else {
 			return "System default".to_string();
 		};
-		let speakers = self.listing.as_ref().and_then(|listing| listing.as_ref().ok());
-		let found = speakers.and_then(|speakers| speakers.iter().find(|found| found.id == id));
-		found.map_or_else(|| id.to_string(), |found| found.name.clone())
+		match &self.listing {
+			Some(Ok(speakers)) => speakers
+				.iter()
+				.find(|found| found.id == id)
+				.map_or_else(|| format!("{id} (not found)"), |found| found.name.clone()),
+			Some(Err(_)) => id.to_string(),
+			None => {
+				self.refresh(runtime);
+				id.to_string()
+			}
+		}
 	}
 
 	/// The outputs to pick `speaker` from, or the system default; whether
@@ -1635,6 +1651,17 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// A desk meter turns hot at the same level as LIVE's, which places
+	/// levels evenly in decibels from silence and keeps the meter's own
+	/// threshold.
+	#[test]
+	fn meters_agree_on_hot() {
+		let hot = gain(HOT_DB);
+		assert!((super::super::levels::position(hot) - kit::Meter::HOT).abs() < 1e-5);
+		assert!((untaper(lit(hot) * UNITY) - HOT_DB).abs() < 1e-3);
+		assert!(lit(gain(HOT_DB - 1.0)) < lit(hot) && lit(hot) < lit(gain(HOT_DB + 1.0)));
 	}
 
 	/// A meter lights to its top at full scale, which is unity on the scale.

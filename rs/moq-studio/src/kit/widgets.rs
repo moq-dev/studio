@@ -629,21 +629,29 @@ pub enum Run {
 pub struct Meter {
 	level: f32,
 	peak: f32,
+	hot: f32,
 	run: Run,
 	size: Vec2,
 }
 
-/// Where a meter turns from healthy to hot.
-const HOT: f32 = 0.7;
-
 impl Meter {
+	/// Where a meter turns from healthy to hot, unless told otherwise.
+	pub const HOT: f32 = 0.7;
+
 	pub fn new(level: f32, peak: f32) -> Self {
 		Self {
 			level,
 			peak,
+			hot: Self::HOT,
 			run: Run::Across,
 			size: vec2(160.0, 9.0),
 		}
+	}
+
+	/// Turn hot from `at` along the run, for a meter on a scale of its own.
+	pub fn hot(mut self, at: f32) -> Self {
+		self.hot = at;
+		self
 	}
 
 	/// Run `run`, `size` points along it and across.
@@ -678,7 +686,7 @@ impl Widget for Meter {
 		for index in 0..count {
 			let at = (index as f32 + 0.5) / count as f32;
 			let lit = at <= self.level;
-			let color = match (lit || index + 1 == peak, at >= HOT) {
+			let color = match (lit || index + 1 == peak, at >= self.hot) {
 				(false, _) => P3,
 				(true, false) => OK,
 				(true, true) if clipped && index + 1 == count => ERR,
