@@ -3812,6 +3812,8 @@ fn strip_controls(
 			let slid = ui.add(kit::Slider::new(&mut at).width(120.0)).on_hover_text("Gain");
 			let level = egui::DragValue::new(&mut typed)
 				.range(MUTE_DB..=12.0)
+				// A scene file may hold more boost; showing it must not cut it.
+				.clamp_existing_to_range(false)
 				.speed(0.1)
 				.custom_formatter(|db, _| match db <= f64::from(MUTE_DB) {
 					true => "-inf".to_string(),
@@ -4992,15 +4994,15 @@ impl Devices {
 mod tests {
 	use super::*;
 
-	/// The gain field takes an exact level, so a sound dragged off unity can
-	/// go back to exactly 0 dB.
+	/// The gain field shows a boost past its range without cutting it, and
+	/// takes an exact level, so a sound can go back to exactly 0 dB.
 	#[test]
 	fn a_typed_gain_is_exact() {
 		use egui::accesskit::Role;
 		use egui_kittest::kittest::Queryable;
 
 		let audio = moq_scene::Audio {
-			gain: 1.7,
+			gain: 10.0,
 			..Default::default()
 		};
 		// The kit's faces take effect a frame after they are installed.
@@ -5017,6 +5019,7 @@ mod tests {
 			(audio, Gestures::default(), false),
 		);
 		harness.run();
+		assert_eq!(harness.state().0.gain, 10.0, "showing +20 dB changed it");
 		harness.get_all_by_role(Role::SpinButton).next().unwrap().click();
 		harness.run();
 		harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
