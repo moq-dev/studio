@@ -3871,6 +3871,24 @@ mod tests {
 			state.commit(draft, None).unwrap();
 			assert_eq!(state.seen("Portrait"), Some(format!("`{main}` shows it")));
 		}
+
+		// A scene's key, from the hotkey thread or a button, cues in Studio
+		// mode and takes otherwise.
+		let controls = crate::controls::Controls::new(engine.clone(), tokio::runtime::Handle::current());
+		controls.set_studio(true);
+		controls.scene(&mut engine.state.lock().unwrap(), "Guest").unwrap();
+		{
+			let state = engine.state.lock().unwrap();
+			assert_eq!(state.cued(), Some("Guest"), "Studio mode cues");
+			assert_eq!(state.compositor.program_scene(), Some(main.as_str()));
+		}
+		controls.set_studio(false);
+		controls.fire(&crate::controls::Action::Scene("Guest".into())).unwrap();
+		{
+			let state = engine.state.lock().unwrap();
+			assert_eq!(state.compositor.program_scene(), Some("Guest"), "otherwise it takes");
+			assert_eq!(state.cued(), None);
+		}
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 	}

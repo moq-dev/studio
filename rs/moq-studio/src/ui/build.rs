@@ -42,7 +42,7 @@ impl Panels {
 		let mut room = middle.with_min_y(bar.bottom()).shrink(28.0);
 		let mut shape = snapshot.shape;
 		if let Some(cued) = snapshot.cued.as_ref().filter(|cued| cued.off_air) {
-			room.min.y = self.off_air(ui, cued, room, snapshot.shape);
+			room.min.y = self.off_air_header(ui, cued, room, snapshot.shape);
 			shape = cued.shape();
 		}
 		self.stage(ui, fx, snapshot, bar, super::layout::fit(room, shape));
@@ -84,20 +84,17 @@ impl Panels {
 		// Decided under this lock, as the edits below are, so the picture
 		// shown is the one they edit even if a key took a scene since the
 		// snapshot.
-		let off_air = state
-			.cued()
-			.filter(|cued| self.editing.as_deref() == Some(*cued))
-			.map(|cued| {
-				let collection = state.collection();
-				let canvas = collection.canvas(Some(cued)).unwrap_or(collection.canvas);
-				// Viewers may see it anyway, such as a published scene.
-				let tag = if state.seen(cued).is_some() {
-					"Not on program"
-				} else {
-					"Off air"
-				};
-				(canvas, tag)
-			});
+		let off_air = self.off_air(&state).map(|cued| {
+			let collection = state.collection();
+			let canvas = collection.canvas(Some(cued)).unwrap_or(collection.canvas);
+			// Viewers may see it anyway, such as a published scene.
+			let tag = if state.seen(cued).is_some() {
+				"Not on program"
+			} else {
+				"Off air"
+			};
+			(canvas, tag)
+		});
 		let (canvas, id, frame) = match off_air {
 			Some((canvas, tag)) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag(tag)),
 			// It is the live picture, so the accent frame stays while editing it.
@@ -780,10 +777,19 @@ impl Panels {
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
 		let scene = self.edited(&state).unwrap_or("no scene").to_string();
+		let off_air = self.off_air(&state).is_some();
 		ui.horizontal(|ui| {
-			ui.selectable_value(&mut self.top, false, format!("Scene: {scene}"));
-			ui.selectable_value(&mut self.top, true, "Top layer")
-				.on_hover_text("Drawn over every scene on program");
+			let mut top = self.top && !off_air;
+			ui.selectable_value(&mut top, false, format!("Scene: {scene}"));
+			ui.add_enabled_ui(!off_air, |ui| {
+				ui.selectable_value(&mut top, true, "Top layer")
+					.on_hover_text("Drawn over every scene on program")
+					.on_disabled_hover_text("Drawn on program; go back to live to edit it");
+			});
+			// Picked again once the scene is back to live, unless changed here.
+			if top != (self.top && !off_air) {
+				self.top = top;
+			}
 		});
 		ui.separator();
 		let layer = match self.layer(&state) {
@@ -1654,8 +1660,7 @@ impl Panels {
 		}
 
 		if play {
-			let off_air = state.cued().filter(|cued| self.editing.as_deref() == Some(*cued));
-			match off_air.map(str::to_string) {
+			match self.off_air(&state).map(str::to_string) {
 				// Replayed where it is drawn, never on program.
 				Some(cued) => state.compositor.set_preview(Some(cued)),
 				None => state.compositor.set_program_start(kio::clock::now()),

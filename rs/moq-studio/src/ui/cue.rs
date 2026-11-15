@@ -198,7 +198,7 @@ impl Panels {
 	/// Over the picture of a scene open off air, in `room`'s top: the banner
 	/// saying so, with Back to live and Take it live, and the live picture
 	/// small at its right. Where the room left for the picture starts.
-	pub(super) fn off_air(&mut self, ui: &mut Ui, cued: &Cued, room: Rect, shape: f32) -> f32 {
+	pub(super) fn off_air_header(&mut self, ui: &mut Ui, cued: &Cued, room: Rect, shape: f32) -> f32 {
 		// No taller than a fifth of the room, so a portrait show's picture
 		// leaves the scene open off air most of it.
 		let width = (room.width() * 0.24).clamp(140.0, 240.0);

@@ -133,6 +133,15 @@ impl Controls {
 		self.studio.store(on, Ordering::Relaxed);
 	}
 
+	/// Do what a scene's key does to the scene called `name`, under `state`
+	/// locked by the caller: cue it in Studio mode, or else take it.
+	pub fn scene(&self, state: &mut State, name: &str) -> anyhow::Result<String> {
+		match self.studio() {
+			true => cue(state, name),
+			false => take(state, name),
+		}
+	}
+
 	/// Do `action`, saying what it did.
 	pub fn fire(&self, action: &Action) -> anyhow::Result<String> {
 		match action {
@@ -146,13 +155,7 @@ impl Controls {
 				let scene = state.take_cued(Some((transition, kio::clock::Instant::now())))?;
 				Ok(format!("took `{scene}`"))
 			}
-			Action::Scene(name) => {
-				let mut state = self.engine.state.lock().unwrap();
-				match self.studio() {
-					true => cue(&mut state, name),
-					false => take(&mut state, name),
-				}
-			}
+			Action::Scene(name) => self.scene(&mut self.engine.state.lock().unwrap(), name),
 			Action::StudioMode => {
 				let on = !self.studio.fetch_xor(true, Ordering::Relaxed);
 				Ok(match on {

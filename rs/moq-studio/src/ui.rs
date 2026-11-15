@@ -760,11 +760,19 @@ impl Panels {
 	/// scene on program's, or the top layer over it, which goes over every
 	/// scene of the program's size, as the one on program always is.
 	fn layer(&self, state: &State) -> Result<Layer, String> {
-		match (self.top, self.edited(state)) {
+		// The top layer is drawn on program, so a scene open off air is edited
+		// alone.
+		let top = self.top && self.off_air(state).is_none();
+		match (top, self.edited(state)) {
 			(true, _) => Ok(Layer::top()),
 			(false, Some(name)) => Ok(Layer::scene(name)),
 			(false, None) => Err("Take a scene to edit what it shows.".into()),
 		}
+	}
+
+	/// The scene open for editing off air, if one is.
+	fn off_air<'a>(&self, state: &'a State) -> Option<&'a str> {
+		state.cued().filter(|cued| self.editing.as_deref() == Some(*cued))
 	}
 
 	/// The scene BUILD edits: the one open off air, or else the one on
@@ -776,9 +784,9 @@ impl Panels {
 	/// The scene BUILD edits, and how long it had been on as of the last
 	/// render, the moment of its keyframes the picture shows.
 	fn edited_since<'a>(&self, state: &'a State) -> (Option<&'a str>, Duration) {
-		match state.cued() {
-			Some(cued) if self.editing.as_deref() == Some(cued) => (Some(cued), state.compositor.preview_since()),
-			_ => (state.compositor.program_scene(), state.compositor.program_since()),
+		match self.off_air(state) {
+			Some(cued) => (Some(cued), state.compositor.preview_since()),
+			None => (state.compositor.program_scene(), state.compositor.program_since()),
 		}
 	}
 
