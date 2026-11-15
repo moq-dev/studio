@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
@@ -279,10 +280,17 @@ struct Window {
 	/// Whether the studio's title bar is the window's frame, rather than the
 	/// desktop's, which guided setup keeps.
 	framed: bool,
+	/// Set once the window is asked to close, as [`Events::closed`] is.
+	closed: Arc<AtomicBool>,
 }
 
 impl eframe::App for Window {
 	fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+		// The title bar's Close asks egui rather than the desktop, so no
+		// window event says so.
+		if ctx.input(|input| input.viewport().close_requested()) {
+			self.closed.store(true, Ordering::Relaxed);
+		}
 		if let App::Studio(studio) = &mut self.app {
 			studio.logic(ctx, frame);
 		}
@@ -336,9 +344,9 @@ impl Window {
 struct Events<'a> {
 	eframe: eframe::EframeWinitApplication<'a>,
 	keyboard: hotkeys::Keyboard,
-	/// Whether the window was asked to close, since eframe only logs the error
-	/// that stops it otherwise.
-	closed: bool,
+	/// Whether the window was asked to close, by the desktop or the studio's
+	/// own title bar, since eframe only logs the error that stops it otherwise.
+	closed: Arc<AtomicBool>,
 }
 
 impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
@@ -368,7 +376,7 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 				}
 			}
 			WindowEvent::ModifiersChanged(modifiers) => self.keyboard.modifiers(modifiers.state()),
-			WindowEvent::CloseRequested => self.closed = true,
+			WindowEvent::CloseRequested => self.closed.store(true, Ordering::Relaxed),
 			_ => {}
 		}
 		self.eframe.window_event(event_loop, id, event);
@@ -462,6 +470,8 @@ fn run(
 		.context("cannot open the window")?;
 	let keyboard = hotkeys::Keyboard::default();
 	let window_keyboard = keyboard.clone();
+	let closed = Arc::new(AtomicBool::new(false));
+	let window_closed = closed.clone();
 	let eframe = eframe::create_native(
 		"moq-studio",
 		options,
@@ -480,6 +490,7 @@ fn run(
 				keyboard: window_keyboard,
 				fx,
 				framed,
+				closed: window_closed,
 			}))
 		}),
 		&event_loop,
@@ -487,10 +498,13 @@ fn run(
 	let mut events = Events {
 		eframe,
 		keyboard,
-		closed: false,
+		closed: closed.clone(),
 	};
 	event_loop.run_app(&mut events).context("the window failed")?;
-	anyhow::ensure!(events.closed, "the window failed; the error is logged above");
+	anyhow::ensure!(
+		closed.load(Ordering::Relaxed),
+		"the window failed; the error is logged above"
+	);
 	Ok(())
 }
 

@@ -8,7 +8,7 @@
 //! clicking as a person does, and draws nothing.
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -112,6 +112,9 @@ views! {
 	build: Still, studio(View::Page(Page::Build));
 	/// MIX holds the mixer, and a small live picture in the sound's place.
 	mix: Still, studio(View::Page(Page::Mix));
+	/// MIX in a stacked window, its live picture as tall as the sound's slot
+	/// allows.
+	mix_compact: Still, Open::Studio { view: View::Page(Page::Mix), size: HALF, show: "show.toml" };
 	review: Still, studio(View::Page(Page::Review));
 	graph: Still, studio(View::Setting(Setting::Graph));
 	history: Still, studio(View::Setting(Setting::History));
@@ -215,7 +218,8 @@ fn start(launch: engine::Launch, runtime: &tokio::runtime::Runtime) -> App {
 /// A click on a pad takes its scene on air, and the panic key mutes every
 /// microphone and guest, in an edit undo takes back, and cuts to the safe
 /// scene: the window as a person uses it, on a real engine. Remote feeds that
-/// are not guests stay on. It draws no view.
+/// are not guests stay on. Then the title bar's Close closes it. It draws no
+/// view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn a_click_takes_and_the_panic_key_cuts() {
@@ -237,7 +241,7 @@ fn a_click_takes_and_the_panic_key_cuts() {
 		room: Some(Arc::new(room)),
 		..launch(&gpu)
 	};
-	let (mut harness, started) = window(start(launch, &runtime), &gpu, &runtime, SIZE);
+	let (mut harness, started, closed) = window(start(launch, &runtime), &gpu, &runtime, SIZE);
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -276,6 +280,21 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	assert!(!muted("mic") && !muted("alice"), "undo takes the mute back");
 	assert_eq!(program().as_deref(), Some("Break"), "and leaves program where it is");
 
+	// The title bar's Close asks egui to close, which eframe passes back as a
+	// close event the window counts as asked for, not as a failure.
+	harness.get_by_label("Close").click();
+	harness.step();
+	let commands = &harness.output().viewport_output[&egui::ViewportId::ROOT].commands;
+	assert!(commands.contains(&egui::ViewportCommand::Close), "{commands:?}");
+	assert!(!closed.load(Ordering::Relaxed));
+	let root = harness.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default();
+	root.events.push(egui::ViewportEvent::Close);
+	harness.step();
+	assert!(
+		closed.load(Ordering::Relaxed),
+		"the window counts the close as asked for"
+	);
+
 	drop(harness);
 	quit(&engine, &runtime);
 }
@@ -299,7 +318,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		Open::Studio { size, .. } => *size,
 		_ => SIZE,
 	};
-	let (mut harness, started) = window(app, gpu, runtime, size);
+	let (mut harness, started, _) = window(app, gpu, runtime, size);
 
 	let Open::Studio { view, .. } = open else {
 		runtime
@@ -331,16 +350,19 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	image
 }
 
-/// A window on `app`, `size` large, and where the studio it starts is kept.
+/// A window on `app`, `size` large, where the studio it starts is kept, and
+/// whether it was asked to close.
 fn window<'a>(
 	app: App,
 	gpu: &engine::Gpu,
 	runtime: &'a tokio::runtime::Runtime,
 	size: egui::Vec2,
-) -> (Harness<'a, Window>, Arc<OnceLock<Arc<engine::Engine>>>) {
+) -> (Harness<'a, Window>, Arc<OnceLock<Arc<engine::Engine>>>, Arc<AtomicBool>) {
 	let render = render_state(gpu);
 	let started = Arc::new(OnceLock::new());
 	let kept = started.clone();
+	let closed = Arc::new(AtomicBool::new(false));
+	let window_closed = closed.clone();
 	let harness = Harness::builder()
 		.with_size(size)
 		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
@@ -357,9 +379,10 @@ fn window<'a>(
 				keyboard: hotkeys::Keyboard::default(),
 				fx,
 				framed: true,
+				closed: window_closed,
 			}
 		});
-	(harness, started)
+	(harness, started, closed)
 }
 
 /// Stop `engine` as quitting does.

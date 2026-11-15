@@ -161,6 +161,7 @@ impl Studio {
 			drag: None,
 			new_scene: String::new(),
 			renaming: None,
+			title_needs: 0.0,
 			renaming_audio: None,
 			speaker: None,
 			speakers: Speakers::default(),
@@ -451,6 +452,9 @@ struct Panels {
 	new_scene: String,
 	/// The scene being renamed, by index, and the name typed so far.
 	renaming: Option<(usize, String)>,
+	/// The width the title bar's full controls took when last drawn, past
+	/// which it draws them compact.
+	title_needs: f32,
 	/// The audio scene being renamed, by its name, and the name typed so far.
 	renaming_audio: Option<(String, String)>,
 	/// The output Listen plays on, by [`mix::Speaker::id`], or `None` for the

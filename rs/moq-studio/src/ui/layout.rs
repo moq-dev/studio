@@ -40,7 +40,7 @@ const SCENES_ROW: f32 = 118.0;
 /// window gives room to before they scroll, fewer when the picture needs it.
 pub const SOUND_ROW: f32 = 29.0;
 const SOUND_PAD: f32 = 20.0;
-const SOUND_ROWS: usize = 4;
+pub const SOUND_ROWS: usize = 4;
 
 /// The narrowest the scenes get beside the panic key and the sound in the
 /// wide arrangement: two pads and the one that adds a scene.

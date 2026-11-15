@@ -366,7 +366,11 @@ impl State {
 		}
 		match self.collection.safe().map(str::to_string) {
 			None => done.push("no scene is marked safe to cut to".into()),
-			Some(safe) if self.compositor.program_scene() == Some(safe.as_str()) => {
+			// A transition bringing it in still shows what it leaves, so that
+			// cuts too.
+			Some(safe)
+				if self.compositor.program_scene() == Some(safe.as_str()) && !self.compositor.transitioning() =>
+			{
 				done.push(format!("`{safe}` is on program"));
 			}
 			Some(safe) => {
@@ -3633,6 +3637,16 @@ mod tests {
 			let said = state.panic(None).unwrap();
 			assert_eq!(said, "no microphone or guest was on, and `BRB` is on program");
 			assert_eq!(state.takes, takes + 2);
+
+			// Mid-fade into the safe scene, the panic key still cuts, so what
+			// the fade leaves goes off at once.
+			assert_eq!(state.take(&main, now).unwrap(), main);
+			assert_eq!(state.take("BRB", now).unwrap(), "BRB");
+			assert!(state.compositor.transitioning());
+			let said = state.panic(None).unwrap();
+			assert_eq!(said, "no microphone or guest was on, and cut to `BRB`");
+			assert!(!state.compositor.transitioning(), "a cut, at once");
+			assert_eq!(state.takes, takes + 5);
 		}
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();

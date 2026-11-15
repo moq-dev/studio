@@ -6,7 +6,7 @@ use egui::{
 	Align, Align2, CursorIcon, Rect, ResizeDirection, Sense, Stroke, UiBuilder, Vec2, ViewportCommand, pos2, vec2,
 };
 
-use super::layout::{Arrangement, Layout, SOUND_ROW, fit};
+use super::layout::{self, Arrangement, Layout, SOUND_ROW, fit};
 use super::levels::reading;
 use super::*;
 
@@ -63,10 +63,14 @@ const FAILED: Duration = Duration::from_secs(10);
 const TRAFFIC_LIGHTS: f32 = 64.0;
 
 /// What a pad's menu asked for.
+/// What a pad asked for, naming its scene: the pads are drawn from the
+/// frame's snapshot, and a reload since may have moved or removed it.
 enum PadAction {
 	Take(String),
-	Scene(SceneAction),
-	Rename(usize, String),
+	/// Make it the safe scene, or stop.
+	Safe(String, bool),
+	Remove(String),
+	Rename(String),
 	Add,
 }
 
@@ -181,7 +185,13 @@ impl Panels {
 	/// messages over them.
 	pub(super) fn window(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot) {
 		let window = ui.max_rect();
-		let layout = Layout::new(window.size(), snapshot.shape, snapshot.sounds.len()).translate(window.min.to_vec2());
+		// MIX puts a live picture in the sound's slot, which wants all the
+		// room the slot gets rather than a row per sound.
+		let sounds = match self.page {
+			Page::Mix => layout::SOUND_ROWS,
+			_ => snapshot.sounds.len(),
+		};
+		let layout = Layout::new(window.size(), snapshot.shape, sounds).translate(window.min.to_vec2());
 		ui.painter().rect_filled(window, 0, kit::BG);
 		self.page(ui, fx, snapshot, &layout);
 		self.title(ui, fx, snapshot, &layout);
@@ -247,7 +257,6 @@ impl Panels {
 	/// empty room moves the window.
 	fn title(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot, layout: &Layout) {
 		let rect = layout.title;
-		let stacked = layout.arrangement == Arrangement::Stacked;
 		bar(ui, fx, rect);
 		ui.painter()
 			.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, kit::LINE));
@@ -265,14 +274,17 @@ impl Panels {
 		if mac && self.framed {
 			inner.min.x += TRAFFIC_LIGHTS;
 		}
+		// Compact while stacked, or where the full controls last needed more
+		// room than the bar has, such as for a long show name.
+		let compact = layout.arrangement == Arrangement::Stacked || self.title_needs > inner.width();
 		let builder = UiBuilder::new()
 			.max_rect(inner)
 			.layout(egui::Layout::left_to_right(Align::Center));
 		let (left, right) = ui
 			.scope_builder(builder, |ui| {
 				ui.spacing_mut().item_spacing.x = 8.0;
-				self.show_menu(ui, snapshot, stacked);
-				if !stacked {
+				self.show_menu(ui, snapshot, compact);
+				if !compact {
 					ui.add_space(4.0);
 					self.undo_redo(ui, snapshot);
 				}
@@ -293,29 +305,41 @@ impl Panels {
 						}
 						self.live_control(ui);
 						self.record_button(ui, fx);
-						self.health_dot(ui, fx, stacked);
+						self.health_dot(ui, fx, compact);
 						ui.min_rect().left()
 					})
 					.inner;
 				(left, right)
 			})
 			.inner;
+		let nav = match layout.sidebar {
+			Some(_) => 0.0,
+			None => nav_width(ui, compact) + 24.0,
+		};
+		if !compact {
+			let needs = (left - inner.left()) + nav + (inner.right() - right);
+			if needs > inner.width() {
+				// Drawn compact from the next frame.
+				ui.ctx().request_repaint();
+			}
+			self.title_needs = needs;
+		}
 		if layout.sidebar.is_none() {
 			// Centered on the bar, or as near as the controls beside it allow.
-			let width = nav_width(ui, stacked);
+			let width = nav_width(ui, compact);
 			let center = rect
 				.center()
 				.x
 				.min(right - 12.0 - width / 2.0)
 				.max(left + 12.0 + width / 2.0);
 			let at = Rect::from_center_size(pos2(center, rect.center().y), vec2(width, 32.0));
-			self.nav(ui, at, stacked);
+			self.nav(ui, at, compact);
 		}
 	}
 
 	/// The logo and the show's name, which open the show's menu.
-	fn show_menu(&mut self, ui: &mut Ui, snapshot: &Snapshot, stacked: bool) {
-		let name = (!stacked).then(|| {
+	fn show_menu(&mut self, ui: &mut Ui, snapshot: &Snapshot, compact: bool) {
+		let name = (!compact).then(|| {
 			ui.painter()
 				.layout_no_wrap(snapshot.show.clone(), kit::ui_strong(14.0), kit::TEXT)
 		});
@@ -669,16 +693,29 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
+		let at = |state: &State, name: &str| {
+			let scenes = &state.collection().scenes;
+			let index = scenes.iter().position(|scene| scene.name == name);
+			index.with_context(|| format!("no scene is called `{name}`"))
+		};
 		let result = match action {
 			PadAction::Take(name) => crate::controls::take(&mut state, &name).map(drop),
-			PadAction::Scene(action) => self.scene_action(&mut state, action),
-			PadAction::Rename(index, name) => {
-				drop(state);
-				self.page = Page::Build;
-				self.left = Tool::Scenes;
-				self.renaming = Some((index, name));
-				return;
+			PadAction::Safe(name, safe) => {
+				at(&state, &name).and_then(|index| self.scene_action(&mut state, SceneAction::Safe(index, safe)))
 			}
+			PadAction::Remove(name) => {
+				at(&state, &name).and_then(|index| self.scene_action(&mut state, SceneAction::Remove(index)))
+			}
+			PadAction::Rename(name) => match at(&state, &name) {
+				Ok(index) => {
+					drop(state);
+					self.page = Page::Build;
+					self.left = Tool::Scenes;
+					self.renaming = Some((index, name));
+					return;
+				}
+				Err(err) => Err(err),
+			},
 			PadAction::Add => {
 				let collection = state.collection();
 				let name = (collection.scenes.len() + 1..)
@@ -726,16 +763,16 @@ impl Panels {
 				.add_enabled(takeable || safe, kit::Toggle::new(&mut safe).label("Safe scene"))
 				.on_hover_text("The scene the panic key cuts to, as it mutes every microphone and guest");
 			if toggle.changed() {
-				action = Some(PadAction::Scene(SceneAction::Safe(index, safe)));
+				action = Some(PadAction::Safe(pad.name.clone(), safe));
 			}
 			if ui.button("Rename").clicked() {
-				action = Some(PadAction::Rename(index, pad.name.clone()));
+				action = Some(PadAction::Rename(pad.name.clone()));
 			}
 			let remove = ui
 				.add_enabled(!on_air, egui::Button::new("Remove"))
 				.on_disabled_hover_text("On air; take another scene first");
 			if remove.clicked() {
-				action = Some(PadAction::Scene(SceneAction::Remove(index)));
+				action = Some(PadAction::Remove(pad.name.clone()));
 			}
 			if action.is_some() {
 				ui.close();
