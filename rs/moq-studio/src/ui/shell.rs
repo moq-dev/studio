@@ -6,6 +6,7 @@ use egui::{
 	Align, Align2, CursorIcon, Rect, ResizeDirection, Sense, Stroke, UiBuilder, Vec2, ViewportCommand, pos2, vec2,
 };
 
+use super::cue::{Corner, Cued, transition_words};
 use super::layout::{Arrangement, Layout, SOUND_ROW, fit};
 use super::levels::reading;
 use super::*;
@@ -30,7 +31,11 @@ pub(super) struct Snapshot {
 	/// How many scenes have been taken, which the effects burst on.
 	pub(super) takes: u64,
 	/// The program's shape, width over height.
-	shape: f32,
+	pub(super) shape: f32,
+	/// The scene cued, or open off air.
+	pub(super) cued: Option<Cued>,
+	/// Whether Studio mode is on: a scene's pad cues it.
+	pub(super) studio: bool,
 }
 
 /// A scene as its pad shows it.
@@ -62,11 +67,13 @@ const FAILED: Duration = Duration::from_secs(10);
 /// Room on the title bar's left for macOS's own window buttons.
 const TRAFFIC_LIGHTS: f32 = 64.0;
 
-/// What a pad's menu asked for.
 /// What a pad asked for, naming its scene: the pads are drawn from the
 /// frame's snapshot, and a reload since may have moved or removed it.
 enum PadAction {
 	Take(String),
+	Cue(String),
+	/// Open it for editing off air.
+	Edit(String),
 	/// Make it the safe scene, or stop.
 	Safe(String, bool),
 	Remove(String),
@@ -85,6 +92,7 @@ impl Panels {
 		self.program_drawn = state.compositor.canvas();
 		if let Some(render) = frame.wgpu_render_state() {
 			self.program.follow(render, state.compositor.layered());
+			self.preview.follow(render, state.compositor.preview());
 			self.follow_thumbnails(render, &state.compositor);
 		}
 		// Redraw at the canvas rate, so the picture and the pads are live.
@@ -99,6 +107,16 @@ impl Panels {
 			for renames in &renames {
 				hotkeys.rename(renames);
 			}
+		}
+		// So does the scene open off air, which stays open while it is cued.
+		for renames in &renames {
+			if let Some(to) = self.editing.as_ref().and_then(|editing| renames.get(editing)) {
+				self.editing = to.clone();
+			}
+		}
+		let cued = state.cued().map(str::to_string);
+		if self.editing != cued {
+			self.editing = None;
 		}
 		// So does a size being typed, a renamed scene's winning its new name.
 		for renames in &renames {
@@ -160,6 +178,13 @@ impl Panels {
 				})
 			})
 			.collect();
+		let cued = cued.map(|name| Cued {
+			refused: collection.refuses(&name),
+			canvas: collection.canvas(Some(name.as_str())).unwrap_or(collection.canvas),
+			off_air: self.editing.as_ref() == Some(&name),
+			transition: transition_words(&collection.transition),
+			name,
+		});
 		let path = self.engine.autosave.path();
 		let show = path
 			.file_stem()
@@ -177,6 +202,8 @@ impl Panels {
 			stream,
 			takes: state.takes,
 			shape: self.program_drawn.width as f32 / self.program_drawn.height.max(1) as f32,
+			cued,
+			studio: self.controls.studio(),
 		}
 	}
 
@@ -215,9 +242,12 @@ impl Panels {
 		match self.page {
 			Page::Live => {
 				kit::wash(ui.painter(), stage);
-				self.on_air(ui, Some(fx), layout.picture);
+				let picture = self.on_air(ui, Some(fx), layout.picture).rect;
+				if let Some(cued) = &snapshot.cued {
+					self.next(ui, fx, cued, picture, Corner::TopRight);
+				}
 			}
-			Page::Build => self.build(ui, fx, stage, snapshot.shape),
+			Page::Build => self.build(ui, fx, stage, snapshot),
 			// The sound slot holds the live picture instead.
 			Page::Mix => region(ui, stage, |ui| self.audio(ui)),
 			Page::Review => {
@@ -654,6 +684,19 @@ impl Panels {
 	/// a row down a `column`.
 	fn scenes_strip(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, column: bool) {
 		let room = rect.shrink(MARGIN);
+		// Studio mode's switch at the strip's end: right of a row, under a
+		// column.
+		let (room, switch) = match column {
+			true => (
+				room.with_max_y(room.bottom() - 30.0 - GAP),
+				Rect::from_min_size(pos2(room.right() - 30.0, room.bottom() - 30.0), Vec2::splat(30.0)),
+			),
+			false => (
+				room.with_max_x(room.right() - 30.0 - GAP),
+				Rect::from_center_size(pos2(room.right() - 15.0, room.center().y), Vec2::splat(30.0)),
+			),
+		};
+		self.studio_switch(ui, snapshot.studio, switch);
 		let mut action = None;
 		ui.scope_builder(UiBuilder::new().max_rect(room), |ui| {
 			ui.spacing_mut().item_spacing = Vec2::splat(GAP);
@@ -700,6 +743,13 @@ impl Panels {
 		};
 		let result = match action {
 			PadAction::Take(name) => crate::controls::take(&mut state, &name).map(drop),
+			PadAction::Cue(name) => crate::controls::cue(&mut state, &name).map(drop),
+			PadAction::Edit(name) => {
+				drop(state);
+				let result = self.open_off_air(&name);
+				self.check(result);
+				return;
+			}
 			PadAction::Safe(name, safe) => {
 				at(&state, &name).and_then(|index| self.scene_action(&mut state, SceneAction::Safe(index, safe)))
 			}
@@ -749,14 +799,36 @@ impl Panels {
 			return response.clicked().then_some(PadAction::Add);
 		};
 		let on_air = snapshot.program.as_deref() == Some(pad.name.as_str());
-		let tally = if on_air { Tally::Air } else { Tally::Off };
+		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
+		let tally = match (on_air, cued) {
+			(true, _) => Tally::Air,
+			(false, true) => Tally::Cue,
+			(false, false) => Tally::Off,
+		};
 		let response = self.pad(ui, pad, tally, width, snapshot.shape);
-		let mut action = (response.clicked() && pad.refused.is_none()).then(|| PadAction::Take(pad.name.clone()));
+		let click = match snapshot.studio {
+			true => PadAction::Cue(pad.name.clone()),
+			false => PadAction::Take(pad.name.clone()),
+		};
+		let mut action = (response.clicked() && pad.refused.is_none()).then_some(click);
 		response.context_menu(|ui| {
 			let takeable = pad.refused.is_none() || on_air;
 			let take = ui.add_enabled(!on_air && pad.refused.is_none(), egui::Button::new("Take it on air"));
 			if take.clicked() {
 				action = Some(PadAction::Take(pad.name.clone()));
+			}
+			if snapshot.studio {
+				let cue = ui.add_enabled(!on_air && !cued && pad.refused.is_none(), egui::Button::new("Cue it"));
+				if cue.clicked() {
+					action = Some(PadAction::Cue(pad.name.clone()));
+				}
+			}
+			let edit = ui
+				.add_enabled(!on_air, egui::Button::new("Edit off air"))
+				.on_hover_text("Open it on Build without going on air")
+				.on_disabled_hover_text("On air; Build edits it live");
+			if edit.clicked() {
+				action = Some(PadAction::Edit(pad.name.clone()));
 			}
 			let mut safe = snapshot.safe.as_deref() == Some(pad.name.as_str());
 			let toggle = ui
@@ -806,7 +878,7 @@ impl Panels {
 	}
 
 	/// The key bound to `action`, as its tooltip shows it.
-	fn key(&self, action: &Action, ctx: &egui::Context) -> Option<String> {
+	pub(super) fn key(&self, action: &Action, ctx: &egui::Context) -> Option<String> {
 		let hotkeys = self.hotkeys.as_ref()?;
 		let bindings = hotkeys.bindings();
 		Some(bindings.get(action)?.shown(ctx))

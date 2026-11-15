@@ -30,6 +30,7 @@ use crate::snap::{self, Grab, Snap};
 use crate::{mix, record};
 
 mod build;
+mod cue;
 mod graph;
 mod layout;
 mod levels;
@@ -110,9 +111,6 @@ impl Setting {
 /// The studio window.
 pub struct Studio {
 	panels: Panels,
-	/// Keys saved for actions this version does not offer, such as Studio
-	/// mode's Cut and Transition, kept for the version that does.
-	hidden: Bindings,
 }
 
 impl Studio {
@@ -125,13 +123,16 @@ impl Studio {
 	) -> Self {
 		// egui samples whatever the compositor's textures hold each frame, so
 		// they are registered again only when a resize replaces them, or the
-		// program starts or stops showing layers over it.
-		let (program, dropped) = {
-			let mut state = engine.state.lock().unwrap();
-			// Nothing shows the preview: the scene edited is the one on air,
-			// until Studio mode (quest/m0/ux/studio-mode.md).
-			state.compositor.set_previewing(false);
-			(Registered::new(render, state.compositor.layered()), state.dropped)
+		// program starts or stops showing layers over it. The engine draws the
+		// preview only while a scene is cued or open off air, which shows it.
+		let (program, preview, dropped) = {
+			let state = engine.state.lock().unwrap();
+			let program = Registered::new(render, state.compositor.layered());
+			(
+				program,
+				Registered::new(render, state.compositor.preview()),
+				state.dropped,
+			)
 		};
 		let controls = Arc::new(Controls::new(engine.clone(), runtime.clone()));
 		let mut panels = Panels {
@@ -144,6 +145,8 @@ impl Studio {
 			refusal: None,
 			program,
 			program_drawn: Canvas::default(),
+			preview,
+			editing: None,
 			framed,
 			page: Page::default(),
 			setting: None,
@@ -186,10 +189,7 @@ impl Studio {
 		if dropped > 0 {
 			panels.report(Err(anyhow::anyhow!(dropped_message(dropped))));
 		}
-		Self {
-			panels,
-			hidden: Bindings::new(),
-		}
+		Self { panels }
 	}
 }
 
@@ -210,6 +210,23 @@ impl Studio {
 		self.panels.details = true;
 	}
 
+	/// Turn Studio mode on or off, as its switch would.
+	pub(crate) fn studio_mode(&mut self, on: bool) {
+		self.panels.controls.set_studio(on);
+	}
+
+	/// Cue the scene called `scene`, as its pad would in Studio mode.
+	pub(crate) fn cue(&mut self, scene: &str) {
+		let mut state = self.panels.engine.state.lock().unwrap();
+		state.cue(scene).expect("a scene that can go on air");
+	}
+
+	/// Open the scene called `scene` off air on BUILD, as its pad's menu would.
+	pub(crate) fn edit_off_air(&mut self, scene: &str) {
+		let result = self.panels.open_off_air(scene);
+		result.expect("a scene to open");
+	}
+
 	/// Turn to BUILD and show `tool`, as its tab would.
 	pub(crate) fn tool(&mut self, tool: Tool) {
 		self.panels.page = Page::Build;
@@ -225,6 +242,8 @@ impl Studio {
 const SPEAKER: &str = "speaker";
 const SNAPPING: &str = "snapping";
 const HOTKEYS: &str = "hotkeys";
+/// How this operator runs a show, not part of the show.
+const STUDIO_MODE: &str = "studio_mode";
 
 impl Studio {
 	/// Take up what this user picked last time, and start hearing the keys
@@ -236,34 +255,20 @@ impl Studio {
 			panels.speaker = eframe::get_value::<Option<String>>(storage, SPEAKER).flatten();
 			panels.snapping = eframe::get_value(storage, SNAPPING).unwrap_or_default();
 			bindings = eframe::get_value(storage, HOTKEYS).unwrap_or_default();
+			let studio = eframe::get_value(storage, STUDIO_MODE).unwrap_or_default();
+			panels.controls.set_studio(studio);
 		}
-		// A key bound to an action not offered does nothing until it is.
-		let (offered, hidden) = bindings.into_iter().partition(|(action, _)| action.offered());
-		self.hidden = hidden;
-		let hotkeys = Hotkeys::new(window, self.panels.controls.clone(), &self.panels.runtime, offered);
+		let hotkeys = Hotkeys::new(window, self.panels.controls.clone(), &self.panels.runtime, bindings);
 		self.panels.hotkeys = Some(hotkeys);
 	}
-}
 
-/// Put back in `bindings` the key of each action not offered, which `hidden`
-/// held, unless another action took that key meanwhile.
-fn keep_hidden(bindings: &mut Bindings, hidden: &Bindings) {
-	for (action, key) in hidden {
-		if !bindings.values().any(|bound| bound.same(key)) {
-			bindings.insert(action.clone(), key.clone());
-		}
-	}
-}
-
-impl Studio {
 	pub fn save(&mut self, storage: &mut dyn eframe::Storage) {
 		let panels = &self.panels;
 		eframe::set_value(storage, SPEAKER, &panels.speaker);
 		eframe::set_value(storage, SNAPPING, &panels.snapping);
+		eframe::set_value(storage, STUDIO_MODE, &panels.controls.studio());
 		if let Some(hotkeys) = &panels.hotkeys {
-			let mut bindings = hotkeys.bindings();
-			keep_hidden(&mut bindings, &self.hidden);
-			eframe::set_value(storage, HOTKEYS, &bindings);
+			eframe::set_value(storage, HOTKEYS, &hotkeys.bindings());
 		}
 	}
 
@@ -416,6 +421,11 @@ struct Panels {
 	program: Registered,
 	/// The program's size this frame, as its texture was drawn.
 	program_drawn: Canvas,
+	/// The cued scene, or the one open off air, which the compositor draws
+	/// while there is one.
+	preview: Registered,
+	/// The scene open for editing off air on BUILD, while it is the one cued.
+	editing: Option<String>,
 	/// Whether the title bar is the window's frame, which moves, resizes,
 	/// and closes it.
 	framed: bool,
@@ -750,11 +760,35 @@ impl Panels {
 	/// scene on program's, or the top layer over it, which goes over every
 	/// scene of the program's size, as the one on program always is.
 	fn layer(&self, state: &State) -> Result<Layer, String> {
-		match (self.top, state.compositor.program_scene()) {
+		match (self.top, self.edited(state)) {
 			(true, _) => Ok(Layer::top()),
 			(false, Some(name)) => Ok(Layer::scene(name)),
 			(false, None) => Err("Take a scene to edit what it shows.".into()),
 		}
+	}
+
+	/// The scene BUILD edits: the one open off air, or else the one on
+	/// program.
+	fn edited<'a>(&self, state: &'a State) -> Option<&'a str> {
+		self.edited_since(state).0
+	}
+
+	/// The scene BUILD edits, and how long it had been on as of the last
+	/// render, the moment of its keyframes the picture shows.
+	fn edited_since<'a>(&self, state: &'a State) -> (Option<&'a str>, Duration) {
+		match state.cued() {
+			Some(cued) if self.editing.as_deref() == Some(cued) => (Some(cued), state.compositor.preview_since()),
+			_ => (state.compositor.program_scene(), state.compositor.program_since()),
+		}
+	}
+
+	/// Open the scene called `scene` for editing off air, on BUILD.
+	fn open_off_air(&mut self, scene: &str) -> anyhow::Result<()> {
+		let mut state = self.engine.state.lock().unwrap();
+		let scene = state.open_off_air(scene)?;
+		self.editing = state.cued().is_some().then_some(scene);
+		self.page = Page::Build;
+		Ok(())
 	}
 
 	/// Copy the selected item, with what it shows, to the clipboard.
@@ -1751,14 +1785,19 @@ struct Drag {
 /// How far, in points on screen, the pointer reaches to an edge or a line.
 const REACH: f32 = 8.0;
 
-/// Where the visible items of the scene on program and the top layer over it
-/// show `since` the scene went on program, other than the one at `index` of
-/// `layer`: what a dragged item snaps to.
-fn others(state: &State, layer: &Layer, index: usize, since: Duration) -> Vec<Rect> {
-	let scene = state.compositor.program_scene();
+/// Where the visible items of `scene` and the top layer over it, if it is
+/// drawn over that scene, show `since` the scene went on, other than the one
+/// at `index` of `layer`: what a dragged item snaps to.
+fn others(state: &State, scene: Option<&str>, layer: &Layer, index: usize, since: Duration) -> Vec<Rect> {
 	let collection = state.collection();
+	// The top layer goes over a scene of the program's size, as the
+	// compositor draws it.
+	let top = collection
+		.canvas(scene)
+		.is_none_or(|canvas| canvas.size() == collection.canvas.size());
 	let mut rects = Vec::new();
-	for shown in scene.map(Layer::scene).into_iter().chain([Layer::top()]) {
+	let layers = scene.map(Layer::scene).into_iter().chain(top.then(Layer::top));
+	for shown in layers {
 		let items = collection.items(&shown).unwrap_or_default();
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == *layer && at == index) {
@@ -2323,33 +2362,6 @@ impl Devices {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// A key bound to Cut or Transition, which the window no longer offers,
-	/// is kept across a save for when they come back, unless the operator
-	/// bound that key to something else meanwhile.
-	#[test]
-	fn a_hidden_action_keeps_its_key() {
-		let key = |code| hotkeys::Binding {
-			modifiers: egui::Modifiers::NONE,
-			key: PhysicalKey::Code(code),
-			name: winit::keyboard::Key::Named(winit::keyboard::NamedKey::F1),
-		};
-		let saved = Bindings::from([
-			(Action::Cut, key(KeyCode::F5)),
-			(Action::Transition, key(KeyCode::F6)),
-			(Action::Panic, key(KeyCode::F1)),
-		]);
-		let (mut bindings, hidden): (Bindings, Bindings) = saved.into_iter().partition(|(action, _)| action.offered());
-		assert_eq!(bindings, Bindings::from([(Action::Panic, key(KeyCode::F1))]));
-		bindings.insert(Action::Replay, key(KeyCode::F6));
-		keep_hidden(&mut bindings, &hidden);
-		let kept = Bindings::from([
-			(Action::Panic, key(KeyCode::F1)),
-			(Action::Replay, key(KeyCode::F6)),
-			(Action::Cut, key(KeyCode::F5)),
-		]);
-		assert_eq!(bindings, kept, "Transition lost F6 to Replay");
-	}
 
 	/// The gain field shows a boost past its range without cutting it, and
 	/// takes an exact level, so a sound can go back to exactly 0 dB.

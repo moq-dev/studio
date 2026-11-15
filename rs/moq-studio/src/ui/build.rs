@@ -1,13 +1,16 @@
 //! The BUILD page: the scenes, their layers, the sources, and the selected
 //! layer's inspector, around the live picture they edit.
 
+use super::cue::Corner;
+use super::shell::Snapshot;
 use super::*;
 
 impl Panels {
 	/// The BUILD page: the layers and the sources on the left, the live
-	/// picture with its tools in the middle, and the selection's inspector on
-	/// the right, or among the left's tabs when the window is narrow.
-	pub(super) fn build(&mut self, ui: &mut Ui, fx: &mut Fx, stage: egui::Rect, shape: f32) {
+	/// picture, or the scene open off air, with its tools in the middle, and
+	/// the selection's inspector on the right, or among the left's tabs when
+	/// the window is narrow.
+	pub(super) fn build(&mut self, ui: &mut Ui, fx: &mut Fx, stage: egui::Rect, snapshot: &Snapshot) {
 		let side = (stage.width() * 0.22).clamp(260.0, 320.0);
 		let wide = stage.width() >= side * 2.0 + 360.0;
 		let left = stage.with_max_x(stage.left() + side);
@@ -36,8 +39,13 @@ impl Panels {
 		}
 		kit::wash(ui.painter(), middle);
 		let bar = middle.with_max_y(middle.top() + 44.0).shrink2(egui::vec2(16.0, 6.0));
-		let room = middle.with_min_y(bar.bottom()).shrink(28.0);
-		self.stage(ui, fx, bar, super::layout::fit(room, shape));
+		let mut room = middle.with_min_y(bar.bottom()).shrink(28.0);
+		let mut shape = snapshot.shape;
+		if let Some(cued) = snapshot.cued.as_ref().filter(|cued| cued.off_air) {
+			room.min.y = self.off_air(ui, cued, room, snapshot.shape);
+			shape = cued.shape();
+		}
+		self.stage(ui, fx, snapshot, bar, super::layout::fit(room, shape));
 	}
 
 	/// A column of `tools` in `rect`, showing `tool` under their tabs.
@@ -64,15 +72,36 @@ impl Panels {
 		});
 	}
 
-	/// The live picture at `at`, where a drag arranges the items of the
-	/// layer the Layers tab shows, or the mouse and keyboard pass to browser
-	/// sources while Interact is on, with its tools in `bar`.
-	fn stage(&mut self, ui: &mut Ui, fx: &mut Fx, bar: egui::Rect, at: egui::Rect) {
+	/// The live picture at `at`, or the scene open off air, where a drag
+	/// arranges the items of the layer the Layers tab shows, or the mouse and
+	/// keyboard pass to browser sources while Interact is on, with its tools
+	/// in `bar`. The NEXT card docks on the live picture while a scene is cued.
+	fn stage(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot, bar: egui::Rect, at: egui::Rect) {
 		self.staged = true;
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let canvas = self.program_drawn;
+		// Decided under this lock, as the edits below are, so the picture
+		// shown is the one they edit even if a key took a scene since the
+		// snapshot.
+		let off_air = state
+			.cued()
+			.filter(|cued| self.editing.as_deref() == Some(*cued))
+			.map(|cued| {
+				state
+					.collection()
+					.canvas(Some(cued))
+					.unwrap_or(state.collection().canvas)
+			});
+		let (canvas, id, frame) = match off_air {
+			Some(canvas) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag("Off air")),
+			// It is the live picture, so the accent frame stays while editing it.
+			None => (
+				self.program_drawn,
+				self.program.id,
+				TallyFrame::new(Tally::Air).tag("On air"),
+			),
+		};
 		let builder = egui::UiBuilder::new()
 			.max_rect(bar)
 			.layout(egui::Layout::left_to_right(egui::Align::Center));
@@ -106,11 +135,9 @@ impl Panels {
 					.suffix(" px"),
 			);
 		});
-		// It is the live picture, so the accent frame stays while editing it.
-		let frame = TallyFrame::new(Tally::Air).tag("On air");
-		let id = self.program.id;
 		let builder = egui::UiBuilder::new().max_rect(at.expand(10.0));
-		// Interacting, the pointer belongs to the pages rather than to arranging.
+		// Interacting, the pointer belongs to the pages rather than to arranging,
+		// and no card covers them.
 		if self.interacting {
 			let image = ui
 				.scope_builder(builder, |ui| {
@@ -118,8 +145,8 @@ impl Panels {
 				})
 				.inner
 				.rect;
-			let since = state.compositor.program_since();
-			let scene = state.compositor.program_scene().map(|scene| (scene, since));
+			let (scene, since) = self.edited_since(&state);
+			let scene = scene.map(|scene| (scene, since));
 			self.rebind(&state.sources);
 			let delivered = self.interact.update(ui, image, state.collection(), scene);
 			deliver(&state.sources, delivered);
@@ -134,8 +161,20 @@ impl Panels {
 			})
 			.inner;
 		let result = self.arrange(ui, &mut state, &response, canvas);
+		// Docked on the live picture, away from the item being dragged.
+		let dragged = self.drag.as_ref().and_then(|drag| {
+			let item = state.collection().items(&drag.layer)?.get(drag.index)?;
+			let (width, height) = (canvas.width.max(1) as f32, canvas.height.max(1) as f32);
+			Some([
+				(item.rect.x + item.rect.width / 2.0) / width,
+				(item.rect.y + item.rect.height / 2.0) / height,
+			])
+		});
 		drop(state);
 		self.check(result);
+		if let Some(cued) = snapshot.cued.as_ref().filter(|_| off_air.is_none()) {
+			self.next(ui, fx, cued, response.rect, Corner::away_from(dragged));
+		}
 	}
 
 	/// Select, move, and resize the items of the layer the Layers tab shows
@@ -168,7 +207,8 @@ impl Panels {
 		let Some(resting) = state.collection().items(&layer).map(<[Item]>::to_vec) else {
 			return Ok(());
 		};
-		let since = state.compositor.program_since();
+		let (scene, since) = self.edited_since(state);
+		let scene = scene.map(str::to_string);
 		let items: Vec<Item> = resting.iter().map(|item| item.posed(since).into_owned()).collect();
 		let selected = match &self.selection {
 			Some(Selection::Item(selected, index)) if *selected == layer => Some(*index),
@@ -237,7 +277,7 @@ impl Panels {
 						height: shown.height - rest.height,
 					},
 				};
-				let others = others(state, &drag.layer, drag.index, since);
+				let others = others(state, scene.as_deref(), &drag.layer, drag.index, since);
 				snap.apply(drag.grab, rect, &others, &canvas)
 			});
 			let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
@@ -468,6 +508,7 @@ impl Panels {
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
 		let program = state.compositor.program_scene().map(str::to_owned);
+		let cued = state.cued().map(str::to_owned);
 		let on_air: Vec<String> = state.compositor.on_air().map(str::to_owned).collect();
 		let mut action = None;
 		let mut audio_action = None;
@@ -503,6 +544,9 @@ impl Panels {
 						}
 						if program.as_deref() == Some(scene.name.as_str()) {
 							ui.add(kit::Tag::new("On air", Tally::Air));
+						}
+						if cued.as_deref() == Some(scene.name.as_str()) {
+							ui.add(kit::Tag::new("Next", Tally::Cue));
 						}
 						if let Some(size) = scene.size {
 							ui.weak(format!("{}x{}", size.width, size.height));
@@ -725,12 +769,12 @@ impl Panels {
 		}
 	}
 
-	/// The items of the scene on program or the top layer, back to front.
+	/// The items of the scene edited or the top layer, back to front.
 	pub(super) fn items(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let scene = state.compositor.program_scene().unwrap_or("no scene").to_string();
+		let scene = self.edited(&state).unwrap_or("no scene").to_string();
 		ui.horizontal(|ui| {
 			ui.selectable_value(&mut self.top, false, format!("Scene: {scene}"));
 			ui.selectable_value(&mut self.top, true, "Top layer")

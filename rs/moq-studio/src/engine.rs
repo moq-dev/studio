@@ -236,6 +236,8 @@ impl State {
 		}
 		self.compositor.retain(&collection);
 		self.collection = collection;
+		// A removed scene may have been the one cued.
+		self.preview_cued();
 		self.renamed
 			.extend(renames.into_iter().filter(|renames| !renames.is_empty()));
 		Ok(())
@@ -311,6 +313,7 @@ impl State {
 	pub fn cut(&mut self) -> anyhow::Result<()> {
 		self.compositor.cut(&self.collection, &self.sources)?;
 		self.takes += 1;
+		self.preview_cued();
 		Ok(())
 	}
 
@@ -320,23 +323,22 @@ impl State {
 		self.compositor
 			.transition(&self.collection, transition, &self.sources, now)?;
 		self.takes += 1;
+		self.preview_cued();
 		Ok(())
 	}
 
 	/// Take the scene called `scene` on program by the show's transition, as
 	/// its pad or hotkey does, following any rename the window has yet to move
 	/// a key through; the name it went on by. The scene on program stays as it
-	/// is. The preview follows, so the scene in preview is always the one
-	/// last taken.
+	/// is, leaving nothing [cued](Self::cued). The preview follows, so nothing
+	/// is cued after a take either.
 	///
 	/// Refused, changing nothing, unless the scene can go on program, as
 	/// [`Collection::takes`] says.
 	pub fn take(&mut self, scene: &str, now: Instant) -> anyhow::Result<String> {
-		let scene = self
-			.follow(scene)
-			.filter(|scene| self.collection.scene(scene).is_some())
-			.with_context(|| format!("no scene is called `{scene}`"))?;
+		let scene = self.named(scene)?;
 		if self.compositor.program_scene() == Some(scene.as_str()) {
+			self.uncue();
 			return Ok(scene);
 		}
 		self.collection.takes(&scene)?;
@@ -348,6 +350,83 @@ impl State {
 			return Err(err);
 		}
 		Ok(scene)
+	}
+
+	/// The scene cued for Studio mode's TAKE and AUTO, or open for editing off
+	/// air: the one in preview, unless it is the one on program.
+	pub fn cued(&self) -> Option<&str> {
+		let preview = self.compositor.preview_scene()?;
+		(self.compositor.program_scene() != Some(preview)).then_some(preview)
+	}
+
+	/// Cue the scene called `scene`, as its pad or hotkey does in Studio mode,
+	/// following renames as [`take`](Self::take) does; the name it was cued
+	/// by. Its keyframes and overlays start over, as the audience will see
+	/// them, unless it was cued already. Cueing the scene on program leaves
+	/// nothing cued.
+	///
+	/// Refused, changing nothing, unless the scene can go on program.
+	pub fn cue(&mut self, scene: &str) -> anyhow::Result<String> {
+		let scene = self.named(scene)?;
+		self.collection.takes(&scene)?;
+		self.stage(&scene);
+		Ok(scene)
+	}
+
+	/// Open the scene called `scene` for editing off air: cue it as
+	/// [`cue`](Self::cue) does, even one that cannot go on program.
+	pub fn open_off_air(&mut self, scene: &str) -> anyhow::Result<String> {
+		let scene = self.named(scene)?;
+		self.stage(&scene);
+		Ok(scene)
+	}
+
+	/// Leave nothing cued, back to editing the scene on program.
+	pub fn uncue(&mut self) {
+		if self.cued().is_some() {
+			let program = self.compositor.program_scene().map(str::to_string);
+			self.compositor.set_preview(program);
+		}
+		self.preview_cued();
+	}
+
+	/// Put the cued scene on program: at once without a `transition`, or by
+	/// it, starting at its instant. The name it went on by.
+	///
+	/// Refused, changing nothing, while nothing is cued or the cued scene
+	/// cannot go on program.
+	pub fn take_cued(&mut self, transition: Option<(moq_scene::Transition, Instant)>) -> anyhow::Result<String> {
+		let scene = self.cued().context("nothing is cued")?.to_string();
+		match transition {
+			None => self.cut()?,
+			Some((transition, now)) => self.transition(transition, now)?,
+		}
+		Ok(scene)
+	}
+
+	/// Put the scene called `scene` in preview, unless it is there already,
+	/// where its keyframes play on.
+	fn stage(&mut self, scene: &str) {
+		if self.compositor.preview_scene() != Some(scene) {
+			self.compositor.set_preview(Some(scene.to_string()));
+		}
+		self.preview_cued();
+	}
+
+	/// Draw the preview while a scene is cued, which the window shows, and
+	/// not otherwise. Called on every change to what is cued, so a new cue is
+	/// drawn from the next render and never shows the one before, and a take
+	/// from a hotkey while the window is hidden stops drawing it.
+	fn preview_cued(&mut self) {
+		self.compositor.set_previewing(self.cued().is_some());
+	}
+
+	/// The scene called `scene`, following any rename the window has yet to
+	/// move a key through, if the collection has it.
+	fn named(&self, scene: &str) -> anyhow::Result<String> {
+		self.follow(scene)
+			.filter(|scene| self.collection.scene(scene).is_some())
+			.with_context(|| format!("no scene is called `{scene}`"))
 	}
 
 	/// The panic key: mute every microphone and every guest in `room`, in one
@@ -1059,6 +1138,8 @@ impl Engine {
 			.find(|scene| collection.takes(&scene.name).is_ok());
 		compositor.set_preview(first.map(|scene| scene.name.clone()));
 		compositor.cut(&collection, &sources)?;
+		// Nothing is cued, so nothing shows the preview.
+		compositor.set_previewing(false);
 
 		let engine = Arc::new(Self {
 			gpu,
@@ -3647,6 +3728,75 @@ mod tests {
 			assert_eq!(said, "no microphone or guest was on, and cut to `BRB`");
 			assert!(!state.compositor.transitioning(), "a cut, at once");
 			assert_eq!(state.takes, takes + 5);
+		}
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+	}
+
+	/// A cue waits in preview until TAKE or AUTO. Only a scene that can go on
+	/// air is cued, but any opens off air,
+	/// and the scene on program is never cued: cueing it, or taking it,
+	/// clears the cue.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_cue_waits_for_take() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut loaded = red_canvas();
+		let collection = &mut loaded.collection;
+		collection.transition = moq_scene::Transition::Fade {
+			duration: Duration::from_secs(60),
+		};
+		let main = collection.scenes[0].name.clone();
+		let mut portrait = moq_scene::Scene::new("Portrait");
+		portrait.size = Some(moq_scene::Size {
+			width: 360,
+			height: 640,
+		});
+		collection.scenes.extend([moq_scene::Scene::new("Guest"), portrait]);
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
+			.await
+			.expect("the studio starts");
+		{
+			let mut state = engine.state.lock().unwrap();
+			let now = kio::clock::now();
+			let takes = state.takes;
+			assert_eq!(state.cued(), None);
+			assert!(state.take_cued(None).is_err(), "nothing to take");
+
+			assert_eq!(state.cue("Guest").unwrap(), "Guest");
+			assert_eq!(state.cued(), Some("Guest"));
+			assert_eq!(state.compositor.program_scene(), Some(main.as_str()), "still on air");
+			assert_eq!(state.takes, takes);
+			assert!(state.cue("Portrait").is_err(), "it cannot go on air");
+			assert_eq!(state.cued(), Some("Guest"), "a refused cue changes nothing");
+			assert_eq!(state.cue(&main).unwrap(), main);
+			assert_eq!(state.cued(), None, "cueing the scene on air clears the cue");
+
+			assert_eq!(state.open_off_air("Portrait").unwrap(), "Portrait");
+			assert_eq!(state.cued(), Some("Portrait"), "any scene opens off air");
+			let refused = state.take_cued(None).unwrap_err();
+			assert!(format!("{refused:#}").contains("cannot go on program"), "{refused:#}");
+			assert_eq!(state.compositor.program_scene(), Some(main.as_str()));
+			assert_eq!(state.take(&main, now).unwrap(), main);
+			assert_eq!(state.cued(), None, "taking the scene on air goes back to live");
+
+			state.cue("Guest").unwrap();
+			let fade = state.collection().transition.clone();
+			assert_eq!(state.take_cued(Some((fade, now))).unwrap(), "Guest");
+			assert_eq!(state.compositor.program_scene(), Some("Guest"));
+			assert!(state.compositor.transitioning(), "AUTO, by the show's fade");
+			assert_eq!(state.cued(), None);
+			state.cue(&main).unwrap();
+			assert_eq!(state.take_cued(None).unwrap(), main);
+			assert!(!state.compositor.transitioning(), "TAKE, at once");
+			assert_eq!(state.takes, takes + 2);
+
+			state.cue("Guest").unwrap();
+			state.uncue();
+			assert_eq!(state.cued(), None);
+			assert_eq!(state.compositor.program_scene(), Some(main.as_str()));
 		}
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
