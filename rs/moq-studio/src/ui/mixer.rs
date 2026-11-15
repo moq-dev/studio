@@ -330,6 +330,10 @@ const BAR: f32 = 44.0;
 /// A sound's strip, and as narrow as one gets beside an opened one.
 const WIDE: f32 = 128.0;
 const NARROW: f32 = 92.0;
+/// The smallest and largest a send dot under a strip gets, and the room
+/// between dots.
+const DOT: [f32; 2] = [12.0, 22.0];
+const DOT_GAP: f32 = 5.0;
 /// The narrowest and widest an audio scene's strip gets.
 const MASTER: [f32; 2] = [150.0, 240.0];
 /// Room between strips, and between the sounds and the audio scenes.
@@ -403,16 +407,21 @@ impl Panels {
 			}
 		}
 
-		// The legend, from the right.
+		// The legend, from the right, left out where it would run into the
+		// switch: each dot's tooltip says its route anyway.
 		let font = kit::ui(11.5);
 		let mut right = room.right();
 		let keys = [
 			(Reach::Not, "not heard"),
 			(Reach::Through(String::new()), "through another audio scene"),
 			(Reach::Sent, "sent"),
-		];
-		for (reach, says) in keys {
-			let galley = ui.painter().layout_no_wrap(says.into(), font.clone(), kit::DIM);
+		]
+		.map(|(reach, says)| (reach, ui.painter().layout_no_wrap(says.into(), font.clone(), kit::DIM)));
+		let legend: f32 = keys.iter().map(|(_, galley)| galley.size().x + 7.0 + 14.0 + 16.0).sum();
+		if right - legend < switch.right() {
+			return;
+		}
+		for (reach, galley) in keys {
 			right -= galley.size().x;
 			ui.painter()
 				.galley(pos2(right, rect.center().y - galley.size().y / 2.0), galley, kit::DIM);
@@ -439,20 +448,24 @@ impl Panels {
 		let opened = self.desk.opened.clone();
 		let grow = if opened.is_some() { OPENED } else { 0.0 };
 		let group = if sounds > 0 { GROUP } else { 0.0 };
-		let masters_min = masters as f32 * (MASTER[0] + GAP) + ADD;
+		// Every strip holds a dot for each audio scene, however many there are.
+		let floor = strip_floor(masters);
+		let (narrow, wide) = (NARROW.max(floor), WIDE.max(floor));
+		let (master_min, master_max) = (MASTER[0].max(floor), MASTER[1].max(floor));
+		let masters_min = masters as f32 * (master_min + GAP) + ADD;
 		let gaps = sounds.saturating_sub(1) as f32 * GAP;
 		// The opened strip keeps its width; the others share what is left.
 		let others = sounds.saturating_sub(usize::from(opened.is_some()));
-		let room = body.width() - masters_min - group - gaps - grow - if opened.is_some() { WIDE } else { 0.0 };
+		let room = body.width() - masters_min - group - gaps - grow - if opened.is_some() { wide } else { 0.0 };
 		let width = match others {
-			0 => WIDE,
-			others => (room / others as f32).clamp(NARROW, WIDE),
+			0 => wide,
+			others => (room / others as f32).clamp(narrow, wide),
 		};
-		let sounds_width = others as f32 * width + if opened.is_some() { WIDE + grow } else { 0.0 } + gaps;
+		let sounds_width = others as f32 * width + if opened.is_some() { wide + grow } else { 0.0 } + gaps;
 		let spare = body.width() - sounds_width - group - ADD - masters as f32 * GAP;
 		let master = match masters {
 			0 => 0.0,
-			masters => (spare / masters as f32).clamp(MASTER[0], MASTER[1]),
+			masters => (spare / masters as f32).clamp(master_min, master_max),
 		};
 		let content = vec2(
 			(sounds_width + group + masters as f32 * (master + GAP) + ADD).max(body.width()),
@@ -473,7 +486,7 @@ impl Panels {
 					}
 					for sound in &board.sounds {
 						let open = opened.as_deref() == Some(sound.name.as_str());
-						let strip_width = if open { WIDE } else { width };
+						let strip_width = if open { wide } else { width };
 						let strip = Rect::from_min_max(pos2(x, top), pos2(x + strip_width, bottom));
 						if open {
 							let whole = strip.with_max_x(strip.right() + grow);
@@ -641,31 +654,11 @@ impl Panels {
 			galley,
 			kit::TEXT,
 		);
-		let heard = board.heard(name);
-		let mut tags = Rect::from_min_size(
+		let tags = Rect::from_min_size(
 			pos2(rect.left() + 8.0, badge.bottom() + 8.0),
 			vec2(rect.width() - 16.0, 18.0),
 		);
-		if scene.program {
-			tag(ui, tags, "Stream hears this", kit::ACCENT, kit::TEXT);
-		} else {
-			let response = tag_button(ui, tags, "Put on stream", ("put on stream", name));
-			let response = kit::tip(
-				response,
-				&format!("Put {name} on the stream, without dropping or repeating audio"),
-				None,
-			);
-			if response.clicked() {
-				changes.push(Change::Program(name.clone()));
-			}
-		}
-		if heard {
-			tags = tags.translate(vec2(0.0, 22.0));
-			self.listen_tag(ui, tags, changes);
-		} else if scene.recorded {
-			tags = tags.translate(vec2(0.0, 22.0));
-			tag(ui, tags, "In the recording", kit::P3, kit::DIM);
-		}
+		self.master_tags(ui, tags, scene, board, changes);
 
 		// The meter on the same scale as the sounds', without a fader: an
 		// audio scene has no gain of its own.
@@ -694,6 +687,7 @@ impl Panels {
 			true => "Play this audio scene on the output picked under its name; use headphones",
 			false => "Needs a build with the `capture` feature",
 		};
+		let heard = board.heard(name);
 		let says = if heard {
 			"Stop listening".to_string()
 		} else {
@@ -1022,6 +1016,32 @@ impl Panels {
 		});
 	}
 
+	/// What an audio scene is for, as tags from `first` down: whether the
+	/// stream hears it, or a button putting it on, then Listen's output where
+	/// it is listened to, or that recordings hold it.
+	fn master_tags(&mut self, ui: &mut Ui, first: Rect, scene: &Master, board: &Board, changes: &mut Vec<Change>) {
+		let name = &scene.name;
+		if scene.program {
+			tag(ui, first, "Stream hears this", kit::ACCENT, kit::TEXT);
+		} else {
+			let response = tag_button(ui, first, "Put on stream", ("put on stream", name));
+			let response = kit::tip(
+				response,
+				&format!("Put {name} on the stream, without dropping or repeating audio"),
+				None,
+			);
+			if response.clicked() {
+				changes.push(Change::Program(name.clone()));
+			}
+		}
+		let second = first.translate(vec2(0.0, 22.0));
+		if board.heard(name) {
+			self.listen_tag(ui, second, changes);
+		} else if scene.recorded {
+			tag(ui, second, "In the recording", kit::P3, kit::DIM);
+		}
+	}
+
 	/// An audio scene's column head: its badge and name, what it is for,
 	/// and its meter.
 	fn route_head(&mut self, ui: &mut Ui, head: Rect, master: &Master, board: &Board, changes: &mut Vec<Change>) {
@@ -1035,7 +1055,7 @@ impl Panels {
 		);
 		let line = galley.size().x + 26.0;
 		let left = head.center().x - line / 2.0;
-		let badge = Rect::from_center_size(pos2(left + 9.0, head.top() + 28.0), Vec2::splat(18.0));
+		let badge = Rect::from_center_size(pos2(left + 9.0, head.top() + 22.0), Vec2::splat(18.0));
 		paint_dot(painter, badge, &Reach::Sent, &master.letter, master.program);
 		painter.galley(
 			pos2(left + 26.0, badge.center().y - galley.size().y / 2.0),
@@ -1043,23 +1063,12 @@ impl Panels {
 			kit::TEXT,
 		);
 		let tags = Rect::from_center_size(
-			pos2(head.center().x, head.top() + 56.0),
+			pos2(head.center().x, head.top() + 46.0),
 			vec2(head.width() - 24.0, 18.0),
 		);
-		if master.program {
-			tag(ui, tags, "Stream hears this", kit::ACCENT, kit::TEXT);
-		} else if board.heard(&master.name) {
-			self.listen_tag(ui, tags, changes);
-		} else if master.recorded {
-			tag(ui, tags, "In the recording", kit::P3, kit::DIM);
-		} else {
-			let response = tag_button(ui, tags, "Put on stream", ("put on stream", &master.name));
-			if response.clicked() {
-				changes.push(Change::Program(master.name.clone()));
-			}
-		}
+		self.master_tags(ui, tags, master, board, changes);
 		let (level, peak) = reading(self.levels.mix(&master.name));
-		let at = Rect::from_center_size(pos2(head.center().x, head.top() + 80.0), vec2(head.width() - 24.0, 8.0));
+		let at = Rect::from_center_size(pos2(head.center().x, head.top() + 88.0), vec2(head.width() - 24.0, 8.0));
 		ui.put(at, kit::Meter::new(level, peak).run(kit::Run::Across, at.width(), 8.0));
 	}
 
@@ -1194,6 +1203,13 @@ enum RowIcon<'a> {
 	Scene(&'a Master),
 }
 
+/// The narrowest a strip gets that still holds a send dot, at its smallest,
+/// for each of `masters` audio scenes.
+fn strip_floor(masters: usize) -> f32 {
+	let count = masters as f32;
+	count * DOT[0] + (count - 1.0).max(0.0) * DOT_GAP + 2.0 * Parts::INSET.x
+}
+
 /// Where a strip's parts sit in it, top to bottom.
 struct Parts {
 	head: Rect,
@@ -1205,8 +1221,11 @@ struct Parts {
 }
 
 impl Parts {
+	/// Room between a strip's edges and its parts.
+	const INSET: Vec2 = vec2(10.0, 12.0);
+
 	fn of(rect: Rect) -> Self {
-		let inner = rect.shrink2(vec2(10.0, 12.0));
+		let inner = rect.shrink2(Self::INSET);
 		let head = Rect::from_min_size(inner.min, vec2(inner.width(), 58.0));
 		let sends = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 33.0), inner.max);
 		let buttons = Rect::from_min_max(
@@ -1418,14 +1437,8 @@ impl Dot<'_> {
 fn sends(ui: &mut Ui, rect: Rect, from: Strip<'_>, reach: &[Reach], board: &Board, changes: &mut Vec<Change>) {
 	ui.painter()
 		.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, kit::LINE));
-	let count = board.masters.len().max(1) as f32;
-	let size = ((rect.width() - (count - 1.0) * 5.0) / count).clamp(12.0, 22.0);
-	let width = count * size + (count - 1.0) * 5.0;
-	let mut x = rect.center().x - width / 2.0;
-	let y = rect.bottom() - size / 2.0;
-	for (to, reach) in board.masters.iter().zip(reach) {
-		let at = Rect::from_center_size(pos2(x + size / 2.0, y), Vec2::splat(size));
-		x += size + 5.0;
+	let dots = dot_rects(rect, board.masters.len());
+	for ((to, reach), at) in board.masters.iter().zip(reach).zip(dots) {
 		let send = Dot {
 			from,
 			to,
@@ -1434,6 +1447,19 @@ fn sends(ui: &mut Ui, rect: Rect, from: Strip<'_>, reach: &[Reach], board: &Boar
 		};
 		send.ui(ui, at, changes);
 	}
+}
+
+/// Where `count` send dots sit in `rect`: a row along its foot, centered, as
+/// big as fit.
+fn dot_rects(rect: Rect, count: usize) -> impl Iterator<Item = Rect> {
+	let n = count.max(1) as f32;
+	let size = ((rect.width() - (n - 1.0) * DOT_GAP) / n).clamp(DOT[0], DOT[1]);
+	let left = rect.center().x - (n * size + (n - 1.0) * DOT_GAP) / 2.0;
+	let y = rect.bottom() - size / 2.0;
+	(0..count).map(move |at| {
+		let x = left + at as f32 * (size + DOT_GAP) + size / 2.0;
+		Rect::from_center_size(pos2(x, y), Vec2::splat(size))
+	})
 }
 
 /// A matrix cell: its dot, and the audio scene a sound comes through, or
@@ -1584,6 +1610,31 @@ mod tests {
 			assert!((untaper(at) - db).abs() < 1e-3, "{db} dB comes back");
 		}
 		assert_eq!(untaper(0.0), MUTE_DB);
+	}
+
+	/// However many audio scenes there are, a strip at its narrowest holds
+	/// each one's dot within it, so a click never lands on a neighbour's.
+	#[test]
+	fn every_send_dot_fits_its_strip() {
+		for masters in 0..=16 {
+			let floor = strip_floor(masters);
+			for width in [NARROW.max(floor), WIDE.max(floor), MASTER[0].max(floor)] {
+				let strip = Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 400.0));
+				let room = Parts::of(strip).sends;
+				let dots: Vec<Rect> = dot_rects(room, masters).collect();
+				assert_eq!(dots.len(), masters);
+				for (at, dot) in dots.iter().enumerate() {
+					assert!(
+						room.expand(1e-3).contains_rect(*dot),
+						"{masters} dots at {width}: {dot:?} in {room:?}"
+					);
+					assert!(dot.width() >= DOT[0]);
+					if let Some(next) = dots.get(at + 1) {
+						assert!(dot.right() < next.left(), "{masters} dots at {width} overlap");
+					}
+				}
+			}
+		}
 	}
 
 	/// A meter lights to its top at full scale, which is unity on the scale.
