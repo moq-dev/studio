@@ -1031,7 +1031,7 @@ impl Card<'_> {
 					.paint_at(ui, thumb);
 			}
 			// What a finished file shows waits on reading a regular MP4's first
-			// picture (quest/m0/ux/review.md).
+			// picture (quest/m3/card-pictures.md).
 			None => {
 				ui.painter().rect_filled(thumb, 7, kit::P3);
 				Icon::Review.paint(ui, thumb, 20.0, kit::FAINT);
