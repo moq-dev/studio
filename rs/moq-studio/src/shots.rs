@@ -31,6 +31,8 @@ enum Open {
 	Setup,
 	/// The studio, with a panel at the front of its group.
 	Studio(Option<Tab>),
+	/// The kit's gallery, with a sheet open over it or not.
+	Kit { sheet: bool },
 }
 
 /// Whether a view draws the same picture every time.
@@ -55,6 +57,10 @@ macro_rules! views {
 // Every view. A quest that adds a page or a state adds its row, and an
 // `Open` variant for a state no existing one reaches.
 views! {
+	/// Every widget of the kit in every state.
+	kit: Still, Open::Kit { sheet: false };
+	/// The kit's sheet, over the gallery.
+	kit_sheet: Still, Open::Kit { sheet: true };
 	/// Once its checks are done: this machine's encoder timings, and the
 	/// capture errors of a build without `capture`, which keeps the view off
 	/// the host's devices.
@@ -118,6 +124,9 @@ fn shot(name: &str, motion: Motion, open: Open) {
 
 /// Draw what `open` opens on a fresh engine, from the scene file `show`.
 fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show: &Path) -> image::RgbaImage {
+	if let &Open::Kit { sheet } = open {
+		return gallery(gpu, runtime, sheet);
+	}
 	let launch = engine::Launch {
 		gpu: gpu.clone(),
 		relays: Vec::new(),
@@ -130,6 +139,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		Open::Setup => App::Setup(Box::new(
 			setup::Setup::new(launch, "show.toml".into(), runtime.handle().clone()).unwrap(),
 		)),
+		Open::Kit { .. } => unreachable!("drawn without an engine"),
 		Open::Studio(_) => {
 			// Afresh, without the history an earlier draw's edits left.
 			std::fs::copy(show, "show.toml").unwrap();
@@ -148,6 +158,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		.with_size(SIZE)
 		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
 		.build_eframe(|cc| {
+			crate::kit::install(&cc.egui_ctx);
 			let mut fx = fx::Fx::new(&render, None, &cc.egui_ctx, runtime.handle());
 			// Not the system's reduced motion, which differs between machines.
 			fx.pick(Effects::Full);
@@ -184,6 +195,23 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	engine.stop();
 	runtime.block_on(async { tokio::join!(engine.close(), engine.recorder.done()) });
 	image
+}
+
+/// Draw the kit's gallery, with a sheet over it if `sheet`.
+fn gallery(gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, sheet: bool) -> image::RgbaImage {
+	let render = render_state(gpu);
+	let mut harness = Harness::builder()
+		.with_size(SIZE)
+		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
+		.build_eframe(|cc| {
+			crate::kit::install(&cc.egui_ctx);
+			let mut fx = fx::Fx::new(&render, None, &cc.egui_ctx, runtime.handle());
+			fx.pick(Effects::Full);
+			crate::kit::gallery::Gallery::new(fx, sheet)
+		});
+	// Enough for the popover and the sheet to settle where they open.
+	harness.run_steps(4);
+	harness.render().unwrap()
 }
 
 /// Draw until setup has finished its checks and proposes a scene.

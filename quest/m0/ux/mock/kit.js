@@ -73,7 +73,7 @@ document.body.insertAdjacentHTML('afterbegin',String.raw`<svg width="0" height="
       <div><b style="color:#5f27cd">quietriver</b> gg</div>
       <div><b style="color:#1dd1a1">hopper</b> what sens do you play on</div>
       <div><b style="color:#ff6b6b">tin_kettle</b> clip that!!</div>
-      <div class="ev" style="border-color:var(--air)"><b>lowtide</b> gifted 5 subs</div>
+      <div class="ev" style="border-color:var(--accent)"><b>lowtide</b> gifted 5 subs</div>
       <div><b style="color:#feca57">marrow</b> first time here, this stream looks so clean</div>
       <div><b style="color:#48dbfb">ibis</b> song name?</div>
       <div><b style="color:#ff9ff3">vellum</b> can you show the loadout again</div>
@@ -90,7 +90,7 @@ document.body.insertAdjacentHTML('afterbegin',String.raw`<svg width="0" height="
       <div class="row"><span class="grow">Keep out of the way</span><span class="dim" style="font-size:11px">moves off what matters</span><i class="tog on"></i></div>
     </div>
     <div class="sec"><span class="cap">Shape</span>
-      <div class="shape"><span><i></i></span><span><i style="border-radius:6px"></i></span><span class="on"><i style="border-radius:50%;background:var(--sel)"></i></span><span><i style="border-radius:50% 50% 4px 4px"></i></span></div>
+      <div class="shape"><span><i></i></span><span><i style="border-radius:6px"></i></span><span class="on"><i style="border-radius:50%;background:var(--accent)"></i></span><span><i style="border-radius:50% 50% 4px 4px"></i></span></div>
       <div class="sl"><span class="n">Border</span><div class="bar" style="--v:30%"></div></div>
       <div class="sl"><span class="n">Shadow</span><div class="bar" style="--v:55%"></div></div>
     </div>
@@ -134,7 +134,7 @@ function topbar(page,o={}){return `<div class="top">
   ${o.compact?'':`<div class="ib" style="margin-left:6px">${I('undo')}</div><div class="ib" style="transform:scaleX(-1)">${I('undo')}</div>`}
   <div class="grow"></div>${o.nav===false?'':NAV(page)}<div class="grow"></div>
     <div class="pill"><i class="dot"></i>${o.compact?'':'Excellent'}</div>
-  ${o.compact?'':`<div class="ib b"><i class="dot" style="background:var(--air)"></i></div>`}
+  ${o.compact?'':`<div class="ib b"><i class="dot" style="background:var(--accent)"></i></div>`}
   ${o.end?'<div class="onair end">END STREAM</div>':'<div class="onair">LIVE <b>01:24:07</b></div>'}
   ${o.compact?'':`<div class="ib">${I('gear')}</div><div class="wc"><i></i><i></i><i></i></div>`}
 </div>`}
