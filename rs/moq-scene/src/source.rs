@@ -4186,8 +4186,11 @@ mod media_tests {
 			plays_on_time(feed, first, begin).await;
 			until_time(begin.saturating_add(Duration::from_millis(998))).await;
 			assert!(feed.next_picture().is_none(), "the start again before the end");
-			// At the end, before the second play's next picture is due.
-			until_time(begin.saturating_add(Duration::from_millis(1_000))).await;
+			// The second play begins where the first ended, its sound a little
+			// past its last picture; holding the clock there keeps the second
+			// play's next picture from replacing its first.
+			let end = until(|| feed.run().ended).await;
+			until_time(end).await;
 			let (again, _) = shown(feed).await;
 			assert_eq!(again, first);
 			assert_eq!(feed.status(), Status::Live);
