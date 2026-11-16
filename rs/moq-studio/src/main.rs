@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use winit::event::WindowEvent;
@@ -220,6 +220,25 @@ fn shutdown(engine: &engine::Engine, runtime: &tokio::runtime::Handle) -> anyhow
 	saved
 }
 
+/// The engine of the show open, to end on quit or when it is closed.
+#[derive(Default)]
+struct Started(Mutex<Option<Arc<engine::Engine>>>);
+
+impl Started {
+	fn get(&self) -> Option<Arc<engine::Engine>> {
+		self.0.lock().unwrap().clone()
+	}
+
+	fn set(&self, engine: Arc<engine::Engine>) {
+		*self.0.lock().unwrap() = Some(engine);
+	}
+
+	/// Take the engine, so a quit after it is closed ends nothing twice.
+	fn take(&self) -> Option<Arc<engine::Engine>> {
+		self.0.lock().unwrap().take()
+	}
+}
+
 /// A show being opened from the library.
 type Opening = setup::Task<anyhow::Result<show::Opened>>;
 
@@ -242,10 +261,12 @@ struct Window {
 	app: App,
 	render: eframe::egui_wgpu::RenderState,
 	opener: show::Opener,
-	/// The engine once the studio is built, for ending it on quit.
-	started: Arc<OnceLock<Arc<engine::Engine>>>,
+	/// The engine once the studio is built, until the show is closed.
+	started: Arc<Started>,
 	/// The shows this user has opened.
 	recent: library::Recent,
+	/// Where the shows' pictures are kept, if the system has app storage.
+	pictures: Option<PathBuf>,
 	/// The open show's last stream off air that [`Self::recent`] has noted.
 	aired: Option<engine::Aired>,
 	keyboard: hotkeys::Keyboard,
@@ -291,18 +312,8 @@ impl eframe::App for Window {
 				let at = library::now().saturating_sub(lasted);
 				self.recent.aired(path, library::Aired { at, lasted });
 			}
-			// The show's picture is the program as it was when the window
-			// closed.
 			if self.closed.load(Ordering::Relaxed) {
-				let pictures = library::pictures().context("this system has no app storage");
-				let picture = pictures.and_then(|pictures| Ok((pictures, library::capture(&self.opener.gpu, engine)?)));
-				let saved = picture.and_then(|(pictures, picture)| {
-					self.recent.shaped(path, picture.portrait());
-					library::save_picture(&pictures, path, &picture)
-				});
-				if let Err(err) = saved {
-					tracing::warn!(error = format!("{err:#}"), "cannot keep the show's picture");
-				}
+				self.keep_picture(&engine);
 			}
 		}
 		self.recent.save(storage);
@@ -316,7 +327,10 @@ impl Window {
 		match std::mem::replace(&mut self.app, App::Moving) {
 			App::Studio(mut studio) => {
 				studio.ui(ui, frame, &mut self.fx);
-				self.app = App::Studio(studio);
+				match studio.closing() {
+					true => self.close_show(studio, ui.ctx(), frame),
+					false => self.app = App::Studio(studio),
+				}
 			}
 			App::Library(library, opening) => self.library(ui, library, opening),
 			App::Setup(mut setup, stream) => match setup.ui(ui, &mut self.fx) {
@@ -378,7 +392,7 @@ impl Window {
 		engine: Arc<engine::Engine>,
 		stream: stream::Stream,
 	) {
-		let _ = self.started.set(engine.clone());
+		self.started.set(engine.clone());
 		self.recent.opened(engine.autosave.path(), library::now());
 		// Once a show is open, the desktop's frame goes. macOS cannot draw under
 		// its title bar once the window is open, so it keeps it until a restart.
@@ -395,6 +409,62 @@ impl Window {
 		});
 		self.app = App::Studio(Box::new(studio));
 		ui.ctx().request_repaint();
+	}
+
+	/// Keep the program as the open show's picture in the library.
+	fn keep_picture(&mut self, engine: &engine::Engine) {
+		let path = engine.autosave.path();
+		let saved = self
+			.pictures
+			.clone()
+			.context("this system has no app storage")
+			.and_then(|pictures| {
+				let picture = library::capture(&self.opener.gpu, engine)?;
+				self.recent.shaped(path, picture.portrait());
+				library::save_picture(&pictures, path, &picture)
+			});
+		if let Err(err) = saved {
+			tracing::warn!(error = format!("{err:#}"), "cannot keep the show's picture");
+		}
+	}
+
+	/// End the open show as quitting does, and return to the library with its
+	/// card refreshed. The show stays open if it cannot be saved, or went live
+	/// since the click, rather than lose an edit or cut a stream.
+	fn close_show(&mut self, mut studio: Box<ui::Studio>, ctx: &egui::Context, frame: &mut eframe::Frame) {
+		let engine = studio.engine().clone();
+		// Claimed against a go-live first, which the engine being off air
+		// alone would not refuse while it reads tokens or checks encoders.
+		let ready = studio
+			.reserve_close()
+			.and_then(|()| engine.save().inspect_err(|_| studio.release_close()));
+		if let Err(err) = ready {
+			studio.refuse(err.context("cannot close the show"));
+			self.app = App::Studio(studio);
+			return;
+		}
+		self.follow_air();
+		// Before the engine stops drawing.
+		self.keep_picture(&engine);
+		if let Some(storage) = frame.storage_mut() {
+			studio.save(storage);
+			self.recent.save(storage);
+		}
+		self.started.take();
+		self.aired = None;
+		if let Err(err) = shutdown(&engine, &self.opener.runtime) {
+			tracing::error!(error = format!("{err:#}"), "cannot save on close");
+		}
+		// The studio goes with its hotkeys, which would otherwise fire on the
+		// closed show.
+		studio.release(&self.render);
+		// The desktop's frame again, which the library keeps.
+		if self.framed && !cfg!(target_os = "macos") {
+			ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+			self.framed = false;
+		}
+		self.app = App::Library(Box::new(library::Library::new(self.pictures.clone())), None);
+		ctx.request_repaint();
 	}
 
 	/// Note when the open show's last stream went live, and how long it
@@ -421,7 +491,7 @@ struct Events<'a> {
 	/// own title bar, since eframe only logs the error that stops it otherwise.
 	closed: Arc<AtomicBool>,
 	/// The engine once the studio is built, to end on the way out.
-	started: Arc<OnceLock<Arc<engine::Engine>>>,
+	started: Arc<Started>,
 	runtime: tokio::runtime::Handle,
 	/// Whether ending the studio could not save it.
 	unsaved: bool,
@@ -482,7 +552,7 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 		// Here rather than once the loop returns: quitting from the macOS app
 		// menu or Dock, or logging out, ends the process as this returns.
 		if let Some(engine) = self.started.get()
-			&& let Err(err) = shutdown(engine, &self.runtime)
+			&& let Err(err) = shutdown(&engine, &self.runtime)
 		{
 			tracing::error!(error = format!("{err:#}"), "cannot save on quit");
 			self.unsaved = true;
@@ -507,7 +577,7 @@ fn icon() -> egui::IconData {
 
 /// Show the window until it is closed, then end the studio.
 fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
-	let started = Arc::new(OnceLock::new());
+	let started = Arc::<Started>::default();
 	// The studio's title bar is the window's: the desktop draws no frame, and
 	// macOS draws its buttons over the studio's bar. The library and guided
 	// setup keep the desktop's until a show opens.
@@ -574,6 +644,7 @@ fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
 				opener,
 				started: window_started,
 				recent,
+				pictures: library::pictures(),
 				aired: None,
 				keyboard: window_keyboard,
 				fx,
