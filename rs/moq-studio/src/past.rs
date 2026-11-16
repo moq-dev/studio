@@ -188,7 +188,7 @@ struct Decoding {
 	/// By the keyframe's timestamp, in microseconds on its broadcast's timeline.
 	pictures: BTreeMap<u128, Arc<Picture>>,
 	/// The same for the sound: what it is of, its decoder, and each group's
-	/// peaks by the group's sequence.
+	/// peaks by the group's start.
 	sound_key: Option<(Of, String, hang::catalog::AudioConfig)>,
 	sound_decoder: Option<moq_audio::decode::Decoder>,
 	peaks: BTreeMap<u64, Vec<(moq_net::Timestamp, f32)>>,
@@ -209,9 +209,18 @@ impl Decoding {
 				return view;
 			}
 		};
+		let end = match Duration::try_from(take.end) {
+			Ok(end) => end,
+			Err(err) => {
+				self.reset();
+				view.held = Some(Err(format!("the take's end: {err}")));
+				return view;
+			}
+		};
 		// The moment a timestamp of the take's broadcast was shown.
-		let end = Duration::from(take.end);
-		let at = |timestamp: moq_net::Timestamp| now.saturating_sub(end.saturating_sub(Duration::from(timestamp)));
+		let at = |timestamp: moq_net::Timestamp| -> Result<Instant, moq_net::TimeOverflow> {
+			Ok(now.saturating_sub(end.saturating_sub(Duration::try_from(timestamp)?)))
+		};
 		let broadcast = take.consume();
 		let mut oldest = None;
 		if let Some((name, config)) = &take.audio {
@@ -251,7 +260,7 @@ impl Decoding {
 		of: &Of,
 		name: &str,
 		config: &hang::catalog::VideoConfig,
-		at: &impl Fn(moq_net::Timestamp) -> Instant,
+		at: &impl Fn(moq_net::Timestamp) -> Result<Instant, moq_net::TimeOverflow>,
 	) -> anyhow::Result<Vec<Arc<Picture>>> {
 		let key = Some((of.clone(), name.to_string(), config.clone()));
 		if self.key != key {
@@ -261,7 +270,7 @@ impl Decoding {
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
 		let mut kept = BTreeMap::new();
 		for frame in firsts(broadcast, name, container)? {
-			let micros = frame.timestamp.as_micros();
+			let micros = frame.timestamp.as_micros()?;
 			let picture = match self.pictures.remove(&micros) {
 				Some(picture) => picture,
 				None => {
@@ -271,7 +280,7 @@ impl Decoding {
 					let size = rgba.size();
 					Arc::new(Picture {
 						id: LAST_ID.fetch_add(1, Ordering::Relaxed) + 1,
-						at: at(frame.timestamp),
+						at: at(frame.timestamp)?,
 						size: [size.width as usize, size.height as usize],
 						rgba: rgba.into_data(),
 					})
@@ -325,7 +334,7 @@ impl Decoding {
 		of: &Of,
 		name: &str,
 		config: &hang::catalog::AudioConfig,
-		at: &impl Fn(moq_net::Timestamp) -> Instant,
+		at: &impl Fn(moq_net::Timestamp) -> Result<Instant, moq_net::TimeOverflow>,
 	) -> anyhow::Result<Vec<(Instant, f32)>> {
 		let key = Some((of.clone(), name.to_string(), config.clone()));
 		if self.sound_key != key {
@@ -335,11 +344,11 @@ impl Decoding {
 		}
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
 		let groups = groups(broadcast, name, false)?;
-		let newest = groups.last().map(|(sequence, _)| *sequence);
+		let newest = groups.last().map(|(start, _)| *start);
 		let mut kept = BTreeMap::new();
-		for (sequence, frames) in groups {
-			let peaks = match self.peaks.remove(&sequence) {
-				Some(peaks) if Some(sequence) != newest => peaks,
+		for (start, frames) in groups {
+			let peaks = match self.peaks.remove(&start) {
+				Some(peaks) if Some(start) != newest => peaks,
 				_ => {
 					let decoder = match &mut self.sound_decoder {
 						Some(decoder) => decoder,
@@ -362,15 +371,15 @@ impl Decoding {
 					peaks
 				}
 			};
-			kept.insert(sequence, peaks);
+			kept.insert(start, peaks);
 		}
 		self.peaks = kept;
 		Ok(self
 			.peaks
 			.values()
 			.flatten()
-			.map(|(timestamp, peak)| (at(*timestamp), *peak))
-			.collect())
+			.map(|(timestamp, peak)| Ok((at(*timestamp)?, *peak)))
+			.collect::<Result<_, moq_net::TimeOverflow>>()?)
 	}
 
 	fn reset(&mut self) {
@@ -405,7 +414,7 @@ fn firsts(
 	Ok(firsts)
 }
 
-/// Each group of the track `name` by its sequence, oldest first, with its
+/// Each group of the track `name` by its start, oldest first, with its
 /// frames, or only its first if `first`, as far as the take holds them now.
 fn groups(
 	broadcast: &moq_net::broadcast::Consumer,
@@ -432,7 +441,67 @@ fn groups(
 				break;
 			}
 		}
-		groups.insert(group.sequence, frames);
+		groups.insert(group.start, frames);
 	}
 	Ok(groups.into_iter().collect())
+}
+
+// The software encoder is the one every test machine has.
+#[cfg(all(test, feature = "openh264"))]
+mod tests {
+	use super::*;
+
+	/// The strip holds the keyframe each group of a take opens with, at the
+	/// moment it was shown, and decodes each only once across samples.
+	#[tokio::test]
+	async fn the_strip_shows_each_groups_keyframe_once() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
+		config.kind = moq_video::encode::Kind::Software;
+		let rendition = config.probe().await.unwrap();
+		let reserved = catalog.reserve().with_interval(config.effective_join());
+		let track = broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut producer = moq_video::encode::Producer::new(track, reserved, rendition).unwrap();
+		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
+		let gray = vec![0x80; 64 * 64 * 4];
+		let at = |index: u64| moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap();
+		for index in 0..90u64 {
+			if index % 30 == 0 {
+				encoder.cut().unwrap();
+			}
+			let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(64, 64)).unwrap();
+			encoder.encode(&moq_video::Frame::new(surface, at(index))).unwrap();
+			let unit = encoder.receive().unwrap().expect("an access unit per picture");
+			producer.publish(&unit).unwrap();
+		}
+		let (name, video) = catalog.snapshot().video.renditions.into_iter().next().unwrap();
+		let target = moq_scene::replay::Target {
+			broadcast: broadcast.consume(),
+			video: Some((name.clone(), video.clone())),
+			audio: None,
+			end: at(89),
+		};
+		let take = moq_scene::replay::Take::new(&target, Duration::from_secs(3)).unwrap();
+
+		let zero = Instant::now();
+		let shown = |timestamp: moq_net::Timestamp| -> Result<Instant, moq_net::TimeOverflow> {
+			Ok(zero.saturating_add(Duration::try_from(timestamp)?))
+		};
+		let mut decoding = Decoding::default();
+		let pictures = decoding
+			.pictures(&take.consume(), &Of::Program, &name, &video, &shown)
+			.unwrap();
+		let secs = |seconds| zero.saturating_add(Duration::from_secs(seconds));
+		let ats: Vec<_> = pictures.iter().map(|picture| picture.at).collect();
+		assert_eq!(ats, [secs(0), secs(1), secs(2)]);
+
+		let again = decoding
+			.pictures(&take.consume(), &Of::Program, &name, &video, &shown)
+			.unwrap();
+		let ids = |pictures: &[Arc<Picture>]| pictures.iter().map(|picture| picture.id).collect::<Vec<_>>();
+		assert_eq!(ids(&again), ids(&pictures), "decoded again");
+	}
 }
