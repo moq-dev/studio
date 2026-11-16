@@ -2803,6 +2803,7 @@ impl Encoder {
 	}
 
 	fn try_open(&mut self) -> anyhow::Result<()> {
+		let session = self.track.hold(false)?;
 		let mut encoder = moq_video::encode::Encoder::new(&self.config)?;
 		// Asked of a fresh encoder, whose first picture is a keyframe anyway, so
 		// the cut it queues costs nothing.
@@ -2821,7 +2822,7 @@ impl Encoder {
 		if let Some((stats, rendition)) = &self.report {
 			stats.opened_encoder(*rendition, encoder.name());
 		}
-		self.track.open(encoder)?;
+		self.track.open(session, encoder)?;
 		Ok(())
 	}
 

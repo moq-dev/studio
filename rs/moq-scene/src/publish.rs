@@ -124,23 +124,31 @@ impl Sessions {
 		Reclaim(self.clone())
 	}
 
-	fn hold(&self) -> Result<Session, Error> {
+	/// Count a session before its encoder asks the GPU for one, so the program
+	/// sees a replay's session, `spare`, while it is still opening. A replay's
+	/// is refused while a reclaim is under way.
+	fn hold(&self, spare: bool) -> Result<Session, Error> {
 		let mut refused = None;
 		self.0.send_if_modified(|state| match state.cap {
+			_ if spare && state.reclaims > 0 => {
+				refused = Some(Error::Reclaimed);
+				false
+			}
 			Some(cap) if state.open >= cap => {
-				refused = Some(cap);
+				refused = Some(Error::Sessions(cap));
 				false
 			}
 			_ => {
 				state.open += 1;
+				state.spare += usize::from(spare);
 				true
 			}
 		});
 		match refused {
-			Some(cap) => Err(Error::Sessions(cap)),
+			Some(err) => Err(err),
 			None => Ok(Session {
 				sessions: self.clone(),
-				spare: false,
+				spare,
 			}),
 		}
 	}
@@ -166,7 +174,7 @@ impl Drop for Reclaim {
 }
 
 /// One open encoder's place in its [`Sessions`], given back when dropped.
-struct Session {
+pub struct Session {
 	sessions: Sessions,
 	/// Held by a replay encoder.
 	spare: bool,
@@ -769,11 +777,20 @@ impl<E: Encode> Encoding<E> {
 		self.producer.as_ref().expect("open until it ends").demand()
 	}
 
-	/// Encode with `encoder` from here on, after draining the one it replaces.
-	/// Fails when [capped](Sessions::capped) sessions are all open.
-	pub fn open(&mut self, encoder: E) -> Result<(), Error> {
+	/// Drain the open encoder, then count a session for the next one before it
+	/// asks the GPU, `spare` when only a replay would use it, to
+	/// [open](Self::open) it in. Fails when [capped](Sessions::capped)
+	/// sessions are all open, or, for a spare one, while the program reclaims.
+	pub fn hold(&mut self, spare: bool) -> Result<Session, Error> {
 		self.drain()?;
-		self.encoder = Some((encoder, self.sessions.hold()?));
+		self.sessions.hold(spare)
+	}
+
+	/// Encode with `encoder`, in the `session` [held](Self::hold) for it, from
+	/// here on.
+	pub fn open(&mut self, session: Session, encoder: E) -> Result<(), Error> {
+		self.drain()?;
+		self.encoder = Some((encoder, session));
 		Ok(())
 	}
 
@@ -1007,14 +1024,22 @@ impl<'a> Video<'a> {
 		}
 		if !self.track.is_open() {
 			let closed = self.track.sessions.0.borrow().closed;
-			let opened = moq_video::encode::Encoder::new(&self.config)
-				.map_err(Error::from)
-				.and_then(|encoder| self.track.open(encoder));
+			let spare = !self.track.watched();
+			let opened = self.track.hold(spare).and_then(|session| {
+				let encoder = moq_video::encode::Encoder::new(&self.config)?;
+				self.track.open(session, encoder)
+			});
 			match opened {
 				Ok(()) => {
 					self.reclaimed = false;
 					self.refused = None;
 					self.granted = None;
+				}
+				// A reclaim began since it was wanted: it stays closed for the
+				// program, and reopens once the reclaim ends.
+				Err(Error::Reclaimed) => {
+					self.reclaimed = true;
+					return Ok(());
 				}
 				// Its session went to the program, so it waits for one given
 				// back rather than failing.
@@ -1802,7 +1827,7 @@ mod tests {
 			publish.set_on_program(shown("display"));
 			video.encode(&mut gray(size, 0)).unwrap();
 			assert_eq!((sessions.open(), sessions.spare()), (1, 1), "a replay's");
-			assert!(sessions.hold().is_err(), "at the cap");
+			assert!(sessions.hold(false).is_err(), "at the cap");
 
 			let reclaim = sessions.reclaim();
 			settled(&video).await.expect("asked to close without a picture");
@@ -1814,7 +1839,7 @@ mod tests {
 			video.encode(&mut gray(size, 33)).unwrap();
 			assert_eq!(sessions.open(), 0, "none opens while the program reclaims");
 
-			let program = sessions.hold().unwrap();
+			let program = sessions.hold(false).unwrap();
 			drop(reclaim);
 			settled(&video).await.expect("wanted again");
 			video.encode(&mut gray(size, 66)).unwrap();
@@ -1823,7 +1848,7 @@ mod tests {
 			// Given back and taken again before the replay looks, as by another
 			// replay reopening first: it still tries, and waits again.
 			drop(program);
-			let sibling = sessions.hold().unwrap();
+			let sibling = sessions.hold(false).unwrap();
 			settled(&video)
 				.await
 				.expect("a session given back, even if taken again");
@@ -2086,6 +2111,30 @@ mod tests {
 		}
 	}
 
+	/// A replay's session counts as spare from before its encoder asks the GPU,
+	/// so the program, on another thread, reclaims it and waits for it to
+	/// close, and none starts opening once a reclaim is under way.
+	#[tokio::test(start_paused = true)]
+	async fn a_replay_is_counted_before_it_opens() {
+		let sessions = Sessions::default();
+		let opening = sessions.hold(true).unwrap();
+		assert_eq!((sessions.open(), sessions.spare()), (1, 1), "a replay's, still opening");
+
+		let reclaim = sessions.reclaim();
+		assert!(matches!(sessions.hold(true), Err(Error::Reclaimed)), "no replay starts");
+		let program = sessions.hold(false).expect("the program's opens");
+		let wait = std::time::Duration::from_millis(10);
+		assert!(
+			kio::clock::timeout(wait, reclaim.closed()).await.is_err(),
+			"the opening replay is waited for"
+		);
+		drop(opening);
+		kio::clock::timeout(wait, reclaim.closed()).await.expect("then closed");
+		drop(reclaim);
+		drop(sessions.hold(true).expect("a replay opens again"));
+		drop(program);
+	}
+
 	/// Records how many sessions are counted open as it closes.
 	struct Closing {
 		encoder: moq_video::encode::Encoder,
@@ -2142,12 +2191,16 @@ mod tests {
 		let sessions = Sessions::default();
 		let mut track = Encoding::new(producer, sessions.clone());
 		let open = Arc::new(Mutex::new(None));
+		let session = track.hold(false).unwrap();
 		track
-			.open(Closing {
-				encoder: moq_video::encode::Encoder::new(&config).unwrap(),
-				sessions: sessions.clone(),
-				open: open.clone(),
-			})
+			.open(
+				session,
+				Closing {
+					encoder: moq_video::encode::Encoder::new(&config).unwrap(),
+					sessions: sessions.clone(),
+					open: open.clone(),
+				},
+			)
 			.unwrap();
 		track.encode(&gray(size, 0)).unwrap();
 		track.drain().unwrap();
@@ -2185,13 +2238,17 @@ mod tests {
 		let mut reader = moq_mux::container::Consumer::new(subscriber, container);
 
 		let mut track = Encoding::new(producer, Sessions::default());
+		let session = track.hold(false).unwrap();
 		let encoder = moq_video::encode::Encoder::new(&config).unwrap();
 		track
-			.open(Pipelined {
-				encoder,
-				held: Default::default(),
-				flushed: false,
-			})
+			.open(
+				session,
+				Pipelined {
+					encoder,
+					held: Default::default(),
+					flushed: false,
+				},
+			)
 			.unwrap();
 		for millis in [0, 33, 66] {
 			track.encode(&gray(size, millis)).unwrap();

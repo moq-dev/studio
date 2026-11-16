@@ -139,6 +139,11 @@ pub enum Error {
 	#[error("all {0} encode sessions are open")]
 	Sessions(usize),
 
+	/// A replay encoder may not open while the program reclaims their
+	/// sessions.
+	#[error("the program is reclaiming the replay encoders' sessions")]
+	Reclaimed,
+
 	/// A browser source's page failed, or its helper process stopped.
 	#[error("browser: {0}")]
 	Browser(String),
