@@ -636,36 +636,15 @@ impl Engine {
 	}
 }
 
-/// Why a connection's dial failed, once one has. The connection keeps
-/// redialing, but going live says at once that a relay cannot be reached
-/// rather than waiting out [`DIAL`].
-async fn failed_dial(monitor: moq_tokio::connection::Monitor) -> anyhow::Error {
-	use moq_tokio::connection::Phase;
-	let mut seen = monitor.state();
-	loop {
-		match seen.phase {
-			Phase::Connecting { failure: Some(err) } | Phase::Closed { failure: Some(err) } => return err.into(),
-			_ => {}
-		}
-		seen = match monitor.state_changed(seen.revision).await {
-			Ok(seen) => seen,
-			Err(err) => return err.into(),
-		};
-	}
-}
-
 /// Wait until any of `connections` has a session, or fail with why the first
-/// one could not once each has failed a dial, within [`DIAL`].
+/// one could not, within [`DIAL`]. A connection keeps redialing until its
+/// loop gives up, so a relay whose first dial fails may still answer in time.
 async fn dial(connections: &[moq_tokio::Connection], links: &[health::Link]) -> anyhow::Result<()> {
 	let mut dialing: tokio::task::JoinSet<(usize, anyhow::Result<()>)> = tokio::task::JoinSet::new();
 	for (index, connection) in connections.iter().enumerate() {
 		let connection = connection.clone();
 		dialing.spawn(async move {
-			let failed = failed_dial(connection.monitor());
-			let established = tokio::select! {
-				established = connection.established() => established.map(drop).map_err(anyhow::Error::from),
-				failed = failed => Err(failed),
-			};
+			let established = connection.established().await.map(drop).map_err(anyhow::Error::from);
 			(index, established)
 		});
 	}
