@@ -289,7 +289,6 @@ impl Panels {
 		let mut result = Ok(());
 		let (scene, since) = self.edited_since(state);
 		let scene = scene.map(str::to_string);
-		let off_air = self.off_air(state).is_some();
 		if let Some(drag) = &mut self.drag
 			&& let Some(pos) = response.interact_pointer_pos()
 		{
@@ -322,7 +321,7 @@ impl Panels {
 								height: shown.height - rest.height,
 							},
 						};
-						let others = others(state.collection(), scene.as_deref(), off_air, &drag.picked, since);
+						let others = others(state, scene.as_deref(), &drag.picked, since);
 						snap.apply(drag.grab, rect, &others, &canvas)
 					});
 					let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
