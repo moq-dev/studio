@@ -20,6 +20,17 @@ const WINDOW: Vec2 = vec2(960.0, 664.0);
 /// The categories' column.
 const NAV: f32 = 216.0;
 
+/// The categories' column as icons alone, in a window too narrow for the
+/// names beside a pane wide enough for its controls.
+const NAV_ICONS: f32 = 60.0;
+
+/// The pane's space each side of its rows.
+const MARGIN: f32 = 32.0;
+
+/// A pane narrower than this puts each row's control under its name: the
+/// widest control, the format cards, no longer fits beside the name.
+const STACK: f32 = 580.0;
+
 /// The canvas sizes offered by name, by their short side, each 16:9; any
 /// other is Custom.
 const SIZES: [(u32, &str); 4] = [(720, "720p"), (1080, "1080p"), (1440, "1440p"), (2160, "4K")];
@@ -132,10 +143,11 @@ impl Panels {
 				ui.set_min_size(size);
 				ui.set_max_size(size);
 				let rect = ui.max_rect();
-				let nav = Rect::from_min_size(rect.min, vec2(NAV, rect.height()));
+				let icons = rect.width() - NAV - 2.0 * MARGIN < STACK;
+				let nav = Rect::from_min_size(rect.min, vec2(if icons { NAV_ICONS } else { NAV }, rect.height()));
 				let pane = Rect::from_min_max(pos2(nav.right(), rect.top()), rect.max);
-				self.settings_nav(ui, nav, &mut setting);
-				let builder = egui::UiBuilder::new().max_rect(pane.shrink2(vec2(32.0, 0.0)));
+				self.settings_nav(ui, nav, icons, &mut setting);
+				let builder = egui::UiBuilder::new().max_rect(pane.shrink2(vec2(MARGIN, 0.0)));
 				ui.scope_builder(builder, |ui| {
 					ui.add_space(24.0);
 					ui.horizontal(|ui| {
@@ -158,6 +170,9 @@ impl Panels {
 							Setting::Guests => self.guest_settings(ui),
 							Setting::Advanced => self.advanced(ui, fx),
 						});
+					// A pane closes the window by clearing it, as the scene
+					// graph's Open does.
+					closed |= self.setting.is_none();
 				});
 			});
 		// Escape while a key is being bound cancels the binding instead.
@@ -169,8 +184,8 @@ impl Panels {
 		self.confirm_restart(ctx);
 	}
 
-	/// The categories, the one shown lit.
-	fn settings_nav(&mut self, ui: &mut Ui, rect: Rect, setting: &mut Setting) {
+	/// The categories, the one shown lit: by name, or by `icons` alone.
+	fn settings_nav(&mut self, ui: &mut Ui, rect: Rect, icons: bool, setting: &mut Setting) {
 		let painter = ui.painter();
 		let fill = egui::Color32::from_rgb(0x0c, 0x0c, 0x11);
 		painter.rect_filled(
@@ -184,26 +199,34 @@ impl Panels {
 			fill,
 		);
 		painter.vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, kit::LINE));
-		let title = kit::caps_galley(painter, "Settings", kit::display_bold(22.0), kit::TEXT, None);
-		painter.galley(pos2(rect.left() + 20.0, rect.top() + 22.0), title, kit::TEXT);
-		let mut y = rect.top() + 58.0;
+		let mut y = rect.top() + 22.0;
+		if !icons {
+			let title = kit::caps_galley(painter, "Settings", kit::display_bold(22.0), kit::TEXT, None);
+			painter.galley(pos2(rect.left() + 20.0, y), title, kit::TEXT);
+			y += 36.0;
+		}
 		for each in Setting::ALL {
 			let at = Rect::from_min_size(pos2(rect.left() + 10.0, y), vec2(rect.width() - 20.0, 38.0));
 			y += 40.0;
-			let response = ui.interact(at, ui.id().with(("setting", each.name())), Sense::click());
+			let mut response = ui.interact(at, ui.id().with(("setting", each.name())), Sense::click());
+			if icons {
+				response = response.on_hover_text(each.name());
+			}
 			let on = *setting == each;
 			response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, each.name()));
 			if on {
 				ui.painter().rect_filled(at, 9, kit::P3);
 			}
 			let ink = if on || response.hovered() { kit::TEXT } else { kit::DIM };
-			let icon = Rect::from_center_size(pos2(at.left() + 19.0, at.center().y), Vec2::splat(16.0));
+			let icon = Rect::from_center_size(pos2(at.left() + 20.0, at.center().y), Vec2::splat(16.0));
 			each.icon().paint(ui, icon, 16.0, ink);
-			let name = ui
-				.painter()
-				.layout_no_wrap(each.name().into(), kit::ui_strong(13.5), ink);
-			ui.painter()
-				.galley(pos2(at.left() + 38.0, at.center().y - name.size().y / 2.0), name, ink);
+			if !icons {
+				let name = ui
+					.painter()
+					.layout_no_wrap(each.name().into(), kit::ui_strong(13.5), ink);
+				ui.painter()
+					.galley(pos2(at.left() + 38.0, at.center().y - name.size().y / 2.0), name, ink);
+			}
 			if response.clicked() {
 				*setting = each;
 			}
@@ -852,18 +875,16 @@ impl Panels {
 			}
 			let options: Vec<(Duration, &str)> =
 				lifetimes.iter().map(|(lasts, name)| (*lasts, name.as_str())).collect();
-			row(
+			field_row(
 				ui,
 				"Link lifetime",
 				"How long a join link works. A guest in the room is renewed, so a guest removed from scenes leaves \
 				 within it.",
+				overridden.guest_expiry.then_some("--guest-expiry"),
 				|ui| {
 					ui.add(kit::Segmented::new(&mut form.expiry, &options));
 				},
 			);
-			if overridden.guest_expiry {
-				flag_note(ui, "--guest-expiry");
-			}
 		});
 
 		let edited = form.edited(&saved);
@@ -1281,38 +1302,15 @@ fn rule(ui: &mut Ui) {
 /// A setting's row, under a line: its name and what it costs on the left,
 /// its control on the right.
 pub(super) fn row(ui: &mut Ui, name: &str, help: &str, control: impl FnOnce(&mut Ui)) {
-	rule(ui);
-	ui.add_space(14.0);
-	let width = ui.available_width();
-	ui.horizontal(|ui| {
-		ui.vertical(|ui| {
-			ui.set_width((width * 0.46).max(200.0));
-			ui.label(RichText::new(name).font(kit::ui_strong(13.5)).color(kit::TEXT));
-			if !help.is_empty() {
-				ui.add_space(2.0);
-				help_label(ui, help);
-			}
-		});
-		ui.with_layout(Layout::right_to_left(Align::Center), control);
+	labeled(ui, name, help, 0.46, |ui| {
+		ui.horizontal(|ui| ui.with_layout(Layout::right_to_left(Align::Center), control));
 	});
-	ui.add_space(14.0);
 }
 
 /// A row whose control is a field filling the right side, which says when
 /// `flag` sets it for this run instead, and is then not editable.
 pub(super) fn field_row(ui: &mut Ui, name: &str, help: &str, flag: Option<&str>, field: impl FnOnce(&mut Ui)) {
-	rule(ui);
-	ui.add_space(14.0);
-	let width = ui.available_width();
-	ui.horizontal(|ui| {
-		ui.vertical(|ui| {
-			ui.set_width((width * 0.36).max(180.0));
-			ui.label(RichText::new(name).font(kit::ui_strong(13.5)).color(kit::TEXT));
-			if !help.is_empty() {
-				ui.add_space(2.0);
-				help_label(ui, help);
-			}
-		});
+	labeled(ui, name, help, 0.36, |ui| {
 		ui.vertical(|ui| {
 			ui.add_enabled_ui(flag.is_none(), field);
 			if let Some(flag) = flag {
@@ -1320,6 +1318,34 @@ pub(super) fn field_row(ui: &mut Ui, name: &str, help: &str, flag: Option<&str>,
 			}
 		});
 	});
+}
+
+/// A row under a line: `name` and `help` in `share` of its width with
+/// `control` beside them, or `control` under them in a pane too narrow.
+fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce(&mut Ui)) {
+	rule(ui);
+	ui.add_space(14.0);
+	let width = ui.available_width();
+	let label = |ui: &mut Ui| {
+		ui.label(RichText::new(name).font(kit::ui_strong(13.5)).color(kit::TEXT));
+		if !help.is_empty() {
+			ui.add_space(2.0);
+			help_label(ui, help);
+		}
+	};
+	if width < STACK {
+		label(ui);
+		ui.add_space(10.0);
+		control(ui);
+	} else {
+		ui.horizontal(|ui| {
+			ui.vertical(|ui| {
+				ui.set_width(width * share);
+				label(ui);
+			});
+			control(ui);
+		});
+	}
 	ui.add_space(14.0);
 }
 

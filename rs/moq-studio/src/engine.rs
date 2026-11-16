@@ -470,13 +470,13 @@ impl State {
 			.with_context(|| format!("no scene is called `{scene}`"))
 	}
 
-	/// The panic key: mute every microphone and every guest in `room`, hide
+	/// The panic key: mute every microphone and every guest of `rooms`, hide
 	/// every item of the top layer, in one edit undo takes back, and cut at
 	/// once to the scene the show marks safe, if it marks one. Says what it
 	/// did, or fails saying what it did before it failed.
-	pub fn panic(&mut self, room: Option<&crate::guests::Room>) -> anyhow::Result<String> {
+	pub fn panic(&mut self, rooms: &[moq_net::Path]) -> anyhow::Result<String> {
 		let mut done = Vec::new();
-		let (draft, muted, hidden) = silence(&self.collection, room)?;
+		let (draft, muted, hidden) = silence(&self.collection, rooms)?;
 		let named = |names: &[String]| {
 			names
 				.iter()
@@ -533,16 +533,17 @@ impl State {
 }
 
 /// The edit panic makes: it mutes every microphone `collection` has, and
-/// every source playing a guest in `room`, that is not muted, and hides every
+/// every source playing a guest of one of `rooms`, that is not muted, and hides every
 /// visible item of the top layer, whatever it shows. Also the sources it
 /// mutes, and the sources it hides, each once. Other broadcasts and media stay
 /// on. The edit is empty when there is nothing to do.
 fn silence(
 	collection: &Collection,
-	room: Option<&crate::guests::Room>,
+	rooms: &[moq_net::Path],
 ) -> Result<(Draft, Vec<String>, Vec<String>), moq_scene::Error> {
 	let voice = |source: &moq_scene::Source| {
-		matches!(source, moq_scene::Source::Microphone { .. }) || room.is_some_and(|room| room.plays_guest(source))
+		matches!(source, moq_scene::Source::Microphone { .. })
+			|| rooms.iter().any(|room| crate::guests::plays_guest(room, source))
 	};
 	let muted: Vec<String> = collection
 		.sources
@@ -961,6 +962,9 @@ pub struct Engine {
 	pub recorder: record::Recorder,
 	/// The room guests join, while the show has one, and what follows it.
 	room: Mutex<Option<Joined>>,
+	/// The path of every room followed this run, so the panic key still mutes
+	/// a guest added from a room left since.
+	rooms: Mutex<Vec<moq_net::Path>>,
 	/// Each guest's return feed, once the studio's session in the room dials.
 	feeds: Mutex<Option<crate::feed::Feeds>>,
 	/// What the program's broadcasts share, on air or not.
@@ -1106,6 +1110,7 @@ impl Engine {
 			on_air_program: tokio::sync::watch::Sender::new(None),
 			recorder,
 			room: Mutex::default(),
+			rooms: Mutex::default(),
 			feeds: Mutex::default(),
 			program,
 			subscribe,
@@ -1164,6 +1169,11 @@ impl Engine {
 		joined.as_ref().map(|joined| joined.room.clone())
 	}
 
+	/// The path of every room followed this run, the one followed now included.
+	pub fn rooms(&self) -> Vec<moq_net::Path> {
+		self.rooms.lock().unwrap().clone()
+	}
+
 	/// Follow `joining`'s room in place of the one followed now, if any:
 	/// add each guest who joins it as a source, renew their tokens through its
 	/// session, and give each a return feed. `None` leaves the room. Guests
@@ -1206,6 +1216,11 @@ impl Engine {
 				engine.state.lock().unwrap().stale = true;
 			}
 		}));
+		let mut rooms = self.rooms.lock().unwrap();
+		if !rooms.contains(room.path()) {
+			rooms.push(room.path().clone());
+		}
+		drop(rooms);
 		*self.room.lock().unwrap() = Some(Joined { room, tasks });
 		Ok(())
 	}
@@ -3563,7 +3578,7 @@ mod tests {
 			assert!(state.compositor.transitioning(), "by the show's fade");
 			assert_eq!(state.takes, takes + 1);
 
-			let said = state.panic(None).unwrap();
+			let said = state.panic(&[]).unwrap();
 			assert_eq!(
 				said,
 				"no microphone or guest was on, and hid `red` from the always-on-top layers, and cut to `BRB`"
@@ -3572,7 +3587,7 @@ mod tests {
 			assert!(!state.compositor.transitioning(), "a cut, at once");
 			assert_eq!(state.takes, takes + 2);
 			assert!(!state.collection.top[0].visible, "the always-on-top layer is off");
-			let said = state.panic(None).unwrap();
+			let said = state.panic(&[]).unwrap();
 			assert_eq!(
 				said,
 				"no microphone or guest was on, and no always-on-top layer was shown, and `BRB` is on program"
@@ -3586,7 +3601,7 @@ mod tests {
 			assert_eq!(state.take(&main, now).unwrap(), main);
 			assert_eq!(state.take("BRB", now).unwrap(), "BRB");
 			assert!(state.compositor.transitioning());
-			let said = state.panic(None).unwrap();
+			let said = state.panic(&[]).unwrap();
 			assert_eq!(
 				said,
 				"no microphone or guest was on, and hid `red` from the always-on-top layers, and cut to `BRB`"
@@ -3788,7 +3803,7 @@ mod tests {
 		collection.top = top.clone();
 
 		// Without a room, nothing is a guest.
-		let (_, muted, shown) = silence(&collection, None).unwrap();
+		let (_, muted, shown) = silence(&collection, &[]).unwrap();
 		assert_eq!(muted, ["desk", "lav"]);
 		assert_eq!(shown, ["alice", "desk"], "each source once, not the hidden item");
 
@@ -3796,7 +3811,7 @@ mod tests {
 		let page = url::Url::parse("https://studio.example/join/").unwrap();
 		let key = tests::key("show/guests", &["**"], &["**"]);
 		let room = Room::new(&connect, "guests", key, page, tests::EXPIRY).unwrap();
-		let (draft, muted, _) = silence(&collection, Some(&room)).unwrap();
+		let (draft, muted, _) = silence(&collection, &[room.path().clone()]).unwrap();
 		assert_eq!(muted, ["alice", "alice screen", "desk", "lav"]);
 		let edit = draft.finish().unwrap();
 		assert_eq!(
@@ -3820,7 +3835,7 @@ mod tests {
 		for name in ["music", "feed", "elsewhere"] {
 			assert!(!collection.audio.get(name).is_some_and(|audio| audio.muted), "{name}");
 		}
-		let (draft, muted, shown) = silence(&collection, Some(&room)).unwrap();
+		let (draft, muted, shown) = silence(&collection, &[room.path().clone()]).unwrap();
 		assert!(muted.is_empty() && shown.is_empty());
 		assert!(draft.finish().unwrap().changes.is_empty(), "nothing to edit");
 	}

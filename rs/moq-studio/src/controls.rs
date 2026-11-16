@@ -226,8 +226,8 @@ impl Controls {
 				})
 			}
 			Action::Panic => {
-				let room = self.engine.room();
-				self.engine.state.lock().unwrap().panic(room.as_deref())
+				let rooms = self.engine.rooms();
+				self.engine.state.lock().unwrap().panic(&rooms)
 			}
 			Action::Replay => self.replay(true, false),
 			Action::SaveClip => self.replay(false, false),

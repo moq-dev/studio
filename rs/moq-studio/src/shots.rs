@@ -241,6 +241,9 @@ views! {
 	/// Settings, Show: the format, the canvas size and frame rate by name,
 	/// and the scene sizes behind their disclosure.
 	settings_show: Still, studio(View::Setting(Setting::Show));
+	/// Settings, Show in the smallest window: each row's control under its
+	/// name, and the categories as icons.
+	settings_compact: Still, Open::Studio { view: View::Setting(Setting::Show), size: crate::ui::MIN_SIZE, show: "show.toml", relay: false };
 	/// Settings, Show on air, saying what a new size does then.
 	settings_show_on_air: Live, relayed(View::OnAirSetting(Setting::Show));
 	/// On air, a new canvas size waits for a yes before it restarts the video.
@@ -396,8 +399,9 @@ fn start(launch: engine::Launch, stream: stream::Stream, runtime: &tokio::runtim
 
 /// A click on a pad takes its scene on air, and the panic key mutes every
 /// microphone and guest, in an edit undo takes back, and cuts to the safe
-/// scene: the window as a person uses it, on a real engine. Remote feeds that
-/// are not guests stay on. Then the title bar's Close closes it. It draws no
+/// scene: the window as a person uses it, on a real engine. A guest of a room
+/// the engine has since left is muted too; remote feeds that are not guests
+/// stay on. Then the title bar's Close closes it. It draws no
 /// view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
@@ -415,12 +419,16 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	let connect = url::Url::parse("https://relay.example/show").unwrap();
 	let page = url::Url::parse("https://studio.example/join/").unwrap();
 	let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
-	let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+	let room = crate::guests::Room::new(&connect, "room", key, page.clone(), crate::guests::tests::EXPIRY).unwrap();
 	let app = start(launch(&gpu), stream(None), &runtime);
 	let App::Starting(engine, _) = &app else {
 		unreachable!("the studio starts")
 	};
 	engine.join(Some(crate::guests::Joining::offline(room))).unwrap();
+	// Moving to another room keeps `alice`, added from the first, a guest.
+	let key = crate::guests::tests::key("show/other", &["**"], &["**"]);
+	let other = crate::guests::Room::new(&connect, "other", key, page, crate::guests::tests::EXPIRY).unwrap();
+	engine.join(Some(crate::guests::Joining::offline(other))).unwrap();
 	let (mut harness, started, closed) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
@@ -480,8 +488,8 @@ fn a_click_takes_and_the_panic_key_cuts() {
 /// Settings changes the show as a person would: a canvas size by name and
 /// the format turn the program, keeping its frame rate. The Guests pane
 /// refuses a room guests could not join, saying why, then joins the room it
-/// saves at once, off air, and moves to the next on the next save. It draws
-/// no view.
+/// saves at once, off air, and moves to the next on the next save. The scene
+/// graph's Open closes Settings for the graph. It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn settings_change_the_show_and_move_the_guests() {
@@ -570,6 +578,14 @@ fn settings_change_the_show_and_move_the_guests() {
 	joined(&mut harness, "other");
 	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
 	assert!(saved.contains("room = \"other\""), "{saved}");
+
+	// The scene graph opens in place of Settings, so it takes the clicks.
+	harness.get_by_label("Advanced").click();
+	harness.run_steps(2);
+	harness.get_by_label("Open").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Advanced").is_none(), "Settings closed");
+	assert!(harness.query_by_label("Scene graph").is_some(), "the graph is open");
 
 	drop(harness);
 	quit(&engine, &runtime);

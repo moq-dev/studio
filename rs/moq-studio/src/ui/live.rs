@@ -947,36 +947,34 @@ impl Panels {
 			ui.checkbox(forget, "Forget the saved token");
 		};
 		ui.add_enabled_ui(!busy, |ui| {
-			field_row(
-				ui,
-				"Relay",
-				"Where the program goes live, and its token.",
-				overridden.relay.then_some("--connect"),
-				|ui| {
-					ui.add(
-						egui::TextEdit::singleline(&mut form.relay)
-							.hint_text("https://relay.example/anon")
-							.desired_width(f32::INFINITY),
-					);
-					ui.add_enabled_ui(!overridden.token, |ui| {
-						token(ui, &mut form.relay_token, &mut form.forget_relay_token);
-					});
-					if overridden.token {
-						super::settings::flag_note(ui, "--connect-token");
-					}
-				},
-			);
+			// A flag locks only the address: the token stays the one kept for
+			// the relay in effect, which the flag may name.
+			field_row(ui, "Relay", "Where the program goes live, and its token.", None, |ui| {
+				address(
+					ui,
+					&mut form.relay,
+					"https://relay.example/anon",
+					overridden.relay.then_some("--connect"),
+				);
+				ui.add_enabled_ui(!overridden.token, |ui| {
+					token(ui, &mut form.relay_token, &mut form.forget_relay_token);
+				});
+				if overridden.token {
+					super::settings::flag_note(ui, "--connect-token");
+				}
+			});
 			field_row(
 				ui,
 				"Failover relay",
 				"A second relay the same broadcast goes to, which viewers resume from if the first fails. Each is \
 				 another upload of the whole stream.",
-				overridden.failover.then_some("--failover"),
+				None,
 				|ui| {
-					ui.add(
-						egui::TextEdit::singleline(&mut form.failover)
-							.hint_text("https://backup.example/anon")
-							.desired_width(f32::INFINITY),
+					address(
+						ui,
+						&mut form.failover,
+						"https://backup.example/anon",
+						overridden.failover.then_some("--failover"),
 					);
 					token(ui, &mut form.failover_token, &mut form.forget_failover_token);
 				},
@@ -1024,7 +1022,7 @@ impl Panels {
 				);
 			}
 		});
-		let tokens = form.tokens();
+		let tokens = form.tokens(&stream);
 		let retokened = !tokens.is_empty()
 			|| [&form.relay, &form.failover]
 				.iter()
@@ -1045,6 +1043,19 @@ impl Panels {
 			let stream = self.controls.stream.lock().unwrap().clone();
 			self.stream_form = Some(Form::new(&stream));
 		}
+	}
+}
+
+/// A relay's address, locked with a note when `flag` sets it for this run.
+fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<&str>) {
+	ui.add_enabled(
+		flag.is_none(),
+		egui::TextEdit::singleline(text)
+			.hint_text(hint)
+			.desired_width(f32::INFINITY),
+	);
+	if let Some(flag) = flag {
+		super::settings::flag_note(ui, flag);
 	}
 }
 
@@ -1296,14 +1307,26 @@ impl Form {
 		tokens || self.saved(saved).is_ok_and(|form| form != *saved) || self.saved(saved).is_err()
 	}
 
-	/// The tokens typed or forgotten, by the relay they go with.
-	fn tokens(&self) -> Vec<Token> {
+	/// The tokens typed or forgotten, by the relay they go with: the one
+	/// the form names, or the one a flag of `stream` sets over it.
+	fn tokens(&self, stream: &Stream) -> Vec<Token> {
+		let overridden = stream.overridden();
 		let mut tokens = Vec::new();
-		for (url, token, forget) in [
-			(&self.relay, &self.relay_token, self.forget_relay_token),
-			(&self.failover, &self.failover_token, self.forget_failover_token),
+		for (flagged, url, token, forget) in [
+			(
+				overridden.relay.then(|| stream.relay()).flatten(),
+				&self.relay,
+				&self.relay_token,
+				self.forget_relay_token,
+			),
+			(
+				overridden.failover.then(|| stream.failover()).flatten(),
+				&self.failover,
+				&self.failover_token,
+				self.forget_failover_token,
+			),
 		] {
-			let Ok(url) = url.trim().parse::<url::Url>() else {
+			let Some(url) = flagged.cloned().or_else(|| url.trim().parse::<url::Url>().ok()) else {
 				continue;
 			};
 			match (token.trim(), forget) {

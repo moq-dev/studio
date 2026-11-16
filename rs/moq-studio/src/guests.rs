@@ -637,18 +637,25 @@ impl Room {
 		})
 	}
 
-	/// Whether `source` plays a guest's camera and microphone, or their screen.
-	pub fn plays_guest(&self, source: &Source) -> bool {
-		self.guest_of(source).is_some()
-	}
-
 	/// The guest `source` plays, and which of their broadcasts.
 	fn guest_of(&self, source: &Source) -> Option<(Path, Kind)> {
-		let Source::Broadcast { path } = source else {
-			return None;
-		};
-		guest(&Path::new(path).ok()?.strip_prefix(&self.path)?)
+		guest_in(&self.path, source)
 	}
+}
+
+/// Whether `source` plays a guest's camera and microphone, or their screen, in
+/// the room at `room`, as [`Room::path`] gives it.
+pub fn plays_guest(room: &Path, source: &Source) -> bool {
+	guest_in(room, source).is_some()
+}
+
+/// The guest `source` plays in the room at `room`, and which of their
+/// broadcasts.
+fn guest_in(room: &Path, source: &Source) -> Option<(Path, Kind)> {
+	let Source::Broadcast { path } = source else {
+		return None;
+	};
+	guest(&Path::new(path).ok()?.strip_prefix(room)?)
 }
 
 /// Whether `url` names this machine, so a browser treats an `http://` page
