@@ -367,6 +367,7 @@ impl Controls {
 	/// Take `stream` as the settings, as Settings saved them. When
 	/// `followed_changed`, such as a new relay or guests' room, follow them
 	/// now if off air, or once the stream ends; says whether they wait for it.
+	/// Otherwise a guests' room that failed is tried again, off air.
 	pub fn set_stream(self: &Arc<Self>, stream: Stream, followed_changed: bool) -> bool {
 		{
 			// Marked with the settings it belongs to, so a snapshot never
@@ -378,6 +379,11 @@ impl Controls {
 			}
 		}
 		if !followed_changed {
+			// A room that failed is tried again on any save, such as once its
+			// key file is back, off air.
+			if self.room_failure().is_some() {
+				drop(self.follow_saved_relays());
+			}
 			return false;
 		}
 		let waits = self.going() || self.engine.on_air() != OnAir::Off;
