@@ -39,7 +39,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use kio::clock::Instant;
 use moq_net::bandwidth;
-use moq_scene::publish::{Encoding, Sessions};
+use moq_scene::publish::{Encoding, Reclaim, Sessions};
 use moq_scene::source::{self, Driver, Sources, Status};
 use moq_scene::{Canvas, Collection, Compositor, Draft, Edit, History, Scaler};
 use moq_video::render::export::{Exporter, Pending, Route};
@@ -860,6 +860,8 @@ pub struct Program {
 	epoch: Duration,
 	/// Where the local sources keep their own tracks, on the same clock.
 	sources: moq_scene::publish::Publish,
+	/// [`Renditions::reclaim`].
+	reclaim: Option<Sessions>,
 	/// The sources published independently, whose tracks the broadcast on air
 	/// carries beside the program's.
 	published: tokio::sync::watch::Sender<BTreeSet<String>>,
@@ -1001,6 +1003,8 @@ pub struct Launch {
 	pub recordings: PathBuf,
 	/// The room guests join, if any.
 	pub room: Option<Arc<crate::guests::Room>>,
+	/// Where the video encoders count the encode sessions they hold.
+	pub sessions: Sessions,
 }
 
 impl Engine {
@@ -1012,7 +1016,12 @@ impl Engine {
 	///
 	/// Call inside the tokio runtime that serves the relay connections.
 	pub async fn start(launch: Launch, autosave: Autosave, loaded: autosave::Loaded) -> anyhow::Result<Arc<Self>> {
-		let Launch { gpu, recordings, room } = launch;
+		let Launch {
+			gpu,
+			recordings,
+			room,
+			sessions,
+		} = launch;
 		let (bus, driver) = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
 		// Every relay feeds `subscribe`, so a guest either one routes is seen.
@@ -1032,7 +1041,10 @@ impl Engine {
 			dropped,
 		} = loaded;
 		let canvas = collection.canvas;
-		let stats = Arc::new(Stats::default());
+		let stats = Arc::new(Stats {
+			sessions,
+			..Default::default()
+		});
 
 		// The program clock's start, from which the audio clock advances the
 		// bus too, so the sources place their sound on it.
@@ -1865,22 +1877,22 @@ async fn publish(gpu: &Gpu, stats: &Arc<Stats>, canvas: Canvas, start: Instant) 
 	// that source loudly instead of falling to software. When the program could
 	// not use hardware, such as NVENC beside an integrated GPU it cannot read, a
 	// source may still reach it from the CPU.
-	let kind = match Probe::new(gpu, canvas, false).await {
-		Ok(probe) => match &probe.rungs[0].config.kind {
-			moq_video::encode::Kind::Named(name) if name == "openh264" => moq_video::encode::Kind::Auto,
-			_ => moq_video::encode::Kind::Hardware,
-		},
+	let kind = match Probe::open(gpu, canvas, false).await {
+		Ok(probe) if !probe.hardware() => moq_video::encode::Kind::Auto,
+		Ok(_) => moq_video::encode::Kind::Hardware,
 		Err(err) => {
 			stats.video.fail(format!("{err:#}"));
 			moq_video::encode::Kind::Hardware
 		}
 	};
+	let reclaim = matches!(kind, moq_video::encode::Kind::Hardware).then(|| stats.sessions.clone());
 	let sources = moq_scene::publish::Publish::new(clock.clone(), kind, stats.sessions.clone())?;
 	let recorded_video = Renditions {
 		gpu: gpu.clone(),
 		broadcast: recorder.clone(),
 		timebase: recorded.timebase(),
 		record: true,
+		reclaim: reclaim.clone(),
 		bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 		on_demand: true,
 		live: false,
@@ -1897,6 +1909,7 @@ async fn publish(gpu: &Gpu, stats: &Arc<Stats>, canvas: Canvas, start: Instant) 
 			clock,
 			epoch,
 			sources: sources.clone(),
+			reclaim,
 			published,
 			recording,
 			recorded,
@@ -1960,6 +1973,10 @@ struct Renditions {
 	/// full quality whatever the grant, rather than the published full and
 	/// half sizes.
 	record: bool,
+	/// Where the program reclaims the sources' replay encoders' sessions when
+	/// the GPU refuses it the hardware encoder it found at launch, or `None`
+	/// when it found none, so the sources' encoders hold none either.
+	reclaim: Option<Sessions>,
 	/// The connection's bandwidth, which each published rendition follows its
 	/// share of.
 	bandwidth: bandwidth::Allocator,
@@ -1978,10 +1995,10 @@ struct Renditions {
 
 impl Renditions {
 	/// Probe for `canvas`'s renditions and [`start`](Self::start) them, waiting
-	/// for the full size's encoder to open, as at startup, so it holds its
-	/// encode session before any source opens one.
+	/// for the full size's encoder to open, so a canvas the GPU cannot encode
+	/// fails here, even after reclaiming the sources' replay encoders.
 	async fn open(&self, canvas: Canvas) -> anyhow::Result<Ladder> {
-		let probe = Probe::new(&self.gpu, canvas, self.record).await?;
+		let probe = Probe::new(self, canvas).await?;
 		let (ladder, opened) = self.start(probe)?;
 		opened.await.context("the encode thread stopped")??;
 		Ok(ladder)
@@ -2013,6 +2030,7 @@ impl Renditions {
 			.collect();
 		let (opened, open) = tokio::sync::oneshot::channel();
 		let mut opened = Some(opened);
+		let mut reclaim = probe.reclaim;
 		let number = self.video.rendition();
 		let mut rungs = Vec::with_capacity(probe.rungs.len());
 		for probed in probe.rungs {
@@ -2062,8 +2080,18 @@ impl Renditions {
 
 			// One more than the exporter's pool, for a skip behind a full pool.
 			let (frames, pending) = mpsc::sync_channel(Exporter::DEPTH + 1);
+			// Live, the canvas size holds its session from the start, so a
+			// source past the GPU's session cap is the one that fails. Without
+			// a relay nobody can watch it, so it opens nothing.
+			let opened = match role {
+				Role::Canvas if self.live => opened.take(),
+				_ => None,
+			};
 			let job = Job {
 				sessions: self.stats.sessions.clone(),
+				// Kept from the probe until the canvas size opens, so no source
+				// takes back a session meanwhile.
+				reclaim: opened.is_some().then(|| reclaim.take()).flatten(),
 				video: self.video.clone(),
 				role,
 				rendition: (role == Role::Canvas).then_some(number),
@@ -2073,13 +2101,6 @@ impl Renditions {
 				config,
 				// The canvas size holds its session while it skips frames.
 				hold: role == Role::Canvas,
-			};
-			// Live, the canvas size holds its session from the start, so a
-			// source past the GPU's session cap is the one that fails. Without
-			// a relay nobody can watch it, so it opens nothing.
-			let opened = match role {
-				Role::Canvas if self.live => opened.take(),
-				_ => None,
 			};
 			let thread = std::thread::Builder::new()
 				.name("encode".into())
@@ -2110,6 +2131,8 @@ struct Probe {
 	rungs: Vec<Probed>,
 	/// Why the encoder refused a rendition the program does without.
 	refused: Vec<(Role, String)>,
+	/// The sources' replay encoders' sessions, reclaimed for these encoders.
+	reclaim: Option<Reclaim>,
 }
 
 /// One rendition of a [`Probe`].
@@ -2121,11 +2144,41 @@ struct Probed {
 }
 
 impl Probe {
+	/// [`open`](Self::open) `renditions` of `canvas`. When the GPU refuses
+	/// them the hardware encoder found at launch, as one at its session cap
+	/// does, the program comes first: this closes the sources' replay
+	/// encoders, which replay a source's recent past, and probes again in
+	/// their sessions, holding them until the full size's encoder opens.
+	async fn new(renditions: &Renditions, canvas: Canvas) -> anyhow::Result<Self> {
+		let probe = Self::open(&renditions.gpu, canvas, renditions.record).await;
+		let Some(sessions) = renditions.reclaim.as_ref().filter(|sessions| sessions.spare() > 0) else {
+			return probe;
+		};
+		if probe.as_ref().is_ok_and(Self::hardware) {
+			return probe;
+		}
+		match &probe {
+			Ok(_) => tracing::warn!("closing the sources' replay encoders for the program's hardware encoder"),
+			Err(err) => tracing::warn!(%err, "closing the sources' replay encoders for the program's encoder"),
+		}
+		drop(probe);
+		let reclaim = sessions.reclaim();
+		reclaim.closed().await;
+		let mut probe = Self::open(&renditions.gpu, canvas, renditions.record).await?;
+		probe.reclaim = Some(reclaim);
+		Ok(probe)
+	}
+
+	/// Whether the canvas size took a hardware encoder.
+	fn hardware(&self) -> bool {
+		!matches!(&self.rungs[0].config.kind, moq_video::encode::Kind::Named(name) if name == "openh264")
+	}
+
 	/// Open a throwaway encoder of each of `canvas`'s renditions on what `gpu`
 	/// exports, the published sizes or, if `record`, the recording's alone,
 	/// which also settles whether the encoder reads the program on the GPU.
 	/// The first picks the encoder, which the other uses too.
-	async fn new(gpu: &Gpu, canvas: Canvas, record: bool) -> anyhow::Result<Self> {
+	async fn open(gpu: &Gpu, canvas: Canvas, record: bool) -> anyhow::Result<Self> {
 		let framerate = canvas.framerate();
 		let size = moq_video::Size::new(canvas.width, canvas.height);
 		let roles: Vec<(Role, moq_video::Size)> = match record {
@@ -2162,15 +2215,18 @@ impl Probe {
 				video,
 			});
 		}
-		Ok(Self { rungs, refused })
+		Ok(Self {
+			rungs,
+			refused,
+			reclaim: None,
+		})
 	}
 
 	/// [`new`](Self::new) on a thread of its own, off the program clock, once
 	/// the encode threads `ending` have closed their sessions.
 	fn spawn(
-		gpu: Gpu,
+		renditions: Renditions,
 		canvas: Canvas,
-		record: bool,
 		ending: Vec<std::thread::JoinHandle<()>>,
 	) -> std::io::Result<std::thread::JoinHandle<anyhow::Result<Self>>> {
 		std::thread::Builder::new().name("probe".into()).spawn(move || {
@@ -2179,7 +2235,7 @@ impl Probe {
 				let _ = thread.join();
 			}
 			let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-			runtime.block_on(Self::new(&gpu, canvas, record))
+			runtime.block_on(Self::new(&renditions, canvas))
 		})
 	}
 }
@@ -2303,7 +2359,7 @@ impl Line {
 		}
 		if self.probing.is_none() && !self.settled {
 			let ending = std::mem::take(&mut self.ending);
-			match Probe::spawn(renditions.gpu.clone(), self.canvas, renditions.record, ending) {
+			match Probe::spawn(renditions.clone(), self.canvas, ending) {
 				Ok(probe) => self.probing = Some((self.canvas, probe)),
 				Err(err) => {
 					self.settled = true;
@@ -2438,6 +2494,8 @@ struct Extras {
 	on_demand: bool,
 	live: bool,
 	stats: Arc<Stats>,
+	/// [`Renditions::reclaim`].
+	reclaim: Option<Sessions>,
 	/// Where each published scene's broadcast is graded, while live.
 	graded: Option<health::Scenes>,
 }
@@ -2527,6 +2585,7 @@ impl Extras {
 			broadcast,
 			timebase: catalog.timebase(),
 			record: false,
+			reclaim: self.reclaim.clone(),
 			bandwidth: self.bandwidth.clone(),
 			on_demand: self.on_demand,
 			live: self.live,
@@ -2685,6 +2744,8 @@ enum Video {
 /// What an encode thread runs.
 struct Job {
 	sessions: Sessions,
+	/// The sources' replay encoders' sessions, held until the encoder opens.
+	reclaim: Option<Reclaim>,
 	/// How its canvas's video is doing.
 	video: Arc<VideoStats>,
 	/// Which of the program's renditions it is.
@@ -2705,6 +2766,7 @@ struct Job {
 /// One rendition's encoder and track, doing what its gate decided.
 struct Encoder {
 	track: Encoding,
+	sessions: Sessions,
 	config: moq_video::encode::Config,
 	joins: Joins,
 	/// Where to report each encoder opened as its canvas's, under the
@@ -2723,8 +2785,24 @@ struct Encoder {
 }
 
 impl Encoder {
-	/// Open an encoder, returning its backend's name.
+	/// Open an encoder. When the GPU refuses it one, the program comes first:
+	/// this closes the sources' replay encoders and opens it in their
+	/// sessions.
 	fn open(&mut self) -> anyhow::Result<()> {
+		match self.try_open() {
+			Err(err) if self.sessions.spare() > 0 => {
+				tracing::warn!(err = %format!("{err:#}"), "closing the sources' replay encoders for the program's");
+				let reclaim = self.sessions.reclaim();
+				// Each source closes its own at its next picture, or at once
+				// when it delivers none.
+				pollster::block_on(reclaim.closed());
+				self.try_open()
+			}
+			result => result,
+		}
+	}
+
+	fn try_open(&mut self) -> anyhow::Result<()> {
 		let mut encoder = moq_video::encode::Encoder::new(&self.config)?;
 		// Asked of a fresh encoder, whose first picture is a keyframe anyway, so
 		// the cut it queues costs nothing.
@@ -2813,6 +2891,7 @@ impl Encoder {
 fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<()>>>, video: mpsc::Receiver<Video>) {
 	let Job {
 		sessions,
+		reclaim,
 		video: stats,
 		role,
 		rendition,
@@ -2825,7 +2904,8 @@ fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<(
 	let size = config.size();
 	// Built here, since an encoder stays on the thread that opened it.
 	let mut encoder = Encoder {
-		track: Encoding::new(producer, sessions),
+		track: Encoding::new(producer, sessions.clone()),
+		sessions,
 		joins: Joins::new(track),
 		report: rendition.map(|rendition| (stats.clone(), rendition)),
 		config,
@@ -2843,7 +2923,9 @@ fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<(
 		_ => load.fail(format!("{}x{}: {err:#}", size.width, size.height)),
 	};
 	if let Some(opened) = opened {
-		match encoder.open() {
+		let open = encoder.open();
+		drop(reclaim);
+		match open {
 			Ok(()) => {
 				let _ = opened.send(Ok(()));
 			}
@@ -3076,6 +3158,7 @@ mod tests {
 			gpu,
 			recordings: recordings.to_path_buf(),
 			room: None,
+			sessions: Sessions::default(),
 		};
 		let engine = Engine::start(launch, autosave, loaded).await?;
 		if !relays.is_empty() {
@@ -5022,6 +5105,92 @@ mod tests {
 		.expect("the program draws on off air");
 		assert_eq!(engine.on_air(), OnAir::Off);
 		assert_eq!(engine.stats.sessions.open(), 0, "no encoder runs off air");
+		engine.stop();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
+	/// Going live on a GPU whose sessions the sources' replay encoders took
+	/// all of closes them for the program's encoder, and each replay waits for
+	/// a session given back, rather than failing, then starts over. A cap of
+	/// one stands in for a GeForce card's.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
+	async fn going_live_takes_the_replays_sessions() {
+		let (relay, _routes, _config) = test_relay().await;
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let mut loaded = red_canvas();
+		std::fs::write(
+			dir.path().join("clip.mkv"),
+			include_bytes!("../../moq-scene/src/test_data/clip.mkv"),
+		)
+		.unwrap();
+		let media = moq_scene::Source::Media {
+			path: "clip.mkv".into(),
+			looping: true,
+			restart: false,
+		};
+		loaded.collection.sources.insert("clip".into(), media);
+		let corner = moq_scene::Rect {
+			width: 64.0,
+			height: 36.0,
+			..moq_scene::Rect::fill(&loaded.collection.canvas)
+		};
+		loaded.collection.scenes[0]
+			.items
+			.push(moq_scene::Item::new("clip", corner));
+		let sessions = Sessions::capped(1);
+		let launch = Launch {
+			gpu,
+			recordings: dir.path().to_path_buf(),
+			room: None,
+			sessions: sessions.clone(),
+		};
+		let engine = Engine::start(launch, autosave, loaded)
+			.await
+			.expect("the studio starts");
+		let replaying = || async {
+			while (sessions.open(), sessions.spare()) != (1, 1) {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		};
+		kio::clock::timeout(TIMEOUT, replaying())
+			.await
+			.expect("the clip on program keeps a replay");
+
+		let destination = Destination {
+			relays: vec![relay],
+			broadcast: "studio".into(),
+			on_demand: false,
+		};
+		kio::clock::timeout(TIMEOUT, engine.go_live(destination))
+			.await
+			.expect("going live in time")
+			.expect("the program takes the replay's session");
+		assert!(engine.stats.video.error().is_none());
+		assert_eq!((sessions.open(), sessions.spare()), (1, 0), "the program's");
+		let track = || {
+			engine
+				.state
+				.lock()
+				.unwrap()
+				.sources
+				.get("clip")
+				.and_then(source::Feed::track)
+		};
+		assert!(!matches!(track(), Some(Status::Failed(_))), "{:?}", track());
+
+		kio::clock::timeout(TIMEOUT, engine.end_stream())
+			.await
+			.expect("the stream ends in time")
+			.expect("each relay takes the stream's end");
+		kio::clock::timeout(TIMEOUT, replaying())
+			.await
+			.expect("the replay starts over off air");
+		assert!(!matches!(track(), Some(Status::Failed(_))), "{:?}", track());
 		engine.stop();
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await

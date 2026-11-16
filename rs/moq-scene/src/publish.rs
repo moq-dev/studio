@@ -12,7 +12,6 @@
 //! something in the studio subscribes to it, such as a recording.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -64,29 +63,131 @@ impl Section {
 /// The catalog of the program's broadcast, or of the sources' local one.
 pub type Catalog = moq_mux::catalog::Producer<Ext>;
 
-/// How many video encoders are open. Each holds a session on a hardware
-/// encoder, which a GPU caps, such as at 8 on a GeForce card.
-#[derive(Clone, Debug, Default)]
-pub struct Sessions(Arc<AtomicUsize>);
+/// The video encoders open, each holding a session on a hardware encoder,
+/// which a GPU caps, such as at 8 on a GeForce card, refusing an open past it.
+///
+/// The program's encoders come first: one the GPU refuses
+/// [reclaims](Self::reclaim) the sessions of the sources' replay encoders,
+/// those open only so a replay of a source on program has its recent past.
+#[derive(Clone, Debug)]
+pub struct Sessions(Arc<tokio::sync::watch::Sender<State>>);
+
+#[derive(Clone, Copy, Debug, Default)]
+struct State {
+	open: usize,
+	/// Those of `open` held by a replay encoder, which the program may take.
+	spare: usize,
+	/// The program's reclaims under way: while any is, a replay encoder
+	/// closes and none opens.
+	reclaims: usize,
+	/// Refuse an open past this many, as a capped GPU does.
+	cap: Option<usize>,
+}
+
+impl Default for Sessions {
+	fn default() -> Self {
+		Self(Arc::new(tokio::sync::watch::Sender::new(State::default())))
+	}
+}
 
 impl Sessions {
-	/// How many encoders are open now.
-	pub fn open(&self) -> usize {
-		self.0.load(Ordering::Relaxed)
+	/// Sessions that refuse an encoder past `cap` open at once, as a GPU with
+	/// that cap does, to stand in for one on a machine without it.
+	pub fn capped(cap: usize) -> Self {
+		let state = State {
+			cap: Some(cap),
+			..Default::default()
+		};
+		Self(Arc::new(tokio::sync::watch::Sender::new(state)))
 	}
 
-	fn hold(&self) -> Session {
-		self.0.fetch_add(1, Ordering::Relaxed);
-		Session(self.clone())
+	/// How many encoders are open now.
+	pub fn open(&self) -> usize {
+		self.0.borrow().open
+	}
+
+	/// How many of those are the sources' replay encoders, which a
+	/// [reclaim](Self::reclaim) would close.
+	pub fn spare(&self) -> usize {
+		self.0.borrow().spare
+	}
+
+	/// Close every replay encoder and open none until the returned guard
+	/// drops, so the program's encoder can open in their sessions. A replay
+	/// starts over once its encoder reopens, which waits for a session given
+	/// back if the GPU refuses it.
+	pub fn reclaim(&self) -> Reclaim {
+		self.0.send_modify(|state| state.reclaims += 1);
+		Reclaim(self.clone())
+	}
+
+	fn hold(&self) -> Result<Session, Error> {
+		let mut refused = None;
+		self.0.send_if_modified(|state| match state.cap {
+			Some(cap) if state.open >= cap => {
+				refused = Some(cap);
+				false
+			}
+			_ => {
+				state.open += 1;
+				true
+			}
+		});
+		match refused {
+			Some(cap) => Err(Error::Sessions(cap)),
+			None => Ok(Session {
+				sessions: self.clone(),
+				spare: false,
+			}),
+		}
+	}
+}
+
+/// The program's claim on the replay encoders' sessions, from
+/// [`Sessions::reclaim`] until dropped.
+pub struct Reclaim(Sessions);
+
+impl Reclaim {
+	/// Wait until every replay encoder has closed.
+	pub async fn closed(&self) {
+		let mut state = (self.0).0.subscribe();
+		// Fails only once the sender drops, which this holds.
+		let _ = state.wait_for(|state| state.spare == 0).await;
+	}
+}
+
+impl Drop for Reclaim {
+	fn drop(&mut self) {
+		(self.0).0.send_modify(|state| state.reclaims -= 1);
 	}
 }
 
 /// One open encoder's place in its [`Sessions`], given back when dropped.
-struct Session(Sessions);
+struct Session {
+	sessions: Sessions,
+	/// Held by a replay encoder.
+	spare: bool,
+}
+
+impl Session {
+	fn set_spare(&mut self, spare: bool) {
+		if self.spare != spare {
+			self.spare = spare;
+			self.sessions.0.send_modify(|state| match spare {
+				true => state.spare += 1,
+				false => state.spare -= 1,
+			});
+		}
+	}
+}
 
 impl Drop for Session {
 	fn drop(&mut self) {
-		(self.0).0.fetch_sub(1, Ordering::Relaxed);
+		let spare = self.spare;
+		self.sessions.0.send_modify(|state| {
+			state.open -= 1;
+			state.spare -= usize::from(spare);
+		});
 	}
 }
 
@@ -665,10 +766,23 @@ impl<E: Encode> Encoding<E> {
 	}
 
 	/// Encode with `encoder` from here on, after draining the one it replaces.
+	/// Fails when [capped](Sessions::capped) sessions are all open.
 	pub fn open(&mut self, encoder: E) -> Result<(), Error> {
 		self.drain()?;
-		self.encoder = Some((encoder, self.sessions.hold()));
+		self.encoder = Some((encoder, self.sessions.hold()?));
 		Ok(())
+	}
+
+	/// Whether the open encoder is a replay's, which the program may reclaim.
+	fn spare(&self) -> bool {
+		self.encoder.as_ref().is_some_and(|(_, session)| session.spare)
+	}
+
+	/// Mark the open encoder as a replay's, or not.
+	fn set_spare(&mut self, spare: bool) {
+		if let Some((_, session)) = &mut self.encoder {
+			session.set_spare(spare);
+		}
 	}
 
 	/// Encode `frame` and publish what the encoder hands back.
@@ -793,6 +907,12 @@ pub(crate) struct Video<'a> {
 	/// Where the capture's private timeline starts on the studio clock, in
 	/// microseconds, taken at the first frame unless [anchored](Self::anchor).
 	epoch: Option<u128>,
+	/// The encoder closed for the program's [reclaim](Sessions::reclaim),
+	/// until it reopens.
+	reclaimed: bool,
+	/// How many sessions were open when the GPU refused a reclaimed encoder
+	/// reopening, which waits until fewer are.
+	refused: Option<usize>,
 }
 
 impl<'a> Video<'a> {
@@ -825,6 +945,8 @@ impl<'a> Video<'a> {
 			config,
 			clock: listing.studio.clock(),
 			epoch: None,
+			reclaimed: false,
+			refused: None,
 		})
 	}
 
@@ -857,7 +979,7 @@ impl<'a> Video<'a> {
 		};
 		frame.timestamp = moq_net::Timestamp::from_micros((epoch + captured) as u64).map_err(moq_video::Error::from)?;
 
-		if !self.used() {
+		if !self.wanted() {
 			return self.release();
 		}
 
@@ -871,9 +993,26 @@ impl<'a> Video<'a> {
 			self.track.drain()?;
 		}
 		if !self.track.is_open() {
-			self.track.open(moq_video::encode::Encoder::new(&self.config)?)?;
-			self.granted = None;
+			let opened = moq_video::encode::Encoder::new(&self.config)
+				.map_err(Error::from)
+				.and_then(|encoder| self.track.open(encoder));
+			match opened {
+				Ok(()) => {
+					self.reclaimed = false;
+					self.refused = None;
+					self.granted = None;
+				}
+				// Its session went to the program, so it waits for one given
+				// back rather than failing.
+				Err(err) if self.reclaimed => {
+					tracing::warn!(source = %self.claim.name, %err, "waiting for an encode session");
+					self.refused = Some(self.track.sessions.open());
+					return Ok(());
+				}
+				Err(err) => return Err(err),
+			}
 		}
+		self.track.set_spare(!self.track.watched());
 		// Published independently, it encodes at what the connection grants.
 		let grant = self
 			.grants
@@ -907,23 +1046,44 @@ impl<'a> Video<'a> {
 		self.on_program.borrow().shown.contains(&self.claim.name) || self.track.watched()
 	}
 
-	/// Wait until whether the source is used disagrees with whether its
-	/// encoder is open, so a source that delivers nothing new, such as a
-	/// still screen or a media file that ended, can act without waiting on a
-	/// picture: [`release`] the encoder when it is open and nothing uses the
-	/// source, or bring a picture when it is closed and the source goes into
-	/// use.
+	/// Whether the encoder is to be open: while the source is used, but not
+	/// for a replay alone while the program reclaims its session, nor while
+	/// waiting for a session given back since the GPU refused one.
+	fn wanted(&self) -> bool {
+		let watched = self.track.watched();
+		if !watched && !self.on_program.borrow().shown.contains(&self.claim.name) {
+			return false;
+		}
+		let sessions = self.track.sessions.0.borrow();
+		(watched || sessions.reclaims == 0) && self.refused.is_none_or(|open| sessions.open < open)
+	}
+
+	/// Whether the encoder is not as [`wanted`](Self::wanted): open or closed
+	/// when it should not be, or open and marked a replay's while read, or
+	/// the other way around, which a reclaim would misjudge.
+	fn unsettled(&self) -> bool {
+		let wanted = self.wanted();
+		wanted != self.track.is_open() || (wanted && self.track.spare() == self.track.watched())
+	}
+
+	/// Wait until the encoder is not as wanted, so a source that delivers
+	/// nothing new, such as a still screen or a media file that ended, can
+	/// act without waiting on a picture: [`release`] the encoder when it is
+	/// open, or bring a picture when it is closed and wanted.
 	///
 	/// [`release`]: Self::release
 	pub(crate) async fn settle(&self) {
 		let mut demand = self.track.demand();
 		let mut on_program = self.on_program.clone();
 		on_program.mark_unchanged();
-		while self.used() == self.track.is_open() {
+		let mut sessions = self.track.sessions.0.subscribe();
+		while !self.unsettled() {
 			// The first look at the demand reports it as it is now.
 			tokio::select! {
 				changed = on_program.changed() => if changed.is_err() { std::future::pending::<()>().await },
 				wanted = demand.wanted_changed() => if wanted.is_err() { std::future::pending::<()>().await },
+				// Never fails: the track holds the sender.
+				_ = sessions.changed() => {}
 			}
 		}
 	}
@@ -943,13 +1103,20 @@ impl<'a> Video<'a> {
 		self.epoch = None;
 	}
 
-	/// Close the encoder while nothing uses the source, marking the gap, which
-	/// gives the encode session back.
+	/// Close the encoder while it is not [wanted](Self::wanted), marking the
+	/// gap, which gives the encode session back, or else mark it a replay's
+	/// or not, as whether its track is read says.
 	pub(crate) fn release(&mut self) -> Result<(), Error> {
-		if self.track.is_open() && !self.used() {
-			self.track.discontinuity()?;
+		if !self.track.is_open() {
+			return Ok(());
 		}
-		Ok(())
+		if self.wanted() {
+			self.track.set_spare(!self.track.watched());
+			return Ok(());
+		}
+		// Still used, so it closed for the program.
+		self.reclaimed = self.used();
+		self.track.discontinuity()
 	}
 
 	/// Start a group with the next picture, as a keyframe, such as where a
@@ -1596,6 +1763,65 @@ mod tests {
 			let mut picture = gray(size, 0);
 			video.encode(&mut picture).unwrap();
 			assert!(picture.timestamp >= now, "{:?} before {now:?}", picture.timestamp);
+		})
+		.await;
+	}
+
+	/// On a GPU at its session cap, the program reclaims a replay encoder's
+	/// session, even from a still screen that delivers no picture, and the
+	/// replay waits for a session given back rather than failing, then starts
+	/// over. One whose track is read keeps its encoder.
+	#[tokio::test(start_paused = true)]
+	async fn the_program_reclaims_a_replays_session() {
+		local(async {
+			let clock = moq_mux::Clock::new();
+			let sessions = Sessions::capped(1);
+			let publish = Publish::new(clock, moq_video::encode::Kind::Auto, sessions.clone()).unwrap();
+			let claim = publish.claim("display");
+			let listing = Listing::new(&claim, &publish).unwrap();
+			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+			let size = moq_video::Size::new(64, 48);
+			let mut video = Video::new(&listing, size, framerate, None).await.unwrap();
+			let wait = std::time::Duration::from_secs(1);
+			let settled = async |video: &Video<'_>| kio::clock::timeout(wait, video.settle()).await;
+
+			publish.set_on_program(shown("display"));
+			video.encode(&mut gray(size, 0)).unwrap();
+			assert_eq!((sessions.open(), sessions.spare()), (1, 1), "a replay's");
+			assert!(sessions.hold().is_err(), "at the cap");
+
+			let reclaim = sessions.reclaim();
+			settled(&video).await.expect("asked to close without a picture");
+			video.release().unwrap();
+			kio::clock::timeout(wait, reclaim.closed())
+				.await
+				.expect("the replay closed");
+			assert_eq!(sessions.open(), 0);
+			video.encode(&mut gray(size, 33)).unwrap();
+			assert_eq!(sessions.open(), 0, "none opens while the program reclaims");
+
+			let program = sessions.hold().unwrap();
+			drop(reclaim);
+			settled(&video).await.expect("wanted again");
+			video.encode(&mut gray(size, 66)).unwrap();
+			assert!(!video.is_open(), "refused, so it waits");
+			assert!(settled(&video).await.is_err(), "until a session is given back");
+			drop(program);
+			settled(&video).await.expect("a session given back");
+			video.encode(&mut gray(size, 100)).unwrap();
+			assert_eq!((sessions.open(), sessions.spare()), (1, 1), "the replay starts over");
+
+			// Read, such as by a recording, it is no replay's alone.
+			let snapshot = listing.catalog.snapshot();
+			let name = snapshot.video.renditions.keys().next().unwrap();
+			let _track = publish.consume().track(name).unwrap().subscribe(None).await.unwrap();
+			let reclaim = sessions.reclaim();
+			settled(&video).await.expect("marked read without a picture");
+			video.release().unwrap();
+			kio::clock::timeout(wait, reclaim.closed())
+				.await
+				.expect("nothing to close");
+			assert_eq!((sessions.open(), sessions.spare()), (1, 0), "kept");
 		})
 		.await;
 	}

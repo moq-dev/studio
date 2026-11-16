@@ -134,6 +134,11 @@ pub enum Error {
 	#[error(transparent)]
 	Net(#[from] moq_net::Error),
 
+	/// Every encode session [`Sessions::capped`](publish::Sessions::capped)
+	/// allows is open.
+	#[error("all {0} encode sessions are open")]
+	Sessions(usize),
+
 	/// A browser source's page failed, or its helper process stopped.
 	#[error("browser: {0}")]
 	Browser(String),

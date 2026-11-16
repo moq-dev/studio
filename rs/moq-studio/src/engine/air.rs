@@ -357,6 +357,7 @@ impl Engine {
 			broadcast: broadcast.clone(),
 			timebase: catalog.timebase(),
 			record: false,
+			reclaim: self.program.reclaim.clone(),
 			bandwidth: bandwidth.clone(),
 			on_demand,
 			live: true,
@@ -430,6 +431,7 @@ impl Engine {
 			on_demand,
 			live: true,
 			stats: self.stats.clone(),
+			reclaim: self.program.reclaim.clone(),
 			graded: Some(publisher.scenes.clone()),
 		};
 		let layout = moq_scene::layout::Publisher::new(broadcast.clone(), catalog.clone());

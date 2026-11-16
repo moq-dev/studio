@@ -60,6 +60,7 @@ impl Opener {
 			gpu: self.gpu.clone(),
 			recordings: stream.recordings(&path),
 			room,
+			sessions: Default::default(),
 		};
 		let exists = path
 			.try_exists()
