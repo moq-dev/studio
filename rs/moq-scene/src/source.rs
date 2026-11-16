@@ -2057,6 +2057,17 @@ impl Driver {
 	/// own track gets no more pictures, so its encoder is released here once
 	/// nothing uses the source, giving the encode session back.
 	async fn ended(&self, cues: &mut watch::Receiver<Cue>, own: &mut Own<'_, '_>) {
+		// The feed is gone, which stops this driver anyway.
+		if self.serve(own, cues.changed()).await.is_err() {
+			std::future::pending::<()>().await;
+		}
+	}
+
+	/// Wait for `until`, meanwhile releasing the source's open encoder once
+	/// nothing wants it, such as when the program reclaims its session, rather
+	/// than at the next picture, which may be far off or never come.
+	async fn serve<T>(&self, own: &mut Own<'_, '_>, until: impl Future<Output = T>) -> T {
+		let mut until = std::pin::pin!(until);
 		loop {
 			let settled = async {
 				match &own.track {
@@ -2065,13 +2076,7 @@ impl Driver {
 				}
 			};
 			tokio::select! {
-				changed = cues.changed() => {
-					// The feed is gone, which stops this driver anyway.
-					if changed.is_err() {
-						std::future::pending::<()>().await;
-					}
-					return;
-				}
+				done = &mut until => return done,
 				() = settled => {
 					if let Some(video) = &mut own.track
 						&& let Err(err) = video.release()
@@ -2161,6 +2166,9 @@ impl Driver {
 		let end = std::cell::Cell::new(begin);
 		let last = |until: Instant| end.set(end.get().max(until));
 
+		// Once every sound is handed over, which the pictures wait for after
+		// their last, still giving the encoder back if the program asks.
+		let sounded = Notify::new();
 		let pictures = async {
 			let Some((consumer, config)) = &mut video else {
 				return Ok(());
@@ -2168,17 +2176,18 @@ impl Driver {
 			let mut previous = None;
 			while let Some(mut frame) = picture.take() {
 				let due = at(frame.timestamp)?;
-				ahead(due).await;
+				self.serve(own, ahead(due)).await;
 				last(due.saturating_add(previous.map_or(Duration::ZERO, |previous| due - previous)));
 				previous = Some(due);
 				self.encode(own, &mut frame, config, due).await?;
 				shows.queue.borrow_mut().push_back((due, play, frame));
 				shows.handed.notify_one();
-				picture = next_picture(consumer).await?;
+				picture = self.serve(own, next_picture(consumer)).await?;
 			}
+			self.serve(own, sounded.notified()).await;
 			Ok::<_, Error>(())
 		};
-		let sounds = async {
+		let handing = async {
 			let (Some(consumer), Some(sound)) = (&mut audio, &mut sound) else {
 				return Ok(());
 			};
@@ -2214,9 +2223,14 @@ impl Driver {
 			}
 			Ok::<_, Error>(())
 		};
+		let sounds = async {
+			let handed = handing.await;
+			sounded.notify_one();
+			handed
+		};
 		tokio::try_join!(pictures, sounds)?;
 		let end = end.get();
-		ahead(end).await;
+		self.serve(own, ahead(end)).await;
 		Ok(end)
 	}
 
@@ -4052,6 +4066,39 @@ mod media_tests {
 			let (again, _) = shown(feed).await;
 			assert_eq!(again, first, "from the start");
 			assert_eq!(feed.status(), Status::Live);
+		})
+		.await;
+	}
+
+	/// A playing file on program gives its replay encoder's session back as
+	/// soon as the program reclaims it, not at its next picture, which may be
+	/// far off, or never come while its sound plays on.
+	#[tokio::test(start_paused = true)]
+	async fn a_playing_media_file_gives_its_session_back_at_once() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (mut context, _origin) = context(dir.path());
+			let sessions = crate::publish::Sessions::capped(1);
+			let publish =
+				crate::publish::Publish::new(moq_mux::Clock::new(), moq_video::encode::Kind::Auto, sessions.clone())
+					.unwrap();
+			publish.set_on_program(crate::publish::OnProgram {
+				shown: ["clip.mkv".to_string()].into(),
+				..Default::default()
+			});
+			context.publish = Some(publish);
+			let mut sources = Sources::new(context);
+			let collection = media(dir.path(), &[("clip.mkv", CLIP, false, false)]);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			until(|| (sessions.spare() == 1).then_some(())).await;
+
+			// Its pictures come every 100 ms.
+			let reclaim = sessions.reclaim();
+			kio::clock::timeout(Duration::from_millis(10), reclaim.closed())
+				.await
+				.expect("given back before the next picture");
+			assert_eq!(sessions.open(), 0);
 		})
 		.await;
 	}
