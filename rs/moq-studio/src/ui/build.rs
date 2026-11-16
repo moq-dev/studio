@@ -805,12 +805,7 @@ impl Menu {
 	}
 
 	/// What the selected layer offers, if it is shown on the picture.
-	fn of_selected(
-		state: &State,
-		selection: Option<&Picked>,
-		shown: &[(Picked, Item)],
-		off_air: bool,
-	) -> Option<Self> {
+	fn of_selected(state: &State, selection: Option<&Picked>, shown: &[(Picked, Item)], off_air: bool) -> Option<Self> {
 		let picked = selection.filter(|picked| shown.iter().any(|(shown, _)| shown == *picked))?;
 		Self::of(state, picked, off_air)
 	}
