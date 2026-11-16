@@ -5113,6 +5113,66 @@ mod tests {
 			.expect("the studio closes");
 	}
 
+	/// The show's first follow of its relays is ordered with a save's, so
+	/// relays saved while it may still be reading its tokens are the ones
+	/// followed, never replaced by the opening settings landing late.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn the_first_follow_never_lands_after_a_save() {
+		let _ = moq_tokio::crypto::install_default();
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = start(gpu, Vec::new(), dir.path(), autosave, red_canvas())
+			.await
+			.expect("the studio starts");
+		let mut stream = crate::stream::Stream::load(
+			&dir.path().join("show.toml"),
+			Default::default(),
+			Default::default(),
+			Default::default(),
+			crate::stream::Credentials::memory(),
+		)
+		.unwrap();
+		let relay = |port: u16| crate::stream::Saved {
+			relay: Some(format!("https://127.0.0.1:{port}/").parse().unwrap()),
+			..Default::default()
+		};
+		let saving = tokio::task::spawn_blocking(move || {
+			stream.save(relay(9)).unwrap();
+			stream
+		});
+		let mut stream = saving.await.unwrap();
+		let controls = Arc::new(crate::controls::Controls::new(
+			engine.clone(),
+			stream.clone(),
+			tokio::runtime::Handle::current(),
+		));
+		let first = controls.follow_relays().expect("the follow starts");
+		let saved = tokio::task::spawn_blocking(move || {
+			stream.save(relay(10)).unwrap();
+			controls.set_stream(stream, true);
+			first.join().expect("the first follow ran");
+		});
+		saved.await.unwrap();
+		// The first follow is done, so only the save's can land after it.
+		let followed = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let watched: Vec<String> = engine.watched().into_iter().map(|(relay, _)| relay.endpoint).collect();
+				if watched == ["https://127.0.0.1:10"] {
+					return;
+				}
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await;
+		assert!(followed.is_ok(), "watched {:?}", engine.watched());
+		engine.stop();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
 	/// Closing the sessions as ending the stream does delivers the tail of every finished
 	/// track before the relay session goes: a subscriber at the relay reads
 	/// each track's last group whole and then its end, and the broadcast is

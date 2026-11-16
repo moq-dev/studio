@@ -102,24 +102,12 @@ impl Opener {
 	}
 }
 
-/// Follow broadcast sources, guests, and viewers' reports through the show's
-/// relays, read with their tokens on a thread of its own since the credential
-/// store blocks. Each relay is set up on its own, so one that cannot be is
-/// logged and the other still followed; going live says why.
-pub fn watch(engine: &Arc<Engine>, stream: &Stream, runtime: &tokio::runtime::Handle) {
-	let (engine, stream, runtime) = (engine.clone(), stream.clone(), runtime.clone());
-	let spawned = std::thread::Builder::new().name("watch".into()).spawn(move || {
-		// Each client binds its socket on the runtime.
-		let _runtime = runtime.enter();
-		follow(&engine, &stream);
-	});
-	if let Err(err) = spawned {
-		tracing::warn!(error = format!("{err:#}"), "cannot follow the relays");
-	}
-}
-
-/// [`watch`] on this thread, which blocks on the credential store: call it
-/// off the window's thread, outside an async task, inside the tokio runtime.
+/// Follow broadcast sources, guests, and viewers' reports through `stream`'s
+/// relays, read with their tokens. Each relay is set up on its own, so one
+/// that cannot be is logged and the other still followed; going live says
+/// why. Blocks on the credential store: call it off the window's thread,
+/// outside an async task, inside the tokio runtime, and through
+/// [`Controls`](crate::controls::Controls), which orders the follows.
 pub fn follow(engine: &Engine, stream: &Stream) {
 	let each = [(true, false), (false, true)].map(|(relay, failover)| stream::Switched { relay, failover });
 	let mut relays = Vec::new();

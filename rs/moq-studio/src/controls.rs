@@ -97,11 +97,13 @@ pub struct Controls {
 	/// refused, which covers reading the tokens before the engine says
 	/// Starting, so a second press is refused at once.
 	going: AtomicBool,
-	/// Whether relays saved on air wait for the stream to end to be
-	/// followed, which would cut the broadcast sources and guests on program.
+	/// Whether the relays wait to be followed: the show's, until its first
+	/// follow, and those saved on air until the stream ends, since following
+	/// them then would cut the broadcast sources and guests on program.
 	rewatch: AtomicBool,
-	/// Held while saved relays are followed, and by a go-live while it
-	/// follows any still waiting, so none is followed once it is on air.
+	/// Held while the relays are followed, and by a go-live while it follows
+	/// any still waiting, so each follow reads the settings after the last
+	/// one landed, and none is followed once it is on air.
 	following: Mutex<()>,
 	/// REVIEW's replay picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
@@ -258,7 +260,7 @@ impl Controls {
 			// Relays saved while this started, followed now if it failed;
 			// once live, when it ends. Whichever of a save and this runs
 			// last follows them.
-			controls.follow_saved_relays();
+			drop(controls.follow_saved_relays());
 			controls.report(&Action::GoLive, result);
 		});
 		if let Err(err) = spawned {
@@ -291,7 +293,7 @@ impl Controls {
 			return false;
 		}
 		let waits = self.going() || self.engine.on_air() != OnAir::Off;
-		self.follow_saved_relays();
+		drop(self.follow_saved_relays());
 		waits
 	}
 
@@ -302,10 +304,20 @@ impl Controls {
 		(stream.clone(), self.rewatch.swap(false, Ordering::AcqRel))
 	}
 
+	/// Follow broadcast sources, guests, and viewers' reports through the
+	/// show's relays, as the settings hold them once the follow runs, in the
+	/// background. Ordered with every save and go-live after it, as a save's
+	/// follow is, so it never lands after a later one with relays since
+	/// replaced, nor once a stream is on air.
+	pub fn follow_relays(self: &Arc<Self>) -> Option<std::thread::JoinHandle<()>> {
+		self.rewatch.store(true, Ordering::Release);
+		self.follow_saved_relays()
+	}
+
 	/// Follow the saved relays, if any wait to be, on a thread of its own,
 	/// since the credential store blocks, unless a stream is on air or on its
 	/// way, which follows them itself.
-	fn follow_saved_relays(self: &Arc<Self>) {
+	fn follow_saved_relays(self: &Arc<Self>) -> Option<std::thread::JoinHandle<()>> {
 		let controls = self.clone();
 		let spawned = std::thread::Builder::new().name("follow".into()).spawn(move || {
 			let _following = controls.following.lock().unwrap();
@@ -320,9 +332,9 @@ impl Controls {
 			let _runtime = controls.runtime.enter();
 			crate::show::follow(&controls.engine, &stream);
 		});
-		if let Err(err) = spawned {
-			tracing::warn!(error = format!("{err:#}"), "cannot follow the saved relays");
-		}
+		spawned
+			.inspect_err(|err| tracing::warn!(error = format!("{err:#}"), "cannot follow the relays"))
+			.ok()
 	}
 
 	/// End the stream in the background, handing the relays its tail first.
@@ -331,7 +343,7 @@ impl Controls {
 		let controls = self.clone();
 		self.runtime.spawn(async move {
 			let result = controls.engine.end_stream().await;
-			controls.follow_saved_relays();
+			drop(controls.follow_saved_relays());
 			let result = result.map(|()| "the stream ended".to_string());
 			controls.report(&Action::EndStream, result.map_err(|err| format!("{err:#}")));
 		});

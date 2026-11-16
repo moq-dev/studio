@@ -378,7 +378,6 @@ impl Window {
 	) {
 		let _ = self.started.set(engine.clone());
 		self.recent.opened(engine.autosave.path(), library::now());
-		show::watch(&engine, &stream, &self.opener.runtime);
 		// Once a show is open, the desktop's frame goes. macOS cannot draw under
 		// its title bar once the window is open, so it keeps it until a restart.
 		if !self.framed && !cfg!(target_os = "macos") {

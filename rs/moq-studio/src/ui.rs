@@ -189,6 +189,7 @@ impl Studio {
 			)
 		};
 		let controls = Arc::new(Controls::new(engine.clone(), stream, runtime.clone()));
+		drop(controls.follow_relays());
 		let review = review::Review::new(&engine, &runtime);
 		let mut panels = Panels {
 			engine,
