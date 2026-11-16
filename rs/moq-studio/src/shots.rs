@@ -21,7 +21,7 @@ use moq_scene::source::Status;
 
 use crate::fx::Effects;
 use crate::ui::{Inspect, MixView, Page, Setting, Side};
-use crate::{App, Window, autosave, engine, fx, hotkeys, setup};
+use crate::{App, Window, autosave, engine, fx, hotkeys, library, setup, show, stream};
 
 /// The window's size, the mock-ups'.
 const SIZE: egui::Vec2 = egui::vec2(1440.0, 900.0);
@@ -36,12 +36,15 @@ const SETTLE: Duration = Duration::from_secs(20);
 enum Open {
 	/// Guided setup, as the first launch shows it.
 	Setup,
+	/// The library, as the app opens with no show, with a few recent shows.
+	Library,
 	/// The studio on the show in `shots/<show>`, in a window `size` large,
-	/// turned to `view`.
+	/// turned to `view`, with a relay of its own to go live on if `relay`.
 	Studio {
 		view: View,
 		size: egui::Vec2,
 		show: &'static str,
+		relay: bool,
 	},
 	/// The kit's gallery, with a sheet open over it or not.
 	Kit { sheet: bool },
@@ -72,6 +75,14 @@ enum View {
 	/// The LIVE page after a mute, with the health dot's popover open and the
 	/// pointer on undo, which names the mute.
 	Hover,
+	/// The go-live sheet, once its checks finish.
+	Going,
+	/// On air, at the LIVE page.
+	OnAir,
+	/// On air, with the pointer on the clock.
+	EndStream,
+	/// On air, with the health dot's popover open.
+	OnAirHealth,
 	/// REVIEW, with this show's recordings and clips, and if `picked`, the
 	/// last 30 seconds held and a stretch picked. With `replays`, the show
 	/// has two replay sources to pick between.
@@ -99,6 +110,17 @@ fn studio(view: View) -> Open {
 		view,
 		size: SIZE,
 		show: "show.toml",
+		relay: false,
+	}
+}
+
+/// [`studio`], with a relay to go live on.
+fn relayed(view: View) -> Open {
+	Open::Studio {
+		view,
+		size: SIZE,
+		show: "show.toml",
+		relay: true,
 	}
 }
 
@@ -109,6 +131,7 @@ fn mixing(view: MixView, opened: Option<&'static str>, size: egui::Vec2) -> Open
 		view: View::Mix(view, opened),
 		size,
 		show: "mix.toml",
+		relay: false,
 	}
 }
 
@@ -149,10 +172,10 @@ views! {
 	live_hover: Still, studio(View::Hover);
 	/// A portrait show: the pages in a sidebar, and the scenes and the sound
 	/// in columns beside the picture.
-	live_portrait: Still, Open::Studio { view: View::Page(Page::Live), size: SIZE, show: "portrait.toml" };
+	live_portrait: Still, Open::Studio { view: View::Page(Page::Live), size: SIZE, show: "portrait.toml", relay: false };
 	/// A window snapped beside a game stacks the picture, the scenes, and the
 	/// sound.
-	live_compact: Still, Open::Studio { view: View::Page(Page::Live), size: HALF, show: "show.toml" };
+	live_compact: Still, Open::Studio { view: View::Page(Page::Live), size: HALF, show: "show.toml", relay: false };
 	/// Studio mode: the cued scene's pad turns amber, and NEXT docks on the
 	/// live picture with TAKE and AUTO.
 	live_studio: Still, studio(View::Cued(Page::Live));
@@ -170,7 +193,7 @@ views! {
 	build_menu: Still, studio(View::Menu);
 	/// BUILD in a window snapped beside a game: the inspector is a tab beside
 	/// Layers and Add.
-	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml" };
+	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml", relay: false };
 	/// BUILD in Studio mode edits the scene on air, with NEXT docked on it.
 	build_studio: Still, studio(View::Cued(Page::Build));
 	/// A scene open off air: the frame turns amber, and the live picture
@@ -181,7 +204,7 @@ views! {
 	/// dimmed, saying why under the pointer.
 	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
 	/// Too narrow for the banner beside the live picture, it goes under it.
-	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml" };
+	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml", relay: false };
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
 	mix: Still, mixing(MixView::Strips, None, SIZE);
@@ -189,13 +212,13 @@ views! {
 	/// its neighbours narrowed.
 	mix_strip: Still, mixing(MixView::Strips, Some("mic"), SIZE);
 	/// An audio scene's menu: rename, move, or remove it.
-	mix_menu: Still, Open::Studio { view: View::MixMenu, size: SIZE, show: "mix.toml" };
+	mix_menu: Still, Open::Studio { view: View::MixMenu, size: SIZE, show: "mix.toml", relay: false };
 	/// The same sends as a matrix.
 	mix_routes: Still, mixing(MixView::Routes, None, SIZE);
 	/// MIX in a stacked window, its strips scrolling, its live picture as
 	/// tall as the sound's slot allows.
 	mix_compact: Still, mixing(MixView::Strips, None, HALF);
-	/// REVIEW off air: without a relay the program keeps no past, which the
+	/// REVIEW off air: the program keeps no past until it goes live, which the
 	/// strip and both actions say, beside this show's recordings and clips.
 	review: Still, studio(View::Review { picked: false, replays: false });
 	/// REVIEW with the last 30 seconds held: a stretch picked between the
@@ -215,6 +238,22 @@ views! {
 	/// Settings' Show tab, with the encoders' timings.
 	output: Live, studio(View::Setting(Setting::Show));
 	hotkeys: Still, studio(View::Setting(Setting::Hotkeys));
+	/// With no show open: recent shows, each with its picture, beside New
+	/// show and Open a show file.
+	library: Still, Open::Library;
+	/// GO LIVE's sheet: the relay with its switch and its state, and the
+	/// checks once they finish.
+	going: Live, relayed(View::Going);
+	/// On air: the accent frame, ON AIR, and the clock.
+	on_air: Live, relayed(View::OnAir);
+	/// On air, the pointer on the clock, which reads END STREAM.
+	end_stream: Live, relayed(View::EndStream);
+	/// On air, the health dot's popover: the worst problem, every
+	/// destination, the viewers, and the encoder.
+	on_air_health: Live, relayed(View::OnAirHealth);
+	/// Settings' Stream tab: the relay, its token, the failover, the
+	/// broadcast's name, and on demand.
+	settings_stream: Still, studio(View::Setting(Setting::Stream));
 }
 
 /// Draw the view `name` opens into `$SHOTS_DIR/<name>.png`, twice if it is
@@ -281,27 +320,60 @@ fn lavapipe() -> (tempfile::TempDir, tokio::runtime::Runtime, engine::Gpu) {
 	(show, runtime, gpu)
 }
 
-/// How a view starts the studio: with no relay, recording beside the show.
+/// How a view starts the studio: recording beside the show.
 fn launch(gpu: &engine::Gpu) -> engine::Launch {
 	engine::Launch {
 		gpu: gpu.clone(),
-		relays: Vec::new(),
-		broadcast: "studio".into(),
-		on_demand: false,
 		recordings: ".".into(),
 		room: None,
 	}
 }
 
+/// `show.toml`'s stream settings, on `relay` if given, with tokens in a store
+/// of the test's own.
+fn stream(relay: Option<&Relay>) -> stream::Stream {
+	let mut flags = stream::Flags::default();
+	let mut client = moq_tokio::connect::Config::default();
+	if let Some(relay) = relay {
+		flags.relay = Some(relay.url.clone());
+		client.tls.fingerprint = vec![relay.fingerprint.clone()];
+	}
+	let credentials = stream::Credentials::memory();
+	stream::Stream::load(Path::new("show.toml"), flags, client, Default::default(), credentials).unwrap()
+}
+
+/// A relay of the view's own, running on `runtime`.
+struct Relay {
+	url: url::Url,
+	fingerprint: String,
+}
+
+impl Relay {
+	fn start(runtime: &tokio::runtime::Runtime) -> Self {
+		runtime.block_on(async {
+			let _ = moq_tokio::crypto::install_default();
+			let fixture = moq_relay::test_relay().await.expect("test relay");
+			let ready = fixture.relay.ready();
+			tokio::spawn(fixture.relay.run());
+			ready.wait().await.expect("relay ready");
+			Self {
+				url: fixture.url,
+				fingerprint: fixture.fingerprint,
+			}
+		})
+	}
+}
+
 /// Start the studio by `launch` on `show.toml`, without the history an
-/// earlier draw's edits left.
-fn start(launch: engine::Launch, runtime: &tokio::runtime::Runtime) -> App {
+/// earlier draw's edits left, streaming as `stream` sets.
+fn start(launch: engine::Launch, stream: stream::Stream, runtime: &tokio::runtime::Runtime) -> App {
 	let _ = std::fs::remove_file("show.history.toml");
 	let (autosave, loaded) = autosave::Autosave::open("show.toml".into()).unwrap();
 	App::Starting(
 		runtime
 			.block_on(engine::Engine::start(launch, autosave, loaded))
 			.unwrap(),
+		stream,
 	)
 }
 
@@ -331,7 +403,8 @@ fn a_click_takes_and_the_panic_key_cuts() {
 		room: Some(Arc::new(room)),
 		..launch(&gpu)
 	};
-	let (mut harness, started, closed) = window(start(launch, &runtime), &gpu, &runtime, SIZE);
+	let app = start(launch, stream(None), &runtime);
+	let (mut harness, started, closed) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -398,7 +471,13 @@ fn a_layer_menu_edits_its_layer() {
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
-	let (mut harness, started, _) = window(start(launch(&gpu), &runtime), &gpu, &runtime, SIZE);
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
 	harness.step();
 	let App::Studio(studio) = &mut harness.state_mut().app else {
 		panic!("the studio starts on its first frame")
@@ -498,7 +577,13 @@ fn studio_mode_cues_and_takes() {
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
-	let (mut harness, started, _) = window(start(launch(&gpu), &runtime), &gpu, &runtime, SIZE);
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -571,7 +656,13 @@ fn mix_sends_and_mutes() {
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	std::fs::copy(fixture.join("shots/mix.toml"), "show.toml").unwrap();
-	let (mut harness, started, _) = window(start(launch(&gpu), &runtime), &gpu, &runtime, SIZE);
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
 	harness.step();
 	let App::Studio(studio) = &mut harness.state_mut().app else {
 		panic!("the studio starts on its first frame")
@@ -691,25 +782,34 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	if let &Open::Kit { sheet } = open {
 		return gallery(gpu, runtime, sheet);
 	}
+	if let Open::Library = open {
+		let (app, recent) = library_shelf();
+		let (mut harness, ..) = window(app, gpu, runtime, SIZE, recent);
+		// Enough for the pictures to load and the cards to settle.
+		harness.run_steps(4);
+		return harness.render().unwrap();
+	}
 	let app = match open {
-		Open::Setup => App::Setup(Box::new(
-			setup::Setup::new(launch(gpu), "show.toml".into(), runtime.handle().clone()).unwrap(),
-		)),
-		Open::Kit { .. } => unreachable!("drawn without an engine"),
-		Open::Studio { show, view, .. } => {
+		Open::Setup => {
+			let setup = setup::Setup::new(launch(gpu), None, "show.toml".into(), runtime.handle().clone());
+			App::Setup(Box::new(setup.unwrap()), stream(None))
+		}
+		Open::Kit { .. } | Open::Library => unreachable!("drawn without an engine"),
+		Open::Studio { show, view, relay, .. } => {
 			let mut text = std::fs::read_to_string(shows.join(show)).unwrap();
 			if let View::Review { replays: true, .. } = view {
 				text.push_str("\n[sources.replay]\nkind = \"replay\"\n\n[sources.slowmo]\nkind = \"replay\"\n");
 			}
 			std::fs::write("show.toml", text).unwrap();
-			start(launch(gpu), runtime)
+			let relay = relay.then(|| Relay::start(runtime));
+			start(launch(gpu), stream(relay.as_ref()), runtime)
 		}
 	};
 	let size = match open {
 		Open::Studio { size, .. } => *size,
 		_ => SIZE,
 	};
-	let (mut harness, started, _) = window(app, gpu, runtime, size);
+	let (mut harness, started, _) = window(app, gpu, runtime, size, library::Recent::default());
 
 	let Open::Studio { view, .. } = open else {
 		runtime
@@ -721,6 +821,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	let App::Studio(studio) = &mut harness.state_mut().app else {
 		panic!("the studio starts on its first frame")
 	};
+	let controls = studio.controls();
 	match view {
 		View::Page(page) => studio.turn(*page),
 		View::Mix(view, opened) => studio.mix(*view, *opened),
@@ -729,7 +830,8 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) => studio.open(*setting),
 		View::Health => studio.details(),
-		View::Hover | View::History => {}
+		View::Going => studio.going(),
+		View::Hover | View::History | View::OnAir | View::EndStream | View::OnAirHealth => {}
 		View::Cued(page) => {
 			studio.studio_mode(true);
 			studio.cue("Interview");
@@ -747,11 +849,36 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 	}
 	let engine = started.get().expect("the studio started").clone();
+	if let View::OnAir | View::EndStream | View::OnAirHealth = view {
+		controls.go_live().expect("going live starts");
+		runtime
+			.block_on(kio::clock::timeout(SETTLE, async {
+				while engine.on_air().live().is_none() {
+					kio::clock::sleep(Duration::from_millis(20)).await;
+				}
+			}))
+			.unwrap_or_else(|_| panic!("the studio goes live: {:?}", controls.refused.lock().unwrap()));
+	}
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
 		.expect("the sources and pictures settle");
 	match view {
 		View::Hover => hover(&mut harness),
+		View::Going => runtime
+			.block_on(kio::clock::timeout(SETTLE, checks(&mut harness)))
+			.expect("the go-live checks finish"),
+		View::EndStream => {
+			harness.get_by_label("End stream").hover();
+			harness.run_steps(2);
+		}
+		View::OnAirHealth => {
+			let pill = ["Healthy", "Starting", "Degraded", "Unhealthy"]
+				.into_iter()
+				.find_map(|name| harness.query_by_label(name))
+				.expect("the health dot");
+			pill.click();
+			harness.run_steps(2);
+		}
 		View::MixMenu => {
 			harness.get_by_label("Audio scene Headphones").click_secondary();
 			harness.run_steps(4);
@@ -805,7 +932,16 @@ fn window<'a>(
 	gpu: &engine::Gpu,
 	runtime: &'a tokio::runtime::Runtime,
 	size: egui::Vec2,
+	recent: library::Recent,
 ) -> (Harness<'a, Window>, Arc<OnceLock<Arc<engine::Engine>>>, Arc<AtomicBool>) {
+	let opener = show::Opener {
+		gpu: gpu.clone(),
+		runtime: runtime.handle().clone(),
+		flags: Default::default(),
+		client: Default::default(),
+		quic: Default::default(),
+		credentials: stream::Credentials::memory(),
+	};
 	let render = render_state(gpu);
 	let started = Arc::new(OnceLock::new());
 	let kept = started.clone();
@@ -822,8 +958,10 @@ fn window<'a>(
 			Window {
 				app,
 				render: render.clone(),
-				runtime: runtime.handle().clone(),
+				opener,
 				started: kept,
+				recent,
+				aired: None,
 				keyboard: hotkeys::Keyboard::default(),
 				fx,
 				framed: true,
@@ -870,11 +1008,65 @@ fn hover(harness: &mut Harness<'_, Window>) {
 		.expect("a sound to mute")
 		.click();
 	harness.run_steps(2);
-	harness.get_by_label("Not live").click();
+	harness.get_by_label("No relay").click();
 	harness.run_steps(2);
 	harness.get_by_label_contains("Undo: Mute").hover();
 	// egui shows a tooltip once the pointer rests half a second.
 	harness.run_steps(4);
+}
+
+/// The library's shows: a few recent ones, beside the view's directory, most
+/// with the person's picture as their last program.
+fn library_shelf() -> (App, library::Recent) {
+	let pictures = std::path::absolute("pictures").unwrap();
+	let person = image::open("person.jpg").unwrap().to_rgba8();
+	let day = 24 * 3600;
+	let now = library::now();
+	let shows = [
+		("Friday Night Ranked", Some((3 * day, 3 * 3600 + 120)), Some(false)),
+		("Sunday Chill", Some((6 * day, 6000)), Some(false)),
+		("Garage Sale Live", Some((14 * day, 55 * 60)), Some(true)),
+		("Podcast with Sam", None, None),
+		("Workbench Close-ups", Some((40 * day, 2 * 3600 + 900)), Some(false)),
+	];
+	let mut recent = library::Recent::default();
+	// Oldest first, so the first is the latest opened.
+	for (index, (name, live, picture)) in shows.into_iter().enumerate().rev() {
+		let path = std::path::absolute(format!("{name}.toml")).unwrap();
+		std::fs::write(&path, "").unwrap();
+		recent.opened(&path, now - 21 * day + (5 - index as u64) * 3600);
+		if let Some((ago, lasted)) = live {
+			recent.aired(&path, library::Aired { at: now - ago, lasted });
+		}
+		if let Some(portrait) = picture {
+			let (width, height) = if portrait { (360, 640) } else { (640, 360) };
+			let picture = image::imageops::resize(&person, width, height, image::imageops::FilterType::Triangle);
+			let picture = library::Picture {
+				width,
+				height,
+				rgba: picture.into_raw(),
+			};
+			recent.shaped(&path, portrait);
+			library::save_picture(&pictures, &path, &picture).unwrap();
+		}
+	}
+	let app = App::Library(Box::new(library::Library::new(Some(pictures))), None);
+	(app, recent)
+}
+
+/// Draw until the go-live sheet's checks finish.
+async fn checks(harness: &mut Harness<'_, Window>) {
+	loop {
+		harness.step();
+		let App::Studio(studio) = &harness.state().app else {
+			panic!("the studio stays open")
+		};
+		if studio.checked() {
+			break;
+		}
+		kio::clock::sleep(Duration::from_millis(50)).await;
+	}
+	harness.run_steps(2);
 }
 
 /// The last 30 seconds as of `now`: a keyframe every 2.5 s, a sun setting
@@ -972,7 +1164,7 @@ fn shelf() -> crate::shelf::Listing {
 async fn checked(harness: &mut Harness<'_, Window>) {
 	loop {
 		harness.step();
-		let App::Setup(setup) = &harness.state().app else {
+		let App::Setup(setup, _) = &harness.state().app else {
 			panic!("setup starts nothing on its own")
 		};
 		if setup.proposing() {

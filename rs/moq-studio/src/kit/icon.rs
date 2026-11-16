@@ -64,12 +64,19 @@ pub enum Icon {
 	Folder,
 	Save,
 	Repaired,
+	Open,
+	Check,
+	Encoder,
+	Warning,
+	Landscape,
+	Portrait,
+	Uplink,
 }
 
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 53] = [
+	pub const ALL: [Self; 60] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -123,6 +130,13 @@ impl Icon {
 		Self::Folder,
 		Self::Save,
 		Self::Repaired,
+		Self::Open,
+		Self::Check,
+		Self::Encoder,
+		Self::Warning,
+		Self::Landscape,
+		Self::Portrait,
+		Self::Uplink,
 	];
 
 	fn source(self) -> ImageSource<'static> {
@@ -180,6 +194,13 @@ impl Icon {
 			Self::Folder => include_image!("../../assets/icons/folder.svg"),
 			Self::Save => include_image!("../../assets/icons/download.svg"),
 			Self::Repaired => include_image!("../../assets/icons/shield.svg"),
+			Self::Open => include_image!("../../assets/icons/folder-open.svg"),
+			Self::Check => include_image!("../../assets/icons/check.svg"),
+			Self::Encoder => include_image!("../../assets/icons/cpu.svg"),
+			Self::Warning => include_image!("../../assets/icons/triangle-alert.svg"),
+			Self::Landscape => include_image!("../../assets/icons/rectangle-horizontal.svg"),
+			Self::Portrait => include_image!("../../assets/icons/rectangle-vertical.svg"),
+			Self::Uplink => include_image!("../../assets/icons/upload.svg"),
 		}
 	}
 

@@ -43,9 +43,6 @@ cef = ["moq-scene/cef"]
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
-# The user's videos folder, where recordings go when no scene file is named:
-# Linux keeps it in user-dirs.dirs, and Windows lets it be moved.
-dirs = "7"
 # The window, its event loop, and the egui integration. `wgpu` is the renderer
 # the compositor shares a device with; no glow, no system font discovery.
 # `persistence` keeps per-user picks, such as the output Listen plays on, out
@@ -58,6 +55,11 @@ hang = { workspace = true }
 # Stamps a recording's file name with when it started. Already in the graph
 # through moq-scene's humantime-serde.
 humantime = { workspace = true }
+# How long a guest's link lasts, as the stream settings file spells it.
+humantime-serde = { workspace = true }
+# The relay tokens, in the operating system's credential store rather than a
+# file; each platform's store is its own crate, below.
+keyring-core = "1.0"
 kio = { workspace = true, features = ["async", "runtime"] }
 moq-audio = { workspace = true }
 # Signs guest tokens with the room key.
@@ -72,9 +74,14 @@ moq-video = { workspace = true }
 # A recording's length, from its movie header; the version moq-mux writes it
 # with.
 mp4-atom = "0.17.0"
+# A show's picture in the library, the last frame of its program.
+png = "0.18"
 pollster = { workspace = true }
 # The join link's QR code. No dependencies of its own.
 qrcodegen = "1.8"
+# The system's own dialog for opening a show file or saving a new one: the
+# desktop portal on Linux, so it works in the Flatpak.
+rfd = "0.18"
 # Whether a recording's marker is still the file its holder locked, which std
 # cannot tell on Windows.
 same-file = "1.0.6"
@@ -113,6 +120,9 @@ raw-window-handle = "0.6"
 # Hotkeys on X11, grabbed by keycode so any key binds on any layout. `xkb`
 # tells a held key's repeats from new presses.
 x11rb = { version = "0.13", features = ["xkb"] }
+# Relay tokens in the Secret Service (GNOME Keyring, KWallet), over the D-Bus
+# stack ashpd uses, on tokio as ashpd has it, with no system library.
+zbus-secret-service-keyring-store = { version = "1.0", features = ["rt-tokio-crypto-rust"] }
 
 [target.'cfg(unix)'.dependencies]
 # The room left on the recordings folder's disk. moq-scene's release.
@@ -127,6 +137,8 @@ global-hotkey = "0.9"
 # Whether the system asks apps to reduce motion, for the effects. eframe's
 # version, already in the graph through winit.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
+# Relay tokens in the login keychain.
+apple-native-keyring-store = { version = "1.0", features = ["keychain"] }
 
 [target.'cfg(windows)'.dependencies]
 # Which virtual key the foreground window's layout puts on each key, so a
@@ -134,6 +146,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # reduce motion, for the effects, and the room left on the recordings folder's
 # disk.
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+# Relay tokens in the Windows Credential Manager. Without `search`, which the
+# studio never does, so no regex.
+windows-native-keyring-store = { version = "1.1", default-features = false }
 
 [build-dependencies]
 # Rasterizes the app icon's SVG for the window. No text or embedded images, so

@@ -36,14 +36,17 @@ mod inspector;
 mod layers;
 mod layout;
 mod levels;
+mod live;
 mod mixer;
 mod review;
 mod settings;
 mod shell;
 
+pub(crate) use layout::fit;
 use levels::Levels;
 #[cfg(test)]
 pub(crate) use mixer::View as MixView;
+pub(crate) use shell::dashed;
 
 /// The smallest the window gets, at which every part still has room.
 pub const MIN_SIZE: egui::Vec2 = layout::MIN;
@@ -98,11 +101,14 @@ pub(crate) enum Setting {
 	Effects,
 	/// The scene graph: every source, scene, and audio scene, wired.
 	Advanced,
+	/// Where the show streams: its relays, their tokens, and the broadcast.
+	Stream,
 }
 
 impl Setting {
-	const ALL: [Self; 5] = [
+	const ALL: [Self; 6] = [
 		Self::Show,
+		Self::Stream,
 		Self::Recording,
 		Self::Hotkeys,
 		Self::Effects,
@@ -112,6 +118,7 @@ impl Setting {
 	fn name(self) -> &'static str {
 		match self {
 			Self::Show => "Show",
+			Self::Stream => "Stream",
 			Self::Recording => "Recording",
 			Self::Hotkeys => "Hotkeys",
 			Self::Effects => "Effects",
@@ -159,10 +166,12 @@ pub struct Studio {
 }
 
 impl Studio {
-	/// The studio on `engine`, `framed` if its title bar is the window's frame.
+	/// The studio on `engine`, streaming as `stream` sets, `framed` if its
+	/// title bar is the window's frame.
 	pub fn new(
 		render: &eframe::egui_wgpu::RenderState,
 		engine: Arc<Engine>,
+		stream: crate::stream::Stream,
 		runtime: tokio::runtime::Handle,
 		framed: bool,
 	) -> Self {
@@ -179,7 +188,8 @@ impl Studio {
 				state.dropped,
 			)
 		};
-		let controls = Arc::new(Controls::new(engine.clone(), runtime.clone()));
+		let controls = Arc::new(Controls::new(engine.clone(), stream, runtime.clone()));
+		drop(controls.follow_relays());
 		let review = review::Review::new(&engine, &runtime);
 		let mut panels = Panels {
 			engine,
@@ -199,7 +209,9 @@ impl Studio {
 			details: false,
 			side: Side::default(),
 			inspect: Inspect::default(),
-			launched: kio::clock::now(),
+			going: None,
+			ending: None,
+			stream_form: None,
 			selection: None,
 			cropping: false,
 			gestures: Gestures::default(),
@@ -264,6 +276,21 @@ impl Studio {
 	/// Open the stream's health in detail, as the health dot's popover would.
 	pub(crate) fn details(&mut self) {
 		self.panels.details = true;
+	}
+
+	/// Open the go-live sheet, as GO LIVE would.
+	pub(crate) fn going(&mut self) {
+		self.panels.open_going();
+	}
+
+	/// Whether the go-live sheet's checks have finished, or it is closed.
+	pub(crate) fn checked(&self) -> bool {
+		self.panels.going.as_ref().is_none_or(live::Going::done)
+	}
+
+	/// What the buttons and hotkeys do, such as going live.
+	pub(crate) fn controls(&self) -> Arc<Controls> {
+		self.panels.controls.clone()
 	}
 
 	/// Show `listing` as REVIEW's cards, as if the folder held them.
@@ -380,6 +407,7 @@ impl Studio {
 		if let Some(hotkeys) = &mut self.panels.hotkeys {
 			hotkeys.hear();
 		}
+		self.panels.follow_stream_save();
 	}
 
 	/// Draw the window, with `fx` drawing its effects.
@@ -405,7 +433,7 @@ impl Studio {
 				.first()
 				.map_or(Verdict::Healthy, |problem| problem.verdict)
 		};
-		fx.follow(panels.engine.output.is_some(), snapshot.takes, verdict);
+		fx.follow(panels.engine.on_air().live().is_some(), snapshot.takes, verdict);
 		panels.window(ui, fx, &snapshot);
 		// A stage not shown hears no input, so it lets go of the pages, as
 		// turning Interact off does.
@@ -489,9 +517,12 @@ struct Panels {
 	/// The BUILD page's left column and inspector tabs.
 	side: Side,
 	inspect: Inspect,
-	/// When the studio started, which it is live from with `--connect`, until
-	/// going live is its own step (quest/m0/ux/go-live.md).
-	launched: kio::clock::Instant,
+	/// The go-live sheet, while open.
+	going: Option<live::Going>,
+	/// Since when END STREAM has been held down.
+	ending: Option<kio::clock::Instant>,
+	/// The Stream tab's form, while it has edits not yet saved.
+	stream_form: Option<live::Form>,
 	/// The layer the inspector edits, the picture's handles hold, and a copy
 	/// takes.
 	selection: Option<Picked>,

@@ -53,14 +53,15 @@ impl Panels {
 		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
 		let watched = stats.video.watched.load(Ordering::Relaxed);
 
+		let on_air = self.engine.on_air();
 		egui::Grid::new("output").show(ui, |ui| {
-			match &self.engine.output {
-				Some(output) => {
+			match on_air.live() {
+				Some(live) => {
 					ui.label("Broadcast");
-					ui.label(&output.path);
+					ui.label(&live.path);
 					ui.end_row();
 					ui.label("Encoding");
-					ui.label(match (output.on_demand, watched) {
+					ui.label(match (live.on_demand, watched) {
 						(false, _) => "the canvas size always, half size while watched",
 						(true, true) => "while watched; watched now",
 						(true, false) => "while watched; idle now",
@@ -68,8 +69,8 @@ impl Panels {
 					ui.end_row();
 				}
 				None => {
-					ui.label("Relay");
-					ui.label("none; start with --connect to publish");
+					ui.label("On air");
+					ui.label("no; GO LIVE sends the program to the relays in Settings, Stream");
 					ui.end_row();
 					ui.label("Encoding");
 					ui.label("only the recording's encoder, while recording");
@@ -102,10 +103,18 @@ impl Panels {
 			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
 		}
 
-		for (name, video) in stats.published() {
+		// Every published scene, on air or not, since its virtual camera works
+		// off air too; its encoder runs only on air.
+		let encoding = stats.published();
+		let published: Vec<String> = {
+			let state = self.engine.state.lock().unwrap();
+			let scenes = state.collection().scenes.iter().filter(|scene| scene.published);
+			scenes.map(|scene| scene.name.clone()).collect()
+		};
+		for name in published {
 			ui.separator();
 			ui.strong(format!("Scene `{name}`"));
-			if let Some(output) = &self.engine.output {
+			if let Some(live) = on_air.live() {
 				let state = self.engine.state.lock().unwrap();
 				let audio = state
 					.collection()
@@ -113,18 +122,20 @@ impl Panels {
 					.unwrap_or_default()
 					.to_string();
 				drop(state);
-				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", output.path));
+				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", live.path));
 			}
-			ui.label(format!(
-				"Encoder: {}",
-				video.encoder().unwrap_or_else(|| "not open".into())
-			));
-			renditions(ui, Some(&name), &video, false);
-			if let Some(error) = video.error() {
-				ui.colored_label(ui.visuals().error_fg_color, error);
-			}
-			if let Some(error) = video.audio_error() {
-				ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
+			if let Some(video) = encoding.get(&name) {
+				ui.label(format!(
+					"Encoder: {}",
+					video.encoder().unwrap_or_else(|| "not open".into())
+				));
+				renditions(ui, Some(&name), video, false);
+				if let Some(error) = video.error() {
+					ui.colored_label(ui.visuals().error_fg_color, error);
+				}
+				if let Some(error) = video.audio_error() {
+					ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
+				}
 			}
 			self.camera(ui, Some(&name));
 		}
@@ -425,7 +436,10 @@ impl Panels {
 				self.check(result);
 			}
 		});
-		ui.weak("Set with --recordings. Clips are saved here too.");
+		ui.weak(
+			"Set by recordings in the show's .stream.toml, or --recordings for one run, and beside the show by \
+			 default. Clips are saved here too.",
+		);
 		ui.add_space(8.0);
 		self.recorded_scene(ui);
 		ui.weak("The program is what viewers see. A scene records at its own size.");

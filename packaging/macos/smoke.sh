@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Launch the app bundle given as Finder does, through Launch Services with no
-# arguments, and check that it lists cameras and audio, opens its window, and
-# quits when asked without crashing. A fresh home directory makes it open a
-# new scene collection, so guided setup lists the devices.
+# Launch the app bundle given through Launch Services, as Finder does, and
+# check that it lists cameras and audio, opens its window, and quits when
+# asked without crashing. Without arguments it opens the library of recent
+# shows, so it is handed a show not yet made, whose guided setup lists the
+# devices.
 # Given a disk image instead, it mounts it as a download is and launches the
 # app inside, after checking the image offers the drag to Applications.
 set -euo pipefail
@@ -63,9 +64,10 @@ reports=~/Library/Logs/DiagnosticReports
 marker=$home/started
 touch "$marker"
 
-open -n "$app" --stdout "$log" --stderr "$log" --env HOME="$home" --env NO_COLOR=1
+show=$home/show.toml
+open -n "$app" --stdout "$log" --stderr "$log" --env HOME="$home" --env NO_COLOR=1 --args "$show"
 deadline=$((SECONDS + 30))
-until pid=$(pgrep -nfx "$executable"); do
+until pid=$(pgrep -nfx "$executable $show"); do
     ((SECONDS < deadline)) || fail "the studio never started"
     sleep 0.1
 done

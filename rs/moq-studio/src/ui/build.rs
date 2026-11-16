@@ -99,12 +99,8 @@ impl Panels {
 		});
 		let (canvas, id, frame) = match off_air {
 			Some((canvas, tag)) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag(tag)),
-			// It is the live picture, so the accent frame stays while editing it.
-			None => (
-				self.program_drawn,
-				self.program.id,
-				TallyFrame::new(Tally::Air).tag("On air"),
-			),
+			// It is the live picture, so its frame says whether it is on air.
+			None => (self.program_drawn, self.program.id, self.program_frame()),
 		};
 		let builder = egui::UiBuilder::new().max_rect(at.expand(10.0));
 		if self.interacting {

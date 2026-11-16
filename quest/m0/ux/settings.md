@@ -9,8 +9,8 @@ title bar's gear, as in
 - **Show:** landscape or portrait, the canvas size and frame rate as a few
   named choices with the numbers behind Custom, and per-scene sizes behind a
   disclosure.
-- **Stream:** the relay, failover, and options from
-  [go live](/quest/m0/ux/go-live.md).
+- **Stream:** the relay, its token, the failover, the broadcast's name, and
+  on demand, as today's Stream tab holds them in `<show>.stream.toml`.
 - **Recording:** the folder, what a recording holds, and each source too.
 - **Hotkeys:** today's Hotkeys panel, on keycaps.
 - **Guests:** the room, its key, the join page, and how long a link lasts.
@@ -40,10 +40,16 @@ bar.
   says so before it applies while on air.
 - The scene graph (`rs/moq-studio/src/ui/graph.rs`) opens from Advanced in a
   window of its own.
+- The Recording pane's folder and the Guests pane's room, key, join page, and
+  link lifetime are already fields of `<show>.stream.toml` (`recordings`,
+  `room`, `room_key`, `join_page`, `guest_expiry`), which go live
+  ([moq-dev/studio#175](https://github.com/moq-dev/studio/pull/175)) saves
+  but gives no UI; the Recording tab shows and opens the folder but cannot
+  change it. These panes edit them there, and a flag that overrides one
+  shows it as the flag's, as the Stream pane does.
+- A room or relay change reaches the open show's guests at once: the guest
+  room renews its links against the new room and relay, instead of only after
+  the show is reopened, as go live left it.
 
 Human check: whether each setting is where a streamer would look for it, and
 the words on each pane.
-
-## Required
-
-- [Going live from inside the app](/quest/m0/ux/go-live.md) - the Stream pane's settings and where they are saved

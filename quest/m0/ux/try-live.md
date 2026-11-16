@@ -25,6 +25,12 @@ says where to find it). What to try:
   edge, snapping to a screen edge, and full screen.
 - **macOS:** the system title bar stays after first-run setup until the next
   launch, then the studio's own frame replaces it.
+- **Going live** ([moq-dev/studio#175](https://github.com/moq-dev/studio/pull/175)):
+  opening a show from the library, a real stream to a relay with your token
+  set in Settings, Stream (kept in the OS credential store; only Linux's
+  Secret Service has been exercised, so macOS's keychain matters most), the
+  GO LIVE sheet's checks, ending by holding END STREAM for 1.2 s, and the Go
+  live and End stream hotkeys while another app is full screen.
 
 An agent then turns each finding into a quest, or an edit to the quest that
 owns that page, and deletes this one.
