@@ -17,7 +17,3 @@ Planned 2026-11-09 (maintainer, /quest-plan), and held for later: ✅ m2
   same keyframe limits apply.
 - Chapters are written when a recording becomes a regular MP4.
 - Marker is a hotkey action.
-
-## Required
-
-- [The REVIEW page](/quest/m0/ux/review.md) - the strip and the list markers appear on

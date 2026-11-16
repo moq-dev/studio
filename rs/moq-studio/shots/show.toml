@@ -19,6 +19,11 @@ color = "#101828"
 kind = "color"
 color = "#2563ebe6"
 
+# Shown by no layer, which Add offers to place or remove.
+[sources.highlight]
+kind = "color"
+color = "#f59e0b"
+
 [sources.guest]
 kind = "broadcast"
 path = "room/guest"

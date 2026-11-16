@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use winit::keyboard::{Key, KeyCode, ModifiersState, NativeKeyCode, PhysicalKey};
 
-use crate::controls::{self, Action, Controls};
+use crate::controls::{Action, Controls};
 
 // Tested on macOS too, which global-hotkey builds for.
 #[cfg(any(windows, all(test, target_os = "macos")))]
@@ -306,7 +306,7 @@ impl Hotkeys {
 				};
 				match &action {
 					Action::Scene(name) => {
-						let result = controls::take(&mut state, name);
+						let result = controls.scene(&mut state, name);
 						drop(state);
 						controls.report(&action, result.map_err(|err| format!("{err:#}")));
 					}

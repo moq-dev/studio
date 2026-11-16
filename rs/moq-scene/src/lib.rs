@@ -14,7 +14,9 @@
 //!   beside the scene file. A [`Clip`] carries items or filters between
 //!   scenes and collections as text.
 //! - [`source::Sources`] runs each source: a camera, display, window,
-//!   microphone, or system-audio capture (with the `capture` feature), a still
+//!   microphone, or system-audio capture (with the `capture` feature), a
+//!   display or window the system picker grants, kept granted by [`Grants`]
+//!   (Linux, with the `pipewire` feature), a still
 //!   image, a video or audio file, a solid color, a broadcast subscribed over MoQ, or a web page
 //!   rendered by a browser engine (the [`browser`] module). Pictures go to the
 //!   compositor and sound goes to a `moq_audio::bus::Bus`, routed into a mix
@@ -46,6 +48,7 @@ mod collection;
 mod compositor;
 mod edit;
 mod effect;
+mod grant;
 pub mod layout;
 mod lut;
 mod matte;
@@ -60,10 +63,11 @@ pub mod source;
 pub use clip::Clip;
 pub use collection::{
 	Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item, Keyframe, Layer,
-	MaskMode, Nested, Rect, Rgba, Scene, Size, Source, Transition, Video,
+	MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Source, Transition, Video,
 };
 pub use compositor::{Compositor, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
+pub use grant::Grants;
 pub use scale::Scaler;
 
 /// Errors from loading scenes, opening sources, and drawing them.
@@ -143,4 +147,8 @@ pub enum Error {
 	/// a picture back for it.
 	#[error("background removal: {0}")]
 	Matte(String),
+
+	/// The screen-sharing grants file could not be read or written.
+	#[error("screen-sharing grants: {0}")]
+	Grants(String),
 }
