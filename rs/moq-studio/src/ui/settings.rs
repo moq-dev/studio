@@ -27,9 +27,19 @@ const NAV_ICONS: f32 = 60.0;
 /// The pane's space each side of its rows.
 const MARGIN: f32 = 32.0;
 
-/// A pane narrower than this puts each row's control under its name: the
-/// widest control, the format cards, no longer fits beside the name.
-const STACK: f32 = 580.0;
+/// The share of a row's width its name takes, beside its control.
+const NAME: f32 = 0.42;
+
+/// A format card's size, and the space between the two.
+const CARD: Vec2 = vec2(176.0, 76.0);
+const CARD_GAP: f32 = 10.0;
+
+/// The narrowest pane whose rows keep their control beside their name: the
+/// widest control, the two format cards, then still fits. Narrower, each
+/// row puts its control under its name.
+fn stack(ui: &Ui) -> f32 {
+	(2.0 * CARD.x + CARD_GAP + ui.spacing().item_spacing.x) / (1.0 - NAME)
+}
 
 /// The canvas sizes offered by name, by their short side, each 16:9; any
 /// other is Custom.
@@ -143,7 +153,7 @@ impl Panels {
 				ui.set_min_size(size);
 				ui.set_max_size(size);
 				let rect = ui.max_rect();
-				let icons = rect.width() - NAV - 2.0 * MARGIN < STACK;
+				let icons = rect.width() - NAV - 2.0 * MARGIN < stack(ui);
 				let nav = Rect::from_min_size(rect.min, vec2(if icons { NAV_ICONS } else { NAV }, rect.height()));
 				let pane = Rect::from_min_max(pos2(nav.right(), rect.top()), rect.max);
 				self.settings_nav(ui, nav, icons, &mut setting);
@@ -249,7 +259,7 @@ impl Panels {
 			"Format",
 			"One format for the whole show. The layout of this window follows it.",
 			|ui| {
-				ui.spacing_mut().item_spacing.x = 10.0;
+				ui.spacing_mut().item_spacing.x = CARD_GAP;
 				// Right to left, so Landscape comes first.
 				for (tall, name, says, icon) in [
 					(true, "Portrait", "Phones", Icon::Portrait),
@@ -1302,7 +1312,7 @@ fn rule(ui: &mut Ui) {
 /// A setting's row, under a line: its name and what it costs on the left,
 /// its control on the right.
 pub(super) fn row(ui: &mut Ui, name: &str, help: &str, control: impl FnOnce(&mut Ui)) {
-	labeled(ui, name, help, 0.46, |ui| {
+	labeled(ui, name, help, NAME, |ui| {
 		ui.horizontal(|ui| ui.with_layout(Layout::right_to_left(Align::Center), control));
 	});
 }
@@ -1333,7 +1343,7 @@ fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce
 			help_label(ui, help);
 		}
 	};
-	if width < STACK {
+	if width < stack(ui) {
 		label(ui);
 		ui.add_space(10.0);
 		control(ui);
@@ -1379,7 +1389,7 @@ fn note(ui: &mut Ui, text: &str) {
 
 /// One of the two formats, as a card with its shape: whether it was clicked.
 fn format_card(ui: &mut Ui, icon: Icon, name: &str, says: &str, on: bool) -> egui::Response {
-	let (rect, response) = ui.allocate_exact_size(vec2(176.0, 76.0), Sense::click());
+	let (rect, response) = ui.allocate_exact_size(CARD, Sense::click());
 	response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, name));
 	let painter = ui.painter();
 	let (fill, stroke) = match (on, response.hovered()) {
