@@ -3,7 +3,7 @@
 //! window's layout puts there.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Once, mpsc};
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -24,11 +24,42 @@ pub struct Native {
 	layout: super::layout::Foreground,
 }
 
+/// Where the keys the platform reports go: the show open now, if any.
+struct Route {
+	/// The key each registered hotkey hears, by its id.
+	registered: Arc<Mutex<HashMap<u32, Binding>>>,
+	fire: mpsc::Sender<Binding>,
+}
+
+/// global-hotkey keeps the first handler it is given for as long as the
+/// process runs, so one handler is installed once and reads its target from
+/// here, which each show sets as it opens and clears as it closes.
+static ROUTE: Mutex<Option<Route>> = Mutex::new(None);
+static HANDLER: Once = Once::new();
+
+/// Send a hotkey the platform reported to the show open now.
+fn deliver(event: GlobalHotKeyEvent) {
+	if event.state() != HotKeyState::Pressed {
+		return;
+	}
+	if let Some(route) = ROUTE.lock().unwrap().as_ref()
+		&& let Some(key) = route.registered.lock().unwrap().get(&event.id())
+	{
+		let _ = route.fire.send(key.clone());
+	}
+}
+
 impl Drop for Native {
 	/// The manager unregisters the keys as it drops; this lets go of the
-	/// handler, which holds the channel firing them.
+	/// channel firing them, unless a later show already took the route.
 	fn drop(&mut self) {
-		GlobalHotKeyEvent::set_event_handler(None::<fn(GlobalHotKeyEvent)>);
+		let mut route = ROUTE.lock().unwrap();
+		if route
+			.as_ref()
+			.is_some_and(|route| Arc::ptr_eq(&route.registered, &self.registered))
+		{
+			*route = None;
+		}
 	}
 }
 
@@ -43,15 +74,11 @@ impl Native {
 	) -> Result<Self, global_hotkey::Error> {
 		let manager = GlobalHotKeyManager::new()?;
 		let registered: Arc<Mutex<HashMap<u32, Binding>>> = Arc::default();
-		let heard = registered.clone();
-		GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-			if event.state() != HotKeyState::Pressed {
-				return;
-			}
-			if let Some(key) = heard.lock().unwrap().get(&event.id()) {
-				let _ = fire.send(key.clone());
-			}
-		}));
+		HANDLER.call_once(|| GlobalHotKeyEvent::set_event_handler(Some(deliver)));
+		*ROUTE.lock().unwrap() = Some(Route {
+			registered: registered.clone(),
+			fire,
+		});
 		#[cfg(not(windows))]
 		let _ = (ctx, runtime);
 		Ok(Self {
