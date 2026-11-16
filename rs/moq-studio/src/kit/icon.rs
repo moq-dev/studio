@@ -18,10 +18,6 @@ pub enum Icon {
 	Shown,
 	Hidden,
 	Panic,
-	#[cfg_attr(
-		not(test),
-		expect(dead_code, reason = "Studio mode's switch: quest/m0/ux/studio-mode.md")
-	)]
 	StudioMode,
 	Add,
 	Close,

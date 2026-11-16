@@ -617,6 +617,9 @@ impl Panels {
 			if state.compositor.program_scene() == Some(name) {
 				ui.add(kit::Tag::new("On air", kit::Tally::Air));
 			}
+			if state.cued() == Some(name) {
+				ui.add(kit::Tag::new("Next", kit::Tally::Cue));
+			}
 		});
 		if let Some(size) = scene.size {
 			ui.weak(format!("{}x{}", size.width, size.height));

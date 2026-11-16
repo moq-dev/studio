@@ -15,15 +15,15 @@ use crate::replay;
 /// Something a hotkey can be bound to.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Action {
-	/// Put the preview on program at once. Studio mode's TAKE
-	/// (quest/m0/ux/studio-mode.md); until then the preview is always the
-	/// scene on program, so it is not offered.
+	/// TAKE: put the cued scene on program at once.
 	Cut,
-	/// Take the preview to program by the show's transition: Studio mode's
-	/// AUTO, not offered until then either.
+	/// AUTO: take the cued scene to program by the show's transition.
 	Transition,
-	/// Take a scene, by name, on program by the show's transition.
+	/// Take a scene, by name, on program by the show's transition, or cue it
+	/// while Studio mode is on.
 	Scene(String),
+	/// Turn Studio mode on or off.
+	StudioMode,
 	/// Play the recent past the Replay panel picks in its replay source.
 	Replay,
 	/// Save the recent past the Replay panel picks as a clip.
@@ -35,21 +35,36 @@ pub enum Action {
 }
 
 impl Action {
-	/// The actions every scene file has, as the Hotkeys panel lists them.
-	pub const FIXED: [Self; 4] = [Self::Panic, Self::Replay, Self::SaveClip, Self::Record];
+	/// The actions every scene file has, as the Hotkeys tab lists them.
+	pub const FIXED: [Self; 7] = [
+		Self::Panic,
+		Self::Cut,
+		Self::Transition,
+		Self::StudioMode,
+		Self::Replay,
+		Self::SaveClip,
+		Self::Record,
+	];
 
-	/// Whether a key can be bound to it: a fixed action, or a scene.
-	pub fn offered(&self) -> bool {
-		matches!(self, Self::Scene(_)) || Self::FIXED.contains(self)
+	/// What it does with Studio mode on or off, as the Hotkeys tab and a
+	/// hotkey's message name it.
+	pub fn name(&self, studio: bool) -> String {
+		match (self, studio) {
+			(Self::Scene(name), true) => format!("Cue scene `{name}`"),
+			(Self::Scene(name), false) => format!("Take scene `{name}`"),
+			_ => self.to_string(),
+		}
 	}
 }
 
 impl std::fmt::Display for Action {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::Cut => write!(f, "Cut"),
-			Self::Transition => write!(f, "Transition"),
-			Self::Scene(name) => write!(f, "Take scene `{name}`"),
+			Self::Cut => write!(f, "Take the cued scene"),
+			Self::Transition => write!(f, "Auto: take the cued scene by the transition"),
+			// The desktop's shortcut settings show it whichever mode is on.
+			Self::Scene(name) => write!(f, "Take or cue scene `{name}`"),
+			Self::StudioMode => write!(f, "Turn Studio mode on or off"),
 			Self::Replay => write!(f, "Replay"),
 			Self::SaveClip => write!(f, "Save clip"),
 			Self::Record => write!(f, "Start or stop recording"),
@@ -66,6 +81,9 @@ pub struct Controls {
 	pub replay: Mutex<Replay>,
 	/// Whether the next recording gives each source a file of its own too.
 	pub record_sources: AtomicBool,
+	/// Whether Studio mode is on: a scene's pad or key cues it rather than
+	/// taking it.
+	studio: AtomicBool,
 	/// How the last action a hotkey fired went, until the status bar takes it.
 	fired: Arc<Mutex<Option<Result<String, String>>>>,
 }
@@ -100,7 +118,27 @@ impl Controls {
 			runtime,
 			replay: Mutex::default(),
 			record_sources: AtomicBool::new(false),
+			studio: AtomicBool::new(false),
 			fired: Arc::default(),
+		}
+	}
+
+	/// Whether Studio mode is on.
+	pub fn studio(&self) -> bool {
+		self.studio.load(Ordering::Relaxed)
+	}
+
+	/// Turn Studio mode on or off.
+	pub fn set_studio(&self, on: bool) {
+		self.studio.store(on, Ordering::Relaxed);
+	}
+
+	/// Do what a scene's key does to the scene called `name`, under `state`
+	/// locked by the caller: cue it in Studio mode, or else take it.
+	pub fn scene(&self, state: &mut State, name: &str) -> anyhow::Result<String> {
+		match self.studio() {
+			true => cue(state, name),
+			false => take(state, name),
 		}
 	}
 
@@ -108,17 +146,23 @@ impl Controls {
 	pub fn fire(&self, action: &Action) -> anyhow::Result<String> {
 		match action {
 			Action::Cut => {
-				let mut state = self.engine.state.lock().unwrap();
-				state.cut()?;
-				Ok(format!("cut to {}", on_program(state.compositor.program_scene())))
+				let scene = self.engine.state.lock().unwrap().take_cued(None)?;
+				Ok(format!("took `{scene}`"))
 			}
 			Action::Transition => {
 				let mut state = self.engine.state.lock().unwrap();
 				let transition = state.collection().transition.clone();
-				state.transition(transition, kio::clock::Instant::now())?;
-				Ok(format!("took {}", on_program(state.compositor.program_scene())))
+				let scene = state.take_cued(Some((transition, kio::clock::Instant::now())))?;
+				Ok(format!("took `{scene}`"))
 			}
-			Action::Scene(name) => take(&mut self.engine.state.lock().unwrap(), name),
+			Action::Scene(name) => self.scene(&mut self.engine.state.lock().unwrap(), name),
+			Action::StudioMode => {
+				let on = !self.studio.fetch_xor(true, Ordering::Relaxed);
+				Ok(match on {
+					true => "Studio mode on: a scene's pad or key cues it".into(),
+					false => "Studio mode off: a scene's pad or key takes it".into(),
+				})
+			}
 			Action::Panic => self.engine.state.lock().unwrap().panic(self.engine.room.as_deref()),
 			Action::Replay => self.replay(true, false),
 			Action::SaveClip => self.replay(false, false),
@@ -225,6 +269,7 @@ impl Controls {
 
 	/// Keep how `action`, fired by a hotkey, went for the status bar.
 	pub fn report(&self, action: &Action, result: Result<String, String>) {
+		let action = action.name(self.studio());
 		*self.fired.lock().unwrap() = Some(result.map_err(|err| format!("{action}: {err}")));
 	}
 
@@ -241,9 +286,12 @@ pub fn take(state: &mut State, name: &str) -> anyhow::Result<String> {
 	Ok(format!("took `{scene}`"))
 }
 
-fn on_program(scene: Option<&str>) -> String {
-	match scene {
-		Some(scene) => format!("`{scene}`"),
-		None => "nothing".into(),
-	}
+/// Cue the scene called `name`, under `state` locked by the caller, as
+/// [`take`] takes it.
+pub fn cue(state: &mut State, name: &str) -> anyhow::Result<String> {
+	let scene = state.cue(name)?;
+	Ok(match state.cued() {
+		Some(_) => format!("cued `{scene}`; TAKE or AUTO puts it on air"),
+		None => format!("`{scene}` is on air; nothing is cued"),
+	})
 }
