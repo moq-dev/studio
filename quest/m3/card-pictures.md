@@ -8,8 +8,8 @@ picture, where it shows a placeholder tile today.
 
 ## Plan
 
-Decided 2026-11-15 (agent's recommendation on moq-dev/studio#177, for the
-maintainer to keep or drop): ✅ decode through moq-mux's regular MP4 import
+Decided 2026-11-15 (agent's recommendation on moq-dev/studio#177, which the
+maintainer kept when picking it to merge): ✅ decode through moq-mux's regular MP4 import
 (rejected: reading the first sample here with `mp4-atom`, since demuxing
 belongs in moq; dropping the pictures from the mock-up).
 
