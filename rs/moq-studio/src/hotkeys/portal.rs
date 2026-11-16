@@ -104,6 +104,9 @@ async fn run(
 				}
 				changed = wanted.changed() => {
 					if changed.is_err() {
+						// The show closed: the desktop keeps a session until it is
+						// asked to end it, and would go on holding the keys.
+						let _ = session.close().await;
 						return Ok(());
 					}
 					break;

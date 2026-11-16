@@ -484,6 +484,14 @@ impl Hotkeys {
 	}
 }
 
+impl Drop for Hotkeys {
+	/// Leave the window's keyboard as the library, which has no show to fire
+	/// on, finds it: its keys act on nothing.
+	fn drop(&mut self) {
+		self.keyboard.take(Taking::Nothing);
+	}
+}
+
 impl Backend {
 	/// Pick where keys are heard from what the platform offers.
 	fn new(window: &Window<'_>, runtime: &tokio::runtime::Handle, fire: mpsc::Sender<Binding>) -> Self {

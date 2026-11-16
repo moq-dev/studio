@@ -375,6 +375,7 @@ impl Panels {
 		});
 		let width = 22.0 + name.as_ref().map_or(0.0, |name| 10.0 + name.size().x + 4.0 + 12.0);
 		let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+		response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "The show"));
 		let response = kit::tip(response, "The show", None);
 		let painter = ui.painter();
 		let logo = Rect::from_min_size(pos2(rect.left(), rect.center().y - 11.0), Vec2::splat(22.0));
@@ -402,6 +403,15 @@ impl Panels {
 			if ui.button("Paste").clicked() {
 				// Arrives as a paste event on a later frame.
 				ui.ctx().send_viewport_cmd(ViewportCommand::RequestPaste);
+			}
+			// Closing ends the show as quitting does, which would cut a stream
+			// on air: the broadcaster ends that with END STREAM.
+			let off = matches!(self.engine.on_air(), crate::engine::OnAir::Off) && !self.controls.going();
+			let close = ui.add_enabled(off, kit::button(Icon::Close, "Close show"));
+			if !off {
+				kit::tip(close, "End the stream first", None);
+			} else if close.clicked() {
+				self.closing = true;
 			}
 		});
 	}

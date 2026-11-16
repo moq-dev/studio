@@ -975,8 +975,9 @@ pub struct Engine {
 	/// A session to each relay set for the show, which only subscribes, so
 	/// broadcast sources and guests are seen off air too.
 	watching: Mutex<Vec<air::Watch>>,
-	/// Set by [`stop`](Self::stop), which ends the program clock.
-	stopped: AtomicBool,
+	/// Set by [`stop`](Self::stop), which ends the program clock and the tasks
+	/// that run only for as long as the engine does.
+	stopped: tokio::sync::watch::Sender<bool>,
 	/// The program clock's and the audio's threads, which [`stop`](Self::stop)
 	/// waits on.
 	threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -1115,7 +1116,7 @@ impl Engine {
 			program,
 			subscribe,
 			watching: Mutex::default(),
-			stopped: AtomicBool::new(false),
+			stopped: tokio::sync::watch::Sender::new(false),
 			threads: Mutex::default(),
 			running: Mutex::default(),
 		});
@@ -1156,9 +1157,17 @@ impl Engine {
 		})?;
 		engine.threads.lock().unwrap().push(thread);
 		let save = engine.clone();
-		clocked("autosave".into(), async move || save.autosave.run(&save.state).await)?;
+		let mut stopped = engine.stopped.subscribe();
+		let thread = clocked("autosave".into(), async move || {
+			tokio::select! {
+				() = save.autosave.run(&save.state) => {}
+				// Its last write is the one quitting makes.
+				_ = stopped.wait_for(|stopped| *stopped) => {}
+			}
+		})?;
+		engine.threads.lock().unwrap().push(thread);
 		starting.started();
-		tokio::spawn(engine.clone().grade());
+		engine.until_stopped(engine.clone().grade());
 
 		Ok(engine)
 	}
@@ -1233,10 +1242,11 @@ impl Engine {
 	/// finishes, so a recording reading the program reaches its end. Then stop
 	/// every source, which finishes its own track on its thread, and the
 	/// browser sources' helper, waiting for it to exit, so their profile is
-	/// saved and free for the next launch. A stream on air ends with
-	/// [`close`](Self::close).
+	/// saved and free for the next launch. The autosave and the health grading
+	/// end too, so a show closed without quitting leaves nothing running. A
+	/// stream on air ends with [`close`](Self::close).
 	pub fn stop(&self) {
-		self.stopped.store(true, Ordering::Relaxed);
+		self.stopped.send_replace(true);
 		let threads = std::mem::take(&mut *self.threads.lock().unwrap());
 		for thread in threads {
 			let name = thread.thread().name().unwrap_or_default().to_string();
@@ -1262,7 +1272,8 @@ impl Engine {
 	/// recording on the relay receives them rather than a cut; one going live
 	/// or ending is waited out first. Meanwhile wait for each source's thread
 	/// to end, having finished its own track, and then finish the sources'
-	/// local catalog. Bounded at [`CLOSE`].
+	/// local catalog. Bounded at [`CLOSE`]. The studio's session in the guests'
+	/// room ends too.
 	pub async fn close(&self) {
 		// Its session and followers hold the engine until they end.
 		*self.room.lock().unwrap() = None;
@@ -1294,6 +1305,18 @@ impl Engine {
 		if kio::clock::timeout(CLOSE, closing).await.is_err() {
 			tracing::warn!(timeout = ?CLOSE, "quitting before every source stopped and every relay drained");
 		}
+	}
+
+	/// Run `task` on the runtime until [`stop`](Self::stop), for work that
+	/// belongs to this engine and would otherwise outlive a show closed.
+	fn until_stopped(&self, task: impl Future<Output = ()> + Send + 'static) {
+		let mut stopped = self.stopped.subscribe();
+		tokio::spawn(async move {
+			tokio::select! {
+				() = task => {}
+				_ = stopped.wait_for(|stopped| *stopped) => {}
+			}
+		});
 	}
 
 	/// Write the collection and its history to their files unless they
@@ -1568,7 +1591,7 @@ impl Engine {
 			// The cameras of scenes no longer published, closed once the lock
 			// is let go, so the UI does not wait on their backends.
 			let mut closed: Vec<crate::vcam::Camera> = Vec::new();
-			if self.stopped.load(Ordering::Relaxed) {
+			if *self.stopped.borrow() {
 				// A stream handed over since is ended too, and one asked to end
 				// finds nothing left to wait for.
 				let (start, _end) = self.handoff.lock().unwrap().close();
@@ -1775,7 +1798,7 @@ impl Engine {
 
 		loop {
 			let tick = clock.tick().await;
-			if self.stopped.load(Ordering::Relaxed) {
+			if *self.stopped.borrow() {
 				drop(mixer);
 				self.program_audio.close();
 				self.recorded_audio.close();
@@ -5200,6 +5223,9 @@ mod tests {
 		assert!(controls.going(), "the go-live waits for the check");
 		assert_eq!(*controls.refused.lock().unwrap(), None);
 		assert!(controls.probing().is_none(), "no new check while going live");
+		// The engine is off air in this gap, yet closing the show would cut
+		// the stream that is about to start.
+		assert!(controls.reserve_close().is_err(), "no close while going live");
 		drop(probing);
 		kio::clock::timeout(TIMEOUT, async {
 			while controls.going() {
@@ -5210,6 +5236,11 @@ mod tests {
 		.expect("the go-live goes on once the check ends");
 		assert!(controls.refused.lock().unwrap().is_some(), "and reads where to go");
 		assert!(controls.probing().is_some(), "checks are admitted once it ends");
+		// Closing claims the show against a go-live, until it is given back.
+		controls.reserve_close().expect("a close is admitted off air");
+		assert!(controls.go_live().is_err(), "no go-live while closing");
+		controls.release_close();
+		assert!(!controls.going(), "a close given back leaves the show as it was");
 		engine.stop();
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
