@@ -61,12 +61,15 @@ pub enum Icon {
 	Broadcast,
 	Scene,
 	Replay,
+	Folder,
+	Save,
+	Repaired,
 }
 
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 50] = [
+	pub const ALL: [Self; 53] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -117,6 +120,9 @@ impl Icon {
 		Self::Broadcast,
 		Self::Scene,
 		Self::Replay,
+		Self::Folder,
+		Self::Save,
+		Self::Repaired,
 	];
 
 	fn source(self) -> ImageSource<'static> {
@@ -171,6 +177,9 @@ impl Icon {
 			Self::Broadcast => include_image!("../../assets/icons/radio-tower.svg"),
 			Self::Scene => include_image!("../../assets/icons/layers.svg"),
 			Self::Replay => include_image!("../../assets/icons/rewind.svg"),
+			Self::Folder => include_image!("../../assets/icons/folder.svg"),
+			Self::Save => include_image!("../../assets/icons/download.svg"),
+			Self::Repaired => include_image!("../../assets/icons/shield.svg"),
 		}
 	}
 

@@ -156,6 +156,11 @@ impl Recorder {
 		&self.dir
 	}
 
+	/// The show's name, which each file's starts with: the scene file's.
+	pub fn show(&self) -> &str {
+		&self.name
+	}
+
 	/// Record the broadcast sources `collection` has from now on, as each
 	/// recording that gives sources files of their own follows them.
 	pub fn set_sources(&self, collection: &moq_scene::Collection) {
