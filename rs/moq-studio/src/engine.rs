@@ -470,13 +470,13 @@ impl State {
 			.with_context(|| format!("no scene is called `{scene}`"))
 	}
 
-	/// The panic key: mute every microphone and every guest in `room`, hide
+	/// The panic key: mute every microphone and every guest of `rooms`, hide
 	/// every item of the top layer, in one edit undo takes back, and cut at
 	/// once to the scene the show marks safe, if it marks one. Says what it
 	/// did, or fails saying what it did before it failed.
-	pub fn panic(&mut self, room: Option<&crate::guests::Room>) -> anyhow::Result<String> {
+	pub fn panic(&mut self, rooms: &[moq_net::Path]) -> anyhow::Result<String> {
 		let mut done = Vec::new();
-		let (draft, muted, hidden) = silence(&self.collection, room)?;
+		let (draft, muted, hidden) = silence(&self.collection, rooms)?;
 		let named = |names: &[String]| {
 			names
 				.iter()
@@ -533,16 +533,17 @@ impl State {
 }
 
 /// The edit panic makes: it mutes every microphone `collection` has, and
-/// every source playing a guest in `room`, that is not muted, and hides every
+/// every source playing a guest of one of `rooms`, that is not muted, and hides every
 /// visible item of the top layer, whatever it shows. Also the sources it
 /// mutes, and the sources it hides, each once. Other broadcasts and media stay
 /// on. The edit is empty when there is nothing to do.
 fn silence(
 	collection: &Collection,
-	room: Option<&crate::guests::Room>,
+	rooms: &[moq_net::Path],
 ) -> Result<(Draft, Vec<String>, Vec<String>), moq_scene::Error> {
 	let voice = |source: &moq_scene::Source| {
-		matches!(source, moq_scene::Source::Microphone { .. }) || room.is_some_and(|room| room.plays_guest(source))
+		matches!(source, moq_scene::Source::Microphone { .. })
+			|| rooms.iter().any(|room| crate::guests::plays_guest(room, source))
 	};
 	let muted: Vec<String> = collection
 		.sources
@@ -961,8 +962,11 @@ pub struct Engine {
 	on_air_program: tokio::sync::watch::Sender<Option<moq_net::broadcast::Consumer>>,
 	/// Records the program, and each source too if asked.
 	pub recorder: record::Recorder,
-	/// The room guests join, when configured.
-	pub room: Option<Arc<crate::guests::Room>>,
+	/// The room guests join, while the show has one, and what follows it.
+	room: Mutex<Option<Joined>>,
+	/// The path of every room followed this run, so the panic key still mutes
+	/// a guest added from a room left since.
+	rooms: Mutex<Vec<moq_net::Path>>,
 	/// Each guest's return feed, once the studio's session in the room dials.
 	feeds: Mutex<Option<crate::feed::Feeds>>,
 	/// What the program's broadcasts share, on air or not.
@@ -1002,39 +1006,41 @@ pub struct Launch {
 	pub gpu: Gpu,
 	/// The directory recordings are saved in.
 	pub recordings: PathBuf,
-	/// The room guests join, if any.
-	pub room: Option<Arc<crate::guests::Room>>,
 	/// Where the video encoders count the encode sessions they hold.
 	pub sessions: Sessions,
+}
+
+/// The room the engine follows, until dropped: the guests who join it, their
+/// renewals, and who has a return feed.
+struct Joined {
+	room: Arc<crate::guests::Room>,
+	tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Joined {
+	fn drop(&mut self) {
+		for task in &self.tasks {
+			task.abort();
+		}
+	}
 }
 
 impl Engine {
 	/// Open the `loaded` collection and history on `launch.gpu`, start the
 	/// program clock, and save both to `autosave`'s files as they change,
-	/// starting at once. Recordings go into `launch.recordings`, and the
-	/// guests who join `launch.room` are added as sources. Nothing is
-	/// published until the studio [goes live](Self::go_live).
+	/// starting at once. Recordings go into `launch.recordings`. Guests join
+	/// once the engine [joins](Self::join) a room. Nothing is published until
+	/// the studio [goes live](Self::go_live).
 	///
 	/// Call inside the tokio runtime that serves the relay connections.
 	pub async fn start(launch: Launch, autosave: Autosave, loaded: autosave::Loaded) -> anyhow::Result<Arc<Self>> {
 		let Launch {
 			gpu,
 			recordings,
-			room,
 			sessions,
 		} = launch;
 		let (bus, driver) = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
-		// Every relay feeds `subscribe`, so a guest either one routes is seen.
-		let guests = match &room {
-			Some(room) => Some(
-				subscribe
-					.consume()
-					.scope(room.path(), &moq_auth::Pattern::all().into())
-					.context("cannot follow the room")?,
-			),
-			None => None,
-		};
 		let sources = subscribe.consume();
 		let autosave::Loaded {
 			collection,
@@ -1115,7 +1121,8 @@ impl Engine {
 			handoff: Mutex::default(),
 			on_air_program: tokio::sync::watch::Sender::new(None),
 			recorder,
-			room,
+			room: Mutex::default(),
+			rooms: Mutex::default(),
 			feeds: Mutex::default(),
 			program,
 			subscribe,
@@ -1130,14 +1137,6 @@ impl Engine {
 			sources: _,
 		} = publish;
 
-		if let Some(room) = &engine.room
-			&& let Some(origin) = room.origin()
-		{
-			let program = engine.on_air_program.subscribe();
-			let clock = engine.program.clock.clone();
-			let feeds = crate::feed::Feeds::new(room.clone(), origin.clone(), program, clock, epoch)?;
-			*engine.feeds.lock().unwrap() = Some(feeds);
-		}
 		// Probed now, so a scene a recording cannot encode says so before
 		// anyone records it, and opened before the program clock starts the
 		// sources. It opens its session only once recorded.
@@ -1180,26 +1179,83 @@ impl Engine {
 		engine.threads.lock().unwrap().push(thread);
 		starting.started();
 		engine.until_stopped(engine.clone().grade());
-		// Last, once nothing can fail: a start that fails is retried from setup,
-		// and a follower already running would keep this engine and its
-		// publication alive beside the retry's.
-		if let Some(guests) = guests {
-			engine.until_stopped(crate::guests::run(engine.clone(), guests));
-		}
-		if let Some(room) = &engine.room {
-			// Who has a return feed follows who is renewed, synced with the audio.
-			let mut changes = room.changes();
-			// Including any made since the feeds started.
-			changes.mark_changed();
-			let follow = engine.clone();
-			engine.until_stopped(async move {
-				while changes.changed().await.is_ok() {
-					follow.state.lock().unwrap().stale = true;
-				}
-			});
-		}
 
 		Ok(engine)
+	}
+
+	/// The room guests join, while the engine follows one.
+	pub fn room(&self) -> Option<Arc<crate::guests::Room>> {
+		let joined = self.room.lock().unwrap();
+		joined.as_ref().map(|joined| joined.room.clone())
+	}
+
+	/// The path of every room followed this run, the one followed now
+	/// included, and of every room [remembered](Self::remember_room).
+	pub fn rooms(&self) -> Vec<moq_net::Path> {
+		self.rooms.lock().unwrap().clone()
+	}
+
+	/// Keep `room` among the [rooms](Self::rooms) Panic mutes the guests of,
+	/// as one the settings named, even if it could not be joined: a guest of
+	/// it already in a scene may still play through the relays followed.
+	pub fn remember_room(&self, room: &moq_net::Path) {
+		let mut rooms = self.rooms.lock().unwrap();
+		if !rooms.contains(room) {
+			rooms.push(room.clone());
+		}
+	}
+
+	/// Follow `joining`'s room in place of the one followed now, if any:
+	/// add each guest who joins it as a source, renew their tokens through its
+	/// session, and give each a return feed. `None` leaves the room. Guests
+	/// already added stay sources, and a guest of the room left keeps their
+	/// link until it expires, unrenewed.
+	///
+	/// Call inside the tokio runtime that serves the relay connections.
+	pub fn join(self: &Arc<Self>, joining: Option<crate::guests::Joining>) -> anyhow::Result<()> {
+		// Held throughout, as `close` takes it once `stop` has run, so a join
+		// racing a close either ends before it, and is left, or finds the
+		// engine stopped.
+		let mut joined = self.room.lock().unwrap();
+		// The room left stops renewing and feeding before the next starts, so
+		// the two never publish at once.
+		*joined = None;
+		*self.feeds.lock().unwrap() = None;
+		let Some(crate::guests::Joining { room, renewal }) = joining else {
+			return Ok(());
+		};
+		anyhow::ensure!(!*self.stopped.borrow(), "the show is closing");
+		// Every relay feeds `subscribe`, so a guest either one routes is seen.
+		let announced = self
+			.subscribe
+			.consume()
+			.scope(room.path(), &moq_auth::Pattern::all().into())
+			.context("cannot follow the room")?;
+		if let Some(origin) = room.origin() {
+			let program = self.on_air_program.subscribe();
+			let clock = self.program.clock.clone();
+			let feeds = crate::feed::Feeds::new(room.clone(), origin.clone(), program, clock, self.program.epoch)?;
+			*self.feeds.lock().unwrap() = Some(feeds);
+		}
+		// Each ends with the engine too, so none outlives a show closed.
+		let mut tasks = vec![self.until_stopped(crate::guests::run(self.clone(), room.clone(), announced))];
+		if let Some(renewal) = renewal {
+			tasks.push(self.until_stopped(renewal.run()));
+		}
+		// Who has a return feed follows who is renewed, synced with the audio,
+		// including any change made since the feeds started.
+		let mut changes = room.changes();
+		changes.mark_changed();
+		let engine = Arc::downgrade(self);
+		tasks.push(self.until_stopped(async move {
+			while changes.changed().await.is_ok() {
+				let Some(engine) = engine.upgrade() else { return };
+				engine.state.lock().unwrap().stale = true;
+			}
+		}));
+		self.remember_room(room.path());
+		*joined = Some(Joined { room, tasks });
+		Ok(())
 	}
 
 	/// Stop the program clock, then wait for each rendition's encoder, of
@@ -1243,6 +1299,9 @@ impl Engine {
 	/// local catalog. Bounded at [`CLOSE`]. The studio's session in the guests'
 	/// room ends too.
 	pub async fn close(&self) {
+		// Its session and followers hold the engine until they end.
+		*self.room.lock().unwrap() = None;
+		*self.feeds.lock().unwrap() = None;
 		let running = std::mem::take(&mut *self.running.lock().unwrap());
 		let sources = async {
 			for ended in running {
@@ -1270,23 +1329,18 @@ impl Engine {
 		if kio::clock::timeout(CLOSE, closing).await.is_err() {
 			tracing::warn!(timeout = ?CLOSE, "quitting before every source stopped and every relay drained");
 		}
-		// Not in `stop`, which a start that failed calls, and setup retries
-		// on the same room.
-		if let Some(room) = &self.room {
-			room.end_renewal();
-		}
 	}
 
 	/// Run `task` on the runtime until [`stop`](Self::stop), for work that
 	/// belongs to this engine and would otherwise outlive a show closed.
-	fn until_stopped(&self, task: impl Future<Output = ()> + Send + 'static) {
+	fn until_stopped(&self, task: impl Future<Output = ()> + Send + 'static) -> tokio::task::JoinHandle<()> {
 		let mut stopped = self.stopped.subscribe();
 		tokio::spawn(async move {
 			tokio::select! {
 				() = task => {}
 				_ = stopped.wait_for(|stopped| *stopped) => {}
 			}
-		});
+		})
 	}
 
 	/// Write the collection and its history to their files unless they
@@ -3193,7 +3247,6 @@ mod tests {
 		let launch = Launch {
 			gpu,
 			recordings: recordings.to_path_buf(),
-			room: None,
 			sessions: Sessions::default(),
 		};
 		let engine = Engine::start(launch, autosave, loaded).await?;
@@ -3651,7 +3704,7 @@ mod tests {
 			assert!(state.compositor.transitioning(), "by the show's fade");
 			assert_eq!(state.takes, takes + 1);
 
-			let said = state.panic(None).unwrap();
+			let said = state.panic(&[]).unwrap();
 			assert_eq!(
 				said,
 				"no microphone or guest was on, and hid `red` from the always-on-top layers, and cut to `BRB`"
@@ -3660,7 +3713,7 @@ mod tests {
 			assert!(!state.compositor.transitioning(), "a cut, at once");
 			assert_eq!(state.takes, takes + 2);
 			assert!(!state.collection.top[0].visible, "the always-on-top layer is off");
-			let said = state.panic(None).unwrap();
+			let said = state.panic(&[]).unwrap();
 			assert_eq!(
 				said,
 				"no microphone or guest was on, and no always-on-top layer was shown, and `BRB` is on program"
@@ -3674,7 +3727,7 @@ mod tests {
 			assert_eq!(state.take(&main, now).unwrap(), main);
 			assert_eq!(state.take("BRB", now).unwrap(), "BRB");
 			assert!(state.compositor.transitioning());
-			let said = state.panic(None).unwrap();
+			let said = state.panic(&[]).unwrap();
 			assert_eq!(
 				said,
 				"no microphone or guest was on, and hid `red` from the always-on-top layers, and cut to `BRB`"
@@ -3876,7 +3929,7 @@ mod tests {
 		collection.top = top.clone();
 
 		// Without a room, nothing is a guest.
-		let (_, muted, shown) = silence(&collection, None).unwrap();
+		let (_, muted, shown) = silence(&collection, &[]).unwrap();
 		assert_eq!(muted, ["desk", "lav"]);
 		assert_eq!(shown, ["alice", "desk"], "each source once, not the hidden item");
 
@@ -3884,7 +3937,7 @@ mod tests {
 		let page = url::Url::parse("https://studio.example/join/").unwrap();
 		let key = tests::key("show/guests", &["**"], &["**"]);
 		let room = Room::new(&connect, "guests", key, page, tests::EXPIRY).unwrap();
-		let (draft, muted, _) = silence(&collection, Some(&room)).unwrap();
+		let (draft, muted, _) = silence(&collection, &[room.path().clone()]).unwrap();
 		assert_eq!(muted, ["alice", "alice screen", "desk", "lav"]);
 		let edit = draft.finish().unwrap();
 		assert_eq!(
@@ -3908,7 +3961,7 @@ mod tests {
 		for name in ["music", "feed", "elsewhere"] {
 			assert!(!collection.audio.get(name).is_some_and(|audio| audio.muted), "{name}");
 		}
-		let (draft, muted, shown) = silence(&collection, Some(&room)).unwrap();
+		let (draft, muted, shown) = silence(&collection, &[room.path().clone()]).unwrap();
 		assert!(muted.is_empty() && shown.is_empty());
 		assert!(draft.finish().unwrap().changes.is_empty(), "nothing to edit");
 	}
@@ -4930,7 +4983,7 @@ mod tests {
 			.expect("the program's past");
 		assert!(take.video.is_some(), "the canvas size holds video");
 		let (folder, show) = (engine.recorder.dir(), engine.recorder.show());
-		let clip = kio::clock::timeout(TIMEOUT, crate::replay::save(take, folder, show))
+		let clip = kio::clock::timeout(TIMEOUT, crate::replay::save(take, &folder, show))
 			.await
 			.expect("the clip saves")
 			.expect("a clip");
@@ -5182,7 +5235,6 @@ mod tests {
 		let launch = Launch {
 			gpu,
 			recordings: dir.path().to_path_buf(),
-			room: None,
 			sessions: sessions.clone(),
 		};
 		let engine = Engine::start(launch, autosave, loaded)
@@ -5378,6 +5430,21 @@ mod tests {
 		controls.release_close();
 		assert!(!controls.going(), "a close given back leaves the show as it was");
 		engine.stop();
+		// A room joined late, such as by a follow still under way, is refused.
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+		let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+		let refused = engine.join(Some(crate::guests::Joining::offline(room))).unwrap_err();
+		assert!(format!("{refused:#}").contains("closing"), "{refused:#}");
+		assert!(engine.room().is_none());
+		// So are relays followed late.
+		let client = moq_tokio::connect::Config::default().init(Default::default()).unwrap();
+		engine.watch(&[Relay {
+			client,
+			url: connect.clone(),
+		}]);
+		assert!(engine.watched().is_empty(), "no relay is watched once stopped");
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");

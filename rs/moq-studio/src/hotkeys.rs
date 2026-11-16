@@ -57,6 +57,26 @@ impl Binding {
 		}
 	}
 
+	/// Each modifier and then the key, one per keycap.
+	pub fn caps(&self, ctx: &egui::Context) -> Vec<String> {
+		let mac = ctx.os().is_mac();
+		// Each key held, by its own field: `contains` takes `command` for
+		// either Ctrl or Cmd, which would show both for Cmd on a Mac.
+		let held = &self.modifiers;
+		let mut caps: Vec<String> = [
+			(held.ctrl, egui::Modifiers::CTRL),
+			(held.alt, egui::Modifiers::ALT),
+			(held.shift, egui::Modifiers::SHIFT),
+			(held.mac_cmd, egui::Modifiers::MAC_CMD),
+		]
+		.into_iter()
+		.filter(|(on, _)| *on)
+		.map(|(_, one)| egui::ModifierNames::NAMES.format(&one, mac))
+		.collect();
+		caps.push(self.label());
+		caps
+	}
+
 	/// The key alone, as the layout printed it, and a keypad key by its place
 	/// on the keypad, which NumLock relabels.
 	fn label(&self) -> String {
@@ -569,6 +589,23 @@ mod tests {
 			name: Key::Unidentified(winit::keyboard::NativeKey::Unidentified),
 		};
 		assert_eq!(unnamed.label(), "Key 200");
+	}
+
+	#[test]
+	fn a_keycap_for_each_key_held() {
+		let ctx = egui::Context::default();
+		ctx.set_os(egui::os::OperatingSystem::Mac);
+		// Cmd on a Mac, which egui also marks as its `command`.
+		let mut cmd = key(KeyCode::KeyL, "l");
+		cmd.modifiers = egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND;
+		let caps = cmd.caps(&ctx);
+		assert_eq!(caps.len(), 2, "{caps:?}");
+		assert_eq!(caps[1], "L");
+		ctx.set_os(egui::os::OperatingSystem::Nix);
+		let mut both = key(KeyCode::KeyL, "l");
+		both.modifiers = egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+		let caps = both.caps(&ctx);
+		assert_eq!(caps.len(), 3, "{caps:?}");
 	}
 
 	#[test]

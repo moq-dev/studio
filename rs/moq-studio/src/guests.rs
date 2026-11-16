@@ -93,7 +93,7 @@ fn guest(path: &Path) -> Option<(Path, Kind)> {
 }
 
 /// The guest flags, which win over the show's own guest settings for a run.
-#[derive(usage_rs::Args, Clone, Debug, Default)]
+#[derive(usage_rs::Args, Clone, Debug, Default, PartialEq)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Config {
 	/// The room guests join: a path under the relay's URL, which the studio's
@@ -124,6 +124,12 @@ pub struct Config {
 pub const DEFAULT_EXPIRY: Duration = Duration::from_secs(4 * 3600);
 
 impl Config {
+	/// The path of the room these settings name, as [`Room::path`] gives it,
+	/// whether or not its key loads.
+	pub fn path(&self) -> Option<Path> {
+		Path::new(self.room.as_deref()?).ok().filter(|path| !path.is_empty())
+	}
+
 	/// The room these settings describe on the relay at `connect`, or `None`
 	/// without a room, remembering who was removed from scenes beside the room
 	/// key.
@@ -188,8 +194,6 @@ pub struct Room {
 	session: OnceLock<moq_tokio::connection::Monitor>,
 	/// What that session publishes, once it dials.
 	origin: OnceLock<moq_net::origin::Producer>,
-	/// The task running [`Renewal`], until the studio stops.
-	renewing: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 /// One guest the studio knows of.
@@ -252,7 +256,7 @@ impl Room {
 		);
 		anyhow::ensure!(
 			expiry >= MIN_EXPIRY,
-			"--guest-expiry must be at least a minute, so a renewal reaches each guest before their token expires"
+			"a join link must last at least a minute, so a renewal reaches each guest before their token expires"
 		);
 		let path = Path::new(room).with_context(|| format!("invalid room `{room}`"))?;
 		anyhow::ensure!(!path.is_empty(), "the room needs a path");
@@ -286,7 +290,6 @@ impl Room {
 			changed: Default::default(),
 			session: Default::default(),
 			origin: Default::default(),
-			renewing: Mutex::default(),
 		};
 		// Sign once now, so a key that cannot sign for guests or for the studio's
 		// own session fails at startup.
@@ -435,19 +438,6 @@ impl Room {
 	/// A receiver that sees each change to who is renewed.
 	pub fn changes(&self) -> tokio::sync::watch::Receiver<()> {
 		self.changed.subscribe()
-	}
-
-	/// Run `renewal` on `runtime` until [`end_renewal`](Self::end_renewal).
-	pub fn start_renewal(&self, renewal: Renewal, runtime: &tokio::runtime::Handle) {
-		let task = runtime.spawn(renewal.run());
-		*self.renewing.lock().unwrap() = Some(task.abort_handle());
-	}
-
-	/// End the renewals, and the studio's session in the room with them.
-	pub fn end_renewal(&self) {
-		if let Some(task) = self.renewing.lock().unwrap().take() {
-			task.abort();
-		}
 	}
 
 	/// What the studio's session in the room publishes, once it dials.
@@ -653,18 +643,25 @@ impl Room {
 		})
 	}
 
-	/// Whether `source` plays a guest's camera and microphone, or their screen.
-	pub fn plays_guest(&self, source: &Source) -> bool {
-		self.guest_of(source).is_some()
-	}
-
 	/// The guest `source` plays, and which of their broadcasts.
 	fn guest_of(&self, source: &Source) -> Option<(Path, Kind)> {
-		let Source::Broadcast { path } = source else {
-			return None;
-		};
-		guest(&Path::new(path).ok()?.strip_prefix(&self.path)?)
+		guest_in(&self.path, source)
 	}
+}
+
+/// Whether `source` plays a guest's camera and microphone, or their screen, in
+/// the room at `room`, as [`Room::path`] gives it.
+pub fn plays_guest(room: &Path, source: &Source) -> bool {
+	guest_in(room, source).is_some()
+}
+
+/// The guest `source` plays in the room at `room`, and which of their
+/// broadcasts.
+fn guest_in(room: &Path, source: &Source) -> Option<(Path, Kind)> {
+	let Source::Broadcast { path } = source else {
+		return None;
+	};
+	guest(&Path::new(path).ok()?.strip_prefix(room)?)
 }
 
 /// Whether `url` names this machine, so a browser treats an `http://` page
@@ -711,10 +708,9 @@ fn check_scope(key: &moq_auth::Key, room: &Path) -> anyhow::Result<()> {
 	Ok(())
 }
 
-/// Follow the room's announcements for as long as the studio runs, adding each
-/// guest's broadcasts as sources.
-pub async fn run(engine: Arc<Engine>, origin: moq_net::origin::Consumer) {
-	let room = engine.room.as_ref().expect("run only with a room");
+/// Follow `room`'s announcements in `origin`, scoped to it, until the engine
+/// leaves it, adding each guest's broadcasts as sources.
+pub async fn run(engine: Arc<Engine>, room: Arc<Room>, origin: moq_net::origin::Consumer) {
 	let mut announced = origin.announced();
 	while let Some(event) = announced.next().await {
 		use moq_net::announce::Event;
@@ -743,6 +739,43 @@ pub async fn run(engine: Arc<Engine>, origin: moq_net::origin::Consumer) {
 		}
 	}
 	tracing::warn!("the room's announcements ended");
+}
+
+/// A room ready for the engine to [join](Engine::join), with the studio's
+/// session in it, which renews its guests' tokens.
+pub struct Joining {
+	pub(crate) room: Arc<Room>,
+	pub(crate) renewal: Option<Renewal>,
+}
+
+impl Joining {
+	/// The room `config` describes on the relay at `connect`, with its session
+	/// dialed by `client`'s settings, or `None` without a room.
+	pub fn connect(
+		config: &Config,
+		connect: Option<&Url>,
+		client: &moq_tokio::connect::Config,
+		quic: moq_tokio::quic::Config,
+	) -> anyhow::Result<Option<Self>> {
+		let Some(room) = config.load(connect)? else {
+			return Ok(None);
+		};
+		let room = Arc::new(room);
+		let renewal = Renewal::connect(room.clone(), client, quic)?;
+		Ok(Some(Self {
+			room,
+			renewal: Some(renewal),
+		}))
+	}
+
+	/// `room` with no session in it, so no guest is renewed or fed.
+	#[cfg(test)]
+	pub fn offline(room: Room) -> Self {
+		Self {
+			room: Arc::new(room),
+			renewal: None,
+		}
+	}
 }
 
 /// The studio's own session in the room, which publishes each renewed guest's
@@ -788,9 +821,9 @@ impl Renewal {
 	}
 
 	/// Publish a token to each guest as they join, and renew every token, the
-	/// session's own included, every half `--guest-expiry`, for as long as the
-	/// studio runs.
-	async fn run(mut self) {
+	/// session's own included, every half `--guest-expiry`, until the engine
+	/// leaves the room.
+	pub async fn run(mut self) {
 		let room = self.renewals.room.clone();
 		let period = room.expiry / 2;
 		let mut renew = kio::clock::interval_at(kio::clock::now().saturating_add(period), period);
@@ -1071,7 +1104,7 @@ pub(crate) mod tests {
 		] {
 			let key = key("show/guests", &["**"], &["**"]);
 			let err = Room::new(&connect, "guests", key, page.clone(), expiry).err().unwrap();
-			assert!(err.to_string().contains("--guest-expiry"), "{expiry:?}: {err}");
+			assert!(err.to_string().contains("at least a minute"), "{expiry:?}: {err}");
 		}
 	}
 

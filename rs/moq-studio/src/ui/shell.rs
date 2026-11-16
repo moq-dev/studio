@@ -241,7 +241,8 @@ impl Panels {
 		self.strip(ui, fx, snapshot, &layout);
 		self.banners(ui.ctx(), layout.stage);
 		self.toast(ui.ctx(), layout.stage);
-		self.settings(ui.ctx(), fx, layout.stage);
+		self.graph_window(ui.ctx(), layout.stage);
+		self.settings(ui.ctx(), fx);
 		self.details(ui.ctx(), layout.stage);
 		self.going_sheet(ui.ctx());
 		// macOS keeps its own frame's edges, and resizes by them.
@@ -1132,41 +1133,6 @@ impl Panels {
 		}
 	}
 
-	/// The Settings window, while open.
-	fn settings(&mut self, ctx: &egui::Context, fx: &mut Fx, stage: Rect) {
-		let Some(mut setting) = self.setting else { return };
-		let mut open = true;
-		egui::Window::new("Settings")
-			.id(egui::Id::new("settings"))
-			.open(&mut open)
-			.frame(window_frame())
-			.collapsible(false)
-			.pivot(Align2::CENTER_TOP)
-			.default_pos(stage.center_top() + vec2(0.0, MARGIN))
-			.default_size(vec2(900.0, 620.0).min(stage.size() - Vec2::splat(2.0 * MARGIN)))
-			.show(ctx, |ui| {
-				tabs(ui, &mut setting, &Setting::ALL, Setting::name);
-				ui.add_space(6.0);
-				match setting {
-					Setting::Show => {
-						egui::ScrollArea::vertical().show(ui, |ui| self.output(ui));
-					}
-					Setting::Stream => {
-						egui::ScrollArea::vertical().show(ui, |ui| self.stream_settings(ui));
-					}
-					Setting::Recording => {
-						egui::ScrollArea::vertical().show(ui, |ui| self.recording(ui));
-					}
-					Setting::Hotkeys => {
-						egui::ScrollArea::vertical().show(ui, |ui| self.hotkeys(ui, fx));
-					}
-					Setting::Effects => fx.menu(ui),
-					Setting::Advanced => self.graph(ui),
-				}
-			});
-		self.setting = open.then_some(setting);
-	}
-
 	/// The stream's health in detail, while open.
 	fn details(&mut self, ctx: &egui::Context, stage: Rect) {
 		if !self.details {
@@ -1213,9 +1179,19 @@ impl Panels {
 	}
 
 	/// How the stream reaches viewers: what is wrong and why, each relay, the
-	/// uplink, each track, and each viewer that reports.
+	/// uplink, each track, and each viewer that reports; and what the
+	/// encoders cost, on air or not.
 	pub(super) fn health(&mut self, ui: &mut Ui) {
 		repairs(ui, &self.engine.recorder.repairs());
+		egui::ScrollArea::vertical().show(ui, |ui| {
+			self.delivery(ui);
+			ui.separator();
+			self.encoders(ui);
+		});
+	}
+
+	/// How the stream reaches viewers, while on air.
+	fn delivery(&self, ui: &mut Ui) {
 		let report = self.engine.health.lock().unwrap();
 		if report.relays.is_empty() {
 			ui.label("Off air. Once live, this shows how the stream reaches viewers.");
@@ -1225,78 +1201,167 @@ impl Panels {
 			return;
 		};
 
-		egui::ScrollArea::vertical().show(ui, |ui| {
-			if report.problems.is_empty() {
-				ui.colored_label(kit::OK, "No problems.");
-			}
-			for problem in &report.problems {
-				ui.colored_label(color(problem.verdict), &problem.cause);
-			}
-			ui.separator();
+		if report.problems.is_empty() {
+			ui.colored_label(kit::OK, "No problems.");
+		}
+		for problem in &report.problems {
+			ui.colored_label(color(problem.verdict), &problem.cause);
+		}
+		ui.separator();
 
-			egui::Grid::new("relays").striped(true).show(ui, |ui| {
-				for heading in ["Relay", "State", "Protocol"] {
-					ui.strong(heading);
-				}
-				ui.end_row();
-				for relay in &report.relays {
-					ui.label(&relay.endpoint);
-					match &relay.state {
-						health::State::Connecting => ui.weak("connecting"),
-						health::State::Connected => ui.colored_label(kit::OK, "connected"),
-						health::State::Disconnected(reason) => ui
-							.colored_label(ui.visuals().error_fg_color, "unreachable")
-							.on_hover_text(reason),
-					};
-					ui.label(or_unknown(relay.version.map(|version| version.to_string())));
-					ui.end_row();
-				}
-			});
-			ui.separator();
-
-			let uplink = &report.uplink;
-			egui::Grid::new("uplink").show(ui, |ui| {
-				ui.label("Uplink");
-				ui.horizontal(|ui| {
-					verdict(ui, uplink.verdict);
-					match &uplink.relay {
-						Some(relay) => ui.weak(format!("to {relay}")),
-						None => ui.weak("no relay connected"),
-					};
-				});
-				ui.end_row();
-				ui.label("Round trip");
-				ui.label(or_unknown(uplink.rtt.map(|rtt| format!("{} ms", rtt.as_millis()))));
-				ui.end_row();
-				ui.label("Estimated capacity");
-				ui.label(or_unknown(uplink.capacity.map(health::rate)));
-				ui.end_row();
-				ui.label("Media written");
-				ui.label(or_unknown(uplink.media.map(health::rate)))
-					.on_hover_text("By every broadcast: the program's and each published scene's");
-				ui.end_row();
-				ui.label("Lost and resent");
-				ui.label(or_unknown(uplink.loss.map(|loss| format!("{:.2}%", loss * 100.0))));
-				ui.end_row();
-			});
-
-			// Each broadcast, with its own viewers beneath it.
-			for broadcast in &report.broadcasts {
-				ui.separator();
-				if report.broadcasts.len() > 1 {
-					match &broadcast.name {
-						Some(name) => ui.strong(format!("Scene `{name}`")),
-						None => ui.strong("Program"),
-					};
-				}
-				broadcast_health(ui, broadcast);
+		egui::Grid::new("relays").striped(true).show(ui, |ui| {
+			for heading in ["Relay", "State", "Protocol"] {
+				ui.strong(heading);
 			}
-			if !report.sources.is_empty() {
-				ui.separator();
-				ui.strong("Sources");
-				tracks_health(ui, "sources", &report.sources, true);
+			ui.end_row();
+			for relay in &report.relays {
+				ui.label(&relay.endpoint);
+				match &relay.state {
+					health::State::Connecting => ui.weak("connecting"),
+					health::State::Connected => ui.colored_label(kit::OK, "connected"),
+					health::State::Disconnected(reason) => ui
+						.colored_label(ui.visuals().error_fg_color, "unreachable")
+						.on_hover_text(reason),
+				};
+				ui.label(or_unknown(relay.version.map(|version| version.to_string())));
+				ui.end_row();
 			}
 		});
+		ui.separator();
+
+		let uplink = &report.uplink;
+		egui::Grid::new("uplink").show(ui, |ui| {
+			ui.label("Uplink");
+			ui.horizontal(|ui| {
+				verdict(ui, uplink.verdict);
+				match &uplink.relay {
+					Some(relay) => ui.weak(format!("to {relay}")),
+					None => ui.weak("no relay connected"),
+				};
+			});
+			ui.end_row();
+			ui.label("Round trip");
+			ui.label(or_unknown(uplink.rtt.map(|rtt| format!("{} ms", rtt.as_millis()))));
+			ui.end_row();
+			ui.label("Estimated capacity");
+			ui.label(or_unknown(uplink.capacity.map(health::rate)));
+			ui.end_row();
+			ui.label("Media written");
+			ui.label(or_unknown(uplink.media.map(health::rate)))
+				.on_hover_text("By every broadcast: the program's and each published scene's");
+			ui.end_row();
+			ui.label("Lost and resent");
+			ui.label(or_unknown(uplink.loss.map(|loss| format!("{:.2}%", loss * 100.0))));
+			ui.end_row();
+		});
+
+		// Each broadcast, with its own viewers beneath it.
+		for broadcast in &report.broadcasts {
+			ui.separator();
+			if report.broadcasts.len() > 1 {
+				match &broadcast.name {
+					Some(name) => ui.strong(format!("Scene `{name}`")),
+					None => ui.strong("Program"),
+				};
+			}
+			broadcast_health(ui, broadcast);
+		}
+		if !report.sources.is_empty() {
+			ui.separator();
+			ui.strong("Sources");
+			tracks_health(ui, "sources", &report.sources, true);
+		}
+	}
+
+	/// The encoders: where the program goes and whether it encodes, the
+	/// sessions open, and each encoder's work, the program's, the
+	/// recording's, and each published scene's.
+	fn encoders(&self, ui: &mut Ui) {
+		let stats = &self.engine.stats;
+		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
+		let watched = stats.video.watched.load(Ordering::Relaxed);
+		let on_air = self.engine.on_air();
+		ui.strong("Encoders");
+		egui::Grid::new("encoders").show(ui, |ui| {
+			match on_air.live() {
+				Some(live) => {
+					ui.label("Broadcast");
+					ui.label(&live.path);
+					ui.end_row();
+					ui.label("Encoding");
+					ui.label(match (live.on_demand, watched) {
+						(false, _) => "the canvas size always, half size while watched",
+						(true, true) => "while watched; watched now",
+						(true, false) => "while watched; idle now",
+					});
+					ui.end_row();
+				}
+				None => {
+					ui.label("Encoding");
+					ui.label("only the recording's encoder, while recording");
+					ui.end_row();
+				}
+			}
+			ui.label("Drawn");
+			ui.label(format!("{} frames", count(&stats.rendered)));
+			ui.end_row();
+			ui.label("Encoder");
+			ui.label(stats.video.encoder().unwrap_or_else(|| "not open".into()));
+			ui.end_row();
+			ui.label("Encoder sessions");
+			ui.label(format!("{} open", stats.sessions.open())).on_hover_text(
+				"Video encoders open now: the program's, each published scene's, the recording's while recording, \
+				 and the sources'. A GPU caps them.",
+			);
+			ui.end_row();
+		});
+		renditions(ui, None, &stats.video, false);
+		if let Some(error) = stats.error() {
+			ui.colored_label(ui.visuals().error_fg_color, error);
+		}
+		renditions(ui, None, &stats.recording, true);
+		if let Some(error) = stats.recording.error() {
+			ui.colored_label(ui.visuals().warn_fg_color, format!("recording {error}"));
+		}
+		if let Some(error) = stats.recording_audio_error() {
+			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
+		}
+
+		// Every published scene, encoding only on air.
+		let encoding = stats.published();
+		let published: Vec<(String, String)> = {
+			let state = self.engine.state.lock().unwrap();
+			let collection = state.collection();
+			let scenes = collection.scenes.iter().filter(|scene| scene.published);
+			scenes
+				.map(|scene| {
+					let audio = collection.published_audio(&scene.name).unwrap_or_default().to_string();
+					(scene.name.clone(), audio)
+				})
+				.collect()
+		};
+		for (name, audio) in published {
+			ui.separator();
+			ui.strong(format!("Scene `{name}`"));
+			if let Some(live) = on_air.live() {
+				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", live.path));
+			}
+			let Some(video) = encoding.get(&name) else {
+				ui.weak("Encodes only on air.");
+				continue;
+			};
+			ui.label(format!(
+				"Encoder: {}",
+				video.encoder().unwrap_or_else(|| "not open".into())
+			));
+			renditions(ui, Some(&name), video, false);
+			if let Some(error) = video.error() {
+				ui.colored_label(ui.visuals().error_fg_color, error);
+			}
+			if let Some(error) = video.audio_error() {
+				ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
+			}
+		}
 	}
 }
 

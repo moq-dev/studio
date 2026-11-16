@@ -74,9 +74,9 @@
 <symbol id="out" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
 </defs></svg>
 <script>
-const CATS=[['show','Show','film'],['stream','Stream','cast'],['recording','Recording','rec'],['sound','Sound','vol'],['hotkeys','Hotkeys','keys'],['guests','Guests','users'],['advanced','Advanced','sliders']];
+const CATS=[['show','Show','film'],['stream','Stream','cast'],['recording','Recording','rec'],['hotkeys','Hotkeys','keys'],['guests','Guests','users'],['advanced','Advanced','sliders']];
 const win=(cat,title,lead,body)=>`<div class="scrim"><div class="swin">
-  <div class="snv"><h2>SETTINGS</h2>${CATS.map(([k,n,i])=>`<a class="${k==cat?'on':''}">${I(i)}${n}</a>`).join('')}<div class="grow"></div><small>Changes apply at once.</small></div>
+  <div class="snv"><h2>SETTINGS</h2>${CATS.map(([k,n,i])=>`<a class="${k==cat?'on':''}">${I(i)}${n}</a>`).join('')}</div>
   <div class="pane"><div class="ib shut">${I('x')}</div><h1>${title}</h1><p class="lead">${lead}</p>${body}</div>
 </div></div>`;
 const app=()=>topbar('LIVE')+stage()+dock();
@@ -93,7 +93,7 @@ const P={
   sr('Canvas size','Bigger needs a faster encoder and more upload: 1080p wants about 6 Mb/s.',seg(['720p','1080p','1440p','4K','Custom'],'1080p'))+
   sr('Frame rate','60 is smoother for games and doubles the encoder\'s work.',seg(['30','60','Custom'],'60'))+
   `<div class="sr" style="flex-direction:column;align-items:stretch;gap:12px">
-    <div class="disc">${I('down','sm')}Advanced<span class="grow"></span><span class="hl">1 scene has its own size</span></div>
+    <div class="disc">${I('down','sm')}Scene sizes<span class="grow"></span><span class="hl">1 scene has its own size</span></div>
     <div class="box">
       <div class="dr">${I('layers','sm dim')}<span class="grow">Phone cut</span><div class="f" style="grid-template-columns:92px 92px"><span><em>W</em>1080</span><span><em>H</em>1920</span></div><div class="ib" style="width:24px;height:24px">${I('x','sm')}</div></div>
       <div class="dr dim">${I('plus','sm')}Give a scene its own size</div>
@@ -139,17 +139,25 @@ const P={
   <div class="hkgrid"><div><div class="hk"><span class="n">Replay</span><div class="inp bind" style="height:26px">Press the keys now<span class="kc" style="height:18px;min-width:0;padding:0 5px;font-size:10px;box-shadow:none">Esc</span>cancels</div></div></div><div>${hk('Save clip',['Ctrl','Shift','C'])}</div></div>
   <div class="grow"></div><div class="row hl">${I('info','sm')}A key bound to one action is refused for another until it is cleared there.</div>`),
 
+ guests:()=>win('guests','GUESTS','People who join from a web page, appearing as sources. Kept beside the show.',
+  `<div class="row" style="margin-bottom:6px"><i class="dot"></i><span class="hl">Guests can join show/guests.</span></div>`+
+  sr('Room','A path under the relay\'s address, such as <code>guests</code>.','<div class="inp" style="width:420px">guests</div>')+
+  sr('Room key','Signs each guest\'s link, and only reaches inside the room.',`<div class="row" style="gap:6px"><span class="btn">Choose</span><div class="inp" style="width:340px">${I('lock','sm dim')}room.jwk</div></div>`)+
+  sr('Join page','The page a guest\'s link opens. It must be https://.','<div class="inp" style="width:420px">https://join.studio.moq.dev/</div>')+
+  sr('Link lifetime','How long a join link works. A guest in the room is renewed, so a guest removed from scenes leaves within it.',seg(['1 hour','4 hours','12 hours','1 day'],'4 hours'))+
+  `<div class="row" style="gap:8px;margin-top:14px"><span class="btn">Save</span><span class="btn">Revert</span></div>
+  <div class="grow"></div><div class="row hl">${I('info','sm')}A saved room is joined at once off air, and once the stream ends on air.</div>`),
+
  advanced:()=>win('advanced','ADVANCED','Things most shows never touch.',
   sr('Publish a scene as its own broadcast','It stays live whatever is on air. Each one costs an encoder of its own.',`<div class="row" style="gap:6px"><div class="tagc">Phone cut${I('x','sm')}</div><div class="ib b">${I('plus','sm')}</div></div>`)+
   sr('Publish a source independently','Viewers and services fetch it on its own. It leaves the program and every audio scene.',`<div class="row" style="gap:6px"><div class="ib b">${I('plus','sm')}</div></div>`)+
   sr('Virtual camera','Shows the program as a camera that other apps can pick.','<i class="tog"></i>')+
-  sr('Effects','How this window moves and glows. It never reaches the stream.',seg(['Full','Reduced','Off'],'Full'))+
-  sr('Scene graph','Every scene, source, and audio scene, drawn as one map.',`<span class="btn">${I('out','sm')}Open</span>`)+
-  sr('Edit history','Every change to this show, to step back through.',`<span class="btn">${I('out','sm')}Open</span>`)),
+  sr('Effects','How this window moves and glows. It never reaches the stream.',seg(['System','Full','Reduced','Off'],'Full'))+
+  sr('Scene graph','Every scene, source, and audio scene, drawn as one map.',`<span class="btn">${I('out','sm')}Open</span>`)),
 };
 
 const V={
- 'show':{label:'Show',cls:'L',note:'<b>Settings, Show.</b> The format, the canvas size, and the frame rate are named choices, with the exact numbers behind Custom; per-scene sizes sit behind Advanced. They left the home page because a broadcaster sets them once, and each line of help names what the choice costs.',
+ 'show':{label:'Show',cls:'L',note:'<b>Settings, Show.</b> The format, the canvas size, and the frame rate are named choices, with the exact numbers behind Custom; per-scene sizes sit behind a disclosure. They left the home page because a broadcaster sets them once, and each line of help names what the choice costs.',
    html:()=>app()+P.show(),after:live},
  'stream':{label:'Stream',cls:'L',note:'<b>Settings, Stream.</b> Where the stream goes: the relay with its address and a key that is only ever dots, the failover relay, and the RTMP and WHIP destinations as rows with a state dot. It replaces the command-line flags, so the app can go live after a double click.',
    html:()=>app()+P.stream(),after:live},
@@ -157,7 +165,9 @@ const V={
    html:()=>app()+P.recording(),after:live},
  'hotkeys':{label:'Hotkeys',cls:'L',note:'<b>Settings, Hotkeys.</b> Each action with its keys on keycaps, one row waiting for a key, and unbound actions offering Bind. The note that they fire while a game has focus is the first thing on the pane, because it decides which keys are safe to pick.',
    html:()=>app()+P.hotkeys(),after:live},
- 'advanced':{label:'Advanced',cls:'L',note:'<b>Settings, Advanced.</b> Publishing a scene or a source on its own, the virtual camera, the effects level, and the two inspection windows. Everything here is off the pages on purpose: most shows never open it.',
+ 'guests':{label:'Guests',cls:'L',note:'<b>Settings, Guests.</b> The room guests join, the key that signs their links, the join page, and how long a link lasts, saved together beside the show. A room guests could not join is refused with the reason before it is saved.',
+   html:()=>app()+P.guests(),after:live},
+ 'advanced':{label:'Advanced',cls:'L',note:'<b>Settings, Advanced.</b> Publishing a scene or a source on its own, the virtual camera, the effects level, and the scene graph, which opens in a window of its own. Everything here is off the pages on purpose: most shows never open it.',
    html:()=>app()+P.advanced(),after:live},
 };
 mount(V);

@@ -870,176 +870,218 @@ impl Panels {
 		}
 	}
 
-	/// Apply a Stream settings save once it finished, before every frame and
-	/// while the window is hidden, so one still running when Settings closes,
-	/// the tab changes, or the window hides applies before a hotkey goes live.
+	/// Apply a save of the stream file once it finished, before every frame
+	/// and while the window is hidden, so one still running when Settings
+	/// closes, the pane changes, or the window hides applies before a hotkey
+	/// goes live.
 	pub(super) fn follow_stream_save(&mut self) {
-		let Some(form) = &mut self.stream_form else { return };
-		let Some(saving) = &mut form.saving else { return };
+		let Some(saving) = &mut self.saving else { return };
 		// The save asks for a frame once it finishes, which polls it again.
-		let Some(saved) = saving.poll() else { return };
-		match saved.clone() {
-			Ok(saved) => {
-				let before = self.controls.stream.lock().unwrap().clone();
-				// Only a new address or token follows the relays anew, which
-				// cuts the broadcast sources and guests they carry, so not on
-				// air: then once the stream ends.
-				let moved = before.relay() != saved.relay() || before.failover() != saved.failover();
-				let retokened = !form.tokens().is_empty()
-					|| [&form.relay, &form.failover]
-						.iter()
-						.any(|url| crate::stream::carries_token(url));
-				let deferred = self.controls.set_stream(saved.clone(), moved || retokened);
-				// A measurement under way is of the relay as it was.
-				if (moved || retokened)
-					&& let Some(going) = &mut self.going
-				{
-					going.uplink = None;
-				}
-				*form = Form::new(&saved);
-				form.note = Some(match deferred {
-					true => "Saved. It applies the next time you go live; broadcast sources and guests follow the new relays once this stream ends.".into(),
-					false => "Saved. It applies the next time you go live.".into(),
-				});
-			}
+		let Some(result) = saving.task.poll().cloned() else {
+			return;
+		};
+		let Saving { from, retokened, .. } = self.saving.take().expect("polled above");
+		let saved = match result {
+			Ok(saved) => saved,
 			Err(err) => {
-				form.saving = None;
-				form.note = Some(err);
+				self.saved = Some((from, err));
+				return;
 			}
+		};
+		let before = self.controls.stream.lock().unwrap().clone();
+		// Only a new address, token, or room follows the relays anew, which
+		// cuts the broadcast sources and guests they carry, so not on air:
+		// then once the stream ends.
+		let moved = before.relay() != saved.relay() || before.failover() != saved.failover();
+		let rejoined = before.guests() != saved.guests();
+		let deferred = self.controls.set_stream(saved.clone(), moved || retokened || rejoined);
+		// A measurement under way is of the relay as it was.
+		if (moved || retokened)
+			&& let Some(going) = &mut self.going
+		{
+			going.uplink = None;
 		}
+		let note = match (from, deferred) {
+			(Setting::Stream, true) => {
+				"Saved. It applies the next time you go live; broadcast sources and guests follow the new relays \
+				 once this stream ends."
+			}
+			(Setting::Stream, false) => "Saved. It applies the next time you go live.",
+			(Setting::Guests, true) => "Saved. Guests move to the new room once this stream ends.",
+			(Setting::Guests, false) => "Saved. Guests join the new room now; links made before stop renewing.",
+			(_, _) => "Saved. The next recording goes there.",
+		}
+		.to_string();
+		// The recorder moved with the save, which REVIEW's shelf follows.
+		let scene = self.engine.autosave.path();
+		if before.recordings(scene) != saved.recordings(scene) {
+			self.review.shelve(&self.engine, &self.runtime);
+		}
+		match from {
+			Setting::Stream => self.stream_form = Some(Form::new(&saved)),
+			Setting::Guests => self.guests_form = Some(super::settings::GuestForm::new(saved.saved())),
+			_ => {}
+		}
+		self.saved = Some((from, note));
 	}
 
 	/// Settings, Stream: the relay and its token, a failover relay, the
 	/// broadcast's name, and on-demand encoding, kept beside the show. A
-	/// setting a flag overrides for this run says so.
+	/// setting a flag overrides for this run says so, and is not editable.
 	pub(super) fn stream_settings(&mut self, ui: &mut Ui) {
+		use super::settings::{field_row, row};
 		let stream = self.controls.stream.lock().unwrap().clone();
 		let overridden = stream.overridden();
+		let busy = self.saving.is_some() || self.picker.is_some();
 		let form = self.stream_form.get_or_insert_with(|| Form::new(&stream));
-		let busy = form.saving.is_some();
-		if busy {
-			ui.ctx().request_repaint_after(Duration::from_millis(100));
-		}
-		ui.label(
-			egui::RichText::new(format!(
-				"Kept beside the show, in {}. Tokens go in the system's credential store, never in a file.",
-				stream.path().display()
-			))
-			.color(kit::DIM),
-		);
-		ui.add_space(8.0);
-		let flagged = |ui: &mut Ui, flag: &str| {
-			ui.label(egui::RichText::new(format!("{flag} overrides this for this run")).color(kit::CUE));
+		let token = |ui: &mut Ui, token: &mut String, forget: &mut bool| {
+			ui.add(
+				egui::TextEdit::singleline(token)
+					.password(true)
+					.hint_text("Token: leave empty to keep the saved one")
+					.desired_width(f32::INFINITY),
+			);
+			ui.checkbox(forget, "Forget the saved token");
 		};
+		// The relays flags set over the saved ones this run, which the token
+		// controls key to, and whether each flag's address carries a token of
+		// its own, which the stream dials with over any kept.
+		let relay_flag = overridden.relay.then(|| stream.relay()).flatten();
+		let failover_flag = overridden.failover.then(|| stream.failover()).flatten();
+		let carries = |flag: Option<&url::Url>| flag.is_some_and(|url| crate::stream::carries_token(url.as_str()));
+		let relay_carries = !overridden.token && carries(relay_flag);
+		let failover_carries = carries(failover_flag);
 		ui.add_enabled_ui(!busy, |ui| {
-			egui::Grid::new("stream settings")
-				.num_columns(2)
-				.spacing(vec2(14.0, 10.0))
-				.show(ui, |ui| {
-					ui.label("Relay");
-					ui.vertical(|ui| {
-						ui.add(
-							egui::TextEdit::singleline(&mut form.relay)
-								.hint_text("https://relay.example/anon")
-								.desired_width(360.0),
-						);
-						if overridden.relay {
-							flagged(ui, "--connect");
-						}
-					});
-					ui.end_row();
-					ui.label("Token");
-					ui.vertical(|ui| {
-						ui.add(
-							egui::TextEdit::singleline(&mut form.relay_token)
-								.password(true)
-								.hint_text("Leave empty to keep the saved one")
-								.desired_width(360.0),
-						);
-						ui.checkbox(&mut form.forget_relay_token, "Forget the saved token");
-						if overridden.token {
-							flagged(ui, "--connect-token");
-						}
-					});
-					ui.end_row();
-					ui.label("Failover relay");
-					ui.vertical(|ui| {
-						ui.add(
-							egui::TextEdit::singleline(&mut form.failover)
-								.hint_text("A second relay viewers resume from")
-								.desired_width(360.0),
-						);
-						if overridden.failover {
-							flagged(ui, "--failover");
-						}
-					});
-					ui.end_row();
-					ui.label("Its token");
-					ui.vertical(|ui| {
-						ui.add(
-							egui::TextEdit::singleline(&mut form.failover_token)
-								.password(true)
-								.hint_text("Leave empty to keep the saved one")
-								.desired_width(360.0),
-						);
-						ui.checkbox(&mut form.forget_failover_token, "Forget the saved token");
-					});
-					ui.end_row();
-					ui.label("Broadcast name");
-					ui.vertical(|ui| {
-						ui.add(
-							egui::TextEdit::singleline(&mut form.broadcast)
-								.hint_text(crate::stream::BROADCAST)
-								.desired_width(360.0),
-						);
-						if overridden.broadcast {
-							flagged(ui, "--broadcast");
-						}
-					});
-					ui.end_row();
-					ui.label("On demand");
-					ui.vertical(|ui| {
-						ui.add(kit::Toggle::new(&mut form.on_demand).label("Encode the full size only while watched"));
-						ui.add(
-							egui::Label::new(
-								egui::RichText::new(
-									"Saves the work, but a late viewer gets nothing from before they arrived.",
-								)
-								.color(kit::DIM),
-							)
-							.wrap(),
-						);
-						if overridden.on_demand {
-							flagged(ui, "--on-demand");
-						}
-					});
-					ui.end_row();
+			// A flag locks only the address: the token stays the one kept for
+			// the relay in effect, which the flag may name, unless the flag's
+			// address carries its own.
+			field_row(ui, "Relay", "Where the program goes live, and its token.", None, |ui| {
+				address(
+					ui,
+					&mut form.relay,
+					"https://relay.example/anon",
+					relay_flag.map(|url| ("--connect", url)),
+				);
+				ui.add_enabled_ui(!overridden.token && !relay_carries, |ui| {
+					token(ui, &mut form.relay_token, &mut form.forget_relay_token);
 				});
-		});
-		ui.add_space(10.0);
-		ui.horizontal(|ui| {
-			let edited = form.edited(stream.saved());
-			if ui.add_enabled(edited && !busy, egui::Button::new("Save")).clicked() {
-				match form.saved(stream.saved()) {
-					Ok(saved) => {
-						let tokens = form.tokens();
-						form.saving = Some(save(stream, saved, tokens, ui.ctx()));
-						form.note = None;
-					}
-					Err(err) => form.note = Some(err),
+				if overridden.token {
+					super::settings::flag_note(ui, "--connect-token");
+				} else if relay_carries {
+					super::settings::cue_note(ui, "The --connect address carries its own token, used over any kept");
 				}
-			}
-			if ui.add_enabled(edited && !busy, egui::Button::new("Revert")).clicked() {
-				let stream = self.controls.stream.lock().unwrap().clone();
-				*form = Form::new(&stream);
-			}
-			if busy {
-				ui.spinner();
-			}
-			if let Some(note) = &form.note {
-				ui.label(egui::RichText::new(note).color(kit::DIM));
+			});
+			field_row(
+				ui,
+				"Failover relay",
+				"A second relay the same broadcast goes to, which viewers resume from if the first fails. Each is \
+				 another upload of the whole stream.",
+				None,
+				|ui| {
+					address(
+						ui,
+						&mut form.failover,
+						"https://backup.example/anon",
+						failover_flag.map(|url| ("--failover", url)),
+					);
+					ui.add_enabled_ui(!failover_carries, |ui| {
+						token(ui, &mut form.failover_token, &mut form.forget_failover_token);
+					});
+					if failover_carries {
+						super::settings::cue_note(
+							ui,
+							"The --failover address carries its own token, used over any kept",
+						);
+					}
+				},
+			);
+			field_row(
+				ui,
+				"Broadcast name",
+				"Where viewers find it on the relays.",
+				overridden.broadcast.then_some("--broadcast"),
+				|ui| {
+					ui.add(
+						egui::TextEdit::singleline(&mut form.broadcast)
+							.hint_text(crate::stream::BROADCAST)
+							.desired_width(f32::INFINITY),
+					);
+				},
+			);
+			row(
+				ui,
+				"Encode only while someone watches",
+				"Spares the encoder while nobody watches the full size. A late viewer then gets nothing from before \
+				 they arrived.",
+				|ui| {
+					ui.add_enabled(!overridden.on_demand, kit::Toggle::new(&mut form.on_demand));
+				},
+			);
+			if overridden.on_demand {
+				super::settings::flag_note(ui, "--on-demand");
 			}
 		});
+		let edited = form.edited(stream.saved());
+		let mut save = None;
+		let mut revert = false;
+		ui.horizontal(|ui| {
+			if ui.add_enabled(edited && !busy, egui::Button::new("Save")).clicked() {
+				save = Some(form.saved(stream.saved()));
+			}
+			revert = ui.add_enabled(edited && !busy, egui::Button::new("Revert")).clicked();
+			if let Some(file) = stream.path().file_name() {
+				ui.add_space(8.0);
+				ui.label(
+					egui::RichText::new(format!("Kept in {}", file.to_string_lossy()))
+						.font(kit::ui(11.5))
+						.color(kit::DIM),
+				);
+			}
+		});
+		let tokens = form.tokens(&stream);
+		let retokened = !tokens.is_empty()
+			|| [&form.relay, &form.failover]
+				.iter()
+				.any(|url| crate::stream::carries_token(url));
+		ui.add_space(6.0);
+		self.saved_note(ui, Setting::Stream);
+		match save {
+			Some(Ok(saved)) => {
+				self.saved = None;
+				let mut saving = Saving::start(Setting::Stream, stream, saved, tokens, ui.ctx());
+				saving.retokened = retokened;
+				self.saving = Some(saving);
+			}
+			Some(Err(err)) => self.saved = Some((Setting::Stream, err)),
+			None => {}
+		}
+		if revert {
+			let stream = self.controls.stream.lock().unwrap().clone();
+			self.stream_form = Some(Form::new(&stream));
+		}
+	}
+}
+
+/// A relay's address, or the one `flag` sets over it for this run, without
+/// its token, locked with a note. The saved address stays in `text`, as a
+/// flag is never saved.
+fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<(&str, &url::Url)>) {
+	match flag {
+		None => {
+			ui.add(
+				egui::TextEdit::singleline(text)
+					.hint_text(hint)
+					.desired_width(f32::INFINITY),
+			);
+		}
+		Some((flag, url)) => {
+			let shown = crate::stream::redacted(url);
+			ui.add_enabled(
+				false,
+				egui::TextEdit::singleline(&mut shown.as_str()).desired_width(f32::INFINITY),
+			);
+			super::settings::flag_note(ui, flag);
+		}
 	}
 }
 
@@ -1179,7 +1221,57 @@ fn confirm_button(ui: &mut Ui, text: &str, enabled: bool, waiting: bool) -> egui
 	response
 }
 
-/// The Stream tab's form.
+/// A save of the show's stream file under way, from the Settings pane that
+/// asked for it.
+pub(super) struct Saving {
+	pub(super) from: Setting,
+	/// Whether it sets a relay's token, which the relays are followed anew for.
+	pub(super) retokened: bool,
+	pub(super) task: Task<Result<Stream, String>>,
+}
+
+impl Saving {
+	/// Keep `tokens` and save `saved` as `stream`'s, on a thread of their own,
+	/// since the credential store blocks, asking `ctx` for a frame once the
+	/// result is in, which applies it even while the window is hidden. A save
+	/// from the Guests pane is refused unless guests could join its room.
+	pub(super) fn start(
+		from: Setting,
+		mut stream: Stream,
+		saved: Saved,
+		tokens: Vec<Token>,
+		ctx: &egui::Context,
+	) -> Self {
+		let ctx = ctx.clone();
+		let (send, recv) = std::sync::mpsc::channel();
+		let spawned = std::thread::Builder::new().name("save".into()).spawn(move || {
+			let result = (|| -> anyhow::Result<Stream> {
+				if from == Setting::Guests {
+					stream.check_guests(&saved)?;
+				}
+				for (url, token) in &tokens {
+					stream.credentials().set(url, token.as_deref())?;
+				}
+				stream.save(saved)?;
+				Ok(stream)
+			})();
+			let _ = send.send(result.map_err(|err| format!("{err:#}")));
+			// After the send, so the frame it asks for finds the result.
+			ctx.request_repaint();
+		});
+		let task = match spawned {
+			Ok(_) => Task::Running(recv),
+			Err(err) => Task::Done(Err(format!("cannot save: {err}"))),
+		};
+		Self {
+			from,
+			retokened: false,
+			task,
+		}
+	}
+}
+
+/// The Stream pane's form.
 pub(super) struct Form {
 	relay: String,
 	relay_token: String,
@@ -1189,13 +1281,10 @@ pub(super) struct Form {
 	forget_failover_token: bool,
 	broadcast: String,
 	on_demand: bool,
-	saving: Option<Task<Result<Stream, String>>>,
-	/// How the last save went, or why it was refused.
-	note: Option<String>,
 }
 
 /// A token to keep for a relay, or `None` to forget its saved one.
-type Token = (url::Url, Option<String>);
+pub(super) type Token = (url::Url, Option<String>);
 
 impl Form {
 	/// The form holding what `stream` saved, not what the flags set.
@@ -1211,8 +1300,6 @@ impl Form {
 			forget_failover_token: false,
 			broadcast: saved.broadcast.clone().unwrap_or_default(),
 			on_demand: saved.on_demand,
-			saving: None,
-			note: None,
 		}
 	}
 
@@ -1246,14 +1333,26 @@ impl Form {
 		tokens || self.saved(saved).is_ok_and(|form| form != *saved) || self.saved(saved).is_err()
 	}
 
-	/// The tokens typed or forgotten, by the relay they go with.
-	fn tokens(&self) -> Vec<Token> {
+	/// The tokens typed or forgotten, by the relay they go with: the one
+	/// the form names, or the one a flag of `stream` sets over it.
+	fn tokens(&self, stream: &Stream) -> Vec<Token> {
+		let overridden = stream.overridden();
 		let mut tokens = Vec::new();
-		for (url, token, forget) in [
-			(&self.relay, &self.relay_token, self.forget_relay_token),
-			(&self.failover, &self.failover_token, self.forget_failover_token),
+		for (flagged, url, token, forget) in [
+			(
+				overridden.relay.then(|| stream.relay()).flatten(),
+				&self.relay,
+				&self.relay_token,
+				self.forget_relay_token,
+			),
+			(
+				overridden.failover.then(|| stream.failover()).flatten(),
+				&self.failover,
+				&self.failover_token,
+				self.forget_failover_token,
+			),
 		] {
-			let Ok(url) = url.trim().parse::<url::Url>() else {
+			let Some(url) = flagged.cloned().or_else(|| url.trim().parse::<url::Url>().ok()) else {
 				continue;
 			};
 			match (token.trim(), forget) {
@@ -1263,29 +1362,5 @@ impl Form {
 			}
 		}
 		tokens
-	}
-}
-
-/// Keep `tokens` and save `saved` as `stream`'s, on a thread of their own,
-/// since the credential store blocks, asking `ctx` for a frame once the
-/// result is in, which applies it even while the window is hidden.
-fn save(mut stream: Stream, saved: Saved, tokens: Vec<Token>, ctx: &egui::Context) -> Task<Result<Stream, String>> {
-	let ctx = ctx.clone();
-	let (send, recv) = std::sync::mpsc::channel();
-	let spawned = std::thread::Builder::new().name("save".into()).spawn(move || {
-		let result = (|| -> anyhow::Result<Stream> {
-			for (url, token) in &tokens {
-				stream.credentials().set(url, token.as_deref())?;
-			}
-			stream.save(saved)?;
-			Ok(stream)
-		})();
-		let _ = send.send(result.map_err(|err| format!("{err:#}")));
-		// After the send, so the frame it asks for finds the result.
-		ctx.request_repaint();
-	});
-	match spawned {
-		Ok(_) => Task::Running(recv),
-		Err(err) => Task::Done(Err(format!("cannot save: {err}"))),
 	}
 }

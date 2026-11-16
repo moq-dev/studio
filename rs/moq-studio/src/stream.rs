@@ -47,6 +47,21 @@ pub struct Saved {
 	pub guest_expiry: Option<Duration>,
 }
 
+impl Saved {
+	/// Where these settings save recordings for the show at `scene`, with no
+	/// flag over them.
+	pub fn folder(&self, scene: &Path) -> PathBuf {
+		match &self.recordings {
+			Some(dir) => dir.clone(),
+			None => scene
+				.parent()
+				.filter(|dir| !dir.as_os_str().is_empty())
+				.unwrap_or(Path::new("."))
+				.to_path_buf(),
+		}
+	}
+}
+
 /// What the command line sets for one run, over the show's saved settings.
 #[derive(Clone, Debug, Default)]
 pub struct Flags {
@@ -70,6 +85,11 @@ pub struct Overridden {
 	pub failover: bool,
 	pub broadcast: bool,
 	pub on_demand: bool,
+	pub recordings: bool,
+	pub room: bool,
+	pub room_key: bool,
+	pub join_page: bool,
+	pub guest_expiry: bool,
 }
 
 /// Which relays a stream goes to, as the go-live sheet switches them.
@@ -159,6 +179,11 @@ impl Stream {
 			failover: flags.failover.is_some(),
 			broadcast: flags.broadcast.is_some(),
 			on_demand: flags.on_demand,
+			recordings: flags.recordings.is_some(),
+			room: flags.guests.room.is_some(),
+			room_key: flags.guests.room_key.is_some(),
+			join_page: flags.guests.join_page.is_some(),
+			guest_expiry: flags.guests.guest_expiry.is_some(),
 		}
 	}
 
@@ -218,20 +243,29 @@ impl Stream {
 
 	/// Where recordings are saved for the show at `scene`.
 	pub fn recordings(&self, scene: &Path) -> PathBuf {
-		let set = self.flags.recordings.as_ref().or(self.saved.recordings.as_ref());
-		match set {
+		match &self.flags.recordings {
 			Some(dir) => dir.clone(),
-			None => scene
-				.parent()
-				.filter(|dir| !dir.as_os_str().is_empty())
-				.unwrap_or(Path::new("."))
-				.to_path_buf(),
+			None => self.saved.folder(scene),
 		}
 	}
 
 	/// The guests' room, as the flags and the show set it.
 	pub fn guests(&self) -> guests::Config {
-		let (flags, saved) = (&self.flags.guests, &self.saved);
+		self.guests_with(&self.saved)
+	}
+
+	/// Refuse `saved` unless guests could join the room it sets, under the
+	/// flags, on its relay: with both a room and its key, a key that reads,
+	/// and a relay and join page a browser can reach.
+	pub fn check_guests(&self, saved: &Saved) -> anyhow::Result<()> {
+		let relay = self.flags.relay.as_ref().or(saved.relay.as_ref());
+		self.guests_with(saved).load(relay)?;
+		Ok(())
+	}
+
+	/// The guests' room, as the flags and `saved` set it.
+	fn guests_with(&self, saved: &Saved) -> guests::Config {
+		let flags = &self.flags.guests;
 		guests::Config {
 			room: flags.room.clone().or(saved.room.clone()),
 			room_key: flags.room_key.clone().or(saved.room_key.clone()),
@@ -382,6 +416,13 @@ fn path(scene: &Path) -> PathBuf {
 /// takes out of it, its query's `jwt` as decoded, however it is written.
 pub fn carries_token(url: &str) -> bool {
 	Url::parse(url.trim()).is_ok_and(|url| url.query_pairs().any(|(key, _)| key == "jwt"))
+}
+
+/// `url` without the token its `?jwt=` carries, to show.
+pub fn redacted(url: &Url) -> String {
+	let mut url = url.clone();
+	take_token(&mut url);
+	url.to_string()
 }
 
 /// Take the token out of `url`'s `?jwt=`, if it has one, leaving the rest of
@@ -665,6 +706,7 @@ mod tests {
 		] {
 			assert!(carries_token(url), "{url}");
 			let mut parsed: Url = url.trim().parse().unwrap();
+			assert!(!redacted(&parsed).contains("abc"), "shown without it: {url}");
 			assert_eq!(take_token(&mut parsed).as_deref(), Some("abc"), "{url}");
 		}
 		for url in [

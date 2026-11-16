@@ -40,17 +40,12 @@ pub enum Action {
 }
 
 impl Action {
-	/// The actions every scene file has, as the Hotkeys tab lists them.
-	pub const FIXED: [Self; 9] = [
-		Self::Panic,
-		Self::Cut,
-		Self::Transition,
-		Self::StudioMode,
-		Self::Replay,
-		Self::SaveClip,
-		Self::Record,
-		Self::GoLive,
-		Self::EndStream,
+	/// The actions every scene file has, by what they are for, as the
+	/// Hotkeys pane lists them, each scene's after the first two.
+	pub const FIXED: [(&'static str, &'static [Self]); 3] = [
+		("Live", &[Self::GoLive, Self::EndStream, Self::Panic, Self::Record]),
+		("Studio mode", &[Self::StudioMode, Self::Cut, Self::Transition]),
+		("Review", &[Self::Replay, Self::SaveClip]),
 	];
 
 	/// What it does with Studio mode on or off, as the Hotkeys tab and a
@@ -130,6 +125,9 @@ pub struct Controls {
 	/// any still waiting, so each follow reads the settings after the last
 	/// one landed, and none is followed once it is on air.
 	following: Mutex<()>,
+	/// The relay and guest settings of the room last joined, and whether it
+	/// could be.
+	joined: Mutex<Option<(JoinedAt, Result<(), String>)>>,
 	/// The encoder checks running, which a go-live waits out, a closed
 	/// go-live sheet's included, whose check runs to its end, and admits no
 	/// more of until it is live or refused.
@@ -144,6 +142,9 @@ pub struct Controls {
 	/// How the last action a hotkey fired went, until the status bar takes it.
 	fired: Arc<Mutex<Option<Result<String, String>>>>,
 }
+
+/// What a guests' room is joined by: the relay, and the guest settings.
+type JoinedAt = (Option<url::Url>, crate::guests::Config);
 
 /// REVIEW's replay choices, and how the last replay or clip went.
 pub struct Replay {
@@ -180,6 +181,7 @@ impl Controls {
 			closing: AtomicBool::new(false),
 			rewatch: AtomicBool::new(false),
 			following: Mutex::new(()),
+			joined: Mutex::default(),
 			probes: Arc::new(tokio::sync::watch::Sender::new(Probes::default())),
 			replay: Mutex::default(),
 			record_sources: AtomicBool::new(false),
@@ -228,7 +230,10 @@ impl Controls {
 					false => "Studio mode off: a scene's pad or key takes it".into(),
 				})
 			}
-			Action::Panic => self.engine.state.lock().unwrap().panic(self.engine.room.as_deref()),
+			Action::Panic => {
+				let rooms = self.engine.rooms();
+				self.engine.state.lock().unwrap().panic(&rooms)
+			}
 			Action::Replay => self.replay(true, false),
 			Action::SaveClip => self.replay(false, false),
 			Action::Record => {
@@ -272,9 +277,7 @@ impl Controls {
 			let stream = {
 				let _following = controls.following.lock().unwrap();
 				let (stream, waiting) = controls.snapshot();
-				if waiting {
-					controls.follow(&stream);
-				}
+				controls.catch_up(&stream, waiting);
 				stream
 			};
 			// Wait out the encoder checks still running before opening anything.
@@ -362,19 +365,25 @@ impl Controls {
 	}
 
 	/// Take `stream` as the settings, as Settings saved them. When
-	/// `relays_changed`, follow the new relays now if off air, or once the
-	/// stream ends; says whether they wait for it.
-	pub fn set_stream(self: &Arc<Self>, stream: Stream, relays_changed: bool) -> bool {
+	/// `followed_changed`, such as a new relay or guests' room, follow them
+	/// now if off air, or once the stream ends; says whether they wait for it.
+	/// Otherwise a guests' room that failed is tried again, off air.
+	pub fn set_stream(self: &Arc<Self>, stream: Stream, followed_changed: bool) -> bool {
 		{
 			// Marked with the settings it belongs to, so a snapshot never
 			// holds the new relays without knowing they wait to be followed.
 			let mut current = self.stream.lock().unwrap();
 			*current = stream;
-			if relays_changed {
+			if followed_changed {
 				self.rewatch.store(true, Ordering::Release);
 			}
 		}
-		if !relays_changed {
+		if !followed_changed {
+			// A room that failed is tried again on any save, such as once its
+			// key file is back, off air.
+			if self.room_failure().is_some() {
+				drop(self.follow_saved_relays());
+			}
 			return false;
 		}
 		let waits = self.going() || self.engine.on_air() != OnAir::Off;
@@ -384,12 +393,76 @@ impl Controls {
 
 	/// Follow `stream`'s relays, which wait to be followed again if any could
 	/// not be set up, such as on a token the credential store would not read,
-	/// so the next go-live, end of stream, or save tries them again. Call it
-	/// holding [`Self::following`].
+	/// so the next go-live, end of stream, or save tries them again; and join
+	/// its guests' room on them, unless joined already. Call it holding
+	/// [`Self::following`], inside the runtime.
 	fn follow(&self, stream: &Stream) {
 		if !crate::show::follow(&self.engine, stream) {
 			self.rewatch.store(true, Ordering::Release);
 		}
+		self.join_room(stream);
+	}
+
+	/// Follow `stream`'s relays if they `waiting` to be, or else join its
+	/// guests' room if the last try failed, so a room whose key file is back
+	/// joins at the next go-live, end of stream, or save, as well as on Try
+	/// again. Call it holding [`Self::following`], inside the runtime.
+	fn catch_up(&self, stream: &Stream, waiting: bool) {
+		match waiting {
+			true => self.follow(stream),
+			false => self.join_room(stream),
+		}
+	}
+
+	/// Join the guests' room `stream` names, unless joined to it already: a
+	/// room that failed is tried again, such as once its key file is back.
+	/// Call it holding [`Self::following`], which keeps two joins apart, as
+	/// [`Self::joined`] is let go while one reads the key file, so the UI
+	/// reading the failure never waits on the disk; inside the runtime.
+	fn join_room(&self, stream: &Stream) {
+		let room = (stream.relay().cloned(), stream.guests());
+		{
+			let mut joined = self.joined.lock().unwrap();
+			match &*joined {
+				Some((at, Ok(()))) if *at == room => return,
+				// The engine starts in no room.
+				None if room.1 == crate::guests::Config::default() => {
+					*joined = Some((room, Ok(())));
+					return;
+				}
+				_ => {}
+			}
+		}
+		// Panic mutes its guests even if it cannot be joined, such as when
+		// its key file is gone, since one already in a scene may still play.
+		if let Some(path) = room.1.path() {
+			self.engine.remember_room(&path);
+		}
+		let joining =
+			crate::guests::Joining::connect(&room.1, room.0.as_ref(), &stream.client(), stream.quic().clone());
+		// A room that cannot be leaves the last one too, since its settings
+		// are gone; it is tried again once they change.
+		let result = match joining {
+			Ok(joining) => self.engine.join(joining),
+			Err(err) => self.engine.join(None).and(Err(err)),
+		};
+		if let Err(err) = &result {
+			tracing::error!(error = format!("{err:#}"), "guests cannot join");
+		}
+		*self.joined.lock().unwrap() = Some((room, result.map_err(|err| format!("{err:#}"))));
+	}
+
+	/// Try the guests' room that failed again, on a thread of its own, since
+	/// the credential store blocks. Off air only: on air, the settings may
+	/// hold a room that waits for the stream to end, and its end tries again.
+	pub fn retry_room(self: &Arc<Self>) {
+		drop(self.follow_saved_relays());
+	}
+
+	/// Why guests cannot join the room the settings name, if they cannot.
+	pub fn room_failure(&self) -> Option<String> {
+		let joined = self.joined.lock().unwrap();
+		joined.as_ref().and_then(|(_, result)| result.clone().err())
 	}
 
 	/// The settings, and whether their relays wait to be followed, which
@@ -409,9 +482,10 @@ impl Controls {
 		self.follow_saved_relays()
 	}
 
-	/// Follow the saved relays, if any wait to be, on a thread of its own,
-	/// since the credential store blocks, unless a stream is on air or on its
-	/// way, which follows them itself.
+	/// Follow the saved relays, if any wait to be, or join the guests' room
+	/// if it failed, on a thread of its own, since the credential store
+	/// blocks, unless a stream is on air or on its way, which follows them
+	/// itself.
 	fn follow_saved_relays(self: &Arc<Self>) -> Option<std::thread::JoinHandle<()>> {
 		let controls = self.clone();
 		let spawned = std::thread::Builder::new().name("follow".into()).spawn(move || {
@@ -420,12 +494,9 @@ impl Controls {
 				return;
 			}
 			let (stream, waiting) = controls.snapshot();
-			if !waiting {
-				return;
-			}
 			// Each relay's client binds its socket on the runtime.
 			let _runtime = controls.runtime.enter();
-			controls.follow(&stream);
+			controls.catch_up(&stream, waiting);
 		});
 		spawned
 			.inspect_err(|err| tracing::warn!(error = format!("{err:#}"), "cannot follow the relays"))
@@ -514,7 +585,7 @@ impl Controls {
 		let engine = self.engine.clone();
 		let save = async move {
 			let recorder = &engine.recorder;
-			let path = replay::save(take, recorder.dir(), recorder.show()).await?;
+			let path = replay::save(take, &recorder.dir(), recorder.show()).await?;
 			Ok(format!("saved {of} to {}", path.display()))
 		};
 		Ok((saving, Some(save)))

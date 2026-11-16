@@ -9,9 +9,6 @@ with their live picture, dragged onto the picture like any source, and a
 guest's card offers Remove from scenes and New link. A failing token renewal
 shows on the card.
 
-Without a room configured, the section says what to set and opens that
-Settings pane.
-
 ## Plan
 
 The behavior is today's (`rs/moq-studio/src/guests.rs`): only the place

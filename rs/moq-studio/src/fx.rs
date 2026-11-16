@@ -104,7 +104,7 @@ impl Fx {
 		}
 	}
 
-	/// Pick `effects`, as View > Effects does.
+	/// Pick `effects`, as Settings, Advanced does.
 	#[cfg(test)]
 	pub fn pick(&mut self, effects: Effects) {
 		self.picked = Some(effects);
@@ -146,16 +146,20 @@ impl Fx {
 		self.effects != Effects::Off
 	}
 
-	/// View > Effects: the setting, or the system's.
-	pub fn menu(&mut self, ui: &mut Ui) {
-		ui.menu_button("Effects", |ui| {
-			let system = format!("Follow the system ({})", self.system().name());
-			ui.radio_value(&mut self.picked, None, system)
-				.on_hover_text("Reduced while the system asks apps to reduce motion");
-			for effects in [Effects::Full, Effects::Reduced, Effects::Off] {
-				ui.radio_value(&mut self.picked, Some(effects), effects.name());
-			}
-		});
+	/// Settings, Advanced: the setting picked, or the system's.
+	pub fn picker(&mut self, ui: &mut Ui) -> egui::Response {
+		let options = [
+			(None, "System"),
+			(Some(Effects::Full), Effects::Full.name()),
+			(Some(Effects::Reduced), Effects::Reduced.name()),
+			(Some(Effects::Off), Effects::Off.name()),
+		];
+		let system = format!(
+			"{}, while the system asks apps to reduce motion or not",
+			self.system().name()
+		);
+		ui.add(crate::kit::Segmented::new(&mut self.picked, &options))
+			.on_hover_text(system)
 	}
 
 	/// Draw `layers` at `at` in `painter`'s layer, clipped to it.

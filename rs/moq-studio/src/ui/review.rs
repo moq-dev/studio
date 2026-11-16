@@ -57,13 +57,19 @@ impl Review {
 		let recorder = &engine.recorder;
 		Self {
 			past: Past::new(engine.clone()),
-			shelf: Shelf::new(recorder.dir(), recorder.show(), runtime.clone()),
+			shelf: Shelf::new(&recorder.dir(), recorder.show(), runtime.clone()),
 			textures: BTreeMap::new(),
 			head: None,
 			grip: None,
 			outcome: None,
 			frozen: None,
 		}
+	}
+
+	/// List the recordings folder `engine` records into now, as it moved.
+	pub(super) fn shelve(&mut self, engine: &Engine, runtime: &tokio::runtime::Handle) {
+		let recorder = &engine.recorder;
+		self.shelf = Shelf::new(&recorder.dir(), recorder.show(), runtime.clone());
 	}
 
 	/// Show `listing` as the cards, for the window's views.

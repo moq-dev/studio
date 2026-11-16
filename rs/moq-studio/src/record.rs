@@ -55,12 +55,16 @@ pub struct Recorder {
 	/// Each broadcast source, by name, and the path it subscribes to, as
 	/// [`set_sources`](Self::set_sources) last saw them.
 	broadcasts: watch::Sender<BTreeMap<String, String>>,
-	dir: PathBuf,
+	/// Where the next recording goes.
+	dir: Mutex<PathBuf>,
 	/// Each file's name starts with this: the scene file's.
 	name: String,
 	runtime: tokio::runtime::Handle,
 	/// The recording in progress, or the last one.
 	session: Mutex<Option<Session>>,
+	/// Whether `dir` is being moved, which no recording starts during. Set
+	/// and read under `session`.
+	moving: AtomicBool,
 	/// The recordings found unfinished in `dir` at launch.
 	repairs: repair::Repairs,
 }
@@ -119,6 +123,28 @@ pub struct FileStatus {
 	pub finished: Option<Finished>,
 }
 
+/// A move of the recordings directory under way, during which a recording
+/// is refused rather than started, until it finishes or drops.
+pub struct Moving<'a> {
+	recorder: &'a Recorder,
+	dir: PathBuf,
+}
+
+impl Moving<'_> {
+	/// Save the next recording into the directory moved to.
+	pub fn finish(self) {
+		let _session = self.recorder.session.lock().unwrap();
+		*self.recorder.dir.lock().unwrap() = self.dir.clone();
+	}
+}
+
+impl Drop for Moving<'_> {
+	fn drop(&mut self) {
+		let _session = self.recorder.session.lock().unwrap();
+		self.recorder.moving.store(false, Ordering::Relaxed);
+	}
+}
+
 impl Recorder {
 	/// Record what `inputs` names into `dir`, naming each file after the
 	/// `scenes` file, and repair in the background each file in `dir` a crash
@@ -144,16 +170,40 @@ impl Recorder {
 			origin,
 			broadcasts: watch::channel(BTreeMap::new()).0,
 			repairs: repair::Repairs::start(&dir, &runtime),
-			dir,
+			dir: Mutex::new(dir),
 			name,
 			runtime,
 			session: Mutex::new(None),
+			moving: AtomicBool::new(false),
 		})
 	}
 
 	/// The directory recordings go to.
-	pub fn dir(&self) -> &Path {
-		&self.dir
+	pub fn dir(&self) -> PathBuf {
+		self.dir.lock().unwrap().clone()
+	}
+
+	/// Start moving the directory to `dir`, such as while the settings
+	/// naming it are written. Refused while a recording is under way, whose
+	/// unfinished file the next launch repairs only in the directory then
+	/// set. No recording starts until the move finishes or is dropped, nor
+	/// does another move.
+	pub fn moving(&self, dir: &Path) -> anyhow::Result<Moving<'_>> {
+		let dir = std::path::absolute(dir)?;
+		// The lock `start` checks under, held only for the check, so a slow
+		// move never holds up a read of the status.
+		let session = self.session.lock().unwrap();
+		anyhow::ensure!(
+			!self.moving.load(Ordering::Relaxed),
+			"the folder is already being moved"
+		);
+		anyhow::ensure!(
+			*self.dir.lock().unwrap() == dir || session.as_ref().is_none_or(|session| *session.done.borrow()),
+			"a recording is under way: stop it before moving the folder, so a crash leaves it where the next \
+			 launch repairs it"
+		);
+		self.moving.store(true, Ordering::Relaxed);
+		Ok(Moving { recorder: self, dir })
 	}
 
 	/// The show's name, which each file's starts with: the scene file's.
@@ -188,6 +238,10 @@ impl Recorder {
 			session.as_ref().is_none_or(|session| *session.done.borrow()),
 			"already recording"
 		);
+		anyhow::ensure!(
+			!self.moving.load(Ordering::Relaxed),
+			"the recordings folder is being moved; try again in a moment"
+		);
 
 		// UTC, since the studio does not read the time zone; no colons, which
 		// Windows refuses in a file name.
@@ -197,7 +251,8 @@ impl Recorder {
 		let stem = program_stem(&self.name, &stamp);
 		// Here rather than on the runtime, so a directory that cannot take it
 		// fails the click that started it.
-		let (path, file, marker) = create(&self.dir, &stem)?;
+		let dir = self.dir();
+		let (path, file, marker) = create(&dir, &stem)?;
 		let program = Arc::new(File::new(path, Some(marker)));
 		let files: Files = Arc::new(Mutex::new(vec![program.clone()]));
 		let stop = Arc::new(watch::channel(false).0);
@@ -209,7 +264,7 @@ impl Recorder {
 			sources: self.sources.clone(),
 			origin: self.origin.clone(),
 			broadcasts: self.broadcasts.subscribe(),
-			dir: self.dir.clone(),
+			dir,
 			stem,
 			files: files.clone(),
 			stop: stop.clone(),
@@ -1596,6 +1651,40 @@ mod tests {
 		recorder.start(false).unwrap();
 		assert_eq!(recorder.status().unwrap().files.len(), 1);
 		recorder.finish().await;
+	}
+
+	/// The folder stays put while a recording is under way, since a crash
+	/// leaves its file for the next launch to repair only where the folder
+	/// is then; once it is done, the folder moves, and only when the move
+	/// finishes, such as once the settings naming it are written.
+	#[tokio::test(start_paused = true)]
+	async fn the_folder_stays_while_recording() {
+		let dir = tempfile::tempdir().unwrap();
+		let other = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		let recorder = studio.recorder(dir.path());
+		studio.play(Duration::from_secs(1)).await;
+		recorder.start(false).unwrap();
+		let refused = recorder.moving(other.path()).err().expect("refused while recording");
+		assert!(
+			format!("{refused:#}").contains("a recording is under way"),
+			"{refused:#}"
+		);
+		recorder
+			.moving(dir.path())
+			.expect("the same folder is no move")
+			.finish();
+		assert_eq!(recorder.dir(), dir.path());
+		recorder.stop();
+		let ((), ()) = tokio::join!(recorder.finish(), studio.play(Duration::from_millis(500)));
+		let moving = recorder.moving(other.path()).unwrap();
+		let refused = recorder.start(false).unwrap_err();
+		assert!(format!("{refused:#}").contains("being moved"), "{refused:#}");
+		assert!(recorder.moving(dir.path()).is_err(), "one move at a time");
+		drop(moving);
+		assert_eq!(recorder.dir(), dir.path(), "a move dropped unfinished stays");
+		recorder.moving(other.path()).unwrap().finish();
+		assert_eq!(recorder.dir(), other.path());
 	}
 
 	/// Each source with media of its own records into its own file while it is

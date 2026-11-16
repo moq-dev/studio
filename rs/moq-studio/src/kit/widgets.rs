@@ -417,6 +417,80 @@ impl Widget for Toggle<'_> {
 	}
 }
 
+/// One of a few named choices, side by side, the one picked lit, such as a
+/// canvas size.
+pub struct Segmented<'a, T> {
+	current: &'a mut T,
+	options: &'a [(T, &'a str)],
+	reclick: bool,
+}
+
+impl<'a, T: PartialEq + Clone> Segmented<'a, T> {
+	pub fn new(current: &'a mut T, options: &'a [(T, &'a str)]) -> Self {
+		Self {
+			current,
+			options,
+			reclick: false,
+		}
+	}
+
+	/// Count a click on the option already chosen as a change too, such as
+	/// Custom opening its editor again.
+	pub fn reclick(mut self) -> Self {
+		self.reclick = true;
+		self
+	}
+}
+
+impl<T: PartialEq + Clone> Widget for Segmented<'_, T> {
+	fn ui(self, ui: &mut Ui) -> Response {
+		let font = super::ui_strong(12.5);
+		let layout =
+			|painter: &egui::Painter, name: &str, ink: Color32| painter.layout_no_wrap(name.into(), font.clone(), ink);
+		let widths: Vec<f32> = self
+			.options
+			.iter()
+			.map(|(_, name)| layout(ui.painter(), name, TEXT).size().x + 28.0)
+			.collect();
+		let size = vec2(widths.iter().sum::<f32>() + 4.0, 34.0);
+		let (rect, mut response) = ui.allocate_exact_size(size, Sense::hover());
+		let painter = ui.painter().clone();
+		painter.rect(rect, 9, P2, Stroke::new(1.0, LINE), StrokeKind::Inside);
+		let mut x = rect.left() + 2.0;
+		for (index, (value, name)) in self.options.iter().enumerate() {
+			let at = Rect::from_min_size(pos2(x, rect.top() + 2.0), vec2(widths[index], rect.height() - 4.0));
+			x = at.right();
+			let option = ui.interact(at, response.id.with(index), Sense::click());
+			let on = *self.current == *value;
+			option.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), on, *name));
+			if option.clicked() && (!on || self.reclick) {
+				*self.current = value.clone();
+				response.mark_changed();
+			}
+			let on = *self.current == *value;
+			let dim = if ui.is_enabled() { 1.0 } else { 0.4 };
+			if on {
+				painter.rect_filled(at, 7, TEXT.gamma_multiply(dim));
+			} else if option.hovered() {
+				painter.rect_filled(at, 7, P3);
+			}
+			// The option the keyboard is on, apart from the one picked, as a
+			// field shows its focus.
+			if option.has_focus() {
+				painter.rect_stroke(at, 7, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
+			}
+			let ink = match (on, option.hovered()) {
+				(true, _) => BG,
+				(false, true) => TEXT,
+				(false, false) => DIM,
+			};
+			let galley = layout(&painter, name, ink.gamma_multiply(dim));
+			painter.galley(at.center() - galley.size() / 2.0, galley, ink);
+		}
+		response
+	}
+}
+
 /// Where `pos` falls along `range`, from 0 to 1.
 fn fraction(pos: f32, range: egui::Rangef) -> f32 {
 	((pos - range.min) / range.span()).clamp(0.0, 1.0)
