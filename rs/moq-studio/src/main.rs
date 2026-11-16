@@ -433,10 +433,11 @@ impl Window {
 	/// since the click, rather than lose an edit or cut a stream.
 	fn close_show(&mut self, mut studio: Box<ui::Studio>, ctx: &egui::Context, frame: &mut eframe::Frame) {
 		let engine = studio.engine().clone();
-		let ready = match engine.on_air() {
-			engine::OnAir::Off => engine.save(),
-			_ => Err(anyhow::anyhow!("end the stream first")),
-		};
+		// Claimed against a go-live first, which the engine being off air
+		// alone would not refuse while it reads tokens or checks encoders.
+		let ready = studio
+			.reserve_close()
+			.and_then(|()| engine.save().inspect_err(|_| studio.release_close()));
 		if let Err(err) = ready {
 			studio.refuse(err.context("cannot close the show"));
 			self.app = App::Studio(studio);

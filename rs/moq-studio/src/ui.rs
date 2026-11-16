@@ -267,6 +267,17 @@ impl Studio {
 		std::mem::take(&mut self.panels.closing)
 	}
 
+	/// Claim the show for closing against a go-live, which a hotkey could
+	/// start after an off-air check alone.
+	pub fn reserve_close(&self) -> anyhow::Result<()> {
+		self.panels.controls.reserve_close()
+	}
+
+	/// Give the show back after a close that left it open.
+	pub fn release_close(&self) {
+		self.panels.controls.release_close();
+	}
+
 	/// Say why the show stays open.
 	pub fn refuse(&mut self, err: anyhow::Error) {
 		self.panels.report(Err(err));

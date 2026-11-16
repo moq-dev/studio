@@ -15,6 +15,7 @@ use x11rb::protocol::xkb::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, ModMask, Window, WindowClass};
 use x11rb::protocol::{ErrorKind, Event};
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 
 use super::Binding;
 
@@ -177,14 +178,21 @@ impl X11 {
 
 impl Drop for X11 {
 	/// Let go of every key and end the thread, so a closed show's keys fire
-	/// nothing, and the connection closes with it.
+	/// nothing, and the connection closes with it. The grabs end before this
+	/// returns, not when the thread drops the connection, so a show opened
+	/// next can grab the same keys.
 	fn drop(&mut self) {
 		self.ending.store(true, Ordering::Relaxed);
+		let was = std::mem::take(&mut *self.grabbed.lock().unwrap());
+		for (keycode, held) in was.keys() {
+			self.ungrab(*keycode, *held, &locks());
+		}
 		// Its destruction is an event for the thread, which sees it is ending.
 		if let Ok(cookie) = self.conn.destroy_window(self.wake) {
 			cookie.ignore_error();
 		}
-		if let Err(err) = self.conn.flush() {
+		// A round trip, so the server has processed the ungrabs.
+		if let Err(err) = self.conn.sync() {
 			tracing::warn!(error = %err, "cannot reach the X server");
 		}
 	}

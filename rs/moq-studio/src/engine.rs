@@ -5182,6 +5182,9 @@ mod tests {
 		assert!(controls.going(), "the go-live waits for the check");
 		assert_eq!(*controls.refused.lock().unwrap(), None);
 		assert!(controls.probing().is_none(), "no new check while going live");
+		// The engine is off air in this gap, yet closing the show would cut
+		// the stream that is about to start.
+		assert!(controls.reserve_close().is_err(), "no close while going live");
 		drop(probing);
 		kio::clock::timeout(TIMEOUT, async {
 			while controls.going() {
@@ -5192,6 +5195,11 @@ mod tests {
 		.expect("the go-live goes on once the check ends");
 		assert!(controls.refused.lock().unwrap().is_some(), "and reads where to go");
 		assert!(controls.probing().is_some(), "checks are admitted once it ends");
+		// Closing claims the show against a go-live, until it is given back.
+		controls.reserve_close().expect("a close is admitted off air");
+		assert!(controls.go_live().is_err(), "no go-live while closing");
+		controls.release_close();
+		assert!(!controls.going(), "a close given back leaves the show as it was");
 		engine.stop();
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await

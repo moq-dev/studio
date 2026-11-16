@@ -118,6 +118,10 @@ pub struct Controls {
 	/// refused, which covers reading the tokens before the engine says
 	/// Starting, so a second press is refused at once.
 	going: AtomicBool,
+	/// Whether the show is closing, which refuses a go-live. Closing holds
+	/// [`Self::going`] too, so the two are claimed by one atomic swap: a
+	/// press that a go-live won is one closing refuses, and the reverse.
+	closing: AtomicBool,
 	/// Whether the relays wait to be followed: the show's, until its first
 	/// follow, and those saved on air until the stream ends, since following
 	/// them then would cut the broadcast sources and guests on program.
@@ -173,6 +177,7 @@ impl Controls {
 			switched: Mutex::default(),
 			refused: Mutex::default(),
 			going: AtomicBool::new(false),
+			closing: AtomicBool::new(false),
 			rewatch: AtomicBool::new(false),
 			following: Mutex::new(()),
 			probes: Arc::new(tokio::sync::watch::Sender::new(Probes::default())),
@@ -254,6 +259,7 @@ impl Controls {
 			self.engine.on_air() == OnAir::Off,
 			"the program is already on air, or on its way on or off"
 		);
+		anyhow::ensure!(!self.closing.load(Ordering::Acquire), "the show is closing");
 		anyhow::ensure!(!self.going.swap(true, Ordering::AcqRel), "already going live");
 		*self.refused.lock().unwrap() = None;
 		let controls = self.clone();
@@ -330,6 +336,29 @@ impl Controls {
 	/// refused.
 	pub fn going(&self) -> bool {
 		self.going.load(Ordering::Acquire)
+	}
+
+	/// Claim the show for closing, which refuses a go-live from now on, from a
+	/// hotkey included, until [`Self::release_close`]. Refused while a stream
+	/// is on air, on its way on or off, or going live, whose press the engine
+	/// does not show until it has read the tokens and checked the encoders.
+	pub fn reserve_close(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			!self.going.swap(true, Ordering::AcqRel),
+			"end the stream first: it is going live"
+		);
+		if self.engine.on_air() != OnAir::Off {
+			self.going.store(false, Ordering::Release);
+			anyhow::bail!("end the stream first");
+		}
+		self.closing.store(true, Ordering::Release);
+		Ok(())
+	}
+
+	/// Give the show back after a close that left it open.
+	pub fn release_close(&self) {
+		self.closing.store(false, Ordering::Release);
+		self.going.store(false, Ordering::Release);
 	}
 
 	/// Take `stream` as the settings, as Settings saved them. When

@@ -405,7 +405,7 @@ impl Panels {
 			}
 			// Closing ends the show as quitting does, which would cut a stream
 			// on air: the broadcaster ends that with END STREAM.
-			let off = matches!(self.engine.on_air(), crate::engine::OnAir::Off);
+			let off = matches!(self.engine.on_air(), crate::engine::OnAir::Off) && !self.controls.going();
 			let close = ui.add_enabled(off, kit::button(Icon::Close, "Close show"));
 			if !off {
 				kit::tip(close, "End the stream first", None);
