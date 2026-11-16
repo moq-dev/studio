@@ -468,10 +468,8 @@ impl Panels {
 		self.devices(ui);
 		section(ui, "Any source");
 		self.by_hand(ui);
-		if self.engine.room.is_some() {
-			section(ui, "Guests");
-			self.guests(ui);
-		}
+		section(ui, "Guests");
+		self.guests(ui);
 	}
 
 	/// The sources no layer shows and no audio scene hears, each to add as a
@@ -656,8 +654,14 @@ impl Panels {
 	/// Invite guests, show their links, and see who joined.
 	fn guests(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
-		let Some(room) = &engine.room else {
-			ui.label("Start with --room and --room-key to invite guests.");
+		let Some(room) = engine.room() else {
+			match self.controls.room_failure() {
+				Some(failure) => ui.colored_label(kit::ERR, format!("Guests cannot join: {failure}")),
+				None => ui.label("Guests join a room on your relay, which needs a room and its key."),
+			};
+			if ui.add(kit::button(Icon::Settings, "Set up the room")).clicked() {
+				self.setting = Some(Setting::Guests);
+			}
 			return;
 		};
 
@@ -753,7 +757,7 @@ impl Panels {
 						if ui
 							.small_button("Remove from scenes")
 							.on_hover_text(
-								"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within --guest-expiry. Undo puts them back in the scenes; only New link renews them again.",
+								"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within the link lifetime in Settings, Guests. Undo puts them back in the scenes; only New link renews them again.",
 							)
 							.clicked()
 						{

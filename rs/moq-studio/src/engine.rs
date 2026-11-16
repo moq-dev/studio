@@ -959,8 +959,8 @@ pub struct Engine {
 	on_air_program: tokio::sync::watch::Sender<Option<moq_net::broadcast::Consumer>>,
 	/// Records the program, and each source too if asked.
 	pub recorder: record::Recorder,
-	/// The room guests join, when configured.
-	pub room: Option<Arc<crate::guests::Room>>,
+	/// The room guests join, while the show has one, and what follows it.
+	room: Mutex<Option<Joined>>,
 	/// Each guest's return feed, once the studio's session in the room dials.
 	feeds: Mutex<Option<crate::feed::Feeds>>,
 	/// What the program's broadcasts share, on air or not.
@@ -999,32 +999,35 @@ pub struct Launch {
 	pub gpu: Gpu,
 	/// The directory recordings are saved in.
 	pub recordings: PathBuf,
-	/// The room guests join, if any.
-	pub room: Option<Arc<crate::guests::Room>>,
+}
+
+/// The room the engine follows, until dropped: the guests who join it, their
+/// renewals, and who has a return feed.
+struct Joined {
+	room: Arc<crate::guests::Room>,
+	tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Joined {
+	fn drop(&mut self) {
+		for task in &self.tasks {
+			task.abort();
+		}
+	}
 }
 
 impl Engine {
 	/// Open the `loaded` collection and history on `launch.gpu`, start the
 	/// program clock, and save both to `autosave`'s files as they change,
-	/// starting at once. Recordings go into `launch.recordings`, and the
-	/// guests who join `launch.room` are added as sources. Nothing is
-	/// published until the studio [goes live](Self::go_live).
+	/// starting at once. Recordings go into `launch.recordings`. Guests join
+	/// once the engine [joins](Self::join) a room. Nothing is published until
+	/// the studio [goes live](Self::go_live).
 	///
 	/// Call inside the tokio runtime that serves the relay connections.
 	pub async fn start(launch: Launch, autosave: Autosave, loaded: autosave::Loaded) -> anyhow::Result<Arc<Self>> {
-		let Launch { gpu, recordings, room } = launch;
+		let Launch { gpu, recordings } = launch;
 		let (bus, driver) = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
-		// Every relay feeds `subscribe`, so a guest either one routes is seen.
-		let guests = match &room {
-			Some(room) => Some(
-				subscribe
-					.consume()
-					.scope(room.path(), &moq_auth::Pattern::all().into())
-					.context("cannot follow the room")?,
-			),
-			None => None,
-		};
 		let sources = subscribe.consume();
 		let autosave::Loaded {
 			collection,
@@ -1102,7 +1105,7 @@ impl Engine {
 			handoff: Mutex::default(),
 			on_air_program: tokio::sync::watch::Sender::new(None),
 			recorder,
-			room,
+			room: Mutex::default(),
 			feeds: Mutex::default(),
 			program,
 			subscribe,
@@ -1117,14 +1120,6 @@ impl Engine {
 			sources: _,
 		} = publish;
 
-		if let Some(room) = &engine.room
-			&& let Some(origin) = room.origin()
-		{
-			let program = engine.on_air_program.subscribe();
-			let clock = engine.program.clock.clone();
-			let feeds = crate::feed::Feeds::new(room.clone(), origin.clone(), program, clock, epoch)?;
-			*engine.feeds.lock().unwrap() = Some(feeds);
-		}
 		// Probed now, so a scene a recording cannot encode says so before
 		// anyone records it, and opened before the program clock starts the
 		// sources. It opens its session only once recorded.
@@ -1159,26 +1154,60 @@ impl Engine {
 		clocked("autosave".into(), async move || save.autosave.run(&save.state).await)?;
 		starting.started();
 		tokio::spawn(engine.clone().grade());
-		// Last, once nothing can fail: a start that fails is retried from setup,
-		// and a follower already running would keep this engine and its
-		// publication alive beside the retry's.
-		if let Some(guests) = guests {
-			tokio::spawn(crate::guests::run(engine.clone(), guests));
-		}
-		if let Some(room) = &engine.room {
-			// Who has a return feed follows who is renewed, synced with the audio.
-			let mut changes = room.changes();
-			// Including any made since the feeds started.
-			changes.mark_changed();
-			let follow = engine.clone();
-			tokio::spawn(async move {
-				while changes.changed().await.is_ok() {
-					follow.state.lock().unwrap().stale = true;
-				}
-			});
-		}
 
 		Ok(engine)
+	}
+
+	/// The room guests join, while the engine follows one.
+	pub fn room(&self) -> Option<Arc<crate::guests::Room>> {
+		let joined = self.room.lock().unwrap();
+		joined.as_ref().map(|joined| joined.room.clone())
+	}
+
+	/// Follow `joining`'s room in place of the one followed now, if any:
+	/// add each guest who joins it as a source, renew their tokens through its
+	/// session, and give each a return feed. `None` leaves the room. Guests
+	/// already added stay sources, and a guest of the room left keeps their
+	/// link until it expires, unrenewed.
+	///
+	/// Call inside the tokio runtime that serves the relay connections.
+	pub fn join(self: &Arc<Self>, joining: Option<crate::guests::Joining>) -> anyhow::Result<()> {
+		// The room left stops renewing and feeding before the next starts, so
+		// the two never publish at once.
+		*self.room.lock().unwrap() = None;
+		*self.feeds.lock().unwrap() = None;
+		let Some(crate::guests::Joining { room, renewal }) = joining else {
+			return Ok(());
+		};
+		// Every relay feeds `subscribe`, so a guest either one routes is seen.
+		let announced = self
+			.subscribe
+			.consume()
+			.scope(room.path(), &moq_auth::Pattern::all().into())
+			.context("cannot follow the room")?;
+		if let Some(origin) = room.origin() {
+			let program = self.on_air_program.subscribe();
+			let clock = self.program.clock.clone();
+			let feeds = crate::feed::Feeds::new(room.clone(), origin.clone(), program, clock, self.program.epoch)?;
+			*self.feeds.lock().unwrap() = Some(feeds);
+		}
+		let mut tasks = vec![tokio::spawn(crate::guests::run(self.clone(), room.clone(), announced))];
+		if let Some(renewal) = renewal {
+			tasks.push(tokio::spawn(renewal.run()));
+		}
+		// Who has a return feed follows who is renewed, synced with the audio,
+		// including any change made since the feeds started.
+		let mut changes = room.changes();
+		changes.mark_changed();
+		let engine = Arc::downgrade(self);
+		tasks.push(tokio::spawn(async move {
+			while changes.changed().await.is_ok() {
+				let Some(engine) = engine.upgrade() else { return };
+				engine.state.lock().unwrap().stale = true;
+			}
+		}));
+		*self.room.lock().unwrap() = Some(Joined { room, tasks });
+		Ok(())
 	}
 
 	/// Stop the program clock, then wait for each rendition's encoder, of
@@ -1220,6 +1249,9 @@ impl Engine {
 	/// to end, having finished its own track, and then finish the sources'
 	/// local catalog. Bounded at [`CLOSE`].
 	pub async fn close(&self) {
+		// Its session and followers hold the engine until they end.
+		*self.room.lock().unwrap() = None;
+		*self.feeds.lock().unwrap() = None;
 		let running = std::mem::take(&mut *self.running.lock().unwrap());
 		let sources = async {
 			for ended in running {
@@ -3075,7 +3107,6 @@ mod tests {
 		let launch = Launch {
 			gpu,
 			recordings: recordings.to_path_buf(),
-			room: None,
 		};
 		let engine = Engine::start(launch, autosave, loaded).await?;
 		if !relays.is_empty() {
@@ -4811,7 +4842,7 @@ mod tests {
 			.expect("the program's past");
 		assert!(take.video.is_some(), "the canvas size holds video");
 		let (folder, show) = (engine.recorder.dir(), engine.recorder.show());
-		let clip = kio::clock::timeout(TIMEOUT, crate::replay::save(take, folder, show))
+		let clip = kio::clock::timeout(TIMEOUT, crate::replay::save(take, &folder, show))
 			.await
 			.expect("the clip saves")
 			.expect("a clip");

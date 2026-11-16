@@ -55,7 +55,8 @@ pub struct Recorder {
 	/// Each broadcast source, by name, and the path it subscribes to, as
 	/// [`set_sources`](Self::set_sources) last saw them.
 	broadcasts: watch::Sender<BTreeMap<String, String>>,
-	dir: PathBuf,
+	/// Where the next recording goes.
+	dir: Mutex<PathBuf>,
 	/// Each file's name starts with this: the scene file's.
 	name: String,
 	runtime: tokio::runtime::Handle,
@@ -144,7 +145,7 @@ impl Recorder {
 			origin,
 			broadcasts: watch::channel(BTreeMap::new()).0,
 			repairs: repair::Repairs::start(&dir, &runtime),
-			dir,
+			dir: Mutex::new(dir),
 			name,
 			runtime,
 			session: Mutex::new(None),
@@ -152,8 +153,14 @@ impl Recorder {
 	}
 
 	/// The directory recordings go to.
-	pub fn dir(&self) -> &Path {
-		&self.dir
+	pub fn dir(&self) -> PathBuf {
+		self.dir.lock().unwrap().clone()
+	}
+
+	/// Save the next recording into `dir`; one under way stays where it is.
+	pub fn set_dir(&self, dir: &Path) -> anyhow::Result<()> {
+		*self.dir.lock().unwrap() = std::path::absolute(dir)?;
+		Ok(())
 	}
 
 	/// The show's name, which each file's starts with: the scene file's.
@@ -197,7 +204,8 @@ impl Recorder {
 		let stem = program_stem(&self.name, &stamp);
 		// Here rather than on the runtime, so a directory that cannot take it
 		// fails the click that started it.
-		let (path, file, marker) = create(&self.dir, &stem)?;
+		let dir = self.dir();
+		let (path, file, marker) = create(&dir, &stem)?;
 		let program = Arc::new(File::new(path, Some(marker)));
 		let files: Files = Arc::new(Mutex::new(vec![program.clone()]));
 		let stop = Arc::new(watch::channel(false).0);
@@ -209,7 +217,7 @@ impl Recorder {
 			sources: self.sources.clone(),
 			origin: self.origin.clone(),
 			broadcasts: self.broadcasts.subscribe(),
-			dir: self.dir.clone(),
+			dir,
 			stem,
 			files: files.clone(),
 			stop: stop.clone(),

@@ -57,6 +57,24 @@ impl Binding {
 		}
 	}
 
+	/// Each modifier and then the key, one per keycap.
+	pub fn caps(&self, ctx: &egui::Context) -> Vec<String> {
+		let mac = ctx.os().is_mac();
+		let held = [
+			egui::Modifiers::CTRL,
+			egui::Modifiers::ALT,
+			egui::Modifiers::SHIFT,
+			egui::Modifiers::MAC_CMD,
+		];
+		let mut caps: Vec<String> = held
+			.into_iter()
+			.filter(|one| self.modifiers.contains(*one))
+			.map(|one| egui::ModifierNames::NAMES.format(&one, mac))
+			.collect();
+		caps.push(self.label());
+		caps
+	}
+
 	/// The key alone, as the layout printed it, and a keypad key by its place
 	/// on the keypad, which NumLock relabels.
 	fn label(&self) -> String {

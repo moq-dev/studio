@@ -68,8 +68,14 @@ enum View {
 	Menu,
 	/// The edit history, under the title bar's undo, after an edit.
 	History,
-	/// Settings, at a tab.
+	/// Settings, at a pane.
 	Setting(Setting),
+	/// On air, Settings at a pane.
+	OnAirSetting(Setting),
+	/// On air, Settings' Show pane asking before 720p restarts the video.
+	Restart,
+	/// The scene graph's window.
+	Graph,
 	/// The stream's health in detail.
 	Health,
 	/// The LIVE page after a mute, with the health dot's popover open and the
@@ -228,16 +234,28 @@ views! {
 	/// REVIEW on a show with two replay sources: which one Replay plays in is
 	/// picked under the speed, in place of its note.
 	review_into: Still, studio(View::Review { picked: true, replays: true });
-	/// Settings' Recording tab: the folder, and what a recording holds.
-	recording: Still, studio(View::Setting(Setting::Recording));
-	/// Settings' Advanced tab: the scene graph.
-	advanced: Still, studio(View::Setting(Setting::Advanced));
 	/// The edit history, open under undo.
 	history: Still, studio(View::History);
-	health: Still, studio(View::Health);
-	/// Settings' Show tab, with the encoders' timings.
-	output: Live, studio(View::Setting(Setting::Show));
-	hotkeys: Still, studio(View::Setting(Setting::Hotkeys));
+	/// The health dot's details off air: the encoders and their timings.
+	health: Live, studio(View::Health);
+	/// Settings, Show: the format, the canvas size and frame rate by name,
+	/// and the scene sizes behind their disclosure.
+	settings_show: Still, studio(View::Setting(Setting::Show));
+	/// Settings, Show on air, saying what a new size does then.
+	settings_show_on_air: Live, relayed(View::OnAirSetting(Setting::Show));
+	/// On air, a new canvas size waits for a yes before it restarts the video.
+	settings_restart: Live, relayed(View::Restart);
+	/// Settings, Recording: the folder, and what a recording holds.
+	settings_recording: Still, studio(View::Setting(Setting::Recording));
+	/// Settings, Hotkeys: each action by what it is for, on keycaps.
+	settings_hotkeys: Still, studio(View::Setting(Setting::Hotkeys));
+	/// Settings, Guests, with no room yet.
+	settings_guests: Still, studio(View::Setting(Setting::Guests));
+	/// Settings, Advanced: published scenes and sources, the virtual camera,
+	/// the effects, and the scene graph.
+	settings_advanced: Still, studio(View::Setting(Setting::Advanced));
+	/// The scene graph, in a window of its own.
+	graph: Still, studio(View::Graph);
 	/// With no show open: recent shows, each with its picture, beside New
 	/// show and Open a show file.
 	library: Still, Open::Library;
@@ -251,8 +269,8 @@ views! {
 	/// On air, the health dot's popover: the worst problem, every
 	/// destination, the viewers, and the encoder.
 	on_air_health: Live, relayed(View::OnAirHealth);
-	/// Settings' Stream tab: the relay, its token, the failover, the
-	/// broadcast's name, and on demand.
+	/// Settings, Stream: the relay, its token, the failover, the broadcast's
+	/// name, and on demand.
 	settings_stream: Still, studio(View::Setting(Setting::Stream));
 }
 
@@ -325,7 +343,6 @@ fn launch(gpu: &engine::Gpu) -> engine::Launch {
 	engine::Launch {
 		gpu: gpu.clone(),
 		recordings: ".".into(),
-		room: None,
 	}
 }
 
@@ -399,11 +416,11 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	let page = url::Url::parse("https://studio.example/join/").unwrap();
 	let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
 	let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
-	let launch = engine::Launch {
-		room: Some(Arc::new(room)),
-		..launch(&gpu)
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let App::Starting(engine, _) = &app else {
+		unreachable!("the studio starts")
 	};
-	let app = start(launch, stream(None), &runtime);
+	engine.join(Some(crate::guests::Joining::offline(room))).unwrap();
 	let (mut harness, started, closed) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
@@ -455,6 +472,104 @@ fn a_click_takes_and_the_panic_key_cuts() {
 		closed.load(Ordering::Relaxed),
 		"the window counts the close as asked for"
 	);
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// Settings changes the show as a person would: a canvas size by name and
+/// the format turn the program, keeping its frame rate. The Guests pane
+/// refuses a room guests could not join, saying why, then joins the room it
+/// saves at once, off air, and moves to the next on the next save. It draws
+/// no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn settings_change_the_show_and_move_the_guests() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let relay = Relay::start(&runtime);
+	let app = start(launch(&gpu), stream(Some(&relay)), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let canvas = || engine.state.lock().unwrap().collection().canvas;
+	let framerate = canvas().framerate;
+
+	harness.get_by_label("Settings").click();
+	harness.run_steps(2);
+	harness.get_by_label("720p").click();
+	harness.run_steps(2);
+	assert_eq!((canvas().width, canvas().height), (1280, 720));
+	harness.get_by_label("Portrait").click();
+	harness.run_steps(2);
+	assert_eq!((canvas().width, canvas().height), (720, 1280));
+	assert_eq!(canvas().framerate, framerate, "the format keeps the frame rate");
+	harness.get_by_label("1080p").click();
+	harness.run_steps(2);
+	assert_eq!(
+		(canvas().width, canvas().height),
+		(1080, 1920),
+		"a size keeps the format"
+	);
+
+	// The relay's path is the room's parent.
+	for room in ["guests", "other"] {
+		crate::guests::tests::key(room, &["**"], &["**"])
+			.to_file(format!("{room}.jwk"))
+			.unwrap();
+	}
+	harness.get_by_label("Guests").click();
+	harness.run_steps(2);
+	// Fill the room, then the room key, then save; each field replaced whole.
+	let fill = |harness: &mut Harness<'_, Window>, index: usize, text: &str| {
+		harness.get_all_by_role(Role::TextInput).nth(index).unwrap().focus();
+		harness.run_steps(2);
+		harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+		harness
+			.get_all_by_role(Role::TextInput)
+			.nth(index)
+			.unwrap()
+			.type_text(text);
+		harness.run_steps(2);
+	};
+	let joined = |harness: &mut Harness<'_, Window>, room: &str| {
+		runtime
+			.block_on(kio::clock::timeout(SETTLE, async {
+				while engine.room().is_none_or(|joined| joined.path().as_str() != room) {
+					harness.step();
+					kio::clock::sleep(Duration::from_millis(20)).await;
+				}
+			}))
+			.unwrap_or_else(|_| panic!("guests join `{room}`"));
+	};
+	fill(&mut harness, 0, "guests");
+	harness.get_by_label("Save").click();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while harness
+				.query_by_label_contains("need both a room and a room key")
+				.is_none()
+			{
+				harness.step();
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("a room without its key is refused");
+	assert!(engine.room().is_none());
+	fill(&mut harness, 1, "guests.jwk");
+	harness.get_by_label("Save").click();
+	joined(&mut harness, "guests");
+	fill(&mut harness, 0, "other");
+	fill(&mut harness, 1, "other.jwk");
+	harness.get_by_label("Save").click();
+	joined(&mut harness, "other");
+	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
+	assert!(saved.contains("room = \"other\""), "{saved}");
 
 	drop(harness);
 	quit(&engine, &runtime);
@@ -828,7 +943,9 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
 		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
-		View::Setting(setting) => studio.open(*setting),
+		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
+		View::Restart => studio.open(Setting::Show),
+		View::Graph => studio.open_graph(),
 		View::Health => studio.details(),
 		View::Going => studio.going(),
 		View::Hover | View::History | View::OnAir | View::EndStream | View::OnAirHealth => {}
@@ -849,7 +966,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 	}
 	let engine = started.get().expect("the studio started").clone();
-	if let View::OnAir | View::EndStream | View::OnAirHealth = view {
+	if let View::OnAir | View::EndStream | View::OnAirHealth | View::OnAirSetting(_) | View::Restart = view {
 		controls.go_live().expect("going live starts");
 		runtime
 			.block_on(kio::clock::timeout(SETTLE, async {
@@ -870,6 +987,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::EndStream => {
 			harness.get_by_label("End stream").hover();
 			harness.run_steps(2);
+		}
+		View::Restart => {
+			harness.get_by_label("720p").click();
+			harness.run_steps(4);
 		}
 		View::OnAirHealth => {
 			let pill = ["Healthy", "Starting", "Degraded", "Unhealthy"]

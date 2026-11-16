@@ -70,6 +70,11 @@ pub struct Overridden {
 	pub failover: bool,
 	pub broadcast: bool,
 	pub on_demand: bool,
+	pub recordings: bool,
+	pub room: bool,
+	pub room_key: bool,
+	pub join_page: bool,
+	pub guest_expiry: bool,
 }
 
 /// Which relays a stream goes to, as the go-live sheet switches them.
@@ -159,6 +164,11 @@ impl Stream {
 			failover: flags.failover.is_some(),
 			broadcast: flags.broadcast.is_some(),
 			on_demand: flags.on_demand,
+			recordings: flags.recordings.is_some(),
+			room: flags.guests.room.is_some(),
+			room_key: flags.guests.room_key.is_some(),
+			join_page: flags.guests.join_page.is_some(),
+			guest_expiry: flags.guests.guest_expiry.is_some(),
 		}
 	}
 
@@ -231,7 +241,21 @@ impl Stream {
 
 	/// The guests' room, as the flags and the show set it.
 	pub fn guests(&self) -> guests::Config {
-		let (flags, saved) = (&self.flags.guests, &self.saved);
+		self.guests_with(&self.saved)
+	}
+
+	/// Refuse `saved` unless guests could join the room it sets, under the
+	/// flags, on its relay: with both a room and its key, a key that reads,
+	/// and a relay and join page a browser can reach.
+	pub fn check_guests(&self, saved: &Saved) -> anyhow::Result<()> {
+		let relay = self.flags.relay.as_ref().or(saved.relay.as_ref());
+		self.guests_with(saved).load(relay)?;
+		Ok(())
+	}
+
+	/// The guests' room, as the flags and `saved` set it.
+	fn guests_with(&self, saved: &Saved) -> guests::Config {
+		let flags = &self.flags.guests;
 		guests::Config {
 			room: flags.room.clone().or(saved.room.clone()),
 			room_key: flags.room_key.clone().or(saved.room_key.clone()),

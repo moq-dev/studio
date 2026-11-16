@@ -89,20 +89,22 @@ impl Page {
 	}
 }
 
-/// The Settings window's tabs: what a broadcaster sets once.
+/// The Settings window's panes: what a broadcaster sets once.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Setting {
-	/// The canvas, each scene's size, the encoders, and the virtual cameras.
+	/// The format, the canvas size and frame rate, and each scene's size.
 	#[default]
 	Show,
+	/// Where the show streams: its relays, their tokens, and the broadcast.
+	Stream,
 	/// The folder, and what a recording holds.
 	Recording,
 	Hotkeys,
-	Effects,
-	/// The scene graph: every source, scene, and audio scene, wired.
+	/// The room guests join, its key, the join page, and how long a link lasts.
+	Guests,
+	/// Published scenes and sources, the virtual camera, the effects, and the
+	/// scene graph.
 	Advanced,
-	/// Where the show streams: its relays, their tokens, and the broadcast.
-	Stream,
 }
 
 impl Setting {
@@ -111,7 +113,7 @@ impl Setting {
 		Self::Stream,
 		Self::Recording,
 		Self::Hotkeys,
-		Self::Effects,
+		Self::Guests,
 		Self::Advanced,
 	];
 
@@ -121,8 +123,31 @@ impl Setting {
 			Self::Stream => "Stream",
 			Self::Recording => "Recording",
 			Self::Hotkeys => "Hotkeys",
-			Self::Effects => "Effects",
+			Self::Guests => "Guests",
 			Self::Advanced => "Advanced",
+		}
+	}
+
+	fn icon(self) -> Icon {
+		match self {
+			Self::Show => Icon::Media,
+			Self::Stream => Icon::Broadcast,
+			Self::Recording => Icon::Record,
+			Self::Hotkeys => Icon::Hotkeys,
+			Self::Guests => Icon::Guests,
+			Self::Advanced => Icon::Advanced,
+		}
+	}
+
+	/// The line under the pane's title.
+	fn lead(self) -> &'static str {
+		match self {
+			Self::Show => "The shape of the picture. It is saved in the show file.",
+			Self::Stream => "Where the stream goes. Tokens stay in the system's credential store, never in a file.",
+			Self::Recording => "What the record button saves, from any page.",
+			Self::Hotkeys => "Kept on this computer, not in the show.",
+			Self::Guests => "People who join from a web page, appearing as sources. Kept beside the show.",
+			Self::Advanced => "Things most shows never touch.",
 		}
 	}
 }
@@ -212,6 +237,12 @@ impl Studio {
 			going: None,
 			ending: None,
 			stream_form: None,
+			guests_form: None,
+			saving: None,
+			saved: None,
+			picker: None,
+			restart: None,
+			graph_open: false,
 			selection: None,
 			cropping: false,
 			gestures: Gestures::default(),
@@ -271,6 +302,11 @@ impl Studio {
 	/// Open Settings at `setting`, as the gear would.
 	pub(crate) fn open(&mut self, setting: Setting) {
 		self.panels.setting = Some(setting);
+	}
+
+	/// Open the scene graph's window, as Settings, Advanced would.
+	pub(crate) fn open_graph(&mut self) {
+		self.panels.graph_open = true;
 	}
 
 	/// Open the stream's health in detail, as the health dot's popover would.
@@ -521,8 +557,20 @@ struct Panels {
 	going: Option<live::Going>,
 	/// Since when END STREAM has been held down.
 	ending: Option<kio::clock::Instant>,
-	/// The Stream tab's form, while it has edits not yet saved.
+	/// The Stream pane's form, while it has edits not yet saved.
 	stream_form: Option<live::Form>,
+	/// The Guests pane's form, while it has edits not yet saved.
+	guests_form: Option<settings::GuestForm>,
+	/// A save of the stream file under way.
+	saving: Option<live::Saving>,
+	/// How the last save of the stream file went, for the pane that asked.
+	saved: Option<(Setting, String)>,
+	/// A system file dialog Settings opened, until it closes.
+	picker: Option<settings::Picker>,
+	/// A change that restarts encoders, waiting for a yes while on air.
+	restart: Option<settings::Restart>,
+	/// Whether the scene graph's window is open.
+	graph_open: bool,
 	/// The layer the inspector edits, the picture's handles hold, and a copy
 	/// takes.
 	selection: Option<Picked>,
@@ -560,8 +608,8 @@ struct Panels {
 	speakers: mixer::Speakers,
 	/// The MIX page's view and the strip open on it.
 	desk: mixer::Desk,
-	/// The canvas the Show tab's form holds until it is applied, or `None`
-	/// while it shows the collection's.
+	/// The custom canvas the Show pane holds until it is applied, or `None`
+	/// while it shows the collection's by name.
 	canvas: Option<Canvas>,
 	/// The size each scene's form holds until it is applied, by name.
 	sizes: BTreeMap<String, (u32, u32)>,

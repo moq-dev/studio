@@ -172,7 +172,7 @@ macOS the system's buttons and edges stay. It holds, from the left:
   encoder, and **Details** for the [Health](#health) window. Off air it reads
   **Ready** once the show has a relay, and **No relay** until then.
 - Record, which starts or stops a [recording](#recording) from any page, with
-  the picks in Settings' Recording tab. Its dot pulses while recording, with
+  the picks in Settings, Recording. Its dot pulses while recording, with
   how long it has been recording beside it.
 - The live control: **GO LIVE** off air, which opens the
   [go-live sheet](#going-live); on air, **LIVE** and how long the stream has
@@ -359,33 +359,44 @@ shared:
 - **Failover relay** and its token: a second relay the same broadcast goes
   to, which needs one `--connect-version` with broadcast instances.
 - **Broadcast name**, the path on the relays, `studio` until set.
-- **On demand**, which encodes the canvas size only while someone watches
-  (see [Output](#output)).
+- **Encode only while someone watches** (on demand), which encodes the
+  canvas size only while someone watches (see [Output](#output)).
 
 Tokens are kept in the system's credential store (the Secret Service on Linux,
 the login keychain on macOS, the Credential Manager on Windows), one per relay
 address, never in a file: a `?jwt=` typed into an address moves there when
 saved. Without a credential store, a relay that needs no token still
-connects, and saving a token says why it cannot. A setting a flag overrides for this run says so. A change applies the
-next time you go live; a change to the room the guests join applies once the
-show is opened again. The recordings folder and the guests' room are kept in
-the same file, as `recordings`, `room`, `room_key`, `join_page`, and
-`guest_expiry`, set there by hand until Settings has panes for them.
+connects, and saving a token says why it cannot. A setting a flag sets for
+this run says so, and is not editable there. A change applies the next time
+you go live. A new relay or token is followed for broadcast sources and
+guests at once off air, and once the stream ends on air. The recordings
+folder (Settings, Recording) and the guests' room (Settings, Guests) are kept
+in the same file, as `recordings`, `room`, `room_key`, `join_page`, and
+`guest_expiry`.
 
 ### Settings
 
-| Tab | Use it to |
+The gear opens Settings, one window over the pages: the categories down the
+left, and the one picked on the right. Each line of help names what the
+setting costs. Escape or a click outside closes it.
+
+| Pane | Use it to |
 | --- | --- |
-| Show | Set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
+| Show | Pick the format, landscape or portrait, which swaps the canvas's sides; the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, or **Custom** for exact numbers; the frame rate as 30, 60, or **Custom**; and, under **Scene sizes**, each scene's own size (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
 | Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)). |
-| Recording | See and open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
-| Hotkeys | Bind keys to the panic key, TAKE, AUTO, Studio mode, replay, save a clip, start or stop recording, go live, end the stream, and take or cue each scene, and clear them (see [Hotkeys](#hotkeys)). |
-| Effects | Pick how the window's [effects](#effects) move. |
-| Advanced | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
+| Recording | Change or open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
+| Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; and replay and clips (see [Hotkeys](#hotkeys)). |
+| Guests | Set the room guests join, its key, the join page, and how long a link lasts (see [Guests](#guests)). |
+| Advanced | Publish scenes as broadcasts of their own and sources independently, turn the virtual camera of the program or of each published scene on, pick how the window's [effects](#effects) move, and open the [scene graph](#scene-graph). |
+
+On air, a new canvas size or frame rate, or a published scene's new size,
+asks before it applies, since the video pauses while the new encoders open.
+The encoders themselves, the sessions open, and each one's work are in the
+[Health](#health) window.
 
 ### Scene graph
 
-The Advanced tab, in Settings, shows the collection as nodes: each source
+Settings, Advanced, opens the scene graph in a window of its own: the collection as nodes, each source
 with a picture or sound, each scene and the always-on-top layers, and each
 audio scene.
 A wire runs from each source to every scene or layer placing it, and from
@@ -405,14 +416,15 @@ history, as from anywhere else.
 
 ### Published scenes
 
-Every scene has a size, the program's unless **Scene sizes**, in Settings'
-Show tab, gives it its own, such as 1080x1920 for a portrait scene beside a
+Every scene has a size, the program's unless **Scene sizes**, in Settings,
+Show, gives it its own, such as 1080x1920 for a portrait scene beside a
 1920x1080 program. Every scene is drawn at the program's frame rate. Only a
 scene of the program's size goes on program: its pad refuses another, saying
 why, and an edit resizing the scene on air is refused.
 
-Switch on **Publish** for a scene, in BUILD's inspector with no layer selected
-or in the scene graph, to put it live as a broadcast
+Switch on **Publish** for a scene, in BUILD's inspector with no layer selected,
+in the scene graph, or with the **+** of **Publish a scene as its own
+broadcast** in Settings, Advanced, to put it live as a broadcast
 of its own beneath the program's, at `<broadcast>/<scene name>`, at its own
 size, with renditions and encoders of its own (see [Output](#output)), while
 the program is on air. A published scene is never switched: it shows what its layers
@@ -605,7 +617,7 @@ one on program instead, and switching it, or editing an audio scene, never
 drops or repeats audio. **+** after the audio scenes adds one, holding
 nothing. Right-click an audio scene's strip, or its column under **Routes**,
 to rename it, move it left or right, or remove it. A recording holds the
-audio scene on program unless Settings' Recording tab picks another, such as one keeping music the stream leaves out, which is tagged
+audio scene on program unless Settings, Recording picks another, such as one keeping music the stream leaves out, which is tagged
 **In the recording**, and each published scene carries the one on program
 unless BUILD's inspector picks another beside its **Publish** switch; switching
 either while it runs never drops or repeats audio either. The audio scene on
@@ -793,8 +805,15 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
     --room guests --room-key room.jwk --join-page https://join.example.com/
 ```
 
-The guest flags set the room for one run; `room`, `room_key`, `join_page`, and
-`guest_expiry` in the show's [stream settings](#stream-settings) file keep it.
+Settings, Guests, sets the room, its key, the join page, and how long a link
+lasts, and keeps them in the show's [stream settings](#stream-settings) file as
+`room`, `room_key`, `join_page`, and `guest_expiry`. It refuses a room guests
+could not join, saying why, before it saves. A saved room is joined at once
+off air; on air, the guests already in the old room stay until the stream
+ends, and the new room is joined then. The guest flags set the room for one
+run instead, and the pane shows a field a flag sets as the flag's. A room
+that fails to load no longer stops the show from opening: BUILD's Add says
+why under Guests, with a button to the pane.
 
 - `--room` is a path under the relay's URL, here `show/guests` on the
   relay. The studio's own token must let it subscribe there. A guest's browser
@@ -1172,7 +1191,7 @@ the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
 takes each frame there when it can read the GPU the studio draws on. When it
 cannot, such as NVENC while the studio draws on a laptop's integrated GPU, the
 studio passes over it for an encoder that reads each frame back to the CPU
-(the opt-in `vaapi` or `openh264` features), which Settings' Show tab counts.
+(the opt-in `vaapi` or `openh264` features), which the Health window counts.
 Frames the encoder cannot keep up with are dropped rather than delaying the
 stream.
 
@@ -1209,7 +1228,7 @@ half that for mono, and holds no encode session.
 
 Every encoder holds an encode session, and consumer GPUs allow only a few
 hardware sessions at once: 8 on a GeForce card, while a base Apple M4 has one
-encode engine for them all. Settings' Show tab counts the sessions open:
+encode engine for them all. The Health window counts the sessions open:
 
 | Encoder | Sessions |
 |---|---|
@@ -1230,7 +1249,7 @@ drawing in the studio's own scenes. The program opens its session before any
 source, even with on demand, so the sources past the cap fail rather than
 the program; so does each scene published in the scene file at startup. A
 scene published later, past the cap, publishes without video and says why in
-Settings' Show tab. When the program encodes in software, a source takes hardware
+the Health window. When the program encodes in software, a source takes hardware
 where it can and software otherwise.
 
 ### Published independently
@@ -1334,13 +1353,13 @@ once `moq play` plays layers.
 ### Recording
 
 The record button in the title bar, on any page, saves the program at the
-canvas size, or the scene picked in Settings' Recording tab at its own size,
+canvas size, or the scene picked in Settings, Recording at its own size,
 to `<scene file name> <UTC start time>.mp4` in the `--recordings` directory,
 live or not. The recording has an encoder of its own, opened only while it
 records, at full quality whatever the uplink grants the live stream, as OBS's
 advanced output mode records apart from streaming. It costs one more encode
 session and one more copy of each program frame while recording. With
-**Each source too** in Settings' Recording tab, every camera, display, window, microphone, and system
+**Each source too** in Settings, Recording, every camera, display, window, microphone, and system
 audio records its own track into a file of its own beside it,
 `<scene file name> <UTC start time> <source>.mp4`, holding the capture before
 any filter, or the sound before its gain and mute; a source being recorded
@@ -1363,7 +1382,7 @@ program and local sources are read from the studio's own broadcasts, never what
 the relay serves, so a recording starts and stops without touching the live
 stream. The audio scene it holds is
 encoded a second time for it while recording: the one on program, so the file
-holds what viewers hear, or the one Settings' Recording tab picks, which viewers never
+holds what viewers hear, or the one Settings, Recording picks, which viewers never
 can. Off air, only the
 recording's encoder encodes the program.
 
@@ -1401,7 +1420,7 @@ a WebGL page runs slower.
 
 ## Hotkeys
 
-The Hotkeys tab in Settings binds a key to the **Panic** key, TAKE and AUTO
+Settings, Hotkeys binds a key to the **Panic** key, TAKE and AUTO
 for the cued scene, turning [Studio mode](#off-air-and-studio-mode) on or off,
 **Replay**, **Save clip**, starting or stopping a recording, **Go live**,
 **End stream**, and each scene, which its key takes, or cues in Studio mode,
@@ -1412,7 +1431,7 @@ uses is taken unasked, and a key bound to one action is refused for another
 until it is cleared there. Replay and Save clip use REVIEW's picks, but take
 the last seconds as long as the stretch picked there, so a key pressed from
 another page acts on what just happened, as the clip button beside the panic
-key does; a recording uses Settings' Recording tab.
+key does; a recording uses Settings, Recording.
 
 The key pressed is the key that fires, wherever it sits, on any keyboard layout
 and after a layout change: the tab names it as the layout printed it when it
@@ -1456,13 +1475,13 @@ published scene, or a recording:
   relay, the record dot pulses, and each cut or transition, from a pad, the
   panic key, or a hotkey, bursts on the frame. Studio mode's TAKE is polished
   metal that ripples under the pointer.
-- The Hotkeys tab shows each bound key on a dark plastic keycap, the title
+- Settings, Hotkeys shows each bound key on a dark plastic keycap, the title
   bar, the strip, and BUILD's columns have a faint grain, and first launch
   draws its screen over a soft gradient.
 - The health dot pulses amber while the worst problem is degraded, and
   flickers red with electricity while it is unhealthy.
 
-The Effects tab in Settings sets how they move: **Full**, **Reduced**, which holds each
+**Effects**, in Settings, Advanced, sets how they move: **Full**, **Reduced**, which holds each
 on one still pose, or **Off**. Until you pick one it follows the system's
 reduced-motion setting: Reduce motion on macOS, animation effects on Windows,
 and on Linux the desktop's, through its Settings portal.
@@ -1569,11 +1588,11 @@ Each catalog asks viewers to report beneath its broadcast, under
 
 ## Virtual camera
 
-The **Virtual camera** toggle in Settings' Show tab shows the program as a
+The **Virtual camera** toggle in Settings, Advanced, shows the program as a
 camera that video-call and conferencing apps can pick, at the canvas size and
 frame rate, with each [published source](#published-independently) drawn
-over it as viewers see it. Each published scene has a toggle of its own beneath it in the
-tab, showing that scene at its own size as a camera of its own, so an app
+over it as viewers see it. Each published scene has a toggle of its own beneath it,
+showing that scene at its own size as a camera of its own, so an app
 can pick the program or any published scene. A camera stays on until you
 turn it off or quit; it is not saved in the scene file. A scene's camera
 turns off when you stop publishing or rename the scene. A picture is copied

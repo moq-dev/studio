@@ -71,12 +71,18 @@ pub enum Icon {
 	Landscape,
 	Portrait,
 	Uplink,
+	Record,
+	Guests,
+	Advanced,
+	/// Opens in a window of its own.
+	Detach,
+	Info,
 }
 
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 60] = [
+	pub const ALL: [Self; 65] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -137,6 +143,11 @@ impl Icon {
 		Self::Landscape,
 		Self::Portrait,
 		Self::Uplink,
+		Self::Record,
+		Self::Guests,
+		Self::Advanced,
+		Self::Detach,
+		Self::Info,
 	];
 
 	fn source(self) -> ImageSource<'static> {
@@ -201,6 +212,11 @@ impl Icon {
 			Self::Landscape => include_image!("../../assets/icons/rectangle-horizontal.svg"),
 			Self::Portrait => include_image!("../../assets/icons/rectangle-vertical.svg"),
 			Self::Uplink => include_image!("../../assets/icons/upload.svg"),
+			Self::Record => include_image!("../../assets/icons/circle-dot.svg"),
+			Self::Guests => include_image!("../../assets/icons/users.svg"),
+			Self::Advanced => include_image!("../../assets/icons/sliders-horizontal.svg"),
+			Self::Detach => include_image!("../../assets/icons/external-link.svg"),
+			Self::Info => include_image!("../../assets/icons/info.svg"),
 		}
 	}
 
