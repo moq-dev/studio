@@ -623,11 +623,18 @@ impl Engine {
 	}
 
 	/// Subscribe to broadcast sources, guests, and viewers' reports through
-	/// `relays`, the preferred first, instead of those followed before.
+	/// `relays`, the preferred first, instead of those followed before. Not
+	/// once the engine stops, as a follow still under way at a close would.
 	pub fn watch(&self, relays: &[Relay]) {
 		let watching = subscribe(relays, &self.subscribe);
+		// Under the lock `unwatch` takes, which a close does once `stop` has
+		// run, so these are either closed with the rest or never kept.
+		let mut current = self.watching.lock().unwrap();
+		if *self.stopped.borrow() {
+			return;
+		}
 		// Each dropped stops dialing, and its session goes.
-		drop(std::mem::replace(&mut *self.watching.lock().unwrap(), watching));
+		drop(std::mem::replace(&mut *current, watching));
 	}
 
 	/// Each relay [watched](Self::watch), with its state and round trip.

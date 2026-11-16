@@ -5256,6 +5256,13 @@ mod tests {
 		let refused = engine.join(Some(crate::guests::Joining::offline(room))).unwrap_err();
 		assert!(format!("{refused:#}").contains("closing"), "{refused:#}");
 		assert!(engine.room().is_none());
+		// So are relays followed late.
+		let client = moq_tokio::connect::Config::default().init(Default::default()).unwrap();
+		engine.watch(&[Relay {
+			client,
+			url: connect.clone(),
+		}]);
+		assert!(engine.watched().is_empty(), "no relay is watched once stopped");
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");
