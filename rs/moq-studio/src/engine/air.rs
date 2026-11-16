@@ -670,13 +670,20 @@ async fn dial(connections: &[moq_tokio::Connection], links: &[health::Link]) -> 
 		}
 		Err(_) => {
 			// Each relay, and its latest failed dial where one failed rather
-			// than hung.
+			// than hung. A relay whose loop gave up, such as on an auth
+			// rejection, is closed, so its monitor no longer says why; its
+			// dial did.
 			let relays: Vec<String> = connections
 				.iter()
 				.zip(links)
-				.map(|(connection, link)| match connection.monitor().failure() {
-					Some(err) => format!("{}: {err}", link.endpoint),
-					None => format!("{}: no answer", link.endpoint),
+				.enumerate()
+				.map(|(index, (connection, link))| {
+					let gave_up = failures.iter().find(|(failed, _)| *failed == index);
+					match (gave_up, connection.monitor().failure()) {
+						(Some((_, err)), _) => format!("{}: {err:#}", link.endpoint),
+						(None, Some(err)) => format!("{}: {err}", link.endpoint),
+						(None, None) => format!("{}: no answer", link.endpoint),
+					}
 				})
 				.collect();
 			anyhow::bail!(
@@ -730,5 +737,41 @@ pub(super) fn lay_out(publisher: &mut moq_scene::layout::Publisher, state: &Stat
 pub(super) fn finish_layout(publisher: &mut moq_scene::layout::Publisher) {
 	if let Err(err) = publisher.finish() {
 		tracing::warn!(%err, "cannot finish the layer layout");
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// When no relay takes the session in time, the error names why each
+	/// one did not: a relay whose loop already gave up keeps the reason it
+	/// gave up with, beside the one that never answered, rather than reading
+	/// as unanswered because its closed monitor no longer holds it.
+	#[tokio::test(start_paused = true)]
+	async fn a_relay_that_gave_up_keeps_its_reason_past_the_timeout() {
+		let _ = moq_tokio::crypto::install_default();
+		let client = moq_tokio::connect::Config::default()
+			.init(Default::default())
+			.expect("client");
+		// No backend dials this scheme, so its loop gives up at once.
+		let primary: url::Url = "ftp://127.0.0.1:1/".parse().unwrap();
+		// Bound but never read, so the failover never answers.
+		let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		let failover: url::Url = format!("https://{}/", silent.local_addr().unwrap()).parse().unwrap();
+		let relays = vec![
+			Relay {
+				client: client.clone(),
+				url: primary,
+			},
+			Relay { client, url: failover },
+		];
+		let origin = moq_tokio::origin::spawn();
+		let (connections, links) = publish(relays, &origin, &moq_net::Path::new("studio").unwrap());
+		let err = dial(&connections, &links).await.expect_err("no relay answers");
+		let err = format!("{err:#}");
+		assert!(err.contains("no relay took the session"), "{err}");
+		assert!(err.contains("ftp://127.0.0.1:1: url scheme must be"), "{err}");
+		assert!(err.contains("no answer"), "the failover hung: {err}");
 	}
 }
