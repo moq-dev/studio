@@ -284,8 +284,10 @@ impl Controls {
 			if let Err(err) = &result {
 				*controls.refused.lock().unwrap() = Some(err.clone());
 			}
-			controls.going.store(false, Ordering::Release);
+			// Before `going`, which admits the next go-live, whose own gate this
+			// would otherwise lift.
 			controls.probes.send_modify(|probes| probes.starting = false);
+			controls.going.store(false, Ordering::Release);
 			// Relays saved while this started, followed now if it failed;
 			// once live, when it ends. Whichever of a save and this runs
 			// last follows them.
