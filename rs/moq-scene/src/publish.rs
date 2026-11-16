@@ -149,6 +149,7 @@ impl Sessions {
 			None => Ok(Session {
 				sessions: self.clone(),
 				spare,
+				opened: false,
 			}),
 		}
 	}
@@ -178,6 +179,9 @@ pub struct Session {
 	sessions: Sessions,
 	/// Held by a replay encoder.
 	spare: bool,
+	/// An encoder opened in it, rather than failing to: only then does it
+	/// give a session back that one refused could take.
+	opened: bool,
 }
 
 impl Session {
@@ -194,11 +198,11 @@ impl Session {
 
 impl Drop for Session {
 	fn drop(&mut self) {
-		let spare = self.spare;
+		let Self { spare, opened, .. } = *self;
 		self.sessions.0.send_modify(|state| {
 			state.open -= 1;
 			state.spare -= usize::from(spare);
-			state.closed += 1;
+			state.closed += u64::from(opened);
 		});
 	}
 }
@@ -788,8 +792,9 @@ impl<E: Encode> Encoding<E> {
 
 	/// Encode with `encoder`, in the `session` [held](Self::hold) for it, from
 	/// here on.
-	pub fn open(&mut self, session: Session, encoder: E) -> Result<(), Error> {
+	pub fn open(&mut self, mut session: Session, encoder: E) -> Result<(), Error> {
 		self.drain()?;
+		session.opened = true;
 		self.encoder = Some((encoder, session));
 		Ok(())
 	}
@@ -1334,6 +1339,14 @@ mod tests {
 		(publish, catalog, consumer)
 	}
 
+	/// A session an encoder opened in, such as the program's, standing in for
+	/// one held on the GPU.
+	fn opened(sessions: &Sessions) -> Session {
+		let mut session = sessions.hold(false).unwrap();
+		session.opened = true;
+		session
+	}
+
 	/// On program with only `name`'s picture shown.
 	fn shown(name: &str) -> OnProgram {
 		OnProgram {
@@ -1839,7 +1852,7 @@ mod tests {
 			video.encode(&mut gray(size, 33)).unwrap();
 			assert_eq!(sessions.open(), 0, "none opens while the program reclaims");
 
-			let program = sessions.hold(false).unwrap();
+			let program = opened(&sessions);
 			drop(reclaim);
 			settled(&video).await.expect("wanted again");
 			video.encode(&mut gray(size, 66)).unwrap();
@@ -1848,7 +1861,7 @@ mod tests {
 			// Given back and taken again before the replay looks, as by another
 			// replay reopening first: it still tries, and waits again.
 			drop(program);
-			let sibling = sessions.hold(false).unwrap();
+			let sibling = opened(&sessions);
 			settled(&video)
 				.await
 				.expect("a session given back, even if taken again");
@@ -2128,7 +2141,10 @@ mod tests {
 			kio::clock::timeout(wait, reclaim.closed()).await.is_err(),
 			"the opening replay is waited for"
 		);
+		// Refused by the GPU, say: it gives back nothing one refused could take,
+		// so a replay waiting for a session does not retry on its own failure.
 		drop(opening);
+		assert_eq!(sessions.0.borrow().closed, 0, "nothing given back");
 		kio::clock::timeout(wait, reclaim.closed()).await.expect("then closed");
 		drop(reclaim);
 		drop(sessions.hold(true).expect("a replay opens again"));
