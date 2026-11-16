@@ -1337,7 +1337,9 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let program = moq_net::broadcast::Info::new().produce();
-		let copied = copy(local.consume(), program.clone(), "audio".into(), None);
+		// Held to the end, so the copy runs until its source finishes.
+		let (_stop, stopped) = tokio::sync::watch::channel(());
+		let copied = copy(local.consume(), program.clone(), "audio".into(), None, stopped);
 		let checked = async {
 			// The copy's track lasts as long as the copy, so it is read while
 			// the source is written.

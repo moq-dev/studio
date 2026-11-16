@@ -287,7 +287,7 @@ impl Panels {
 						picture: Some(program),
 						sound: false,
 						on: replay.of == Of::Program,
-						air: true,
+						air: self.engine.on_air().live().is_some(),
 					};
 					if card.show(ui).clicked() {
 						replay.of = Of::Program;
@@ -330,7 +330,7 @@ struct What<'a> {
 	sound: bool,
 	/// Whether it is picked.
 	on: bool,
-	/// Whether it is the program, tagged ON AIR.
+	/// Whether it is the program while live, tagged ON AIR.
 	air: bool,
 }
 
