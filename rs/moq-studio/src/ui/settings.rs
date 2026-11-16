@@ -948,27 +948,34 @@ impl Panels {
 	}
 
 	/// Save `saved`, with a new recordings folder, and move the recorder to
-	/// it, holding off any recording until both are done, so the file and the
+	/// it, refusing any recording until both are done, so the file and the
 	/// recorder never name different folders: an unfinished recording is
-	/// repaired only in the folder the file names. Here rather than on a
-	/// thread, since a save with no token never waits on the credential
-	/// store.
+	/// repaired only in the folder the file names. On a thread of its own,
+	/// as any save is, so a slow disk never holds up the window.
 	fn move_recordings(&mut self, mut stream: crate::stream::Stream, saved: Saved, ctx: &egui::Context) {
-		let scene = self.engine.autosave.path().to_path_buf();
-		let result = (|| -> anyhow::Result<crate::stream::Stream> {
-			let moving = self.engine.recorder.moving(&saved.folder(&scene))?;
-			stream.save(saved)?;
-			moving.finish();
-			Ok(stream)
-		})();
-		// Applied as a save from a thread is, on the next frame.
+		let engine = self.engine.clone();
+		let ctx = ctx.clone();
+		let (send, recv) = std::sync::mpsc::channel();
+		let spawned = std::thread::Builder::new().name("save".into()).spawn(move || {
+			let result = (|| -> anyhow::Result<crate::stream::Stream> {
+				let moving = engine.recorder.moving(&saved.folder(engine.autosave.path()))?;
+				stream.save(saved)?;
+				moving.finish();
+				Ok(stream)
+			})();
+			let _ = send.send(result.map_err(|err| format!("{err:#}")));
+			// After the send, so the frame it asks for finds the result.
+			ctx.request_repaint();
+		});
 		self.saved = None;
 		self.saving = Some(super::live::Saving {
 			from: Setting::Recording,
 			retokened: false,
-			task: Task::Done(result.map_err(|err| format!("{err:#}"))),
+			task: match spawned {
+				Ok(_) => Task::Running(recv),
+				Err(err) => Task::Done(Err(format!("cannot save: {err}"))),
+			},
 		});
-		ctx.request_repaint();
 	}
 
 	/// Save `saved` as the show's stream file, keeping `tokens`, for the

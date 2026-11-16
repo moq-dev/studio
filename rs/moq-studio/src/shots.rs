@@ -625,15 +625,21 @@ fn settings_change_the_show_and_move_the_guests() {
 		}))
 		.expect("the recording finishes");
 	harness.get_by_label("Beside the show").click();
-	harness.run_steps(2);
-	assert_eq!(recorder.dir(), std::path::absolute(".").unwrap());
+	let beside = std::path::absolute(".").unwrap();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while harness
+				.query_by_label_contains("The next recording goes there")
+				.is_none()
+			{
+				harness.step();
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("the folder moves");
+	assert_eq!(recorder.dir(), beside);
 	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
 	assert!(!saved.contains("recordings"), "{saved}");
-	assert!(
-		harness
-			.query_by_label_contains("The next recording goes there")
-			.is_some()
-	);
 
 	// The scene graph opens in place of Settings, so it takes the clicks.
 	harness.get_by_label("Advanced").click();

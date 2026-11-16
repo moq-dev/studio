@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -62,6 +62,9 @@ pub struct Recorder {
 	runtime: tokio::runtime::Handle,
 	/// The recording in progress, or the last one.
 	session: Mutex<Option<Session>>,
+	/// Whether `dir` is being moved, which no recording starts during. Set
+	/// and read under `session`.
+	moving: AtomicBool,
 	/// The recordings found unfinished in `dir` at launch.
 	repairs: repair::Repairs,
 }
@@ -120,18 +123,25 @@ pub struct FileStatus {
 	pub finished: Option<Finished>,
 }
 
-/// A move of the recordings directory under way, which holds off any
-/// recording until it finishes or drops.
+/// A move of the recordings directory under way, during which a recording
+/// is refused rather than started, until it finishes or drops.
 pub struct Moving<'a> {
-	_session: MutexGuard<'a, Option<Session>>,
-	current: &'a Mutex<PathBuf>,
+	recorder: &'a Recorder,
 	dir: PathBuf,
 }
 
 impl Moving<'_> {
 	/// Save the next recording into the directory moved to.
 	pub fn finish(self) {
-		*self.current.lock().unwrap() = self.dir;
+		let _session = self.recorder.session.lock().unwrap();
+		*self.recorder.dir.lock().unwrap() = self.dir.clone();
+	}
+}
+
+impl Drop for Moving<'_> {
+	fn drop(&mut self) {
+		let _session = self.recorder.session.lock().unwrap();
+		self.recorder.moving.store(false, Ordering::Relaxed);
 	}
 }
 
@@ -164,6 +174,7 @@ impl Recorder {
 			name,
 			runtime,
 			session: Mutex::new(None),
+			moving: AtomicBool::new(false),
 		})
 	}
 
@@ -175,21 +186,24 @@ impl Recorder {
 	/// Start moving the directory to `dir`, such as while the settings
 	/// naming it are written. Refused while a recording is under way, whose
 	/// unfinished file the next launch repairs only in the directory then
-	/// set. No recording starts until the move finishes or is dropped.
+	/// set. No recording starts until the move finishes or is dropped, nor
+	/// does another move.
 	pub fn moving(&self, dir: &Path) -> anyhow::Result<Moving<'_>> {
 		let dir = std::path::absolute(dir)?;
-		// The lock `start` reads the directory under.
+		// The lock `start` checks under, held only for the check, so a slow
+		// move never holds up a read of the status.
 		let session = self.session.lock().unwrap();
+		anyhow::ensure!(
+			!self.moving.load(Ordering::Relaxed),
+			"the folder is already being moved"
+		);
 		anyhow::ensure!(
 			*self.dir.lock().unwrap() == dir || session.as_ref().is_none_or(|session| *session.done.borrow()),
 			"a recording is under way: stop it before moving the folder, so a crash leaves it where the next \
 			 launch repairs it"
 		);
-		Ok(Moving {
-			_session: session,
-			current: &self.dir,
-			dir,
-		})
+		self.moving.store(true, Ordering::Relaxed);
+		Ok(Moving { recorder: self, dir })
 	}
 
 	/// The show's name, which each file's starts with: the scene file's.
@@ -223,6 +237,10 @@ impl Recorder {
 		anyhow::ensure!(
 			session.as_ref().is_none_or(|session| *session.done.borrow()),
 			"already recording"
+		);
+		anyhow::ensure!(
+			!self.moving.load(Ordering::Relaxed),
+			"the recordings folder is being moved; try again in a moment"
 		);
 
 		// UTC, since the studio does not read the time zone; no colons, which
@@ -1659,7 +1677,11 @@ mod tests {
 		assert_eq!(recorder.dir(), dir.path());
 		recorder.stop();
 		let ((), ()) = tokio::join!(recorder.finish(), studio.play(Duration::from_millis(500)));
-		drop(recorder.moving(other.path()).unwrap());
+		let moving = recorder.moving(other.path()).unwrap();
+		let refused = recorder.start(false).unwrap_err();
+		assert!(format!("{refused:#}").contains("being moved"), "{refused:#}");
+		assert!(recorder.moving(dir.path()).is_err(), "one move at a time");
+		drop(moving);
 		assert_eq!(recorder.dir(), dir.path(), "a move dropped unfinished stays");
 		recorder.moving(other.path()).unwrap().finish();
 		assert_eq!(recorder.dir(), other.path());
