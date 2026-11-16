@@ -381,7 +381,18 @@ async fn copy(
 			}
 		});
 		let result: Result<(), moq_net::Error> = async {
+			// Past the last group copied, from where a skip the source declared
+			// is carried over.
+			let mut below = 0;
 			while let Some(mut group) = track.recv_group().await? {
+				// Creating a group says nothing of the starts below it, so the
+				// copy repeats the source's skips: one before its first group
+				// marks the encoder's first, and one between groups says the
+				// media runs on across them.
+				if below < group.start && track.is_skipped(below..group.start) {
+					out.skip_groups(below..group.start);
+				}
+				below = below.max(group.start + 1);
 				let mut copy = out.create_group(moq_net::group::Info { start: group.start })?;
 				while let Some(frame) = group.read_frame().await? {
 					copy.write_frame(frame.timestamp, frame.payload)?;
@@ -1242,6 +1253,47 @@ mod tests {
 			listed(&catalog, |sources| sources.is_empty()).await;
 		})
 		.await;
+	}
+
+	/// A forwarded track says what its source said of the starts it skipped:
+	/// those before its first group, which mark the encoder's first, and those
+	/// between its groups, but not a hole the source left.
+	#[tokio::test(start_paused = true)]
+	async fn a_forwarded_track_keeps_its_skips() {
+		let local = moq_net::broadcast::Info::new().produce();
+		let source = local
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let program = moq_net::broadcast::Info::new().produce();
+		let copied = copy(local.consume(), program.clone(), "audio".into(), None);
+		let checked = async {
+			// The copy's track lasts as long as the copy, so it is read while
+			// the source is written.
+			let mut forwarded = loop {
+				match program.consume().track(&format!("{FORWARDED}audio")) {
+					Ok(track) => break track.subscribe(None).await.unwrap(),
+					Err(_) => tokio::task::yield_now().await,
+				}
+			};
+			source.skip_groups(0..1_000);
+			let mut starts = Vec::new();
+			for (start, appended) in [(1_000, true), (3_000, true), (5_000, false)] {
+				// Nothing says what lies between 3 000 and 5 000.
+				let group = match appended {
+					true => source.append_group(start),
+					false => source.create_group(moq_net::group::Info { start }),
+				};
+				group.unwrap().close().unwrap();
+				starts.push(forwarded.recv_group().await.unwrap().unwrap().start);
+			}
+			drop(source.clone().finish().unwrap());
+			assert!(forwarded.recv_group().await.unwrap().is_none());
+			assert_eq!(starts, [1_000, 3_000, 5_000]);
+			assert!(forwarded.is_skipped(0..1_000), "the encoder's first group");
+			assert!(forwarded.is_skipped(1_001..3_000), "the media runs on");
+			assert!(!forwarded.is_skipped(3_001..5_000), "a hole stays one");
+		};
+		tokio::join!(copied, checked);
 	}
 
 	/// Stopping the sources, as quitting does, ends each source's own track

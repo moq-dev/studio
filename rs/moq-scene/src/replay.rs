@@ -376,11 +376,17 @@ fn copy_held(
 		}
 	}
 
-	// Nothing the take does not hold between its groups is to come, a group
-	// missing from the span included.
+	// Carry over only the starts the source declared skipped, before its
+	// first group too, which marks the encoder's first. A group lost on the way
+	// stays a hole, which the finished take lets readers pass as the gap it
+	// is: a skip would tell them the media runs on across it.
 	let copied: Vec<u64> = held.into_keys().collect();
-	for pair in copied.windows(2) {
-		track.skip_groups(pair[0] + 1..pair[1]);
+	let mut below = 0;
+	for &start in &copied {
+		if below < start && source.is_skipped(below..start) {
+			track.skip_groups(below..start);
+		}
+		below = start + 1;
 	}
 	Ok(media.then_some(covered))
 }
@@ -434,16 +440,30 @@ mod tests {
 	}
 
 	/// A video track with a group a second, from `0` up to but excluding
-	/// `groups` seconds, but for the group the publisher gave up at `lost`.
+	/// `groups` seconds, but for the group lost on the way at `lost`. The
+	/// publisher appends each group, saying nothing lies between them, up to the
+	/// loss; past it, nothing says what lies before a group, as a copy that lost
+	/// one knows.
 	fn broadcast(groups: u64, lost: Option<u64>) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		for sequence in (0..groups).filter(|sequence| lost != Some(*sequence)) {
-			append(&track, sequence, &second(sequence));
+		for sequence in 0..groups {
+			match lost {
+				Some(lost) if sequence == lost => {}
+				Some(lost) if sequence > lost => write(&track, sequence, &second(sequence)),
+				_ => append(&track, sequence, &second(sequence)),
+			}
 		}
 		(broadcast, track)
+	}
+
+	/// Whether the take's track declares every group start in `starts`, in
+	/// microseconds, skipped.
+	async fn skipped(take: &Take, starts: std::ops::Range<u64>) -> bool {
+		let track = take.consume().track("video").unwrap().subscribe(None).await.unwrap();
+		track.is_skipped(starts)
 	}
 
 	fn target(broadcast: &moq_net::broadcast::Producer, end: moq_net::Timestamp) -> Target {
@@ -511,7 +531,7 @@ mod tests {
 	}
 
 	/// A group missing from the span stays missing, rather than one its readers
-	/// wait for.
+	/// wait for, and a gap rather than a span the media runs on across.
 	#[tokio::test(start_paused = true)]
 	async fn a_take_keeps_a_gap() {
 		let (broadcast, _track) = broadcast(10, Some(5));
@@ -520,6 +540,28 @@ mod tests {
 			read(&take).await,
 			[(4, frames(4, 3)), (6, frames(6, 3)), (7, frames(7, 2))]
 		);
+		assert!(!skipped(&take, 4_000_001..6_000_000).await, "the lost group is a gap");
+	}
+
+	/// A take says what the source said of the starts it skipped: between its
+	/// groups, and before the source's first group, which marks the encoder's
+	/// first, but not before a take that starts later.
+	#[tokio::test(start_paused = true)]
+	async fn a_take_keeps_the_skips_it_was_given() {
+		let (broadcast, track) = broadcast(0, None);
+		track.skip_groups(0..1_000_000);
+		for sequence in 1..10 {
+			append(&track, sequence, &second(sequence));
+		}
+		let from_first = Take::new(&target(&broadcast, ts(3_500)), Duration::from_secs(3)).unwrap();
+		assert_eq!(read(&from_first).await[0].0, 1);
+		assert!(skipped(&from_first, 0..1_000_000).await, "the encoder's first group");
+		assert!(skipped(&from_first, 1_000_001..2_000_000).await);
+
+		let later = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3)).unwrap();
+		assert_eq!(read(&later).await[0].0, 4);
+		assert!(!skipped(&later, 0..4_000_000).await, "past the encoder's first");
+		assert!(skipped(&later, 4_000_001..5_000_000).await);
 	}
 
 	/// Groups that reached the studio out of order are held in their own order,
