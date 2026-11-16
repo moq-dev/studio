@@ -1928,6 +1928,14 @@ impl Driver {
 		};
 		let mut own = Own::new(listing, kio::clock::now());
 		let shows = Shows::default();
+		// Show each picture handed over whose moment has come.
+		let show_due = || {
+			let now = kio::clock::now();
+			while shows.queue.borrow().front().is_some_and(|(due, ..)| *due <= now) {
+				let (_, play, frame) = shows.queue.borrow_mut().pop_front().expect("peeked");
+				self.show_play(play, Picture::Frame(frame));
+			}
+		};
 		// The last channel on a strip to close drops what it has not played
 		// yet, so a loop keeps its channel, sounding on, while a new cue drops
 		// it, cutting off what the play before still had queued, pictures
@@ -1993,6 +2001,10 @@ impl Driver {
 					played.is_some()
 				};
 				if rest {
+					// A picture handed over late, past its moment, may still
+					// wait to show when the play's end comes; shown after it,
+					// it would read the ended source as live again.
+					show_due();
 					set(&self.status, Status::Ended);
 					self.ended(&mut cues, &mut own).await;
 				}
@@ -2006,13 +2018,9 @@ impl Driver {
 		// has shown.
 		let present = async {
 			loop {
-				let now = kio::clock::now();
+				show_due();
 				let due = shows.queue.borrow().front().map(|(due, ..)| *due);
 				match due {
-					Some(due) if due <= now => {
-						let (_, play, frame) = shows.queue.borrow_mut().pop_front().expect("peeked");
-						self.show_play(play, Picture::Frame(frame));
-					}
 					Some(due) => tokio::select! {
 						() = kio::clock::sleep_until(due) => {}
 						() = shows.handed.notified() => {}
@@ -4235,11 +4243,11 @@ mod media_tests {
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 			let (first, begin) = shown(sources.get("intro.mkv").unwrap()).await;
-			// Each clip starts once its first picture decodes, on a thread
-			// tokio cannot see. Waiting for both while the clock holds starts
-			// them together, so both end before the clock passes 1.1 s.
-			shown(sources.get("still.mkv").unwrap()).await;
-			until_time(begin.saturating_add(Duration::from_millis(1_100))).await;
+			// Each clip begins the write lead after its first picture decodes,
+			// on a thread tokio cannot see, so the still clip may begin after
+			// the intro has.
+			let (_, still) = shown(sources.get("still.mkv").unwrap()).await;
+			until_time(begin.max(still).saturating_add(Duration::from_millis(1_100))).await;
 			until_status(&sources, "intro.mkv", Status::Ended).await;
 			until_status(&sources, "still.mkv", Status::Ended).await;
 			for name in ["intro.mkv", "still.mkv"] {
