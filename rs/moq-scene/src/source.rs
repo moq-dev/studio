@@ -3984,6 +3984,26 @@ mod media_tests {
 		}
 	}
 
+	/// Check that the clip's pictures after `first`, which showed at `begin`,
+	/// each show at its moment and not before, stepping the clock to one moment
+	/// at a time. Each step waits for its picture: pictures decode on a thread
+	/// tokio cannot see, so a clock moved past several moments at once runs on
+	/// ahead of the ones not decoded yet, which then show late.
+	async fn plays_on_time(feed: &Feed, first: moq_net::Timestamp, begin: Instant) {
+		for index in 1..10u64 {
+			let into = Duration::from_millis(index * 100);
+			// Within the timer wheel's millisecond of when the test saw the first.
+			until_time(begin.saturating_add(into).saturating_sub(Duration::from_millis(2))).await;
+			assert!(feed.next_picture().is_none(), "picture {index} before its moment");
+			until_time(begin.saturating_add(into)).await;
+			let (timestamp, _) = shown(feed).await;
+			assert_eq!(
+				Duration::try_from(timestamp).unwrap() - Duration::try_from(first).unwrap(),
+				into
+			);
+		}
+	}
+
 	/// Wait until `name` reads as `status`, without moving the clock.
 	async fn until_status(sources: &Sources, name: &str, status: Status) {
 		until(|| (sources.get(name).unwrap().status() == status).then_some(())).await;
@@ -4005,18 +4025,7 @@ mod media_tests {
 
 			let (first, begin) = shown(feed).await;
 			assert_eq!(feed.status(), Status::Live);
-			for index in 1..10u64 {
-				let into = Duration::from_millis(index * 100);
-				// Within the timer wheel's millisecond of when the test saw the first.
-				until_time(begin.saturating_add(into).saturating_sub(Duration::from_millis(2))).await;
-				assert!(feed.next_picture().is_none(), "picture {index} before its moment");
-				until_time(begin.saturating_add(into)).await;
-				let (timestamp, _) = shown(feed).await;
-				assert_eq!(
-					Duration::try_from(timestamp).unwrap() - Duration::try_from(first).unwrap(),
-					into
-				);
-			}
+			plays_on_time(feed, first, begin).await;
 
 			// The last picture lasts as long as the one before it, and the
 			// sound runs a little past it.
@@ -4196,15 +4205,14 @@ mod media_tests {
 			let feed = sources.get("clip.mkv").unwrap();
 
 			let (first, begin) = shown(feed).await;
-			until_time(begin.saturating_add(Duration::from_millis(950))).await;
-			let (last, _) = shown(feed).await;
-			assert_eq!(
-				Duration::try_from(last).unwrap() - Duration::try_from(first).unwrap(),
-				Duration::from_millis(900)
-			);
+			plays_on_time(feed, first, begin).await;
 			until_time(begin.saturating_add(Duration::from_millis(998))).await;
 			assert!(feed.next_picture().is_none(), "the start again before the end");
-			until_time(begin.saturating_add(Duration::from_millis(1_100))).await;
+			// The second play begins where the first ended, its sound a little
+			// past its last picture; holding the clock there keeps the second
+			// play's next picture from replacing its first.
+			let end = until(|| feed.run().ended).await;
+			until_time(end).await;
 			let (again, _) = shown(feed).await;
 			assert_eq!(again, first);
 			assert_eq!(feed.status(), Status::Live);
