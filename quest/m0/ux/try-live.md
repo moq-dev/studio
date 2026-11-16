@@ -11,8 +11,8 @@ headless run exercises.
 
 The LIVE page, its strip, the panic key, and the title bar the studio draws
 itself are on `main` (`cargo run -p moq-studio --features capture`, or the
-macOS app once [packaging](/quest/m0/packaging/macos.md) ships it). What to
-try:
+macOS app's disk image, as [Try the macOS app](/quest/m0/packaging/macos-try.md)
+says where to find it). What to try:
 
 - **Look and feel:** whether the page reads as bold and calm at once beside
   the [mock-up](/quest/m0/ux/mock/shell-live.webp); taking a scene by its pad

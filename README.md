@@ -19,6 +19,16 @@ cameras through the camera portal, which asks once, and files under your home
 directory. The virtual camera is its PipeWire node only, since the sandbox
 has no `/dev/video*`.
 
+On macOS 13 or later, each release ships the app for Apple silicon
+(`moq-studio-macos-arm64.dmg`) and Intel (`moq-studio-macos-x86_64.dmg`),
+signed and notarized. Open the disk image and drag **kixel.live Studio** to
+Applications. Opened from Finder or the Dock, it opens the scene collection
+in `~/Library/Application Support/moq-studio` and saves recordings to your
+Movies folder. macOS asks you to grant it the camera, microphone, and Screen &
+System Audio Recording permissions, the last in System Settings > Privacy &
+Security. Run it from a terminal with the flags below as
+`"/Applications/kixel.live Studio.app/Contents/MacOS/moq-studio"`.
+
 Elsewhere, build it from source. The moq crates come from the `moq`
 submodule:
 
@@ -31,9 +41,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 
 - `show.toml` is the scene collection. If it does not exist yet,
   [guided setup](#first-launch) proposes one and creates it. Changes are saved
-  to it a second after you stop editing, with no save step.
-- `--recordings <dir>` is where recordings and clips are saved, by default beside
-  `show.toml`.
+  to it a second after you stop editing, with no save step. Without one, the
+  studio opens `scenes.toml` in its data directory, as the macOS app does.
+- `--recordings <dir>` is where recordings and clips are saved, by default
+  beside `show.toml`, or in your videos folder when no scene file is named.
 - Without `--connect`, the studio composes, previews, and records but
   publishes nothing, and broadcast sources stay offline.
 - `--failover <url>` publishes the same broadcast to a second relay under the
@@ -64,11 +75,11 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
   `pipewire`, a display or window can also be picked in the desktop's
   screen-sharing picker, the only way to share a Wayland screen; see
   [Picked displays and windows](#picked-displays-and-windows).
-- On macOS, the studio is not an app bundle yet, so the camera, microphone,
-  and Screen & System Audio Recording permissions are asked of, and granted
-  to, the app that launched it, such as your terminal. Display, window, and
-  system-audio sources need the last, granted in System Settings > Privacy &
-  Security.
+- On macOS, a build from source is not an app bundle, so the camera,
+  microphone, and Screen & System Audio Recording permissions are asked of,
+  and granted to, the app that launched it, such as your terminal. Display,
+  window, and system-audio sources need the last, granted in System Settings >
+  Privacy & Security.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are
   [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
 - `moq-studio --watch <url>` opens no scene file and plays a studio broadcast

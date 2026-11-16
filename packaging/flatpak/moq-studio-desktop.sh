@@ -1,6 +1,7 @@
 #!/bin/sh
-# The menu entry's launch, which passes no arguments: the scene collection in
-# the app's own data directory, so the first launch runs guided setup, and
-# recordings in the Videos folder rather than beside it.
+# The menu entry's launch, which passes no arguments: the studio's default
+# scene collection in its data directory, the one `flatpak run` opens too, so
+# the first launch runs guided setup, with recordings in the Videos folder the
+# desktop names.
 set -eu
-exec moq-studio --recordings "$(xdg-user-dir VIDEOS)" "$XDG_DATA_HOME/scenes.toml" "$@"
+exec moq-studio --recordings "$(xdg-user-dir VIDEOS)" "$@"

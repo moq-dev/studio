@@ -21,7 +21,7 @@ Decided 2026-11-09 (maintainer, /quest-audit): ✅ one quest per platform
 leaving one packaging quest). One quest held all three artifacts behind the
 Apple identity and the Windows host, though the Flatpak needs neither, and
 three quests shaped the macOS app bundle with no link between them. The
-[macOS app](/quest/m0/packaging/macos.md) owns that bundle.
+macOS app owns that bundle, which `packaging/macos/` now holds.
 
 A release is cut by running `.github/workflows/release.yml` on main, which
 publishes from the `release` environment. Each artifact's workflow is called

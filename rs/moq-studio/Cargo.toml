@@ -43,6 +43,9 @@ cef = ["moq-scene/cef"]
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
+# The user's videos folder, where recordings go when no scene file is named:
+# Linux keeps it in user-dirs.dirs, and Windows lets it be moved.
+dirs = "7"
 # The window, its event loop, and the egui integration. `wgpu` is the renderer
 # the compositor shares a device with; no glow, no system font discovery.
 # `persistence` keeps per-user picks, such as the output Listen plays on, out
