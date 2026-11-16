@@ -38,4 +38,4 @@ processes. Each platform's quest says what it needs on top.
 Decided 2026-11-09 (maintainer, /quest-audit): ✅ one quest per platform
 (rejected: Related links only; leaving one quest). One quest held macOS
 behind the Windows host, and shaped the macOS app bundle with no link to the
-[quest that owns it](/quest/m0/packaging/macos.md).
+quest that owned it, which landed as `packaging/macos/`.

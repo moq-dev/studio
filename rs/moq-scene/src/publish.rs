@@ -183,24 +183,32 @@ impl Publish {
 		});
 	}
 
-	/// Publish each source `published` names in `broadcast`, the program's,
-	/// as long as it stays named, until `published` closes: its tracks are
-	/// copied in under [`FORWARDED`] and its catalog listed under `catalog`'s
-	/// [`SECTION`] section, renamed to match. Reading its tracks keeps each
-	/// source encoding while it is published. Each copied audio or video
-	/// track claims its bitrate from `bandwidth` while subscribed, as the
-	/// program's tracks do.
-	pub async fn forward(
-		&self,
-		mut published: tokio::sync::watch::Receiver<BTreeSet<String>>,
-		broadcast: moq_net::broadcast::Producer,
-		mut catalog: Catalog,
-		bandwidth: moq_net::bandwidth::Allocator,
-	) -> Result<(), Error> {
+	/// Publish each source `forward.published` names in the program's
+	/// broadcast, as long as it stays named, until `published` closes or
+	/// `stop` is dropped: its tracks are copied in under [`FORWARDED`] and its
+	/// catalog listed under the catalog's [`SECTION`] section, renamed to
+	/// match. Reading its tracks keeps each source encoding while it is
+	/// published. Each copied audio or video track claims its bitrate from
+	/// `bandwidth` while subscribed, as the program's tracks do. A copied
+	/// track that ends, once its source is no longer named or forwarding
+	/// stops, is finished after what it copied, so its viewers see it end
+	/// rather than cut off; this returns once every one has.
+	pub async fn forward(&self, forward: Forward) -> Result<(), Error> {
+		let Forward {
+			mut published,
+			broadcast,
+			mut catalog,
+			bandwidth,
+			mut stop,
+		} = forward;
 		let mut updates = self.catalog.consume()?;
 		let mut local = self.catalog.snapshot();
-		// Each copied track's copy, by its local name, aborted once dropped.
-		let mut copies: BTreeMap<String, tokio::task::JoinHandle<()>> = BTreeMap::new();
+		// Each copied track's copy, by its local name, and what stops it,
+		// finishing its track, once dropped.
+		let mut copies: BTreeMap<String, (tokio::task::JoinHandle<()>, tokio::sync::watch::Sender<()>)> =
+			BTreeMap::new();
+		// The copies of tracks no longer listed, still finishing them.
+		let mut retiring: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 		loop {
 			let listed: BTreeMap<String, hang::Catalog> = {
 				let published = published.borrow_and_update();
@@ -212,13 +220,19 @@ impl Publish {
 				.iter()
 				.flat_map(|(source, catalog)| tracks(catalog).map(move |(name, rate)| (name, (source.clone(), rate))))
 				.collect();
-			copies.retain(|name, copy| {
-				let keep = tracks.contains_key(name);
-				if !keep {
-					copy.abort();
+			// Its stopper dropped, a copy finishes its track on its own, and is
+			// still waited on below should forwarding stop first.
+			retiring.retain(|copy| !copy.is_finished());
+			let gone: Vec<String> = copies
+				.keys()
+				.filter(|name| !tracks.contains_key(*name))
+				.cloned()
+				.collect();
+			for name in gone {
+				if let Some((copy, _stopper)) = copies.remove(&name) {
+					retiring.push(copy);
 				}
-				keep
-			});
+			}
 			for (name, (source, rate)) in tracks {
 				if copies.contains_key(&name) {
 					continue;
@@ -230,8 +244,9 @@ impl Publish {
 					grants: self.grants.clone(),
 					source,
 				});
-				let copy = copy(self.consume(), broadcast.clone(), name.clone(), bandwidth);
-				copies.insert(name, tokio::spawn(copy));
+				let (stopper, stopped) = tokio::sync::watch::channel(());
+				let copy = copy(self.consume(), broadcast.clone(), name.clone(), bandwidth, stopped);
+				copies.insert(name, (tokio::spawn(copy), stopper));
 			}
 			let listed: BTreeMap<String, hang::Catalog> = listed
 				.into_iter()
@@ -249,10 +264,14 @@ impl Publish {
 					None => break,
 				},
 				changed = published.changed() => if changed.is_err() { break },
+				_ = stop.changed() => break,
 			}
 		}
-		for copy in copies.into_values() {
-			copy.abort();
+		// Each stopped as its stopper drops, and waited on, so the broadcast
+		// holds every copied track's end before the listing goes.
+		let copies: Vec<_> = copies.into_values().map(|(copy, _stopper)| copy).collect();
+		for copy in copies.into_iter().chain(retiring) {
+			let _ = copy.await;
 		}
 		catalog.mutate(|root| root.ext.studio.sources.clear())?;
 		Ok(())
@@ -282,6 +301,20 @@ impl Publish {
 			owners: self.owners.clone(),
 		}
 	}
+}
+
+/// What [`Publish::forward`] copies into, and how long.
+pub struct Forward {
+	/// The names of the sources to publish.
+	pub published: tokio::sync::watch::Receiver<BTreeSet<String>>,
+	/// The program's broadcast, which each source's tracks are copied into.
+	pub broadcast: moq_net::broadcast::Producer,
+	/// The program's catalog, which lists each source.
+	pub catalog: Catalog,
+	/// What each copied audio or video track claims its bitrate from.
+	pub bandwidth: moq_net::bandwidth::Allocator,
+	/// Forwarding stops once its sender is dropped.
+	pub stop: tokio::sync::watch::Receiver<()>,
 }
 
 /// The prefix of each source track's name in the program's broadcast, ahead
@@ -323,8 +356,6 @@ fn renamed(mut source: hang::Catalog) -> hang::Catalog {
 	source
 }
 
-/// Copy the local track `name` into `broadcast` under [`FORWARDED`], group by
-/// group, until it ends. A failure ends the copy, failed, with the reason.
 /// How a copied track claims its bitrate of the connection, and where its
 /// source's video finds what it was granted.
 struct Grant {
@@ -355,16 +386,23 @@ impl Drop for Granted {
 	}
 }
 
+/// Copy the local track `name` into `broadcast` under [`FORWARDED`], group by
+/// group, until it ends or `stop`'s sender is dropped, when the copy finishes
+/// the group it is on and then its track. A failure ends the copy, failed,
+/// with the reason.
 async fn copy(
 	local: moq_net::broadcast::Consumer,
 	broadcast: moq_net::broadcast::Producer,
 	name: String,
 	grant: Option<Grant>,
+	mut stop: tokio::sync::watch::Receiver<()>,
 ) {
 	let copied = async {
-		let mut track = local.track(&name)?.subscribe(None).await?;
+		let mut track = tokio::select! {
+			track = async { local.track(&name)?.subscribe(None).await } => track?,
+			_ = stop.changed() => return Ok(()),
+		};
 		let out = broadcast.create_track(format!("{FORWARDED}{name}"), track.info().clone())?;
-		// Held for as long as the copy runs.
 		// Held for as long as the copy runs. A video's grant is what its source
 		// encodes at, so the source follows the connection as the program does.
 		let _grant = grant.map(|grant| {
@@ -381,14 +419,43 @@ async fn copy(
 			}
 		});
 		let result: Result<(), moq_net::Error> = async {
-			while let Some(mut group) = track.recv_group().await? {
-				let mut copy = out.create_group(moq_net::group::Info {
-					sequence: group.sequence,
-				})?;
-				while let Some(frame) = group.read_frame().await? {
+			// Past the last group copied, from where a skip the source declared
+			// is carried over.
+			let mut below = 0;
+			'groups: loop {
+				let group = tokio::select! {
+					group = track.recv_group() => group?,
+					_ = stop.changed() => break,
+				};
+				let Some(mut group) = group else { break };
+				// Creating a group says nothing of the starts below it, so the
+				// copy repeats the source's skips: one before its first group
+				// marks the encoder's first, and one between groups says the
+				// media runs on across them.
+				if below < group.start && track.is_skipped(below..group.start) {
+					out.skip_groups(below..group.start);
+				}
+				below = below.max(group.start + 1);
+				let mut copy = out.create_group(moq_net::group::Info { start: group.start })?;
+				loop {
+					let frame = tokio::select! {
+						frame = group.read_frame() => frame?,
+						// The group ends at what it holds, where the source
+						// has not said.
+						_ = stop.changed() => {
+							drop(copy.close()?);
+							break 'groups;
+						}
+					};
+					let Some(frame) = frame else { break };
 					copy.write_frame(frame.timestamp, frame.payload)?;
 				}
-				copy.finish()?;
+				// The copy ends where the source ended its group, when it said,
+				// so a paused source's last picture ages out of the copy too.
+				match group.end() {
+					Some(end) => drop(copy.finish(end)?),
+					None => drop(copy.close()?),
+				}
 			}
 			out.clone().finish().map(drop)
 		}
@@ -765,7 +832,12 @@ impl<'a> Video<'a> {
 	/// where the first frame encodes, for a source that encodes its pictures
 	/// ahead of when they show.
 	pub(crate) fn anchor(&mut self, origin: kio::clock::Instant) -> Result<(), Error> {
-		self.epoch = Some(self.clock.capture(origin)?.as_micros());
+		self.epoch = Some(
+			self.clock
+				.capture(origin)?
+				.as_micros()
+				.map_err(moq_video::Error::from)?,
+		);
 		Ok(())
 	}
 
@@ -775,10 +847,14 @@ impl<'a> Video<'a> {
 	/// the gap, and reopens when the picture's size or color space changes,
 	/// which moves the rendition to a new track.
 	pub(crate) fn encode(&mut self, frame: &mut moq_video::Frame) -> Result<(), Error> {
-		let captured = frame.timestamp.as_micros();
-		let epoch = *self
-			.epoch
-			.get_or_insert_with(|| self.clock.now().as_micros().saturating_sub(captured));
+		let captured = frame.timestamp.as_micros().map_err(moq_video::Error::from)?;
+		let epoch = match self.epoch {
+			Some(epoch) => epoch,
+			None => {
+				let now = self.clock.now().as_micros().map_err(moq_video::Error::from)?;
+				*self.epoch.insert(now.saturating_sub(captured))
+			}
+		};
 		frame.timestamp = moq_net::Timestamp::from_micros((epoch + captured) as u64).map_err(moq_video::Error::from)?;
 
 		if !self.used() {
@@ -960,7 +1036,12 @@ impl<'a> Audio<'a> {
 		// has passed: the rest is counted on from now.
 		let now = kio::clock::now();
 		let ahead = captured.saturating_duration_since(now).as_micros();
-		let timestamp = self.clock.capture(captured.min(now))?.as_micros() + ahead;
+		let timestamp = self
+			.clock
+			.capture(captured.min(now))?
+			.as_micros()
+			.map_err(moq_audio::Error::from)?
+			+ ahead;
 		let timestamp = moq_net::Timestamp::from_micros(timestamp as u64).map_err(moq_audio::Error::from)?;
 		let data = bytes::Bytes::copy_from_slice(bytemuck::cast_slice(samples));
 		producer.write(&moq_audio::Frame::new(data, timestamp))?;
@@ -1204,14 +1285,18 @@ mod tests {
 			let config = moq_mux::catalog::Config::default().with_catalog(Default::default());
 			let catalog = Catalog::new(&mut program, config).unwrap();
 			let (published, follow) = tokio::sync::watch::channel(collection.published.clone());
-			let forward = publish.clone();
-			let (broadcast, listing) = (program.clone(), catalog.clone());
-			tokio::spawn(async move {
-				forward
-					.forward(follow, broadcast, listing, moq_net::bandwidth::Allocator::unlimited())
-					.await
-					.unwrap()
-			});
+			let (stop, stopped) = tokio::sync::watch::channel(());
+			let forward = Forward {
+				published: follow,
+				broadcast: program.clone(),
+				catalog: catalog.clone(),
+				bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+				stop: stopped,
+			};
+			let forwarding = {
+				let publish = publish.clone();
+				tokio::spawn(async move { publish.forward(forward).await.unwrap() })
+			};
 
 			let snapshot = listed(&catalog, |sources| sources.contains_key("red")).await;
 			let red = &snapshot.ext.studio.sources["red"];
@@ -1224,11 +1309,75 @@ mod tests {
 			assert_eq!(mime, "image/png");
 			let red = image::load_from_memory(&payload).unwrap().into_rgba8();
 			assert_eq!(red.into_raw(), [255, 0, 0, 255]);
+			let name = snapshot.ext.studio.sources["red"].binary.tracks.keys().next().unwrap();
+			let mut track = program.consume().track(name).unwrap().subscribe(None).await.unwrap();
 
 			published.send(BTreeSet::new()).unwrap();
 			listed(&catalog, |sources| sources.is_empty()).await;
+			// No longer published, its copy ends after what it copied rather
+			// than being cut off.
+			let mut group = track.recv_group().await.unwrap().expect("the still");
+			while group.read_frame().await.unwrap().is_some() {}
+			assert!(track.recv_group().await.unwrap().is_none(), "the copy finished");
+
+			drop(stop);
+			forwarding.await.expect("forwarding stops once told to");
 		})
 		.await;
+	}
+
+	/// A forwarded track says what its source said of the starts it skipped:
+	/// those before its first group, which mark the encoder's first, and those
+	/// between its groups, but not a hole the source left. Its groups end where
+	/// the source said they end.
+	#[tokio::test(start_paused = true)]
+	async fn a_forwarded_track_keeps_its_skips() {
+		let local = moq_net::broadcast::Info::new().produce();
+		let source = local
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let program = moq_net::broadcast::Info::new().produce();
+		// Held to the end, so the copy runs until its source finishes.
+		let (_stop, stopped) = tokio::sync::watch::channel(());
+		let copied = copy(local.consume(), program.clone(), "audio".into(), None, stopped);
+		let checked = async {
+			// The copy's track lasts as long as the copy, so it is read while
+			// the source is written.
+			let mut forwarded = loop {
+				match program.consume().track(&format!("{FORWARDED}audio")) {
+					Ok(track) => break track.subscribe(None).await.unwrap(),
+					Err(_) => tokio::task::yield_now().await,
+				}
+			};
+			source.skip_groups(0..1_000);
+			let mut groups = Vec::new();
+			for (start, appended) in [(1_000, true), (3_000, true), (5_000, false)] {
+				// Nothing says what lies between 3 000 and 5 000.
+				let group = match appended {
+					true => source.append_group(start),
+					false => source.create_group(moq_net::group::Info { start }),
+				};
+				// The first group says where it ends; the others only close.
+				let group = group.unwrap();
+				drop(
+					match start {
+						1_000 => group.finish(2_000),
+						_ => group.close(),
+					}
+					.unwrap(),
+				);
+				let mut copied = forwarded.recv_group().await.unwrap().unwrap();
+				assert!(copied.read_frame().await.unwrap().is_none());
+				groups.push((copied.start, copied.end()));
+			}
+			drop(source.clone().finish().unwrap());
+			assert!(forwarded.recv_group().await.unwrap().is_none());
+			assert_eq!(groups, [(1_000, Some(2_000)), (3_000, None), (5_000, None)]);
+			assert!(forwarded.is_skipped(0..1_000), "the encoder's first group");
+			assert!(forwarded.is_skipped(1_001..3_000), "the media runs on");
+			assert!(!forwarded.is_skipped(3_001..5_000), "a hole stays one");
+		};
+		tokio::join!(copied, checked);
 	}
 
 	/// Stopping the sources, as quitting does, ends each source's own track
@@ -1480,7 +1629,7 @@ mod tests {
 					assert!(video.track.is_open(), "a subscriber gets pictures");
 					let mut group = track.recv_group().await.unwrap().expect("a group");
 					assert!(group.read_frame().await.unwrap().is_some());
-					let first = group.sequence;
+					let first = group.start;
 
 					drop(group);
 					drop(track);
@@ -1496,7 +1645,7 @@ mod tests {
 					video.encode(&mut gray(size, 100)).unwrap();
 					assert!(video.track.is_open(), "a new subscriber reopens the encoder");
 					let mut group = track.recv_group().await.unwrap().expect("a group");
-					assert!(group.sequence > first, "{} after {first}", group.sequence);
+					assert!(group.start > first, "{} after {first}", group.start);
 					assert!(group.read_frame().await.unwrap().is_some());
 				} => {}
 			}
@@ -1624,7 +1773,7 @@ mod tests {
 					let (_, config) = take.audio.as_ref().unwrap();
 					let read = packets(&take.consume(), name, config).await;
 					let near = |at: moq_net::Timestamp, to: moq_net::Timestamp| {
-						at.as_micros().abs_diff(to.as_micros()) <= 20_000
+						at.as_micros().unwrap().abs_diff(to.as_micros().unwrap()) <= 20_000
 					};
 					let first = read.first().copied().flatten().expect("a packet first");
 					assert!(near(first, heard), "{first:?} for {heard:?}");
@@ -1752,7 +1901,7 @@ mod tests {
 					if current.replace(group) != Some(group) {
 						seen.push(Seen::Group);
 					}
-					seen.push(Seen::Picture(frame.timestamp.as_micros() / 1000));
+					seen.push(Seen::Picture(frame.timestamp.as_micros().unwrap() / 1000));
 				}
 				moq_mux::container::Read::End { .. } => seen.push(Seen::End),
 				moq_mux::container::Read::Gap { .. } => panic!("pictures went missing"),
@@ -1957,7 +2106,7 @@ mod tests {
 			// Stamped with when it showed, though encoded ahead of it.
 			let shown = publish.catalog.clock().capture(first).unwrap();
 			assert!(
-				stamps[0].as_micros().abs_diff(shown.as_micros()) <= 1,
+				stamps[0].as_micros().unwrap().abs_diff(shown.as_micros().unwrap()) <= 1,
 				"the first picture as it showed: {:?}, not {shown:?}",
 				stamps[0]
 			);
@@ -2069,7 +2218,7 @@ mod tests {
 			let silences = until(|| {
 				while let std::task::Poll::Ready(read) = track.poll_read(&now) {
 					if let moq_mux::container::Read::Frame { frame, .. } = read.unwrap().expect("open") {
-						stamps.push(std::time::Duration::from(frame.timestamp));
+						stamps.push(std::time::Duration::try_from(frame.timestamp).unwrap());
 					}
 				}
 				let gaps = stamps.windows(2).map(|pair| pair[1].saturating_sub(pair[0]));
@@ -2079,7 +2228,7 @@ mod tests {
 			.await;
 			assert_eq!(silences, 2, "each loop's silence is kept: {stamps:?}");
 			// Stamped with when it sounded, though written ahead of it.
-			let sounded = std::time::Duration::from(publish.catalog.clock().capture(begun).unwrap());
+			let sounded = std::time::Duration::try_from(publish.catalog.clock().capture(begun).unwrap()).unwrap();
 			assert_eq!(stamps[0], sounded, "the first sound as it sounded");
 		})
 		.await;

@@ -21,7 +21,3 @@ Planned 2026-11-09 (maintainer, /quest-plan), and held for later: ✅ m2
 - Removing a remote stops renewing its token, as for a guest.
 - The page follows the look of the studio's LIVE page
   ([mock-up](/quest/m0/ux/mock/shell-live.webp)) at a phone's width.
-
-## Required
-
-- [Going live from inside the app](/quest/m0/ux/go-live.md) - the relay and room it is reached through

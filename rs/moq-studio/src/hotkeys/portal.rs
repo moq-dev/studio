@@ -144,6 +144,9 @@ fn id(action: &Action, binding: &Binding) -> String {
 		Action::SaveClip => "save-clip".into(),
 		Action::Record => "record".into(),
 		Action::Panic => "panic".into(),
+		Action::StudioMode => "studio-mode".into(),
+		Action::GoLive => "go-live".into(),
+		Action::EndStream => "end-stream".into(),
 	}
 }
 

@@ -25,8 +25,16 @@ const RATE: u32 = 30;
 /// The probe's one track.
 const TRACK: &str = "probe";
 
-/// Publish a probe at `path` on the relay at `url` for `window` once it flows,
-/// probing up to `ceiling`, and return the send-rate estimate it ends with.
+/// The start of the path the probe publishes at beneath the broadcast, with a
+/// random suffix: a path of its own, so neither a viewer of the show nor one
+/// of a scene published beneath it resolves the probe, yet one the relay's
+/// token for the broadcast covers. Not dot-prefixed, which moq hides from
+/// subscribers that do not opt in.
+const PROBE: &str = "probe";
+
+/// Publish a probe beneath the broadcast at `path` on the relay at `url` for
+/// `window` once it flows, probing up to `ceiling`, and return the send-rate
+/// estimate it ends with.
 ///
 /// Fails, rather than guessing, when either connection fails, the relay never
 /// delivers the probe back, or the transport reports no estimate (WebSocket
@@ -38,9 +46,15 @@ pub async fn measure(
 	ceiling: Rate,
 	window: Duration,
 ) -> anyhow::Result<Rate> {
+	// Random without a dependency: each `RandomState` is seeded anew.
+	let suffix = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), ());
+	let probe = format!("{PROBE}-{suffix:016x}");
+	let path = moq_net::Path::new(path)
+		.and_then(|path| path.join(&moq_net::Path::new(&probe)?))
+		.with_context(|| format!("cannot probe beneath `{path}`"))?;
 	let publish = moq_tokio::origin::spawn();
 	let publication = publish
-		.route(path, moq_net::origin::RouteOptions::hidden())
+		.route(path.clone(), moq_net::origin::RouteOptions::hidden())
 		.context("cannot create the probe broadcast")?;
 	let track = publication
 		.broadcast()
@@ -61,7 +75,7 @@ pub async fn measure(
 
 	let measured = async {
 		// The window starts when the probe comes back, so a slow dial does not eat it.
-		let Ok(received) = kio::clock::timeout(window, receive(subscribe.consume(), path)).await else {
+		let Ok(received) = kio::clock::timeout(window, receive(subscribe.consume(), &path)).await else {
 			anyhow::bail!(match publisher.connected() && viewer.connected() {
 				true => format!("the relay did not deliver the probe back within {} s", window.as_secs()),
 				false => format!("cannot connect to the relay within {} s", window.as_secs()),
@@ -96,9 +110,12 @@ pub async fn measure(
 }
 
 /// Wait for the probe through the relay, and subscribe to its track.
-async fn receive(origin: moq_net::origin::Consumer, path: &str) -> anyhow::Result<moq_net::track::Subscriber> {
+async fn receive(
+	origin: moq_net::origin::Consumer,
+	path: &moq_net::Path,
+) -> anyhow::Result<moq_net::track::Subscriber> {
 	let broadcast = origin
-		.follow(path, None)?
+		.follow(path.clone(), None)?
 		.available()
 		.await?
 		.expect("the first change is an instance");
@@ -127,15 +144,17 @@ async fn fill(
 		clock.tick().await;
 		if frames % RATE == 0 {
 			if let Some(done) = group.take() {
-				moq_net::group::Producer::finish(done)?;
+				moq_net::group::Producer::close(done)?;
 			}
-			group = Some(track.append_group()?);
+			// The probe's track has no timescale, so its groups count up.
+			group = Some(track.append_group(u64::from(frames / RATE))?);
 		}
 		frames += 1;
 		let rate = reservation.rate().unwrap_or(FLOOR).clamp(FLOOR, ceiling);
 		let size = (rate.as_bps() / 8 / u64::from(RATE)) as usize;
 		let group = group.as_mut().expect("opened above");
-		group.write_frame(None, filler.slice(..size.clamp(1, filler.len())))?;
+		let key = moq_net::Timestamp::unscaled(group.start);
+		group.write_frame(key, filler.slice(..size.clamp(1, filler.len())))?;
 	}
 }
 

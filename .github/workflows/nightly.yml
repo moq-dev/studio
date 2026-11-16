@@ -6,8 +6,8 @@ name: Nightly
 # window's named views drawn there; the virtual camera's
 # v4l2loopback fallback, a module load no pull request job should make;
 # `just ci` on macOS and the studio's Windows build, whose capture backends
-# Check's Linux runner never compiles; and the Flatpak, a release build of
-# everything.
+# Check's Linux runner never compiles; and the Flatpak and the macOS app,
+# release builds of everything.
 
 permissions:
   contents: read
@@ -95,6 +95,10 @@ jobs:
   flatpak:
     name: Flatpak
     uses: ./.github/workflows/flatpak.yml
+
+  macos-app:
+    name: macOS app
+    uses: ./.github/workflows/macos.yml
 
   windows:
     name: Windows build

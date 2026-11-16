@@ -6,6 +6,8 @@ use egui::{
 	Align, Align2, CursorIcon, Rect, ResizeDirection, Sense, Stroke, UiBuilder, Vec2, ViewportCommand, pos2, vec2,
 };
 
+use super::build::duplicate_scene;
+use super::cue::{Corner, Cued, transition_words};
 use super::layout::{Arrangement, Layout, SOUND_ROW, fit};
 use super::levels::reading;
 use super::*;
@@ -30,7 +32,11 @@ pub(super) struct Snapshot {
 	/// How many scenes have been taken, which the effects burst on.
 	pub(super) takes: u64,
 	/// The program's shape, width over height.
-	shape: f32,
+	pub(super) shape: f32,
+	/// The scene cued, or open off air.
+	pub(super) cued: Option<Cued>,
+	/// Whether Studio mode is on: a scene's pad cues it.
+	pub(super) studio: bool,
 }
 
 /// A scene as its pad shows it.
@@ -62,15 +68,28 @@ const FAILED: Duration = Duration::from_secs(10);
 /// Room on the title bar's left for macOS's own window buttons.
 const TRAFFIC_LIGHTS: f32 = 64.0;
 
-/// What a pad's menu asked for.
 /// What a pad asked for, naming its scene: the pads are drawn from the
 /// frame's snapshot, and a reload since may have moved or removed it.
 enum PadAction {
 	Take(String),
+	Cue(String),
+	/// Open it for editing off air.
+	Edit(String),
 	/// Make it the safe scene, or stop.
 	Safe(String, bool),
 	Remove(String),
+	/// Ask for a new name.
 	Rename(String),
+	/// Name it the second.
+	Renamed(String, String),
+	/// A new scene after it showing what it shows: the same sources, linked,
+	/// or each its own copy.
+	Duplicate {
+		name: String,
+		independent: bool,
+	},
+	/// Move it this many places along the strip.
+	Move(String, isize),
 	Add,
 }
 
@@ -85,6 +104,7 @@ impl Panels {
 		self.program_drawn = state.compositor.canvas();
 		if let Some(render) = frame.wgpu_render_state() {
 			self.program.follow(render, state.compositor.layered());
+			self.preview.follow(render, state.compositor.preview());
 			self.follow_thumbnails(render, &state.compositor);
 		}
 		// Redraw at the canvas rate, so the picture and the pads are live.
@@ -99,6 +119,16 @@ impl Panels {
 			for renames in &renames {
 				hotkeys.rename(renames);
 			}
+		}
+		// So does the scene open off air, which stays open while it is cued.
+		for renames in &renames {
+			if let Some(to) = self.editing.as_ref().and_then(|editing| renames.get(editing)) {
+				self.editing = to.clone();
+			}
+		}
+		let cued = state.cued().map(str::to_string);
+		if self.editing != cued {
+			self.editing = None;
 		}
 		// So does a size being typed, a renamed scene's winning its new name.
 		for renames in &renames {
@@ -160,6 +190,14 @@ impl Panels {
 				})
 			})
 			.collect();
+		let cued = cued.map(|name| Cued {
+			refused: collection.refuses(&name),
+			canvas: collection.canvas(Some(name.as_str())).unwrap_or(collection.canvas),
+			off_air: self.editing.as_ref() == Some(&name),
+			live: state.seen(&name),
+			transition: transition_words(&collection.transition),
+			name,
+		});
 		let path = self.engine.autosave.path();
 		let show = path
 			.file_stem()
@@ -177,6 +215,8 @@ impl Panels {
 			stream,
 			takes: state.takes,
 			shape: self.program_drawn.width as f32 / self.program_drawn.height.max(1) as f32,
+			cued,
+			studio: self.controls.studio(),
 		}
 	}
 
@@ -203,6 +243,7 @@ impl Panels {
 		self.toast(ui.ctx(), layout.stage);
 		self.settings(ui.ctx(), fx, layout.stage);
 		self.details(ui.ctx(), layout.stage);
+		self.going_sheet(ui.ctx());
 		// macOS keeps its own frame's edges, and resizes by them.
 		if self.framed && !cfg!(target_os = "macos") {
 			edges(ui, window);
@@ -215,27 +256,16 @@ impl Panels {
 		match self.page {
 			Page::Live => {
 				kit::wash(ui.painter(), stage);
-				self.on_air(ui, Some(fx), layout.picture);
+				let picture = self.on_air(ui, Some(fx), layout.picture).rect;
+				if let Some(cued) = &snapshot.cued {
+					self.next(ui, fx, cued, picture, Corner::TopRight);
+				}
 			}
-			Page::Build => self.build(ui, fx, stage, snapshot.shape),
+			Page::Build => self.build(ui, fx, stage, snapshot),
 			// The sound slot holds the live picture instead.
-			Page::Mix => region(ui, stage, |ui| self.audio(ui)),
-			Page::Review => {
-				// The live picture beside replays and recordings.
-				let side = (stage.width() * 0.32).clamp(220.0, 420.0);
-				let card = stage.with_min_x(stage.right() - side);
-				region(ui, stage.with_max_x(card.left()), |ui| {
-					self.replay(ui);
-					ui.separator();
-					self.record(ui);
-				});
-				bar(ui, fx, card);
-				ui.painter()
-					.vline(card.left() + 0.5, card.y_range(), Stroke::new(1.0, kit::LINE));
-				let room = card.shrink(MARGIN + 10.0);
-				let room = room.with_max_y(room.top() + room.width() / snapshot.shape.max(0.5));
-				self.on_air(ui, Some(fx), fit(room, snapshot.shape));
-			}
+			Page::Mix => self.mix(ui, stage),
+			// The program's card in "replay what" is the live picture.
+			Page::Review => self.review(ui, fx, stage, snapshot.shape),
 		}
 	}
 
@@ -244,10 +274,9 @@ impl Panels {
 		let id = self.program.id;
 		let canvas = self.program_drawn;
 		let builder = UiBuilder::new().max_rect(picture.expand(10.0));
+		let frame = self.program_frame();
 		ui.scope_builder(builder, |ui| {
-			TallyFrame::new(Tally::Air)
-				.tag("On air")
-				.show(ui, fx, |ui| super::picture(ui, id, canvas, Sense::hover()))
+			frame.show(ui, fx, |ui| super::picture(ui, id, canvas, Sense::hover()))
 		})
 		.inner
 	}
@@ -366,7 +395,7 @@ impl Panels {
 				let result = self.engine.reload();
 				self.check(result);
 			}
-			if ui.add(kit::button(Icon::Copy, "Copy the selected item")).clicked() {
+			if ui.add(kit::button(Icon::Copy, "Copy the selected layer")).clicked() {
 				self.copy(ui.ctx());
 			}
 			if ui.button("Paste").clicked() {
@@ -403,6 +432,12 @@ impl Panels {
 		if ui.add_enabled(snapshot.redo.is_some(), button).clicked() {
 			self.redo();
 		}
+		let any = snapshot.undo.is_some() || snapshot.redo.is_some();
+		let history = ui.add_enabled(any, IconButton::new(Icon::History, "History"));
+		egui::Popup::menu(&history)
+			.id(egui::Id::new("history"))
+			.width(280.0)
+			.show(|ui| self.history(ui));
 	}
 
 	/// The pages, as one segmented control at `rect`.
@@ -462,84 +497,23 @@ impl Panels {
 		}
 	}
 
-	/// The stream's health as one dot, its name beside it unless `compact`,
-	/// with each relay, the viewers, the encoder, and each problem in its
-	/// popover, which opens the details.
-	fn health_dot(&mut self, ui: &mut Ui, fx: &mut Fx, compact: bool) {
-		let report = self.engine.health.lock().unwrap();
-		let worst = report
-			.problems
-			.first()
-			.map_or(Verdict::Healthy, |problem| problem.verdict);
-		// A problem shows even when not publishing, such as a failed source.
-		let (name, dot) = match (worst, report.relays.is_empty()) {
-			(Verdict::Unhealthy, _) => ("Unhealthy", kit::ERR),
-			(Verdict::Degraded, _) => ("Degraded", kit::CUE),
-			(_, true) => ("Not live", kit::DIM),
-			(Verdict::Healthy, false) => ("Healthy", kit::OK),
-			(Verdict::Unknown, false) => ("Starting", kit::DIM),
-		};
-		let mark = fx.on().then(|| Mark::new(ui.painter()));
-		let text = if compact { "" } else { name };
-		let pill = ui.add(kit::Pill::new(text).dot(dot).clickable());
-		let pill = kit::tip(pill, &format!("Health: {name}"), None);
-		if let Some(mark) = mark {
-			fx.health(&mark.around(pill.rect).inset(2.0));
-		}
-		let mut details = false;
-		kit::popover(&pill).show(|ui| {
-			let row = |ui: &mut Ui, dot: Option<Color32>, name: &str, value: &str| {
-				kit::popover_row(ui, false, |ui| {
-					let (at, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-					if let Some(dot) = dot {
-						ui.painter().circle_filled(at.center(), 4.0, dot);
-					}
-					ui.add(egui::Label::new(name).wrap());
-					ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-						ui.label(egui::RichText::new(value).font(kit::mono(12.0)).color(kit::TEXT))
-					});
-				});
-			};
-			if report.relays.is_empty() {
-				row(ui, None, "Not publishing; start with --connect", "");
-			}
-			for relay in &report.relays {
-				let (dot, state) = match &relay.state {
-					health::State::Connecting => (kit::DIM, "connecting"),
-					health::State::Connected => (kit::OK, "connected"),
-					health::State::Disconnected(_) => (kit::ERR, "unreachable"),
-				};
-				row(ui, Some(dot), &relay.endpoint, state);
-			}
-			if let Some(watching) = report.broadcasts.first().and_then(|program| program.viewers.watching) {
-				row(ui, None, "Watching", &watching.to_string());
-			}
-			let encoder = self.engine.stats.video.encoder();
-			row(ui, None, "Encoder", encoder.as_deref().unwrap_or("not open"));
-			for problem in &report.problems {
-				row(ui, Some(color(problem.verdict)), &problem.cause, "");
-			}
-			ui.add_space(4.0);
-			details = ui.button("Details").clicked();
-		});
-		drop(report);
-		if details {
-			self.details = true;
-		}
-	}
-
-	/// Start or stop recording, pulsing while it records.
+	/// Start or stop recording, from any page, pulsing and showing its clock
+	/// while it records.
 	fn record_button(&mut self, ui: &mut Ui, fx: &mut Fx) {
 		let status = self.engine.recorder.status().filter(|status| !status.done);
 		let key = self.key(&Action::Record, ui.ctx());
-		let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
-		let name = match &status {
-			None => "Start recording".to_string(),
-			Some(status) if status.stopping => "Finishing the recording".to_string(),
-			Some(status) => {
-				let elapsed = kio::clock::now().saturating_duration_since(status.started);
-				format!("Stop recording, {} in", clock(elapsed))
-			}
+		let elapsed = status
+			.as_ref()
+			.map(|status| super::review::clock(kio::clock::now().saturating_duration_since(status.started)));
+		let time = elapsed
+			.clone()
+			.map(|elapsed| ui.painter().layout_no_wrap(elapsed, kit::mono(12.0), kit::TEXT));
+		let width = time.as_ref().map_or(30.0, |time| 30.0 + time.size().x + 8.0);
+		let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+		let name = match (&status, &elapsed) {
+			(None, _) => "Start recording".to_string(),
+			(Some(status), _) if status.stopping => "Finishing the recording".to_string(),
+			(Some(_), elapsed) => format!("Stop recording, {} in", elapsed.as_deref().unwrap_or_default()),
 		};
 		let response = kit::tip(response, &name, key.as_deref());
 		let painter = ui.painter();
@@ -557,59 +531,18 @@ impl Panels {
 			egui::StrokeKind::Inside,
 		);
 		let pulse = (recording && fx.on()).then(|| Mark::new(ui.painter()));
-		let dot = Rect::from_center_size(rect.center(), Vec2::splat(9.0));
+		let dot = Rect::from_center_size(pos2(rect.left() + 15.0, rect.center().y), Vec2::splat(9.0));
 		ui.painter().circle_filled(dot.center(), 4.5, kit::ACCENT);
 		if let Some(pulse) = pulse {
 			fx.recording(&pulse.around(dot));
 		}
+		if let Some(time) = time {
+			let at = pos2(dot.right() + 7.0, rect.center().y - time.size().y / 2.0);
+			ui.painter().galley(at, time, kit::TEXT);
+		}
 		if response.clicked() {
 			self.controls.press(&Action::Record);
 		}
-	}
-
-	/// The live control: LIVE with the clock while the studio publishes, or
-	/// not live without `--connect`. Ending the stream comes with going live
-	/// (quest/m0/ux/go-live.md), so it has no END STREAM face yet.
-	fn live_control(&mut self, ui: &mut Ui) {
-		let Some(output) = &self.engine.output else {
-			let galley = kit::caps_galley(ui.painter(), "Not live", kit::display_bold(15.0), kit::DIM, None);
-			let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 24.0, 30.0), Sense::hover());
-			kit::tip(response, "Not live: start the studio with --connect to publish", None);
-			ui.painter()
-				.rect(rect, 6, kit::P2, Stroke::new(1.0, kit::LINE), egui::StrokeKind::Inside);
-			ui.painter()
-				.galley(rect.center() - galley.size() / 2.0, galley, kit::DIM);
-			return;
-		};
-		let elapsed = kio::clock::now().saturating_duration_since(self.launched);
-		let word = kit::caps_galley(ui.painter(), "Live", kit::display_bold(17.0), Color32::WHITE, None);
-		let time = ui
-			.painter()
-			.layout_no_wrap(clock(elapsed), kit::mono(14.0), Color32::WHITE);
-		let width = 12.0 + word.size().x + 10.0 + time.size().x + 12.0;
-		let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
-		kit::tip(
-			response,
-			&format!("Live at {} since the studio started", output.path),
-			None,
-		);
-		let painter = ui.painter();
-		let glow = egui::Shadow {
-			offset: [0, 0],
-			blur: 22,
-			spread: 0,
-			color: kit::ACCENT.gamma_multiply(0.4),
-		};
-		painter.add(glow.as_shape(rect, egui::CornerRadius::same(6)));
-		painter.rect_filled(rect, 6, kit::ACCENT);
-		let x = rect.left() + 12.0;
-		painter.galley(
-			pos2(x, rect.center().y - word.size().y / 2.0),
-			word.clone(),
-			Color32::WHITE,
-		);
-		let x = x + word.size().x + 10.0;
-		painter.galley(pos2(x, rect.center().y - time.size().y / 2.0), time, Color32::WHITE);
 	}
 
 	/// The strip: the scene pads, the panic key, and the sound, along the
@@ -654,6 +587,19 @@ impl Panels {
 	/// a row down a `column`.
 	fn scenes_strip(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, column: bool) {
 		let room = rect.shrink(MARGIN);
+		// Studio mode's switch at the strip's end: right of a row, under a
+		// column.
+		let (room, switch) = match column {
+			true => (
+				room.with_max_y(room.bottom() - 30.0 - GAP),
+				Rect::from_min_size(pos2(room.right() - 30.0, room.bottom() - 30.0), Vec2::splat(30.0)),
+			),
+			false => (
+				room.with_max_x(room.right() - 30.0 - GAP),
+				Rect::from_center_size(pos2(room.right() - 15.0, room.center().y), Vec2::splat(30.0)),
+			),
+		};
+		self.studio_switch(ui, snapshot.studio, switch);
 		let mut action = None;
 		ui.scope_builder(UiBuilder::new().max_rect(room), |ui| {
 			ui.spacing_mut().item_spacing = Vec2::splat(GAP);
@@ -689,6 +635,10 @@ impl Panels {
 				});
 			});
 		});
+		let action = action.or_else(|| {
+			let (from, to) = rename_sheet(ui.ctx(), "rename scene", &mut self.renaming_pad)?;
+			Some(PadAction::Renamed(from, to))
+		});
 		let Some(action) = action else { return };
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -698,24 +648,54 @@ impl Panels {
 			let index = scenes.iter().position(|scene| scene.name == name);
 			index.with_context(|| format!("no scene is called `{name}`"))
 		};
+		let spot = match &action {
+			PadAction::Take(name)
+			| PadAction::Cue(name)
+			| PadAction::Edit(name)
+			| PadAction::Safe(name, _)
+			| PadAction::Remove(name)
+			| PadAction::Rename(name)
+			| PadAction::Renamed(name, _)
+			| PadAction::Duplicate { name, .. }
+			| PadAction::Move(name, _) => Some(Spot::Pad(name.clone())),
+			PadAction::Add => None,
+		};
 		let result = match action {
 			PadAction::Take(name) => crate::controls::take(&mut state, &name).map(drop),
+			PadAction::Cue(name) => crate::controls::cue(&mut state, &name).map(drop),
+			PadAction::Edit(name) => {
+				drop(state);
+				let result = self.open_off_air(&name);
+				self.fail(Spot::Pad(name), result);
+				return;
+			}
 			PadAction::Safe(name, safe) => {
 				at(&state, &name).and_then(|index| self.scene_action(&mut state, SceneAction::Safe(index, safe)))
 			}
 			PadAction::Remove(name) => {
 				at(&state, &name).and_then(|index| self.scene_action(&mut state, SceneAction::Remove(index)))
 			}
-			PadAction::Rename(name) => match at(&state, &name) {
-				Ok(index) => {
-					drop(state);
-					self.page = Page::Build;
-					self.left = Tool::Scenes;
-					self.renaming = Some((index, name));
-					return;
+			PadAction::Rename(name) => {
+				self.renaming_pad = Some((name.clone(), name));
+				Ok(())
+			}
+			PadAction::Renamed(name, to) => at(&state, &name).and_then(|index| {
+				if to == name {
+					return Ok(());
 				}
-				Err(err) => Err(err),
-			},
+				self.scene_action(&mut state, SceneAction::Rename(index, to))
+			}),
+			PadAction::Move(name, by) => at(&state, &name).and_then(|from| {
+				let count = state.collection().scenes.len();
+				let to = from.saturating_add_signed(by).min(count.saturating_sub(1));
+				match to == from {
+					true => Ok(()),
+					false => self.scene_action(&mut state, SceneAction::Move(from, to)),
+				}
+			}),
+			PadAction::Duplicate { name, independent } => at(&state, &name)
+				.and_then(|index| duplicate_scene(&mut state, index, independent))
+				.map(|copy| self.say(Ok(format!("added scene `{copy}`")))),
 			PadAction::Add => {
 				let collection = state.collection();
 				let name = (collection.scenes.len() + 1..)
@@ -730,7 +710,10 @@ impl Panels {
 			}
 		};
 		drop(state);
-		self.check(result);
+		match spot {
+			Some(spot) => self.fail(spot, result),
+			None => self.check(result),
+		}
 	}
 
 	/// The pad of the scene at `index`, or the one that adds a scene past
@@ -749,24 +732,79 @@ impl Panels {
 			return response.clicked().then_some(PadAction::Add);
 		};
 		let on_air = snapshot.program.as_deref() == Some(pad.name.as_str());
-		let tally = if on_air { Tally::Air } else { Tally::Off };
-		let response = self.pad(ui, pad, tally, width, snapshot.shape);
-		let mut action = (response.clicked() && pad.refused.is_none()).then(|| PadAction::Take(pad.name.clone()));
+		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
+		// Off air, the scene on program is the one the stream opens on.
+		let live = self.engine.on_air().live().is_some();
+		let (tally, tag) = match (on_air, live, cued) {
+			(true, true, _) => (Tally::Air, None),
+			(true, false, _) => (Tally::Cue, Some("First")),
+			(false, _, true) => (Tally::Cue, None),
+			(false, _, false) => (Tally::Off, None),
+		};
+		let response = self.pad(ui, pad, tally, tag, width, snapshot.shape);
+		let click = match snapshot.studio {
+			true => PadAction::Cue(pad.name.clone()),
+			false => PadAction::Take(pad.name.clone()),
+		};
+		let mut action = (response.clicked() && pad.refused.is_none()).then_some(click);
 		response.context_menu(|ui| {
 			let takeable = pad.refused.is_none() || on_air;
 			let take = ui.add_enabled(!on_air && pad.refused.is_none(), egui::Button::new("Take it on air"));
 			if take.clicked() {
 				action = Some(PadAction::Take(pad.name.clone()));
 			}
+			if snapshot.studio {
+				let cue = ui.add_enabled(!on_air && !cued && pad.refused.is_none(), egui::Button::new("Cue it"));
+				if cue.clicked() {
+					action = Some(PadAction::Cue(pad.name.clone()));
+				}
+			}
+			let edit = ui
+				.add_enabled(!on_air, egui::Button::new("Edit off air"))
+				.on_hover_text("Open it on Build without going on air")
+				.on_disabled_hover_text("On air; Build edits it live");
+			if edit.clicked() {
+				action = Some(PadAction::Edit(pad.name.clone()));
+			}
 			let mut safe = snapshot.safe.as_deref() == Some(pad.name.as_str());
 			let toggle = ui
 				.add_enabled(takeable || safe, kit::Toggle::new(&mut safe).label("Safe scene"))
-				.on_hover_text("The scene the panic key cuts to, as it mutes every microphone and guest");
+				.on_hover_text(
+					"The scene the panic key cuts to, as it mutes every microphone and guest and hides the always-on-top layers",
+				);
 			if toggle.changed() {
 				action = Some(PadAction::Safe(pad.name.clone(), safe));
 			}
 			if ui.button("Rename").clicked() {
 				action = Some(PadAction::Rename(pad.name.clone()));
+			}
+			let duplicate = ui
+				.button("Duplicate")
+				.on_hover_text("A new scene showing the same sources: editing a layer's look edits both");
+			if duplicate.clicked() {
+				action = Some(PadAction::Duplicate {
+					name: pad.name.clone(),
+					independent: false,
+				});
+			}
+			let own = ui
+				.button("Duplicate with its own copies")
+				.on_hover_text("A new scene whose layers each show a copy of their own, to edit apart");
+			if own.clicked() {
+				action = Some(PadAction::Duplicate {
+					name: pad.name.clone(),
+					independent: true,
+				});
+			}
+			let count = snapshot.scenes.len();
+			if ui.add_enabled(index > 0, egui::Button::new("Move left")).clicked() {
+				action = Some(PadAction::Move(pad.name.clone(), -1));
+			}
+			if ui
+				.add_enabled(index + 1 < count, egui::Button::new("Move right"))
+				.clicked()
+			{
+				action = Some(PadAction::Move(pad.name.clone(), 1));
 			}
 			let remove = ui
 				.add_enabled(!on_air, egui::Button::new("Remove"))
@@ -783,7 +821,15 @@ impl Panels {
 
 	/// A scene's pad, `width` wide, with its thumbnail once the compositor
 	/// has drawn it, which it draws while the pad is on screen.
-	fn pad(&mut self, ui: &mut Ui, pad: &ScenePad, tally: Tally, width: f32, shape: f32) -> egui::Response {
+	fn pad(
+		&mut self,
+		ui: &mut Ui,
+		pad: &ScenePad,
+		tally: Tally,
+		tag: Option<&str>,
+		width: f32,
+		shape: f32,
+	) -> egui::Response {
 		let thumbnail = Thumbnail::Scene(pad.name.clone());
 		let size = vec2(pad.canvas.width as f32, pad.canvas.height as f32);
 		let picture = self
@@ -791,11 +837,14 @@ impl Panels {
 			.get(&thumbnail)
 			.map(|registered| egui::load::SizedTexture::new(registered.id, size));
 		let key = self.key(&Action::Scene(pad.name.clone()), ui.ctx());
+		let fault = self.fault(&Spot::Pad(pad.name.clone()));
 		let widget = kit::Pad::new(&pad.name)
 			.picture(picture)
 			.key(key.as_deref())
 			.tally(tally)
+			.tag(tag)
 			.refused(pad.refused.as_deref())
+			.fault(fault)
 			.width(width)
 			.shape(shape);
 		let response = ui.add(widget);
@@ -806,7 +855,7 @@ impl Panels {
 	}
 
 	/// The key bound to `action`, as its tooltip shows it.
-	fn key(&self, action: &Action, ctx: &egui::Context) -> Option<String> {
+	pub(super) fn key(&self, action: &Action, ctx: &egui::Context) -> Option<String> {
 		let hotkeys = self.hotkeys.as_ref()?;
 		let bindings = hotkeys.bindings();
 		Some(bindings.get(action)?.shown(ctx))
@@ -816,8 +865,8 @@ impl Panels {
 	fn panic_key(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, tall: bool) {
 		let room = rect.shrink(MARGIN);
 		let note = match &snapshot.safe {
-			Some(safe) => format!("Cut to `{safe}` and mute every microphone and guest"),
-			None => "Mute every microphone and guest. Mark a scene safe in its pad's menu to cut to it too.".into(),
+			Some(safe) => format!("Cut to `{safe}`, mute every microphone and guest, and hide the always-on-top layers"),
+			None => "Mute every microphone and guest and hide the always-on-top layers. Mark a scene safe in its pad's menu to cut to it too.".into(),
 		};
 		let key = self.key(&Action::Panic, ui.ctx());
 		let clip_key = self.key(&Action::SaveClip, ui.ctx());
@@ -830,7 +879,7 @@ impl Panels {
 			.look(kit::Look::Boxed)
 			.key(clip_key.as_deref())
 			.note(Some(
-				"Save the last moments, as Review sets them, beside the scene file",
+				"Save the last seconds, as many as REVIEW picks, as a clip into the recordings folder",
 			));
 		let (panic_at, clip_at) = match tall {
 			true => (
@@ -1092,12 +1141,17 @@ impl Panels {
 					Setting::Show => {
 						egui::ScrollArea::vertical().show(ui, |ui| self.output(ui));
 					}
+					Setting::Stream => {
+						egui::ScrollArea::vertical().show(ui, |ui| self.stream_settings(ui));
+					}
+					Setting::Recording => {
+						egui::ScrollArea::vertical().show(ui, |ui| self.recording(ui));
+					}
 					Setting::Hotkeys => {
 						egui::ScrollArea::vertical().show(ui, |ui| self.hotkeys(ui, fx));
 					}
 					Setting::Effects => fx.menu(ui),
-					Setting::Graph => self.graph(ui),
-					Setting::History => self.history(ui),
+					Setting::Advanced => self.graph(ui),
 				}
 			});
 		self.setting = open.then_some(setting);
@@ -1154,7 +1208,7 @@ impl Panels {
 		repairs(ui, &self.engine.recorder.repairs());
 		let report = self.engine.health.lock().unwrap();
 		if report.relays.is_empty() {
-			ui.label("Not publishing; start with --connect to see how the stream is delivered.");
+			ui.label("Off air. Once live, this shows how the stream reaches viewers.");
 			for problem in &report.problems {
 				ui.colored_label(color(problem.verdict), &problem.cause);
 			}
@@ -1250,14 +1304,33 @@ pub(super) fn bar(ui: &Ui, fx: &mut Fx, rect: Rect) {
 	}
 }
 
-/// A page's room: what `add` draws, scrolled, inside `rect`.
-fn region(ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui)) {
-	ui.scope_builder(UiBuilder::new().max_rect(rect.shrink(MARGIN + 4.0)), |ui| {
-		egui::ScrollArea::both()
-			.id_salt(("page", rect.min.x as i32))
-			.auto_shrink(false)
-			.show(ui, add);
+/// The sheet renaming what `renaming` names, while it names one, as the name
+/// it holds and the name typed so far; the rename once asked for.
+pub(super) fn rename_sheet(
+	ctx: &egui::Context,
+	id: &str,
+	renaming: &mut Option<(String, String)>,
+) -> Option<(String, String)> {
+	let (from, to) = renaming.as_mut()?;
+	let mut asked = None;
+	let title = format!("Rename {from}");
+	let closed = kit::Sheet::new(egui::Id::new(id), &title).show(ctx, |ui| {
+		let field = ui.add(egui::TextEdit::singleline(to).desired_width(f32::INFINITY));
+		if !field.has_focus() && !field.lost_focus() {
+			field.request_focus();
+		}
+		let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+		ui.add_space(8.0);
+		ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+			if ui.button("Rename").clicked() || entered {
+				asked = Some((from.clone(), to.trim().to_string()));
+			}
+		});
 	});
+	if closed || asked.is_some() {
+		*renaming = None;
+	}
+	asked
 }
 
 /// The pages' font and the room either side of each name, smaller when
@@ -1360,13 +1433,13 @@ fn edges(ui: &mut Ui, window: Rect) {
 }
 
 /// `elapsed` as a clock, hours first.
-fn clock(elapsed: Duration) -> String {
+pub(super) fn clock(elapsed: Duration) -> String {
 	let seconds = elapsed.as_secs();
 	format!("{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
 }
 
 /// A dashed outline around `rect`, as the pad that adds a scene has.
-fn dashed(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
+pub(crate) fn dashed(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
 	let corners = [
 		rect.left_top(),
 		rect.right_top(),
@@ -1412,14 +1485,16 @@ fn window_frame() -> egui::Frame {
 }
 
 /// A row of tabs, `current` underlined, each of `all` named by `name`.
-pub(super) fn tabs<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, all: &[T], name: fn(T) -> &'static str) {
+pub(super) fn tabs<T: Copy + PartialEq, S: AsRef<str>>(ui: &mut Ui, current: &mut T, all: &[T], name: impl Fn(T) -> S) {
 	ui.horizontal_wrapped(|ui| {
 		ui.spacing_mut().item_spacing.x = 16.0;
 		for &tab in all {
 			let on = *current == tab;
-			let galley = kit::caps_galley(ui.painter(), name(tab), kit::display(14.0), kit::TEXT, None);
+			let text = name(tab);
+			let text = text.as_ref();
+			let galley = kit::caps_galley(ui.painter(), text, kit::display(14.0), kit::TEXT, None);
 			let (rect, response) = ui.allocate_exact_size(galley.size() + vec2(0.0, 10.0), Sense::click());
-			response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, name(tab)));
+			response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, text));
 			let ink = if on || response.hovered() { kit::TEXT } else { kit::DIM };
 			ui.painter().galley(rect.left_top(), galley, ink);
 			if on {

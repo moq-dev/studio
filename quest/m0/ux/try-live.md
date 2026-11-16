@@ -11,8 +11,8 @@ headless run exercises.
 
 The LIVE page, its strip, the panic key, and the title bar the studio draws
 itself are on `main` (`cargo run -p moq-studio --features capture`, or the
-macOS app once [packaging](/quest/m0/packaging/macos.md) ships it). What to
-try:
+macOS app's disk image, as [Try the macOS app](/quest/m0/packaging/macos-try.md)
+says where to find it). What to try:
 
 - **Look and feel:** whether the page reads as bold and calm at once beside
   the [mock-up](/quest/m0/ux/mock/shell-live.webp); taking a scene by its pad
@@ -25,6 +25,12 @@ try:
   edge, snapping to a screen edge, and full screen.
 - **macOS:** the system title bar stays after first-run setup until the next
   launch, then the studio's own frame replaces it.
+- **Going live** ([moq-dev/studio#175](https://github.com/moq-dev/studio/pull/175)):
+  opening a show from the library, a real stream to a relay with your token
+  set in Settings, Stream (kept in the OS credential store; only Linux's
+  Secret Service has been exercised, so macOS's keychain matters most), the
+  GO LIVE sheet's checks, ending by holding END STREAM for 1.2 s, and the Go
+  live and End stream hotkeys while another app is full screen.
 
 An agent then turns each finding into a quest, or an edit to the quest that
 owns that page, and deletes this one.

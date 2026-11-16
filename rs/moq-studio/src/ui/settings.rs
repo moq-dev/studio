@@ -1,41 +1,42 @@
-//! Settings: what a broadcaster sets once, such as the canvas and the
-//! hotkeys, and the edit history.
+//! Settings: what a broadcaster sets once, such as the canvas, recording, and
+//! the hotkeys; and the edit history, under the title bar's undo.
 
 use super::*;
 
 impl Panels {
-	/// Every edit, oldest first; pick one to undo or redo to just after it.
+	/// Every edit, newest first; pick one to undo or redo to just after it.
 	pub(super) fn history(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let position = state.history().position();
-		let count = state.history().entries().len();
 		let mut seek = None;
-		ui.horizontal(|ui| {
-			if ui.add_enabled(position > 0, egui::Button::new("Undo")).clicked() {
-				seek = Some(position - 1);
-			}
-			if ui.add_enabled(position < count, egui::Button::new("Redo")).clicked() {
-				seek = Some(position + 1);
-			}
-		});
-		ui.separator();
-		egui::ScrollArea::vertical().show(ui, |ui| {
-			if ui.selectable_label(position == 0, "Start").clicked() {
-				seek = Some(0);
-			}
-			for (index, edit) in state.history().entries().enumerate() {
-				// Undone edits are dimmed, as redo would bring them back.
-				let mut label = egui::RichText::new(&edit.label);
-				if index >= position {
-					label = label.weak();
+		ui.label(kit::caps("History", kit::display(13.0)));
+		ui.label(
+			egui::RichText::new("Pick an edit to go back to just after it; the dimmed ones redo")
+				.color(kit::DIM)
+				.font(kit::ui(11.0)),
+		);
+		egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+			// Each row as wide as the list, its words on the left.
+			ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+				let entries: Vec<_> = state.history().entries().map(|edit| edit.label.clone()).collect();
+				for (index, label) in entries.into_iter().enumerate().rev() {
+					// Undone edits are dimmed, as redo would bring them back.
+					let mut label = egui::RichText::new(label);
+					if index >= position {
+						label = label.color(kit::FAINT);
+					}
+					if ui.add(egui::Button::selectable(position == index + 1, label)).clicked() {
+						seek = Some(index + 1);
+					}
 				}
-				if ui.selectable_label(position == index + 1, label).clicked() {
-					seek = Some(index + 1);
+				if ui.add(egui::Button::selectable(position == 0, "Start")).clicked() {
+					seek = Some(0);
 				}
-			}
+			});
 		});
 		if let Some(seek) = seek {
+			ui.close();
 			let result = state.seek(seek);
 			drop(state);
 			self.deselect_item();
@@ -52,14 +53,15 @@ impl Panels {
 		let count = |value: &std::sync::atomic::AtomicU64| value.load(Ordering::Relaxed);
 		let watched = stats.video.watched.load(Ordering::Relaxed);
 
+		let on_air = self.engine.on_air();
 		egui::Grid::new("output").show(ui, |ui| {
-			match &self.engine.output {
-				Some(output) => {
+			match on_air.live() {
+				Some(live) => {
 					ui.label("Broadcast");
-					ui.label(&output.path);
+					ui.label(&live.path);
 					ui.end_row();
 					ui.label("Encoding");
-					ui.label(match (output.on_demand, watched) {
+					ui.label(match (live.on_demand, watched) {
 						(false, _) => "the canvas size always, half size while watched",
 						(true, true) => "while watched; watched now",
 						(true, false) => "while watched; idle now",
@@ -67,8 +69,8 @@ impl Panels {
 					ui.end_row();
 				}
 				None => {
-					ui.label("Relay");
-					ui.label("none; start with --connect to publish");
+					ui.label("On air");
+					ui.label("no; GO LIVE sends the program to the relays in Settings, Stream");
 					ui.end_row();
 					ui.label("Encoding");
 					ui.label("only the recording's encoder, while recording");
@@ -101,10 +103,18 @@ impl Panels {
 			ui.colored_label(ui.visuals().warn_fg_color, format!("recording audio off: {error}"));
 		}
 
-		for (name, video) in stats.published() {
+		// Every published scene, on air or not, since its virtual camera works
+		// off air too; its encoder runs only on air.
+		let encoding = stats.published();
+		let published: Vec<String> = {
+			let state = self.engine.state.lock().unwrap();
+			let scenes = state.collection().scenes.iter().filter(|scene| scene.published);
+			scenes.map(|scene| scene.name.clone()).collect()
+		};
+		for name in published {
 			ui.separator();
 			ui.strong(format!("Scene `{name}`"));
-			if let Some(output) = &self.engine.output {
+			if let Some(live) = on_air.live() {
 				let state = self.engine.state.lock().unwrap();
 				let audio = state
 					.collection()
@@ -112,18 +122,20 @@ impl Panels {
 					.unwrap_or_default()
 					.to_string();
 				drop(state);
-				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", output.path));
+				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", live.path));
 			}
-			ui.label(format!(
-				"Encoder: {}",
-				video.encoder().unwrap_or_else(|| "not open".into())
-			));
-			renditions(ui, Some(&name), &video, false);
-			if let Some(error) = video.error() {
-				ui.colored_label(ui.visuals().error_fg_color, error);
-			}
-			if let Some(error) = video.audio_error() {
-				ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
+			if let Some(video) = encoding.get(&name) {
+				ui.label(format!(
+					"Encoder: {}",
+					video.encoder().unwrap_or_else(|| "not open".into())
+				));
+				renditions(ui, Some(&name), video, false);
+				if let Some(error) = video.error() {
+					ui.colored_label(ui.visuals().error_fg_color, error);
+				}
+				if let Some(error) = video.audio_error() {
+					ui.colored_label(ui.visuals().error_fg_color, format!("audio stopped: {error}"));
+				}
 			}
 			self.camera(ui, Some(&name));
 		}
@@ -251,9 +263,11 @@ impl Panels {
 
 		let mut bind = None;
 		let mut clear = None;
+		// A scene's key takes it, or cues it in Studio mode.
+		let studio = self.controls.studio();
 		egui::Grid::new("hotkeys").striped(true).show(ui, |ui| {
 			for action in &actions {
-				ui.label(action.to_string());
+				ui.label(action.name(studio));
 				let bound = bindings.get(action);
 				if self.binding.as_ref() == Some(action) {
 					ui.strong("press a key, or Escape");
@@ -404,6 +418,117 @@ impl Panels {
 		if result.is_ok() {
 			self.sizes.remove(&name);
 		}
+		drop(state);
+		self.check(result);
+	}
+
+	/// What the record button saves, from any page: the folder, the picture,
+	/// the sound, and whether each source gets a file of its own too.
+	pub(super) fn recording(&mut self, ui: &mut Ui) {
+		let dir = self.engine.recorder.dir().to_path_buf();
+		ui.weak("What the record button saves, from any page.");
+		ui.add_space(8.0);
+		ui.horizontal(|ui| {
+			ui.label("Folder");
+			ui.monospace(dir.display().to_string());
+			if ui.add(kit::button(Icon::Folder, "Open")).clicked() {
+				let result = crate::shelf::open(&dir);
+				self.check(result);
+			}
+		});
+		ui.weak(
+			"Set by recordings in the show's .stream.toml, or --recordings for one run, and beside the show by \
+			 default. Clips are saved here too.",
+		);
+		ui.add_space(8.0);
+		self.recorded_scene(ui);
+		ui.weak("The program is what viewers see. A scene records at its own size.");
+		ui.add_space(8.0);
+		self.recorded_audio(ui);
+		ui.weak("The audio scene the recording holds. It can differ from the stream's, to keep music out.");
+		ui.add_space(8.0);
+		let mut each = self.controls.record_sources.load(Ordering::Relaxed);
+		if ui.add(kit::Toggle::new(&mut each).label("Each source too")).changed() {
+			self.controls.record_sources.store(each, Ordering::Relaxed);
+		}
+		ui.weak(
+			"Every camera, screen, and microphone also saves a file of its own, before its filters. Each costs an \
+			 encoder and its share of the disk.",
+		);
+		ui.add_space(12.0);
+		ui.weak("A recording cut short by a crash is repaired the next time the studio opens.");
+	}
+
+	/// Pick the picture recordings hold, the program or any scene, even while
+	/// recording, which goes on in a new file when the size changes.
+	fn recorded_scene(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let current = state.collection().recorded().map(str::to_string);
+		let scenes = state.collection().scenes.iter();
+		let names: Vec<String> = scenes.map(|scene| scene.name.clone()).collect();
+		let mut picked = current.clone();
+		ui.horizontal(|ui| {
+			ui.label("Picture")
+				.on_hover_text("A scene of another size than the program's goes on in a new file");
+			egui::ComboBox::from_id_salt("recorded scene")
+				.selected_text(picked.as_deref().unwrap_or("The program"))
+				.show_ui(ui, |ui| {
+					ui.selectable_value(&mut picked, None, "The program");
+					for name in &names {
+						ui.selectable_value(&mut picked, Some(name.clone()), name);
+					}
+				});
+		});
+		if picked == current {
+			return;
+		}
+		let label = match &picked {
+			Some(name) => format!("Record scene `{name}`"),
+			None => "Record the program".into(),
+		};
+		let result = edit(&mut state, label, None, |draft| draft.set_recorded(picked.as_deref()));
+		drop(state);
+		self.check(result);
+	}
+
+	/// Pick the audio scene recordings hold, even while recording, which goes
+	/// on with the new one from its next block.
+	fn recorded_audio(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let scenes = state.collection().audio_scenes.clone();
+		let program = state.collection().program_audio().unwrap_or_default();
+		let on_program = format!("On program ({program})");
+		let current = scenes
+			.iter()
+			.find(|scene| scene.recorded)
+			.map(|scene| scene.name.clone());
+		let mut picked = current.clone();
+		ui.horizontal(|ui| {
+			ui.label("Sound")
+				.on_hover_text("An audio scene nothing else carries stays off the relay");
+			egui::ComboBox::from_id_salt("recorded audio")
+				.selected_text(picked.as_deref().unwrap_or(&on_program))
+				.show_ui(ui, |ui| {
+					ui.selectable_value(&mut picked, None, &on_program);
+					for scene in &scenes {
+						ui.selectable_value(&mut picked, Some(scene.name.clone()), &scene.name);
+					}
+				});
+		});
+		if picked == current {
+			return;
+		}
+		let label = match &picked {
+			Some(name) => format!("Record audio scene `{name}`"),
+			None => "Record the audio scene on program".into(),
+		};
+		let mut next = scenes;
+		for scene in &mut next {
+			scene.recorded = picked.as_deref() == Some(scene.name.as_str());
+		}
+		let result = edit(&mut state, label, None, |draft| draft.set_audio_scenes(next));
 		drop(state);
 		self.check(result);
 	}

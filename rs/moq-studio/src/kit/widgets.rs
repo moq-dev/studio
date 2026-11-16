@@ -87,6 +87,8 @@ pub struct IconButton<'a> {
 	/// The fill while lit, such as a mute while muted.
 	lit: Option<Color32>,
 	size: f32,
+	/// How wide it is, if wider than tall, such as a strip's mute.
+	width: Option<f32>,
 	/// Said under the name, such as why it is disabled.
 	note: Option<&'a str>,
 	pose: Option<Pose>,
@@ -102,9 +104,16 @@ impl<'a> IconButton<'a> {
 			look: Look::Plain,
 			lit: None,
 			size: 30.0,
+			width: None,
 			note: None,
 			pose: None,
 		}
+	}
+
+	/// Make it `width` wide, as a mixer strip's buttons fill the strip.
+	pub fn width(mut self, width: f32) -> Self {
+		self.width = Some(width);
+		self
 	}
 
 	/// The key that does the same, shown in the tooltip.
@@ -146,7 +155,8 @@ impl<'a> IconButton<'a> {
 
 impl Widget for IconButton<'_> {
 	fn ui(self, ui: &mut Ui) -> Response {
-		let (rect, response) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
+		let size = vec2(self.width.unwrap_or(self.size), self.size);
+		let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 		response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.name));
 		if ui.is_rect_visible(rect) {
 			let pose = self.pose.unwrap_or_else(|| Pose::of(&response));
@@ -300,10 +310,7 @@ impl<'a> Pill<'a> {
 
 	#[cfg_attr(
 		not(test),
-		expect(
-			dead_code,
-			reason = "the pages draw with it: the rest of quest/m0/ux, such as go-live.md"
-		)
+		expect(dead_code, reason = "the pages draw with it: the rest of quest/m0/ux")
 	)]
 	pub fn value(mut self, value: &'a str) -> Self {
 		self.value = Some(value);
@@ -503,27 +510,35 @@ impl Widget for Slider<'_> {
 	}
 }
 
-/// A vertical fader over 0 to 1, as on a mixing desk: a slot and a cap.
-#[cfg_attr(
-	not(test),
-	expect(dead_code, reason = "the MIX page's strips draw with it: quest/m0/ux/mix.md")
-)]
+/// A vertical fader over 0 to 1, as on a mixing desk: a slot, a cap, and a
+/// line across the slot at a mark, such as unity gain.
 pub struct Fader<'a> {
 	value: &'a mut f32,
 	height: f32,
+	mark: Option<f32>,
 }
 
-#[cfg_attr(
-	not(test),
-	expect(dead_code, reason = "the MIX page's strips draw with it: quest/m0/ux/mix.md")
-)]
 impl<'a> Fader<'a> {
+	/// How far in from its top and bottom the cap's center stops, so a scale
+	/// beside it lines up with its travel.
+	pub const INSET: f32 = 8.0;
+
 	pub fn new(value: &'a mut f32) -> Self {
-		Self { value, height: 160.0 }
+		Self {
+			value,
+			height: 160.0,
+			mark: None,
+		}
 	}
 
 	pub fn height(mut self, height: f32) -> Self {
 		self.height = height;
+		self
+	}
+
+	/// Mark the value `at` across the slot, as unity on a gain fader.
+	pub fn mark(mut self, at: f32) -> Self {
+		self.mark = Some(at);
 		self
 	}
 }
@@ -531,7 +546,7 @@ impl<'a> Fader<'a> {
 impl Widget for Fader<'_> {
 	fn ui(self, ui: &mut Ui) -> Response {
 		let (rect, mut response) = ui.allocate_exact_size(vec2(28.0, self.height), Sense::drag());
-		let travel = egui::Rangef::new(rect.top() + 8.0, rect.bottom() - 8.0);
+		let travel = egui::Rangef::new(rect.top() + Self::INSET, rect.bottom() - Self::INSET);
 		// The release too, so a move in its frame is kept.
 		if (response.dragged() || response.drag_stopped())
 			&& let Some(pos) = response.interact_pointer_pos()
@@ -548,6 +563,10 @@ impl Widget for Fader<'_> {
 			let painter = ui.painter();
 			let slot = Rect::from_center_size(rect.center(), vec2(8.0, rect.height()));
 			painter.rect_filled(slot, 4, Color32::BLACK);
+			if let Some(mark) = self.mark {
+				let y = egui::lerp(travel.max..=travel.min, mark);
+				painter.hline(rect.x_range().shrink(2.0), y, Stroke::new(2.0, FAINT));
+			}
 			let y = egui::lerp(travel.max..=travel.min, value);
 			let cap = Rect::from_center_size(pos2(rect.center().x, y), vec2(26.0, 16.0));
 			// A cap lit from above: light on top, darker below, and a groove.
@@ -567,7 +586,6 @@ impl Widget for Fader<'_> {
 }
 
 /// Fill `rect`, rounded by `corner`, from `top` down to `bottom`.
-#[cfg_attr(not(test), expect(dead_code, reason = "the fader's cap"))]
 fn gradient(painter: &egui::Painter, rect: Rect, corner: u8, top: Color32, bottom: Color32) {
 	// The rounded body in the bottom color, its top half's gradient over it.
 	painter.rect_filled(rect, corner, bottom);
@@ -608,21 +626,29 @@ pub enum Run {
 pub struct Meter {
 	level: f32,
 	peak: f32,
+	hot: f32,
 	run: Run,
 	size: Vec2,
 }
 
-/// Where a meter turns from healthy to hot.
-const HOT: f32 = 0.7;
-
 impl Meter {
+	/// Where a meter turns from healthy to hot, unless told otherwise.
+	pub const HOT: f32 = 0.7;
+
 	pub fn new(level: f32, peak: f32) -> Self {
 		Self {
 			level,
 			peak,
+			hot: Self::HOT,
 			run: Run::Across,
 			size: vec2(160.0, 9.0),
 		}
+	}
+
+	/// Turn hot from `at` along the run, for a meter on a scale of its own.
+	pub fn hot(mut self, at: f32) -> Self {
+		self.hot = at;
+		self
 	}
 
 	/// Run `run`, `size` points along it and across.
@@ -657,7 +683,7 @@ impl Widget for Meter {
 		for index in 0..count {
 			let at = (index as f32 + 0.5) / count as f32;
 			let lit = at <= self.level;
-			let color = match (lit || index + 1 == peak, at >= HOT) {
+			let color = match (lit || index + 1 == peak, at >= self.hot) {
 				(false, _) => P3,
 				(true, false) => OK,
 				(true, true) if clipped && index + 1 == count => ERR,
@@ -992,8 +1018,13 @@ pub struct Pad<'a> {
 	picture: Option<egui::load::SizedTexture>,
 	key: Option<&'a str>,
 	tally: Tally,
+	/// The tag over the tally's own, such as FIRST for the scene a stream
+	/// opens on.
+	tag: Option<&'a str>,
 	/// Why the scene cannot be taken, if it cannot.
 	refused: Option<&'a str>,
+	/// What just failed on it, such as a rename.
+	fault: Option<&'a str>,
 	width: f32,
 	/// The thumbnail's shape, width over height: the show's.
 	shape: f32,
@@ -1007,7 +1038,9 @@ impl<'a> Pad<'a> {
 			picture: None,
 			key: None,
 			tally: Tally::Off,
+			tag: None,
 			refused: None,
+			fault: None,
 			width: 124.0,
 			shape: 16.0 / 9.0,
 			pose: None,
@@ -1031,10 +1064,22 @@ impl<'a> Pad<'a> {
 		self
 	}
 
+	/// Tagged `tag` in its tally's color, rather than the tally's own word.
+	pub fn tag(mut self, tag: Option<&'a str>) -> Self {
+		self.tag = tag;
+		self
+	}
+
 	/// Shown, but not takeable, for `why`. It still hears a click, such as
 	/// for its menu, which its caller does not take it on.
 	pub fn refused(mut self, why: Option<&'a str>) -> Self {
 		self.refused = why;
+		self
+	}
+
+	/// Ringed in red, saying `what` failed on hover, such as a rename.
+	pub fn fault(mut self, what: Option<&'a str>) -> Self {
+		self.fault = what;
 		self
 	}
 
@@ -1078,6 +1123,7 @@ impl Widget for Pad<'_> {
 				shadow(painter, rect, 10, color.gamma_multiply(0.25), 12.0);
 			}
 			let border = match (self.tally.color(), pose) {
+				_ if self.fault.is_some() => ERR,
 				(Some(color), _) => color,
 				(None, Pose::Hover | Pose::Press) if self.refused.is_none() => LINE_HOVER,
 				(None, _) => Color32::TRANSPARENT,
@@ -1096,8 +1142,8 @@ impl Widget for Pad<'_> {
 			}
 			let tag_text = match self.tally {
 				Tally::Off => None,
-				Tally::Air => Some("On air"),
-				Tally::Cue => Some("Next"),
+				Tally::Air => Some(self.tag.unwrap_or("On air")),
+				Tally::Cue => Some(self.tag.unwrap_or("Next")),
 			};
 			if let Some(text) = tag_text {
 				tag(painter, thumb.min + vec2(4.0, 4.0), text, self.tally, 11.0);
@@ -1125,7 +1171,7 @@ impl Widget for Pad<'_> {
 			);
 			painter.galley(at, galley, TEXT);
 		}
-		match self.refused {
+		match self.fault.or(self.refused) {
 			Some(why) => tip(response, why, None),
 			None => response,
 		}
@@ -1144,11 +1190,14 @@ fn shadow(painter: &egui::Painter, rect: Rect, corner: u8, color: Color32, blur:
 }
 
 /// The frame around the live picture: the accent while on air, amber and striped
-/// while it shows a scene that is not, with a tag naming which.
+/// while it shows a scene that is not, neutral off air, with a tag naming which.
 pub struct TallyFrame<'a> {
 	tally: Tally,
-	tag: Option<&'a str>,
+	tag: Option<(&'a str, Tally)>,
 }
+
+/// The neutral frame's outline, off air.
+const NEUTRAL: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x46);
 
 impl<'a> TallyFrame<'a> {
 	pub fn new(tally: Tally) -> Self {
@@ -1157,7 +1206,14 @@ impl<'a> TallyFrame<'a> {
 
 	/// The tag in the picture's corner, such as ON AIR.
 	pub fn tag(mut self, tag: &'a str) -> Self {
-		self.tag = Some(tag);
+		self.tag = Some((tag, self.tally));
+		self
+	}
+
+	/// The tag in `tally`'s color rather than the frame's, such as OFF AIR
+	/// in amber on the neutral frame.
+	pub fn tag_as(mut self, tag: &'a str, tally: Tally) -> Self {
+		self.tag = Some((tag, tally));
 		self
 	}
 
@@ -1192,9 +1248,11 @@ impl<'a> TallyFrame<'a> {
 				painter.with_clip_rect(clip).set(band, Shape::Vec(stripes));
 			}
 			painter.rect_stroke(outline, 12, Stroke::new(3.0, color), StrokeKind::Middle);
+		} else {
+			painter.rect_stroke(rect.expand(4.5), 12, Stroke::new(3.0, NEUTRAL), StrokeKind::Middle);
 		}
-		if let Some(text) = self.tag {
-			tag(painter, rect.min + vec2(12.0, 12.0), text, self.tally, 15.0);
+		if let Some((text, tally)) = self.tag {
+			tag(painter, rect.min + vec2(12.0, 12.0), text, tally, 15.0);
 		}
 		if let (Some(fx), Some(mark)) = (effects, mark) {
 			fx.program(&mark.around(rect));
@@ -1204,7 +1262,7 @@ impl<'a> TallyFrame<'a> {
 }
 
 /// Diagonal stripes of `color` filling `rect`, clipped to it.
-fn stripes(rect: Rect, color: Color32) -> Vec<Shape> {
+pub fn stripes(rect: Rect, color: Color32) -> Vec<Shape> {
 	let mut shapes = Vec::new();
 	let pitch = 24.0;
 	let rot = Rot2::from_angle(-std::f32::consts::FRAC_PI_4);

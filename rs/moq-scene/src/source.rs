@@ -955,11 +955,11 @@ impl Driver {
 	#[cfg(feature = "capture")]
 	async fn device(&self, source: &Source, listing: Option<&Listing<'_>>) -> Result<(), Error> {
 		use moq_audio::capture::Source as Audio;
-		use moq_video::capture::Source as Video;
+		use moq_video::capture::{DisplaySelection, Source as Video};
 
 		let video = match source {
 			Source::Camera { id } => Video::Camera(id.clone()),
-			Source::Display { id } => Video::Display(id.clone()),
+			Source::Display { id } => Video::Display(id.clone().map(DisplaySelection::new).unwrap_or_default()),
 			Source::Window { id } => Video::Window(id.clone()),
 			Source::PickedDisplay | Source::PickedWindow => return self.picked(source, listing).await,
 			Source::Microphone { id } => return self.listen(Audio::Microphone(id.clone()), listing).await,
@@ -1785,7 +1785,7 @@ impl Driver {
 			let stride = bus.layout.channels() as usize * size_of::<f32>();
 			while let Some(frame) = next_samples(consumer).await? {
 				let length = (frame.data.len() / stride) as f64 / f64::from(bus.sample_rate);
-				if Duration::from(frame.timestamp) + Duration::from_secs_f64(length) > Duration::from(take.start) {
+				if elapsed(frame.timestamp)? + Duration::from_secs_f64(length) > elapsed(take.start)? {
 					samples = Some(frame);
 					break;
 				}
@@ -1802,12 +1802,13 @@ impl Driver {
 		self.ran(play.play, |run| {
 			run.begun.get_or_insert(begin);
 		});
-		let at = |timestamp: moq_net::Timestamp| {
-			let (timestamp, start) = (Duration::from(timestamp), Duration::from(take.start));
-			match timestamp.checked_sub(start) {
+		let start = elapsed(take.start)?;
+		let at = |timestamp: moq_net::Timestamp| -> Result<Instant, Error> {
+			let timestamp = elapsed(timestamp)?;
+			Ok(match timestamp.checked_sub(start) {
 				Some(into) => begin.saturating_add(into.div_f32(play.speed)),
 				None => begin.saturating_sub((start - timestamp).div_f32(play.speed)),
-			}
+			})
 		};
 
 		let pictures = async {
@@ -1820,7 +1821,7 @@ impl Driver {
 					// One at the end would show for no time at all.
 					moq_video::decode::Read::Frame(frame) if frame.timestamp >= take.end => break,
 					moq_video::decode::Read::Frame(mut frame) => {
-						kio::clock::sleep_until(at(frame.timestamp)).await;
+						kio::clock::sleep_until(at(frame.timestamp)?).await;
 						self.encode(&mut own, &mut frame, config, kio::clock::now()).await?;
 						self.show_play(play.play, Picture::Frame(frame));
 					}
@@ -1829,7 +1830,14 @@ impl Driver {
 					// the end, the replay is over anyway.
 					moq_video::decode::Read::Gap { timestamp, .. }
 					| moq_video::decode::Read::End { end: timestamp } => {
-						kio::clock::sleep_until(at(timestamp.clamp(take.start, take.end))).await;
+						let timestamp = if timestamp < take.start {
+							take.start
+						} else if timestamp > take.end {
+							take.end
+						} else {
+							timestamp
+						};
+						kio::clock::sleep_until(at(timestamp)?).await;
 						self.picture.lock().unwrap().clear();
 						if let Some(video) = &mut own.track
 							&& let Err(err) = video.discontinuity()
@@ -1851,7 +1859,7 @@ impl Driver {
 			while let Some(frame) = samples.take()
 				&& frame.timestamp < take.end
 			{
-				let due = at(frame.timestamp);
+				let due = at(frame.timestamp)?;
 				ahead(due).await;
 				let before = begin.saturating_duration_since(due).as_nanos() * u128::from(bus.sample_rate);
 				let cut = (before / 1_000_000_000) as usize * stride;
@@ -1870,7 +1878,7 @@ impl Driver {
 			tokio::try_join!(pictures, sounds)?;
 			std::future::pending().await
 		};
-		let end = at(take.end);
+		let end = at(take.end)?;
 		// Played first, so a picture due at the very end shows before it does.
 		tokio::select! {
 			biased;
@@ -2115,8 +2123,8 @@ impl Driver {
 			None => None,
 		};
 		let first = [
-			picture.as_ref().map(|frame| Duration::from(frame.timestamp)),
-			samples.as_ref().map(|frame| Duration::from(frame.timestamp)),
+			picture.as_ref().map(|frame| elapsed(frame.timestamp)).transpose()?,
+			samples.as_ref().map(|frame| elapsed(frame.timestamp)).transpose()?,
 		];
 		let Some(start) = first.into_iter().flatten().min() else {
 			// Its tracks hold no frame that decodes, which a loop would only
@@ -2139,7 +2147,9 @@ impl Driver {
 		self.ran(play, |run| {
 			run.begun.get_or_insert(begin);
 		});
-		let at = |timestamp: moq_net::Timestamp| begin.saturating_add(Duration::from(timestamp).saturating_sub(start));
+		let at = |timestamp: moq_net::Timestamp| -> Result<Instant, Error> {
+			Ok(begin.saturating_add(elapsed(timestamp)?.saturating_sub(start)))
+		};
 		let end = std::cell::Cell::new(begin);
 		let last = |until: Instant| end.set(end.get().max(until));
 
@@ -2149,7 +2159,7 @@ impl Driver {
 			};
 			let mut previous = None;
 			while let Some(mut frame) = picture.take() {
-				let due = at(frame.timestamp);
+				let due = at(frame.timestamp)?;
 				ahead(due).await;
 				last(due.saturating_add(previous.map_or(Duration::ZERO, |previous| due - previous)));
 				previous = Some(due);
@@ -2172,7 +2182,7 @@ impl Driver {
 			// after a loop's silence while its pictures play on, is a gap.
 			let mut first = true;
 			while let Some(frame) = samples.take() {
-				let due = at(frame.timestamp);
+				let due = at(frame.timestamp)?;
 				ahead(due).await;
 				let length = (frame.data.len() / bytes) as u64 * 1_000_000_000 / u64::from(bus.sample_rate);
 				last(due.saturating_add(Duration::from_nanos(length)));
@@ -2343,6 +2353,11 @@ async fn next_picture(consumer: &mut moq_video::decode::Consumer) -> Result<Opti
 		}
 	}
 	Ok(None)
+}
+
+/// A decoded frame's time since its track's zero.
+fn elapsed(timestamp: moq_net::Timestamp) -> Result<Duration, Error> {
+	Ok(Duration::try_from(timestamp).map_err(moq_video::Error::from)?)
 }
 
 /// The next sound `consumer` decodes, passing over gaps, or `None` at the end
@@ -3245,7 +3260,7 @@ mod tests {
 	/// The picture a feed shows next, once it shows one.
 	async fn shown(feed: &Feed) -> Duration {
 		until(|| match feed.next_picture() {
-			Some(Picture::Frame(frame)) => Some(frame.timestamp.into()),
+			Some(Picture::Frame(frame)) => Some(Duration::try_from(frame.timestamp).unwrap()),
 			Some(_) => panic!("a broadcast shows only frames"),
 			None => None,
 		})
@@ -3274,7 +3289,7 @@ mod tests {
 			assert_eq!(due, arrived.saturating_add(VIDEO_DELAY));
 			assert!(feed.next_picture().is_none(), "shown on arrival");
 			until_time(due).await;
-			assert_eq!(shown(feed).await, Duration::from(stamp));
+			assert_eq!(shown(feed).await, Duration::try_from(stamp).unwrap());
 			assert_eq!(feed.delay(), Some(VIDEO_DELAY));
 		})
 		.await;
@@ -3336,7 +3351,7 @@ mod tests {
 			until_time(due.saturating_sub(Duration::from_millis(1))).await;
 			assert!(layer.next_picture().is_none(), "shown before its moment");
 			until_time(due).await;
-			assert_eq!(shown(layer).await, Duration::from(stamp));
+			assert_eq!(shown(layer).await, Duration::try_from(stamp).unwrap());
 			assert_eq!(layer.delay(), Some(VIDEO_DELAY), "the program's");
 		})
 		.await;
@@ -3359,7 +3374,9 @@ mod tests {
 			let pixel = image::RgbaImage::from_raw(1, 1, vec![255, 0, 0, 255]).unwrap();
 			let mut png = std::io::Cursor::new(Vec::new());
 			pixel.write_to(&mut png, image::ImageFormat::Png).unwrap();
-			track.write_frame(None, bytes::Bytes::from(png.into_inner())).unwrap();
+			track
+				.write_frame(moq_net::Timestamp::unscaled(0), bytes::Bytes::from(png.into_inner()))
+				.unwrap();
 			let mut still = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
 			still.mime = Some("image/png".into());
 			let mut logo = hang::Catalog::default();
@@ -3446,7 +3463,7 @@ mod tests {
 			let first = moq_net::Timestamp::from_millis(1_000).unwrap();
 			let due = until(|| clock.due(first)).await;
 			until_time(due).await;
-			assert_eq!(shown(feed).await, Duration::from(first));
+			assert_eq!(shown(feed).await, Duration::try_from(first).unwrap());
 
 			// Its stamps sit half a second before the first track's clock reading.
 			let timebase = live.catalog.timebase();
@@ -3481,7 +3498,7 @@ mod tests {
 			assert!(feed.next_picture().is_none(), "shown before its delay");
 			until_time(arrived.saturating_add(VIDEO_DELAY)).await;
 			assert!(
-				shown(feed).await < Duration::from(first),
+				shown(feed).await < Duration::try_from(first).unwrap(),
 				"stamped before the first track"
 			);
 		})
@@ -3519,7 +3536,7 @@ mod tests {
 			until_time(due.saturating_sub(Duration::from_millis(1))).await;
 			assert!(feed.next_picture().is_none(), "shown before its sound");
 			until_time(due).await;
-			assert_eq!(shown(feed).await, Duration::from(stamp(1_000)));
+			assert_eq!(shown(feed).await, Duration::try_from(stamp(1_000)).unwrap());
 			assert_eq!(feed.delay(), Some(delay));
 
 			// The sound stalls; each picture still shows on its moment.
@@ -3533,7 +3550,7 @@ mod tests {
 				until_time(due).await;
 				assert_eq!(
 					shown(feed).await,
-					Duration::from(stamp(at)),
+					Duration::try_from(stamp(at)).unwrap(),
 					"held by the stalled sound"
 				);
 			}
@@ -3547,7 +3564,7 @@ mod tests {
 			picture(&mut live.video, &mut live.encoder, at);
 			let due = until(|| clock.due(stamp(at))).await;
 			until_time(due).await;
-			assert_eq!(shown(feed).await, Duration::from(stamp(at)));
+			assert_eq!(shown(feed).await, Duration::try_from(stamp(at)).unwrap());
 		})
 		.await;
 	}
@@ -3818,7 +3835,9 @@ mod tests {
 			let start = moq_net::Timestamp::from_micros(1_500_000).unwrap();
 			for index in 45..75u64 {
 				let timestamp = moq_net::Timestamp::from_micros(index * 1_000_000 / 30).unwrap();
-				let due = begin.saturating_add((Duration::from(timestamp) - Duration::from(start)).div_f32(speed));
+				let due = begin.saturating_add(
+					(Duration::try_from(timestamp).unwrap() - Duration::try_from(start).unwrap()).div_f32(speed),
+				);
 				assert!(feed.next_picture().is_none(), "a picture before {timestamp:?} is due");
 				until_time(due).await;
 				let shown = until(|| match feed.next_picture() {
@@ -3965,6 +3984,26 @@ mod media_tests {
 		}
 	}
 
+	/// Check that the clip's pictures after `first`, which showed at `begin`,
+	/// each show at its moment and not before, stepping the clock to one moment
+	/// at a time. Each step waits for its picture: pictures decode on a thread
+	/// tokio cannot see, so a clock moved past several moments at once runs on
+	/// ahead of the ones not decoded yet, which then show late.
+	async fn plays_on_time(feed: &Feed, first: moq_net::Timestamp, begin: Instant) {
+		for index in 1..10u64 {
+			let into = Duration::from_millis(index * 100);
+			// Within the timer wheel's millisecond of when the test saw the first.
+			until_time(begin.saturating_add(into).saturating_sub(Duration::from_millis(2))).await;
+			assert!(feed.next_picture().is_none(), "picture {index} before its moment");
+			until_time(begin.saturating_add(into)).await;
+			let (timestamp, _) = shown(feed).await;
+			assert_eq!(
+				Duration::try_from(timestamp).unwrap() - Duration::try_from(first).unwrap(),
+				into
+			);
+		}
+	}
+
 	/// Wait until `name` reads as `status`, without moving the clock.
 	async fn until_status(sources: &Sources, name: &str, status: Status) {
 		until(|| (sources.get(name).unwrap().status() == status).then_some(())).await;
@@ -3986,15 +4025,7 @@ mod media_tests {
 
 			let (first, begin) = shown(feed).await;
 			assert_eq!(feed.status(), Status::Live);
-			for index in 1..10u64 {
-				let into = Duration::from_millis(index * 100);
-				// Within the timer wheel's millisecond of when the test saw the first.
-				until_time(begin.saturating_add(into).saturating_sub(Duration::from_millis(2))).await;
-				assert!(feed.next_picture().is_none(), "picture {index} before its moment");
-				until_time(begin.saturating_add(into)).await;
-				let (timestamp, _) = shown(feed).await;
-				assert_eq!(Duration::from(timestamp) - Duration::from(first), into);
-			}
+			plays_on_time(feed, first, begin).await;
 
 			// The last picture lasts as long as the one before it, and the
 			// sound runs a little past it.
@@ -4174,12 +4205,14 @@ mod media_tests {
 			let feed = sources.get("clip.mkv").unwrap();
 
 			let (first, begin) = shown(feed).await;
-			until_time(begin.saturating_add(Duration::from_millis(950))).await;
-			let (last, _) = shown(feed).await;
-			assert_eq!(Duration::from(last) - Duration::from(first), Duration::from_millis(900));
+			plays_on_time(feed, first, begin).await;
 			until_time(begin.saturating_add(Duration::from_millis(998))).await;
 			assert!(feed.next_picture().is_none(), "the start again before the end");
-			until_time(begin.saturating_add(Duration::from_millis(1_100))).await;
+			// The second play begins where the first ended, its sound a little
+			// past its last picture; holding the clock there keeps the second
+			// play's next picture from replacing its first.
+			let end = until(|| feed.run().ended).await;
+			until_time(end).await;
 			let (again, _) = shown(feed).await;
 			assert_eq!(again, first);
 			assert_eq!(feed.status(), Status::Live);

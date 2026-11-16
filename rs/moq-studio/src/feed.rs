@@ -2,11 +2,12 @@
 //!
 //! Every guest the studio renews gets a broadcast at
 //! `.return/<identity>/<generation>` in the room, which only their token may
-//! read. Its video is the program's: the studio's session in the room serves the
-//! program broadcast once at `.program`, and each feed's catalog lists its video
-//! renditions by reference, so a guest costs no video encode. Its audio is its
-//! own: a mix-minus of the audio scene on program without the guest's microphone, so
-//! they follow the show without hearing themselves back.
+//! read. Its video is the program's while on air: the studio's session in the
+//! room serves the program broadcast once at `.program`, and each feed's catalog
+//! lists its video renditions by reference, so a guest costs no video encode.
+//! Off air it lists none. Its audio is its own, on air or not: a mix-minus of
+//! the audio scene on program without the guest's microphone, so they follow
+//! the show without hearing themselves back.
 //!
 //! The studio's session in the room publishes them, holding only what the room
 //! key signs. A guest costs one subtraction per audio block and an Opus encoder
@@ -30,13 +31,16 @@ use crate::mix;
 /// not for broadcast.
 const BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(64);
 
+/// The program's broadcast while on air, and `None` off air.
+pub type Program = tokio::sync::watch::Receiver<Option<moq_net::broadcast::Consumer>>;
+
 /// The return feeds of every renewed guest, and the program they show.
 pub struct Feeds {
 	room: Arc<Room>,
 	/// What the studio's session in the room publishes.
 	origin: moq_net::origin::Producer,
-	/// The program broadcast, which each feed's video names.
-	program: moq_net::broadcast::Consumer,
+	/// The program broadcast while on air, which each feed's video names.
+	program: Program,
 	/// The program catalog's clock, which each feed's catalog shares so its
 	/// audio lines up with the program's video.
 	clock: moq_mux::Clock,
@@ -52,14 +56,14 @@ pub struct Feeds {
 }
 
 impl Feeds {
-	/// Serve `program` at [`PROGRAM`] in `room`, through `origin`, the studio's
-	/// session there, and publish a feed for each guest [`sync`](Self::sync)
-	/// finds renewed. `clock` and `epoch` are the program audio's, which the
-	/// feeds' audio is stamped against.
+	/// Serve the broadcast `program` holds while on air at [`PROGRAM`] in
+	/// `room`, through `origin`, the studio's session there, and publish a feed
+	/// for each guest [`sync`](Self::sync) finds renewed. `clock` and `epoch`
+	/// are the program audio's, which the feeds' audio is stamped against.
 	pub fn new(
 		room: Arc<Room>,
 		origin: moq_net::origin::Producer,
-		program: moq_net::broadcast::Consumer,
+		program: Program,
 		clock: moq_mux::Clock,
 		epoch: Duration,
 	) -> anyhow::Result<Self> {
@@ -69,10 +73,12 @@ impl Feeds {
 		let served = program.clone();
 		let serving = tokio::spawn(async move {
 			while let Some(request) = route.requested().await {
-				// The route claims everything beneath it too, which holds nothing.
-				match request.path().as_str() == PROGRAM {
-					true => request.serve(served.clone()),
-					false => request.reject(moq_net::Error::NotFound),
+				let on_air = served.borrow().clone();
+				// The route claims everything beneath it too, which holds nothing,
+				// and off air the program is nowhere.
+				match on_air {
+					Some(program) if request.path().as_str() == PROGRAM => request.serve(program),
+					_ => request.reject(moq_net::Error::NotFound),
 				}
 			}
 		});
@@ -203,8 +209,9 @@ struct Running {
 	catalog: moq_mux::catalog::Producer,
 	audio: moq_audio::encode::Producer,
 	follow: mix::Follow,
-	/// The program broadcast, whose video renditions the catalog lists.
-	program: moq_net::broadcast::Consumer,
+	/// The program broadcast while on air, whose video renditions the catalog
+	/// lists.
+	program: Program,
 	/// The program, relative to the feed.
 	reference: moq_net::path::Relative,
 	epoch: Duration,
@@ -212,8 +219,9 @@ struct Running {
 }
 
 impl Running {
-	/// List the program's video and encode the picked audio until `stopped`
-	/// or the program ends, then finish the audio track and the catalog.
+	/// List the program's video while on air and encode the picked audio
+	/// until `stopped` or the studio closes, then finish the audio track and
+	/// the catalog.
 	async fn run(mut self, stopped: tokio::sync::oneshot::Receiver<()>) -> anyhow::Result<()> {
 		let Self {
 			catalog,
@@ -243,9 +251,47 @@ impl Running {
 	}
 }
 
+/// List in `catalog` the video renditions of the program on air, read from
+/// the broadcast at `reference`, and none while it is off air, until the
+/// studio closes.
+async fn list(
+	program: &mut Program,
+	catalog: &mut moq_mux::catalog::Producer,
+	reference: &moq_net::path::Relative,
+) -> anyhow::Result<()> {
+	loop {
+		let on_air = program.borrow_and_update().clone();
+		// Whether the program changed before this one ended.
+		let changed = match &on_air {
+			Some(on_air) => tokio::select! {
+				changed = program.changed() => Some(changed.is_ok()),
+				listed = list_one(on_air, catalog, reference) => {
+					// The stream ending can cut its catalog, which says only that.
+					if let Err(err) = listed {
+						tracing::debug!(error = format!("{err:#}"), "the program's catalog ended");
+					}
+					None
+				}
+			},
+			None => None,
+		};
+		let open = match changed {
+			Some(open) => open,
+			None => {
+				catalog.mutate(|catalog| catalog.video = Default::default())?;
+				program.changed().await.is_ok()
+			}
+		};
+		// The studio closed.
+		if !open {
+			return Ok(());
+		}
+	}
+}
+
 /// List the video renditions of each catalog `program` publishes in
 /// `catalog`, read from the broadcast at `reference`, until the program ends.
-async fn list(
+async fn list_one(
 	program: &moq_net::broadcast::Consumer,
 	catalog: &mut moq_mux::catalog::Producer,
 	reference: &moq_net::path::Relative,
@@ -295,20 +341,20 @@ mod tests {
 
 	/// Return feeds on `origin` for the guests in `room`, of a program that
 	/// lives as long as the returned broadcast and catalog.
-	fn feeds(
-		room: &Arc<Room>,
-		origin: &moq_net::origin::Producer,
-	) -> (Feeds, (moq_net::broadcast::Producer, moq_mux::catalog::Producer)) {
+	fn feeds(room: &Arc<Room>, origin: &moq_net::origin::Producer) -> (Feeds, OnAir) {
 		let (broadcast, catalog) = program();
-		let feeds = Feeds::new(
-			room.clone(),
-			origin.clone(),
-			broadcast.consume(),
-			catalog.clock(),
-			Duration::ZERO,
-		);
-		(feeds.unwrap(), (broadcast, catalog))
+		let (on_air, program) = tokio::sync::watch::channel(Some(broadcast.consume()));
+		let feeds = Feeds::new(room.clone(), origin.clone(), program, catalog.clock(), Duration::ZERO);
+		(feeds.unwrap(), (on_air, broadcast, catalog))
 	}
+
+	/// The program on air, as the engine holds it, with its broadcast and
+	/// catalog.
+	type OnAir = (
+		tokio::sync::watch::Sender<Option<moq_net::broadcast::Consumer>>,
+		moq_net::broadcast::Producer,
+		moq_mux::catalog::Producer,
+	);
 
 	/// Alice and bob in `room` with their cameras on, and a collection playing
 	/// each camera, whose sources run on `bus`, which `mixed` follows.

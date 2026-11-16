@@ -92,13 +92,12 @@ fn guest(path: &Path) -> Option<(Path, Kind)> {
 	Some((identity, kind))
 }
 
-/// The guest flags.
-#[derive(usage_rs::Args, Clone, Debug)]
+/// The guest flags, which win over the show's own guest settings for a run.
+#[derive(usage_rs::Args, Clone, Debug, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Config {
-	/// The room guests join: a path under the `--connect` URL's, which the
-	/// studio's own connection must be allowed to subscribe to. Needs
-	/// `--room-key`.
+	/// The room guests join: a path under the relay's URL, which the studio's
+	/// own connection must be allowed to subscribe to. Needs `--room-key`.
 	#[usage(long)]
 	pub room: Option<String>,
 
@@ -116,28 +115,33 @@ pub struct Config {
 
 	/// How long a join link, and each token the studio renews it with, works. A
 	/// guest in the room is renewed every half of this, so a guest removed from
-	/// scenes is disconnected within it. At least a minute.
-	#[usage(long, default = "4h")]
-	pub guest_expiry: moq_tokio::cli::Duration,
+	/// scenes is disconnected within it. At least a minute. Defaults to 4h.
+	#[usage(long)]
+	pub guest_expiry: Option<moq_tokio::cli::Duration>,
 }
 
+/// How long a join link works unless the show or a flag says otherwise.
+pub const DEFAULT_EXPIRY: Duration = Duration::from_secs(4 * 3600);
+
 impl Config {
-	/// The room these flags describe on the relay at `connect`, or `None` without
-	/// `--room`, remembering who was removed from scenes beside the room key.
+	/// The room these settings describe on the relay at `connect`, or `None`
+	/// without a room, remembering who was removed from scenes beside the room
+	/// key.
 	pub fn load(&self, connect: Option<&Url>) -> anyhow::Result<Option<Room>> {
 		let (room, key) = match (&self.room, &self.room_key, &self.join_page) {
 			(None, None, None) => return Ok(None),
 			(Some(room), Some(key), _) => (room, key),
-			_ => anyhow::bail!("guests need both --room and --room-key"),
+			_ => anyhow::bail!("guests need both a room and a room key"),
 		};
 		let page = self
 			.join_page
 			.clone()
 			.unwrap_or_else(|| Url::parse(JOIN_PAGE).expect("the default join page is a URL"));
-		let connect = connect.context("guests join through the relay; add --connect")?;
+		let connect = connect.context("guests join through the relay; set one in Settings, Stream")?;
 		let removals = removals_path(key);
 		let key = moq_auth::Key::from_file(key).with_context(|| format!("reading the room key {}", key.display()))?;
-		let room = Room::new(connect, room, key, page, self.guest_expiry.into())?;
+		let expiry = self.guest_expiry.map_or(DEFAULT_EXPIRY, Duration::from);
+		let room = Room::new(connect, room, key, page, expiry)?;
 		Ok(Some(room.remember(removals)?))
 	}
 }
@@ -808,6 +812,8 @@ struct Renewed {
 	generation: u64,
 	publication: moq_net::origin::Route,
 	track: moq_net::track::Producer,
+	/// The key of the next token's group, since the token track has no timescale.
+	next: u64,
 }
 
 impl Drop for Renewed {
@@ -856,6 +862,7 @@ impl Renewals {
 			generation,
 			publication,
 			track,
+			next: 0,
 		};
 		self.write(identity, &mut renewed)?;
 		renewed.publication.announce()?;
@@ -875,7 +882,10 @@ impl Renewals {
 
 	fn write(&self, identity: &str, renewed: &mut Renewed) -> anyhow::Result<()> {
 		let (token, _) = self.room.sign(identity, renewed.generation)?;
-		renewed.track.write_frame(None, token)?;
+		renewed
+			.track
+			.write_frame(moq_net::Timestamp::unscaled(renewed.next), token)?;
+		renewed.next += 1;
 		Ok(())
 	}
 }
@@ -919,7 +929,7 @@ pub(crate) mod tests {
 			room: room.then(|| "guests".into()),
 			room_key: key.then(|| path.clone()),
 			join_page: page.then(|| Url::parse("https://studio.example/join/").unwrap()),
-			guest_expiry: EXPIRY.into(),
+			guest_expiry: Some(EXPIRY.into()),
 		};
 
 		assert!(config(false, false, false).load(Some(&connect)).unwrap().is_none());
@@ -932,7 +942,7 @@ pub(crate) mod tests {
 			assert!(err.to_string().contains("need both"), "{err}");
 		}
 		let err = config(true, true, true).load(None).err().unwrap();
-		assert!(err.to_string().contains("--connect"), "{err}");
+		assert!(err.to_string().contains("relay"), "{err}");
 		let room = config(true, true, true).load(Some(&connect)).unwrap().unwrap();
 		assert_eq!(room.path().as_str(), "guests");
 		let link = room.invite("alice").unwrap().link;
@@ -1437,7 +1447,7 @@ pub(crate) mod tests {
 			room: Some("guests".into()),
 			room_key: Some(path),
 			join_page: None,
-			guest_expiry: EXPIRY.into(),
+			guest_expiry: Some(EXPIRY.into()),
 		};
 		// Nothing the studio loads names the scene file, so another one sees the same state.
 		let start = || config.load(Some(&connect)).unwrap().unwrap();
