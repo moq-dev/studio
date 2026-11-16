@@ -75,10 +75,19 @@ struct Check {
 }
 
 impl Going {
-	/// Start the checks for the program at `canvas`.
-	fn new(gpu: crate::engine::Gpu, runtime: &tokio::runtime::Handle, canvas: Canvas) -> Self {
-		let encoder = Task::spawn(runtime, move || setup::probe(gpu, canvas))
-			.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the check: {err}"))));
+	/// Start the checks for the program at `canvas`, the encoder's noted as
+	/// `probing` until it ends, even once the sheet closes.
+	fn new(
+		gpu: crate::engine::Gpu,
+		runtime: &tokio::runtime::Handle,
+		canvas: Canvas,
+		probing: crate::controls::Probing,
+	) -> Self {
+		let encoder = Task::spawn(runtime, move || async move {
+			let _probing = probing;
+			setup::probe(gpu, canvas).await
+		})
+		.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the check: {err}"))));
 		Self {
 			canvas,
 			encoder,
@@ -264,7 +273,8 @@ impl Panels {
 	pub(super) fn open_going(&mut self) {
 		let canvas = self.engine.state.lock().unwrap().collection().canvas;
 		*self.controls.refused.lock().unwrap() = None;
-		self.going = Some(Going::new(self.engine.gpu().clone(), &self.runtime, canvas));
+		let probing = self.controls.probing();
+		self.going = Some(Going::new(self.engine.gpu().clone(), &self.runtime, canvas, probing));
 	}
 
 	/// The go-live sheet, while open: where the stream goes, each with a

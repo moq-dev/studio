@@ -82,6 +82,18 @@ impl std::fmt::Display for Action {
 	}
 }
 
+/// How long a go-live waits for encoder checks still running.
+const PROBED: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// An encoder check running, until dropped: see [`Controls::probing`].
+pub struct Probing(Arc<tokio::sync::watch::Sender<usize>>);
+
+impl Drop for Probing {
+	fn drop(&mut self) {
+		self.0.send_modify(|probes| *probes -= 1);
+	}
+}
+
 /// The engine as panels and hotkeys drive it, with the picks both share.
 pub struct Controls {
 	pub engine: Arc<Engine>,
@@ -105,6 +117,10 @@ pub struct Controls {
 	/// any still waiting, so each follow reads the settings after the last
 	/// one landed, and none is followed once it is on air.
 	following: Mutex<()>,
+	/// How many encoder checks are running, each holding a hardware encode
+	/// session the program's would count against, so a go-live waits them
+	/// out: a closed go-live sheet's included, whose check runs to its end.
+	probes: Arc<tokio::sync::watch::Sender<usize>>,
 	/// REVIEW's replay picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
 	/// Whether the next recording gives each source a file of its own too.
@@ -150,6 +166,7 @@ impl Controls {
 			going: AtomicBool::new(false),
 			rewatch: AtomicBool::new(false),
 			following: Mutex::new(()),
+			probes: Arc::new(tokio::sync::watch::Sender::new(0)),
 			replay: Mutex::default(),
 			record_sources: AtomicBool::new(false),
 			studio: AtomicBool::new(false),
@@ -245,6 +262,8 @@ impl Controls {
 				}
 				stream
 			};
+			// Wait out the encoder checks still running before opening anything.
+			controls.runtime.block_on(controls.probed());
 			let switched = *controls.switched.lock().unwrap();
 			let destination = stream.destination(switched);
 			let result = destination.and_then(|destination| {
@@ -268,6 +287,23 @@ impl Controls {
 			return Err(err).context("cannot go live");
 		}
 		Ok("going live".into())
+	}
+
+	/// Note an encoder check running until the returned guard drops, which
+	/// a go-live waits for before the program's encoders open.
+	pub fn probing(&self) -> Probing {
+		self.probes.send_modify(|probes| *probes += 1);
+		Probing(self.probes.clone())
+	}
+
+	/// Wait out the encoder checks running, bounded at [`PROBED`], past which
+	/// the program's encoders open anyway and a refused one says why.
+	async fn probed(&self) {
+		let mut probes = self.probes.subscribe();
+		let waited = kio::clock::timeout(PROBED, probes.wait_for(|probes| *probes == 0)).await;
+		if waited.is_err() {
+			tracing::warn!("going live beside an encoder check still running");
+		}
 	}
 
 	/// Whether a go-live is under way, from the press until it is live or

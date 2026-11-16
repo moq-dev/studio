@@ -5121,6 +5121,52 @@ mod tests {
 			.expect("the studio closes");
 	}
 
+	/// A go-live, from a hotkey as from the sheet, waits out an encoder check
+	/// still running, such as a closed sheet's, whose hardware session the
+	/// program's encoders would count against, before it opens anything.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn going_live_waits_out_an_encoder_check() {
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = start(gpu, Vec::new(), dir.path(), autosave, red_canvas())
+			.await
+			.expect("the studio starts");
+		// No relay, so the go-live is refused at once once it reads where to go.
+		let stream = crate::stream::Stream::load(
+			&dir.path().join("show.toml"),
+			Default::default(),
+			Default::default(),
+			Default::default(),
+			crate::stream::Credentials::memory(),
+		)
+		.unwrap();
+		let controls = Arc::new(crate::controls::Controls::new(
+			engine.clone(),
+			stream,
+			tokio::runtime::Handle::current(),
+		));
+		let probing = controls.probing();
+		controls.go_live().expect("the go-live starts");
+		kio::clock::sleep(Duration::from_millis(300)).await;
+		assert!(controls.going(), "the go-live waits for the check");
+		assert_eq!(*controls.refused.lock().unwrap(), None);
+		drop(probing);
+		kio::clock::timeout(TIMEOUT, async {
+			while controls.going() {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the go-live goes on once the check ends");
+		assert!(controls.refused.lock().unwrap().is_some(), "and reads where to go");
+		engine.stop();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
 	/// A follow that can set up none of the show's relays, such as a relay
 	/// and a failover on one fixed `--connect-bind` port, keeps the sessions
 	/// followed before, and with them the broadcast sources and guests.
