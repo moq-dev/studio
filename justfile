@@ -14,8 +14,8 @@ check:
     sh/check-ignore-recipes.sh
     quest check
     actionlint
-    shellcheck .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh
-    shfmt -d .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh
+    shellcheck .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh packaging/macos/*.sh
+    shfmt -d .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh packaging/macos/*.sh
     taplo format --check
     nixfmt --check flake.nix
     bun install --frozen-lockfile
@@ -43,7 +43,7 @@ ci:
 
 # Apply formatters without changing program behavior.
 fix:
-    shfmt -w .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh
+    shfmt -w .claude/hooks/*.sh .codex/hooks/*.sh sh/*.sh packaging/flatpak/*.sh packaging/macos/*.sh
     taplo format
     nixfmt flake.nix
     bun biome check --write .

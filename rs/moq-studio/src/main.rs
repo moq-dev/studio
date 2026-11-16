@@ -158,6 +158,11 @@ impl Config {
 	}
 }
 
+/// Where the studio keeps its own files, such as the window's settings.
+fn data_dir() -> Option<PathBuf> {
+	eframe::storage_dir("moq-studio")
+}
+
 fn main() -> anyhow::Result<ExitCode> {
 	// A browser source's helper, and CEF's subprocesses, are this executable
 	// started again.
@@ -196,27 +201,23 @@ fn main() -> anyhow::Result<ExitCode> {
 		None => App::Library(Box::new(library::Library::new(library::pictures())), None),
 	};
 
-	let started = Arc::new(OnceLock::new());
-	let ran = run(app, opener, started.clone());
-	let Some(engine) = started.get() else {
-		return ran.map(|()| ExitCode::SUCCESS);
-	};
+	run(app, opener)?;
+	Ok(ExitCode::SUCCESS)
+}
+
+/// End the studio on the way out: finish a recording, save the edits since
+/// the last autosave, and close each relay session.
+fn shutdown(engine: &engine::Engine, runtime: &tokio::runtime::Handle) -> anyhow::Result<()> {
 	// A recording still running reads the program until stopping ends its
 	// tracks, so it holds what the encoders publish on the way out, and then
 	// finishes as a regular MP4.
 	engine.recorder.close();
-	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
 	engine.stop();
 	// Before the runtime goes, which would drop each relay session with the
 	// tail of the broadcast still on its way.
 	runtime.block_on(async { tokio::join!(engine.close(), engine.recorder.done()) });
-	if let (Err(err), Err(_)) = (&saved, &ran) {
-		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
-	}
-	ran?;
-	saved?;
-	Ok(ExitCode::SUCCESS)
+	saved
 }
 
 /// A show being opened from the library.
@@ -241,7 +242,7 @@ struct Window {
 	app: App,
 	render: eframe::egui_wgpu::RenderState,
 	opener: show::Opener,
-	/// The engine once the studio is built, for the save on quit.
+	/// The engine once the studio is built, for ending it on quit.
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
 	/// The shows this user has opened.
 	recent: library::Recent,
@@ -419,6 +420,11 @@ struct Events<'a> {
 	/// Whether the window was asked to close, by the desktop or the studio's
 	/// own title bar, since eframe only logs the error that stops it otherwise.
 	closed: Arc<AtomicBool>,
+	/// The engine once the studio is built, to end on the way out.
+	started: Arc<OnceLock<Arc<engine::Engine>>>,
+	runtime: tokio::runtime::Handle,
+	/// Whether ending the studio could not save it.
+	unsaved: bool,
 }
 
 impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
@@ -473,6 +479,14 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 
 	fn exiting(&mut self, event_loop: &ActiveEventLoop) {
 		self.eframe.exiting(event_loop);
+		// Here rather than once the loop returns: quitting from the macOS app
+		// menu or Dock, or logging out, ends the process as this returns.
+		if let Some(engine) = self.started.get()
+			&& let Err(err) = shutdown(engine, &self.runtime)
+		{
+			tracing::error!(error = format!("{err:#}"), "cannot save on quit");
+			self.unsaved = true;
+		}
 	}
 
 	fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
@@ -491,8 +505,9 @@ fn icon() -> egui::IconData {
 	}
 }
 
-/// Show the window until it is closed.
-fn run(app: App, opener: show::Opener, started: Arc<OnceLock<Arc<engine::Engine>>>) -> anyhow::Result<()> {
+/// Show the window until it is closed, then end the studio.
+fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
+	let started = Arc::new(OnceLock::new());
 	// The studio's title bar is the window's: the desktop draws no frame, and
 	// macOS draws its buttons over the studio's bar. The library and guided
 	// setup keep the desktop's until a show opens.
@@ -530,7 +545,7 @@ fn run(app: App, opener: show::Opener, started: Arc<OnceLock<Arc<engine::Engine>
 		},
 		// eframe would otherwise name the settings directory after the app id;
 		// keep it beside the browser profile, under the app's name.
-		persistence_path: eframe::storage_dir("moq-studio").map(|dir| dir.join("app.ron")),
+		persistence_path: data_dir().map(|dir| dir.join("app.ron")),
 		..Default::default()
 	};
 	let event_loop = EventLoop::<eframe::UserEvent>::with_user_event()
@@ -538,6 +553,8 @@ fn run(app: App, opener: show::Opener, started: Arc<OnceLock<Arc<engine::Engine>
 		.context("cannot open the window")?;
 	let keyboard = hotkeys::Keyboard::default();
 	let window_keyboard = keyboard.clone();
+	let window_started = started.clone();
+	let runtime = opener.runtime.clone();
 	let closed = Arc::new(AtomicBool::new(false));
 	let window_closed = closed.clone();
 	let eframe = eframe::create_native(
@@ -555,7 +572,7 @@ fn run(app: App, opener: show::Opener, started: Arc<OnceLock<Arc<engine::Engine>
 				app,
 				render,
 				opener,
-				started,
+				started: window_started,
 				recent,
 				aired: None,
 				keyboard: window_keyboard,
@@ -570,12 +587,16 @@ fn run(app: App, opener: show::Opener, started: Arc<OnceLock<Arc<engine::Engine>
 		eframe,
 		keyboard,
 		closed: closed.clone(),
+		started,
+		runtime,
+		unsaved: false,
 	};
 	event_loop.run_app(&mut events).context("the window failed")?;
 	anyhow::ensure!(
 		closed.load(Ordering::Relaxed),
 		"the window failed; the error is logged above"
 	);
+	anyhow::ensure!(!events.unsaved, "cannot save on quit; the error is logged above");
 	Ok(())
 }
 

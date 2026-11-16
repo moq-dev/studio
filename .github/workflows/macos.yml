@@ -1,0 +1,222 @@
+name: macOS
+
+# Builds the macOS app bundle for each architecture, signs it ad hoc with the
+# release's hardened runtime and entitlements, packs it into a disk image, and
+# checks the app in the image launches and lists devices. Pull requests that
+# change the packaging run it; nightly runs it against main. release.yml calls
+# it with `sign`, which signs and notarizes the app as the Developer ID, then
+# the disk image holding it, checks them again, and ships the images.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/macos.yml
+      - packaging/macos/**
+      - packaging/*.svg
+      # The bundle's icon.
+      - rs/moq-studio/build.rs
+  workflow_call:
+    inputs:
+      sign:
+        description: Sign and notarize the bundles, from the release environment.
+        type: boolean
+        default: false
+  workflow_dispatch:
+
+concurrency:
+  # A called run takes its caller's workflow name, keeping its group apart
+  # from the caller's own.
+  group: macos-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    name: Bundle (${{ matrix.arch }})
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runs-on: macos-15
+          - arch: x86_64
+            runs-on: macos-15-intel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      # The image's rustup installs the toolchain rust-toolchain.toml names, and
+      # Xcode's own linker and SDK keep the binary free of Nix store paths.
+      - name: Build
+        run: packaging/macos/bundle.sh "kixel.live Studio.app"
+
+      - name: Sign ad hoc
+        run: packaging/macos/sign.sh "kixel.live Studio.app" -
+
+      # dmg.sh's builder needs a newer Python than macOS ships.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Pack
+        run: packaging/macos/dmg.sh "kixel.live Studio.app" "moq-studio-macos-${{ matrix.arch }}.dmg"
+
+      - name: Smoke test
+        run: packaging/macos/smoke.sh "moq-studio-macos-${{ matrix.arch }}.dmg"
+
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unsigned-macos-${{ matrix.arch }}
+          path: moq-studio-macos-${{ matrix.arch }}.dmg
+          if-no-files-found: error
+
+  sign:
+    name: Sign (${{ matrix.arch }})
+    needs: [bundle]
+    if: inputs.sign
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 60
+    # The signing identity and the notary key, which only protected branches
+    # can deploy from, for team D7D5SDDB5Z: APPLE_CERTIFICATE, the Developer ID
+    # Application .p12 (base64, legacy encryption so `security import` reads
+    # it) and APPLE_CERTIFICATE_PASSWORD; APPLE_API_KEY, APPLE_API_ISSUER, and
+    # APPLE_API_PRIVATE_KEY, the App Store Connect key ID, issuer ID, and .p8
+    # text. quest/m0/signing-renew.md renews them. Nothing built runs until
+    # they are gone from the runner.
+    environment: release
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runs-on: macos-15
+          - arch: x86_64
+            runs-on: macos-15-intel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: packaging/macos
+          sparse-checkout-cone-mode: false
+
+      - name: Download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: unsigned-macos-${{ matrix.arch }}
+
+      # The app out of the image, to sign again; the image is packed anew.
+      - name: Unpack
+        run: |
+          image=moq-studio-macos-${{ matrix.arch }}.dmg
+          volume=$RUNNER_TEMP/unsigned
+          mkdir "$volume"
+          hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$volume" "$image"
+          ditto "$volume/kixel.live Studio.app" "kixel.live Studio.app"
+          hdiutil detach "$volume"
+          rm "$image"
+
+      # dmg.sh's builder needs a newer Python than macOS ships.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+
+      # A keychain of its own, holding the Developer ID certificate and the
+      # intermediate that chains it to Apple's root, which runner images may
+      # lack.
+      - name: Import the identity
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain=$RUNNER_TEMP/signing.keychain-db
+          password=$(openssl rand -hex 32)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          base64 --decode <<<"$APPLE_CERTIFICATE" >"$RUNNER_TEMP/identity.p12"
+          security import "$RUNNER_TEMP/identity.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -x -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/identity.p12"
+          curl -fsSL -o "$RUNNER_TEMP/g2.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $RUNNER_TEMP/g2.cer" | shasum -a 256 -c
+          security import "$RUNNER_TEMP/g2.cer" -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          # codesign finds the chain only through the search list.
+          read -ra keychains < <(security list-keychains -d user | tr -d '"')
+          security list-keychains -d user -s "$keychain" "${keychains[@]}"
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk '/"Developer ID Application: .*\(D7D5SDDB5Z\)"/ { print $2; exit }')
+          [[ -n $identity ]]
+          echo "KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+          echo "IDENTITY=$identity" >>"$GITHUB_ENV"
+
+      - name: Sign
+        run: packaging/macos/sign.sh "kixel.live Studio.app" "$IDENTITY" "$KEYCHAIN"
+
+      - name: Notarize the app
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: packaging/macos/notarize.sh "kixel.live Studio.app"
+
+      - name: Pack
+        run: packaging/macos/dmg.sh "kixel.live Studio.app" "moq-studio-macos-${{ matrix.arch }}.dmg" "$IDENTITY" "$KEYCHAIN"
+
+      - name: Notarize the image
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: packaging/macos/notarize.sh "moq-studio-macos-${{ matrix.arch }}.dmg"
+
+      - name: Remove the credentials
+        if: always()
+        run: |
+          if [[ -n ${KEYCHAIN:-} ]]; then
+            security delete-keychain "$KEYCHAIN"
+          fi
+          rm -f "$RUNNER_TEMP/identity.p12"
+
+      # What Gatekeeper decides for a download, for the image opened and for
+      # the app run: a Developer ID signature with its notarization ticket
+      # stapled, so a first launch offline passes too.
+      - name: Verify
+        run: |
+          image=moq-studio-macos-${{ matrix.arch }}.dmg
+          codesign --verify --strict --verbose=2 "$image"
+          xcrun stapler validate "$image"
+          assessment=$(spctl --assess --type open --context context:primary-signature --verbose=2 "$image" 2>&1)
+          echo "$assessment"
+          [[ $assessment == *"source=Notarized Developer ID"* ]]
+          codesign --verify --strict --deep --verbose=2 "kixel.live Studio.app"
+          xcrun stapler validate "kixel.live Studio.app"
+          assessment=$(spctl --assess --type execute --verbose=2 "kixel.live Studio.app" 2>&1)
+          echo "$assessment"
+          [[ $assessment == *"source=Notarized Developer ID"* ]]
+
+      # The app as the image holds it, which is what users run.
+      - name: Smoke test
+        run: packaging/macos/smoke.sh "moq-studio-macos-${{ matrix.arch }}.dmg"
+
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: macos-${{ matrix.arch }}
+          path: moq-studio-macos-${{ matrix.arch }}.dmg
+          if-no-files-found: error

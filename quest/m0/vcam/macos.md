@@ -9,9 +9,17 @@ update installs the new extension without a reboot.
 ## Plan
 
 Decided 2026-11-09 (maintainer, /quest-audit): ✅ the extension joins the
-bundle the [macOS app](/quest/m0/packaging/macos.md) owns and goes through
-its signing (rejected: a Related link only; leaving the quests unlinked).
+studio's app bundle and goes through its signing (rejected: a Related link
+only; leaving the quests unlinked).
 
-## Required
-
-- [macOS app](/quest/m0/packaging/macos.md) - the app bundle that carries and signs the extension
+`packaging/macos/bundle.sh` lays the bundle out; the extension goes in
+`Contents/Library/SystemExtensions`. `packaging/macos/sign.sh` signs it, with
+its own entitlements, before the app. The app then needs the
+`com.apple.developer.system-extension.install` entitlement, which only a
+provisioning profile grants: embed the `release` environment's
+`APPLE_PROVISIONING_PROFILE` (the Developer ID profile for
+`live.kixel.studio` with the System Extension capability, base64) as
+`Contents/embedded.provisionprofile`, and sign with the
+`com.apple.application-identifier` and `com.apple.developer.team-identifier`
+entitlements it names. A pull request's ad hoc signature cannot carry these,
+so its launch check needs them left out.
