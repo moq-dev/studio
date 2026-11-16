@@ -5,6 +5,7 @@ use egui::{Align2, CursorIcon, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2,
 use moq_scene::{AudioScene, Collection};
 
 use super::levels::{History, latest};
+use super::shell::rename_sheet;
 use super::*;
 
 /// The page's two views of the same sends.
@@ -304,6 +305,14 @@ enum Change {
 	Program(String),
 	/// Add an audio scene.
 	Add,
+	/// Open the sheet renaming the audio scene called this.
+	Rename(String),
+	/// Rename the audio scene called `from` to `to`.
+	Renamed { from: String, to: String },
+	/// Move the audio scene called this one place left (-1) or right (1).
+	Move(String, isize),
+	/// Remove the audio scene called this.
+	Remove(String),
 	/// Listen to the audio scene called this, or stop.
 	Listen(Option<String>),
 	/// Listen on this output, or the system default.
@@ -387,6 +396,9 @@ impl Panels {
 		match self.desk.view {
 			View::Strips => self.strips(ui, body, &board, &mut changes),
 			View::Routes => self.routes(ui, body, &board, &mut changes),
+		}
+		if let Some((from, to)) = rename_sheet(ui.ctx(), "rename audio scene", &mut self.renaming_audio) {
+			changes.push(Change::Renamed { from, to });
 		}
 		self.apply(changes);
 	}
@@ -521,9 +533,9 @@ impl Panels {
 					}
 					x += group - if sounds > 0 { GAP } else { 0.0 };
 					caption(ui, pos2(x, area.top()), "Audio scenes");
-					for scene in &board.masters {
+					for index in 0..masters {
 						let strip = Rect::from_min_max(pos2(x, top), pos2(x + master, bottom));
-						self.master_strip(ui, strip, scene, board, changes);
+						self.master_strip(ui, strip, index, board, changes);
 						x = strip.right() + GAP;
 					}
 					let add = Rect::from_min_max(pos2(x, top), pos2(x + ADD, bottom));
@@ -646,7 +658,8 @@ impl Panels {
 
 	/// An audio scene's strip in `rect`: its name and what it is for, its
 	/// meter, Listen, and its sends into the others.
-	fn master_strip(&mut self, ui: &mut Ui, rect: Rect, scene: &Master, board: &Board, changes: &mut Vec<Change>) {
+	fn master_strip(&mut self, ui: &mut Ui, rect: Rect, index: usize, board: &Board, changes: &mut Vec<Change>) {
+		let scene = &board.masters[index];
 		let painter = ui.painter();
 		let (fill, stroke) = match scene.program {
 			true => (kit::P2, Stroke::new(1.5, kit::ACCENT)),
@@ -667,6 +680,8 @@ impl Panels {
 			galley,
 			kit::TEXT,
 		);
+		let header = Rect::from_x_y_ranges(rect.x_range().shrink(8.0), rect.top()..=badge.bottom() + 4.0);
+		scene_menu(ui, header, index, board, changes);
 		let tags = Rect::from_min_size(
 			pos2(rect.left() + 8.0, badge.bottom() + 8.0),
 			vec2(rect.width() - 16.0, 18.0),
@@ -939,7 +954,7 @@ impl Panels {
 							ui.painter().rect_filled(body, 0, kit::ACCENT.gamma_multiply(0.06));
 						}
 						ui.painter().vline(x.min, table.y_range().shrink(1.0), line);
-						self.route_head(ui, head, master, board, changes);
+						self.route_head(ui, head, index, board, changes);
 					}
 					let add = Rect::from_center_size(
 						pos2(column(board.masters.len()).min + 12.0 + ADD / 2.0, table.top() + 48.0),
@@ -1064,7 +1079,8 @@ impl Panels {
 
 	/// An audio scene's column head: its badge and name, what it is for,
 	/// and its meter.
-	fn route_head(&mut self, ui: &mut Ui, head: Rect, master: &Master, board: &Board, changes: &mut Vec<Change>) {
+	fn route_head(&mut self, ui: &mut Ui, head: Rect, index: usize, board: &Board, changes: &mut Vec<Change>) {
+		let master = &board.masters[index];
 		let painter = ui.painter();
 		let galley = kit::caps_galley(
 			painter,
@@ -1082,6 +1098,8 @@ impl Panels {
 			galley,
 			kit::TEXT,
 		);
+		let header = Rect::from_x_y_ranges(head.x_range().shrink(12.0), head.top() + 8.0..=badge.bottom() + 4.0);
+		scene_menu(ui, header, index, board, changes);
 		let tags = Rect::from_center_size(
 			pos2(head.center().x, head.top() + 46.0),
 			vec2(head.width() - 24.0, 18.0),
@@ -1190,8 +1208,30 @@ impl Panels {
 					let done = edit(&mut state, format!("Add audio scene `{name}`"), None, |draft| {
 						draft.set_audio_scenes(scenes)
 					});
-					done.map(|()| self.say(Ok(format!("added audio scene `{name}`; rename it in Build's Scenes"))))
+					done.map(|()| self.say(Ok(format!("added audio scene `{name}`; right-click it to rename it"))))
 				}
+				Change::Rename(name) => {
+					self.renaming_audio = Some((name.clone(), name));
+					Ok(())
+				}
+				Change::Renamed { from, to } => self.rename_audio(&mut state, &from, &to),
+				Change::Move(name, by) => {
+					let mut scenes = state.collection().audio_scenes.clone();
+					match scenes.iter().position(|scene| scene.name == name) {
+						Some(from) => {
+							let to = from.saturating_add_signed(by).min(scenes.len() - 1);
+							let scene = scenes.remove(from);
+							scenes.insert(to, scene);
+							edit(&mut state, format!("Reorder audio scene `{name}`"), None, |draft| {
+								draft.set_audio_scenes(scenes)
+							})
+						}
+						None => Err(anyhow::anyhow!("no audio scene is called `{name}`")),
+					}
+				}
+				Change::Remove(name) => edit(&mut state, format!("Remove audio scene `{name}`"), None, |draft| {
+					draft.remove_audio_scene(&name)
+				}),
 				Change::Listen(scene) => self.listen(&mut state, scene.as_deref()),
 				Change::Speaker(speaker) => {
 					self.speaker = speaker;
@@ -1208,119 +1248,17 @@ impl Panels {
 		self.check(result);
 	}
 
-	/// The audio scenes by name, each renamed, reordered, or removed here, and
-	/// a new one added. The MIX page's redesign gives each a master strip
-	/// (quest/m0/ux/mix.md).
-	pub(super) fn audio_scenes(&mut self, ui: &mut Ui) {
-		let engine = self.engine.clone();
-		let mut state = engine.state.lock().unwrap();
-		let audio_scenes = state.collection().audio_scenes.clone();
-		let count = audio_scenes.len();
-		let mut audio_action = None;
-		for (index, scene) in audio_scenes.iter().enumerate() {
-			ui.horizontal(|ui| {
-				if let Some((renaming, name)) = &mut self.renaming_audio
-					&& *renaming == scene.name
-				{
-					let response = ui.text_edit_singleline(name);
-					if !response.has_focus() && !response.lost_focus() {
-						response.request_focus();
-					}
-					if response.lost_focus() {
-						// Escape cancels; Enter or a click away renames.
-						if !ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-							audio_action = Some(AudioAction::Rename(index, name.trim().to_string()));
-						}
-						self.renaming_audio = None;
-					}
-					return;
-				}
-				let label = ui.label(kit::caps(&scene.name, kit::display(14.0)));
-				if scene.program {
-					ui.add(kit::Tag::new("On air", Tally::Air));
-				}
-				let rename = ui.add(IconButton::new(Icon::Rename, "Rename").small());
-				if label.double_clicked() || rename.clicked() {
-					self.renaming_audio = Some((scene.name.clone(), scene.name.clone()));
-				}
-				if ui
-					.add_enabled(index > 0, IconButton::new(Icon::Up, "Move up").small())
-					.clicked()
-				{
-					audio_action = Some(AudioAction::Move(index, index - 1));
-				}
-				let down = IconButton::new(Icon::Down, "Move down").small();
-				if ui.add_enabled(index + 1 < count, down).clicked() {
-					audio_action = Some(AudioAction::Move(index, index + 1));
-				}
-				let remove = IconButton::new(Icon::Remove, "Remove").small().note(
-					scene
-						.program
-						.then_some("On program; put another audio scene on program first"),
-				);
-				if ui.add_enabled(!scene.program, remove).clicked() {
-					audio_action = Some(AudioAction::Remove(index));
-				}
-			});
+	/// Rename the audio scene called `from` to `to`; Listen follows it.
+	fn rename_audio(&self, state: &mut State, from: &str, to: &str) -> anyhow::Result<()> {
+		if from == to {
+			return Ok(());
 		}
-		ui.horizontal(|ui| {
-			ui.add(egui::TextEdit::singleline(&mut self.new_scene).hint_text("New audio scene"));
-			if ui.add(kit::button(Icon::Add, "Add audio scene")).clicked() {
-				let name = self.new_scene.trim().to_string();
-				let mut next = audio_scenes.clone();
-				next.push(moq_scene::AudioScene::new(name.clone()));
-				let result = edit(&mut state, format!("Add audio scene `{name}`"), None, |draft| {
-					draft.set_audio_scenes(next)
-				});
-				match result {
-					Ok(()) => self.new_scene.clear(),
-					Err(err) => self.report(Err(err)),
-				}
-			}
-		});
-		if let Some(action) = audio_action {
-			let result = self.audio_scene(&mut state, &audio_scenes, action);
-			drop(state);
-			self.check(result);
-		}
-	}
-
-	/// Rename, reorder, or remove one of `scenes`, the audio scenes as their
-	/// list showed them. Listening follows a renamed one.
-	pub(super) fn audio_scene(
-		&self,
-		state: &mut State,
-		scenes: &[moq_scene::AudioScene],
-		action: AudioAction,
-	) -> anyhow::Result<()> {
-		match action {
-			AudioAction::Rename(index, to) => {
-				let from = &scenes[index].name;
-				if *from == to {
-					return Ok(());
-				}
-				edit(state, format!("Rename audio scene `{from}` to `{to}`"), None, |draft| {
-					draft.rename_audio_scene(from, &to)
-				})?;
-				let listening = self.engine.listening();
-				if listening.is_some_and(|(heard, _)| heard == *from) {
-					self.listen(state, Some(&to))?;
-				}
-				Ok(())
-			}
-			AudioAction::Move(from, to) => {
-				let mut next = scenes.to_vec();
-				let scene = next.remove(from);
-				let label = format!("Reorder audio scene `{}`", scene.name);
-				next.insert(to, scene);
-				edit(state, label, None, |draft| draft.set_audio_scenes(next))
-			}
-			AudioAction::Remove(index) => {
-				let name = &scenes[index].name;
-				edit(state, format!("Remove audio scene `{name}`"), None, |draft| {
-					draft.remove_audio_scene(name)
-				})
-			}
+		edit(state, format!("Rename audio scene `{from}` to `{to}`"), None, |draft| {
+			draft.rename_audio_scene(from, to)
+		})?;
+		match self.engine.listening() {
+			Some((heard, _)) if heard == from => self.listen(state, Some(to)),
+			_ => Ok(()),
 		}
 	}
 
@@ -1509,6 +1447,43 @@ fn tag_button(ui: &mut Ui, rect: Rect, text: &str, id: impl egui::AsIdSalt) -> e
 		.rect(at, 4, fill, Stroke::new(1.0, kit::LINE), StrokeKind::Inside);
 	ui.painter().galley(at.center() - galley.size() / 2.0, galley, ink);
 	response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// The menu a right click on the audio scene at `index` opens over `rect`,
+/// its name: rename it, move it, or remove it, as a scene's pad's does.
+fn scene_menu(ui: &mut Ui, rect: Rect, index: usize, board: &Board, changes: &mut Vec<Change>) {
+	let scene = &board.masters[index];
+	let name = &scene.name;
+	let response = ui.interact(rect, ui.id().with(("audio scene menu", name)), Sense::click());
+	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Audio scene {name}")));
+	let response = kit::tip(
+		response,
+		&format!("Right-click to rename, move, or remove {name}"),
+		None,
+	);
+	response.context_menu(|ui| {
+		let mut asked = None;
+		if ui.button("Rename").clicked() {
+			asked = Some(Change::Rename(name.clone()));
+		}
+		if ui.add_enabled(index > 0, egui::Button::new("Move left")).clicked() {
+			asked = Some(Change::Move(name.clone(), -1));
+		}
+		let last = index + 1 == board.masters.len();
+		if ui.add_enabled(!last, egui::Button::new("Move right")).clicked() {
+			asked = Some(Change::Move(name.clone(), 1));
+		}
+		let remove = ui
+			.add_enabled(!scene.program, egui::Button::new("Remove"))
+			.on_disabled_hover_text("The stream hears it; put another on the stream first");
+		if remove.clicked() {
+			asked = Some(Change::Remove(name.clone()));
+		}
+		if let Some(asked) = asked {
+			changes.push(asked);
+			ui.close();
+		}
+	});
 }
 
 /// The dashed tile that adds an audio scene, saying whether it was clicked.

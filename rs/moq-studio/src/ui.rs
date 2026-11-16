@@ -208,7 +208,6 @@ impl Studio {
 			duration: Transition::default().duration().unwrap_or_default(),
 			cut: STINGER_CUT,
 			drag: None,
-			new_scene: String::new(),
 			renaming: None,
 			title_needs: 0.0,
 			renaming_audio: None,
@@ -514,13 +513,13 @@ struct Panels {
 	drag: Option<Drag>,
 	/// The layer row being dragged to a new place, by its index.
 	moving: Option<usize>,
-	new_scene: String,
 	/// The scene being renamed, by index, and the name typed so far.
 	renaming: Option<(usize, String)>,
 	/// The width the title bar's full controls took when last drawn, past
 	/// which it draws them compact.
 	title_needs: f32,
-	/// The audio scene being renamed, by its name, and the name typed so far.
+	/// The audio scene its strip's sheet renames, by name, and the name typed
+	/// so far.
 	renaming_audio: Option<(String, String)>,
 	/// The scene its pad's sheet renames, by name, and the name typed so far.
 	renaming_pad: Option<(String, String)>,
@@ -1249,14 +1248,6 @@ impl SceneAction {
 			| Self::Safe(index, _) => *index,
 		}
 	}
-}
-
-/// An edit the Scenes panel makes to the audio scenes, each by its place.
-enum AudioAction {
-	/// To the name typed.
-	Rename(usize, String),
-	Move(usize, usize),
-	Remove(usize),
 }
 
 /// A strip of the mixer, which sends into audio scenes: a source's sound, or

@@ -13,6 +13,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use eframe::egui_wgpu;
+use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use moq_scene::Source;
@@ -51,6 +52,8 @@ enum View {
 	Page(Page),
 	/// The MIX page in a view, with the strip of the sound named open.
 	Mix(MixView, Option<&'static str>),
+	/// MIX with Headphones' menu open, as a right click on its strip opens it.
+	MixMenu,
 	/// The BUILD page with `side` and `inspect` shown, and the layer of the
 	/// scene on program at `index`, front first, selected.
 	Build {
@@ -185,6 +188,8 @@ views! {
 	/// A sound's strip opened to its gain, pan, delay, and where it is heard,
 	/// its neighbours narrowed.
 	mix_strip: Still, mixing(MixView::Strips, Some("mic"), SIZE);
+	/// An audio scene's menu: rename, move, or remove it.
+	mix_menu: Still, Open::Studio { view: View::MixMenu, size: SIZE, show: "mix.toml" };
 	/// The same sends as a matrix.
 	mix_routes: Still, mixing(MixView::Routes, None, SIZE);
 	/// MIX in a stacked window, its strips scrolling, its live picture as
@@ -640,6 +645,43 @@ fn mix_sends_and_mutes() {
 	harness.run_steps(2);
 	assert_eq!(scene("Audio scene 4").sounds.len(), 0);
 
+	// Its strip's menu renames it in a sheet, moves it, and removes it.
+	let names = || {
+		let state = engine.state.lock().unwrap();
+		let scenes = &state.collection().audio_scenes;
+		scenes.iter().map(|scene| scene.name.clone()).collect::<Vec<_>>()
+	};
+	harness.get_by_label("Audio scene Audio scene 4").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Rename").click();
+	harness.run_steps(2);
+	harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+	harness.get_by_role(Role::TextInput).type_text("Talkback");
+	harness.run_steps(2);
+	harness.get_by_label("Rename").click();
+	harness.run_steps(2);
+	assert_eq!(names(), ["Stream", "Headphones", "Recording", "Talkback"]);
+	assert_eq!(
+		undo().as_deref(),
+		Some("Rename audio scene `Audio scene 4` to `Talkback`")
+	);
+	harness.get_by_label("Audio scene Talkback").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Move left").click();
+	harness.run_steps(2);
+	assert_eq!(names(), ["Stream", "Headphones", "Talkback", "Recording"]);
+	harness.get_by_label("Audio scene Talkback").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Remove").click();
+	harness.run_steps(2);
+	assert_eq!(names(), ["Stream", "Headphones", "Recording"]);
+	// The one the stream hears cannot be removed.
+	harness.get_by_label("Audio scene Headphones").click_secondary();
+	harness.run_steps(2);
+	assert!(harness.get_by_label("Remove").accesskit_node().is_disabled());
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+
 	drop(harness);
 	quit(&engine, &runtime);
 }
@@ -682,6 +724,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	match view {
 		View::Page(page) => studio.turn(*page),
 		View::Mix(view, opened) => studio.mix(*view, *opened),
+		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
 		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) => studio.open(*setting),
@@ -709,6 +752,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		.expect("the sources and pictures settle");
 	match view {
 		View::Hover => hover(&mut harness),
+		View::MixMenu => {
+			harness.get_by_label("Audio scene Headphones").click_secondary();
+			harness.run_steps(4);
+		}
 		View::Menu => {
 			// The row comes before the inspector's tab of the same name.
 			harness.get_all_by_label("host").next().unwrap().click_secondary();
@@ -726,10 +773,29 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		_ => {}
 	}
+	fresh_glyphs(&mut harness);
 	let image = harness.render().unwrap();
 	drop(harness);
 	quit(&engine, runtime);
 	image
+}
+
+/// Pack egui's glyphs anew from the frame about to be drawn. They are packed
+/// in the order text first appears, and a glyph's edge samples its
+/// neighbour's, so a view whose text changed while it settled, such as the
+/// health dot's on a show with a failed source, would otherwise draw a pixel
+/// differently from run to run. New font definitions repack the atlas.
+fn fresh_glyphs(harness: &mut Harness<'_, Window>) {
+	let ctx = harness.ctx.clone();
+	let fonts = ctx.fonts(|fonts| fonts.definitions().clone());
+	let mut other = fonts.clone();
+	other
+		.families
+		.insert(egui::FontFamily::Name("repack".into()), Vec::new());
+	ctx.set_fonts(other);
+	harness.step();
+	ctx.set_fonts(fonts);
+	harness.step();
 }
 
 /// A window on `app`, `size` large, where the studio it starts is kept, and

@@ -746,7 +746,10 @@ impl Panels {
 				});
 			});
 		});
-		let action = action.or_else(|| self.rename_sheet(ui.ctx()));
+		let action = action.or_else(|| {
+			let (from, to) = rename_sheet(ui.ctx(), "rename scene", &mut self.renaming_pad)?;
+			Some(PadAction::Renamed(from, to))
+		});
 		let Some(action) = action else { return };
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -788,7 +791,6 @@ impl Panels {
 				Ok(())
 			}
 			PadAction::Renamed(name, to) => at(&state, &name).and_then(|index| {
-				let to = to.trim().to_string();
 				if to == name {
 					return Ok(());
 				}
@@ -823,32 +825,6 @@ impl Panels {
 			Some(spot) => self.fail(spot, result),
 			None => self.check(result),
 		}
-	}
-
-	/// The sheet renaming a scene, while one is renamed, and the rename it
-	/// asked for.
-	fn rename_sheet(&mut self, ctx: &egui::Context) -> Option<PadAction> {
-		let (from, mut to) = self.renaming_pad.clone()?;
-		let mut asked = None;
-		let title = format!("Rename {from}");
-		let closed = kit::Sheet::new(egui::Id::new("rename scene"), &title).show(ctx, |ui| {
-			let field = ui.add(egui::TextEdit::singleline(&mut to).desired_width(f32::INFINITY));
-			if !field.has_focus() && !field.lost_focus() {
-				field.request_focus();
-			}
-			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-			ui.add_space(8.0);
-			ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-				if ui.button("Rename").clicked() || entered {
-					asked = Some(PadAction::Renamed(from.clone(), to.clone()));
-				}
-			});
-		});
-		self.renaming_pad = match closed || asked.is_some() {
-			true => None,
-			false => Some((from, to)),
-		};
-		asked
 	}
 
 	/// The pad of the scene at `index`, or the one that adds a scene past
@@ -1424,14 +1400,33 @@ pub(super) fn bar(ui: &Ui, fx: &mut Fx, rect: Rect) {
 	}
 }
 
-/// A page's room: what `add` draws, scrolled, inside `rect`.
-fn region(ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui)) {
-	ui.scope_builder(UiBuilder::new().max_rect(rect.shrink(MARGIN + 4.0)), |ui| {
-		egui::ScrollArea::both()
-			.id_salt(("page", rect.min.x as i32))
-			.auto_shrink(false)
-			.show(ui, add);
+/// The sheet renaming what `renaming` names, while it names one, as the name
+/// it holds and the name typed so far; the rename once asked for.
+pub(super) fn rename_sheet(
+	ctx: &egui::Context,
+	id: &str,
+	renaming: &mut Option<(String, String)>,
+) -> Option<(String, String)> {
+	let (from, to) = renaming.as_mut()?;
+	let mut asked = None;
+	let title = format!("Rename {from}");
+	let closed = kit::Sheet::new(egui::Id::new(id), &title).show(ctx, |ui| {
+		let field = ui.add(egui::TextEdit::singleline(to).desired_width(f32::INFINITY));
+		if !field.has_focus() && !field.lost_focus() {
+			field.request_focus();
+		}
+		let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+		ui.add_space(8.0);
+		ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+			if ui.button("Rename").clicked() || entered {
+				asked = Some((from.clone(), to.trim().to_string()));
+			}
+		});
 	});
+	if closed || asked.is_some() {
+		*renaming = None;
+	}
+	asked
 }
 
 /// The pages' font and the room either side of each name, smaller when
