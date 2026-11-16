@@ -1,41 +1,42 @@
 //! Settings: what a broadcaster sets once, such as the canvas, recording, and
-//! the hotkeys, and the edit history.
+//! the hotkeys; and the edit history, under the title bar's undo.
 
 use super::*;
 
 impl Panels {
-	/// Every edit, oldest first; pick one to undo or redo to just after it.
+	/// Every edit, newest first; pick one to undo or redo to just after it.
 	pub(super) fn history(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let position = state.history().position();
-		let count = state.history().entries().len();
 		let mut seek = None;
-		ui.horizontal(|ui| {
-			if ui.add_enabled(position > 0, egui::Button::new("Undo")).clicked() {
-				seek = Some(position - 1);
-			}
-			if ui.add_enabled(position < count, egui::Button::new("Redo")).clicked() {
-				seek = Some(position + 1);
-			}
-		});
-		ui.separator();
-		egui::ScrollArea::vertical().show(ui, |ui| {
-			if ui.selectable_label(position == 0, "Start").clicked() {
-				seek = Some(0);
-			}
-			for (index, edit) in state.history().entries().enumerate() {
-				// Undone edits are dimmed, as redo would bring them back.
-				let mut label = egui::RichText::new(&edit.label);
-				if index >= position {
-					label = label.weak();
+		ui.label(kit::caps("History", kit::display(13.0)));
+		ui.label(
+			egui::RichText::new("Pick an edit to go back to just after it; the dimmed ones redo")
+				.color(kit::DIM)
+				.font(kit::ui(11.0)),
+		);
+		egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+			// Each row as wide as the list, its words on the left.
+			ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+				let entries: Vec<_> = state.history().entries().map(|edit| edit.label.clone()).collect();
+				for (index, label) in entries.into_iter().enumerate().rev() {
+					// Undone edits are dimmed, as redo would bring them back.
+					let mut label = egui::RichText::new(label);
+					if index >= position {
+						label = label.color(kit::FAINT);
+					}
+					if ui.add(egui::Button::selectable(position == index + 1, label)).clicked() {
+						seek = Some(index + 1);
+					}
 				}
-				if ui.selectable_label(position == index + 1, label).clicked() {
-					seek = Some(index + 1);
+				if ui.add(egui::Button::selectable(position == 0, "Start")).clicked() {
+					seek = Some(0);
 				}
-			}
+			});
 		});
 		if let Some(seek) = seek {
+			ui.close();
 			let result = state.seek(seek);
 			drop(state);
 			self.deselect_item();
@@ -251,9 +252,11 @@ impl Panels {
 
 		let mut bind = None;
 		let mut clear = None;
+		// A scene's key takes it, or cues it in Studio mode.
+		let studio = self.controls.studio();
 		egui::Grid::new("hotkeys").striped(true).show(ui, |ui| {
 			for action in &actions {
-				ui.label(action.to_string());
+				ui.label(action.name(studio));
 				let bound = bindings.get(action);
 				if self.binding.as_ref() == Some(action) {
 					ui.strong("press a key, or Escape");

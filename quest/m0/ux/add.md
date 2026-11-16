@@ -56,5 +56,4 @@ its title.
 
 ## Required
 
-- [The BUILD page](/quest/m0/ux/build.md) - the column the Add tab lives in
 - [moq-video's capture listing is pinned](/quest/m0/pin-capture-list.md) - icons, live pictures, and change notices for windows and devices

@@ -224,11 +224,9 @@ impl Fx {
 	}
 
 	/// The text color over a [`button`](Self::button).
-	#[expect(dead_code, reason = "Studio mode's TAKE: quest/m0/ux/studio-mode.md")]
 	pub const INK: Color32 = Color32::from_gray(24);
 
 	/// A button of polished metal that ripples while the pointer is on it.
-	#[expect(dead_code, reason = "Studio mode's TAKE: quest/m0/ux/studio-mode.md")]
 	pub fn button(&mut self, spot: &Spot) {
 		let hovered = spot
 			.painter
@@ -359,7 +357,6 @@ const WRAP: f64 = 3600.0;
 struct Look {
 	on_air: Light,
 	/// The metal [`button`](Fx::button)'s ripple.
-	#[expect(dead_code, reason = "Studio mode's TAKE: quest/m0/ux/studio-mode.md")]
 	ripple: Light,
 	/// The take count last seen, and when each burst it fired started, with
 	/// its seed.
