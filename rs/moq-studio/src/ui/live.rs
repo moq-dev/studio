@@ -883,15 +883,7 @@ impl Panels {
 		let Saving { from, retokened, .. } = self.saving.take().expect("polled above");
 		let saved = match result {
 			Ok(saved) => saved,
-			Err(mut err) => {
-				// The recorder moved before the save; it goes back with the file.
-				if from == Setting::Recording {
-					let scene = self.engine.autosave.path().to_path_buf();
-					let back = self.controls.stream.lock().unwrap().recordings(&scene);
-					if let Err(moved) = self.engine.recorder.set_dir(&back) {
-						err = format!("{err} The next recording still goes to the new folder: {moved:#}");
-					}
-				}
+			Err(err) => {
 				self.saved = Some((from, err));
 				return;
 			}
@@ -909,9 +901,7 @@ impl Panels {
 		{
 			going.uplink = None;
 		}
-		let scene = self.engine.autosave.path().to_path_buf();
-		let dir = saved.recordings(&scene);
-		let mut note = match (from, deferred) {
+		let note = match (from, deferred) {
 			(Setting::Stream, true) => {
 				"Saved. It applies the next time you go live; broadcast sources and guests follow the new relays \
 				 once this stream ends."
@@ -922,11 +912,10 @@ impl Panels {
 			(_, _) => "Saved. The next recording goes there.",
 		}
 		.to_string();
-		if before.recordings(&scene) != dir {
-			match self.engine.recorder.set_dir(&dir) {
-				Ok(()) => self.review.shelve(&self.engine, &self.runtime),
-				Err(err) => note = format!("Saved, but recordings cannot go there: {err:#}"),
-			}
+		// The recorder moved with the save, which REVIEW's shelf follows.
+		let scene = self.engine.autosave.path();
+		if before.recordings(scene) != saved.recordings(scene) {
+			self.review.shelve(&self.engine, &self.runtime);
 		}
 		match from {
 			Setting::Stream => self.stream_form = Some(Form::new(&saved)),

@@ -489,7 +489,8 @@ fn a_click_takes_and_the_panic_key_cuts() {
 /// the format turn the program, keeping its frame rate. A show whose room
 /// key is missing still opens, and once the key is back, Try again joins its
 /// room. The Guests pane refuses a room guests could not join, saying why,
-/// and moves to the room it saves at once, off air. The scene
+/// and moves to the room it saves at once, off air. The recordings folder
+/// moves only once no recording is under way. The scene
 /// graph's Open closes Settings for the graph. It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
@@ -499,9 +500,19 @@ fn settings_change_the_show_and_move_the_guests() {
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
 	// A room whose key is not there yet.
-	std::fs::write("show.stream.toml", "room = \"guests\"\nroom_key = \"guests.jwk\"\n").unwrap();
+	std::fs::write(
+		"show.stream.toml",
+		"recordings = \"elsewhere\"\nroom = \"guests\"\nroom_key = \"guests.jwk\"\n",
+	)
+	.unwrap();
+	std::fs::create_dir("elsewhere").unwrap();
 	let relay = Relay::start(&runtime);
-	let app = start(launch(&gpu), stream(Some(&relay)), &runtime);
+	// Where the stream file puts them, as opening the show does.
+	let launched = engine::Launch {
+		recordings: "elsewhere".into(),
+		..launch(&gpu)
+	};
+	let app = start(launched, stream(Some(&relay)), &runtime);
 	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
@@ -591,6 +602,38 @@ fn settings_change_the_show_and_move_the_guests() {
 	joined(&mut harness, "other");
 	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
 	assert!(saved.contains("room = \"other\""), "{saved}");
+
+	// The recordings folder stays put while a recording is under way, then
+	// moves with the file naming it.
+	let recorder = &engine.recorder;
+	let elsewhere = std::path::absolute("elsewhere").unwrap();
+	assert_eq!(recorder.dir(), elsewhere);
+	harness.get_by_label("Recording").click();
+	harness.run_steps(2);
+	recorder.start(false).unwrap();
+	harness.run_steps(2);
+	harness.get_by_label("Beside the show").click();
+	harness.run_steps(2);
+	assert_eq!(recorder.dir(), elsewhere, "not while recording");
+	recorder.stop();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while recorder.status().is_some_and(|status| !status.done) {
+				harness.step();
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("the recording finishes");
+	harness.get_by_label("Beside the show").click();
+	harness.run_steps(2);
+	assert_eq!(recorder.dir(), std::path::absolute(".").unwrap());
+	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
+	assert!(!saved.contains("recordings"), "{saved}");
+	assert!(
+		harness
+			.query_by_label_contains("The next recording goes there")
+			.is_some()
+	);
 
 	// The scene graph opens in place of Settings, so it takes the clicks.
 	harness.get_by_label("Advanced").click();

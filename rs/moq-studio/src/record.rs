@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -120,6 +120,21 @@ pub struct FileStatus {
 	pub finished: Option<Finished>,
 }
 
+/// A move of the recordings directory under way, which holds off any
+/// recording until it finishes or drops.
+pub struct Moving<'a> {
+	_session: MutexGuard<'a, Option<Session>>,
+	current: &'a Mutex<PathBuf>,
+	dir: PathBuf,
+}
+
+impl Moving<'_> {
+	/// Save the next recording into the directory moved to.
+	pub fn finish(self) {
+		*self.current.lock().unwrap() = self.dir;
+	}
+}
+
 impl Recorder {
 	/// Record what `inputs` names into `dir`, naming each file after the
 	/// `scenes` file, and repair in the background each file in `dir` a crash
@@ -157,25 +172,24 @@ impl Recorder {
 		self.dir.lock().unwrap().clone()
 	}
 
-	/// Save the next recording into `dir`. Refused while one is under way,
-	/// whose unfinished file the next launch repairs only in the directory
-	/// then set.
-	pub fn set_dir(&self, dir: &Path) -> anyhow::Result<()> {
+	/// Start moving the directory to `dir`, such as while the settings
+	/// naming it are written. Refused while a recording is under way, whose
+	/// unfinished file the next launch repairs only in the directory then
+	/// set. No recording starts until the move finishes or is dropped.
+	pub fn moving(&self, dir: &Path) -> anyhow::Result<Moving<'_>> {
 		let dir = std::path::absolute(dir)?;
-		// Under the lock `start` reads the directory under, so none starts
-		// between the check and the move.
+		// The lock `start` reads the directory under.
 		let session = self.session.lock().unwrap();
-		let mut current = self.dir.lock().unwrap();
-		if *current == dir {
-			return Ok(());
-		}
 		anyhow::ensure!(
-			session.as_ref().is_none_or(|session| *session.done.borrow()),
+			*self.dir.lock().unwrap() == dir || session.as_ref().is_none_or(|session| *session.done.borrow()),
 			"a recording is under way: stop it before moving the folder, so a crash leaves it where the next \
 			 launch repairs it"
 		);
-		*current = dir;
-		Ok(())
+		Ok(Moving {
+			_session: session,
+			current: &self.dir,
+			dir,
+		})
 	}
 
 	/// The show's name, which each file's starts with: the scene file's.
@@ -1623,7 +1637,8 @@ mod tests {
 
 	/// The folder stays put while a recording is under way, since a crash
 	/// leaves its file for the next launch to repair only where the folder
-	/// is then; once it is done, the folder moves.
+	/// is then; once it is done, the folder moves, and only when the move
+	/// finishes, such as once the settings naming it are written.
 	#[tokio::test(start_paused = true)]
 	async fn the_folder_stays_while_recording() {
 		let dir = tempfile::tempdir().unwrap();
@@ -1632,16 +1647,21 @@ mod tests {
 		let recorder = studio.recorder(dir.path());
 		studio.play(Duration::from_secs(1)).await;
 		recorder.start(false).unwrap();
-		let refused = recorder.set_dir(other.path()).unwrap_err();
+		let refused = recorder.moving(other.path()).err().expect("refused while recording");
 		assert!(
 			format!("{refused:#}").contains("a recording is under way"),
 			"{refused:#}"
 		);
-		recorder.set_dir(dir.path()).expect("the same folder is no move");
+		recorder
+			.moving(dir.path())
+			.expect("the same folder is no move")
+			.finish();
 		assert_eq!(recorder.dir(), dir.path());
 		recorder.stop();
 		let ((), ()) = tokio::join!(recorder.finish(), studio.play(Duration::from_millis(500)));
-		recorder.set_dir(other.path()).unwrap();
+		drop(recorder.moving(other.path()).unwrap());
+		assert_eq!(recorder.dir(), dir.path(), "a move dropped unfinished stays");
+		recorder.moving(other.path()).unwrap().finish();
 		assert_eq!(recorder.dir(), other.path());
 	}
 

@@ -947,15 +947,28 @@ impl Panels {
 		}
 	}
 
-	/// Save `saved`, with a new recordings folder, once the recorder has
-	/// moved to it, so the file never names a folder a recording under way
-	/// kept it from.
-	fn move_recordings(&mut self, stream: crate::stream::Stream, saved: Saved, ctx: &egui::Context) {
+	/// Save `saved`, with a new recordings folder, and move the recorder to
+	/// it, holding off any recording until both are done, so the file and the
+	/// recorder never name different folders: an unfinished recording is
+	/// repaired only in the folder the file names. Here rather than on a
+	/// thread, since a save with no token never waits on the credential
+	/// store.
+	fn move_recordings(&mut self, mut stream: crate::stream::Stream, saved: Saved, ctx: &egui::Context) {
 		let scene = self.engine.autosave.path().to_path_buf();
-		match self.engine.recorder.set_dir(&saved.folder(&scene)) {
-			Ok(()) => self.save_stream(Setting::Recording, stream, saved, Vec::new(), ctx),
-			Err(err) => self.saved = Some((Setting::Recording, format!("{err:#}"))),
-		}
+		let result = (|| -> anyhow::Result<crate::stream::Stream> {
+			let moving = self.engine.recorder.moving(&saved.folder(&scene))?;
+			stream.save(saved)?;
+			moving.finish();
+			Ok(stream)
+		})();
+		// Applied as a save from a thread is, on the next frame.
+		self.saved = None;
+		self.saving = Some(super::live::Saving {
+			from: Setting::Recording,
+			retokened: false,
+			task: Task::Done(result.map_err(|err| format!("{err:#}"))),
+		});
+		ctx.request_repaint();
 	}
 
 	/// Save `saved` as the show's stream file, keeping `tokens`, for the

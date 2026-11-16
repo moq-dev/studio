@@ -409,9 +409,14 @@ impl Controls {
 			if controls.going() || controls.engine.on_air() != OnAir::Off {
 				return;
 			}
-			let (stream, _) = controls.snapshot();
+			let (stream, waiting) = controls.snapshot();
 			let _runtime = controls.runtime.enter();
-			controls.join_room(&stream);
+			// Relays still to follow, such as ones that failed, go first, as
+			// the room is joined through them.
+			match waiting {
+				true => controls.follow(&stream),
+				false => controls.join_room(&stream),
+			}
 		});
 		if let Err(err) = spawned {
 			tracing::warn!(error = format!("{err:#}"), "cannot join the room");
