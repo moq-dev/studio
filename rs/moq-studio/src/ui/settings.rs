@@ -284,13 +284,14 @@ impl Panels {
 			.chain([(None, "Custom")])
 			.collect();
 		row(ui, "Canvas size", &upload(current), |ui| {
-			if ui.add(kit::Segmented::new(&mut size, &sizes)).changed() {
+			// Custom lit, as for a size no name has, still opens its editor.
+			if ui.add(kit::Segmented::new(&mut size, &sizes).reclick()).changed() {
 				match size {
 					Some(short) => {
 						self.canvas = None;
 						wanted = Some(sized(current, short));
 					}
-					None => self.canvas = Some(current),
+					None => self.canvas = Some(self.canvas.unwrap_or(current)),
 				}
 			}
 		});
@@ -302,7 +303,7 @@ impl Panels {
 			"Frame rate",
 			"60 is smoother for games and doubles the encoder's work.",
 			|ui| {
-				if ui.add(kit::Segmented::new(&mut rate, &rates)).changed() {
+				if ui.add(kit::Segmented::new(&mut rate, &rates).reclick()).changed() {
 					match (rate, &mut self.canvas) {
 						(Some(rate), Some(draft)) => draft.framerate = rate,
 						(Some(rate), None) => {
@@ -953,6 +954,9 @@ impl Panels {
 	/// repaired only in the folder the file names. On a thread of its own,
 	/// as any save is, so a slow disk never holds up the window.
 	fn move_recordings(&mut self, mut stream: crate::stream::Stream, saved: Saved, ctx: &egui::Context) {
+		if self.refuse_overlap(Setting::Recording) {
+			return;
+		}
 		let engine = self.engine.clone();
 		let ctx = ctx.clone();
 		let (send, recv) = std::sync::mpsc::channel();
@@ -988,8 +992,24 @@ impl Panels {
 		tokens: Vec<super::live::Token>,
 		ctx: &egui::Context,
 	) {
+		if self.refuse_overlap(from) {
+			return;
+		}
 		self.saved = None;
 		self.saving = Some(Saving::start(from, stream, saved, tokens, ctx));
+	}
+
+	/// Refuse a save for the `from` pane while another runs, which would
+	/// lose its result and write the file from settings it has not seen.
+	fn refuse_overlap(&mut self, from: Setting) -> bool {
+		let running = self.saving.is_some();
+		if running {
+			self.saved = Some((
+				from,
+				"Another save is still running; try again once it finishes.".into(),
+			));
+		}
+		running
 	}
 
 	/// Bind the key pressed to the action the Hotkeys pane waits on, or cancel

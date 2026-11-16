@@ -932,7 +932,7 @@ impl Panels {
 		use super::settings::{field_row, row};
 		let stream = self.controls.stream.lock().unwrap().clone();
 		let overridden = stream.overridden();
-		let busy = self.saving.is_some();
+		let busy = self.saving.is_some() || self.picker.is_some();
 		let form = self.stream_form.get_or_insert_with(|| Form::new(&stream));
 		let token = |ui: &mut Ui, token: &mut String, forget: &mut bool| {
 			ui.add(

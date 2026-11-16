@@ -498,7 +498,11 @@ fn settings_change_the_show_and_move_the_guests() {
 	let (_show, runtime, gpu) = lavapipe();
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
-	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	// A canvas size no name has.
+	let show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	let custom = show.replacen("width = 1920\nheight = 1080", "width = 1366\nheight = 768", 1);
+	assert_ne!(custom, show);
+	std::fs::write("show.toml", custom).unwrap();
 	// A room whose key is not there yet.
 	std::fs::write(
 		"show.stream.toml",
@@ -524,6 +528,12 @@ fn settings_change_the_show_and_move_the_guests() {
 
 	harness.get_by_label("Settings").click();
 	harness.run_steps(2);
+	// Custom is lit, and a click on it still opens its editor.
+	assert!(harness.query_by_label("Cancel").is_none());
+	harness.get_all_by_label("Custom").next().unwrap().click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Cancel").is_some(), "the editor is open");
+	assert_eq!((canvas().width, canvas().height), (1366, 768), "and nothing changed");
 	harness.get_by_label("720p").click();
 	harness.run_steps(2);
 	assert_eq!((canvas().width, canvas().height), (1280, 720));

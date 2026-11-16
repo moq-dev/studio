@@ -422,11 +422,23 @@ impl Widget for Toggle<'_> {
 pub struct Segmented<'a, T> {
 	current: &'a mut T,
 	options: &'a [(T, &'a str)],
+	reclick: bool,
 }
 
 impl<'a, T: PartialEq + Clone> Segmented<'a, T> {
 	pub fn new(current: &'a mut T, options: &'a [(T, &'a str)]) -> Self {
-		Self { current, options }
+		Self {
+			current,
+			options,
+			reclick: false,
+		}
+	}
+
+	/// Count a click on the option already chosen as a change too, such as
+	/// Custom opening its editor again.
+	pub fn reclick(mut self) -> Self {
+		self.reclick = true;
+		self
 	}
 }
 
@@ -451,7 +463,7 @@ impl<T: PartialEq + Clone> Widget for Segmented<'_, T> {
 			let option = ui.interact(at, response.id.with(index), Sense::click());
 			let on = *self.current == *value;
 			option.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), on, *name));
-			if option.clicked() && !on {
+			if option.clicked() && (!on || self.reclick) {
 				*self.current = value.clone();
 				response.mark_changed();
 			}
