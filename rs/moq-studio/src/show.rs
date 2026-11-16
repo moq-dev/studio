@@ -111,11 +111,22 @@ impl Opener {
 pub fn follow(engine: &Engine, stream: &Stream) {
 	let each = [(true, false), (false, true)].map(|(relay, failover)| stream::Switched { relay, failover });
 	let mut relays = Vec::new();
+	let mut failed = false;
 	for switched in each {
 		match stream.relays(switched) {
 			Ok(set) => relays.extend(set),
-			Err(err) => tracing::warn!(error = format!("{err:#}"), "cannot follow a relay"),
+			Err(err) => {
+				tracing::warn!(error = format!("{err:#}"), "cannot follow a relay");
+				failed = true;
+			}
 		}
+	}
+	// None could be set up, such as a new relay on a fixed --connect-bind
+	// port the sessions followed now still hold: those keep the broadcast
+	// sources and guests rather than none.
+	if relays.is_empty() && failed {
+		tracing::warn!("keeping the relays followed before");
+		return;
 	}
 	engine.watch(&relays);
 }

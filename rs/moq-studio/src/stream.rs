@@ -378,6 +378,12 @@ fn path(scene: &Path) -> PathBuf {
 	scene.with_file_name(name)
 }
 
+/// Whether the address `url` carries a token that [saving](Stream::save)
+/// takes out of it, its query's `jwt` as decoded, however it is written.
+pub fn carries_token(url: &str) -> bool {
+	Url::parse(url.trim()).is_ok_and(|url| url.query_pairs().any(|(key, _)| key == "jwt"))
+}
+
 /// Take the token out of `url`'s `?jwt=`, if it has one, leaving the rest of
 /// its query.
 fn take_token(url: &mut Url) -> Option<String> {
@@ -646,6 +652,29 @@ mod tests {
 			failover: false,
 		};
 		assert!(stream.destination(none).is_err(), "nothing to send");
+	}
+
+	/// An address carries a token wherever saving would take one out of it,
+	/// its key percent-encoded included, and only there.
+	#[test]
+	fn a_token_is_found_as_saving_finds_it() {
+		for url in [
+			"https://relay.example/anon?jwt=abc",
+			" https://relay.example/anon?%6awt=abc ",
+			"https://relay.example/anon?x=1&jwt=abc",
+		] {
+			assert!(carries_token(url), "{url}");
+			let mut parsed: Url = url.trim().parse().unwrap();
+			assert_eq!(take_token(&mut parsed).as_deref(), Some("abc"), "{url}");
+		}
+		for url in [
+			"https://relay.example/anon",
+			"https://relay.example/anon?notjwt=abc",
+			"https://relay.example/jwt=abc",
+			"not a url ?jwt=abc",
+		] {
+			assert!(!carries_token(url), "{url}");
+		}
 	}
 
 	/// An address carrying its own `?jwt=` dials with it, without the

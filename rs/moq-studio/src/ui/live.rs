@@ -302,6 +302,12 @@ impl Panels {
 		let mut settings = false;
 		let refused = self.controls.refused.lock().unwrap().clone();
 		let confirmed = self.going.as_ref().is_some_and(|going| going.confirmed);
+		// The encoder check holds a hardware encode session until it finishes,
+		// which would count against the program's.
+		let probing = self
+			.going
+			.as_ref()
+			.is_some_and(|going| matches!(going.encoder, Task::Running(_)));
 		let id = egui::Id::new("go live");
 		let asked = kit::Sheet::new(id, "Go live").show(ctx, |ui| {
 			let opens = match &program {
@@ -334,9 +340,10 @@ impl Panels {
 			let text = match (waiting, count) {
 				(true, _) => "Going live".to_string(),
 				(false, 0) => "Switch a destination on".to_string(),
+				(false, _) if probing => "Checking the encoder".to_string(),
 				(false, count) => format!("Go live to {count}"),
 			};
-			let enabled = count > 0 && on_air == OnAir::Off && !going;
+			let enabled = count > 0 && on_air == OnAir::Off && !going && !probing;
 			confirm = confirm_button(ui, &text, enabled, waiting).clicked();
 		});
 		close |= asked;
@@ -550,13 +557,15 @@ impl Panels {
 			let heard = going.heard.entry(name.clone()).or_default();
 			*heard = heard.max(level);
 		}
-		let moving = microphones
+		// The first that has not moved yet, so one silent beside another that
+		// moves is still named.
+		let silent = microphones
 			.iter()
-			.find(|name| going.heard.get(*name).is_some_and(|heard| *heard >= MOVING));
+			.find(|name| going.heard.get(*name).is_none_or(|heard| *heard < MOVING));
 		let listened = now.saturating_duration_since(going.opened) >= LISTEN;
-		let shown = moving.or(microphones.first());
+		let shown = silent.or(microphones.first());
 		let level = shown.map(|name| reading(self.levels.sound(name)));
-		checks.push(match (shown, moving, listened) {
+		checks.push(match (shown, silent, listened) {
 			(None, ..) => Check {
 				mark: Outcome::Skipped,
 				icon: Icon::Mic,
@@ -565,15 +574,18 @@ impl Panels {
 				level: None,
 				fixes: Vec::new(),
 			},
-			(Some(name), Some(_), _) => Check {
+			(Some(name), None, _) => Check {
 				mark: Outcome::Passed,
 				icon: Icon::Mic,
 				name: "Microphone",
-				said: format!("{name} is moving"),
+				said: match microphones.len() {
+					1 => format!("{name} is moving"),
+					count => format!("All {count} microphones are moving"),
+				},
 				level,
 				fixes: Vec::new(),
 			},
-			(Some(name), None, false) => Check {
+			(Some(_), Some(name), false) => Check {
 				mark: Outcome::Waiting,
 				icon: Icon::Mic,
 				name: "Microphone",
@@ -581,7 +593,7 @@ impl Panels {
 				level,
 				fixes: Vec::new(),
 			},
-			(Some(name), None, true) => Check {
+			(Some(_), Some(name), true) => Check {
 				mark: Outcome::Failed,
 				icon: Icon::Mic,
 				name: "Microphone",
@@ -855,8 +867,10 @@ impl Panels {
 				// cuts the broadcast sources and guests they carry, so not on
 				// air: then once the stream ends.
 				let moved = before.relay() != saved.relay() || before.failover() != saved.failover();
-				let retokened =
-					!form.tokens().is_empty() || [&form.relay, &form.failover].iter().any(|url| url.contains("jwt="));
+				let retokened = !form.tokens().is_empty()
+					|| [&form.relay, &form.failover]
+						.iter()
+						.any(|url| crate::stream::carries_token(url));
 				let deferred = self.controls.set_stream(saved.clone(), moved || retokened);
 				// A measurement under way is of the relay as it was.
 				if (moved || retokened)

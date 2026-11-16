@@ -63,6 +63,15 @@ pub struct Live {
 	pub relays: Vec<String>,
 }
 
+/// A stream that has gone off air.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Aired {
+	/// When it went live.
+	pub since: Instant,
+	/// How long it was on air, until END STREAM.
+	pub lasted: Duration,
+}
+
 /// The engine's stream.
 pub(super) enum Slot {
 	Off,
@@ -247,6 +256,12 @@ impl Engine {
 		self.on_air.borrow().clone()
 	}
 
+	/// The last stream to go off air, kept as it ends rather than as the
+	/// window sees it, since hotkeys go live and end while it draws nothing.
+	pub fn aired(&self) -> Option<Aired> {
+		*self.aired.lock().unwrap()
+	}
+
 	/// Whether the program is on air, as it changes.
 	pub fn on_air_changes(&self) -> tokio::sync::watch::Receiver<OnAir> {
 		self.on_air.subscribe()
@@ -422,6 +437,8 @@ impl Engine {
 		// The audio scene on program, encoded on the runtime, never the
 		// program clock's thread.
 		let mut follow = self.program_audio.follow();
+		// A stream before this one whose audio failed is not this one's.
+		*self.stats.audio_error.lock().unwrap() = None;
 		let (audio_stop, stopped) = tokio::sync::oneshot::channel::<()>();
 		let (stats, epoch) = (self.stats.clone(), self.program.epoch);
 		let audio = tokio::spawn(async move {
@@ -505,6 +522,10 @@ impl Engine {
 				}
 			};
 			self.set_air(&mut slot, Slot::Ending);
+			*self.aired.lock().unwrap() = Some(Aired {
+				since: air.live.since,
+				lasted: air.live.since.elapsed(),
+			});
 			air
 		};
 		let ending = {

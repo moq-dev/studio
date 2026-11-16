@@ -51,7 +51,7 @@ use crate::{health, mix, record};
 
 pub mod air;
 
-pub use air::{Destination, OnAir};
+pub use air::{Aired, Destination, OnAir};
 
 /// The GPU everything shares: sources upload to it, the compositor draws on
 /// it, the window presents from it, and the encoder reads the program from it.
@@ -948,6 +948,8 @@ pub struct Engine {
 	monitor: Mutex<Option<mix::Monitor>>,
 	/// The stream, while on air, going live, or ending.
 	air: Mutex<air::Slot>,
+	/// The last stream to go off air.
+	aired: Mutex<Option<air::Aired>>,
 	/// Whether the program is on air, for the window and for quitting, which
 	/// waits out a stream going live or ending.
 	on_air: tokio::sync::watch::Sender<OnAir>,
@@ -1095,6 +1097,7 @@ impl Engine {
 			recorded_audio: mix::Pick::default(),
 			monitor: Mutex::default(),
 			air: Mutex::new(air::Slot::Off),
+			aired: Mutex::default(),
 			on_air: tokio::sync::watch::Sender::new(OnAir::Off),
 			handoff: Mutex::default(),
 			on_air_program: tokio::sync::watch::Sender::new(None),
@@ -5040,7 +5043,8 @@ mod tests {
 		let engine = start(gpu, vec![relay], dir.path(), autosave, red_canvas())
 			.await
 			.expect("the studio goes live");
-		assert!(engine.on_air().live().is_some());
+		let since = engine.on_air().live().expect("on air").since;
+		assert_eq!(engine.aired(), None, "nothing has gone off air yet");
 		assert!(engine.program_targets().is_ok(), "the program has a past on air");
 		let (broadcast, catalogs, catalog) = routed(&routes, "studio").await;
 		let video = catalog.video.renditions.keys().next().expect("its video").clone();
@@ -5051,6 +5055,10 @@ mod tests {
 			.expect("the stream ends in time")
 			.expect("each relay takes the stream's end");
 		assert_eq!(engine.on_air(), OnAir::Off);
+		// Kept by the engine as the stream ends, whether or not a window saw it.
+		let aired = engine.aired().expect("the stream is noted as it ends");
+		assert_eq!(aired.since, since);
+		assert!(aired.lasted <= since.elapsed(), "{aired:?}");
 		ended(catalogs, viewer).await;
 		let refused = engine
 			.program_targets()
@@ -5107,6 +5115,63 @@ mod tests {
 			.expect_err("nothing answers");
 		assert!(format!("{refused:#}").contains("127.0.0.1:9"), "{refused:#}");
 		assert_eq!(engine.on_air(), OnAir::Off);
+		engine.stop();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
+	/// A follow that can set up none of the show's relays, such as a relay
+	/// and a failover on one fixed `--connect-bind` port, keeps the sessions
+	/// followed before, and with them the broadcast sources and guests.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_follow_that_sets_up_no_relay_keeps_the_last() {
+		let _ = moq_tokio::crypto::install_default();
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = start(gpu, Vec::new(), dir.path(), autosave, red_canvas())
+			.await
+			.expect("the studio starts");
+		let scene = dir.path().join("show.toml");
+		let follow = |client: moq_tokio::connect::Config, saved: crate::stream::Saved| {
+			let (engine, scene) = (engine.clone(), scene.clone());
+			let runtime = tokio::runtime::Handle::current();
+			tokio::task::spawn_blocking(move || {
+				let _runtime = runtime.enter();
+				let mut stream = crate::stream::Stream::load(
+					&scene,
+					Default::default(),
+					client,
+					Default::default(),
+					crate::stream::Credentials::memory(),
+				)
+				.unwrap();
+				stream.save(saved).unwrap();
+				crate::show::follow(&engine, &stream);
+			})
+		};
+		let watched = || -> Vec<String> { engine.watched().into_iter().map(|(relay, _)| relay.endpoint).collect() };
+		let relay = |port: u16| Some(format!("https://127.0.0.1:{port}/").parse().unwrap());
+
+		let first = crate::stream::Saved {
+			relay: relay(9),
+			..Default::default()
+		};
+		follow(Default::default(), first).await.unwrap();
+		assert_eq!(watched(), ["https://127.0.0.1:9"]);
+
+		let mut fixed = moq_tokio::connect::Config::default();
+		fixed.bind = Some("127.0.0.1:4999".parse().unwrap());
+		let unset = crate::stream::Saved {
+			relay: relay(10),
+			failover: relay(11),
+			..Default::default()
+		};
+		follow(fixed, unset).await.unwrap();
+		assert_eq!(watched(), ["https://127.0.0.1:9"], "the last relay is kept");
+
 		engine.stop();
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await

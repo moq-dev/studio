@@ -246,9 +246,8 @@ struct Window {
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
 	/// The shows this user has opened.
 	recent: library::Recent,
-	/// When the open show went live, in seconds since the Unix epoch, while
-	/// it is on air.
-	aired: Option<u64>,
+	/// The open show's last stream off air that [`Self::recent`] has noted.
+	aired: Option<engine::Aired>,
 	keyboard: hotkeys::Keyboard,
 	/// The window's own effects, on the setup screen and in the studio.
 	fx: fx::Fx,
@@ -283,11 +282,13 @@ impl eframe::App for Window {
 		if let App::Studio(studio) = &mut self.app {
 			studio.save(storage);
 		}
+		self.follow_air();
 		if let Some(engine) = self.started.get() {
 			let path = engine.autosave.path();
 			// Its time on air so far, in case the window closes while live.
-			if let Some(at) = self.aired {
-				let lasted = library::now().saturating_sub(at);
+			if let Some(live) = engine.on_air().live() {
+				let lasted = live.since.elapsed().as_secs();
+				let at = library::now().saturating_sub(lasted);
 				self.recent.aired(path, library::Aired { at, lasted });
 			}
 			// The show's picture is the program as it was when the window
@@ -396,19 +397,18 @@ impl Window {
 		ui.ctx().request_repaint();
 	}
 
-	/// Note when the open show goes live, and how long it stayed once it ends.
+	/// Note when the open show's last stream went live, and how long it
+	/// stayed, once it ends.
 	fn follow_air(&mut self) {
 		let Some(engine) = self.started.get() else { return };
-		let live = engine.on_air().live().map(|live| live.since.elapsed());
-		match (live, self.aired) {
-			(Some(since), None) => self.aired = Some(library::now().saturating_sub(since.as_secs())),
-			(None, Some(at)) => {
-				let lasted = library::now().saturating_sub(at);
-				self.recent.aired(engine.autosave.path(), library::Aired { at, lasted });
-				self.aired = None;
-			}
-			_ => {}
+		let Some(aired) = engine.aired() else { return };
+		if self.aired == Some(aired) {
+			return;
 		}
+		self.aired = Some(aired);
+		let at = library::now().saturating_sub(aired.since.elapsed().as_secs());
+		let lasted = aired.lasted.as_secs();
+		self.recent.aired(engine.autosave.path(), library::Aired { at, lasted });
 	}
 }
 
