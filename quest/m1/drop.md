@@ -23,7 +23,3 @@ Nothing accepts a drop today.
   covers it meanwhile.
 - A drop on a layer that takes a file, such as an image layer, offers to
   replace its file instead.
-
-## Required
-
-- [The BUILD page](/quest/m0/ux/build.md) - the picture's drop targets and the layers it makes

@@ -124,6 +124,122 @@ impl Panels {
 		self.check(result);
 	}
 
+	/// The audio scenes by name, each renamed, reordered, or removed here, and
+	/// a new one added. The MIX page's redesign gives each a master strip
+	/// (quest/m0/ux/mix.md).
+	pub(super) fn audio_scenes(&mut self, ui: &mut Ui) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let audio_scenes = state.collection().audio_scenes.clone();
+		let count = audio_scenes.len();
+		let mut audio_action = None;
+		for (index, scene) in audio_scenes.iter().enumerate() {
+			ui.horizontal(|ui| {
+				if let Some((renaming, name)) = &mut self.renaming_audio
+					&& *renaming == scene.name
+				{
+					let response = ui.text_edit_singleline(name);
+					if !response.has_focus() && !response.lost_focus() {
+						response.request_focus();
+					}
+					if response.lost_focus() {
+						// Escape cancels; Enter or a click away renames.
+						if !ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+							audio_action = Some(AudioAction::Rename(index, name.trim().to_string()));
+						}
+						self.renaming_audio = None;
+					}
+					return;
+				}
+				let label = ui.label(kit::caps(&scene.name, kit::display(14.0)));
+				if scene.program {
+					ui.add(kit::Tag::new("On air", Tally::Air));
+				}
+				let rename = ui.add(IconButton::new(Icon::Rename, "Rename").small());
+				if label.double_clicked() || rename.clicked() {
+					self.renaming_audio = Some((scene.name.clone(), scene.name.clone()));
+				}
+				if ui
+					.add_enabled(index > 0, IconButton::new(Icon::Up, "Move up").small())
+					.clicked()
+				{
+					audio_action = Some(AudioAction::Move(index, index - 1));
+				}
+				let down = IconButton::new(Icon::Down, "Move down").small();
+				if ui.add_enabled(index + 1 < count, down).clicked() {
+					audio_action = Some(AudioAction::Move(index, index + 1));
+				}
+				let remove = IconButton::new(Icon::Remove, "Remove").small().note(
+					scene
+						.program
+						.then_some("On program; put another audio scene on program first"),
+				);
+				if ui.add_enabled(!scene.program, remove).clicked() {
+					audio_action = Some(AudioAction::Remove(index));
+				}
+			});
+		}
+		ui.horizontal(|ui| {
+			ui.add(egui::TextEdit::singleline(&mut self.new_scene).hint_text("New audio scene"));
+			if ui.add(kit::button(Icon::Add, "Add audio scene")).clicked() {
+				let name = self.new_scene.trim().to_string();
+				let mut next = audio_scenes.clone();
+				next.push(moq_scene::AudioScene::new(name.clone()));
+				let result = edit(&mut state, format!("Add audio scene `{name}`"), None, |draft| {
+					draft.set_audio_scenes(next)
+				});
+				match result {
+					Ok(()) => self.new_scene.clear(),
+					Err(err) => self.report(Err(err)),
+				}
+			}
+		});
+		if let Some(action) = audio_action {
+			let result = self.audio_scene(&mut state, &audio_scenes, action);
+			drop(state);
+			self.check(result);
+		}
+	}
+
+	/// Rename, reorder, or remove one of `scenes`, the audio scenes as their
+	/// list showed them. Listening follows a renamed one.
+	pub(super) fn audio_scene(
+		&self,
+		state: &mut State,
+		scenes: &[moq_scene::AudioScene],
+		action: AudioAction,
+	) -> anyhow::Result<()> {
+		match action {
+			AudioAction::Rename(index, to) => {
+				let from = &scenes[index].name;
+				if *from == to {
+					return Ok(());
+				}
+				edit(state, format!("Rename audio scene `{from}` to `{to}`"), None, |draft| {
+					draft.rename_audio_scene(from, &to)
+				})?;
+				let listening = self.engine.listening();
+				if listening.is_some_and(|(heard, _)| heard == *from) {
+					self.listen(state, Some(&to))?;
+				}
+				Ok(())
+			}
+			AudioAction::Move(from, to) => {
+				let mut next = scenes.to_vec();
+				let scene = next.remove(from);
+				let label = format!("Reorder audio scene `{}`", scene.name);
+				next.insert(to, scene);
+				edit(state, label, None, |draft| draft.set_audio_scenes(next))
+			}
+			AudioAction::Remove(index) => {
+				let name = &scenes[index].name;
+				edit(state, format!("Remove audio scene `{name}`"), None, |draft| {
+					draft.remove_audio_scene(name)
+				})
+			}
+		}
+	}
+
 	/// Play the audio scene called `scene` to the speakers picked, or stop
 	/// with `None`.
 	pub(super) fn listen(&self, state: &mut State, scene: Option<&str>) -> anyhow::Result<()> {

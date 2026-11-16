@@ -1,10 +1,105 @@
 //! Where an item dragged in the preview lands: the part of it the pointer
-//! holds, and how it snaps to the canvas, other items, and a grid.
+//! holds, and how it snaps to the canvas, other items, and a grid; and how a
+//! crop drag, Fit, and Fill reshape it.
 //!
 //! Plain math in canvas pixels with no egui types, so it is tested here; the
 //! preview only converts the pointer and draws the result.
 
-use moq_scene::{Canvas, Item, Rect};
+use moq_scene::{Canvas, Crop, Item, Rect};
+
+/// The least of its picture a crop leaves across each axis, so a crop drag
+/// stops before the picture is gone.
+const KEPT: f32 = 0.05;
+
+impl Grab {
+	/// `rect` showing `crop` of its picture with what this grab holds dragged
+	/// by `delta`, trimming or restoring the picture rather than scaling it:
+	/// a held edge crops, stopping at the picture's own edge and before the
+	/// opposite one, and a move pans the picture under the rect.
+	pub fn crop(self, rect: Rect, crop: Crop, delta: [f32; 2]) -> (Rect, Crop) {
+		let (mut rect, mut crop) = (rect, crop);
+		for axis in Axis::ALL {
+			let (start, end) = axis.span(&rect);
+			let (low, high) = match axis {
+				Axis::X => (&mut crop.left, &mut crop.right),
+				Axis::Y => (&mut crop.top, &mut crop.bottom),
+			};
+			let shown = 1.0 - *low - *high;
+			if shown <= 0.0 || end <= start {
+				continue;
+			}
+			// Where the whole picture would be at this scale.
+			let whole = (end - start) / shown;
+			let from = start - *low * whole;
+			let to = from + whole;
+			let least = KEPT * whole;
+			let by = axis.of(delta);
+			let span = match self.moves(axis) {
+				Moves::Neither => continue,
+				Moves::Edge(Side::Start) => ((start + by).clamp(from, (end - least).max(from)), end),
+				Moves::Edge(Side::End) => (start, (end + by).clamp((start + least).min(to), to)),
+				Moves::Both => {
+					let from = (from + by).clamp(end - whole, start);
+					*low = (start - from) / whole;
+					*high = (from + whole - end) / whole;
+					clamp_crop(low, high);
+					continue;
+				}
+			};
+			*low = (span.0 - from) / whole;
+			*high = (to - span.1) / whole;
+			clamp_crop(low, high);
+			axis.set_span(&mut rect, span);
+		}
+		(rect, crop)
+	}
+}
+
+/// Keep a crop's two edges along an axis valid, whatever float rounding left.
+fn clamp_crop(low: &mut f32, high: &mut f32) {
+	*low = low.clamp(0.0, 1.0 - KEPT);
+	*high = high.clamp(0.0, 1.0 - KEPT - *low);
+}
+
+/// The largest rect a picture of `aspect`, its width over its height, takes
+/// inside `canvas` keeping its shape, centered.
+pub fn fit(aspect: f32, canvas: &Canvas) -> Rect {
+	let (width, height) = (canvas.width as f32, canvas.height as f32);
+	let (fitted_width, fitted_height) = match aspect > width / height {
+		true => (width, (width / aspect).round()),
+		false => ((height * aspect).round(), height),
+	};
+	Rect {
+		x: ((width - fitted_width) / 2.0).round(),
+		y: ((height - fitted_height) / 2.0).round(),
+		width: fitted_width,
+		height: fitted_height,
+	}
+}
+
+/// The crop that trims a picture of `aspect` evenly to `canvas`'s shape, so
+/// it fills the canvas without stretching.
+pub fn fill(aspect: f32, canvas: &Canvas) -> Crop {
+	let shape = canvas.width as f32 / canvas.height as f32;
+	match aspect > shape {
+		true => {
+			let trim = (1.0 - shape / aspect) / 2.0;
+			Crop {
+				left: trim,
+				right: trim,
+				..Crop::default()
+			}
+		}
+		false => {
+			let trim = (1.0 - aspect / shape) / 2.0;
+			Crop {
+				top: trim,
+				bottom: trim,
+				..Crop::default()
+			}
+		}
+	}
+}
 
 /// How close two positions are to count as lined up. Snapping makes them
 /// equal up to float rounding; unsnapped drags never draw guides.
@@ -201,10 +296,12 @@ fn shift(rect: &mut Rect, axis: Axis, moves: Moves, by: f32) {
 /// The item of `items` a press at `point` grabs, and what part of it. The
 /// `selected` item's edges come first, since they reach past it; then the
 /// frontmost item under the point, so a selected backdrop does not hide what
-/// is in front of it. Hidden items are not shown, so nothing grabs them.
+/// is in front of it. Hidden items are not shown, so nothing grabs them, and
+/// the pointer passes through a locked one.
 pub fn hit(items: &[Item], selected: Option<usize>, point: [f32; 2], reach: f32) -> Option<(usize, Grab)> {
+	let grabbable = |item: &Item| item.visible && !item.locked;
 	if let Some(index) = selected
-		&& let Some(item) = items.get(index).filter(|item| item.visible)
+		&& let Some(item) = items.get(index).filter(|item| grabbable(item))
 		&& let Some(grab @ Grab::Resize { .. }) = Grab::at(&item.rect, point, reach)
 	{
 		return Some((index, grab));
@@ -217,7 +314,7 @@ pub fn hit(items: &[Item], selected: Option<usize>, point: [f32; 2], reach: f32)
 	};
 	let index = (0..items.len())
 		.rev()
-		.find(|&index| items[index].visible && inside(&items[index].rect))?;
+		.find(|&index| grabbable(&items[index]) && inside(&items[index].rect))?;
 	Some((index, Grab::Move))
 }
 
@@ -823,6 +920,12 @@ mod tests {
 		assert_eq!(hit(&selected, Some(0), [603.0, 600.0], 8.0), Some((0, right)));
 		// A hidden selected item's edge, inside a visible item, grabs that item.
 		assert_eq!(hit(&items, Some(1), [700.0, 600.0], 8.0), Some((2, Grab::Move)));
+		// The pointer passes through a locked item, selected or not, to the
+		// one behind it.
+		let mut locked = items.clone();
+		locked[2].locked = true;
+		assert_eq!(hit(&locked, Some(2), [600.0, 600.0], 8.0), Some((0, Grab::Move)));
+		assert_eq!(hit(&locked, Some(2), [403.0, 600.0], 8.0), Some((0, Grab::Move)));
 		// Outside everything shown, nothing.
 		let items = &items[1..2];
 		assert_eq!(hit(items, Some(0), [700.0, 600.0], 8.0), None);
@@ -839,6 +942,66 @@ mod tests {
 		let snapped = SNAP.apply(Grab::Move, rect(503.0, 500.0, 50.0, 100.0), &others, &CANVAS);
 		assert_eq!(snapped.rect.x, 503.0);
 		assert!(snapped.gaps.is_empty());
+	}
+
+	/// A crop drag trims the picture at its scale: the rect's edge moves
+	/// with the pointer, the picture under it stays put, and the drag stops
+	/// at the picture's own edge and before the opposite one.
+	#[test]
+	fn a_crop_drag_trims_without_scaling() {
+		let left = Grab::Resize {
+			x: Some(Side::Start),
+			y: None,
+		};
+		let bottom = Grab::Resize {
+			x: None,
+			y: Some(Side::End),
+		};
+		let whole = rect(100.0, 100.0, 400.0, 200.0);
+		let (cropped, crop) = left.crop(whole, Crop::default(), [100.0, 0.0]);
+		assert_eq!(cropped, rect(200.0, 100.0, 300.0, 200.0));
+		assert_eq!(crop.left, 0.25);
+		// Back out past the picture's edge restores it, and no further.
+		let (restored, crop) = left.crop(cropped, crop, [-500.0, 0.0]);
+		assert_eq!(restored, whole);
+		assert_eq!(crop, Crop::default());
+		// Past the opposite edge it stops, leaving some of the picture.
+		let (thin, crop) = bottom.crop(whole, Crop::default(), [0.0, -1000.0]);
+		assert_eq!(thin.height, 10.0);
+		assert!((crop.bottom - 0.95).abs() < 1e-6, "{crop:?}");
+	}
+
+	/// A move while cropping pans the picture under the rect, which stays,
+	/// as far as the picture reaches.
+	#[test]
+	fn a_crop_move_pans_the_picture() {
+		let crop = Crop {
+			left: 0.25,
+			right: 0.25,
+			..Crop::default()
+		};
+		let shown = rect(0.0, 0.0, 200.0, 100.0);
+		// The picture is 400 wide; dragging right shows more of its left.
+		let (panned, crop) = Grab::Move.crop(shown, crop, [40.0, 10.0]);
+		assert_eq!(panned, shown);
+		assert!(
+			(crop.left - 0.15).abs() < 1e-6 && (crop.right - 0.35).abs() < 1e-6,
+			"{crop:?}"
+		);
+		assert_eq!((crop.top, crop.bottom), (0.0, 0.0), "nothing to pan across");
+		let (_, crop) = Grab::Move.crop(shown, crop, [1000.0, 0.0]);
+		assert_eq!((crop.left, crop.right), (0.0, 0.5));
+	}
+
+	#[test]
+	fn fit_and_fill_keep_the_shape() {
+		assert_eq!(fit(1.0, &CANVAS), rect(420.0, 0.0, 1080.0, 1080.0));
+		assert_eq!(fit(4.0, &CANVAS), rect(0.0, 300.0, 1920.0, 480.0));
+		let square = fill(1.0, &CANVAS);
+		assert_eq!((square.left, square.right), (0.0, 0.0));
+		assert!((square.top - 0.21875).abs() < 1e-6, "{square:?}");
+		let wide = fill(32.0 / 9.0, &CANVAS);
+		assert_eq!((wide.left, wide.right), (0.25, 0.25));
 	}
 
 	fn spaces(snapped: &Snapped) -> Vec<(f32, f32)> {

@@ -36,12 +36,12 @@ pub(super) enum Corner {
 }
 
 impl Corner {
-	/// Where the NEXT card docks while an item centered at `dragged`, as a
-	/// fraction of the picture across and down, is dragged: top right, or the
-	/// opposite corner while the item is in that one, so it never hides the
-	/// item.
-	pub(super) fn away_from(dragged: Option<[f32; 2]>) -> Self {
-		match dragged {
+	/// Where the NEXT card docks while the selected layer is centered at
+	/// `selected`, as a fraction of the picture across and down: top right,
+	/// or the opposite corner while the layer is in that one, so it never
+	/// hides the layer or its toolbar.
+	pub(super) fn away_from(selected: Option<[f32; 2]>) -> Self {
+		match selected {
 			Some([x, y]) if x >= 0.5 && y < 0.5 => Self::BottomLeft,
 			_ => Self::TopRight,
 		}
@@ -431,10 +431,10 @@ pub(super) fn transition_words(transition: &Transition) -> String {
 mod tests {
 	use super::*;
 
-	/// The card stays top right unless the dragged item is there, when it
+	/// The card stays top right unless the selected layer is there, when it
 	/// moves to the opposite corner.
 	#[test]
-	fn the_card_docks_away_from_a_dragged_item() {
+	fn the_card_docks_away_from_the_selected_layer() {
 		assert_eq!(Corner::away_from(None), Corner::TopRight);
 		assert_eq!(Corner::away_from(Some([0.9, 0.1])), Corner::BottomLeft);
 		assert_eq!(
