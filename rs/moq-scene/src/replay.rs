@@ -276,6 +276,8 @@ fn marker(frame: &moq_net::frame::Frame, container: &impl moq_mux::container::Co
 struct Held {
 	frames: Vec<moq_net::frame::Frame>,
 	read: Result<(), moq_net::Error>,
+	/// Where the source ended the group, for one held whole.
+	end: Option<u64>,
 }
 
 /// Copy every group and frame `source` has ready, up to `end` as `cut` says,
@@ -321,8 +323,12 @@ fn copy_held(
 		// up or that aged out before any of it was read, which replays as the
 		// gap it is.
 		if kept > 0 {
+			// A group cut short ends where its pictures do, which only a reader
+			// can tell.
+			let whole = kept == frames.len();
 			frames.truncate(kept);
-			held.insert(group.start, Held { frames, read });
+			let end = group.end().filter(|_| whole);
+			held.insert(group.start, Held { frames, read, end });
 		}
 	}
 
@@ -334,9 +340,10 @@ fn copy_held(
 		for frame in &held.frames {
 			into.write_frame(frame.timestamp, frame.payload.clone())?;
 		}
-		match &held.read {
-			Ok(()) => drop(into.close()?),
-			Err(err) => into.abort(err.clone())?,
+		match (&held.read, held.end) {
+			(Ok(()), Some(end)) => drop(into.finish(end)?),
+			(Ok(()), None) => drop(into.close()?),
+			(Err(err), _) => into.abort(err.clone())?,
 		}
 	}
 
@@ -541,6 +548,38 @@ mod tests {
 			[(4, frames(4, 3)), (6, frames(6, 3)), (7, frames(7, 2))]
 		);
 		assert!(!skipped(&take, 4_000_001..6_000_000).await, "the lost group is a gap");
+	}
+
+	/// A group held whole ends where its source ended it, and one cut at the
+	/// span's end only closes.
+	#[tokio::test(start_paused = true)]
+	async fn a_take_keeps_where_its_whole_groups_end() {
+		let (broadcast, track) = broadcast(0, None);
+		for sequence in 0..3 {
+			let mut group = track.append_group(sequence * 1_000_000).unwrap();
+			for (index, at) in second(sequence).iter().enumerate() {
+				group
+					.write_frame(ts(*at), format!("{sequence}.{index}").into_bytes())
+					.unwrap();
+			}
+			drop(group.finish((sequence + 1) * 1_000_000).unwrap());
+		}
+		let take = Take::new(&target(&broadcast, ts(2_500)), Duration::from_secs(2)).unwrap();
+		let mut copied = take
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None)),
+			)
+			.await
+			.unwrap();
+		let mut ends = Vec::new();
+		while let Some(mut group) = copied.recv_group().await.unwrap() {
+			while group.read_frame().await.unwrap().is_some() {}
+			ends.push((second_of(group.start), group.end()));
+		}
+		assert_eq!(ends, [(0, Some(1_000_000)), (1, Some(2_000_000)), (2, None)]);
 	}
 
 	/// A take says what the source said of the starts it skipped: between its

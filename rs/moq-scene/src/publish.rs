@@ -397,8 +397,12 @@ async fn copy(
 				while let Some(frame) = group.read_frame().await? {
 					copy.write_frame(frame.timestamp, frame.payload)?;
 				}
-				// A relayed group's end is not ours to state.
-				copy.close()?;
+				// The copy ends where the source ended its group, when it said,
+				// so a paused source's last picture ages out of the copy too.
+				match group.end() {
+					Some(end) => drop(copy.finish(end)?),
+					None => drop(copy.close()?),
+				}
 			}
 			out.clone().finish().map(drop)
 		}
@@ -1257,7 +1261,8 @@ mod tests {
 
 	/// A forwarded track says what its source said of the starts it skipped:
 	/// those before its first group, which mark the encoder's first, and those
-	/// between its groups, but not a hole the source left.
+	/// between its groups, but not a hole the source left. Its groups end where
+	/// the source said they end.
 	#[tokio::test(start_paused = true)]
 	async fn a_forwarded_track_keeps_its_skips() {
 		let local = moq_net::broadcast::Info::new().produce();
@@ -1276,19 +1281,29 @@ mod tests {
 				}
 			};
 			source.skip_groups(0..1_000);
-			let mut starts = Vec::new();
+			let mut groups = Vec::new();
 			for (start, appended) in [(1_000, true), (3_000, true), (5_000, false)] {
 				// Nothing says what lies between 3 000 and 5 000.
 				let group = match appended {
 					true => source.append_group(start),
 					false => source.create_group(moq_net::group::Info { start }),
 				};
-				group.unwrap().close().unwrap();
-				starts.push(forwarded.recv_group().await.unwrap().unwrap().start);
+				// The first group says where it ends; the others only close.
+				let group = group.unwrap();
+				drop(
+					match start {
+						1_000 => group.finish(2_000),
+						_ => group.close(),
+					}
+					.unwrap(),
+				);
+				let mut copied = forwarded.recv_group().await.unwrap().unwrap();
+				assert!(copied.read_frame().await.unwrap().is_none());
+				groups.push((copied.start, copied.end()));
 			}
 			drop(source.clone().finish().unwrap());
 			assert!(forwarded.recv_group().await.unwrap().is_none());
-			assert_eq!(starts, [1_000, 3_000, 5_000]);
+			assert_eq!(groups, [(1_000, Some(2_000)), (3_000, None), (5_000, None)]);
 			assert!(forwarded.is_skipped(0..1_000), "the encoder's first group");
 			assert!(forwarded.is_skipped(1_001..3_000), "the media runs on");
 			assert!(!forwarded.is_skipped(3_001..5_000), "a hole stays one");
