@@ -5,7 +5,7 @@ use egui::{Color32, RichText, Ui, vec2};
 
 use super::{
 	ACCENT, BG, CUE, DIM, ERR, FAINT, Fader, Icon, IconButton, Keycap, LINE, Look, Meter, Number, OK, P1, P2, P3,
-	POPOVER, Pad, Pill, Pose, Run, Sheet, Slider, TEXT, Tag, Tally, TallyFrame, Toggle,
+	POPOVER, Pad, Pill, Pose, Quick, Run, Sheet, Slider, TEXT, Tag, Tally, TallyFrame, Toggle,
 };
 use crate::fx::Fx;
 
@@ -174,6 +174,13 @@ fn buttons(ui: &mut Ui) {
 		ui.add(IconButton::new(Icon::Up, "Move up").small());
 		ui.add(IconButton::new(Icon::Remove, "Remove").small().pose(Pose::Hover));
 	});
+	caption(ui, "Quick actions: rest, hover, press");
+	ui.horizontal(|ui| {
+		for pose in [Pose::Rest, Pose::Hover, Pose::Press] {
+			ui.add(Quick::new(Icon::Panic, "BRB", "Panic", 96.0).look(Look::Cue).pose(pose));
+		}
+		ui.add(Quick::new(Icon::Clip, "Clip", "Save clip", 96.0).pose(Pose::Rest));
+	});
 	caption(ui, "Pills");
 	ui.horizontal_wrapped(|ui| {
 		ui.add(Pill::new("Excellent").dot(OK));
@@ -257,6 +264,7 @@ fn pads(ui: &mut Ui, picture: egui::TextureId) {
 				.refused(Some("Another size than the program's")),
 		);
 		ui.add(Pad::new("A scene with a long name").key(Some("F6")));
+		ui.add(Pad::new("Renamed").fault(Some("Cannot rename: a scene is already called that")));
 	});
 }
 

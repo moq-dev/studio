@@ -49,10 +49,6 @@ section has them. "Audio scene" stays the word, since it was chosen over
 Human check: a real microphone and headphones, and whether the sends read at
 a glance to someone who has never seen an audio scene.
 
-## Required
-
-- [One live picture](/quest/m0/ux/live.md) - the page and the sound strip
-
 ## Related
 
 - [Audio filters](/quest/m0/audio-filters.md) - the filter chain an opened strip configures

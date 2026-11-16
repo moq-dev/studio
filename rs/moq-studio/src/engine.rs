@@ -323,6 +323,80 @@ impl State {
 		Ok(())
 	}
 
+	/// Take the scene called `scene` on program by the show's transition, as
+	/// its pad or hotkey does, following any rename the window has yet to move
+	/// a key through; the name it went on by. The scene on program stays as it
+	/// is. The preview follows, so the scene in preview is always the one
+	/// last taken.
+	///
+	/// Refused, changing nothing, unless the scene can go on program, as
+	/// [`Collection::takes`] says.
+	pub fn take(&mut self, scene: &str, now: Instant) -> anyhow::Result<String> {
+		let scene = self
+			.follow(scene)
+			.filter(|scene| self.collection.scene(scene).is_some())
+			.with_context(|| format!("no scene is called `{scene}`"))?;
+		if self.compositor.program_scene() == Some(scene.as_str()) {
+			return Ok(scene);
+		}
+		self.collection.takes(&scene)?;
+		let previewed = self.compositor.preview_scene().map(str::to_string);
+		self.compositor.set_preview(Some(scene.clone()));
+		let transition = self.collection.transition.clone();
+		if let Err(err) = self.transition(transition, now) {
+			self.compositor.set_preview(previewed);
+			return Err(err);
+		}
+		Ok(scene)
+	}
+
+	/// The panic key: mute every microphone and every guest in `room`, hide
+	/// every item of the top layer, in one edit undo takes back, and cut at
+	/// once to the scene the show marks safe, if it marks one. Says what it
+	/// did, or fails saying what it did before it failed.
+	pub fn panic(&mut self, room: Option<&crate::guests::Room>) -> anyhow::Result<String> {
+		let mut done = Vec::new();
+		let (draft, muted, hidden) = silence(&self.collection, room)?;
+		let named = |names: &[String]| {
+			names
+				.iter()
+				.map(|name| format!("`{name}`"))
+				.collect::<Vec<_>>()
+				.join(", ")
+		};
+		match muted.is_empty() {
+			true => done.push("no microphone or guest was on".to_string()),
+			false => done.push(format!("muted {}", named(&muted))),
+		}
+		match hidden.is_empty() {
+			true => done.push("no always-on-top layer was shown".to_string()),
+			false => done.push(format!("hid {} from the always-on-top layers", named(&hidden))),
+		}
+		if !muted.is_empty() || !hidden.is_empty() {
+			self.commit(draft, None)?;
+		}
+		match self.collection.safe().map(str::to_string) {
+			None => done.push("no scene is marked safe to cut to".into()),
+			// A transition bringing it in still shows what it leaves, so that
+			// cuts too.
+			Some(safe)
+				if self.compositor.program_scene() == Some(safe.as_str()) && !self.compositor.transitioning() =>
+			{
+				done.push(format!("`{safe}` is on program"));
+			}
+			Some(safe) => {
+				let previewed = self.compositor.preview_scene().map(str::to_string);
+				self.compositor.set_preview(Some(safe.clone()));
+				if let Err(err) = self.cut() {
+					self.compositor.set_preview(previewed);
+					anyhow::bail!("{}, but cannot cut to `{safe}`: {err:#}", done.join(", "));
+				}
+				done.push(format!("cut to `{safe}`"));
+			}
+		}
+		Ok(done.join(", and "))
+	}
+
 	/// Restart the source called `name`, as an edit would, such as to reload a
 	/// web page.
 	pub fn restart(&mut self, name: &str) {
@@ -336,6 +410,49 @@ impl State {
 		self.stale = true;
 		self.edits.record();
 	}
+}
+
+/// The edit panic makes: it mutes every microphone `collection` has, and
+/// every source playing a guest in `room`, that is not muted, and hides every
+/// visible item of the top layer, whatever it shows. Also the sources it
+/// mutes, and the sources it hides, each once. Other broadcasts and media stay
+/// on. The edit is empty when there is nothing to do.
+fn silence(
+	collection: &Collection,
+	room: Option<&crate::guests::Room>,
+) -> Result<(Draft, Vec<String>, Vec<String>), moq_scene::Error> {
+	let voice = |source: &moq_scene::Source| {
+		matches!(source, moq_scene::Source::Microphone { .. }) || room.is_some_and(|room| room.plays_guest(source))
+	};
+	let muted: Vec<String> = collection
+		.sources
+		.iter()
+		.filter(|(_, source)| voice(source))
+		.map(|(name, _)| name)
+		.filter(|name| !collection.audio.get(*name).is_some_and(|audio| audio.muted))
+		.cloned()
+		.collect();
+	let mut draft = collection.draft("Panic: mute every microphone and guest, hide the always-on-top layers");
+	for name in &muted {
+		let audio = collection.audio.get(name).cloned().unwrap_or_default();
+		draft.set_audio(name, Some(moq_scene::Audio { muted: true, ..audio }))?;
+	}
+	let mut hidden: Vec<String> = Vec::new();
+	let top = moq_scene::Layer::top();
+	for (index, item) in collection.top.iter().enumerate().filter(|(_, item)| item.visible) {
+		draft.set_item(
+			&top,
+			index,
+			moq_scene::Item {
+				visible: false,
+				..item.clone()
+			},
+		)?;
+		if !hidden.contains(&item.source) {
+			hidden.push(item.source.clone());
+		}
+	}
+	Ok((draft, muted, hidden))
 }
 
 /// The sources the masks among `filters` read: a mask's picture shapes what
@@ -957,6 +1074,7 @@ impl Engine {
 			output: moq_video::render::output(&gpu.device),
 			publish: Some(publish.sources.clone()),
 			browser: browser(&gpu)?,
+			grants: grants(autosave.path())?,
 		});
 		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
 		compositor.fit(&collection)?;
@@ -3027,18 +3145,50 @@ fn browser(gpu: &Gpu) -> anyhow::Result<Option<moq_scene::browser::Helper>> {
 }
 
 /// Where browser sources keep their cookies and logins, whichever scene file
-/// is open: `moq-studio/browser` in the user's data directory, as the XDG base
-/// directories name it, since browser sources run on Linux only for now.
+/// is open: `moq-studio/browser` in the user's data directory, since browser
+/// sources run on Linux only for now.
 fn browser_profile() -> anyhow::Result<PathBuf> {
-	let data = match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+	Ok(xdg("XDG_DATA_HOME", ".local/share")?.join("moq-studio/browser"))
+}
+
+/// Where the system picker's grants for the scene file at `scene` are kept:
+/// `moq-studio/portal.toml` in the user's state directory, on Linux, the one
+/// platform with the picker.
+fn grants(scene: &Path) -> anyhow::Result<Option<moq_scene::Grants>> {
+	if !cfg!(target_os = "linux") {
+		return Ok(None);
+	}
+	let file = xdg("XDG_STATE_HOME", ".local/state")?.join("moq-studio/portal.toml");
+	Ok(Some(moq_scene::Grants::new(file, &grant_key(scene)?)))
+}
+
+/// The one path the scene file at `scene` keeps its grants under, however
+/// it was named: with `..` and symlinks resolved, so opening it another way
+/// shows no picker again. A scene file not written yet resolves as autosave
+/// will write it, through any dangling symlinks and then its directory, so it
+/// keeps the key it gets once written.
+fn grant_key(scene: &Path) -> std::io::Result<PathBuf> {
+	let scene = std::path::absolute(crate::autosave::resolve(scene)?)?;
+	if let Ok(scene) = std::fs::canonicalize(&scene) {
+		return Ok(scene);
+	}
+	let resolved = scene
+		.parent()
+		.zip(scene.file_name())
+		.and_then(|(dir, name)| Some(std::fs::canonicalize(dir).ok()?.join(name)));
+	Ok(resolved.unwrap_or(scene))
+}
+
+/// The XDG base directory `var` names, or `fallback` under the home directory.
+fn xdg(var: &str, fallback: &str) -> anyhow::Result<PathBuf> {
+	match std::env::var_os(var).map(PathBuf::from) {
 		// The spec ignores a relative one.
-		Some(data) if data.is_absolute() => data,
+		Some(dir) if dir.is_absolute() => Ok(dir),
 		_ => {
-			let home = std::env::var_os("HOME").context("no HOME to keep the browser profile in")?;
-			PathBuf::from(home).join(".local/share")
+			let home = std::env::var_os("HOME").with_context(|| format!("no HOME to find {var}'s default in"))?;
+			Ok(PathBuf::from(home).join(fallback))
 		}
-	};
-	Ok(data.join("moq-studio/browser"))
+	}
 }
 
 /// Run a source on its own thread until its feed is dropped, or fail the
@@ -3104,6 +3254,35 @@ mod tests {
 
 	/// Bounds each step, so a stall fails rather than hangs.
 	const TIMEOUT: Duration = Duration::from_secs(30);
+
+	/// One scene file keeps one grant key however it is named, written yet
+	/// or not.
+	#[cfg(unix)]
+	#[test]
+	fn a_scene_file_has_one_grant_key_however_it_is_named() {
+		let dir = tempfile::tempdir().unwrap();
+		let dir = std::fs::canonicalize(dir.path()).unwrap();
+		std::fs::create_dir(dir.join("sub")).unwrap();
+		std::os::unix::fs::symlink(dir.join("sub"), dir.join("link")).unwrap();
+		let scene = dir.join("show.toml");
+		// A dangling chain of links, which autosave creates the scene file through.
+		std::os::unix::fs::symlink("../show.toml", dir.join("sub/middle.toml")).unwrap();
+		std::os::unix::fs::symlink("link/middle.toml", dir.join("chain.toml")).unwrap();
+		let names = [
+			scene.clone(),
+			dir.join("sub/../show.toml"),
+			dir.join("link/../show.toml"),
+			dir.join("chain.toml"),
+		];
+
+		let unwritten: Vec<_> = names.iter().map(|name| grant_key(name).unwrap()).collect();
+		std::fs::write(&scene, "").unwrap();
+		std::os::unix::fs::symlink(&scene, dir.join("alias.toml")).unwrap();
+		for name in names.iter().chain([&dir.join("alias.toml")]) {
+			assert_eq!(grant_key(name).unwrap(), scene, "{name:?}");
+		}
+		assert!(unwritten.iter().all(|key| *key == scene), "{unwritten:?}");
+	}
 
 	/// How the tests start a studio, live on `relays`.
 	fn launch(gpu: Gpu, relays: Vec<Relay>, recordings: &Path) -> Launch {
@@ -3490,6 +3669,180 @@ mod tests {
 
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+	}
+
+	/// A pad takes its scene by the show's transition, and takes nothing for
+	/// the scene already on program, one that cannot go there, or one that
+	/// is not there at all. The panic key then cuts at once to the safe scene,
+	/// even part way through the transition.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_pad_takes_and_the_panic_key_cuts_to_safety() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut loaded = red_canvas();
+		let collection = &mut loaded.collection;
+		collection.transition = moq_scene::Transition::Fade {
+			duration: Duration::from_secs(60),
+		};
+		let logo = moq_scene::Item::new("red", moq_scene::Rect::fill(&collection.canvas));
+		collection.top.push(logo);
+		let main = collection.scenes[0].name.clone();
+		let mut brb = moq_scene::Scene::new("BRB");
+		brb.safe = true;
+		let mut portrait = moq_scene::Scene::new("Portrait");
+		portrait.size = Some(moq_scene::Size {
+			width: 360,
+			height: 640,
+		});
+		collection
+			.scenes
+			.extend([moq_scene::Scene::new("Guest"), brb, portrait]);
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = Engine::start(launch(gpu, Vec::new(), dir.path()), autosave, loaded)
+			.await
+			.expect("the studio starts");
+		{
+			let mut state = engine.state.lock().unwrap();
+			let now = kio::clock::now();
+			let takes = state.takes;
+			assert_eq!(state.take(&main, now).unwrap(), main, "already on program");
+			let refused = state.take("Portrait", now).unwrap_err();
+			assert!(format!("{refused:#}").contains("cannot go on program"), "{refused:#}");
+			assert!(state.take("Nobody", now).is_err());
+			assert_eq!(state.takes, takes, "none of them took anything");
+			assert_eq!(state.compositor.program_scene(), Some(main.as_str()));
+
+			assert_eq!(state.take("Guest", now).unwrap(), "Guest");
+			assert_eq!(state.compositor.program_scene(), Some("Guest"));
+			assert!(state.compositor.transitioning(), "by the show's fade");
+			assert_eq!(state.takes, takes + 1);
+
+			let said = state.panic(None).unwrap();
+			assert_eq!(
+				said,
+				"no microphone or guest was on, and hid `red` from the always-on-top layers, and cut to `BRB`"
+			);
+			assert_eq!(state.compositor.program_scene(), Some("BRB"));
+			assert!(!state.compositor.transitioning(), "a cut, at once");
+			assert_eq!(state.takes, takes + 2);
+			assert!(!state.collection.top[0].visible, "the always-on-top layer is off");
+			let said = state.panic(None).unwrap();
+			assert_eq!(
+				said,
+				"no microphone or guest was on, and no always-on-top layer was shown, and `BRB` is on program"
+			);
+			assert_eq!(state.takes, takes + 2);
+			state.undo().unwrap();
+			assert!(state.collection.top[0].visible, "one undo brings it back");
+
+			// Mid-fade into the safe scene, the panic key still cuts, so what
+			// the fade leaves goes off at once.
+			assert_eq!(state.take(&main, now).unwrap(), main);
+			assert_eq!(state.take("BRB", now).unwrap(), "BRB");
+			assert!(state.compositor.transitioning());
+			let said = state.panic(None).unwrap();
+			assert_eq!(
+				said,
+				"no microphone or guest was on, and hid `red` from the always-on-top layers, and cut to `BRB`"
+			);
+			assert!(!state.compositor.transitioning(), "a cut, at once");
+			assert_eq!(state.takes, takes + 5);
+		}
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+	}
+
+	/// The panic key's edit mutes each microphone and each source playing a
+	/// guest in the room that is on, keeping the rest of their settings, and
+	/// no other source, and hides every visible top-layer item, whatever it
+	/// shows, keeping its place. With all of it done, there is nothing left to
+	/// edit.
+	#[test]
+	fn the_panic_key_mutes_every_microphone_and_guest_and_hides_the_top_layer() {
+		use crate::guests::{Room, tests};
+
+		let mut collection = Collection::new();
+		let mic = |id: Option<&str>| moq_scene::Source::Microphone {
+			id: id.map(str::to_string),
+		};
+		let broadcast = |path: &str| moq_scene::Source::Broadcast { path: path.into() };
+		collection.sources.insert("desk".into(), mic(None));
+		collection.sources.insert("lav".into(), mic(Some("usb")));
+		collection.sources.insert("spare".into(), mic(Some("spare")));
+		collection
+			.sources
+			.insert("music".into(), moq_scene::Source::SystemAudio);
+		collection
+			.sources
+			.insert("alice".into(), broadcast("guests/alice/camera.hang"));
+		collection
+			.sources
+			.insert("alice screen".into(), broadcast("guests/alice/screen.hang"));
+		// A remote feed that is not a guest, and one shaped like a guest's
+		// outside the room.
+		collection.sources.insert("feed".into(), broadcast("news/live"));
+		collection
+			.sources
+			.insert("elsewhere".into(), broadcast("lobby/bob/camera.hang"));
+		let quiet = moq_scene::Audio {
+			gain: 0.5,
+			..Default::default()
+		};
+		collection.audio.insert("lav".into(), quiet.clone());
+		collection.audio.insert("alice".into(), quiet);
+		let muted = moq_scene::Audio {
+			muted: true,
+			..Default::default()
+		};
+		collection.audio.insert("spare".into(), muted);
+
+		// The top layer: a guest twice, a microphone's meter, and an item
+		// already hidden.
+		let place = |source: &str| moq_scene::Item::new(source, moq_scene::Rect::fill(&collection.canvas));
+		let off = moq_scene::Item {
+			visible: false,
+			..place("music")
+		};
+		let top = vec![place("alice"), place("desk"), place("alice"), off];
+		collection.top = top.clone();
+
+		// Without a room, nothing is a guest.
+		let (_, muted, shown) = silence(&collection, None).unwrap();
+		assert_eq!(muted, ["desk", "lav"]);
+		assert_eq!(shown, ["alice", "desk"], "each source once, not the hidden item");
+
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = tests::key("show/guests", &["**"], &["**"]);
+		let room = Room::new(&connect, "guests", key, page, tests::EXPIRY).unwrap();
+		let (draft, muted, _) = silence(&collection, Some(&room)).unwrap();
+		assert_eq!(muted, ["alice", "alice screen", "desk", "lav"]);
+		let edit = draft.finish().unwrap();
+		assert_eq!(
+			edit.label,
+			"Panic: mute every microphone and guest, hide the always-on-top layers"
+		);
+		collection.apply(&edit).unwrap();
+		assert!(collection.top.iter().all(|item| !item.visible), "all hidden");
+		for (now, before) in collection.top.iter().zip(&top) {
+			assert_eq!(now.rect, before.rect, "in place");
+			assert_eq!(now.source, before.source);
+		}
+		collection.apply(&edit.inverse()).unwrap();
+		assert_eq!(collection.top, top, "one undo brings it back");
+		collection.apply(&edit).unwrap();
+		for name in ["desk", "lav", "spare", "alice", "alice screen"] {
+			assert!(collection.audio[name].muted, "{name}");
+		}
+		assert_eq!(collection.audio["lav"].gain, 0.5, "kept");
+		assert_eq!(collection.audio["alice"].gain, 0.5, "kept");
+		for name in ["music", "feed", "elsewhere"] {
+			assert!(!collection.audio.get(name).is_some_and(|audio| audio.muted), "{name}");
+		}
+		let (draft, muted, shown) = silence(&collection, Some(&room)).unwrap();
+		assert!(muted.is_empty() && shown.is_empty());
+		assert!(draft.finish().unwrap().changes.is_empty(), "nothing to edit");
 	}
 
 	/// A rendition a resize retired while its encoder was still opening must

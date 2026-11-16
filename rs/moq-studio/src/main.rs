@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
@@ -276,10 +277,20 @@ struct Window {
 	keyboard: hotkeys::Keyboard,
 	/// The window's own effects, on the setup screen and in the studio.
 	fx: fx::Fx,
+	/// Whether the studio's title bar is the window's frame, rather than the
+	/// desktop's, which guided setup keeps.
+	framed: bool,
+	/// Set once the window is asked to close, as [`Events::closed`] is.
+	closed: Arc<AtomicBool>,
 }
 
 impl eframe::App for Window {
 	fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+		// The title bar's Close asks egui rather than the desktop, so no
+		// window event says so.
+		if ctx.input(|input| input.viewport().close_requested()) {
+			self.closed.store(true, Ordering::Relaxed);
+		}
 		if let App::Studio(studio) = &mut self.app {
 			studio.logic(ctx, frame);
 		}
@@ -311,7 +322,13 @@ impl Window {
 			App::Starting(engine) => engine.clone(),
 		};
 		let _ = self.started.set(engine.clone());
-		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
+		// After setup, the desktop's frame goes. macOS cannot draw under its
+		// title bar once the window is open, so it keeps it until a restart.
+		if !self.framed && !cfg!(target_os = "macos") {
+			ui.ctx().send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+			self.framed = true;
+		}
+		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone(), self.framed);
 		studio.load(hotkeys::Window {
 			frame,
 			ctx: ui.ctx(),
@@ -327,9 +344,9 @@ impl Window {
 struct Events<'a> {
 	eframe: eframe::EframeWinitApplication<'a>,
 	keyboard: hotkeys::Keyboard,
-	/// Whether the window was asked to close, since eframe only logs the error
-	/// that stops it otherwise.
-	closed: bool,
+	/// Whether the window was asked to close, by the desktop or the studio's
+	/// own title bar, since eframe only logs the error that stops it otherwise.
+	closed: Arc<AtomicBool>,
 }
 
 impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
@@ -359,7 +376,7 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 				}
 			}
 			WindowEvent::ModifiersChanged(modifiers) => self.keyboard.modifiers(modifiers.state()),
-			WindowEvent::CloseRequested => self.closed = true,
+			WindowEvent::CloseRequested => self.closed.store(true, Ordering::Relaxed),
 			_ => {}
 		}
 		self.eframe.window_event(event_loop, id, event);
@@ -409,14 +426,29 @@ fn run(
 	runtime: tokio::runtime::Handle,
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
 ) -> anyhow::Result<()> {
+	// The studio's title bar is the window's: the desktop draws no frame, and
+	// macOS draws its buttons over the studio's bar. Guided setup keeps the
+	// desktop's until it starts the studio.
+	let framed = matches!(app, App::Starting(_));
+	let mut viewport = egui::ViewportBuilder::default()
+		.with_title("kixel.live Studio")
+		// The Wayland app id and X11 class, which the desktop finds the
+		// app's entry and icon by: the entry's file name, without `.desktop`.
+		.with_app_id("live.kixel.studio")
+		.with_icon(icon())
+		.with_inner_size([1440.0, 900.0])
+		.with_min_inner_size(ui::MIN_SIZE);
+	if framed {
+		viewport = match cfg!(target_os = "macos") {
+			true => viewport
+				.with_fullsize_content_view(true)
+				.with_titlebar_shown(false)
+				.with_title_shown(false),
+			false => viewport.with_decorations(false),
+		};
+	}
 	let options = eframe::NativeOptions {
-		viewport: egui::ViewportBuilder::default()
-			.with_title("kixel.live Studio")
-			// The Wayland app id and X11 class, which the desktop finds the
-			// app's entry and icon by: the entry's file name, without `.desktop`.
-			.with_app_id("live.kixel.studio")
-			.with_icon(icon())
-			.with_inner_size([1440.0, 900.0]),
+		viewport,
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
 			// The window draws on the device the compositor does, so preview and
 			// program reach the screen without leaving the GPU.
@@ -438,6 +470,8 @@ fn run(
 		.context("cannot open the window")?;
 	let keyboard = hotkeys::Keyboard::default();
 	let window_keyboard = keyboard.clone();
+	let closed = Arc::new(AtomicBool::new(false));
+	let window_closed = closed.clone();
 	let eframe = eframe::create_native(
 		"moq-studio",
 		options,
@@ -455,6 +489,8 @@ fn run(
 				started,
 				keyboard: window_keyboard,
 				fx,
+				framed,
+				closed: window_closed,
 			}))
 		}),
 		&event_loop,
@@ -462,10 +498,13 @@ fn run(
 	let mut events = Events {
 		eframe,
 		keyboard,
-		closed: false,
+		closed: closed.clone(),
 	};
 	event_loop.run_app(&mut events).context("the window failed")?;
-	anyhow::ensure!(events.closed, "the window failed; the error is logged above");
+	anyhow::ensure!(
+		closed.load(Ordering::Relaxed),
+		"the window failed; the error is logged above"
+	);
 	Ok(())
 }
 

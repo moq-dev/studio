@@ -628,12 +628,22 @@ impl Room {
 		identity: &str,
 	) -> impl Iterator<Item = (&'a String, Kind)> {
 		collection.sources.iter().filter_map(move |(name, source)| {
-			let Source::Broadcast { path } = source else {
-				return None;
-			};
-			let (guest, kind) = guest(&Path::new(path).ok()?.strip_prefix(&self.path)?)?;
+			let (guest, kind) = self.guest_of(source)?;
 			(guest.as_str() == identity).then_some((name, kind))
 		})
+	}
+
+	/// Whether `source` plays a guest's camera and microphone, or their screen.
+	pub fn plays_guest(&self, source: &Source) -> bool {
+		self.guest_of(source).is_some()
+	}
+
+	/// The guest `source` plays, and which of their broadcasts.
+	fn guest_of(&self, source: &Source) -> Option<(Path, Kind)> {
+		let Source::Broadcast { path } = source else {
+			return None;
+		};
+		guest(&Path::new(path).ok()?.strip_prefix(&self.path)?)
 	}
 }
 

@@ -5,10 +5,6 @@
 use egui::{Color32, ImageSource, include_image};
 
 /// An icon, by its role in the studio.
-#[cfg_attr(
-	not(test),
-	expect(dead_code, reason = "the title bar and pages draw the rest: quest/m0/ux/live.md")
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
 	Undo,
@@ -22,6 +18,10 @@ pub enum Icon {
 	Shown,
 	Hidden,
 	Panic,
+	#[cfg_attr(
+		not(test),
+		expect(dead_code, reason = "Studio mode's switch: quest/m0/ux/studio-mode.md")
+	)]
 	StudioMode,
 	Add,
 	Close,
@@ -30,18 +30,47 @@ pub enum Icon {
 	Down,
 	Remove,
 	Copy,
+	Paste,
 	Hotkeys,
 	Play,
 	Stop,
 	Reload,
 	Link,
+	/// The rest of a layer's actions.
 	More,
+	MicMuted,
+	Minimize,
+	Maximize,
+	Live,
+	Build,
+	Mix,
+	Review,
+	Lock,
+	Unlock,
+	Crop,
+	/// Removing a picture's background.
+	CutOut,
+	/// Passing the pointer and keyboard to a web page.
+	Interact,
+	History,
+	/// What a layer shows, by its source's kind.
+	Camera,
+	Display,
+	Window,
+	Web,
+	Text,
+	Image,
+	Media,
+	Color,
+	Broadcast,
+	Scene,
+	Replay,
 }
 
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 25] = [
+	pub const ALL: [Self; 50] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -61,12 +90,37 @@ impl Icon {
 		Self::Down,
 		Self::Remove,
 		Self::Copy,
+		Self::Paste,
 		Self::Hotkeys,
 		Self::Play,
 		Self::Stop,
 		Self::Reload,
 		Self::Link,
 		Self::More,
+		Self::MicMuted,
+		Self::Minimize,
+		Self::Maximize,
+		Self::Live,
+		Self::Build,
+		Self::Mix,
+		Self::Review,
+		Self::Lock,
+		Self::Unlock,
+		Self::Crop,
+		Self::CutOut,
+		Self::Interact,
+		Self::History,
+		Self::Camera,
+		Self::Display,
+		Self::Window,
+		Self::Web,
+		Self::Text,
+		Self::Image,
+		Self::Media,
+		Self::Color,
+		Self::Broadcast,
+		Self::Scene,
+		Self::Replay,
 	];
 
 	fn source(self) -> ImageSource<'static> {
@@ -90,12 +144,37 @@ impl Icon {
 			Self::Down => include_image!("../../assets/icons/arrow-down.svg"),
 			Self::Remove => include_image!("../../assets/icons/trash-2.svg"),
 			Self::Copy => include_image!("../../assets/icons/copy.svg"),
+			Self::Paste => include_image!("../../assets/icons/clipboard-paste.svg"),
 			Self::Hotkeys => include_image!("../../assets/icons/keyboard.svg"),
 			Self::Play => include_image!("../../assets/icons/play.svg"),
 			Self::Stop => include_image!("../../assets/icons/square.svg"),
 			Self::Reload => include_image!("../../assets/icons/rotate-ccw.svg"),
 			Self::Link => include_image!("../../assets/icons/link.svg"),
-			Self::More => include_image!("../../assets/icons/chevron-down.svg"),
+			Self::More => include_image!("../../assets/icons/ellipsis.svg"),
+			Self::MicMuted => include_image!("../../assets/icons/mic-off.svg"),
+			Self::Minimize => include_image!("../../assets/icons/minus.svg"),
+			Self::Maximize => include_image!("../../assets/icons/square.svg"),
+			Self::Live => include_image!("../../assets/icons/video.svg"),
+			Self::Build => include_image!("../../assets/icons/layers.svg"),
+			Self::Mix => include_image!("../../assets/icons/sliders-vertical.svg"),
+			Self::Review => include_image!("../../assets/icons/film.svg"),
+			Self::Lock => include_image!("../../assets/icons/lock.svg"),
+			Self::Unlock => include_image!("../../assets/icons/lock-open.svg"),
+			Self::Crop => include_image!("../../assets/icons/crop.svg"),
+			Self::CutOut => include_image!("../../assets/icons/wand-sparkles.svg"),
+			Self::Interact => include_image!("../../assets/icons/mouse-pointer-click.svg"),
+			Self::History => include_image!("../../assets/icons/history.svg"),
+			Self::Camera => include_image!("../../assets/icons/video.svg"),
+			Self::Display => include_image!("../../assets/icons/monitor.svg"),
+			Self::Window => include_image!("../../assets/icons/app-window.svg"),
+			Self::Web => include_image!("../../assets/icons/globe.svg"),
+			Self::Text => include_image!("../../assets/icons/type.svg"),
+			Self::Image => include_image!("../../assets/icons/image.svg"),
+			Self::Media => include_image!("../../assets/icons/film.svg"),
+			Self::Color => include_image!("../../assets/icons/palette.svg"),
+			Self::Broadcast => include_image!("../../assets/icons/radio-tower.svg"),
+			Self::Scene => include_image!("../../assets/icons/layers.svg"),
+			Self::Replay => include_image!("../../assets/icons/rewind.svg"),
 		}
 	}
 

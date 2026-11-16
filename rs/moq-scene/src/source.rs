@@ -256,6 +256,9 @@ pub struct Context {
 	pub browser: Option<crate::browser::Helper>,
 	/// Where local sources publish their own tracks, or `None` to publish nothing.
 	pub publish: Option<Publish>,
+	/// Where picked displays and windows keep their grants, or `None` to show
+	/// the picker each time one opens.
+	pub grants: Option<crate::Grants>,
 }
 
 /// Advances a bus sample-exact on the clock from its start, as the clock's
@@ -312,6 +315,9 @@ pub struct Sources {
 	mixes: BTreeMap<String, Mix>,
 	/// The sources on program, as last set.
 	on_program: BTreeSet<String>,
+	/// The picked displays and windows the last sync ran, by name, whose
+	/// grants are kept, or `None` before the first.
+	picked: Option<BTreeSet<String>>,
 }
 
 impl Sources {
@@ -322,6 +328,7 @@ impl Sources {
 			feeds: BTreeMap::new(),
 			mixes: BTreeMap::new(),
 			on_program: BTreeSet::new(),
+			picked: None,
 		}
 	}
 
@@ -362,6 +369,7 @@ impl Sources {
 	/// replacement never plays over it. Panics on a gain, pan, or delay
 	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
+		self.forget_grants(collection);
 		let mixes = &self.mixes;
 		self.feeds.retain(|name, feed| {
 			let keep = collection.sources.get(name) == Some(&feed.source);
@@ -453,6 +461,26 @@ impl Sources {
 			}
 		}
 		drivers
+	}
+
+	/// Forget the grant of each picked display or window `collection` no
+	/// longer has, such as one removed or renamed, since a grant is a
+	/// credential.
+	fn forget_grants(&mut self, collection: &Collection) {
+		let Some(grants) = &self.context.grants else { return };
+		let picked: BTreeSet<String> = collection
+			.sources
+			.iter()
+			.filter(|(_, source)| matches!(source, Source::PickedDisplay | Source::PickedWindow))
+			.map(|(name, _)| name.clone())
+			.collect();
+		if self.picked.as_ref() == Some(&picked) {
+			return;
+		}
+		match grants.retain(&picked) {
+			Ok(()) => self.picked = Some(picked),
+			Err(err) => tracing::warn!(%err, "cannot forget the grants of removed sources"),
+		}
 	}
 
 	/// Stop the source called `name`, so the next [`sync`](Self::sync) starts
@@ -767,6 +795,10 @@ pub struct Driver {
 	/// A layer's broadcast path, and the clock of the broadcast source it
 	/// plays on.
 	follows: Option<(String, sync::Consumer)>,
+	/// A picked source's right to keep its grant, taken as it opens, so a
+	/// newer one supersedes it whatever order the drivers run in.
+	#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
+	grant: Option<crate::grant::Claim>,
 }
 
 /// Where a source's own track goes, its claim on the local catalog's listing
@@ -929,6 +961,7 @@ impl Driver {
 			Source::Camera { id } => Video::Camera(id.clone()),
 			Source::Display { id } => Video::Display(id.clone()),
 			Source::Window { id } => Video::Window(id.clone()),
+			Source::PickedDisplay | Source::PickedWindow => return self.picked(source, listing).await,
 			Source::Microphone { id } => return self.listen(Audio::Microphone(id.clone()), listing).await,
 			Source::SystemAudio => return self.listen(Audio::System, listing).await,
 			Source::Color { .. }
@@ -947,6 +980,51 @@ impl Driver {
 
 		let mut config = moq_video::capture::Config::default();
 		config.source = video;
+		self.capture(config, listing).await
+	}
+
+	/// Capture a display or window the system picker grants, starting from
+	/// the grant [`Context::grants`] kept for this source, and keeping each
+	/// grant the portal replaces it with, or forgetting it once spent.
+	#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
+	async fn picked(&self, source: &Source, listing: Option<&Listing<'_>>) -> Result<(), Error> {
+		use moq_video::capture::portal::Kind;
+
+		let kind = match source {
+			Source::PickedDisplay => Kind::Screen,
+			_ => Kind::Window,
+		};
+		let claim = self.grant.as_ref();
+		let selection = picker::seeded(kind, claim)?;
+		let mut watch = selection.restore_token();
+		let mut config = moq_video::capture::Config::default();
+		config.source = moq_video::capture::Source::Portal(selection);
+
+		let result = tokio::select! {
+			result = self.capture(config, listing) => result,
+			err = picker::keep(&mut watch, claim) => err,
+		};
+		// The capture can end on a change not yet kept, such as the user
+		// stopping the share, which spends the grant.
+		let kept = picker::store(claim, watch.token());
+		result.and(kept)
+	}
+
+	#[cfg(all(feature = "capture", not(all(target_os = "linux", feature = "pipewire"))))]
+	async fn picked(&self, _: &Source, _: Option<&Listing<'_>>) -> Result<(), Error> {
+		Err(Error::Unsupported(
+			"the system's screen-sharing picker needs Linux and the `pipewire` feature".into(),
+		))
+	}
+
+	/// Capture what `config` names until it ends. A picture is also encoded
+	/// onto the source's own track as it is shown, when `listing` is set.
+	#[cfg(feature = "capture")]
+	async fn capture(
+		&self,
+		mut config: moq_video::capture::Config,
+		listing: Option<&Listing<'_>>,
+	) -> Result<(), Error> {
 		config.output = self.context.output;
 		let mut stream = moq_video::capture::open(&config).await?;
 
@@ -963,7 +1041,11 @@ impl Driver {
 		// A display or window delivers nothing while its screen stands still,
 		// so going into use reopens its capture, which starts with the picture
 		// as it is. A camera delivers its next picture within a frame anyway.
-		let still = matches!(source, Source::Display { .. } | Source::Window { .. });
+		// A picked one repeats its last picture while its screen stands still.
+		let still = matches!(
+			config.source,
+			moq_video::capture::Source::Display(_) | moq_video::capture::Source::Window(_)
+		);
 		let result = async {
 			// Whether a change of use is still to be acted on: not again until
 			// a picture arrives, since a closed encoder opens only on one.
@@ -2400,8 +2482,90 @@ fn open(
 		silent,
 		clock,
 		follows,
+		#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
+		grant: match source {
+			Source::PickedDisplay | Source::PickedWindow => context.grants.as_ref().map(|grants| grants.claim(name)),
+			_ => None,
+		},
 	};
 	(feed, driver)
+}
+
+/// The system picker's grants, as a picked source keeps them.
+#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
+mod picker {
+	use moq_video::capture::portal::{Kind, RestoreToken, RestoreTokenConsumer, Selection};
+
+	use crate::Error;
+	use crate::grant::Claim;
+
+	/// A selection of `kind`, seeded with the grant `claim` holds.
+	pub(super) fn seeded(kind: Kind, claim: Option<&Claim>) -> Result<Selection, Error> {
+		let selection = Selection::new(kind);
+		Ok(match claim.map(Claim::get).transpose()?.flatten() {
+			Some(grant) => selection.with_restore_token(RestoreToken::new(grant)),
+			None => selection,
+		})
+	}
+
+	/// Keep each grant `watch` sees under `claim`, until the selection is gone.
+	pub(super) async fn keep(watch: &mut RestoreTokenConsumer, claim: Option<&Claim>) -> Result<(), Error> {
+		while let Some(grant) = watch.changed().await {
+			store(claim, grant)?;
+		}
+		std::future::pending().await
+	}
+
+	/// Keep `grant` under `claim`, or forget the grant on `None`.
+	pub(super) fn store(claim: Option<&Claim>, grant: Option<RestoreToken>) -> Result<(), Error> {
+		match claim {
+			Some(claim) => claim.set(grant.as_ref().map(RestoreToken::as_str)),
+			None => Ok(()),
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::path::Path;
+
+		use super::*;
+
+		#[tokio::test]
+		async fn a_picked_source_keeps_each_grant_across_opens() {
+			let dir = tempfile::tempdir().unwrap();
+			let grants = crate::Grants::new(dir.path().join("portal.toml"), Path::new("/scene.toml"));
+			let claim = grants.claim("Screen");
+			claim.set(Some("kept")).unwrap();
+
+			// The grant kept by an earlier run seeds the next.
+			let selection = seeded(Kind::Screen, Some(&claim)).unwrap();
+			let mut watch = selection.restore_token();
+			assert_eq!(watch.token(), Some(RestoreToken::new("kept")));
+			let other = grants.claim("Other");
+			assert!(
+				seeded(Kind::Window, Some(&other))
+					.unwrap()
+					.restore_token()
+					.token()
+					.is_none()
+			);
+
+			// The portal replacing it, as a grant does, is kept at once.
+			let keeping = keep(&mut watch, Some(&claim));
+			tokio::pin!(keeping);
+			selection.clone().with_restore_token(RestoreToken::new("replaced"));
+			tokio::select! {
+				biased;
+				_ = &mut keeping => unreachable!("keeps until the selection is gone"),
+				() = tokio::task::yield_now() => {}
+			}
+			assert_eq!(claim.get().unwrap().as_deref(), Some("replaced"));
+
+			// A spent grant is forgotten.
+			store(Some(&claim), None).unwrap();
+			assert_eq!(claim.get().unwrap(), None);
+		}
+	}
 }
 
 impl Source {
@@ -2421,6 +2585,8 @@ impl Source {
 			Source::Camera { .. }
 			| Source::Display { .. }
 			| Source::Window { .. }
+			| Source::PickedDisplay
+			| Source::PickedWindow
 			| Source::Microphone { .. }
 			| Source::SystemAudio
 			| Source::Color { .. }
@@ -2517,6 +2683,7 @@ pub(crate) mod test {
 			output: moq_video::Output::Cpu,
 			browser: None,
 			publish: None,
+			grants: None,
 		};
 		(context, origin)
 	}
@@ -3555,6 +3722,37 @@ mod tests {
 				panic!("an overlay outside the subset fails");
 			};
 			assert!(reason.contains("`text-shadow`"), "{reason}");
+		})
+		.await;
+	}
+
+	#[tokio::test]
+	async fn removing_or_renaming_a_picked_source_forgets_its_grant() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let grants = crate::Grants::new(dir.path().join("portal.toml"), Path::new("/scene.toml"));
+			for name in ["Screen", "Window", "Camera"] {
+				grants.claim(name).set(Some(name)).unwrap();
+			}
+			let (mut context, _origin) = context(dir.path());
+			context.grants = Some(grants.clone());
+			let mut sources = Sources::new(context);
+			let mut collection = Collection::new();
+			collection.sources.insert("Screen".into(), Source::PickedDisplay);
+			collection.sources.insert("Window".into(), Source::PickedWindow);
+			collection.sources.insert("Camera".into(), Source::Camera { id: None });
+			drop(sources.sync(&collection));
+			// Read through another studio's claims, which this one's do not affect.
+			let reader = crate::Grants::new(dir.path().join("portal.toml"), Path::new("/scene.toml"));
+			let kept = |name| reader.claim(name).get().unwrap().is_some();
+			assert!(kept("Screen") && kept("Window"));
+			assert!(!kept("Camera"), "only a picked source holds a grant");
+
+			collection.sources.remove("Window");
+			let screen = collection.sources.remove("Screen").unwrap();
+			collection.sources.insert("Renamed".into(), screen);
+			drop(sources.sync(&collection));
+			assert!(!kept("Screen") && !kept("Window"));
 		})
 		.await;
 	}

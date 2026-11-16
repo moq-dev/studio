@@ -40,7 +40,3 @@ shown, and nothing records in the background for it.
 and chapters to a recording.
 
 Human check: scrubbing and picking a stretch by feel.
-
-## Required
-
-- [One live picture](/quest/m0/ux/live.md) - the page and the record button

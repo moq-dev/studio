@@ -74,10 +74,6 @@ pub fn ui_medium(size: f32) -> FontId {
 }
 
 /// The plain face, at semibold weight, for a title.
-#[cfg_attr(
-	not(test),
-	expect(dead_code, reason = "the title bar's show name: quest/m0/ux/live.md")
-)]
 pub fn ui_strong(size: f32) -> FontId {
 	FontId::new(size, FontFamily::Name(fonts::STRONG.into()))
 }
