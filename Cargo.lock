@@ -4694,6 +4694,7 @@ dependencies = [
  "raw-window-handle",
  "resvg 0.50.0",
  "rune-fx",
+ "rustix 1.1.6",
  "same-file",
  "serde",
  "tempfile",
