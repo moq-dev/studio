@@ -60,6 +60,7 @@ impl Opener {
 			gpu: self.gpu.clone(),
 			recordings: stream.recordings(&path),
 			room: room.clone(),
+			sessions: Default::default(),
 		};
 		// The room's session, which the engine ends as it stops.
 		let renew = |renewal: Option<guests::Renewal>| {
