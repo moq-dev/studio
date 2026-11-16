@@ -90,6 +90,8 @@ pub(crate) enum Setting {
 	/// The canvas, each scene's size, the encoders, and the virtual cameras.
 	#[default]
 	Show,
+	/// The folder, and what a recording holds.
+	Recording,
 	Hotkeys,
 	Effects,
 	/// The scene graph: every source, scene, and audio scene, wired.
@@ -97,11 +99,18 @@ pub(crate) enum Setting {
 }
 
 impl Setting {
-	const ALL: [Self; 4] = [Self::Show, Self::Hotkeys, Self::Effects, Self::Advanced];
+	const ALL: [Self; 5] = [
+		Self::Show,
+		Self::Recording,
+		Self::Hotkeys,
+		Self::Effects,
+		Self::Advanced,
+	];
 
 	fn name(self) -> &'static str {
 		match self {
 			Self::Show => "Show",
+			Self::Recording => "Recording",
 			Self::Hotkeys => "Hotkeys",
 			Self::Effects => "Effects",
 			Self::Advanced => "Advanced",
@@ -169,6 +178,7 @@ impl Studio {
 			)
 		};
 		let controls = Arc::new(Controls::new(engine.clone(), runtime.clone()));
+		let review = review::Review::new(&engine, &runtime);
 		let mut panels = Panels {
 			engine,
 			runtime,
@@ -221,6 +231,7 @@ impl Studio {
 			reloads: 0,
 			levels: Levels::default(),
 			graph: graph::View::default(),
+			review,
 		};
 		if dropped > 0 {
 			panels.report(Err(anyhow::anyhow!(dropped_message(dropped))));
@@ -244,6 +255,26 @@ impl Studio {
 	/// Open the stream's health in detail, as the health dot's popover would.
 	pub(crate) fn details(&mut self) {
 		self.panels.details = true;
+	}
+
+	/// Show `listing` as REVIEW's cards, as if the folder held them.
+	pub(crate) fn seed_shelf(&mut self, listing: crate::shelf::Listing) {
+		self.panels.review.seed_shelf(listing);
+	}
+
+	/// Show `view` as REVIEW's strip, as if the window held it, still at
+	/// `now`, with the stretch `picked` ago, from and to, and the head `head`
+	/// ago.
+	pub(crate) fn seed_past(
+		&mut self,
+		view: crate::past::View,
+		now: kio::clock::Instant,
+		picked: (Duration, Duration),
+		head: Duration,
+	) {
+		self.panels.review.seed_past(view, now, head);
+		self.panels.controls.replay.lock().unwrap().stretch =
+			replay::Stretch::Between(now.saturating_sub(picked.0), now.saturating_sub(picked.1));
 	}
 
 	/// Turn Studio mode on or off, as its switch would.
@@ -521,6 +552,8 @@ struct Panels {
 	/// Each sound's and audio scene's recent levels, for the meters.
 	levels: Levels,
 	graph: graph::View,
+	/// The REVIEW page's strip, cards, and what is dragged on it.
+	review: review::Review,
 }
 
 /// A layer, by the list it is in and its place there, back to front.

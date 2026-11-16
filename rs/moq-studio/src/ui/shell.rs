@@ -267,22 +267,8 @@ impl Panels {
 				ui.separator();
 				self.audio(ui);
 			}),
-			Page::Review => {
-				// The live picture beside replays and recordings.
-				let side = (stage.width() * 0.32).clamp(220.0, 420.0);
-				let card = stage.with_min_x(stage.right() - side);
-				region(ui, stage.with_max_x(card.left()), |ui| {
-					self.replay(ui);
-					ui.separator();
-					self.record(ui);
-				});
-				bar(ui, fx, card);
-				ui.painter()
-					.vline(card.left() + 0.5, card.y_range(), Stroke::new(1.0, kit::LINE));
-				let room = card.shrink(MARGIN + 10.0);
-				let room = room.with_max_y(room.top() + room.width() / snapshot.shape.max(0.5));
-				self.on_air(ui, Some(fx), fit(room, snapshot.shape));
-			}
+			// The program's card in "replay what" is the live picture.
+			Page::Review => self.review(ui, fx, stage, snapshot.shape),
 		}
 	}
 
@@ -581,18 +567,23 @@ impl Panels {
 		}
 	}
 
-	/// Start or stop recording, pulsing while it records.
+	/// Start or stop recording, from any page, pulsing and showing its clock
+	/// while it records.
 	fn record_button(&mut self, ui: &mut Ui, fx: &mut Fx) {
 		let status = self.engine.recorder.status().filter(|status| !status.done);
 		let key = self.key(&Action::Record, ui.ctx());
-		let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
-		let name = match &status {
-			None => "Start recording".to_string(),
-			Some(status) if status.stopping => "Finishing the recording".to_string(),
-			Some(status) => {
-				let elapsed = kio::clock::now().saturating_duration_since(status.started);
-				format!("Stop recording, {} in", clock(elapsed))
-			}
+		let elapsed = status
+			.as_ref()
+			.map(|status| super::review::clock(kio::clock::now().saturating_duration_since(status.started)));
+		let time = elapsed
+			.clone()
+			.map(|elapsed| ui.painter().layout_no_wrap(elapsed, kit::mono(12.0), kit::TEXT));
+		let width = time.as_ref().map_or(30.0, |time| 30.0 + time.size().x + 8.0);
+		let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+		let name = match (&status, &elapsed) {
+			(None, _) => "Start recording".to_string(),
+			(Some(status), _) if status.stopping => "Finishing the recording".to_string(),
+			(Some(_), elapsed) => format!("Stop recording, {} in", elapsed.as_deref().unwrap_or_default()),
 		};
 		let response = kit::tip(response, &name, key.as_deref());
 		let painter = ui.painter();
@@ -610,10 +601,14 @@ impl Panels {
 			egui::StrokeKind::Inside,
 		);
 		let pulse = (recording && fx.on()).then(|| Mark::new(ui.painter()));
-		let dot = Rect::from_center_size(rect.center(), Vec2::splat(9.0));
+		let dot = Rect::from_center_size(pos2(rect.left() + 15.0, rect.center().y), Vec2::splat(9.0));
 		ui.painter().circle_filled(dot.center(), 4.5, kit::ACCENT);
 		if let Some(pulse) = pulse {
 			fx.recording(&pulse.around(dot));
+		}
+		if let Some(time) = time {
+			let at = pos2(dot.right() + 7.0, rect.center().y - time.size().y / 2.0);
+			ui.painter().galley(at, time, kit::TEXT);
 		}
 		if response.clicked() {
 			self.controls.press(&Action::Record);
@@ -1011,7 +1006,7 @@ impl Panels {
 			.look(kit::Look::Boxed)
 			.key(clip_key.as_deref())
 			.note(Some(
-				"Save the last moments, as Review sets them, beside the scene file",
+				"Save the last seconds, as many as REVIEW picks, as a clip into the recordings folder",
 			));
 		let (panic_at, clip_at) = match tall {
 			true => (
@@ -1272,6 +1267,9 @@ impl Panels {
 				match setting {
 					Setting::Show => {
 						egui::ScrollArea::vertical().show(ui, |ui| self.output(ui));
+					}
+					Setting::Recording => {
+						egui::ScrollArea::vertical().show(ui, |ui| self.recording(ui));
 					}
 					Setting::Hotkeys => {
 						egui::ScrollArea::vertical().show(ui, |ui| self.hotkeys(ui, fx));
