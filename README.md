@@ -1251,12 +1251,16 @@ plus 1 for each captured source it shows that program does not. When the program
 encodes on hardware, so do the sources, and a
 session the GPU refuses fails that source's track with the encoder's reason on
 its layer rather than falling back to software. The source keeps
-drawing in the studio's own scenes. The program opens its session before any
-source, even with on demand, so the sources past the cap fail rather than
-the program; so does each scene published in the scene file at startup. A
-scene published later, past the cap, publishes without video and says why in
-the Health window. When the program encodes in software, a source takes hardware
-where it can and software otherwise.
+drawing in the studio's own scenes. The program comes first: when the GPU
+refuses the program or a published scene an encoder, such as going live while
+the sources on program hold every session, the studio closes the encoders those
+sources keep only for a replay of their recent past and opens the program's in
+their sessions. Each such source reopens once a session is given back, such as
+when the stream ends, its replay starting over; one whose track something reads,
+such as a recording, keeps its encoder. A scene published past the cap with no
+replay left to close publishes without video and says why in the Health
+window. When the program encodes in software, a source takes hardware where it can
+and software otherwise.
 
 ### Published independently
 

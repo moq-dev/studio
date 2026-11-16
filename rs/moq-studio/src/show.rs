@@ -47,6 +47,7 @@ impl Opener {
 		let launch = Launch {
 			gpu: self.gpu.clone(),
 			recordings: stream.recordings(&path),
+			sessions: Default::default(),
 		};
 		let exists = path
 			.try_exists()

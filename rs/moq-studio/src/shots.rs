@@ -356,6 +356,7 @@ fn launch(gpu: &engine::Gpu) -> engine::Launch {
 	engine::Launch {
 		gpu: gpu.clone(),
 		recordings: ".".into(),
+		sessions: Default::default(),
 	}
 }
 
