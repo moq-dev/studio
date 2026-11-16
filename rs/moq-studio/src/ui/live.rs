@@ -943,21 +943,32 @@ impl Panels {
 			);
 			ui.checkbox(forget, "Forget the saved token");
 		};
+		// The relays flags set over the saved ones this run, which the token
+		// controls key to, and whether each flag's address carries a token of
+		// its own, which the stream dials with over any kept.
+		let relay_flag = overridden.relay.then(|| stream.relay()).flatten();
+		let failover_flag = overridden.failover.then(|| stream.failover()).flatten();
+		let carries = |flag: Option<&url::Url>| flag.is_some_and(|url| crate::stream::carries_token(url.as_str()));
+		let relay_carries = !overridden.token && carries(relay_flag);
+		let failover_carries = carries(failover_flag);
 		ui.add_enabled_ui(!busy, |ui| {
 			// A flag locks only the address: the token stays the one kept for
-			// the relay in effect, which the flag may name.
+			// the relay in effect, which the flag may name, unless the flag's
+			// address carries its own.
 			field_row(ui, "Relay", "Where the program goes live, and its token.", None, |ui| {
 				address(
 					ui,
 					&mut form.relay,
 					"https://relay.example/anon",
-					overridden.relay.then_some("--connect"),
+					relay_flag.map(|url| ("--connect", url)),
 				);
-				ui.add_enabled_ui(!overridden.token, |ui| {
+				ui.add_enabled_ui(!overridden.token && !relay_carries, |ui| {
 					token(ui, &mut form.relay_token, &mut form.forget_relay_token);
 				});
 				if overridden.token {
 					super::settings::flag_note(ui, "--connect-token");
+				} else if relay_carries {
+					super::settings::cue_note(ui, "The --connect address carries its own token, used over any kept");
 				}
 			});
 			field_row(
@@ -971,9 +982,17 @@ impl Panels {
 						ui,
 						&mut form.failover,
 						"https://backup.example/anon",
-						overridden.failover.then_some("--failover"),
+						failover_flag.map(|url| ("--failover", url)),
 					);
-					token(ui, &mut form.failover_token, &mut form.forget_failover_token);
+					ui.add_enabled_ui(!failover_carries, |ui| {
+						token(ui, &mut form.failover_token, &mut form.forget_failover_token);
+					});
+					if failover_carries {
+						super::settings::cue_note(
+							ui,
+							"The --failover address carries its own token, used over any kept",
+						);
+					}
 				},
 			);
 			field_row(
@@ -1043,16 +1062,26 @@ impl Panels {
 	}
 }
 
-/// A relay's address, locked with a note when `flag` sets it for this run.
-fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<&str>) {
-	ui.add_enabled(
-		flag.is_none(),
-		egui::TextEdit::singleline(text)
-			.hint_text(hint)
-			.desired_width(f32::INFINITY),
-	);
-	if let Some(flag) = flag {
-		super::settings::flag_note(ui, flag);
+/// A relay's address, or the one `flag` sets over it for this run, without
+/// its token, locked with a note. The saved address stays in `text`, as a
+/// flag is never saved.
+fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<(&str, &url::Url)>) {
+	match flag {
+		None => {
+			ui.add(
+				egui::TextEdit::singleline(text)
+					.hint_text(hint)
+					.desired_width(f32::INFINITY),
+			);
+		}
+		Some((flag, url)) => {
+			let shown = crate::stream::redacted(url);
+			ui.add_enabled(
+				false,
+				egui::TextEdit::singleline(&mut shown.as_str()).desired_width(f32::INFINITY),
+			);
+			super::settings::flag_note(ui, flag);
+		}
 	}
 }
 

@@ -277,9 +277,7 @@ impl Controls {
 			let stream = {
 				let _following = controls.following.lock().unwrap();
 				let (stream, waiting) = controls.snapshot();
-				if waiting {
-					controls.follow(&stream);
-				}
+				controls.catch_up(&stream, waiting);
 				stream
 			};
 			// Wait out the encoder checks still running before opening anything.
@@ -399,20 +397,40 @@ impl Controls {
 		self.join_room(stream);
 	}
 
+	/// Follow `stream`'s relays if they `waiting` to be, or else join its
+	/// guests' room if the last try failed, so a room whose key file is back
+	/// joins at the next go-live, end of stream, or save, as well as on Try
+	/// again. Call it holding [`Self::following`], inside the runtime.
+	fn catch_up(&self, stream: &Stream, waiting: bool) {
+		match waiting {
+			true => self.follow(stream),
+			false => self.join_room(stream),
+		}
+	}
+
 	/// Join the guests' room `stream` names, unless joined to it already: a
 	/// room that failed is tried again, such as once its key file is back.
-	/// Call it holding [`Self::following`], inside the runtime.
+	/// Call it holding [`Self::following`], which keeps two joins apart, as
+	/// [`Self::joined`] is let go while one reads the key file, so the UI
+	/// reading the failure never waits on the disk; inside the runtime.
 	fn join_room(&self, stream: &Stream) {
 		let room = (stream.relay().cloned(), stream.guests());
-		let mut joined = self.joined.lock().unwrap();
-		match &*joined {
-			Some((at, Ok(()))) if *at == room => return,
-			// The engine starts in no room.
-			None if room.1 == crate::guests::Config::default() => {
-				*joined = Some((room, Ok(())));
-				return;
+		{
+			let mut joined = self.joined.lock().unwrap();
+			match &*joined {
+				Some((at, Ok(()))) if *at == room => return,
+				// The engine starts in no room.
+				None if room.1 == crate::guests::Config::default() => {
+					*joined = Some((room, Ok(())));
+					return;
+				}
+				_ => {}
 			}
-			_ => {}
+		}
+		// Panic mutes its guests even if it cannot be joined, such as when
+		// its key file is gone, since one already in a scene may still play.
+		if let Some(path) = room.1.path() {
+			self.engine.remember_room(&path);
 		}
 		let joining =
 			crate::guests::Joining::connect(&room.1, room.0.as_ref(), &stream.client(), stream.quic().clone());
@@ -425,31 +443,14 @@ impl Controls {
 		if let Err(err) = &result {
 			tracing::error!(error = format!("{err:#}"), "guests cannot join");
 		}
-		*joined = Some((room, result.map_err(|err| format!("{err:#}"))));
+		*self.joined.lock().unwrap() = Some((room, result.map_err(|err| format!("{err:#}"))));
 	}
 
 	/// Try the guests' room that failed again, on a thread of its own, since
 	/// the credential store blocks. Off air only: on air, the settings may
 	/// hold a room that waits for the stream to end, and its end tries again.
 	pub fn retry_room(self: &Arc<Self>) {
-		let controls = self.clone();
-		let spawned = std::thread::Builder::new().name("room".into()).spawn(move || {
-			let _following = controls.following.lock().unwrap();
-			if controls.going() || controls.engine.on_air() != OnAir::Off {
-				return;
-			}
-			let (stream, waiting) = controls.snapshot();
-			let _runtime = controls.runtime.enter();
-			// Relays still to follow, such as ones that failed, go first, as
-			// the room is joined through them.
-			match waiting {
-				true => controls.follow(&stream),
-				false => controls.join_room(&stream),
-			}
-		});
-		if let Err(err) = spawned {
-			tracing::warn!(error = format!("{err:#}"), "cannot join the room");
-		}
+		drop(self.follow_saved_relays());
 	}
 
 	/// Why guests cannot join the room the settings name, if they cannot.
@@ -475,9 +476,10 @@ impl Controls {
 		self.follow_saved_relays()
 	}
 
-	/// Follow the saved relays, if any wait to be, on a thread of its own,
-	/// since the credential store blocks, unless a stream is on air or on its
-	/// way, which follows them itself.
+	/// Follow the saved relays, if any wait to be, or join the guests' room
+	/// if it failed, on a thread of its own, since the credential store
+	/// blocks, unless a stream is on air or on its way, which follows them
+	/// itself.
 	fn follow_saved_relays(self: &Arc<Self>) -> Option<std::thread::JoinHandle<()>> {
 		let controls = self.clone();
 		let spawned = std::thread::Builder::new().name("follow".into()).spawn(move || {
@@ -486,12 +488,9 @@ impl Controls {
 				return;
 			}
 			let (stream, waiting) = controls.snapshot();
-			if !waiting {
-				return;
-			}
 			// Each relay's client binds its socket on the runtime.
 			let _runtime = controls.runtime.enter();
-			controls.follow(&stream);
+			controls.catch_up(&stream, waiting);
 		});
 		spawned
 			.inspect_err(|err| tracing::warn!(error = format!("{err:#}"), "cannot follow the relays"))

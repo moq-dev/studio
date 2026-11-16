@@ -418,6 +418,13 @@ pub fn carries_token(url: &str) -> bool {
 	Url::parse(url.trim()).is_ok_and(|url| url.query_pairs().any(|(key, _)| key == "jwt"))
 }
 
+/// `url` without the token its `?jwt=` carries, to show.
+pub fn redacted(url: &Url) -> String {
+	let mut url = url.clone();
+	take_token(&mut url);
+	url.to_string()
+}
+
 /// Take the token out of `url`'s `?jwt=`, if it has one, leaving the rest of
 /// its query.
 fn take_token(url: &mut Url) -> Option<String> {
@@ -699,6 +706,7 @@ mod tests {
 		] {
 			assert!(carries_token(url), "{url}");
 			let mut parsed: Url = url.trim().parse().unwrap();
+			assert!(!redacted(&parsed).contains("abc"), "shown without it: {url}");
 			assert_eq!(take_token(&mut parsed).as_deref(), Some("abc"), "{url}");
 		}
 		for url in [

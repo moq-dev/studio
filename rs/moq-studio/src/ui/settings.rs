@@ -60,8 +60,9 @@ const LIFETIMES: [(Duration, &str); 4] = [
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Restart {
 	Canvas(Canvas),
-	/// The scene at this index, published, to this size or the program's.
-	Scene(usize, Option<moq_scene::Size>),
+	/// The scene of this name, published, to this size or the program's: by
+	/// name, as an undo or reload while the restart waits may move it.
+	Scene(String, Option<moq_scene::Size>),
 }
 
 /// What a system file dialog is picking.
@@ -338,10 +339,11 @@ impl Panels {
 			(Some(canvas), _) if canvas != current => Some(Restart::Canvas(canvas)),
 			(_, Some((index, size))) => {
 				// Only a published scene encodes, so only its size restarts anything.
+				let name = scenes[index].name.clone();
 				match scenes[index].published && on_air {
-					true => Some(Restart::Scene(index, size)),
+					true => Some(Restart::Scene(name, size)),
 					false => {
-						self.apply_restart(Restart::Scene(index, size));
+						self.apply_restart(Restart::Scene(name, size));
 						None
 					}
 				}
@@ -478,11 +480,7 @@ impl Panels {
 				"The program goes to {}x{} at {} fps.",
 				canvas.width, canvas.height, canvas.framerate
 			),
-			Restart::Scene(index, _) => {
-				let state = self.engine.state.lock().unwrap();
-				let name = state.collection().scenes.get(*index).map(|scene| scene.name.clone());
-				format!("Scene `{}` publishes at its new size.", name.unwrap_or_default())
-			}
+			Restart::Scene(name, _) => format!("Scene `{name}` publishes at its new size."),
 		};
 		let mut apply = false;
 		let closed = kit::Sheet::new(egui::Id::new("restart"), "Restart the video?").show(ctx, |ui| {
@@ -515,9 +513,9 @@ impl Panels {
 				);
 				edit(&mut state, label, None, |draft| draft.set_canvas(canvas))
 			}
-			Restart::Scene(index, size) => match state.collection().scenes.get(index).cloned() {
-				Some(scene) => {
-					let name = scene.name.clone();
+			Restart::Scene(name, size) => match state.collection().scenes.iter().position(|scene| scene.name == name) {
+				Some(index) => {
+					let scene = state.collection().scenes[index].clone();
 					let label = match size {
 						Some(size) => format!("Size scene `{name}` {}x{}", size.width, size.height),
 						None => format!("Size scene `{name}` as the program"),
@@ -1263,11 +1261,18 @@ impl Panels {
 				true => format!("Publish scene `{name}`"),
 				false => format!("Stop publishing scene `{name}`"),
 			};
-			let scene = scenes[index].clone();
+			// The scene as it is under the lock that edits it, found by name,
+			// so a reload since the copy above is kept.
 			let mut state = engine.state.lock().unwrap();
-			let result = edit(&mut state, label, None, |draft| {
-				draft.set_scene(index, Scene { published, ..scene })
-			});
+			let result = match state.collection().scenes.iter().position(|scene| scene.name == name) {
+				Some(index) => {
+					let scene = state.collection().scenes[index].clone();
+					edit(&mut state, label, None, |draft| {
+						draft.set_scene(index, Scene { published, ..scene })
+					})
+				}
+				None => Err(anyhow::anyhow!("the scene is gone")),
+			};
 			drop(state);
 			self.check(result);
 		}
@@ -1430,11 +1435,12 @@ fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce
 
 /// That `flag` sets a setting for this run, over the show's own.
 pub(super) fn flag_note(ui: &mut Ui, flag: &str) {
-	ui.label(
-		RichText::new(format!("{flag} sets this for this run"))
-			.font(kit::ui(11.5))
-			.color(kit::CUE),
-	);
+	cue_note(ui, &format!("{flag} sets this for this run"));
+}
+
+/// Why a setting is not the one saved this run, such as a flag over it.
+pub(super) fn cue_note(ui: &mut Ui, text: &str) {
+	ui.add(egui::Label::new(RichText::new(text).font(kit::ui(11.5)).color(kit::CUE)).wrap());
 }
 
 /// Words under a setting's name.

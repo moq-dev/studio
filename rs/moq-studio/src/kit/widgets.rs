@@ -474,6 +474,11 @@ impl<T: PartialEq + Clone> Widget for Segmented<'_, T> {
 			} else if option.hovered() {
 				painter.rect_filled(at, 7, P3);
 			}
+			// The option the keyboard is on, apart from the one picked, as a
+			// field shows its focus.
+			if option.has_focus() {
+				painter.rect_stroke(at, 7, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
+			}
 			let ink = match (on, option.hovered()) {
 				(true, _) => BG,
 				(false, true) => TEXT,

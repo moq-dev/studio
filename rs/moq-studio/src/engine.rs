@@ -1189,9 +1189,20 @@ impl Engine {
 		joined.as_ref().map(|joined| joined.room.clone())
 	}
 
-	/// The path of every room followed this run, the one followed now included.
+	/// The path of every room followed this run, the one followed now
+	/// included, and of every room [remembered](Self::remember_room).
 	pub fn rooms(&self) -> Vec<moq_net::Path> {
 		self.rooms.lock().unwrap().clone()
+	}
+
+	/// Keep `room` among the [rooms](Self::rooms) Panic mutes the guests of,
+	/// as one the settings named, even if it could not be joined: a guest of
+	/// it already in a scene may still play through the relays followed.
+	pub fn remember_room(&self, room: &moq_net::Path) {
+		let mut rooms = self.rooms.lock().unwrap();
+		if !rooms.contains(room) {
+			rooms.push(room.clone());
+		}
 	}
 
 	/// Follow `joining`'s room in place of the one followed now, if any:
@@ -1242,11 +1253,7 @@ impl Engine {
 				engine.state.lock().unwrap().stale = true;
 			}
 		}));
-		let mut rooms = self.rooms.lock().unwrap();
-		if !rooms.contains(room.path()) {
-			rooms.push(room.path().clone());
-		}
-		drop(rooms);
+		self.remember_room(room.path());
 		*joined = Some(Joined { room, tasks });
 		Ok(())
 	}

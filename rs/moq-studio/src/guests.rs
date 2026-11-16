@@ -124,6 +124,12 @@ pub struct Config {
 pub const DEFAULT_EXPIRY: Duration = Duration::from_secs(4 * 3600);
 
 impl Config {
+	/// The path of the room these settings name, as [`Room::path`] gives it,
+	/// whether or not its key loads.
+	pub fn path(&self) -> Option<Path> {
+		Path::new(self.room.as_deref()?).ok().filter(|path| !path.is_empty())
+	}
+
 	/// The room these settings describe on the relay at `connect`, or `None`
 	/// without a room, remembering who was removed from scenes beside the room
 	/// key.
