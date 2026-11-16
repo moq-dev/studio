@@ -5123,7 +5123,8 @@ mod tests {
 
 	/// A go-live, from a hotkey as from the sheet, waits out an encoder check
 	/// still running, such as a closed sheet's, whose hardware session the
-	/// program's encoders would count against, before it opens anything.
+	/// program's encoders would count against, before it opens anything, and
+	/// admits no new one, such as a canvas change's, until it ends.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn going_live_waits_out_an_encoder_check() {
@@ -5147,11 +5148,12 @@ mod tests {
 			stream,
 			tokio::runtime::Handle::current(),
 		));
-		let probing = controls.probing();
+		let probing = controls.probing().expect("a check is admitted off air");
 		controls.go_live().expect("the go-live starts");
 		kio::clock::sleep(Duration::from_millis(300)).await;
 		assert!(controls.going(), "the go-live waits for the check");
 		assert_eq!(*controls.refused.lock().unwrap(), None);
+		assert!(controls.probing().is_none(), "no new check while going live");
 		drop(probing);
 		kio::clock::timeout(TIMEOUT, async {
 			while controls.going() {
@@ -5161,6 +5163,7 @@ mod tests {
 		.await
 		.expect("the go-live goes on once the check ends");
 		assert!(controls.refused.lock().unwrap().is_some(), "and reads where to go");
+		assert!(controls.probing().is_some(), "checks are admitted once it ends");
 		engine.stop();
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
@@ -5195,7 +5198,7 @@ mod tests {
 				)
 				.unwrap();
 				stream.save(saved).unwrap();
-				crate::show::follow(&engine, &stream);
+				crate::show::follow(&engine, &stream)
 			})
 		};
 		let watched = || -> Vec<String> { engine.watched().into_iter().map(|(relay, _)| relay.endpoint).collect() };
@@ -5205,7 +5208,10 @@ mod tests {
 			relay: relay(9),
 			..Default::default()
 		};
-		follow(Default::default(), first).await.unwrap();
+		assert!(
+			follow(Default::default(), first).await.unwrap(),
+			"every relay is set up"
+		);
 		assert_eq!(watched(), ["https://127.0.0.1:9"]);
 
 		let mut fixed = moq_tokio::connect::Config::default();
@@ -5215,7 +5221,7 @@ mod tests {
 			failover: relay(11),
 			..Default::default()
 		};
-		follow(fixed, unset).await.unwrap();
+		assert!(!follow(fixed, unset).await.unwrap(), "the follow says it failed");
 		assert_eq!(watched(), ["https://127.0.0.1:9"], "the last relay is kept");
 
 		engine.stop();

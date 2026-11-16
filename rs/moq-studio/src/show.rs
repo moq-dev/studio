@@ -108,7 +108,10 @@ impl Opener {
 /// why. Blocks on the credential store: call it off the window's thread,
 /// outside an async task, inside the tokio runtime, and through
 /// [`Controls`](crate::controls::Controls), which orders the follows.
-pub fn follow(engine: &Engine, stream: &Stream) {
+/// Says whether every relay was set up, so a follow that was not can be
+/// tried again.
+#[must_use]
+pub fn follow(engine: &Engine, stream: &Stream) -> bool {
 	let each = [(true, false), (false, true)].map(|(relay, failover)| stream::Switched { relay, failover });
 	let mut relays = Vec::new();
 	let mut failed = false;
@@ -126,7 +129,8 @@ pub fn follow(engine: &Engine, stream: &Stream) {
 	// sources and guests rather than none.
 	if relays.is_empty() && failed {
 		tracing::warn!("keeping the relays followed before");
-		return;
+		return false;
 	}
 	engine.watch(&relays);
+	!failed
 }

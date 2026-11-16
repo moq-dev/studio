@@ -76,18 +76,22 @@ struct Check {
 
 impl Going {
 	/// Start the checks for the program at `canvas`, the encoder's noted as
-	/// `probing` until it ends, even once the sheet closes.
+	/// `probing` until it ends, even once the sheet closes, and not run
+	/// without it, while a go-live opens the program's encoders.
 	fn new(
 		gpu: crate::engine::Gpu,
 		runtime: &tokio::runtime::Handle,
 		canvas: Canvas,
-		probing: crate::controls::Probing,
+		probing: Option<crate::controls::Probing>,
 	) -> Self {
-		let encoder = Task::spawn(runtime, move || async move {
-			let _probing = probing;
-			setup::probe(gpu, canvas).await
-		})
-		.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the check: {err}"))));
+		let encoder = match probing {
+			Some(probing) => Task::spawn(runtime, move || async move {
+				let _probing = probing;
+				setup::probe(gpu, canvas).await
+			})
+			.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the check: {err}")))),
+			None => Task::Done(Err("not checked while a stream goes live".into())),
+		};
 		Self {
 			canvas,
 			encoder,
@@ -301,7 +305,9 @@ impl Panels {
 			let program = state.compositor.program_scene().map(str::to_string);
 			(show, program, state.collection().canvas)
 		};
-		if self.going.as_ref().is_some_and(|going| going.canvas != canvas) {
+		// Not while going live, which keeps the sheet waiting on it, and
+		// whose encoders a new check would compete with: once it ends.
+		if self.going.as_ref().is_some_and(|going| going.canvas != canvas) && !self.controls.going() {
 			self.open_going();
 		}
 		self.advance_going();
@@ -480,7 +486,9 @@ impl Panels {
 						.circle_stroke(at.center(), 3.5, Stroke::new(1.0, kit::FAINT)),
 				};
 				ui.label(egui::RichText::new(name).font(kit::ui_strong(13.0)).color(kit::TEXT))
-					.on_hover_text(url.as_str());
+					// The endpoint, never the address, whose query can carry a token
+					// on a shared screen.
+					.on_hover_text(endpoint.as_str());
 				ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
 					ui.add(egui::Label::new(egui::RichText::new(said).color(kit::DIM)).truncate());
 				});

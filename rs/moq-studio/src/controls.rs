@@ -85,12 +85,21 @@ impl std::fmt::Display for Action {
 /// How long a go-live waits for encoder checks still running.
 const PROBED: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The encoder checks, each holding a hardware encode session the
+/// program's would count against, and whether a go-live is opening the
+/// program's, which admits no new check.
+#[derive(Default)]
+struct Probes {
+	running: usize,
+	starting: bool,
+}
+
 /// An encoder check running, until dropped: see [`Controls::probing`].
-pub struct Probing(Arc<tokio::sync::watch::Sender<usize>>);
+pub struct Probing(Arc<tokio::sync::watch::Sender<Probes>>);
 
 impl Drop for Probing {
 	fn drop(&mut self) {
-		self.0.send_modify(|probes| *probes -= 1);
+		self.0.send_modify(|probes| probes.running -= 1);
 	}
 }
 
@@ -117,10 +126,10 @@ pub struct Controls {
 	/// any still waiting, so each follow reads the settings after the last
 	/// one landed, and none is followed once it is on air.
 	following: Mutex<()>,
-	/// How many encoder checks are running, each holding a hardware encode
-	/// session the program's would count against, so a go-live waits them
-	/// out: a closed go-live sheet's included, whose check runs to its end.
-	probes: Arc<tokio::sync::watch::Sender<usize>>,
+	/// The encoder checks running, which a go-live waits out, a closed
+	/// go-live sheet's included, whose check runs to its end, and admits no
+	/// more of until it is live or refused.
+	probes: Arc<tokio::sync::watch::Sender<Probes>>,
 	/// REVIEW's replay picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
 	/// Whether the next recording gives each source a file of its own too.
@@ -166,7 +175,7 @@ impl Controls {
 			going: AtomicBool::new(false),
 			rewatch: AtomicBool::new(false),
 			following: Mutex::new(()),
-			probes: Arc::new(tokio::sync::watch::Sender::new(0)),
+			probes: Arc::new(tokio::sync::watch::Sender::new(Probes::default())),
 			replay: Mutex::default(),
 			record_sources: AtomicBool::new(false),
 			studio: AtomicBool::new(false),
@@ -258,7 +267,7 @@ impl Controls {
 				let _following = controls.following.lock().unwrap();
 				let (stream, waiting) = controls.snapshot();
 				if waiting {
-					crate::show::follow(&controls.engine, &stream);
+					controls.follow(&stream);
 				}
 				stream
 			};
@@ -276,6 +285,7 @@ impl Controls {
 				*controls.refused.lock().unwrap() = Some(err.clone());
 			}
 			controls.going.store(false, Ordering::Release);
+			controls.probes.send_modify(|probes| probes.starting = false);
 			// Relays saved while this started, followed now if it failed;
 			// once live, when it ends. Whichever of a save and this runs
 			// last follows them.
@@ -290,17 +300,25 @@ impl Controls {
 	}
 
 	/// Note an encoder check running until the returned guard drops, which
-	/// a go-live waits for before the program's encoders open.
-	pub fn probing(&self) -> Probing {
-		self.probes.send_modify(|probes| *probes += 1);
-		Probing(self.probes.clone())
+	/// a go-live waits for before the program's encoders open, or `None`
+	/// while a go-live is opening them, whose sessions it would take.
+	pub fn probing(&self) -> Option<Probing> {
+		let mut admitted = false;
+		self.probes.send_if_modified(|probes| {
+			admitted = !probes.starting;
+			probes.running += usize::from(admitted);
+			admitted
+		});
+		admitted.then(|| Probing(self.probes.clone()))
 	}
 
-	/// Wait out the encoder checks running, bounded at [`PROBED`], past which
-	/// the program's encoders open anyway and a refused one says why.
+	/// Admit no more encoder checks until this go-live ends, and wait out
+	/// those running, bounded at [`PROBED`], past which the program's
+	/// encoders open anyway and a refused one says why.
 	async fn probed(&self) {
+		self.probes.send_modify(|probes| probes.starting = true);
 		let mut probes = self.probes.subscribe();
-		let waited = kio::clock::timeout(PROBED, probes.wait_for(|probes| *probes == 0)).await;
+		let waited = kio::clock::timeout(PROBED, probes.wait_for(|probes| probes.running == 0)).await;
 		if waited.is_err() {
 			tracing::warn!("going live beside an encoder check still running");
 		}
@@ -331,6 +349,16 @@ impl Controls {
 		let waits = self.going() || self.engine.on_air() != OnAir::Off;
 		drop(self.follow_saved_relays());
 		waits
+	}
+
+	/// Follow `stream`'s relays, which wait to be followed again if any could
+	/// not be set up, such as on a token the credential store would not read,
+	/// so the next go-live, end of stream, or save tries them again. Call it
+	/// holding [`Self::following`].
+	fn follow(&self, stream: &Stream) {
+		if !crate::show::follow(&self.engine, stream) {
+			self.rewatch.store(true, Ordering::Release);
+		}
 	}
 
 	/// The settings, and whether their relays wait to be followed, which
@@ -366,7 +394,7 @@ impl Controls {
 			}
 			// Each relay's client binds its socket on the runtime.
 			let _runtime = controls.runtime.enter();
-			crate::show::follow(&controls.engine, &stream);
+			controls.follow(&stream);
 		});
 		spawned
 			.inspect_err(|err| tracing::warn!(error = format!("{err:#}"), "cannot follow the relays"))
