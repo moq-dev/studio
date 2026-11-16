@@ -113,9 +113,10 @@ impl Take {
 			));
 		}
 		let end = target.end;
-		let start = Duration::from(end).saturating_sub(length);
-		let start = moq_net::Timestamp::try_from(start)
-			.and_then(|start| start.convert(end.scale()))
+		let start = Duration::try_from(end)
+			.map(|end| end.saturating_sub(length))
+			.and_then(moq_net::Timestamp::try_from)
+			.and_then(|start| start.convert(end.scale().ok_or(moq_net::TimeOverflow)?))
 			.map_err(|err| Error::Invalid(format!("replay start: {err}")))?;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -215,9 +216,15 @@ fn copy(
 	cut: Cut,
 	container: &impl moq_mux::container::Container,
 ) -> Result<Option<(moq_net::track::Finished, Duration)>, Error> {
+	// The anchors are group starts, in the timescale of hang's media tracks.
+	let key = |at: moq_net::Timestamp| {
+		at.convert(hang::container::TIMESCALE)
+			.map(moq_net::Timestamp::value)
+			.map_err(|err| Error::Invalid(format!("replay span: {err}")))
+	};
 	let range = moq_net::track::Range {
-		start: moq_net::track::Anchor::Time(start),
-		end: Some(moq_net::track::Anchor::Time(target.end)),
+		start: moq_net::track::Anchor::Time(key(start)?),
+		end: Some(moq_net::track::Anchor::Time(key(target.end)?)),
 	};
 	// With the publisher's whole window, so none of the span is skipped as
 	// stale.
@@ -232,6 +239,12 @@ fn copy(
 		Poll::Ready(source) => source?,
 		Poll::Pending => return Ok(None),
 	};
+	// The range was keyed before the track described itself.
+	if source.info().timescale != Some(hang::container::TIMESCALE) {
+		return Err(Error::Unsupported(format!(
+			"replaying {name}, which is not on hang's media timescale"
+		)));
+	}
 	// Never stale: the take keeps its groups for as long as it lives.
 	let info = source.info().clone().with_max_age(None);
 	let mut track = broadcast.create_track(name, info)?;
@@ -263,6 +276,8 @@ fn marker(frame: &moq_net::frame::Frame, container: &impl moq_mux::container::Co
 struct Held {
 	frames: Vec<moq_net::frame::Frame>,
 	read: Result<(), moq_net::Error>,
+	/// Where the source ended the group, for one held whole.
+	end: Option<u64>,
 }
 
 /// Copy every group and frame `source` has ready, up to `end` as `cut` says,
@@ -298,7 +313,8 @@ fn copy_held(
 				Poll::Ready(Err(err)) => break Err(err),
 			}
 		};
-		let inside = |frame: &moq_net::frame::Frame| frame.timestamp.is_none_or(|timestamp| timestamp <= end);
+		// A frame without a time cannot be past the end.
+		let inside = |frame: &moq_net::frame::Frame| frame.timestamp.scale().is_none() || frame.timestamp <= end;
 		let kept = match cut {
 			Cut::Decodable => frames.iter().rposition(inside).map_or(0, |last| last + 1),
 			Cut::Shown => frames.iter().position(|frame| !inside(frame)).unwrap_or(frames.len()),
@@ -307,22 +323,27 @@ fn copy_held(
 		// up or that aged out before any of it was read, which replays as the
 		// gap it is.
 		if kept > 0 {
+			// A group cut short ends where its pictures do, which only a reader
+			// can tell.
+			let whole = kept == frames.len();
 			frames.truncate(kept);
-			held.insert(group.sequence, Held { frames, read });
+			let end = group.end().filter(|_| whole);
+			held.insert(group.start, Held { frames, read, end });
 		}
 	}
 
 	if let Some(&first) = held.keys().next() {
 		track.start_at(first)?;
 	}
-	for (&sequence, held) in &held {
-		let mut into = track.create_group(moq_net::group::Info { sequence })?;
+	for (&start, held) in &held {
+		let mut into = track.create_group(moq_net::group::Info { start })?;
 		for frame in &held.frames {
 			into.write_frame(frame.timestamp, frame.payload.clone())?;
 		}
-		match &held.read {
-			Ok(()) => drop(into.finish()?),
-			Err(err) => into.abort(err.clone())?,
+		match (&held.read, held.end) {
+			(Ok(()), Some(end)) => drop(into.finish(end)?),
+			(Ok(()), None) => drop(into.close()?),
+			(Err(err), _) => into.abort(err.clone())?,
 		}
 	}
 
@@ -334,37 +355,45 @@ fn copy_held(
 	let mut media = false;
 	let mut covered = Duration::ZERO;
 	let mut last: Option<(u64, Duration)> = None;
-	for (&sequence, held) in &held {
-		// Groups follow on only when no sequence is missing between them.
-		last = last.filter(|(previous, _)| sequence <= previous + 1);
+	for (&start, held) in &held {
+		// Groups follow on only when the publisher said nothing lies between them.
+		last = last.filter(|(previous, _)| source.is_skipped(previous + 1..start));
 		for frame in &held.frames {
 			if marker(frame, container) {
 				last = None;
 				continue;
 			}
 			media = true;
-			let Some(at) = frame.timestamp.filter(|at| span.contains(at)).map(Duration::from) else {
+			let Some(at) = Some(frame.timestamp)
+				.filter(|at| span.contains(at))
+				.and_then(|at| Duration::try_from(at).ok())
+			else {
 				continue;
 			};
 			// Decode order can show a picture before the one decoded ahead of
 			// it, so only time past the newest shown counts.
 			last = match last {
-				Some((_, newest)) if at <= newest => Some((sequence, newest)),
+				Some((_, newest)) if at <= newest => Some((start, newest)),
 				Some((_, newest)) => {
 					covered += at - newest;
-					Some((sequence, at))
+					Some((start, at))
 				}
-				None => Some((sequence, at)),
+				None => Some((start, at)),
 			};
 		}
 	}
 
-	// Groups the span covers that are not here are gaps, not groups to come.
+	// Carry over only the starts the source declared skipped, before its
+	// first group too, which marks the encoder's first. A group lost on the way
+	// stays a hole, which the finished take lets readers pass as the gap it
+	// is: a skip would tell them the media runs on across it.
 	let copied: Vec<u64> = held.into_keys().collect();
-	for pair in copied.windows(2) {
-		if pair[1] > pair[0] + 1 {
-			track.skip_groups(pair[0] + 1..pair[1]);
+	let mut below = 0;
+	for &start in &copied {
+		if below < start && source.is_skipped(below..start) {
+			track.skip_groups(below..start);
 		}
+		below = start + 1;
 	}
 	Ok(media.then_some(covered))
 }
@@ -379,15 +408,36 @@ mod tests {
 
 	/// Write group `sequence` of `track` with a frame at each of `at`, in
 	/// milliseconds and decode order, the frame at `at[i]` named
-	/// `{sequence}.{i}`.
+	/// `{sequence}.{i}`. The group starts at its first frame, in microseconds
+	/// as hang's tracks count, and says nothing of the groups around it.
 	fn write(track: &moq_net::track::Producer, sequence: u64, at: &[u64]) {
-		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		fill(
+			track
+				.create_group(moq_net::group::Info { start: at[0] * 1000 })
+				.unwrap(),
+			sequence,
+			at,
+		);
+	}
+
+	/// [`write`] as a publisher appends, saying nothing lies between this group
+	/// and the one before.
+	fn append(track: &moq_net::track::Producer, sequence: u64, at: &[u64]) {
+		fill(track.append_group(at[0] * 1000).unwrap(), sequence, at);
+	}
+
+	fn fill(mut group: moq_net::group::Producer, sequence: u64, at: &[u64]) {
 		for (index, at) in at.iter().enumerate() {
 			group
 				.write_frame(ts(*at), format!("{sequence}.{index}").into_bytes())
 				.unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
+	}
+
+	/// A group's second, from its start in microseconds.
+	fn second_of(start: u64) -> u64 {
+		start / 1_000_000
 	}
 
 	/// The frames of group `sequence` of [`broadcast`], three a third of a
@@ -397,19 +447,30 @@ mod tests {
 	}
 
 	/// A video track with a group a second, from `0` up to but excluding
-	/// `groups` seconds, but for the group the publisher gave up at `lost`.
+	/// `groups` seconds, but for the group lost on the way at `lost`. The
+	/// publisher appends each group, saying nothing lies between them, up to the
+	/// loss; past it, nothing says what lies before a group, as a copy that lost
+	/// one knows.
 	fn broadcast(groups: u64, lost: Option<u64>) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		for sequence in 0..groups {
-			match lost == Some(sequence) {
-				true => track.skip_groups(sequence..sequence + 1),
-				false => write(&track, sequence, &second(sequence)),
+			match lost {
+				Some(lost) if sequence == lost => {}
+				Some(lost) if sequence > lost => write(&track, sequence, &second(sequence)),
+				_ => append(&track, sequence, &second(sequence)),
 			}
 		}
 		(broadcast, track)
+	}
+
+	/// Whether the take's track declares every group start in `starts`, in
+	/// microseconds, skipped.
+	async fn skipped(take: &Take, starts: std::ops::Range<u64>) -> bool {
+		let track = take.consume().track("video").unwrap().subscribe(None).await.unwrap();
+		track.is_skipped(starts)
 	}
 
 	fn target(broadcast: &moq_net::broadcast::Producer, end: moq_net::Timestamp) -> Target {
@@ -444,7 +505,7 @@ mod tests {
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				frames.push(String::from_utf8(frame.payload.to_vec()).unwrap());
 			}
-			groups.push((group.sequence, frames));
+			groups.push((second_of(group.start), frames));
 		}
 		groups
 	}
@@ -477,7 +538,7 @@ mod tests {
 	}
 
 	/// A group missing from the span stays missing, rather than one its readers
-	/// wait for.
+	/// wait for, and a gap rather than a span the media runs on across.
 	#[tokio::test(start_paused = true)]
 	async fn a_take_keeps_a_gap() {
 		let (broadcast, _track) = broadcast(10, Some(5));
@@ -486,6 +547,60 @@ mod tests {
 			read(&take).await,
 			[(4, frames(4, 3)), (6, frames(6, 3)), (7, frames(7, 2))]
 		);
+		assert!(!skipped(&take, 4_000_001..6_000_000).await, "the lost group is a gap");
+	}
+
+	/// A group held whole ends where its source ended it, and one cut at the
+	/// span's end only closes.
+	#[tokio::test(start_paused = true)]
+	async fn a_take_keeps_where_its_whole_groups_end() {
+		let (broadcast, track) = broadcast(0, None);
+		for sequence in 0..3 {
+			let mut group = track.append_group(sequence * 1_000_000).unwrap();
+			for (index, at) in second(sequence).iter().enumerate() {
+				group
+					.write_frame(ts(*at), format!("{sequence}.{index}").into_bytes())
+					.unwrap();
+			}
+			drop(group.finish((sequence + 1) * 1_000_000).unwrap());
+		}
+		let take = Take::new(&target(&broadcast, ts(2_500)), Duration::from_secs(2)).unwrap();
+		let mut copied = take
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None)),
+			)
+			.await
+			.unwrap();
+		let mut ends = Vec::new();
+		while let Some(mut group) = copied.recv_group().await.unwrap() {
+			while group.read_frame().await.unwrap().is_some() {}
+			ends.push((second_of(group.start), group.end()));
+		}
+		assert_eq!(ends, [(0, Some(1_000_000)), (1, Some(2_000_000)), (2, None)]);
+	}
+
+	/// A take says what the source said of the starts it skipped: between its
+	/// groups, and before the source's first group, which marks the encoder's
+	/// first, but not before a take that starts later.
+	#[tokio::test(start_paused = true)]
+	async fn a_take_keeps_the_skips_it_was_given() {
+		let (broadcast, track) = broadcast(0, None);
+		track.skip_groups(0..1_000_000);
+		for sequence in 1..10 {
+			append(&track, sequence, &second(sequence));
+		}
+		let from_first = Take::new(&target(&broadcast, ts(3_500)), Duration::from_secs(3)).unwrap();
+		assert_eq!(read(&from_first).await[0].0, 1);
+		assert!(skipped(&from_first, 0..1_000_000).await, "the encoder's first group");
+		assert!(skipped(&from_first, 1_000_001..2_000_000).await);
+
+		let later = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3)).unwrap();
+		assert_eq!(read(&later).await[0].0, 4);
+		assert!(!skipped(&later, 0..4_000_000).await, "past the encoder's first");
+		assert!(skipped(&later, 4_000_001..5_000_000).await);
 	}
 
 	/// Groups that reached the studio out of order are held in their own order,
@@ -541,7 +656,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_take_at_the_live_edge_holds_what_was_written() {
 		let (broadcast, track) = broadcast(7, None);
-		let mut live = track.create_group(moq_net::group::Info { sequence: 7 }).unwrap();
+		let mut live = track.append_group(7_000_000).unwrap();
 		live.write_frame(ts(7_000), b"7.0".to_vec()).unwrap();
 		let take = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3)).unwrap();
 		live.write_frame(ts(7_333), b"7.1".to_vec()).unwrap();
@@ -593,7 +708,7 @@ mod tests {
 		// The marker a publisher writes as it stops encoding.
 		let config = target(&broadcast, ts(0)).video.unwrap().1;
 		let container = moq_mux::catalog::hang::Container::try_from(&config).unwrap();
-		let mut group = track.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
+		let mut group = track.append_group(3_500_000).unwrap();
 		let gap = moq_mux::container::Frame {
 			timestamp: ts(3_500),
 			payload: bytes::Bytes::new(),
@@ -601,7 +716,7 @@ mod tests {
 			duration: None,
 		};
 		container.write(&mut group, &[gap]).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let result = Take::new(&target(&broadcast, ts(3_900)), Duration::from_millis(300));
 		assert!(matches!(result, Err(Error::Unsupported(_))), "{:?}", result.err());
 	}
@@ -620,7 +735,7 @@ mod tests {
 				let at: Vec<u64> = (0..per_second)
 					.map(|index| second * 1000 + index * 1000 / per_second)
 					.collect();
-				write(&track, second, &at);
+				append(&track, second, &at);
 			}
 			let take = Take::new(&target(&broadcast, ts(9_999)), Duration::from_secs(10)).unwrap();
 			(take.covered, broadcast, track)

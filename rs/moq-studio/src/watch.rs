@@ -182,7 +182,12 @@ impl Read {
 			None => self.pending.clear(),
 			Some(at) => {
 				let passed = self.pending.iter().take_while(|(_, stamp)| {
-					stamp.is_none_or(|stamp| Duration::from(stamp) + MAX_DELAY <= Duration::from(at))
+					stamp.is_none_or(|stamp| {
+						matches!(
+							(Duration::try_from(stamp), Duration::try_from(at)),
+							(Ok(stamp), Ok(at)) if stamp + MAX_DELAY <= at
+						)
+					})
 				});
 				self.pending.drain(..passed.count().saturating_sub(1));
 			}
@@ -273,7 +278,7 @@ async fn instance(broadcast: moq_net::broadcast::Consumer, read: watch::Sender<R
 				}
 			}
 			next = async { layouts.as_mut().expect("guarded").next().await }, if layouts.is_some() => match next {
-				Ok(Some(timed)) => read.send_modify(|read| read.push(Some(timed.value), timed.at)),
+				Ok(Some(timed)) => read.send_modify(|read| read.push(Some(timed.value), Some(timed.at))),
 				Ok(None) => {
 					layouts = None;
 					alone();
@@ -648,7 +653,9 @@ mod tests {
 		let mut reads = read.subscribe();
 		let read = reads.wait_for(|read| read.pending.len() >= count).await.unwrap();
 		let pending = read.pending.iter().cloned();
-		pending.map(|(layout, at)| (layout, at.map(Duration::from))).collect()
+		pending
+			.map(|(layout, at)| (layout, at.map(|at| Duration::try_from(at).unwrap())))
+			.collect()
 	}
 
 	/// Wait until the newest thing `read` holds is the program alone.

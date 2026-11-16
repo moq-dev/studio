@@ -264,6 +264,7 @@ fn pads(ui: &mut Ui, picture: egui::TextureId) {
 				.refused(Some("Another size than the program's")),
 		);
 		ui.add(Pad::new("A scene with a long name").key(Some("F6")));
+		ui.add(Pad::new("Renamed").fault(Some("Cannot rename: a scene is already called that")));
 	});
 }
 

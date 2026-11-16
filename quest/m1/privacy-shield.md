@@ -34,5 +34,4 @@ Human check: a second capture tool on each desktop, to see what it sees.
 
 ## Required
 
-- [The BUILD page](/quest/m0/ux/build.md) - the inspector's note and the Add card's mark
 - [moq-video's capture exclusion is pinned](/quest/m1/pin-capture-exclude.md) - leaving chosen apps out of a display capture

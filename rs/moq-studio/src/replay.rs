@@ -1,26 +1,70 @@
-//! Instant replays and clips: the recent past of the program or a source,
-//! played in a replay source or saved to disk.
+//! Instant replays and clips: a stretch of the recent past of the program or a
+//! source, played in a replay source or saved to disk.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
+use kio::clock::Instant;
 use moq_scene::Source;
 use moq_scene::replay::{Take, Target};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::engine::Engine;
 
-/// The lengths the Replay panel offers.
-pub const LENGTHS: [Duration; 4] = [
-	Duration::from_secs(5),
-	Duration::from_secs(10),
-	Duration::from_secs(20),
-	moq_scene::replay::MAX_LENGTH,
-];
+/// How far back a replay reaches: as far as the tracks keep their past.
+pub const WINDOW: Duration = moq_scene::replay::MAX_LENGTH;
 
-/// The speeds the Replay panel offers: real time, and slow motion.
+/// The shortest stretch REVIEW's handles pick.
+pub const MIN_STRETCH: Duration = Duration::from_millis(500);
+
+/// The speeds REVIEW offers: real time, and slow motion.
 pub const SPEEDS: [f32; 3] = [1.0, 0.5, 0.25];
+
+/// Which stretch of the recent past a replay or clip takes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Stretch {
+	/// The last this long, up to the moment it is fired.
+	Last(Duration),
+	/// From one past moment to a later one, which stay put as time goes on,
+	/// until they age out of the [`WINDOW`].
+	Between(Instant, Instant),
+}
+
+impl Default for Stretch {
+	fn default() -> Self {
+		Self::Last(Duration::from_secs(10))
+	}
+}
+
+impl Stretch {
+	/// How long before `now` it ends, and how long it is: the part of it still
+	/// inside the [`WINDOW`]. Refuses one that has aged out of it.
+	pub fn span(&self, now: Instant) -> anyhow::Result<(Duration, Duration)> {
+		let (from, to) = match *self {
+			Self::Last(length) => (length, Duration::ZERO),
+			Self::Between(from, to) => (now.saturating_duration_since(from), now.saturating_duration_since(to)),
+		};
+		anyhow::ensure!(
+			to < WINDOW,
+			"the picked stretch is older than the last {} s; pick another",
+			WINDOW.as_secs()
+		);
+		let length = from.min(WINDOW).saturating_sub(to);
+		anyhow::ensure!(!length.is_zero(), "the picked stretch is empty");
+		Ok((to, length))
+	}
+
+	/// The last stretch as long as this one, as a hotkey or the shell's clip
+	/// button fires it: pressed away from REVIEW's strip, it means what just
+	/// happened, not a moment picked there earlier, which would age out.
+	pub fn last(self) -> Self {
+		match self {
+			Self::Between(from, to) => Self::Last(to.saturating_duration_since(from).min(WINDOW)),
+			last => last,
+		}
+	}
+}
 
 /// What a replay or clip is of.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -88,15 +132,16 @@ impl Engine {
 	}
 }
 
-/// Hold the `length` of `of` up to now: to play in a replay source with
+/// Hold the `length` of `of` that ended `ago`: to play in a replay source with
 /// `play`, or as a clip to save.
 ///
 /// Takes the target whose video covers the most of the span, the first of
 /// those tied, such as the program's half size over a canvas size the grant
 /// disabled partway, or else the first one tried.
-pub fn take(engine: &Engine, of: &Of, length: Duration, play: bool) -> anyhow::Result<Take> {
+pub fn take(engine: &Engine, of: &Of, ago: Duration, length: Duration, play: bool) -> anyhow::Result<Take> {
 	let mut best: Option<anyhow::Result<Take>> = None;
-	for target in engine.targets(of)? {
+	for mut target in engine.targets(of)? {
+		target.end = before(target.end, ago)?;
 		let next = match play {
 			true => Take::new(&target, length),
 			false => Take::clip(&target, length),
@@ -121,6 +166,15 @@ pub fn take(engine: &Engine, of: &Of, length: Duration, play: bool) -> anyhow::R
 	})
 }
 
+/// The moment `ago` before `end`, on `end`'s timeline and in its scale.
+fn before(end: moq_net::Timestamp, ago: Duration) -> anyhow::Result<moq_net::Timestamp> {
+	let at = Duration::try_from(end)?
+		.checked_sub(ago)
+		.context("the broadcast is younger than the picked stretch")?;
+	let scale = end.scale().context("the broadcast's timeline has no timescale")?;
+	Ok(moq_net::Timestamp::try_from(at)?.convert(scale)?)
+}
+
 /// Play `take` at `speed` in the replay source `into`.
 pub fn play(engine: &Engine, take: Take, speed: f32, into: &str) -> anyhow::Result<()> {
 	let state = engine.state.lock().unwrap();
@@ -132,10 +186,10 @@ pub fn play(engine: &Engine, take: Take, speed: f32, into: &str) -> anyhow::Resu
 	Ok(())
 }
 
-/// Save `take`, in real time, as a new MP4 file beside `scenes`, the scene
-/// file. Returns where.
-pub async fn save(take: Take, scenes: &Path) -> anyhow::Result<PathBuf> {
-	let (path, mut file) = create(scenes).await?;
+/// Save `take`, in real time, as a new MP4 file in `dir`, the recordings
+/// folder, named after `show`. Returns where.
+pub async fn save(take: Take, dir: &Path, show: &str) -> anyhow::Result<PathBuf> {
+	let (path, mut file) = create(dir, show).await?;
 	let written = async {
 		let broadcast = take.consume();
 		let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang).await?;
@@ -169,13 +223,11 @@ pub async fn save(take: Take, scenes: &Path) -> anyhow::Result<PathBuf> {
 	Ok(path)
 }
 
-/// A new file beside the scene file `scenes`: for `show.toml`,
-/// `show-clip-1.mp4`, or the first number not taken.
-async fn create(scenes: &Path) -> anyhow::Result<(PathBuf, tokio::fs::File)> {
-	let dir = scenes.parent().unwrap_or(Path::new(""));
-	let stem = scenes.file_stem().unwrap_or_default().to_string_lossy();
+/// A new clip file in `dir`: for the show `show`, `show-clip-1.mp4`, or the
+/// first number not taken.
+async fn create(dir: &Path, show: &str) -> anyhow::Result<(PathBuf, tokio::fs::File)> {
 	for n in 1.. {
-		let path = dir.join(format!("{stem}-clip-{n}.mp4"));
+		let path = dir.join(clip_name(show, n));
 		match tokio::fs::File::create_new(&path).await {
 			Ok(file) => return Ok((path, file)),
 			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -185,6 +237,49 @@ async fn create(scenes: &Path) -> anyhow::Result<(PathBuf, tokio::fs::File)> {
 	unreachable!("some clip number is free")
 }
 
+/// The name of the show `show`'s `n`th clip.
+pub fn clip_name(show: &str, n: u32) -> String {
+	format!("{show}-clip-{n}.mp4")
+}
+
+#[cfg(test)]
+mod stretch_tests {
+	use super::*;
+
+	/// The last few seconds end now, and a stretch picked between two moments
+	/// ends as long ago as its end, is cut where it leaves the window, and is
+	/// refused once it is wholly out of it.
+	#[test]
+	fn a_stretch_spans_what_the_window_holds() {
+		let secs = Duration::from_secs;
+		let now = Instant::now().saturating_add(secs(100));
+		let ago = |seconds| now.saturating_sub(secs(seconds));
+		assert_eq!(Stretch::Last(secs(8)).span(now).unwrap(), (Duration::ZERO, secs(8)));
+		let picked = Stretch::Between(ago(14), ago(6));
+		assert_eq!(picked.span(now).unwrap(), (secs(6), secs(8)));
+		// Twenty seconds on, its start has left the 30 s window.
+		let later = now.saturating_add(secs(20));
+		assert_eq!(picked.span(later).unwrap(), (secs(26), secs(4)));
+		let gone = now.saturating_add(secs(24));
+		assert!(picked.span(gone).is_err(), "aged out");
+		let empty = Stretch::Between(ago(3), ago(3));
+		assert!(empty.span(now).is_err(), "empty");
+	}
+
+	/// A hotkey takes the last stretch as long as the one picked, even once
+	/// the picked one has aged out.
+	#[test]
+	fn a_hotkey_takes_the_last_stretch_as_long() {
+		let secs = Duration::from_secs;
+		let now = Instant::now().saturating_add(secs(100));
+		let picked = Stretch::Between(now.saturating_sub(secs(14)), now.saturating_sub(secs(6)));
+		assert_eq!(picked.last(), Stretch::Last(secs(8)));
+		let later = now.saturating_add(secs(60));
+		assert_eq!(picked.last().span(later).unwrap(), (Duration::ZERO, secs(8)));
+		assert_eq!(Stretch::Last(secs(5)).last(), Stretch::Last(secs(5)));
+	}
+}
+
 // The software encoder is the one every test machine has.
 #[cfg(all(test, feature = "openh264"))]
 mod tests {
@@ -192,7 +287,7 @@ mod tests {
 
 	use super::*;
 
-	/// A clip is a finished MP4 of the span, named beside the scene file
+	/// A clip is a finished MP4 of the span, named in the recordings folder
 	/// without overwriting an earlier one, that shows nothing after the span's
 	/// end even when a picture inside it refers to one shown after.
 	#[tokio::test]
@@ -239,10 +334,9 @@ mod tests {
 		};
 
 		let dir = tempfile::tempdir().unwrap();
-		let scenes = dir.path().join("show.toml");
 		std::fs::write(dir.path().join("show-clip-1.mp4"), b"an earlier clip").unwrap();
 		let take = Take::clip(&target, Duration::from_secs(1)).unwrap();
-		let path = save(take, &scenes).await.unwrap();
+		let path = save(take, dir.path(), "show").await.unwrap();
 		assert_eq!(path, dir.path().join("show-clip-2.mp4"));
 		assert_eq!(
 			std::fs::read(dir.path().join("show-clip-1.mp4")).unwrap(),

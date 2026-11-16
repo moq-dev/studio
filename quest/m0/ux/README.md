@@ -140,7 +140,9 @@ quest links its own.
 
 An agent can prove a page matches its mock-up's layout, that nothing clips at
 any window size, and what a frame costs. It cannot judge these, so each child's
-PR hands them to the maintainer as `## Waiting` with what to look at:
+PR adds a follow-up quest for the maintainer to try the page, such as
+[Try the LIVE page](/quest/m0/ux/try-live.md), with a `Maintainer:` item saying
+what to look at, rather than waiting on it:
 
 - **Taste:** whether the page reads as bold and calm at once. The PR shows its
   screenshots beside the mock-up frames.

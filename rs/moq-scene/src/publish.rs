@@ -381,14 +381,28 @@ async fn copy(
 			}
 		});
 		let result: Result<(), moq_net::Error> = async {
+			// Past the last group copied, from where a skip the source declared
+			// is carried over.
+			let mut below = 0;
 			while let Some(mut group) = track.recv_group().await? {
-				let mut copy = out.create_group(moq_net::group::Info {
-					sequence: group.sequence,
-				})?;
+				// Creating a group says nothing of the starts below it, so the
+				// copy repeats the source's skips: one before its first group
+				// marks the encoder's first, and one between groups says the
+				// media runs on across them.
+				if below < group.start && track.is_skipped(below..group.start) {
+					out.skip_groups(below..group.start);
+				}
+				below = below.max(group.start + 1);
+				let mut copy = out.create_group(moq_net::group::Info { start: group.start })?;
 				while let Some(frame) = group.read_frame().await? {
 					copy.write_frame(frame.timestamp, frame.payload)?;
 				}
-				copy.finish()?;
+				// The copy ends where the source ended its group, when it said,
+				// so a paused source's last picture ages out of the copy too.
+				match group.end() {
+					Some(end) => drop(copy.finish(end)?),
+					None => drop(copy.close()?),
+				}
 			}
 			out.clone().finish().map(drop)
 		}
@@ -765,7 +779,12 @@ impl<'a> Video<'a> {
 	/// where the first frame encodes, for a source that encodes its pictures
 	/// ahead of when they show.
 	pub(crate) fn anchor(&mut self, origin: kio::clock::Instant) -> Result<(), Error> {
-		self.epoch = Some(self.clock.capture(origin)?.as_micros());
+		self.epoch = Some(
+			self.clock
+				.capture(origin)?
+				.as_micros()
+				.map_err(moq_video::Error::from)?,
+		);
 		Ok(())
 	}
 
@@ -775,10 +794,14 @@ impl<'a> Video<'a> {
 	/// the gap, and reopens when the picture's size or color space changes,
 	/// which moves the rendition to a new track.
 	pub(crate) fn encode(&mut self, frame: &mut moq_video::Frame) -> Result<(), Error> {
-		let captured = frame.timestamp.as_micros();
-		let epoch = *self
-			.epoch
-			.get_or_insert_with(|| self.clock.now().as_micros().saturating_sub(captured));
+		let captured = frame.timestamp.as_micros().map_err(moq_video::Error::from)?;
+		let epoch = match self.epoch {
+			Some(epoch) => epoch,
+			None => {
+				let now = self.clock.now().as_micros().map_err(moq_video::Error::from)?;
+				*self.epoch.insert(now.saturating_sub(captured))
+			}
+		};
 		frame.timestamp = moq_net::Timestamp::from_micros((epoch + captured) as u64).map_err(moq_video::Error::from)?;
 
 		if !self.used() {
@@ -960,7 +983,12 @@ impl<'a> Audio<'a> {
 		// has passed: the rest is counted on from now.
 		let now = kio::clock::now();
 		let ahead = captured.saturating_duration_since(now).as_micros();
-		let timestamp = self.clock.capture(captured.min(now))?.as_micros() + ahead;
+		let timestamp = self
+			.clock
+			.capture(captured.min(now))?
+			.as_micros()
+			.map_err(moq_audio::Error::from)?
+			+ ahead;
 		let timestamp = moq_net::Timestamp::from_micros(timestamp as u64).map_err(moq_audio::Error::from)?;
 		let data = bytes::Bytes::copy_from_slice(bytemuck::cast_slice(samples));
 		producer.write(&moq_audio::Frame::new(data, timestamp))?;
@@ -1231,6 +1259,58 @@ mod tests {
 		.await;
 	}
 
+	/// A forwarded track says what its source said of the starts it skipped:
+	/// those before its first group, which mark the encoder's first, and those
+	/// between its groups, but not a hole the source left. Its groups end where
+	/// the source said they end.
+	#[tokio::test(start_paused = true)]
+	async fn a_forwarded_track_keeps_its_skips() {
+		let local = moq_net::broadcast::Info::new().produce();
+		let source = local
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let program = moq_net::broadcast::Info::new().produce();
+		let copied = copy(local.consume(), program.clone(), "audio".into(), None);
+		let checked = async {
+			// The copy's track lasts as long as the copy, so it is read while
+			// the source is written.
+			let mut forwarded = loop {
+				match program.consume().track(&format!("{FORWARDED}audio")) {
+					Ok(track) => break track.subscribe(None).await.unwrap(),
+					Err(_) => tokio::task::yield_now().await,
+				}
+			};
+			source.skip_groups(0..1_000);
+			let mut groups = Vec::new();
+			for (start, appended) in [(1_000, true), (3_000, true), (5_000, false)] {
+				// Nothing says what lies between 3 000 and 5 000.
+				let group = match appended {
+					true => source.append_group(start),
+					false => source.create_group(moq_net::group::Info { start }),
+				};
+				// The first group says where it ends; the others only close.
+				let group = group.unwrap();
+				drop(
+					match start {
+						1_000 => group.finish(2_000),
+						_ => group.close(),
+					}
+					.unwrap(),
+				);
+				let mut copied = forwarded.recv_group().await.unwrap().unwrap();
+				assert!(copied.read_frame().await.unwrap().is_none());
+				groups.push((copied.start, copied.end()));
+			}
+			drop(source.clone().finish().unwrap());
+			assert!(forwarded.recv_group().await.unwrap().is_none());
+			assert_eq!(groups, [(1_000, Some(2_000)), (3_000, None), (5_000, None)]);
+			assert!(forwarded.is_skipped(0..1_000), "the encoder's first group");
+			assert!(forwarded.is_skipped(1_001..3_000), "the media runs on");
+			assert!(!forwarded.is_skipped(3_001..5_000), "a hole stays one");
+		};
+		tokio::join!(copied, checked);
+	}
+
 	/// Stopping the sources, as quitting does, ends each source's own track
 	/// cleanly after what it published, and takes it out of the listing.
 	#[tokio::test]
@@ -1480,7 +1560,7 @@ mod tests {
 					assert!(video.track.is_open(), "a subscriber gets pictures");
 					let mut group = track.recv_group().await.unwrap().expect("a group");
 					assert!(group.read_frame().await.unwrap().is_some());
-					let first = group.sequence;
+					let first = group.start;
 
 					drop(group);
 					drop(track);
@@ -1496,7 +1576,7 @@ mod tests {
 					video.encode(&mut gray(size, 100)).unwrap();
 					assert!(video.track.is_open(), "a new subscriber reopens the encoder");
 					let mut group = track.recv_group().await.unwrap().expect("a group");
-					assert!(group.sequence > first, "{} after {first}", group.sequence);
+					assert!(group.start > first, "{} after {first}", group.start);
 					assert!(group.read_frame().await.unwrap().is_some());
 				} => {}
 			}
@@ -1624,7 +1704,7 @@ mod tests {
 					let (_, config) = take.audio.as_ref().unwrap();
 					let read = packets(&take.consume(), name, config).await;
 					let near = |at: moq_net::Timestamp, to: moq_net::Timestamp| {
-						at.as_micros().abs_diff(to.as_micros()) <= 20_000
+						at.as_micros().unwrap().abs_diff(to.as_micros().unwrap()) <= 20_000
 					};
 					let first = read.first().copied().flatten().expect("a packet first");
 					assert!(near(first, heard), "{first:?} for {heard:?}");
@@ -1752,7 +1832,7 @@ mod tests {
 					if current.replace(group) != Some(group) {
 						seen.push(Seen::Group);
 					}
-					seen.push(Seen::Picture(frame.timestamp.as_micros() / 1000));
+					seen.push(Seen::Picture(frame.timestamp.as_micros().unwrap() / 1000));
 				}
 				moq_mux::container::Read::End { .. } => seen.push(Seen::End),
 				moq_mux::container::Read::Gap { .. } => panic!("pictures went missing"),
@@ -1957,7 +2037,7 @@ mod tests {
 			// Stamped with when it showed, though encoded ahead of it.
 			let shown = publish.catalog.clock().capture(first).unwrap();
 			assert!(
-				stamps[0].as_micros().abs_diff(shown.as_micros()) <= 1,
+				stamps[0].as_micros().unwrap().abs_diff(shown.as_micros().unwrap()) <= 1,
 				"the first picture as it showed: {:?}, not {shown:?}",
 				stamps[0]
 			);
@@ -2069,7 +2149,7 @@ mod tests {
 			let silences = until(|| {
 				while let std::task::Poll::Ready(read) = track.poll_read(&now) {
 					if let moq_mux::container::Read::Frame { frame, .. } = read.unwrap().expect("open") {
-						stamps.push(std::time::Duration::from(frame.timestamp));
+						stamps.push(std::time::Duration::try_from(frame.timestamp).unwrap());
 					}
 				}
 				let gaps = stamps.windows(2).map(|pair| pair[1].saturating_sub(pair[0]));
@@ -2079,7 +2159,7 @@ mod tests {
 			.await;
 			assert_eq!(silences, 2, "each loop's silence is kept: {stamps:?}");
 			// Stamped with when it sounded, though written ahead of it.
-			let sounded = std::time::Duration::from(publish.catalog.clock().capture(begun).unwrap());
+			let sounded = std::time::Duration::try_from(publish.catalog.clock().capture(begun).unwrap()).unwrap();
 			assert_eq!(stamps[0], sounded, "the first sound as it sounded");
 		})
 		.await;
