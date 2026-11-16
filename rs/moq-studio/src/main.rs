@@ -28,9 +28,11 @@ mod kit;
 mod ladder;
 mod library;
 mod mix;
+mod past;
 mod record;
 mod replay;
 mod setup;
+mod shelf;
 #[cfg(test)]
 mod shots;
 mod show;
@@ -73,8 +75,8 @@ pub struct Config {
 	#[usage(long)]
 	pub on_demand: bool,
 
-	/// The directory recordings are saved in, for this run. Defaults to the
-	/// scene file's.
+	/// The directory recordings and clips are saved in, for this run.
+	/// Defaults to the scene file's.
 	#[usage(long, value_hint = usage_rs::ValueHint::DirPath)]
 	pub recordings: Option<PathBuf>,
 

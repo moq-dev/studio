@@ -33,7 +33,3 @@ program source, cropped. This quest makes that one switch.
   beside it, and Studio mode cues both.
 
 Human check: a phone and a desktop viewer watching the same show.
-
-## Required
-
-- [The BUILD page](/quest/m0/ux/build.md) - editing an arrangement per format

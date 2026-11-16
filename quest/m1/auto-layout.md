@@ -32,10 +32,6 @@ change of hardware.
 Human check: whether the reflow reads as intended rather than as a glitch,
 with real guests joining mid-show.
 
-## Required
-
-- [The BUILD page](/quest/m0/ux/build.md) - where slots are drawn and filled
-
 ## Related
 
 - [First run](/quest/m0/ux/first-run.md) - its starting layouts become role-based templates

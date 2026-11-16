@@ -44,7 +44,8 @@ bar.
   link lifetime are already fields of `<show>.stream.toml` (`recordings`,
   `room`, `room_key`, `join_page`, `guest_expiry`), which go live
   ([moq-dev/studio#175](https://github.com/moq-dev/studio/pull/175)) saves
-  but gives no UI; these panes edit them there, and a flag that overrides one
+  but gives no UI; the Recording tab shows and opens the folder but cannot
+  change it. These panes edit them there, and a flag that overrides one
   shows it as the flag's, as the Stream pane does.
 - A room or relay change reaches the open show's guests at once: the guest
   room renews its links against the new room and relay, instead of only after

@@ -144,15 +144,17 @@ async fn fill(
 		clock.tick().await;
 		if frames % RATE == 0 {
 			if let Some(done) = group.take() {
-				moq_net::group::Producer::finish(done)?;
+				moq_net::group::Producer::close(done)?;
 			}
-			group = Some(track.append_group()?);
+			// The probe's track has no timescale, so its groups count up.
+			group = Some(track.append_group(u64::from(frames / RATE))?);
 		}
 		frames += 1;
 		let rate = reservation.rate().unwrap_or(FLOOR).clamp(FLOOR, ceiling);
 		let size = (rate.as_bps() / 8 / u64::from(RATE)) as usize;
 		let group = group.as_mut().expect("opened above");
-		group.write_frame(None, filler.slice(..size.clamp(1, filler.len())))?;
+		let key = moq_net::Timestamp::unscaled(group.start);
+		group.write_frame(key, filler.slice(..size.clamp(1, filler.len())))?;
 	}
 }
 

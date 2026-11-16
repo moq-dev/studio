@@ -20,18 +20,10 @@ sessions held, so the failure shows before the confirm; this makes it not
 happen. `Sessions` counts encoders but cannot know a cap, which a driver
 reports only by refusing an open.
 
-Recommended: when the program's encoder cannot open, release the replay
-encoders of the sources on program, open the program's, then let each source
-reopen as sessions allow, its replay starting over. A replay is a convenience
-and the program is what viewers see; the cost falls only on a machine at its
-cap.
-
-## Waiting
-
-- Maintainer: how the program takes priority. (a) Recommended: release the
-  sources' replay encoders when the program's cannot open, as the Plan says.
-  (b) Open the program's encoders when the show opens and hold them idle off
-  air, as launch did before, at one or two sessions and their memory for the
-  whole session. (c) Leave it to the go-live sheet's Encoder check, which
-  reports it. An agent cannot pick: each trades replay, memory, or a failed
-  go-live on capped GPUs. Check: this item is answered here.
+Decided by the maintainer: when the program's encoder cannot open, release
+the replay encoders of the sources on program, open the program's, then let
+each source reopen as sessions allow, its replay starting over (rejected:
+opening the program's encoders when the show opens and holding them idle off
+air, at one or two sessions and their memory for the whole session; leaving
+it to the go-live sheet's Encoder check alone). A replay is a convenience and
+the program is what viewers see; the cost falls only on a machine at its cap.
