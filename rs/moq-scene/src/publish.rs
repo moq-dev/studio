@@ -104,6 +104,11 @@ impl Sessions {
 		Self(Arc::new(tokio::sync::watch::Sender::new(state)))
 	}
 
+	/// Whether these stand in for a capped GPU, made by [`capped`](Self::capped).
+	pub fn is_capped(&self) -> bool {
+		self.0.borrow().cap.is_some()
+	}
+
 	/// How many encoders are open now.
 	pub fn open(&self) -> usize {
 		self.0.borrow().open

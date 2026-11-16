@@ -1885,7 +1885,8 @@ async fn publish(gpu: &Gpu, stats: &Arc<Stats>, canvas: Canvas, start: Instant) 
 			moq_video::encode::Kind::Hardware
 		}
 	};
-	let reclaim = matches!(kind, moq_video::encode::Kind::Hardware).then(|| stats.sessions.clone());
+	let capped = matches!(kind, moq_video::encode::Kind::Hardware) || stats.sessions.is_capped();
+	let reclaim = capped.then(|| stats.sessions.clone());
 	let sources = moq_scene::publish::Publish::new(clock.clone(), kind, stats.sessions.clone())?;
 	let recorded_video = Renditions {
 		gpu: gpu.clone(),
@@ -1975,7 +1976,8 @@ struct Renditions {
 	record: bool,
 	/// Where the program reclaims the sources' replay encoders' sessions when
 	/// the GPU refuses it the hardware encoder it found at launch, or `None`
-	/// when it found none, so the sources' encoders hold none either.
+	/// when it found none and the sessions are not
+	/// [capped](Sessions::capped), so the sources' encoders hold none either.
 	reclaim: Option<Sessions>,
 	/// The connection's bandwidth, which each published rendition follows its
 	/// share of.
@@ -2089,6 +2091,7 @@ impl Renditions {
 			};
 			let job = Job {
 				sessions: self.stats.sessions.clone(),
+				reclaim_from: self.reclaim.clone(),
 				// Kept from the probe until the canvas size opens, so no source
 				// takes back a session meanwhile.
 				reclaim: opened.is_some().then(|| reclaim.take()).flatten(),
@@ -2744,6 +2747,8 @@ enum Video {
 /// What an encode thread runs.
 struct Job {
 	sessions: Sessions,
+	/// [`Renditions::reclaim`].
+	reclaim_from: Option<Sessions>,
 	/// The sources' replay encoders' sessions, held until the encoder opens.
 	reclaim: Option<Reclaim>,
 	/// How its canvas's video is doing.
@@ -2766,7 +2771,8 @@ struct Job {
 /// One rendition's encoder and track, doing what its gate decided.
 struct Encoder {
 	track: Encoding,
-	sessions: Sessions,
+	/// [`Renditions::reclaim`].
+	reclaim_from: Option<Sessions>,
 	config: moq_video::encode::Config,
 	joins: Joins,
 	/// Where to report each encoder opened as its canvas's, under the
@@ -2790,9 +2796,9 @@ impl Encoder {
 	/// sessions.
 	fn open(&mut self) -> anyhow::Result<()> {
 		match self.try_open() {
-			Err(err) if self.sessions.spare() > 0 => {
+			Err(err) if let Some(sessions) = self.reclaim_from.clone().filter(|sessions| sessions.spare() > 0) => {
 				tracing::warn!(err = %format!("{err:#}"), "closing the sources' replay encoders for the program's");
-				let reclaim = self.sessions.reclaim();
+				let reclaim = sessions.reclaim();
 				// Each source closes its own at its next picture, or at once
 				// when it delivers none.
 				pollster::block_on(reclaim.closed());
@@ -2892,6 +2898,7 @@ impl Encoder {
 fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<()>>>, video: mpsc::Receiver<Video>) {
 	let Job {
 		sessions,
+		reclaim_from,
 		reclaim,
 		video: stats,
 		role,
@@ -2905,8 +2912,8 @@ fn encode(job: Job, opened: Option<tokio::sync::oneshot::Sender<anyhow::Result<(
 	let size = config.size();
 	// Built here, since an encoder stays on the thread that opened it.
 	let mut encoder = Encoder {
-		track: Encoding::new(producer, sessions.clone()),
-		sessions,
+		track: Encoding::new(producer, sessions),
+		reclaim_from,
 		joins: Joins::new(track),
 		report: rendition.map(|rendition| (stats.clone(), rendition)),
 		config,
