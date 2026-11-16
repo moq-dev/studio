@@ -486,9 +486,10 @@ fn a_click_takes_and_the_panic_key_cuts() {
 }
 
 /// Settings changes the show as a person would: a canvas size by name and
-/// the format turn the program, keeping its frame rate. The Guests pane
-/// refuses a room guests could not join, saying why, then joins the room it
-/// saves at once, off air, and moves to the next on the next save. The scene
+/// the format turn the program, keeping its frame rate. A show whose room
+/// key is missing still opens, and once the key is back, Try again joins its
+/// room. The Guests pane refuses a room guests could not join, saying why,
+/// and moves to the room it saves at once, off air. The scene
 /// graph's Open closes Settings for the graph. It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
@@ -497,6 +498,8 @@ fn settings_change_the_show_and_move_the_guests() {
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	// A room whose key is not there yet.
+	std::fs::write("show.stream.toml", "room = \"guests\"\nroom_key = \"guests.jwk\"\n").unwrap();
 	let relay = Relay::start(&runtime);
 	let app = start(launch(&gpu), stream(Some(&relay)), &runtime);
 	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
@@ -533,11 +536,12 @@ fn settings_change_the_show_and_move_the_guests() {
 	}
 	harness.get_by_label("Guests").click();
 	harness.run_steps(2);
-	// Fill the room, then the room key, then save; each field replaced whole.
+	// Fill a field, replaced whole.
 	let fill = |harness: &mut Harness<'_, Window>, index: usize, text: &str| {
 		harness.get_all_by_role(Role::TextInput).nth(index).unwrap().focus();
 		harness.run_steps(2);
 		harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+		harness.key_press(egui::Key::Backspace);
 		harness
 			.get_all_by_role(Role::TextInput)
 			.nth(index)
@@ -555,7 +559,20 @@ fn settings_change_the_show_and_move_the_guests() {
 			}))
 			.unwrap_or_else(|_| panic!("guests join `{room}`"));
 	};
-	fill(&mut harness, 0, "guests");
+	// The key is back in place, under the same name.
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while harness.query_by_label_contains("Guests cannot join").is_none() {
+				harness.step();
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("the room failed to join at launch");
+	assert!(engine.room().is_none());
+	harness.get_by_label("Try again").click();
+	joined(&mut harness, "guests");
+	fill(&mut harness, 0, "other");
+	fill(&mut harness, 1, "");
 	harness.get_by_label("Save").click();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, async {
@@ -568,11 +585,7 @@ fn settings_change_the_show_and_move_the_guests() {
 			}
 		}))
 		.expect("a room without its key is refused");
-	assert!(engine.room().is_none());
-	fill(&mut harness, 1, "guests.jwk");
-	harness.get_by_label("Save").click();
-	joined(&mut harness, "guests");
-	fill(&mut harness, 0, "other");
+	assert_eq!(engine.room().unwrap().path().as_str(), "guests", "and the room stays");
 	fill(&mut harness, 1, "other.jwk");
 	harness.get_by_label("Save").click();
 	joined(&mut harness, "other");

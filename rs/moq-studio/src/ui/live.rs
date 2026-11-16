@@ -883,7 +883,15 @@ impl Panels {
 		let Saving { from, retokened, .. } = self.saving.take().expect("polled above");
 		let saved = match result {
 			Ok(saved) => saved,
-			Err(err) => {
+			Err(mut err) => {
+				// The recorder moved before the save; it goes back with the file.
+				if from == Setting::Recording {
+					let scene = self.engine.autosave.path().to_path_buf();
+					let back = self.controls.stream.lock().unwrap().recordings(&scene);
+					if let Err(moved) = self.engine.recorder.set_dir(&back) {
+						err = format!("{err} The next recording still goes to the new folder: {moved:#}");
+					}
+				}
 				self.saved = Some((from, err));
 				return;
 			}

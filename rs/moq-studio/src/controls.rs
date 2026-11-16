@@ -367,10 +367,17 @@ impl Controls {
 		if !crate::show::follow(&self.engine, stream) {
 			self.rewatch.store(true, Ordering::Release);
 		}
+		self.join_room(stream);
+	}
+
+	/// Join the guests' room `stream` names, unless joined to it already: a
+	/// room that failed is tried again, such as once its key file is back.
+	/// Call it holding [`Self::following`], inside the runtime.
+	fn join_room(&self, stream: &Stream) {
 		let room = (stream.relay().cloned(), stream.guests());
 		let mut joined = self.joined.lock().unwrap();
 		match &*joined {
-			Some((at, _)) if *at == room => return,
+			Some((at, Ok(()))) if *at == room => return,
 			// The engine starts in no room.
 			None if room.1 == crate::guests::Config::default() => {
 				*joined = Some((room, Ok(())));
@@ -390,6 +397,25 @@ impl Controls {
 			tracing::error!(error = format!("{err:#}"), "guests cannot join");
 		}
 		*joined = Some((room, result.map_err(|err| format!("{err:#}"))));
+	}
+
+	/// Try the guests' room that failed again, on a thread of its own, since
+	/// the credential store blocks. Off air only: on air, the settings may
+	/// hold a room that waits for the stream to end, and its end tries again.
+	pub fn retry_room(self: &Arc<Self>) {
+		let controls = self.clone();
+		let spawned = std::thread::Builder::new().name("room".into()).spawn(move || {
+			let _following = controls.following.lock().unwrap();
+			if controls.going() || controls.engine.on_air() != OnAir::Off {
+				return;
+			}
+			let (stream, _) = controls.snapshot();
+			let _runtime = controls.runtime.enter();
+			controls.join_room(&stream);
+		});
+		if let Err(err) = spawned {
+			tracing::warn!(error = format!("{err:#}"), "cannot join the room");
+		}
 	}
 
 	/// Why guests cannot join the room the settings name, if they cannot.

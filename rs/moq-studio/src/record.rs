@@ -157,9 +157,24 @@ impl Recorder {
 		self.dir.lock().unwrap().clone()
 	}
 
-	/// Save the next recording into `dir`; one under way stays where it is.
+	/// Save the next recording into `dir`. Refused while one is under way,
+	/// whose unfinished file the next launch repairs only in the directory
+	/// then set.
 	pub fn set_dir(&self, dir: &Path) -> anyhow::Result<()> {
-		*self.dir.lock().unwrap() = std::path::absolute(dir)?;
+		let dir = std::path::absolute(dir)?;
+		// Under the lock `start` reads the directory under, so none starts
+		// between the check and the move.
+		let session = self.session.lock().unwrap();
+		let mut current = self.dir.lock().unwrap();
+		if *current == dir {
+			return Ok(());
+		}
+		anyhow::ensure!(
+			session.as_ref().is_none_or(|session| *session.done.borrow()),
+			"a recording is under way: stop it before moving the folder, so a crash leaves it where the next \
+			 launch repairs it"
+		);
+		*current = dir;
 		Ok(())
 	}
 
@@ -1604,6 +1619,30 @@ mod tests {
 		recorder.start(false).unwrap();
 		assert_eq!(recorder.status().unwrap().files.len(), 1);
 		recorder.finish().await;
+	}
+
+	/// The folder stays put while a recording is under way, since a crash
+	/// leaves its file for the next launch to repair only where the folder
+	/// is then; once it is done, the folder moves.
+	#[tokio::test(start_paused = true)]
+	async fn the_folder_stays_while_recording() {
+		let dir = tempfile::tempdir().unwrap();
+		let other = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		let recorder = studio.recorder(dir.path());
+		studio.play(Duration::from_secs(1)).await;
+		recorder.start(false).unwrap();
+		let refused = recorder.set_dir(other.path()).unwrap_err();
+		assert!(
+			format!("{refused:#}").contains("a recording is under way"),
+			"{refused:#}"
+		);
+		recorder.set_dir(dir.path()).expect("the same folder is no move");
+		assert_eq!(recorder.dir(), dir.path());
+		recorder.stop();
+		let ((), ()) = tokio::join!(recorder.finish(), studio.play(Duration::from_millis(500)));
+		recorder.set_dir(other.path()).unwrap();
+		assert_eq!(recorder.dir(), other.path());
 	}
 
 	/// Each source with media of its own records into its own file while it is

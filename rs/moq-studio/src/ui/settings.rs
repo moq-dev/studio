@@ -583,6 +583,9 @@ impl Panels {
 		let dir = self.engine.recorder.dir();
 		let flagged = stream.overridden().recordings;
 		let busy = self.saving.is_some() || self.picker.is_some();
+		// The folder stays put under a recording, as the recorder holds it.
+		let recording = self.engine.recorder.status().is_some_and(|status| !status.done);
+		const RECORDING: &str = "Stop the recording to move the folder.";
 		rule(ui);
 		ui.add_space(12.0);
 		ui.horizontal(|ui| {
@@ -610,18 +613,22 @@ impl Panels {
 					let result = crate::shelf::open(&dir);
 					self.check(result);
 				}
-				let change = ui.add_enabled(!flagged && !busy, egui::Button::new("Change"));
-				if change.clicked() {
+				let button = |ui: &mut Ui, name: &str, enabled: bool| {
+					let response = ui.add_enabled(enabled && !busy && !recording, egui::Button::new(name));
+					match recording {
+						true => response.on_disabled_hover_text(RECORDING),
+						false => response,
+					}
+				};
+				if button(ui, "Change", !flagged).clicked() {
 					self.pick(Picking::Folder, &dir);
 				}
-				if stream.saved().recordings.is_some()
-					&& !flagged && ui.add_enabled(!busy, egui::Button::new("Beside the show")).clicked()
-				{
+				if stream.saved().recordings.is_some() && !flagged && button(ui, "Beside the show", true).clicked() {
 					let saved = Saved {
 						recordings: None,
 						..stream.saved().clone()
 					};
-					self.save_stream(Setting::Recording, stream.clone(), saved, Vec::new(), ui.ctx());
+					self.move_recordings(stream.clone(), saved, ui.ctx());
 				}
 			});
 		});
@@ -690,7 +697,7 @@ impl Panels {
 					recordings: Some(picked),
 					..stream.saved().clone()
 				};
-				self.save_stream(Setting::Recording, stream, saved, Vec::new(), ctx);
+				self.move_recordings(stream, saved, ctx);
 			}
 			Picking::Key => {
 				let stream = self.controls.stream.lock().unwrap().clone();
@@ -829,6 +836,14 @@ impl Panels {
 			ui.painter().circle_filled(at.center(), 4.5, dot);
 			ui.add(egui::Label::new(RichText::new(said).font(kit::ui(12.5)).color(kit::TEXT)).wrap());
 		});
+		// Such as once the room key's file is back; on air, the stream's end
+		// tries it again.
+		if failure.is_some() && self.engine.on_air() == crate::engine::OnAir::Off {
+			ui.add_space(6.0);
+			if ui.add_enabled(!busy, egui::Button::new("Try again")).clicked() {
+				self.controls.retry_room();
+			}
+		}
 		ui.add_space(10.0);
 
 		ui.add_enabled_ui(!busy, |ui| {
@@ -840,6 +855,7 @@ impl Panels {
 				|ui| {
 					ui.add(
 						egui::TextEdit::singleline(&mut form.room)
+							.id_salt("guests room")
 							.hint_text("guests")
 							.desired_width(f32::INFINITY),
 					);
@@ -856,6 +872,7 @@ impl Panels {
 						pick_key = ui.button("Choose").clicked();
 						ui.add(
 							egui::TextEdit::singleline(&mut form.key)
+								.id_salt("guests room key")
 								.hint_text("room.jwk")
 								.desired_width(f32::INFINITY),
 						);
@@ -870,6 +887,7 @@ impl Panels {
 				|ui| {
 					ui.add(
 						egui::TextEdit::singleline(&mut form.page)
+							.id_salt("guests join page")
 							.hint_text("https://join.studio.moq.dev/")
 							.desired_width(f32::INFINITY),
 					);
@@ -926,6 +944,17 @@ impl Panels {
 				.map(std::path::Path::to_path_buf)
 				.unwrap_or_else(|| self.engine.recorder.dir());
 			self.pick(Picking::Key, &from);
+		}
+	}
+
+	/// Save `saved`, with a new recordings folder, once the recorder has
+	/// moved to it, so the file never names a folder a recording under way
+	/// kept it from.
+	fn move_recordings(&mut self, stream: crate::stream::Stream, saved: Saved, ctx: &egui::Context) {
+		let scene = self.engine.autosave.path().to_path_buf();
+		match self.engine.recorder.set_dir(&saved.folder(&scene)) {
+			Ok(()) => self.save_stream(Setting::Recording, stream, saved, Vec::new(), ctx),
+			Err(err) => self.saved = Some((Setting::Recording, format!("{err:#}"))),
 		}
 	}
 

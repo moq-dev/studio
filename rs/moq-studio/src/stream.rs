@@ -47,6 +47,21 @@ pub struct Saved {
 	pub guest_expiry: Option<Duration>,
 }
 
+impl Saved {
+	/// Where these settings save recordings for the show at `scene`, with no
+	/// flag over them.
+	pub fn folder(&self, scene: &Path) -> PathBuf {
+		match &self.recordings {
+			Some(dir) => dir.clone(),
+			None => scene
+				.parent()
+				.filter(|dir| !dir.as_os_str().is_empty())
+				.unwrap_or(Path::new("."))
+				.to_path_buf(),
+		}
+	}
+}
+
 /// What the command line sets for one run, over the show's saved settings.
 #[derive(Clone, Debug, Default)]
 pub struct Flags {
@@ -228,14 +243,9 @@ impl Stream {
 
 	/// Where recordings are saved for the show at `scene`.
 	pub fn recordings(&self, scene: &Path) -> PathBuf {
-		let set = self.flags.recordings.as_ref().or(self.saved.recordings.as_ref());
-		match set {
+		match &self.flags.recordings {
 			Some(dir) => dir.clone(),
-			None => scene
-				.parent()
-				.filter(|dir| !dir.as_os_str().is_empty())
-				.unwrap_or(Path::new("."))
-				.to_path_buf(),
+			None => self.saved.folder(scene),
 		}
 	}
 
