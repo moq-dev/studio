@@ -1889,14 +1889,15 @@ const REACH: f32 = 8.0;
 
 /// Where the visible layers of `scene` and the always-on-top ones over it,
 /// if they are drawn over that scene, show `since` the scene went on, other
-/// than `dragged`: what a dragged layer snaps to.
-fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration) -> Vec<Rect> {
-	let collection = state.collection();
+/// than `dragged`: what a dragged layer snaps to. A scene open `off_air` is
+/// drawn without the always-on-top layers, so nothing snaps to them.
+fn others(collection: &Collection, scene: Option<&str>, off_air: bool, dragged: &Picked, since: Duration) -> Vec<Rect> {
 	// The top layer goes over a scene of the program's size, as the
 	// compositor draws it.
-	let top = collection
-		.canvas(scene)
-		.is_none_or(|canvas| canvas.size() == collection.canvas.size());
+	let top = !off_air
+		&& collection
+			.canvas(scene)
+			.is_none_or(|canvas| canvas.size() == collection.canvas.size());
 	let mut rects = Vec::new();
 	let layers = scene.map(Layer::scene).into_iter().chain(top.then(Layer::top));
 	for shown in layers {
@@ -2641,5 +2642,54 @@ filters = [{ kind = "opacity", amount = 0.5 }]
 		draft.set_source("clone", Some(source)).unwrap();
 		draft.set_video("clone", Some(video)).unwrap();
 		draft.finish().unwrap();
+	}
+
+	/// A layer dragged in a scene open off air snaps only to what its picture
+	/// draws, so never to an always-on-top layer, which stays on program.
+	#[test]
+	fn off_air_snaps_past_the_always_on_top_layers() {
+		let collection = Collection::from_toml(
+			r#"
+version = 1
+top = [
+    { source = "bug", rect = { x = 1100, y = 20, width = 160, height = 90 } },
+]
+
+[canvas]
+width = 1280
+height = 720
+framerate = 30
+
+[sources.cam]
+kind = "camera"
+
+[sources.bug]
+kind = "camera"
+
+[[scenes]]
+name = "Main"
+items = [
+    { source = "cam", rect = { x = 0, y = 0, width = 640, height = 360 } },
+    { source = "cam", rect = { x = 640, y = 360, width = 640, height = 360 } },
+]
+"#,
+		)
+		.unwrap();
+		let dragged = Picked {
+			layer: Layer::scene("Main"),
+			index: 0,
+		};
+		let bug = Rect {
+			x: 1100.0,
+			y: 20.0,
+			width: 160.0,
+			height: 90.0,
+		};
+		let on_air = others(&collection, Some("Main"), false, &dragged, Duration::ZERO);
+		assert_eq!(on_air.len(), 2, "{on_air:?}");
+		assert!(on_air.contains(&bug), "on air, it snaps to the layer on top");
+		let off_air = others(&collection, Some("Main"), true, &dragged, Duration::ZERO);
+		assert_eq!(off_air.len(), 1, "{off_air:?}");
+		assert!(!off_air.contains(&bug), "off air, the layer on top is not drawn");
 	}
 }

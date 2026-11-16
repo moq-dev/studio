@@ -833,13 +833,15 @@ impl Panels {
 		let spot = Spot::Layer(layer.clone(), item.source.clone());
 		let what = format!("`{}`", item.source);
 		let mut play = false;
+		// Play replays a scene open off air in its own picture, never on air.
+		let replays = match self.off_air(&state) {
+			Some(_) => "Play the keyframes of the scene open off air again from the start, in its own picture only",
+			None => "Play the keyframes of the scene on air again from the start, on air",
+		};
 		ui.horizontal(|ui| {
 			ui.strong(format!("Keyframes of {what}"));
 			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-				play = ui
-					.add(kit::button(Icon::Play, "Play"))
-					.on_hover_text("Play the keyframes of the scene on air again from the start, on air")
-					.clicked();
+				play = ui.add(kit::button(Icon::Play, "Play")).on_hover_text(replays).clicked();
 			});
 		});
 		ui.label(

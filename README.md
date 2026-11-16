@@ -423,9 +423,9 @@ Keyframes play once, from when the layer's scene goes on program, and hold the
 last keyframe; before the first, the layer holds the first. A cut or transition
 starts them again, while a scene leaving in a transition carries on with its
 own. Press **Play** in the Animate tab to play the scene on program's again
-from now, or a scene open off air's in its own picture alone. They are drawn on the program clock, so the stream, a recording, and
-a replay of the program show the same frames. Always-on-top layers have none,
-since they never go on.
+from now, or a scene open off air's in its own picture alone. They are drawn
+on the program clock, so the stream, a recording, and a replay of the program
+show the same frames. Always-on-top layers have none, since they never go on.
 
 Dragging a layer on BUILD grabs it where its keyframes have it and moves
 where it rests, so its whole animation moves with it.
