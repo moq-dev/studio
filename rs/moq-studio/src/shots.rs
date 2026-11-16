@@ -18,7 +18,7 @@ use egui_kittest::kittest::Queryable;
 use moq_scene::source::Status;
 
 use crate::fx::Effects;
-use crate::ui::{Page, Setting, Tool};
+use crate::ui::{Inspect, Page, Setting, Side};
 use crate::{App, Window, autosave, engine, fx, hotkeys, setup};
 
 /// The window's size, the mock-ups'.
@@ -48,8 +48,17 @@ enum Open {
 /// Where a view turns the studio.
 enum View {
 	Page(Page),
-	/// The BUILD page, showing a tool.
-	Tool(Tool),
+	/// The BUILD page with `side` and `inspect` shown, and the layer of the
+	/// scene on program at `index`, front first, selected.
+	Build {
+		side: Side,
+		inspect: Inspect,
+		index: Option<usize>,
+	},
+	/// BUILD with the host's layer selected and its row's menu open.
+	Menu,
+	/// The edit history, under the title bar's undo, after an edit.
+	History,
 	/// Settings, at a tab.
 	Setting(Setting),
 	/// The stream's health in detail.
@@ -58,6 +67,14 @@ enum View {
 	/// pointer on undo, which names the mute.
 	Hover,
 }
+
+/// BUILD with the host's layer, the middle of the scene on program's three,
+/// selected, as the mock-up's.
+const BUILD: View = View::Build {
+	side: Side::Layers,
+	inspect: Inspect::Layer,
+	index: Some(1),
+};
 
 /// The studio on the shots' show, at the mock-ups' size, turned to `view`.
 fn studio(view: View) -> Open {
@@ -109,18 +126,31 @@ views! {
 	/// A window snapped beside a game stacks the picture, the scenes, and the
 	/// sound.
 	live_compact: Still, Open::Studio { view: View::Page(Page::Live), size: HALF, show: "show.toml" };
-	build: Still, studio(View::Page(Page::Build));
+	/// BUILD with the host's layer selected: its row in Layers, its handles
+	/// and toolbar on the picture, and its inspector.
+	build: Still, studio(BUILD);
+	/// BUILD with no layer selected: the inspector shows the scene.
+	build_scene: Still, studio(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: None });
+	/// The selected layer's keyframes.
+	build_animate: Still, studio(View::Build { side: Side::Layers, inspect: Inspect::Animate, index: Some(1) });
+	/// What can be added: sources no layer shows, devices, by hand, and
+	/// guests.
+	build_add: Still, studio(View::Build { side: Side::Add, inspect: Inspect::Layer, index: None });
+	/// A layer row's menu, as a right click opens it.
+	build_menu: Still, studio(View::Menu);
+	/// BUILD in a window snapped beside a game: the inspector is a tab beside
+	/// Layers and Add.
+	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml" };
 	/// MIX holds the mixer, and a small live picture in the sound's place.
 	mix: Still, studio(View::Page(Page::Mix));
 	/// MIX in a stacked window, its live picture as tall as the sound's slot
 	/// allows.
 	mix_compact: Still, Open::Studio { view: View::Page(Page::Mix), size: HALF, show: "show.toml" };
 	review: Still, studio(View::Page(Page::Review));
-	graph: Still, studio(View::Setting(Setting::Graph));
-	history: Still, studio(View::Setting(Setting::History));
-	devices: Still, studio(View::Tool(Tool::Devices));
-	guests: Still, studio(View::Tool(Tool::Guests));
-	keyframes: Still, studio(View::Tool(Tool::Keyframes));
+	/// Settings' Advanced tab: the scene graph.
+	advanced: Still, studio(View::Setting(Setting::Advanced));
+	/// The edit history, open under undo.
+	history: Still, studio(View::History);
 	health: Still, studio(View::Health);
 	/// Settings' Show tab, with the encoders' timings.
 	output: Live, studio(View::Setting(Setting::Show));
@@ -273,9 +303,7 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	assert!(muted("alice"), "the guest is muted");
 	assert!(!muted("guest") && !muted("caller"), "other remote feeds stay on");
 
-	harness
-		.get_by_label("Undo: Panic: mute every microphone and guest")
-		.click();
+	harness.get_by_label_contains("Undo: Panic: ").click();
 	harness.run_steps(2);
 	assert!(!muted("mic") && !muted("alice"), "undo takes the mute back");
 	assert_eq!(program().as_deref(), Some("Break"), "and leaves program where it is");
@@ -294,6 +322,104 @@ fn a_click_takes_and_the_panic_key_cuts() {
 		closed.load(Ordering::Relaxed),
 		"the window counts the close as asked for"
 	);
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// On BUILD, a layer row's menu hides, locks, reorders, and duplicates its
+/// layer, a scene's pad's duplicates the scene with its own copies, and
+/// undo takes each back, and a take lets go of a layer of the scene it
+/// leaves. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_layer_menu_edits_its_layer() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(start(launch(&gpu), &runtime), &gpu, &runtime, SIZE);
+	harness.step();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.build(Side::Layers, Inspect::Layer, None);
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let main = || {
+		let state = engine.state.lock().unwrap();
+		state.collection().scene("Main").unwrap().items.clone()
+	};
+	let menu = |harness: &mut Harness<'_, Window>, row: &str, button: &str| {
+		harness.get_all_by_label(row).next().unwrap().click_secondary();
+		harness.run_steps(2);
+		// The menu's, which comes after the row's own eye and lock and the
+		// inspector's buttons of the same names.
+		harness.get_all_by_label(button).last().unwrap().click();
+		harness.run_steps(2);
+	};
+
+	menu(&mut harness, "bar", "Hide");
+	assert!(!main()[2].visible, "the menu hid the bar");
+	menu(&mut harness, "bar", "Lock");
+	assert!(main()[2].locked, "and locked it");
+	menu(&mut harness, "bar", "Send to back");
+	assert_eq!(main()[0].source, "bar", "it went to the back");
+	menu(&mut harness, "host", "Duplicate as its own copy");
+	let items = main();
+	assert_eq!(items.len(), 4);
+	assert_eq!(items[3].source, "host copy", "the copy went in front of the host");
+	let cloned = engine.state.lock().unwrap().collection().sources["host copy"].clone();
+	assert_eq!(cloned, moq_scene::Source::Clone { source: "host".into() });
+	// The menu acts while it holds the engine's state, which copying reads.
+	menu(&mut harness, "bar", "Copy");
+	harness.get_by_label("copied `bar`");
+
+	harness.get_by_label("Interview").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Duplicate with its own copies").click();
+	harness.run_steps(2);
+	{
+		let state = engine.state.lock().unwrap();
+		let collection = state.collection();
+		let copy = collection.scene("Interview copy").expect("the scene was duplicated");
+		let shown: Vec<&str> = copy.items.iter().map(|item| item.source.as_str()).collect();
+		assert_eq!(shown, ["backdrop copy", "host copy 2", "guest copy"]);
+	}
+
+	for _ in 0..5 {
+		harness.get_by_label_contains("Undo: ").click();
+		harness.run_steps(2);
+	}
+	let items = main();
+	let shown: Vec<&str> = items.iter().map(|item| item.source.as_str()).collect();
+	assert_eq!(shown, ["backdrop", "host", "bar"], "undo took each edit back");
+	assert!(items[2].visible && !items[2].locked);
+	assert!(
+		engine
+			.state
+			.lock()
+			.unwrap()
+			.collection()
+			.scene("Interview copy")
+			.is_none()
+	);
+
+	// A take moves BUILD to another scene, letting go of a layer of this one.
+	let selected = |harness: &mut Harness<'_, Window>| {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!()
+		};
+		studio.selected()
+	};
+	harness.get_all_by_label("bar").next().unwrap().click();
+	harness.run_steps(2);
+	assert!(selected(&mut harness), "the click selected the bar");
+	harness.get_by_label("Interview").click();
+	harness.run_steps(2);
+	assert!(!selected(&mut harness), "the take let go of Main's bar");
 
 	drop(harness);
 	quit(&engine, &runtime);
@@ -332,17 +458,34 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	};
 	match view {
 		View::Page(page) => studio.turn(*page),
-		View::Tool(tool) => studio.tool(*tool),
+		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
+		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) => studio.open(*setting),
 		View::Health => studio.details(),
-		View::Hover => {}
+		View::Hover | View::History => {}
 	}
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
 		.expect("the sources and pictures settle");
-	if let View::Hover = view {
-		hover(&mut harness);
+	match view {
+		View::Hover => hover(&mut harness),
+		View::Menu => {
+			// The row comes before the inspector's tab of the same name.
+			harness.get_all_by_label("host").next().unwrap().click_secondary();
+			harness.run_steps(4);
+		}
+		View::History => {
+			harness
+				.get_all_by_label("Mute")
+				.next()
+				.expect("a sound to mute")
+				.click();
+			harness.run_steps(2);
+			harness.get_by_label("History").click();
+			harness.run_steps(4);
+		}
+		_ => {}
 	}
 	let image = harness.render().unwrap();
 	drop(harness);

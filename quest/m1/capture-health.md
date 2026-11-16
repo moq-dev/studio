@@ -28,7 +28,3 @@ simply black and the cause is a forum search away.
   invisible but a stale frame never passes for live. The alternatives are
   black at once, as today, or a placeholder the show chooses.
 - A source that is meant to be black can dismiss the badge for good.
-
-## Required
-
-- [The BUILD page](/quest/m0/ux/build.md) - the layer rows and the on-picture badge

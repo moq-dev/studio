@@ -369,8 +369,8 @@ impl State {
 			false => done.push(format!("muted {}", named(&muted))),
 		}
 		match hidden.is_empty() {
-			true => done.push("the top layer showed nothing".to_string()),
-			false => done.push(format!("hid {} from the top layer", named(&hidden))),
+			true => done.push("no always-on-top layer was shown".to_string()),
+			false => done.push(format!("hid {} from the always-on-top layers", named(&hidden))),
 		}
 		if !muted.is_empty() || !hidden.is_empty() {
 			self.commit(draft, None)?;
@@ -432,7 +432,7 @@ fn silence(
 		.filter(|name| !collection.audio.get(*name).is_some_and(|audio| audio.muted))
 		.cloned()
 		.collect();
-	let mut draft = collection.draft("Panic: mute every microphone and guest, hide the top layer");
+	let mut draft = collection.draft("Panic: mute every microphone and guest, hide the always-on-top layers");
 	for name in &muted {
 		let audio = collection.audio.get(name).cloned().unwrap_or_default();
 		draft.set_audio(name, Some(moq_scene::Audio { muted: true, ..audio }))?;
@@ -3721,16 +3721,16 @@ mod tests {
 			let said = state.panic(None).unwrap();
 			assert_eq!(
 				said,
-				"no microphone or guest was on, and hid `red` from the top layer, and cut to `BRB`"
+				"no microphone or guest was on, and hid `red` from the always-on-top layers, and cut to `BRB`"
 			);
 			assert_eq!(state.compositor.program_scene(), Some("BRB"));
 			assert!(!state.compositor.transitioning(), "a cut, at once");
 			assert_eq!(state.takes, takes + 2);
-			assert!(!state.collection.top[0].visible, "the top layer is off");
+			assert!(!state.collection.top[0].visible, "the always-on-top layer is off");
 			let said = state.panic(None).unwrap();
 			assert_eq!(
 				said,
-				"no microphone or guest was on, and the top layer showed nothing, and `BRB` is on program"
+				"no microphone or guest was on, and no always-on-top layer was shown, and `BRB` is on program"
 			);
 			assert_eq!(state.takes, takes + 2);
 			state.undo().unwrap();
@@ -3744,7 +3744,7 @@ mod tests {
 			let said = state.panic(None).unwrap();
 			assert_eq!(
 				said,
-				"no microphone or guest was on, and hid `red` from the top layer, and cut to `BRB`"
+				"no microphone or guest was on, and hid `red` from the always-on-top layers, and cut to `BRB`"
 			);
 			assert!(!state.compositor.transitioning(), "a cut, at once");
 			assert_eq!(state.takes, takes + 5);
@@ -3819,7 +3819,10 @@ mod tests {
 		let (draft, muted, _) = silence(&collection, Some(&room)).unwrap();
 		assert_eq!(muted, ["alice", "alice screen", "desk", "lav"]);
 		let edit = draft.finish().unwrap();
-		assert_eq!(edit.label, "Panic: mute every microphone and guest, hide the top layer");
+		assert_eq!(
+			edit.label,
+			"Panic: mute every microphone and guest, hide the always-on-top layers"
+		);
 		collection.apply(&edit).unwrap();
 		assert!(collection.top.iter().all(|item| !item.visible), "all hidden");
 		for (now, before) in collection.top.iter().zip(&top) {

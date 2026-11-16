@@ -31,6 +31,8 @@ use crate::{mix, record};
 
 mod build;
 mod graph;
+mod inspector;
+mod layers;
 mod layout;
 mod levels;
 mod mixer;
@@ -50,7 +52,8 @@ pub(crate) enum Page {
 	/// The live picture, as large as the window allows.
 	#[default]
 	Live,
-	/// The live picture with the layers, the sources, and the inspector.
+	/// The live picture with its layers, what can be added, and the
+	/// selected layer's inspector.
 	Build,
 	/// Every sound and audio scene, with its sends.
 	Mix,
@@ -88,23 +91,54 @@ pub(crate) enum Setting {
 	Show,
 	Hotkeys,
 	Effects,
-	/// Every source, scene, and audio scene, wired.
-	Graph,
-	History,
+	/// The scene graph: every source, scene, and audio scene, wired.
+	Advanced,
 }
 
 impl Setting {
-	const ALL: [Self; 5] = [Self::Show, Self::Hotkeys, Self::Effects, Self::Graph, Self::History];
+	const ALL: [Self; 4] = [Self::Show, Self::Hotkeys, Self::Effects, Self::Advanced];
 
 	fn name(self) -> &'static str {
 		match self {
 			Self::Show => "Show",
 			Self::Hotkeys => "Hotkeys",
 			Self::Effects => "Effects",
-			Self::Graph => "Graph",
-			Self::History => "History",
+			Self::Advanced => "Advanced",
 		}
 	}
+}
+
+/// The BUILD page's left column: the layers, or what can be added.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Side {
+	#[default]
+	Layers,
+	Add,
+	/// The inspector, a tab of its own when the window is too narrow for
+	/// its column.
+	Inspect,
+}
+
+impl Side {
+	/// The tabs beside the inspector's own column.
+	const ALL: [Self; 2] = [Self::Layers, Self::Add];
+
+	fn name(self) -> &'static str {
+		match self {
+			Self::Layers => "Layers",
+			Self::Add => "Add",
+			Self::Inspect => "Inspector",
+		}
+	}
+}
+
+/// The inspector's tabs: the selected layer, or the scene with none, and the
+/// layer's keyframes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Inspect {
+	#[default]
+	Layer,
+	Animate,
 }
 
 /// The studio window.
@@ -148,11 +182,11 @@ impl Studio {
 			page: Page::default(),
 			setting: None,
 			details: false,
-			left: Tool::Layers,
-			right: Tool::Filters,
+			side: Side::default(),
+			inspect: Inspect::default(),
 			launched: kio::clock::now(),
-			top: false,
 			selection: None,
+			cropping: false,
 			gestures: Gestures::default(),
 			snapping: Snapping::default(),
 			direction: Direction::Left,
@@ -163,15 +197,16 @@ impl Studio {
 			renaming: None,
 			title_needs: 0.0,
 			renaming_audio: None,
+			renaming_pad: None,
 			speaker: None,
 			speakers: Speakers::default(),
 			canvas: None,
 			sizes: BTreeMap::new(),
-			new_item: None,
 			add: AddSource::default(),
 			devices: Devices::default(),
 			interacting: false,
 			interact: Interact::default(),
+			moving: None,
 			staged: false,
 			thumbnails: BTreeMap::new(),
 			thumbnails_shown: BTreeSet::new(),
@@ -179,6 +214,7 @@ impl Studio {
 			guest: String::new(),
 			shown: None,
 			message: None,
+			faults: Vec::new(),
 			reloads: 0,
 			levels: Levels::default(),
 			graph: graph::View::default(),
@@ -210,13 +246,29 @@ impl Studio {
 		self.panels.details = true;
 	}
 
-	/// Turn to BUILD and show `tool`, as its tab would.
-	pub(crate) fn tool(&mut self, tool: Tool) {
-		self.panels.page = Page::Build;
-		match Tool::RIGHT.contains(&tool) {
-			true => self.panels.right = tool,
-			false => self.panels.left = tool,
-		}
+	/// Whether a layer is selected.
+	pub(crate) fn selected(&self) -> bool {
+		self.panels.selection.is_some()
+	}
+
+	/// Turn to BUILD with `side` and `inspect` shown, and the layer at
+	/// `index` of the scene on program selected, front first, as a click on
+	/// its row would.
+	pub(crate) fn build(&mut self, side: Side, inspect: Inspect, index: Option<usize>) {
+		let panels = &mut self.panels;
+		panels.page = Page::Build;
+		panels.side = side;
+		panels.inspect = inspect;
+		let state = panels.engine.state.lock().unwrap();
+		let layer = state.compositor.program_scene().map(Layer::scene);
+		let count = layer
+			.as_ref()
+			.and_then(|layer| state.collection().items(layer))
+			.map_or(0, <[Item]>::len);
+		panels.selection = index.zip(layer).map(|(index, layer)| Picked {
+			layer,
+			index: count - 1 - index,
+		});
 	}
 }
 
@@ -356,47 +408,6 @@ impl Registered {
 	}
 }
 
-/// The BUILD page's tools, each a tab of one of its columns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Tool {
-	Layers,
-	Scenes,
-	Sources,
-	Devices,
-	Guests,
-	/// The selection's inspector, on the right.
-	Filters,
-	Keyframes,
-}
-
-impl Tool {
-	/// The left column's, and the right's.
-	const LEFT: [Self; 5] = [Self::Layers, Self::Scenes, Self::Sources, Self::Devices, Self::Guests];
-	const RIGHT: [Self; 2] = [Self::Filters, Self::Keyframes];
-	/// Every tool, in one column when the window is too narrow for two.
-	const ALL: [Self; 7] = [
-		Self::Layers,
-		Self::Scenes,
-		Self::Sources,
-		Self::Devices,
-		Self::Guests,
-		Self::Filters,
-		Self::Keyframes,
-	];
-
-	fn name(self) -> &'static str {
-		match self {
-			Self::Layers => "Layers",
-			Self::Scenes => "Scenes",
-			Self::Sources => "Sources",
-			Self::Devices => "Devices",
-			Self::Guests => "Guests",
-			Self::Filters => "Filters",
-			Self::Keyframes => "Keyframes",
-		}
-	}
-}
-
 /// What every page draws from, plus the half-typed forms.
 struct Panels {
 	engine: Arc<Engine>,
@@ -425,17 +436,18 @@ struct Panels {
 	setting: Option<Setting>,
 	/// Whether the stream's health shows in detail.
 	details: bool,
-	/// The BUILD page's tool in each column.
-	left: Tool,
-	right: Tool,
+	/// The BUILD page's left column and inspector tabs.
+	side: Side,
+	inspect: Inspect,
 	/// When the studio started, which it is live from with `--connect`, until
 	/// going live is its own step (quest/m0/ux/go-live.md).
 	launched: kio::clock::Instant,
-	/// Whether the Layers tab shows the top layer rather than the scene on
-	/// program.
-	top: bool,
-	/// What the inspector edits and a copy takes.
-	selection: Option<Selection>,
+	/// The layer the inspector edits, the picture's handles hold, and a copy
+	/// takes.
+	selection: Option<Picked>,
+	/// Whether a drag on the selected layer's edges crops it rather than
+	/// resizing it.
+	cropping: bool,
 	gestures: Gestures,
 	snapping: Snapping,
 	/// The direction a slide or wipe last had, which the transition picker
@@ -447,8 +459,10 @@ struct Panels {
 	/// The cut point a stinger last had, which the transition picker offers
 	/// again after another kind.
 	cut: Duration,
-	/// The item a drag on the BUILD page's picture holds.
+	/// The layer a drag on the BUILD page's picture holds.
 	drag: Option<Drag>,
+	/// The layer row being dragged to a new place, by its index.
+	moving: Option<usize>,
 	new_scene: String,
 	/// The scene being renamed, by index, and the name typed so far.
 	renaming: Option<(usize, String)>,
@@ -457,6 +471,8 @@ struct Panels {
 	title_needs: f32,
 	/// The audio scene being renamed, by its name, and the name typed so far.
 	renaming_audio: Option<(String, String)>,
+	/// The scene its pad's sheet renames, by name, and the name typed so far.
+	renaming_pad: Option<(String, String)>,
 	/// The output Listen plays on, by [`mix::Speaker::id`], or `None` for the
 	/// system default. Saved per user, not in the shared scene file.
 	speaker: Option<String>,
@@ -466,11 +482,10 @@ struct Panels {
 	canvas: Option<Canvas>,
 	/// The size each scene's form holds until it is applied, by name.
 	sizes: BTreeMap<String, (u32, u32)>,
-	new_item: Option<String>,
 	add: AddSource,
 	devices: Devices,
-	/// Whether the BUILD page's picture passes the mouse and keyboard to
-	/// browser sources.
+	/// Whether the BUILD page's picture passes the mouse and keyboard to the
+	/// selected layer's web page, until Escape.
 	interacting: bool,
 	interact: Interact,
 	/// Whether this frame drew the BUILD page's picture, which hears input.
@@ -486,8 +501,11 @@ struct Panels {
 	guest: String,
 	/// The join link on screen.
 	shown: Option<Shown>,
-	/// The outcome of the last action, and when, shown for a while.
+	/// The outcome of the last action that happened nowhere in particular,
+	/// and when, shown for a while.
 	message: Option<(Result<String, String>, kio::clock::Instant)>,
+	/// Failures shown where they happened, newest last.
+	faults: Vec<Fault>,
 	/// The engine's reloads seen so far.
 	reloads: u64,
 	/// Each sound's and audio scene's recent levels, for the meters.
@@ -495,14 +513,57 @@ struct Panels {
 	graph: graph::View,
 }
 
-/// A source or an item: what the Filters panel edits.
+/// A layer, by the list it is in and its place there, back to front.
+#[derive(Clone, Debug, PartialEq)]
+struct Picked {
+	layer: Layer,
+	index: usize,
+}
+
+impl Picked {
+	/// The layer as `collection` has it, if it is still there.
+	fn item<'a>(&self, collection: &'a Collection) -> Option<&'a Item> {
+		collection.items(&self.layer)?.get(self.index)
+	}
+
+	/// What its look edits.
+	fn look(&self) -> Selection {
+		Selection::Item(self.layer.clone(), self.index)
+	}
+}
+
+/// Where a failure happened, which shows it there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Spot {
+	/// The rows and the inspector of the layers of `Layer` showing a source.
+	Layer(Layer, String),
+	/// A scene's pad, by its name.
+	Pad(String),
+	/// The scene's inspector, with no layer selected.
+	Scene,
+	/// The Add tab.
+	Add,
+}
+
+/// A failure at a spot, and when, shown there for a while.
+struct Fault {
+	spot: Spot,
+	text: String,
+	at: kio::clock::Instant,
+}
+
+/// How long a failure shows where it happened, unless the next edit there
+/// succeeds first.
+const FAULT: Duration = Duration::from_secs(10);
+
+/// A source or a layer: what a look editor edits.
 #[derive(Clone, Debug, PartialEq)]
 enum Selection {
 	Source(String),
 	Item(Layer, usize),
 }
 
-/// What the Filters panel sets on a selection.
+/// What a look editor sets on a selection.
 #[derive(Clone, Debug, PartialEq)]
 struct Look {
 	/// A source's background, where it can be removed; an item has none.
@@ -567,7 +628,7 @@ impl Selection {
 					.and_then(|items| items.get(*index))
 					.cloned();
 				let item =
-					item.ok_or_else(|| moq_scene::Error::Conflict(format!("there is no item {index} in {layer}")))?;
+					item.ok_or_else(|| moq_scene::Error::Conflict(format!("there is no layer {index} in {layer}")))?;
 				let blend = blend.unwrap_or(item.blend);
 				draft.set_item(
 					layer,
@@ -596,7 +657,7 @@ impl Selection {
 			Self::Item(layer, index) => {
 				let item = collection.items(layer).and_then(|items| items.get(*index));
 				let source = item.map_or("nothing", |item| item.source.as_str());
-				format!("`{source}` in {layer}")
+				format!("`{source}` {}", place(layer))
 			}
 		}
 	}
@@ -624,6 +685,15 @@ impl Gestures {
 	}
 }
 
+/// Where `layer`'s layers are, as an edit's label says it: in a scene, or
+/// always on top.
+fn place(layer: &Layer) -> String {
+	match &layer.scene {
+		Some(scene) => format!("in scene `{scene}`"),
+		None => "always on top".into(),
+	}
+}
+
 /// Build an edit labelled `label` with `build` and commit it.
 fn edit(
 	state: &mut State,
@@ -634,6 +704,14 @@ fn edit(
 	let mut draft = state.collection().draft(label);
 	build(&mut draft)?;
 	state.commit(draft, gesture)
+}
+
+/// Put `item`, with what it shows, on the clipboard; what to say.
+fn clip(ctx: &egui::Context, state: &State, item: &Item) -> anyhow::Result<String> {
+	let dir = &state.sources.context().dir;
+	let text = Clip::items(state.collection(), vec![item.clone()], dir).to_toml()?;
+	ctx.copy_text(text);
+	Ok(format!("copied `{}`", item.source))
 }
 
 fn dropped_message(dropped: usize) -> String {
@@ -679,7 +757,22 @@ impl Panels {
 	/// took, and let go of a selected item, a drag, and a scene rename under
 	/// way, whose index it may have given to another. Called under every lock
 	/// that uses one, since the autosave can reload between two.
+	///
+	/// Let go of a layer of a scene no longer on program too, which a pad or
+	/// hotkey took away from BUILD, so a paste, the inspector, and the picture
+	/// never act on a scene the picture does not show.
 	fn follow_reloads(&mut self, state: &State) {
+		if let Some(Picked {
+			layer: Layer { scene: Some(scene) },
+			..
+		}) = &self.selection
+			&& state.compositor.program_scene() != Some(scene.as_str())
+		{
+			self.selection = None;
+			self.drag = None;
+			self.moving = None;
+			self.cropping = false;
+		}
 		if state.reloads == self.reloads {
 			return;
 		}
@@ -719,105 +812,133 @@ impl Panels {
 		self.message = Some((message, kio::clock::now()));
 	}
 
-	/// Report a failed edit; a successful one shows for itself.
+	/// Report a failure that happened nowhere in particular; a success shows
+	/// for itself.
 	fn check(&mut self, result: anyhow::Result<()>) {
 		if let Err(err) = result {
 			self.report(Err(err));
 		}
 	}
 
-	/// Keep a selected item of `layer` on the item it named, now at `moved`'s
-	/// index, or deselect it if `moved` says it is gone.
-	fn follow(&mut self, layer: &Layer, moved: impl FnOnce(usize) -> Option<usize>) {
-		if let Some(Selection::Item(selected, index)) = &self.selection
-			&& selected == layer
-		{
-			self.selection = moved(*index).map(|index| Selection::Item(layer.clone(), index));
+	/// Show a failure at `spot`, or clear the last one there on a success.
+	fn fail(&mut self, spot: Spot, result: anyhow::Result<()>) {
+		self.faults.retain(|fault| fault.spot != spot);
+		if let Err(err) = result {
+			self.faults.push(Fault {
+				spot,
+				text: format!("{err:#}"),
+				at: kio::clock::now(),
+			});
 		}
 	}
 
-	/// Deselect an item, after an edit that may have moved any of them, and
-	/// let go of any drag and any scene rename under way.
-	fn deselect_item(&mut self) {
-		if matches!(self.selection, Some(Selection::Item(..))) {
-			self.selection = None;
+	/// The failure showing at `spot`, if one does.
+	fn fault(&self, spot: &Spot) -> Option<&str> {
+		let now = kio::clock::now();
+		let fault = self.faults.iter().rev().find(|fault| fault.spot == *spot)?;
+		(now.saturating_duration_since(fault.at) < FAULT).then_some(fault.text.as_str())
+	}
+
+	/// Keep a selected layer of `layer` on the one it named, now at `moved`'s
+	/// index, or deselect it if `moved` says it is gone.
+	fn follow(&mut self, layer: &Layer, moved: impl FnOnce(usize) -> Option<usize>) {
+		if let Some(picked) = &self.selection
+			&& picked.layer == *layer
+		{
+			self.selection = moved(picked.index).map(|index| Picked {
+				layer: layer.clone(),
+				index,
+			});
 		}
+	}
+
+	/// Deselect the layer, after an edit that may have moved any of them, and
+	/// let go of any drag, crop, and scene rename under way.
+	fn deselect_item(&mut self) {
+		self.selection = None;
 		self.drag = None;
+		self.moving = None;
+		self.cropping = false;
 		self.renaming = None;
 	}
 
-	/// The layer the Layers tab shows, and new sources are placed in: the
-	/// scene on program's, or the top layer over it, which goes over every
-	/// scene of the program's size, as the one on program always is.
-	fn layer(&self, state: &State) -> Result<Layer, String> {
-		match (self.top, state.compositor.program_scene()) {
-			(true, _) => Ok(Layer::top()),
-			(false, Some(name)) => Ok(Layer::scene(name)),
-			(false, None) => Err("Take a scene to edit what it shows.".into()),
+	/// Select `picked`, leaving cropping and interacting with the last one.
+	fn select(&mut self, picked: Option<Picked>) {
+		if self.selection != picked {
+			self.cropping = false;
+		}
+		self.selection = picked;
+	}
+
+	/// The layers BUILD edits, and new sources go in: the scene on program's.
+	/// The always-on-top layers over it are [`Layer::top`].
+	fn scene(&self, state: &State) -> Result<Layer, String> {
+		match state.compositor.program_scene() {
+			Some(name) => Ok(Layer::scene(name)),
+			None => Err("Take a scene to edit what it shows.".into()),
 		}
 	}
 
-	/// Copy the selected item, with what it shows, to the clipboard.
+	/// Copy the selected layer, with what it shows, to the clipboard.
 	fn copy(&mut self, ctx: &egui::Context) {
 		let engine = self.engine.clone();
 		let state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
 		let collection = state.collection();
-		let item = match &self.selection {
-			Some(Selection::Item(layer, index)) => collection.items(layer).and_then(|items| items.get(*index)),
-			_ => None,
-		};
+		let item = self.selection.as_ref().and_then(|picked| picked.item(collection));
 		let Some(item) = item.cloned() else {
 			drop(state);
-			self.report(Err(anyhow::anyhow!("select an item to copy it")));
+			self.report(Err(anyhow::anyhow!("select a layer to copy it")));
 			return;
 		};
-		let dir = &state.sources.context().dir;
-		let result = Clip::items(collection, vec![item.clone()], dir).to_toml();
+		let result = clip(ctx, &state, &item);
 		drop(state);
-		let result = result.map(|text| {
-			ctx.copy_text(text);
-			format!("copied `{}`", item.source)
-		});
-		self.report(result.map_err(Into::into));
+		self.report(result);
 	}
 
-	/// Paste items into the layer the Layers tab shows, or filters onto the
-	/// selection.
+	/// Paste layers into the selected layer's list, or the scene on program,
+	/// or filters onto the selected layer.
 	fn paste(&mut self, text: &str) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
+		// A failure with no layer to show it on is the toast's.
+		let mut spot = None;
 		let result = (|| {
-			let clip = Clip::from_toml(text).context("the clipboard holds no items or filters")?;
+			let clip = Clip::from_toml(text).context("the clipboard holds no layers or filters")?;
 			match clip {
 				Clip::Items(items) => {
-					let layer = self.layer(&state).map_err(anyhow::Error::msg)?;
+					let layer = match &self.selection {
+						Some(picked) => picked.layer.clone(),
+						None => self.scene(&state).map_err(anyhow::Error::msg)?,
+					};
 					let dir = state.sources.context().dir.clone();
-					edit(&mut state, format!("Paste into {layer}"), None, |draft| {
+					edit(&mut state, format!("Paste into {}", place(&layer)), None, |draft| {
 						draft.paste(&layer, &items, &dir)
 					})?;
-					Ok(format!("pasted into {layer}"))
+					Ok(())
 				}
 				Clip::Filters(pasted) => {
-					let selection = self
-						.selection
-						.clone()
-						.context("select a source or an item to paste filters onto")?;
+					let picked = self.selection.clone().context("select a layer to paste filters onto")?;
+					let item = picked.item(state.collection()).context("the selected layer is gone")?;
+					spot = Some(Spot::Layer(picked.layer.clone(), item.source.clone()));
+					let selection = picked.look();
 					let mut filters = selection
 						.filters(state.collection())
-						.context("the selection has no picture to filter")?;
+						.context("the layer has no picture to filter")?;
 					filters.extend(pasted.filters);
 					let what = selection.describe(state.collection());
 					edit(&mut state, format!("Paste filters onto {what}"), None, |draft| {
 						selection.set_filters(draft, filters)
-					})?;
-					Ok(format!("pasted filters onto {what}"))
+					})
 				}
 			}
 		})();
 		drop(state);
-		self.report(result);
+		match spot {
+			Some(spot) => self.fail(spot, result),
+			None => self.check(result),
+		}
 	}
 
 	/// Let go of every page the picture passed input to.
@@ -851,9 +972,12 @@ impl Panels {
 		}
 	}
 
-	/// Keep a selected item of the scene renamed from `from` selected.
+	/// Keep a selected layer of the scene renamed from `from` selected.
 	fn renamed(&mut self, from: &str, to: &str) {
-		if let Some(Selection::Item(Layer { scene: Some(scene), .. }, _)) = &mut self.selection
+		if let Some(Picked {
+			layer: Layer { scene: Some(scene) },
+			..
+		}) = &mut self.selection
 			&& scene == from
 		{
 			*scene = to.to_string();
@@ -1250,36 +1374,6 @@ fn scene_settings(
 		}
 	}
 	action
-}
-
-/// An edit the Items panel makes.
-enum ItemAction {
-	/// Replace the item at an index, labelled, as part of a gesture.
-	Set(usize, Item, String, Option<u64>),
-	Move(usize, usize),
-	Remove(usize),
-	Add(Item),
-}
-
-/// Say where else the item at `index` of `layer` shows its source, and what
-/// a clone clones.
-fn linked(ui: &mut Ui, collection: &Collection, layer: &Layer, index: usize, item: &Item) {
-	if let Some(Source::Clone { source }) = collection.sources.get(&item.source) {
-		ui.weak(format!("clone of `{source}`"));
-	}
-	let elsewhere: Vec<String> = collection
-		.layers()
-		.flat_map(|(other, items)| {
-			let at = items.iter().enumerate();
-			at.filter(|(i, shown)| shown.source == item.source && !(other == *layer && *i == index))
-				.map(|_| other.to_string())
-				.collect::<Vec<_>>()
-		})
-		.collect();
-	if !elsewhere.is_empty() {
-		ui.weak("linked")
-			.on_hover_text(format!("Also shown in:\n{}", elsewhere.join("\n")));
-	}
 }
 
 fn describe_filter(filter: &Filter) -> String {
@@ -1729,14 +1823,15 @@ impl Default for Snapping {
 	}
 }
 
-/// An item a drag on the BUILD page's picture holds.
+/// A layer a drag on the BUILD page's picture holds.
 struct Drag {
-	layer: Layer,
-	index: usize,
+	picked: Picked,
 	grab: Grab,
-	/// The item's rect, and where the pointer was in canvas pixels, when the
-	/// drag started. Each frame drags from these, so snaps never accumulate.
+	/// The layer's rect and crop, and where the pointer was in canvas
+	/// pixels, when the drag started. Each frame drags from these, so snaps
+	/// never accumulate.
 	rect: Rect,
+	crop: Crop,
 	origin: [f32; 2],
 	/// Whether the item's source draws a picture of its own shape, which a
 	/// resize keeps unless Shift is held.
@@ -1751,17 +1846,17 @@ struct Drag {
 /// How far, in points on screen, the pointer reaches to an edge or a line.
 const REACH: f32 = 8.0;
 
-/// Where the visible items of the scene on program and the top layer over it
-/// show `since` the scene went on program, other than the one at `index` of
-/// `layer`: what a dragged item snaps to.
-fn others(state: &State, layer: &Layer, index: usize, since: Duration) -> Vec<Rect> {
+/// Where the visible layers of the scene on program and the always-on-top
+/// ones over it show `since` the scene went on program, other than
+/// `dragged`: what a dragged layer snaps to.
+fn others(state: &State, dragged: &Picked, since: Duration) -> Vec<Rect> {
 	let scene = state.compositor.program_scene();
 	let collection = state.collection();
 	let mut rects = Vec::new();
 	for shown in scene.map(Layer::scene).into_iter().chain([Layer::top()]) {
 		let items = collection.items(&shown).unwrap_or_default();
 		for (at, item) in items.iter().enumerate() {
-			if item.visible && !(shown == *layer && at == index) {
+			if item.visible && !(shown == dragged.layer && at == dragged.index) {
 				rects.push(item.posed(since).rect);
 			}
 		}
@@ -1867,17 +1962,54 @@ impl View {
 		}
 	}
 
-	/// An outline with a handle at each corner and edge.
-	fn selected(&self, painter: &egui::Painter, rect: &Rect, color: Color32) {
+	/// An outline with a handle at each corner and edge: squares that
+	/// resize, or bars that crop while `cropping`.
+	fn selected(&self, painter: &egui::Painter, rect: &Rect, color: Color32, cropping: bool) {
 		let rect = self.screen(rect);
 		painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.5, color), egui::StrokeKind::Outside);
 		for x in [rect.left(), rect.center().x, rect.right()] {
 			for y in [rect.top(), rect.center().y, rect.bottom()] {
-				if (x, y) != (rect.center().x, rect.center().y) {
-					let handle = egui::Rect::from_center_size(egui::pos2(x, y), egui::Vec2::splat(6.0));
-					painter.rect_filled(handle, 1.0, color);
+				if (x, y) == (rect.center().x, rect.center().y) {
+					continue;
 				}
+				let size = match (cropping, x == rect.center().x, y == rect.center().y) {
+					(false, _, _) => egui::Vec2::splat(7.0),
+					(true, true, _) => egui::vec2(16.0, 4.0),
+					(true, _, true) => egui::vec2(4.0, 16.0),
+					(true, _, _) => egui::Vec2::splat(9.0),
+				};
+				let handle = egui::Rect::from_center_size(egui::pos2(x, y), size);
+				let edge = egui::Stroke::new(1.0, Color32::WHITE);
+				painter.rect(handle, 1.0, color, edge, egui::StrokeKind::Outside);
 			}
+		}
+	}
+
+	/// While cropping a layer at `rect` showing `crop` of its picture, where
+	/// the whole picture would be, dashed, so a drag can bring it back.
+	fn whole(&self, painter: &egui::Painter, rect: &Rect, crop: &Crop) {
+		let (wide, tall) = (1.0 - crop.left - crop.right, 1.0 - crop.top - crop.bottom);
+		if wide <= 0.0 || tall <= 0.0 {
+			return;
+		}
+		let (width, height) = (rect.width / wide, rect.height / tall);
+		let whole = Rect {
+			x: rect.x - crop.left * width,
+			y: rect.y - crop.top * height,
+			width,
+			height,
+		};
+		let stroke = egui::Stroke::new(1.0, Color32::from_white_alpha(120));
+		let outline = self.screen(&whole);
+		let corners = [
+			outline.left_top(),
+			outline.right_top(),
+			outline.right_bottom(),
+			outline.left_bottom(),
+			outline.left_top(),
+		];
+		for side in corners.windows(2) {
+			painter.extend(egui::Shape::dashed_line(side, stroke, 4.0, 4.0));
 		}
 	}
 
@@ -2341,6 +2473,25 @@ impl Devices {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A selection follows its layer as another moves past it in the list.
+	#[test]
+	fn a_reorder_moves_the_layers_between() {
+		let moved = |from, to| (0..5).map(|at| build::reordered(at, from, to)).collect::<Vec<_>>();
+		assert_eq!(moved(1, 3), [0, 3, 1, 2, 4], "to the front, the ones passed step back");
+		assert_eq!(
+			moved(3, 1),
+			[0, 2, 3, 1, 4],
+			"to the back, the ones passed step forward"
+		);
+		assert_eq!(moved(2, 2), [0, 1, 2, 3, 4]);
+		// Each layer lands on a place of its own.
+		for (from, to) in [(0, 4), (4, 0), (2, 3)] {
+			let mut places = moved(from, to);
+			places.sort();
+			assert_eq!(places, [0, 1, 2, 3, 4]);
+		}
+	}
 
 	/// A key bound to Cut or Transition, which the window no longer offers,
 	/// is kept across a save for when they come back, unless the operator

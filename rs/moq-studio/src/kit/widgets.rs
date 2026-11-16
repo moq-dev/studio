@@ -994,6 +994,8 @@ pub struct Pad<'a> {
 	tally: Tally,
 	/// Why the scene cannot be taken, if it cannot.
 	refused: Option<&'a str>,
+	/// What just failed on it, such as a rename.
+	fault: Option<&'a str>,
 	width: f32,
 	/// The thumbnail's shape, width over height: the show's.
 	shape: f32,
@@ -1008,6 +1010,7 @@ impl<'a> Pad<'a> {
 			key: None,
 			tally: Tally::Off,
 			refused: None,
+			fault: None,
 			width: 124.0,
 			shape: 16.0 / 9.0,
 			pose: None,
@@ -1035,6 +1038,12 @@ impl<'a> Pad<'a> {
 	/// for its menu, which its caller does not take it on.
 	pub fn refused(mut self, why: Option<&'a str>) -> Self {
 		self.refused = why;
+		self
+	}
+
+	/// Ringed in red, saying `what` failed on hover, such as a rename.
+	pub fn fault(mut self, what: Option<&'a str>) -> Self {
+		self.fault = what;
 		self
 	}
 
@@ -1078,6 +1087,7 @@ impl Widget for Pad<'_> {
 				shadow(painter, rect, 10, color.gamma_multiply(0.25), 12.0);
 			}
 			let border = match (self.tally.color(), pose) {
+				_ if self.fault.is_some() => ERR,
 				(Some(color), _) => color,
 				(None, Pose::Hover | Pose::Press) if self.refused.is_none() => LINE_HOVER,
 				(None, _) => Color32::TRANSPARENT,
@@ -1125,7 +1135,7 @@ impl Widget for Pad<'_> {
 			);
 			painter.galley(at, galley, TEXT);
 		}
-		match self.refused {
+		match self.fault.or(self.refused) {
 			Some(why) => tip(response, why, None),
 			None => response,
 		}
