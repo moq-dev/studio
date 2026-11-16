@@ -436,7 +436,10 @@ impl Panels {
 				self.check(result);
 			}
 		});
-		ui.weak("Set with --recordings. Clips are saved here too.");
+		ui.weak(
+			"Set by recordings in the show's .stream.toml, or --recordings for one run, and beside the show by \
+			 default. Clips are saved here too.",
+		);
 		ui.add_space(8.0);
 		self.recorded_scene(ui);
 		ui.weak("The program is what viewers see. A scene records at its own size.");

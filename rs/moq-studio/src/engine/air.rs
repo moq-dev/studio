@@ -636,14 +636,36 @@ impl Engine {
 	}
 }
 
+/// Why a connection's dial failed, once one has. The connection keeps
+/// redialing, but going live says at once that a relay cannot be reached
+/// rather than waiting out [`DIAL`].
+async fn failed_dial(monitor: moq_tokio::connection::Monitor) -> anyhow::Error {
+	use moq_tokio::connection::Phase;
+	let mut seen = monitor.state();
+	loop {
+		match seen.phase {
+			Phase::Connecting { failure: Some(err) } | Phase::Closed { failure: Some(err) } => return err.into(),
+			_ => {}
+		}
+		seen = match monitor.state_changed(seen.revision).await {
+			Ok(seen) => seen,
+			Err(err) => return err.into(),
+		};
+	}
+}
+
 /// Wait until any of `connections` has a session, or fail with why the first
-/// one could not, within [`DIAL`].
+/// one could not once each has failed a dial, within [`DIAL`].
 async fn dial(connections: &[moq_tokio::Connection], links: &[health::Link]) -> anyhow::Result<()> {
 	let mut dialing: tokio::task::JoinSet<(usize, anyhow::Result<()>)> = tokio::task::JoinSet::new();
 	for (index, connection) in connections.iter().enumerate() {
 		let connection = connection.clone();
 		dialing.spawn(async move {
-			let established = connection.established().await.map(drop).map_err(anyhow::Error::from);
+			let failed = failed_dial(connection.monitor());
+			let established = tokio::select! {
+				established = connection.established() => established.map(drop).map_err(anyhow::Error::from),
+				failed = failed => Err(failed),
+			};
 			(index, established)
 		});
 	}
@@ -667,7 +689,23 @@ async fn dial(connections: &[moq_tokio::Connection], links: &[health::Link]) -> 
 			let endpoint = links.get(index).map_or("the relay", |link| link.endpoint.as_str());
 			Err(err.context(format!("cannot reach {endpoint}")))
 		}
-		Err(_) => anyhow::bail!("no relay took the session within {} s", DIAL.as_secs()),
+		Err(_) => {
+			// Each relay, and its latest failed dial where one failed rather
+			// than hung.
+			let relays: Vec<String> = connections
+				.iter()
+				.zip(links)
+				.map(|(connection, link)| match connection.monitor().failure() {
+					Some(err) => format!("{}: {err}", link.endpoint),
+					None => format!("{}: no answer", link.endpoint),
+				})
+				.collect();
+			anyhow::bail!(
+				"no relay took the session within {} s ({})",
+				DIAL.as_secs(),
+				relays.join("; ")
+			)
+		}
 	}
 }
 
