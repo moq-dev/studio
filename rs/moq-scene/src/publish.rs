@@ -77,6 +77,9 @@ struct State {
 	open: usize,
 	/// Those of `open` held by a replay encoder, which the program may take.
 	spare: usize,
+	/// How many encoders have closed, so one refused waits for any given back
+	/// after it tried, however many are open by then.
+	closed: u64,
 	/// The program's reclaims under way: while any is, a replay encoder
 	/// closes and none opens.
 	reclaims: usize,
@@ -187,6 +190,7 @@ impl Drop for Session {
 		self.sessions.0.send_modify(|state| {
 			state.open -= 1;
 			state.spare -= usize::from(spare);
+			state.closed += 1;
 		});
 	}
 }
@@ -826,11 +830,18 @@ impl<E: Encode> Encoding<E> {
 
 	/// Close the encoder, publishing what it still holds.
 	pub fn drain(&mut self) -> Result<(), Error> {
-		if let (Some((mut encoder, _session)), Some(producer)) = (self.encoder.take(), &mut self.producer) {
-			encoder.flush()?;
-			publish_ready(&mut encoder, producer)?;
-		}
-		Ok(())
+		let (Some((mut encoder, session)), Some(producer)) = (self.encoder.take(), &mut self.producer) else {
+			return Ok(());
+		};
+		let drained = encoder
+			.flush()
+			.map_err(Error::from)
+			.and_then(|()| publish_ready(&mut encoder, producer));
+		// The GPU takes the session back before it counts as given back, so a
+		// replay that the count wakes to reopen finds it free.
+		drop(encoder);
+		drop(session);
+		drained
 	}
 
 	/// Mark a gap in the track after [draining](Self::drain) the encoder, which
@@ -910,9 +921,11 @@ pub(crate) struct Video<'a> {
 	/// The encoder closed for the program's [reclaim](Sessions::reclaim),
 	/// until it reopens.
 	reclaimed: bool,
-	/// How many sessions were open when the GPU refused a reclaimed encoder
-	/// reopening, which waits until fewer are.
-	refused: Option<usize>,
+	/// How many encoders had closed before the GPU refused a reclaimed one
+	/// reopening, which waits until another closes. Not how many were open:
+	/// another replay's session the GPU already holds counts only once its
+	/// open returns, so the refused one could wait for fewer than ever are.
+	refused: Option<u64>,
 }
 
 impl<'a> Video<'a> {
@@ -993,6 +1006,7 @@ impl<'a> Video<'a> {
 			self.track.drain()?;
 		}
 		if !self.track.is_open() {
+			let closed = self.track.sessions.0.borrow().closed;
 			let opened = moq_video::encode::Encoder::new(&self.config)
 				.map_err(Error::from)
 				.and_then(|encoder| self.track.open(encoder));
@@ -1006,7 +1020,7 @@ impl<'a> Video<'a> {
 				// back rather than failing.
 				Err(err) if self.reclaimed => {
 					tracing::warn!(source = %self.claim.name, %err, "waiting for an encode session");
-					self.refused = Some(self.track.sessions.open());
+					self.refused = Some(closed);
 					return Ok(());
 				}
 				Err(err) => return Err(err),
@@ -1055,7 +1069,7 @@ impl<'a> Video<'a> {
 			return false;
 		}
 		let sessions = self.track.sessions.0.borrow();
-		(watched || sessions.reclaims == 0) && self.refused.is_none_or(|open| sessions.open < open)
+		(watched || sessions.reclaims == 0) && self.refused.is_none_or(|closed| sessions.closed > closed)
 	}
 
 	/// Whether the encoder is not as [`wanted`](Self::wanted): open or closed
@@ -1806,7 +1820,17 @@ mod tests {
 			video.encode(&mut gray(size, 66)).unwrap();
 			assert!(!video.is_open(), "refused, so it waits");
 			assert!(settled(&video).await.is_err(), "until a session is given back");
+			// Given back and taken again before the replay looks, as by another
+			// replay reopening first: it still tries, and waits again.
 			drop(program);
+			let sibling = sessions.hold().unwrap();
+			settled(&video)
+				.await
+				.expect("a session given back, even if taken again");
+			video.encode(&mut gray(size, 80)).unwrap();
+			assert!(!video.is_open(), "refused again, so it waits");
+			assert!(settled(&video).await.is_err(), "until another is given back");
+			drop(sibling);
 			settled(&video).await.expect("a session given back");
 			video.encode(&mut gray(size, 100)).unwrap();
 			assert_eq!((sessions.open(), sessions.spare()), (1, 1), "the replay starts over");
@@ -2060,6 +2084,75 @@ mod tests {
 		fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), moq_video::Error> {
 			self.encoder.set_bitrate(bitrate)
 		}
+	}
+
+	/// Records how many sessions are counted open as it closes.
+	struct Closing {
+		encoder: moq_video::encode::Encoder,
+		sessions: Sessions,
+		open: Arc<Mutex<Option<usize>>>,
+	}
+
+	impl Drop for Closing {
+		fn drop(&mut self) {
+			*self.open.lock().unwrap() = Some(self.sessions.open());
+		}
+	}
+
+	impl Encode for Closing {
+		fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), moq_video::Error> {
+			self.encoder.encode(frame)
+		}
+
+		fn receive(&mut self) -> Result<Option<moq_video::encode::Encoded>, moq_video::Error> {
+			self.encoder.receive()
+		}
+
+		fn flush(&mut self) -> Result<(), moq_video::Error> {
+			self.encoder.flush()
+		}
+
+		fn cut(&mut self) -> Result<(), moq_video::Error> {
+			self.encoder.cut()
+		}
+
+		fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), moq_video::Error> {
+			self.encoder.set_bitrate(bitrate)
+		}
+	}
+
+	/// An encoder closes before its session counts as given back, so a replay
+	/// that the count wakes to reopen finds the GPU's session free.
+	#[tokio::test]
+	async fn an_encoder_closes_before_its_session_is_given_back() {
+		let (publish, _catalog, _consumer) = studio();
+		let claim = publish.claim("program");
+		let listing = Listing::new(&claim, &publish).unwrap();
+		let size = moq_video::Size::new(64, 48);
+		let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+		let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
+		config.kind = moq_video::encode::Kind::Named("openh264".into());
+		let rendition = config.probe().await.unwrap();
+		let reserved = listing.catalog.reserve();
+		let track = listing
+			.broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let producer = moq_video::encode::Producer::new(track, reserved, rendition).unwrap();
+		let sessions = Sessions::default();
+		let mut track = Encoding::new(producer, sessions.clone());
+		let open = Arc::new(Mutex::new(None));
+		track
+			.open(Closing {
+				encoder: moq_video::encode::Encoder::new(&config).unwrap(),
+				sessions: sessions.clone(),
+				open: open.clone(),
+			})
+			.unwrap();
+		track.encode(&gray(size, 0)).unwrap();
+		track.drain().unwrap();
+		assert_eq!(*open.lock().unwrap(), Some(1), "still counted as it closed");
+		assert_eq!(sessions.open(), 0, "given back after");
 	}
 
 	/// A pipelined encoder's last pictures land before a pause's gap rather
