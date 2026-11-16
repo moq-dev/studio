@@ -65,9 +65,11 @@ shows those pictures beside the frames they implement.
 - **Formats:** ✅ one format per show in m0, landscape or portrait, and the
   layout follows it. [Both at once](/quest/m1/dual-format.md) is m1 (rejected:
   designing every m0 page for two pictures).
-- **Layout follows the picture:** the picture gets the largest rectangle the
-  window allows, and the scenes and the sound take whichever side is left
-  over. See the portrait and half-screen frames.
+- **Layout follows the picture:** ✅ the picture is larger than any other
+  part of the window but the title bar, as large as the window allows, and
+  the scenes and the sound take whichever side is left over (rejected: the
+  largest rectangle, which a full-width title bar outsizes beside a portrait
+  picture in a narrow window). See the portrait and half-screen frames.
 - **Toolkit:** ✅ egui draws the views, without `egui_dock` (rejected:
   Slint; defer until a Slint release takes femtovg 0.28). A spike of the LIVE
   page in both ([moq-dev/studio#126](https://github.com/moq-dev/studio/pull/126))
@@ -160,4 +162,3 @@ PR hands them to the maintainer as `## Waiting` with what to look at:
 
 - [m1](/quest/m1/README.md) - the features that follow the redesign
 - [Destinations](/quest/m0/destinations.md) - RTMP and WHIP rows in the go-live sheet this epic builds
-- [Wayland display and window sources](/quest/m0/wayland-sources.md) - the system picker the Add page opens

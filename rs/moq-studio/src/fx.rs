@@ -356,6 +356,7 @@ const WRAP: f64 = 3600.0;
 /// The effects' state across frames.
 struct Look {
 	on_air: Light,
+	/// The metal [`button`](Fx::button)'s ripple.
 	ripple: Light,
 	/// The take count last seen, and when each burst it fired started, with
 	/// its seed.

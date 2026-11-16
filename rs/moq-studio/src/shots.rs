@@ -4,23 +4,29 @@
 //! engine and draws one state of the window through egui_kittest, on the GPU
 //! the compositor uses. A still view draws the same picture every time, which
 //! its test checks by drawing it twice; a live one shows something that moves,
-//! such as an encoder's timings.
+//! such as an encoder's timings. One more test drives the window the same way,
+//! clicking as a person does, and draws nothing.
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use eframe::egui_wgpu;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
+use moq_scene::Source;
 use moq_scene::source::Status;
 
 use crate::fx::Effects;
-use crate::ui::Tab;
+use crate::ui::{Inspect, Page, Setting, Side};
 use crate::{App, Window, autosave, engine, fx, hotkeys, setup};
 
 /// The window's size, the mock-ups'.
 const SIZE: egui::Vec2 = egui::vec2(1440.0, 900.0);
+
+/// A window snapped to half of a 1440x900 screen, as the compact mock-up's.
+const HALF: egui::Vec2 = egui::vec2(711.0, 872.0);
 
 /// The longest a view waits for its sources and pictures to settle.
 const SETTLE: Duration = Duration::from_secs(20);
@@ -29,10 +35,66 @@ const SETTLE: Duration = Duration::from_secs(20);
 enum Open {
 	/// Guided setup, as the first launch shows it.
 	Setup,
-	/// The studio, with a panel at the front of its group.
-	Studio(Option<Tab>),
+	/// The studio on the show in `shots/<show>`, in a window `size` large,
+	/// turned to `view`.
+	Studio {
+		view: View,
+		size: egui::Vec2,
+		show: &'static str,
+	},
 	/// The kit's gallery, with a sheet open over it or not.
 	Kit { sheet: bool },
+}
+
+/// Where a view turns the studio.
+enum View {
+	Page(Page),
+	/// The BUILD page with `side` and `inspect` shown, and the layer of the
+	/// scene on program at `index`, front first, selected.
+	Build {
+		side: Side,
+		inspect: Inspect,
+		index: Option<usize>,
+	},
+	/// BUILD with the host's layer selected and its row's menu open.
+	Menu,
+	/// The edit history, under the title bar's undo, after an edit.
+	History,
+	/// Settings, at a tab.
+	Setting(Setting),
+	/// The stream's health in detail.
+	Health,
+	/// The LIVE page after a mute, with the health dot's popover open and the
+	/// pointer on undo, which names the mute.
+	Hover,
+	/// REVIEW, with this show's recordings and clips, and if `picked`, the
+	/// last 30 seconds held and a stretch picked. With `replays`, the show
+	/// has two replay sources to pick between.
+	Review {
+		picked: bool,
+		replays: bool,
+	},
+	/// A page in Studio mode, with `Interview` cued.
+	Cued(Page),
+	/// A scene, by name, open for editing off air on BUILD.
+	OffAir(&'static str),
+}
+
+/// BUILD with the host's layer, the middle of the scene on program's three,
+/// selected, as the mock-up's.
+const BUILD: View = View::Build {
+	side: Side::Layers,
+	inspect: Inspect::Layer,
+	index: Some(1),
+};
+
+/// The studio on the shots' show, at the mock-ups' size, turned to `view`.
+fn studio(view: View) -> Open {
+	Open::Studio {
+		view,
+		size: SIZE,
+		show: "show.toml",
+	}
 }
 
 /// Whether a view draws the same picture every time.
@@ -65,18 +127,71 @@ views! {
 	/// capture errors of a build without `capture`, which keeps the view off
 	/// the host's devices.
 	setup: Live, Open::Setup;
-	studio: Still, Open::Studio(None);
-	graph: Still, Open::Studio(Some(Tab::Graph));
-	history: Still, Open::Studio(Some(Tab::History));
-	devices: Still, Open::Studio(Some(Tab::Devices));
-	guests: Still, Open::Studio(Some(Tab::Guests));
-	keyframes: Still, Open::Studio(Some(Tab::Keyframes));
-	replay: Still, Open::Studio(Some(Tab::Replay));
-	health: Still, Open::Studio(Some(Tab::Health));
-	audio: Still, Open::Studio(Some(Tab::Audio));
-	/// The encoders' timings.
-	output: Live, Open::Studio(Some(Tab::Output));
-	hotkeys: Still, Open::Studio(Some(Tab::Hotkeys));
+	/// The LIVE page: the picture as large as the window allows, the pads, the
+	/// panic key, and the sound.
+	live: Still, studio(View::Page(Page::Live));
+	/// What the title bar's controls show under the pointer.
+	live_hover: Still, studio(View::Hover);
+	/// A portrait show: the pages in a sidebar, and the scenes and the sound
+	/// in columns beside the picture.
+	live_portrait: Still, Open::Studio { view: View::Page(Page::Live), size: SIZE, show: "portrait.toml" };
+	/// A window snapped beside a game stacks the picture, the scenes, and the
+	/// sound.
+	live_compact: Still, Open::Studio { view: View::Page(Page::Live), size: HALF, show: "show.toml" };
+	/// Studio mode: the cued scene's pad turns amber, and NEXT docks on the
+	/// live picture with TAKE and AUTO.
+	live_studio: Still, studio(View::Cued(Page::Live));
+	/// BUILD with the host's layer selected: its row in Layers, its handles
+	/// and toolbar on the picture, and its inspector.
+	build: Still, studio(BUILD);
+	/// BUILD with no layer selected: the inspector shows the scene.
+	build_scene: Still, studio(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: None });
+	/// The selected layer's keyframes.
+	build_animate: Still, studio(View::Build { side: Side::Layers, inspect: Inspect::Animate, index: Some(1) });
+	/// What can be added: sources no layer shows, devices, by hand, and
+	/// guests.
+	build_add: Still, studio(View::Build { side: Side::Add, inspect: Inspect::Layer, index: None });
+	/// A layer row's menu, as a right click opens it.
+	build_menu: Still, studio(View::Menu);
+	/// BUILD in a window snapped beside a game: the inspector is a tab beside
+	/// Layers and Add.
+	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml" };
+	/// BUILD in Studio mode edits the scene on air, with NEXT docked on it.
+	build_studio: Still, studio(View::Cued(Page::Build));
+	/// A scene open off air: the frame turns amber, and the live picture
+	/// shrinks to a corner beside the banner that takes it live or goes back.
+	/// Layers lists the scene's own, as always on top is drawn on program.
+	build_off_air: Still, studio(View::OffAir("Break"));
+	/// A scene that cannot go on air opens off air too, its Take it live
+	/// dimmed, saying why under the pointer.
+	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
+	/// Too narrow for the banner beside the live picture, it goes under it.
+	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml" };
+	/// MIX holds the mixer, and a small live picture in the sound's place.
+	mix: Still, studio(View::Page(Page::Mix));
+	/// MIX in a stacked window, its live picture as tall as the sound's slot
+	/// allows.
+	mix_compact: Still, Open::Studio { view: View::Page(Page::Mix), size: HALF, show: "show.toml" };
+	/// REVIEW off air: without a relay the program keeps no past, which the
+	/// strip and both actions say, beside this show's recordings and clips.
+	review: Still, studio(View::Review { picked: false, replays: false });
+	/// REVIEW with the last 30 seconds held: a stretch picked between the
+	/// handles, the head inside it, the picture under the head large, and
+	/// Replay saying why it cannot play without a replay source.
+	review_picked: Still, studio(View::Review { picked: true, replays: false });
+	/// REVIEW on a show with two replay sources: which one Replay plays in is
+	/// picked under the speed, in place of its note.
+	review_into: Still, studio(View::Review { picked: true, replays: true });
+	/// Settings' Recording tab: the folder, and what a recording holds.
+	recording: Still, studio(View::Setting(Setting::Recording));
+	/// Settings' Advanced tab: the scene graph.
+	advanced: Still, studio(View::Setting(Setting::Advanced));
+	/// The edit history, open under undo.
+	history: Still, studio(View::History);
+	health: Still, studio(View::Health);
+	/// Settings' Show tab, with the encoders' timings.
+	output: Live, studio(View::Setting(Setting::Show));
+	hotkeys: Still, studio(View::Setting(Setting::Hotkeys));
 }
 
 /// Draw the view `name` opens into `$SHOTS_DIR/<name>.png`, twice if it is
@@ -87,9 +202,39 @@ fn shot(name: &str, motion: Motion, open: Open) {
 	let out = std::path::absolute(out).unwrap();
 	std::fs::create_dir_all(&out).unwrap();
 
-	// The show is opened as `show.toml` from a directory of its own, so the
-	// status bar names it the same on every machine. nextest runs each test
-	// in a process of its own, which the change of directory relies on.
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let image = shoot(&open, &gpu, &runtime, &fixture.join("shots"));
+	let path = out.join(format!("{name}.png"));
+	if motion == Motion::Still {
+		let again = shoot(&open, &gpu, &runtime, &fixture.join("shots"));
+		if image != again {
+			// Both, to see what moved.
+			let again_path = out.join(format!("{name}.again.png"));
+			image::DynamicImage::ImageRgba8(again)
+				.to_rgb8()
+				.save(&again_path)
+				.unwrap();
+			image::DynamicImage::ImageRgba8(image).to_rgb8().save(&path).unwrap();
+			panic!(
+				"the still view `{name}` drew a different picture twice: {}",
+				again_path.display()
+			);
+		}
+	}
+	// The window is opaque, and a quarter smaller without the alpha.
+	image::DynamicImage::ImageRgba8(image).to_rgb8().save(&path).unwrap();
+	println!("{}", path.display());
+}
+
+/// A directory of its own to open the show from, made the current one, a
+/// runtime, and Mesa's software GPU.
+///
+/// The show is opened as `show.toml` from there, so the window names it the
+/// same on every machine. nextest runs each test in a process of its own,
+/// which the change of directory relies on.
+fn lavapipe() -> (tempfile::TempDir, tokio::runtime::Runtime, engine::Gpu) {
 	let show = tempfile::tempdir().unwrap();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	std::fs::copy(
@@ -100,7 +245,6 @@ fn shot(name: &str, motion: Motion, open: Open) {
 	std::env::set_current_dir(show.path()).unwrap();
 
 	let runtime = tokio::runtime::Runtime::new().unwrap();
-	let _entered = runtime.enter();
 	// Vulkan only, where `just shots` names lavapipe the sole driver: any other
 	// backend would find the host's hardware and draw a different picture.
 	let gpu = pollster::block_on(engine::Gpu::new(wgpu::Backends::VULKAN)).expect("a GPU");
@@ -111,68 +255,315 @@ fn shot(name: &str, motion: Motion, open: Open) {
 		"views draw on lavapipe, not {}",
 		info.name
 	);
-	let image = shoot(&open, &gpu, &runtime, &fixture.join("shots/show.toml"));
-	if motion == Motion::Still {
-		let again = shoot(&open, &gpu, &runtime, &fixture.join("shots/show.toml"));
-		assert!(image == again, "the still view `{name}` drew a different picture twice");
-	}
-	let path = out.join(format!("{name}.png"));
-	// The window is opaque, and a quarter smaller without the alpha.
-	image::DynamicImage::ImageRgba8(image).to_rgb8().save(&path).unwrap();
-	println!("{}", path.display());
+	(show, runtime, gpu)
 }
 
-/// Draw what `open` opens on a fresh engine, from the scene file `show`.
-fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show: &Path) -> image::RgbaImage {
-	if let &Open::Kit { sheet } = open {
-		return gallery(gpu, runtime, sheet);
-	}
-	let launch = engine::Launch {
+/// How a view starts the studio: with no relay, recording beside the show.
+fn launch(gpu: &engine::Gpu) -> engine::Launch {
+	engine::Launch {
 		gpu: gpu.clone(),
 		relays: Vec::new(),
 		broadcast: "studio".into(),
 		on_demand: false,
 		recordings: ".".into(),
 		room: None,
+	}
+}
+
+/// Start the studio by `launch` on `show.toml`, without the history an
+/// earlier draw's edits left.
+fn start(launch: engine::Launch, runtime: &tokio::runtime::Runtime) -> App {
+	let _ = std::fs::remove_file("show.history.toml");
+	let (autosave, loaded) = autosave::Autosave::open("show.toml".into()).unwrap();
+	App::Starting(
+		runtime
+			.block_on(engine::Engine::start(launch, autosave, loaded))
+			.unwrap(),
+	)
+}
+
+/// A click on a pad takes its scene on air, and the panic key mutes every
+/// microphone and guest, in an edit undo takes back, and cuts to the safe
+/// scene: the window as a person uses it, on a real engine. Remote feeds that
+/// are not guests stay on. Then the title bar's Close closes it. It draws no
+/// view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_click_takes_and_the_panic_key_cuts() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let mut show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	// Failed in a build without `capture`, which leaves it a microphone to mute.
+	show.push_str("\n[sources.mic]\nkind = \"microphone\"\n");
+	// A guest in the room the show's `guest` and `caller` feeds are under,
+	// which are not guests' broadcasts.
+	show.push_str("\n[sources.alice]\nkind = \"broadcast\"\npath = \"room/alice/camera.hang\"\n");
+	std::fs::write("show.toml", show).unwrap();
+	let connect = url::Url::parse("https://relay.example/show").unwrap();
+	let page = url::Url::parse("https://studio.example/join/").unwrap();
+	let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+	let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+	let launch = engine::Launch {
+		room: Some(Arc::new(room)),
+		..launch(&gpu)
 	};
+	let (mut harness, started, closed) = window(start(launch, &runtime), &gpu, &runtime, SIZE);
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let program = || {
+		engine
+			.state
+			.lock()
+			.unwrap()
+			.compositor
+			.program_scene()
+			.map(str::to_string)
+	};
+	let muted = |name: &str| {
+		let state = engine.state.lock().unwrap();
+		state.collection().audio.get(name).is_some_and(|audio| audio.muted)
+	};
+	assert_eq!(program().as_deref(), Some("Main"));
+
+	harness.get_by_label("Interview").click();
+	harness.run_steps(2);
+	assert_eq!(program().as_deref(), Some("Interview"), "the pad took its scene");
+
+	harness.get_by_label("Panic").click();
+	harness.run_steps(2);
+	assert_eq!(program().as_deref(), Some("Break"), "cut to the safe scene");
+	assert!(muted("mic"), "the microphone is muted");
+	assert!(muted("alice"), "the guest is muted");
+	assert!(!muted("guest") && !muted("caller"), "other remote feeds stay on");
+
+	harness.get_by_label_contains("Undo: Panic: ").click();
+	harness.run_steps(2);
+	assert!(!muted("mic") && !muted("alice"), "undo takes the mute back");
+	assert_eq!(program().as_deref(), Some("Break"), "and leaves program where it is");
+
+	// The title bar's Close asks egui to close, which eframe passes back as a
+	// close event the window counts as asked for, not as a failure.
+	harness.get_by_label("Close").click();
+	harness.step();
+	let commands = &harness.output().viewport_output[&egui::ViewportId::ROOT].commands;
+	assert!(commands.contains(&egui::ViewportCommand::Close), "{commands:?}");
+	assert!(!closed.load(Ordering::Relaxed));
+	let root = harness.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default();
+	root.events.push(egui::ViewportEvent::Close);
+	harness.step();
+	assert!(
+		closed.load(Ordering::Relaxed),
+		"the window counts the close as asked for"
+	);
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// On BUILD, a layer row's menu hides, locks, reorders, and duplicates its
+/// layer, a scene's pad's duplicates the scene with its own copies, and
+/// undo takes each back, and a take lets go of a layer of the scene it
+/// leaves. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_layer_menu_edits_its_layer() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(start(launch(&gpu), &runtime), &gpu, &runtime, SIZE);
+	harness.step();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.build(Side::Layers, Inspect::Layer, None);
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let main = || {
+		let state = engine.state.lock().unwrap();
+		state.collection().scene("Main").unwrap().items.clone()
+	};
+	let menu = |harness: &mut Harness<'_, Window>, row: &str, button: &str| {
+		harness.get_all_by_label(row).next().unwrap().click_secondary();
+		harness.run_steps(2);
+		// The menu's, which comes after the row's own eye and lock and the
+		// inspector's buttons of the same names.
+		harness.get_all_by_label(button).last().unwrap().click();
+		harness.run_steps(2);
+	};
+
+	menu(&mut harness, "bar", "Hide");
+	assert!(!main()[2].visible, "the menu hid the bar");
+	menu(&mut harness, "bar", "Lock");
+	assert!(main()[2].locked, "and locked it");
+	menu(&mut harness, "bar", "Send to back");
+	assert_eq!(main()[0].source, "bar", "it went to the back");
+	menu(&mut harness, "host", "Duplicate as its own copy");
+	let items = main();
+	assert_eq!(items.len(), 4);
+	assert_eq!(items[3].source, "host copy", "the copy went in front of the host");
+	let cloned = engine.state.lock().unwrap().collection().sources["host copy"].clone();
+	assert_eq!(cloned, moq_scene::Source::Clone { source: "host".into() });
+	// The menu acts while it holds the engine's state, which copying reads.
+	menu(&mut harness, "bar", "Copy");
+	harness.get_by_label("copied `bar`");
+
+	harness.get_by_label("Interview").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Duplicate with its own copies").click();
+	harness.run_steps(2);
+	{
+		let state = engine.state.lock().unwrap();
+		let collection = state.collection();
+		let copy = collection.scene("Interview copy").expect("the scene was duplicated");
+		let shown: Vec<&str> = copy.items.iter().map(|item| item.source.as_str()).collect();
+		assert_eq!(shown, ["backdrop copy", "host copy 2", "guest copy"]);
+	}
+
+	for _ in 0..5 {
+		harness.get_by_label_contains("Undo: ").click();
+		harness.run_steps(2);
+	}
+	let items = main();
+	let shown: Vec<&str> = items.iter().map(|item| item.source.as_str()).collect();
+	assert_eq!(shown, ["backdrop", "host", "bar"], "undo took each edit back");
+	assert!(items[2].visible && !items[2].locked);
+	assert!(
+		engine
+			.state
+			.lock()
+			.unwrap()
+			.collection()
+			.scene("Interview copy")
+			.is_none()
+	);
+
+	// A take moves BUILD to another scene, letting go of a layer of this one.
+	let selected = |harness: &mut Harness<'_, Window>| {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!()
+		};
+		studio.selected()
+	};
+	harness.get_all_by_label("bar").next().unwrap().click();
+	harness.run_steps(2);
+	assert!(selected(&mut harness), "the click selected the bar");
+	harness.get_by_label("Interview").click();
+	harness.run_steps(2);
+	assert!(!selected(&mut harness), "the take let go of Main's bar");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// Studio mode, driven as a person does: its switch turns it on, a pad then
+/// cues its scene rather than taking it, and TAKE puts it on air. NEXT's Edit
+/// opens the cued scene off air on BUILD, Back to live keeps it cued, and
+/// the card's close clears it. Off again, a pad's menu opens a scene off air,
+/// whose own layers BUILD lists and selects, and the banner's Take it live
+/// takes it, keeping the selection on the scene now live. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn studio_mode_cues_and_takes() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(start(launch(&gpu), &runtime), &gpu, &runtime, SIZE);
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	// The scene on program, and the one cued.
+	let staged = || {
+		let state = engine.state.lock().unwrap();
+		let program = state.compositor.program_scene().map(str::to_string);
+		(program, state.cued().map(str::to_string))
+	};
+	let scenes = |program: &str, cued: Option<&str>| (Some(program.to_string()), cued.map(str::to_string));
+	let selected = |harness: &mut Harness<'_, Window>| {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!()
+		};
+		studio.selected()
+	};
+	assert_eq!(staged(), scenes("Main", None));
+
+	harness.get_by_label("Studio mode").click();
+	harness.run_steps(2);
+	harness.get_by_label("Interview").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Main", Some("Interview")), "the pad cued its scene");
+	harness.get_by_label("TAKE").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", None), "TAKE put it on air");
+
+	harness.get_by_label("Main").click();
+	harness.run_steps(2);
+	harness.get_by_label("Edit").click();
+	harness.run_steps(2);
+	harness.get_by_label("Back to live").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", Some("Main")), "Studio mode keeps it cued");
+	harness.get_by_label("Clear the cue").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", None));
+
+	harness.get_by_label("Studio mode").click();
+	harness.run_steps(2);
+	harness.get_by_label("Main").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Edit off air").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", Some("Main")), "open off air, not taken");
+	// BUILD lists the layers of the scene open off air, and
+	// leaves always on top to the program.
+	harness.get_by_label_contains("Always on top is drawn on program");
+	harness.get_all_by_label("bar").next().unwrap().click();
+	harness.run_steps(2);
+	assert!(selected(&mut harness), "the click selected Main's bar off air");
+	harness.get_by_label("Take it live").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Main", None), "taken live");
+	assert!(selected(&mut harness), "the bar stays selected, its scene now live");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// Draw what `open` opens on a fresh engine, from a scene file in `shows`.
+fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, shows: &Path) -> image::RgbaImage {
+	if let &Open::Kit { sheet } = open {
+		return gallery(gpu, runtime, sheet);
+	}
 	let app = match open {
 		Open::Setup => App::Setup(Box::new(
-			setup::Setup::new(launch, "show.toml".into(), runtime.handle().clone()).unwrap(),
+			setup::Setup::new(launch(gpu), "show.toml".into(), runtime.handle().clone()).unwrap(),
 		)),
 		Open::Kit { .. } => unreachable!("drawn without an engine"),
-		Open::Studio(_) => {
-			// Afresh, without the history an earlier draw's edits left.
-			std::fs::copy(show, "show.toml").unwrap();
-			let _ = std::fs::remove_file("show.history.toml");
-			let (autosave, loaded) = autosave::Autosave::open("show.toml".into()).unwrap();
-			App::Starting(
-				runtime
-					.block_on(engine::Engine::start(launch, autosave, loaded))
-					.unwrap(),
-			)
+		Open::Studio { show, view, .. } => {
+			let mut text = std::fs::read_to_string(shows.join(show)).unwrap();
+			if let View::Review { replays: true, .. } = view {
+				text.push_str("\n[sources.replay]\nkind = \"replay\"\n\n[sources.slowmo]\nkind = \"replay\"\n");
+			}
+			std::fs::write("show.toml", text).unwrap();
+			start(launch(gpu), runtime)
 		}
 	};
-	let render = render_state(gpu);
-	let started = Arc::new(OnceLock::new());
-	let mut harness = Harness::builder()
-		.with_size(SIZE)
-		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
-		.build_eframe(|cc| {
-			crate::kit::install(&cc.egui_ctx);
-			let mut fx = fx::Fx::new(&render, None, &cc.egui_ctx, runtime.handle());
-			// Not the system's reduced motion, which differs between machines.
-			fx.pick(Effects::Full);
-			Window {
-				app,
-				render: render.clone(),
-				runtime: runtime.handle().clone(),
-				started: started.clone(),
-				keyboard: hotkeys::Keyboard::default(),
-				fx,
-			}
-		});
+	let size = match open {
+		Open::Studio { size, .. } => *size,
+		_ => SIZE,
+	};
+	let (mut harness, started, _) = window(app, gpu, runtime, size);
 
-	let &Open::Studio(tab) = open else {
+	let Open::Studio { view, .. } = open else {
 		runtime
 			.block_on(kio::clock::timeout(SETTLE, checked(&mut harness)))
 			.expect("setup finishes its checks");
@@ -182,19 +573,102 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	let App::Studio(studio) = &mut harness.state_mut().app else {
 		panic!("the studio starts on its first frame")
 	};
-	if let Some(tab) = tab {
-		studio.front(tab);
+	match view {
+		View::Page(page) => studio.turn(*page),
+		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
+		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
+		View::Setting(setting) => studio.open(*setting),
+		View::Health => studio.details(),
+		View::Hover | View::History => {}
+		View::Cued(page) => {
+			studio.studio_mode(true);
+			studio.cue("Interview");
+			studio.turn(*page);
+		}
+		View::OffAir(scene) => studio.edit_off_air(scene),
+		View::Review { picked, .. } => {
+			studio.turn(Page::Review);
+			studio.seed_shelf(shelf());
+			if *picked {
+				let secs = Duration::from_secs;
+				let now = kio::clock::Instant::now();
+				studio.seed_past(past(now), now, (secs(14), secs(6)), secs(9));
+			}
+		}
 	}
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
 		.expect("the sources and pictures settle");
+	match view {
+		View::Hover => hover(&mut harness),
+		View::Menu => {
+			// The row comes before the inspector's tab of the same name.
+			harness.get_all_by_label("host").next().unwrap().click_secondary();
+			harness.run_steps(4);
+		}
+		View::History => {
+			harness
+				.get_all_by_label("Mute")
+				.next()
+				.expect("a sound to mute")
+				.click();
+			harness.run_steps(2);
+			harness.get_by_label("History").click();
+			harness.run_steps(4);
+		}
+		_ => {}
+	}
 	let image = harness.render().unwrap();
 	drop(harness);
+	quit(&engine, runtime);
+	image
+}
+
+/// A window on `app`, `size` large, where the studio it starts is kept, and
+/// whether it was asked to close.
+fn window<'a>(
+	app: App,
+	gpu: &engine::Gpu,
+	runtime: &'a tokio::runtime::Runtime,
+	size: egui::Vec2,
+) -> (Harness<'a, Window>, Arc<OnceLock<Arc<engine::Engine>>>, Arc<AtomicBool>) {
+	let render = render_state(gpu);
+	let started = Arc::new(OnceLock::new());
+	let kept = started.clone();
+	let closed = Arc::new(AtomicBool::new(false));
+	let window_closed = closed.clone();
+	let harness = Harness::builder()
+		.with_size(size)
+		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
+		.build_eframe(move |cc| {
+			crate::kit::install(&cc.egui_ctx);
+			let mut fx = fx::Fx::new(&render, None, &cc.egui_ctx, runtime.handle());
+			// Not the system's reduced motion, which differs between machines.
+			fx.pick(Effects::Full);
+			Window {
+				app,
+				render: render.clone(),
+				runtime: runtime.handle().clone(),
+				started: kept,
+				keyboard: hotkeys::Keyboard::default(),
+				fx,
+				framed: true,
+				closed: window_closed,
+			}
+		});
+	(harness, started, closed)
+}
+
+/// Stop `engine` as quitting does.
+fn quit(engine: &engine::Engine, runtime: &tokio::runtime::Runtime) {
+	// Now, while the scene file is this test's: the autosave's thread outlives
+	// the engine, and would otherwise write an edit made here over the next
+	// draw's copy.
+	engine.save().expect("the show saves");
 	engine.recorder.close();
 	engine.stop();
 	runtime.block_on(async { tokio::join!(engine.close(), engine.recorder.done()) });
-	image
 }
 
 /// Draw the kit's gallery, with a sheet over it if `sheet`.
@@ -212,6 +686,113 @@ fn gallery(gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, sheet: bool) ->
 	// Enough for the popover and the sheet to settle where they open.
 	harness.run_steps(4);
 	harness.render().unwrap()
+}
+
+/// Mute the first sound, open the health dot's popover, and rest the pointer
+/// on undo until its tooltip shows.
+fn hover(harness: &mut Harness<'_, Window>) {
+	harness
+		.get_all_by_label("Mute")
+		.next()
+		.expect("a sound to mute")
+		.click();
+	harness.run_steps(2);
+	harness.get_by_label("Not live").click();
+	harness.run_steps(2);
+	harness.get_by_label_contains("Undo: Mute").hover();
+	// egui shows a tooltip once the pointer rests half a second.
+	harness.run_steps(4);
+}
+
+/// The last 30 seconds as of `now`: a keyframe every 2.5 s, a sun setting
+/// across a gradient, drawn rather than decoded so the view is the same on
+/// every machine.
+fn past(now: kio::clock::Instant) -> crate::past::View {
+	let (width, height) = (480usize, 270usize);
+	let pictures = (0..12u64)
+		.map(|index| {
+			let mut rgba = vec![0u8; width * height * 4];
+			let sun = (60.0 + index as f32 * 30.0, 70.0 + index as f32 * 6.0);
+			for (at, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+				let (x, y) = ((at % width) as f32, (at / width) as f32);
+				let sky = y / height as f32;
+				let mut color = [
+					(40.0 + 160.0 * sky) as u8,
+					(20.0 + 40.0 * sky) as u8,
+					(90.0 - 40.0 * sky) as u8,
+				];
+				if (x - sun.0).powi(2) + (y - sun.1).powi(2) < 45.0_f32.powi(2) {
+					color = [255, 170, 80];
+				}
+				pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
+			}
+			Arc::new(crate::past::Picture {
+				id: index + 1,
+				at: now.saturating_sub(Duration::from_millis(29_000 - index * 2_500)),
+				size: [width, height],
+				rgba,
+			})
+		})
+		.collect::<Vec<_>>();
+	// A packet each 20 ms, swelling and fading as speech does.
+	let sound = (0..1450u64)
+		.map(|index| {
+			let at = now.saturating_sub(Duration::from_millis(29_000 - index * 20));
+			let t = index as f32 / 50.0;
+			let peak = ((t * 1.3).sin() * (t * 0.17).cos() * (t * 0.049 + 1.0).sin()).abs();
+			(at, peak)
+		})
+		.collect();
+	crate::past::View {
+		of: crate::replay::Of::Program,
+		held: Some(Ok(crate::past::Held {
+			oldest: pictures[0].at,
+			video: true,
+		})),
+		pictures,
+		sound: Ok(sound),
+	}
+}
+
+/// This show's recordings and clips, as the mock-up lists them.
+fn shelf() -> crate::shelf::Listing {
+	use crate::shelf::{Card, Kind, Listing};
+	let wall = kio::clock::wall();
+	let ago = |seconds: u64| Some(wall - Duration::from_secs(seconds));
+	let length = |seconds: u64| Some(Duration::from_secs(seconds));
+	let recording = |sources, repaired| Kind::Recording {
+		stamp: String::new(),
+		sources,
+		repaired,
+	};
+	let card = |kind, modified, bytes, length| Card {
+		kind,
+		path: "show.mp4".into(),
+		modified,
+		bytes,
+		length,
+	};
+	Listing {
+		cards: vec![
+			card(Kind::Clip(3), ago(150), 11_000_000, length(8)),
+			card(Kind::Clip(2), ago(41 * 60), 18_000_000, length(12)),
+			card(
+				recording(0, true),
+				ago(2 * 86_400 + 600),
+				14_200_000_000,
+				length(2 * 3600 + 10 * 60 + 44),
+			),
+			card(
+				recording(4, false),
+				ago(6 * 86_400 + 600),
+				21_000_000_000,
+				length(3 * 3600 + 2 * 60 + 10),
+			),
+			card(Kind::Clip(1), ago(6 * 86_400 + 900), 22_000_000, length(15)),
+		],
+		error: None,
+		free: Some(212_000_000_000),
+	}
 }
 
 /// Draw until setup has finished its checks and proposes a scene.
@@ -244,8 +825,11 @@ async fn settle(harness: &mut Harness<'_, Window>, engine: &engine::Engine) {
 		let rendered = engine.stats.rendered.load(Ordering::Relaxed);
 		let (started, framerate) = {
 			let state = engine.state.lock().unwrap();
+			// A replay source's track starts with its first replay, so one that
+			// idles has nothing to wait for.
 			let started = state.sources.iter().all(|(_, feed)| {
-				!matches!(feed.status(), Status::Starting) && !matches!(feed.track(), Some(Status::Starting))
+				!matches!(feed.status(), Status::Starting)
+					&& (matches!(feed.source(), Source::Replay) || !matches!(feed.track(), Some(Status::Starting)))
 			});
 			(started, u64::from(state.compositor.canvas().framerate))
 		};

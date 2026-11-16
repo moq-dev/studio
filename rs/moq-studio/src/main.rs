@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
@@ -26,9 +27,11 @@ mod interact;
 mod kit;
 mod ladder;
 mod mix;
+mod past;
 mod record;
 mod replay;
 mod setup;
+mod shelf;
 #[cfg(test)]
 mod shots;
 mod snap;
@@ -67,8 +70,8 @@ pub struct Config {
 	#[usage(long)]
 	pub on_demand: bool,
 
-	/// The directory recordings are saved in. Defaults to a named scene file's,
-	/// or else to the user's videos folder.
+	/// The directory recordings and clips are saved in. Defaults to a named
+	/// scene file's, or else to the user's videos folder.
 	#[usage(long, value_hint = usage_rs::ValueHint::DirPath)]
 	pub recordings: Option<PathBuf>,
 
@@ -307,10 +310,20 @@ struct Window {
 	keyboard: hotkeys::Keyboard,
 	/// The window's own effects, on the setup screen and in the studio.
 	fx: fx::Fx,
+	/// Whether the studio's title bar is the window's frame, rather than the
+	/// desktop's, which guided setup keeps.
+	framed: bool,
+	/// Set once the window is asked to close, as [`Events::closed`] is.
+	closed: Arc<AtomicBool>,
 }
 
 impl eframe::App for Window {
 	fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+		// The title bar's Close asks egui rather than the desktop, so no
+		// window event says so.
+		if ctx.input(|input| input.viewport().close_requested()) {
+			self.closed.store(true, Ordering::Relaxed);
+		}
 		if let App::Studio(studio) = &mut self.app {
 			studio.logic(ctx, frame);
 		}
@@ -342,7 +355,13 @@ impl Window {
 			App::Starting(engine) => engine.clone(),
 		};
 		let _ = self.started.set(engine.clone());
-		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
+		// After setup, the desktop's frame goes. macOS cannot draw under its
+		// title bar once the window is open, so it keeps it until a restart.
+		if !self.framed && !cfg!(target_os = "macos") {
+			ui.ctx().send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+			self.framed = true;
+		}
+		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone(), self.framed);
 		studio.load(hotkeys::Window {
 			frame,
 			ctx: ui.ctx(),
@@ -358,9 +377,9 @@ impl Window {
 struct Events<'a> {
 	eframe: eframe::EframeWinitApplication<'a>,
 	keyboard: hotkeys::Keyboard,
-	/// Whether the window was asked to close, since eframe only logs the error
-	/// that stops it otherwise.
-	closed: bool,
+	/// Whether the window was asked to close, by the desktop or the studio's
+	/// own title bar, since eframe only logs the error that stops it otherwise.
+	closed: Arc<AtomicBool>,
 	/// The engine once the studio is built, to end on the way out.
 	started: Arc<OnceLock<Arc<engine::Engine>>>,
 	runtime: tokio::runtime::Handle,
@@ -395,7 +414,7 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 				}
 			}
 			WindowEvent::ModifiersChanged(modifiers) => self.keyboard.modifiers(modifiers.state()),
-			WindowEvent::CloseRequested => self.closed = true,
+			WindowEvent::CloseRequested => self.closed.store(true, Ordering::Relaxed),
 			_ => {}
 		}
 		self.eframe.window_event(event_loop, id, event);
@@ -449,14 +468,29 @@ fn icon() -> egui::IconData {
 /// Show the window until it is closed, then end the studio.
 fn run(app: App, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::Result<()> {
 	let started = Arc::new(OnceLock::new());
+	// The studio's title bar is the window's: the desktop draws no frame, and
+	// macOS draws its buttons over the studio's bar. Guided setup keeps the
+	// desktop's until it starts the studio.
+	let framed = matches!(app, App::Starting(_));
+	let mut viewport = egui::ViewportBuilder::default()
+		.with_title("kixel.live Studio")
+		// The Wayland app id and X11 class, which the desktop finds the
+		// app's entry and icon by: the entry's file name, without `.desktop`.
+		.with_app_id("live.kixel.studio")
+		.with_icon(icon())
+		.with_inner_size([1440.0, 900.0])
+		.with_min_inner_size(ui::MIN_SIZE);
+	if framed {
+		viewport = match cfg!(target_os = "macos") {
+			true => viewport
+				.with_fullsize_content_view(true)
+				.with_titlebar_shown(false)
+				.with_title_shown(false),
+			false => viewport.with_decorations(false),
+		};
+	}
 	let options = eframe::NativeOptions {
-		viewport: egui::ViewportBuilder::default()
-			.with_title("kixel.live Studio")
-			// The Wayland app id and X11 class, which the desktop finds the
-			// app's entry and icon by: the entry's file name, without `.desktop`.
-			.with_app_id("live.kixel.studio")
-			.with_icon(icon())
-			.with_inner_size([1440.0, 900.0]),
+		viewport,
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
 			// The window draws on the device the compositor does, so preview and
 			// program reach the screen without leaving the GPU.
@@ -480,6 +514,8 @@ fn run(app: App, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::R
 	let window_keyboard = keyboard.clone();
 	let window_started = started.clone();
 	let window_runtime = runtime.clone();
+	let closed = Arc::new(AtomicBool::new(false));
+	let window_closed = closed.clone();
 	let eframe = eframe::create_native(
 		"moq-studio",
 		options,
@@ -497,6 +533,8 @@ fn run(app: App, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::R
 				started: window_started,
 				keyboard: window_keyboard,
 				fx,
+				framed,
+				closed: window_closed,
 			}))
 		}),
 		&event_loop,
@@ -504,13 +542,16 @@ fn run(app: App, gpu: engine::Gpu, runtime: tokio::runtime::Handle) -> anyhow::R
 	let mut events = Events {
 		eframe,
 		keyboard,
-		closed: false,
+		closed: closed.clone(),
 		started,
 		runtime,
 		unsaved: false,
 	};
 	event_loop.run_app(&mut events).context("the window failed")?;
-	anyhow::ensure!(events.closed, "the window failed; the error is logged above");
+	anyhow::ensure!(
+		closed.load(Ordering::Relaxed),
+		"the window failed; the error is logged above"
+	);
 	anyhow::ensure!(!events.unsaved, "cannot save on quit; the error is logged above");
 	Ok(())
 }

@@ -143,6 +143,8 @@ fn id(action: &Action, binding: &Binding) -> String {
 		Action::Replay => "replay".into(),
 		Action::SaveClip => "save-clip".into(),
 		Action::Record => "record".into(),
+		Action::Panic => "panic".into(),
+		Action::StudioMode => "studio-mode".into(),
 	}
 }
 
@@ -258,11 +260,11 @@ mod tests {
 			reach: Arc::new(Mutex::new(Reach::Asking)),
 		};
 		let key = key(egui::Modifiers::CTRL, KeyCode::KeyR, prints("r"));
-		portal.set(Bindings::from([(Action::Cut, key.clone())]));
+		portal.set(Bindings::from([(Action::Panic, key.clone())]));
 		assert!(wanted.has_changed().unwrap());
 		wanted.mark_unchanged();
 		// What the Hotkeys panel sets when it starts and stops waiting for a key.
-		portal.set(Bindings::from([(Action::Cut, key)]));
+		portal.set(Bindings::from([(Action::Panic, key)]));
 		assert!(!wanted.has_changed().unwrap());
 	}
 
@@ -283,10 +285,13 @@ mod tests {
 			"scene/ctrl+shift+Numpad1"
 		);
 		// An activation reads the bindings the session was opened with.
-		let cut = key(egui::Modifiers::CTRL, KeyCode::F1, Key::Named(NamedKey::F1));
-		let bindings = Bindings::from([(scene("Opening"), f1.clone()), (Action::Cut, cut)]);
+		let panic = key(egui::Modifiers::CTRL, KeyCode::F1, Key::Named(NamedKey::F1));
+		let bindings = Bindings::from([(scene("Opening"), f1.clone()), (Action::Panic, panic)]);
 		assert_eq!(by_id(&bindings, "scene/F1"), Some((&scene("Opening"), &f1)));
-		assert_eq!(by_id(&bindings, "cut").map(|(action, _)| action), Some(&Action::Cut));
+		assert_eq!(
+			by_id(&bindings, "panic").map(|(action, _)| action),
+			Some(&Action::Panic)
+		);
 		assert_eq!(by_id(&bindings, "unknown"), None);
 	}
 

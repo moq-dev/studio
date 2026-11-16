@@ -433,15 +433,15 @@ mod tests {
 		let mut reader = moq_json::snapshot::Consumer::<Layout>::new(track, Default::default());
 		let read = reader.next().await.unwrap().expect("a layout");
 		assert_eq!(
-			(read.value, read.at.map(Duration::from)),
-			(first, Some(Duration::from_secs(1)))
+			(read.value, Duration::try_from(read.at).unwrap()),
+			(first, Duration::from_secs(1))
 		);
 		publisher.update(second.clone(), stamp(2)).unwrap();
 		publisher.update(second.clone(), stamp(3)).unwrap();
 		let read = reader.next().await.unwrap().expect("a layout");
 		assert_eq!(
-			(read.value, read.at.map(Duration::from)),
-			(second, Some(Duration::from_secs(2)))
+			(read.value, Duration::try_from(read.at).unwrap()),
+			(second, Duration::from_secs(2))
 		);
 
 		publisher.finish().unwrap();

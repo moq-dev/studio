@@ -1,0 +1,53 @@
+# The portrait show `just shots` renders the portrait view on: the shots'
+# show, its canvas turned on its side.
+version = 1
+
+[canvas]
+width = 1080
+height = 1920
+framerate = 30
+
+[sources.host]
+kind = "image"
+path = "person.jpg"
+
+[sources.backdrop]
+kind = "color"
+color = "#101828"
+
+[sources.bar]
+kind = "color"
+color = "#2563ebe6"
+
+[sources.guest]
+kind = "broadcast"
+path = "room/guest"
+
+[[scenes]]
+name = "Close-up"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1080, height = 1920 } },
+    { source = "host", rect = { x = 0, y = 656, width = 1080, height = 608 } },
+    { source = "bar", rect = { x = 60, y = 1600, width = 960, height = 140 } },
+]
+
+[[scenes]]
+name = "Chatting"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1080, height = 1920 } },
+    { source = "host", rect = { x = 60, y = 200, width = 960, height = 540 } },
+    { source = "guest", rect = { x = 60, y = 1000, width = 960, height = 540 } },
+]
+
+[[scenes]]
+name = "BRB"
+safe = true
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1080, height = 1920 } },
+    { source = "bar", rect = { x = 140, y = 900, width = 800, height = 120 } },
+]
+
+[[audio_scenes]]
+name = "Program"
+program = true
+sounds = ["guest"]

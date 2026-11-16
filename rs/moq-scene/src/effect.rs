@@ -11,7 +11,7 @@
 
 use std::num::NonZeroU64;
 
-use crate::collection::{Blend, Canvas, Crop, Filter, MaskMode, Rect, Rgba};
+use crate::collection::{Blend, Canvas, Crop, Filter, MaskMode, Rect, Rgba, Shape};
 use crate::compositor::FORMAT;
 use crate::lut::Cube;
 
@@ -50,6 +50,22 @@ impl Op {
 	const LUMA_KEY: u32 = 2;
 	const LUT: u32 = 3;
 	const MASK: u32 = 4;
+	const SHAPE: u32 = 5;
+
+	/// `shape` cut over an item `width` by `height` canvas pixels, or `None`
+	/// if it leaves the item as it is.
+	fn shape(shape: &Shape, width: f32, height: f32) -> Option<Self> {
+		if shape.is_square() {
+			return None;
+		}
+		let color = shape.color.0.map(|channel| f32::from(channel) / 255.0);
+		Some(Self {
+			kind: [Self::SHAPE, 0, 0, 0],
+			params: shape.corners,
+			matrix: [[width, height, shape.border, 0.0], [0.0; 4], [0.0; 4], [0.0; 4]],
+			offset: color,
+		})
+	}
 
 	/// `rows` times straight RGBA, plus `offset`, clamped.
 	fn matrix(rows: [[f32; 4]; 4], offset: [f32; 4]) -> Self {
@@ -458,6 +474,8 @@ pub(crate) struct Item<'a> {
 	pub filters: Vec<&'a Filter>,
 	/// How it mixes with what is under it.
 	pub blend: Blend,
+	/// The outline it is cut to, before every filter.
+	pub shape: Shape,
 }
 
 /// The pictures and tables filters read, by source name.
@@ -886,6 +904,8 @@ impl Effects {
 
 		let mut bounds = area;
 		let mut segment = Segment::default();
+		// First, so a filter such as a shadow sees the shape.
+		segment.ops.extend(Op::shape(&item.shape, area.width(), area.height()));
 		for (index, stage) in stages.iter().enumerate() {
 			match *stage {
 				Stage::Pixel(filter) => {
