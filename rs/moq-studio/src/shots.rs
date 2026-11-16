@@ -13,13 +13,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use eframe::egui_wgpu;
+use egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use moq_scene::Source;
 use moq_scene::source::Status;
 
 use crate::fx::Effects;
-use crate::ui::{Inspect, Page, Setting, Side};
+use crate::ui::{Inspect, MixView, Page, Setting, Side};
 use crate::{App, Window, autosave, engine, fx, hotkeys, setup};
 
 /// The window's size, the mock-ups'.
@@ -49,6 +50,10 @@ enum Open {
 /// Where a view turns the studio.
 enum View {
 	Page(Page),
+	/// The MIX page in a view, with the strip of the sound named open.
+	Mix(MixView, Option<&'static str>),
+	/// MIX with Headphones' menu open, as a right click on its strip opens it.
+	MixMenu,
 	/// The BUILD page with `side` and `inspect` shown, and the layer of the
 	/// scene on program at `index`, front first, selected.
 	Build {
@@ -94,6 +99,16 @@ fn studio(view: View) -> Open {
 		view,
 		size: SIZE,
 		show: "show.toml",
+	}
+}
+
+/// The studio on the MIX views' show, `size` large, turned to MIX in `view`
+/// with the strip of the sound called `opened` open.
+fn mixing(view: MixView, opened: Option<&'static str>, size: egui::Vec2) -> Open {
+	Open::Studio {
+		view: View::Mix(view, opened),
+		size,
+		show: "mix.toml",
 	}
 }
 
@@ -167,11 +182,19 @@ views! {
 	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
 	/// Too narrow for the banner beside the live picture, it goes under it.
 	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml" };
-	/// MIX holds the mixer, and a small live picture in the sound's place.
-	mix: Still, studio(View::Page(Page::Mix));
-	/// MIX in a stacked window, its live picture as tall as the sound's slot
-	/// allows.
-	mix_compact: Still, Open::Studio { view: View::Page(Page::Mix), size: HALF, show: "show.toml" };
+	/// MIX: a strip per sound and per audio scene, with their sends, and a
+	/// small live picture in the sound's place.
+	mix: Still, mixing(MixView::Strips, None, SIZE);
+	/// A sound's strip opened to its gain, pan, delay, and where it is heard,
+	/// its neighbours narrowed.
+	mix_strip: Still, mixing(MixView::Strips, Some("mic"), SIZE);
+	/// An audio scene's menu: rename, move, or remove it.
+	mix_menu: Still, Open::Studio { view: View::MixMenu, size: SIZE, show: "mix.toml" };
+	/// The same sends as a matrix.
+	mix_routes: Still, mixing(MixView::Routes, None, SIZE);
+	/// MIX in a stacked window, its strips scrolling, its live picture as
+	/// tall as the sound's slot allows.
+	mix_compact: Still, mixing(MixView::Strips, None, HALF);
 	/// REVIEW off air: without a relay the program keeps no past, which the
 	/// strip and both actions say, beside this show's recordings and clips.
 	review: Still, studio(View::Review { picked: false, replays: false });
@@ -538,6 +561,131 @@ fn studio_mode_cues_and_takes() {
 	quit(&engine, &runtime);
 }
 
+/// MIX's send dots, an opened strip's switches, a mute, and the audio scene
+/// tags edit the show as a person clicking them does, each an edit undo
+/// names: on the MIX views' show, on a real engine. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn mix_sends_and_mutes() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/mix.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(start(launch(&gpu), &runtime), &gpu, &runtime, SIZE);
+	harness.step();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.mix(MixView::Strips, None);
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let scene = |name: &str| {
+		let state = engine.state.lock().unwrap();
+		state.collection().audio_scene(name).cloned().expect("the audio scene")
+	};
+	let undo = || {
+		let state = engine.state.lock().unwrap();
+		let history = state.history();
+		let at = history.position().checked_sub(1)?;
+		history.entries().nth(at).map(|edit| edit.label.clone())
+	};
+
+	// A dot sends a sound in, and again takes it out.
+	assert!(!scene("Recording").sounds.contains("music"));
+	harness.get_by_label("Send music to Recording").click();
+	harness.run_steps(2);
+	assert!(scene("Recording").sounds.contains("music"), "sent");
+	assert_eq!(undo().as_deref(), Some("Put `music` in `Recording`"));
+	harness.get_by_label("Send music to Recording").click();
+	harness.run_steps(2);
+	assert!(!scene("Recording").sounds.contains("music"), "taken out");
+
+	// A sound heard only through Stream, its dot a ring, is sent straight in.
+	harness.get_by_label("Send guest to Headphones").click();
+	harness.run_steps(2);
+	assert!(scene("Headphones").sounds.contains("guest"));
+
+	// An audio scene sends into another, but never into one it holds.
+	harness.get_by_label("Send Recording to Headphones").click();
+	harness.run_steps(2);
+	assert!(scene("Headphones").scenes.contains("Recording"));
+	assert!(
+		harness
+			.get_by_label("Send Headphones to Stream")
+			.accesskit_node()
+			.is_disabled(),
+		"Headphones holds Stream"
+	);
+
+	// A strip's name opens it to its controls, and again closes it.
+	assert!(harness.query_by_label("Delay").is_none());
+	harness.get_by_label("Open mic").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Delay").is_some(), "opened");
+	harness.get_by_label("Close mic").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Delay").is_none(), "closed");
+
+	// The mute, and putting another audio scene on the stream.
+	harness.get_all_by_label("Mute").next().expect("a mute").click();
+	harness.run_steps(2);
+	assert_eq!(undo().as_deref(), Some("Mute `guest`"));
+	harness
+		.get_all_by_label("Put on stream")
+		.next()
+		.expect("one off the stream")
+		.click();
+	harness.run_steps(2);
+	assert!(scene("Headphones").program && !scene("Stream").program);
+
+	// A new audio scene, with nothing in it.
+	harness.get_by_label("Add an audio scene").click();
+	harness.run_steps(2);
+	assert_eq!(scene("Audio scene 4").sounds.len(), 0);
+
+	// Its strip's menu renames it in a sheet, moves it, and removes it.
+	let names = || {
+		let state = engine.state.lock().unwrap();
+		let scenes = &state.collection().audio_scenes;
+		scenes.iter().map(|scene| scene.name.clone()).collect::<Vec<_>>()
+	};
+	harness.get_by_label("Audio scene Audio scene 4").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Rename").click();
+	harness.run_steps(2);
+	harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+	harness.get_by_role(Role::TextInput).type_text("Talkback");
+	harness.run_steps(2);
+	harness.get_by_label("Rename").click();
+	harness.run_steps(2);
+	assert_eq!(names(), ["Stream", "Headphones", "Recording", "Talkback"]);
+	assert_eq!(
+		undo().as_deref(),
+		Some("Rename audio scene `Audio scene 4` to `Talkback`")
+	);
+	harness.get_by_label("Audio scene Talkback").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Move left").click();
+	harness.run_steps(2);
+	assert_eq!(names(), ["Stream", "Headphones", "Talkback", "Recording"]);
+	harness.get_by_label("Audio scene Talkback").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Remove").click();
+	harness.run_steps(2);
+	assert_eq!(names(), ["Stream", "Headphones", "Recording"]);
+	// The one the stream hears cannot be removed.
+	harness.get_by_label("Audio scene Headphones").click_secondary();
+	harness.run_steps(2);
+	assert!(harness.get_by_label("Remove").accesskit_node().is_disabled());
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// Draw what `open` opens on a fresh engine, from a scene file in `shows`.
 fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, shows: &Path) -> image::RgbaImage {
 	if let &Open::Kit { sheet } = open {
@@ -575,6 +723,8 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	};
 	match view {
 		View::Page(page) => studio.turn(*page),
+		View::Mix(view, opened) => studio.mix(*view, *opened),
+		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
 		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) => studio.open(*setting),
@@ -602,6 +752,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		.expect("the sources and pictures settle");
 	match view {
 		View::Hover => hover(&mut harness),
+		View::MixMenu => {
+			harness.get_by_label("Audio scene Headphones").click_secondary();
+			harness.run_steps(4);
+		}
 		View::Menu => {
 			// The row comes before the inspector's tab of the same name.
 			harness.get_all_by_label("host").next().unwrap().click_secondary();
@@ -619,10 +773,29 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		_ => {}
 	}
+	fresh_glyphs(&mut harness);
 	let image = harness.render().unwrap();
 	drop(harness);
 	quit(&engine, runtime);
 	image
+}
+
+/// Pack egui's glyphs anew from the frame about to be drawn. They are packed
+/// in the order text first appears, and a glyph's edge samples its
+/// neighbour's, so a view whose text changed while it settled, such as the
+/// health dot's on a show with a failed source, would otherwise draw a pixel
+/// differently from run to run. New font definitions repack the atlas.
+fn fresh_glyphs(harness: &mut Harness<'_, Window>) {
+	let ctx = harness.ctx.clone();
+	let fonts = ctx.fonts(|fonts| fonts.definitions().clone());
+	let mut other = fonts.clone();
+	other
+		.families
+		.insert(egui::FontFamily::Name("repack".into()), Vec::new());
+	ctx.set_fonts(other);
+	harness.step();
+	ctx.set_fonts(fonts);
+	harness.step();
 }
 
 /// A window on `app`, `size` large, where the studio it starts is kept, and
