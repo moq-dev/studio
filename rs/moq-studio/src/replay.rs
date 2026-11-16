@@ -168,10 +168,11 @@ pub fn take(engine: &Engine, of: &Of, ago: Duration, length: Duration, play: boo
 
 /// The moment `ago` before `end`, on `end`'s timeline and in its scale.
 fn before(end: moq_net::Timestamp, ago: Duration) -> anyhow::Result<moq_net::Timestamp> {
-	let at = Duration::from(end)
+	let at = Duration::try_from(end)?
 		.checked_sub(ago)
 		.context("the broadcast is younger than the picked stretch")?;
-	Ok(moq_net::Timestamp::try_from(at)?.convert(end.scale())?)
+	let scale = end.scale().context("the broadcast's timeline has no timescale")?;
+	Ok(moq_net::Timestamp::try_from(at)?.convert(scale)?)
 }
 
 /// Play `take` at `speed` in the replay source `into`.
