@@ -25,7 +25,7 @@ bar.
 ## Plan
 
 - The mock-up lists a Sound pane. Its one setting, the output Listen plays
-  on, is on the [MIX page](/quest/m0/ux/mix.md) instead, so there is none.
+  on, is on the MIX page instead, so there is none.
   The Guests pane has no frame; it follows the Stream pane's shape.
 - Each setting keeps its home on disk: the scene file for what belongs to
   the show (canvas, scene sizes, published scenes), per-user settings for

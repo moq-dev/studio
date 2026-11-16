@@ -107,7 +107,7 @@ fn push(history: &mut History, level: Level, steps: usize) {
 }
 
 /// Where `amplitude` falls on a meter, from 0 at [`MUTE_DB`] to 1 at full scale.
-fn position(amplitude: f32) -> f32 {
+pub(super) fn position(amplitude: f32) -> f32 {
 	(1.0 - decibels(amplitude) / MUTE_DB).clamp(0.0, 1.0)
 }
 
@@ -116,16 +116,15 @@ fn color(level: Level) -> Color32 {
 	if level.peak() >= 1.0 { kit::ERR } else { kit::OK }
 }
 
-/// A level meter of the latest step: RMS lit, peak held, on a decibel scale.
-pub(super) fn meter(ui: &mut Ui, history: Option<&History>) {
-	let (level, peak) = reading(history);
-	ui.add(kit::Meter::new(level, peak));
+/// The latest step's level, or silence before the first.
+pub(super) fn latest(history: Option<&History>) -> Level {
+	history.and_then(|history| history.back().copied()).unwrap_or_default()
 }
 
 /// The latest step's RMS and peak where they fall on a meter, from 0 at
 /// [`MUTE_DB`] to 1 at full scale, as [`kit::Meter::new`] takes them.
 pub(super) fn reading(history: Option<&History>) -> (f32, f32) {
-	let level = history.and_then(|history| history.back().copied()).unwrap_or_default();
+	let level = latest(history);
 	(position(level.rms()), position(level.peak()))
 }
 

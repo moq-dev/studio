@@ -87,6 +87,8 @@ pub struct IconButton<'a> {
 	/// The fill while lit, such as a mute while muted.
 	lit: Option<Color32>,
 	size: f32,
+	/// How wide it is, if wider than tall, such as a strip's mute.
+	width: Option<f32>,
 	/// Said under the name, such as why it is disabled.
 	note: Option<&'a str>,
 	pose: Option<Pose>,
@@ -102,9 +104,16 @@ impl<'a> IconButton<'a> {
 			look: Look::Plain,
 			lit: None,
 			size: 30.0,
+			width: None,
 			note: None,
 			pose: None,
 		}
+	}
+
+	/// Make it `width` wide, as a mixer strip's buttons fill the strip.
+	pub fn width(mut self, width: f32) -> Self {
+		self.width = Some(width);
+		self
 	}
 
 	/// The key that does the same, shown in the tooltip.
@@ -146,7 +155,8 @@ impl<'a> IconButton<'a> {
 
 impl Widget for IconButton<'_> {
 	fn ui(self, ui: &mut Ui) -> Response {
-		let (rect, response) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
+		let size = vec2(self.width.unwrap_or(self.size), self.size);
+		let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 		response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.name));
 		if ui.is_rect_visible(rect) {
 			let pose = self.pose.unwrap_or_else(|| Pose::of(&response));
@@ -503,27 +513,35 @@ impl Widget for Slider<'_> {
 	}
 }
 
-/// A vertical fader over 0 to 1, as on a mixing desk: a slot and a cap.
-#[cfg_attr(
-	not(test),
-	expect(dead_code, reason = "the MIX page's strips draw with it: quest/m0/ux/mix.md")
-)]
+/// A vertical fader over 0 to 1, as on a mixing desk: a slot, a cap, and a
+/// line across the slot at a mark, such as unity gain.
 pub struct Fader<'a> {
 	value: &'a mut f32,
 	height: f32,
+	mark: Option<f32>,
 }
 
-#[cfg_attr(
-	not(test),
-	expect(dead_code, reason = "the MIX page's strips draw with it: quest/m0/ux/mix.md")
-)]
 impl<'a> Fader<'a> {
+	/// How far in from its top and bottom the cap's center stops, so a scale
+	/// beside it lines up with its travel.
+	pub const INSET: f32 = 8.0;
+
 	pub fn new(value: &'a mut f32) -> Self {
-		Self { value, height: 160.0 }
+		Self {
+			value,
+			height: 160.0,
+			mark: None,
+		}
 	}
 
 	pub fn height(mut self, height: f32) -> Self {
 		self.height = height;
+		self
+	}
+
+	/// Mark the value `at` across the slot, as unity on a gain fader.
+	pub fn mark(mut self, at: f32) -> Self {
+		self.mark = Some(at);
 		self
 	}
 }
@@ -531,7 +549,7 @@ impl<'a> Fader<'a> {
 impl Widget for Fader<'_> {
 	fn ui(self, ui: &mut Ui) -> Response {
 		let (rect, mut response) = ui.allocate_exact_size(vec2(28.0, self.height), Sense::drag());
-		let travel = egui::Rangef::new(rect.top() + 8.0, rect.bottom() - 8.0);
+		let travel = egui::Rangef::new(rect.top() + Self::INSET, rect.bottom() - Self::INSET);
 		// The release too, so a move in its frame is kept.
 		if (response.dragged() || response.drag_stopped())
 			&& let Some(pos) = response.interact_pointer_pos()
@@ -548,6 +566,10 @@ impl Widget for Fader<'_> {
 			let painter = ui.painter();
 			let slot = Rect::from_center_size(rect.center(), vec2(8.0, rect.height()));
 			painter.rect_filled(slot, 4, Color32::BLACK);
+			if let Some(mark) = self.mark {
+				let y = egui::lerp(travel.max..=travel.min, mark);
+				painter.hline(rect.x_range().shrink(2.0), y, Stroke::new(2.0, FAINT));
+			}
 			let y = egui::lerp(travel.max..=travel.min, value);
 			let cap = Rect::from_center_size(pos2(rect.center().x, y), vec2(26.0, 16.0));
 			// A cap lit from above: light on top, darker below, and a groove.
@@ -567,7 +589,6 @@ impl Widget for Fader<'_> {
 }
 
 /// Fill `rect`, rounded by `corner`, from `top` down to `bottom`.
-#[cfg_attr(not(test), expect(dead_code, reason = "the fader's cap"))]
 fn gradient(painter: &egui::Painter, rect: Rect, corner: u8, top: Color32, bottom: Color32) {
 	// The rounded body in the bottom color, its top half's gradient over it.
 	painter.rect_filled(rect, corner, bottom);
@@ -608,21 +629,29 @@ pub enum Run {
 pub struct Meter {
 	level: f32,
 	peak: f32,
+	hot: f32,
 	run: Run,
 	size: Vec2,
 }
 
-/// Where a meter turns from healthy to hot.
-const HOT: f32 = 0.7;
-
 impl Meter {
+	/// Where a meter turns from healthy to hot, unless told otherwise.
+	pub const HOT: f32 = 0.7;
+
 	pub fn new(level: f32, peak: f32) -> Self {
 		Self {
 			level,
 			peak,
+			hot: Self::HOT,
 			run: Run::Across,
 			size: vec2(160.0, 9.0),
 		}
+	}
+
+	/// Turn hot from `at` along the run, for a meter on a scale of its own.
+	pub fn hot(mut self, at: f32) -> Self {
+		self.hot = at;
+		self
 	}
 
 	/// Run `run`, `size` points along it and across.
@@ -657,7 +686,7 @@ impl Widget for Meter {
 		for index in 0..count {
 			let at = (index as f32 + 0.5) / count as f32;
 			let lit = at <= self.level;
-			let color = match (lit || index + 1 == peak, at >= HOT) {
+			let color = match (lit || index + 1 == peak, at >= self.hot) {
 				(false, _) => P3,
 				(true, false) => OK,
 				(true, true) if clipped && index + 1 == count => ERR,
@@ -1214,7 +1243,7 @@ impl<'a> TallyFrame<'a> {
 }
 
 /// Diagonal stripes of `color` filling `rect`, clipped to it.
-fn stripes(rect: Rect, color: Color32) -> Vec<Shape> {
+pub fn stripes(rect: Rect, color: Color32) -> Vec<Shape> {
 	let mut shapes = Vec::new();
 	let pitch = 24.0;
 	let rot = Rot2::from_angle(-std::f32::consts::FRAC_PI_4);
