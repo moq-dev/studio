@@ -1191,13 +1191,18 @@ impl Engine {
 	///
 	/// Call inside the tokio runtime that serves the relay connections.
 	pub fn join(self: &Arc<Self>, joining: Option<crate::guests::Joining>) -> anyhow::Result<()> {
+		// Held throughout, as `close` takes it once `stop` has run, so a join
+		// racing a close either ends before it, and is left, or finds the
+		// engine stopped.
+		let mut joined = self.room.lock().unwrap();
 		// The room left stops renewing and feeding before the next starts, so
 		// the two never publish at once.
-		*self.room.lock().unwrap() = None;
+		*joined = None;
 		*self.feeds.lock().unwrap() = None;
 		let Some(crate::guests::Joining { room, renewal }) = joining else {
 			return Ok(());
 		};
+		anyhow::ensure!(!*self.stopped.borrow(), "the show is closing");
 		// Every relay feeds `subscribe`, so a guest either one routes is seen.
 		let announced = self
 			.subscribe
@@ -1210,16 +1215,17 @@ impl Engine {
 			let feeds = crate::feed::Feeds::new(room.clone(), origin.clone(), program, clock, self.program.epoch)?;
 			*self.feeds.lock().unwrap() = Some(feeds);
 		}
-		let mut tasks = vec![tokio::spawn(crate::guests::run(self.clone(), room.clone(), announced))];
+		// Each ends with the engine too, so none outlives a show closed.
+		let mut tasks = vec![self.until_stopped(crate::guests::run(self.clone(), room.clone(), announced))];
 		if let Some(renewal) = renewal {
-			tasks.push(tokio::spawn(renewal.run()));
+			tasks.push(self.until_stopped(renewal.run()));
 		}
 		// Who has a return feed follows who is renewed, synced with the audio,
 		// including any change made since the feeds started.
 		let mut changes = room.changes();
 		changes.mark_changed();
 		let engine = Arc::downgrade(self);
-		tasks.push(tokio::spawn(async move {
+		tasks.push(self.until_stopped(async move {
 			while changes.changed().await.is_ok() {
 				let Some(engine) = engine.upgrade() else { return };
 				engine.state.lock().unwrap().stale = true;
@@ -1230,7 +1236,7 @@ impl Engine {
 			rooms.push(room.path().clone());
 		}
 		drop(rooms);
-		*self.room.lock().unwrap() = Some(Joined { room, tasks });
+		*joined = Some(Joined { room, tasks });
 		Ok(())
 	}
 
@@ -1309,14 +1315,14 @@ impl Engine {
 
 	/// Run `task` on the runtime until [`stop`](Self::stop), for work that
 	/// belongs to this engine and would otherwise outlive a show closed.
-	fn until_stopped(&self, task: impl Future<Output = ()> + Send + 'static) {
+	fn until_stopped(&self, task: impl Future<Output = ()> + Send + 'static) -> tokio::task::JoinHandle<()> {
 		let mut stopped = self.stopped.subscribe();
 		tokio::spawn(async move {
 			tokio::select! {
 				() = task => {}
 				_ = stopped.wait_for(|stopped| *stopped) => {}
 			}
-		});
+		})
 	}
 
 	/// Write the collection and its history to their files unless they
@@ -5242,6 +5248,14 @@ mod tests {
 		controls.release_close();
 		assert!(!controls.going(), "a close given back leaves the show as it was");
 		engine.stop();
+		// A room joined late, such as by a follow still under way, is refused.
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+		let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+		let refused = engine.join(Some(crate::guests::Joining::offline(room))).unwrap_err();
+		assert!(format!("{refused:#}").contains("closing"), "{refused:#}");
+		assert!(engine.room().is_none());
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");
