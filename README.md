@@ -153,18 +153,21 @@ macOS the system's buttons and edges stay. It holds, from the left:
 The **strip** holds:
 
 - A **pad** for each scene, its picture redrawn a few times a second, with its
-  name, its hotkey, and an ON AIR tag on the scene on program. Click a pad to
-  take its scene on air by the show's transition (see
-  [Transitions](#transitions)); taking the scene already on air does nothing.
-  A scene that cannot go on air, of another size or showing the program, has
-  a dimmed pad that says why under the pointer. Right-click a pad to take its
-  scene, mark it the safe scene, rename it, duplicate it, move it left or
+  name, its hotkey, an ON AIR tag on the scene on program, and a NEXT tag on
+  the scene cued or open off air. Click a pad to take its scene on air by the
+  show's transition (see [Transitions](#transitions)), or to cue it in
+  [Studio mode](#off-air-and-studio-mode); clicking the scene already on air
+  leaves nothing cued. A scene that cannot go on air, of another size or
+  showing the program, has a dimmed pad that says why under the pointer.
+  Right-click a pad to take its scene, cue it in Studio mode, **Edit off
+  air**, mark it the safe scene, rename it, duplicate it, move it left or
   right, or remove it. **Duplicate** adds a scene after it showing the same
   sources, linked, so an edit to a source's look shows in both; **Duplicate
   with its own copies** gives each of its layers a copy of its source to edit
   apart (a scene or the program drawn in it stays one picture). A pad ringed
   in red says what just failed on it under the pointer. The last pad, **+**,
-  adds an empty scene without taking it.
+  adds an empty scene without taking it, and the switch after it turns
+  [Studio mode](#off-air-and-studio-mode) on and off.
 - The **panic key**, amber and named for the safe scene: it mutes every
   microphone and every guest (their camera's sound and their screen's), hides
   every always-on-top layer, whatever it shows, in one edit undo takes back,
@@ -178,8 +181,8 @@ The **strip** holds:
 
 | Page | Use it to |
 | --- | --- |
-| LIVE | Watch the program while on air. |
-| BUILD | Edit the scene on program, shown in the middle, with its layers and what can be added on the left and the inspector on the right (see [BUILD](#build)). |
+| LIVE | Watch the program while on air, and TAKE or AUTO a cued scene. |
+| BUILD | Edit the scene on program, or the one open off air, shown in the middle, with its layers and what can be added on the left and the inspector on the right (see [BUILD](#build)). |
 | MIX | Add, rename, reorder, and remove audio scenes, pick the audio scene on program and the one to listen to and on which output, set each sound's gain, pan, mute, and delay, and send each sound and audio scene into audio scenes, with a meter on every one. The program shows small in the strip's place for the sound. |
 | REVIEW | Replay the last moments of the program or a source in a replay source, slowed down if you like, or save them as a clip (see [Replay](#replay)), and start and stop recording and pick the picture and the audio scene it records (see [Recording](#recording)), beside the program. |
 
@@ -198,13 +201,13 @@ edit there succeeds.
 
 ### BUILD
 
-BUILD edits the scene on air as viewers see it: every change is live at once.
-What a scene draws is a stack of **layers**, each placing one source.
+BUILD edits the scene on air as viewers see it: every change is live at once,
+unless a scene is open [off air](#off-air-and-studio-mode). What a scene draws is a stack of **layers**, each placing one source.
 
 **Layers**, on the left, lists them front first in two groups: **Always on
 top**, drawn over every scene on program and staying on through a cut or
 transition (a downstream keyer for a logo or a lower third), and **This
-scene**, the scene on program's own. Each row has an icon for the source's
+scene**, the edited scene's own: the one on program, or the one open off air. Each row has an icon for the source's
 kind, its name, what it shows (and **linked ×3** when three layers show the
 source), and its eye, which shows or hides it. A lock shows on a locked row,
 and on the selected or pointed-at one to lock it. A dot says a source is not
@@ -218,12 +221,12 @@ its own copy), make it independent, copy it, or remove it. **Add a layer**
 (A) turns to Add.
 
 **Add** lists what can be placed: the sources no layer shows, no audio scene
-hears, and nothing reads, each with **Add**, to place it in the scene on
-program, or the bin, to remove it for good; this machine's cameras, displays,
+hears, and nothing reads, each with **Add**, to place it in the edited
+scene, or the bin, to remove it for good; this machine's cameras, displays,
 windows, and audio inputs; any source by hand; and, with a room, guests:
 invite one, show their join link as a QR code in a sheet over the window, see
 who joined, and take a guest out of every scene. A new source with a picture
-is placed in front of the scene on program, and selected.
+is placed in front of the edited scene, and selected.
 
 On the **picture**, click a layer to select it, drag it to move it, and drag
 its edges or corners to resize it (see [Placing layers](#placing-layers)). A
@@ -255,7 +258,7 @@ is named for it, with these sections:
 | Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. Publish it independently (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. |
 
 Its **Animate** tab holds the layer's keyframes (see [Keyframes](#keyframes)).
-With no layer selected, the inspector shows the scene on program: rename it,
+With no layer selected, the inspector shows the edited scene: rename it,
 see its size, mark it **Safe**, switch on **Publish** and pick the audio scene
 it carries (see [Published scenes](#published-scenes)), and pick the show's
 transition and how long it takes, or for a stinger its media source and cut
@@ -264,12 +267,37 @@ it in a transition, cannot be removed, even by an undo, until program cuts
 away from it. In a narrow window, the inspector is a tab beside Layers and
 Add.
 
+### Off air and Studio mode
+
+**Edit off air**, in a pad's menu, opens its scene on BUILD without taking it:
+the frame turns amber and reads OFF AIR, and the program shrinks to a corner
+beside a banner. **Take it live** puts the scene on air by the show's
+transition; **Back to live** goes back to editing the scene on air. Any scene
+opens off air, even one that cannot go on air. One viewers see anyway, still
+leaving program in a transition, published or recorded on its own, or shown
+by a scene they see through a scene source, reads NOT ON PROGRAM instead, and
+the banner says how they see it, since an edit reaches them. Off air, Layers
+lists the scene's own layers alone: the always-on-top ones are drawn on
+program, so editing them, or keeping a layer always on top, waits for **Back
+to live**.
+
+**Studio mode**, off by default, is for an operator running a show: with its
+switch at the end of the scene strip on, a pad or a scene's hotkey cues its
+scene instead of taking it. A NEXT card docks on the program, on LIVE and on
+BUILD, with the cued scene as it will go on air, its keyframes and overlays
+started over. **TAKE** puts it on air at once and **AUTO** by the show's
+transition; **Edit** opens it off air, from where **Back to live** leaves it
+cued; and the close clears the cue. On BUILD the card moves to the opposite
+corner while the selected layer is under it, so it hides neither the layer
+nor its toolbar, even mid-drag. Studio mode is kept per user, with
+the [hotkeys](#hotkeys), not in the scene file.
+
 ### Settings
 
 | Tab | Use it to |
 | --- | --- |
 | Show | Set the canvas size and frame rate and each scene's size, see the broadcast path, whether the program is encoding, the encoder sessions open, and the encoder work of the program, the recording, and each published scene, and turn the virtual camera of the program or of each published scene on. |
-| Hotkeys | Bind keys to the panic key, replay, save a clip, start or stop recording, and take each scene, and clear them (see [Hotkeys](#hotkeys)). |
+| Hotkeys | Bind keys to the panic key, TAKE, AUTO, Studio mode, replay, save a clip, start or stop recording, and take or cue each scene, and clear them (see [Hotkeys](#hotkeys)). |
 | Effects | Pick how the window's [effects](#effects) move. |
 | Advanced | See the sources, scenes, and audio scenes as nodes, wired left to right to what draws or holds them, and wire them there (see [Scene graph](#scene-graph)). |
 
@@ -395,9 +423,9 @@ Keyframes play once, from when the layer's scene goes on program, and hold the
 last keyframe; before the first, the layer holds the first. A cut or transition
 starts them again, while a scene leaving in a transition carries on with its
 own. Press **Play** in the Animate tab to play the scene on program's again
-from now. They are drawn on the program clock, so the stream, a recording, and
-a replay of the program show the same frames. Always-on-top layers have none,
-since they never go on.
+from now, or a scene open off air's in its own picture alone. They are drawn
+on the program clock, so the stream, a recording, and a replay of the program
+show the same frames. Always-on-top layers have none, since they never go on.
 
 Dragging a layer on BUILD grabs it where its keyframes have it and moves
 where it rests, so its whole animation moves with it.
@@ -1268,14 +1296,15 @@ a WebGL page runs slower.
 
 ## Hotkeys
 
-The Hotkeys tab in Settings binds a key to the **Panic** key, **Replay**,
-**Save clip**, starting or stopping a recording, and taking each scene, as its
-pad does. Press **Bind**, then the key with any modifiers; Escape, or leaving
+The Hotkeys tab in Settings binds a key to the **Panic** key, TAKE and AUTO
+for the cued scene, turning [Studio mode](#off-air-and-studio-mode) on or off,
+**Replay**, **Save clip**, starting or stopping a recording, and each scene,
+which its key takes, or cues in Studio mode, as its pad does; the tab says
+which. Press **Bind**, then the key with any modifiers; Escape, or leaving
 the window or the tab, cancels. Every action starts unbound, so no key a game
 uses is taken unasked, and a key bound to one action is refused for another
 until it is cleared there. Replay, Save clip, and a recording use REVIEW's
-picks. A key bound to **Cut** or **Transition**, which have no preview to act
-on, is kept in the settings but neither shown nor fired.
+picks.
 
 The key pressed is the key that fires, wherever it sits, on any keyboard layout
 and after a layout change: the tab names it as the layout printed it when it
@@ -1317,7 +1346,8 @@ published scene, or a recording:
 
 - The program's tally frame glows blue while the studio is connected to a
   relay, the record dot pulses, and each cut or transition, from a pad, the
-  panic key, or a hotkey, bursts on the frame.
+  panic key, or a hotkey, bursts on the frame. Studio mode's TAKE is polished
+  metal that ripples under the pointer.
 - The Hotkeys tab shows each bound key on a dark plastic keycap, the title
   bar, the strip, and BUILD's columns have a faint grain, and first launch
   draws its screen over a soft gradient.

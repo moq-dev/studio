@@ -66,6 +66,10 @@ enum View {
 	/// The LIVE page after a mute, with the health dot's popover open and the
 	/// pointer on undo, which names the mute.
 	Hover,
+	/// A page in Studio mode, with `Interview` cued.
+	Cued(Page),
+	/// A scene, by name, open for editing off air on BUILD.
+	OffAir(&'static str),
 }
 
 /// BUILD with the host's layer, the middle of the scene on program's three,
@@ -126,6 +130,9 @@ views! {
 	/// A window snapped beside a game stacks the picture, the scenes, and the
 	/// sound.
 	live_compact: Still, Open::Studio { view: View::Page(Page::Live), size: HALF, show: "show.toml" };
+	/// Studio mode: the cued scene's pad turns amber, and NEXT docks on the
+	/// live picture with TAKE and AUTO.
+	live_studio: Still, studio(View::Cued(Page::Live));
 	/// BUILD with the host's layer selected: its row in Layers, its handles
 	/// and toolbar on the picture, and its inspector.
 	build: Still, studio(BUILD);
@@ -141,6 +148,17 @@ views! {
 	/// BUILD in a window snapped beside a game: the inspector is a tab beside
 	/// Layers and Add.
 	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml" };
+	/// BUILD in Studio mode edits the scene on air, with NEXT docked on it.
+	build_studio: Still, studio(View::Cued(Page::Build));
+	/// A scene open off air: the frame turns amber, and the live picture
+	/// shrinks to a corner beside the banner that takes it live or goes back.
+	/// Layers lists the scene's own, as always on top is drawn on program.
+	build_off_air: Still, studio(View::OffAir("Break"));
+	/// A scene that cannot go on air opens off air too, its Take it live
+	/// dimmed, saying why under the pointer.
+	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
+	/// Too narrow for the banner beside the live picture, it goes under it.
+	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml" };
 	/// MIX holds the mixer, and a small live picture in the sound's place.
 	mix: Still, studio(View::Page(Page::Mix));
 	/// MIX in a stacked window, its live picture as tall as the sound's slot
@@ -425,6 +443,82 @@ fn a_layer_menu_edits_its_layer() {
 	quit(&engine, &runtime);
 }
 
+/// Studio mode, driven as a person does: its switch turns it on, a pad then
+/// cues its scene rather than taking it, and TAKE puts it on air. NEXT's Edit
+/// opens the cued scene off air on BUILD, Back to live keeps it cued, and
+/// the card's close clears it. Off again, a pad's menu opens a scene off air,
+/// whose own layers BUILD lists and selects, and the banner's Take it live
+/// takes it, keeping the selection on the scene now live. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn studio_mode_cues_and_takes() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(start(launch(&gpu), &runtime), &gpu, &runtime, SIZE);
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	// The scene on program, and the one cued.
+	let staged = || {
+		let state = engine.state.lock().unwrap();
+		let program = state.compositor.program_scene().map(str::to_string);
+		(program, state.cued().map(str::to_string))
+	};
+	let scenes = |program: &str, cued: Option<&str>| (Some(program.to_string()), cued.map(str::to_string));
+	let selected = |harness: &mut Harness<'_, Window>| {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!()
+		};
+		studio.selected()
+	};
+	assert_eq!(staged(), scenes("Main", None));
+
+	harness.get_by_label("Studio mode").click();
+	harness.run_steps(2);
+	harness.get_by_label("Interview").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Main", Some("Interview")), "the pad cued its scene");
+	harness.get_by_label("TAKE").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", None), "TAKE put it on air");
+
+	harness.get_by_label("Main").click();
+	harness.run_steps(2);
+	harness.get_by_label("Edit").click();
+	harness.run_steps(2);
+	harness.get_by_label("Back to live").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", Some("Main")), "Studio mode keeps it cued");
+	harness.get_by_label("Clear the cue").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", None));
+
+	harness.get_by_label("Studio mode").click();
+	harness.run_steps(2);
+	harness.get_by_label("Main").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Edit off air").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", Some("Main")), "open off air, not taken");
+	// BUILD lists the layers of the scene open off air, and
+	// leaves always on top to the program.
+	harness.get_by_label_contains("Always on top is drawn on program");
+	harness.get_all_by_label("bar").next().unwrap().click();
+	harness.run_steps(2);
+	assert!(selected(&mut harness), "the click selected Main's bar off air");
+	harness.get_by_label("Take it live").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Main", None), "taken live");
+	assert!(selected(&mut harness), "the bar stays selected, its scene now live");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// Draw what `open` opens on a fresh engine, from a scene file in `shows`.
 fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, shows: &Path) -> image::RgbaImage {
 	if let &Open::Kit { sheet } = open {
@@ -463,6 +557,12 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Setting(setting) => studio.open(*setting),
 		View::Health => studio.details(),
 		View::Hover | View::History => {}
+		View::Cued(page) => {
+			studio.studio_mode(true);
+			studio.cue("Interview");
+			studio.turn(*page);
+		}
+		View::OffAir(scene) => studio.edit_off_air(scene),
 	}
 	let engine = started.get().expect("the studio started").clone();
 	runtime

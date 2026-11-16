@@ -24,7 +24,3 @@ It is the operator's view a broadcast studio expects beside Studio mode.
   [the privacy shield](/quest/m1/privacy-shield.md) keeps it out of capture.
 
 Human check: on a real second monitor, at a distance.
-
-## Required
-
-- [Editing off air, and Studio mode](/quest/m0/ux/studio-mode.md) - cue, take, and the amber and accent it shows

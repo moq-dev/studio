@@ -1,6 +1,9 @@
-//! The BUILD page: the live picture, edited where it shows, with the scene's
-//! layers on the left and the selected layer's inspector on the right.
+//! The BUILD page: the live picture, or a scene open off air, edited where
+//! it shows, with the scene's layers on the left and the selected layer's
+//! inspector on the right.
 
+use super::cue::Corner;
+use super::shell::Snapshot;
 use super::*;
 
 /// The inspector's width, and the layers' column's.
@@ -9,11 +12,16 @@ const SIDE: std::ops::RangeInclusive<f32> = 260.0..=320.0;
 /// Room between the selected layer and its toolbar.
 const TOOLBAR_GAP: f32 = 8.0;
 
+/// Why nothing goes always on top, or comes off it, while a scene is open
+/// off air.
+pub(super) const OFF_AIR_TOP: &str = "Always on top is drawn on program; go back to live to change it";
+
 impl Panels {
-	/// The BUILD page: the layers and Add on the left, the live picture in
-	/// the middle, and the inspector on the right, or among the left's tabs
-	/// when the window is narrow.
-	pub(super) fn build(&mut self, ui: &mut Ui, fx: &mut Fx, stage: egui::Rect, shape: f32) {
+	/// The BUILD page: the layers and Add on the left, the live picture, or
+	/// the scene open off air under its banner, in the middle, and the
+	/// inspector on the right, or among the left's tabs when the window is
+	/// narrow.
+	pub(super) fn build(&mut self, ui: &mut Ui, fx: &mut Fx, stage: egui::Rect, snapshot: &Snapshot) {
 		let side = (stage.width() * 0.22).clamp(*SIDE.start(), *SIDE.end());
 		let wide = stage.width() >= side * 2.0 + 360.0;
 		let left = stage.with_max_x(stage.left() + side);
@@ -33,8 +41,13 @@ impl Panels {
 			self.inspector(ui, right);
 		}
 		kit::wash(ui.painter(), middle);
-		let room = middle.shrink(28.0);
-		self.stage(ui, fx, super::layout::fit(room, shape));
+		let mut room = middle.shrink(28.0);
+		let mut shape = snapshot.shape;
+		if let Some(cued) = snapshot.cued.as_ref().filter(|cued| cued.off_air) {
+			room.min.y = self.off_air_header(ui, cued, room, snapshot.shape);
+			shape = cued.shape();
+		}
+		self.stage(ui, fx, snapshot, super::layout::fit(room, shape));
 		self.build_keys(ui);
 	}
 
@@ -61,19 +74,38 @@ impl Panels {
 		}
 	}
 
-	/// The live picture at `at`: a click selects the layer under it, a drag
-	/// moves, resizes, or crops it, and a right click offers what applies
-	/// there. While interacting, the pointer and keyboard pass to the
-	/// selected layer's web page instead, until Escape.
-	fn stage(&mut self, ui: &mut Ui, fx: &mut Fx, at: egui::Rect) {
+	/// The live picture at `at`, or the scene open off air: a click selects
+	/// the layer under it, a drag moves, resizes, or crops it, and a right
+	/// click offers what applies there. While interacting, the pointer and
+	/// keyboard pass to the selected layer's web page instead, until Escape.
+	/// The NEXT card docks on the live picture while a scene is cued.
+	fn stage(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot, at: egui::Rect) {
 		self.staged = true;
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		let canvas = self.program_drawn;
-		// It is the live picture, so the accent frame stays while editing it.
-		let frame = TallyFrame::new(Tally::Air).tag("On air");
-		let id = self.program.id;
+		// Decided under this lock, as the edits below are, so the picture
+		// shown is the one they edit even if a key took a scene since the
+		// snapshot.
+		let off_air = self.off_air(&state).map(|cued| {
+			let collection = state.collection();
+			let canvas = collection.canvas(Some(cued)).unwrap_or(collection.canvas);
+			// Viewers may see it anyway, such as a published scene.
+			let tag = match state.seen(cued) {
+				Some(_) => "Not on program",
+				None => "Off air",
+			};
+			(canvas, tag)
+		});
+		let (canvas, id, frame) = match off_air {
+			Some((canvas, tag)) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag(tag)),
+			// It is the live picture, so the accent frame stays while editing it.
+			None => (
+				self.program_drawn,
+				self.program.id,
+				TallyFrame::new(Tally::Air).tag("On air"),
+			),
+		};
 		let builder = egui::UiBuilder::new().max_rect(at.expand(10.0));
 		if self.interacting {
 			let page = self.interacted(&state);
@@ -85,8 +117,8 @@ impl Panels {
 					})
 					.inner
 					.rect;
-				let since = state.compositor.program_since();
-				let scene = state.compositor.program_scene().map(|scene| (scene, since));
+				let (scene, since) = self.edited_since(&state);
+				let scene = scene.map(|scene| (scene, since));
 				self.rebind(&state.sources);
 				// `interacted` found the page through the selection, so one is.
 				let picked = self.selection.clone().expect("interacting with the selected layer");
@@ -114,9 +146,23 @@ impl Panels {
 			Some(acted) => acted,
 			None => (spot, result),
 		};
+		// Docked on the live picture, away from the selected layer and its
+		// toolbar, which a drag moves with it.
+		let (width, height) = (canvas.width.max(1) as f32, canvas.height.max(1) as f32);
+		let selected = self.shown(&state).into_iter().find_map(|(picked, item)| {
+			(Some(&picked) == self.selection.as_ref()).then(|| {
+				[
+					(item.rect.x + item.rect.width / 2.0) / width,
+					(item.rect.y + item.rect.height / 2.0) / height,
+				]
+			})
+		});
 		drop(state);
 		if let Some(spot) = spot {
 			self.fail(spot, result);
+		}
+		if let Some(cued) = snapshot.cued.as_ref().filter(|_| off_air.is_none()) {
+			self.next(ui, fx, cued, response.rect, Corner::away_from(selected));
 		}
 	}
 
@@ -127,8 +173,8 @@ impl Panels {
 		let collection = state.collection();
 		let item = picked.item(collection).filter(|item| item.visible)?;
 		let shown = match &picked.layer.scene {
-			Some(scene) => state.compositor.program_scene() == Some(scene.as_str()),
-			None => true,
+			Some(scene) => self.edited(state) == Some(scene.as_str()),
+			None => self.off_air(state).is_none(),
 		};
 		let page = collection.capture(&item.source);
 		let web = matches!(collection.sources.get(page), Some(Source::Browser { .. }));
@@ -142,12 +188,14 @@ impl Panels {
 		deliver(&state.sources, self.interact.release());
 	}
 
-	/// The layers the picture shows, front last, each with its place: the
-	/// scene on program's, then the always-on-top ones over it.
+	/// The layers the picture edits, front last, each with its place: the
+	/// scene's, then the always-on-top ones over it, unless the scene is open
+	/// off air, as they are drawn on program.
 	fn shown(&self, state: &State) -> Vec<(Picked, Item)> {
-		let since = state.compositor.program_since();
+		let (_, since) = self.edited_since(state);
 		let collection = state.collection();
-		let layers = self.scene(state).ok().into_iter().chain([Layer::top()]);
+		let top = self.off_air(state).is_none().then(Layer::top);
+		let layers = self.scene(state).ok().into_iter().chain(top);
 		layers
 			.flat_map(|layer| {
 				let items = collection.items(&layer).unwrap_or_default();
@@ -239,7 +287,8 @@ impl Panels {
 
 		let mut spot = None;
 		let mut result = Ok(());
-		let since = state.compositor.program_since();
+		let (scene, since) = self.edited_since(state);
+		let scene = scene.map(str::to_string);
 		if let Some(drag) = &mut self.drag
 			&& let Some(pos) = response.interact_pointer_pos()
 		{
@@ -272,7 +321,7 @@ impl Panels {
 								height: shown.height - rest.height,
 							},
 						};
-						let others = others(state, &drag.picked, since);
+						let others = others(state, scene.as_deref(), &drag.picked, since);
 						snap.apply(drag.grab, rect, &others, &canvas)
 					});
 					let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
@@ -423,6 +472,7 @@ impl Panels {
 	) -> Option<(Option<Spot>, anyhow::Result<()>)> {
 		let view = View::new(response.rect, canvas);
 		let shown = self.shown(state);
+		let off_air = self.off_air(state).is_some();
 		let selected = shown
 			.iter()
 			.find(|(picked, item)| Some(picked) == self.selection.as_ref() && item.visible);
@@ -430,13 +480,13 @@ impl Panels {
 		if let Some((picked, item)) = selected
 			&& self.drag.is_none()
 			&& response.rect.is_positive()
-			&& let Some(menu) = Menu::of(state, picked)
+			&& let Some(menu) = Menu::of(state, picked, off_air)
 		{
 			let at = view.screen(&item.rect).intersect(response.rect);
 			let cropping = self.cropping;
 			action = toolbar(ui, response.rect, at, &menu, cropping);
 		}
-		let context = Menu::of_selected(state, self.selection.as_ref(), &shown);
+		let context = Menu::of_selected(state, self.selection.as_ref(), &shown, off_air);
 		let mut picture = None;
 		response.context_menu(|ui| match &context {
 			Some(menu) => {
@@ -580,6 +630,7 @@ impl Panels {
 				}
 				result
 			}
+			LayerAction::Top(_) if self.off_air(state).is_some() => Err(anyhow::anyhow!(OFF_AIR_TOP)),
 			LayerAction::Top(top) => {
 				let to = match top {
 					true => Layer::top(),
@@ -725,11 +776,14 @@ pub(super) struct Menu {
 	cut: Option<bool>,
 	/// How many lists of layers show its source.
 	linked: usize,
+	/// Whether its scene is open off air, where nothing goes always on top,
+	/// as that is drawn on program.
+	off_air: bool,
 }
 
 impl Menu {
-	/// What `picked` offers, if it is still there.
-	pub(super) fn of(state: &State, picked: &Picked) -> Option<Self> {
+	/// What `picked` offers, if it is still there, `off_air` or not.
+	pub(super) fn of(state: &State, picked: &Picked, off_air: bool) -> Option<Self> {
 		let collection = state.collection();
 		let item = picked.item(collection)?.clone();
 		let capture = collection.sources.get(collection.capture(&item.source));
@@ -745,14 +799,15 @@ impl Menu {
 			web: matches!(capture, Some(Source::Browser { .. })),
 			cut,
 			linked: shown_in(collection, &item.source).len(),
+			off_air,
 			item,
 		})
 	}
 
 	/// What the selected layer offers, if it is shown on the picture.
-	fn of_selected(state: &State, selection: Option<&Picked>, shown: &[(Picked, Item)]) -> Option<Self> {
+	fn of_selected(state: &State, selection: Option<&Picked>, shown: &[(Picked, Item)], off_air: bool) -> Option<Self> {
 		let picked = selection.filter(|picked| shown.iter().any(|(shown, _)| shown == *picked))?;
-		Self::of(state, picked)
+		Self::of(state, picked, off_air)
 	}
 }
 
@@ -803,7 +858,11 @@ pub(super) fn layer_menu(ui: &mut Ui, menu: &Menu) -> Option<LayerAction> {
 		true => "Show it in the scene on program alone, under the always-on-top layers",
 		false => "Draw it over every scene on program, through every cut; it loses its keyframes",
 	};
-	if ui.button(top).on_hover_text(hover).clicked() {
+	let button = ui
+		.add_enabled(!menu.off_air, egui::Button::new(top))
+		.on_hover_text(hover)
+		.on_disabled_hover_text(OFF_AIR_TOP);
+	if button.clicked() {
 		action = Some(LayerAction::Top(!menu.top));
 	}
 	ui.separator();

@@ -3,7 +3,7 @@
 
 use egui::{Align2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
-use super::build::{LayerAction, Menu, layer_menu, shown_in};
+use super::build::{LayerAction, Menu, OFF_AIR_TOP, layer_menu, shown_in};
 use super::*;
 
 /// A layer row's height.
@@ -38,8 +38,9 @@ impl Panels {
 		});
 	}
 
-	/// The layers of the scene on program and the always-on-top ones over
-	/// it, front first, with Add a layer under them.
+	/// The layers of the scene BUILD edits and the always-on-top ones over
+	/// it, front first, with Add a layer under them. A scene open off air
+	/// has only its own, as the always-on-top ones are drawn on program.
 	fn layers(&mut self, ui: &mut Ui) {
 		let footer = 40.0;
 		let list = ui
@@ -56,7 +57,14 @@ impl Panels {
 				.show(ui, |ui| {
 					ui.spacing_mut().item_spacing.y = 0.0;
 					let groups = [(Layer::top(), "Always on top"), (Layer::scene(""), "This scene")];
+					let off_air = self.off_air(&state).is_some();
 					for (layer, caption) in groups {
+						if off_air && layer.scene.is_none() {
+							caption_row(ui, caption);
+							ui.label(egui::RichText::new(OFF_AIR_TOP).color(kit::DIM));
+							ui.add_space(8.0);
+							continue;
+						}
 						let layer = match layer.scene {
 							None => layer,
 							Some(_) => match self.scene(&state) {
@@ -135,7 +143,7 @@ impl Panels {
 			if response.drag_started() {
 				self.moving = Some(index);
 			}
-			if let Some(menu) = Menu::of(state, &picked) {
+			if let Some(menu) = Menu::of(state, &picked, self.off_air(state).is_some()) {
 				response.context_menu(|ui| {
 					if let Some(chosen) = layer_menu(ui, &menu) {
 						action = Some((picked.clone(), chosen));
