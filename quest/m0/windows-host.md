@@ -33,7 +33,7 @@ The host, as found on 2026-11-10:
 No real microphone is needed: VB-Audio's `CABLE Output` is a WASAPI capture
 endpoint like a USB microphone's, so playing a tone into `CABLE Input` drives
 the same capture path [Studio on Windows](/quest/m0/app-windows.md) runs, with
-a known signal to check. A camera has no such stand-in (see Waiting).
+a known signal to check. A camera has no such stand-in.
 
 There is no Nix dev shell, so agents here run cargo and `just` natively;
 `just check` steps that call Nix tools cannot run.
@@ -49,27 +49,22 @@ every build error on the host (rejected: handing errors CI also shows to the
 CI build quest, which would make that quest this one's prerequisite; merging
 that split as is).
 
+Found 2026-11-15 (maintainer, /quest-complete): the `windows` PC is dead (it
+kept crash looping), so the host above no longer exists and the two earlier
+Waiting items (free 4 GiB for the gate; plug in a USB camera) no longer apply.
+The quest needs a new Windows host; the maintainer has not picked one. The
+Goal and host notes above describe the dead PC and stay until `/quest-plan`
+replans this quest around the new host.
+
 ## Hosts
 
 - windows - the work is setting up this host
 
 ## Waiting
 
-- Maintainer: leave 4 GiB of memory available on `windows` while an agent
-  builds there. `quest gate` admits a build only once available memory
-  reaches min(4 GiB, RAM/4), and with the desktop apps running (OneDrive's
-  sync service alone held 3 GB) the PC sat at 2.6 to 3.1 GB available for two
-  hours on 2026-11-10, so the build never started. An agent cannot close the
-  maintainer's apps, and building outside the gate is against the repo's
-  rules. Options: quit OneDrive, ChatGPT, and Discord during agent runs, or add
-  RAM (recommended: add RAM, since 16 GB leaves a linker little room beside a
-  desktop). Check: `(Get-Counter '\Memory\Available MBytes').CounterSamples`
-  reads above 4096.
-- Maintainer: plug a USB camera into `windows`. It has none, and Media
-  Foundation's camera source, the path [Studio on Windows](/quest/m0/app-windows.md)
-  runs, needs a device; no virtual camera ships with Windows. An agent could
-  register a Media Foundation virtual camera (`MFCreateVirtualCamera`) only
-  with a media source of its own, which is
-  [the Windows virtual camera](/quest/m0/vcam/windows.md)'s deliverable and
-  not built yet; a USB camera also covers the formats real hardware sends.
-  Check: the studio's Devices panel lists a camera.
+- Maintainer: pick a new Windows host and replan this quest with
+  `/quest-plan`. Options: a cloud or GitHub-hosted Windows machine, a Windows
+  VM on another host, or new hardware. Not picked here: the maintainer
+  chooses in `/quest-plan`. Check: an agent on the new host builds
+  `moq-studio --features capture` and the studio's Devices panel lists a
+  camera and a microphone.
