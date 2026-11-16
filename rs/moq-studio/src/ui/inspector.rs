@@ -46,7 +46,7 @@ impl Panels {
 			let collection = state.collection();
 			let layer = self.selection.as_ref().and_then(|picked| picked.item(collection));
 			let layer = layer.map(|item| item.source.clone());
-			(layer, state.compositor.program_scene().map(str::to_string))
+			(layer, self.edited(&state).map(str::to_string))
 		};
 		let Some(name) = layer else {
 			let name = scene.unwrap_or_else(|| "Scene".into());
@@ -572,14 +572,14 @@ impl Panels {
 		Some((next, label, gesture))
 	}
 
-	/// The scene on program's own settings, with no layer selected: its
+	/// The settings of the scene BUILD edits, with no layer selected: its
 	/// name, whether it is safe or published, and how every scene goes on air.
 	fn scene_inspector(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
 		let collection = state.collection();
-		let program = state.compositor.program_scene().map(str::to_string);
+		let program = self.edited(&state).map(str::to_string);
 		let found = program
 			.as_deref()
 			.and_then(|name| collection.scenes.iter().position(|scene| scene.name == name));
@@ -833,13 +833,15 @@ impl Panels {
 		let spot = Spot::Layer(layer.clone(), item.source.clone());
 		let what = format!("`{}`", item.source);
 		let mut play = false;
+		// Play replays a scene open off air in its own picture, never on air.
+		let replays = match self.off_air(&state) {
+			Some(_) => "Play the keyframes of the scene open off air again from the start, in its own picture only",
+			None => "Play the keyframes of the scene on air again from the start, on air",
+		};
 		ui.horizontal(|ui| {
 			ui.strong(format!("Keyframes of {what}"));
 			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-				play = ui
-					.add(kit::button(Icon::Play, "Play"))
-					.on_hover_text("Play the keyframes of the scene on air again from the start, on air")
-					.clicked();
+				play = ui.add(kit::button(Icon::Play, "Play")).on_hover_text(replays).clicked();
 			});
 		});
 		ui.label(
@@ -977,7 +979,11 @@ impl Panels {
 		}
 
 		if play {
-			state.compositor.set_program_start(kio::clock::now());
+			match self.off_air(&state).map(str::to_string) {
+				// Replayed where it is drawn, never on program.
+				Some(cued) => state.compositor.set_preview(Some(cued)),
+				None => state.compositor.set_program_start(kio::clock::now()),
+			}
 		}
 		let Some((label, gesture)) = action else { return };
 		let result = edit(&mut state, label, gesture, |draft| {

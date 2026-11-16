@@ -252,9 +252,11 @@ impl Panels {
 
 		let mut bind = None;
 		let mut clear = None;
+		// A scene's key takes it, or cues it in Studio mode.
+		let studio = self.controls.studio();
 		egui::Grid::new("hotkeys").striped(true).show(ui, |ui| {
 			for action in &actions {
-				ui.label(action.to_string());
+				ui.label(action.name(studio));
 				let bound = bindings.get(action);
 				if self.binding.as_ref() == Some(action) {
 					ui.strong("press a key, or Escape");
