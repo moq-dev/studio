@@ -59,7 +59,13 @@ impl Opener {
 		let launch = Launch {
 			gpu: self.gpu.clone(),
 			recordings: stream.recordings(&path),
-			room,
+			room: room.clone(),
+		};
+		// The room's session, which the engine ends as it stops.
+		let renew = |renewal: Option<guests::Renewal>| {
+			if let (Some(room), Some(renewal)) = (&room, renewal) {
+				room.start_renewal(renewal, &self.runtime);
+			}
 		};
 		let exists = path
 			.try_exists()
@@ -67,9 +73,7 @@ impl Opener {
 		if exists {
 			let (autosave, loaded) = Autosave::open(path)?;
 			let engine = Engine::start(launch, autosave, loaded).await?;
-			if let Some(renewal) = renewal {
-				self.runtime.spawn(renewal.run());
-			}
+			renew(renewal);
 			return Ok(Opened::Studio(engine, stream));
 		}
 		// The relay setup measures the uplink to, with its token, read off
@@ -95,9 +99,7 @@ impl Opener {
 			}
 		};
 		let setup = setup::Setup::new(launch, uplink, path, self.runtime.clone())?;
-		if let Some(renewal) = renewal {
-			self.runtime.spawn(renewal.run());
-		}
+		renew(renewal);
 		Ok(Opened::Setup(Box::new(setup), stream))
 	}
 }

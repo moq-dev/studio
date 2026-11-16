@@ -24,6 +24,14 @@ pub struct Native {
 	layout: super::layout::Foreground,
 }
 
+impl Drop for Native {
+	/// The manager unregisters the keys as it drops; this lets go of the
+	/// handler, which holds the channel firing them.
+	fn drop(&mut self) {
+		GlobalHotKeyEvent::set_event_handler(None::<fn(GlobalHotKeyEvent)>);
+	}
+}
+
 impl Native {
 	/// Hear registered keys from now on, sending each pressed to `fire`.
 	/// On Windows, `ctx` is woken when the foreground window's layout

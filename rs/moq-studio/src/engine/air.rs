@@ -301,7 +301,7 @@ impl Engine {
 				Slot::Live(_) => anyhow::bail!("already live"),
 				Slot::Ending => anyhow::bail!("the last stream is still ending"),
 			}
-			anyhow::ensure!(!self.stopped.load(Ordering::Relaxed), "the studio is quitting");
+			anyhow::ensure!(!*self.stopped.borrow(), "the studio is quitting");
 			self.set_air(&mut slot, Slot::Starting);
 		}
 		let lifted = self.lift(destination).await;

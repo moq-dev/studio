@@ -243,6 +243,7 @@ impl Studio {
 			message: None,
 			faults: Vec::new(),
 			reloads: 0,
+			closing: false,
 			levels: Levels::default(),
 			graph: graph::View::default(),
 			review,
@@ -251,6 +252,38 @@ impl Studio {
 			panels.report(Err(anyhow::anyhow!(dropped_message(dropped))));
 		}
 		Self { panels }
+	}
+}
+
+impl Studio {
+	/// The show's engine.
+	pub fn engine(&self) -> &Arc<Engine> {
+		&self.panels.engine
+	}
+
+	/// Whether Close show was clicked since this last said so, which the
+	/// window then answers by closing the show, or [`refuse`](Self::refuse).
+	pub fn closing(&mut self) -> bool {
+		std::mem::take(&mut self.panels.closing)
+	}
+
+	/// Say why the show stays open.
+	pub fn refuse(&mut self, err: anyhow::Error) {
+		self.panels.report(Err(err));
+	}
+
+	/// Give back what the studio registered with the window: the program, the
+	/// preview, and each thumbnail, whose compositor textures they would
+	/// otherwise keep alive.
+	pub fn release(self, render: &eframe::egui_wgpu::RenderState) {
+		let panels = self.panels;
+		let mut renderer = render.renderer.write();
+		for registered in [&panels.program, &panels.preview]
+			.into_iter()
+			.chain(panels.thumbnails.values())
+		{
+			renderer.free_texture(&registered.id);
+		}
 	}
 }
 
@@ -591,6 +624,8 @@ struct Panels {
 	faults: Vec<Fault>,
 	/// The engine's reloads seen so far.
 	reloads: u64,
+	/// Whether Close show was clicked, until the window has closed the show.
+	closing: bool,
 	/// Each sound's and audio scene's recent levels, for the meters.
 	levels: Levels,
 	graph: graph::View,

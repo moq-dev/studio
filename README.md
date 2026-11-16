@@ -92,14 +92,15 @@ cargo run --release -p moq-studio --features capture,openh264
 
 ## Your shows
 
-Opened with no show, the window lists the shows you have opened, the latest
-first, each with the last picture of its program, its shape, and when it was
-last live and for how long. Click one to pick up where it ended; nothing goes
+Opened with no show, or after **Close show**, the window lists the shows you
+have opened, the latest first, each with the last picture of its program, its
+shape, and when it was last live and for how long. Click one to pick up where it ended; nothing goes
 live until you say so. **New show** asks where to keep a new show's file and
 starts [guided setup](#first-launch) there, and **Open a show file** opens
 any other. Right-click a show to forget it; one whose file has moved says so.
 The list and the pictures are yours, kept with the app's settings rather than
-beside any show, and a show's picture is saved as the window closes.
+beside any show, and a show's picture is saved as the window closes or the
+show does.
 
 ## First launch
 
@@ -141,8 +142,8 @@ BUILD page, its canvas in Settings, and where it streams in Settings, Stream.
 The health dot shows how the uplink holds up once you are live.
 
 Your shows and setup sit in the desktop's own window frame, and the studio
-then draws its own (see [The window](#the-window)). On macOS the system's title bar stays
-until the next launch.
+then draws its own (see [The window](#the-window)); closing the show brings the
+desktop's back. On macOS the system's title bar stays until the next launch.
 
 ## The window
 
@@ -162,7 +163,12 @@ double-click it to maximize, and drag the window's edges to resize it. On
 macOS the system's buttons and edges stay. It holds, from the left:
 
 - The show's name. Its menu has the scene file's path, **Reload the scene
-  file**, **Copy the selected layer**, and **Paste**.
+  file**, **Copy the selected layer**, **Paste**, and **Close show**, which
+  ends the show as quitting does (saving it, finishing a recording, and
+  letting go of its relays, sources, and keys) and returns the window to [your
+  shows](#your-shows). It is dimmed while the stream is on air or going on or
+  off: end the stream first. A close that cannot save the show, because the
+  scene file changed outside the studio, stays open and says so.
 - Undo and redo, each naming under the pointer the edit it would step, and
   the history (the clock), which lists every edit, newest first: pick one to
   undo or redo back to just after it.

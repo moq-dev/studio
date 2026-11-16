@@ -188,6 +188,8 @@ pub struct Room {
 	session: OnceLock<moq_tokio::connection::Monitor>,
 	/// What that session publishes, once it dials.
 	origin: OnceLock<moq_net::origin::Producer>,
+	/// The task running [`Renewal`], until the studio stops.
+	renewing: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 /// One guest the studio knows of.
@@ -284,6 +286,7 @@ impl Room {
 			changed: Default::default(),
 			session: Default::default(),
 			origin: Default::default(),
+			renewing: Mutex::default(),
 		};
 		// Sign once now, so a key that cannot sign for guests or for the studio's
 		// own session fails at startup.
@@ -432,6 +435,19 @@ impl Room {
 	/// A receiver that sees each change to who is renewed.
 	pub fn changes(&self) -> tokio::sync::watch::Receiver<()> {
 		self.changed.subscribe()
+	}
+
+	/// Run `renewal` on `runtime` until [`end_renewal`](Self::end_renewal).
+	pub fn start_renewal(&self, renewal: Renewal, runtime: &tokio::runtime::Handle) {
+		let task = runtime.spawn(renewal.run());
+		*self.renewing.lock().unwrap() = Some(task.abort_handle());
+	}
+
+	/// End the renewals, and the studio's session in the room with them.
+	pub fn end_renewal(&self) {
+		if let Some(task) = self.renewing.lock().unwrap().take() {
+			task.abort();
+		}
 	}
 
 	/// What the studio's session in the room publishes, once it dials.
@@ -774,7 +790,7 @@ impl Renewal {
 	/// Publish a token to each guest as they join, and renew every token, the
 	/// session's own included, every half `--guest-expiry`, for as long as the
 	/// studio runs.
-	pub async fn run(mut self) {
+	async fn run(mut self) {
 		let room = self.renewals.room.clone();
 		let period = room.expiry / 2;
 		let mut renew = kio::clock::interval_at(kio::clock::now().saturating_add(period), period);

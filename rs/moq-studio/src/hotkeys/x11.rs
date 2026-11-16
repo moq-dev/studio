@@ -3,6 +3,7 @@
 //! change moves none.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Context;
@@ -11,7 +12,7 @@ use winit::platform::scancode::PhysicalKeyExtScancode;
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
 use x11rb::protocol::xkb::{self, ConnectionExt as _};
-use x11rb::protocol::xproto::{ConnectionExt as _, GrabMode, ModMask, Window};
+use x11rb::protocol::xproto::{ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, ModMask, Window, WindowClass};
 use x11rb::protocol::{ErrorKind, Event};
 use x11rb::rust_connection::RustConnection;
 
@@ -26,11 +27,15 @@ pub struct X11 {
 	root: Window,
 	/// The binding each grabbed key fires, which the thread hearing them reads.
 	grabbed: Arc<Mutex<HashMap<Grab, Binding>>>,
+	/// A window of ours that nothing sees, whose destruction wakes the thread
+	/// to end.
+	wake: Window,
+	ending: Arc<AtomicBool>,
 }
 
 impl X11 {
 	/// Hear grabbed keys from now on, sending each pressed to `fire`, from a
-	/// thread that waits on the X server for as long as the studio runs.
+	/// thread that waits on the X server until this is dropped.
 	pub fn new(fire: mpsc::Sender<Binding>) -> anyhow::Result<Self> {
 		let (conn, screen) = x11rb::connect(None).context("cannot reach the X server")?;
 		let xkb = conn.xkb_use_extension(1, 0)?.reply()?;
@@ -49,7 +54,23 @@ impl X11 {
 		let root = conn.setup().roots[screen].root;
 		let conn = Arc::new(conn);
 		let grabbed: Arc<Mutex<HashMap<Grab, Binding>>> = Arc::default();
-		let (waiting, reading) = (conn.clone(), grabbed.clone());
+		let wake = conn.generate_id()?;
+		conn.create_window(
+			x11rb::COPY_DEPTH_FROM_PARENT,
+			wake,
+			root,
+			0,
+			0,
+			1,
+			1,
+			0,
+			WindowClass::INPUT_ONLY,
+			x11rb::COPY_FROM_PARENT,
+			&CreateWindowAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+		)?
+		.check()?;
+		let ending = Arc::new(AtomicBool::new(false));
+		let (waiting, reading, stop) = (conn.clone(), grabbed.clone(), ending.clone());
 		std::thread::spawn(move || {
 			let mut held = HashSet::new();
 			loop {
@@ -60,6 +81,9 @@ impl X11 {
 						return;
 					}
 				};
+				if stop.load(Ordering::Relaxed) {
+					return;
+				}
 				match event {
 					Event::KeyPress(press) => {
 						if !held.insert(press.detail) {
@@ -77,7 +101,13 @@ impl X11 {
 				}
 			}
 		});
-		Ok(Self { conn, root, grabbed })
+		Ok(Self {
+			conn,
+			root,
+			grabbed,
+			wake,
+			ending,
+		})
 	}
 
 	/// Grab `keys` in place of the keys grabbed now, returning why the X
@@ -141,6 +171,21 @@ impl X11 {
 			if let Ok(cookie) = self.conn.ungrab_key(keycode, self.root, held | *lock) {
 				cookie.ignore_error();
 			}
+		}
+	}
+}
+
+impl Drop for X11 {
+	/// Let go of every key and end the thread, so a closed show's keys fire
+	/// nothing, and the connection closes with it.
+	fn drop(&mut self) {
+		self.ending.store(true, Ordering::Relaxed);
+		// Its destruction is an event for the thread, which sees it is ending.
+		if let Ok(cookie) = self.conn.destroy_window(self.wake) {
+			cookie.ignore_error();
+		}
+		if let Err(err) = self.conn.flush() {
+			tracing::warn!(error = %err, "cannot reach the X server");
 		}
 	}
 }
