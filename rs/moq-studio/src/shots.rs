@@ -8,8 +8,8 @@
 //! clicking as a person does, and draws nothing.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use eframe::egui_wgpu;
@@ -68,6 +68,11 @@ enum View {
 	Menu,
 	/// The edit history, under the title bar's undo, after an edit.
 	History,
+	/// The show's menu, open from the title bar.
+	ShowMenu,
+	/// On air, the show's menu with Close show dimmed, saying why under the
+	/// pointer.
+	ShowMenuLive,
 	/// Settings, at a tab.
 	Setting(Setting),
 	/// The stream's health in detail.
@@ -234,6 +239,11 @@ views! {
 	advanced: Still, studio(View::Setting(Setting::Advanced));
 	/// The edit history, open under undo.
 	history: Still, studio(View::History);
+	/// The show's menu: its file, Reload, Copy, Paste, and Close show, which
+	/// returns to the library.
+	show_menu: Still, studio(View::ShowMenu);
+	/// On air, Close show is dimmed, and says to end the stream first.
+	show_menu_live: Live, relayed(View::ShowMenuLive);
 	health: Still, studio(View::Health);
 	/// Settings' Show tab, with the encoders' timings.
 	output: Live, studio(View::Setting(Setting::Show));
@@ -456,6 +466,88 @@ fn a_click_takes_and_the_panic_key_cuts() {
 		"the window counts the close as asked for"
 	);
 
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// Close show, in the show's menu, waits for the stream to end, and then ends
+/// the show as quitting does and returns to the library, where the show is
+/// listed with its picture and opens again, a new engine in place of the old,
+/// which nothing keeps alive. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn closing_the_show_returns_to_the_library() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let relay = Relay::start(&runtime);
+	let app = start(launch(&gpu), stream(Some(&relay)), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	let pictures = std::path::absolute("pictures").unwrap();
+	harness.state_mut().pictures = Some(pictures.clone());
+	harness.step();
+	let engine = started.get().expect("the studio started");
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let App::Studio(studio) = &harness.state().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.controls().go_live().expect("going live starts");
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while engine.on_air().live().is_none() {
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("the studio goes live");
+
+	// On air, the row is dimmed and nothing happens.
+	harness.get_by_label("The show").click();
+	harness.run_steps(4);
+	harness.get_by_label("Close show").click();
+	harness.run_steps(4);
+	assert!(matches!(harness.state().app, App::Studio(_)), "closed on air");
+	assert!(started.get().is_some());
+
+	runtime.block_on(engine.end_stream()).expect("the stream ends");
+	harness.run_steps(2);
+	harness.get_by_label("The show").click();
+	harness.run_steps(4);
+	harness.get_by_label("Close show").click();
+	harness.run_steps(4);
+	assert!(matches!(harness.state().app, App::Library(..)), "the show closed");
+	assert!(started.get().is_none(), "nothing is left to end on quit");
+	let path = std::path::absolute("show.toml").unwrap();
+	assert!(
+		library::picture_path(&pictures, &path).exists(),
+		"the card has the program"
+	);
+
+	// Nothing of the show outlives it: not its tasks, its threads, its hotkeys.
+	let closed = Arc::downgrade(&engine);
+	drop(engine);
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while closed.upgrade().is_some() {
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("something still holds the closed show's engine");
+
+	// The show opens again from its card.
+	harness.get_by_label("show").click();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while started.get().is_none() {
+				harness.step();
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("the show opens again");
+	let engine = started.get().unwrap();
+	assert!(matches!(harness.state().app, App::Studio(_)));
 	drop(harness);
 	quit(&engine, &runtime);
 }
@@ -831,7 +923,13 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Setting(setting) => studio.open(*setting),
 		View::Health => studio.details(),
 		View::Going => studio.going(),
-		View::Hover | View::History | View::OnAir | View::EndStream | View::OnAirHealth => {}
+		View::Hover
+		| View::History
+		| View::ShowMenu
+		| View::ShowMenuLive
+		| View::OnAir
+		| View::EndStream
+		| View::OnAirHealth => {}
 		View::Cued(page) => {
 			studio.studio_mode(true);
 			studio.cue("Interview");
@@ -849,7 +947,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 	}
 	let engine = started.get().expect("the studio started").clone();
-	if let View::OnAir | View::EndStream | View::OnAirHealth = view {
+	if let View::OnAir | View::EndStream | View::OnAirHealth | View::ShowMenuLive = view {
 		controls.go_live().expect("going live starts");
 		runtime
 			.block_on(kio::clock::timeout(SETTLE, async {
@@ -886,6 +984,17 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Menu => {
 			// The row comes before the inspector's tab of the same name.
 			harness.get_all_by_label("host").next().unwrap().click_secondary();
+			harness.run_steps(4);
+		}
+		View::ShowMenu => {
+			harness.get_by_label("The show").click();
+			harness.run_steps(4);
+		}
+		View::ShowMenuLive => {
+			harness.get_by_label("The show").click();
+			harness.run_steps(4);
+			harness.get_by_label("Close show").hover();
+			// egui shows a tooltip once the pointer rests half a second.
 			harness.run_steps(4);
 		}
 		View::History => {
@@ -933,7 +1042,7 @@ fn window<'a>(
 	runtime: &'a tokio::runtime::Runtime,
 	size: egui::Vec2,
 	recent: library::Recent,
-) -> (Harness<'a, Window>, Arc<OnceLock<Arc<engine::Engine>>>, Arc<AtomicBool>) {
+) -> (Harness<'a, Window>, Arc<crate::Started>, Arc<AtomicBool>) {
 	let opener = show::Opener {
 		gpu: gpu.clone(),
 		runtime: runtime.handle().clone(),
@@ -943,7 +1052,7 @@ fn window<'a>(
 		credentials: stream::Credentials::memory(),
 	};
 	let render = render_state(gpu);
-	let started = Arc::new(OnceLock::new());
+	let started = Arc::<crate::Started>::default();
 	let kept = started.clone();
 	let closed = Arc::new(AtomicBool::new(false));
 	let window_closed = closed.clone();
@@ -961,6 +1070,8 @@ fn window<'a>(
 				opener,
 				started: kept,
 				recent,
+				// None, so a view keeps no picture in the user's own storage.
+				pictures: None,
 				aired: None,
 				keyboard: hotkeys::Keyboard::default(),
 				fx,
@@ -973,9 +1084,8 @@ fn window<'a>(
 
 /// Stop `engine` as quitting does.
 fn quit(engine: &engine::Engine, runtime: &tokio::runtime::Runtime) {
-	// Now, while the scene file is this test's: the autosave's thread outlives
-	// the engine, and would otherwise write an edit made here over the next
-	// draw's copy.
+	// Now, while the scene file is this test's, so an edit made here is not
+	// left for the autosave to lose when the engine stops.
 	engine.save().expect("the show saves");
 	engine.recorder.close();
 	engine.stop();
