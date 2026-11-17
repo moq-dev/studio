@@ -499,9 +499,6 @@ impl Glide {
 /// under it show.
 pub(crate) struct Placer {
 	sight: Sight,
-	/// The rect the scene file gives, as of the last [`place`](Self::place),
-	/// which tells a move by hand.
-	saved: Option<Rect>,
 	at: At,
 	/// When it last started looking before choosing: when it began, its
 	/// scene went on, or the content under it changed.
@@ -528,7 +525,6 @@ impl Placer {
 		};
 		Self {
 			sight: Sight::default(),
-			saved: None,
 			at: At::Rest,
 			looking: Some(now),
 			worst: None,
@@ -567,6 +563,16 @@ impl Placer {
 		self.since = Some(since);
 	}
 
+	/// Moved by hand, such as dragged or nudged: it stays where the scene
+	/// file has it until the content under it changes, and a choice it was
+	/// about to make is dropped. A resize alone is no move: it keeps its
+	/// place.
+	pub fn hold(&mut self) {
+		self.at = At::Held;
+		self.looking = None;
+		self.worst = None;
+	}
+
 	/// Where it is as of the last [`place`](Self::place).
 	pub fn placement(&self) -> &Placement {
 		&self.placement
@@ -575,13 +581,6 @@ impl Placer {
 	/// Where to draw the item at `now`, saved at `saved` and keeping clear as
 	/// `keep` says on `canvas`.
 	pub fn place(&mut self, saved: Rect, keep: &KeepClear, canvas: Canvas, now: Instant) -> Rect {
-		// Moved by hand, such as dragged: it stays where it was put until the
-		// content changes. A resize alone keeps its place.
-		if self.saved.is_some_and(|last| (last.x, last.y) != (saved.x, saved.y)) {
-			self.at = At::Held;
-			self.worst = None;
-		}
-		self.saved = Some(saved);
 		let slots: Vec<(Slot, Rect)> = Slot::ALL
 			.into_iter()
 			.filter_map(|slot| Some((slot, slot.rect(saved.width, saved.height, canvas)?)))
@@ -1100,6 +1099,7 @@ mod tests {
 
 		// Dragged back over the minimap.
 		let dragged = Rect { x: 1600.0, ..saved };
+		placer.hold();
 		assert_eq!(placer.place(dragged, &KeepClear::default(), CANVAS, now), dragged);
 		let now = run(&mut placer, dragged, now, (0..80).map(|_| read(MOVING, game)));
 		let placement = placer.placement();
@@ -1118,6 +1118,47 @@ mod tests {
 		// Its own place covers no text, so nothing is clearly better.
 		assert_eq!(placement.slot, None);
 		assert_eq!(placement.rect, dragged);
+		let _ = now;
+	}
+
+	/// A move by hand while it is still looking drops the choice it was about
+	/// to make: it stays where it was put, over the minimap, as the same game
+	/// plays on.
+	#[test]
+	fn a_move_by_hand_while_it_looks_drops_the_choice() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let now = run(&mut placer, saved, start, (0..2).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, None, "still looking");
+		let dragged = Rect { x: 1600.0, ..saved };
+		placer.hold();
+		let now = run(&mut placer, dragged, now, (0..40).map(|_| read(MOVING, game)));
+		let placement = placer.placement();
+		assert!(placement.held);
+		assert_eq!(placement.slot, None);
+		assert_eq!(placement.rect, dragged);
+		let _ = now;
+	}
+
+	/// A resize is no move by hand: it stays in its corner at its new size.
+	#[test]
+	fn a_resize_keeps_its_place() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let now = run(&mut placer, saved, start, (0..6).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+		let resized = Rect {
+			width: 200.0,
+			height: 200.0,
+			..saved
+		};
+		let now = run(&mut placer, resized, now, (0..8).map(|_| read(MOVING, game)));
+		let placement = placer.placement();
+		assert!(!placement.held);
+		assert_eq!(placement.slot, Some(Slot::TopLeft));
+		assert_eq!(Some(placement.rect), Slot::TopLeft.rect(200.0, 200.0, CANVAS));
 		let _ = now;
 	}
 

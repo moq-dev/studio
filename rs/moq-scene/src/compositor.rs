@@ -505,6 +505,17 @@ impl Compositor {
 		(keeper.source == source).then(|| keeper.placer.placement())
 	}
 
+	/// Note that the `index`th item of the scene called `scene`, one showing
+	/// `source` that keeps clear, was moved by hand: it stays where the scene
+	/// file puts it until the content under it changes. A resize is no move.
+	pub fn hold(&mut self, scene: &str, index: usize, source: &str) {
+		if let Some(keeper) = self.keepers.get_mut(&(scene.to_string(), index))
+			&& keeper.source == source
+		{
+			keeper.placer.hold();
+		}
+	}
+
 	/// Keep the scenes `outputs` names as outputs from now on, each with
 	/// whether the next [`render`](Self::render) draws it, as it does while an
 	/// output reads it. Each plays its keyframes from the first render after
@@ -1031,20 +1042,18 @@ impl Compositor {
 	/// back show. A keeper whose item is gone is forgotten.
 	fn place<'a>(&mut self, collection: &'a Collection, now: Instant) -> Cow<'a, Collection> {
 		let mut staged = Cow::Borrowed(collection);
+		let mut kept = self.follow(collection);
 		let mut keepers = HashMap::new();
 		for (number, scene) in collection.scenes.iter().enumerate() {
 			let canvas = scene.canvas(collection.canvas);
 			for (index, item) in scene.items.iter().enumerate() {
 				let Some(keep) = &item.keep_clear else { continue };
 				let key = (scene.name.clone(), index);
-				let mut keeper = match self.keepers.remove(&key) {
-					Some(keeper) if keeper.source == item.source => keeper,
-					_ => Keeper {
-						source: item.source.clone(),
-						placer: Placer::new(now),
-						look: Look::new(&self.device, &self.queue),
-					},
-				};
+				let mut keeper = kept.remove(&key).unwrap_or_else(|| Keeper {
+					source: item.source.clone(),
+					placer: Placer::new(now),
+					look: Look::new(&self.device, &self.queue),
+				});
 				match keeper.look.finish() {
 					Some(Ok((tiles, at))) => keeper.placer.see(&tiles, at),
 					Some(Err(err)) => tracing::warn!(
@@ -1064,6 +1073,60 @@ impl Compositor {
 		}
 		self.keepers = keepers;
 		staged
+	}
+
+	/// The keepers, each under where its item keeping clear now is: the same
+	/// place first; else the same source in the same scene, as a layer added
+	/// or removed under it shifts it; else the same source in a scene that
+	/// is no longer there, as a rename leaves it, so it goes on from where it
+	/// was placed. The rest are left out.
+	fn follow(&mut self, collection: &Collection) -> HashMap<(String, usize), Keeper> {
+		let mut old = std::mem::take(&mut self.keepers);
+		let mut kept = HashMap::new();
+		let mut missing = Vec::new();
+		for scene in &collection.scenes {
+			for (index, item) in scene.items.iter().enumerate() {
+				if item.keep_clear.is_none() {
+					continue;
+				}
+				let key = (scene.name.clone(), index);
+				match old.remove(&key) {
+					Some(keeper) if keeper.source == item.source => {
+						kept.insert(key, keeper);
+					}
+					Some(other) => {
+						old.insert(key.clone(), other);
+						missing.push((key, &item.source));
+					}
+					None => missing.push((key, &item.source)),
+				}
+			}
+		}
+		let gone = |scene: &str| collection.scene(scene).is_none();
+		for same_scene in [true, false] {
+			missing.retain(|(key, source)| {
+				let mut candidates: Vec<&(String, usize)> = old
+					.iter()
+					.filter(|((scene, _), keeper)| {
+						&keeper.source == *source
+							&& match same_scene {
+								true => *scene == key.0,
+								false => gone(scene),
+							}
+					})
+					.map(|(old_key, _)| old_key)
+					.collect();
+				// The nearest, so two alike keep their order.
+				candidates.sort_by_key(|(_, index)| index.abs_diff(key.1));
+				let Some(found) = candidates.first().map(|found| (*found).clone()) else {
+					return true;
+				};
+				let keeper = old.remove(&found).expect("listed above");
+				kept.insert(key.clone(), keeper);
+				false
+			});
+		}
+		kept
 	}
 
 	/// Pull the newest picture from every source onto the GPU, and forget the
@@ -2614,6 +2677,26 @@ mod tests {
 			assert_eq!(texel(&program, 320, 41, 41), BLUE, "the camera where it went");
 			assert_eq!(texel(&program, 320, 279, 139), [255; 4], "the block uncovered");
 			assert_eq!(program, studio.preview(), "the preview shows it alike");
+
+			// A layer added under it shifts it, but it stays where it went.
+			let added = Item {
+				visible: false,
+				..studio.collection.scenes[0].items[0].clone()
+			};
+			studio.collection.scenes[0].items.insert(0, added);
+			let camera = camera + 1;
+			let after = moved.saturating_add(glide * 2);
+			studio.render(after);
+			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			assert_eq!(placement.rect, to, "it goes on from where it was placed");
+			assert_eq!(placement.slot, Some(crate::place::Slot::TopLeft));
+
+			// Moved by hand, it stays where the scene file puts it.
+			studio.compositor.hold("busy", camera, "camera");
+			studio.render(after.saturating_add(Duration::from_millis(100)));
+			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			assert!(placement.held);
+			assert_eq!(placement.rect, saved);
 		})
 		.await;
 	}

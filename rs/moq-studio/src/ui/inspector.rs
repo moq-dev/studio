@@ -91,6 +91,8 @@ impl Panels {
 		}
 		let name = item.source.clone();
 		let mut asked = None;
+		// Whether the edit asked for is a move by hand.
+		let mut moved = false;
 
 		section(ui, "Place");
 		// Where the picture draws it: a layer keeping clear where it was
@@ -127,6 +129,7 @@ impl Panels {
 						},
 						_ => rect,
 					};
+					moved = verb == "Move";
 					asked = Some(Asked::Item(Item { rect, ..item.clone() }, label, gesture));
 				}
 			}
@@ -445,9 +448,14 @@ impl Panels {
 
 		let Some(asked) = asked else { return };
 		let result = match asked {
-			Asked::Item(item, label, gesture) => edit(&mut state, label, gesture, |draft| {
-				draft.set_item(&picked.layer, picked.index, item)
-			}),
+			Asked::Item(item, label, gesture) => {
+				if moved {
+					keep::hold(&mut state, &picked.layer, picked.index, &item);
+				}
+				edit(&mut state, label, gesture, |draft| {
+					draft.set_item(&picked.layer, picked.index, item)
+				})
+			}
 			Asked::Look(selection, look, label, gesture) => {
 				edit(&mut state, label, gesture, |draft| selection.set_look(draft, look))
 			}

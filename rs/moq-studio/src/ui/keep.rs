@@ -1,6 +1,7 @@
 //! Keep out of the way: where the picture draws a layer that moves itself
 //! off what matters, what it saw there, and its settings in the inspector.
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use egui::{Color32, Pos2, Stroke};
@@ -42,6 +43,50 @@ pub(super) fn placed(state: &State, layer: &Layer, index: usize, item: &Item) ->
 		},
 		None => item.clone(),
 	}
+}
+
+/// `rect`, a new rect for `item` from a gesture other than a move, such as a
+/// resize, to save: a layer placed off where it rests keeps resting where it
+/// did, so the resize leaves it free to keep clear.
+pub(super) fn resized(state: &State, layer: &Layer, index: usize, item: &Item, rect: Rect) -> Rect {
+	match placement(state, layer, index, item) {
+		Some(placement) if placement.rect != item.rect => Rect {
+			x: item.rect.x,
+			y: item.rect.y,
+			..rect
+		},
+		_ => rect,
+	}
+}
+
+/// Note that `item`, the `index`th of `layer`, was moved by hand: a layer
+/// keeping clear stays where it was put until the content under it changes.
+pub(super) fn hold(state: &mut State, layer: &Layer, index: usize, item: &Item) {
+	if item.keep_clear.is_some()
+		&& let Some(scene) = layer.scene.as_deref()
+	{
+		state.compositor.hold(scene, index, &item.source);
+	}
+}
+
+/// The collection as the picture draws it: each layer keeping clear where
+/// it was placed, so a pointer over the picture finds what it sees.
+pub(super) fn drawn(state: &State) -> Cow<'_, Collection> {
+	let collection = state.collection();
+	let mut drawn = Cow::Borrowed(collection);
+	for (number, scene) in collection.scenes.iter().enumerate() {
+		for (index, item) in scene.items.iter().enumerate() {
+			if item.keep_clear.is_none() {
+				continue;
+			}
+			if let Some(placement) = state.compositor.placement(&scene.name, index, &item.source)
+				&& placement.rect != item.rect
+			{
+				drawn.to_mut().scenes[number].items[index].rect = placement.rect;
+			}
+		}
+	}
+	drawn
 }
 
 fn slot_name(slot: Slot) -> &'static str {

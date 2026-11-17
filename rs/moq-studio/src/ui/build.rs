@@ -127,7 +127,10 @@ impl Panels {
 				// `interacted` found the page through the selection, so one is.
 				let picked = self.selection.clone().expect("interacting with the selected layer");
 				let only = Some((&picked.layer, picked.index));
-				let delivered = self.interact.update(ui, image, state.collection(), scene, only);
+				// A layer keeping clear takes the pointer where it is drawn.
+				let drawn = keep::drawn(&state);
+				let delivered = self.interact.update(ui, image, &drawn, scene, only);
+				drop(drawn);
 				deliver(&state.sources, delivered);
 				self.rebind(&state.sources);
 				let stop = interacting_banner(ui, image, &page);
@@ -359,6 +362,15 @@ impl Panels {
 				let label = format!("{verb} `{}`", item.source);
 				spot = Some(Spot::Layer(drag.picked.layer.clone(), item.source.clone()));
 				let picked = &drag.picked;
+				// A move by hand holds a layer keeping clear where it is put;
+				// a resize or a crop leaves it where it rests.
+				let rect = match verb {
+					"Move" => {
+						keep::hold(state, &picked.layer, picked.index, &item);
+						rect
+					}
+					_ => keep::resized(state, &picked.layer, picked.index, &item, rect),
+				};
 				result = edit(state, label, drag.gesture, |draft| {
 					draft.set_item(&picked.layer, picked.index, Item { rect, crop, ..item })
 				});
@@ -485,6 +497,7 @@ impl Panels {
 		};
 		let label = format!("Move `{}`", item.source);
 		let spot = Spot::Layer(picked.layer.clone(), item.source.clone());
+		keep::hold(state, &picked.layer, picked.index, &item);
 		let result = edit(state, label, Some(gesture), |draft| {
 			draft.set_item(&picked.layer, picked.index, Item { rect, ..item })
 		});
