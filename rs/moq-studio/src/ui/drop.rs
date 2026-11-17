@@ -104,9 +104,6 @@ struct Offer {
 	/// The name of the source shown by the layer dropped on, and that source.
 	shown: String,
 	was: Source,
-	/// How many layers show that source, which a replaced file changes on
-	/// each.
-	linked: usize,
 }
 
 /// What the picture knows of a file dragged over it, read once per drag.
@@ -620,17 +617,11 @@ impl Panels {
 						let collection = state.collection();
 						let shown = collection.capture(&item.source).to_string();
 						let was = collection.sources.get(&shown).cloned().expect("a source of its kind");
-						let linked = collection
-							.layers()
-							.flat_map(|(_, items)| items)
-							.filter(|item| collection.capture(&item.source) == shown)
-							.count();
 						self.dropping.offer = Some(Offer {
 							source,
 							landing,
 							shown,
 							was,
-							linked,
 						});
 						return;
 					}
@@ -861,6 +852,14 @@ impl Panels {
 			super::dashed(&painter, view.screen(&item.rect), egui::Stroke::new(2.0, kit::ACCENT));
 		}
 		let name = offer.source_name();
+		// The layers a replaced file changes, counted as the offer shows, so
+		// one added meanwhile is named too.
+		let collection = state.collection();
+		let linked = collection
+			.layers()
+			.flat_map(|(_, items)| items)
+			.filter(|item| collection.capture(&item.source) == offer.shown)
+			.count();
 		let mut chosen = None;
 		let area = egui::Area::new(egui::Id::new("drop offer"))
 			.order(egui::Order::Foreground)
@@ -869,7 +868,7 @@ impl Panels {
 				kit::popover_frame().show(ui, |ui| {
 					ui.label(egui::RichText::new(&name).font(kit::ui_medium(13.0)).color(kit::TEXT));
 					ui.add_space(4.0);
-					let label = match offer.linked {
+					let label = match linked {
 						0 | 1 => format!("Replace {}'s file", offer.shown),
 						n => format!("Replace {}'s file, on all {n} layers showing it", offer.shown),
 					};
