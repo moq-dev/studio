@@ -107,6 +107,11 @@ pub struct State {
 	/// How many times the collection was reloaded from its files, so the UI
 	/// can let go of what a reload may have removed.
 	pub reloads: u64,
+	/// How many times an edit the UI did not make, such as a guest appearing
+	/// on their own, inserted or replaced a layer of a scene, and the count
+	/// each scene last did so at, so the UI can let go of a layer there whose
+	/// index it may have given to another. See [`shifted`](Self::shifted).
+	pub shifts: (u64, BTreeMap<String, u64>),
 	/// How many times the preview was taken to program, by a cut or a
 	/// transition, so the UI can mark each however it was fired.
 	pub takes: u64,
@@ -159,6 +164,14 @@ impl State {
 		self.history.record(edit, gesture);
 		self.edited();
 		Ok(())
+	}
+
+	/// Note that an edit the UI did not make inserted or replaced a layer of
+	/// `scene`.
+	pub fn shifted(&mut self, scene: &str) {
+		let (count, scenes) = &mut self.shifts;
+		*count += 1;
+		scenes.insert(scene.to_string(), *count);
 	}
 
 	/// Apply `draft`, a change the user did not make, such as a guest joining,
@@ -1103,6 +1116,7 @@ impl Engine {
 				history,
 				dropped,
 				reloads: 0,
+				shifts: (0, BTreeMap::new()),
 				takes: 0,
 				sources,
 				compositor,
@@ -5641,6 +5655,8 @@ mod tests {
 		shown("hal").await.expect("hal takes the place dave left");
 		{
 			let state = engine.state.lock().unwrap();
+			let (count, scenes) = &state.shifts;
+			assert!(scenes.values().any(|at| at == count), "the UI lets go of a layer there");
 			let hal = state.collection().scenes[0]
 				.items
 				.iter()

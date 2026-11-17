@@ -278,6 +278,7 @@ impl Studio {
 			message: None,
 			faults: Vec::new(),
 			reloads: 0,
+			shifts: 0,
 			closing: false,
 			levels: Levels::default(),
 			graph: graph::View::default(),
@@ -710,6 +711,8 @@ struct Panels {
 	faults: Vec<Fault>,
 	/// The engine's reloads seen so far.
 	reloads: u64,
+	/// The engine's [shifts](engine::State::shifts) seen so far.
+	shifts: u64,
 	/// Whether Close show was clicked, until the window has closed the show.
 	closing: bool,
 	/// Each sound's and audio scene's recent levels, for the meters.
@@ -995,7 +998,11 @@ impl Panels {
 			Some(scene) => self.edited(state) != Some(scene.as_str()),
 			None => self.off_air(state).is_some(),
 		});
-		if gone {
+		// A layer of its scene that an edit of the engine's own, such as a
+		// guest appearing, inserted or replaced may have taken its index.
+		let shifted = shifted_since(self.selection.as_ref(), &state.shifts, self.shifts);
+		self.shifts = state.shifts.0;
+		if gone || shifted {
 			self.selection = None;
 			self.drag = None;
 			self.moving = None;
@@ -1869,6 +1876,15 @@ fn color_ui(ui: &mut Ui, color: &mut moq_scene::Rgba) -> egui::Response {
 		*color = moq_scene::Rgba(edited.to_srgba_unmultiplied());
 	}
 	response
+}
+
+/// Whether an edit the UI did not make inserted or replaced a layer of the
+/// scene `selection` is in after the UI saw `seen` of the engine's
+/// [shifts](engine::State::shifts).
+fn shifted_since(selection: Option<&Picked>, shifts: &(u64, BTreeMap<String, u64>), seen: u64) -> bool {
+	let (count, scenes) = shifts;
+	let scene = selection.and_then(|picked| picked.layer.scene.as_ref());
+	*count != seen && scene.is_some_and(|scene| scenes.get(scene).is_some_and(|at| *at > seen))
 }
 
 /// The source and video settings of a clone of `name`. A clone of a clone
@@ -2818,6 +2834,28 @@ mod tests {
 		};
 		collection.sources.insert("Main".into(), filled);
 		assert!(build::own_copy(&collection, "Main"), "the source filling it");
+	}
+
+	/// A layer the UI picked is let go of once an edit of the engine's own
+	/// inserts or replaces a layer of its scene, and kept for one elsewhere.
+	#[test]
+	fn a_guest_appearing_lets_go_of_a_layer_of_their_scene() {
+		let picked = |scene: &str| Picked {
+			layer: Layer::scene(scene),
+			index: 2,
+		};
+		let mut shifts = (0, BTreeMap::new());
+		assert!(!shifted_since(Some(&picked("Interview")), &shifts, 0));
+		shifts.0 += 1;
+		shifts.1.insert("Interview".to_string(), shifts.0);
+		assert!(shifted_since(Some(&picked("Interview")), &shifts, 0));
+		assert!(!shifted_since(Some(&picked("Solo")), &shifts, 0), "another scene");
+		assert!(!shifted_since(Some(&picked("Interview")), &shifts, 1), "already seen");
+		assert!(!shifted_since(None, &shifts, 0));
+		shifts.0 += 1;
+		shifts.1.insert("Solo".to_string(), shifts.0);
+		assert!(shifted_since(Some(&picked("Interview")), &shifts, 0), "two since");
+		assert!(!shifted_since(Some(&picked("Interview")), &shifts, 1));
 	}
 
 	/// A layer showing a role nothing fills offers no copy of its own, to

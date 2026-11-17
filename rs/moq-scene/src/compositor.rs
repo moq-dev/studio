@@ -694,6 +694,16 @@ impl Compositor {
 				None => self.outputs.insert(scene, output),
 			};
 		}
+		// Each scene keeps where its slots were, so two swapping names do
+		// not glide from each other's.
+		let reflows = std::mem::take(&mut self.reflows);
+		for (scene, reflow) in reflows {
+			match renames.get(&scene) {
+				Some(Some(to)) => self.reflows.insert(to.clone(), reflow),
+				Some(None) => None,
+				None => self.reflows.insert(scene, reflow),
+			};
+		}
 	}
 
 	/// Drop each scene `collection` does not have from preview, program, a
@@ -3068,6 +3078,41 @@ mod tests {
 			let (x, y) = center(&before[1].rect);
 			assert_ne!(texel(&program, width, x, y), BLUE, "blue gone");
 			assert_eq!(studio.program(), studio.preview(), "the preview glides alike");
+		})
+		.await;
+	}
+
+	/// Two slotted scenes swapping names each keep where their slots were,
+	/// so neither glides from the other's arrangement.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn scenes_swapping_names_keep_their_own_slots() {
+		local(async {
+			let mut collection = slotted();
+			let row = Scene {
+				name: "row".into(),
+				arrangement: crate::Arrangement::Row,
+				..collection.scenes[0].clone()
+			};
+			collection.scenes.push(row);
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.render(start);
+
+			let mut draft = studio.collection.draft("Swap");
+			draft.rename_scene(0, "swapping").unwrap();
+			draft.rename_scene(1, "slots").unwrap();
+			draft.rename_scene(0, "row").unwrap();
+			let edit = draft.finish().unwrap();
+			studio.compositor.rename(&studio.collection.renames(&edit));
+			studio.collection.apply(&edit).unwrap();
+			studio.render(start.saturating_add(REFLOW / 2));
+			for scene in ["slots", "row"] {
+				let arranged = studio.compositor.arranged(scene).unwrap().to_vec();
+				let placed = studio.compositor.placed(scene).unwrap().to_vec();
+				assert_eq!(placed, arranged, "`{scene}` is where it was, with no glide");
+			}
 		})
 		.await;
 	}

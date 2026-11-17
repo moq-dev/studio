@@ -845,6 +845,7 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 		}
 		return Err(err);
 	}
+	state.shifted(scene);
 	Ok(true)
 }
 
