@@ -31,6 +31,7 @@ use crate::{mix, record};
 
 mod build;
 mod cue;
+mod dark;
 mod graph;
 mod inspector;
 mod layers;
@@ -792,14 +793,24 @@ impl Selection {
 			blend,
 		} = look;
 		match self {
-			Self::Source(name) => draft.set_video(
-				name,
-				Some(Video {
-					background: background.unwrap_or_default(),
-					crop,
-					filters,
-				}),
-			),
+			Self::Source(name) => {
+				// Not part of the look, so it stays as it was.
+				let expect_dark = draft
+					.collection()
+					.video
+					.get(name)
+					.is_some_and(|video| video.expect_dark);
+				draft.set_video(
+					name,
+					Some(Video {
+						background: background.unwrap_or_default(),
+						crop,
+						filters,
+						expect_dark,
+					}),
+				)
+			}
+
 			Self::Item(layer, index) => {
 				let item = draft
 					.collection()

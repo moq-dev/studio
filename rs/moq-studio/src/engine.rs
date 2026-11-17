@@ -124,9 +124,25 @@ pub struct State {
 	/// [`Collection::renames`] reads it, so what the window follows a scene by
 	/// name with, such as a hotkey, follows it too.
 	renamed: Vec<BTreeMap<String, Option<String>>>,
+	/// Sources a view shows gone dark for so long, as no capture can be in
+	/// a view's headless build.
+	#[cfg(test)]
+	pub dark: BTreeMap<String, Duration>,
 }
 
 impl State {
+	/// How long the camera, display, or window `name` shows, a copy showing
+	/// what it copies, has been all dark while live at `now`, once that is
+	/// long enough to count; see [`Compositor::dark`].
+	pub fn dark(&self, name: &str, now: Instant) -> Option<Duration> {
+		let capture = self.collection.capture(name);
+		#[cfg(test)]
+		if let Some(dark) = self.dark.get(capture) {
+			return Some(*dark);
+		}
+		self.compositor.dark(capture, now)
+	}
+
 	/// How the program's virtual camera, or the published scene `scene`'s,
 	/// is doing, or `None` while it is off.
 	pub fn camera(&self, scene: Option<&str>) -> Option<crate::vcam::Status> {
@@ -522,6 +538,14 @@ impl State {
 	pub fn restart(&mut self, name: &str) {
 		self.sources.restart(name);
 		self.stale = true;
+	}
+
+	/// Restart the display or window called `name`, asking the system picker
+	/// afresh rather than reopening what it was granted.
+	pub fn pick_again(&mut self, name: &str) -> anyhow::Result<()> {
+		self.sources.pick_again(name)?;
+		self.stale = true;
+		Ok(())
 	}
 
 	/// After any change to the collection or its history, which the autosave
@@ -1107,6 +1131,8 @@ impl Engine {
 				stale: true,
 				edits: autosave.edits(),
 				renamed: Vec::new(),
+				#[cfg(test)]
+				dark: BTreeMap::new(),
 			}),
 			autosave,
 			stats,
@@ -1442,7 +1468,7 @@ impl Engine {
 		// Stalled sound matters only if an audio scene viewers hear plays it:
 		// the one on program or one a published scene carries, not one only
 		// listened to. A source that stopped matters either way.
-		let (stalled, stopped, uploaded) = {
+		let (stalled, dark, stopped, uploaded) = {
 			let state = self.state.lock().unwrap();
 			let on_program = state.on_program();
 			let beside = state.beside();
@@ -1483,6 +1509,15 @@ impl Engine {
 					live.any().then(|| (name.to_string(), stall, live))
 				})
 				.collect();
+			let dark = state
+				.sources
+				.iter()
+				.filter_map(|(name, _)| {
+					let dark = state.dark(name, now)?;
+					let live = shown(name);
+					live.any().then(|| (name.to_string(), dark, live))
+				})
+				.collect();
 			// A stinger's clip rests ended between stingers, unless a live scene
 			// places it.
 			let stinger = state.collection.transition.stinger();
@@ -1495,7 +1530,8 @@ impl Engine {
 						shown: shown(name),
 						heard: heard(name),
 					};
-					if !reach.any() {
+					// A dark source is reported as dark, as its layer's row says.
+					if !reach.any() || state.dark(name, now).is_some() {
 						return None;
 					}
 					// A picture that fails to draw fails the source as the Sources panel shows it.
@@ -1522,7 +1558,7 @@ impl Engine {
 					moq_scene::browser::Paint::Gpu => None,
 				})
 				.collect();
-			(stalled, stopped, uploaded)
+			(stalled, dark, stopped, uploaded)
 		};
 		let video = |video: &VideoStats, failed: Option<String>| {
 			let full = &video.renditions[Role::Canvas as usize];
@@ -1548,6 +1584,7 @@ impl Engine {
 			broadcasts: std::iter::once(program).chain(published).collect(),
 			grants: stats.grants(),
 			stalled,
+			dark,
 			stopped,
 			uploaded,
 		}

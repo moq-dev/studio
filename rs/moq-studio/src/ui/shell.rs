@@ -45,6 +45,8 @@ struct ScenePad {
 	canvas: Canvas,
 	/// Why it cannot go on program, if it cannot.
 	refused: Option<String>,
+	/// Whether a camera, display, or window it shows went dark.
+	dark: bool,
 }
 
 /// A sound the stream carries, as its row shows it.
@@ -165,6 +167,7 @@ impl Panels {
 		let position = history.position();
 		let undo = position.checked_sub(1).and_then(|at| history.entries().nth(at));
 		let redo = history.entries().nth(position);
+		let now = kio::clock::now();
 		let scenes = collection
 			.scenes
 			.iter()
@@ -172,6 +175,7 @@ impl Panels {
 				name: scene.name.clone(),
 				canvas: scene.canvas(collection.canvas),
 				refused: collection.refuses(&scene.name),
+				dark: scene.items.iter().any(|item| state.dark(&item.source, now).is_some()),
 			})
 			.collect();
 		let stream = collection.program_audio().map(str::to_string);
@@ -855,6 +859,7 @@ impl Panels {
 			.tally(tally)
 			.tag(tag)
 			.refused(pad.refused.as_deref())
+			.dark(pad.dark)
 			.fault(fault)
 			.width(width)
 			.shape(shape);

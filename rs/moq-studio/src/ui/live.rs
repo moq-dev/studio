@@ -748,9 +748,22 @@ impl Panels {
 			(Verdict::Healthy, true, _) => ("Healthy", kit::OK),
 			(Verdict::Unknown, true, _) => ("Starting", kit::DIM),
 		};
+		// Unless something is unhealthy, the dot counts the layers gone dark,
+		// which the streamer can see and fix on BUILD.
+
+		let dark = match report.dark {
+			0 => None,
+			1 => Some("1 layer dark".to_string()),
+			count => Some(format!("{count} layers dark")),
+		};
+		let name = match (&dark, worst) {
+			(Some(dark), Verdict::Degraded) => dark.as_str(),
+			_ => name,
+		};
 		let mark = fx.on().then(|| crate::fx::Mark::new(ui.painter()));
 		let text = if compact { "" } else { name };
 		let pill = ui.add(kit::Pill::new(text).dot(dot).clickable());
+
 		let pill = kit::tip(pill, &format!("Health: {name}"), None);
 		if let Some(mark) = mark {
 			fx.health(&mark.around(pill.rect).inset(2.0));

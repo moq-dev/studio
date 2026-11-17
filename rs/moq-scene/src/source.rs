@@ -492,6 +492,16 @@ impl Sources {
 		}
 	}
 
+	/// Forget the grant of the display or window called `name` and
+	/// [restart](Self::restart) it, so it asks the system picker afresh.
+	pub fn pick_again(&mut self, name: &str) -> Result<(), Error> {
+		if let Some(grants) = &self.context.grants {
+			grants.forget(name)?;
+		}
+		self.restart(name);
+		Ok(())
+	}
+
 	/// Stop every source, as removing it would: each [`Driver`] returns and
 	/// its own track finishes cleanly with what it published. The mixes stay,
 	/// and the next [`sync`](Self::sync) starts the sources again.

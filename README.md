@@ -176,7 +176,9 @@ macOS the system's buttons and edges stay. It holds, from the left:
 - The health dot, the stream's worst grade at a glance. Click it for the
   worst problem first, then each destination, who is watching, and the
   encoder, and **Details** for the [Health](#health) window. Off air it reads
-  **Ready** once the show has a relay, and **No relay** until then.
+  **Ready** once the show has a relay, and **No relay** until then. While a
+  capture a live scene shows has [gone dark](#a-capture-gone-dark) and
+  nothing is worse, it counts them, as **1 layer dark**.
 - Record, which starts or stops a [recording](#recording) from any page, with
   the picks in Settings, Recording. Its dot pulses while recording, with
   how long it has been recording beside it.
@@ -249,7 +251,9 @@ kind, its name, what it shows (and **linked ×3** when three layers show the
 source), and its eye, which shows or hides it. A lock shows on a locked row,
 and on the selected or pointed-at one to lock it. A dot says a source is not
 live, such as starting, stalled, offline, ended, or failed, with the words on
-hover, and an error on the layer replaces what it shows, in red. Click a row
+hover, and an error on the layer replaces what it shows, in red. A capture
+[gone dark](#a-capture-gone-dark) has an amber badge instead, which opens
+what happened and the fix. Click a row
 to select its layer, drag it up or down its group to restack it, and
 right-click it for its menu: hide or show, lock or unlock, interact with a web
 page, bring it to the front or forward or send it backward or to the back,
@@ -292,7 +296,7 @@ is named for it, with these sections:
 | Shape | Pick its outline, square, rounded, circle, or arch, give it a border inside that outline and the border's color, and give it a soft shadow, which follows the outline and is the layer's first drop shadow filter. |
 | Look | Remove its source's background, which every layer showing the source loses (make it independent to cut out here alone); grade its color through a LUT source; add, order, set, and remove its filters, copy them, or paste copied filters after its own; and set its blend mode. |
 | Shown in | See how many places show its source, **Linked in 3 scenes**, and **Make independent**, which points this layer at a copy of the source of its own, keeping its look, so editing that look no longer edits the others. A copy says what it copies. |
-| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. Publish it independently (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. |
+| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. **Warn when it goes dark**, on by default for a camera, display, or window, watches it for [going dark](#a-capture-gone-dark). Publish it independently (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. |
 
 Its **Animate** tab holds the layer's keyframes (see [Keyframes](#keyframes)).
 With no layer selected, the inspector shows the edited scene: rename it,
@@ -1090,6 +1094,8 @@ published independently takes no shape.
 
 `[video.<source>]` sets a source's `background`, `crop`, and `filters`,
 wherever it is shown, and a layer's `crop`, `filters`, and `blend` its own.
+`expect_dark = true` on a camera, display, or window says it is meant to go
+dark at times, so the studio never flags it [gone dark](#a-capture-gone-dark).
 `background = "remove"` cuts the person out of a camera, display, window,
 image, media, broadcast, browser, or replay source's picture before its crop
 and filters, leaving the rest transparent. A segmentation model finds them in
@@ -1543,6 +1549,33 @@ no past to replay: a page publishes no track of its own, so replay the program
 to show it. A replay source on program encodes each replay as its own track
 while it plays, like a camera.
 
+## A capture gone dark
+
+A camera, display, or window can go black while its capture still runs: a
+window closed, minimized, or switched to exclusive full screen, a screen
+locked or showing protected video, a camera behind its shutter, or a
+permission the system took away. Four times a second at most, and only when
+it delivers a new picture, the studio shrinks each one's picture on the GPU
+to a grid of 64 by 36 tiles and reads the grid back. A picture whose every
+texel is dark and whose tiles are all one color is dark.
+
+For its first 3 seconds of dark the studio draws the capture's last picture
+that was not dark in its place, on program and everywhere else, so a moment
+of black never reaches viewers. After that it shows the dark as it is, so a
+stale picture never passes for live, and the capture's layer row, its
+layer on the picture, and each scene pad showing it turn amber, and the
+health dot counts it. The row's badge says what may have happened and offers
+the fixes the studio can take: pick a picked window or display again in the
+system picker, capture another listed window or the whole screen in its
+place, or open a camera or display again. Where only you can fix it, such as
+a permission macOS took away or a game that refuses capture, it says what to
+do and where. **It is meant to go dark** stops watching it, as
+`expect_dark` in its `[video]` table, and **Warn when it goes dark** in the
+inspector's Source section watches it again.
+
+A source published independently reaches viewers on its own track, which
+shows the dark at once.
+
 ## Health
 
 The Health window, from the health dot's **Details**, grades the stream every second on the thresholds moq's
@@ -1553,7 +1586,9 @@ stuck, a source stalled (a camera or broadcast the program or a published
 scene draws, or a microphone or system audio that the audio scene on program
 or one a published scene carries plays: unmuted and held by it), a source
 one of them shows or plays failed or, as a media file that does not loop,
-played to its end, a browser source one of them shows is uploaded from memory
+played to its end, a camera, display, or window one of them shows
+[went dark](#a-capture-gone-dark), a browser source one of them shows is uploaded from memory
+
 rather than copied on the GPU, or viewers are late, stalling, or cannot decode
 a track. A relay lost while the other serves is
 degraded, since viewers have nothing left to fall back to; with none serving

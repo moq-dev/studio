@@ -117,6 +117,7 @@ impl Panels {
 		let now = kio::clock::now();
 		let mut action = None;
 		let mut rows = Vec::new();
+		self.devices.poll();
 		for index in (0..items.len()).rev() {
 			let item = &items[index];
 			let picked = Picked {
@@ -124,12 +125,25 @@ impl Panels {
 				index,
 			};
 			let selected = self.selection.as_ref() == Some(&picked);
+			let status = status_of(state, &item.source, now);
+			let capture = collection.sources.get(collection.capture(&item.source));
+			// A window chosen by id offers the windows listed now in its place.
+			if status.dark.is_some()
+				&& matches!(capture, Some(Source::Window { .. }))
+				&& self.devices.listing.is_none()
+				&& self.devices.pending.is_none()
+			{
+				let refreshed = self.devices.refresh(&self.runtime).context("cannot list windows");
+				self.fail(Spot::Add, refreshed);
+			}
 			let fault = self.fault(&Spot::Layer(layer.clone(), item.source.clone()));
 			let row = Row {
 				item,
 				kind: kind(collection, &item.source),
 				words: words(collection, &item.source),
-				status: status_of(state, &item.source, now),
+				status,
+				capture,
+				windows: self.devices.listing.as_ref().map(|listing| &listing.windows),
 				fault,
 				selected,
 			};
@@ -209,6 +223,10 @@ struct Row<'a> {
 	kind: Icon,
 	words: String,
 	status: Health,
+	/// The source it captures, a copy's what it copies.
+	capture: Option<&'a Source>,
+	/// The windows this machine lists, once listed.
+	windows: Option<&'a Result<Vec<Pick>, String>>,
 	fault: Option<&'a str>,
 	selected: bool,
 }
@@ -254,9 +272,11 @@ impl Row<'_> {
 			egui::TextStyle::Body,
 		);
 		painter.galley(pos2(left, rect.top() + 8.0), galley, ink);
-		let (below, color) = match self.fault {
-			Some(fault) => (fault.to_string(), kit::ERR),
-			None => (self.words, kit::DIM),
+		let (below, color) = match (self.fault, self.status.dark) {
+			(Some(fault), _) => (fault.to_string(), kit::ERR),
+			// Its icon says what kind it is.
+			(None, Some(dark)) => (super::dark::words(dark), kit::CUE),
+			(None, None) => (self.words, kit::DIM),
 		};
 		let small = egui::RichText::new(below).font(kit::ui(11.0)).color(color);
 		let galley = egui::WidgetText::from(small).into_galley(
@@ -268,10 +288,17 @@ impl Row<'_> {
 		painter.galley(pos2(left, rect.top() + 26.0), galley, color);
 
 		let mut asked = None;
-		// A source live and well needs no mark; the inspector says so.
+		// A source live and well needs no mark; the inspector says so. One
+		// gone dark has a badge in its place, which opens what to do.
 		let marked = self.status.color != kit::OK || self.fault.is_some();
+		let dark = self.status.dark.is_some() && self.fault.is_none();
+		if dark && let Some(capture) = self.capture {
+			let badge = Rect::from_center_size(dot.center() - vec2(4.0, 0.0), Vec2::splat(20.0));
+			let mend = super::dark::badge_button(ui, badge, id.with("dark"), &self.item.source, capture, self.windows);
+			asked = mend.map(LayerAction::Mend);
+		}
 		let status = ui.interact(dot, id.with("status"), Sense::hover());
-		if marked {
+		if marked && !dark {
 			let color = if self.fault.is_some() {
 				kit::ERR
 			} else {
@@ -279,7 +306,7 @@ impl Row<'_> {
 			};
 			painter.circle_filled(dot.center(), 3.5, color);
 		}
-		if marked && (status.hovered() || self.fault.is_some()) {
+		if marked && !dark && (status.hovered() || self.fault.is_some()) {
 			let mut lines = self.status.lines.clone();
 			if let Some(fault) = self.fault {
 				lines.insert(0, fault.to_string());
@@ -347,6 +374,8 @@ impl egui::Widget for AddLayer {
 pub(super) struct Health {
 	pub(super) color: Color32,
 	pub(super) lines: Vec<String>,
+	/// How long a capture has been all dark, once that counts.
+	pub(super) dark: Option<Duration>,
 }
 
 /// How `name` is doing: live, starting, stalled, ended, or failed with its
@@ -357,6 +386,7 @@ pub(super) fn status_of(state: &State, name: &str, now: kio::clock::Instant) -> 
 	// A clone is as live as what it clones.
 	let capture = collection.capture(name);
 	let feed = state.sources.get(capture);
+	let dark = state.dark(name, now);
 	let (mut color, first) = match (
 		state.compositor.error(capture),
 		feed,
@@ -364,6 +394,7 @@ pub(super) fn status_of(state: &State, name: &str, now: kio::clock::Instant) -> 
 	) {
 		(Some(err), _, _) => (kit::ERR, format!("Failed: {err}")),
 		(None, _, Some(stall)) => (kit::CUE, format!("Stalled: {}", health::without(stall))),
+		(None, _, None) if let Some(dark) = dark => (kit::CUE, format!("All dark for {:.0} s", dark.as_secs_f64())),
 		(None, Some(feed), None) => match feed.status() {
 			Status::Starting => (kit::DIM, "Starting".to_string()),
 			Status::Live => (kit::OK, "Live".to_string()),
@@ -402,7 +433,7 @@ pub(super) fn status_of(state: &State, name: &str, now: kio::clock::Instant) -> 
 			None => {}
 		},
 	}
-	Health { color, lines }
+	Health { color, lines, dark }
 }
 
 /// The icon for what `name` shows, by its source's kind, or the kind of what

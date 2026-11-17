@@ -1792,6 +1792,12 @@ pub struct Video {
 	/// Applied in order, before each item's own.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub filters: Vec<Filter>,
+	/// Whether a camera, display, or window is meant to go all dark at
+	/// times, such as a camera whose shutter closes between segments: the
+	/// compositor never judges it gone dark, nor holds its last picture over
+	/// the dark.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub expect_dark: bool,
 }
 
 /// What happens to the background behind a person in a source's picture.
@@ -2022,6 +2028,15 @@ impl Source {
 	/// rather than showing another source's or a scene.
 	pub fn opens(&self) -> bool {
 		!matches!(self, Self::Clone { .. } | Self::Scene { .. } | Self::Program)
+	}
+
+	/// Whether the source is a camera, display, or window capture, which the
+	/// compositor watches for going dark; see [`Compositor::dark`](crate::Compositor::dark).
+	pub fn may_go_dark(&self) -> bool {
+		matches!(
+			self,
+			Self::Camera { .. } | Self::Display { .. } | Self::Window { .. } | Self::PickedDisplay | Self::PickedWindow
+		)
 	}
 
 	/// Whether the source's picture can have its background removed: a

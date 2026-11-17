@@ -74,6 +74,14 @@ impl Grants {
 		})
 	}
 
+	/// Forget the grant of the source called `source`, so it asks the picker
+	/// next time it opens, and stop its claims from writing one again.
+	pub(crate) fn forget(&self, source: &str) -> Result<(), Error> {
+		let mut owners = self.owners.lock().unwrap();
+		owners.claims.remove(source);
+		self.change(|grants| grants.remove(source).is_some())
+	}
+
 	/// Apply `change` to this scene file's table, writing the file back only
 	/// when `change` says it changed something.
 	fn change(&self, change: impl FnOnce(&mut BTreeMap<String, String>) -> bool) -> Result<(), Error> {
@@ -237,6 +245,22 @@ mod tests {
 		grants.retain(&BTreeSet::from(["Kept".to_string()])).unwrap();
 		assert_eq!(kept.get().unwrap().as_deref(), Some("a"));
 		assert_eq!(removed.get().unwrap(), None);
+	}
+
+	#[test]
+	fn forgetting_one_keeps_the_rest() {
+		let dir = tempfile::tempdir().unwrap();
+		let grants = Grants::new(dir.path().join("portal.toml"), Path::new("/scene.toml"));
+		let kept = grants.claim("Kept");
+		let forgotten = grants.claim("Game");
+		kept.set(Some("a")).unwrap();
+		forgotten.set(Some("b")).unwrap();
+		grants.forget("Game").unwrap();
+		assert_eq!(kept.get().unwrap().as_deref(), Some("a"));
+		assert_eq!(forgotten.get().unwrap(), None);
+		// The capture it forgot, still closing, writes nothing back.
+		forgotten.set(Some("stale")).unwrap();
+		assert_eq!(forgotten.get().unwrap(), None);
 	}
 
 	#[test]

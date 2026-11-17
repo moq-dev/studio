@@ -46,6 +46,7 @@ pub mod browser;
 pub mod clip;
 mod collection;
 mod compositor;
+mod dark;
 mod edit;
 mod effect;
 mod grant;

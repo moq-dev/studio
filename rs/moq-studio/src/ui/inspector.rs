@@ -26,6 +26,8 @@ enum Asked {
 	Reload(String),
 	/// Publish the source independently, or stop.
 	Publish(String, bool),
+	/// Watch the capture for going dark, or stop.
+	Warn(String, bool),
 }
 
 impl Panels {
@@ -380,6 +382,21 @@ impl Panels {
 					asked = Some(Asked::Reload(name.clone()));
 				}
 			});
+			let capture = collection.capture(&name);
+			if collection.sources.get(capture).is_some_and(Source::may_go_dark) {
+				let mut warn = !collection.video.get(capture).is_some_and(|video| video.expect_dark);
+				if ui
+					.add(kit::Toggle::new(&mut warn).label("Warn when it goes dark"))
+					.on_hover_text(
+						"Badge it in amber when its picture stays all dark, holding its last picture over \
+						 a moment of dark. Turn off for a capture meant to go dark, such as a camera whose \
+						 shutter closes between segments.",
+					)
+					.changed()
+				{
+					asked = Some(Asked::Warn(capture.to_string(), warn));
+				}
+			}
 			if source.publishes() {
 				let mut published = collection.published.contains(&name);
 				if ui
@@ -437,6 +454,7 @@ impl Panels {
 				state.restart(&name);
 				Ok(())
 			}
+			Asked::Warn(capture, warn) => super::dark::expect(&mut state, &capture, !warn),
 			Asked::Publish(name, published) => {
 				let verb = if published { "Publish" } else { "Stop publishing" };
 				edit(&mut state, format!("{verb} `{name}` independently"), None, |draft| {

@@ -65,6 +65,9 @@ pub struct Report {
 	pub sources: Vec<Track>,
 	/// What is wrong, worst first, each naming its cause.
 	pub problems: Vec<Problem>,
+	/// How many cameras, displays, and windows a live broadcast shows went
+	/// dark, which the health dot counts.
+	pub dark: usize,
 }
 
 /// One broadcast: who watches it, and how each of its tracks reaches
@@ -218,6 +221,9 @@ pub struct Local {
 	/// Sources whose stalled picture or sound a live broadcast carries, what
 	/// stalled, and which broadcasts carry it.
 	pub stalled: Vec<(String, Stall, Live)>,
+	/// Cameras, displays, and windows a live broadcast shows that have been
+	/// all dark this long, and which broadcasts show them.
+	pub dark: Vec<(String, Duration, Live)>,
 	/// Sources a live broadcast shows or plays that ended or failed, and
 	/// where.
 	pub stopped: Vec<(String, Status, Reach)>,
@@ -601,6 +607,7 @@ impl Sampler {
 			viewers,
 			tracks: &broadcast.tracks,
 		});
+		report.dark = local.dark.len();
 		report.problems = problems(&Facts {
 			relays: &report.relays,
 			local: &local,
@@ -964,6 +971,16 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		add(
 			Verdict::Unhealthy,
 			format!("Source `{name}` stalled: {}, so {instead}.", without(*stall)),
+		);
+	}
+	for (name, dark, live) in &local.dark {
+		add(
+			Verdict::Degraded,
+			format!(
+				"Source `{name}` has been all dark for {:.0} s, so {}.",
+				dark.as_secs_f64(),
+				clause(live, "shows", "show", "black where it was")
+			),
 		);
 	}
 	for (name, status, reach) in &local.stopped {
@@ -1824,6 +1841,10 @@ mod tests {
 				("logo".into(), Stall::Picture(Duration::from_secs(3)), tall.clone()),
 				("mic".into(), Stall::Sound(Duration::from_secs(2)), tall.clone()),
 			],
+			dark: vec![
+				("game".into(), Duration::from_secs(12), program.clone()),
+				("screen".into(), Duration::from_secs(3), both.clone()),
+			],
 			stopped: vec![
 				("intro".into(), Status::Ended, reach(&program, &program)),
 				("outro".into(), Status::Ended, reach(&both, &both)),
@@ -1862,6 +1883,8 @@ mod tests {
 				"Source `outro` played to its end, so the program, scene `tall` and scene `wide` hold its last picture and play no sound for it.",
 				"Source `clip` played to its end, so the program holds its last picture and scene `tall` plays no sound for it.",
 				"Source `bed` played to its end, so scene `tall` plays no sound for it.",
+				"Source `game` has been all dark for 12 s, so the program shows black where it was.",
+				"Source `screen` has been all dark for 3 s, so the program, scene `tall` and scene `wide` show black where it was.",
 				"Source `chat`, which scene `tall` shows, is uploaded from memory every frame rather than copied on the GPU: there is no display to paint through.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
