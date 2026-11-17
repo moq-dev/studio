@@ -296,6 +296,18 @@ struct Layer {
 }
 
 impl Layer {
+	/// Forget every picture from before a clear, so none may show, even if
+	/// the picture after it fails to draw: the newest, and the probe's last
+	/// good one and the read it has in flight.
+	fn clear(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+		self.cleared = true;
+		self.raw = None;
+		self.fresh = true;
+		if let Some(probe) = &mut self.probe {
+			*probe = Probe::new(device, queue);
+		}
+	}
+
 	/// Bring the picture drawn up to date with the newest one delivered,
 	/// through its matte while `background` is removed.
 	fn develop(
@@ -1015,11 +1027,7 @@ impl Compositor {
 			}
 			if let Some(taken) = taken {
 				if taken.cleared {
-					// Nothing from before the clear may show, even if the picture
-					// after it fails to draw.
-					layer.cleared = true;
-					layer.raw = None;
-					layer.fresh = true;
+					layer.clear(&self.device, &self.queue);
 				}
 				self.take(name, source, &mut layer, taken.picture, now);
 			}
@@ -3738,6 +3746,33 @@ mod tests {
 		layer.probe = probe;
 		compositor.watch(&mut layer, Background::Keep, true, at(dark));
 		assert!(layer.holding);
+
+		// A clear forgets the last good picture: black after it is drawn
+		// as it is, never the red from before it.
+		let mut cleared = Layer {
+			source: Source::Camera { id: None },
+			renderer: None,
+			raw: Some(raw.clone()),
+			fresh: true,
+			cleared: false,
+			matte: None,
+			picture: None,
+			lut: None,
+			overlay: None,
+			error: None,
+			probe: Some(Probe::new(&device, &queue)),
+			holding: false,
+		};
+		read(&mut compositor, &mut cleared, RED, at(Duration::ZERO), Background::Keep);
+		read(&mut compositor, &mut cleared, BLACK, at(dark), Background::Keep);
+		assert!(cleared.holding, "the red is held over the black");
+		cleared.clear(&device, &queue);
+		compositor.watch(&mut cleared, Background::Keep, true, at(dark));
+		assert!(!cleared.holding, "nothing from before the clear is held");
+		assert!(cleared.picture.is_none(), "nothing from before the clear is drawn");
+		cleared.raw = Some(raw.clone());
+		read(&mut compositor, &mut cleared, BLACK, at(dark * 2), Background::Keep);
+		assert!(!cleared.holding, "the red from before the clear is never held again");
 
 		let gone = dark + crate::dark::DARK;
 		compositor.watch(&mut layer, Background::Keep, true, at(gone));
