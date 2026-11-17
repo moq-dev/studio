@@ -229,9 +229,9 @@ impl Collection {
 	}
 
 	/// Whether the scene called `scene` can go on program: it is the
-	/// program's size, and draws no program source, which it would draw into
-	/// itself. Refused with the reason otherwise, or for a scene that does
-	/// not exist.
+	/// program's size, following it while the show goes out in portrait too,
+	/// and draws no program source, which it would draw into itself. Refused
+	/// with the reason otherwise, or for a scene that does not exist.
 	pub fn takes(&self, scene: &str) -> Result<(), Error> {
 		match self.refuses(scene) {
 			Some(why) => Err(Error::Invalid(why)),
@@ -249,6 +249,13 @@ impl Collection {
 			return Some(format!(
 				"`{scene}` is {}x{}, not the program's {}x{}, so it cannot go on program",
 				canvas.width, canvas.height, self.canvas.width, self.canvas.height
+			));
+		}
+		// Only a scene that follows the program's size has a portrait picture.
+		if self.portrait && self.scene(scene).is_some_and(|scene| scene.size.is_some()) {
+			return Some(format!(
+				"`{scene}` has a size of its own, so it has no portrait picture and cannot go on program while \
+				 the show goes out in portrait too"
 			));
 		}
 		if self.draws_program(scene) {

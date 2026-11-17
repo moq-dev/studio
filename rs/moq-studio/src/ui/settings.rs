@@ -542,6 +542,13 @@ impl Panels {
 			Restart::Scene(name, size) => match state.collection().scenes.iter().position(|scene| scene.name == name) {
 				Some(index) => {
 					let scene = state.collection().scenes[index].clone();
+					// The program's size, while the show goes out in portrait
+					// too, follows the program's, so the scene keeps its
+					// portrait picture and can still go on program.
+					let program = state.collection().canvas;
+					let size = size.filter(|size| {
+						!state.collection().portrait || (size.width, size.height) != (program.width, program.height)
+					});
 					let label = match size {
 						Some(size) => format!("Size scene `{name}` {}x{}", size.width, size.height),
 						None => format!("Size scene `{name}` as the program"),

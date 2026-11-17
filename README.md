@@ -729,7 +729,8 @@ landscape picture for desks and TVs: switch on **Both at once** in Settings,
 Show. Each scene of the show's size then has two arrangements of the same
 layers, and the studio draws, encodes, and sends both pictures. A scene of its
 own size, such as a published portrait scene, stays one picture, in its own
-shape.
+shape, so it cannot go on program meanwhile. A scene given the show's size as
+its own follows the show's size instead when you turn it on.
 
 Turning it on is one edit you can undo, and starts each portrait arrangement
 from the landscape one. The largest picture, covering a quarter of the canvas

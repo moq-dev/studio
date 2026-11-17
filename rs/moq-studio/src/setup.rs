@@ -95,10 +95,10 @@ impl Encoding {
 		self.frame * encodes <= budget(canvas)
 	}
 
-	/// What `encodes` pictures at this bitrate send, plus the audio, which
-	/// they share.
+	/// What `encodes` pictures at this bitrate send, each a broadcast with
+	/// its own audio.
 	pub(crate) fn total_of(&self, encodes: u32) -> Rate {
-		Rate::from_bps(self.bitrate.as_bps() * u64::from(encodes) + engine::AUDIO_BITRATE.as_bps())
+		Rate::from_bps(self.total().as_bps() * u64::from(encodes))
 	}
 
 	/// How many times its [`budget`] a frame of `canvas` took, scaled to compare
@@ -945,6 +945,14 @@ mod tests {
 		let encoders = timed([20, 30, 12, 12, 5]);
 		assert_eq!(pick(&encoders, Some(Rate::from_mbps(100))), CANVASES[2]);
 		assert_eq!(pick(&encoders, None), CANVASES[2], "the default does not keep up");
+	}
+
+	/// The portrait picture is a broadcast of its own, audio included.
+	#[test]
+	fn both_formats_send_the_audio_twice() {
+		let encoding = encoders(DEFAULTS)[1].1.clone().unwrap();
+		assert_eq!(encoding.total_of(1), encoding.total());
+		assert_eq!(encoding.total_of(2), Rate::from_kbps(2 * (4354 + 128)));
 	}
 
 	#[test]

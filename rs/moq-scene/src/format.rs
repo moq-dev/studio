@@ -450,19 +450,26 @@ impl Draft {
 	/// Send the show out in portrait too, or no longer. Turned on, each
 	/// layer's portrait arrangement starts from its landscape one: the main
 	/// picture cropped to the top, the camera stacked under it, and slots in
-	/// a row unless they were in a grid or inset. Turned off, the layers shown
-	/// only in portrait are removed and every portrait place dropped.
+	/// a row unless they were in a grid or inset. A scene given the program's
+	/// size as its own follows the program's instead, so it has a portrait
+	/// picture and can stay on program. Turned off, the layers shown only in
+	/// portrait are removed and every portrait place dropped.
 	pub fn set_portrait(&mut self, on: bool) -> Result<(), Error> {
 		let before = self.collection().portrait;
 		if before == on {
 			return Ok(());
 		}
 		let collection = self.collection().clone();
+		let program = (collection.canvas.width, collection.canvas.height);
 		for (index, scene) in collection.scenes.iter().enumerate() {
-			if scene.size.is_some() {
+			let pinned = on && scene.size.is_some_and(|size| (size.width, size.height) == program);
+			if scene.size.is_some() && !pinned {
 				continue;
 			}
-			let mut after = scene.clone();
+			let mut after = Scene {
+				size: None,
+				..scene.clone()
+			};
 			match on {
 				true => {
 					after.items = collection.turned_on(&scene.items);
@@ -708,6 +715,32 @@ mod tests {
 		});
 		let turned = turned(&show);
 		assert_eq!(turned.scenes[0], show.scenes[0]);
+	}
+
+	/// A scene of its own size has no portrait picture, so it does not go on
+	/// program while the show goes out in both, even at the program's size;
+	/// one given the program's size before turning on follows it instead.
+	#[test]
+	fn only_a_scene_following_the_program_goes_on_in_both() {
+		let mut show = show();
+		let program = Size {
+			width: 1920,
+			height: 1080,
+		};
+		show.scenes[0].size = Some(program);
+		show.takes("Game").unwrap();
+		let mut turned = turned(&show);
+		assert_eq!(
+			turned.scenes[0].size, None,
+			"pinned at the program's size, so it follows it"
+		);
+		assert!(turned.scenes[0].items[0].portrait.is_some());
+		turned.takes("Game").unwrap();
+
+		turned.scenes[0] = turned.scenes[0].clone().sized(Some(program));
+		turned.validate().unwrap();
+		let why = turned.refuses("Game").unwrap();
+		assert!(why.contains("size of its own"), "{why}");
 	}
 
 	#[test]
