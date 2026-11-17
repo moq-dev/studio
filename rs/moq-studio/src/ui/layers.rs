@@ -117,6 +117,7 @@ impl Panels {
 		let now = kio::clock::now();
 		let mut action = None;
 		let mut rows = Vec::new();
+		self.devices.poll();
 		for index in (0..items.len()).rev() {
 			let item = &items[index];
 			let picked = Picked {
@@ -124,6 +125,14 @@ impl Panels {
 				index,
 			};
 			let selected = self.selection.as_ref() == Some(&picked);
+			let status = status_of(state, &item.source, now);
+			let capture = collection.sources.get(collection.capture(&item.source));
+			// A window chosen by id offers the windows listed now in its place.
+			let window = matches!(status.lost, Some(Lost::Dark(_))) && matches!(capture, Some(Source::Window { .. }));
+			if window && self.devices.listing.is_none() && self.devices.pending.is_none() {
+				let refreshed = self.devices.refresh(&self.runtime).context("cannot list windows");
+				self.fail(Spot::Add, refreshed);
+			}
 			let fault = self.fault(&Spot::Layer(layer.clone(), item.source.clone()));
 			let what = words(collection, &item.source);
 			let what = match item.slot {
@@ -135,11 +144,19 @@ impl Panels {
 				item,
 				kind: kind(collection, &item.source),
 				words: what,
-				status: status_of(state, &item.source, now),
+				status,
+				capture,
+				windows: self.devices.listing.as_ref().map(|listing| &listing.windows),
 				fault,
 				selected,
 			};
-			let (response, asked) = row.show(ui, ui.id().with(("layer", layer.scene.as_deref(), index)));
+			let (response, asked, opened) = row.show(ui, ui.id().with(("layer", layer.scene.as_deref(), index)));
+			// Its popover, opened, lists the windows afresh: the listing kept
+			// may be from before the window went, or another opened.
+			if opened && window && self.devices.pending.is_none() {
+				let refreshed = self.devices.refresh(&self.runtime).context("cannot list windows");
+				self.fail(Spot::Add, refreshed);
+			}
 			if let Some(asked) = asked {
 				action = Some((picked.clone(), asked));
 			}
@@ -220,13 +237,18 @@ struct Row<'a> {
 	kind: Icon,
 	words: String,
 	status: Health,
+	/// The source it captures, a copy's what it copies.
+	capture: Option<&'a Source>,
+	/// The windows this machine lists, once listed.
+	windows: Option<&'a Result<Vec<Pick>, String>>,
 	fault: Option<&'a str>,
 	selected: bool,
 }
 
 impl Row<'_> {
-	/// Draw the row with `id`; its response and what its lock or eye asked.
-	fn show(self, ui: &mut Ui, id: egui::Id) -> (egui::Response, Option<LayerAction>) {
+	/// Draw the row with `id`; its response, what its lock, eye, or badge
+	/// asked, and whether its badge was clicked open.
+	fn show(self, ui: &mut Ui, id: egui::Id) -> (egui::Response, Option<LayerAction>, bool) {
 		let size = vec2(ui.available_width(), ROW);
 		let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
 		let response = ui.interact(rect, id, Sense::click_and_drag());
@@ -265,9 +287,11 @@ impl Row<'_> {
 			egui::TextStyle::Body,
 		);
 		painter.galley(pos2(left, rect.top() + 8.0), galley, ink);
-		let (below, color) = match self.fault {
-			Some(fault) => (fault.to_string(), kit::ERR),
-			None => (self.words, kit::DIM),
+		let (below, color) = match (self.fault, self.status.lost) {
+			(Some(fault), _) => (fault.to_string(), kit::ERR),
+			// Its icon says what kind it is.
+			(None, Some(lost)) => (super::dark::words(lost), kit::CUE),
+			(None, None) => (self.words, kit::DIM),
 		};
 		let small = egui::RichText::new(below).font(kit::ui(11.0)).color(color);
 		let galley = egui::WidgetText::from(small).into_galley(
@@ -279,10 +303,30 @@ impl Row<'_> {
 		painter.galley(pos2(left, rect.top() + 26.0), galley, color);
 
 		let mut asked = None;
-		// A source live and well needs no mark; the inspector says so.
+		let mut opened = false;
+		// A source live and well needs no mark; the inspector says so. One
+		// gone dark or stalled has a badge in its place, which opens what to do.
 		let marked = self.status.color != kit::OK || self.fault.is_some();
+		let lost = self.status.lost.filter(|_| self.fault.is_none());
+		let dark = lost.is_some();
+		let badge = Rect::from_center_size(dot.center() - vec2(4.0, 0.0), Vec2::splat(20.0));
+		if let Some(lost) = lost
+			&& let Some(capture) = self.capture
+		{
+			let mend;
+			(opened, mend) = super::dark::badge_button(
+				ui,
+				badge,
+				id.with("dark"),
+				&self.item.source,
+				capture,
+				lost,
+				self.windows,
+			);
+			asked = mend.map(LayerAction::Mend);
+		}
 		let status = ui.interact(dot, id.with("status"), Sense::hover());
-		if marked {
+		if marked && !dark {
 			let color = if self.fault.is_some() {
 				kit::ERR
 			} else {
@@ -290,7 +334,17 @@ impl Row<'_> {
 			};
 			painter.circle_filled(dot.center(), 3.5, color);
 		}
-		if marked && (status.hovered() || self.fault.is_some()) {
+		// A failure besides, such as its track's, keeps its red dot beside
+		// the badge, with the words on hover.
+		if dark && self.status.color == kit::ERR {
+			let beside = Rect::from_center_size(pos2(badge.left() - 8.0, dot.center().y), Vec2::splat(12.0));
+			painter.circle_filled(beside.center(), 3.5, kit::ERR);
+			let failed = ui.interact(beside, id.with("failed"), Sense::hover());
+			if failed.hovered() {
+				failed.on_hover_text(self.status.lines.join("\n"));
+			}
+		}
+		if marked && !dark && (status.hovered() || self.fault.is_some()) {
 			let mut lines = self.status.lines.clone();
 			if let Some(fault) = self.fault {
 				lines.insert(0, fault.to_string());
@@ -318,7 +372,7 @@ impl Row<'_> {
 		if ui.put(eye, IconButton::new(icon, name).small()).clicked() {
 			asked = Some(LayerAction::Show(!self.item.visible));
 		}
-		(response, asked)
+		(response, asked, opened)
 	}
 }
 
@@ -358,6 +412,8 @@ impl egui::Widget for AddLayer {
 pub(super) struct Health {
 	pub(super) color: Color32,
 	pub(super) lines: Vec<String>,
+	/// Why it shows no new picture, once that counts: gone dark or stalled.
+	pub(super) lost: Option<Lost>,
 }
 
 /// How `name` is doing: live, starting, stalled, ended, or failed with its
@@ -368,13 +424,12 @@ pub(super) fn status_of(state: &State, name: &str, now: kio::clock::Instant) -> 
 	// A clone is as live as what it clones.
 	let capture = collection.capture(name);
 	let feed = state.sources.get(capture);
-	let (mut color, first) = match (
-		state.compositor.error(capture),
-		feed,
-		feed.and_then(|feed| feed.stalled(now)),
-	) {
+	let dark = state.dark(name, now);
+	let lost = state.lost(name, now);
+	let (mut color, first) = match (state.compositor.error(capture), feed, state.stalled(name, now)) {
 		(Some(err), _, _) => (kit::ERR, format!("Failed: {err}")),
 		(None, _, Some(stall)) => (kit::CUE, format!("Stalled: {}", health::without(stall))),
+		(None, _, None) if let Some(dark) = dark => (kit::CUE, format!("All dark for {:.0} s", dark.as_secs_f64())),
 		(None, Some(feed), None) => match feed.status() {
 			Status::Starting => (kit::DIM, "Starting".to_string()),
 			Status::Live => (kit::OK, "Live".to_string()),
@@ -413,7 +468,7 @@ pub(super) fn status_of(state: &State, name: &str, now: kio::clock::Instant) -> 
 			None => {}
 		},
 	}
-	Health { color, lines }
+	Health { color, lines, lost }
 }
 
 /// The icon for what `name` shows, by its source's kind, or the kind of what

@@ -15,6 +15,7 @@ use crate::collection::{
 	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Nested, Rect, Settled, Shape,
 	Source, Transition,
 };
+use crate::dark::{Probe, Prober};
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::glide::{Glide, REFLOW, mixed, pair, stack};
 use crate::matte::Matte;
@@ -91,6 +92,9 @@ pub struct Compositor {
 	nested: HashMap<String, Vec<Target>>,
 	/// Lays out and paints overlays, started with the first one.
 	overlays: Option<Overlays>,
+	/// Reduces captures' pictures to see if they went dark, built with the
+	/// first probe's first read.
+	prober: Option<Prober>,
 	/// The thumbnails shown, by what they show.
 	thumbnails: BTreeMap<Thumbnail, Thumb>,
 	/// How many renders have run, which picks the thumbnails each draws.
@@ -322,9 +326,26 @@ struct Layer {
 	overlay: Option<Overlay>,
 	/// Why the newest picture failed to draw, logged when it first does.
 	error: Option<String>,
+	/// Watches a camera, display, or window for going dark, unless it is
+	/// expected to.
+	probe: Option<Probe>,
+	/// Whether `picture` is the probe's last good one, held over the dark.
+	holding: bool,
 }
 
 impl Layer {
+	/// Forget every picture from before a clear, so none may show, even if
+	/// the picture after it fails to draw: the newest, and the probe's last
+	/// good one and the read it has in flight.
+	fn clear(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+		self.cleared = true;
+		self.raw = None;
+		self.fresh = true;
+		if let Some(probe) = &mut self.probe {
+			*probe = Probe::new(device, queue);
+		}
+	}
+
 	/// Bring the picture drawn up to date with the newest one delivered,
 	/// through its matte while `background` is removed.
 	fn develop(
@@ -424,6 +445,7 @@ impl Compositor {
 			layers: HashMap::new(),
 			nested: HashMap::new(),
 			overlays: None,
+			prober: None,
 			thumbnails: BTreeMap::new(),
 			renders: 0,
 			named: 0,
@@ -607,6 +629,16 @@ impl Compositor {
 			Some(Err(err)) => Some(err),
 			_ => layer.error.as_deref(),
 		}
+	}
+
+	/// How long the camera, display, or window called `source` has shown a
+	/// picture all one dark color while live, once that is at least
+	/// [`DARK`](crate::dark::DARK) at `now`. Until then the compositor draws
+	/// the last picture it showed that was not dark in its place, if any;
+	/// after, the dark picture as it is. Never for a source expected to go
+	/// dark, nor any other kind.
+	pub fn dark(&self, source: &str, now: Instant) -> Option<Duration> {
+		self.layers.get(source)?.probe.as_ref()?.dark(now)
 	}
 
 	/// The width and height in pixels of `source`'s newest picture, a capture
@@ -1117,16 +1149,25 @@ impl Compositor {
 					lut: None,
 					overlay: None,
 					error: None,
+					probe: None,
+					holding: false,
 				},
 				None => continue,
 			};
+			let probed = source.may_go_dark() && !collection.video.get(name).is_some_and(|video| video.expect_dark);
+			match (&layer.probe, probed) {
+				(None, true) => layer.probe = Some(Probe::new(&self.device, &self.queue)),
+				(Some(_), false) => layer.probe = None,
+				_ => {}
+			}
+			// A feed started again, even between two renders, holds nothing
+			// from the one before.
+			if let Some(probe) = &mut layer.probe {
+				probe.follow(feed.generation());
+			}
 			if let Some(taken) = taken {
 				if taken.cleared {
-					// Nothing from before the clear may show, even if the picture
-					// after it fails to draw.
-					layer.cleared = true;
-					layer.raw = None;
-					layer.fresh = true;
+					layer.clear(&self.device, &self.queue);
 				}
 				self.take(name, source, &mut layer, taken.picture, now);
 			}
@@ -1136,7 +1177,43 @@ impl Compositor {
 				.map(|video| video.background)
 				.unwrap_or_default();
 			layer.develop(name, background, &self.device, &self.queue, &self.effects);
+			let live = feed.status() == Status::Live;
+			self.watch(&mut layer, background, live, now);
 			self.layers.insert(name.clone(), layer);
+		}
+	}
+
+	/// Have `layer`'s probe read its newest picture, and draw the probe's last
+	/// good picture in its place while it holds one over the dark. A picture
+	/// cut out of its background is never held, since the good one is not.
+	/// A picture is drawn before it is judged, so black shows until the next
+	/// read, up to [`INTERVAL`](crate::dark::INTERVAL) and its readback:
+	/// judging each one first would hold every capture's picture back by a
+	/// readback, or read every picture, and the maintainer took this bounded
+	/// flash over either on moq-dev/studio#192.
+	/// Without a probe, such as once its warning is turned off, or a picture,
+	/// it holds nothing.
+	fn watch(&mut self, layer: &mut Layer, background: Background, live: bool, now: Instant) {
+		let (Some(probe), Some(raw)) = (&mut layer.probe, &layer.raw) else {
+			if std::mem::take(&mut layer.holding) && background == Background::Keep {
+				layer.picture = layer.raw.as_ref().map(|raw| self.effects.picture(raw));
+			}
+			return;
+		};
+		let prober = self.prober.get_or_insert_with(|| Prober::new(&self.device));
+		probe.step(prober, &self.effects, raw, live, now);
+		match probe.held(now).filter(|_| background == Background::Keep) {
+			Some(held) => {
+				layer.picture = Some(held.clone());
+				layer.holding = true;
+			}
+			None if layer.holding => {
+				layer.holding = false;
+				if background == Background::Keep {
+					layer.picture = layer.raw.as_ref().map(|raw| self.effects.picture(raw));
+				}
+			}
+			None => {}
 		}
 	}
 
@@ -1151,8 +1228,14 @@ impl Compositor {
 			source::Picture::Frame(frame) => {
 				let renderer = match layer.renderer.as_mut() {
 					Some(renderer) => Ok(renderer),
-					None => Renderer::new(&self.device, &self.queue, Default::default())
-						.map(|renderer| layer.renderer.insert(renderer)),
+					None => {
+						// A probe copies each picture it reads.
+						let mut config = moq_video::render::Config::default();
+						if source.may_go_dark() {
+							config.usage = wgpu::TextureUsages::COPY_SRC;
+						}
+						Renderer::new(&self.device, &self.queue, config).map(|renderer| layer.renderer.insert(renderer))
+					}
 				};
 				renderer
 					.and_then(|renderer| renderer.render(&frame))
@@ -1192,6 +1275,9 @@ impl Compositor {
 				layer.error = None;
 				layer.raw = Some(texture);
 				layer.fresh = true;
+				if let Some(probe) = &mut layer.probe {
+					probe.changed();
+				}
 			}
 			Err(err) => {
 				if layer.error.is_none() {
@@ -3823,6 +3909,124 @@ mod tests {
 		.await;
 	}
 
+	/// A camera that goes dark for a moment draws its last good picture in
+	/// place of the dark, unless its background is removed; dark for
+	/// [`DARK`](crate::dark::DARK), it draws its own again and counts as
+	/// gone dark.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_moment_of_dark_draws_the_last_good_picture() {
+		let (device, queue) = gpu().await;
+		let mut compositor = Compositor::new(&device, &queue, collection().canvas).unwrap();
+		let size = wgpu::Extent3d {
+			width: 64,
+			height: 36,
+			depth_or_array_layers: 1,
+		};
+		let raw = device.create_texture(&wgpu::TextureDescriptor {
+			label: None,
+			size,
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			format: FORMAT,
+			usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+			view_formats: &[],
+		});
+		let show = |rgba: [u8; 4]| {
+			queue.write_texture(
+				raw.as_image_copy(),
+				&rgba.repeat(64 * 36),
+				wgpu::TexelCopyBufferLayout {
+					offset: 0,
+					bytes_per_row: Some(64 * 4),
+					rows_per_image: None,
+				},
+				size,
+			);
+		};
+		let mut layer = Layer {
+			source: Source::Camera { id: None },
+			renderer: None,
+			raw: Some(raw.clone()),
+			fresh: true,
+			cleared: false,
+			matte: None,
+			picture: None,
+			lut: None,
+			overlay: None,
+			error: None,
+			probe: Some(Probe::new(&device, &queue)),
+			holding: false,
+		};
+		let start = Instant::now();
+		let at = |offset: Duration| start.saturating_add(offset);
+		// Each picture is read, then judged on the next watch once the GPU is done.
+		let read = |compositor: &mut Compositor, layer: &mut Layer, rgba, when, background| {
+			show(rgba);
+			layer.probe.as_mut().unwrap().changed();
+			compositor.watch(layer, background, true, when);
+			device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+			compositor.watch(layer, background, true, when);
+		};
+
+		read(&mut compositor, &mut layer, RED, at(Duration::ZERO), Background::Keep);
+		assert!(!layer.holding);
+		let dark = crate::dark::INTERVAL;
+		read(&mut compositor, &mut layer, BLACK, at(dark), Background::Keep);
+		assert!(layer.holding, "the last good picture is drawn");
+		assert_eq!(layer.probe.as_ref().unwrap().dark(at(dark)), None);
+
+		// A cut-out never shows the held picture, which has its background.
+		compositor.watch(&mut layer, Background::Remove, true, at(dark));
+		assert!(!layer.holding);
+		compositor.watch(&mut layer, Background::Keep, true, at(dark));
+		assert!(layer.holding);
+
+		// Turning its warning off draws its own picture again at once, with
+		// no new picture to replace the held one.
+		let probe = layer.probe.take();
+		compositor.watch(&mut layer, Background::Keep, true, at(dark));
+		assert!(!layer.holding, "no probe holds a picture");
+		assert!(layer.picture.is_some());
+		layer.probe = probe;
+		compositor.watch(&mut layer, Background::Keep, true, at(dark));
+		assert!(layer.holding);
+
+		// A clear forgets the last good picture: black after it is drawn
+		// as it is, never the red from before it.
+		let mut cleared = Layer {
+			source: Source::Camera { id: None },
+			renderer: None,
+			raw: Some(raw.clone()),
+			fresh: true,
+			cleared: false,
+			matte: None,
+			picture: None,
+			lut: None,
+			overlay: None,
+			error: None,
+			probe: Some(Probe::new(&device, &queue)),
+			holding: false,
+		};
+		read(&mut compositor, &mut cleared, RED, at(Duration::ZERO), Background::Keep);
+		read(&mut compositor, &mut cleared, BLACK, at(dark), Background::Keep);
+		assert!(cleared.holding, "the red is held over the black");
+		cleared.clear(&device, &queue);
+		compositor.watch(&mut cleared, Background::Keep, true, at(dark));
+		assert!(!cleared.holding, "nothing from before the clear is held");
+		assert!(cleared.picture.is_none(), "nothing from before the clear is drawn");
+		cleared.raw = Some(raw.clone());
+		read(&mut compositor, &mut cleared, BLACK, at(dark * 2), Background::Keep);
+		assert!(!cleared.holding, "the red from before the clear is never held again");
+
+		let gone = dark + crate::dark::DARK;
+		compositor.watch(&mut layer, Background::Keep, true, at(gone));
+		assert!(!layer.holding, "the dark is drawn as it is");
+		assert!(layer.picture.is_some());
+		assert_eq!(layer.probe.as_ref().unwrap().dark(at(gone)), Some(crate::dark::DARK));
+	}
+
 	/// A source that clears its picture, such as a media source played
 	/// again, never shows the cut-out of a picture from before, even when its
 	/// next picture overtakes the clear.
@@ -3853,6 +4057,8 @@ mod tests {
 			lut: None,
 			overlay: None,
 			error: None,
+			probe: None,
+			holding: false,
 		};
 		let develop = |layer: &mut Layer| layer.develop("replay", Background::Remove, &device, &queue, &effects);
 		let wait = |layer: &mut Layer| {

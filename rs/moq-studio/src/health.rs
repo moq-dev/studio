@@ -65,6 +65,12 @@ pub struct Report {
 	pub sources: Vec<Track>,
 	/// What is wrong, worst first, each naming its cause.
 	pub problems: Vec<Problem>,
+	/// How many cameras, displays, and windows a live broadcast shows went
+	/// dark, which the health dot counts.
+	pub dark: usize,
+	/// How many cameras and broadcasts a live broadcast shows stopped
+	/// sending pictures, which the health dot counts too.
+	pub stalled: usize,
 }
 
 /// One broadcast: who watches it, and how each of its tracks reaches
@@ -218,6 +224,9 @@ pub struct Local {
 	/// Sources whose stalled picture or sound a live broadcast carries, what
 	/// stalled, and which broadcasts carry it.
 	pub stalled: Vec<(String, Stall, Live)>,
+	/// Cameras, displays, and windows a live broadcast shows that have been
+	/// all dark this long, and which broadcasts show them.
+	pub dark: Vec<(String, Duration, Live)>,
 	/// Sources a live broadcast shows or plays that ended or failed, and
 	/// where.
 	pub stopped: Vec<(String, Status, Reach)>,
@@ -601,6 +610,12 @@ impl Sampler {
 			viewers,
 			tracks: &broadcast.tracks,
 		});
+		report.dark = local.dark.len();
+		report.stalled = local
+			.stalled
+			.iter()
+			.filter(|(_, stall, _)| matches!(stall, Stall::Picture(_)))
+			.count();
 		report.problems = problems(&Facts {
 			relays: &report.relays,
 			local: &local,
@@ -964,6 +979,16 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		add(
 			Verdict::Unhealthy,
 			format!("Source `{name}` stalled: {}, so {instead}.", without(*stall)),
+		);
+	}
+	for (name, dark, live) in &local.dark {
+		add(
+			Verdict::Degraded,
+			format!(
+				"Source `{name}` has been all dark for {:.0} s, so {}.",
+				dark.as_secs_f64(),
+				clause(live, "shows", "show", "black where it was")
+			),
 		);
 	}
 	for (name, status, reach) in &local.stopped {
@@ -1569,6 +1594,27 @@ mod tests {
 		);
 	}
 
+	/// The dot counts the layers gone dark and those whose picture stalled,
+	/// but not a stalled sound, which no layer shows.
+	#[test]
+	fn counts_the_layers_without_a_picture() {
+		let program = Live {
+			program: true,
+			scenes: Vec::new(),
+		};
+		let secs = Duration::from_secs;
+		let local = Local {
+			stalled: vec![
+				("camera".into(), Stall::Picture(secs(3)), program.clone()),
+				("mic".into(), Stall::Sound(secs(2)), program.clone()),
+			],
+			dark: vec![("game".into(), secs(12), program.clone())],
+			..Default::default()
+		};
+		let report = Sampler::new(None).sample(kio::clock::now(), local);
+		assert_eq!((report.dark, report.stalled), (1, 1));
+	}
+
 	/// A scene published again under its name counts its frames afresh,
 	/// rather than from the counters of the one before.
 	#[test]
@@ -1797,7 +1843,7 @@ mod tests {
 	}
 
 	/// Problems list worst first: an unreachable relay and a frozen or silent
-	/// source above a slow round trip. A frozen, silent, ended, or uploaded
+	/// source above a slow round trip. A frozen, silent, dark, ended, or uploaded
 	/// source names the broadcasts that show or play it, including a published
 	/// scene that alone plays it.
 	#[test]
@@ -1823,6 +1869,10 @@ mod tests {
 				("camera".into(), Stall::Picture(Duration::from_secs(3)), program.clone()),
 				("logo".into(), Stall::Picture(Duration::from_secs(3)), tall.clone()),
 				("mic".into(), Stall::Sound(Duration::from_secs(2)), tall.clone()),
+			],
+			dark: vec![
+				("game".into(), Duration::from_secs(12), program.clone()),
+				("screen".into(), Duration::from_secs(3), both.clone()),
 			],
 			stopped: vec![
 				("intro".into(), Status::Ended, reach(&program, &program)),
@@ -1858,6 +1908,8 @@ mod tests {
 				"Source `logo` stalled: no new picture for 3 s, so scene `tall` repeats its last one.",
 				"Source `mic` stalled: no new sound for 2 s, so scene `tall` plays silence for it.",
 				"Source `music` failed: the file is gone.",
+				"Source `game` has been all dark for 12 s, so the program shows black where it was.",
+				"Source `screen` has been all dark for 3 s, so the program, scene `tall` and scene `wide` show black where it was.",
 				"Source `intro` played to its end, so the program holds its last picture and plays no sound for it.",
 				"Source `outro` played to its end, so the program, scene `tall` and scene `wide` hold its last picture and play no sound for it.",
 				"Source `clip` played to its end, so the program holds its last picture and scene `tall` plays no sound for it.",
