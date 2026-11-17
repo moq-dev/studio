@@ -12,8 +12,8 @@ use egui::{Color32, Ui};
 use moq_scene::browser::Paint;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
-	Background, Blend, Canvas, Clip, Collection, Crop, Detail, Direction, Draft, Ease, Filter, Item, Keyframe, Layer,
-	MaskMode, Rect, Scene, Source, Thumbnail, Transition, Video,
+	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode,
+	Rect, Scene, Source, Thumbnail, Transition, Video,
 };
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -217,6 +217,7 @@ impl Studio {
 		let controls = Arc::new(Controls::new(engine.clone(), stream, runtime.clone()));
 		drop(controls.follow_relays());
 		let review = review::Review::new(&engine, &runtime);
+		let multiview = multiview::Multiview::new(render.clone(), engine.clone(), controls.clone());
 		let mut panels = Panels {
 			engine,
 			runtime,
@@ -268,7 +269,7 @@ impl Studio {
 			moving: None,
 			staged: false,
 			thumbnails: BTreeMap::new(),
-			thumbnails_shown: BTreeMap::new(),
+			thumbnails_shown: BTreeSet::new(),
 			bound: BTreeMap::new(),
 			guest: String::new(),
 			shown: None,
@@ -279,7 +280,7 @@ impl Studio {
 			levels: Levels::default(),
 			graph: graph::View::default(),
 			review,
-			multiview: multiview::Multiview::default(),
+			multiview,
 		};
 		if dropped > 0 {
 			panels.report(Err(anyhow::anyhow!(dropped_message(dropped))));
@@ -321,6 +322,7 @@ impl Studio {
 	/// otherwise keep alive.
 	pub fn release(self, render: &eframe::egui_wgpu::RenderState) {
 		let panels = self.panels;
+		panels.multiview.release();
 		let mut renderer = render.renderer.write();
 		for registered in [&panels.program, &panels.preview]
 			.into_iter()
@@ -353,12 +355,7 @@ impl Studio {
 	/// Draw the multiview as the window itself, in place of the studio, with
 	/// the sources called `picked` on it.
 	pub(crate) fn multiview_alone(&mut self, picked: &[&str]) {
-		let panels = &mut self.panels;
-		panels.multiview.alone = true;
-		let show = panels.engine.autosave.path().display().to_string();
-		for name in picked {
-			panels.pick_source(&show, name, true);
-		}
+		self.panels.multiview.set_alone(picked);
 	}
 
 	/// Open the scene graph's window, as Settings, Advanced would.
@@ -469,7 +466,8 @@ impl Studio {
 			bindings = eframe::get_value(storage, HOTKEYS).unwrap_or_default();
 			let studio = eframe::get_value(storage, STUDIO_MODE).unwrap_or_default();
 			panels.controls.set_studio(studio);
-			panels.multiview = eframe::get_value(storage, multiview::KEY).unwrap_or_default();
+			let multiview = eframe::get_value(storage, multiview::KEY).unwrap_or_default();
+			panels.multiview.load(multiview);
 		}
 		let hotkeys = Hotkeys::new(window, self.panels.controls.clone(), &self.panels.runtime, bindings);
 		self.panels.hotkeys = Some(hotkeys);
@@ -480,7 +478,7 @@ impl Studio {
 		eframe::set_value(storage, SPEAKER, &panels.speaker);
 		eframe::set_value(storage, SNAPPING, &panels.snapping);
 		eframe::set_value(storage, STUDIO_MODE, &panels.controls.studio());
-		eframe::set_value(storage, multiview::KEY, &panels.multiview);
+		panels.multiview.save(storage);
 		if let Some(hotkeys) = &panels.hotkeys {
 			eframe::set_value(storage, HOTKEYS, &hotkeys.bindings());
 		}
@@ -529,14 +527,11 @@ impl Studio {
 				.map_or(Verdict::Healthy, |problem| problem.verdict)
 		};
 		fx.follow(panels.engine.on_air().live().is_some(), snapshot.takes, verdict);
-		match panels.multiview.alone {
-			true => {
-				let rect = ui.max_rect();
-				panels.multiview(ui, &snapshot, rect);
-			}
+		match panels.multiview.alone() {
+			true => panels.multiview.ui(ui),
 			false => {
 				panels.window(ui, fx, &snapshot);
-				panels.multiview_window(ui.ctx(), &snapshot);
+				panels.multiview.show(ui.ctx());
 			}
 		}
 		// A stage not shown hears no input, so it lets go of the pages, as
@@ -545,11 +540,8 @@ impl Studio {
 			panels.let_go();
 		}
 		// A thumbnail nothing shows is not drawn, until it is again.
-		let mut state = panels.engine.state.lock().unwrap();
-		let shown = panels.thumbnails_shown.iter();
-		state
-			.compositor
-			.set_thumbnails(shown.map(|(thumbnail, detail)| (thumbnail.clone(), *detail)));
+		let bindings = panels.hotkeys.as_ref().map(Hotkeys::bindings).unwrap_or_default();
+		panels.multiview.share(&panels.thumbnails_shown, bindings);
 	}
 }
 
@@ -694,9 +686,8 @@ struct Panels {
 	staged: bool,
 	/// Each thumbnail the compositor drew of those shown last frame.
 	thumbnails: BTreeMap<Thumbnail, Registered>,
-	/// The thumbnails this frame shows, at the largest detail any place
-	/// shows each, which the compositor draws from now on.
-	thumbnails_shown: BTreeMap<Thumbnail, Detail>,
+	/// The thumbnails this frame shows, which the compositor draws from now on.
+	thumbnails_shown: BTreeSet<Thumbnail>,
 	/// The page `interact` holds state for under each name, so one stopped or
 	/// restarted under it, as an edit or a reload does, is forgotten.
 	bound: BTreeMap<String, moq_scene::browser::Page>,

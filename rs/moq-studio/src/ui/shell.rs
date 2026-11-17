@@ -16,13 +16,13 @@ use super::*;
 /// short lock a frame.
 pub(super) struct Snapshot {
 	/// The show's name: its scene file's, without the extension.
-	pub(super) show: String,
+	show: String,
 	/// The edits undo and redo would take back and bring back, by label.
 	undo: Option<String>,
 	redo: Option<String>,
 	/// The scene on program.
-	pub(super) program: Option<String>,
-	pub(super) scenes: Vec<ScenePad>,
+	program: Option<String>,
+	scenes: Vec<ScenePad>,
 	/// The scene the panic key cuts to.
 	safe: Option<String>,
 	/// Each sound the stream carries.
@@ -40,11 +40,11 @@ pub(super) struct Snapshot {
 }
 
 /// A scene as its pad shows it.
-pub(super) struct ScenePad {
-	pub(super) name: String,
-	pub(super) canvas: Canvas,
+struct ScenePad {
+	name: String,
+	canvas: Canvas,
 	/// Why it cannot go on program, if it cannot.
-	pub(super) refused: Option<String>,
+	refused: Option<String>,
 }
 
 /// A sound the stream carries, as its row shows it.
@@ -54,12 +54,15 @@ struct Sound {
 	audio: moq_scene::Audio,
 }
 
-/// What a click on the pad of the scene called `scene` does: cue it in
-/// Studio mode, or take it.
-pub(super) fn click(snapshot: &Snapshot, scene: &str) -> PadAction {
-	match snapshot.studio {
-		true => PadAction::Cue(scene.to_string()),
-		false => PadAction::Take(scene.to_string()),
+/// A scene's tally, and the tag over its own, if any, by whether it is `on_air`,
+/// the stream is `live`, and it is `cued`: off air, the scene on program is
+/// the one the stream opens on.
+pub(super) fn tally(on_air: bool, live: bool, cued: bool) -> (Tally, Option<&'static str>) {
+	match (on_air, live, cued) {
+		(true, true, _) => (Tally::Air, None),
+		(true, false, _) => (Tally::Cue, Some("First")),
+		(false, _, true) => (Tally::Cue, None),
+		(false, _, false) => (Tally::Off, None),
 	}
 }
 
@@ -79,7 +82,7 @@ const TRAFFIC_LIGHTS: f32 = 64.0;
 
 /// What a pad asked for, naming its scene: the pads are drawn from the
 /// frame's snapshot, and a reload since may have moved or removed it.
-pub(super) enum PadAction {
+enum PadAction {
 	Take(String),
 	Cue(String),
 	/// Open it for editing off air.
@@ -670,13 +673,7 @@ impl Panels {
 			let (from, to) = rename_sheet(ui.ctx(), "rename scene", &mut self.renaming_pad)?;
 			Some(PadAction::Renamed(from, to))
 		});
-		if let Some(action) = action {
-			self.pad_action(action);
-		}
-	}
-
-	/// Do what a scene's pad, or its tile on the multiview, asked for.
-	pub(super) fn pad_action(&mut self, action: PadAction) {
+		let Some(action) = action else { return };
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
@@ -770,9 +767,14 @@ impl Panels {
 		};
 		let on_air = snapshot.program.as_deref() == Some(pad.name.as_str());
 		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
-		let (tally, tag) = self.tally(snapshot, &pad.name);
+		let live = self.engine.on_air().live().is_some();
+		let (tally, tag) = tally(on_air, live, cued);
 		let response = self.pad(ui, pad, tally, tag, width, snapshot.shape);
-		let mut action = (response.clicked() && pad.refused.is_none()).then(|| click(snapshot, &pad.name));
+		let click = match snapshot.studio {
+			true => PadAction::Cue(pad.name.clone()),
+			false => PadAction::Take(pad.name.clone()),
+		};
+		let mut action = (response.clicked() && pad.refused.is_none()).then_some(click);
 		response.context_menu(|ui| {
 			let takeable = pad.refused.is_none() || on_air;
 			let take = ui.add_enabled(!on_air && pad.refused.is_none(), egui::Button::new("Take it on air"));
@@ -845,20 +847,6 @@ impl Panels {
 		action
 	}
 
-	/// The tally of the scene called `scene`, and the tag over its own, if
-	/// any: off air, the scene on program is the one the stream opens on.
-	pub(super) fn tally(&self, snapshot: &Snapshot, scene: &str) -> (Tally, Option<&'static str>) {
-		let on_air = snapshot.program.as_deref() == Some(scene);
-		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == scene);
-		let live = self.engine.on_air().live().is_some();
-		match (on_air, live, cued) {
-			(true, true, _) => (Tally::Air, None),
-			(true, false, _) => (Tally::Cue, Some("First")),
-			(false, _, true) => (Tally::Cue, None),
-			(false, _, false) => (Tally::Off, None),
-		}
-	}
-
 	/// A scene's pad, `width` wide, with its thumbnail once the compositor
 	/// has drawn it, which it draws while the pad is on screen.
 	fn pad(
@@ -889,7 +877,7 @@ impl Panels {
 			.shape(shape);
 		let response = ui.add(widget);
 		if ui.is_rect_visible(response.rect) {
-			self.show_thumbnail(thumbnail, Detail::default());
+			self.thumbnails_shown.insert(thumbnail);
 		}
 		response
 	}
@@ -1180,13 +1168,6 @@ impl Panels {
 		self.details = open;
 	}
 
-	/// Draw `thumbnail` at `detail` from now on, or at the larger of each where
-	/// another place shows it too.
-	pub(super) fn show_thumbnail(&mut self, thumbnail: Thumbnail, detail: Detail) {
-		let shown = self.thumbnails_shown.entry(thumbnail).or_insert(detail);
-		*shown = shown.max(detail);
-	}
-
 	/// Show each thumbnail the compositor drew of those shown last frame, and
 	/// let go of the rest, so this frame starts with none shown.
 	pub(super) fn follow_thumbnails(
@@ -1195,7 +1176,7 @@ impl Panels {
 		compositor: &moq_scene::Compositor,
 	) {
 		let mut gone = std::mem::take(&mut self.thumbnails);
-		for thumbnail in std::mem::take(&mut self.thumbnails_shown).into_keys() {
+		for thumbnail in std::mem::take(&mut self.thumbnails_shown) {
 			let Some(texture) = compositor.thumbnail(&thumbnail) else {
 				continue;
 			};
