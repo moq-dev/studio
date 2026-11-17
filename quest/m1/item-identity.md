@@ -31,9 +31,14 @@ for the same reason.
 - **Users:** the compositor's keepers key by id; `follow` keeps only the
   reload match. The slots' glide (`rs/moq-scene/src/glide.rs`, which pairs
   items by source) pairs by id where both sides have one.
+- **Undo across layers:** a placer whose layer leaves its scene, as Keep
+  always on top does, stays parked under its id
+  while the history can bring the layer back, so the undo puts it back where
+  it was, as an undo of switching keep-clear off does now (#194's decision
+  11). Today such an undo starts a fresh placer at the saved rect.
 - **Tests:** duplicates of one camera keep their own placers across an
-  insert under both, a reorder, an undo of a removal, and a reload of an
-  unchanged file.
+  insert under both, a reorder, an undo of a removal, an undo of Keep always
+  on top, and a reload of an unchanged file.
 
 Decided 2026-11-17 (maintainer, on
 [#194](https://github.com/moq-dev/studio/pull/194#issuecomment-6944247792)):

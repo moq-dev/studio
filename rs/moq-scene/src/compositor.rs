@@ -591,6 +591,17 @@ impl Compositor {
 		}
 	}
 
+	/// Note that a redo or a reload saved the `index`th item of the scene
+	/// called `scene`, one showing `source` that keeps clear, at `saved`: it
+	/// holds there, as [`hold`](Self::hold) says.
+	pub fn redone(&mut self, scene: &str, index: usize, source: &str, saved: Rect) {
+		if let Some(keeper) = self.keepers.get_mut(&(scene.to_string(), index))
+			&& keeper.source == source
+		{
+			keeper.placer.redone(saved);
+		}
+	}
+
 	/// Note that an undo saved the `index`th item of the scene called
 	/// `scene`, one showing `source` that keeps clear, at `saved` as of
 	/// `now`: back where it was saved before the move by hand that held it,
@@ -2859,8 +2870,24 @@ mod tests {
 			assert_eq!(placement.rect, to, "it goes on from where it was placed");
 			assert_eq!(placement.slot, Some(crate::place::Slot::TopLeft));
 
-			// Switched off, as the inspector does, it stays where it is drawn;
-			// an undo of that puts it back in its slot, keeping clear.
+			// Switched off, as the inspector does, holding it, and the switch
+			// undone before the next render: it is still in its slot.
+			studio.compositor.hold("busy", camera, "camera");
+			let item = &mut studio.collection.scenes[0].items[camera];
+			let keep = item.keep_clear.take();
+			item.rect = to;
+			let item = &mut studio.collection.scenes[0].items[camera];
+			item.keep_clear = keep;
+			item.rect = saved;
+			studio.compositor.undone("busy", camera, "camera", saved, after);
+			let after = after.saturating_add(Duration::from_millis(100));
+			studio.render(after);
+			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			assert_eq!((placement.rect, placement.held), (to, false), "undone before it drew");
+
+			// Switched off and drawn so, it stays where it is drawn; an undo of
+			// that puts it back in its slot, keeping clear.
+			studio.compositor.hold("busy", camera, "camera");
 			let item = &mut studio.collection.scenes[0].items[camera];
 			let keep = item.keep_clear.take();
 			item.rect = to;
@@ -2880,10 +2907,25 @@ mod tests {
 
 			// Moved by hand, it stays where the scene file puts it.
 			studio.compositor.hold("busy", camera, "camera");
+			let dragged = Rect { x: 200.0, ..saved };
+			studio.collection.scenes[0].items[camera].rect = dragged;
 			studio.render(after.saturating_add(Duration::from_millis(100)));
 			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
 			assert!(placement.held);
-			assert_eq!(placement.rect, saved);
+			assert_eq!(placement.rect, dragged);
+
+			// Switched off where it is held, which leaves its rect as it is, and
+			// that undone: it is still held.
+			let after = after.saturating_add(Duration::from_millis(200));
+			studio.compositor.hold("busy", camera, "camera");
+			studio.collection.scenes[0].items[camera].keep_clear = None;
+			studio.render(after);
+			studio.collection.scenes[0].items[camera].keep_clear = keep;
+			studio.compositor.undone("busy", camera, "camera", dragged, after);
+			let after = after.saturating_add(Duration::from_millis(100));
+			studio.render(after);
+			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			assert_eq!((placement.rect, placement.held), (dragged, true), "still held");
 		})
 		.await;
 	}

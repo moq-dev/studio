@@ -242,7 +242,8 @@ impl State {
 	/// the scene file has it until the content under it changes.
 	fn hold(&mut self, moved: &[Moved]) {
 		for moved in moved {
-			self.compositor.hold(&moved.scene, moved.index, &moved.source);
+			self.compositor
+				.redone(&moved.scene, moved.index, &moved.source, moved.rect);
 		}
 	}
 
@@ -662,10 +663,11 @@ struct Moved {
 	rect: moq_scene::Rect,
 }
 
-/// Each scene item keeping clear in `after` that `before` saved elsewhere:
-/// the same scene's item at the same index showing the same source, at
-/// another x or y. Its keeper is still under that place, as the compositor
-/// follows items only as it renders.
+/// Each scene item keeping clear in `after` that `before` saved elsewhere or
+/// had not keeping clear: the same scene's item at the same index showing
+/// the same source, at another x or y or switched back on. Its keeper is
+/// still under that place, as the compositor follows items only as it
+/// renders.
 fn moved(before: &Collection, after: &Collection) -> Vec<Moved> {
 	let mut moved = Vec::new();
 	for scene in &after.scenes {
@@ -674,7 +676,7 @@ fn moved(before: &Collection, after: &Collection) -> Vec<Moved> {
 			let Some(old) = was.items.get(index) else { continue };
 			if item.keep_clear.is_some()
 				&& old.source == item.source
-				&& (old.rect.x, old.rect.y) != (item.rect.x, item.rect.y)
+				&& (old.keep_clear.is_none() || (old.rect.x, old.rect.y) != (item.rect.x, item.rect.y))
 			{
 				moved.push(Moved {
 					scene: scene.name.clone(),
@@ -3401,8 +3403,8 @@ mod tests {
 	}
 
 	/// A layer keeping clear that an undo, a redo, or a reload saved
-	/// elsewhere is listed as moved by hand; one only resized, another
-	/// source, or one that does not keep clear is not.
+	/// elsewhere, or switched keeping clear back on, is listed as moved; one
+	/// only resized, another source, or one that does not keep clear is not.
 	#[test]
 	fn an_undo_or_a_reload_moves_by_hand() {
 		let mut before = red_canvas().collection;
@@ -3420,6 +3422,7 @@ mod tests {
 			.items
 			.extend([keeping.clone(), keeping.clone(), keeping]);
 		before.scenes[0].items.push(moq_scene::Item::new("red", rect));
+		before.scenes[0].items.push(moq_scene::Item::new("red", rect));
 		let main = before.scenes[0].name.clone();
 		let mut after = before.clone();
 		let items = &mut after.scenes[0].items;
@@ -3428,14 +3431,15 @@ mod tests {
 		items[3].source = "blue".into();
 		items[3].rect.x = 300.0;
 		items[4].rect.x = 300.0;
-		let rect = moq_scene::Rect { x: 300.0, ..rect };
-		let moved = Moved {
-			scene: main,
-			index: 1,
+		items[5].keep_clear = Some(moq_scene::KeepClear::default());
+		let moved = |index, rect| Moved {
+			scene: main.clone(),
+			index,
 			source: "red".into(),
 			rect,
 		};
-		assert_eq!(super::moved(&before, &after), [moved]);
+		let elsewhere = moq_scene::Rect { x: 300.0, ..rect };
+		assert_eq!(super::moved(&before, &after), [moved(1, elsewhere), moved(5, rect)]);
 	}
 
 	/// An undo of a move by hand puts a layer keeping clear back as it was

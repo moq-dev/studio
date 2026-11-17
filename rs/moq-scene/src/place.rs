@@ -585,6 +585,8 @@ impl Placer {
 	/// the undo puts back what the streamer saw. Anywhere else, it holds, as
 	/// after a move by hand.
 	pub fn undone(&mut self, saved: Rect, now: Instant) {
+		// What another undo or a redo before the next place starts from.
+		self.saved = Some(saved);
 		match self.before.take() {
 			Some(before) if before.saved == saved => {
 				self.at = before.at;
@@ -601,6 +603,15 @@ impl Placer {
 				self.before = before;
 			}
 		}
+	}
+
+	/// Moved by an edit already made, such as a redo or a reload, that saved
+	/// it at `saved`: it holds, as [`hold`](Self::hold) says, and another
+	/// undo or redo before the next [`place`](Self::place) starts from
+	/// there.
+	pub fn redone(&mut self, saved: Rect) {
+		self.hold();
+		self.saved = Some(saved);
 	}
 
 	/// Note whether its picture is read as of `now`: while its scene is not
@@ -1425,6 +1436,15 @@ mod tests {
 		assert!(placer.placement().held);
 		placer.undone(saved, now);
 		assert_eq!(placer.place(saved, &keep, CANVAS, now), to);
+
+		// Redone and undone twice before it is placed again, as on a slow
+		// canvas, it is still back.
+		for _ in 0..2 {
+			placer.redone(first);
+			placer.undone(saved, now);
+		}
+		assert_eq!(placer.place(saved, &keep, CANVAS, now), to);
+		assert!(!placer.placement().held);
 
 		// An undo of an edit that held nothing holds.
 		placer.undone(first, now);

@@ -93,8 +93,10 @@ impl Panels {
 		}
 		let name = item.source.clone();
 		let mut asked = None;
-		// Whether the edit asked for is a move by hand.
+		// Whether the edit asked for is a move by hand, or switches keeping
+		// clear off, which leaves it where it is drawn as a move would.
 		let mut moved = false;
+		let kept = item.keep_clear;
 
 		section(ui, "Place");
 		if picked.layer.scene.is_some() {
@@ -230,7 +232,10 @@ impl Panels {
 			// Switched off, it stays where it is drawn, as keeping it always
 			// on top does, rather than going back over what it moved off.
 			let rect = match (keep_clear, placement) {
-				(None, Some(placement)) => placement.rect,
+				(None, Some(placement)) => {
+					moved = true;
+					placement.rect
+				}
 				_ => item.rect,
 			};
 			asked = Some(Asked::Item(
@@ -531,7 +536,12 @@ impl Panels {
 		let result = match asked {
 			Asked::Item(item, label, gesture) => {
 				if moved {
-					keep::hold(&mut state, &picked.layer, picked.index, &item);
+					// Held as it was before the edit, so an undo puts it back.
+					let was = Item {
+						keep_clear: kept,
+						..item.clone()
+					};
+					keep::hold(&mut state, &picked.layer, picked.index, &was);
 				}
 				edit(&mut state, label, gesture, |draft| {
 					draft.set_item(&picked.layer, picked.index, item)
