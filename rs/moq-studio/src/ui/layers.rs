@@ -565,10 +565,10 @@ impl Panels {
 						let source = state.collection().sources.get(&name);
 						source.is_some_and(|source| crate::guests::plays_guest(room.path(), source))
 					});
-					let tile = room
-						.as_ref()
-						.zip(layer.scene.as_deref())
-						.and_then(|(room, scene)| crate::guests::tile(state.collection(), room.path(), scene, &name));
+					let tile = layer
+						.scene
+						.as_deref()
+						.and_then(|scene| crate::guests::tile(state.collection(), scene, &name));
 					if let Some(at) = tile.filter(|_| guest) {
 						index = at;
 						item = Item {

@@ -1816,12 +1816,13 @@ fn color_ui(ui: &mut Ui, color: &mut moq_scene::Rgba) -> egui::Response {
 
 /// The source and video settings of a clone of `name`. A clone of a clone
 /// shows the same capture, so it clones that. It copies the crop and filters,
-/// but not a removed background: the clone already shows the cut-out.
+/// but not a removed background: the clone already shows the cut-out. For a
+/// role, it copies the source filling it, with that look.
 fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
 	let source = Source::Clone {
 		source: collection.capture(name).to_string(),
 	};
-	let video = collection.video.get(name).map(|video| Video {
+	let video = collection.video.get(collection.resolve(name)).map(|video| Video {
 		background: Background::Keep,
 		..video.clone()
 	});
@@ -2761,6 +2762,10 @@ framerate = 30
 [sources.cam]
 kind = "camera"
 
+[sources.Camera]
+kind = "role"
+source = "cam"
+
 [video.cam]
 background = "remove"
 filters = [{ kind = "opacity", amount = 0.5 }]
@@ -2768,14 +2773,18 @@ filters = [{ kind = "opacity", amount = 0.5 }]
 		)
 		.unwrap();
 
-		let (source, video) = clone_of(&collection, "cam");
-		let video = video.unwrap();
-		assert_eq!(video.background, Background::Keep);
-		assert_eq!(video.filters, collection.video["cam"].filters);
+		// A role's copy is of the source filling it, with that look.
+		for name in ["cam", "Camera"] {
+			let (source, video) = clone_of(&collection, name);
+			assert_eq!(source, Source::Clone { source: "cam".into() }, "{name}");
+			let video = video.unwrap();
+			assert_eq!(video.background, Background::Keep);
+			assert_eq!(video.filters, collection.video["cam"].filters, "{name}");
 
-		let mut draft = collection.draft("clone");
-		draft.set_source("clone", Some(source)).unwrap();
-		draft.set_video("clone", Some(video)).unwrap();
-		draft.finish().unwrap();
+			let mut draft = collection.draft("clone");
+			draft.set_source("clone", Some(source)).unwrap();
+			draft.set_video("clone", Some(video)).unwrap();
+			draft.finish().unwrap();
+		}
 	}
 }

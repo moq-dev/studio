@@ -7,7 +7,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, Collection, Filter, Item, Layer, Scene, Source, Video, validate_filters, versioned};
+use crate::collection::{
+	Audio, Collection, Filter, Item, Layer, Rect, Scene, Slot, Source, Video, validate_filters, versioned,
+};
 use crate::edit::Draft;
 
 /// What a copy holds: items, or a filter chain.
@@ -62,7 +64,8 @@ impl Clip {
 			audio: BTreeMap::new(),
 			video: BTreeMap::new(),
 		};
-		// Each source brings what it clones and what its own filters read.
+		// Each source brings what it clones, what fills it if it is a role,
+		// and what its own filters read.
 		while let Some(name) = names.pop() {
 			let Some(source) = collection.sources.get(&name) else {
 				continue;
@@ -75,6 +78,7 @@ impl Clip {
 				*path = dir.join(&path);
 			}
 			clip.sources.insert(name.clone(), source);
+			names.push(collection.resolve(&name).to_string());
 			names.push(collection.capture(&name).to_string());
 			if let Some(audio) = collection.audio.get(&name) {
 				clip.audio.insert(name.clone(), audio.clone());
@@ -167,15 +171,23 @@ impl Draft {
 	pub fn paste(&mut self, layer: &Layer, items: &Items, dir: &Path) -> Result<(), Error> {
 		let mut names = BTreeMap::new();
 		let mut added = Vec::new();
-		// What clones clone first, so each clone names what it was renamed to.
-		let (clones, origins): (Vec<_>, Vec<_>) = items
-			.sources
-			.iter()
-			.partition(|(_, source)| matches!(source, Source::Clone { .. }));
-		for (name, source) in origins.into_iter().chain(clones) {
+		// What clones clone first, then the clones, then the roles, which a
+		// clone may fill, so each names what it was renamed to.
+		let rank = |source: &Source| match source {
+			Source::Clone { .. } => 1,
+			Source::Role { .. } => 2,
+			_ => 0,
+		};
+		let mut ordered: Vec<_> = items.sources.iter().collect();
+		ordered.sort_by_key(|(_, source)| rank(source));
+		for (name, source) in ordered {
+			let renamed = |source: &String| names.get(source).cloned().unwrap_or_else(|| source.clone());
 			let mut source = match source {
 				Source::Clone { source } => Source::Clone {
-					source: names.get(source).cloned().unwrap_or_else(|| source.clone()),
+					source: renamed(source),
+				},
+				Source::Role { source } => Source::Role {
+					source: source.as_ref().map(renamed),
 				},
 				source => source.clone(),
 			};
@@ -232,11 +244,19 @@ impl Draft {
 		}
 		for item in &items.items {
 			let source = names.get(&item.source).cloned().unwrap_or_else(|| item.source.clone());
-			let index = self
+			let held = self
 				.collection()
 				.items(layer)
-				.ok_or_else(|| Error::Conflict(format!("there is no {layer}")))?
-				.len();
+				.ok_or_else(|| Error::Conflict(format!("there is no {layer}")))?;
+			let index = held.len();
+			let main = held.iter().any(|item| item.slot == Some(Slot::Main));
+			// Only a scene arranges slots, and it holds one main slot; a layer
+			// set free covers the canvas.
+			let (slot, rect) = match item.slot {
+				Some(_) if layer.scene.is_none() => (None, Rect::fill(&self.collection().canvas)),
+				Some(Slot::Main) if main => (Some(Slot::Tile), item.rect),
+				slot => (slot, item.rect),
+			};
 			let filters = rename(&item.filters);
 			self.insert_item(
 				layer,
@@ -244,6 +264,8 @@ impl Draft {
 				Item {
 					source,
 					filters,
+					slot,
+					rect,
 					..item.clone()
 				},
 			)?;
@@ -358,6 +380,44 @@ mod tests {
 		let mut draft = collection.draft("Paste");
 		draft.paste(&Layer::top(), &items, Path::new(DIR)).unwrap();
 		assert!(matches!(draft.finish(), Err(Error::Invalid(_))));
+	}
+
+	/// A layer in the main slot, showing a role filled by a clone, copies
+	/// with the role, the clone, and what it clones. Pasted back, it is
+	/// linked and takes a tile, the main slot being taken; on top, it is set
+	/// free over the canvas; into another collection, the role follows the
+	/// clone it names through a rename.
+	#[test]
+	fn a_role_in_a_slot_copies_with_what_fills_it() {
+		let mut collection = collection();
+		let filled = Source::Role {
+			source: Some("cam faded".into()),
+		};
+		collection.sources.insert("Main".into(), filled.clone());
+		collection.scenes[0].items = vec![Item {
+			slot: Some(Slot::Main),
+			..Item::new("Main", Rect::default())
+		}];
+		collection.validate().unwrap();
+		let clip = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR));
+		let text = clip.to_toml().unwrap();
+
+		let pasted = paste(&collection, &Layer::scene("Scene"), &text, DIR);
+		assert_eq!(pasted.sources, collection.sources, "linked");
+		assert_eq!(pasted.scenes[0].items[1].slot, Some(Slot::Tile));
+		let pasted = paste(&collection, &Layer::top(), &text, DIR);
+		assert_eq!(pasted.top[0].slot, None);
+		assert_eq!(pasted.top[0].rect, Rect::fill(&collection.canvas));
+
+		let mut other = Collection::new();
+		other.sources.insert("cam faded".into(), color([0, 255, 0, 255]));
+		let pasted = paste(&other, &Layer::scene("Scene"), &text, DIR);
+		assert_eq!(pasted.sources["cam faded 2"], Source::Clone { source: "cam".into() });
+		let renamed = Source::Role {
+			source: Some("cam faded 2".into()),
+		};
+		assert_eq!(pasted.sources["Main"], renamed, "the role follows the rename");
+		assert_eq!(pasted.scenes[0].items[0].slot, Some(Slot::Main));
 	}
 
 	/// Into another collection, a clip brings what its items show, renaming a

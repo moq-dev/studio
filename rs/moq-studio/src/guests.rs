@@ -660,29 +660,38 @@ impl Room {
 	}
 }
 
-/// Where the guest playing from `source` would take a tile of `scene`: after
-/// its last layer in a slot, so a logo stays in front. `None` for a scene
-/// with no slots, one showing them already, or one whose tiles hold
-/// [`MAX_GUESTS`] guests of the room at `room`.
-pub fn tile(collection: &Collection, room: &Path, scene: &str, source: &str) -> Option<usize> {
+/// Where `source` would take a tile of `scene`: after its last layer in a
+/// slot, so a logo stays in front. `None` for a scene with no slots, or one
+/// showing it already.
+pub fn tile(collection: &Collection, scene: &str, source: &str) -> Option<usize> {
 	let items = &collection.scene(scene)?.items;
 	let last = items.iter().rposition(|item| item.slot.is_some())?;
 	if items.iter().any(|item| collection.capture(&item.source) == source) {
 		return None;
 	}
+	Some(last + 1)
+}
+
+/// How many guests of the room at `room` the tiles of `scene` show.
+fn tiled(collection: &Collection, room: &Path, scene: &str) -> usize {
+	let items = collection.scene(scene).map_or(&[][..], |scene| &scene.items);
 	let guests = items.iter().filter(|item| {
 		let shown = collection.sources.get(collection.capture(&item.source));
 		item.slot == Some(Slot::Tile) && shown.is_some_and(|shown| plays_guest(room, shown))
 	});
-	(guests.count() < MAX_GUESTS).then_some(last + 1)
+	guests.count()
 }
 
 /// Show the guest playing from `source` in the next tile of `scene`, the
 /// one on program, and hear them on program, as one edit the host can undo,
-/// if [`tile`] finds one. Says whether it did.
+/// if [`tile`] finds one and the tiles show fewer than [`MAX_GUESTS`]
+/// guests of the room at `room`. Says whether it did.
 pub fn appear(state: &mut State, room: &Path, scene: Option<&str>, source: &str) -> anyhow::Result<bool> {
 	let Some(scene) = scene else { return Ok(false) };
-	let Some(index) = tile(state.collection(), room, scene, source) else {
+	if tiled(state.collection(), room, scene) >= MAX_GUESTS {
+		return Ok(false);
+	}
+	let Some(index) = tile(state.collection(), scene, source) else {
 		return Ok(false);
 	};
 	let layer = Layer::scene(scene);
@@ -787,7 +796,16 @@ pub async fn run(engine: Arc<Engine>, room: Arc<Room>, origin: moq_net::origin::
 				Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot add a guest"),
 			}
 		}
-		let camera = guest(&path).is_some_and(|(_, kind)| kind == Kind::Camera);
+		// A guest the host removed stays off until a new link lets them back.
+		let camera = guest(&path).is_some_and(|(identity, kind)| {
+			let removed = room
+				.participants
+				.lock()
+				.unwrap()
+				.get(identity.as_str())
+				.is_some_and(|guest| guest.removed);
+			kind == Kind::Camera && !removed
+		});
 		if online && camera && engine.guests_appear() {
 			let Some(name) = room.source_at(state.collection(), &path) else {
 				continue;
@@ -1599,8 +1617,8 @@ pub(crate) mod tests {
 	}
 
 	/// A guest takes the tile after the scene's last layer in a slot, so a
-	/// logo stays in front, until its tiles hold four guests; a scene with no
-	/// slots, or showing them already, takes none.
+	/// logo stays in front; the tiles take four guests on their own, and the
+	/// host more. A scene with no slots, or showing them already, takes none.
 	#[test]
 	fn a_guest_takes_the_next_tile_until_four() {
 		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
@@ -1625,25 +1643,23 @@ pub(crate) mod tests {
 		collection.scenes[0].items = vec![slot("Camera"), Item::new("logo", fill)];
 		collection.validate().unwrap();
 
-		assert_eq!(tile(&collection, &guests, "Scene", "alice"), Some(1));
+		assert_eq!(tile(&collection, "Scene", "alice"), Some(1));
 		for guest in ["alice", "bob", "carol", "dave"] {
-			let at = tile(&collection, &guests, "Scene", guest).unwrap();
+			assert!(tiled(&collection, &guests, "Scene") < MAX_GUESTS);
+			let at = tile(&collection, "Scene", guest).unwrap();
 			collection.scenes[0].items.insert(at, slot(guest));
-			assert_eq!(tile(&collection, &guests, "Scene", guest), None, "{guest} is shown");
+			assert_eq!(tile(&collection, "Scene", guest), None, "{guest} is shown");
 		}
 		assert_eq!(collection.scenes[0].items.last().unwrap().source, "logo");
 		assert_eq!(
-			tile(&collection, &guests, "Scene", "erin"),
-			None,
+			tiled(&collection, &guests, "Scene"),
+			MAX_GUESTS,
 			"four guests fill the tiles"
 		);
+		assert_eq!(tile(&collection, "Scene", "erin"), Some(5), "the host can add a fifth");
 
 		collection.scenes[0].items.retain(|item| item.slot.is_none());
-		assert_eq!(
-			tile(&collection, &guests, "Scene", "erin"),
-			None,
-			"a scene with no slots"
-		);
+		assert_eq!(tile(&collection, "Scene", "erin"), None, "a scene with no slots");
 	}
 
 	/// A guest joining is not the host's edit: what the host undid can still

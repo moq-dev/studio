@@ -466,7 +466,8 @@ impl Panels {
 					asked = Some(Asked::Publish(name.clone(), published));
 				}
 			}
-			if source.has_video() {
+			// A role takes the look of the source filling it.
+			if source.has_video() && !source.is_role() {
 				let own = Selection::Source(name.clone());
 				egui::CollapsingHeader::new("Its own crop and filters")
 					.id_salt("source look")

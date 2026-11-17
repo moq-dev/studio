@@ -2,7 +2,7 @@
 //! in it, a layer dragged onto a slot, and the scene's arrangement and slots
 //! in the inspector.
 
-use moq_scene::{Arrangement, Slot};
+use moq_scene::{Arrangement, Crop, Slot};
 
 use super::layers::section;
 use super::*;
@@ -29,6 +29,45 @@ pub(super) fn placed(state: &State, layer: &Layer) -> Vec<Item> {
 		None => item.clone(),
 	});
 	placed.collect()
+}
+
+/// The collection with the scene called `scene` drawn as its arrangement
+/// placed it on the last render, cover crops included, so a page in a slot
+/// takes input where it is drawn.
+pub(super) fn staged<'a>(state: &'a State, scene: Option<&str>) -> std::borrow::Cow<'a, Collection> {
+	let collection = state.collection();
+	let found = scene.and_then(|scene| {
+		let index = collection.scenes.iter().position(|found| found.name == scene)?;
+		let arranged = state.compositor.arranged(scene)?;
+		(arranged.len() == collection.scenes[index].items.len()).then_some((index, arranged))
+	});
+	let Some((index, arranged)) = found else {
+		return std::borrow::Cow::Borrowed(collection);
+	};
+	let mut staged = collection.clone();
+	staged.scenes[index].items = arranged.to_vec();
+	std::borrow::Cow::Owned(staged)
+}
+
+/// Where the layer at `index` of `layer` is drawn and what it shows of its
+/// picture, cover crop included, so setting it free keeps how it looks; its
+/// own place for a layer set free or not yet arranged.
+pub(super) fn drawn(state: &State, layer: &Layer, index: usize) -> Option<(Rect, Crop)> {
+	let collection = state.collection();
+	let item = collection.items(layer)?.get(index)?;
+	let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
+	let arranged = layer
+		.scene
+		.as_deref()
+		.and_then(|scene| state.compositor.arranged(scene))
+		.filter(|arranged| arranged.len() == collection.items(layer).map_or(0, <[Item]>::len))
+		.and_then(|arranged| arranged.get(index))
+		.filter(|arranged| item.slot.is_some() && !arranged.rect.is_empty());
+	Some(match (arranged, item.slot) {
+		(Some(arranged), _) => (arranged.rect, arranged.crop),
+		(None, Some(_)) => (Rect::fill(&canvas), item.crop),
+		(None, None) => (item.rect, item.crop),
+	})
 }
 
 /// What a slot's chip calls it: the role in it, a guest, or the slot.
@@ -133,9 +172,20 @@ pub(super) fn assign(state: &mut State, dragged: &Picked, target: &Picked) -> an
 		rect: Rect::default(),
 		..moved.clone()
 	};
+	// Set free in place of `moved`, cropped to its shape rather than
+	// stretched.
+	let (rect, crop) = match moved.slot {
+		Some(_) => (Rect::default(), held.crop),
+		None => {
+			let (from, crop) = drawn(state, &target.layer, target.index).unwrap_or((moved.rect, held.crop));
+			let shape = |rect: &Rect| rect.width / rect.height;
+			(moved.rect, crop.then(&Crop::covering(shape(&from), shape(&moved.rect))))
+		}
+	};
 	let leaving = Item {
 		slot: moved.slot,
-		rect: moved.rect,
+		rect,
+		crop,
 		..held
 	};
 	edit(state, label, None, |draft| {
@@ -159,15 +209,9 @@ pub(super) fn set_slot(state: &mut State, picked: &Picked, slot: Option<Slot>) -
 		return Ok(());
 	}
 	let name = item.source.clone();
-	let rect = match slot {
-		Some(_) => Rect::default(),
-		None => {
-			let drawn = placed(state, &picked.layer).get(picked.index).map(|item| item.rect);
-			let canvas = collection
-				.canvas(picked.layer.scene.as_deref())
-				.unwrap_or(collection.canvas);
-			drawn.filter(|rect| !rect.is_empty()).unwrap_or(Rect::fill(&canvas))
-		}
+	let (rect, crop) = match slot {
+		Some(_) => (Rect::default(), item.crop),
+		None => drawn(state, &picked.layer, picked.index).unwrap_or((item.rect, item.crop)),
 	};
 	let main = match slot {
 		Some(Slot::Main) => collection
@@ -191,7 +235,16 @@ pub(super) fn set_slot(state: &mut State, picked: &Picked, slot: Option<Slot>) -
 			};
 			draft.set_item(&picked.layer, index, tile)?;
 		}
-		draft.set_item(&picked.layer, picked.index, Item { slot, rect, ..item })
+		draft.set_item(
+			&picked.layer,
+			picked.index,
+			Item {
+				slot,
+				rect,
+				crop,
+				..item
+			},
+		)
 	})
 }
 

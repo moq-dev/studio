@@ -119,7 +119,8 @@ impl Panels {
 				// `interacted` found the page through the selection, so one is.
 				let picked = self.selection.clone().expect("interacting with the selected layer");
 				let only = Some((&picked.layer, picked.index));
-				let delivered = self.interact.update(ui, image, state.collection(), scene, only);
+				let staged = super::slots::staged(&state, scene.map(|(scene, _)| scene));
+				let delivered = self.interact.update(ui, image, &staged, scene, only);
 				deliver(&state.sources, delivered);
 				self.rebind(&state.sources);
 				let stop = interacting_banner(ui, image, &page);
@@ -277,7 +278,11 @@ impl Panels {
 						grab
 					},
 					slotted: resting.slot.is_some(),
-					rect: resting.rect,
+					// A layer in a slot is cropped in the slot it is drawn in.
+					rect: match resting.slot {
+						Some(_) => shown[index].1.rect,
+						None => resting.rect,
+					},
 					crop: resting.crop,
 					origin: view.point(origin),
 					fixed: fixed_shape(source),
@@ -362,6 +367,11 @@ impl Panels {
 					let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
 					(rect, drag.crop)
 				}
+			};
+			// Its slot keeps placing a layer in one.
+			let rect = match (&item, drag.slotted) {
+				(Some(item), true) => item.rect,
+				_ => rect,
 			};
 			if let Some(item) = item
 				&& (item.rect != rect || item.crop != crop)
@@ -699,18 +709,12 @@ impl Panels {
 				let count = collection.items(&to).map_or(0, <[Item]>::len);
 				// The always-on-top layers never go on, so they have no
 				// keyframes to play, nor slots; it stays where it was drawn.
-				let rect = match item.slot {
-					Some(_) => super::slots::placed(state, layer)
-						.get(index)
-						.map(|placed| placed.rect)
-						.filter(|rect| !rect.is_empty())
-						.unwrap_or(Rect::fill(&collection.canvas)),
-					None => item.rect,
-				};
+				let (rect, crop) = super::slots::drawn(state, layer, index).unwrap_or((item.rect, item.crop));
 				let moved = Item {
 					keyframes: if top { Vec::new() } else { item.keyframes.clone() },
 					slot: None,
 					rect,
+					crop,
 					..item.clone()
 				};
 				let label = match top {
@@ -731,6 +735,10 @@ impl Panels {
 			}
 			LayerAction::Duplicate { independent } => {
 				let mut copy = item.clone();
+				// A scene has one main slot, so the copy takes a tile.
+				if copy.slot == Some(moq_scene::Slot::Main) {
+					copy.slot = Some(moq_scene::Slot::Tile);
+				}
 				let mut source = None;
 				if independent {
 					let (cloned, video) = clone_of(collection, &name);
@@ -1215,6 +1223,7 @@ pub(super) fn duplicate_scene(state: &mut State, index: usize, independent: bool
 	let mut copy = Scene {
 		name: name.clone(),
 		size: scene.size,
+		arrangement: scene.arrangement,
 		items: scene.items.clone(),
 		..Scene::new("")
 	};

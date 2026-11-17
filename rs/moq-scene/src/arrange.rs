@@ -197,23 +197,31 @@ fn whole(rect: Rect) -> Rect {
 pub(crate) fn cover(crop: Crop, size: (u32, u32), rect: &Rect) -> Crop {
 	let width = size.0 as f32 * (1.0 - crop.left - crop.right);
 	let height = size.1 as f32 * (1.0 - crop.top - crop.bottom);
-	let (shown, wanted) = (width / height, rect.width / rect.height);
-	if !shown.is_finite() || shown <= 0.0 || !wanted.is_finite() || wanted <= 0.0 {
-		return Crop::default();
-	}
-	if shown > wanted {
-		let trim = (1.0 - wanted / shown) / 2.0;
-		Crop {
-			left: trim,
-			right: trim,
-			..Crop::default()
+	Crop::covering(width / height, rect.width / rect.height)
+}
+
+impl Crop {
+	/// The even crop that shows a picture shaped `shown` (width over height)
+	/// in a frame shaped `wanted` without stretching it; none for a shape
+	/// that is not a positive number.
+	pub fn covering(shown: f32, wanted: f32) -> Self {
+		if !shown.is_finite() || shown <= 0.0 || !wanted.is_finite() || wanted <= 0.0 {
+			return Self::default();
 		}
-	} else {
-		let trim = (1.0 - shown / wanted) / 2.0;
-		Crop {
-			top: trim,
-			bottom: trim,
-			..Crop::default()
+		if shown > wanted {
+			let trim = (1.0 - wanted / shown) / 2.0;
+			Self {
+				left: trim,
+				right: trim,
+				..Self::default()
+			}
+		} else {
+			let trim = (1.0 - shown / wanted) / 2.0;
+			Self {
+				top: trim,
+				bottom: trim,
+				..Self::default()
+			}
 		}
 	}
 }

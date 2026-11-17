@@ -5467,8 +5467,8 @@ mod tests {
 
 	/// A guest whose camera comes online in the room takes the next tile of
 	/// the scene on program once the show says guests appear on their own, as
-	/// an edit the host can undo; before that, and for their screen, they
-	/// wait under Add.
+	/// an edit the host can undo; before that, for their screen, and once the
+	/// host removed them, they wait under Add.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_guest_appears_in_the_next_tile_once_the_show_says_so() {
@@ -5544,6 +5544,15 @@ mod tests {
 			engine.state.lock().unwrap().collection().sources.contains_key("alice"),
 			"and leaves her under Add"
 		);
+
+		// Removed from scenes, a guest whose link still works waits under Add.
+		engine.room().unwrap().stop_renewing("carol").unwrap();
+		let _carol = engine
+			.subscribe
+			.route("guests/carol/camera.hang", Default::default())
+			.unwrap();
+		joined("carol").await.expect("carol joins");
+		assert_eq!(items(&engine).len(), 1, "a removed guest takes no tile");
 
 		engine.stop();
 		kio::clock::timeout(TIMEOUT, engine.close())
