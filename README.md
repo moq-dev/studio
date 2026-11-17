@@ -1574,7 +1574,10 @@ layer on the picture, and each scene pad showing it turn amber, and the
 health dot counts it. The row's badge says what may have happened and offers
 the fixes the studio can take: pick a picked window or display again in the
 system picker, capture another listed window or the whole screen in its
-place, or open a camera or display again. Where only you can fix it, such as
+place, or open a camera or display again. As with **Reload**, picking or
+opening it again leaves its last picture on program until it delivers a new
+one, even while the picker is open, so cut away first if that picture should
+not show. Where only you can fix it, such as
 a permission macOS took away or a game that refuses capture, it says what to
 do and where. **It is meant to go dark** stops watching it, as
 `expect_dark` in its `[video]` table, and **Warn when it goes dark** in the
