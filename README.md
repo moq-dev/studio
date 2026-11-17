@@ -257,7 +257,9 @@ keep it always on top or move it into this scene, duplicate it (linked, or as
 its own copy), make it independent, copy it, or remove it. **Add a layer**
 (A) turns to Add.
 
-**Add** lists what can be placed: the sources no layer shows, no audio scene
+**Add** lists what can be placed: what a drop or paste makes (see
+[Dropping and pasting](#dropping-and-pasting)), the kind a drag over the
+window holds lit; the sources no layer shows, no audio scene
 hears, and nothing reads, each with **Add**, to place it in the edited
 scene, or the bin, to remove it for good; this machine's cameras, displays,
 windows, and audio inputs; any source by hand; and, with a room, guests:
@@ -562,6 +564,40 @@ same source exists under the same name, the layer is linked to it; otherwise
 the source comes along, renamed if its name is taken. Copied filters paste
 onto the selected layer, after its own. The clipboard holds text in the scene
 file's format.
+
+### Dropping and pasting
+
+Drag a file from a file manager onto BUILD's picture and it becomes the kind
+of layer it holds, where you let go: a PNG or JPEG becomes an image layer, and
+a video or sound file a media layer, each at its own size, no larger than
+half the canvas, in front of the edited scene, and selected. A sound alone
+has no picture, so it is only sent to the audio scene on program, as anything
+with sound is. A `.cube` file grades the layer it is dropped on, in place of
+any grade it had. While the drag is over the window, the picture outlines
+where the layer will land and names what it will become, and Add lights that
+kind. A file dropped on an image or media layer of its own kind asks whether
+to replace that layer's file, which every layer showing its source shows, or
+add a layer. Dropped anywhere else in the window, or on another page, it lands
+in the middle of the edited scene.
+
+A file the studio cannot play says why where it was dropped, and how to fix
+it where it can: a regular MP4 names the remux that makes it readable. The
+file is read before it is placed, in the background, so a large video holds
+up nothing while it is read.
+
+A dropped file outside the scene file's directory is copied there, since
+sources name files relative to it: `logo.png`, or `logo 2.png` beside a
+different `logo.png`, while a copy already there with the same contents is
+reused. One already under that directory is named where it is.
+
+**Paste** (Ctrl+V, or the picture's right-click menu) does the same at the
+pointer, and the title bar's **Paste** at the scene's center: files copied in a file manager; a picture, such as a screenshot,
+saved as `Pasted picture.png` beside the scene file; and a web address, as a
+web page layer the size of the canvas, shown at half that size.
+
+The window hears drops on Windows, macOS, and X11. On Wayland it hears none
+yet, so paste instead; a web address dragged from a browser is not heard on
+any platform, so paste it too.
 
 A broadcast source subscribes through the show's relays, on air or off,
 over sessions of their own that only subscribe. It plays its broadcast
