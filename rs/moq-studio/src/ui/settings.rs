@@ -547,7 +547,7 @@ impl Panels {
 						None => format!("Size scene `{name}` as the program"),
 					};
 					let result = edit(&mut state, label, None, |draft| {
-						draft.set_scene(index, Scene { size, ..scene })
+						draft.set_scene(index, scene.sized(size))
 					});
 					if result.is_ok() {
 						self.sizes.remove(&name);

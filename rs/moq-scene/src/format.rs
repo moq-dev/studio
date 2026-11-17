@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Arrangement, Canvas, Collection, Crop, Item, Layer, Rect, Source};
+use crate::collection::{Arrangement, Canvas, Collection, Crop, Item, Layer, Rect, Scene, Size, Source};
 use crate::edit::{Change, Draft};
 
 /// Where the portrait picture goes out, beneath the program's broadcast, so
@@ -422,6 +422,30 @@ impl Collection {
 	}
 }
 
+impl Scene {
+	/// The scene at `size`, its own, or the program's for `None`. A scene of
+	/// its own size is drawn in one picture, so it keeps no portrait
+	/// arrangement or place, and its layers shown only in portrait are
+	/// removed, as turning portrait off removes them.
+	pub fn sized(mut self, size: Option<Size>) -> Self {
+		if size.is_some() {
+			self.single();
+		}
+		Self { size, ..self }
+	}
+
+	/// Forget the portrait picture: its arrangement, each layer's place
+	/// there, and the layers shown only there.
+	fn single(&mut self) {
+		self.portrait = Portrait::default();
+		self.items.retain(|item| item.shown_in(Format::Landscape));
+		for item in &mut self.items {
+			item.format = None;
+			item.portrait = None;
+		}
+	}
+}
+
 impl Draft {
 	/// Send the show out in portrait too, or no longer. Turned on, each
 	/// layer's portrait arrangement starts from its landscape one: the main
@@ -446,14 +470,7 @@ impl Draft {
 						after.portrait.arrangement = scene.arrangement;
 					}
 				}
-				false => {
-					after.portrait = Default::default();
-					after.items.retain(|item| item.shown_in(Format::Landscape));
-					for item in &mut after.items {
-						item.format = None;
-						item.portrait = None;
-					}
-				}
+				false => after.single(),
 			}
 			if after != *scene {
 				self.set_scene(index, after)?;
@@ -783,6 +800,25 @@ mod tests {
 			})
 			.contains("rename it")
 		);
+	}
+
+	/// A scene given its own size is drawn in one picture, so it forgets the
+	/// portrait one in the same edit, which validates.
+	#[test]
+	fn a_scene_given_its_own_size_forgets_the_portrait_picture() {
+		let mut turned = turned(&show());
+		turned.scenes[0].items[2].format = Some(Format::Portrait);
+		turned.validate().unwrap();
+		let size = Size {
+			width: 1080,
+			height: 1920,
+		};
+		let sized = turned.scenes[0].clone().sized(Some(size));
+		assert_eq!(sized.size, Some(size));
+		assert_eq!(sized.items.len(), 2, "the portrait-only logo removed");
+		assert!(sized.items.iter().all(|item| !item.formats()));
+		turned.scenes[0] = sized;
+		turned.validate().unwrap();
 	}
 
 	#[test]

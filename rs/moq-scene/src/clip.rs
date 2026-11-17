@@ -136,6 +136,13 @@ impl Clip {
 					})
 					.chain(drawn)
 					.collect(),
+					// Copied from a show going out in both formats, its items
+					// may say where each picture shows them, which pasting
+					// keeps or drops as the destination does.
+					portrait: items
+						.items
+						.iter()
+						.any(|item| item.format.is_some() || item.portrait.is_some()),
 					..Collection::new()
 				}
 				.validate()?
@@ -369,6 +376,32 @@ mod tests {
 		let pasted = paste(&collection, &Layer::top(), &clip.to_toml().unwrap(), DIR);
 		assert_eq!(pasted.sources, collection.sources, "no source added");
 		assert_eq!(pasted.top, collection.scenes[0].items);
+	}
+
+	/// A layer copied from a show going out in both formats reads back with
+	/// its portrait place, which a paste into a show going out in landscape
+	/// alone drops.
+	#[test]
+	fn a_layer_with_a_portrait_place_copies() {
+		let mut collection = collection();
+		collection.portrait = true;
+		let item = &mut collection.scenes[0].items[0];
+		item.portrait = Some(crate::Placement {
+			rect: Rect::fill(&collection.canvas.turned()),
+			crop: Default::default(),
+		});
+		item.format = Some(crate::Format::Portrait);
+		collection.validate().unwrap();
+		let clip = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR));
+		let text = clip.to_toml().unwrap();
+		let pasted = paste(&collection, &Layer::scene("Scene"), &text, DIR);
+		assert_eq!(pasted.scenes[0].items[1], collection.scenes[0].items[0]);
+		let mut landscape = collection.clone();
+		landscape.portrait = false;
+		landscape.scenes[0].items.clear();
+		let pasted = paste(&landscape, &Layer::scene("Scene"), &text, DIR);
+		assert_eq!(pasted.scenes[0].items[0].portrait, None);
+		assert_eq!(pasted.scenes[0].items[0].format, None);
 	}
 
 	/// A layer the studio placed on its own is the host's once copied.

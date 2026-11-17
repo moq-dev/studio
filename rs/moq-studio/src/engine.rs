@@ -1743,11 +1743,20 @@ impl Engine {
 								.inspect_err(|err| video.fail(format!("{err:#}")))
 								.ok()
 						});
-						// Its audio follows the audio scene it carries from now on.
+						// Its audio follows the audio scene it carries from now on:
+						// the portrait picture's, the program's, with the sources
+						// published independently in it, as it carries no layout.
+						let portrait = portrait.is_some() && name == moq_scene::PORTRAIT;
+						let mix = match portrait {
+							true => state.sources.whole(&state.collection),
+							false => state
+								.collection
+								.published_audio(name)
+								.and_then(|audio| state.sources.mix(audio)),
+						};
 						if (synced || started)
 							&& let Some((_, broadcast)) = line
-							&& let Some(audio) = state.collection.published_audio(name)
-							&& let Some(mix) = state.sources.mix(audio)
+							&& let Some(mix) = mix
 						{
 							broadcast.audio.set(mix.clone());
 						}

@@ -53,6 +53,9 @@ impl Arrival {
 struct Landing {
 	/// The layers it joins.
 	layer: Layer,
+	/// The picture it lands in, BUILD's while it edits a scene drawn in both,
+	/// and that picture's canvas.
+	format: Format,
 	canvas: Canvas,
 	/// Its center, in canvas pixels.
 	at: [f32; 2],
@@ -538,7 +541,11 @@ impl Panels {
 	fn landing(&self, state: &State, at: Option<[f32; 2]>) -> Result<Landing, String> {
 		let layer = self.scene(state)?;
 		let collection = state.collection();
-		let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
+		let format = collection.format_of(&layer, self.format);
+		let canvas = match collection.dual(&layer) {
+			true => collection.canvas_of(format),
+			false => collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas),
+		};
 		let center = [canvas.width as f32 / 2.0, canvas.height as f32 / 2.0];
 		let onto = at.and_then(|at| {
 			let shown = self.shown(state);
@@ -548,6 +555,7 @@ impl Panels {
 		});
 		Ok(Landing {
 			layer,
+			format,
 			canvas,
 			at: at.unwrap_or(center),
 			onto,
@@ -738,13 +746,30 @@ impl Panels {
 		let layer = &landing.layer;
 		let heard = source.has_audio();
 		let index = state.collection().items(layer).map_or(0, <[Item]>::len);
+		// Landed in the portrait picture, it sits there; in the landscape
+		// one, it lands centered at the same size until moved there.
+		let item = rect.map(|rect| match landing.format {
+			Format::Landscape => Item::new(name.clone(), rect),
+			Format::Portrait => {
+				let landscape = state.collection().canvas;
+				let center = [landscape.width as f32 / 2.0, landscape.height as f32 / 2.0];
+				let placed = land(landscape, [rect.width, rect.height], center);
+				Item {
+					portrait: Some(Placement {
+						rect,
+						crop: Crop::default(),
+					}),
+					..Item::new(name.clone(), placed)
+				}
+			}
+		});
 		edit(state, format!("Drop `{name}` {}", place(layer)), None, |draft| {
 			draft.set_source(&name, Some(source))?;
 			if heard {
 				draft.hear(&name)?;
 			}
-			if let Some(rect) = rect {
-				draft.insert_item(layer, index, Item::new(name.clone(), rect))?;
+			if let Some(item) = item {
+				draft.insert_item(layer, index, item)?;
 			}
 			Ok(())
 		})?;

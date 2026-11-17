@@ -208,7 +208,7 @@ pub(super) fn assign(state: &mut State, dragged: &Picked, target: &Picked) -> an
 				slot: None,
 				rect: landscape.rect,
 				crop: landscape.crop,
-				portrait: dual.then(|| free(Format::Portrait)),
+				portrait: (dual && held.shown_in(Format::Portrait)).then(|| free(Format::Portrait)),
 				..held
 			}
 		}
@@ -241,7 +241,7 @@ pub(super) fn set_slot(state: &mut State, picked: &Picked, slot: Option<Slot>) -
 		None => drawn(Format::Landscape),
 	};
 	let portrait = match slot {
-		None if collection.dual(&picked.layer) => {
+		None if collection.dual(&picked.layer) && item.shown_in(Format::Portrait) => {
 			let (rect, crop) = drawn(Format::Portrait);
 			Some(Placement { rect, crop })
 		}

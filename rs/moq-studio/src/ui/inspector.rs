@@ -155,6 +155,18 @@ impl Panels {
 				.unwrap_or_else(|| item.clone())
 		};
 		let mut rect = rest.rect;
+		// A layer the picture BUILD edits never shows has no place there.
+		let placeable = item.shown_in(collection.format_of(&picked.layer, format));
+		if !placeable {
+			ui.label(
+				egui::RichText::new(format!(
+					"Not shown in the {} picture; place it in the other",
+					format.name().to_lowercase()
+				))
+				.color(kit::DIM)
+				.font(kit::ui(11.0)),
+			);
+		}
 		if item.slot.is_some() {
 			ui.label(
 				egui::RichText::new("Placed by the scene's arrangement; drag it onto another slot to swap them")
@@ -162,7 +174,7 @@ impl Panels {
 					.font(kit::ui(11.0)),
 			);
 		}
-		if item.slot.is_none() {
+		if item.slot.is_none() && placeable {
 			ui.horizontal(|ui| {
 				ui.spacing_mut().item_spacing.x = 4.0;
 				let width = ((ui.available_width() - 12.0) / 4.0).max(40.0);
@@ -189,18 +201,20 @@ impl Panels {
 			});
 		}
 		let mut crop = rest.crop;
+		if placeable {
+			ui.horizontal(|ui| {
+				ui.label(egui::RichText::new("Crop").color(kit::DIM));
+				if let Some(gesture) = crop_ui(ui, &mut crop, &mut self.gestures) {
+					asked = Some(Asked::Item(placed(rest.rect, crop), format!("Crop `{name}`"), gesture));
+				}
+			})
+			.response
+			.on_hover_text("Percent of the picture trimmed from the left, top, right, and bottom");
+		}
 		ui.horizontal(|ui| {
-			ui.label(egui::RichText::new("Crop").color(kit::DIM));
-			if let Some(gesture) = crop_ui(ui, &mut crop, &mut self.gestures) {
-				asked = Some(Asked::Item(placed(rest.rect, crop), format!("Crop `{name}`"), gesture));
-			}
-		})
-		.response
-		.on_hover_text("Percent of the picture trimmed from the left, top, right, and bottom");
-		ui.horizontal(|ui| {
-			let fits = match item.slot {
-				Some(_) => &[][..],
-				None => &[
+			let fits = match (item.slot, placeable) {
+				(Some(_), _) | (_, false) => &[][..],
+				(None, true) => &[
 					(
 						"Fit",
 						LayerAction::Fit,

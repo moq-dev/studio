@@ -791,10 +791,13 @@ impl Picked {
 	}
 
 	/// The layer placed at `rect` with `crop` in `format`'s picture, as it
-	/// is in the other, if it is still there.
+	/// is in the other, if it is still there and shown in that picture.
 	fn placed(&self, collection: &Collection, format: Format, rect: Rect, crop: Crop) -> Option<Item> {
 		let format = collection.format_of(&self.layer, format);
-		Some(self.item(collection)?.clone().placed(format, Placement { rect, crop }))
+		let item = self.item(collection)?.clone();
+		// Not shown there, it has no place there.
+		item.shown_in(format)
+			.then(|| item.placed(format, Placement { rect, crop }))
 	}
 
 	/// What its look edits.

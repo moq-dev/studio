@@ -740,6 +740,10 @@ impl Panels {
 					true => collection.canvas_of(format),
 					false => collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas),
 				};
+				if !item.shown_in(format) {
+					let why = format!("`{name}` is not shown in the {} picture", format.name().to_lowercase());
+					return (spot, Err(anyhow::anyhow!(why)));
+				}
 				let rest = item.portrayed(format, collection.canvas);
 				let (label, rect, crop) = match action {
 					LayerAction::Fit => {
