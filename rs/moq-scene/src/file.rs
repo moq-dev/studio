@@ -25,8 +25,15 @@ pub fn source(path: &Path) -> Result<Source, Error> {
 	match image::guess_format(&head[..read]) {
 		Ok(image::ImageFormat::Png | image::ImageFormat::Jpeg) => return Ok(Source::Image { path: path.into() }),
 		Ok(format) => {
-			let name = format.extensions_str().first().copied().unwrap_or("this").to_uppercase();
-			return Err(failed(format!("a {name} image is not shown; the studio shows PNG or JPEG stills")));
+			let name = format
+				.extensions_str()
+				.first()
+				.copied()
+				.unwrap_or("this")
+				.to_uppercase();
+			return Err(failed(format!(
+				"a {name} image is not shown; the studio shows PNG or JPEG stills"
+			)));
 		}
 		Err(_) => {}
 	}
@@ -73,13 +80,19 @@ pub fn picture(source: &Source) -> Result<Picture, Error> {
 		}
 		Source::Media { path, .. } => {
 			let clip = crate::media::Clip::open(path)?;
-			Ok(match clip.video.as_ref().map(|(_, config)| (config.coded_width, config.coded_height)) {
-				None => Picture::None,
-				Some((Some(width), Some(height))) if width > 0 && height > 0 => {
-					Picture::Sized(moq_video::Size::new(width, height))
-				}
-				Some(_) => Picture::Unsized,
-			})
+			Ok(
+				match clip
+					.video
+					.as_ref()
+					.map(|(_, config)| (config.coded_width, config.coded_height))
+				{
+					None => Picture::None,
+					Some((Some(width), Some(height))) if width > 0 && height > 0 => {
+						Picture::Sized(moq_video::Size::new(width, height))
+					}
+					Some(_) => Picture::Unsized,
+				},
+			)
 		}
 		Source::Lut { path } => {
 			let failed = |err: String| Error::Lut(format!("{}: {err}", path.display()));
@@ -110,7 +123,9 @@ mod tests {
 		let person = write(dir.path(), "person.dat", include_bytes!("test_data/person.jpg"));
 		let source = super::source(&person).unwrap();
 		assert_eq!(source, Source::Image { path: person.clone() });
-		let Picture::Sized(size) = picture(&source).unwrap() else { panic!("no size") };
+		let Picture::Sized(size) = picture(&source).unwrap() else {
+			panic!("no size")
+		};
 		let decoded = image::load_from_memory(include_bytes!("test_data/person.jpg")).unwrap();
 		assert_eq!((size.width, size.height), (decoded.width(), decoded.height()));
 
@@ -120,9 +135,17 @@ mod tests {
 		assert_eq!(picture(&source).unwrap(), Picture::Sized(moq_video::Size::new(64, 64)));
 
 		let tone = write(dir.path(), "tone.webm", TONE);
-		assert_eq!(picture(&super::source(&tone).unwrap()).unwrap(), Picture::None, "a sound has no picture");
+		assert_eq!(
+			picture(&super::source(&tone).unwrap()).unwrap(),
+			Picture::None,
+			"a sound has no picture"
+		);
 
-		let grade = write(dir.path(), "grade.CUBE", b"LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n");
+		let grade = write(
+			dir.path(),
+			"grade.CUBE",
+			b"LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
+		);
 		let source = super::source(&grade).unwrap();
 		assert_eq!(source, Source::Lut { path: grade });
 		assert_eq!(picture(&source).unwrap(), Picture::None);
@@ -155,6 +178,9 @@ mod tests {
 		assert!(source(&dir.path().join("missing.png")).is_err());
 
 		let broken = write(dir.path(), "broken.cube", b"LUT_1D_SIZE 2\n");
-		assert!(picture(&source(&broken).unwrap()).is_err(), "a LUT is parsed before it is placed");
+		assert!(
+			picture(&source(&broken).unwrap()).is_err(),
+			"a LUT is parsed before it is placed"
+		);
 	}
 }

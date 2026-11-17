@@ -163,11 +163,15 @@ impl Default for Dropping {
 /// of the canvas.
 const CASCADE: f32 = 0.04;
 
+/// Where a chip sits from the pointer it labels, clear of the cursor.
+const CHIP: egui::Vec2 = egui::vec2(14.0, 18.0);
+
 impl Dropping {
 	/// Take this frame's drag and drops from `ctx`, asking the windowing
 	/// system where the pointer is while a drag holds it.
 	pub(super) fn follow(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-		let (hovered, dropped) = ctx.input(|input| (!input.raw.hovered_files.is_empty(), input.raw.dropped_files.clone()));
+		let (hovered, dropped) =
+			ctx.input(|input| (!input.raw.hovered_files.is_empty(), input.raw.dropped_files.clone()));
 		if hovered || !dropped.is_empty() {
 			// egui's own pointer, where the windowing system cannot say, as in a
 			// test, which hovers it.
@@ -262,16 +266,25 @@ fn land(canvas: Canvas, size: [f32; 2], at: [f32; 2]) -> Rect {
 /// first free one after it (`logo 2.png`). A file there already that holds
 /// the same bytes is reused rather than copied again.
 fn beside(dir: &Path, path: &Path) -> anyhow::Result<PathBuf> {
-	let dir = dir.canonicalize().with_context(|| format!("cannot read {}", dir.display()))?;
-	let path = path.canonicalize().with_context(|| format!("cannot read {}", path.display()))?;
+	let dir = dir
+		.canonicalize()
+		.with_context(|| format!("cannot read {}", dir.display()))?;
+	let path = path
+		.canonicalize()
+		.with_context(|| format!("cannot read {}", path.display()))?;
 	if let Ok(under) = path.strip_prefix(&dir) {
 		return Ok(under.to_path_buf());
 	}
 	let name = path.file_name().context("the file has no name")?;
-	save(&dir, Path::new(name), |copy| {
-		let mut from = std::fs::File::open(&path)?;
-		std::io::copy(&mut from, copy).map(drop)
-	}, |there| same(&path, there))
+	save(
+		&dir,
+		Path::new(name),
+		|copy| {
+			let mut from = std::fs::File::open(&path)?;
+			std::io::copy(&mut from, copy).map(drop)
+		},
+		|there| same(&path, there),
+	)
 }
 
 /// Write a file named `name`, or the first free name after it, into `dir`
@@ -296,7 +309,8 @@ fn save(
 	};
 	// Written whole under a name of its own, so nothing reads it half done,
 	// then moved to a name nothing holds.
-	let mut temp = tempfile::NamedTempFile::new_in(dir).with_context(|| format!("cannot write in {}", dir.display()))?;
+	let mut temp =
+		tempfile::NamedTempFile::new_in(dir).with_context(|| format!("cannot write in {}", dir.display()))?;
 	write(temp.as_file_mut()).with_context(|| format!("cannot write in {}", dir.display()))?;
 	for n in 1.. {
 		let name = named(n);
@@ -380,9 +394,12 @@ fn pasted(dir: &Path) -> anyhow::Result<Prepared> {
 		let mut writer = encoder.write_header()?;
 		writer.write_image_data(&image.bytes)?;
 	}
-	let path = save(dir, Path::new("Pasted picture.png"), |file| {
-		std::io::Write::write_all(file, &png)
-	}, |_| false)?;
+	let path = save(
+		dir,
+		Path::new("Pasted picture.png"),
+		|file| std::io::Write::write_all(file, &png),
+		|_| false,
+	)?;
 	Ok(Prepared {
 		source: Source::Image { path },
 		picture: Picture::Sized(moq_video::Size::new(width, height)),
@@ -404,7 +421,8 @@ impl Panels {
 			input.pointer.secondary_clicked() && input.pointer.interact_pos().is_some_and(|at| rect.contains(at))
 		});
 		if opened {
-			self.dropping.menu_opened(ui.input(|input| input.pointer.interact_pos()));
+			self.dropping
+				.menu_opened(ui.input(|input| input.pointer.interact_pos()));
 		}
 		for (arrival, at) in std::mem::take(&mut self.dropping.arrived) {
 			let at = at.filter(|at| rect.contains(*at)).map(|at| view.point(at));
@@ -416,11 +434,18 @@ impl Panels {
 		}
 		for (_, name, at) in &self.dropping.busy {
 			let pos = view.pos(at[0], at[1]);
-			chip(ui, &painter, pos, &format!("Reading {name}…"), Icon::Reload, kit::ACCENT);
+			chip(
+				ui,
+				&painter,
+				pos + CHIP,
+				&format!("Reading {name}…"),
+				Icon::Reload,
+				kit::ACCENT,
+			);
 		}
 		if let Some(fault) = self.fault(&Spot::Dropped) {
 			let [x, y] = self.dropping.failed_at;
-			chip(ui, &painter, view.pos(x, y), fault, Icon::Close, kit::ERR);
+			chip(ui, &painter, view.pos(x, y) + CHIP, fault, Icon::Close, kit::ERR);
 		}
 		self.offer(ui, state, &view);
 	}
@@ -524,7 +549,12 @@ impl Panels {
 
 	/// Read `job`'s file in the background with `read`, then do what it is
 	/// for.
-	fn read(&mut self, ctx: &egui::Context, job: Job, read: impl FnOnce() -> anyhow::Result<Prepared> + Send + 'static) {
+	fn read(
+		&mut self,
+		ctx: &egui::Context,
+		job: Job,
+		read: impl FnOnce() -> anyhow::Result<Prepared> + Send + 'static,
+	) {
 		let Job { name, at, intent } = job;
 		self.dropping.jobs += 1;
 		let job = self.dropping.jobs;
@@ -551,7 +581,12 @@ impl Panels {
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
 		for Done { job, intent, result } in done {
-			let at = self.dropping.busy.iter().find(|(busy, ..)| *busy == job).map(|(.., at)| *at);
+			let at = self
+				.dropping
+				.busy
+				.iter()
+				.find(|(busy, ..)| *busy == job)
+				.map(|(.., at)| *at);
 			self.dropping.busy.retain(|(busy, ..)| *busy != job);
 			let at = at.unwrap_or_default();
 			let result = result.and_then(|prepared| match intent {
@@ -642,8 +677,14 @@ impl Panels {
 
 	/// What a drag over the picture would become, drawn where it would land.
 	fn preview(&mut self, ui: &mut Ui, state: &State, view: &View, painter: &egui::Painter) {
-		let paths: Vec<PathBuf> =
-			ui.input(|input| input.raw.hovered_files.iter().filter_map(|file| file.path.clone()).collect());
+		let paths: Vec<PathBuf> = ui.input(|input| {
+			input
+				.raw
+				.hovered_files
+				.iter()
+				.filter_map(|file| file.path.clone())
+				.collect()
+		});
 		let pointer = self.dropping.dragging;
 		let at = pointer.filter(|at| view.rect.contains(*at)).map(|at| view.point(at));
 		let Ok(landing) = self.landing(state, at) else { return };
@@ -659,13 +700,21 @@ impl Panels {
 		let collection = state.collection();
 		let (rect, tag, icon) = match &guess.source {
 			Err(why) => {
-				chip(ui, painter, chip_at, &format!("{name}: {why}"), Icon::Close, kit::ERR);
+				chip(
+					ui,
+					painter,
+					chip_at + CHIP,
+					&format!("{name}: {why}"),
+					Icon::Close,
+					kit::ERR,
+				);
 				return;
 			}
 			Ok(Source::Lut { .. }) => match &landing.onto {
 				Some((_, item)) => (item.rect, format!("Color grade for {}", item.source), Icon::Color),
 				None => {
-					chip(ui, painter, chip_at, "Drop a color grade on the layer it grades", Icon::Color, kit::ERR);
+					let why = "Drop a color grade on the layer it grades";
+					chip(ui, painter, chip_at + CHIP, why, Icon::Color, kit::ERR);
 					return;
 				}
 			},
@@ -697,9 +746,14 @@ impl Panels {
 		let size = galley.size() + egui::vec2(28.0, 8.0);
 		let tag_rect = egui::Rect::from_min_size(rect.left_top() - egui::vec2(0.0, size.y + 4.0), size);
 		painter.rect_filled(tag_rect, 4.0, accent);
-		icon.paint(ui, egui::Rect::from_min_size(tag_rect.min + egui::vec2(4.0, 2.0), egui::Vec2::splat(size.y - 4.0)), 12.0, Color32::WHITE);
+		icon.paint(
+			ui,
+			egui::Rect::from_min_size(tag_rect.min + egui::vec2(4.0, 2.0), egui::Vec2::splat(size.y - 4.0)),
+			12.0,
+			Color32::WHITE,
+		);
 		painter.galley(tag_rect.min + egui::vec2(22.0, 4.0), galley, Color32::WHITE);
-		chip(ui, painter, chip_at + egui::vec2(14.0, 18.0), &name, icon, accent);
+		chip(ui, painter, chip_at + CHIP, &name, icon, accent);
 	}
 
 	/// Ask whether a file dropped on a layer showing a file of its kind
@@ -707,17 +761,23 @@ impl Panels {
 	fn offer(&mut self, ui: &mut Ui, state: &mut State, view: &View) {
 		let Some(offer) = &self.dropping.offer else { return };
 		let at = view.pos(offer.landing.at[0], offer.landing.at[1]);
+		if let Some((_, item)) = &offer.landing.onto {
+			let painter = ui.painter_at(view.rect);
+			super::dashed(&painter, view.screen(&item.rect), egui::Stroke::new(2.0, kit::ACCENT));
+		}
 		let name = offer.source_name();
 		let mut chosen = None;
 		let area = egui::Area::new(egui::Id::new("drop offer"))
 			.order(egui::Order::Foreground)
-			.fixed_pos(at)
+			.fixed_pos(at + CHIP)
 			.show(ui.ctx(), |ui| {
 				kit::popover_frame().show(ui, |ui| {
-					ui.set_width(240.0);
 					ui.label(egui::RichText::new(&name).font(kit::ui_medium(13.0)).color(kit::TEXT));
 					ui.add_space(4.0);
-					if ui.add(kit::button(Icon::Image, &format!("Replace {}'s file", offer.shown))).clicked() {
+					if ui
+						.add(kit::button(Icon::Image, &format!("Replace {}'s file", offer.shown)))
+						.clicked()
+					{
 						chosen = Some(true);
 					}
 					if ui.add(kit::button(Icon::Add, "Add a layer")).clicked() {
@@ -728,7 +788,10 @@ impl Panels {
 		let away = ui.input(|input| {
 			input.key_pressed(egui::Key::Escape)
 				|| (input.pointer.any_pressed()
-					&& input.pointer.interact_pos().is_some_and(|pos| !area.response.rect.contains(pos)))
+					&& input
+						.pointer
+						.interact_pos()
+						.is_some_and(|pos| !area.response.rect.contains(pos)))
 		});
 		let Some(replace) = chosen else {
 			if away {
@@ -745,6 +808,67 @@ impl Panels {
 			false => Intent::Add(landing),
 		};
 		self.read(ui.ctx(), Job { name, at, intent }, move || prepare(source, &dir));
+	}
+}
+
+/// What a drop or paste can become, with what makes it, for the Add tab.
+const KINDS: [(Icon, &str, &str); 4] = [
+	(Icon::Image, "Image layer", "from a PNG or JPEG"),
+	(Icon::Media, "Media layer", "from a video or sound file"),
+	(Icon::Color, "Color grade", "from a .cube file, on a layer"),
+	(Icon::Web, "Web page layer", "from a pasted web address"),
+];
+
+impl Panels {
+	/// What can be dropped or pasted onto the picture, the kind a drag over
+	/// the window holds lit, naming its file.
+	pub(super) fn drop_kinds(&mut self, ui: &mut Ui) {
+		let hovered: Option<PathBuf> =
+			ui.input(|input| input.raw.hovered_files.iter().find_map(|file| file.path.clone()));
+		let dragged = hovered.map(|path| {
+			let kind = match self.dropping.guess(&path).source {
+				Ok(Source::Image { .. }) => Some(0),
+				Ok(Source::Media { .. }) => Some(1),
+				Ok(Source::Lut { .. }) => Some(2),
+				_ => None,
+			};
+			(
+				kind,
+				path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+			)
+		});
+		for (index, (icon, name, from)) in KINDS.into_iter().enumerate() {
+			let lit = dragged
+				.as_ref()
+				.and_then(|(kind, file)| (*kind == Some(index)).then_some(file));
+			let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 42.0), egui::Sense::hover());
+			let painter = ui.painter_at(rect);
+			if lit.is_some() {
+				painter.rect_filled(rect, 6, kit::ACCENT.gamma_multiply(0.14));
+			}
+			let tile = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 7.0), egui::Vec2::splat(28.0));
+			painter.rect_filled(tile, 7, if lit.is_some() { kit::ACCENT } else { kit::P3 });
+			icon.paint(ui, tile, 15.0, kit::TEXT);
+			let left = tile.right() + 10.0;
+			painter.text(
+				egui::pos2(left, rect.top() + 5.0),
+				egui::Align2::LEFT_TOP,
+				name,
+				kit::ui_medium(13.0),
+				kit::TEXT,
+			);
+			let (below, color) = match lit {
+				Some(file) => (format!("{file}, dropping now"), kit::TEXT),
+				None => (from.to_string(), kit::DIM),
+			};
+			painter.text(
+				egui::pos2(left, rect.top() + 23.0),
+				egui::Align2::LEFT_TOP,
+				below,
+				kit::ui(11.0),
+				color,
+			);
+		}
 	}
 }
 
@@ -773,9 +897,15 @@ fn same_kind(collection: &Collection, shown: &str, dropped: &Source) -> bool {
 /// Point the source called `name` at `source`'s file, keeping how a media
 /// file plays.
 fn replace(state: &mut State, name: &str, source: Source) -> anyhow::Result<()> {
-	let old = state.collection().sources.get(name).context("the layer's source is gone")?;
+	let old = state
+		.collection()
+		.sources
+		.get(name)
+		.context("the layer's source is gone")?;
 	let source = match (old, source) {
-		(&Source::Media { looping, restart, .. }, Source::Media { path, .. }) => Source::Media { path, looping, restart },
+		(&Source::Media { looping, restart, .. }, Source::Media { path, .. }) => {
+			Source::Media { path, looping, restart }
+		}
 		(Source::Image { .. }, source @ Source::Image { .. }) => source,
 		_ => anyhow::bail!("`{name}` no longer shows a file of that kind"),
 	};
@@ -793,7 +923,10 @@ fn grade(state: &mut State, picked: &Picked, shown: &str, prepared: Prepared) ->
 		.filter(|item| item.source == shown)
 		.cloned()
 		.context("the layer dropped on moved")?;
-	let existing = collection.sources.iter().find(|(_, source)| **source == prepared.source);
+	let existing = collection
+		.sources
+		.iter()
+		.find(|(_, source)| **source == prepared.source);
 	let (lut, added) = match existing {
 		Some((name, _)) => (name.clone(), None),
 		None => {
@@ -830,7 +963,13 @@ fn chip(ui: &Ui, painter: &egui::Painter, at: egui::Pos2, text: &str, icon: Icon
 		at.y.min(clip.bottom() - size.y).max(clip.top()),
 	);
 	let rect = egui::Rect::from_min_size(min, size);
-	painter.rect(rect, 8.0, kit::POPOVER, egui::Stroke::new(1.0, color), egui::StrokeKind::Inside);
+	painter.rect(
+		rect,
+		8.0,
+		kit::POPOVER,
+		egui::Stroke::new(1.0, color),
+		egui::StrokeKind::Inside,
+	);
 	let icon_rect = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 6.0), egui::Vec2::splat(18.0));
 	icon.paint(ui, icon_rect, 14.0, color);
 	painter.galley(rect.min + egui::vec2(28.0, 6.0), galley, kit::TEXT);
@@ -851,9 +990,25 @@ mod tests {
 	#[test]
 	fn lands_where_dropped() {
 		let small = land(CANVAS, [200.0, 100.0], [500.0, 500.0]);
-		assert_eq!(small, Rect { x: 400.0, y: 450.0, width: 200.0, height: 100.0 });
+		assert_eq!(
+			small,
+			Rect {
+				x: 400.0,
+				y: 450.0,
+				width: 200.0,
+				height: 100.0
+			}
+		);
 		let large = land(CANVAS, [3840.0, 2160.0], [960.0, 540.0]);
-		assert_eq!(large, Rect { x: 480.0, y: 270.0, width: 960.0, height: 540.0 });
+		assert_eq!(
+			large,
+			Rect {
+				x: 480.0,
+				y: 270.0,
+				width: 960.0,
+				height: 540.0
+			}
+		);
 		let tall = land(CANVAS, [1000.0, 4000.0], [0.0, 0.0]);
 		assert_eq!((tall.x, tall.y, tall.height), (0.0, 0.0, 540.0), "{tall:?}");
 		assert!((tall.width - 135.0).abs() < 1.0, "keeps its shape: {tall:?}");
@@ -870,18 +1025,28 @@ mod tests {
 		let outside = tempfile::tempdir().unwrap();
 		std::fs::create_dir(show.path().join("art")).unwrap();
 		std::fs::write(show.path().join("art/logo.png"), b"inside").unwrap();
-		assert_eq!(beside(show.path(), &show.path().join("art/logo.png")).unwrap(), Path::new("art/logo.png"));
+		assert_eq!(
+			beside(show.path(), &show.path().join("art/logo.png")).unwrap(),
+			Path::new("art/logo.png")
+		);
 
 		std::fs::write(show.path().join("logo.png"), b"another").unwrap();
 		std::fs::write(outside.path().join("logo.png"), b"dropped").unwrap();
 		let copied = beside(show.path(), &outside.path().join("logo.png")).unwrap();
 		assert_eq!(copied, Path::new("logo 2.png"));
 		assert_eq!(std::fs::read(show.path().join(&copied)).unwrap(), b"dropped");
-		assert_eq!(std::fs::read(show.path().join("logo.png")).unwrap(), b"another", "left alone");
+		assert_eq!(
+			std::fs::read(show.path().join("logo.png")).unwrap(),
+			b"another",
+			"left alone"
+		);
 
 		let again = beside(show.path(), &outside.path().join("logo.png")).unwrap();
 		assert_eq!(again, copied, "the same bytes are not copied twice");
-		let left: Vec<_> = std::fs::read_dir(show.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+		let left: Vec<_> = std::fs::read_dir(show.path())
+			.unwrap()
+			.map(|entry| entry.unwrap().file_name())
+			.collect();
 		assert_eq!(left.len(), 3, "no temporary file is left: {left:?}");
 	}
 
@@ -893,13 +1058,22 @@ mod tests {
 		let logo = dir.path().join("my logo.png");
 		std::fs::write(&logo, b"png").unwrap();
 		let uri = url::Url::from_file_path(&logo).unwrap();
-		assert_eq!(Arrival::of_text(&format!("{uri}\r\n")), Some(vec![Arrival::File(logo.clone())]));
+		assert_eq!(
+			Arrival::of_text(&format!("{uri}\r\n")),
+			Some(vec![Arrival::File(logo.clone())])
+		);
 		let both = format!("{}\n{uri}", logo.display());
 		assert_eq!(Arrival::of_text(&both), Some(vec![Arrival::File(logo.clone()); 2]));
-		assert_eq!(Arrival::of_text(&dir.path().join("missing.png").display().to_string()), None);
+		assert_eq!(
+			Arrival::of_text(&dir.path().join("missing.png").display().to_string()),
+			None
+		);
 
 		let page = url::Url::parse("https://example.com/overlay?id=1").unwrap();
-		assert_eq!(Arrival::of_text(" https://example.com/overlay?id=1 "), Some(vec![Arrival::Page(page)]));
+		assert_eq!(
+			Arrival::of_text(" https://example.com/overlay?id=1 "),
+			Some(vec![Arrival::Page(page)])
+		);
 		assert_eq!(Arrival::of_text("ftp://example.com/file"), None);
 		assert_eq!(Arrival::of_text("see https://example.com"), None);
 		assert_eq!(Arrival::of_text("[[items]]\nsource = \"host\""), None);

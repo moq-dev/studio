@@ -47,7 +47,9 @@ impl Pointer {
 			return None;
 		};
 		// Off the window's screen, the position says nothing.
-		reply.same_screen.then(|| physical(ctx, reply.win_x.into(), reply.win_y.into()))
+		reply
+			.same_screen
+			.then(|| physical(ctx, reply.win_x.into(), reply.win_y.into()))
 	}
 
 	#[cfg(windows)]

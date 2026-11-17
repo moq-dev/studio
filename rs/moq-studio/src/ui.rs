@@ -1143,7 +1143,8 @@ impl Panels {
 		// A failure with no layer to show it on is the toast's.
 		let mut spot = None;
 		let result = (|| {
-			let clip = Clip::from_toml(text).context("the clipboard holds no layers, filters, files, picture, or web address")?;
+			let clip = Clip::from_toml(text)
+				.context("the clipboard holds no layers, filters, files, picture, or web address")?;
 			match clip {
 				Clip::Items(items) => {
 					let layer = match &self.selection {
