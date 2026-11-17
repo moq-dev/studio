@@ -104,8 +104,8 @@ struct Offer {
 	/// The name of the source shown by the layer dropped on, and that source.
 	shown: String,
 	was: Source,
-	/// How many lists of layers show that source, which a replaced file
-	/// changes on each.
+	/// How many layers show that source, which a replaced file changes on
+	/// each.
 	linked: usize,
 }
 
@@ -602,7 +602,15 @@ impl Panels {
 				let onto = landing.onto.clone();
 				let landing_at = landing.at;
 				let intent = match (&source, onto) {
-					(Source::Lut { .. }, Some((picked, item))) => Intent::Grade(picked, item),
+					// As the scene file has it, not as posed for the picture.
+					(Source::Lut { .. }, Some((picked, _))) => match picked.item(state.collection()) {
+						Some(stored) => Intent::Grade(picked.clone(), stored.clone()),
+						None => {
+							let err = anyhow::anyhow!("the layer dropped on is gone");
+							self.dropped_failed(landing.at, Err(err));
+							return;
+						}
+					},
 					(Source::Lut { .. }, None) => {
 						let err = anyhow::anyhow!("drop a color grade on the layer it grades");
 						self.dropped_failed(landing.at, Err(err));
@@ -614,7 +622,8 @@ impl Panels {
 						let was = collection.sources.get(&shown).cloned().expect("a source of its kind");
 						let linked = collection
 							.layers()
-							.filter(|(_, items)| items.iter().any(|item| collection.capture(&item.source) == shown))
+							.flat_map(|(_, items)| items)
+							.filter(|item| collection.capture(&item.source) == shown)
 							.count();
 						self.dropping.offer = Some(Offer {
 							source,
