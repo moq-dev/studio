@@ -19,12 +19,8 @@ use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::glide::{Glide, REFLOW, mixed, pair, stack};
 use crate::matte::Matte;
 use crate::overlay::{Overlay, Overlays};
-use crate::place::{Look, Placement, Placer, Reducer};
+use crate::place::{GRAB, Look, Placement, Placer, Reducer};
 use crate::source::{self, Feed, Sources, Status};
-
-/// How long a gesture holds an item keeping clear in hand after it last
-/// said so: a few frames of the window, so one hidden mid-drag lets go.
-pub const GRAB: Duration = Duration::from_millis(500);
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
 /// `moq_video::render` produces and what its exporter hands an encoder.

@@ -436,8 +436,12 @@ impl Panels {
 		if !response.dragged() {
 			self.drag = None;
 		}
-		// A layer keeping clear stays put while in hand.
+		// A layer keeping clear stays put while in hand, which each frame
+		// says again, at least four times a lease, whatever the canvas rate.
 		keep::grab(state, self.drag.as_ref().map(|drag| &drag.picked));
+		if self.drag.is_some() {
+			ui.ctx().request_repaint_after(moq_scene::place::GRAB / 4);
+		}
 		if response.has_focus() && self.drag.is_none() && result.is_ok() {
 			(spot, result) = self.nudge(ui, state, response.id);
 		}

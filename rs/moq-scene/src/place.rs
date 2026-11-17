@@ -23,6 +23,11 @@ use crate::glide::Glide;
 /// How often the picture under an item is read, at most.
 pub const INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long a gesture holds an item keeping clear in hand after it last
+/// said so: a window that stops drawing mid-drag, as a hidden one does,
+/// lets go this long after.
+pub const GRAB: Duration = Duration::from_millis(500);
+
 /// The longest side of the picture read, in pixels: text a 1080p canvas
 /// shows at a readable size still has edges at this size.
 const SIDE: u32 = 512;
