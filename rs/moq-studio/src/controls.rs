@@ -171,6 +171,7 @@ impl Default for Replay {
 
 impl Controls {
 	pub fn new(engine: Arc<Engine>, stream: Stream, runtime: tokio::runtime::Handle) -> Self {
+		engine.set_guests_appear(stream.guests_appear());
 		Self {
 			engine,
 			runtime,
@@ -369,6 +370,7 @@ impl Controls {
 	/// now if off air, or once the stream ends; says whether they wait for it.
 	/// Otherwise a guests' room that failed is tried again, off air.
 	pub fn set_stream(self: &Arc<Self>, stream: Stream, followed_changed: bool) -> bool {
+		self.engine.set_guests_appear(stream.guests_appear());
 		{
 			// Marked with the settings it belongs to, so a snapshot never
 			// holds the new relays without knowing they wait to be followed.

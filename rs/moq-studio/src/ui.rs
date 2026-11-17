@@ -43,6 +43,7 @@ mod multiview;
 mod review;
 mod settings;
 mod shell;
+mod slots;
 
 pub(crate) use layout::fit;
 use levels::Levels;
@@ -277,6 +278,7 @@ impl Studio {
 			message: None,
 			faults: Vec::new(),
 			reloads: 0,
+			shifts: 0,
 			closing: false,
 			levels: Levels::default(),
 			graph: graph::View::default(),
@@ -709,6 +711,8 @@ struct Panels {
 	faults: Vec<Fault>,
 	/// The engine's reloads seen so far.
 	reloads: u64,
+	/// The engine's [shifts](engine::State::shifts) seen so far.
+	shifts: u64,
 	/// Whether Close show was clicked, until the window has closed the show.
 	closing: bool,
 	/// Each sound's and audio scene's recent levels, for the meters.
@@ -994,7 +998,11 @@ impl Panels {
 			Some(scene) => self.edited(state) != Some(scene.as_str()),
 			None => self.off_air(state).is_some(),
 		});
-		if gone {
+		// A layer of its scene that an edit of the engine's own, such as a
+		// guest appearing, inserted or replaced may have taken its index.
+		let shifted = shifted_since(self.selection.as_ref(), &state.shifts, self.shifts);
+		self.shifts = state.shifts.0;
+		if gone || shifted {
 			self.selection = None;
 			self.drag = None;
 			self.moving = None;
@@ -1870,14 +1878,24 @@ fn color_ui(ui: &mut Ui, color: &mut moq_scene::Rgba) -> egui::Response {
 	response
 }
 
+/// Whether an edit the UI did not make inserted or replaced a layer of the
+/// scene `selection` is in after the UI saw `seen` of the engine's
+/// [shifts](engine::State::shifts).
+fn shifted_since(selection: Option<&Picked>, shifts: &(u64, BTreeMap<String, u64>), seen: u64) -> bool {
+	let (count, scenes) = shifts;
+	let scene = selection.and_then(|picked| picked.layer.scene.as_ref());
+	*count != seen && scene.is_some_and(|scene| scenes.get(scene).is_some_and(|at| *at > seen))
+}
+
 /// The source and video settings of a clone of `name`. A clone of a clone
 /// shows the same capture, so it clones that. It copies the crop and filters,
-/// but not a removed background: the clone already shows the cut-out.
+/// but not a removed background: the clone already shows the cut-out. For a
+/// role, it copies the source filling it, with that look.
 fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
 	let source = Source::Clone {
 		source: collection.capture(name).to_string(),
 	};
-	let video = collection.video.get(name).map(|video| Video {
+	let video = collection.video.get(collection.resolve(name)).map(|video| Video {
 		background: Background::Keep,
 		..video.clone()
 	});
@@ -2075,6 +2093,9 @@ impl Default for Snapping {
 struct Drag {
 	picked: Picked,
 	grab: Grab,
+	/// Whether the layer is in a slot, so the drag moves it to another
+	/// slot rather than where the pointer lets go.
+	slotted: bool,
 	/// The layer's rect and crop, and where the pointer was in canvas
 	/// pixels, when the drag started. Each frame drags from these, so snaps
 	/// never accumulate.
@@ -2109,7 +2130,7 @@ fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration)
 	let mut rects = Vec::new();
 	let layers = scene.map(Layer::scene).into_iter().chain(top.then(Layer::top));
 	for shown in layers {
-		let items = collection.items(&shown).unwrap_or_default();
+		let items = slots::placed(state, &shown);
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == dragged.layer && at == dragged.index) {
 				rects.push(item.posed(since).rect);
@@ -2317,6 +2338,8 @@ fn describe(source: &Source) -> String {
 		Source::Browser { url, width, height } => format!("browser: {url} ({width}x{height})"),
 		Source::Overlay { width, height, .. } => format!("overlay ({width}x{height})"),
 		Source::Clone { source } => format!("clone of {source}"),
+		Source::Role { source: Some(source) } => format!("role: {source}"),
+		Source::Role { source: None } => "role: unfilled".into(),
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
 		Source::Scene { scene } => format!("scene: {scene}"),
@@ -2431,10 +2454,11 @@ enum Kind {
 	Replay,
 	Lut,
 	Scene,
+	Role,
 }
 
 impl Kind {
-	const ALL: [Self; 16] = [
+	const ALL: [Self; 17] = [
 		Self::Color,
 		Self::Image,
 		Self::Media,
@@ -2451,6 +2475,7 @@ impl Kind {
 		Self::Replay,
 		Self::Lut,
 		Self::Scene,
+		Self::Role,
 	];
 
 	fn label(self) -> &'static str {
@@ -2471,6 +2496,7 @@ impl Kind {
 			Self::Replay => "Replay",
 			Self::Lut => "LUT",
 			Self::Scene => "Scene",
+			Self::Role => "Role",
 		}
 	}
 
@@ -2482,6 +2508,7 @@ impl Kind {
 			}
 			Self::Image | Self::Media => Some("file"),
 			Self::Lut => Some(".cube file"),
+			Self::Role => Some("source filling it (empty for none)"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
 			Self::Browser => Some("url"),
@@ -2611,6 +2638,7 @@ impl AddSource {
 				restart: self.restart,
 			},
 			Kind::Replay => Source::Replay,
+			Kind::Role => Source::Role { source: id },
 			Kind::Scene => match &self.scene {
 				Some(scene) => Source::Scene { scene: scene.clone() },
 				None => Source::Program,
@@ -2791,6 +2819,67 @@ mod tests {
 		);
 	}
 
+	/// A scene duplicated with its own copies keeps an unfilled role as the
+	/// role, as it does a scene drawn in it, and copies a filled one.
+	#[test]
+	fn an_unfilled_role_gets_no_copy_of_its_own() {
+		let mut collection = Collection::new();
+		let color = moq_scene::Rgba([255, 255, 255, 255]);
+		collection.sources.insert("game".into(), Source::Color { color });
+		collection.sources.insert("Main".into(), Source::Role { source: None });
+		assert!(!build::own_copy(&collection, "Main"), "nothing to copy");
+		assert!(build::own_copy(&collection, "game"));
+		let filled = Source::Role {
+			source: Some("game".into()),
+		};
+		collection.sources.insert("Main".into(), filled);
+		assert!(build::own_copy(&collection, "Main"), "the source filling it");
+	}
+
+	/// A layer the UI picked is let go of once an edit of the engine's own
+	/// inserts or replaces a layer of its scene, and kept for one elsewhere.
+	#[test]
+	fn a_guest_appearing_lets_go_of_a_layer_of_their_scene() {
+		let picked = |scene: &str| Picked {
+			layer: Layer::scene(scene),
+			index: 2,
+		};
+		let mut shifts = (0, BTreeMap::new());
+		assert!(!shifted_since(Some(&picked("Interview")), &shifts, 0));
+		shifts.0 += 1;
+		shifts.1.insert("Interview".to_string(), shifts.0);
+		assert!(shifted_since(Some(&picked("Interview")), &shifts, 0));
+		assert!(!shifted_since(Some(&picked("Solo")), &shifts, 0), "another scene");
+		assert!(!shifted_since(Some(&picked("Interview")), &shifts, 1), "already seen");
+		assert!(!shifted_since(None, &shifts, 0));
+		shifts.0 += 1;
+		shifts.1.insert("Solo".to_string(), shifts.0);
+		assert!(shifted_since(Some(&picked("Interview")), &shifts, 0), "two since");
+		assert!(!shifted_since(Some(&picked("Interview")), &shifts, 1));
+	}
+
+	/// A layer showing a role nothing fills offers no copy of its own, to
+	/// duplicate or make independent, as a clone of it would be refused; one
+	/// it fills copies the source filling it.
+	#[test]
+	fn an_unfilled_role_has_nothing_to_copy() {
+		let mut collection = Collection::new();
+		let color = moq_scene::Rgba([255, 255, 255, 255]);
+		collection.sources.insert("game".into(), Source::Color { color });
+		collection.sources.insert("Main".into(), Source::Role { source: None });
+		let err = build::copy_of(&collection, "Main").unwrap_err();
+		assert_eq!(err.to_string(), build::NOTHING_TO_COPY);
+		let filled = Source::Role {
+			source: Some("game".into()),
+		};
+		collection.sources.insert("Main".into(), filled);
+		let (copy, _) = build::copy_of(&collection, "Main").unwrap();
+		assert!(matches!(&copy, Source::Clone { source } if source == "game"));
+		let mut draft = collection.draft("Duplicate `Main` as its own copy");
+		draft.set_source("Main copy", Some(copy)).unwrap();
+		draft.finish().unwrap();
+	}
+
 	/// A clone of a source with its background removed copies its filters,
 	/// and the edit adding it is valid.
 	#[test]
@@ -2807,6 +2896,10 @@ framerate = 30
 [sources.cam]
 kind = "camera"
 
+[sources.Camera]
+kind = "role"
+source = "cam"
+
 [video.cam]
 background = "remove"
 filters = [{ kind = "opacity", amount = 0.5 }]
@@ -2814,14 +2907,18 @@ filters = [{ kind = "opacity", amount = 0.5 }]
 		)
 		.unwrap();
 
-		let (source, video) = clone_of(&collection, "cam");
-		let video = video.unwrap();
-		assert_eq!(video.background, Background::Keep);
-		assert_eq!(video.filters, collection.video["cam"].filters);
+		// A role's copy is of the source filling it, with that look.
+		for name in ["cam", "Camera"] {
+			let (source, video) = clone_of(&collection, name);
+			assert_eq!(source, Source::Clone { source: "cam".into() }, "{name}");
+			let video = video.unwrap();
+			assert_eq!(video.background, Background::Keep);
+			assert_eq!(video.filters, collection.video["cam"].filters, "{name}");
 
-		let mut draft = collection.draft("clone");
-		draft.set_source("clone", Some(source)).unwrap();
-		draft.set_video("clone", Some(video)).unwrap();
-		draft.finish().unwrap();
+			let mut draft = collection.draft("clone");
+			draft.set_source("clone", Some(source)).unwrap();
+			draft.set_video("clone", Some(video)).unwrap();
+			draft.finish().unwrap();
+		}
 	}
 }
