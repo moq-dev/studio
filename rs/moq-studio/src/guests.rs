@@ -743,12 +743,23 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 		.sources
 		.get(source)
 		.and_then(|shown| room.guest_of(shown));
-	state.commit(draft, None)?;
-	if let Some((identity, _)) = identity {
-		let mut participants = room.participants.lock().unwrap();
-		room.change(&mut participants, identity.as_str(), |participant| {
-			participant.appeared = true
-		})?;
+	// Kept before they go on, so a latch that cannot be saved never leaves
+	// them on air with nothing keeping them off once the host undoes it.
+	let latch = |appeared: bool| match &identity {
+		Some((identity, _)) => {
+			let mut participants = room.participants.lock().unwrap();
+			room.change(&mut participants, identity.as_str(), |participant| {
+				participant.appeared = appeared
+			})
+		}
+		None => Ok(()),
+	};
+	latch(true)?;
+	if let Err(err) = state.commit(draft, None) {
+		if let Err(undone) = latch(false) {
+			tracing::warn!(error = format!("{undone:#}"), "cannot forget a guest's appearance");
+		}
+		return Err(err);
 	}
 	Ok(true)
 }
