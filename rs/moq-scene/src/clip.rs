@@ -54,7 +54,11 @@ impl Clip {
 	/// filters read. Relative image and LUT paths are resolved against `dir`,
 	/// the absolute directory of the collection's scene file, so they name the
 	/// same file wherever the clip is pasted.
-	pub fn items(collection: &Collection, items: Vec<Item>, dir: &Path) -> Self {
+	pub fn items(collection: &Collection, mut items: Vec<Item>, dir: &Path) -> Self {
+		// A copy is the host's, never the studio's to give away.
+		for item in &mut items {
+			item.auto = false;
+		}
 		let mut names: Vec<String> = items.iter().map(|item| item.source.clone()).collect();
 		names.extend(items.iter().flat_map(|item| &item.filters).filter_map(read));
 
@@ -358,6 +362,17 @@ mod tests {
 		let pasted = paste(&collection, &Layer::top(), &clip.to_toml().unwrap(), DIR);
 		assert_eq!(pasted.sources, collection.sources, "no source added");
 		assert_eq!(pasted.top, collection.scenes[0].items);
+	}
+
+	/// A layer the studio placed on its own is the host's once copied.
+	#[test]
+	fn a_copy_is_the_hosts() {
+		let mut collection = collection();
+		collection.scenes[0].items[0].auto = true;
+		let Clip::Items(items) = Clip::items(&collection, collection.scenes[0].items.clone(), Path::new(DIR)) else {
+			panic!("not items")
+		};
+		assert!(!items.items[0].auto);
 	}
 
 	/// An animated item copies with its keyframes into a scene, and the top

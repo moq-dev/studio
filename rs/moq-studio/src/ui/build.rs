@@ -739,7 +739,10 @@ impl Panels {
 				result
 			}
 			LayerAction::Duplicate { independent } => {
-				let mut copy = item.clone();
+				let mut copy = Item {
+					auto: false,
+					..item.clone()
+				};
 				// A scene has one main slot, so the copy takes a tile.
 				if copy.slot == Some(moq_scene::Slot::Main) {
 					copy.slot = Some(moq_scene::Slot::Tile);
@@ -1229,7 +1232,15 @@ pub(super) fn duplicate_scene(state: &mut State, index: usize, independent: bool
 		name: name.clone(),
 		size: scene.size,
 		arrangement: scene.arrangement,
-		items: scene.items.clone(),
+		// A copy is the host's, never the studio's to give away.
+		items: scene
+			.items
+			.iter()
+			.map(|item| Item {
+				auto: false,
+				..item.clone()
+			})
+			.collect(),
 		..Scene::new("")
 	};
 	// Each source shown, and the copy of its own each of its layers shows.

@@ -1211,6 +1211,12 @@ pub struct Item {
 	/// or failed, and glides the others to their new places.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub slot: Option<Slot>,
+	/// Whether the studio placed it on its own, as a guest appearing in the
+	/// next tile, rather than the host: once that guest leaves, the next to
+	/// appear may take it. Undo restores it with the rest of the item, and a
+	/// copy is the host's.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub auto: bool,
 	/// Whether the item is drawn. A hidden item keeps its place.
 	#[serde(default = "yes")]
 	pub visible: bool,
@@ -1248,6 +1254,7 @@ impl Item {
 			source: source.into(),
 			rect,
 			slot: None,
+			auto: false,
 			visible: true,
 			locked: false,
 			shape: Shape::default(),
@@ -1269,6 +1276,7 @@ impl Item {
 		Cow::Owned(Self {
 			source: self.source.clone(),
 			slot: self.slot,
+			auto: self.auto,
 			rect: Rect {
 				x: self.rect.x + offset.x,
 				y: self.rect.y + offset.y,

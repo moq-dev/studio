@@ -680,14 +680,10 @@ impl Room {
 	/// Whether `source` plays a broadcast of a guest in the room, announced
 	/// now.
 	fn here(&self, source: &Source) -> bool {
-		self.here_locked(&self.participants.lock().unwrap(), source)
-	}
-
-	/// [`here`](Self::here), with `participants` already locked.
-	fn here_locked(&self, participants: &BTreeMap<String, Participant>, source: &Source) -> bool {
 		let Some((identity, kind)) = self.guest_of(source) else {
 			return false;
 		};
+		let participants = self.participants.lock().unwrap();
 		participants.get(identity.as_str()).is_some_and(|guest| match kind {
 			Kind::Camera => guest.camera,
 			Kind::Screen => guest.screen,
@@ -723,35 +719,53 @@ fn tiled(collection: &Collection, room: &Room, scene: &str) -> usize {
 enum Place {
 	/// A new tile after the others.
 	Next,
-	/// The camera tile at this index of a guest who appeared on their own
-	/// and has left, in place of them.
+	/// The tile at this index the studio gave a guest who has since left,
+	/// in place of them.
 	Taken(usize),
 }
 
 /// Where in `scene` the next guest to appear on their own goes: a new tile
 /// while the tiles hold fewer than [`MAX_GUESTS`] guests of the room, here
-/// or not, and once they hold that many the camera tile of one who
-/// appeared on their own and has left, so one coming back cannot make a
-/// fifth. Only a camera appears on its own, so a screen tile is the host's
-/// and stays theirs, as does the tile of a guest who never appeared on
-/// their own; with none to take there is no place.
+/// or not, and once they hold that many the [auto](Item::auto) tile of one
+/// who has left, so one coming back cannot make a fifth. A tile the host
+/// gave a guest stays theirs, even one who once appeared on their own; with
+/// none to take there is no place.
 fn place(collection: &Collection, room: &Room, scene: &str) -> Option<Place> {
 	let items = &collection.scene(scene)?.items;
-	let guests: Vec<(usize, &Source)> = (items.iter().enumerate())
+	let guests: Vec<(usize, &Item, &Source)> = (items.iter().enumerate())
 		.filter(|(_, item)| item.slot == Some(Slot::Tile))
-		.filter_map(|(index, item)| Some((index, collection.sources.get(collection.capture(&item.source))?)))
-		.filter(|(_, shown)| room.guest_of(shown).is_some())
+		.filter_map(|(index, item)| Some((index, item, collection.sources.get(collection.capture(&item.source))?)))
+		.filter(|(_, _, shown)| room.guest_of(shown).is_some())
 		.collect();
 	if guests.len() < MAX_GUESTS {
 		return Some(Place::Next);
 	}
-	let participants = room.participants.lock().unwrap();
-	guests.into_iter().find_map(|(index, shown)| {
-		let (identity, kind) = room.guest_of(shown)?;
-		let guest = participants.get(identity.as_str())?;
-		let left = kind == Kind::Camera && guest.appeared && !room.here_locked(&participants, shown);
-		left.then_some(Place::Taken(index))
-	})
+	let left = guests
+		.into_iter()
+		.find(|(_, item, shown)| item.auto && !room.here(shown));
+	left.map(|(index, ..)| Place::Taken(index))
+}
+
+/// The audio scenes with the guest shown by the tile at `index` of `scene`
+/// no longer heard on program, as [`appear`] had them, once the studio gives
+/// that tile to another, so they are not heard there unseen when back.
+/// `None` while a layer elsewhere, in a scene or the top layer, still shows
+/// them. The other mixes stay as the host set them.
+fn unheard(collection: &Collection, scene: &str, index: usize) -> Option<Vec<moq_scene::AudioScene>> {
+	let gone = collection.capture(&collection.scene(scene)?.items.get(index)?.source);
+	let others = collection.scenes.iter().flat_map(|other| {
+		let elsewhere = move |(at, _): &(usize, &Item)| other.name != scene || *at != index;
+		other.items.iter().enumerate().filter(elsewhere).map(|(_, item)| item)
+	});
+	if others
+		.chain(&collection.top)
+		.any(|item| collection.capture(&item.source) == gone)
+	{
+		return None;
+	}
+	let mut scenes = collection.audio_scenes.clone();
+	scenes.iter_mut().find(|audio| audio.program)?.sounds.remove(gone);
+	Some(scenes)
 }
 
 /// Show the guest playing from `source` in the next tile of `scene`, the
@@ -776,15 +790,11 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 	let mut draft = state.collection().draft(format!("`{source}` joins `{scene}`"));
 	match &place {
 		Place::Taken(index) => {
-			let left = state.collection().scene(scene).expect("a vacated tile's scene").items[*index].clone();
-			// No longer shown on program, nor heard there should they come
-			// back: what `hear` gave them, leaving the other mixes as set.
-			let gone = state.collection().capture(&left.source).to_string();
-			let mut scenes = state.collection().audio_scenes.clone();
-			if let Some(program) = scenes.iter_mut().find(|audio| audio.program) {
-				program.sounds.remove(&gone);
+			let collection = state.collection();
+			let left = collection.scene(scene).expect("a vacated tile's scene").items[*index].clone();
+			if let Some(scenes) = unheard(collection, scene, *index) {
+				draft.set_audio_scenes(scenes)?;
 			}
-			draft.set_audio_scenes(scenes)?;
 			let taken = Item {
 				source: source.to_string(),
 				..left
@@ -794,6 +804,7 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 		Place::Next => {
 			let item = Item {
 				slot: Some(Slot::Tile),
+				auto: true,
 				..Item::new(source, moq_scene::Rect::default())
 			};
 			draft.insert_item(&layer, next, item)?;
@@ -1800,27 +1811,55 @@ pub(crate) mod tests {
 			"one who left frees a place"
 		);
 		assert_eq!(tile(&collection, "Scene", "erin"), Some(5), "the host can add a fifth");
+		// The host placed bob, so his tile stays his, even once he has
+		// appeared on his own elsewhere.
+		room.participants.lock().unwrap().get_mut("bob").unwrap().appeared = true;
 		assert!(
 			place(&collection, &room, "Scene").is_none(),
 			"a tile the host gave bob stays his"
 		);
-		room.participants.lock().unwrap().get_mut("bob").unwrap().appeared = true;
+		collection.scenes[0].items[2].auto = true;
 		let Some(Place::Taken(index)) = place(&collection, &room, "Scene") else {
-			panic!("the next guest takes the tile bob had");
+			panic!("the next guest takes the tile the studio gave bob");
 		};
 		assert_eq!(index, 2);
-		let screen = Source::Broadcast {
-			path: "guests/bob/screen.hang".into(),
-		};
-		collection.sources.insert("bob screen".into(), screen);
-		collection.scenes[0].items[2].source = "bob screen".into();
-		assert!(
-			place(&collection, &room, "Scene").is_none(),
-			"only a camera appears on its own, so his screen's tile is the host's"
-		);
+		observe(&collection, "bob", true);
+		assert!(place(&collection, &room, "Scene").is_none(), "nor while he is back");
+		observe(&collection, "bob", false);
 
 		collection.scenes[0].items.retain(|item| item.slot.is_none());
 		assert_eq!(tile(&collection, "Scene", "erin"), None, "a scene with no slots");
+	}
+
+	/// A guest whose tile the studio gives away is no longer heard on
+	/// program, unless a layer elsewhere still shows them, and stays in the
+	/// host's other mixes.
+	#[test]
+	fn a_guest_whose_tile_is_taken_is_heard_only_where_shown() {
+		let mut collection = Collection::new();
+		let path = "guests/dave/camera.hang".to_string();
+		collection.sources.insert("dave".into(), Source::Broadcast { path });
+		let tile = Item {
+			slot: Some(Slot::Tile),
+			auto: true,
+			..Item::new("dave", moq_scene::Rect::default())
+		};
+		collection.scenes[0].items = vec![tile];
+		let mut headphones = moq_scene::AudioScene::new("Headphones");
+		headphones.sounds.insert("dave".into());
+		collection.audio_scenes[0].sounds.insert("dave".into());
+		collection.audio_scenes.push(headphones);
+		collection.validate().unwrap();
+
+		let scenes = unheard(&collection, "Scene", 0).expect("shown nowhere else");
+		assert!(!scenes[0].sounds.contains("dave"), "not on program");
+		assert!(scenes[1].sounds.contains("dave"), "still in the headphones");
+
+		let fill = moq_scene::Rect::fill(&collection.canvas);
+		let mut other = moq_scene::Scene::new("Other");
+		other.items.push(Item::new("dave", fill));
+		collection.scenes.push(other);
+		assert!(unheard(&collection, "Scene", 0).is_none(), "shown in another scene");
 	}
 
 	/// A guest joining is not the host's edit: what the host undid can still
