@@ -658,6 +658,19 @@ impl Room {
 	fn guest_of(&self, source: &Source) -> Option<(Path, Kind)> {
 		guest_in(&self.path, source)
 	}
+
+	/// Whether `source` plays a broadcast of a guest in the room, announced
+	/// now.
+	fn here(&self, source: &Source) -> bool {
+		let Some((identity, kind)) = self.guest_of(source) else {
+			return false;
+		};
+		let participants = self.participants.lock().unwrap();
+		participants.get(identity.as_str()).is_some_and(|guest| match kind {
+			Kind::Camera => guest.camera,
+			Kind::Screen => guest.screen,
+		})
+	}
 }
 
 /// Where `source` would take a tile of `scene`: after its last layer in a
@@ -672,12 +685,14 @@ pub fn tile(collection: &Collection, scene: &str, source: &str) -> Option<usize>
 	Some(last + 1)
 }
 
-/// How many guests of the room at `room` the tiles of `scene` show.
-fn tiled(collection: &Collection, room: &Path, scene: &str) -> usize {
+/// How many guests in `room` the tiles of `scene` show: a guest who left
+/// keeps their tile, closed until they are back, but not their place among
+/// the guests.
+fn tiled(collection: &Collection, room: &Room, scene: &str) -> usize {
 	let items = collection.scene(scene).map_or(&[][..], |scene| &scene.items);
 	let guests = items.iter().filter(|item| {
 		let shown = collection.sources.get(collection.capture(&item.source));
-		item.slot == Some(Slot::Tile) && shown.is_some_and(|shown| plays_guest(room, shown))
+		item.slot == Some(Slot::Tile) && shown.is_some_and(|shown| room.here(shown))
 	});
 	guests.count()
 }
@@ -685,8 +700,8 @@ fn tiled(collection: &Collection, room: &Path, scene: &str) -> usize {
 /// Show the guest playing from `source` in the next tile of `scene`, the
 /// one on program, and hear them on program, as one edit the host can undo,
 /// if [`tile`] finds one and the tiles show fewer than [`MAX_GUESTS`]
-/// guests of the room at `room`. Says whether it did.
-pub fn appear(state: &mut State, room: &Path, scene: Option<&str>, source: &str) -> anyhow::Result<bool> {
+/// guests still in `room`. Says whether it did.
+pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str) -> anyhow::Result<bool> {
 	let Some(scene) = scene else { return Ok(false) };
 	if tiled(state.collection(), room, scene) >= MAX_GUESTS {
 		return Ok(false);
@@ -811,7 +826,7 @@ pub async fn run(engine: Arc<Engine>, room: Arc<Room>, origin: moq_net::origin::
 				continue;
 			};
 			let program = state.compositor.program_scene().map(str::to_string);
-			match appear(&mut state, room.path(), program.as_deref(), &name) {
+			match appear(&mut state, &room, program.as_deref(), &name) {
 				Ok(true) => tracing::info!(source = %name, "a guest appeared on their own"),
 				Ok(false) => {}
 				Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot show a guest"),
@@ -1622,11 +1637,14 @@ pub(crate) mod tests {
 	#[test]
 	fn a_guest_takes_the_next_tile_until_four() {
 		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
-		let guests = room.path().clone();
 		let mut collection = Collection::new();
 		collection
 			.sources
 			.insert("Camera".into(), Source::Role { source: None });
+		let observe = |collection: &Collection, guest: &str, online: bool| {
+			let path = format!("{guest}/camera.hang");
+			room.observe(&Path::new(&path).unwrap(), online, collection, &History::new());
+		};
 		let logo = Source::Color {
 			color: moq_scene::Rgba([255, 255, 255, 255]),
 		};
@@ -1645,16 +1663,23 @@ pub(crate) mod tests {
 
 		assert_eq!(tile(&collection, "Scene", "alice"), Some(1));
 		for guest in ["alice", "bob", "carol", "dave"] {
-			assert!(tiled(&collection, &guests, "Scene") < MAX_GUESTS);
+			observe(&collection, guest, true);
+			assert!(tiled(&collection, &room, "Scene") < MAX_GUESTS);
 			let at = tile(&collection, "Scene", guest).unwrap();
 			collection.scenes[0].items.insert(at, slot(guest));
 			assert_eq!(tile(&collection, "Scene", guest), None, "{guest} is shown");
 		}
 		assert_eq!(collection.scenes[0].items.last().unwrap().source, "logo");
 		assert_eq!(
-			tiled(&collection, &guests, "Scene"),
+			tiled(&collection, &room, "Scene"),
 			MAX_GUESTS,
 			"four guests fill the tiles"
+		);
+		observe(&collection, "bob", false);
+		assert_eq!(
+			tiled(&collection, &room, "Scene"),
+			MAX_GUESTS - 1,
+			"one who left frees a place"
 		);
 		assert_eq!(tile(&collection, "Scene", "erin"), Some(5), "the host can add a fifth");
 

@@ -1206,7 +1206,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	let engine = started.get().expect("the studio started").clone();
 	if let View::Joined = view {
 		let mut state = engine.state.lock().unwrap();
-		let room = moq_net::Path::new("room").unwrap();
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+		let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
 		let appeared = crate::guests::appear(&mut state, &room, Some("Guests"), "Ibis").unwrap();
 		assert!(appeared, "Ibis takes a tile");
 	}

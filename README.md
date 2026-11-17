@@ -633,8 +633,11 @@ slots.
 
 **Appear on their own**, in Settings, Guests, has a guest whose camera comes
 online take the next tile of the scene on program, and be heard on program,
-as an edit you can undo; up to four guests of the room take tiles that way,
-and more wait under Add. Off, every guest waits under Add, as before.
+as an edit you can undo. Up to four guests still in the room take tiles that
+way, and more wait under Add; one who leaves keeps their tile, closed until
+they are back, and frees their place for the next. A guest whose appearance
+you undid appears again when they rejoin; **Remove from scenes** keeps them
+off. Off, every guest waits under Add, as before.
 
 ### Audio scenes
 

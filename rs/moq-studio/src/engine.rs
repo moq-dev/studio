@@ -5467,8 +5467,9 @@ mod tests {
 
 	/// A guest whose camera comes online in the room takes the next tile of
 	/// the scene on program once the show says guests appear on their own, as
-	/// an edit the host can undo; before that, for their screen, and once the
-	/// host removed them, they wait under Add.
+	/// an edit the host can undo, and again when they rejoin after one; before
+	/// that, for their screen, once the host removed them, and while four
+	/// guests there fill the tiles, they wait under Add.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_guest_appears_in_the_next_tile_once_the_show_says_so() {
@@ -5553,6 +5554,60 @@ mod tests {
 			.unwrap();
 		joined("carol").await.expect("carol joins");
 		assert_eq!(items(&engine).len(), 1, "a removed guest takes no tile");
+
+		let shown = |name: &'static str| {
+			let engine = engine.clone();
+			kio::clock::timeout(TIMEOUT, async move {
+				while !items(&engine).iter().any(|(source, _)| source == name) {
+					kio::clock::sleep(Duration::from_millis(10)).await;
+				}
+			})
+		};
+		let offline = |name: &'static str| {
+			let engine = engine.clone();
+			kio::clock::timeout(TIMEOUT, async move {
+				while engine.room().unwrap().participants()[name].camera {
+					kio::clock::sleep(Duration::from_millis(10)).await;
+				}
+			})
+		};
+		// An undone appearance is not a removal: joining again, she appears.
+		drop(_camera);
+		offline("alice").await.expect("alice leaves");
+		let _camera = engine
+			.subscribe
+			.route("guests/alice/camera.hang", Default::default())
+			.unwrap();
+		shown("alice").await.expect("alice appears again");
+
+		// Four guests there fill the tiles; one leaving frees a place, his
+		// tile closed until he is back.
+		let mut cameras = Vec::new();
+		for name in ["dave", "erin", "frank"] {
+			let path = format!("guests/{name}/camera.hang");
+			cameras.push(engine.subscribe.route(path, Default::default()).unwrap());
+			shown(name).await.expect("a guest appears");
+		}
+		let _gus = engine
+			.subscribe
+			.route("guests/gus/camera.hang", Default::default())
+			.unwrap();
+		joined("gus").await.expect("gus joins");
+		assert!(
+			!items(&engine).iter().any(|(source, _)| source == "gus"),
+			"a fifth waits"
+		);
+		drop(cameras.remove(0));
+		offline("dave").await.expect("dave leaves");
+		let _hal = engine
+			.subscribe
+			.route("guests/hal/camera.hang", Default::default())
+			.unwrap();
+		shown("hal").await.expect("hal takes the place dave left");
+		assert!(
+			items(&engine).iter().any(|(source, _)| source == "dave"),
+			"dave keeps his tile"
+		);
 
 		engine.stop();
 		kio::clock::timeout(TIMEOUT, engine.close())
