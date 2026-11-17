@@ -475,6 +475,12 @@ pub(crate) struct Placer {
 	/// Whether a gesture has it in hand, such as a drag: it chooses only once
 	/// let go.
 	grabbed: bool,
+	/// Until when the glide of its last choice runs.
+	gliding: Option<Instant>,
+	/// Where a glide under way stopped when a gesture took it in hand: it
+	/// stays there, at the size it is meant to have, until let go, then
+	/// glides on from there.
+	paused: Option<Rect>,
 	placement: Placement,
 	/// What [`Sight::generation`] and settings the heat was drawn from.
 	heated: Option<(u64, KeepClear)>,
@@ -501,6 +507,8 @@ impl Placer {
 			aimed: None,
 			watched: true,
 			grabbed: false,
+			gliding: None,
+			paused: None,
 			placement: Placement {
 				rect: nowhere,
 				slot: None,
@@ -539,6 +547,8 @@ impl Placer {
 		self.looking = None;
 		self.worst = None;
 		self.glide = Glide::new(self.glides, |_| true);
+		self.gliding = None;
+		self.paused = None;
 	}
 
 	/// Note whether its picture is read as of `now`: while its scene is not
@@ -595,17 +605,49 @@ impl Placer {
 		}
 
 		let target = self.target(saved, &slots);
-		// Another target with no move, as a resize gives, shows at once, even
-		// part way along a glide.
-		if self
-			.aimed
-			.is_some_and(|(aimed, moves)| aimed != target && moves == self.moves)
-		{
-			self.glide = Glide::new(self.glides, |_| true);
+		// Taken in hand part way along a glide, as a crop started then is, it
+		// stops where it is drawn, so it stays under the pointer; let go, it
+		// glides on from there.
+		let gliding = self.gliding.is_some_and(|until| now < until);
+		if self.grabbed && gliding && self.paused.is_none() {
+			self.paused = Some(self.placement.rect);
 		}
-		self.aimed = Some((target, self.moves));
-		self.glide.show(self.moves, &[shown(target)], now);
-		let rect = self.glide.placed()[0].rect;
+		if !self.grabbed
+			&& let Some(paused) = self.paused.take()
+		{
+			let at = Rect {
+				width: target.width,
+				height: target.height,
+				..paused
+			};
+			self.glide = Glide::new(self.glides, |_| true);
+			self.glide.show(self.moves, &[shown(at)], now);
+			self.moves += 1;
+			self.gliding = Some(now.saturating_add(self.glides));
+		}
+		let rect = match self.paused {
+			Some(paused) => {
+				self.aimed = Some((target, self.moves));
+				Rect {
+					width: target.width,
+					height: target.height,
+					..paused
+				}
+			}
+			None => {
+				// Another target with no move, as a resize gives, shows at
+				// once, even part way along a glide.
+				if self
+					.aimed
+					.is_some_and(|(aimed, moves)| aimed != target && moves == self.moves)
+				{
+					self.glide = Glide::new(self.glides, |_| true);
+				}
+				self.aimed = Some((target, self.moves));
+				self.glide.show(self.moves, &[shown(target)], now);
+				self.glide.placed()[0].rect
+			}
+		};
 		self.placement.rect = rect;
 		self.placement.slot = match self.at {
 			At::Slot(slot) => Some(slot),
@@ -697,6 +739,7 @@ impl Placer {
 			self.glide.show(self.moves, &[shown(self.placement.rect)], now);
 		}
 		self.moves += 1;
+		self.gliding = Some(now.saturating_add(keep.glide));
 	}
 }
 
@@ -1114,6 +1157,37 @@ mod tests {
 		let now = run(&mut placer, saved, now, [read(MOVING, game)]);
 		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
 		let _ = now;
+	}
+
+	/// Taken in hand part way along a glide, as a crop started then is, it
+	/// stops where it is drawn; let go, it glides on from there to its slot.
+	#[test]
+	fn a_glide_pauses_while_in_hand() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let now = run(&mut placer, saved, start, (0..5).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+		let moved = now.saturating_sub(INTERVAL);
+		let glide = KeepClear::default().glide;
+		let to = Slot::TopLeft.rect(288.0, 288.0, CANVAS).unwrap();
+
+		let half = moved.saturating_add(glide / 2);
+		let at = placer.place(saved, &KeepClear::default(), CANVAS, half);
+		assert!(at.x < saved.x && at.x > to.x, "on its way: {at:?}");
+		placer.grab(true);
+		for later in [half, half.saturating_add(glide), half.saturating_add(glide * 4)] {
+			let held = placer.place(saved, &KeepClear::default(), CANVAS, later);
+			assert_eq!(held, at, "in hand, it stays where it is drawn");
+		}
+
+		placer.grab(false);
+		let released = half.saturating_add(glide * 4);
+		assert_eq!(placer.place(saved, &KeepClear::default(), CANVAS, released), at);
+		let on = placer.place(saved, &KeepClear::default(), CANVAS, released.saturating_add(glide / 2));
+		assert!(on.x < at.x && on.x > to.x, "it glides on: {on:?}");
+		let landed = placer.place(saved, &KeepClear::default(), CANVAS, released.saturating_add(glide));
+		assert_eq!(landed, to);
 	}
 
 	/// A resize part way along a glide takes its new size at once, in the
