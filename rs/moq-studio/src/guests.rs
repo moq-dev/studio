@@ -788,27 +788,21 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 		return Ok(false);
 	};
 	let mut draft = state.collection().draft(format!("`{source}` joins `{scene}`"));
-	match &place {
+	// A tile of their own, shown, with nothing of the look the host gave
+	// whoever had it before.
+	let item = Item {
+		slot: Some(Slot::Tile),
+		auto: true,
+		..Item::new(source, moq_scene::Rect::default())
+	};
+	match place {
 		Place::Taken(index) => {
-			let collection = state.collection();
-			let left = collection.scene(scene).expect("a vacated tile's scene").items[*index].clone();
-			if let Some(scenes) = unheard(collection, scene, *index) {
+			if let Some(scenes) = unheard(state.collection(), scene, index) {
 				draft.set_audio_scenes(scenes)?;
 			}
-			let taken = Item {
-				source: source.to_string(),
-				..left
-			};
-			draft.set_item(&layer, *index, taken)?;
+			draft.set_item(&layer, index, item)?;
 		}
-		Place::Next => {
-			let item = Item {
-				slot: Some(Slot::Tile),
-				auto: true,
-				..Item::new(source, moq_scene::Rect::default())
-			};
-			draft.insert_item(&layer, next, item)?;
-		}
+		Place::Next => draft.insert_item(&layer, next, item)?,
 	}
 	if state.collection().sources.get(source).is_some_and(Source::has_audio) {
 		draft.hear(source)?;

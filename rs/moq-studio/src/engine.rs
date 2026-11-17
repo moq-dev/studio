@@ -5620,6 +5620,16 @@ mod tests {
 			scenes.push(headphones);
 			let mut draft = state.collection().draft("Headphones");
 			draft.set_audio_scenes(scenes).unwrap();
+			// And the host hid dave's tile, which the next guest takes shown.
+			let scene = state.collection().scenes[0].name.clone();
+			let at = (state.collection().scenes[0].items.iter())
+				.position(|item| item.source == "dave")
+				.unwrap();
+			let hidden = moq_scene::Item {
+				visible: false,
+				..state.collection().scenes[0].items[at].clone()
+			};
+			draft.set_item(&moq_scene::Layer::scene(&scene), at, hidden).unwrap();
 			state.commit(draft, None).unwrap();
 		}
 		drop(cameras.remove(0));
@@ -5629,6 +5639,17 @@ mod tests {
 			.route("guests/hal/camera.hang", Default::default())
 			.unwrap();
 		shown("hal").await.expect("hal takes the place dave left");
+		{
+			let state = engine.state.lock().unwrap();
+			let hal = state.collection().scenes[0]
+				.items
+				.iter()
+				.find(|item| item.source == "hal");
+			assert!(
+				hal.is_some_and(|hal| hal.visible && hal.auto),
+				"shown, in a tile of his own"
+			);
+		}
 		assert!(
 			!items(&engine).iter().any(|(source, _)| source == "dave"),
 			"in dave's tile"
