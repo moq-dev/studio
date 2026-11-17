@@ -536,14 +536,20 @@ impl Compositor {
 	/// [`set_previewing`](Self::set_previewing) is: a thumbnail no one shows
 	/// costs nothing.
 	pub fn set_thumbnails(&mut self, shown: impl IntoIterator<Item = (Thumbnail, Detail)>) {
-		let mut kept: BTreeMap<Thumbnail, Thumb> = BTreeMap::new();
+		let mut details: BTreeMap<Thumbnail, Detail> = BTreeMap::new();
 		for (thumbnail, detail) in shown {
-			if let Some(thumb) = kept.get_mut(&thumbnail) {
-				thumb.detail = thumb.detail.max(detail);
-				continue;
-			}
+			let merged = details.entry(thumbnail).or_insert(detail);
+			*merged = merged.max(detail);
+		}
+		let mut kept = BTreeMap::new();
+		for (thumbnail, detail) in details {
 			let thumb = match self.thumbnails.remove(&thumbnail) {
-				Some(thumb) => Thumb { detail, ..thumb },
+				// A new size is drawn on the next render, not its next turn.
+				Some(thumb) => Thumb {
+					drawn: thumb.drawn && thumb.detail.side == detail.side,
+					detail,
+					..thumb
+				},
 				None => {
 					self.named += 1;
 					Thumb {
