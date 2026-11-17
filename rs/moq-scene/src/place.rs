@@ -535,9 +535,10 @@ impl Placer {
 	/// Note whether its picture is read as of `now`: while its scene is not
 	/// drawn or the item is hidden it sees nothing new, so it neither
 	/// chooses nor counts its place the worst, and it looks again once it is
-	/// read again.
+	/// read again, unless a move by hand holds it, which only the content
+	/// changing ends.
 	pub fn watch(&mut self, watched: bool, now: Instant) {
-		if watched && !self.watched {
+		if watched && !self.watched && self.at != At::Held {
 			self.looking = Some(now);
 		}
 		if !watched {
@@ -1116,6 +1117,19 @@ mod tests {
 		assert_eq!(placer.placement().slot, None, "it looks again first");
 		let now = run(&mut placer, saved, later, (0..8).map(|_| read(MOVING, game)));
 		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+
+		// Moved by hand, then hidden and shown over the same game: it stays
+		// where it was put.
+		let dragged = Rect { x: 1600.0, ..saved };
+		placer.hold();
+		let now = run(&mut placer, dragged, now, (0..4).map(|_| read(MOVING, game)));
+		placer.watch(false, now);
+		let now = run(&mut placer, dragged, now, (0..4).map(|_| read(MOVING, game)));
+		placer.watch(true, now);
+		let now = run(&mut placer, dragged, now, (0..40).map(|_| read(MOVING, game)));
+		let placement = placer.placement();
+		assert!(placement.held, "still held");
+		assert_eq!(placement.rect, dragged);
 		let _ = now;
 	}
 
