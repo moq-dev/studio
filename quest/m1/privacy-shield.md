@@ -11,7 +11,11 @@ the `shield` frame of [`mock/later.html`](/quest/m0/ux/mock/later.html).
 
 - **The studio's own windows** ask the operating system to leave them out of
   capture, where it offers that: the window sharing type on macOS and the
-  display affinity on Windows. This needs no moq change.
+  display affinity on Windows. This needs no moq change. That is every
+  window the studio opens, each an egui viewport: the main window and the
+  multiview, which a streamer puts on the monitor beside the one they
+  capture. Each viewport's native window is set as it opens, since the
+  multiview opens and closes while the studio runs.
 - **Private apps** are left out by moq-video's capture, which reaches here
   through [its pin](/quest/m1/pin-capture-exclude.md). moq plans that for
   macOS alone: no other desktop's capture can filter, and painting over a

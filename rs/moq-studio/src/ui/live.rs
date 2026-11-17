@@ -734,20 +734,8 @@ impl Panels {
 	pub(super) fn health_dot(&mut self, ui: &mut Ui, fx: &mut Fx, compact: bool) {
 		let on_air = self.engine.on_air();
 		let watched = self.engine.watched();
+		let (name, dot) = health_word(&self.engine);
 		let report = self.engine.health.lock().unwrap();
-		let worst = report
-			.problems
-			.first()
-			.map_or(Verdict::Healthy, |problem| problem.verdict);
-		// A problem shows even off air, such as a failed source.
-		let (name, dot) = match (worst, on_air.live().is_some(), watched.is_empty()) {
-			(Verdict::Unhealthy, ..) => ("Unhealthy", kit::ERR),
-			(Verdict::Degraded, ..) => ("Degraded", kit::CUE),
-			(_, false, true) => ("No relay", kit::DIM),
-			(_, false, false) => ("Ready", kit::OK),
-			(Verdict::Healthy, true, _) => ("Healthy", kit::OK),
-			(Verdict::Unknown, true, _) => ("Starting", kit::DIM),
-		};
 		let mark = fx.on().then(|| crate::fx::Mark::new(ui.painter()));
 		let text = if compact { "" } else { name };
 		let pill = ui.add(kit::Pill::new(text).dot(dot).clickable());
@@ -1362,5 +1350,25 @@ impl Form {
 			}
 		}
 		tokens
+	}
+}
+
+/// The stream's health in a word, and its dot's color. A problem shows even
+/// off air, such as a failed source.
+pub(super) fn health_word(engine: &Engine) -> (&'static str, Color32) {
+	let live = engine.on_air().live().is_some();
+	let unwatched = engine.watched().is_empty();
+	let report = engine.health.lock().unwrap();
+	let worst = report
+		.problems
+		.first()
+		.map_or(Verdict::Healthy, |problem| problem.verdict);
+	match (worst, live, unwatched) {
+		(Verdict::Unhealthy, ..) => ("Unhealthy", kit::ERR),
+		(Verdict::Degraded, ..) => ("Degraded", kit::CUE),
+		(_, false, true) => ("No relay", kit::DIM),
+		(_, false, false) => ("Ready", kit::OK),
+		(Verdict::Healthy, true, _) => ("Healthy", kit::OK),
+		(Verdict::Unknown, true, _) => ("Starting", kit::DIM),
 	}
 }
