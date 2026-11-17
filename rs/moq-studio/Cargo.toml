@@ -42,6 +42,10 @@ cef = ["moq-scene/cef"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
+# A picture pasted from the clipboard, which egui pastes only as text. eframe's
+# release, already in the graph through egui-winit; on Linux it reads the X11
+# clipboard, which a Wayland desktop shares through Xwayland.
+arboard = { version = "3.7", default-features = false, features = ["image-data"] }
 bytes = { workspace = true }
 # The window, its event loop, and the egui integration. `wgpu` is the renderer
 # the compositor shares a device with; no glow, no system font discovery.
@@ -77,6 +81,9 @@ mp4-atom = "0.17.0"
 # A show's picture in the library, the last frame of its program.
 png = "0.18"
 pollster = { workspace = true }
+# The window, to ask where the pointer is during a drag, and whether it is on
+# Wayland, where only the portal hears keys globally.
+raw-window-handle = "0.6"
 # The join link's QR code. No dependencies of its own.
 qrcodegen = "1.8"
 # The system's own dialog for opening a show file or saving a new one: the
@@ -115,8 +122,6 @@ moq-v4l = { workspace = true }
 # The virtual camera's PipeWire node, behind `pipewire`. moq-video links the
 # same release; `v0_3_34` adds the trigger a driving stream paces frames with.
 pipewire = { version = "0.10", optional = true, features = ["v0_3_34"] }
-# Whether the window is on Wayland, where only the portal hears keys globally.
-raw-window-handle = "0.6"
 # Hotkeys on X11, grabbed by keycode so any key binds on any layout. `xkb`
 # tells a held key's repeats from new presses.
 x11rb = { version = "0.13", features = ["xkb"] }
@@ -136,7 +141,14 @@ global-hotkey = "0.9"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Whether the system asks apps to reduce motion, for the effects. eframe's
 # version, already in the graph through winit.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSAccessibility",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+    "NSWorkspace",
+] }
 # Relay tokens in the login keychain.
 apple-native-keyring-store = { version = "1.0", features = ["keychain"] }
 
@@ -145,7 +157,12 @@ apple-native-keyring-store = { version = "1.0", features = ["keychain"] }
 # hotkey registers the key pressed, and whether the system asks apps to
 # reduce motion, for the effects, and the room left on the recordings folder's
 # disk.
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 # Relay tokens in the Windows Credential Manager. Without `search`, which the
 # studio never does, so no regex.
 windows-native-keyring-store = { version = "1.1", default-features = false }

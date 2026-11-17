@@ -110,6 +110,34 @@ enum View {
 	Cued(Page),
 	/// A scene, by name, open for editing off air on BUILD.
 	OffAir(&'static str),
+	/// BUILD's Add tab on the drop views' show, with a file dragged or
+	/// dropped on the picture.
+	Drop(Drop),
+}
+
+/// A file over the picture, at the pointer.
+#[derive(Clone, Copy)]
+enum Drop {
+	/// A logo dragged over the picture, away from every layer.
+	Hover,
+	/// A picture dropped on the host's picture, which asks whether to replace
+	/// its file.
+	Replace,
+	/// A regular MP4 dropped, which says why it cannot play.
+	Refused,
+	/// A logo from outside the show's directory dropped away from every
+	/// layer, copied beside the show, and placed there, selected.
+	Placed,
+}
+
+/// The studio on the drop views' show, turned to BUILD's Add tab with `drop`.
+fn dropping(drop: Drop) -> Open {
+	Open::Studio {
+		view: View::Drop(drop),
+		size: SIZE,
+		show: "drop.toml",
+		relay: false,
+	}
 }
 
 /// BUILD with the host's layer, the middle of the scene on program's three,
@@ -221,6 +249,17 @@ views! {
 	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
 	/// Too narrow for the banner beside the live picture, it goes under it.
 	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml", relay: false };
+	/// A logo dragged over the picture: where it lands, outlined and named
+	/// for the kind of layer it becomes, and Add's row for that kind lit.
+	build_drop: Still, dropping(Drop::Hover);
+	/// A picture dropped on an image layer asks whether to replace that
+	/// layer's file or add a layer.
+	build_drop_replace: Still, dropping(Drop::Replace);
+	/// A regular MP4 dropped says, where it was dropped, why it cannot play
+	/// and the remux that fixes it.
+	build_drop_refused: Still, dropping(Drop::Refused);
+	/// The logo dropped lands where it was let go, at its own size, selected.
+	build_dropped: Still, dropping(Drop::Placed);
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
 	mix: Still, mixing(MixView::Strips, None, SIZE);
@@ -1167,6 +1206,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			studio.turn(*page);
 		}
 		View::OffAir(scene) => studio.edit_off_air(scene),
+		View::Drop(_) => studio.build(Side::Add, Inspect::Layer, None),
 		View::Review { picked, .. } => {
 			studio.turn(Page::Review);
 			studio.seed_shelf(shelf());
@@ -1250,6 +1290,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			// egui shows a tooltip once the pointer rests half a second.
 			harness.run_steps(4);
 		}
+		View::Drop(drop) => drag(&mut harness, &engine, *drop),
 		View::History => {
 			harness
 				.get_all_by_label("Mute")
@@ -1360,6 +1401,93 @@ fn gallery(gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, sheet: bool) ->
 	// Enough for the popover and the sheet to settle where they open.
 	harness.run_steps(4);
 	harness.render().unwrap()
+}
+
+/// A file on the picture as `drop` has it, from the show's directory.
+fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) {
+	/// A file the system drops, which the studio reads by its path.
+	#[derive(Debug)]
+	struct Dropped(std::path::PathBuf);
+
+	impl egui::DroppedFile for Dropped {
+		fn path(&self) -> &Path {
+			&self.0
+		}
+
+		fn bytes(&self) -> Result<Vec<u8>, String> {
+			unreachable!("the studio reads the file itself")
+		}
+	}
+
+	// A white ring, as the mock-up's logo.
+	let logo = image::RgbaImage::from_fn(400, 400, |x, y| {
+		let distance = ((x as f32 - 200.0).powi(2) + (y as f32 - 200.0).powi(2)).sqrt();
+		match (120.0..190.0).contains(&distance) {
+			true => image::Rgba([255, 255, 255, 255]),
+			false => image::Rgba([0, 0, 0, 0]),
+		}
+	});
+	let dir = std::env::current_dir().unwrap();
+	let outside = tempfile::tempdir().unwrap();
+	// The drop that copies the logo in brings it from outside the show.
+	match drop {
+		Drop::Placed => logo.save(outside.path().join("logo.png")).unwrap(),
+		_ => logo.save(dir.join("logo.png")).unwrap(),
+	}
+	// Boxes as a regular MP4 has them, its samples indexed in a `moov`.
+	let mut mp4 = Vec::new();
+	for (kind, body) in [(b"ftyp", 8), (b"moov", 32), (b"mdat", 64)] {
+		mp4.extend_from_slice(&(8 + body as u32).to_be_bytes());
+		mp4.extend_from_slice(kind);
+		mp4.resize(mp4.len() + body, 0);
+	}
+	std::fs::write(dir.join("intro.mp4"), mp4).unwrap();
+
+	// Away from every layer, or on the host's picture at the right.
+	let (path, at) = match drop {
+		Drop::Hover => (dir.join("logo.png"), egui::pos2(470.0, 330.0)),
+		Drop::Replace => (dir.join("logo.png"), egui::pos2(985.0, 330.0)),
+		Drop::Refused => (dir.join("intro.mp4"), egui::pos2(470.0, 330.0)),
+		Drop::Placed => (outside.path().join("logo.png"), egui::pos2(470.0, 330.0)),
+	};
+	harness.input_mut().events.push(egui::Event::PointerMoved(at));
+	match drop {
+		Drop::Hover => harness.input_mut().hovered_files.push(egui::HoveredFile {
+			path: Some(path.clone()),
+			..Default::default()
+		}),
+		Drop::Replace | Drop::Refused | Drop::Placed => {
+			harness.input_mut().dropped_files.push(Arc::new(Dropped(path.clone())))
+		}
+	}
+	harness.run_steps(4);
+	if let Drop::Placed = drop {
+		// Read and copied on a thread of its own.
+		let selected = |harness: &mut Harness<'_, Window>| match &harness.state().app {
+			App::Studio(studio) => studio.selected(),
+			_ => false,
+		};
+		let placed = async {
+			while !selected(harness) {
+				kio::clock::sleep(Duration::from_millis(20)).await;
+				harness.step();
+			}
+		};
+		tokio::runtime::Handle::current()
+			.block_on(kio::clock::timeout(SETTLE, placed))
+			.expect("the dropped logo is placed");
+		assert_eq!(
+			std::fs::read(dir.join("logo.png")).unwrap(),
+			std::fs::read(&path).unwrap(),
+			"copied beside the show"
+		);
+		// Away from the pointer, as a person moves on, and with the source's
+		// picture opened and drawn.
+		harness.input_mut().events.push(egui::Event::PointerGone);
+		tokio::runtime::Handle::current()
+			.block_on(kio::clock::timeout(SETTLE, settle(harness, engine)))
+			.expect("the dropped logo's picture settles");
+	}
 }
 
 /// Mute the first sound, open the health dot's popover, and rest the pointer

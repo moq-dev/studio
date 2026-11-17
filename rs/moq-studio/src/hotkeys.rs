@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-use winit::keyboard::{Key, KeyCode, ModifiersState, NativeKeyCode, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, NativeKeyCode, PhysicalKey};
 
 use crate::controls::{Action, Controls};
 
@@ -134,6 +134,8 @@ struct Pressing {
 	/// The modifiers held now, as egui names them.
 	modifiers: egui::Modifiers,
 	taking: Taking,
+	/// Whether a paste reached egui since [`Keyboard::pasted`] last said so.
+	pasted: bool,
 }
 
 /// What a key pressed in the window does besides reaching egui.
@@ -173,6 +175,19 @@ impl Keyboard {
 	/// returning whether egui hears it too.
 	pub fn pressed(&self, key: PhysicalKey, name: Key, repeat: bool) -> bool {
 		let mut pressing = self.0.lock().unwrap();
+		let paste = !repeat && paste(pressing.modifiers, key, &name);
+		let heard = Self::hear(&mut pressing, key, name, repeat);
+		pressing.pasted |= heard && paste;
+		heard
+	}
+
+	/// Whether a paste was pressed since this last said so, which egui reports
+	/// only when the clipboard holds text.
+	pub fn pasted(&self) -> bool {
+		std::mem::take(&mut self.0.lock().unwrap().pasted)
+	}
+
+	fn hear(pressing: &mut Pressing, key: PhysicalKey, name: Key, repeat: bool) -> bool {
 		let pressed = Binding {
 			modifiers: pressing.modifiers,
 			key,
@@ -203,6 +218,24 @@ impl Keyboard {
 
 	fn take(&self, taking: Taking) {
 		self.0.lock().unwrap().taking = taking;
+	}
+}
+
+/// Whether `key`, where the layout puts `name`, held with `modifiers`
+/// pastes, as egui-winit decides: by the name, or by the key V sits on for a
+/// name egui has no key for, as on a layout without Latin letters.
+fn paste(modifiers: egui::Modifiers, key: PhysicalKey, name: &Key) -> bool {
+	match name {
+		Key::Named(NamedKey::Paste) => true,
+		Key::Named(NamedKey::Insert) => cfg!(windows) && modifiers.shift,
+		Key::Character(text) => {
+			modifiers.command
+				&& match egui::Key::from_name(text) {
+					Some(named) => named == egui::Key::V,
+					None => key == PhysicalKey::Code(KeyCode::KeyV),
+				}
+		}
+		_ => false,
 	}
 }
 
@@ -673,5 +706,23 @@ mod tests {
 		let moved = renamed(&bindings, &onto);
 		assert_eq!(moved[&scene("B")], f1);
 		assert!(!moved.contains_key(&scene("A")));
+	}
+
+	/// The paste key is V by name, or the key V sits on where the layout
+	/// names it nothing egui knows, as egui-winit falls back to.
+	#[test]
+	fn paste_as_egui_hears_it() {
+		let command = egui::Modifiers::COMMAND;
+		let v = PhysicalKey::Code(KeyCode::KeyV);
+		let pastes = |modifiers, key, name: &str| paste(modifiers, key, &Key::Character(name.into()));
+		assert!(pastes(command, v, "v"));
+		assert!(pastes(command, v, "V"));
+		// Russian puts `м` on V.
+		assert!(pastes(command, v, "м"));
+		// Dvorak puts `k` on V, and `v` on the key Qwerty's period is on.
+		assert!(!pastes(command, v, "k"));
+		assert!(pastes(command, PhysicalKey::Code(KeyCode::Period), "v"));
+		assert!(!pastes(egui::Modifiers::NONE, v, "v"));
+		assert!(paste(egui::Modifiers::NONE, v, &Key::Named(NamedKey::Paste)));
 	}
 }

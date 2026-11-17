@@ -29,6 +29,7 @@ mod ladder;
 mod library;
 mod mix;
 mod past;
+mod pointer;
 mod record;
 mod replay;
 mod setup;
