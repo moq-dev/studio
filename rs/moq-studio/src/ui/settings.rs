@@ -86,6 +86,7 @@ pub(super) struct GuestForm {
 	key: String,
 	page: String,
 	expiry: Duration,
+	appear: bool,
 }
 
 impl GuestForm {
@@ -100,6 +101,7 @@ impl GuestForm {
 				.unwrap_or_default(),
 			page: saved.join_page.as_ref().map(ToString::to_string).unwrap_or_default(),
 			expiry: saved.guest_expiry.unwrap_or(crate::guests::DEFAULT_EXPIRY),
+			appear: saved.guests_appear,
 		}
 	}
 
@@ -119,6 +121,7 @@ impl GuestForm {
 			room_key: text(&self.key).map(PathBuf::from),
 			join_page: page,
 			guest_expiry: expiry,
+			guests_appear: self.appear,
 			..saved.clone()
 		})
 	}
@@ -912,6 +915,12 @@ impl Panels {
 					ui.add(kit::Segmented::new(&mut form.expiry, &options));
 				},
 			);
+			field_row(ui, "Appear on their own", "", None, |ui| {
+				ui.add(kit::Toggle::new(&mut form.appear).label("In the next tile on program"))
+					.on_hover_text(
+						"A guest who joins takes the next tile of the scene on program, rather than waiting under Add",
+					);
+			});
 		});
 
 		let edited = form.edited(&saved);

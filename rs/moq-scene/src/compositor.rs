@@ -10,12 +10,14 @@ use kio::clock::Instant;
 use moq_video::render::Renderer;
 
 use crate::Error;
+use crate::arrange::cover;
 use crate::collection::{
 	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Nested, Rect, Settled, Shape,
 	Source, Transition,
 };
 use crate::dark::{Probe, Prober};
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
+use crate::glide::{Glide, REFLOW, mixed, pair, stack};
 use crate::matte::Matte;
 use crate::overlay::{Overlay, Overlays};
 use crate::source::{self, Feed, Sources, Status};
@@ -60,11 +62,12 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// what viewers see.
 ///
 /// A [`Thumbnail`] is drawn only while [`set_thumbnails`](Self::set_thumbnails)
-/// names it, into a texture of its own of at most 256 pixels a
-/// side, redrawn about five times a second on the program
-/// clock, each on a render of its own so a strip of them spreads its cost. A
-/// scene on program is sampled from [`layered`](Self::layered), and one drawn
-/// for an output from that output's texture, rather than drawn again. Thumbnails reach nothing else, and open no
+/// names it, into a texture of its own as large as its [`Detail`] asks,
+/// redrawn as often as it asks on the program clock, each on a render of its
+/// own so a strip of them spreads its cost. A scene on program is sampled
+/// from [`layered`](Self::layered), the one in preview from the preview while
+/// it is drawn, and one drawn for an output from that output's texture,
+/// rather than drawn again. Thumbnails reach nothing else, and open no
 /// source: one shows what the collection's sources already deliver.
 pub struct Compositor {
 	device: wgpu::Device,
@@ -114,6 +117,17 @@ pub struct Compositor {
 	/// Whether the last render drew layers over the program.
 	layered: bool,
 	switch: Option<Switch>,
+	/// Each scene with items in slots, by name: where its arrangement put
+	/// them as of the last render, and their glide there.
+	reflows: HashMap<String, Reflow>,
+}
+
+/// A scene's items in slots, arranged.
+struct Reflow {
+	/// Its items where its arrangement puts them, in order.
+	arranged: Vec<Item>,
+	/// Its items as drawn, gliding to `arranged` when a slot opens or closes.
+	glide: Glide<Vec<(String, bool, Rect)>>,
 }
 
 /// The program and the scenes a transition draws whole on its way, as of the
@@ -176,12 +190,33 @@ impl Output {
 	}
 }
 
-/// The longest side of a thumbnail, in pixels: a scene pad's picture at twice
-/// its size, for a HiDPI screen.
-const THUMBNAIL_SIDE: u32 = 256;
+/// How large a thumbnail is drawn, and how often.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Detail {
+	/// Its longest side, in pixels, at most what it shows.
+	pub side: u32,
+	/// How many times a second it is redrawn, at most: the program's frame
+	/// rate or more redraws it every render.
+	pub rate: u32,
+}
 
-/// How many times a second each thumbnail is redrawn, at most.
-const THUMBNAIL_RATE: u32 = 5;
+impl Default for Detail {
+	/// A scene pad's picture at twice its size, for a HiDPI screen, redrawn
+	/// five times a second.
+	fn default() -> Self {
+		Self { side: 256, rate: 5 }
+	}
+}
+
+impl Detail {
+	/// The larger of each of `self` and `other`, for a thumbnail shown twice.
+	pub fn max(self, other: Self) -> Self {
+		Self {
+			side: self.side.max(other.side),
+			rate: self.rate.max(other.rate),
+		}
+	}
+}
 
 /// A small live picture the UI shows, by what it shows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -195,6 +230,7 @@ pub enum Thumbnail {
 
 /// A thumbnail named by [`Compositor::set_thumbnails`].
 struct Thumb {
+	detail: Detail,
 	/// What it was last drawn into, or `None` until it is, or while it shows
 	/// nothing.
 	target: Option<Target>,
@@ -215,6 +251,8 @@ enum Shows<'a> {
 	Scene(&'a str),
 	/// The program, sampled.
 	Program,
+	/// The preview, showing the scene called this, sampled.
+	Preview(&'a str),
 	/// The output reading the scene called this, sampled.
 	Output(&'a str),
 	/// The source called this.
@@ -419,6 +457,7 @@ impl Compositor {
 			program_shown: Duration::ZERO,
 			layered: false,
 			switch: None,
+			reflows: HashMap::new(),
 		})
 	}
 
@@ -527,23 +566,38 @@ impl Compositor {
 		self.outputs.get(scene)
 	}
 
-	/// Draw a thumbnail of each of `shown` from now on, and forget the rest,
-	/// so one named again starts over. Call it with what the UI shows, as
+	/// Draw a thumbnail of each of `shown` at its detail from now on, and
+	/// forget the rest, so one named again starts over. One named twice takes
+	/// the larger of each. Call it with what the UI shows, as
 	/// [`set_previewing`](Self::set_previewing) is: a thumbnail no one shows
 	/// costs nothing.
-	pub fn set_thumbnails(&mut self, shown: impl IntoIterator<Item = Thumbnail>) {
+	pub fn set_thumbnails(&mut self, shown: impl IntoIterator<Item = (Thumbnail, Detail)>) {
+		let mut details: BTreeMap<Thumbnail, Detail> = BTreeMap::new();
+		for (thumbnail, detail) in shown {
+			let merged = details.entry(thumbnail).or_insert(detail);
+			*merged = merged.max(detail);
+		}
 		let mut kept = BTreeMap::new();
-		for thumbnail in shown {
-			let thumb = self.thumbnails.remove(&thumbnail).unwrap_or_else(|| {
-				self.named += 1;
-				Thumb {
-					target: None,
-					start: None,
-					phase: self.named,
-					drawn: false,
-					due: false,
+		for (thumbnail, detail) in details {
+			let thumb = match self.thumbnails.remove(&thumbnail) {
+				// A new size is drawn on the next render, not its next turn.
+				Some(thumb) => Thumb {
+					drawn: thumb.drawn && thumb.detail.side == detail.side,
+					detail,
+					..thumb
+				},
+				None => {
+					self.named += 1;
+					Thumb {
+						detail,
+						target: None,
+						start: None,
+						phase: self.named,
+						drawn: false,
+						due: false,
+					}
 				}
-			});
+			};
 			kept.insert(thumbnail, thumb);
 		}
 		self.thumbnails = kept;
@@ -592,6 +646,22 @@ impl Compositor {
 	pub fn picture_size(&self, source: &str) -> Option<(u32, u32)> {
 		let picture = self.layers.get(source)?.picture.as_ref()?;
 		Some(picture.size())
+	}
+
+	/// The items of the scene called `scene` where its arrangement put them
+	/// as of the last [`render`](Self::render), in order, as
+	/// [`Collection::arranged`] gives them: `None` for a scene with no item
+	/// in a slot. What is drawn glides there when a slot opens or closes.
+	pub fn arranged(&self, scene: &str) -> Option<&[Item]> {
+		self.reflows.get(scene).map(|reflow| reflow.arranged.as_slice())
+	}
+
+	/// The items of the scene called `scene` where the last
+	/// [`render`](Self::render) drew them, in order: those in slots part way
+	/// along their glide while a reflow is under way, as
+	/// [`arranged`](Self::arranged) otherwise.
+	pub fn placed(&self, scene: &str) -> Option<&[Item]> {
+		self.reflows.get(scene).map(|reflow| reflow.glide.placed())
 	}
 
 	/// Whether a transition is under way.
@@ -654,6 +724,16 @@ impl Compositor {
 				Some(Some(to)) => self.outputs.insert(to.clone(), output),
 				Some(None) => None,
 				None => self.outputs.insert(scene, output),
+			};
+		}
+		// Each scene keeps where its slots were, so two swapping names do
+		// not glide from each other's.
+		let reflows = std::mem::take(&mut self.reflows);
+		for (scene, reflow) in reflows {
+			match renames.get(&scene) {
+				Some(Some(to)) => self.reflows.insert(to.clone(), reflow),
+				Some(None) => None,
+				None => self.reflows.insert(scene, reflow),
 			};
 		}
 	}
@@ -810,14 +890,18 @@ impl Compositor {
 		for output in self.outputs.values_mut() {
 			output.start.get_or_insert(now);
 		}
-		let period = u64::from((self.program.canvas.framerate / THUMBNAIL_RATE).max(1));
+		let framerate = self.program.canvas.framerate;
 		for thumb in self.thumbnails.values_mut() {
+			let period = u64::from((framerate / thumb.detail.rate.max(1)).max(1));
 			thumb.due = !thumb.drawn || (self.renders + thumb.phase).is_multiple_of(period);
 			thumb.drawn = true;
 			thumb.start.get_or_insert(now);
 		}
 		self.renders += 1;
 		self.update(collection, sources, now);
+		// Every draw below reads the scenes as arranged.
+		let staged = self.reflow(collection, sources, now);
+		let collection = &*staged;
 		self.restart(collection, preview_start, program_start);
 		self.paint(collection, now);
 		let thumbnails = self.thumbnail_targets(collection, now);
@@ -969,6 +1053,10 @@ impl Compositor {
 					draw.target(target);
 					draw.picture(target, program.unwrap_or(&self.program.program), fill, fill, 1.0);
 				}
+				Shows::Preview(_) => {
+					draw.target(target);
+					draw.picture(target, &self.preview, fill, fill, 1.0);
+				}
 				Shows::Output(scene) => {
 					let output = outputs.iter().find(|(on, _)| on.0 == Some(scene));
 					let (_, output) = output.expect("an output drawn this render");
@@ -987,6 +1075,53 @@ impl Compositor {
 
 		self.effects.submit(frame);
 		Ok(())
+	}
+
+	/// `collection` with each scene's items in slots where its arrangement
+	/// puts them at `now`, gliding there as a move transition does when a
+	/// slot opens or closes. A slot closes while its source is offline or
+	/// failed in `sources`, and the picture in it is cropped to cover it by
+	/// the size of its newest picture.
+	fn reflow<'a>(&mut self, collection: &'a Collection, sources: &Sources, now: Instant) -> Cow<'a, Collection> {
+		let present = |name: &str| {
+			let feed = sources.get(collection.capture(name));
+			!feed.is_some_and(|feed| matches!(feed.status(), Status::Offline | Status::Failed(_)))
+		};
+		let layers = &self.layers;
+		let size = |name: &str| match collection.nested(name) {
+			Some(Nested::Scene(scene)) => collection
+				.canvas(Some(scene))
+				.map(|canvas| (canvas.width, canvas.height)),
+			Some(Nested::Program) => Some((collection.canvas.width, collection.canvas.height)),
+			None => {
+				let layer = layers.get(collection.capture(name))?;
+				layer.picture.as_ref().map(Picture::size)
+			}
+		};
+		let mut staged = Cow::Borrowed(collection);
+		let mut reflows = HashMap::new();
+		for (index, scene) in collection.scenes.iter().enumerate() {
+			let Some(arranged) = collection.arranged(&scene.name, present, size) else {
+				continue;
+			};
+			let mut reflow = self.reflows.remove(&scene.name).unwrap_or_else(|| Reflow {
+				arranged: Vec::new(),
+				// Only the slots glide, so a layer set free that is being
+				// dragged follows the pointer.
+				glide: Glide::new(REFLOW, |item| item.slot.is_some()),
+			});
+			// Only the slots start a glide: what each shows, whether it is
+			// open, and where.
+			let slotted = arranged.iter().filter(|item| item.slot.is_some());
+			let key = slotted
+				.map(|item| (item.source.clone(), item.visible, item.rect))
+				.collect();
+			staged.to_mut().scenes[index].items = reflow.glide.show(key, &arranged, now).to_vec();
+			reflow.arranged = arranged;
+			reflows.insert(scene.name.clone(), reflow);
+		}
+		self.reflows = reflows;
+		staged
 	}
 
 	/// Pull the newest picture from every source onto the GPU, and forget the
@@ -1274,14 +1409,14 @@ impl Compositor {
 						video.into_iter().flat_map(|video| &video.filters),
 					);
 				}
-				Shows::Program | Shows::Output(_) | Shows::Nothing => {}
+				Shows::Program | Shows::Preview(_) | Shows::Output(_) | Shows::Nothing => {}
 			}
 		}
 		shown
 	}
 
-	/// What `thumbnail` shows this render: a scene on program or drawn for an
-	/// output is sampled from its texture.
+	/// What `thumbnail` shows this render: a scene on program, in preview
+	/// while it is drawn, or drawn for an output is sampled from its texture.
 	fn shows<'a>(&self, collection: &'a Collection, thumbnail: &Thumbnail) -> Shows<'a> {
 		let scene = match thumbnail {
 			Thumbnail::Scene(scene) => scene,
@@ -1297,6 +1432,8 @@ impl Compositor {
 		};
 		if self.program_scene.as_deref() == Some(scene) {
 			Shows::Program
+		} else if self.previewing && self.preview_scene.as_deref() == Some(scene) {
+			Shows::Preview(scene)
 		} else if self.outputs.get(scene).is_some_and(|output| output.draw) {
 			Shows::Output(scene)
 		} else {
@@ -1324,7 +1461,7 @@ impl Compositor {
 			let thumb = self.thumbnails.get_mut(&thumbnail).expect("listed above");
 			let since = now.saturating_duration_since(thumb.start.unwrap_or(now));
 			let canvas = match shows {
-				Shows::Scene(scene) | Shows::Output(scene) => collection.canvas(Some(scene)),
+				Shows::Scene(scene) | Shows::Output(scene) | Shows::Preview(scene) => collection.canvas(Some(scene)),
 				Shows::Program => Some(program),
 				Shows::Source(source) => {
 					let size = match collection.nested(source) {
@@ -1349,7 +1486,7 @@ impl Compositor {
 				thumb.target = None;
 				continue;
 			};
-			let size = thumbnail_size(canvas);
+			let size = thumbnail_size(canvas, thumb.detail.side);
 			let target = match thumb.target.take() {
 				Some(mut target) if (target.texture.width(), target.texture.height()) == size => {
 					target.canvas = canvas;
@@ -1367,7 +1504,7 @@ impl Compositor {
 	/// scene on program, the scene a transition leaves, and the top layer,
 	/// through the scenes they draw, a stinger's clip under way, and each
 	/// mask's, through clones.
-	fn on_air_sources<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
+	pub fn on_air_sources<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
 		let mut shown = self.drawn(collection, self.on_air().map(Some).chain([None]));
 		// Drawn through its source's filters alone.
 		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
@@ -1411,10 +1548,10 @@ fn resize(target: &mut Target, device: &wgpu::Device, effects: &Effects, canvas:
 	}
 }
 
-/// The pixels of a thumbnail of `canvas`: its shape, at most
-/// [`THUMBNAIL_SIDE`] a side, and never larger than the canvas.
-fn thumbnail_size(canvas: Canvas) -> (u32, u32) {
-	let scale = (THUMBNAIL_SIDE as f32 / canvas.width.max(canvas.height) as f32).min(1.0);
+/// The pixels of a thumbnail of `canvas`: its shape, at most `side` a side,
+/// and never larger than the canvas.
+fn thumbnail_size(canvas: Canvas, side: u32) -> (u32, u32) {
+	let scale = (side as f32 / canvas.width.max(canvas.height) as f32).min(1.0);
 	let side = |length: u32| ((length as f32 * scale).round() as u32).max(1);
 	(side(canvas.width), side(canvas.height))
 }
@@ -1495,32 +1632,6 @@ fn stinger(feed: Option<&Feed>, cut: Duration, played: &mut Option<u64>, now: In
 	})))
 }
 
-/// The crop that trims what `crop` leaves of a `size` picture evenly from two
-/// opposite sides to `canvas`'s shape, so it covers the canvas unstretched.
-fn cover(crop: Crop, size: (u32, u32), canvas: &Canvas) -> Crop {
-	let width = size.0 as f32 * (1.0 - crop.left - crop.right);
-	let height = size.1 as f32 * (1.0 - crop.top - crop.bottom);
-	let (shown, wanted) = (width / height, canvas.width as f32 / canvas.height as f32);
-	if !shown.is_finite() || shown <= 0.0 {
-		return Crop::default();
-	}
-	if shown > wanted {
-		let trim = (1.0 - wanted / shown) / 2.0;
-		Crop {
-			left: trim,
-			right: trim,
-			..Crop::default()
-		}
-	} else {
-		let trim = (1.0 - shown / wanted) / 2.0;
-		Crop {
-			top: trim,
-			bottom: trim,
-			..Crop::default()
-		}
-	}
-}
-
 /// How far moving `amount` of `canvas`'s width or height in `direction` goes,
 /// in whole pixels so a moving scene stays sharp and two meet without a seam.
 fn offset(direction: Direction, amount: f32, canvas: &Rect) -> (f32, f32) {
@@ -1578,52 +1689,6 @@ impl Pose {
 			shape: self.shape.toward(&other.shape, progress),
 		}
 	}
-}
-
-/// `old`'s filters `progress` of the way to `new`'s, or `None` if their blend
-/// modes differ or their filters do not pair up by kind, in order, as
-/// [`Filter::toward`] mixes them.
-fn mixed(old: &Item, new: &Item, progress: f32) -> Option<Vec<Filter>> {
-	if old.blend != new.blend || old.filters.len() != new.filters.len() {
-		return None;
-	}
-	let pairs = old.filters.iter().zip(&new.filters);
-	pairs.map(|(old, new)| old.toward(new, progress)).collect()
-}
-
-/// The order to draw a move's visible items in, back to front, as `lead`
-/// stacks them: each slot is an item of `lead`, of `other`, or a pair of
-/// both, as `lead_pairs` and `other_pairs` pair them. An unpaired item of
-/// `other` goes just over the paired item it was over in `other`, or under
-/// every slot if it was under every paired item.
-fn stack(
-	lead: &[Cow<'_, Item>],
-	lead_pairs: &[Option<usize>],
-	other: &[Cow<'_, Item>],
-	other_pairs: &[Option<usize>],
-) -> Vec<(Option<usize>, Option<usize>)> {
-	let mut over: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-	let mut under = None;
-	for index in (0..other.len()).filter(|&index| other[index].visible) {
-		match other_pairs[index] {
-			Some(_) => under = Some(index),
-			None => over.entry(under).or_default().push(index),
-		}
-	}
-	let mut unpaired = |under: Option<usize>| {
-		let items = over.remove(&under).unwrap_or_default();
-		items.into_iter().map(|index| (None, Some(index)))
-	};
-
-	let mut slots: Vec<_> = unpaired(None).collect();
-	for index in (0..lead.len()).filter(|&index| lead[index].visible) {
-		let pair = lead_pairs[index];
-		slots.push((Some(index), pair));
-		if pair.is_some() {
-			slots.extend(unpaired(pair));
-		}
-	}
-	slots
 }
 
 /// Refuse an invalid canvas, or one larger than `device` can hold as a
@@ -1991,7 +2056,7 @@ impl Draw<'_> {
 		};
 		let crop = self.collection.video.get(source).map(|video| video.crop);
 		let item = Item {
-			crop: cover(crop.unwrap_or_default(), picture.size(), &canvas),
+			crop: cover(crop.unwrap_or_default(), picture.size(), &Rect::fill(&canvas)),
 			..Item::new(source, Rect::fill(&canvas))
 		};
 		let pose = Pose::of(self.collection, &item);
@@ -2076,17 +2141,10 @@ impl Draw<'_> {
 		let resting = items(to.0);
 		let (leaving, entering) = (posed(from), posed(to));
 
-		// Which item of the other scene each visible item pairs with.
-		let mut left = vec![None; leaving.len()];
-		let mut entered = vec![None; entering.len()];
-		for (index, item) in entering.iter().enumerate().filter(|(_, item)| item.visible) {
-			let pair = (0..leaving.len())
-				.find(|&at| left[at].is_none() && leaving[at].visible && leaving[at].source == item.source);
-			if let Some(at) = pair {
-				left[at] = Some(index);
-				entered[index] = Some(at);
-			}
-		}
+		// Which item of the other scene each visible item pairs with: one
+		// showing the same source, through a role.
+		let same = |old: &Item, new: &Item| collection.resolve(&old.source) == collection.resolve(&new.source);
+		let (left, entered) = pair(&leaving, &entering, same);
 
 		// Each slot is an index into `leaving`, `entering`, or both.
 		let slots: Vec<(Option<usize>, Option<usize>)> = if progress < 0.5 {
@@ -2299,7 +2357,7 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
-	use crate::collection::{Blend, MaskMode, Rgba, Scene, Size, Video};
+	use crate::collection::{Arrangement, Blend, MaskMode, Rgba, Scene, Size, Video};
 	use crate::source::test::{context, local, start, until, until_time};
 
 	/// A fade over a second.
@@ -2394,7 +2452,7 @@ mod tests {
 		}
 
 		/// Over sources whose files are in `dir`.
-		async fn with_files(collection: Collection, dir: tempfile::TempDir) -> Self {
+		pub(super) async fn with_files(collection: Collection, dir: tempfile::TempDir) -> Self {
 			let (device, queue) = gpu().await;
 			let (mut context, origin) = context(dir.path());
 			context.output = moq_video::render::output(&device);
@@ -2511,7 +2569,9 @@ mod tests {
 			assert_eq!(pixel(&layered, 1, 1), RED);
 			assert_eq!(studio.preview(), layered, "preview shows what viewers see");
 			let thumbnail = Thumbnail::Scene(studio.collection.scenes[0].name.clone());
-			studio.compositor.set_thumbnails([thumbnail.clone()]);
+			studio
+				.compositor
+				.set_thumbnails([(thumbnail.clone(), Detail::default())]);
 			studio.render(Instant::now());
 			let texture = studio.compositor.thumbnail(&thumbnail).unwrap().clone();
 			assert_eq!(studio.read(&texture), layered, "its thumbnail shows what viewers see");
@@ -3004,6 +3064,184 @@ mod tests {
 			assert_eq!(pixel(&program, 1, 6), BLUE);
 			assert_eq!(pixel(&program, 6, 6), BLACK);
 			assert_eq!(pixel(&program, 7, 0), GREEN);
+		})
+		.await;
+	}
+
+	/// A 192x108 scene "slots" arranged in a column: red in the main slot,
+	/// then blue and green tiles.
+	fn slotted() -> Collection {
+		let mut collection = Collection::new();
+		collection.canvas = Canvas {
+			width: 192,
+			height: 108,
+			framerate: 30,
+		};
+		for (name, color) in [("red", RED), ("blue", BLUE), ("green", GREEN)] {
+			let color = Rgba(color);
+			collection.sources.insert(name.into(), Source::Color { color });
+		}
+		let slot = |source: &str, slot| Item {
+			slot: Some(slot),
+			..Item::new(source, Rect::default())
+		};
+		collection.scenes = vec![Scene {
+			items: vec![
+				slot("red", crate::Slot::Main),
+				slot("blue", crate::Slot::Tile),
+				slot("green", crate::Slot::Tile),
+			],
+			..Scene::new("slots")
+		}];
+		collection.validate().unwrap();
+		collection
+	}
+
+	/// The center of `rect`, in whole pixels.
+	fn center(rect: &Rect) -> (usize, usize) {
+		(
+			(rect.x + rect.width / 2.0) as usize,
+			(rect.y + rect.height / 2.0) as usize,
+		)
+	}
+
+	/// A slot closing reflows the others with a glide on the program clock:
+	/// the program, which the encoder reads, shows the closed slot's item
+	/// half faded and the rest part way to their new places halfway through,
+	/// and the new arrangement once it is over.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_slot_closing_reflows_the_rest_with_a_glide() {
+		local(async {
+			let mut studio = Studio::new(slotted()).await;
+			studio.compositor.set_preview(Some("slots".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			let start = Instant::now();
+			studio.render(start);
+			let before = studio.compositor.arranged("slots").unwrap().to_vec();
+			let width = 192;
+			let program = studio.program();
+			for (item, color) in before.iter().zip([RED, BLUE, GREEN]) {
+				let (x, y) = center(&item.rect);
+				assert_eq!(
+					texel(&program, width, x, y),
+					color,
+					"{} where it is arranged",
+					item.source
+				);
+			}
+
+			studio.collection.scenes[0].items[1].visible = false;
+			studio.render(start);
+			let after = studio.compositor.arranged("slots").unwrap().to_vec();
+			assert!(!after[1].visible, "a hidden item takes no slot");
+			assert_ne!(after[2].rect, before[2].rect, "green moves up");
+
+			studio.render(start.saturating_add(REFLOW / 2));
+			let program = studio.program();
+			let (x, y) = center(&before[1].rect);
+			let actual = texel(&program, width, x, y);
+			assert!(
+				near(actual, [0, 0, 128, 255]),
+				"blue half faded where it was: {actual:?}"
+			);
+			let halfway = |from: f32, to: f32| (from + to) / 2.0;
+			let green = Rect {
+				x: halfway(before[2].rect.x, after[2].rect.x),
+				y: halfway(before[2].rect.y, after[2].rect.y),
+				width: halfway(before[2].rect.width, after[2].rect.width),
+				height: halfway(before[2].rect.height, after[2].rect.height),
+			};
+			let (x, y) = center(&green);
+			assert_eq!(texel(&program, width, x, y), GREEN, "green on its way");
+
+			studio.render(start.saturating_add(REFLOW));
+			let program = studio.program();
+			let (x, y) = center(&after[2].rect);
+			assert_eq!(texel(&program, width, x, y), GREEN, "green where it lands");
+			let (x, y) = center(&after[0].rect);
+			assert_eq!(texel(&program, width, x, y), RED);
+			let (x, y) = center(&before[1].rect);
+			assert_ne!(texel(&program, width, x, y), BLUE, "blue gone");
+			assert_eq!(studio.program(), studio.preview(), "the preview glides alike");
+		})
+		.await;
+	}
+
+	/// Two slotted scenes swapping names each keep where their slots were,
+	/// so neither glides from the other's arrangement.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn scenes_swapping_names_keep_their_own_slots() {
+		local(async {
+			let mut collection = slotted();
+			let row = Scene {
+				name: "row".into(),
+				arrangement: crate::Arrangement::Row,
+				..collection.scenes[0].clone()
+			};
+			collection.scenes.push(row);
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.render(start);
+
+			let mut draft = studio.collection.draft("Swap");
+			draft.rename_scene(0, "swapping").unwrap();
+			draft.rename_scene(1, "slots").unwrap();
+			draft.rename_scene(0, "row").unwrap();
+			let edit = draft.finish().unwrap();
+			studio.compositor.rename(&studio.collection.renames(&edit));
+			studio.collection.apply(&edit).unwrap();
+			studio.render(start.saturating_add(REFLOW / 2));
+			for scene in ["slots", "row"] {
+				let arranged = studio.compositor.arranged(scene).unwrap().to_vec();
+				let placed = studio.compositor.placed(scene).unwrap().to_vec();
+				assert_eq!(placed, arranged, "`{scene}` is where it was, with no glide");
+			}
+		})
+		.await;
+	}
+
+	/// A slot whose source is offline is closed, so a guest who leaves
+	/// takes no room, and an unfilled role draws nothing and takes none.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn an_offline_source_and_an_unfilled_role_take_no_slot() {
+		local(async {
+			let mut collection = slotted();
+			let guest = Source::Broadcast { path: "guest".into() };
+			collection.sources.insert("guest".into(), guest);
+			collection.sources.insert("main".into(), Source::Role { source: None });
+			collection.scenes[0].items[0].source = "main".into();
+			collection.scenes[0].items[1].source = "guest".into();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("slots".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			let arranged = studio.compositor.arranged("slots").unwrap().to_vec();
+			assert!(!arranged[0].visible, "an unfilled role takes no slot");
+			assert!(!arranged[1].visible, "an offline guest takes no slot");
+			let (_, alone) = Arrangement::Column.places(studio.collection.canvas, false, 1);
+			assert_eq!(arranged[2].rect, alone[0]);
+			let (x, y) = center(&arranged[2].rect);
+			assert_eq!(texel(&studio.program(), 192, x, y), GREEN, "green has the canvas");
+
+			let role = Source::Role {
+				source: Some("red".into()),
+			};
+			studio.collection.sources.insert("main".into(), role);
+			let filled = Instant::now();
+			studio.render(filled);
+			studio.render(filled.saturating_add(REFLOW));
+			let arranged = studio.compositor.arranged("slots").unwrap().to_vec();
+			assert!(arranged[0].visible, "a filled role takes the main slot");
+			let (x, y) = center(&arranged[0].rect);
+			assert_eq!(
+				texel(&studio.program(), 192, x, y),
+				RED,
+				"it shows the source filling it"
+			);
 		})
 		.await;
 	}
@@ -3538,16 +3776,19 @@ mod tests {
 			height: 1920,
 			framerate: 30,
 		};
-		let crop = cover(Crop::default(), (1920, 1080), &portrait);
+		let crop = cover(Crop::default(), (1920, 1080), &Rect::fill(&portrait));
 		let kept = 1.0 - crop.left - crop.right;
 		assert!((kept - (1080.0 / 1920.0) / (1920.0 / 1080.0)).abs() < 1e-6, "{crop:?}");
 		assert_eq!((crop.left, crop.top, crop.bottom), (crop.right, 0.0, 0.0));
 
 		let landscape = Canvas::default();
-		let crop = cover(Crop::default(), (1080, 1920), &landscape);
+		let crop = cover(Crop::default(), (1080, 1920), &Rect::fill(&landscape));
 		assert_eq!((crop.left, crop.right), (0.0, 0.0));
 		assert!(crop.top > 0.0 && crop.top == crop.bottom, "{crop:?}");
-		assert_eq!(cover(Crop::default(), (1920, 1080), &landscape), Crop::default());
+		assert_eq!(
+			cover(Crop::default(), (1920, 1080), &Rect::fill(&landscape)),
+			Crop::default()
+		);
 
 		// A source cropped to a square is trimmed from what it leaves.
 		let square = Crop {
@@ -3555,7 +3796,7 @@ mod tests {
 			right: 0.21875,
 			..Crop::default()
 		};
-		let crop = cover(square, (1920, 1080), &landscape);
+		let crop = cover(square, (1920, 1080), &Rect::fill(&landscape));
 		assert!((crop.top - 0.21875).abs() < 1e-6, "{crop:?}");
 	}
 
@@ -5165,14 +5406,16 @@ mod tests {
 			studio.compositor.fit(&studio.collection).unwrap();
 			let wide = Thumbnail::Scene("wide".into());
 			let missing = Thumbnail::Scene("missing".into());
-			studio.compositor.set_thumbnails([wide.clone(), missing.clone()]);
+			studio
+				.compositor
+				.set_thumbnails([wide.clone(), missing.clone()].map(|thumbnail| (thumbnail, Detail::default())));
 			assert!(studio.compositor.thumbnail(&wide).is_none(), "not drawn yet");
 
 			studio.render(Instant::now());
 			let texture = studio.compositor.thumbnail(&wide).expect("drawn").clone();
 			assert_eq!(
 				(texture.width(), texture.height()),
-				(THUMBNAIL_SIDE, THUMBNAIL_SIDE / 2)
+				(Detail::default().side, Detail::default().side / 2)
 			);
 			let rgba = studio.read(&texture);
 			assert_eq!(texel(&rgba, 256, 64, 64), RED);
@@ -5192,10 +5435,12 @@ mod tests {
 	async fn thumbnails_redraw_a_few_times_a_second_on_renders_of_their_own() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
-			let period = (studio.collection.canvas.framerate / THUMBNAIL_RATE) as usize;
+			let period = (studio.collection.canvas.framerate / Detail::default().rate) as usize;
 			assert!(period > 2, "a period long enough to tell the renders apart");
 			let (first, second) = (Thumbnail::Scene("blue".into()), Thumbnail::Scene("red".into()));
-			studio.compositor.set_thumbnails([first.clone(), second.clone()]);
+			studio
+				.compositor
+				.set_thumbnails([first.clone(), second.clone()].map(|thumbnail| (thumbnail, Detail::default())));
 			studio.render(Instant::now());
 			let corner = |studio: &mut Studio, thumbnail: &Thumbnail| {
 				let texture = studio.compositor.thumbnail(thumbnail).unwrap().clone();
@@ -5254,7 +5499,9 @@ mod tests {
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			let (on, off) = (Thumbnail::Scene("red".into()), Thumbnail::Scene("blue".into()));
-			studio.compositor.set_thumbnails([on.clone(), off.clone()]);
+			studio
+				.compositor
+				.set_thumbnails([on.clone(), off.clone()].map(|thumbnail| (thumbnail, Detail::default())));
 			studio.render(Instant::now());
 			let texture = studio.compositor.thumbnail(&on).unwrap().clone();
 			let rgba = studio.read(&texture);
@@ -5262,6 +5509,121 @@ mod tests {
 			assert_eq!(pixel(&rgba, 1, 6), RED);
 			let texture = studio.compositor.thumbnail(&off).unwrap().clone();
 			assert!(studio.read(&texture).chunks(4).all(|texel| texel == BLUE));
+		})
+		.await;
+	}
+
+	/// The scene in preview is sampled from the preview, top layer and all,
+	/// while the preview is drawn, and drawn alone while it is not.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_thumbnail_of_the_scene_in_preview_samples_the_preview() {
+		local(async {
+			let mut collection = collection();
+			let corner = Rect {
+				x: 0.0,
+				y: 0.0,
+				width: 4.0,
+				height: 4.0,
+			};
+			collection.top.push(Item::new("red", corner));
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.compositor.set_preview(Some("blue".into()));
+			let cued = Thumbnail::Scene("blue".into());
+			studio.compositor.set_thumbnails([(cued.clone(), Detail::default())]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&cued).unwrap().clone();
+			let rgba = studio.read(&texture);
+			assert_eq!(pixel(&rgba, 1, 1), RED, "the top layer, from the preview");
+			assert_eq!(pixel(&rgba, 1, 6), BLUE);
+
+			// Named anew, so this render draws it.
+			studio.compositor.set_previewing(false);
+			studio.compositor.set_thumbnails([]);
+			studio.compositor.set_thumbnails([(cued.clone(), Detail::default())]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&cued).unwrap().clone();
+			let drawn = studio.read(&texture);
+			assert!(drawn.chunks(4).all(|texel| texel == BLUE), "drawn alone");
+		})
+		.await;
+	}
+
+	/// A thumbnail is as large as its detail asks, never larger than its
+	/// scene, and one named twice takes the larger.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_thumbnail_is_as_large_as_its_detail_asks() {
+		local(async {
+			let mut studio = Studio::new(wide(Blend::Normal)).await;
+			studio.compositor.fit(&studio.collection).unwrap();
+			let wide = Thumbnail::Scene("wide".into());
+			let detail = |side| Detail {
+				side,
+				..Detail::default()
+			};
+			studio
+				.compositor
+				.set_thumbnails([(wide.clone(), detail(64)), (wide.clone(), detail(128))]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&wide).unwrap().clone();
+			assert_eq!((texture.width(), texture.height()), (128, 64), "the larger of the two");
+			let rgba = studio.read(&texture);
+			assert_eq!(texel(&rgba, 128, 32, 32), RED);
+			assert_eq!(texel(&rgba, 128, 96, 32), BLUE);
+
+			studio.compositor.set_thumbnails([(wide.clone(), detail(4096))]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&wide).unwrap();
+			assert_eq!(
+				(texture.width(), texture.height()),
+				(512, 256),
+				"no larger than the scene"
+			);
+		})
+		.await;
+	}
+
+	/// A thumbnail at the program's rate is redrawn every render, while one at
+	/// the default rate waits for its turn.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_thumbnail_at_the_program_rate_redraws_every_render() {
+		local(async {
+			let mut studio = Studio::new(collection()).await;
+			let (live, slow) = (Thumbnail::Scene("blue".into()), Thumbnail::Scene("red".into()));
+			let rate = studio.collection.canvas.framerate;
+			studio.compositor.set_thumbnails([
+				(
+					live.clone(),
+					Detail {
+						rate,
+						..Detail::default()
+					},
+				),
+				(slow.clone(), Detail::default()),
+			]);
+			studio.render(Instant::now());
+			let corner = |studio: &mut Studio, thumbnail: &Thumbnail| {
+				let texture = studio.compositor.thumbnail(thumbnail).unwrap().clone();
+				pixel(&studio.read(&texture), 1, 1)
+			};
+			studio
+				.collection
+				.sources
+				.insert("green".into(), Source::Color { color: Rgba(GREEN) });
+			let fill = Rect::fill(&studio.collection.canvas);
+			for scene in &mut studio.collection.scenes {
+				scene.items = vec![Item::new("green", fill)];
+			}
+			let drivers = studio.sources.sync(&studio.collection);
+			start(&studio.sources, drivers).await;
+			studio.render(Instant::now());
+			assert_eq!(corner(&mut studio, &live), GREEN, "redrawn on the next render");
+			assert_eq!(corner(&mut studio, &slow), RED, "not yet its turn");
 		})
 		.await;
 	}
@@ -5304,7 +5666,9 @@ mod tests {
 			let mut studio = Studio::with_files(collection, dir).await;
 			let thumbnail = |name: &str| Thumbnail::Source(name.into());
 			let names = ["halves", "missing", "red scene"];
-			studio.compositor.set_thumbnails(names.map(thumbnail));
+			studio
+				.compositor
+				.set_thumbnails(names.map(|name| (thumbnail(name), Detail::default())));
 			studio.render(Instant::now());
 			let half = [128, 0, 0, 128];
 			for (name, size) in [("halves", (2, 2)), ("red scene", (4, 8))] {
@@ -5328,7 +5692,7 @@ mod tests {
 			let mut studio = Studio::new(wide(Blend::Multiply)).await;
 			studio.compositor.fit(&studio.collection).unwrap();
 			let wide = Thumbnail::Scene("wide".into());
-			studio.compositor.set_thumbnails([wide.clone()]);
+			studio.compositor.set_thumbnails([(wide.clone(), Detail::default())]);
 			studio.render(Instant::now());
 			let texture = studio.compositor.thumbnail(&wide).unwrap().clone();
 			let rgba = studio.read(&texture);
@@ -5531,7 +5895,8 @@ mod bench {
 				let scene = studio.collection.scenes[0].name.clone();
 				studio.compositor.set_preview(Some(scene));
 				studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
-				let thumbnails = (0..shown).map(|scene| Thumbnail::Scene(format!("scene {scene}")));
+				let thumbnails =
+					(0..shown).map(|scene| (Thumbnail::Scene(format!("scene {scene}")), Detail::default()));
 				studio.compositor.set_thumbnails(thumbnails);
 
 				let (mut total, mut worst, mut ran) = (Duration::ZERO, Duration::ZERO, (0, 0));
@@ -5552,6 +5917,89 @@ mod bench {
 				let (passes, copies) = ran;
 				let mean = total / FRAMES;
 				println!("{shown:>10} {mean:>7.2?} {worst:>7.2?} {passes:>6} {copies:>6}");
+			}
+		})
+		.await;
+	}
+
+	/// What a multiview's 4x4 grid costs: eight scenes and eight sources, each
+	/// source a 1080p picture, every scene placing four of them. The scene on
+	/// program and the one cued are redrawn every render, the rest at `rest`
+	/// times a second, all at `side` pixels; none is the program and preview
+	/// alone. Prints the mean and worst frame, and the render passes and
+	/// texture copies of the worst.
+	#[tokio::test]
+	#[ignore = "a benchmark; run by hand on a GPU"]
+	async fn multiview() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let mut collection = Collection::new();
+			let canvas = collection.canvas;
+			for index in 0..8u8 {
+				let picture = image::RgbaImage::from_fn(canvas.width, canvas.height, |x, y| {
+					image::Rgba([(x / 8) as u8 ^ index, (y / 8) as u8, index * 30, 255])
+				});
+				let path = format!("picture {index}.png");
+				picture.save(dir.path().join(&path)).unwrap();
+				collection
+					.sources
+					.insert(format!("picture {index}"), Source::Image { path: path.into() });
+			}
+			let quarter = |at: usize| Rect {
+				x: (at % 2) as f32 * canvas.width as f32 / 2.0,
+				y: (at / 2) as f32 * canvas.height as f32 / 2.0,
+				width: canvas.width as f32 / 2.0,
+				height: canvas.height as f32 / 2.0,
+			};
+			collection.scenes = (0..8)
+				.map(|scene| crate::Scene {
+					items: (0..4)
+						.map(|at| Item::new(format!("picture {}", (scene + at) % 8), quarter(at)))
+						.collect(),
+					..crate::Scene::new(format!("scene {scene}"))
+				})
+				.collect();
+			collection.validate().unwrap();
+
+			let mut studio = Studio::with_files(collection, dir).await;
+			studio.compositor.set_preview(Some("scene 0".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.compositor.set_preview(Some("scene 1".into()));
+			let framerate = canvas.framerate;
+			println!("  side rest    mean   worst passes copies");
+			for (side, rest) in [(0, 0), (256, 5), (720, 5), (720, 10), (720, 30), (1080, 10)] {
+				let tiles = (0..8)
+					.map(|scene| {
+						let rate = if scene < 2 { framerate } else { rest };
+						(Thumbnail::Scene(format!("scene {scene}")), Detail { side, rate })
+					})
+					.chain((0..8).map(|source| {
+						let detail = Detail { side, rate: rest };
+						(Thumbnail::Source(format!("picture {source}")), detail)
+					}));
+				studio.compositor.set_thumbnails([]);
+				if side > 0 {
+					studio.compositor.set_thumbnails(tiles);
+				}
+
+				let (mut total, mut worst, mut ran) = (Duration::ZERO, Duration::ZERO, (0, 0));
+				for frame in 0..FRAMES * 2 {
+					let start = Instant::now();
+					studio.render(Instant::now());
+					studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+					let took = Instant::now().saturating_duration_since(start);
+					if frame < FRAMES {
+						continue;
+					}
+					total += took;
+					if took > worst {
+						worst = took;
+						ran = studio.compositor.effects.ran;
+					}
+				}
+				let (passes, copies) = ran;
+				let mean = total / FRAMES;
+				println!("{side:>6} {rest:>4} {mean:>7.2?} {worst:>7.2?} {passes:>6} {copies:>6}");
 			}
 		})
 		.await;

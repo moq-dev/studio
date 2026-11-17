@@ -163,7 +163,8 @@ double-click it to maximize, and drag the window's edges to resize it. On
 macOS the system's buttons and edges stay. It holds, from the left:
 
 - The show's name. Its menu has the scene file's path, **Reload the scene
-  file**, **Copy the selected layer**, **Paste**, and **Close show**, which
+  file**, **Copy the selected layer**, **Paste**, **Open the multiview** (see
+  [Multiview](#multiview)), and **Close show**, which
   ends the show as quitting does (saving it, finishing a recording, and
   letting go of its relays, sources, and keys) and returns the window to [your
   shows](#your-shows). It is dimmed while the stream is on air or going on or
@@ -264,7 +265,9 @@ keep it always on top or move it into this scene, duplicate it (linked, or as
 its own copy), make it independent, copy it, or remove it. **Add a layer**
 (A) turns to Add.
 
-**Add** lists what can be placed: the sources no layer shows, no audio scene
+**Add** lists what can be placed: what a drop or paste makes (see
+[Dropping and pasting](#dropping-and-pasting)), the kind a drag over the
+window holds lit; the sources no layer shows, no audio scene
 hears, and nothing reads, each with **Add**, to place it in the edited
 scene, or the bin, to remove it for good; this machine's cameras, displays,
 windows, and audio inputs; any source by hand; and, with a room, guests:
@@ -286,6 +289,14 @@ for the same menu, or the picture elsewhere to add a layer, paste, or set
 **Snap**, **Grid**, and the grid's spacing. Escape ends cropping, then the
 selection.
 
+A layer in a [slot](#slots-and-roles) is outlined on the picture, dashed, with
+a chip naming its role, or **Guest** or its slot, and a tag naming the source
+it shows. It has no handles, nor Fit and Fill, since its slot places it: drag
+it onto another slot, or drag a row of Layers onto a slot, to swap the two
+layers' places. A row in a slot says **Main slot** or **Tile** before what it
+shows. The row's menu puts a layer in the main slot or a tile, or sets it
+free where it is drawn.
+
 **Interact** passes the mouse and keyboard to the selected layer's web page
 alone, even where another layer is over it, while the picture says so; Escape
 or **Stop** ends it.
@@ -295,16 +306,17 @@ is named for it, with these sections:
 
 | Section | Use it to |
 | --- | --- |
-| Place | Type or drag its position and size, and its crop, in percent off each edge, fit or fill it, and lock it. |
+| Place | Pick its [slot](#slots-and-roles), or none; type or drag its position and size, and its crop, in percent off each edge, fit or fill it, and lock it. A layer in a slot has no position or size of its own to type. |
 | Shape | Pick its outline, square, rounded, circle, or arch, give it a border inside that outline and the border's color, and give it a soft shadow, which follows the outline and is the layer's first drop shadow filter. |
 | Look | Remove its source's background, which every layer showing the source loses (make it independent to cut out here alone); grade its color through a LUT source; add, order, set, and remove its filters, copy them, or paste copied filters after its own; and set its blend mode. |
 | Shown in | See how many places show its source, **Linked in 3 scenes**, and **Make independent**, which points this layer at a copy of the source of its own, keeping its look, so editing that look no longer edits the others. A copy says what it copies. |
-| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. **Warn when it goes dark**, on by default for a camera, display, or window, watches it for [going dark](#a-capture-gone-dark). Publish it independently (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. |
+| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. Publish it independently (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. **Warn when it goes dark**, on by default for a camera, display, or window, watches it for [going dark](#a-capture-gone-dark). For a role, pick the source filling it. |
 
 Its **Animate** tab holds the layer's keyframes (see [Keyframes](#keyframes)).
 With no layer selected, the inspector shows the edited scene: rename it,
 see its size, mark it **Safe**, switch on **Publish** and pick the audio scene
-it carries (see [Published scenes](#published-scenes)), and pick the show's
+it carries (see [Published scenes](#published-scenes)), arrange its slots and
+fill their roles (see [Slots and roles](#slots-and-roles)), and pick the show's
 transition and how long it takes, or for a stinger its media source and cut
 point (see [Transitions](#transitions)). A scene on program, or still leaving
 it in a transition, cannot be removed, even by an undo, until program cuts
@@ -335,6 +347,35 @@ cued; and the close clears the cue. On BUILD the card moves to the opposite
 corner while the selected layer is under it, so it hides neither the layer
 nor its toolbar, even mid-drag. Studio mode is kept per user, with
 the [hotkeys](#hotkeys), not in the scene file.
+
+### Multiview
+
+**Open the multiview**, in the show's menu, opens a window for another
+monitor with every scene and the sources you pick live in one grid, as large
+as the window allows: the scene on air framed in blue and tagged ON AIR, the
+one cued (or, off air, the one the stream opens on) framed in amber, and a
+blue dot on each source the live picture shows. A source
+[gone dark](#a-capture-gone-dark) or [stalled](#a-picture-that-stalls), and
+each scene showing it, carries the amber badge, and the source's picture says
+so. Over the grid are the show's
+name, a clock in this computer's time zone, the stream's health, and how long
+it has been live. Click a scene's tile to take it, or cue it in Studio mode,
+as its pad does; its hotkey shows on the tile and works with the multiview in
+front. The multiview draws on its own, so it stays live while the studio's
+window is minimized or behind a game.
+
+Sources that move on their own (cameras, screens, windows, guests and other
+broadcasts, web pages, video files, and replays) are on it until you leave
+one out, from its tile's right-click menu or the eye in the corner, where you
+can also add a still, a color, or a copy. The tiles on air and cued are
+redrawn at the program's frame rate, and the rest ten times a second.
+
+**F11**, the square in the corner, or a double-click on the header goes full
+screen on the monitor the window is on, and **Escape** comes back. Whether
+it is open, where it was, whether it was full screen, and each show's picks
+are kept per user, with the [hotkeys](#hotkeys), not in the scene file, so it
+opens where you left it next time. Wayland does not let an app place its own
+window, so there the desktop picks where it opens.
 
 ### Going live
 
@@ -384,8 +425,8 @@ this run says so, and is not editable there. A change applies the next time
 you go live. A new relay or token is followed for broadcast sources and
 guests at once off air, and once the stream ends on air. The recordings
 folder (Settings, Recording) and the guests' room (Settings, Guests) are kept
-in the same file, as `recordings`, `room`, `room_key`, `join_page`, and
-`guest_expiry`.
+in the same file, as `recordings`, `room`, `room_key`, `join_page`,
+`guest_expiry`, and `guests_appear`.
 
 ### Settings
 
@@ -399,7 +440,7 @@ setting costs. Escape or a click outside closes it.
 | Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)). |
 | Recording | Change or open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
 | Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; and replay and clips (see [Hotkeys](#hotkeys)). |
-| Guests | Set the room guests join, its key, the join page, and how long a link lasts (see [Guests](#guests)). |
+| Guests | Set the room guests join, its key, the join page, how long a link lasts, and whether guests appear on their own (see [Guests](#guests)). |
 | Advanced | Publish scenes as broadcasts of their own and sources independently, turn the virtual camera of the program or of each published scene on, pick how the window's [effects](#effects) move, and open the [scene graph](#scene-graph). |
 
 On air, a new canvas size or frame rate, or a published scene's new size,
@@ -570,6 +611,40 @@ the source comes along, renamed if its name is taken. Copied filters paste
 onto the selected layer, after its own. The clipboard holds text in the scene
 file's format.
 
+### Dropping and pasting
+
+Drag a file from a file manager onto BUILD's picture and it becomes the kind
+of layer it holds, where you let go: a PNG or JPEG becomes an image layer, and
+a video or sound file a media layer, each at its own size, no larger than
+half the canvas, in front of the edited scene, and selected. A sound alone
+has no picture, so it is only sent to the audio scene on program, as anything
+with sound is. A `.cube` file grades the layer it is dropped on, in place of
+any grade it had. While the drag is over the window, the picture outlines
+where the layer will land and names what it will become, and Add lights that
+kind. A file dropped on an image or media layer of its own kind asks whether
+to replace that layer's file, which every layer showing its source shows, or
+add a layer. Dropped anywhere else in the window, or on another page, it lands
+in the middle of the edited scene.
+
+A file the studio cannot play says why where it was dropped, and how to fix
+it where it can: a regular MP4 names the remux that makes it readable. The
+file is read before it is placed, in the background, so a large video holds
+up nothing while it is read.
+
+A dropped file outside the scene file's directory is copied there, since
+sources name files relative to it: `logo.png`, or `logo 2.png` beside a
+different `logo.png`, while a copy already there with the same contents is
+reused. One already under that directory is named where it is.
+
+**Paste** (Ctrl+V, or the picture's right-click menu) does the same at the
+pointer, and the title bar's **Paste** at the scene's center: files copied in a file manager; a picture, such as a screenshot,
+saved as `Pasted picture.png` beside the scene file; and a web address, as a
+web page layer the size of the canvas, shown at half that size.
+
+The window hears drops on Windows, macOS, and X11. On Wayland it hears none
+yet, so paste instead; a web address dragged from a browser is not heard on
+any platform, so paste it too.
+
 A broadcast source subscribes through the show's relays, on air or off,
 over sessions of their own that only subscribe. It plays its broadcast
 through the first relay while that relay has a route to it, and
@@ -592,6 +667,57 @@ sound comes back on the clock, skipping what it missed by more than 200 ms
 and speeding up through the rest; a picture stall leaves the sound playing,
 with the canvas showing the last picture meanwhile. Without audio, the picture plays 100 ms behind. The inspector's Source section shows how
 far behind each broadcast plays.
+
+### Slots and roles
+
+A scene can lay out some of its layers by **slots** rather than by hand: one
+**main** slot, the largest, and **tiles** beside it, in the order of their
+layers. The scene's **arrangement** places them, each slot 16:9,
+inside a margin, each picture covering its slot, cropped evenly to fit:
+
+| Arrangement | Places |
+| --- | --- |
+| Side column | The main slot on the left, the tiles stacked in a column on the right. |
+| Bottom row | The main slot on top, the tiles in a row under it. |
+| Grid | Every slot the same size, in as square a grid as fits them. |
+| Picture in picture | The main slot fills the canvas, the tiles small, stacked up from its bottom-right corner. |
+
+A layer in a slot closes up when it has nothing to show: when it is hidden,
+when its source is offline or failed, or when it shows a role nothing fills.
+The others grow into its room, and they glide there over 0.4 s on program, as
+a Move transition does, so a guest joining or leaving moves the rest rather
+than cutting them. Layers set free, by their own `rect`, stay where they are,
+so a scene can mix both: a backdrop behind the slots and a logo over them.
+
+A **role** is a source that names another, once for the whole show:
+`Main`, the main picture, or `Camera`, the host's camera. A layer showing a
+role shows its source, through that source's crop and filters, and filling
+the role with another source, from the scene inspector's Slots or the
+layer's Source section, changes it in every scene at once. A role filled by
+nothing draws nothing, and its slot closes up. Removing the source filling a
+role leaves the role unfilled. A role takes no look of its own, and is not
+cloned or published; its layers take their own.
+
+The scene inspector's **Slots** section picks the arrangement, lists the
+slots with the role or source in each and what fills each role, and adds a
+**Main slot** or **Camera slot**, making the role if the show has none. Add, under
+**Not in any scene**, puts a guest into the scene's next tile when it has
+slots.
+
+**Appear on their own**, in Settings, Guests, has a guest whose camera comes
+online take the next tile of the scene on program, and be heard on program,
+as an edit you can undo. Up to four guests still in the room take tiles that
+way, and more wait under Add. One who leaves keeps their tile, closed until
+they are back, and frees their place: the next guest takes a new tile, or
+once four tiles hold guests, a tile the studio gave one who has left. They
+are no longer heard on program unless another layer shows them, and wait
+under Add when back, as they appeared once already. A tile you gave a guest
+yourself stays theirs, as does a copy of one, and the scene file marks the
+studio's own with `auto = true`. A guest appears on their own once per link,
+across restarts: after that, where they are shown is yours, so undoing their
+appearance or removing their layer keeps them off when they reconnect, until
+a new link. Since an appearance is your edit, it drops what you could redo.
+Off, every guest waits under Add, as before.
 
 ### Audio scenes
 
@@ -873,10 +999,12 @@ before it expires, and is then renewed for as long as they stay, until you
 remove them. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, in no scene or audio scene: place
 them from BUILD's Add and send them to the audio scene on program on MIX
-to put them on air. That includes a
+to put them on air, or have them [appear on their own](#slots-and-roles) in
+the next tile of the scene on program. That includes a
 guest invited before a restart whose link still works. A guest's source is
 saved to the scene file but is not your edit: it stays out of History, so undo
-never removes it and a guest joining never loses what you could redo. A guest
+never removes it and a guest joining never loses what you could redo, unless
+they [appear on their own](#slots-and-roles). A guest
 who reconnects after you removed their source comes back under a new name
 (`alice 2`), since undoing the removal brings back the old one.
 **Remove from scenes** is your edit, so it undoes: it takes a guest, any clone
@@ -884,9 +1012,9 @@ of their sources, and any mask reading them out of every scene and the top
 layer and mutes them. A signed token cannot be taken back, so it also stops
 renewing theirs and ends their return feed, and they are disconnected within
 `--guest-expiry`. That
-holds across a restart, whichever scene file you open: removed guests are
-kept beside the room key, as `room.guests.toml` for `room.jwk`, so its
-directory must be writable. Undo puts them back in the scenes but not on
+holds across a restart, whichever scene file you open: removed guests, and
+those who appeared on their own, are kept beside the room key, as
+`room.guests.toml` for `room.jwk`, so its directory must be writable. Undo puts them back in the scenes but not on
 renewal; **New link** lets them back in and renews them again, under a new
 generation, so a link from before the removal cannot read their renewals.
 
@@ -939,6 +1067,10 @@ path = "logo.png" # relative to the scene file
 [sources.guest]
 kind = "broadcast"
 path = "room/guest"
+
+[sources.Main] # a role: the show's main picture, wherever a scene shows it
+kind = "role"
+source = "camera" # the source filling it; none draws nothing
 
 [sources.alerts]
 kind = "browser"
@@ -1018,6 +1150,15 @@ items = [
 ]
 
 [[scenes]]
+name = "Guests"
+arrangement = "column" # column (the default), row, grid, or inset
+items = [
+    { source = "Main", slot = "main" }, # a slot takes no rect
+    { source = "guest", slot = "tile" },
+    { source = "logo", rect = { x = 1600, y = 40, width = 280, height = 120 } },
+]
+
+[[scenes]]
 name = "Portrait"
 size = { width = 1080, height = 1920 } # its own size; the program's without one
 published = true # live at <broadcast>/Portrait
@@ -1054,7 +1195,7 @@ Source kinds are `camera`, `display`, and `microphone` (each with an optional
 (macOS), `image` (PNG or JPEG), `media` (a video or audio file; see
 [Media files](#media-files)), `color` (`#rrggbb` or `#rrggbbaa`),
 `broadcast`, `browser` (a `url`, and a `width` and `height` up to 4096),
-`overlay` (its `html`, a `width` and `height` up to 4096, and whether it `restart`s, true by default), `clone` (with the `source` it shows), `lut` (a 3D Adobe or Resolve `.cube`
+`overlay` (its `html`, a `width` and `height` up to 4096, and whether it `restart`s, true by default), `clone` (with the `source` it shows), `role` (with the `source` filling it, if any; see [Slots and roles](#slots-and-roles)), `lut` (a 3D Adobe or Resolve `.cube`
 file, which no layer places, but which grades what a `lut` filter names it in),
 `replay`, where REVIEW plays replays, `scene` (with the `scene` it
 draws), and `program` (see [Scene sources](#scene-sources)). BUILD's Add fills in
@@ -1068,7 +1209,9 @@ at most. `safe = true` marks the scene the panic key cuts to, on one scene at
 most, which must be able to go on program.
 
 A scene's `audio` names the audio scene it carries while published, the
-one on program without it.
+one on program without it, and its `arrangement` how it places its slots:
+`column`, the default, `row`, `grid`, or `inset` (see
+[Slots and roles](#slots-and-roles)).
 
 `[[audio_scenes]]` lists the audio scenes, in the order MIX lists
 them, each with its `name`, the sources whose `sounds` it holds, and the other
@@ -1084,7 +1227,8 @@ default), and `delay`, in every audio scene holding it.
 
 Each entry of a scene's `items` is one of its layers, back to front, and each
 `[[top]]` an always-on-top layer: the `source` it shows and its `rect` on the
-canvas, in pixels, and optionally `visible = false`, `locked = true`, which
+canvas, in pixels, or, in a scene, its `slot`, `main` (one per scene) or
+`tile`, in place of a `rect`, and optionally `visible = false`, `locked = true`, which
 the picture's pointer passes through, and its `crop`, `filters`, `blend`,
 `shape`, and `keyframes`.
 
@@ -1477,8 +1621,9 @@ with, such as a function key, a keypad key, or one with modifiers:
   bound. Without the portal, or if the dialog is declined, bound keys work only
   while the studio has focus, and the tab says so.
 
-The bindings, the snap and grid settings, the [effects](#effects) setting, and
-the output **Listen** plays on are kept per user in the app's settings, `~/Library/Application
+The bindings, the snap and grid settings, the [effects](#effects) setting, the
+[multiview](#multiview)'s place and picks, and the output **Listen** plays on
+are kept per user in the app's settings, `~/Library/Application
 Support/moq-studio` on macOS, `$XDG_DATA_HOME/moq-studio` (or
 `~/.local/share/moq-studio`) on Linux, and `%APPDATA%\moq-studio\data` on
 Windows, apart from the scene file, so a scene file moves between machines

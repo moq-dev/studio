@@ -32,6 +32,7 @@ use crate::{mix, record};
 mod build;
 mod cue;
 mod dark;
+mod drop;
 mod graph;
 mod inspector;
 mod layers;
@@ -39,9 +40,11 @@ mod layout;
 mod levels;
 mod live;
 mod mixer;
+mod multiview;
 mod review;
 mod settings;
 mod shell;
+mod slots;
 
 pub(crate) use layout::fit;
 use levels::Levels;
@@ -217,6 +220,7 @@ impl Studio {
 		let controls = Arc::new(Controls::new(engine.clone(), stream, runtime.clone()));
 		drop(controls.follow_relays());
 		let review = review::Review::new(&engine, &runtime);
+		let multiview = multiview::Multiview::new(render.clone(), engine.clone(), controls.clone());
 		let mut panels = Panels {
 			engine,
 			runtime,
@@ -275,10 +279,14 @@ impl Studio {
 			message: None,
 			faults: Vec::new(),
 			reloads: 0,
+			shifts: 0,
 			closing: false,
 			levels: Levels::default(),
 			graph: graph::View::default(),
 			review,
+			multiview,
+			dropping: drop::Dropping::default(),
+			keyboard: None,
 		};
 		if dropped > 0 {
 			panels.report(Err(anyhow::anyhow!(dropped_message(dropped))));
@@ -320,6 +328,7 @@ impl Studio {
 	/// otherwise keep alive.
 	pub fn release(self, render: &eframe::egui_wgpu::RenderState) {
 		let panels = self.panels;
+		panels.multiview.release();
 		let mut renderer = render.renderer.write();
 		for registered in [&panels.program, &panels.preview]
 			.into_iter()
@@ -347,6 +356,12 @@ impl Studio {
 	/// Open Settings at `setting`, as the gear would.
 	pub(crate) fn open(&mut self, setting: Setting) {
 		self.panels.setting = Some(setting);
+	}
+
+	/// Draw the multiview as the window itself, in place of the studio, with
+	/// the sources called `picked` on it.
+	pub(crate) fn multiview_alone(&mut self, picked: &[&str]) {
+		self.panels.multiview.set_alone(picked);
 	}
 
 	/// Open the scene graph's window, as Settings, Advanced would.
@@ -457,7 +472,10 @@ impl Studio {
 			bindings = eframe::get_value(storage, HOTKEYS).unwrap_or_default();
 			let studio = eframe::get_value(storage, STUDIO_MODE).unwrap_or_default();
 			panels.controls.set_studio(studio);
+			let multiview = eframe::get_value(storage, multiview::KEY).unwrap_or_default();
+			panels.multiview.load(multiview);
 		}
+		self.panels.keyboard = Some(window.keyboard.clone());
 		let hotkeys = Hotkeys::new(window, self.panels.controls.clone(), &self.panels.runtime, bindings);
 		self.panels.hotkeys = Some(hotkeys);
 	}
@@ -467,6 +485,7 @@ impl Studio {
 		eframe::set_value(storage, SPEAKER, &panels.speaker);
 		eframe::set_value(storage, SNAPPING, &panels.snapping);
 		eframe::set_value(storage, STUDIO_MODE, &panels.controls.studio());
+		panels.multiview.save(storage);
 		if let Some(hotkeys) = &panels.hotkeys {
 			eframe::set_value(storage, HOTKEYS, &hotkeys.bindings());
 		}
@@ -505,7 +524,9 @@ impl Studio {
 			hotkeys.focused(panels.interact.has_keyboard() || ui.ctx().text_edit_focused());
 		}
 		panels.take_binding(ui.ctx());
+		panels.dropping.follow(ui.ctx(), frame);
 		panels.shortcuts(ui.ctx());
+		panels.drops_read();
 		panels.staged = false;
 		let verdict = {
 			let report = panels.engine.health.lock().unwrap();
@@ -515,15 +536,22 @@ impl Studio {
 				.map_or(Verdict::Healthy, |problem| problem.verdict)
 		};
 		fx.follow(panels.engine.on_air().live().is_some(), snapshot.takes, verdict);
-		panels.window(ui, fx, &snapshot);
+		match panels.multiview.alone() {
+			true => panels.multiview.ui(ui),
+			false => {
+				panels.window(ui, fx, &snapshot);
+				panels.drops_elsewhere(ui.ctx());
+				panels.multiview.show(ui.ctx());
+			}
+		}
 		// A stage not shown hears no input, so it lets go of the pages, as
 		// turning Interact off does.
 		if !panels.staged {
 			panels.let_go();
 		}
 		// A thumbnail nothing shows is not drawn, until it is again.
-		let mut state = panels.engine.state.lock().unwrap();
-		state.compositor.set_thumbnails(panels.thumbnails_shown.iter().cloned());
+		let bindings = panels.hotkeys.as_ref().map(Hotkeys::bindings).unwrap_or_default();
+		panels.multiview.share(&panels.thumbnails_shown, bindings);
 	}
 }
 
@@ -684,6 +712,8 @@ struct Panels {
 	faults: Vec<Fault>,
 	/// The engine's reloads seen so far.
 	reloads: u64,
+	/// The engine's [shifts](engine::State::shifts) seen so far.
+	shifts: u64,
 	/// Whether Close show was clicked, until the window has closed the show.
 	closing: bool,
 	/// Each sound's and audio scene's recent levels, for the meters.
@@ -691,6 +721,13 @@ struct Panels {
 	graph: graph::View,
 	/// The REVIEW page's strip, cards, and what is dragged on it.
 	review: review::Review,
+	/// The multiview's window, and this user's picks for it.
+	multiview: multiview::Multiview,
+	/// The files and pastes landing on the picture.
+	dropping: drop::Dropping,
+	/// The keys the window hears before egui, which say when a paste was
+	/// pressed, once the window has handed them over.
+	keyboard: Option<hotkeys::Keyboard>,
 }
 
 /// A layer, by the list it is in and its place there, back to front.
@@ -723,6 +760,8 @@ enum Spot {
 	Scene,
 	/// The Add tab.
 	Add,
+	/// The picture, where the last drop or paste landed.
+	Dropped,
 }
 
 /// A failure at a spot, and when, shown there for a while.
@@ -911,6 +950,10 @@ fn dropped_message(dropped: usize) -> String {
 impl Panels {
 	/// The keyboard shortcuts, and the clipboard.
 	fn shortcuts(&mut self, ctx: &egui::Context) {
+		// egui pastes only text, so a paste it does not report may be a picture.
+		let pressed = self.keyboard.as_ref().is_some_and(hotkeys::Keyboard::pasted);
+		let text = ctx.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Paste(_))));
+		let menu = self.dropping.menu_pasted(ctx, text);
 		// A focused text field, or a page the picture passes the keyboard to,
 		// keeps its own undo, copy, and paste; any other focused widget, such
 		// as a slider, leaves them to the studio.
@@ -938,8 +981,16 @@ impl Panels {
 		if copy {
 			self.copy(ctx);
 		}
-		if let Some(text) = paste {
-			self.paste(&text);
+		// At the pointer, or where a menu's Paste lands.
+		let at = match menu {
+			Some((at, _)) => at,
+			None => ctx.pointer_latest_pos(),
+		};
+		let other = menu.is_some_and(|(_, other)| other);
+		match paste {
+			Some(text) => self.paste(&text, at),
+			None if pressed || other => self.dropping.paste_clipboard(at),
+			None => {}
 		}
 	}
 
@@ -958,7 +1009,11 @@ impl Panels {
 			Some(scene) => self.edited(state) != Some(scene.as_str()),
 			None => self.off_air(state).is_some(),
 		});
-		if gone {
+		// A layer of its scene that an edit of the engine's own, such as a
+		// guest appearing, inserted or replaced may have taken its index.
+		let shifted = shifted_since(self.selection.as_ref(), &state.shifts, self.shifts);
+		self.shifts = state.shifts.0;
+		if gone || shifted {
 			self.selection = None;
 			self.drag = None;
 			self.moving = None;
@@ -1118,41 +1173,51 @@ impl Panels {
 	}
 
 	/// Paste layers into the selected layer's list, or the scene on program,
-	/// or filters onto the selected layer.
-	fn paste(&mut self, text: &str) {
+	/// or filters onto the selected layer; or files or a web address at `at`
+	/// on screen, as if dropped there. Other text may name what the clipboard
+	/// holds beside it, as macOS Finder names copied files, so the clipboard's
+	/// files or picture are pasted instead.
+	fn paste(&mut self, text: &str, at: Option<egui::Pos2>) {
+		if let Some(arrivals) = drop::Arrival::of_text(text) {
+			for arrival in arrivals {
+				self.dropping.arrive(arrival, at);
+			}
+			return;
+		}
+		let Ok(clip) = Clip::from_toml(text) else {
+			self.dropping.paste_clipboard(at);
+			return;
+		};
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
 		// A failure with no layer to show it on is the toast's.
 		let mut spot = None;
-		let result = (|| {
-			let clip = Clip::from_toml(text).context("the clipboard holds no layers or filters")?;
-			match clip {
-				Clip::Items(items) => {
-					let layer = match &self.selection {
-						Some(picked) => picked.layer.clone(),
-						None => self.scene(&state).map_err(anyhow::Error::msg)?,
-					};
-					let dir = state.sources.context().dir.clone();
-					edit(&mut state, format!("Paste into {}", place(&layer)), None, |draft| {
-						draft.paste(&layer, &items, &dir)
-					})?;
-					Ok(())
-				}
-				Clip::Filters(pasted) => {
-					let picked = self.selection.clone().context("select a layer to paste filters onto")?;
-					let item = picked.item(state.collection()).context("the selected layer is gone")?;
-					spot = Some(Spot::Layer(picked.layer.clone(), item.source.clone()));
-					let selection = picked.look();
-					let mut filters = selection
-						.filters(state.collection())
-						.context("the layer has no picture to filter")?;
-					filters.extend(pasted.filters);
-					let what = selection.describe(state.collection());
-					edit(&mut state, format!("Paste filters onto {what}"), None, |draft| {
-						selection.set_filters(draft, filters)
-					})
-				}
+		let result = (|| match clip {
+			Clip::Items(items) => {
+				let layer = match &self.selection {
+					Some(picked) => picked.layer.clone(),
+					None => self.scene(&state).map_err(anyhow::Error::msg)?,
+				};
+				let dir = state.sources.context().dir.clone();
+				edit(&mut state, format!("Paste into {}", place(&layer)), None, |draft| {
+					draft.paste(&layer, &items, &dir)
+				})?;
+				Ok(())
+			}
+			Clip::Filters(pasted) => {
+				let picked = self.selection.clone().context("select a layer to paste filters onto")?;
+				let item = picked.item(state.collection()).context("the selected layer is gone")?;
+				spot = Some(Spot::Layer(picked.layer.clone(), item.source.clone()));
+				let selection = picked.look();
+				let mut filters = selection
+					.filters(state.collection())
+					.context("the layer has no picture to filter")?;
+				filters.extend(pasted.filters);
+				let what = selection.describe(state.collection());
+				edit(&mut state, format!("Paste filters onto {what}"), None, |draft| {
+					selection.set_filters(draft, filters)
+				})
 			}
 		})();
 		drop(state);
@@ -1824,14 +1889,24 @@ fn color_ui(ui: &mut Ui, color: &mut moq_scene::Rgba) -> egui::Response {
 	response
 }
 
+/// Whether an edit the UI did not make inserted or replaced a layer of the
+/// scene `selection` is in after the UI saw `seen` of the engine's
+/// [shifts](engine::State::shifts).
+fn shifted_since(selection: Option<&Picked>, shifts: &(u64, BTreeMap<String, u64>), seen: u64) -> bool {
+	let (count, scenes) = shifts;
+	let scene = selection.and_then(|picked| picked.layer.scene.as_ref());
+	*count != seen && scene.is_some_and(|scene| scenes.get(scene).is_some_and(|at| *at > seen))
+}
+
 /// The source and video settings of a clone of `name`. A clone of a clone
 /// shows the same capture, so it clones that. It copies the crop and filters,
-/// but not a removed background: the clone already shows the cut-out.
+/// but not a removed background: the clone already shows the cut-out. For a
+/// role, it copies the source filling it, with that look.
 fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
 	let source = Source::Clone {
 		source: collection.capture(name).to_string(),
 	};
-	let video = collection.video.get(name).map(|video| Video {
+	let video = collection.video.get(collection.resolve(name)).map(|video| Video {
 		background: Background::Keep,
 		..video.clone()
 	});
@@ -2029,6 +2104,9 @@ impl Default for Snapping {
 struct Drag {
 	picked: Picked,
 	grab: Grab,
+	/// Whether the layer is in a slot, so the drag moves it to another
+	/// slot rather than where the pointer lets go.
+	slotted: bool,
 	/// The layer's rect and crop, and where the pointer was in canvas
 	/// pixels, when the drag started. Each frame drags from these, so snaps
 	/// never accumulate.
@@ -2063,7 +2141,7 @@ fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration)
 	let mut rects = Vec::new();
 	let layers = scene.map(Layer::scene).into_iter().chain(top.then(Layer::top));
 	for shown in layers {
-		let items = collection.items(&shown).unwrap_or_default();
+		let items = slots::placed(state, &shown);
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == dragged.layer && at == dragged.index) {
 				rects.push(item.posed(since).rect);
@@ -2271,6 +2349,8 @@ fn describe(source: &Source) -> String {
 		Source::Browser { url, width, height } => format!("browser: {url} ({width}x{height})"),
 		Source::Overlay { width, height, .. } => format!("overlay ({width}x{height})"),
 		Source::Clone { source } => format!("clone of {source}"),
+		Source::Role { source: Some(source) } => format!("role: {source}"),
+		Source::Role { source: None } => "role: unfilled".into(),
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
 		Source::Scene { scene } => format!("scene: {scene}"),
@@ -2385,10 +2465,11 @@ enum Kind {
 	Replay,
 	Lut,
 	Scene,
+	Role,
 }
 
 impl Kind {
-	const ALL: [Self; 16] = [
+	const ALL: [Self; 17] = [
 		Self::Color,
 		Self::Image,
 		Self::Media,
@@ -2405,6 +2486,7 @@ impl Kind {
 		Self::Replay,
 		Self::Lut,
 		Self::Scene,
+		Self::Role,
 	];
 
 	fn label(self) -> &'static str {
@@ -2425,6 +2507,7 @@ impl Kind {
 			Self::Replay => "Replay",
 			Self::Lut => "LUT",
 			Self::Scene => "Scene",
+			Self::Role => "Role",
 		}
 	}
 
@@ -2436,6 +2519,7 @@ impl Kind {
 			}
 			Self::Image | Self::Media => Some("file"),
 			Self::Lut => Some(".cube file"),
+			Self::Role => Some("source filling it (empty for none)"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
 			Self::Browser => Some("url"),
@@ -2565,6 +2649,7 @@ impl AddSource {
 				restart: self.restart,
 			},
 			Kind::Replay => Source::Replay,
+			Kind::Role => Source::Role { source: id },
 			Kind::Scene => match &self.scene {
 				Some(scene) => Source::Scene { scene: scene.clone() },
 				None => Source::Program,
@@ -2745,6 +2830,67 @@ mod tests {
 		);
 	}
 
+	/// A scene duplicated with its own copies keeps an unfilled role as the
+	/// role, as it does a scene drawn in it, and copies a filled one.
+	#[test]
+	fn an_unfilled_role_gets_no_copy_of_its_own() {
+		let mut collection = Collection::new();
+		let color = moq_scene::Rgba([255, 255, 255, 255]);
+		collection.sources.insert("game".into(), Source::Color { color });
+		collection.sources.insert("Main".into(), Source::Role { source: None });
+		assert!(!build::own_copy(&collection, "Main"), "nothing to copy");
+		assert!(build::own_copy(&collection, "game"));
+		let filled = Source::Role {
+			source: Some("game".into()),
+		};
+		collection.sources.insert("Main".into(), filled);
+		assert!(build::own_copy(&collection, "Main"), "the source filling it");
+	}
+
+	/// A layer the UI picked is let go of once an edit of the engine's own
+	/// inserts or replaces a layer of its scene, and kept for one elsewhere.
+	#[test]
+	fn a_guest_appearing_lets_go_of_a_layer_of_their_scene() {
+		let picked = |scene: &str| Picked {
+			layer: Layer::scene(scene),
+			index: 2,
+		};
+		let mut shifts = (0, BTreeMap::new());
+		assert!(!shifted_since(Some(&picked("Interview")), &shifts, 0));
+		shifts.0 += 1;
+		shifts.1.insert("Interview".to_string(), shifts.0);
+		assert!(shifted_since(Some(&picked("Interview")), &shifts, 0));
+		assert!(!shifted_since(Some(&picked("Solo")), &shifts, 0), "another scene");
+		assert!(!shifted_since(Some(&picked("Interview")), &shifts, 1), "already seen");
+		assert!(!shifted_since(None, &shifts, 0));
+		shifts.0 += 1;
+		shifts.1.insert("Solo".to_string(), shifts.0);
+		assert!(shifted_since(Some(&picked("Interview")), &shifts, 0), "two since");
+		assert!(!shifted_since(Some(&picked("Interview")), &shifts, 1));
+	}
+
+	/// A layer showing a role nothing fills offers no copy of its own, to
+	/// duplicate or make independent, as a clone of it would be refused; one
+	/// it fills copies the source filling it.
+	#[test]
+	fn an_unfilled_role_has_nothing_to_copy() {
+		let mut collection = Collection::new();
+		let color = moq_scene::Rgba([255, 255, 255, 255]);
+		collection.sources.insert("game".into(), Source::Color { color });
+		collection.sources.insert("Main".into(), Source::Role { source: None });
+		let err = build::copy_of(&collection, "Main").unwrap_err();
+		assert_eq!(err.to_string(), build::NOTHING_TO_COPY);
+		let filled = Source::Role {
+			source: Some("game".into()),
+		};
+		collection.sources.insert("Main".into(), filled);
+		let (copy, _) = build::copy_of(&collection, "Main").unwrap();
+		assert!(matches!(&copy, Source::Clone { source } if source == "game"));
+		let mut draft = collection.draft("Duplicate `Main` as its own copy");
+		draft.set_source("Main copy", Some(copy)).unwrap();
+		draft.finish().unwrap();
+	}
+
 	/// A clone of a source with its background removed copies its filters,
 	/// and the edit adding it is valid.
 	#[test]
@@ -2761,6 +2907,10 @@ framerate = 30
 [sources.cam]
 kind = "camera"
 
+[sources.Camera]
+kind = "role"
+source = "cam"
+
 [video.cam]
 background = "remove"
 filters = [{ kind = "opacity", amount = 0.5 }]
@@ -2768,14 +2918,18 @@ filters = [{ kind = "opacity", amount = 0.5 }]
 		)
 		.unwrap();
 
-		let (source, video) = clone_of(&collection, "cam");
-		let video = video.unwrap();
-		assert_eq!(video.background, Background::Keep);
-		assert_eq!(video.filters, collection.video["cam"].filters);
+		// A role's copy is of the source filling it, with that look.
+		for name in ["cam", "Camera"] {
+			let (source, video) = clone_of(&collection, name);
+			assert_eq!(source, Source::Clone { source: "cam".into() }, "{name}");
+			let video = video.unwrap();
+			assert_eq!(video.background, Background::Keep);
+			assert_eq!(video.filters, collection.video["cam"].filters, "{name}");
 
-		let mut draft = collection.draft("clone");
-		draft.set_source("clone", Some(source)).unwrap();
-		draft.set_video("clone", Some(video)).unwrap();
-		draft.finish().unwrap();
+			let mut draft = collection.draft("clone");
+			draft.set_source("clone", Some(source)).unwrap();
+			draft.set_video("clone", Some(video)).unwrap();
+			draft.finish().unwrap();
+		}
 	}
 }

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-use winit::keyboard::{Key, KeyCode, ModifiersState, NativeKeyCode, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, NativeKeyCode, PhysicalKey};
 
 use crate::controls::{Action, Controls};
 
@@ -134,6 +134,8 @@ struct Pressing {
 	/// The modifiers held now, as egui names them.
 	modifiers: egui::Modifiers,
 	taking: Taking,
+	/// Whether a paste reached egui since [`Keyboard::pasted`] last said so.
+	pasted: bool,
 }
 
 /// What a key pressed in the window does besides reaching egui.
@@ -146,10 +148,12 @@ enum Taking {
 	/// key binds rather than acts.
 	Binding(Option<Binding>),
 	/// Bound keys fire instead of reaching egui, where nothing hears them
-	/// outside the window.
+	/// outside the window, unless `typing` into the studio's window: there
+	/// they reach egui, while another window, the multiview, fires them.
 	Firing {
 		bound: Arc<Mutex<Bindings>>,
 		fire: mpsc::Sender<Binding>,
+		typing: bool,
 	},
 }
 
@@ -169,10 +173,24 @@ impl Keyboard {
 		};
 	}
 
-	/// Hear `key` pressed in the window, where the layout puts `name` on it,
-	/// returning whether egui hears it too.
-	pub fn pressed(&self, key: PhysicalKey, name: Key, repeat: bool) -> bool {
+	/// Hear `key` pressed in a window, the studio's own if `studio`, where
+	/// the layout puts `name` on it, returning whether egui hears it too.
+	pub fn pressed(&self, key: PhysicalKey, name: Key, repeat: bool, studio: bool) -> bool {
 		let mut pressing = self.0.lock().unwrap();
+		// A paste lands in the studio's window, never from the multiview's.
+		let paste = studio && !repeat && paste(pressing.modifiers, key, &name);
+		let heard = Self::hear(&mut pressing, key, name, repeat, studio);
+		pressing.pasted |= heard && paste;
+		heard
+	}
+
+	/// Whether a paste was pressed since this last said so, which egui reports
+	/// only when the clipboard holds text.
+	pub fn pasted(&self) -> bool {
+		std::mem::take(&mut self.0.lock().unwrap().pasted)
+	}
+
+	fn hear(pressing: &mut Pressing, key: PhysicalKey, name: Key, repeat: bool, studio: bool) -> bool {
 		let pressed = Binding {
 			modifiers: pressing.modifiers,
 			key,
@@ -188,7 +206,8 @@ impl Keyboard {
 				}
 				false
 			}
-			Taking::Firing { bound, fire } => {
+			Taking::Firing { typing: true, .. } if studio => true,
+			Taking::Firing { bound, fire, .. } => {
 				if !bound.lock().unwrap().values().any(|bound| bound.same(&pressed)) {
 					return true;
 				}
@@ -203,6 +222,24 @@ impl Keyboard {
 
 	fn take(&self, taking: Taking) {
 		self.0.lock().unwrap().taking = taking;
+	}
+}
+
+/// Whether `key`, where the layout puts `name`, held with `modifiers`
+/// pastes, as egui-winit decides: by the name, or by the key V sits on for a
+/// name egui has no key for, as on a layout without Latin letters.
+fn paste(modifiers: egui::Modifiers, key: PhysicalKey, name: &Key) -> bool {
+	match name {
+		Key::Named(NamedKey::Paste) => true,
+		Key::Named(NamedKey::Insert) => cfg!(windows) && modifiers.shift,
+		Key::Character(text) => {
+			modifiers.command
+				&& match egui::Key::from_name(text) {
+					Some(named) => named == egui::Key::V,
+					None => key == PhysicalKey::Code(KeyCode::KeyV),
+				}
+		}
+		_ => false,
 	}
 }
 
@@ -467,19 +504,21 @@ impl Hotkeys {
 		}
 	}
 
-	/// Fire the actions bound to keys pressed in the studio's window, where
-	/// nothing hears them outside it, unless `typing`, as into a text field
-	/// or a page the preview passes the keyboard to. A key that fires is
-	/// taken, so nothing else in the window acts on it. Called each frame.
+	/// Fire the actions bound to keys pressed in the studio's windows, where
+	/// nothing hears them outside them, unless `typing` into the studio's
+	/// own, as into a text field or a page the preview passes the keyboard
+	/// to. A key that fires is taken, so nothing else in the window acts on
+	/// it. Called each frame.
 	pub fn focused(&self, typing: bool) {
 		if self.suspended.load(Ordering::Relaxed) {
 			return;
 		}
-		let firing = !typing && matches!(self.reach(), Reach::Focused(_));
+		let firing = matches!(self.reach(), Reach::Focused(_));
 		self.keyboard.take(match firing {
 			true => Taking::Firing {
 				bound: self.bound.clone(),
 				fire: self.fire.clone(),
+				typing,
 			},
 			false => Taking::Nothing,
 		});
@@ -611,8 +650,9 @@ mod tests {
 	#[test]
 	fn the_panel_takes_the_key_pressed() {
 		let keyboard = Keyboard::default();
-		let press =
-			|code, name: &str, repeat| keyboard.pressed(PhysicalKey::Code(code), Key::Character(name.into()), repeat);
+		let press = |code, name: &str, repeat| {
+			keyboard.pressed(PhysicalKey::Code(code), Key::Character(name.into()), repeat, true)
+		};
 		// Nothing is taken unless the panel waits for a key.
 		assert!(press(KeyCode::KeyA, "a", false));
 		keyboard.take(Taking::Binding(None));
@@ -621,7 +661,8 @@ mod tests {
 		assert!(keyboard.pressed(
 			PhysicalKey::Code(KeyCode::ControlLeft),
 			Key::Named(NamedKey::Control),
-			false
+			false,
+			true
 		));
 		assert!(!press(KeyCode::Numpad1, "1", false));
 		assert!(!press(KeyCode::Digit1, "1", false));
@@ -640,11 +681,66 @@ mod tests {
 			Action::Panic,
 			key(KeyCode::Numpad1, "1"),
 		)])));
-		keyboard.take(Taking::Firing { bound, fire });
-		let press = |code, repeat| keyboard.pressed(PhysicalKey::Code(code), Key::Character("1".into()), repeat);
+		keyboard.take(Taking::Firing {
+			bound,
+			fire,
+			typing: false,
+		});
+		let press = |code, repeat| keyboard.pressed(PhysicalKey::Code(code), Key::Character("1".into()), repeat, true);
 		assert!(press(KeyCode::Digit1, false), "an unbound key reaches egui");
 		assert!(!press(KeyCode::Numpad1, false));
 		assert!(!press(KeyCode::Numpad1, true));
+		assert_eq!(fired.try_iter().count(), 1);
+	}
+
+	/// A paste pressed in the multiview pastes nothing into the studio.
+	#[test]
+	fn only_the_studios_window_pastes() {
+		let keyboard = Keyboard::default();
+		keyboard.modifiers(match cfg!(target_os = "macos") {
+			true => ModifiersState::SUPER,
+			false => ModifiersState::CONTROL,
+		});
+		let paste = |studio| {
+			keyboard.pressed(
+				PhysicalKey::Code(KeyCode::KeyV),
+				Key::Character("v".into()),
+				false,
+				studio,
+			)
+		};
+		assert!(paste(false));
+		assert!(!keyboard.pasted(), "the multiview pasted");
+		assert!(paste(true));
+		assert!(keyboard.pasted(), "the studio's window pasted");
+	}
+
+	/// Typing into the studio's window holds its keys back, not those the
+	/// multiview hears, whichever window drew last.
+	#[test]
+	fn typing_holds_back_only_the_studios_keys() {
+		let keyboard = Keyboard::default();
+		let (fire, fired) = mpsc::channel();
+		let bound = Arc::new(Mutex::new(Bindings::from([(
+			Action::Panic,
+			key(KeyCode::Numpad1, "1"),
+		)])));
+		keyboard.take(Taking::Firing {
+			bound,
+			fire,
+			typing: true,
+		});
+		let press = |studio| {
+			keyboard.pressed(
+				PhysicalKey::Code(KeyCode::Numpad1),
+				Key::Character("1".into()),
+				false,
+				studio,
+			)
+		};
+		assert!(press(true), "typed into the studio's field");
+		assert_eq!(fired.try_iter().count(), 0);
+		assert!(!press(false), "fired in the multiview");
 		assert_eq!(fired.try_iter().count(), 1);
 	}
 
@@ -673,5 +769,23 @@ mod tests {
 		let moved = renamed(&bindings, &onto);
 		assert_eq!(moved[&scene("B")], f1);
 		assert!(!moved.contains_key(&scene("A")));
+	}
+
+	/// The paste key is V by name, or the key V sits on where the layout
+	/// names it nothing egui knows, as egui-winit falls back to.
+	#[test]
+	fn paste_as_egui_hears_it() {
+		let command = egui::Modifiers::COMMAND;
+		let v = PhysicalKey::Code(KeyCode::KeyV);
+		let pastes = |modifiers, key, name: &str| paste(modifiers, key, &Key::Character(name.into()));
+		assert!(pastes(command, v, "v"));
+		assert!(pastes(command, v, "V"));
+		// Russian puts `м` on V.
+		assert!(pastes(command, v, "м"));
+		// Dvorak puts `k` on V, and `v` on the key Qwerty's period is on.
+		assert!(!pastes(command, v, "k"));
+		assert!(pastes(command, PhysicalKey::Code(KeyCode::Period), "v"));
+		assert!(!pastes(egui::Modifiers::NONE, v, "v"));
+		assert!(paste(egui::Modifiers::NONE, v, &Key::Named(NamedKey::Paste)));
 	}
 }

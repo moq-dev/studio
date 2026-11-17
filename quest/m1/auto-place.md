@@ -36,7 +36,10 @@ ready; local first with a hosted model as an opt-in tie-breaker).
   game is right from its first frame.
 - **Where it lives:** the analysis and the choice are UI-free, in moq-scene,
   tested on recorded frames with a paused clock. The move is the item's
-  rect animated as a Move transition eases.
+  rect animated as a Move transition eases: moq-scene's `Glide`
+  (`rs/moq-scene/src/glide.rs`), which glides a scene's slots when they
+  reflow, eases any list of items from one placement to the next on the
+  program clock, keyed by what changed.
 
 Measure, per AGENTS.md: the frame time and GPU copies the analysis adds, and
 that the encoder's load does not move. Should the signals prove too weak, a
@@ -48,4 +51,3 @@ a judgment no test makes.
 ## Related
 
 - [moq-video's foreground app is pinned](/quest/m1/pin-capture-foreground.md) - when the app in front changes, and the key its slot is remembered under
-- [Scenes that lay themselves out](/quest/m1/auto-layout.md) - slots chosen by role rather than by content

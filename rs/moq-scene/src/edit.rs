@@ -600,7 +600,8 @@ impl Draft {
 	/// Remove the source called `name` and everything that refers to it: its
 	/// clones, the items showing either, their audio and video settings, the
 	/// audio scenes holding its sound, the filters reading it, such as a mask,
-	/// and a stinger playing it, which becomes the default fade.
+	/// and a stinger playing it, which becomes the default fade. A role it
+	/// fills is left unfilled.
 	pub fn remove_source(&mut self, name: &str) -> Result<(), Error> {
 		let clones: Vec<String> = self
 			.collection
@@ -611,6 +612,17 @@ impl Draft {
 			.collect();
 		for clone in clones {
 			self.remove_source(&clone)?;
+		}
+		// A role it fills is left unfilled, its slots closed up.
+		let roles: Vec<String> = self
+			.collection
+			.sources
+			.iter()
+			.filter(|(_, source)| matches!(source, Source::Role { source: Some(source) } if source == name))
+			.map(|(role, _)| role.clone())
+			.collect();
+		for role in roles {
+			self.set_source(&role, Some(Source::Role { source: None }))?;
 		}
 
 		let placed: Vec<(Layer, usize)> = self
@@ -1248,13 +1260,18 @@ mod tests {
 	}
 
 	/// Removing a source removes its clones, every item showing either, and
-	/// their settings, and one undo puts all of it back.
+	/// their settings, leaves a role it fills unfilled, and one undo puts all
+	/// of it back.
 	#[test]
 	fn removing_a_source_cascades_and_undoes_whole() {
 		let mut collection = collection();
 		collection
 			.sources
 			.insert("red copy".into(), Source::Clone { source: "red".into() });
+		let role = Source::Role {
+			source: Some("red".into()),
+		};
+		collection.sources.insert("main".into(), role);
 		collection.video.insert(
 			"red copy".into(),
 			Video {
@@ -1275,7 +1292,8 @@ mod tests {
 		let mut draft = collection.draft("Remove red");
 		draft.remove_source("red").unwrap();
 		commit(&mut collection, &mut history, draft, None);
-		assert!(collection.sources.is_empty());
+		let unfilled = Source::Role { source: None };
+		assert_eq!(collection.sources.values().collect::<Vec<_>>(), vec![&unfilled]);
 		assert!(collection.video.is_empty());
 		assert!(collection.top.is_empty());
 		assert!(collection.scenes[0].items.is_empty());

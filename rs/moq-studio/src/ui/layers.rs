@@ -137,10 +137,16 @@ impl Panels {
 				self.fail(Spot::Add, refreshed);
 			}
 			let fault = self.fault(&Spot::Layer(layer.clone(), item.source.clone()));
+			let what = words(collection, &item.source);
+			let what = match item.slot {
+				Some(moq_scene::Slot::Main) => format!("Main slot · {what}"),
+				Some(moq_scene::Slot::Tile) => format!("Tile · {what}"),
+				None => what,
+			};
 			let row = Row {
 				item,
 				kind: kind(collection, &item.source),
-				words: words(collection, &item.source),
+				words: what,
 				status,
 				capture,
 				windows: self.devices.listing.as_ref().map(|listing| &listing.windows),
@@ -157,6 +163,8 @@ impl Panels {
 			if response.drag_started() {
 				self.moving = Some(index);
 			}
+			// Dropped on a slot on the picture, it takes that slot.
+			response.dnd_set_drag_payload(picked.clone());
 			if let Some(menu) = Menu::of(state, &picked, self.off_air(state).is_some()) {
 				response.context_menu(|ui| {
 					if let Some(chosen) = layer_menu(ui, &menu) {
@@ -171,8 +179,11 @@ impl Panels {
 		let dragged = rows
 			.iter()
 			.find(|(index, response)| Some(*index) == self.moving && (response.dragged() || response.drag_stopped()));
+		let column = rows.first().map(|(_, row)| row.rect.x_range());
 		if let Some((from, response)) = dragged
 			&& let Some(pointer) = response.interact_pointer_pos()
+			// Out over the picture, it is dropped on a slot instead.
+			&& column.is_some_and(|column| column.contains(pointer.x))
 		{
 			let from = *from;
 			// Rows go front first, so the slot counted from the top is the
@@ -485,6 +496,8 @@ pub(super) fn words(collection: &Collection, name: &str) -> String {
 	};
 	let what = match collection.sources.get(name) {
 		Some(Source::Clone { source }) => format!("{what} · own copy of {source}"),
+		Some(Source::Role { source: Some(source) }) => format!("{what} · role, filled by {source}"),
+		Some(Source::Role { source: None }) => "Role, unfilled".to_string(),
 		_ => what,
 	};
 	match shown_in(collection, name).len() {
@@ -494,14 +507,17 @@ pub(super) fn words(collection: &Collection, name: &str) -> String {
 }
 
 impl Panels {
-	/// What can be added: the sources nothing shows, this machine's devices,
-	/// any source by hand, and guests. The Add page replaces it with pictures
+	/// What can be added: what a drop or paste makes, the sources nothing
+	/// shows, this machine's devices, any source by hand, and guests. The Add page replaces it with pictures
 	/// (quest/m0/ux/add.md).
 	fn adding(&mut self, ui: &mut Ui) {
 		if let Some(fault) = self.fault(&Spot::Add) {
 			ui.colored_label(kit::ERR, fault);
 			ui.add_space(6.0);
 		}
+		ui.label(kit::caps("Drop or paste anything", kit::display(11.0)).color(kit::DIM));
+		ui.add_space(4.0);
+		self.drop_kinds(ui);
 		self.unused(ui);
 		section(ui, "Devices");
 		self.devices(ui);
@@ -530,10 +546,11 @@ impl Panels {
 				.flat_map(|(_, items)| items.iter().flat_map(|item| &item.filters));
 			let read = filters.chain(collection.video.values().flat_map(|video| &video.filters));
 			let mut read = read.filter_map(Filter::source);
-			let cloned = collection
-				.sources
-				.values()
-				.any(|source| matches!(source, Source::Clone { source } if source == name));
+			// A clone or a role naming it shows it.
+			let cloned = collection.sources.values().any(|source| match source {
+				Source::Clone { source } | Source::Role { source: Some(source) } => source == name,
+				_ => false,
+			});
 			// Removing the stinger's source would quietly reset the transition.
 			let stinger = collection.transition.stinger() == Some(name);
 			cloned || stinger || read.any(|source| source == name)
@@ -583,8 +600,25 @@ impl Panels {
 						.collection()
 						.canvas(layer.scene.as_deref())
 						.unwrap_or(state.collection().canvas);
-					let index = state.collection().items(&layer).map_or(0, <[Item]>::len);
-					let item = Item::new(name.clone(), moq_scene::Rect::fill(&canvas));
+					let mut index = state.collection().items(&layer).map_or(0, <[Item]>::len);
+					let mut item = Item::new(name.clone(), moq_scene::Rect::fill(&canvas));
+					// A guest takes the next tile of a scene with slots.
+					let room = self.engine.room();
+					let guest = room.as_ref().is_some_and(|room| {
+						let source = state.collection().sources.get(&name);
+						source.is_some_and(|source| crate::guests::plays_guest(room.path(), source))
+					});
+					let tile = layer
+						.scene
+						.as_deref()
+						.and_then(|scene| crate::guests::tile(state.collection(), scene, &name));
+					if let Some(at) = tile.filter(|_| guest) {
+						index = at;
+						item = Item {
+							slot: Some(moq_scene::Slot::Tile),
+							..Item::new(name.clone(), moq_scene::Rect::default())
+						};
+					}
 					let result = edit(&mut state, format!("Add `{name}` {}", place(&layer)), None, |draft| {
 						draft.insert_item(&layer, index, item)
 					});

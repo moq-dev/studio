@@ -107,6 +107,11 @@ pub struct State {
 	/// How many times the collection was reloaded from its files, so the UI
 	/// can let go of what a reload may have removed.
 	pub reloads: u64,
+	/// How many times an edit the UI did not make, such as a guest appearing
+	/// on their own, inserted or replaced a layer of a scene, and the count
+	/// each scene last did so at, so the UI can let go of a layer there whose
+	/// index it may have given to another. See [`shifted`](Self::shifted).
+	pub shifts: (u64, BTreeMap<String, u64>),
 	/// How many times the preview was taken to program, by a cut or a
 	/// transition, so the UI can mark each however it was fired.
 	pub takes: u64,
@@ -218,6 +223,14 @@ impl State {
 		self.history.record(edit, gesture);
 		self.edited();
 		Ok(())
+	}
+
+	/// Note that an edit the UI did not make inserted or replaced a layer of
+	/// `scene`.
+	pub fn shifted(&mut self, scene: &str) {
+		let (count, scenes) = &mut self.shifts;
+		*count += 1;
+		scenes.insert(scene.to_string(), *count);
 	}
 
 	/// Apply `draft`, a change the user did not make, such as a guest joining,
@@ -1034,6 +1047,9 @@ pub struct Engine {
 	/// The path of every room followed this run, so the panic key still mutes
 	/// a guest added from a room left since.
 	rooms: Mutex<Vec<moq_net::Path>>,
+	/// Whether a guest who joins takes the next tile of the scene on program,
+	/// as the show's settings say.
+	guests_appear: std::sync::atomic::AtomicBool,
 	/// Each guest's return feed, once the studio's session in the room dials.
 	feeds: Mutex<Option<crate::feed::Feeds>>,
 	/// What the program's broadcasts share, on air or not.
@@ -1167,6 +1183,7 @@ impl Engine {
 				history,
 				dropped,
 				reloads: 0,
+				shifts: (0, BTreeMap::new()),
 				takes: 0,
 				sources,
 				compositor,
@@ -1194,6 +1211,7 @@ impl Engine {
 			recorder,
 			room: Mutex::default(),
 			rooms: Mutex::default(),
+			guests_appear: Default::default(),
 			feeds: Mutex::default(),
 			program,
 			subscribe,
@@ -1264,6 +1282,17 @@ impl Engine {
 	/// included, and of every room [remembered](Self::remember_room).
 	pub fn rooms(&self) -> Vec<moq_net::Path> {
 		self.rooms.lock().unwrap().clone()
+	}
+
+	/// Whether a guest who joins takes the next tile of the scene on program
+	/// on their own, rather than waiting under Add.
+	pub fn guests_appear(&self) -> bool {
+		self.guests_appear.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Set whether guests appear on their own, as the show's settings say.
+	pub fn set_guests_appear(&self, appear: bool) {
+		self.guests_appear.store(appear, std::sync::atomic::Ordering::Relaxed);
 	}
 
 	/// Keep `room` among the [rooms](Self::rooms) Panic mutes the guests of,
@@ -5560,6 +5589,230 @@ mod tests {
 			url: connect.clone(),
 		}]);
 		assert!(engine.watched().is_empty(), "no relay is watched once stopped");
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
+	/// A guest whose camera comes online in the room takes the next tile of
+	/// the scene on program once the show says guests appear on their own, as
+	/// an edit the host can undo, which a reconnect leaves undone; before
+	/// that, for their screen, once the host removed them, and while four
+	/// guests there fill the tiles, they wait under Add.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_guest_appears_in_the_next_tile_once_the_show_says_so() {
+		use crate::guests::{Joining, Room, tests};
+
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let mut loaded = red_canvas();
+		let scene = loaded.collection.scenes[0].name.clone();
+		let main = &mut loaded.collection.scenes[0].items[0];
+		main.slot = Some(moq_scene::Slot::Main);
+		main.rect = moq_scene::Rect::default();
+		let engine = start(gpu, Vec::new(), dir.path(), autosave, loaded)
+			.await
+			.expect("the studio starts");
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = tests::key("show/guests", &["**"], &["**"]);
+		let room = Room::new(&connect, "guests", key, page, tests::EXPIRY).unwrap();
+		engine.join(Some(Joining::offline(room))).unwrap();
+		let items = |engine: &Engine| -> Vec<(String, Option<moq_scene::Slot>)> {
+			let state = engine.state.lock().unwrap();
+			let items = &state.collection().scene(&scene).unwrap().items;
+			items.iter().map(|item| (item.source.clone(), item.slot)).collect()
+		};
+		let joined = |name: &'static str| {
+			let engine = engine.clone();
+			kio::clock::timeout(TIMEOUT, async move {
+				while !engine.state.lock().unwrap().collection().sources.contains_key(name) {
+					kio::clock::sleep(Duration::from_millis(10)).await;
+				}
+			})
+		};
+
+		let _bob = engine
+			.subscribe
+			.route("guests/bob/camera.hang", Default::default())
+			.unwrap();
+		joined("bob").await.expect("bob joins");
+		assert_eq!(
+			items(&engine),
+			[("red".into(), Some(moq_scene::Slot::Main))],
+			"bob waits under Add"
+		);
+
+		engine.set_guests_appear(true);
+		let _screen = engine
+			.subscribe
+			.route("guests/alice/screen.hang", Default::default())
+			.unwrap();
+		joined("alice screen").await.expect("alice's screen joins");
+		let _camera = engine
+			.subscribe
+			.route("guests/alice/camera.hang", Default::default())
+			.unwrap();
+		kio::clock::timeout(TIMEOUT, async {
+			while items(&engine).len() < 2 {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("alice appears");
+		let tiled = [
+			("red".into(), Some(moq_scene::Slot::Main)),
+			("alice".into(), Some(moq_scene::Slot::Tile)),
+		];
+		assert_eq!(items(&engine), tiled, "alice's camera alone, in a tile");
+		let undone = engine.state.lock().unwrap().undo().unwrap();
+		assert_eq!(undone, Some(format!("`alice` joins `{scene}`")));
+		assert_eq!(items(&engine).len(), 1, "an undo takes her out");
+		assert!(
+			engine.state.lock().unwrap().collection().sources.contains_key("alice"),
+			"and leaves her under Add"
+		);
+
+		// Removed from scenes, a guest whose link still works waits under Add.
+		engine.room().unwrap().stop_renewing("carol").unwrap();
+		let _carol = engine
+			.subscribe
+			.route("guests/carol/camera.hang", Default::default())
+			.unwrap();
+		joined("carol").await.expect("carol joins");
+		assert_eq!(items(&engine).len(), 1, "a removed guest takes no tile");
+
+		let shown = |name: &'static str| {
+			let engine = engine.clone();
+			kio::clock::timeout(TIMEOUT, async move {
+				while !items(&engine).iter().any(|(source, _)| source == name) {
+					kio::clock::sleep(Duration::from_millis(10)).await;
+				}
+			})
+		};
+		let offline = |name: &'static str| {
+			let engine = engine.clone();
+			kio::clock::timeout(TIMEOUT, async move {
+				while engine.room().unwrap().participants()[name].camera {
+					kio::clock::sleep(Duration::from_millis(10)).await;
+				}
+			})
+		};
+		// The host took her off, so rejoining leaves her under Add.
+		drop(_camera);
+		offline("alice").await.expect("alice leaves");
+		let _camera = engine
+			.subscribe
+			.route("guests/alice/camera.hang", Default::default())
+			.unwrap();
+		kio::clock::timeout(TIMEOUT, async {
+			while !engine.room().unwrap().participants()["alice"].camera {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("alice is back");
+		assert_eq!(items(&engine).len(), 1, "an undone appearance stays undone");
+
+		// Four guests there fill the tiles; one leaving frees a place, which
+		// the next takes in his tile, so his coming back makes no fifth.
+		let mut cameras = Vec::new();
+		for name in ["dave", "erin", "frank", "ivy"] {
+			let path = format!("guests/{name}/camera.hang");
+			cameras.push(engine.subscribe.route(path, Default::default()).unwrap());
+			shown(name).await.expect("a guest appears");
+		}
+		let _gus = engine
+			.subscribe
+			.route("guests/gus/camera.hang", Default::default())
+			.unwrap();
+		joined("gus").await.expect("gus joins");
+		assert!(
+			!items(&engine).iter().any(|(source, _)| source == "gus"),
+			"a fifth waits"
+		);
+		// A mix of the host's own holding dave keeps him once his tile goes.
+		{
+			let mut state = engine.state.lock().unwrap();
+			assert!(
+				state
+					.collection()
+					.heard(moq_scene::AudioScene::DEFAULT)
+					.contains("dave"),
+				"dave is heard on program"
+			);
+			let mut scenes = state.collection().audio_scenes.clone();
+			let mut headphones = moq_scene::AudioScene::new("Headphones");
+			headphones.sounds.insert("dave".into());
+			scenes.push(headphones);
+			let mut draft = state.collection().draft("Headphones");
+			draft.set_audio_scenes(scenes).unwrap();
+			// And the host hid dave's tile, which the next guest takes shown.
+			let scene = state.collection().scenes[0].name.clone();
+			let at = (state.collection().scenes[0].items.iter())
+				.position(|item| item.source == "dave")
+				.unwrap();
+			let hidden = moq_scene::Item {
+				visible: false,
+				..state.collection().scenes[0].items[at].clone()
+			};
+			draft.set_item(&moq_scene::Layer::scene(&scene), at, hidden).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		drop(cameras.remove(0));
+		offline("dave").await.expect("dave leaves");
+		let shifts = engine.state.lock().unwrap().shifts.0;
+		let _hal = engine
+			.subscribe
+			.route("guests/hal/camera.hang", Default::default())
+			.unwrap();
+		shown("hal").await.expect("hal takes the place dave left");
+		{
+			let state = engine.state.lock().unwrap();
+			let shifted = state.shifts.1.get(&scene).is_some_and(|at| *at > shifts);
+			assert!(
+				shifted,
+				"hal's appearance shifted the scene, so the UI lets go of a layer there"
+			);
+			let hal = state.collection().scenes[0]
+				.items
+				.iter()
+				.find(|item| item.source == "hal");
+			assert!(
+				hal.is_some_and(|hal| hal.visible && hal.auto),
+				"shown, in a tile of his own"
+			);
+		}
+		assert!(
+			!items(&engine).iter().any(|(source, _)| source == "dave"),
+			"in dave's tile"
+		);
+		{
+			let state = engine.state.lock().unwrap();
+			let heard = |audio: &str| state.collection().heard(audio).contains("dave");
+			assert!(!heard(moq_scene::AudioScene::DEFAULT), "nor is he heard on program");
+			assert!(heard("Headphones"), "but still in the host's own mix");
+		}
+		let _dave = engine
+			.subscribe
+			.route("guests/dave/camera.hang", Default::default())
+			.unwrap();
+		kio::clock::timeout(TIMEOUT, async {
+			while !engine.room().unwrap().participants()["dave"].camera {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("dave is back");
+		let guests = items(&engine)
+			.iter()
+			.filter(|(_, slot)| *slot == Some(moq_scene::Slot::Tile))
+			.count();
+		assert_eq!(guests, 4, "dave back waits under Add, the tiles full");
+
+		engine.stop();
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");

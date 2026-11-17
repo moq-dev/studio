@@ -116,6 +116,45 @@ enum View {
 	/// BUILD with the host's camera stalled selected, and what to do about it
 	/// open from its badge.
 	Stalled,
+	/// BUILD with no layer selected, after the guest `Ibis` appears on their
+	/// own in the scene on program.
+	Joined,
+	/// The multiview, as its own window draws it, with the host and the
+	/// highlight picked beside the guests. If `live`, on air in Studio mode
+	/// with `Interview` cued.
+	Multiview {
+		live: bool,
+		/// Whether the host's picture stalled.
+		stalled: bool,
+	},
+	/// BUILD's Add tab on the drop views' show, with a file dragged or
+	/// dropped on the picture.
+	Drop(Drop),
+}
+
+/// A file over the picture, at the pointer.
+#[derive(Clone, Copy)]
+enum Drop {
+	/// A logo dragged over the picture, away from every layer.
+	Hover,
+	/// A picture dropped on the host's picture, which asks whether to replace
+	/// its file.
+	Replace,
+	/// A regular MP4 dropped, which says why it cannot play.
+	Refused,
+	/// A logo from outside the show's directory dropped away from every
+	/// layer, copied beside the show, and placed there, selected.
+	Placed,
+}
+
+/// The studio on the drop views' show, turned to BUILD's Add tab with `drop`.
+fn dropping(drop: Drop) -> Open {
+	Open::Studio {
+		view: View::Drop(drop),
+		size: SIZE,
+		show: "drop.toml",
+		relay: false,
+	}
 }
 
 /// BUILD with the host's layer, the middle of the scene on program's three,
@@ -143,6 +182,17 @@ fn relayed(view: View) -> Open {
 		size: SIZE,
 		show: "show.toml",
 		relay: true,
+	}
+}
+
+/// The studio on the slot views' show, at the mock-ups' size, turned to
+/// `view`.
+fn slotted(view: View) -> Open {
+	Open::Studio {
+		view,
+		size: SIZE,
+		show: "slots.toml",
+		relay: false,
 	}
 }
 
@@ -216,6 +266,17 @@ views! {
 	/// BUILD in a window snapped beside a game: the inspector is a tab beside
 	/// Layers and Add.
 	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml", relay: false };
+	/// A scene laid out by slots: each slot outlined with the role or guest
+	/// in it, and the inspector's arrangements and slots, the main picture
+	/// and camera filled by roles.
+	build_slots: Still, slotted(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: None });
+	/// The same scene once a second guest appears on their own: the column
+	/// shrinks to take them and the main picture grows, as the `autolayout`
+	/// mock-up frame has it.
+	build_slots_joined: Still, slotted(View::Joined);
+	/// The camera's layer selected in its slot: no handles to resize it, its
+	/// slot in the inspector, and the source filling its role.
+	build_slots_layer: Still, slotted(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: Some(2) });
 	/// BUILD in Studio mode edits the scene on air, with NEXT docked on it.
 	build_studio: Still, studio(View::Cued(Page::Build));
 	/// A scene open off air: the frame turns amber, and the live picture
@@ -234,6 +295,17 @@ views! {
 	/// A camera that stopped sending pictures: the same amber badge, saying
 	/// its picture froze, and offering to open it again.
 	build_stalled: Live, Open::Studio { view: View::Stalled, size: SIZE, show: "stalled.toml", relay: false };
+	/// A logo dragged over the picture: where it lands, outlined and named
+	/// for the kind of layer it becomes, and Add's row for that kind lit.
+	build_drop: Still, dropping(Drop::Hover);
+	/// A picture dropped on an image layer asks whether to replace that
+	/// layer's file or add a layer.
+	build_drop_replace: Still, dropping(Drop::Replace);
+	/// A regular MP4 dropped says, where it was dropped, why it cannot play
+	/// and the remux that fixes it.
+	build_drop_refused: Still, dropping(Drop::Refused);
+	/// The logo dropped lands where it was let go, at its own size, selected.
+	build_dropped: Still, dropping(Drop::Placed);
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
 	mix: Still, mixing(MixView::Strips, None, SIZE);
@@ -311,6 +383,17 @@ views! {
 	/// Settings, Stream with `--connect` set: the flag's relay, locked, and
 	/// the token kept for it.
 	settings_stream_flagged: Live, relayed(View::Setting(Setting::Stream));
+	/// The multiview off air: every scene and the sources picked, the scene
+	/// the stream opens on amber, and the clock, which keeps it from being
+	/// still.
+	multiview: Live, studio(View::Multiview { live: false, stalled: false });
+	/// The multiview with the host's camera stalled: its tile and each scene
+	/// tile showing it carry the amber badge, and its picture says so.
+	multiview_stalled: Live, studio(View::Multiview { live: false, stalled: true });
+	/// The multiview on air in Studio mode: the scene on air framed in the
+	/// accent, the cued one amber, and the sources the live picture shows
+	/// dotted.
+	multiview_on_air: Live, relayed(View::Multiview { live: true, stalled: false });
 }
 
 /// Draw the view `name` opens into `$SHOTS_DIR/<name>.png`, twice if it is
@@ -894,6 +977,119 @@ fn a_layer_menu_edits_its_layer() {
 	quit(&engine, &runtime);
 }
 
+/// A Layers row dragged onto a slot on the picture takes that slot, unless
+/// a guest appears in the scene mid-drag, whose new tile may have taken the
+/// row's index: the drop then does nothing rather than move another layer.
+/// It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_row_dropped_on_a_slot_after_a_guest_appears_moves_nothing() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/slots.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
+	harness.step();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.build(Side::Layers, Inspect::Layer, None);
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let guests = || {
+		let state = engine.state.lock().unwrap();
+		state.collection().scene("Guests").unwrap().items.clone()
+	};
+	let slot_of = |items: &[moq_scene::Item], source: &str| {
+		items
+			.iter()
+			.find(|item| item.source == source)
+			.and_then(|item| item.slot)
+	};
+	let pointer = |harness: &mut Harness<'_, Window>, pos: egui::Pos2, pressed: Option<bool>| {
+		let event = match pressed {
+			None => egui::Event::PointerMoved(pos),
+			Some(pressed) => egui::Event::PointerButton {
+				pos,
+				button: egui::PointerButton::Primary,
+				pressed,
+				modifiers: Default::default(),
+			},
+		};
+		harness.input_mut().events.push(event);
+		harness.run_steps(2);
+	};
+	// The logo's row, and the main slot on the picture.
+	let row = egui::pos2(160.0, 217.0);
+	let main = egui::pos2(574.0, 400.0);
+	let grab = |harness: &mut Harness<'_, Window>| {
+		pointer(harness, row, None);
+		pointer(harness, row, Some(true));
+		pointer(harness, row + egui::vec2(0.0, 12.0), None);
+		pointer(harness, row + egui::vec2(40.0, 40.0), None);
+	};
+	let release = |harness: &mut Harness<'_, Window>| {
+		pointer(harness, main, None);
+		pointer(harness, main, Some(false));
+		pointer(harness, egui::pos2(720.0, 880.0), None);
+	};
+	assert_eq!(slot_of(&guests(), "logo"), None, "the logo starts free");
+
+	// Dropped on the main slot, the logo takes it.
+	grab(&mut harness);
+	release(&mut harness);
+	assert_eq!(
+		slot_of(&guests(), "logo"),
+		Some(moq_scene::Slot::Main),
+		"the row's drop put the logo in the main slot"
+	);
+	harness.get_by_label_contains("Undo: ").click();
+	harness.run_steps(2);
+	assert_eq!(slot_of(&guests(), "logo"), None, "undone");
+	let before = guests();
+
+	// Ibis appears mid-drag, in a tile at the logo's index.
+	grab(&mut harness);
+	{
+		let mut state = engine.state.lock().unwrap();
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+		let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+		let appeared = crate::guests::appear(&mut state, &room, Some("Guests"), "Ibis").unwrap();
+		assert!(appeared, "Ibis takes a tile");
+	}
+	// Drawn in its tile, the others glided to theirs, still held.
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the new tile settles");
+	release(&mut harness);
+	let after = guests();
+	assert_eq!(after.len(), before.len() + 1);
+	assert_eq!(
+		slot_of(&after, "Ibis"),
+		Some(moq_scene::Slot::Tile),
+		"Ibis keeps the tile"
+	);
+	assert_eq!(
+		slot_of(&after, "Main"),
+		Some(moq_scene::Slot::Main),
+		"Main keeps its slot"
+	);
+	assert_eq!(slot_of(&after, "logo"), None, "the logo stays free");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// Studio mode, driven as a person does: its switch turns it on, a pad then
 /// cues its scene rather than taking it, and TAKE puts it on air. NEXT's Edit
 /// opens the cued scene off air on BUILD, Back to live keeps it cued, and
@@ -971,6 +1167,85 @@ fn studio_mode_cues_and_takes() {
 	harness.run_steps(2);
 	assert_eq!(staged(), scenes("Main", None), "taken live");
 	assert!(selected(&mut harness), "the bar stays selected, its scene now live");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// The show's menu opens the multiview. On it, a click on
+/// a scene's tile takes it, or cues it in Studio mode, a source's menu leaves
+/// it out, and the sources' popover picks one: on a real engine. It draws no
+/// view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn the_multiview_takes_cues_and_picks() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let staged = || {
+		let state = engine.state.lock().unwrap();
+		let program = state.compositor.program_scene().map(str::to_string);
+		(program, state.cued().map(str::to_string))
+	};
+	let scenes = |program: &str, cued: Option<&str>| (Some(program.to_string()), cued.map(str::to_string));
+
+	// Embedded in the window here, as egui draws a viewport where it opens no
+	// native windows.
+	assert!(harness.query_by_label("Sources shown").is_none());
+	harness.get_by_label("The show").click();
+	harness.run_steps(2);
+	harness.get_by_label("Open the multiview").click();
+	harness.run_steps(4);
+	assert!(harness.query_by_label("Sources shown").is_some(), "opened");
+
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("the studio is open")
+	};
+	studio.multiview_alone(&[]);
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Main", None));
+	harness.get_by_label("Interview").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", None), "the tile took its scene");
+	harness.get_by_label("Vertical").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", None), "a refused scene stays off");
+
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("the studio is open")
+	};
+	studio.studio_mode(true);
+	harness.run_steps(2);
+	harness.get_by_label("Break").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", Some("Break")), "the tile cued its scene");
+
+	assert!(harness.query_by_label("guest").is_some(), "a guest is shown by default");
+	harness.get_by_label("guest").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Leave out of the multiview").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("guest").is_none(), "left out");
+	harness.get_by_label("Sources shown").click();
+	harness.run_steps(2);
+	harness.get_by_label("host").click();
+	harness.run_steps(2);
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	assert!(harness.query_by_label("host").is_some(), "picked");
 
 	drop(harness);
 	quit(&engine, &runtime);
@@ -1183,6 +1458,15 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		// The game's window, the back one of three over the black.
 		View::Dark => studio.build(Side::Layers, Inspect::Layer, Some(2)),
 		View::Stalled => studio.build(Side::Layers, Inspect::Layer, Some(1)),
+		View::Joined => studio.build(Side::Layers, Inspect::Layer, None),
+		View::Multiview { live, .. } => {
+			studio.multiview_alone(&["host", "highlight"]);
+			if *live {
+				studio.studio_mode(true);
+				studio.cue("Interview");
+			}
+		}
+		View::Drop(_) => studio.build(Side::Add, Inspect::Layer, None),
 		View::Review { picked, .. } => {
 			studio.turn(Page::Review);
 			studio.seed_shelf(shelf());
@@ -1198,16 +1482,26 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		let dark = Duration::from_secs(12);
 		engine.state.lock().unwrap().dark.insert("game".into(), dark);
 	}
-	if let View::Stalled = view {
+	if let View::Stalled | View::Multiview { stalled: true, .. } = view {
 		let stalled = Duration::from_secs(4);
 		engine.state.lock().unwrap().stalled.insert("host".into(), stalled);
+	}
+	if let View::Joined = view {
+		let mut state = engine.state.lock().unwrap();
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+		let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+		let appeared = crate::guests::appear(&mut state, &room, Some("Guests"), "Ibis").unwrap();
+		assert!(appeared, "Ibis takes a tile");
 	}
 	if let View::OnAir
 	| View::EndStream
 	| View::OnAirHealth
 	| View::OnAirSetting(_)
 	| View::Restart
-	| View::ShowMenuLive = view
+	| View::ShowMenuLive
+	| View::Multiview { live: true, .. } = view
 	{
 		controls.go_live().expect("going live starts");
 		runtime
@@ -1300,6 +1594,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			// egui shows a tooltip once the pointer rests half a second.
 			harness.run_steps(4);
 		}
+		View::Drop(drop) => drag(&mut harness, &engine, *drop),
 		View::History => {
 			harness
 				.get_all_by_label("Mute")
@@ -1410,6 +1705,93 @@ fn gallery(gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, sheet: bool) ->
 	// Enough for the popover and the sheet to settle where they open.
 	harness.run_steps(4);
 	harness.render().unwrap()
+}
+
+/// A file on the picture as `drop` has it, from the show's directory.
+fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) {
+	/// A file the system drops, which the studio reads by its path.
+	#[derive(Debug)]
+	struct Dropped(std::path::PathBuf);
+
+	impl egui::DroppedFile for Dropped {
+		fn path(&self) -> &Path {
+			&self.0
+		}
+
+		fn bytes(&self) -> Result<Vec<u8>, String> {
+			unreachable!("the studio reads the file itself")
+		}
+	}
+
+	// A white ring, as the mock-up's logo.
+	let logo = image::RgbaImage::from_fn(400, 400, |x, y| {
+		let distance = ((x as f32 - 200.0).powi(2) + (y as f32 - 200.0).powi(2)).sqrt();
+		match (120.0..190.0).contains(&distance) {
+			true => image::Rgba([255, 255, 255, 255]),
+			false => image::Rgba([0, 0, 0, 0]),
+		}
+	});
+	let dir = std::env::current_dir().unwrap();
+	let outside = tempfile::tempdir().unwrap();
+	// The drop that copies the logo in brings it from outside the show.
+	match drop {
+		Drop::Placed => logo.save(outside.path().join("logo.png")).unwrap(),
+		_ => logo.save(dir.join("logo.png")).unwrap(),
+	}
+	// Boxes as a regular MP4 has them, its samples indexed in a `moov`.
+	let mut mp4 = Vec::new();
+	for (kind, body) in [(b"ftyp", 8), (b"moov", 32), (b"mdat", 64)] {
+		mp4.extend_from_slice(&(8 + body as u32).to_be_bytes());
+		mp4.extend_from_slice(kind);
+		mp4.resize(mp4.len() + body, 0);
+	}
+	std::fs::write(dir.join("intro.mp4"), mp4).unwrap();
+
+	// Away from every layer, or on the host's picture at the right.
+	let (path, at) = match drop {
+		Drop::Hover => (dir.join("logo.png"), egui::pos2(470.0, 330.0)),
+		Drop::Replace => (dir.join("logo.png"), egui::pos2(985.0, 330.0)),
+		Drop::Refused => (dir.join("intro.mp4"), egui::pos2(470.0, 330.0)),
+		Drop::Placed => (outside.path().join("logo.png"), egui::pos2(470.0, 330.0)),
+	};
+	harness.input_mut().events.push(egui::Event::PointerMoved(at));
+	match drop {
+		Drop::Hover => harness.input_mut().hovered_files.push(egui::HoveredFile {
+			path: Some(path.clone()),
+			..Default::default()
+		}),
+		Drop::Replace | Drop::Refused | Drop::Placed => {
+			harness.input_mut().dropped_files.push(Arc::new(Dropped(path.clone())))
+		}
+	}
+	harness.run_steps(4);
+	if let Drop::Placed = drop {
+		// Read and copied on a thread of its own.
+		let selected = |harness: &mut Harness<'_, Window>| match &harness.state().app {
+			App::Studio(studio) => studio.selected(),
+			_ => false,
+		};
+		let placed = async {
+			while !selected(harness) {
+				kio::clock::sleep(Duration::from_millis(20)).await;
+				harness.step();
+			}
+		};
+		tokio::runtime::Handle::current()
+			.block_on(kio::clock::timeout(SETTLE, placed))
+			.expect("the dropped logo is placed");
+		assert_eq!(
+			std::fs::read(dir.join("logo.png")).unwrap(),
+			std::fs::read(&path).unwrap(),
+			"copied beside the show"
+		);
+		// Away from the pointer, as a person moves on, and with the source's
+		// picture opened and drawn.
+		harness.input_mut().events.push(egui::Event::PointerGone);
+		tokio::runtime::Handle::current()
+			.block_on(kio::clock::timeout(SETTLE, settle(harness, engine)))
+			.expect("the dropped logo's picture settles");
+	}
 }
 
 /// Mute the first sound, open the health dot's popover, and rest the pointer

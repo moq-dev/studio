@@ -31,6 +31,8 @@
 //!   segmentation model on the CPU. `moq_video::render::export` hands the
 //!   program to an encoder, on the GPU where the platform allows, and a
 //!   [`Scaler`] draws it smaller for a smaller rendition.
+//! - [`file`] says which source shows a file, such as one dropped on the
+//!   picture, and how large its picture is.
 //! - [`publish`] gives each local source its own track, in a broadcast the
 //!   studio keeps to itself, to replay or record the source on its own.
 //! - [`layout`] says where and when each source published independently
@@ -42,6 +44,7 @@
 //! source that stalls repeats its last picture rather than holding up the
 //! canvas.
 
+mod arrange;
 pub mod browser;
 pub mod clip;
 mod collection;
@@ -49,6 +52,8 @@ mod compositor;
 mod dark;
 mod edit;
 mod effect;
+pub mod file;
+mod glide;
 mod grant;
 pub mod layout;
 mod lut;
@@ -63,10 +68,10 @@ pub mod source;
 
 pub use clip::Clip;
 pub use collection::{
-	Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item, Keyframe, Layer,
-	MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Source, Transition, Video,
+	Arrangement, Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item,
+	Keyframe, Layer, MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Slot, Source, Transition, Video,
 };
-pub use compositor::{Compositor, FORMAT, Output, Thumbnail};
+pub use compositor::{Compositor, Detail, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
 pub use grant::Grants;
 pub use scale::Scaler;
