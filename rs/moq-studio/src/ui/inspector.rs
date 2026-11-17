@@ -227,9 +227,16 @@ impl Panels {
 			&& let Some((keep_clear, label)) = keep::inspector(ui, item.keep_clear, placement)
 		{
 			let label = format!("{label}: `{name}`");
+			// Switched off, it stays where it is drawn, as keeping it always
+			// on top does, rather than going back over what it moved off.
+			let rect = match (keep_clear, placement) {
+				(None, Some(placement)) => placement.rect,
+				_ => item.rect,
+			};
 			asked = Some(Asked::Item(
 				Item {
 					keep_clear,
+					rect,
 					..item.clone()
 				},
 				label,
