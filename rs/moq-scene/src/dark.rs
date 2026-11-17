@@ -188,10 +188,12 @@ impl Probe {
 
 	/// Watch the feed of `generation`: one restarted, such as opened or
 	/// picked again, has a new one, and nothing read from the feed before
-	/// may be held for it, as that may be another window.
+	/// may be held for it, as that may be another window. Nor is the picture
+	/// the layer still has from before read for it: only the new feed's own.
 	pub fn follow(&mut self, generation: u64) {
 		if self.feed.replace(generation).is_some_and(|was| was != generation) {
 			self.forget();
+			self.changed = false;
 		}
 	}
 
@@ -608,9 +610,15 @@ mod tests {
 			"the same feed holds its last good picture"
 		);
 
+		// A picture from before arrived, but was not read yet.
+		probe.changed();
 		probe.follow(2);
 		assert!(probe.held(at(INTERVAL)).is_none(), "nothing from the feed before");
 		assert_eq!(probe.dark(at(INTERVAL + DARK)), None);
+		// Live before its first picture, the new feed's layer still has the
+		// one from before, which is not read for it.
+		probe.step(&prober, &effects, &capture.texture, true, at(INTERVAL * 2));
+		assert!(probe.reading.is_none(), "the picture from before is not read");
 
 		// A read under way as the feed starts again is from before.
 		let before = INTERVAL * 2;
