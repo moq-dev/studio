@@ -152,6 +152,9 @@ pub(crate) struct Probe {
 	/// When the first of the dark pictures read since the last good one was
 	/// taken.
 	dark: Option<Instant>,
+	/// The [generation](crate::source::Feed::generation) of the feed it
+	/// watches, once it has watched one.
+	feed: Option<u64>,
 }
 
 impl Probe {
@@ -179,6 +182,26 @@ impl Probe {
 			last: None,
 			changed: true,
 			dark: None,
+			feed: None,
+		}
+	}
+
+	/// Watch the feed of `generation`: one restarted, such as opened or
+	/// picked again, has a new one, and nothing read from the feed before
+	/// may be held for it, as that may be another window.
+	pub fn follow(&mut self, generation: u64) {
+		if self.feed.replace(generation).is_some_and(|was| was != generation) {
+			self.forget();
+		}
+	}
+
+	/// Forget the last good picture and what is being read, and that it is
+	/// dark.
+	fn forget(&mut self) {
+		self.dark = None;
+		self.good = None;
+		if let Some(reading) = &mut self.reading {
+			reading.stale = true;
 		}
 	}
 
@@ -198,11 +221,7 @@ impl Probe {
 	pub fn step(&mut self, prober: &Prober, effects: &Effects, picture: &wgpu::Texture, live: bool, now: Instant) {
 		self.judge(effects);
 		if !live {
-			self.dark = None;
-			self.good = None;
-			if let Some(reading) = &mut self.reading {
-				reading.stale = true;
-			}
+			self.forget();
 			return;
 		}
 		let due = self
@@ -558,6 +577,49 @@ mod tests {
 		device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 		probe.step(&prober, &effects, &capture.texture, true, at(before));
 		assert!(probe.reading.is_none(), "the read came back");
+		let after = before + INTERVAL;
+		capture.show([0, 0, 0], None);
+		read(&mut probe, &prober, &effects, &device, &capture, at(after));
+		assert!(probe.held(at(after)).is_none(), "the read from before is not held");
+	}
+
+	/// A feed started again, live before the compositor saw it stop, holds
+	/// nothing read from the feed before: not its last good picture, nor a
+	/// read under way.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_feed_started_again_holds_nothing_from_before() {
+		let (device, queue) = gpu().await;
+		let effects = Effects::new(&device, &queue, 64, 64);
+		let prober = Prober::new(&device);
+		let capture = Capture::new(&device, &queue);
+		let mut probe = Probe::new(&device, &queue);
+		let start = kio::clock::now();
+		let at = |offset: Duration| start.saturating_add(offset);
+
+		probe.follow(1);
+		capture.show([90, 120, 200], None);
+		read(&mut probe, &prober, &effects, &device, &capture, at(Duration::ZERO));
+		probe.follow(1);
+		capture.show([0, 0, 0], None);
+		read(&mut probe, &prober, &effects, &device, &capture, at(INTERVAL));
+		assert!(
+			probe.held(at(INTERVAL)).is_some(),
+			"the same feed holds its last good picture"
+		);
+
+		probe.follow(2);
+		assert!(probe.held(at(INTERVAL)).is_none(), "nothing from the feed before");
+		assert_eq!(probe.dark(at(INTERVAL + DARK)), None);
+
+		// A read under way as the feed starts again is from before.
+		let before = INTERVAL * 2;
+		capture.show([200, 40, 40], None);
+		probe.changed();
+		probe.step(&prober, &effects, &capture.texture, true, at(before));
+		assert!(probe.reading.is_some(), "a read started");
+		probe.follow(3);
+		device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 		let after = before + INTERVAL;
 		capture.show([0, 0, 0], None);
 		read(&mut probe, &prober, &effects, &device, &capture, at(after));

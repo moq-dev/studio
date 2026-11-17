@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -577,9 +577,20 @@ pub struct Feed {
 	silent: Arc<AtomicBool>,
 	/// A broadcast source's playout clock, or the one a layer plays on.
 	clock: Option<sync::Consumer>,
+	/// Which start of its source this is, unique across feeds.
+	generation: u64,
 }
 
+/// The next feed's [`Feed::generation`].
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
 impl Feed {
+	/// Which start of its source this is: a feed restarted, or started again
+	/// under the same name, has a new one, so what was drawn from the one
+	/// before can be told apart and forgotten.
+	pub fn generation(&self) -> u64 {
+		self.generation
+	}
 	/// What a replay of this broadcast source copies: the broadcast it plays,
 	/// up to the newest picture it showed, which is what was just seen.
 	///
@@ -2521,6 +2532,7 @@ fn open(
 			Some((_, schedule)) => Some(schedule.clone()),
 			None => clock.as_ref().map(sync::Producer::consume),
 		},
+		generation: GENERATION.fetch_add(1, Ordering::Relaxed),
 	};
 	let driver = Driver {
 		name: name.to_string(),
@@ -3781,6 +3793,32 @@ mod tests {
 				panic!("an overlay outside the subset fails");
 			};
 			assert!(reason.contains("`text-shadow`"), "{reason}");
+		})
+		.await;
+	}
+
+	/// A source started again has a feed of a new generation, so the
+	/// compositor forgets what it read from the one before.
+	#[tokio::test]
+	async fn a_restarted_feed_is_a_new_generation() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let mut collection = Collection::new();
+			collection.sources.insert(
+				"red".into(),
+				Source::Color {
+					color: crate::Rgba([255, 0, 0, 255]),
+				},
+			);
+			drop(sources.sync(&collection));
+			let first = sources.get("red").unwrap().generation();
+			drop(sources.sync(&collection));
+			assert_eq!(sources.get("red").unwrap().generation(), first, "a sync keeps the feed");
+			sources.restart("red");
+			drop(sources.sync(&collection));
+			assert_ne!(sources.get("red").unwrap().generation(), first);
 		})
 		.await;
 	}

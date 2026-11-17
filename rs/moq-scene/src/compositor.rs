@@ -1025,6 +1025,11 @@ impl Compositor {
 				(Some(_), false) => layer.probe = None,
 				_ => {}
 			}
+			// A feed started again, even between two renders, holds nothing
+			// from the one before.
+			if let Some(probe) = &mut layer.probe {
+				probe.follow(feed.generation());
+			}
 			if let Some(taken) = taken {
 				if taken.cleared {
 					layer.clear(&self.device, &self.queue);
