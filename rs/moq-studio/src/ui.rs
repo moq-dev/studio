@@ -2260,6 +2260,8 @@ fn describe(source: &Source) -> String {
 		Source::Browser { url, width, height } => format!("browser: {url} ({width}x{height})"),
 		Source::Overlay { width, height, .. } => format!("overlay ({width}x{height})"),
 		Source::Clone { source } => format!("clone of {source}"),
+		Source::Role { source: Some(source) } => format!("role: {source}"),
+		Source::Role { source: None } => "role: unfilled".into(),
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
 		Source::Scene { scene } => format!("scene: {scene}"),

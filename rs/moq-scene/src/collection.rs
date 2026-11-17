@@ -249,12 +249,31 @@ impl Collection {
 		None
 	}
 
-	/// The source whose capture `name` shows: itself, or what it clones.
+	/// The source whose capture `name` shows: itself, what it clones, or, for
+	/// a role, what the source it names shows.
 	pub fn capture<'a>(&'a self, name: &'a str) -> &'a str {
+		let name = self.resolve(name);
 		match self.sources.get(name) {
 			Some(Source::Clone { source }) => source,
 			_ => name,
 		}
+	}
+
+	/// The source a [`Source::Role`] called `name` names, or `name` itself
+	/// for any other source and for a role nothing fills.
+	pub fn resolve<'a>(&'a self, name: &'a str) -> &'a str {
+		match self.sources.get(name) {
+			Some(Source::Role { source: Some(source) }) => source,
+			_ => name,
+		}
+	}
+
+	/// Whether `name` is a role nothing fills, which draws nothing.
+	pub fn unfilled(&self, name: &str) -> bool {
+		matches!(
+			self.sources.get(self.resolve(name)),
+			Some(Source::Role { source: None })
+		)
 	}
 
 	/// What the source called `name` draws if it is a scene or program
@@ -373,16 +392,18 @@ impl Collection {
 		Ok(())
 	}
 
-	/// The filters `item` draws through: its source's, then its own.
+	/// The filters `item` draws through: its source's, through a role, then
+	/// its own.
 	pub fn filters<'a>(&'a self, item: &'a Item) -> impl Iterator<Item = &'a Filter> {
-		let source = self.video.get(&item.source).map(|video| video.filters.as_slice());
+		let source = self.video.get(self.resolve(&item.source));
+		let source = source.map(|video| video.filters.as_slice());
 		source.unwrap_or_default().iter().chain(&item.filters)
 	}
 
-	/// What `item` shows of its source's picture: its source's crop, then its
-	/// own.
+	/// What `item` shows of its source's picture: its source's crop, through a
+	/// role, then its own.
 	pub fn crop(&self, item: &Item) -> Crop {
-		let source = self.video.get(&item.source).map(|video| video.crop);
+		let source = self.video.get(self.resolve(&item.source)).map(|video| video.crop);
 		source.unwrap_or_default().then(&item.crop)
 	}
 
@@ -407,6 +428,13 @@ impl Collection {
 				.canvas(self.canvas)
 				.validate()
 				.map_err(|err| Error::Invalid(format!("scene `{}`: {err}", scene.name)))?;
+			let mains = scene.items.iter().filter(|item| item.slot == Some(Slot::Main)).count();
+			if mains > 1 {
+				return Err(Error::Invalid(format!(
+					"scene `{}` puts {mains} layers in its main slot, which holds one",
+					scene.name
+				)));
+			}
 			if scene.published && (scene.name.contains('/') || moq_net::Path::new(&scene.name).is_err()) {
 				return Err(Error::Invalid(format!(
 					"scene `{}` is published, so its name is one segment of its broadcast's path: no `/`, and a `\\` only before another",
@@ -444,6 +472,18 @@ impl Collection {
 				}
 				item.rect.validate(&layer, &item.source)?;
 				let on = format!("`{}` in {layer}", item.source);
+				if item.slot.is_some() {
+					if layer.scene.is_none() {
+						return Err(Error::Invalid(format!(
+							"{on} is in a slot, but only a scene arranges slots"
+						)));
+					}
+					if item.rect != Rect::default() {
+						return Err(Error::Invalid(format!(
+							"{on} is in a slot, which places it, so it takes no rect"
+						)));
+					}
+				}
 				item.shape
 					.validate()
 					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
@@ -500,11 +540,26 @@ impl Collection {
 					"`{name}` plays on `{broadcast}`, which is not a broadcast source"
 				)));
 			}
+			if let Source::Role { source: Some(source) } = source {
+				match self.sources.get(source) {
+					Some(Source::Role { .. }) => {
+						return Err(Error::Invalid(format!(
+							"role `{name}` is filled by `{source}`, which is itself a role"
+						)));
+					}
+					Some(filled) if filled.has_video() && !matches!(filled, Source::Lut { .. }) => {}
+					_ => {
+						return Err(Error::Invalid(format!(
+							"role `{name}` is filled by `{source}`, which is not a source with a picture"
+						)));
+					}
+				}
+			}
 			let Source::Clone { source } = source else { continue };
 			match self.sources.get(source) {
-				Some(Source::Clone { .. }) => {
+				Some(Source::Clone { .. } | Source::Role { .. }) => {
 					return Err(Error::Invalid(format!(
-						"`{name}` clones `{source}`, which is itself a clone"
+						"`{name}` clones `{source}`, which is itself a clone or a role"
 					)));
 				}
 				Some(origin) if origin.has_video() => {}
@@ -520,6 +575,11 @@ impl Collection {
 			if !self.sources.get(name).is_some_and(Source::has_video) {
 				return Err(Error::Invalid(format!(
 					"video settings for `{name}`, which is not a source with a picture"
+				)));
+			}
+			if matches!(self.sources[name], Source::Role { .. }) {
+				return Err(Error::Invalid(format!(
+					"video settings for `{name}`, a role, which shows its source's"
 				)));
 			}
 			if video.background == Background::Remove && !self.sources[name].removes_background() {
@@ -697,6 +757,11 @@ impl Collection {
 				{
 					return Err(Error::Invalid(format!(
 						"{on} cannot be in a scene another scene draws, since viewers place it over the program"
+					)));
+				}
+				if item.slot.is_some() {
+					return Err(Error::Invalid(format!(
+						"{on} cannot be in a slot, since viewers place it where its rect says"
 					)));
 				}
 				let keyframed = item.keyframes.iter().flat_map(|keyframe| &keyframe.filters);
@@ -1009,6 +1074,9 @@ pub struct Scene {
 	/// must be able to go on program.
 	#[serde(default, skip_serializing_if = "is_false")]
 	pub safe: bool,
+	/// Where its items in a [`Slot`] go.
+	#[serde(default, skip_serializing_if = "Arrangement::is_default")]
+	pub arrangement: Arrangement,
 	/// What the scene draws, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
@@ -1025,6 +1093,7 @@ impl Scene {
 			recorded: false,
 			audio: None,
 			safe: false,
+			arrangement: Arrangement::default(),
 			items: Vec::new(),
 		}
 	}
@@ -1075,6 +1144,44 @@ impl fmt::Display for Layer {
 	}
 }
 
+/// Where a scene places its items in a [`Slot`]: the main one large and
+/// the tiles beside it, each shaped 16:9 and the picture in it cropped to
+/// cover it unstretched. Without a main item, the tiles share the canvas as
+/// a grid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Arrangement {
+	/// The main item on the left, the tiles in a column on its right.
+	#[default]
+	Column,
+	/// The main item on top, the tiles in a row under it.
+	Row,
+	/// Every item in a grid of equal cells, the main item first.
+	Grid,
+	/// The main item filling the canvas, the tiles small in its bottom-right
+	/// corner.
+	Inset,
+}
+
+impl Arrangement {
+	/// Every arrangement.
+	pub const ALL: [Self; 4] = [Self::Column, Self::Row, Self::Grid, Self::Inset];
+
+	fn is_default(&self) -> bool {
+		*self == Self::default()
+	}
+}
+
+/// Which of its scene's slots an item fills.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Slot {
+	/// The largest. A scene has one at most.
+	Main,
+	/// One of the tiles beside it, in the order the scene lists them.
+	Tile,
+}
+
 /// What a [`Source::Scene`] or [`Source::Program`] draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Nested<'a> {
@@ -1094,8 +1201,16 @@ pub enum Nested<'a> {
 pub struct Item {
 	/// The [`Collection::sources`] entry to draw.
 	pub source: String,
-	/// Where on the canvas, stretched to fill it.
+	/// Where on the canvas, stretched to fill it. Empty, and left out of the
+	/// file, for an item in a [`slot`](Self::slot).
+	#[serde(default, skip_serializing_if = "Rect::is_empty")]
 	pub rect: Rect,
+	/// The slot its scene's [`Arrangement`] places it in, rather than its
+	/// rect, which it then leaves out. The arrangement closes up a slot
+	/// whose item is hidden, a role nothing fills, or a source gone offline
+	/// or failed, and glides the others to their new places.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub slot: Option<Slot>,
 	/// Whether the item is drawn. A hidden item keeps its place.
 	#[serde(default = "yes")]
 	pub visible: bool,
@@ -1132,6 +1247,7 @@ impl Item {
 		Self {
 			source: source.into(),
 			rect,
+			slot: None,
 			visible: true,
 			locked: false,
 			shape: Shape::default(),
@@ -1152,6 +1268,7 @@ impl Item {
 		filters.extend(offset.filters);
 		Cow::Owned(Self {
 			source: self.source.clone(),
+			slot: self.slot,
 			rect: Rect {
 				x: self.rect.x + offset.x,
 				y: self.rect.y + offset.y,
@@ -1816,7 +1933,7 @@ impl Background {
 }
 
 /// A rectangle in canvas pixels, from the top-left corner.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rect {
 	/// Left edge.
@@ -1838,6 +1955,11 @@ impl Rect {
 			width: canvas.width as f32,
 			height: canvas.height as f32,
 		}
+	}
+
+	/// Whether it is the empty rect at the origin, which an item in a slot has.
+	pub fn is_empty(&self) -> bool {
+		*self == Self::default()
 	}
 
 	fn validate(&self, layer: &Layer, source: &str) -> Result<(), Error> {
@@ -1953,6 +2075,16 @@ pub enum Source {
 		#[serde(default = "yes", skip_serializing_if = "is_true")]
 		restart: bool,
 	},
+	/// A role a show casts once, such as its main camera or main picture: it
+	/// shows the source it names, with that source's crop and filters, so a
+	/// scene built from roles survives a change of hardware. It draws
+	/// nothing while nothing fills it, and its slot closes up. Its sound is
+	/// its source's, not mixed a second time.
+	Role {
+		/// The source filling it: one with a picture, and not itself a role.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		source: Option<String>,
+	},
 	/// Another source's picture, captured once, with [`Collection::video`]
 	/// filters of its own. Its sound is not mixed a second time.
 	Clone {
@@ -2021,7 +2153,10 @@ impl Source {
 	/// Whether the source opens a capture, file, or subscription of its own,
 	/// rather than showing another source's or a scene.
 	pub fn opens(&self) -> bool {
-		!matches!(self, Self::Clone { .. } | Self::Scene { .. } | Self::Program)
+		!matches!(
+			self,
+			Self::Clone { .. } | Self::Role { .. } | Self::Scene { .. } | Self::Program
+		)
 	}
 
 	/// Whether the source's picture can have its background removed: a
@@ -3471,5 +3606,172 @@ background = "remove"
 		for bad in ["102030", "#1020", "#gg0000", "#ééé"] {
 			assert!(bad.parse::<Rgba>().is_err(), "{bad}");
 		}
+	}
+
+	/// A scene of slots by hand: roles name the sources in them, an item in a
+	/// slot leaves its rect out, and a logo keeps its rect beside them.
+	const SLOTS: &str = r##"version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.Main]
+kind = "role"
+source = "Game"
+
+[sources.Camera]
+kind = "role"
+
+[sources.Game]
+kind = "window"
+id = "42"
+
+[sources.Logo]
+kind = "color"
+color = "#ffffff"
+
+[[scenes]]
+name = "Guests"
+arrangement = "row"
+
+[[scenes.items]]
+source = "Main"
+slot = "main"
+
+[[scenes.items]]
+source = "Camera"
+slot = "tile"
+
+[[scenes.items]]
+source = "Logo"
+rect = { x = 1700, y = 40, width = 160, height = 90 }
+"##;
+
+	#[test]
+	fn a_scene_of_slots_reads_and_writes_by_hand() {
+		let collection = Collection::from_toml(SLOTS).unwrap();
+		let scene = collection.scene("Guests").unwrap();
+		assert_eq!(scene.arrangement, Arrangement::Row);
+		assert_eq!(scene.items[0].slot, Some(Slot::Main));
+		assert_eq!(scene.items[0].rect, Rect::default());
+		assert_eq!(collection.resolve("Main"), "Game");
+		assert_eq!(collection.capture("Main"), "Game");
+		assert!(collection.unfilled("Camera"));
+		assert!(!collection.unfilled("Main"));
+
+		let text = collection.to_toml().unwrap();
+		assert_eq!(Collection::from_toml(&text).unwrap(), collection);
+		assert_eq!(text.matches("rect").count(), 1, "only the logo has a rect:\n{text}");
+		assert!(text.contains("arrangement = \"row\""), "{text}");
+	}
+
+	#[test]
+	fn a_role_shows_its_source_through_that_source_s_crop_and_filters() {
+		let mut collection = Collection::from_toml(SLOTS).unwrap();
+		let video = Video {
+			crop: Crop {
+				left: 0.5,
+				..Crop::default()
+			},
+			filters: vec![Filter::Opacity { amount: 0.5 }],
+			..Video::default()
+		};
+		collection.video.insert("Game".into(), video.clone());
+		collection.validate().unwrap();
+		let item = &collection.scenes[0].items[0];
+		assert_eq!(collection.crop(item), video.crop);
+		assert_eq!(collection.filters(item).collect::<Vec<_>>(), vec![&video.filters[0]]);
+
+		let mut own = collection.clone();
+		own.video.insert("Main".into(), video);
+		assert!(own.validate().is_err(), "a role has no video settings of its own");
+	}
+
+	#[test]
+	fn refuses_slots_and_roles_that_cannot_be_drawn() {
+		let collection = Collection::from_toml(SLOTS).unwrap();
+		let refused = |change: &dyn Fn(&mut Collection), why: &str| {
+			let mut changed = collection.clone();
+			change(&mut changed);
+			let err = changed.validate().unwrap_err().to_string();
+			assert!(err.contains(why), "{why}: {err}");
+		};
+		refused(
+			&|c| c.scenes[0].items[1].rect = Rect::fill(&c.canvas),
+			"so it takes no rect",
+		);
+		refused(&|c| c.scenes[0].items[1].slot = Some(Slot::Main), "which holds one");
+		refused(
+			&|c| {
+				let mut item = c.scenes[0].items[0].clone();
+				item.source = "Game".into();
+				c.top.push(item);
+			},
+			"only a scene arranges slots",
+		);
+		refused(
+			&|c| {
+				let filled = Some("Camera".into());
+				c.sources.insert("Main".into(), Source::Role { source: filled });
+			},
+			"itself a role",
+		);
+		refused(
+			&|c| {
+				let filled = Some("Nowhere".into());
+				c.sources.insert("Main".into(), Source::Role { source: filled });
+			},
+			"not a source with a picture",
+		);
+		refused(
+			&|c| {
+				let cloned = "Main".into();
+				c.sources.insert("Copy".into(), Source::Clone { source: cloned });
+			},
+			"a clone or a role",
+		);
+		refused(
+			&|c| {
+				c.sources.insert("Cam".into(), Source::Camera { id: None });
+				c.published.insert("Cam".into());
+				c.scenes[0].items[1].source = "Cam".into();
+			},
+			"cannot be in a slot",
+		);
+	}
+
+	/// Each slot that takes no room closes up, the rest share the canvas,
+	/// and the picture in a slot is cropped to cover it unstretched.
+	#[test]
+	fn closed_slots_leave_their_room_to_the_rest() {
+		let mut collection = Collection::from_toml(SLOTS).unwrap();
+		collection.sources.insert("Cam".into(), Source::Camera { id: None });
+		let mut guest = collection.scenes[0].items[1].clone();
+		guest.source = "Cam".into();
+		collection.scenes[0].items.insert(2, guest);
+		collection.validate().unwrap();
+		let all = |_: &str| true;
+		let square = |_: &str| Some((100, 100));
+		let arranged = collection.arranged("Guests", all, square).unwrap();
+		assert_eq!(arranged.len(), 4);
+		assert!(arranged[0].visible && !arranged[1].visible, "the unfilled role closes");
+		assert_eq!(arranged[3], collection.scenes[0].items[3], "the logo stays");
+		let (main, tiles) = crate::arrange::places(Arrangement::Row, collection.canvas, true, 1);
+		assert_eq!(arranged[0].rect, main.unwrap());
+		assert_eq!(arranged[2].rect, tiles[0]);
+		let crop = arranged[0].crop;
+		assert!(
+			crop.top > 0.0 && crop.top == crop.bottom && crop.left == 0.0,
+			"{crop:?}"
+		);
+
+		let away = |name: &str| name != "Cam";
+		let arranged = collection.arranged("Guests", away, square).unwrap();
+		assert!(!arranged[2].visible, "an absent source closes");
+		let (main, _) = crate::arrange::places(Arrangement::Row, collection.canvas, true, 0);
+		assert_eq!(arranged[0].rect, main.unwrap(), "the main slot takes the room");
+		assert!(collection.arranged("Scene", all, square).is_none());
 	}
 }

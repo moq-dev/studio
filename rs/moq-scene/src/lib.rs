@@ -42,12 +42,14 @@
 //! source that stalls repeats its last picture rather than holding up the
 //! canvas.
 
+mod arrange;
 pub mod browser;
 pub mod clip;
 mod collection;
 mod compositor;
 mod edit;
 mod effect;
+mod glide;
 mod grant;
 pub mod layout;
 mod lut;
@@ -62,8 +64,8 @@ pub mod source;
 
 pub use clip::Clip;
 pub use collection::{
-	Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item, Keyframe, Layer,
-	MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Source, Transition, Video,
+	Arrangement, Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item,
+	Keyframe, Layer, MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Slot, Source, Transition, Video,
 };
 pub use compositor::{Compositor, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
