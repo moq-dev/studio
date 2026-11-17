@@ -1,0 +1,63 @@
+# The show the slot views render on: a scene laid out by slots, its main
+# picture and camera cast as roles, a guest in a tile, and a logo placed by
+# hand over them. Still sources only, so each view draws the same picture.
+version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.Main]
+kind = "role"
+source = "game"
+
+[sources.Camera]
+kind = "role"
+source = "host"
+
+[sources.game]
+kind = "color"
+color = "#3b1d6e"
+
+[sources.host]
+kind = "image"
+path = "person.jpg"
+
+# Guests, as stills: copies of the host, each tinted its own way.
+[sources.Dana]
+kind = "clone"
+source = "host"
+
+[sources.Ibis]
+kind = "clone"
+source = "host"
+
+[sources.backdrop]
+kind = "color"
+color = "#101828"
+
+[sources.logo]
+kind = "color"
+color = "#f59e0b"
+
+[video.Dana]
+filters = [{ kind = "hue_rotate", degrees = 140.0 }]
+
+[video.Ibis]
+filters = [{ kind = "hue_rotate", degrees = 260.0 }]
+
+[[scenes]]
+name = "Guests"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "Main", slot = "main" },
+    { source = "Camera", slot = "tile" },
+    { source = "Dana", slot = "tile" },
+    { source = "logo", rect = { x = 24, y = 1016, width = 104, height = 40 } },
+]
+
+[[scenes]]
+name = "Just chatting"
+arrangement = "inset"
+items = [{ source = "Camera", slot = "main" }, { source = "Dana", slot = "tile" }]
