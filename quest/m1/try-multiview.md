@@ -8,6 +8,9 @@ headless run can judge.
 
 ## Plan
 
+Kept 2026-11-17 (maintainer, on
+[moq-dev/studio#195](https://github.com/moq-dev/studio/pull/195#issuecomment-6941200815)).
+
 The multiview is on `main` (`cargo run -p moq-studio --features capture`),
 opened from the show's menu, **Open the multiview**. What to try, on a show
 with a few scenes and a camera or screen, going live to a relay:
