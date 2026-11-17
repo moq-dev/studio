@@ -196,13 +196,16 @@ pub(super) fn counted(dark: usize, stalled: usize) -> Option<String> {
 }
 
 /// Whether the scene called `scene` draws a layer that `lost` its picture,
-/// as `lost` says of a source: through the scenes it nests, and not one it
-/// hides.
+/// as `lost` says of a source: through the scenes it nests, and the masks
+/// its layers read, and not one it hides.
 pub(super) fn draws_lost(collection: &Collection, scene: &str, lost: impl Fn(&str) -> bool) -> bool {
-	collection
-		.drawn([Layer::scene(scene)])
-		.iter()
-		.any(|item| lost(&item.source))
+	collection.drawn([Layer::scene(scene)]).iter().any(|item| {
+		let masks = collection.filters(item).filter_map(|filter| match filter {
+			Filter::Mask { source, .. } => Some(source.as_str()),
+			_ => None,
+		});
+		std::iter::once(item.source.as_str()).chain(masks).any(&lost)
+	})
 }
 
 /// The amber badge in `rect`: a warning sign on amber.
@@ -426,12 +429,29 @@ mod tests {
 		});
 		collection.scenes.push(hidden);
 		collection.scenes[0].items.push(Item::new("inner", fill));
+		// A color cut to the camera's shape reads the camera's picture.
+		collection.sources.insert(
+			"red".into(),
+			Source::Color {
+				color: moq_scene::Rgba([255, 0, 0, 255]),
+			},
+		);
+		let mut masked = Scene::new("Masked");
+		masked.items.push(Item {
+			filters: vec![Filter::Mask {
+				source: "cam".into(),
+				mode: MaskMode::default(),
+			}],
+			..Item::new("red", fill)
+		});
+		collection.scenes.push(masked);
 		let outer = collection.scenes[0].name.clone();
 		collection.validate().unwrap();
 		let lost = |name: &str| name == "cam";
 		assert!(draws_lost(&collection, "Inner", lost));
 		assert!(draws_lost(&collection, &outer, lost), "through the scene it nests");
 		assert!(!draws_lost(&collection, "Hidden", lost), "not what it hides");
+		assert!(draws_lost(&collection, "Masked", lost), "through the mask it reads");
 	}
 
 	/// The health dot names what the layers lost, and counts them.
