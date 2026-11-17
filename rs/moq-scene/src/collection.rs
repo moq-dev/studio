@@ -304,17 +304,25 @@ impl Collection {
 	/// The visible items `layers` draw, then those of each scene they draw
 	/// through a scene source, and so on, each scene once.
 	pub fn drawn(&self, layers: impl IntoIterator<Item = Layer>) -> Vec<&Item> {
+		self.drawn_through(layers, self)
+	}
+
+	/// The visible items `layers` draw, then those of each scene they draw
+	/// through a scene source as `nested` arranges it, and so on, each scene
+	/// once, such as the portrait picture's, whose scene sources show the
+	/// landscape picture's.
+	pub fn drawn_through<'a>(&'a self, layers: impl IntoIterator<Item = Layer>, nested: &'a Self) -> Vec<&'a Item> {
 		let mut items: Vec<&Item> = layers
 			.into_iter()
 			.flat_map(|layer| self.items(&layer).unwrap_or_default())
 			.filter(|item| item.visible)
 			.collect();
-		let mut nested = BTreeSet::new();
+		let mut walked = BTreeSet::new();
 		let mut next = 0;
 		while let Some(item) = items.get(next) {
-			if let Some(Nested::Scene(scene)) = self.nested(&item.source)
-				&& nested.insert(scene)
-				&& let Some(scene) = self.scene(scene)
+			if let Some(Nested::Scene(scene)) = nested.nested(&item.source)
+				&& walked.insert(scene)
+				&& let Some(scene) = nested.scene(scene)
 			{
 				items.extend(scene.items.iter().filter(|item| item.visible));
 			}

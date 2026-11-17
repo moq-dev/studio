@@ -743,7 +743,9 @@ picture, such as a lower third or a logo, keeps its place on it. A layer set
 anywhere else keeps its place on the turned canvas, scaled to fit, until you
 move it in portrait. A scene laid out by slots arranges them in a row in
 portrait, or in a grid or inset if that is how it arranges them in landscape,
-and picks its own portrait arrangement in BUILD's scene inspector.
+and picks its own portrait arrangement in BUILD's scene inspector. A layer
+showing another scene shows that scene's landscape picture in portrait too,
+placed and cropped like any other landscape source.
 
 LIVE shows both pictures side by side, each in its tally frame, with its
 format, size, and what its video sends under it. BUILD edits one picture at a
