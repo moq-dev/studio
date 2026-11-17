@@ -288,7 +288,7 @@ is named for it, with these sections:
 
 | Section | Use it to |
 | --- | --- |
-| Place | Type or drag its position and size, and its crop, in percent off each edge, fit or fill it, and lock it. |
+| Place | Type or drag its position and size, and its crop, in percent off each edge, fit or fill it, lock it, and switch on **Keep out of the way** (see [Keeping out of the way](#keeping-out-of-the-way)). |
 | Shape | Pick its outline, square, rounded, circle, or arch, give it a border inside that outline and the border's color, and give it a soft shadow, which follows the outline and is the layer's first drop shadow filter. |
 | Look | Remove its source's background, which every layer showing the source loses (make it independent to cut out here alone); grade its color through a LUT source; add, order, set, and remove its filters, copy them, or paste copied filters after its own; and set its blend mode. |
 | Shown in | See how many places show its source, **Linked in 3 scenes**, and **Make independent**, which points this layer at a copy of the source of its own, keeping its look, so editing that look no longer edits the others. A copy says what it copies. |
@@ -585,6 +585,35 @@ sound comes back on the clock, skipping what it missed by more than 200 ms
 and speeding up through the rest; a picture stall leaves the sound playing,
 with the canvas showing the last picture meanwhile. Without audio, the picture plays 100 ms behind. The inspector's Source section shows how
 far behind each broadcast plays.
+
+### Keeping out of the way
+
+A scene's layer with **Keep out of the way** on, in the inspector's Place
+section, moves itself off what matters in the picture under it, such as a
+facecam off a game's minimap or a slide's text. A few times a second the
+studio draws the layers under it, scaled far down, and reduces them on the
+GPU to a grid: where the picture moves, where it is dense with edges that hold
+still, as text is, and what holds still while the rest moves, as a HUD does.
+Each can be switched off under **Stays clear of**. Nothing is uploaded: the
+choice is made on this machine, from the picture alone.
+
+It keeps to one of eight places, the canvas's corners and edge middles,
+inside a margin of a twentieth of the canvas's shorter side, that its size
+fits in, taking the one that covers the least of what matters, a corner over
+a middle that covers as much. It chooses a second after its scene goes on,
+about two seconds after the content under it changes kind (another layout, or
+another app), and otherwise moves only once its place has been the worst of them for
+10 seconds, never for a single busy moment. It glides there as a move
+transition eases, in 0.4 s unless **Glide** says otherwise. Its rect in the
+scene file gives its size, and where it rests until it first moves.
+
+While it is selected, BUILD shows what it saw: what matters glowing, tagged
+**MOVING**, **TEXT**, or **HUD**, the places it may go, dashed, and where it
+last moved from, with what it left there and an arrow to where it went. Drag
+it, nudge it, or type its X or Y, and it stays where it was put until the
+content changes; a resize keeps it free to move. Only a scene's layer keeps
+out of the way, and not one showing a source [published
+independently](#published-independently), which viewers place themselves.
 
 ### Audio scenes
 
@@ -1079,7 +1108,12 @@ Each entry of a scene's `items` is one of its layers, back to front, and each
 `[[top]]` an always-on-top layer: the `source` it shows and its `rect` on the
 canvas, in pixels, and optionally `visible = false`, `locked = true`, which
 the picture's pointer passes through, and its `crop`, `filters`, `blend`,
-`shape`, and `keyframes`.
+`shape`, `keyframes`, and `keep_clear`.
+
+A scene's layer with `keep_clear = {}` [keeps out of the
+way](#keeping-out-of-the-way) of motion, text, and a HUD; `motion = false`,
+`text = false`, or `hud = false` in it ignores one, and `glide` sets how long
+a move takes, `"400ms"` unless it says otherwise, up to `"5s"`.
 
 A layer's `shape` cuts it to an outline, before its filters, so a drop shadow
 follows it: `corners`, how round each corner is (top-left, top-right,
@@ -1285,7 +1319,8 @@ published, holding an encode session as one on program does.
 
 Every player must reproduce how it is placed, so a layer showing it takes no
 filter but opacity, no blend mode, and no shape, nor do its source's filters or
-its keyframes, and no scene that another scene draws can place it. A source with
+its keyframes, it does not keep out of the way, and no scene that another scene
+draws can place it. A source with
 its background removed cannot be published, since H.264 carries no
 transparency and its track would show the background.
 

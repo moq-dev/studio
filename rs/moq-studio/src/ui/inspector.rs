@@ -173,8 +173,11 @@ impl Panels {
 				asked = Some(Asked::Act(LayerAction::Lock(locked)));
 			}
 		});
-		// Only a scene's layer has a picture under it to keep clear of.
+		// Only a scene's layer has a picture under it to keep clear of, and
+		// viewers place a published source where the scene file does.
+		let published = collection.published.contains(collection.capture(&item.source));
 		if picked.layer.scene.is_some()
+			&& !published
 			&& let Some((keep_clear, label)) = keep::inspector(ui, item.keep_clear, placement)
 		{
 			let label = format!("{label}: `{name}`");

@@ -685,8 +685,9 @@ impl Collection {
 
 	/// Refuse an item showing a source published independently that the
 	/// layer layout cannot carry: one blended or filtered past opacity, which
-	/// not every player can reproduce, or one in a scene another scene draws,
-	/// which the layout cannot place.
+	/// not every player can reproduce, one keeping clear, which moves where
+	/// no player sees, or one in a scene another scene draws, which the
+	/// layout cannot place.
 	fn validate_published(&self) -> Result<(), Error> {
 		let nested: BTreeSet<&str> = self
 			.sources
@@ -711,6 +712,11 @@ impl Collection {
 				{
 					return Err(Error::Invalid(format!(
 						"{on} cannot be in a scene another scene draws, since viewers place it over the program"
+					)));
+				}
+				if item.keep_clear.is_some() {
+					return Err(Error::Invalid(format!(
+						"{on} cannot keep out of the way, since viewers place it where the scene file does"
 					)));
 				}
 				let keyframed = item.keyframes.iter().flat_map(|keyframe| &keyframe.filters);
@@ -3225,7 +3231,7 @@ items = [
 	}
 
 	#[test]
-	fn refuses_keeping_clear_with_nothing_under_it_or_too_slowly() {
+	fn refuses_keeping_clear_where_it_cannot() {
 		let mut collection = example();
 		collection.scenes[0].items[1].keep_clear = Some(KeepClear::default());
 		collection.validate().unwrap();
@@ -3233,10 +3239,32 @@ items = [
 			glide: Duration::from_secs(6),
 			..KeepClear::default()
 		});
-		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "a glide too long");
+		assert!(
+			matches!(collection.validate(), Err(Error::Invalid(_))),
+			"a glide too long"
+		);
 		collection.scenes[0].items[1].keep_clear = None;
 		collection.top[0].keep_clear = Some(KeepClear::default());
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "the top layer");
+		collection.top[0].keep_clear = None;
+		collection.validate().unwrap();
+
+		// A player of the layer layout places a published source where the
+		// file does, so it cannot move.
+		let mut published = Collection::new();
+		published.sources.insert("cam".into(), Source::Camera { id: None });
+		published.published.insert("cam".into());
+		published.scenes = vec![Scene {
+			items: vec![Item {
+				keep_clear: Some(KeepClear::default()),
+				..Item::new("cam", Rect::fill(&published.canvas))
+			}],
+			..Scene::new("Main")
+		}];
+		assert!(
+			matches!(published.validate(), Err(Error::Invalid(_))),
+			"a published source"
+		);
 	}
 
 	#[test]

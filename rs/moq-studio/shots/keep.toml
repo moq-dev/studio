@@ -65,7 +65,12 @@ html = """
 name = "Gameplay"
 items = [
     { source = "game", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
-    { source = "facecam", rect = { x = 1578, y = 54, width = 288, height = 288 }, crop = { left = 0.21875, right = 0.21875 }, shape = { corners = [0.5, 0.5, 0.5, 0.5], border = 6 }, keep_clear = {} },
+    { source = "facecam", rect = { x = 1578, y = 54, width = 288, height = 288 }, crop = { left = 0.21875, right = 0.21875 }, shape = { corners = [
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+    ], border = 6 }, keep_clear = {} },
 ]
 
 [[audio_scenes]]
