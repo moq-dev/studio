@@ -61,6 +61,8 @@ hang = { workspace = true }
 humantime = { workspace = true }
 # How long a guest's link lasts, as the stream settings file spells it.
 humantime-serde = { workspace = true }
+# The multiview's clock, in the system's time zone. Already in the graph.
+jiff = "0.2.37"
 # The relay tokens, in the operating system's credential store rather than a
 # file; each platform's store is its own crate, below.
 keyring-core = "1.0"
