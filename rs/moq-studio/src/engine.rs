@@ -5465,6 +5465,92 @@ mod tests {
 			.expect("the studio closes");
 	}
 
+	/// A guest whose camera comes online in the room takes the next tile of
+	/// the scene on program once the show says guests appear on their own, as
+	/// an edit the host can undo; before that, and for their screen, they
+	/// wait under Add.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_guest_appears_in_the_next_tile_once_the_show_says_so() {
+		use crate::guests::{Joining, Room, tests};
+
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let mut loaded = red_canvas();
+		let scene = loaded.collection.scenes[0].name.clone();
+		let main = &mut loaded.collection.scenes[0].items[0];
+		main.slot = Some(moq_scene::Slot::Main);
+		main.rect = moq_scene::Rect::default();
+		let engine = start(gpu, Vec::new(), dir.path(), autosave, loaded)
+			.await
+			.expect("the studio starts");
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = tests::key("show/guests", &["**"], &["**"]);
+		let room = Room::new(&connect, "guests", key, page, tests::EXPIRY).unwrap();
+		engine.join(Some(Joining::offline(room))).unwrap();
+		let items = |engine: &Engine| -> Vec<(String, Option<moq_scene::Slot>)> {
+			let state = engine.state.lock().unwrap();
+			let items = &state.collection().scene(&scene).unwrap().items;
+			items.iter().map(|item| (item.source.clone(), item.slot)).collect()
+		};
+		let joined = |name: &'static str| {
+			let engine = engine.clone();
+			kio::clock::timeout(TIMEOUT, async move {
+				while !engine.state.lock().unwrap().collection().sources.contains_key(name) {
+					kio::clock::sleep(Duration::from_millis(10)).await;
+				}
+			})
+		};
+
+		let _bob = engine
+			.subscribe
+			.route("guests/bob/camera.hang", Default::default())
+			.unwrap();
+		joined("bob").await.expect("bob joins");
+		assert_eq!(
+			items(&engine),
+			[("red".into(), Some(moq_scene::Slot::Main))],
+			"bob waits under Add"
+		);
+
+		engine.set_guests_appear(true);
+		let _screen = engine
+			.subscribe
+			.route("guests/alice/screen.hang", Default::default())
+			.unwrap();
+		joined("alice screen").await.expect("alice's screen joins");
+		let _camera = engine
+			.subscribe
+			.route("guests/alice/camera.hang", Default::default())
+			.unwrap();
+		kio::clock::timeout(TIMEOUT, async {
+			while items(&engine).len() < 2 {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("alice appears");
+		let tiled = [
+			("red".into(), Some(moq_scene::Slot::Main)),
+			("alice".into(), Some(moq_scene::Slot::Tile)),
+		];
+		assert_eq!(items(&engine), tiled, "alice's camera alone, in a tile");
+		let undone = engine.state.lock().unwrap().undo().unwrap();
+		assert_eq!(undone, Some(format!("`alice` joins `{scene}`")));
+		assert_eq!(items(&engine).len(), 1, "an undo takes her out");
+		assert!(
+			engine.state.lock().unwrap().collection().sources.contains_key("alice"),
+			"and leaves her under Add"
+		);
+
+		engine.stop();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
+	}
+
 	/// A follow that can set up none of the show's relays, such as a relay
 	/// and a failover on one fixed `--connect-bind` port, keeps the sessions
 	/// followed before, and with them the broadcast sources and guests.
