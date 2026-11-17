@@ -52,6 +52,7 @@ mod compositor;
 mod edit;
 mod effect;
 pub mod file;
+mod format;
 mod glide;
 mod grant;
 pub mod layout;
@@ -70,6 +71,7 @@ pub use collection::{
 	Arrangement, Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item,
 	Keyframe, Layer, MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Slot, Source, Transition, Video,
 };
+pub use format::{Format, PORTRAIT, Placement, Portrait};
 pub use compositor::{Compositor, Detail, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
 pub use grant::Grants;

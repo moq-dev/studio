@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use crate::Error;
+use crate::format::{Format, Placement, Portrait};
 
 /// Everything a studio composes: the program's canvas, the sources, and the
 /// scenes that place them.
@@ -24,6 +25,12 @@ pub struct Collection {
 	/// The program's size and frame rate: the size of every scene that sets
 	/// none, and the frame rate every scene is drawn at.
 	pub canvas: Canvas,
+	/// Whether the show goes out in portrait too, beside the landscape
+	/// canvas: every scene of the program's size drawn again on the canvas
+	/// turned on its side, as its [`Portrait`] arrangement and each item's
+	/// [`portrait`](Item::portrait) place it. Only a landscape canvas turns.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub portrait: bool,
 	/// How the preview is taken to program, short of a cut.
 	#[serde(default)]
 	pub transition: Transition,
@@ -77,6 +84,7 @@ impl Collection {
 	pub fn new() -> Self {
 		Self {
 			canvas: Canvas::default(),
+			portrait: false,
 			transition: Transition::default(),
 			sources: BTreeMap::new(),
 			audio: BTreeMap::new(),
@@ -622,6 +630,7 @@ impl Collection {
 
 		self.validate_nesting()?;
 		self.validate_published()?;
+		self.validate_formats()?;
 		// Checked once the scenes it draws are, so a panic never finds out.
 		if let Some(safe) = self.safe()
 			&& let Some(why) = self.refuses(safe)
@@ -1077,6 +1086,11 @@ pub struct Scene {
 	/// Where its items in a [`Slot`] go.
 	#[serde(default, skip_serializing_if = "Arrangement::is_default")]
 	pub arrangement: Arrangement,
+	/// How it is arranged in the portrait picture, while the show goes out in
+	/// [portrait](Collection::portrait). Only a scene of the program's size
+	/// has one.
+	#[serde(default, skip_serializing_if = "Portrait::is_default")]
+	pub portrait: Portrait,
 	/// What the scene draws, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
@@ -1094,6 +1108,7 @@ impl Scene {
 			audio: None,
 			safe: false,
 			arrangement: Arrangement::default(),
+			portrait: Portrait::default(),
 			items: Vec::new(),
 		}
 	}
@@ -1167,7 +1182,7 @@ impl Arrangement {
 	/// Every arrangement.
 	pub const ALL: [Self; 4] = [Self::Column, Self::Row, Self::Grid, Self::Inset];
 
-	fn is_default(&self) -> bool {
+	pub(crate) fn is_default(&self) -> bool {
 		*self == Self::default()
 	}
 }
@@ -1211,6 +1226,15 @@ pub struct Item {
 	/// or failed, and glides the others to their new places.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub slot: Option<Slot>,
+	/// The one format it is shown in, or `None` for both, while the show goes
+	/// out in [portrait](Collection::portrait).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub format: Option<Format>,
+	/// Where it is drawn in the portrait picture, or `None` where it sits on
+	/// the landscape one, scaled to fit, as [`Placement::fitted`] has it. An
+	/// item in a slot has none, since the portrait arrangement places it.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub portrait: Option<Placement>,
 	/// Whether the studio placed it on its own, as a guest appearing in the
 	/// next tile, rather than the host: once that guest leaves, the next to
 	/// appear may take it. Undo restores it with the rest of the item, and a
@@ -1254,6 +1278,8 @@ impl Item {
 			source: source.into(),
 			rect,
 			slot: None,
+			format: None,
+			portrait: None,
 			auto: false,
 			visible: true,
 			locked: false,
@@ -1276,6 +1302,8 @@ impl Item {
 		Cow::Owned(Self {
 			source: self.source.clone(),
 			slot: self.slot,
+			format: self.format,
+			portrait: self.portrait,
 			auto: self.auto,
 			rect: Rect {
 				x: self.rect.x + offset.x,
@@ -1873,7 +1901,7 @@ impl Crop {
 		}
 	}
 
-	fn validate(&self) -> Result<(), String> {
+	pub(crate) fn validate(&self) -> Result<(), String> {
 		let edges = [self.left, self.top, self.right, self.bottom];
 		if edges.iter().any(|edge| !(0.0..1.0).contains(edge))
 			|| self.left + self.right >= 1.0
@@ -1970,7 +1998,7 @@ impl Rect {
 		*self == Self::default()
 	}
 
-	fn validate(&self, layer: &Layer, source: &str) -> Result<(), Error> {
+	pub(crate) fn validate(&self, layer: &Layer, source: &str) -> Result<(), Error> {
 		let finite = [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite());
 		if !finite || self.width < 0.0 || self.height < 0.0 {
 			return Err(Error::Invalid(format!(

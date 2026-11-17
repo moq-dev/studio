@@ -1,0 +1,745 @@
+//! Landscape and portrait at once: while a show goes out in
+//! [portrait](Collection::portrait), each scene of the program's size has a
+//! portrait arrangement of the same layers, drawn on the canvas turned on its
+//! side.
+
+use std::borrow::Cow;
+
+use serde::{Deserialize, Serialize};
+
+use crate::Error;
+use crate::collection::{Arrangement, Canvas, Collection, Crop, Item, Layer, Rect, Source};
+use crate::edit::{Change, Draft};
+
+/// Where the portrait picture goes out, beneath the program's broadcast, so
+/// no scene published while the show goes out in portrait takes the name.
+pub const PORTRAIT: &str = "portrait";
+
+/// How much of the portrait canvas's height the main picture takes when a
+/// camera is stacked under it.
+const MAIN_SHARE: f32 = 0.6;
+
+/// How much of the landscape canvas an item covers to count as a backdrop,
+/// which covers the portrait canvas too.
+const BACKDROP: f32 = 0.9;
+
+/// One of the two shapes a show goes out in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Format {
+	/// Wider than tall: the canvas as it is.
+	Landscape,
+	/// Taller than wide: the canvas turned on its side.
+	Portrait,
+}
+
+impl Format {
+	/// Both, landscape first.
+	pub const ALL: [Self; 2] = [Self::Landscape, Self::Portrait];
+
+	/// The other one.
+	pub fn other(self) -> Self {
+		match self {
+			Self::Landscape => Self::Portrait,
+			Self::Portrait => Self::Landscape,
+		}
+	}
+
+	/// Its name, capitalized, as a label says it.
+	pub fn name(self) -> &'static str {
+		match self {
+			Self::Landscape => "Landscape",
+			Self::Portrait => "Portrait",
+		}
+	}
+}
+
+/// Where an item is drawn in the portrait picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+	/// Where on the portrait canvas, stretched to fill it.
+	pub rect: Rect,
+	/// Trimmed from what its source's crop leaves, in place of the item's own
+	/// crop.
+	#[serde(default, skip_serializing_if = "Crop::is_none")]
+	pub crop: Crop,
+}
+
+impl Placement {
+	/// Where an item at `rect` on the `landscape` canvas sits on the portrait
+	/// one without a place of its own there: as far across and down, scaled by
+	/// as much as the narrower side shrinks, so it keeps its shape and fits.
+	pub fn fitted(rect: Rect, crop: Crop, landscape: Canvas) -> Self {
+		let portrait = landscape.turned();
+		let (from, to) = (
+			(landscape.width as f32, landscape.height as f32),
+			(portrait.width as f32, portrait.height as f32),
+		);
+		let scale = (to.0 / from.0).min(to.1 / from.1);
+		let (width, height) = (rect.width * scale, rect.height * scale);
+		let center = (
+			(rect.x + rect.width / 2.0) / from.0 * to.0,
+			(rect.y + rect.height / 2.0) / from.1 * to.1,
+		);
+		Self {
+			rect: Rect {
+				x: (center.0 - width / 2.0).round(),
+				y: (center.1 - height / 2.0).round(),
+				width: width.round(),
+				height: height.round(),
+			},
+			crop,
+		}
+	}
+}
+
+/// How a scene is arranged in the portrait picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Portrait {
+	/// Where its items in a slot go: in a row under the main one unless set,
+	/// since a column beside it leaves a tall canvas mostly empty.
+	#[serde(default = "row", skip_serializing_if = "is_row")]
+	pub arrangement: Arrangement,
+}
+
+impl Default for Portrait {
+	fn default() -> Self {
+		Self {
+			arrangement: Arrangement::Row,
+		}
+	}
+}
+
+impl Portrait {
+	pub(crate) fn is_default(&self) -> bool {
+		*self == Self::default()
+	}
+}
+
+fn row() -> Arrangement {
+	Arrangement::Row
+}
+
+fn is_row(arrangement: &Arrangement) -> bool {
+	*arrangement == Arrangement::Row
+}
+
+impl Canvas {
+	/// The canvas turned on its side: its width and height swapped.
+	pub fn turned(self) -> Self {
+		Self {
+			width: self.height,
+			height: self.width,
+			framerate: self.framerate,
+		}
+	}
+}
+
+impl Item {
+	/// Whether it is shown in `format`'s picture.
+	pub fn shown_in(&self, format: Format) -> bool {
+		self.format.is_none_or(|only| only == format)
+	}
+
+	/// Where it is drawn in `format`'s picture, in a show whose landscape
+	/// canvas is `landscape`: its rect and crop, or its portrait place, or
+	/// failing that where it sits on the landscape picture, fitted.
+	pub fn placement(&self, format: Format, landscape: Canvas) -> Placement {
+		let landscaped = Placement {
+			rect: self.rect,
+			crop: self.crop,
+		};
+		match format {
+			Format::Landscape => landscaped,
+			Format::Portrait => self
+				.portrait
+				.unwrap_or_else(|| Placement::fitted(self.rect, self.crop, landscape)),
+		}
+	}
+
+	/// The item drawn at `placement` in `format`'s picture, as it was in the
+	/// other.
+	pub fn placed(self, format: Format, placement: Placement) -> Self {
+		match format {
+			Format::Landscape => Self {
+				rect: placement.rect,
+				crop: placement.crop,
+				..self
+			},
+			Format::Portrait => Self {
+				portrait: Some(placement),
+				..self
+			},
+		}
+	}
+
+	/// The item as `format`'s picture draws it, in a show whose landscape
+	/// canvas is `landscape`: at its place there, and hidden unless shown in
+	/// it. An item in a slot stays where the arrangement puts it.
+	fn portrayed(&mut self, format: Format, landscape: Canvas) {
+		if self.slot.is_none() {
+			let placement = self.placement(format, landscape);
+			self.rect = placement.rect;
+			self.crop = placement.crop;
+		}
+		self.visible &= self.shown_in(format);
+	}
+
+	/// Whether it says anything about the portrait picture.
+	fn formats(&self) -> bool {
+		self.format.is_some() || self.portrait.is_some()
+	}
+}
+
+impl Collection {
+	/// The portrait picture's canvas, while the show goes out in portrait.
+	pub fn portrait_canvas(&self) -> Option<Canvas> {
+		self.portrait.then(|| self.canvas.turned())
+	}
+
+	/// The canvas `format`'s picture is drawn on: the program's, or turned.
+	pub fn canvas_of(&self, format: Format) -> Canvas {
+		match format {
+			Format::Landscape => self.canvas,
+			Format::Portrait => self.canvas.turned(),
+		}
+	}
+
+	/// Whether `layer` is drawn in both pictures: the top layer, or a scene of
+	/// the program's size, while the show goes out in portrait.
+	pub fn dual(&self, layer: &Layer) -> bool {
+		self.portrait
+			&& match &layer.scene {
+				None => true,
+				Some(scene) => self.scene(scene).is_some_and(|scene| scene.size.is_none()),
+			}
+	}
+
+	/// The collection as `format`'s picture draws it, while the show goes out
+	/// in portrait: in portrait, on the canvas turned, each scene of the
+	/// program's size arranged as its portrait arrangement says and each item
+	/// at its portrait place; in either, an item shown only in the other is
+	/// hidden. A scene of its own size is drawn as it is. Itself otherwise.
+	pub fn formatted(&self, format: Format) -> Cow<'_, Self> {
+		if !self.portrait {
+			return Cow::Borrowed(self);
+		}
+		if format == Format::Landscape {
+			let hides = self.layers().any(|(_, items)| items.iter().any(|item| !item.shown_in(format)));
+			if !hides {
+				return Cow::Borrowed(self);
+			}
+		}
+		let landscape = self.canvas;
+		let mut view = self.clone();
+		view.canvas = self.canvas_of(format);
+		for scene in view.scenes.iter_mut().filter(|scene| scene.size.is_none()) {
+			if format == Format::Portrait {
+				scene.arrangement = scene.portrait.arrangement;
+			}
+			for item in &mut scene.items {
+				item.portrayed(format, landscape);
+			}
+		}
+		for item in &mut view.top {
+			item.portrayed(format, landscape);
+		}
+		Cow::Owned(view)
+	}
+
+	/// Check the portrait picture's rules: only a landscape canvas turns, and
+	/// only a scene of the program's size, or the top layer, says anything
+	/// about it, an item in a slot or shown only in landscape taking no place
+	/// there; nor does a scene publish where it goes out.
+	pub(crate) fn validate_formats(&self) -> Result<(), Error> {
+		if self.portrait && self.canvas.width <= self.canvas.height {
+			return Err(Error::Invalid(format!(
+				"the show goes out in portrait too, which turns a landscape canvas, not {}x{}",
+				self.canvas.width, self.canvas.height
+			)));
+		}
+		for scene in &self.scenes {
+			let why = match (self.portrait, scene.size) {
+				(false, _) => "the show does not go out in portrait",
+				(true, Some(_)) => "it has a size of its own, so it is drawn in one format",
+				(true, None) => "",
+			};
+			if why.is_empty() {
+				continue;
+			}
+			if !scene.portrait.is_default() {
+				return Err(Error::Invalid(format!(
+					"scene `{}` has a portrait arrangement, but {why}",
+					scene.name
+				)));
+			}
+			if let Some(item) = scene.items.iter().find(|item| item.formats()) {
+				return Err(Error::Invalid(format!(
+					"`{}` in scene `{}` says where it shows in portrait, but {why}",
+					item.source, scene.name
+				)));
+			}
+		}
+		if !self.portrait
+			&& let Some(item) = self.top.iter().find(|item| item.formats())
+		{
+			return Err(Error::Invalid(format!(
+				"always-on-top `{}` says where it shows in portrait, but the show does not go out in portrait",
+				item.source
+			)));
+		}
+		for (layer, items) in self.layers() {
+			for item in items {
+				let Some(placement) = &item.portrait else { continue };
+				let on = format!("`{}` in {layer}", item.source);
+				if item.slot.is_some() {
+					return Err(Error::Invalid(format!(
+						"{on} is in a slot, which places it in portrait too, so it takes no portrait place"
+					)));
+				}
+				if item.format == Some(Format::Landscape) {
+					return Err(Error::Invalid(format!(
+						"{on} is shown only in landscape, so it takes no portrait place"
+					)));
+				}
+				placement.rect.validate(&layer, &item.source)?;
+				placement
+					.crop
+					.validate()
+					.map_err(|err| Error::Invalid(format!("{on} in portrait: {err}")))?;
+			}
+		}
+		if self.portrait
+			&& let Some(scene) = self.scenes.iter().find(|scene| scene.published && scene.name == PORTRAIT)
+		{
+			return Err(Error::Invalid(format!(
+				"scene `{}` is published where the portrait picture goes out; rename it to publish it",
+				scene.name
+			)));
+		}
+		Ok(())
+	}
+
+	/// The items of a layer as a show turning to portrait first places them:
+	/// the main picture, the largest covering a quarter of the canvas or more,
+	/// cropped to the top of the portrait canvas, or all of it without a
+	/// camera, and the largest camera stacked under it, keeping its shape if
+	/// it has an outline; a backdrop covering the landscape canvas covers the
+	/// portrait one, cropped. The rest sit where they are, fitted, until
+	/// moved there.
+	fn turned_on(&self, items: &[Item]) -> Vec<Item> {
+		let landscape = self.canvas;
+		let portrait = landscape.turned();
+		let whole = Rect::fill(&portrait);
+		let canvas = landscape.width as f32 * landscape.height as f32;
+		let area = |item: &Item| covered(&item.rect, &landscape) / canvas;
+		let free: Vec<usize> = (0..items.len())
+			.filter(|&at| {
+				let item = &items[at];
+				item.slot.is_none() && item.visible && item.shown_in(Format::Portrait) && area(item) > 0.0
+			})
+			.collect();
+		let largest = |among: &mut dyn Iterator<Item = usize>| {
+			among.max_by(|a, b| area(&items[*a]).total_cmp(&area(&items[*b])).then(b.cmp(a)))
+		};
+		let main = largest(&mut free.iter().copied()).filter(|&at| area(&items[at]) >= 0.25);
+		let camera = largest(&mut free.iter().copied().filter(|&at| {
+			let source = self.sources.get(self.capture(&items[at].source));
+			Some(at) != main && matches!(source, Some(Source::Camera { .. })) && area(&items[at]) < BACKDROP
+		}));
+
+		let mut placed = items.to_vec();
+		if let Some(main) = main {
+			let top = match camera {
+				Some(_) => Rect {
+					height: (portrait.height as f32 * MAIN_SHARE).round(),
+					..whole
+				},
+				None => whole,
+			};
+			placed[main].portrait = Some(covering(&items[main], top));
+			if let Some(camera) = camera {
+				let under = Rect {
+					y: top.height,
+					height: whole.height - top.height,
+					..whole
+				};
+				let item = &items[camera];
+				placed[camera].portrait = Some(match item.shape.is_square() {
+					true => covering(item, under),
+					false => fitting(item, under),
+				});
+			}
+		}
+		for &at in &free {
+			let item = &items[at];
+			let source = self.sources.get(self.capture(&item.source));
+			// A page or overlay is mostly see-through, so it is fitted whole
+			// rather than cropped.
+			let see_through = matches!(source, Some(Source::Browser { .. } | Source::Overlay { .. }));
+			if Some(at) != main && Some(at) != camera && area(item) >= BACKDROP && !see_through {
+				placed[at].portrait = Some(covering(item, whole));
+			}
+		}
+		placed
+	}
+}
+
+impl Draft {
+	/// Send the show out in portrait too, or no longer. Turned on, each
+	/// layer's portrait arrangement starts from its landscape one: the main
+	/// picture cropped to the top, the camera stacked under it, and slots in
+	/// a row unless they were in a grid or inset. Turned off, the layers shown
+	/// only in portrait are removed and every portrait place dropped.
+	pub fn set_portrait(&mut self, on: bool) -> Result<(), Error> {
+		let before = self.collection().portrait;
+		if before == on {
+			return Ok(());
+		}
+		let collection = self.collection().clone();
+		for (index, scene) in collection.scenes.iter().enumerate() {
+			if scene.size.is_some() {
+				continue;
+			}
+			let mut after = scene.clone();
+			match on {
+				true => {
+					after.items = collection.turned_on(&scene.items);
+					if matches!(scene.arrangement, Arrangement::Grid | Arrangement::Inset) {
+						after.portrait.arrangement = scene.arrangement;
+					}
+				}
+				false => {
+					after.portrait = Default::default();
+					after.items.retain(|item| item.shown_in(Format::Landscape));
+					for item in &mut after.items {
+						item.format = None;
+						item.portrait = None;
+					}
+				}
+			}
+			if after != *scene {
+				self.set_scene(index, after)?;
+			}
+		}
+		let top = Layer::top();
+		match on {
+			true => {
+				for (index, item) in collection.turned_on(&collection.top).into_iter().enumerate() {
+					if item != collection.top[index] {
+						self.set_item(&top, index, item)?;
+					}
+				}
+			}
+			false => {
+				for (index, item) in collection.top.iter().enumerate().rev() {
+					if !item.shown_in(Format::Landscape) {
+						self.remove_item(&top, index)?;
+					} else if item.formats() {
+						let item = Item {
+							format: None,
+							portrait: None,
+							..item.clone()
+						};
+						self.set_item(&top, index, item)?;
+					}
+				}
+			}
+		}
+		self.change(Change::Portrait { before, after: on })
+	}
+}
+
+/// How much of `canvas` `rect` covers, in square pixels.
+fn covered(rect: &Rect, canvas: &Canvas) -> f32 {
+	let width = (rect.x + rect.width).min(canvas.width as f32) - rect.x.max(0.0);
+	let height = (rect.y + rect.height).min(canvas.height as f32) - rect.y.max(0.0);
+	width.max(0.0) * height.max(0.0)
+}
+
+/// `item` covering `rect`, its picture cropped evenly to `rect`'s shape on
+/// top of its own crop, so it shows unstretched as it did.
+fn covering(item: &Item, rect: Rect) -> Placement {
+	let shown = item.rect.width / item.rect.height;
+	let wanted = rect.width / rect.height;
+	Placement {
+		rect,
+		crop: item.crop.then(&Crop::covering(shown, wanted)),
+	}
+}
+
+/// `item` as large as fits in `rect`, keeping its shape, centered.
+fn fitting(item: &Item, rect: Rect) -> Placement {
+	let shape = item.rect.width / item.rect.height;
+	let width = rect.width.min(rect.height * shape);
+	let height = width / shape;
+	Placement {
+		rect: Rect {
+			x: (rect.x + (rect.width - width) / 2.0).round(),
+			y: (rect.y + (rect.height - height) / 2.0).round(),
+			width: width.round(),
+			height: height.round(),
+		},
+		crop: item.crop,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::collection::{Rgba, Scene, Shape, Size, Slot};
+
+	fn color() -> Source {
+		Source::Color {
+			color: Rgba([255, 0, 0, 255]),
+		}
+	}
+
+	/// A 1920x1080 show: a game filling the canvas, a camera in its corner,
+	/// and a logo, in scene "Game"; and a slotted scene "Guests".
+	fn show() -> Collection {
+		let mut collection = Collection::new();
+		collection.sources.insert("game".into(), color());
+		collection.sources.insert("camera".into(), Source::Camera { id: None });
+		collection.sources.insert("logo".into(), color());
+		let fill = Rect::fill(&collection.canvas);
+		let corner = Rect {
+			x: 1440.0,
+			y: 720.0,
+			width: 480.0,
+			height: 270.0,
+		};
+		let logo = Rect {
+			x: 1600.0,
+			y: 40.0,
+			width: 280.0,
+			height: 120.0,
+		};
+		let slotted = |slot| Item {
+			slot: Some(slot),
+			..Item::new("camera", Rect::default())
+		};
+		collection.scenes = vec![
+			Scene {
+				items: vec![
+					Item::new("game", fill),
+					Item::new("camera", corner),
+					Item::new("logo", logo),
+				],
+				..Scene::new("Game")
+			},
+			Scene {
+				items: vec![slotted(Slot::Main), slotted(Slot::Tile)],
+				..Scene::new("Guests")
+			},
+		];
+		collection.validate().unwrap();
+		collection
+	}
+
+	fn turned(collection: &Collection) -> Collection {
+		let mut draft = collection.draft("Both");
+		draft.set_portrait(true).unwrap();
+		let edit = draft.finish().unwrap();
+		let mut turned = collection.clone();
+		turned.apply(&edit).unwrap();
+		turned
+	}
+
+	#[test]
+	fn turning_on_crops_the_main_picture_over_the_camera() {
+		let turned = turned(&show());
+		assert!(turned.portrait);
+		let items = &turned.scenes[0].items;
+		let game = items[0].portrait.unwrap();
+		assert_eq!(
+			game.rect,
+			Rect {
+				x: 0.0,
+				y: 0.0,
+				width: 1080.0,
+				height: 1152.0
+			}
+		);
+		// The 16:9 game cropped evenly to the 1080x1152 band, unstretched.
+		let kept = 1.0 - game.crop.left - game.crop.right;
+		assert!((1920.0 * kept / 1080.0 - 1080.0 / 1152.0).abs() < 1e-3, "{game:?}");
+		assert!((game.crop.left - game.crop.right).abs() < 1e-6);
+		let camera = items[1].portrait.unwrap();
+		assert_eq!(
+			camera.rect,
+			Rect {
+				x: 0.0,
+				y: 1152.0,
+				width: 1080.0,
+				height: 768.0
+			}
+		);
+		// The logo has no place of its own, so it follows its landscape one.
+		assert_eq!(items[2].portrait, None);
+		turned.validate().unwrap();
+	}
+
+	#[test]
+	fn a_round_camera_keeps_its_shape() {
+		let mut show = show();
+		show.scenes[0].items[1].rect = Rect {
+			x: 1500.0,
+			y: 700.0,
+			width: 300.0,
+			height: 300.0,
+		};
+		show.scenes[0].items[1].shape = Shape {
+			corners: [0.5; 4],
+			..Shape::default()
+		};
+		let turned = turned(&show);
+		let camera = turned.scenes[0].items[1].portrait.unwrap();
+		assert_eq!(camera.rect.width, camera.rect.height);
+		assert_eq!(camera.rect.width, 768.0);
+		assert_eq!(camera.rect.y, 1152.0);
+		assert_eq!(camera.rect.x, 156.0);
+	}
+
+	#[test]
+	fn without_a_camera_the_main_picture_covers_the_canvas() {
+		let mut show = show();
+		show.scenes[0].items.remove(1);
+		let turned = turned(&show);
+		let game = turned.scenes[0].items[0].portrait.unwrap();
+		assert_eq!(game.rect, Rect::fill(&show.canvas.turned()));
+	}
+
+	#[test]
+	fn slots_go_in_a_row_unless_gridded() {
+		let mut show = show();
+		show.scenes[1].arrangement = Arrangement::Grid;
+		let mut copy = show.scenes[1].clone();
+		copy.name = "Row".into();
+		copy.arrangement = Arrangement::Column;
+		show.scenes.push(copy);
+		let turned = turned(&show);
+		assert_eq!(turned.scenes[1].portrait.arrangement, Arrangement::Grid);
+		assert_eq!(turned.scenes[2].portrait.arrangement, Arrangement::Row);
+		assert!(turned.scenes[1].items.iter().all(|item| item.portrait.is_none()));
+	}
+
+	#[test]
+	fn a_scene_of_its_own_size_is_left_alone() {
+		let mut show = show();
+		show.scenes[0].size = Some(Size {
+			width: 1080,
+			height: 1920,
+		});
+		let turned = turned(&show);
+		assert_eq!(turned.scenes[0], show.scenes[0]);
+	}
+
+	#[test]
+	fn the_portrait_view_places_each_item_there() {
+		let mut turned = turned(&show());
+		turned.scenes[0].items[2].format = Some(Format::Landscape);
+		let view = turned.formatted(Format::Portrait);
+		assert_eq!(view.canvas, turned.canvas.turned());
+		let items = &view.scenes[0].items;
+		assert_eq!(items[0].rect, turned.scenes[0].items[0].portrait.unwrap().rect);
+		assert!(!items[2].visible, "shown only in landscape");
+		assert_eq!(view.scenes[1].arrangement, Arrangement::Row);
+		// The landscape view hides nothing shown in landscape, so it is the
+		// collection itself.
+		assert!(matches!(turned.formatted(Format::Landscape), Cow::Borrowed(_)));
+		turned.scenes[0].items[2].format = Some(Format::Portrait);
+		let view = turned.formatted(Format::Landscape);
+		assert!(!view.scenes[0].items[2].visible);
+		assert!(view.scenes[0].items[0].visible);
+	}
+
+	#[test]
+	fn fitted_keeps_its_place_and_shape() {
+		let landscape = Canvas::default();
+		let logo = Rect {
+			x: 1600.0,
+			y: 40.0,
+			width: 280.0,
+			height: 120.0,
+		};
+		let fitted = Placement::fitted(logo, Crop::default(), landscape);
+		// 9/16 the size, its center as far across and down.
+		assert_eq!(fitted.rect.width, 158.0);
+		assert_eq!(fitted.rect.height, 68.0);
+		let center = fitted.rect.x + fitted.rect.width / 2.0;
+		assert!((center / 1080.0 - 1740.0 / 1920.0).abs() < 1e-3);
+		let center = fitted.rect.y + fitted.rect.height / 2.0;
+		assert!((center / 1920.0 - 100.0 / 1080.0).abs() < 1e-3);
+	}
+
+	#[test]
+	fn turning_off_drops_the_portrait_picture() {
+		let mut turned = turned(&show());
+		turned.scenes[0].items.push(Item {
+			format: Some(Format::Portrait),
+			..Item::new("logo", Rect::fill(&turned.canvas))
+		});
+		turned.top.push(Item {
+			format: Some(Format::Portrait),
+			..Item::new("logo", Rect::fill(&turned.canvas))
+		});
+		turned.top.push(Item {
+			format: Some(Format::Landscape),
+			..Item::new("logo", Rect::fill(&turned.canvas))
+		});
+		turned.validate().unwrap();
+		let mut draft = turned.draft("Landscape");
+		draft.set_portrait(false).unwrap();
+		let edit = draft.finish().unwrap();
+		let mut off = turned.clone();
+		off.apply(&edit).unwrap();
+		assert_eq!(off.scenes, show().scenes);
+		assert_eq!(off.top.len(), 1);
+		assert_eq!(off.top[0].format, None);
+		// Undone whole.
+		off.apply(&edit.inverse()).unwrap();
+		assert_eq!(off, turned);
+	}
+
+	#[test]
+	fn refuses_what_the_portrait_picture_cannot_draw() {
+		let refused = |edit: &dyn Fn(&mut Collection)| {
+			let mut collection = turned(&show());
+			edit(&mut collection);
+			collection.validate().unwrap_err().to_string()
+		};
+		assert!(refused(&|c| c.canvas = c.canvas.turned()).contains("turns a landscape canvas"));
+		assert!(
+			refused(&|c| c.scenes[1].items[0].portrait = Some(Placement::default())).contains("in a slot")
+		);
+		assert!(
+			refused(&|c| c.scenes[0].items[0].format = Some(Format::Landscape)).contains("only in landscape")
+		);
+		assert!(
+			refused(&|c| {
+				c.portrait = false;
+			})
+			.contains("does not go out in portrait")
+		);
+		assert!(
+			refused(&|c| {
+				c.scenes[0].name = PORTRAIT.into();
+				c.scenes[0].published = true;
+			})
+			.contains("rename it")
+		);
+	}
+
+	#[test]
+	fn round_trips_through_the_scene_file() {
+		let mut turned = turned(&show());
+		turned.scenes[0].items[2].format = Some(Format::Landscape);
+		let text = turned.to_toml().unwrap();
+		assert!(text.contains("portrait = true"), "{text}");
+		assert!(text.contains("format = \"landscape\""), "{text}");
+		assert_eq!(Collection::from_toml(&text).unwrap(), turned);
+	}
+}

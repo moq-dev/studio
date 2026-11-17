@@ -72,6 +72,8 @@ pub enum Change {
 	Transition { before: Transition, after: Transition },
 	/// [`Collection::canvas`].
 	Canvas { before: Canvas, after: Canvas },
+	/// [`Collection::portrait`].
+	Portrait { before: bool, after: bool },
 	/// [`Collection::audio_scenes`], whole.
 	AudioScenes {
 		before: Vec<AudioScene>,
@@ -127,6 +129,10 @@ impl Change {
 				before: after,
 				after: before,
 			},
+			Self::Portrait { before, after } => Self::Portrait {
+				before: after,
+				after: before,
+			},
 			Self::AudioScenes { before, after } => Self::AudioScenes {
 				before: after,
 				after: before,
@@ -145,6 +151,7 @@ impl Change {
 			| Self::Item { .. }
 			| Self::Transition { .. }
 			| Self::Canvas { .. }
+			| Self::Portrait { .. }
 			| Self::AudioScenes { .. } => None,
 		}
 	}
@@ -160,6 +167,7 @@ impl Change {
 			Self::Item { before, after, .. } => before == after,
 			Self::Transition { before, after } => before == after,
 			Self::Canvas { before, after } => before == after,
+			Self::Portrait { before, after } => before == after,
 			Self::AudioScenes { before, after } => before == after,
 		}
 	}
@@ -261,6 +269,9 @@ impl Change {
 			(Self::Canvas { before, after }, Self::Canvas { before: b, after: a }) if after == *b => {
 				Self::Canvas { before, after: *a }
 			}
+			(Self::Portrait { before, after }, Self::Portrait { before: b, after: a }) if after == *b => {
+				Self::Portrait { before, after: *a }
+			}
 			(Self::AudioScenes { before, after }, Self::AudioScenes { before: b, after: a }) if after == *b => {
 				Self::AudioScenes {
 					before,
@@ -315,6 +326,13 @@ impl Change {
 					return Err(conflict("the canvas changed".into()));
 				}
 				collection.canvas = *after;
+				Ok(())
+			}
+			Self::Portrait { before, after } => {
+				if collection.portrait != *before {
+					return Err(conflict("whether the show goes out in portrait changed".into()));
+				}
+				collection.portrait = *after;
 				Ok(())
 			}
 			Self::AudioScenes { before, after } => {

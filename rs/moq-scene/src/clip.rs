@@ -262,6 +262,11 @@ impl Draft {
 				slot => (slot, item.rect),
 			};
 			let filters = rename(&item.filters);
+			// Where it shows in portrait means nothing to a layer drawn in one
+			// format, and a slot places it there too.
+			let dual = self.collection().dual(layer);
+			let format = item.format.filter(|_| dual);
+			let portrait = item.portrait.filter(|_| dual && slot.is_none());
 			self.insert_item(
 				layer,
 				index,
@@ -270,6 +275,8 @@ impl Draft {
 					filters,
 					slot,
 					rect,
+					format,
+					portrait,
 					..item.clone()
 				},
 			)?;
