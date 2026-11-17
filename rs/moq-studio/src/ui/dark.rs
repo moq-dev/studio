@@ -213,8 +213,9 @@ pub(super) fn badge(ui: &Ui, rect: Rect) {
 }
 
 /// The badge for the source `source`, called `name`, that `lost` its
-/// picture, in `rect`: a click opens its popover. The fix asked for, if one
-/// was; with `windows`, the windows to offer in its place, if listed.
+/// picture, in `rect`: a click opens its popover. Whether it was clicked
+/// open, and the fix asked for, if one was; with `windows`, the windows to
+/// offer in its place, if listed.
 pub(super) fn badge_button(
 	ui: &mut Ui,
 	rect: Rect,
@@ -223,17 +224,20 @@ pub(super) fn badge_button(
 	source: &Source,
 	lost: Lost,
 	windows: Option<&Result<Vec<Pick>, String>>,
-) -> Option<Mend> {
+) -> (bool, Option<Mend>) {
 	let response = ui.interact(rect, id, Sense::click());
 	let label = format!("What happened to {name}");
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
 	badge(ui, rect);
-	let advice = advice(name, source, lost)?;
+	let opened = response.clicked();
+	let Some(advice) = advice(name, source, lost) else {
+		return (opened, None);
+	};
 	let mut mend = None;
 	kit::popover(&response).width(300.0).show(|ui| {
 		mend = popover(ui, &advice, windows);
 	});
-	mend
+	(opened, mend)
 }
 
 /// The popover's body: what happened, the fixes, and where the streamer acts

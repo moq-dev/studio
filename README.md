@@ -1710,7 +1710,8 @@ back. A picture dark in every
 tile but a mouse pointer's few, and all one color, is dark.
 
 For its first 3 seconds of dark the studio draws the capture's last picture
-that was not dark in its place, on program and everywhere else, so a moment
+that was not dark in its place, on program and everywhere else but where its
+background is removed, which shows the dark at once, so a moment
 of black barely reaches viewers: the black shows until its picture is next
 read, up to a quarter of a second, as each picture is drawn before it is
 read, never held back for it. After that it shows the dark as it is, so a

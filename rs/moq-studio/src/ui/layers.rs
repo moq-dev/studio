@@ -128,11 +128,8 @@ impl Panels {
 			let status = status_of(state, &item.source, now);
 			let capture = collection.sources.get(collection.capture(&item.source));
 			// A window chosen by id offers the windows listed now in its place.
-			if matches!(status.lost, Some(Lost::Dark(_)))
-				&& matches!(capture, Some(Source::Window { .. }))
-				&& self.devices.listing.is_none()
-				&& self.devices.pending.is_none()
-			{
+			let window = matches!(status.lost, Some(Lost::Dark(_))) && matches!(capture, Some(Source::Window { .. }));
+			if window && self.devices.listing.is_none() && self.devices.pending.is_none() {
 				let refreshed = self.devices.refresh(&self.runtime).context("cannot list windows");
 				self.fail(Spot::Add, refreshed);
 			}
@@ -153,7 +150,13 @@ impl Panels {
 				fault,
 				selected,
 			};
-			let (response, asked) = row.show(ui, ui.id().with(("layer", layer.scene.as_deref(), index)));
+			let (response, asked, opened) = row.show(ui, ui.id().with(("layer", layer.scene.as_deref(), index)));
+			// Its popover, opened, lists the windows afresh: the listing kept
+			// may be from before the window went, or another opened.
+			if opened && window && self.devices.pending.is_none() {
+				let refreshed = self.devices.refresh(&self.runtime).context("cannot list windows");
+				self.fail(Spot::Add, refreshed);
+			}
 			if let Some(asked) = asked {
 				action = Some((picked.clone(), asked));
 			}
@@ -243,8 +246,9 @@ struct Row<'a> {
 }
 
 impl Row<'_> {
-	/// Draw the row with `id`; its response and what its lock or eye asked.
-	fn show(self, ui: &mut Ui, id: egui::Id) -> (egui::Response, Option<LayerAction>) {
+	/// Draw the row with `id`; its response, what its lock, eye, or badge
+	/// asked, and whether its badge was clicked open.
+	fn show(self, ui: &mut Ui, id: egui::Id) -> (egui::Response, Option<LayerAction>, bool) {
 		let size = vec2(ui.available_width(), ROW);
 		let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
 		let response = ui.interact(rect, id, Sense::click_and_drag());
@@ -299,16 +303,18 @@ impl Row<'_> {
 		painter.galley(pos2(left, rect.top() + 26.0), galley, color);
 
 		let mut asked = None;
+		let mut opened = false;
 		// A source live and well needs no mark; the inspector says so. One
 		// gone dark or stalled has a badge in its place, which opens what to do.
 		let marked = self.status.color != kit::OK || self.fault.is_some();
 		let lost = self.status.lost.filter(|_| self.fault.is_none());
 		let dark = lost.is_some();
+		let badge = Rect::from_center_size(dot.center() - vec2(4.0, 0.0), Vec2::splat(20.0));
 		if let Some(lost) = lost
 			&& let Some(capture) = self.capture
 		{
-			let badge = Rect::from_center_size(dot.center() - vec2(4.0, 0.0), Vec2::splat(20.0));
-			let mend = super::dark::badge_button(
+			let mend;
+			(opened, mend) = super::dark::badge_button(
 				ui,
 				badge,
 				id.with("dark"),
@@ -327,6 +333,16 @@ impl Row<'_> {
 				self.status.color
 			};
 			painter.circle_filled(dot.center(), 3.5, color);
+		}
+		// A failure besides, such as its track's, keeps its red dot beside
+		// the badge, with the words on hover.
+		if dark && self.status.color == kit::ERR {
+			let beside = Rect::from_center_size(pos2(badge.left() - 8.0, dot.center().y), Vec2::splat(12.0));
+			painter.circle_filled(beside.center(), 3.5, kit::ERR);
+			let failed = ui.interact(beside, id.with("failed"), Sense::hover());
+			if failed.hovered() {
+				failed.on_hover_text(self.status.lines.join("\n"));
+			}
 		}
 		if marked && !dark && (status.hovered() || self.fault.is_some()) {
 			let mut lines = self.status.lines.clone();
@@ -356,7 +372,7 @@ impl Row<'_> {
 		if ui.put(eye, IconButton::new(icon, name).small()).clicked() {
 			asked = Some(LayerAction::Show(!self.item.visible));
 		}
-		(response, asked)
+		(response, asked, opened)
 	}
 }
 

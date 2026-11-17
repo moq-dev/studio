@@ -3584,6 +3584,14 @@ mod tests {
 		let engine = start(gpu, Vec::new(), dir.path(), autosave, red_canvas())
 			.await
 			.expect("the studio starts");
+		// The program thread starts the sources on its first sync.
+		kio::clock::timeout(Duration::from_secs(10), async {
+			while engine.state.lock().unwrap().sources.get("red").is_none() {
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("the source starts");
 		let secs = Duration::from_secs;
 		engine.state.lock().unwrap().dark.insert("red".into(), secs(12));
 		let local = engine.local(kio::clock::now());
