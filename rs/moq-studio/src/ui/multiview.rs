@@ -480,8 +480,12 @@ impl Inner {
 	fn ui(&mut self, ui: &mut Ui, rect: Rect) {
 		let snapshot = self.snapshot(ui.ctx());
 		// Live at the program's rate, whether or not the studio's window draws.
-		ui.ctx()
-			.request_repaint_after(Duration::from_secs(1) / snapshot.framerate.max(1));
+		// egui takes its predicted frame time off the delay, which would
+		// redraw at the display's rate instead, so it is added back.
+		let period = Duration::from_secs(1) / snapshot.framerate.max(1);
+		let predicted = ui.input(|input| input.predicted_dt);
+		let predicted = Duration::try_from_secs_f32(predicted).unwrap_or_default();
+		ui.ctx().request_repaint_after(period + predicted.min(period));
 		ui.painter().rect_filled(rect, 0, BACKDROP);
 		let shown: Vec<&SourceTile> = snapshot.sources.iter().filter(|source| source.shown).collect();
 
