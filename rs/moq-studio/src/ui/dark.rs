@@ -1,6 +1,7 @@
-//! A camera, display, or window gone dark: the amber badge on its layer's
-//! row, over it on the picture, and on its scenes' pads, and the popover
-//! that says in plain words what happened and offers the fix.
+//! A camera, display, or window gone dark, or a camera or broadcast that
+//! stopped sending pictures: the amber badge on its layer's row, over it on
+//! the picture, and on its scenes' pads, and the popover that says in plain
+//! words what happened and offers the fix.
 
 use egui::{Rect, Sense, Stroke, Vec2, pos2, vec2};
 
@@ -11,7 +12,7 @@ use super::*;
 pub(super) enum Mend {
 	/// Ask the system picker afresh, forgetting the grant it holds.
 	PickAgain,
-	/// Open the device again.
+	/// Open the device, or subscribe to the broadcast, again.
 	Reopen,
 	/// Capture this in its place, under the same name.
 	Replace(Source),
@@ -19,23 +20,74 @@ pub(super) enum Mend {
 	Expected,
 }
 
-/// What a dark capture's popover says and offers, by its kind.
+/// What a lost picture's popover says and offers, by its kind.
 struct Advice {
 	title: &'static str,
 	/// What may have happened, and what viewers see.
 	cause: String,
 	/// What the streamer must do where the studio cannot, and where.
-	hint: Option<&'static str>,
+	hint: Option<String>,
 	/// Each fix the studio can take itself, the first the likeliest.
 	fixes: Vec<(&'static str, Mend)>,
 	/// Whether to offer the windows this machine lists, to capture one in
 	/// its place: a window chosen by id, which the system cannot ask again.
 	windows: bool,
+	/// Whether to offer to stop watching it: a capture meant to go dark.
+	expected: bool,
 }
 
-/// What to say of `source`, called `name`, gone dark; `None` for a kind
-/// never watched.
-fn advice(name: &str, source: &Source) -> Option<Advice> {
+/// What to say of `source`, called `name`, that `lost` its picture; `None`
+/// for a kind never watched for it.
+fn advice(name: &str, source: &Source, lost: Lost) -> Option<Advice> {
+	match lost {
+		Lost::Dark(_) => dark(name, source),
+		Lost::Stalled(_) => stalled(name, source),
+	}
+}
+
+/// What to say of `source`, called `name`, that stopped sending pictures.
+fn stalled(name: &str, source: &Source) -> Option<Advice> {
+	let again = ("Subscribe again", Mend::Reopen);
+	let advice = match source {
+		Source::Camera { .. } => Advice {
+			title: "This camera stopped sending pictures.",
+			cause: format!(
+				"`{name}` may have been unplugged, or another app may have taken it. Viewers see its last picture, frozen."
+			),
+			hint: Some("If it stays frozen, check its cable, and quit any other app using the camera.".into()),
+			fixes: vec![("Open it again", Mend::Reopen)],
+			windows: false,
+			expected: false,
+		},
+		Source::Broadcast { path } => Advice {
+			title: "This broadcast stopped sending pictures.",
+			cause: format!(
+				"`{name}`'s sender may have stopped, or lost its connection to the relay. Viewers see its last picture, frozen."
+			),
+			hint: Some(format!(
+				"If it stays frozen, whoever sends `{path}` should check that it is still live and its connection keeps up."
+			)),
+			fixes: vec![again],
+			windows: false,
+			expected: false,
+		},
+		Source::Layer { broadcast, .. } => Advice {
+			title: "This layer stopped sending pictures.",
+			cause: format!(
+				"`{name}` comes from the broadcast `{broadcast}`, whose sender may have stopped or lost its connection. Viewers see its last picture, frozen."
+			),
+			hint: None,
+			fixes: vec![again],
+			windows: false,
+			expected: false,
+		},
+		_ => return None,
+	};
+	Some(advice)
+}
+
+/// What to say of `source`, called `name`, gone dark.
+fn dark(name: &str, source: &Source) -> Option<Advice> {
 	let whole = ("Capture the whole screen instead", Mend::Replace(whole_screen()));
 	let advice = match source {
 		Source::PickedWindow | Source::Window { .. } => Advice {
@@ -43,29 +95,29 @@ fn advice(name: &str, source: &Source) -> Option<Advice> {
 			cause: format!(
 				"`{name}` may have closed, been minimized, or changed how it draws. Viewers see black where it was."
 			),
-			hint: match () {
-				_ if cfg!(target_os = "macos") => Some(SCREEN_PERMISSION),
-				_ => Some(
-					"A game in exclusive full screen refuses capture: switch it to borderless or windowed in its display settings.",
-				),
-			},
+			hint: Some(match () {
+				_ if cfg!(target_os = "macos") => SCREEN_PERMISSION.into(),
+				_ => "A game in exclusive full screen refuses capture: switch it to borderless or windowed in its display settings.".into(),
+			}),
 			fixes: match source {
 				Source::PickedWindow => vec![("Pick it again", Mend::PickAgain), whole],
 				_ => vec![whole],
 			},
 			windows: !matches!(source, Source::PickedWindow),
+			expected: true,
 		},
 		Source::PickedDisplay | Source::Display { .. } => Advice {
 			title: "This screen went black.",
 			cause: format!(
 				"`{name}` may be locked or asleep, or showing something that refuses capture, such as protected video. Viewers see black where it was."
 			),
-			hint: cfg!(target_os = "macos").then_some(SCREEN_PERMISSION),
+			hint: cfg!(target_os = "macos").then(|| SCREEN_PERMISSION.into()),
 			fixes: match source {
 				Source::PickedDisplay => vec![("Pick it again", Mend::PickAgain)],
 				_ => vec![("Open it again", Mend::Reopen)],
 			},
 			windows: false,
+			expected: true,
 		},
 		Source::Camera { .. } => Advice {
 			title: "This camera went black.",
@@ -80,9 +132,11 @@ fn advice(name: &str, source: &Source) -> Option<Advice> {
 					"If it stays black, Windows may have taken away the camera: allow desktop apps in Settings > Privacy & security > Camera.",
 				),
 				_ => None,
-			},
+			}
+			.map(str::to_string),
 			fixes: vec![("Open it again", Mend::Reopen)],
 			windows: false,
+			expected: true,
 		},
 		_ => return None,
 	};
@@ -116,9 +170,29 @@ pub(super) fn expect(state: &mut State, capture: &str, expected: bool) -> anyhow
 	edit(state, label, None, |draft| draft.set_video(capture, Some(video)))
 }
 
-/// "No picture for 12 s", what a capture dark for `dark` shows.
-pub(super) fn words(dark: Duration) -> String {
-	format!("No picture for {:.0} s", dark.as_secs_f64())
+/// "No picture for 12 s" for a capture gone dark, "No new picture for 3 s"
+/// for one stalled: what its row says under its name.
+pub(super) fn words(lost: Lost) -> String {
+	let what = match lost {
+		Lost::Dark(_) => "No picture",
+		Lost::Stalled(_) => "No new picture",
+	};
+	format!("{what} for {:.0} s", lost.since().as_secs_f64())
+}
+
+/// What the health dot says of `dark` layers gone dark and `stalled` ones
+/// stalled, such as "1 layer dark"; `None` for none.
+pub(super) fn counted(dark: usize, stalled: usize) -> Option<String> {
+	let layers = |count: usize| match count {
+		1 => "1 layer".to_string(),
+		count => format!("{count} layers"),
+	};
+	match (dark, stalled) {
+		(0, 0) => None,
+		(dark, 0) => Some(format!("{} dark", layers(dark))),
+		(0, stalled) => Some(format!("{} stalled", layers(stalled))),
+		(dark, stalled) => Some(format!("{} dark or stalled", layers(dark + stalled))),
+	}
 }
 
 /// The amber badge in `rect`: a warning sign on amber.
@@ -128,22 +202,23 @@ pub(super) fn badge(ui: &Ui, rect: Rect) {
 	Icon::Warning.paint(ui, rect, rect.width() * 0.6, kit::ON_CUE);
 }
 
-/// The badge for the capture `source`, called `name`, dark for `dark`, in
-/// `rect`: a click opens its popover. The fix asked for, if one was; with
-/// `windows`, the windows to offer in its place, if listed.
+/// The badge for the source `source`, called `name`, that `lost` its
+/// picture, in `rect`: a click opens its popover. The fix asked for, if one
+/// was; with `windows`, the windows to offer in its place, if listed.
 pub(super) fn badge_button(
 	ui: &mut Ui,
 	rect: Rect,
 	id: egui::Id,
 	name: &str,
 	source: &Source,
+	lost: Lost,
 	windows: Option<&Result<Vec<Pick>, String>>,
 ) -> Option<Mend> {
 	let response = ui.interact(rect, id, Sense::click());
 	let label = format!("What happened to {name}");
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
 	badge(ui, rect);
-	let advice = advice(name, source)?;
+	let advice = advice(name, source, lost)?;
 	let mut mend = None;
 	kit::popover(&response).width(300.0).show(|ui| {
 		mend = popover(ui, &advice, windows);
@@ -203,27 +278,34 @@ fn popover(ui: &mut Ui, advice: &Advice, windows: Option<&Result<Vec<Pick>, Stri
 			mend = Some(fix.clone());
 		}
 	}
-	if let Some(hint) = advice.hint {
+	if let Some(hint) = &advice.hint {
 		ui.add_space(4.0);
 		ui.add(egui::Label::new(egui::RichText::new(hint).font(kit::ui(11.0)).color(kit::DIM)).wrap());
 	}
-	ui.add_space(4.0);
-	let expected = ui
-		.add(egui::Button::new(egui::RichText::new("It is meant to go dark").color(kit::DIM)).frame(false))
-		.on_hover_text("Stop watching it for going dark; its inspector watches it again");
-	if expected.clicked() {
-		mend = Some(Mend::Expected);
+	if advice.expected {
+		ui.add_space(4.0);
+		let expected = ui
+			.add(egui::Button::new(egui::RichText::new("It is meant to go dark").color(kit::DIM)).frame(false))
+			.on_hover_text("Stop watching it for going dark; its inspector watches it again");
+		if expected.clicked() {
+			mend = Some(Mend::Expected);
+		}
 	}
 	mend
 }
 
-/// Mark the dark layer at `at` on the picture: an amber dashed outline, and
-/// its name on an amber pill in its middle.
-pub(super) fn on_picture(ui: &Ui, at: Rect, name: &str) {
+/// Mark the layer called `name` at `at`, which `lost` its picture, on the
+/// picture: an amber dashed outline, and its name on an amber pill in its
+/// middle.
+pub(super) fn on_picture(ui: &Ui, at: Rect, name: &str, lost: Lost) {
 	let painter = ui.painter();
 	super::dashed(painter, at.shrink(1.5), Stroke::new(2.0, kit::CUE));
 
-	let text = format!("{name} · no picture");
+	let what = match lost {
+		Lost::Dark(_) => "no picture",
+		Lost::Stalled(_) => "no new picture",
+	};
+	let text = format!("{name} · {what}");
 	let galley = painter.layout_no_wrap(text.to_uppercase(), kit::display(13.0), kit::ON_CUE);
 	let size = galley.size() + vec2(44.0, 14.0);
 	let pill = Rect::from_center_size(at.center(), size);
@@ -242,6 +324,9 @@ pub(super) fn on_picture(ui: &Ui, at: Rect, name: &str) {
 mod tests {
 	use super::*;
 
+	const DARK: Lost = Lost::Dark(Duration::from_secs(12));
+	const STALLED: Lost = Lost::Stalled(Duration::from_secs(3));
+
 	/// Every watched kind says what happened and offers a fix, and a window
 	/// or display the picker granted offers to pick it again first.
 	#[test]
@@ -254,20 +339,58 @@ mod tests {
 			Source::PickedWindow,
 		];
 		for source in kinds {
-			let advice = advice("game", &source).expect("advice");
+			let advice = advice("game", &source, DARK).expect("advice");
 			assert!(advice.cause.contains("`game`"));
 			assert!(!advice.fixes.is_empty() || advice.windows, "{source:?}");
+			assert!(advice.expected, "{source:?}");
 		}
-		let picked = advice("game", &Source::PickedWindow).unwrap();
+		let picked = advice("game", &Source::PickedWindow, DARK).unwrap();
 		assert_eq!(picked.fixes[0].1, Mend::PickAgain);
-		assert!(
-			advice(
-				"logo",
-				&Source::Image {
-					path: "logo.png".into()
-				}
-			)
-			.is_none()
-		);
+		let logo = Source::Image {
+			path: "logo.png".into(),
+		};
+		assert!(advice("logo", &logo, DARK).is_none());
+		assert!(advice("logo", &logo, STALLED).is_none());
+	}
+
+	/// Every kind whose picture can stall says so and offers to open or
+	/// subscribe again, and never to stop watching it.
+	#[test]
+	fn every_stalling_kind_has_advice() {
+		let kinds = [
+			Source::Camera { id: None },
+			Source::Broadcast { path: "guest".into() },
+			Source::Layer {
+				broadcast: "remote".into(),
+				source: "cam".into(),
+			},
+		];
+		for source in kinds {
+			let advice = advice("cam", &source, STALLED).expect("advice");
+			assert!(advice.cause.contains("`cam`"), "{source:?}");
+			assert!(advice.cause.contains("frozen"), "{source:?}");
+			assert_eq!(advice.fixes[0].1, Mend::Reopen, "{source:?}");
+			assert!(!advice.expected, "{source:?}");
+		}
+		let broadcast = advice("cam", &Source::Broadcast { path: "guest".into() }, STALLED).unwrap();
+		assert!(broadcast.hint.unwrap().contains("`guest`"));
+		// A window that stands still is not stalled.
+		assert!(advice("game", &Source::PickedWindow, STALLED).is_none());
+	}
+
+	#[test]
+	fn rows_say_how_long() {
+		assert_eq!(words(DARK), "No picture for 12 s");
+		assert_eq!(words(STALLED), "No new picture for 3 s");
+	}
+
+	/// The health dot names what the layers lost, and counts them.
+	#[test]
+	fn the_dot_counts_layers_without_a_picture() {
+		assert_eq!(counted(0, 0), None);
+		assert_eq!(counted(1, 0).as_deref(), Some("1 layer dark"));
+		assert_eq!(counted(2, 0).as_deref(), Some("2 layers dark"));
+		assert_eq!(counted(0, 1).as_deref(), Some("1 layer stalled"));
+		assert_eq!(counted(1, 1).as_deref(), Some("2 layers dark or stalled"));
 	}
 }

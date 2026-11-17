@@ -113,6 +113,9 @@ enum View {
 	/// BUILD with the game's window gone dark selected, and what to do about
 	/// it open from its badge.
 	Dark,
+	/// BUILD with the host's camera stalled selected, and what to do about it
+	/// open from its badge.
+	Stalled,
 }
 
 /// BUILD with the host's layer, the middle of the scene on program's three,
@@ -228,6 +231,9 @@ views! {
 	/// pad, and the health dot turn amber, and its badge opens what happened
 	/// and the fixes.
 	build_dark: Live, Open::Studio { view: View::Dark, size: SIZE, show: "dark.toml", relay: false };
+	/// A camera that stopped sending pictures: the same amber badge, saying
+	/// its picture froze, and offering to open it again.
+	build_stalled: Live, Open::Studio { view: View::Stalled, size: SIZE, show: "stalled.toml", relay: false };
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
 	mix: Still, mixing(MixView::Strips, None, SIZE);
@@ -1176,6 +1182,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::OffAir(scene) => studio.edit_off_air(scene),
 		// The game's window, the back one of three over the black.
 		View::Dark => studio.build(Side::Layers, Inspect::Layer, Some(2)),
+		View::Stalled => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Review { picked, .. } => {
 			studio.turn(Page::Review);
 			studio.seed_shelf(shelf());
@@ -1190,6 +1197,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	if let View::Dark = view {
 		let dark = Duration::from_secs(12);
 		engine.state.lock().unwrap().dark.insert("game".into(), dark);
+	}
+	if let View::Stalled = view {
+		let stalled = Duration::from_secs(4);
+		engine.state.lock().unwrap().stalled.insert("host".into(), stalled);
 	}
 	if let View::OnAir
 	| View::EndStream
@@ -1258,6 +1269,18 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				.expect("the health dot counts the dark window");
 			harness.run_steps(2);
 			harness.get_by_label("What happened to game").click();
+			harness.run_steps(4);
+		}
+		View::Stalled => {
+			runtime
+				.block_on(kio::clock::timeout(SETTLE, async {
+					while engine.health.lock().unwrap().stalled == 0 {
+						kio::clock::sleep(Duration::from_millis(20)).await;
+					}
+				}))
+				.expect("the health dot counts the stalled camera");
+			harness.run_steps(2);
+			harness.get_by_label("What happened to host").click();
 			harness.run_steps(4);
 		}
 		View::Menu => {

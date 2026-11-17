@@ -748,18 +748,19 @@ impl Panels {
 			(Verdict::Healthy, true, _) => ("Healthy", kit::OK),
 			(Verdict::Unknown, true, _) => ("Starting", kit::DIM),
 		};
-		// Unless something is unhealthy, the dot counts the layers gone dark,
-		// which the streamer can see and fix on BUILD.
+		// When layers gone dark or stalled are among the worst problems, the
+		// dot counts them, as the streamer can see and fix them on BUILD. A
+		// stalled picture is unhealthy, a dark one degraded.
+		let among = match worst {
+			Verdict::Unhealthy => report.stalled > 0,
+			Verdict::Degraded => report.dark > 0,
+			_ => false,
+		};
+		let dark = among
+			.then(|| super::dark::counted(report.dark, report.stalled))
+			.flatten();
+		let name = dark.as_deref().unwrap_or(name);
 
-		let dark = match report.dark {
-			0 => None,
-			1 => Some("1 layer dark".to_string()),
-			count => Some(format!("{count} layers dark")),
-		};
-		let name = match (&dark, worst) {
-			(Some(dark), Verdict::Degraded) => dark.as_str(),
-			_ => name,
-		};
 		let mark = fx.on().then(|| crate::fx::Mark::new(ui.painter()));
 		let text = if compact { "" } else { name };
 		let pill = ui.add(kit::Pill::new(text).dot(dot).clickable());

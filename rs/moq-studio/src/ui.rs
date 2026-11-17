@@ -19,7 +19,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 
 use crate::controls::{Action, Controls};
 use crate::devices::{self, Listing, Pick};
-use crate::engine::{Engine, State};
+use crate::engine::{Engine, Lost, State};
 use crate::fx::{Fx, Mark};
 use crate::health::{self, Verdict};
 use crate::hotkeys::{self, Bindings, Hotkeys, Reach};

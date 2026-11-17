@@ -177,8 +177,10 @@ macOS the system's buttons and edges stay. It holds, from the left:
   worst problem first, then each destination, who is watching, and the
   encoder, and **Details** for the [Health](#health) window. Off air it reads
   **Ready** once the show has a relay, and **No relay** until then. While a
-  capture a live scene shows has [gone dark](#a-capture-gone-dark) and
-  nothing is worse, it counts them, as **1 layer dark**.
+  capture a live scene shows has [gone dark](#a-capture-gone-dark), or a
+  camera or broadcast it shows [stopped sending pictures](#a-picture-that-stalls),
+  and those are among the worst problems, it counts them, as **1 layer dark**,
+  **1 layer stalled**, or **2 layers dark or stalled**.
 - Record, which starts or stops a [recording](#recording) from any page, with
   the picks in Settings, Recording. Its dot pulses while recording, with
   how long it has been recording beside it.
@@ -252,7 +254,8 @@ source), and its eye, which shows or hides it. A lock shows on a locked row,
 and on the selected or pointed-at one to lock it. A dot says a source is not
 live, such as starting, stalled, offline, ended, or failed, with the words on
 hover, and an error on the layer replaces what it shows, in red. A capture
-[gone dark](#a-capture-gone-dark) has an amber badge instead, which opens
+[gone dark](#a-capture-gone-dark), or a camera or broadcast whose picture
+[stalled](#a-picture-that-stalls), has an amber badge instead, which opens
 what happened and the fix. Click a row
 to select its layer, drag it up or down its group to restack it, and
 right-click it for its menu: hide or show, lock or unlock, interact with a web
@@ -1576,6 +1579,19 @@ inspector's Source section watches it again.
 A source published independently reaches viewers on its own track, which
 shows the dark at once.
 
+### A picture that stalls
+
+A camera or broadcast can also stop sending pictures, so the program repeats
+its last one: a camera unplugged or taken by another app, or a broadcast
+whose sender stopped or lost its connection. A second without a new picture
+counts. Its layer row reads **No new picture for 3 s**, and its layer on the
+picture, each scene pad showing it, and the health dot turn amber as for a
+capture gone dark. The badge offers to open the camera or subscribe to the
+broadcast again, and says what to check where only you can: the camera's
+cable and any other app using it, or the broadcast's sender. A window or
+display that stands still is not stalled, as nothing new to draw sends no
+new picture.
+
 ## Health
 
 The Health window, from the health dot's **Details**, grades the stream every second on the thresholds moq's
@@ -1588,7 +1604,6 @@ or one a published scene carries plays: unmuted and held by it), a source
 one of them shows or plays failed or, as a media file that does not loop,
 played to its end, a camera, display, or window one of them shows
 [went dark](#a-capture-gone-dark), a browser source one of them shows is uploaded from memory
-
 rather than copied on the GPU, or viewers are late, stalling, or cannot decode
 a track. A relay lost while the other serves is
 degraded, since viewers have nothing left to fall back to; with none serving

@@ -149,12 +149,14 @@ impl Panels {
 		let now = kio::clock::now();
 		let scale = response.rect.size() / egui::vec2(width, height);
 		for (_, item) in self.shown(&state) {
-			if item.visible && state.dark(&item.source, now).is_some() {
+			if item.visible
+				&& let Some(lost) = state.lost(&item.source, now)
+			{
 				let at = egui::Rect::from_min_size(
 					response.rect.min + egui::vec2(item.rect.x, item.rect.y) * scale,
 					egui::vec2(item.rect.width, item.rect.height) * scale,
 				);
-				super::dark::on_picture(ui, at.intersect(response.rect), &item.source);
+				super::dark::on_picture(ui, at.intersect(response.rect), &item.source, lost);
 			}
 		}
 
@@ -773,7 +775,7 @@ pub(super) enum LayerAction {
 	},
 	/// Show a copy of its own of what it shows, so its look is its own.
 	Independent,
-	/// Fix the capture it shows, which went dark.
+	/// Fix what it shows, which went dark or stalled.
 	Mend(Mend),
 	Copy,
 	Remove,

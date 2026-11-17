@@ -45,7 +45,7 @@ struct ScenePad {
 	canvas: Canvas,
 	/// Why it cannot go on program, if it cannot.
 	refused: Option<String>,
-	/// Whether a camera, display, or window it shows went dark.
+	/// Whether a layer it shows went dark or stalled.
 	dark: bool,
 }
 
@@ -175,7 +175,7 @@ impl Panels {
 				name: scene.name.clone(),
 				canvas: scene.canvas(collection.canvas),
 				refused: collection.refuses(&scene.name),
-				dark: scene.items.iter().any(|item| state.dark(&item.source, now).is_some()),
+				dark: scene.items.iter().any(|item| state.lost(&item.source, now).is_some()),
 			})
 			.collect();
 		let stream = collection.program_audio().map(str::to_string);

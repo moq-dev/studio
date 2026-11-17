@@ -128,7 +128,7 @@ impl Panels {
 			let status = status_of(state, &item.source, now);
 			let capture = collection.sources.get(collection.capture(&item.source));
 			// A window chosen by id offers the windows listed now in its place.
-			if status.dark.is_some()
+			if matches!(status.lost, Some(Lost::Dark(_)))
 				&& matches!(capture, Some(Source::Window { .. }))
 				&& self.devices.listing.is_none()
 				&& self.devices.pending.is_none()
@@ -272,10 +272,10 @@ impl Row<'_> {
 			egui::TextStyle::Body,
 		);
 		painter.galley(pos2(left, rect.top() + 8.0), galley, ink);
-		let (below, color) = match (self.fault, self.status.dark) {
+		let (below, color) = match (self.fault, self.status.lost) {
 			(Some(fault), _) => (fault.to_string(), kit::ERR),
 			// Its icon says what kind it is.
-			(None, Some(dark)) => (super::dark::words(dark), kit::CUE),
+			(None, Some(lost)) => (super::dark::words(lost), kit::CUE),
 			(None, None) => (self.words, kit::DIM),
 		};
 		let small = egui::RichText::new(below).font(kit::ui(11.0)).color(color);
@@ -289,12 +289,23 @@ impl Row<'_> {
 
 		let mut asked = None;
 		// A source live and well needs no mark; the inspector says so. One
-		// gone dark has a badge in its place, which opens what to do.
+		// gone dark or stalled has a badge in its place, which opens what to do.
 		let marked = self.status.color != kit::OK || self.fault.is_some();
-		let dark = self.status.dark.is_some() && self.fault.is_none();
-		if dark && let Some(capture) = self.capture {
+		let lost = self.status.lost.filter(|_| self.fault.is_none());
+		let dark = lost.is_some();
+		if let Some(lost) = lost
+			&& let Some(capture) = self.capture
+		{
 			let badge = Rect::from_center_size(dot.center() - vec2(4.0, 0.0), Vec2::splat(20.0));
-			let mend = super::dark::badge_button(ui, badge, id.with("dark"), &self.item.source, capture, self.windows);
+			let mend = super::dark::badge_button(
+				ui,
+				badge,
+				id.with("dark"),
+				&self.item.source,
+				capture,
+				lost,
+				self.windows,
+			);
 			asked = mend.map(LayerAction::Mend);
 		}
 		let status = ui.interact(dot, id.with("status"), Sense::hover());
@@ -374,8 +385,8 @@ impl egui::Widget for AddLayer {
 pub(super) struct Health {
 	pub(super) color: Color32,
 	pub(super) lines: Vec<String>,
-	/// How long a capture has been all dark, once that counts.
-	pub(super) dark: Option<Duration>,
+	/// Why it shows no new picture, once that counts: gone dark or stalled.
+	pub(super) lost: Option<Lost>,
 }
 
 /// How `name` is doing: live, starting, stalled, ended, or failed with its
@@ -387,11 +398,8 @@ pub(super) fn status_of(state: &State, name: &str, now: kio::clock::Instant) -> 
 	let capture = collection.capture(name);
 	let feed = state.sources.get(capture);
 	let dark = state.dark(name, now);
-	let (mut color, first) = match (
-		state.compositor.error(capture),
-		feed,
-		feed.and_then(|feed| feed.stalled(now)),
-	) {
+	let lost = state.lost(name, now);
+	let (mut color, first) = match (state.compositor.error(capture), feed, state.stalled(name, now)) {
 		(Some(err), _, _) => (kit::ERR, format!("Failed: {err}")),
 		(None, _, Some(stall)) => (kit::CUE, format!("Stalled: {}", health::without(stall))),
 		(None, _, None) if let Some(dark) = dark => (kit::CUE, format!("All dark for {:.0} s", dark.as_secs_f64())),
@@ -433,7 +441,7 @@ pub(super) fn status_of(state: &State, name: &str, now: kio::clock::Instant) -> 
 			None => {}
 		},
 	}
-	Health { color, lines, dark }
+	Health { color, lines, lost }
 }
 
 /// The icon for what `name` shows, by its source's kind, or the kind of what

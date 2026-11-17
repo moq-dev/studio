@@ -68,6 +68,9 @@ pub struct Report {
 	/// How many cameras, displays, and windows a live broadcast shows went
 	/// dark, which the health dot counts.
 	pub dark: usize,
+	/// How many cameras and broadcasts a live broadcast shows stopped
+	/// sending pictures, which the health dot counts too.
+	pub stalled: usize,
 }
 
 /// One broadcast: who watches it, and how each of its tracks reaches
@@ -608,6 +611,11 @@ impl Sampler {
 			tracks: &broadcast.tracks,
 		});
 		report.dark = local.dark.len();
+		report.stalled = local
+			.stalled
+			.iter()
+			.filter(|(_, stall, _)| matches!(stall, Stall::Picture(_)))
+			.count();
 		report.problems = problems(&Facts {
 			relays: &report.relays,
 			local: &local,
@@ -1584,6 +1592,27 @@ mod tests {
 			causes(super::problems(&facts)),
 			["On scene `tall`, the output stopped: video: the encoder failed."]
 		);
+	}
+
+	/// The dot counts the layers gone dark and those whose picture stalled,
+	/// but not a stalled sound, which no layer shows.
+	#[test]
+	fn counts_the_layers_without_a_picture() {
+		let program = Live {
+			program: true,
+			scenes: Vec::new(),
+		};
+		let secs = Duration::from_secs;
+		let local = Local {
+			stalled: vec![
+				("camera".into(), Stall::Picture(secs(3)), program.clone()),
+				("mic".into(), Stall::Sound(secs(2)), program.clone()),
+			],
+			dark: vec![("game".into(), secs(12), program.clone())],
+			..Default::default()
+		};
+		let report = Sampler::new(None).sample(kio::clock::now(), local);
+		assert_eq!((report.dark, report.stalled), (1, 1));
 	}
 
 	/// A scene published again under its name counts its frames afresh,

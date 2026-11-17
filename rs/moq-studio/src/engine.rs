@@ -128,9 +128,52 @@ pub struct State {
 	/// a view's headless build.
 	#[cfg(test)]
 	pub dark: BTreeMap<String, Duration>,
+	/// Sources a view shows stalled for so long, as no camera or broadcast
+	/// can be in a view's headless build.
+	#[cfg(test)]
+	pub stalled: BTreeMap<String, Duration>,
+}
+
+/// Why a layer shows no new picture, once that counts: what its badge says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lost {
+	/// A camera, display, or window all dark this long.
+	Dark(Duration),
+	/// A camera or broadcast without a new picture this long, so its last
+	/// one repeats.
+	Stalled(Duration),
+}
+
+impl Lost {
+	/// How long it has gone without a picture.
+	pub fn since(&self) -> Duration {
+		match self {
+			Self::Dark(since) | Self::Stalled(since) => *since,
+		}
+	}
 }
 
 impl State {
+	/// What stalled of the source `name`, a copy's what it copies, live at
+	/// `now`, once that counts; see [`source::Feed::stalled`].
+	pub fn stalled(&self, name: &str, now: Instant) -> Option<source::Stall> {
+		let capture = self.collection.capture(name);
+		#[cfg(test)]
+		if let Some(stalled) = self.stalled.get(capture) {
+			return Some(source::Stall::Picture(*stalled));
+		}
+		self.sources.get(capture)?.stalled(now)
+	}
+
+	/// Why `name`, a copy showing what it copies, shows no new picture at
+	/// `now`, once that counts: a picture stalled, else gone dark.
+	pub fn lost(&self, name: &str, now: Instant) -> Option<Lost> {
+		if let Some(source::Stall::Picture(since)) = self.stalled(name, now) {
+			return Some(Lost::Stalled(since));
+		}
+		self.dark(name, now).map(Lost::Dark)
+	}
+
 	/// How long the camera, display, or window `name` shows, a copy showing
 	/// what it copies, has been all dark while live at `now`, once that is
 	/// long enough to count; see [`Compositor::dark`].
@@ -1133,6 +1176,8 @@ impl Engine {
 				renamed: Vec::new(),
 				#[cfg(test)]
 				dark: BTreeMap::new(),
+				#[cfg(test)]
+				stalled: BTreeMap::new(),
 			}),
 			autosave,
 			stats,
@@ -1500,8 +1545,8 @@ impl Engine {
 			let stalled = state
 				.sources
 				.iter()
-				.filter_map(|(name, feed)| {
-					let stall = feed.stalled(now)?;
+				.filter_map(|(name, _)| {
+					let stall = state.stalled(name, now)?;
 					let live = match stall {
 						source::Stall::Picture(_) => shown(name),
 						source::Stall::Sound(_) => heard(name),
@@ -1530,8 +1575,8 @@ impl Engine {
 						shown: shown(name),
 						heard: heard(name),
 					};
-					// A dark source is reported as dark, as its layer's row says.
-					if !reach.any() || state.dark(name, now).is_some() {
+					// A dark or stalled source is reported so, as its layer's row says.
+					if !reach.any() || state.lost(name, now).is_some() {
 						return None;
 					}
 					// A picture that fails to draw fails the source as the Sources panel shows it.
