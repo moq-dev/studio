@@ -737,8 +737,9 @@ content changes, as it does where a redo or a reload of the scene file
 moves it, or an undo moves it anywhere but back before such a move. Undo
 that move and it goes back to where it was, such as the corner it had
 glided to. A resize keeps it free to move. Switched off, it stays where it
-is drawn. Only a scene's layer set free of its [slots](#slots-and-roles)
-keeps out of the way, and not one showing a source
+is drawn, and undoing that puts it back keeping clear where it was. Only a
+scene's layer set free of its [slots](#slots-and-roles) keeps out of the
+way, and not one showing a source
 [published independently](#published-independently), which viewers place
 themselves; putting one in a slot switches it off.
 

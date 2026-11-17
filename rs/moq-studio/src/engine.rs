@@ -248,8 +248,8 @@ impl State {
 
 	/// Note each layer keeping clear in `moved`, as [`moved`] lists them, as
 	/// put back by an undo: one back where it was saved before a move by hand
-	/// held it goes back to where it was then, such as the slot it had
-	/// glided to, so the undo puts back what the streamer saw; any other
+	/// held it, or before keeping clear was switched off, goes back to where
+	/// it was then, such as the slot it had glided to, so the undo puts back what the streamer saw; any other
 	/// holds, as [`hold`](Self::hold) says.
 	fn undone(&mut self, moved: &[Moved]) {
 		let now = kio::clock::now();
