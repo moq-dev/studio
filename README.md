@@ -1564,7 +1564,9 @@ tile but a mouse pointer's few, and all one color, is dark.
 
 For its first 3 seconds of dark the studio draws the capture's last picture
 that was not dark in its place, on program and everywhere else, so a moment
-of black never reaches viewers. After that it shows the dark as it is, so a
+of black barely reaches viewers: the black shows until its picture is next
+read, up to a quarter of a second, as each picture is drawn before it is
+read, never held back for it. After that it shows the dark as it is, so a
 stale picture never passes for live, and the capture's layer row, its
 layer on the picture, and each scene pad showing it turn amber, and the
 health dot counts it. The row's badge says what may have happened and offers

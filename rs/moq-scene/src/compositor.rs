@@ -1038,6 +1038,11 @@ impl Compositor {
 	/// Have `layer`'s probe read its newest picture, and draw the probe's last
 	/// good picture in its place while it holds one over the dark. A picture
 	/// cut out of its background is never held, since the good one is not.
+	/// A picture is drawn before it is judged, so black shows until the next
+	/// read, up to [`INTERVAL`](crate::dark::INTERVAL) and its readback:
+	/// judging each one first would hold every capture's picture back by a
+	/// readback, or read every picture, and the maintainer took this bounded
+	/// flash over either on moq-dev/studio#192.
 	/// Without a probe, such as once its warning is turned off, or a picture,
 	/// it holds nothing.
 	fn watch(&mut self, layer: &mut Layer, background: Background, live: bool, now: Instant) {
