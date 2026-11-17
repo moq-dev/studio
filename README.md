@@ -1713,8 +1713,8 @@ For its first 3 seconds of dark the studio draws the capture's last picture
 that was not dark in its place, on program and everywhere else but where its
 background is removed, which shows the dark at once, so a moment
 of black barely reaches viewers: the black shows until its picture is next
-read and that read comes back from the GPU, up to a quarter of a second and a
-frame or two, as each picture is drawn before it is read, never held back for
+read and that read comes back from the GPU, up to a quarter second, plus GPU
+readback time, as each picture is drawn before it is read, never held back for
 it. After that it shows the dark as it is, so a
 stale picture never passes for live, and the capture's layer row, its
 layer on the picture, and each scene pad showing it turn amber, and the
