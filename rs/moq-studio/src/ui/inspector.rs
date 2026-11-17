@@ -26,6 +26,8 @@ enum Asked {
 	Reload(String),
 	/// Publish the source independently, or stop.
 	Publish(String, bool),
+	/// Fill the role called this with this source, or leave it unfilled.
+	Fill(String, Option<String>),
 }
 
 impl Panels {
@@ -95,45 +97,81 @@ impl Panels {
 		let mut moved = false;
 
 		section(ui, "Place");
+		if picked.layer.scene.is_some() {
+			use moq_scene::Slot;
+			let name = |slot: Option<Slot>| match slot {
+				None => "Free",
+				Some(Slot::Main) => "Main slot",
+				Some(Slot::Tile) => "A tile",
+			};
+			let mut slot = item.slot;
+			ui.horizontal(|ui| {
+				ui.label("Slot");
+				egui::ComboBox::from_id_salt("slot")
+					.selected_text(name(slot))
+					.show_ui(ui, |ui| {
+						for each in [None, Some(Slot::Main), Some(Slot::Tile)] {
+							ui.selectable_value(&mut slot, each, name(each));
+						}
+					})
+					.response
+					.on_hover_text(
+						"A layer in a slot is placed by the scene's arrangement, which closes the slot up when \
+						 its source goes away; a free one stays where its rect says",
+					);
+			});
+			if slot != item.slot {
+				asked = Some(Asked::Act(LayerAction::Slot(slot)));
+			}
+		}
 		// Where the picture draws it: a layer keeping clear where it was
 		// placed, which a move by hand starts from.
 		let placement = keep::placement(&state, &picked.layer, picked.index, &item);
 		let mut rect = placement.map_or(item.rect, |placement| placement.rect);
-		ui.horizontal(|ui| {
-			ui.spacing_mut().item_spacing.x = 4.0;
-			let width = ((ui.available_width() - 12.0) / 4.0).max(40.0);
-			let field = |drag, label| kit::Number::new(drag).label(label).width(width);
-			let size = 0.0..=f32::MAX;
-			let responses = [
-				("Move", ui.add(field(egui::DragValue::new(&mut rect.x), "X"))),
-				("Move", ui.add(field(egui::DragValue::new(&mut rect.y), "Y"))),
-				(
-					"Resize",
-					ui.add(field(egui::DragValue::new(&mut rect.width).range(size.clone()), "W")),
-				),
-				(
-					"Resize",
-					ui.add(field(egui::DragValue::new(&mut rect.height).range(size), "H")),
-				),
-			];
-			for (verb, response) in responses {
-				if let Some(gesture) = changed(&response, &mut self.gestures) {
-					let label = format!("{verb} `{name}`");
-					// A resize keeps where a layer keeping clear rests, so it
-					// stays free to move.
-					let rect = match verb {
-						"Resize" => Rect {
-							x: item.rect.x,
-							y: item.rect.y,
-							..rect
-						},
-						_ => rect,
-					};
-					moved = verb == "Move";
-					asked = Some(Asked::Item(Item { rect, ..item.clone() }, label, gesture));
+		if item.slot.is_some() {
+			ui.label(
+				egui::RichText::new("Placed by the scene's arrangement; drag it onto another slot to swap them")
+					.color(kit::DIM)
+					.font(kit::ui(11.0)),
+			);
+		}
+		if item.slot.is_none() {
+			ui.horizontal(|ui| {
+				ui.spacing_mut().item_spacing.x = 4.0;
+				let width = ((ui.available_width() - 12.0) / 4.0).max(40.0);
+				let field = |drag, label| kit::Number::new(drag).label(label).width(width);
+				let size = 0.0..=f32::MAX;
+				let responses = [
+					("Move", ui.add(field(egui::DragValue::new(&mut rect.x), "X"))),
+					("Move", ui.add(field(egui::DragValue::new(&mut rect.y), "Y"))),
+					(
+						"Resize",
+						ui.add(field(egui::DragValue::new(&mut rect.width).range(size.clone()), "W")),
+					),
+					(
+						"Resize",
+						ui.add(field(egui::DragValue::new(&mut rect.height).range(size), "H")),
+					),
+				];
+				for (verb, response) in responses {
+					if let Some(gesture) = changed(&response, &mut self.gestures) {
+						let label = format!("{verb} `{name}`");
+						// A resize keeps where a layer keeping clear rests, so it
+						// stays free to move.
+						let rect = match verb {
+							"Resize" => Rect {
+								x: item.rect.x,
+								y: item.rect.y,
+								..rect
+							},
+							_ => rect,
+						};
+						moved = verb == "Move";
+						asked = Some(Asked::Item(Item { rect, ..item.clone() }, label, gesture));
+					}
 				}
-			}
-		});
+			});
+		}
 		let mut crop = item.crop;
 		ui.horizontal(|ui| {
 			ui.label(egui::RichText::new("Crop").color(kit::DIM));
@@ -148,18 +186,22 @@ impl Panels {
 		.response
 		.on_hover_text("Percent of the picture trimmed from the left, top, right, and bottom");
 		ui.horizontal(|ui| {
-			for (text, action, hover) in [
-				(
-					"Fit",
-					LayerAction::Fit,
-					"As large as fits on the canvas, keeping its shape",
-				),
-				(
-					"Fill",
-					LayerAction::Fill,
-					"Cover the canvas, keeping its shape and cropping the rest",
-				),
-			] {
+			let fits = match item.slot {
+				Some(_) => &[][..],
+				None => &[
+					(
+						"Fit",
+						LayerAction::Fit,
+						"As large as fits on the canvas, keeping its shape",
+					),
+					(
+						"Fill",
+						LayerAction::Fill,
+						"Cover the canvas, keeping its shape and cropping the rest",
+					),
+				][..],
+			};
+			for (text, action, hover) in fits.iter().cloned() {
 				if ui.button(text).on_hover_text(hover).clicked() {
 					asked = Some(Asked::Act(action));
 				}
@@ -180,6 +222,7 @@ impl Panels {
 		// viewers place a published source where the scene file does.
 		let published = collection.published.contains(collection.capture(&item.source));
 		if picked.layer.scene.is_some()
+			&& item.slot.is_none()
 			&& !published
 			&& let Some((keep_clear, label)) = keep::inspector(ui, item.keep_clear, placement)
 		{
@@ -355,9 +398,11 @@ impl Panels {
 			ui.label(text).on_hover_text(list.join("\n"));
 			if places.len() > 1 {
 				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					let copyable = !collection.unfilled(&item.source);
 					if ui
-						.button("Make independent")
+						.add_enabled(copyable, egui::Button::new("Make independent"))
 						.on_hover_text(linked_note(places.len()))
+						.on_disabled_hover_text(super::build::NOTHING_TO_COPY)
 						.clicked()
 					{
 						asked = Some(Asked::Act(LayerAction::Independent));
@@ -413,6 +458,34 @@ impl Panels {
 					asked = Some(Asked::Reload(name.clone()));
 				}
 			});
+			if let Source::Role { source: filled } = source {
+				let fillers: Vec<String> = collection
+					.sources
+					.iter()
+					.filter(|(_, other)| other.has_video() && !other.is_role() && !matches!(other, Source::Lut { .. }))
+					.map(|(name, _)| name.clone())
+					.collect();
+				let mut fill = filled.clone();
+				ui.horizontal(|ui| {
+					ui.label("Filled by");
+					egui::ComboBox::from_id_salt("fill")
+						.selected_text(fill.as_deref().unwrap_or("Nothing"))
+						.show_ui(ui, |ui| {
+							ui.selectable_value(&mut fill, None, "Nothing");
+							for other in &fillers {
+								ui.selectable_value(&mut fill, Some(other.clone()), other);
+							}
+						})
+						.response
+						.on_hover_text(
+							"What the role shows in every scene of the show, so a scene built from roles \
+							 survives a change of hardware. Unfilled, it draws nothing and its slot closes up.",
+						);
+				});
+				if fill != *filled {
+					asked = Some(Asked::Fill(name.clone(), fill));
+				}
+			}
 			if source.publishes() {
 				let mut published = collection.published.contains(&name);
 				if ui
@@ -429,7 +502,8 @@ impl Panels {
 					asked = Some(Asked::Publish(name.clone(), published));
 				}
 			}
-			if source.has_video() {
+			// A role takes the look of the source filling it.
+			if source.has_video() && !source.is_role() {
 				let own = Selection::Source(name.clone());
 				egui::CollapsingHeader::new("Its own crop and filters")
 					.id_salt("source look")
@@ -474,6 +548,15 @@ impl Panels {
 			Asked::Reload(name) => {
 				state.restart(&name);
 				Ok(())
+			}
+			Asked::Fill(role, source) => {
+				let label = match &source {
+					Some(source) => format!("Fill the role `{role}` with `{source}`"),
+					None => format!("Leave the role `{role}` unfilled"),
+				};
+				edit(&mut state, label, None, |draft| {
+					draft.set_source(&role, Some(Source::Role { source }))
+				})
 			}
 			Asked::Publish(name, published) => {
 				let verb = if published { "Publish" } else { "Stop publishing" };
@@ -675,12 +758,16 @@ impl Panels {
 				.color(kit::DIM)
 				.font(kit::ui(12.0)),
 		);
+		let slotted = self.slots(ui, &mut state, index);
 		if let Some(action) = action {
 			let result = self.scene_action(&mut state, action);
 			drop(state);
 			self.fail(Spot::Scene, result);
 		} else {
 			drop(state);
+		}
+		if let Some(result) = slotted {
+			self.fail(Spot::Scene, result);
 		}
 		section(ui, "Every scene");
 		self.transition(ui);

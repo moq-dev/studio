@@ -30,10 +30,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use moq_net::Path;
-use moq_scene::{Collection, Draft, Filter, History, Item, Layer, Source, Video};
+use moq_scene::{Collection, Draft, Filter, History, Item, Layer, Slot, Source, Video};
 use url::Url;
 
-use crate::engine::Engine;
+use crate::engine::{Engine, State};
 
 /// The domain `.github/workflows/join.yml` deploys `js/join` to.
 const JOIN_PAGE: &str = "https://join.studio.moq.dev/";
@@ -53,6 +53,9 @@ const RETURN: &str = ".return";
 /// Where the studio's session in the room serves the program, which every
 /// guest's return feed shows. The room's announcements hide it.
 pub const PROGRAM: &str = ".program";
+
+/// The most guests a scene's tiles take on their own; more wait under Add.
+pub const MAX_GUESTS: usize = 4;
 
 /// The shortest `--guest-expiry`: half of it must leave room for a renewal to
 /// reach the guest and the relay before the token it replaces expires.
@@ -152,8 +155,8 @@ impl Config {
 	}
 }
 
-/// Where the guests removed from scenes, and how often each was let back in,
-/// are kept: `room.guests.toml` for `room.jwk`. Beside the key, since the
+/// Where the guests removed from scenes, how often each was let back in, and
+/// who appeared on their own are kept: `room.guests.toml` for `room.jwk`. Beside the key, since the
 /// tokens they bound are the key's, whichever scene file the studio opens.
 fn removals_path(key: &std::path::Path) -> PathBuf {
 	let mut name = key.file_stem().unwrap_or_default().to_os_string();
@@ -171,6 +174,10 @@ struct Removals {
 	/// Each guest's [`Participant::generation`], when not zero.
 	#[serde(default)]
 	generation: BTreeMap<String, u64>,
+	/// The guests who [appeared](Participant::appeared) on their own since
+	/// their newest link.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	appeared: BTreeSet<String>,
 }
 
 /// The studio's room: who was invited, and what each guest publishes.
@@ -211,6 +218,10 @@ pub struct Participant {
 	/// How often a new link let them back in after a removal. Their renewals are
 	/// published under it, so a token from before cannot read them.
 	pub generation: u64,
+	/// Whether they appeared on their own in a tile since their newest link,
+	/// across restarts, after which where they are shown is the host's to say:
+	/// a reconnect never undoes the host taking them off.
+	pub appeared: bool,
 }
 
 impl Participant {
@@ -313,6 +324,9 @@ impl Room {
 		for (identity, generation) in removals.generation {
 			participants.entry(identity).or_default().generation = generation;
 		}
+		for identity in removals.appeared {
+			participants.entry(identity).or_default().appeared = true;
+		}
 		self.removals = Some(path);
 		Ok(self)
 	}
@@ -342,11 +356,13 @@ impl Room {
 		let generation = participants
 			.iter()
 			.filter(|(_, participant)| participant.generation > 0);
+		let appeared = participants.iter().filter(|(_, participant)| participant.appeared);
 		let removals = Removals {
 			removed: removed.map(|(identity, _)| identity.clone()).collect(),
 			generation: generation
 				.map(|(identity, participant)| (identity.clone(), participant.generation))
 				.collect(),
+			appeared: appeared.map(|(identity, _)| identity.clone()).collect(),
 		};
 		let context = || format!("writing {}", path.display());
 		let dir = match path.parent() {
@@ -384,6 +400,7 @@ impl Room {
 		anyhow::ensure!(!name.starts_with('.'), "a guest's name cannot start with `.`");
 		let mut participants = self.participants.lock().unwrap();
 		let removed = participants.get(name).is_some_and(|participant| participant.removed);
+		let appeared = participants.get(name).is_some_and(|participant| participant.appeared);
 		let generation = participants.get(name).map_or(0, |participant| participant.generation);
 		// Refused before anything changes, as a name that cannot be a guest.
 		let (token, expires) = self.sign(name, generation + u64::from(removed))?;
@@ -404,6 +421,10 @@ impl Room {
 			.finish();
 		link.set_fragment(Some(&fragment));
 		let invite = Invite { link, expires };
+		// A new link may appear on its own again.
+		if appeared {
+			self.change(&mut participants, name, |participant| participant.appeared = false)?;
+		}
 		participants.entry(name.to_string()).or_default().invite = Some(invite.clone());
 		drop(participants);
 		self.changed.send_replace(());
@@ -615,6 +636,14 @@ impl Room {
 		Ok(*draft.collection() != before)
 	}
 
+	/// The source in `collection` playing the room-relative broadcast `path`.
+	fn source_at(&self, collection: &Collection, path: &Path) -> Option<String> {
+		let played = self.path.join(path).ok()?.to_string();
+		let mut sources = collection.sources.iter();
+		let found = sources.find(|(_, source)| matches!(source, Source::Broadcast { path } if *path == played));
+		found.map(|(name, _)| name.clone())
+	}
+
 	/// The sources in `collection` that show the guest called `identity`.
 	pub fn sources_of(&self, collection: &Collection, identity: &str) -> Vec<String> {
 		self.guest_sources(collection, identity)
@@ -647,6 +676,177 @@ impl Room {
 	fn guest_of(&self, source: &Source) -> Option<(Path, Kind)> {
 		guest_in(&self.path, source)
 	}
+
+	/// Whether `source` plays a broadcast of a guest in the room, announced
+	/// now.
+	fn here(&self, source: &Source) -> bool {
+		let Some((identity, kind)) = self.guest_of(source) else {
+			return false;
+		};
+		let participants = self.participants.lock().unwrap();
+		participants.get(identity.as_str()).is_some_and(|guest| match kind {
+			Kind::Camera => guest.camera,
+			Kind::Screen => guest.screen,
+		})
+	}
+}
+
+/// Where `source` would take a tile of `scene`: after its last layer in a
+/// slot, so a logo stays in front. `None` for a scene with no slots, or one
+/// showing it already, under its name or another playing the same broadcast.
+pub fn tile(collection: &Collection, scene: &str, source: &str) -> Option<usize> {
+	let items = &collection.scene(scene)?.items;
+	let last = items.iter().rposition(|item| item.slot.is_some())?;
+	let broadcast = |name: &str| match collection.sources.get(collection.capture(name)) {
+		Some(Source::Broadcast { path }) => Some(path),
+		_ => None,
+	};
+	let wanted = broadcast(source);
+	let showing = |item: &Item| {
+		collection.capture(&item.source) == source || wanted.is_some() && broadcast(&item.source) == wanted
+	};
+	if items.iter().any(showing) {
+		return None;
+	}
+	Some(last + 1)
+}
+
+/// How many guests in `room` the tiles of `scene` show: a guest who left
+/// keeps their tile, closed until they are back or [`place`] gives it to
+/// another, but not their place among the guests.
+fn tiled(collection: &Collection, room: &Room, scene: &str) -> usize {
+	let items = collection.scene(scene).map_or(&[][..], |scene| &scene.items);
+	let guests = items.iter().filter(|item| {
+		let shown = collection.sources.get(collection.capture(&item.source));
+		item.slot == Some(Slot::Tile) && shown.is_some_and(|shown| room.here(shown))
+	});
+	guests.count()
+}
+
+/// Where in its scene the next guest to appear on their own goes.
+enum Place {
+	/// A new tile after the others.
+	Next,
+	/// The tile at this index the studio gave a guest who has since left,
+	/// in place of them.
+	Taken(usize),
+}
+
+/// Where in `scene` the next guest to appear on their own goes: a new tile
+/// while the tiles hold fewer than [`MAX_GUESTS`] guests of the room, here
+/// or not, and once they hold that many the [auto](Item::auto) tile of one
+/// who has left, so one coming back cannot make a fifth. A tile the host
+/// gave a guest stays theirs, even one who once appeared on their own; with
+/// none to take there is no place.
+fn place(collection: &Collection, room: &Room, scene: &str) -> Option<Place> {
+	let items = &collection.scene(scene)?.items;
+	let guests: Vec<(usize, &Item, &Source)> = (items.iter().enumerate())
+		.filter(|(_, item)| item.slot == Some(Slot::Tile))
+		.filter_map(|(index, item)| Some((index, item, collection.sources.get(collection.capture(&item.source))?)))
+		.filter(|(_, _, shown)| room.guest_of(shown).is_some())
+		.collect();
+	if guests.len() < MAX_GUESTS {
+		return Some(Place::Next);
+	}
+	let left = guests
+		.into_iter()
+		.find(|(_, item, shown)| item.auto && !room.here(shown));
+	left.map(|(index, ..)| Place::Taken(index))
+}
+
+/// The audio scenes with the guest shown by the tile at `index` of `scene`
+/// no longer heard on program, as [`appear`] had them, once the studio gives
+/// that tile to another, so they are not heard there unseen when back.
+/// `None` while a layer elsewhere, in a scene or the top layer, still shows
+/// them. The other mixes stay as the host set them.
+fn unheard(collection: &Collection, scene: &str, index: usize) -> Option<Vec<moq_scene::AudioScene>> {
+	let gone = collection.capture(&collection.scene(scene)?.items.get(index)?.source);
+	let others = collection.scenes.iter().flat_map(|other| {
+		let elsewhere = move |(at, _): &(usize, &Item)| other.name != scene || *at != index;
+		other.items.iter().enumerate().filter(elsewhere).map(|(_, item)| item)
+	});
+	if others
+		.chain(&collection.top)
+		.any(|item| collection.capture(&item.source) == gone)
+	{
+		return None;
+	}
+	let mut scenes = collection.audio_scenes.clone();
+	scenes.iter_mut().find(|audio| audio.program)?.sounds.remove(gone);
+	Some(scenes)
+}
+
+/// Show the guest playing from `source` in the next tile of `scene`, the
+/// one on program, and hear them on program, as one edit the host can undo,
+/// if [`tile`] finds one and the tiles show fewer than [`MAX_GUESTS`]
+/// guests still in `room`, marking them [appeared](Participant::appeared).
+/// Once the tiles hold four guests, here or not, they take the tile one who
+/// appeared on their own and left had, in place of them, or wait under Add
+/// with no such tile; see [`place`]. Says whether it did.
+pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str) -> anyhow::Result<bool> {
+	let Some(scene) = scene else { return Ok(false) };
+	if tiled(state.collection(), room, scene) >= MAX_GUESTS {
+		return Ok(false);
+	}
+	let Some(next) = tile(state.collection(), scene, source) else {
+		return Ok(false);
+	};
+	let layer = Layer::scene(scene);
+	let Some(place) = place(state.collection(), room, scene) else {
+		return Ok(false);
+	};
+	let mut draft = state.collection().draft(format!("`{source}` joins `{scene}`"));
+	// A tile of their own, shown, with nothing of the look the host gave
+	// whoever had it before.
+	let item = Item {
+		slot: Some(Slot::Tile),
+		auto: true,
+		..Item::new(source, moq_scene::Rect::default())
+	};
+	match place {
+		Place::Taken(index) => {
+			if let Some(scenes) = unheard(state.collection(), scene, index) {
+				draft.set_audio_scenes(scenes)?;
+			}
+			draft.set_item(&layer, index, item)?;
+		}
+		Place::Next => draft.insert_item(&layer, next, item)?,
+	}
+	if state.collection().sources.get(source).is_some_and(Source::has_audio) {
+		draft.hear(source)?;
+	}
+	let identity = state
+		.collection()
+		.sources
+		.get(source)
+		.and_then(|shown| room.guest_of(shown));
+	// Kept before they go on, so a latch that cannot be saved never leaves
+	// them on air with nothing keeping them off once the host undoes it.
+	let latch = |appeared: bool| match &identity {
+		Some((identity, _)) => {
+			let mut participants = room.participants.lock().unwrap();
+			room.change(&mut participants, identity.as_str(), |participant| {
+				participant.appeared = appeared
+			})
+		}
+		None => Ok(()),
+	};
+	latch(true)?;
+	if let Err(err) = state.commit(draft, None) {
+		if let Err(undone) = latch(false) {
+			// Forgotten here even so, so they may appear on their next
+			// join, and the next write of the file forgets it there too.
+			if let Some((identity, _)) = &identity
+				&& let Some(guest) = room.participants.lock().unwrap().get_mut(identity.as_str())
+			{
+				guest.appeared = false;
+			}
+			tracing::warn!(error = format!("{undone:#}"), "cannot forget a guest's appearance");
+		}
+		return Err(err);
+	}
+	state.shifted(scene);
+	Ok(true)
 }
 
 /// Whether `source` plays a guest's camera and microphone, or their screen, in
@@ -722,20 +922,40 @@ pub async fn run(engine: Arc<Engine>, room: Arc<Room>, origin: moq_net::origin::
 		};
 		let path = announce.prefix;
 		let mut state = engine.state.lock().unwrap();
-		let Some((name, source)) = room.observe(&path, online, state.collection(), state.history()) else {
-			continue;
-		};
-		// Not the host's edit, so it stays out of what they undo and redo. It
-		// is in no scene or audio scene, so the guest reaches the program only
-		// once the host places them or puts their sound in an audio scene.
-		let mut draft = state.collection().draft(format!("Add guest `{name}`"));
-		let added = draft
-			.set_source(&name, Some(source))
-			.map_err(anyhow::Error::from)
-			.and_then(|()| state.apply_outside(draft));
-		match added {
-			Ok(()) => tracing::info!(source = %name, %path, "a guest joined"),
-			Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot add a guest"),
+		if let Some((name, source)) = room.observe(&path, online, state.collection(), state.history()) {
+			// Not the host's edit, so it stays out of what they undo and redo.
+			// It is in no scene or audio scene, so the guest reaches the
+			// program only once the host places them or puts their sound in an
+			// audio scene, or they appear on their own below.
+			let mut draft = state.collection().draft(format!("Add guest `{name}`"));
+			let added = draft
+				.set_source(&name, Some(source))
+				.map_err(anyhow::Error::from)
+				.and_then(|()| state.apply_outside(draft));
+			match added {
+				Ok(()) => tracing::info!(source = %name, %path, "a guest joined"),
+				Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot add a guest"),
+			}
+		}
+		// A guest the host removed, or one who appeared once already, stays
+		// where the host put them until a new link.
+		let camera = guest(&path).is_some_and(|(identity, kind)| {
+			let participants = room.participants.lock().unwrap();
+			let settled = participants
+				.get(identity.as_str())
+				.is_some_and(|guest| guest.removed || guest.appeared);
+			kind == Kind::Camera && !settled
+		});
+		if online && camera && engine.guests_appear() {
+			let Some(name) = room.source_at(state.collection(), &path) else {
+				continue;
+			};
+			let program = state.compositor.program_scene().map(str::to_string);
+			match appear(&mut state, &room, program.as_deref(), &name) {
+				Ok(true) => tracing::info!(source = %name, "a guest appeared on their own"),
+				Ok(false) => {}
+				Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot show a guest"),
+			}
 		}
 	}
 	tracing::warn!("the room's announcements ended");
@@ -1203,6 +1423,7 @@ pub(crate) mod tests {
 				screen: false,
 				removed: false,
 				generation: 0,
+				appeared: false,
 			}
 		);
 
@@ -1484,7 +1705,8 @@ pub(crate) mod tests {
 
 	/// A removed guest stays unrenewed when the studio restarts, whichever
 	/// scene file it opens, until a new link, whose generation a restart keeps
-	/// too: the state is the room key's, kept beside it.
+	/// too, and so does a guest having appeared on their own: the state is
+	/// the room key's, kept beside it.
 	#[test]
 	fn a_removal_outlasts_a_restart() {
 		let dir = tempfile::tempdir().unwrap();
@@ -1534,6 +1756,126 @@ pub(crate) mod tests {
 		std::fs::remove_dir(&file).unwrap();
 		room.stop_renewing("alice").unwrap();
 		assert!(start().participants()["alice"].removed);
+
+		// Appearing on their own outlasts a restart too, until a new link.
+		let room = start();
+		let mut participants = room.participants.lock().unwrap();
+		room.change(&mut participants, "bob", |participant| participant.appeared = true)
+			.unwrap();
+		drop(participants);
+		let room = start();
+		assert!(room.participants()["bob"].appeared, "kept across a restart");
+		room.invite("bob").unwrap();
+		let cleared = start().participants().get("bob").is_none_or(|bob| !bob.appeared);
+		assert!(cleared, "a new link clears it");
+	}
+
+	/// A guest takes the tile after the scene's last layer in a slot, so a
+	/// logo stays in front; the tiles take four guests on their own, and the
+	/// host more. A scene with no slots, or showing them already, takes none.
+	#[test]
+	fn a_guest_takes_the_next_tile_until_four() {
+		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
+		let mut collection = Collection::new();
+		collection
+			.sources
+			.insert("Camera".into(), Source::Role { source: None });
+		let observe = |collection: &Collection, guest: &str, online: bool| {
+			let path = format!("{guest}/camera.hang");
+			room.observe(&Path::new(&path).unwrap(), online, collection, &History::new());
+		};
+		let logo = Source::Color {
+			color: moq_scene::Rgba([255, 255, 255, 255]),
+		};
+		collection.sources.insert("logo".into(), logo);
+		for guest in ["alice", "bob", "carol", "dave", "erin"] {
+			let path = format!("guests/{guest}/camera.hang");
+			collection.sources.insert(guest.into(), Source::Broadcast { path });
+		}
+		let slot = |source: &str| Item {
+			slot: Some(Slot::Tile),
+			..Item::new(source, moq_scene::Rect::default())
+		};
+		let fill = moq_scene::Rect::fill(&collection.canvas);
+		collection.scenes[0].items = vec![slot("Camera"), Item::new("logo", fill)];
+		collection.validate().unwrap();
+
+		assert_eq!(tile(&collection, "Scene", "alice"), Some(1));
+		let path = "guests/alice/camera.hang".to_string();
+		collection.sources.insert("Alice".into(), Source::Broadcast { path });
+		collection.scenes[0].items.insert(1, slot("Alice"));
+		assert_eq!(tile(&collection, "Scene", "alice"), None, "shown under another name");
+		collection.scenes[0].items.remove(1);
+		collection.sources.remove("Alice");
+		for guest in ["alice", "bob", "carol", "dave"] {
+			observe(&collection, guest, true);
+			assert!(tiled(&collection, &room, "Scene") < MAX_GUESTS);
+			let at = tile(&collection, "Scene", guest).unwrap();
+			collection.scenes[0].items.insert(at, slot(guest));
+			assert_eq!(tile(&collection, "Scene", guest), None, "{guest} is shown");
+		}
+		assert_eq!(collection.scenes[0].items.last().unwrap().source, "logo");
+		assert_eq!(
+			tiled(&collection, &room, "Scene"),
+			MAX_GUESTS,
+			"four guests fill the tiles"
+		);
+		observe(&collection, "bob", false);
+		assert_eq!(
+			tiled(&collection, &room, "Scene"),
+			MAX_GUESTS - 1,
+			"one who left frees a place"
+		);
+		assert_eq!(tile(&collection, "Scene", "erin"), Some(5), "the host can add a fifth");
+		// The host placed bob, so his tile stays his, even once he has
+		// appeared on his own elsewhere.
+		room.participants.lock().unwrap().get_mut("bob").unwrap().appeared = true;
+		assert!(
+			place(&collection, &room, "Scene").is_none(),
+			"a tile the host gave bob stays his"
+		);
+		collection.scenes[0].items[2].auto = true;
+		let Some(Place::Taken(index)) = place(&collection, &room, "Scene") else {
+			panic!("the next guest takes the tile the studio gave bob");
+		};
+		assert_eq!(index, 2);
+		observe(&collection, "bob", true);
+		assert!(place(&collection, &room, "Scene").is_none(), "nor while he is back");
+		observe(&collection, "bob", false);
+
+		collection.scenes[0].items.retain(|item| item.slot.is_none());
+		assert_eq!(tile(&collection, "Scene", "erin"), None, "a scene with no slots");
+	}
+
+	/// A guest whose tile the studio gives away is no longer heard on
+	/// program, unless a layer elsewhere still shows them, and stays in the
+	/// host's other mixes.
+	#[test]
+	fn a_guest_whose_tile_is_taken_is_heard_only_where_shown() {
+		let mut collection = Collection::new();
+		let path = "guests/dave/camera.hang".to_string();
+		collection.sources.insert("dave".into(), Source::Broadcast { path });
+		let tile = Item {
+			slot: Some(Slot::Tile),
+			auto: true,
+			..Item::new("dave", moq_scene::Rect::default())
+		};
+		collection.scenes[0].items = vec![tile];
+		let mut headphones = moq_scene::AudioScene::new("Headphones");
+		headphones.sounds.insert("dave".into());
+		collection.audio_scenes[0].sounds.insert("dave".into());
+		collection.audio_scenes.push(headphones);
+		collection.validate().unwrap();
+
+		let scenes = unheard(&collection, "Scene", 0).expect("shown nowhere else");
+		assert!(!scenes[0].sounds.contains("dave"), "not on program");
+		assert!(scenes[1].sounds.contains("dave"), "still in the headphones");
+
+		let fill = moq_scene::Rect::fill(&collection.canvas);
+		let mut other = moq_scene::Scene::new("Other");
+		other.items.push(Item::new("dave", fill));
+		collection.scenes.push(other);
+		assert!(unheard(&collection, "Scene", 0).is_none(), "shown in another scene");
 	}
 
 	/// A guest joining is not the host's edit: what the host undid can still

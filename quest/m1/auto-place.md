@@ -41,4 +41,3 @@ hosted one.
 ## Related
 
 - [Living with it](/quest/m1/auto-place-check.md) - whether it moves too often, judged on real streams
-- [Scenes that lay themselves out](/quest/m1/auto-layout.md) - slots chosen by role rather than by content

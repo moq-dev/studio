@@ -69,19 +69,23 @@ pub(super) fn hold(state: &mut State, layer: &Layer, index: usize, item: &Item) 
 	}
 }
 
-/// The collection as the picture draws it: each layer keeping clear where
-/// it was placed, so a pointer over the picture finds what it sees.
-pub(super) fn drawn(state: &State) -> Cow<'_, Collection> {
+/// `staged`, the collection as the picture draws it, with each layer
+/// keeping clear where it was placed, so a pointer over the picture finds
+/// what it sees.
+pub(super) fn drawn<'a>(state: &State, staged: Cow<'a, Collection>) -> Cow<'a, Collection> {
 	let collection = state.collection();
-	let mut drawn = Cow::Borrowed(collection);
+	let mut drawn = staged;
 	for (number, scene) in collection.scenes.iter().enumerate() {
 		for (index, item) in scene.items.iter().enumerate() {
 			if item.keep_clear.is_none() {
 				continue;
 			}
-			if let Some(placement) = state.compositor.placement(&scene.name, index, &item.source)
-				&& placement.rect != item.rect
-			{
+			let Some(placement) = state.compositor.placement(&scene.name, index, &item.source) else {
+				continue;
+			};
+			// A scene staged one frame behind an edit may lack it.
+			let staged = drawn.scenes.get(number).and_then(|staged| staged.items.get(index));
+			if staged.is_some_and(|staged| staged.source == item.source && staged.rect != placement.rect) {
 				drawn.to_mut().scenes[number].items[index].rect = placement.rect;
 			}
 		}

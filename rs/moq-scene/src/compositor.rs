@@ -10,11 +10,13 @@ use kio::clock::Instant;
 use moq_video::render::Renderer;
 
 use crate::Error;
+use crate::arrange::cover;
 use crate::collection::{
 	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Nested, Rect, Settled, Shape,
 	Source, Transition,
 };
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
+use crate::glide::{Glide, REFLOW, mixed, pair, stack};
 use crate::matte::Matte;
 use crate::overlay::{Overlay, Overlays};
 use crate::place::{Look, Placement, Placer, Reducer};
@@ -116,6 +118,9 @@ pub struct Compositor {
 	keepers: HashMap<(String, usize), Keeper>,
 	/// Reduces the pictures under them, made with the first.
 	reducer: Option<Reducer>,
+	/// Each scene with items in slots, by name: where its arrangement put
+	/// them as of the last render, and their glide there.
+	reflows: HashMap<String, Reflow>,
 }
 
 /// A scene item keeping clear: where it goes, and its reads of the picture
@@ -128,6 +133,14 @@ struct Keeper {
 	rect: Rect,
 	placer: Placer,
 	look: Look,
+}
+
+/// A scene's items in slots, arranged.
+struct Reflow {
+	/// Its items where its arrangement puts them, in order.
+	arranged: Vec<Item>,
+	/// Its items as drawn, gliding to `arranged` when a slot opens or closes.
+	glide: Glide<Vec<(String, bool, Rect)>>,
 }
 
 /// The program and the scenes a transition draws whole on its way, as of the
@@ -441,6 +454,7 @@ impl Compositor {
 			switch: None,
 			keepers: HashMap::new(),
 			reducer: None,
+			reflows: HashMap::new(),
 		})
 	}
 
@@ -641,6 +655,22 @@ impl Compositor {
 		Some(picture.size())
 	}
 
+	/// The items of the scene called `scene` where its arrangement put them
+	/// as of the last [`render`](Self::render), in order, as
+	/// [`Collection::arranged`] gives them: `None` for a scene with no item
+	/// in a slot. What is drawn glides there when a slot opens or closes.
+	pub fn arranged(&self, scene: &str) -> Option<&[Item]> {
+		self.reflows.get(scene).map(|reflow| reflow.arranged.as_slice())
+	}
+
+	/// The items of the scene called `scene` where the last
+	/// [`render`](Self::render) drew them, in order: those in slots part way
+	/// along their glide while a reflow is under way, as
+	/// [`arranged`](Self::arranged) otherwise.
+	pub fn placed(&self, scene: &str) -> Option<&[Item]> {
+		self.reflows.get(scene).map(|reflow| reflow.glide.placed())
+	}
+
 	/// Whether a transition is under way.
 	pub fn transitioning(&self) -> bool {
 		self.switch.is_some()
@@ -701,6 +731,16 @@ impl Compositor {
 				Some(Some(to)) => self.outputs.insert(to.clone(), output),
 				Some(None) => None,
 				None => self.outputs.insert(scene, output),
+			};
+		}
+		// Each scene keeps where its slots were, so two swapping names do
+		// not glide from each other's.
+		let reflows = std::mem::take(&mut self.reflows);
+		for (scene, reflow) in reflows {
+			match renames.get(&scene) {
+				Some(Some(to)) => self.reflows.insert(to.clone(), reflow),
+				Some(None) => None,
+				None => self.reflows.insert(scene, reflow),
 			};
 		}
 	}
@@ -866,8 +906,10 @@ impl Compositor {
 		}
 		self.renders += 1;
 		self.update(collection, sources, now);
-		// Every draw below reads the items keeping clear where they are placed.
-		let staged = self.place(collection, now);
+		// Every draw below reads the items keeping clear where they are
+		// placed, and the scenes as arranged around them.
+		let placed = self.place(collection, now);
+		let staged = self.reflow(&placed, sources, now);
 		let collection = &*staged;
 		self.restart(collection, preview_start, program_start);
 		self.paint(collection, now);
@@ -1061,15 +1103,26 @@ impl Compositor {
 				continue;
 			};
 			keeper.placer.shown(since, now);
-			let item = collection.scene(scene).and_then(|shown| shown.items.get(*index));
-			if !item.is_some_and(|item| item.visible) || !keeper.look.due(now) {
+			let Some(shown) = collection.scene(scene) else { continue };
+			// While its slots glide, a scene draws only its visible items, so
+			// one keeping clear is found by what it shows and where it is.
+			let mine = |item: &Item| item.keep_clear.is_some() && item.source == keeper.source;
+			let rect = keeper.placer.placement().rect;
+			let at = match shown.items.get(*index) {
+				Some(item) if mine(item) => Some(*index),
+				_ => shown.items.iter().position(|item| mine(item) && item.rect == rect),
+			};
+			let Some(at) = at.filter(|&at| shown.items[at].visible) else {
+				continue;
+			};
+			if !keeper.look.due(now) {
 				continue;
 			}
 			let canvas = canvas_of(Some(scene));
 			let target = keeper.look.target(draw.effects, canvas);
 			draw.size = canvas;
 			draw.target(&target);
-			draw.under(&target, Place::scene(scene.as_str()), *index, since);
+			draw.under(&target, Place::scene(scene.as_str()), at, since);
 			reads.push((scene.clone(), *index));
 		}
 		self.previewed = previewing;
@@ -1124,6 +1177,53 @@ impl Compositor {
 			}
 		}
 		self.keepers = keepers;
+		staged
+	}
+
+	/// `collection` with each scene's items in slots where its arrangement
+	/// puts them at `now`, gliding there as a move transition does when a
+	/// slot opens or closes. A slot closes while its source is offline or
+	/// failed in `sources`, and the picture in it is cropped to cover it by
+	/// the size of its newest picture.
+	fn reflow<'a>(&mut self, collection: &'a Collection, sources: &Sources, now: Instant) -> Cow<'a, Collection> {
+		let present = |name: &str| {
+			let feed = sources.get(collection.capture(name));
+			!feed.is_some_and(|feed| matches!(feed.status(), Status::Offline | Status::Failed(_)))
+		};
+		let layers = &self.layers;
+		let size = |name: &str| match collection.nested(name) {
+			Some(Nested::Scene(scene)) => collection
+				.canvas(Some(scene))
+				.map(|canvas| (canvas.width, canvas.height)),
+			Some(Nested::Program) => Some((collection.canvas.width, collection.canvas.height)),
+			None => {
+				let layer = layers.get(collection.capture(name))?;
+				layer.picture.as_ref().map(Picture::size)
+			}
+		};
+		let mut staged = Cow::Borrowed(collection);
+		let mut reflows = HashMap::new();
+		for (index, scene) in collection.scenes.iter().enumerate() {
+			let Some(arranged) = collection.arranged(&scene.name, present, size) else {
+				continue;
+			};
+			let mut reflow = self.reflows.remove(&scene.name).unwrap_or_else(|| Reflow {
+				arranged: Vec::new(),
+				// Only the slots glide, so a layer set free that is being
+				// dragged follows the pointer.
+				glide: Glide::new(REFLOW, |item| item.slot.is_some()),
+			});
+			// Only the slots start a glide: what each shows, whether it is
+			// open, and where.
+			let slotted = arranged.iter().filter(|item| item.slot.is_some());
+			let key = slotted
+				.map(|item| (item.source.clone(), item.visible, item.rect))
+				.collect();
+			staged.to_mut().scenes[index].items = reflow.glide.show(key, &arranged, now).to_vec();
+			reflow.arranged = arranged;
+			reflows.insert(scene.name.clone(), reflow);
+		}
+		self.reflows = reflows;
 		staged
 	}
 
@@ -1581,32 +1681,6 @@ fn stinger(feed: Option<&Feed>, cut: Duration, played: &mut Option<u64>, now: In
 	})))
 }
 
-/// The crop that trims what `crop` leaves of a `size` picture evenly from two
-/// opposite sides to `canvas`'s shape, so it covers the canvas unstretched.
-fn cover(crop: Crop, size: (u32, u32), canvas: &Canvas) -> Crop {
-	let width = size.0 as f32 * (1.0 - crop.left - crop.right);
-	let height = size.1 as f32 * (1.0 - crop.top - crop.bottom);
-	let (shown, wanted) = (width / height, canvas.width as f32 / canvas.height as f32);
-	if !shown.is_finite() || shown <= 0.0 {
-		return Crop::default();
-	}
-	if shown > wanted {
-		let trim = (1.0 - wanted / shown) / 2.0;
-		Crop {
-			left: trim,
-			right: trim,
-			..Crop::default()
-		}
-	} else {
-		let trim = (1.0 - shown / wanted) / 2.0;
-		Crop {
-			top: trim,
-			bottom: trim,
-			..Crop::default()
-		}
-	}
-}
-
 /// How far moving `amount` of `canvas`'s width or height in `direction` goes,
 /// in whole pixels so a moving scene stays sharp and two meet without a seam.
 fn offset(direction: Direction, amount: f32, canvas: &Rect) -> (f32, f32) {
@@ -1664,52 +1738,6 @@ impl Pose {
 			shape: self.shape.toward(&other.shape, progress),
 		}
 	}
-}
-
-/// `old`'s filters `progress` of the way to `new`'s, or `None` if their blend
-/// modes differ or their filters do not pair up by kind, in order, as
-/// [`Filter::toward`] mixes them.
-fn mixed(old: &Item, new: &Item, progress: f32) -> Option<Vec<Filter>> {
-	if old.blend != new.blend || old.filters.len() != new.filters.len() {
-		return None;
-	}
-	let pairs = old.filters.iter().zip(&new.filters);
-	pairs.map(|(old, new)| old.toward(new, progress)).collect()
-}
-
-/// The order to draw a move's visible items in, back to front, as `lead`
-/// stacks them: each slot is an item of `lead`, of `other`, or a pair of
-/// both, as `lead_pairs` and `other_pairs` pair them. An unpaired item of
-/// `other` goes just over the paired item it was over in `other`, or under
-/// every slot if it was under every paired item.
-fn stack(
-	lead: &[Cow<'_, Item>],
-	lead_pairs: &[Option<usize>],
-	other: &[Cow<'_, Item>],
-	other_pairs: &[Option<usize>],
-) -> Vec<(Option<usize>, Option<usize>)> {
-	let mut over: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-	let mut under = None;
-	for index in (0..other.len()).filter(|&index| other[index].visible) {
-		match other_pairs[index] {
-			Some(_) => under = Some(index),
-			None => over.entry(under).or_default().push(index),
-		}
-	}
-	let mut unpaired = |under: Option<usize>| {
-		let items = over.remove(&under).unwrap_or_default();
-		items.into_iter().map(|index| (None, Some(index)))
-	};
-
-	let mut slots: Vec<_> = unpaired(None).collect();
-	for index in (0..lead.len()).filter(|&index| lead[index].visible) {
-		let pair = lead_pairs[index];
-		slots.push((Some(index), pair));
-		if pair.is_some() {
-			slots.extend(unpaired(pair));
-		}
-	}
-	slots
 }
 
 /// Refuse an invalid canvas, or one larger than `device` can hold as a
@@ -2084,7 +2112,7 @@ impl Draw<'_> {
 		};
 		let crop = self.collection.video.get(source).map(|video| video.crop);
 		let item = Item {
-			crop: cover(crop.unwrap_or_default(), picture.size(), &canvas),
+			crop: cover(crop.unwrap_or_default(), picture.size(), &Rect::fill(&canvas)),
 			..Item::new(source, Rect::fill(&canvas))
 		};
 		let pose = Pose::of(self.collection, &item);
@@ -2169,17 +2197,10 @@ impl Draw<'_> {
 		let resting = items(to.0);
 		let (leaving, entering) = (posed(from), posed(to));
 
-		// Which item of the other scene each visible item pairs with.
-		let mut left = vec![None; leaving.len()];
-		let mut entered = vec![None; entering.len()];
-		for (index, item) in entering.iter().enumerate().filter(|(_, item)| item.visible) {
-			let pair = (0..leaving.len())
-				.find(|&at| left[at].is_none() && leaving[at].visible && leaving[at].source == item.source);
-			if let Some(at) = pair {
-				left[at] = Some(index);
-				entered[index] = Some(at);
-			}
-		}
+		// Which item of the other scene each visible item pairs with: one
+		// showing the same source, through a role.
+		let same = |old: &Item, new: &Item| collection.resolve(&old.source) == collection.resolve(&new.source);
+		let (left, entered) = pair(&leaving, &entering, same);
 
 		// Each slot is an index into `leaving`, `entering`, or both.
 		let slots: Vec<(Option<usize>, Option<usize>)> = if progress < 0.5 {
@@ -2439,7 +2460,7 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
-	use crate::collection::{Blend, MaskMode, Rgba, Scene, Size, Video};
+	use crate::collection::{Arrangement, Blend, MaskMode, Rgba, Scene, Size, Video};
 	use crate::source::test::{context, local, start, until, until_time};
 
 	/// A fade over a second.
@@ -3326,6 +3347,184 @@ mod tests {
 		.await;
 	}
 
+	/// A 192x108 scene "slots" arranged in a column: red in the main slot,
+	/// then blue and green tiles.
+	fn slotted() -> Collection {
+		let mut collection = Collection::new();
+		collection.canvas = Canvas {
+			width: 192,
+			height: 108,
+			framerate: 30,
+		};
+		for (name, color) in [("red", RED), ("blue", BLUE), ("green", GREEN)] {
+			let color = Rgba(color);
+			collection.sources.insert(name.into(), Source::Color { color });
+		}
+		let slot = |source: &str, slot| Item {
+			slot: Some(slot),
+			..Item::new(source, Rect::default())
+		};
+		collection.scenes = vec![Scene {
+			items: vec![
+				slot("red", crate::Slot::Main),
+				slot("blue", crate::Slot::Tile),
+				slot("green", crate::Slot::Tile),
+			],
+			..Scene::new("slots")
+		}];
+		collection.validate().unwrap();
+		collection
+	}
+
+	/// The center of `rect`, in whole pixels.
+	fn center(rect: &Rect) -> (usize, usize) {
+		(
+			(rect.x + rect.width / 2.0) as usize,
+			(rect.y + rect.height / 2.0) as usize,
+		)
+	}
+
+	/// A slot closing reflows the others with a glide on the program clock:
+	/// the program, which the encoder reads, shows the closed slot's item
+	/// half faded and the rest part way to their new places halfway through,
+	/// and the new arrangement once it is over.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_slot_closing_reflows_the_rest_with_a_glide() {
+		local(async {
+			let mut studio = Studio::new(slotted()).await;
+			studio.compositor.set_preview(Some("slots".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			let start = Instant::now();
+			studio.render(start);
+			let before = studio.compositor.arranged("slots").unwrap().to_vec();
+			let width = 192;
+			let program = studio.program();
+			for (item, color) in before.iter().zip([RED, BLUE, GREEN]) {
+				let (x, y) = center(&item.rect);
+				assert_eq!(
+					texel(&program, width, x, y),
+					color,
+					"{} where it is arranged",
+					item.source
+				);
+			}
+
+			studio.collection.scenes[0].items[1].visible = false;
+			studio.render(start);
+			let after = studio.compositor.arranged("slots").unwrap().to_vec();
+			assert!(!after[1].visible, "a hidden item takes no slot");
+			assert_ne!(after[2].rect, before[2].rect, "green moves up");
+
+			studio.render(start.saturating_add(REFLOW / 2));
+			let program = studio.program();
+			let (x, y) = center(&before[1].rect);
+			let actual = texel(&program, width, x, y);
+			assert!(
+				near(actual, [0, 0, 128, 255]),
+				"blue half faded where it was: {actual:?}"
+			);
+			let halfway = |from: f32, to: f32| (from + to) / 2.0;
+			let green = Rect {
+				x: halfway(before[2].rect.x, after[2].rect.x),
+				y: halfway(before[2].rect.y, after[2].rect.y),
+				width: halfway(before[2].rect.width, after[2].rect.width),
+				height: halfway(before[2].rect.height, after[2].rect.height),
+			};
+			let (x, y) = center(&green);
+			assert_eq!(texel(&program, width, x, y), GREEN, "green on its way");
+
+			studio.render(start.saturating_add(REFLOW));
+			let program = studio.program();
+			let (x, y) = center(&after[2].rect);
+			assert_eq!(texel(&program, width, x, y), GREEN, "green where it lands");
+			let (x, y) = center(&after[0].rect);
+			assert_eq!(texel(&program, width, x, y), RED);
+			let (x, y) = center(&before[1].rect);
+			assert_ne!(texel(&program, width, x, y), BLUE, "blue gone");
+			assert_eq!(studio.program(), studio.preview(), "the preview glides alike");
+		})
+		.await;
+	}
+
+	/// Two slotted scenes swapping names each keep where their slots were,
+	/// so neither glides from the other's arrangement.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn scenes_swapping_names_keep_their_own_slots() {
+		local(async {
+			let mut collection = slotted();
+			let row = Scene {
+				name: "row".into(),
+				arrangement: crate::Arrangement::Row,
+				..collection.scenes[0].clone()
+			};
+			collection.scenes.push(row);
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.render(start);
+
+			let mut draft = studio.collection.draft("Swap");
+			draft.rename_scene(0, "swapping").unwrap();
+			draft.rename_scene(1, "slots").unwrap();
+			draft.rename_scene(0, "row").unwrap();
+			let edit = draft.finish().unwrap();
+			studio.compositor.rename(&studio.collection.renames(&edit));
+			studio.collection.apply(&edit).unwrap();
+			studio.render(start.saturating_add(REFLOW / 2));
+			for scene in ["slots", "row"] {
+				let arranged = studio.compositor.arranged(scene).unwrap().to_vec();
+				let placed = studio.compositor.placed(scene).unwrap().to_vec();
+				assert_eq!(placed, arranged, "`{scene}` is where it was, with no glide");
+			}
+		})
+		.await;
+	}
+
+	/// A slot whose source is offline is closed, so a guest who leaves
+	/// takes no room, and an unfilled role draws nothing and takes none.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn an_offline_source_and_an_unfilled_role_take_no_slot() {
+		local(async {
+			let mut collection = slotted();
+			let guest = Source::Broadcast { path: "guest".into() };
+			collection.sources.insert("guest".into(), guest);
+			collection.sources.insert("main".into(), Source::Role { source: None });
+			collection.scenes[0].items[0].source = "main".into();
+			collection.scenes[0].items[1].source = "guest".into();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("slots".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			let arranged = studio.compositor.arranged("slots").unwrap().to_vec();
+			assert!(!arranged[0].visible, "an unfilled role takes no slot");
+			assert!(!arranged[1].visible, "an offline guest takes no slot");
+			let (_, alone) = Arrangement::Column.places(studio.collection.canvas, false, 1);
+			assert_eq!(arranged[2].rect, alone[0]);
+			let (x, y) = center(&arranged[2].rect);
+			assert_eq!(texel(&studio.program(), 192, x, y), GREEN, "green has the canvas");
+
+			let role = Source::Role {
+				source: Some("red".into()),
+			};
+			studio.collection.sources.insert("main".into(), role);
+			let filled = Instant::now();
+			studio.render(filled);
+			studio.render(filled.saturating_add(REFLOW));
+			let arranged = studio.compositor.arranged("slots").unwrap().to_vec();
+			assert!(arranged[0].visible, "a filled role takes the main slot");
+			let (x, y) = center(&arranged[0].rect);
+			assert_eq!(
+				texel(&studio.program(), 192, x, y),
+				RED,
+				"it shows the source filling it"
+			);
+		})
+		.await;
+	}
+
 	/// Keyframes sliding an item in from off the canvas's left over a second.
 	fn slide_in() -> Vec<crate::Keyframe> {
 		vec![
@@ -3856,16 +4055,19 @@ mod tests {
 			height: 1920,
 			framerate: 30,
 		};
-		let crop = cover(Crop::default(), (1920, 1080), &portrait);
+		let crop = cover(Crop::default(), (1920, 1080), &Rect::fill(&portrait));
 		let kept = 1.0 - crop.left - crop.right;
 		assert!((kept - (1080.0 / 1920.0) / (1920.0 / 1080.0)).abs() < 1e-6, "{crop:?}");
 		assert_eq!((crop.left, crop.top, crop.bottom), (crop.right, 0.0, 0.0));
 
 		let landscape = Canvas::default();
-		let crop = cover(Crop::default(), (1080, 1920), &landscape);
+		let crop = cover(Crop::default(), (1080, 1920), &Rect::fill(&landscape));
 		assert_eq!((crop.left, crop.right), (0.0, 0.0));
 		assert!(crop.top > 0.0 && crop.top == crop.bottom, "{crop:?}");
-		assert_eq!(cover(Crop::default(), (1920, 1080), &landscape), Crop::default());
+		assert_eq!(
+			cover(Crop::default(), (1920, 1080), &Rect::fill(&landscape)),
+			Crop::default()
+		);
 
 		// A source cropped to a square is trimmed from what it leaves.
 		let square = Crop {
@@ -3873,7 +4075,7 @@ mod tests {
 			right: 0.21875,
 			..Crop::default()
 		};
-		let crop = cover(square, (1920, 1080), &landscape);
+		let crop = cover(square, (1920, 1080), &Rect::fill(&landscape));
 		assert!((crop.top - 0.21875).abs() < 1e-6, "{crop:?}");
 	}
 

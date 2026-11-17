@@ -29,7 +29,8 @@ for the same reason.
   fresh ids, then matches them to the items before by the same rule
   `follow` uses, so a reload of an unchanged file keeps every placer.
 - **Users:** the compositor's keepers key by id; `follow` keeps only the
-  reload match. Auto-layout's slots pair by id where both sides have one.
+  reload match. The slots' glide (`rs/moq-scene/src/glide.rs`, which pairs
+  items by source) pairs by id where both sides have one.
 - **Tests:** duplicates of one camera keep their own placers across an
   insert under both, a reorder, an undo of a removal, and a reload of an
   unchanged file.
@@ -42,4 +43,3 @@ heuristics in #194).
 ## Related
 
 - [A camera that keeps out of the way remembers each app](/quest/m1/auto-place.md) - another user of the placers this keys
-- [Scenes that lay themselves out](/quest/m1/auto-layout.md) - its glide pairs items by source today

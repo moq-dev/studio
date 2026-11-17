@@ -922,8 +922,8 @@ impl Driver {
 				let plays = self.plays.clone().expect("a replay source has plays");
 				self.replays(plays, listing).await
 			}
-			Source::Clone { .. } | Source::Scene { .. } | Source::Program => {
-				unreachable!("a clone or scene opens no feed")
+			Source::Clone { .. } | Source::Role { .. } | Source::Scene { .. } | Source::Program => {
+				unreachable!("a clone, role, or scene opens no feed")
 			}
 			device => self.device(device, listing).await,
 		}
@@ -972,6 +972,7 @@ impl Driver {
 			| Source::Browser { .. }
 			| Source::Overlay { .. }
 			| Source::Clone { .. }
+			| Source::Role { .. }
 			| Source::Lut { .. }
 			| Source::Replay
 			| Source::Scene { .. }
@@ -2635,6 +2636,7 @@ impl Source {
 			| Source::Browser { .. }
 			| Source::Overlay { .. }
 			| Source::Clone { .. }
+			| Source::Role { .. }
 			| Source::Lut { .. }
 			| Source::Scene { .. }
 			| Source::Program => false,
