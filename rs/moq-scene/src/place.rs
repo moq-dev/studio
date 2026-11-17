@@ -460,6 +460,13 @@ pub(crate) struct Placer {
 	/// How long [`glide`](Self::glide) takes.
 	glides: Duration,
 	moves: u64,
+	/// Where it was meant to be as of the last [`place`](Self::place), and
+	/// after how many moves: another place with no move, as a resize gives,
+	/// is taken at once, even part way along a glide.
+	aimed: Option<(Rect, u64)>,
+	/// Whether its picture is read: its scene drawn and the item shown. It
+	/// chooses only while it is.
+	watched: bool,
 	placement: Placement,
 	/// What [`Sight::generation`] and settings the heat was drawn from.
 	heated: Option<(u64, KeepClear)>,
@@ -483,6 +490,8 @@ impl Placer {
 			glide: Glide::new(KeepClear::default().glide, |_| true),
 			glides: KeepClear::default().glide,
 			moves: 0,
+			aimed: None,
+			watched: true,
 			placement: Placement {
 				rect: nowhere,
 				slot: None,
@@ -523,6 +532,20 @@ impl Placer {
 		self.glide = Glide::new(self.glides, |_| true);
 	}
 
+	/// Note whether its picture is read as of `now`: while its scene is not
+	/// drawn or the item is hidden it sees nothing new, so it neither
+	/// chooses nor counts its place the worst, and it looks again once it is
+	/// read again.
+	pub fn watch(&mut self, watched: bool, now: Instant) {
+		if watched && !self.watched {
+			self.looking = Some(now);
+		}
+		if !watched {
+			self.worst = None;
+		}
+		self.watched = watched;
+	}
+
 	/// Where it is as of the last [`place`](Self::place).
 	pub fn placement(&self) -> &Placement {
 		&self.placement
@@ -546,12 +569,20 @@ impl Placer {
 			self.heated = Some(generation);
 			self.placement.heat = self.sight.heat(keep).unwrap_or_default();
 		}
-		if self.sight.last.is_some() && !slots.is_empty() {
+		if self.watched && self.sight.last.is_some() && !slots.is_empty() {
 			self.choose(saved, &slots, keep, canvas, now);
 		}
 
 		let target = self.target(saved, &slots);
-		// Another target with no move, as a resize gives, shows at once.
+		// Another target with no move, as a resize gives, shows at once, even
+		// part way along a glide.
+		if self
+			.aimed
+			.is_some_and(|(aimed, moves)| aimed != target && moves == self.moves)
+		{
+			self.glide = Glide::new(self.glides, |_| true);
+		}
+		self.aimed = Some((target, self.moves));
 		self.glide.show(self.moves, &[shown(target)], now);
 		let rect = self.glide.placed()[0].rect;
 		self.placement.rect = rect;
@@ -1046,6 +1077,46 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// A resize part way along a glide takes its new size at once, in the
+	/// slot it was gliding to.
+	#[test]
+	fn a_resize_while_it_glides_lands_at_once() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let now = run(&mut placer, saved, start, (0..5).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+		let resized = Rect {
+			width: 200.0,
+			height: 200.0,
+			..saved
+		};
+		let rect = placer.place(resized, &KeepClear::default(), CANVAS, now);
+		assert_eq!(Some(rect), Slot::TopLeft.rect(200.0, 200.0, CANVAS));
+	}
+
+	/// Unwatched, as when its scene is not drawn or it is hidden, it neither
+	/// chooses nor counts toward [`WORST`], and it looks again once watched.
+	#[test]
+	fn it_chooses_only_while_watched() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		placer.watch(false, start);
+		let now = run(&mut placer, saved, start, (0..8).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, None, "unwatched, it stays");
+		let later = now.saturating_add(WORST * 2);
+		placer.place(saved, &KeepClear::default(), CANVAS, later);
+		assert_eq!(placer.placement().slot, None);
+
+		placer.watch(true, later);
+		placer.place(saved, &KeepClear::default(), CANVAS, later);
+		assert_eq!(placer.placement().slot, None, "it looks again first");
+		let now = run(&mut placer, saved, later, (0..8).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+		let _ = now;
 	}
 
 	/// One busy read is never a reason to move: what it covers lingers, but

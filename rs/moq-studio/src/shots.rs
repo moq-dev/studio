@@ -287,6 +287,9 @@ views! {
 	/// picture, the places it may go, where it was and the glide to where it
 	/// went, the legend under the picture, and its settings in the inspector.
 	build_keep_clear: Live, Open::Studio { view: View::KeepClear, size: SIZE, show: "keep.toml", relay: false };
+	/// The same in the smallest window: the legend's labels shortened to fit
+	/// beside the note, or the note left out.
+	build_keep_clear_compact: Live, Open::Studio { view: View::KeepClear, size: crate::ui::MIN_SIZE, show: "keep.toml", relay: false };
 	/// A logo dragged over the picture: where it lands, outlined and named
 	/// for the kind of layer it becomes, and Add's row for that kind lit.
 	build_drop: Still, dropping(Drop::Hover);

@@ -131,6 +131,9 @@ struct Keeper {
 	/// The rect the scene file gave its item, as of the last render, which
 	/// tells it from another showing the same source.
 	rect: Rect,
+	/// Whether the last render read its picture: its scene drawn and it
+	/// shown.
+	watched: bool,
 	placer: Placer,
 	look: Look,
 }
@@ -1099,6 +1102,7 @@ impl Compositor {
 		}
 		let mut reads = Vec::new();
 		for ((scene, index), keeper) in &mut self.keepers {
+			keeper.watched = false;
 			let Some(&since) = drawn.get(scene.as_str()) else {
 				continue;
 			};
@@ -1115,6 +1119,7 @@ impl Compositor {
 			let Some(at) = at.filter(|&at| shown.items[at].visible) else {
 				continue;
 			};
+			keeper.watched = true;
 			if !keeper.look.due(now) {
 				continue;
 			}
@@ -1155,6 +1160,7 @@ impl Compositor {
 				let mut keeper = kept.remove(&key).unwrap_or_else(|| Keeper {
 					source: item.source.clone(),
 					rect: item.rect,
+					watched: false,
 					placer: Placer::new(now),
 					look: Look::new(&self.device, &self.queue),
 				});
@@ -1169,6 +1175,7 @@ impl Compositor {
 					None => {}
 				}
 				keeper.rect = item.rect;
+				keeper.placer.watch(keeper.watched, now);
 				let rect = keeper.placer.place(item.rect, keep, canvas, now);
 				if rect != item.rect {
 					staged.to_mut().scenes[number].items[index].rect = rect;

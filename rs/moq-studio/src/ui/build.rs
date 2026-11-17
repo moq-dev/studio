@@ -768,11 +768,15 @@ impl Panels {
 				};
 				let count = collection.items(&to).map_or(0, <[Item]>::len);
 				// The always-on-top layers never go on, so they have no
-				// keyframes to play, nor slots; it stays where it was drawn.
+				// keyframes to play, nor slots, nor a picture under them to
+				// keep clear of; it stays where it was drawn.
+				let placed = keep::placed(state, layer, index, &item).rect;
 				let (rect, crop) = super::slots::drawn(state, layer, index).unwrap_or((item.rect, item.crop));
+				let rect = if item.slot.is_none() { placed } else { rect };
 				let moved = Item {
 					keyframes: if top { Vec::new() } else { item.keyframes.clone() },
 					slot: None,
+					keep_clear: if top { None } else { item.keep_clear },
 					rect,
 					crop,
 					..item.clone()

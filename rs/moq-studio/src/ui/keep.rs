@@ -329,15 +329,16 @@ pub(super) fn overlay(painter: &egui::Painter, view: &View, placement: &Placemen
 		painter.extend(egui::Shape::dashed_line(&outline, dashed, 5.0, 4.0));
 	}
 
-	if let Some(left) = placement.left {
-		moved(painter, view, placement, left, shape, glide);
-	}
 	for (signal, _, at) in tags {
 		let (_, tag, _) = signal_names(signal);
 		let galley = painter.layout_no_wrap(tag.into(), kit::display_bold(10.0), Color32::from_rgb(0xc9, 0xf6, 0xff));
 		let rect = egui::Rect::from_center_size(at, galley.size() + egui::vec2(10.0, 6.0));
 		painter.rect_filled(rect, 3, Color32::from_rgba_unmultiplied(0x06, 0x22, 0x2b, 0xd9));
 		painter.galley(rect.min + egui::vec2(5.0, 3.0), galley, Color32::WHITE);
+	}
+	// Its notes over the tags, which they name again where they meet.
+	if let Some(left) = placement.left {
+		moved(painter, view, placement, left, shape, glide);
 	}
 }
 
@@ -538,20 +539,30 @@ pub(super) fn legend(ui: &Ui, below: egui::Rect) {
 			}
 		}
 	};
-	for (kind, text) in [
-		(0, "What matters on screen"),
-		(1, "Places it may go"),
-		(2, "Where it went"),
-	] {
-		mark(painter, x, kind);
-		let galley = painter.layout_no_wrap(text.into(), font.clone(), kit::DIM);
+	let right = below.right() - 4.0;
+	let laid = |labels: [&str; 3]| {
+		let galleys = labels.map(|text| painter.layout_no_wrap(text.into(), font.clone(), kit::DIM));
+		let width: f32 = galleys.iter().map(|galley| 21.0 + galley.size().x + 18.0).sum();
+		(galleys, width - 18.0)
+	};
+	// Narrow, as BUILD is in a small window, the labels shorten.
+	let (galleys, width) = laid(["What matters on screen", "Places it may go", "Where it went"]);
+	let galleys = match x + width <= right {
+		true => galleys,
+		false => laid(["What matters", "May go", "Went"]).0,
+	};
+	for (kind, galley) in galleys.into_iter().enumerate() {
+		mark(painter, x, kind as u8);
 		let width = galley.size().x;
 		painter.galley(egui::pos2(x + 21.0, y - galley.size().y / 2.0), galley, kit::DIM);
 		x += 21.0 + width + 18.0;
 	}
+	// The note goes where it fits beside them.
 	let galley = painter.layout_no_wrap("Decided on this machine".into(), font, kit::DIM);
-	let right = below.right() - 4.0;
 	let at = egui::pos2(right - galley.size().x, y - galley.size().y / 2.0);
+	if at.x - 20.0 < x {
+		return;
+	}
 	let icon = egui::Rect::from_center_size(egui::pos2(at.x - 12.0, y), egui::Vec2::splat(14.0));
 	painter.galley(at, galley, kit::DIM);
 	Icon::Panic.paint(ui, icon, 13.0, kit::DIM);
