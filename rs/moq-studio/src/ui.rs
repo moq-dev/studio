@@ -916,7 +916,8 @@ impl Panels {
 	fn shortcuts(&mut self, ctx: &egui::Context) {
 		// egui pastes only text, so a paste it does not report may be a picture.
 		let pressed = self.keyboard.as_ref().is_some_and(hotkeys::Keyboard::pasted);
-		let menu = self.dropping.menu_pasted();
+		let text = ctx.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Paste(_))));
+		let menu = self.dropping.menu_pasted(ctx, text);
 		// A focused text field, or a page the picture passes the keyboard to,
 		// keeps its own undo, copy, and paste; any other focused widget, such
 		// as a slider, leaves them to the studio.
@@ -944,11 +945,15 @@ impl Panels {
 		if copy {
 			self.copy(ctx);
 		}
-		// At the pointer, or where the picture's menu opened.
-		let at = menu.unwrap_or_else(|| ctx.pointer_latest_pos());
+		// At the pointer, or where a menu's Paste lands.
+		let at = match menu {
+			Some((at, _)) => at,
+			None => ctx.pointer_latest_pos(),
+		};
+		let other = menu.is_some_and(|(_, other)| other);
 		match paste {
 			Some(text) => self.paste(&text, at),
-			None if pressed || menu.is_some() => self.dropping.arrive(drop::Arrival::Clipboard, at),
+			None if pressed || other => self.dropping.paste_clipboard(at),
 			None => {}
 		}
 	}
@@ -1140,7 +1145,7 @@ impl Panels {
 			return;
 		}
 		let Ok(clip) = Clip::from_toml(text) else {
-			self.dropping.arrive(drop::Arrival::Clipboard, at);
+			self.dropping.paste_clipboard(at);
 			return;
 		};
 		let engine = self.engine.clone();

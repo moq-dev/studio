@@ -66,10 +66,11 @@ struct Landing {
 enum Intent {
 	/// A new layer at `landing`, or a sound alone, heard.
 	Add(Landing),
-	/// The new file of the source called this.
-	Replace(String),
-	/// A grade on this layer, which showed the source named.
-	Grade(Picked, String),
+	/// The new file of the source called this, which was the source given
+	/// when the read began.
+	Replace(String, Source),
+	/// A grade on this layer, which was the item given when the read began.
+	Grade(Picked, Item),
 }
 
 /// A source read and copied beside the scene file, ready to add.
@@ -100,8 +101,12 @@ struct Done {
 struct Offer {
 	source: Source,
 	landing: Landing,
-	/// The name of the source shown by the layer dropped on.
+	/// The name of the source shown by the layer dropped on, and that source.
 	shown: String,
+	was: Source,
+	/// How many lists of layers show that source, which a replaced file
+	/// changes on each.
+	linked: usize,
 }
 
 /// What the picture knows of a file dragged over it, read once per drag.
@@ -127,9 +132,9 @@ pub(super) struct Dropping {
 	/// the picture places where they arrived on it, or the window at the
 	/// edited scene's center once it has drawn.
 	arrived: Vec<(Arrival, Option<egui::Pos2>)>,
-	/// Where the picture's menu was opened, while its paste waits on the
-	/// clipboard.
-	menu_paste: Option<Option<egui::Pos2>>,
+	/// Where a menu's Paste lands, on the picture or (`None`) the scene's
+	/// center, while it waits on the clipboard's text, and the frames waited.
+	menu_paste: Option<(Option<egui::Pos2>, u32)>,
 	/// Where the picture's menu was last opened.
 	menu_at: Option<egui::Pos2>,
 	/// The files being read, by job, with their names and where they land.
@@ -162,6 +167,12 @@ impl Default for Dropping {
 /// How far each file after the first lands from the one before, as a part
 /// of the canvas.
 const CASCADE: f32 = 0.04;
+
+/// The frames a menu's Paste waits for the clipboard's text before taking
+/// it to hold none. eframe 0.36 runs a frame's viewport commands after it
+/// takes the next frame's input, so the text a menu asks for in one frame
+/// arrives two frames on; a third spares a slow clipboard.
+const MENU_PASTE_FRAMES: u32 = 3;
 
 /// Where a chip sits from the pointer it labels, clear of the cursor.
 const CHIP: egui::Vec2 = egui::vec2(14.0, 18.0);
@@ -196,19 +207,23 @@ impl Dropping {
 		self.arrived.push((arrival, at));
 	}
 
-	/// Take this frame's arrivals, with the files a clipboard holds as a
-	/// file list (as Windows Explorer and macOS Finder copy them) in place of
-	/// a pasted picture, and whether they are several files, which no single
-	/// layer's file can stand for.
-	fn take_arrived(&mut self) -> (Vec<(Arrival, Option<egui::Pos2>)>, bool) {
-		let mut arrived = Vec::new();
-		for (arrival, at) in std::mem::take(&mut self.arrived) {
-			let files = matches!(arrival, Arrival::Clipboard).then(clipboard_files).flatten();
-			match files {
-				Some(files) => arrived.extend(files.into_iter().map(|path| (Arrival::File(path), at))),
-				None => arrived.push((arrival, at)),
-			}
+	/// Paste what the clipboard holds besides text at `at` on screen: the
+	/// files of a file list, as Windows Explorer and macOS Finder copy them,
+	/// or else a picture. Read here, with nothing locked, as egui reads the
+	/// clipboard's text.
+	pub(super) fn paste_clipboard(&mut self, at: Option<egui::Pos2>) {
+		match clipboard_files() {
+			Some(files) => self
+				.arrived
+				.extend(files.into_iter().map(|path| (Arrival::File(path), at))),
+			None => self.arrived.push((Arrival::Clipboard, at)),
 		}
+	}
+
+	/// Take this frame's arrivals, and whether they are several files, which
+	/// no single layer's file can stand for.
+	fn take_arrived(&mut self) -> (Vec<(Arrival, Option<egui::Pos2>)>, bool) {
+		let arrived = std::mem::take(&mut self.arrived);
 		let files = arrived
 			.iter()
 			.filter(|(arrival, _)| matches!(arrival, Arrival::File(_)))
@@ -216,10 +231,9 @@ impl Dropping {
 		(arrived, files > 1)
 	}
 
-	/// Paste at the edited scene's center, from a menu off the picture,
-	/// unless the clipboard's text arrives first.
+	/// Paste at the edited scene's center, from a menu off the picture.
 	pub(super) fn paste_from_window(&mut self) {
-		self.menu_paste = Some(None);
+		self.menu_paste = Some((None, 0));
 	}
 
 	/// Note where the picture's menu opened, which its Paste pastes at.
@@ -227,15 +241,29 @@ impl Dropping {
 		self.menu_at = at;
 	}
 
-	/// Paste a picture at where the picture's menu opened, unless the
-	/// clipboard's text arrives first.
+	/// Paste at where the picture's menu opened.
 	pub(super) fn paste_from_menu(&mut self) {
-		self.menu_paste = Some(self.menu_at);
+		self.menu_paste = Some((self.menu_at, 0));
 	}
 
-	/// Whether the picture's menu asked to paste last frame, and where.
-	pub(super) fn menu_pasted(&mut self) -> Option<Option<egui::Pos2>> {
-		self.menu_paste.take()
+	/// Where a menu's Paste lands, on the frame it lands: with the clipboard's
+	/// text, if `text` arrived this frame, or else, once none has arrived for
+	/// `MENU_PASTE_FRAMES`, with what the clipboard holds besides text
+	/// (`true`).
+	pub(super) fn menu_pasted(&mut self, ctx: &egui::Context, text: bool) -> Option<(Option<egui::Pos2>, bool)> {
+		let (at, frames) = self.menu_paste.as_mut()?;
+		let at = *at;
+		*frames += 1;
+		if text {
+			self.menu_paste = None;
+			return Some((at, false));
+		}
+		if *frames < MENU_PASTE_FRAMES {
+			ctx.request_repaint();
+			return None;
+		}
+		self.menu_paste = None;
+		Some((at, true))
 	}
 
 	/// Whether files are dragged over the window.
@@ -333,6 +361,15 @@ fn save(
 			None => PathBuf::from(stem),
 		}
 	};
+	// A copy already there is reused before anything is written, so a large
+	// file's second drop needs no room for a third copy.
+	let mut checked = 0;
+	while dir.join(named(checked + 1)).exists() {
+		checked += 1;
+		if matches(&dir.join(named(checked))) {
+			return Ok(named(checked));
+		}
+	}
 	// Written whole under a name of its own, so nothing reads it half done,
 	// then moved to a name nothing holds.
 	let mut temp =
@@ -342,7 +379,8 @@ fn save(
 		let name = named(n);
 		let there = dir.join(&name);
 		if there.exists() {
-			if matches(&there) {
+			// Taken while it was written, by the same bytes or others.
+			if n > checked && matches(&there) {
 				return Ok(name);
 			}
 			continue;
@@ -564,15 +602,27 @@ impl Panels {
 				let onto = landing.onto.clone();
 				let landing_at = landing.at;
 				let intent = match (&source, onto) {
-					(Source::Lut { .. }, Some((picked, item))) => Intent::Grade(picked, item.source),
+					(Source::Lut { .. }, Some((picked, item))) => Intent::Grade(picked, item),
 					(Source::Lut { .. }, None) => {
 						let err = anyhow::anyhow!("drop a color grade on the layer it grades");
 						self.dropped_failed(landing.at, Err(err));
 						return;
 					}
 					(_, Some((_, item))) if !several && same_kind(state.collection(), &item.source, &source) => {
-						let shown = state.collection().capture(&item.source).to_string();
-						self.dropping.offer = Some(Offer { source, landing, shown });
+						let collection = state.collection();
+						let shown = collection.capture(&item.source).to_string();
+						let was = collection.sources.get(&shown).cloned().expect("a source of its kind");
+						let linked = collection
+							.layers()
+							.filter(|(_, items)| items.iter().any(|item| collection.capture(&item.source) == shown))
+							.count();
+						self.dropping.offer = Some(Offer {
+							source,
+							landing,
+							shown,
+							was,
+							linked,
+						});
 						return;
 					}
 					_ => Intent::Add(landing),
@@ -627,8 +677,8 @@ impl Panels {
 			let at = at.unwrap_or_default();
 			let result = result.and_then(|prepared| match intent {
 				Intent::Add(landing) => self.add_prepared(&mut state, &landing, prepared),
-				Intent::Replace(name) => replace(&mut state, &name, prepared.source),
-				Intent::Grade(picked, shown) => grade(&mut state, &picked, &shown, prepared),
+				Intent::Replace(name, was) => replace(&mut state, &name, &was, prepared.source),
+				Intent::Grade(picked, item) => grade(&mut state, &picked, &item, prepared),
 			});
 			self.dropped_failed(at, result);
 		}
@@ -810,10 +860,11 @@ impl Panels {
 				kit::popover_frame().show(ui, |ui| {
 					ui.label(egui::RichText::new(&name).font(kit::ui_medium(13.0)).color(kit::TEXT));
 					ui.add_space(4.0);
-					if ui
-						.add(kit::button(Icon::Image, &format!("Replace {}'s file", offer.shown)))
-						.clicked()
-					{
+					let label = match offer.linked {
+						0 | 1 => format!("Replace {}'s file", offer.shown),
+						n => format!("Replace {}'s file, on all {n} layers showing it", offer.shown),
+					};
+					if ui.add(kit::button(Icon::Image, &label)).clicked() {
 						chosen = Some(true);
 					}
 					if ui.add(kit::button(Icon::Add, "Add a layer")).clicked() {
@@ -836,11 +887,17 @@ impl Panels {
 			}
 			return;
 		};
-		let Offer { source, landing, shown } = self.dropping.offer.take().expect("an offer");
+		let Offer {
+			source,
+			landing,
+			shown,
+			was,
+			..
+		} = self.dropping.offer.take().expect("an offer");
 		let dir = state.sources.context().dir.clone();
 		let at = landing.at;
 		let intent = match replace {
-			true => Intent::Replace(shown),
+			true => Intent::Replace(shown, was),
 			false => Intent::Add(landing),
 		};
 		self.read(ui.ctx(), Job { name, at, intent }, move || prepare(source, &dir));
@@ -930,14 +987,15 @@ fn same_kind(collection: &Collection, shown: &str, dropped: &Source) -> bool {
 	)
 }
 
-/// Point the source called `name` at `source`'s file, keeping how a media
-/// file plays.
-fn replace(state: &mut State, name: &str, source: Source) -> anyhow::Result<()> {
+/// Point the source called `name`, if it is still `was`, at `source`'s
+/// file, keeping how a media file plays.
+fn replace(state: &mut State, name: &str, was: &Source, source: Source) -> anyhow::Result<()> {
 	let old = state
 		.collection()
 		.sources
 		.get(name)
-		.context("the layer's source is gone")?;
+		.filter(|old| *old == was)
+		.context("the layer's source changed while the file was read")?;
 	let source = match (old, source) {
 		(&Source::Media { looping, restart, .. }, Source::Media { path, .. }) => {
 			Source::Media { path, looping, restart }
@@ -950,15 +1008,16 @@ fn replace(state: &mut State, name: &str, source: Source) -> anyhow::Result<()> 
 	})
 }
 
-/// Grade the layer `picked`, which showed `shown`, with the LUT `prepared`,
+/// Grade the layer `picked`, if it is still `item`, with the LUT `prepared`,
 /// reusing a LUT source of the same file, in place of any grade it has.
-fn grade(state: &mut State, picked: &Picked, shown: &str, prepared: Prepared) -> anyhow::Result<()> {
+fn grade(state: &mut State, picked: &Picked, item: &Item, prepared: Prepared) -> anyhow::Result<()> {
 	let collection = state.collection();
+	let shown = &item.source;
 	let item = picked
 		.item(collection)
-		.filter(|item| item.source == shown)
+		.filter(|now| *now == item)
 		.cloned()
-		.context("the layer dropped on moved")?;
+		.context("the layer dropped on changed while the file was read")?;
 	let existing = collection
 		.sources
 		.iter()

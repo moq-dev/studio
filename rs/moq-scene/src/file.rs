@@ -10,15 +10,21 @@ use crate::{Error, Source};
 /// top-level box headers, so a drag can ask on every frame.
 ///
 /// Refuses a file no source shows, saying what the studio does show, and a
-/// regular MP4 with the remux that makes it readable.
+/// regular MP4 with the remux that makes it readable. Refuses anything but a
+/// regular file before opening it, since opening a named pipe waits for a
+/// writer.
 pub fn source(path: &Path) -> Result<Source, Error> {
+	let failed = |err: String| Error::Unsupported(format!("{}: {err}", path.display()));
+	let metadata = std::fs::metadata(path).map_err(|err| failed(err.to_string()))?;
+	if !metadata.is_file() {
+		return Err(failed("not a file".into()));
+	}
 	let cube = path
 		.extension()
 		.is_some_and(|extension| extension.eq_ignore_ascii_case("cube"));
 	if cube {
 		return Ok(Source::Lut { path: path.into() });
 	}
-	let failed = |err: String| Error::Unsupported(format!("{}: {err}", path.display()));
 	let mut file = std::fs::File::open(path).map_err(|err| failed(err.to_string()))?;
 	let mut head = [0; 64];
 	let read = crate::media::fill(&mut file, &mut head).map_err(|err| failed(err.to_string()))?;
@@ -182,5 +188,23 @@ mod tests {
 			picture(&source(&broken).unwrap()).is_err(),
 			"a LUT is parsed before it is placed"
 		);
+
+		let err = source(dir.path()).unwrap_err().to_string();
+		assert!(err.contains("not a file"), "{err}");
+	}
+
+	/// A named pipe with no writer is refused, not opened, which would wait
+	/// for one.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_pipe_is_refused_unopened() {
+		use rustix::fs::{CWD, FileType, Mode, mknodat};
+		let dir = tempfile::tempdir().unwrap();
+		for name in ["pipe.png", "pipe.cube"] {
+			let pipe = dir.path().join(name);
+			mknodat(CWD, &pipe, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+			let err = source(&pipe).unwrap_err().to_string();
+			assert!(err.contains("not a file"), "{err}");
+		}
 	}
 }

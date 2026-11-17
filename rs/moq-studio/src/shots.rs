@@ -1290,7 +1290,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			// egui shows a tooltip once the pointer rests half a second.
 			harness.run_steps(4);
 		}
-		View::Drop(drop) => drag(&mut harness, *drop),
+		View::Drop(drop) => drag(&mut harness, &engine, *drop),
 		View::History => {
 			harness
 				.get_all_by_label("Mute")
@@ -1403,10 +1403,8 @@ fn gallery(gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, sheet: bool) ->
 	harness.render().unwrap()
 }
 
-/// Mute the first sound, open the health dot's popover, and rest the pointer
-/// on undo until its tooltip shows.
 /// A file on the picture as `drop` has it, from the show's directory.
-fn drag(harness: &mut Harness<'_, Window>, drop: Drop) {
+fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) {
 	/// A file the system drops, which the studio reads by its path.
 	#[derive(Debug)]
 	struct Dropped(std::path::PathBuf);
@@ -1484,12 +1482,16 @@ fn drag(harness: &mut Harness<'_, Window>, drop: Drop) {
 			"copied beside the show"
 		);
 		// Away from the pointer, as a person moves on, and with the source's
-		// picture opened.
+		// picture opened and drawn.
 		harness.input_mut().events.push(egui::Event::PointerGone);
-		harness.run_steps(8);
+		tokio::runtime::Handle::current()
+			.block_on(kio::clock::timeout(SETTLE, settle(harness, engine)))
+			.expect("the dropped logo's picture settles");
 	}
 }
 
+/// Mute the first sound, open the health dot's popover, and rest the pointer
+/// on undo until its tooltip shows.
 fn hover(harness: &mut Harness<'_, Window>) {
 	harness
 		.get_all_by_label("Mute")
