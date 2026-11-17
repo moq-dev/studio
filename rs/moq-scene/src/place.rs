@@ -499,8 +499,6 @@ pub(crate) struct Placer {
 	/// Whether a gesture has it in hand, such as a drag: it chooses only once
 	/// let go.
 	grabbed: bool,
-	/// Until when the glide of its last choice runs.
-	gliding: Option<Instant>,
 	/// Where a glide under way stopped when a gesture took it in hand: it
 	/// stays there, at the size it is meant to have, until let go, then
 	/// glides on from there.
@@ -535,7 +533,6 @@ impl Placer {
 			aimed: None,
 			watched: true,
 			grabbed: false,
-			gliding: None,
 			paused: None,
 			placement: Placement {
 				rect: nowhere,
@@ -589,7 +586,7 @@ impl Placer {
 		self.looking = None;
 		self.worst = None;
 		self.glide = Glide::new(self.glides, |_| true);
-		self.gliding = None;
+		self.aimed = None;
 		self.paused = None;
 	}
 
@@ -612,7 +609,7 @@ impl Placer {
 				self.looking = before.looking.then_some(now);
 				self.worst = None;
 				self.glide = Glide::new(self.glides, |_| true);
-				self.gliding = None;
+				self.aimed = None;
 				self.paused = None;
 			}
 			before => {
@@ -689,9 +686,9 @@ impl Placer {
 
 		let target = self.target(saved, &slots);
 		// Taken in hand part way along a glide, as a crop started then is, it
-		// stops where it is drawn, so it stays under the pointer; let go, it
-		// glides on from there.
-		let gliding = self.gliding.is_some_and(|until| now < until);
+		// stops where it was last drawn, so it stays under the pointer, however
+		// late the next render comes; let go, it glides on from there.
+		let gliding = self.aimed.is_some_and(|(aimed, _)| aimed != self.placement.rect);
 		if self.grabbed && gliding && self.paused.is_none() {
 			self.paused = Some(self.placement.rect);
 		}
@@ -706,7 +703,6 @@ impl Placer {
 			self.glide = Glide::new(self.glides, |_| true);
 			self.glide.show(self.moves, &[shown(at)], now);
 			self.moves += 1;
-			self.gliding = Some(now.saturating_add(self.glides));
 		}
 		let rect = match self.paused {
 			Some(paused) => {
@@ -822,7 +818,6 @@ impl Placer {
 			self.glide.show(self.moves, &[shown(self.placement.rect)], now);
 		}
 		self.moves += 1;
-		self.gliding = Some(now.saturating_add(keep.glide));
 	}
 }
 
@@ -1271,6 +1266,25 @@ mod tests {
 		assert!(on.x < at.x && on.x > to.x, "it glides on: {on:?}");
 		let landed = placer.place(saved, &KeepClear::default(), CANVAS, released.saturating_add(glide));
 		assert_eq!(landed, to);
+	}
+
+	/// Taken in hand part way along a glide, as last drawn, it stops there
+	/// though the next render comes after the glide would have landed, as on
+	/// a slow canvas.
+	#[test]
+	fn a_glide_pauses_where_last_drawn() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let now = run(&mut placer, saved, start, (0..5).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+		let moved = now.saturating_sub(INTERVAL);
+		let glide = KeepClear::default().glide;
+		let half = moved.saturating_add(glide / 2);
+		let at = placer.place(saved, &KeepClear::default(), CANVAS, half);
+		placer.grab(true);
+		let late = half.saturating_add(glide * 2);
+		assert_eq!(placer.place(saved, &KeepClear::default(), CANVAS, late), at);
 	}
 
 	/// A resize part way along a glide takes its new size at once, in the
