@@ -1709,13 +1709,20 @@ impl Engine {
 
 				// On air, each published scene's line starts once it is
 				// published, in a broadcast of its own, and ends once it no
-				// longer is.
+				// longer is, as does the portrait picture's while the show
+				// goes out in portrait.
 				let published = published(&state.collection);
+				let portrait = state.collection.portrait_canvas();
+				let extras: Vec<(String, Canvas)> = published
+					.iter()
+					.cloned()
+					.chain(portrait.map(|canvas| (moq_scene::PORTRAIT.to_string(), canvas)))
+					.collect();
 				if let Some(air) = &mut air {
 					let gone: Vec<String> = air
 						.lines
 						.keys()
-						.filter(|line| !published.iter().any(|(name, _)| name == *line))
+						.filter(|line| !extras.iter().any(|(name, _)| name == *line))
 						.cloned()
 						.collect();
 					for name in gone {
@@ -1724,7 +1731,7 @@ impl Engine {
 						}
 						self.stats.published.lock().unwrap().remove(&name);
 					}
-					for (name, canvas) in &published {
+					for (name, canvas) in &extras {
 						let started = !air.lines.contains_key(name);
 						let extras = &air.extras;
 						let line = air.lines.entry(name.clone()).or_insert_with(|| {
@@ -1801,6 +1808,7 @@ impl Engine {
 				}
 				let program = (compositor.program().clone(), compositor.canvas());
 				let texture = |scene: &str| compositor.output(scene).and_then(moq_scene::Output::texture).cloned();
+				let portrait = compositor.portrait().map(|(texture, canvas)| (texture.clone(), canvas));
 				Drawn {
 					published: published
 						.into_iter()
@@ -1808,6 +1816,7 @@ impl Engine {
 							let texture = texture(&name);
 							(name, texture, canvas)
 						})
+						.chain(portrait.map(|(texture, canvas)| (moq_scene::PORTRAIT.to_string(), Some(texture), canvas)))
 						.collect(),
 					recorded: match recorded {
 						Some(scene) => (texture(&scene), recorded_canvas),
@@ -2544,7 +2553,9 @@ type Lines = BTreeMap<String, Option<(Line, Broadcast)>>;
 struct Drawn {
 	/// The program, at its canvas.
 	program: (wgpu::Texture, Canvas),
-	/// Each published scene by name, unless not drawn, at its canvas.
+	/// Each published scene by name, unless not drawn, at its canvas, and
+	/// the portrait picture, as [`moq_scene::PORTRAIT`], while the show goes
+	/// out in portrait.
 	published: Vec<(String, Option<wgpu::Texture>, Canvas)>,
 	/// What recordings hold, unless not drawn, at its canvas.
 	recorded: (Option<wgpu::Texture>, Canvas),
@@ -4363,6 +4374,75 @@ mod tests {
 			.await
 			.expect("the scene's broadcast ends");
 		assert_eq!(engine.stats.sessions.open(), 0);
+	}
+
+	/// A show going out in portrait too sends its portrait picture as a
+	/// broadcast of its own beneath the program's, turned on its side, with
+	/// the program's audio scene, holding an encode session of its own;
+	/// turning portrait off ends it, giving the session back.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
+	async fn the_portrait_picture_has_its_own_broadcast() {
+		let _ = moq_tokio::crypto::install_default();
+		let fixture = moq_relay::test_relay().await.expect("test relay");
+		let ready = fixture.relay.ready();
+		let relay = fixture.relay.cluster().origin.consume();
+		tokio::spawn(fixture.relay.run());
+		ready.wait().await.expect("relay ready");
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
+		let client = client.init(Default::default()).expect("client");
+
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let relays = vec![Relay {
+			client,
+			url: fixture.url.clone(),
+		}];
+		let mut loaded = red_canvas();
+		// Red fills the landscape picture, and is fitted across the middle of
+		// the portrait one.
+		loaded.collection.portrait = true;
+		let engine = start(gpu, relays, dir.path(), autosave, loaded)
+			.await
+			.expect("the studio starts");
+
+		let path = format!("studio/{}", moq_scene::PORTRAIT);
+		let (broadcast, catalogs, catalog) = routed(&relay, &path).await;
+		assert!(catalog.audio.enabled().next().is_some(), "its audio");
+		let (video, config) = catalog
+			.video
+			.renditions
+			.iter()
+			.find(|(_, config)| config.coded_width == Some(360))
+			.expect("the canvas turned");
+		assert_eq!(config.coded_height, Some(640));
+		let (video, config) = (video.clone(), config.clone());
+		let mut pictures = subscribe(&broadcast, &video, &config).await;
+		red(&mut pictures, moq_video::Size::new(360, 640))
+			.await
+			.expect("the portrait picture arrives");
+		assert_eq!(engine.stats.sessions.open(), 2, "one full size each");
+
+		let track = served(&broadcast, &video).await;
+		{
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft("Landscape");
+			draft.set_portrait(false).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		ended(catalogs, track).await;
+		kio::clock::timeout(TIMEOUT, broadcast.closed())
+			.await
+			.expect("the portrait broadcast ends");
+		assert_eq!(engine.stats.sessions.open(), 1, "its session given back");
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
 	}
 
 	/// What a viewer of one broadcast takes in, frame by frame as it arrives,

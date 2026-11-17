@@ -175,16 +175,18 @@ impl Item {
 		}
 	}
 
-	/// The item as `format`'s picture draws it, in a show whose landscape
-	/// canvas is `landscape`: at its place there, and hidden unless shown in
-	/// it. An item in a slot stays where the arrangement puts it.
-	fn portrayed(&mut self, format: Format, landscape: Canvas) {
-		if self.slot.is_none() {
-			let placement = self.placement(format, landscape);
-			self.rect = placement.rect;
-			self.crop = placement.crop;
+	/// The item as `format`'s picture draws it at rest, in a show whose
+	/// landscape canvas is `landscape`: at its place there, and hidden unless
+	/// shown in it. An item in a slot stays where the arrangement puts it.
+	pub fn portrayed(&self, format: Format, landscape: Canvas) -> Self {
+		let mut item = self.clone();
+		if item.slot.is_none() {
+			let placement = item.placement(format, landscape);
+			item.rect = placement.rect;
+			item.crop = placement.crop;
 		}
-		self.visible &= self.shown_in(format);
+		item.visible &= item.shown_in(format);
+		item
 	}
 
 	/// Whether it says anything about the portrait picture.
@@ -240,13 +242,22 @@ impl Collection {
 				scene.arrangement = scene.portrait.arrangement;
 			}
 			for item in &mut scene.items {
-				item.portrayed(format, landscape);
+				*item = item.portrayed(format, landscape);
 			}
 		}
 		for item in &mut view.top {
-			item.portrayed(format, landscape);
+			*item = item.portrayed(format, landscape);
 		}
 		Cow::Owned(view)
+	}
+
+	/// The picture `layer` is edited in when `format` is asked for: `format`
+	/// while the layer is drawn in both, landscape otherwise.
+	pub fn format_of(&self, layer: &Layer, format: Format) -> Format {
+		match self.dual(layer) {
+			true => format,
+			false => Format::Landscape,
+		}
 	}
 
 	/// Check the portrait picture's rules: only a landscape canvas turns, and

@@ -119,7 +119,7 @@ impl Panels {
 				// `interacted` found the page through the selection, so one is.
 				let picked = self.selection.clone().expect("interacting with the selected layer");
 				let only = Some((&picked.layer, picked.index));
-				let staged = super::slots::staged(&state, scene.map(|(scene, _)| scene));
+				let staged = super::slots::staged(&state, scene.map(|(scene, _)| scene), self.format);
 				let delivered = self.interact.update(ui, image, &staged, scene, only);
 				deliver(&state.sources, delivered);
 				self.rebind(&state.sources);
@@ -196,7 +196,7 @@ impl Panels {
 		let layers = self.scene(state).ok().into_iter().chain(top);
 		layers
 			.flat_map(|layer| {
-				let items = super::slots::placed(state, &layer);
+				let items = super::slots::placed(state, &layer, self.format);
 				let posed = items.into_iter().map(move |item| item.posed(since).into_owned());
 				posed.enumerate().map(move |(index, item)| {
 					let picked = Picked {
@@ -267,10 +267,10 @@ impl Panels {
 			let picked = shown[index].0.clone();
 			self.select(Some(picked.clone()));
 			let collection = state.collection();
-			let resting = picked.item(collection).cloned();
+			let resting = picked.rest(collection, self.format);
 			if let Some(resting) = resting {
 				let drawn = match resting.slot {
-					Some(_) => super::slots::drawn(state, &picked.layer, picked.index),
+					Some(_) => super::slots::drawn(state, &picked.layer, picked.index, self.format),
 					None => None,
 				};
 				let drawn = drawn.unwrap_or((resting.rect, resting.crop));
@@ -344,7 +344,7 @@ impl Panels {
 			let point = view.point(pos);
 			// Whole canvas pixels, so an unsnapped drag saves round numbers.
 			let delta = [(point[0] - drag.origin[0]).round(), (point[1] - drag.origin[1]).round()];
-			let item = drag.picked.item(state.collection()).cloned();
+			let item = drag.picked.rest(state.collection(), self.format);
 			let held = ui.input(|input| input.modifiers);
 			let (rect, crop) = match self.cropping {
 				true => {
@@ -370,7 +370,7 @@ impl Panels {
 								height: shown.height - rest.height,
 							},
 						};
-						let others = others(state, scene.as_deref(), &drag.picked, since);
+						let others = others(state, scene.as_deref(), &drag.picked, since, self.format);
 						snap.apply(drag.grab, rect, &others, &canvas)
 					});
 					let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
@@ -393,9 +393,11 @@ impl Panels {
 				let label = format!("{verb} `{}`", item.source);
 				spot = Some(Spot::Layer(drag.picked.layer.clone(), item.source.clone()));
 				let picked = &drag.picked;
-				result = edit(state, label, drag.gesture, |draft| {
-					draft.set_item(&picked.layer, picked.index, Item { rect, crop, ..item })
-				});
+				if let Some(placed) = picked.placed(state.collection(), self.format, rect, crop) {
+					result = edit(state, label, drag.gesture, |draft| {
+						draft.set_item(&picked.layer, picked.index, placed)
+					});
+				}
 			}
 		}
 		if !response.dragged() {
@@ -417,7 +419,7 @@ impl Panels {
 		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible) {
 			if self.cropping {
 				let collection = state.collection();
-				let resting = picked.item(collection).map_or(item.crop, |item| item.crop);
+				let resting = picked.rest(collection, self.format).map_or(item.crop, |item| item.crop);
 				view.whole(&painter, &item.rect, &resting);
 			}
 			// A layer in a slot has no size of its own to drag.
@@ -506,9 +508,8 @@ impl Panels {
 			}
 		});
 		let Some(item) = picked
-			.item(state.collection())
+			.rest(state.collection(), self.format)
 			.filter(|item| !item.locked && item.slot.is_none())
-			.cloned()
 		else {
 			return (None, Ok(()));
 		};
@@ -526,8 +527,11 @@ impl Panels {
 		};
 		let label = format!("Move `{}`", item.source);
 		let spot = Spot::Layer(picked.layer.clone(), item.source.clone());
+		let Some(moved) = picked.placed(state.collection(), self.format, rect, item.crop) else {
+			return (None, Ok(()));
+		};
 		let result = edit(state, label, Some(gesture), |draft| {
-			draft.set_item(&picked.layer, picked.index, Item { rect, ..item })
+			draft.set_item(&picked.layer, picked.index, moved)
 		});
 		(Some(spot), result)
 	}
@@ -660,22 +664,31 @@ impl Panels {
 				"`{name}` is in a slot, which places it; set it free to place it yourself"
 			)),
 			LayerAction::Slot(slot) => super::slots::set_slot(state, picked, slot),
-			LayerAction::Fit => {
-				let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-				let rect = match aspect(state, &item, true) {
-					Some(aspect) => snap::fit(aspect, &canvas),
-					None => Rect::fill(&canvas),
+			LayerAction::Fit | LayerAction::Fill => {
+				// In the picture BUILD edits.
+				let format = collection.format_of(layer, self.format);
+				let canvas = match collection.dual(layer) {
+					true => collection.canvas_of(format),
+					false => collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas),
 				};
-				set(state, format!("Fit `{name}`"), Item { rect, ..item })
-			}
-			LayerAction::Fill => {
-				let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-				let crop = match aspect(state, &item, false) {
-					Some(aspect) => snap::fill(aspect, &canvas),
-					None => Crop::default(),
+				let rest = item.portrayed(format, collection.canvas);
+				let (label, rect, crop) = match action {
+					LayerAction::Fit => {
+						let rect = match aspect(state, &rest, true) {
+							Some(aspect) => snap::fit(aspect, &canvas),
+							None => Rect::fill(&canvas),
+						};
+						(format!("Fit `{name}`"), rect, rest.crop)
+					}
+					_ => {
+						let crop = match aspect(state, &rest, false) {
+							Some(aspect) => snap::fill(aspect, &canvas),
+							None => Crop::default(),
+						};
+						(format!("Fill with `{name}`"), Rect::fill(&canvas), crop)
+					}
 				};
-				let rect = Rect::fill(&canvas);
-				set(state, format!("Fill with `{name}`"), Item { rect, crop, ..item })
+				set(state, label, item.placed(format, Placement { rect, crop }))
 			}
 			LayerAction::Shape(corners) => {
 				let shape = moq_scene::Shape { corners, ..item.shape };
@@ -721,13 +734,22 @@ impl Panels {
 				};
 				let count = collection.items(&to).map_or(0, <[Item]>::len);
 				// The always-on-top layers never go on, so they have no
-				// keyframes to play, nor slots; it stays where it was drawn.
-				let (rect, crop) = super::slots::drawn(state, layer, index).unwrap_or((item.rect, item.crop));
+				// keyframes to play, nor slots; it stays where it was drawn,
+				// in each picture it goes to.
+				let drawn = |format| super::slots::drawn(state, layer, index, format).unwrap_or((item.rect, item.crop));
+				let (rect, crop) = drawn(Format::Landscape);
+				let dual = collection.dual(&to) && collection.dual(layer);
+				let portrait = dual.then(|| {
+					let (rect, crop) = drawn(Format::Portrait);
+					Placement { rect, crop }
+				});
 				let moved = Item {
 					keyframes: if top { Vec::new() } else { item.keyframes.clone() },
 					slot: None,
 					rect,
 					crop,
+					format: item.format.filter(|_| dual),
+					portrait: portrait.filter(|_| item.shown_in(Format::Portrait)),
 					..item.clone()
 				};
 				let label = match top {

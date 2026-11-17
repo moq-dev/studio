@@ -12,8 +12,8 @@ use egui::{Color32, Ui};
 use moq_scene::browser::Paint;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
-	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode,
-	Rect, Scene, Source, Thumbnail, Transition, Video,
+	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Format, Item, Keyframe, Layer,
+	MaskMode, Placement, Rect, Scene, Source, Thumbnail, Transition, Video,
 };
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -231,6 +231,9 @@ impl Studio {
 			program,
 			program_drawn: Canvas::default(),
 			preview,
+			portrait: None,
+			portrait_preview: None,
+			format: Format::Landscape,
 			editing: None,
 			framed,
 			page: Page::default(),
@@ -331,6 +334,8 @@ impl Studio {
 		let mut renderer = render.renderer.write();
 		for registered in [&panels.program, &panels.preview]
 			.into_iter()
+			.chain(panels.portrait.iter().map(|(registered, _)| registered))
+			.chain(&panels.portrait_preview)
 			.chain(panels.thumbnails.values())
 		{
 			renderer.free_texture(&registered.id);
@@ -611,6 +616,13 @@ struct Panels {
 	/// The cued scene, or the one open off air, which the compositor draws
 	/// while there is one.
 	preview: Registered,
+	/// The portrait picture as viewers see it, and its size as drawn this
+	/// frame, while the show goes out in portrait.
+	portrait: Option<(Registered, Canvas)>,
+	/// The preview in portrait, while the show goes out in portrait.
+	portrait_preview: Option<Registered>,
+	/// The picture BUILD edits a scene drawn in both in.
+	format: Format,
 	/// The scene open for editing off air on BUILD, while it is the one cued.
 	editing: Option<String>,
 	/// Whether the title bar is the window's frame, which moves, resizes,
@@ -740,6 +752,20 @@ impl Picked {
 	/// The layer as `collection` has it, if it is still there.
 	fn item<'a>(&self, collection: &'a Collection) -> Option<&'a Item> {
 		collection.items(&self.layer)?.get(self.index)
+	}
+
+	/// The layer at rest in `format`'s picture, at its place there, if it is
+	/// still there: in the landscape one for a layer drawn in one.
+	fn rest(&self, collection: &Collection, format: Format) -> Option<Item> {
+		let format = collection.format_of(&self.layer, format);
+		Some(self.item(collection)?.portrayed(format, collection.canvas))
+	}
+
+	/// The layer placed at `rect` with `crop` in `format`'s picture, as it
+	/// is in the other, if it is still there.
+	fn placed(&self, collection: &Collection, format: Format, rect: Rect, crop: Crop) -> Option<Item> {
+		let format = collection.format_of(&self.layer, format);
+		Some(self.item(collection)?.clone().placed(format, Placement { rect, crop }))
 	}
 
 	/// What its look edits.
@@ -2120,7 +2146,7 @@ const REACH: f32 = 8.0;
 /// than `dragged`: what a dragged layer snaps to. A scene open off air still
 /// snaps to the always-on-top ones: its picture draws them, as the program
 /// will, though BUILD leaves them to the program to edit.
-fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration) -> Vec<Rect> {
+fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration, format: Format) -> Vec<Rect> {
 	let collection = state.collection();
 	// The top layer goes over a scene of the program's size, as the
 	// compositor draws it.
@@ -2130,7 +2156,7 @@ fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration)
 	let mut rects = Vec::new();
 	let layers = scene.map(Layer::scene).into_iter().chain(top.then(Layer::top));
 	for shown in layers {
-		let items = slots::placed(state, &shown);
+		let items = slots::placed(state, &shown, format);
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == dragged.layer && at == dragged.index) {
 				rects.push(item.posed(since).rect);
