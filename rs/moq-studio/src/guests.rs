@@ -680,10 +680,14 @@ impl Room {
 	/// Whether `source` plays a broadcast of a guest in the room, announced
 	/// now.
 	fn here(&self, source: &Source) -> bool {
+		self.here_locked(&self.participants.lock().unwrap(), source)
+	}
+
+	/// [`here`](Self::here), with `participants` already locked.
+	fn here_locked(&self, participants: &BTreeMap<String, Participant>, source: &Source) -> bool {
 		let Some((identity, kind)) = self.guest_of(source) else {
 			return false;
 		};
-		let participants = self.participants.lock().unwrap();
 		participants.get(identity.as_str()).is_some_and(|guest| match kind {
 			Kind::Camera => guest.camera,
 			Kind::Screen => guest.screen,
@@ -704,8 +708,8 @@ pub fn tile(collection: &Collection, scene: &str, source: &str) -> Option<usize>
 }
 
 /// How many guests in `room` the tiles of `scene` show: a guest who left
-/// keeps their tile, closed until they are back, but not their place among
-/// the guests.
+/// keeps their tile, closed until they are back or [`place`] gives it to
+/// another, but not their place among the guests.
 fn tiled(collection: &Collection, room: &Room, scene: &str) -> usize {
 	let items = collection.scene(scene).map_or(&[][..], |scene| &scene.items);
 	let guests = items.iter().filter(|item| {
@@ -715,26 +719,82 @@ fn tiled(collection: &Collection, room: &Room, scene: &str) -> usize {
 	guests.count()
 }
 
+/// Where in its scene the next guest to appear on their own goes.
+enum Place {
+	/// A new tile after the others.
+	Next,
+	/// The tile at this index of a guest who appeared on their own and has
+	/// left, named here, in place of them.
+	Taken(usize, Path),
+}
+
+/// Where in `scene` the next guest to appear on their own goes: a new tile
+/// while the tiles hold fewer than [`MAX_GUESTS`] guests of the room, here
+/// or not, and once they hold that many the tile of one who appeared on
+/// their own and has left, so one coming back cannot make a fifth. A tile
+/// the host placed a guest in stays theirs, so with none to take there is
+/// no place.
+fn place(collection: &Collection, room: &Room, scene: &str) -> Option<Place> {
+	let items = &collection.scene(scene)?.items;
+	let guests: Vec<(usize, &Source)> = (items.iter().enumerate())
+		.filter(|(_, item)| item.slot == Some(Slot::Tile))
+		.filter_map(|(index, item)| Some((index, collection.sources.get(collection.capture(&item.source))?)))
+		.filter(|(_, shown)| room.guest_of(shown).is_some())
+		.collect();
+	if guests.len() < MAX_GUESTS {
+		return Some(Place::Next);
+	}
+	let participants = room.participants.lock().unwrap();
+	guests.into_iter().find_map(|(index, shown)| {
+		let (identity, _) = room.guest_of(shown)?;
+		let guest = participants.get(identity.as_str())?;
+		(guest.appeared && !room.here_locked(&participants, shown)).then_some(Place::Taken(index, identity))
+	})
+}
+
 /// Show the guest playing from `source` in the next tile of `scene`, the
 /// one on program, and hear them on program, as one edit the host can undo,
 /// if [`tile`] finds one and the tiles show fewer than [`MAX_GUESTS`]
 /// guests still in `room`, marking them [appeared](Participant::appeared).
-/// Says whether it did.
+/// Once the tiles hold four guests, here or not, they take the tile one who
+/// appeared on their own and left had, in place of them, or wait under Add
+/// with no such tile; see [`place`]. Says whether it did.
 pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str) -> anyhow::Result<bool> {
 	let Some(scene) = scene else { return Ok(false) };
 	if tiled(state.collection(), room, scene) >= MAX_GUESTS {
 		return Ok(false);
 	}
-	let Some(index) = tile(state.collection(), scene, source) else {
+	let Some(next) = tile(state.collection(), scene, source) else {
 		return Ok(false);
 	};
 	let layer = Layer::scene(scene);
-	let item = Item {
-		slot: Some(Slot::Tile),
-		..Item::new(source, moq_scene::Rect::default())
+	let Some(place) = place(state.collection(), room, scene) else {
+		return Ok(false);
 	};
 	let mut draft = state.collection().draft(format!("`{source}` joins `{scene}`"));
-	draft.insert_item(&layer, index, item)?;
+	match &place {
+		Place::Taken(index, _) => {
+			let left = state.collection().scene(scene).expect("a vacated tile's scene").items[*index].clone();
+			// No longer shown, nor heard should they come back.
+			let mut scenes = state.collection().audio_scenes.clone();
+			for audio in &mut scenes {
+				audio.sounds.remove(&left.source);
+			}
+			draft.set_audio_scenes(scenes)?;
+			let taken = Item {
+				source: source.to_string(),
+				..left
+			};
+			draft.set_item(&layer, *index, taken)?;
+		}
+		Place::Next => {
+			let item = Item {
+				slot: Some(Slot::Tile),
+				..Item::new(source, moq_scene::Rect::default())
+			};
+			draft.insert_item(&layer, next, item)?;
+		}
+	}
 	if state.collection().sources.get(source).is_some_and(Source::has_audio) {
 		draft.hear(source)?;
 	}
@@ -760,6 +820,16 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 			tracing::warn!(error = format!("{undone:#}"), "cannot forget a guest's appearance");
 		}
 		return Err(err);
+	}
+	// The guest whose tile was taken may appear again once there is room.
+	if let Place::Taken(_, left) = place {
+		let mut participants = room.participants.lock().unwrap();
+		let cleared = room.change(&mut participants, left.as_str(), |participant| {
+			participant.appeared = false
+		});
+		if let Err(err) = cleared {
+			tracing::warn!(error = format!("{err:#}"), "cannot let a guest appear again");
+		}
 	}
 	Ok(true)
 }
@@ -1736,6 +1806,15 @@ pub(crate) mod tests {
 			"one who left frees a place"
 		);
 		assert_eq!(tile(&collection, "Scene", "erin"), Some(5), "the host can add a fifth");
+		assert!(
+			place(&collection, &room, "Scene").is_none(),
+			"a tile the host gave bob stays his"
+		);
+		room.participants.lock().unwrap().get_mut("bob").unwrap().appeared = true;
+		let Some(Place::Taken(index, left)) = place(&collection, &room, "Scene") else {
+			panic!("the next guest takes the tile bob had");
+		};
+		assert_eq!((index, left.as_str()), (2, "bob"));
 
 		collection.scenes[0].items.retain(|item| item.slot.is_none());
 		assert_eq!(tile(&collection, "Scene", "erin"), None, "a scene with no slots");

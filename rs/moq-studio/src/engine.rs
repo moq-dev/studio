@@ -5587,8 +5587,8 @@ mod tests {
 		.expect("alice is back");
 		assert_eq!(items(&engine).len(), 1, "an undone appearance stays undone");
 
-		// Four guests there fill the tiles; one leaving frees a place, his
-		// tile closed until he is back.
+		// Four guests there fill the tiles; one leaving frees a place, which
+		// the next takes in his tile, so his coming back makes no fifth.
 		let mut cameras = Vec::new();
 		for name in ["dave", "erin", "frank", "ivy"] {
 			let path = format!("guests/{name}/camera.hang");
@@ -5612,9 +5612,35 @@ mod tests {
 			.unwrap();
 		shown("hal").await.expect("hal takes the place dave left");
 		assert!(
-			items(&engine).iter().any(|(source, _)| source == "dave"),
-			"dave keeps his tile"
+			!items(&engine).iter().any(|(source, _)| source == "dave"),
+			"in dave's tile"
 		);
+		assert!(
+			!engine
+				.state
+				.lock()
+				.unwrap()
+				.collection()
+				.heard(moq_scene::AudioScene::DEFAULT)
+				.contains("dave"),
+			"nor is he heard"
+		);
+		let _dave = engine
+			.subscribe
+			.route("guests/dave/camera.hang", Default::default())
+			.unwrap();
+		kio::clock::timeout(TIMEOUT, async {
+			while !engine.room().unwrap().participants()["dave"].camera {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("dave is back");
+		let guests = items(&engine)
+			.iter()
+			.filter(|(_, slot)| *slot == Some(moq_scene::Slot::Tile))
+			.count();
+		assert_eq!(guests, 4, "dave back waits under Add, the tiles full");
 
 		engine.stop();
 		kio::clock::timeout(TIMEOUT, engine.close())
