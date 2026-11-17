@@ -302,7 +302,10 @@ impl Collection {
 	}
 
 	/// The visible items `layers` draw, then those of each scene they draw
-	/// through a scene source, and so on, each scene once.
+	/// through a scene source, and so on, each scene once. While the show
+	/// goes out in both, `layers` draw an item shown in either picture, and a
+	/// scene source shows the landscape picture, so the scenes they draw only
+	/// the items shown in landscape.
 	pub fn drawn(&self, layers: impl IntoIterator<Item = Layer>) -> Vec<&Item> {
 		self.drawn_through(layers, self)
 	}
@@ -324,7 +327,8 @@ impl Collection {
 				&& walked.insert(scene)
 				&& let Some(scene) = nested.scene(scene)
 			{
-				items.extend(scene.items.iter().filter(|item| item.visible));
+				let shown = |item: &&Item| item.visible && item.shown_in(Format::Landscape);
+				items.extend(scene.items.iter().filter(shown));
 			}
 			next += 1;
 		}
@@ -3509,6 +3513,29 @@ background = "remove"
 		assert!(collection.draws_program("A"));
 		assert!(collection.draws_program("C"));
 		assert!(!collection.draws_program("Scene"));
+
+		// While the show goes out in both, a layer of a scene drawn whole is
+		// drawn in either picture, but a scene shown through a scene source
+		// shows its landscape picture alone.
+		let turned = Rect::fill(&collection.canvas.turned());
+		let portrait_only = |source| Item {
+			format: Some(Format::Portrait),
+			portrait: Some(Placement {
+				rect: turned,
+				crop: Crop::default(),
+			}),
+			..Item::new(source, fill)
+		};
+		collection.portrait = true;
+		collection.scenes[1].items.push(portrait_only("camera"));
+		collection.scenes[3].items.push(portrait_only("guest"));
+		collection.validate().unwrap();
+		let drawn: Vec<&str> = collection
+			.drawn([Layer::scene("A")])
+			.into_iter()
+			.map(|item| item.source.as_str())
+			.collect();
+		assert_eq!(drawn, ["b", "b", "camera", "logo", "c", "background"]);
 	}
 
 	/// A scene's own size is one the encoder can take, a published scene is
