@@ -636,13 +636,14 @@ online take the next tile of the scene on program, and be heard on program,
 as an edit you can undo. Up to four guests still in the room take tiles that
 way, and more wait under Add. One who leaves keeps their tile, closed until
 they are back, and frees their place: the next guest takes a new tile, or
-once four tiles hold guests, the tile of one who appeared on their own and
-left, who then waits under Add when back. A tile you gave a guest stays
-theirs. A guest appears on their
-own once per link, across restarts: after that, where they are shown is
-yours, so undoing their appearance or removing their layer keeps them off
-when they reconnect, until a new link. Since an appearance is your edit, it drops what you could
-redo. Off, every guest waits under Add, as before.
+once four tiles hold guests, the camera tile of one who appeared on their
+own and left, who waits under Add when back, as they appeared once already.
+A screen's tile, and that of a guest who never appeared on their own, stay.
+A guest appears on their own once per link, across restarts: after that,
+where they are shown is yours, so undoing their appearance or removing their
+layer keeps them off when they reconnect, until a new link. Since an
+appearance is your edit, it drops what you could redo. Off, every guest
+waits under Add, as before.
 
 ### Audio scenes
 

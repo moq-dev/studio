@@ -723,17 +723,18 @@ fn tiled(collection: &Collection, room: &Room, scene: &str) -> usize {
 enum Place {
 	/// A new tile after the others.
 	Next,
-	/// The tile at this index of a guest who appeared on their own and has
-	/// left, named here, in place of them.
-	Taken(usize, Path),
+	/// The camera tile at this index of a guest who appeared on their own
+	/// and has left, in place of them.
+	Taken(usize),
 }
 
 /// Where in `scene` the next guest to appear on their own goes: a new tile
 /// while the tiles hold fewer than [`MAX_GUESTS`] guests of the room, here
-/// or not, and once they hold that many the tile of one who appeared on
-/// their own and has left, so one coming back cannot make a fifth. A tile
-/// the host placed a guest in stays theirs, so with none to take there is
-/// no place.
+/// or not, and once they hold that many the camera tile of one who
+/// appeared on their own and has left, so one coming back cannot make a
+/// fifth. Only a camera appears on its own, so a screen tile is the host's
+/// and stays theirs, as does the tile of a guest who never appeared on
+/// their own; with none to take there is no place.
 fn place(collection: &Collection, room: &Room, scene: &str) -> Option<Place> {
 	let items = &collection.scene(scene)?.items;
 	let guests: Vec<(usize, &Source)> = (items.iter().enumerate())
@@ -746,9 +747,10 @@ fn place(collection: &Collection, room: &Room, scene: &str) -> Option<Place> {
 	}
 	let participants = room.participants.lock().unwrap();
 	guests.into_iter().find_map(|(index, shown)| {
-		let (identity, _) = room.guest_of(shown)?;
+		let (identity, kind) = room.guest_of(shown)?;
 		let guest = participants.get(identity.as_str())?;
-		(guest.appeared && !room.here_locked(&participants, shown)).then_some(Place::Taken(index, identity))
+		let left = kind == Kind::Camera && guest.appeared && !room.here_locked(&participants, shown);
+		left.then_some(Place::Taken(index))
 	})
 }
 
@@ -773,12 +775,14 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 	};
 	let mut draft = state.collection().draft(format!("`{source}` joins `{scene}`"));
 	match &place {
-		Place::Taken(index, _) => {
+		Place::Taken(index) => {
 			let left = state.collection().scene(scene).expect("a vacated tile's scene").items[*index].clone();
-			// No longer shown, nor heard should they come back.
+			// No longer shown on program, nor heard there should they come
+			// back: what `hear` gave them, leaving the other mixes as set.
+			let gone = state.collection().capture(&left.source).to_string();
 			let mut scenes = state.collection().audio_scenes.clone();
-			for audio in &mut scenes {
-				audio.sounds.remove(&left.source);
+			if let Some(program) = scenes.iter_mut().find(|audio| audio.program) {
+				program.sounds.remove(&gone);
 			}
 			draft.set_audio_scenes(scenes)?;
 			let taken = Item {
@@ -820,16 +824,6 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 			tracing::warn!(error = format!("{undone:#}"), "cannot forget a guest's appearance");
 		}
 		return Err(err);
-	}
-	// The guest whose tile was taken may appear again once there is room.
-	if let Place::Taken(_, left) = place {
-		let mut participants = room.participants.lock().unwrap();
-		let cleared = room.change(&mut participants, left.as_str(), |participant| {
-			participant.appeared = false
-		});
-		if let Err(err) = cleared {
-			tracing::warn!(error = format!("{err:#}"), "cannot let a guest appear again");
-		}
 	}
 	Ok(true)
 }
@@ -1811,10 +1805,19 @@ pub(crate) mod tests {
 			"a tile the host gave bob stays his"
 		);
 		room.participants.lock().unwrap().get_mut("bob").unwrap().appeared = true;
-		let Some(Place::Taken(index, left)) = place(&collection, &room, "Scene") else {
+		let Some(Place::Taken(index)) = place(&collection, &room, "Scene") else {
 			panic!("the next guest takes the tile bob had");
 		};
-		assert_eq!((index, left.as_str()), (2, "bob"));
+		assert_eq!(index, 2);
+		let screen = Source::Broadcast {
+			path: "guests/bob/screen.hang".into(),
+		};
+		collection.sources.insert("bob screen".into(), screen);
+		collection.scenes[0].items[2].source = "bob screen".into();
+		assert!(
+			place(&collection, &room, "Scene").is_none(),
+			"only a camera appears on its own, so his screen's tile is the host's"
+		);
 
 		collection.scenes[0].items.retain(|item| item.slot.is_none());
 		assert_eq!(tile(&collection, "Scene", "erin"), None, "a scene with no slots");

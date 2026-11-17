@@ -5604,6 +5604,24 @@ mod tests {
 			!items(&engine).iter().any(|(source, _)| source == "gus"),
 			"a fifth waits"
 		);
+		// A mix of the host's own holding dave keeps him once his tile goes.
+		{
+			let mut state = engine.state.lock().unwrap();
+			assert!(
+				state
+					.collection()
+					.heard(moq_scene::AudioScene::DEFAULT)
+					.contains("dave"),
+				"dave is heard on program"
+			);
+			let mut scenes = state.collection().audio_scenes.clone();
+			let mut headphones = moq_scene::AudioScene::new("Headphones");
+			headphones.sounds.insert("dave".into());
+			scenes.push(headphones);
+			let mut draft = state.collection().draft("Headphones");
+			draft.set_audio_scenes(scenes).unwrap();
+			state.commit(draft, None).unwrap();
+		}
 		drop(cameras.remove(0));
 		offline("dave").await.expect("dave leaves");
 		let _hal = engine
@@ -5615,16 +5633,12 @@ mod tests {
 			!items(&engine).iter().any(|(source, _)| source == "dave"),
 			"in dave's tile"
 		);
-		assert!(
-			!engine
-				.state
-				.lock()
-				.unwrap()
-				.collection()
-				.heard(moq_scene::AudioScene::DEFAULT)
-				.contains("dave"),
-			"nor is he heard"
-		);
+		{
+			let state = engine.state.lock().unwrap();
+			let heard = |audio: &str| state.collection().heard(audio).contains("dave");
+			assert!(!heard(moq_scene::AudioScene::DEFAULT), "nor is he heard on program");
+			assert!(heard("Headphones"), "but still in the host's own mix");
+		}
 		let _dave = engine
 			.subscribe
 			.route("guests/dave/camera.hang", Default::default())
