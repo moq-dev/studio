@@ -3645,6 +3645,87 @@ mod tests {
 		.await;
 	}
 
+	/// A camera that goes dark for a moment draws its last good picture in
+	/// place of the dark, unless its background is removed; dark for
+	/// [`DARK`](crate::dark::DARK), it draws its own again and counts as
+	/// gone dark.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_moment_of_dark_draws_the_last_good_picture() {
+		let (device, queue) = gpu().await;
+		let mut compositor = Compositor::new(&device, &queue, collection().canvas).unwrap();
+		let size = wgpu::Extent3d {
+			width: 64,
+			height: 36,
+			depth_or_array_layers: 1,
+		};
+		let raw = device.create_texture(&wgpu::TextureDescriptor {
+			label: None,
+			size,
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			format: FORMAT,
+			usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+			view_formats: &[],
+		});
+		let show = |rgba: [u8; 4]| {
+			queue.write_texture(
+				raw.as_image_copy(),
+				&rgba.repeat(64 * 36),
+				wgpu::TexelCopyBufferLayout {
+					offset: 0,
+					bytes_per_row: Some(64 * 4),
+					rows_per_image: None,
+				},
+				size,
+			);
+		};
+		let mut layer = Layer {
+			source: Source::Camera { id: None },
+			renderer: None,
+			raw: Some(raw.clone()),
+			fresh: true,
+			cleared: false,
+			matte: None,
+			picture: None,
+			lut: None,
+			overlay: None,
+			error: None,
+			probe: Some(Probe::new(&device, &queue)),
+			holding: false,
+		};
+		let start = Instant::now();
+		let at = |offset: Duration| start.saturating_add(offset);
+		// Each picture is read, then judged on the next watch once the GPU is done.
+		let read = |compositor: &mut Compositor, layer: &mut Layer, rgba, when, background| {
+			show(rgba);
+			layer.probe.as_mut().unwrap().changed();
+			compositor.watch(layer, background, true, when);
+			device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+			compositor.watch(layer, background, true, when);
+		};
+
+		read(&mut compositor, &mut layer, RED, at(Duration::ZERO), Background::Keep);
+		assert!(!layer.holding);
+		let dark = crate::dark::INTERVAL;
+		read(&mut compositor, &mut layer, BLACK, at(dark), Background::Keep);
+		assert!(layer.holding, "the last good picture is drawn");
+		assert_eq!(layer.probe.as_ref().unwrap().dark(at(dark)), None);
+
+		// A cut-out never shows the held picture, which has its background.
+		compositor.watch(&mut layer, Background::Remove, true, at(dark));
+		assert!(!layer.holding);
+		compositor.watch(&mut layer, Background::Keep, true, at(dark));
+		assert!(layer.holding);
+
+		let gone = dark + crate::dark::DARK;
+		compositor.watch(&mut layer, Background::Keep, true, at(gone));
+		assert!(!layer.holding, "the dark is drawn as it is");
+		assert!(layer.picture.is_some());
+		assert_eq!(layer.probe.as_ref().unwrap().dark(at(gone)), Some(crate::dark::DARK));
+	}
+
 	/// A source that clears its picture, such as a media source played
 	/// again, never shows the cut-out of a picture from before, even when its
 	/// next picture overtakes the clear.

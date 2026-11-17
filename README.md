@@ -1556,8 +1556,8 @@ window closed, minimized, or switched to exclusive full screen, a screen
 locked or showing protected video, a camera behind its shutter, or a
 permission the system took away. Four times a second at most, and only when
 it delivers a new picture, the studio shrinks each one's picture on the GPU
-to a grid of 64 by 36 tiles and reads the grid back. A picture whose every
-texel is dark and whose tiles are all one color is dark.
+to a grid of 64 by 36 tiles and reads the grid back. A picture dark in every
+tile but a mouse pointer's few, and all one color, is dark.
 
 For its first 3 seconds of dark the studio draws the capture's last picture
 that was not dark in its place, on program and everywhere else, so a moment

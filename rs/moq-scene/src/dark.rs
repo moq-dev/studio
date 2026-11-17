@@ -40,6 +40,10 @@ const BYTES: u64 = (TILES.0 * TILES.1 * 4) as u64;
 /// a camera's noise in the dark stays under it, and any lit pixel passes it.
 const BRIGHTEST: u8 = 40;
 
+/// How many tiles of a dark picture may be lit anyway: a mouse pointer the
+/// capture draws over the black spans up to four.
+const LIT: usize = 4;
+
 /// How far apart a dark picture's tiles' mean colors get, out of 255: a dark
 /// page with a line of text on it spreads further.
 const SPREAD: u8 = 8;
@@ -49,9 +53,14 @@ const SPREAD: u8 = 8;
 fn judge(tiles: &[u8]) -> bool {
 	let mut low = [u8::MAX; 3];
 	let mut high = [0u8; 3];
+	let mut lit = 0;
 	for tile in tiles.as_chunks::<4>().0 {
 		if tile[3] > BRIGHTEST {
-			return false;
+			lit += 1;
+			if lit > LIT {
+				return false;
+			}
+			continue;
 		}
 		for channel in 0..3 {
 			low[channel] = low[channel].min(tile[channel]);
@@ -321,11 +330,26 @@ mod tests {
 		assert!(judge(&tiles));
 	}
 
+	/// A pointer the capture draws over the black lights a few tiles, and
+	/// leaves it dark.
 	#[test]
-	fn a_lit_pixel_is_not_dark() {
+	fn a_pointer_on_black_is_dark() {
 		let mut tiles = plain([0, 0, 0], 0);
-		// Its tile's mean barely moves, but its brightest does.
-		tiles[100 * 4..101 * 4].copy_from_slice(&[1, 1, 1, 255]);
+		for tile in [100, 101, 164, 165] {
+			tiles[tile * 4..tile * 4 + 4].copy_from_slice(&[40, 40, 40, 255]);
+		}
+		assert!(judge(&tiles));
+	}
+
+	/// A little more lit than a pointer is not dark, however small each
+	/// light: a line of text, or the stars of a night sky.
+	#[test]
+	fn a_few_lit_pixels_are_not_dark() {
+		let mut tiles = plain([0, 0, 0], 0);
+		// Each tile's mean barely moves, but its brightest does.
+		for tile in [100, 300, 500, 700, 900] {
+			tiles[tile * 4..tile * 4 + 4].copy_from_slice(&[1, 1, 1, 255]);
+		}
 		assert!(!judge(&tiles));
 	}
 

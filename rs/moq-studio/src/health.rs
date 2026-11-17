@@ -1814,7 +1814,7 @@ mod tests {
 	}
 
 	/// Problems list worst first: an unreachable relay and a frozen or silent
-	/// source above a slow round trip. A frozen, silent, ended, or uploaded
+	/// source above a slow round trip. A frozen, silent, dark, ended, or uploaded
 	/// source names the broadcasts that show or play it, including a published
 	/// scene that alone plays it.
 	#[test]
@@ -1879,12 +1879,12 @@ mod tests {
 				"Source `logo` stalled: no new picture for 3 s, so scene `tall` repeats its last one.",
 				"Source `mic` stalled: no new sound for 2 s, so scene `tall` plays silence for it.",
 				"Source `music` failed: the file is gone.",
+				"Source `game` has been all dark for 12 s, so the program shows black where it was.",
+				"Source `screen` has been all dark for 3 s, so the program, scene `tall` and scene `wide` show black where it was.",
 				"Source `intro` played to its end, so the program holds its last picture and plays no sound for it.",
 				"Source `outro` played to its end, so the program, scene `tall` and scene `wide` hold its last picture and play no sound for it.",
 				"Source `clip` played to its end, so the program holds its last picture and scene `tall` plays no sound for it.",
 				"Source `bed` played to its end, so scene `tall` plays no sound for it.",
-				"Source `game` has been all dark for 12 s, so the program shows black where it was.",
-				"Source `screen` has been all dark for 3 s, so the program, scene `tall` and scene `wide` show black where it was.",
 				"Source `chat`, which scene `tall` shows, is uploaded from memory every frame rather than copied on the GPU: there is no display to paint through.",
 				"The relay is far away: a round trip to it takes 400 ms.",
 			]
