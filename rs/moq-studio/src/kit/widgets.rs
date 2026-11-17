@@ -1099,6 +1099,8 @@ pub struct Pad<'a> {
 	refused: Option<&'a str>,
 	/// What just failed on it, such as a rename.
 	fault: Option<&'a str>,
+	/// Whether a capture it shows went dark.
+	dark: bool,
 	width: f32,
 	/// The thumbnail's shape, width over height: the show's.
 	shape: f32,
@@ -1118,6 +1120,7 @@ impl<'a> Pad<'a> {
 			tag: None,
 			refused: None,
 			fault: None,
+			dark: false,
 			width: 124.0,
 			shape: 16.0 / 9.0,
 			portrait: None,
@@ -1168,6 +1171,12 @@ impl<'a> Pad<'a> {
 	/// Ringed in red, saying `what` failed on hover, such as a rename.
 	pub fn fault(mut self, what: Option<&'a str>) -> Self {
 		self.fault = what;
+		self
+	}
+
+	/// Badged in amber beside its name: a capture it shows went dark.
+	pub fn dark(mut self, dark: bool) -> Self {
+		self.dark = dark;
 		self
 	}
 
@@ -1261,12 +1270,28 @@ impl Widget for Pad<'_> {
 				painter.galley(cap.center() - text.size() / 2.0, text, Color32::from_white_alpha(0xbb));
 			}
 			let ink = if self.refused.is_some() { DIM } else { TEXT };
-			let galley = caps_galley(painter, self.name, super::display(14.0), ink, Some(rect.width() - 16.0));
+			let badge = if self.dark { 20.0 } else { 0.0 };
+			let galley = caps_galley(
+				painter,
+				self.name,
+				super::display(14.0),
+				ink,
+				Some(rect.width() - 16.0 - badge),
+			);
 			let at = pos2(
 				rect.left() + 8.0,
 				thumb.bottom() + (rect.bottom() - thumb.bottom() - galley.size().y) / 2.0,
 			);
 			painter.galley(at, galley, TEXT);
+			if self.dark {
+				let center = pos2(
+					rect.right() - 16.0,
+					thumb.bottom() + (rect.bottom() - thumb.bottom()) / 2.0,
+				);
+				let badge = Rect::from_center_size(center, vec2(16.0, 16.0));
+				painter.circle_filled(center, 8.0, CUE);
+				Icon::Warning.paint(ui, badge, 10.0, ON_CUE);
+			}
 		}
 		match self.fault.or(self.refused) {
 			Some(why) => tip(response, why, None),

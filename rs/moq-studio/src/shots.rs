@@ -110,6 +110,12 @@ enum View {
 	Cued(Page),
 	/// A scene, by name, open for editing off air on BUILD.
 	OffAir(&'static str),
+	/// BUILD with the game's window gone dark selected, and what to do about
+	/// it open from its badge.
+	Dark,
+	/// BUILD with the host's camera stalled selected, and what to do about it
+	/// open from its badge.
+	Stalled,
 	/// BUILD with no layer selected, after the guest `Ibis` appears on their
 	/// own in the scene on program.
 	Joined,
@@ -118,6 +124,8 @@ enum View {
 	/// with `Interview` cued.
 	Multiview {
 		live: bool,
+		/// Whether the host's picture stalled.
+		stalled: bool,
 	},
 	/// BUILD's Add tab on the drop views' show, with a file dragged or
 	/// dropped on the picture.
@@ -308,6 +316,13 @@ views! {
 	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
 	/// Too narrow for the banner beside the live picture, it goes under it.
 	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml", relay: false };
+	/// A window gone dark: its row, the layer on the picture, its scene's
+	/// pad, and the health dot turn amber, and its badge opens what happened
+	/// and the fixes.
+	build_dark: Live, Open::Studio { view: View::Dark, size: SIZE, show: "dark.toml", relay: false };
+	/// A camera that stopped sending pictures: the same amber badge, saying
+	/// its picture froze, and offering to open it again.
+	build_stalled: Live, Open::Studio { view: View::Stalled, size: SIZE, show: "stalled.toml", relay: false };
 	/// A logo dragged over the picture: where it lands, outlined and named
 	/// for the kind of layer it becomes, and Add's row for that kind lit.
 	build_drop: Still, dropping(Drop::Hover);
@@ -421,11 +436,14 @@ views! {
 	/// The multiview off air: every scene and the sources picked, the scene
 	/// the stream opens on amber, and the clock, which keeps it from being
 	/// still.
-	multiview: Live, studio(View::Multiview { live: false });
+	multiview: Live, studio(View::Multiview { live: false, stalled: false });
+	/// The multiview with the host's camera stalled: its tile and each scene
+	/// tile showing it carry the amber badge, and its picture says so.
+	multiview_stalled: Live, studio(View::Multiview { live: false, stalled: true });
 	/// The multiview on air in Studio mode: the scene on air framed in the
 	/// accent, the cued one amber, and the sources the live picture shows
 	/// dotted.
-	multiview_on_air: Live, relayed(View::Multiview { live: true });
+	multiview_on_air: Live, relayed(View::Multiview { live: true, stalled: false });
 }
 
 /// Draw the view `name` opens into `$SHOTS_DIR/<name>.png`, twice if it is
@@ -1487,8 +1505,11 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			studio.turn(*page);
 		}
 		View::OffAir(scene) => studio.edit_off_air(scene),
+		// The game's window, the back one of three over the black.
+		View::Dark => studio.build(Side::Layers, Inspect::Layer, Some(2)),
+		View::Stalled => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Joined => studio.build(Side::Layers, Inspect::Layer, None),
-		View::Multiview { live } => {
+		View::Multiview { live, .. } => {
 			studio.multiview_alone(&["host", "highlight"]);
 			if *live {
 				studio.studio_mode(true);
@@ -1525,6 +1546,14 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 	}
 	let engine = started.get().expect("the studio started").clone();
+	if let View::Dark = view {
+		let dark = Duration::from_secs(12);
+		engine.state.lock().unwrap().dark.insert("game".into(), dark);
+	}
+	if let View::Stalled | View::Multiview { stalled: true, .. } = view {
+		let stalled = Duration::from_secs(4);
+		engine.state.lock().unwrap().stalled.insert("host".into(), stalled);
+	}
 	if let View::Joined = view {
 		let mut state = engine.state.lock().unwrap();
 		let connect = url::Url::parse("https://relay.example/show").unwrap();
@@ -1540,7 +1569,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	| View::OnAirSetting(_)
 	| View::Restart
 	| View::ShowMenuLive
-	| View::Multiview { live: true } = view
+	| View::Multiview { live: true, .. } = view
 	{
 		controls.go_live().expect("going live starts");
 		runtime
@@ -1591,8 +1620,34 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			harness.get_by_label("Audio scene Headphones").click_secondary();
 			harness.run_steps(4);
 		}
+		View::Dark => {
+			// The health dot counts it once the stream is graded again.
+			runtime
+				.block_on(kio::clock::timeout(SETTLE, async {
+					while engine.health.lock().unwrap().dark == 0 {
+						kio::clock::sleep(Duration::from_millis(20)).await;
+					}
+				}))
+				.expect("the health dot counts the dark window");
+			harness.run_steps(2);
+			harness.get_by_label("What happened to game").click();
+			harness.run_steps(4);
+		}
+		View::Stalled => {
+			runtime
+				.block_on(kio::clock::timeout(SETTLE, async {
+					while engine.health.lock().unwrap().stalled == 0 {
+						kio::clock::sleep(Duration::from_millis(20)).await;
+					}
+				}))
+				.expect("the health dot counts the stalled camera");
+			harness.run_steps(2);
+			harness.get_by_label("What happened to host").click();
+			harness.run_steps(4);
+		}
 		View::Menu => {
 			// The row comes before the inspector's tab of the same name.
+
 			harness.get_all_by_label("host").next().unwrap().click_secondary();
 			harness.run_steps(4);
 		}

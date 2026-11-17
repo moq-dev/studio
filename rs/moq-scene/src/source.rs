@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -320,8 +320,8 @@ pub struct Sources {
 	/// The sources on program, as last set.
 	on_program: BTreeSet<String>,
 	/// The picked displays and windows the last sync ran, by name, whose
-	/// grants are kept, or `None` before the first.
-	picked: Option<BTreeSet<String>>,
+	/// grants are kept, each with its kind, or `None` before the first.
+	picked: Option<BTreeMap<String, Source>>,
 }
 
 impl Sources {
@@ -493,19 +493,29 @@ impl Sources {
 
 	/// Forget the grant of each picked display or window `collection` no
 	/// longer has, such as one removed or renamed, since a grant is a
-	/// credential.
+	/// credential, and of each whose kind changed, such as a window made a
+	/// display, since the portal refuses a grant of another kind.
 	fn forget_grants(&mut self, collection: &Collection) {
 		let Some(grants) = &self.context.grants else { return };
-		let picked: BTreeSet<String> = collection
+		let picked: BTreeMap<String, Source> = collection
 			.sources
 			.iter()
 			.filter(|(_, source)| matches!(source, Source::PickedDisplay | Source::PickedWindow))
-			.map(|(name, _)| name.clone())
+			.map(|(name, source)| (name.clone(), source.clone()))
 			.collect();
 		if self.picked.as_ref() == Some(&picked) {
 			return;
 		}
-		match grants.retain(&picked) {
+		let mut changed = self.picked.iter().flat_map(|before| {
+			picked
+				.iter()
+				.filter(|(name, source)| before.get(*name).is_some_and(|was| was != *source))
+				.map(|(name, _)| name)
+		});
+		let forgotten = changed
+			.try_for_each(|name| grants.forget(name))
+			.and_then(|()| grants.retain(&picked.keys().cloned().collect()));
+		match forgotten {
 			Ok(()) => self.picked = Some(picked),
 			Err(err) => tracing::warn!(%err, "cannot forget the grants of removed sources"),
 		}
@@ -518,6 +528,16 @@ impl Sources {
 		if let Some(feed) = self.feeds.remove(name) {
 			leave(&self.mixes, &self.whole, &feed);
 		}
+	}
+
+	/// Forget the grant of the display or window called `name` and
+	/// [restart](Self::restart) it, so it asks the system picker afresh.
+	pub fn pick_again(&mut self, name: &str) -> Result<(), Error> {
+		if let Some(grants) = &self.context.grants {
+			grants.forget(name)?;
+		}
+		self.restart(name);
+		Ok(())
 	}
 
 	/// Stop every source, as removing it would: each [`Driver`] returns and
@@ -596,9 +616,20 @@ pub struct Feed {
 	silent: Arc<AtomicBool>,
 	/// A broadcast source's playout clock, or the one a layer plays on.
 	clock: Option<sync::Consumer>,
+	/// Which start of its source this is, unique across feeds.
+	generation: u64,
 }
 
+/// The next feed's [`Feed::generation`].
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
 impl Feed {
+	/// Which start of its source this is: a feed restarted, or started again
+	/// under the same name, has a new one, so what was drawn from the one
+	/// before can be told apart and forgotten.
+	pub fn generation(&self) -> u64 {
+		self.generation
+	}
 	/// What a replay of this broadcast source copies: the broadcast it plays,
 	/// up to the newest picture it showed, which is what was just seen.
 	///
@@ -2541,6 +2572,7 @@ fn open(
 			Some((_, schedule)) => Some(schedule.clone()),
 			None => clock.as_ref().map(sync::Producer::consume),
 		},
+		generation: GENERATION.fetch_add(1, Ordering::Relaxed),
 	};
 	let driver = Driver {
 		name: name.to_string(),
@@ -3806,6 +3838,32 @@ mod tests {
 		.await;
 	}
 
+	/// A source started again has a feed of a new generation, so the
+	/// compositor forgets what it read from the one before.
+	#[tokio::test]
+	async fn a_restarted_feed_is_a_new_generation() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let mut collection = Collection::new();
+			collection.sources.insert(
+				"red".into(),
+				Source::Color {
+					color: crate::Rgba([255, 0, 0, 255]),
+				},
+			);
+			drop(sources.sync(&collection));
+			let first = sources.get("red").unwrap().generation();
+			drop(sources.sync(&collection));
+			assert_eq!(sources.get("red").unwrap().generation(), first, "a sync keeps the feed");
+			sources.restart("red");
+			drop(sources.sync(&collection));
+			assert_ne!(sources.get("red").unwrap().generation(), first);
+		})
+		.await;
+	}
+
 	#[tokio::test]
 	async fn removing_or_renaming_a_picked_source_forgets_its_grant() {
 		local(async {
@@ -3833,6 +3891,18 @@ mod tests {
 			collection.sources.insert("Renamed".into(), screen);
 			drop(sources.sync(&collection));
 			assert!(!kept("Screen") && !kept("Window"));
+
+			// A window made a display under its name, as "Capture the whole
+			// screen instead" does, asks the picker afresh.
+			collection.sources.insert("Game".into(), Source::PickedWindow);
+			drop(sources.sync(&collection));
+			grants.claim("Game").set(Some("window")).unwrap();
+			grants.claim("Renamed").set(Some("screen")).unwrap();
+			assert!(kept("Game"));
+			collection.sources.insert("Game".into(), Source::PickedDisplay);
+			drop(sources.sync(&collection));
+			assert!(!kept("Game"), "a grant of another kind is forgotten");
+			assert!(kept("Renamed"), "the rest are kept");
 		})
 		.await;
 	}

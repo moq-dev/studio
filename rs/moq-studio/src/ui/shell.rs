@@ -69,6 +69,8 @@ struct ScenePad {
 	dual: bool,
 	/// Why it cannot go on program, if it cannot.
 	refused: Option<String>,
+	/// Whether a layer it shows went dark or stalled.
+	dark: bool,
 }
 
 /// A sound the stream carries, as its row shows it.
@@ -206,6 +208,7 @@ impl Panels {
 		let position = history.position();
 		let undo = position.checked_sub(1).and_then(|at| history.entries().nth(at));
 		let redo = history.entries().nth(position);
+		let now = kio::clock::now();
 		let scenes = collection
 			.scenes
 			.iter()
@@ -214,6 +217,7 @@ impl Panels {
 				canvas: scene.canvas(collection.canvas),
 				dual: collection.dual(&Layer::scene(&scene.name)),
 				refused: collection.refuses(&scene.name),
+				dark: super::dark::draws_lost(collection, &scene.name, |name| state.lost(name, now).is_some()),
 			})
 			.collect();
 		let stream = collection.program_audio().map(str::to_string);
@@ -993,6 +997,7 @@ impl Panels {
 			.tally(tally)
 			.tag(tag)
 			.refused(pad.refused.as_deref())
+			.dark(pad.dark)
 			.fault(fault)
 			.width(width)
 			.shape(shape);
