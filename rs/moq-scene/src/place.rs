@@ -214,7 +214,7 @@ pub struct Placement {
 	/// was put.
 	pub slot: Option<Slot>,
 	/// Whether it stays where the streamer moved it, until the content under
-	/// it changes.
+	/// it changes. A move by hand says so at once, before the next render.
 	pub held: bool,
 	/// Where it last moved from, and what it left there.
 	pub left: Option<Left>,
@@ -222,6 +222,18 @@ pub struct Placement {
 	pub slots: Vec<(Slot, Rect)>,
 	/// What matters under it, once it has looked.
 	pub heat: Heat,
+}
+
+impl Placement {
+	/// Where the item is drawn, saved at `saved`: where it was placed, or,
+	/// held, where it is saved, which an edit since the last render, such as
+	/// a nudge, may have moved.
+	pub fn drawn(&self, saved: Rect) -> Rect {
+		match self.held {
+			true => saved,
+			false => self.rect,
+		}
+	}
 }
 
 /// Where an item moved from.
@@ -572,6 +584,8 @@ impl Placer {
 			});
 		}
 		self.at = At::Held;
+		self.placement.held = true;
+		self.placement.slot = None;
 		self.looking = None;
 		self.worst = None;
 		self.glide = Glide::new(self.glides, |_| true);
@@ -590,6 +604,11 @@ impl Placer {
 		match self.before.take() {
 			Some(before) if before.saved == saved => {
 				self.at = before.at;
+				self.placement.held = false;
+				self.placement.slot = match before.at {
+					At::Slot(slot) => Some(slot),
+					_ => None,
+				};
 				self.looking = before.looking.then_some(now);
 				self.worst = None;
 				self.glide = Glide::new(self.glides, |_| true);
@@ -1390,6 +1409,27 @@ mod tests {
 		assert_eq!(placement.slot, None);
 		assert_eq!(placement.rect, saved);
 		let _ = now;
+	}
+
+	/// A move by hand says it is held at once, before the next place, so
+	/// moves that come faster than renders, as nudges on a slow canvas do,
+	/// each start from where the last saved it; an undo says it is not.
+	#[test]
+	fn a_move_by_hand_is_held_at_once() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let now = run(&mut placer, saved, start, (0..6).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+		let nudged = Rect { x: 20.0, ..saved };
+		placer.hold();
+		let placement = placer.placement();
+		assert_eq!((placement.held, placement.slot), (true, None));
+		assert_eq!(placement.drawn(nudged), nudged);
+		placer.undone(saved, now);
+		let placement = placer.placement();
+		assert_eq!((placement.held, placement.slot), (false, Some(Slot::TopLeft)));
+		assert_eq!(placement.drawn(saved), placement.rect);
 	}
 
 	/// An undo back to where it was saved before a move by hand puts back

@@ -38,7 +38,7 @@ pub(super) fn placement<'a>(state: &'a State, layer: &Layer, index: usize, item:
 pub(super) fn placed(state: &State, layer: &Layer, index: usize, item: &Item) -> Item {
 	match placement(state, layer, index, item) {
 		Some(placement) => Item {
-			rect: placement.rect,
+			rect: placement.drawn(item.rect),
 			..item.clone()
 		},
 		None => item.clone(),
@@ -50,7 +50,7 @@ pub(super) fn placed(state: &State, layer: &Layer, index: usize, item: &Item) ->
 /// did, so the resize leaves it free to keep clear.
 pub(super) fn resized(state: &State, layer: &Layer, index: usize, item: &Item, rect: Rect) -> Rect {
 	match placement(state, layer, index, item) {
-		Some(placement) if placement.rect != item.rect => Rect {
+		Some(placement) if placement.drawn(item.rect) != item.rect => Rect {
 			x: item.rect.x,
 			y: item.rect.y,
 			..rect
@@ -101,8 +101,9 @@ pub(super) fn drawn<'a>(state: &State, staged: Cow<'a, Collection>) -> Cow<'a, C
 			};
 			// A scene staged one frame behind an edit may lack it.
 			let staged = drawn.scenes.get(number).and_then(|staged| staged.items.get(index));
-			if staged.is_some_and(|staged| staged.source == item.source && staged.rect != placement.rect) {
-				drawn.to_mut().scenes[number].items[index].rect = placement.rect;
+			let rect = placement.drawn(item.rect);
+			if staged.is_some_and(|staged| staged.source == item.source && staged.rect != rect) {
+				drawn.to_mut().scenes[number].items[index].rect = rect;
 			}
 		}
 	}

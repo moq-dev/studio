@@ -256,6 +256,7 @@ impl Studio {
 			duration: Transition::default().duration().unwrap_or_default(),
 			cut: STINGER_CUT,
 			drag: None,
+			legend: false,
 			renaming: None,
 			title_needs: 0.0,
 			renaming_audio: None,
@@ -663,6 +664,10 @@ struct Panels {
 	cut: Duration,
 	/// The layer a drag on the BUILD page's picture holds.
 	drag: Option<Drag>,
+	/// Whether the BUILD page's picture leaves room for the keep-clear
+	/// legend under it, which a drag leaves as it found it, so the picture
+	/// under the pointer neither moves nor resizes mid-gesture.
+	legend: bool,
 	/// The layer row being dragged to a new place, by its index.
 	moving: Option<usize>,
 	/// The scene being renamed, by index, and the name typed so far.

@@ -47,7 +47,12 @@ impl Panels {
 			room.min.y = self.off_air_header(ui, cued, room, snapshot.shape);
 			shape = cued.shape();
 		}
-		let keeping = self.keeping_clear();
+		// A drag that selects a layer keeping clear leaves the picture where
+		// it was until let go, so the pointer stays over what it moves.
+		if self.drag.is_none() {
+			self.legend = self.keeping_clear();
+		}
+		let keeping = self.legend;
 		if keeping {
 			room.max.y -= keep::LEGEND;
 		}

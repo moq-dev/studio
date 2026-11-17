@@ -129,7 +129,7 @@ impl Panels {
 		// Where the picture draws it: a layer keeping clear where it was
 		// placed, which a move by hand starts from.
 		let placement = keep::placement(&state, &picked.layer, picked.index, &item);
-		let mut rect = placement.map_or(item.rect, |placement| placement.rect);
+		let mut rect = placement.map_or(item.rect, |placement| placement.drawn(item.rect));
 		if item.slot.is_some() {
 			ui.label(
 				egui::RichText::new("Placed by the scene's arrangement; drag it onto another slot to swap them")
@@ -234,7 +234,7 @@ impl Panels {
 			let rect = match (keep_clear, placement) {
 				(None, Some(placement)) => {
 					moved = true;
-					placement.rect
+					placement.drawn(item.rect)
 				}
 				_ => item.rect,
 			};
