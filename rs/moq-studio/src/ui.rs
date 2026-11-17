@@ -39,6 +39,7 @@ mod layout;
 mod levels;
 mod live;
 mod mixer;
+mod multiview;
 mod review;
 mod settings;
 mod shell;
@@ -217,6 +218,7 @@ impl Studio {
 		let controls = Arc::new(Controls::new(engine.clone(), stream, runtime.clone()));
 		drop(controls.follow_relays());
 		let review = review::Review::new(&engine, &runtime);
+		let multiview = multiview::Multiview::new(render.clone(), engine.clone(), controls.clone());
 		let mut panels = Panels {
 			engine,
 			runtime,
@@ -279,6 +281,7 @@ impl Studio {
 			levels: Levels::default(),
 			graph: graph::View::default(),
 			review,
+			multiview,
 			dropping: drop::Dropping::default(),
 			keyboard: None,
 		};
@@ -322,6 +325,7 @@ impl Studio {
 	/// otherwise keep alive.
 	pub fn release(self, render: &eframe::egui_wgpu::RenderState) {
 		let panels = self.panels;
+		panels.multiview.release();
 		let mut renderer = render.renderer.write();
 		for registered in [&panels.program, &panels.preview]
 			.into_iter()
@@ -349,6 +353,12 @@ impl Studio {
 	/// Open Settings at `setting`, as the gear would.
 	pub(crate) fn open(&mut self, setting: Setting) {
 		self.panels.setting = Some(setting);
+	}
+
+	/// Draw the multiview as the window itself, in place of the studio, with
+	/// the sources called `picked` on it.
+	pub(crate) fn multiview_alone(&mut self, picked: &[&str]) {
+		self.panels.multiview.set_alone(picked);
 	}
 
 	/// Open the scene graph's window, as Settings, Advanced would.
@@ -459,6 +469,8 @@ impl Studio {
 			bindings = eframe::get_value(storage, HOTKEYS).unwrap_or_default();
 			let studio = eframe::get_value(storage, STUDIO_MODE).unwrap_or_default();
 			panels.controls.set_studio(studio);
+			let multiview = eframe::get_value(storage, multiview::KEY).unwrap_or_default();
+			panels.multiview.load(multiview);
 		}
 		self.panels.keyboard = Some(window.keyboard.clone());
 		let hotkeys = Hotkeys::new(window, self.panels.controls.clone(), &self.panels.runtime, bindings);
@@ -470,6 +482,7 @@ impl Studio {
 		eframe::set_value(storage, SPEAKER, &panels.speaker);
 		eframe::set_value(storage, SNAPPING, &panels.snapping);
 		eframe::set_value(storage, STUDIO_MODE, &panels.controls.studio());
+		panels.multiview.save(storage);
 		if let Some(hotkeys) = &panels.hotkeys {
 			eframe::set_value(storage, HOTKEYS, &hotkeys.bindings());
 		}
@@ -520,16 +533,22 @@ impl Studio {
 				.map_or(Verdict::Healthy, |problem| problem.verdict)
 		};
 		fx.follow(panels.engine.on_air().live().is_some(), snapshot.takes, verdict);
-		panels.window(ui, fx, &snapshot);
-		panels.drops_elsewhere(ui.ctx());
+		match panels.multiview.alone() {
+			true => panels.multiview.ui(ui),
+			false => {
+				panels.window(ui, fx, &snapshot);
+				panels.drops_elsewhere(ui.ctx());
+				panels.multiview.show(ui.ctx());
+			}
+		}
 		// A stage not shown hears no input, so it lets go of the pages, as
 		// turning Interact off does.
 		if !panels.staged {
 			panels.let_go();
 		}
 		// A thumbnail nothing shows is not drawn, until it is again.
-		let mut state = panels.engine.state.lock().unwrap();
-		state.compositor.set_thumbnails(panels.thumbnails_shown.iter().cloned());
+		let bindings = panels.hotkeys.as_ref().map(Hotkeys::bindings).unwrap_or_default();
+		panels.multiview.share(&panels.thumbnails_shown, bindings);
 	}
 }
 
@@ -697,6 +716,8 @@ struct Panels {
 	graph: graph::View,
 	/// The REVIEW page's strip, cards, and what is dragged on it.
 	review: review::Review,
+	/// The multiview's window, and this user's picks for it.
+	multiview: multiview::Multiview,
 	/// The files and pastes landing on the picture.
 	dropping: drop::Dropping,
 	/// The keys the window hears before egui, which say when a paste was

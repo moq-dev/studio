@@ -163,7 +163,8 @@ double-click it to maximize, and drag the window's edges to resize it. On
 macOS the system's buttons and edges stay. It holds, from the left:
 
 - The show's name. Its menu has the scene file's path, **Reload the scene
-  file**, **Copy the selected layer**, **Paste**, and **Close show**, which
+  file**, **Copy the selected layer**, **Paste**, **Open the multiview** (see
+  [Multiview](#multiview)), and **Close show**, which
   ends the show as quitting does (saving it, finishing a recording, and
   letting go of its relays, sources, and keys) and returns the window to [your
   shows](#your-shows). It is dimmed while the stream is on air or going on or
@@ -330,6 +331,32 @@ cued; and the close clears the cue. On BUILD the card moves to the opposite
 corner while the selected layer is under it, so it hides neither the layer
 nor its toolbar, even mid-drag. Studio mode is kept per user, with
 the [hotkeys](#hotkeys), not in the scene file.
+
+### Multiview
+
+**Open the multiview**, in the show's menu, opens a window for another
+monitor with every scene and the sources you pick live in one grid, as large
+as the window allows: the scene on air framed in blue and tagged ON AIR, the
+one cued (or, off air, the one the stream opens on) framed in amber, and a
+blue dot on each source the live picture shows. Over the grid are the show's
+name, a clock in this computer's time zone, the stream's health, and how long
+it has been live. Click a scene's tile to take it, or cue it in Studio mode,
+as its pad does; its hotkey shows on the tile and works with the multiview in
+front. The multiview draws on its own, so it stays live while the studio's
+window is minimized or behind a game.
+
+Sources that move on their own (cameras, screens, windows, guests and other
+broadcasts, web pages, video files, and replays) are on it until you leave
+one out, from its tile's right-click menu or the eye in the corner, where you
+can also add a still, a color, or a copy. The tiles on air and cued are
+redrawn at the program's frame rate, and the rest ten times a second.
+
+**F11**, the square in the corner, or a double-click on the header goes full
+screen on the monitor the window is on, and **Escape** comes back. Whether
+it is open, where it was, whether it was full screen, and each show's picks
+are kept per user, with the [hotkeys](#hotkeys), not in the scene file, so it
+opens where you left it next time. Wayland does not let an app place its own
+window, so there the desktop picks where it opens.
 
 ### Going live
 
@@ -1504,8 +1531,9 @@ with, such as a function key, a keypad key, or one with modifiers:
   bound. Without the portal, or if the dialog is declined, bound keys work only
   while the studio has focus, and the tab says so.
 
-The bindings, the snap and grid settings, the [effects](#effects) setting, and
-the output **Listen** plays on are kept per user in the app's settings, `~/Library/Application
+The bindings, the snap and grid settings, the [effects](#effects) setting, the
+[multiview](#multiview)'s place and picks, and the output **Listen** plays on
+are kept per user in the app's settings, `~/Library/Application
 Support/moq-studio` on macOS, `$XDG_DATA_HOME/moq-studio` (or
 `~/.local/share/moq-studio`) on Linux, and `%APPDATA%\moq-studio\data` on
 Windows, apart from the scene file, so a scene file moves between machines
