@@ -228,18 +228,34 @@ impl State {
 		};
 		let moved = moved(&self.collection, &collection);
 		self.adopt(collection, &made)?;
-		self.hold(&moved);
+		match position < from {
+			true => self.undone(&moved),
+			false => self.hold(&moved),
+		}
 		self.history = history;
 		self.edited();
 		Ok(())
 	}
 
 	/// Note each layer keeping clear in `moved`, as [`moved`] lists them, as
-	/// moved by hand: an undo, a redo, or a reload put it elsewhere, so it
-	/// stays where the scene file has it until the content under it changes.
-	fn hold(&mut self, moved: &[(String, usize, String)]) {
-		for (scene, index, source) in moved {
-			self.compositor.hold(scene, *index, source);
+	/// moved by hand: a redo or a reload put it elsewhere, so it stays where
+	/// the scene file has it until the content under it changes.
+	fn hold(&mut self, moved: &[Moved]) {
+		for moved in moved {
+			self.compositor.hold(&moved.scene, moved.index, &moved.source);
+		}
+	}
+
+	/// Note each layer keeping clear in `moved`, as [`moved`] lists them, as
+	/// put back by an undo: one back where it was saved before a move by hand
+	/// held it goes back to where it was then, such as the slot it had
+	/// glided to, so the undo puts back what the streamer saw; any other
+	/// holds, as [`hold`](Self::hold) says.
+	fn undone(&mut self, moved: &[Moved]) {
+		let now = kio::clock::now();
+		for moved in moved {
+			self.compositor
+				.undone(&moved.scene, moved.index, &moved.source, moved.rect, now);
 		}
 	}
 
@@ -635,11 +651,22 @@ impl autosave::Document for State {
 	}
 }
 
-/// Each scene item keeping clear in `after` that `before` saved elsewhere,
-/// as its scene, index, and source: the same scene's item at the same index
-/// showing the same source, at another x or y. Its keeper is still under
-/// that place, as the compositor follows items only as it renders.
-fn moved(before: &Collection, after: &Collection) -> Vec<(String, usize, String)> {
+/// A scene item keeping clear that an edit saved elsewhere, as [`moved`]
+/// finds it.
+#[derive(Clone, Debug, PartialEq)]
+struct Moved {
+	scene: String,
+	index: usize,
+	source: String,
+	/// Where it is saved now.
+	rect: moq_scene::Rect,
+}
+
+/// Each scene item keeping clear in `after` that `before` saved elsewhere:
+/// the same scene's item at the same index showing the same source, at
+/// another x or y. Its keeper is still under that place, as the compositor
+/// follows items only as it renders.
+fn moved(before: &Collection, after: &Collection) -> Vec<Moved> {
 	let mut moved = Vec::new();
 	for scene in &after.scenes {
 		let Some(was) = before.scene(&scene.name) else { continue };
@@ -649,7 +676,12 @@ fn moved(before: &Collection, after: &Collection) -> Vec<(String, usize, String)
 				&& old.source == item.source
 				&& (old.rect.x, old.rect.y) != (item.rect.x, item.rect.y)
 			{
-				moved.push((scene.name.clone(), index, item.source.clone()));
+				moved.push(Moved {
+					scene: scene.name.clone(),
+					index,
+					source: item.source.clone(),
+					rect: item.rect,
+				});
 			}
 		}
 	}
@@ -3396,15 +3428,23 @@ mod tests {
 		items[3].source = "blue".into();
 		items[3].rect.x = 300.0;
 		items[4].rect.x = 300.0;
-		assert_eq!(moved(&before, &after), [(main, 1, "red".to_string())]);
+		let rect = moq_scene::Rect { x: 300.0, ..rect };
+		let moved = Moved {
+			scene: main,
+			index: 1,
+			source: "red".into(),
+			rect,
+		};
+		assert_eq!(super::moved(&before, &after), [moved]);
 	}
 
-	/// An undo that puts a layer keeping clear back where it was saved holds
-	/// it there, as a move by hand does; the edit it undid, made in the
-	/// collection rather than by a gesture, did not.
+	/// An undo of a move by hand puts a layer keeping clear back as it was
+	/// before the move, and a redo holds it again. An undo of an edit made
+	/// in the collection rather than by a gesture, which held nothing, holds
+	/// it where it puts it.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device; run by just render-sw"]
-	async fn an_undo_holds_a_layer_keeping_clear() {
+	async fn an_undo_puts_back_a_layer_keeping_clear() {
 		let dir = tempfile::tempdir().unwrap();
 		let mut loaded = red_canvas();
 		let rect = moq_scene::Rect {
@@ -3446,22 +3486,41 @@ mod tests {
 			.await
 			.expect("placed where it is saved");
 
-		let moved = moq_scene::Rect { x: 200.0, ..rect };
-		{
+		let commit = |to: moq_scene::Rect, by_hand: bool| {
 			let mut state = engine.state.lock().unwrap();
+			if by_hand {
+				state.compositor.hold(&main, 1, "red");
+			}
 			let collection = state.collection();
 			let item = collection.scenes[0].items[1].clone();
 			let mut draft = collection.draft("Move `red`");
 			let layer = moq_scene::Layer::scene(main.as_str());
-			draft
-				.set_item(&layer, 1, moq_scene::Item { rect: moved, ..item })
-				.unwrap();
+			draft.set_item(&layer, 1, moq_scene::Item { rect: to, ..item }).unwrap();
 			state.commit(draft, None).unwrap();
-		}
+		};
+
+		let moved = moq_scene::Rect { x: 200.0, ..rect };
+		commit(moved, true);
+		kio::clock::timeout(TIMEOUT, placed(moved, true))
+			.await
+			.expect("a move by hand holds it");
+		engine.state.lock().unwrap().undo().unwrap();
+		kio::clock::timeout(TIMEOUT, placed(rect, false))
+			.await
+			.expect("the undo puts it back as it was");
+		engine.state.lock().unwrap().redo().unwrap();
+		kio::clock::timeout(TIMEOUT, placed(moved, true))
+			.await
+			.expect("the redo holds it");
+		engine.state.lock().unwrap().undo().unwrap();
+		kio::clock::timeout(TIMEOUT, placed(rect, false))
+			.await
+			.expect("undone again, it is back");
+
+		commit(moved, false);
 		kio::clock::timeout(TIMEOUT, placed(moved, false))
 			.await
 			.expect("an edit is no move by hand");
-
 		engine.state.lock().unwrap().undo().unwrap();
 		kio::clock::timeout(TIMEOUT, placed(rect, true))
 			.await

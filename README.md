@@ -733,12 +733,14 @@ While it is selected, BUILD shows what it saw: what matters glowing, tagged
 **MOVING**, **TEXT**, or **HUD**, the places it may go, dashed, and where it
 last moved from, with what it left there and an arrow to where it went. Drag
 it, nudge it, or type its X or Y, and it stays where it was put until the
-content changes, as it does where an undo, a redo, or a reload of the scene
-file moves it; a resize keeps it free to move. Switched off, it stays where
-it is drawn. Only a scene's layer set
-free of its [slots](#slots-and-roles) keeps out of the way, and not one
-showing a source [published independently](#published-independently), which
-viewers place themselves; putting one in a slot switches it off.
+content changes, as it does where a redo or a reload of the scene file
+moves it, or an undo moves it anywhere but back before such a move. Undo
+that move and it goes back to where it was, such as the corner it had
+glided to. A resize keeps it free to move. Switched off, it stays where it
+is drawn. Only a scene's layer set free of its [slots](#slots-and-roles)
+keeps out of the way, and not one showing a source
+[published independently](#published-independently), which viewers place
+themselves; putting one in a slot switches it off.
 
 ### Audio scenes
 

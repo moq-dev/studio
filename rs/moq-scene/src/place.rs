@@ -446,6 +446,18 @@ enum At {
 	Slot(Slot),
 }
 
+/// What a move by hand held an item from, so an undo back there can put it
+/// back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Before {
+	/// Where its scene file put it.
+	saved: Rect,
+	/// Where it was meant to be, such as the slot it had glided to.
+	at: At,
+	/// Whether it was looking before choosing.
+	looking: bool,
+}
+
 /// Chooses where one item keeping clear goes, from what reads of the picture
 /// under it show.
 pub(crate) struct Placer {
@@ -482,6 +494,10 @@ pub(crate) struct Placer {
 	/// glides on from there.
 	paused: Option<Rect>,
 	placement: Placement,
+	/// Where its scene file put it as of the last [`place`](Self::place).
+	saved: Option<Rect>,
+	/// What the move by hand that holds it, or last held it, held it from.
+	before: Option<Before>,
 	/// What [`Sight::generation`] and settings the heat was drawn from.
 	heated: Option<(u64, KeepClear)>,
 }
@@ -517,6 +533,8 @@ impl Placer {
 				slots: Vec::new(),
 				heat: Heat::default(),
 			},
+			saved: None,
+			before: None,
 			heated: None,
 		}
 	}
@@ -541,14 +559,48 @@ impl Placer {
 	/// Moved by hand, such as dragged or nudged: it stays where the scene
 	/// file has it until the content under it changes, and a choice it was
 	/// about to make is dropped. A resize alone is no move: it keeps its
-	/// place.
+	/// place. The first move of a hold remembers where it was, for
+	/// [`undone`](Self::undone).
 	pub fn hold(&mut self) {
+		if self.at != At::Held
+			&& let Some(saved) = self.saved
+		{
+			self.before = Some(Before {
+				saved,
+				at: self.at,
+				looking: self.looking.is_some(),
+			});
+		}
 		self.at = At::Held;
 		self.looking = None;
 		self.worst = None;
 		self.glide = Glide::new(self.glides, |_| true);
 		self.gliding = None;
 		self.paused = None;
+	}
+
+	/// Moved by an undo, saved at `saved` as of `now`: back where its scene
+	/// file put it before the move by hand that held it, it goes back to
+	/// where it was meant to be then, such as the slot it had glided to, so
+	/// the undo puts back what the streamer saw. Anywhere else, it holds, as
+	/// after a move by hand.
+	pub fn undone(&mut self, saved: Rect, now: Instant) {
+		match self.before.take() {
+			Some(before) if before.saved == saved => {
+				self.at = before.at;
+				self.looking = before.looking.then_some(now);
+				self.worst = None;
+				self.glide = Glide::new(self.glides, |_| true);
+				self.gliding = None;
+				self.paused = None;
+			}
+			before => {
+				self.hold();
+				// What it was held from is still what an undo further back
+				// returns to.
+				self.before = before;
+			}
+		}
 	}
 
 	/// Note whether its picture is read as of `now`: while its scene is not
@@ -585,6 +637,7 @@ impl Placer {
 	/// Where to draw the item at `now`, saved at `saved` and keeping clear as
 	/// `keep` says on `canvas`.
 	pub fn place(&mut self, saved: Rect, keep: &KeepClear, canvas: Canvas, now: Instant) -> Rect {
+		self.saved = Some(saved);
 		let slots: Vec<(Slot, Rect)> = Slot::ALL
 			.into_iter()
 			.filter_map(|slot| Some((slot, slot.rect(saved.width, saved.height, canvas)?)))
@@ -1326,6 +1379,57 @@ mod tests {
 		assert_eq!(placement.slot, None);
 		assert_eq!(placement.rect, saved);
 		let _ = now;
+	}
+
+	/// An undo back to where it was saved before a move by hand puts back
+	/// where it was meant to be then, the slot it had glided to, at once,
+	/// though moves since held it; a redo holds it again. An undo to anywhere
+	/// else holds, as does one with no move by hand to undo.
+	#[test]
+	fn an_undo_of_a_move_by_hand_puts_back_its_place() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let keep = KeepClear::default();
+		let now = run(&mut placer, saved, start, (0..6).map(|_| read(MOVING, game)));
+		let now = now.saturating_add(keep.glide);
+		let to = Slot::TopLeft.rect(288.0, 288.0, CANVAS).unwrap();
+		assert_eq!(placer.place(saved, &keep, CANVAS, now), to);
+
+		// Dragged over the minimap, then on, a move each.
+		let first = Rect { x: 1000.0, ..saved };
+		let second = Rect { x: 1600.0, ..saved };
+		for dragged in [first, second] {
+			placer.hold();
+			assert_eq!(placer.place(dragged, &keep, CANVAS, now), dragged);
+		}
+		let now = run(&mut placer, second, now, (0..8).map(|_| read(MOVING, game)));
+
+		placer.undone(first, now);
+		assert_eq!(
+			placer.place(first, &keep, CANVAS, now),
+			first,
+			"back one move, it holds"
+		);
+		assert!(placer.placement().held);
+		placer.undone(saved, now);
+		assert_eq!(placer.place(saved, &keep, CANVAS, now), to, "back in its slot, at once");
+		let placement = placer.placement();
+		assert_eq!((placement.slot, placement.held), (Some(Slot::TopLeft), false));
+		let now = run(&mut placer, saved, now, (0..40).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().rect, to, "it stays as the game plays on");
+
+		// Redone, it holds; undone again, it is back.
+		placer.hold();
+		assert_eq!(placer.place(first, &keep, CANVAS, now), first);
+		assert!(placer.placement().held);
+		placer.undone(saved, now);
+		assert_eq!(placer.place(saved, &keep, CANVAS, now), to);
+
+		// An undo of an edit that held nothing holds.
+		placer.undone(first, now);
+		assert_eq!(placer.place(first, &keep, CANVAS, now), first);
+		assert!(placer.placement().held);
 	}
 
 	/// A rect saved elsewhere is no move by hand unless the caller says so,

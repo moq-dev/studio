@@ -577,6 +577,19 @@ impl Compositor {
 		}
 	}
 
+	/// Note that an undo saved the `index`th item of the scene called
+	/// `scene`, one showing `source` that keeps clear, at `saved` as of
+	/// `now`: back where it was saved before the move by hand that held it,
+	/// it goes back to where it was then, such as the slot it had glided to.
+	/// Anywhere else, it holds, as [`hold`](Self::hold) says.
+	pub fn undone(&mut self, scene: &str, index: usize, source: &str, saved: Rect, now: Instant) {
+		if let Some(keeper) = self.keepers.get_mut(&(scene.to_string(), index))
+			&& keeper.source == source
+		{
+			keeper.placer.undone(saved, now);
+		}
+	}
+
 	/// Keep the scenes `outputs` names as outputs from now on, each with
 	/// whether the next [`render`](Self::render) draws it, as it does while an
 	/// output reads it. Each plays its keyframes from the first render after
