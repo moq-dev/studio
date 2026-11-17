@@ -468,14 +468,17 @@ pub(super) fn words(collection: &Collection, name: &str) -> String {
 }
 
 impl Panels {
-	/// What can be added: the sources nothing shows, this machine's devices,
-	/// any source by hand, and guests. The Add page replaces it with pictures
+	/// What can be added: what a drop or paste makes, the sources nothing
+	/// shows, this machine's devices, any source by hand, and guests. The Add page replaces it with pictures
 	/// (quest/m0/ux/add.md).
 	fn adding(&mut self, ui: &mut Ui) {
 		if let Some(fault) = self.fault(&Spot::Add) {
 			ui.colored_label(kit::ERR, fault);
 			ui.add_space(6.0);
 		}
+		ui.label(kit::caps("Drop or paste anything", kit::display(11.0)).color(kit::DIM));
+		ui.add_space(4.0);
+		self.drop_kinds(ui);
 		self.unused(ui);
 		section(ui, "Devices");
 		self.devices(ui);

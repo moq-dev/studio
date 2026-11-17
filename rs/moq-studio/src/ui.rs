@@ -31,6 +31,7 @@ use crate::{mix, record};
 
 mod build;
 mod cue;
+mod drop;
 mod graph;
 mod inspector;
 mod layers;
@@ -279,6 +280,8 @@ impl Studio {
 			levels: Levels::default(),
 			graph: graph::View::default(),
 			review,
+			dropping: drop::Dropping::default(),
+			keyboard: None,
 		};
 		if dropped > 0 {
 			panels.report(Err(anyhow::anyhow!(dropped_message(dropped))));
@@ -458,6 +461,7 @@ impl Studio {
 			let studio = eframe::get_value(storage, STUDIO_MODE).unwrap_or_default();
 			panels.controls.set_studio(studio);
 		}
+		self.panels.keyboard = Some(window.keyboard.clone());
 		let hotkeys = Hotkeys::new(window, self.panels.controls.clone(), &self.panels.runtime, bindings);
 		self.panels.hotkeys = Some(hotkeys);
 	}
@@ -505,7 +509,9 @@ impl Studio {
 			hotkeys.focused(panels.interact.has_keyboard() || ui.ctx().text_edit_focused());
 		}
 		panels.take_binding(ui.ctx());
+		panels.dropping.follow(ui.ctx(), frame);
 		panels.shortcuts(ui.ctx());
+		panels.drops_read();
 		panels.staged = false;
 		let verdict = {
 			let report = panels.engine.health.lock().unwrap();
@@ -516,6 +522,7 @@ impl Studio {
 		};
 		fx.follow(panels.engine.on_air().live().is_some(), snapshot.takes, verdict);
 		panels.window(ui, fx, &snapshot);
+		panels.drops_elsewhere(ui.ctx());
 		// A stage not shown hears no input, so it lets go of the pages, as
 		// turning Interact off does.
 		if !panels.staged {
@@ -691,6 +698,11 @@ struct Panels {
 	graph: graph::View,
 	/// The REVIEW page's strip, cards, and what is dragged on it.
 	review: review::Review,
+	/// The files and pastes landing on the picture.
+	dropping: drop::Dropping,
+	/// The keys the window hears before egui, which say when a paste was
+	/// pressed, once the window has handed them over.
+	keyboard: Option<hotkeys::Keyboard>,
 }
 
 /// A layer, by the list it is in and its place there, back to front.
@@ -723,6 +735,8 @@ enum Spot {
 	Scene,
 	/// The Add tab.
 	Add,
+	/// The picture, where the last drop or paste landed.
+	Dropped,
 }
 
 /// A failure at a spot, and when, shown there for a while.
@@ -901,6 +915,10 @@ fn dropped_message(dropped: usize) -> String {
 impl Panels {
 	/// The keyboard shortcuts, and the clipboard.
 	fn shortcuts(&mut self, ctx: &egui::Context) {
+		// egui pastes only text, so a paste it does not report may be a picture.
+		let pressed = self.keyboard.as_ref().is_some_and(hotkeys::Keyboard::pasted);
+		let text = ctx.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Paste(_))));
+		let menu = self.dropping.menu_pasted(ctx, text);
 		// A focused text field, or a page the picture passes the keyboard to,
 		// keeps its own undo, copy, and paste; any other focused widget, such
 		// as a slider, leaves them to the studio.
@@ -928,8 +946,16 @@ impl Panels {
 		if copy {
 			self.copy(ctx);
 		}
-		if let Some(text) = paste {
-			self.paste(&text);
+		// At the pointer, or where a menu's Paste lands.
+		let at = match menu {
+			Some((at, _)) => at,
+			None => ctx.pointer_latest_pos(),
+		};
+		let other = menu.is_some_and(|(_, other)| other);
+		match paste {
+			Some(text) => self.paste(&text, at),
+			None if pressed || other => self.dropping.paste_clipboard(at),
+			None => {}
 		}
 	}
 
@@ -1108,41 +1134,51 @@ impl Panels {
 	}
 
 	/// Paste layers into the selected layer's list, or the scene on program,
-	/// or filters onto the selected layer.
-	fn paste(&mut self, text: &str) {
+	/// or filters onto the selected layer; or files or a web address at `at`
+	/// on screen, as if dropped there. Other text may name what the clipboard
+	/// holds beside it, as macOS Finder names copied files, so the clipboard's
+	/// files or picture are pasted instead.
+	fn paste(&mut self, text: &str, at: Option<egui::Pos2>) {
+		if let Some(arrivals) = drop::Arrival::of_text(text) {
+			for arrival in arrivals {
+				self.dropping.arrive(arrival, at);
+			}
+			return;
+		}
+		let Ok(clip) = Clip::from_toml(text) else {
+			self.dropping.paste_clipboard(at);
+			return;
+		};
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
 		// A failure with no layer to show it on is the toast's.
 		let mut spot = None;
-		let result = (|| {
-			let clip = Clip::from_toml(text).context("the clipboard holds no layers or filters")?;
-			match clip {
-				Clip::Items(items) => {
-					let layer = match &self.selection {
-						Some(picked) => picked.layer.clone(),
-						None => self.scene(&state).map_err(anyhow::Error::msg)?,
-					};
-					let dir = state.sources.context().dir.clone();
-					edit(&mut state, format!("Paste into {}", place(&layer)), None, |draft| {
-						draft.paste(&layer, &items, &dir)
-					})?;
-					Ok(())
-				}
-				Clip::Filters(pasted) => {
-					let picked = self.selection.clone().context("select a layer to paste filters onto")?;
-					let item = picked.item(state.collection()).context("the selected layer is gone")?;
-					spot = Some(Spot::Layer(picked.layer.clone(), item.source.clone()));
-					let selection = picked.look();
-					let mut filters = selection
-						.filters(state.collection())
-						.context("the layer has no picture to filter")?;
-					filters.extend(pasted.filters);
-					let what = selection.describe(state.collection());
-					edit(&mut state, format!("Paste filters onto {what}"), None, |draft| {
-						selection.set_filters(draft, filters)
-					})
-				}
+		let result = (|| match clip {
+			Clip::Items(items) => {
+				let layer = match &self.selection {
+					Some(picked) => picked.layer.clone(),
+					None => self.scene(&state).map_err(anyhow::Error::msg)?,
+				};
+				let dir = state.sources.context().dir.clone();
+				edit(&mut state, format!("Paste into {}", place(&layer)), None, |draft| {
+					draft.paste(&layer, &items, &dir)
+				})?;
+				Ok(())
+			}
+			Clip::Filters(pasted) => {
+				let picked = self.selection.clone().context("select a layer to paste filters onto")?;
+				let item = picked.item(state.collection()).context("the selected layer is gone")?;
+				spot = Some(Spot::Layer(picked.layer.clone(), item.source.clone()));
+				let selection = picked.look();
+				let mut filters = selection
+					.filters(state.collection())
+					.context("the layer has no picture to filter")?;
+				filters.extend(pasted.filters);
+				let what = selection.describe(state.collection());
+				edit(&mut state, format!("Paste filters onto {what}"), None, |draft| {
+					selection.set_filters(draft, filters)
+				})
 			}
 		})();
 		drop(state);

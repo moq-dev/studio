@@ -143,6 +143,7 @@ impl Panels {
 			Some(acted) => acted,
 			None => (spot, result),
 		};
+		self.drops_on_picture(ui, &mut state, response.rect, canvas);
 		// Docked on the live picture, away from the selected layer and its
 		// toolbar, which a drag moves with it.
 		let (width, height) = (canvas.width.max(1) as f32, canvas.height.max(1) as f32);
@@ -189,7 +190,7 @@ impl Panels {
 	/// scene's, then the always-on-top ones over it, unless the scene is open
 	/// off air, as they are drawn on program, each in its slot where the
 	/// scene's arrangement put it.
-	fn shown(&self, state: &State) -> Vec<(Picked, Item)> {
+	pub(super) fn shown(&self, state: &State) -> Vec<(Picked, Item)> {
 		let (_, since) = self.edited_since(state);
 		let top = self.off_air(state).is_none().then(Layer::top);
 		let layers = self.scene(state).ok().into_iter().chain(top);
@@ -571,7 +572,11 @@ impl Panels {
 			}
 		});
 		match picture {
-			Some(PictureAction::Paste) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+			Some(PictureAction::Paste) => {
+				// The text arrives next frame; without any, the picture is pasted.
+				ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+				self.dropping.paste_from_menu();
+			}
 			Some(PictureAction::Add) => self.side = Side::Add,
 			None => {}
 		}

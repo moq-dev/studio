@@ -31,6 +31,8 @@
 //!   segmentation model on the CPU. `moq_video::render::export` hands the
 //!   program to an encoder, on the GPU where the platform allows, and a
 //!   [`Scaler`] draws it smaller for a smaller rendition.
+//! - [`file`] says which source shows a file, such as one dropped on the
+//!   picture, and how large its picture is.
 //! - [`publish`] gives each local source its own track, in a broadcast the
 //!   studio keeps to itself, to replay or record the source on its own.
 //! - [`layout`] says where and when each source published independently
@@ -49,6 +51,7 @@ mod collection;
 mod compositor;
 mod edit;
 mod effect;
+pub mod file;
 mod glide;
 mod grant;
 pub mod layout;

@@ -401,8 +401,10 @@ impl Panels {
 				self.copy(ui.ctx());
 			}
 			if ui.button("Paste").clicked() {
-				// Arrives as a paste event on a later frame.
+				// Arrives as a paste event on a later frame, or else is a
+				// picture or files read from the clipboard.
 				ui.ctx().send_viewport_cmd(ViewportCommand::RequestPaste);
+				self.dropping.paste_from_window();
 			}
 			// Closing ends the show as quitting does, which would cut a stream
 			// on air: the broadcaster ends that with END STREAM.
