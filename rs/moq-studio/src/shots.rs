@@ -959,6 +959,119 @@ fn a_layer_menu_edits_its_layer() {
 	quit(&engine, &runtime);
 }
 
+/// A Layers row dragged onto a slot on the picture takes that slot, unless
+/// a guest appears in the scene mid-drag, whose new tile may have taken the
+/// row's index: the drop then does nothing rather than move another layer.
+/// It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_row_dropped_on_a_slot_after_a_guest_appears_moves_nothing() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/slots.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
+	harness.step();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.build(Side::Layers, Inspect::Layer, None);
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let guests = || {
+		let state = engine.state.lock().unwrap();
+		state.collection().scene("Guests").unwrap().items.clone()
+	};
+	let slot_of = |items: &[moq_scene::Item], source: &str| {
+		items
+			.iter()
+			.find(|item| item.source == source)
+			.and_then(|item| item.slot)
+	};
+	let pointer = |harness: &mut Harness<'_, Window>, pos: egui::Pos2, pressed: Option<bool>| {
+		let event = match pressed {
+			None => egui::Event::PointerMoved(pos),
+			Some(pressed) => egui::Event::PointerButton {
+				pos,
+				button: egui::PointerButton::Primary,
+				pressed,
+				modifiers: Default::default(),
+			},
+		};
+		harness.input_mut().events.push(event);
+		harness.run_steps(2);
+	};
+	// The logo's row, and the main slot on the picture.
+	let row = egui::pos2(160.0, 217.0);
+	let main = egui::pos2(574.0, 400.0);
+	let grab = |harness: &mut Harness<'_, Window>| {
+		pointer(harness, row, None);
+		pointer(harness, row, Some(true));
+		pointer(harness, row + egui::vec2(0.0, 12.0), None);
+		pointer(harness, row + egui::vec2(40.0, 40.0), None);
+	};
+	let release = |harness: &mut Harness<'_, Window>| {
+		pointer(harness, main, None);
+		pointer(harness, main, Some(false));
+		pointer(harness, egui::pos2(720.0, 880.0), None);
+	};
+	assert_eq!(slot_of(&guests(), "logo"), None, "the logo starts free");
+
+	// Dropped on the main slot, the logo takes it.
+	grab(&mut harness);
+	release(&mut harness);
+	assert_eq!(
+		slot_of(&guests(), "logo"),
+		Some(moq_scene::Slot::Main),
+		"the row's drop put the logo in the main slot"
+	);
+	harness.get_by_label_contains("Undo: ").click();
+	harness.run_steps(2);
+	assert_eq!(slot_of(&guests(), "logo"), None, "undone");
+	let before = guests();
+
+	// Ibis appears mid-drag, in a tile at the logo's index.
+	grab(&mut harness);
+	{
+		let mut state = engine.state.lock().unwrap();
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://studio.example/join/").unwrap();
+		let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+		let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+		let appeared = crate::guests::appear(&mut state, &room, Some("Guests"), "Ibis").unwrap();
+		assert!(appeared, "Ibis takes a tile");
+	}
+	// Drawn in its tile, the others glided to theirs, still held.
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the new tile settles");
+	release(&mut harness);
+	let after = guests();
+	assert_eq!(after.len(), before.len() + 1);
+	assert_eq!(
+		slot_of(&after, "Ibis"),
+		Some(moq_scene::Slot::Tile),
+		"Ibis keeps the tile"
+	);
+	assert_eq!(
+		slot_of(&after, "Main"),
+		Some(moq_scene::Slot::Main),
+		"Main keeps its slot"
+	);
+	assert_eq!(slot_of(&after, "logo"), None, "the logo stays free");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// Studio mode, driven as a person does: its switch turns it on, a pad then
 /// cues its scene rather than taking it, and TAKE puts it on air. NEXT's Edit
 /// opens the cued scene off air on BUILD, Back to live keeps it cued, and

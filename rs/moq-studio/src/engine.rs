@@ -5648,6 +5648,7 @@ mod tests {
 		}
 		drop(cameras.remove(0));
 		offline("dave").await.expect("dave leaves");
+		let shifts = engine.state.lock().unwrap().shifts.0;
 		let _hal = engine
 			.subscribe
 			.route("guests/hal/camera.hang", Default::default())
@@ -5655,8 +5656,11 @@ mod tests {
 		shown("hal").await.expect("hal takes the place dave left");
 		{
 			let state = engine.state.lock().unwrap();
-			let (count, scenes) = &state.shifts;
-			assert!(scenes.values().any(|at| at == count), "the UI lets go of a layer there");
+			let shifted = state.shifts.1.get(&scene).is_some_and(|at| *at > shifts);
+			assert!(
+				shifted,
+				"hal's appearance shifted the scene, so the UI lets go of a layer there"
+			);
 			let hal = state.collection().scenes[0]
 				.items
 				.iter()

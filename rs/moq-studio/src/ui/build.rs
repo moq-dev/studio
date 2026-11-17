@@ -314,7 +314,10 @@ impl Panels {
 				.filter(|&at| Some(&shown[at].0) != dragged);
 		}
 		if let Some(dropped) = response.dnd_release_payload::<Picked>() {
-			if let Some(at) = target {
+			// Only while the row dropped is still the one picked: an edit of
+			// the engine's own shifting its scene, such as a guest appearing,
+			// let go of it, as its index may now be another layer's.
+			if let Some(at) = target.filter(|_| self.selection.as_ref() == Some(&*dropped)) {
 				let held = shown[at].0.clone();
 				spot = Some(Spot::Layer(held.layer.clone(), shown[at].1.source.clone()));
 				result = super::slots::assign(state, &dropped, &held);
