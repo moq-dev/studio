@@ -25,6 +25,10 @@ program source, cropped. This quest makes that one switch.
 - A portrait arrangement starts from the landscape one: the main picture
   cropped around its subject, the camera stacked under it. It is then the
   streamer's to move.
+- A layer in a slot keeps no rect, so a scene laid out by slots needs only a
+  second `arrangement` for portrait (such as `portrait = { arrangement =
+  "row" }`), and the slots place themselves on the portrait canvas; only its
+  layers set free need a second rect.
 - Each format is its own encode, so it costs an encoder session and its
   bitrate; the checklist says whether the machine and the uplink carry both.
 - Where a layer is shown is said under the pictures and in the inspector,
