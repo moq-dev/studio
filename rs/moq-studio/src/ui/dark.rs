@@ -195,6 +195,16 @@ pub(super) fn counted(dark: usize, stalled: usize) -> Option<String> {
 	}
 }
 
+/// Whether the scene called `scene` draws a layer that `lost` its picture,
+/// as `lost` says of a source: through the scenes it nests, and not one it
+/// hides.
+pub(super) fn draws_lost(collection: &Collection, scene: &str, lost: impl Fn(&str) -> bool) -> bool {
+	collection
+		.drawn([Layer::scene(scene)])
+		.iter()
+		.any(|item| lost(&item.source))
+}
+
 /// The amber badge in `rect`: a warning sign on amber.
 pub(super) fn badge(ui: &Ui, rect: Rect) {
 	let painter = ui.painter();
@@ -382,6 +392,34 @@ mod tests {
 	fn rows_say_how_long() {
 		assert_eq!(words(DARK), "No picture for 12 s");
 		assert_eq!(words(STALLED), "No new picture for 3 s");
+	}
+
+	/// A scene pad is marked for a lost picture it draws, nested in a scene
+	/// it shows, but not for one it hides.
+	#[test]
+	fn a_pad_marks_what_it_draws() {
+		let fill = moq_scene::Rect::fill(&Canvas::default());
+		let mut collection = Collection::new();
+		collection.sources.insert("cam".into(), Source::Camera { id: None });
+		collection
+			.sources
+			.insert("inner".into(), Source::Scene { scene: "Inner".into() });
+		let mut inner = Scene::new("Inner");
+		inner.items.push(Item::new("cam", fill));
+		collection.scenes.push(inner);
+		let mut hidden = Scene::new("Hidden");
+		hidden.items.push(Item {
+			visible: false,
+			..Item::new("cam", fill)
+		});
+		collection.scenes.push(hidden);
+		collection.scenes[0].items.push(Item::new("inner", fill));
+		let outer = collection.scenes[0].name.clone();
+		collection.validate().unwrap();
+		let lost = |name: &str| name == "cam";
+		assert!(draws_lost(&collection, "Inner", lost));
+		assert!(draws_lost(&collection, &outer, lost), "through the scene it nests");
+		assert!(!draws_lost(&collection, "Hidden", lost), "not what it hides");
 	}
 
 	/// The health dot names what the layers lost, and counts them.

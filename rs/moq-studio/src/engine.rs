@@ -1558,7 +1558,10 @@ impl Engine {
 				.sources
 				.iter()
 				.filter_map(|(name, _)| {
-					let dark = state.dark(name, now)?;
+					// A stalled picture is reported as stalled, as its row says, never also as dark.
+					let Some(Lost::Dark(dark)) = state.lost(name, now) else {
+						return None;
+					};
 					let live = shown(name);
 					live.any().then(|| (name.to_string(), dark, live))
 				})
@@ -3538,6 +3541,36 @@ mod tests {
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");
+	}
+
+	/// A source on program whose picture went dark and then stalled is
+	/// reported once, as stalled, as its layer's row says; one dark only is
+	/// reported as dark.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_lost_picture_is_reported_once() {
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = start(gpu, Vec::new(), dir.path(), autosave, red_canvas())
+			.await
+			.expect("the studio starts");
+		let secs = Duration::from_secs;
+		engine.state.lock().unwrap().dark.insert("red".into(), secs(12));
+		let local = engine.local(kio::clock::now());
+		assert_eq!(local.dark.len(), 1, "{local:?}");
+		assert!(local.stalled.is_empty(), "{local:?}");
+
+		engine.state.lock().unwrap().stalled.insert("red".into(), secs(4));
+		let now = kio::clock::now();
+		let local = engine.local(now);
+		assert!(local.dark.is_empty(), "{local:?}");
+		assert_eq!(local.stalled.len(), 1, "{local:?}");
+		assert_eq!(
+			engine.state.lock().unwrap().lost("red", now),
+			Some(Lost::Stalled(secs(4)))
+		);
+		engine.stop();
 	}
 
 	/// Without a relay, a recording encodes the program on its own and saves it

@@ -175,7 +175,7 @@ impl Panels {
 				name: scene.name.clone(),
 				canvas: scene.canvas(collection.canvas),
 				refused: collection.refuses(&scene.name),
-				dark: scene.items.iter().any(|item| state.lost(&item.source, now).is_some()),
+				dark: super::dark::draws_lost(collection, &scene.name, |name| state.lost(name, now).is_some()),
 			})
 			.collect();
 		let stream = collection.program_audio().map(str::to_string);

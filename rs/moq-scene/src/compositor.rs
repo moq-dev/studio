@@ -1038,8 +1038,13 @@ impl Compositor {
 	/// Have `layer`'s probe read its newest picture, and draw the probe's last
 	/// good picture in its place while it holds one over the dark. A picture
 	/// cut out of its background is never held, since the good one is not.
+	/// Without a probe, such as once its warning is turned off, or a picture,
+	/// it holds nothing.
 	fn watch(&mut self, layer: &mut Layer, background: Background, live: bool, now: Instant) {
 		let (Some(probe), Some(raw)) = (&mut layer.probe, &layer.raw) else {
+			if std::mem::take(&mut layer.holding) && background == Background::Keep {
+				layer.picture = layer.raw.as_ref().map(|raw| self.effects.picture(raw));
+			}
 			return;
 		};
 		let prober = self.prober.get_or_insert_with(|| Prober::new(&self.device));
@@ -3716,6 +3721,16 @@ mod tests {
 		// A cut-out never shows the held picture, which has its background.
 		compositor.watch(&mut layer, Background::Remove, true, at(dark));
 		assert!(!layer.holding);
+		compositor.watch(&mut layer, Background::Keep, true, at(dark));
+		assert!(layer.holding);
+
+		// Turning its warning off draws its own picture again at once, with
+		// no new picture to replace the held one.
+		let probe = layer.probe.take();
+		compositor.watch(&mut layer, Background::Keep, true, at(dark));
+		assert!(!layer.holding, "no probe holds a picture");
+		assert!(layer.picture.is_some());
+		layer.probe = probe;
 		compositor.watch(&mut layer, Background::Keep, true, at(dark));
 		assert!(layer.holding);
 
