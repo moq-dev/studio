@@ -1019,7 +1019,9 @@ impl Compositor {
 			};
 			let mut reflow = self.reflows.remove(&scene.name).unwrap_or_else(|| Reflow {
 				arranged: Vec::new(),
-				glide: Glide::new(REFLOW),
+				// Only the slots glide, so a layer set free that is being
+				// dragged follows the pointer.
+				glide: Glide::new(REFLOW, |item| item.slot.is_some()),
 			});
 			// Only the slots move it, so a layer dragged across the scene
 			// follows the pointer.

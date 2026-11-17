@@ -504,10 +504,11 @@ impl Panels {
 				.flat_map(|(_, items)| items.iter().flat_map(|item| &item.filters));
 			let read = filters.chain(collection.video.values().flat_map(|video| &video.filters));
 			let mut read = read.filter_map(Filter::source);
-			let cloned = collection
-				.sources
-				.values()
-				.any(|source| matches!(source, Source::Clone { source } if source == name));
+			// A clone or a role naming it shows it.
+			let cloned = collection.sources.values().any(|source| match source {
+				Source::Clone { source } | Source::Role { source: Some(source) } => source == name,
+				_ => false,
+			});
 			// Removing the stinger's source would quietly reset the transition.
 			let stinger = collection.transition.stinger() == Some(name);
 			cloned || stinger || read.any(|source| source == name)

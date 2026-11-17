@@ -244,23 +244,22 @@ impl Collection {
 		if scene.items.iter().all(|item| item.slot.is_none()) {
 			return None;
 		}
-		let takes = |item: &Item| item.visible && !self.unfilled(&item.source) && present(self.resolve(&item.source));
-		let main = scene
-			.items
-			.iter()
-			.any(|item| item.slot == Some(Slot::Main) && takes(item));
-		let tiles = scene
-			.items
-			.iter()
-			.filter(|item| item.slot == Some(Slot::Tile) && takes(item))
-			.count();
+		// Asked once each, so counting and placing see the same answers.
+		let takes: Vec<bool> = (scene.items.iter())
+			.map(|item| item.visible && !self.unfilled(&item.source) && present(self.resolve(&item.source)))
+			.collect();
+		let slotted = |slot: Slot| {
+			(scene.items.iter().zip(&takes)).filter(move |(item, takes)| item.slot == Some(slot) && **takes)
+		};
+		let main = slotted(Slot::Main).next().is_some();
+		let tiles = slotted(Slot::Tile).count();
 		let (main, tiles) = places(scene.arrangement, scene.canvas(self.canvas), main, tiles);
 		let mut tiles = tiles.into_iter();
-		let arranged = scene.items.iter().map(|item| {
+		let arranged = scene.items.iter().zip(takes).map(|(item, takes)| {
 			let Some(slot) = item.slot else {
 				return item.clone();
 			};
-			let rect = match takes(item) {
+			let rect = match takes {
 				true if slot == Slot::Main => main,
 				true => tiles.next(),
 				false => None,

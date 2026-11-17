@@ -1199,9 +1199,6 @@ impl Engine {
 		self.rooms.lock().unwrap().clone()
 	}
 
-	/// Keep `room` among the [rooms](Self::rooms) Panic mutes the guests of,
-	/// as one the settings named, even if it could not be joined: a guest of
-	/// it already in a scene may still play through the relays followed.
 	/// Whether a guest who joins takes the next tile of the scene on program
 	/// on their own, rather than waiting under Add.
 	pub fn guests_appear(&self) -> bool {
@@ -1213,6 +1210,9 @@ impl Engine {
 		self.guests_appear.store(appear, std::sync::atomic::Ordering::Relaxed);
 	}
 
+	/// Keep `room` among the [rooms](Self::rooms) Panic mutes the guests of,
+	/// as one the settings named, even if it could not be joined: a guest of
+	/// it already in a scene may still play through the relays followed.
 	pub fn remember_room(&self, room: &moq_net::Path) {
 		let mut rooms = self.rooms.lock().unwrap();
 		if !rooms.contains(room) {
@@ -5467,7 +5467,7 @@ mod tests {
 
 	/// A guest whose camera comes online in the room takes the next tile of
 	/// the scene on program once the show says guests appear on their own, as
-	/// an edit the host can undo, and again when they rejoin after one; before
+	/// an edit the host can undo, which a reconnect leaves undone; before
 	/// that, for their screen, once the host removed them, and while four
 	/// guests there fill the tiles, they wait under Add.
 	#[tokio::test(flavor = "multi_thread")]
@@ -5571,19 +5571,26 @@ mod tests {
 				}
 			})
 		};
-		// An undone appearance is not a removal: joining again, she appears.
+		// The host took her off, so rejoining leaves her under Add.
 		drop(_camera);
 		offline("alice").await.expect("alice leaves");
 		let _camera = engine
 			.subscribe
 			.route("guests/alice/camera.hang", Default::default())
 			.unwrap();
-		shown("alice").await.expect("alice appears again");
+		kio::clock::timeout(TIMEOUT, async {
+			while !engine.room().unwrap().participants()["alice"].camera {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("alice is back");
+		assert_eq!(items(&engine).len(), 1, "an undone appearance stays undone");
 
 		// Four guests there fill the tiles; one leaving frees a place, his
 		// tile closed until he is back.
 		let mut cameras = Vec::new();
-		for name in ["dave", "erin", "frank"] {
+		for name in ["dave", "erin", "frank", "ivy"] {
 			let path = format!("guests/{name}/camera.hang");
 			cameras.push(engine.subscribe.route(path, Default::default()).unwrap());
 			shown(name).await.expect("a guest appears");

@@ -635,9 +635,11 @@ slots.
 online take the next tile of the scene on program, and be heard on program,
 as an edit you can undo. Up to four guests still in the room take tiles that
 way, and more wait under Add; one who leaves keeps their tile, closed until
-they are back, and frees their place for the next. A guest whose appearance
-you undid appears again when they rejoin; **Remove from scenes** keeps them
-off. Off, every guest waits under Add, as before.
+they are back, and frees their place for the next. A guest appears on their
+own once per link: after that, where they are shown is yours, so undoing
+their appearance or removing their layer keeps them off when they reconnect,
+until a new link. Since an appearance is your edit, it drops what you could
+redo. Off, every guest waits under Add, as before.
 
 ### Audio scenes
 
@@ -923,7 +925,8 @@ to put them on air, or have them [appear on their own](#slots-and-roles) in
 the next tile of the scene on program. That includes a
 guest invited before a restart whose link still works. A guest's source is
 saved to the scene file but is not your edit: it stays out of History, so undo
-never removes it and a guest joining never loses what you could redo. A guest
+never removes it and a guest joining never loses what you could redo, unless
+they [appear on their own](#slots-and-roles). A guest
 who reconnects after you removed their source comes back under a new name
 (`alice 2`), since undoing the removal brings back the old one.
 **Remove from scenes** is your edit, so it undoes: it takes a guest, any clone

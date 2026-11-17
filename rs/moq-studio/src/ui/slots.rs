@@ -260,6 +260,14 @@ fn arrangement_name(arrangement: Arrangement) -> &'static str {
 fn arrangement_button(ui: &mut Ui, arrangement: Arrangement, on: bool) -> egui::Response {
 	let size = egui::vec2(58.0, 33.0);
 	let (rect, response) = ui.allocate_exact_size(size + egui::vec2(8.0, 8.0), egui::Sense::click());
+	response.widget_info(|| {
+		egui::WidgetInfo::selected(
+			egui::WidgetType::Button,
+			ui.is_enabled(),
+			on,
+			arrangement_name(arrangement),
+		)
+	});
 	let response = response.on_hover_text(arrangement_name(arrangement));
 	let painter = ui.painter();
 	let fill = match (on, response.hovered()) {

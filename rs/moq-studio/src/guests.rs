@@ -214,6 +214,10 @@ pub struct Participant {
 	/// How often a new link let them back in after a removal. Their renewals are
 	/// published under it, so a token from before cannot read them.
 	pub generation: u64,
+	/// Whether they appeared on their own in a tile since their newest link
+	/// this session, after which where they are shown is the host's to say:
+	/// a reconnect never undoes the host taking them off.
+	pub appeared: bool,
 }
 
 impl Participant {
@@ -407,7 +411,10 @@ impl Room {
 			.finish();
 		link.set_fragment(Some(&fragment));
 		let invite = Invite { link, expires };
-		participants.entry(name.to_string()).or_default().invite = Some(invite.clone());
+		let participant = participants.entry(name.to_string()).or_default();
+		participant.invite = Some(invite.clone());
+		// A new link may appear on its own again.
+		participant.appeared = false;
 		drop(participants);
 		self.changed.send_replace(());
 		Ok(invite)
@@ -700,7 +707,8 @@ fn tiled(collection: &Collection, room: &Room, scene: &str) -> usize {
 /// Show the guest playing from `source` in the next tile of `scene`, the
 /// one on program, and hear them on program, as one edit the host can undo,
 /// if [`tile`] finds one and the tiles show fewer than [`MAX_GUESTS`]
-/// guests still in `room`. Says whether it did.
+/// guests still in `room`, marking them [appeared](Participant::appeared).
+/// Says whether it did.
 pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str) -> anyhow::Result<bool> {
 	let Some(scene) = scene else { return Ok(false) };
 	if tiled(state.collection(), room, scene) >= MAX_GUESTS {
@@ -719,7 +727,20 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 	if state.collection().sources.get(source).is_some_and(Source::has_audio) {
 		draft.hear(source)?;
 	}
+	let identity = state
+		.collection()
+		.sources
+		.get(source)
+		.and_then(|shown| room.guest_of(shown));
 	state.commit(draft, None)?;
+	if let Some((identity, _)) = identity {
+		room.participants
+			.lock()
+			.unwrap()
+			.entry(identity.to_string())
+			.or_default()
+			.appeared = true;
+	}
 	Ok(true)
 }
 
@@ -811,15 +832,14 @@ pub async fn run(engine: Arc<Engine>, room: Arc<Room>, origin: moq_net::origin::
 				Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot add a guest"),
 			}
 		}
-		// A guest the host removed stays off until a new link lets them back.
+		// A guest the host removed, or one who appeared once already, stays
+		// where the host put them until a new link.
 		let camera = guest(&path).is_some_and(|(identity, kind)| {
-			let removed = room
-				.participants
-				.lock()
-				.unwrap()
+			let participants = room.participants.lock().unwrap();
+			let settled = participants
 				.get(identity.as_str())
-				.is_some_and(|guest| guest.removed);
-			kind == Kind::Camera && !removed
+				.is_some_and(|guest| guest.removed || guest.appeared);
+			kind == Kind::Camera && !settled
 		});
 		if online && camera && engine.guests_appear() {
 			let Some(name) = room.source_at(state.collection(), &path) else {
@@ -1298,6 +1318,7 @@ pub(crate) mod tests {
 				screen: false,
 				removed: false,
 				generation: 0,
+				appeared: false,
 			}
 		);
 

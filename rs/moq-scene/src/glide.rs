@@ -14,11 +14,13 @@ use crate::collection::{Ease, Filter, Item, Rect, mix};
 pub(crate) const REFLOW: Duration = Duration::from_millis(400);
 
 /// A run of items shown as their arrangement changes: once the caller's
-/// `K`, naming what moves the items, changes, they glide from where they
-/// were shown to where they now are, as a move transition takes them; items
-/// it does not move show as they are at once.
+/// `K`, naming what moves the items, changes, those `glides` says it moves
+/// glide from where they were shown to where they now are, as a move
+/// transition takes them; the rest show as they are at once, so one being
+/// dragged follows the pointer.
 pub(crate) struct Glide<K> {
 	duration: Duration,
+	glides: fn(&Item) -> bool,
 	/// The arrangement shown, or `None` before the first.
 	key: Option<K>,
 	/// What was shown when the glide under way started, and when.
@@ -30,10 +32,12 @@ pub(crate) struct Glide<K> {
 }
 
 impl<K: PartialEq> Glide<K> {
-	/// A glide taking `duration`, from the second arrangement shown on.
-	pub(crate) fn new(duration: Duration) -> Self {
+	/// A glide taking `duration` for the items `glides` picks, from the
+	/// second arrangement shown on.
+	pub(crate) fn new(duration: Duration, glides: fn(&Item) -> bool) -> Self {
 		Self {
 			duration,
+			glides,
 			key: None,
 			from: None,
 			shown: Vec::new(),
@@ -63,8 +67,12 @@ impl<K: PartialEq> Glide<K> {
 			(linear < 1.0).then(|| Ease::InOut.apply(linear))
 		});
 		let same = |a: &Item, b: &Item| a.source == b.source;
+		let glides = self.glides;
 		(self.shown, self.placed) = match (progress, &self.from) {
-			(Some(progress), Some((from, _))) => (between(from, to, progress, same), placed(from, to, progress, same)),
+			(Some(progress), Some((from, _))) => (
+				between(from, to, progress, same, glides),
+				placed(from, to, progress, same, glides),
+			),
 			_ => {
 				self.from = None;
 				(to.to_vec(), to.to_vec())
@@ -80,8 +88,15 @@ impl<K: PartialEq> Glide<K> {
 /// from its rect, crop, and shape there to its own, its filters' settings
 /// mixing; the rest of `from` fade out and the rest of `to` fade in where
 /// they are. They stack as `from` does until halfway, then as `to` does.
-/// Only visible items are returned.
-pub(crate) fn between(from: &[Item], to: &[Item], progress: f32, same: impl Fn(&Item, &Item) -> bool) -> Vec<Item> {
+/// A paired item `glides` leaves out shows as it is in `to`. Only visible
+/// items are returned.
+pub(crate) fn between(
+	from: &[Item],
+	to: &[Item],
+	progress: f32,
+	same: impl Fn(&Item, &Item) -> bool,
+	glides: impl Fn(&Item) -> bool,
+) -> Vec<Item> {
 	let (left, entered) = pair(from, to, same);
 	let slots: Vec<(Option<usize>, Option<usize>)> = if progress < 0.5 {
 		stack(from, &left, to, &entered)
@@ -99,6 +114,7 @@ pub(crate) fn between(from: &[Item], to: &[Item], progress: f32, same: impl Fn(&
 		.map(|slot| match slot {
 			(Some(at), None) => faded(&from[at], 1.0 - progress),
 			(None, Some(index)) => faded(&to[index], progress),
+			(Some(_), Some(index)) if !glides(&to[index]) => to[index].clone(),
 			(Some(at), Some(index)) => {
 				let (old, new) = (&from[at], &to[index]);
 				let look = match mixed(old, new, progress) {
@@ -123,20 +139,26 @@ pub(crate) fn between(from: &[Item], to: &[Item], progress: f32, same: impl Fn(&
 }
 
 /// Each item of `to` where [`between`] draws it at `progress`: one paired
-/// with an item of `from` part way from its place there, the rest where
-/// they are.
-fn placed(from: &[Item], to: &[Item], progress: f32, same: impl Fn(&Item, &Item) -> bool) -> Vec<Item> {
+/// with an item of `from` and picked by `glides` part way from its place
+/// there, the rest where they are.
+fn placed(
+	from: &[Item],
+	to: &[Item],
+	progress: f32,
+	same: impl Fn(&Item, &Item) -> bool,
+	glides: impl Fn(&Item) -> bool,
+) -> Vec<Item> {
 	let (_, entered) = pair(from, to, same);
 	let paired = to.iter().zip(entered);
 	paired
 		.map(|(new, at)| match at {
-			Some(at) => Item {
+			Some(at) if glides(new) => Item {
 				rect: toward(&from[at].rect, &new.rect, progress),
 				crop: from[at].crop.toward(&new.crop, progress),
 				shape: from[at].shape.toward(&new.shape, progress),
 				..new.clone()
 			},
-			None => new.clone(),
+			_ => new.clone(),
 		})
 		.collect()
 }
@@ -274,7 +296,7 @@ mod tests {
 	fn a_joining_item_fades_in_while_the_others_glide() {
 		let from = vec![at("main", 0.0), at("cam", 500.0)];
 		let to = vec![at("main", 0.0), at("cam", 300.0), at("guest", 600.0)];
-		let half = between(&from, &to, 0.5, |a, b| a.source == b.source);
+		let half = between(&from, &to, 0.5, |a, b| a.source == b.source, |_| true);
 		assert_eq!(half.len(), 3);
 		assert_eq!(half[1].rect.x, 400.0);
 		assert_eq!(half[2].source, "guest");
@@ -286,7 +308,7 @@ mod tests {
 	fn a_leaving_item_fades_out_where_it_was() {
 		let from = vec![at("cam", 0.0), at("guest", 600.0)];
 		let to = vec![at("cam", 300.0)];
-		let quarter = between(&from, &to, 0.25, |a, b| a.source == b.source);
+		let quarter = between(&from, &to, 0.25, |a, b| a.source == b.source, |_| true);
 		let guest = quarter.iter().find(|item| item.source == "guest").unwrap();
 		assert_eq!(guest.rect.x, 600.0);
 		assert_eq!(opacity(guest), 0.75);
@@ -297,7 +319,7 @@ mod tests {
 	#[test]
 	fn a_glide_under_way_restarts_from_what_it_showed() {
 		let start = kio::clock::now();
-		let mut glide = Glide::new(Duration::from_millis(400));
+		let mut glide = Glide::new(Duration::from_millis(400), |_| true);
 		let one = vec![at("cam", 0.0)];
 		let two = vec![at("cam", 0.0), at("guest", 600.0)];
 		let three = vec![at("cam", 200.0), at("guest", 600.0)];
@@ -332,9 +354,25 @@ mod tests {
 		assert_eq!(later, three);
 	}
 
+	/// An item the glide leaves out, such as a layer set free being dragged,
+	/// shows where it is now while the others glide.
+	#[test]
+	fn an_item_left_out_shows_where_it_is() {
+		let start = kio::clock::now();
+		let mut glide = Glide::new(REFLOW, |item| item.source != "logo");
+		let one = vec![at("cam", 0.0), at("logo", 0.0)];
+		let two = vec![at("cam", 200.0), at("logo", 100.0)];
+		glide.show(1, &one, start);
+		glide.show(2, &two, start);
+		let half = glide.show(2, &two, start.saturating_add(REFLOW / 2)).to_vec();
+		assert_eq!(half[1].rect.x, 100.0, "the logo is where it is");
+		assert!(half[0].rect.x > 0.0 && half[0].rect.x < 200.0, "the camera glides");
+		assert_eq!(glide.placed()[1].rect.x, 100.0);
+	}
+
 	#[test]
 	fn the_first_arrangement_shows_at_once() {
-		let mut glide = Glide::new(REFLOW);
+		let mut glide = Glide::new(REFLOW, |_| true);
 		let items = vec![at("cam", 0.0)];
 		assert_eq!(glide.show((), &items, kio::clock::now()), items.as_slice());
 	}
