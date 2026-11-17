@@ -110,6 +110,12 @@ enum View {
 	Cued(Page),
 	/// A scene, by name, open for editing off air on BUILD.
 	OffAir(&'static str),
+	/// The multiview, as its own window draws it, with the host and the
+	/// highlight picked beside the guests. If `live`, on air in Studio mode
+	/// with `Interview` cued.
+	Multiview {
+		live: bool,
+	},
 }
 
 /// BUILD with the host's layer, the middle of the scene on program's three,
@@ -298,6 +304,14 @@ views! {
 	/// Settings, Stream with `--connect` set: the flag's relay, locked, and
 	/// the token kept for it.
 	settings_stream_flagged: Live, relayed(View::Setting(Setting::Stream));
+	/// The multiview off air: every scene and the sources picked, the scene
+	/// the stream opens on amber, and the clock, which keeps it from being
+	/// still.
+	multiview: Live, studio(View::Multiview { live: false });
+	/// The multiview on air in Studio mode: the scene on air framed in the
+	/// accent, the cued one amber, and the sources the live picture shows
+	/// dotted.
+	multiview_on_air: Live, relayed(View::Multiview { live: true });
 }
 
 /// Draw the view `name` opens into `$SHOTS_DIR/<name>.png`, twice if it is
@@ -963,6 +977,85 @@ fn studio_mode_cues_and_takes() {
 	quit(&engine, &runtime);
 }
 
+/// The show's menu opens the multiview. On it, a click on
+/// a scene's tile takes it, or cues it in Studio mode, a source's menu leaves
+/// it out, and the sources' popover picks one: on a real engine. It draws no
+/// view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn the_multiview_takes_cues_and_picks() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let staged = || {
+		let state = engine.state.lock().unwrap();
+		let program = state.compositor.program_scene().map(str::to_string);
+		(program, state.cued().map(str::to_string))
+	};
+	let scenes = |program: &str, cued: Option<&str>| (Some(program.to_string()), cued.map(str::to_string));
+
+	// Embedded in the window here, as egui draws a viewport where it opens no
+	// native windows.
+	assert!(harness.query_by_label("Sources shown").is_none());
+	harness.get_by_label("The show").click();
+	harness.run_steps(2);
+	harness.get_by_label("Open the multiview").click();
+	harness.run_steps(4);
+	assert!(harness.query_by_label("Sources shown").is_some(), "opened");
+
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("the studio is open")
+	};
+	studio.multiview_alone(&[]);
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Main", None));
+	harness.get_by_label("Interview").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", None), "the tile took its scene");
+	harness.get_by_label("Vertical").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", None), "a refused scene stays off");
+
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("the studio is open")
+	};
+	studio.studio_mode(true);
+	harness.run_steps(2);
+	harness.get_by_label("Break").click();
+	harness.run_steps(2);
+	assert_eq!(staged(), scenes("Interview", Some("Break")), "the tile cued its scene");
+
+	assert!(harness.query_by_label("guest").is_some(), "a guest is shown by default");
+	harness.get_by_label("guest").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Leave out of the multiview").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("guest").is_none(), "left out");
+	harness.get_by_label("Sources shown").click();
+	harness.run_steps(2);
+	harness.get_by_label("host").click();
+	harness.run_steps(2);
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	assert!(harness.query_by_label("host").is_some(), "picked");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// MIX's send dots, an opened strip's switches, a mute, and the audio scene
 /// tags edit the show as a person clicking them does, each an edit undo
 /// names: on the MIX views' show, on a real engine. It draws no view.
@@ -1167,6 +1260,13 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			studio.turn(*page);
 		}
 		View::OffAir(scene) => studio.edit_off_air(scene),
+		View::Multiview { live } => {
+			studio.multiview_alone(&["host", "highlight"]);
+			if *live {
+				studio.studio_mode(true);
+				studio.cue("Interview");
+			}
+		}
 		View::Review { picked, .. } => {
 			studio.turn(Page::Review);
 			studio.seed_shelf(shelf());
@@ -1183,7 +1283,8 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	| View::OnAirHealth
 	| View::OnAirSetting(_)
 	| View::Restart
-	| View::ShowMenuLive = view
+	| View::ShowMenuLive
+	| View::Multiview { live: true } = view
 	{
 		controls.go_live().expect("going live starts");
 		runtime

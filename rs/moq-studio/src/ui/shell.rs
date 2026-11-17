@@ -16,13 +16,13 @@ use super::*;
 /// short lock a frame.
 pub(super) struct Snapshot {
 	/// The show's name: its scene file's, without the extension.
-	show: String,
+	pub(super) show: String,
 	/// The edits undo and redo would take back and bring back, by label.
 	undo: Option<String>,
 	redo: Option<String>,
 	/// The scene on program.
-	program: Option<String>,
-	scenes: Vec<ScenePad>,
+	pub(super) program: Option<String>,
+	pub(super) scenes: Vec<ScenePad>,
 	/// The scene the panic key cuts to.
 	safe: Option<String>,
 	/// Each sound the stream carries.
@@ -40,11 +40,11 @@ pub(super) struct Snapshot {
 }
 
 /// A scene as its pad shows it.
-struct ScenePad {
-	name: String,
-	canvas: Canvas,
+pub(super) struct ScenePad {
+	pub(super) name: String,
+	pub(super) canvas: Canvas,
 	/// Why it cannot go on program, if it cannot.
-	refused: Option<String>,
+	pub(super) refused: Option<String>,
 }
 
 /// A sound the stream carries, as its row shows it.
@@ -52,6 +52,15 @@ struct Sound {
 	name: String,
 	microphone: bool,
 	audio: moq_scene::Audio,
+}
+
+/// What a click on the pad of the scene called `scene` does: cue it in
+/// Studio mode, or take it.
+pub(super) fn click(snapshot: &Snapshot, scene: &str) -> PadAction {
+	match snapshot.studio {
+		true => PadAction::Cue(scene.to_string()),
+		false => PadAction::Take(scene.to_string()),
+	}
 }
 
 /// Room around the bars' contents.
@@ -70,7 +79,7 @@ const TRAFFIC_LIGHTS: f32 = 64.0;
 
 /// What a pad asked for, naming its scene: the pads are drawn from the
 /// frame's snapshot, and a reload since may have moved or removed it.
-enum PadAction {
+pub(super) enum PadAction {
 	Take(String),
 	Cue(String),
 	/// Open it for editing off air.
@@ -404,6 +413,17 @@ impl Panels {
 				// Arrives as a paste event on a later frame.
 				ui.ctx().send_viewport_cmd(ViewportCommand::RequestPaste);
 			}
+			let open = self.multiview.open();
+			let text = match open {
+				true => "Close the multiview",
+				false => "Open the multiview",
+			};
+			let multiview = ui
+				.add(kit::button(Icon::Detach, text))
+				.on_hover_text("A window for another monitor with every scene and source, live");
+			if multiview.clicked() {
+				self.multiview.set_open(!open);
+			}
 			// Closing ends the show as quitting does, which would cut a stream
 			// on air: the broadcaster ends that with END STREAM.
 			let off = matches!(self.engine.on_air(), crate::engine::OnAir::Off) && !self.controls.going();
@@ -650,7 +670,13 @@ impl Panels {
 			let (from, to) = rename_sheet(ui.ctx(), "rename scene", &mut self.renaming_pad)?;
 			Some(PadAction::Renamed(from, to))
 		});
-		let Some(action) = action else { return };
+		if let Some(action) = action {
+			self.pad_action(action);
+		}
+	}
+
+	/// Do what a scene's pad, or its tile on the multiview, asked for.
+	pub(super) fn pad_action(&mut self, action: PadAction) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
@@ -744,20 +770,9 @@ impl Panels {
 		};
 		let on_air = snapshot.program.as_deref() == Some(pad.name.as_str());
 		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
-		// Off air, the scene on program is the one the stream opens on.
-		let live = self.engine.on_air().live().is_some();
-		let (tally, tag) = match (on_air, live, cued) {
-			(true, true, _) => (Tally::Air, None),
-			(true, false, _) => (Tally::Cue, Some("First")),
-			(false, _, true) => (Tally::Cue, None),
-			(false, _, false) => (Tally::Off, None),
-		};
+		let (tally, tag) = self.tally(snapshot, &pad.name);
 		let response = self.pad(ui, pad, tally, tag, width, snapshot.shape);
-		let click = match snapshot.studio {
-			true => PadAction::Cue(pad.name.clone()),
-			false => PadAction::Take(pad.name.clone()),
-		};
-		let mut action = (response.clicked() && pad.refused.is_none()).then_some(click);
+		let mut action = (response.clicked() && pad.refused.is_none()).then(|| click(snapshot, &pad.name));
 		response.context_menu(|ui| {
 			let takeable = pad.refused.is_none() || on_air;
 			let take = ui.add_enabled(!on_air && pad.refused.is_none(), egui::Button::new("Take it on air"));
@@ -830,6 +845,20 @@ impl Panels {
 		action
 	}
 
+	/// The tally of the scene called `scene`, and the tag over its own, if
+	/// any: off air, the scene on program is the one the stream opens on.
+	pub(super) fn tally(&self, snapshot: &Snapshot, scene: &str) -> (Tally, Option<&'static str>) {
+		let on_air = snapshot.program.as_deref() == Some(scene);
+		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == scene);
+		let live = self.engine.on_air().live().is_some();
+		match (on_air, live, cued) {
+			(true, true, _) => (Tally::Air, None),
+			(true, false, _) => (Tally::Cue, Some("First")),
+			(false, _, true) => (Tally::Cue, None),
+			(false, _, false) => (Tally::Off, None),
+		}
+	}
+
 	/// A scene's pad, `width` wide, with its thumbnail once the compositor
 	/// has drawn it, which it draws while the pad is on screen.
 	fn pad(
@@ -860,7 +889,7 @@ impl Panels {
 			.shape(shape);
 		let response = ui.add(widget);
 		if ui.is_rect_visible(response.rect) {
-			self.thumbnails_shown.insert(thumbnail);
+			self.show_thumbnail(thumbnail, Detail::default());
 		}
 		response
 	}
@@ -1151,6 +1180,13 @@ impl Panels {
 		self.details = open;
 	}
 
+	/// Draw `thumbnail` at `detail` from now on, or at the larger of each where
+	/// another place shows it too.
+	pub(super) fn show_thumbnail(&mut self, thumbnail: Thumbnail, detail: Detail) {
+		let shown = self.thumbnails_shown.entry(thumbnail).or_insert(detail);
+		*shown = shown.max(detail);
+	}
+
 	/// Show each thumbnail the compositor drew of those shown last frame, and
 	/// let go of the rest, so this frame starts with none shown.
 	pub(super) fn follow_thumbnails(
@@ -1159,7 +1195,7 @@ impl Panels {
 		compositor: &moq_scene::Compositor,
 	) {
 		let mut gone = std::mem::take(&mut self.thumbnails);
-		for thumbnail in std::mem::take(&mut self.thumbnails_shown) {
+		for thumbnail in std::mem::take(&mut self.thumbnails_shown).into_keys() {
 			let Some(texture) = compositor.thumbnail(&thumbnail) else {
 				continue;
 			};

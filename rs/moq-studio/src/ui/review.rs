@@ -316,7 +316,7 @@ impl Panels {
 						};
 						let response = card.show(ui);
 						if !sound && ui.is_rect_visible(response.rect) {
-							self.thumbnails_shown.insert(thumbnail);
+							self.show_thumbnail(thumbnail, Detail::default());
 						}
 						if response.clicked() {
 							replay.of = Of::Source(name.clone());
