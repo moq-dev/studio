@@ -11,7 +11,8 @@ make of the tiles, and neither stalls a frame.
 ## Plan
 
 The two landed separately with the same pattern: a compute pass reducing a
-picture to 16x16 tiles, at most every 250 ms, its result copied to a buffer
+picture to a grid of tiles (64x36 for the probe, 32x18 for the look), at
+most every 250 ms, its result copied to a buffer
 mapped with `map_async` and read on a later frame, a failed or late read
 dropped.
 
@@ -29,7 +30,3 @@ dropped.
 Decided 2026-11-17 (maintainer, on
 [#194](https://github.com/moq-dev/studio/pull/194#issuecomment-6941200435)):
 ✅ one helper once both land (rejected: sharing in #194, before #192 lands).
-
-## Required
-
-- [A capture that went black says so](/quest/m1/capture-health.md) - lands `dark.rs`'s probe, the other reader
