@@ -467,6 +467,9 @@ pub(crate) struct Placer {
 	/// Whether its picture is read: its scene drawn and the item shown. It
 	/// chooses only while it is.
 	watched: bool,
+	/// Whether a gesture has it in hand, such as a drag: it chooses only once
+	/// let go.
+	grabbed: bool,
 	placement: Placement,
 	/// What [`Sight::generation`] and settings the heat was drawn from.
 	heated: Option<(u64, KeepClear)>,
@@ -492,6 +495,7 @@ impl Placer {
 			moves: 0,
 			aimed: None,
 			watched: true,
+			grabbed: false,
 			placement: Placement {
 				rect: nowhere,
 				slot: None,
@@ -547,6 +551,17 @@ impl Placer {
 		self.watched = watched;
 	}
 
+	/// Note whether a gesture has it in hand, such as a drag that moves,
+	/// resizes, or crops it: while it does, it neither chooses nor counts its
+	/// place the worst, and once let go it goes on as the gesture left it, a
+	/// move holding it.
+	pub fn grab(&mut self, grabbed: bool) {
+		if grabbed {
+			self.worst = None;
+		}
+		self.grabbed = grabbed;
+	}
+
 	/// Where it is as of the last [`place`](Self::place).
 	pub fn placement(&self) -> &Placement {
 		&self.placement
@@ -570,7 +585,7 @@ impl Placer {
 			self.heated = Some(generation);
 			self.placement.heat = self.sight.heat(keep).unwrap_or_default();
 		}
-		if self.watched && self.sight.last.is_some() && !slots.is_empty() {
+		if self.watched && !self.grabbed && self.sight.last.is_some() && !slots.is_empty() {
 			self.choose(saved, &slots, keep, canvas, now);
 		}
 
@@ -1078,6 +1093,22 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// In hand, as a drag has it, it does not choose, though the time to has
+	/// come; let go, it does.
+	#[test]
+	fn it_chooses_only_once_let_go() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		placer.grab(true);
+		let now = run(&mut placer, saved, start, (0..12).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, None, "in hand, it stays");
+		placer.grab(false);
+		let now = run(&mut placer, saved, now, [read(MOVING, game)]);
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+		let _ = now;
 	}
 
 	/// A resize part way along a glide takes its new size at once, in the

@@ -436,6 +436,8 @@ impl Panels {
 		if !response.dragged() {
 			self.drag = None;
 		}
+		// A layer keeping clear stays put while in hand.
+		keep::grab(state, self.drag.as_ref().map(|drag| &drag.picked));
 		if response.has_focus() && self.drag.is_none() && result.is_ok() {
 			(spot, result) = self.nudge(ui, state, response.id);
 		}

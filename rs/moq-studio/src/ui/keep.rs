@@ -69,6 +69,22 @@ pub(super) fn hold(state: &mut State, layer: &Layer, index: usize, item: &Item) 
 	}
 }
 
+/// Note the layer a gesture on the picture has in hand, if any: a layer
+/// keeping clear does not choose a place while in hand.
+pub(super) fn grab(state: &mut State, picked: Option<&Picked>) {
+	let collection = state.collection();
+	let grabbed = picked.and_then(|picked| {
+		let scene = picked.layer.scene.clone()?;
+		let item = picked.item(collection)?;
+		item.keep_clear?;
+		Some((scene, picked.index, item.source.clone()))
+	});
+	let grabbed = grabbed
+		.as_ref()
+		.map(|(scene, index, source)| (scene.as_str(), *index, source.as_str()));
+	state.compositor.grab(grabbed);
+}
+
 /// `staged`, the collection as the picture draws it, with each layer
 /// keeping clear where it was placed, so a pointer over the picture finds
 /// what it sees.
