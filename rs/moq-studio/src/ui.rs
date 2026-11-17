@@ -2799,6 +2799,28 @@ mod tests {
 		assert!(build::own_copy(&collection, "Main"), "the source filling it");
 	}
 
+	/// A layer showing a role nothing fills offers no copy of its own, to
+	/// duplicate or make independent, as a clone of it would be refused; one
+	/// it fills copies the source filling it.
+	#[test]
+	fn an_unfilled_role_has_nothing_to_copy() {
+		let mut collection = Collection::new();
+		let color = moq_scene::Rgba([255, 255, 255, 255]);
+		collection.sources.insert("game".into(), Source::Color { color });
+		collection.sources.insert("Main".into(), Source::Role { source: None });
+		let err = build::copy_of(&collection, "Main").unwrap_err();
+		assert_eq!(err.to_string(), build::NOTHING_TO_COPY);
+		let filled = Source::Role {
+			source: Some("game".into()),
+		};
+		collection.sources.insert("Main".into(), filled);
+		let (copy, _) = build::copy_of(&collection, "Main").unwrap();
+		assert!(matches!(&copy, Source::Clone { source } if source == "game"));
+		let mut draft = collection.draft("Duplicate `Main` as its own copy");
+		draft.set_source("Main copy", Some(copy)).unwrap();
+		draft.finish().unwrap();
+	}
+
 	/// A clone of a source with its background removed copies its filters,
 	/// and the edit adding it is valid.
 	#[test]

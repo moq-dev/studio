@@ -364,9 +364,11 @@ impl Panels {
 			ui.label(text).on_hover_text(list.join("\n"));
 			if places.len() > 1 {
 				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					let copyable = !collection.unfilled(&item.source);
 					if ui
-						.button("Make independent")
+						.add_enabled(copyable, egui::Button::new("Make independent"))
 						.on_hover_text(linked_note(places.len()))
+						.on_disabled_hover_text(super::build::NOTHING_TO_COPY)
 						.clicked()
 					{
 						asked = Some(Asked::Act(LayerAction::Independent));

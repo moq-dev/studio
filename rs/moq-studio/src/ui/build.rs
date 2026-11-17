@@ -754,7 +754,10 @@ impl Panels {
 				}
 				let mut source = None;
 				if independent {
-					let (cloned, video) = clone_of(collection, &name);
+					let (cloned, video) = match copy_of(collection, &name) {
+						Ok(copy) => copy,
+						Err(err) => return (spot, Err(err)),
+					};
 					let named = collection.unused_name(&format!("{} copy", collection.capture(&name)));
 					copy.source = named.clone();
 					source = Some((named, cloned, video));
@@ -866,6 +869,8 @@ pub(super) struct Menu {
 	cut: Option<bool>,
 	/// How many lists of layers show its source.
 	linked: usize,
+	/// Whether it can show a copy of its own: not a role nothing fills.
+	copyable: bool,
 	/// Whether its scene is open off air, where nothing goes always on top,
 	/// as that is drawn on program.
 	off_air: bool,
@@ -889,6 +894,7 @@ impl Menu {
 			web: matches!(capture, Some(Source::Browser { .. })),
 			cut,
 			linked: shown_in(collection, &item.source).len(),
+			copyable: !collection.unfilled(&item.source),
 			off_air,
 			item,
 		})
@@ -986,16 +992,18 @@ pub(super) fn layer_menu(ui: &mut Ui, menu: &Menu) -> Option<LayerAction> {
 		action = Some(LayerAction::Duplicate { independent: false });
 	}
 	if ui
-		.button("Duplicate as its own copy")
+		.add_enabled(menu.copyable, egui::Button::new("Duplicate as its own copy"))
 		.on_hover_text("Another layer showing a copy of the source with a look of its own")
+		.on_disabled_hover_text(NOTHING_TO_COPY)
 		.clicked()
 	{
 		action = Some(LayerAction::Duplicate { independent: true });
 	}
 	if menu.linked > 1
 		&& ui
-			.button("Make independent")
+			.add_enabled(menu.copyable, egui::Button::new("Make independent"))
 			.on_hover_text(linked_note(menu.linked))
+			.on_disabled_hover_text(NOTHING_TO_COPY)
 			.clicked()
 	{
 		action = Some(LayerAction::Independent);
@@ -1203,12 +1211,23 @@ pub(super) fn shown_in(collection: &Collection, source: &str) -> Vec<Layer> {
 		.collect()
 }
 
+/// Why a layer showing a role nothing fills offers no copy of its own.
+pub(super) const NOTHING_TO_COPY: &str = "A role nothing fills has nothing to copy";
+
+/// The source and video settings of a copy of its own of `name`, as
+/// [`clone_of`] gives them, or why there is none: a role nothing fills,
+/// which a clone cannot show.
+pub(super) fn copy_of(collection: &Collection, name: &str) -> anyhow::Result<(Source, Option<Video>)> {
+	anyhow::ensure!(!collection.unfilled(name), "{NOTHING_TO_COPY}");
+	Ok(clone_of(collection, name))
+}
+
 /// Point the layer at `index` of `layer` at a copy of its own of what it
 /// shows, which keeps its look, so editing that look no longer changes the
 /// layers it was linked to.
 pub(super) fn make_independent(state: &mut State, layer: &Layer, index: usize, item: &Item) -> anyhow::Result<()> {
 	let collection = state.collection();
-	let (source, video) = clone_of(collection, &item.source);
+	let (source, video) = copy_of(collection, &item.source)?;
 	let name = collection.unused_name(&format!("{} copy", collection.capture(&item.source)));
 	let label = format!("Make `{}` {} independent", item.source, place(layer));
 	let shown = Item {
