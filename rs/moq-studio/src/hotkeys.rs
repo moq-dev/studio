@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-use winit::keyboard::{Key, KeyCode, ModifiersState, NativeKeyCode, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, NativeKeyCode, PhysicalKey};
 
 use crate::controls::{Action, Controls};
 
@@ -134,6 +134,8 @@ struct Pressing {
 	/// The modifiers held now, as egui names them.
 	modifiers: egui::Modifiers,
 	taking: Taking,
+	/// Whether a paste reached egui since [`Keyboard::pasted`] last said so.
+	pasted: bool,
 }
 
 /// What a key pressed in the window does besides reaching egui.
@@ -173,6 +175,19 @@ impl Keyboard {
 	/// returning whether egui hears it too.
 	pub fn pressed(&self, key: PhysicalKey, name: Key, repeat: bool) -> bool {
 		let mut pressing = self.0.lock().unwrap();
+		let paste = !repeat && paste(pressing.modifiers, &name);
+		let heard = Self::hear(&mut pressing, key, name, repeat);
+		pressing.pasted |= heard && paste;
+		heard
+	}
+
+	/// Whether a paste was pressed since this last said so, which egui reports
+	/// only when the clipboard holds text.
+	pub fn pasted(&self) -> bool {
+		std::mem::take(&mut self.0.lock().unwrap().pasted)
+	}
+
+	fn hear(pressing: &mut Pressing, key: PhysicalKey, name: Key, repeat: bool) -> bool {
 		let pressed = Binding {
 			modifiers: pressing.modifiers,
 			key,
@@ -203,6 +218,16 @@ impl Keyboard {
 
 	fn take(&self, taking: Taking) {
 		self.0.lock().unwrap().taking = taking;
+	}
+}
+
+/// Whether `name` held with `modifiers` pastes, as egui-winit decides.
+fn paste(modifiers: egui::Modifiers, name: &Key) -> bool {
+	match name {
+		Key::Named(NamedKey::Paste) => true,
+		Key::Named(NamedKey::Insert) => cfg!(windows) && modifiers.shift,
+		Key::Character(text) => modifiers.command && text.eq_ignore_ascii_case("v"),
+		_ => false,
 	}
 }
 
