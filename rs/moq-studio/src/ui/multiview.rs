@@ -433,7 +433,8 @@ impl Inner {
 			.map(|(name, source)| SourceTile {
 				name: name.clone(),
 				icon: layers::kind(collection, name),
-				on_air: on_air.contains(name.as_str()),
+				// The compositor names a copy by the source it copies.
+				on_air: on_air.contains(collection.capture(name)),
 				shown: self.saved.shows(&show, name, source),
 			})
 			.collect();

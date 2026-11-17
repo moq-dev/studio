@@ -491,6 +491,9 @@ struct Events<'a> {
 	/// Whether the window was asked to close, by the desktop or the studio's
 	/// own title bar, since eframe only logs the error that stops it otherwise.
 	closed: Arc<AtomicBool>,
+	/// The studio's own window, the first to hear an event: the multiview's
+	/// opens after it, and closing that one closes nothing else.
+	root: Option<winit::window::WindowId>,
 	/// The engine once the studio is built, to end on the way out.
 	started: Arc<Started>,
 	runtime: tokio::runtime::Handle,
@@ -512,6 +515,7 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 	}
 
 	fn window_event(&mut self, event_loop: &ActiveEventLoop, id: winit::window::WindowId, event: WindowEvent) {
+		let root = *self.root.get_or_insert(id) == id;
 		match &event {
 			// A synthetic press is a key held as the window gained focus.
 			WindowEvent::KeyboardInput {
@@ -525,7 +529,7 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 				}
 			}
 			WindowEvent::ModifiersChanged(modifiers) => self.keyboard.modifiers(modifiers.state()),
-			WindowEvent::CloseRequested => self.closed.store(true, Ordering::Relaxed),
+			WindowEvent::CloseRequested if root => self.closed.store(true, Ordering::Relaxed),
 			_ => {}
 		}
 		self.eframe.window_event(event_loop, id, event);
@@ -659,6 +663,7 @@ fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
 		eframe,
 		keyboard,
 		closed: closed.clone(),
+		root: None,
 		started,
 		runtime,
 		unsaved: false,
