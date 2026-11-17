@@ -129,9 +129,68 @@ pub struct State {
 	/// [`Collection::renames`] reads it, so what the window follows a scene by
 	/// name with, such as a hotkey, follows it too.
 	renamed: Vec<BTreeMap<String, Option<String>>>,
+	/// Sources a view shows gone dark for so long, as no capture can be in
+	/// a view's headless build.
+	#[cfg(test)]
+	pub dark: BTreeMap<String, Duration>,
+	/// Sources a view shows stalled for so long, as no camera or broadcast
+	/// can be in a view's headless build.
+	#[cfg(test)]
+	pub stalled: BTreeMap<String, Duration>,
+}
+
+/// Why a layer shows no new picture, once that counts: what its badge says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lost {
+	/// A camera, display, or window all dark this long.
+	Dark(Duration),
+	/// A camera or broadcast without a new picture this long, so its last
+	/// one repeats.
+	Stalled(Duration),
+}
+
+impl Lost {
+	/// How long it has gone without a picture.
+	pub fn since(&self) -> Duration {
+		match self {
+			Self::Dark(since) | Self::Stalled(since) => *since,
+		}
+	}
 }
 
 impl State {
+	/// What stalled of the source `name`, a copy's what it copies, live at
+	/// `now`, once that counts; see [`source::Feed::stalled`].
+	pub fn stalled(&self, name: &str, now: Instant) -> Option<source::Stall> {
+		let capture = self.collection.capture(name);
+		#[cfg(test)]
+		if let Some(stalled) = self.stalled.get(capture) {
+			return Some(source::Stall::Picture(*stalled));
+		}
+		self.sources.get(capture)?.stalled(now)
+	}
+
+	/// Why `name`, a copy showing what it copies, shows no new picture at
+	/// `now`, once that counts: a picture stalled, else gone dark.
+	pub fn lost(&self, name: &str, now: Instant) -> Option<Lost> {
+		if let Some(source::Stall::Picture(since)) = self.stalled(name, now) {
+			return Some(Lost::Stalled(since));
+		}
+		self.dark(name, now).map(Lost::Dark)
+	}
+
+	/// How long the camera, display, or window `name` shows, a copy showing
+	/// what it copies, has been all dark while live at `now`, once that is
+	/// long enough to count; see [`Compositor::dark`].
+	pub fn dark(&self, name: &str, now: Instant) -> Option<Duration> {
+		let capture = self.collection.capture(name);
+		#[cfg(test)]
+		if let Some(dark) = self.dark.get(capture) {
+			return Some(*dark);
+		}
+		self.compositor.dark(capture, now)
+	}
+
 	/// How the program's virtual camera, or the published scene `scene`'s,
 	/// is doing, or `None` while it is off.
 	pub fn camera(&self, scene: Option<&str>) -> Option<crate::vcam::Status> {
@@ -563,6 +622,14 @@ impl State {
 	pub fn restart(&mut self, name: &str) {
 		self.sources.restart(name);
 		self.stale = true;
+	}
+
+	/// Restart the display or window called `name`, asking the system picker
+	/// afresh rather than reopening what it was granted.
+	pub fn pick_again(&mut self, name: &str) -> anyhow::Result<()> {
+		self.sources.pick_again(name)?;
+		self.stale = true;
+		Ok(())
 	}
 
 	/// After any change to the collection or its history, which the autosave
@@ -1192,6 +1259,10 @@ impl Engine {
 				stale: true,
 				edits: autosave.edits(),
 				renamed: Vec::new(),
+				#[cfg(test)]
+				dark: BTreeMap::new(),
+				#[cfg(test)]
+				stalled: BTreeMap::new(),
 			}),
 			autosave,
 			stats,
@@ -1539,7 +1610,7 @@ impl Engine {
 		// Stalled sound matters only if an audio scene viewers hear plays it:
 		// the one on program or one a published scene carries, not one only
 		// listened to. A source that stopped matters either way.
-		let (stalled, stopped, uploaded) = {
+		let (stalled, dark, stopped, uploaded) = {
 			let state = self.state.lock().unwrap();
 			let on_program = state.on_program();
 			let beside = state.beside();
@@ -1571,13 +1642,25 @@ impl Engine {
 			let stalled = state
 				.sources
 				.iter()
-				.filter_map(|(name, feed)| {
-					let stall = feed.stalled(now)?;
+				.filter_map(|(name, _)| {
+					let stall = state.stalled(name, now)?;
 					let live = match stall {
 						source::Stall::Picture(_) => shown(name),
 						source::Stall::Sound(_) => heard(name),
 					};
 					live.any().then(|| (name.to_string(), stall, live))
+				})
+				.collect();
+			let dark = state
+				.sources
+				.iter()
+				.filter_map(|(name, _)| {
+					// A stalled picture is reported as stalled, as its row says, never also as dark.
+					let Some(Lost::Dark(dark)) = state.lost(name, now) else {
+						return None;
+					};
+					let live = shown(name);
+					live.any().then(|| (name.to_string(), dark, live))
 				})
 				.collect();
 			// A stinger's clip rests ended between stingers, unless a live scene
@@ -1592,7 +1675,8 @@ impl Engine {
 						shown: shown(name),
 						heard: heard(name),
 					};
-					if !reach.any() {
+					// A dark or stalled source is reported so, as its layer's row says.
+					if !reach.any() || state.lost(name, now).is_some() {
 						return None;
 					}
 					// A picture that fails to draw fails the source as the Sources panel shows it.
@@ -1619,7 +1703,7 @@ impl Engine {
 					moq_scene::browser::Paint::Gpu => None,
 				})
 				.collect();
-			(stalled, stopped, uploaded)
+			(stalled, dark, stopped, uploaded)
 		};
 		let video = |video: &VideoStats, failed: Option<String>| {
 			let full = &video.renditions[Role::Canvas as usize];
@@ -1645,6 +1729,7 @@ impl Engine {
 			broadcasts: std::iter::once(program).chain(published).collect(),
 			grants: stats.grants(),
 			stalled,
+			dark,
 			stopped,
 			uploaded,
 		}
@@ -3682,6 +3767,44 @@ mod tests {
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");
+	}
+
+	/// A source on program whose picture went dark and then stalled is
+	/// reported once, as stalled, as its layer's row says; one dark only is
+	/// reported as dark.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_lost_picture_is_reported_once() {
+		let dir = tempfile::tempdir().unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = start(gpu, Vec::new(), dir.path(), autosave, red_canvas())
+			.await
+			.expect("the studio starts");
+		// The program thread starts the sources on its first sync.
+		kio::clock::timeout(Duration::from_secs(10), async {
+			while engine.state.lock().unwrap().sources.get("red").is_none() {
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("the source starts");
+		let secs = Duration::from_secs;
+		engine.state.lock().unwrap().dark.insert("red".into(), secs(12));
+		let local = engine.local(kio::clock::now());
+		assert_eq!(local.dark.len(), 1, "{local:?}");
+		assert!(local.stalled.is_empty(), "{local:?}");
+
+		engine.state.lock().unwrap().stalled.insert("red".into(), secs(4));
+		let now = kio::clock::now();
+		let local = engine.local(now);
+		assert!(local.dark.is_empty(), "{local:?}");
+		assert_eq!(local.stalled.len(), 1, "{local:?}");
+		assert_eq!(
+			engine.state.lock().unwrap().lost("red", now),
+			Some(Lost::Stalled(secs(4)))
+		);
+		engine.stop();
 	}
 
 	/// Without a relay, a recording encodes the program on its own and saves it

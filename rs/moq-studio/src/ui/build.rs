@@ -3,6 +3,7 @@
 //! inspector on the right.
 
 use super::cue::Corner;
+use super::dark::Mend;
 use super::shell::Snapshot;
 use super::*;
 
@@ -163,6 +164,20 @@ impl Panels {
 		// Docked on the live picture, away from the selected layer and its
 		// toolbar, which a drag moves with it.
 		let (width, height) = (canvas.width.max(1) as f32, canvas.height.max(1) as f32);
+		let now = kio::clock::now();
+		let scale = response.rect.size() / egui::vec2(width, height);
+		for (_, item) in self.shown(&state) {
+			if item.visible
+				&& let Some(lost) = state.lost(&item.source, now)
+			{
+				let at = egui::Rect::from_min_size(
+					response.rect.min + egui::vec2(item.rect.x, item.rect.y) * scale,
+					egui::vec2(item.rect.width, item.rect.height) * scale,
+				);
+				super::dark::on_picture(ui, at.intersect(response.rect), &item.source, lost);
+			}
+		}
+
 		let selected = self.shown(&state).into_iter().find_map(|(picked, item)| {
 			(Some(&picked) == self.selection.as_ref()).then(|| {
 				[
@@ -848,6 +863,22 @@ impl Panels {
 				result
 			}
 			LayerAction::Independent => make_independent(state, layer, index, &item),
+			LayerAction::Mend(mend) => {
+				let capture = collection.capture(&name).to_string();
+				match mend {
+					Mend::PickAgain => state
+						.pick_again(&capture)
+						.with_context(|| format!("cannot pick `{capture}` again")),
+					Mend::Reopen => {
+						state.restart(&capture);
+						Ok(())
+					}
+					Mend::Replace(source) => edit(state, format!("Change what `{capture}` captures"), None, |draft| {
+						draft.set_source(&capture, Some(source))
+					}),
+					Mend::Expected => super::dark::expect(state, &capture, true),
+				}
+			}
 			// The caller holds the state, so this copies from it rather than
 			// through `copy`, which takes the lock.
 			LayerAction::Copy => clip(ctx, state, &item).map(|said| self.say(Ok(said))),
@@ -906,6 +937,8 @@ pub(super) enum LayerAction {
 	},
 	/// Show a copy of its own of what it shows, so its look is its own.
 	Independent,
+	/// Fix what it shows, which went dark or stalled.
+	Mend(Mend),
 	Copy,
 	Remove,
 }

@@ -735,10 +735,12 @@ impl Panels {
 		let on_air = self.engine.on_air();
 		let watched = self.engine.watched();
 		let (name, dot) = health_word(&self.engine);
+		let name = name.as_str();
 		let report = self.engine.health.lock().unwrap();
 		let mark = fx.on().then(|| crate::fx::Mark::new(ui.painter()));
 		let text = if compact { "" } else { name };
 		let pill = ui.add(kit::Pill::new(text).dot(dot).clickable());
+
 		let pill = kit::tip(pill, &format!("Health: {name}"), None);
 		if let Some(mark) = mark {
 			fx.health(&mark.around(pill.rect).inset(2.0));
@@ -1353,9 +1355,10 @@ impl Form {
 	}
 }
 
-/// The stream's health in a word, and its dot's color. A problem shows even
-/// off air, such as a failed source.
-pub(super) fn health_word(engine: &Engine) -> (&'static str, Color32) {
+/// The stream's health in a word, and its dot's color, or how many layers
+/// went dark or stalled when they are among the worst problems. A problem
+/// shows even off air, such as a failed source.
+pub(super) fn health_word(engine: &Engine) -> (String, Color32) {
 	let live = engine.on_air().live().is_some();
 	let unwatched = engine.watched().is_empty();
 	let report = engine.health.lock().unwrap();
@@ -1363,12 +1366,24 @@ pub(super) fn health_word(engine: &Engine) -> (&'static str, Color32) {
 		.problems
 		.first()
 		.map_or(Verdict::Healthy, |problem| problem.verdict);
-	match (worst, live, unwatched) {
+	let (word, dot) = match (worst, live, unwatched) {
 		(Verdict::Unhealthy, ..) => ("Unhealthy", kit::ERR),
 		(Verdict::Degraded, ..) => ("Degraded", kit::CUE),
 		(_, false, true) => ("No relay", kit::DIM),
 		(_, false, false) => ("Ready", kit::OK),
 		(Verdict::Healthy, true, _) => ("Healthy", kit::OK),
 		(Verdict::Unknown, true, _) => ("Starting", kit::DIM),
-	}
+	};
+	// When layers gone dark or stalled are among the worst problems, the
+	// word counts them, as the streamer can see and fix them on BUILD. A
+	// stalled picture is unhealthy, a dark one degraded.
+	let among = match worst {
+		Verdict::Unhealthy => report.stalled > 0,
+		Verdict::Degraded => report.dark > 0,
+		_ => false,
+	};
+	let counted = among
+		.then(|| super::dark::counted(report.dark, report.stalled))
+		.flatten();
+	(counted.unwrap_or_else(|| word.to_string()), dot)
 }

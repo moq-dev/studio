@@ -1,0 +1,35 @@
+# The show `just shots` renders a stalled camera on: the host's camera beside
+# a lower third. A view's build cannot capture, so the view says the camera
+# stalled, and it draws nothing over the backdrop behind it.
+version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.host]
+kind = "camera"
+
+[sources.backdrop]
+kind = "color"
+color = "#1e293b"
+
+[sources.bar]
+kind = "color"
+color = "#2563ebe6"
+
+[[scenes]]
+name = "Interview"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "host", rect = { x = 160, y = 90, width = 1600, height = 900 } },
+    { source = "bar", rect = { x = 80, y = 900, width = 700, height = 110 } },
+]
+
+[[scenes]]
+name = "Break"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "bar", rect = { x = 460, y = 480, width = 1000, height = 120 } },
+]

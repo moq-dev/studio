@@ -257,6 +257,8 @@ struct SourceTile {
 	on_air: bool,
 	/// Whether it has a tile.
 	shown: bool,
+	/// Why it shows no new picture, if it went dark or stalled.
+	lost: Option<Lost>,
 }
 
 /// A scene as its tile shows it.
@@ -268,6 +270,8 @@ struct SceneTile {
 	key: Option<String>,
 	tally: Tally,
 	tag: Option<&'static str>,
+	/// Whether it draws a layer gone dark or stalled.
+	lost: bool,
 }
 
 /// What the multiview shows this frame, copied under one short lock.
@@ -408,6 +412,7 @@ impl Inner {
 		let collection = state.collection();
 		let program = state.compositor.program_scene();
 		let cued = state.cued();
+		let now = kio::clock::now();
 		let scenes = collection
 			.scenes
 			.iter()
@@ -422,6 +427,7 @@ impl Inner {
 					key: self.bindings.get(&action).map(|binding| binding.shown(ctx)),
 					tally,
 					tag,
+					lost: super::dark::draws_lost(collection, name, |name| state.lost(name, now).is_some()),
 				}
 			})
 			.collect();
@@ -436,6 +442,7 @@ impl Inner {
 				// The compositor names a copy by the source it copies.
 				on_air: on_air.contains(collection.capture(name)),
 				shown: self.saved.shows(&show, name, source),
+				lost: state.lost(name, now),
 			})
 			.collect();
 		let canvas = state.compositor.canvas();
@@ -657,7 +664,7 @@ impl Inner {
 			ui.add_space(8.0);
 			on_air(ui, &self.engine);
 			let (word, dot) = live::health_word(&self.engine);
-			ui.add(kit::Pill::new(word).dot(dot));
+			ui.add(kit::Pill::new(&word).dot(dot));
 		});
 		picked
 	}
@@ -776,6 +783,10 @@ fn tile_ui(
 	if refused.is_some() {
 		painter.rect_filled(thumb, top, kit::BG.gamma_multiply(0.6));
 	}
+	// A source gone dark or stalled is marked on its picture, as on BUILD's.
+	if let Tile::Source(SourceTile { lost: Some(lost), .. }) = shows {
+		super::dark::on_picture(ui, thumb, name, *lost);
+	}
 	painter.rect_stroke(rect, radius, outline, StrokeKind::Outside);
 
 	// The name bar: the key or the source's kind, the name, and the tally's
@@ -821,6 +832,17 @@ fn tile_ui(
 		painter.rect_filled(rect, 4, fill);
 		painter.galley(rect.center() - galley.size() / 2.0, galley, ink);
 		right = rect.left() - 9.0 * scale;
+	}
+	// The amber badge for a picture gone dark or stalled, as on a scene pad.
+	let lost = match shows {
+		Tile::Scene(scene) => scene.lost,
+		Tile::Source(source) => source.lost.is_some(),
+	};
+	if lost {
+		let size = 18.0 * scale;
+		let badge = Rect::from_center_size(pos2(right - size / 2.0, middle), Vec2::splat(size));
+		super::dark::badge(ui, badge);
+		right = badge.left() - 9.0 * scale;
 	}
 	if let Tile::Source(source) = shows
 		&& source.on_air
