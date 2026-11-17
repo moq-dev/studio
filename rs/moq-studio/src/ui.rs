@@ -41,6 +41,7 @@ mod mixer;
 mod review;
 mod settings;
 mod shell;
+mod slots;
 
 pub(crate) use layout::fit;
 use levels::Levels;
@@ -2018,6 +2019,9 @@ impl Default for Snapping {
 struct Drag {
 	picked: Picked,
 	grab: Grab,
+	/// Whether the layer is in a slot, so the drag moves it to another
+	/// slot rather than where the pointer lets go.
+	slotted: bool,
 	/// The layer's rect and crop, and where the pointer was in canvas
 	/// pixels, when the drag started. Each frame drags from these, so snaps
 	/// never accumulate.
@@ -2052,7 +2056,7 @@ fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration)
 	let mut rects = Vec::new();
 	let layers = scene.map(Layer::scene).into_iter().chain(top.then(Layer::top));
 	for shown in layers {
-		let items = collection.items(&shown).unwrap_or_default();
+		let items = slots::placed(state, &shown);
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == dragged.layer && at == dragged.index) {
 				rects.push(item.posed(since).rect);
@@ -2376,10 +2380,11 @@ enum Kind {
 	Replay,
 	Lut,
 	Scene,
+	Role,
 }
 
 impl Kind {
-	const ALL: [Self; 16] = [
+	const ALL: [Self; 17] = [
 		Self::Color,
 		Self::Image,
 		Self::Media,
@@ -2396,6 +2401,7 @@ impl Kind {
 		Self::Replay,
 		Self::Lut,
 		Self::Scene,
+		Self::Role,
 	];
 
 	fn label(self) -> &'static str {
@@ -2416,6 +2422,7 @@ impl Kind {
 			Self::Replay => "Replay",
 			Self::Lut => "LUT",
 			Self::Scene => "Scene",
+			Self::Role => "Role",
 		}
 	}
 
@@ -2427,6 +2434,7 @@ impl Kind {
 			}
 			Self::Image | Self::Media => Some("file"),
 			Self::Lut => Some(".cube file"),
+			Self::Role => Some("source filling it (empty for none)"),
 			Self::Broadcast => Some("path"),
 			Self::Window => Some("window id"),
 			Self::Browser => Some("url"),
@@ -2556,6 +2564,7 @@ impl AddSource {
 				restart: self.restart,
 			},
 			Kind::Replay => Source::Replay,
+			Kind::Role => Source::Role { source: id },
 			Kind::Scene => match &self.scene {
 				Some(scene) => Source::Scene { scene: scene.clone() },
 				None => Source::Program,

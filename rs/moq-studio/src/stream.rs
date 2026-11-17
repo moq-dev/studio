@@ -45,6 +45,10 @@ pub struct Saved {
 	/// How long a join link works.
 	#[serde(with = "humantime_serde")]
 	pub guest_expiry: Option<Duration>,
+	/// Whether a guest who joins takes the next tile of the scene on
+	/// program, rather than waiting under Add.
+	#[serde(skip_serializing_if = "std::ops::Not::not")]
+	pub guests_appear: bool,
 }
 
 impl Saved {
@@ -247,6 +251,11 @@ impl Stream {
 			Some(dir) => dir.clone(),
 			None => self.saved.folder(scene),
 		}
+	}
+
+	/// Whether guests appear in the scene on program on their own.
+	pub fn guests_appear(&self) -> bool {
+		self.saved.guests_appear
 	}
 
 	/// The guests' room, as the flags and the show set it.

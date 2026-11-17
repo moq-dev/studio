@@ -186,16 +186,16 @@ impl Panels {
 
 	/// The layers the picture edits, front last, each with its place: the
 	/// scene's, then the always-on-top ones over it, unless the scene is open
-	/// off air, as they are drawn on program.
+	/// off air, as they are drawn on program, each in its slot where the
+	/// scene's arrangement put it.
 	fn shown(&self, state: &State) -> Vec<(Picked, Item)> {
 		let (_, since) = self.edited_since(state);
-		let collection = state.collection();
 		let top = self.off_air(state).is_none().then(Layer::top);
 		let layers = self.scene(state).ok().into_iter().chain(top);
 		layers
 			.flat_map(|layer| {
-				let items = collection.items(&layer).unwrap_or_default();
-				let posed = items.iter().map(move |item| item.posed(since).into_owned());
+				let items = super::slots::placed(state, &layer);
+				let posed = items.into_iter().map(move |item| item.posed(since).into_owned());
 				posed.enumerate().map(move |(index, item)| {
 					let picked = Picked {
 						layer: layer.clone(),
@@ -270,7 +270,13 @@ impl Panels {
 				let source = collection.sources.get(collection.capture(&resting.source));
 				self.drag = Some(Drag {
 					picked,
-					grab,
+					// A layer in a slot moves only to another slot.
+					grab: if resting.slot.is_some() && !self.cropping {
+						Grab::Move
+					} else {
+						grab
+					},
+					slotted: resting.slot.is_some(),
 					rect: resting.rect,
 					crop: resting.crop,
 					origin: view.point(origin),
@@ -285,7 +291,40 @@ impl Panels {
 		let mut result = Ok(());
 		let (scene, since) = self.edited_since(state);
 		let scene = scene.map(str::to_string);
-		if let Some(drag) = &mut self.drag
+		// A layer dragged onto a slot, from the picture or from Layers, swaps
+		// places with the layer in it.
+		let mut target = None;
+		let pointer = response.hover_pos().or(response.interact_pointer_pos());
+		let dropping = response.dnd_hover_payload::<Picked>().is_some();
+		if dropping || self.drag.as_ref().is_some_and(|drag| drag.slotted && !self.cropping) {
+			let dragged = self.drag.as_ref().map(|drag| &drag.picked);
+			target = pointer
+				.and_then(|pos| super::slots::slot_at(&shown, view.point(pos)))
+				.filter(|&at| Some(&shown[at].0) != dragged);
+		}
+		if let Some(dropped) = response.dnd_release_payload::<Picked>() {
+			if let Some(at) = target {
+				let held = shown[at].0.clone();
+				spot = Some(Spot::Layer(held.layer.clone(), shown[at].1.source.clone()));
+				result = super::slots::assign(state, &dropped, &held);
+				if result.is_ok() {
+					self.select(Some(held));
+				}
+			}
+			target = None;
+		}
+		if let Some(drag) = self.drag.as_ref().filter(|drag| drag.slotted && !self.cropping) {
+			if response.drag_stopped()
+				&& let Some(at) = target
+			{
+				let held = shown[at].0.clone();
+				spot = Some(Spot::Layer(held.layer.clone(), shown[at].1.source.clone()));
+				result = super::slots::assign(state, &drag.picked.clone(), &held);
+				if result.is_ok() {
+					self.select(Some(held));
+				}
+			}
+		} else if let Some(drag) = &mut self.drag
 			&& let Some(pos) = response.interact_pointer_pos()
 		{
 			let point = view.point(pos);
@@ -349,6 +388,9 @@ impl Panels {
 
 		// Drawn from the collection and selection as this frame left them.
 		let shown = self.shown(state);
+		let room = self.engine.room();
+		let room = room.as_ref().map(|room| room.path());
+		super::slots::outlines(&painter, &view, state, room, &shown, target);
 		let selected = shown.iter().find(|(picked, _)| Some(picked) == self.selection.as_ref());
 		let accent = ui.visuals().selection.stroke.color;
 		// A hidden layer has no handles, as the picture cannot grab it, and a
@@ -359,7 +401,8 @@ impl Panels {
 				let resting = picked.item(collection).map_or(item.crop, |item| item.crop);
 				view.whole(&painter, &item.rect, &resting);
 			}
-			match item.locked {
+			// A layer in a slot has no size of its own to drag.
+			match item.locked || (item.slot.is_some() && !self.cropping) {
 				true => view.hovered(&painter, &item.rect, accent),
 				false => view.selected(&painter, &item.rect, accent, self.cropping),
 			}
@@ -385,11 +428,21 @@ impl Panels {
 					grab
 				}),
 		};
+		let slotted = |index: usize| items[index].slot.is_some() && !self.cropping;
+		let hovered_slot = response
+			.hover_pos()
+			.and_then(|pos| snap::hit(&items, selected, view.point(pos), reach))
+			.is_some_and(|(index, _)| slotted(index));
 		if let Some(grab) = grab {
-			ui.ctx().set_cursor_icon(match self.cropping && grab == Grab::Move {
-				true => egui::CursorIcon::Grab,
-				false => cursor(grab),
-			});
+			let slot = self
+				.drag
+				.as_ref()
+				.map_or(hovered_slot, |drag| drag.slotted && !self.cropping);
+			ui.ctx()
+				.set_cursor_icon(match (self.cropping && grab == Grab::Move) || slot {
+					true => egui::CursorIcon::Grab,
+					false => cursor(grab),
+				});
 		}
 		(spot, result)
 	}
@@ -433,7 +486,11 @@ impl Panels {
 				fresh |= !repeat;
 			}
 		});
-		let Some(item) = picked.item(state.collection()).filter(|item| !item.locked).cloned() else {
+		let Some(item) = picked
+			.item(state.collection())
+			.filter(|item| !item.locked && item.slot.is_none())
+			.cloned()
+		else {
 			return (None, Ok(()));
 		};
 		if delta == [0.0; 2] {
@@ -576,6 +633,10 @@ impl Panels {
 				self.cropping = !self.cropping;
 				Ok(())
 			}
+			LayerAction::Fit | LayerAction::Fill if item.slot.is_some() => Err(anyhow::anyhow!(
+				"`{name}` is in a slot, which places it; set it free to place it yourself"
+			)),
+			LayerAction::Slot(slot) => super::slots::set_slot(state, picked, slot),
 			LayerAction::Fit => {
 				let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
 				let rect = match aspect(state, &item, true) {
@@ -637,9 +698,19 @@ impl Panels {
 				};
 				let count = collection.items(&to).map_or(0, <[Item]>::len);
 				// The always-on-top layers never go on, so they have no
-				// keyframes to play.
+				// keyframes to play, nor slots; it stays where it was drawn.
+				let rect = match item.slot {
+					Some(_) => super::slots::placed(state, layer)
+						.get(index)
+						.map(|placed| placed.rect)
+						.filter(|rect| !rect.is_empty())
+						.unwrap_or(Rect::fill(&collection.canvas)),
+					None => item.rect,
+				};
 				let moved = Item {
 					keyframes: if top { Vec::new() } else { item.keyframes.clone() },
+					slot: None,
+					rect,
 					..item.clone()
 				};
 				let label = match top {
@@ -727,6 +798,8 @@ pub(super) enum LayerAction {
 	Fit,
 	/// Fill the canvas with its picture, keeping its shape and cropping the rest.
 	Fill,
+	/// Put it in a slot of its scene, or set it free where it is drawn.
+	Slot(Option<moq_scene::Slot>),
 	/// Round its corners so.
 	Shape([f32; 4]),
 	/// Remove its source's background, or stop.
@@ -846,6 +919,28 @@ pub(super) fn layer_menu(ui: &mut Ui, menu: &Menu) -> Option<LayerAction> {
 			action = Some(LayerAction::Reorder(to));
 		}
 	}
+	if !menu.top {
+		use moq_scene::Slot;
+		ui.separator();
+		let slots = [
+			(
+				Some(Slot::Main),
+				"Put in the main slot",
+				"The largest slot; the layer in it moves to the tiles",
+			),
+			(
+				Some(Slot::Tile),
+				"Put in a tile",
+				"Beside the main slot, in the order of the layers",
+			),
+			(None, "Set free", "Placed where it is now, by its own rect"),
+		];
+		for (slot, name, hover) in slots {
+			if item.slot != slot && ui.button(name).on_hover_text(hover).clicked() {
+				action = Some(LayerAction::Slot(slot));
+			}
+		}
+	}
 	let top = match menu.top {
 		true => "Move into this scene",
 		false => "Keep always on top",
@@ -952,17 +1047,20 @@ fn toolbar(ui: &mut Ui, picture: egui::Rect, at: egui::Rect, menu: &Menu, croppi
 						if crop.clicked() {
 							action = Some(LayerAction::Crop);
 						}
-						let fit = ui
-							.add(egui::Button::selectable(false, "Fit"))
-							.on_hover_text("As large as fits on the canvas, keeping its shape");
-						if fit.clicked() {
-							action = Some(LayerAction::Fit);
-						}
-						let fill = ui
-							.add(egui::Button::selectable(false, "Fill"))
-							.on_hover_text("Cover the canvas, keeping its shape and cropping the rest");
-						if fill.clicked() {
-							action = Some(LayerAction::Fill);
+						// Its slot places a layer in one.
+						if menu.item.slot.is_none() {
+							let fit = ui
+								.add(egui::Button::selectable(false, "Fit"))
+								.on_hover_text("As large as fits on the canvas, keeping its shape");
+							if fit.clicked() {
+								action = Some(LayerAction::Fit);
+							}
+							let fill = ui
+								.add(egui::Button::selectable(false, "Fill"))
+								.on_hover_text("Cover the canvas, keeping its shape and cropping the rest");
+							if fill.clicked() {
+								action = Some(LayerAction::Fill);
+							}
 						}
 						let shape = ui.add(egui::Button::selectable(!menu.item.shape.is_square(), "Shape"));
 						egui::Popup::menu(&shape).show(|ui| {

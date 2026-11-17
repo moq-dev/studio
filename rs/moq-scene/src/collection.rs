@@ -2150,6 +2150,11 @@ impl Source {
 		}
 	}
 
+	/// Whether it is a [`Source::Role`].
+	pub fn is_role(&self) -> bool {
+		matches!(self, Self::Role { .. })
+	}
+
 	/// Whether the source opens a capture, file, or subscription of its own,
 	/// rather than showing another source's or a scene.
 	pub fn opens(&self) -> bool {
@@ -3758,7 +3763,7 @@ rect = { x = 1700, y = 40, width = 160, height = 90 }
 		assert_eq!(arranged.len(), 4);
 		assert!(arranged[0].visible && !arranged[1].visible, "the unfilled role closes");
 		assert_eq!(arranged[3], collection.scenes[0].items[3], "the logo stays");
-		let (main, tiles) = crate::arrange::places(Arrangement::Row, collection.canvas, true, 1);
+		let (main, tiles) = Arrangement::Row.places(collection.canvas, true, 1);
 		assert_eq!(arranged[0].rect, main.unwrap());
 		assert_eq!(arranged[2].rect, tiles[0]);
 		let crop = arranged[0].crop;
@@ -3770,7 +3775,7 @@ rect = { x = 1700, y = 40, width = 160, height = 90 }
 		let away = |name: &str| name != "Cam";
 		let arranged = collection.arranged("Guests", away, square).unwrap();
 		assert!(!arranged[2].visible, "an absent source closes");
-		let (main, _) = crate::arrange::places(Arrangement::Row, collection.canvas, true, 0);
+		let (main, _) = Arrangement::Row.places(collection.canvas, true, 0);
 		assert_eq!(arranged[0].rect, main.unwrap(), "the main slot takes the room");
 		assert!(collection.arranged("Scene", all, square).is_none());
 	}

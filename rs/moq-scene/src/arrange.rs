@@ -19,9 +19,17 @@ const SIDE: f32 = 0.4;
 /// The widest an inset tile is, as a share of the canvas's width.
 const INSET: f32 = 0.2;
 
+impl Arrangement {
+	/// Where it puts a main item, if there is one, and `tiles` tiles, in
+	/// order, on a `canvas`-sized picture, in whole pixels.
+	pub fn places(self, canvas: Canvas, main: bool, tiles: usize) -> (Option<Rect>, Vec<Rect>) {
+		places(self, canvas, main, tiles)
+	}
+}
+
 /// Where `arrangement` puts a main item, if there is one, and `tiles` tiles,
 /// in order, on a `canvas`-sized picture, in whole pixels.
-pub(crate) fn places(arrangement: Arrangement, canvas: Canvas, main: bool, tiles: usize) -> (Option<Rect>, Vec<Rect>) {
+fn places(arrangement: Arrangement, canvas: Canvas, main: bool, tiles: usize) -> (Option<Rect>, Vec<Rect>) {
 	let (width, height) = (canvas.width as f32, canvas.height as f32);
 	let short = width.min(height);
 	let (margin, gap) = ((short * MARGIN).round(), (short * GAP).round());

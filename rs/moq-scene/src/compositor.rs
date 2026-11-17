@@ -1006,7 +1006,7 @@ impl Compositor {
 		let mut staged = Cow::Borrowed(collection);
 		let mut reflows = HashMap::new();
 		for (index, scene) in collection.scenes.iter().enumerate() {
-			let Some(arranged) = collection.arranged(&scene.name, &present, &size) else {
+			let Some(arranged) = collection.arranged(&scene.name, present, size) else {
 				continue;
 			};
 			let mut reflow = self.reflows.remove(&scene.name).unwrap_or_else(|| Reflow {
@@ -3032,7 +3032,7 @@ mod tests {
 			let arranged = studio.compositor.arranged("slots").unwrap().to_vec();
 			assert!(!arranged[0].visible, "an unfilled role takes no slot");
 			assert!(!arranged[1].visible, "an offline guest takes no slot");
-			let (_, alone) = crate::arrange::places(Arrangement::Column, studio.collection.canvas, false, 1);
+			let (_, alone) = Arrangement::Column.places(studio.collection.canvas, false, 1);
 			assert_eq!(arranged[2].rect, alone[0]);
 			let (x, y) = center(&arranged[2].rect);
 			assert_eq!(texel(&studio.program(), 192, x, y), GREEN, "green has the canvas");

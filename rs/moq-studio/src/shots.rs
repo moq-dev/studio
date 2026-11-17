@@ -110,6 +110,9 @@ enum View {
 	Cued(Page),
 	/// A scene, by name, open for editing off air on BUILD.
 	OffAir(&'static str),
+	/// BUILD with no layer selected, after the guest `Ibis` appears on their
+	/// own in the scene on program.
+	Joined,
 }
 
 /// BUILD with the host's layer, the middle of the scene on program's three,
@@ -137,6 +140,17 @@ fn relayed(view: View) -> Open {
 		size: SIZE,
 		show: "show.toml",
 		relay: true,
+	}
+}
+
+/// The studio on the slot views' show, at the mock-ups' size, turned to
+/// `view`.
+fn slotted(view: View) -> Open {
+	Open::Studio {
+		view,
+		size: SIZE,
+		show: "slots.toml",
+		relay: false,
 	}
 }
 
@@ -210,6 +224,17 @@ views! {
 	/// BUILD in a window snapped beside a game: the inspector is a tab beside
 	/// Layers and Add.
 	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml", relay: false };
+	/// A scene laid out by slots: each slot outlined with the role or guest
+	/// in it, and the inspector's arrangements and slots, the main picture
+	/// and camera filled by roles.
+	build_slots: Still, slotted(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: None });
+	/// The same scene once a second guest appears on their own: the column
+	/// shrinks to take them and the main picture grows, as the `autolayout`
+	/// mock-up frame has it.
+	build_slots_joined: Still, slotted(View::Joined);
+	/// The camera's layer selected in its slot: no handles to resize it, its
+	/// slot in the inspector, and the source filling its role.
+	build_slots_layer: Still, slotted(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: Some(2) });
 	/// BUILD in Studio mode edits the scene on air, with NEXT docked on it.
 	build_studio: Still, studio(View::Cued(Page::Build));
 	/// A scene open off air: the frame turns amber, and the live picture
@@ -1167,6 +1192,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			studio.turn(*page);
 		}
 		View::OffAir(scene) => studio.edit_off_air(scene),
+		View::Joined => studio.build(Side::Layers, Inspect::Layer, None),
 		View::Review { picked, .. } => {
 			studio.turn(Page::Review);
 			studio.seed_shelf(shelf());
@@ -1178,6 +1204,12 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 	}
 	let engine = started.get().expect("the studio started").clone();
+	if let View::Joined = view {
+		let mut state = engine.state.lock().unwrap();
+		let room = moq_net::Path::new("room").unwrap();
+		let appeared = crate::guests::appear(&mut state, &room, Some("Guests"), "Ibis").unwrap();
+		assert!(appeared, "Ibis takes a tile");
+	}
 	if let View::OnAir
 	| View::EndStream
 	| View::OnAirHealth

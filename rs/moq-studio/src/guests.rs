@@ -30,10 +30,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use moq_net::Path;
-use moq_scene::{Collection, Draft, Filter, History, Item, Layer, Source, Video};
+use moq_scene::{Collection, Draft, Filter, History, Item, Layer, Slot, Source, Video};
 use url::Url;
 
-use crate::engine::Engine;
+use crate::engine::{Engine, State};
 
 /// The domain `.github/workflows/join.yml` deploys `js/join` to.
 const JOIN_PAGE: &str = "https://join.studio.moq.dev/";
@@ -53,6 +53,9 @@ const RETURN: &str = ".return";
 /// Where the studio's session in the room serves the program, which every
 /// guest's return feed shows. The room's announcements hide it.
 pub const PROGRAM: &str = ".program";
+
+/// The most guests a scene's tiles take on their own; more wait under Add.
+pub const MAX_GUESTS: usize = 4;
 
 /// The shortest `--guest-expiry`: half of it must leave room for a renewal to
 /// reach the guest and the relay before the token it replaces expires.
@@ -615,6 +618,14 @@ impl Room {
 		Ok(*draft.collection() != before)
 	}
 
+	/// The source in `collection` playing the room-relative broadcast `path`.
+	fn source_at(&self, collection: &Collection, path: &Path) -> Option<String> {
+		let played = self.path.join(path).ok()?.to_string();
+		let mut sources = collection.sources.iter();
+		let found = sources.find(|(_, source)| matches!(source, Source::Broadcast { path } if *path == played));
+		found.map(|(name, _)| name.clone())
+	}
+
 	/// The sources in `collection` that show the guest called `identity`.
 	pub fn sources_of(&self, collection: &Collection, identity: &str) -> Vec<String> {
 		self.guest_sources(collection, identity)
@@ -647,6 +658,45 @@ impl Room {
 	fn guest_of(&self, source: &Source) -> Option<(Path, Kind)> {
 		guest_in(&self.path, source)
 	}
+}
+
+/// Where the guest playing from `source` would take a tile of `scene`: after
+/// its last layer in a slot, so a logo stays in front. `None` for a scene
+/// with no slots, one showing them already, or one whose tiles hold
+/// [`MAX_GUESTS`] guests of the room at `room`.
+pub fn tile(collection: &Collection, room: &Path, scene: &str, source: &str) -> Option<usize> {
+	let items = &collection.scene(scene)?.items;
+	let last = items.iter().rposition(|item| item.slot.is_some())?;
+	if items.iter().any(|item| collection.capture(&item.source) == source) {
+		return None;
+	}
+	let guests = items.iter().filter(|item| {
+		let shown = collection.sources.get(collection.capture(&item.source));
+		item.slot == Some(Slot::Tile) && shown.is_some_and(|shown| plays_guest(room, shown))
+	});
+	(guests.count() < MAX_GUESTS).then_some(last + 1)
+}
+
+/// Show the guest playing from `source` in the next tile of `scene`, the
+/// one on program, and hear them on program, as one edit the host can undo,
+/// if [`tile`] finds one. Says whether it did.
+pub fn appear(state: &mut State, room: &Path, scene: Option<&str>, source: &str) -> anyhow::Result<bool> {
+	let Some(scene) = scene else { return Ok(false) };
+	let Some(index) = tile(state.collection(), room, scene, source) else {
+		return Ok(false);
+	};
+	let layer = Layer::scene(scene);
+	let item = Item {
+		slot: Some(Slot::Tile),
+		..Item::new(source, moq_scene::Rect::default())
+	};
+	let mut draft = state.collection().draft(format!("`{source}` joins `{scene}`"));
+	draft.insert_item(&layer, index, item)?;
+	if state.collection().sources.get(source).is_some_and(Source::has_audio) {
+		draft.hear(source)?;
+	}
+	state.commit(draft, None)?;
+	Ok(true)
 }
 
 /// Whether `source` plays a guest's camera and microphone, or their screen, in
@@ -722,20 +772,32 @@ pub async fn run(engine: Arc<Engine>, room: Arc<Room>, origin: moq_net::origin::
 		};
 		let path = announce.prefix;
 		let mut state = engine.state.lock().unwrap();
-		let Some((name, source)) = room.observe(&path, online, state.collection(), state.history()) else {
-			continue;
-		};
-		// Not the host's edit, so it stays out of what they undo and redo. It
-		// is in no scene or audio scene, so the guest reaches the program only
-		// once the host places them or puts their sound in an audio scene.
-		let mut draft = state.collection().draft(format!("Add guest `{name}`"));
-		let added = draft
-			.set_source(&name, Some(source))
-			.map_err(anyhow::Error::from)
-			.and_then(|()| state.apply_outside(draft));
-		match added {
-			Ok(()) => tracing::info!(source = %name, %path, "a guest joined"),
-			Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot add a guest"),
+		if let Some((name, source)) = room.observe(&path, online, state.collection(), state.history()) {
+			// Not the host's edit, so it stays out of what they undo and redo.
+			// It is in no scene or audio scene, so the guest reaches the
+			// program only once the host places them or puts their sound in an
+			// audio scene, or they appear on their own below.
+			let mut draft = state.collection().draft(format!("Add guest `{name}`"));
+			let added = draft
+				.set_source(&name, Some(source))
+				.map_err(anyhow::Error::from)
+				.and_then(|()| state.apply_outside(draft));
+			match added {
+				Ok(()) => tracing::info!(source = %name, %path, "a guest joined"),
+				Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot add a guest"),
+			}
+		}
+		let camera = guest(&path).is_some_and(|(_, kind)| kind == Kind::Camera);
+		if online && camera && engine.guests_appear() {
+			let Some(name) = room.source_at(state.collection(), &path) else {
+				continue;
+			};
+			let program = state.compositor.program_scene().map(str::to_string);
+			match appear(&mut state, room.path(), program.as_deref(), &name) {
+				Ok(true) => tracing::info!(source = %name, "a guest appeared on their own"),
+				Ok(false) => {}
+				Err(err) => tracing::error!(source = %name, error = format!("{err:#}"), "cannot show a guest"),
+			}
 		}
 	}
 	tracing::warn!("the room's announcements ended");
@@ -1534,6 +1596,54 @@ pub(crate) mod tests {
 		std::fs::remove_dir(&file).unwrap();
 		room.stop_renewing("alice").unwrap();
 		assert!(start().participants()["alice"].removed);
+	}
+
+	/// A guest takes the tile after the scene's last layer in a slot, so a
+	/// logo stays in front, until its tiles hold four guests; a scene with no
+	/// slots, or showing them already, takes none.
+	#[test]
+	fn a_guest_takes_the_next_tile_until_four() {
+		let room = room("https://relay.example/show", key("show/guests", &["**"], &["**"])).unwrap();
+		let guests = room.path().clone();
+		let mut collection = Collection::new();
+		collection
+			.sources
+			.insert("Camera".into(), Source::Role { source: None });
+		let logo = Source::Color {
+			color: moq_scene::Rgba([255, 255, 255, 255]),
+		};
+		collection.sources.insert("logo".into(), logo);
+		for guest in ["alice", "bob", "carol", "dave", "erin"] {
+			let path = format!("guests/{guest}/camera.hang");
+			collection.sources.insert(guest.into(), Source::Broadcast { path });
+		}
+		let slot = |source: &str| Item {
+			slot: Some(Slot::Tile),
+			..Item::new(source, moq_scene::Rect::default())
+		};
+		let fill = moq_scene::Rect::fill(&collection.canvas);
+		collection.scenes[0].items = vec![slot("Camera"), Item::new("logo", fill)];
+		collection.validate().unwrap();
+
+		assert_eq!(tile(&collection, &guests, "Scene", "alice"), Some(1));
+		for guest in ["alice", "bob", "carol", "dave"] {
+			let at = tile(&collection, &guests, "Scene", guest).unwrap();
+			collection.scenes[0].items.insert(at, slot(guest));
+			assert_eq!(tile(&collection, &guests, "Scene", guest), None, "{guest} is shown");
+		}
+		assert_eq!(collection.scenes[0].items.last().unwrap().source, "logo");
+		assert_eq!(
+			tile(&collection, &guests, "Scene", "erin"),
+			None,
+			"four guests fill the tiles"
+		);
+
+		collection.scenes[0].items.retain(|item| item.slot.is_none());
+		assert_eq!(
+			tile(&collection, &guests, "Scene", "erin"),
+			None,
+			"a scene with no slots"
+		);
 	}
 
 	/// A guest joining is not the host's edit: what the host undid can still

@@ -967,6 +967,9 @@ pub struct Engine {
 	/// The path of every room followed this run, so the panic key still mutes
 	/// a guest added from a room left since.
 	rooms: Mutex<Vec<moq_net::Path>>,
+	/// Whether a guest who joins takes the next tile of the scene on program,
+	/// as the show's settings say.
+	guests_appear: std::sync::atomic::AtomicBool,
 	/// Each guest's return feed, once the studio's session in the room dials.
 	feeds: Mutex<Option<crate::feed::Feeds>>,
 	/// What the program's broadcasts share, on air or not.
@@ -1123,6 +1126,7 @@ impl Engine {
 			recorder,
 			room: Mutex::default(),
 			rooms: Mutex::default(),
+			guests_appear: Default::default(),
 			feeds: Mutex::default(),
 			program,
 			subscribe,
@@ -1198,6 +1202,17 @@ impl Engine {
 	/// Keep `room` among the [rooms](Self::rooms) Panic mutes the guests of,
 	/// as one the settings named, even if it could not be joined: a guest of
 	/// it already in a scene may still play through the relays followed.
+	/// Whether a guest who joins takes the next tile of the scene on program
+	/// on their own, rather than waiting under Add.
+	pub fn guests_appear(&self) -> bool {
+		self.guests_appear.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Set whether guests appear on their own, as the show's settings say.
+	pub fn set_guests_appear(&self, appear: bool) {
+		self.guests_appear.store(appear, std::sync::atomic::Ordering::Relaxed);
+	}
+
 	pub fn remember_room(&self, room: &moq_net::Path) {
 		let mut rooms = self.rooms.lock().unwrap();
 		if !rooms.contains(room) {
