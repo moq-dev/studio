@@ -32,6 +32,7 @@ use crate::{mix, record};
 mod build;
 mod cue;
 mod drop;
+mod formats;
 mod graph;
 mod inspector;
 mod layers;
@@ -232,6 +233,7 @@ impl Studio {
 			program_drawn: Canvas::default(),
 			preview,
 			portrait: None,
+			portrait_drawn: None,
 			portrait_preview: None,
 			format: Format::Landscape,
 			editing: None,
@@ -334,7 +336,7 @@ impl Studio {
 		let mut renderer = render.renderer.write();
 		for registered in [&panels.program, &panels.preview]
 			.into_iter()
-			.chain(panels.portrait.iter().map(|(registered, _)| registered))
+			.chain(&panels.portrait)
 			.chain(&panels.portrait_preview)
 			.chain(panels.thumbnails.values())
 		{
@@ -578,6 +580,26 @@ impl Registered {
 		}
 	}
 
+	/// Show `texture` in `registered` from now on, while there is one,
+	/// registering it when it appears and giving it back when it goes, as the
+	/// portrait picture does when the show stops going out in portrait.
+	pub(crate) fn follow_while(
+		registered: &mut Option<Self>,
+		render: &eframe::egui_wgpu::RenderState,
+		texture: Option<&wgpu::Texture>,
+	) {
+		match (registered.as_mut(), texture) {
+			(Some(shown), Some(texture)) => shown.follow(render, texture),
+			(None, Some(texture)) => *registered = Some(Self::new(render, texture)),
+			(Some(_), None) => {
+				if let Some(gone) = registered.take() {
+					render.renderer.write().free_texture(&gone.id);
+				}
+			}
+			(None, None) => {}
+		}
+	}
+
 	/// Show `texture` from now on, if a resize replaced the one shown.
 	pub(crate) fn follow(&mut self, render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) {
 		if self.texture == *texture {
@@ -616,9 +638,11 @@ struct Panels {
 	/// The cued scene, or the one open off air, which the compositor draws
 	/// while there is one.
 	preview: Registered,
-	/// The portrait picture as viewers see it, and its size as drawn this
-	/// frame, while the show goes out in portrait.
-	portrait: Option<(Registered, Canvas)>,
+	/// The portrait picture as viewers see it, while the show goes out in
+	/// portrait.
+	portrait: Option<Registered>,
+	/// Its size this frame, as its texture was drawn, while there is one.
+	portrait_drawn: Option<Canvas>,
 	/// The preview in portrait, while the show goes out in portrait.
 	portrait_preview: Option<Registered>,
 	/// The picture BUILD edits a scene drawn in both in.

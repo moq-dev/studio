@@ -665,7 +665,8 @@ pub struct Stats {
 	/// hold.
 	pub recording: Arc<VideoStats>,
 	/// Each published scene's video, by the scene's name, while it is
-	/// published.
+	/// published, and the portrait picture's, as [`moq_scene::PORTRAIT`],
+	/// while the show goes out in both.
 	published: Mutex<BTreeMap<String, Arc<VideoStats>>>,
 	/// The video encoders open: the program's, each published scene's, the
 	/// recording's, and the sources'.

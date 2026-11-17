@@ -85,7 +85,20 @@ impl Encoding {
 
 	/// Whether the encoder keeps up with `canvas` in real time, within [`PACE`].
 	pub(crate) fn keeps_up(&self, canvas: Canvas) -> bool {
-		self.frame <= budget(canvas)
+		self.keeps_up_all(canvas, 1)
+	}
+
+	/// Whether it keeps up with `encodes` pictures of `canvas` at once, such
+	/// as a show's landscape and portrait ones: each costs about a frame of
+	/// the one timed, as a turned picture has as many pixels.
+	pub(crate) fn keeps_up_all(&self, canvas: Canvas, encodes: u32) -> bool {
+		self.frame * encodes <= budget(canvas)
+	}
+
+	/// What `encodes` pictures at this bitrate send, plus the audio, which
+	/// they share.
+	pub(crate) fn total_of(&self, encodes: u32) -> Rate {
+		Rate::from_bps(self.bitrate.as_bps() * u64::from(encodes) + engine::AUDIO_BITRATE.as_bps())
 	}
 
 	/// How many times its [`budget`] a frame of `canvas` took, scaled to compare

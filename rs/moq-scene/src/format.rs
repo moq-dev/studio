@@ -160,16 +160,16 @@ impl Item {
 	}
 
 	/// The item drawn at `placement` in `format`'s picture, as it was in the
-	/// other.
+	/// other. An item in a slot has one crop in both, which this sets.
 	pub fn placed(self, format: Format, placement: Placement) -> Self {
 		match format {
-			Format::Landscape => Self {
-				rect: placement.rect,
-				crop: placement.crop,
+			Format::Portrait if self.slot.is_none() => Self {
+				portrait: Some(placement),
 				..self
 			},
-			Format::Portrait => Self {
-				portrait: Some(placement),
+			_ => Self {
+				rect: placement.rect,
+				crop: placement.crop,
 				..self
 			},
 		}

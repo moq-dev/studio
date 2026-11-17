@@ -122,7 +122,39 @@ impl Panels {
 				asked = Some(Asked::Act(LayerAction::Slot(slot)));
 			}
 		}
-		let mut rect = item.rect;
+		// Where it is shown, and its place in the picture BUILD edits, for a
+		// layer drawn in both.
+		let format = self.format;
+		if collection.dual(&picked.layer) {
+			let mut shown = item.format;
+			ui.horizontal(|ui| {
+				ui.label("Shown in");
+				let options = super::formats::shown_in_options();
+				ui.add(kit::Segmented::new(&mut shown, &options))
+					.on_hover_text("Which pictures show it: the landscape one, the portrait one, or both");
+			});
+			if shown != item.format {
+				asked = Some(Asked::Item(
+					super::formats::shown(&item, shown),
+					super::formats::shown_label(&name, shown),
+					None,
+				));
+			}
+			if item.slot.is_none() && item.shown_in(format) {
+				ui.label(
+					egui::RichText::new(format!("Its place in the {} picture", format.name().to_lowercase()))
+						.color(kit::DIM)
+						.font(kit::ui(11.0)),
+				);
+			}
+		}
+		let rest = picked.rest(collection, format).unwrap_or_else(|| item.clone());
+		let placed = |rect, crop| {
+			picked
+				.placed(collection, format, rect, crop)
+				.unwrap_or_else(|| item.clone())
+		};
+		let mut rect = rest.rect;
 		if item.slot.is_some() {
 			ui.label(
 				egui::RichText::new("Placed by the scene's arrangement; drag it onto another slot to swap them")
@@ -151,20 +183,16 @@ impl Panels {
 				for (verb, response) in responses {
 					if let Some(gesture) = changed(&response, &mut self.gestures) {
 						let label = format!("{verb} `{name}`");
-						asked = Some(Asked::Item(Item { rect, ..item.clone() }, label, gesture));
+						asked = Some(Asked::Item(placed(rect, rest.crop), label, gesture));
 					}
 				}
 			});
 		}
-		let mut crop = item.crop;
+		let mut crop = rest.crop;
 		ui.horizontal(|ui| {
 			ui.label(egui::RichText::new("Crop").color(kit::DIM));
 			if let Some(gesture) = crop_ui(ui, &mut crop, &mut self.gestures) {
-				asked = Some(Asked::Item(
-					Item { crop, ..item.clone() },
-					format!("Crop `{name}`"),
-					gesture,
-				));
+				asked = Some(Asked::Item(placed(rest.rect, crop), format!("Crop `{name}`"), gesture));
 			}
 		})
 		.response

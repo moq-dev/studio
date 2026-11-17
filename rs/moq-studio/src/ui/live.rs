@@ -294,7 +294,8 @@ impl Panels {
 			return;
 		}
 		ctx.request_repaint_after(Duration::from_millis(100));
-		let (show, program, canvas) = {
+		let broadcast = self.controls.stream.lock().unwrap().broadcast().to_string();
+		let (show, program, canvas, both) = {
 			let state = self.engine.state.lock().unwrap();
 			let path = self.engine.autosave.path();
 			let show = path
@@ -303,7 +304,15 @@ impl Panels {
 				.to_string_lossy()
 				.into_owned();
 			let program = state.compositor.program_scene().map(str::to_string);
-			(show, program, state.collection().canvas)
+			let collection = state.collection();
+			// Each relay carries both pictures, each its own broadcast.
+			let both = collection.portrait.then(|| {
+				format!(
+					"Both formats go to each relay: landscape at {broadcast}, portrait at {broadcast}/{}.",
+					moq_scene::PORTRAIT
+				)
+			});
+			(show, program, collection.canvas, both)
 		};
 		// Not while going live, which keeps the sheet waiting on it, and
 		// whose encoders a new check would compete with: once it ends.
@@ -334,6 +343,10 @@ impl Panels {
 			ui.add_space(10.0);
 			heading(ui, "Where it goes");
 			let count = self.destinations(ui, &mut settings);
+			if let Some(both) = &both {
+				ui.add_space(4.0);
+				ui.label(egui::RichText::new(both).font(kit::ui(12.0)).color(kit::DIM));
+			}
 			ui.add_space(10.0);
 			heading(ui, "Checks");
 			for (index, check) in checks.iter().enumerate() {
@@ -405,6 +418,10 @@ impl Panels {
 	/// Collect the checks that finished, and start measuring the connection
 	/// once the encoder says what it sends.
 	fn advance_going(&mut self) {
+		let encodes = match self.engine.state.lock().unwrap().collection().portrait {
+			true => 2,
+			false => 1,
+		};
 		let Some(going) = &mut self.going else { return };
 		going.encoder.poll();
 		if going.uplink.is_none()
@@ -414,7 +431,7 @@ impl Panels {
 				Ok(encoding) => {
 					// Up to past what it sends, so a connection that carries
 					// it says so rather than stopping at its rate.
-					let ceiling = encoding.total().scaled(1.0 / setup::headroom());
+					let ceiling = encoding.total_of(encodes).scaled(1.0 / setup::headroom());
 					measure(&self.controls, &self.runtime, ceiling)
 				}
 				Err(_) => Measuring {
@@ -621,7 +638,13 @@ impl Panels {
 			},
 		});
 
-		// The encoder keeps up with the canvas.
+		// The encoder keeps up with the canvas: twice over, a picture in each
+		// format, while the show goes out in both.
+		let encodes = if collection.portrait { 2 } else { 1 };
+		let formats = match encodes {
+			1 => String::new(),
+			_ => " in both formats".to_string(),
+		};
 		let canvas = going.canvas;
 		let send = smaller(canvas).map(|smaller| (format!("Send {} instead", named(smaller)), Fix::Send(smaller)));
 		let encoding = match &going.encoder {
@@ -637,11 +660,11 @@ impl Panels {
 				level: None,
 				fixes: Vec::new(),
 			},
-			Task::Done(Ok(encoding)) if encoding.keeps_up(canvas) => Check {
+			Task::Done(Ok(encoding)) if encoding.keeps_up_all(canvas, encodes) => Check {
 				mark: Outcome::Passed,
 				icon: Icon::Encoder,
 				name: "Encoder",
-				said: format!("Keeps up with {}", named(canvas)),
+				said: format!("Keeps up with {}{formats}", named(canvas)),
 				level: None,
 				fixes: Vec::new(),
 			},
@@ -650,8 +673,8 @@ impl Panels {
 				icon: Icon::Encoder,
 				name: "Encoder",
 				said: format!(
-					"The encoder takes {} ms a frame, too slow for {}. Viewers would see it stutter.",
-					encoding.frame.as_millis(),
+					"The encoder takes {} ms a frame, too slow for {}{formats}. Viewers would see it stutter.",
+					(encoding.frame * encodes).as_millis(),
 					named(canvas)
 				),
 				level: None,
@@ -696,7 +719,7 @@ impl Panels {
 				fixes: Vec::new(),
 			},
 			(Some(Task::Done(Ok(carries))), Some(encoding)) => {
-				let needs = encoding.total();
+				let needs = encoding.total_of(encodes);
 				match carries.scaled(setup::headroom()) >= needs {
 					true => Check {
 						mark: Outcome::Passed,

@@ -33,16 +33,40 @@ pub(super) struct Snapshot {
 	pub(super) takes: u64,
 	/// The program's shape, width over height.
 	pub(super) shape: f32,
+	/// The portrait picture's size as drawn, while the show goes out in both.
+	pub(super) portrait: Option<Canvas>,
 	/// The scene cued, or open off air.
 	pub(super) cued: Option<Cued>,
 	/// Whether Studio mode is on: a scene's pad cues it.
 	pub(super) studio: bool,
 }
 
+impl Snapshot {
+	/// A pad's thumbnail's shape, width over height: the program's, or, while
+	/// the show goes out in both, the pair's.
+	pub(super) fn pad_shape(&self) -> f32 {
+		match self.portrait {
+			Some(portrait) => super::layout::pair_shape([self.shape, shape(portrait)], PAIR_GAP),
+			None => self.shape,
+		}
+	}
+}
+
+/// The shape of a picture of `canvas`, width over height.
+pub(super) fn shape(canvas: Canvas) -> f32 {
+	canvas.width as f32 / canvas.height.max(1) as f32
+}
+
+/// The gap between a pair's pictures in a thumbnail, as a share of their
+/// height.
+const PAIR_GAP: f32 = 0.04;
+
 /// A scene as its pad shows it.
 struct ScenePad {
 	name: String,
 	canvas: Canvas,
+	/// Whether it goes out in portrait too, so its pad shows both pictures.
+	dual: bool,
 	/// Why it cannot go on program, if it cannot.
 	refused: Option<String>,
 }
@@ -117,8 +141,13 @@ impl Panels {
 		if let Some(render) = frame.wgpu_render_state() {
 			self.program.follow(render, state.compositor.layered());
 			self.preview.follow(render, state.compositor.preview());
+			let portrait = state.compositor.portrait();
+			Registered::follow_while(&mut self.portrait, render, portrait.map(|(texture, _)| texture));
+			let preview = state.compositor.portrait_preview();
+			Registered::follow_while(&mut self.portrait_preview, render, preview.map(|(texture, _)| texture));
 			self.follow_thumbnails(render, &state.compositor);
 		}
+		self.portrait_drawn = state.compositor.portrait().map(|(_, canvas)| canvas);
 		// Redraw at the canvas rate, so the picture and the pads are live.
 		let framerate = state.compositor.canvas().framerate;
 		ctx.request_repaint_after(Duration::from_secs(1) / framerate);
@@ -183,6 +212,7 @@ impl Panels {
 			.map(|scene| ScenePad {
 				name: scene.name.clone(),
 				canvas: scene.canvas(collection.canvas),
+				dual: collection.dual(&Layer::scene(&scene.name)),
 				refused: collection.refuses(&scene.name),
 			})
 			.collect();
@@ -205,6 +235,9 @@ impl Panels {
 		let cued = cued.map(|name| Cued {
 			refused: collection.refuses(&name),
 			canvas: collection.canvas(Some(name.as_str())).unwrap_or(collection.canvas),
+			portrait: collection
+				.portrait_canvas()
+				.filter(|_| collection.dual(&Layer::scene(&name))),
 			off_air: self.editing.as_ref() == Some(&name),
 			live: state.seen(&name),
 			transition: transition_words(&collection.transition),
@@ -226,7 +259,8 @@ impl Panels {
 			sounds,
 			stream,
 			takes: state.takes,
-			shape: self.program_drawn.width as f32 / self.program_drawn.height.max(1) as f32,
+			shape: shape(self.program_drawn),
+			portrait: self.portrait_drawn.filter(|_| self.portrait.is_some()),
 			cued,
 			studio: self.controls.studio(),
 		}
@@ -237,7 +271,13 @@ impl Panels {
 	/// messages over them.
 	pub(super) fn window(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot) {
 		let window = ui.max_rect();
-		let (size, shape, sounds) = (window.size(), snapshot.shape, snapshot.sounds.len());
+		let (size, mut shape, sounds) = (window.size(), snapshot.shape, snapshot.sounds.len());
+		// LIVE shows both pictures of a show going out in both, and room for
+		// what is said under them, at about the height they are drawn.
+		if let (Page::Live, Some(portrait)) = (self.page, snapshot.portrait) {
+			let pair = super::layout::pair_shape([shape, self::shape(portrait)], super::formats::GAP / 600.0);
+			shape = pair * 600.0 / (600.0 + super::formats::UNDER);
+		}
 		let layout = match self.page {
 			// MIX puts a live picture in the sound's slot.
 			Page::Mix => Layout::monitor(size, shape, sounds),
@@ -269,7 +309,10 @@ impl Panels {
 		match self.page {
 			Page::Live => {
 				kit::wash(ui.painter(), stage);
-				let picture = self.on_air(ui, Some(fx), layout.picture).rect;
+				let picture = match snapshot.portrait {
+					Some(portrait) => self.both_on_air(ui, fx, layout, portrait),
+					None => self.on_air(ui, Some(fx), layout.picture).rect,
+				};
 				if let Some(cued) = &snapshot.cued {
 					self.next(ui, fx, cued, picture, Corner::TopRight);
 				}
@@ -284,14 +327,73 @@ impl Panels {
 
 	/// The live picture in its tally frame, filling `picture`.
 	pub(super) fn on_air(&mut self, ui: &mut Ui, fx: Option<&mut Fx>, picture: Rect) -> egui::Response {
-		let id = self.program.id;
-		let canvas = self.program_drawn;
+		let (id, canvas) = (self.program.id, self.program_drawn);
+		self.framed(ui, fx, picture, id, canvas)
+	}
+
+	/// The picture `id` of `canvas` in the program's tally frame, filling
+	/// `picture`.
+	fn framed(
+		&self,
+		ui: &mut Ui,
+		fx: Option<&mut Fx>,
+		picture: Rect,
+		id: egui::TextureId,
+		canvas: Canvas,
+	) -> egui::Response {
 		let builder = UiBuilder::new().max_rect(picture.expand(10.0));
 		let frame = self.program_frame();
 		ui.scope_builder(builder, |ui| {
 			frame.show(ui, fx, |ui| super::picture(ui, id, canvas, Sense::hover()))
 		})
 		.inner
+	}
+
+	/// Both live pictures of a show going out in both, each in its tally
+	/// frame, side by side in the stage, with each one's format, size, and
+	/// what it sends under it, and where the selected layer is shown between
+	/// them. The landscape picture's rect, which the NEXT card docks in.
+	fn both_on_air(&mut self, ui: &mut Ui, fx: &mut Fx, layout: &Layout, portrait: Canvas) -> Rect {
+		let room = layout.stage.shrink(20.0);
+		let room = room.with_max_y(room.bottom() - super::formats::UNDER);
+		let [wide, tall] = super::layout::pair(room, [shape(self.program_drawn), shape(portrait)], super::formats::GAP);
+		self.on_air(ui, Some(fx), wide);
+		let Some(id) = self.portrait.as_ref().map(|registered| registered.id) else {
+			return wide;
+		};
+		self.framed(ui, Some(fx), tall, id, portrait);
+		let sent = self.sent();
+		let under = |picture: Rect| {
+			Rect::from_min_size(
+				pos2(picture.left(), picture.bottom() + 18.0),
+				vec2(picture.width(), 24.0),
+			)
+		};
+		let formats = [
+			(Format::Landscape, self.program_drawn, under(wide), sent[0]),
+			(Format::Portrait, portrait, under(tall), sent[1]),
+		];
+		for (format, canvas, rect, sent) in formats {
+			super::formats::format_label(ui, rect, format, canvas, sent);
+		}
+		self.shown_in(ui, under(wide));
+		wide
+	}
+
+	/// What the landscape and portrait broadcasts' video sent over the last
+	/// interval, while on air.
+	fn sent(&self) -> [Option<moq_net::bandwidth::Rate>; 2] {
+		let report = self.engine.health.lock().unwrap();
+		let video = |name: Option<&str>| {
+			let broadcast = report
+				.broadcasts
+				.iter()
+				.find(|broadcast| broadcast.name.as_deref() == name)?;
+			let tracks = broadcast.tracks.iter().filter(|track| track.label.starts_with("video"));
+			let sent: Vec<u64> = tracks.filter_map(|track| track.sent).map(|sent| sent.as_bps()).collect();
+			(!sent.is_empty()).then(|| moq_net::bandwidth::Rate::from_bps(sent.into_iter().sum()))
+		};
+		[video(None), video(Some(moq_scene::PORTRAIT))]
 	}
 
 	/// The title bar: the show's menu, undo and redo, the pages, the health
@@ -657,10 +759,12 @@ impl Panels {
 				return;
 			}
 			// As wide as fits the strip's height, at the show's shape.
-			let tall = kit::Pad::height(PAD, snapshot.shape);
+			let shape = snapshot.pad_shape();
+			let pad = PAD * shape.max(1.0) / snapshot.shape.max(1.0);
+			let tall = kit::Pad::height(pad, shape);
 			let width = match tall > room.height() {
-				true => ((room.height() - 33.0) * snapshot.shape + 8.0).floor().max(48.0),
-				false => PAD,
+				true => ((room.height() - 33.0) * shape + 8.0).floor().max(48.0),
+				false => pad,
 			};
 			egui::ScrollArea::horizontal().id_salt("scenes").show(ui, |ui| {
 				ui.horizontal_centered(|ui| {
@@ -759,7 +863,7 @@ impl Panels {
 			if index > snapshot.scenes.len() {
 				return None;
 			}
-			let size = vec2(width, kit::Pad::height(width, snapshot.shape));
+			let size = vec2(width, kit::Pad::height(width, snapshot.pad_shape()));
 			let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 			let response = kit::tip(response, "Add a scene", None);
 			let ink = if response.hovered() { kit::TEXT } else { kit::FAINT };
@@ -771,7 +875,8 @@ impl Panels {
 		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
 		let live = self.engine.on_air().live().is_some();
 		let (tally, tag) = tally(on_air, live, cued);
-		let response = self.pad(ui, pad, tally, tag, width, snapshot.shape);
+		let portrait = snapshot.portrait.filter(|_| pad.dual);
+		let response = self.pad(ui, pad, tally, tag, width, snapshot.pad_shape(), portrait);
 		let click = match snapshot.studio {
 			true => PadAction::Cue(pad.name.clone()),
 			false => PadAction::Take(pad.name.clone()),
@@ -859,6 +964,7 @@ impl Panels {
 		tag: Option<&str>,
 		width: f32,
 		shape: f32,
+		portrait: Option<Canvas>,
 	) -> egui::Response {
 		let thumbnail = Thumbnail::Scene(pad.name.clone());
 		let size = vec2(pad.canvas.width as f32, pad.canvas.height as f32);
@@ -866,6 +972,16 @@ impl Panels {
 			.thumbnails
 			.get(&thumbnail)
 			.map(|registered| egui::load::SizedTexture::new(registered.id, size));
+		// The portrait picture beside it, for a scene going out in both.
+		let second = portrait.map(|canvas| {
+			let thumbnail = Thumbnail::Portrait(pad.name.clone());
+			let size = vec2(canvas.width as f32, canvas.height as f32);
+			let picture = self
+				.thumbnails
+				.get(&thumbnail)
+				.map(|registered| egui::load::SizedTexture::new(registered.id, size));
+			(thumbnail, picture, self::shape(canvas))
+		});
 		let key = self.key(&Action::Scene(pad.name.clone()), ui.ctx());
 		let fault = self.fault(&Spot::Pad(pad.name.clone()));
 		let widget = kit::Pad::new(&pad.name)
@@ -877,9 +993,14 @@ impl Panels {
 			.fault(fault)
 			.width(width)
 			.shape(shape);
+		let widget = match &second {
+			Some((_, picture, shape)) => widget.portrait(*picture, *shape),
+			None => widget,
+		};
 		let response = ui.add(widget);
 		if ui.is_rect_visible(response.rect) {
 			self.thumbnails_shown.insert(thumbnail);
+			self.thumbnails_shown.extend(second.map(|(thumbnail, ..)| thumbnail));
 		}
 		response
 	}
@@ -1348,20 +1469,30 @@ impl Panels {
 
 		// Every published scene, encoding only on air.
 		let encoding = stats.published();
-		let published: Vec<(String, String)> = {
+		// And the portrait picture, while the show goes out in both, which
+		// carries the program's audio.
+		let published: Vec<(String, String, bool)> = {
 			let state = self.engine.state.lock().unwrap();
 			let collection = state.collection();
 			let scenes = collection.scenes.iter().filter(|scene| scene.published);
+			let portrait = collection.portrait.then(|| {
+				let audio = collection.program_audio().unwrap_or_default().to_string();
+				(moq_scene::PORTRAIT.to_string(), audio, true)
+			});
 			scenes
 				.map(|scene| {
 					let audio = collection.published_audio(&scene.name).unwrap_or_default().to_string();
-					(scene.name.clone(), audio)
+					(scene.name.clone(), audio, false)
 				})
+				.chain(portrait)
 				.collect()
 		};
-		for (name, audio) in published {
+		for (name, audio, portrait) in published {
 			ui.separator();
-			ui.strong(format!("Scene `{name}`"));
+			match portrait {
+				true => ui.strong("The portrait picture"),
+				false => ui.strong(format!("Scene `{name}`")),
+			};
 			if let Some(live) = on_air.live() {
 				ui.label(format!("Broadcast {}/{name}, with audio scene `{audio}`", live.path));
 			}

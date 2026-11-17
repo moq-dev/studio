@@ -250,9 +250,10 @@ impl Panels {
 	/// Settings, Show: the format, the canvas size and frame rate by name or
 	/// by number, and each scene's own size.
 	fn show_pane(&mut self, ui: &mut Ui) {
-		let (current, scenes) = {
+		let (current, scenes, both) = {
 			let state = self.engine.state.lock().unwrap();
-			(state.collection().canvas, state.collection().scenes.clone())
+			let collection = state.collection();
+			(collection.canvas, collection.scenes.clone(), collection.portrait)
 		};
 		let shown = self.canvas.unwrap_or(current);
 		let mut wanted = None;
@@ -276,6 +277,25 @@ impl Panels {
 							..current
 						});
 					}
+				}
+			},
+		);
+
+		let mut on = both;
+		row(
+			ui,
+			"Both at once",
+			"Also send a portrait picture, for phones, as its own broadcast beside the landscape one. Each \
+			 scene gets a portrait arrangement of its layers, and the machine encodes both.",
+			|ui| {
+				let toggle = ui
+					.add_enabled(
+						!portrait,
+						kit::Toggle::new(&mut on).label("Landscape and portrait"),
+					)
+					.on_disabled_hover_text("A portrait show turns to landscape first, then adds portrait");
+				if toggle.changed() {
+					self.set_both(on);
 				}
 			},
 		);
@@ -514,7 +534,13 @@ impl Panels {
 					"Set the canvas to {}x{} at {} fps",
 					canvas.width, canvas.height, canvas.framerate
 				);
-				edit(&mut state, label, None, |draft| draft.set_canvas(canvas))
+				// Only a landscape canvas goes out in portrait too.
+				edit(&mut state, label, None, |draft| {
+					if canvas.height >= canvas.width {
+						draft.set_portrait(false)?;
+					}
+					draft.set_canvas(canvas)
+				})
 			}
 			Restart::Scene(name, size) => match state.collection().scenes.iter().position(|scene| scene.name == name) {
 				Some(index) => {
@@ -534,6 +560,19 @@ impl Panels {
 				None => Err(anyhow::anyhow!("the scene is gone")),
 			},
 		};
+		drop(state);
+		self.check(result);
+	}
+
+	/// Send a portrait picture too, or stop, as an edit undo takes back.
+	fn set_both(&mut self, on: bool) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let label = match on {
+			true => "Go out in landscape and portrait",
+			false => "Go out in landscape only",
+		};
+		let result = edit(&mut state, label.to_string(), None, |draft| draft.set_portrait(on));
 		drop(state);
 		self.check(result);
 	}

@@ -43,12 +43,66 @@ impl Panels {
 		kit::wash(ui.painter(), middle);
 		let mut room = middle.shrink(28.0);
 		let mut shape = snapshot.shape;
-		if let Some(cued) = snapshot.cued.as_ref().filter(|cued| cued.off_air) {
+		let off_air = snapshot.cued.as_ref().filter(|cued| cued.off_air);
+		if let Some(cued) = off_air {
 			room.min.y = self.off_air_header(ui, cued, room, snapshot.shape);
 			shape = cued.shape();
 		}
-		self.stage(ui, fx, snapshot, super::layout::fit(room, shape));
+		// A scene drawn in both: the picture edited large, the other small
+		// beside it, and under them which is edited and where the selected
+		// layer is shown.
+		let dual = {
+			let state = self.engine.state.lock().unwrap();
+			self.edits_both(&state)
+		};
+		let pictures = match (dual, off_air) {
+			(Some(portrait), Some(cued)) => self.portrait_preview.as_ref().map(|portrait_preview| {
+				let landscape = (self.preview.id, cued.canvas);
+				(landscape, (portrait_preview.id, portrait))
+			}),
+			(Some(portrait), None) => self.portrait.as_ref().map(|registered| {
+				((self.program.id, self.program_drawn), (registered.id, portrait))
+			}),
+			(None, _) => None,
+		};
+		let Some((landscape, portrait)) = pictures else {
+			self.format = Format::Landscape;
+			self.stage(ui, fx, snapshot, super::layout::fit(room, shape));
+			self.build_keys(ui);
+			return;
+		};
+		let (edited, other) = match self.format {
+			Format::Landscape => (landscape, portrait),
+			Format::Portrait => (portrait, landscape),
+		};
+		let gap = super::formats::GAP;
+		room.max.y -= super::formats::UNDER;
+		// The other picture a third as tall as the edited one.
+		let shapes = [super::shell::shape(edited.1), super::shell::shape(other.1) / 3.0];
+		let [main, beside] = super::layout::pair(room, shapes, gap);
+		let small = egui::Rect::from_min_size(
+			beside.min,
+			egui::vec2(beside.width(), beside.width() / super::shell::shape(other.1)),
+		);
+		self.stage(ui, fx, snapshot, main);
+		self.other_picture(ui, small, other.0, other.1);
+		let under = egui::Rect::from_min_size(
+			egui::pos2(main.left(), main.bottom() + 18.0),
+			egui::vec2(main.width(), 30.0),
+		);
+		self.format_tabs(ui, under);
+		self.shown_in(ui, under.with_min_x(under.left() + 210.0));
 		self.build_keys(ui);
+	}
+
+	/// The portrait picture's canvas while BUILD edits a scene drawn in both,
+	/// the one open off air or else the one on program.
+	pub(super) fn edits_both(&self, state: &State) -> Option<Canvas> {
+		let collection = state.collection();
+		let scene = self.edited(state)?;
+		collection
+			.portrait_canvas()
+			.filter(|_| collection.dual(&Layer::scene(scene)))
 	}
 
 	/// The page's keys, unless a field or a page has the keyboard: A adds a
@@ -97,10 +151,23 @@ impl Panels {
 			};
 			(canvas, tag)
 		});
-		let (canvas, id, frame) = match off_air {
-			Some((canvas, tag)) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag(tag)),
+		// The portrait picture, while BUILD edits it.
+		let portrait = match self.format {
+			Format::Portrait => self.edits_both(&state).zip(match off_air {
+				Some(_) => self.portrait_preview.as_ref().map(|registered| registered.id),
+				None => self.portrait.as_ref().map(|registered| registered.id),
+			}),
+			Format::Landscape => None,
+		};
+		if portrait.is_none() {
+			self.format = Format::Landscape;
+		}
+		let (canvas, id, frame) = match (off_air, portrait) {
+			(Some((_, tag)), Some((canvas, id))) => (canvas, id, TallyFrame::new(Tally::Cue).tag(tag)),
+			(Some((canvas, tag)), None) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag(tag)),
 			// It is the live picture, so its frame says whether it is on air.
-			None => (self.program_drawn, self.program.id, self.program_frame()),
+			(None, Some((canvas, id))) => (canvas, id, self.program_frame()),
+			(None, None) => (self.program_drawn, self.program.id, self.program_frame()),
 		};
 		let builder = egui::UiBuilder::new().max_rect(at.expand(10.0));
 		if self.interacting {
