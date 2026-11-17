@@ -492,7 +492,8 @@ struct Events<'a> {
 	/// own title bar, since eframe only logs the error that stops it otherwise.
 	closed: Arc<AtomicBool>,
 	/// The studio's own window, the first to hear an event: the multiview's
-	/// opens after it, and closing that one closes nothing else.
+	/// opens after it, closing that one closes nothing else, and typing into
+	/// the studio's holds back no key pressed in it.
 	root: Option<winit::window::WindowId>,
 	/// The engine once the studio is built, to end on the way out.
 	started: Arc<Started>,
@@ -524,7 +525,7 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 				..
 			} if event.state.is_pressed() => {
 				let name = event.key_without_modifiers();
-				if !self.keyboard.pressed(event.physical_key, name, event.repeat) {
+				if !self.keyboard.pressed(event.physical_key, name, event.repeat, root) {
 					return;
 				}
 			}

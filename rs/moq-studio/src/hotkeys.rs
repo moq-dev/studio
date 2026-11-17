@@ -148,10 +148,12 @@ enum Taking {
 	/// key binds rather than acts.
 	Binding(Option<Binding>),
 	/// Bound keys fire instead of reaching egui, where nothing hears them
-	/// outside the window.
+	/// outside the window, unless `typing` into the studio's window: there
+	/// they reach egui, while another window, the multiview, fires them.
 	Firing {
 		bound: Arc<Mutex<Bindings>>,
 		fire: mpsc::Sender<Binding>,
+		typing: bool,
 	},
 }
 
@@ -171,12 +173,12 @@ impl Keyboard {
 		};
 	}
 
-	/// Hear `key` pressed in the window, where the layout puts `name` on it,
-	/// returning whether egui hears it too.
-	pub fn pressed(&self, key: PhysicalKey, name: Key, repeat: bool) -> bool {
+	/// Hear `key` pressed in a window, the studio's own if `studio`, where
+	/// the layout puts `name` on it, returning whether egui hears it too.
+	pub fn pressed(&self, key: PhysicalKey, name: Key, repeat: bool, studio: bool) -> bool {
 		let mut pressing = self.0.lock().unwrap();
 		let paste = !repeat && paste(pressing.modifiers, key, &name);
-		let heard = Self::hear(&mut pressing, key, name, repeat);
+		let heard = Self::hear(&mut pressing, key, name, repeat, studio);
 		pressing.pasted |= heard && paste;
 		heard
 	}
@@ -187,7 +189,7 @@ impl Keyboard {
 		std::mem::take(&mut self.0.lock().unwrap().pasted)
 	}
 
-	fn hear(pressing: &mut Pressing, key: PhysicalKey, name: Key, repeat: bool) -> bool {
+	fn hear(pressing: &mut Pressing, key: PhysicalKey, name: Key, repeat: bool, studio: bool) -> bool {
 		let pressed = Binding {
 			modifiers: pressing.modifiers,
 			key,
@@ -203,7 +205,8 @@ impl Keyboard {
 				}
 				false
 			}
-			Taking::Firing { bound, fire } => {
+			Taking::Firing { typing: true, .. } if studio => true,
+			Taking::Firing { bound, fire, .. } => {
 				if !bound.lock().unwrap().values().any(|bound| bound.same(&pressed)) {
 					return true;
 				}
@@ -500,19 +503,21 @@ impl Hotkeys {
 		}
 	}
 
-	/// Fire the actions bound to keys pressed in the studio's window, where
-	/// nothing hears them outside it, unless `typing`, as into a text field
-	/// or a page the preview passes the keyboard to. A key that fires is
-	/// taken, so nothing else in the window acts on it. Called each frame.
+	/// Fire the actions bound to keys pressed in the studio's windows, where
+	/// nothing hears them outside them, unless `typing` into the studio's
+	/// own, as into a text field or a page the preview passes the keyboard
+	/// to. A key that fires is taken, so nothing else in the window acts on
+	/// it. Called each frame.
 	pub fn focused(&self, typing: bool) {
 		if self.suspended.load(Ordering::Relaxed) {
 			return;
 		}
-		let firing = !typing && matches!(self.reach(), Reach::Focused(_));
+		let firing = matches!(self.reach(), Reach::Focused(_));
 		self.keyboard.take(match firing {
 			true => Taking::Firing {
 				bound: self.bound.clone(),
 				fire: self.fire.clone(),
+				typing,
 			},
 			false => Taking::Nothing,
 		});
@@ -644,8 +649,9 @@ mod tests {
 	#[test]
 	fn the_panel_takes_the_key_pressed() {
 		let keyboard = Keyboard::default();
-		let press =
-			|code, name: &str, repeat| keyboard.pressed(PhysicalKey::Code(code), Key::Character(name.into()), repeat);
+		let press = |code, name: &str, repeat| {
+			keyboard.pressed(PhysicalKey::Code(code), Key::Character(name.into()), repeat, true)
+		};
 		// Nothing is taken unless the panel waits for a key.
 		assert!(press(KeyCode::KeyA, "a", false));
 		keyboard.take(Taking::Binding(None));
@@ -654,7 +660,8 @@ mod tests {
 		assert!(keyboard.pressed(
 			PhysicalKey::Code(KeyCode::ControlLeft),
 			Key::Named(NamedKey::Control),
-			false
+			false,
+			true
 		));
 		assert!(!press(KeyCode::Numpad1, "1", false));
 		assert!(!press(KeyCode::Digit1, "1", false));
@@ -673,11 +680,44 @@ mod tests {
 			Action::Panic,
 			key(KeyCode::Numpad1, "1"),
 		)])));
-		keyboard.take(Taking::Firing { bound, fire });
-		let press = |code, repeat| keyboard.pressed(PhysicalKey::Code(code), Key::Character("1".into()), repeat);
+		keyboard.take(Taking::Firing {
+			bound,
+			fire,
+			typing: false,
+		});
+		let press = |code, repeat| keyboard.pressed(PhysicalKey::Code(code), Key::Character("1".into()), repeat, true);
 		assert!(press(KeyCode::Digit1, false), "an unbound key reaches egui");
 		assert!(!press(KeyCode::Numpad1, false));
 		assert!(!press(KeyCode::Numpad1, true));
+		assert_eq!(fired.try_iter().count(), 1);
+	}
+
+	/// Typing into the studio's window holds its keys back, not those the
+	/// multiview hears, whichever window drew last.
+	#[test]
+	fn typing_holds_back_only_the_studios_keys() {
+		let keyboard = Keyboard::default();
+		let (fire, fired) = mpsc::channel();
+		let bound = Arc::new(Mutex::new(Bindings::from([(
+			Action::Panic,
+			key(KeyCode::Numpad1, "1"),
+		)])));
+		keyboard.take(Taking::Firing {
+			bound,
+			fire,
+			typing: true,
+		});
+		let press = |studio| {
+			keyboard.pressed(
+				PhysicalKey::Code(KeyCode::Numpad1),
+				Key::Character("1".into()),
+				false,
+				studio,
+			)
+		};
+		assert!(press(true), "typed into the studio's field");
+		assert_eq!(fired.try_iter().count(), 0);
+		assert!(!press(false), "fired in the multiview");
 		assert_eq!(fired.try_iter().count(), 1);
 	}
 

@@ -518,10 +518,7 @@ impl Studio {
 			panels.say(fired);
 		}
 		if let Some(hotkeys) = &panels.hotkeys {
-			// A field keeps its focus while another window, such as the
-			// multiview, has the keyboard, and types nothing there.
-			let front = ui.ctx().input(|input| input.viewport().focused).unwrap_or(true);
-			hotkeys.focused(front && (panels.interact.has_keyboard() || ui.ctx().text_edit_focused()));
+			hotkeys.focused(panels.interact.has_keyboard() || ui.ctx().text_edit_focused());
 		}
 		panels.take_binding(ui.ctx());
 		panels.dropping.follow(ui.ctx(), frame);
