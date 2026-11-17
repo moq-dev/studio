@@ -155,8 +155,8 @@ impl Config {
 	}
 }
 
-/// Where the guests removed from scenes, and how often each was let back in,
-/// are kept: `room.guests.toml` for `room.jwk`. Beside the key, since the
+/// Where the guests removed from scenes, how often each was let back in, and
+/// who appeared on their own are kept: `room.guests.toml` for `room.jwk`. Beside the key, since the
 /// tokens they bound are the key's, whichever scene file the studio opens.
 fn removals_path(key: &std::path::Path) -> PathBuf {
 	let mut name = key.file_stem().unwrap_or_default().to_os_string();
@@ -174,6 +174,10 @@ struct Removals {
 	/// Each guest's [`Participant::generation`], when not zero.
 	#[serde(default)]
 	generation: BTreeMap<String, u64>,
+	/// The guests who [appeared](Participant::appeared) on their own since
+	/// their newest link.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	appeared: BTreeSet<String>,
 }
 
 /// The studio's room: who was invited, and what each guest publishes.
@@ -320,6 +324,9 @@ impl Room {
 		for (identity, generation) in removals.generation {
 			participants.entry(identity).or_default().generation = generation;
 		}
+		for identity in removals.appeared {
+			participants.entry(identity).or_default().appeared = true;
+		}
 		self.removals = Some(path);
 		Ok(self)
 	}
@@ -349,11 +356,13 @@ impl Room {
 		let generation = participants
 			.iter()
 			.filter(|(_, participant)| participant.generation > 0);
+		let appeared = participants.iter().filter(|(_, participant)| participant.appeared);
 		let removals = Removals {
 			removed: removed.map(|(identity, _)| identity.clone()).collect(),
 			generation: generation
 				.map(|(identity, participant)| (identity.clone(), participant.generation))
 				.collect(),
+			appeared: appeared.map(|(identity, _)| identity.clone()).collect(),
 		};
 		let context = || format!("writing {}", path.display());
 		let dir = match path.parent() {
@@ -391,6 +400,7 @@ impl Room {
 		anyhow::ensure!(!name.starts_with('.'), "a guest's name cannot start with `.`");
 		let mut participants = self.participants.lock().unwrap();
 		let removed = participants.get(name).is_some_and(|participant| participant.removed);
+		let appeared = participants.get(name).is_some_and(|participant| participant.appeared);
 		let generation = participants.get(name).map_or(0, |participant| participant.generation);
 		// Refused before anything changes, as a name that cannot be a guest.
 		let (token, expires) = self.sign(name, generation + u64::from(removed))?;
@@ -411,10 +421,11 @@ impl Room {
 			.finish();
 		link.set_fragment(Some(&fragment));
 		let invite = Invite { link, expires };
-		let participant = participants.entry(name.to_string()).or_default();
-		participant.invite = Some(invite.clone());
 		// A new link may appear on its own again.
-		participant.appeared = false;
+		if appeared {
+			self.change(&mut participants, name, |participant| participant.appeared = false)?;
+		}
+		participants.entry(name.to_string()).or_default().invite = Some(invite.clone());
 		drop(participants);
 		self.changed.send_replace(());
 		Ok(invite)
@@ -734,12 +745,10 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 		.and_then(|shown| room.guest_of(shown));
 	state.commit(draft, None)?;
 	if let Some((identity, _)) = identity {
-		room.participants
-			.lock()
-			.unwrap()
-			.entry(identity.to_string())
-			.or_default()
-			.appeared = true;
+		let mut participants = room.participants.lock().unwrap();
+		room.change(&mut participants, identity.as_str(), |participant| {
+			participant.appeared = true
+		})?;
 	}
 	Ok(true)
 }
@@ -1600,7 +1609,8 @@ pub(crate) mod tests {
 
 	/// A removed guest stays unrenewed when the studio restarts, whichever
 	/// scene file it opens, until a new link, whose generation a restart keeps
-	/// too: the state is the room key's, kept beside it.
+	/// too, and so does a guest having appeared on their own: the state is
+	/// the room key's, kept beside it.
 	#[test]
 	fn a_removal_outlasts_a_restart() {
 		let dir = tempfile::tempdir().unwrap();
@@ -1650,6 +1660,18 @@ pub(crate) mod tests {
 		std::fs::remove_dir(&file).unwrap();
 		room.stop_renewing("alice").unwrap();
 		assert!(start().participants()["alice"].removed);
+
+		// Appearing on their own outlasts a restart too, until a new link.
+		let room = start();
+		let mut participants = room.participants.lock().unwrap();
+		room.change(&mut participants, "bob", |participant| participant.appeared = true)
+			.unwrap();
+		drop(participants);
+		let room = start();
+		assert!(room.participants()["bob"].appeared, "kept across a restart");
+		room.invite("bob").unwrap();
+		let cleared = start().participants().get("bob").is_none_or(|bob| !bob.appeared);
+		assert!(cleared, "a new link clears it");
 	}
 
 	/// A guest takes the tile after the scene's last layer in a slot, so a

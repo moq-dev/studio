@@ -636,9 +636,9 @@ online take the next tile of the scene on program, and be heard on program,
 as an edit you can undo. Up to four guests still in the room take tiles that
 way, and more wait under Add; one who leaves keeps their tile, closed until
 they are back, and frees their place for the next. A guest appears on their
-own once per link: after that, where they are shown is yours, so undoing
-their appearance or removing their layer keeps them off when they reconnect,
-until a new link. Since an appearance is your edit, it drops what you could
+own once per link, across restarts: after that, where they are shown is
+yours, so undoing their appearance or removing their layer keeps them off
+when they reconnect, until a new link. Since an appearance is your edit, it drops what you could
 redo. Off, every guest waits under Add, as before.
 
 ### Audio scenes
@@ -934,9 +934,9 @@ of their sources, and any mask reading them out of every scene and the top
 layer and mutes them. A signed token cannot be taken back, so it also stops
 renewing theirs and ends their return feed, and they are disconnected within
 `--guest-expiry`. That
-holds across a restart, whichever scene file you open: removed guests are
-kept beside the room key, as `room.guests.toml` for `room.jwk`, so its
-directory must be writable. Undo puts them back in the scenes but not on
+holds across a restart, whichever scene file you open: removed guests, and
+those who appeared on their own, are kept beside the room key, as
+`room.guests.toml` for `room.jwk`, so its directory must be writable. Undo puts them back in the scenes but not on
 renewal; **New link** lets them back in and renews them again, under a new
 generation, so a link from before the removal cannot read their renewals.
 
