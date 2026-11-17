@@ -25,6 +25,8 @@ pub(crate) struct Glide<K> {
 	from: Option<(Vec<Item>, Instant)>,
 	/// What the last [`show`](Self::show) showed.
 	shown: Vec<Item>,
+	/// Where the last [`show`](Self::show) drew each item it was given.
+	placed: Vec<Item>,
 }
 
 impl<K: PartialEq> Glide<K> {
@@ -35,7 +37,14 @@ impl<K: PartialEq> Glide<K> {
 			key: None,
 			from: None,
 			shown: Vec::new(),
+			placed: Vec::new(),
 		}
+	}
+
+	/// Each item the last [`show`](Self::show) was given, in its order, where
+	/// it was drawn: part way along its glide while one is under way.
+	pub(crate) fn placed(&self) -> &[Item] {
+		&self.placed
 	}
 
 	/// The items to draw at `now` for `to`, arranged as `key` names: `to`
@@ -53,11 +62,12 @@ impl<K: PartialEq> Glide<K> {
 			let linear = now.saturating_duration_since(*start).as_secs_f32() / self.duration.as_secs_f32();
 			(linear < 1.0).then(|| Ease::InOut.apply(linear))
 		});
-		self.shown = match (progress, &self.from) {
-			(Some(progress), Some((from, _))) => between(from, to, progress, |a, b| a.source == b.source),
+		let same = |a: &Item, b: &Item| a.source == b.source;
+		(self.shown, self.placed) = match (progress, &self.from) {
+			(Some(progress), Some((from, _))) => (between(from, to, progress, same), placed(from, to, progress, same)),
 			_ => {
 				self.from = None;
-				to.to_vec()
+				(to.to_vec(), to.to_vec())
 			}
 		};
 		&self.shown
@@ -108,6 +118,25 @@ pub(crate) fn between(from: &[Item], to: &[Item], progress: f32, same: impl Fn(&
 				}
 			}
 			(None, None) => unreachable!("a slot holds an item"),
+		})
+		.collect()
+}
+
+/// Each item of `to` where [`between`] draws it at `progress`: one paired
+/// with an item of `from` part way from its place there, the rest where
+/// they are.
+fn placed(from: &[Item], to: &[Item], progress: f32, same: impl Fn(&Item, &Item) -> bool) -> Vec<Item> {
+	let (_, entered) = pair(from, to, same);
+	let paired = to.iter().zip(entered);
+	paired
+		.map(|(new, at)| match at {
+			Some(at) => Item {
+				rect: toward(&from[at].rect, &new.rect, progress),
+				crop: from[at].crop.toward(&new.crop, progress),
+				shape: from[at].shape.toward(&new.shape, progress),
+				..new.clone()
+			},
+			None => new.clone(),
 		})
 		.collect()
 }
@@ -279,10 +308,24 @@ mod tests {
 		let halfway = start.saturating_add(Duration::from_millis(200));
 		let half = glide.show(2, &two, halfway).to_vec();
 		assert_eq!(opacity(&half[1]), 0.5);
+		assert_eq!(glide.placed(), two.as_slice(), "nothing moves, so each is where it is");
 		// The arrangement changes again at once: the guest goes on from half.
 		let again = glide.show(3, &three, halfway).to_vec();
 		assert_eq!(opacity(&again[1]), 0.5);
 		assert_eq!(again[0].rect.x, 0.0);
+		let quarter = halfway.saturating_add(Duration::from_millis(100));
+		let drawn = glide
+			.show(3, &three, quarter)
+			.iter()
+			.find(|item| item.source == "cam")
+			.unwrap()
+			.rect;
+		assert_eq!(
+			glide.placed()[0].rect,
+			drawn,
+			"placed where it is drawn, in the order given"
+		);
+		assert!(drawn.x > 0.0 && drawn.x < 200.0);
 		let later = glide
 			.show(3, &three, halfway.saturating_add(Duration::from_millis(400)))
 			.to_vec();

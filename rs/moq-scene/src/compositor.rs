@@ -584,6 +584,14 @@ impl Compositor {
 		self.reflows.get(scene).map(|reflow| reflow.arranged.as_slice())
 	}
 
+	/// The items of the scene called `scene` where the last
+	/// [`render`](Self::render) drew them, in order: those in slots part way
+	/// along their glide while a reflow is under way, as
+	/// [`arranged`](Self::arranged) otherwise.
+	pub fn placed(&self, scene: &str) -> Option<&[Item]> {
+		self.reflows.get(scene).map(|reflow| reflow.glide.placed())
+	}
+
 	/// Whether a transition is under way.
 	pub fn transitioning(&self) -> bool {
 		self.switch.is_some()

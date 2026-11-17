@@ -268,6 +268,12 @@ impl Panels {
 			let collection = state.collection();
 			let resting = picked.item(collection).cloned();
 			if let Some(resting) = resting {
+				let drawn = match resting.slot {
+					Some(_) => super::slots::drawn(state, &picked.layer, picked.index),
+					None => None,
+				};
+				let drawn = drawn.unwrap_or((resting.rect, resting.crop));
+				let collection = state.collection();
 				let source = collection.sources.get(collection.capture(&resting.source));
 				self.drag = Some(Drag {
 					picked,
@@ -278,12 +284,11 @@ impl Panels {
 						grab
 					},
 					slotted: resting.slot.is_some(),
-					// A layer in a slot is cropped in the slot it is drawn in.
-					rect: match resting.slot {
-						Some(_) => shown[index].1.rect,
-						None => resting.rect,
-					},
-					crop: resting.crop,
+					// A layer in a slot is cropped in the slot it is drawn in,
+					// from what it shows there; that crop already fits the
+					// slot, so its arrangement crops no further.
+					rect: drawn.0,
+					crop: drawn.1,
 					origin: view.point(origin),
 					fixed: fixed_shape(source),
 					gesture,

@@ -8,14 +8,11 @@ use super::layers::section;
 use super::*;
 
 /// `layer`'s layers where they are drawn, in order: those of a scene in
-/// slots where its arrangement put them as of the last render, hidden while
-/// their slot is closed.
+/// slots where the last render drew them, hidden while their slot is
+/// closed.
 pub(super) fn placed(state: &State, layer: &Layer) -> Vec<Item> {
 	let items = state.collection().items(layer).unwrap_or_default();
-	let arranged = layer
-		.scene
-		.as_deref()
-		.and_then(|scene| state.compositor.arranged(scene));
+	let arranged = layer.scene.as_deref().and_then(|scene| state.compositor.placed(scene));
 	// One frame behind an edit, until the next render arranges it.
 	let Some(arranged) = arranged.filter(|arranged| arranged.len() == items.len()) else {
 		return items.to_vec();
@@ -31,14 +28,14 @@ pub(super) fn placed(state: &State, layer: &Layer) -> Vec<Item> {
 	placed.collect()
 }
 
-/// The collection with the scene called `scene` drawn as its arrangement
-/// placed it on the last render, cover crops included, so a page in a slot
+/// The collection with the scene called `scene` as the last render drew
+/// it, cover crops and a glide under way included, so a page in a slot
 /// takes input where it is drawn.
 pub(super) fn staged<'a>(state: &'a State, scene: Option<&str>) -> std::borrow::Cow<'a, Collection> {
 	let collection = state.collection();
 	let found = scene.and_then(|scene| {
 		let index = collection.scenes.iter().position(|found| found.name == scene)?;
-		let arranged = state.compositor.arranged(scene)?;
+		let arranged = state.compositor.placed(scene)?;
 		(arranged.len() == collection.scenes[index].items.len()).then_some((index, arranged))
 	});
 	let Some((index, arranged)) = found else {
@@ -59,7 +56,7 @@ pub(super) fn drawn(state: &State, layer: &Layer, index: usize) -> Option<(Rect,
 	let arranged = layer
 		.scene
 		.as_deref()
-		.and_then(|scene| state.compositor.arranged(scene))
+		.and_then(|scene| state.compositor.placed(scene))
 		.filter(|arranged| arranged.len() == collection.items(layer).map_or(0, <[Item]>::len))
 		.and_then(|arranged| arranged.get(index))
 		.filter(|arranged| item.slot.is_some() && !arranged.rect.is_empty());
