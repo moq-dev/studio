@@ -413,8 +413,10 @@ impl Panels {
 				self.copy(ui.ctx());
 			}
 			if ui.button("Paste").clicked() {
-				// Arrives as a paste event on a later frame.
+				// Arrives as a paste event on a later frame, or else is a
+				// picture or files read from the clipboard.
 				ui.ctx().send_viewport_cmd(ViewportCommand::RequestPaste);
+				self.dropping.paste_from_window();
 			}
 			let open = self.multiview.open();
 			let text = match open {
