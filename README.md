@@ -591,7 +591,7 @@ different `logo.png`, while a copy already there with the same contents is
 reused. One already under that directory is named where it is.
 
 **Paste** (Ctrl+V, or the picture's right-click menu) does the same at the
-pointer: files copied in a file manager; a picture, such as a screenshot,
+pointer, and the title bar's **Paste** at the scene's center: files copied in a file manager; a picture, such as a screenshot,
 saved as `Pasted picture.png` beside the scene file; and a web address, as a
 web page layer the size of the canvas, shown at half that size.
 

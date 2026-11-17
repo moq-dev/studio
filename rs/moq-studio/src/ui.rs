@@ -1129,7 +1129,9 @@ impl Panels {
 
 	/// Paste layers into the selected layer's list, or the scene on program,
 	/// or filters onto the selected layer; or files or a web address at `at`
-	/// on screen, as if dropped there.
+	/// on screen, as if dropped there. Other text may name what the clipboard
+	/// holds beside it, as macOS Finder names copied files, so the clipboard's
+	/// files or picture are pasted instead.
 	fn paste(&mut self, text: &str, at: Option<egui::Pos2>) {
 		if let Some(arrivals) = drop::Arrival::of_text(text) {
 			for arrival in arrivals {
@@ -1137,40 +1139,40 @@ impl Panels {
 			}
 			return;
 		}
+		let Ok(clip) = Clip::from_toml(text) else {
+			self.dropping.arrive(drop::Arrival::Clipboard, at);
+			return;
+		};
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
 		// A failure with no layer to show it on is the toast's.
 		let mut spot = None;
-		let result = (|| {
-			let clip = Clip::from_toml(text)
-				.context("the clipboard holds no layers, filters, files, picture, or web address")?;
-			match clip {
-				Clip::Items(items) => {
-					let layer = match &self.selection {
-						Some(picked) => picked.layer.clone(),
-						None => self.scene(&state).map_err(anyhow::Error::msg)?,
-					};
-					let dir = state.sources.context().dir.clone();
-					edit(&mut state, format!("Paste into {}", place(&layer)), None, |draft| {
-						draft.paste(&layer, &items, &dir)
-					})?;
-					Ok(())
-				}
-				Clip::Filters(pasted) => {
-					let picked = self.selection.clone().context("select a layer to paste filters onto")?;
-					let item = picked.item(state.collection()).context("the selected layer is gone")?;
-					spot = Some(Spot::Layer(picked.layer.clone(), item.source.clone()));
-					let selection = picked.look();
-					let mut filters = selection
-						.filters(state.collection())
-						.context("the layer has no picture to filter")?;
-					filters.extend(pasted.filters);
-					let what = selection.describe(state.collection());
-					edit(&mut state, format!("Paste filters onto {what}"), None, |draft| {
-						selection.set_filters(draft, filters)
-					})
-				}
+		let result = (|| match clip {
+			Clip::Items(items) => {
+				let layer = match &self.selection {
+					Some(picked) => picked.layer.clone(),
+					None => self.scene(&state).map_err(anyhow::Error::msg)?,
+				};
+				let dir = state.sources.context().dir.clone();
+				edit(&mut state, format!("Paste into {}", place(&layer)), None, |draft| {
+					draft.paste(&layer, &items, &dir)
+				})?;
+				Ok(())
+			}
+			Clip::Filters(pasted) => {
+				let picked = self.selection.clone().context("select a layer to paste filters onto")?;
+				let item = picked.item(state.collection()).context("the selected layer is gone")?;
+				spot = Some(Spot::Layer(picked.layer.clone(), item.source.clone()));
+				let selection = picked.look();
+				let mut filters = selection
+					.filters(state.collection())
+					.context("the layer has no picture to filter")?;
+				filters.extend(pasted.filters);
+				let what = selection.describe(state.collection());
+				edit(&mut state, format!("Paste filters onto {what}"), None, |draft| {
+					selection.set_filters(draft, filters)
+				})
 			}
 		})();
 		drop(state);

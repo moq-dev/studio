@@ -196,6 +196,32 @@ impl Dropping {
 		self.arrived.push((arrival, at));
 	}
 
+	/// Take this frame's arrivals, with the files a clipboard holds as a
+	/// file list (as Windows Explorer and macOS Finder copy them) in place of
+	/// a pasted picture, and whether they are several files, which no single
+	/// layer's file can stand for.
+	fn take_arrived(&mut self) -> (Vec<(Arrival, Option<egui::Pos2>)>, bool) {
+		let mut arrived = Vec::new();
+		for (arrival, at) in std::mem::take(&mut self.arrived) {
+			let files = matches!(arrival, Arrival::Clipboard).then(clipboard_files).flatten();
+			match files {
+				Some(files) => arrived.extend(files.into_iter().map(|path| (Arrival::File(path), at))),
+				None => arrived.push((arrival, at)),
+			}
+		}
+		let files = arrived
+			.iter()
+			.filter(|(arrival, _)| matches!(arrival, Arrival::File(_)))
+			.count();
+		(arrived, files > 1)
+	}
+
+	/// Paste at the edited scene's center, from a menu off the picture,
+	/// unless the clipboard's text arrives first.
+	pub(super) fn paste_from_window(&mut self) {
+		self.menu_paste = Some(None);
+	}
+
 	/// Note where the picture's menu opened, which its Paste pastes at.
 	fn menu_opened(&mut self, at: Option<egui::Pos2>) {
 		self.menu_at = at;
@@ -378,6 +404,13 @@ fn prepare(source: Source, dir: &Path) -> anyhow::Result<Prepared> {
 	Ok(Prepared { source, picture, name })
 }
 
+/// The files the clipboard holds as a file list, if any. Read where the
+/// paste key was pressed, as egui reads the clipboard's text.
+fn clipboard_files() -> Option<Vec<PathBuf>> {
+	let files = arboard::Clipboard::new().ok()?.get().file_list().ok()?;
+	(!files.is_empty()).then_some(files)
+}
+
 /// Save the picture the clipboard holds as a PNG beside the scene file in
 /// `dir`.
 fn pasted(dir: &Path) -> anyhow::Result<Prepared> {
@@ -424,9 +457,10 @@ impl Panels {
 			self.dropping
 				.menu_opened(ui.input(|input| input.pointer.interact_pos()));
 		}
-		for (arrival, at) in std::mem::take(&mut self.dropping.arrived) {
+		let (arrived, several) = self.dropping.take_arrived();
+		for (arrival, at) in arrived {
 			let at = at.filter(|at| rect.contains(*at)).map(|at| view.point(at));
-			self.land(ui.ctx(), state, arrival, at);
+			self.land(ui.ctx(), state, arrival, at, several);
 		}
 		let painter = ui.painter_at(rect);
 		if self.dropping.hovering(ui.ctx()) {
@@ -458,8 +492,9 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
-		for (arrival, _) in std::mem::take(&mut self.dropping.arrived) {
-			self.land(ctx, &mut state, arrival, None);
+		let (arrived, several) = self.dropping.take_arrived();
+		for (arrival, _) in arrived {
+			self.land(ctx, &mut state, arrival, None, several);
 		}
 	}
 
@@ -485,8 +520,9 @@ impl Panels {
 	}
 
 	/// Take `arrival` at `at` on the picture, in canvas pixels, or at the
-	/// edited scene's center.
-	fn land(&mut self, ctx: &egui::Context, state: &mut State, arrival: Arrival, at: Option<[f32; 2]>) {
+	/// edited scene's center; one of `several` files is added, never offered
+	/// as a layer's new file.
+	fn land(&mut self, ctx: &egui::Context, state: &mut State, arrival: Arrival, at: Option<[f32; 2]>, several: bool) {
 		let landing = match self.landing(state, at) {
 			Ok(landing) => landing,
 			Err(why) => {
@@ -534,7 +570,7 @@ impl Panels {
 						self.dropped_failed(landing.at, Err(err));
 						return;
 					}
-					(_, Some((_, item))) if same_kind(state.collection(), &item.source, &source) => {
+					(_, Some((_, item))) if !several && same_kind(state.collection(), &item.source, &source) => {
 						let shown = state.collection().capture(&item.source).to_string();
 						self.dropping.offer = Some(Offer { source, landing, shown });
 						return;
