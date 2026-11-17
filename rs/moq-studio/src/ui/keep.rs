@@ -82,7 +82,7 @@ pub(super) fn grab(state: &mut State, picked: Option<&Picked>) {
 	let grabbed = grabbed
 		.as_ref()
 		.map(|(scene, index, source)| (scene.as_str(), *index, source.as_str()));
-	state.compositor.grab(grabbed);
+	state.compositor.grab(grabbed, kio::clock::now());
 }
 
 /// `staged`, the collection as the picture draws it, with each layer

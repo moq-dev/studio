@@ -22,6 +22,10 @@ use crate::overlay::{Overlay, Overlays};
 use crate::place::{Look, Placement, Placer, Reducer};
 use crate::source::{self, Feed, Sources, Status};
 
+/// How long a gesture holds an item keeping clear in hand after it last
+/// said so: a few frames of the window, so one hidden mid-drag lets go.
+pub const GRAB: Duration = Duration::from_millis(500);
+
 /// The format of every canvas texture: gamma-encoded RGBA, what
 /// `moq_video::render` produces and what its exporter hands an encoder.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -117,8 +121,8 @@ pub struct Compositor {
 	/// Each scene item keeping clear, by its scene and place in it.
 	keepers: HashMap<(String, usize), Keeper>,
 	/// The item keeping clear a gesture has in hand, by its scene, place, and
-	/// source.
-	grabbed: Option<(String, usize, String)>,
+	/// source, until when, unless the gesture says so again.
+	grabbed: Option<((String, usize, String), Instant)>,
 	/// Reduces the pictures under them, made with the first.
 	reducer: Option<Reducer>,
 	/// Each scene with items in slots, by name: where its arrangement put
@@ -554,11 +558,16 @@ impl Compositor {
 		(keeper.source == source).then(|| keeper.placer.placement())
 	}
 
-	/// Note the item a gesture has in hand, such as a drag, as its scene,
-	/// index, and source, or `None` once let go: an item keeping clear does
-	/// not choose a place while in hand. Each frame of the gesture says so.
-	pub fn grab(&mut self, item: Option<(&str, usize, &str)>) {
-		self.grabbed = item.map(|(scene, index, source)| (scene.to_string(), index, source.to_string()));
+	/// Note the item a gesture has in hand as of `now`, such as a drag, as
+	/// its scene, index, and source, or `None` once let go: an item keeping
+	/// clear does not choose a place while in hand. Each frame of the gesture
+	/// says so again; one that stops saying so, as when the window is hidden
+	/// mid-drag, lets go after [`GRAB`].
+	pub fn grab(&mut self, item: Option<(&str, usize, &str)>, now: Instant) {
+		self.grabbed = item.map(|(scene, index, source)| {
+			let key = (scene.to_string(), index, source.to_string());
+			(key, now.saturating_add(GRAB))
+		});
 	}
 
 	/// Note that the `index`th item of the scene called `scene`, one showing
@@ -1187,8 +1196,8 @@ impl Compositor {
 				}
 				keeper.rect = item.rect;
 				keeper.placer.watch(keeper.watched, now);
-				let grabbed = self.grabbed.as_ref().is_some_and(|(at, number, source)| {
-					*at == scene.name && *number == index && *source == item.source
+				let grabbed = self.grabbed.as_ref().is_some_and(|((at, number, source), until)| {
+					*at == scene.name && *number == index && *source == item.source && now < *until
 				});
 				keeper.placer.grab(grabbed);
 				let rect = keeper.placer.place(item.rect, keep, canvas, now);
