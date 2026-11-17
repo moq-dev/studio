@@ -21,8 +21,10 @@ use kio::clock::Instant;
 
 use crate::effect::{Effects, Picture};
 
-/// How often a probe reads a capture's picture, at most: only a new picture
-/// is read, so a still screen costs nothing.
+/// How often a probe reads a capture's picture, at most, and only when one
+/// arrives: a camera or window that stops delivering is not read, though a
+/// Linux screen capture repeats its last picture while it stands still, and
+/// is read each time.
 pub const INTERVAL: Duration = Duration::from_millis(250);
 
 /// How long a capture's picture stays dark before it counts as gone dark,
@@ -126,6 +128,9 @@ impl Prober {
 struct Reading {
 	at: Instant,
 	mapped: Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
+	/// Whether the capture stopped being live since, so what it read is
+	/// from before and judged neither dark nor good.
+	stale: bool,
 }
 
 /// Watches one capture's pictures for going dark.
@@ -186,11 +191,18 @@ impl Probe {
 	/// capture's newest, if it is new and the last read was at least
 	/// [`INTERVAL`] ago. `picture` needs `COPY_SRC`.
 	///
-	/// A capture that is not `live`, such as one reopening, is not dark.
+	/// A capture that is not `live`, such as one reopening, is not dark, and
+	/// forgets its last good picture and what it is reading, so nothing from
+	/// before it reopens is drawn for it after: a picked window picked again
+	/// may be another window.
 	pub fn step(&mut self, prober: &Prober, effects: &Effects, picture: &wgpu::Texture, live: bool, now: Instant) {
 		self.judge(effects);
 		if !live {
 			self.dark = None;
+			self.good = None;
+			if let Some(reading) = &mut self.reading {
+				reading.stale = true;
+			}
 			return;
 		}
 		let due = self
@@ -267,7 +279,11 @@ impl Probe {
 			*done.lock().unwrap() = Some(result);
 		});
 		self.read = Some(read);
-		self.reading = Some(Reading { at: now, mapped });
+		self.reading = Some(Reading {
+			at: now,
+			mapped,
+			stale: false,
+		});
 		self.last = Some(now);
 		self.changed = false;
 	}
@@ -279,7 +295,7 @@ impl Probe {
 		let Some(mapped) = reading.mapped.lock().unwrap().take() else {
 			return;
 		};
-		let at = reading.at;
+		let (at, stale) = (reading.at, reading.stale);
 		self.reading = None;
 		let dark = mapped.map_err(|err| err.to_string()).and_then(|()| {
 			let dark = match self.readback.slice(..).get_mapped_range() {
@@ -290,6 +306,7 @@ impl Probe {
 			dark
 		});
 		let dark = match dark {
+			Ok(_) if stale => return,
 			Ok(dark) => dark,
 			Err(err) => {
 				tracing::warn!(%err, "cannot read a capture back to see if it went dark");
@@ -515,13 +532,35 @@ mod tests {
 		probe.step(&prober, &effects, &capture.texture, true, at(dark + INTERVAL / 2));
 		assert!(probe.reading.is_none());
 
-		// A capture that stops being live, such as one reopening, is not dark.
+		// A capture that stops being live, such as one reopening, is not dark,
+		// and forgets its last good picture: reopened dark, it holds nothing
+		// from before, which may be another window.
 		probe.step(&prober, &effects, &capture.texture, false, at(dark + DARK));
 		assert_eq!(probe.dark(at(dark + DARK)), None);
+		let reopened = dark + DARK + INTERVAL;
+		capture.show([0, 0, 0], None);
+		read(&mut probe, &prober, &effects, &device, &capture, at(reopened));
+		assert!(probe.held(at(reopened)).is_none(), "nothing from before it reopened");
 
-		let back = dark + DARK + INTERVAL;
+		let back = reopened + INTERVAL;
 		capture.show([90, 120, 200], None);
 		read(&mut probe, &prober, &effects, &device, &capture, at(back));
 		assert_eq!(probe.dark(at(back + DARK)), None);
+
+		// A read under way as it stops being live is from before, so it never
+		// becomes the picture held after.
+		let before = back + INTERVAL;
+		capture.show([200, 40, 40], None);
+		probe.changed();
+		probe.step(&prober, &effects, &capture.texture, true, at(before));
+		assert!(probe.reading.is_some(), "a read started");
+		probe.step(&prober, &effects, &capture.texture, false, at(before));
+		device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+		probe.step(&prober, &effects, &capture.texture, true, at(before));
+		assert!(probe.reading.is_none(), "the read came back");
+		let after = before + INTERVAL;
+		capture.show([0, 0, 0], None);
+		read(&mut probe, &prober, &effects, &device, &capture, at(after));
+		assert!(probe.held(at(after)).is_none(), "the read from before is not held");
 	}
 }

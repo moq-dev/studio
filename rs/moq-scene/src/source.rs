@@ -316,8 +316,8 @@ pub struct Sources {
 	/// The sources on program, as last set.
 	on_program: BTreeSet<String>,
 	/// The picked displays and windows the last sync ran, by name, whose
-	/// grants are kept, or `None` before the first.
-	picked: Option<BTreeSet<String>>,
+	/// grants are kept, each with its kind, or `None` before the first.
+	picked: Option<BTreeMap<String, Source>>,
 }
 
 impl Sources {
@@ -465,19 +465,29 @@ impl Sources {
 
 	/// Forget the grant of each picked display or window `collection` no
 	/// longer has, such as one removed or renamed, since a grant is a
-	/// credential.
+	/// credential, and of each whose kind changed, such as a window made a
+	/// display, since the portal refuses a grant of another kind.
 	fn forget_grants(&mut self, collection: &Collection) {
 		let Some(grants) = &self.context.grants else { return };
-		let picked: BTreeSet<String> = collection
+		let picked: BTreeMap<String, Source> = collection
 			.sources
 			.iter()
 			.filter(|(_, source)| matches!(source, Source::PickedDisplay | Source::PickedWindow))
-			.map(|(name, _)| name.clone())
+			.map(|(name, source)| (name.clone(), source.clone()))
 			.collect();
 		if self.picked.as_ref() == Some(&picked) {
 			return;
 		}
-		match grants.retain(&picked) {
+		let mut changed = self.picked.iter().flat_map(|before| {
+			picked
+				.iter()
+				.filter(|(name, source)| before.get(*name).is_some_and(|was| was != *source))
+				.map(|(name, _)| name)
+		});
+		let forgotten = changed
+			.try_for_each(|name| grants.forget(name))
+			.and_then(|()| grants.retain(&picked.keys().cloned().collect()));
+		match forgotten {
 			Ok(()) => self.picked = Some(picked),
 			Err(err) => tracing::warn!(%err, "cannot forget the grants of removed sources"),
 		}
@@ -3802,6 +3812,18 @@ mod tests {
 			collection.sources.insert("Renamed".into(), screen);
 			drop(sources.sync(&collection));
 			assert!(!kept("Screen") && !kept("Window"));
+
+			// A window made a display under its name, as "Capture the whole
+			// screen instead" does, asks the picker afresh.
+			collection.sources.insert("Game".into(), Source::PickedWindow);
+			drop(sources.sync(&collection));
+			grants.claim("Game").set(Some("window")).unwrap();
+			grants.claim("Renamed").set(Some("screen")).unwrap();
+			assert!(kept("Game"));
+			collection.sources.insert("Game".into(), Source::PickedDisplay);
+			drop(sources.sync(&collection));
+			assert!(!kept("Game"), "a grant of another kind is forgotten");
+			assert!(kept("Renamed"), "the rest are kept");
 		})
 		.await;
 	}

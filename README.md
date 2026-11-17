@@ -1558,8 +1558,10 @@ A camera, display, or window can go black while its capture still runs: a
 window closed, minimized, or switched to exclusive full screen, a screen
 locked or showing protected video, a camera behind its shutter, or a
 permission the system took away. Four times a second at most, and only when
-it delivers a new picture, the studio shrinks each one's picture on the GPU
-to a grid of 64 by 36 tiles and reads the grid back. A picture dark in every
+it delivers a picture (a Linux screen capture repeats its last one while the
+screen stands still, so it is read every time), the studio shrinks each
+one's picture on the GPU to a grid of 64 by 36 tiles and reads the grid
+back. A picture dark in every
 tile but a mouse pointer's few, and all one color, is dark.
 
 For its first 3 seconds of dark the studio draws the capture's last picture
