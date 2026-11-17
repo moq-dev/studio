@@ -747,20 +747,26 @@ impl Panels {
 		let heard = source.has_audio();
 		let index = state.collection().items(layer).map_or(0, <[Item]>::len);
 		// Landed in the portrait picture, it sits there; in the landscape
-		// one, it lands centered at the same size until moved there.
-		let item = rect.map(|rect| match landing.format {
-			Format::Landscape => Item::new(name.clone(), rect),
-			Format::Portrait => {
-				let landscape = state.collection().canvas;
-				let center = [landscape.width as f32 / 2.0, landscape.height as f32 / 2.0];
-				let placed = land(landscape, [rect.width, rect.height], center);
-				Item {
-					portrait: Some(Placement {
-						rect,
-						crop: Crop::default(),
-					}),
-					..Item::new(name.clone(), placed)
-				}
+		// one, it lands centered at the same size until moved there. One that
+		// landed in portrait before its layers stopped being drawn in both,
+		// such as while its file was read, lands centered in their one.
+		let collection = state.collection();
+		let centered = |canvas: Canvas, rect: Rect| {
+			let center = [canvas.width as f32 / 2.0, canvas.height as f32 / 2.0];
+			land(canvas, [rect.width, rect.height], center)
+		};
+		let item = rect.map(|rect| match (landing.format, collection.dual(layer)) {
+			(Format::Landscape, _) => Item::new(name.clone(), rect),
+			(Format::Portrait, true) => Item {
+				portrait: Some(Placement {
+					rect,
+					crop: Crop::default(),
+				}),
+				..Item::new(name.clone(), centered(collection.canvas, rect))
+			},
+			(Format::Portrait, false) => {
+				let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
+				Item::new(name.clone(), centered(canvas, rect))
 			}
 		});
 		edit(state, format!("Drop `{name}` {}", place(layer)), None, |draft| {
