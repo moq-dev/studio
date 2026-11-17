@@ -308,16 +308,24 @@ fn popover(ui: &mut Ui, advice: &Advice, windows: Option<&Result<Vec<Pick>, Stri
 /// picture: an amber dashed outline, and its name on an amber pill in its
 /// middle.
 pub(super) fn on_picture(ui: &Ui, at: Rect, name: &str, lost: Lost) {
-	let painter = ui.painter();
-	super::dashed(painter, at.shrink(1.5), Stroke::new(2.0, kit::CUE));
+	// Nothing spills onto what is beside it, such as a narrow multiview tile's
+	// neighbors.
+	let painter = ui.painter().with_clip_rect(at.intersect(ui.clip_rect()));
+	super::dashed(&painter, at.shrink(1.5), Stroke::new(2.0, kit::CUE));
 
 	let what = match lost {
 		Lost::Dark(_) => "no picture",
 		Lost::Stalled(_) => "no new picture",
 	};
-	let text = format!("{name} · {what}");
-	let galley = painter.layout_no_wrap(text.to_uppercase(), kit::display(13.0), kit::ON_CUE);
-	let size = galley.size() + vec2(44.0, 14.0);
+	// Its name goes first where the pill would not fit, then the pill.
+	let pill = |text: String| {
+		let galley = painter.layout_no_wrap(text.to_uppercase(), kit::display(13.0), kit::ON_CUE);
+		let size = galley.size() + vec2(44.0, 14.0);
+		(size.x <= at.width() - 8.0 && size.y <= at.height() - 8.0).then_some((galley, size))
+	};
+	let Some((galley, size)) = pill(format!("{name} · {what}")).or_else(|| pill(what.to_string())) else {
+		return;
+	};
 	let pill = Rect::from_center_size(at.center(), size);
 	painter.rect_filled(pill, size.y / 2.0, kit::CUE);
 	let icon = Rect::from_center_size(pos2(pill.left() + 18.0, pill.center().y), Vec2::splat(18.0));
