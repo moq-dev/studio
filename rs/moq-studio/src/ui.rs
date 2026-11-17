@@ -2782,6 +2782,23 @@ mod tests {
 		);
 	}
 
+	/// A scene duplicated with its own copies keeps an unfilled role as the
+	/// role, as it does a scene drawn in it, and copies a filled one.
+	#[test]
+	fn an_unfilled_role_gets_no_copy_of_its_own() {
+		let mut collection = Collection::new();
+		let color = moq_scene::Rgba([255, 255, 255, 255]);
+		collection.sources.insert("game".into(), Source::Color { color });
+		collection.sources.insert("Main".into(), Source::Role { source: None });
+		assert!(!build::own_copy(&collection, "Main"), "nothing to copy");
+		assert!(build::own_copy(&collection, "game"));
+		let filled = Source::Role {
+			source: Some("game".into()),
+		};
+		collection.sources.insert("Main".into(), filled);
+		assert!(build::own_copy(&collection, "Main"), "the source filling it");
+	}
+
 	/// A clone of a source with its background removed copies its filters,
 	/// and the edit adding it is valid.
 	#[test]

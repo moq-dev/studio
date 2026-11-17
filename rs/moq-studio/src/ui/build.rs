@@ -1222,10 +1222,22 @@ pub(super) fn make_independent(state: &mut State, layer: &Layer, index: usize, i
 	})
 }
 
+/// Whether a layer showing `source` gets a copy of its own in a scene
+/// duplicated with its own copies: not a scene or the program drawn in it,
+/// which stays one picture, nor a role nothing fills, which has nothing to
+/// copy and stays the role.
+pub(super) fn own_copy(collection: &Collection, source: &str) -> bool {
+	let shown = collection.sources.get(collection.capture(source));
+	!matches!(
+		shown,
+		Some(Source::Scene { .. } | Source::Program | Source::Role { .. })
+	)
+}
+
 /// Add a scene after the one at `index`, as large and showing the same
 /// layers, named for it, and return its name. Its layers show the same
 /// sources, or with `independent` each a copy of its own, keeping the look,
-/// except a scene or the program drawn in it, which stays one picture.
+/// except where [`own_copy`] says not.
 pub(super) fn duplicate_scene(state: &mut State, index: usize, independent: bool) -> anyhow::Result<String> {
 	let collection = state.collection();
 	let scene = collection.scenes.get(index).context("the scene is gone")?;
@@ -1253,11 +1265,7 @@ pub(super) fn duplicate_scene(state: &mut State, index: usize, independent: bool
 	if independent {
 		let mut taken = BTreeSet::new();
 		for item in &mut copy.items {
-			let nested = matches!(
-				collection.sources.get(collection.capture(&item.source)),
-				Some(Source::Scene { .. } | Source::Program)
-			);
-			if nested {
+			if !own_copy(collection, &item.source) {
 				continue;
 			}
 			let (named, ..) = copies.entry(item.source.clone()).or_insert_with(|| {

@@ -693,11 +693,19 @@ impl Room {
 
 /// Where `source` would take a tile of `scene`: after its last layer in a
 /// slot, so a logo stays in front. `None` for a scene with no slots, or one
-/// showing it already.
+/// showing it already, under its name or another playing the same broadcast.
 pub fn tile(collection: &Collection, scene: &str, source: &str) -> Option<usize> {
 	let items = &collection.scene(scene)?.items;
 	let last = items.iter().rposition(|item| item.slot.is_some())?;
-	if items.iter().any(|item| collection.capture(&item.source) == source) {
+	let broadcast = |name: &str| match collection.sources.get(collection.capture(name)) {
+		Some(Source::Broadcast { path }) => Some(path),
+		_ => None,
+	};
+	let wanted = broadcast(source);
+	let showing = |item: &Item| {
+		collection.capture(&item.source) == source || wanted.is_some() && broadcast(&item.source) == wanted
+	};
+	if items.iter().any(showing) {
 		return None;
 	}
 	Some(last + 1)
@@ -826,6 +834,13 @@ pub fn appear(state: &mut State, room: &Room, scene: Option<&str>, source: &str)
 	latch(true)?;
 	if let Err(err) = state.commit(draft, None) {
 		if let Err(undone) = latch(false) {
+			// Forgotten here even so, so they may appear on their next
+			// join, and the next write of the file forgets it there too.
+			if let Some((identity, _)) = &identity
+				&& let Some(guest) = room.participants.lock().unwrap().get_mut(identity.as_str())
+			{
+				guest.appeared = false;
+			}
 			tracing::warn!(error = format!("{undone:#}"), "cannot forget a guest's appearance");
 		}
 		return Err(err);
@@ -1785,6 +1800,12 @@ pub(crate) mod tests {
 		collection.validate().unwrap();
 
 		assert_eq!(tile(&collection, "Scene", "alice"), Some(1));
+		let path = "guests/alice/camera.hang".to_string();
+		collection.sources.insert("Alice".into(), Source::Broadcast { path });
+		collection.scenes[0].items.insert(1, slot("Alice"));
+		assert_eq!(tile(&collection, "Scene", "alice"), None, "shown under another name");
+		collection.scenes[0].items.remove(1);
+		collection.sources.remove("Alice");
 		for guest in ["alice", "bob", "carol", "dave"] {
 			observe(&collection, guest, true);
 			assert!(tiled(&collection, &room, "Scene") < MAX_GUESTS);
