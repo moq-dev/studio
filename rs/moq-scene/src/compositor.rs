@@ -1023,8 +1023,8 @@ impl Compositor {
 				// dragged follows the pointer.
 				glide: Glide::new(REFLOW, |item| item.slot.is_some()),
 			});
-			// Only the slots move it, so a layer dragged across the scene
-			// follows the pointer.
+			// Only the slots start a glide: what each shows, whether it is
+			// open, and where.
 			let slotted = arranged.iter().filter(|item| item.slot.is_some());
 			let key = slotted
 				.map(|item| (item.source.clone(), item.visible, item.rect))

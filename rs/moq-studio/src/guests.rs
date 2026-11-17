@@ -218,8 +218,8 @@ pub struct Participant {
 	/// How often a new link let them back in after a removal. Their renewals are
 	/// published under it, so a token from before cannot read them.
 	pub generation: u64,
-	/// Whether they appeared on their own in a tile since their newest link
-	/// this session, after which where they are shown is the host's to say:
+	/// Whether they appeared on their own in a tile since their newest link,
+	/// across restarts, after which where they are shown is the host's to say:
 	/// a reconnect never undoes the host taking them off.
 	pub appeared: bool,
 }
