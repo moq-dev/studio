@@ -373,14 +373,10 @@ impl Panels {
 				vec2(picture.width(), 24.0),
 			)
 		};
-		let formats = [
-			(Format::Landscape, self.program_drawn, under(wide), sent[0]),
-			(Format::Portrait, portrait, under(tall), sent[1]),
-		];
-		for (format, canvas, rect, sent) in formats {
-			super::formats::format_label(ui, rect, format, canvas, sent);
-		}
-		self.shown_in(ui, under(wide), egui::Align::Center);
+		let free = super::formats::format_label(ui, under(wide), Format::Landscape, self.program_drawn, sent[0]);
+		super::formats::format_label(ui, under(tall), Format::Portrait, portrait, sent[1]);
+		// Centered under the landscape picture, clear of what is said there.
+		self.shown_in(ui, free, Some(wide.center().x));
 		wide
 	}
 

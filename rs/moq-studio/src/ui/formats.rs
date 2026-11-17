@@ -44,8 +44,15 @@ pub(super) fn shown_label(name: &str, format: Option<Format>) -> String {
 }
 
 /// Under a picture, in `rect`: its format, its size, and what its video sent
-/// over the last interval, while on air.
-pub(super) fn format_label(ui: &Ui, rect: egui::Rect, format: Format, canvas: Canvas, sent: Option<Rate>) {
+/// over the last interval, while on air. The part of `rect` left free
+/// between them.
+pub(super) fn format_label(
+	ui: &Ui,
+	rect: egui::Rect,
+	format: Format,
+	canvas: Canvas,
+	sent: Option<Rate>,
+) -> egui::Rect {
 	let painter = ui.painter();
 	let mid = rect.center().y;
 	mark(painter, pos2(rect.left() + 7.0, mid), format, kit::DIM);
@@ -53,13 +60,14 @@ pub(super) fn format_label(ui: &Ui, rect: egui::Rect, format: Format, canvas: Ca
 	let x = rect.left() + 20.0;
 	let width = name.size().x;
 	painter.galley(pos2(x, mid - name.size().y / 2.0), name, kit::TEXT);
-	painter.text(
+	let size = painter.text(
 		pos2(x + width + 10.0, mid),
 		Align2::LEFT_CENTER,
 		format!("{} × {}", canvas.width, canvas.height),
 		kit::ui(12.0),
 		kit::DIM,
 	);
+	let mut free = rect.with_min_x(size.right() + 16.0);
 	if let Some(sent) = sent {
 		let text = painter.text(
 			pos2(rect.right(), mid),
@@ -69,7 +77,9 @@ pub(super) fn format_label(ui: &Ui, rect: egui::Rect, format: Format, canvas: Ca
 			kit::DIM,
 		);
 		painter.circle_filled(pos2(text.left() - 9.0, mid), 3.5, kit::OK);
+		free.max.x = text.left() - 24.0;
 	}
+	free
 }
 
 /// A small outline of `format`'s shape, centered at `at`, in `ink`.
@@ -83,13 +93,17 @@ pub(super) fn mark(painter: &egui::Painter, at: egui::Pos2, format: Format, ink:
 }
 
 impl Panels {
-	/// In `rect`, under the pictures, centered or at its right by `align`:
-	/// where the selected layer is shown, both pictures, landscape, or
-	/// portrait, for a layer drawn in both. Picking another shows it there.
-	pub(super) fn shown_in(&mut self, ui: &mut Ui, rect: egui::Rect, align: egui::Align) {
-		let Some(picked) = self.selection.clone() else { return };
+	/// In `rect`, under the pictures, centered on `center` as near as it fits,
+	/// or at its right for `None`: where the selected layer is shown, both
+	/// pictures, landscape, or portrait, for a layer drawn in both. Picking
+	/// another shows it there. Without its words where `rect` is too narrow
+	/// for them, and not at all where it is too narrow for the choices, which
+	/// the inspector offers too.
+	pub(super) fn shown_in(&mut self, ui: &mut Ui, rect: egui::Rect, center: Option<f32>) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
+		self.follow_reloads(&state);
+		let Some(picked) = self.selection.clone() else { return };
 		let collection = state.collection();
 		if !collection.dual(&picked.layer) {
 			return;
@@ -111,16 +125,26 @@ impl Panels {
 			})
 			.sum::<f32>()
 			+ 4.0;
-		let width = 12.0 + words.size().x + 10.0 + choices + 4.0;
-		let size = vec2(width.min(rect.width()), 42.0);
-		let chip = match align {
-			egui::Align::Max => egui::Rect::from_min_size(pos2(rect.right() - size.x, rect.center().y - 21.0), size),
-			_ => egui::Rect::from_center_size(rect.center(), size),
+		let full = 12.0 + words.size().x + 10.0 + choices + 4.0;
+		let (width, words) = match full <= rect.width() {
+			true => (full, Some(words)),
+			false => (choices + 8.0, None),
 		};
+		if width > rect.width() {
+			return;
+		}
+		let size = vec2(width, 42.0);
+		let x = match center {
+			Some(center) => (center - size.x / 2.0).clamp(rect.left(), rect.right() - size.x),
+			None => rect.right() - size.x,
+		};
+		let chip = egui::Rect::from_min_size(pos2(x, rect.center().y - 21.0), size);
 		ui.painter()
 			.rect(chip, 10, kit::P1, Stroke::new(1.0, kit::LINE), StrokeKind::Inside);
-		let at = pos2(chip.left() + 12.0, chip.center().y - words.size().y / 2.0);
-		ui.painter().with_clip_rect(chip).galley(at, words, kit::DIM);
+		if let Some(words) = words {
+			let at = pos2(chip.left() + 12.0, chip.center().y - words.size().y / 2.0);
+			ui.painter().galley(at, words, kit::DIM);
+		}
 		let segmented = egui::Rect::from_min_size(
 			pos2(chip.right() - 4.0 - choices, chip.top() + 4.0),
 			vec2(choices, chip.height() - 8.0),
@@ -141,16 +165,18 @@ impl Panels {
 	}
 
 	/// BUILD's choice of the picture it edits, a scene drawn in both: the
-	/// landscape one or the portrait one, at the left of `rect`.
-	pub(super) fn format_tabs(&mut self, ui: &mut Ui, rect: egui::Rect) {
+	/// landscape one or the portrait one, at the left of `rect`; where it is.
+	pub(super) fn format_tabs(&mut self, ui: &mut Ui, rect: egui::Rect) -> egui::Rect {
 		let options = [(Format::Landscape, "Landscape"), (Format::Portrait, "Portrait")];
 		let mut format = self.format;
 		let at = egui::Rect::from_min_size(rect.left_center() - vec2(0.0, 17.0), vec2(rect.width(), 34.0));
-		ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+		let tabs = ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
 			ui.add(kit::Segmented::new(&mut format, &options))
-				.on_hover_text("The picture to edit: each places the layers on its own");
+				.on_hover_text("The picture to edit: each places the layers on its own")
+				.rect
 		});
 		self.format = format;
+		tabs.inner
 	}
 
 	/// The picture BUILD is not editing, small in `rect`, `id` drawn on

@@ -339,12 +339,18 @@ views! {
 	/// it, where the selected camera is shown between them, and each pad
 	/// showing the pair, as the `dual` mock-up frame has it.
 	live_dual: Still, dual(Page::Live, moq_scene::Format::Landscape);
+	/// It in a half-size window: the chip of where the camera is shown keeps
+	/// clear of what is said under the landscape picture, without its words.
+	live_dual_compact: Still, Open::Studio { view: View::Dual { page: Page::Live, format: moq_scene::Format::Landscape, index: Some(2), cued: None, off_air: None }, size: HALF, show: "dual.toml", relay: false };
 	/// Studio mode on it: NEXT shows the cued scene in both formats.
 	live_dual_studio: Still, Open::Studio { view: View::Dual { page: Page::Live, format: moq_scene::Format::Landscape, index: None, cued: Some("Guests"), off_air: None }, size: SIZE, show: "dual.toml", relay: false };
 	/// BUILD on it: the landscape picture edited, the portrait one small
 	/// beside it, and under them the tabs that pick which and where the
 	/// selected camera is shown, which the inspector says too.
 	build_dual: Still, dual(Page::Build, moq_scene::Format::Landscape);
+	/// BUILD on it in a half-size window: the chip keeps clear of the tabs,
+	/// or leaves the choice to the inspector where there is no room.
+	build_dual_compact: Still, Open::Studio { view: View::Dual { page: Page::Build, format: moq_scene::Format::Landscape, index: Some(2), cued: None, off_air: None }, size: HALF, show: "dual.toml", relay: false };
 	/// BUILD editing the portrait picture: the camera's handles at its
 	/// portrait place, the landscape picture small beside it.
 	build_dual_portrait: Still, dual(Page::Build, moq_scene::Format::Portrait);

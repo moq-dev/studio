@@ -124,6 +124,9 @@ impl Going {
 /// stream for the uplink.
 struct Measuring {
 	task: Task<Result<Rate, String>>,
+	/// How many pictures its ceiling was sized for, so turning a second on
+	/// measures again, past what both send.
+	encodes: u32,
 	/// Dropping it ends the measurement.
 	_stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -424,6 +427,9 @@ impl Panels {
 		};
 		let Some(going) = &mut self.going else { return };
 		going.encoder.poll();
+		if going.uplink.as_ref().is_some_and(|uplink| uplink.encodes < encodes) {
+			going.uplink = None;
+		}
 		if going.uplink.is_none()
 			&& let Task::Done(encoder) = &going.encoder
 		{
@@ -432,10 +438,14 @@ impl Panels {
 					// Up to past what it sends, so a connection that carries
 					// it says so rather than stopping at its rate.
 					let ceiling = encoding.total_of(encodes).scaled(1.0 / setup::headroom());
-					measure(&self.controls, &self.runtime, ceiling)
+					Measuring {
+						encodes,
+						..measure(&self.controls, &self.runtime, ceiling)
+					}
 				}
 				Err(_) => Measuring {
 					task: Task::Done(Err("nothing encodes, so nothing would be sent".into())),
+					encodes,
 					_stop: None,
 				},
 			});
@@ -1134,6 +1144,7 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 	});
 	Measuring {
 		task: task.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the measurement: {err}")))),
+		encodes: 1,
 		_stop: Some(stop),
 	}
 }

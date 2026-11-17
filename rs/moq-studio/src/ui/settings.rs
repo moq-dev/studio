@@ -558,6 +558,10 @@ impl Panels {
 					});
 					if result.is_ok() {
 						self.sizes.remove(&name);
+						// Given its own size, its layers shown only in portrait go.
+						if size.is_some() {
+							self.deselect_item();
+						}
 					}
 					result
 				}
@@ -578,6 +582,11 @@ impl Panels {
 		};
 		let result = edit(&mut state, label.to_string(), None, |draft| draft.set_portrait(on));
 		drop(state);
+		// Turned off, the layers shown only in portrait go, which may move
+		// the selected layer's index.
+		if result.is_ok() && !on {
+			self.deselect_item();
+		}
 		self.check(result);
 	}
 

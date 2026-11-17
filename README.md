@@ -1390,8 +1390,8 @@ its own size and half of it, its tracks sharing the connection's bandwidth
 with the program's, and its own encode of the audio scene it carries. A show
 going out in both formats publishes its portrait picture the same way at
 `<broadcast>/portrait`, at the canvas turned and half of it, with its own
-encode of the audio scene on program. It has no layer layout: what is
-published independently is drawn into it. Each relay carries both broadcasts,
+encode of the audio scene on program. The sources published independently
+are drawn into it, with no layer layout of their own. Each relay carries both broadcasts,
 and GO LIVE's checks time the encoder and size the connection for both.
 Timestamps come from the studio's own clock, so a source that stalls repeats
 its last picture instead of holding up the stream.

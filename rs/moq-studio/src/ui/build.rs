@@ -93,8 +93,8 @@ impl Panels {
 			egui::pos2(main.left(), main.bottom() + 18.0),
 			egui::pos2(main.right().max(small.right()), main.bottom() + 48.0),
 		);
-		self.format_tabs(ui, under);
-		self.shown_in(ui, under.with_min_x(under.left() + 200.0), egui::Align::Max);
+		let tabs = self.format_tabs(ui, under);
+		self.shown_in(ui, under.with_min_x(tabs.right() + 12.0), None);
 		self.build_keys(ui);
 	}
 

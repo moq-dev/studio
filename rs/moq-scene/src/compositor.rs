@@ -996,12 +996,13 @@ impl Compositor {
 			&mut self.view.reflows,
 			&self.layers,
 			collection.formatted(Format::Landscape),
+			collection,
 			sources,
 			now,
 		);
 		let turned = self.portrait.as_mut().map(|view| {
 			let formatted = collection.formatted(Format::Portrait);
-			reflow(&mut view.reflows, &self.layers, formatted, sources, now)
+			reflow(&mut view.reflows, &self.layers, formatted, collection, sources, now)
 		});
 		let collection = &*staged;
 		let turned = turned.as_deref();
@@ -1727,6 +1728,7 @@ fn reflow<'a>(
 	reflows: &mut HashMap<String, Reflow>,
 	layers: &HashMap<String, Layer>,
 	mut staged: Cow<'a, Collection>,
+	nested: &Collection,
 	sources: &Sources,
 	now: Instant,
 ) -> Cow<'a, Collection> {
@@ -1735,10 +1737,9 @@ fn reflow<'a>(
 		let feed = sources.get(collection.capture(name));
 		!feed.is_some_and(|feed| matches!(feed.status(), Status::Offline | Status::Failed(_)))
 	};
+	// A scene source shows the landscape picture in both, at its size.
 	let size = |name: &str| match collection.nested(name) {
-		Some(Nested::Scene(scene)) => collection
-			.canvas(Some(scene))
-			.map(|canvas| (canvas.width, canvas.height)),
+		Some(Nested::Scene(scene)) => nested.canvas(Some(scene)).map(|canvas| (canvas.width, canvas.height)),
 		Some(Nested::Program) => Some((collection.canvas.width, collection.canvas.height)),
 		None => {
 			let layer = layers.get(collection.capture(name))?;
@@ -3320,6 +3321,37 @@ mod tests {
 			assert_eq!(texel(&turned, 4, 3, 4), BLUE);
 			assert_eq!(texel(&turned, 4, 1, 1), BLACK);
 			assert!(!turned.as_chunks::<4>().0.contains(&GREEN), "a's portrait-only layer");
+		})
+		.await;
+	}
+
+	/// A slot showing a scene in the portrait picture is cropped for the
+	/// landscape picture the scene source shows there.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_slot_showing_a_scene_crops_its_landscape_picture_in_portrait() {
+		local(async {
+			let mut collection = dual();
+			collection
+				.sources
+				.insert("scene b".into(), Source::Scene { scene: "b".into() });
+			collection.scenes.push(Scene {
+				items: vec![Item {
+					slot: Some(crate::Slot::Main),
+					..Item::new("scene b", Rect::default())
+				}],
+				..Scene::new("s")
+			});
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.fit(&studio.collection).unwrap();
+			studio.render(Instant::now());
+			let turned = studio.collection.formatted(Format::Portrait);
+			let landscape = turned.arranged("s", |_| true, |_| Some((8, 4))).unwrap();
+			let portrait = turned.arranged("s", |_| true, |_| Some((4, 8))).unwrap();
+			assert_ne!(landscape, portrait);
+			let arranged = studio.compositor.arranged(Format::Portrait, "s").unwrap();
+			assert_eq!(arranged, landscape.as_slice());
 		})
 		.await;
 	}
