@@ -177,7 +177,8 @@ impl Keyboard {
 	/// the layout puts `name` on it, returning whether egui hears it too.
 	pub fn pressed(&self, key: PhysicalKey, name: Key, repeat: bool, studio: bool) -> bool {
 		let mut pressing = self.0.lock().unwrap();
-		let paste = !repeat && paste(pressing.modifiers, key, &name);
+		// A paste lands in the studio's window, never from the multiview's.
+		let paste = studio && !repeat && paste(pressing.modifiers, key, &name);
 		let heard = Self::hear(&mut pressing, key, name, repeat, studio);
 		pressing.pasted |= heard && paste;
 		heard
@@ -690,6 +691,25 @@ mod tests {
 		assert!(!press(KeyCode::Numpad1, false));
 		assert!(!press(KeyCode::Numpad1, true));
 		assert_eq!(fired.try_iter().count(), 1);
+	}
+
+	/// A paste pressed in the multiview pastes nothing into the studio.
+	#[test]
+	fn only_the_studios_window_pastes() {
+		let keyboard = Keyboard::default();
+		keyboard.modifiers(ModifiersState::CONTROL);
+		let paste = |studio| {
+			keyboard.pressed(
+				PhysicalKey::Code(KeyCode::KeyV),
+				Key::Character("v".into()),
+				false,
+				studio,
+			)
+		};
+		assert!(paste(false));
+		assert!(!keyboard.pasted(), "the multiview pasted");
+		assert!(paste(true));
+		assert!(keyboard.pasted(), "the studio's window pasted");
 	}
 
 	/// Typing into the studio's window holds its keys back, not those the
