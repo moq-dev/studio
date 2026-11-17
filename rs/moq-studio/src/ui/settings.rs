@@ -532,12 +532,19 @@ impl Panels {
 					canvas.width, canvas.height, canvas.framerate
 				);
 				// Only a landscape canvas goes out in portrait too.
-				edit(&mut state, label, None, |draft| {
+				let turning_off = canvas.height >= canvas.width && state.collection().portrait;
+				let result = edit(&mut state, label, None, |draft| {
 					if canvas.height >= canvas.width {
 						draft.set_portrait(false)?;
 					}
 					draft.set_canvas(canvas)
-				})
+				});
+				// As turning Both off does, it removes the layers shown only in
+				// portrait, which may move the selected layer's index.
+				if result.is_ok() && turning_off {
+					self.deselect_item();
+				}
+				result
 			}
 			Restart::Scene(name, size) => match state.collection().scenes.iter().position(|scene| scene.name == name) {
 				Some(index) => {
