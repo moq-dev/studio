@@ -15,9 +15,10 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
-use crate::collection::{Canvas, Ease, KeepClear, Rect, mix};
+use crate::collection::{Canvas, Item, KeepClear, Rect, mix};
 use crate::compositor::Target;
 use crate::effect::Effects;
+use crate::glide::Glide;
 
 /// How often the picture under an item is read, at most.
 pub const INTERVAL: Duration = Duration::from_millis(250);
@@ -440,61 +441,6 @@ enum At {
 	Slot(Slot),
 }
 
-/// An item's rect easing from one place to the next, on the program clock,
-/// as a move transition eases.
-struct Glide {
-	from: Rect,
-	to: Rect,
-	/// When the glide under way started, and how long it takes.
-	start: Option<(Instant, Duration)>,
-}
-
-impl Glide {
-	/// Glide from where it is drawn at `now` to `to`.
-	fn go(&mut self, to: Rect, now: Instant, duration: Duration) {
-		self.from = self.at(now);
-		self.to = to;
-		self.start = Some((now, duration));
-	}
-
-	/// Where it is drawn at `now`, on its way to `to`: a target it was not
-	/// gliding to, as a drag or a resize gives, it takes at once.
-	fn show(&mut self, to: Rect, now: Instant) -> Rect {
-		if to != self.to {
-			*self = Self {
-				from: to,
-				to,
-				start: None,
-			};
-		}
-		let at = self.at(now);
-		if at == self.to {
-			self.start = None;
-		}
-		at
-	}
-
-	fn at(&self, now: Instant) -> Rect {
-		let Some((start, duration)) = self.start else {
-			return self.to;
-		};
-		let linear = match duration.is_zero() {
-			true => 1.0,
-			false => now.saturating_duration_since(start).as_secs_f32() / duration.as_secs_f32(),
-		};
-		if linear >= 1.0 {
-			return self.to;
-		}
-		let progress = Ease::InOut.apply(linear);
-		Rect {
-			x: mix(self.from.x, self.to.x, progress),
-			y: mix(self.from.y, self.to.y, progress),
-			width: mix(self.from.width, self.to.width, progress),
-			height: mix(self.from.height, self.to.height, progress),
-		}
-	}
-}
-
 /// Chooses where one item keeping clear goes, from what reads of the picture
 /// under it show.
 pub(crate) struct Placer {
@@ -508,7 +454,12 @@ pub(crate) struct Placer {
 	/// How long its scene had been on as of the last read, which tells it
 	/// going on again.
 	since: Option<Duration>,
-	glide: Glide,
+	/// The item gliding from one place to the next as a move transition
+	/// eases, keyed by how many times it moved.
+	glide: Glide<u64>,
+	/// How long [`glide`](Self::glide) takes.
+	glides: Duration,
+	moves: u64,
 	placement: Placement,
 	/// What [`Sight::generation`] and settings the heat was drawn from.
 	heated: Option<(u64, KeepClear)>,
@@ -529,11 +480,9 @@ impl Placer {
 			looking: Some(now),
 			worst: None,
 			since: None,
-			glide: Glide {
-				from: nowhere,
-				to: nowhere,
-				start: None,
-			},
+			glide: Glide::new(KeepClear::default().glide, |_| true),
+			glides: KeepClear::default().glide,
+			moves: 0,
 			placement: Placement {
 				rect: nowhere,
 				slot: None,
@@ -571,6 +520,7 @@ impl Placer {
 		self.at = At::Held;
 		self.looking = None;
 		self.worst = None;
+		self.glide = Glide::new(self.glides, |_| true);
 	}
 
 	/// Where it is as of the last [`place`](Self::place).
@@ -601,7 +551,9 @@ impl Placer {
 		}
 
 		let target = self.target(saved, &slots);
-		let rect = self.glide.show(target, now);
+		// Another target with no move, as a resize gives, shows at once.
+		self.glide.show(self.moves, &[shown(target)], now);
+		let rect = self.glide.placed()[0].rect;
 		self.placement.rect = rect;
 		self.placement.slot = match self.at {
 			At::Slot(slot) => Some(slot),
@@ -663,7 +615,7 @@ impl Placer {
 				self.at = At::Rest;
 			}
 			if better {
-				self.go(best, here, over, slots, keep, now);
+				self.go(best, here, over, keep, now);
 			}
 			return;
 		}
@@ -678,25 +630,27 @@ impl Placer {
 		let since = *self.worst.get_or_insert(now);
 		if now.saturating_duration_since(since) >= WORST {
 			self.worst = None;
-			self.go(best, here, over, slots, keep, now);
+			self.go(best, here, over, keep, now);
 		}
 	}
 
 	/// Glide to `slot` from `here`, over what mattered most there.
-	fn go(
-		&mut self,
-		slot: Slot,
-		here: Rect,
-		over: Option<Signal>,
-		slots: &[(Slot, Rect)],
-		keep: &KeepClear,
-		now: Instant,
-	) {
-		let (_, to) = slots.iter().find(|(fits, _)| *fits == slot).expect("a slot that fits");
+	fn go(&mut self, slot: Slot, here: Rect, over: Option<Signal>, keep: &KeepClear, now: Instant) {
 		self.placement.left = Some(Left { rect: here, over });
 		self.at = At::Slot(slot);
-		self.glide.go(*to, now, keep.glide);
+		if keep.glide != self.glides {
+			// Another length: a glide of that length, from where it is.
+			self.glides = keep.glide;
+			self.glide = Glide::new(keep.glide, |_| true);
+			self.glide.show(self.moves, &[shown(self.placement.rect)], now);
+		}
+		self.moves += 1;
 	}
+}
+
+/// An item at `rect`, standing for the one keeping clear in its glide.
+fn shown(rect: Rect) -> Item {
+	Item::new("keeping clear", rect)
 }
 
 /// The pipeline every read of the picture under an item goes through.
@@ -1054,6 +1008,44 @@ mod tests {
 		assert_eq!(half.x, (saved.x + to.x) / 2.0, "halfway, eased in and out");
 		let landed = placer.place(saved, &KeepClear::default(), CANVAS, moved.saturating_add(glide));
 		assert_eq!(landed, to);
+	}
+
+	/// It glides for as long as its settings say, or jumps.
+	#[test]
+	fn it_glides_as_long_as_it_is_set_to() {
+		let to = Slot::TopLeft.rect(288.0, 288.0, CANVAS).unwrap();
+		for glide in [Duration::ZERO, Duration::from_millis(1500)] {
+			let keep = KeepClear {
+				glide,
+				..KeepClear::default()
+			};
+			let start = Instant::now();
+			let mut placer = Placer::new(start);
+			let saved = camera();
+			let mut now = start;
+			let mut moved = None;
+			for _ in 0..8 {
+				placer.see(&read(MOVING, game), now);
+				placer.place(saved, &keep, CANVAS, now);
+				if placer.placement().slot.is_some() {
+					moved = Some(now);
+					break;
+				}
+				now = now.saturating_add(INTERVAL);
+			}
+			let moved = moved.expect("it chose a slot");
+			let first = placer.placement().rect;
+			match glide.is_zero() {
+				true => assert_eq!(first, to, "a jump lands at once"),
+				false => {
+					assert_eq!(first, saved, "a glide starts where it was");
+					let half = placer.place(saved, &keep, CANVAS, moved.saturating_add(glide / 2));
+					assert_eq!(half.x, (saved.x + to.x) / 2.0, "halfway at half its length");
+					let landed = placer.place(saved, &keep, CANVAS, moved.saturating_add(glide));
+					assert_eq!(landed, to);
+				}
+			}
+		}
 	}
 
 	/// One busy read is never a reason to move: what it covers lingers, but
