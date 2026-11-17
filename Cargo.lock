@@ -4824,6 +4824,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "image",
+ "jiff",
  "keyring-core",
  "kio",
  "moq-audio",

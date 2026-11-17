@@ -54,6 +54,18 @@ struct Sound {
 	audio: moq_scene::Audio,
 }
 
+/// A scene's tally, and the tag over its own, if any, by whether it is `on_air`,
+/// the stream is `live`, and it is `cued`: off air, the scene on program is
+/// the one the stream opens on.
+pub(super) fn tally(on_air: bool, live: bool, cued: bool) -> (Tally, Option<&'static str>) {
+	match (on_air, live, cued) {
+		(true, true, _) => (Tally::Air, None),
+		(true, false, _) => (Tally::Cue, Some("First")),
+		(false, _, true) => (Tally::Cue, None),
+		(false, _, false) => (Tally::Off, None),
+	}
+}
+
 /// Room around the bars' contents.
 const MARGIN: f32 = 14.0;
 /// Room between pads.
@@ -406,6 +418,17 @@ impl Panels {
 				ui.ctx().send_viewport_cmd(ViewportCommand::RequestPaste);
 				self.dropping.paste_from_window();
 			}
+			let open = self.multiview.open();
+			let text = match open {
+				true => "Close the multiview",
+				false => "Open the multiview",
+			};
+			let multiview = ui
+				.add(kit::button(Icon::Detach, text))
+				.on_hover_text("A window for another monitor with every scene and source, live");
+			if multiview.clicked() {
+				self.multiview.set_open(!open);
+			}
 			// Closing ends the show as quitting does, which would cut a stream
 			// on air: the broadcaster ends that with END STREAM.
 			let off = matches!(self.engine.on_air(), crate::engine::OnAir::Off) && !self.controls.going();
@@ -746,14 +769,8 @@ impl Panels {
 		};
 		let on_air = snapshot.program.as_deref() == Some(pad.name.as_str());
 		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
-		// Off air, the scene on program is the one the stream opens on.
 		let live = self.engine.on_air().live().is_some();
-		let (tally, tag) = match (on_air, live, cued) {
-			(true, true, _) => (Tally::Air, None),
-			(true, false, _) => (Tally::Cue, Some("First")),
-			(false, _, true) => (Tally::Cue, None),
-			(false, _, false) => (Tally::Off, None),
-		};
+		let (tally, tag) = tally(on_air, live, cued);
 		let response = self.pad(ui, pad, tally, tag, width, snapshot.shape);
 		let click = match snapshot.studio {
 			true => PadAction::Cue(pad.name.clone()),

@@ -70,7 +70,7 @@ pub use collection::{
 	Arrangement, Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item,
 	Keyframe, Layer, MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Slot, Source, Transition, Video,
 };
-pub use compositor::{Compositor, FORMAT, Output, Thumbnail};
+pub use compositor::{Compositor, Detail, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
 pub use grant::Grants;
 pub use scale::Scaler;
