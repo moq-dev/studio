@@ -60,9 +60,10 @@ impl Panels {
 				let landscape = (self.preview.id, cued.canvas);
 				(landscape, (portrait_preview.id, portrait))
 			}),
-			(Some(portrait), None) => self.portrait.as_ref().map(|registered| {
-				((self.program.id, self.program_drawn), (registered.id, portrait))
-			}),
+			(Some(portrait), None) => self
+				.portrait
+				.as_ref()
+				.map(|registered| ((self.program.id, self.program_drawn), (registered.id, portrait))),
 			(None, _) => None,
 		};
 		let Some((landscape, portrait)) = pictures else {
@@ -86,12 +87,13 @@ impl Panels {
 		);
 		self.stage(ui, fx, snapshot, main);
 		self.other_picture(ui, small, other.0, other.1);
-		let under = egui::Rect::from_min_size(
+		// Under both pictures: the tabs at the left, the chip at the right.
+		let under = egui::Rect::from_min_max(
 			egui::pos2(main.left(), main.bottom() + 18.0),
-			egui::vec2(main.width(), 30.0),
+			egui::pos2(main.right().max(small.right()), main.bottom() + 48.0),
 		);
 		self.format_tabs(ui, under);
-		self.shown_in(ui, under.with_min_x(under.left() + 210.0));
+		self.shown_in(ui, under.with_min_x(under.left() + 200.0), egui::Align::Max);
 		self.build_keys(ui);
 	}
 

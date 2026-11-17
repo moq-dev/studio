@@ -128,10 +128,10 @@ impl Panels {
 		if collection.dual(&picked.layer) {
 			let mut shown = item.format;
 			ui.horizontal(|ui| {
-				ui.label("Shown in");
+				ui.label("Format");
 				let options = super::formats::shown_in_options();
 				ui.add(kit::Segmented::new(&mut shown, &options))
-					.on_hover_text("Which pictures show it: the landscape one, the portrait one, or both");
+					.on_hover_text("Which pictures show it: both, or only the landscape or the portrait one");
 			});
 			if shown != item.format {
 				asked = Some(Asked::Item(

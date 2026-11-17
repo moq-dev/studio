@@ -59,7 +59,10 @@ pub(super) fn staged<'a>(state: &'a State, scene: Option<&str>, format: Format) 
 pub(super) fn drawn(state: &State, layer: &Layer, index: usize, format: Format) -> Option<(Rect, Crop)> {
 	let collection = state.collection();
 	let format = collection.format_of(layer, format);
-	let item = collection.items(layer)?.get(index)?.portrayed(format, collection.canvas);
+	let item = collection
+		.items(layer)?
+		.get(index)?
+		.portrayed(format, collection.canvas);
 	let item = &item;
 	let canvas = match collection.dual(layer) {
 		true => collection.canvas_of(format),

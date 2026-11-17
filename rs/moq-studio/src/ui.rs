@@ -352,6 +352,11 @@ impl Studio {
 		self.panels.page = page;
 	}
 
+	/// Edit `format`'s picture on BUILD, as its tab under the picture would.
+	pub(crate) fn edit_format(&mut self, format: Format) {
+		self.panels.format = format;
+	}
+
 	/// Turn to MIX in `view`, with the strip of the sound called `opened`
 	/// open, as clicking its name would.
 	pub(crate) fn mix(&mut self, view: mixer::View, opened: Option<&str>) {

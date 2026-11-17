@@ -376,7 +376,7 @@ impl Panels {
 		for (format, canvas, rect, sent) in formats {
 			super::formats::format_label(ui, rect, format, canvas, sent);
 		}
-		self.shown_in(ui, under(wide));
+		self.shown_in(ui, under(wide), egui::Align::Center);
 		wide
 	}
 
@@ -390,7 +390,10 @@ impl Panels {
 				.iter()
 				.find(|broadcast| broadcast.name.as_deref() == name)?;
 			let tracks = broadcast.tracks.iter().filter(|track| track.label.starts_with("video"));
-			let sent: Vec<u64> = tracks.filter_map(|track| track.sent).map(|sent| sent.as_bps()).collect();
+			let sent: Vec<u64> = tracks
+				.filter_map(|track| track.sent)
+				.map(|sent| sent.as_bps())
+				.collect();
 			(!sent.is_empty()).then(|| moq_net::bandwidth::Rate::from_bps(sent.into_iter().sum()))
 		};
 		[video(None), video(Some(moq_scene::PORTRAIT))]
@@ -875,8 +878,7 @@ impl Panels {
 		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
 		let live = self.engine.on_air().live().is_some();
 		let (tally, tag) = tally(on_air, live, cued);
-		let portrait = snapshot.portrait.filter(|_| pad.dual);
-		let response = self.pad(ui, pad, tally, tag, width, snapshot.pad_shape(), portrait);
+		let response = self.pad(ui, pad, tally, tag, width, snapshot);
 		let click = match snapshot.studio {
 			true => PadAction::Cue(pad.name.clone()),
 			false => PadAction::Take(pad.name.clone()),
@@ -955,7 +957,8 @@ impl Panels {
 	}
 
 	/// A scene's pad, `width` wide, with its thumbnail once the compositor
-	/// has drawn it, which it draws while the pad is on screen.
+	/// has drawn it, which it draws while the pad is on screen, and its
+	/// portrait one beside it while the show goes out in both.
 	fn pad(
 		&mut self,
 		ui: &mut Ui,
@@ -963,9 +966,9 @@ impl Panels {
 		tally: Tally,
 		tag: Option<&str>,
 		width: f32,
-		shape: f32,
-		portrait: Option<Canvas>,
+		snapshot: &Snapshot,
 	) -> egui::Response {
+		let (shape, portrait) = (snapshot.pad_shape(), snapshot.portrait.filter(|_| pad.dual));
 		let thumbnail = Thumbnail::Scene(pad.name.clone());
 		let size = vec2(pad.canvas.width as f32, pad.canvas.height as f32);
 		let picture = self

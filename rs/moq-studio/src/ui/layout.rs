@@ -264,7 +264,10 @@ pub fn fit(rect: Rect, shape: f32) -> Rect {
 /// in `rect`, and centered in it.
 pub fn pair(rect: Rect, shapes: [f32; 2], gap: f32) -> [Rect; 2] {
 	let [landscape, portrait] = shapes;
-	let tall = rect.height().min((rect.width() - gap).max(0.0) / (landscape + portrait)).max(0.0);
+	let tall = rect
+		.height()
+		.min((rect.width() - gap).max(0.0) / (landscape + portrait))
+		.max(0.0);
 	let wide = tall * (landscape + portrait) + gap;
 	let min = pos2(rect.center().x - wide / 2.0, rect.center().y - tall / 2.0);
 	let first = Rect::from_min_size(min, vec2(tall * landscape, tall));

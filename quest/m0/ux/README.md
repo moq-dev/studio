@@ -63,7 +63,7 @@ shows those pictures beside the frames they implement.
   from capture, dockable into spare room but never docked by default
   (rejected: a chat column in the main window; leaving chat to the browser).
 - **Formats:** ✅ one format per show in m0, landscape or portrait, and the
-  layout follows it. [Both at once](/quest/m1/dual-format.md) is m1 (rejected:
+  layout follows it. [Both at once](https://github.com/moq-dev/studio/pull/200) is m1 (rejected:
   designing every m0 page for two pictures).
 - **Layout follows the picture:** ✅ the picture is larger than any other
   part of the window but the title bar, as large as the window allows, and

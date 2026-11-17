@@ -41,6 +41,15 @@ ready; local first with a hosted model as an opt-in tie-breaker).
   reflow, eases any list of items from one placement to the next on the
   program clock, keyed by what changed.
 
+- **In each format:** while the show goes out in landscape and portrait at
+  once ([moq-dev/studio#200](https://github.com/moq-dev/studio/pull/200)),
+  the layer keeps out of the way in each picture on its own. The analysis
+  reads each picture, the slots are each canvas's own, and the slot chosen
+  is the layer's place in that picture: its `rect` in landscape, its
+  `portrait` place in portrait, which moq-scene's `Item::placed` sets. A
+  layer shown in one format only is placed in that one alone. Off in
+  portrait, it keeps the place turning **Both at once** on gave it.
+
 Measure, per AGENTS.md: the frame time and GPU copies the analysis adds, and
 that the encoder's load does not move. Should the signals prove too weak, a
 small on-device model is a later quest, not a hosted one.

@@ -1817,7 +1817,9 @@ impl Engine {
 							let texture = texture(&name);
 							(name, texture, canvas)
 						})
-						.chain(portrait.map(|(texture, canvas)| (moq_scene::PORTRAIT.to_string(), Some(texture), canvas)))
+						.chain(
+							portrait.map(|(texture, canvas)| (moq_scene::PORTRAIT.to_string(), Some(texture), canvas)),
+						)
 						.collect(),
 					recorded: match recorded {
 						Some(scene) => (texture(&scene), recorded_canvas),

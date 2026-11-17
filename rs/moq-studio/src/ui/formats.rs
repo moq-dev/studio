@@ -83,10 +83,10 @@ pub(super) fn mark(painter: &egui::Painter, at: egui::Pos2, format: Format, ink:
 }
 
 impl Panels {
-	/// Centered in `rect`, under the pictures: where the selected layer is
-	/// shown, both pictures, landscape, or portrait, for a layer drawn in
-	/// both. Picking another shows it there.
-	pub(super) fn shown_in(&mut self, ui: &mut Ui, rect: egui::Rect) {
+	/// In `rect`, under the pictures, centered or at its right by `align`:
+	/// where the selected layer is shown, both pictures, landscape, or
+	/// portrait, for a layer drawn in both. Picking another shows it there.
+	pub(super) fn shown_in(&mut self, ui: &mut Ui, rect: egui::Rect, align: egui::Align) {
 		let Some(picked) = self.selection.clone() else { return };
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -103,11 +103,20 @@ impl Panels {
 		let words = ui.painter().layout_no_wrap(words, kit::ui(12.0), kit::DIM);
 		let choices: f32 = options
 			.iter()
-			.map(|(_, name)| ui.painter().layout_no_wrap(name.to_string(), font.clone(), kit::TEXT).size().x + 28.0)
+			.map(|(_, name)| {
+				ui.painter()
+					.layout_no_wrap(name.to_string(), font.clone(), kit::TEXT)
+					.size()
+					.x + 28.0
+			})
 			.sum::<f32>()
 			+ 4.0;
 		let width = 12.0 + words.size().x + 10.0 + choices + 4.0;
-		let chip = egui::Rect::from_center_size(rect.center(), vec2(width.min(rect.width()), 42.0));
+		let size = vec2(width.min(rect.width()), 42.0);
+		let chip = match align {
+			egui::Align::Max => egui::Rect::from_min_size(pos2(rect.right() - size.x, rect.center().y - 21.0), size),
+			_ => egui::Rect::from_center_size(rect.center(), size),
+		};
 		ui.painter()
 			.rect(chip, 10, kit::P1, Stroke::new(1.0, kit::LINE), StrokeKind::Inside);
 		let at = pos2(chip.left() + 12.0, chip.center().y - words.size().y / 2.0);
@@ -161,7 +170,8 @@ impl Panels {
 			true => kit::FAINT,
 			false => kit::LINE,
 		};
-		ui.painter().rect_stroke(rect, 6, Stroke::new(1.5, ink), StrokeKind::Outside);
+		ui.painter()
+			.rect_stroke(rect, 6, Stroke::new(1.5, ink), StrokeKind::Outside);
 		let under = egui::Rect::from_min_size(rect.left_bottom() + vec2(0.0, 8.0), vec2(rect.width(), 18.0));
 		let painter = ui.painter();
 		mark(painter, pos2(under.left() + 7.0, under.center().y), other, kit::DIM);

@@ -71,16 +71,19 @@ impl Placement {
 	/// one without a place of its own there: as far across and down, scaled by
 	/// as much as the narrower side shrinks, so it keeps its shape and fits.
 	pub fn fitted(rect: Rect, crop: Crop, landscape: Canvas) -> Self {
-		let portrait = landscape.turned();
-		let (from, to) = (
-			(landscape.width as f32, landscape.height as f32),
-			(portrait.width as f32, portrait.height as f32),
-		);
-		let scale = (to.0 / from.0).min(to.1 / from.1);
+		let (from, to) = (Rect::fill(&landscape), Rect::fill(&landscape.turned()));
+		Self::moved(rect, crop, &from, &to)
+	}
+
+	/// `rect` moved from on `from` to on `to` as [`fitted`](Self::fitted)
+	/// moves it from one canvas to the other: its center as far across and
+	/// down, and scaled to fit, uncropped.
+	fn moved(rect: Rect, crop: Crop, from: &Rect, to: &Rect) -> Self {
+		let scale = (to.width / from.width).min(to.height / from.height);
 		let (width, height) = (rect.width * scale, rect.height * scale);
 		let center = (
-			(rect.x + rect.width / 2.0) / from.0 * to.0,
-			(rect.y + rect.height / 2.0) / from.1 * to.1,
+			to.x + (rect.x + rect.width / 2.0 - from.x) / from.width * to.width,
+			to.y + (rect.y + rect.height / 2.0 - from.y) / from.height * to.height,
 		);
 		Self {
 			rect: Rect {
@@ -229,7 +232,9 @@ impl Collection {
 			return Cow::Borrowed(self);
 		}
 		if format == Format::Landscape {
-			let hides = self.layers().any(|(_, items)| items.iter().any(|item| !item.shown_in(format)));
+			let hides = self
+				.layers()
+				.any(|(_, items)| items.iter().any(|item| !item.shown_in(format)));
 			if !hides {
 				return Cow::Borrowed(self);
 			}
@@ -323,7 +328,10 @@ impl Collection {
 			}
 		}
 		if self.portrait
-			&& let Some(scene) = self.scenes.iter().find(|scene| scene.published && scene.name == PORTRAIT)
+			&& let Some(scene) = self
+				.scenes
+				.iter()
+				.find(|scene| scene.published && scene.name == PORTRAIT)
 		{
 			return Err(Error::Invalid(format!(
 				"scene `{}` is published where the portrait picture goes out; rename it to publish it",
@@ -338,8 +346,8 @@ impl Collection {
 	/// cropped to the top of the portrait canvas, or all of it without a
 	/// camera, and the largest camera stacked under it, keeping its shape if
 	/// it has an outline; a backdrop covering the landscape canvas covers the
-	/// portrait one, cropped. The rest sit where they are, fitted, until
-	/// moved there.
+	/// portrait one, cropped. What sits on the main picture keeps its place
+	/// on it. The rest sit where they are, fitted, until moved there.
 	fn turned_on(&self, items: &[Item]) -> Vec<Item> {
 		let landscape = self.canvas;
 		let portrait = landscape.turned();
@@ -353,7 +361,8 @@ impl Collection {
 			})
 			.collect();
 		let largest = |among: &mut dyn Iterator<Item = usize>| {
-			among.max_by(|a, b| area(&items[*a]).total_cmp(&area(&items[*b])).then(b.cmp(a)))
+			// The frontmost of two as large, which is the one seen.
+			among.max_by(|a, b| area(&items[*a]).total_cmp(&area(&items[*b])).then(a.cmp(b)))
 		};
 		let main = largest(&mut free.iter().copied()).filter(|&at| area(&items[at]) >= 0.25);
 		let camera = largest(&mut free.iter().copied().filter(|&at| {
@@ -371,6 +380,21 @@ impl Collection {
 				None => whole,
 			};
 			placed[main].portrait = Some(covering(&items[main], top));
+			// What sits on the main picture, such as a lower third, keeps
+			// its place on it, rather than landing on the camera.
+			let on = items[main].rect;
+			for &at in free.iter().filter(|&&at| Some(at) != Some(main) && Some(at) != camera) {
+				let item = &items[at];
+				let center = (
+					item.rect.x + item.rect.width / 2.0,
+					item.rect.y + item.rect.height / 2.0,
+				);
+				let inside =
+					(on.x..on.x + on.width).contains(&center.0) && (on.y..on.y + on.height).contains(&center.1);
+				if camera.is_some() && inside && area(item) < BACKDROP {
+					placed[at].portrait = Some(Placement::moved(item.rect, item.crop, &on, &top));
+				}
+			}
 			if let Some(camera) = camera {
 				let under = Rect {
 					y: top.height,
@@ -588,9 +612,30 @@ mod tests {
 				height: 768.0
 			}
 		);
-		// The logo has no place of its own, so it follows its landscape one.
-		assert_eq!(items[2].portrait, None);
+		// The logo on the game keeps its place on it, above the camera.
+		assert_eq!(
+			items[2].portrait.unwrap().rect,
+			Rect {
+				x: 900.0,
+				y: 73.0,
+				width: 158.0,
+				height: 68.0
+			}
+		);
 		turned.validate().unwrap();
+	}
+
+	/// A backdrop as large as the game, behind it, is not the main picture:
+	/// the game in front is, and the backdrop covers the portrait canvas.
+	#[test]
+	fn the_frontmost_of_two_as_large_is_the_main_picture() {
+		let mut show = show();
+		let fill = show.scenes[0].items[0].rect;
+		show.scenes[0].items.insert(0, Item::new("logo", fill));
+		let turned = turned(&show);
+		let items = &turned.scenes[0].items;
+		assert_eq!(items[0].portrait.unwrap().rect, Rect::fill(&show.canvas.turned()));
+		assert_eq!(items[1].portrait.unwrap().rect.height, 1152.0);
 	}
 
 	#[test]
@@ -723,12 +768,8 @@ mod tests {
 			collection.validate().unwrap_err().to_string()
 		};
 		assert!(refused(&|c| c.canvas = c.canvas.turned()).contains("turns a landscape canvas"));
-		assert!(
-			refused(&|c| c.scenes[1].items[0].portrait = Some(Placement::default())).contains("in a slot")
-		);
-		assert!(
-			refused(&|c| c.scenes[0].items[0].format = Some(Format::Landscape)).contains("only in landscape")
-		);
+		assert!(refused(&|c| c.scenes[1].items[0].portrait = Some(Placement::default())).contains("in a slot"));
+		assert!(refused(&|c| c.scenes[0].items[0].format = Some(Format::Landscape)).contains("only in landscape"));
 		assert!(
 			refused(&|c| {
 				c.portrait = false;
@@ -748,6 +789,7 @@ mod tests {
 	fn round_trips_through_the_scene_file() {
 		let mut turned = turned(&show());
 		turned.scenes[0].items[2].format = Some(Format::Landscape);
+		turned.scenes[0].items[2].portrait = None;
 		let text = turned.to_toml().unwrap();
 		assert!(text.contains("portrait = true"), "{text}");
 		assert!(text.contains("format = \"landscape\""), "{text}");

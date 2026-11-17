@@ -720,13 +720,17 @@ impl Panels {
 			},
 			(Some(Task::Done(Ok(carries))), Some(encoding)) => {
 				let needs = encoding.total_of(encodes);
+				let sending = match encodes {
+					1 => "the program",
+					_ => "the program in both formats",
+				};
 				match carries.scaled(setup::headroom()) >= needs {
 					true => Check {
 						mark: Outcome::Passed,
 						icon: Icon::Uplink,
 						name: "Connection",
 						said: format!(
-							"Carries {}, and the program needs {}",
+							"Carries {}, and {sending} needs {}",
 							health::rate(*carries),
 							health::rate(needs)
 						),
@@ -738,7 +742,7 @@ impl Panels {
 						icon: Icon::Uplink,
 						name: "Connection",
 						said: format!(
-							"The connection carries {} and the program needs {}. Viewers would see it stall.",
+							"The connection carries {} and {sending} needs {}. Viewers would see it stall.",
 							health::rate(*carries),
 							health::rate(needs)
 						),

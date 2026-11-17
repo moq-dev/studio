@@ -373,12 +373,15 @@ window, so there the desktop picks where it opens.
 
 - **Where it goes:** the show's relay and its failover relay, each with a
   switch and its state, such as *Connected, 18 ms away*. A relay switched off
-  is left out of this stream.
+  is left out of this stream. A show going out in both formats says each
+  relay carries both broadcasts.
 - **Checks**, filled in as they finish: whether each camera has a picture,
   whether a microphone's level moves, whether the encoder keeps up with the
   canvas (timed as [setup](#first-launch) times it), and whether the
   connection to the first relay switched on carries the program (measured as
-  setup measures it; published scenes and sources share what is left). A failed check is one sentence and its fix,
+  setup measures it; published scenes and sources share what is left). A show
+  going out in both formats needs about twice of each: two frames' encoding in
+  a frame's time, and two videos' bitrate. A failed check is one sentence and its fix,
   such as **Send 720p instead**, which changes the canvas, or **Check again**.
 - **GO LIVE TO** the number of destinations switched on. A failed check never
   stops you; only having none switched on does.
@@ -426,7 +429,7 @@ setting costs. Escape or a click outside closes it.
 
 | Pane | Use it to |
 | --- | --- |
-| Show | Pick the format, landscape or portrait, which swaps the canvas's sides; the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, or **Custom** for exact numbers; the frame rate as 30, 60, or **Custom**; and, under **Scene sizes**, each scene's own size (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
+| Show | Pick the format, landscape or portrait, which swaps the canvas's sides; **Both at once**, which sends a portrait picture beside a landscape one (see [Both formats at once](#both-formats-at-once)); the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, or **Custom** for exact numbers; the frame rate as 30, 60, or **Custom**; and, under **Scene sizes**, each scene's own size (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
 | Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)). |
 | Recording | Change or open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
 | Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; and replay and clips (see [Hotkeys](#hotkeys)). |
@@ -708,6 +711,49 @@ across restarts: after that, where they are shown is yours, so undoing their
 appearance or removing their layer keeps them off when they reconnect, until
 a new link. Since an appearance is your edit, it drops what you could redo.
 Off, every guest waits under Add, as before.
+
+### Both formats at once
+
+A landscape show can go out in portrait too, for phones, beside the
+landscape picture for desks and TVs: switch on **Both at once** in Settings,
+Show. Each scene of the show's size then has two arrangements of the same
+layers, and the studio draws, encodes, and sends both pictures. A scene of its
+own size, such as a published portrait scene, stays one picture, in its own
+shape.
+
+Turning it on is one edit you can undo, and starts each portrait arrangement
+from the landscape one. The largest picture, covering a quarter of the canvas
+or more, is the main one: it is cropped to the top 60% of the portrait canvas,
+with the largest camera stacked under it, cropped to fill the rest, or fitted
+there keeping its outline if it has a round or rounded shape. Without a
+camera, the main picture covers the whole portrait canvas. A backdrop covering
+the landscape canvas covers the portrait one, cropped. What sits on the main
+picture, such as a lower third or a logo, keeps its place on it. A layer set
+anywhere else keeps its place on the turned canvas, scaled to fit, until you
+move it in portrait. A scene laid out by slots arranges them in a row in
+portrait, or in a grid or inset if that is how it arranges them in landscape,
+and picks its own portrait arrangement in BUILD's scene inspector.
+
+LIVE shows both pictures side by side, each in its tally frame, with its
+format, size, and what its video sends under it. BUILD edits one picture at a
+time: **Landscape** or **Portrait** under the picture picks which, and the other
+shows small beside it, where a click edits it instead. A drag, Fit, Fill, the
+inspector's X, Y, W, H, and crop all place the layer in the picture edited,
+and leave its place in the other alone. A layer in a slot has one crop in both.
+Each scene's pad shows the pair, and Studio mode's NEXT card shows both
+pictures of the scene cued.
+
+A layer is shown in both pictures, or only in one: **Format** in its
+inspector, and the chip under the pictures naming the selected layer, picks
+**Both**, **Landscape**, or **Portrait**. A layer shown only in landscape keeps
+no portrait place. Switching **Both at once** off removes every layer shown
+only in portrait and forgets every portrait place and arrangement, as one
+edit.
+
+Only a landscape canvas turns: picking Portrait in Settings, Show, switches
+Both off. The portrait picture goes out as its own broadcast, at
+`<broadcast>/portrait` (see [Output](#output)), so a published scene cannot
+be named `portrait` meanwhile.
 
 ### Audio scenes
 
@@ -1149,6 +1195,15 @@ items = [
 ]
 
 [[scenes]]
+name = "Game"
+portrait = { arrangement = "row" } # its slots in portrait, while the show goes out in both
+items = [
+    # Its place in the portrait picture, while the show goes out in both.
+    { source = "game", rect = { x = 0, y = 0, width = 1920, height = 1080 }, portrait = { rect = { x = 0, y = 0, width = 1080, height = 1152 }, crop = { left = 0.2, right = 0.2 } } },
+    { source = "logo", rect = { x = 1600, y = 40, width = 280, height = 120 }, format = "landscape" }, # shown only in landscape
+]
+
+[[scenes]]
 name = "Portrait"
 size = { width = 1080, height = 1920 } # its own size; the program's without one
 published = true # live at <broadcast>/Portrait
@@ -1214,6 +1269,16 @@ default), and `delay`, in every audio scene holding it.
 
 `published = ["camera", "mic"]`, a top-level key, names the sources
 [published independently](#published-independently).
+
+`portrait = true`, a top-level key, sends a portrait picture beside the
+landscape one (see [Both formats at once](#both-formats-at-once)). Meanwhile,
+in a scene of the show's size or `[[top]]`, a layer's `format`, `landscape`
+or `portrait`, shows it only in that picture, both without one, and its
+`portrait`, a `rect` and `crop`, places it in the portrait picture, where it
+sits on the landscape canvas, fitted to the turned one, without one. A layer
+in a slot, or shown only in landscape, takes no `portrait` place, and a
+scene's `portrait = { arrangement = "..." }` arranges its slots there, `row`
+without one.
 
 Each entry of a scene's `items` is one of its layers, back to front, and each
 `[[top]]` an always-on-top layer: the `source` it shows and its `rect` on the
@@ -1307,7 +1372,12 @@ under the broadcast's path, while on air. A canvas under 360 lines has no
 half size. Each published scene publishes the same way at
 `<broadcast>/<scene name>`, at
 its own size and half of it, its tracks sharing the connection's bandwidth
-with the program's, and its own encode of the audio scene it carries.
+with the program's, and its own encode of the audio scene it carries. A show
+going out in both formats publishes its portrait picture the same way at
+`<broadcast>/portrait`, at the canvas turned and half of it, with its own
+encode of the audio scene on program. It has no layer layout: what is
+published independently is drawn into it. Each relay carries both broadcasts,
+and GO LIVE's checks time the encoder and size the connection for both.
 Timestamps come from the studio's own clock, so a source that stalls repeats
 its last picture instead of holding up the stream.
 
@@ -1382,6 +1452,7 @@ encode engine for them all. The Health window counts the sessions open:
 | The program's canvas size | 1 while on air |
 | Its half size | 1 while someone watches it |
 | Each published scene's own size and half size | as the program's |
+| The portrait picture's, while the show goes out in both | as the program's |
 | The recording's own size | 1 while recording |
 | Each captured source or media file | 1 while used, as [above](#source-tracks) |
 
@@ -1710,8 +1781,8 @@ Below that it shows:
   watches, since the relay pulls nothing otherwise. Source tracks never reach
   the relay, so they are left out of the media.
 
-Then, for the program's broadcast and each published scene's, each with its
-own viewers:
+Then, for the program's broadcast, the portrait picture's, and each published
+scene's, each with its own viewers:
 
 - **Watching**: the sessions subscribed to it, from the relays'
   `.stats` broadcasts. A relay shares those only with a connection allowed to

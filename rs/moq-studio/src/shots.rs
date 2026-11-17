@@ -122,6 +122,34 @@ enum View {
 	/// BUILD's Add tab on the drop views' show, with a file dragged or
 	/// dropped on the picture.
 	Drop(Drop),
+	/// On the dual-format show, `page` with the layer of the scene on
+	/// program at `index`, front first, selected, BUILD editing `format`'s
+	/// picture, in Studio mode with the scene `cued` cued, if any, and the
+	/// scene `off_air` open off air, if any.
+	Dual {
+		page: Page,
+		format: moq_scene::Format,
+		index: Option<usize>,
+		cued: Option<&'static str>,
+		off_air: Option<&'static str>,
+	},
+}
+
+/// The studio on the dual-format views' show, at the mock-ups' size, turned
+/// to `page` with the camera's layer selected, editing `format`'s picture.
+fn dual(page: Page, format: moq_scene::Format) -> Open {
+	Open::Studio {
+		view: View::Dual {
+			page,
+			format,
+			index: Some(2),
+			cued: None,
+			off_air: None,
+		},
+		size: SIZE,
+		show: "dual.toml",
+		relay: false,
+	}
 }
 
 /// A file over the picture, at the pointer.
@@ -291,6 +319,28 @@ views! {
 	build_drop_refused: Still, dropping(Drop::Refused);
 	/// The logo dropped lands where it was let go, at its own size, selected.
 	build_dropped: Still, dropping(Drop::Placed);
+	/// A show going out in both formats: the landscape and portrait
+	/// pictures side by side, each in its tally frame with its size under
+	/// it, where the selected camera is shown between them, and each pad
+	/// showing the pair, as the `dual` mock-up frame has it.
+	live_dual: Still, dual(Page::Live, moq_scene::Format::Landscape);
+	/// Studio mode on it: NEXT shows the cued scene in both formats.
+	live_dual_studio: Still, Open::Studio { view: View::Dual { page: Page::Live, format: moq_scene::Format::Landscape, index: None, cued: Some("Guests"), off_air: None }, size: SIZE, show: "dual.toml", relay: false };
+	/// BUILD on it: the landscape picture edited, the portrait one small
+	/// beside it, and under them the tabs that pick which and where the
+	/// selected camera is shown, which the inspector says too.
+	build_dual: Still, dual(Page::Build, moq_scene::Format::Landscape);
+	/// BUILD editing the portrait picture: the camera's handles at its
+	/// portrait place, the landscape picture small beside it.
+	build_dual_portrait: Still, dual(Page::Build, moq_scene::Format::Portrait);
+	/// A scene laid out by slots on it, open off air in portrait: its own
+	/// arrangement there, a row, which the inspector picks.
+	build_dual_slots: Still, Open::Studio { view: View::Dual { page: Page::Build, format: moq_scene::Format::Portrait, index: None, cued: None, off_air: Some("Guests") }, size: SIZE, show: "dual.toml", relay: false };
+	/// Settings, Show on it: Both at once on.
+	settings_show_dual: Still, Open::Studio { view: View::Setting(Setting::Show), size: SIZE, show: "dual.toml", relay: false };
+	/// GO LIVE's sheet on it: both broadcasts to each relay, and the encoder
+	/// and connection checked for both pictures.
+	going_dual: Live, Open::Studio { view: View::Going, size: SIZE, show: "dual.toml", relay: true };
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
 	mix: Still, mixing(MixView::Strips, None, SIZE);
@@ -1446,6 +1496,24 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			}
 		}
 		View::Drop(_) => studio.build(Side::Add, Inspect::Layer, None),
+		View::Dual {
+			page,
+			format,
+			index,
+			cued,
+			off_air,
+		} => {
+			studio.build(Side::Layers, Inspect::Layer, *index);
+			studio.edit_format(*format);
+			if let Some(cued) = cued {
+				studio.studio_mode(true);
+				studio.cue(cued);
+			}
+			studio.turn(*page);
+			if let Some(scene) = off_air {
+				studio.edit_off_air(scene);
+			}
+		}
 		View::Review { picked, .. } => {
 			studio.turn(Page::Review);
 			studio.seed_shelf(shelf());

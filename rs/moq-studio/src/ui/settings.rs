@@ -262,7 +262,7 @@ impl Panels {
 		row(
 			ui,
 			"Format",
-			"One format for the whole show. The layout of this window follows it.",
+			"The shape of the show's picture. The layout of this window follows it.",
 			|ui| {
 				ui.spacing_mut().item_spacing.x = CARD_GAP;
 				// Right to left, so Landscape comes first.
@@ -289,10 +289,7 @@ impl Panels {
 			 scene gets a portrait arrangement of its layers, and the machine encodes both.",
 			|ui| {
 				let toggle = ui
-					.add_enabled(
-						!portrait,
-						kit::Toggle::new(&mut on).label("Landscape and portrait"),
-					)
+					.add_enabled(!portrait, kit::Toggle::new(&mut on).label("Landscape and portrait"))
 					.on_disabled_hover_text("A portrait show turns to landscape first, then adds portrait");
 				if toggle.changed() {
 					self.set_both(on);

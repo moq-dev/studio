@@ -1453,7 +1453,9 @@ impl Compositor {
 /// `thumbnails` without the picture each is in.
 fn strip<'a>(thumbnails: Vec<(Format, Shows<'a>, Duration, Target)>) -> Vec<(Shows<'a>, Duration, Target)> {
 	let thumbnails = thumbnails.into_iter();
-	thumbnails.map(|(_, shows, since, target)| (shows, since, target)).collect()
+	thumbnails
+		.map(|(_, shows, since, target)| (shows, since, target))
+		.collect()
 }
 
 /// What a render draws in each picture: the same scenes on program and in
@@ -3082,7 +3084,12 @@ mod tests {
 			.sources
 			.insert("green".into(), Source::Color { color: Rgba(GREEN) });
 		let rect = |x, y, width, height| Rect { x, y, width, height };
-		let placed = |rect| Some(crate::Placement { rect, crop: Crop::default() });
+		let placed = |rect| {
+			Some(crate::Placement {
+				rect,
+				crop: Crop::default(),
+			})
+		};
 		collection.scenes = vec![
 			Scene {
 				items: vec![
@@ -3136,10 +3143,7 @@ mod tests {
 			let turned = portrait(&mut studio);
 			assert_eq!(texel(&turned, 4, 1, 1), RED);
 			assert_eq!(texel(&turned, 4, 1, 6), GREEN, "shown in portrait");
-			assert!(
-				!turned.chunks_exact(4).any(|texel| texel == BLUE),
-				"shown in landscape alone"
-			);
+			assert!(!turned.as_chunks::<4>().0.contains(&BLUE), "shown in landscape alone");
 
 			// "b" fills the landscape picture and is fitted, 4x2, across the
 			// middle of the portrait one.
@@ -3177,12 +3181,20 @@ mod tests {
 			]);
 			studio.compositor.set_preview(Some("a".into()));
 			studio.render(Instant::now());
-			let texture = studio.compositor.thumbnail(&Thumbnail::Portrait("a".into())).unwrap().clone();
+			let texture = studio
+				.compositor
+				.thumbnail(&Thumbnail::Portrait("a".into()))
+				.unwrap()
+				.clone();
 			assert_eq!((texture.width(), texture.height()), (4, 8));
 			let thumbnail = studio.read(&texture);
 			assert_eq!(texel(&thumbnail, 4, 1, 1), RED);
 			assert_eq!(texel(&thumbnail, 4, 1, 6), GREEN);
-			let texture = studio.compositor.thumbnail(&Thumbnail::Scene("a".into())).unwrap().clone();
+			let texture = studio
+				.compositor
+				.thumbnail(&Thumbnail::Scene("a".into()))
+				.unwrap()
+				.clone();
 			assert_eq!((texture.width(), texture.height()), (8, 4));
 			let (texture, _) = studio.compositor.portrait_preview().unwrap();
 			let texture = texture.clone();
@@ -5984,6 +5996,30 @@ mod bench {
 				] {
 					let (frame, (passes, copies)) = cost(collection, preview).await;
 					println!("{sources:>7} {case:<8} {frame:>7.2?} {passes:>6} {copies:>6}");
+				}
+			}
+		})
+		.await;
+	}
+
+	/// What going out in portrait too costs, over the program and the same
+	/// scene in preview: landscape only, both formats at once, and the long
+	/// way before it, a published portrait scene placing every source.
+	#[tokio::test]
+	#[ignore = "a benchmark; run by hand on a GPU"]
+	async fn both_formats() {
+		local(async {
+			println!("sources case        frame   passes copies");
+			for sources in [4, 16] {
+				let landscape = collection(sources, 0, sources);
+				let mut both = landscape.clone();
+				both.portrait = true;
+				both.validate().unwrap();
+				let published = collection(sources, 1, sources);
+				let scene = landscape.scenes[0].name.clone();
+				for (case, collection) in [("landscape", landscape), ("both", both), ("published", published)] {
+					let (frame, (passes, copies)) = cost(collection, &scene).await;
+					println!("{sources:>7} {case:<10} {frame:>7.2?} {passes:>6} {copies:>6}");
 				}
 			}
 		})
