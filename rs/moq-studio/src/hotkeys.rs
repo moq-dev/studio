@@ -697,7 +697,10 @@ mod tests {
 	#[test]
 	fn only_the_studios_window_pastes() {
 		let keyboard = Keyboard::default();
-		keyboard.modifiers(ModifiersState::CONTROL);
+		keyboard.modifiers(match cfg!(target_os = "macos") {
+			true => ModifiersState::SUPER,
+			false => ModifiersState::CONTROL,
+		});
 		let paste = |studio| {
 			keyboard.pressed(
 				PhysicalKey::Code(KeyCode::KeyV),
