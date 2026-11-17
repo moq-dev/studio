@@ -122,6 +122,9 @@ pub struct Compositor {
 struct Keeper {
 	/// The source it shows: an item showing another is another keeper.
 	source: String,
+	/// The rect the scene file gave its item, as of the last render, which
+	/// tells it from another showing the same source.
+	rect: Rect,
 	placer: Placer,
 	look: Look,
 }
@@ -1042,7 +1045,9 @@ impl Compositor {
 	/// back show. A keeper whose item is gone is forgotten.
 	fn place<'a>(&mut self, collection: &'a Collection, now: Instant) -> Cow<'a, Collection> {
 		let mut staged = Cow::Borrowed(collection);
-		let mut kept = self.follow(collection);
+		let mut kept = follow(std::mem::take(&mut self.keepers), collection, |keeper| {
+			(keeper.source.as_str(), keeper.rect)
+		});
 		let mut keepers = HashMap::new();
 		for (number, scene) in collection.scenes.iter().enumerate() {
 			let canvas = scene.canvas(collection.canvas);
@@ -1051,6 +1056,7 @@ impl Compositor {
 				let key = (scene.name.clone(), index);
 				let mut keeper = kept.remove(&key).unwrap_or_else(|| Keeper {
 					source: item.source.clone(),
+					rect: item.rect,
 					placer: Placer::new(now),
 					look: Look::new(&self.device, &self.queue),
 				});
@@ -1064,6 +1070,7 @@ impl Compositor {
 					),
 					None => {}
 				}
+				keeper.rect = item.rect;
 				let rect = keeper.placer.place(item.rect, keep, canvas, now);
 				if rect != item.rect {
 					staged.to_mut().scenes[number].items[index].rect = rect;
@@ -1073,60 +1080,6 @@ impl Compositor {
 		}
 		self.keepers = keepers;
 		staged
-	}
-
-	/// The keepers, each under where its item keeping clear now is: the same
-	/// place first; else the same source in the same scene, as a layer added
-	/// or removed under it shifts it; else the same source in a scene that
-	/// is no longer there, as a rename leaves it, so it goes on from where it
-	/// was placed. The rest are left out.
-	fn follow(&mut self, collection: &Collection) -> HashMap<(String, usize), Keeper> {
-		let mut old = std::mem::take(&mut self.keepers);
-		let mut kept = HashMap::new();
-		let mut missing = Vec::new();
-		for scene in &collection.scenes {
-			for (index, item) in scene.items.iter().enumerate() {
-				if item.keep_clear.is_none() {
-					continue;
-				}
-				let key = (scene.name.clone(), index);
-				match old.remove(&key) {
-					Some(keeper) if keeper.source == item.source => {
-						kept.insert(key, keeper);
-					}
-					Some(other) => {
-						old.insert(key.clone(), other);
-						missing.push((key, &item.source));
-					}
-					None => missing.push((key, &item.source)),
-				}
-			}
-		}
-		let gone = |scene: &str| collection.scene(scene).is_none();
-		for same_scene in [true, false] {
-			missing.retain(|(key, source)| {
-				let mut candidates: Vec<&(String, usize)> = old
-					.iter()
-					.filter(|((scene, _), keeper)| {
-						&keeper.source == *source
-							&& match same_scene {
-								true => *scene == key.0,
-								false => gone(scene),
-							}
-					})
-					.map(|(old_key, _)| old_key)
-					.collect();
-				// The nearest, so two alike keep their order.
-				candidates.sort_by_key(|(_, index)| index.abs_diff(key.1));
-				let Some(found) = candidates.first().map(|found| (*found).clone()) else {
-					return true;
-				};
-				let keeper = old.remove(&found).expect("listed above");
-				kept.insert(key.clone(), keeper);
-				false
-			});
-		}
-		kept
 	}
 
 	/// Pull the newest picture from every source onto the GPU, and forget the
@@ -2387,6 +2340,53 @@ impl Target {
 	}
 }
 
+/// `old`, the keepers, each under where its item keeping clear now is, so it
+/// goes on from where it was placed. A keeper shows the same source; of
+/// those, it is first the one in the same scene saved at the same rect, at
+/// the same index or the nearest, as a layer added or removed under it
+/// shifts it; then one in the same scene at the same index or the
+/// nearest, as an edit to its rect leaves it; then the same in a scene no
+/// longer there, as a rename leaves it. The rest are left out.
+fn follow<T>(
+	mut old: HashMap<(String, usize), T>,
+	collection: &Collection,
+	shows: impl Fn(&T) -> (&str, Rect),
+) -> HashMap<(String, usize), T> {
+	let mut kept = HashMap::new();
+	let mut missing: Vec<((String, usize), &Item)> = Vec::new();
+	for scene in &collection.scenes {
+		for (index, item) in scene.items.iter().enumerate() {
+			if item.keep_clear.is_some() {
+				missing.push(((scene.name.clone(), index), item));
+			}
+		}
+	}
+	let gone = |scene: &str| collection.scene(scene).is_none();
+	for (same_scene, same_rect) in [(true, true), (true, false), (false, true), (false, false)] {
+		missing.retain(|(key, item)| {
+			let found = old
+				.iter()
+				.filter(|((scene, _), keeper)| {
+					let (source, rect) = shows(keeper);
+					source == item.source
+						&& (!same_rect || rect == item.rect)
+						&& match same_scene {
+							true => *scene == key.0,
+							false => gone(scene),
+						}
+				})
+				.map(|(old_key, _)| old_key)
+				.min_by_key(|(_, index)| index.abs_diff(key.1))
+				.cloned();
+			let Some(found) = found else { return true };
+			let keeper = old.remove(&found).expect("found above");
+			kept.insert(key.clone(), keeper);
+			false
+		});
+	}
+	kept
+}
+
 #[cfg(test)]
 mod tests {
 	use std::time::Duration;
@@ -2699,6 +2699,62 @@ mod tests {
 			assert_eq!(placement.rect, saved);
 		})
 		.await;
+	}
+
+	/// Two layers keeping clear of the same camera keep their own keepers as
+	/// a layer added under both shifts them, as an edit to one's rect, and as
+	/// their scene is renamed.
+	#[test]
+	fn keepers_follow_their_items() {
+		let rect = |x| Rect {
+			x,
+			y: 0.0,
+			width: 10.0,
+			height: 10.0,
+		};
+		let keeping = |x| Item {
+			keep_clear: Some(crate::KeepClear::default()),
+			..Item::new("camera", rect(x))
+		};
+		let mut collection = Collection::new();
+		collection.scenes = vec![Scene {
+			items: vec![keeping(0.0), keeping(50.0)],
+			..Scene::new("main")
+		}];
+		let named = |name: &str, index| (name.to_string(), index);
+		fn shows<'a>(keeper: &'a (String, Rect, &'static str)) -> (&'a str, Rect) {
+			(keeper.0.as_str(), keeper.1)
+		}
+		let mut keepers = HashMap::from([
+			(named("main", 0), ("camera".to_string(), rect(0.0), "first")),
+			(named("main", 1), ("camera".to_string(), rect(50.0), "second")),
+		]);
+		let which = |keepers: &HashMap<(String, usize), (String, Rect, &'static str)>, scene, index| {
+			keepers.get(&named(scene, index)).map(|keeper| keeper.2)
+		};
+
+		collection.scenes[0].items.insert(0, Item::new("camera", rect(90.0)));
+		keepers = follow(keepers, &collection, shows);
+		assert_eq!(which(&keepers, "main", 1), Some("first"));
+		assert_eq!(which(&keepers, "main", 2), Some("second"));
+
+		// Moved, the second still has its own.
+		collection.scenes[0].items[2].rect = rect(70.0);
+		keepers = follow(keepers, &collection, shows);
+		assert_eq!(which(&keepers, "main", 1), Some("first"));
+		assert_eq!(which(&keepers, "main", 2), Some("second"));
+		keepers.get_mut(&named("main", 2)).unwrap().1 = rect(70.0);
+
+		collection.scenes[0].name = "renamed".into();
+		keepers = follow(keepers, &collection, shows);
+		assert_eq!(which(&keepers, "renamed", 1), Some("first"));
+		assert_eq!(which(&keepers, "renamed", 2), Some("second"));
+
+		// One that stops keeping clear has no keeper.
+		collection.scenes[0].items[1].keep_clear = None;
+		keepers = follow(keepers, &collection, shows);
+		assert_eq!(keepers.len(), 1);
+		assert_eq!(which(&keepers, "renamed", 2), Some("second"));
 	}
 
 	/// A source published independently is left out of the program and drawn

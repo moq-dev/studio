@@ -499,6 +499,10 @@ impl Glide {
 /// under it show.
 pub(crate) struct Placer {
 	sight: Sight,
+	/// The rect the scene file gives, as of the last [`place`](Self::place):
+	/// one saved elsewhere since, as a reload or an undo gives, was moved by
+	/// hand.
+	saved: Option<Rect>,
 	at: At,
 	/// When it last started looking before choosing: when it began, its
 	/// scene went on, or the content under it changed.
@@ -525,6 +529,7 @@ impl Placer {
 		};
 		Self {
 			sight: Sight::default(),
+			saved: None,
 			at: At::Rest,
 			looking: Some(now),
 			worst: None,
@@ -581,6 +586,12 @@ impl Placer {
 	/// Where to draw the item at `now`, saved at `saved` and keeping clear as
 	/// `keep` says on `canvas`.
 	pub fn place(&mut self, saved: Rect, keep: &KeepClear, canvas: Canvas, now: Instant) -> Rect {
+		// Saved elsewhere, it was moved by hand, though not through
+		// [`hold`](Self::hold). A resize alone keeps its place.
+		if self.saved.is_some_and(|last| (last.x, last.y) != (saved.x, saved.y)) {
+			self.hold();
+		}
+		self.saved = Some(saved);
 		let slots: Vec<(Slot, Rect)> = Slot::ALL
 			.into_iter()
 			.filter_map(|slot| Some((slot, slot.rect(saved.width, saved.height, canvas)?)))
@@ -1097,9 +1108,8 @@ mod tests {
 		let now = run(&mut placer, saved, start, (0..6).map(|_| read(MOVING, game)));
 		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
 
-		// Dragged back over the minimap.
+		// Dragged back over the minimap, or saved there and reloaded.
 		let dragged = Rect { x: 1600.0, ..saved };
-		placer.hold();
 		assert_eq!(placer.place(dragged, &KeepClear::default(), CANVAS, now), dragged);
 		let now = run(&mut placer, dragged, now, (0..80).map(|_| read(MOVING, game)));
 		let placement = placer.placement();
@@ -1131,13 +1141,13 @@ mod tests {
 		let saved = camera();
 		let now = run(&mut placer, saved, start, (0..2).map(|_| read(MOVING, game)));
 		assert_eq!(placer.placement().slot, None, "still looking");
-		let dragged = Rect { x: 1600.0, ..saved };
+		// Put back where it was: the saved rect alone cannot tell.
 		placer.hold();
-		let now = run(&mut placer, dragged, now, (0..40).map(|_| read(MOVING, game)));
+		let now = run(&mut placer, saved, now, (0..40).map(|_| read(MOVING, game)));
 		let placement = placer.placement();
 		assert!(placement.held);
 		assert_eq!(placement.slot, None);
-		assert_eq!(placement.rect, dragged);
+		assert_eq!(placement.rect, saved);
 		let _ = now;
 	}
 
