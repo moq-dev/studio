@@ -17,6 +17,7 @@ use crate::collection::{
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
 use crate::matte::Matte;
 use crate::overlay::{Overlay, Overlays};
+use crate::place::{Look, Placement, Placer, Reducer};
 use crate::source::{self, Feed, Sources, Status};
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
@@ -110,6 +111,19 @@ pub struct Compositor {
 	/// Whether the last render drew layers over the program.
 	layered: bool,
 	switch: Option<Switch>,
+	/// Each scene item keeping clear, by its scene and place in it.
+	keepers: HashMap<(String, usize), Keeper>,
+	/// Reduces the pictures under them, made with the first.
+	reducer: Option<Reducer>,
+}
+
+/// A scene item keeping clear: where it goes, and its reads of the picture
+/// under it.
+struct Keeper {
+	/// The source it shows: an item showing another is another keeper.
+	source: String,
+	placer: Placer,
+	look: Look,
 }
 
 /// The program and the scenes a transition draws whole on its way, as of the
@@ -248,11 +262,11 @@ impl Switch {
 /// A texture drawn into at a canvas's coordinates, and bound to sample:
 /// canvas-sized, or smaller for a thumbnail.
 #[derive(Clone)]
-struct Target {
+pub(crate) struct Target {
 	/// The canvas drawn, at the program's frame rate.
-	canvas: Canvas,
-	texture: wgpu::Texture,
-	picture: Picture,
+	pub canvas: Canvas,
+	pub texture: wgpu::Texture,
+	pub picture: Picture,
 }
 
 /// One source's newest picture or table on the GPU.
@@ -397,6 +411,8 @@ impl Compositor {
 			program_shown: Duration::ZERO,
 			layered: false,
 			switch: None,
+			keepers: HashMap::new(),
+			reducer: None,
 		})
 	}
 
@@ -478,6 +494,15 @@ impl Compositor {
 	/// program shows, and the layer layout's pictures play from.
 	pub fn program_since(&self) -> Duration {
 		self.program_shown
+	}
+
+	/// Where the `index`th item of the scene called `scene`, one showing
+	/// `source` that keeps clear, was drawn as of the last
+	/// [`render`](Self::render), and why: `None` for any other item, or before
+	/// a render placed it.
+	pub fn placement(&self, scene: &str, index: usize, source: &str) -> Option<&Placement> {
+		let keeper = self.keepers.get(&(scene.to_string(), index))?;
+		(keeper.source == source).then(|| keeper.placer.placement())
 	}
 
 	/// Keep the scenes `outputs` names as outputs from now on, each with
@@ -786,6 +811,9 @@ impl Compositor {
 		}
 		self.renders += 1;
 		self.update(collection, sources, now);
+		// Every draw below reads the items keeping clear where they are placed.
+		let staged = self.place(collection, now);
+		let collection = &*staged;
 		self.restart(collection, preview_start, program_start);
 		self.paint(collection, now);
 		let thumbnails = self.thumbnail_targets(collection, now);
@@ -951,10 +979,91 @@ impl Compositor {
 				Shows::Nothing => unreachable!("a thumbnail showing nothing is not drawn"),
 			}
 		}
+
+		// The picture under each item keeping clear, read a few times a
+		// second while its scene is drawn: on program, in preview, for an
+		// output, or through a scene source.
+		let mut drawn: HashMap<&str, Duration> = HashMap::new();
+		let roots = on_program(program, switch)
+			.into_iter()
+			.chain(previewing.then_some(preview))
+			.chain(outputs.iter().map(|(on, _)| *on));
+		for On(scene, since) in roots {
+			if let Some(scene) = scene {
+				drawn.entry(scene).or_insert(since);
+			}
+		}
+		for nest in &nesting.order {
+			drawn.entry(nest.scene).or_insert(nest.since);
+		}
+		let mut reads = Vec::new();
+		for ((scene, index), keeper) in &mut self.keepers {
+			let Some(&since) = drawn.get(scene.as_str()) else {
+				continue;
+			};
+			keeper.placer.shown(since, now);
+			let item = collection.scene(scene).and_then(|shown| shown.items.get(*index));
+			if !item.is_some_and(|item| item.visible) || !keeper.look.due(now) {
+				continue;
+			}
+			let canvas = canvas_of(Some(scene));
+			let target = keeper.look.target(draw.effects, canvas);
+			draw.size = canvas;
+			draw.target(&target);
+			draw.under(&target, Place::scene(scene.as_str()), *index, since);
+			reads.push((scene.clone(), *index));
+		}
 		self.previewed = previewing;
 
 		self.effects.submit(frame);
+		if !reads.is_empty() {
+			let reducer = self.reducer.get_or_insert_with(|| Reducer::new(&self.device));
+			for key in reads {
+				let keeper = self.keepers.get_mut(&key).expect("read above");
+				keeper.look.start(reducer, now);
+			}
+		}
 		Ok(())
+	}
+
+	/// `collection` with each scene item keeping clear where its placer puts
+	/// it at `now`, from what the reads of the picture under it that came
+	/// back show. A keeper whose item is gone is forgotten.
+	fn place<'a>(&mut self, collection: &'a Collection, now: Instant) -> Cow<'a, Collection> {
+		let mut staged = Cow::Borrowed(collection);
+		let mut keepers = HashMap::new();
+		for (number, scene) in collection.scenes.iter().enumerate() {
+			let canvas = scene.canvas(collection.canvas);
+			for (index, item) in scene.items.iter().enumerate() {
+				let Some(keep) = &item.keep_clear else { continue };
+				let key = (scene.name.clone(), index);
+				let mut keeper = match self.keepers.remove(&key) {
+					Some(keeper) if keeper.source == item.source => keeper,
+					_ => Keeper {
+						source: item.source.clone(),
+						placer: Placer::new(now),
+						look: Look::new(&self.device, &self.queue),
+					},
+				};
+				match keeper.look.finish() {
+					Some(Ok((tiles, at))) => keeper.placer.see(&tiles, at),
+					Some(Err(err)) => tracing::warn!(
+						scene = %scene.name,
+						source = %item.source,
+						%err,
+						"cannot read the picture under an item keeping clear"
+					),
+					None => {}
+				}
+				let rect = keeper.placer.place(item.rect, keep, canvas, now);
+				if rect != item.rect {
+					staged.to_mut().scenes[number].items[index].rect = rect;
+				}
+				keepers.insert(key, keeper);
+			}
+		}
+		self.keepers = keepers;
+		staged
 	}
 
 	/// Pull the newest picture from every source onto the GPU, and forget the
@@ -1845,8 +1954,15 @@ impl Draw<'_> {
 	/// item, a source with no picture yet, or a filter whose source has nothing
 	/// yet draws nothing.
 	fn layer(&mut self, target: &Target, place: Place, since: Duration) {
+		self.under(target, place, usize::MAX, since);
+	}
+
+	/// Draw `place`'s items under its `index`th onto `target`, as
+	/// [`layer`](Self::layer) draws them: what that item covers.
+	fn under(&mut self, target: &Target, place: Place, index: usize, since: Duration) {
 		let items = self.collection.items(&place).unwrap_or_default();
-		for (index, item) in items.iter().enumerate().filter(|(_, item)| item.visible) {
+		let under = items.iter().enumerate().take(index);
+		for (index, item) in under.filter(|(_, item)| item.visible) {
 			let key = (place.clone(), index, self.settled(item, since));
 			self.item(target, key, &item.posed(since), since);
 		}
@@ -2180,7 +2296,7 @@ impl Target {
 	}
 
 	/// A target drawing `canvas` into `size` pixels, labeled `label`.
-	fn sized(device: &wgpu::Device, effects: &Effects, canvas: Canvas, size: (u32, u32), label: &str) -> Self {
+	pub fn sized(device: &wgpu::Device, effects: &Effects, canvas: Canvas, size: (u32, u32), label: &str) -> Self {
 		let texture = device.create_texture(&wgpu::TextureDescriptor {
 			label: Some(label),
 			size: wgpu::Extent3d {
@@ -2400,6 +2516,106 @@ mod tests {
 
 	fn near(actual: [u8; 4], expected: [u8; 4]) -> bool {
 		actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 1)
+	}
+
+	/// A 320x180 scene "busy" with a camera keeping clear over the bottom
+	/// right, where a block moves: a checkerboard in the top right and lines
+	/// of "text" in the bottom left, on black.
+	fn busy() -> Collection {
+		let mut collection = Collection::new();
+		collection.canvas = Canvas {
+			width: 320,
+			height: 180,
+			framerate: 30,
+		};
+		for (name, color) in [("black", BLACK), ("white", [255; 4]), ("camera", BLUE)] {
+			let color = Rgba(color);
+			collection.sources.insert(name.into(), Source::Color { color });
+		}
+		let rect = |x, y, width, height| Rect { x, y, width, height };
+		let mut items = vec![Item::new("black", Rect::fill(&collection.canvas))];
+		for row in 0..9 {
+			for column in (row % 2..10).step_by(2) {
+				let at = rect(232.0 + 8.0 * column as f32, 4.0 + 8.0 * row as f32, 8.0, 8.0);
+				items.push(Item::new("white", at));
+			}
+		}
+		for line in 0..13 {
+			items.push(Item::new("white", rect(8.0, 130.0 + 3.0 * line as f32, 100.0, 1.0)));
+		}
+		items.push(Item::new("white", rect(250.0, 120.0, 40.0, 40.0)));
+		items.push(Item {
+			keep_clear: Some(crate::KeepClear::default()),
+			..Item::new("camera", rect(247.0, 107.0, 64.0, 64.0))
+		});
+		collection.scenes = vec![Scene {
+			items,
+			..Scene::new("busy")
+		}];
+		collection.validate().unwrap();
+		collection
+	}
+
+	/// The compositor reads the picture under a camera keeping clear on the
+	/// GPU, sees the block moving under it, and glides it to the corner that
+	/// covers nothing, on program and in preview alike.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_camera_keeping_clear_glides_off_what_moves() {
+		local(async {
+			let mut studio = Studio::new(busy()).await;
+			studio.compositor.set_preview(Some("busy".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			let camera = studio.collection.scenes[0].items.len() - 1;
+			let block = camera - 1;
+			let saved = studio.collection.scenes[0].items[camera].rect;
+			let start = Instant::now();
+			let mut now = start;
+			let mut moved = None;
+			for frame in 0..40u32 {
+				studio.collection.scenes[0].items[block].rect.x = 240.0 + 6.0 * (frame % 7) as f32;
+				studio.render(now);
+				studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+				let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+				if placement.slot.is_some() {
+					moved = Some(now);
+					break;
+				}
+				assert_eq!(placement.rect, saved, "it stays put while it looks");
+				now = now.saturating_add(Duration::from_millis(100));
+			}
+			let moved = moved.expect("it chose a slot");
+			assert!(
+				moved.saturating_duration_since(start) >= crate::place::SETTLE,
+				"it looks before it moves"
+			);
+			let placement = studio.compositor.placement("busy", camera, "camera").unwrap().clone();
+			assert_eq!(placement.slot, Some(crate::place::Slot::TopLeft));
+			let left = placement.left.unwrap();
+			assert_eq!(left.rect, saved);
+			assert_eq!(left.over, Some(crate::place::Signal::Motion));
+			let heat = &placement.heat;
+			let (column, row) = (heat.columns - 2, 1);
+			let (matters, signal) = heat.tiles[row * heat.columns + column];
+			assert!(matters > 0.5, "the checkerboard matters: {matters}");
+			assert_eq!(signal, crate::place::Signal::Text, "still edges in a still picture");
+			assert_eq!(heat.tiles[heat.columns * 4 + 4].0, 0.0, "black does not");
+
+			let glide = crate::KeepClear::default().glide;
+			studio.render(moved.saturating_add(glide / 2));
+			let half = studio.compositor.placement("busy", camera, "camera").unwrap().rect;
+			assert!(half.x < saved.x && half.x > 9.0, "on its way: {half:?}");
+			studio.render(moved.saturating_add(glide));
+			let to = crate::place::Slot::TopLeft
+				.rect(64.0, 64.0, studio.collection.canvas)
+				.unwrap();
+			assert_eq!(studio.compositor.placement("busy", camera, "camera").unwrap().rect, to);
+			let program = studio.program();
+			assert_eq!(texel(&program, 320, 41, 41), BLUE, "the camera where it went");
+			assert_eq!(texel(&program, 320, 279, 139), [255; 4], "the block uncovered");
+			assert_eq!(program, studio.preview(), "the preview shows it alike");
+		})
+		.await;
 	}
 
 	/// A source published independently is left out of the program and drawn

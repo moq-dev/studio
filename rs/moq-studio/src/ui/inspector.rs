@@ -93,7 +93,10 @@ impl Panels {
 		let mut asked = None;
 
 		section(ui, "Place");
-		let mut rect = item.rect;
+		// Where the picture draws it: a layer keeping clear where it was
+		// placed, which a move by hand starts from.
+		let placement = keep::placement(&state, &picked.layer, picked.index, &item);
+		let mut rect = placement.map_or(item.rect, |placement| placement.rect);
 		ui.horizontal(|ui| {
 			ui.spacing_mut().item_spacing.x = 4.0;
 			let width = ((ui.available_width() - 12.0) / 4.0).max(40.0);
@@ -114,6 +117,16 @@ impl Panels {
 			for (verb, response) in responses {
 				if let Some(gesture) = changed(&response, &mut self.gestures) {
 					let label = format!("{verb} `{name}`");
+					// A resize keeps where a layer keeping clear rests, so it
+					// stays free to move.
+					let rect = match verb {
+						"Resize" => Rect {
+							x: item.rect.x,
+							y: item.rect.y,
+							..rect
+						},
+						_ => rect,
+					};
 					asked = Some(Asked::Item(Item { rect, ..item.clone() }, label, gesture));
 				}
 			}
@@ -160,6 +173,20 @@ impl Panels {
 				asked = Some(Asked::Act(LayerAction::Lock(locked)));
 			}
 		});
+		// Only a scene's layer has a picture under it to keep clear of.
+		if picked.layer.scene.is_some()
+			&& let Some((keep_clear, label)) = keep::inspector(ui, item.keep_clear, placement)
+		{
+			let label = format!("{label}: `{name}`");
+			asked = Some(Asked::Item(
+				Item {
+					keep_clear,
+					..item.clone()
+				},
+				label,
+				None,
+			));
+		}
 
 		section(ui, "Shape");
 		if let Some(corners) = shapes(ui, item.shape.corners) {

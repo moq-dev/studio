@@ -54,6 +54,7 @@ mod lut;
 mod matte;
 mod media;
 mod overlay;
+pub mod place;
 mod playout;
 pub mod publish;
 pub mod replay;
@@ -62,8 +63,8 @@ pub mod source;
 
 pub use clip::Clip;
 pub use collection::{
-	Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item, Keyframe, Layer,
-	MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Source, Transition, Video,
+	Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item, KeepClear, Keyframe,
+	Layer, MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Source, Transition, Video,
 };
 pub use compositor::{Compositor, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};

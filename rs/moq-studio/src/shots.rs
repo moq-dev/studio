@@ -110,6 +110,9 @@ enum View {
 	Cued(Page),
 	/// A scene, by name, open for editing off air on BUILD.
 	OffAir(&'static str),
+	/// BUILD with the front layer selected, once it kept out of the way:
+	/// moved off what mattered and landed.
+	KeepClear,
 }
 
 /// BUILD with the host's layer, the middle of the scene on program's three,
@@ -221,6 +224,10 @@ views! {
 	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
 	/// Too narrow for the banner beside the live picture, it goes under it.
 	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml", relay: false };
+	/// A facecam keeping out of the way of a game: what matters glowing on the
+	/// picture, the places it may go, where it was and the glide to where it
+	/// went, the legend under the picture, and its settings in the inspector.
+	build_keep_clear: Live, Open::Studio { view: View::KeepClear, size: SIZE, show: "keep.toml", relay: false };
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
 	mix: Still, mixing(MixView::Strips, None, SIZE);
@@ -1147,6 +1154,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Mix(view, opened) => studio.mix(*view, *opened),
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
+		View::KeepClear => studio.build(Side::Layers, Inspect::Layer, Some(0)),
 		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
@@ -1222,6 +1230,29 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				}
 			}))
 			.expect("the room fails to join at launch"),
+		View::KeepClear => runtime
+			.block_on(kio::clock::timeout(SETTLE, async {
+				loop {
+					let landed = {
+						let state = engine.state.lock().unwrap();
+						let item = &state.collection().scenes[0].items[1];
+						let placement = state.compositor.placement("Gameplay", 1, &item.source);
+						placement.is_some_and(|placement| {
+							let slot = placement
+								.slot
+								.and_then(|slot| placement.slots.iter().find(|(fits, _)| *fits == slot));
+							placement.left.is_some() && slot.is_some_and(|(_, rect)| *rect == placement.rect)
+						})
+					};
+					if landed {
+						break;
+					}
+					harness.step();
+					kio::clock::sleep(Duration::from_millis(20)).await;
+				}
+				harness.run_steps(2);
+			}))
+			.expect("the facecam moves off the minimap and lands"),
 		View::OnAirHealth => {
 			let pill = ["Healthy", "Starting", "Degraded", "Unhealthy"]
 				.into_iter()

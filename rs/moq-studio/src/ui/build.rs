@@ -47,7 +47,15 @@ impl Panels {
 			room.min.y = self.off_air_header(ui, cued, room, snapshot.shape);
 			shape = cued.shape();
 		}
-		self.stage(ui, fx, snapshot, super::layout::fit(room, shape));
+		let keeping = self.keeping_clear();
+		if keeping {
+			room.max.y -= keep::LEGEND;
+		}
+		let at = super::layout::fit(room, shape);
+		self.stage(ui, fx, snapshot, at);
+		if keeping {
+			keep::legend(ui, at);
+		}
 		self.build_keys(ui);
 	}
 
@@ -162,6 +170,17 @@ impl Panels {
 		}
 	}
 
+	/// Whether the selected layer keeps out of the way, so the stage explains
+	/// what it saw under the picture.
+	fn keeping_clear(&self) -> bool {
+		let Some(picked) = &self.selection else {
+			return false;
+		};
+		let state = self.engine.state.lock().unwrap();
+		let item = picked.item(state.collection());
+		item.is_some_and(|item| item.visible && keep::placement(&state, &picked.layer, picked.index, item).is_some())
+	}
+
 	/// The web page the selected layer shows, while it is a visible layer of
 	/// the picture that shows one.
 	fn interacted(&self, state: &State) -> Option<String> {
@@ -186,7 +205,8 @@ impl Panels {
 
 	/// The layers the picture edits, front last, each with its place: the
 	/// scene's, then the always-on-top ones over it, unless the scene is open
-	/// off air, as they are drawn on program.
+	/// off air, as they are drawn on program, those keeping clear where they
+	/// were placed.
 	fn shown(&self, state: &State) -> Vec<(Picked, Item)> {
 		let (_, since) = self.edited_since(state);
 		let collection = state.collection();
@@ -195,8 +215,8 @@ impl Panels {
 		layers
 			.flat_map(|layer| {
 				let items = collection.items(&layer).unwrap_or_default();
-				let posed = items.iter().map(move |item| item.posed(since).into_owned());
-				posed.enumerate().map(move |(index, item)| {
+				items.iter().enumerate().map(move |(index, item)| {
+					let item = keep::placed(state, &layer, index, item).posed(since).into_owned();
 					let picked = Picked {
 						layer: layer.clone(),
 						index,
@@ -265,7 +285,10 @@ impl Panels {
 			let picked = shown[index].0.clone();
 			self.select(Some(picked.clone()));
 			let collection = state.collection();
-			let resting = picked.item(collection).cloned();
+			// A layer keeping clear moves from where it was placed.
+			let resting = picked
+				.item(collection)
+				.map(|item| keep::placed(state, &picked.layer, picked.index, item));
 			if let Some(resting) = resting {
 				let source = collection.sources.get(collection.capture(&resting.source));
 				self.drag = Some(Drag {
@@ -351,6 +374,15 @@ impl Panels {
 		let shown = self.shown(state);
 		let selected = shown.iter().find(|(picked, _)| Some(picked) == self.selection.as_ref());
 		let accent = ui.visuals().selection.stroke.color;
+		// What a layer keeping clear saw, under its handles, unless it is
+		// being dragged, which holds it where it is put.
+		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible && self.drag.is_none())
+			&& let Some(resting) = picked.item(state.collection())
+			&& let Some(placement) = keep::placement(state, &picked.layer, picked.index, resting)
+			&& let Some(keep) = resting.keep_clear
+		{
+			keep::overlay(&painter, &view, placement, &item.shape, keep.glide);
+		}
 		// A hidden layer has no handles, as the picture cannot grab it, and a
 		// locked one only its outline.
 		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible) {
@@ -433,9 +465,11 @@ impl Panels {
 				fresh |= !repeat;
 			}
 		});
-		let Some(item) = picked.item(state.collection()).filter(|item| !item.locked).cloned() else {
+		let Some(item) = picked.item(state.collection()).filter(|item| !item.locked) else {
 			return (None, Ok(()));
 		};
+		// A layer keeping clear moves from where it was placed.
+		let item = keep::placed(state, &picked.layer, picked.index, item);
 		if delta == [0.0; 2] {
 			return (None, Ok(()));
 		}

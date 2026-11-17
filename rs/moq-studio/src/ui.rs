@@ -33,6 +33,7 @@ mod build;
 mod cue;
 mod graph;
 mod inspector;
+mod keep;
 mod layers;
 mod layout;
 mod levels;
@@ -2055,7 +2056,7 @@ fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration)
 		let items = collection.items(&shown).unwrap_or_default();
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == dragged.layer && at == dragged.index) {
-				rects.push(item.posed(since).rect);
+				rects.push(keep::placed(state, &shown, at, item).posed(since).rect);
 			}
 		}
 	}
