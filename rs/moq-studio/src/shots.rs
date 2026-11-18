@@ -662,6 +662,21 @@ fn the_palette_finds_and_runs_anything() {
 	assert_eq!(program().as_deref(), Some("Interview"), "the palette took the scene");
 	assert!(harness.query_by_role(Role::TextInput).is_none(), "and closed");
 
+	// Typed and run in one frame, Enter runs what was typed.
+	harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+	harness.run_steps(2);
+	let enter = egui::Event::Key {
+		key: egui::Key::Enter,
+		physical_key: None,
+		pressed: true,
+		repeat: false,
+		modifiers: egui::Modifiers::NONE,
+	};
+	let events = &mut harness.input_mut().events;
+	events.extend([egui::Event::Text("take scene break".into()), enter]);
+	harness.run_steps(2);
+	assert_eq!(program().as_deref(), Some("Break"), "the palette ran what was typed");
+
 	assert!(!muted("mic"));
 	run(&mut harness, "mute mic");
 	assert!(muted("mic"), "the palette muted the sound");
@@ -672,11 +687,20 @@ fn the_palette_finds_and_runs_anything() {
 	run(&mut harness, "take the cued");
 	let take = harness.get_by_label("Take the cued scene");
 	assert!(take.accesskit_node().is_disabled(), "it cannot run");
-	assert_eq!(program().as_deref(), Some("Interview"));
+	assert_eq!(program().as_deref(), Some("Break"));
 	assert!(harness.query_by_role(Role::TextInput).is_some(), "still open");
 	harness.key_press(egui::Key::Escape);
 	harness.run_steps(2);
 	assert!(harness.query_by_role(Role::TextInput).is_none(), "Escape closes it");
+
+	// A setting under a disclosure opens it.
+	run(&mut harness, "scene sizes");
+	assert!(
+		harness.query_by_label("Give a scene its own size").is_some(),
+		"Scene sizes opened"
+	);
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
 
 	run(&mut harness, "fps");
 	assert!(

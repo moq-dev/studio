@@ -198,6 +198,12 @@ impl Panels {
 		self.confirm_restart(ctx);
 	}
 
+	/// Close Settings, dropping a restart it was asking about.
+	pub(super) fn close_settings(&mut self) {
+		self.setting = None;
+		self.restart = None;
+	}
+
 	/// The categories, the one shown lit: by name, or by `icons` alone.
 	fn settings_nav(&mut self, ui: &mut Ui, rect: Rect, icons: bool, setting: &mut Setting) {
 		let painter = ui.painter();
@@ -408,9 +414,15 @@ impl Panels {
 		};
 		let mut action = None;
 		let id = ui.make_persistent_id("scene sizes");
-		egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+		let top = ui.cursor().top();
+		let mut sizes = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+		// Found by the palette, it opens to show what it holds.
+		if seeking(ui.ctx(), SCENE_SIZES) {
+			sizes.set_open(true);
+		}
+		sizes
 			.show_header(ui, |ui| {
-				ui.label(RichText::new("Scene sizes").font(kit::ui_strong(13.5)).color(kit::TEXT));
+				ui.label(RichText::new(SCENE_SIZES).font(kit::ui_strong(13.5)).color(kit::TEXT));
 				ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
 					ui.label(RichText::new(count).font(kit::ui(12.0)).color(kit::DIM));
 				});
@@ -472,6 +484,8 @@ impl Panels {
 					"A scene of another size cannot go on air. Publish it as its own broadcast instead, under Advanced.",
 				);
 			});
+		let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+		sought(ui, SCENE_SIZES, rect);
 		action
 	}
 
@@ -1445,6 +1459,16 @@ struct Sought {
 	name: String,
 	since: f64,
 	scrolled: bool,
+}
+
+/// The Show pane's disclosure of each scene's own size, by its name.
+pub(super) const SCENE_SIZES: &str = "Scene sizes";
+
+/// Whether the palette found the setting called `name`, which its pane has
+/// yet to light.
+fn seeking(ctx: &egui::Context, name: &str) -> bool {
+	let sought = ctx.data(|data| data.get_temp::<Sought>(egui::Id::new("sought setting")));
+	sought.is_some_and(|sought| sought.name == name)
 }
 
 /// How long a setting the palette found stays lit.

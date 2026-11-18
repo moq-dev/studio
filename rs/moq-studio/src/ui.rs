@@ -152,7 +152,7 @@ impl Setting {
 				("Format", &["portrait", "landscape", "vertical"]),
 				("Canvas size", &["resolution", "1080p", "720p"]),
 				("Frame rate", &["fps"]),
-				("Scene sizes", &[]),
+				(settings::SCENE_SIZES, &[]),
 			],
 			Self::Stream => &[
 				("Relay", &["token", "server", "url"]),

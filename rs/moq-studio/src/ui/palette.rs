@@ -121,10 +121,16 @@ fn found(rows: Vec<Row>, query: &str) -> Vec<Row> {
 impl Panels {
 	/// Open the palette, or close it if open.
 	pub(super) fn toggle_palette(&mut self) {
-		self.palette = match self.palette.take() {
-			Some(_) => None,
-			None => Some(Palette::default()),
-		};
+		if self.palette.take().is_some() {
+			return;
+		}
+		// The search box takes the keyboard from a page the picture passed it
+		// to, which would type into both.
+		if self.interacting {
+			let engine = self.engine.clone();
+			self.stop_interacting(&engine.state.lock().unwrap());
+		}
+		self.palette = Some(Palette::default());
 	}
 
 	/// Everything the palette offers now, in the order it lists them before
@@ -155,9 +161,12 @@ impl Panels {
 			rows.push(row);
 		}
 
-		// The layers BUILD edits, by the source each shows.
+		// The layers BUILD edits, by the source each shows: off air, only the
+		// scene's own, as the always-on-top ones are drawn on program.
 		if let Ok(layer) = self.scene(&state) {
-			for top in [Layer::top(), layer] {
+			let off_air = self.off_air(&state).is_some();
+			let layers = [(!off_air).then(Layer::top), Some(layer)];
+			for top in layers.into_iter().flatten() {
 				let items = collection.items(&top).unwrap_or_default();
 				for (index, item) in items.iter().enumerate().rev() {
 					let picked = Picked {
@@ -190,8 +199,12 @@ impl Panels {
 					("Windows", &listing.windows),
 					("Audio inputs", &listing.audio),
 				];
+				// Never the studio's own virtual cameras, which would feed what
+				// one shows back into itself.
+				let own: Vec<String> = state.cameras().map(|camera| camera.id).collect();
+				let own = |pick: &&Pick| matches!(&pick.source, Source::Camera { id: Some(id) } if own.contains(id));
 				for (kind, picks) in kinds {
-					for pick in picks.iter().flatten() {
+					for pick in picks.iter().flatten().filter(|pick| !own(pick)) {
 						let name = format!("Add `{}`", pick.name);
 						rows.push(Row::new(
 							Command::Device(pick.clone()),
@@ -283,7 +296,9 @@ impl Panels {
 	/// arrows pick a row, Enter or a click runs it, and Escape closes.
 	pub(super) fn palette(&mut self, ctx: &egui::Context) {
 		let Some(mut palette) = self.palette.take() else { return };
-		let rows = found(self.palette_rows(ctx), &palette.query);
+		// A listing asked for from here arrives on any page.
+		self.devices.poll();
+		let all = self.palette_rows(ctx);
 		// Taken before the search box sees them, which would move its cursor
 		// or lose focus on them.
 		let (up, down, enter) = ctx.input_mut(|input| {
@@ -293,14 +308,6 @@ impl Panels {
 				input.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
 			)
 		});
-		let last = rows.len().saturating_sub(1);
-		palette.picked = match (up, down) {
-			(true, false) => palette.picked.saturating_sub(1),
-			(false, true) => (palette.picked + 1).min(last),
-			_ => palette.picked.min(last),
-		};
-		let moved = up || down;
-		let mut run = enter.then_some(palette.picked);
 
 		let frame = egui::Frame::new()
 			.fill(kit::P1)
@@ -336,6 +343,16 @@ impl Panels {
 						palette.picked = 0;
 					}
 				});
+				// Found from what the box holds after this frame's typing, so
+				// Enter pressed with it runs what was typed, not what was before.
+				let rows = found(all, &palette.query);
+				let last = rows.len().saturating_sub(1);
+				palette.picked = match (up, down) {
+					(true, false) => palette.picked.saturating_sub(1),
+					(false, true) => (palette.picked + 1).min(last),
+					_ => palette.picked.min(last),
+				};
+				let mut run = enter.then_some(palette.picked);
 				ui.add_space(10.0);
 				let y = ui.cursor().top();
 				ui.painter()
@@ -355,7 +372,7 @@ impl Panels {
 						}
 						for (index, row) in rows.iter().enumerate() {
 							let response = row_ui(ui, row, index == palette.picked);
-							if moved && index == palette.picked {
+							if (up || down) && index == palette.picked {
 								response.scroll_to_me(None);
 							}
 							if response.hovered() && ui.input(|input| input.pointer.delta() != egui::Vec2::ZERO) {
@@ -373,16 +390,17 @@ impl Panels {
 					ui.label(RichText::new(hint).font(kit::ui(11.0)).color(kit::FAINT));
 				});
 				ui.add_space(8.0);
+				run.and_then(|index| rows.into_iter().nth(index))
 			});
 		let mut open = !modal.should_close();
-		if let Some(row) = run.and_then(|index| rows.get(index)) {
+		if let Some(row) = modal.inner {
 			match &row.refused {
 				// Shown on its row already; the palette stays open on it.
 				Some(_) => {}
 				None => {
 					// A listing keeps the palette open, to show what it finds.
 					open = matches!(row.command, Command::Devices);
-					self.run(ctx, row.command.clone());
+					self.run(ctx, row.command);
 				}
 			}
 		}
@@ -391,8 +409,21 @@ impl Panels {
 		}
 	}
 
-	/// Do what a row of the palette does.
+	/// Do what a row of the palette does. One that turns to a page or opens
+	/// a window closes Settings, which would hide it.
 	fn run(&mut self, ctx: &egui::Context, command: Command) {
+		if matches!(
+			command,
+			Command::Act(Action::GoLive)
+				| Command::Page(_)
+				| Command::Layer(_)
+				| Command::Device(_)
+				| Command::Kind(_)
+				| Command::Health
+				| Command::Graph
+		) {
+			self.close_settings();
+		}
 		match command {
 			// The window's GO LIVE: the sheet, with its checks and relays.
 			Command::Act(Action::GoLive) => self.open_going(),
