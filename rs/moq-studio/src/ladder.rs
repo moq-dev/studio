@@ -294,7 +294,7 @@ mod tests {
 		let _second = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 		assert!(joins.due(), "a join past the newest group");
 		assert!(!joins.due(), "the keyframe is still in the encoder");
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _group = write(1, 100);
 		assert!(!joins.due(), "group 1 answered it");
 	}

@@ -6003,11 +6003,11 @@ mod tests {
 		for (name, track) in ["video", "audio"].into_iter().zip(&tracks) {
 			let mut subscription = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
 			// A head group read through the relay, so only the tail is at stake.
-			let mut group = track.append_group(0).unwrap();
+			let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), vec![0; 1])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			let mut head = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 				.await
 				.expect("the head group arrives")
@@ -6039,13 +6039,13 @@ mod tests {
 			})
 			.collect();
 		for track in &tracks {
-			let mut group = track.append_group(1).unwrap();
+			let mut group = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 			for _ in 0..FRAMES {
 				group
 					.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), vec![0; PADDING])
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			// The kept producer holds the finished track listed.
 			drop(track.clone().finish().unwrap());
 		}

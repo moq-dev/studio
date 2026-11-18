@@ -2255,7 +2255,11 @@ mod tests {
 				.unwrap()
 				.expect("an instance");
 			let mut video = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
-			track.append_group(0).unwrap().close().unwrap();
+			track
+				.append_group(moq_net::Timestamp::unscaled(0))
+				.unwrap()
+				.finish()
+				.unwrap();
 			video.recv_group().await.unwrap();
 			while watching.get() != Some(1) {
 				kio::clock::sleep(INTERVAL / 4).await;
