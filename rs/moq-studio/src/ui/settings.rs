@@ -1098,29 +1098,24 @@ impl Panels {
 					});
 				});
 			});
-		let scenes: Vec<String> = {
-			let state = self.engine.state.lock().unwrap();
-			state
-				.collection()
-				.scenes
-				.iter()
-				.map(|scene| scene.name.clone())
-				.collect()
-		};
+		let listed = Action::listed(&self.engine.state.lock().unwrap());
 		let bindings = hotkeys.bindings();
-		// A key bound to a scene the file no longer has, so it can be cleared.
+		// A key bound to a scene or sound the show no longer has, so it can be
+		// cleared.
 		let gone: Vec<Action> = bindings
 			.keys()
-			.filter(|action| matches!(action, Action::Scene(name) if !scenes.contains(name)))
+			.filter(|action| !listed.contains(action))
 			.cloned()
 			.collect();
-		let mut scene_actions: Vec<Action> = scenes.iter().cloned().map(Action::Scene).collect();
-		scene_actions.extend(gone.iter().cloned());
-		let mut groups: Vec<(&str, Vec<Action>)> = Action::FIXED
-			.iter()
-			.map(|(caption, actions)| (*caption, actions.to_vec()))
-			.collect();
-		groups.insert(2, ("Scenes", scene_actions));
+		let groups = Group::ALL.map(|group| {
+			let actions: Vec<Action> = listed
+				.iter()
+				.chain(&gone)
+				.filter(|action| action.group() == group)
+				.cloned()
+				.collect();
+			(group.name(), actions)
+		});
 
 		let mut bind = None;
 		let mut clear = None;
@@ -1139,15 +1134,13 @@ impl Panels {
 				for (column, actions) in columns.iter_mut().zip(actions.chunks(half)) {
 					for action in actions {
 						let name = match action {
-							Action::Scene(name) => name.clone(),
+							Action::Scene(name) | Action::Mute(name) => name.clone(),
 							action => action.name(studio),
 						};
 						let detail = match action {
-							Action::EndStream => Some("held"),
-							Action::Panic => Some("safe scene, mics muted"),
-							Action::Scene(_) if studio => Some("cues"),
-							Action::Scene(name) if !scenes.contains(name) => Some("no such scene"),
-							_ => None,
+							Action::Scene(_) if gone.contains(action) => Some("no such scene"),
+							Action::Mute(_) if gone.contains(action) => Some("no such sound"),
+							action => action.detail(studio),
 						};
 						let refusal = self
 							.refusal
@@ -1416,6 +1409,7 @@ pub(super) fn field_row(ui: &mut Ui, name: &str, help: &str, flag: Option<&str>,
 /// A row under a line: `name` and `help` in `share` of its width with
 /// `control` beside them, or `control` under them in a pane too narrow.
 fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce(&mut Ui)) {
+	let top = ui.cursor().top();
 	rule(ui);
 	ui.add_space(14.0);
 	let width = ui.available_width();
@@ -1440,6 +1434,57 @@ fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce
 		});
 	}
 	ui.add_space(14.0);
+	let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+	sought(ui, name, rect);
+}
+
+/// The setting the palette found, by its row's name, and when, which its
+/// pane scrolls to once and lights for a moment.
+#[derive(Clone)]
+struct Sought {
+	name: String,
+	since: f64,
+	scrolled: bool,
+}
+
+/// How long a setting the palette found stays lit.
+const LIT: f64 = 1.5;
+
+/// Scroll Settings to the row called `name` and light it, as the palette
+/// does for a setting it found.
+pub(super) fn seek(ctx: &egui::Context, name: &str) {
+	let since = ctx.input(|input| input.time);
+	let sought = Sought {
+		name: name.to_string(),
+		since,
+		scrolled: false,
+	};
+	ctx.data_mut(|data| data.insert_temp(egui::Id::new("sought setting"), sought));
+}
+
+/// Scroll to the row called `name` at `rect` once, and light it a moment, if
+/// the palette found it.
+fn sought(ui: &mut Ui, name: &str, rect: Rect) {
+	let id = egui::Id::new("sought setting");
+	let Some(mut sought) = ui.ctx().data(|data| data.get_temp::<Sought>(id)) else {
+		return;
+	};
+	if sought.name != name {
+		return;
+	}
+	if !std::mem::replace(&mut sought.scrolled, true) {
+		ui.scroll_to_rect(rect, Some(Align::Min));
+	}
+	let age = ui.input(|input| input.time) - sought.since;
+	if age > LIT {
+		ui.ctx().data_mut(|data| data.remove::<Sought>(id));
+		return;
+	}
+	let alpha = (1.0 - age / LIT) as f32;
+	ui.painter()
+		.rect_filled(rect, 8, kit::ACCENT.gamma_multiply(0.12 * alpha));
+	ui.ctx().request_repaint();
+	ui.ctx().data_mut(|data| data.insert_temp(id, sought));
 }
 
 /// That `flag` sets a setting for this run, over the show's own.

@@ -4022,6 +4022,51 @@ mod tests {
 			assert_eq!(state.compositor.program_scene(), Some("Guest"), "otherwise it takes");
 			assert_eq!(state.cued(), None);
 		}
+
+		// The palette says why an action cannot run now, and what it says is
+		// what running it would.
+		{
+			use crate::controls::Action;
+			let state = engine.state.lock().unwrap();
+			let refused = |action: Action| controls.refused(&state, &action);
+			assert_eq!(refused(Action::Cut).as_deref(), Some("nothing is cued"));
+			assert_eq!(refused(Action::Transition).as_deref(), Some("nothing is cued"));
+			assert_eq!(
+				refused(Action::Scene("Portrait".into())),
+				state.collection().refuses("Portrait")
+			);
+			assert!(refused(Action::Scene("Portrait".into())).is_some());
+			assert_eq!(refused(Action::Scene("Guest".into())), None);
+			assert_eq!(refused(Action::EndStream).as_deref(), Some("the program is not on air"));
+			assert_eq!(refused(Action::GoLive), None);
+			assert_eq!(
+				refused(Action::Replay).as_deref(),
+				Some("no replay source; add one in Sources")
+			);
+			assert_eq!(refused(Action::Mute("red".into())), None);
+			assert!(refused(Action::Mute("nobody".into())).is_some());
+			assert!(Action::listed(&state).contains(&Action::Scene("Portrait".into())));
+		}
+		for (action, why) in [
+			(crate::controls::Action::Cut, "nothing is cued"),
+			(crate::controls::Action::EndStream, "the program is not on air"),
+		] {
+			let err = controls.fire(&action).unwrap_err();
+			assert_eq!(format!("{err:#}"), why);
+		}
+
+		// A sound's key or palette row flips its mute, an edit undo takes back.
+		let mute = crate::controls::Action::Mute("red".into());
+		assert_eq!(controls.fire(&mute).unwrap(), "muted `red`");
+		assert!(engine.state.lock().unwrap().collection().audio["red"].muted);
+		assert_eq!(controls.fire(&mute).unwrap(), "unmuted `red`");
+		assert!(!engine.state.lock().unwrap().collection().audio["red"].muted);
+		assert_eq!(
+			engine.state.lock().unwrap().undo().unwrap().as_deref(),
+			Some("Unmute `red`")
+		);
+		assert!(engine.state.lock().unwrap().collection().audio["red"].muted);
+		assert!(controls.fire(&crate::controls::Action::Mute("nobody".into())).is_err());
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 	}
