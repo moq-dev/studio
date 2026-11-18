@@ -1199,7 +1199,7 @@ pub fn rate(rate: Rate) -> String {
 pub fn echo(path: &moq_net::Path) -> anyhow::Result<(moq_net::path::Relative, moq_net::Path)> {
 	// A reference resolves against the broadcast's parent, as a relative URL
 	// does, so naming the broadcast's last segment puts the prefix beneath it.
-	let relative = match path.parts().last() {
+	let relative = match path.parts().next_back() {
 		Some(last) => format!("{last}/{ECHO}"),
 		None => ECHO.to_string(),
 	};
