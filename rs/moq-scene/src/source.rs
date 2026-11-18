@@ -45,8 +45,8 @@ pub(crate) enum Picture {
 	/// A texture on the compositor's device with premultiplied alpha, such as
 	/// a web page.
 	#[cfg_attr(
-		not(target_os = "linux"),
-		expect(dead_code, reason = "browser sources are Linux-only")
+		not(any(target_os = "linux", target_os = "macos")),
+		expect(dead_code, reason = "browser sources run on Linux and macOS")
 	)]
 	Texture(wgpu::Texture),
 	/// A LUT source's table, which is not drawn but looked up.
@@ -811,8 +811,8 @@ pub struct Driver {
 	strip: Option<Strip>,
 	status: kio::Producer<Status>,
 	#[cfg_attr(
-		not(target_os = "linux"),
-		expect(dead_code, reason = "browser sources are Linux-only")
+		not(any(target_os = "linux", target_os = "macos")),
+		expect(dead_code, reason = "browser sources run on Linux and macOS")
 	)]
 	page: Option<Page>,
 	/// The source's own track, when it publishes one.
@@ -1196,7 +1196,7 @@ impl Driver {
 
 	/// Render the page at `url` until its helper stops, or fail at once if the
 	/// studio offers no helper.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	async fn browser(&self, url: &str, width: u32, height: u32) -> Result<(), Error> {
 		let Some(helper) = &self.context.browser else {
 			return Err(Error::Unsupported(
@@ -1220,9 +1220,11 @@ impl Driver {
 		crate::browser::run(helper, open, page, &self.picture, Some(sound), &self.status).await
 	}
 
-	#[cfg(not(target_os = "linux"))]
+	#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 	async fn browser(&self, _: &str, _: u32, _: u32) -> Result<(), Error> {
-		Err(Error::Unsupported("browser sources run on Linux only for now".into()))
+		Err(Error::Unsupported(
+			"browser sources run on Linux and macOS only for now".into(),
+		))
 	}
 
 	/// Follow the broadcast at `path` for as long as the feed lives, playing

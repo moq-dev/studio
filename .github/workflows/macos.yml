@@ -1,11 +1,13 @@
 name: macOS
 
-# Builds the macOS app bundle for each architecture, signs it ad hoc with the
-# release's hardened runtime and entitlements, packs it into a disk image, and
-# checks the app in the image launches and lists devices. Pull requests that
-# change the packaging run it; nightly runs it against main. release.yml calls
-# it with `sign`, which signs and notarizes the app as the Developer ID, then
-# the disk image holding it, checks them again, and ships the images.
+# Builds the macOS app bundle for each architecture, with CEF for browser
+# sources, signs it ad hoc with the release's hardened runtime and
+# entitlements, runs the browser-source tests against it, packs it into a disk
+# image, and checks the app in the image launches and lists devices. Pull
+# requests that change the packaging run it; nightly runs it against main.
+# release.yml calls it with `sign`, which signs and notarizes the app as the
+# Developer ID, then the disk image holding it, checks them again, and ships
+# the images.
 
 permissions:
   contents: read
@@ -55,6 +57,13 @@ jobs:
           persist-credentials: false
           submodules: true
 
+      # cef-dll-sys builds CEF's C++ wrapper with CMake, which the image has,
+      # and Ninja, which it may lack.
+      - name: Install Ninja
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: command -v ninja || brew install ninja
+
       # The image's rustup installs the toolchain rust-toolchain.toml names, and
       # Xcode's own linker and SDK keep the binary free of Nix store paths.
       - name: Build
@@ -62,6 +71,18 @@ jobs:
 
       - name: Sign ad hoc
         run: packaging/macos/sign.sh "kixel.live Studio.app" -
+
+      # Browser sources against the signed bundle, the only place CEF runs
+      # from on macOS: drawn on the GPU, played, clicked, typed into, copied,
+      # kept logged in, and crashing alone. One at a time, since a test finds
+      # its helper among the processes this one started.
+      - name: Browser sources
+        env:
+          MOQ_STUDIO_APP: ${{ github.workspace }}/kixel.live Studio.app
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+        run: >-
+          cargo test --locked --release -p moq-studio --features release,cef --test browser --
+          --include-ignored --test-threads=1
 
       # dmg.sh's builder needs a newer Python than macOS ships.
       - name: Set up Python

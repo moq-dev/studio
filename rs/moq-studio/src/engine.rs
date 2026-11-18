@@ -3210,10 +3210,11 @@ fn browser(gpu: &Gpu) -> anyhow::Result<Option<moq_scene::browser::Helper>> {
 }
 
 /// Where browser sources keep their cookies and logins, whichever scene file
-/// is open: `moq-studio/browser` in the user's data directory, since browser
-/// sources run on Linux only for now.
+/// is open: `browser` in the studio's own data directory, the user's
+/// (`$XDG_DATA_HOME/moq-studio` on Linux, `Application Support` on macOS).
 fn browser_profile() -> anyhow::Result<PathBuf> {
-	Ok(xdg("XDG_DATA_HOME", ".local/share")?.join("moq-studio/browser"))
+	let dir = crate::data_dir().context("no home directory to keep the browser profile in")?;
+	Ok(dir.join("browser"))
 }
 
 /// Where the system picker's grants for the scene file at `scene` are kept:

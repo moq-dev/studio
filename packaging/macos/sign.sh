@@ -22,7 +22,32 @@ if [[ -n $keychain ]]; then
     flags+=(--keychain "$keychain")
 fi
 
+# The entitlements each helper app's process needs, by its name: none but
+# CEF's renderers and GPU process, which compile code at run time.
+entitlements() {
+    case $1 in
+        *" Helper (Renderer).app" | *" Helper (GPU).app") echo "$packaging/jit.entitlements.plist" ;;
+        *.app) ;;
+        *)
+            echo "no entitlements known for $1" >&2
+            return 1
+            ;;
+    esac
+}
+
 # Nested code is signed before the bundle that holds it, innermost first, each
-# with its own entitlements; the bundle's signature then seals theirs.
+# with its own entitlements; the bundle's signature then seals theirs. A
+# framework's libraries go before the framework.
+shopt -s nullglob
+for framework in "$app"/Contents/Frameworks/*.framework; do
+    for library in "$framework"/Libraries/*.dylib; do
+        codesign "${flags[@]}" "$library"
+    done
+    codesign "${flags[@]}" "$framework"
+done
+for helper in "$app"/Contents/Frameworks/*.app; do
+    plist=$(entitlements "$helper")
+    codesign "${flags[@]}" ${plist:+--entitlements "$plist"} "$helper"
+done
 codesign "${flags[@]}" --entitlements "$packaging/entitlements.plist" "$app"
 codesign --verify --strict --deep --verbose=2 "$app"

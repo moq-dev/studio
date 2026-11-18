@@ -1,10 +1,11 @@
 //! Browser sources against the real helper: this package's binary, built with
 //! `cef`, rendering `data:` pages, or pages served on loopback, with nothing
-//! fetched from the network.
+//! fetched from the network. On macOS the binary is the one in the app bundle
+//! `MOQ_STUDIO_APP` names, since CEF runs only from there.
 
-#![cfg(all(target_os = "linux", feature = "cef"))]
+#![cfg(all(any(target_os = "linux", target_os = "macos"), feature = "cef"))]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,6 +18,22 @@ use moq_scene::{Canvas, Collection, Compositor, Item, Rect, Rgba, Scene, Source}
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 const BLUE: [u8; 4] = [0, 0, 255, 255];
+
+/// The studio's executable, which becomes the helper.
+#[cfg(target_os = "linux")]
+fn program() -> PathBuf {
+	PathBuf::from(env!("CARGO_BIN_EXE_moq-studio"))
+}
+
+/// The studio's executable in the app bundle `MOQ_STUDIO_APP` names, as
+/// `packaging/macos/bundle.sh` lays it out with CEF.
+#[cfg(target_os = "macos")]
+fn program() -> PathBuf {
+	let app = std::env::var_os("MOQ_STUDIO_APP").expect("MOQ_STUDIO_APP names the app bundle to run CEF from");
+	std::fs::canonicalize(app)
+		.expect("the app bundle")
+		.join("Contents/MacOS/moq-studio")
+}
 
 /// A studio of one scene, "Main", drawing `sources` back to front over the
 /// whole of a small canvas. Dropping it stops its helper.
@@ -45,7 +62,7 @@ impl Studio {
 
 	/// A studio whose pages keep their cookies in `profile`.
 	async fn on(profile: &Path, sources: &[(&str, Source)]) -> Self {
-		Self::start(Path::new(env!("CARGO_BIN_EXE_moq-studio")), profile, sources).await
+		Self::start(&program(), profile, sources).await
 	}
 
 	/// A studio whose helper is `program`, with its pages' cookies in
@@ -231,7 +248,7 @@ async fn local<F: Future>(f: F) -> F::Output {
 /// A page draws over what is under it with its own alpha, and its sound
 /// joins the bus.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_page_draws_and_plays() {
 	local(async {
 		// Half-transparent red over blue, and a tone.
@@ -245,7 +262,15 @@ async fn a_page_draws_and_plays() {
 		studio.until_center([128, 0, 127, 255], &[]).await;
 		let feed = studio.sources.get("page").unwrap();
 		assert_eq!(feed.status(), Status::Live);
-		assert!(feed.page().unwrap().paint().is_some(), "the paint path shows");
+		let paint = feed.page().unwrap().paint();
+		assert!(paint.is_some(), "the paint path shows");
+		// Every Mac draws with Metal, which imports the page's IOSurface.
+		#[cfg(target_os = "macos")]
+		assert_eq!(
+			paint,
+			Some(moq_scene::browser::Paint::Gpu),
+			"the page is copied on the GPU"
+		);
 
 		let strip = feed.strip().unwrap().clone();
 		let deadline = Instant::now().saturating_add(TIMEOUT);
@@ -262,7 +287,7 @@ async fn a_page_draws_and_plays() {
 /// shared texture from a GPU whose tiling the studio's cannot read scrambles
 /// its rows.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_page_keeps_its_layout() {
 	local(async {
 		const RED: [u8; 4] = [255, 0, 0, 255];
@@ -290,7 +315,7 @@ async fn a_page_keeps_its_layout() {
 
 /// A page gets WebGL and WebGL2 contexts, and what it draws with them shows.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_webgl_page_draws() {
 	local(async {
 		// Red unless both contexts exist, and then green from WebGL2.
@@ -309,7 +334,7 @@ async fn a_webgl_page_draws() {
 /// A click reaches the page where the preview put it, and a popup it asks for
 /// opens nothing.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_click_reaches_the_page() {
 	local(async {
 		let html = "<body style='margin:0;height:100vh;background:red' onclick=\"\
@@ -338,7 +363,7 @@ async fn a_click_reaches_the_page() {
 /// A `<select>`'s list, which CEF paints apart from the page, draws over the
 /// page, and a click on it picks an option like a click on the page would.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_dropdown_draws_and_takes_clicks() {
 	local(async {
 		// A select across the top, whose list of lime options covers the
@@ -377,7 +402,7 @@ async fn a_dropdown_draws_and_takes_clicks() {
 /// Copy and Cut put the page's selection on the clipboard, and Cut deletes it
 /// from the page. A password field's text is never taken.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn copy_and_cut_reach_the_clipboard() {
 	local(async {
 		// A text box over the whole page, then a password field and a second
@@ -410,8 +435,10 @@ async fn copy_and_cut_reach_the_clipboard() {
 				});
 			}
 		};
+		// Select All: Command-A on a Mac.
 		let ctrl = Modifiers {
-			ctrl: true,
+			ctrl: cfg!(not(target_os = "macos")),
+			meta: cfg!(target_os = "macos"),
 			..Default::default()
 		};
 		let mut clipboard = Clipboard::new(studio.helper.clone());
@@ -453,19 +480,20 @@ async fn copy_and_cut_reach_the_clipboard() {
 	.await;
 }
 
-/// Where a page's copies land: the X clipboard, where CEF copies itself, or
-/// else the studio's, through the helper.
+/// Where a page's copies land: the desktop's clipboard, where CEF copies
+/// itself on macOS and through an X display, or else the studio's, through
+/// the helper.
 enum Clipboard {
 	Relay(Helper),
 	/// With the text it held when last read.
-	X11(Option<String>),
+	Desktop(Option<String>),
 }
 
 impl Clipboard {
 	fn new(helper: Helper) -> Self {
 		match helper.relays_copies() {
 			true => Self::Relay(helper),
-			false => Self::X11(x11_clipboard()),
+			false => Self::Desktop(desktop_clipboard()),
 		}
 	}
 
@@ -473,8 +501,8 @@ impl Clipboard {
 	fn take(&mut self) -> Option<String> {
 		match self {
 			Self::Relay(helper) => helper.copied(),
-			Self::X11(held) => {
-				let text = x11_clipboard();
+			Self::Desktop(held) => {
+				let text = desktop_clipboard();
 				if text == *held {
 					return None;
 				}
@@ -497,9 +525,18 @@ impl Clipboard {
 	}
 }
 
+/// The pasteboard's text, as a paste takes it: none when it holds no text.
+#[cfg(target_os = "macos")]
+fn desktop_clipboard() -> Option<String> {
+	let pasted = std::process::Command::new("pbpaste").output().unwrap();
+	assert!(pasted.status.success());
+	Some(String::from_utf8(pasted.stdout).unwrap()).filter(|text| !text.is_empty())
+}
+
 /// The X clipboard's text, as a paste takes it: none with no owner, or one
 /// offering no text.
-fn x11_clipboard() -> Option<String> {
+#[cfg(target_os = "linux")]
+fn desktop_clipboard() -> Option<String> {
 	use x11rb::connection::Connection;
 	use x11rb::protocol::Event;
 	use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, WindowClass};
@@ -549,7 +586,7 @@ fn x11_clipboard() -> Option<String> {
 /// A page that closes itself fails its own source and leaves the canvas,
 /// while the page beside it in the same helper keeps drawing.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_page_that_closes_itself_fails_alone() {
 	local(async {
 		let closer = page("<body><script>addEventListener('load', () => window.close())</script></body>");
@@ -566,7 +603,7 @@ async fn a_page_that_closes_itself_fails_alone() {
 /// source, while everything else keeps drawing. A crash of the helper every
 /// page shares fails them all and nothing else, and a reload starts a new one.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_crash_while_loading_drops_only_its_source() {
 	local(async {
 		let crash = Source::Browser {
@@ -602,7 +639,7 @@ async fn a_crash_while_loading_drops_only_its_source() {
 /// leaves the canvas, and no longer reports a paint path, and a reload draws
 /// it again.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_crash_after_drawing_leaves_the_canvas() {
 	local(async {
 		let red = page("<body style='background:red'></body>");
@@ -638,7 +675,7 @@ async fn a_crash_after_drawing_leaves_the_canvas() {
 /// A second studio on the profile while it is in use fails its pages saying
 /// why, and leaves the first one's drawing.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn cookies_survive_a_restart() {
 	local(async {
 		// Red until it has seen its cookie, then green.
@@ -713,7 +750,7 @@ async fn serve(html: &'static str) -> String {
 /// component updates, a spellcheck dictionary, the network time, or
 /// autofill's guesses at a page's text field.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn the_helper_requests_only_its_pages() {
 	use std::os::unix::fs::PermissionsExt;
 	use tokio::io::AsyncBufReadExt;
@@ -738,13 +775,13 @@ async fn the_helper_requests_only_its_pages() {
 	});
 	// The helper, told to use the proxy.
 	let dir = tempfile::tempdir().unwrap();
-	let program = dir.path().join("helper");
+	let wrapper = dir.path().join("helper");
 	let script = format!(
 		"#!/bin/sh\nexec '{}' \"$@\" --proxy-server=http://{proxy}\n",
-		env!("CARGO_BIN_EXE_moq-studio")
+		program().display()
 	);
-	std::fs::write(&program, script).unwrap();
-	std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+	std::fs::write(&wrapper, script).unwrap();
+	std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
 
 	local(async {
 		let url = serve("<body style='margin:0;background:lime'><textarea autofocus></textarea></body>").await;
@@ -753,7 +790,7 @@ async fn the_helper_requests_only_its_pages() {
 			width: 320,
 			height: 240,
 		};
-		let mut studio = Studio::start(&program, &dir.path().join("profile"), &[("page", page)]).await;
+		let mut studio = Studio::start(&wrapper, &dir.path().join("profile"), &[("page", page)]).await;
 		studio.until_center(GREEN, &[]).await;
 		// The browser asks for what it wants as it starts and as the page
 		// loads, so every request seen had begun by the time the page drew.
@@ -772,7 +809,7 @@ const DYING: &str = "MOQ_STUDIO_TEST_DYING_PROFILE";
 /// holds even while CEF is still starting, which can last for good, as on a
 /// display that never answers.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_helper_exits_with_its_studio() {
 	let profile = tempfile::tempdir().unwrap();
 	let _stall = stall(profile.path());
@@ -823,7 +860,7 @@ async fn a_studio_that_dies() {
 /// A studio stops a helper still starting CEF without waiting for it to
 /// finish starting, which can take forever.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs CEF and a Vulkan device; run by just render-sw"]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
 async fn a_helper_stops_while_starting() {
 	local(async {
 		let profile = tempfile::tempdir().unwrap();
@@ -852,21 +889,39 @@ async fn until_stalled(studio: u32, profile: &Path) -> u32 {
 	let state = std::fs::canonicalize(profile).unwrap().join("Local State");
 	let deadline = Instant::now().saturating_add(TIMEOUT);
 	loop {
-		if let Some(helper) = helper(studio) {
-			let fds = std::fs::read_dir(format!("/proc/{helper}/fd"))
-				.into_iter()
-				.flatten()
-				.flatten();
-			if fds
-				.filter_map(|fd| std::fs::read_link(fd.path()).ok())
-				.any(|path| path == state)
-			{
-				return helper;
-			}
+		if let Some(helper) = helper(studio)
+			&& open_files(helper).contains(&state)
+		{
+			return helper;
 		}
 		assert!(Instant::now() < deadline, "no helper reads {}", state.display());
 		kio::clock::sleep(Duration::from_millis(30)).await;
 	}
+}
+
+/// The files process `pid` holds open.
+#[cfg(target_os = "linux")]
+fn open_files(pid: u32) -> Vec<PathBuf> {
+	let fds = std::fs::read_dir(format!("/proc/{pid}/fd"))
+		.into_iter()
+		.flatten()
+		.flatten();
+	fds.filter_map(|fd| std::fs::read_link(fd.path()).ok()).collect()
+}
+
+/// The files process `pid` holds open.
+#[cfg(target_os = "macos")]
+fn open_files(pid: u32) -> Vec<PathBuf> {
+	// One field per line, each a letter and its value: `n` is a file's name.
+	let listed = std::process::Command::new("lsof")
+		.args(["-n", "-Fn", "-p", &pid.to_string()])
+		.output()
+		.unwrap();
+	String::from_utf8_lossy(&listed.stdout)
+		.lines()
+		.filter_map(|line| line.strip_prefix('n'))
+		.map(PathBuf::from)
+		.collect()
 }
 
 /// The one helper `studio` still runs: a child started with the helper's
@@ -878,9 +933,7 @@ fn helper(studio: u32) -> Option<u32> {
 		.map(|process| process.pid)
 }
 
-/// The renderers under `helper`. CEF forks them from its zygote, whose
-/// arguments they keep, so they are told apart by the compositor thread every
-/// renderer runs.
+/// The renderers under `helper`.
 fn renderers(helper: u32) -> Vec<u32> {
 	let processes = processes();
 	let mut family = vec![helper];
@@ -894,18 +947,30 @@ fn renderers(helper: u32) -> Vec<u32> {
 		);
 		at += 1;
 	}
-	family
+	family.into_iter().filter(|&pid| is_renderer(pid, &processes)).collect()
+}
+
+/// Whether `pid` is a renderer. CEF forks them from its zygote, whose
+/// arguments they keep, so they are told apart by the compositor thread every
+/// renderer runs.
+#[cfg(target_os = "linux")]
+fn is_renderer(pid: u32, _: &[Process]) -> bool {
+	let threads = std::fs::read_dir(format!("/proc/{pid}/task"))
 		.into_iter()
-		.filter(|pid| {
-			let threads = std::fs::read_dir(format!("/proc/{pid}/task"))
-				.into_iter()
-				.flatten()
-				.flatten();
-			threads
-				.filter_map(|thread| std::fs::read_to_string(thread.path().join("comm")).ok())
-				.any(|name| name.trim_end() == "Compositor")
-		})
-		.collect()
+		.flatten()
+		.flatten();
+	threads
+		.filter_map(|thread| std::fs::read_to_string(thread.path().join("comm")).ok())
+		.any(|name| name.trim_end() == "Compositor")
+}
+
+/// Whether `pid` is a renderer, which macOS starts with its type in its
+/// arguments, having no zygote.
+#[cfg(target_os = "macos")]
+fn is_renderer(pid: u32, processes: &[Process]) -> bool {
+	processes
+		.iter()
+		.any(|process| process.pid == pid && process.args.iter().any(|arg| arg == b"--type=renderer"))
 }
 
 struct Process {
@@ -915,7 +980,37 @@ struct Process {
 	args: Vec<Vec<u8>>,
 }
 
+/// Every process running, leaving out the dead ones waiting to be reaped. A
+/// path with a space splits into several arguments, which no test looks at.
+#[cfg(target_os = "macos")]
+fn processes() -> Vec<Process> {
+	let listed = std::process::Command::new("ps")
+		.args(["-axww", "-o", "pid=,ppid=,pgid=,stat=,command="])
+		.output()
+		.unwrap();
+	String::from_utf8_lossy(&listed.stdout)
+		.lines()
+		.filter_map(|line| {
+			let mut fields = line.split_whitespace();
+			let pid = fields.next()?.parse().ok()?;
+			let parent = fields.next()?.parse().ok()?;
+			let group = fields.next()?.parse().ok()?;
+			if fields.next()?.starts_with('Z') {
+				return None;
+			}
+			let args = fields.map(|arg| arg.as_bytes().to_vec()).collect();
+			Some(Process {
+				pid,
+				parent,
+				group,
+				args,
+			})
+		})
+		.collect()
+}
+
 /// Every process running, leaving out the dead ones waiting to be reaped.
+#[cfg(target_os = "linux")]
 fn processes() -> Vec<Process> {
 	let Ok(entries) = std::fs::read_dir("/proc") else {
 		return Vec::new();

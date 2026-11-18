@@ -14,7 +14,9 @@ use cef::*;
 use rustix::process::{Resource, Rlimit, Signal, getpid, getrlimit, kill_process_group, setrlimit};
 
 use super::outbox::Commands;
-use super::protocol::{Area, Channel, Command, Display, Event, Format, Id, Layer, Open, Plane, Raster, Start, Texture};
+use super::protocol::{Area, Channel, Command, Event, Format, Id, Layer, Open, Raster, Start, Texture};
+#[cfg(target_os = "linux")]
+use super::protocol::{Display, Plane};
 use super::{Button, Input, Modifiers};
 
 /// What the helper asks of a page's focused frame: its selection, and whether
@@ -25,6 +27,14 @@ const COPIED: &str = "moq-studio-copied";
 
 /// Run one of CEF's subprocesses (renderer, GPU, utility, zygote).
 pub(super) fn subprocess() -> ExitCode {
+	#[cfg(target_os = "macos")]
+	let _framework = match mac::framework(true) {
+		Ok(framework) => framework,
+		Err(err) => {
+			eprintln!("browser source helper: {err}");
+			return ExitCode::FAILURE;
+		}
+	};
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 	let args = args::Args::new();
 	let mut app = RendererApp::new(RendererCopy::new());
@@ -52,9 +62,12 @@ struct Shared {
 	/// never another page's.
 	painted: Mutex<mpsc::Receiver<()>>,
 	accelerated: bool,
-	/// Whether CEF's own copy reaches the desktop's clipboard: only through
-	/// an X display.
+	/// Whether CEF's own copy reaches the desktop's clipboard.
 	native_copy: bool,
+	/// The studio's service, which takes each shared texture's IOSurface, on
+	/// the GPU path.
+	#[cfg(target_os = "macos")]
+	surfaces: Option<super::mach::Sender>,
 }
 
 impl Shared {
@@ -113,12 +126,25 @@ fn serve() -> Result<(), String> {
 		Err(err) => return Err(format!("socket: {err}")),
 	};
 
+	#[cfg(target_os = "macos")]
+	let surfaces = match &start.raster {
+		Raster::Gpu { service } => match super::mach::Sender::look_up(service) {
+			Ok(sender) => Some(sender),
+			Err(reason) => {
+				_ = writer.send(&Event::Fatal(reason.clone()), &[]);
+				return Err(reason);
+			}
+		},
+		Raster::Cpu => None,
+	};
 	let (painted_tx, painted) = mpsc::channel();
 	let shared = Arc::new(Shared {
 		writer: Mutex::new(writer),
 		painted: Mutex::new(painted),
 		accelerated: matches!(start.raster, Raster::Gpu { .. }),
 		native_copy: start.raster.native_copy(),
+		#[cfg(target_os = "macos")]
+		surfaces,
 	});
 	// The studio shows why, rather than only that the helper exited.
 	browse(&shared, start, reader, painted_tx).inspect_err(|reason| _ = shared.send(&Event::Fatal(reason.clone()), &[]))
@@ -160,11 +186,20 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 			.map_err(|err| format!("cannot start the helper's command thread: {err}"))?;
 	}
 
+	// CEF's framework first: the application CEF requires conforms to the
+	// protocols it defines.
+	#[cfg(target_os = "macos")]
+	let _framework = mac::framework(false)?;
+	#[cfg(target_os = "macos")]
+	let _awake = mac::application()?;
+
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 	let args = args::Args::new();
 	let mut app = HelperApp::new(HelperProcess::new(), start.raster);
 	let profile = CefString::from(start.profile.as_str());
 	let settings = Settings {
+		#[cfg(target_os = "macos")]
+		browser_subprocess_path: CefString::from(mac::subprocess_path()?.as_str()),
 		windowless_rendering_enabled: 1,
 		// The global profile, kept on disk: without a cache path CEF keeps
 		// everything in memory.
@@ -440,6 +475,15 @@ fn deliver(id: Id, input: Input) {
 			modifiers,
 		} => host.send_mouse_wheel_event(Some(&mouse(x, y, modifiers)), dx, dy),
 		Input::Key { code, down, modifiers } => {
+			// A page in a Mac browser takes these from the Edit menu, which
+			// the helper has none of.
+			#[cfg(target_os = "macos")]
+			if down && let Some(command) = mac::command(code, modifiers) {
+				if let Some(frame) = browser.focused_frame() {
+					command(&frame);
+				}
+				return;
+			}
 			let event = KeyEvent {
 				type_: if down {
 					KeyEventType::RAWKEYDOWN
@@ -450,6 +494,10 @@ fn deliver(id: Id, input: Input) {
 				windows_key_code: code,
 				..Default::default()
 			};
+			// On macOS CEF reads a key from a native event it builds from the
+			// key's Mac code and characters, not from the Windows code.
+			#[cfg(target_os = "macos")]
+			let event = mac::key(event, code, modifiers.shift);
 			host.send_key_event(Some(&event));
 		}
 		Input::Text(text) => {
@@ -568,12 +616,18 @@ wrap_app! {
 			// desktop's keyring hands over its key, which a locked keyring holds
 			// behind an unlock prompt: every page that loads over the network
 			// stays Starting until someone answers it, and forever where no one
-			// can, as with no monitor attached.
+			// can, as with no monitor attached. On macOS the keychain asks the
+			// user, once per build the signature changes in.
+			#[cfg(target_os = "linux")]
 			command_line.append_switch_with_value(Some(&"password-store".into()), Some(&"basic".into()));
+			#[cfg(target_os = "macos")]
+			command_line.append_switch(Some(&"use-mock-keychain".into()));
 			// Chromium's sandbox needs unprivileged user namespaces, which
 			// Ubuntu's AppArmor and a Flatpak deny, or a setuid-root helper,
 			// which a user build lacks. Without either, the browser aborts
-			// rather than run unsandboxed, so the sandbox is off, as in OBS.
+			// rather than run unsandboxed, so the sandbox is off, as in OBS. On
+			// macOS it needs CEF's sandbox library linked into every helper,
+			// which the `cef` crate leaves to the app, so it is off there too.
 			command_line.append_switch(Some(&"no-sandbox".into()));
 			// The browser requests only what its pages load. Otherwise it asks
 			// Google, unprompted, for the network time, for autofill's guesses
@@ -597,6 +651,11 @@ wrap_app! {
 			// names.
 			command_line.append_switch(Some(&"disable-extensions".into()));
 			match &self.raster {
+				// On macOS shared textures come from Metal, on whichever GPU the
+				// studio's surface lands on, so there is nothing to pick.
+				#[cfg(target_os = "macos")]
+				Raster::Gpu { .. } => {}
+				#[cfg(target_os = "linux")]
 				Raster::Gpu { render_node, display } => {
 					let platform = match display {
 						Display::Wayland => "wayland",
@@ -623,12 +682,13 @@ wrap_app! {
 				// told to, since it JITs page shaders in the GPU process. A
 				// browser source runs the pages its user picked, not the web.
 				//
-				// Painting offscreen in software needs no display either,
-				// so none is opened, which lets the helper run with no X
-				// server, as under Wayland without XWayland.
+				// On Linux, painting offscreen in software needs no display
+				// either, so none is opened, which lets the helper run with no
+				// X server, as under Wayland without XWayland.
 				Raster::Cpu => {
 					command_line.append_switch(Some(&"disable-gpu".into()));
 					command_line.append_switch(Some(&"enable-unsafe-swiftshader".into()));
+					#[cfg(target_os = "linux")]
 					command_line.append_switch_with_value(Some(&"ozone-platform".into()), Some(&"headless".into()));
 				}
 			}
@@ -860,26 +920,54 @@ wrap_render_handler! {
 					return;
 				}
 			};
-			let count = (info.plane_count.max(0) as usize).min(info.planes.len());
-			let planes = &info.planes[..count];
-			let texture = Texture {
-				width: info.extra.coded_size.width as u32,
-				height: info.extra.coded_size.height as u32,
-				format,
-				modifier: info.modifier,
-				planes: planes
-					.iter()
-					.map(|plane| Plane {
-						stride: plane.stride,
-						offset: plane.offset,
-						size: plane.size,
-					})
-					.collect(),
-			};
-			// SAFETY: CEF owns these descriptors and keeps them open for this
-			// call, which outlasts the send that duplicates them.
-			let fds: Vec<_> = planes.iter().map(|plane| unsafe { BorrowedFd::borrow_raw(plane.fd) }).collect();
-			self.page.shared.paint(&Event::Texture(self.page.id, layer, texture), &fds);
+			#[cfg(target_os = "linux")]
+			{
+				let count = (info.plane_count.max(0) as usize).min(info.planes.len());
+				let planes = &info.planes[..count];
+				let texture = Texture {
+					width: info.extra.coded_size.width as u32,
+					height: info.extra.coded_size.height as u32,
+					format,
+					modifier: info.modifier,
+					planes: planes
+						.iter()
+						.map(|plane| Plane {
+							stride: plane.stride,
+							offset: plane.offset,
+							size: plane.size,
+						})
+						.collect(),
+				};
+				// SAFETY: CEF owns these descriptors and keeps them open for
+				// this call, which outlasts the send that duplicates them.
+				let fds: Vec<_> = planes.iter().map(|plane| unsafe { BorrowedFd::borrow_raw(plane.fd) }).collect();
+				self.page.shared.paint(&Event::Texture(self.page.id, layer, texture), &fds);
+			}
+			#[cfg(target_os = "macos")]
+			{
+				let Some(surfaces) = &self.page.shared.surfaces else {
+					self.page.fail("CEF painted a shared texture, though the page paints into memory".into());
+					return;
+				};
+				let Some(surface) = std::ptr::NonNull::new(info.shared_texture_io_surface) else {
+					self.page.fail("CEF painted a shared texture with no surface".into());
+					return;
+				};
+				// SAFETY: CEF keeps the surface alive for this call, which
+				// outlasts the send that hands the studio its own reference.
+				let surface = unsafe { surface.cast::<objc2_io_surface::IOSurfaceRef>().as_ref() };
+				// Ahead of the message, which the studio takes it with.
+				if let Err(reason) = surfaces.send(surface) {
+					self.page.fail(reason);
+					return;
+				}
+				let texture = Texture {
+					width: info.extra.coded_size.width as u32,
+					height: info.extra.coded_size.height as u32,
+					format,
+				};
+				self.page.shared.paint(&Event::Texture(self.page.id, layer, texture), &[]);
+			}
 		}
 	}
 }
@@ -1046,5 +1134,212 @@ wrap_life_span_handler! {
 				quit_message_loop();
 			}
 		}
+	}
+}
+
+/// What CEF needs of a helper on macOS: its framework, loaded from the app
+/// bundle rather than linked, the helper apps its subprocesses run from, and
+/// an NSApplication that takes part in its event handling.
+#[cfg(target_os = "macos")]
+mod mac {
+	use std::cell::Cell;
+	use std::path::{Path, PathBuf};
+
+	use cef::ImplFrame;
+	use cef::application_mac::{CefAppProtocol, CrAppControlProtocol, CrAppProtocol};
+	use cef::library_loader::LibraryLoader;
+	use objc2::rc::Retained;
+	use objc2::runtime::{Bool, NSObjectProtocol, ProtocolObject};
+	use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+	use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent, NSResponder};
+	use objc2_foundation::{NSActivityOptions, NSObject, NSProcessInfo, NSString};
+
+	/// The Edit menu's command a Mac browser runs for the key with the
+	/// Windows code `code` pressed with `modifiers`: Select All, Undo, and
+	/// Redo. Copy, Cut, and Paste arrive as their own input.
+	pub(super) fn command(code: i32, modifiers: super::Modifiers) -> Option<fn(&super::Frame)> {
+		if !modifiers.meta || modifiers.ctrl || modifiers.alt {
+			return None;
+		}
+		match (u8::try_from(code).ok()?, modifiers.shift) {
+			(b'A', false) => Some(|frame| frame.select_all()),
+			(b'Z', false) => Some(|frame| frame.undo()),
+			(b'Z', true) => Some(|frame| frame.redo()),
+			_ => None,
+		}
+	}
+
+	/// `event` with the Mac key code and characters of the key with the
+	/// Windows code `code`, on a US layout, which CEF builds its native event
+	/// from. The page's text arrives apart, as typed characters.
+	pub(super) fn key(mut event: super::KeyEvent, code: i32, shift: bool) -> super::KeyEvent {
+		let Some((native, character)) = u8::try_from(code).ok().and_then(mac_key) else {
+			return event;
+		};
+		event.native_key_code = native.into();
+		event.unmodified_character = character;
+		event.character = match u8::try_from(character) {
+			Ok(letter @ b'a'..=b'z') if shift => letter.to_ascii_uppercase().into(),
+			_ => character,
+		};
+		event
+	}
+
+	/// The Mac key code (`kVK_*`) of the key with the Windows code `code`,
+	/// and the character it types unshifted, AppKit's own for a function key,
+	/// for every key the studio sends.
+	fn mac_key(code: u8) -> Option<(u16, u16)> {
+		const LETTERS: [u16; 26] = [
+			0x00, 0x0b, 0x08, 0x02, 0x0e, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2e, 0x2d, 0x1f, 0x23, 0x0c, 0x0f,
+			0x01, 0x11, 0x20, 0x09, 0x0d, 0x07, 0x10, 0x06,
+		];
+		const DIGITS: [u16; 10] = [0x1d, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1a, 0x1c, 0x19];
+		const F_KEYS: [u16; 12] = [0x7a, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6d, 0x67, 0x6f];
+		// AppKit's function-key characters, from NSUpArrowFunctionKey on.
+		let function = |offset: u16| 0xf700 + offset;
+		let ascii = |byte: u8| u16::from(byte);
+		Some(match code {
+			b'A'..=b'Z' => (LETTERS[usize::from(code - b'A')], ascii(code.to_ascii_lowercase())),
+			b'0'..=b'9' => (DIGITS[usize::from(code - b'0')], ascii(code)),
+			0x70..=0x7b => (F_KEYS[usize::from(code - 0x70)], function(4 + u16::from(code - 0x70))),
+			// Backspace types DEL on a Mac.
+			0x08 => (0x33, 0x7f),
+			0x09 => (0x30, ascii(b'\t')),
+			0x0d => (0x24, ascii(b'\r')),
+			0x1b => (0x35, 0x1b),
+			0x20 => (0x31, ascii(b' ')),
+			0x21 => (0x74, function(0x2c)),
+			0x22 => (0x79, function(0x2d)),
+			0x23 => (0x77, function(0x2b)),
+			0x24 => (0x73, function(0x29)),
+			0x25 => (0x7b, function(0x02)),
+			0x26 => (0x7e, function(0x00)),
+			0x27 => (0x7c, function(0x03)),
+			0x28 => (0x7d, function(0x01)),
+			0x2d => (0x72, function(0x27)),
+			0x2e => (0x75, function(0x28)),
+			0xba => (0x29, ascii(b';')),
+			0xbb => (0x18, ascii(b'=')),
+			0xbc => (0x2b, ascii(b',')),
+			0xbd => (0x1b, ascii(b'-')),
+			0xbe => (0x2f, ascii(b'.')),
+			0xbf => (0x2c, ascii(b'/')),
+			0xc0 => (0x32, ascii(b'`')),
+			0xdb => (0x21, ascii(b'[')),
+			0xdc => (0x2a, ascii(b'\\')),
+			0xdd => (0x1e, ascii(b']')),
+			0xde => (0x27, ascii(b'\'')),
+			_ => return None,
+		})
+	}
+
+	/// CEF's library, within the app bundle's `Contents/Frameworks`.
+	const FRAMEWORK: &str = "Chromium Embedded Framework.framework/Chromium Embedded Framework";
+
+	/// Load CEF's framework from the app bundle this executable runs in: the
+	/// helper, in `Contents/MacOS`, or a `subprocess` in a helper app of its
+	/// own under `Contents/Frameworks`. Unloaded when dropped.
+	pub(super) fn framework(subprocess: bool) -> Result<LibraryLoader, String> {
+		let exe = std::env::current_exe().map_err(|err| format!("cannot find this executable: {err}"))?;
+		let up = if subprocess { "../../.." } else { "../Frameworks" };
+		let path = directory(&exe)?.join(up).join(FRAMEWORK);
+		if !path.exists() {
+			return Err(format!(
+				"browser sources on macOS run only from the app bundle, which holds CEF at {}",
+				path.display()
+			));
+		}
+		let framework = LibraryLoader::new(&exe, subprocess);
+		if !framework.load() {
+			return Err(format!("cannot load CEF from {}", path.display()));
+		}
+		Ok(framework)
+	}
+
+	/// The helper app CEF starts its subprocesses from: `<name> Helper.app`
+	/// beside the framework, whose `(GPU)`, `(Renderer)`, `(Plugin)`, and
+	/// `(Alerts)` variants CEF finds by those suffixes.
+	pub(super) fn subprocess_path() -> Result<String, String> {
+		let exe = std::env::current_exe().map_err(|err| format!("cannot find this executable: {err}"))?;
+		let name = exe
+			.file_name()
+			.and_then(|name| name.to_str())
+			.ok_or("this executable has no name")?;
+		let helper = format!("{name} Helper");
+		let path = directory(&exe)?
+			.join("../Frameworks")
+			.join(format!("{helper}.app"))
+			.join("Contents/MacOS")
+			.join(&helper);
+		let path = std::fs::canonicalize(&path)
+			.map_err(|err| format!("the app bundle lacks CEF's helper app {}: {err}", path.display()))?;
+		path.into_os_string()
+			.into_string()
+			.map_err(|path| format!("CEF's helper app {} is not UTF-8", PathBuf::from(path).display()))
+	}
+
+	fn directory(exe: &Path) -> Result<&Path, String> {
+		exe.parent()
+			.ok_or_else(|| format!("{} has no directory", exe.display()))
+	}
+
+	thread_local! {
+		/// Whether the application is dispatching an event, which CEF asks.
+		static HANDLING: Cell<bool> = const { Cell::new(false) };
+	}
+
+	define_class!(
+		/// The helper's NSApplication, which says whether it is dispatching
+		/// an event, as CEF requires of the application it runs in.
+		#[unsafe(super(NSApplication, NSResponder, NSObject))]
+		#[thread_kind = MainThreadOnly]
+		#[name = "MoqBrowserApplication"]
+		struct Application;
+
+		unsafe impl NSObjectProtocol for Application {}
+
+		unsafe impl CrAppProtocol for Application {
+			#[unsafe(method(isHandlingSendEvent))]
+			fn handling(&self) -> Bool {
+				Bool::new(HANDLING.get())
+			}
+		}
+
+		unsafe impl CrAppControlProtocol for Application {
+			#[unsafe(method(setHandlingSendEvent:))]
+			fn set_handling(&self, handling: Bool) {
+				HANDLING.set(handling.as_bool());
+			}
+		}
+
+		unsafe impl CefAppProtocol for Application {}
+
+		impl Application {
+			#[unsafe(method(sendEvent:))]
+			fn send_event(&self, event: &NSEvent) {
+				let was = HANDLING.replace(true);
+				// SAFETY: NSApplication's own `sendEvent:`, with its event.
+				let () = unsafe { msg_send![super(self), sendEvent: event] };
+				HANDLING.set(was);
+			}
+		}
+	);
+
+	/// Make this process's NSApplication one CEF accepts, kept out of the
+	/// Dock, as the studio's own icon already stands for it. The returned
+	/// activity keeps it out of App Nap, which would slow its pages' painting
+	/// with no window of its own on screen, for as long as it is held.
+	pub(super) fn application() -> Result<Retained<ProtocolObject<dyn NSObjectProtocol>>, String> {
+		MainThreadMarker::new().ok_or("the helper runs CEF off its main thread")?;
+		// SAFETY: the first `sharedApplication` makes NSApp an instance of the
+		// class it is sent to.
+		let app: Retained<NSApplication> = unsafe { msg_send![Application::class(), sharedApplication] };
+		if !app.isKindOfClass(Application::class()) {
+			return Err("the helper's NSApplication was made before CEF's".into());
+		}
+		app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+		let reason = NSString::from_str("Browser sources paint into the studio's stream");
+		let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep | NSActivityOptions::LatencyCritical;
+		Ok(NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &reason))
 	}
 }
