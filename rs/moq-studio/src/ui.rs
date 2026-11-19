@@ -17,7 +17,7 @@ use moq_scene::{
 };
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-use crate::controls::{Action, Controls};
+use crate::controls::{Action, Controls, Group};
 use crate::devices::{self, Listing, Pick};
 use crate::engine::{Engine, Lost, State};
 use crate::fx::{Fx, Mark};
@@ -36,12 +36,14 @@ mod drop;
 mod formats;
 mod graph;
 mod inspector;
+mod keep;
 mod layers;
 mod layout;
 mod levels;
 mod live;
 mod mixer;
 mod multiview;
+mod palette;
 mod review;
 mod settings;
 mod shell;
@@ -113,7 +115,7 @@ pub(crate) enum Setting {
 }
 
 impl Setting {
-	const ALL: [Self; 6] = [
+	pub(crate) const ALL: [Self; 6] = [
 		Self::Show,
 		Self::Stream,
 		Self::Recording,
@@ -141,6 +143,57 @@ impl Setting {
 			Self::Hotkeys => Icon::Hotkeys,
 			Self::Guests => Icon::Guests,
 			Self::Advanced => Icon::Advanced,
+		}
+	}
+
+	/// Each setting in its pane by the name its row shows, which the palette
+	/// finds it by, with what else it answers to.
+	pub(crate) fn rows(self) -> &'static [(&'static str, &'static [&'static str])] {
+		match self {
+			Self::Show => &[
+				("Format", &["portrait", "landscape", "vertical"]),
+				("Canvas size", &["resolution", "1080p", "720p"]),
+				("Frame rate", &["fps"]),
+				(settings::SCENE_SIZES, &[]),
+			],
+			Self::Stream => &[
+				("Relay", &["token", "server", "url"]),
+				("Failover relay", &["backup"]),
+				("Broadcast name", &["path"]),
+				("Encode only while someone watches", &["on demand", "viewers"]),
+			],
+			Self::Recording => &[
+				("Each source too", &["iso", "separate", "files"]),
+				("Picture", &["video"]),
+				("Sound", &["audio"]),
+			],
+			Self::Hotkeys => &[],
+			Self::Guests => &[
+				("Room", &[]),
+				("Room key", &[]),
+				("Join page", &[]),
+				("Link lifetime", &["expiry", "expires"]),
+				("Appear on their own", &["tile"]),
+			],
+			Self::Advanced => &[
+				("Publish a scene as its own broadcast", &[]),
+				("Publish a source independently", &[]),
+				("Virtual camera", &["webcam", "video call"]),
+				("Effects", &["animation", "glow", "motion"]),
+				("Scene graph", &["wires", "nodes", "map"]),
+			],
+		}
+	}
+
+	/// What else the palette finds the pane by, besides its name and lead.
+	fn words(self) -> &'static [&'static str] {
+		match self {
+			Self::Show => &["canvas"],
+			Self::Stream => &["relay", "token"],
+			Self::Recording => &["folder", "record"],
+			Self::Hotkeys => &["keys", "shortcuts", "bind"],
+			Self::Guests => &["invite", "join", "room"],
+			Self::Advanced => &["publish"],
 		}
 	}
 
@@ -261,6 +314,7 @@ impl Studio {
 			duration: Transition::default().duration().unwrap_or_default(),
 			cut: STINGER_CUT,
 			drag: None,
+			legend: false,
 			renaming: None,
 			title_needs: 0.0,
 			renaming_audio: None,
@@ -292,6 +346,7 @@ impl Studio {
 			multiview,
 			dropping: drop::Dropping::default(),
 			keyboard: None,
+			palette: None,
 		};
 		if dropped > 0 {
 			panels.report(Err(anyhow::anyhow!(dropped_message(dropped))));
@@ -419,6 +474,12 @@ impl Studio {
 		self.panels.review.seed_past(view, now, head);
 		self.panels.controls.replay.lock().unwrap().stretch =
 			replay::Stretch::Between(now.saturating_sub(picked.0), now.saturating_sub(picked.1));
+	}
+
+	/// Bind `key` to `action`, as the Hotkeys pane would.
+	pub(crate) fn bind(&mut self, action: &Action, key: hotkeys::Binding) {
+		let hotkeys = self.panels.hotkeys.as_mut().expect("the window handed over its keys");
+		hotkeys.bind(action, Some(key)).expect("a key bound to nothing else");
 	}
 
 	/// Turn Studio mode on or off, as its switch would.
@@ -552,6 +613,7 @@ impl Studio {
 			true => panels.multiview.ui(ui),
 			false => {
 				panels.window(ui, fx, &snapshot);
+				panels.palette(ui.ctx());
 				panels.drops_elsewhere(ui.ctx());
 				panels.multiview.show(ui.ctx());
 			}
@@ -704,6 +766,10 @@ struct Panels {
 	cut: Duration,
 	/// The layer a drag on the BUILD page's picture holds.
 	drag: Option<Drag>,
+	/// Whether the BUILD page's picture leaves room for the keep-clear
+	/// legend under it, which a drag leaves as it found it, so the picture
+	/// under the pointer neither moves nor resizes mid-gesture.
+	legend: bool,
 	/// The layer row being dragged to a new place, by its index.
 	moving: Option<usize>,
 	/// The scene being renamed, by index, and the name typed so far.
@@ -769,6 +835,8 @@ struct Panels {
 	/// The keys the window hears before egui, which say when a paste was
 	/// pressed, once the window has handed them over.
 	keyboard: Option<hotkeys::Keyboard>,
+	/// The command palette, while open.
+	palette: Option<palette::Palette>,
 }
 
 /// A layer, by the list it is in and its place there, back to front.
@@ -1008,6 +1076,11 @@ fn dropped_message(dropped: usize) -> String {
 impl Panels {
 	/// The keyboard shortcuts, and the clipboard.
 	fn shortcuts(&mut self, ctx: &egui::Context) {
+		// From anywhere, a text field included, and while the palette's own
+		// search box has the keyboard, where it closes it again.
+		if ctx.input_mut(|input| input.consume_shortcut(&palette::OPEN)) {
+			self.toggle_palette();
+		}
 		// egui pastes only text, so a paste it does not report may be a picture.
 		let pressed = self.keyboard.as_ref().is_some_and(hotkeys::Keyboard::pasted);
 		let text = ctx.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Paste(_))));

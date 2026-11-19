@@ -122,8 +122,6 @@ async fn run(
 /// for the key bound to it, which follows the scene through renames.
 fn id(action: &Action, binding: &Binding) -> String {
 	match action {
-		Action::Cut => "cut".into(),
-		Action::Transition => "transition".into(),
 		Action::Scene(_) => {
 			let held = binding.modifiers;
 			let mut id = "scene/".to_string();
@@ -143,13 +141,7 @@ fn id(action: &Action, binding: &Binding) -> String {
 			}
 			id
 		}
-		Action::Replay => "replay".into(),
-		Action::SaveClip => "save-clip".into(),
-		Action::Record => "record".into(),
-		Action::Panic => "panic".into(),
-		Action::StudioMode => "studio-mode".into(),
-		Action::GoLive => "go-live".into(),
-		Action::EndStream => "end-stream".into(),
+		action => action.id().expect("only a scene's is named for its key"),
 	}
 }
 

@@ -144,10 +144,10 @@ async fn fill(
 		clock.tick().await;
 		if frames % RATE == 0 {
 			if let Some(done) = group.take() {
-				moq_net::group::Producer::close(done)?;
+				moq_net::group::Producer::finish(done)?;
 			}
 			// The probe's track has no timescale, so its groups count up.
-			group = Some(track.append_group(u64::from(frames / RATE))?);
+			group = Some(track.append_group(moq_net::Timestamp::unscaled(u64::from(frames / RATE)))?);
 		}
 		frames += 1;
 		let rate = reservation.rate().unwrap_or(FLOOR).clamp(FLOOR, ceiling);

@@ -67,9 +67,22 @@ impl Panels {
 				.map(|registered| ((self.program.id, self.program_drawn), (registered.id, portrait))),
 			(None, _) => None,
 		};
+		// A drag that selects a layer keeping clear leaves the picture where
+		// it was until let go, so the pointer stays over what it moves.
+		if self.drag.is_none() {
+			self.legend = self.keeping_clear();
+		}
+		let keeping = self.legend;
+		if keeping {
+			room.max.y -= keep::LEGEND;
+		}
 		let Some((landscape, portrait)) = pictures else {
 			self.format = Format::Landscape;
-			self.stage(ui, fx, snapshot, super::layout::fit(room, shape));
+			let at = super::layout::fit(room, shape);
+			self.stage(ui, fx, snapshot, at);
+			if keeping {
+				keep::legend(ui, at);
+			}
 			self.build_keys(ui);
 			return;
 		};
@@ -88,10 +101,16 @@ impl Panels {
 		);
 		self.stage(ui, fx, snapshot, main);
 		self.other_picture(ui, small, other.0, other.1);
-		// Under both pictures: the tabs at the left, the chip at the right.
+		// Under both pictures: the legend of what a layer keeping clear saw,
+		// then the tabs at the left and the chip at the right.
+		let mut top = main.bottom();
+		if keeping {
+			keep::legend(ui, main);
+			top += keep::LEGEND;
+		}
 		let under = egui::Rect::from_min_max(
-			egui::pos2(main.left(), main.bottom() + 18.0),
-			egui::pos2(main.right().max(small.right()), main.bottom() + 48.0),
+			egui::pos2(main.left(), top + 18.0),
+			egui::pos2(main.right().max(small.right()), top + 48.0),
 		);
 		let tabs = self.format_tabs(ui, under);
 		self.shown_in(ui, under.with_min_x(tabs.right() + 12.0), None);
@@ -190,7 +209,10 @@ impl Panels {
 				let picked = self.selection.clone().expect("interacting with the selected layer");
 				let only = Some((&picked.layer, picked.index));
 				let staged = super::slots::staged(&state, scene.map(|(scene, _)| scene), self.format);
+				// A layer keeping clear takes the pointer where it is drawn.
+				let staged = keep::drawn(&state, staged, self.format);
 				let delivered = self.interact.update(ui, image, &staged, scene, only);
+				drop(staged);
 				deliver(&state.sources, delivered);
 				self.rebind(&state.sources);
 				let stop = interacting_banner(ui, image, &page);
@@ -248,6 +270,19 @@ impl Panels {
 		}
 	}
 
+	/// Whether the selected layer keeps out of the way, so the stage explains
+	/// what it saw under the picture.
+	fn keeping_clear(&self) -> bool {
+		let Some(picked) = &self.selection else {
+			return false;
+		};
+		let state = self.engine.state.lock().unwrap();
+		let item = picked.item(state.collection());
+		item.is_some_and(|item| {
+			item.visible && keep::placement(&state, &picked.layer, picked.index, item, self.format).is_some()
+		})
+	}
+
 	/// The web page the selected layer shows, while it is a visible layer of
 	/// the picture that shows one.
 	fn interacted(&self, state: &State) -> Option<String> {
@@ -264,7 +299,7 @@ impl Panels {
 	}
 
 	/// Stop passing input to a page, letting go of what it holds.
-	fn stop_interacting(&mut self, state: &State) {
+	pub(super) fn stop_interacting(&mut self, state: &State) {
 		self.interacting = false;
 		self.rebind(&state.sources);
 		deliver(&state.sources, self.interact.release());
@@ -273,7 +308,8 @@ impl Panels {
 	/// The layers the picture edits, front last, each with its place: the
 	/// scene's, then the always-on-top ones over it, unless the scene is open
 	/// off air, as they are drawn on program, each in its slot where the
-	/// scene's arrangement put it.
+	/// scene's arrangement put it, and each keeping clear where it was
+	/// placed.
 	pub(super) fn shown(&self, state: &State) -> Vec<(Picked, Item)> {
 		let (_, since) = self.edited_since(state);
 		let top = self.off_air(state).is_none().then(Layer::top);
@@ -351,7 +387,10 @@ impl Panels {
 			let picked = shown[index].0.clone();
 			self.select(Some(picked.clone()));
 			let collection = state.collection();
-			let resting = picked.rest(collection, self.format);
+			// A layer keeping clear moves from where it was placed.
+			let resting = picked
+				.rest(collection, self.format)
+				.map(|item| keep::placed(state, &picked.layer, picked.index, &item, self.format));
 			if let Some(resting) = resting {
 				let drawn = match resting.slot {
 					Some(_) => super::slots::drawn(state, &picked.layer, picked.index, self.format),
@@ -477,6 +516,15 @@ impl Panels {
 				let label = format!("{verb} `{}`", item.source);
 				spot = Some(Spot::Layer(drag.picked.layer.clone(), item.source.clone()));
 				let picked = &drag.picked;
+				// A move by hand holds a layer keeping clear where it is put;
+				// a resize or a crop leaves it where it rests.
+				let rect = match verb {
+					"Move" => {
+						keep::hold(state, &picked.layer, picked.index, &item, self.format);
+						rect
+					}
+					_ => keep::resized(state, &picked.layer, picked.index, &item, rect, self.format),
+				};
 				if let Some(placed) = picked.placed(state.collection(), self.format, rect, crop) {
 					result = edit(state, label, drag.gesture, |draft| {
 						draft.set_item(&picked.layer, picked.index, placed)
@@ -486,6 +534,12 @@ impl Panels {
 		}
 		if !response.dragged() {
 			self.drag = None;
+		}
+		// A layer keeping clear stays put while in hand, which each frame
+		// says again, at least four times a lease, whatever the canvas rate.
+		keep::grab(state, self.drag.as_ref().map(|drag| &drag.picked), self.format);
+		if self.drag.is_some() {
+			ui.ctx().request_repaint_after(moq_scene::place::GRAB / 4);
 		}
 		if response.has_focus() && self.drag.is_none() && result.is_ok() {
 			(spot, result) = self.nudge(ui, state, response.id);
@@ -498,6 +552,15 @@ impl Panels {
 		super::slots::outlines(&painter, &view, state, room, &shown, target);
 		let selected = shown.iter().find(|(picked, _)| Some(picked) == self.selection.as_ref());
 		let accent = ui.visuals().selection.stroke.color;
+		// What a layer keeping clear saw, under its handles, unless it is
+		// being dragged, which holds it where it is put.
+		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible && self.drag.is_none())
+			&& let Some(resting) = picked.item(state.collection())
+			&& let Some(placement) = keep::placement(state, &picked.layer, picked.index, resting, self.format)
+			&& let Some(keep) = resting.keep_clear
+		{
+			keep::overlay(&painter, &view, placement, &item.shape, keep.glide);
+		}
 		// A hidden layer has no handles, as the picture cannot grab it, and a
 		// locked one only its outline.
 		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible) {
@@ -597,6 +660,8 @@ impl Panels {
 		else {
 			return (None, Ok(()));
 		};
+		// A layer keeping clear moves from where it was placed.
+		let item = keep::placed(state, &picked.layer, picked.index, &item, self.format);
 		if delta == [0.0; 2] {
 			return (None, Ok(()));
 		}
@@ -614,6 +679,7 @@ impl Panels {
 		let Some(moved) = picked.placed(state.collection(), self.format, rect, item.crop) else {
 			return (None, Ok(()));
 		};
+		keep::hold(state, &picked.layer, picked.index, &item, self.format);
 		let result = edit(state, label, Some(gesture), |draft| {
 			draft.set_item(&picked.layer, picked.index, moved)
 		});
@@ -822,9 +888,18 @@ impl Panels {
 				};
 				let count = collection.items(&to).map_or(0, <[Item]>::len);
 				// The always-on-top layers never go on, so they have no
-				// keyframes to play, nor slots; it stays where it was drawn,
-				// in each picture it goes to.
-				let drawn = |format| super::slots::drawn(state, layer, index, format).unwrap_or((item.rect, item.crop));
+				// keyframes to play, nor slots, nor a picture under them to
+				// keep clear of; it stays where it was drawn, in each picture
+				// it goes to.
+				let drawn = |format| {
+					let placed = keep::placed(state, layer, index, &item, format).portrayed(format, collection.canvas);
+					let (rect, crop) =
+						super::slots::drawn(state, layer, index, format).unwrap_or((item.rect, item.crop));
+					match item.slot {
+						None => (placed.rect, placed.crop),
+						Some(_) => (rect, crop),
+					}
+				};
 				let (rect, crop) = drawn(Format::Landscape);
 				let dual = collection.dual(&to) && collection.dual(layer);
 				let portrait = dual.then(|| {
@@ -834,6 +909,7 @@ impl Panels {
 				let moved = Item {
 					keyframes: if top { Vec::new() } else { item.keyframes.clone() },
 					slot: None,
+					keep_clear: if top { None } else { item.keep_clear },
 					rect,
 					crop,
 					format: item.format.filter(|_| dual),

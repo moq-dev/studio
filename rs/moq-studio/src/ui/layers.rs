@@ -707,7 +707,7 @@ impl Panels {
 	}
 
 	/// Follow an added source to its layer, or show why it was not added.
-	fn added(&mut self, result: anyhow::Result<String>) {
+	pub(super) fn added(&mut self, result: anyhow::Result<String>) {
 		match result {
 			Ok(name) => {
 				let state = self.engine.state.lock().unwrap();

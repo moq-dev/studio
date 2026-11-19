@@ -5,6 +5,7 @@
 //! the show, this user's settings for what belongs to the operator, and
 //! `<show>.stream.toml` for where it streams and who joins it.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use egui::{Align, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
@@ -196,6 +197,12 @@ impl Panels {
 			self.restart = None;
 		}
 		self.confirm_restart(ctx);
+	}
+
+	/// Close Settings, dropping a restart it was asking about.
+	pub(super) fn close_settings(&mut self) {
+		self.setting = None;
+		self.restart = None;
 	}
 
 	/// The categories, the one shown lit: by name, or by `icons` alone.
@@ -425,9 +432,15 @@ impl Panels {
 		};
 		let mut action = None;
 		let id = ui.make_persistent_id("scene sizes");
-		egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+		let top = ui.cursor().top();
+		let mut sizes = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+		// Found by the palette, it opens to show what it holds.
+		if seeking(ui.ctx(), SCENE_SIZES) {
+			sizes.set_open(true);
+		}
+		sizes
 			.show_header(ui, |ui| {
-				ui.label(RichText::new("Scene sizes").font(kit::ui_strong(13.5)).color(kit::TEXT));
+				ui.label(RichText::new(SCENE_SIZES).font(kit::ui_strong(13.5)).color(kit::TEXT));
 				ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
 					ui.label(RichText::new(count).font(kit::ui(12.0)).color(kit::DIM));
 				});
@@ -489,6 +502,8 @@ impl Panels {
 					"A scene of another size cannot go on air. Publish it as its own broadcast instead, under Advanced.",
 				);
 			});
+		let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+		sought(ui, SCENE_SIZES, rect);
 		action
 	}
 
@@ -1157,29 +1172,29 @@ impl Panels {
 					});
 				});
 			});
-		let scenes: Vec<String> = {
+		// A source can be in the scene file yet unlisted, such as a clip with no
+		// audio, so a sound is gone only once the file lacks it, as firing it checks.
+		let (listed, sources): (Vec<Action>, HashSet<String>) = {
 			let state = self.engine.state.lock().unwrap();
-			state
-				.collection()
-				.scenes
-				.iter()
-				.map(|scene| scene.name.clone())
-				.collect()
+			let sources = state.collection().sources.keys().cloned().collect();
+			(Action::listed(&state), sources)
 		};
 		let bindings = hotkeys.bindings();
-		// A key bound to a scene the file no longer has, so it can be cleared.
-		let gone: Vec<Action> = bindings
+		// A key bound to an action not listed, so it can still be seen and cleared.
+		let unlisted: Vec<Action> = bindings
 			.keys()
-			.filter(|action| matches!(action, Action::Scene(name) if !scenes.contains(name)))
+			.filter(|action| !listed.contains(action))
 			.cloned()
 			.collect();
-		let mut scene_actions: Vec<Action> = scenes.iter().cloned().map(Action::Scene).collect();
-		scene_actions.extend(gone.iter().cloned());
-		let mut groups: Vec<(&str, Vec<Action>)> = Action::FIXED
-			.iter()
-			.map(|(caption, actions)| (*caption, actions.to_vec()))
-			.collect();
-		groups.insert(2, ("Scenes", scene_actions));
+		let groups = Group::ALL.map(|group| {
+			let actions: Vec<Action> = listed
+				.iter()
+				.chain(&unlisted)
+				.filter(|action| action.group() == group)
+				.cloned()
+				.collect();
+			(group.name(), actions)
+		});
 
 		let mut bind = None;
 		let mut clear = None;
@@ -1198,15 +1213,13 @@ impl Panels {
 				for (column, actions) in columns.iter_mut().zip(actions.chunks(half)) {
 					for action in actions {
 						let name = match action {
-							Action::Scene(name) => name.clone(),
+							Action::Scene(name) | Action::Mute(name) => name.clone(),
 							action => action.name(studio),
 						};
 						let detail = match action {
-							Action::EndStream => Some("held"),
-							Action::Panic => Some("safe scene, mics muted"),
-							Action::Scene(_) if studio => Some("cues"),
-							Action::Scene(name) if !scenes.contains(name) => Some("no such scene"),
-							_ => None,
+							Action::Scene(_) if unlisted.contains(action) => Some("no such scene"),
+							Action::Mute(name) if !sources.contains(name) => Some("no such sound"),
+							action => action.detail(studio),
 						};
 						let refusal = self
 							.refusal
@@ -1475,6 +1488,7 @@ pub(super) fn field_row(ui: &mut Ui, name: &str, help: &str, flag: Option<&str>,
 /// A row under a line: `name` and `help` in `share` of its width with
 /// `control` beside them, or `control` under them in a pane too narrow.
 fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce(&mut Ui)) {
+	let top = ui.cursor().top();
 	rule(ui);
 	ui.add_space(14.0);
 	let width = ui.available_width();
@@ -1499,6 +1513,67 @@ fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce
 		});
 	}
 	ui.add_space(14.0);
+	let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+	sought(ui, name, rect);
+}
+
+/// The setting the palette found, by its row's name, and when, which its
+/// pane scrolls to once and lights for a moment.
+#[derive(Clone)]
+struct Sought {
+	name: String,
+	since: f64,
+	scrolled: bool,
+}
+
+/// The Show pane's disclosure of each scene's own size, by its name.
+pub(super) const SCENE_SIZES: &str = "Scene sizes";
+
+/// Whether the palette found the setting called `name`, which its pane has
+/// yet to light.
+fn seeking(ctx: &egui::Context, name: &str) -> bool {
+	let sought = ctx.data(|data| data.get_temp::<Sought>(egui::Id::new("sought setting")));
+	sought.is_some_and(|sought| sought.name == name)
+}
+
+/// How long a setting the palette found stays lit.
+const LIT: f64 = 1.5;
+
+/// Scroll Settings to the row called `name` and light it, as the palette
+/// does for a setting it found.
+pub(super) fn seek(ctx: &egui::Context, name: &str) {
+	let since = ctx.input(|input| input.time);
+	let sought = Sought {
+		name: name.to_string(),
+		since,
+		scrolled: false,
+	};
+	ctx.data_mut(|data| data.insert_temp(egui::Id::new("sought setting"), sought));
+}
+
+/// Scroll to the row called `name` at `rect` once, and light it a moment, if
+/// the palette found it.
+fn sought(ui: &mut Ui, name: &str, rect: Rect) {
+	let id = egui::Id::new("sought setting");
+	let Some(mut sought) = ui.ctx().data(|data| data.get_temp::<Sought>(id)) else {
+		return;
+	};
+	if sought.name != name {
+		return;
+	}
+	if !std::mem::replace(&mut sought.scrolled, true) {
+		ui.scroll_to_rect(rect, Some(Align::Min));
+	}
+	let age = ui.input(|input| input.time) - sought.since;
+	if age > LIT {
+		ui.ctx().data_mut(|data| data.remove::<Sought>(id));
+		return;
+	}
+	let alpha = (1.0 - age / LIT) as f32;
+	ui.painter()
+		.rect_filled(rect, 8, kit::ACCENT.gamma_multiply(0.12 * alpha));
+	ui.ctx().request_repaint();
+	ui.ctx().data_mut(|data| data.insert_temp(id, sought));
 }
 
 /// That `flag` sets a setting for this run, over the show's own.

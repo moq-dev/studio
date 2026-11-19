@@ -450,6 +450,11 @@ impl Panels {
 								false => Some(Setting::default()),
 							};
 						}
+						let key = ui.ctx().format_shortcut(&super::palette::OPEN);
+						let search = IconButton::new(Icon::Search, "Search and run anything").key(Some(&key));
+						if ui.add(search).clicked() {
+							self.toggle_palette();
+						}
 						self.live_control(ui);
 						self.record_button(ui, fx);
 						self.health_dot(ui, fx, compact);

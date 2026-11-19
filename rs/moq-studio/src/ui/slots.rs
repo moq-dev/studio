@@ -15,21 +15,22 @@ pub(super) fn placed(state: &State, layer: &Layer, format: Format) -> Vec<Item> 
 	let collection = state.collection();
 	let format = collection.format_of(layer, format);
 	let items = collection.items(layer).unwrap_or_default();
-	let items: Vec<Item> = (items.iter())
-		.map(|item| item.portrayed(format, collection.canvas))
-		.collect();
+	// A layer set free that keeps clear, where it was placed.
+	let items = (items.iter().enumerate()).map(|(index, item)| {
+		super::keep::placed(state, layer, index, &item.portrayed(format, collection.canvas), format)
+	});
 	let arranged = (layer.scene.as_deref()).and_then(|scene| state.compositor.placed(format, scene));
 	// One frame behind an edit, until the next render arranges it.
 	let Some(arranged) = arranged.filter(|arranged| arranged.len() == items.len()) else {
-		return items;
+		return items.collect();
 	};
-	let placed = items.iter().zip(arranged).map(|(item, arranged)| match item.slot {
+	let placed = items.zip(arranged).map(|(item, arranged)| match item.slot {
 		Some(_) => Item {
 			rect: arranged.rect,
 			visible: item.visible && arranged.visible,
-			..item.clone()
+			..item
 		},
-		None => item.clone(),
+		None => item,
 	});
 	placed.collect()
 }
@@ -164,7 +165,8 @@ pub(super) fn outlines(
 
 /// Swap `dragged` with the layer in the slot `target` holds, both of the
 /// same scene: `dragged` takes its slot and its place in the order, and it
-/// takes the slot `dragged` was in, or, for a layer set free, its rect.
+/// takes the slot `dragged` was in, or, for a layer set free, where it is
+/// drawn.
 pub(super) fn assign(state: &mut State, dragged: &Picked, target: &Picked) -> anyhow::Result<()> {
 	anyhow::ensure!(
 		dragged.layer == target.layer,
@@ -179,17 +181,21 @@ pub(super) fn assign(state: &mut State, dragged: &Picked, target: &Picked) -> an
 	};
 	anyhow::ensure!(held.slot.is_some(), "`{}` is in no slot", held.source);
 	let label = format!("Put `{}` in the slot of `{}`", moved.source, held.source);
+	// In a slot, the arrangement places it, so it no longer keeps clear.
 	let taking = Item {
 		slot: held.slot,
 		rect: Rect::default(),
 		portrait: None,
+		keep_clear: None,
 		..moved.clone()
 	};
-	// Set free in place of `moved`, in each picture, cropped to its shape
-	// there rather than stretched.
+	// Set free where `moved` is drawn in each picture, as a layer keeping
+	// clear may be off where it is saved, cropped to its shape there rather
+	// than stretched.
 	let free = |format: Format| {
 		let landscape = state.collection().canvas;
-		let Placement { rect, .. } = moved.placement(format, landscape);
+		let resting = super::keep::placed(state, &dragged.layer, dragged.index, &moved, format);
+		let Placement { rect, .. } = resting.placement(format, landscape);
 		let (from, crop) = drawn(state, &target.layer, target.index, format).unwrap_or((rect, held.crop));
 		let shape = |rect: &Rect| rect.width / rect.height;
 		let crop = crop.then(&Crop::covering(shape(&from), shape(&rect)));
@@ -277,6 +283,8 @@ pub(super) fn set_slot(state: &mut State, picked: &Picked, slot: Option<Slot>) -
 				rect,
 				crop,
 				portrait,
+				// In a slot, the arrangement places it.
+				keep_clear: item.keep_clear.filter(|_| slot.is_none()),
 				..item
 			},
 		)

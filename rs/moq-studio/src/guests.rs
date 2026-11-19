@@ -1351,9 +1351,9 @@ pub(crate) mod tests {
 
 		let claims = key.verify(&fragment["jwt"]).unwrap();
 		assert_eq!(claims.root, "show/guests");
-		assert_eq!(claims.publish, ["alice/**".parse().unwrap()].into_iter().collect());
+		assert_eq!(claims.publish.path, ["alice/**".parse().unwrap()].into_iter().collect());
 		assert_eq!(
-			claims.subscribe,
+			claims.subscribe.path,
 			subscribes("alice", 0),
 			"a guest reads only its own renewals and feed, and the program"
 		);
@@ -1674,7 +1674,7 @@ pub(crate) mod tests {
 		renewals.sync();
 		let first = key.verify(&next_token(&consumer, "alice", 0).await.unwrap()).unwrap();
 		assert_eq!(first.root, "show/guests");
-		assert_eq!(first.publish, ["alice/**".parse().unwrap()].into_iter().collect());
+		assert_eq!(first.publish.path, ["alice/**".parse().unwrap()].into_iter().collect());
 		// Each renewal comes half an expiry later, so a token must outlast that.
 		let ahead = |claims: &moq_auth::Claims| claims.expires.unwrap().saturating_duration_since(kio::clock::wall());
 		assert!(ahead(&first) >= EXPIRY, "{:?}", ahead(&first));
@@ -1694,7 +1694,7 @@ pub(crate) mod tests {
 		room.invite("alice").unwrap();
 		renewals.sync();
 		let back = key.verify(&next_token(&consumer, "alice", 1).await.unwrap()).unwrap();
-		assert_eq!(back.subscribe, subscribes("alice", 1));
+		assert_eq!(back.subscribe.path, subscribes("alice", 1));
 		let before = consumer.request(Room::renewal_path("alice", 0).unwrap(), None).await;
 		assert!(before.is_err(), "the earlier generation is still renewed");
 
