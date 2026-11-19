@@ -25,6 +25,7 @@ Never point the submodule at a commit off moq's `main`: CI's `sh/check-moq-main.
 
 PRs target `main`.
 Run `just ci` before every push.
+Outside the dev shell, such as in Pullfrog's job, which puts the shell's tools on `PATH` but not its variables (`PKG_CONFIG_PATH`, `NIX_LDFLAGS`, ...), run `just` as `nix develop --command just ...`.
 
 `README.md` is the user guide. A change to what a user does (flags, panels, the scene file, outputs) updates it in the same PR.
 
