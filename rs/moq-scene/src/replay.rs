@@ -341,8 +341,8 @@ fn copy_held(
 			into.write_frame(frame.timestamp, frame.payload.clone())?;
 		}
 		match (&held.read, held.end) {
-			(Ok(()), Some(end)) => drop(into.finish(end)?),
-			(Ok(()), None) => drop(into.close()?),
+			(Ok(()), Some(end)) => drop(into.finish_at(end)?),
+			(Ok(()), None) => drop(into.finish()?),
 			(Err(err), _) => into.abort(err.clone())?,
 		}
 	}
@@ -423,7 +423,7 @@ mod tests {
 	/// [`write`] as a publisher appends, saying nothing lies between this group
 	/// and the one before.
 	fn append(track: &moq_net::track::Producer, sequence: u64, at: &[u64]) {
-		fill(track.append_group(at[0] * 1000).unwrap(), sequence, at);
+		fill(track.append_group(ts(at[0])).unwrap(), sequence, at);
 	}
 
 	fn fill(mut group: moq_net::group::Producer, sequence: u64, at: &[u64]) {
@@ -432,7 +432,7 @@ mod tests {
 				.write_frame(ts(*at), format!("{sequence}.{index}").into_bytes())
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 
 	/// A group's second, from its start in microseconds.
@@ -556,13 +556,13 @@ mod tests {
 	async fn a_take_keeps_where_its_whole_groups_end() {
 		let (broadcast, track) = broadcast(0, None);
 		for sequence in 0..3 {
-			let mut group = track.append_group(sequence * 1_000_000).unwrap();
+			let mut group = track.append_group(ts(sequence * 1_000)).unwrap();
 			for (index, at) in second(sequence).iter().enumerate() {
 				group
 					.write_frame(ts(*at), format!("{sequence}.{index}").into_bytes())
 					.unwrap();
 			}
-			drop(group.finish((sequence + 1) * 1_000_000).unwrap());
+			drop(group.finish_at((sequence + 1) * 1_000_000).unwrap());
 		}
 		let take = Take::new(&target(&broadcast, ts(2_500)), Duration::from_secs(2)).unwrap();
 		let mut copied = take
@@ -656,7 +656,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_take_at_the_live_edge_holds_what_was_written() {
 		let (broadcast, track) = broadcast(7, None);
-		let mut live = track.append_group(7_000_000).unwrap();
+		let mut live = track.append_group(ts(7_000)).unwrap();
 		live.write_frame(ts(7_000), b"7.0".to_vec()).unwrap();
 		let take = Take::new(&target(&broadcast, ts(7_500)), Duration::from_secs(3)).unwrap();
 		live.write_frame(ts(7_333), b"7.1".to_vec()).unwrap();
@@ -708,7 +708,7 @@ mod tests {
 		// The marker a publisher writes as it stops encoding.
 		let config = target(&broadcast, ts(0)).video.unwrap().1;
 		let container = moq_mux::catalog::hang::Container::try_from(&config).unwrap();
-		let mut group = track.append_group(3_500_000).unwrap();
+		let mut group = track.append_group(ts(3_500)).unwrap();
 		let gap = moq_mux::container::Frame {
 			timestamp: ts(3_500),
 			payload: bytes::Bytes::new(),
@@ -716,7 +716,7 @@ mod tests {
 			duration: None,
 		};
 		container.write(&mut group, &[gap]).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let result = Take::new(&target(&broadcast, ts(3_900)), Duration::from_millis(300));
 		assert!(matches!(result, Err(Error::Unsupported(_))), "{:?}", result.err());
 	}

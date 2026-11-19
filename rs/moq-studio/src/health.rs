@@ -1199,7 +1199,7 @@ pub fn rate(rate: Rate) -> String {
 pub fn echo(path: &moq_net::Path) -> anyhow::Result<(moq_net::path::Relative, moq_net::Path)> {
 	// A reference resolves against the broadcast's parent, as a relative URL
 	// does, so naming the broadcast's last segment puts the prefix beneath it.
-	let relative = match path.parts().last() {
+	let relative = match path.parts().next_back() {
 		Some(last) => format!("{last}/{ECHO}"),
 		None => ECHO.to_string(),
 	};
@@ -2255,7 +2255,11 @@ mod tests {
 				.unwrap()
 				.expect("an instance");
 			let mut video = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
-			track.append_group(0).unwrap().close().unwrap();
+			track
+				.append_group(moq_net::Timestamp::unscaled(0))
+				.unwrap()
+				.finish()
+				.unwrap();
 			video.recv_group().await.unwrap();
 			while watching.get() != Some(1) {
 				kio::clock::sleep(INTERVAL / 4).await;
