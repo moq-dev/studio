@@ -44,8 +44,9 @@ pub(super) fn shown_label(name: &str, format: Option<Format>) -> String {
 }
 
 /// Under a picture, in `rect`: its format, its size, and what its video sent
-/// over the last interval, while on air. The part of `rect` left free
-/// between them.
+/// over the last interval, while on air, as many of those as fit, right to
+/// left from the rate, with all of them on hover where some did not. The part
+/// of `rect` left free between them.
 pub(super) fn format_label(
 	ui: &Ui,
 	rect: egui::Rect,
@@ -56,29 +57,48 @@ pub(super) fn format_label(
 	let painter = ui.painter();
 	let mid = rect.center().y;
 	mark(painter, pos2(rect.left() + 7.0, mid), format, kit::DIM);
+	let dims = format!("{} × {}", canvas.width, canvas.height);
+	let rate = sent.map(crate::health::rate);
 	let name = kit::caps_galley(painter, format.name(), kit::display_bold(11.5), kit::TEXT, None);
+	let size = painter.layout_no_wrap(dims.clone(), kit::ui(12.0), kit::DIM);
+	let said = rate
+		.clone()
+		.map(|rate| painter.layout_no_wrap(rate, kit::ui(12.0), kit::DIM));
+	// Past the mark, and the rate with its dot.
 	let x = rect.left() + 20.0;
-	let width = name.size().x;
-	painter.galley(pos2(x, mid - name.size().y / 2.0), name, kit::TEXT);
-	let size = painter.text(
-		pos2(x + width + 10.0, mid),
-		Align2::LEFT_CENTER,
-		format!("{} × {}", canvas.width, canvas.height),
-		kit::ui(12.0),
-		kit::DIM,
-	);
-	let mut free = rect.with_min_x(size.right() + 16.0);
-	if let Some(sent) = sent {
-		let text = painter.text(
-			pos2(rect.right(), mid),
-			Align2::RIGHT_CENTER,
-			crate::health::rate(sent),
-			kit::ui(12.0),
-			kit::DIM,
-		);
-		painter.circle_filled(pos2(text.left() - 9.0, mid), 3.5, kit::OK);
-		free.max.x = text.left() - 24.0;
+	let mut room = rect.right() - x;
+	let said = said.filter(|said| said.size().x + 24.0 <= room);
+	if let Some(said) = &said {
+		room -= said.size().x + 24.0;
 	}
+	let named = name.size().x <= room;
+	let sized = named && name.size().x + 10.0 + size.size().x <= room;
+	let mut free = rect.with_min_x(x);
+	if named {
+		let width = name.size().x;
+		painter.galley(pos2(x, mid - name.size().y / 2.0), name, kit::TEXT);
+		free.min.x = x + width + 16.0;
+	}
+	if sized {
+		let at = pos2(free.min.x - 6.0, mid - size.size().y / 2.0);
+		free.min.x = at.x + size.size().x + 16.0;
+		painter.galley(at, size, kit::DIM);
+	}
+	free.max.x = rect.right();
+	let all = said.is_some() == rate.is_some();
+	if let Some(said) = said {
+		let at = pos2(rect.right() - said.size().x, mid - said.size().y / 2.0);
+		painter.circle_filled(pos2(at.x - 9.0, mid), 3.5, kit::OK);
+		free.max.x = at.x - 24.0;
+		painter.galley(at, said, kit::DIM);
+	}
+	if !(named && sized && all) {
+		let words = [Some(format.name().to_string()), Some(dims), rate];
+		let words: Vec<String> = words.into_iter().flatten().collect();
+		let id = ui.id().with(("format label", format));
+		ui.interact(rect, id, Sense::hover()).on_hover_text(words.join(" · "));
+	}
+	free.max.x = free.max.x.max(free.min.x);
 	free
 }
 

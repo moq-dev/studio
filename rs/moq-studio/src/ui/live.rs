@@ -137,16 +137,22 @@ fn named(canvas: Canvas) -> String {
 }
 
 /// A smaller canvas to send, if there is one worth offering: 720p from
-/// anything larger, then 30 frames a second rather than more.
+/// anything larger, keeping it wider than tall, or taller, as it was, then
+/// 30 frames a second rather than more.
 fn smaller(canvas: Canvas) -> Option<Canvas> {
 	let short = canvas.width.min(canvas.height);
 	if short > 720 {
 		let scale = |side: u32| (u64::from(side) * 720 / u64::from(short)) as u32 & !1;
-		return Some(Canvas {
-			width: scale(canvas.width),
-			height: scale(canvas.height),
-			framerate: canvas.framerate,
-		});
+		let (width, height) = (scale(canvas.width), scale(canvas.height));
+		// Rounding a nearly square canvas can make it square, which a show
+		// going out in both formats cannot turn.
+		if width.cmp(&height) == canvas.width.cmp(&canvas.height) {
+			return Some(Canvas {
+				width,
+				height,
+				framerate: canvas.framerate,
+			});
+		}
 	}
 	(canvas.framerate > 30).then_some(Canvas {
 		framerate: 30,
@@ -1424,4 +1430,24 @@ pub(super) fn health_word(engine: &Engine) -> (String, Color32) {
 		.then(|| super::dark::counted(report.dark, report.stalled))
 		.flatten();
 	(counted.unwrap_or_else(|| word.to_string()), dot)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// 720p from anything larger, keeping its shape, unless rounding would
+	/// make a canvas wider than tall square; then a lower frame rate.
+	#[test]
+	fn a_smaller_canvas_keeps_its_orientation() {
+		let canvas = |width, height, framerate| Canvas {
+			width,
+			height,
+			framerate,
+		};
+		assert_eq!(smaller(canvas(1920, 1080, 60)), Some(canvas(1280, 720, 60)));
+		assert_eq!(smaller(canvas(1080, 1920, 30)), Some(canvas(720, 1280, 30)));
+		assert_eq!(smaller(canvas(1082, 1080, 60)), Some(canvas(1082, 1080, 30)));
+		assert_eq!(smaller(canvas(1082, 1080, 30)), None);
+	}
 }

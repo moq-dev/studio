@@ -863,10 +863,18 @@ impl Picked {
 	/// is in the other, if it is still there and shown in that picture.
 	fn placed(&self, collection: &Collection, format: Format, rect: Rect, crop: Crop) -> Option<Item> {
 		let format = collection.format_of(&self.layer, format);
-		let item = self.item(collection)?.clone();
+		let mut item = self.item(collection)?.clone();
 		// Not shown there, it has no place there.
-		item.shown_in(format)
-			.then(|| item.placed(format, Placement { rect, crop }))
+		if !item.shown_in(format) {
+			return None;
+		}
+		// Set free and drawn in both without a portrait place, it is fitted
+		// there from its landscape one, so it keeps where it was fitted.
+		let follows = format == Format::Landscape && collection.dual(&self.layer) && item.slot.is_none();
+		if follows && item.portrait.is_none() && item.shown_in(Format::Portrait) {
+			item.portrait = Some(collection.placement(&item, Format::Portrait));
+		}
+		Some(item.placed(format, Placement { rect, crop }))
 	}
 
 	/// What its look edits.
@@ -2958,6 +2966,51 @@ mod tests {
 		assert!(
 			edits[0].is_some() && edits.iter().all(|edit| *edit == edits[0]),
 			"{edits:?}"
+		);
+	}
+
+	/// While the show goes out in both, placing a layer in the landscape
+	/// picture leaves where the portrait picture draws it, even fitted there
+	/// without a place of its own; a layer shown only in landscape takes no
+	/// portrait place.
+	#[test]
+	fn a_landscape_edit_leaves_the_portrait_picture_alone() {
+		let mut collection = Collection::new();
+		collection.portrait = true;
+		let color = moq_scene::Rgba([255, 255, 255, 255]);
+		collection.sources.insert("logo".into(), Source::Color { color });
+		let rect = |x| Rect {
+			x,
+			y: 40.0,
+			width: 320.0,
+			height: 180.0,
+		};
+		collection.scenes[0].items = vec![
+			Item::new("logo", rect(40.0)),
+			Item {
+				format: Some(Format::Landscape),
+				..Item::new("logo", rect(40.0))
+			},
+		];
+		collection.validate().unwrap();
+		let picked = |index| Picked {
+			layer: Layer::scene("Scene"),
+			index,
+		};
+		let fitted = collection.placement(&collection.scenes[0].items[0], Format::Portrait);
+		let moved = picked(0).placed(&collection, Format::Landscape, rect(400.0), Crop::default());
+		let moved = moved.unwrap();
+		assert_eq!(moved.rect, rect(400.0));
+		assert_eq!(moved.portrait, Some(fitted), "kept where it was fitted");
+		let only = picked(1).placed(&collection, Format::Landscape, rect(400.0), Crop::default());
+		assert_eq!(only.unwrap().portrait, None);
+
+		// Placed in portrait, its landscape place stays.
+		let tall = picked(0).placed(&collection, Format::Portrait, rect(0.0), Crop::default());
+		let tall = tall.unwrap();
+		assert_eq!(
+			(tall.rect, tall.portrait.map(|placed| placed.rect)),
+			(rect(40.0), Some(rect(0.0)))
 		);
 	}
 

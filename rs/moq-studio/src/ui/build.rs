@@ -61,10 +61,11 @@ impl Panels {
 				let landscape = (self.preview.id, cued.canvas);
 				(landscape, (portrait_preview.id, portrait))
 			}),
-			(Some(portrait), None) => self
+			(Some(_), None) => self
 				.portrait
 				.as_ref()
-				.map(|registered| ((self.program.id, self.program_drawn), (registered.id, portrait))),
+				.zip(self.portrait_drawn)
+				.map(|(registered, portrait)| ((self.program.id, self.program_drawn), (registered.id, portrait))),
 			(None, _) => None,
 		};
 		// A drag that selects a layer keeping clear leaves the picture where
@@ -173,11 +174,14 @@ impl Panels {
 			};
 			(canvas, tag)
 		});
-		// The portrait picture, while BUILD edits it.
+		// The portrait picture, while BUILD edits it: on program, at the size
+		// it was drawn at, as the landscape one is.
 		let portrait = match self.format {
-			Format::Portrait => self.edits_both(&state).zip(match off_air {
-				Some(_) => self.portrait_preview.as_ref().map(|registered| registered.id),
-				None => self.portrait.as_ref().map(|registered| registered.id),
+			Format::Portrait => self.edits_both(&state).and_then(|canvas| match off_air {
+				Some(_) => Some(canvas).zip(self.portrait_preview.as_ref().map(|registered| registered.id)),
+				None => self
+					.portrait_drawn
+					.zip(self.portrait.as_ref().map(|registered| registered.id)),
 			}),
 			Format::Landscape => None,
 		};
@@ -279,16 +283,23 @@ impl Panels {
 		let state = self.engine.state.lock().unwrap();
 		let item = picked.item(state.collection());
 		item.is_some_and(|item| {
-			item.visible && keep::placement(&state, &picked.layer, picked.index, item, self.format).is_some()
+			self.drawn(&state, picked, item)
+				&& keep::placement(&state, &picked.layer, picked.index, item, self.format).is_some()
 		})
 	}
 
-	/// The web page the selected layer shows, while it is a visible layer of
-	/// the picture that shows one.
+	/// Whether `item`, `picked`, is drawn in the picture BUILD edits.
+	fn drawn(&self, state: &State, picked: &Picked, item: &Item) -> bool {
+		let format = state.collection().format_of(&picked.layer, self.format);
+		item.visible && item.shown_in(format)
+	}
+
+	/// The web page the selected layer shows, while it is a layer drawn in
+	/// the picture edited that shows one.
 	fn interacted(&self, state: &State) -> Option<String> {
 		let picked = self.selection.as_ref()?;
 		let collection = state.collection();
-		let item = picked.item(collection).filter(|item| item.visible)?;
+		let item = picked.item(collection).filter(|item| self.drawn(state, picked, item))?;
 		let shown = match &picked.layer.scene {
 			Some(scene) => self.edited(state) == Some(scene.as_str()),
 			None => self.off_air(state).is_none(),
@@ -842,7 +853,10 @@ impl Panels {
 						(format!("Fill with `{name}`"), Rect::fill(&canvas), crop)
 					}
 				};
-				set(state, label, item.placed(format, Placement { rect, crop }))
+				match picked.placed(collection, format, rect, crop) {
+					Some(placed) => set(state, label, placed),
+					None => Ok(()),
+				}
 			}
 			LayerAction::Shape(corners) => {
 				let shape = moq_scene::Shape { corners, ..item.shape };

@@ -382,6 +382,9 @@ views! {
 	/// GO LIVE's sheet on it: both broadcasts to each relay, and the encoder
 	/// and connection checked for both pictures.
 	going_dual: Live, Open::Studio { view: View::Going, size: SIZE, show: "dual.toml", relay: true };
+	/// On air on it: both pictures in their ON AIR frames, each with what
+	/// its video sends under it.
+	on_air_dual: Live, Open::Studio { view: View::OnAir, size: SIZE, show: "dual.toml", relay: true };
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
 	mix: Still, mixing(MixView::Strips, None, SIZE);
@@ -1822,6 +1825,25 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				harness.run_steps(2);
 			}))
 			.expect("the facecam moves off the minimap and lands"),
+		View::OnAir if engine.state.lock().unwrap().collection().portrait => runtime
+			.block_on(kio::clock::timeout(SETTLE, async {
+				// Each picture's rate shows once health hears what its video
+				// sent.
+				let sending = |name: Option<&str>| {
+					let report = engine.health.lock().unwrap();
+					let broadcast = report.broadcasts.iter().find(|found| found.name.as_deref() == name);
+					broadcast.is_some_and(|broadcast| {
+						let mut tracks = broadcast.tracks.iter();
+						tracks.any(|track| track.label.starts_with("video") && track.sent.is_some())
+					})
+				};
+				while !(sending(None) && sending(Some(moq_scene::PORTRAIT))) {
+					harness.step();
+					kio::clock::sleep(Duration::from_millis(20)).await;
+				}
+				harness.run_steps(2);
+			}))
+			.expect("both pictures send"),
 		View::OnAirHealth => {
 			let pill = ["Healthy", "Starting", "Degraded", "Unhealthy"]
 				.into_iter()

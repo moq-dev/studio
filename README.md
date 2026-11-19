@@ -469,7 +469,7 @@ setting costs. Escape or a click outside closes it.
 
 | Pane | Use it to |
 | --- | --- |
-| Show | Pick the format, landscape or portrait, which swaps the canvas's sides; **Both at once**, which sends a portrait picture beside a landscape one (see [Both formats at once](#both-formats-at-once)); the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, or **Custom** for exact numbers; the frame rate as 30, 60, or **Custom**; and, under **Scene sizes**, each scene's own size (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
+| Show | Pick the format, landscape or portrait, which swaps the canvas's sides; **Both at once**, which sends a portrait picture beside a landscape one (see [Both formats at once](#both-formats-at-once)); the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, for both pictures while Both at once is on, or **Custom** for exact numbers; the frame rate as 30, 60, or **Custom**; and, under **Scene sizes**, each scene's own size (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
 | Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)). |
 | Recording | Change or open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
 | Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; each sound's mute; and replay and clips (see [Hotkeys](#hotkeys)). |
@@ -809,10 +809,11 @@ or more, is the main one: it is cropped to the top 60% of the portrait canvas,
 with the largest camera stacked under it, cropped to fill the rest, or fitted
 there keeping its outline if it has a round or rounded shape. Without a
 camera, the main picture covers the whole portrait canvas. A backdrop covering
-the landscape canvas covers the portrait one, cropped. What sits on the main
-picture, such as a lower third or a logo, keeps its place on it. A layer set
-anywhere else keeps its place on the turned canvas, scaled to fit, until you
-move it in portrait. A scene laid out by slots arranges them in a row in
+the landscape canvas covers the portrait one, cropped, but a web page or
+overlay covering it, mostly see-through, is fitted whole and is never the main
+picture. What sits on the main picture, such as a lower third or a logo, keeps
+its place on it. A layer set anywhere else keeps its place on the turned
+canvas, scaled to fit. A scene laid out by slots arranges them in a row in
 portrait, or in a grid or inset if that is how it arranges them in landscape,
 and picks its own portrait arrangement in BUILD's scene inspector. A layer
 showing another scene of the show's size, or the program, shows that scene's
@@ -820,14 +821,18 @@ portrait arrangement in the portrait picture, tall as the portrait canvas is,
 so its place there is shaped for it: one covering the landscape canvas, such
 as a scene of overlays, covers the portrait canvas whole rather than being the
 main picture, and one set anywhere else keeps its place, as wide and as much
-taller as its picture turned.
+taller as its picture turned. Giving that scene a size of its own in Settings,
+or the show's back, changes the shape of its picture there, so each layer
+showing it is fitted inside the place it had in the portrait picture, in the
+same edit.
 
 LIVE shows both pictures side by side, each in its tally frame, with its
 format, size, and what its video sends under it. BUILD edits one picture at a
 time: **Landscape** or **Portrait** under the picture picks which, and the other
 shows small beside it, where a click edits it instead. A drag, Fit, Fill, the
 inspector's X, Y, W, H, and crop all place the layer in the picture edited,
-and leave its place in the other alone. A layer in a slot has one crop in both.
+and leave its place in the other alone, even one fitted there from its
+landscape place. A layer in a slot has one crop in both.
 Each scene's pad shows the pair, and Studio mode's NEXT card shows both
 pictures of the scene cued.
 
