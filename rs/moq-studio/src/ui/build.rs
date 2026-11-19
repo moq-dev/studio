@@ -222,7 +222,7 @@ impl Panels {
 	}
 
 	/// Stop passing input to a page, letting go of what it holds.
-	fn stop_interacting(&mut self, state: &State) {
+	pub(super) fn stop_interacting(&mut self, state: &State) {
 		self.interacting = false;
 		self.rebind(&state.sources);
 		deliver(&state.sources, self.interact.release());
