@@ -474,6 +474,8 @@ impl Paired {
 			Ok(following) => following,
 			Err(err) => return tracing::error!(remote = self.name, %err, "cannot read a remote"),
 		};
+		// How the last press went, across reconnects, so one read again is not done again.
+		let mut done = None;
 		let mut next = following.available().await;
 		loop {
 			let broadcast = match next {
@@ -493,7 +495,7 @@ impl Paired {
 			};
 			self.room.remotes.connect(&self.name, true);
 			tokio::select! {
-				result = self.drive(broadcast) => {
+				result = self.drive(broadcast, &mut done) => {
 					if let Err(err) = result {
 						tracing::debug!(remote = self.name, error = format!("{err:#}"), "stopped reading a remote");
 					}
@@ -506,8 +508,9 @@ impl Paired {
 	}
 
 	/// Publish the page at `broadcast` its desk and renew its token, and do
-	/// each press it makes, until it leaves or the studio closes.
-	async fn drive(&self, broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
+	/// each press it makes, keeping how the last went in `done`, until it
+	/// leaves or the studio closes.
+	async fn drive(&self, broadcast: moq_net::broadcast::Consumer, done: &mut Option<Done>) -> anyhow::Result<()> {
 		let route = self.publish.route(
 			desk_path(&self.name, self.generation)?,
 			moq_net::origin::RouteOptions::hidden(),
@@ -526,7 +529,11 @@ impl Paired {
 		self.renew(&mut published)?;
 		let board = self.board.upgrade().context("the studio closed")?;
 		let frame = board.frame();
-		self.show(&mut published, board.desk())?;
+		let desk = Desk {
+			done: done.clone(),
+			..board.desk()
+		};
+		self.show(&mut published, desk)?;
 		drop(board);
 		published.route.announce()?;
 
@@ -537,7 +544,6 @@ impl Paired {
 		let mut renew = kio::clock::interval_at(kio::clock::now().saturating_add(period), period);
 		let mut frames = kio::clock::interval(frame);
 		let mut listening = false;
-		let mut done = None;
 		let mut ready = true;
 		loop {
 			tokio::select! {
@@ -547,7 +553,7 @@ impl Paired {
 					// The next press waits for the next frame.
 					ready = false;
 					match press {
-						Ok(Some(press)) => done = Some(self.handle(press.value, &mut listening)),
+						Ok(Some(press)) => *done = Some(self.handle(press.value, &mut listening, done.as_ref())),
 						Ok(None) => return Ok(()),
 						Err(moq_json::Error::Net(err)) => return Err(err.into()),
 						// Refused whole, as one the page cannot be told about.
@@ -582,12 +588,16 @@ impl Paired {
 		Ok(())
 	}
 
-	/// Do `press`, saying how it went. The first press read from a page is
-	/// one the studio may have done before it was listening, such as before a
-	/// restart, so it is never done again; the page names itself first, so it
-	/// is only ever that.
-	fn handle(&self, press: Press, listening: &mut bool) -> Done {
+	/// Do `press`, saying how it went, after the `last` one. The first press
+	/// read from a connection is one the studio may have done before it was
+	/// listening, such as before a restart, so it is never done again: it is
+	/// the `last` if the page reconnected, and else told to press again. The
+	/// page names itself first, so it is only ever that.
+	fn handle(&self, press: Press, listening: &mut bool, last: Option<&Done>) -> Done {
 		let first = !std::mem::replace(listening, true);
+		if first && let Some(last) = last.filter(|last| last.id == press.id && press.seq <= last.seq) {
+			return last.clone();
+		}
 		let result = match press.action {
 			None => Ok("connected".to_string()),
 			Some(_) if first => Err("pressed before the studio was listening; press again".to_string()),
@@ -847,16 +857,30 @@ mod tests {
 		assert_eq!(refused.said, "Go live is not for a remote");
 		assert_eq!(fake.pressed().len(), 2);
 
-		// A page back with a press already made, which the studio may have
-		// done before, is told to press again.
+		// The page back on a new connection: the press read first is the
+		// last it made, which is not done again.
 		drop(page);
 		while desks.latest().await.unwrap().is_some() {}
 		let mut page = Page::open(&heard, "phone", 0);
-		page.press(press(1, Some(scene.clone())));
+		page.press(press(12, Some(Action::GoLive)));
 		let mut desks = read_desks(publish.consume(), "phone", 0).await;
+		clock.advance(FRAME);
+		assert_eq!(done(&mut desks, 12).await, refused, "the last press, again");
+
+		// Another page, such as one reloaded, whose first press the studio
+		// may have done before it was listening, is told to press again.
+		drop(page);
+		while desks.latest().await.unwrap().is_some() {}
+		let mut page = Page::open(&heard, "phone", 0);
+		page.press(Press {
+			id: "reloaded".into(),
+			..press(1, Some(scene.clone()))
+		});
+		let mut desks = read_desks(publish.consume(), "phone", 0).await;
+		clock.advance(FRAME);
 		let again = loop {
 			let desk = desks.latest().await.unwrap().unwrap().value;
-			if let Some(done) = desk.done.filter(|done| done.seq == 1) {
+			if let Some(done) = desk.done.filter(|done| done.id == "reloaded") {
 				break done;
 			}
 		};
