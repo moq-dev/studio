@@ -847,7 +847,7 @@ mod tests {
 		clock.advance(FRAME);
 		let first = done(&mut desks, 1).await;
 		assert!(first.ok, "{first:?}");
-		assert_eq!(fake.pressed(), [scene.clone()]);
+		assert_eq!(fake.pressed(), std::slice::from_ref(&scene));
 
 		// A burst within one frame: only the newest is done, a frame later.
 		for seq in 2..=11 {
