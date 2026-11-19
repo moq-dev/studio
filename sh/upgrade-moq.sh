@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# Move the moq submodule to a moq commit (default: origin/main) and refresh
+# Move the moq submodule to a commit on moq's main (default: its tip) and refresh
 # Cargo.lock and bun.lock to match. Commit the gitlink and both locks together.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-rev="${1:-origin/main}"
+# FETCH_HEAD is moq-dev/moq's main once check-moq-main.sh has fetched it.
+rev="${1:-FETCH_HEAD}"
 
-git -C "$root/moq" fetch --quiet origin main
-git -C "$root/moq" checkout --quiet --detach "$rev"
+# Fetches main, refuses a revision off it, and prints the commit it checked:
+# check out that ID, since checkout resolves a name tagging one commit and
+# naming a branch at another to the branch, not the tag the check saw.
+commit="$("$root/sh/check-moq-main.sh" "$rev")"
+git -C "$root/moq" checkout --quiet --detach "$commit"
 # Resolve without --locked: Cargo adds and prunes only what the new moq needs.
 cargo metadata --manifest-path "$root/Cargo.toml" --format-version 1 >/dev/null
 
-# Print the first registry crate both locks hold at semver-compatible but
-# different versions, as `<name>@<studio version> <moq version>`.
+# Print each registry crate both locks hold at semver-compatible but different
+# versions, as `<name>@<studio version> <moq version>`.
 drift() {
     awk '
         function compat(v, p) {
@@ -25,7 +29,7 @@ drift() {
         /^source = "registry/ {
             key = name " " compat(version)
             if (file == 1) moq[key] = version
-            else if (key in moq && moq[key] != version) { print name "@" version, moq[key]; exit }
+            else if (key in moq && moq[key] != version) print name "@" version, moq[key]
         }
     ' "$root/moq/Cargo.lock" "$root/Cargo.lock"
 }
@@ -33,15 +37,22 @@ drift() {
 # Cargo resolves a crate the new moq adds at its newest release, not the one
 # moq's lock tested, and that release can pull a second copy of a crate moq
 # holds once: two copies of rind's assembly fail the fat-LTO release link.
-# So move every shared crate to moq's version; one the studio needs newer fails here.
-last=""
-while next="$(drift)" && [ -n "$next" ]; do
-    if [ "$next" = "$last" ]; then
-        echo "upgrade-moq: cargo did not move ${next% *} to moq's ${next#* }" >&2
+# So move every shared crate to moq's version. A crate a newer dependent holds
+# back (rind under a newer rind-rcgen) moves on a later pass, once that
+# dependent has moved; a pass that moves nothing means the studio needs one
+# newer, and fails here.
+while pending="$(drift)" && [ -n "$pending" ]; do
+    moved=""
+    while read -r crate version; do
+        if cargo update --manifest-path "$root/Cargo.toml" --quiet -p "$crate" --precise "$version" 2>/dev/null; then
+            moved=1
+        fi
+    done <<<"$pending"
+    if [ -z "$moved" ]; then
+        echo "upgrade-moq: cargo could not move these to moq's versions:" >&2
+        echo "$pending" >&2
         exit 1
     fi
-    cargo update --manifest-path "$root/Cargo.toml" --quiet -p "${next% *}" --precise "${next#* }"
-    last="$next"
 done
 # The join page's workspace includes moq's JS packages, whose dependencies move too.
 (cd "$root" && bun install)

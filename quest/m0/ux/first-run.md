@@ -44,4 +44,3 @@ machine with a real camera and microphone, watched without helping.
 ## Required
 
 - [Adding a source by picking a picture](/quest/m0/ux/add.md) - the cards with live pictures and meters
-- [Going live from inside the app](/quest/m0/ux/go-live.md) - the show library it starts from and the relay it measures

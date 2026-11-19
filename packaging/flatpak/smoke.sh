@@ -64,7 +64,10 @@ SWAYSOCK=$(compgen -G "$runtime/sway-ipc.*.sock")
 WAYLAND_DISPLAY=$(basename "$(compgen -G "$runtime/wayland-*[0-9]")")
 export SWAYSOCK WAYLAND_DISPLAY
 
-flatpak run --env=NO_COLOR=1 --command=moq-studio-desktop live.kixel.studio 2>"$log" &
+# A show that does not exist yet, so the launch runs guided setup rather than
+# opening the library.
+# shellcheck disable=SC2016 # Expanded inside the sandbox.
+flatpak run --env=NO_COLOR=1 --command=sh live.kixel.studio -c 'exec moq-studio-desktop "$XDG_DATA_HOME/smoke.toml"' 2>"$log" &
 studio=$!
 pids+=("$studio")
 

@@ -57,11 +57,10 @@ offset onto the composition's clock, and every independently published
 source, local or guest, its own broadcast (rejected: a layer layout track in
 the program's broadcast naming tracks; local sources as tracks of the
 program's broadcast, the 2026-10-26 rule this reverses). The studio
-prototypes the format first: `rs/moq-scene/src/composition.rs`, documented in
-the README's "Composition". [Moving it into its broadcast's
-catalog](/quest/m2/compose/layout.md) waits for hang's timed catalogs.
+prototypes the format first: `rs/moq-scene/src/composition.rs`, in a section
+of its broadcast's hang catalog applied at each update's timestamp,
+documented in the README's "Composition".
 
-moq's side, in its own quest tree (m3): hang specifies the composition, and
-`moq play` and `@moq/watch` composite it. moq's three layers quests were
-planned for a layer layout track and need replanning there.
+moq's side, in its own quest tree (m3, `quest/m3/layers/`): hang specifies
+the composition, and `moq play` and `@moq/watch` composite it.
 

@@ -65,6 +65,12 @@ pub struct Report {
 	pub sources: Vec<Track>,
 	/// What is wrong, worst first, each naming its cause.
 	pub problems: Vec<Problem>,
+	/// How many cameras, displays, and windows a live broadcast shows went
+	/// dark, which the health dot counts.
+	pub dark: usize,
+	/// How many cameras and broadcasts a live broadcast shows stopped
+	/// sending pictures, which the health dot counts too.
+	pub stalled: usize,
 }
 
 /// One broadcast: who watches it, and how each of its tracks reaches
@@ -152,8 +158,6 @@ pub struct Viewer {
 	pub rtt: Option<Duration>,
 	/// The longest any track took from the program clock to this viewer.
 	pub latency: Option<Duration>,
-	/// The longest playout delay it reports.
-	pub playout: Option<Duration>,
 	/// Why its report cannot be read, if it cannot.
 	pub error: Option<String>,
 }
@@ -220,6 +224,9 @@ pub struct Local {
 	/// Sources whose stalled picture or sound a live broadcast carries, what
 	/// stalled, and which broadcasts carry it.
 	pub stalled: Vec<(String, Stall, Live)>,
+	/// Cameras, displays, and windows a live broadcast shows that have been
+	/// all dark this long, and which broadcasts show them.
+	pub dark: Vec<(String, Duration, Live)>,
 	/// Sources a live broadcast shows or plays that ended or failed, and
 	/// where.
 	pub stopped: Vec<(String, Status, Reach)>,
@@ -603,6 +610,12 @@ impl Sampler {
 			viewers,
 			tracks: &broadcast.tracks,
 		});
+		report.dark = local.dark.len();
+		report.stalled = local
+			.stalled
+			.iter()
+			.filter(|(_, stall, _)| matches!(stall, Stall::Picture(_)))
+			.count();
 		report.problems = problems(&Facts {
 			relays: &report.relays,
 			local: &local,
@@ -636,22 +649,21 @@ impl Sampler {
 	}
 }
 
-fn relay(link: &Link) -> Relay {
+/// How `link` is doing now.
+pub(crate) fn relay(link: &Link) -> Relay {
 	use moq_tokio::connection::Phase;
-	let observed = link.monitor.state();
-	let state = match observed.phase {
-		Phase::Connecting => State::Connecting,
-		Phase::Connected | Phase::Migrating => State::Connected,
-		Phase::Disconnected | Phase::Closed => State::Disconnected(
-			observed
-				.failure
-				.map_or_else(|| "the connection closed".to_string(), |err| err.to_string()),
+	let (state, version) = match link.monitor.state().phase {
+		Phase::Connecting { .. } => (State::Connecting, None),
+		Phase::Connected { version, .. } | Phase::Migrating { version, .. } => (State::Connected, Some(version)),
+		Phase::Disconnected { failure } | Phase::Closed { failure } => (
+			State::Disconnected(failure.map_or_else(|| "the connection closed".to_string(), |err| err.to_string())),
+			None,
 		),
 	};
 	Relay {
 		endpoint: link.endpoint.clone(),
 		state,
-		version: observed.version,
+		version,
 	}
 }
 
@@ -848,13 +860,6 @@ fn viewers(graded: &[GradedViewer], clock: &moq_mux::Clock) -> Vec<Viewer> {
 						.filter_map(|id| viewer.latency(id, clock))
 						.max()
 				}),
-				playout: current.and_then(|snapshot| {
-					snapshot
-						.renditions
-						.values()
-						.filter_map(|rendition| rendition.latency)
-						.max()
-				}),
 				error: viewer.error.clone(),
 			}
 		})
@@ -974,6 +979,16 @@ fn problems(facts: &Facts<'_>) -> Vec<Problem> {
 		add(
 			Verdict::Unhealthy,
 			format!("Source `{name}` stalled: {}, so {instead}.", without(*stall)),
+		);
+	}
+	for (name, dark, live) in &local.dark {
+		add(
+			Verdict::Degraded,
+			format!(
+				"Source `{name}` has been all dark for {:.0} s, so {}.",
+				dark.as_secs_f64(),
+				clause(live, "shows", "show", "black where it was")
+			),
 		);
 	}
 	for (name, status, reach) in &local.stopped {
@@ -1184,7 +1199,7 @@ pub fn rate(rate: Rate) -> String {
 pub fn echo(path: &moq_net::Path) -> anyhow::Result<(moq_net::path::Relative, moq_net::Path)> {
 	// A reference resolves against the broadcast's parent, as a relative URL
 	// does, so naming the broadcast's last segment puts the prefix beneath it.
-	let relative = match path.parts().last() {
+	let relative = match path.parts().next_back() {
 		Some(last) => format!("{last}/{ECHO}"),
 		None => ECHO.to_string(),
 	};
@@ -1249,11 +1264,13 @@ impl Feedback {
 						unread += 1;
 					}
 				}
-				moq_net::announce::Event::Absent(announce) => {
+				moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => {
 					if readers.remove(&announce.prefix).is_none() && hang::echo::is_echo(&announce.prefix) {
 						unread = unread.saturating_sub(1);
 					}
 				}
+				// A reader stays on a viewer whose route recovers.
+				moq_net::announce::Event::Unavailable(_) | moq_net::announce::Event::Available(_) => {}
 			}
 			self.0.lock().unwrap().unread = unread;
 		}
@@ -1577,6 +1594,27 @@ mod tests {
 		);
 	}
 
+	/// The dot counts the layers gone dark and those whose picture stalled,
+	/// but not a stalled sound, which no layer shows.
+	#[test]
+	fn counts_the_layers_without_a_picture() {
+		let program = Live {
+			program: true,
+			scenes: Vec::new(),
+		};
+		let secs = Duration::from_secs;
+		let local = Local {
+			stalled: vec![
+				("camera".into(), Stall::Picture(secs(3)), program.clone()),
+				("mic".into(), Stall::Sound(secs(2)), program.clone()),
+			],
+			dark: vec![("game".into(), secs(12), program.clone())],
+			..Default::default()
+		};
+		let report = Sampler::new(None).sample(kio::clock::now(), local);
+		assert_eq!((report.dark, report.stalled), (1, 1));
+	}
+
 	/// A scene published again under its name counts its frames afresh,
 	/// rather than from the counters of the one before.
 	#[test]
@@ -1593,7 +1631,7 @@ mod tests {
 			};
 			let mut local = local(Video::default(), Some(tall));
 			local.rendered = u64::from(seconds) * 30;
-			causes(sampler.sample(start + INTERVAL * seconds, local).problems)
+			causes(sampler.sample(start.saturating_add(INTERVAL * seconds), local).problems)
 		};
 		sample(10, 0);
 		let republished = sample(11, 1);
@@ -1805,7 +1843,7 @@ mod tests {
 	}
 
 	/// Problems list worst first: an unreachable relay and a frozen or silent
-	/// source above a slow round trip. A frozen, silent, ended, or uploaded
+	/// source above a slow round trip. A frozen, silent, dark, ended, or uploaded
 	/// source names the broadcasts that show or play it, including a published
 	/// scene that alone plays it.
 	#[test]
@@ -1831,6 +1869,10 @@ mod tests {
 				("camera".into(), Stall::Picture(Duration::from_secs(3)), program.clone()),
 				("logo".into(), Stall::Picture(Duration::from_secs(3)), tall.clone()),
 				("mic".into(), Stall::Sound(Duration::from_secs(2)), tall.clone()),
+			],
+			dark: vec![
+				("game".into(), Duration::from_secs(12), program.clone()),
+				("screen".into(), Duration::from_secs(3), both.clone()),
 			],
 			stopped: vec![
 				("intro".into(), Status::Ended, reach(&program, &program)),
@@ -1866,6 +1908,8 @@ mod tests {
 				"Source `logo` stalled: no new picture for 3 s, so scene `tall` repeats its last one.",
 				"Source `mic` stalled: no new sound for 2 s, so scene `tall` plays silence for it.",
 				"Source `music` failed: the file is gone.",
+				"Source `game` has been all dark for 12 s, so the program shows black where it was.",
+				"Source `screen` has been all dark for 3 s, so the program, scene `tall` and scene `wide` show black where it was.",
 				"Source `intro` played to its end, so the program holds its last picture and plays no sound for it.",
 				"Source `outro` played to its end, so the program, scene `tall` and scene `wide` hold its last picture and play no sound for it.",
 				"Source `clip` played to its end, so the program holds its last picture and scene `tall` plays no sound for it.",
@@ -2002,7 +2046,9 @@ mod tests {
 		rendition.frames = 50;
 		rendition.arrival = Some(hang::echo::Arrival::new(timestamp, wall));
 		report.renditions.insert(id.to_string(), rendition);
-		reports.update(&report).unwrap();
+		reports
+			.update(moq_json::Timed::new(&report, moq_net::Timestamp::unscaled(0)))
+			.unwrap();
 		(viewer, reports)
 	}
 
@@ -2095,7 +2141,12 @@ mod tests {
 			let route = origin.route(&path, moq_net::origin::RouteOptions::hidden()).unwrap();
 			let track = route.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 			let mut reports = moq_json::snapshot::Producer::<hang::echo::Snapshot>::new(track, Default::default());
-			reports.update(&hang::echo::Snapshot::default()).unwrap();
+			reports
+				.update(moq_json::Timed::new(
+					&hang::echo::Snapshot::default(),
+					moq_net::Timestamp::unscaled(0),
+				))
+				.unwrap();
 			route.announce().unwrap();
 			(route, reports)
 		};
@@ -2204,7 +2255,11 @@ mod tests {
 				.unwrap()
 				.expect("an instance");
 			let mut video = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
-			track.append_group().unwrap().finish().unwrap();
+			track
+				.append_group(moq_net::Timestamp::unscaled(0))
+				.unwrap()
+				.finish()
+				.unwrap();
 			video.recv_group().await.unwrap();
 			while watching.get() != Some(1) {
 				kio::clock::sleep(INTERVAL / 4).await;

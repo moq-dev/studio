@@ -274,8 +274,10 @@ mod tests {
 		let track = broadcast.create_track("video", info).unwrap();
 		let mut joins = Joins::new(track.clone());
 		let write = |sequence: u64, bytes: usize| {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-			group.write_frame(None, vec![0u8; bytes]).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::unscaled(sequence), vec![0u8; bytes])
+				.unwrap();
 			group
 		};
 		assert!(!joins.due(), "nobody watches");
@@ -286,7 +288,9 @@ mod tests {
 		let mut group = write(0, 100);
 		assert!(!joins.due(), "the group landed");
 		// Deltas outweighing twice the keyframe make the next join ask.
-		group.write_frame(None, vec![0u8; 300]).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(0), vec![0u8; 300])
+			.unwrap();
 		let _second = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 		assert!(joins.due(), "a join past the newest group");
 		assert!(!joins.due(), "the keyframe is still in the encoder");

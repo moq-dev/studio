@@ -1,10 +1,12 @@
 //! Recording the program, and optionally each source, to disk beside any live
 //! output.
 //!
-//! A recording reads the studio's broadcast the way a relay viewer does, so it
-//! shares the live encoders and starts and stops without touching what the
-//! relay serves, each local source's track from the studio's local broadcast,
-//! which its reading keeps encoding, and each broadcast source, a guest's
+//! A recording reads, the way a relay viewer does, the program from a hidden
+//! broadcast no relay sees, holding its own full-size encode of the video, at
+//! full quality whatever the grant, and of the mix, so it starts and stops
+//! without touching what the relay serves; each local source's track from the
+//! studio's local broadcast, which its reading keeps encoding; and each
+//! broadcast source, a guest's
 //! included, as it arrives through the origin the studio subscribes through,
 //! copied without a re-encode. Each file is an MP4 that plays while it
 //! grows, so a crash still leaves a playable file, and becomes a regular MP4
@@ -53,12 +55,16 @@ pub struct Recorder {
 	/// Each broadcast source, by name, and the path it subscribes to, as
 	/// [`set_sources`](Self::set_sources) last saw them.
 	broadcasts: watch::Sender<BTreeMap<String, String>>,
-	dir: PathBuf,
+	/// Where the next recording goes.
+	dir: Mutex<PathBuf>,
 	/// Each file's name starts with this: the scene file's.
 	name: String,
 	runtime: tokio::runtime::Handle,
 	/// The recording in progress, or the last one.
 	session: Mutex<Option<Session>>,
+	/// Whether `dir` is being moved, which no recording starts during. Set
+	/// and read under `session`.
+	moving: AtomicBool,
 	/// The recordings found unfinished in `dir` at launch.
 	repairs: repair::Repairs,
 }
@@ -117,6 +123,28 @@ pub struct FileStatus {
 	pub finished: Option<Finished>,
 }
 
+/// A move of the recordings directory under way, during which a recording
+/// is refused rather than started, until it finishes or drops.
+pub struct Moving<'a> {
+	recorder: &'a Recorder,
+	dir: PathBuf,
+}
+
+impl Moving<'_> {
+	/// Save the next recording into the directory moved to.
+	pub fn finish(self) {
+		let _session = self.recorder.session.lock().unwrap();
+		*self.recorder.dir.lock().unwrap() = self.dir.clone();
+	}
+}
+
+impl Drop for Moving<'_> {
+	fn drop(&mut self) {
+		let _session = self.recorder.session.lock().unwrap();
+		self.recorder.moving.store(false, Ordering::Relaxed);
+	}
+}
+
 impl Recorder {
 	/// Record what `inputs` names into `dir`, naming each file after the
 	/// `scenes` file, and repair in the background each file in `dir` a crash
@@ -142,16 +170,45 @@ impl Recorder {
 			origin,
 			broadcasts: watch::channel(BTreeMap::new()).0,
 			repairs: repair::Repairs::start(&dir, &runtime),
-			dir,
+			dir: Mutex::new(dir),
 			name,
 			runtime,
 			session: Mutex::new(None),
+			moving: AtomicBool::new(false),
 		})
 	}
 
 	/// The directory recordings go to.
-	pub fn dir(&self) -> &Path {
-		&self.dir
+	pub fn dir(&self) -> PathBuf {
+		self.dir.lock().unwrap().clone()
+	}
+
+	/// Start moving the directory to `dir`, such as while the settings
+	/// naming it are written. Refused while a recording is under way, whose
+	/// unfinished file the next launch repairs only in the directory then
+	/// set. No recording starts until the move finishes or is dropped, nor
+	/// does another move.
+	pub fn moving(&self, dir: &Path) -> anyhow::Result<Moving<'_>> {
+		let dir = std::path::absolute(dir)?;
+		// The lock `start` checks under, held only for the check, so a slow
+		// move never holds up a read of the status.
+		let session = self.session.lock().unwrap();
+		anyhow::ensure!(
+			!self.moving.load(Ordering::Relaxed),
+			"the folder is already being moved"
+		);
+		anyhow::ensure!(
+			*self.dir.lock().unwrap() == dir || session.as_ref().is_none_or(|session| *session.done.borrow()),
+			"a recording is under way: stop it before moving the folder, so a crash leaves it where the next \
+			 launch repairs it"
+		);
+		self.moving.store(true, Ordering::Relaxed);
+		Ok(Moving { recorder: self, dir })
+	}
+
+	/// The show's name, which each file's starts with: the scene file's.
+	pub fn show(&self) -> &str {
+		&self.name
 	}
 
 	/// Record the broadcast sources `collection` has from now on, as each
@@ -181,6 +238,10 @@ impl Recorder {
 			session.as_ref().is_none_or(|session| *session.done.borrow()),
 			"already recording"
 		);
+		anyhow::ensure!(
+			!self.moving.load(Ordering::Relaxed),
+			"the recordings folder is being moved; try again in a moment"
+		);
 
 		// UTC, since the studio does not read the time zone; no colons, which
 		// Windows refuses in a file name.
@@ -190,7 +251,8 @@ impl Recorder {
 		let stem = program_stem(&self.name, &stamp);
 		// Here rather than on the runtime, so a directory that cannot take it
 		// fails the click that started it.
-		let (path, file, marker) = create(&self.dir, &stem)?;
+		let dir = self.dir();
+		let (path, file, marker) = create(&dir, &stem)?;
 		let program = Arc::new(File::new(path, Some(marker)));
 		let files: Files = Arc::new(Mutex::new(vec![program.clone()]));
 		let stop = Arc::new(watch::channel(false).0);
@@ -202,7 +264,7 @@ impl Recorder {
 			sources: self.sources.clone(),
 			origin: self.origin.clone(),
 			broadcasts: self.broadcasts.subscribe(),
-			dir: self.dir.clone(),
+			dir,
 			stem,
 			files: files.clone(),
 			stop: stop.clone(),
@@ -736,6 +798,9 @@ fn numbered(stem: &str, number: u32) -> String {
 /// Create a file named `stem` in `dir`, numbering it rather than replacing
 /// one already there, and mark it unfinished before it exists.
 fn create(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, std::fs::File, Marker)> {
+	// A default folder, such as the videos folder the platform names, may not
+	// exist yet.
+	std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
 	let mut number: u32 = 1;
 	loop {
 		let path = dir.join(numbered(stem, number));
@@ -912,7 +977,7 @@ async fn record<S: Stream>(
 	entry: &File,
 	mut stop: watch::Receiver<bool>,
 ) -> Outcome {
-	let mut export = export.with_max_delay(MAX_DELAY);
+	let mut export = export.with_delay(moq_net::track::Delay::default().with_max(MAX_DELAY));
 	let mut stopping = false;
 	let read = loop {
 		let next = if !stopping && *stop.borrow() {
@@ -1138,7 +1203,7 @@ fn replaced<T: hang::catalog::Reference>(last: &BTreeMap<String, T>, now: &BTree
 #[cfg(test)]
 mod tests {
 	use bytes::Bytes;
-	use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+	use mp4_atom::DecodeMaybe;
 
 	use super::*;
 
@@ -1162,6 +1227,11 @@ mod tests {
 			options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Opus, &input);
 			let audio = moq_audio::encode::Producer::new(broadcast, catalog, input, &options).unwrap();
 			Self { audio }
+		}
+
+		/// End the track cleanly, as the studio's sources do.
+		fn finish(self) {
+			drop(self.audio.finish().unwrap());
 		}
 
 		/// Write the 10 ms of tone starting at `at`.
@@ -1252,11 +1322,13 @@ mod tests {
 
 		/// Stop listing the source `name`.
 		fn remove(&mut self, name: &str) {
-			// A removed source ends its track cleanly, as the studio's do.
-			for (_, tone, ..) in self.sources.iter_mut().filter(|(source, ..)| source == name) {
-				tone.audio.finish().unwrap();
+			let (removed, kept) = std::mem::take(&mut self.sources)
+				.into_iter()
+				.partition::<Vec<_>, _>(|(source, ..)| source == name);
+			self.sources = kept;
+			for (_, tone, ..) in removed {
+				tone.finish();
 			}
-			self.sources.retain(|(source, ..)| source != name);
 			self.relist();
 		}
 
@@ -1266,9 +1338,7 @@ mod tests {
 			let mut broadcast = self.local.clone();
 			let (_, tone, _, listing) = self.sources.iter_mut().find(|(source, ..)| source == name).unwrap();
 			let old = listing.snapshot().audio.renditions;
-			let mut old_tone = std::mem::replace(tone, Tone::new(&mut broadcast, listing.clone()));
-			old_tone.audio.finish().unwrap();
-			drop(old_tone);
+			std::mem::replace(tone, Tone::new(&mut broadcast, listing.clone())).finish();
 			listing
 				.mutate(|catalog| catalog.audio.renditions.retain(|track, _| !old.contains_key(track)))
 				.unwrap();
@@ -1281,9 +1351,7 @@ mod tests {
 			let mut broadcast = self.publication.broadcast().clone();
 			let old = self.catalog.snapshot().audio.renditions;
 			let tone = Tone::new(&mut broadcast, self.catalog.clone());
-			let mut old_tone = self.program.replace(tone).unwrap();
-			old_tone.audio.finish().unwrap();
-			drop(old_tone);
+			self.program.replace(tone).unwrap().finish();
 			self.catalog
 				.mutate(|root| root.audio.renditions.retain(|track, _| !old.contains_key(track)))
 				.unwrap();
@@ -1292,9 +1360,7 @@ mod tests {
 		/// End the program's track, as stopping the studio does.
 		fn end_program(&mut self) {
 			let old = self.catalog.snapshot().audio.renditions;
-			let mut tone = self.program.take().unwrap();
-			tone.audio.finish().unwrap();
-			drop(tone);
+			self.program.take().unwrap().finish();
 			self.catalog
 				.mutate(|root| root.audio.renditions.retain(|track, _| !old.contains_key(track)))
 				.unwrap();
@@ -1307,7 +1373,7 @@ mod tests {
 				.iter()
 				.map(|(name, _, _, listing)| {
 					let mut listing = listing.snapshot();
-					listing.media = Default::default();
+					listing.sync = Default::default();
 					(name.clone(), listing)
 				})
 				.collect();
@@ -1401,8 +1467,8 @@ mod tests {
 		}
 
 		/// Leave, ending the track cleanly, as closing the join page does.
-		fn leave(mut self) -> Vec<Bytes> {
-			self.audio.finish().unwrap();
+		fn leave(self) -> Vec<Bytes> {
+			drop(self.audio.finish().unwrap());
 			self.sent
 		}
 	}
@@ -1585,6 +1651,40 @@ mod tests {
 		recorder.start(false).unwrap();
 		assert_eq!(recorder.status().unwrap().files.len(), 1);
 		recorder.finish().await;
+	}
+
+	/// The folder stays put while a recording is under way, since a crash
+	/// leaves its file for the next launch to repair only where the folder
+	/// is then; once it is done, the folder moves, and only when the move
+	/// finishes, such as once the settings naming it are written.
+	#[tokio::test(start_paused = true)]
+	async fn the_folder_stays_while_recording() {
+		let dir = tempfile::tempdir().unwrap();
+		let other = tempfile::tempdir().unwrap();
+		let mut studio = Studio::new();
+		let recorder = studio.recorder(dir.path());
+		studio.play(Duration::from_secs(1)).await;
+		recorder.start(false).unwrap();
+		let refused = recorder.moving(other.path()).err().expect("refused while recording");
+		assert!(
+			format!("{refused:#}").contains("a recording is under way"),
+			"{refused:#}"
+		);
+		recorder
+			.moving(dir.path())
+			.expect("the same folder is no move")
+			.finish();
+		assert_eq!(recorder.dir(), dir.path());
+		recorder.stop();
+		let ((), ()) = tokio::join!(recorder.finish(), studio.play(Duration::from_millis(500)));
+		let moving = recorder.moving(other.path()).unwrap();
+		let refused = recorder.start(false).unwrap_err();
+		assert!(format!("{refused:#}").contains("being moved"), "{refused:#}");
+		assert!(recorder.moving(dir.path()).is_err(), "one move at a time");
+		drop(moving);
+		assert_eq!(recorder.dir(), dir.path(), "a move dropped unfinished stays");
+		recorder.moving(other.path()).unwrap().finish();
+		assert_eq!(recorder.dir(), other.path());
 	}
 
 	/// Each source with media of its own records into its own file while it is
@@ -2214,6 +2314,17 @@ mod tests {
 		assert!(!replaced(&BTreeMap::new(), &audio(None, None)));
 	}
 
+	/// A recording's folder, such as a videos folder not yet made, is created
+	/// when missing.
+	#[test]
+	fn a_missing_folder_is_created() {
+		let dir = tempfile::tempdir().unwrap();
+		let folder = dir.path().join("Movies");
+		let (path, ..) = create(&folder, "show").unwrap();
+		assert_eq!(path, folder.join("show.mp4"));
+		assert!(path.is_file());
+	}
+
 	/// A name already taken, such as by a recording started in the same
 	/// second, is numbered rather than replaced.
 	#[test]
@@ -2259,12 +2370,14 @@ mod tests {
 		assert!(!Marker::named(&path, &file).unwrap());
 	}
 
-	/// Starting into a directory that does not exist fails at once.
+	/// Starting into a directory that cannot be created fails at once.
 	#[tokio::test(start_paused = true)]
-	async fn a_missing_directory_fails_to_start() {
+	async fn an_uncreatable_directory_fails_to_start() {
 		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join("file");
+		std::fs::write(&file, b"").unwrap();
 		let studio = Studio::new();
-		let recorder = studio.recorder(&dir.path().join("missing"));
+		let recorder = studio.recorder(&file.join("missing"));
 		let err = recorder.start(false).unwrap_err();
 		assert!(format!("{err:#}").contains("cannot create"), "{err:#}");
 		assert!(recorder.status().is_none());

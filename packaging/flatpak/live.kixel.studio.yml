@@ -23,6 +23,8 @@ finish-args:
   - --filesystem=xdg-run/pipewire-0
   # Scene files, image sources, and recordings wherever the creator keeps them.
   - --filesystem=home
+  # Relay tokens, kept in the Secret Service (GNOME Keyring, KWallet).
+  - --talk-name=org.freedesktop.secrets
 modules:
   - name: moq-studio
     buildsystem: simple

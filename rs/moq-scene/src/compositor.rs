@@ -7,14 +7,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use kio::clock::Instant;
-use moq_video::render::{Renderer, wgpu};
+use moq_video::render::Renderer;
 
 use crate::Error;
+use crate::arrange::cover;
 use crate::collection::{
-	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Nested, Rect, Settled, Source,
-	Transition,
+	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Nested, Rect, Settled, Shape,
+	Source, Transition,
 };
+use crate::dark::{Probe, Prober};
 use crate::effect::{self, Effects, Frame, Lut, Picture, Prepared};
+use crate::glide::{Glide, REFLOW, mixed, pair, stack};
 use crate::matte::Matte;
 use crate::overlay::{Overlay, Overlays};
 use crate::source::{self, Feed, Sources, Status};
@@ -59,11 +62,12 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// what viewers see.
 ///
 /// A [`Thumbnail`] is drawn only while [`set_thumbnails`](Self::set_thumbnails)
-/// names it, into a texture of its own of at most 256 pixels a
-/// side, redrawn about five times a second on the program
-/// clock, each on a render of its own so a strip of them spreads its cost. A
-/// scene on program is sampled from [`layered`](Self::layered), and one drawn
-/// for an output from that output's texture, rather than drawn again. Thumbnails reach nothing else, and open no
+/// names it, into a texture of its own as large as its [`Detail`] asks,
+/// redrawn as often as it asks on the program clock, each on a render of its
+/// own so a strip of them spreads its cost. A scene on program is sampled
+/// from [`layered`](Self::layered), the one in preview from the preview while
+/// it is drawn, and one drawn for an output from that output's texture,
+/// rather than drawn again. Thumbnails reach nothing else, and open no
 /// source: one shows what the collection's sources already deliver.
 pub struct Compositor {
 	device: wgpu::Device,
@@ -88,6 +92,9 @@ pub struct Compositor {
 	nested: HashMap<String, Vec<Target>>,
 	/// Lays out and paints overlays, started with the first one.
 	overlays: Option<Overlays>,
+	/// Reduces captures' pictures to see if they went dark, built with the
+	/// first probe's first read.
+	prober: Option<Prober>,
 	/// The thumbnails shown, by what they show.
 	thumbnails: BTreeMap<Thumbnail, Thumb>,
 	/// How many renders have run, which picks the thumbnails each draws.
@@ -110,6 +117,17 @@ pub struct Compositor {
 	/// Whether the last render drew layers over the program.
 	layered: bool,
 	switch: Option<Switch>,
+	/// Each scene with items in slots, by name: where its arrangement put
+	/// them as of the last render, and their glide there.
+	reflows: HashMap<String, Reflow>,
+}
+
+/// A scene's items in slots, arranged.
+struct Reflow {
+	/// Its items where its arrangement puts them, in order.
+	arranged: Vec<Item>,
+	/// Its items as drawn, gliding to `arranged` when a slot opens or closes.
+	glide: Glide<Vec<(String, bool, Rect)>>,
 }
 
 /// The program and the scenes a transition draws whole on its way, as of the
@@ -172,12 +190,33 @@ impl Output {
 	}
 }
 
-/// The longest side of a thumbnail, in pixels: a scene pad's picture at twice
-/// its size, for a HiDPI screen.
-const THUMBNAIL_SIDE: u32 = 256;
+/// How large a thumbnail is drawn, and how often.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Detail {
+	/// Its longest side, in pixels, at most what it shows.
+	pub side: u32,
+	/// How many times a second it is redrawn, at most: the program's frame
+	/// rate or more redraws it every render.
+	pub rate: u32,
+}
 
-/// How many times a second each thumbnail is redrawn, at most.
-const THUMBNAIL_RATE: u32 = 5;
+impl Default for Detail {
+	/// A scene pad's picture at twice its size, for a HiDPI screen, redrawn
+	/// five times a second.
+	fn default() -> Self {
+		Self { side: 256, rate: 5 }
+	}
+}
+
+impl Detail {
+	/// The larger of each of `self` and `other`, for a thumbnail shown twice.
+	pub fn max(self, other: Self) -> Self {
+		Self {
+			side: self.side.max(other.side),
+			rate: self.rate.max(other.rate),
+		}
+	}
+}
 
 /// A small live picture the UI shows, by what it shows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -191,6 +230,7 @@ pub enum Thumbnail {
 
 /// A thumbnail named by [`Compositor::set_thumbnails`].
 struct Thumb {
+	detail: Detail,
 	/// What it was last drawn into, or `None` until it is, or while it shows
 	/// nothing.
 	target: Option<Target>,
@@ -211,6 +251,8 @@ enum Shows<'a> {
 	Scene(&'a str),
 	/// The program, sampled.
 	Program,
+	/// The preview, showing the scene called this, sampled.
+	Preview(&'a str),
 	/// The output reading the scene called this, sampled.
 	Output(&'a str),
 	/// The source called this.
@@ -284,9 +326,26 @@ struct Layer {
 	overlay: Option<Overlay>,
 	/// Why the newest picture failed to draw, logged when it first does.
 	error: Option<String>,
+	/// Watches a camera, display, or window for going dark, unless it is
+	/// expected to.
+	probe: Option<Probe>,
+	/// Whether `picture` is the probe's last good one, held over the dark.
+	holding: bool,
 }
 
 impl Layer {
+	/// Forget every picture from before a clear, so none may show, even if
+	/// the picture after it fails to draw: the newest, and the probe's last
+	/// good one and the read it has in flight.
+	fn clear(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+		self.cleared = true;
+		self.raw = None;
+		self.fresh = true;
+		if let Some(probe) = &mut self.probe {
+			*probe = Probe::new(device, queue);
+		}
+	}
+
 	/// Bring the picture drawn up to date with the newest one delivered,
 	/// through its matte while `background` is removed.
 	fn develop(
@@ -386,6 +445,7 @@ impl Compositor {
 			layers: HashMap::new(),
 			nested: HashMap::new(),
 			overlays: None,
+			prober: None,
 			thumbnails: BTreeMap::new(),
 			renders: 0,
 			named: 0,
@@ -397,6 +457,7 @@ impl Compositor {
 			program_shown: Duration::ZERO,
 			layered: false,
 			switch: None,
+			reflows: HashMap::new(),
 		})
 	}
 
@@ -505,23 +566,38 @@ impl Compositor {
 		self.outputs.get(scene)
 	}
 
-	/// Draw a thumbnail of each of `shown` from now on, and forget the rest,
-	/// so one named again starts over. Call it with what the UI shows, as
+	/// Draw a thumbnail of each of `shown` at its detail from now on, and
+	/// forget the rest, so one named again starts over. One named twice takes
+	/// the larger of each. Call it with what the UI shows, as
 	/// [`set_previewing`](Self::set_previewing) is: a thumbnail no one shows
 	/// costs nothing.
-	pub fn set_thumbnails(&mut self, shown: impl IntoIterator<Item = Thumbnail>) {
+	pub fn set_thumbnails(&mut self, shown: impl IntoIterator<Item = (Thumbnail, Detail)>) {
+		let mut details: BTreeMap<Thumbnail, Detail> = BTreeMap::new();
+		for (thumbnail, detail) in shown {
+			let merged = details.entry(thumbnail).or_insert(detail);
+			*merged = merged.max(detail);
+		}
 		let mut kept = BTreeMap::new();
-		for thumbnail in shown {
-			let thumb = self.thumbnails.remove(&thumbnail).unwrap_or_else(|| {
-				self.named += 1;
-				Thumb {
-					target: None,
-					start: None,
-					phase: self.named,
-					drawn: false,
-					due: false,
+		for (thumbnail, detail) in details {
+			let thumb = match self.thumbnails.remove(&thumbnail) {
+				// A new size is drawn on the next render, not its next turn.
+				Some(thumb) => Thumb {
+					drawn: thumb.drawn && thumb.detail.side == detail.side,
+					detail,
+					..thumb
+				},
+				None => {
+					self.named += 1;
+					Thumb {
+						detail,
+						target: None,
+						start: None,
+						phase: self.named,
+						drawn: false,
+						due: false,
+					}
 				}
-			});
+			};
 			kept.insert(thumbnail, thumb);
 		}
 		self.thumbnails = kept;
@@ -553,6 +629,39 @@ impl Compositor {
 			Some(Err(err)) => Some(err),
 			_ => layer.error.as_deref(),
 		}
+	}
+
+	/// How long the camera, display, or window called `source` has shown a
+	/// picture all one dark color while live, once that is at least
+	/// [`DARK`](crate::dark::DARK) at `now`. Until then the compositor draws
+	/// the last picture it showed that was not dark in its place, if any;
+	/// after, the dark picture as it is. Never for a source expected to go
+	/// dark, nor any other kind.
+	pub fn dark(&self, source: &str, now: Instant) -> Option<Duration> {
+		self.layers.get(source)?.probe.as_ref()?.dark(now)
+	}
+
+	/// The width and height in pixels of `source`'s newest picture, a capture
+	/// named as [`Collection::capture`] names it, once one is drawn.
+	pub fn picture_size(&self, source: &str) -> Option<(u32, u32)> {
+		let picture = self.layers.get(source)?.picture.as_ref()?;
+		Some(picture.size())
+	}
+
+	/// The items of the scene called `scene` where its arrangement put them
+	/// as of the last [`render`](Self::render), in order, as
+	/// [`Collection::arranged`] gives them: `None` for a scene with no item
+	/// in a slot. What is drawn glides there when a slot opens or closes.
+	pub fn arranged(&self, scene: &str) -> Option<&[Item]> {
+		self.reflows.get(scene).map(|reflow| reflow.arranged.as_slice())
+	}
+
+	/// The items of the scene called `scene` where the last
+	/// [`render`](Self::render) drew them, in order: those in slots part way
+	/// along their glide while a reflow is under way, as
+	/// [`arranged`](Self::arranged) otherwise.
+	pub fn placed(&self, scene: &str) -> Option<&[Item]> {
+		self.reflows.get(scene).map(|reflow| reflow.glide.placed())
 	}
 
 	/// Whether a transition is under way.
@@ -615,6 +724,16 @@ impl Compositor {
 				Some(Some(to)) => self.outputs.insert(to.clone(), output),
 				Some(None) => None,
 				None => self.outputs.insert(scene, output),
+			};
+		}
+		// Each scene keeps where its slots were, so two swapping names do
+		// not glide from each other's.
+		let reflows = std::mem::take(&mut self.reflows);
+		for (scene, reflow) in reflows {
+			match renames.get(&scene) {
+				Some(Some(to)) => self.reflows.insert(to.clone(), reflow),
+				Some(None) => None,
+				None => self.reflows.insert(scene, reflow),
 			};
 		}
 	}
@@ -771,14 +890,18 @@ impl Compositor {
 		for output in self.outputs.values_mut() {
 			output.start.get_or_insert(now);
 		}
-		let period = u64::from((self.program.canvas.framerate / THUMBNAIL_RATE).max(1));
+		let framerate = self.program.canvas.framerate;
 		for thumb in self.thumbnails.values_mut() {
+			let period = u64::from((framerate / thumb.detail.rate.max(1)).max(1));
 			thumb.due = !thumb.drawn || (self.renders + thumb.phase).is_multiple_of(period);
 			thumb.drawn = true;
 			thumb.start.get_or_insert(now);
 		}
 		self.renders += 1;
 		self.update(collection, sources, now);
+		// Every draw below reads the scenes as arranged.
+		let staged = self.reflow(collection, sources, now);
+		let collection = &*staged;
 		self.restart(collection, preview_start, program_start);
 		self.paint(collection, now);
 		let thumbnails = self.thumbnail_targets(collection, now);
@@ -930,6 +1053,10 @@ impl Compositor {
 					draw.target(target);
 					draw.picture(target, program.unwrap_or(&self.program.program), fill, fill, 1.0);
 				}
+				Shows::Preview(_) => {
+					draw.target(target);
+					draw.picture(target, &self.preview, fill, fill, 1.0);
+				}
 				Shows::Output(scene) => {
 					let output = outputs.iter().find(|(on, _)| on.0 == Some(scene));
 					let (_, output) = output.expect("an output drawn this render");
@@ -948,6 +1075,53 @@ impl Compositor {
 
 		self.effects.submit(frame);
 		Ok(())
+	}
+
+	/// `collection` with each scene's items in slots where its arrangement
+	/// puts them at `now`, gliding there as a move transition does when a
+	/// slot opens or closes. A slot closes while its source is offline or
+	/// failed in `sources`, and the picture in it is cropped to cover it by
+	/// the size of its newest picture.
+	fn reflow<'a>(&mut self, collection: &'a Collection, sources: &Sources, now: Instant) -> Cow<'a, Collection> {
+		let present = |name: &str| {
+			let feed = sources.get(collection.capture(name));
+			!feed.is_some_and(|feed| matches!(feed.status(), Status::Offline | Status::Failed(_)))
+		};
+		let layers = &self.layers;
+		let size = |name: &str| match collection.nested(name) {
+			Some(Nested::Scene(scene)) => collection
+				.canvas(Some(scene))
+				.map(|canvas| (canvas.width, canvas.height)),
+			Some(Nested::Program) => Some((collection.canvas.width, collection.canvas.height)),
+			None => {
+				let layer = layers.get(collection.capture(name))?;
+				layer.picture.as_ref().map(Picture::size)
+			}
+		};
+		let mut staged = Cow::Borrowed(collection);
+		let mut reflows = HashMap::new();
+		for (index, scene) in collection.scenes.iter().enumerate() {
+			let Some(arranged) = collection.arranged(&scene.name, present, size) else {
+				continue;
+			};
+			let mut reflow = self.reflows.remove(&scene.name).unwrap_or_else(|| Reflow {
+				arranged: Vec::new(),
+				// Only the slots glide, so a layer set free that is being
+				// dragged follows the pointer.
+				glide: Glide::new(REFLOW, |item| item.slot.is_some()),
+			});
+			// Only the slots start a glide: what each shows, whether it is
+			// open, and where.
+			let slotted = arranged.iter().filter(|item| item.slot.is_some());
+			let key = slotted
+				.map(|item| (item.source.clone(), item.visible, item.rect))
+				.collect();
+			staged.to_mut().scenes[index].items = reflow.glide.show(key, &arranged, now).to_vec();
+			reflow.arranged = arranged;
+			reflows.insert(scene.name.clone(), reflow);
+		}
+		self.reflows = reflows;
+		staged
 	}
 
 	/// Pull the newest picture from every source onto the GPU, and forget the
@@ -980,17 +1154,26 @@ impl Compositor {
 					lut: None,
 					overlay: None,
 					error: None,
+					probe: None,
+					holding: false,
 				},
 				None => continue,
 			};
 			layer.source = source.clone();
+			let probed = source.may_go_dark() && !collection.video.get(name).is_some_and(|video| video.expect_dark);
+			match (&layer.probe, probed) {
+				(None, true) => layer.probe = Some(Probe::new(&self.device, &self.queue)),
+				(Some(_), false) => layer.probe = None,
+				_ => {}
+			}
+			// A feed started again, even between two renders, holds nothing
+			// from the one before.
+			if let Some(probe) = &mut layer.probe {
+				probe.follow(feed.generation());
+			}
 			if let Some(taken) = taken {
 				if taken.cleared {
-					// Nothing from before the clear may show, even if the picture
-					// after it fails to draw.
-					layer.cleared = true;
-					layer.raw = None;
-					layer.fresh = true;
+					layer.clear(&self.device, &self.queue);
 				}
 				self.take(name, source, &mut layer, taken.picture, now);
 			}
@@ -1000,7 +1183,43 @@ impl Compositor {
 				.map(|video| video.background)
 				.unwrap_or_default();
 			layer.develop(name, background, &self.device, &self.queue, &self.effects);
+			let live = feed.status() == Status::Live;
+			self.watch(&mut layer, background, live, now);
 			self.layers.insert(name.clone(), layer);
+		}
+	}
+
+	/// Have `layer`'s probe read its newest picture, and draw the probe's last
+	/// good picture in its place while it holds one over the dark. A picture
+	/// cut out of its background is never held, since the good one is not.
+	/// A picture is drawn before it is judged, so black shows until the next
+	/// read, up to [`INTERVAL`](crate::dark::INTERVAL) and its readback:
+	/// judging each one first would hold every capture's picture back by a
+	/// readback, or read every picture, and the maintainer took this bounded
+	/// flash over either on moq-dev/studio#192.
+	/// Without a probe, such as once its warning is turned off, or a picture,
+	/// it holds nothing.
+	fn watch(&mut self, layer: &mut Layer, background: Background, live: bool, now: Instant) {
+		let (Some(probe), Some(raw)) = (&mut layer.probe, &layer.raw) else {
+			if std::mem::take(&mut layer.holding) && background == Background::Keep {
+				layer.picture = layer.raw.as_ref().map(|raw| self.effects.picture(raw));
+			}
+			return;
+		};
+		let prober = self.prober.get_or_insert_with(|| Prober::new(&self.device));
+		probe.step(prober, &self.effects, raw, live, now);
+		match probe.held(now).filter(|_| background == Background::Keep) {
+			Some(held) => {
+				layer.picture = Some(held.clone());
+				layer.holding = true;
+			}
+			None if layer.holding => {
+				layer.holding = false;
+				if background == Background::Keep {
+					layer.picture = layer.raw.as_ref().map(|raw| self.effects.picture(raw));
+				}
+			}
+			None => {}
 		}
 	}
 
@@ -1015,8 +1234,14 @@ impl Compositor {
 			source::Picture::Frame(frame) => {
 				let renderer = match layer.renderer.as_mut() {
 					Some(renderer) => Ok(renderer),
-					None => Renderer::new(&self.device, &self.queue, Default::default())
-						.map(|renderer| layer.renderer.insert(renderer)),
+					None => {
+						// A probe copies each picture it reads.
+						let mut config = moq_video::render::Config::default();
+						if source.may_go_dark() {
+							config.usage = wgpu::TextureUsages::COPY_SRC;
+						}
+						Renderer::new(&self.device, &self.queue, config).map(|renderer| layer.renderer.insert(renderer))
+					}
 				};
 				renderer
 					.and_then(|renderer| renderer.render(&frame))
@@ -1056,6 +1281,9 @@ impl Compositor {
 				layer.error = None;
 				layer.raw = Some(texture);
 				layer.fresh = true;
+				if let Some(probe) = &mut layer.probe {
+					probe.changed();
+				}
 			}
 			Err(err) => {
 				if layer.error.is_none() {
@@ -1187,14 +1415,14 @@ impl Compositor {
 						video.into_iter().flat_map(|video| &video.filters),
 					);
 				}
-				Shows::Program | Shows::Output(_) | Shows::Nothing => {}
+				Shows::Program | Shows::Preview(_) | Shows::Output(_) | Shows::Nothing => {}
 			}
 		}
 		shown
 	}
 
-	/// What `thumbnail` shows this render: a scene on program or drawn for an
-	/// output is sampled from its texture.
+	/// What `thumbnail` shows this render: a scene on program, in preview
+	/// while it is drawn, or drawn for an output is sampled from its texture.
 	fn shows<'a>(&self, collection: &'a Collection, thumbnail: &Thumbnail) -> Shows<'a> {
 		let scene = match thumbnail {
 			Thumbnail::Scene(scene) => scene,
@@ -1210,6 +1438,8 @@ impl Compositor {
 		};
 		if self.program_scene.as_deref() == Some(scene) {
 			Shows::Program
+		} else if self.previewing && self.preview_scene.as_deref() == Some(scene) {
+			Shows::Preview(scene)
 		} else if self.outputs.get(scene).is_some_and(|output| output.draw) {
 			Shows::Output(scene)
 		} else {
@@ -1237,7 +1467,7 @@ impl Compositor {
 			let thumb = self.thumbnails.get_mut(&thumbnail).expect("listed above");
 			let since = now.saturating_duration_since(thumb.start.unwrap_or(now));
 			let canvas = match shows {
-				Shows::Scene(scene) | Shows::Output(scene) => collection.canvas(Some(scene)),
+				Shows::Scene(scene) | Shows::Output(scene) | Shows::Preview(scene) => collection.canvas(Some(scene)),
 				Shows::Program => Some(program),
 				Shows::Source(source) => {
 					let size = match collection.nested(source) {
@@ -1262,7 +1492,7 @@ impl Compositor {
 				thumb.target = None;
 				continue;
 			};
-			let size = thumbnail_size(canvas);
+			let size = thumbnail_size(canvas, thumb.detail.side);
 			let target = match thumb.target.take() {
 				Some(mut target) if (target.texture.width(), target.texture.height()) == size => {
 					target.canvas = canvas;
@@ -1280,7 +1510,7 @@ impl Compositor {
 	/// scene on program, the scene a transition leaves, and the top layer,
 	/// through the scenes they draw, a stinger's clip under way, and each
 	/// mask's, through clones.
-	fn on_air_sources<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
+	pub fn on_air_sources<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
 		let mut shown = self.drawn(collection, self.on_air().map(Some).chain([None]));
 		// Drawn through its source's filters alone.
 		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
@@ -1324,10 +1554,10 @@ fn resize(target: &mut Target, device: &wgpu::Device, effects: &Effects, canvas:
 	}
 }
 
-/// The pixels of a thumbnail of `canvas`: its shape, at most
-/// [`THUMBNAIL_SIDE`] a side, and never larger than the canvas.
-fn thumbnail_size(canvas: Canvas) -> (u32, u32) {
-	let scale = (THUMBNAIL_SIDE as f32 / canvas.width.max(canvas.height) as f32).min(1.0);
+/// The pixels of a thumbnail of `canvas`: its shape, at most `side` a side,
+/// and never larger than the canvas.
+fn thumbnail_size(canvas: Canvas, side: u32) -> (u32, u32) {
+	let scale = (side as f32 / canvas.width.max(canvas.height) as f32).min(1.0);
 	let side = |length: u32| ((length as f32 * scale).round() as u32).max(1);
 	(side(canvas.width), side(canvas.height))
 }
@@ -1408,32 +1638,6 @@ fn stinger(feed: Option<&Feed>, cut: Duration, played: &mut Option<u64>, now: In
 	})))
 }
 
-/// The crop that trims what `crop` leaves of a `size` picture evenly from two
-/// opposite sides to `canvas`'s shape, so it covers the canvas unstretched.
-fn cover(crop: Crop, size: (u32, u32), canvas: &Canvas) -> Crop {
-	let width = size.0 as f32 * (1.0 - crop.left - crop.right);
-	let height = size.1 as f32 * (1.0 - crop.top - crop.bottom);
-	let (shown, wanted) = (width / height, canvas.width as f32 / canvas.height as f32);
-	if !shown.is_finite() || shown <= 0.0 {
-		return Crop::default();
-	}
-	if shown > wanted {
-		let trim = (1.0 - wanted / shown) / 2.0;
-		Crop {
-			left: trim,
-			right: trim,
-			..Crop::default()
-		}
-	} else {
-		let trim = (1.0 - shown / wanted) / 2.0;
-		Crop {
-			top: trim,
-			bottom: trim,
-			..Crop::default()
-		}
-	}
-}
-
 /// How far moving `amount` of `canvas`'s width or height in `direction` goes,
 /// in whole pixels so a moving scene stays sharp and two meet without a seam.
 fn offset(direction: Direction, amount: f32, canvas: &Rect) -> (f32, f32) {
@@ -1462,6 +1666,7 @@ struct Pose {
 	rect: Rect,
 	crop: Crop,
 	opacity: f32,
+	shape: Shape,
 }
 
 impl Pose {
@@ -1471,6 +1676,7 @@ impl Pose {
 			rect: item.rect,
 			crop: collection.crop(item),
 			opacity: 1.0,
+			shape: item.shape,
 		}
 	}
 
@@ -1486,54 +1692,9 @@ impl Pose {
 			},
 			crop: self.crop.toward(&other.crop, progress),
 			opacity: mix(self.opacity, other.opacity),
+			shape: self.shape.toward(&other.shape, progress),
 		}
 	}
-}
-
-/// `old`'s filters `progress` of the way to `new`'s, or `None` if their blend
-/// modes differ or their filters do not pair up by kind, in order, as
-/// [`Filter::toward`] mixes them.
-fn mixed(old: &Item, new: &Item, progress: f32) -> Option<Vec<Filter>> {
-	if old.blend != new.blend || old.filters.len() != new.filters.len() {
-		return None;
-	}
-	let pairs = old.filters.iter().zip(&new.filters);
-	pairs.map(|(old, new)| old.toward(new, progress)).collect()
-}
-
-/// The order to draw a move's visible items in, back to front, as `lead`
-/// stacks them: each slot is an item of `lead`, of `other`, or a pair of
-/// both, as `lead_pairs` and `other_pairs` pair them. An unpaired item of
-/// `other` goes just over the paired item it was over in `other`, or under
-/// every slot if it was under every paired item.
-fn stack(
-	lead: &[Cow<'_, Item>],
-	lead_pairs: &[Option<usize>],
-	other: &[Cow<'_, Item>],
-	other_pairs: &[Option<usize>],
-) -> Vec<(Option<usize>, Option<usize>)> {
-	let mut over: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-	let mut under = None;
-	for index in (0..other.len()).filter(|&index| other[index].visible) {
-		match other_pairs[index] {
-			Some(_) => under = Some(index),
-			None => over.entry(under).or_default().push(index),
-		}
-	}
-	let mut unpaired = |under: Option<usize>| {
-		let items = over.remove(&under).unwrap_or_default();
-		items.into_iter().map(|index| (None, Some(index)))
-	};
-
-	let mut slots: Vec<_> = unpaired(None).collect();
-	for index in (0..lead.len()).filter(|&index| lead[index].visible) {
-		let pair = lead_pairs[index];
-		slots.push((Some(index), pair));
-		if pair.is_some() {
-			slots.extend(unpaired(pair));
-		}
-	}
-	slots
 }
 
 /// Refuse an invalid canvas, or one larger than `device` can hold as a
@@ -1864,6 +2025,7 @@ impl Draw<'_> {
 				crop: item.crop,
 				filters: item.filters.iter().collect(),
 				blend: item.blend,
+				shape: item.shape,
 			};
 			if let Some(prepared) = self.effects.prepare(self.frame, item, &self.library) {
 				self.effects.draw(self.frame, &target.texture, &prepared);
@@ -1900,7 +2062,7 @@ impl Draw<'_> {
 		};
 		let crop = self.collection.video.get(source).map(|video| video.crop);
 		let item = Item {
-			crop: cover(crop.unwrap_or_default(), picture.size(), &canvas),
+			crop: cover(crop.unwrap_or_default(), picture.size(), &Rect::fill(&canvas)),
 			..Item::new(source, Rect::fill(&canvas))
 		};
 		let pose = Pose::of(self.collection, &item);
@@ -1929,6 +2091,7 @@ impl Draw<'_> {
 			crop: collection.crop(&whole),
 			filters: collection.filters(&whole).collect(),
 			blend: whole.blend,
+			shape: whole.shape,
 		};
 		if let Some(prepared) = self.effects.prepare(self.frame, item, &self.library) {
 			self.effects.draw(self.frame, &target.texture, &prepared);
@@ -1984,17 +2147,10 @@ impl Draw<'_> {
 		let resting = items(to.0);
 		let (leaving, entering) = (posed(from), posed(to));
 
-		// Which item of the other scene each visible item pairs with.
-		let mut left = vec![None; leaving.len()];
-		let mut entered = vec![None; entering.len()];
-		for (index, item) in entering.iter().enumerate().filter(|(_, item)| item.visible) {
-			let pair = (0..leaving.len())
-				.find(|&at| left[at].is_none() && leaving[at].visible && leaving[at].source == item.source);
-			if let Some(at) = pair {
-				left[at] = Some(index);
-				entered[index] = Some(at);
-			}
-		}
+		// Which item of the other scene each visible item pairs with: one
+		// showing the same source, through a role.
+		let same = |old: &Item, new: &Item| collection.resolve(&old.source) == collection.resolve(&new.source);
+		let (left, entered) = pair(&leaving, &entering, same);
 
 		// Each slot is an index into `leaving`, `entering`, or both.
 		let slots: Vec<(Option<usize>, Option<usize>)> = if progress < 0.5 {
@@ -2075,6 +2231,7 @@ impl Draw<'_> {
 			crop: pose.crop,
 			filters,
 			blend: item.blend,
+			shape: pose.shape,
 		};
 		self.effects.prepare(self.frame, item, &self.library)
 	}
@@ -2206,7 +2363,7 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
-	use crate::collection::{Blend, MaskMode, Rgba, Scene, Size, Video};
+	use crate::collection::{Arrangement, Blend, MaskMode, Rgba, Scene, Size, Video};
 	use crate::source::test::{Still, context, local, start, until, until_time};
 
 	/// A fade over a second.
@@ -2301,7 +2458,7 @@ mod tests {
 		}
 
 		/// Over sources whose files are in `dir`.
-		async fn with_files(collection: Collection, dir: tempfile::TempDir) -> Self {
+		pub(super) async fn with_files(collection: Collection, dir: tempfile::TempDir) -> Self {
 			let (device, queue) = gpu().await;
 			let (mut context, origin) = context(dir.path());
 			context.output = moq_video::render::output(&device);
@@ -2400,7 +2557,7 @@ mod tests {
 	/// scene stacks it; without one showing, the layered program is the
 	/// program itself.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_published_source_draws_over_the_program() {
 		local(async {
 			let mut collection = collection();
@@ -2418,7 +2575,9 @@ mod tests {
 			assert_eq!(pixel(&layered, 1, 1), RED);
 			assert_eq!(studio.preview(), layered, "preview shows what viewers see");
 			let thumbnail = Thumbnail::Scene(studio.collection.scenes[0].name.clone());
-			studio.compositor.set_thumbnails([thumbnail.clone()]);
+			studio
+				.compositor
+				.set_thumbnails([(thumbnail.clone(), Detail::default())]);
 			studio.render(Instant::now());
 			let texture = studio.compositor.thumbnail(&thumbnail).unwrap().clone();
 			assert_eq!(studio.read(&texture), layered, "its thumbnail shows what viewers see");
@@ -2434,7 +2593,7 @@ mod tests {
 	/// Items draw where their rect says, later items over earlier ones, and
 	/// a hidden item not at all.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn items_draw_in_place_and_in_order() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -2454,9 +2613,41 @@ mod tests {
 		.await;
 	}
 
+	/// A shape cuts its item's corners away, showing what is under them, and
+	/// draws its border inside the outline.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_shape_cuts_the_corners() {
+		local(async {
+			let mut collection = collection();
+			let blue = &mut collection.scenes[0].items[1];
+			blue.rect = Rect::fill(&collection.canvas);
+			blue.shape.corners = [0.5; 4];
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			let program = studio.program();
+			for (x, y) in [(0, 0), (7, 0), (7, 7), (0, 7)] {
+				assert_eq!(pixel(&program, x, y), RED, "the corner at {x},{y} is cut away");
+			}
+			assert_eq!(pixel(&program, 4, 4), BLUE);
+			assert_eq!(pixel(&program, 4, 1), BLUE);
+
+			studio.collection.scenes[0].items[1].shape.border = 2.0;
+			studio.render(Instant::now());
+			let program = studio.program();
+			assert_eq!(pixel(&program, 4, 1), [255; 4], "the border is inside the outline");
+			assert_eq!(pixel(&program, 4, 4), BLUE);
+			assert_eq!(pixel(&program, 0, 0), RED);
+		})
+		.await;
+	}
+
 	/// Straight alpha blends over what is below, and the canvas stays opaque.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn alpha_blends_over_black() {
 		local(async {
 			let mut collection = collection();
@@ -2480,7 +2671,7 @@ mod tests {
 	/// A fade mixes the outgoing and incoming scenes by its progress on the
 	/// program clock, and lands on the incoming scene; preview never fades.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_fade_mixes_by_progress() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -2494,7 +2685,7 @@ mod tests {
 				.unwrap();
 			assert_eq!(studio.compositor.program_scene(), Some("blue"));
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			assert!(studio.compositor.transitioning());
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
@@ -2502,7 +2693,7 @@ mod tests {
 			assert_eq!(pixel(&program, 6, 1), BLUE, "blue under blue stays blue");
 			assert_eq!(pixel(&studio.preview(), 1, 1), BLUE);
 
-			studio.render(start + Duration::from_secs(1));
+			studio.render(start.saturating_add(Duration::from_secs(1)));
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
 		})
@@ -2520,7 +2711,7 @@ mod tests {
 	/// A clone draws its source's picture through its own filters, then the
 	/// item's, and leaves the source it clones as it was.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_clone_draws_through_its_own_filters() {
 		local(async {
 			let mut collection = collection();
@@ -2555,7 +2746,7 @@ mod tests {
 	/// The top layer draws over preview and program, and over a fade rather
 	/// than fading with it.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn the_top_layer_stays_over_a_fade() {
 		local(async {
 			let mut collection = collection();
@@ -2572,13 +2763,13 @@ mod tests {
 				.compositor
 				.transition(&studio.collection, FADE, &studio.sources, start)
 				.unwrap();
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			let actual = pixel(&program, 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "{actual:?}");
 			assert_eq!(pixel(&program, 1, 6), BLUE, "the top layer does not fade");
 			studio.collection.scenes[1].items.clear();
-			studio.render(start + Duration::from_millis(600));
+			studio.render(start.saturating_add(Duration::from_millis(600)));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLUE);
 			assert_eq!(pixel(&studio.preview(), 6, 1), BLACK);
 		})
@@ -2628,7 +2819,7 @@ mod tests {
 	/// not drawn has no picture, one left out is forgotten, and a preview no
 	/// one looks at is not drawn.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_output_draws_its_scene_at_its_own_size() {
 		local(async {
 			let mut collection = tall(vec![Item::new("red", BOTTOM)]);
@@ -2655,14 +2846,14 @@ mod tests {
 				.compositor
 				.transition(&studio.collection, FADE, &studio.sources, start)
 				.unwrap();
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let texture = studio.compositor.output("tall").unwrap().texture().unwrap().clone();
 			let rgba = studio.read(&texture);
 			let faded = rgba[..4].try_into().unwrap();
 			assert!(near(faded, [128, 0, 127, 255]), "the program as it fades: {faded:?}");
 
 			studio.compositor.set_preview(Some("tall".into()));
-			studio.render(start + Duration::from_secs(1));
+			studio.render(start.saturating_add(Duration::from_secs(1)));
 			assert_eq!(studio.compositor.preview_canvas().size(), moq_video::Size::new(4, 8));
 			let preview = studio.compositor.preview().clone();
 			assert_eq!(
@@ -2675,7 +2866,7 @@ mod tests {
 
 			studio.compositor.set_outputs(BTreeMap::from([("tall", false)]));
 			studio.compositor.set_previewing(false);
-			studio.render(start + Duration::from_secs(1));
+			studio.render(start.saturating_add(Duration::from_secs(1)));
 			assert!(studio.compositor.output("tall").unwrap().texture().is_none());
 			assert!(!studio.compositor.previewed());
 			studio.compositor.set_outputs(BTreeMap::new());
@@ -2687,7 +2878,7 @@ mod tests {
 	/// An output's items play their keyframes from when it was first named,
 	/// drawn or not, and from the start again once named anew.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_output_plays_keyframes_from_when_it_went_on() {
 		local(async {
 			let mut slide = slide_in();
@@ -2699,7 +2890,7 @@ mod tests {
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.fit(&studio.collection).unwrap();
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 			let drawn = |studio: &mut Studio| {
 				let texture = studio.compositor.output("tall").unwrap().texture().unwrap().clone();
 				tall_pixels(studio, &texture)
@@ -2723,7 +2914,7 @@ mod tests {
 
 	/// A cut lands at once, even mid-fade, and an empty program is black.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_cut_ends_a_fade() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -2736,11 +2927,11 @@ mod tests {
 				.compositor
 				.transition(&studio.collection, FADE, &studio.sources, start)
 				.unwrap();
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			assert!(!studio.compositor.transitioning());
-			studio.render(start + Duration::from_millis(600));
+			studio.render(start.saturating_add(Duration::from_millis(600)));
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
 		})
 		.await;
@@ -2751,7 +2942,7 @@ mod tests {
 	/// left half on the right; a wipe leaves the outgoing scene in place and
 	/// uncovers the incoming one where the slide brought it in.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_slide_pushes_and_a_wipe_uncovers() {
 		local(async {
 			let mut collection = collection();
@@ -2803,7 +2994,7 @@ mod tests {
 					.compositor
 					.transition(&studio.collection, transition.clone(), &studio.sources, start)
 					.unwrap();
-				studio.render(start + Duration::from_millis(500));
+				studio.render(start.saturating_add(Duration::from_millis(500)));
 				let program = studio.program();
 				let actual = [(1, 1), (1, 6), (6, 1), (6, 6)].map(|(x, y)| pixel(&program, x, y));
 				assert_eq!(actual, expected, "{transition:?}");
@@ -2818,7 +3009,7 @@ mod tests {
 	/// over, and fades in what only the incoming one does, landing on the
 	/// incoming scene as drawn.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_move_glides_what_both_scenes_place() {
 		local(async {
 			let mut collection = collection();
@@ -2862,7 +3053,7 @@ mod tests {
 				.unwrap();
 
 			// Eased halfway, blue is at (2, 2) and both fades are at half.
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert_eq!(pixel(&program, 3, 3), BLUE, "blue in between");
 			assert_eq!(pixel(&program, 5, 4), BLUE);
@@ -2873,12 +3064,190 @@ mod tests {
 			let actual = pixel(&program, 7, 0);
 			assert!(near(actual, [64, 128, 0, 255]), "green half over half red: {actual:?}");
 
-			studio.render(start + duration);
+			studio.render(start.saturating_add(duration));
 			assert!(!studio.compositor.transitioning());
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 6), BLUE);
 			assert_eq!(pixel(&program, 6, 6), BLACK);
 			assert_eq!(pixel(&program, 7, 0), GREEN);
+		})
+		.await;
+	}
+
+	/// A 192x108 scene "slots" arranged in a column: red in the main slot,
+	/// then blue and green tiles.
+	fn slotted() -> Collection {
+		let mut collection = Collection::new();
+		collection.canvas = Canvas {
+			width: 192,
+			height: 108,
+			framerate: 30,
+		};
+		for (name, color) in [("red", RED), ("blue", BLUE), ("green", GREEN)] {
+			let color = Rgba(color);
+			collection.sources.insert(name.into(), Source::Color { color });
+		}
+		let slot = |source: &str, slot| Item {
+			slot: Some(slot),
+			..Item::new(source, Rect::default())
+		};
+		collection.scenes = vec![Scene {
+			items: vec![
+				slot("red", crate::Slot::Main),
+				slot("blue", crate::Slot::Tile),
+				slot("green", crate::Slot::Tile),
+			],
+			..Scene::new("slots")
+		}];
+		collection.validate().unwrap();
+		collection
+	}
+
+	/// The center of `rect`, in whole pixels.
+	fn center(rect: &Rect) -> (usize, usize) {
+		(
+			(rect.x + rect.width / 2.0) as usize,
+			(rect.y + rect.height / 2.0) as usize,
+		)
+	}
+
+	/// A slot closing reflows the others with a glide on the program clock:
+	/// the program, which the encoder reads, shows the closed slot's item
+	/// half faded and the rest part way to their new places halfway through,
+	/// and the new arrangement once it is over.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_slot_closing_reflows_the_rest_with_a_glide() {
+		local(async {
+			let mut studio = Studio::new(slotted()).await;
+			studio.compositor.set_preview(Some("slots".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			let start = Instant::now();
+			studio.render(start);
+			let before = studio.compositor.arranged("slots").unwrap().to_vec();
+			let width = 192;
+			let program = studio.program();
+			for (item, color) in before.iter().zip([RED, BLUE, GREEN]) {
+				let (x, y) = center(&item.rect);
+				assert_eq!(
+					texel(&program, width, x, y),
+					color,
+					"{} where it is arranged",
+					item.source
+				);
+			}
+
+			studio.collection.scenes[0].items[1].visible = false;
+			studio.render(start);
+			let after = studio.compositor.arranged("slots").unwrap().to_vec();
+			assert!(!after[1].visible, "a hidden item takes no slot");
+			assert_ne!(after[2].rect, before[2].rect, "green moves up");
+
+			studio.render(start.saturating_add(REFLOW / 2));
+			let program = studio.program();
+			let (x, y) = center(&before[1].rect);
+			let actual = texel(&program, width, x, y);
+			assert!(
+				near(actual, [0, 0, 128, 255]),
+				"blue half faded where it was: {actual:?}"
+			);
+			let halfway = |from: f32, to: f32| (from + to) / 2.0;
+			let green = Rect {
+				x: halfway(before[2].rect.x, after[2].rect.x),
+				y: halfway(before[2].rect.y, after[2].rect.y),
+				width: halfway(before[2].rect.width, after[2].rect.width),
+				height: halfway(before[2].rect.height, after[2].rect.height),
+			};
+			let (x, y) = center(&green);
+			assert_eq!(texel(&program, width, x, y), GREEN, "green on its way");
+
+			studio.render(start.saturating_add(REFLOW));
+			let program = studio.program();
+			let (x, y) = center(&after[2].rect);
+			assert_eq!(texel(&program, width, x, y), GREEN, "green where it lands");
+			let (x, y) = center(&after[0].rect);
+			assert_eq!(texel(&program, width, x, y), RED);
+			let (x, y) = center(&before[1].rect);
+			assert_ne!(texel(&program, width, x, y), BLUE, "blue gone");
+			assert_eq!(studio.program(), studio.preview(), "the preview glides alike");
+		})
+		.await;
+	}
+
+	/// Two slotted scenes swapping names each keep where their slots were,
+	/// so neither glides from the other's arrangement.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn scenes_swapping_names_keep_their_own_slots() {
+		local(async {
+			let mut collection = slotted();
+			let row = Scene {
+				name: "row".into(),
+				arrangement: crate::Arrangement::Row,
+				..collection.scenes[0].clone()
+			};
+			collection.scenes.push(row);
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.render(start);
+
+			let mut draft = studio.collection.draft("Swap");
+			draft.rename_scene(0, "swapping").unwrap();
+			draft.rename_scene(1, "slots").unwrap();
+			draft.rename_scene(0, "row").unwrap();
+			let edit = draft.finish().unwrap();
+			studio.compositor.rename(&studio.collection.renames(&edit));
+			studio.collection.apply(&edit).unwrap();
+			studio.render(start.saturating_add(REFLOW / 2));
+			for scene in ["slots", "row"] {
+				let arranged = studio.compositor.arranged(scene).unwrap().to_vec();
+				let placed = studio.compositor.placed(scene).unwrap().to_vec();
+				assert_eq!(placed, arranged, "`{scene}` is where it was, with no glide");
+			}
+		})
+		.await;
+	}
+
+	/// A slot whose source is offline is closed, so a guest who leaves
+	/// takes no room, and an unfilled role draws nothing and takes none.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn an_offline_source_and_an_unfilled_role_take_no_slot() {
+		local(async {
+			let mut collection = slotted();
+			let guest = Source::Broadcast { path: "guest".into() };
+			collection.sources.insert("guest".into(), guest);
+			collection.sources.insert("main".into(), Source::Role { source: None });
+			collection.scenes[0].items[0].source = "main".into();
+			collection.scenes[0].items[1].source = "guest".into();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("slots".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.render(Instant::now());
+			let arranged = studio.compositor.arranged("slots").unwrap().to_vec();
+			assert!(!arranged[0].visible, "an unfilled role takes no slot");
+			assert!(!arranged[1].visible, "an offline guest takes no slot");
+			let (_, alone) = Arrangement::Column.places(studio.collection.canvas, false, 1);
+			assert_eq!(arranged[2].rect, alone[0]);
+			let (x, y) = center(&arranged[2].rect);
+			assert_eq!(texel(&studio.program(), 192, x, y), GREEN, "green has the canvas");
+
+			let role = Source::Role {
+				source: Some("red".into()),
+			};
+			studio.collection.sources.insert("main".into(), role);
+			let filled = Instant::now();
+			studio.render(filled);
+			studio.render(filled.saturating_add(REFLOW));
+			let arranged = studio.compositor.arranged("slots").unwrap().to_vec();
+			assert!(arranged[0].visible, "a filled role takes the main slot");
+			let (x, y) = center(&arranged[0].rect);
+			assert_eq!(
+				texel(&studio.program(), 192, x, y),
+				RED,
+				"it shows the source filling it"
+			);
 		})
 		.await;
 	}
@@ -2901,14 +3270,14 @@ mod tests {
 	/// preview, and from when it went on program, for the program, so one scene
 	/// can be at two points of them at once.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn keyframes_play_from_when_the_scene_goes_on() {
 		local(async {
 			let mut collection = collection();
 			collection.scenes[1].items[0].keyframes = slide_in();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("blue".into()));
@@ -2949,7 +3318,7 @@ mod tests {
 	/// Two outputs at either side of a jump, keyframes at the same moment, each
 	/// draw their own side of it rather than share one.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_jump_draws_each_side_on_its_own_output() {
 		local(async {
 			let mut collection = collection();
@@ -2968,7 +3337,7 @@ mod tests {
 			studio.render(start);
 			// Program has reached the jump; preview starts over before it.
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.render(start + jump);
+			studio.render(start.saturating_add(jump));
 			assert_eq!(pixel(&studio.preview(), 1, 6), BLACK, "before the jump");
 			assert_eq!(pixel(&studio.program(), 1, 6), BLUE, "after the jump");
 		})
@@ -2978,7 +3347,7 @@ mod tests {
 	/// A transition starts the incoming scene's keyframes, however long it was
 	/// in preview, while the outgoing scene's carry on.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_transition_starts_the_incoming_keyframes() {
 		local(async {
 			let mut collection = collection();
@@ -2986,7 +3355,7 @@ mod tests {
 			collection.scenes[1].items[0].keyframes = slide_in();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.compositor.set_preview(Some("red".into()));
@@ -3012,7 +3381,7 @@ mod tests {
 	/// incoming scene's halfway, and an item's filter settings mix from one
 	/// scene's to the other's as it goes.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_move_restacks_halfway_and_mixes_filters() {
 		local(async {
 			let mut collection = collection();
@@ -3044,14 +3413,55 @@ mod tests {
 			assert_eq!(pixel(&program, 1, 6), BLUE, "blue over red, as the outgoing scene");
 			assert_eq!(pixel(&program, 6, 1), BLUE);
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert_eq!(pixel(&program, 1, 6), RED, "red over blue from halfway");
 			let actual = pixel(&program, 6, 1);
 			assert!(near(actual, [128, 128, 128, 255]), "half inverted: {actual:?}");
 
-			studio.render(start + duration);
+			studio.render(start.saturating_add(duration));
 			assert_eq!(pixel(&studio.program(), 6, 1), [255, 255, 0, 255]);
+		})
+		.await;
+	}
+
+	/// A move mixes an item's shape from one scene's to the other's, starting
+	/// at the outgoing scene's.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_move_mixes_shapes() {
+		local(async {
+			let mut collection = collection();
+			let fill = Rect::fill(&collection.canvas);
+			let round = Item {
+				shape: Shape {
+					corners: [0.5; 4],
+					..Shape::default()
+				},
+				..Item::new("blue", fill)
+			};
+			collection.scenes[0].items = vec![Item::new("red", fill), Item::new("blue", fill)];
+			collection.scenes[1].items = vec![Item::new("red", fill), round];
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.compositor.set_preview(Some("blue".into()));
+			let duration = Duration::from_secs(1);
+			studio
+				.compositor
+				.transition(
+					&studio.collection,
+					Transition::Move { duration },
+					&studio.sources,
+					start,
+				)
+				.unwrap();
+
+			studio.render(start);
+			assert_eq!(pixel(&studio.program(), 0, 0), BLUE, "square, as the outgoing scene");
+			studio.render(start.saturating_add(duration));
+			assert_eq!(pixel(&studio.program(), 0, 0), RED, "round, as the incoming scene");
 		})
 		.await;
 	}
@@ -3059,7 +3469,7 @@ mod tests {
 	/// A source with no new picture repeats its last one; an edited source never
 	/// shows the old one's picture, and a removed source disappears.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stalled_source_repeats_its_last_picture() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -3093,7 +3503,7 @@ mod tests {
 	/// A layer whose offset alone changes keeps showing its picture, rather
 	/// than going blank until its broadcast sends another.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_layer_moved_on_its_clock_keeps_its_picture() {
 		local(async {
 			let mut collection = collection();
@@ -3168,7 +3578,7 @@ mod tests {
 	/// switches the scenes under it at its cut point into the clip, and ends
 	/// with the clip, which holds its last picture.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stinger_cuts_under_its_clip() {
 		local(async {
 			let mut studio = stinging(crate::media::tests::CLIP).await;
@@ -3215,9 +3625,9 @@ mod tests {
 
 			// Seen through, the outgoing scene shows until the cut point.
 			sting(&mut studio, Filter::Opacity { amount: 0.0 });
-			studio.render(begun + Duration::from_millis(299));
+			studio.render(begun.saturating_add(Duration::from_millis(299)));
 			assert_eq!(pixel(&studio.program(), 1, 1), RED);
-			studio.render(begun + Duration::from_millis(300));
+			studio.render(begun.saturating_add(Duration::from_millis(300)));
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
 			assert!(studio.compositor.transitioning(), "until the clip ends");
 
@@ -3227,7 +3637,11 @@ mod tests {
 				}
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			};
-			assert!(ended >= begun + Duration::from_secs(1), "{:?}", ended - begun);
+			assert!(
+				ended >= begun.saturating_add(Duration::from_secs(1)),
+				"{:?}",
+				ended - begun
+			);
 			studio.render(ended);
 			assert!(!studio.compositor.transitioning());
 			assert_eq!(studio.compositor.stinger(), None);
@@ -3260,7 +3674,7 @@ mod tests {
 	/// A stinger whose clip cannot play cuts at once, as does one whose clip
 	/// is played again from elsewhere, such as the Sources panel.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stinger_that_cannot_play_cuts() {
 		local(async {
 			let mut studio = stinging(b"not a video").await;
@@ -3294,7 +3708,7 @@ mod tests {
 	/// clip ends its stinger at once, and a looping clip stops with its
 	/// stinger after one pass.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stinger_stops_its_clip() {
 		local(async {
 			let mut studio = stinging(crate::media::tests::CLIP).await;
@@ -3306,7 +3720,7 @@ mod tests {
 				.unwrap();
 			loop {
 				studio.render(Instant::now());
-				if Studio::hear(&program, Instant::now() + Duration::from_millis(10)).await > 0.0 {
+				if Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(10))).await > 0.0 {
 					break;
 				}
 			}
@@ -3316,7 +3730,7 @@ mod tests {
 			while feed.status() != Status::Ended {
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			}
-			let heard = Studio::hear(&program, Instant::now() + Duration::from_millis(500)).await;
+			let heard = Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(500))).await;
 			assert_eq!(heard, 0.0, "the clip's sound stops with the cut");
 
 			// Stopped from the Sources panel, the stinger ends with it.
@@ -3350,14 +3764,14 @@ mod tests {
 				.unwrap();
 			while studio.compositor.transitioning() {
 				studio.render(Instant::now());
-				Studio::hear(&program, Instant::now() + Duration::from_millis(10)).await;
+				Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(10))).await;
 			}
 			let feed = studio.sources.get("sting").unwrap();
 			assert!(feed.run().ended.is_some(), "after its first pass");
 			while feed.status() != Status::Ended {
 				kio::clock::sleep(Duration::from_millis(5)).await;
 			}
-			let heard = Studio::hear(&program, Instant::now() + Duration::from_millis(500)).await;
+			let heard = Studio::hear(&program, Instant::now().saturating_add(Duration::from_millis(500))).await;
 			assert_eq!(heard, 0.0, "the loop stops with the stinger");
 		})
 		.await;
@@ -3408,16 +3822,19 @@ mod tests {
 			height: 1920,
 			framerate: 30,
 		};
-		let crop = cover(Crop::default(), (1920, 1080), &portrait);
+		let crop = cover(Crop::default(), (1920, 1080), &Rect::fill(&portrait));
 		let kept = 1.0 - crop.left - crop.right;
 		assert!((kept - (1080.0 / 1920.0) / (1920.0 / 1080.0)).abs() < 1e-6, "{crop:?}");
 		assert_eq!((crop.left, crop.top, crop.bottom), (crop.right, 0.0, 0.0));
 
 		let landscape = Canvas::default();
-		let crop = cover(Crop::default(), (1080, 1920), &landscape);
+		let crop = cover(Crop::default(), (1080, 1920), &Rect::fill(&landscape));
 		assert_eq!((crop.left, crop.right), (0.0, 0.0));
 		assert!(crop.top > 0.0 && crop.top == crop.bottom, "{crop:?}");
-		assert_eq!(cover(Crop::default(), (1920, 1080), &landscape), Crop::default());
+		assert_eq!(
+			cover(Crop::default(), (1920, 1080), &Rect::fill(&landscape)),
+			Crop::default()
+		);
 
 		// A source cropped to a square is trimmed from what it leaves.
 		let square = Crop {
@@ -3425,14 +3842,14 @@ mod tests {
 			right: 0.21875,
 			..Crop::default()
 		};
-		let crop = cover(square, (1920, 1080), &landscape);
+		let crop = cover(square, (1920, 1080), &Rect::fill(&landscape));
 		assert!((crop.top - 0.21875).abs() < 1e-6, "{crop:?}");
 	}
 
 	/// A picture the GPU cannot hold says why, rather than leaving its source
 	/// live and missing from the canvas.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_picture_that_cannot_draw_reports_why() {
 		local(async {
 			let mut collection = collection();
@@ -3462,7 +3879,7 @@ mod tests {
 	/// picture once the model has it, and its whole picture again once kept,
 	/// in its scene or a scene that scene shows.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn removes_the_background() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -3538,11 +3955,129 @@ mod tests {
 		.await;
 	}
 
+	/// A camera that goes dark for a moment draws its last good picture in
+	/// place of the dark, unless its background is removed; dark for
+	/// [`DARK`](crate::dark::DARK), it draws its own again and counts as
+	/// gone dark.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_moment_of_dark_draws_the_last_good_picture() {
+		let (device, queue) = gpu().await;
+		let mut compositor = Compositor::new(&device, &queue, collection().canvas).unwrap();
+		let size = wgpu::Extent3d {
+			width: 64,
+			height: 36,
+			depth_or_array_layers: 1,
+		};
+		let raw = device.create_texture(&wgpu::TextureDescriptor {
+			label: None,
+			size,
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			format: FORMAT,
+			usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+			view_formats: &[],
+		});
+		let show = |rgba: [u8; 4]| {
+			queue.write_texture(
+				raw.as_image_copy(),
+				&rgba.repeat(64 * 36),
+				wgpu::TexelCopyBufferLayout {
+					offset: 0,
+					bytes_per_row: Some(64 * 4),
+					rows_per_image: None,
+				},
+				size,
+			);
+		};
+		let mut layer = Layer {
+			source: Source::Camera { id: None },
+			renderer: None,
+			raw: Some(raw.clone()),
+			fresh: true,
+			cleared: false,
+			matte: None,
+			picture: None,
+			lut: None,
+			overlay: None,
+			error: None,
+			probe: Some(Probe::new(&device, &queue)),
+			holding: false,
+		};
+		let start = Instant::now();
+		let at = |offset: Duration| start.saturating_add(offset);
+		// Each picture is read, then judged on the next watch once the GPU is done.
+		let read = |compositor: &mut Compositor, layer: &mut Layer, rgba, when, background| {
+			show(rgba);
+			layer.probe.as_mut().unwrap().changed();
+			compositor.watch(layer, background, true, when);
+			device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+			compositor.watch(layer, background, true, when);
+		};
+
+		read(&mut compositor, &mut layer, RED, at(Duration::ZERO), Background::Keep);
+		assert!(!layer.holding);
+		let dark = crate::dark::INTERVAL;
+		read(&mut compositor, &mut layer, BLACK, at(dark), Background::Keep);
+		assert!(layer.holding, "the last good picture is drawn");
+		assert_eq!(layer.probe.as_ref().unwrap().dark(at(dark)), None);
+
+		// A cut-out never shows the held picture, which has its background.
+		compositor.watch(&mut layer, Background::Remove, true, at(dark));
+		assert!(!layer.holding);
+		compositor.watch(&mut layer, Background::Keep, true, at(dark));
+		assert!(layer.holding);
+
+		// Turning its warning off draws its own picture again at once, with
+		// no new picture to replace the held one.
+		let probe = layer.probe.take();
+		compositor.watch(&mut layer, Background::Keep, true, at(dark));
+		assert!(!layer.holding, "no probe holds a picture");
+		assert!(layer.picture.is_some());
+		layer.probe = probe;
+		compositor.watch(&mut layer, Background::Keep, true, at(dark));
+		assert!(layer.holding);
+
+		// A clear forgets the last good picture: black after it is drawn
+		// as it is, never the red from before it.
+		let mut cleared = Layer {
+			source: Source::Camera { id: None },
+			renderer: None,
+			raw: Some(raw.clone()),
+			fresh: true,
+			cleared: false,
+			matte: None,
+			picture: None,
+			lut: None,
+			overlay: None,
+			error: None,
+			probe: Some(Probe::new(&device, &queue)),
+			holding: false,
+		};
+		read(&mut compositor, &mut cleared, RED, at(Duration::ZERO), Background::Keep);
+		read(&mut compositor, &mut cleared, BLACK, at(dark), Background::Keep);
+		assert!(cleared.holding, "the red is held over the black");
+		cleared.clear(&device, &queue);
+		compositor.watch(&mut cleared, Background::Keep, true, at(dark));
+		assert!(!cleared.holding, "nothing from before the clear is held");
+		assert!(cleared.picture.is_none(), "nothing from before the clear is drawn");
+		cleared.raw = Some(raw.clone());
+		read(&mut compositor, &mut cleared, BLACK, at(dark * 2), Background::Keep);
+		assert!(!cleared.holding, "the red from before the clear is never held again");
+
+		let gone = dark + crate::dark::DARK;
+		compositor.watch(&mut layer, Background::Keep, true, at(gone));
+		assert!(!layer.holding, "the dark is drawn as it is");
+		assert!(layer.picture.is_some());
+		assert_eq!(layer.probe.as_ref().unwrap().dark(at(gone)), Some(crate::dark::DARK));
+	}
+
 	/// A source that clears its picture, such as a media source played
 	/// again, never shows the cut-out of a picture from before, even when its
 	/// next picture overtakes the clear.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_clear_drops_the_cut_out_in_hand() {
 		let (device, queue) = gpu().await;
 		let effects = Effects::new(&device, &queue, 256, 144);
@@ -3568,6 +4103,8 @@ mod tests {
 			lut: None,
 			overlay: None,
 			error: None,
+			probe: None,
+			holding: false,
 		};
 		let develop = |layer: &mut Layer| layer.develop("replay", Background::Remove, &device, &queue, &effects);
 		let wait = |layer: &mut Layer| {
@@ -3616,7 +4153,7 @@ mod tests {
 	/// Each CSS color filter maps a color as the spec's matrix does, clamping
 	/// after each filter rather than once at the end.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn color_filters_follow_css() {
 		let cases = [
 			(vec![Filter::Grayscale { amount: 1.0 }], [118, 118, 118]),
@@ -3656,7 +4193,7 @@ mod tests {
 	/// A crop trims the picture and stretches the rest over the item: an image
 	/// red on its left half and blue on its right shows blue where red was.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_crop_fills_the_item() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -3688,7 +4225,7 @@ mod tests {
 	/// its edges, as CSS's edge mode none: a blue square bleeds onto the black
 	/// around it by the discrete Gaussian's weights.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blur_spreads_past_the_edges() {
 		local(async {
 			let square = Rect {
@@ -3724,7 +4261,7 @@ mod tests {
 	/// A blur many pixels wide is drawn on halved rasters, still matching the
 	/// Gaussian of a square to within a few levels.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_wide_blur_matches_the_gaussian() {
 		local(async {
 			let mut collection = collection();
@@ -3757,7 +4294,7 @@ mod tests {
 
 	/// A drop shadow is the picture's shape, offset and filled, under it.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_drop_shadow_falls_under() {
 		local(async {
 			let square = Rect {
@@ -3790,7 +4327,7 @@ mod tests {
 	/// A chroma key hides its color and keeps the rest; a luma key hides what
 	/// is out of its range.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn keys_hide_what_they_key() {
 		local(async {
 			let mut collection = collection();
@@ -3836,7 +4373,7 @@ mod tests {
 
 	/// A LUT maps each color through its table, interpolating between points.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_lut_grades() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -3894,7 +4431,7 @@ mod tests {
 	/// A mask keeps the picture where its source is opaque, or bright in
 	/// luminance mode, and an item whose mask has no picture yet draws nothing.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_mask_keeps_what_it_covers() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -3953,7 +4490,7 @@ mod tests {
 	/// transparent texel bleeds into no edge, of a still, an overlay's
 	/// straight paint, or a luminance mask, while the edge still fades.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn scaling_bleeds_no_transparent_color() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -4044,7 +4581,7 @@ mod tests {
 	/// new width, a canvas the GPU cannot hold changes nothing, and a scene
 	/// grown since the last fit is not drawn.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_resize_draws_the_new_canvas() {
 		local(async {
 			let mut collection = collection();
@@ -4122,7 +4659,7 @@ mod tests {
 	/// even when another scene takes its old name in the same edit, and a scene
 	/// the collection lost leaves them.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_renamed_scene_stays_where_it_is() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
@@ -4144,7 +4681,7 @@ mod tests {
 			studio.collection.apply(&edit).unwrap();
 			assert_eq!(studio.compositor.preview_scene(), Some("red"));
 			assert_eq!(studio.compositor.program_scene(), Some("red"));
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let actual = pixel(&studio.program(), 1, 1);
 			assert!(near(actual, [128, 0, 127, 255]), "still fading from red: {actual:?}");
 
@@ -4161,7 +4698,7 @@ mod tests {
 	/// A blend mode mixes an item with what is under it by the CSS formula,
 	/// weighted by the item's opacity.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn blend_modes_mix_with_what_is_under() {
 		let cases = [
 			(Blend::Multiply, 255, [0, 0, 0]),
@@ -4198,7 +4735,7 @@ mod tests {
 	/// An overlay's image, a file beside the scene file, is on the first
 	/// frame that shows the overlay.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_overlay_draws_its_image_on_its_first_frame() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -4232,7 +4769,7 @@ mod tests {
 	/// that frame is drawn, even the first one to show it. This one does not
 	/// restart, so going on program does not start it over.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_overlay_animates_on_the_program_clock() {
 		local(async {
 			let mut collection = collection();
@@ -4261,7 +4798,7 @@ mod tests {
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 
 			for (at, expected) in [(500, [128, 0, 128, 255]), (750, [64, 0, 191, 255]), (2000, BLUE)] {
-				studio.render(start + Duration::from_millis(at));
+				studio.render(start.saturating_add(Duration::from_millis(at)));
 				let program = studio.program();
 				let actual = pixel(&program, 3, 1);
 				assert!(
@@ -4280,7 +4817,7 @@ mod tests {
 	/// included. One that does
 	/// not restart runs on from when it opened.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_overlay_restarts_going_on() {
 		local(async {
 			let mut collection = collection();
@@ -4315,10 +4852,10 @@ mod tests {
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 
-			let previewed = start + Duration::from_secs(2);
+			let previewed = start.saturating_add(Duration::from_secs(2));
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.render(previewed);
-			studio.render(previewed + Duration::from_millis(500));
+			studio.render(previewed.saturating_add(Duration::from_millis(500)));
 			let preview = studio.preview();
 			assert!(
 				near(pixel(&preview, 3, 1), half),
@@ -4327,11 +4864,11 @@ mod tests {
 			);
 			assert_eq!(pixel(&preview, 3, 6), BLUE, "the clock ran on");
 
-			let cut = previewed + Duration::from_secs(3);
+			let cut = previewed.saturating_add(Duration::from_secs(3));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(cut);
 			assert_eq!(pixel(&studio.program(), 3, 1), RED, "on program, from the start");
-			studio.render(cut + Duration::from_millis(500));
+			studio.render(cut.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert!(
 				near(pixel(&program, 3, 1), half),
@@ -4342,7 +4879,7 @@ mod tests {
 
 			// Into preview again, but program shows it, so it runs on in both.
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.render(cut + Duration::from_millis(750));
+			studio.render(cut.saturating_add(Duration::from_millis(750)));
 			let quarter = [64, 0, 191, 255];
 			for (output, picture) in [("program", studio.program()), ("preview", studio.preview())] {
 				let actual = pixel(&picture, 3, 1);
@@ -4353,9 +4890,9 @@ mod tests {
 			studio.collection.top = vec![Item::new("third", fill)];
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
-			studio.render(cut + Duration::from_secs(1));
+			studio.render(cut.saturating_add(Duration::from_secs(1)));
 			studio.compositor.set_preview(Some("blue".into()));
-			studio.render(cut + Duration::from_millis(1100));
+			studio.render(cut.saturating_add(Duration::from_millis(1100)));
 			assert_eq!(pixel(&studio.program(), 3, 1), BLUE, "the top layer's ran on");
 		})
 		.await;
@@ -4365,7 +4902,7 @@ mod tests {
 	/// showing it goes on program, and a preview showing it directly never
 	/// restarts it while program shows it through that scene.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn an_overlay_in_a_nested_scene_restarts_going_on() {
 		local(async {
 			let mut collection = collection();
@@ -4400,12 +4937,12 @@ mod tests {
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(start);
 
-			let cut = start + Duration::from_secs(2);
+			let cut = start.saturating_add(Duration::from_secs(2));
 			studio.compositor.set_preview(Some("blue".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			studio.render(cut);
 			assert_eq!(pixel(&studio.program(), 3, 1), RED, "on program, from the start");
-			studio.render(cut + Duration::from_millis(500));
+			studio.render(cut.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert!(
 				near(pixel(&program, 3, 1), [128, 0, 128, 255]),
@@ -4414,7 +4951,7 @@ mod tests {
 			);
 
 			studio.compositor.set_preview(Some("lower".into()));
-			studio.render(cut + Duration::from_millis(750));
+			studio.render(cut.saturating_add(Duration::from_millis(750)));
 			for (output, picture) in [("program", studio.program()), ("preview", studio.preview())] {
 				let actual = pixel(&picture, 3, 1);
 				assert!(near(actual, [64, 0, 191, 255]), "{output} ran on: {actual:?}");
@@ -4426,7 +4963,7 @@ mod tests {
 	/// A preview never restarts an overlay a stinger under way masks its clip
 	/// with on program, though no scene on air shows it.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stinger_mask_runs_on_under_a_preview() {
 		local(async {
 			let mut studio = stinging(crate::media::tests::CLIP).await;
@@ -4460,7 +4997,7 @@ mod tests {
 			let opened = studio.compositor.layers["third"].overlay.as_ref().unwrap().start();
 
 			studio.compositor.set_preview(Some("third".into()));
-			studio.render(now + Duration::from_millis(100));
+			studio.render(now.saturating_add(Duration::from_millis(100)));
 			assert_eq!(studio.compositor.stinger(), Some("sting"));
 			let overlay = studio.compositor.layers["third"].overlay.as_ref().unwrap();
 			assert_eq!(overlay.start(), opened, "the stinger's mask ran on");
@@ -4471,7 +5008,7 @@ mod tests {
 	/// An overlay a move glides is painted on the program clock while both
 	/// scenes are on air, and drawn where the move has it.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_move_glides_an_overlay() {
 		local(async {
 			let mut collection = collection();
@@ -4508,13 +5045,13 @@ mod tests {
 				)
 				.unwrap();
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let program = studio.program();
 			assert_eq!(pixel(&program, 2, 2), GREEN, "halfway, at (2, 2)");
 			assert_eq!(pixel(&program, 0, 0), BLACK);
 			assert_eq!(pixel(&program, 5, 5), BLACK);
 
-			studio.render(start + duration);
+			studio.render(start.saturating_add(duration));
 			assert_eq!(pixel(&studio.program(), 5, 5), GREEN);
 		})
 		.await;
@@ -4523,7 +5060,7 @@ mod tests {
 	/// When the overlay thread stops, every overlay it held fails, including
 	/// one off air, rather than showing its last paint when cut to.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_stopped_overlay_thread_fails_every_overlay() {
 		local(async {
 			let mut collection = collection();
@@ -4587,7 +5124,7 @@ mod tests {
 	/// picture, and transparent where the scene draws nothing. It is drawn once
 	/// however many items show it, and not at all once nothing drawn does.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_scene_source_draws_its_scene() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4639,7 +5176,7 @@ mod tests {
 	/// a transition under way included, and a scene showing it cannot go on
 	/// program.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_program_source_shows_the_program_on_the_same_frame() {
 		local(async {
 			let mut studio = Studio::new(nesting(vec![Item::new("on air", CORNER)])).await;
@@ -4653,7 +5190,7 @@ mod tests {
 				.unwrap();
 			studio.compositor.set_preview(Some("scene".into()));
 
-			studio.render(start + Duration::from_millis(500));
+			studio.render(start.saturating_add(Duration::from_millis(500)));
 			let faded = pixel(&studio.program(), 1, 1);
 			assert!(near(faded, [128, 0, 127, 255]), "{faded:?}");
 			let preview = studio.preview();
@@ -4677,7 +5214,7 @@ mod tests {
 	/// A scene source showing a scene that shows the program, even through
 	/// another, is drawn after the program, on the same frame.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_scene_showing_the_program_is_drawn_after_it() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4707,7 +5244,7 @@ mod tests {
 	/// then at the moment the scene it lands on is at, as the stacking
 	/// changes.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_move_shows_a_nested_scene_as_the_scene_it_leaves_until_halfway() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4720,7 +5257,7 @@ mod tests {
 			collection.validate().unwrap();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 
 			studio.compositor.set_preview(Some("scene".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
@@ -4756,7 +5293,7 @@ mod tests {
 	/// nested scene, mixes with the backdrop as much as the backdrop covers,
 	/// as CSS does.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blend_mode_over_a_partly_transparent_backdrop_mixes_partly() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4783,7 +5320,7 @@ mod tests {
 	/// on, so preview and program can show it at two moments, each drawn once,
 	/// and once both settle, drawn once for both.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_nested_scene_plays_its_keyframes_from_when_its_scene_goes_on() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4791,7 +5328,7 @@ mod tests {
 			collection.scenes[1].items[0].keyframes = slide_in();
 			let mut studio = Studio::new(collection).await;
 			let start = Instant::now();
-			let at = |millis| start + Duration::from_millis(millis);
+			let at = |millis| start.saturating_add(Duration::from_millis(millis));
 
 			studio.compositor.set_preview(Some("scene".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
@@ -4826,7 +5363,7 @@ mod tests {
 	/// A filter reading around each pixel, such as a blur, reads the nested
 	/// scene drawn this render, not the last one.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blur_reads_the_nested_scene_drawn_now() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4847,7 +5384,7 @@ mod tests {
 	/// A blend mode in a nested scene mixes with what the scene draws under it,
 	/// and where it draws nothing, leaves the picture as it is, as CSS does.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blend_mode_over_nothing_in_a_nested_scene_draws_the_picture() {
 		local(async {
 			let fill = Rect::fill(&collection().canvas);
@@ -4908,21 +5445,23 @@ mod tests {
 	/// first render after it is named until it is left out; one of a scene
 	/// that does not exist shows nothing.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_thumbnail_shows_its_scene_scaled_down_while_shown() {
 		local(async {
 			let mut studio = Studio::new(wide(Blend::Normal)).await;
 			studio.compositor.fit(&studio.collection).unwrap();
 			let wide = Thumbnail::Scene("wide".into());
 			let missing = Thumbnail::Scene("missing".into());
-			studio.compositor.set_thumbnails([wide.clone(), missing.clone()]);
+			studio
+				.compositor
+				.set_thumbnails([wide.clone(), missing.clone()].map(|thumbnail| (thumbnail, Detail::default())));
 			assert!(studio.compositor.thumbnail(&wide).is_none(), "not drawn yet");
 
 			studio.render(Instant::now());
 			let texture = studio.compositor.thumbnail(&wide).expect("drawn").clone();
 			assert_eq!(
 				(texture.width(), texture.height()),
-				(THUMBNAIL_SIDE, THUMBNAIL_SIDE / 2)
+				(Detail::default().side, Detail::default().side / 2)
 			);
 			let rgba = studio.read(&texture);
 			assert_eq!(texel(&rgba, 256, 64, 64), RED);
@@ -4938,14 +5477,16 @@ mod tests {
 	/// Each thumbnail is redrawn a few times a second on the program clock,
 	/// and two named at once on different renders.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn thumbnails_redraw_a_few_times_a_second_on_renders_of_their_own() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
-			let period = (studio.collection.canvas.framerate / THUMBNAIL_RATE) as usize;
+			let period = (studio.collection.canvas.framerate / Detail::default().rate) as usize;
 			assert!(period > 2, "a period long enough to tell the renders apart");
 			let (first, second) = (Thumbnail::Scene("blue".into()), Thumbnail::Scene("red".into()));
-			studio.compositor.set_thumbnails([first.clone(), second.clone()]);
+			studio
+				.compositor
+				.set_thumbnails([first.clone(), second.clone()].map(|thumbnail| (thumbnail, Detail::default())));
 			studio.render(Instant::now());
 			let corner = |studio: &mut Studio, thumbnail: &Thumbnail| {
 				let texture = studio.compositor.thumbnail(thumbnail).unwrap().clone();
@@ -4988,7 +5529,7 @@ mod tests {
 	/// The scene on program is sampled from the program, top layer and all,
 	/// rather than drawn again; a scene off program is drawn alone.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_thumbnail_of_the_scene_on_program_samples_the_program() {
 		local(async {
 			let mut collection = collection();
@@ -5004,7 +5545,9 @@ mod tests {
 			studio.compositor.set_preview(Some("red".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			let (on, off) = (Thumbnail::Scene("red".into()), Thumbnail::Scene("blue".into()));
-			studio.compositor.set_thumbnails([on.clone(), off.clone()]);
+			studio
+				.compositor
+				.set_thumbnails([on.clone(), off.clone()].map(|thumbnail| (thumbnail, Detail::default())));
 			studio.render(Instant::now());
 			let texture = studio.compositor.thumbnail(&on).unwrap().clone();
 			let rgba = studio.read(&texture);
@@ -5016,12 +5559,127 @@ mod tests {
 		.await;
 	}
 
+	/// The scene in preview is sampled from the preview, top layer and all,
+	/// while the preview is drawn, and drawn alone while it is not.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_thumbnail_of_the_scene_in_preview_samples_the_preview() {
+		local(async {
+			let mut collection = collection();
+			let corner = Rect {
+				x: 0.0,
+				y: 0.0,
+				width: 4.0,
+				height: 4.0,
+			};
+			collection.top.push(Item::new("red", corner));
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("red".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.compositor.set_preview(Some("blue".into()));
+			let cued = Thumbnail::Scene("blue".into());
+			studio.compositor.set_thumbnails([(cued.clone(), Detail::default())]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&cued).unwrap().clone();
+			let rgba = studio.read(&texture);
+			assert_eq!(pixel(&rgba, 1, 1), RED, "the top layer, from the preview");
+			assert_eq!(pixel(&rgba, 1, 6), BLUE);
+
+			// Named anew, so this render draws it.
+			studio.compositor.set_previewing(false);
+			studio.compositor.set_thumbnails([]);
+			studio.compositor.set_thumbnails([(cued.clone(), Detail::default())]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&cued).unwrap().clone();
+			let drawn = studio.read(&texture);
+			assert!(drawn.chunks(4).all(|texel| texel == BLUE), "drawn alone");
+		})
+		.await;
+	}
+
+	/// A thumbnail is as large as its detail asks, never larger than its
+	/// scene, and one named twice takes the larger.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_thumbnail_is_as_large_as_its_detail_asks() {
+		local(async {
+			let mut studio = Studio::new(wide(Blend::Normal)).await;
+			studio.compositor.fit(&studio.collection).unwrap();
+			let wide = Thumbnail::Scene("wide".into());
+			let detail = |side| Detail {
+				side,
+				..Detail::default()
+			};
+			studio
+				.compositor
+				.set_thumbnails([(wide.clone(), detail(64)), (wide.clone(), detail(128))]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&wide).unwrap().clone();
+			assert_eq!((texture.width(), texture.height()), (128, 64), "the larger of the two");
+			let rgba = studio.read(&texture);
+			assert_eq!(texel(&rgba, 128, 32, 32), RED);
+			assert_eq!(texel(&rgba, 128, 96, 32), BLUE);
+
+			studio.compositor.set_thumbnails([(wide.clone(), detail(4096))]);
+			studio.render(Instant::now());
+			let texture = studio.compositor.thumbnail(&wide).unwrap();
+			assert_eq!(
+				(texture.width(), texture.height()),
+				(512, 256),
+				"no larger than the scene"
+			);
+		})
+		.await;
+	}
+
+	/// A thumbnail at the program's rate is redrawn every render, while one at
+	/// the default rate waits for its turn.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_thumbnail_at_the_program_rate_redraws_every_render() {
+		local(async {
+			let mut studio = Studio::new(collection()).await;
+			let (live, slow) = (Thumbnail::Scene("blue".into()), Thumbnail::Scene("red".into()));
+			let rate = studio.collection.canvas.framerate;
+			studio.compositor.set_thumbnails([
+				(
+					live.clone(),
+					Detail {
+						rate,
+						..Detail::default()
+					},
+				),
+				(slow.clone(), Detail::default()),
+			]);
+			studio.render(Instant::now());
+			let corner = |studio: &mut Studio, thumbnail: &Thumbnail| {
+				let texture = studio.compositor.thumbnail(thumbnail).unwrap().clone();
+				pixel(&studio.read(&texture), 1, 1)
+			};
+			studio
+				.collection
+				.sources
+				.insert("green".into(), Source::Color { color: Rgba(GREEN) });
+			let fill = Rect::fill(&studio.collection.canvas);
+			for scene in &mut studio.collection.scenes {
+				scene.items = vec![Item::new("green", fill)];
+			}
+			let drivers = studio.sources.sync(&studio.collection);
+			start(&studio.sources, drivers).await;
+			studio.render(Instant::now());
+			assert_eq!(corner(&mut studio, &live), GREEN, "redrawn on the next render");
+			assert_eq!(corner(&mut studio, &slow), RED, "not yet its turn");
+		})
+		.await;
+	}
+
 	/// A source's thumbnail shows its newest picture through its crop and
 	/// filters, at the cropped picture's shape, transparent where it is, and a
 	/// scene source shows its scene so too; one with no picture yet shows
 	/// nothing.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_source_thumbnail_shows_its_picture_through_its_crop_and_filters() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
@@ -5054,7 +5712,9 @@ mod tests {
 			let mut studio = Studio::with_files(collection, dir).await;
 			let thumbnail = |name: &str| Thumbnail::Source(name.into());
 			let names = ["halves", "missing", "red scene"];
-			studio.compositor.set_thumbnails(names.map(thumbnail));
+			studio
+				.compositor
+				.set_thumbnails(names.map(|name| (thumbnail(name), Detail::default())));
 			studio.render(Instant::now());
 			let half = [128, 0, 0, 128];
 			for (name, size) in [("halves", (2, 2)), ("red scene", (4, 8))] {
@@ -5072,13 +5732,13 @@ mod tests {
 	/// A blend mode in a thumbnail smaller than its scene mixes with what is
 	/// under it there.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
 	async fn a_blend_mode_draws_in_a_thumbnail_smaller_than_its_scene() {
 		local(async {
 			let mut studio = Studio::new(wide(Blend::Multiply)).await;
 			studio.compositor.fit(&studio.collection).unwrap();
 			let wide = Thumbnail::Scene("wide".into());
-			studio.compositor.set_thumbnails([wide.clone()]);
+			studio.compositor.set_thumbnails([(wide.clone(), Detail::default())]);
 			studio.render(Instant::now());
 			let texture = studio.compositor.thumbnail(&wide).unwrap().clone();
 			let rgba = studio.read(&texture);
@@ -5281,7 +5941,8 @@ mod bench {
 				let scene = studio.collection.scenes[0].name.clone();
 				studio.compositor.set_preview(Some(scene));
 				studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
-				let thumbnails = (0..shown).map(|scene| Thumbnail::Scene(format!("scene {scene}")));
+				let thumbnails =
+					(0..shown).map(|scene| (Thumbnail::Scene(format!("scene {scene}")), Detail::default()));
 				studio.compositor.set_thumbnails(thumbnails);
 
 				let (mut total, mut worst, mut ran) = (Duration::ZERO, Duration::ZERO, (0, 0));
@@ -5302,6 +5963,89 @@ mod bench {
 				let (passes, copies) = ran;
 				let mean = total / FRAMES;
 				println!("{shown:>10} {mean:>7.2?} {worst:>7.2?} {passes:>6} {copies:>6}");
+			}
+		})
+		.await;
+	}
+
+	/// What a multiview's 4x4 grid costs: eight scenes and eight sources, each
+	/// source a 1080p picture, every scene placing four of them. The scene on
+	/// program and the one cued are redrawn every render, the rest at `rest`
+	/// times a second, all at `side` pixels; none is the program and preview
+	/// alone. Prints the mean and worst frame, and the render passes and
+	/// texture copies of the worst.
+	#[tokio::test]
+	#[ignore = "a benchmark; run by hand on a GPU"]
+	async fn multiview() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let mut collection = Collection::new();
+			let canvas = collection.canvas;
+			for index in 0..8u8 {
+				let picture = image::RgbaImage::from_fn(canvas.width, canvas.height, |x, y| {
+					image::Rgba([(x / 8) as u8 ^ index, (y / 8) as u8, index * 30, 255])
+				});
+				let path = format!("picture {index}.png");
+				picture.save(dir.path().join(&path)).unwrap();
+				collection
+					.sources
+					.insert(format!("picture {index}"), Source::Image { path: path.into() });
+			}
+			let quarter = |at: usize| Rect {
+				x: (at % 2) as f32 * canvas.width as f32 / 2.0,
+				y: (at / 2) as f32 * canvas.height as f32 / 2.0,
+				width: canvas.width as f32 / 2.0,
+				height: canvas.height as f32 / 2.0,
+			};
+			collection.scenes = (0..8)
+				.map(|scene| crate::Scene {
+					items: (0..4)
+						.map(|at| Item::new(format!("picture {}", (scene + at) % 8), quarter(at)))
+						.collect(),
+					..crate::Scene::new(format!("scene {scene}"))
+				})
+				.collect();
+			collection.validate().unwrap();
+
+			let mut studio = Studio::with_files(collection, dir).await;
+			studio.compositor.set_preview(Some("scene 0".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			studio.compositor.set_preview(Some("scene 1".into()));
+			let framerate = canvas.framerate;
+			println!("  side rest    mean   worst passes copies");
+			for (side, rest) in [(0, 0), (256, 5), (720, 5), (720, 10), (720, 30), (1080, 10)] {
+				let tiles = (0..8)
+					.map(|scene| {
+						let rate = if scene < 2 { framerate } else { rest };
+						(Thumbnail::Scene(format!("scene {scene}")), Detail { side, rate })
+					})
+					.chain((0..8).map(|source| {
+						let detail = Detail { side, rate: rest };
+						(Thumbnail::Source(format!("picture {source}")), detail)
+					}));
+				studio.compositor.set_thumbnails([]);
+				if side > 0 {
+					studio.compositor.set_thumbnails(tiles);
+				}
+
+				let (mut total, mut worst, mut ran) = (Duration::ZERO, Duration::ZERO, (0, 0));
+				for frame in 0..FRAMES * 2 {
+					let start = Instant::now();
+					studio.render(Instant::now());
+					studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+					let took = Instant::now().saturating_duration_since(start);
+					if frame < FRAMES {
+						continue;
+					}
+					total += took;
+					if took > worst {
+						worst = took;
+						ran = studio.compositor.effects.ran;
+					}
+				}
+				let (passes, copies) = ran;
+				let mean = total / FRAMES;
+				println!("{side:>6} {rest:>4} {mean:>7.2?} {worst:>7.2?} {passes:>6} {copies:>6}");
 			}
 		})
 		.await;

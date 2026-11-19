@@ -17,9 +17,9 @@ reach the studio as [private panels](/quest/m1/panels.md), any web page shown
 beside the show and never in it.
 
 This README's own work, once every child has merged: `README.md`'s Panels
-section is rewritten around the pages, with a picture of each from the
-[screenshots](/quest/m0/ux/shots.md), and the maintainer runs one real show
-start to finish on the finished UI.
+section is rewritten around the pages, with a picture of each from
+`just shots`, and the maintainer runs one real show start to finish on the
+finished UI.
 
 ## Plan
 
@@ -30,6 +30,9 @@ pages drawn at 1440x900, each frame rendered beside it as
 tone. The app is native, so a child matches them in what is where and how it
 reads, not pixel for pixel, and a child that has to depart from one changes
 the mock-up in the same PR.
+Each child adds a view to `just shots` (the table in
+`rs/moq-studio/src/shots.rs`) for every page and state it builds, and its PR
+shows those pictures beside the frames they implement.
 
 ![LIVE](/quest/m0/ux/mock/shell-live.webp)
 
@@ -62,9 +65,11 @@ the mock-up in the same PR.
 - **Formats:** ✅ one format per show in m0, landscape or portrait, and the
   layout follows it. [Both at once](/quest/m1/dual-format.md) is m1 (rejected:
   designing every m0 page for two pictures).
-- **Layout follows the picture:** the picture gets the largest rectangle the
-  window allows, and the scenes and the sound take whichever side is left
-  over. See the portrait and half-screen frames.
+- **Layout follows the picture:** ✅ the picture is larger than any other
+  part of the window but the title bar, as large as the window allows, and
+  the scenes and the sound take whichever side is left over (rejected: the
+  largest rectangle, which a full-width title bar outsizes beside a portrait
+  picture in a narrow window). See the portrait and half-screen frames.
 - **Toolkit:** ✅ egui draws the views, without `egui_dock` (rejected:
   Slint; defer until a Slint release takes femtovg 0.28). A spike of the LIVE
   page in both ([moq-dev/studio#126](https://github.com/moq-dev/studio/pull/126))
@@ -72,8 +77,16 @@ the mock-up in the same PR.
   as released and 3 to 5 ms with femtovg's pipeline cache patched. Patched
   Slint also made the program render about four times slower, and Slint's
   licenses require GPLv3 or attribution with an embedded ban. egui's gaps
-  (SVG icons, gradients) are painter work the [kit](/quest/m0/ux/kit.md)
-  owns.
+  (SVG icons, gradients) are painter work, done in the kit
+  (`rs/moq-studio/src/kit`).
+- **Color:** ✅ one shared accent (`kit::ACCENT`, `--accent` in
+  `mock/kit.css`), blue until proper branding replaces that one value, for
+  what is on air (the ON AIR tag, the tally frame, the live control) and for
+  selection, toggles, and sliders (rejected: a separate token for on air).
+  Red is errors alone, a clipping meter among them; amber is cued, off air,
+  muted, and degraded (rejected: red for the program, as hardware switchers
+  do; red or amber for both a mute and a clip). Decided by the maintainer in
+  [moq-dev/studio#164](https://github.com/moq-dev/studio/pull/164#issuecomment-6887308961).
 - **Milestones:** ✅ redesigning what exists is m0, here. Features that do not
   exist yet are [m1](/quest/m1/README.md), and three more are
   [m2](/quest/m2/README.md) (rejected: all in m0; all in m1).
@@ -112,7 +125,8 @@ quest links its own.
 
 - Editing the live picture, with layers beside it: Meld Studio and StreamYard,
   which stay safe by constraining what a click can do.
-- Cue and take, red for program and amber for preview: hardware switchers.
+- Cue and take, a tally for program and amber for preview: hardware switchers,
+  which draw the program red where this draws it in the accent.
   vMix and OBS Studio Mode show the cost of the split this plan rejects.
 - Selection handles, smart guides, a toolbar on the selected thing, and an
   inspector that follows the selection: Figma and Keynote.
@@ -126,7 +140,9 @@ quest links its own.
 
 An agent can prove a page matches its mock-up's layout, that nothing clips at
 any window size, and what a frame costs. It cannot judge these, so each child's
-PR hands them to the maintainer as `## Waiting` with what to look at:
+PR adds a follow-up quest for the maintainer to try the page, such as
+[Try the LIVE page](/quest/m0/ux/try-live.md), with a `Maintainer:` item saying
+what to look at, rather than waiting on it:
 
 - **Taste:** whether the page reads as bold and calm at once. The PR shows its
   screenshots beside the mock-up frames.
@@ -141,10 +157,10 @@ PR hands them to the maintainer as `## Waiting` with what to look at:
   credentials, and ending it.
 - **Other apps in front:** hotkeys, and later the mini controller, while a
   full-screen game has focus.
-- **Readability:** contrast, and red against amber for a color-blind reader.
+- **Readability:** contrast, and the accent, amber, and red told apart by a
+  color-blind reader.
 
 ## Related
 
 - [m1](/quest/m1/README.md) - the features that follow the redesign
 - [Destinations](/quest/m0/destinations.md) - RTMP and WHIP rows in the go-live sheet this epic builds
-- [Wayland display and window sources](/quest/m0/wayland-sources.md) - the system picker the Add page opens

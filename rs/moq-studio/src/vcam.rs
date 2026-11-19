@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Context;
-use moq_scene::{Canvas, wgpu};
+use moq_scene::Canvas;
 use moq_video::render::readback::{Pending, Readback};
 
 #[cfg(all(target_os = "linux", feature = "pipewire"))]

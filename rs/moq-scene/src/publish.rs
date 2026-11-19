@@ -13,12 +13,23 @@
 //! something in the studio subscribes to it, such as a recording.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
+
+/// The track-name suffix a video rendition of `codec` is published under, or
+/// an error for a codec the studio does not publish.
+pub fn suffix(codec: &hang::catalog::VideoCodec) -> Result<&'static str, Error> {
+	match codec {
+		hang::catalog::VideoCodec::H264(_) => Ok(".avc3"),
+		hang::catalog::VideoCodec::H265(_) => Ok(".hev1"),
+		other => Err(Error::Unsupported(format!(
+			"{other} is not a codec the studio publishes"
+		))),
+	}
+}
 
 /// The local catalog's own root section, namespaced as hang asks of
 /// application sections.
@@ -53,29 +64,152 @@ impl Section {
 /// The catalog of the program's broadcast, or of the sources' local one.
 pub type Catalog = moq_mux::catalog::Producer<Ext>;
 
-/// How many video encoders are open. Each holds a session on a hardware
-/// encoder, which a GPU caps, such as at 8 on a GeForce card.
-#[derive(Clone, Debug, Default)]
-pub struct Sessions(Arc<AtomicUsize>);
+/// The video encoders open, each holding a session on a hardware encoder,
+/// which a GPU caps, such as at 8 on a GeForce card, refusing an open past it.
+///
+/// The program's encoders come first: one the GPU refuses
+/// [reclaims](Self::reclaim) the sessions of the sources' replay encoders,
+/// those open only so a replay of a source on program has its recent past.
+#[derive(Clone, Debug)]
+pub struct Sessions(Arc<tokio::sync::watch::Sender<State>>);
+
+#[derive(Clone, Copy, Debug, Default)]
+struct State {
+	open: usize,
+	/// Those of `open` held by a replay encoder, which the program may take.
+	spare: usize,
+	/// How many encoders have closed, so one refused waits for any given back
+	/// after it tried, however many are open by then.
+	closed: u64,
+	/// The program's reclaims under way: while any is, a replay encoder
+	/// closes and none opens.
+	reclaims: usize,
+	/// Refuse an open past this many, as a capped GPU does.
+	cap: Option<usize>,
+}
+
+impl Default for Sessions {
+	fn default() -> Self {
+		Self(Arc::new(tokio::sync::watch::Sender::new(State::default())))
+	}
+}
 
 impl Sessions {
-	/// How many encoders are open now.
-	pub fn open(&self) -> usize {
-		self.0.load(Ordering::Relaxed)
+	/// Sessions that refuse an encoder past `cap` open at once, as a GPU with
+	/// that cap does, to stand in for one on a machine without it.
+	pub fn capped(cap: usize) -> Self {
+		let state = State {
+			cap: Some(cap),
+			..Default::default()
+		};
+		Self(Arc::new(tokio::sync::watch::Sender::new(state)))
 	}
 
-	fn hold(&self) -> Session {
-		self.0.fetch_add(1, Ordering::Relaxed);
-		Session(self.clone())
+	/// Whether these stand in for a capped GPU, made by [`capped`](Self::capped).
+	pub fn is_capped(&self) -> bool {
+		self.0.borrow().cap.is_some()
+	}
+
+	/// How many encoders are open now.
+	pub fn open(&self) -> usize {
+		self.0.borrow().open
+	}
+
+	/// How many of those are the sources' replay encoders, which a
+	/// [reclaim](Self::reclaim) would close.
+	pub fn spare(&self) -> usize {
+		self.0.borrow().spare
+	}
+
+	/// Close every replay encoder and open none until the returned guard
+	/// drops, so the program's encoder can open in their sessions. A replay
+	/// starts over once its encoder reopens, which waits for a session given
+	/// back if the GPU refuses it.
+	pub fn reclaim(&self) -> Reclaim {
+		self.0.send_modify(|state| state.reclaims += 1);
+		Reclaim(self.clone())
+	}
+
+	/// Count a session before its encoder asks the GPU for one, so the program
+	/// sees a replay's session, `spare`, while it is still opening. A replay's
+	/// is refused while a reclaim is under way.
+	fn hold(&self, spare: bool) -> Result<Session, Error> {
+		let mut refused = None;
+		self.0.send_if_modified(|state| match state.cap {
+			_ if spare && state.reclaims > 0 => {
+				refused = Some(Error::Reclaimed);
+				false
+			}
+			Some(cap) if state.open >= cap => {
+				refused = Some(Error::Sessions(cap));
+				false
+			}
+			_ => {
+				state.open += 1;
+				state.spare += usize::from(spare);
+				true
+			}
+		});
+		match refused {
+			Some(err) => Err(err),
+			None => Ok(Session {
+				sessions: self.clone(),
+				spare,
+				opened: false,
+			}),
+		}
+	}
+}
+
+/// The program's claim on the replay encoders' sessions, from
+/// [`Sessions::reclaim`] until dropped.
+pub struct Reclaim(Sessions);
+
+impl Reclaim {
+	/// Wait until every replay encoder has closed.
+	pub async fn closed(&self) {
+		let mut state = (self.0).0.subscribe();
+		// Fails only once the sender drops, which this holds.
+		let _ = state.wait_for(|state| state.spare == 0).await;
+	}
+}
+
+impl Drop for Reclaim {
+	fn drop(&mut self) {
+		(self.0).0.send_modify(|state| state.reclaims -= 1);
 	}
 }
 
 /// One open encoder's place in its [`Sessions`], given back when dropped.
-struct Session(Sessions);
+pub struct Session {
+	sessions: Sessions,
+	/// Held by a replay encoder.
+	spare: bool,
+	/// An encoder opened in it, rather than failing to: only then does it
+	/// give a session back that one refused could take.
+	opened: bool,
+}
+
+impl Session {
+	fn set_spare(&mut self, spare: bool) {
+		if self.spare != spare {
+			self.spare = spare;
+			self.sessions.0.send_modify(|state| match spare {
+				true => state.spare += 1,
+				false => state.spare -= 1,
+			});
+		}
+	}
+}
 
 impl Drop for Session {
 	fn drop(&mut self) {
-		(self.0).0.fetch_sub(1, Ordering::Relaxed);
+		let Self { spare, opened, .. } = *self;
+		self.sessions.0.send_modify(|state| {
+			state.open -= 1;
+			state.spare -= usize::from(spare);
+			state.closed += u64::from(opened);
+		});
 	}
 }
 
@@ -172,24 +306,31 @@ impl Publish {
 		});
 	}
 
-	/// Publish each source `published` names as a broadcast of its own at
-	/// `<base>/<name>` on `origin`, as long as it stays named, until
-	/// `published` closes: its tracks are copied in, and its catalog published
-	/// there on the program's clock, so a [composition](crate::composition)
-	/// lists it at offset zero. Reading its tracks keeps each source encoding
-	/// while it is published. Each copied audio or video track claims its
-	/// bitrate from `bandwidth` while subscribed, as the program's tracks do.
-	pub async fn forward(
-		&self,
-		mut published: tokio::sync::watch::Receiver<BTreeSet<String>>,
-		origin: moq_net::origin::Producer,
-		base: moq_net::Path,
-		bandwidth: moq_net::bandwidth::Allocator,
-	) -> Result<(), Error> {
+	/// Publish each source `forward.published` names as a broadcast of its
+	/// own at `<base>/<name>` on `origin`, as long as it stays named, until
+	/// `published` closes or `stop` is dropped: its tracks are copied in, and
+	/// its catalog published there on the program's clock, so a
+	/// [composition](crate::composition) lists it at offset zero. Reading its
+	/// tracks keeps each source encoding while it is published. Each copied
+	/// audio or video track claims its bitrate from `bandwidth` while
+	/// subscribed, as the program's tracks do. A copied track that ends, once
+	/// its source is no longer named or forwarding stops, is finished after
+	/// what it copied, and then its catalog, so its viewers see it end rather
+	/// than cut off; this returns once every one has.
+	pub async fn forward(&self, forward: Forward) -> Result<(), Error> {
+		let Forward {
+			mut published,
+			origin,
+			base,
+			bandwidth,
+			mut stop,
+		} = forward;
 		let mut updates = self.catalog.consume()?;
 		let mut local = self.catalog.snapshot();
-		// Each source's broadcast, by name, finished once dropped.
+		// Each source's broadcast, by name.
 		let mut broadcasts: BTreeMap<String, Independent> = BTreeMap::new();
+		// The broadcasts of sources no longer published, still finishing.
+		let mut retiring: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 		loop {
 			let listed: BTreeMap<String, hang::Catalog> = {
 				let published = published.borrow_and_update();
@@ -197,7 +338,17 @@ impl Publish {
 				let sources = sources.filter(|(name, _)| published.contains(*name));
 				sources.map(|(name, source)| (name.clone(), source.clone())).collect()
 			};
-			broadcasts.retain(|name, _| listed.contains_key(name));
+			retiring.retain(|retired| !retired.is_finished());
+			let gone: Vec<String> = broadcasts
+				.keys()
+				.filter(|name| !listed.contains_key(*name))
+				.cloned()
+				.collect();
+			for name in gone {
+				if let Some(independent) = broadcasts.remove(&name) {
+					retiring.push(tokio::spawn(independent.retire()));
+				}
+			}
 			for (name, source) in listed {
 				let independent = match broadcasts.entry(name.clone()) {
 					std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -213,7 +364,8 @@ impl Publish {
 				};
 				if let Err(err) = independent.sync(&name, &source, self, &bandwidth) {
 					tracing::warn!(source = %name, %err, "cannot publish a source independently");
-					broadcasts.remove(&name);
+					let independent = broadcasts.remove(&name).expect("synced above");
+					retiring.push(tokio::spawn(independent.retire()));
 				}
 			}
 
@@ -223,7 +375,16 @@ impl Publish {
 					None => break,
 				},
 				changed = published.changed() => if changed.is_err() { break },
+				_ = stop.changed() => break,
 			}
+		}
+		// Each finished after what it copied, so the relay holds every
+		// track's end before its broadcast goes.
+		for independent in broadcasts.into_values() {
+			independent.retire().await;
+		}
+		for retired in retiring {
+			let _ = retired.await;
 		}
 		Ok(())
 	}
@@ -254,13 +415,29 @@ impl Publish {
 	}
 }
 
+/// What [`Publish::forward`] publishes into, and how long.
+pub struct Forward {
+	/// The names of the sources to publish.
+	pub published: tokio::sync::watch::Receiver<BTreeSet<String>>,
+	/// Where each source's broadcast is announced.
+	pub origin: moq_net::origin::Producer,
+	/// The path each source's broadcast is beneath, under its name.
+	pub base: moq_net::Path,
+	/// What each copied audio or video track claims its bitrate from.
+	pub bandwidth: moq_net::bandwidth::Allocator,
+	/// Forwarding stops once its sender is dropped.
+	pub stop: tokio::sync::watch::Receiver<()>,
+}
+
 /// A source published independently: its broadcast, announced once its
 /// catalog lists what it carries, and the copy of each of its tracks, by
-/// name, aborted once dropped.
+/// name, with what stops it, finishing its track, once dropped.
 struct Independent {
 	route: moq_net::origin::Route,
 	catalog: moq_mux::catalog::Producer,
-	copies: BTreeMap<String, tokio::task::JoinHandle<()>>,
+	copies: BTreeMap<String, (tokio::task::JoinHandle<()>, tokio::sync::watch::Sender<()>)>,
+	/// The copies of tracks no longer listed, still finishing them.
+	retiring: Vec<tokio::task::JoinHandle<()>>,
 	announced: bool,
 }
 
@@ -283,13 +460,14 @@ impl Independent {
 			route,
 			catalog,
 			copies: BTreeMap::new(),
+			retiring: Vec::new(),
 			announced: false,
 		})
 	}
 
 	/// Carry what `source`, the local catalog's entry for the source called
 	/// `name`, lists: copy each track it names from `publish`'s local
-	/// broadcast, stop copying each it no longer does, and list them.
+	/// broadcast, finish each it no longer does, and list them.
 	fn sync(
 		&mut self,
 		name: &str,
@@ -298,13 +476,19 @@ impl Independent {
 		bandwidth: &moq_net::bandwidth::Allocator,
 	) -> Result<(), Error> {
 		let tracks: BTreeMap<String, Option<(moq_net::bandwidth::Rate, bool)>> = tracks(source).collect();
-		self.copies.retain(|track, copy| {
-			let keep = tracks.contains_key(track);
-			if !keep {
-				copy.abort();
+		// Its stopper dropped, a copy finishes its track on its own.
+		self.retiring.retain(|copy| !copy.is_finished());
+		let gone: Vec<String> = self
+			.copies
+			.keys()
+			.filter(|track| !tracks.contains_key(*track))
+			.cloned()
+			.collect();
+		for track in gone {
+			if let Some((copy, _stopper)) = self.copies.remove(&track) {
+				self.retiring.push(copy);
 			}
-			keep
-		});
+		}
 		for (track, rate) in tracks {
 			if self.copies.contains_key(&track) {
 				continue;
@@ -316,8 +500,15 @@ impl Independent {
 				grants: publish.grants.clone(),
 				source: name.to_string(),
 			});
-			let copy = copy(publish.consume(), self.route.broadcast().clone(), track.clone(), grant);
-			self.copies.insert(track, tokio::spawn(copy));
+			let (stopper, stopped) = tokio::sync::watch::channel(());
+			let copy = copy(
+				publish.consume(),
+				self.route.broadcast().clone(),
+				track.clone(),
+				grant,
+				stopped,
+			);
+			self.copies.insert(track, (tokio::spawn(copy), stopper));
 		}
 		self.catalog.mutate(|root| {
 			root.video = source.video.clone();
@@ -330,12 +521,14 @@ impl Independent {
 		}
 		Ok(())
 	}
-}
 
-impl Drop for Independent {
-	fn drop(&mut self) {
-		for copy in self.copies.values() {
-			copy.abort();
+	/// Finish each copied track after what it copied, then the catalog, and
+	/// take the broadcast down.
+	async fn retire(mut self) {
+		let copies = std::mem::take(&mut self.copies);
+		let copies = copies.into_values().map(|(copy, _stopper)| copy);
+		for copy in copies.chain(std::mem::take(&mut self.retiring)) {
+			let _ = copy.await;
 		}
 		// Fails only once the catalog failed, which ended its tracks already.
 		let _ = self.catalog.finish();
@@ -394,15 +587,21 @@ impl Drop for Granted {
 }
 
 /// Copy the local track `name` into `broadcast`, under the same name, group
-/// by group, until it ends. A failure ends the copy, failed, with the reason.
+/// by group, until it ends or `stop`'s sender is dropped, when the copy
+/// finishes the group it is on and then its track. A failure ends the copy,
+/// failed, with the reason.
 async fn copy(
 	local: moq_net::broadcast::Consumer,
 	broadcast: moq_net::broadcast::Producer,
 	name: String,
 	grant: Option<Grant>,
+	mut stop: tokio::sync::watch::Receiver<()>,
 ) {
 	let copied = async {
-		let mut track = local.track(&name)?.subscribe(None).await?;
+		let mut track = tokio::select! {
+			track = async { local.track(&name)?.subscribe(None).await } => track?,
+			_ = stop.changed() => return Ok(()),
+		};
 		let out = broadcast.create_track(name.clone(), track.info().clone())?;
 		// Held for as long as the copy runs. A video's grant is what its source
 		// encodes at, so the source follows the connection as the program does.
@@ -420,16 +619,45 @@ async fn copy(
 			}
 		});
 		let result: Result<(), moq_net::Error> = async {
-			while let Some(mut group) = track.recv_group().await? {
-				let mut copy = out.create_group(moq_net::group::Info {
-					sequence: group.sequence,
-				})?;
-				while let Some(frame) = group.read_frame().await? {
+			// Past the last group copied, from where a skip the source declared
+			// is carried over.
+			let mut below = 0;
+			'groups: loop {
+				let group = tokio::select! {
+					group = track.recv_group() => group?,
+					_ = stop.changed() => break,
+				};
+				let Some(mut group) = group else { break };
+				// Creating a group says nothing of the starts below it, so the
+				// copy repeats the source's skips: one before its first group
+				// marks the encoder's first, and one between groups says the
+				// media runs on across them.
+				if below < group.start && track.is_skipped(below..group.start) {
+					out.skip_groups(below..group.start);
+				}
+				below = below.max(group.start + 1);
+				let mut copy = out.create_group(moq_net::group::Info { start: group.start })?;
+				loop {
+					let frame = tokio::select! {
+						frame = group.read_frame() => frame?,
+						// The group ends at what it holds, where the source
+						// has not said.
+						_ = stop.changed() => {
+							drop(copy.finish()?);
+							break 'groups;
+						}
+					};
+					let Some(frame) = frame else { break };
 					copy.write_frame(frame.timestamp, frame.payload)?;
 				}
-				copy.finish()?;
+				// The copy ends where the source ended its group, when it said,
+				// so a paused source's last picture ages out of the copy too.
+				match group.end() {
+					Some(end) => drop(copy.finish_at(end)?),
+					None => drop(copy.finish()?),
+				}
 			}
-			out.finish()
+			out.clone().finish().map(drop)
 		}
 		.await;
 		if let Err(err) = &result {
@@ -514,7 +742,7 @@ impl<'a> Listing<'a> {
 		while let Some(mut catalog) = updates.next().await? {
 			// Media timing is the root's: the one clock, and the join interval an
 			// HLS export numbers its segments on.
-			catalog.media = Default::default();
+			catalog.sync = Default::default();
 			// The claim is checked inside the mutation, so a newer source's
 			// writes, made under the same lock, are never overwritten.
 			studio.mutate(|root| {
@@ -553,11 +781,11 @@ impl Drop for Listing<'_> {
 /// way a pipelined hardware backend does.
 pub trait Encode {
 	/// [`Encoder::encode`](moq_video::encode::Encoder::encode).
-	fn encode(&mut self, frame: &moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
+	fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), moq_video::Error>;
+	/// [`Encoder::receive`](moq_video::encode::Encoder::receive).
+	fn receive(&mut self) -> Result<Option<moq_video::encode::Encoded>, moq_video::Error>;
 	/// [`Encoder::flush`](moq_video::encode::Encoder::flush).
-	fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
-	/// [`Encoder::finish`](moq_video::encode::Encoder::finish).
-	fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error>;
+	fn flush(&mut self) -> Result<(), moq_video::Error>;
 	/// [`Encoder::cut`](moq_video::encode::Encoder::cut).
 	fn cut(&mut self) -> Result<(), moq_video::Error>;
 	/// [`Encoder::set_bitrate`](moq_video::encode::Encoder::set_bitrate).
@@ -565,16 +793,16 @@ pub trait Encode {
 }
 
 impl Encode for moq_video::encode::Encoder {
-	fn encode(&mut self, frame: &moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
+	fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), moq_video::Error> {
 		self.encode(frame)
 	}
 
-	fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-		self.flush()
+	fn receive(&mut self) -> Result<Option<moq_video::encode::Encoded>, moq_video::Error> {
+		self.receive()
 	}
 
-	fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-		self.finish()
+	fn flush(&mut self) -> Result<(), moq_video::Error> {
+		self.flush()
 	}
 
 	fn cut(&mut self) -> Result<(), moq_video::Error> {
@@ -584,6 +812,14 @@ impl Encode for moq_video::encode::Encoder {
 	fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), moq_video::Error> {
 		self.set_bitrate(bitrate)
 	}
+}
+
+/// Publish every access unit `encoder` has ready into `producer`.
+fn publish_ready<E: Encode>(encoder: &mut E, producer: &mut moq_video::encode::Producer) -> Result<(), Error> {
+	while let Some(encoded) = encoder.receive()? {
+		producer.publish(&encoded)?;
+	}
+	Ok(())
 }
 
 /// An encoder and the video track it publishes into.
@@ -628,11 +864,34 @@ impl<E: Encode> Encoding<E> {
 		self.producer.as_ref().expect("open until it ends").demand()
 	}
 
-	/// Encode with `encoder` from here on, after draining the one it replaces.
-	pub fn open(&mut self, encoder: E) -> Result<(), Error> {
+	/// Drain the open encoder, then count a session for the next one before it
+	/// asks the GPU, `spare` when only a replay would use it, to
+	/// [open](Self::open) it in. Fails when [capped](Sessions::capped)
+	/// sessions are all open, or, for a spare one, while the program reclaims.
+	pub fn hold(&mut self, spare: bool) -> Result<Session, Error> {
 		self.drain()?;
-		self.encoder = Some((encoder, self.sessions.hold()));
+		self.sessions.hold(spare)
+	}
+
+	/// Encode with `encoder`, in the `session` [held](Self::hold) for it, from
+	/// here on.
+	pub fn open(&mut self, mut session: Session, encoder: E) -> Result<(), Error> {
+		self.drain()?;
+		session.opened = true;
+		self.encoder = Some((encoder, session));
 		Ok(())
+	}
+
+	/// Whether the open encoder is a replay's, which the program may reclaim.
+	fn spare(&self) -> bool {
+		self.encoder.as_ref().is_some_and(|(_, session)| session.spare)
+	}
+
+	/// Mark the open encoder as a replay's, or not.
+	fn set_spare(&mut self, spare: bool) {
+		if let Some((_, session)) = &mut self.encoder {
+			session.set_spare(spare);
+		}
 	}
 
 	/// Encode `frame` and publish what the encoder hands back.
@@ -642,9 +901,8 @@ impl<E: Encode> Encoding<E> {
 	/// When no encoder is [open](Self::open).
 	pub fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), Error> {
 		let (encoder, _) = self.encoder.as_mut().expect("an encoder is open");
-		let encoded = encoder.encode(frame)?;
-		self.producer.as_mut().expect("open until it ends").publish(&encoded)?;
-		Ok(())
+		encoder.encode(frame)?;
+		publish_ready(encoder, self.producer.as_mut().expect("open until it ends"))
 	}
 
 	/// Open a group with the next picture, as a keyframe.
@@ -677,10 +935,18 @@ impl<E: Encode> Encoding<E> {
 
 	/// Close the encoder, publishing what it still holds.
 	pub fn drain(&mut self) -> Result<(), Error> {
-		if let (Some((encoder, _session)), Some(producer)) = (self.encoder.take(), &mut self.producer) {
-			producer.publish(&encoder.finish()?)?;
-		}
-		Ok(())
+		let (Some((mut encoder, session)), Some(producer)) = (self.encoder.take(), &mut self.producer) else {
+			return Ok(());
+		};
+		let drained = encoder
+			.flush()
+			.map_err(Error::from)
+			.and_then(|()| publish_ready(&mut encoder, producer));
+		// The GPU takes the session back before it counts as given back, so a
+		// replay that the count wakes to reopen finds it free.
+		drop(encoder);
+		drop(session);
+		drained
 	}
 
 	/// Mark a gap in the track after [draining](Self::drain) the encoder, which
@@ -699,7 +965,8 @@ impl<E: Encode> Encoding<E> {
 	pub fn pause(&mut self) -> Result<(), Error> {
 		let producer = self.producer.as_mut().expect("open until it ends");
 		if let Some((encoder, _)) = &mut self.encoder {
-			producer.publish(&encoder.flush()?)?;
+			encoder.flush()?;
+			publish_ready(encoder, producer)?;
 			encoder.cut()?;
 		}
 		producer.discontinuity()?;
@@ -756,6 +1023,14 @@ pub(crate) struct Video<'a> {
 	/// Where the capture's private timeline starts on the studio clock, in
 	/// microseconds, taken at the first frame unless [anchored](Self::anchor).
 	epoch: Option<u128>,
+	/// The encoder closed for the program's [reclaim](Sessions::reclaim),
+	/// until it reopens.
+	reclaimed: bool,
+	/// How many encoders had closed before the GPU refused a reclaimed one
+	/// reopening, which waits until another closes. Not how many were open:
+	/// another replay's session the GPU already holds counts only once its
+	/// open returns, so the refused one could wait for fewer than ever are.
+	refused: Option<u64>,
 }
 
 impl<'a> Video<'a> {
@@ -774,7 +1049,11 @@ impl<'a> Video<'a> {
 		config.kind = listing.kind.clone();
 		let rendition = config.probe().await?;
 		let reserved = listing.catalog.reserve().with_interval(config.effective_join());
-		let producer = moq_video::encode::Producer::new(listing.broadcast.clone(), reserved, rendition)?;
+		let track = listing.broadcast.unique_track(
+			suffix(&rendition.codec)?,
+			reserved.track_info(hang::catalog::PRIORITY.video),
+		)?;
+		let producer = moq_video::encode::Producer::new(track, reserved, rendition)?;
 		Ok(Self {
 			track: Encoding::new(producer, listing.sessions.clone()),
 			claim: listing.claim,
@@ -784,6 +1063,8 @@ impl<'a> Video<'a> {
 			config,
 			clock: listing.studio.clock(),
 			epoch: None,
+			reclaimed: false,
+			refused: None,
 		})
 	}
 
@@ -791,7 +1072,12 @@ impl<'a> Video<'a> {
 	/// where the first frame encodes, for a source that encodes its pictures
 	/// ahead of when they show.
 	pub(crate) fn anchor(&mut self, origin: kio::clock::Instant) -> Result<(), Error> {
-		self.epoch = Some(self.clock.capture(origin)?.as_micros());
+		self.epoch = Some(
+			self.clock
+				.capture(origin)?
+				.as_micros()
+				.map_err(moq_video::Error::from)?,
+		);
 		Ok(())
 	}
 
@@ -801,13 +1087,17 @@ impl<'a> Video<'a> {
 	/// the gap, and reopens when the picture's size or color space changes,
 	/// which moves the rendition to a new track.
 	pub(crate) fn encode(&mut self, frame: &mut moq_video::Frame) -> Result<(), Error> {
-		let captured = frame.timestamp.as_micros();
-		let epoch = *self
-			.epoch
-			.get_or_insert_with(|| self.clock.now().as_micros().saturating_sub(captured));
+		let captured = frame.timestamp.as_micros().map_err(moq_video::Error::from)?;
+		let epoch = match self.epoch {
+			Some(epoch) => epoch,
+			None => {
+				let now = self.clock.now().as_micros().map_err(moq_video::Error::from)?;
+				*self.epoch.insert(now.saturating_sub(captured))
+			}
+		};
 		frame.timestamp = moq_net::Timestamp::from_micros((epoch + captured) as u64).map_err(moq_video::Error::from)?;
 
-		if !self.used() {
+		if !self.wanted() {
 			return self.release();
 		}
 
@@ -821,9 +1111,35 @@ impl<'a> Video<'a> {
 			self.track.drain()?;
 		}
 		if !self.track.is_open() {
-			self.track.open(moq_video::encode::Encoder::new(&self.config)?)?;
-			self.granted = None;
+			let closed = self.track.sessions.0.borrow().closed;
+			let spare = !self.track.watched();
+			let opened = self.track.hold(spare).and_then(|session| {
+				let encoder = moq_video::encode::Encoder::new(&self.config)?;
+				self.track.open(session, encoder)
+			});
+			match opened {
+				Ok(()) => {
+					self.reclaimed = false;
+					self.refused = None;
+					self.granted = None;
+				}
+				// A reclaim began since it was wanted: it stays closed for the
+				// program, and reopens once the reclaim ends.
+				Err(Error::Reclaimed) => {
+					self.reclaimed = true;
+					return Ok(());
+				}
+				// Its session went to the program, so it waits for one given
+				// back rather than failing.
+				Err(err) if self.reclaimed => {
+					tracing::warn!(source = %self.claim.name, %err, "waiting for an encode session");
+					self.refused = Some(closed);
+					return Ok(());
+				}
+				Err(err) => return Err(err),
+			}
 		}
+		self.track.set_spare(!self.track.watched());
 		// Published independently, it encodes at what the connection grants.
 		let grant = self
 			.grants
@@ -857,23 +1173,44 @@ impl<'a> Video<'a> {
 		self.on_program.borrow().shown.contains(&self.claim.name) || self.track.watched()
 	}
 
-	/// Wait until whether the source is used disagrees with whether its
-	/// encoder is open, so a source that delivers nothing new, such as a
-	/// still screen or a media file that ended, can act without waiting on a
-	/// picture: [`release`] the encoder when it is open and nothing uses the
-	/// source, or bring a picture when it is closed and the source goes into
-	/// use.
+	/// Whether the encoder is to be open: while the source is used, but not
+	/// for a replay alone while the program reclaims its session, nor while
+	/// waiting for a session given back since the GPU refused one.
+	fn wanted(&self) -> bool {
+		let watched = self.track.watched();
+		if !watched && !self.on_program.borrow().shown.contains(&self.claim.name) {
+			return false;
+		}
+		let sessions = self.track.sessions.0.borrow();
+		(watched || sessions.reclaims == 0) && self.refused.is_none_or(|closed| sessions.closed > closed)
+	}
+
+	/// Whether the encoder is not as [`wanted`](Self::wanted): open or closed
+	/// when it should not be, or open and marked a replay's while read, or
+	/// the other way around, which a reclaim would misjudge.
+	fn unsettled(&self) -> bool {
+		let wanted = self.wanted();
+		wanted != self.track.is_open() || (wanted && self.track.spare() == self.track.watched())
+	}
+
+	/// Wait until the encoder is not as wanted, so a source that delivers
+	/// nothing new, such as a still screen or a media file that ended, can
+	/// act without waiting on a picture: [`release`] the encoder when it is
+	/// open, or bring a picture when it is closed and wanted.
 	///
 	/// [`release`]: Self::release
 	pub(crate) async fn settle(&self) {
 		let mut demand = self.track.demand();
 		let mut on_program = self.on_program.clone();
 		on_program.mark_unchanged();
-		while self.used() == self.track.is_open() {
+		let mut sessions = self.track.sessions.0.subscribe();
+		while !self.unsettled() {
 			// The first look at the demand reports it as it is now.
 			tokio::select! {
 				changed = on_program.changed() => if changed.is_err() { std::future::pending::<()>().await },
 				wanted = demand.wanted_changed() => if wanted.is_err() { std::future::pending::<()>().await },
+				// Never fails: the track holds the sender.
+				_ = sessions.changed() => {}
 			}
 		}
 	}
@@ -893,13 +1230,20 @@ impl<'a> Video<'a> {
 		self.epoch = None;
 	}
 
-	/// Close the encoder while nothing uses the source, marking the gap, which
-	/// gives the encode session back.
+	/// Close the encoder while it is not [wanted](Self::wanted), marking the
+	/// gap, which gives the encode session back, or else mark it a replay's
+	/// or not, as whether its track is read says.
 	pub(crate) fn release(&mut self) -> Result<(), Error> {
-		if self.track.is_open() && !self.used() {
-			self.track.discontinuity()?;
+		if !self.track.is_open() {
+			return Ok(());
 		}
-		Ok(())
+		if self.wanted() {
+			self.track.set_spare(!self.track.watched());
+			return Ok(());
+		}
+		// Still used, so it closed for the program.
+		self.reclaimed = self.used();
+		self.track.discontinuity()
 	}
 
 	/// Start a group with the next picture, as a keyframe, such as where a
@@ -986,7 +1330,12 @@ impl<'a> Audio<'a> {
 		// has passed: the rest is counted on from now.
 		let now = kio::clock::now();
 		let ahead = captured.saturating_duration_since(now).as_micros();
-		let timestamp = self.clock.capture(captured.min(now))?.as_micros() + ahead;
+		let timestamp = self
+			.clock
+			.capture(captured.min(now))?
+			.as_micros()
+			.map_err(moq_audio::Error::from)?
+			+ ahead;
 		let timestamp = moq_net::Timestamp::from_micros(timestamp as u64).map_err(moq_audio::Error::from)?;
 		let data = bytes::Bytes::copy_from_slice(bytemuck::cast_slice(samples));
 		producer.write(&moq_audio::Frame::new(data, timestamp))?;
@@ -1005,10 +1354,9 @@ impl Drop for Audio<'_> {
 	/// End the track cleanly, after publishing what the encoder still holds,
 	/// or failed with the reason that could not be done.
 	fn drop(&mut self) {
-		if let Some(mut producer) = self.producer.take()
-			&& let Err(err) = producer.finish()
-		{
-			producer.abort(moq_net::Error::Transport(err.to_string()));
+		// A finish that fails ends the track with an error itself.
+		if let Some(producer) = self.producer.take() {
+			let _ = producer.finish();
 		}
 	}
 }
@@ -1053,7 +1401,7 @@ impl Still {
 
 impl Drop for Still {
 	fn drop(&mut self) {
-		let _ = self.track.finish();
+		let _ = self.track.clone().finish();
 	}
 }
 
@@ -1072,6 +1420,14 @@ mod tests {
 		let publish = Publish::new(clock, moq_video::encode::Kind::Auto, Sessions::default()).unwrap();
 		let (catalog, consumer) = (publish.catalog.clone(), publish.consume());
 		(publish, catalog, consumer)
+	}
+
+	/// A session an encoder opened in, such as the program's, standing in for
+	/// one held on the GPU.
+	fn opened(sessions: &Sessions) -> Session {
+		let mut session = sessions.hold(false).unwrap();
+		session.opened = true;
+		session
 	}
 
 	/// On program with only `name`'s picture shown.
@@ -1100,7 +1456,7 @@ mod tests {
 		let begun = until(|| feed.run().begun).await;
 		let shown = || matches!(feed.next_picture(), Some(crate::source::Picture::Frame(_))).then_some(());
 		for index in from..from + count {
-			until_time(begun + std::time::Duration::from_millis(100) * index).await;
+			until_time(begun.saturating_add(std::time::Duration::from_millis(100) * index)).await;
 			until(shown).await;
 		}
 		begun
@@ -1171,7 +1527,7 @@ mod tests {
 			let snapshot = listed(&catalog, |sources| sources.len() == 2).await;
 			assert!(snapshot.video.renditions.is_empty(), "no source is a program rendition");
 			let published = &snapshot.ext.studio.sources;
-			assert!(published["red"].media.is_empty(), "the root carries the media timing");
+			assert!(published["red"].sync.is_empty(), "the root carries the media timing");
 			assert_eq!(sources.get("red").unwrap().track(), Some(Status::Live));
 			assert_eq!(sources.get("guest").unwrap().track(), None);
 			assert!(sources.get("red copy").is_none(), "a clone opens no feed, so no track");
@@ -1229,15 +1585,18 @@ mod tests {
 			start(&sources, drivers).await;
 
 			let (published, follow) = tokio::sync::watch::channel(collection.published.clone());
-			let forward = publish.clone();
-			let base = moq_net::Path::new("show/source").unwrap();
-			let publishing = origin.clone();
-			tokio::spawn(async move {
-				forward
-					.forward(follow, publishing, base, moq_net::bandwidth::Allocator::unlimited())
-					.await
-					.unwrap()
-			});
+			let (stop, stopped) = tokio::sync::watch::channel(());
+			let forward = Forward {
+				published: follow,
+				origin: origin.clone(),
+				base: moq_net::Path::new("show/source").unwrap(),
+				bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+				stop: stopped,
+			};
+			let forwarding = {
+				let publish = publish.clone();
+				tokio::spawn(async move { publish.forward(forward).await.unwrap() })
+			};
 
 			let consumer = origin.consume();
 			let mut announced = consumer.announced();
@@ -1250,20 +1609,84 @@ mod tests {
 			let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default())
 				.await
 				.unwrap();
-			let red = catalogs.next().await.unwrap().expect("a catalog");
-			assert_eq!(red.media.clock, publish.catalog.clock().wall(), "the program's clock");
-			let (payload, mime) = still(&broadcast, &red).await;
+			let listed = catalogs.next().await.unwrap().expect("a catalog");
+			assert_eq!(listed.sync.clock, publish.catalog.clock().wall(), "the program's clock");
+			let (payload, mime) = still(&broadcast, &listed).await;
 			assert_eq!(mime, "image/png");
 			let red = image::load_from_memory(&payload).unwrap().into_rgba8();
 			assert_eq!(red.into_raw(), [255, 0, 0, 255]);
+			let name = listed.binary.tracks.keys().next().unwrap();
+			let mut track = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
 
 			published.send(BTreeSet::new()).unwrap();
+			// No longer published, its copy ends after what it copied rather
+			// than being cut off, and then its catalog.
+			let mut group = track.recv_group().await.unwrap().expect("the still");
+			while group.read_frame().await.unwrap().is_some() {}
+			assert!(track.recv_group().await.unwrap().is_none(), "the copy finished");
 			assert!(
 				catalogs.next().await.unwrap().is_none(),
 				"unpublished, its catalog ends"
 			);
+
+			drop(stop);
+			forwarding.await.expect("forwarding stops once told to");
 		})
 		.await;
+	}
+
+	/// A forwarded track says what its source said of the starts it skipped:
+	/// those before its first group, which mark the encoder's first, and those
+	/// between its groups, but not a hole the source left. Its groups end where
+	/// the source said they end.
+	#[tokio::test(start_paused = true)]
+	async fn a_forwarded_track_keeps_its_skips() {
+		let local = moq_net::broadcast::Info::new().produce();
+		let source = local
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let program = moq_net::broadcast::Info::new().produce();
+		// Held to the end, so the copy runs until its source finishes.
+		let (_stop, stopped) = tokio::sync::watch::channel(());
+		let copied = copy(local.consume(), program.clone(), "audio".into(), None, stopped);
+		let checked = async {
+			// The copy's track lasts as long as the copy, so it is read while
+			// the source is written.
+			let mut forwarded = loop {
+				match program.consume().track("audio") {
+					Ok(track) => break track.subscribe(None).await.unwrap(),
+					Err(_) => tokio::task::yield_now().await,
+				}
+			};
+			source.skip_groups(0..1_000);
+			let mut groups = Vec::new();
+			for (start, appended) in [(1_000, true), (3_000, true), (5_000, false)] {
+				// Nothing says what lies between 3 000 and 5 000.
+				let group = match appended {
+					true => source.append_group(moq_net::Timestamp::from_micros(start).unwrap()),
+					false => source.create_group(moq_net::group::Info { start }),
+				};
+				// The first group says where it ends; the others only close.
+				let group = group.unwrap();
+				drop(
+					match start {
+						1_000 => group.finish_at(2_000),
+						_ => group.finish(),
+					}
+					.unwrap(),
+				);
+				let mut copied = forwarded.recv_group().await.unwrap().unwrap();
+				assert!(copied.read_frame().await.unwrap().is_none());
+				groups.push((copied.start, copied.end()));
+			}
+			drop(source.clone().finish().unwrap());
+			assert!(forwarded.recv_group().await.unwrap().is_none());
+			assert_eq!(groups, [(1_000, Some(2_000)), (3_000, None), (5_000, None)]);
+			assert!(forwarded.is_skipped(0..1_000), "the encoder's first group");
+			assert!(forwarded.is_skipped(1_001..3_000), "the media runs on");
+			assert!(!forwarded.is_skipped(3_001..5_000), "a hole stays one");
+		};
+		tokio::join!(copied, checked);
 	}
 
 	/// Stopping the sources, as quitting does, ends each source's own track
@@ -1486,6 +1909,75 @@ mod tests {
 		.await;
 	}
 
+	/// On a GPU at its session cap, the program reclaims a replay encoder's
+	/// session, even from a still screen that delivers no picture, and the
+	/// replay waits for a session given back rather than failing, then starts
+	/// over. One whose track is read keeps its encoder.
+	#[tokio::test(start_paused = true)]
+	async fn the_program_reclaims_a_replays_session() {
+		local(async {
+			let clock = moq_mux::Clock::new();
+			let sessions = Sessions::capped(1);
+			let publish = Publish::new(clock, moq_video::encode::Kind::Auto, sessions.clone()).unwrap();
+			let claim = publish.claim("display");
+			let listing = Listing::new(&claim, &publish).unwrap();
+			let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+			let size = moq_video::Size::new(64, 48);
+			let mut video = Video::new(&listing, size, framerate, None).await.unwrap();
+			let wait = std::time::Duration::from_secs(1);
+			let settled = async |video: &Video<'_>| kio::clock::timeout(wait, video.settle()).await;
+
+			publish.set_on_program(shown("display"));
+			video.encode(&mut gray(size, 0)).unwrap();
+			assert_eq!((sessions.open(), sessions.spare()), (1, 1), "a replay's");
+			assert!(sessions.hold(false).is_err(), "at the cap");
+
+			let reclaim = sessions.reclaim();
+			settled(&video).await.expect("asked to close without a picture");
+			video.release().unwrap();
+			kio::clock::timeout(wait, reclaim.closed())
+				.await
+				.expect("the replay closed");
+			assert_eq!(sessions.open(), 0);
+			video.encode(&mut gray(size, 33)).unwrap();
+			assert_eq!(sessions.open(), 0, "none opens while the program reclaims");
+
+			let program = opened(&sessions);
+			drop(reclaim);
+			settled(&video).await.expect("wanted again");
+			video.encode(&mut gray(size, 66)).unwrap();
+			assert!(!video.is_open(), "refused, so it waits");
+			assert!(settled(&video).await.is_err(), "until a session is given back");
+			// Given back and taken again before the replay looks, as by another
+			// replay reopening first: it still tries, and waits again.
+			drop(program);
+			let sibling = opened(&sessions);
+			settled(&video)
+				.await
+				.expect("a session given back, even if taken again");
+			video.encode(&mut gray(size, 80)).unwrap();
+			assert!(!video.is_open(), "refused again, so it waits");
+			assert!(settled(&video).await.is_err(), "until another is given back");
+			drop(sibling);
+			settled(&video).await.expect("a session given back");
+			video.encode(&mut gray(size, 100)).unwrap();
+			assert_eq!((sessions.open(), sessions.spare()), (1, 1), "the replay starts over");
+
+			// Read, such as by a recording, it is no replay's alone.
+			let snapshot = listing.catalog.snapshot();
+			let name = snapshot.video.renditions.keys().next().unwrap();
+			let _track = publish.consume().track(name).unwrap().subscribe(None).await.unwrap();
+			let reclaim = sessions.reclaim();
+			settled(&video).await.expect("marked read without a picture");
+			video.release().unwrap();
+			kio::clock::timeout(wait, reclaim.closed())
+				.await
+				.expect("nothing to close");
+			assert_eq!((sessions.open(), sessions.spare()), (1, 0), "kept");
+		})
+		.await;
+	}
+
 	/// A source off program encodes only while its track is subscribed, such
 	/// as by a recording, holding no encoder between subscribers.
 	#[tokio::test]
@@ -1515,7 +2007,7 @@ mod tests {
 					assert!(video.track.is_open(), "a subscriber gets pictures");
 					let mut group = track.recv_group().await.unwrap().expect("a group");
 					assert!(group.read_frame().await.unwrap().is_some());
-					let first = group.sequence;
+					let first = group.start;
 
 					drop(group);
 					drop(track);
@@ -1531,7 +2023,7 @@ mod tests {
 					video.encode(&mut gray(size, 100)).unwrap();
 					assert!(video.track.is_open(), "a new subscriber reopens the encoder");
 					let mut group = track.recv_group().await.unwrap().expect("a group");
-					assert!(group.sequence > first, "{} after {first}", group.sequence);
+					assert!(group.start > first, "{} after {first}", group.start);
 					assert!(group.read_frame().await.unwrap().is_some());
 				} => {}
 			}
@@ -1659,7 +2151,7 @@ mod tests {
 					let (_, config) = take.audio.as_ref().unwrap();
 					let read = packets(&take.consume(), name, config).await;
 					let near = |at: moq_net::Timestamp, to: moq_net::Timestamp| {
-						at.as_micros().abs_diff(to.as_micros()) <= 20_000
+						at.as_micros().unwrap().abs_diff(to.as_micros().unwrap()) <= 20_000
 					};
 					let first = read.first().copied().flatten().expect("a packet first");
 					assert!(near(first, heard), "{first:?} for {heard:?}");
@@ -1674,11 +2166,13 @@ mod tests {
 	}
 
 	/// Holds its newest pictures back the way a pipelined hardware encoder
-	/// does, handing them over only on a flush or finish. openh264, the encoder
-	/// on every machine, holds nothing.
+	/// does, handing them over only on a flush. openh264, the encoder on every
+	/// machine, holds nothing.
 	struct Pipelined {
 		encoder: moq_video::encode::Encoder,
-		held: Vec<moq_video::encode::Encoded>,
+		held: std::collections::VecDeque<moq_video::encode::Encoded>,
+		/// Whether a flush asked for every held picture.
+		flushed: bool,
 	}
 
 	impl Pipelined {
@@ -1686,22 +2180,29 @@ mod tests {
 	}
 
 	impl Encode for Pipelined {
-		fn encode(&mut self, frame: &moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-			self.held.extend(self.encoder.encode(frame)?);
-			let ready = self.held.len().saturating_sub(Self::DEPTH);
-			Ok(self.held.drain(..ready).collect())
+		fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), moq_video::Error> {
+			self.flushed = false;
+			self.encoder.encode(frame)?;
+			while let Some(encoded) = self.encoder.receive()? {
+				self.held.push_back(encoded);
+			}
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-			let mut encoded = std::mem::take(&mut self.held);
-			encoded.extend(self.encoder.flush()?);
-			Ok(encoded)
+		fn receive(&mut self) -> Result<Option<moq_video::encode::Encoded>, moq_video::Error> {
+			match self.flushed || self.held.len() > Self::DEPTH {
+				true => Ok(self.held.pop_front()),
+				false => Ok(None),
+			}
 		}
 
-		fn finish(mut self) -> Result<Vec<moq_video::encode::Encoded>, moq_video::Error> {
-			let mut encoded = std::mem::take(&mut self.held);
-			encoded.extend(self.encoder.finish()?);
-			Ok(encoded)
+		fn flush(&mut self) -> Result<(), moq_video::Error> {
+			self.encoder.flush()?;
+			while let Some(encoded) = self.encoder.receive()? {
+				self.held.push_back(encoded);
+			}
+			self.flushed = true;
+			Ok(())
 		}
 
 		fn cut(&mut self) -> Result<(), moq_video::Error> {
@@ -1711,6 +2212,106 @@ mod tests {
 		fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), moq_video::Error> {
 			self.encoder.set_bitrate(bitrate)
 		}
+	}
+
+	/// A replay's session counts as spare from before its encoder asks the GPU,
+	/// so the program, on another thread, reclaims it and waits for it to
+	/// close, and none starts opening once a reclaim is under way.
+	#[tokio::test(start_paused = true)]
+	async fn a_replay_is_counted_before_it_opens() {
+		let sessions = Sessions::default();
+		let opening = sessions.hold(true).unwrap();
+		assert_eq!((sessions.open(), sessions.spare()), (1, 1), "a replay's, still opening");
+
+		let reclaim = sessions.reclaim();
+		assert!(matches!(sessions.hold(true), Err(Error::Reclaimed)), "no replay starts");
+		let program = sessions.hold(false).expect("the program's opens");
+		let wait = std::time::Duration::from_millis(10);
+		assert!(
+			kio::clock::timeout(wait, reclaim.closed()).await.is_err(),
+			"the opening replay is waited for"
+		);
+		// Refused by the GPU, say: it gives back nothing one refused could take,
+		// so a replay waiting for a session does not retry on its own failure.
+		drop(opening);
+		assert_eq!(sessions.0.borrow().closed, 0, "nothing given back");
+		kio::clock::timeout(wait, reclaim.closed()).await.expect("then closed");
+		drop(reclaim);
+		drop(sessions.hold(true).expect("a replay opens again"));
+		drop(program);
+	}
+
+	/// Records how many sessions are counted open as it closes.
+	struct Closing {
+		encoder: moq_video::encode::Encoder,
+		sessions: Sessions,
+		open: Arc<Mutex<Option<usize>>>,
+	}
+
+	impl Drop for Closing {
+		fn drop(&mut self) {
+			*self.open.lock().unwrap() = Some(self.sessions.open());
+		}
+	}
+
+	impl Encode for Closing {
+		fn encode(&mut self, frame: &moq_video::Frame) -> Result<(), moq_video::Error> {
+			self.encoder.encode(frame)
+		}
+
+		fn receive(&mut self) -> Result<Option<moq_video::encode::Encoded>, moq_video::Error> {
+			self.encoder.receive()
+		}
+
+		fn flush(&mut self) -> Result<(), moq_video::Error> {
+			self.encoder.flush()
+		}
+
+		fn cut(&mut self) -> Result<(), moq_video::Error> {
+			self.encoder.cut()
+		}
+
+		fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), moq_video::Error> {
+			self.encoder.set_bitrate(bitrate)
+		}
+	}
+
+	/// An encoder closes before its session counts as given back, so a replay
+	/// that the count wakes to reopen finds the GPU's session free.
+	#[tokio::test]
+	async fn an_encoder_closes_before_its_session_is_given_back() {
+		let (publish, _catalog, _consumer) = studio();
+		let claim = publish.claim("program");
+		let listing = Listing::new(&claim, &publish).unwrap();
+		let size = moq_video::Size::new(64, 48);
+		let framerate = moq_video::FrameRate::new(30, 1).unwrap();
+		let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
+		config.kind = moq_video::encode::Kind::Named("openh264".into());
+		let rendition = config.probe().await.unwrap();
+		let reserved = listing.catalog.reserve();
+		let track = listing
+			.broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let producer = moq_video::encode::Producer::new(track, reserved, rendition).unwrap();
+		let sessions = Sessions::default();
+		let mut track = Encoding::new(producer, sessions.clone());
+		let open = Arc::new(Mutex::new(None));
+		let session = track.hold(false).unwrap();
+		track
+			.open(
+				session,
+				Closing {
+					encoder: moq_video::encode::Encoder::new(&config).unwrap(),
+					sessions: sessions.clone(),
+					open: open.clone(),
+				},
+			)
+			.unwrap();
+		track.encode(&gray(size, 0)).unwrap();
+		track.drain().unwrap();
+		assert_eq!(*open.lock().unwrap(), Some(1), "still counted as it closed");
+		assert_eq!(sessions.open(), 0, "given back after");
 	}
 
 	/// A pipelined encoder's last pictures land before a pause's gap rather
@@ -1727,8 +2328,12 @@ mod tests {
 		let mut config = moq_video::encode::Config::new(size.width, size.height, framerate);
 		config.kind = moq_video::encode::Kind::Named("openh264".into());
 		let rendition = config.probe().await.unwrap();
-		let producer =
-			moq_video::encode::Producer::new(listing.broadcast.clone(), listing.catalog.reserve(), rendition).unwrap();
+		let reserved = listing.catalog.reserve();
+		let track = listing
+			.broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let producer = moq_video::encode::Producer::new(track, reserved, rendition).unwrap();
 		let (name, rendition) = listing.catalog.snapshot().video.renditions.pop_first().unwrap();
 		// Every group, however far behind the newest, since this reads only once
 		// the track has ended.
@@ -1739,12 +2344,17 @@ mod tests {
 		let mut reader = moq_mux::container::Consumer::new(subscriber, container);
 
 		let mut track = Encoding::new(producer, Sessions::default());
+		let session = track.hold(false).unwrap();
 		let encoder = moq_video::encode::Encoder::new(&config).unwrap();
 		track
-			.open(Pipelined {
-				encoder,
-				held: Vec::new(),
-			})
+			.open(
+				session,
+				Pipelined {
+					encoder,
+					held: Default::default(),
+					flushed: false,
+				},
+			)
 			.unwrap();
 		for millis in [0, 33, 66] {
 			track.encode(&gray(size, millis)).unwrap();
@@ -1773,7 +2383,7 @@ mod tests {
 					if current.replace(group) != Some(group) {
 						seen.push(Seen::Group);
 					}
-					seen.push(Seen::Picture(frame.timestamp.as_micros() / 1000));
+					seen.push(Seen::Picture(frame.timestamp.as_micros().unwrap() / 1000));
 				}
 				moq_mux::container::Read::End { .. } => seen.push(Seen::End),
 				moq_mux::container::Read::Gap { .. } => panic!("pictures went missing"),
@@ -1892,7 +2502,7 @@ mod tests {
 			let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 			let mut track = moq_mux::container::Consumer::new(track, container);
 			let begin = until(|| feed.run().begun).await;
-			until_time(begin + std::time::Duration::from_millis(1_500)).await;
+			until_time(begin.saturating_add(std::time::Duration::from_millis(1_500))).await;
 			let now = kio::Waiter::noop();
 			until(|| match track.poll_read(&now) {
 				std::task::Poll::Ready(read) => match read.unwrap().expect("open while the replay plays") {
@@ -1952,11 +2562,11 @@ mod tests {
 
 			// Half way, five pictures in, it starts over, and plays to its end.
 			let first = pictures(feed, 0, 5).await;
-			until_time(first + std::time::Duration::from_millis(450)).await;
+			until_time(first.saturating_add(std::time::Duration::from_millis(450))).await;
 			let cut = publish.catalog.clock().now();
 			feed.play().unwrap();
 			let restarted = pictures(feed, 0, 10).await;
-			until_time(restarted + std::time::Duration::from_millis(1_100)).await;
+			until_time(restarted.saturating_add(std::time::Duration::from_millis(1_100))).await;
 			until(|| (feed.status() == Status::Ended).then_some(())).await;
 
 			// How many pictures land depends on the encoder, which may skip
@@ -1978,7 +2588,7 @@ mod tests {
 			// Stamped with when it showed, though encoded ahead of it.
 			let shown = publish.catalog.clock().capture(first).unwrap();
 			assert!(
-				stamps[0].as_micros().abs_diff(shown.as_micros()) <= 1,
+				stamps[0].as_micros().unwrap().abs_diff(shown.as_micros().unwrap()) <= 1,
 				"the first picture as it showed: {:?}, not {shown:?}",
 				stamps[0]
 			);
@@ -2090,7 +2700,7 @@ mod tests {
 			let silences = until(|| {
 				while let std::task::Poll::Ready(read) = track.poll_read(&now) {
 					if let moq_mux::container::Read::Frame { frame, .. } = read.unwrap().expect("open") {
-						stamps.push(std::time::Duration::from(frame.timestamp));
+						stamps.push(std::time::Duration::try_from(frame.timestamp).unwrap());
 					}
 				}
 				let gaps = stamps.windows(2).map(|pair| pair[1].saturating_sub(pair[0]));
@@ -2100,7 +2710,7 @@ mod tests {
 			.await;
 			assert_eq!(silences, 2, "each loop's silence is kept: {stamps:?}");
 			// Stamped with when it sounded, though written ahead of it.
-			let sounded = std::time::Duration::from(publish.catalog.clock().capture(begun).unwrap());
+			let sounded = std::time::Duration::try_from(publish.catalog.clock().capture(begun).unwrap()).unwrap();
 			assert_eq!(stamps[0], sounded, "the first sound as it sounded");
 		})
 		.await;

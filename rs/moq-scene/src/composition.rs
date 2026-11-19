@@ -17,10 +17,13 @@
 //! stamps on the program's clock, and for a guest, how far its stamps sat from
 //! the program's when the studio played them.
 //!
-//! It travels as JSON on [`TRACK`] in snapshot mode, in a broadcast of its own
-//! [beneath the program's](PATH), so a viewer joining late reads the
-//! composition in force. The format is the studio's own, provisional until
-//! hang specifies a composition.
+//! It travels in the [`SECTION`] section of the hang catalog of a broadcast
+//! of its own [beneath the program's](PATH), each update stamped with the
+//! program frame it takes effect on, so a player applies it when it plays
+//! that frame, and a viewer joining late reads the composition in force. The
+//! catalog also lists the program's renditions, so a player that knows no
+//! compositions plays the program from it. The format is the studio's own,
+//! provisional until hang specifies a composition.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -31,9 +34,9 @@ use serde_with::{DisplayFromStr, DurationMicroSeconds, serde_as};
 use crate::Error;
 use crate::collection::{Audio, Collection, Item, Layer, Size};
 
-/// The composition broadcast's track carrying the composition, listed in its
-/// catalog's `json` section.
-pub const TRACK: &str = "live.kixel.studio.composition";
+/// The section of the composition broadcast's catalog the composition is
+/// in, until hang specifies a composition.
+pub const SECTION: &str = "live.kixel.studio.composition";
 
 /// Where the composition's broadcast is, beneath the program's.
 pub const PATH: &str = "composition";
@@ -240,66 +243,112 @@ fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
 	*value == T::default()
 }
 
-/// Publishes the composition on [`TRACK`] in a broadcast of its own, listed
-/// in its catalog on the program's clock.
+/// The composition broadcast's catalog extension: the composition, under
+/// [`SECTION`], beside the program's renditions.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Ext {
+	/// The composition in force from the catalog's timestamp, or `None` for
+	/// the program alone.
+	#[serde(
+		rename = "live.kixel.studio.composition",
+		default,
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub composition: Option<Composition>,
+}
+
+/// The composition broadcast's hang catalog.
+pub type Catalog = hang::Catalog<Ext>;
+
+/// The catalog of a composition broadcast listing `composition` over
+/// `program`'s video and audio renditions, each referenced where the
+/// program's broadcast is, so a player that knows no compositions plays the
+/// program from it. Its timeline is the program's.
+fn catalog<E>(composition: Composition, program: &hang::Catalog<E>) -> Catalog {
+	let broadcast = Some(composition.program.broadcast.clone());
+	let mut catalog = Catalog::default();
+	catalog.video = program.video.clone();
+	for config in catalog.video.renditions.values_mut() {
+		config.broadcast.clone_from(&broadcast);
+	}
+	catalog.audio = program.audio.clone();
+	for config in catalog.audio.renditions.values_mut() {
+		config.broadcast.clone_from(&broadcast);
+	}
+	catalog.sync = program.sync;
+	catalog.ext.composition = Some(composition);
+	catalog
+}
+
+/// Publishes the composition broadcast's hang catalog, each update stamped
+/// with the program frame it takes effect on, on the program's clock.
+///
+/// The catalog track is written here rather than through moq-mux's catalog
+/// producer, which stamps each update when it publishes, a frame or so after
+/// the program frame a cut lands on.
 pub struct Publisher {
-	catalog: moq_mux::catalog::Producer,
-	broadcast: moq_net::broadcast::Producer,
-	/// The track, and the composition last written to it, once there is one.
-	track: Option<(moq_mux::json::Snapshot<Composition>, Option<Composition>)>,
+	/// The catalog track, until finished.
+	track: Option<moq_json::snapshot::Producer<Catalog>>,
+	clock: moq_mux::Clock,
+	/// The catalog last written.
+	published: Option<Catalog>,
+	/// Keeps the broadcast open while the catalog is, as moq-mux's catalog
+	/// producer does.
+	_broadcast: moq_net::broadcast::Producer,
 }
 
 impl Publisher {
-	/// Publish in `broadcast`, whose catalog advertises `clock`, the
+	/// Publish the catalog of `broadcast`, a composition on `clock`, the
 	/// program's, from the first [`update`](Self::update).
 	pub fn new(broadcast: &mut moq_net::broadcast::Producer, clock: moq_mux::Clock) -> Result<Self, Error> {
-		let config = moq_mux::catalog::Config::default().with_clock(clock);
-		let catalog = moq_mux::catalog::Producer::new(broadcast, config)?;
+		let track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
+		// Each catalog whole in a group of its own, so a joiner reads the one
+		// in force without a refresh.
+		let config = moq_json::snapshot::Config::default().with_deltas(false);
 		Ok(Self {
-			catalog,
-			broadcast: broadcast.clone(),
-			track: None,
+			track: Some(moq_json::snapshot::Producer::new(track, config)),
+			clock,
+			published: None,
+			_broadcast: broadcast.clone(),
 		})
 	}
 
-	/// Publish `composition`, stamped `at` on the media clock, when it took
-	/// effect, unless it is the one published already, starting the track and
-	/// its listing if there is none. A child's offset within [`DRIFT`] of the
-	/// one published for the same stream keeps the published one.
-	pub fn update(&mut self, mut composition: Composition, at: moq_net::Timestamp) -> Result<(), Error> {
-		let (snapshot, published) = match &mut self.track {
-			Some(track) => track,
-			None => {
-				let info = moq_net::track::Info::default()
-					.with_timescale(moq_mux::Clock::TIMESCALE)
-					.with_priority(hang::catalog::PRIORITY.catalog)
-					.with_compress(true);
-				let created = self.broadcast.create_track(TRACK, info)?;
-				// Each composition whole in a group of its own, so a joiner needs
-				// no refresh to read it.
-				let options = moq_mux::json::Options::default().with_deltas(false);
-				let config = moq_mux::json::Config::default();
-				let snapshot = self.catalog.json_snapshot(created, config, options)?;
-				self.track.insert((snapshot, None))
-			}
+	/// Publish `composition` over the renditions `program`, the program's
+	/// catalog, lists, to take effect at `at` on the program's clock, unless
+	/// the catalog in force says the same. A child's offset within [`DRIFT`]
+	/// of the one in force for the same stream keeps that one.
+	pub fn update<E>(
+		&mut self,
+		composition: Composition,
+		program: &hang::Catalog<E>,
+		at: moq_net::Timestamp,
+	) -> Result<(), Error> {
+		let Some(track) = self.track.as_mut() else {
+			return Err(Error::Net(moq_net::Error::Closed));
 		};
-		if let Some(published) = published.as_ref() {
-			steady(&mut composition, published);
-			if *published == composition {
+		let mut catalog = catalog(composition, program);
+		catalog.sync.clock = self.clock.wall();
+		if let Some(published) = &self.published {
+			if let (Some(composition), Some(before)) = (&mut catalog.ext.composition, &published.ext.composition) {
+				steady(composition, before);
+			}
+			if *published == catalog {
 				return Ok(());
 			}
 		}
-		snapshot.update(&composition, at)?;
-		*published = Some(composition);
+		track
+			.update(moq_json::Timed::new(&catalog, at))
+			.map_err(moq_mux::Error::from)?;
+		self.published = Some(catalog);
 		Ok(())
 	}
 
-	/// End the track and the catalog, so a reader reaches their end.
+	/// End the catalog track, so a reader reaches its end.
 	pub fn finish(&mut self) -> Result<(), Error> {
-		if let Some((snapshot, _)) = self.track.take() {
-			snapshot.finish()?;
+		if let Some(track) = self.track.take() {
+			drop(track.finish().map_err(moq_mux::Error::from)?);
 		}
-		Ok(self.catalog.finish()?)
+		Ok(())
 	}
 }
 
@@ -324,7 +373,6 @@ fn steady(composition: &mut Composition, published: &Composition) {
 mod tests {
 	use super::*;
 	use crate::collection::{Blend, Filter, Keyframe, Rect, Rgba, Scene, Source};
-	use moq_mux::catalog::Stream;
 
 	fn rect(x: f32) -> Rect {
 		Rect {
@@ -453,14 +501,12 @@ mod tests {
 	}
 
 	/// A source left unlocated, such as a guest offline, is left out with its
-	/// pictures and sound, and a relay-minted instance is never named.
+	/// pictures and sound.
 	#[test]
 	fn leaves_out_what_is_not_located() {
 		let collection = collection();
 		let mut children = children();
 		children.remove("alice");
-		let minted = Child::new(relative("source/mic"), Some("~minted".parse().unwrap()), 0);
-		assert_eq!(minted.instance, None);
 		let composition = Composition::new(&collection, Some("live"), Duration::ZERO, program(), children);
 		assert!(!composition.sources.contains_key("alice"));
 		assert!(composition.pictures.iter().all(|item| item.source != "alice"));
@@ -561,13 +607,17 @@ mod tests {
 		assert!(err.contains("composition version 1 is not supported"), "{err}");
 	}
 
-	/// The track carries each new composition at the media time it took
-	/// effect, listed in the catalog on the program's clock; an offset that
-	/// only jitters writes nothing, one that moves past the drift or a new
-	/// instance does, and finishing ends the track and the catalog.
+	/// The composition broadcast's catalog carries each new composition at
+	/// the media time it takes effect, on the program's clock, over the
+	/// program's renditions referenced where the program is; a catalog that
+	/// only jitters an offset writes nothing, one that moves it past the
+	/// drift, names a new instance, or lists new renditions does, and
+	/// finishing ends the catalog.
 	#[tokio::test]
 	async fn publishes_each_new_composition() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut info = moq_net::broadcast::Info::new();
+		info.path = moq_net::Path::from_static("show/composition");
+		let mut broadcast = info.produce();
 		let clock = moq_mux::Clock::default();
 		let mut publisher = Publisher::new(&mut broadcast, clock.clone()).unwrap();
 		let collection = collection();
@@ -583,39 +633,54 @@ mod tests {
 			);
 			Composition::new(&collection, Some("live"), Duration::ZERO, program(), children)
 		};
+		let mut renditions = hang::Catalog::<()>::default();
+		let audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		renditions.audio.renditions.insert("audio".into(), audio);
 		let stamp = |secs| moq_net::Timestamp::try_from(Duration::from_secs(secs)).unwrap();
-		publisher.update(compose(0, "a"), stamp(1)).unwrap();
+		publisher.update(compose(0, "a"), &renditions, stamp(1)).unwrap();
 
-		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast.consume(), Default::default())
-			.await
-			.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
-		assert!(catalog.json.tracks.contains_key(TRACK));
-		assert_eq!(catalog.media.clock, clock.wall(), "the program's clock");
-
-		let track = broadcast.consume().track(TRACK).unwrap();
-		let mut reader = moq_json::snapshot::Consumer::<Composition>::new(track, Default::default());
-		let next = async |reader: &mut moq_json::snapshot::Consumer<Composition>| {
-			let read = reader.next().await.unwrap().expect("a composition");
-			(read.value.sources["alice"].clone(), read.at.map(Duration::from))
+		// Read as a player playing up to 10 s behind, so it reads each update.
+		let track = broadcast.consume().track(hang::Catalog::DEFAULT_NAME).unwrap();
+		let mut reader = hang::catalog::Consumer::<Ext>::new(track, Duration::from_secs(10));
+		let mut next = async || {
+			let read = reader.next().await.unwrap().expect("a catalog");
+			(read.value, Duration::try_from(read.at).unwrap())
 		};
-		let (alice, at) = next(&mut reader).await;
-		assert_eq!((alice.offset, at), (0, Some(Duration::from_secs(1))));
+		let (catalog, at) = next().await;
+		assert_eq!(at, Duration::from_secs(1));
+		assert_eq!(catalog.sync.clock, clock.wall(), "the program's clock");
+		let listed = &catalog.audio.renditions["audio"];
+		assert_eq!(listed.broadcast, Some(relative(".")), "where the program is");
+		let alice = &catalog.ext.composition.as_ref().expect("a composition").sources["alice"];
+		assert_eq!(alice.offset, 0);
+		let json = catalog.to_json().unwrap();
+		assert!(json.contains(&format!("\"{SECTION}\":{{\"version\":2,")), "{json}");
 
 		let drift = DRIFT.as_micros() as i64;
-		publisher.update(compose(drift, "a"), stamp(2)).unwrap();
-		publisher.update(compose(-drift, "a"), stamp(3)).unwrap();
-		publisher.update(compose(drift + 1, "a"), stamp(4)).unwrap();
-		let (alice, at) = next(&mut reader).await;
-		assert_eq!((alice.offset, at), (drift + 1, Some(Duration::from_secs(4))));
-		publisher.update(compose(drift + 2, "b"), stamp(5)).unwrap();
-		let (alice, at) = next(&mut reader).await;
+		publisher.update(compose(drift, "a"), &renditions, stamp(2)).unwrap();
+		publisher.update(compose(-drift, "a"), &renditions, stamp(3)).unwrap();
+		publisher
+			.update(compose(drift + 1, "a"), &renditions, stamp(4))
+			.unwrap();
+		let (catalog, at) = next().await;
+		let alice = &catalog.ext.composition.as_ref().unwrap().sources["alice"];
+		assert_eq!((alice.offset, at), (drift + 1, Duration::from_secs(4)));
+		publisher
+			.update(compose(drift + 2, "b"), &renditions, stamp(5))
+			.unwrap();
+		let (catalog, at) = next().await;
+		let alice = &catalog.ext.composition.as_ref().unwrap().sources["alice"];
 		assert_eq!(alice.instance, Some("b".parse().unwrap()));
-		assert_eq!((alice.offset, at), (drift + 2, Some(Duration::from_secs(5))));
+		assert_eq!((alice.offset, at), (drift + 2, Duration::from_secs(5)));
+		renditions.audio.renditions.clear();
+		publisher
+			.update(compose(drift + 2, "b"), &renditions, stamp(6))
+			.unwrap();
+		let (catalog, at) = next().await;
+		assert!(catalog.audio.renditions.is_empty());
+		assert_eq!(at, Duration::from_secs(6));
 
 		publisher.finish().unwrap();
-		assert!(reader.next().await.unwrap().is_none(), "the track ends");
-		// The track leaves the catalog, then the catalog ends.
-		while catalogs.next().await.unwrap().is_some() {}
+		assert!(reader.next().await.unwrap().is_none(), "the catalog ends");
 	}
 }

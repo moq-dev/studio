@@ -10,6 +10,7 @@ use moq_scene::Collection;
 use moq_scene::source::Sources;
 
 use super::{MUTE_DB, decibels};
+use crate::kit;
 
 /// How often levels are taken. Taking one resets it, so the Audio and Graph
 /// panels read these rather than each take their own and see half of it.
@@ -55,7 +56,7 @@ impl Levels {
 		// across it.
 		let steps = match usize::try_from(steps) {
 			Ok(steps) if steps <= GAP => {
-				self.taken = Some(taken + STEP * steps as u32);
+				self.taken = Some(taken.saturating_add(STEP * steps as u32));
 				steps
 			}
 			_ => {
@@ -109,32 +110,25 @@ fn push(history: &mut History, level: Level, steps: usize) {
 }
 
 /// Where `amplitude` falls on a meter, from 0 at [`MUTE_DB`] to 1 at full scale.
-fn position(amplitude: f32) -> f32 {
+pub(super) fn position(amplitude: f32) -> f32 {
 	(1.0 - decibels(amplitude) / MUTE_DB).clamp(0.0, 1.0)
 }
 
-/// Green, or red once a level reaches full scale.
+/// Green, or red once a level clips at full scale.
 fn color(level: Level) -> Color32 {
-	if level.peak() >= 1.0 {
-		Color32::RED
-	} else {
-		Color32::from_rgb(80, 200, 120)
-	}
+	if level.peak() >= 1.0 { kit::ERR } else { kit::OK }
 }
 
-/// A level meter of the latest step: RMS filled, peak as a tick, on a
-/// decibel scale.
-pub(super) fn meter(ui: &mut Ui, history: Option<&History>) {
-	let level = history.and_then(|history| history.back().copied()).unwrap_or_default();
-	let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 12.0), egui::Sense::hover());
-	let painter = ui.painter_at(rect);
-	painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-	let color = color(level);
-	let mut filled = rect;
-	filled.set_width(rect.width() * position(level.rms()));
-	painter.rect_filled(filled, 2.0, color);
-	let x = rect.left() + rect.width() * position(level.peak());
-	painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, color));
+/// The latest step's level, or silence before the first.
+pub(super) fn latest(history: Option<&History>) -> Level {
+	history.and_then(|history| history.back().copied()).unwrap_or_default()
+}
+
+/// The latest step's RMS and peak where they fall on a meter, from 0 at
+/// [`MUTE_DB`] to 1 at full scale, as [`kit::Meter::new`] takes them.
+pub(super) fn reading(history: Option<&History>) -> (f32, f32) {
+	let level = latest(history);
+	(position(level.rms()), position(level.peak()))
 }
 
 /// The last few seconds, newest on the right, mirrored about the middle on a
@@ -143,7 +137,7 @@ pub(super) fn waveform(ui: &mut Ui, history: Option<&History>) -> egui::Response
 	let size = egui::vec2(ui.available_width(), 28.0);
 	let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
 	let painter = ui.painter_at(rect);
-	painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+	painter.rect_filled(rect, 2.0, kit::BG);
 	let Some(history) = history else {
 		return response;
 	};

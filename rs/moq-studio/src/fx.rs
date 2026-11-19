@@ -2,17 +2,16 @@
 //! rune-fx, drawn inside egui's render pass through paint callbacks. They
 //! never reach the program, a published scene, or any encode.
 //!
-//! Panels mark where an effect goes as they draw ([`Mark`], [`Spot`]); the
-//! effects are filled in once the frame knows what to show, and every layer
-//! of a frame is uploaded once, by whichever of its callbacks egui prepares
-//! first.
+//! A widget marks where its effect goes as it draws ([`Mark`], [`Spot`]) and
+//! hands the spot to its effect at once; the effects are filled in once the
+//! frame is done, and every layer of a frame is uploaded once, by whichever
+//! of its callbacks egui prepares first. Their colors are the kit's.
 
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use eframe::egui_wgpu;
 use egui::{Color32, Rect, Ui};
-use moq_scene::wgpu;
 use rune_fx::{
 	ElectricParams, ElectricStyle, Fx as Effect, FxFrame, FxLayer, FxOptions, FxRenderer, GlowParams, GlowStyle,
 	GradientKind, GrainGradientParams, LiquidMetalParams, MeshGradientParams, PlasticParams, PulseParams, PulseStyle,
@@ -20,6 +19,7 @@ use rune_fx::{
 };
 
 use crate::health::Verdict;
+use crate::kit;
 
 mod motion;
 
@@ -104,6 +104,12 @@ impl Fx {
 		}
 	}
 
+	/// Pick `effects`, as Settings, Advanced does.
+	#[cfg(test)]
+	pub fn pick(&mut self, effects: Effects) {
+		self.picked = Some(effects);
+	}
+
 	pub fn save(&self, storage: &mut dyn eframe::Storage) {
 		eframe::set_value(storage, SETTING, &self.picked);
 	}
@@ -140,16 +146,20 @@ impl Fx {
 		self.effects != Effects::Off
 	}
 
-	/// View > Effects: the setting, or the system's.
-	pub fn menu(&mut self, ui: &mut Ui) {
-		ui.menu_button("Effects", |ui| {
-			let system = format!("Follow the system ({})", self.system().name());
-			ui.radio_value(&mut self.picked, None, system)
-				.on_hover_text("Reduced while the system asks apps to reduce motion");
-			for effects in [Effects::Full, Effects::Reduced, Effects::Off] {
-				ui.radio_value(&mut self.picked, Some(effects), effects.name());
-			}
-		});
+	/// Settings, Advanced: the setting picked, or the system's.
+	pub fn picker(&mut self, ui: &mut Ui) -> egui::Response {
+		let options = [
+			(None, "System"),
+			(Some(Effects::Full), Effects::Full.name()),
+			(Some(Effects::Reduced), Effects::Reduced.name()),
+			(Some(Effects::Off), Effects::Off.name()),
+		];
+		let system = format!(
+			"{}, while the system asks apps to reduce motion or not",
+			self.system().name()
+		);
+		ui.add(crate::kit::Segmented::new(&mut self.picked, &options))
+			.on_hover_text(system)
 	}
 
 	/// Draw `layers` at `at` in `painter`'s layer, clipped to it.
@@ -175,14 +185,14 @@ impl Fx {
 	}
 
 	/// A first-launch screen's background.
-	pub fn backdrop(&mut self, spot: &Spot, visuals: &egui::Visuals) {
-		let base = visuals.panel_fill;
+	pub fn backdrop(&mut self, spot: &Spot) {
+		let base = kit::P1;
 		let params = MeshGradientParams {
 			colors: Stops::new(&[
 				linear(base),
-				linear(mix(base, visuals.selection.bg_fill, 0.35)),
-				linear(mix(base, Color32::BLACK, 0.3)),
-				linear(mix(base, visuals.hyperlink_color, 0.2)),
+				linear(mix(base, kit::ACCENT, 0.12)),
+				linear(kit::BG),
+				linear(mix(base, kit::ACCENT, 0.06)),
 			]),
 			// Still: the screen repaints only while setup probes the machine.
 			drift: 0.0,
@@ -192,16 +202,11 @@ impl Fx {
 	}
 
 	/// A panel's background: a faint grain over its fill, which never moves.
-	pub fn panel(&mut self, spot: &Spot, visuals: &egui::Visuals) {
-		let base = visuals.panel_fill;
-		let lift = if visuals.dark_mode {
-			Color32::WHITE
-		} else {
-			Color32::BLACK
-		};
+	pub fn panel(&mut self, spot: &Spot) {
+		let base = kit::P1;
 		let params = GrainGradientParams {
 			kind: GradientKind::Linear,
-			colors: Stops::new(&[linear(base), linear(mix(base, lift, 0.05))]),
+			colors: Stops::new(&[linear(base), linear(mix(base, Color32::WHITE, 0.03))]),
 			angle: 1.2,
 			amount: 0.25,
 			size: 1.0,
@@ -212,16 +217,17 @@ impl Fx {
 		self.draw(&spot.painter, spot.under, [Effect::fill(params).on(spot.shape(0.0))]);
 	}
 
-	/// A key's cap in the Hotkeys panel.
+	/// A key's cap: dark plastic, dished.
 	pub fn keycap(&mut self, spot: &Spot) {
 		let params = PlasticParams {
+			color: linear(kit::P3),
 			bevel: 3.0,
 			..PlasticParams::dished()
 		};
 		self.draw(&spot.painter, spot.under, [Effect::fill(params).on(spot.shape(4.0))]);
 	}
 
-	/// The text color over a [`keycap`](Self::keycap) or a [`button`](Self::button).
+	/// The text color over a [`button`](Self::button).
 	pub const INK: Color32 = Color32::from_gray(24);
 
 	/// A button of polished metal that ripples while the pointer is on it.
@@ -244,21 +250,21 @@ impl Fx {
 		self.draw(&spot.painter, spot.under, [Effect::fill(params).on(spot.shape(4.0))]);
 	}
 
-	/// The Program monitor: a glow while on air, and a burst on each take.
-	/// Called every frame, shown or not, so the monitor shown again later
-	/// picks up where it would have been rather than bursting late.
-	pub fn program(&mut self, spot: Option<&Spot>, on_air: bool, takes: u64) {
-		let (time, clock, look) = (self.time, self.clock, &mut self.look);
+	/// What the effects follow this frame: whether the show is on air, how
+	/// many takes there have been, and the worst health. Called every frame,
+	/// whatever is drawn, so a picture or alert shown again later picks up
+	/// where it would have been rather than bursting late.
+	pub fn follow(&mut self, on_air: bool, takes: u64, verdict: Verdict) {
+		let (time, look) = (self.time, &mut self.look);
 		look.on_air.set(time, on_air);
-		let sparkles = SparkleParams {
-			count: 12,
-			size: 9.0,
-			..SparkleParams::default()
-		};
-		look.take(time, takes, f64::from(sparkles.burst_life().max(TAKE)));
-		let Some(spot) = spot else {
-			return;
-		};
+		look.take(time, takes, f64::from(sparkles().burst_life().max(TAKE)));
+		look.alerts.set(time, verdict);
+	}
+
+	/// The live picture: a glow while on air, and a burst on each take.
+	pub fn program(&mut self, spot: &Spot) {
+		let (time, clock, look) = (self.time, self.clock, &self.look);
+		let sparkles = sparkles();
 		// Kept off the controls above the monitor.
 		let mut clip = spot.painter.clip_rect();
 		clip.min.y = clip.min.y.max(spot.rect.top() - 3.0);
@@ -266,8 +272,8 @@ impl Fx {
 		let shape = spot.shape(2.0);
 		let glow = Effect::glow(GlowParams {
 			style: GlowStyle::Neon,
-			color: tally(),
-			core: rgb(0xffe2dc),
+			color: linear(kit::ACCENT),
+			core: rgb(0xdce8ff),
 			radius: 8.0,
 			occlusion: 0.0,
 			breathe: 0.25,
@@ -310,8 +316,8 @@ impl Fx {
 		let center = spot.rect.center();
 		let pulse = Effect::pulse(PulseParams {
 			style: PulseStyle::Radar,
-			color: tally(),
-			core: rgb(0xffd0c8),
+			color: linear(kit::ACCENT),
+			core: rgb(0xd0e0ff),
 			count: 2,
 			period: 1.6,
 			reach: 10.0,
@@ -323,17 +329,20 @@ impl Fx {
 		self.draw(&spot.painter, spot.under, [pulse.on(shape)]);
 	}
 
-	/// The Health panel and its tab, by how bad the worst problem is: a
-	/// warning pulse while degraded, and electric flicker while unhealthy.
-	/// Called every frame, drawn or not, so an alert shown again later picks
-	/// up where it would have been.
-	pub fn health(&mut self, spots: &[&Spot], verdict: Verdict) {
-		let alerts = &mut self.look.alerts;
-		alerts.set(self.time, verdict);
-		for spot in spots {
-			let layers = self.look.alerts.layers(self.time, spot.shape(4.0));
-			self.draw(&spot.painter, spot.over, layers);
-		}
+	/// The health of the stream, by how bad the worst problem is: a warning
+	/// pulse while degraded, and electric flicker while unhealthy.
+	pub fn health(&mut self, spot: &Spot) {
+		let layers = self.look.alerts.layers(self.time, spot.shape(4.0));
+		self.draw(&spot.painter, spot.over, layers);
+	}
+}
+
+/// The sparkles a take bursts into.
+fn sparkles() -> SparkleParams {
+	SparkleParams {
+		count: 12,
+		size: 9.0,
+		..SparkleParams::default()
 	}
 }
 
@@ -348,14 +357,10 @@ const BURSTS: usize = 4;
 /// breathing glow's phase goes unseen.
 const WRAP: f64 = 3600.0;
 
-/// The red of a tally light on air.
-fn tally() -> Rgb {
-	rgb(0xff2a1f)
-}
-
 /// The effects' state across frames.
 struct Look {
 	on_air: Light,
+	/// The metal [`button`](Fx::button)'s ripple.
 	ripple: Light,
 	/// The take count last seen, and when each burst it fired started, with
 	/// its seed.
@@ -418,7 +423,7 @@ impl Alerts {
 		if degraded > 0.0 {
 			let pulse = Effect::pulse(PulseParams {
 				style: PulseStyle::Breathe,
-				color: rgb(0xdcb43c),
+				color: linear(kit::CUE),
 				core: rgb(0xfff1c4),
 				period: 1.8,
 				reach: 8.0,
@@ -432,9 +437,10 @@ impl Alerts {
 		if unhealthy > 0.0 {
 			let electric = Effect::electric(ElectricParams {
 				style: ElectricStyle::Border,
-				color: rgb(0xff4b3e),
-				core: rgb(0xfff0ea),
-				cool: rgb(0x9b1c5a),
+				// Red, as an error is: unhealthy means something failed.
+				color: linear(kit::ERR),
+				core: rgb(0xffdce0),
+				cool: rgb(0x9b1c2a),
 				amplitude: 2.5,
 				glow: 3.0,
 				strands: 1,

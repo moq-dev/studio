@@ -11,7 +11,7 @@ kixel.live Studio is a native, cross-platform streaming studio that composites s
 
 Media, transport, and protocol work belongs in moq-dev/moq, not here: capture, codecs, rendering import and export (moq-video), audio capture, mixing, and filters (moq-audio), the catalog (hang), and the transport (moq-net, moq-tokio).
 A studio feature that needs a moq change lands that change in moq first, with a moq-side test proving it, then bumps the `moq` gitlink here.
-Never point the submodule at an unmerged moq branch on `main`.
+Never point the submodule at a commit off moq's `main`: CI's `sh/check-moq-main.sh` fails a PR that moves the pin there, and `just upgrade-moq` refuses one.
 
 # Rust
 
@@ -27,6 +27,10 @@ PRs target `main`.
 Run `just ci` before every push.
 
 `README.md` is the user guide. A change to what a user does (flags, panels, the scene file, outputs) updates it in the same PR.
+
+`just shots` renders named views of the window to PNG with no display, on Linux (the table in `rs/moq-studio/src/shots.rs`).
+A PR that changes what the window shows adds a view for each page or state it builds, and shows the views it changes in its body, beside the mock-up frames they implement.
+To host them, convert the views to lossy WebP (`cwebp -q 80`), commit them in a commit of their own, link them by that commit's SHA, and delete them in the next commit.
 
 Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
 The `quest` binary comes from the moq-dev/quest flake input, so outside the dev shell run it as `nix develop --command quest ...`. It serves the quest skills; change them upstream and bump the input.

@@ -104,6 +104,9 @@ async fn run(
 				}
 				changed = wanted.changed() => {
 					if changed.is_err() {
+						// The show closed: the desktop keeps a session until it is
+						// asked to end it, and would go on holding the keys.
+						let _ = session.close().await;
 						return Ok(());
 					}
 					break;
@@ -119,8 +122,6 @@ async fn run(
 /// for the key bound to it, which follows the scene through renames.
 fn id(action: &Action, binding: &Binding) -> String {
 	match action {
-		Action::Cut => "cut".into(),
-		Action::Transition => "transition".into(),
 		Action::Scene(_) => {
 			let held = binding.modifiers;
 			let mut id = "scene/".to_string();
@@ -140,9 +141,7 @@ fn id(action: &Action, binding: &Binding) -> String {
 			}
 			id
 		}
-		Action::Replay => "replay".into(),
-		Action::SaveClip => "save-clip".into(),
-		Action::Record => "record".into(),
+		action => action.id().expect("only a scene's is named for its key"),
 	}
 }
 
@@ -258,11 +257,11 @@ mod tests {
 			reach: Arc::new(Mutex::new(Reach::Asking)),
 		};
 		let key = key(egui::Modifiers::CTRL, KeyCode::KeyR, prints("r"));
-		portal.set(Bindings::from([(Action::Cut, key.clone())]));
+		portal.set(Bindings::from([(Action::Panic, key.clone())]));
 		assert!(wanted.has_changed().unwrap());
 		wanted.mark_unchanged();
 		// What the Hotkeys panel sets when it starts and stops waiting for a key.
-		portal.set(Bindings::from([(Action::Cut, key)]));
+		portal.set(Bindings::from([(Action::Panic, key)]));
 		assert!(!wanted.has_changed().unwrap());
 	}
 
@@ -283,10 +282,13 @@ mod tests {
 			"scene/ctrl+shift+Numpad1"
 		);
 		// An activation reads the bindings the session was opened with.
-		let cut = key(egui::Modifiers::CTRL, KeyCode::F1, Key::Named(NamedKey::F1));
-		let bindings = Bindings::from([(scene("Opening"), f1.clone()), (Action::Cut, cut)]);
+		let panic = key(egui::Modifiers::CTRL, KeyCode::F1, Key::Named(NamedKey::F1));
+		let bindings = Bindings::from([(scene("Opening"), f1.clone()), (Action::Panic, panic)]);
 		assert_eq!(by_id(&bindings, "scene/F1"), Some((&scene("Opening"), &f1)));
-		assert_eq!(by_id(&bindings, "cut").map(|(action, _)| action), Some(&Action::Cut));
+		assert_eq!(
+			by_id(&bindings, "panic").map(|(action, _)| action),
+			Some(&Action::Panic)
+		);
 		assert_eq!(by_id(&bindings, "unknown"), None);
 	}
 

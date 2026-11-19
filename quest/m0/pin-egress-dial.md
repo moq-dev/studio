@@ -4,7 +4,7 @@
 
 The `moq` submodule includes the two moq changes destinations dial through:
 moq-rtmp's `rtmps://` dial keeps the URL-derived `tcUrl`, from
-[RTMPS keeps `tcUrl`](https://github.com/moq-dev/moq/blob/main/quest/m3/rtmp-rtmps-tcurl.md),
+[RTMPS keeps `tcUrl`](https://github.com/moq-dev/moq/blob/main/quest/m2/rtmp-rtmps-tcurl.md),
 and a dial takes a policy its caller supplies, so a host can refuse private
 and loopback addresses, from
 [a caller-supplied dial policy](https://github.com/moq-dev/moq/blob/main/quest/m3/webrtc-dial-policy.md).
@@ -26,7 +26,3 @@ fixing whatever the new API breaks here.
   moq-rtmp's TLS dial sends the URL-derived `tcUrl`, and a dial takes the
   caller's policy. A quest file that moved, or went away without its work
   landing, does not count.
-
-## Required
-
-- [The studio is caught up to moq's main](/quest/m0/pin-main.md) - moq's breaking changes since moq-dev/moq#8272, so this pin takes only its own

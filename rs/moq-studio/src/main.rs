@@ -4,9 +4,10 @@
 //! The scenes, sources, and compositor live in `moq-scene`; this binary is the
 //! window around them and the program clock that publishes the result.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use winit::event::WindowEvent;
@@ -23,12 +24,21 @@ mod guests;
 mod health;
 mod hotkeys;
 mod interact;
+mod kit;
 mod ladder;
+mod library;
 mod mix;
+mod past;
+mod pointer;
 mod record;
 mod replay;
 mod setup;
+mod shelf;
+#[cfg(test)]
+mod shots;
+mod show;
 mod snap;
+mod stream;
 mod ui;
 mod uplink;
 mod vcam;
@@ -37,10 +47,11 @@ mod watch;
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-studio")]
-#[usage(completion, settings)]
+#[usage(completion, settings, unknown_env(prefix = "MOQ_"))]
 pub struct Config {
-	/// The scene collection to open, saved as it changes. If it does not exist,
-	/// guided setup proposes one and creates it.
+	/// The show to open: its scene file, saved as it changes. If it does not
+	/// exist, guided setup proposes one and creates it. Without one, the
+	/// window opens on your recent shows.
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub scenes: Option<PathBuf>,
 
@@ -52,19 +63,22 @@ pub struct Config {
 	#[usage(long)]
 	pub watch: Option<url::Url>,
 
-	/// The broadcast path the program is published at, or with `--watch`, is
-	/// played from.
-	#[usage(long, default = "studio")]
-	pub broadcast: String,
+	/// The broadcast path the program goes live at, for this run, over the
+	/// show's own (Settings, Stream), which is `studio` until set. With
+	/// `--watch`, the studio broadcast played, `studio` unless given.
+	#[usage(long)]
+	pub broadcast: Option<String>,
 
 	/// Copy and encode the program video at the canvas size only while someone
-	/// watches it, as the half size always is. This saves the work while
-	/// nobody does, but leaves a late viewer nothing from before they arrived.
-	/// Audio is always encoded, and a recording has an encoder of its own.
+	/// watches it, as the half size always is, for this run. This saves the
+	/// work while nobody does, but leaves a late viewer nothing from before
+	/// they arrived. Audio is always encoded, and a recording has an encoder
+	/// of its own.
 	#[usage(long)]
 	pub on_demand: bool,
 
-	/// The directory recordings are saved in. Defaults to the scene file's.
+	/// The directory recordings and clips are saved in, for this run.
+	/// Defaults to the scene file's.
 	#[usage(long, value_hint = usage_rs::ValueHint::DirPath)]
 	pub recordings: Option<PathBuf>,
 
@@ -72,16 +86,16 @@ pub struct Config {
 	#[usage(flatten)]
 	pub guests: guests::Config,
 
-	/// The MoQ client configuration. Without `--connect`, nothing is published
-	/// and broadcast sources stay offline.
+	/// The MoQ client configuration. `--connect` names the relay to go live
+	/// on for this run, over the show's own, and `--connect-token` goes to it
+	/// alone. Nothing is published until you go live.
 	#[usage(flatten)]
 	pub client: moq_tokio::connect::Config,
 
-	/// A second relay to publish the same broadcast to, so a viewer linked to
-	/// both resumes from it when the `--connect` relay fails. Both must speak
-	/// the one `--connect-version`, which must carry broadcast instances. Its
-	/// credential rides its URL's `?jwt=`: `--connect-token` goes to the
-	/// `--connect` relay only.
+	/// A second relay to publish the same broadcast to, for this run, so a
+	/// viewer linked to both resumes from it when the first fails. Both must
+	/// speak the one `--connect-version`, which must carry broadcast instances.
+	/// Its credential is its own, from Settings or its URL's `?jwt=`.
 	#[usage(long)]
 	pub failover: Option<url::Url>,
 
@@ -95,14 +109,10 @@ pub struct Config {
 }
 
 impl Config {
-	/// The scene file to open, refusing `--watch` beside the studio's own flags.
-	fn scenes(&self) -> anyhow::Result<Option<&Path>> {
+	/// Refuse `--watch` beside the studio's own flags.
+	fn check_watch(&self) -> anyhow::Result<()> {
 		if self.watch.is_none() {
-			let scenes = self
-				.scenes
-				.as_deref()
-				.context("name a scene file to open, or --watch a broadcast")?;
-			return Ok(Some(scenes));
+			return Ok(());
 		}
 		anyhow::ensure!(
 			self.scenes.is_none(),
@@ -116,7 +126,7 @@ impl Config {
 			self.guests.room.is_none(),
 			"--watch publishes nothing, so it has no --room"
 		);
-		Ok(None)
+		Ok(())
 	}
 
 	/// Refuse a config parsed from released spellings, naming what replaced each.
@@ -127,49 +137,32 @@ impl Config {
 		Ok(())
 	}
 
-	/// The relays to publish to, the `--connect` one first; none without it.
-	fn relays(&self) -> anyhow::Result<Vec<engine::Relay>> {
-		let Some(url) = self.client.url.clone() else {
-			anyhow::ensure!(self.failover.is_none(), "--failover needs --connect");
-			return Ok(Vec::new());
-		};
-		if self.failover.is_some() {
-			self.check_failover()?;
+	/// What the flags set for every show this run opens.
+	fn flags(&self) -> stream::Flags {
+		stream::Flags {
+			relay: self.client.url.clone(),
+			tokens: self.client.tokens.clone(),
+			failover: self.failover.clone(),
+			broadcast: self.broadcast.clone(),
+			on_demand: self.on_demand,
+			recordings: self.recordings.clone(),
+			guests: self.guests.clone(),
 		}
-		let client = self.client.clone().init(self.quic.clone())?;
-		let mut relays = vec![engine::Relay { client, url }];
-		if let Some(url) = self.failover.clone() {
-			let mut client = self.client.clone();
-			// Its own credentials ride its URL; another operator's never reach it.
-			client.tokens.clear();
-			let client = client
-				.init(self.quic.clone())
-				.context("cannot set up the failover relay")?;
-			relays.push(engine::Relay { client, url });
-		}
-		Ok(relays)
 	}
 
-	/// Refuse relays a viewer could not move between without a restart: a copy
-	/// resumes mid-group only under the same instance, which needs both links on
-	/// one protocol version that carries it.
-	fn check_failover(&self) -> anyhow::Result<()> {
-		let [version] = self.client.version.as_slice() else {
-			anyhow::bail!("--failover needs exactly one --connect-version, so both relays negotiate the same protocol");
-		};
-		anyhow::ensure!(
-			matches!(version, moq_net::Version::Lite(lite) if lite.has_instance()),
-			"--failover needs a --connect-version with broadcast instances (moq-lite-07-wip today), not {version}, \
-			 or a viewer moving between relays restarts the stream rather than resuming it"
-		);
-		// Each relay's client binds its own socket, so a fixed port would be
-		// bound twice.
-		anyhow::ensure!(
-			self.client.bind.is_none_or(|bind| bind.port() == 0),
-			"--failover cannot share a fixed --connect-bind port between the two relays; leave the port 0"
-		);
-		Ok(())
+	/// Every other client flag, which each relay is dialed with: the relay and
+	/// its tokens come from the show, or the flags over it.
+	fn client(&self) -> moq_tokio::connect::Config {
+		let mut client = self.client.clone();
+		client.url = None;
+		client.tokens.clear();
+		client
 	}
+}
+
+/// Where the studio keeps its own files, such as the window's settings.
+fn data_dir() -> Option<PathBuf> {
+	eframe::storage_dir("moq-studio")
 }
 
 fn main() -> anyhow::Result<ExitCode> {
@@ -182,103 +175,121 @@ fn main() -> anyhow::Result<ExitCode> {
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
-	moq_tokio::cli::check_env(&[Config::spec()], &[])?;
-	let Some(scenes) = config.scenes()? else {
-		let url = config.watch.clone().expect("checked by scenes");
-		watch::run(config.client.clone(), config.quic.clone(), url, &config.broadcast)?;
+	config.check_watch()?;
+	if let Some(url) = config.watch.clone() {
+		let broadcast = config.broadcast.as_deref().unwrap_or(stream::BROADCAST);
+		watch::run(config.client.clone(), config.quic.clone(), url, broadcast)?;
 		return Ok(ExitCode::SUCCESS);
-	};
-	let scenes = scenes.to_path_buf();
+	}
 
 	let runtime = tokio::runtime::Runtime::new()?;
 	// The QUIC client binds its socket on the current runtime.
 	let _runtime = runtime.enter();
-	let relays = config.relays()?;
-	let gpu = pollster::block_on(engine::Gpu::new())?;
-	let recordings = match &config.recordings {
-		Some(dir) => dir.clone(),
-		None => scenes
-			.parent()
-			.filter(|dir| !dir.as_os_str().is_empty())
-			.unwrap_or(Path::new("."))
-			.to_path_buf(),
-	};
-	let room = config.guests.load(config.client.url.as_ref())?.map(Arc::new);
-	if let Some(room) = &room {
-		let renewal = guests::Renewal::connect(room.clone(), &config.client, config.quic.clone())?;
-		runtime.spawn(renewal.run());
-	}
-	let launch = engine::Launch {
+	let gpu = pollster::block_on(engine::Gpu::new(wgpu::Backends::all()))?;
+	let opener = show::Opener {
 		gpu: gpu.clone(),
-		relays,
-		broadcast: config.broadcast.clone(),
-		on_demand: config.on_demand,
-		recordings,
-		room,
+		runtime: runtime.handle().clone(),
+		flags: config.flags(),
+		client: config.client(),
+		quic: config.quic.clone(),
+		credentials: stream::Credentials::system(),
 	};
-	let exists = scenes
-		.try_exists()
-		.with_context(|| format!("reading {}", scenes.display()))?;
-	let app = match exists {
-		true => {
-			let (autosave, loaded) = autosave::Autosave::open(scenes.clone())?;
-			App::Starting(runtime.block_on(engine::Engine::start(launch, autosave, loaded))?)
-		}
-		// Nothing is saved until setup starts the studio, so quitting before then
-		// leaves no file and the next launch runs setup again.
-		false => App::Setup(Box::new(setup::Setup::new(
-			launch,
-			scenes.clone(),
-			runtime.handle().clone(),
-		)?)),
+	let app = match &config.scenes {
+		// Nothing is saved until setup starts the studio, so quitting before
+		// then leaves no file and the next launch runs setup again.
+		Some(scenes) => match runtime.block_on(opener.open(scenes.clone()))? {
+			show::Opened::Studio(engine, stream) => App::Starting(engine, stream),
+			show::Opened::Setup(setup, stream) => App::Setup(setup, stream),
+		},
+		None => App::Library(Box::new(library::Library::new(library::pictures())), None),
 	};
 
-	let started = Arc::new(OnceLock::new());
-	let ran = run(app, gpu, runtime.handle().clone(), started.clone());
-	let Some(engine) = started.get() else {
-		return ran.map(|()| ExitCode::SUCCESS);
-	};
+	run(app, opener)?;
+	Ok(ExitCode::SUCCESS)
+}
+
+/// End the studio on the way out: finish a recording, save the edits since
+/// the last autosave, and close each relay session.
+fn shutdown(engine: &engine::Engine, runtime: &tokio::runtime::Handle) -> anyhow::Result<()> {
 	// A recording still running reads the program until stopping ends its
 	// tracks, so it holds what the encoders publish on the way out, and then
 	// finishes as a regular MP4.
 	engine.recorder.close();
-	// The edits since the last autosave, so quitting loses none.
 	let saved = engine.save();
 	engine.stop();
 	// Before the runtime goes, which would drop each relay session with the
 	// tail of the broadcast still on its way.
 	runtime.block_on(async { tokio::join!(engine.close(), engine.recorder.done()) });
-	if let (Err(err), Err(_)) = (&saved, &ran) {
-		tracing::error!(error = format!("{err:#}"), "cannot save on quit");
-	}
-	ran?;
-	saved?;
-	Ok(ExitCode::SUCCESS)
+	saved
 }
+
+/// The engine of the show open, to end on quit or when it is closed.
+#[derive(Default)]
+struct Started(Mutex<Option<Arc<engine::Engine>>>);
+
+impl Started {
+	fn get(&self) -> Option<Arc<engine::Engine>> {
+		self.0.lock().unwrap().clone()
+	}
+
+	fn set(&self, engine: Arc<engine::Engine>) {
+		*self.0.lock().unwrap() = Some(engine);
+	}
+
+	/// Take the engine, so a quit after it is closed ends nothing twice.
+	fn take(&self) -> Option<Arc<engine::Engine>> {
+		self.0.lock().unwrap().take()
+	}
+}
+
+/// A show being opened from the library.
+type Opening = setup::Task<anyhow::Result<show::Opened>>;
 
 /// What the window shows.
 enum App {
-	/// First launch: guided setup, until it starts the studio.
-	Setup(Box<setup::Setup>),
+	/// No show open: the library, and the show it is opening.
+	Library(Box<library::Library>, Option<Opening>),
+	/// A new show: guided setup, until it starts the studio.
+	Setup(Box<setup::Setup>, stream::Stream),
 	/// An engine whose studio is built once the window can draw it.
-	Starting(Arc<engine::Engine>),
+	Starting(Arc<engine::Engine>, stream::Stream),
 	Studio(Box<ui::Studio>),
+	/// Between two of the above, within the frame that moves from one to the
+	/// next.
+	Moving,
 }
 
 /// The window's contents, and what building the studio takes.
 struct Window {
 	app: App,
 	render: eframe::egui_wgpu::RenderState,
-	runtime: tokio::runtime::Handle,
-	/// The engine once the studio is built, for the save on quit.
-	started: Arc<OnceLock<Arc<engine::Engine>>>,
+	opener: show::Opener,
+	/// The engine once the studio is built, until the show is closed.
+	started: Arc<Started>,
+	/// The shows this user has opened.
+	recent: library::Recent,
+	/// Where the shows' pictures are kept, if the system has app storage.
+	pictures: Option<PathBuf>,
+	/// The open show's last stream off air that [`Self::recent`] has noted.
+	aired: Option<engine::Aired>,
 	keyboard: hotkeys::Keyboard,
 	/// The window's own effects, on the setup screen and in the studio.
 	fx: fx::Fx,
+	/// Whether the studio's title bar is the window's frame, rather than the
+	/// desktop's, which the library and guided setup keep.
+	framed: bool,
+	/// Set once the window is asked to close, as [`Events::closed`] is.
+	closed: Arc<AtomicBool>,
 }
 
 impl eframe::App for Window {
 	fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+		// The title bar's Close asks egui rather than the desktop, so no
+		// window event says so.
+		if ctx.input(|input| input.viewport().close_requested()) {
+			self.closed.store(true, Ordering::Relaxed);
+		}
+		self.follow_air();
 		if let App::Studio(studio) = &mut self.app {
 			studio.logic(ctx, frame);
 		}
@@ -295,22 +306,105 @@ impl eframe::App for Window {
 		if let App::Studio(studio) = &mut self.app {
 			studio.save(storage);
 		}
+		self.follow_air();
+		if let Some(engine) = self.started.get() {
+			let path = engine.autosave.path();
+			// Its time on air so far, in case the window closes while live.
+			if let Some(live) = engine.on_air().live() {
+				let lasted = live.since.elapsed().as_secs();
+				let at = library::now().saturating_sub(lasted);
+				self.recent.aired(path, library::Aired { at, lasted });
+			}
+			if self.closed.load(Ordering::Relaxed) {
+				self.keep_picture(&engine);
+			}
+		}
+		self.recent.save(storage);
 	}
 }
 
 impl Window {
-	/// Draw setup or the studio, building the studio once its engine starts.
+	/// Draw the library, setup, or the studio, building the studio once its
+	/// engine starts.
 	fn show(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-		let engine = match &mut self.app {
-			App::Studio(studio) => return studio.ui(ui, frame, &mut self.fx),
-			App::Setup(setup) => match setup.ui(ui, &mut self.fx) {
-				Some(engine) => engine,
-				None => return,
+		match std::mem::replace(&mut self.app, App::Moving) {
+			App::Studio(mut studio) => {
+				studio.ui(ui, frame, &mut self.fx);
+				match studio.closing() {
+					true => self.close_show(studio, ui.ctx(), frame),
+					false => self.app = App::Studio(studio),
+				}
+			}
+			App::Library(library, opening) => self.library(ui, library, opening),
+			App::Setup(mut setup, stream) => match setup.ui(ui, &mut self.fx) {
+				Some(engine) => {
+					self.app = App::Starting(engine, stream);
+					ui.ctx().request_repaint();
+				}
+				None => self.app = App::Setup(setup, stream),
 			},
-			App::Starting(engine) => engine.clone(),
-		};
-		let _ = self.started.set(engine.clone());
-		let mut studio = ui::Studio::new(&self.render, engine, self.runtime.clone());
+			App::Starting(engine, stream) => self.start(ui, frame, engine, stream),
+			App::Moving => unreachable!("the window moves between pages within a frame"),
+		}
+	}
+
+	/// Draw the library, and open the show picked there, off this thread.
+	fn library(&mut self, ui: &mut egui::Ui, mut library: Box<library::Library>, mut opening: Option<Opening>) {
+		if let Some(task) = &mut opening {
+			ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+			if task.poll().is_some() {
+				let Some(setup::Task::Done(opened)) = opening.take() else {
+					unreachable!("polled done")
+				};
+				library.opening = None;
+				match opened {
+					Ok(show::Opened::Studio(engine, stream)) => {
+						self.app = App::Starting(engine, stream);
+						return ui.ctx().request_repaint();
+					}
+					Ok(show::Opened::Setup(setup, stream)) => {
+						self.app = App::Setup(setup, stream);
+						return ui.ctx().request_repaint();
+					}
+					Err(err) => library.error = Some(format!("{err:#}")),
+				}
+			}
+		}
+		let runtime = self.opener.runtime.clone();
+		if let Some(library::Pick::Open(path)) = library.ui(ui, &mut self.recent, &runtime) {
+			let name = path.file_stem().unwrap_or(path.as_os_str()).to_string_lossy();
+			library.opening = Some(name.into_owned());
+			library.error = None;
+			let opener = self.opener.clone();
+			match setup::Task::spawn(&runtime, move || async move { opener.open(path).await }) {
+				Ok(task) => opening = Some(task),
+				Err(err) => {
+					library.opening = None;
+					library.error = Some(format!("cannot open the show: {err}"));
+				}
+			}
+		}
+		self.app = App::Library(library, opening);
+	}
+
+	/// Build the studio around `engine`, now that the window can draw it.
+	fn start(
+		&mut self,
+		ui: &mut egui::Ui,
+		frame: &mut eframe::Frame,
+		engine: Arc<engine::Engine>,
+		stream: stream::Stream,
+	) {
+		self.started.set(engine.clone());
+		self.recent.opened(engine.autosave.path(), library::now());
+		// Once a show is open, the desktop's frame goes. macOS cannot draw under
+		// its title bar once the window is open, so it keeps it until a restart.
+		if !self.framed && !cfg!(target_os = "macos") {
+			ui.ctx().send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+			self.framed = true;
+		}
+		let runtime = self.opener.runtime.clone();
+		let mut studio = ui::Studio::new(&self.render, engine, stream, runtime, self.framed);
 		studio.load(hotkeys::Window {
 			frame,
 			ctx: ui.ctx(),
@@ -319,6 +413,76 @@ impl Window {
 		self.app = App::Studio(Box::new(studio));
 		ui.ctx().request_repaint();
 	}
+
+	/// Keep the program as the open show's picture in the library.
+	fn keep_picture(&mut self, engine: &engine::Engine) {
+		let path = engine.autosave.path();
+		let saved = self
+			.pictures
+			.clone()
+			.context("this system has no app storage")
+			.and_then(|pictures| {
+				let picture = library::capture(&self.opener.gpu, engine)?;
+				self.recent.shaped(path, picture.portrait());
+				library::save_picture(&pictures, path, &picture)
+			});
+		if let Err(err) = saved {
+			tracing::warn!(error = format!("{err:#}"), "cannot keep the show's picture");
+		}
+	}
+
+	/// End the open show as quitting does, and return to the library with its
+	/// card refreshed. The show stays open if it cannot be saved, or went live
+	/// since the click, rather than lose an edit or cut a stream.
+	fn close_show(&mut self, mut studio: Box<ui::Studio>, ctx: &egui::Context, frame: &mut eframe::Frame) {
+		let engine = studio.engine().clone();
+		// Claimed against a go-live first, which the engine being off air
+		// alone would not refuse while it reads tokens or checks encoders.
+		let ready = studio
+			.reserve_close()
+			.and_then(|()| engine.save().inspect_err(|_| studio.release_close()));
+		if let Err(err) = ready {
+			studio.refuse(err.context("cannot close the show"));
+			self.app = App::Studio(studio);
+			return;
+		}
+		self.follow_air();
+		// Before the engine stops drawing.
+		self.keep_picture(&engine);
+		if let Some(storage) = frame.storage_mut() {
+			studio.save(storage);
+			self.recent.save(storage);
+		}
+		self.started.take();
+		self.aired = None;
+		if let Err(err) = shutdown(&engine, &self.opener.runtime) {
+			tracing::error!(error = format!("{err:#}"), "cannot save on close");
+		}
+		// The studio goes with its hotkeys, which would otherwise fire on the
+		// closed show.
+		studio.release(&self.render);
+		// The desktop's frame again, which the library keeps.
+		if self.framed && !cfg!(target_os = "macos") {
+			ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+			self.framed = false;
+		}
+		self.app = App::Library(Box::new(library::Library::new(self.pictures.clone())), None);
+		ctx.request_repaint();
+	}
+
+	/// Note when the open show's last stream went live, and how long it
+	/// stayed, once it ends.
+	fn follow_air(&mut self) {
+		let Some(engine) = self.started.get() else { return };
+		let Some(aired) = engine.aired() else { return };
+		if self.aired == Some(aired) {
+			return;
+		}
+		self.aired = Some(aired);
+		let at = library::now().saturating_sub(aired.since.elapsed().as_secs());
+		let lasted = aired.lasted.as_secs();
+		self.recent.aired(engine.autosave.path(), library::Aired { at, lasted });
+	}
 }
 
 /// eframe's handler for the window's events, which hears keys before egui,
@@ -326,9 +490,18 @@ impl Window {
 struct Events<'a> {
 	eframe: eframe::EframeWinitApplication<'a>,
 	keyboard: hotkeys::Keyboard,
-	/// Whether the window was asked to close, since eframe only logs the error
-	/// that stops it otherwise.
-	closed: bool,
+	/// Whether the window was asked to close, by the desktop or the studio's
+	/// own title bar, since eframe only logs the error that stops it otherwise.
+	closed: Arc<AtomicBool>,
+	/// The studio's own window, the first to hear an event: the multiview's
+	/// opens after it, closing that one closes nothing else, and typing into
+	/// the studio's holds back no key pressed in it.
+	root: Option<winit::window::WindowId>,
+	/// The engine once the studio is built, to end on the way out.
+	started: Arc<Started>,
+	runtime: tokio::runtime::Handle,
+	/// Whether ending the studio could not save it.
+	unsaved: bool,
 }
 
 impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
@@ -345,6 +518,7 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 	}
 
 	fn window_event(&mut self, event_loop: &ActiveEventLoop, id: winit::window::WindowId, event: WindowEvent) {
+		let root = *self.root.get_or_insert(id) == id;
 		match &event {
 			// A synthetic press is a key held as the window gained focus.
 			WindowEvent::KeyboardInput {
@@ -353,12 +527,12 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 				..
 			} if event.state.is_pressed() => {
 				let name = event.key_without_modifiers();
-				if !self.keyboard.pressed(event.physical_key, name, event.repeat) {
+				if !self.keyboard.pressed(event.physical_key, name, event.repeat, root) {
 					return;
 				}
 			}
 			WindowEvent::ModifiersChanged(modifiers) => self.keyboard.modifiers(modifiers.state()),
-			WindowEvent::CloseRequested => self.closed = true,
+			WindowEvent::CloseRequested if root => self.closed.store(true, Ordering::Relaxed),
 			_ => {}
 		}
 		self.eframe.window_event(event_loop, id, event);
@@ -383,6 +557,14 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 
 	fn exiting(&mut self, event_loop: &ActiveEventLoop) {
 		self.eframe.exiting(event_loop);
+		// Here rather than once the loop returns: quitting from the macOS app
+		// menu or Dock, or logging out, ends the process as this returns.
+		if let Some(engine) = self.started.get()
+			&& let Err(err) = shutdown(&engine, &self.runtime)
+		{
+			tracing::error!(error = format!("{err:#}"), "cannot save on quit");
+			self.unsaved = true;
+		}
 	}
 
 	fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
@@ -401,21 +583,33 @@ fn icon() -> egui::IconData {
 	}
 }
 
-/// Show the window until it is closed.
-fn run(
-	app: App,
-	gpu: engine::Gpu,
-	runtime: tokio::runtime::Handle,
-	started: Arc<OnceLock<Arc<engine::Engine>>>,
-) -> anyhow::Result<()> {
+/// Show the window until it is closed, then end the studio.
+fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
+	let started = Arc::<Started>::default();
+	// The studio's title bar is the window's: the desktop draws no frame, and
+	// macOS draws its buttons over the studio's bar. The library and guided
+	// setup keep the desktop's until a show opens.
+	let framed = matches!(app, App::Starting(..));
+	let mut viewport = egui::ViewportBuilder::default()
+		.with_title("kixel.live Studio")
+		// The Wayland app id and X11 class, which the desktop finds the
+		// app's entry and icon by: the entry's file name, without `.desktop`.
+		.with_app_id("live.kixel.studio")
+		.with_icon(icon())
+		.with_inner_size([1440.0, 900.0])
+		.with_min_inner_size(ui::MIN_SIZE);
+	if framed {
+		viewport = match cfg!(target_os = "macos") {
+			true => viewport
+				.with_fullsize_content_view(true)
+				.with_titlebar_shown(false)
+				.with_title_shown(false),
+			false => viewport.with_decorations(false),
+		};
+	}
+	let gpu = opener.gpu.clone();
 	let options = eframe::NativeOptions {
-		viewport: egui::ViewportBuilder::default()
-			.with_title("kixel.live Studio")
-			// The Wayland app id and X11 class, which the desktop finds the
-			// app's entry and icon by: the entry's file name, without `.desktop`.
-			.with_app_id("live.kixel.studio")
-			.with_icon(icon())
-			.with_inner_size([1440.0, 900.0]),
+		viewport,
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
 			// The window draws on the device the compositor does, so preview and
 			// program reach the screen without leaving the GPU.
@@ -429,7 +623,7 @@ fn run(
 		},
 		// eframe would otherwise name the settings directory after the app id;
 		// keep it beside the browser profile, under the app's name.
-		persistence_path: eframe::storage_dir("moq-studio").map(|dir| dir.join("app.ron")),
+		persistence_path: data_dir().map(|dir| dir.join("app.ron")),
 		..Default::default()
 	};
 	let event_loop = EventLoop::<eframe::UserEvent>::with_user_event()
@@ -437,6 +631,10 @@ fn run(
 		.context("cannot open the window")?;
 	let keyboard = hotkeys::Keyboard::default();
 	let window_keyboard = keyboard.clone();
+	let window_started = started.clone();
+	let runtime = opener.runtime.clone();
+	let closed = Arc::new(AtomicBool::new(false));
+	let window_closed = closed.clone();
 	let eframe = eframe::create_native(
 		"moq-studio",
 		options,
@@ -445,14 +643,21 @@ fn run(
 				.wgpu_render_state
 				.clone()
 				.context("the window is not drawn with wgpu")?;
-			let fx = fx::Fx::new(&render, cc.storage, &cc.egui_ctx, &runtime);
+			kit::install(&cc.egui_ctx);
+			let fx = fx::Fx::new(&render, cc.storage, &cc.egui_ctx, &opener.runtime);
+			let recent = library::Recent::load(cc.storage);
 			Ok(Box::new(Window {
 				app,
 				render,
-				runtime,
-				started,
+				opener,
+				started: window_started,
+				recent,
+				pictures: library::pictures(),
+				aired: None,
 				keyboard: window_keyboard,
 				fx,
+				framed,
+				closed: window_closed,
 			}))
 		}),
 		&event_loop,
@@ -460,82 +665,75 @@ fn run(
 	let mut events = Events {
 		eframe,
 		keyboard,
-		closed: false,
+		closed: closed.clone(),
+		root: None,
+		started,
+		runtime,
+		unsaved: false,
 	};
 	event_loop.run_app(&mut events).context("the window failed")?;
-	anyhow::ensure!(events.closed, "the window failed; the error is logged above");
+	anyhow::ensure!(
+		closed.load(Ordering::Relaxed),
+		"the window failed; the error is logged above"
+	);
+	anyhow::ensure!(!events.unsaved, "cannot save on quit; the error is logged above");
 	Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-	use std::time::Duration;
-
 	use super::*;
 
+	fn parse(args: &[&str]) -> Config {
+		let args: Vec<_> = args.iter().map(std::ffi::OsStr::new).collect();
+		Config::parse_from(&args).unwrap()
+	}
+
+	/// A scene file and a relay parse as flags over the show's own settings,
+	/// with the relay and its tokens taken out of the client every relay is
+	/// dialed with.
 	#[test]
 	fn parses_a_scene_file_and_a_relay() {
-		let config = Config::parse_from(&[
-			std::ffi::OsStr::new("show.toml"),
-			std::ffi::OsStr::new("--connect"),
-			std::ffi::OsStr::new("http://localhost:4443"),
-		])
-		.expect("a scene file and a relay should parse");
+		let config = parse(&[
+			"show.toml",
+			"--connect",
+			"http://localhost:4443",
+			"--connect-token",
+			"secret",
+		]);
 		config.check_deprecated().unwrap();
-		assert_eq!(config.scenes().unwrap(), Some(Path::new("show.toml")));
-		assert_eq!(config.broadcast, "studio");
-		assert!(!config.on_demand, "the program encodes whatever the demand by default");
-		assert!(config.guests.room.is_none(), "guests are opt-in");
-		assert_eq!(
-			Duration::from(config.guests.guest_expiry),
-			Duration::from_secs(4 * 3600)
-		);
-		assert_eq!(config.client.url.unwrap().port(), Some(4443));
+		config.check_watch().unwrap();
+		assert_eq!(config.scenes.as_deref(), Some(std::path::Path::new("show.toml")));
+		let flags = config.flags();
+		assert_eq!(flags.broadcast, None, "the show's broadcast name stands");
+		assert!(!flags.on_demand, "the program encodes whatever the demand by default");
+		assert!(flags.guests.room.is_none(), "guests are opt-in");
+		assert_eq!(flags.relay.unwrap().port(), Some(4443));
+		assert_eq!(flags.tokens.len(), 1);
+		let client = config.client();
+		assert!(client.url.is_none() && client.tokens.is_empty());
 	}
 
-	/// A failover relay is accepted only on one protocol version that carries
-	/// broadcast instances, so a viewer moving between the relays resumes rather
-	/// than restarts.
+	/// With no arguments the studio opens on the library.
 	#[test]
-	fn failover_needs_one_version_with_instances() {
-		let check = |extra: &[&str]| {
-			let mut args = vec!["show.toml", "--connect", "https://a/", "--failover", "https://b/"];
-			args.extend(extra);
-			let args: Vec<_> = args.into_iter().map(std::ffi::OsStr::new).collect();
-			Config::parse_from(&args).unwrap().check_failover()
-		};
-		let lite07 = ["--connect-version", "moq-lite-07-wip"];
-		check(&lite07).expect("one version with instances");
-		check(&[&lite07[..], &["--connect-bind", "127.0.0.1:0"]].concat()).expect("an ephemeral port");
-		for refused in [
-			&[][..],
-			&["--connect-version", "moq-lite-06"],
-			&["--connect-version", "moq-transport-22"],
-			&[&lite07[..], &["--connect-version", "moq-lite-06"]].concat(),
-			// Each relay binds its own socket.
-			&[&lite07[..], &["--connect-bind", "127.0.0.1:4444"]].concat(),
-		] {
-			assert!(check(refused).is_err(), "{refused:?} was accepted");
-		}
+	fn opens_with_no_arguments() {
+		let config = parse(&[]);
+		config.check_watch().unwrap();
+		assert!(config.scenes.is_none() && config.watch.is_none());
 	}
 
-	/// `--watch` opens no scene file and names its own relay, and the studio
-	/// needs a scene file.
+	/// `--watch` opens no scene file and names its own relay.
 	#[test]
 	fn watch_takes_no_scene_file_or_relay() {
-		let parse = |args: &[&str]| {
-			let args: Vec<_> = args.iter().map(std::ffi::OsStr::new).collect();
-			Config::parse_from(&args).unwrap()
-		};
-		let watch = parse(&["--watch", "https://relay.example/anon", "--broadcast", "studio"]);
-		assert_eq!(watch.scenes().unwrap(), None);
+		parse(&["--watch", "https://relay.example/anon", "--broadcast", "studio"])
+			.check_watch()
+			.unwrap();
 		for refused in [
 			&["show.toml", "--watch", "https://a/b"][..],
 			&["--watch", "https://a/b", "--connect", "https://a/"],
 			&["--watch", "https://a/b", "--room", "guests"],
-			&[],
 		] {
-			assert!(parse(refused).scenes().is_err(), "{refused:?} was accepted");
+			assert!(parse(refused).check_watch().is_err(), "{refused:?} was accepted");
 		}
 	}
 }

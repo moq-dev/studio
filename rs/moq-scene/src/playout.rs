@@ -1,24 +1,28 @@
 //! When a broadcast source's audio sounds and its pictures show: on its
-//! publisher's timestamps, so they stay in sync through jitter and stalls.
+//! publisher's timestamps, against one [`sync`] clock per broadcast, as in
+//! `moq play`.
 //!
-//! A broadcast's audio and video share one [`timeline`] clock, as they do in
-//! `moq play`: audio owns the clock's anchor while it plays, and video shows
-//! each picture once the clock says it is due and its sound has played.
-//! Without audio, video paces itself [`VIDEO_DELAY`] behind its arrivals.
+//! Each track folds its arrivals into the clock, which plays the largest
+//! jitter target any track holds behind the earliest of them. In the steady
+//! state, sound and pictures stamped alike are due together. A track that
+//! stalls only arrives late, and never holds or moves the other: the picture
+//! plays on through a sound stall, and the sound comes back on the clock, the
+//! part of it more than [`STRETCH`] late skipped and the rest sped up onto
+//! it. Without audio, video plays [`VIDEO_DELAY`] behind its arrivals.
 //!
-//! `moq play` holds its jitter buffer in the speaker. Here a [`Speaker`] holds
-//! it: it places each frame the playout target moq-audio's decoder estimates
-//! after it arrives, and a [`Writer`] hands it to the bus [`WRITE_LEAD`] ahead
-//! of then, at the bus position that moment maps to. A media or replay
-//! source's sound goes through a [`Writer`] too, so it sounds with the
-//! pictures it shows.
+//! A [`Writer`] hands each sound to the bus [`WRITE_LEAD`] ahead of its
+//! moment, at the bus position that moment maps to. A broadcast's sound glides
+//! onto a moment that moves, as `moq play`'s does: a step of the jitter target
+//! speeds it up or slows it down rather than skipping it or leaving a silence. A media or replay source's sound goes
+//! through a [`Writer`] too, placed exactly, so it sounds with the pictures it
+//! shows.
 
 use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_audio::bus;
-use moq_mux::timeline;
-use tokio::sync::Notify;
+use moq_mux::sync;
+use tokio::sync::watch;
 
 use crate::source::Mixed;
 
@@ -26,7 +30,7 @@ use crate::source::Mixed;
 /// `moq play --delay auto`. With audio, video follows the audio's target.
 pub(crate) const VIDEO_DELAY: Duration = Duration::from_millis(100);
 
-/// The longest playout target, the most lateness the jitter estimate can
+/// The longest playout delay, the most lateness the jitter estimate can
 /// represent, and so how long a stalled group is waited on before it is
 /// skipped, as under `moq play --delay auto`. A shorter wait would cap the
 /// estimate at it, since a skipped group is never measured.
@@ -44,193 +48,113 @@ const _: () = assert!(
 	"a sound handed over the lead ahead is in the bus's reach"
 );
 
-/// How far over its target the queue may run before an arrival is skipped to
-/// land back on it, as `moq play`'s speaker allows: one frame of cadence.
-const SLACK: Duration = Duration::from_millis(20);
+/// How far a broadcast's sound may trail its moments before it skips onto
+/// them, as `moq play --stretch` defaults to: within it, the sound speeds up
+/// or slows down onto a moment that moved, rather than skipping or falling
+/// silent.
+pub(crate) const STRETCH: Duration = Duration::from_millis(200);
+
+const _: () = assert!(
+	STRETCH.as_nanos() <= bus::MAX_STRETCH.as_nanos(),
+	"the bus stretches a channel this far"
+);
 
 /// How far apart two stamps may be and still meet: a millisecond-stamped
 /// ingest rounds each one.
 const CONTIGUOUS: Duration = Duration::from_millis(1);
 
-/// Places one broadcast audio track's frames on the bus clock, and reports
-/// where they sound to the broadcast's clock, which video follows.
+/// One track's hold on its broadcast's clock: its arrivals, and for audio its
+/// jitter target. Every move of the schedule is sent on `moved`, since a track
+/// asleep on a deadline computed before it is due earlier or later now.
 ///
-/// Dropping it hands the clock's anchor back to video.
-pub(crate) struct Speaker<'a> {
-	clock: timeline::Producer,
-	/// Woken on every frame placed and when the speaker stops, so pictures
-	/// held for their sound show once it plays, or once there is none.
-	changed: &'a Notify,
-	/// The last frame placed: when it finishes sounding, and the media time it
-	/// ends at.
-	tail: Option<(Instant, Duration)>,
-	/// When the media after a skip starts sounding. The clock holds one
-	/// mapping, and the audio queued ahead of the skip plays on the old one
-	/// until then, so frames placed before it are reported only once it comes:
-	/// see [`commit`](Self::commit).
-	skipped: Option<Instant>,
-	/// The newest frame placed but not reported yet: when it finishes
-	/// sounding, the media time it ends at, and the target it was placed on.
-	unreported: Option<(Instant, Duration, Duration)>,
+/// Dropping it releases its hold, which may move the schedule too.
+pub(crate) struct Hold<'a> {
+	track: sync::Track,
+	moved: &'a watch::Sender<()>,
 }
 
-/// What to do with a frame [`Speaker::place`] was given.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Place {
-	/// Play it from this moment.
-	Play(Instant),
-	/// Drop it: more is queued than the target needs, after a burst or a
-	/// target that fell, so the media skips ahead to land back on the target.
-	Skip,
-}
-
-impl<'a> Speaker<'a> {
-	/// Place audio on `clock`, taking its anchor from video on the first frame,
-	/// and wake `changed` whenever that may let a picture show.
-	pub(crate) fn new(clock: timeline::Producer, changed: &'a Notify) -> Self {
+impl<'a> Hold<'a> {
+	/// Hold `clock` for a track of `kind`, the only one of that kind on it.
+	pub(crate) fn new(clock: &sync::Producer, kind: moq_mux::container::Kind, moved: &'a watch::Sender<()>) -> Self {
 		Self {
-			clock,
-			changed,
-			tail: None,
-			skipped: None,
-			unreported: None,
+			track: clock.track(kind),
+			moved,
 		}
 	}
 
-	/// Place a decoded frame covering `duration` of media from `start`,
-	/// arriving at `now`, given the playout `target` moq-audio estimated.
-	///
-	/// A frame continues the one before, after silence for any hole in the
-	/// media between them. A frame that arrives too late for that, because the
-	/// network stalled longer than the target, re-buffers instead: it sounds the
-	/// whole target after it arrived, and the clock re-pins on it, so video
-	/// waits along with the sound rather than running ahead of it. A frame
-	/// that would queue past the target, or that overlaps media already queued,
-	/// is skipped, so the queue never holds more than the target.
-	pub(crate) fn place(&mut self, start: Duration, duration: Duration, target: Duration, now: Instant) -> Place {
-		let target = target.min(MAX_DELAY);
-		let end = start.saturating_add(duration);
-		let begins = match self.tail {
-			None => now + target + WRITE_LEAD,
-			Some((sounds, media)) => {
-				let follows = sounds + start.saturating_sub(media);
-				// A write half its lead late is still ahead of the mix, however
-				// coarsely the bus advances.
-				if follows < now + WRITE_LEAD / 2 {
-					self.clock.audio_restarted();
-					self.skipped = None;
-					self.unreported = None;
-					now + target + WRITE_LEAD
-				} else if start.saturating_add(CONTIGUOUS) < media
-					|| follows.saturating_duration_since(now) > target + WRITE_LEAD + SLACK
-				{
-					// Media overlapping what is queued, or past the target, would
-					// queue without bound however fast it arrives.
-					self.tail = Some((sounds, media.max(end)));
-					self.skipped = Some(sounds);
-					return Place::Skip;
-				} else {
-					follows
-				}
-			}
-		};
-		let sounds = begins + duration;
-		self.tail = Some((sounds, end));
-		self.unreported = Some((sounds, end, target));
-		if self.skipped.is_none_or(|skipped| skipped <= now) {
-			self.report(now);
-		}
-		Place::Play(begins)
-	}
-
-	/// When [`commit`](Self::commit) has a report to make, after a skip.
-	pub(crate) fn deferred(&self) -> Option<Instant> {
-		self.unreported.and(self.skipped)
-	}
-
-	/// Report the frames placed since a skip, once the media after it sounds at
-	/// `now`, whether or not another frame has arrived since.
-	pub(crate) fn commit(&mut self, now: Instant) {
-		if self.deferred().is_some_and(|skipped| skipped <= now) {
-			self.report(now);
+	/// Fold a frame stamped `timestamp` that arrived at `now` into the clock.
+	pub(crate) fn received(&self, timestamp: moq_net::Timestamp, now: Instant) {
+		if self.track.received(timestamp, now) {
+			self.moved.send_replace(());
 		}
 	}
 
-	/// Tell the clock where the newest frame placed sounds, as of `now`.
-	fn report(&mut self, now: Instant) {
-		self.skipped = None;
-		let Some((sounds, end, target)) = self.unreported.take() else {
-			return;
-		};
-		let audio = timeline::Audio {
-			end,
-			buffered: sounds.saturating_duration_since(now),
-			target,
-		};
-		self.clock.audio(audio, now);
-		self.changed.notify_one();
+	/// Hold the audio's jitter `target`, plus the lead its writes need so a
+	/// frame on time is handed to the bus whole, up to [`MAX_DELAY`].
+	pub(crate) fn set_target(&self, target: Duration) {
+		if self.track.set_target(target.saturating_add(WRITE_LEAD).min(MAX_DELAY)) {
+			self.moved.send_replace(());
+		}
+	}
+
+	/// End this track's timeline at lost media or an encoder restart: its
+	/// arrivals hold the clock again from the next frame.
+	pub(crate) fn reset(&self) {
+		self.track.reset();
+		self.moved.send_replace(());
 	}
 }
 
-impl Drop for Speaker<'_> {
+impl Drop for Hold<'_> {
 	fn drop(&mut self) {
-		self.clock.audio_stopped();
-		self.changed.notify_one();
+		self.moved.send_replace(());
 	}
 }
 
-/// How soon a picture held by [`heard`] looks at the playhead again: another
-/// broadcast's playhead moves, or re-anchors across a gap, without telling
-/// anyone reading its clock, so a held picture polls it.
-pub const RECHECK: Duration = Duration::from_millis(10);
+/// How soon a sound waiting on another broadcast's clock looks at it again:
+/// that clock moves without telling anyone reading it.
+pub(crate) const RECHECK: Duration = Duration::from_millis(10);
 
-/// Whether a picture stamped `timestamp` may show at `now` on `schedule`:
-/// while audio plays, only once the sound stamped with it has played, so a
-/// stall in the audio alone holds the picture too.
-pub fn heard(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: Instant) -> bool {
-	schedule.target().is_none()
-		|| schedule
-			.playhead(now)
-			.is_some_and(|head| Duration::from(timestamp) <= head + CONTIGUOUS)
-}
-
-/// What to do at `now` with a sound stamped `timestamp` that plays on
-/// `schedule`, another track's clock.
+/// What to do with a sound at a moment.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Follow {
 	/// Write it to sound at this moment.
 	Write(Instant),
-	/// Look again at this moment.
+	/// Look again at this moment, its lead before it sounds.
 	Wait(Instant),
-	/// Its moment has passed, or the clock has none.
+	/// It has sounded through, or the clock has no moment for it.
 	Drop,
 }
 
-/// Decide what to do with a followed sound from the clock as it is now, not
-/// as it was when the sound arrived, so a re-anchor moves it. The clock's own
-/// sound stamped alike must have been written first: when that stalls, this
-/// one waits with the pictures, until its moment has passed.
-pub(crate) fn follow(schedule: &timeline::Consumer, timestamp: moq_net::Timestamp, now: Instant) -> Follow {
-	let Some(sounds) = schedule.due(timestamp) else {
+/// What to do at `now` with a sound lasting `duration` that the clock says
+/// sounds at `due`, in a channel placing it exactly. Read `due` from the clock
+/// as it is now, not as it was when the sound arrived, so a move of the
+/// schedule moves the sound. One already partly due is still written: the
+/// [`Writer`] trims what the bus has mixed.
+pub(crate) fn follow(due: Option<Instant>, duration: Duration, now: Instant) -> Follow {
+	let Some(sounds) = due else {
 		return Follow::Drop;
 	};
-	if sounds < now {
+	if gone(due, duration, now, Duration::ZERO) {
 		return Follow::Drop;
 	}
-	// The clock re-anchors without telling its readers, so a wait for a
-	// moment it may yet move earlier is rechecked too.
-	let write = sounds - WRITE_LEAD;
+	let write = sounds.saturating_sub(WRITE_LEAD);
 	if write > now {
-		return Follow::Wait(write.min(now + RECHECK));
-	}
-	if !heard(schedule, timestamp, sounds) {
-		return Follow::Wait(now + RECHECK);
+		return Follow::Wait(write);
 	}
 	Follow::Write(sounds)
 }
 
+/// Whether, at `now`, a sound lasting `duration` that the clock says sounds at
+/// `due` is past playing in a channel whose sound may trail by `stretch`: it
+/// sounded through more than that ago, or the clock has no moment for it.
+pub(crate) fn gone(due: Option<Instant>, duration: Duration, now: Instant, stretch: Duration) -> bool {
+	due.is_none_or(|sounds| sounds.saturating_add(duration).saturating_add(stretch) <= now)
+}
+
 /// Writes placed frames into a positioned bus channel, each at the bus
-/// position its moment maps to, so it sounds exactly then.
+/// position its moment maps to: exactly there, or, with a stretch, right after
+/// the sound before it, for the channel to glide onto that position.
 ///
 /// The bus's [`Mixer`](crate::source::Mixer) advances it sample-exact on the
 /// clock from its start, so a moment `t` is bus position `(t - start) * rate`.
@@ -240,24 +164,98 @@ pub(crate) struct Writer {
 	stride: usize,
 	rate: u32,
 	mixed: Mixed,
+	/// How far the channel's sound may trail its positions, which it was
+	/// opened with; zero places each write exactly.
+	stretch: Duration,
 	/// The bus position the last write ended at, which the next follows.
+	/// With a stretch, where the channel's sound runs to at least: the
+	/// earlier of its written audio played at speed and the position the
+	/// channel glides onto, so a channel that sped up is never thought fuller
+	/// than it is.
 	end: i128,
 }
 
 impl Writer {
-	/// Write into `channel` on the bus `mixed` follows, taking interleaved
-	/// `f32` at the bus `rate` in `channels`.
-	pub(crate) fn new(channel: bus::Positioned, mixed: Mixed, rate: u32, channels: u32) -> Self {
+	/// Write into `channel`, opened with `stretch`, on the bus `mixed` follows,
+	/// taking interleaved `f32` at the bus `rate` in `channels`.
+	pub(crate) fn new(channel: bus::Positioned, mixed: Mixed, rate: u32, channels: u32, stretch: Duration) -> Self {
 		Self {
 			channel,
 			stride: channels as usize * size_of::<f32>(),
 			rate,
 			mixed,
+			stretch,
 			end: 0,
 		}
 	}
 
+	/// What to do at `now` with a sound lasting `duration` that the clock says
+	/// sounds at `due`, as [`follow`] decides for an exact channel.
+	///
+	/// With a stretch, a sound up to the stretch late is still written, for the
+	/// channel to speed up onto, and one whose moment moved later is written as
+	/// the sound before it runs out, so the channel slows down onto it rather
+	/// than falling silent. Only as early as its position is in the bus's
+	/// reach, though: one moved further runs the channel dry, then sounds
+	/// exactly on its moment.
+	pub(crate) fn follow(&self, due: Option<Instant>, duration: Duration, now: Instant) -> Follow {
+		if self.stretch.is_zero() {
+			return follow(due, duration, now);
+		}
+		let Some(sounds) = due else {
+			return Follow::Drop;
+		};
+		if gone(due, duration, now, self.stretch) {
+			return Follow::Drop;
+		}
+		let mut write = sounds.saturating_sub(WRITE_LEAD);
+		// A dry channel places a write exactly, so one written early would
+		// sound early: only a channel still sounding is fed ahead.
+		if self.end > *self.mixed.position.borrow() as i128 {
+			let fits = sounds.saturating_add(duration).saturating_sub(bus::REACH);
+			write = write.min(self.moment(self.end).saturating_sub(WRITE_LEAD).max(fits));
+		}
+		if write > now {
+			return Follow::Wait(write);
+		}
+		Follow::Write(sounds)
+	}
+
 	/// Write `data` to sound at `sounds`, handed over [`WRITE_LEAD`] ahead.
+	///
+	/// With a stretch, it follows the sound before it, whatever its position,
+	/// and the channel speeds up or slows down onto that position, skipping
+	/// onto it only past the stretch. The part past what the bus holds waits
+	/// until the bus has mixed far enough to hold it. Without one, see
+	/// [`write_exact`](Self::write_exact).
+	pub(crate) async fn write(&mut self, sounds: Instant, data: &[u8]) -> Result<(), moq_audio::Error> {
+		if self.stretch.is_zero() {
+			return self.write_exact(sounds, data).await;
+		}
+		let position = self.position(sounds);
+		let frames = (data.len() / self.stride) as i128;
+		let reach = self.frames(bus::REACH) as i128;
+		let mut written = 0;
+		loop {
+			let next = *self.mixed.position.borrow_and_update() as i128;
+			let at = position + written;
+			let take = (next + reach - at).min(frames - written);
+			if take > 0 {
+				let bytes = written as usize * self.stride..(written + take) as usize * self.stride;
+				self.channel.write(at.max(0) as u64, &data[bytes])?;
+				// The channel's sound runs on from its end as counted, unless
+				// it sped up, and settles onto the end handed over, unless it
+				// slows down: it runs at least to the earlier of the two.
+				self.end = (self.end.max(next) + take).min(at + take);
+				written += take;
+			}
+			if written >= frames || self.mixed.position.changed().await.is_err() {
+				return Ok(());
+			}
+		}
+	}
+
+	/// Write `data` to sound exactly at `sounds`, handed over [`WRITE_LEAD`] ahead.
 	///
 	/// A frame that starts within [`CONTIGUOUS`] of where the last one ended
 	/// continues it. The part the bus has already mixed, or overlapping the
@@ -265,7 +263,7 @@ impl Writer {
 	/// what the bus holds waits until the bus has mixed far enough to hold it,
 	/// however far behind the clock it runs. Once the bus's mixer is gone,
 	/// nothing mixes, and what is left is dropped.
-	pub(crate) async fn write(&mut self, sounds: Instant, data: &[u8]) -> Result<(), moq_audio::Error> {
+	async fn write_exact(&mut self, sounds: Instant, data: &[u8]) -> Result<(), moq_audio::Error> {
 		let mut position = self.position(sounds);
 		if position.abs_diff(self.end) <= self.frames(CONTIGUOUS) {
 			position = self.end;
@@ -303,6 +301,12 @@ impl Writer {
 		(nanos * i128::from(self.rate) + 500_000_000).div_euclid(1_000_000_000)
 	}
 
+	/// The moment the bus mixes `position`, which is not before its start.
+	fn moment(&self, position: i128) -> Instant {
+		let nanos = position.max(0) as u128 * 1_000_000_000 / u128::from(self.rate);
+		self.mixed.start.saturating_add(Duration::from_nanos(nanos as u64))
+	}
+
 	/// The whole frames `duration` spans.
 	fn frames(&self, duration: Duration) -> u128 {
 		duration.as_nanos() * u128::from(self.rate) / 1_000_000_000
@@ -318,7 +322,9 @@ mod tests {
 	const TARGET: Duration = Duration::from_millis(100);
 
 	fn at(millis: u64) -> Instant {
-		Instant::ZERO + Duration::from_secs(10) + Duration::from_millis(millis)
+		Instant::ZERO
+			.saturating_add(Duration::from_secs(10))
+			.saturating_add(Duration::from_millis(millis))
 	}
 
 	fn ms(millis: u64) -> Duration {
@@ -329,155 +335,66 @@ mod tests {
 		moq_net::Timestamp::from_millis(millis).unwrap()
 	}
 
-	/// The first frame waits out the target and the bus's latency, later ones
-	/// follow it on their stamps however unevenly they arrive within it, and a
-	/// picture is due when the sound stamped with it plays.
+	/// A sound is written its lead before its moment, and still once partly
+	/// due, for the writer to trim; once it has sounded through, or before the
+	/// clock has a moment for it, it is dropped.
 	#[test]
-	fn video_is_due_when_its_audio_sounds() {
-		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let changed = Notify::new();
-		let mut speaker = Speaker::new(clock.clone(), &changed);
-		assert_eq!(speaker.place(ms(1_000), FRAME, TARGET, at(0)), Place::Play(at(150)));
+	fn a_sound_is_written_its_lead_ahead() {
+		assert_eq!(follow(Some(at(150)), FRAME, at(0)), Follow::Wait(at(100)));
+		assert_eq!(follow(Some(at(150)), FRAME, at(100)), Follow::Write(at(150)));
+		assert_eq!(follow(Some(at(150)), FRAME, at(160)), Follow::Write(at(150)));
+		assert_eq!(follow(Some(at(150)), FRAME, at(170)), Follow::Drop);
+		assert_eq!(follow(None, FRAME, at(0)), Follow::Drop);
+	}
+
+	/// Sound and pictures stamped alike are due together, the audio's target
+	/// and the write lead behind the first arrival. A sound stall leaves the
+	/// pictures on their moments, and the backlog that lands late is dropped
+	/// up to what is still to sound, which plays on the clock.
+	#[test]
+	fn a_sound_stall_leaves_the_pictures_on_their_moments() {
+		let clock = sync::Producer::new(VIDEO_DELAY);
+		let (moved, mut seen) = watch::channel(());
+		let video = Hold::new(&clock, moq_mux::container::Kind::Video, &moved);
+		let audio = Hold::new(&clock, moq_mux::container::Kind::Audio, &moved);
+		audio.received(stamp(1_000), at(0));
+		audio.set_target(TARGET);
+		video.received(stamp(1_000), at(0));
+		assert!(seen.has_changed().unwrap(), "the first arrival anchors the clock");
+		seen.mark_unchanged();
 		assert_eq!(clock.due(stamp(1_000)), Some(at(150)));
-		// Late within the target, and early: both keep their place.
-		assert_eq!(speaker.place(ms(1_020), FRAME, TARGET, at(90)), Place::Play(at(170)));
-		assert_eq!(speaker.place(ms(1_040), FRAME, TARGET, at(91)), Place::Play(at(190)));
-		assert_eq!(clock.due(stamp(1_040)), Some(at(190)));
-		assert_eq!(clock.consume().target(), Some(TARGET));
+		assert_eq!(clock.consume().delay(), TARGET + WRITE_LEAD);
 
-		// A stopped track hands the clock back to video.
-		drop(speaker);
-		assert_eq!(clock.consume().target(), None);
-	}
-
-	/// A picture whose sound has not arrived waits for it, even once due: the
-	/// audio stalled, and the picture stalls with it.
-	#[test]
-	fn a_picture_waits_for_its_sound_to_play() {
-		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let schedule = clock.consume();
-		assert!(
-			heard(&schedule, stamp(5_000), at(0)),
-			"without audio, only the deadline counts"
-		);
-		let changed = Notify::new();
-		let mut speaker = Speaker::new(clock.clone(), &changed);
-		speaker.place(ms(1_000), FRAME, TARGET, at(0));
-		assert!(!heard(&schedule, stamp(1_000), at(148)));
-		assert!(heard(&schedule, stamp(1_000), at(150)));
-		assert!(clock.due(stamp(1_100)).is_some_and(|due| due < at(500)));
-		assert!(heard(&schedule, stamp(1_020), at(500)));
-		assert!(!heard(&schedule, stamp(1_100), at(500)), "shown past its sound");
-	}
-
-	/// A followed sound, rechecked until then, is written the bus's latency
-	/// before its moment once the clock's own sound stamped alike has been,
-	/// waits while that has not, and is dropped once its moment has passed.
-	#[test]
-	fn a_followed_sound_waits_for_the_clocks_own() {
-		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let schedule = clock.consume();
-		let changed = Notify::new();
-		let mut speaker = Speaker::new(clock.clone(), &changed);
-		speaker.place(ms(1_000), FRAME, TARGET, at(0));
-		assert_eq!(
-			follow(&schedule, stamp(1_000), at(0)),
-			Follow::Wait(at(10)),
-			"rechecked"
-		);
-		assert_eq!(follow(&schedule, stamp(1_000), at(95)), Follow::Wait(at(100)));
-		assert_eq!(follow(&schedule, stamp(1_000), at(100)), Follow::Write(at(150)));
-		// Past what the clock's own sound has written: it stalled.
-		assert_eq!(follow(&schedule, stamp(1_100), at(200)), Follow::Wait(at(210)));
-		assert_eq!(follow(&schedule, stamp(1_100), at(250)), Follow::Wait(at(260)));
-		assert_eq!(follow(&schedule, stamp(1_100), at(251)), Follow::Drop);
-		let fresh = clock.clone().reset(VIDEO_DELAY).consume();
-		assert_eq!(follow(&fresh, stamp(1_000), at(0)), Follow::Drop, "no moment yet");
-	}
-
-	/// A stall longer than the target re-buffers: the next frame sounds the
-	/// target after it arrived, and the pictures stamped with it wait as long.
-	#[test]
-	fn a_stall_holds_video_back_with_the_sound() {
-		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let changed = Notify::new();
-		let mut speaker = Speaker::new(clock.clone(), &changed);
-		speaker.place(ms(1_000), FRAME, TARGET, at(0));
-		assert_eq!(speaker.place(ms(1_020), FRAME, TARGET, at(500)), Place::Play(at(650)));
-		assert_eq!(clock.due(stamp(1_020)), Some(at(650)));
-	}
-
-	/// Lost media plays as the silence it was, so the pictures after it keep
-	/// their moments; a hole past the target skips instead, and the clock
-	/// re-pins on the frame after it.
-	#[test]
-	fn a_hole_plays_as_silence_up_to_the_target() {
-		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let changed = Notify::new();
-		let mut speaker = Speaker::new(clock.clone(), &changed);
-		speaker.place(ms(1_000), FRAME, TARGET, at(0));
-		assert_eq!(speaker.place(ms(1_060), FRAME, TARGET, at(40)), Place::Play(at(210)));
-		assert_eq!(clock.due(stamp(1_060)), Some(at(210)));
-
-		// 1 s lost, with only the target queued: skipped back onto the target.
-		// The audio queued ahead of the skip keeps its pictures' moments until
-		// the media after it starts to sound.
-		assert_eq!(speaker.place(ms(2_080), FRAME, TARGET, at(60)), Place::Skip);
-		let schedule = clock.consume();
-		assert_eq!(speaker.place(ms(2_100), FRAME, TARGET, at(61)), Place::Play(at(230)));
-		assert_eq!(clock.due(stamp(1_060)), Some(at(210)));
-		assert!(!heard(&schedule, stamp(2_100), at(61)));
-		// It sounds whether or not anything arrives after it.
-		assert_eq!(speaker.deferred(), Some(at(230)));
-		speaker.commit(at(229));
-		assert_eq!(clock.due(stamp(1_060)), Some(at(210)));
-		speaker.commit(at(230));
-		assert_eq!(speaker.deferred(), None);
-		assert_eq!(clock.due(stamp(2_100)), Some(at(230)));
-		assert!(heard(&schedule, stamp(2_100), at(230)));
-	}
-
-	/// A burst queues no more than the target and a frame of slack: the rest
-	/// is skipped, and play goes on from what arrives next.
-	#[test]
-	fn a_burst_skips_past_the_target() {
-		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let changed = Notify::new();
-		let mut speaker = Speaker::new(clock.clone(), &changed);
-		let placed = (0..10)
-			.map(|index| speaker.place(ms(1_000 + index * 20), FRAME, TARGET, at(0)))
-			.filter(|place| *place != Place::Skip)
-			.collect::<Vec<_>>();
-		assert_eq!(placed, [Place::Play(at(150)), Place::Play(at(170))]);
-		// What arrives next follows the queue, and the clock takes its media
-		// once the first of it sounds, on arrival or not.
-		for index in 0..9 {
-			let place = speaker.place(ms(1_200 + index * 20), FRAME, TARGET, at(20 + index * 20));
-			assert_eq!(place, Place::Play(at(190 + index * 20)));
-			assert_eq!(clock.due(stamp(1_000)), Some(at(150)), "{index}");
+		// The audio stalls; the pictures go on arriving, and showing, on time.
+		for index in 1..25 {
+			video.received(stamp(1_000 + index * 20), at(index * 20));
+			assert_eq!(clock.due(stamp(1_000 + index * 20)), Some(at(150 + index * 20)));
 		}
-		assert_eq!(speaker.place(ms(1_380), FRAME, TARGET, at(200)), Place::Play(at(370)));
-		assert_eq!(clock.due(stamp(1_200)), Some(at(190)));
-		assert_eq!(speaker.deferred(), None);
+		// Its backlog lands half a second late, moving nothing: what sounded
+		// through meanwhile is dropped, and the rest written on the clock.
+		for index in 0..25 {
+			audio.received(stamp(1_000 + index * 20), at(500));
+		}
+		assert!(!seen.has_changed().unwrap(), "a late track moved the schedule");
+		assert_eq!(follow(clock.due(stamp(1_320)), FRAME, at(500)), Follow::Drop);
+		assert_eq!(follow(clock.due(stamp(1_340)), FRAME, at(500)), Follow::Write(at(490)));
+		assert_eq!(follow(clock.due(stamp(1_400)), FRAME, at(500)), Follow::Write(at(550)));
+		assert_eq!(follow(clock.due(stamp(1_420)), FRAME, at(500)), Follow::Wait(at(520)));
+
+		// A stopped audio track lets the pictures play on video's own delay.
+		drop(audio);
+		assert!(seen.has_changed().unwrap());
+		assert_eq!(clock.consume().delay(), VIDEO_DELAY);
 	}
 
-	/// Media overlapping what is queued, stamped the same or a millisecond
-	/// apart however long each frame is, is skipped rather than queued behind
-	/// it; once the queue runs out, a rewound timeline plays from the target.
+	/// However deep the jitter target, playback stays within the longest delay.
 	#[test]
-	fn overlapping_media_queues_no_more_than_the_target() {
-		let clock = timeline::Producer::new(VIDEO_DELAY);
-		let changed = Notify::new();
-		let mut speaker = Speaker::new(clock.clone(), &changed);
-		for index in 0..1_000 {
-			for start in [ms(1_000), ms(1_000 + index)] {
-				if let Place::Play(begins) = speaker.place(start, FRAME, TARGET, at(0)) {
-					assert!(begins <= at(0) + TARGET + WRITE_LEAD + SLACK, "{index}: {begins:?}");
-				}
-			}
-		}
-		assert_eq!(speaker.place(ms(500), FRAME, TARGET, at(1_000)), Place::Play(at(1_150)));
-		assert_eq!(clock.due(stamp(500)), Some(at(1_150)));
+	fn the_delay_never_passes_the_longest() {
+		let clock = sync::Producer::new(VIDEO_DELAY);
+		let (moved, _) = watch::channel(());
+		let audio = Hold::new(&clock, moq_mux::container::Kind::Audio, &moved);
+		audio.set_target(MAX_DELAY);
+		assert_eq!(clock.consume().delay(), MAX_DELAY);
 	}
 
 	/// The bus mixed a block at a time along with a paused clock, as the
@@ -491,6 +408,8 @@ mod tests {
 		rate: u64,
 		/// Each bus position the first channel changed at, and what to.
 		heard: Vec<(u64, f32)>,
+		/// Every sample the first channel mixed, from bus position 0.
+		samples: Vec<f32>,
 	}
 
 	impl Ear {
@@ -500,7 +419,9 @@ mod tests {
 		async fn until(&mut self, until: Instant) {
 			loop {
 				let next = self.next + Self::BLOCK;
-				let due = self.start + Duration::from_nanos(next * 1_000_000_000 / self.rate);
+				let due = self
+					.start
+					.saturating_add(Duration::from_nanos(next * 1_000_000_000 / self.rate));
 				if due > until {
 					return;
 				}
@@ -517,6 +438,7 @@ mod tests {
 				panic!("an advance publishes a block");
 			};
 			let mut last = self.heard.last().map_or(0.0, |(_, value)| *value);
+			self.samples.extend(read.data.chunks(2).map(|sample| sample[0]));
 			for (index, sample) in read.data.chunks(2).enumerate() {
 				if sample[0] != last {
 					last = sample[0];
@@ -538,12 +460,18 @@ mod tests {
 		let strip = bus::Strip::default();
 		let mut input = moq_audio::encode::Input::new(config.sample_rate, config.layout);
 		input.format = moq_audio::Format::F32;
-		let channel = bus.positioned(input, strip.clone()).unwrap();
+		let channel = bus.positioned(input, strip.clone(), Duration::ZERO).unwrap();
 		let mix = bus.mix();
 		mix.route(&strip);
 		let start = kio::clock::now();
 		let (mixer, mixed) = Mixer::new(driver, start);
-		let mut writer = Writer::new(channel, mixed, config.sample_rate, config.layout.channels());
+		let mut writer = Writer::new(
+			channel,
+			mixed,
+			config.sample_rate,
+			config.layout.channels(),
+			Duration::ZERO,
+		);
 		let mut ear = Ear {
 			mixer,
 			next: 0,
@@ -551,8 +479,9 @@ mod tests {
 			start,
 			rate: u64::from(config.sample_rate),
 			heard: Vec::new(),
+			samples: Vec::new(),
 		};
-		let at = |millis: u64| start + ms(millis);
+		let at = |millis: u64| start.saturating_add(ms(millis));
 		// `millis` of a frame of `value`, at 48 frames a millisecond.
 		let frame = |value: f32, millis: usize| bytemuck::cast_slice::<f32, u8>(&vec![value; 2 * 48 * millis]).to_vec();
 
@@ -561,7 +490,7 @@ mod tests {
 		ear.until(at(30)).await;
 		// Stamped half a millisecond after the last ended.
 		writer
-			.write(at(80) + Duration::from_micros(500), &frame(2.0, 20))
+			.write(at(80).saturating_add(Duration::from_micros(500)), &frame(2.0, 20))
 			.await
 			.unwrap();
 		// Overlapping the last by 5 ms.
@@ -618,5 +547,191 @@ mod tests {
 				(48 * 6_010, 0.0),
 			]
 		);
+	}
+
+	/// What a broadcast's sound did through a schedule that moves at 1 s and
+	/// again at 3 s, as a jitter target steps.
+	struct Stepped {
+		/// Frames dropped as sounded through.
+		dropped: usize,
+		/// Samples of silence inside the sound.
+		silent: usize,
+		/// The bus position the sound ended at.
+		ended: u64,
+		/// Every sample mixed, from bus position 0.
+		samples: Vec<f32>,
+	}
+
+	impl Stepped {
+		/// How far the sound mixed over `millis` trails where the schedule
+		/// puts it, moved by `moved` ms, in frames: the median over the span,
+		/// read off the ramp each sample's level is.
+		fn lag(&self, millis: std::ops::Range<u64>, moved: i64) -> i64 {
+			let mut lags: Vec<i64> = (48 * millis.start..48 * millis.end)
+				.map(|position| {
+					let written = f64::from(self.samples[position as usize] - RAMP.0) / f64::from(RAMP.1)
+						* (STEPPED * 960) as f64;
+					position as i64 - 48 * (100 + moved) - written.round() as i64
+				})
+				.collect();
+			lags.sort_unstable();
+			lags[lags.len() / 2]
+		}
+	}
+
+	/// The frames [`stepped`] plays.
+	const STEPPED: u64 = 250;
+
+	/// The level the sound starts at, and how far it rises by its end, so a
+	/// sample's level says which written one it is.
+	const RAMP: (f32, f32) = (0.2, 0.6);
+
+	/// Play five seconds of a ramp in 20 ms frames, through a writer whose
+	/// channel stretches by `stretch`, each frame when the writer says, as a
+	/// broadcast source plays one, while the schedule is `moved.0` ms later
+	/// from 1 s and `moved.1` ms later from 3 s.
+	async fn stepped(stretch: Duration, moved: (i64, i64)) -> Stepped {
+		let (bus, driver) = bus::Bus::new(Default::default()).unwrap();
+		let config = bus.config().clone();
+		let strip = bus::Strip::default();
+		let mut input = moq_audio::encode::Input::new(config.sample_rate, config.layout);
+		input.format = moq_audio::Format::F32;
+		let channel = bus.positioned(input, strip.clone(), stretch).unwrap();
+		let mix = bus.mix();
+		mix.route(&strip);
+		let start = kio::clock::now();
+		let (mixer, mixed) = Mixer::new(driver, start);
+		let mut writer = Writer::new(channel, mixed, config.sample_rate, config.layout.channels(), stretch);
+		let mut ear = Ear {
+			mixer,
+			next: 0,
+			reader: mix.reader(),
+			start,
+			rate: u64::from(config.sample_rate),
+			heard: Vec::new(),
+			samples: Vec::new(),
+		};
+
+		// Frame `index` sounds 100 ms in, plus 20 ms for each before it.
+		let moment = |index: u64, now: Instant| {
+			let moved = match now.saturating_duration_since(start).as_millis() {
+				..1_000 => 0,
+				1_000..3_000 => moved.0,
+				_ => moved.1,
+			};
+			start.saturating_add(ms((100 + index as i64 * 20 + moved) as u64))
+		};
+		// Never zero, so silence shows.
+		let ramp = |index: u64| {
+			let data: Vec<f32> = (index * 960..(index + 1) * 960)
+				.flat_map(|sample| [RAMP.0 + RAMP.1 * sample as f32 / (STEPPED * 960) as f32; 2])
+				.collect();
+			bytemuck::cast_slice::<f32, u8>(&data).to_vec()
+		};
+
+		let mut dropped = 0;
+		let play = async {
+			let mut index = 0;
+			while index < STEPPED {
+				let now = kio::clock::now();
+				match writer.follow(Some(moment(index, now)), ms(20), now) {
+					Follow::Write(sounds) => {
+						writer.write(sounds, &ramp(index)).await.unwrap();
+						index += 1;
+					}
+					// The schedule moves without telling anyone, as another
+					// broadcast's clock does.
+					Follow::Wait(at) => kio::clock::sleep_until(at.min(now.saturating_add(RECHECK))).await,
+					Follow::Drop => {
+						dropped += 1;
+						index += 1;
+					}
+				}
+			}
+		};
+		tokio::join!(play, ear.until(start.saturating_add(ms(5_500))));
+
+		let first = ear.samples.iter().position(|sample| *sample != 0.0).expect("the sound");
+		let last = ear
+			.samples
+			.iter()
+			.rposition(|sample| *sample != 0.0)
+			.expect("the sound");
+		Stepped {
+			dropped,
+			silent: ear.samples[first..=last]
+				.iter()
+				.filter(|sample| **sample == 0.0)
+				.count(),
+			ended: last as u64 + 1,
+			samples: ear.samples,
+		}
+	}
+
+	/// A broadcast's sound glides onto a schedule that steps earlier and back
+	/// later: nothing is dropped, nothing falls silent, it is back on the
+	/// schedule a second and a half after each step, a tenth faster or slower
+	/// meanwhile, and it ends on its last moment. Placed exactly, the same
+	/// steps drop frames and leave a silence.
+	#[tokio::test(start_paused = true)]
+	async fn a_stretched_sound_glides_onto_a_moved_schedule() {
+		let glided = stepped(STRETCH, (-100, 0)).await;
+		assert_eq!(glided.dropped, 0, "frames dropped");
+		assert_eq!(glided.silent, 0, "samples of silence");
+		// 5 ms, as a time stretch converges.
+		const NEAR: i64 = 240;
+		for (span, moved) in [(500..900, 0), (2_500..2_900, -100), (4_500..4_900, 0)] {
+			let lag = glided.lag(span.clone(), moved);
+			assert!(lag.abs() <= NEAR, "{lag} frames behind over {span:?} ms");
+		}
+		// Gliding, not skipping: half a second after the step, half of it.
+		let lag = glided.lag(1_450..1_550, -100);
+		assert!((1_920..=2_880).contains(&lag), "{lag} frames behind half a second in");
+		// The last frame ends at 100 + 250 * 20 ms; the channel bridges the
+		// last write before a gap by up to 20 ms.
+		let end = 48 * 5_100;
+		assert!(
+			(end - NEAR as u64..=end + 48 * 20 + NEAR as u64).contains(&glided.ended),
+			"ended at {}, not {end}",
+			glided.ended
+		);
+
+		let exact = stepped(Duration::ZERO, (-100, 0)).await;
+		assert!(exact.dropped > 0, "an exact channel drops a step down");
+		assert!(exact.silent >= 48 * 80, "an exact channel falls silent on a step up");
+	}
+
+	/// A step later after one earlier glides too: the sound the channel sped
+	/// through is not counted as still to play.
+	#[tokio::test(start_paused = true)]
+	async fn a_sound_glides_through_consecutive_steps() {
+		let glided = stepped(STRETCH, (-150, -50)).await;
+		assert_eq!(glided.dropped, 0, "frames dropped");
+		assert_eq!(glided.silent, 0, "samples of silence");
+		// 150 ms takes nearly 2 s, so it is within 10 ms by the next step.
+		for (span, moved, near) in [(2_800..3_000, -150, 480), (4_400..4_900, -50, 240)] {
+			let lag = glided.lag(span.clone(), moved);
+			assert!(lag.abs() <= near, "{lag} frames behind over {span:?} ms");
+		}
+	}
+
+	/// A step later than the bus holds cannot glide: the sound runs out, then
+	/// comes back exactly on the moved schedule rather than early, and a step
+	/// back past the stretch skips onto it.
+	#[tokio::test(start_paused = true)]
+	async fn a_step_past_the_reach_falls_silent_then_sounds_on_schedule() {
+		let stepped = stepped(STRETCH, (500, 0)).await;
+		// It falls silent for the step less what the stretch could have reached.
+		let reach = 48 * (500 - STRETCH.as_millis() as usize);
+		assert!(
+			(reach..48 * 500).contains(&stepped.silent),
+			"{} samples of silence",
+			stepped.silent
+		);
+		for (span, moved) in [(500..900, 0), (1_600..2_900, 500), (4_500..4_900, 0)] {
+			let lag = stepped.lag(span.clone(), moved);
+			assert!(lag.abs() <= 240, "{lag} frames behind over {span:?} ms");
+		}
+		assert!(stepped.dropped > 0, "the step back skips");
 	}
 }

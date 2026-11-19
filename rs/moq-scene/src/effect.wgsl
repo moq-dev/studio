@@ -12,6 +12,7 @@ const CHROMA_KEY: u32 = 1u;
 const LUMA_KEY: u32 = 2u;
 const LUT: u32 = 3u;
 const MASK: u32 = 4u;
+const SHAPE: u32 = 5u;
 
 // Rec. 709 luma.
 const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
@@ -21,10 +22,14 @@ struct Op {
 	kind: vec4<u32>,
 	// MATRIX: unused. CHROMA_KEY: key Cb, key Cr, similarity, smoothness.
 	// LUMA_KEY: min, max, smoothness. LUT: amount, size. MASK: mode.
+	// SHAPE: each corner's radius over the shorter side, clockwise from the
+	// top-left.
 	params: vec4<f32>,
 	// MATRIX: applied to straight RGBA. LUT: the domain's max in column 0.
+	// SHAPE: the item's width, height, and border in canvas pixels in column 0.
 	matrix: mat4x4<f32>,
 	// MATRIX: added after. CHROMA_KEY: spill in x. LUT: the domain's min.
+	// SHAPE: the border's straight color.
 	offset: vec4<f32>,
 }
 
@@ -148,6 +153,33 @@ fn coverage(item: vec2<f32>, op: Op) -> f32 {
 	return color.a;
 }
 
+// `color` at `item` cut to the shape's outline, with its border over it.
+fn shape(color: vec4<f32>, item: vec2<f32>, op: Op) -> vec4<f32> {
+	let size = op.matrix[0].xy;
+	let border = op.matrix[0].z;
+	let at = item * size;
+	// A canvas pixel's footprint on the target, so the edge is a texel soft
+	// at any size it is drawn, a thumbnail's included.
+	let soft = max(length(fwidth(at)) * 0.7071, 1e-3);
+	let half = size * 0.5;
+	let p = at - half;
+	let radii = op.params * min(size.x, size.y);
+	let top = select(radii.x, radii.y, p.x >= 0.0);
+	let bottom = select(radii.w, radii.z, p.x >= 0.0);
+	let radius = select(bottom, top, p.y < 0.0);
+	// The signed distance to the rounded outline: negative inside.
+	let q = abs(p) - half + vec2<f32>(radius);
+	let distance = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+	var out = color;
+	if border > 0.0 {
+		let edge = clamp(0.5 + (distance + border) / soft, 0.0, 1.0) * op.offset.a;
+		let alpha = edge + out.a * (1.0 - edge);
+		let rgb = (op.offset.rgb * edge + out.rgb * out.a * (1.0 - edge)) / max(alpha, 1e-4);
+		out = vec4<f32>(rgb, alpha);
+	}
+	return vec4<f32>(out.rgb, out.a * clamp(0.5 - distance / soft, 0.0, 1.0));
+}
+
 // Run the draw's ops, in order, on a straight-alpha color.
 fn apply(start: vec4<f32>, item: vec2<f32>) -> vec4<f32> {
 	var color = start;
@@ -168,6 +200,9 @@ fn apply(start: vec4<f32>, item: vec2<f32>) -> vec4<f32> {
 			}
 			case MASK: {
 				color.a *= coverage(item, op);
+			}
+			case SHAPE: {
+				color = shape(color, item, op);
 			}
 			default: {}
 		}

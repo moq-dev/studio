@@ -6,6 +6,7 @@
 //! never reads the disk again. The source holds the file's size in memory for
 //! as long as it runs.
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use hang::catalog::{AudioConfig, VideoConfig};
@@ -17,7 +18,7 @@ use crate::Error;
 pub(crate) struct Clip {
 	broadcast: moq_net::broadcast::Producer,
 	/// Keeps the imported tracks readable.
-	_import: moq_mux::import::Container,
+	_import: moq_mux::import::container::Finished,
 	_catalog: moq_mux::catalog::Producer,
 	/// The video rendition, by catalog name.
 	pub video: Option<(String, VideoConfig)>,
@@ -32,7 +33,7 @@ impl Clip {
 	pub fn open(path: &Path) -> Result<Self, Error> {
 		let failed = |err: String| Error::Media(format!("{}: {err}", path.display()));
 		let bytes = std::fs::read(path).map_err(|err| failed(err.to_string()))?;
-		let format = container(&bytes).map_err(failed)?;
+		let format = container(&mut std::io::Cursor::new(&bytes)).map_err(failed)?;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		// The file is written whole before anything reads it, so nothing in it
@@ -40,9 +41,10 @@ impl Clip {
 		let config = moq_mux::catalog::Config::default().with_max_age(None);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let init = moq_mux::import::ContainerInit::new(format, bytes);
-		let mut import = moq_mux::import::Container::new(broadcast.clone(), catalog.reserve(), &init)
+		let import = moq_mux::import::Container::new(broadcast.clone(), catalog.reserve(), &init)
+			.map_err(|err| failed(err.to_string()))?
+			.finish()
 			.map_err(|err| failed(err.to_string()))?;
-		import.finish().map_err(|err| failed(err.to_string()))?;
 
 		let listed = catalog.snapshot();
 		let video = crate::source::pick(listed.video.enabled())?;
@@ -66,14 +68,18 @@ impl Clip {
 }
 
 /// The containers a media file may be in, as moq-mux reads them.
-const READ: &str = "fragmented MP4, MKV or WebM, MPEG-TS, or FLV";
+pub(crate) const READ: &str = "fragmented MP4, MKV or WebM, MPEG-TS, or FLV";
 
-/// Which container `bytes` are in, by their first bytes.
+/// Which container `file` is in, by its first bytes and, for an MP4, its
+/// top-level boxes, reading little else.
 ///
 /// A regular MP4, with its samples indexed in a `moov` rather than in
 /// fragments, is refused: moq-mux demuxes only fragmented MP4.
-fn container(bytes: &[u8]) -> Result<ContainerFormat, String> {
+pub(crate) fn container(file: &mut (impl Read + Seek)) -> Result<ContainerFormat, String> {
 	const TS_PACKET: usize = 188;
+	let mut head = [0; TS_PACKET + 1];
+	let read = fill(file, &mut head).map_err(|err| err.to_string())?;
+	let bytes = &head[..read];
 	if bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
 		return Ok(ContainerFormat::Mkv);
 	}
@@ -84,7 +90,7 @@ fn container(bytes: &[u8]) -> Result<ContainerFormat, String> {
 		return Ok(ContainerFormat::Ts);
 	}
 	if bytes.get(4..8) == Some(b"ftyp") {
-		return match fragmented(bytes) {
+		return match fragmented(file).map_err(|err| err.to_string())? {
 			true => Ok(ContainerFormat::Fmp4),
 			false => Err(format!(
 				"a regular MP4 is not read yet; remux it into one of {READ}, such as with \
@@ -95,29 +101,47 @@ fn container(bytes: &[u8]) -> Result<ContainerFormat, String> {
 	Err(format!("not a container the studio reads; it reads {READ}"))
 }
 
-/// Whether the MP4 in `bytes` holds a fragment (`moof`) among its top-level boxes.
-fn fragmented(mut bytes: &[u8]) -> bool {
-	while let Some(header) = bytes.get(..8) {
-		if &header[4..] == b"moof" {
-			return true;
+/// Read into `buf` until it is full or the file ends; how much was read.
+pub(crate) fn fill(file: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+	let mut read = 0;
+	while read < buf.len() {
+		match file.read(&mut buf[read..]) {
+			Ok(0) => break,
+			Ok(more) => read += more,
+			Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+			Err(err) => return Err(err),
+		}
+	}
+	Ok(read)
+}
+
+/// Whether the MP4 in `file` holds a fragment (`moof`) among its top-level
+/// boxes, reading only their headers.
+fn fragmented(file: &mut (impl Read + Seek)) -> std::io::Result<bool> {
+	let end = file.seek(SeekFrom::End(0))?;
+	let mut at = 0;
+	while end - at >= 8 {
+		file.seek(SeekFrom::Start(at))?;
+		let mut header = [0; 16];
+		let read = fill(file, &mut header)?;
+		if &header[4..8] == b"moof" {
+			return Ok(true);
 		}
 		let size = u32::from_be_bytes(header[..4].try_into().expect("four bytes"));
 		let size = match size {
 			// To the end of the file.
-			0 => return false,
+			0 => return Ok(false),
 			// A 64-bit size follows the type.
-			1 => match bytes.get(8..16) {
-				Some(large) => u64::from_be_bytes(large.try_into().expect("eight bytes")),
-				None => return false,
-			},
+			1 if read == 16 => u64::from_be_bytes(header[8..].try_into().expect("eight bytes")),
+			1 => return Ok(false),
 			size => u64::from(size),
 		};
-		match usize::try_from(size).ok().filter(|size| *size >= 8) {
-			Some(size) if size <= bytes.len() => bytes = &bytes[size..],
-			_ => return false,
+		match size >= 8 && size <= end - at {
+			true => at += size,
+			false => return Ok(false),
 		}
 	}
-	false
+	Ok(false)
 }
 
 #[cfg(test)]
@@ -145,6 +169,10 @@ pub(crate) mod tests {
 
 	/// [`CLIP`]'s second of pictures with [`TONE`]'s half second of sound.
 	pub(crate) const UNEVEN: &[u8] = include_bytes!("test_data/uneven.mkv");
+
+	fn container(bytes: &[u8]) -> Result<ContainerFormat, String> {
+		super::container(&mut std::io::Cursor::new(bytes))
+	}
 
 	#[test]
 	fn reads_by_the_first_bytes() {

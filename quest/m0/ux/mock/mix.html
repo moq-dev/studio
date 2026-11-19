@@ -13,8 +13,8 @@
 .M .dock{grid-column:1/-1}
 /* the dock on MIX: scenes and the panic key as everywhere, and the live picture where the sound strip would repeat the page */
 .livemon{width:360px;flex:none;border-left:1px solid var(--line);display:flex;align-items:center;gap:18px;padding:0 14px 0 18px}
-.livemon-pic{position:relative;width:208px;aspect-ratio:16/9;flex:none;border-radius:6px;outline:2px solid var(--air);outline-offset:2px;box-shadow:0 0 24px #ff2d4640}
-.livemon-tag{position:absolute;left:6px;top:6px;z-index:5;padding:0 5px;border-radius:3px;background:var(--air);color:#fff;font:700 11px/16px var(--disp);letter-spacing:.12em}
+.livemon-pic{position:relative;width:208px;aspect-ratio:16/9;flex:none;border-radius:6px;outline:2px solid var(--accent);outline-offset:2px;box-shadow:0 0 24px #4f8cff40}
+.livemon-tag{position:absolute;left:6px;top:6px;z-index:5;padding:0 5px;border-radius:3px;background:var(--accent);color:#fff;font:700 11px/16px var(--disp);letter-spacing:.12em}
 .livemon-tx{display:flex;flex-direction:column;gap:8px;min-width:0}
 .livemon-tx b{font:700 17px/1 var(--disp);letter-spacing:.06em;text-transform:uppercase;white-space:nowrap}
 .sub{display:flex;align-items:center;gap:16px;padding:0 20px}
@@ -38,7 +38,7 @@
 .mt{display:flex;gap:3px;height:var(--H)}
 .mt i{position:relative;width:9px;overflow:hidden;border-radius:2px;background:var(--p3);
   -webkit-mask:repeating-linear-gradient(0deg,#000 0 4px,transparent 4px 6px);mask:repeating-linear-gradient(0deg,#000 0 4px,transparent 4px 6px)}
-.mt i::before{content:"";position:absolute;inset:0;background:linear-gradient(0deg,var(--ok) 0 74%,var(--cue) 74% 93%,var(--air) 93%);clip-path:inset(calc(100% - var(--n)*6px) 0 0 0)}
+.mt i::before{content:"";position:absolute;inset:0;background:linear-gradient(0deg,var(--ok) 0 74%,var(--cue) 74% 93%,var(--err) 93%);clip-path:inset(calc(100% - var(--n)*6px) 0 0 0)}
 .mt i::after{content:"";position:absolute;left:0;right:0;bottom:calc(var(--p)*6px);height:4px;background:#fff}
 .sc{position:relative;width:20px;height:var(--H);flex:none}
 .sc span{position:absolute;left:0;right:0;top:var(--y);transform:translateY(-50%);text-align:center;font:500 9px/1 var(--mono);color:var(--faint)}
@@ -51,33 +51,34 @@
 .db{flex:none;height:22px;padding:0 8px;border-radius:6px;background:var(--p2);border:1px solid var(--line);display:flex;align-items:center;font:500 11px/1 var(--mono);color:var(--dim);white-space:nowrap}
 .bts{display:flex;gap:6px;align-self:stretch;flex:none}
 .bt{flex:1;height:30px;border-radius:8px;background:var(--p3);display:grid;place-items:center;color:var(--text)}
-.bt.off{background:var(--air)}
-.bt.on{background:var(--sel)}
+.bt.off{background:var(--cue);color:#1a1200}
+.bt.on{background:var(--accent)}
 /* send dots: one per audio scene, in the order of the masters */
 .sends{display:flex;gap:5px;justify-content:center;align-self:stretch;padding-top:10px;border-top:1px solid var(--line);flex:none}
 .sd{position:relative;width:22px;height:22px;border-radius:50%;flex:none;display:grid;place-items:center;font:700 12px/1 var(--disp);font-style:normal;color:var(--faint);background:var(--p2)}
 .sd.d{background:var(--text);color:#111}
-.sd.d.pg{background:var(--air);color:#fff}
+.sd.d.pg{background:var(--accent);color:#fff}
 .sd.v{background:transparent;box-shadow:inset 0 0 0 2px var(--text);color:var(--text)}
 .sd.x{background:transparent}
 .sd.x::after{content:"";width:8px;height:2px;border-radius:1px;background:var(--line)}
-.sd.hov{outline:2px solid var(--sel);outline-offset:2px}
+.sd.hov{outline:2px solid var(--accent);outline-offset:2px}
 .strip.muted .hd,.strip.muted .fz,.strip.muted .db{opacity:.45}
 
 /* masters: the audio scenes */
 .strip.ms{width:auto;flex:1;background:linear-gradient(#1d1d27,#15151b);border-color:#3b3b4a}
 .strip.ms .mt i{width:14px}
-.strip.ms .hd{gap:10px;justify-content:center}
+.strip.ms .hd{gap:6px;justify-content:center}
 .strip.ms .nm2{font-size:18px;letter-spacing:.08em}
-.strip.ms.pg{border-color:var(--air);box-shadow:0 0 28px #ff2d4633}
+.strip.ms.pg{border-color:var(--accent);box-shadow:0 0 28px #4f8cff33}
 .mtag{display:flex;align-items:center;gap:5px;height:18px;padding:0 7px;border-radius:4px;background:var(--p3);color:var(--dim);font:700 11px/1 var(--disp);letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
-.mtag.air{background:var(--air);color:#fff}
+.mtag.air{background:var(--accent);color:#fff}
 .mtag.sel{background:#4f8cff2b;color:#8db4ff}
+.mtag.ghost{background:var(--p2);box-shadow:inset 0 0 0 1px var(--line)}
 .mtag svg.i{width:12px;height:12px}
 .addms{width:40px;flex:none;border:2px dashed var(--line);border-radius:12px;display:grid;place-items:center;color:var(--dim)}
 
 /* an opened strip grows a panel; its neighbours narrow */
-.openw{display:flex;flex:none;border-radius:12px;background:var(--p1);border:1px solid var(--sel);box-shadow:0 0 0 1px var(--sel),0 0 30px #4f8cff26}
+.openw{display:flex;flex:none;border-radius:12px;background:var(--p1);border:1px solid var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 30px #4f8cff26}
 .openw .strip{border:0;background:none}
 .c .strip:not(.ms){width:auto;flex:1;padding:12px 6px;gap:10px}
 .c .openw .strip{width:126px;flex:none;padding:12px 10px}
@@ -130,7 +131,7 @@
 .mx>.lv{padding:0 26px 0 6px}
 .mx>.lv .led{height:8px}
 .mx>.c{justify-content:center;flex-direction:column;gap:4px;border-left:1px solid var(--line)}
-.mx>.c.pg{background:#ff2d460f}
+.mx>.c.pg{background:#4f8cff0f}
 .mx>.c small{font-size:10px;line-height:1;color:var(--dim)}
 .mx>.c.self{background:repeating-linear-gradient(-45deg,transparent 0 6px,#ffffff08 6px 12px)}
 .mx>.dv{grid-column:1/-1;height:34px;padding:0 18px;gap:10px;background:#0d0d12}
@@ -140,9 +141,9 @@
 .mx>.c.pg.hi{background:#4f8cff14}
 .rd{width:24px;height:24px;border-radius:50%;flex:none;background:var(--p2);box-shadow:inset 0 0 0 1px var(--line)}
 .rd.d{background:var(--text);box-shadow:none}
-.rd.d.pg{background:var(--air)}
+.rd.d.pg{background:var(--accent)}
 .rd.v{background:transparent;box-shadow:inset 0 0 0 2.5px var(--text)}
-.rd.hov{outline:2px solid var(--sel);outline-offset:3px}
+.rd.hov{outline:2px solid var(--accent);outline-offset:3px}
 .colh{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:0 14px}
 .colh .led{flex:none;width:100%;height:8px}
 .ttl{flex:1;display:flex;flex-direction:column;justify-content:center;gap:8px;padding-left:18px}
@@ -180,13 +181,15 @@ const SEGS=62,seg=x=>x<0?-2:Math.round(x*SEGS/100);
 const dot=(c,i,l=1)=>`<i class="sd ${{d:'d',v:'v','-':'',x:'x'}[c]} ${i==0?'pg':''}">${c=='x'||!l?'':SC[i][0]}</i>`;
 const sends=s=>`<div class="sends">${[...s].map((c,i)=>dot(c,i)).join('')}</div>`;
 const scale=`<div class="sc">${[['+6',0],['0',14,'u'],['6',28],['12',42],['24',58],['36',72],['48',86],['60',100]].map(([t,y,c])=>`<span class="${c||''}" style="--y:${y}%">${t}</span>`).join('')}</div>`;
-const fz=s=>`<div class="fz"><div class="mt"><i style="--n:${seg(s.l)};--p:${seg(s.pk)}"></i><i style="--n:${seg(s.r)};--p:${seg(s.pk-3)}"></i></div>${scale}<div class="fdr" style="--t:${s.t}%"><i></i></div></div><span class="db">${s.db} dB</span>`;
+const fz=s=>`<div class="fz"><div class="mt"><i style="--n:${seg(s.l)};--p:${seg(s.pk)}"></i></div>${scale}<div class="fdr" style="--t:${s.t}%"><i></i></div></div><span class="db">${s.db} dB</span>`;
+/* an audio scene has no gain or mute of its own: its meter on the same scale, and Listen */
+const mfz=s=>`<div class="fz"><div class="mt"><i style="--n:${seg(s.l)};--p:${seg(s.pk)}"></i></div>${scale}</div><span class="db" style="visibility:hidden"></span>`;
 const strip=s=>`<div class="strip ${s.m?'muted':''}" data-id="${s.id}">
   <div class="hd"><div class="ic" style="background:${s.bg}">${s.ic}</div><span class="nm2">${s.n}</span></div>${fz(s)}
   <div class="bts"><div class="bt ${s.m?'off':''}">${I(s.mi||'vol','sm')}</div></div>${sends(s.s)}</div>`;
 const master=s=>`<div class="strip ms ${s.pg?'pg':''}" data-id="${s.id}">
-  <div class="hd"><div class="row" style="gap:7px"><i class="sd d ${s.pg?'pg':''}">${s.id}</i><span class="nm2">${s.n}</span></div>${s.tag}</div>${fz(s)}
-  <div class="bts"><div class="bt">${I('vol','sm')}</div><div class="bt ${s.on?'on':''}">${I('phones','sm')}</div></div>${sends(s.s)}</div>`;
+  <div class="hd"><div class="row" style="gap:7px"><i class="sd d ${s.pg?'pg':''}">${s.id}</i><span class="nm2">${s.n}</span></div>${s.pg?'':'<span class="mtag ghost">Put on stream</span>'}${s.tag}</div>${mfz(s)}
+  <div class="bts"><div class="bt ${s.on?'on':''}">${I('phones','sm')}</div></div>${sends(s.s)}</div>`;
 const legend=`<div class="lg"><span>Where each sound is heard</span><i class="sd d"></i>sent<i class="sd v" style="margin-left:8px"></i>through another audio scene<i class="sd" style="margin-left:8px;box-shadow:inset 0 0 0 1px var(--line)"></i>not heard</div>`;
 const sub=v=>`<div class="sub"><div class="seg"><span class="${v=='s'?'on':''}">STRIPS</span><span class="${v=='r'?'on':''}">ROUTES</span></div><div class="grow"></div>${legend}</div>`;
 const desk=(open)=>`<div class="desk ${open?'c':''}">
@@ -232,7 +235,7 @@ const mixdock=()=>`<div class="dock">${scenes()}${quick}${livemon}</div>`;
 // the matrix
 const ROWS=[...SND,...MS.map(m=>({...m,ms:1}))];
 const cell=(c,i,r)=>`<div class="c ${i==0?'pg':''} ${c=='x'?'self':''}" data-r="${r}" data-c="${i}">${c=='x'?'':`<i class="rd ${{d:'d',v:'v','-':''}[c]} ${i==0?'pg':''}"></i>`}${c=='v'?'<small>through Stream</small>':''}</div>`;
-const mrow=s=>`<div class="nm" data-r="${s.id}">${s.ms?`<i class="sd d ${s.pg?'pg':''}" style="width:28px;height:28px;font-size:14px">${s.id}</i>`:`<div class="ic" style="background:${s.bg}">${s.ic}</div>`}<span class="${s.m?'dim':''}">${s.n}</span>${s.m?'<span class="mtag" style="background:var(--air);color:#fff">Muted</span>':''}</div>
+const mrow=s=>`<div class="nm" data-r="${s.id}">${s.ms?`<i class="sd d ${s.pg?'pg':''}" style="width:28px;height:28px;font-size:14px">${s.id}</i>`:`<div class="ic" style="background:${s.bg}">${s.ic}</div>`}<span class="${s.m?'dim':''}">${s.n}</span>${s.m?'<span class="mtag" style="background:var(--accent);color:#fff">Muted</span>':''}</div>
   <div class="lv" data-r="${s.id}"><div class="led ${s.l>70?'hot':''}" style="--v:${s.l}%"></div></div>${[...s.s].map((c,i)=>cell(c,i,s.id)).join('')}<div class="c" data-r="${s.id}"></div>`;
 const matrix=()=>`<div class="mxw"><div class="mx">
   <div class="h" style="grid-column:span 2"><div class="ttl"><b>WHO HEARS WHAT</b><span class="help">A row is sent into a column. Click a dot to change it.</span></div></div>
@@ -246,7 +249,7 @@ const matrix=()=>`<div class="mxw"><div class="mx">
 </div></div>`;
 
 const V={
- 'mix':{label:'MIX',cls:'M',note:'<b>MIX.</b> One strip per sound with a tall meter, a fader in decibels, and a mute; the audio scenes stand to the right as heavier master strips. The dots under a strip say where it is heard, one per audio scene: filled is sent, a ring arrives through another audio scene, and red is the one the stream hears. Any audio scene can be listened to with its headphone button. The dock stays underneath, so the scenes, the panic key, and the live picture stay on screen; the picture takes the slot where the sound strip sits on the other pages, since this page already is the sound.',
+ 'mix':{label:'MIX',cls:'M',note:'<b>MIX.</b> One strip per sound with a tall meter, a fader in decibels, and a mute; the audio scenes stand to the right as heavier master strips, with their meters on the same scale but no fader or mute, since an audio scene has no gain of its own. The dots under a strip say where it is heard, one per audio scene: filled is sent, a ring arrives through another audio scene, and the accent is the one the stream hears. Any audio scene can be listened to with its headphone button. The dock stays underneath, so the scenes, the panic key, and the live picture stay on screen; the picture takes the slot where the sound strip sits on the other pages, since this page already is the sound.',
    html:()=>topbar('MIX')+sub('s')+desk()+mixdock(),
    after:f=>{air(f,'game');const d=f.querySelector('.strip[data-id=mic] .sends .sd.v');d.classList.add('hov');
      f.querySelector('.strip[data-id=mic]').insertAdjacentHTML('beforeend','<div class="tip" style="left:40px;bottom:-22px">Desk mic reaches Headphones through Stream</div>')}},

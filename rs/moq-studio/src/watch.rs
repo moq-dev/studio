@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use kio::clock::Instant;
-use moq_mux::timeline;
+use moq_mux::sync;
 use moq_scene::composition::{self, Composition};
 use moq_scene::source::{self, MAX_DELAY, Sources, Status};
 use moq_scene::{AudioScene, Canvas, Collection, Compositor, Item, Rect, Scene, Source};
@@ -62,7 +62,7 @@ pub fn run(
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), composition = %at, "watching");
 	let connection = client.with_subscriber(origin.clone()).connect(url.clone());
 
-	let gpu = pollster::block_on(Gpu::new())?;
+	let gpu = pollster::block_on(Gpu::new(wgpu::Backends::all()))?;
 	let (bus, driver) = moq_audio::bus::Bus::new(Default::default())?;
 	let config = bus.config().clone();
 	let start = Instant::now();
@@ -83,6 +83,7 @@ pub fn run(
 		dir: std::env::current_dir()?,
 		output: moq_video::render::output(&gpu.device),
 		publish: None,
+		grants: None,
 		browser: None,
 	});
 	let paths = Paths { program, at };
@@ -201,7 +202,12 @@ impl Read {
 			None => self.pending.clear(),
 			Some(at) => {
 				let passed = self.pending.iter().take_while(|(_, stamp)| {
-					stamp.is_none_or(|stamp| Duration::from(stamp) + MAX_DELAY <= Duration::from(at))
+					stamp.is_none_or(|stamp| {
+						matches!(
+							(Duration::try_from(stamp), Duration::try_from(at)),
+							(Ok(stamp), Ok(at)) if stamp + MAX_DELAY <= at
+						)
+					})
 				});
 				self.pending.drain(..passed.count().saturating_sub(1));
 			}
@@ -210,17 +216,14 @@ impl Read {
 	}
 
 	/// Take the newest composition due at `now`: each takes effect once the
-	/// program plays the frame it is stamped with on `schedule`, and its sound
-	/// has played. `None` while none is due; `Some(None)` for the program
-	/// alone.
-	fn take_due(&mut self, schedule: Option<&timeline::Consumer>, now: Instant) -> Option<Option<Composition>> {
+	/// program plays the frame it is stamped with on `schedule`. `None` while
+	/// none is due; `Some(None)` for the program alone.
+	fn take_due(&mut self, schedule: Option<&sync::Consumer>, now: Instant) -> Option<Option<Composition>> {
 		let mut taken = None;
 		while let Some((_, at)) = self.pending.front() {
 			let due = match at {
 				None => true,
-				Some(at) => schedule.is_some_and(|schedule| {
-					schedule.due(*at).is_some_and(|due| due <= now) && source::heard(schedule, *at, now)
-				}),
+				Some(at) => schedule.is_some_and(|schedule| schedule.due(*at).is_some_and(|due| due <= now)),
 			};
 			if !due {
 				break;
@@ -321,44 +324,38 @@ async fn follow(origin: moq_net::origin::Consumer, path: moq_net::Path, read: wa
 }
 
 /// Read one instance of the composition broadcast until its catalog ends:
-/// each composition while the catalog lists its track.
+/// each catalog's composition, or the program alone where it has none, to
+/// take effect at the catalog's timestamp.
 async fn instance(broadcast: moq_net::broadcast::Consumer, read: watch::Sender<Read>) -> anyhow::Result<()> {
-	let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default()).await?;
-	let mut compositions: Option<moq_json::snapshot::Consumer<Composition>> = None;
-	// A refused composition stays refused for this instance.
-	let mut refused = false;
-	let alone = || read.send_modify(|read| read.push(None, None));
+	// Every update the program, playing up to `MAX_DELAY` behind, may still
+	// reach, in order.
+	let track = broadcast.track(hang::Catalog::DEFAULT_NAME)?;
+	let mut catalogs = hang::catalog::Consumer::<composition::Ext>::new(track, MAX_DELAY);
+	let refuse = |why: String| {
+		tracing::error!(%why, "refusing the composition; playing the program alone");
+		read.send_modify(|read| {
+			read.refused = Some(why);
+			read.push(None, None);
+		});
+	};
 	loop {
-		tokio::select! {
-			catalog = moq_mux::catalog::Stream::next(&mut catalogs) => {
-				let Some(catalog) = catalog? else {
-					alone();
-					return Ok(());
-				};
-				let listed = catalog.json.tracks.contains_key(composition::TRACK);
-				if listed && compositions.is_none() && !refused {
-					let track = broadcast.track(composition::TRACK)?;
-					compositions = Some(moq_json::snapshot::Consumer::new(track, Default::default()));
-				} else if !listed && compositions.take().is_some() {
-					alone();
-				}
+		match catalogs.next().await {
+			// A scale-less catalog says nothing of when a composition applies.
+			Ok(Some(timed)) if timed.at.scale().is_none() => {
+				refuse("its catalog is not timed".into());
+				return Ok(());
 			}
-			next = async { compositions.as_mut().expect("guarded").next().await }, if compositions.is_some() => match next {
-				Ok(Some(timed)) => read.send_modify(|read| read.push(Some(timed.value), timed.at)),
-				Ok(None) => {
-					compositions = None;
-					alone();
-				}
-				Err(err) => {
-					tracing::error!(%err, "refusing the composition; playing the program alone");
-					compositions = None;
-					refused = true;
-					read.send_modify(|read| {
-						read.refused = Some(err.to_string());
-						read.push(None, None);
-					});
-				}
-			},
+			Ok(Some(timed)) => read.send_modify(|read| read.push(timed.value.ext.composition, Some(timed.at))),
+			Ok(None) => {
+				read.send_modify(|read| read.push(None, None));
+				return Ok(());
+			}
+			Err(hang::Error::Moq(err)) => return Err(err.into()),
+			// Refused for the rest of this instance.
+			Err(err) => {
+				refuse(err.to_string());
+				return Ok(());
+			}
 		}
 	}
 }
@@ -524,15 +521,12 @@ impl Watch {
 			self.synced = true;
 		}
 
-		// The keyframes play from `start` as far as the program has played,
-		// following the clock as it re-anchors or stalls with the sound.
+		// The keyframes play from when the program plays `start`, following
+		// the clock as it moves.
 		if let (Some(composition), Some(schedule)) = (self.composition.as_ref().filter(|_| self.applied), &schedule) {
-			let went_on = match schedule.playhead(now) {
-				Some(head) => now.checked_sub(head.saturating_sub(composition.start)),
-				None => moq_net::Timestamp::try_from(composition.start)
-					.ok()
-					.and_then(|start| schedule.due(start)),
-			};
+			let went_on = moq_net::Timestamp::try_from(composition.start)
+				.ok()
+				.and_then(|start| schedule.due(start));
 			if let Some(went_on) = went_on {
 				self.compositor.set_program_start(went_on);
 			}
@@ -759,22 +753,17 @@ mod tests {
 		assert!(read.refused.is_none());
 	}
 
-	/// Once the composition track is unlisted, the program plays alone at
-	/// once, even while a stalled program holds back a composition still
+	/// Once the composition's catalog ends, the program plays alone at once,
+	/// even while a program not playing yet holds back a composition still
 	/// waiting.
 	#[tokio::test(start_paused = true)]
-	async fn unlisting_supersedes_a_waiting_composition() {
-		let clock = timeline::Producer::new(Duration::from_millis(100));
-		let audio = timeline::Audio {
-			end: Duration::from_secs(1),
-			buffered: Duration::ZERO,
-			target: Duration::from_millis(100),
-		};
-		clock.audio(audio, Instant::now());
-		let schedule = clock.consume();
+	async fn an_ended_catalog_supersedes_a_waiting_composition() {
+		let schedule = sync::Producer::new(Duration::from_millis(100)).consume();
 
 		let (mut publisher, read, reader) = broadcast();
-		publisher.update(composition(Duration::ZERO), stamp(5)).unwrap();
+		publisher
+			.update(composition(Duration::ZERO), &program(), stamp(5))
+			.unwrap();
 		pending(&read, 1).await;
 		tokio::time::advance(Duration::from_secs(60)).await;
 		let later = Instant::now();
@@ -786,7 +775,7 @@ mod tests {
 			});
 			taken
 		};
-		assert_eq!(take(), None, "the program stalled before it");
+		assert_eq!(take(), None, "the program has no moment for it");
 
 		publisher.finish().unwrap();
 		alone(&read).await;
@@ -795,10 +784,22 @@ mod tests {
 		reader.abort();
 	}
 
-	/// A composition of another version, as a newer studio would publish.
+	/// The catalog of a composition of another version, as a newer studio
+	/// would publish.
 	#[derive(serde::Serialize)]
 	struct Newer {
+		#[serde(rename = "live.kixel.studio.composition")]
+		composition: Version3,
+	}
+
+	#[derive(serde::Serialize)]
+	struct Version3 {
 		version: u32,
+	}
+
+	/// The program's catalog, listing nothing.
+	fn program() -> hang::Catalog {
+		hang::Catalog::default()
 	}
 
 	/// A composition broadcast, and the instance reader's view of it.
@@ -822,7 +823,7 @@ mod tests {
 		let read = reads.wait_for(|read| read.pending.len() >= count).await.unwrap();
 		let pending = read.pending.iter().cloned();
 		pending
-			.map(|(composition, at)| (composition, at.map(Duration::from)))
+			.map(|(composition, at)| (composition, at.map(|at| Duration::try_from(at).unwrap())))
 			.collect()
 	}
 
@@ -833,15 +834,19 @@ mod tests {
 		reads.wait_for(alone).await.unwrap();
 	}
 
-	/// The reader hands over each composition at the media time it took
-	/// effect, and the program alone once the composition ends.
+	/// The reader hands over each composition at the media time its catalog
+	/// takes effect, and the program alone once the catalog ends.
 	#[tokio::test]
 	async fn reads_each_composition() {
 		let (mut publisher, read, reader) = broadcast();
-		publisher.update(composition(Duration::ZERO), stamp(1)).unwrap();
+		publisher
+			.update(composition(Duration::ZERO), &program(), stamp(1))
+			.unwrap();
 		let first = (Some(composition(Duration::ZERO)), Some(Duration::from_secs(1)));
 		assert_eq!(pending(&read, 1).await, [first]);
-		publisher.update(composition(Duration::from_secs(2)), stamp(2)).unwrap();
+		publisher
+			.update(composition(Duration::from_secs(2)), &program(), stamp(2))
+			.unwrap();
 		let second = (Some(composition(Duration::from_secs(2))), Some(Duration::from_secs(2)));
 		assert_eq!(pending(&read, 2).await[1], second);
 		publisher.finish().unwrap();
@@ -850,26 +855,34 @@ mod tests {
 		reader.abort();
 	}
 
-	/// A composition of another version is refused, saying why, and the
-	/// program plays alone.
-	#[tokio::test]
-	async fn refuses_another_version() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let config = moq_mux::catalog::Config::default();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+	/// Why the reader refuses the catalog `value` written at `at` on a track
+	/// of `info`, once it plays the program alone.
+	async fn refused(info: moq_net::track::Info, value: &impl serde::Serialize, at: moq_net::Timestamp) -> String {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, info).unwrap();
+		let mut catalog = moq_json::snapshot::Producer::new(track, Default::default());
 		let (read, _) = watch::channel(Read::default());
 		let reader = tokio::spawn(instance(broadcast.consume(), read.clone()));
-		let info = moq_net::track::Info::default().with_timescale(moq_mux::Clock::TIMESCALE);
-		let track = broadcast.create_track(composition::TRACK, info).unwrap();
-		let options = moq_mux::json::Options::default().with_deltas(false);
-		let mut newer = catalog
-			.json_snapshot::<Newer>(track, moq_mux::json::Config::default(), options)
-			.unwrap();
-		newer.update(&Newer { version: 3 }, stamp(1)).unwrap();
+		catalog.update(moq_json::Timed::new(value, at)).unwrap();
 		assert_eq!(pending(&read, 1).await, [(None, None)]);
-		let refused = read.borrow().refused.clone().unwrap();
-		assert!(refused.contains("composition version 3 is not supported"), "{refused}");
 		reader.abort();
+		read.borrow().refused.clone().unwrap()
+	}
+
+	/// A composition of another version is refused, saying why, and the
+	/// program plays alone, as is one in a catalog that is not timed.
+	#[tokio::test]
+	async fn refuses_another_version() {
+		let newer = Newer {
+			composition: Version3 { version: 3 },
+		};
+		let why = refused(hang::Catalog::default_track_info(), &newer, stamp(1)).await;
+		assert!(why.contains("composition version 3 is not supported"), "{why}");
+
+		let mut untimed = hang::Catalog::<composition::Ext>::default();
+		untimed.ext.composition = Some(composition(Duration::ZERO));
+		let why = refused(Default::default(), &untimed, moq_net::Timestamp::unscaled(0)).await;
+		assert!(why.contains("not timed"), "{why}");
 	}
 
 	/// A guest's broadcast, published independently, reaches a viewer through
@@ -879,7 +892,7 @@ mod tests {
 	/// predict, and a player of that composition shows each of its pictures
 	/// beside the program picture that offset puts it with.
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just rs render-sw"]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn plays_a_guest_where_the_studio_did() {
 		use moq_mux::catalog::Stream;
 		const TIMEOUT: Duration = Duration::from_secs(30);
@@ -913,7 +926,10 @@ mod tests {
 				config.kind = moq_video::encode::Kind::Software;
 				let rendition = config.probe().await.unwrap();
 				let reserved = catalog.timebase().reserve().with_interval(config.effective_join());
-				let mut video = moq_video::encode::Producer::new(broadcast, reserved, rendition).unwrap();
+				let track = broadcast
+					.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+					.unwrap();
+				let mut video = moq_video::encode::Producer::new(track, reserved, rendition).unwrap();
 				let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
 				let gray = vec![0x80; 64 * 64 * 4];
 				let mut pace = kio::clock::interval(PERIOD);
@@ -921,8 +937,11 @@ mod tests {
 					pace.tick().await;
 					let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(64, 64)).unwrap();
 					let frame = moq_video::Frame::new(surface, stamping.now());
-					if video.publish(&encoder.encode(&frame).unwrap()).is_err() {
-						return;
+					encoder.encode(&frame).unwrap();
+					while let Some(encoded) = encoder.receive().unwrap() {
+						if video.publish(&encoded).is_err() {
+							return;
+						}
 					}
 				}
 			});
@@ -932,7 +951,7 @@ mod tests {
 		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
 		let client = client.init(Default::default()).expect("client");
 		let dir = tempfile::tempdir().unwrap();
-		let gpu = Gpu::new().await.expect("a GPU");
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = crate::autosave::Autosave::open(dir.path().join("show.toml")).unwrap();
 		let mut studio = Collection::new();
 		studio.canvas = Canvas {
@@ -968,14 +987,8 @@ mod tests {
 		studio.validate().unwrap();
 		let launch = engine::Launch {
 			gpu,
-			relays: vec![engine::Relay {
-				client,
-				url: fixture.url.clone(),
-			}],
-			broadcast: "studio".into(),
-			on_demand: false,
 			recordings: dir.path().to_path_buf(),
-			room: None,
+			sessions: Default::default(),
 		};
 		let loaded = crate::autosave::Loaded {
 			collection: studio,
@@ -985,6 +998,18 @@ mod tests {
 		let engine = engine::Engine::start(launch, autosave, loaded)
 			.await
 			.expect("the studio starts");
+		let relays = vec![engine::Relay {
+			client,
+			url: fixture.url.clone(),
+		}];
+		// It reads the guest through the relay, and goes live on it.
+		engine.watch(&relays);
+		let destination = engine::Destination {
+			relays,
+			broadcast: "studio".into(),
+			on_demand: false,
+		};
+		engine.go_live(destination).await.expect("the studio goes live");
 
 		// The composition, as a viewer on the relay reads it.
 		let viewer = relay.consume();
@@ -1002,17 +1027,17 @@ mod tests {
 		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&program, Default::default())
 			.await
 			.unwrap();
-		let program_clock = catalogs.next().await.unwrap().expect("a catalog").media.clock.unwrap();
+		let program_clock = catalogs.next().await.unwrap().expect("a catalog").sync.clock.unwrap();
 		let composed = follow("studio/composition").await;
-		let mut compositions = moq_json::snapshot::Consumer::<Composition>::new(
-			composed.track(composition::TRACK).unwrap(),
-			Default::default(),
-		);
+		let track = composed.track(hang::Catalog::DEFAULT_NAME).unwrap();
+		let mut compositions = hang::catalog::Consumer::<composition::Ext>::new(track, MAX_DELAY);
 		let composition = kio::clock::timeout(TIMEOUT, async {
 			loop {
-				let read = compositions.next().await.unwrap().expect("a composition");
-				if read.value.sources.contains_key("alice") {
-					return read.value;
+				let read = compositions.next().await.unwrap().expect("a catalog");
+				if let Some(composition) = read.value.ext.composition
+					&& composition.sources.contains_key("alice")
+				{
+					return composition;
 				}
 			}
 		})
@@ -1024,7 +1049,7 @@ mod tests {
 		assert_eq!(composition.pictures.len(), 1);
 
 		// Where the two clocks put one moment, and so the offset with no delay.
-		let micros = |clock: hang::catalog::Clock| Duration::from(clock.wall).as_micros() as i64;
+		let micros = |clock: hang::catalog::Clock| Duration::try_from(clock.wall).unwrap().as_micros() as i64;
 		let apart = micros(guest.wall().unwrap()) - micros(program_clock);
 		let delay = alice.offset - apart;
 		let playout = engine
@@ -1044,7 +1069,7 @@ mod tests {
 		);
 
 		// A player of the composition, on the relay.
-		let gpu = Gpu::new().await.expect("a GPU");
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (bus, driver) = moq_audio::bus::Bus::new(Default::default()).unwrap();
 		let (_mixer, mixed) = source::Mixer::new(driver, Instant::now());
 		let mut sources = Sources::new(source::Context {
@@ -1054,6 +1079,7 @@ mod tests {
 			dir: dir.path().to_path_buf(),
 			output: moq_video::render::output(&gpu.device),
 			publish: None,
+			grants: None,
 			browser: None,
 		});
 		let paths = Paths {

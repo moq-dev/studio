@@ -1,0 +1,33 @@
+# The show the drop views open: room on the left to drop a logo, and the
+# host's picture on the right to drop a new picture on.
+version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.host]
+kind = "image"
+path = "person.jpg"
+
+[sources.backdrop]
+kind = "color"
+color = "#101828"
+
+[sources.bar]
+kind = "color"
+color = "#2563ebe6"
+
+[[scenes]]
+name = "Main"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "host", rect = { x = 1060, y = 160, width = 760, height = 428 } },
+    { source = "bar", rect = { x = 80, y = 860, width = 900, height = 120 } },
+]
+
+[[audio_scenes]]
+name = "Program"
+program = true
+sounds = []

@@ -26,6 +26,13 @@ jobs:
     timeout-minutes: 60
     env:
       NEXTEST_PROFILE: ci
+      # No auto maintenance in this throwaway checkout. Checkout disables gc
+      # only in the superproject, so the moq submodule's fetch leaves a
+      # detached maintenance that rewrites its shallow file mid-unshallow,
+      # failing the pin check.
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: maintenance.auto
+      GIT_CONFIG_VALUE_0: false
 
     steps:
       - name: Checkout
@@ -33,6 +40,18 @@ jobs:
         with:
           persist-credentials: false
           submodules: true
+
+      # Only a PR that moves the pin fetches moq's history, so an unchanged pin
+      # never fails on the network.
+      - name: The moq pin is on moq's main
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --quiet --no-tags --depth=1 origin "$BASE"
+          if [ "$(git rev-parse "$BASE:moq")" != "$(git rev-parse HEAD:moq)" ]; then
+            sh/check-moq-main.sh
+          fi
 
       - uses: ./.github/actions/nix
 

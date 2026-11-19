@@ -11,7 +11,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, mpsc};
 
-use moq_video::render::wgpu;
 use tract_onnx::prelude::*;
 
 use crate::Error;

@@ -155,6 +155,12 @@ impl Collection {
 		recorded.map(|scene| scene.name.as_str())
 	}
 
+	/// The scene the panic key cuts to, if one is marked safe.
+	pub fn safe(&self) -> Option<&str> {
+		let safe = self.scenes.iter().find(|scene| scene.safe);
+		safe.map(|scene| scene.name.as_str())
+	}
+
 	/// The audio scene called `name`.
 	pub fn audio_scene(&self, name: &str) -> Option<&AudioScene> {
 		self.audio_scenes.iter().find(|scene| scene.name == name)
@@ -221,29 +227,55 @@ impl Collection {
 	/// itself. Refused with the reason otherwise, or for a scene that does
 	/// not exist.
 	pub fn takes(&self, scene: &str) -> Result<(), Error> {
-		let canvas = self
-			.canvas(Some(scene))
-			.ok_or_else(|| Error::Invalid(format!("there is no scene `{scene}`")))?;
-		if canvas.size() != self.canvas.size() {
-			return Err(Error::Invalid(format!(
-				"`{scene}` is {}x{}, not the program's {}x{}, so it cannot go on program",
-				canvas.width, canvas.height, self.canvas.width, self.canvas.height
-			)));
+		match self.refuses(scene) {
+			Some(why) => Err(Error::Invalid(why)),
+			None => Ok(()),
 		}
-		if self.draws_program(scene) {
-			return Err(Error::Invalid(format!(
-				"`{scene}` draws the program, so it cannot go on program"
-			)));
-		}
-		Ok(())
 	}
 
-	/// The source whose capture `name` shows: itself, or what it clones.
+	/// Why the scene called `scene` cannot go on program, if it cannot, as
+	/// its pad says.
+	pub fn refuses(&self, scene: &str) -> Option<String> {
+		let Some(canvas) = self.canvas(Some(scene)) else {
+			return Some(format!("there is no scene `{scene}`"));
+		};
+		if canvas.size() != self.canvas.size() {
+			return Some(format!(
+				"`{scene}` is {}x{}, not the program's {}x{}, so it cannot go on program",
+				canvas.width, canvas.height, self.canvas.width, self.canvas.height
+			));
+		}
+		if self.draws_program(scene) {
+			return Some(format!("`{scene}` draws the program, so it cannot go on program"));
+		}
+		None
+	}
+
+	/// The source whose capture `name` shows: itself, what it clones, or, for
+	/// a role, what the source it names shows.
 	pub fn capture<'a>(&'a self, name: &'a str) -> &'a str {
+		let name = self.resolve(name);
 		match self.sources.get(name) {
 			Some(Source::Clone { source }) => source,
 			_ => name,
 		}
+	}
+
+	/// The source a [`Source::Role`] called `name` names, or `name` itself
+	/// for any other source and for a role nothing fills.
+	pub fn resolve<'a>(&'a self, name: &'a str) -> &'a str {
+		match self.sources.get(name) {
+			Some(Source::Role { source: Some(source) }) => source,
+			_ => name,
+		}
+	}
+
+	/// Whether `name` is a role nothing fills, which draws nothing.
+	pub fn unfilled(&self, name: &str) -> bool {
+		matches!(
+			self.sources.get(self.resolve(name)),
+			Some(Source::Role { source: None })
+		)
 	}
 
 	/// What the source called `name` draws if it is a scene or program
@@ -354,7 +386,7 @@ impl Collection {
 			};
 			if draws {
 				return Err(Error::Invalid(format!(
-					"the top layer places `{}`, which draws the program the top layer is drawn over",
+					"an always-on-top layer shows `{}`, which draws the program the always-on-top layers are drawn over",
 					item.source
 				)));
 			}
@@ -362,24 +394,27 @@ impl Collection {
 		Ok(())
 	}
 
-	/// The filters `item` draws through: its source's, then its own.
+	/// The filters `item` draws through: its source's, through a role, then
+	/// its own.
 	pub fn filters<'a>(&'a self, item: &'a Item) -> impl Iterator<Item = &'a Filter> {
-		let source = self.video.get(&item.source).map(|video| video.filters.as_slice());
+		let source = self.video.get(self.resolve(&item.source));
+		let source = source.map(|video| video.filters.as_slice());
 		source.unwrap_or_default().iter().chain(&item.filters)
 	}
 
-	/// What `item` shows of its source's picture: its source's crop, then its
-	/// own.
+	/// What `item` shows of its source's picture: its source's crop, through a
+	/// role, then its own.
 	pub fn crop(&self, item: &Item) -> Crop {
-		let source = self.video.get(&item.source).map(|video| video.crop);
+		let source = self.video.get(self.resolve(&item.source)).map(|video| video.crop);
 		source.unwrap_or_default().then(&item.crop)
 	}
 
 	/// Check what the types cannot: every canvas can be encoded, names are
 	/// unique, a published scene's names its broadcast, one scene at most is
-	/// recorded, every item, clone, audio, and video entry names a source that
-	/// exists, a stinger names a media source, and every crop and filter's
-	/// settings are in range, each filter naming a source of the kind it reads.
+	/// recorded and one at most safe, which can go on program, every item,
+	/// clone, audio, and video entry names a source that exists, a stinger
+	/// names a media source, and every crop and filter's settings are in
+	/// range, each filter naming a source of the kind it reads.
 	pub fn validate(&self) -> Result<(), Error> {
 		self.canvas.validate()?;
 
@@ -395,6 +430,13 @@ impl Collection {
 				.canvas(self.canvas)
 				.validate()
 				.map_err(|err| Error::Invalid(format!("scene `{}`: {err}", scene.name)))?;
+			let mains = scene.items.iter().filter(|item| item.slot == Some(Slot::Main)).count();
+			if mains > 1 {
+				return Err(Error::Invalid(format!(
+					"scene `{}` puts {mains} layers in its main slot, which holds one",
+					scene.name
+				)));
+			}
 			if scene.published && (scene.name.contains('/') || moq_net::Path::new(&scene.name).is_err()) {
 				return Err(Error::Invalid(format!(
 					"scene `{}` is published, so its name is one segment of its broadcast's path: no `/`, and a `\\` only before another",
@@ -406,6 +448,13 @@ impl Collection {
 		if let (Some(first), Some(second)) = (recorded.next(), recorded.next()) {
 			return Err(Error::Invalid(format!(
 				"scenes `{}` and `{}` are both recorded, but recordings hold one",
+				first.name, second.name
+			)));
+		}
+		let mut safe = self.scenes.iter().filter(|scene| scene.safe);
+		if let (Some(first), Some(second)) = (safe.next(), safe.next()) {
+			return Err(Error::Invalid(format!(
+				"scenes `{}` and `{}` are both safe, but the panic key cuts to one",
 				first.name, second.name
 			)));
 		}
@@ -425,6 +474,21 @@ impl Collection {
 				}
 				item.rect.validate(&layer, &item.source)?;
 				let on = format!("`{}` in {layer}", item.source);
+				if item.slot.is_some() {
+					if layer.scene.is_none() {
+						return Err(Error::Invalid(format!(
+							"{on} is in a slot, but only a scene arranges slots"
+						)));
+					}
+					if item.rect != Rect::default() {
+						return Err(Error::Invalid(format!(
+							"{on} is in a slot, which places it, so it takes no rect"
+						)));
+					}
+				}
+				item.shape
+					.validate()
+					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 				item.crop
 					.validate()
 					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
@@ -432,14 +496,14 @@ impl Collection {
 				if layer.scene.is_none() {
 					if !item.keyframes.is_empty() {
 						return Err(Error::Invalid(format!(
-							"{on} has keyframes, but the top layer never goes on to start them"
+							"{on} has keyframes, but an always-on-top layer never goes on to start them"
 						)));
 					}
 					if let Some(Nested::Scene(scene)) = self.nested(&item.source)
 						&& let Some(keyed) = self.reached(scene).into_iter().find(|item| !item.keyframes.is_empty())
 					{
 						return Err(Error::Invalid(format!(
-							"{on} draws `{}` with keyframes, but the top layer never goes on to start them",
+							"{on} draws `{}` with keyframes, but an always-on-top layer never goes on to start them",
 							keyed.source
 						)));
 					}
@@ -478,11 +542,26 @@ impl Collection {
 					"`{name}` plays on `{clock}`, which is not a broadcast source"
 				)));
 			}
+			if let Source::Role { source: Some(source) } = source {
+				match self.sources.get(source) {
+					Some(Source::Role { .. }) => {
+						return Err(Error::Invalid(format!(
+							"role `{name}` is filled by `{source}`, which is itself a role"
+						)));
+					}
+					Some(filled) if filled.has_video() && !matches!(filled, Source::Lut { .. }) => {}
+					_ => {
+						return Err(Error::Invalid(format!(
+							"role `{name}` is filled by `{source}`, which is not a source with a picture"
+						)));
+					}
+				}
+			}
 			let Source::Clone { source } = source else { continue };
 			match self.sources.get(source) {
-				Some(Source::Clone { .. }) => {
+				Some(Source::Clone { .. } | Source::Role { .. }) => {
 					return Err(Error::Invalid(format!(
-						"`{name}` clones `{source}`, which is itself a clone"
+						"`{name}` clones `{source}`, which is itself a clone or a role"
 					)));
 				}
 				Some(origin) if origin.has_video() => {}
@@ -498,6 +577,11 @@ impl Collection {
 			if !self.sources.get(name).is_some_and(Source::has_video) {
 				return Err(Error::Invalid(format!(
 					"video settings for `{name}`, which is not a source with a picture"
+				)));
+			}
+			if matches!(self.sources[name], Source::Role { .. }) {
+				return Err(Error::Invalid(format!(
+					"video settings for `{name}`, a role, which shows its source's"
 				)));
 			}
 			if video.background == Background::Remove && !self.sources[name].removes_background() {
@@ -547,6 +631,14 @@ impl Collection {
 
 		self.validate_nesting()?;
 		self.validate_published()?;
+		// Checked once the scenes it draws are, so a panic never finds out.
+		if let Some(safe) = self.safe()
+			&& let Some(why) = self.refuses(safe)
+		{
+			return Err(Error::Invalid(format!(
+				"{why}, but it is the safe scene the panic key cuts to"
+			)));
+		}
 
 		if let Some(name) = self.transition.stinger()
 			&& !matches!(self.sources.get(name), Some(Source::Media { .. }))
@@ -676,11 +768,19 @@ impl Collection {
 						"{on} cannot be in a scene another scene draws, since viewers place it over the program"
 					)));
 				}
+				if item.slot.is_some() {
+					return Err(Error::Invalid(format!(
+						"{on} cannot be in a slot, since viewers place it where its rect says"
+					)));
+				}
 				let keyframed = item.keyframes.iter().flat_map(|keyframe| &keyframe.filters);
 				let mut filters = self.filters(item).chain(keyframed);
-				if item.blend != Blend::Normal || filters.any(|filter| !matches!(filter, Filter::Opacity { .. })) {
+				if item.blend != Blend::Normal
+					|| !item.shape.is_square()
+					|| filters.any(|filter| !matches!(filter, Filter::Opacity { .. }))
+				{
 					return Err(Error::Invalid(format!(
-						"{on} takes no filter but opacity and no blend mode, which every player must reproduce"
+						"{on} takes no filter but opacity, no blend mode, and no shape, which every player must reproduce"
 					)));
 				}
 			}
@@ -979,14 +1079,21 @@ pub struct Scene {
 	/// the one on program.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub audio: Option<String>,
+	/// Whether the panic key cuts to it. One scene at most is safe, and it
+	/// must be able to go on program.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub safe: bool,
+	/// Where its items in a [`Slot`] go.
+	#[serde(default, skip_serializing_if = "Arrangement::is_default")]
+	pub arrangement: Arrangement,
 	/// What the scene draws, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
 }
 
 impl Scene {
-	/// An empty scene of the program's size, neither published nor recorded,
-	/// carrying the audio scene on program.
+	/// An empty scene of the program's size, neither published, recorded,
+	/// nor safe, carrying the audio scene on program.
 	pub fn new(name: impl Into<String>) -> Self {
 		Self {
 			name: name.into(),
@@ -994,6 +1101,8 @@ impl Scene {
 			published: false,
 			recorded: false,
 			audio: None,
+			safe: false,
+			arrangement: Arrangement::default(),
 			items: Vec::new(),
 		}
 	}
@@ -1039,9 +1148,47 @@ impl fmt::Display for Layer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match &self.scene {
 			Some(name) => write!(f, "scene `{name}`"),
-			None => write!(f, "the top layer"),
+			None => write!(f, "the always-on-top layers"),
 		}
 	}
+}
+
+/// Where a scene places its items in a [`Slot`]: the main one large and
+/// the tiles beside it, each shaped 16:9 and the picture in it cropped to
+/// cover it unstretched. Without a main item, the tiles share the canvas as
+/// a grid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Arrangement {
+	/// The main item on the left, the tiles in a column on its right.
+	#[default]
+	Column,
+	/// The main item on top, the tiles in a row under it.
+	Row,
+	/// Every item in a grid of equal cells, the main item first.
+	Grid,
+	/// The main item filling the canvas, the tiles small in its bottom-right
+	/// corner.
+	Inset,
+}
+
+impl Arrangement {
+	/// Every arrangement.
+	pub const ALL: [Self; 4] = [Self::Column, Self::Row, Self::Grid, Self::Inset];
+
+	fn is_default(&self) -> bool {
+		*self == Self::default()
+	}
+}
+
+/// Which of its scene's slots an item fills.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Slot {
+	/// The largest. A scene has one at most.
+	Main,
+	/// One of the tiles beside it, in the order the scene lists them.
+	Tile,
 }
 
 /// What a [`Source::Scene`] or [`Source::Program`] draws.
@@ -1063,11 +1210,34 @@ pub enum Nested<'a> {
 pub struct Item {
 	/// The [`Collection::sources`] entry to draw.
 	pub source: String,
-	/// Where on the canvas, stretched to fill it.
+	/// Where on the canvas, stretched to fill it. Empty, and left out of the
+	/// file, for an item in a [`slot`](Self::slot).
+	#[serde(default, skip_serializing_if = "Rect::is_empty")]
 	pub rect: Rect,
+	/// The slot its scene's [`Arrangement`] places it in, rather than its
+	/// rect, which it then leaves out. The arrangement closes up a slot
+	/// whose item is hidden, a role nothing fills, or a source gone offline
+	/// or failed, and glides the others to their new places.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub slot: Option<Slot>,
+	/// Whether the studio placed it on its own, as a guest appearing in the
+	/// next tile, rather than the host: once that guest leaves, the next to
+	/// appear may take it. Undo restores it with the rest of the item, and a
+	/// copy is the host's.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub auto: bool,
 	/// Whether the item is drawn. A hidden item keeps its place.
 	#[serde(default = "yes")]
 	pub visible: bool,
+	/// Whether the item stays where it is: an editor's pointer passes through
+	/// it, so what is in front of a backdrop is never missed for it. It draws
+	/// as any other item does.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub locked: bool,
+	/// The outline it is cut to and the border along it, applied to its rect
+	/// before every filter, so a shadow follows the shape.
+	#[serde(default, skip_serializing_if = "Shape::is_square")]
+	pub shape: Shape,
 	/// Trimmed from what its source's crop leaves, before every filter.
 	#[serde(default, skip_serializing_if = "Crop::is_none")]
 	pub crop: Crop,
@@ -1092,7 +1262,11 @@ impl Item {
 		Self {
 			source: source.into(),
 			rect,
+			slot: None,
+			auto: false,
 			visible: true,
+			locked: false,
+			shape: Shape::default(),
 			crop: Crop::default(),
 			filters: Vec::new(),
 			blend: Blend::Normal,
@@ -1110,6 +1284,8 @@ impl Item {
 		filters.extend(offset.filters);
 		Cow::Owned(Self {
 			source: self.source.clone(),
+			slot: self.slot,
+			auto: self.auto,
 			rect: Rect {
 				x: self.rect.x + offset.x,
 				y: self.rect.y + offset.y,
@@ -1118,6 +1294,8 @@ impl Item {
 				height: (self.rect.height + offset.height).max(0.0),
 			},
 			visible: self.visible,
+			locked: self.locked,
+			shape: self.shape,
 			crop: self.crop.then(&offset.crop),
 			filters,
 			blend: self.blend,
@@ -1158,6 +1336,75 @@ pub(crate) enum Settled {
 	Before,
 	At(Duration),
 	After,
+}
+
+/// The outline an item is cut to, and a border drawn inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shape {
+	/// How round each corner is, top-left, top-right, bottom-right, then
+	/// bottom-left, as a fraction of the item's shorter side: 0 is square,
+	/// and 0.5 on every corner makes a square item a circle.
+	#[serde(default, skip_serializing_if = "is_square")]
+	pub corners: [f32; 4],
+	/// How wide the border is in canvas pixels, inside the outline; 0 for none.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub border: f32,
+	/// The border's color.
+	#[serde(default = "white", skip_serializing_if = "is_white")]
+	pub color: Rgba,
+}
+
+impl Default for Shape {
+	fn default() -> Self {
+		Self {
+			corners: [0.0; 4],
+			border: 0.0,
+			color: white(),
+		}
+	}
+}
+
+impl Shape {
+	/// Square corners and no border, as an item is cut by default.
+	pub fn is_square(&self) -> bool {
+		is_square(&self.corners) && self.border == 0.0
+	}
+
+	/// `progress` of the way from this shape to `other`, which a mix of two
+	/// valid shapes is.
+	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Self {
+		Self {
+			corners: std::array::from_fn(|corner| mix(self.corners[corner], other.corners[corner], progress)),
+			border: mix(self.border, other.border, progress),
+			color: self.color.toward(&other.color, progress),
+		}
+	}
+
+	fn validate(&self) -> Result<(), String> {
+		if !self.corners.iter().all(|corner| (0.0..=0.5).contains(corner)) {
+			return Err(format!(
+				"its corners are {:?}; each must be from 0 to 0.5 of its shorter side",
+				self.corners
+			));
+		}
+		if !self.border.is_finite() || self.border < 0.0 {
+			return Err(format!("its border is {} pixels wide", self.border));
+		}
+		Ok(())
+	}
+}
+
+fn is_square(corners: &[f32; 4]) -> bool {
+	*corners == [0.0; 4]
+}
+
+fn white() -> Rgba {
+	Rgba([u8::MAX; 4])
+}
+
+fn is_white(color: &Rgba) -> bool {
+	*color == white()
 }
 
 /// Where an item is at a moment after its scene goes on, as an offset from
@@ -1401,11 +1648,7 @@ impl Filter {
 	/// mask modes. A mix of valid settings is valid.
 	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Option<Self> {
 		let mix = |from: f32, to: f32| mix(from, to, progress);
-		let color = |from: Rgba, to: Rgba| {
-			Rgba(std::array::from_fn(|channel| {
-				mix(f32::from(from.0[channel]), f32::from(to.0[channel])).round() as u8
-			}))
-		};
+		let color = |from: Rgba, to: Rgba| from.toward(&to, progress);
 		Some(match (self, other) {
 			(Self::Opacity { amount: a }, Self::Opacity { amount: b }) => Self::Opacity { amount: mix(*a, *b) },
 			(Self::Brightness { amount: a }, Self::Brightness { amount: b }) => {
@@ -1683,6 +1926,12 @@ pub struct Video {
 	/// Applied in order, before each item's own.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub filters: Vec<Filter>,
+	/// Whether a camera, display, or window is meant to go all dark at
+	/// times, such as a camera whose shutter closes between segments: the
+	/// compositor never judges it gone dark, nor holds its last picture over
+	/// the dark.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub expect_dark: bool,
 }
 
 /// What happens to the background behind a person in a source's picture.
@@ -1707,7 +1956,7 @@ impl Background {
 }
 
 /// A rectangle in canvas pixels, from the top-left corner.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rect {
 	/// Left edge.
@@ -1729,6 +1978,11 @@ impl Rect {
 			width: canvas.width as f32,
 			height: canvas.height as f32,
 		}
+	}
+
+	/// Whether it is the empty rect at the origin, which an item in a slot has.
+	pub fn is_empty(&self) -> bool {
+		*self == Self::default()
 	}
 
 	fn validate(&self, layer: &Layer, source: &str) -> Result<(), Error> {
@@ -1766,6 +2020,14 @@ pub enum Source {
 		/// The window's id.
 		id: String,
 	},
+	/// A whole display the user picks in the system's screen-sharing picker,
+	/// as a Wayland desktop has no other way to share one. The file records
+	/// only that it is picked; this machine's [`Grants`](crate::Grants)
+	/// remember the grant, so it reopens without the picker. Linux only.
+	PickedDisplay,
+	/// One window the user picks in the system's screen-sharing picker, as
+	/// [`Source::PickedDisplay`] is.
+	PickedWindow,
 	/// A microphone or other audio input.
 	Microphone {
 		/// The input's id, or the default input.
@@ -1835,6 +2097,16 @@ pub enum Source {
 		/// clock should.
 		#[serde(default = "yes", skip_serializing_if = "is_true")]
 		restart: bool,
+	},
+	/// A role a show casts once, such as its main camera or main picture: it
+	/// shows the source it names, with that source's crop and filters, so a
+	/// scene built from roles survives a change of hardware. It draws
+	/// nothing while nothing fills it, and its slot closes up. Its sound is
+	/// its source's, not mixed a second time.
+	Role {
+		/// The source filling it: one with a picture, and not itself a role.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		source: Option<String>,
 	},
 	/// Another source's picture, captured once, with [`Collection::video`]
 	/// filters of its own. Its sound is not mixed a second time.
@@ -1906,10 +2178,27 @@ impl Source {
 		}
 	}
 
+	/// Whether it is a [`Source::Role`].
+	pub fn is_role(&self) -> bool {
+		matches!(self, Self::Role { .. })
+	}
+
 	/// Whether the source opens a capture, file, or subscription of its own,
 	/// rather than showing another source's or a scene.
 	pub fn opens(&self) -> bool {
-		!matches!(self, Self::Clone { .. } | Self::Scene { .. } | Self::Program)
+		!matches!(
+			self,
+			Self::Clone { .. } | Self::Role { .. } | Self::Scene { .. } | Self::Program
+		)
+	}
+
+	/// Whether the source is a camera, display, or window capture, which the
+	/// compositor watches for going dark; see [`Compositor::dark`](crate::Compositor::dark).
+	pub fn may_go_dark(&self) -> bool {
+		matches!(
+			self,
+			Self::Camera { .. } | Self::Display { .. } | Self::Window { .. } | Self::PickedDisplay | Self::PickedWindow
+		)
 	}
 
 	/// Whether the source's picture can have its background removed: a
@@ -1920,6 +2209,8 @@ impl Source {
 			Self::Camera { .. }
 				| Self::Display { .. }
 				| Self::Window { .. }
+				| Self::PickedDisplay
+				| Self::PickedWindow
 				| Self::Image { .. }
 				| Self::Media { .. }
 				| Self::Broadcast { .. }
@@ -2055,6 +2346,15 @@ fn is_center(pan: &f32) -> bool {
 /// An sRGB color with straight alpha, written `#rrggbb` or `#rrggbbaa`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerializeDisplay, DeserializeFromStr)]
 pub struct Rgba(pub [u8; 4]);
+
+impl Rgba {
+	/// `progress` of the way from this color to `other`, channel by channel.
+	pub(crate) fn toward(&self, other: &Self, progress: f32) -> Self {
+		Self(std::array::from_fn(|channel| {
+			mix(f32::from(self.0[channel]), f32::from(other.0[channel]), progress).round() as u8
+		}))
+	}
+}
 
 impl fmt::Display for Rgba {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2270,6 +2570,7 @@ path = "grade.cube"
 
 [[scenes]]
 name = "Main"
+safe = true
 items = [
 	{ source = "bg", rect = { x = 0, y = 0, width = 1280, height = 720 } },
 	{ source = "cam", rect = { x = 10, y = 10, width = 320, height = 180 }, visible = false, keyframes = [
@@ -2782,6 +3083,66 @@ background = "remove"
 		}
 	}
 
+	/// An item's lock and shape are written only when set, read back, and
+	/// refused out of range or on a source published independently.
+	#[test]
+	fn an_item_keeps_its_lock_and_shape() {
+		let mut collection = example();
+		let plain = collection.to_toml().unwrap();
+		assert!(!plain.contains("locked") && !plain.contains("shape"), "{plain}");
+
+		let item = &mut collection.scenes[0].items[0];
+		item.locked = true;
+		item.shape = Shape {
+			corners: [0.5, 0.5, 0.06, 0.06],
+			border: 4.0,
+			..Shape::default()
+		};
+		let text = collection.to_toml().unwrap();
+		assert!(text.contains("locked = true"), "{text}");
+		let shape = text
+			.lines()
+			.find(|line| line.contains("corners"))
+			.expect("the shape is written");
+		assert!(!shape.contains("color"), "a white border's color is left out: {shape}");
+		assert_eq!(Collection::from_toml(&text).unwrap(), collection);
+
+		let item = &collection.scenes[0].items[0];
+		for shape in [
+			Shape {
+				corners: [0.6, 0.0, 0.0, 0.0],
+				..item.shape
+			},
+			Shape {
+				border: -1.0,
+				..item.shape
+			},
+			Shape {
+				border: f32::NAN,
+				..item.shape
+			},
+		] {
+			let mut wrong = collection.clone();
+			wrong.scenes[0].items[0].shape = shape;
+			assert!(matches!(wrong.validate(), Err(Error::Invalid(_))), "{shape:?}");
+		}
+
+		let mut published = Collection::new();
+		published.sources.insert("cam".into(), Source::Camera { id: None });
+		published.published.insert("cam".into());
+		let shaped = Item {
+			shape: collection.scenes[0].items[0].shape,
+			..Item::new("cam", Rect::fill(&published.canvas))
+		};
+		published.scenes = vec![Scene {
+			items: vec![shaped],
+			..Scene::new("Main")
+		}];
+		assert!(published.validate().is_err(), "every player would have to cut it");
+		published.scenes[0].items[0].shape = Shape::default();
+		published.validate().unwrap();
+	}
+
 	/// A source's crop then an item's is one crop of the original picture.
 	#[test]
 	fn crops_compose() {
@@ -3054,14 +3415,14 @@ background = "remove"
 		);
 		refused(
 			&|collection| collection.top.push(Item::new("on air", fill)),
-			"the top layer places `on air`, which draws the program",
+			"an always-on-top layer shows `on air`, which draws the program",
 		);
 		refused(
 			&|collection| {
 				collection.scenes[2].items.push(Item::new("on air", fill));
 				collection.top.push(Item::new("a", fill));
 			},
-			"the top layer places `a`, which draws the program",
+			"an always-on-top layer shows `a`, which draws the program",
 		);
 		refused(
 			&|collection| {
@@ -3072,7 +3433,7 @@ background = "remove"
 				});
 				collection.top.push(Item::new("a", fill));
 			},
-			"with keyframes, but the top layer never goes on to start them",
+			"with keyframes, but an always-on-top layer never goes on to start them",
 		);
 		refused(
 			&|collection| {
@@ -3172,6 +3533,61 @@ background = "remove"
 		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "two recorded");
 	}
 
+	/// One scene at most is safe, and it goes on program: the program's size,
+	/// drawing no program source. Marking another moves the mark, and the
+	/// file names it once.
+	#[test]
+	fn the_safe_scene_goes_on_program() {
+		let mut collection = example();
+		assert_eq!(collection.safe(), None);
+		collection.scenes.push(Scene::new("Break"));
+		let mut draft = collection.draft("Mark `Break` safe");
+		draft.set_safe(Some("Break")).unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
+		assert_eq!(collection.safe(), Some("Break"));
+		let text = collection.to_toml().unwrap();
+		assert_eq!(text.matches("safe = true").count(), 1, "{text}");
+		assert_eq!(Collection::from_toml(&text).unwrap(), collection);
+
+		let mut draft = collection.draft("Mark `Scene` safe");
+		draft.set_safe(Some("Scene")).unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
+		assert_eq!(collection.safe(), Some("Scene"), "the mark moves");
+		let mut draft = collection.draft("Mark no scene safe");
+		draft.set_safe(None).unwrap();
+		collection.apply(&draft.finish().unwrap()).unwrap();
+		assert_eq!(collection.safe(), None);
+		assert!(collection.draft("").set_safe(Some("Nowhere")).is_err());
+
+		let refused = |edit: fn(&mut Collection)| {
+			let mut collection = example();
+			collection.scenes.push(Scene {
+				safe: true,
+				..Scene::new("Break")
+			});
+			collection.validate().unwrap();
+			edit(&mut collection);
+			matches!(collection.validate(), Err(Error::Invalid(_)))
+		};
+		assert!(refused(|collection| collection.scenes[0].safe = true), "two safe");
+		assert!(
+			refused(|collection| collection.scenes[1].size = Some(Size {
+				width: 1080,
+				height: 1920
+			})),
+			"another size"
+		);
+		assert!(
+			refused(|collection| {
+				collection.sources.insert("program".into(), Source::Program);
+				collection.scenes[1]
+					.items
+					.push(Item::new("program", Rect::fill(&collection.canvas)));
+			}),
+			"drawing the program"
+		);
+	}
+
 	#[test]
 	fn refuses_a_canvas_the_encoder_cannot_take() {
 		for (width, height, framerate) in [(1921, 1080, 30), (0, 1080, 30), (1920, 1080, 0)] {
@@ -3232,5 +3648,172 @@ background = "remove"
 		for bad in ["102030", "#1020", "#gg0000", "#ééé"] {
 			assert!(bad.parse::<Rgba>().is_err(), "{bad}");
 		}
+	}
+
+	/// A scene of slots by hand: roles name the sources in them, an item in a
+	/// slot leaves its rect out, and a logo keeps its rect beside them.
+	const SLOTS: &str = r##"version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.Main]
+kind = "role"
+source = "Game"
+
+[sources.Camera]
+kind = "role"
+
+[sources.Game]
+kind = "window"
+id = "42"
+
+[sources.Logo]
+kind = "color"
+color = "#ffffff"
+
+[[scenes]]
+name = "Guests"
+arrangement = "row"
+
+[[scenes.items]]
+source = "Main"
+slot = "main"
+
+[[scenes.items]]
+source = "Camera"
+slot = "tile"
+
+[[scenes.items]]
+source = "Logo"
+rect = { x = 1700, y = 40, width = 160, height = 90 }
+"##;
+
+	#[test]
+	fn a_scene_of_slots_reads_and_writes_by_hand() {
+		let collection = Collection::from_toml(SLOTS).unwrap();
+		let scene = collection.scene("Guests").unwrap();
+		assert_eq!(scene.arrangement, Arrangement::Row);
+		assert_eq!(scene.items[0].slot, Some(Slot::Main));
+		assert_eq!(scene.items[0].rect, Rect::default());
+		assert_eq!(collection.resolve("Main"), "Game");
+		assert_eq!(collection.capture("Main"), "Game");
+		assert!(collection.unfilled("Camera"));
+		assert!(!collection.unfilled("Main"));
+
+		let text = collection.to_toml().unwrap();
+		assert_eq!(Collection::from_toml(&text).unwrap(), collection);
+		assert_eq!(text.matches("rect").count(), 1, "only the logo has a rect:\n{text}");
+		assert!(text.contains("arrangement = \"row\""), "{text}");
+	}
+
+	#[test]
+	fn a_role_shows_its_source_through_that_source_s_crop_and_filters() {
+		let mut collection = Collection::from_toml(SLOTS).unwrap();
+		let video = Video {
+			crop: Crop {
+				left: 0.5,
+				..Crop::default()
+			},
+			filters: vec![Filter::Opacity { amount: 0.5 }],
+			..Video::default()
+		};
+		collection.video.insert("Game".into(), video.clone());
+		collection.validate().unwrap();
+		let item = &collection.scenes[0].items[0];
+		assert_eq!(collection.crop(item), video.crop);
+		assert_eq!(collection.filters(item).collect::<Vec<_>>(), vec![&video.filters[0]]);
+
+		let mut own = collection.clone();
+		own.video.insert("Main".into(), video);
+		assert!(own.validate().is_err(), "a role has no video settings of its own");
+	}
+
+	#[test]
+	fn refuses_slots_and_roles_that_cannot_be_drawn() {
+		let collection = Collection::from_toml(SLOTS).unwrap();
+		let refused = |change: &dyn Fn(&mut Collection), why: &str| {
+			let mut changed = collection.clone();
+			change(&mut changed);
+			let err = changed.validate().unwrap_err().to_string();
+			assert!(err.contains(why), "{why}: {err}");
+		};
+		refused(
+			&|c| c.scenes[0].items[1].rect = Rect::fill(&c.canvas),
+			"so it takes no rect",
+		);
+		refused(&|c| c.scenes[0].items[1].slot = Some(Slot::Main), "which holds one");
+		refused(
+			&|c| {
+				let mut item = c.scenes[0].items[0].clone();
+				item.source = "Game".into();
+				c.top.push(item);
+			},
+			"only a scene arranges slots",
+		);
+		refused(
+			&|c| {
+				let filled = Some("Camera".into());
+				c.sources.insert("Main".into(), Source::Role { source: filled });
+			},
+			"itself a role",
+		);
+		refused(
+			&|c| {
+				let filled = Some("Nowhere".into());
+				c.sources.insert("Main".into(), Source::Role { source: filled });
+			},
+			"not a source with a picture",
+		);
+		refused(
+			&|c| {
+				let cloned = "Main".into();
+				c.sources.insert("Copy".into(), Source::Clone { source: cloned });
+			},
+			"a clone or a role",
+		);
+		refused(
+			&|c| {
+				c.sources.insert("Cam".into(), Source::Camera { id: None });
+				c.published.insert("Cam".into());
+				c.scenes[0].items[1].source = "Cam".into();
+			},
+			"cannot be in a slot",
+		);
+	}
+
+	/// Each slot that takes no room closes up, the rest share the canvas,
+	/// and the picture in a slot is cropped to cover it unstretched.
+	#[test]
+	fn closed_slots_leave_their_room_to_the_rest() {
+		let mut collection = Collection::from_toml(SLOTS).unwrap();
+		collection.sources.insert("Cam".into(), Source::Camera { id: None });
+		let mut guest = collection.scenes[0].items[1].clone();
+		guest.source = "Cam".into();
+		collection.scenes[0].items.insert(2, guest);
+		collection.validate().unwrap();
+		let all = |_: &str| true;
+		let square = |_: &str| Some((100, 100));
+		let arranged = collection.arranged("Guests", all, square).unwrap();
+		assert_eq!(arranged.len(), 4);
+		assert!(arranged[0].visible && !arranged[1].visible, "the unfilled role closes");
+		assert_eq!(arranged[3], collection.scenes[0].items[3], "the logo stays");
+		let (main, tiles) = Arrangement::Row.places(collection.canvas, true, 1);
+		assert_eq!(arranged[0].rect, main.unwrap());
+		assert_eq!(arranged[2].rect, tiles[0]);
+		let crop = arranged[0].crop;
+		assert!(
+			crop.top > 0.0 && crop.top == crop.bottom && crop.left == 0.0,
+			"{crop:?}"
+		);
+
+		let away = |name: &str| name != "Cam";
+		let arranged = collection.arranged("Guests", away, square).unwrap();
+		assert!(!arranged[2].visible, "an absent source closes");
+		let (main, _) = Arrangement::Row.places(collection.canvas, true, 0);
+		assert_eq!(arranged[0].rect, main.unwrap(), "the main slot takes the room");
+		assert!(collection.arranged("Scene", all, square).is_none());
 	}
 }

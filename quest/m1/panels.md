@@ -36,7 +36,6 @@ Human check: a real chat page, logged in, typed into during a stream.
 
 ## Required
 
-- [One live picture](/quest/m0/ux/live.md) - the layout a panel docks into
 - [The studio hides itself and private apps from capture](/quest/m1/privacy-shield.md) - a panel must not appear on stream
 
 ## Related
