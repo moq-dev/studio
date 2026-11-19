@@ -825,17 +825,17 @@ impl Panels {
 					let why = format!("`{name}` is not shown in the {} picture", format.name().to_lowercase());
 					return (spot, Err(anyhow::anyhow!(why)));
 				}
-				let rest = item.portrayed(format, collection.canvas);
+				let rest = collection.portrayed(&item, format);
 				let (label, rect, crop) = match action {
 					LayerAction::Fit => {
-						let rect = match aspect(state, &rest, true) {
+						let rect = match aspect(state, &rest, true, format) {
 							Some(aspect) => snap::fit(aspect, &canvas),
 							None => Rect::fill(&canvas),
 						};
 						(format!("Fit `{name}`"), rect, rest.crop)
 					}
 					_ => {
-						let crop = match aspect(state, &rest, false) {
+						let crop = match aspect(state, &rest, false, format) {
 							Some(aspect) => snap::fill(aspect, &canvas),
 							None => Crop::default(),
 						};
@@ -892,7 +892,7 @@ impl Panels {
 				// keep clear of; it stays where it was drawn, in each picture
 				// it goes to.
 				let drawn = |format| {
-					let placed = keep::placed(state, layer, index, &item, format).portrayed(format, collection.canvas);
+					let placed = collection.portrayed(&keep::placed(state, layer, index, &item, format), format);
 					let (rect, crop) =
 						super::slots::drawn(state, layer, index, format).unwrap_or((item.rect, item.crop));
 					match item.slot {
@@ -1524,15 +1524,21 @@ pub(super) fn duplicate_scene(state: &mut State, index: usize, independent: bool
 /// The width over height of what `item` shows: after its crop if `cropped`,
 /// else after its source's alone. `None` for a source that fills any shape,
 /// such as a color.
-fn aspect(state: &State, item: &Item, cropped: bool) -> Option<f32> {
+fn aspect(state: &State, item: &Item, cropped: bool, format: Format) -> Option<f32> {
 	let collection = state.collection();
 	let capture = collection.capture(&item.source);
 	let (width, height) = match collection.sources.get(capture)? {
 		Source::Browser { width, height, .. } | Source::Overlay { width, height, .. } => (*width, *height),
+		// The program, or a scene, as `format`'s picture draws it: turned
+		// in portrait while drawn in both.
 		Source::Scene { scene } => collection
+			.formatted(format)
 			.canvas(Some(scene))
 			.map(|canvas| (canvas.width, canvas.height))?,
-		Source::Program => (collection.canvas.width, collection.canvas.height),
+		Source::Program => {
+			let canvas = collection.canvas_of(format);
+			(canvas.width, canvas.height)
+		}
 		Source::Color { .. } => return None,
 		_ => state.compositor.picture_size(capture)?,
 	};

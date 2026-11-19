@@ -59,14 +59,15 @@ pub enum Change {
 		after: Option<Scene>,
 	},
 	/// The item at `index` of `layer`. Adding one inserts it there, in front of
-	/// the ones before it.
+	/// the ones before it. Boxed, as an item is far larger than any other
+	/// change.
 	Item {
 		layer: Layer,
 		index: usize,
 		#[serde(default, skip_serializing_if = "Option::is_none")]
-		before: Option<Item>,
+		before: Option<Box<Item>>,
 		#[serde(default, skip_serializing_if = "Option::is_none")]
-		after: Option<Item>,
+		after: Option<Box<Item>>,
 	},
 	/// [`Collection::transition`].
 	Transition { before: Transition, after: Transition },
@@ -302,6 +303,7 @@ impl Change {
 				Ok(())
 			}
 			Self::Scene { index, before, after } => {
+				let (before, after) = (before.as_ref(), after.as_ref());
 				splice(&mut collection.scenes, *index, before, after).map_err(|err| conflict(format!("scene {err}")))
 			}
 			Self::Item {
@@ -310,6 +312,7 @@ impl Change {
 				before,
 				after,
 			} => {
+				let (before, after) = (before.as_deref(), after.as_deref());
 				let spliced = collection.edit_items(layer, |items| splice(items, *index, before, after));
 				let spliced = spliced.ok_or_else(|| conflict(format!("there is no {layer}")))?;
 				spliced.map_err(|err| conflict(format!("layer {err} in {layer}")))
@@ -371,8 +374,8 @@ fn replace<T: Clone + PartialEq>(
 fn splice<T: Clone + PartialEq>(
 	list: &mut Vec<T>,
 	index: usize,
-	before: &Option<T>,
-	after: &Option<T>,
+	before: Option<&T>,
+	after: Option<&T>,
 ) -> Result<(), String> {
 	match (before, after) {
 		(None, Some(after)) if index <= list.len() => list.insert(index, after.clone()),
@@ -790,7 +793,7 @@ impl Draft {
 			layer: layer.clone(),
 			index,
 			before: None,
-			after: Some(item),
+			after: Some(Box::new(item)),
 		})
 	}
 
@@ -800,7 +803,7 @@ impl Draft {
 		self.change(Change::Item {
 			layer: layer.clone(),
 			index,
-			before: Some(before.clone()),
+			before: Some(Box::new(before.clone())),
 			after: None,
 		})?;
 		Ok(before)
@@ -812,8 +815,8 @@ impl Draft {
 		self.change(Change::Item {
 			layer: layer.clone(),
 			index,
-			before: Some(before),
-			after: Some(item),
+			before: Some(Box::new(before)),
+			after: Some(Box::new(item)),
 		})
 	}
 

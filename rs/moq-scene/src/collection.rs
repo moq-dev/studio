@@ -303,32 +303,22 @@ impl Collection {
 
 	/// The visible items `layers` draw, then those of each scene they draw
 	/// through a scene source, and so on, each scene once. While the show
-	/// goes out in both, `layers` draw an item shown in either picture, and a
-	/// scene source shows the landscape picture, so the scenes they draw only
-	/// the items shown in landscape.
+	/// goes out in both, an item shown in either picture is drawn, as the
+	/// [formatted](Self::formatted) pictures hide those each does not show.
 	pub fn drawn(&self, layers: impl IntoIterator<Item = Layer>) -> Vec<&Item> {
-		self.drawn_through(layers, self)
-	}
-
-	/// The visible items `layers` draw, then those of each scene they draw
-	/// through a scene source as `nested` arranges it, and so on, each scene
-	/// once, such as the portrait picture's, whose scene sources show the
-	/// landscape picture's.
-	pub fn drawn_through<'a>(&'a self, layers: impl IntoIterator<Item = Layer>, nested: &'a Self) -> Vec<&'a Item> {
 		let mut items: Vec<&Item> = layers
 			.into_iter()
 			.flat_map(|layer| self.items(&layer).unwrap_or_default())
 			.filter(|item| item.visible)
 			.collect();
-		let mut walked = BTreeSet::new();
+		let mut nested = BTreeSet::new();
 		let mut next = 0;
 		while let Some(item) = items.get(next) {
-			if let Some(Nested::Scene(scene)) = nested.nested(&item.source)
-				&& walked.insert(scene)
-				&& let Some(scene) = nested.scene(scene)
+			if let Some(Nested::Scene(scene)) = self.nested(&item.source)
+				&& nested.insert(scene)
+				&& let Some(scene) = self.scene(scene)
 			{
-				let shown = |item: &&Item| item.visible && item.shown_in(Format::Landscape);
-				items.extend(scene.items.iter().filter(shown));
+				items.extend(scene.items.iter().filter(|item| item.visible));
 			}
 			next += 1;
 		}
@@ -1275,8 +1265,8 @@ pub struct Item {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub format: Option<Format>,
 	/// Where it is drawn in the portrait picture, or `None` where it sits on
-	/// the landscape one, scaled to fit, as [`Placement::fitted`] has it. An
-	/// item in a slot has none, since the portrait arrangement places it.
+	/// the landscape one, scaled to fit, as [`Collection::placement`] has it.
+	/// An item in a slot has none, since the portrait arrangement places it.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub portrait: Option<Placement>,
 	/// Whether the studio placed it on its own, as a guest appearing in the
@@ -3684,9 +3674,10 @@ items = [
 		assert!(collection.draws_program("C"));
 		assert!(!collection.draws_program("Scene"));
 
-		// While the show goes out in both, a layer of a scene drawn whole is
-		// drawn in either picture, but a scene shown through a scene source
-		// shows its landscape picture alone.
+		// While the show goes out in both, a layer shown in either picture is
+		// drawn, in a scene drawn whole or through a scene source, which shows
+		// its portrait picture in the portrait one; the landscape picture
+		// draws neither of those shown only in portrait.
 		let turned = Rect::fill(&collection.canvas.turned());
 		let portrait_only = |source| Item {
 			format: Some(Format::Portrait),
@@ -3705,7 +3696,14 @@ items = [
 			.into_iter()
 			.map(|item| item.source.as_str())
 			.collect();
-		assert_eq!(drawn, ["b", "b", "camera", "logo", "c", "background"]);
+		assert_eq!(drawn, ["b", "b", "camera", "logo", "c", "background", "guest"]);
+		let landscape = collection.formatted(Format::Landscape);
+		let drawn: Vec<&str> = landscape
+			.drawn([Layer::scene("A")])
+			.into_iter()
+			.map(|item| item.source.as_str())
+			.collect();
+		assert_eq!(drawn, ["b", "b", "logo", "c", "background"]);
 	}
 
 	/// A scene's own size is one the encoder can take, a published scene is

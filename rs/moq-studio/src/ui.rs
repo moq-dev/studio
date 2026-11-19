@@ -856,7 +856,7 @@ impl Picked {
 	/// still there: in the landscape one for a layer drawn in one.
 	fn rest(&self, collection: &Collection, format: Format) -> Option<Item> {
 		let format = collection.format_of(&self.layer, format);
-		Some(self.item(collection)?.portrayed(format, collection.canvas))
+		Some(collection.portrayed(self.item(collection)?, format))
 	}
 
 	/// The layer placed at `rect` with `crop` in `format`'s picture, as it

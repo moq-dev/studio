@@ -1147,17 +1147,11 @@ impl Compositor {
 		// picture, so the portrait one draws each item where it was set.
 		let watched = self.watched(collection, progress, now);
 		let placed = self.place(collection, &watched, now);
-		let staged = reflow(
-			&mut self.view.reflows,
-			&self.layers,
-			placed.formatted(Format::Landscape),
-			collection,
-			sources,
-			now,
-		);
+		let landscape = placed.formatted(Format::Landscape);
+		let staged = reflow(&mut self.view.reflows, &self.layers, landscape, sources, now);
 		let turned = self.portrait.as_mut().map(|view| {
 			let formatted = collection.formatted(Format::Portrait);
-			reflow(&mut view.reflows, &self.layers, formatted, collection, sources, now)
+			reflow(&mut view.reflows, &self.layers, formatted, sources, now)
 		});
 		let collection = &*staged;
 		let turned = turned.as_deref();
@@ -1215,16 +1209,9 @@ impl Compositor {
 			watched: &watched,
 			now,
 		};
-		let reads = pass.draw(
-			&mut self.view,
-			collection,
-			collection,
-			&outputs,
-			&strip(landscape),
-			Some(keeping),
-		);
+		let reads = pass.draw(&mut self.view, collection, &outputs, &strip(landscape), Some(keeping));
 		if let (Some(view), Some(turned)) = (&mut self.portrait, turned) {
-			pass.draw(view, turned, collection, &[], &strip(portrait), None);
+			pass.draw(view, turned, &[], &strip(portrait), None);
 		}
 		self.previewed = self.previewing;
 
@@ -1562,21 +1549,16 @@ impl Compositor {
 		}
 		let (mut program, mut on_air, mut preview) = (HashSet::new(), HashSet::new(), HashSet::new());
 		for picture in std::iter::once(collection).chain(turned) {
-			program.extend(self.drawn(picture, collection, self.program_scene.as_deref().map(Some)));
-			on_air.extend(self.on_air_in(picture, collection));
-			preview.extend(self.drawn(picture, collection, self.preview_scene.as_deref().map(Some)));
+			program.extend(self.drawn(picture, self.program_scene.as_deref().map(Some)));
+			on_air.extend(self.on_air_in(picture));
+			preview.extend(self.drawn(picture, self.preview_scene.as_deref().map(Some)));
 		}
 		// One not drawn shows nothing, so it leaves the overlay to the preview.
 		let outputs: Vec<(HashSet<&str>, Instant)> = self
 			.outputs
 			.iter()
 			.filter(|(_, output)| output.draw)
-			.filter_map(|(scene, output)| {
-				Some((
-					self.drawn(collection, collection, [Some(scene.as_str())]),
-					output.start?,
-				))
-			})
+			.filter_map(|(scene, output)| Some((self.drawn(collection, [Some(scene.as_str())]), output.start?)))
 			.collect();
 		for (name, layer) in &mut self.layers {
 			let name = name.as_str();
@@ -1652,15 +1634,14 @@ impl Compositor {
 	/// stinger's clip under way, and each mask's, through clones.
 	fn shown<'a>(&self, collection: &'a Collection, turned: Option<&'a Collection>) -> HashSet<&'a str> {
 		let mut shown = HashSet::new();
-		let landscape = collection;
 		for picture in std::iter::once(collection).chain(turned) {
-			shown.extend(self.on_air_in(picture, landscape));
+			shown.extend(self.on_air_in(picture));
 			if self.previewing {
-				shown.extend(self.drawn(picture, landscape, [self.preview_scene.as_deref(), None]));
+				shown.extend(self.drawn(picture, [self.preview_scene.as_deref(), None]));
 			}
 		}
 		let outputs = self.outputs.iter().filter(|(_, output)| output.draw);
-		shown.extend(self.drawn(collection, landscape, outputs.map(|(scene, _)| Some(scene.as_str()))));
+		shown.extend(self.drawn(collection, outputs.map(|(scene, _)| Some(scene.as_str()))));
 		let thumbnails = self.thumbnails.iter().filter(|(_, thumb)| thumb.due);
 		for (thumbnail, _) in thumbnails {
 			let (format, shows) = self.shows(collection, turned, thumbnail);
@@ -1669,10 +1650,10 @@ impl Compositor {
 				Format::Landscape => collection,
 			};
 			match shows {
-				Shows::Scene(scene) => shown.extend(self.drawn(collection, landscape, [Some(scene)])),
+				Shows::Scene(scene) => shown.extend(self.drawn(collection, [Some(scene)])),
 				Shows::Source(source) => {
 					if let Some(Nested::Scene(scene)) = collection.nested(source) {
-						shown.extend(self.drawn(landscape, landscape, [Some(scene)]));
+						shown.extend(self.drawn(collection, [Some(scene)]));
 					}
 					shown.insert(collection.capture(source));
 					let video = collection.video.get(source);
@@ -1805,7 +1786,7 @@ impl Compositor {
 		let mut shown = HashSet::new();
 		for picture in &pictures {
 			// Named as `collection` names them, rather than as the pictures do.
-			let names = self.on_air_in(picture, &pictures[0]).into_iter();
+			let names = self.on_air_in(picture).into_iter();
 			let names = names.filter_map(|name| collection.sources.get_key_value(name));
 			shown.extend(names.map(|(name, _)| name.as_str()));
 		}
@@ -1813,10 +1794,10 @@ impl Compositor {
 	}
 
 	/// The sources whose pictures program draws in one picture, `collection`
-	/// as it places its scenes and `nested`, the landscape picture, the
-	/// scenes they draw, as [`on_air_sources`](Self::on_air_sources) says.
-	fn on_air_in<'a>(&self, collection: &'a Collection, nested: &'a Collection) -> HashSet<&'a str> {
-		let mut shown = self.drawn(collection, nested, self.on_air().map(Some).chain([None]));
+	/// as it places its scenes, as [`on_air_sources`](Self::on_air_sources)
+	/// says.
+	fn on_air_in<'a>(&self, collection: &'a Collection) -> HashSet<&'a str> {
+		let mut shown = self.drawn(collection, self.on_air().map(Some).chain([None]));
 		// Drawn through its source's filters alone.
 		if let Some((name, _)) = self.stinger().and_then(|name| collection.sources.get_key_value(name)) {
 			shown.insert(name);
@@ -1831,19 +1812,18 @@ impl Compositor {
 	}
 
 	/// The sources whose pictures `scenes` draw, `None` being the top layer:
-	/// each visible item's, through the scenes they draw as `nested`, the
-	/// landscape picture, arranges them, and each mask's, through clones.
+	/// each visible item's, through the scenes they draw, and each mask's,
+	/// through clones.
 	fn drawn<'a, 'b>(
 		&self,
 		collection: &'a Collection,
-		nested: &'a Collection,
 		scenes: impl IntoIterator<Item = Option<&'b str>>,
 	) -> HashSet<&'a str> {
 		let places = scenes.into_iter().map(|scene| Place {
 			scene: scene.map(str::to_string),
 		});
 		let mut shown = HashSet::new();
-		for item in collection.drawn_through(places, nested) {
+		for item in collection.drawn(places) {
 			shown.insert(collection.capture(&item.source));
 			masks(collection, &mut shown, collection.filters(item));
 		}
@@ -1875,16 +1855,14 @@ struct Pass<'a, 's> {
 impl Pass<'_, '_> {
 	/// Draw `view`'s program, its preview unless no one looks at it,
 	/// `outputs`, and `thumbnails`, from `collection` as that picture places
-	/// its scenes, and the scenes they draw through scene sources as `nested`,
-	/// the landscape picture, does: a scene source shows a 16:9 picture in
-	/// both, as the place its layer has in each is shaped for. With
-	/// `keeping`, it also draws the picture under each item keeping clear that
-	/// is due a read, and returns which.
+	/// its scenes, the scenes they draw through scene sources included: in
+	/// the portrait picture, a scene source shows that scene's portrait
+	/// picture. With `keeping`, it also draws the picture under each item
+	/// keeping clear that is due a read, and returns which.
 	fn draw(
 		&mut self,
 		view: &mut View,
 		collection: &Collection,
-		nested: &Collection,
 		outputs: &[(On, Target)],
 		thumbnails: &[(Shows, Duration, Target)],
 		keeping: Option<Keeping>,
@@ -1940,8 +1918,8 @@ impl Pass<'_, '_> {
 			.iter()
 			.map(|(place, since)| (collection.items(place).unwrap_or_default(), *since));
 		let wholes = wholes.iter().map(|(item, since)| (std::slice::from_ref(item), *since));
-		let nesting = Nesting::of(nested, roots.chain(wholes));
-		let targets = nested_targets(&mut view.nested, self.device, self.effects, nested, &nesting);
+		let nesting = Nesting::of(collection, roots.chain(wholes));
+		let targets = nested_targets(&mut view.nested, self.device, self.effects, collection, &nesting);
 
 		// The pictures viewers draw over the program, which the preview draws
 		// over its scene too, so both show what viewers would see.
@@ -1955,8 +1933,6 @@ impl Pass<'_, '_> {
 
 		let mut draw = Draw {
 			collection,
-			nested,
-			prepared_nested: HashMap::new(),
 			effects: self.effects,
 			library: Library(self.layers),
 			frame: self.frame,
@@ -2082,16 +2058,16 @@ struct Keeping<'a> {
 	now: Instant,
 }
 
-/// `collection` with each scene's items in slots where its arrangement puts
-/// them at `now`, gliding there as a move transition does when a slot opens
-/// or closes, following `reflows`, one picture's. A slot closes while its
-/// source is offline or failed in `sources`, and the picture in it is cropped
-/// to cover it by the size of its newest picture in `layers`.
+/// `staged`, one picture's collection, with each scene's items in slots
+/// where its arrangement puts them at `now`, gliding there as a move
+/// transition does when a slot opens or closes, following `reflows`, that
+/// picture's. A slot closes while its source is offline or failed in
+/// `sources`, and the picture in it is cropped to cover it by the size of
+/// its newest picture in `layers`, or of the scene it shows in that picture.
 fn reflow<'a>(
 	reflows: &mut HashMap<String, Reflow>,
 	layers: &HashMap<String, Layer>,
 	mut staged: Cow<'a, Collection>,
-	nested: &Collection,
 	sources: &Sources,
 	now: Instant,
 ) -> Cow<'a, Collection> {
@@ -2100,9 +2076,10 @@ fn reflow<'a>(
 		let feed = sources.get(collection.capture(name));
 		!feed.is_some_and(|feed| matches!(feed.status(), Status::Offline | Status::Failed(_)))
 	};
-	// A scene source shows the landscape picture in both, at its size.
 	let size = |name: &str| match collection.nested(name) {
-		Some(Nested::Scene(scene)) => nested.canvas(Some(scene)).map(|canvas| (canvas.width, canvas.height)),
+		Some(Nested::Scene(scene)) => collection
+			.canvas(Some(scene))
+			.map(|canvas| (canvas.width, canvas.height)),
 		Some(Nested::Program) => Some((collection.canvas.width, collection.canvas.height)),
 		None => {
 			let layer = layers.get(collection.capture(name))?;
@@ -2469,13 +2446,6 @@ fn moment(collection: &Collection, scene: &str, since: Duration) -> Option<Durat
 /// One render's draws onto its targets.
 struct Draw<'a> {
 	collection: &'a Collection,
-	/// How the scenes drawn through scene sources are arranged: as
-	/// `collection` is, or the landscape picture for the portrait one.
-	nested: &'a Collection,
-	/// `prepared` for the scenes drawn through scene sources, while they are
-	/// arranged unlike `collection`, so a scene both drawn whole and through
-	/// a scene source does not share an item placed differently in each.
-	prepared_nested: HashMap<(Place, usize, Settled), Option<Prepared>>,
 	effects: &'a mut Effects,
 	library: Library<'a>,
 	frame: &'a mut Frame,
@@ -2498,19 +2468,10 @@ impl Draw<'_> {
 	/// Draw the scene `nest` names, the `index`th of the nesting, into
 	/// `target`, transparent where it draws nothing, for items to show.
 	fn nest(&mut self, index: usize, nest: &Nest, target: &Target) {
-		let root = std::mem::replace(&mut self.collection, self.nested);
-		let apart = !std::ptr::eq(root, self.nested);
-		if apart {
-			std::mem::swap(&mut self.prepared, &mut self.prepared_nested);
-		}
 		self.size = target.canvas;
 		self.frame.target(&target.picture, self.size, wgpu::Color::TRANSPARENT);
 		self.layer(target, Place::scene(nest.scene), nest.since);
 		self.scenes.insert(index, target.picture.clone());
-		if apart {
-			std::mem::swap(&mut self.prepared, &mut self.prepared_nested);
-		}
-		self.collection = root;
 	}
 
 	/// Draw `preview` showing the scene `on`, under the top layer if `top`.
@@ -3425,6 +3386,56 @@ mod tests {
 		.await;
 	}
 
+	/// While the show goes out in both, a camera keeping clear places only the
+	/// landscape picture: in the portrait one it stays where the place saved
+	/// in the scene file puts it, fitted, rather than following its move.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn keeping_clear_places_only_the_landscape_picture() {
+		local(async {
+			let mut collection = busy();
+			collection.portrait = true;
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.fit(&studio.collection).unwrap();
+			studio.compositor.set_preview(Some("busy".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			let camera = studio.collection.scenes[0].items.len() - 1;
+			let block = camera - 1;
+			let mut now = Instant::now();
+			let mut moved = None;
+			for frame in 0..40u32 {
+				studio.collection.scenes[0].items[block].rect.x = 240.0 + 6.0 * (frame % 7) as f32;
+				studio.render(now);
+				studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+				if studio
+					.compositor
+					.placement("busy", camera, "camera")
+					.unwrap()
+					.slot
+					.is_some()
+				{
+					moved = Some(now);
+					break;
+				}
+				now = now.saturating_add(Duration::from_millis(100));
+			}
+			let moved = moved.expect("it chose a slot");
+			studio.render(moved.saturating_add(crate::KeepClear::default().glide));
+			let program = studio.program();
+			assert_eq!(texel(&program, 320, 41, 41), BLUE, "moved in landscape");
+
+			// Fitted from where the scene file saves it: 36x36, its center
+			// at about (157, 247) of the 180x320 portrait canvas.
+			let (texture, _) = studio.compositor.portrait().unwrap();
+			let texture = texture.clone();
+			let turned = studio.read(&texture);
+			assert_eq!(texel(&turned, 180, 157, 247), BLUE, "where it was saved");
+			assert_ne!(texel(&turned, 180, 23, 73), BLUE, "not where it moved");
+		})
+		.await;
+	}
+
 	/// Each scene's keepers follow a rename, so two scenes swapping names
 	/// keep their own, and a removed scene's are dropped.
 	#[test]
@@ -3982,30 +3993,26 @@ mod tests {
 		.await;
 	}
 
-	/// A layer showing a scene of the program's size shows its landscape
-	/// picture in the portrait one too, the 16:9 picture its portrait place
-	/// is shaped for, rather than the scene's portrait arrangement squeezed
-	/// into it.
+	/// A layer showing a scene of the program's size shows the scene's
+	/// portrait arrangement in the portrait picture, 9:16, at a place shaped
+	/// for it: one covering the landscape canvas covers the portrait one.
+	/// The landscape picture shows its landscape arrangement.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just render-sw"]
-	async fn a_scene_source_shows_the_landscape_picture_in_portrait() {
+	async fn a_scene_source_shows_the_portrait_arrangement_in_portrait() {
 		local(async {
 			let mut collection = dual();
 			collection
 				.sources
 				.insert("scene a".into(), Source::Scene { scene: "a".into() });
-			let rect = |x, y, width, height| Rect { x, y, width, height };
+			let item = Item::new("scene a", Rect::fill(&collection.canvas));
 			collection.scenes.push(Scene {
-				items: vec![Item {
-					portrait: Some(crate::Placement {
-						rect: rect(0.0, 3.0, 4.0, 2.0),
-						crop: Crop::default(),
-					}),
-					..Item::new("scene a", rect(0.0, 0.0, 8.0, 4.0))
-				}],
+				items: vec![item.clone()],
 				..Scene::new("c")
 			});
 			collection.validate().unwrap();
+			let placed = collection.placement(&item, Format::Portrait);
+			assert_eq!(placed.rect, Rect::fill(&collection.canvas.turned()));
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.fit(&studio.collection).unwrap();
 			studio.compositor.set_preview(Some("c".into()));
@@ -4014,23 +4021,26 @@ mod tests {
 			let landscape = studio.program();
 			assert_eq!(pixel(&landscape, 1, 1), RED);
 			assert_eq!(pixel(&landscape, 6, 1), BLUE);
+			assert!(
+				!landscape.as_chunks::<4>().0.contains(&GREEN),
+				"a's portrait-only layer"
+			);
 			let (texture, _) = studio.compositor.portrait().unwrap();
 			let texture = texture.clone();
 			let turned = studio.read(&texture);
-			// "a" in landscape: red, blue over its right half.
-			assert_eq!(texel(&turned, 4, 0, 3), RED);
-			assert_eq!(texel(&turned, 4, 3, 4), BLUE);
-			assert_eq!(texel(&turned, 4, 1, 1), BLACK);
-			assert!(!turned.as_chunks::<4>().0.contains(&GREEN), "a's portrait-only layer");
+			// "a" in portrait: red, green over its bottom half.
+			assert_eq!(texel(&turned, 4, 1, 1), RED);
+			assert_eq!(texel(&turned, 4, 1, 6), GREEN);
+			assert!(!turned.as_chunks::<4>().0.contains(&BLUE), "a's landscape-only layer");
 		})
 		.await;
 	}
 
 	/// A slot showing a scene in the portrait picture is cropped for the
-	/// landscape picture the scene source shows there.
+	/// scene's portrait picture, which the scene source shows there.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just render-sw"]
-	async fn a_slot_showing_a_scene_crops_its_landscape_picture_in_portrait() {
+	async fn a_slot_showing_a_scene_crops_its_portrait_picture_in_portrait() {
 		local(async {
 			let mut collection = dual();
 			collection
@@ -4052,7 +4062,7 @@ mod tests {
 			let portrait = turned.arranged("s", |_| true, |_| Some((4, 8))).unwrap();
 			assert_ne!(landscape, portrait);
 			let arranged = studio.compositor.arranged(Format::Portrait, "s").unwrap();
-			assert_eq!(arranged, landscape.as_slice());
+			assert_eq!(arranged, portrait.as_slice());
 		})
 		.await;
 	}

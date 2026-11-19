@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Arrangement, Canvas, Collection, Crop, Item, Layer, Rect, Scene, Size, Source};
+use crate::collection::{Arrangement, Canvas, Collection, Crop, Item, Layer, Nested, Rect, Scene, Size, Source};
 use crate::edit::{Change, Draft};
 
 /// Where the portrait picture goes out, beneath the program's broadcast, so
@@ -67,20 +67,24 @@ pub struct Placement {
 }
 
 impl Placement {
-	/// Where an item at `rect` on the `landscape` canvas sits on the portrait
-	/// one without a place of its own there: as far across and down, scaled by
-	/// as much as the narrower side shrinks, so it keeps its shape and fits.
-	pub fn fitted(rect: Rect, crop: Crop, landscape: Canvas) -> Self {
+	/// Where an item placed here on the `landscape` canvas sits on the
+	/// portrait one without a place of its own there: as far across and down,
+	/// scaled by as much as the narrower side shrinks, so it keeps its shape
+	/// and fits, its picture `turn` times as wide for its height there, as
+	/// [`Collection::turn`] says.
+	fn fitted(self, landscape: Canvas, turn: f32) -> Self {
 		let (from, to) = (Rect::fill(&landscape), Rect::fill(&landscape.turned()));
-		Self::moved(rect, crop, &from, &to)
+		self.moved(&from, &to, turn)
 	}
 
-	/// `rect` moved from on `from` to on `to` as [`fitted`](Self::fitted)
-	/// moves it from one canvas to the other: its center as far across and
-	/// down, and scaled to fit, uncropped.
-	fn moved(rect: Rect, crop: Crop, from: &Rect, to: &Rect) -> Self {
+	/// Moved from on `from` to on `to` as [`fitted`](Self::fitted) moves it
+	/// from one canvas to the other: its center as far across and down, and
+	/// scaled to fit, uncropped, as tall again as a picture `turn` times as
+	/// wide for its height needs.
+	fn moved(self, from: &Rect, to: &Rect, turn: f32) -> Self {
+		let rect = self.rect;
 		let scale = (to.width / from.width).min(to.height / from.height);
-		let (width, height) = (rect.width * scale, rect.height * scale);
+		let (width, height) = (rect.width * scale, rect.height * scale / turn);
 		let center = (
 			to.x + (rect.x + rect.width / 2.0 - from.x) / from.width * to.width,
 			to.y + (rect.y + rect.height / 2.0 - from.y) / from.height * to.height,
@@ -92,7 +96,7 @@ impl Placement {
 				width: width.round(),
 				height: height.round(),
 			},
-			crop,
+			crop: self.crop,
 		}
 	}
 }
@@ -146,22 +150,6 @@ impl Item {
 		self.format.is_none_or(|only| only == format)
 	}
 
-	/// Where it is drawn in `format`'s picture, in a show whose landscape
-	/// canvas is `landscape`: its rect and crop, or its portrait place, or
-	/// failing that where it sits on the landscape picture, fitted.
-	pub fn placement(&self, format: Format, landscape: Canvas) -> Placement {
-		let landscaped = Placement {
-			rect: self.rect,
-			crop: self.crop,
-		};
-		match format {
-			Format::Landscape => landscaped,
-			Format::Portrait => self
-				.portrait
-				.unwrap_or_else(|| Placement::fitted(self.rect, self.crop, landscape)),
-		}
-	}
-
 	/// The item drawn at `placement` in `format`'s picture, as it was in the
 	/// other. An item in a slot has one crop in both, which this sets.
 	pub fn placed(self, format: Format, placement: Placement) -> Self {
@@ -178,18 +166,12 @@ impl Item {
 		}
 	}
 
-	/// The item as `format`'s picture draws it at rest, in a show whose
-	/// landscape canvas is `landscape`: at its place there, and hidden unless
-	/// shown in it. An item in a slot stays where the arrangement puts it.
-	pub fn portrayed(&self, format: Format, landscape: Canvas) -> Self {
-		let mut item = self.clone();
-		if item.slot.is_none() {
-			let placement = item.placement(format, landscape);
-			item.rect = placement.rect;
-			item.crop = placement.crop;
+	/// Where it is drawn in the landscape picture.
+	fn landscaped(&self) -> Placement {
+		Placement {
+			rect: self.rect,
+			crop: self.crop,
 		}
-		item.visible &= item.shown_in(format);
-		item
 	}
 
 	/// Whether it says anything about the portrait picture.
@@ -209,6 +191,48 @@ impl Collection {
 		match format {
 			Format::Landscape => self.canvas,
 			Format::Portrait => self.canvas.turned(),
+		}
+	}
+
+	/// Where `item` is drawn in `format`'s picture: its rect and crop, or its
+	/// portrait place, or failing that where it sits on the landscape picture,
+	/// fitted, its picture turned as [`turn`](Self::turn) says.
+	pub fn placement(&self, item: &Item, format: Format) -> Placement {
+		match format {
+			Format::Landscape => item.landscaped(),
+			Format::Portrait => item
+				.portrait
+				.unwrap_or_else(|| item.landscaped().fitted(self.canvas, self.turn(item))),
+		}
+	}
+
+	/// `item` as `format`'s picture draws it at rest: at its place there, and
+	/// hidden unless shown in it. An item in a slot stays where the
+	/// arrangement puts it.
+	pub fn portrayed(&self, item: &Item, format: Format) -> Item {
+		let mut portrayed = item.clone();
+		if item.slot.is_none() {
+			let placement = self.placement(item, format);
+			portrayed.rect = placement.rect;
+			portrayed.crop = placement.crop;
+		}
+		portrayed.visible &= item.shown_in(format);
+		portrayed
+	}
+
+	/// How many times as wide for its height `item`'s picture is in the
+	/// portrait picture as in the landscape one: narrower, as the canvas
+	/// turns, for one showing the program or a scene drawn in both, which
+	/// shows its portrait picture there; as wide for any other.
+	pub fn turn(&self, item: &Item) -> f32 {
+		let turns = match self.nested(&item.source) {
+			Some(Nested::Program) => self.portrait,
+			Some(Nested::Scene(scene)) => self.dual(&Layer::scene(scene)),
+			None => false,
+		};
+		match turns {
+			true => (self.canvas.height as f32 / self.canvas.width as f32).powi(2),
+			false => 1.0,
 		}
 	}
 
@@ -239,19 +263,21 @@ impl Collection {
 				return Cow::Borrowed(self);
 			}
 		}
-		let landscape = self.canvas;
 		let mut view = self.clone();
 		view.canvas = self.canvas_of(format);
-		for scene in view.scenes.iter_mut().filter(|scene| scene.size.is_none()) {
+		for (scene, at) in view.scenes.iter_mut().zip(&self.scenes) {
+			if scene.size.is_some() {
+				continue;
+			}
 			if format == Format::Portrait {
 				scene.arrangement = scene.portrait.arrangement;
 			}
-			for item in &mut scene.items {
-				*item = item.portrayed(format, landscape);
+			for (item, at) in scene.items.iter_mut().zip(&at.items) {
+				*item = self.portrayed(at, format);
 			}
 		}
-		for item in &mut view.top {
-			*item = item.portrayed(format, landscape);
+		for (item, at) in view.top.iter_mut().zip(&self.top) {
+			*item = self.portrayed(at, format);
 		}
 		Cow::Owned(view)
 	}
@@ -347,7 +373,10 @@ impl Collection {
 	/// camera, and the largest camera stacked under it, keeping its shape if
 	/// it has an outline; a backdrop covering the landscape canvas covers the
 	/// portrait one, cropped. What sits on the main picture keeps its place
-	/// on it. The rest sit where they are, fitted, until moved there.
+	/// on it. The rest sit where they are, fitted, until moved there. A layer
+	/// showing a scene drawn in both, or the program, shows its portrait
+	/// picture, shaped for the portrait canvas: covering the landscape canvas,
+	/// it covers the portrait one whole, rather than being the main picture.
 	fn turned_on(&self, items: &[Item]) -> Vec<Item> {
 		let landscape = self.canvas;
 		let portrait = landscape.turned();
@@ -364,7 +393,14 @@ impl Collection {
 			// The frontmost of two as large, which is the one seen.
 			among.max_by(|a, b| area(&items[*a]).total_cmp(&area(&items[*b])).then(a.cmp(b)))
 		};
-		let main = largest(&mut free.iter().copied()).filter(|&at| area(&items[at]) >= 0.25);
+		let turned = |at: usize| self.turn(&items[at]) != 1.0;
+		let main = largest(
+			&mut free
+				.iter()
+				.copied()
+				.filter(|&at| !turned(at) || area(&items[at]) < BACKDROP),
+		)
+		.filter(|&at| area(&items[at]) >= 0.25);
 		let camera = largest(&mut free.iter().copied().filter(|&at| {
 			let source = self.sources.get(self.capture(&items[at].source));
 			Some(at) != main && matches!(source, Some(Source::Camera { .. })) && area(&items[at]) < BACKDROP
@@ -379,7 +415,7 @@ impl Collection {
 				},
 				None => whole,
 			};
-			placed[main].portrait = Some(covering(&items[main], top));
+			placed[main].portrait = Some(self.covering(&items[main], top));
 			// What sits on the main picture, such as a lower third, keeps
 			// its place on it, rather than landing on the camera.
 			let on = items[main].rect;
@@ -392,7 +428,7 @@ impl Collection {
 				let inside =
 					(on.x..on.x + on.width).contains(&center.0) && (on.y..on.y + on.height).contains(&center.1);
 				if camera.is_some() && inside && area(item) < BACKDROP {
-					placed[at].portrait = Some(Placement::moved(item.rect, item.crop, &on, &top));
+					placed[at].portrait = Some(item.landscaped().moved(&on, &top, self.turn(item)));
 				}
 			}
 			if let Some(camera) = camera {
@@ -403,8 +439,8 @@ impl Collection {
 				};
 				let item = &items[camera];
 				placed[camera].portrait = Some(match item.shape.is_square() {
-					true => covering(item, under),
-					false => fitting(item, under),
+					true => self.covering(item, under),
+					false => self.fitting(item, under),
 				});
 			}
 		}
@@ -415,7 +451,7 @@ impl Collection {
 			// rather than cropped.
 			let see_through = matches!(source, Some(Source::Browser { .. } | Source::Overlay { .. }));
 			if Some(at) != main && Some(at) != camera && area(item) >= BACKDROP && !see_through {
-				placed[at].portrait = Some(covering(item, whole));
+				placed[at].portrait = Some(self.covering(item, whole));
 			}
 		}
 		placed
@@ -461,9 +497,16 @@ impl Draft {
 		}
 		let collection = self.collection().clone();
 		let program = (collection.canvas.width, collection.canvas.height);
+		let pinned = |scene: &Scene| on && scene.size.is_some_and(|size| (size.width, size.height) == program);
+		// The show as it goes out in both, so a layer showing a scene that
+		// will be drawn in both is placed for its portrait picture.
+		let mut turning = collection.clone();
+		turning.portrait = true;
+		for scene in turning.scenes.iter_mut().filter(|scene| pinned(scene)) {
+			scene.size = None;
+		}
 		for (index, scene) in collection.scenes.iter().enumerate() {
-			let pinned = on && scene.size.is_some_and(|size| (size.width, size.height) == program);
-			if scene.size.is_some() && !pinned {
+			if scene.size.is_some() && !pinned(scene) {
 				continue;
 			}
 			let mut after = Scene {
@@ -472,7 +515,7 @@ impl Draft {
 			};
 			match on {
 				true => {
-					after.items = collection.turned_on(&scene.items);
+					after.items = turning.turned_on(&scene.items);
 					if matches!(scene.arrangement, Arrangement::Grid | Arrangement::Inset) {
 						after.portrait.arrangement = scene.arrangement;
 					}
@@ -486,7 +529,7 @@ impl Draft {
 		let top = Layer::top();
 		match on {
 			true => {
-				for (index, item) in collection.turned_on(&collection.top).into_iter().enumerate() {
+				for (index, item) in turning.turned_on(&collection.top).into_iter().enumerate() {
 					if item != collection.top[index] {
 						self.set_item(&top, index, item)?;
 					}
@@ -518,30 +561,44 @@ fn covered(rect: &Rect, canvas: &Canvas) -> f32 {
 	width.max(0.0) * height.max(0.0)
 }
 
-/// `item` covering `rect`, its picture cropped evenly to `rect`'s shape on
-/// top of its own crop, so it shows unstretched as it did.
-fn covering(item: &Item, rect: Rect) -> Placement {
-	let shown = item.rect.width / item.rect.height;
-	let wanted = rect.width / rect.height;
-	Placement {
-		rect,
-		crop: item.crop.then(&Crop::covering(shown, wanted)),
+impl Collection {
+	/// The shape `item`'s picture shows in the portrait picture, as its rect
+	/// shows it in the landscape one, turned as [`turn`](Self::turn) says.
+	fn portrait_shape(&self, item: &Item) -> f32 {
+		item.rect.width / item.rect.height * self.turn(item)
 	}
-}
 
-/// `item` as large as fits in `rect`, keeping its shape, centered.
-fn fitting(item: &Item, rect: Rect) -> Placement {
-	let shape = item.rect.width / item.rect.height;
-	let width = rect.width.min(rect.height * shape);
-	let height = width / shape;
-	Placement {
-		rect: Rect {
-			x: (rect.x + (rect.width - width) / 2.0).round(),
-			y: (rect.y + (rect.height - height) / 2.0).round(),
-			width: width.round(),
-			height: height.round(),
-		},
-		crop: item.crop,
+	/// `item` covering `rect` in the portrait picture, its picture cropped
+	/// evenly to `rect`'s shape on top of its own crop, so it shows
+	/// unstretched as it did.
+	fn covering(&self, item: &Item, rect: Rect) -> Placement {
+		let (shown, wanted) = (self.portrait_shape(item), rect.width / rect.height);
+		// A shape turned to the canvas's own, in floating point, trims nothing.
+		let trim = match (shown / wanted - 1.0).abs() < 1e-4 {
+			true => Crop::default(),
+			false => Crop::covering(shown, wanted),
+		};
+		Placement {
+			rect,
+			crop: item.crop.then(&trim),
+		}
+	}
+
+	/// `item` as large as fits in `rect` in the portrait picture, keeping its
+	/// shape, centered.
+	fn fitting(&self, item: &Item, rect: Rect) -> Placement {
+		let shape = self.portrait_shape(item);
+		let width = rect.width.min(rect.height * shape);
+		let height = width / shape;
+		Placement {
+			rect: Rect {
+				x: (rect.x + (rect.width - width) / 2.0).round(),
+				y: (rect.y + (rect.height - height) / 2.0).round(),
+				width: width.round(),
+				height: height.round(),
+			},
+			crop: item.crop,
+		}
 	}
 }
 
@@ -651,6 +708,71 @@ mod tests {
 
 	/// A backdrop as large as the game, behind it, is not the main picture:
 	/// the game in front is, and the backdrop covers the portrait canvas.
+	/// A layer showing a scene drawn in both shows its portrait picture,
+	/// 9:16, in the portrait one: covering the landscape canvas, such as a
+	/// scene of overlays, it covers the portrait canvas whole rather than
+	/// being the main picture; a smaller one is shaped for it wherever it
+	/// goes, set or fitted. A scene of its own size shows one picture.
+	#[test]
+	fn a_scene_source_is_placed_for_its_portrait_picture() {
+		let mut show = show();
+		show.sources
+			.insert("overlays".into(), Source::Scene { scene: "Guests".into() });
+		show.sources
+			.insert("wide".into(), Source::Scene { scene: "Wide".into() });
+		show.scenes.push(Scene {
+			size: Some(Size {
+				width: 1280,
+				height: 720,
+			}),
+			..Scene::new("Wide")
+		});
+		let fill = Rect::fill(&show.canvas);
+		let pip = Rect {
+			x: 0.0,
+			y: 0.0,
+			width: 960.0,
+			height: 540.0,
+		};
+		let items = &mut show.scenes[0].items;
+		items.push(Item::new("overlays", fill));
+		items.push(Item::new("wide", pip));
+		show.validate().unwrap();
+		let turned = turned(&show);
+		let items = &turned.scenes[0].items;
+		let whole = Rect::fill(&show.canvas.turned());
+		assert_eq!(
+			items[0].portrait.unwrap().rect.height,
+			1152.0,
+			"the game is the main picture"
+		);
+		let overlays = items[3].portrait.unwrap();
+		assert_eq!((overlays.rect, overlays.crop), (whole, Crop::default()));
+		// On the game, the scene of its own size keeps its 16:9 shape.
+		let wide = items[4].portrait.unwrap().rect;
+		assert!((wide.width / wide.height - 16.0 / 9.0).abs() < 0.01, "{wide:?}");
+
+		// Without a place of its own, a scene drawn in both is fitted turned:
+		// a quarter of the landscape canvas is a quarter of the portrait one.
+		let quarter = Item::new("overlays", pip);
+		let fitted = turned.placement(&quarter, Format::Portrait).rect;
+		assert_eq!(
+			fitted,
+			Rect {
+				x: 0.0,
+				y: 0.0,
+				width: 540.0,
+				height: 960.0
+			}
+		);
+		let program = Item::new("program", pip);
+		let mut with_program = turned.clone();
+		with_program.sources.insert("program".into(), Source::Program);
+		assert_eq!(with_program.placement(&program, Format::Portrait).rect, fitted);
+		assert_eq!(turned.turn(&Item::new("wide", pip)), 1.0);
+		assert_eq!(turned.turn(&Item::new("camera", pip)), 1.0);
+	}
+
 	#[test]
 	fn the_frontmost_of_two_as_large_is_the_main_picture() {
 		let mut show = show();
@@ -771,7 +893,11 @@ mod tests {
 			width: 280.0,
 			height: 120.0,
 		};
-		let fitted = Placement::fitted(logo, Crop::default(), landscape);
+		let fitted = Placement {
+			rect: logo,
+			crop: Crop::default(),
+		}
+		.fitted(landscape, 1.0);
 		// 9/16 the size, its center as far across and down.
 		assert_eq!(fitted.rect.width, 158.0);
 		assert_eq!(fitted.rect.height, 68.0);

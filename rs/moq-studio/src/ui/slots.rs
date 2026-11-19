@@ -16,9 +16,8 @@ pub(super) fn placed(state: &State, layer: &Layer, format: Format) -> Vec<Item> 
 	let format = collection.format_of(layer, format);
 	let items = collection.items(layer).unwrap_or_default();
 	// A layer set free that keeps clear, where it was placed.
-	let items = (items.iter().enumerate()).map(|(index, item)| {
-		super::keep::placed(state, layer, index, &item.portrayed(format, collection.canvas), format)
-	});
+	let items = (items.iter().enumerate())
+		.map(|(index, item)| super::keep::placed(state, layer, index, &collection.portrayed(item, format), format));
 	let arranged = (layer.scene.as_deref()).and_then(|scene| state.compositor.placed(format, scene));
 	// One frame behind an edit, until the next render arranges it.
 	let Some(arranged) = arranged.filter(|arranged| arranged.len() == items.len()) else {
@@ -60,11 +59,7 @@ pub(super) fn staged<'a>(state: &'a State, scene: Option<&str>, format: Format) 
 pub(super) fn drawn(state: &State, layer: &Layer, index: usize, format: Format) -> Option<(Rect, Crop)> {
 	let collection = state.collection();
 	let format = collection.format_of(layer, format);
-	let item = collection
-		.items(layer)?
-		.get(index)?
-		.portrayed(format, collection.canvas);
-	let item = &item;
+	let item = &collection.portrayed(collection.items(layer)?.get(index)?, format);
 	let canvas = match collection.dual(layer) {
 		true => collection.canvas_of(format),
 		false => collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas),
@@ -193,9 +188,8 @@ pub(super) fn assign(state: &mut State, dragged: &Picked, target: &Picked) -> an
 	// clear may be off where it is saved, cropped to its shape there rather
 	// than stretched.
 	let free = |format: Format| {
-		let landscape = state.collection().canvas;
 		let resting = super::keep::placed(state, &dragged.layer, dragged.index, &moved, format);
-		let Placement { rect, .. } = resting.placement(format, landscape);
+		let Placement { rect, .. } = state.collection().placement(&resting, format);
 		let (from, crop) = drawn(state, &target.layer, target.index, format).unwrap_or((rect, held.crop));
 		let shape = |rect: &Rect| rect.width / rect.height;
 		let crop = crop.then(&Crop::covering(shape(&from), shape(&rect)));
