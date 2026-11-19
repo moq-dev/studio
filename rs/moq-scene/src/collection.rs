@@ -1419,6 +1419,11 @@ impl Id {
 		static NEXT: AtomicU64 = AtomicU64::new(0);
 		Self(NEXT.fetch_add(1, Ordering::Relaxed))
 	}
+
+	/// The number that names it, unique while the studio runs.
+	pub(crate) fn number(self) -> u64 {
+		self.0
+	}
 }
 
 impl Item {

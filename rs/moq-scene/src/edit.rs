@@ -174,7 +174,7 @@ impl Change {
 		}
 	}
 
-	/// The items it holds before and after, to give identities.
+	/// The items it holds before, then after, to give identities.
 	fn sides_mut(&mut self) -> (Vec<&mut Item>, Vec<&mut Item>) {
 		match self {
 			Self::Item { before, after, .. } => (
@@ -468,6 +468,14 @@ pub struct Edit {
 }
 
 impl Edit {
+	/// Every item its changes hold, each change's before, then after.
+	fn items_mut(&mut self) -> impl Iterator<Item = &mut Item> {
+		self.changes.iter_mut().flat_map(|change| {
+			let (befores, afters) = change.sides_mut();
+			befores.into_iter().chain(afters)
+		})
+	}
+
 	/// The edit that undoes this one.
 	pub fn inverse(&self) -> Self {
 		Self {
@@ -1056,6 +1064,12 @@ struct Entry {
 #[serde(deny_unknown_fields)]
 struct File {
 	position: usize,
+	/// The identity of each item of each entry, in the order
+	/// [`Change::sides_mut`] lists them, as numbers that name one item
+	/// within the file, so a load tells an item moved or swapped from another
+	/// alike. A file without them loads each item as a new one.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	ids: Vec<Vec<u64>>,
 	#[serde(default)]
 	entries: Vec<Edit>,
 }
@@ -1217,9 +1231,15 @@ impl History {
 	/// Serialize to the history file format, in the scene file's version,
 	/// since entries hold its sources, scenes, and items.
 	pub fn to_toml(&self) -> Result<String, Error> {
+		let mut entries: Vec<Edit> = self.entries().cloned().collect();
+		let ids = entries
+			.iter_mut()
+			.map(|edit| edit.items_mut().map(|item| item.id.number()).collect())
+			.collect();
 		let file = File {
 			position: self.position,
-			entries: self.entries().cloned().collect(),
+			ids,
+			entries,
 		};
 		let body = toml::to_string(&file).map_err(|err| Error::Format(err.to_string()))?;
 		Ok(format!("version = {}\n\n{body}", Collection::VERSION))
@@ -1235,7 +1255,14 @@ impl History {
 	/// version fails.
 	pub fn from_toml(text: &str, collection: &Collection) -> Result<(Self, usize), Error> {
 		let table = crate::collection::versioned(text)?;
-		let file = File::deserialize(table).map_err(|err| Error::Format(err.to_string()))?;
+		let mut file = File::deserialize(table).map_err(|err| Error::Format(err.to_string()))?;
+		// Each number one item, under one new identity wherever it appears.
+		let mut ids: HashMap<u64, Id> = HashMap::new();
+		for (edit, numbers) in file.entries.iter_mut().zip(&file.ids) {
+			for (item, number) in edit.items_mut().zip(numbers) {
+				item.id = *ids.entry(*number).or_insert_with(Id::fresh);
+			}
+		}
 		if file.position > file.entries.len() {
 			return Err(Error::Format(format!(
 				"position {} is past the history's {} entries",
@@ -1276,29 +1303,31 @@ impl History {
 
 	/// Give the items each entry holds the [identities](Item::id) of the
 	/// items of `collection` they are, as a loaded history, whose items are
-	/// each fresh, needs, so an undo or a redo keeps each item's own. Each
-	/// entry reads them from the collection as undoing or redoing to it
-	/// leaves it: an item it replaces keeps its identity, one it adds stays
-	/// new, and the items of a scene it replaces are matched as
-	/// [`Collection::recognize`] matches them. It stops at an entry that no
-	/// longer applies.
+	/// each fresh, needs, so an undo or a redo keeps each item's own: each
+	/// item an entry replaces or removes takes the identity the collection
+	/// has there, undone or redone to that entry, and so does every other
+	/// mention of it. It stops at an entry that no longer applies.
 	pub fn align(&mut self, collection: &Collection) {
+		let mut renames: HashMap<Id, Id> = HashMap::new();
 		let (undo, redo) = self.entries.make_contiguous().split_at_mut(self.position);
 		let mut state = collection.clone();
-		for entry in undo.iter_mut().rev() {
-			let mut inverse = entry.edit.inverse();
-			if aligned(&mut state, &mut inverse).is_err() {
+		for entry in undo.iter().rev() {
+			if aligned(&mut state, &entry.edit.inverse(), &mut renames).is_err() {
 				break;
 			}
-			entry.edit = inverse.inverse();
 		}
 		let mut state = collection.clone();
-		for entry in redo {
-			let mut edit = entry.edit.clone();
-			if aligned(&mut state, &mut edit).is_err() {
+		for entry in redo.iter() {
+			if aligned(&mut state, &entry.edit, &mut renames).is_err() {
 				break;
 			}
-			entry.edit = edit;
+		}
+		for entry in &mut self.entries {
+			for item in entry.edit.items_mut() {
+				if let Some(&id) = renames.get(&item.id) {
+					item.id = id;
+				}
+			}
 		}
 	}
 
@@ -1337,12 +1366,9 @@ impl History {
 			}
 		}
 		for entry in &mut self.entries {
-			for change in &mut entry.edit.changes {
-				let (befores, afters) = change.sides_mut();
-				for item in befores.into_iter().chain(afters) {
-					if let Some(&id) = ids.get(&item.id) {
-						item.id = id;
-					}
+			for item in entry.edit.items_mut() {
+				if let Some(&id) = ids.get(&item.id) {
+					item.id = id;
 				}
 			}
 		}
@@ -1354,64 +1380,25 @@ impl History {
 	}
 }
 
-/// Make `edit` to `state`, first giving the items each change replaces or
-/// removes the identities they have there, and each item it puts in place
-/// the identity of the one it took from, as [`History::align`] says.
-fn aligned(state: &mut Collection, edit: &mut Edit) -> Result<(), Error> {
-	// Made once as loaded, to read the identity of each item a change
-	// replaces, which may be one an earlier change of the edit put in place.
-	let mut scratch = state.clone();
-	for change in &mut edit.changes {
-		let held = change.held(&scratch);
-		for (item, id) in change.sides_mut().0.into_iter().zip(held) {
+/// Make `edit` to `state`, noting in `renames` the identity `state` has for
+/// each item it replaces or removes that the edit names otherwise.
+fn aligned(state: &mut Collection, edit: &Edit, renames: &mut HashMap<Id, Id>) -> Result<(), Error> {
+	for change in &edit.changes {
+		let mut change = change.clone();
+		let held = change.held(state);
+		let (befores, afters) = change.sides_mut();
+		for (item, id) in befores.into_iter().zip(held) {
+			let named = *renames.entry(item.id).or_insert(id);
+			if named != id {
+				return Err(conflict(format!("`{}` is two items", item.source)));
+			}
 			item.id = id;
 		}
-		change.apply(&mut scratch)?;
-	}
-
-	// Each item put in place takes the identity of one the edit took out
-	// that it did not put in itself: one alike, then one showing the same
-	// source, from the same change first, as a set or a scene replaced
-	// keeps its own, then from any, as a move or a swap carries it.
-	let afters = |change: &Change| change.items_on(false).into_iter().cloned().collect::<Vec<_>>();
-	let afters: Vec<Vec<Item>> = edit.changes.iter().map(afters).collect();
-	let added: HashSet<Id> = afters.iter().flatten().map(|item| item.id).collect();
-	let mut left: Vec<(usize, usize, &Item)> = Vec::new();
-	for (number, change) in edit.changes.iter().enumerate() {
-		let befores = change.items_on(true).into_iter().enumerate();
-		left.extend(
-			befores
-				.filter(|(_, item)| !added.contains(&item.id))
-				.map(|(at, item)| (number, at, item)),
-		);
-	}
-	let mut missing: Vec<(usize, usize, &Item)> = Vec::new();
-	for (number, items) in afters.iter().enumerate() {
-		missing.extend(items.iter().enumerate().map(|(at, item)| (number, at, item)));
-	}
-	let mut ids: HashMap<Id, Id> = HashMap::new();
-	for (alike, same_change) in [(true, true), (true, false), (false, true), (false, false)] {
-		missing.retain(|(number, at, item)| {
-			let found = (left.iter().enumerate())
-				.filter(|(_, (from, _, was))| {
-					was.source == item.source && (!alike || *was == *item) && (!same_change || from == number)
-				})
-				.min_by_key(|(_, (_, was_at, _))| was_at.abs_diff(*at))
-				.map(|(found, _)| found);
-			let Some(found) = found else { return true };
-			ids.insert(item.id, left.remove(found).2.id);
-			false
-		});
-	}
-	for change in &mut edit.changes {
-		let (befores, afters) = change.sides_mut();
-		for item in befores.into_iter().chain(afters) {
-			if let Some(&id) = ids.get(&item.id) {
+		for item in afters {
+			if let Some(&id) = renames.get(&item.id) {
 				item.id = id;
 			}
 		}
-	}
-	for change in &edit.changes {
 		change.apply(state)?;
 	}
 	Ok(())
@@ -2024,12 +2011,14 @@ mod tests {
 		assert!(collection.sources.is_empty());
 	}
 
-	/// Over many edits of one layer, alike and not, an undo or a redo back to
+	/// Over many edits of one layer, alike and not, moves, swaps, and changes
+	/// of source among them, an undo or a redo back to
 	/// any point brings back the items it had, each under its own identity,
 	/// before a reload and after one, whose history keeps those it loads.
 	#[test]
 	fn every_point_of_a_history_keeps_its_identities() {
 		let mut collection = collection();
+		collection.sources.insert("blue".into(), color([0, 0, 255, 255]));
 		let mut history = History::new();
 		let ids = |collection: &Collection| -> Vec<crate::Id> {
 			collection.scenes[0].items.iter().map(|item| item.id).collect()
@@ -2044,7 +2033,7 @@ mod tests {
 			let items = &collection.scenes[0].items;
 			let at = next(items.len());
 			let mut draft = collection.draft("Edit");
-			match next(4) {
+			match next(6) {
 				// A copy, alike but another.
 				0 => {
 					let copy = Item {
@@ -2059,6 +2048,22 @@ mod tests {
 				2 => {
 					let to = next(items.len());
 					draft.move_item(&main(), at, to).unwrap();
+				}
+				// Two swapped by replacing each with the other, changed, as a
+				// drop into a slot does.
+				3 => {
+					let other = next(items.len());
+					let (mut one, mut two) = (items[other].clone(), items[at].clone());
+					one.rect.y = next(4) as f32;
+					two.rect.y = next(4) as f32;
+					draft.set_item(&main(), at, one).unwrap();
+					draft.set_item(&main(), other, two).unwrap();
+				}
+				// Another source, as making a layer's copy its own does.
+				4 => {
+					let mut item = items[at].clone();
+					item.source = if item.source == "red" { "blue" } else { "red" }.into();
+					draft.set_item(&main(), at, item).unwrap();
 				}
 				_ => {
 					let mut item = items[at].clone();
