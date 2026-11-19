@@ -3031,6 +3031,25 @@ mod tests {
 		assert!(build::own_copy(&collection, "Main"), "the source filling it");
 	}
 
+	/// A duplicated scene is laid out as the original in both formats, but is
+	/// none of the scenes there is one of at most.
+	#[test]
+	fn a_duplicated_scene_keeps_its_portrait_arrangement() {
+		let scene = moq_scene::Scene {
+			recorded: true,
+			safe: true,
+			arrangement: moq_scene::Arrangement::Grid,
+			portrait: moq_scene::Portrait {
+				arrangement: moq_scene::Arrangement::Inset,
+			},
+			..moq_scene::Scene::new("Interview")
+		};
+		let copy = build::scene_copy(&scene, "Interview copy".into());
+		assert_eq!(copy.name, "Interview copy");
+		assert_eq!((copy.arrangement, copy.portrait), (scene.arrangement, scene.portrait));
+		assert!(!copy.recorded && !copy.safe);
+	}
+
 	/// A layer the UI picked is let go of once an edit of the engine's own
 	/// inserts or replaces a layer of its scene, and kept for one elsewhere.
 	#[test]

@@ -1474,6 +1474,28 @@ pub(super) fn own_copy(collection: &Collection, source: &str) -> bool {
 	)
 }
 
+/// `scene` named `name`, laid out the same in each format, but neither
+/// published, recorded, nor safe, and carrying the audio scene on program.
+pub(super) fn scene_copy(scene: &Scene, name: String) -> Scene {
+	Scene {
+		name,
+		published: false,
+		recorded: false,
+		audio: None,
+		safe: false,
+		// A copy is the host's, never the studio's to give away.
+		items: scene
+			.items
+			.iter()
+			.map(|item| Item {
+				auto: false,
+				..item.clone()
+			})
+			.collect(),
+		..scene.clone()
+	}
+}
+
 /// Add a scene after the one at `index`, as large and showing the same
 /// layers, named for it, and return its name. Its layers show the same
 /// sources, or with `independent` each a copy of its own, keeping the look,
@@ -1485,21 +1507,7 @@ pub(super) fn duplicate_scene(state: &mut State, index: usize, independent: bool
 		.chain((2..).map(|n| format!("{} copy {n}", scene.name)))
 		.find(|name| collection.scene(name).is_none())
 		.expect("an unused name");
-	let mut copy = Scene {
-		name: name.clone(),
-		size: scene.size,
-		arrangement: scene.arrangement,
-		// A copy is the host's, never the studio's to give away.
-		items: scene
-			.items
-			.iter()
-			.map(|item| Item {
-				auto: false,
-				..item.clone()
-			})
-			.collect(),
-		..Scene::new("")
-	};
+	let mut copy = scene_copy(scene, name.clone());
 	// Each source shown, and the copy of its own each of its layers shows.
 	let mut copies: BTreeMap<String, (String, Source, Option<Video>)> = BTreeMap::new();
 	if independent {

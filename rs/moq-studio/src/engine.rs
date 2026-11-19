@@ -804,11 +804,12 @@ fn reordered(before: &[moq_scene::Item], after: &[moq_scene::Item]) -> bool {
 }
 
 /// Refuse edits, each read as its [`Collection::renames`], that remove a
-/// scene `on_air` program draws, so a slip cannot put black on air, that
-/// leave one drawing the program in `collection`, which it would draw into
-/// itself, or that make one another size than the program, which it would
-/// not fill. A reload that leaves one out still drops it, having nothing to
-/// show instead.
+/// scene `on_air` program draws, so a slip cannot put black on air, or that
+/// leave one in `collection` unable to go on program, as
+/// [`Collection::refuses`] says: drawing the program into itself, another
+/// size than the program, or of its own size while the show goes out in
+/// portrait too, with no portrait picture. A reload that leaves one out
+/// still drops it, having nothing to show instead.
 fn keep_on_air<'a>(
 	on_air: impl IntoIterator<Item = &'a str>,
 	renames: &'a [BTreeMap<String, Option<String>>],
@@ -822,15 +823,13 @@ fn keep_on_air<'a>(
 				None => {}
 			}
 		}
-		anyhow::ensure!(
-			!collection.draws_program(scene),
-			"`{scene}` is on air, so it cannot draw the program, which it would draw into itself"
-		);
-		let size = collection.canvas(Some(scene)).map(|canvas| canvas.size());
-		anyhow::ensure!(
-			size.is_none_or(|size| size == collection.canvas.size()),
-			"`{scene}` is on air, so it stays the program's size; cut to another scene first"
-		);
+		// A reload that leaves it out drops it, having nothing to show.
+		if collection.scene(scene).is_none() {
+			continue;
+		}
+		if let Some(why) = collection.refuses(scene) {
+			anyhow::bail!("`{scene}` is on air, so cut to another scene first: {why}");
+		}
 	}
 	Ok(())
 }
@@ -4635,8 +4634,23 @@ mod tests {
 		drawing.apply(&edit).unwrap();
 		let renames = [collection.renames(&edit)];
 		let err = keep_on_air([live.as_str()], &renames, &drawing).unwrap_err();
-		assert!(err.to_string().contains("cannot draw the program"), "{err}");
+		assert!(err.to_string().contains("draws the program"), "{err}");
 		keep_on_air(["Renamed"], &renames, &drawing).unwrap();
+
+		// Nor, while the show goes out in portrait too, one given a size of
+		// its own, even the program's, which has no portrait picture.
+		let mut both = collection.clone();
+		both.portrait = true;
+		let canvas = both.canvas;
+		let on_air = both.scenes.iter_mut().find(|scene| scene.name == live).unwrap();
+		on_air.size = Some(moq_scene::Size {
+			width: canvas.width,
+			height: canvas.height,
+		});
+		let err = keep_on_air([live.as_str()], &[], &both).unwrap_err();
+		assert!(err.to_string().contains("no portrait picture"), "{err}");
+		both.portrait = false;
+		keep_on_air([live.as_str()], &[], &both).unwrap();
 	}
 
 	async fn subscribe(

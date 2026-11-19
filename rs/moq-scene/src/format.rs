@@ -503,6 +503,10 @@ impl Draft {
 		for (layer, items) in after.layers() {
 			for (index, item) in items.iter().enumerate() {
 				let Some(placement) = item.portrait else { continue };
+				// A place shrunk to nothing has no shape to keep.
+				if placement.rect.width <= 0.0 || placement.rect.height <= 0.0 {
+					continue;
+				}
 				if after.nested(&item.source) != Some(Nested::Scene(&name)) {
 					continue;
 				}
@@ -1103,6 +1107,23 @@ mod tests {
 			},
 			"its 9:16 picture fitted in the box it was placed in"
 		);
+
+		// A place shrunk to nothing has no shape to keep, so it stays as is.
+		for (width, height) in [(0.0, 608.0), (1080.0, 0.0), (0.0, 0.0)] {
+			let mut empty = turned.clone();
+			let placement = empty.scenes[0].items[3].portrait.as_mut().unwrap();
+			placement.rect.width = width;
+			placement.rect.height = height;
+			let rect = placement.rect;
+			let own = resize(
+				&empty,
+				Some(Size {
+					width: 1280,
+					height: 720,
+				}),
+			);
+			assert_eq!(own.scenes[0].items[3].portrait.unwrap().rect, rect);
+		}
 	}
 
 	/// A web page covering the canvas in front of the game is mostly
