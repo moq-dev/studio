@@ -3810,6 +3810,9 @@ mod tests {
 		loaded.collection.published.insert("red".into());
 		let mut two = loaded.collection.scenes[0].clone();
 		two.name = "Two".into();
+		for item in &mut two.items {
+			item.id = moq_scene::Id::fresh();
+		}
 		loaded.collection.scenes.push(two);
 		let (relay, _routes, _) = test_relay().await;
 		let engine = start(gpu, vec![relay], dir.path(), autosave, loaded)
@@ -4901,6 +4904,9 @@ mod tests {
 		collection.audio_scenes[0].sounds.insert("tone".into());
 		let mut published = collection.scenes[0].clone();
 		published.name = moq_scene::PORTRAIT.into();
+		for item in &mut published.items {
+			item.id = moq_scene::Id::fresh();
+		}
 		published.published = true;
 		collection.scenes.push(published);
 		let engine = start(gpu, relays, dir.path(), autosave, loaded)
