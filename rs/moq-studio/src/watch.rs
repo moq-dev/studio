@@ -887,10 +887,11 @@ mod tests {
 
 	/// A guest's broadcast, published independently, reaches a viewer through
 	/// a relay as the studio played it: the composition lists it where it is,
-	/// at the offset its timeline sat from the program's when the studio
-	/// showed it, which its catalog's clock and the studio's playout delay
-	/// predict, and a player of that composition shows each of its pictures
-	/// beside the program picture that offset puts it with.
+	/// at the offset its timeline sits from the program's where the studio
+	/// shows it, never sooner after its stamp than its catalog's clock and the
+	/// studio's playout delay allow, and a player of that composition shows
+	/// each of its pictures beside the program picture that offset puts it
+	/// with.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn plays_a_guest_where_the_studio_did() {
@@ -1031,42 +1032,52 @@ mod tests {
 		let composed = follow("studio/composition").await;
 		let track = composed.track(hang::Catalog::DEFAULT_NAME).unwrap();
 		let mut compositions = hang::catalog::Consumer::<composition::Ext>::new(track, MAX_DELAY);
-		let composition = kio::clock::timeout(TIMEOUT, async {
+		// Where the two clocks put one moment, and so the offset with no delay.
+		let micros = |at: Duration| at.as_micros() as i64;
+		let wall = |clock: hang::catalog::Clock| micros(Duration::try_from(clock.wall).unwrap());
+		let apart = wall(guest.wall().unwrap()) - wall(program_clock);
+		let near = micros(composition::DRIFT) + micros(PERIOD);
+		// Where the studio shows the guest now: the program's moment less the
+		// guest's, which trails its stamp by the playout delay and the path's.
+		let shown = || {
+			let state = engine.state.lock().unwrap();
+			let feed = state.sources.get("alice")?;
+			let playout = feed.delay()?;
+			let showing = feed.clock()?.position(kio::clock::now())?;
+			// The program's moment now, by the guest's clock and where the two sit.
+			let program = micros(Duration::try_from(guest.now()).ok()?) + apart;
+			Some((program - micros(showing), micros(playout)))
+		};
+		// The studio's schedule for the guest settles as its first frames
+		// arrive, a group's worth at once, and the composition follows it.
+		let mut last = None;
+		let settled = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let read = compositions.next().await.unwrap().expect("a catalog");
-				if let Some(composition) = read.value.ext.composition
-					&& composition.sources.contains_key("alice")
-				{
+				let Some(composition) = read.value.ext.composition else {
+					continue;
+				};
+				let Some(alice) = composition.sources.get("alice") else {
+					continue;
+				};
+				let Some((offset, playout)) = shown() else { continue };
+				tracing::info!(listed = alice.offset, offset, apart, playout, "the guest's offset");
+				last = Some((alice.offset, offset));
+				if (offset - near..=offset + near).contains(&alice.offset) {
+					// Never sooner after its stamp than the playout delay.
+					assert!(alice.offset - apart >= playout - near, "ahead of the playout delay");
 					return composition;
 				}
 			}
 		})
-		.await
-		.expect("the composition lists the guest once the studio plays it");
+		.await;
+		let Ok(composition) = settled else {
+			panic!("the composition listed the guest at, and the studio showed it at, {last:?} us");
+		};
 		let alice = &composition.sources["alice"];
 		assert_eq!(alice.broadcast.as_str(), "../guests/alice");
 		assert!(alice.instance.as_ref().is_none_or(|instance| !instance.is_minted()));
 		assert_eq!(composition.pictures.len(), 1);
-
-		// Where the two clocks put one moment, and so the offset with no delay.
-		let micros = |clock: hang::catalog::Clock| Duration::try_from(clock.wall).unwrap().as_micros() as i64;
-		let apart = micros(guest.wall().unwrap()) - micros(program_clock);
-		let delay = alice.offset - apart;
-		let playout = engine
-			.state
-			.lock()
-			.unwrap()
-			.sources
-			.get("alice")
-			.and_then(|feed| feed.delay());
-		let expected = playout.expect("the studio plays the guest").as_micros() as i64;
-		let drift = composition::DRIFT.as_micros() as i64;
-		let tick = PERIOD.as_micros() as i64;
-		tracing::info!(offset = alice.offset, apart, delay, "the guest's offset");
-		assert!(
-			(expected - drift..=expected + tick + drift).contains(&delay),
-			"the studio showed the guest {delay} us after its stamp, not its playout delay"
-		);
 
 		// A player of the composition, on the relay.
 		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");

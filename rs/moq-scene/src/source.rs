@@ -3711,6 +3711,9 @@ mod tests {
 			collection.sources.insert("cam".into(), layer(350_000));
 			assert!(sources.sync(&collection).is_empty(), "opened again");
 			let layer_feed = sources.get("cam").unwrap();
+			// The program's next picture arrives on time: an early one would pull
+			// its clock toward live once it is read, racing the due found below.
+			until_time(arrived.saturating_add(Duration::from_millis(200))).await;
 			picture(&mut live.video, &mut live.encoder, 1_200);
 			picture(&mut cam, &mut cam_encoder, 850);
 			let later = moq_net::Timestamp::from_millis(1_200).unwrap();

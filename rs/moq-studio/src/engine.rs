@@ -3509,11 +3509,17 @@ mod tests {
 		let mut two = loaded.collection.scenes[0].clone();
 		two.name = "Two".into();
 		loaded.collection.scenes.push(two);
-		let (relay, routes, _) = test_relay().await;
+		let (relay, routes, mut config) = test_relay().await;
+		// A version that carries the program's stream to the relay, rather
+		// than leaving the relay to mint one.
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
+		let relay = Relay {
+			client: config.init(Default::default()).expect("client"),
+			url: relay.url,
+		};
 		let engine = start(gpu, vec![relay], dir.path(), autosave, loaded)
 			.await
 			.expect("the studio goes live");
-		let program = engine.on_air_program.borrow().clone().expect("on air");
 		let online = async |path: &str| {
 			let mut following = routes.follow(path, None).unwrap();
 			kio::clock::timeout(TIMEOUT, following.available())
@@ -3523,6 +3529,21 @@ mod tests {
 				.expect("online")
 		};
 
+		// The stream the relay routes at the program's path.
+		let mut routed = routes.routes();
+		let program = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let event = routed.next().await.expect("routes");
+				let announce = event.announce;
+				if announce.prefix.as_str() == "studio"
+					&& matches!(event.kind, RouteKind::Start | RouteKind::Update | RouteKind::Restart)
+				{
+					return announce.route.instance().clone();
+				}
+			}
+		})
+		.await
+		.expect("the relay routes the program");
 		let composed = online("studio/composition").await;
 		// As a player up to 10 s behind the live edge, so it reads each update.
 		let track = composed.track(hang::Catalog::DEFAULT_NAME).unwrap();
@@ -3541,7 +3562,11 @@ mod tests {
 		);
 		let composition = first.value.ext.composition.as_ref().expect("a composition");
 		assert_eq!(composition.program.broadcast.as_str(), ".");
-		assert_eq!(composition.program.instance.as_ref(), program.info().instance.as_ref());
+		assert_eq!(
+			composition.program.instance,
+			Some(program),
+			"the stream the relay routes"
+		);
 		let sources: Vec<&str> = composition.pictures.iter().map(|item| item.source.as_str()).collect();
 		assert_eq!(sources, ["red"]);
 		let red = &composition.sources["red"];
