@@ -4409,6 +4409,34 @@ mod tests {
 			assert_eq!(format!("{err:#}"), why);
 		}
 
+		// A phone paired as a remote shows the pads and mutes the palette
+		// lists, with the tally, and presses as a key does.
+		{
+			use crate::controls::Action;
+			use crate::guests::remote::Board;
+			let desk = controls.desk();
+			let pads: Vec<&str> = desk.scenes.iter().map(|pad| pad.name.as_str()).collect();
+			assert!(pads.contains(&"Guest") && pads.contains(&main.as_str()), "{pads:?}");
+			let portrait = desk.scenes.iter().find(|pad| pad.name == "Portrait").unwrap();
+			assert!(portrait.refused.is_some(), "a pad says why it cannot go on");
+			assert_eq!(desk.program.as_deref(), Some("Guest"));
+			assert_eq!(desk.take_refused.as_deref(), Some("nothing is cued"));
+			let mutes: Vec<String> = Action::listed(&engine.state.lock().unwrap())
+				.into_iter()
+				.filter_map(|action| match action {
+					Action::Mute(name) => Some(name),
+					_ => None,
+				})
+				.collect();
+			let sounds: Vec<String> = desk.sounds.iter().map(|sound| sound.name.clone()).collect();
+			assert_eq!(sounds, mutes, "the palette's mutes, in its order");
+			assert!(!desk.studio);
+			let take = |scene: &str| controls.clone().press(&Action::Scene(scene.into()));
+			assert_eq!(take(&main), Ok(format!("took `{main}`")));
+			assert_eq!(controls.desk().program.as_deref(), Some(main.as_str()));
+			take("Guest").unwrap();
+		}
+
 		// A sound's key or palette row flips its mute, an edit undo takes back.
 		let mute = crate::controls::Action::Mute("red".into());
 		assert_eq!(controls.fire(&mute).unwrap(), "muted `red`");

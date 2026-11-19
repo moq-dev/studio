@@ -208,8 +208,12 @@ impl Room {
 		let invalid = || format!("cannot pair `{name}`");
 		let claims = moq_auth::Claims::default()
 			.with_root(self.root.as_str())
-			.with_publish([moq_auth::Pattern::literal(press_path(name, generation).with_context(invalid)?.as_str())?])
-			.with_subscribe([moq_auth::Pattern::literal(desk_path(name, generation).with_context(invalid)?.as_str())?]);
+			.with_publish([moq_auth::Pattern::literal(
+				press_path(name, generation).with_context(invalid)?.as_str(),
+			)?])
+			.with_subscribe([moq_auth::Pattern::literal(
+				desk_path(name, generation).with_context(invalid)?.as_str(),
+			)?]);
 		self.sign_claims(claims)
 			.context("the room key cannot sign a remote's token")
 	}
@@ -714,7 +718,11 @@ mod tests {
 	}
 
 	/// The desks the studio publishes the remote called `name` in `generation`.
-	async fn read_desks(origin: moq_net::origin::Consumer, name: &str, generation: u64) -> moq_json::snapshot::Consumer<Desk> {
+	async fn read_desks(
+		origin: moq_net::origin::Consumer,
+		name: &str,
+		generation: u64,
+	) -> moq_json::snapshot::Consumer<Desk> {
 		let broadcast = origin
 			.follow(desk_path(name, generation).unwrap(), None)
 			.unwrap()
@@ -929,4 +937,3 @@ mod tests {
 		assert_eq!(fake.pressed(), [scene]);
 	}
 }
-
