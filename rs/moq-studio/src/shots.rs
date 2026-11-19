@@ -728,7 +728,10 @@ fn the_palette_finds_and_runs_anything() {
 		studio.open(Setting::Hotkeys);
 	}
 	harness.run_steps(2);
-	assert!(harness.query_by_label("host").is_some(), "the silent source's key is listed");
+	assert!(
+		harness.query_by_label("host").is_some(),
+		"the silent source's key is listed"
+	);
 	assert_eq!(
 		harness.query_all_by_label("no such sound").count(),
 		1,
