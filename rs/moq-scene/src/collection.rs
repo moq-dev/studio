@@ -301,28 +301,39 @@ impl Collection {
 		}
 	}
 
-	/// The visible items `layers` draw, then those of each scene they draw
-	/// through a scene source, and so on, each scene once. While the show
-	/// goes out in both, an item shown in either picture is drawn, as the
-	/// [formatted](Self::formatted) pictures hide those each does not show.
-	pub fn drawn(&self, layers: impl IntoIterator<Item = Layer>) -> Vec<&Item> {
-		let mut items: Vec<&Item> = layers
-			.into_iter()
-			.flat_map(|layer| self.items(&layer).unwrap_or_default())
-			.filter(|item| item.visible)
-			.collect();
+	/// The visible items `layers` draw in `format`'s picture, then those of
+	/// each scene they draw through a scene source, and so on, each scene
+	/// once, leaving out those shown only in the other picture. In the
+	/// portrait picture, a scene of its own size and all it draws are drawn as
+	/// the landscape picture draws them. The portrait picture draws nothing
+	/// unless the show goes out in it.
+	pub fn drawn(&self, layers: impl IntoIterator<Item = Layer>, format: Format) -> Vec<&Item> {
+		if format == Format::Portrait && !self.portrait {
+			return Vec::new();
+		}
+		let shown = |format: Format| move |item: &&Item| item.visible && item.shown_in(format);
+		let mut items: Vec<(&Item, Format)> = Vec::new();
+		for layer in layers {
+			let format = self.format_of(&layer, format);
+			let found = self.items(&layer).unwrap_or_default();
+			items.extend(found.iter().filter(shown(format)).map(|item| (item, format)));
+		}
 		let mut nested = BTreeSet::new();
 		let mut next = 0;
-		while let Some(item) = items.get(next) {
-			if let Some(Nested::Scene(scene)) = self.nested(&item.source)
-				&& nested.insert(scene)
-				&& let Some(scene) = self.scene(scene)
+		while let Some(&(item, outer)) = items.get(next) {
+			if let Some(Nested::Scene(name)) = self.nested(&item.source)
+				&& let Some(scene) = self.scene(name)
 			{
-				items.extend(scene.items.iter().filter(|item| item.visible));
+				// Drawn as the landscape picture draws it, a scene draws all it
+				// shows so.
+				let format = self.format_of(&Layer::scene(name), outer);
+				if nested.insert((name, format)) {
+					items.extend(scene.items.iter().filter(shown(format)).map(|item| (item, format)));
+				}
 			}
 			next += 1;
 		}
-		items
+		items.into_iter().map(|(item, _)| item).collect()
 	}
 
 	/// Whether the scene called `scene` places a program source, itself or in
@@ -3664,20 +3675,22 @@ items = [
 			},
 		];
 		collection.validate().unwrap();
-		let drawn: Vec<&str> = collection
-			.drawn([Layer::scene("A")])
-			.into_iter()
-			.map(|item| item.source.as_str())
-			.collect();
-		assert_eq!(drawn, ["b", "b", "logo", "c", "background"]);
+		let drawn = |collection: &Collection, format| -> Vec<String> {
+			let drawn = collection.drawn([Layer::scene("A")], format);
+			drawn.into_iter().map(|item| item.source.clone()).collect()
+		};
+		assert_eq!(
+			drawn(&collection, Format::Landscape),
+			["b", "b", "logo", "c", "background"]
+		);
+		assert!(drawn(&collection, Format::Portrait).is_empty(), "no portrait picture");
 		assert!(collection.draws_program("A"));
 		assert!(collection.draws_program("C"));
 		assert!(!collection.draws_program("Scene"));
 
-		// While the show goes out in both, a layer shown in either picture is
-		// drawn, in a scene drawn whole or through a scene source, which shows
-		// its portrait picture in the portrait one; the landscape picture
-		// draws neither of those shown only in portrait.
+		// While the show goes out in both, each picture draws the layers
+		// shown in it, in a scene drawn whole or through a scene source,
+		// which shows its portrait picture in the portrait one.
 		let turned = Rect::fill(&collection.canvas.turned());
 		let portrait_only = |source| Item {
 			format: Some(Format::Portrait),
@@ -3691,19 +3704,39 @@ items = [
 		collection.scenes[1].items.push(portrait_only("camera"));
 		collection.scenes[3].items.push(portrait_only("guest"));
 		collection.validate().unwrap();
-		let drawn: Vec<&str> = collection
-			.drawn([Layer::scene("A")])
-			.into_iter()
-			.map(|item| item.source.as_str())
-			.collect();
-		assert_eq!(drawn, ["b", "b", "camera", "logo", "c", "background", "guest"]);
-		let landscape = collection.formatted(Format::Landscape);
-		let drawn: Vec<&str> = landscape
-			.drawn([Layer::scene("A")])
-			.into_iter()
-			.map(|item| item.source.as_str())
-			.collect();
-		assert_eq!(drawn, ["b", "b", "logo", "c", "background"]);
+		assert_eq!(
+			drawn(&collection, Format::Landscape),
+			["b", "b", "logo", "c", "background"]
+		);
+		assert_eq!(
+			drawn(&collection, Format::Portrait),
+			["b", "b", "camera", "logo", "c", "background", "guest"]
+		);
+
+		// Shown only in landscape, B draws what it shows only in portrait in
+		// neither picture.
+		let mut landscape_only = collection.clone();
+		for item in &mut landscape_only.scenes[1].items[..2] {
+			item.format = Some(Format::Landscape);
+		}
+		landscape_only.validate().unwrap();
+		assert_eq!(
+			drawn(&landscape_only, Format::Landscape),
+			["b", "b", "logo", "c", "background"]
+		);
+		assert_eq!(drawn(&landscape_only, Format::Portrait), ["camera"]);
+
+		// Of its own size, B, and C through it, are drawn in portrait as the
+		// landscape picture draws them.
+		collection.scenes[2].size = Some(Size {
+			width: 1280,
+			height: 720,
+		});
+		collection.validate().unwrap();
+		assert_eq!(
+			drawn(&collection, Format::Portrait),
+			["b", "b", "camera", "logo", "c", "background"]
+		);
 	}
 
 	/// A scene's own size is one the encoder can take, a published scene is

@@ -782,7 +782,7 @@ impl Draft {
 		self.insert_scene(to, scene)
 	}
 
-	fn scene_at(&self, index: usize) -> Result<Scene, Error> {
+	pub(crate) fn scene_at(&self, index: usize) -> Result<Scene, Error> {
 		let scene = self.collection.scenes.get(index).cloned();
 		scene.ok_or_else(|| conflict(format!("there is no scene {index}")))
 	}

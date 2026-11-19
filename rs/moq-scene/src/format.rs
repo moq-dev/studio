@@ -372,8 +372,9 @@ impl Collection {
 	/// cropped to the top of the portrait canvas, or all of it without a
 	/// camera, and the largest camera stacked under it, keeping its shape if
 	/// it has an outline; a backdrop covering the landscape canvas covers the
-	/// portrait one, cropped. What sits on the main picture keeps its place
-	/// on it. The rest sit where they are, fitted, until moved there. A layer
+	/// portrait one, cropped, or, a page or overlay, which is mostly
+	/// see-through, is fitted whole, never the main picture. What sits on the
+	/// main picture keeps its place on it. The rest sit where they are, fitted, until moved there. A layer
 	/// showing a scene drawn in both, or the program, shows its portrait
 	/// picture, shaped for the portrait canvas: covering the landscape canvas,
 	/// it covers the portrait one whole, rather than being the main picture.
@@ -393,17 +394,19 @@ impl Collection {
 			// The frontmost of two as large, which is the one seen.
 			among.max_by(|a, b| area(&items[*a]).total_cmp(&area(&items[*b])).then(a.cmp(b)))
 		};
+		let source = |at: usize| self.sources.get(self.capture(&items[at].source));
+		// A page or overlay is mostly see-through, so it is fitted whole
+		// rather than cropped.
+		let see_through = |at: usize| matches!(source(at), Some(Source::Browser { .. } | Source::Overlay { .. }));
 		let turned = |at: usize| self.turn(&items[at]) != 1.0;
-		let main = largest(
-			&mut free
-				.iter()
-				.copied()
-				.filter(|&at| !turned(at) || area(&items[at]) < BACKDROP),
-		)
-		.filter(|&at| area(&items[at]) >= 0.25);
+		// One covering the landscape canvas that is see-through, or shows its
+		// own portrait picture, covers or fits the portrait canvas whole
+		// rather than being cropped to the main picture.
+		let whole_page = |at: usize| area(&items[at]) >= BACKDROP && (turned(at) || see_through(at));
+		let main =
+			largest(&mut free.iter().copied().filter(|&at| !whole_page(at))).filter(|&at| area(&items[at]) >= 0.25);
 		let camera = largest(&mut free.iter().copied().filter(|&at| {
-			let source = self.sources.get(self.capture(&items[at].source));
-			Some(at) != main && matches!(source, Some(Source::Camera { .. })) && area(&items[at]) < BACKDROP
+			Some(at) != main && matches!(source(at), Some(Source::Camera { .. })) && area(&items[at]) < BACKDROP
 		}));
 
 		let mut placed = items.to_vec();
@@ -446,11 +449,7 @@ impl Collection {
 		}
 		for &at in &free {
 			let item = &items[at];
-			let source = self.sources.get(self.capture(&item.source));
-			// A page or overlay is mostly see-through, so it is fitted whole
-			// rather than cropped.
-			let see_through = matches!(source, Some(Source::Browser { .. } | Source::Overlay { .. }));
-			if Some(at) != main && Some(at) != camera && area(item) >= BACKDROP && !see_through {
+			if Some(at) != main && Some(at) != camera && area(item) >= BACKDROP && !see_through(at) {
 				placed[at].portrait = Some(self.covering(item, whole));
 			}
 		}
@@ -483,6 +482,34 @@ impl Scene {
 }
 
 impl Draft {
+	/// Give the scene at `index` a size of its own, or the program's with
+	/// `None`, as [`Scene::sized`] does. While the show goes out in both, a
+	/// layer elsewhere showing it shows its portrait picture as long as it
+	/// follows the program's size, so one placed in the portrait picture,
+	/// whose picture changes shape there, is fitted where it was placed.
+	pub fn set_size(&mut self, index: usize, size: Option<Size>) -> Result<(), Error> {
+		let before = self.collection().clone();
+		self.set_scene(index, self.scene_at(index)?.sized(size))?;
+		let after = self.collection().clone();
+		for (layer, items) in after.layers() {
+			for (index, item) in items.iter().enumerate() {
+				let Some(placement) = item.portrait else { continue };
+				if before.turn(item) != after.turn(item) {
+					let portrait = Some(after.fitting(item, placement.rect));
+					self.set_item(
+						&layer,
+						index,
+						Item {
+							portrait,
+							..item.clone()
+						},
+					)?;
+				}
+			}
+		}
+		Ok(())
+	}
+
 	/// Send the show out in portrait too, or no longer. Turned on, each
 	/// layer's portrait arrangement starts from its landscape one: the main
 	/// picture cropped to the top, the camera stacked under it, and slots in
@@ -978,6 +1005,88 @@ mod tests {
 		assert!(sized.items.iter().all(|item| !item.formats()));
 		turned.scenes[0] = sized;
 		turned.validate().unwrap();
+	}
+
+	/// While the show goes out in both, a scene of overlays given a size of
+	/// its own shows one 16:9 picture, so a layer covering the portrait
+	/// canvas with its portrait picture is fitted there instead; given the
+	/// program's size back, its 9:16 picture is fitted in the box it was
+	/// placed in. Each is one edit with the resize.
+	#[test]
+	fn resizing_a_scene_fits_the_layers_showing_it_in_portrait() {
+		let mut show = show();
+		show.sources
+			.insert("overlays".into(), Source::Scene { scene: "Guests".into() });
+		show.scenes[0]
+			.items
+			.push(Item::new("overlays", Rect::fill(&show.canvas)));
+		let turned = turned(&show);
+		let whole = Rect::fill(&show.canvas.turned());
+		assert_eq!(turned.scenes[0].items[3].portrait.unwrap().rect, whole);
+		let resize = |collection: &Collection, size| {
+			let mut draft = collection.draft("Size");
+			draft.set_size(1, size).unwrap();
+			let edit = draft.finish().unwrap();
+			let mut resized = collection.clone();
+			resized.apply(&edit).unwrap();
+			resized.validate().unwrap();
+			resized
+		};
+		let own = resize(
+			&turned,
+			Some(Size {
+				width: 1280,
+				height: 720,
+			}),
+		);
+		let banner = Rect {
+			x: 0.0,
+			y: 656.0,
+			width: 1080.0,
+			height: 608.0,
+		};
+		let overlays = own.scenes[0].items[3].portrait.unwrap();
+		assert_eq!(overlays.rect, banner, "its 16:9 picture fitted unstretched");
+		assert_eq!(
+			own.scenes[0].items[0], turned.scenes[0].items[0],
+			"the game is left alone"
+		);
+
+		let back = resize(&own, None);
+		assert_eq!(
+			back.scenes[0].items[3].portrait.unwrap().rect,
+			Rect {
+				x: 369.0,
+				y: 656.0,
+				width: 342.0,
+				height: 608.0
+			},
+			"its 9:16 picture fitted in the box it was placed in"
+		);
+	}
+
+	/// A web page covering the canvas in front of the game is mostly
+	/// see-through, so the game stays the main picture and the page is
+	/// fitted whole rather than cropped to the main picture's band.
+	#[test]
+	fn a_page_covering_the_canvas_is_not_the_main_picture() {
+		let mut show = show();
+		let page = Source::Browser {
+			url: "https://example.com".into(),
+			width: 1920,
+			height: 1080,
+		};
+		show.sources.insert("page".into(), page);
+		show.scenes[0].items.push(Item::new("page", Rect::fill(&show.canvas)));
+		show.validate().unwrap();
+		let turned = turned(&show);
+		let items = &turned.scenes[0].items;
+		assert_eq!(
+			items[0].portrait.unwrap().rect.height,
+			1152.0,
+			"the game is the main picture"
+		);
+		assert_eq!(items[3].portrait, None, "the page is fitted");
 	}
 
 	#[test]

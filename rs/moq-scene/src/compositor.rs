@@ -2204,11 +2204,13 @@ fn nested_targets(
 	for nest in &nesting.order {
 		let collection = pictures.of(nest.landscaped);
 		let canvas = collection.canvas(Some(nest.scene)).unwrap_or(collection.canvas);
-		let reused = free.get_mut(nest.scene).and_then(Vec::pop);
-		let target = match reused {
-			Some(target) if target.canvas.size() == canvas.size() => target,
-			_ => Target::new(device, effects, canvas, "moq-scene nested"),
-		};
+		// One of its size: the portrait picture may draw a scene both turned
+		// and, through a scene of its own size, as the landscape one does.
+		let reused = free.get_mut(nest.scene).and_then(|free| {
+			let at = free.iter().position(|target| target.canvas.size() == canvas.size())?;
+			Some(free.swap_remove(at))
+		});
+		let target = reused.unwrap_or_else(|| Target::new(device, effects, canvas, "moq-scene nested"));
 		pool.entry(nest.scene.to_string()).or_default().push(target.clone());
 		targets.push(target);
 	}
@@ -4225,8 +4227,19 @@ mod tests {
 				items: vec![Item::new("scene a", Rect::fill(&wide))],
 				..Scene::new("w")
 			});
+			// "a" shown directly too, behind "w", so the portrait picture draws
+			// it both turned and as the landscape picture does.
+			let behind = Rect {
+				x: 3.0,
+				y: 1.5,
+				width: 2.0,
+				height: 0.5,
+			};
 			collection.scenes.push(Scene {
-				items: vec![Item::new("scene w", Rect::fill(&collection.canvas))],
+				items: vec![
+					Item::new("scene a", behind),
+					Item::new("scene w", Rect::fill(&collection.canvas)),
+				],
 				..Scene::new("c")
 			});
 			collection.validate().unwrap();
@@ -4244,6 +4257,22 @@ mod tests {
 			assert_eq!(texel(&turned, 4, 3, 4), BLUE);
 			assert_eq!(texel(&turned, 4, 1, 1), BLACK);
 			assert!(!turned.as_chunks::<4>().0.contains(&GREEN), "a's portrait-only layer");
+
+			// Each of "a"'s two pictures keeps its texture from one render to
+			// the next.
+			let nested = |studio: &Studio| {
+				let view = studio.compositor.portrait.as_ref().unwrap();
+				let mut targets: Vec<wgpu::Texture> =
+					view.nested["a"].iter().map(|target| target.texture.clone()).collect();
+				targets.sort_by_key(|texture| texture.width());
+				targets
+			};
+			let drawn = nested(&studio);
+			assert_eq!(drawn.len(), 2, "turned and as in landscape");
+			for _ in 0..2 {
+				studio.render(Instant::now());
+				assert_eq!(nested(&studio), drawn);
+			}
 		})
 		.await;
 	}
