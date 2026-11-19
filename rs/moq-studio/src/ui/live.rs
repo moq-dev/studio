@@ -451,7 +451,7 @@ impl Panels {
 					measure(&self.controls, &self.runtime, ceiling)
 				}
 				Err(_) => Measuring {
-					task: Task::Done(Err("the encoders did not open, so what they send is not known".into())),
+					task: Task::Done(Err("the encoder failed, so what it would send is not known".into())),
 					_stop: None,
 				},
 			});
@@ -705,7 +705,7 @@ impl Panels {
 				mark: Outcome::Failed,
 				icon: Icon::Encoder,
 				name: "Encoder",
-				said: format!("The encoders did not open: {err}."),
+				said: format!("The encoder failed: {err}."),
 				level: None,
 				// A smaller picture frees no encode session, which a second
 				// picture is likelier to be refused for.

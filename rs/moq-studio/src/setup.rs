@@ -273,12 +273,14 @@ async fn probe_together(gpu: &engine::Gpu, picture: &Picture, canvases: &[Canvas
 	let budgets: Vec<Duration> = canvases.iter().map(|canvas| budget(*canvas)).collect();
 	let started = kio::clock::now();
 	let (frames, lanes) = std::thread::scope(|scope| {
-		let workers: Vec<_> = lanes
+		// A thread the OS refuses fails the check; dropping the feeds already
+		// made ends the threads that did start, so the scope can join them.
+		let workers = lanes
 			.into_iter()
 			.map(|mut lane| {
 				let (feed, indexes) = mpsc::channel::<(u32, kio::clock::Instant)>();
 				let (done, took) = mpsc::channel();
-				let thread = scope.spawn(move || {
+				let thread = std::thread::Builder::new().spawn_scoped(scope, move || {
 					let mut session = None;
 					let canvas = lane.canvas;
 					for (index, handed) in indexes {
@@ -290,10 +292,19 @@ async fn probe_together(gpu: &engine::Gpu, picture: &Picture, canvases: &[Canvas
 						}
 					}
 					lane
-				});
-				(feed, took, thread)
+				})?;
+				Ok((feed, took, thread))
 			})
-			.collect();
+			.collect::<std::io::Result<Vec<_>>>();
+		let workers = match workers {
+			Ok(workers) => workers,
+			Err(err) => {
+				return (
+					Err(anyhow::Error::new(err).context("cannot start an encode thread")),
+					Vec::new(),
+				);
+			}
+		};
 		let frames = time(&budgets, |index| {
 			let handed = kio::clock::now();
 			for (feed, ..) in &workers {
