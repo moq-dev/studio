@@ -734,11 +734,14 @@ struct Moved {
 /// had not keeping clear: the same scene's item at the same index showing
 /// the same source, at another x or y or switched back on. Its keeper is
 /// still under that place, as the compositor follows items only as it
-/// renders.
+/// renders. A change of order alone moves nothing.
 fn moved(before: &Collection, after: &Collection) -> Vec<Moved> {
 	let mut moved = Vec::new();
 	for scene in &after.scenes {
 		let Some(was) = before.scene(&scene.name) else { continue };
+		if reordered(&was.items, &scene.items) {
+			continue;
+		}
 		for (index, item) in scene.items.iter().enumerate() {
 			let Some(old) = was.items.get(index) else { continue };
 			if item.keep_clear.is_some()
@@ -755,6 +758,19 @@ fn moved(before: &Collection, after: &Collection) -> Vec<Moved> {
 		}
 	}
 	moved
+}
+
+/// Whether `after` holds each of `before`'s items once, in any order.
+fn reordered(before: &[moq_scene::Item], after: &[moq_scene::Item]) -> bool {
+	let mut left: Vec<&moq_scene::Item> = before.iter().collect();
+	before.len() == after.len()
+		&& after.iter().all(|item| {
+			let Some(at) = left.iter().position(|old| *old == item) else {
+				return false;
+			};
+			left.swap_remove(at);
+			true
+		})
 }
 
 /// Refuse edits, each read as its [`Collection::renames`], that remove a
@@ -3525,6 +3541,14 @@ mod tests {
 		};
 		let elsewhere = moq_scene::Rect { x: 300.0, ..rect };
 		assert_eq!(super::moved(&before, &after), [moved(1, elsewhere), moved(5, rect)]);
+
+		// Two keeping clear of the same source swapped, as an undo of a
+		// change of order does: neither moved.
+		let mut after = before.clone();
+		after.scenes[0].items[1].rect.x = 300.0;
+		let mut swapped = after.clone();
+		swapped.scenes[0].items.swap(1, 2);
+		assert_eq!(super::moved(&after, &swapped), []);
 	}
 
 	/// An undo of a move by hand puts a layer keeping clear back as it was
@@ -3614,6 +3638,8 @@ mod tests {
 		kio::clock::timeout(TIMEOUT, placed(rect, true))
 			.await
 			.expect("the undo holds it");
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 	}
 
 	/// Frames the recording's own encoder encoded.

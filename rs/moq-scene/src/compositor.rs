@@ -158,6 +158,15 @@ struct Parked {
 	placer: Placer,
 }
 
+/// A scene a render draws, as [`Compositor::watched`] finds it.
+#[derive(Clone, Copy)]
+struct Watched {
+	/// How long it has been on, which its keyframes play from.
+	since: Duration,
+	/// Whether it is drawn only through a scene source, onto transparency.
+	nested: bool,
+}
+
 /// A scene's items in slots, arranged.
 struct Reflow {
 	/// Its items where its arrangement puts them, in order.
@@ -617,9 +626,7 @@ impl Compositor {
 	/// called `scene`, one showing `source` that keeps clear, at `saved`: it
 	/// holds there, as [`hold`](Self::hold) says.
 	pub fn redone(&mut self, scene: &str, index: usize, source: &str, saved: Rect) {
-		if let Some(keeper) = self.keepers.get_mut(&(scene.to_string(), index))
-			&& keeper.source == source
-		{
+		if let Some(keeper) = self.unpark(scene, index, source, saved) {
 			keeper.placer.redone(saved);
 		}
 	}
@@ -631,6 +638,15 @@ impl Compositor {
 	/// then, such as the slot it had glided to. Anywhere else, it holds, as
 	/// [`hold`](Self::hold) says.
 	pub fn undone(&mut self, scene: &str, index: usize, source: &str, saved: Rect, now: Instant) {
+		if let Some(keeper) = self.unpark(scene, index, source, saved) {
+			keeper.placer.undone(saved, now);
+		}
+	}
+
+	/// The keeper of the `index`th item of the scene called `scene`, one
+	/// showing `source` saved at `saved`, taking it back from where it was
+	/// parked when an undo or a redo switches keeping clear back on.
+	fn unpark(&mut self, scene: &str, index: usize, source: &str, saved: Rect) -> Option<&mut Keeper> {
 		let key = (scene.to_string(), index);
 		if !self.keepers.contains_key(&key) && self.parked.get(&key).is_some_and(|parked| parked.source == source) {
 			let parked = self.parked.remove(&key).expect("found above");
@@ -643,11 +659,7 @@ impl Compositor {
 			};
 			self.keepers.insert(key.clone(), keeper);
 		}
-		if let Some(keeper) = self.keepers.get_mut(&key)
-			&& keeper.source == source
-		{
-			keeper.placer.undone(saved, now);
-		}
+		self.keepers.get_mut(&key).filter(|keeper| keeper.source == source)
 	}
 
 	/// Keep the scenes `outputs` names as outputs from now on, each with
@@ -835,15 +847,17 @@ impl Compositor {
 				None => self.outputs.insert(scene, output),
 			};
 		}
-		// Each scene keeps where its slots were, so two swapping names do
-		// not glide from each other's.
-		let reflows = std::mem::take(&mut self.reflows);
-		for (scene, reflow) in reflows {
-			match renames.get(&scene) {
-				Some(Some(to)) => self.reflows.insert(to.clone(), reflow),
-				Some(None) => None,
-				None => self.reflows.insert(scene, reflow),
-			};
+		// Each scene keeps where its slots were, and where its items keeping
+		// clear went, so two swapping names do not take each other's.
+		self.reflows = renamed(std::mem::take(&mut self.reflows), renames, |scene| scene);
+		self.keepers = renamed(std::mem::take(&mut self.keepers), renames, |(scene, _)| scene);
+		self.parked = renamed(std::mem::take(&mut self.parked), renames, |(scene, _)| scene);
+		if let Some(((scene, _, _), _)) = &mut self.grabbed {
+			match renames.get(scene.as_str()) {
+				Some(Some(to)) => *scene = to.clone(),
+				Some(None) => self.grabbed = None,
+				None => {}
+			}
 		}
 	}
 
@@ -1010,7 +1024,8 @@ impl Compositor {
 		self.update(collection, sources, now);
 		// Every draw below reads the items keeping clear where they are
 		// placed, and the scenes as arranged around them.
-		let placed = self.place(collection, now);
+		let watched = self.watched(collection, progress, now);
+		let placed = self.place(collection, &watched, now);
 		let staged = self.reflow(&placed, sources, now);
 		let collection = &*staged;
 		self.restart(collection, preview_start, program_start);
@@ -1186,35 +1201,25 @@ impl Compositor {
 		// The picture under each item keeping clear, read a few times a
 		// second while its scene is drawn: on program, in preview, for an
 		// output, or through a scene source.
-		let mut drawn: HashMap<&str, Duration> = HashMap::new();
-		let roots = on_program(program, switch)
-			.into_iter()
-			.chain(previewing.then_some(preview))
-			.chain(outputs.iter().map(|(on, _)| *on));
-		for On(scene, since) in roots {
-			if let Some(scene) = scene {
-				drawn.entry(scene).or_insert(since);
-			}
-		}
-		for nest in &nesting.order {
-			drawn.entry(nest.scene).or_insert(nest.since);
-		}
 		let mut reads = Vec::new();
 		for ((scene, index), keeper) in &mut self.keepers {
 			keeper.watched = false;
-			let Some(&since) = drawn.get(scene.as_str()) else {
+			let Some(&Watched { since, nested }) = watched.get(scene) else {
 				continue;
 			};
-			keeper.placer.shown(since, now);
 			let Some(shown) = collection.scene(scene) else { continue };
-			// While its slots glide, a scene draws only its visible items, so
-			// one keeping clear is found by what it shows and where it is.
-			let mine = |item: &Item| item.keep_clear.is_some() && item.source == keeper.source;
+			// While its slots glide, a scene draws only its visible items, in
+			// the order they stack, so one keeping clear is found by what it
+			// shows and where it was placed, nearest its place in the file.
 			let rect = keeper.placer.placement().rect;
-			let at = match shown.items.get(*index) {
-				Some(item) if mine(item) => Some(*index),
-				_ => shown.items.iter().position(|item| mine(item) && item.rect == rect),
-			};
+			let mine = |item: &Item| item.keep_clear.is_some() && item.source == keeper.source && item.rect == rect;
+			let at = shown
+				.items
+				.iter()
+				.enumerate()
+				.filter(|(_, item)| mine(item))
+				.min_by_key(|(at, _)| at.abs_diff(*index))
+				.map(|(at, _)| at);
 			let Some(at) = at.filter(|&at| shown.items[at].visible) else {
 				continue;
 			};
@@ -1225,7 +1230,11 @@ impl Compositor {
 			let canvas = canvas_of(Some(scene));
 			let target = keeper.look.target(draw.effects, canvas);
 			draw.size = canvas;
-			draw.target(&target);
+			// What a scene source draws starts transparent, as its nest does.
+			match nested {
+				true => draw.frame.target(&target.picture, canvas, wgpu::Color::TRANSPARENT),
+				false => draw.target(&target),
+			}
 			draw.under(&target, Place::scene(scene.as_str()), at, since);
 			reads.push((scene.clone(), *index));
 		}
@@ -1242,12 +1251,64 @@ impl Compositor {
 		Ok(())
 	}
 
+	/// Each scene the render at `now` draws, by name: on program, `progress`
+	/// of the way through a switch, in preview, for an output, or through a
+	/// scene source in one of them. Known before the render places what it
+	/// draws, so a scene that went on again is seen before a choice is made
+	/// from what it showed before.
+	fn watched(&self, collection: &Collection, progress: Option<f32>, now: Instant) -> HashMap<String, Watched> {
+		let keeping = |scene: &crate::Scene| scene.items.iter().any(|item| item.keep_clear.is_some());
+		if !collection.scenes.iter().any(keeping) {
+			return HashMap::new();
+		}
+		let since = |start: Option<Instant>| now.saturating_duration_since(start.unwrap_or(now));
+		let switch = self.switch.as_ref().zip(progress).map(|(switch, progress)| {
+			let from = On(switch.from.as_deref(), now.saturating_duration_since(switch.from_start));
+			(switch, from, progress)
+		});
+		let program = On(self.program_scene.as_deref(), since(self.program_start));
+		let mut roots = on_program(program, switch);
+		if self.previewing {
+			roots.push(On(self.preview_scene.as_deref(), since(self.preview_start)));
+		}
+		let outputs = self.outputs.iter().filter(|(_, output)| output.draw);
+		roots.extend(outputs.map(|(scene, output)| On(Some(scene.as_str()), since(output.start))));
+
+		let mut watched = HashMap::new();
+		for On(scene, since) in &roots {
+			if let Some(scene) = scene {
+				let shown = Watched {
+					since: *since,
+					nested: false,
+				};
+				watched.entry(scene.to_string()).or_insert(shown);
+			}
+		}
+		let items = roots
+			.iter()
+			.filter_map(|On(scene, since)| Some((collection.items(&Place::scene((*scene)?))?, *since)));
+		let top = (collection.items(&Place::top()).unwrap_or_default(), Duration::ZERO);
+		for nest in &Nesting::of(collection, items.chain([top])).order {
+			let shown = Watched {
+				since: nest.since,
+				nested: true,
+			};
+			watched.entry(nest.scene.to_string()).or_insert(shown);
+		}
+		watched
+	}
+
 	/// `collection` with each scene item keeping clear where its placer puts
 	/// it at `now`, from what the reads of the picture under it that came
 	/// back show. A keeper whose item stopped keeping clear is parked, held
 	/// where it was, until the item keeps clear again or is gone; one whose
 	/// item is gone is forgotten.
-	fn place<'a>(&mut self, collection: &'a Collection, now: Instant) -> Cow<'a, Collection> {
+	fn place<'a>(
+		&mut self,
+		collection: &'a Collection,
+		watched: &HashMap<String, Watched>,
+		now: Instant,
+	) -> Cow<'a, Collection> {
 		let mut staged = Cow::Borrowed(collection);
 		let keeping = |item: &Item| item.keep_clear.is_some();
 		let (mut kept, left) = follow(std::mem::take(&mut self.keepers), collection, keeping, |keeper| {
@@ -1273,7 +1334,9 @@ impl Compositor {
 		for (number, scene) in collection.scenes.iter().enumerate() {
 			let canvas = scene.canvas(collection.canvas);
 			for (index, item) in scene.items.iter().enumerate() {
-				let Some(keep) = &item.keep_clear else { continue };
+				if item.keep_clear.is_none() {
+					continue;
+				}
 				let key = (scene.name.clone(), index);
 				let mut keeper = kept.remove(&key).unwrap_or_else(|| Keeper {
 					source: item.source.clone(),
@@ -1282,6 +1345,13 @@ impl Compositor {
 					placer: Placer::new(now),
 					look: Look::new(&self.device, &self.queue),
 				});
+				// A scene that went on again shows new content, which the
+				// reads of what it showed before say nothing of.
+				if let Some(watched) = watched.get(&scene.name)
+					&& keeper.placer.shown(watched.since, now)
+				{
+					keeper.look.restart();
+				}
 				match keeper.look.finish() {
 					Some(Ok((tiles, at))) => keeper.placer.see(&tiles, at),
 					Some(Err(err)) => tracing::warn!(
@@ -1298,7 +1368,7 @@ impl Compositor {
 					*at == scene.name && *number == index && *source == item.source && now < *until
 				});
 				keeper.placer.grab(grabbed);
-				let rect = keeper.placer.place(item.rect, keep, canvas, now);
+				let rect = keeper.placer.place(item, canvas, now);
 				if rect != item.rect {
 					staged.to_mut().scenes[number].items[index].rect = rect;
 				}
@@ -2596,6 +2666,26 @@ impl Target {
 	}
 }
 
+/// `map` with the scene each key names, as `scene` finds it, renamed as
+/// `renames` says, dropping those of scenes it removes.
+fn renamed<K: Eq + std::hash::Hash, V>(
+	map: HashMap<K, V>,
+	renames: &BTreeMap<String, Option<String>>,
+	scene: for<'k> fn(&'k mut K) -> &'k mut String,
+) -> HashMap<K, V> {
+	map.into_iter()
+		.filter_map(|(mut key, value)| {
+			let name = scene(&mut key);
+			match renames.get(name.as_str()) {
+				Some(Some(to)) => *name = to.clone(),
+				Some(None) => return None,
+				None => {}
+			}
+			Some((key, value))
+		})
+		.collect()
+}
+
 /// Each of something by the scene and place of the item it is for.
 type Placed<T> = HashMap<(String, usize), T>;
 
@@ -3012,8 +3102,34 @@ mod tests {
 			studio.render(after);
 			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
 			assert_eq!((placement.rect, placement.held), (dragged, true), "still held");
+
+			// Switched off and drawn so, then back on by a redo: it holds.
+			studio.collection.scenes[0].items[camera].keep_clear = None;
+			let after = after.saturating_add(Duration::from_millis(100));
+			studio.render(after);
+			assert!(studio.compositor.placement("busy", camera, "camera").is_none());
+			studio.collection.scenes[0].items[camera].keep_clear = keep;
+			studio.compositor.redone("busy", camera, "camera", dragged);
+			studio.render(after.saturating_add(Duration::from_millis(100)));
+			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			assert_eq!((placement.rect, placement.held), (dragged, true), "a redo holds it");
 		})
 		.await;
+	}
+
+	/// Each scene's keepers follow a rename, so two scenes swapping names
+	/// keep their own, and a removed scene's are dropped.
+	#[test]
+	fn keepers_follow_a_rename() {
+		let key = |scene: &str, index| (scene.to_string(), index);
+		let keepers = HashMap::from([(key("a", 0), "a's"), (key("b", 0), "b's"), (key("c", 1), "c's")]);
+		let renames = BTreeMap::from([
+			("a".to_string(), Some("b".to_string())),
+			("b".to_string(), Some("a".to_string())),
+			("c".to_string(), None),
+		]);
+		let keepers = renamed(keepers, &renames, |(scene, _)| scene);
+		assert_eq!(keepers, HashMap::from([(key("b", 0), "a's"), (key("a", 0), "b's")]));
 	}
 
 	/// Two layers keeping clear of the same camera keep their own keepers as

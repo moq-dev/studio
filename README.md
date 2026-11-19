@@ -729,14 +729,17 @@ still, as text is, and what holds still while the rest moves, as a HUD does.
 Each can be switched off under **Stays clear of**. Nothing is uploaded: the
 choice is made on this machine, from the picture alone.
 
-It keeps to one of eight places, the canvas's corners and edge middles,
+It moves to one of eight places, the canvas's corners and edge middles,
 inside a margin of a twentieth of the canvas's shorter side, that its size
 fits in, taking the one that covers the least of what matters, a corner over
 a middle that covers as much. It chooses a second after its scene goes on,
 about two seconds after the content under it changes kind (another layout, or
 another app), and otherwise moves only once its place has been the worst of them for
-10 seconds, never for a single busy moment. It glides there as a move
-transition eases, in 0.4 s unless **Glide** says otherwise. Its rect in the
+10 seconds, never for a single busy moment. It moves only to a place that
+covers clearly less, so over a picture where nothing matters it stays where it
+rests, even outside the eight places. What it covers is where its keyframes
+draw it, and it never goes where they would draw it off the canvas. It glides
+to a new place as a move transition eases, in 0.4 s unless **Glide** says otherwise. Its rect in the
 scene file gives its size, and where it rests until it first moves.
 
 While it is selected, BUILD shows what it saw: what matters glowing, tagged

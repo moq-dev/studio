@@ -232,11 +232,11 @@ pub(super) fn inspector(
 					}
 				});
 			});
-			ui.label(
-				egui::RichText::new("Moves only when the content changes.")
-					.color(kit::DIM)
-					.font(kit::ui(12.0)),
+			let moves = format!(
+				"Moves when the content changes, or after {} s in the worst place.",
+				moq_scene::place::WORST.as_secs()
 			);
+			ui.label(egui::RichText::new(moves).color(kit::DIM).font(kit::ui(12.0)));
 		});
 	asked
 }

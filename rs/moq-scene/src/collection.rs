@@ -3400,6 +3400,10 @@ items = [
 
 	#[test]
 	fn refuses_keeping_clear_where_it_cannot() {
+		let refused = |collection: &Collection, why: &str| match collection.validate() {
+			Err(Error::Invalid(err)) => assert!(err.contains(why), "{err}"),
+			other => panic!("{why}: {other:?}"),
+		};
 		let mut collection = example();
 		collection.scenes[0].items[1].keep_clear = Some(KeepClear::default());
 		collection.validate().unwrap();
@@ -3407,19 +3411,19 @@ items = [
 			glide: Duration::from_secs(6),
 			..KeepClear::default()
 		});
-		assert!(
-			matches!(collection.validate(), Err(Error::Invalid(_))),
-			"a glide too long"
-		);
+		refused(&collection, "longer than");
 		collection.scenes[0].items[1].keep_clear = None;
 		collection.top[0].keep_clear = Some(KeepClear::default());
-		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "the top layer");
+		refused(&collection, "only a scene's item");
 		collection.top[0].keep_clear = None;
 		collection.validate().unwrap();
+		// A slot places the item, so it takes no rect of its own.
 		collection.scenes[0].items[1].keep_clear = Some(KeepClear::default());
+		let rect = std::mem::take(&mut collection.scenes[0].items[1].rect);
 		collection.scenes[0].items[1].slot = Some(Slot::Tile);
-		assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "in a slot");
+		refused(&collection, "keeps clear in a slot");
 		collection.scenes[0].items[1].slot = None;
+		collection.scenes[0].items[1].rect = rect;
 		collection.validate().unwrap();
 
 		// A player of the layer layout places a published source where the
@@ -3434,10 +3438,7 @@ items = [
 			}],
 			..Scene::new("Main")
 		}];
-		assert!(
-			matches!(published.validate(), Err(Error::Invalid(_))),
-			"a published source"
-		);
+		refused(&published, "viewers place it where the scene file does");
 	}
 
 	#[test]

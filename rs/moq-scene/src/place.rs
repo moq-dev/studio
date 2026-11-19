@@ -23,6 +23,13 @@ use crate::glide::Glide;
 /// How often the picture under an item is read, at most.
 pub const INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long after the read before a read follows a gap, as when its scene
+/// was off or the item hidden: it compares with no picture, and a change of
+/// content is told from what was read before the gap. Reads come at least
+/// once a second while the picture is read, as a canvas runs at 1 fps at
+/// least.
+const GAP: Duration = Duration::from_secs(2);
+
 /// How long a gesture holds an item keeping clear in hand after it last
 /// said so: a window that stops drawing mid-drag, as a hidden one does,
 /// lets go this long after.
@@ -216,7 +223,8 @@ pub struct Placement {
 	/// Whether it stays where the streamer moved it, until the content under
 	/// it changes. A move by hand says so at once, before the next render.
 	pub held: bool,
-	/// Where it last moved from, and what it left there.
+	/// Where it last moved from, and what it left there, until a move by
+	/// hand.
 	pub left: Option<Left>,
 	/// The places it may go: each slot it fits in.
 	pub slots: Vec<(Slot, Rect)>,
@@ -299,6 +307,9 @@ struct Sight {
 
 impl Sight {
 	/// Take in a read taken `at`, returning whether the content changed kind.
+	/// A read after a [`GAP`] weighs in the layouts as one taken an
+	/// [`INTERVAL`] after the last, so what the content looked like before
+	/// the gap is what a change is told from.
 	fn see(&mut self, read: &Tiles, at: Instant) -> bool {
 		self.generation += 1;
 		let count = read.tiles.len();
@@ -347,7 +358,14 @@ impl Sight {
 				*signal = if raw > *signal { raw } else { mix(*signal, raw, linger) };
 			}
 		}
-		let (recent, usual) = (weight(dt, RECENT), weight(dt, USUAL));
+		let step = match dt > GAP {
+			true => {
+				self.apart = None;
+				INTERVAL
+			}
+			false => dt,
+		};
+		let (recent, usual) = (weight(step, RECENT), weight(step, USUAL));
 		let mut distance = 0.0;
 		for ((now, usually), layout) in self.recent.iter_mut().zip(&mut self.usual).zip(layout) {
 			for channel in 0..2 {
@@ -466,6 +484,11 @@ struct Before {
 	saved: Rect,
 	/// Where it was meant to be, such as the slot it had glided to.
 	at: At,
+	/// Where it was drawn, part way along a glide if one was under way, which
+	/// it glides on from.
+	drawn: Rect,
+	/// Where it had last moved from.
+	left: Option<Left>,
 	/// Whether it was looking before choosing.
 	looking: bool,
 }
@@ -478,10 +501,10 @@ pub(crate) struct Placer {
 	/// When it last started looking before choosing: when it began, its
 	/// scene went on, or the content under it changed.
 	looking: Option<Instant>,
-	/// Since when its place has been the worst.
+	/// Since the read when its place has been the worst.
 	worst: Option<Instant>,
-	/// How long its scene had been on as of the last read, which tells it
-	/// going on again.
+	/// How long its scene had been on as of the last render that drew it,
+	/// which tells it going on again and poses it by its keyframes.
 	since: Option<Duration>,
 	/// The item gliding from one place to the next as a move transition
 	/// eases, keyed by how many times it moved.
@@ -548,28 +571,42 @@ impl Placer {
 		}
 	}
 
-	/// Take in a read of the picture under the item, taken `at`.
+	/// Take in a read of the picture under the item, taken `at`. Its place
+	/// counts as the worst afresh after a [`GAP`], which showed nothing.
 	pub fn see(&mut self, read: &Tiles, at: Instant) {
+		if self
+			.sight
+			.last
+			.is_some_and(|last| at.saturating_duration_since(last) > GAP)
+		{
+			self.worst = None;
+		}
 		if self.sight.see(read, at) {
 			self.looking = Some(at);
 		}
 	}
 
-	/// Note that the item's scene is drawn, on for `since`, as of `now`: one
-	/// that went on again since the last is new content to choose for.
-	pub fn shown(&mut self, since: Duration, now: Instant) {
-		if self.since.is_some_and(|last| since < last) {
+	/// Note that the item's scene is drawn, on for `since`, as of `now`,
+	/// before it [places](Self::place) the item: one that went on again since
+	/// the last is new content to choose for, which it returns, so the reads
+	/// of what it showed before are dropped.
+	pub fn shown(&mut self, since: Duration, now: Instant) -> bool {
+		let again = self.since.is_some_and(|last| since < last);
+		if again {
 			self.sight.forget();
 			self.looking = Some(now);
+			self.worst = None;
 		}
 		self.since = Some(since);
+		again
 	}
 
 	/// Moved by hand, such as dragged or nudged: it stays where the scene
 	/// file has it until the content under it changes, and a choice it was
 	/// about to make is dropped. A resize alone is no move: it keeps its
 	/// place. The first move of a hold remembers where it was, for
-	/// [`undone`](Self::undone).
+	/// [`undone`](Self::undone). Where it last moved from is no longer shown,
+	/// as that move did not put it here.
 	pub fn hold(&mut self) {
 		if self.at != At::Held
 			&& let Some(saved) = self.saved
@@ -577,12 +614,15 @@ impl Placer {
 			self.before = Some(Before {
 				saved,
 				at: self.at,
+				drawn: self.placement.rect,
+				left: self.placement.left,
 				looking: self.looking.is_some(),
 			});
 		}
 		self.at = At::Held;
 		self.placement.held = true;
 		self.placement.slot = None;
+		self.placement.left = None;
 		self.looking = None;
 		self.worst = None;
 		self.glide = Glide::new(self.glides, |_| true);
@@ -593,8 +633,9 @@ impl Placer {
 	/// Moved by an undo, saved at `saved` as of `now`: back where its scene
 	/// file put it before the move by hand that held it, it goes back to
 	/// where it was meant to be then, such as the slot it had glided to, so
-	/// the undo puts back what the streamer saw. Anywhere else, it holds, as
-	/// after a move by hand.
+	/// the undo puts back what the streamer saw: where it was drawn, gliding
+	/// on from there if it was taken part way along a glide. Anywhere else,
+	/// it holds, as after a move by hand.
 	pub fn undone(&mut self, saved: Rect, now: Instant) {
 		// What another undo or a redo before the next place starts from.
 		self.saved = Some(saved);
@@ -606,11 +647,13 @@ impl Placer {
 					At::Slot(slot) => Some(slot),
 					_ => None,
 				};
+				self.placement.left = before.left;
 				self.looking = before.looking.then_some(now);
 				self.worst = None;
 				self.glide = Glide::new(self.glides, |_| true);
 				self.aimed = None;
-				self.paused = None;
+				// Let go, as it is, it glides on from where it was drawn.
+				self.paused = Some(before.drawn);
 			}
 			before => {
 				self.hold();
@@ -661,9 +704,12 @@ impl Placer {
 		&self.placement
 	}
 
-	/// Where to draw the item at `now`, saved at `saved` and keeping clear as
-	/// `keep` says on `canvas`.
-	pub fn place(&mut self, saved: Rect, keep: &KeepClear, canvas: Canvas, now: Instant) -> Rect {
+	/// Where to draw `item`, keeping clear on `canvas`, at `now`: one that
+	/// does not keep clear stays where it is saved.
+	pub fn place(&mut self, item: &Item, canvas: Canvas, now: Instant) -> Rect {
+		let (saved, Some(keep)) = (item.rect, &item.keep_clear) else {
+			return item.rect;
+		};
 		self.saved = Some(saved);
 		let slots: Vec<(Slot, Rect)> = Slot::ALL
 			.into_iter()
@@ -680,8 +726,9 @@ impl Placer {
 			self.heated = Some(generation);
 			self.placement.heat = self.sight.heat(keep).unwrap_or_default();
 		}
-		if self.watched && !self.grabbed && self.sight.last.is_some() && !slots.is_empty() {
-			self.choose(saved, &slots, keep, canvas, now);
+		if self.watched && !self.grabbed && !slots.is_empty() {
+			let posed = item.posed(self.since.unwrap_or_default()).rect;
+			self.choose(posed, saved, &slots, keep, canvas, now);
 		}
 
 		let target = self.target(saved, &slots);
@@ -748,11 +795,33 @@ impl Placer {
 		}
 	}
 
-	/// Move to the slot that matters least, if the time has come.
-	fn choose(&mut self, saved: Rect, slots: &[(Slot, Rect)], keep: &KeepClear, canvas: Canvas, now: Instant) {
+	/// Move to the slot that matters least, if the time has come, for the
+	/// item saved at `saved` and drawn at `posed` there.
+	fn choose(
+		&mut self,
+		posed: Rect,
+		saved: Rect,
+		slots: &[(Slot, Rect)],
+		keep: &KeepClear,
+		canvas: Canvas,
+		now: Instant,
+	) {
+		// Its place counts as the worst for as long as the reads show it.
+		let Some(seen) = self.sight.last else { return };
 		let heat = &self.placement.heat;
+		// Its keyframes move it from wherever it is placed alike, so a place
+		// covers what the item covers posed there, and a slot they would take
+		// it off the canvas from is no place to go.
+		let drawn = |rect: &Rect| Rect {
+			x: rect.x + posed.x - saved.x,
+			y: rect.y + posed.y - saved.y,
+			..posed
+		};
+		let (w, h) = (canvas.width as f32, canvas.height as f32);
+		let inside =
+			|rect: Rect| rect.x >= 0.0 && rect.y >= 0.0 && rect.x + rect.width <= w && rect.y + rect.height <= h;
 		let cost = |slot: Option<Slot>, rect: &Rect| {
-			let (covered, over) = covered(heat, rect, canvas);
+			let (covered, over) = covered(heat, &drawn(rect), canvas);
 			let middle = if slot.is_some_and(|slot| !slot.corner()) {
 				MIDDLE
 			} else {
@@ -762,21 +831,22 @@ impl Placer {
 		};
 		let costs: Vec<(Slot, f32)> = slots
 			.iter()
+			.filter(|(_, rect)| inside(drawn(rect)))
 			.map(|(slot, rect)| (*slot, cost(Some(*slot), rect).0))
 			.collect();
 		let lowest = costs.iter().map(|(_, cost)| *cost).fold(f32::INFINITY, f32::min);
-		// Of slots that cover alike, the first: a corner, from the top left.
-		let (best, _) = *costs
-			.iter()
-			.find(|(_, cost)| *cost <= lowest + ALIKE)
-			.expect("a slot fits");
 		let current = match self.at {
 			At::Slot(slot) => Some(slot),
 			_ => None,
 		};
 		let here = self.target(saved, slots);
 		let (cost_here, over) = cost(current, &here);
-		let better = lowest + BETTER <= cost_here && current != Some(best);
+		// Of slots that cover alike, the first: a corner, from the top left.
+		let better = costs
+			.iter()
+			.find(|(_, cost)| *cost <= lowest + ALIKE)
+			.map(|(best, _)| *best)
+			.filter(|best| lowest + BETTER <= cost_here && current != Some(*best));
 
 		let looked = self
 			.looking
@@ -787,7 +857,7 @@ impl Placer {
 			if self.at == At::Held {
 				self.at = At::Rest;
 			}
-			if better {
+			if let Some(best) = better {
 				self.go(best, here, over, keep, now);
 			}
 			return;
@@ -796,12 +866,12 @@ impl Placer {
 			return;
 		}
 		let worst = costs.iter().all(|(_, cost)| *cost <= cost_here + ALIKE);
-		if !(worst && better) {
+		let Some(best) = better.filter(|_| worst) else {
 			self.worst = None;
 			return;
-		}
-		let since = *self.worst.get_or_insert(now);
-		if now.saturating_duration_since(since) >= WORST {
+		};
+		let since = *self.worst.get_or_insert(seen);
+		if seen.saturating_duration_since(since) >= WORST {
 			self.worst = None;
 			self.go(best, here, over, keep, now);
 		}
@@ -886,6 +956,9 @@ struct Reading {
 	size: (u32, u32),
 	compared: bool,
 	mapped: Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
+	/// Whether it is of what the scene showed before it went on again, so it
+	/// is dropped once it comes back.
+	dropped: bool,
 }
 
 /// One item's reads of the picture under it.
@@ -930,6 +1003,15 @@ impl Look {
 		}
 	}
 
+	/// Forget the reads so far, as when the scene goes on again: the next
+	/// read compares with no picture, and one under way is dropped.
+	pub fn restart(&mut self) {
+		self.last = None;
+		if let Some(reading) = &mut self.reading {
+			reading.dropped = true;
+		}
+	}
+
 	/// Whether a read may start at `now`: none is under way, and the last
 	/// was at least [`INTERVAL`] ago.
 	pub fn due(&self, now: Instant) -> bool {
@@ -967,10 +1049,12 @@ impl Look {
 	}
 
 	/// Reduce the picture the frame drew into [`target`](Self::target), once
-	/// submitted, with the one before, and read the tiles back.
+	/// submitted, with the one before, unless that is from before a
+	/// [`GAP`], and read the tiles back.
 	pub fn start(&mut self, reducer: &Reducer, now: Instant) {
 		let read = self.pictures[self.next].as_ref().expect("drawn into");
-		let before = self.pictures[1 - self.next].as_ref();
+		let recent = self.last.is_some_and(|last| now.saturating_duration_since(last) <= GAP);
+		let before = self.pictures[1 - self.next].as_ref().filter(|_| recent);
 		let compared = before.is_some();
 		let view = |target: &Target| target.texture.create_view(&Default::default());
 		let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1017,16 +1101,30 @@ impl Look {
 			size,
 			compared,
 			mapped,
+			dropped: false,
 		});
 		self.last = Some(now);
 		self.next = 1 - self.next;
 	}
 
-	/// The read under way, once it came back, and when it was taken.
+	/// The read under way, once it came back, and when it was taken; a
+	/// dropped one comes back as nothing.
 	pub fn finish(&mut self) -> Option<Result<(Tiles, Instant), String>> {
 		let reading = self.reading.as_ref()?;
 		let mapped = reading.mapped.lock().unwrap().take()?;
-		let Reading { at, size, compared, .. } = self.reading.take().expect("checked above");
+		let Reading {
+			at,
+			size,
+			compared,
+			dropped,
+			..
+		} = self.reading.take().expect("checked above");
+		if dropped {
+			if mapped.is_ok() {
+				self.readback.unmap();
+			}
+			return None;
+		}
 		let count = (size.0.div_ceil(TILE) * size.1.div_ceil(TILE)) as usize;
 		let read = mapped.map_err(|err| err.to_string()).and_then(|()| {
 			let tiles = match self.readback.slice(..).get_mapped_range() {
@@ -1093,13 +1191,27 @@ mod tests {
 		}
 	}
 
+	/// An item saved at `saved`, keeping clear as `keep` says.
+	fn keeping(saved: Rect, keep: KeepClear) -> Item {
+		Item {
+			keep_clear: Some(keep),
+			..Item::new("camera", saved)
+		}
+	}
+
+	/// Where `placer` draws an item saved at `saved`, keeping clear of
+	/// everything, at `now`.
+	fn put(placer: &mut Placer, saved: Rect, now: Instant) -> Rect {
+		placer.place(&keeping(saved, KeepClear::default()), CANVAS, now)
+	}
+
 	/// A placer fed `frames` reads a quarter second apart from `start`,
 	/// placing an item saved at `saved` after each; the time after the last.
 	fn run(placer: &mut Placer, saved: Rect, start: Instant, reads: impl IntoIterator<Item = Tiles>) -> Instant {
 		let mut now = start;
 		for read in reads {
 			placer.see(&read, now);
-			placer.place(saved, &KeepClear::default(), CANVAS, now);
+			put(placer, saved, now);
 			now = now.saturating_add(INTERVAL);
 		}
 		now
@@ -1163,7 +1275,7 @@ mod tests {
 		let start = Instant::now();
 		let mut placer = Placer::new(start);
 		let saved = camera();
-		assert_eq!(placer.place(saved, &KeepClear::default(), CANVAS, start), saved);
+		assert_eq!(put(&mut placer, saved, start), saved);
 		// Not yet: it has not looked for long enough.
 		let now = run(&mut placer, saved, start, (0..3).map(|_| read(MOVING, game)));
 		assert_eq!(placer.placement().slot, None);
@@ -1177,9 +1289,9 @@ mod tests {
 		let moved = now.saturating_sub(INTERVAL);
 		let to = Slot::TopLeft.rect(288.0, 288.0, CANVAS).unwrap();
 		let glide = KeepClear::default().glide;
-		let half = placer.place(saved, &KeepClear::default(), CANVAS, moved.saturating_add(glide / 2));
+		let half = put(&mut placer, saved, moved.saturating_add(glide / 2));
 		assert_eq!(half.x, (saved.x + to.x) / 2.0, "halfway, eased in and out");
-		let landed = placer.place(saved, &KeepClear::default(), CANVAS, moved.saturating_add(glide));
+		let landed = put(&mut placer, saved, moved.saturating_add(glide));
 		assert_eq!(landed, to);
 	}
 
@@ -1199,7 +1311,7 @@ mod tests {
 			let mut moved = None;
 			for _ in 0..8 {
 				placer.see(&read(MOVING, game), now);
-				placer.place(saved, &keep, CANVAS, now);
+				placer.place(&keeping(saved, keep), CANVAS, now);
 				if placer.placement().slot.is_some() {
 					moved = Some(now);
 					break;
@@ -1212,9 +1324,9 @@ mod tests {
 				true => assert_eq!(first, to, "a jump lands at once"),
 				false => {
 					assert_eq!(first, saved, "a glide starts where it was");
-					let half = placer.place(saved, &keep, CANVAS, moved.saturating_add(glide / 2));
+					let half = placer.place(&keeping(saved, keep), CANVAS, moved.saturating_add(glide / 2));
 					assert_eq!(half.x, (saved.x + to.x) / 2.0, "halfway at half its length");
-					let landed = placer.place(saved, &keep, CANVAS, moved.saturating_add(glide));
+					let landed = placer.place(&keeping(saved, keep), CANVAS, moved.saturating_add(glide));
 					assert_eq!(landed, to);
 				}
 			}
@@ -1251,20 +1363,20 @@ mod tests {
 		let to = Slot::TopLeft.rect(288.0, 288.0, CANVAS).unwrap();
 
 		let half = moved.saturating_add(glide / 2);
-		let at = placer.place(saved, &KeepClear::default(), CANVAS, half);
+		let at = put(&mut placer, saved, half);
 		assert!(at.x < saved.x && at.x > to.x, "on its way: {at:?}");
 		placer.grab(true);
 		for later in [half, half.saturating_add(glide), half.saturating_add(glide * 4)] {
-			let held = placer.place(saved, &KeepClear::default(), CANVAS, later);
+			let held = put(&mut placer, saved, later);
 			assert_eq!(held, at, "in hand, it stays where it is drawn");
 		}
 
 		placer.grab(false);
 		let released = half.saturating_add(glide * 4);
-		assert_eq!(placer.place(saved, &KeepClear::default(), CANVAS, released), at);
-		let on = placer.place(saved, &KeepClear::default(), CANVAS, released.saturating_add(glide / 2));
+		assert_eq!(put(&mut placer, saved, released), at);
+		let on = put(&mut placer, saved, released.saturating_add(glide / 2));
 		assert!(on.x < at.x && on.x > to.x, "it glides on: {on:?}");
-		let landed = placer.place(saved, &KeepClear::default(), CANVAS, released.saturating_add(glide));
+		let landed = put(&mut placer, saved, released.saturating_add(glide));
 		assert_eq!(landed, to);
 	}
 
@@ -1281,10 +1393,10 @@ mod tests {
 		let moved = now.saturating_sub(INTERVAL);
 		let glide = KeepClear::default().glide;
 		let half = moved.saturating_add(glide / 2);
-		let at = placer.place(saved, &KeepClear::default(), CANVAS, half);
+		let at = put(&mut placer, saved, half);
 		placer.grab(true);
 		let late = half.saturating_add(glide * 2);
-		assert_eq!(placer.place(saved, &KeepClear::default(), CANVAS, late), at);
+		assert_eq!(put(&mut placer, saved, late), at);
 	}
 
 	/// A resize part way along a glide takes its new size at once, in the
@@ -1301,7 +1413,7 @@ mod tests {
 			height: 200.0,
 			..saved
 		};
-		let rect = placer.place(resized, &KeepClear::default(), CANVAS, now);
+		let rect = put(&mut placer, resized, now);
 		assert_eq!(Some(rect), Slot::TopLeft.rect(200.0, 200.0, CANVAS));
 	}
 
@@ -1316,11 +1428,11 @@ mod tests {
 		let now = run(&mut placer, saved, start, (0..8).map(|_| read(MOVING, game)));
 		assert_eq!(placer.placement().slot, None, "unwatched, it stays");
 		let later = now.saturating_add(WORST * 2);
-		placer.place(saved, &KeepClear::default(), CANVAS, later);
+		put(&mut placer, saved, later);
 		assert_eq!(placer.placement().slot, None);
 
 		placer.watch(true, later);
-		placer.place(saved, &KeepClear::default(), CANVAS, later);
+		put(&mut placer, saved, later);
 		assert_eq!(placer.placement().slot, None, "it looks again first");
 		let now = run(&mut placer, saved, later, (0..8).map(|_| read(MOVING, game)));
 		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
@@ -1384,7 +1496,7 @@ mod tests {
 		// Dragged back over the minimap.
 		let dragged = Rect { x: 1600.0, ..saved };
 		placer.hold();
-		assert_eq!(placer.place(dragged, &KeepClear::default(), CANVAS, now), dragged);
+		assert_eq!(put(&mut placer, dragged, now), dragged);
 		let now = run(&mut placer, dragged, now, (0..80).map(|_| read(MOVING, game)));
 		let placement = placer.placement();
 		assert!(placement.held);
@@ -1459,26 +1571,30 @@ mod tests {
 		let now = run(&mut placer, saved, start, (0..6).map(|_| read(MOVING, game)));
 		let now = now.saturating_add(keep.glide);
 		let to = Slot::TopLeft.rect(288.0, 288.0, CANVAS).unwrap();
-		assert_eq!(placer.place(saved, &keep, CANVAS, now), to);
+		assert_eq!(placer.place(&keeping(saved, keep), CANVAS, now), to);
 
 		// Dragged over the minimap, then on, a move each.
 		let first = Rect { x: 1000.0, ..saved };
 		let second = Rect { x: 1600.0, ..saved };
 		for dragged in [first, second] {
 			placer.hold();
-			assert_eq!(placer.place(dragged, &keep, CANVAS, now), dragged);
+			assert_eq!(placer.place(&keeping(dragged, keep), CANVAS, now), dragged);
 		}
 		let now = run(&mut placer, second, now, (0..8).map(|_| read(MOVING, game)));
 
 		placer.undone(first, now);
 		assert_eq!(
-			placer.place(first, &keep, CANVAS, now),
+			placer.place(&keeping(first, keep), CANVAS, now),
 			first,
 			"back one move, it holds"
 		);
 		assert!(placer.placement().held);
 		placer.undone(saved, now);
-		assert_eq!(placer.place(saved, &keep, CANVAS, now), to, "back in its slot, at once");
+		assert_eq!(
+			placer.place(&keeping(saved, keep), CANVAS, now),
+			to,
+			"back in its slot, at once"
+		);
 		let placement = placer.placement();
 		assert_eq!((placement.slot, placement.held), (Some(Slot::TopLeft), false));
 		let now = run(&mut placer, saved, now, (0..40).map(|_| read(MOVING, game)));
@@ -1486,10 +1602,10 @@ mod tests {
 
 		// Redone, it holds; undone again, it is back.
 		placer.hold();
-		assert_eq!(placer.place(first, &keep, CANVAS, now), first);
+		assert_eq!(placer.place(&keeping(first, keep), CANVAS, now), first);
 		assert!(placer.placement().held);
 		placer.undone(saved, now);
-		assert_eq!(placer.place(saved, &keep, CANVAS, now), to);
+		assert_eq!(placer.place(&keeping(saved, keep), CANVAS, now), to);
 
 		// Redone and undone twice before it is placed again, as on a slow
 		// canvas, it is still back.
@@ -1497,12 +1613,12 @@ mod tests {
 			placer.redone(first);
 			placer.undone(saved, now);
 		}
-		assert_eq!(placer.place(saved, &keep, CANVAS, now), to);
+		assert_eq!(placer.place(&keeping(saved, keep), CANVAS, now), to);
 		assert!(!placer.placement().held);
 
 		// An undo of an edit that held nothing holds.
 		placer.undone(first, now);
-		assert_eq!(placer.place(first, &keep, CANVAS, now), first);
+		assert_eq!(placer.place(&keeping(first, keep), CANVAS, now), first);
 		assert!(placer.placement().held);
 	}
 
@@ -1572,6 +1688,147 @@ mod tests {
 		);
 	}
 
+	/// Its place counts as the worst only while reads show it so: a render
+	/// long after the last read moves nothing, and reads after a gap count
+	/// afresh.
+	#[test]
+	fn the_worst_counts_only_while_read() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = Slot::TopLeft.rect(288.0, 288.0, CANVAS).unwrap();
+		let now = run(&mut placer, saved, start, (0..8).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, None, "already clear");
+
+		// A HUD over it, read once before the reads stop.
+		let hud = |column, row| {
+			(column < 10 && row < 8)
+				.then_some([0, 60, 50, 90])
+				.or(game(column, row))
+		};
+		let now = run(&mut placer, saved, now, [read(MOVING, hud)]);
+		let late = now.saturating_add(WORST * 2);
+		put(&mut placer, saved, late);
+		assert_eq!(placer.placement().slot, None, "no read showed it for long");
+
+		let reads = (WORST.as_millis() / INTERVAL.as_millis()) as usize;
+		let now = run(&mut placer, saved, late, (0..reads - 4).map(|_| read(MOVING, hud)));
+		assert_eq!(
+			placer.placement().slot,
+			None,
+			"not yet, counted from the first read again"
+		);
+		run(&mut placer, saved, now, (0..8).map(|_| read(MOVING, hud)));
+		assert_ne!(placer.placement().slot, None);
+	}
+
+	/// Held, then not read for a minute, as while hidden: the same content
+	/// back keeps it held, and other content ends the hold once it lasts.
+	#[test]
+	fn a_gap_keeps_what_the_content_was() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let now = run(&mut placer, saved, start, (0..6).map(|_| read(MOVING, game)));
+		let dragged = Rect { x: 1600.0, ..saved };
+		placer.hold();
+		let now = run(&mut placer, dragged, now, (0..40).map(|_| read(MOVING, game)));
+		let gap = Duration::from_secs(60);
+
+		placer.watch(false, now);
+		let back = now.saturating_add(gap);
+		placer.watch(true, back);
+		let now = run(&mut placer, dragged, back, (0..40).map(|_| read(MOVING, game)));
+		assert!(placer.placement().held, "the same game keeps it held");
+
+		placer.watch(false, now);
+		let back = now.saturating_add(gap);
+		placer.watch(true, back);
+		let mut now = back;
+		while placer.placement().held {
+			now = run(&mut placer, dragged, now, [read(STILL, slide)]);
+			assert!(
+				now.saturating_duration_since(back) < CHANGING * 4,
+				"a slide in its place is new content"
+			);
+		}
+	}
+
+	/// Taken part way along a glide and moved, then undone, it shows where it
+	/// was drawn and glides on from there. The move by hand drops where it
+	/// last moved from, and the undo puts that back.
+	#[test]
+	fn an_undo_mid_glide_glides_on() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let keep = KeepClear::default();
+		let now = run(&mut placer, saved, start, (0..5).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+		let left = placer.placement().left;
+		assert!(left.is_some());
+		let moved = now.saturating_sub(INTERVAL);
+		let glide = keep.glide;
+		let to = Slot::TopLeft.rect(288.0, 288.0, CANVAS).unwrap();
+		let half = moved.saturating_add(glide / 2);
+		let at = placer.place(&keeping(saved, keep), CANVAS, half);
+		assert!(at.x < saved.x && at.x > to.x, "on its way: {at:?}");
+
+		placer.grab(true);
+		placer.place(&keeping(saved, keep), CANVAS, half);
+		placer.hold();
+		assert_eq!(placer.placement().left, None, "no arrow to where it is put");
+		let dragged = Rect { x: 600.0, ..saved };
+		placer.place(&keeping(dragged, keep), CANVAS, half);
+		placer.grab(false);
+		let later = half.saturating_add(glide * 4);
+		assert_eq!(placer.place(&keeping(dragged, keep), CANVAS, later), dragged);
+
+		placer.undone(saved, later);
+		assert_eq!(
+			placer.place(&keeping(saved, keep), CANVAS, later),
+			at,
+			"where it was drawn"
+		);
+		assert_eq!(placer.placement().left, left);
+		let on = placer.place(&keeping(saved, keep), CANVAS, later.saturating_add(glide / 2));
+		assert!(on.x < at.x && on.x > to.x, "it glides on: {on:?}");
+		assert_eq!(
+			placer.place(&keeping(saved, keep), CANVAS, later.saturating_add(glide)),
+			to
+		);
+	}
+
+	/// What it covers is where its keyframes draw it: saved in the top left
+	/// but drawn over the minimap, it moves to where it is drawn clear of it,
+	/// and saved over the minimap but drawn in the top left, it stays. A slot
+	/// they would draw it off the canvas from is no place to go.
+	#[test]
+	fn it_keeps_clear_where_its_keyframes_draw_it() {
+		let top_left = Slot::TopLeft.rect(288.0, 288.0, CANVAS).unwrap();
+		let top_right = Slot::TopRight.rect(288.0, 288.0, CANVAS).unwrap();
+		for (saved, to, slot) in [
+			(top_left, top_right, Some(Slot::BottomLeft)),
+			(top_right, top_left, None),
+		] {
+			let start = Instant::now();
+			let mut placer = Placer::new(start);
+			let item = Item {
+				keyframes: vec![crate::Keyframe {
+					x: to.x - saved.x,
+					..crate::Keyframe::new(Duration::ZERO)
+				}],
+				..keeping(saved, KeepClear::default())
+			};
+			let mut now = start;
+			for _ in 0..40 {
+				placer.see(&read(MOVING, game), now);
+				placer.place(&item, CANVAS, now);
+				now = now.saturating_add(INTERVAL);
+			}
+			assert_eq!(placer.placement().slot, slot, "saved at {saved:?}");
+		}
+	}
+
 	/// What it is told not to stay clear of does not matter to it.
 	#[test]
 	fn a_signal_switched_off_does_not_matter() {
@@ -1586,7 +1843,7 @@ mod tests {
 		let mut now = start;
 		for _ in 0..8 {
 			placer.see(&read(MOVING, game), now);
-			placer.place(saved, &keep, CANVAS, now);
+			placer.place(&keeping(saved, keep), CANVAS, now);
 			now = now.saturating_add(INTERVAL);
 		}
 		assert_eq!(placer.placement().slot, None);
