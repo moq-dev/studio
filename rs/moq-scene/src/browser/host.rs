@@ -475,15 +475,6 @@ fn deliver(id: Id, input: Input) {
 			modifiers,
 		} => host.send_mouse_wheel_event(Some(&mouse(x, y, modifiers)), dx, dy),
 		Input::Key { code, down, modifiers } => {
-			// A page in a Mac browser takes these from the Edit menu, which
-			// the helper has none of.
-			#[cfg(target_os = "macos")]
-			if down && let Some(command) = mac::command(code, modifiers) {
-				if let Some(frame) = browser.focused_frame() {
-					command(&frame);
-				}
-				return;
-			}
 			let event = KeyEvent {
 				type_: if down {
 					KeyEventType::RAWKEYDOWN
@@ -817,6 +808,11 @@ wrap_client! {
 			Some(self.life.clone())
 		}
 
+		#[cfg(target_os = "macos")]
+		fn keyboard_handler(&self) -> Option<KeyboardHandler> {
+			Some(HelperKeys::new())
+		}
+
 		fn on_process_message_received(
 			&self,
 			_browser: Option<&mut Browser>,
@@ -1137,6 +1133,35 @@ wrap_life_span_handler! {
 	}
 }
 
+#[cfg(target_os = "macos")]
+wrap_keyboard_handler! {
+	struct HelperKeys;
+
+	impl KeyboardHandler {
+		// A Mac browser runs Select All, Undo, and Redo from its Edit menu,
+		// which the helper has none of, for a key the page left unhandled, so
+		// a page's own handler still comes first.
+		fn on_key_event(
+			&self,
+			browser: Option<&mut Browser>,
+			event: Option<&KeyEvent>,
+			_os_event: *mut u8,
+		) -> ::std::os::raw::c_int {
+			let (Some(browser), Some(event)) = (browser, event) else { return 0 };
+			if event.type_ != KeyEventType::RAWKEYDOWN {
+				return 0;
+			}
+			let Some(command) = mac::command(event.windows_key_code, event.modifiers) else {
+				return 0;
+			};
+			if let Some(frame) = browser.focused_frame() {
+				command(&frame);
+			}
+			1
+		}
+	}
+}
+
 /// What CEF needs of a helper on macOS: its framework, loaded from the app
 /// bundle rather than linked, the helper apps its subprocesses run from, and
 /// an NSApplication that takes part in its event handling.
@@ -1155,13 +1180,15 @@ mod mac {
 	use objc2_foundation::{NSActivityOptions, NSObject, NSProcessInfo, NSString};
 
 	/// The Edit menu's command a Mac browser runs for the key with the
-	/// Windows code `code` pressed with `modifiers`: Select All, Undo, and
-	/// Redo. Copy, Cut, and Paste arrive as their own input.
-	pub(super) fn command(code: i32, modifiers: super::Modifiers) -> Option<fn(&super::Frame)> {
-		if !modifiers.meta || modifiers.ctrl || modifiers.alt {
+	/// Windows code `code` pressed with CEF's event `flags`: Select All, Undo,
+	/// and Redo. Copy, Cut, and Paste arrive as their own input.
+	pub(super) fn command(code: i32, flags: u32) -> Option<fn(&super::Frame)> {
+		use super::sys::cef_event_flags_t as F;
+		let held = |flag: F| flags & flag.0 != 0;
+		if !held(F::EVENTFLAG_COMMAND_DOWN) || held(F::EVENTFLAG_CONTROL_DOWN) || held(F::EVENTFLAG_ALT_DOWN) {
 			return None;
 		}
-		match (u8::try_from(code).ok()?, modifiers.shift) {
+		match (u8::try_from(code).ok()?, held(F::EVENTFLAG_SHIFT_DOWN)) {
 			(b'A', false) => Some(|frame| frame.select_all()),
 			(b'Z', false) => Some(|frame| frame.undo()),
 			(b'Z', true) => Some(|frame| frame.redo()),

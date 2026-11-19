@@ -399,6 +399,48 @@ async fn a_dropdown_draws_and_takes_clicks() {
 	.await;
 }
 
+/// A page's own handler takes Undo's shortcut before the browser's command,
+/// as an editor with its own history needs.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
+async fn a_page_takes_its_own_shortcuts() {
+	local(async {
+		let html = "<body style='margin:0;height:100vh;background:red' tabindex=0 onkeydown=\"\
+			if (event.keyCode == 90 && (event.metaKey || event.ctrlKey)) {\
+			event.preventDefault(); document.body.style.background = 'blue' }\"></body>";
+		let mut studio = Studio::new(&[("page", page(html))]).await;
+		studio.until_center([255, 0, 0, 255], &[]).await;
+
+		let page = studio.sources.get("page").unwrap().page().unwrap().clone();
+		page.send(Input::Focus(true));
+		for down in [true, false] {
+			page.send(Input::Button {
+				x: 160,
+				y: 120,
+				button: Button::Left,
+				down,
+				clicks: 1,
+				modifiers: Modifiers::default(),
+			});
+		}
+		// Undo: Command-Z on a Mac.
+		let modifiers = Modifiers {
+			ctrl: cfg!(not(target_os = "macos")),
+			meta: cfg!(target_os = "macos"),
+			..Default::default()
+		};
+		for down in [true, false] {
+			page.send(Input::Key {
+				code: b'Z'.into(),
+				down,
+				modifiers,
+			});
+		}
+		studio.until_center(BLUE, &[]).await;
+	})
+	.await;
+}
+
 /// Copy and Cut put the page's selection on the clipboard, and Cut deletes it
 /// from the page. A password field's text is never taken.
 #[tokio::test(flavor = "multi_thread")]
