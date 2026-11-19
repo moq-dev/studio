@@ -485,26 +485,39 @@ impl Draft {
 	/// Give the scene at `index` a size of its own, or the program's with
 	/// `None`, as [`Scene::sized`] does. While the show goes out in both, a
 	/// layer elsewhere showing it shows its portrait picture as long as it
-	/// follows the program's size, so one placed in the portrait picture,
-	/// whose picture changes shape there, is fitted where it was placed.
+	/// follows the program's size, and its own size otherwise, so one placed
+	/// in the portrait picture, whose picture changes shape there, is fitted
+	/// where it was placed, as wide for its height as the picture became.
 	pub fn set_size(&mut self, index: usize, size: Option<Size>) -> Result<(), Error> {
 		let before = self.collection().clone();
-		self.set_scene(index, self.scene_at(index)?.sized(size))?;
+		let scene = self.scene_at(index)?;
+		let name = scene.name.clone();
+		self.set_scene(index, scene.sized(size))?;
 		let after = self.collection().clone();
+		let (Some(from), Some(to)) = (before.portrait_shape_of(&name), after.portrait_shape_of(&name)) else {
+			return Ok(());
+		};
+		if from == to {
+			return Ok(());
+		}
 		for (layer, items) in after.layers() {
 			for (index, item) in items.iter().enumerate() {
 				let Some(placement) = item.portrait else { continue };
-				if before.turn(item) != after.turn(item) {
-					let portrait = Some(after.fitting(item, placement.rect));
-					self.set_item(
-						&layer,
-						index,
-						Item {
-							portrait,
-							..item.clone()
-						},
-					)?;
+				if after.nested(&item.source) != Some(Nested::Scene(&name)) {
+					continue;
 				}
+				// Cropped as it was, the picture shown there changes shape as
+				// the whole does.
+				let shape = placement.rect.width / placement.rect.height * to / from;
+				let placement = Placement {
+					rect: fit(shape, placement.rect),
+					crop: placement.crop,
+				};
+				let item = Item {
+					portrait: Some(placement),
+					..item.clone()
+				};
+				self.set_item(&layer, index, item)?;
 			}
 		}
 		Ok(())
@@ -614,18 +627,35 @@ impl Collection {
 	/// `item` as large as fits in `rect` in the portrait picture, keeping its
 	/// shape, centered.
 	fn fitting(&self, item: &Item, rect: Rect) -> Placement {
-		let shape = self.portrait_shape(item);
-		let width = rect.width.min(rect.height * shape);
-		let height = width / shape;
 		Placement {
-			rect: Rect {
-				x: (rect.x + (rect.width - width) / 2.0).round(),
-				y: (rect.y + (rect.height - height) / 2.0).round(),
-				width: width.round(),
-				height: height.round(),
-			},
+			rect: fit(self.portrait_shape(item), rect),
 			crop: item.crop,
 		}
+	}
+
+	/// How many times as wide for its height the portrait picture draws the
+	/// scene called `scene`, whole: as the turned canvas while it is drawn in
+	/// both, as its own size otherwise; `None` while the show does not go out
+	/// in portrait, or the scene is gone.
+	fn portrait_shape_of(&self, scene: &str) -> Option<f32> {
+		let canvas = match self.dual(&Layer::scene(scene)) {
+			true => self.portrait_canvas()?,
+			false => self.portrait.then(|| self.canvas(Some(scene))).flatten()?,
+		};
+		Some(canvas.width as f32 / canvas.height as f32)
+	}
+}
+
+/// As large as a picture `shape` times as wide for its height fits in
+/// `rect`, centered.
+fn fit(shape: f32, rect: Rect) -> Rect {
+	let width = rect.width.min(rect.height * shape);
+	let height = width / shape;
+	Rect {
+		x: (rect.x + (rect.width - width) / 2.0).round(),
+		y: (rect.y + (rect.height - height) / 2.0).round(),
+		width: width.round(),
+		height: height.round(),
 	}
 }
 
@@ -1023,7 +1053,7 @@ mod tests {
 		let turned = turned(&show);
 		let whole = Rect::fill(&show.canvas.turned());
 		assert_eq!(turned.scenes[0].items[3].portrait.unwrap().rect, whole);
-		let resize = |collection: &Collection, size| {
+		let resize = |collection: &Collection, size: Option<Size>| {
 			let mut draft = collection.draft("Size");
 			draft.set_size(1, size).unwrap();
 			let edit = draft.finish().unwrap();
@@ -1051,6 +1081,16 @@ mod tests {
 			own.scenes[0].items[0], turned.scenes[0].items[0],
 			"the game is left alone"
 		);
+
+		// Given a 9:16 size of its own, its picture keeps its shape there.
+		let tall = resize(
+			&turned,
+			Some(Size {
+				width: 1080,
+				height: 1920,
+			}),
+		);
+		assert_eq!(tall.scenes[0].items[3].portrait.unwrap().rect, whole);
 
 		let back = resize(&own, None);
 		assert_eq!(
