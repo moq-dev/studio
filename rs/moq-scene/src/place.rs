@@ -639,11 +639,13 @@ impl Placer {
 	/// file put it before the move by hand that held it, it goes back to
 	/// where it was meant to be then, such as the slot it had glided to, so
 	/// the undo puts back what the streamer saw: where it was drawn, gliding
-	/// on from there if it was taken part way along a glide. Anywhere else,
-	/// it holds, as after a move by hand.
+	/// on from there if it was taken part way along a glide. Back where the
+	/// last place saw it saved, as an edit undone before the next render
+	/// leaves it, nothing changed for it. Anywhere else, it holds, as after a
+	/// move by hand.
 	pub fn undone(&mut self, saved: Rect, now: Instant) {
 		// What another undo or a redo before the next place starts from.
-		self.saved = Some(saved);
+		let seen = self.saved.replace(saved);
 		match self.before.take() {
 			Some(before) if before.saved == saved => {
 				self.at = before.at;
@@ -663,6 +665,7 @@ impl Placer {
 				self.paused = Some(before.drawn);
 				self.placement.rect = before.drawn;
 			}
+			before if seen == Some(saved) => self.before = before,
 			before => {
 				self.hold();
 				// What it was held from is still what an undo further back
@@ -1641,6 +1644,12 @@ mod tests {
 			placer.redone(first);
 			placer.undone(saved, now);
 		}
+		assert_eq!(placer.place(&keeping(saved, keep), CANVAS, now), to);
+		assert!(!placer.placement().held);
+
+		// An undo of an edit made and undone before it was placed, as on a
+		// slow canvas, changes nothing.
+		placer.undone(saved, now);
 		assert_eq!(placer.place(&keeping(saved, keep), CANVAS, now), to);
 		assert!(!placer.placement().held);
 
