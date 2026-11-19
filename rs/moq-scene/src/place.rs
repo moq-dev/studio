@@ -652,8 +652,11 @@ impl Placer {
 				self.worst = None;
 				self.glide = Glide::new(self.glides, |_| true);
 				self.aimed = None;
-				// Let go, as it is, it glides on from where it was drawn.
+				// Let go, as it is, it glides on from where it was drawn. Shown
+				// there until the next place, so BUILD draws it there and a redo
+				// before then holds it from there.
 				self.paused = Some(before.drawn);
+				self.placement.rect = before.drawn;
 			}
 			before => {
 				self.hold();
@@ -1604,6 +1607,17 @@ mod tests {
 		placer.hold();
 		assert_eq!(placer.place(&keeping(first, keep), CANVAS, now), first);
 		assert!(placer.placement().held);
+		placer.undone(saved, now);
+		assert_eq!(placer.place(&keeping(saved, keep), CANVAS, now), to);
+
+		// Held elsewhere, then undone, redone, and undone again before it is
+		// placed, as on a slow canvas: it is back in its slot at once, not
+		// gliding from where the last place drew it.
+		placer.hold();
+		assert_eq!(placer.place(&keeping(first, keep), CANVAS, now), first);
+		placer.undone(saved, now);
+		assert_eq!(placer.placement().drawn(saved), to, "shown back before it is placed");
+		placer.redone(first);
 		placer.undone(saved, now);
 		assert_eq!(placer.place(&keeping(saved, keep), CANVAS, now), to);
 

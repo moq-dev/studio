@@ -156,7 +156,8 @@ pub(super) fn outlines(
 
 /// Swap `dragged` with the layer in the slot `target` holds, both of the
 /// same scene: `dragged` takes its slot and its place in the order, and it
-/// takes the slot `dragged` was in, or, for a layer set free, its rect.
+/// takes the slot `dragged` was in, or, for a layer set free, where it is
+/// drawn.
 pub(super) fn assign(state: &mut State, dragged: &Picked, target: &Picked) -> anyhow::Result<()> {
 	anyhow::ensure!(
 		dragged.layer == target.layer,
@@ -178,14 +179,15 @@ pub(super) fn assign(state: &mut State, dragged: &Picked, target: &Picked) -> an
 		keep_clear: None,
 		..moved.clone()
 	};
-	// Set free in place of `moved`, cropped to its shape rather than
-	// stretched.
+	// Set free where `moved` is drawn, as a layer keeping clear may be off
+	// where it is saved, cropped to its shape rather than stretched.
 	let (rect, crop) = match moved.slot {
 		Some(_) => (Rect::default(), held.crop),
 		None => {
-			let (from, crop) = drawn(state, &target.layer, target.index).unwrap_or((moved.rect, held.crop));
+			let to = super::keep::placed(state, &dragged.layer, dragged.index, &moved).rect;
+			let (from, crop) = drawn(state, &target.layer, target.index).unwrap_or((to, held.crop));
 			let shape = |rect: &Rect| rect.width / rect.height;
-			(moved.rect, crop.then(&Crop::covering(shape(&from), shape(&moved.rect))))
+			(to, crop.then(&Crop::covering(shape(&from), shape(&to))))
 		}
 	};
 	let leaving = Item {
