@@ -414,6 +414,10 @@ impl Watch {
 			// slot glides on from where it was.
 			collection.recognize(&self.collection);
 			self.collection = collection;
+			// No undo here brings a picture back: one the layout dropped is
+			// gone, so its parked placer is too.
+			let shown = self.collection.layers().flat_map(|(_, items)| items);
+			self.compositor.remember(shown.map(|item| item.id));
 			for driver in self.sources.sync(&self.collection) {
 				engine::spawn(driver);
 			}
@@ -628,6 +632,61 @@ mod tests {
 		assert_eq!(take(), Some(None), "the program alone");
 		assert!(read.borrow().pending.is_empty());
 		reader.abort();
+	}
+
+	/// The placer of a picture keeping clear that a layout dropped is
+	/// forgotten once the next layout comes, since nothing can bring that
+	/// picture back.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_dropped_picture_forgets_its_placer() {
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (bus, driver) = moq_audio::bus::Bus::new(Default::default()).unwrap();
+		let (_mixer, mixed) = source::Mixer::new(driver, Instant::now());
+		let origin = moq_tokio::origin::spawn();
+		let sources = Sources::new(source::Context {
+			bus,
+			mixed,
+			origin: origin.consume(),
+			dir: ".".into(),
+			output: moq_video::render::output(&gpu.device),
+			publish: None,
+			grants: None,
+			browser: None,
+		});
+		let collection = collection(None, CANVAS).unwrap();
+		let (read, _) = watch::channel(Read::default());
+		let mut watch = Watch {
+			url: String::new(),
+			read,
+			compositor: Compositor::new(&gpu.device, &gpu.queue, collection.canvas).unwrap(),
+			collection,
+			synced: false,
+			layout: None,
+			size: None,
+			sources,
+			monitor: None,
+			shown: None,
+		};
+		let show = |watch: &mut Watch, layout: Option<Layout>| {
+			watch.read.send_modify(|read| read.push(layout, None));
+			watch.render(Instant::now()).unwrap();
+		};
+
+		let mut keeping = layout(Duration::ZERO);
+		keeping.pictures.truncate(1);
+		keeping.pictures[0].item.keep_clear = Some(moq_scene::KeepClear::default());
+		show(&mut watch, Some(keeping.clone()));
+		let item = &watch.collection.scene(SCENE).unwrap().items[1];
+		let (id, rect) = (item.id, item.rect);
+		assert!(watch.compositor.placement(id).is_some(), "it keeps clear");
+
+		// Dropped, its placer is parked, then forgotten at the next layout.
+		show(&mut watch, None);
+		show(&mut watch, Some(keeping));
+		assert_ne!(watch.collection.scene(SCENE).unwrap().items[1].id, id, "a new picture");
+		watch.compositor.undone(id, rect, Instant::now());
+		assert!(watch.compositor.placement(id).is_none(), "the placer is forgotten");
 	}
 
 	/// A layout of another version, as a newer studio would publish.
