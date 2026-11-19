@@ -1,6 +1,8 @@
 //! Settings, Remote: pair a phone by its QR code, see which are connected,
 //! and remove one.
 
+use std::sync::Arc;
+
 use egui::{RichText, Ui};
 
 use super::{Panels, Setting, Shown, expiry, kit, qr};
@@ -21,6 +23,8 @@ impl Panels {
 			}
 			return;
 		};
+		// A link into a room the studio has left joins nothing.
+		self.paired.take_if(|shown| !shown.joins(&room));
 
 		let mut pair = None;
 		ui.horizontal(|ui| {
@@ -130,12 +134,12 @@ impl Panels {
 		});
 
 		if let Some((name, invite)) = show {
-			self.show_remote(ui.ctx(), name, invite);
+			self.show_remote(ui.ctx(), &room, name, invite);
 		}
 		if let Some(name) = pair {
 			match room.pair(&name) {
 				Ok(invite) => {
-					self.show_remote(ui.ctx(), name, invite);
+					self.show_remote(ui.ctx(), &room, name, invite);
 					self.phone.clear();
 				}
 				Err(err) => self.report(Err(err)),
@@ -151,8 +155,15 @@ impl Panels {
 	}
 
 	/// Put `invite`'s link for the remote `name` on screen as a QR code.
-	fn show_remote(&mut self, ctx: &egui::Context, name: String, invite: crate::guests::Invite) {
+	fn show_remote(
+		&mut self,
+		ctx: &egui::Context,
+		room: &Arc<crate::guests::Room>,
+		name: String,
+		invite: crate::guests::Invite,
+	) {
 		let qr = qr(ctx, invite.link.as_str());
-		self.paired = Some(Shown { name, invite, qr });
+		let room = Arc::downgrade(room);
+		self.paired = Some(Shown { name, invite, qr, room });
 	}
 }

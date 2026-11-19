@@ -780,7 +780,8 @@ fn the_palette_finds_and_runs_anything() {
 /// the format turn the program, keeping its frame rate. A show whose room
 /// key is missing still opens, and once the key is back, Try again joins its
 /// room. The Guests pane refuses a room guests could not join, saying why,
-/// and moves to the room it saves at once, off air. The recordings folder
+/// and moves to the room it saves at once, off air, dropping a phone's link
+/// into the room it left. The recordings folder
 /// moves only once no recording is under way. The scene
 /// graph's Open closes Settings for the graph. It draws no view.
 #[test]
@@ -897,6 +898,15 @@ fn settings_change_the_show_and_move_the_guests() {
 	}
 	harness.get_by_label("Try again").click();
 	joined(&mut harness, "guests");
+	// A phone paired in this room, whose link stays on screen...
+	harness.get_by_label("Remote").click();
+	harness.run_steps(2);
+	fill(&mut harness, 0, "phone");
+	harness.get_by_label("Pair a phone").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Copy link").is_some(), "the phone's link shows");
+	harness.get_by_label("Guests").click();
+	harness.run_steps(2);
 	fill(&mut harness, 0, "other");
 	fill(&mut harness, 1, "");
 	harness.get_by_label("Save").click();
@@ -917,6 +927,13 @@ fn settings_change_the_show_and_move_the_guests() {
 	joined(&mut harness, "other");
 	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
 	assert!(saved.contains("room = \"other\""), "{saved}");
+	// ...until the room is another, which its link cannot join.
+	harness.get_by_label("Remote").click();
+	harness.run_steps(2);
+	assert!(
+		harness.query_by_label("Copy link").is_none(),
+		"a link into the room left shows"
+	);
 
 	// The recordings folder stays put while a recording is under way, then
 	// moves with the file naming it.

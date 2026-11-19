@@ -1131,8 +1131,10 @@ password: anyone holding it can drive the show until you remove it.
 - The studio reads a remote's newest press only, at most one a program frame,
   and refuses one that is not a single action of at most 4 KiB, so a page
   pressing faster costs the studio nothing more. The page sends its next
-  press once the desk says how the last went. A press the phone made before
-  the studio was listening is not done: the page asks to press it again.
+  press once the desk says how the last went, and the desk catches up with
+  what changed at the studio four times a second. A press the phone made
+  before the studio restarted or rejoined the room is not done again, since
+  it was most likely done before: the page asks you to check it first.
 - **Remove** stops reading its presses at once, and stops renewing its token,
   so it is disconnected within `--guest-expiry`; **New link** pairs it again
   under a new generation, which a link from before cannot reach. Pairings and

@@ -2072,6 +2072,16 @@ struct Shown {
 	invite: crate::guests::Invite,
 	/// Or why the link cannot be one, so it can still be copied.
 	qr: Result<egui::TextureHandle, String>,
+	/// The room it joins. Weak, so a room the studio left is never kept, and
+	/// another never takes its place in [`Self::joins`].
+	room: std::sync::Weak<crate::guests::Room>,
+}
+
+impl Shown {
+	/// Whether it joins `room`, rather than one the studio has left.
+	fn joins(&self, room: &Arc<crate::guests::Room>) -> bool {
+		std::ptr::eq(self.room.as_ptr(), Arc::as_ptr(room))
+	}
 }
 
 /// `text` as a QR code, one texel per module, inside the quiet zone scanners need.

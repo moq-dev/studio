@@ -48,6 +48,14 @@ const PRESS_TRACK: &str = "press";
 /// so this only stops a page sending something that is not one.
 const MAX_PRESS: usize = 4096;
 
+/// How often a connected remote's desk catches up with what the studio
+/// changed itself, such as a scene taken at the keyboard.
+const TALLY: Duration = Duration::from_millis(250);
+
+/// What a remote's page is told of a press it made before the studio
+/// restarted or rejoined the room, which the studio cannot tell was done.
+const RESTARTED: &str = "the studio restarted; check whether this was done before pressing again";
+
 /// The remote's page, beside the join page: `js/join/remote.html`.
 const PAGE: &str = "remote.html";
 
@@ -533,7 +541,6 @@ impl Paired {
 		};
 		self.renew(&mut published)?;
 		let board = self.board.upgrade().context("the studio closed")?;
-		let frame = board.frame();
 		let desk = Desk {
 			done: done.clone(),
 			..board.desk()
@@ -545,16 +552,26 @@ impl Paired {
 		let mut presses = Presses::new(broadcast.track(PRESS_TRACK)?);
 		let period = self.room.expiry / 2;
 		let mut renew = kio::clock::interval_at(kio::clock::now().saturating_add(period), period);
-		let mut frames = kio::clock::interval(frame);
+		// The desk is built again only on a press or a tally tick, since each
+		// build waits on the state the render loop holds.
+		let mut tally = kio::clock::interval_at(kio::clock::now().saturating_add(TALLY), TALLY);
+		tally.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
 		let mut listening = false;
-		let mut ready = true;
+		// When the next press may be read: a program frame after the last.
+		let mut open = kio::clock::now();
 		loop {
+			let mut pressed = false;
 			tokio::select! {
-				_ = frames.tick() => ready = true,
-				_ = renew.tick() => self.renew(&mut published)?,
-				press = presses.latest(), if ready => {
-					// The next press waits for the next frame.
-					ready = false;
+				_ = tally.tick() => {}
+				_ = renew.tick() => {
+					self.renew(&mut published)?;
+					continue;
+				}
+				press = async {
+					kio::clock::sleep_until(open).await;
+					presses.latest().await
+				} => {
+					pressed = true;
 					match press {
 						Ok(Some(press)) => *done = Some(self.handle(press, &mut listening, done.as_ref())),
 						Ok(None) => return Ok(()),
@@ -565,6 +582,10 @@ impl Paired {
 				}
 			}
 			let board = self.board.upgrade().context("the studio closed")?;
+			if pressed {
+				// The frame now, as the show's frame rate may have changed.
+				open = kio::clock::now().saturating_add(board.frame());
+			}
 			let desk = Desk {
 				done: done.clone(),
 				..board.desk()
@@ -593,9 +614,11 @@ impl Paired {
 
 	/// Do `press`, saying how it went, after the `last` one. The first press
 	/// read from a connection is one the studio may have done before it was
-	/// listening, such as before a restart, so it is never done again: it is
-	/// the `last` if the page reconnected, and else told to press again. The
-	/// page names itself first, so it is only ever that.
+	/// listening, so it is never done again: it is the `last` if the page
+	/// reconnected. The page names itself first on each connection, so any
+	/// other first press is one the page made before the studio restarted or
+	/// rejoined the room, which was almost surely done then; pressing it
+	/// again could undo it, as with a mute, so the page is told to check.
 	fn handle(&self, press: Press, listening: &mut bool, last: Option<&Done>) -> Done {
 		let first = !std::mem::replace(listening, true);
 		if first && let Some(last) = last.filter(|last| last.id == press.id && press.seq <= last.seq) {
@@ -603,7 +626,7 @@ impl Paired {
 		}
 		let result = match press.action {
 			None => Ok("connected".to_string()),
-			Some(_) if first => Err("pressed before the studio was listening; press again".to_string()),
+			Some(_) if first => Err(RESTARTED.to_string()),
 			Some(action) if !action.remote() => Err(format!("{action} is not for a remote")),
 			Some(action) => match self.board.upgrade() {
 				Some(board) => board.press(&action),
@@ -718,11 +741,12 @@ mod tests {
 	use super::*;
 	use url::Url;
 
-	/// A board that keeps what it was asked to do.
+	/// A board that keeps what it was asked to do, and how often its desk was built.
 	struct Fake {
-		desk: Desk,
-		frame: Duration,
+		desk: Mutex<Desk>,
+		frame: Mutex<Duration>,
 		pressed: Mutex<Vec<Action>>,
+		built: std::sync::atomic::AtomicUsize,
 	}
 
 	impl Fake {
@@ -739,24 +763,30 @@ mod tests {
 				..Desk::default()
 			};
 			Arc::new(Self {
-				desk,
-				frame,
+				desk: Mutex::new(desk),
+				frame: Mutex::new(frame),
 				pressed: Mutex::default(),
+				built: Default::default(),
 			})
 		}
 
 		fn pressed(&self) -> Vec<Action> {
 			self.pressed.lock().unwrap().clone()
 		}
+
+		fn built(&self) -> usize {
+			self.built.load(std::sync::atomic::Ordering::Relaxed)
+		}
 	}
 
 	impl Board for Fake {
 		fn desk(&self) -> Desk {
-			self.desk.clone()
+			self.built.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			self.desk.lock().unwrap().clone()
 		}
 
 		fn frame(&self) -> Duration {
-			self.frame
+			*self.frame.lock().unwrap()
 		}
 
 		fn press(self: Arc<Self>, action: &Action) -> Result<String, String> {
@@ -924,7 +954,7 @@ mod tests {
 	/// A page's presses drive the board, its newest only, at most one a
 	/// frame, and only those a remote may fire; the desk says how each went.
 	/// A page's first press is never done, since the studio may have done it
-	/// before it was listening. A removal stops reading it at once.
+	/// before it restarted. A removal stops reading it at once.
 	#[tokio::test]
 	async fn a_remote_drives_the_board_one_press_a_frame() {
 		const FRAME: Duration = Duration::from_millis(20);
@@ -944,7 +974,7 @@ mod tests {
 		let mut desks = read_desks(publish.consume(), "phone", 0).await;
 		let connected = desk(&mut desks, 0).await;
 		assert_eq!(connected.done.unwrap().said, "connected");
-		assert_eq!(connected.scenes, fake.desk.scenes, "the board's desk");
+		assert_eq!(connected.scenes, fake.desk.lock().unwrap().scenes, "the board's desk");
 		assert!(room.remotes()["phone"].connected);
 
 		let scene = Action::Scene("Gameplay".into());
@@ -1005,8 +1035,8 @@ mod tests {
 		clock.advance(FRAME);
 		assert_eq!(done(&mut desks, 13).await, refused, "the last press, again");
 
-		// Another page, such as one reloaded, whose first press the studio
-		// may have done before it was listening, is told to press again.
+		// A page whose press the studio may have done before it restarted,
+		// which is told to check it, not done again.
 		drop(page);
 		while desks.latest().await.unwrap().is_some() {}
 		let mut page = Page::open(&heard, "phone", 0);
@@ -1023,6 +1053,7 @@ mod tests {
 			}
 		};
 		assert!(!again.ok);
+		assert_eq!(again.said, RESTARTED);
 		assert_eq!(fake.pressed().len(), 2, "done again");
 
 		// Removed: the desk ends, and nothing more is read.
@@ -1033,6 +1064,70 @@ mod tests {
 		tokio::task::yield_now().await;
 		assert_eq!(fake.pressed().len(), 2, "a removed remote drives");
 		assert!(!room.remotes()["phone"].connected);
+	}
+
+	/// A connected page's desk is built on a press and at the tally rate,
+	/// not every program frame, and still shows what the studio changed
+	/// itself. Presses wait out the frame the program shows now, whatever it
+	/// was when the page connected.
+	#[tokio::test]
+	async fn a_remote_keeps_pace_with_the_show() {
+		const FRAME: Duration = Duration::from_millis(20);
+		let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
+		let room = Arc::new(room(key("show/guests", &["**"], &["**"])));
+		let publish = moq_tokio::origin::spawn();
+		let heard = moq_tokio::origin::spawn();
+		let _ = room.origin.set(publish.clone());
+		let _ = room.heard.set(heard.clone());
+		let fake = Fake::new(FRAME);
+		let board: Arc<dyn Board> = fake.clone();
+		let _service = tokio::spawn(Service::new(room.clone(), Arc::downgrade(&board)).run());
+		room.pair("phone").unwrap();
+
+		let mut page = Page::open(&heard, "phone", 0);
+		page.press(press(0, None));
+		let mut desks = read_desks(publish.consume(), "phone", 0).await;
+		desk(&mut desks, 0).await;
+
+		// A second of program frames with nothing pressed builds a desk a tally tick.
+		let built = fake.built();
+		for _ in 0..Duration::from_secs(1).div_duration_f64(FRAME) as u32 {
+			clock.advance(FRAME);
+			for _ in 0..20 {
+				tokio::task::yield_now().await;
+			}
+		}
+		let ticks = Duration::from_secs(1).div_duration_f64(TALLY) as usize;
+		assert_eq!(fake.built() - built, ticks, "desks built in a second");
+
+		// What the studio changed itself reaches the page within a tick.
+		fake.desk.lock().unwrap().program = Some("Gameplay".into());
+		clock.advance(TALLY);
+		let program = loop {
+			let desk = desks.latest().await.unwrap().unwrap().value;
+			if desk.program.is_some() {
+				break desk.program;
+			}
+		};
+		assert_eq!(program.as_deref(), Some("Gameplay"));
+
+		// The show slows to a frame a second: the next press waits for it.
+		*fake.frame.lock().unwrap() = Duration::from_secs(1);
+		let scene = Action::Scene("Gameplay".into());
+		page.press(press(1, Some(scene.clone())));
+		clock.advance(FRAME);
+		assert!(done(&mut desks, 1).await.ok);
+		page.press(press(2, Some(scene.clone())));
+		for _ in 0..10 {
+			clock.advance(FRAME);
+			for _ in 0..20 {
+				tokio::task::yield_now().await;
+			}
+		}
+		assert_eq!(fake.pressed().len(), 1, "pressed within the program's frame");
+		clock.advance(Duration::from_secs(1));
+		assert!(done(&mut desks, 2).await.ok);
+		assert_eq!(fake.pressed(), [scene.clone(), scene]);
 	}
 
 	/// A page that opens the link reaches the relay with its token, presses
