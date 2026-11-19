@@ -2409,7 +2409,7 @@ fn past(now: kio::clock::Instant) -> crate::past::View {
 			oldest: pictures[0].at,
 			video: true,
 		})),
-		pictures,
+		pictures: Ok(pictures),
 		sound: Ok(sound),
 	}
 }

@@ -100,14 +100,15 @@ impl Review {
 
 	/// The picture shown at or before `at`, or the first after it when none was.
 	fn picture_at<'a>(&self, view: &'a past::View, at: Instant) -> Option<&'a past::Picture> {
-		let before = view.pictures.iter().rev().find(|picture| picture.at <= at);
-		before.or(view.pictures.first()).map(|picture| &**picture)
+		let pictures = view.pictures.as_deref().unwrap_or_default();
+		let before = pictures.iter().rev().find(|picture| picture.at <= at);
+		before.or(pictures.first()).map(|picture| &**picture)
 	}
 
 	/// Upload each picture not on the GPU yet, and let go of those gone.
 	fn upload(&mut self, ctx: &egui::Context, view: &past::View) {
 		let mut kept = BTreeMap::new();
-		for picture in &view.pictures {
+		for picture in view.pictures.as_deref().unwrap_or_default() {
 			let texture = self.textures.remove(&picture.id).unwrap_or_else(|| {
 				let image = egui::ColorImage::from_rgba_unmultiplied(picture.size, &picture.rgba);
 				ctx.load_texture(format!("past-{}", picture.id), image, egui::TextureOptions::LINEAR)
@@ -411,7 +412,10 @@ impl Panels {
 					None => "Reading the last 30 seconds".to_string(),
 					Some(Err(why)) => capitalize(why),
 					Some(Ok(held)) if !held.video => "Sound only: nothing to show".to_string(),
-					Some(Ok(_)) => "No pictures held".to_string(),
+					Some(Ok(_)) => match &view.pictures {
+						Err(why) => capitalize(why),
+						Ok(_) => "No pictures held".to_string(),
+					},
 				};
 				let galley = ui.painter().layout(why, kit::ui(14.0), kit::DIM, rect.width() - 80.0);
 				ui.painter()
@@ -743,7 +747,7 @@ impl Panels {
 			None => Some("Reading the last 30 seconds".to_string()),
 			Some(Err(why)) => Some(capitalize(why)),
 			Some(Ok(held)) if !held.video => Some("Sound only".to_string()),
-			Some(Ok(_)) => None,
+			Some(Ok(_)) => view.pictures.as_ref().err().map(|why| capitalize(why)),
 		};
 		if let Some(note) = note {
 			let galley = painter.layout(note, kit::ui(13.0), kit::TEXT, thumbs.width() - 80.0);
