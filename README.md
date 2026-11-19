@@ -787,7 +787,10 @@ is drawn, and undoing that puts it back keeping clear where it was. Only a
 scene's layer set free of its [slots](#slots-and-roles) keeps out of the
 way, and not one showing a source
 [published independently](#published-independently), which viewers place
-themselves; putting one in a slot switches it off.
+themselves; putting one in a slot switches it off. While the show goes out in
+[both formats at once](#both-formats-at-once), it moves only in the landscape
+picture: in the portrait one it stays at the place set there, or fitted from
+where its rect rests.
 
 ### Both formats at once
 
@@ -811,8 +814,12 @@ anywhere else keeps its place on the turned canvas, scaled to fit, until you
 move it in portrait. A scene laid out by slots arranges them in a row in
 portrait, or in a grid or inset if that is how it arranges them in landscape,
 and picks its own portrait arrangement in BUILD's scene inspector. A layer
-showing another scene shows that scene's landscape picture in portrait too,
-placed and cropped like any other landscape source.
+showing another scene of the show's size, or the program, shows that scene's
+portrait arrangement in the portrait picture, tall as the portrait canvas is,
+so its place there is shaped for it: one covering the landscape canvas, such
+as a scene of overlays, covers the portrait canvas whole rather than being the
+main picture, and one set anywhere else keeps its place, as wide and as much
+taller as its picture turned.
 
 LIVE shows both pictures side by side, each in its tally frame, with its
 format, size, and what its video sends under it. BUILD edits one picture at a
