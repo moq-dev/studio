@@ -710,6 +710,31 @@ fn the_palette_finds_and_runs_anything() {
 	harness.key_press(egui::Key::Escape);
 	harness.run_steps(2);
 
+	// A key bound to a source with no sound, which the MIX lists no strip for,
+	// is still a sound of the show; only one the file lacks is no such sound.
+	{
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!("the studio is open")
+		};
+		let key = |code, name: &str| hotkeys::Binding {
+			modifiers: egui::Modifiers::NONE,
+			key: winit::keyboard::PhysicalKey::Code(code),
+			name: winit::keyboard::Key::Character(name.into()),
+		};
+		use crate::controls::Action;
+		use winit::keyboard::KeyCode;
+		studio.bind(&Action::Mute("host".into()), key(KeyCode::F7, "F7"));
+		studio.bind(&Action::Mute("nope".into()), key(KeyCode::F8, "F8"));
+		studio.open(Setting::Hotkeys);
+	}
+	harness.run_steps(2);
+	assert!(harness.query_by_label("host").is_some(), "the silent source's key is listed");
+	assert_eq!(
+		harness.query_all_by_label("no such sound").count(),
+		1,
+		"only the missing source is no such sound"
+	);
+
 	// Each setting the palette finds by name is a row of its pane.
 	for setting in Setting::ALL {
 		let App::Studio(studio) = &mut harness.state_mut().app else {

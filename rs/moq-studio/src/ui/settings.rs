@@ -5,6 +5,7 @@
 //! the show, this user's settings for what belongs to the operator, and
 //! `<show>.stream.toml` for where it streams and who joins it.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use egui::{Align, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
@@ -1112,11 +1113,16 @@ impl Panels {
 					});
 				});
 			});
-		let listed = Action::listed(&self.engine.state.lock().unwrap());
+		// A source can be in the scene file yet unlisted, such as a clip with no
+		// audio, so a sound is gone only once the file lacks it, as firing it checks.
+		let (listed, sources): (Vec<Action>, HashSet<String>) = {
+			let state = self.engine.state.lock().unwrap();
+			let sources = state.collection().sources.keys().cloned().collect();
+			(Action::listed(&state), sources)
+		};
 		let bindings = hotkeys.bindings();
-		// A key bound to a scene or sound the show no longer has, so it can be
-		// cleared.
-		let gone: Vec<Action> = bindings
+		// A key bound to an action not listed, so it can still be seen and cleared.
+		let unlisted: Vec<Action> = bindings
 			.keys()
 			.filter(|action| !listed.contains(action))
 			.cloned()
@@ -1124,7 +1130,7 @@ impl Panels {
 		let groups = Group::ALL.map(|group| {
 			let actions: Vec<Action> = listed
 				.iter()
-				.chain(&gone)
+				.chain(&unlisted)
 				.filter(|action| action.group() == group)
 				.cloned()
 				.collect();
@@ -1152,8 +1158,8 @@ impl Panels {
 							action => action.name(studio),
 						};
 						let detail = match action {
-							Action::Scene(_) if gone.contains(action) => Some("no such scene"),
-							Action::Mute(_) if gone.contains(action) => Some("no such sound"),
+							Action::Scene(_) if unlisted.contains(action) => Some("no such scene"),
+							Action::Mute(name) if !sources.contains(name) => Some("no such sound"),
 							action => action.detail(studio),
 						};
 						let refusal = self
