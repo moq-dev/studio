@@ -23,10 +23,13 @@ if [[ -n $keychain ]]; then
 fi
 
 # The entitlements each helper app's process needs, by its name: none but
-# CEF's renderers and GPU process, which compile code at run time.
+# those that compile code at run time: the GPU and renderer helpers, and the
+# plain one too, since CEF 156 starts pages' renderers and utility processes
+# from it, and under the hardened runtime V8 cannot reserve its code range
+# without `allow-jit`.
 entitlements() {
     case $1 in
-        *" Helper (Renderer).app" | *" Helper (GPU).app") echo "$packaging/jit.entitlements.plist" ;;
+        *" Helper.app" | *" Helper (Renderer).app" | *" Helper (GPU).app") echo "$packaging/jit.entitlements.plist" ;;
         *.app) ;;
         *)
             echo "no entitlements known for $1" >&2

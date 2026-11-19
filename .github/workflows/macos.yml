@@ -75,13 +75,15 @@ jobs:
       # Browser sources against the signed bundle, the only place CEF runs
       # from on macOS: drawn on the GPU, played, clicked, typed into, copied,
       # kept logged in, and crashing alone. One at a time, since a test finds
-      # its helper among the processes this one started.
+      # its helper among the processes this one started. The harness builds in
+      # the dev profile: only the bundle it drives needs release, and a second
+      # fat-LTO build of the studio would add an hour.
       - name: Browser sources
         env:
           MOQ_STUDIO_APP: ${{ github.workspace }}/kixel.live Studio.app
           MACOSX_DEPLOYMENT_TARGET: "13.0"
         run: >-
-          cargo test --locked --release -p moq-studio --features release,cef --test browser --
+          cargo test --locked -p moq-studio --features cef --test browser --
           --include-ignored --test-threads=1
 
       # dmg.sh's builder needs a newer Python than macOS ships.

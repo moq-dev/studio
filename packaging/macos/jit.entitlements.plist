@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<!-- CEF's renderer and GPU helpers, which compile JavaScript, WebAssembly, and
-     SwiftShader's shaders at run time, as Chrome's do. -->
+<!-- CEF's plain, renderer, and GPU helpers, which compile JavaScript,
+     WebAssembly, and SwiftShader's shaders at run time, as Chrome's do. -->
 <dict>
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
