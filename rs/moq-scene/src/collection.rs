@@ -2566,18 +2566,39 @@ impl Default for Audio {
 /// Give each item of `new` the identity of the one of `old` it was,
 /// returning how many it found: the longest run of items in order showing
 /// the same source at the same rect, then of the rest, the longest showing
-/// the same source.
+/// the same source, so two alike keep their order; then of the rest, out
+/// of order, as a reorder leaves them, one showing the same source at the
+/// same rect, then one showing the same source, each the nearest.
 pub(crate) fn recognized(old: &[Item], new: &mut [Item]) -> usize {
 	let mut taken = vec![false; old.len()];
 	let mut found = vec![false; new.len()];
+	let same = |same_rect: bool| {
+		move |was: &Item, item: &Item| was.source == item.source && (!same_rect || was.rect == item.rect)
+	};
 	for same_rect in [true, false] {
 		let left: Vec<usize> = (0..old.len()).filter(|&at| !taken[at]).collect();
 		let missing: Vec<usize> = (0..new.len()).filter(|&at| !found[at]).collect();
-		let same = |was: &Item, item: &Item| was.source == item.source && (!same_rect || was.rect == item.rect);
+		let same = same(same_rect);
 		for (was, at) in common(&left, &missing, |was, at| same(&old[was], &new[at])) {
 			new[at].id = old[was].id;
 			taken[was] = true;
 			found[at] = true;
+		}
+	}
+	for same_rect in [true, false] {
+		let same = same(same_rect);
+		for at in 0..new.len() {
+			if found[at] {
+				continue;
+			}
+			let was = (0..old.len())
+				.filter(|&was| !taken[was] && same(&old[was], &new[at]))
+				.min_by_key(|was| was.abs_diff(at));
+			if let Some(was) = was {
+				new[at].id = old[was].id;
+				taken[was] = true;
+				found[at] = true;
+			}
 		}
 	}
 	found.iter().filter(|&&found| found).count()
@@ -2585,7 +2606,7 @@ pub(crate) fn recognized(old: &[Item], new: &mut [Item]) -> usize {
 
 /// The pairs of the longest common subsequence of `a` and `b`, as `same`
 /// matches their elements, in order.
-fn common(a: &[usize], b: &[usize], same: impl Fn(usize, usize) -> bool) -> Vec<(usize, usize)> {
+pub(crate) fn common(a: &[usize], b: &[usize], same: impl Fn(usize, usize) -> bool) -> Vec<(usize, usize)> {
 	// How long the common run of `a[i..]` and `b[j..]` is.
 	let mut runs = vec![vec![0usize; b.len() + 1]; a.len() + 1];
 	for i in (0..a.len()).rev() {
@@ -2705,6 +2726,14 @@ mod tests {
 		let added = edited.scenes[0].items[0].id;
 		assert!(!ids(&before).contains(&added), "an added layer is new");
 		assert_eq!(ids(&edited)[1..], ids(&before)[..]);
+
+		// Reordered by hand, the moved one is still itself, and the two alike
+		// keep their order, being indistinguishable.
+		let mut reversed = Collection::from_toml(&before.to_toml().unwrap()).unwrap();
+		reversed.scenes[0].items.reverse();
+		reversed.recognize(&before);
+		let was = ids(&before);
+		assert_eq!(ids(&reversed), [was[2], was[0], was[1], was[3]]);
 	}
 
 	fn example() -> Collection {

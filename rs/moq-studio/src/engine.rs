@@ -727,6 +727,7 @@ impl autosave::Document for State {
 		// goes on.
 		collection.recognize(&self.collection);
 		history.align(&collection);
+		history.recognize(&self.history, &collection);
 		// A scene in preview or on program that the file no longer has, such as
 		// one renamed by hand, leaves it until another is picked.
 		let moved = self.adopt(collection, &[])?;
