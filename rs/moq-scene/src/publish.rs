@@ -565,7 +565,7 @@ async fn copy(
 						// The group ends at what it holds, where the source
 						// has not said.
 						_ = stop.changed() => {
-							drop(copy.close()?);
+							drop(copy.finish()?);
 							break 'groups;
 						}
 					};
@@ -575,8 +575,8 @@ async fn copy(
 				// The copy ends where the source ended its group, when it said,
 				// so a paused source's last picture ages out of the copy too.
 				match group.end() {
-					Some(end) => drop(copy.finish(end)?),
-					None => drop(copy.close()?),
+					Some(end) => drop(copy.finish_at(end)?),
+					None => drop(copy.finish()?),
 				}
 			}
 			out.clone().finish().map(drop)
@@ -664,7 +664,7 @@ impl<'a> Listing<'a> {
 		while let Some(mut catalog) = updates.next().await? {
 			// Media timing is the root's: the one clock, and the join interval an
 			// HLS export numbers its segments on.
-			catalog.media = Default::default();
+			catalog.sync = Default::default();
 			// The claim is checked inside the mutation, so a newer source's
 			// writes, made under the same lock, are never overwritten.
 			studio.mutate(|root| {
@@ -1449,7 +1449,7 @@ mod tests {
 			let snapshot = listed(&catalog, |sources| sources.len() == 2).await;
 			assert!(snapshot.video.renditions.is_empty(), "no source is a program rendition");
 			let published = &snapshot.ext.studio.sources;
-			assert!(published["red"].media.is_empty(), "the root carries the media timing");
+			assert!(published["red"].sync.is_empty(), "the root carries the media timing");
 			assert_eq!(sources.get("red").unwrap().track(), Some(Status::Live));
 			assert_eq!(sources.get("guest").unwrap().track(), None);
 			assert!(sources.get("red copy").is_none(), "a clone opens no feed, so no track");
@@ -1578,15 +1578,15 @@ mod tests {
 			for (start, appended) in [(1_000, true), (3_000, true), (5_000, false)] {
 				// Nothing says what lies between 3 000 and 5 000.
 				let group = match appended {
-					true => source.append_group(start),
+					true => source.append_group(moq_net::Timestamp::from_micros(start).unwrap()),
 					false => source.create_group(moq_net::group::Info { start }),
 				};
 				// The first group says where it ends; the others only close.
 				let group = group.unwrap();
 				drop(
 					match start {
-						1_000 => group.finish(2_000),
-						_ => group.close(),
+						1_000 => group.finish_at(2_000),
+						_ => group.finish(),
 					}
 					.unwrap(),
 				);
