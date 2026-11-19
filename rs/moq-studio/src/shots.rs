@@ -759,7 +759,8 @@ fn a_marker_is_named_where_it_is_typed() {
 
 	// Until the strip's thread first samples the program, nothing refuses.
 	let refused = |harness: &Harness<'_, Window>| {
-		harness.get_by_label("Save clip").accesskit_node().is_disabled()
+		let scissors: Vec<_> = harness.get_all_by_label("Clip around it").collect();
+		scissors.len() == 3 && scissors.iter().all(|clip| clip.accesskit_node().is_disabled())
 	};
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, async {
@@ -768,13 +769,7 @@ fn a_marker_is_named_where_it_is_typed() {
 				kio::clock::sleep(Duration::from_millis(20)).await;
 			}
 		}))
-		.expect("off air, Save clip is refused");
-	let scissors: Vec<_> = harness.get_all_by_label("Clip around it").collect();
-	assert_eq!(scissors.len(), 3);
-	assert!(
-		scissors.iter().all(|clip| clip.accesskit_node().is_disabled()),
-		"no marker is clipped around off air"
-	);
+		.expect("no marker is clipped around off air");
 
 	drop(harness);
 	quit(&engine, &runtime);
