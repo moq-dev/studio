@@ -695,7 +695,10 @@ mod tests {
 	/// `generation` into `origin`, as `js/join/src/remote.ts` does.
 	struct Page {
 		_route: moq_net::origin::Route,
+		track: moq_net::track::Producer,
 		presses: moq_json::snapshot::Producer<Press>,
+		/// The next group's start, as each write is a group of its own.
+		next: u64,
 	}
 
 	impl Page {
@@ -707,13 +710,23 @@ mod tests {
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_route: route,
+				track: track.clone(),
 				presses: moq_json::snapshot::Producer::new(track, config),
+				next: 0,
 			}
 		}
 
 		fn press(&mut self, press: Press) {
-			let at = moq_net::Timestamp::unscaled(press.seq);
+			let at = moq_net::Timestamp::unscaled(self.next);
+			self.next += 1;
 			self.presses.update(moq_json::Timed::new(&press, at)).unwrap();
+		}
+
+		/// Write `bytes` as a press, whatever they are.
+		fn raw(&mut self, bytes: Vec<u8>) {
+			let at = moq_net::Timestamp::unscaled(self.next);
+			self.next += 1;
+			self.track.write_frame(at, bytes).unwrap();
 		}
 	}
 
@@ -865,15 +878,34 @@ mod tests {
 		assert_eq!(refused.said, "Go live is not for a remote");
 		assert_eq!(fake.pressed().len(), 2);
 
+		// Not a press, or more than one could be: refused whole, saying
+		// nothing, and the next press is still read.
+		// Each is read on a frame of its own, as `latest` skips any it passed.
+		for bytes in [
+			br#"{"id":"page","seq":13,"action":{"Launch":"rockets"}}"#.to_vec(),
+			vec![b' '; MAX_PRESS + 1],
+		] {
+			page.raw(bytes);
+			clock.advance(FRAME);
+			for _ in 0..20 {
+				tokio::task::yield_now().await;
+			}
+		}
+		page.press(press(13, Some(Action::GoLive)));
+		clock.advance(FRAME);
+		let refused = done(&mut desks, 13).await;
+		assert_eq!(refused.said, "Go live is not for a remote");
+		assert_eq!(fake.pressed().len(), 2);
+
 		// The page back on a new connection: the press read first is the
 		// last it made, which is not done again.
 		drop(page);
 		while desks.latest().await.unwrap().is_some() {}
 		let mut page = Page::open(&heard, "phone", 0);
-		page.press(press(12, Some(Action::GoLive)));
+		page.press(press(13, Some(Action::GoLive)));
 		let mut desks = read_desks(publish.consume(), "phone", 0).await;
 		clock.advance(FRAME);
-		assert_eq!(done(&mut desks, 12).await, refused, "the last press, again");
+		assert_eq!(done(&mut desks, 13).await, refused, "the last press, again");
 
 		// Another page, such as one reloaded, whose first press the studio
 		// may have done before it was listening, is told to press again.
