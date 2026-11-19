@@ -95,6 +95,10 @@ impl Panels {
 		}
 		let name = item.source.clone();
 		let mut asked = None;
+		// Whether the edit asked for is a move by hand, or switches keeping
+		// clear off, which leaves it where it is drawn as a move would.
+		let mut moved = false;
+		let kept = item.keep_clear;
 
 		section(ui, "Place");
 		if picked.layer.scene.is_some() {
@@ -124,7 +128,10 @@ impl Panels {
 				asked = Some(Asked::Act(LayerAction::Slot(slot)));
 			}
 		}
-		let mut rect = item.rect;
+		// Where the picture draws it: a layer keeping clear where it was
+		// placed, which a move by hand starts from.
+		let placement = keep::placement(&state, &picked.layer, picked.index, &item);
+		let mut rect = placement.map_or(item.rect, |placement| placement.drawn(item.rect));
 		if item.slot.is_some() {
 			ui.label(
 				egui::RichText::new("Placed by the scene's arrangement; drag it onto another slot to swap them")
@@ -153,6 +160,17 @@ impl Panels {
 				for (verb, response) in responses {
 					if let Some(gesture) = changed(&response, &mut self.gestures) {
 						let label = format!("{verb} `{name}`");
+						// A resize keeps where a layer keeping clear rests, so it
+						// stays free to move.
+						let rect = match verb {
+							"Resize" => Rect {
+								x: item.rect.x,
+								y: item.rect.y,
+								..rect
+							},
+							_ => rect,
+						};
+						moved = verb == "Move";
 						asked = Some(Asked::Item(Item { rect, ..item.clone() }, label, gesture));
 					}
 				}
@@ -204,6 +222,34 @@ impl Panels {
 				asked = Some(Asked::Act(LayerAction::Lock(locked)));
 			}
 		});
+		// Only a scene's layer has a picture under it to keep clear of, and
+		// viewers place a published source where the scene file does.
+		let published = collection.published.contains(collection.capture(&item.source));
+		if picked.layer.scene.is_some()
+			&& item.slot.is_none()
+			&& !published
+			&& let Some((keep_clear, label)) = keep::inspector(ui, item.keep_clear, placement)
+		{
+			let label = format!("{label}: `{name}`");
+			// Switched off, it stays where it is drawn, as keeping it always
+			// on top does, rather than going back over what it moved off.
+			let rect = match (keep_clear, placement) {
+				(None, Some(placement)) => {
+					moved = true;
+					placement.drawn(item.rect)
+				}
+				_ => item.rect,
+			};
+			asked = Some(Asked::Item(
+				Item {
+					keep_clear,
+					rect,
+					..item.clone()
+				},
+				label,
+				None,
+			));
+		}
 
 		section(ui, "Shape");
 		if let Some(corners) = shapes(ui, item.shape.corners) {
@@ -505,9 +551,19 @@ impl Panels {
 
 		let Some(asked) = asked else { return };
 		let result = match asked {
-			Asked::Item(item, label, gesture) => edit(&mut state, label, gesture, |draft| {
-				draft.set_item(&picked.layer, picked.index, item)
-			}),
+			Asked::Item(item, label, gesture) => {
+				if moved {
+					// Held as it was before the edit, so an undo puts it back.
+					let was = Item {
+						keep_clear: kept,
+						..item.clone()
+					};
+					keep::hold(&mut state, &picked.layer, picked.index, &was);
+				}
+				edit(&mut state, label, gesture, |draft| {
+					draft.set_item(&picked.layer, picked.index, item)
+				})
+			}
 			Asked::Look(selection, look, label, gesture) => {
 				edit(&mut state, label, gesture, |draft| selection.set_look(draft, look))
 			}

@@ -491,7 +491,26 @@ impl Collection {
 					.validate()
 					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 				self.validate_chain(&item.filters, &on)?;
+				if let Some(keep) = &item.keep_clear
+					&& keep.glide > KeepClear::LONGEST
+				{
+					return Err(Error::Invalid(format!(
+						"{on} glides for {:?} to keep clear, longer than the {:?} a glide may take",
+						keep.glide,
+						KeepClear::LONGEST
+					)));
+				}
+				if item.keep_clear.is_some() && item.slot.is_some() {
+					return Err(Error::Invalid(format!(
+						"{on} keeps clear in a slot, but its scene's arrangement places it; set it free first"
+					)));
+				}
 				if layer.scene.is_none() {
+					if item.keep_clear.is_some() {
+						return Err(Error::Invalid(format!(
+							"{on} keeps clear, but only a scene's item has a picture under it to keep clear of"
+						)));
+					}
 					if !item.keyframes.is_empty() {
 						return Err(Error::Invalid(format!(
 							"{on} has keyframes, but an always-on-top layer never goes on to start them"
@@ -731,8 +750,9 @@ impl Collection {
 
 	/// Refuse an item showing a source published independently that the
 	/// layer layout cannot carry: one blended or filtered past opacity, which
-	/// not every player can reproduce, or one in a scene another scene draws,
-	/// which the layout cannot place.
+	/// not every player can reproduce, one keeping clear, which moves where
+	/// no player sees, or one in a scene another scene draws, which the
+	/// layout cannot place.
 	fn validate_published(&self) -> Result<(), Error> {
 		let nested: BTreeSet<&str> = self
 			.sources
@@ -757,6 +777,11 @@ impl Collection {
 				{
 					return Err(Error::Invalid(format!(
 						"{on} cannot be in a scene another scene draws, since viewers place it over the program"
+					)));
+				}
+				if item.keep_clear.is_some() {
+					return Err(Error::Invalid(format!(
+						"{on} cannot keep out of the way, since viewers place it where the scene file does"
 					)));
 				}
 				if item.slot.is_some() {
@@ -1245,6 +1270,12 @@ pub struct Item {
 	/// layer never goes on.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub keyframes: Vec<Keyframe>,
+	/// Whether it moves itself off what matters in the picture under it, and
+	/// what that is. Its rect gives its size, and where it rests until it
+	/// first moves; the [`Compositor`](crate::Compositor) chooses where it
+	/// is drawn. Only a scene's item keeps clear.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub keep_clear: Option<KeepClear>,
 }
 
 impl Item {
@@ -1262,6 +1293,7 @@ impl Item {
 			filters: Vec::new(),
 			blend: Blend::Normal,
 			keyframes: Vec::new(),
+			keep_clear: None,
 		}
 	}
 
@@ -1291,6 +1323,7 @@ impl Item {
 			filters,
 			blend: self.blend,
 			keyframes: Vec::new(),
+			keep_clear: self.keep_clear,
 		})
 	}
 
@@ -1316,6 +1349,61 @@ impl Item {
 		// `to` is later than `since`, and `from` no later, so the span is not empty.
 		let linear = (since - from.at).as_secs_f32() / (to.at - from.at).as_secs_f32();
 		Some(from.toward(to, to.ease.apply(linear)))
+	}
+}
+
+/// What an item keeping out of the way stays clear of in the picture under
+/// it, and how it moves.
+///
+/// It chooses among the corners and edge middles of the canvas, inside a
+/// margin, and moves when the content under it changes, or when its place
+/// has been the worst of them for a while, never for a single busy moment.
+/// A move by hand holds until the content changes. The choice is made on
+/// this machine from the picture alone.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeepClear {
+	/// Whether it stays clear of where the picture moves.
+	#[serde(default = "yes", skip_serializing_if = "is_true")]
+	pub motion: bool,
+	/// Whether it stays clear of text and other dense detail.
+	#[serde(default = "yes", skip_serializing_if = "is_true")]
+	pub text: bool,
+	/// Whether it stays clear of what holds still while the rest moves, such
+	/// as a game's HUD or minimap.
+	#[serde(default = "yes", skip_serializing_if = "is_true")]
+	pub hud: bool,
+	/// How long it takes to glide to a new place.
+	#[serde(
+		default = "KeepClear::default_glide",
+		with = "humantime_serde",
+		skip_serializing_if = "KeepClear::is_default_glide"
+	)]
+	pub glide: Duration,
+}
+
+impl KeepClear {
+	/// The longest glide, so a typo cannot park an item mid-canvas for minutes.
+	pub const LONGEST: Duration = Duration::from_secs(5);
+
+	fn default_glide() -> Duration {
+		Duration::from_millis(400)
+	}
+
+	fn is_default_glide(glide: &Duration) -> bool {
+		*glide == Self::default_glide()
+	}
+}
+
+impl Default for KeepClear {
+	/// Clear of everything it can see, gliding for 0.4 s.
+	fn default() -> Self {
+		Self {
+			motion: true,
+			text: true,
+			hud: true,
+			glide: Self::default_glide(),
+		}
 	}
 }
 
@@ -3269,6 +3357,88 @@ background = "remove"
 		let filters = |millis| item.posed(Duration::from_millis(millis)).filters[1].clone();
 		assert_eq!(filters(499), Filter::Sepia { amount: 1.0 });
 		assert_eq!(filters(500), Filter::Invert { amount: 1.0 });
+	}
+
+	/// An item keeps clear with `keep_clear = {}`, of everything it can see,
+	/// writing only what differs from that.
+	#[test]
+	fn reads_and_writes_keep_clear() {
+		let text = r#"
+version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.camera]
+kind = "camera"
+
+[[scenes]]
+name = "Game"
+items = [
+    { source = "camera", rect = { x = 0, y = 0, width = 320, height = 180 }, keep_clear = {} },
+    { source = "camera", rect = { x = 0, y = 0, width = 320, height = 180 }, keep_clear = { hud = false, glide = "1s" } },
+]
+"#;
+		let collection = Collection::from_toml(text).unwrap();
+		let items = &collection.scenes[0].items;
+		assert_eq!(items[0].keep_clear, Some(KeepClear::default()));
+		let partly = KeepClear {
+			hud: false,
+			glide: Duration::from_secs(1),
+			..KeepClear::default()
+		};
+		assert_eq!(items[1].keep_clear, Some(partly));
+		let saved = collection.to_toml().unwrap();
+		assert!(
+			saved.contains("[scenes.items.keep_clear]\nhud = false\nglide = \"1s\"\n"),
+			"{saved}"
+		);
+		assert_eq!(Collection::from_toml(&saved).unwrap(), collection);
+	}
+
+	#[test]
+	fn refuses_keeping_clear_where_it_cannot() {
+		let refused = |collection: &Collection, why: &str| match collection.validate() {
+			Err(Error::Invalid(err)) => assert!(err.contains(why), "{err}"),
+			other => panic!("{why}: {other:?}"),
+		};
+		let mut collection = example();
+		collection.scenes[0].items[1].keep_clear = Some(KeepClear::default());
+		collection.validate().unwrap();
+		collection.scenes[0].items[1].keep_clear = Some(KeepClear {
+			glide: Duration::from_secs(6),
+			..KeepClear::default()
+		});
+		refused(&collection, "longer than");
+		collection.scenes[0].items[1].keep_clear = None;
+		collection.top[0].keep_clear = Some(KeepClear::default());
+		refused(&collection, "only a scene's item");
+		collection.top[0].keep_clear = None;
+		collection.validate().unwrap();
+		// A slot places the item, so it takes no rect of its own.
+		collection.scenes[0].items[1].keep_clear = Some(KeepClear::default());
+		let rect = std::mem::take(&mut collection.scenes[0].items[1].rect);
+		collection.scenes[0].items[1].slot = Some(Slot::Tile);
+		refused(&collection, "keeps clear in a slot");
+		collection.scenes[0].items[1].slot = None;
+		collection.scenes[0].items[1].rect = rect;
+		collection.validate().unwrap();
+
+		// A player of the layer layout places a published source where the
+		// file does, so it cannot move.
+		let mut published = Collection::new();
+		published.sources.insert("cam".into(), Source::Camera { id: None });
+		published.published.insert("cam".into());
+		published.scenes = vec![Scene {
+			items: vec![Item {
+				keep_clear: Some(KeepClear::default()),
+				..Item::new("cam", Rect::fill(&published.canvas))
+			}],
+			..Scene::new("Main")
+		}];
+		refused(&published, "viewers place it where the scene file does");
 	}
 
 	#[test]

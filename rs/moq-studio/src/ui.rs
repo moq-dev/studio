@@ -35,6 +35,7 @@ mod dark;
 mod drop;
 mod graph;
 mod inspector;
+mod keep;
 mod layers;
 mod layout;
 mod levels;
@@ -308,6 +309,7 @@ impl Studio {
 			duration: Transition::default().duration().unwrap_or_default(),
 			cut: STINGER_CUT,
 			drag: None,
+			legend: false,
 			renaming: None,
 			title_needs: 0.0,
 			renaming_audio: None,
@@ -723,6 +725,10 @@ struct Panels {
 	cut: Duration,
 	/// The layer a drag on the BUILD page's picture holds.
 	drag: Option<Drag>,
+	/// Whether the BUILD page's picture leaves room for the keep-clear
+	/// legend under it, which a drag leaves as it found it, so the picture
+	/// under the pointer neither moves nor resizes mid-gesture.
+	legend: bool,
 	/// The layer row being dragged to a new place, by its index.
 	moving: Option<usize>,
 	/// The scene being renamed, by index, and the name typed so far.
@@ -2211,7 +2217,7 @@ fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration)
 		let items = slots::placed(state, &shown);
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == dragged.layer && at == dragged.index) {
-				rects.push(item.posed(since).rect);
+				rects.push(keep::placed(state, &shown, at, item).posed(since).rect);
 			}
 		}
 	}

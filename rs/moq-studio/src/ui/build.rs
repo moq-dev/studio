@@ -48,7 +48,20 @@ impl Panels {
 			room.min.y = self.off_air_header(ui, cued, room, snapshot.shape);
 			shape = cued.shape();
 		}
-		self.stage(ui, fx, snapshot, super::layout::fit(room, shape));
+		// A drag that selects a layer keeping clear leaves the picture where
+		// it was until let go, so the pointer stays over what it moves.
+		if self.drag.is_none() {
+			self.legend = self.keeping_clear();
+		}
+		let keeping = self.legend;
+		if keeping {
+			room.max.y -= keep::LEGEND;
+		}
+		let at = super::layout::fit(room, shape);
+		self.stage(ui, fx, snapshot, at);
+		if keeping {
+			keep::legend(ui, at);
+		}
 		self.build_keys(ui);
 	}
 
@@ -121,7 +134,10 @@ impl Panels {
 				let picked = self.selection.clone().expect("interacting with the selected layer");
 				let only = Some((&picked.layer, picked.index));
 				let staged = super::slots::staged(&state, scene.map(|(scene, _)| scene));
+				// A layer keeping clear takes the pointer where it is drawn.
+				let staged = keep::drawn(&state, staged);
 				let delivered = self.interact.update(ui, image, &staged, scene, only);
+				drop(staged);
 				deliver(&state.sources, delivered);
 				self.rebind(&state.sources);
 				let stop = interacting_banner(ui, image, &page);
@@ -179,6 +195,17 @@ impl Panels {
 		}
 	}
 
+	/// Whether the selected layer keeps out of the way, so the stage explains
+	/// what it saw under the picture.
+	fn keeping_clear(&self) -> bool {
+		let Some(picked) = &self.selection else {
+			return false;
+		};
+		let state = self.engine.state.lock().unwrap();
+		let item = picked.item(state.collection());
+		item.is_some_and(|item| item.visible && keep::placement(&state, &picked.layer, picked.index, item).is_some())
+	}
+
 	/// The web page the selected layer shows, while it is a visible layer of
 	/// the picture that shows one.
 	fn interacted(&self, state: &State) -> Option<String> {
@@ -204,7 +231,8 @@ impl Panels {
 	/// The layers the picture edits, front last, each with its place: the
 	/// scene's, then the always-on-top ones over it, unless the scene is open
 	/// off air, as they are drawn on program, each in its slot where the
-	/// scene's arrangement put it.
+	/// scene's arrangement put it, and each keeping clear where it was
+	/// placed.
 	pub(super) fn shown(&self, state: &State) -> Vec<(Picked, Item)> {
 		let (_, since) = self.edited_since(state);
 		let top = self.off_air(state).is_none().then(Layer::top);
@@ -282,7 +310,10 @@ impl Panels {
 			let picked = shown[index].0.clone();
 			self.select(Some(picked.clone()));
 			let collection = state.collection();
-			let resting = picked.item(collection).cloned();
+			// A layer keeping clear moves from where it was placed.
+			let resting = picked
+				.item(collection)
+				.map(|item| keep::placed(state, &picked.layer, picked.index, item));
 			if let Some(resting) = resting {
 				let drawn = match resting.slot {
 					Some(_) => super::slots::drawn(state, &picked.layer, picked.index),
@@ -408,6 +439,15 @@ impl Panels {
 				let label = format!("{verb} `{}`", item.source);
 				spot = Some(Spot::Layer(drag.picked.layer.clone(), item.source.clone()));
 				let picked = &drag.picked;
+				// A move by hand holds a layer keeping clear where it is put;
+				// a resize or a crop leaves it where it rests.
+				let rect = match verb {
+					"Move" => {
+						keep::hold(state, &picked.layer, picked.index, &item);
+						rect
+					}
+					_ => keep::resized(state, &picked.layer, picked.index, &item, rect),
+				};
 				result = edit(state, label, drag.gesture, |draft| {
 					draft.set_item(&picked.layer, picked.index, Item { rect, crop, ..item })
 				});
@@ -415,6 +455,12 @@ impl Panels {
 		}
 		if !response.dragged() {
 			self.drag = None;
+		}
+		// A layer keeping clear stays put while in hand, which each frame
+		// says again, at least four times a lease, whatever the canvas rate.
+		keep::grab(state, self.drag.as_ref().map(|drag| &drag.picked));
+		if self.drag.is_some() {
+			ui.ctx().request_repaint_after(moq_scene::place::GRAB / 4);
 		}
 		if response.has_focus() && self.drag.is_none() && result.is_ok() {
 			(spot, result) = self.nudge(ui, state, response.id);
@@ -427,6 +473,15 @@ impl Panels {
 		super::slots::outlines(&painter, &view, state, room, &shown, target);
 		let selected = shown.iter().find(|(picked, _)| Some(picked) == self.selection.as_ref());
 		let accent = ui.visuals().selection.stroke.color;
+		// What a layer keeping clear saw, under its handles, unless it is
+		// being dragged, which holds it where it is put.
+		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible && self.drag.is_none())
+			&& let Some(resting) = picked.item(state.collection())
+			&& let Some(placement) = keep::placement(state, &picked.layer, picked.index, resting)
+			&& let Some(keep) = resting.keep_clear
+		{
+			keep::overlay(&painter, &view, placement, &item.shape, keep.glide);
+		}
 		// A hidden layer has no handles, as the picture cannot grab it, and a
 		// locked one only its outline.
 		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible) {
@@ -527,6 +582,8 @@ impl Panels {
 		else {
 			return (None, Ok(()));
 		};
+		// A layer keeping clear moves from where it was placed.
+		let item = keep::placed(state, &picked.layer, picked.index, &item);
 		if delta == [0.0; 2] {
 			return (None, Ok(()));
 		}
@@ -541,6 +598,7 @@ impl Panels {
 		};
 		let label = format!("Move `{}`", item.source);
 		let spot = Spot::Layer(picked.layer.clone(), item.source.clone());
+		keep::hold(state, &picked.layer, picked.index, &item);
 		let result = edit(state, label, Some(gesture), |draft| {
 			draft.set_item(&picked.layer, picked.index, Item { rect, ..item })
 		});
@@ -736,11 +794,15 @@ impl Panels {
 				};
 				let count = collection.items(&to).map_or(0, <[Item]>::len);
 				// The always-on-top layers never go on, so they have no
-				// keyframes to play, nor slots; it stays where it was drawn.
+				// keyframes to play, nor slots, nor a picture under them to
+				// keep clear of; it stays where it was drawn.
+				let placed = keep::placed(state, layer, index, &item).rect;
 				let (rect, crop) = super::slots::drawn(state, layer, index).unwrap_or((item.rect, item.crop));
+				let rect = if item.slot.is_none() { placed } else { rect };
 				let moved = Item {
 					keyframes: if top { Vec::new() } else { item.keyframes.clone() },
 					slot: None,
+					keep_clear: if top { None } else { item.keep_clear },
 					rect,
 					crop,
 					..item.clone()
