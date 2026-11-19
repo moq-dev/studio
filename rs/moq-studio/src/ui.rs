@@ -12,8 +12,8 @@ use egui::{Color32, Ui};
 use moq_scene::browser::Paint;
 use moq_scene::source::{Feed, Status};
 use moq_scene::{
-	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Item, Keyframe, Layer, MaskMode,
-	Rect, Scene, Source, Thumbnail, Transition, Video,
+	Background, Blend, Canvas, Clip, Collection, Crop, Direction, Draft, Ease, Filter, Format, Item, Keyframe, Layer,
+	MaskMode, Placement, Rect, Scene, Source, Thumbnail, Transition, Video,
 };
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -33,6 +33,7 @@ mod build;
 mod cue;
 mod dark;
 mod drop;
+mod formats;
 mod graph;
 mod inspector;
 mod keep;
@@ -296,6 +297,10 @@ impl Studio {
 			program,
 			program_drawn: Canvas::default(),
 			preview,
+			portrait: None,
+			portrait_drawn: None,
+			portrait_preview: None,
+			format: Format::Landscape,
 			editing: None,
 			framed,
 			page: Page::default(),
@@ -400,6 +405,8 @@ impl Studio {
 		let mut renderer = render.renderer.write();
 		for registered in [&panels.program, &panels.preview]
 			.into_iter()
+			.chain(&panels.portrait)
+			.chain(&panels.portrait_preview)
 			.chain(panels.thumbnails.values())
 		{
 			renderer.free_texture(&registered.id);
@@ -412,6 +419,11 @@ impl Studio {
 	/// Turn to `page`, as its button in the title bar would.
 	pub(crate) fn turn(&mut self, page: Page) {
 		self.panels.page = page;
+	}
+
+	/// Edit `format`'s picture on BUILD, as its tab under the picture would.
+	pub(crate) fn edit_format(&mut self, format: Format) {
+		self.panels.format = format;
 	}
 
 	/// Turn to MIX in `view`, with the strip of the sound called `opened`
@@ -649,6 +661,26 @@ impl Registered {
 		}
 	}
 
+	/// Show `texture` in `registered` from now on, while there is one,
+	/// registering it when it appears and giving it back when it goes, as the
+	/// portrait picture does when the show stops going out in portrait.
+	pub(crate) fn follow_while(
+		registered: &mut Option<Self>,
+		render: &eframe::egui_wgpu::RenderState,
+		texture: Option<&wgpu::Texture>,
+	) {
+		match (registered.as_mut(), texture) {
+			(Some(shown), Some(texture)) => shown.follow(render, texture),
+			(None, Some(texture)) => *registered = Some(Self::new(render, texture)),
+			(Some(_), None) => {
+				if let Some(gone) = registered.take() {
+					render.renderer.write().free_texture(&gone.id);
+				}
+			}
+			(None, None) => {}
+		}
+	}
+
 	/// Show `texture` from now on, if a resize replaced the one shown.
 	pub(crate) fn follow(&mut self, render: &eframe::egui_wgpu::RenderState, texture: &wgpu::Texture) {
 		if self.texture == *texture {
@@ -687,6 +719,15 @@ struct Panels {
 	/// The cued scene, or the one open off air, which the compositor draws
 	/// while there is one.
 	preview: Registered,
+	/// The portrait picture as viewers see it, while the show goes out in
+	/// portrait.
+	portrait: Option<Registered>,
+	/// Its size this frame, as its texture was drawn, while there is one.
+	portrait_drawn: Option<Canvas>,
+	/// The preview in portrait, while the show goes out in portrait.
+	portrait_preview: Option<Registered>,
+	/// The picture BUILD edits a scene drawn in both in.
+	format: Format,
 	/// The scene open for editing off air on BUILD, while it is the one cued.
 	editing: Option<String>,
 	/// Whether the title bar is the window's frame, which moves, resizes,
@@ -826,6 +867,31 @@ impl Picked {
 	/// The layer as `collection` has it, if it is still there.
 	fn item<'a>(&self, collection: &'a Collection) -> Option<&'a Item> {
 		collection.items(&self.layer)?.get(self.index)
+	}
+
+	/// The layer at rest in `format`'s picture, at its place there, if it is
+	/// still there: in the landscape one for a layer drawn in one.
+	fn rest(&self, collection: &Collection, format: Format) -> Option<Item> {
+		let format = collection.format_of(&self.layer, format);
+		Some(collection.portrayed(self.item(collection)?, format))
+	}
+
+	/// The layer placed at `rect` with `crop` in `format`'s picture, as it
+	/// is in the other, if it is still there and shown in that picture.
+	fn placed(&self, collection: &Collection, format: Format, rect: Rect, crop: Crop) -> Option<Item> {
+		let format = collection.format_of(&self.layer, format);
+		let mut item = self.item(collection)?.clone();
+		// Not shown there, it has no place there.
+		if !item.shown_in(format) {
+			return None;
+		}
+		// Set free and drawn in both without a portrait place, it is fitted
+		// there from its landscape one, so it keeps where it was fitted.
+		let follows = format == Format::Landscape && collection.dual(&self.layer) && item.slot.is_none();
+		if follows && item.portrait.is_none() && item.shown_in(Format::Portrait) {
+			item.portrait = Some(collection.placement(&item, Format::Portrait));
+		}
+		Some(item.placed(format, Placement { rect, crop }))
 	}
 
 	/// What its look edits.
@@ -2231,7 +2297,7 @@ const REACH: f32 = 8.0;
 /// than `dragged`: what a dragged layer snaps to. A scene open off air still
 /// snaps to the always-on-top ones: its picture draws them, as the program
 /// will, though BUILD leaves them to the program to edit.
-fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration) -> Vec<Rect> {
+fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration, format: Format) -> Vec<Rect> {
 	let collection = state.collection();
 	// The top layer goes over a scene of the program's size, as the
 	// compositor draws it.
@@ -2241,10 +2307,10 @@ fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration)
 	let mut rects = Vec::new();
 	let layers = scene.map(Layer::scene).into_iter().chain(top.then(Layer::top));
 	for shown in layers {
-		let items = slots::placed(state, &shown);
+		let items = slots::placed(state, &shown, format);
 		for (at, item) in items.iter().enumerate() {
 			if item.visible && !(shown == dragged.layer && at == dragged.index) {
-				rects.push(keep::placed(state, &shown, at, item).posed(since).rect);
+				rects.push(item.posed(since).rect);
 			}
 		}
 	}
@@ -2930,6 +2996,51 @@ mod tests {
 		);
 	}
 
+	/// While the show goes out in both, placing a layer in the landscape
+	/// picture leaves where the portrait picture draws it, even fitted there
+	/// without a place of its own; a layer shown only in landscape takes no
+	/// portrait place.
+	#[test]
+	fn a_landscape_edit_leaves_the_portrait_picture_alone() {
+		let mut collection = Collection::new();
+		collection.portrait = true;
+		let color = moq_scene::Rgba([255, 255, 255, 255]);
+		collection.sources.insert("logo".into(), Source::Color { color });
+		let rect = |x| Rect {
+			x,
+			y: 40.0,
+			width: 320.0,
+			height: 180.0,
+		};
+		collection.scenes[0].items = vec![
+			Item::new("logo", rect(40.0)),
+			Item {
+				format: Some(Format::Landscape),
+				..Item::new("logo", rect(40.0))
+			},
+		];
+		collection.validate().unwrap();
+		let picked = |index| Picked {
+			layer: Layer::scene("Scene"),
+			index,
+		};
+		let fitted = collection.placement(&collection.scenes[0].items[0], Format::Portrait);
+		let moved = picked(0).placed(&collection, Format::Landscape, rect(400.0), Crop::default());
+		let moved = moved.unwrap();
+		assert_eq!(moved.rect, rect(400.0));
+		assert_eq!(moved.portrait, Some(fitted), "kept where it was fitted");
+		let only = picked(1).placed(&collection, Format::Landscape, rect(400.0), Crop::default());
+		assert_eq!(only.unwrap().portrait, None);
+
+		// Placed in portrait, its landscape place stays.
+		let tall = picked(0).placed(&collection, Format::Portrait, rect(0.0), Crop::default());
+		let tall = tall.unwrap();
+		assert_eq!(
+			(tall.rect, tall.portrait.map(|placed| placed.rect)),
+			(rect(40.0), Some(rect(0.0)))
+		);
+	}
+
 	/// A scene duplicated with its own copies keeps an unfilled role as the
 	/// role, as it does a scene drawn in it, and copies a filled one.
 	#[test]
@@ -2945,6 +3056,25 @@ mod tests {
 		};
 		collection.sources.insert("Main".into(), filled);
 		assert!(build::own_copy(&collection, "Main"), "the source filling it");
+	}
+
+	/// A duplicated scene is laid out as the original in both formats, but is
+	/// none of the scenes there is one of at most.
+	#[test]
+	fn a_duplicated_scene_keeps_its_portrait_arrangement() {
+		let scene = moq_scene::Scene {
+			recorded: true,
+			safe: true,
+			arrangement: moq_scene::Arrangement::Grid,
+			portrait: moq_scene::Portrait {
+				arrangement: moq_scene::Arrangement::Inset,
+			},
+			..moq_scene::Scene::new("Interview")
+		};
+		let copy = build::scene_copy(&scene, "Interview copy".into());
+		assert_eq!(copy.name, "Interview copy");
+		assert_eq!((copy.arrangement, copy.portrait), (scene.arrangement, scene.portrait));
+		assert!(!copy.recorded && !copy.safe);
 	}
 
 	/// A layer the UI picked is let go of once an edit of the engine's own

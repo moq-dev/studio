@@ -53,6 +53,7 @@ mod dark;
 mod edit;
 mod effect;
 pub mod file;
+mod format;
 mod glide;
 mod grant;
 pub mod layout;
@@ -74,6 +75,7 @@ pub use collection::{
 };
 pub use compositor::{Compositor, Detail, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
+pub use format::{Format, PORTRAIT, Placement, Portrait};
 pub use grant::Grants;
 pub use scale::Scaler;
 

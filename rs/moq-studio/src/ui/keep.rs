@@ -25,18 +25,28 @@ const GLIDES: [Duration; 5] = [
 /// The legend's height under the stage, with its gap.
 pub(super) const LEGEND: f32 = 30.0;
 
-/// How the last render placed `item`, the `index`th of `layer`, while it
-/// keeps clear.
-pub(super) fn placement<'a>(state: &'a State, layer: &Layer, index: usize, item: &Item) -> Option<&'a Placement> {
+/// How the last render placed `item`, the `index`th of `layer`, in
+/// `format`'s picture while it keeps clear. Keeping clear places only the
+/// landscape picture, so none in the portrait one.
+pub(super) fn placement<'a>(
+	state: &'a State,
+	layer: &Layer,
+	index: usize,
+	item: &Item,
+	format: Format,
+) -> Option<&'a Placement> {
 	item.keep_clear?;
 	let scene = layer.scene.as_deref()?;
+	if state.collection().format_of(layer, format) != Format::Landscape {
+		return None;
+	}
 	state.compositor.placement(scene, index, &item.source)
 }
 
-/// `item`, the `index`th of `layer`, resting where the picture draws it: a
-/// layer keeping clear where it was placed.
-pub(super) fn placed(state: &State, layer: &Layer, index: usize, item: &Item) -> Item {
-	match placement(state, layer, index, item) {
+/// `item`, the `index`th of `layer`, resting where `format`'s picture draws
+/// it: a layer keeping clear where it was placed.
+pub(super) fn placed(state: &State, layer: &Layer, index: usize, item: &Item, format: Format) -> Item {
+	match placement(state, layer, index, item, format) {
 		Some(placement) => Item {
 			rect: placement.drawn(item.rect),
 			..item.clone()
@@ -45,11 +55,11 @@ pub(super) fn placed(state: &State, layer: &Layer, index: usize, item: &Item) ->
 	}
 }
 
-/// `rect`, a new rect for `item` from a gesture other than a move, such as a
-/// resize, to save: a layer placed off where it rests keeps resting where it
-/// did, so the resize leaves it free to keep clear.
-pub(super) fn resized(state: &State, layer: &Layer, index: usize, item: &Item, rect: Rect) -> Rect {
-	match placement(state, layer, index, item) {
+/// `rect`, a new rect in `format`'s picture for `item` from a gesture other
+/// than a move, such as a resize, to save: a layer placed off where it rests
+/// keeps resting where it did, so the resize leaves it free to keep clear.
+pub(super) fn resized(state: &State, layer: &Layer, index: usize, item: &Item, rect: Rect, format: Format) -> Rect {
+	match placement(state, layer, index, item, format) {
 		Some(placement) if placement.drawn(item.rect) != item.rect => Rect {
 			x: item.rect.x,
 			y: item.rect.y,
@@ -59,24 +69,29 @@ pub(super) fn resized(state: &State, layer: &Layer, index: usize, item: &Item, r
 	}
 }
 
-/// Note that `item`, the `index`th of `layer`, was moved by hand: a layer
-/// keeping clear stays where it was put until the content under it changes.
-pub(super) fn hold(state: &mut State, layer: &Layer, index: usize, item: &Item) {
+/// Note that `item`, the `index`th of `layer`, was moved by hand in
+/// `format`'s picture: a layer keeping clear stays where it was put until the
+/// content under it changes. A move in the portrait picture, which keeping
+/// clear does not place, holds nothing.
+pub(super) fn hold(state: &mut State, layer: &Layer, index: usize, item: &Item, format: Format) {
 	if item.keep_clear.is_some()
 		&& let Some(scene) = layer.scene.as_deref()
+		&& state.collection().format_of(layer, format) == Format::Landscape
 	{
 		state.compositor.hold(scene, index, &item.source);
 	}
 }
 
-/// Note the layer a gesture on the picture has in hand, if any: a layer
-/// keeping clear does not choose a place while in hand.
-pub(super) fn grab(state: &mut State, picked: Option<&Picked>) {
+/// Note the layer a gesture on `format`'s picture has in hand, if any: a
+/// layer keeping clear does not choose a place while in hand in the
+/// landscape picture, the one it places.
+pub(super) fn grab(state: &mut State, picked: Option<&Picked>, format: Format) {
 	let collection = state.collection();
 	let grabbed = picked.and_then(|picked| {
 		let scene = picked.layer.scene.clone()?;
 		let item = picked.item(collection)?;
 		item.keep_clear?;
+		(collection.format_of(&picked.layer, format) == Format::Landscape).then_some(())?;
 		Some((scene, picked.index, item.source.clone()))
 	});
 	let grabbed = grabbed
@@ -85,13 +100,16 @@ pub(super) fn grab(state: &mut State, picked: Option<&Picked>) {
 	state.compositor.grab(grabbed, kio::clock::now());
 }
 
-/// `staged`, the collection as the picture draws it, with each layer
-/// keeping clear where it was placed, so a pointer over the picture finds
-/// what it sees.
-pub(super) fn drawn<'a>(state: &State, staged: Cow<'a, Collection>) -> Cow<'a, Collection> {
+/// `staged`, the collection as `format`'s picture draws it, with each
+/// layer keeping clear where it was placed, so a pointer over the picture
+/// finds what it sees.
+pub(super) fn drawn<'a>(state: &State, staged: Cow<'a, Collection>, format: Format) -> Cow<'a, Collection> {
 	let collection = state.collection();
 	let mut drawn = staged;
 	for (number, scene) in collection.scenes.iter().enumerate() {
+		if collection.format_of(&Layer::scene(&scene.name), format) != Format::Landscape {
+			continue;
+		}
 		for (index, item) in scene.items.iter().enumerate() {
 			if item.keep_clear.is_none() {
 				continue;

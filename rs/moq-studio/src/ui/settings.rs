@@ -263,9 +263,10 @@ impl Panels {
 	/// Settings, Show: the format, the canvas size and frame rate by name or
 	/// by number, and each scene's own size.
 	fn show_pane(&mut self, ui: &mut Ui) {
-		let (current, scenes) = {
+		let (current, scenes, both) = {
 			let state = self.engine.state.lock().unwrap();
-			(state.collection().canvas, state.collection().scenes.clone())
+			let collection = state.collection();
+			(collection.canvas, collection.scenes.clone(), collection.portrait)
 		};
 		let shown = self.canvas.unwrap_or(current);
 		let mut wanted = None;
@@ -274,7 +275,7 @@ impl Panels {
 		row(
 			ui,
 			"Format",
-			"One format for the whole show. The layout of this window follows it.",
+			"The shape of the show's picture. The layout of this window follows it.",
 			|ui| {
 				ui.spacing_mut().item_spacing.x = CARD_GAP;
 				// Right to left, so Landscape comes first.
@@ -293,6 +294,26 @@ impl Panels {
 			},
 		);
 
+		let mut on = both;
+		row(
+			ui,
+			"Both at once",
+			"Also send a portrait picture, for phones, as its own broadcast beside the landscape one. Each \
+			 scene gets a portrait arrangement of its layers, and the machine encodes both.",
+			|ui| {
+				// As the scene file requires: only a canvas wider than tall turns.
+				let wide = current.width > current.height;
+				let toggle = ui
+					.add_enabled(wide, kit::Toggle::new(&mut on).label("Landscape and portrait"))
+					.on_disabled_hover_text(
+						"Only a canvas wider than tall turns: a portrait show turns to landscape first",
+					);
+				if toggle.changed() {
+					self.set_both(on);
+				}
+			},
+		);
+
 		let named = named_size(current).filter(|_| self.canvas.is_none());
 		let mut size = named;
 		let sizes: Vec<(Option<u32>, &str)> = SIZES
@@ -300,7 +321,7 @@ impl Panels {
 			.map(|(short, name)| (Some(*short), *name))
 			.chain([(None, "Custom")])
 			.collect();
-		row(ui, "Canvas size", &upload(current), |ui| {
+		row(ui, "Canvas size", &upload(current, both), |ui| {
 			// Custom lit, as for a size no name has, still opens its editor.
 			if ui.add(kit::Segmented::new(&mut size, &sizes).reclick()).changed() {
 				match size {
@@ -535,20 +556,41 @@ impl Panels {
 					"Set the canvas to {}x{} at {} fps",
 					canvas.width, canvas.height, canvas.framerate
 				);
-				edit(&mut state, label, None, |draft| draft.set_canvas(canvas))
+				// Only a landscape canvas goes out in portrait too.
+				let turning_off = canvas.height >= canvas.width && state.collection().portrait;
+				let result = edit(&mut state, label, None, |draft| {
+					if canvas.height >= canvas.width {
+						draft.set_portrait(false)?;
+					}
+					draft.set_canvas(canvas)
+				});
+				// As turning Both off does, it removes the layers shown only in
+				// portrait, which may move the selected layer's index.
+				if result.is_ok() && turning_off {
+					self.deselect_item();
+				}
+				result
 			}
 			Restart::Scene(name, size) => match state.collection().scenes.iter().position(|scene| scene.name == name) {
 				Some(index) => {
-					let scene = state.collection().scenes[index].clone();
+					// The program's size, while the show goes out in portrait
+					// too, follows the program's, so the scene keeps its
+					// portrait picture and can still go on program.
+					let program = state.collection().canvas;
+					let size = size.filter(|size| {
+						!state.collection().portrait || (size.width, size.height) != (program.width, program.height)
+					});
 					let label = match size {
 						Some(size) => format!("Size scene `{name}` {}x{}", size.width, size.height),
 						None => format!("Size scene `{name}` as the program"),
 					};
-					let result = edit(&mut state, label, None, |draft| {
-						draft.set_scene(index, Scene { size, ..scene })
-					});
+					let result = edit(&mut state, label, None, |draft| draft.set_size(index, size));
 					if result.is_ok() {
 						self.sizes.remove(&name);
+						// Given its own size, its layers shown only in portrait go.
+						if size.is_some() {
+							self.deselect_item();
+						}
 					}
 					result
 				}
@@ -556,6 +598,24 @@ impl Panels {
 			},
 		};
 		drop(state);
+		self.check(result);
+	}
+
+	/// Send a portrait picture too, or stop, as an edit undo takes back.
+	fn set_both(&mut self, on: bool) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let label = match on {
+			true => "Go out in landscape and portrait",
+			false => "Go out in landscape only",
+		};
+		let result = edit(&mut state, label.to_string(), None, |draft| draft.set_portrait(on));
+		drop(state);
+		// Turned off, the layers shown only in portrait go, which may move
+		// the selected layer's index.
+		if result.is_ok() && !on {
+			self.deselect_item();
+		}
 		self.check(result);
 	}
 
@@ -1709,13 +1769,24 @@ fn sized(canvas: Canvas, short: u32) -> Canvas {
 }
 
 /// What `canvas` costs in upload: the most its renditions and the audio
-/// send, as each rendition's ceiling allows.
-fn upload(canvas: Canvas) -> String {
-	let video: u64 = crate::ladder::sizes(canvas.size())
-		.into_iter()
-		.map(|size| crate::ladder::ceiling(size, canvas.framerate()).as_bps())
+/// send, as each rendition's ceiling allows, twice over, a picture in each
+/// format, if `both`.
+fn upload(canvas: Canvas, both: bool) -> String {
+	// The portrait picture is a broadcast of its own, audio included.
+	let pictures = std::iter::once(canvas).chain(both.then(|| canvas.turned()));
+	let total: u64 = pictures
+		.map(|canvas| {
+			let ladder = crate::ladder::sizes(canvas.size()).into_iter();
+			let video: u64 = ladder
+				.map(|size| crate::ladder::ceiling(size, canvas.framerate()).as_bps())
+				.sum();
+			video + crate::engine::AUDIO_BITRATE.as_bps()
+		})
 		.sum();
-	let total = video + crate::engine::AUDIO_BITRATE.as_bps();
+	let both = match both {
+		true => " in both formats",
+		false => "",
+	};
 	let name = named_size(canvas)
 		.and_then(|short| SIZES.iter().find(|(side, _)| *side == short))
 		.map_or_else(
@@ -1723,7 +1794,7 @@ fn upload(canvas: Canvas) -> String {
 			|(_, name)| name.to_string(),
 		);
 	format!(
-		"Bigger needs a faster encoder and more upload: {name} at {} wants up to about {:.1} Mb/s.",
+		"Bigger needs a faster encoder and more upload: {name} at {}{both} wants up to about {:.1} Mb/s.",
 		canvas.framerate,
 		total as f64 / 1e6
 	)
@@ -1739,6 +1810,25 @@ mod tests {
 			height,
 			framerate,
 		}
+	}
+
+	/// The portrait picture is a broadcast of its own, as costly as the
+	/// landscape one.
+	#[test]
+	fn both_formats_want_twice_the_upload() {
+		let canvas = canvas(1920, 1080, 30);
+		let wanted = |both| {
+			let said = upload(canvas, both);
+			let number = said.rsplit("about ").next().unwrap().trim_end_matches(" Mb/s.");
+			number.parse::<f64>().unwrap()
+		};
+		assert!(upload(canvas, true).contains("1080p at 30 in both formats"));
+		assert!(
+			(wanted(true) - 2.0 * wanted(false)).abs() <= 0.1,
+			"{} {}",
+			wanted(true),
+			wanted(false)
+		);
 	}
 
 	#[test]

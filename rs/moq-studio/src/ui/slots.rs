@@ -7,63 +7,67 @@ use moq_scene::{Arrangement, Crop, Slot};
 use super::layers::section;
 use super::*;
 
-/// `layer`'s layers where they are drawn, in order: those of a scene in
-/// slots where the last render drew them, hidden while their slot is
+/// `layer`'s layers where they are drawn in `format`'s picture, in order:
+/// each at its place there, hidden unless shown there, and those of a scene
+/// in slots where the last render drew them, hidden while their slot is
 /// closed.
-pub(super) fn placed(state: &State, layer: &Layer) -> Vec<Item> {
-	let items = state.collection().items(layer).unwrap_or_default();
+pub(super) fn placed(state: &State, layer: &Layer, format: Format) -> Vec<Item> {
+	let collection = state.collection();
+	let format = collection.format_of(layer, format);
+	let items = collection.items(layer).unwrap_or_default();
 	// A layer set free that keeps clear, where it was placed.
-	let free = |index, item| super::keep::placed(state, layer, index, item);
-	let arranged = layer.scene.as_deref().and_then(|scene| state.compositor.placed(scene));
+	let items = (items.iter().enumerate())
+		.map(|(index, item)| super::keep::placed(state, layer, index, &collection.portrayed(item, format), format));
+	let arranged = (layer.scene.as_deref()).and_then(|scene| state.compositor.placed(format, scene));
 	// One frame behind an edit, until the next render arranges it.
 	let Some(arranged) = arranged.filter(|arranged| arranged.len() == items.len()) else {
-		return items
-			.iter()
-			.enumerate()
-			.map(|(index, item)| free(index, item))
-			.collect();
+		return items.collect();
 	};
-	let placed = items.iter().zip(arranged).enumerate();
-	let placed = placed.map(|(index, (item, arranged))| match item.slot {
+	let placed = items.zip(arranged).map(|(item, arranged)| match item.slot {
 		Some(_) => Item {
 			rect: arranged.rect,
 			visible: item.visible && arranged.visible,
-			..item.clone()
+			..item
 		},
-		None => free(index, item),
+		None => item,
 	});
 	placed.collect()
 }
 
-/// The collection with the scene called `scene` as the last render drew
-/// it, cover crops and a glide under way included, so a page in a slot
-/// takes input where it is drawn.
-pub(super) fn staged<'a>(state: &'a State, scene: Option<&str>) -> std::borrow::Cow<'a, Collection> {
+/// The collection as `format`'s picture draws it, with the scene called
+/// `scene` as the last render drew it there, cover crops and a glide under
+/// way included, so a page in a slot takes input where it is drawn.
+pub(super) fn staged<'a>(state: &'a State, scene: Option<&str>, format: Format) -> std::borrow::Cow<'a, Collection> {
 	let collection = state.collection();
+	let format = scene.map_or(format, |scene| collection.format_of(&Layer::scene(scene), format));
 	let found = scene.and_then(|scene| {
 		let index = collection.scenes.iter().position(|found| found.name == scene)?;
-		let arranged = state.compositor.placed(scene)?;
+		let arranged = state.compositor.placed(format, scene)?;
 		(arranged.len() == collection.scenes[index].items.len()).then_some((index, arranged))
 	});
-	let Some((index, arranged)) = found else {
-		return std::borrow::Cow::Borrowed(collection);
-	};
-	let mut staged = collection.clone();
-	staged.scenes[index].items = arranged.to_vec();
-	std::borrow::Cow::Owned(staged)
+	let mut staged = collection.formatted(format);
+	if let Some((index, arranged)) = found {
+		staged.to_mut().scenes[index].items = arranged.to_vec();
+	}
+	staged
 }
 
-/// Where the layer at `index` of `layer` is drawn and what it shows of its
-/// picture, cover crop included, so setting it free keeps how it looks; its
-/// own place for a layer set free or not yet arranged.
-pub(super) fn drawn(state: &State, layer: &Layer, index: usize) -> Option<(Rect, Crop)> {
+/// Where the layer at `index` of `layer` is drawn in `format`'s picture and
+/// what it shows of its picture, cover crop included, so setting it free
+/// keeps how it looks; its own place there for a layer set free or not yet
+/// arranged.
+pub(super) fn drawn(state: &State, layer: &Layer, index: usize, format: Format) -> Option<(Rect, Crop)> {
 	let collection = state.collection();
-	let item = collection.items(layer)?.get(index)?;
-	let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
+	let format = collection.format_of(layer, format);
+	let item = &collection.portrayed(collection.items(layer)?.get(index)?, format);
+	let canvas = match collection.dual(layer) {
+		true => collection.canvas_of(format),
+		false => collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas),
+	};
 	let arranged = layer
 		.scene
 		.as_deref()
-		.and_then(|scene| state.compositor.placed(scene))
+		.and_then(|scene| state.compositor.placed(format, scene))
 		.filter(|arranged| arranged.len() == collection.items(layer).map_or(0, <[Item]>::len))
 		.and_then(|arranged| arranged.get(index))
 		.filter(|arranged| item.slot.is_some() && !arranged.rect.is_empty());
@@ -176,25 +180,38 @@ pub(super) fn assign(state: &mut State, dragged: &Picked, target: &Picked) -> an
 	let taking = Item {
 		slot: held.slot,
 		rect: Rect::default(),
+		portrait: None,
 		keep_clear: None,
 		..moved.clone()
 	};
-	// Set free where `moved` is drawn, as a layer keeping clear may be off
-	// where it is saved, cropped to its shape rather than stretched.
-	let (rect, crop) = match moved.slot {
-		Some(_) => (Rect::default(), held.crop),
-		None => {
-			let to = super::keep::placed(state, &dragged.layer, dragged.index, &moved).rect;
-			let (from, crop) = drawn(state, &target.layer, target.index).unwrap_or((to, held.crop));
-			let shape = |rect: &Rect| rect.width / rect.height;
-			(to, crop.then(&Crop::covering(shape(&from), shape(&to))))
-		}
+	// Set free where `moved` is drawn in each picture, as a layer keeping
+	// clear may be off where it is saved, cropped to its shape there rather
+	// than stretched.
+	let free = |format: Format| {
+		let resting = super::keep::placed(state, &dragged.layer, dragged.index, &moved, format);
+		let Placement { rect, .. } = state.collection().placement(&resting, format);
+		let (from, crop) = drawn(state, &target.layer, target.index, format).unwrap_or((rect, held.crop));
+		let shape = |rect: &Rect| rect.width / rect.height;
+		let crop = crop.then(&Crop::covering(shape(&from), shape(&rect)));
+		Placement { rect, crop }
 	};
-	let leaving = Item {
-		slot: moved.slot,
-		rect,
-		crop,
-		..held
+	let leaving = match moved.slot {
+		Some(_) => Item {
+			slot: moved.slot,
+			rect: Rect::default(),
+			..held
+		},
+		None => {
+			let dual = state.collection().dual(&target.layer);
+			let landscape = free(Format::Landscape);
+			Item {
+				slot: None,
+				rect: landscape.rect,
+				crop: landscape.crop,
+				portrait: (dual && held.shown_in(Format::Portrait)).then(|| free(Format::Portrait)),
+				..held
+			}
+		}
 	};
 	edit(state, label, None, |draft| {
 		draft.set_item(&target.layer, target.index, taking)?;
@@ -217,9 +234,18 @@ pub(super) fn set_slot(state: &mut State, picked: &Picked, slot: Option<Slot>) -
 		return Ok(());
 	}
 	let name = item.source.clone();
+	// Set free where it is drawn in each picture.
+	let drawn = |format| drawn(state, &picked.layer, picked.index, format).unwrap_or((item.rect, item.crop));
 	let (rect, crop) = match slot {
 		Some(_) => (Rect::default(), item.crop),
-		None => drawn(state, &picked.layer, picked.index).unwrap_or((item.rect, item.crop)),
+		None => drawn(Format::Landscape),
+	};
+	let portrait = match slot {
+		None if collection.dual(&picked.layer) && item.shown_in(Format::Portrait) => {
+			let (rect, crop) = drawn(Format::Portrait);
+			Some(Placement { rect, crop })
+		}
+		_ => None,
 	};
 	let main = match slot {
 		Some(Slot::Main) => collection
@@ -250,6 +276,7 @@ pub(super) fn set_slot(state: &mut State, picked: &Picked, slot: Option<Slot>) -
 				slot,
 				rect,
 				crop,
+				portrait,
 				// In a slot, the arrangement places it.
 				keep_clear: item.keep_clear.filter(|_| slot.is_none()),
 				..item
@@ -268,10 +295,11 @@ fn arrangement_name(arrangement: Arrangement) -> &'static str {
 	}
 }
 
-/// A button showing `arrangement`'s slots, a main item and three tiles, lit
-/// while `on`.
-fn arrangement_button(ui: &mut Ui, arrangement: Arrangement, on: bool) -> egui::Response {
-	let size = egui::vec2(58.0, 33.0);
+/// A button showing `arrangement`'s slots on `canvas`, a main item and
+/// three tiles, lit while `on`.
+fn arrangement_button(ui: &mut Ui, arrangement: Arrangement, canvas: Canvas, on: bool) -> egui::Response {
+	// As tall as a landscape one, so a row of either lines up.
+	let size = egui::vec2(33.0 * canvas.width as f32 / canvas.height as f32, 33.0);
 	let (rect, response) = ui.allocate_exact_size(size + egui::vec2(8.0, 8.0), egui::Sense::click());
 	response.widget_info(|| {
 		egui::WidgetInfo::selected(
@@ -293,7 +321,6 @@ fn arrangement_button(ui: &mut Ui, arrangement: Arrangement, on: bool) -> egui::
 		false => egui::Stroke::new(1.0, kit::LINE),
 	};
 	painter.rect(rect, 6.0, fill, stroke, egui::StrokeKind::Inside);
-	let canvas = Canvas::default();
 	let picture = egui::Rect::from_center_size(rect.center(), size);
 	let scale = size.x / canvas.width as f32;
 	let (main, tiles) = arrangement.places(canvas, true, 3);
@@ -324,12 +351,17 @@ enum Asked {
 
 impl Panels {
 	/// The Slots section of the scene inspector for the scene at `index`:
-	/// how it arranges its slots, each slot and the role or source in it,
-	/// and a slot to add for the main picture or the camera; the result of
-	/// what it asked for, if it asked.
+	/// how it arranges its slots in the picture BUILD edits, each slot and
+	/// the role or source in it, and a slot to add for the main picture or
+	/// the camera; the result of what it asked for, if it asked.
 	pub(super) fn slots(&mut self, ui: &mut Ui, state: &mut State, index: usize) -> Option<anyhow::Result<()>> {
 		let collection = state.collection();
 		let scene = collection.scenes[index].clone();
+		let format = collection.format_of(&Layer::scene(&scene.name), self.format);
+		let (arranged, canvas) = match format {
+			Format::Landscape => (scene.arrangement, Canvas::default()),
+			Format::Portrait => (scene.portrait.arrangement, Canvas::default().turned()),
+		};
 		let room = self.engine.room();
 		let room = room.as_ref().map(|room| room.path());
 		let mut asked = None;
@@ -341,10 +373,17 @@ impl Panels {
 			.color(kit::DIM)
 			.font(kit::ui(11.0)),
 		);
+		if collection.dual(&Layer::scene(&scene.name)) {
+			ui.label(
+				egui::RichText::new(format!("Arranged in {}", format.name().to_lowercase()))
+					.color(kit::DIM)
+					.font(kit::ui(11.0)),
+			);
+		}
 		ui.horizontal_wrapped(|ui| {
 			ui.spacing_mut().item_spacing.x = 6.0;
 			for arrangement in Arrangement::ALL {
-				if arrangement_button(ui, arrangement, scene.arrangement == arrangement).clicked() {
+				if arrangement_button(ui, arrangement, canvas, arranged == arrangement).clicked() {
 					asked = Some(Asked::Arrange(arrangement));
 				}
 			}
@@ -421,16 +460,21 @@ impl Panels {
 
 		let asked = asked?;
 		Some(match asked {
-			Asked::Arrange(arrangement) => edit(
-				state,
-				format!(
+			Asked::Arrange(arrangement) => {
+				let label = format!(
 					"Arrange `{}` as {}",
 					scene.name,
 					arrangement_name(arrangement).to_lowercase()
-				),
-				None,
-				|draft| draft.set_scene(index, Scene { arrangement, ..scene }),
-			),
+				);
+				let scene = match format {
+					Format::Landscape => Scene { arrangement, ..scene },
+					Format::Portrait => Scene {
+						portrait: moq_scene::Portrait { arrangement },
+						..scene
+					},
+				};
+				edit(state, label, None, |draft| draft.set_scene(index, scene))
+			}
 			Asked::Fill(role, source) => {
 				let label = match &source {
 					Some(source) => format!("Fill the role `{role}` with `{source}`"),

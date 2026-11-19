@@ -114,8 +114,11 @@ enum View {
 	/// A scene, by name, open for editing off air on BUILD.
 	OffAir(&'static str),
 	/// BUILD with the front layer selected, once it kept out of the way:
-	/// moved off what mattered and landed.
-	KeepClear,
+	/// moved off what mattered and landed. If `dual`, with the show going
+	/// out in both formats.
+	KeepClear {
+		dual: bool,
+	},
 	/// BUILD with the game's window gone dark selected, and what to do about
 	/// it open from its badge.
 	Dark,
@@ -136,9 +139,37 @@ enum View {
 	/// BUILD's Add tab on the drop views' show, with a file dragged or
 	/// dropped on the picture.
 	Drop(Drop),
+	/// On the dual-format show, `page` with the layer of the scene on
+	/// program at `index`, front first, selected, BUILD editing `format`'s
+	/// picture, in Studio mode with the scene `cued` cued, if any, and the
+	/// scene `off_air` open off air, if any.
+	Dual {
+		page: Page,
+		format: moq_scene::Format,
+		index: Option<usize>,
+		cued: Option<&'static str>,
+		off_air: Option<&'static str>,
+	},
 	/// The command palette, open by its key over LIVE with a few keys bound,
 	/// with what is typed into it.
 	Palette(&'static str),
+}
+
+/// The studio on the dual-format views' show, at the mock-ups' size, turned
+/// to `page` with the camera's layer selected, editing `format`'s picture.
+fn dual(page: Page, format: moq_scene::Format) -> Open {
+	Open::Studio {
+		view: View::Dual {
+			page,
+			format,
+			index: Some(2),
+			cued: None,
+			off_air: None,
+		},
+		size: SIZE,
+		show: "dual.toml",
+		relay: false,
+	}
 }
 
 /// A file over the picture, at the pointer.
@@ -300,10 +331,14 @@ views! {
 	/// A facecam keeping out of the way of a game: what matters glowing on the
 	/// picture, the places it may go, where it was and the glide to where it
 	/// went, the legend under the picture, and its settings in the inspector.
-	build_keep_clear: Live, Open::Studio { view: View::KeepClear, size: SIZE, show: "keep.toml", relay: false };
+	build_keep_clear: Live, Open::Studio { view: View::KeepClear { dual: false }, size: SIZE, show: "keep.toml", relay: false };
 	/// The same in the smallest window: the legend's labels shortened to fit
 	/// beside the note, or the note left out.
-	build_keep_clear_compact: Live, Open::Studio { view: View::KeepClear, size: crate::ui::MIN_SIZE, show: "keep.toml", relay: false };
+	build_keep_clear_compact: Live, Open::Studio { view: View::KeepClear { dual: false }, size: crate::ui::MIN_SIZE, show: "keep.toml", relay: false };
+	/// The same going out in both formats: the legend between the landscape
+	/// picture, the only one it moves in, and the tabs, the portrait picture
+	/// beside it showing the facecam where its rect rests, fitted.
+	build_keep_clear_dual: Live, Open::Studio { view: View::KeepClear { dual: true }, size: SIZE, show: "keep.toml", relay: false };
 	/// A window gone dark: its row, the layer on the picture, its scene's
 	/// pad, and the health dot turn amber, and its badge opens what happened
 	/// and the fixes.
@@ -322,6 +357,37 @@ views! {
 	build_drop_refused: Still, dropping(Drop::Refused);
 	/// The logo dropped lands where it was let go, at its own size, selected.
 	build_dropped: Still, dropping(Drop::Placed);
+	/// A show going out in both formats: the landscape and portrait
+	/// pictures side by side, each in its tally frame with its size under
+	/// it, where the selected camera is shown between them, and each pad
+	/// showing the pair, as the `dual` mock-up frame has it.
+	live_dual: Still, dual(Page::Live, moq_scene::Format::Landscape);
+	/// It in a half-size window: the chip of where the camera is shown keeps
+	/// clear of what is said under the landscape picture, without its words.
+	live_dual_compact: Still, Open::Studio { view: View::Dual { page: Page::Live, format: moq_scene::Format::Landscape, index: Some(2), cued: None, off_air: None }, size: HALF, show: "dual.toml", relay: false };
+	/// Studio mode on it: NEXT shows the cued scene in both formats.
+	live_dual_studio: Still, Open::Studio { view: View::Dual { page: Page::Live, format: moq_scene::Format::Landscape, index: None, cued: Some("Guests"), off_air: None }, size: SIZE, show: "dual.toml", relay: false };
+	/// BUILD on it: the landscape picture edited, the portrait one small
+	/// beside it, and under them the tabs that pick which and where the
+	/// selected camera is shown, which the inspector says too.
+	build_dual: Still, dual(Page::Build, moq_scene::Format::Landscape);
+	/// BUILD on it in a half-size window: the chip keeps clear of the tabs,
+	/// or leaves the choice to the inspector where there is no room.
+	build_dual_compact: Still, Open::Studio { view: View::Dual { page: Page::Build, format: moq_scene::Format::Landscape, index: Some(2), cued: None, off_air: None }, size: HALF, show: "dual.toml", relay: false };
+	/// BUILD editing the portrait picture: the camera's handles at its
+	/// portrait place, the landscape picture small beside it.
+	build_dual_portrait: Still, dual(Page::Build, moq_scene::Format::Portrait);
+	/// A scene laid out by slots on it, open off air in portrait: its own
+	/// arrangement there, a row, which the inspector picks.
+	build_dual_slots: Still, Open::Studio { view: View::Dual { page: Page::Build, format: moq_scene::Format::Portrait, index: None, cued: None, off_air: Some("Guests") }, size: SIZE, show: "dual.toml", relay: false };
+	/// Settings, Show on it: Both at once on.
+	settings_show_dual: Still, Open::Studio { view: View::Setting(Setting::Show), size: SIZE, show: "dual.toml", relay: false };
+	/// GO LIVE's sheet on it: both broadcasts to each relay, and the encoder
+	/// and connection checked for both pictures.
+	going_dual: Live, Open::Studio { view: View::Going, size: SIZE, show: "dual.toml", relay: true };
+	/// On air on it: both pictures in their ON AIR frames, each with what
+	/// its video sends under it.
+	on_air_dual: Live, Open::Studio { view: View::OnAir, size: SIZE, show: "dual.toml", relay: true };
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
 	mix: Still, mixing(MixView::Strips, None, SIZE);
@@ -1596,6 +1662,9 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		Open::Kit { .. } | Open::Library => unreachable!("drawn without an engine"),
 		Open::Studio { show, view, relay, .. } => {
 			let mut text = std::fs::read_to_string(shows.join(show)).unwrap();
+			if let View::KeepClear { dual: true } = view {
+				text = text.replacen("version = 1\n", "version = 1\nportrait = true\n", 1);
+			}
 			if let View::Review { replays: true, .. } = view {
 				text.push_str("\n[sources.replay]\nkind = \"replay\"\n\n[sources.slowmo]\nkind = \"replay\"\n");
 			}
@@ -1629,7 +1698,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Mix(view, opened) => studio.mix(*view, *opened),
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
-		View::KeepClear => studio.build(Side::Layers, Inspect::Layer, Some(0)),
+		View::KeepClear { .. } => studio.build(Side::Layers, Inspect::Layer, Some(0)),
 		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
@@ -1663,6 +1732,24 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			}
 		}
 		View::Drop(_) => studio.build(Side::Add, Inspect::Layer, None),
+		View::Dual {
+			page,
+			format,
+			index,
+			cued,
+			off_air,
+		} => {
+			studio.build(Side::Layers, Inspect::Layer, *index);
+			studio.edit_format(*format);
+			if let Some(cued) = cued {
+				studio.studio_mode(true);
+				studio.cue(cued);
+			}
+			studio.turn(*page);
+			if let Some(scene) = off_air {
+				studio.edit_off_air(scene);
+			}
+		}
 		View::Palette(_) => {
 			let key = |code, name: &str| hotkeys::Binding {
 				modifiers: egui::Modifiers::NONE,
@@ -1765,7 +1852,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				}
 			}))
 			.expect("the room fails to join at launch"),
-		View::KeepClear => runtime
+		View::KeepClear { .. } => runtime
 			.block_on(kio::clock::timeout(SETTLE, async {
 				loop {
 					let landed = {
@@ -1788,6 +1875,25 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				harness.run_steps(2);
 			}))
 			.expect("the facecam moves off the minimap and lands"),
+		View::OnAir if engine.state.lock().unwrap().collection().portrait => runtime
+			.block_on(kio::clock::timeout(SETTLE, async {
+				// Each picture's rate shows once health hears what its video
+				// sent.
+				let sending = |name: Option<&str>| {
+					let report = engine.health.lock().unwrap();
+					let broadcast = report.broadcasts.iter().find(|found| found.name.as_deref() == name);
+					broadcast.is_some_and(|broadcast| {
+						let mut tracks = broadcast.tracks.iter();
+						tracks.any(|track| track.label.starts_with("video") && track.sent.is_some())
+					})
+				};
+				while !(sending(None) && sending(Some(moq_scene::PORTRAIT))) {
+					harness.step();
+					kio::clock::sleep(Duration::from_millis(20)).await;
+				}
+				harness.run_steps(2);
+			}))
+			.expect("both pictures send"),
 		View::OnAirHealth => {
 			let pill = ["Healthy", "Starting", "Degraded", "Unhealthy"]
 				.into_iter()
