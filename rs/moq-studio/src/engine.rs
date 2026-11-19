@@ -1426,7 +1426,7 @@ impl Engine {
 		// the two never publish at once.
 		*joined = None;
 		*self.feeds.lock().unwrap() = None;
-		let Some(crate::guests::Joining { room, renewal }) = joining else {
+		let Some(crate::guests::Joining { room, renewal, remotes }) = joining else {
 			return Ok(());
 		};
 		anyhow::ensure!(!*self.stopped.borrow(), "the show is closing");
@@ -1446,6 +1446,9 @@ impl Engine {
 		let mut tasks = vec![self.until_stopped(crate::guests::run(self.clone(), room.clone(), announced))];
 		if let Some(renewal) = renewal {
 			tasks.push(self.until_stopped(renewal.run()));
+		}
+		if let Some(remotes) = remotes {
+			tasks.push(self.until_stopped(remotes.run()));
 		}
 		// Who has a return feed follows who is renewed, synced with the audio,
 		// including any change made since the feeds started.
