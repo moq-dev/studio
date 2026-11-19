@@ -162,6 +162,7 @@ impl Panels {
 				let nav = Rect::from_min_size(rect.min, vec2(if icons { NAV_ICONS } else { NAV }, rect.height()));
 				let pane = Rect::from_min_max(pos2(nav.right(), rect.top()), rect.max);
 				self.settings_nav(ui, nav, icons, &mut setting);
+				self.setting = Some(setting);
 				let builder = egui::UiBuilder::new().max_rect(pane.shrink2(vec2(MARGIN, 0.0)));
 				ui.scope_builder(builder, |ui| {
 					ui.add_space(24.0);
@@ -187,8 +188,12 @@ impl Panels {
 							Setting::Advanced => self.advanced(ui, fx),
 						});
 					// A pane closes the window by clearing it, as the scene
-					// graph's Open does.
-					closed |= self.setting.is_none();
+					// graph's Open does, or opens another by naming it, as
+					// Remote's Set up the room does.
+					match self.setting {
+						None => closed = true,
+						Some(asked) => setting = asked,
+					}
 				});
 			});
 		// Escape while a key is being bound cancels the binding instead.

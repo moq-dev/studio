@@ -882,6 +882,12 @@ fn settings_change_the_show_and_move_the_guests() {
 		engine.state.lock().unwrap().collection().audio["alice"].muted,
 		"{muted}"
 	);
+	// Remote, with no room to pair in, sends the host to the room's pane.
+	harness.get_by_label("Remote").click();
+	harness.run_steps(2);
+	harness.get_by_label("Set up the room").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Try again").is_some(), "Guests is open");
 	// The key is back in place, under the same name; the relay's path is the
 	// room's parent.
 	for room in ["guests", "other"] {
