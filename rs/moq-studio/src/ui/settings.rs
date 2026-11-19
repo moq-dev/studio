@@ -183,6 +183,7 @@ impl Panels {
 							Setting::Recording => self.recording(ui),
 							Setting::Hotkeys => self.hotkeys(ui, fx),
 							Setting::Guests => self.guest_settings(ui),
+							Setting::Remote => self.remote_settings(ui),
 							Setting::Advanced => self.advanced(ui, fx),
 						});
 					// A pane closes the window by clearing it, as the scene

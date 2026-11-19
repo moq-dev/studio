@@ -84,6 +84,9 @@ enum View {
 	/// Settings' Guests pane, its room unable to join at launch, as its key
 	/// file is missing.
 	GuestsFailed,
+	/// Settings' Remote pane in a room, one phone paired and removed, and
+	/// another just paired by its name and Pair a phone.
+	Paired,
 	/// The scene graph's window.
 	Graph,
 	/// The stream's health in detail.
@@ -367,6 +370,12 @@ views! {
 	/// Settings, Guests, when the room saved cannot be joined, such as when
 	/// its key file is gone: why, and Try again.
 	settings_guests_failed: Live, relayed(View::GuestsFailed);
+	/// Settings, Remote with no room yet, which a remote joins.
+	settings_remote: Still, studio(View::Setting(Setting::Remote));
+	/// Settings, Remote with a phone just paired: the code its camera scans,
+	/// when its link expires, and every phone paired, one removed. Live, as
+	/// each link carries a token of its own.
+	settings_remote_paired: Live, studio(View::Paired);
 	/// Settings, Advanced: published scenes and sources, the virtual camera,
 	/// the effects, and the scene graph.
 	settings_advanced: Still, studio(View::Setting(Setting::Advanced));
@@ -1602,6 +1611,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
 		View::GuestsFailed => studio.open(Setting::Guests),
+		View::Paired => studio.open(Setting::Remote),
 		View::Graph => studio.open_graph(),
 		View::Health => studio.details(),
 		View::Going => studio.going(),
@@ -1661,6 +1671,15 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		let stalled = Duration::from_secs(4);
 		engine.state.lock().unwrap().stalled.insert("host".into(), stalled);
 	}
+	if let View::Paired = view {
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://join.studio.moq.dev/").unwrap();
+		let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+		let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+		room.pair("tablet").unwrap();
+		room.unpair("tablet").unwrap();
+		engine.join(Some(crate::guests::Joining::offline(room))).unwrap();
+	}
 	if let View::Joined = view {
 		let mut state = engine.state.lock().unwrap();
 		let connect = url::Url::parse("https://relay.example/show").unwrap();
@@ -1705,6 +1724,14 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		View::CustomCanvas => {
 			harness.get_all_by_label("Custom").next().unwrap().click();
+			harness.run_steps(4);
+		}
+		View::Paired => {
+			harness.get_by_role(Role::TextInput).click();
+			harness.run_steps(2);
+			harness.get_by_role(Role::TextInput).type_text("Phone");
+			harness.run_steps(2);
+			harness.get_by_label("Pair a phone").click();
 			harness.run_steps(4);
 		}
 		View::GuestsFailed => runtime

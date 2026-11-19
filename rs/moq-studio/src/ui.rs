@@ -43,6 +43,7 @@ mod live;
 mod mixer;
 mod multiview;
 mod palette;
+mod remotes;
 mod review;
 mod settings;
 mod shell;
@@ -108,18 +109,21 @@ pub(crate) enum Setting {
 	Hotkeys,
 	/// The room guests join, its key, the join page, and how long a link lasts.
 	Guests,
+	/// The phones paired as remotes.
+	Remote,
 	/// Published scenes and sources, the virtual camera, the effects, and the
 	/// scene graph.
 	Advanced,
 }
 
 impl Setting {
-	pub(crate) const ALL: [Self; 6] = [
+	pub(crate) const ALL: [Self; 7] = [
 		Self::Show,
 		Self::Stream,
 		Self::Recording,
 		Self::Hotkeys,
 		Self::Guests,
+		Self::Remote,
 		Self::Advanced,
 	];
 
@@ -130,6 +134,7 @@ impl Setting {
 			Self::Recording => "Recording",
 			Self::Hotkeys => "Hotkeys",
 			Self::Guests => "Guests",
+			Self::Remote => "Remote",
 			Self::Advanced => "Advanced",
 		}
 	}
@@ -141,6 +146,7 @@ impl Setting {
 			Self::Recording => Icon::Record,
 			Self::Hotkeys => Icon::Hotkeys,
 			Self::Guests => Icon::Guests,
+			Self::Remote => Icon::Phone,
 			Self::Advanced => Icon::Advanced,
 		}
 	}
@@ -174,6 +180,7 @@ impl Setting {
 				("Link lifetime", &["expiry", "expires"]),
 				("Appear on their own", &["tile"]),
 			],
+			Self::Remote => &[],
 			Self::Advanced => &[
 				("Publish a scene as its own broadcast", &[]),
 				("Publish a source independently", &[]),
@@ -192,6 +199,7 @@ impl Setting {
 			Self::Recording => &["folder", "record"],
 			Self::Hotkeys => &["keys", "shortcuts", "bind"],
 			Self::Guests => &["invite", "join", "room"],
+			Self::Remote => &["phone", "pair", "qr", "control"],
 			Self::Advanced => &["publish"],
 		}
 	}
@@ -204,6 +212,9 @@ impl Setting {
 			Self::Recording => "What the record button saves, from any page.",
 			Self::Hotkeys => "Kept on this computer, not in the show.",
 			Self::Guests => "People who join from a web page, appearing as sources. Kept beside the show.",
+			Self::Remote => {
+				"Phones that drive the show from a page their code opens: the scenes, TAKE, and the mutes. Kept beside the room key."
+			}
 			Self::Advanced => "Things most shows never touch.",
 		}
 	}
@@ -330,6 +341,8 @@ impl Studio {
 			bound: BTreeMap::new(),
 			guest: String::new(),
 			shown: None,
+			phone: String::new(),
+			paired: None,
 			message: None,
 			faults: Vec::new(),
 			reloads: 0,
@@ -771,6 +784,10 @@ struct Panels {
 	guest: String,
 	/// The join link on screen.
 	shown: Option<Shown>,
+	/// The name typed for the next remote.
+	phone: String,
+	/// The remote's link on screen.
+	paired: Option<Shown>,
 	/// The outcome of the last action that happened nowhere in particular,
 	/// and when, shown for a while.
 	message: Option<(Result<String, String>, kio::clock::Instant)>,
