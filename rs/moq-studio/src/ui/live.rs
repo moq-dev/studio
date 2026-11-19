@@ -451,7 +451,7 @@ impl Panels {
 					measure(&self.controls, &self.runtime, ceiling)
 				}
 				Err(_) => Measuring {
-					task: Task::Done(Err("nothing encodes, so nothing would be sent".into())),
+					task: Task::Done(Err("the encoders did not open, so what they send is not known".into())),
 					_stop: None,
 				},
 			});
@@ -705,9 +705,14 @@ impl Panels {
 				mark: Outcome::Failed,
 				icon: Icon::Encoder,
 				name: "Encoder",
-				said: format!("Nothing encodes {} here: {err}.", named(canvas)),
+				said: format!("The encoders did not open: {err}."),
 				level: None,
-				fixes: send.clone().into_iter().collect(),
+				// A smaller picture frees no encode session, which a second
+				// picture is likelier to be refused for.
+				fixes: match encodes {
+					1 => send.clone().into_iter().collect(),
+					_ => Vec::new(),
+				},
 			},
 		});
 

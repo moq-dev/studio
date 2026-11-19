@@ -178,8 +178,8 @@ struct Lane {
 }
 
 impl Lane {
-	/// Open the exporter the program would for `canvas`, which holds its
-	/// hardware encode session until this is dropped.
+	/// Open the exporter the program would for `canvas`, which settles its
+	/// encoder; the encode session opens on the burst's first frame.
 	async fn open(gpu: &engine::Gpu, canvas: Canvas) -> anyhow::Result<Self> {
 		let config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
 		let (exporter, config, rendition) = moq_video::render::export::Exporter::new(&gpu.device, &gpu.queue, &config)
@@ -212,20 +212,21 @@ impl Lane {
 		})
 	}
 
-	/// Encode frame `index` of a burst, and how long it took, opening the
-	/// encoder into `session` on the first.
+	/// Encode frame `index` of a burst, and how long it took from `handed`,
+	/// when it went to every encode, opening the encoder into `session` on the
+	/// first. A thread that was slow to start counts against the encode.
 	fn frame(
 		&mut self,
 		session: &mut Option<moq_video::encode::Encoder>,
 		gpu: &engine::Gpu,
 		picture: &Picture,
 		index: u32,
+		handed: kio::clock::Instant,
 	) -> anyhow::Result<Duration> {
 		let session = match session {
 			Some(session) => session,
 			None => session.insert(moq_video::encode::Encoder::new(&self.config)?),
 		};
-		let started = kio::clock::now();
 		picture.pan(gpu, &self.target, index);
 		let period = Duration::from_secs(1) / self.canvas.framerate;
 		let timestamp = moq_net::Timestamp::try_from(period * index)?;
@@ -245,7 +246,7 @@ impl Lane {
 		if index == BURST {
 			session.flush()?;
 		}
-		Ok(started.elapsed())
+		Ok(handed.elapsed())
 	}
 
 	fn finish(self, frame: Duration) -> Encoding {
@@ -262,8 +263,9 @@ impl Lane {
 /// at once: each frame is handed to every encode together, one thread each, as
 /// the compositor hands the program's encode threads theirs.
 async fn probe_together(gpu: &engine::Gpu, picture: &Picture, canvases: &[Canvas]) -> anyhow::Result<Vec<Encoding>> {
-	// Every exporter opens before any is timed, so all the sessions are held,
-	// as the program holds them, and a refused one fails the check outright.
+	// Every exporter settles its encoder before any is timed. Each thread opens
+	// its session on frame 0 and holds it through the burst, as the program's
+	// encode threads do, so a refused one fails the check.
 	let mut lanes = Vec::new();
 	for canvas in canvases {
 		lanes.push(Lane::open(gpu, *canvas).await?);
@@ -274,12 +276,16 @@ async fn probe_together(gpu: &engine::Gpu, picture: &Picture, canvases: &[Canvas
 		let workers: Vec<_> = lanes
 			.into_iter()
 			.map(|mut lane| {
-				let (feed, indexes) = mpsc::channel::<u32>();
+				let (feed, indexes) = mpsc::channel::<(u32, kio::clock::Instant)>();
 				let (done, took) = mpsc::channel();
 				let thread = scope.spawn(move || {
 					let mut session = None;
-					for index in indexes {
-						if done.send(lane.frame(&mut session, gpu, picture, index)).is_err() {
+					let canvas = lane.canvas;
+					for (index, handed) in indexes {
+						let result = lane
+							.frame(&mut session, gpu, picture, index, handed)
+							.with_context(|| format!("cannot encode {}", describe(canvas)));
+						if done.send(result).is_err() {
 							break;
 						}
 					}
@@ -289,8 +295,9 @@ async fn probe_together(gpu: &engine::Gpu, picture: &Picture, canvases: &[Canvas
 			})
 			.collect();
 		let frames = time(&budgets, |index| {
+			let handed = kio::clock::now();
 			for (feed, ..) in &workers {
-				feed.send(index).context("an encode thread ended")?;
+				feed.send((index, handed)).context("an encode thread ended")?;
 			}
 			workers
 				.iter()
