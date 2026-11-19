@@ -1373,7 +1373,7 @@ mod tests {
 				.iter()
 				.map(|(name, _, _, listing)| {
 					let mut listing = listing.snapshot();
-					listing.media = Default::default();
+					listing.sync = Default::default();
 					(name.clone(), listing)
 				})
 				.collect();
