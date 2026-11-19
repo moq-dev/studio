@@ -329,6 +329,7 @@ fn collection(layout: Option<&Layout>, size: Canvas) -> anyhow::Result<Collectio
 	let mut audio = Vec::new();
 	for picture in layout.iter().flat_map(|layout| &layout.pictures) {
 		items.push(Item {
+			id: moq_scene::Id::fresh(),
 			source: layer(&picture.item.source),
 			..picture.item.clone()
 		});
@@ -397,7 +398,7 @@ impl Watch {
 				},
 				None => CANVAS,
 			};
-			let collection = match collection(self.layout.as_ref(), size) {
+			let mut collection = match collection(self.layout.as_ref(), size) {
 				Ok(collection) => collection,
 				Err(err) => {
 					tracing::error!(error = format!("{err:#}"), "playing the program alone");
@@ -409,6 +410,9 @@ impl Watch {
 			if collection.canvas != self.collection.canvas {
 				self.compositor.fit(&collection)?;
 			}
+			// A picture the last layout showed too is the same layer, so its
+			// slot glides on from where it was.
+			collection.recognize(&self.collection);
 			self.collection = collection;
 			for driver in self.sources.sync(&self.collection) {
 				engine::spawn(driver);

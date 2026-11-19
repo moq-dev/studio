@@ -164,8 +164,8 @@ impl Panels {
 		// Where the picture draws it: a layer keeping clear where it was
 		// placed, which a move by hand starts from. Keeping clear places only
 		// the landscape picture, so its switch and what it saw speak of that.
-		let placement = keep::placement(&state, &picked.layer, picked.index, &item, Format::Landscape);
-		let drawn = keep::placement(&state, &picked.layer, picked.index, &item, format);
+		let placement = keep::placement(&state, &picked.layer, &item, Format::Landscape);
+		let drawn = keep::placement(&state, &picked.layer, &item, format);
 		let mut rect = drawn.map_or(rest.rect, |placement| placement.drawn(rest.rect));
 		// A layer the picture BUILD edits never shows has no place there.
 		let placeable = item.shown_in(collection.format_of(&picked.layer, format));
@@ -606,7 +606,7 @@ impl Panels {
 						keep_clear: kept,
 						..item.clone()
 					};
-					keep::hold(&mut state, &picked.layer, picked.index, &was, format);
+					keep::hold(&mut state, &picked.layer, &was, format);
 				}
 				edit(&mut state, label, gesture, |draft| {
 					draft.set_item(&picked.layer, picked.index, item)

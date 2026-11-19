@@ -881,6 +881,9 @@ mod tests {
 		show.scenes[1].arrangement = Arrangement::Grid;
 		let mut copy = show.scenes[1].clone();
 		copy.name = "Row".into();
+		for item in &mut copy.items {
+			item.id = crate::Id::fresh();
+		}
 		copy.arrangement = Arrangement::Column;
 		show.scenes.push(copy);
 		let turned = turned(&show);

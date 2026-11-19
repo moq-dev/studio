@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -153,6 +154,35 @@ impl Collection {
 			.iter()
 			.map(|scene| (Layer::scene(&scene.name), scene.items.as_slice()));
 		scenes.chain([(Layer::top(), self.top.as_slice())])
+	}
+
+	/// Give each item the [identity](Item::id) of the one it was in `before`,
+	/// as a reload of the scene file, which makes each fresh, needs. Each
+	/// layer is matched with the one of its name, or a renamed scene with
+	/// the scene no longer there it shares the most items with, and their
+	/// items in order, as [`recognized`] matches them: a layer added or
+	/// removed among them, or one edited, leaves the rest themselves, even
+	/// two alike. An item none matches stays new.
+	pub fn recognize(&mut self, before: &Collection) {
+		recognized(&before.top, &mut self.top);
+		let mut gone: Vec<&Scene> = (before.scenes.iter())
+			.filter(|was| self.scene(&was.name).is_none())
+			.collect();
+		for scene in &mut self.scenes {
+			let was = match before.scene(&scene.name) {
+				Some(was) => was,
+				None => {
+					let shared = |was: &&Scene| recognized(&was.items, &mut scene.items.clone());
+					let most = (gone.iter().enumerate())
+						.map(|(at, was)| (shared(was), at))
+						.filter(|(shared, _)| *shared > 0)
+						.min_by_key(|(shared, at)| (std::cmp::Reverse(*shared), *at));
+					let Some((_, at)) = most else { continue };
+					gone.remove(at)
+				}
+			};
+			recognized(&was.items, &mut scene.items);
+		}
 	}
 
 	/// The scene recordings hold, or `None` for the program.
@@ -484,8 +514,17 @@ impl Collection {
 				first.name, second.name
 			)));
 		}
+		let mut ids = BTreeSet::new();
 		for (layer, items) in self.layers() {
 			for item in items {
+				// Only a bug copies a layer without a fresh identity; refused,
+				// it never shares one layer's state with another.
+				if !ids.insert(item.id) {
+					return Err(Error::Invalid(format!(
+						"`{}` in {layer} is another layer under the same identity",
+						item.source
+					)));
+				}
 				let Some(source) = self.sources.get(&item.source) else {
 					return Err(Error::Invalid(format!(
 						"{layer} places `{}`, which is not a source",
@@ -1256,9 +1295,18 @@ pub enum Nested<'a> {
 /// Every item naming the same source shows the same capture, with the
 /// source's filters: the items are linked. A [`Source::Clone`] shows another
 /// source's capture with filters of its own.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Two items equal when all but their [`id`](Self::id) does, so a reload or
+/// a change check reads the file's content alone.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Item {
+	/// Who it is while the studio runs: a clone, and so an edit made to it
+	/// or an undo putting it back, is the same item, while a copy that is
+	/// another, such as a duplicate or a paste, takes a [fresh](Id::fresh)
+	/// one. The scene file never saves it, so loading one makes each fresh.
+	#[serde(skip, default = "Id::fresh")]
+	pub id: Id,
 	/// The [`Collection::sources`] entry to draw.
 	pub source: String,
 	/// Where on the canvas, stretched to fill it. Empty, and left out of the
@@ -1322,10 +1370,63 @@ pub struct Item {
 	pub keep_clear: Option<KeepClear>,
 }
 
+impl PartialEq for Item {
+	fn eq(&self, other: &Self) -> bool {
+		// Listed whole, so a field added later is compared or left out on
+		// purpose.
+		let Self {
+			id: _,
+			source,
+			rect,
+			slot,
+			format,
+			portrait,
+			auto,
+			visible,
+			locked,
+			shape,
+			crop,
+			filters,
+			blend,
+			keyframes,
+			keep_clear,
+		} = self;
+		*source == other.source
+			&& *rect == other.rect
+			&& *slot == other.slot
+			&& *format == other.format
+			&& *portrait == other.portrait
+			&& *auto == other.auto
+			&& *visible == other.visible
+			&& *locked == other.locked
+			&& *shape == other.shape
+			&& *crop == other.crop
+			&& *filters == other.filters
+			&& *blend == other.blend
+			&& *keyframes == other.keyframes
+			&& *keep_clear == other.keep_clear
+	}
+}
+
+/// An [`Item`]'s identity while the studio runs, unique among every item
+/// made since it started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Id(u64);
+
+impl Id {
+	/// One no item has had yet.
+	pub fn fresh() -> Self {
+		static NEXT: AtomicU64 = AtomicU64::new(0);
+		Self(NEXT.fetch_add(1, Ordering::Relaxed))
+	}
+}
+
 impl Item {
-	/// `source` shown, uncropped, unfiltered, and still, at `rect`.
+	/// `source` shown, uncropped, unfiltered, and still, at `rect`: a new
+	/// item.
 	pub fn new(source: impl Into<String>, rect: Rect) -> Self {
 		Self {
+			id: Id::fresh(),
 			source: source.into(),
 			rect,
 			slot: None,
@@ -1352,6 +1453,7 @@ impl Item {
 		let mut filters = self.filters.clone();
 		filters.extend(offset.filters);
 		Cow::Owned(Self {
+			id: self.id,
 			source: self.source.clone(),
 			slot: self.slot,
 			format: self.format,
@@ -2461,6 +2563,54 @@ impl Default for Audio {
 	}
 }
 
+/// Give each item of `new` the identity of the one of `old` it was,
+/// returning how many it found: the longest run of items in order showing
+/// the same source at the same rect, then of the rest, the longest showing
+/// the same source.
+pub(crate) fn recognized(old: &[Item], new: &mut [Item]) -> usize {
+	let mut taken = vec![false; old.len()];
+	let mut found = vec![false; new.len()];
+	for same_rect in [true, false] {
+		let left: Vec<usize> = (0..old.len()).filter(|&at| !taken[at]).collect();
+		let missing: Vec<usize> = (0..new.len()).filter(|&at| !found[at]).collect();
+		let same = |was: &Item, item: &Item| was.source == item.source && (!same_rect || was.rect == item.rect);
+		for (was, at) in common(&left, &missing, |was, at| same(&old[was], &new[at])) {
+			new[at].id = old[was].id;
+			taken[was] = true;
+			found[at] = true;
+		}
+	}
+	found.iter().filter(|&&found| found).count()
+}
+
+/// The pairs of the longest common subsequence of `a` and `b`, as `same`
+/// matches their elements, in order.
+fn common(a: &[usize], b: &[usize], same: impl Fn(usize, usize) -> bool) -> Vec<(usize, usize)> {
+	// How long the common run of `a[i..]` and `b[j..]` is.
+	let mut runs = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+	for i in (0..a.len()).rev() {
+		for j in (0..b.len()).rev() {
+			runs[i][j] = match same(a[i], b[j]) {
+				true => runs[i + 1][j + 1] + 1,
+				false => runs[i + 1][j].max(runs[i][j + 1]),
+			};
+		}
+	}
+	let (mut i, mut j) = (0, 0);
+	let mut pairs = Vec::new();
+	while i < a.len() && j < b.len() {
+		if same(a[i], b[j]) && runs[i][j] == runs[i + 1][j + 1] + 1 {
+			pairs.push((a[i], b[j]));
+			(i, j) = (i + 1, j + 1);
+		} else if runs[i + 1][j] >= runs[i][j + 1] {
+			i += 1;
+		} else {
+			j += 1;
+		}
+	}
+	pairs
+}
+
 fn is_center(pan: &f32) -> bool {
 	*pan == 0.0
 }
@@ -2510,6 +2660,52 @@ impl FromStr for Rgba {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A reload of an unchanged file gives each item the identity it had,
+	/// two showing one source at one rect included; one the file adds under
+	/// them, or a rename of their scene, takes none from another.
+	#[test]
+	fn a_reload_recognizes_each_item() {
+		let mut before = Collection::new();
+		let color = Source::Color { color: Rgba([0; 4]) };
+		before.sources.insert("camera".into(), color.clone());
+		before.sources.insert("logo".into(), color);
+		let corner = Rect {
+			x: 10.0,
+			y: 10.0,
+			width: 20.0,
+			height: 20.0,
+		};
+		let camera = Item::new("camera", corner);
+		let copy = Item {
+			id: Id::fresh(),
+			..camera.clone()
+		};
+		let moved = Item::new("camera", Rect { x: 50.0, ..corner });
+		before.scenes[0].items = vec![camera, copy, moved];
+		before.top.push(Item::new("logo", corner));
+		let ids = |collection: &Collection| -> Vec<Id> {
+			let layers = collection.layers().flat_map(|(_, items)| items);
+			layers.map(|item| item.id).collect()
+		};
+
+		let mut reloaded = Collection::from_toml(&before.to_toml().unwrap()).unwrap();
+		assert!(
+			ids(&reloaded).iter().all(|id| !ids(&before).contains(id)),
+			"loaded fresh"
+		);
+		reloaded.recognize(&before);
+		assert_eq!(ids(&reloaded), ids(&before));
+
+		let mut edited = Collection::from_toml(&before.to_toml().unwrap()).unwrap();
+		edited.scenes[0].name = "Renamed".into();
+		edited.scenes[0].items.insert(0, Item::new("logo", corner));
+		edited.scenes[0].items[3].rect.y = 70.0;
+		edited.recognize(&before);
+		let added = edited.scenes[0].items[0].id;
+		assert!(!ids(&before).contains(&added), "an added layer is new");
+		assert_eq!(ids(&edited)[1..], ids(&before)[..]);
+	}
 
 	fn example() -> Collection {
 		let mut collection = Collection::new();
@@ -4005,6 +4201,7 @@ rect = { x = 1700, y = 40, width = 160, height = 90 }
 		refused(
 			&|c| {
 				let mut item = c.scenes[0].items[0].clone();
+				item.id = Id::fresh();
 				item.source = "Game".into();
 				c.top.push(item);
 			},
@@ -4048,6 +4245,7 @@ rect = { x = 1700, y = 40, width = 160, height = 90 }
 		let mut collection = Collection::from_toml(SLOTS).unwrap();
 		collection.sources.insert("Cam".into(), Source::Camera { id: None });
 		let mut guest = collection.scenes[0].items[1].clone();
+		guest.id = Id::fresh();
 		guest.source = "Cam".into();
 		collection.scenes[0].items.insert(2, guest);
 		collection.validate().unwrap();
