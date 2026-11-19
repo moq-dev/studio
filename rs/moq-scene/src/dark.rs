@@ -178,9 +178,10 @@ impl Probe {
 
 	/// Judge the read that came back, if one did, and read `picture`, the
 	/// capture's newest, if it is new and the last read was at least
-	/// [`INTERVAL`](crate::readback::INTERVAL) ago. `picture` needs `COPY_SRC`. A camera or window that
-	/// stops delivering is not read, though a Linux screen capture repeats
-	/// its last picture while it stands still, and is read each time.
+	/// [`INTERVAL`](crate::readback::INTERVAL) ago. `picture` needs
+	/// `COPY_SRC`. A camera or window that stops delivering is not read,
+	/// though a Linux screen capture repeats its last picture while it stands
+	/// still, and is read each time.
 	///
 	/// A capture that is not `live`, such as one reopening, is not dark, and
 	/// forgets its last good picture and what it is reading, so nothing from
