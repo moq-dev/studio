@@ -350,7 +350,13 @@ async fn instance(broadcast: moq_net::broadcast::Consumer, read: watch::Sender<R
 				read.send_modify(|read| read.push(None, None));
 				return Ok(());
 			}
-			Err(hang::Error::Moq(err)) => return Err(err.into()),
+			// The program plays alone from here, as at the catalog's end, rather
+			// than under the last composition read for as long as the broadcast
+			// stays announced.
+			Err(hang::Error::Moq(err)) => {
+				read.send_modify(|read| read.push(None, None));
+				return Err(err.into());
+			}
 			// Refused for the rest of this instance.
 			Err(err) => {
 				refuse(err.to_string());
@@ -782,6 +788,27 @@ mod tests {
 		assert_eq!(take(), Some(None), "the program alone");
 		assert!(read.borrow().pending.is_empty());
 		reader.abort();
+	}
+
+	/// Once the composition's catalog fails, as when a relay drops its
+	/// subscription, the program plays alone at once, as at its end.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_catalog_plays_the_program_alone() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+			.unwrap();
+		let mut catalog = moq_json::snapshot::Producer::new(track.clone(), Default::default());
+		let (read, _) = watch::channel(Read::default());
+		let reader = tokio::spawn(instance(broadcast.consume(), read.clone()));
+		let mut first = hang::Catalog::<composition::Ext>::default();
+		first.ext.composition = Some(composition(Duration::ZERO));
+		catalog.update(moq_json::Timed::new(&first, stamp(1))).unwrap();
+		pending(&read, 1).await;
+
+		track.abort(moq_net::Error::Cancel).unwrap();
+		alone(&read).await;
+		assert!(reader.await.unwrap().is_err(), "a transport failure");
 	}
 
 	/// The catalog of a composition of another version, as a newer studio

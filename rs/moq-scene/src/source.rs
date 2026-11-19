@@ -220,6 +220,11 @@ struct Clock {
 /// holds no more decoder output than this.
 const QUEUED: usize = 3;
 
+/// How far past its arrival a layer's media can be due: its offset carries
+/// the studio's playout of its broadcast, up to [`MAX_DELAY`], and a viewer
+/// plays the program up to as far behind again.
+const LAYER_DELAY: Duration = MAX_DELAY.saturating_mul(2);
+
 /// What a running source is doing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1531,7 +1536,7 @@ impl Driver {
 		options.decoder.output = self.context.output;
 		options.delay = moq_video::decode::Delay {
 			min: Some(VIDEO_DELAY),
-			max: Some(MAX_DELAY),
+			max: Some(LAYER_DELAY),
 		};
 		let mut consumer = moq_video::decode::Consumer::new(broadcast, &config, name, options).await?;
 		let mut offsets = self.offset.clone();
@@ -1592,7 +1597,7 @@ impl Driver {
 		options.start = moq_audio::decode::Start::Latest;
 		options.delay = moq_audio::decode::Delay {
 			min: None,
-			max: Some(MAX_DELAY),
+			max: Some(LAYER_DELAY),
 		};
 		options.output.format = moq_audio::Format::F32;
 		options.output.sample_rate = Some(bus.sample_rate);
@@ -1639,7 +1644,7 @@ impl Driver {
 						let now = kio::clock::now();
 						let due = shift(frame.timestamp, *offsets.borrow()).and_then(|at| schedule.due(at));
 						let placed = !gone(due, length(&frame, bus), now, STRETCH)
-							&& due.is_some_and(|sounds| sounds <= now.saturating_add(MAX_DELAY));
+							&& due.is_some_and(|sounds| sounds <= now.saturating_add(LAYER_DELAY));
 						if placed {
 							queue.push_back(frame);
 						}
@@ -3140,7 +3145,7 @@ pub(crate) mod test {
 
 #[cfg(test)]
 mod tests {
-	use super::test::{Still, context, local, start, until, until_time, video};
+	use super::test::{Still, context, listen, local, start, until, until_time, video};
 	use super::*;
 	use crate::collection::{Audio, Rgba};
 
@@ -3839,6 +3844,72 @@ mod tests {
 			collection.audio_scenes[0].sounds.insert("cam".into());
 			assert!(sources.sync(&collection).is_empty(), "opened again");
 			until(|| demand.wanted().is_some().then_some(())).await;
+		})
+		.await;
+	}
+
+	/// A layer's sound sounds when its offset puts it more than
+	/// [`MAX_DELAY`] past its arrival, as the studio's playout carried in the
+	/// offset and a viewer's own playout add up to.
+	#[tokio::test(start_paused = true)]
+	async fn a_layer_sounds_two_playouts_late() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (mut context, origin) = context(dir.path());
+			let (bus, driver) = Bus::new(Default::default()).unwrap();
+			let mut at = kio::clock::now();
+			let (mut mixer, mixed) = Mixer::new(driver, at);
+			context.bus = bus;
+			context.mixed = mixed;
+			let mut live = live(&origin, false).await;
+			let mut cam = live_at(&origin, "room/cam", true).await;
+			let mut collection = collection();
+			collection.sources.insert(
+				"cam".into(),
+				Source::Layer {
+					clock: "guest".into(),
+					path: "room/cam".into(),
+					instance: None,
+					offset: 2_500_000,
+				},
+			);
+			collection.audio_scenes[0].sounds.insert("cam".into());
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
+			let demand = cam.audio.as_ref().unwrap().demand();
+			until(|| demand.wanted().is_some().then_some(())).await;
+
+			until_time(kio::clock::now()).await;
+			let arrived = kio::clock::now();
+			picture(&mut live.video, &mut live.encoder, 1_000);
+			let clock = sources.get("guest").unwrap().clock.clone().unwrap();
+			until(|| clock.due(moq_net::Timestamp::from_millis(1_000).unwrap())).await;
+			// 20 ms frames of a steady half-scale tone at the bus's 48 kHz
+			// stereo, stamped beside the program's picture.
+			let loud: Vec<u8> = std::iter::repeat_n(0.5f32.to_le_bytes(), 960 * 2).flatten().collect();
+			let audio = cam.audio.as_mut().unwrap();
+			for millis in (1_000..1_400).step_by(20) {
+				let stamp = moq_net::Timestamp::from_millis(millis).unwrap();
+				audio.write(&moq_audio::Frame::new(loud.clone().into(), stamp)).unwrap();
+			}
+			let before = listen(
+				&mut mixer,
+				&program,
+				&mut at,
+				arrived.saturating_add(Duration::from_secs(2)),
+			)
+			.await;
+			assert_eq!(before, 0.0, "sounded before its moment");
+			let heard = listen(
+				&mut mixer,
+				&program,
+				&mut at,
+				arrived.saturating_add(Duration::from_secs(3)),
+			)
+			.await;
+			assert!(heard > 0.0, "dropped as too far ahead");
 		})
 		.await;
 	}

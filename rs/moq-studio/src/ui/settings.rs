@@ -1223,7 +1223,7 @@ impl Panels {
 			let sources: Vec<String> = collection
 				.sources
 				.iter()
-				.filter(|(_, source)| source.publishes())
+				.filter(|(_, source)| source.independent())
 				.map(|(name, _)| name.clone())
 				.collect();
 			(collection.scenes.clone(), sources, collection.published.clone())
@@ -1259,7 +1259,7 @@ impl Panels {
 		row(
 			ui,
 			"Publish a source independently",
-			"Viewers and services fetch it on its own. It leaves the program and every audio scene.",
+			"Viewers and services fetch it on its own. It leaves the program and the audio the studio encodes, though Listen still hears it.",
 			|ui| {
 				let others = sources.iter().filter(|name| !published.contains(*name));
 				add_menu(

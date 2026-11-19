@@ -818,7 +818,10 @@ filled where the strip is sent into it, the accent's color for the one the
 stream carries; ringed where it is heard there only through another audio
 scene; and faint where it is not heard. A click sends it in or takes it out.
 An audio scene shows a dash under its own strip and under any it holds, which
-it cannot be sent back into. **Routes** shows the same sends as a matrix, a
+it cannot be sent back into. A sound [published independently](#published-independently)
+keeps its dots and sends: they say where people in the studio hear it, while
+viewers hear it from its own broadcast and the audio the studio encodes
+leaves it out. **Routes** shows the same sends as a matrix, a
 row for each sound and audio scene and a column for each audio scene, with
 what each one holds at its foot.
 
@@ -1642,7 +1645,8 @@ goes once `moq play` plays compositions.
 
 - Each catalog's composition takes effect when the program plays the frame
   the catalog is stamped with, a catalog without one plays the program alone
-  from there, and a composition's pictures' keyframes play from its `start`.
+  from there, as does a catalog that ends or fails at once, and a
+  composition's pictures' keyframes play from its `start`.
 - Each source plays its own broadcast on the program's clock, its timestamps
   moved by its `offset`: a picture shows when the program's picture stamped
   alike does, and a sound plays with the program's sound stamped alike, at
