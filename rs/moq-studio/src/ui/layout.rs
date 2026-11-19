@@ -259,6 +259,28 @@ pub fn fit(rect: Rect, shape: f32) -> Rect {
 	Rect::from_center_size(rect.center(), size.max(Vec2::ZERO))
 }
 
+/// The landscape and portrait pictures of a show going out in both, of
+/// `shapes` (width over height), side by side `gap` apart: as tall as fits
+/// in `rect`, and centered in it.
+pub fn pair(rect: Rect, shapes: [f32; 2], gap: f32) -> [Rect; 2] {
+	let [landscape, portrait] = shapes;
+	let tall = rect
+		.height()
+		.min((rect.width() - gap).max(0.0) / (landscape + portrait))
+		.max(0.0);
+	let wide = tall * (landscape + portrait) + gap;
+	let min = pos2(rect.center().x - wide / 2.0, rect.center().y - tall / 2.0);
+	let first = Rect::from_min_size(min, vec2(tall * landscape, tall));
+	let second = Rect::from_min_size(pos2(first.right() + gap, min.y), vec2(tall * portrait, tall));
+	[first, second]
+}
+
+/// The shape, width over height, of the pair [`pair`] places, with a gap
+/// `gap` of their height between them.
+pub fn pair_shape(shapes: [f32; 2], gap: f32) -> f32 {
+	shapes[0] + shapes[1] + gap
+}
+
 fn area(rect: Rect) -> f32 {
 	rect.width().max(0.0) * rect.height().max(0.0)
 }
@@ -284,6 +306,23 @@ mod tests {
 			Layout::new(vec2(711.0, 872.0), LANDSCAPE, 4).arrangement,
 			Arrangement::Stacked
 		);
+	}
+
+	/// Both pictures of a show going out in both fit side by side, as tall
+	/// as the room allows, with the gap between them.
+	#[test]
+	fn a_pair_fits_side_by_side() {
+		let room = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 400.0));
+		let [landscape, portrait] = pair(room, [LANDSCAPE, PORTRAIT], 20.0);
+		assert!(room.contains_rect(landscape.union(portrait)));
+		assert_eq!(landscape.height(), portrait.height());
+		assert!((portrait.left() - landscape.right() - 20.0).abs() < 1e-3);
+		assert!((landscape.width() / landscape.height() - LANDSCAPE).abs() < 1e-3);
+		assert!((portrait.width() / portrait.height() - PORTRAIT).abs() < 1e-3);
+		// Too narrow for the full height, the pair is as wide as the room.
+		let narrow = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0));
+		let [landscape, portrait] = pair(narrow, [LANDSCAPE, PORTRAIT], 20.0);
+		assert!((portrait.right() - landscape.left() - 600.0).abs() < 1e-3);
 	}
 
 	/// For every size from the smallest up, of every shape of picture and

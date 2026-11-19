@@ -124,6 +124,9 @@ impl Going {
 /// stream for the uplink.
 struct Measuring {
 	task: Task<Result<Rate, String>>,
+	/// How many pictures its ceiling was sized for, so turning a second on
+	/// measures again, past what both send.
+	encodes: u32,
 	/// Dropping it ends the measurement.
 	_stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -134,16 +137,22 @@ fn named(canvas: Canvas) -> String {
 }
 
 /// A smaller canvas to send, if there is one worth offering: 720p from
-/// anything larger, then 30 frames a second rather than more.
+/// anything larger, keeping it wider than tall, or taller, as it was, then
+/// 30 frames a second rather than more.
 fn smaller(canvas: Canvas) -> Option<Canvas> {
 	let short = canvas.width.min(canvas.height);
 	if short > 720 {
 		let scale = |side: u32| (u64::from(side) * 720 / u64::from(short)) as u32 & !1;
-		return Some(Canvas {
-			width: scale(canvas.width),
-			height: scale(canvas.height),
-			framerate: canvas.framerate,
-		});
+		let (width, height) = (scale(canvas.width), scale(canvas.height));
+		// Rounding a nearly square canvas can make it square, which a show
+		// going out in both formats cannot turn.
+		if width.cmp(&height) == canvas.width.cmp(&canvas.height) {
+			return Some(Canvas {
+				width,
+				height,
+				framerate: canvas.framerate,
+			});
+		}
 	}
 	(canvas.framerate > 30).then_some(Canvas {
 		framerate: 30,
@@ -294,7 +303,8 @@ impl Panels {
 			return;
 		}
 		ctx.request_repaint_after(Duration::from_millis(100));
-		let (show, program, canvas) = {
+		let broadcast = self.controls.stream.lock().unwrap().broadcast().to_string();
+		let (show, program, canvas, both) = {
 			let state = self.engine.state.lock().unwrap();
 			let path = self.engine.autosave.path();
 			let show = path
@@ -303,7 +313,15 @@ impl Panels {
 				.to_string_lossy()
 				.into_owned();
 			let program = state.compositor.program_scene().map(str::to_string);
-			(show, program, state.collection().canvas)
+			let collection = state.collection();
+			// Each relay carries both pictures, each its own broadcast.
+			let both = collection.portrait.then(|| {
+				format!(
+					"Both formats go to each relay: landscape at {broadcast}, portrait at {broadcast}/{}.",
+					moq_scene::PORTRAIT
+				)
+			});
+			(show, program, collection.canvas, both)
 		};
 		// Not while going live, which keeps the sheet waiting on it, and
 		// whose encoders a new check would compete with: once it ends.
@@ -334,6 +352,10 @@ impl Panels {
 			ui.add_space(10.0);
 			heading(ui, "Where it goes");
 			let count = self.destinations(ui, &mut settings);
+			if let Some(both) = &both {
+				ui.add_space(4.0);
+				ui.label(egui::RichText::new(both).font(kit::ui(12.0)).color(kit::DIM));
+			}
 			ui.add_space(10.0);
 			heading(ui, "Checks");
 			for (index, check) in checks.iter().enumerate() {
@@ -405,8 +427,15 @@ impl Panels {
 	/// Collect the checks that finished, and start measuring the connection
 	/// once the encoder says what it sends.
 	fn advance_going(&mut self) {
+		let encodes = match self.engine.state.lock().unwrap().collection().portrait {
+			true => 2,
+			false => 1,
+		};
 		let Some(going) = &mut self.going else { return };
 		going.encoder.poll();
+		if going.uplink.as_ref().is_some_and(|uplink| uplink.encodes < encodes) {
+			going.uplink = None;
+		}
 		if going.uplink.is_none()
 			&& let Task::Done(encoder) = &going.encoder
 		{
@@ -414,11 +443,15 @@ impl Panels {
 				Ok(encoding) => {
 					// Up to past what it sends, so a connection that carries
 					// it says so rather than stopping at its rate.
-					let ceiling = encoding.total().scaled(1.0 / setup::headroom());
-					measure(&self.controls, &self.runtime, ceiling)
+					let ceiling = encoding.total_of(encodes).scaled(1.0 / setup::headroom());
+					Measuring {
+						encodes,
+						..measure(&self.controls, &self.runtime, ceiling)
+					}
 				}
 				Err(_) => Measuring {
 					task: Task::Done(Err("nothing encodes, so nothing would be sent".into())),
+					encodes,
 					_stop: None,
 				},
 			});
@@ -621,7 +654,13 @@ impl Panels {
 			},
 		});
 
-		// The encoder keeps up with the canvas.
+		// The encoder keeps up with the canvas: twice over, a picture in each
+		// format, while the show goes out in both.
+		let encodes = if collection.portrait { 2 } else { 1 };
+		let formats = match encodes {
+			1 => String::new(),
+			_ => " in both formats".to_string(),
+		};
 		let canvas = going.canvas;
 		let send = smaller(canvas).map(|smaller| (format!("Send {} instead", named(smaller)), Fix::Send(smaller)));
 		let encoding = match &going.encoder {
@@ -637,11 +676,11 @@ impl Panels {
 				level: None,
 				fixes: Vec::new(),
 			},
-			Task::Done(Ok(encoding)) if encoding.keeps_up(canvas) => Check {
+			Task::Done(Ok(encoding)) if encoding.keeps_up_all(canvas, encodes) => Check {
 				mark: Outcome::Passed,
 				icon: Icon::Encoder,
 				name: "Encoder",
-				said: format!("Keeps up with {}", named(canvas)),
+				said: format!("Keeps up with {}{formats}", named(canvas)),
 				level: None,
 				fixes: Vec::new(),
 			},
@@ -650,8 +689,8 @@ impl Panels {
 				icon: Icon::Encoder,
 				name: "Encoder",
 				said: format!(
-					"The encoder takes {} ms a frame, too slow for {}. Viewers would see it stutter.",
-					encoding.frame.as_millis(),
+					"The encoder takes {} ms a frame, too slow for {}{formats}. Viewers would see it stutter.",
+					(encoding.frame * encodes).as_millis(),
 					named(canvas)
 				),
 				level: None,
@@ -696,14 +735,18 @@ impl Panels {
 				fixes: Vec::new(),
 			},
 			(Some(Task::Done(Ok(carries))), Some(encoding)) => {
-				let needs = encoding.total();
+				let needs = encoding.total_of(encodes);
+				let sending = match encodes {
+					1 => "the program",
+					_ => "the program in both formats",
+				};
 				match carries.scaled(setup::headroom()) >= needs {
 					true => Check {
 						mark: Outcome::Passed,
 						icon: Icon::Uplink,
 						name: "Connection",
 						said: format!(
-							"Carries {}, and the program needs {}",
+							"Carries {}, and {sending} needs {}",
 							health::rate(*carries),
 							health::rate(needs)
 						),
@@ -715,7 +758,7 @@ impl Panels {
 						icon: Icon::Uplink,
 						name: "Connection",
 						said: format!(
-							"The connection carries {} and the program needs {}. Viewers would see it stall.",
+							"The connection carries {} and {sending} needs {}. Viewers would see it stall.",
 							health::rate(*carries),
 							health::rate(needs)
 						),
@@ -1107,6 +1150,7 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 	});
 	Measuring {
 		task: task.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the measurement: {err}")))),
+		encodes: 1,
 		_stop: Some(stop),
 	}
 }
@@ -1386,4 +1430,24 @@ pub(super) fn health_word(engine: &Engine) -> (String, Color32) {
 		.then(|| super::dark::counted(report.dark, report.stalled))
 		.flatten();
 	(counted.unwrap_or_else(|| word.to_string()), dot)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// 720p from anything larger, keeping its shape, unless rounding would
+	/// make a canvas wider than tall square; then a lower frame rate.
+	#[test]
+	fn a_smaller_canvas_keeps_its_orientation() {
+		let canvas = |width, height, framerate| Canvas {
+			width,
+			height,
+			framerate,
+		};
+		assert_eq!(smaller(canvas(1920, 1080, 60)), Some(canvas(1280, 720, 60)));
+		assert_eq!(smaller(canvas(1080, 1920, 30)), Some(canvas(720, 1280, 30)));
+		assert_eq!(smaller(canvas(1082, 1080, 60)), Some(canvas(1082, 1080, 30)));
+		assert_eq!(smaller(canvas(1082, 1080, 30)), None);
+	}
 }

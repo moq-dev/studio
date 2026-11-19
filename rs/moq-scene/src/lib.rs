@@ -53,6 +53,7 @@ mod dark;
 mod edit;
 mod effect;
 pub mod file;
+mod format;
 mod glide;
 mod grant;
 pub mod layout;
@@ -60,6 +61,7 @@ mod lut;
 mod matte;
 mod media;
 mod overlay;
+pub mod place;
 mod playout;
 pub mod publish;
 pub mod replay;
@@ -69,10 +71,11 @@ pub mod source;
 pub use clip::Clip;
 pub use collection::{
 	Arrangement, Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item,
-	Keyframe, Layer, MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Slot, Source, Transition, Video,
+	KeepClear, Keyframe, Layer, MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Slot, Source, Transition, Video,
 };
 pub use compositor::{Compositor, Detail, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
+pub use format::{Format, PORTRAIT, Placement, Portrait};
 pub use grant::Grants;
 pub use scale::Scaler;
 
