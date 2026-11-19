@@ -2,9 +2,10 @@ name: macOS
 
 # Builds the macOS app bundle for each architecture, with CEF for browser
 # sources, signs it ad hoc with the release's hardened runtime and
-# entitlements, runs the browser-source tests against it, packs it into a disk
-# image, and checks the app in the image launches and lists devices. Pull
-# requests that change the packaging run it; nightly runs it against main.
+# entitlements, runs the browser-source tests against it on Apple silicon,
+# packs it into a disk image, and checks the app in the image launches and
+# lists devices. Pull requests that change the packaging run it; nightly runs
+# it against main.
 # release.yml calls it with `sign`, which signs and notarizes the app as the
 # Developer ID, then the disk image holding it, checks them again, and ships
 # the images.
@@ -77,8 +78,11 @@ jobs:
       # kept logged in, and crashing alone. One at a time, since a test finds
       # its helper among the processes this one started. The harness builds in
       # the dev profile: only the bundle it drives needs release, and a second
-      # fat-LTO build of the studio would add an hour.
+      # fat-LTO build of the studio would add an hour. Apple silicon only: the
+      # Intel runners' paravirtual GPU passes for Metal to the studio, but
+      # Chromium's GPU process cannot start ANGLE on it and the browser exits.
       - name: Browser sources
+        if: matrix.arch == 'arm64'
         env:
           MOQ_STUDIO_APP: ${{ github.workspace }}/kixel.live Studio.app
           MACOSX_DEPLOYMENT_TARGET: "13.0"
