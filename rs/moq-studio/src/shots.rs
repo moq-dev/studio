@@ -623,6 +623,67 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	quit(&engine, &runtime);
 }
 
+/// A name typed into a marker's row on REVIEW names that marker: when
+/// another marker's name is clicked next, and when a key drops a new marker
+/// above it while it is being typed. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_marker_is_named_where_it_is_typed() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	let controls = studio.controls();
+	studio.turn(Page::Review);
+	let dir = engine.recorder.dir();
+	for _ in 0..2 {
+		controls.markers.mark(&dir, kio::clock::Instant::now()).unwrap();
+	}
+	harness.run_steps(2);
+	let name = |number| controls.markers.get(number).unwrap().name;
+	// The newest first: marker 2's name, then marker 1's.
+	let field = |harness: &Harness<'_, Window>, index: usize| {
+		harness.get_all_by_role(Role::TextInput).nth(index).unwrap().focus();
+	};
+
+	field(&harness, 1);
+	harness.run_steps(1);
+	harness.event(egui::Event::Text("Opening".into()));
+	harness.run_steps(1);
+	field(&harness, 0);
+	harness.run_steps(2);
+	assert_eq!(
+		name(1).as_deref(),
+		Some("Opening"),
+		"kept when marker 2 took the typing"
+	);
+
+	harness.event(egui::Event::Text("Come".into()));
+	harness.run_steps(1);
+	// A key drops marker 3 over the row being typed in.
+	controls.press(&crate::controls::Action::Marker);
+	harness.run_steps(2);
+	harness.event(egui::Event::Text("back".into()));
+	harness.run_steps(1);
+	harness.key_press(egui::Key::Enter);
+	harness.run_steps(2);
+	assert_eq!(name(2).as_deref(), Some("Comeback"), "the typing stayed on marker 2");
+	assert_eq!(name(3), None);
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// A marker dropped by the flag beside the panic key, on air, shows on
 /// REVIEW, and a click on its row saves the seconds around it as a clip:
 /// from [`replay::BEFORE`] it to [`replay::AFTER`] it, its video starting up

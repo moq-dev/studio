@@ -1748,8 +1748,9 @@ The markers are kept beside the recordings, not in the scene file:
 `show 2026-11-18T12-00-00Z.markers.toml` for `show.toml`, named for when the
 studio opened the show, lists each marker's number, the UTC moment it was
 dropped, and its name. It is written again on every change and removed once
-no marker is left; a marker the folder refuses is kept for the session
-anyway, saying why. A session holds at most 255 markers.
+no marker is left, in the background, so a slow disk never holds up a key. A
+marker the folder refuses is kept for the session anyway, and REVIEW says why
+until a write succeeds. A session holds at most 255 markers.
 
 ## A capture gone dark
 

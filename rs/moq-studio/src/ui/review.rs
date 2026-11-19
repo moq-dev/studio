@@ -42,8 +42,8 @@ pub(super) struct Review {
 	grip: Option<Grip>,
 	/// The last outcome of a replay or clip shown, so each shows once.
 	outcome: Option<Result<String, String>>,
-	/// The marker whose name is being typed, by number, and what is typed.
-	naming: Option<(u32, String)>,
+	/// Each marker's name as typed, by number, until its field lets go.
+	drafts: BTreeMap<u32, String>,
 	/// The moment the page draws as now, held still for the window's views.
 	frozen: Option<Instant>,
 }
@@ -68,7 +68,7 @@ impl Review {
 			head: None,
 			grip: None,
 			outcome: None,
-			naming: None,
+			drafts: BTreeMap::new(),
 			frozen: None,
 		}
 	}
@@ -180,10 +180,17 @@ impl Panels {
 		);
 		let list = rect.with_min_y(rect.top() + title_height + 8.0);
 		let now = self.review.now();
+		let failure = self.controls.markers.failure();
+		self.review
+			.drafts
+			.retain(|number, _| marked.iter().any(|marker| marker.number == *number));
 		let key = self.key(&Action::Marker, ui.ctx());
 		// What a row asked for, done once the list is drawn.
 		let mut asked = None;
 		ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+			if let Some(failure) = &failure {
+				ui.label(egui::RichText::new(capitalize(failure)).color(kit::ERR));
+			}
 			if marked.is_empty() {
 				let how = match &key {
 					Some(key) => format!("Drop one with {key} or the flag beside the panic key as the show runs."),
@@ -241,29 +248,31 @@ impl Panels {
 		let when = ui.painter().layout_no_wrap(since(ago), kit::mono(11.0), kit::DIM);
 		// The name takes what the age and the two buttons leave.
 		let field = (ui.available_width() - when.size().x - 2.0 * (24.0 + 6.0) - 12.0).max(40.0);
-		let editing = self.review.naming.as_ref().is_some_and(|(at, _)| *at == marker.number);
-		let mut text = match (&self.review.naming, editing) {
-			(Some((_, text)), true) => text.clone(),
-			_ => marker.name.clone().unwrap_or_default(),
+		let mut text = match self.review.drafts.get(&marker.number) {
+			Some(draft) => draft.clone(),
+			None => marker.name.clone().unwrap_or_default(),
 		};
+		// Named for the marker, so focus stays on it when a newer one is
+		// dropped above it.
 		let edit = egui::TextEdit::singleline(&mut text)
+			.id(egui::Id::new(("marker name", marker.number)))
 			.hint_text(format!("Marker {}", marker.number))
 			.char_limit(markers::MAX_NAME)
 			.desired_width(field);
 		let response = ui.add(edit);
 		let mut asked = None;
 		if response.gained_focus() || response.changed() {
-			self.review.naming = Some((marker.number, text.clone()));
+			self.review.drafts.insert(marker.number, text);
 		}
-		// Taken here, so a click on the row's buttons that ends the typing
-		// keeps the name too.
-		if response.lost_focus() && editing {
-			self.review.naming = None;
-			if text.trim() != marker.name.as_deref().unwrap_or("") {
-				let dir = self.engine.recorder.dir();
-				let result = self.controls.markers.rename(&dir, marker.number, &text);
-				self.check(result);
-			}
+		// Taken here, so a click on the row's buttons, or on another marker's
+		// name, that ends the typing keeps the name too.
+		if response.lost_focus()
+			&& let Some(draft) = self.review.drafts.remove(&marker.number)
+			&& draft.trim() != marker.name.as_deref().unwrap_or("")
+		{
+			let dir = self.engine.recorder.dir();
+			let result = self.controls.markers.rename(&dir, marker.number, &draft);
+			self.check(result);
 		}
 		let (when_rect, _) = ui.allocate_exact_size(when.size(), Sense::hover());
 		ui.painter().galley(when_rect.min, when, kit::DIM);

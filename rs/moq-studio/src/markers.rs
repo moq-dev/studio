@@ -4,9 +4,9 @@
 //! recordings, in `<show> <stamp>.markers.toml`, named after when the studio
 //! opened the show, not in the scene file.
 
-use std::io::Write;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Context;
 use kio::clock::{Instant, Wall};
@@ -46,15 +46,14 @@ impl Marker {
 pub struct Markers {
 	/// The file's name in the recordings folder.
 	file: String,
-	/// Held while the file is written too, so the last write holds the last
-	/// change.
 	list: Mutex<List>,
+	writer: Writer,
 }
 
 #[derive(Default)]
 struct List {
 	markers: Vec<Marker>,
-	/// The number the next marker takes.
+	/// The number the last marker took.
 	last: u32,
 }
 
@@ -85,6 +84,7 @@ impl Markers {
 		Self {
 			file: format!("{show} {stamp}.markers.toml"),
 			list: Mutex::default(),
+			writer: Writer::default(),
 		}
 	}
 
@@ -103,9 +103,15 @@ impl Markers {
 		(self.list.lock().unwrap().markers.len() >= MAX).then(full)
 	}
 
-	/// Mark `at`, saving the markers into `dir`, and return its number. A
-	/// marker the folder refuses is kept for this session anyway, so its clip
-	/// can still be cut, and the error says so.
+	/// Why the last write of the file failed, until one succeeds. The
+	/// markers are kept for this session whatever the folder does, so their
+	/// clips can still be cut.
+	pub fn failure(&self) -> Option<String> {
+		self.writer.shared.0.lock().unwrap().failure.clone()
+	}
+
+	/// Mark `at`, saving the markers into `dir` in the background, and return
+	/// its number.
 	pub fn mark(&self, dir: &Path, at: Instant) -> anyhow::Result<u32> {
 		let mut list = self.list.lock().unwrap();
 		anyhow::ensure!(list.markers.len() < MAX, "{}", full());
@@ -117,13 +123,12 @@ impl Markers {
 			wall: kio::clock::wall(),
 			name: None,
 		});
-		self.save(dir, &list)
-			.with_context(|| format!("marker {number} is kept for this session but not saved"))?;
+		self.save(dir, &list);
 		Ok(number)
 	}
 
 	/// Name marker `number` `name`, or no name when it is blank, saving the
-	/// markers into `dir`.
+	/// markers into `dir` in the background.
 	pub fn rename(&self, dir: &Path, number: u32, name: &str) -> anyhow::Result<()> {
 		let name = name.trim();
 		anyhow::ensure!(
@@ -137,16 +142,19 @@ impl Markers {
 			.find(|marker| marker.number == number)
 			.with_context(|| format!("there is no marker {number}"))?;
 		marker.name = (!name.is_empty()).then(|| name.to_string());
-		self.save(dir, &list)
+		self.save(dir, &list);
+		Ok(())
 	}
 
-	/// Remove marker `number`, saving the markers into `dir`.
+	/// Remove marker `number`, saving the markers into `dir` in the
+	/// background.
 	pub fn remove(&self, dir: &Path, number: u32) -> anyhow::Result<()> {
 		let mut list = self.list.lock().unwrap();
 		let before = list.markers.len();
 		list.markers.retain(|marker| marker.number != number);
 		anyhow::ensure!(list.markers.len() < before, "there is no marker {number}");
-		self.save(dir, &list)
+		self.save(dir, &list);
+		Ok(())
 	}
 
 	/// Marker `number`, if it is still there.
@@ -155,48 +163,163 @@ impl Markers {
 		list.markers.iter().find(|marker| marker.number == number).cloned()
 	}
 
-	/// Write `list` over the file in `dir`, whole, so a crash leaves the last
-	/// list or the one before, or remove the file once the list is empty.
-	fn save(&self, dir: &Path, list: &List) -> anyhow::Result<()> {
-		let path = self.path(dir);
-		if list.markers.is_empty() {
-			return match std::fs::remove_file(&path) {
-				Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-					Err(err).with_context(|| format!("cannot remove {}", path.display()))
-				}
-				_ => Ok(()),
+	/// Queue `list` to be written over the file in `dir`, or the file's
+	/// removal once the list is empty. Called under the list's lock, so the
+	/// writes queue in the order of the changes.
+	fn save(&self, dir: &Path, list: &List) {
+		let text = (!list.markers.is_empty()).then(|| {
+			let saved = Saved {
+				marker: list
+					.markers
+					.iter()
+					.map(|marker| SavedMarker {
+						number: marker.number,
+						at: humantime::format_rfc3339_millis(marker.wall.into()).to_string(),
+						name: marker.name.clone(),
+					})
+					.collect(),
 			};
-		}
-		let saved = Saved {
-			marker: list
-				.markers
-				.iter()
-				.map(|marker| SavedMarker {
-					number: marker.number,
-					at: humantime::format_rfc3339_millis(marker.wall.into()).to_string(),
-					name: marker.name.clone(),
-				})
-				.collect(),
-		};
-		let text = toml::to_string(&saved)?;
-		let written = (|| {
-			// A default folder, such as the videos folder the platform names, may
-			// not exist yet.
-			std::fs::create_dir_all(dir)?;
-			let mut file = tempfile::NamedTempFile::new_in(dir)?;
-			file.write_all(b"# The moments marked while the show ran, beside its recordings.\n")?;
-			file.write_all(text.as_bytes())?;
-			file.as_file().sync_all()?;
-			file.persist(&path)?;
-			std::io::Result::Ok(())
-		})();
-		written.with_context(|| format!("cannot write {}", path.display()))
+			let text = toml::to_string(&saved).expect("numbers and strings serialize");
+			format!("# The moments marked while the show ran, beside its recordings.\n{text}")
+		});
+		self.writer.queue(Write {
+			dir: dir.to_path_buf(),
+			path: self.path(dir),
+			text,
+		});
+	}
+
+	/// Wait until every write queued so far has been tried.
+	#[cfg(test)]
+	fn saved(&self) {
+		let (queue, changed) = &*self.writer.shared;
+		let queue = queue.lock().unwrap();
+		drop(changed.wait_while(queue, |queue| queue.tried < queue.asked).unwrap());
 	}
 }
 
 /// Why a full session refuses another marker.
 fn full() -> String {
 	format!("this session already holds {MAX} markers, the most it can; remove one on REVIEW")
+}
+
+/// Writes the file on a thread of its own, so a slow disk never holds up the
+/// window or a hotkey. Only the latest list queued is written; one that
+/// changed again before its turn is skipped. The last write finishes before
+/// the markers drop, as the studio closes.
+#[derive(Default)]
+struct Writer {
+	shared: Arc<(Mutex<Queue>, Condvar)>,
+	thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+#[derive(Default)]
+struct Queue {
+	next: Option<Write>,
+	/// How many writes were queued, and how many of them were tried, the
+	/// skipped included.
+	asked: u64,
+	tried: u64,
+	failure: Option<String>,
+	/// No more writes are coming.
+	closed: bool,
+}
+
+/// One write of the file.
+struct Write {
+	/// The recordings folder.
+	dir: PathBuf,
+	path: PathBuf,
+	/// What it holds, or `None` to remove it.
+	text: Option<String>,
+}
+
+impl Write {
+	/// Write the file whole, so a crash leaves this list or the one before.
+	fn run(&self) -> anyhow::Result<()> {
+		let Some(text) = &self.text else {
+			return match std::fs::remove_file(&self.path) {
+				Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+					Err(err).with_context(|| format!("cannot remove {}", self.path.display()))
+				}
+				_ => Ok(()),
+			};
+		};
+		let written = (|| {
+			// A default folder, such as the videos folder the platform names, may
+			// not exist yet.
+			std::fs::create_dir_all(&self.dir)?;
+			let mut file = tempfile::NamedTempFile::new_in(&self.dir)?;
+			file.write_all(text.as_bytes())?;
+			file.as_file().sync_all()?;
+			file.persist(&self.path)?;
+			std::io::Result::Ok(())
+		})();
+		written.with_context(|| format!("cannot write {}", self.path.display()))
+	}
+}
+
+impl Writer {
+	/// Write `write` once the thread is free, in place of any still waiting.
+	fn queue(&self, write: Write) {
+		let mut thread = self.thread.lock().unwrap();
+		{
+			let mut queue = self.shared.0.lock().unwrap();
+			queue.next = Some(write);
+			queue.asked += 1;
+		}
+		self.shared.1.notify_all();
+		if thread.is_none() {
+			let shared = self.shared.clone();
+			let spawned = std::thread::Builder::new()
+				.name("markers".into())
+				.spawn(move || write_queued(&shared));
+			match spawned {
+				Ok(spawned) => *thread = Some(spawned),
+				Err(err) => {
+					let mut queue = self.shared.0.lock().unwrap();
+					queue.failure = Some(format!("cannot start saving the markers: {err}"));
+					queue.tried = queue.asked;
+					drop(queue);
+					self.shared.1.notify_all();
+				}
+			}
+		}
+	}
+}
+
+impl Drop for Writer {
+	fn drop(&mut self) {
+		self.shared.0.lock().unwrap().closed = true;
+		self.shared.1.notify_all();
+		if let Some(thread) = self.thread.get_mut().unwrap().take() {
+			let _ = thread.join();
+		}
+	}
+}
+
+/// Write each list queued in `shared`, the latest each time, until closed.
+fn write_queued(shared: &(Mutex<Queue>, Condvar)) {
+	let (queue, changed) = shared;
+	let mut guard = queue.lock().unwrap();
+	loop {
+		match guard.next.take() {
+			Some(write) => {
+				let asked = guard.asked;
+				drop(guard);
+				let result = write.run();
+				guard = queue.lock().unwrap();
+				guard.tried = asked;
+				guard.failure = result.err().map(|err| {
+					tracing::error!(error = format!("{err:#}"), "cannot save the markers");
+					format!("{err:#}")
+				});
+				changed.notify_all();
+			}
+			None if guard.closed => return,
+			None => guard = changed.wait(guard).unwrap(),
+		}
+	}
 }
 
 #[cfg(test)]
@@ -237,6 +360,7 @@ mod tests {
 			2
 		);
 		markers.rename(&folder, 1, "  The goal ").unwrap();
+		markers.saved();
 		assert_eq!(read(&path), [(1, Some("The goal".into())), (2, None)]);
 		assert_eq!(markers.get(1).unwrap().title(), "The goal");
 		assert_eq!(markers.get(2).unwrap().title(), "Marker 2");
@@ -245,6 +369,7 @@ mod tests {
 		assert_eq!(markers.get(1).unwrap().name, None, "a blank name is none");
 		markers.remove(&folder, 1).unwrap();
 		assert_eq!(markers.mark(&folder, now).unwrap(), 3, "numbers are not reused");
+		markers.saved();
 		assert_eq!(read(&path), [(2, None), (3, None)]);
 
 		assert!(markers.remove(&folder, 1).is_err(), "already removed");
@@ -254,7 +379,9 @@ mod tests {
 
 		markers.remove(&folder, 2).unwrap();
 		markers.remove(&folder, 3).unwrap();
+		markers.saved();
 		assert!(!path.exists(), "nothing left to keep");
+		assert_eq!(markers.failure(), None);
 	}
 
 	/// A session holds at most [`MAX`] markers, refused past it until one is
@@ -275,7 +402,7 @@ mod tests {
 	}
 
 	/// A folder that cannot take the file keeps the marker for this session,
-	/// and says it was not saved.
+	/// and says why until a write succeeds.
 	#[test]
 	fn a_marker_the_folder_refuses_is_kept() {
 		let dir = tempfile::tempdir().unwrap();
@@ -283,8 +410,31 @@ mod tests {
 		let folder = dir.path().join("taken");
 		std::fs::write(&folder, b"").unwrap();
 		let markers = Markers::new("show");
-		let err = markers.mark(&folder, Instant::now()).unwrap_err();
-		assert!(format!("{err:#}").contains("marker 1 is kept"), "{err:#}");
-		assert_eq!(markers.list().len(), 1);
+		assert_eq!(markers.mark(&folder, Instant::now()).unwrap(), 1);
+		markers.saved();
+		let failure = markers.failure().expect("the folder is a file");
+		assert!(failure.contains("cannot write"), "{failure}");
+		assert_eq!(markers.list().len(), 1, "kept anyway");
+		markers.mark(dir.path(), Instant::now()).unwrap();
+		markers.saved();
+		assert_eq!(markers.failure(), None, "saved once the folder takes it");
+		assert_eq!(read(&markers.path(dir.path())), [(1, None), (2, None)]);
+	}
+
+	/// The last change queued is on disk once the markers drop, as the studio
+	/// closes.
+	#[test]
+	fn the_last_change_is_written_before_closing() {
+		let dir = tempfile::tempdir().unwrap();
+		let markers = Markers::new("show");
+		let path = markers.path(dir.path());
+		for _ in 0..20 {
+			markers.mark(dir.path(), Instant::now()).unwrap();
+		}
+		markers.rename(dir.path(), 20, "Last").unwrap();
+		drop(markers);
+		let saved = read(&path);
+		assert_eq!(saved.len(), 20);
+		assert_eq!(saved[19], (20, Some("Last".into())));
 	}
 }
