@@ -1,12 +1,13 @@
 //! The REVIEW page: the last 30 seconds as a strip to pick a stretch from,
 //! what to replay and how fast, Replay and Save clip, and beside them this
-//! show's recordings and clips.
+//! session's markers and this show's recordings and clips.
 
 use egui::{Align2, CursorIcon, Rect, Sense, Stroke, UiBuilder, Vec2, pos2, vec2};
 use kio::clock::Instant;
 
 use super::*;
 use crate::controls;
+use crate::markers::{self, Marker};
 use crate::past::{self, Past};
 use crate::shelf::{self, Shelf};
 
@@ -25,6 +26,9 @@ const PIN: f32 = 8.0;
 /// How tall the sound under the strip's pictures is, and how wide each bar.
 const WAVE: f32 = 28.0;
 const BAR: f32 = 6.0;
+/// How tall a marker's row is, and how many show before the list scrolls.
+const MARKER_ROW: f32 = 32.0;
+const MARKER_ROWS: usize = 4;
 
 /// The page's own state: the strip, the cards, and what a drag holds.
 pub(super) struct Review {
@@ -38,6 +42,8 @@ pub(super) struct Review {
 	grip: Option<Grip>,
 	/// The last outcome of a replay or clip shown, so each shows once.
 	outcome: Option<Result<String, String>>,
+	/// The marker whose name is being typed, by number, and what is typed.
+	naming: Option<(u32, String)>,
 	/// The moment the page draws as now, held still for the window's views.
 	frozen: Option<Instant>,
 }
@@ -62,6 +68,7 @@ impl Review {
 			head: None,
 			grip: None,
 			outcome: None,
+			naming: None,
 			frozen: None,
 		}
 	}
@@ -117,6 +124,12 @@ impl Review {
 	}
 }
 
+/// What a marker's row asks for, besides its name, which it takes itself.
+enum Row {
+	Clip,
+	Remove,
+}
+
 /// Why REVIEW's picks cannot play or save now, if they cannot.
 struct Refusals {
 	replay: Option<String>,
@@ -124,8 +137,9 @@ struct Refusals {
 }
 
 impl Panels {
-	/// The page in `stage`: the strip and its actions, and the recordings
-	/// column on the right. `shape` is the program's, width over height.
+	/// The page in `stage`: the strip and its actions, and the markers over
+	/// the recordings in the column on the right. `shape` is the program's,
+	/// width over height.
 	pub(super) fn review(&mut self, ui: &mut Ui, fx: &mut Fx, stage: Rect, shape: f32) {
 		let side = SHELF.min(stage.width() * 0.34);
 		let shelf = stage.with_min_x(stage.right() - side);
@@ -135,7 +149,144 @@ impl Panels {
 		ui.painter()
 			.vline(shelf.left() + 0.5, shelf.y_range(), Stroke::new(1.0, kit::LINE));
 		self.replays(ui, main.shrink2(vec2(24.0, 14.0)), shape);
-		self.shelf(ui, shelf.shrink2(vec2(16.0, 14.0)));
+		let column = shelf.shrink2(vec2(16.0, 14.0));
+		let marked = self.controls.markers.list();
+		let rows = match marked.len() {
+			// Room for the lines saying how to drop one.
+			0 => 1.5,
+			count => count.min(MARKER_ROWS) as f32,
+		};
+		let height = (34.0 + rows * MARKER_ROW).min(column.height() * 0.45);
+		let marks = column.with_max_y(column.top() + height);
+		ui.painter()
+			.hline(column.x_range(), marks.bottom() + 9.5, Stroke::new(1.0, kit::LINE));
+		self.markers(ui, marks, &marked);
+		self.shelf(ui, column.with_min_y(marks.bottom() + 20.0));
+	}
+
+	/// This session's markers, the newest first, each with how long ago it
+	/// was dropped, its name to type, a clip around it, and its removal.
+	fn markers(&mut self, ui: &mut Ui, rect: Rect, marked: &[Marker]) {
+		let painter = ui.painter();
+		let title = kit::caps_galley(painter, "Markers", kit::display_bold(22.0), kit::TEXT, None);
+		let title_height = title.size().y;
+		painter.galley(rect.left_top(), title, kit::TEXT);
+		painter.text(
+			pos2(rect.right(), rect.top() + title_height / 2.0),
+			Align2::RIGHT_CENTER,
+			"of this session",
+			kit::ui(11.5),
+			kit::DIM,
+		);
+		let list = rect.with_min_y(rect.top() + title_height + 8.0);
+		let now = self.review.now();
+		let key = self.key(&Action::Marker, ui.ctx());
+		// What a row asked for, done once the list is drawn.
+		let mut asked = None;
+		ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+			if marked.is_empty() {
+				let how = match &key {
+					Some(key) => format!("Drop one with {key} or the flag beside the panic key as the show runs."),
+					None => {
+						"Drop one with the flag beside the panic key, or a key bound in Settings, as the show runs."
+							.into()
+					}
+				};
+				ui.label(egui::RichText::new(how).color(kit::DIM));
+				return;
+			}
+			egui::ScrollArea::vertical()
+				.id_salt("markers")
+				.auto_shrink(false)
+				.show(ui, |ui| {
+					ui.spacing_mut().item_spacing.y = 0.0;
+					for marker in marked.iter().rev() {
+						let size = vec2(ui.available_width(), MARKER_ROW);
+						ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+							ui.spacing_mut().item_spacing.x = 6.0;
+							if let Some(row) = self.marker_row(ui, marker, now) {
+								asked = Some((marker.number, row));
+							}
+						});
+					}
+				});
+		});
+		let dir = self.engine.recorder.dir();
+		match asked {
+			Some((number, Row::Clip)) => {
+				let result = self.controls.clip_marker(number);
+				self.report(result);
+			}
+			Some((number, Row::Remove)) => {
+				let result = self.controls.markers.remove(&dir, number);
+				self.check(result);
+			}
+			None => {}
+		}
+	}
+
+	/// One marker's row, naming the marker once its name loses focus, and
+	/// returning what else it asked for.
+	fn marker_row(&mut self, ui: &mut Ui, marker: &Marker, now: Instant) -> Option<Row> {
+		let badge = ui
+			.painter()
+			.layout_no_wrap(marker.number.to_string(), kit::mono(11.0), kit::TEXT);
+		let (badge_rect, _) = ui.allocate_exact_size(vec2(badge.size().x.max(14.0) + 10.0, 20.0), Sense::hover());
+		ui.painter().rect_filled(badge_rect, 4, kit::P3);
+		ui.painter()
+			.galley(badge_rect.center() - badge.size() / 2.0, badge, kit::TEXT);
+
+		let ago = now.saturating_duration_since(marker.at);
+		let clippable = ago < replay::WINDOW;
+		let when = ui.painter().layout_no_wrap(since(ago), kit::mono(11.0), kit::DIM);
+		// The name takes what the age and the two buttons leave.
+		let field = (ui.available_width() - when.size().x - 2.0 * (24.0 + 6.0) - 12.0).max(40.0);
+		let editing = self.review.naming.as_ref().is_some_and(|(at, _)| *at == marker.number);
+		let mut text = match (&self.review.naming, editing) {
+			(Some((_, text)), true) => text.clone(),
+			_ => marker.name.clone().unwrap_or_default(),
+		};
+		let edit = egui::TextEdit::singleline(&mut text)
+			.hint_text(format!("Marker {}", marker.number))
+			.char_limit(markers::MAX_NAME)
+			.desired_width(field);
+		let response = ui.add(edit);
+		let mut asked = None;
+		if response.gained_focus() || response.changed() {
+			self.review.naming = Some((marker.number, text.clone()));
+		}
+		// Taken here, so a click on the row's buttons that ends the typing
+		// keeps the name too.
+		if response.lost_focus() && editing {
+			self.review.naming = None;
+			if text.trim() != marker.name.as_deref().unwrap_or("") {
+				let dir = self.engine.recorder.dir();
+				let result = self.controls.markers.rename(&dir, marker.number, &text);
+				self.check(result);
+			}
+		}
+		let (when_rect, _) = ui.allocate_exact_size(when.size(), Sense::hover());
+		ui.painter().galley(when_rect.min, when, kit::DIM);
+		let note = match clippable {
+			true => format!(
+				"Save from {} s before it to {} s after it, as Save clip does",
+				replay::BEFORE.as_secs(),
+				replay::AFTER.as_secs()
+			),
+			false => format!(
+				"It is older than the last {} s, as far back as a clip reaches",
+				replay::WINDOW.as_secs()
+			),
+		};
+		let clip = IconButton::new(Icon::Clip, "Clip around it").small().note(Some(&note));
+		if ui.add_enabled(clippable, clip).clicked() {
+			asked = Some(Row::Clip);
+		}
+		let remove = IconButton::new(Icon::Close, "Remove the marker").small();
+		if ui.add(remove).clicked() {
+			asked = Some(Row::Remove);
+		}
+		asked
 	}
 
 	/// The large picture and what to replay, the strip, the speed, and the
@@ -554,6 +705,29 @@ impl Panels {
 			},
 			Color32::WHITE,
 		);
+		// Each marker still in the window: a pennant over the pictures with its
+		// number, and a line down through the sound.
+		for marker in self.controls.markers.list() {
+			let age = now.saturating_duration_since(marker.at);
+			if age >= replay::WINDOW {
+				continue;
+			}
+			let x = x_at(age);
+			let top = thumbs.top() - 12.0;
+			painter.vline(x, top..=wave.bottom(), Stroke::new(1.5, kit::TEXT.gamma_multiply(0.8)));
+			painter.add(egui::Shape::convex_polygon(
+				vec![pos2(x, top), pos2(x + 9.0, top + 3.5), pos2(x, top + 7.0)],
+				kit::TEXT,
+				Stroke::NONE,
+			));
+			painter.text(
+				pos2(x + 11.0, top + 3.5),
+				Align2::LEFT_CENTER,
+				marker.number.to_string(),
+				kit::mono(10.0),
+				kit::TEXT,
+			);
+		}
 		// Why there are no pictures, over everything.
 		let note = match &view.held {
 			None => Some("Reading the last 30 seconds".to_string()),
@@ -1303,6 +1477,18 @@ fn ago(then: kio::clock::Wall) -> String {
 	}
 }
 
+/// How long ago a marker was dropped: "now", "12 s ago", "4 min ago",
+/// "1 h 5 min ago".
+fn since(ago: Duration) -> String {
+	let seconds = ago.as_secs();
+	match seconds {
+		0 => "now".into(),
+		1..60 => format!("{seconds} s ago"),
+		60..3600 => format!("{} min ago", seconds / 60),
+		_ => format!("{} h {} min ago", seconds / 3600, seconds / 60 % 60),
+	}
+}
+
 /// A length: "0:08", "52:10", "2:10:44".
 pub(super) fn clock(length: Duration) -> String {
 	let seconds = length.as_secs();
@@ -1323,6 +1509,10 @@ mod tests {
 		assert_eq!(clock(Duration::from_secs(8)), "0:08");
 		assert_eq!(clock(Duration::from_secs(52 * 60 + 10)), "52:10");
 		assert_eq!(clock(Duration::from_secs(2 * 3600 + 10 * 60 + 44)), "2:10:44");
+		assert_eq!(since(Duration::from_millis(900)), "now");
+		assert_eq!(since(Duration::from_secs(59)), "59 s ago");
+		assert_eq!(since(Duration::from_secs(4 * 60 + 59)), "4 min ago");
+		assert_eq!(since(Duration::from_secs(3600 + 5 * 60)), "1 h 5 min ago");
 	}
 
 	/// Each handle is taken near it, and where both are in reach, the one on

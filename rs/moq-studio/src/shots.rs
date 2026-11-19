@@ -101,10 +101,12 @@ enum View {
 	OnAirHealth,
 	/// REVIEW, with this show's recordings and clips, and if `picked`, the
 	/// last 30 seconds held and a stretch picked. With `replays`, the show
-	/// has two replay sources to pick between.
+	/// has two replay sources to pick between, and with `markers`, three
+	/// markers were dropped, two still on the strip.
 	Review {
 		picked: bool,
 		replays: bool,
+		markers: bool,
 	},
 	/// A page in Studio mode, with `Interview` cued.
 	Cued(Page),
@@ -324,14 +326,18 @@ views! {
 	mix_compact: Still, mixing(MixView::Strips, None, HALF);
 	/// REVIEW off air: the program keeps no past until it goes live, which the
 	/// strip and both actions say, beside this show's recordings and clips.
-	review: Still, studio(View::Review { picked: false, replays: false });
+	review: Still, studio(View::Review { picked: false, replays: false, markers: false });
 	/// REVIEW with the last 30 seconds held: a stretch picked between the
 	/// handles, the head inside it, the picture under the head large, and
 	/// Replay saying why it cannot play without a replay source.
-	review_picked: Still, studio(View::Review { picked: true, replays: false });
+	review_picked: Still, studio(View::Review { picked: true, replays: false, markers: false });
 	/// REVIEW on a show with two replay sources: which one Replay plays in is
 	/// picked under the speed, in place of its note.
-	review_into: Still, studio(View::Review { picked: true, replays: true });
+	review_into: Still, studio(View::Review { picked: true, replays: true, markers: false });
+	/// REVIEW with markers: each still in the last 30 seconds a numbered
+	/// pennant on the strip, and the list over the recordings, the newest
+	/// first, one named, and the oldest too old to clip around.
+	review_markers: Still, studio(View::Review { picked: true, replays: false, markers: true });
 	/// The edit history, open under undo.
 	history: Still, studio(View::History);
 	/// The health dot's details off air: the encoders and their timings.
@@ -611,6 +617,105 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	assert!(
 		closed.load(Ordering::Relaxed),
 		"the window counts the close as asked for"
+	);
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// A marker dropped by the flag beside the panic key, on air, shows on
+/// REVIEW, and a click on its row saves the seconds around it as a clip:
+/// from [`replay::BEFORE`] it to [`replay::AFTER`] it, its video starting up
+/// to a keyframe interval early. The window as a person uses it, on a real
+/// engine going live to a relay. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_marker_is_clipped_around() {
+	use crate::replay;
+
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let relay = Relay::start(&runtime);
+	let app = start(launch(&gpu), stream(Some(&relay)), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	let controls = studio.controls();
+	controls.go_live().expect("going live starts");
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while engine.on_air().live().is_none() {
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("the studio goes live");
+	// On air long enough before the marker for all of its clip to be held.
+	let wait = |seconds: Duration| runtime.block_on(kio::clock::sleep(seconds));
+	wait(replay::BEFORE + Duration::from_secs(1));
+
+	harness.get_by_label("Drop a marker").click();
+	harness.run_steps(2);
+	assert_eq!(controls.markers.list().len(), 1, "the flag dropped a marker");
+	// Past the seconds after it, so the clip is the whole span around it.
+	wait(replay::AFTER + Duration::from_secs(1));
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("still the studio")
+	};
+	studio.turn(Page::Review);
+	harness.run_steps(2);
+	harness.get_by_label("Clip around it").click();
+	harness.run_steps(2);
+	let outcome = controls.replay.lock().unwrap().outcome.clone();
+	let saved = runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			loop {
+				match outcome.lock().unwrap().clone() {
+					Some(Ok(saved)) if saved.starts_with("saved") => return Ok(saved),
+					Some(Err(err)) => return Err(err),
+					_ => {}
+				}
+				kio::clock::sleep(Duration::from_millis(50)).await;
+			}
+		}))
+		.expect("the clip is written in real time");
+	saved.expect("the clip saves");
+
+	let mut file = std::fs::File::open("show-clip-1.mp4").expect("the clip is in the recordings folder");
+	let moov = std::iter::from_fn(|| mp4_atom::ReadFrom::read_from(&mut file).unwrap())
+		.find_map(|atom| match atom {
+			mp4_atom::Any::Moov(moov) => Some(moov),
+			_ => None,
+		})
+		.expect("a regular MP4");
+	let length = Duration::from_secs_f64(moov.mvhd.duration as f64 / f64::from(moov.mvhd.timescale));
+	let span = replay::BEFORE + replay::AFTER;
+	assert!(
+		length >= span - Duration::from_millis(200),
+		"{length:?} is short of {span:?}"
+	);
+	assert!(
+		length <= span + Duration::from_secs(3),
+		"{length:?} is more than a keyframe past {span:?}"
+	);
+	// Sound, a keyframe every packet, holds the span itself.
+	let sound = moov
+		.trak
+		.iter()
+		.find(|trak| trak.mdia.hdlr.handler == b"soun".into())
+		.expect("the program's sound");
+	let mdhd = &sound.mdia.mdhd;
+	let heard = Duration::from_secs_f64(mdhd.duration as f64 / f64::from(mdhd.timescale));
+	assert!(
+		heard.abs_diff(span) < Duration::from_millis(100),
+		"{heard:?} heard of {span:?}"
 	);
 
 	drop(harness);
@@ -1631,13 +1736,20 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			studio.bind(&Action::Scene("Main".into()), key(KeyCode::F1, "F1"));
 			studio.bind(&Action::Cut, key(KeyCode::Numpad0, "0"));
 		}
-		View::Review { picked, .. } => {
+		View::Review { picked, markers, .. } => {
 			studio.turn(Page::Review);
 			studio.seed_shelf(shelf());
+			let secs = Duration::from_secs;
+			let now = kio::clock::Instant::now();
 			if *picked {
-				let secs = Duration::from_secs;
-				let now = kio::clock::Instant::now();
 				studio.seed_past(past(now), now, (secs(14), secs(6)), secs(9));
+			}
+			if *markers {
+				let dir = controls.engine.recorder.dir();
+				for ago in [secs(3 * 60 + 5), secs(22), secs(4)] {
+					controls.markers.mark(&dir, now.saturating_sub(ago)).unwrap();
+				}
+				controls.markers.rename(&dir, 2, "The comeback").unwrap();
 			}
 		}
 	}

@@ -901,7 +901,8 @@ impl Panels {
 		Some(bindings.get(action)?.shown(ctx))
 	}
 
-	/// The panic key, named for the scene it cuts to, and saving a clip.
+	/// The panic key, named for the scene it cuts to, saving a clip, and
+	/// dropping a marker.
 	fn panic_key(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, tall: bool) {
 		let room = rect.shrink(MARGIN);
 		let note = match &snapshot.safe {
@@ -910,6 +911,7 @@ impl Panels {
 		};
 		let key = self.key(&Action::Panic, ui.ctx());
 		let clip_key = self.key(&Action::SaveClip, ui.ctx());
+		let marker_key = self.key(&Action::Marker, ui.ctx());
 		let text = snapshot.safe.as_deref().unwrap_or("Panic");
 		let panic = kit::Quick::new(Icon::Panic, text, "Panic", room.width())
 			.look(kit::Look::Cue)
@@ -921,6 +923,10 @@ impl Panels {
 			.note(Some(
 				"Save the last seconds, as many as REVIEW picks, as a clip into the recordings folder",
 			));
+		let marker = IconButton::new(Icon::Marker, "Drop a marker")
+			.look(kit::Look::Boxed)
+			.key(marker_key.as_deref())
+			.note(Some("Mark this moment, which REVIEW lists and cuts a clip around"));
 		let (panic_at, clip_at) = match tall {
 			true => (
 				Rect::from_min_size(room.min, vec2(room.width(), 30.0)),
@@ -928,14 +934,18 @@ impl Panels {
 			),
 			false => (
 				Rect::from_center_size(room.center() - vec2(0.0, 19.0), vec2(room.width(), 30.0)),
-				Rect::from_center_size(room.center() + vec2(0.0, 19.0), Vec2::splat(30.0)),
+				Rect::from_center_size(room.center() + vec2(-19.0, 19.0), Vec2::splat(30.0)),
 			),
 		};
+		let marker_at = clip_at.translate(vec2(38.0, 0.0));
 		if ui.put(panic_at, panic).clicked() {
 			self.controls.press(&Action::Panic);
 		}
 		if ui.put(clip_at, clip).clicked() {
 			self.controls.press(&Action::SaveClip);
+		}
+		if ui.put(marker_at, marker).clicked() {
+			self.controls.press(&Action::Marker);
 		}
 	}
 
