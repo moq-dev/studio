@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -541,9 +542,7 @@ impl Paired {
 		drop(board);
 		published.route.announce()?;
 
-		let mut config = moq_json::snapshot::consumer::Config::default();
-		config.max_size = Some(MAX_PRESS);
-		let mut presses = moq_json::snapshot::Consumer::<Press>::new(broadcast.track(PRESS_TRACK)?, config);
+		let mut presses = Presses::new(broadcast.track(PRESS_TRACK)?);
 		let period = self.room.expiry / 2;
 		let mut renew = kio::clock::interval_at(kio::clock::now().saturating_add(period), period);
 		let mut frames = kio::clock::interval(frame);
@@ -557,7 +556,7 @@ impl Paired {
 					// The next press waits for the next frame.
 					ready = false;
 					match press {
-						Ok(Some(press)) => *done = Some(self.handle(press.value, &mut listening, done.as_ref())),
+						Ok(Some(press)) => *done = Some(self.handle(press, &mut listening, done.as_ref())),
 						Ok(None) => return Ok(()),
 						Err(moq_json::Error::Net(err)) => return Err(err.into()),
 						// Refused whole, as one the page cannot be told about.
@@ -620,6 +619,95 @@ impl Paired {
 			seq: press.seq,
 			ok,
 			said,
+		}
+	}
+}
+
+/// A remote's presses, each costing the studio one parse of at most
+/// [`MAX_PRESS`] bytes: only the first frame of the newest group, decoded on
+/// its own. The page writes each press as a group of its own; whatever else a
+/// group holds, such as the merge patches a snapshot track may carry, is
+/// never read, so a page cannot make one read do more work.
+struct Presses {
+	track: Pressing,
+	decoder: moq_json::snapshot::Decoder<Press>,
+}
+
+enum Pressing {
+	Subscribing(moq_net::track::Subscribing),
+	Reading {
+		// Boxed: the reader dwarfs the pending subscription.
+		groups: Box<moq_net::track::Ordered>,
+		/// The newest group, until its first frame is read.
+		group: Option<moq_net::group::Consumer>,
+		/// Whether the track has ended.
+		ended: bool,
+	},
+}
+
+impl Presses {
+	fn new(track: moq_net::track::Consumer) -> Self {
+		let mut config = moq_json::snapshot::consumer::Config::default();
+		config.max_size = Some(MAX_PRESS);
+		Self {
+			track: Pressing::Subscribing(track.subscribe(None).into_inner()),
+			decoder: moq_json::snapshot::Decoder::new(config),
+		}
+	}
+
+	/// The newest press, skipping those a newer one superseded, or `None` once
+	/// the page stops publishing. An error other than [`moq_json::Error::Net`]
+	/// refuses that press alone.
+	async fn latest(&mut self) -> Result<Option<Press>, moq_json::Error> {
+		kio::wait(|waiter| self.poll_latest(waiter)).await
+	}
+
+	fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Press>, moq_json::Error>> {
+		if let Pressing::Subscribing(pending) = &self.track {
+			let groups = ready!(pending.poll_ok(waiter))?.ordered();
+			self.track = Pressing::Reading {
+				groups: Box::new(groups),
+				group: None,
+				ended: false,
+			};
+		}
+		let Pressing::Reading { groups, group, ended } = &mut self.track else {
+			unreachable!("subscribed above");
+		};
+		loop {
+			// The newest group the reader has; a newer one supersedes the rest.
+			while !*ended {
+				match groups.poll_next_group(waiter)? {
+					Poll::Ready(Some(item)) => {
+						if let Some(newer) = item.group() {
+							*group = Some(newer);
+						}
+					}
+					Poll::Ready(None) => *ended = true,
+					Poll::Pending => break,
+				}
+			}
+			let Some(current) = group else {
+				return match ended {
+					true => Poll::Ready(Ok(None)),
+					false => Poll::Pending,
+				};
+			};
+			let read = ready!(current.poll_read_frame(waiter));
+			// One frame a group, whatever follows it.
+			*group = None;
+			match read {
+				Ok(Some(frame)) => {
+					self.decoder.snapshot(&frame.payload)?;
+					return Poll::Ready(self.decoder.decode());
+				}
+				Ok(None) => continue,
+				Err(err) => {
+					// A newer group follows, as a lost one is superseded.
+					tracing::debug!(%err, "lost a press");
+					continue;
+				}
+			}
 		}
 	}
 }
@@ -722,11 +810,15 @@ mod tests {
 			self.presses.update(moq_json::Timed::new(&press, at)).unwrap();
 		}
 
-		/// Write `bytes` as a press, whatever they are.
-		fn raw(&mut self, bytes: Vec<u8>) {
+		/// Write each of `frames` in one group, whatever they are.
+		fn raw(&mut self, frames: &[&[u8]]) {
 			let at = moq_net::Timestamp::unscaled(self.next);
 			self.next += 1;
-			self.track.write_frame(at, bytes).unwrap();
+			let mut group = self.track.append_group(at).unwrap();
+			for frame in frames {
+				group.write_frame(at, frame.to_vec()).unwrap();
+			}
+			group.finish().unwrap();
 		}
 	}
 
@@ -881,17 +973,23 @@ mod tests {
 		// Not a press, or more than one could be: refused whole, saying
 		// nothing, and the next press is still read.
 		// Each is read on a frame of its own, as `latest` skips any it passed.
-		for bytes in [
-			br#"{"id":"page","seq":13,"action":{"Launch":"rockets"}}"#.to_vec(),
-			vec![b' '; MAX_PRESS + 1],
+		let large = vec![b' '; MAX_PRESS + 1];
+		for frame in [
+			br#"{"id":"page","seq":13,"action":{"Launch":"rockets"}}"#.as_slice(),
+			&large,
 		] {
-			page.raw(bytes);
+			page.raw(&[frame]);
 			clock.advance(FRAME);
 			for _ in 0..20 {
 				tokio::task::yield_now().await;
 			}
 		}
-		page.press(press(13, Some(Action::GoLive)));
+		// A press is its group's first frame alone: patches after it, as many
+		// as a page sends, are never applied.
+		let patch = br#"{"action":{"Scene":"Gameplay"}}"#.as_slice();
+		let mut frames = vec![br#"{"id":"page","seq":13,"action":"GoLive"}"#.as_slice()];
+		frames.extend(std::iter::repeat_n(patch, 1000));
+		page.raw(&frames);
 		clock.advance(FRAME);
 		let refused = done(&mut desks, 13).await;
 		assert_eq!(refused.said, "Go live is not for a remote");
