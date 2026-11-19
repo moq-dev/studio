@@ -116,9 +116,9 @@ winit = { version = "0.30", default-features = false, features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The GlobalShortcuts portal for hotkeys on Wayland, and the Settings portal's
-# reduced motion for the effects. 0.13, as moq-video's PipeWire capture uses,
-# so the two share one D-Bus stack.
-ashpd = { version = "0.13", default-features = false, features = ["global_shortcuts", "settings", "tokio"] }
+# reduced motion for the effects. 0.13 on `async-io`, as moq-video's PipeWire
+# capture uses, so the two share one D-Bus stack; ashpd refuses both backends.
+ashpd = { version = "0.13", default-features = false, features = ["global_shortcuts", "settings", "async-io"] }
 futures-util = "0.3"
 # The virtual camera's v4l2loopback fallback. Pure Rust with its kernel bindings
 # checked in, and already in the graph through moq-video's capture.
@@ -130,7 +130,8 @@ pipewire = { version = "0.10", optional = true, features = ["v0_3_34"] }
 # tells a held key's repeats from new presses.
 x11rb = { version = "0.13", features = ["xkb"] }
 # Relay tokens in the Secret Service (GNOME Keyring, KWallet), over the D-Bus
-# stack ashpd uses, on tokio as ashpd has it, with no system library.
+# stack ashpd uses, with no system library. Its `rt-tokio` puts that zbus on
+# tokio, so the portals keep needing a tokio runtime, as before.
 zbus-secret-service-keyring-store = { version = "1.0", features = ["rt-tokio-crypto-rust"] }
 
 [target.'cfg(unix)'.dependencies]

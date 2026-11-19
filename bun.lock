@@ -142,12 +142,12 @@
         "@moq/json": "workspace:^",
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
-        "@moq/ui": "workspace:^",
         "@moq/video": "workspace:^",
         "mediabunny": "^1.65.2",
       },
       "devDependencies": {
         "@moq/libav": "workspace:^",
+        "@moq/ui": "workspace:^",
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.4",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
@@ -216,7 +216,7 @@
     },
     "moq/js/ui": {
       "name": "@moq/ui",
-      "version": "0.1.0",
+      "version": "0.0.0",
       "dependencies": {
         "@moq/signals": "workspace:^",
       },
@@ -250,12 +250,12 @@
         "@moq/msf": "workspace:^",
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
-        "@moq/ui": "workspace:^",
         "@moq/video": "workspace:^",
         "media-captions": "0.0.18",
       },
       "devDependencies": {
         "@moq/libav": "workspace:^",
+        "@moq/ui": "workspace:^",
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.4",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",

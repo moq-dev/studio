@@ -26,6 +26,13 @@ jobs:
     timeout-minutes: 60
     env:
       NEXTEST_PROFILE: ci
+      # No auto maintenance in this throwaway checkout. Checkout disables gc
+      # only in the superproject, so the moq submodule's fetch leaves a
+      # detached maintenance that rewrites its shallow file mid-unshallow,
+      # failing the pin check.
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: maintenance.auto
+      GIT_CONFIG_VALUE_0: false
 
     steps:
       - name: Checkout
