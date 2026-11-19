@@ -441,6 +441,54 @@ async fn a_page_takes_its_own_shortcuts() {
 	.await;
 }
 
+/// A shifted key reaches the page's keydown as the character it types, as a
+/// `?` shortcut needs.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
+async fn a_shifted_key_is_its_character() {
+	local(async {
+		// Green once `?` is pressed, then blue once `!` is.
+		let html = "<body style='margin:0;height:100vh;background:red' tabindex=0 onkeydown=\"\
+			if (event.key == '?') document.body.style.background = 'lime';\
+			if (event.key == '!' && document.body.style.background == 'lime') \
+			document.body.style.background = 'blue'\"></body>";
+		let mut studio = Studio::new(&[("page", page(html))]).await;
+		studio.until_center([255, 0, 0, 255], &[]).await;
+
+		let page = studio.sources.get("page").unwrap().page().unwrap().clone();
+		page.send(Input::Focus(true));
+		for down in [true, false] {
+			page.send(Input::Button {
+				x: 160,
+				y: 120,
+				button: Button::Left,
+				down,
+				clicks: 1,
+				modifiers: Modifiers::default(),
+			});
+		}
+		let shift = Modifiers {
+			shift: true,
+			..Default::default()
+		};
+		let key = |code: u8| {
+			for down in [true, false] {
+				page.send(Input::Key {
+					code: code.into(),
+					down,
+					modifiers: shift,
+				});
+			}
+		};
+		// The US layout's `/` key, then `1`.
+		key(0xbf);
+		studio.until_center(GREEN, &[]).await;
+		key(b'1');
+		studio.until_center(BLUE, &[]).await;
+	})
+	.await;
+}
+
 /// Copy and Cut put the page's selection on the clipboard, and Cut deletes it
 /// from the page. A password field's text is never taken.
 #[tokio::test(flavor = "multi_thread")]

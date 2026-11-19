@@ -1205,11 +1205,32 @@ mod mac {
 		};
 		event.native_key_code = native.into();
 		event.unmodified_character = character;
+		// Chromium takes a keydown's `key` from these characters.
 		event.character = match u8::try_from(character) {
-			Ok(letter @ b'a'..=b'z') if shift => letter.to_ascii_uppercase().into(),
+			Ok(byte) if shift => shifted(byte).into(),
 			_ => character,
 		};
 		event
+	}
+
+	/// The character Shift turns the US layout's unshifted `byte` into.
+	fn shifted(byte: u8) -> u8 {
+		match byte {
+			b'a'..=b'z' => byte.to_ascii_uppercase(),
+			b'0'..=b'9' => b")!@#$%^&*("[usize::from(byte - b'0')],
+			b';' => b':',
+			b'=' => b'+',
+			b',' => b'<',
+			b'-' => b'_',
+			b'.' => b'>',
+			b'/' => b'?',
+			b'`' => b'~',
+			b'[' => b'{',
+			b'\\' => b'|',
+			b']' => b'}',
+			b'\'' => b'"',
+			_ => byte,
+		}
 	}
 
 	/// The Mac key code (`kVK_*`) of the key with the Windows code `code`,
