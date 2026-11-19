@@ -157,6 +157,11 @@ button {
 	-webkit-tap-highlight-color: transparent;
 }
 
+/* A tap always lands on the button itself, whatever it holds. */
+button > * {
+	pointer-events: none;
+}
+
 button:active:not(:disabled) {
 	background: var(--p3);
 }

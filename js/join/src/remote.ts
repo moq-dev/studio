@@ -119,11 +119,12 @@ function drive(link: Link): void {
 		if (on) effect.interval(tick, Duration.millis(250));
 	});
 
+	const show = view(press);
 	signals.run((effect) => {
 		const current = effect.get(desk);
 		const last = effect.get(sent);
 		const ready = last !== undefined && Desk.settled(current, id, last);
-		render(current, ready, current?.done?.id === id ? current.done : undefined, press);
+		show(current, ready, current?.done?.id === id ? current.done : undefined);
 	});
 }
 
@@ -142,70 +143,115 @@ function said(air: Desk.Air, clock: string): string {
 }
 
 /**
- * Show `desk`, its controls pressable once `ready`, and how this page's last
- * press went.
+ * Show each desk, its controls pressable once `ready`, and how this page's
+ * last press went. A control stays the same element from one desk to the
+ * next, changed in place, since a desk arrives each second while live: a tap
+ * that spans one still lands, and focus stays where it was.
  */
-function render(
-	desk: Desk.Desk | undefined,
-	ready: boolean,
-	done: Desk.Done | undefined,
+function view(
 	press: (action: Desk.Action) => void,
-): void {
-	element("waiting").hidden = desk !== undefined;
-	element("desk").hidden = desk === undefined;
-	document.body.dataset.air = desk?.air ?? "off";
-	element("air").dataset.air = desk?.air ?? "off";
-	if (!desk) return;
-
-	const button = (label: string, action: Desk.Action, refused: string | null) => {
-		const button = document.createElement("button");
-		button.type = "button";
-		button.textContent = label;
-		button.disabled = !ready || refused !== null;
-		if (refused) button.title = refused;
-		button.addEventListener("click", () => press(action));
+): (desk: Desk.Desk | undefined, ready: boolean, done: Desk.Done | undefined) => void {
+	// By the action each presses, which never changes for an element.
+	const controls = new Map<string, HTMLButtonElement>();
+	const control = (action: Desk.Action, className: string): HTMLButtonElement => {
+		const key = JSON.stringify(action);
+		let button = controls.get(key);
+		if (!button) {
+			button = document.createElement("button");
+			button.type = "button";
+			button.className = className;
+			button.addEventListener("click", () => press(action));
+			controls.set(key, button);
+		}
 		return button;
 	};
+	const take = control("Cut", "");
+	const auto = control("Transition", "");
+	take.textContent = "Take";
+	auto.textContent = "Auto";
+	element("take").replaceChildren(take, auto);
+	const rows = new Map<string, HTMLDivElement>();
 
-	const pads = desk.scenes.map((scene) => {
-		const pad = button(scene.name, { Scene: scene.name }, scene.refused);
-		pad.className = "pad";
-		const tally = Desk.tally(desk, scene.name);
-		if (tally) {
-			pad.dataset.tally = tally.on;
-			const tag = document.createElement("span");
-			tag.className = "tag";
-			tag.textContent = tally.tag;
-			pad.prepend(tag);
-		}
-		return pad;
-	});
-	element("scenes").replaceChildren(...pads);
-	element("mode").textContent = desk.studio ? "Studio mode: a pad cues its scene" : "A pad takes its scene";
+	return (desk, ready, done) => {
+		element("waiting").hidden = desk !== undefined;
+		element("desk").hidden = desk === undefined;
+		document.body.dataset.air = desk?.air ?? "off";
+		element("air").dataset.air = desk?.air ?? "off";
+		if (!desk) return;
 
-	// TAKE and AUTO put the cued scene on air, in Studio mode.
-	const take = element("take");
-	take.hidden = !desk.studio;
-	take.replaceChildren(button("Take", "Cut", desk.take_refused), button("Auto", "Transition", desk.take_refused));
+		const enable = (button: HTMLButtonElement, refused: string | null) => {
+			button.disabled = !ready || refused !== null;
+			if (refused) button.title = refused;
+			else button.removeAttribute("title");
+		};
 
-	const sounds = desk.sounds.map((sound) => {
-		const row = document.createElement("div");
-		row.className = "sound";
-		const name = document.createElement("span");
-		name.textContent = sound.name;
-		const mute = button(sound.muted ? "Muted" : "Mute", { Mute: sound.name }, null);
-		mute.setAttribute("aria-pressed", String(sound.muted));
-		mute.setAttribute("aria-label", `${sound.muted ? "Unmute" : "Mute"} ${sound.name}`);
-		row.append(name, mute);
-		return row;
-	});
-	element("sounds").replaceChildren(...sounds);
-	element("no-sounds").hidden = sounds.length > 0;
+		const pads = desk.scenes.map((scene) => {
+			const pad = control({ Scene: scene.name }, "pad");
+			if (!pad.firstChild) {
+				const tag = document.createElement("span");
+				tag.className = "tag";
+				const name = document.createElement("span");
+				name.textContent = scene.name;
+				pad.append(tag, name);
+			}
+			const tally = Desk.tally(desk, scene.name);
+			const tag = pad.firstChild as HTMLSpanElement;
+			tag.hidden = !tally;
+			text(tag, tally?.tag ?? "");
+			if (tally) pad.dataset.tally = tally.on;
+			else delete pad.dataset.tally;
+			enable(pad, scene.refused);
+			return pad;
+		});
+		children(element("scenes"), pads);
+		text(element("mode"), desk.studio ? "Studio mode: a pad cues its scene" : "A pad takes its scene");
 
-	const message = element("said");
-	message.hidden = !done;
-	message.textContent = done?.said ?? "";
-	message.classList.toggle("error", done?.ok === false);
+		// TAKE and AUTO put the cued scene on air, in Studio mode.
+		element("take").hidden = !desk.studio;
+		enable(take, desk.take_refused);
+		enable(auto, desk.take_refused);
+
+		const sounds = desk.sounds.map((sound) => {
+			let row = rows.get(sound.name);
+			const mute = control({ Mute: sound.name }, "");
+			if (!row) {
+				row = document.createElement("div");
+				row.className = "sound";
+				const name = document.createElement("span");
+				name.textContent = sound.name;
+				row.append(name, mute);
+				rows.set(sound.name, row);
+			}
+			text(mute, sound.muted ? "Muted" : "Mute");
+			mute.setAttribute("aria-pressed", String(sound.muted));
+			mute.setAttribute("aria-label", `${sound.muted ? "Unmute" : "Mute"} ${sound.name}`);
+			enable(mute, null);
+			return row;
+		});
+		children(element("sounds"), sounds);
+		element("no-sounds").hidden = sounds.length > 0;
+
+		// Forget the controls of scenes and sounds the show no longer has.
+		const kept = new Set([take, auto, ...pads, ...sounds.map((row) => row.lastChild)]);
+		for (const [key, button] of controls) if (!kept.has(button)) controls.delete(key);
+		for (const [name, row] of rows) if (!sounds.includes(row)) rows.delete(name);
+
+		const message = element("said");
+		message.hidden = !done;
+		text(message, done?.said ?? "");
+		message.classList.toggle("error", done?.ok === false);
+	};
+}
+
+/** Set `node`'s text, unless it already says it, which would replace its text node. */
+function text(node: HTMLElement, said: string): void {
+	if (node.textContent !== said) node.textContent = said;
+}
+
+/** Make `nodes` the children of `parent`, in order, moving none that already are. */
+function children(parent: HTMLElement, nodes: readonly Node[]): void {
+	const same = parent.childNodes.length === nodes.length && nodes.every((node, i) => parent.childNodes[i] === node);
+	if (!same) parent.replaceChildren(...nodes);
 }
 
 function main(): void {
