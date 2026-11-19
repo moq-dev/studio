@@ -471,6 +471,7 @@ setting costs. Escape or a click outside closes it.
 | Recording | Change or open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
 | Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; each sound's mute; and replay and clips (see [Hotkeys](#hotkeys)). |
 | Guests | Set the room guests join, its key, the join page, how long a link lasts, and whether guests appear on their own (see [Guests](#guests)). |
+| Remote | Pair a phone as a remote by its QR code, see which are connected, and remove one (see [Phone remote](#phone-remote)). |
 | Advanced | Publish scenes as broadcasts of their own and sources independently, turn the virtual camera of the program or of each published scene on, pick how the window's [effects](#effects) move, and open the [scene graph](#scene-graph). |
 
 On air, a new canvas size or frame rate, or a published scene's new size,
@@ -1039,7 +1040,9 @@ why under Guests, with a button to the pane.
   without reconnecting. A guest's token may read only their own renewals and
   return feed, at `.renew/<name>/<generation>` and `.return/<name>/<generation>`
   in the room, and the program at `.program`, but anything else the relay lets
-  subscribe there can read every guest's, so grant that only to the studio. A guest who
+  subscribe there can read every guest's, so grant that only to the studio.
+  The same session publishes each [phone remote](#phone-remote)'s desk under
+  `.remote` and reads their presses under `.press`. A guest who
   leaves needs a link, or a renewed token, that has not expired to come back.
   BUILD's Add says, under Guests, when renewal is failing.
 - **Upgrading from a studio without renewal:** generate a new room key, drop
@@ -1098,6 +1101,43 @@ encode as any viewer does. Each guest in the room costs one 64 kbps Opus
 encode of their mix-minus. A guest's
 screen share stays in their feed, since only their camera's microphone is
 taken out.
+
+## Phone remote
+
+A phone paired as a remote drives the show from wherever it reaches the
+relay, with nothing installed: its page shows the scene pads with their
+tally (ON AIR, FIRST, or NEXT, as the studio's own pads), TAKE and AUTO in
+Studio mode, each sound's mute, and the live clock, and the whole page is
+framed in the accent while the program is on air. A pad the studio cannot
+take now is greyed out. Each press shows in the studio's status
+bar, as a key's does, and on the phone.
+
+Settings, Remote, pairs one: name it, **Pair a phone**, and scan the QR code
+with the phone's camera, or **Copy link** to send it. A remote joins the
+[guests' room](#guests), so it needs the room, its key, and the join page set
+there first; its page is `remote.html` beside the join page, and the link
+lasts as long as a guest's (`--guest-expiry`). The pane lists each phone
+paired, whether it is connected, and its link, with **Show link** while that
+link still works, **New link**, and **Remove**. Treat the link like a
+password: anyone holding it can drive the show until you remove it.
+
+- A remote presses only what is safe to press by mistake from a pocket: a
+  scene's pad, TAKE, AUTO, and a sound's mute. Going live, ending the
+  stream, the panic key, recording, and replay stay on the studio.
+- A remote's token, signed by the room key like a guest's, may publish only
+  its presses, at `.press/<name>/<generation>` in the room, and read only the
+  desk the studio publishes it at `.remote/<name>/<generation>`, which carries
+  its renewed tokens. Remote names are their own, apart from guests'.
+- The studio reads a remote's newest press only, at most one a program frame,
+  and refuses one that is not a single action of at most 4 KiB, so a page
+  pressing faster costs the studio nothing more. The page sends its next
+  press once the desk says how the last went. A press the phone made before
+  the studio was listening is not done: the page asks to press it again.
+- **Remove** stops reading its presses at once, and stops renewing its token,
+  so it is disconnected within `--guest-expiry`; **New link** pairs it again
+  under a new generation, which a link from before cannot reach. Pairings and
+  removals outlast a restart, kept beside the room key as
+  `room.remotes.toml` for `room.jwk`.
 
 ## Scene file
 
