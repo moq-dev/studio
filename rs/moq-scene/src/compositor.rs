@@ -645,11 +645,28 @@ impl Compositor {
 
 	/// The keeper of the `index`th item of the scene called `scene`, one
 	/// showing `source` saved at `saved`, taking it back from where it was
-	/// parked when an undo or a redo switches keeping clear back on.
+	/// parked when an undo or a redo switches keeping clear back on: under
+	/// that item, or under the only other of the scene's items parked
+	/// showing `source`, as an undo of a swap into a slot moves it.
 	fn unpark(&mut self, scene: &str, index: usize, source: &str, saved: Rect) -> Option<&mut Keeper> {
 		let key = (scene.to_string(), index);
-		if !self.keepers.contains_key(&key) && self.parked.get(&key).is_some_and(|parked| parked.source == source) {
-			let parked = self.parked.remove(&key).expect("found above");
+		let found = match self.parked.get(&key) {
+			Some(parked) if parked.source == source => Some(key.clone()),
+			_ => {
+				let mut others = self
+					.parked
+					.iter()
+					.filter(|((at, _), parked)| at == scene && parked.source == source);
+				match (others.next(), others.next()) {
+					(Some((at, _)), None) => Some(at.clone()),
+					_ => None,
+				}
+			}
+		};
+		if !self.keepers.contains_key(&key)
+			&& let Some(found) = found
+		{
+			let parked = self.parked.remove(&found).expect("found above");
 			let keeper = Keeper {
 				source: parked.source,
 				rect: saved,

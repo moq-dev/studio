@@ -285,8 +285,7 @@ impl State {
 		} else {
 			entries[from..position].iter().map(|&edit| edit.clone()).collect()
 		};
-		let moved = moved(&self.collection, &collection);
-		self.adopt(collection, &made)?;
+		let moved = self.adopt(collection, &made)?;
 		match position < from {
 			true => self.undone(&moved),
 			false => self.hold(&moved),
@@ -325,8 +324,9 @@ impl State {
 	/// each edit read against the collection it was made to, and any
 	/// `collection` lacks is dropped. Edits that remove a scene on air, leave
 	/// one drawing the program, or make one another size than the program,
-	/// are refused, changing nothing.
-	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<()> {
+	/// are refused, changing nothing. Returns the layers keeping clear it
+	/// saved elsewhere, as [`moved`] finds them.
+	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<Vec<Moved>> {
 		let mut before = self.collection.clone();
 		let mut renames = Vec::with_capacity(made.len());
 		for edit in made {
@@ -334,6 +334,7 @@ impl State {
 			before.apply(edit)?;
 		}
 		keep_on_air(self.compositor.on_air(), &renames, &collection)?;
+		let moved = moved(&self.collection, &collection, &renames);
 		self.compositor.fit(&collection)?;
 		for renames in &renames {
 			self.compositor.rename(renames);
@@ -344,7 +345,7 @@ impl State {
 		self.preview_cued();
 		self.renamed
 			.extend(renames.into_iter().filter(|renames| !renames.is_empty()));
-		Ok(())
+		Ok(moved)
 	}
 
 	/// The scene renames and removals since the last call, oldest first.
@@ -708,8 +709,7 @@ impl autosave::Document for State {
 		} = loaded;
 		// A scene in preview or on program that the file no longer has, such as
 		// one renamed by hand, leaves it until another is picked.
-		let moved = moved(&self.collection, &collection);
-		self.adopt(collection, &[])?;
+		let moved = self.adopt(collection, &[])?;
 		self.hold(&moved);
 		self.history = history;
 		self.dropped = dropped;
@@ -732,21 +732,28 @@ struct Moved {
 
 /// Each scene item keeping clear in `after` that `before` saved elsewhere or
 /// had not keeping clear: the same scene's item at the same index showing
-/// the same source, at another x or y or switched back on. Its keeper is
-/// still under that place, as the compositor follows items only as it
-/// renders. A change of order alone moves nothing.
-fn moved(before: &Collection, after: &Collection) -> Vec<Moved> {
+/// the same source, at another x or y or switched back on, or one switched
+/// back on that `before` showed elsewhere in the scene, as an undo of a
+/// swap into a slot puts it. A scene is the one `renames`, each edit's
+/// between them, oldest first, called it in `before`. Its keeper is still
+/// under that place, as the compositor follows items only as it renders. A
+/// change of order alone moves nothing.
+fn moved(before: &Collection, after: &Collection, renames: &[BTreeMap<String, Option<String>>]) -> Vec<Moved> {
 	let mut moved = Vec::new();
 	for scene in &after.scenes {
-		let Some(was) = before.scene(&scene.name) else { continue };
+		let Some(was) = was_named(renames, &scene.name).and_then(|name| before.scene(&name)) else {
+			continue;
+		};
 		if reordered(&was.items, &scene.items) {
 			continue;
 		}
 		for (index, item) in scene.items.iter().enumerate() {
 			let Some(old) = was.items.get(index) else { continue };
+			let switched_on = |old: &moq_scene::Item| old.source == item.source && old.keep_clear.is_none();
 			if item.keep_clear.is_some()
-				&& old.source == item.source
-				&& (old.keep_clear.is_none() || (old.rect.x, old.rect.y) != (item.rect.x, item.rect.y))
+				&& (switched_on(old)
+					|| (old.source == item.source && (old.rect.x, old.rect.y) != (item.rect.x, item.rect.y))
+					|| (old.source != item.source && was.items.iter().any(switched_on)))
 			{
 				moved.push(Moved {
 					scene: scene.name.clone(),
@@ -758,6 +765,20 @@ fn moved(before: &Collection, after: &Collection) -> Vec<Moved> {
 		}
 	}
 	moved
+}
+
+/// What the scene called `name` after `renames`, each edit's, oldest first,
+/// was called before them, or `None` if one of them added it.
+fn was_named(renames: &[BTreeMap<String, Option<String>>], name: &str) -> Option<String> {
+	let mut name = name.to_string();
+	for renames in renames.iter().rev() {
+		if let Some((from, _)) = renames.iter().find(|(_, to)| to.as_deref() == Some(name.as_str())) {
+			name = from.clone();
+		} else if renames.contains_key(&name) {
+			return None;
+		}
+	}
+	Some(name)
 }
 
 /// Whether `after` holds each of `before`'s items once, in any order.
@@ -3540,7 +3561,10 @@ mod tests {
 			rect,
 		};
 		let elsewhere = moq_scene::Rect { x: 300.0, ..rect };
-		assert_eq!(super::moved(&before, &after), [moved(1, elsewhere), moved(5, rect)]);
+		assert_eq!(
+			super::moved(&before, &after, &[]),
+			[moved(1, elsewhere), moved(5, rect)]
+		);
 
 		// Two keeping clear of the same source swapped, as an undo of a
 		// change of order does: neither moved.
@@ -3548,7 +3572,65 @@ mod tests {
 		after.scenes[0].items[1].rect.x = 300.0;
 		let mut swapped = after.clone();
 		swapped.scenes[0].items.swap(1, 2);
-		assert_eq!(super::moved(&after, &swapped), []);
+		assert_eq!(super::moved(&after, &swapped, &[]), []);
+
+		// Switched back on where `before` showed it elsewhere in the scene, as
+		// an undo of a swap into a slot puts it.
+		let mut kept = before.clone();
+		kept.scenes[0].items.truncate(2);
+		kept.scenes[0].items.push(moq_scene::Item::new("blue", rect));
+		let mut slotted = kept.clone();
+		slotted.scenes[0].items.swap(1, 2);
+		slotted.scenes[0].items[2].keep_clear = None;
+		assert_eq!(super::moved(&slotted, &kept, &[]), [moved(1, rect)]);
+	}
+
+	/// Scenes are matched across the renames between them, so two that swap
+	/// names move nothing, and a move in a renamed scene is the new name's.
+	#[test]
+	fn a_renamed_scene_is_the_one_it_was() {
+		let mut before = red_canvas().collection;
+		let keeping = |x| moq_scene::Item {
+			keep_clear: Some(moq_scene::KeepClear::default()),
+			..moq_scene::Item::new(
+				"red",
+				moq_scene::Rect {
+					x,
+					y: 0.0,
+					width: 100.0,
+					height: 100.0,
+				},
+			)
+		};
+		before.scenes[0].name = "a".into();
+		before.scenes[0].items = vec![keeping(0.0)];
+		before.scenes.push(moq_scene::Scene {
+			items: vec![keeping(200.0)],
+			..moq_scene::Scene::new("b")
+		});
+		let mut after = before.clone();
+		after.scenes[0].name = "b".into();
+		after.scenes[1].name = "a".into();
+		let swap = BTreeMap::from([
+			("a".to_string(), Some("b".to_string())),
+			("b".to_string(), Some("a".to_string())),
+		]);
+		assert_eq!(super::moved(&before, &after, &[swap]), []);
+
+		after.scenes[0].items[0].rect.x = 50.0;
+		let rename = BTreeMap::from([("a".to_string(), Some("c".to_string()))]);
+		let added = BTreeMap::from([("b".to_string(), None)]);
+		after.scenes[0].name = "c".into();
+		after.scenes[1].name = "b".into();
+		assert_eq!(
+			super::moved(&before, &after, &[rename, added]),
+			[Moved {
+				scene: "c".into(),
+				index: 0,
+				source: "red".into(),
+				rect: after.scenes[0].items[0].rect,
+			}]
+		);
 	}
 
 	/// An undo of a move by hand puts a layer keeping clear back as it was
@@ -3570,6 +3652,14 @@ mod tests {
 			keep_clear: Some(moq_scene::KeepClear::default()),
 			..moq_scene::Item::new("red", rect)
 		});
+		loaded.collection.sources.insert(
+			"blue".into(),
+			moq_scene::Source::Color {
+				color: moq_scene::Rgba([0, 0, 255, 255]),
+			},
+		);
+		let slot = moq_scene::Rect { y: 0.0, ..rect };
+		(loaded.collection.scenes[0].items).push(moq_scene::Item::new("blue", slot));
 		let main = loaded.collection.scenes[0].name.clone();
 		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
@@ -3638,6 +3728,44 @@ mod tests {
 		kio::clock::timeout(TIMEOUT, placed(rect, true))
 			.await
 			.expect("the undo holds it");
+
+		// Swapped with another layer, as a drop into its slot does, it stops
+		// keeping clear; the undo takes its placer back from where it was
+		// parked rather than starting over.
+		{
+			let mut state = engine.state.lock().unwrap();
+			let collection = state.collection();
+			let items = &collection.scenes[0].items;
+			let (red, blue) = (items[1].clone(), items[2].clone());
+			let mut draft = collection.draft("Swap `red` into the slot");
+			let layer = moq_scene::Layer::scene(main.as_str());
+			draft.set_item(&layer, 1, blue).unwrap();
+			let parked = moq_scene::Item {
+				keep_clear: None,
+				..red
+			};
+			draft.set_item(&layer, 2, parked).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		// The render that drops its keeper parks it.
+		kio::clock::timeout(TIMEOUT, async {
+			while engine
+				.state
+				.lock()
+				.unwrap()
+				.compositor
+				.placement(&main, 1, "red")
+				.is_some()
+			{
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the swap parks it");
+		engine.state.lock().unwrap().undo().unwrap();
+		kio::clock::timeout(TIMEOUT, placed(rect, true))
+			.await
+			.expect("the undo of the swap takes back its held placer");
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 	}

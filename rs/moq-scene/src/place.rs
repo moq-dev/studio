@@ -572,7 +572,8 @@ impl Placer {
 	}
 
 	/// Take in a read of the picture under the item, taken `at`. Its place
-	/// counts as the worst afresh after a [`GAP`], which showed nothing.
+	/// counts as the worst afresh after a [`GAP`], which showed nothing, and
+	/// a look under way starts over, needing reads compared since.
 	pub fn see(&mut self, read: &Tiles, at: Instant) {
 		if self
 			.sight
@@ -580,6 +581,10 @@ impl Placer {
 			.is_some_and(|last| at.saturating_duration_since(last) > GAP)
 		{
 			self.worst = None;
+			if self.looking.is_some() {
+				self.looking = Some(at);
+				self.sight.compared = 0;
+			}
 		}
 		if self.sight.see(read, at) {
 			self.looking = Some(at);
@@ -714,9 +719,19 @@ impl Placer {
 			return item.rect;
 		};
 		self.saved = Some(saved);
+		// Its keyframes move it from wherever it is placed alike, so a slot
+		// they leave it off the canvas from once they settle is no place to
+		// be, the one it is in included.
+		let settled = item.posed(Duration::MAX).rect;
+		let (w, h) = (canvas.width as f32, canvas.height as f32);
+		let fits = |rect: &Rect| {
+			let (x, y) = (rect.x + settled.x - saved.x, rect.y + settled.y - saved.y);
+			x >= 0.0 && y >= 0.0 && x + settled.width <= w && y + settled.height <= h
+		};
 		let slots: Vec<(Slot, Rect)> = Slot::ALL
 			.into_iter()
 			.filter_map(|slot| Some((slot, slot.rect(saved.width, saved.height, canvas)?)))
+			.filter(|(_, rect)| fits(rect))
 			.collect();
 		if let At::Slot(slot) = self.at
 			&& !slots.iter().any(|(fits, _)| *fits == slot)
@@ -813,16 +828,12 @@ impl Placer {
 		let Some(seen) = self.sight.last else { return };
 		let heat = &self.placement.heat;
 		// Its keyframes move it from wherever it is placed alike, so a place
-		// covers what the item covers posed there, and a slot they would take
-		// it off the canvas from is no place to go.
+		// covers what the item covers posed there.
 		let drawn = |rect: &Rect| Rect {
 			x: rect.x + posed.x - saved.x,
 			y: rect.y + posed.y - saved.y,
 			..posed
 		};
-		let (w, h) = (canvas.width as f32, canvas.height as f32);
-		let inside =
-			|rect: Rect| rect.x >= 0.0 && rect.y >= 0.0 && rect.x + rect.width <= w && rect.y + rect.height <= h;
 		let cost = |slot: Option<Slot>, rect: &Rect| {
 			let (covered, over) = covered(heat, &drawn(rect), canvas);
 			let middle = if slot.is_some_and(|slot| !slot.corner()) {
@@ -834,7 +845,6 @@ impl Placer {
 		};
 		let costs: Vec<(Slot, f32)> = slots
 			.iter()
-			.filter(|(_, rect)| inside(drawn(rect)))
 			.map(|(slot, rect)| (*slot, cost(Some(*slot), rect).0))
 			.collect();
 		let lowest = costs.iter().map(|(_, cost)| *cost).fold(f32::INFINITY, f32::min);
@@ -851,9 +861,13 @@ impl Placer {
 			.map(|(best, _)| *best)
 			.filter(|best| lowest + BETTER <= cost_here && current != Some(*best));
 
-		let looked = self
-			.looking
-			.is_some_and(|since| now.saturating_duration_since(since) >= SETTLE && self.sight.compared >= 2);
+		// Only from reads that are fresh: one before a gap says nothing of
+		// what it covers now.
+		let looked = now.saturating_duration_since(seen) <= GAP
+			&& self.sight.compared >= 2
+			&& self
+				.looking
+				.is_some_and(|since| now.saturating_duration_since(since) >= SETTLE);
 		if looked {
 			self.looking = None;
 			self.worst = None;
@@ -1841,6 +1855,55 @@ mod tests {
 			}
 			assert_eq!(placer.placement().slot, slot, "saved at {saved:?}");
 		}
+	}
+
+	/// A slot its keyframes, once settled, leave it off the canvas from is
+	/// left for where it is saved, even the one it is in.
+	#[test]
+	fn a_slot_its_keyframes_leave_off_the_canvas_is_left() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let mut now = run(&mut placer, saved, start, (0..8).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
+		let item = Item {
+			keyframes: vec![crate::Keyframe {
+				x: -350.0,
+				..crate::Keyframe::new(Duration::ZERO)
+			}],
+			..keeping(saved, KeepClear::default())
+		};
+		for _ in 0..8 {
+			placer.see(&read(MOVING, game), now);
+			placer.place(&item, CANVAS, now);
+			now = now.saturating_add(INTERVAL);
+		}
+		assert_eq!(placer.placement().slot, None);
+		assert_eq!(placer.place(&item, CANVAS, now), saved);
+		assert!(!placer.placement().slots.iter().any(|(slot, _)| *slot == Slot::TopLeft));
+	}
+
+	/// A gap in the reads while it looks starts the look over: it chooses
+	/// only once it has looked again, from reads compared since.
+	#[test]
+	fn a_gap_while_it_looks_looks_again() {
+		let start = Instant::now();
+		let mut placer = Placer::new(start);
+		let saved = camera();
+		let now = run(&mut placer, saved, start, (0..3).map(|_| read(MOVING, game)));
+		let back = now.saturating_add(Duration::from_secs(10));
+		put(&mut placer, saved, back);
+		assert_eq!(placer.placement().slot, None, "chose from reads before the gap");
+		// The first read back has nothing recent to compare with.
+		let first = Tiles {
+			compared: false,
+			..read(MOVING, game)
+		};
+		let now = run(&mut placer, saved, back, [first]);
+		let now = run(&mut placer, saved, now, (0..3).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, None, "chose before looking again");
+		run(&mut placer, saved, now, (0..2).map(|_| read(MOVING, game)));
+		assert_eq!(placer.placement().slot, Some(Slot::TopLeft));
 	}
 
 	/// What it is told not to stay clear of does not matter to it.
