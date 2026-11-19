@@ -1,0 +1,75 @@
+# The show the dual-format views render on: one show going out in landscape
+# and portrait at once. Each scene of the program's size has a portrait
+# arrangement of the same layers: the game cropped into the top of the
+# portrait picture with the camera under it, as turning Both on places them,
+# a logo shown only in landscape, and a scene laid out by slots in a row in
+# portrait. Still sources only, so each view draws the same picture.
+version = 1
+portrait = true
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.Main]
+kind = "role"
+source = "game"
+
+[sources.Camera]
+kind = "role"
+source = "host"
+
+[sources.game]
+kind = "color"
+color = "#3b1d6e"
+
+[sources.host]
+kind = "image"
+path = "person.jpg"
+
+[sources.Dana]
+kind = "clone"
+source = "host"
+
+[sources.backdrop]
+kind = "color"
+color = "#101828"
+
+[sources.bar]
+kind = "color"
+color = "#2563ebe6"
+
+[sources.logo]
+kind = "color"
+color = "#f59e0b"
+
+[video.Dana]
+filters = [{ kind = "hue_rotate", degrees = 140.0 }]
+
+[[scenes]]
+name = "Gameplay"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 }, portrait = { rect = { x = 0, y = 0, width = 1080, height = 1920 } } },
+    { source = "game", rect = { x = 0, y = 0, width = 1920, height = 1080 }, portrait = { rect = { x = 0, y = 0, width = 1080, height = 1152 } } },
+    { source = "host", rect = { x = 1440, y = 600, width = 400, height = 400 }, crop = { left = 0.21875, right = 0.21875 }, portrait = { rect = { x = 0, y = 1152, width = 1080, height = 768 }, crop = { left = 0.1, right = 0.1 } } },
+    { source = "bar", rect = { x = 80, y = 860, width = 900, height = 120 }, portrait = { rect = { x = 45, y = 948, width = 506, height = 68 } } },
+    { source = "logo", rect = { x = 1760, y = 40, width = 120, height = 120 }, format = "landscape" },
+]
+
+[[scenes]]
+name = "Guests"
+portrait = { arrangement = "row" }
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 }, portrait = { rect = { x = 0, y = 0, width = 1080, height = 1920 } } },
+    { source = "Main", slot = "main" },
+    { source = "Camera", slot = "tile" },
+    { source = "Dana", slot = "tile" },
+]
+
+[[scenes]]
+name = "Break"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 }, portrait = { rect = { x = 0, y = 0, width = 1080, height = 1920 } } },
+    { source = "bar", rect = { x = 460, y = 480, width = 1000, height = 120 } },
+]

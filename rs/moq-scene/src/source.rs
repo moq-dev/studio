@@ -313,6 +313,10 @@ pub struct Sources {
 	feeds: BTreeMap<String, Feed>,
 	/// Each audio scene's mix, by its name.
 	mixes: BTreeMap<String, Mix>,
+	/// The program's audio scene with its sources published independently
+	/// mixed in too, by its name, while the show goes out in portrait and
+	/// one of them is heard: see [`whole`](Self::whole).
+	whole: Option<(String, Mix)>,
 	/// The sources on program, as last set.
 	on_program: BTreeSet<String>,
 	/// The picked displays and windows the last sync ran, by name, whose
@@ -327,6 +331,7 @@ impl Sources {
 			context,
 			feeds: BTreeMap::new(),
 			mixes: BTreeMap::new(),
+			whole: None,
 			on_program: BTreeSet::new(),
 			picked: None,
 		}
@@ -370,11 +375,11 @@ impl Sources {
 	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		self.forget_grants(collection);
-		let mixes = &self.mixes;
+		let (mixes, whole) = (&self.mixes, &self.whole);
 		self.feeds.retain(|name, feed| {
 			let keep = collection.sources.get(name) == Some(&feed.source);
 			if !keep {
-				leave(mixes, feed);
+				leave(mixes, whole, feed);
 			}
 			keep
 		});
@@ -390,10 +395,22 @@ impl Sources {
 			.collect();
 		for name in orphaned {
 			let feed = self.feeds.remove(&name).expect("listed above");
-			leave(&self.mixes, &feed);
+			leave(&self.mixes, &self.whole, &feed);
 		}
 		// A mix ends once its last handle drops, which may be a reader's.
 		self.mixes.retain(|name, _| collection.audio_scene(name).is_some());
+		// The portrait picture carries no layout, so its sound has the
+		// sources published independently mixed in, when any is heard.
+		let whole = collection
+			.portrait_canvas()
+			.and(collection.program_audio())
+			.filter(|audio| {
+				let heard = collection.heard(audio);
+				heard.iter().any(|name| collection.published.contains(*name))
+			});
+		if self.whole.as_ref().map(|(name, _)| name.as_str()) != whole {
+			self.whole = whole.map(|name| (name.to_string(), self.context.bus.mix()));
+		}
 		for scene in &collection.audio_scenes {
 			if !self.mixes.contains_key(&scene.name) {
 				self.mixes.insert(scene.name.clone(), self.context.bus.mix());
@@ -458,6 +475,17 @@ impl Sources {
 						mix.unroute(strip);
 					}
 				}
+				if let Some((scene, mix)) = &self.whole {
+					let routed = heard
+						.get(scene.as_str())
+						.is_some_and(|heard| heard.contains(name.as_str()));
+					if mix.routes(strip) != routed {
+						match routed {
+							true => mix.route(strip),
+							false => mix.unroute(strip),
+						}
+					}
+				}
 			}
 		}
 		drivers
@@ -498,7 +526,7 @@ impl Sources {
 	/// every mix at once, as an edited source does.
 	pub fn restart(&mut self, name: &str) {
 		if let Some(feed) = self.feeds.remove(name) {
-			leave(&self.mixes, &feed);
+			leave(&self.mixes, &self.whole, &feed);
 		}
 	}
 
@@ -517,7 +545,7 @@ impl Sources {
 	/// and the next [`sync`](Self::sync) starts the sources again.
 	pub fn stop(&mut self) {
 		for feed in std::mem::take(&mut self.feeds).into_values() {
-			leave(&self.mixes, &feed);
+			leave(&self.mixes, &self.whole, &feed);
 		}
 	}
 
@@ -530,6 +558,17 @@ impl Sources {
 	/// synced had it.
 	pub fn mix(&self, scene: &str) -> Option<&Mix> {
 		self.mixes.get(scene)
+	}
+
+	/// The sound of a picture that carries no layer layout, such as the
+	/// portrait one: the program's audio scene, as [`mix`](Self::mix) has
+	/// it, with the sources published independently that it hears mixed in,
+	/// which reach the landscape picture's viewers by their own tracks.
+	pub fn whole(&self, collection: &Collection) -> Option<&Mix> {
+		match &self.whole {
+			Some((_, mix)) => Some(mix),
+			None => self.mix(collection.program_audio()?),
+		}
 	}
 
 	/// Whether the audio scene called `scene` plays the source called `name`:
@@ -548,11 +587,11 @@ impl Sources {
 	}
 }
 
-/// Take a stopping `feed` out of every one of `mixes`, so it leaves nothing
-/// behind in them, nor plays over a replacement.
-fn leave(mixes: &BTreeMap<String, Mix>, feed: &Feed) {
+/// Take a stopping `feed` out of every one of `mixes`, and `whole`, so it
+/// leaves nothing behind in them, nor plays over a replacement.
+fn leave(mixes: &BTreeMap<String, Mix>, whole: &Option<(String, Mix)>, feed: &Feed) {
 	let Some(strip) = &feed.strip else { return };
-	for mix in mixes.values() {
+	for mix in mixes.values().chain(whole.iter().map(|(_, mix)| mix)) {
 		mix.unroute(strip);
 	}
 }
@@ -4667,6 +4706,46 @@ mod media_tests {
 			until_time(kio::clock::now().saturating_add(Duration::from_millis(600))).await;
 			until_status(&sources, "tone.webm", Status::Ended).await;
 			assert!(sources.get("tone.webm").unwrap().take().is_none());
+		})
+		.await;
+	}
+
+	/// A sound published independently reaches the landscape picture's
+	/// viewers by its own track, so the program's mix leaves it out; the
+	/// portrait picture, which carries no layout, has it mixed in.
+	#[tokio::test(start_paused = true)]
+	async fn the_portrait_picture_hears_what_is_published_independently() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let mut collection = media(dir.path(), &[("tone.webm", TONE, true, false)]);
+			collection.published.insert("tone.webm".into());
+			collection.validate().unwrap();
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let strip = sources.get("tone.webm").unwrap().strip().unwrap().clone();
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap();
+			assert!(!program.routes(&strip), "by its own track");
+			assert!(
+				std::ptr::eq(sources.whole(&collection).unwrap(), program),
+				"without portrait, the program's"
+			);
+
+			collection.portrait = true;
+			collection.validate().unwrap();
+			assert!(sources.sync(&collection).is_empty());
+			let whole = sources.whole(&collection).unwrap();
+			assert!(whole.routes(&strip), "mixed into the portrait picture's");
+			assert!(!sources.mix(crate::AudioScene::DEFAULT).unwrap().routes(&strip));
+
+			// Restarted, it leaves that mix too, and comes back in.
+			sources.restart("tone.webm");
+			assert!(!sources.whole(&collection).unwrap().routes(&strip));
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let strip = sources.get("tone.webm").unwrap().strip().unwrap().clone();
+			assert!(sources.whole(&collection).unwrap().routes(&strip));
 		})
 		.await;
 	}

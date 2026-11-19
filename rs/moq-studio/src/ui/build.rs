@@ -44,12 +44,88 @@ impl Panels {
 		kit::wash(ui.painter(), middle);
 		let mut room = middle.shrink(28.0);
 		let mut shape = snapshot.shape;
-		if let Some(cued) = snapshot.cued.as_ref().filter(|cued| cued.off_air) {
+		let off_air = snapshot.cued.as_ref().filter(|cued| cued.off_air);
+		if let Some(cued) = off_air {
 			room.min.y = self.off_air_header(ui, cued, room, snapshot.shape);
 			shape = cued.shape();
 		}
-		self.stage(ui, fx, snapshot, super::layout::fit(room, shape));
+		// A scene drawn in both: the picture edited large, the other small
+		// beside it, and under them which is edited and where the selected
+		// layer is shown.
+		let dual = {
+			let state = self.engine.state.lock().unwrap();
+			self.edits_both(&state)
+		};
+		let pictures = match (dual, off_air) {
+			(Some(portrait), Some(cued)) => self.portrait_preview.as_ref().map(|portrait_preview| {
+				let landscape = (self.preview.id, cued.canvas);
+				(landscape, (portrait_preview.id, portrait))
+			}),
+			(Some(_), None) => self
+				.portrait
+				.as_ref()
+				.zip(self.portrait_drawn)
+				.map(|(registered, portrait)| ((self.program.id, self.program_drawn), (registered.id, portrait))),
+			(None, _) => None,
+		};
+		// A drag that selects a layer keeping clear leaves the picture where
+		// it was until let go, so the pointer stays over what it moves.
+		if self.drag.is_none() {
+			self.legend = self.keeping_clear();
+		}
+		let keeping = self.legend;
+		if keeping {
+			room.max.y -= keep::LEGEND;
+		}
+		let Some((landscape, portrait)) = pictures else {
+			self.format = Format::Landscape;
+			let at = super::layout::fit(room, shape);
+			self.stage(ui, fx, snapshot, at);
+			if keeping {
+				keep::legend(ui, at);
+			}
+			self.build_keys(ui);
+			return;
+		};
+		let (edited, other) = match self.format {
+			Format::Landscape => (landscape, portrait),
+			Format::Portrait => (portrait, landscape),
+		};
+		let gap = super::formats::GAP;
+		room.max.y -= super::formats::UNDER;
+		// The other picture a third as tall as the edited one.
+		let shapes = [super::shell::shape(edited.1), super::shell::shape(other.1) / 3.0];
+		let [main, beside] = super::layout::pair(room, shapes, gap);
+		let small = egui::Rect::from_min_size(
+			beside.min,
+			egui::vec2(beside.width(), beside.width() / super::shell::shape(other.1)),
+		);
+		self.stage(ui, fx, snapshot, main);
+		self.other_picture(ui, small, other.0, other.1);
+		// Under both pictures: the legend of what a layer keeping clear saw,
+		// then the tabs at the left and the chip at the right.
+		let mut top = main.bottom();
+		if keeping {
+			keep::legend(ui, main);
+			top += keep::LEGEND;
+		}
+		let under = egui::Rect::from_min_max(
+			egui::pos2(main.left(), top + 18.0),
+			egui::pos2(main.right().max(small.right()), top + 48.0),
+		);
+		let tabs = self.format_tabs(ui, under);
+		self.shown_in(ui, under.with_min_x(tabs.right() + 12.0), None);
 		self.build_keys(ui);
+	}
+
+	/// The portrait picture's canvas while BUILD edits a scene drawn in both,
+	/// the one open off air or else the one on program.
+	pub(super) fn edits_both(&self, state: &State) -> Option<Canvas> {
+		let collection = state.collection();
+		let scene = self.edited(state)?;
+		collection
+			.portrait_canvas()
+			.filter(|_| collection.dual(&Layer::scene(scene)))
 	}
 
 	/// The page's keys, unless a field or a page has the keyboard: A adds a
@@ -98,10 +174,26 @@ impl Panels {
 			};
 			(canvas, tag)
 		});
-		let (canvas, id, frame) = match off_air {
-			Some((canvas, tag)) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag(tag)),
+		// The portrait picture, while BUILD edits it: on program, at the size
+		// it was drawn at, as the landscape one is.
+		let portrait = match self.format {
+			Format::Portrait => self.edits_both(&state).and_then(|canvas| match off_air {
+				Some(_) => Some(canvas).zip(self.portrait_preview.as_ref().map(|registered| registered.id)),
+				None => self
+					.portrait_drawn
+					.zip(self.portrait.as_ref().map(|registered| registered.id)),
+			}),
+			Format::Landscape => None,
+		};
+		if portrait.is_none() {
+			self.format = Format::Landscape;
+		}
+		let (canvas, id, frame) = match (off_air, portrait) {
+			(Some((_, tag)), Some((canvas, id))) => (canvas, id, TallyFrame::new(Tally::Cue).tag(tag)),
+			(Some((canvas, tag)), None) => (canvas, self.preview.id, TallyFrame::new(Tally::Cue).tag(tag)),
 			// It is the live picture, so its frame says whether it is on air.
-			None => (self.program_drawn, self.program.id, self.program_frame()),
+			(None, Some((canvas, id))) => (canvas, id, self.program_frame()),
+			(None, None) => (self.program_drawn, self.program.id, self.program_frame()),
 		};
 		let builder = egui::UiBuilder::new().max_rect(at.expand(10.0));
 		if self.interacting {
@@ -120,8 +212,11 @@ impl Panels {
 				// `interacted` found the page through the selection, so one is.
 				let picked = self.selection.clone().expect("interacting with the selected layer");
 				let only = Some((&picked.layer, picked.index));
-				let staged = super::slots::staged(&state, scene.map(|(scene, _)| scene));
+				let staged = super::slots::staged(&state, scene.map(|(scene, _)| scene), self.format);
+				// A layer keeping clear takes the pointer where it is drawn.
+				let staged = keep::drawn(&state, staged, self.format);
 				let delivered = self.interact.update(ui, image, &staged, scene, only);
+				drop(staged);
 				deliver(&state.sources, delivered);
 				self.rebind(&state.sources);
 				let stop = interacting_banner(ui, image, &page);
@@ -179,12 +274,32 @@ impl Panels {
 		}
 	}
 
-	/// The web page the selected layer shows, while it is a visible layer of
-	/// the picture that shows one.
+	/// Whether the selected layer keeps out of the way, so the stage explains
+	/// what it saw under the picture.
+	fn keeping_clear(&self) -> bool {
+		let Some(picked) = &self.selection else {
+			return false;
+		};
+		let state = self.engine.state.lock().unwrap();
+		let item = picked.item(state.collection());
+		item.is_some_and(|item| {
+			self.drawn(&state, picked, item)
+				&& keep::placement(&state, &picked.layer, picked.index, item, self.format).is_some()
+		})
+	}
+
+	/// Whether `item`, `picked`, is drawn in the picture BUILD edits.
+	fn drawn(&self, state: &State, picked: &Picked, item: &Item) -> bool {
+		let format = state.collection().format_of(&picked.layer, self.format);
+		item.visible && item.shown_in(format)
+	}
+
+	/// The web page the selected layer shows, while it is a layer drawn in
+	/// the picture edited that shows one.
 	fn interacted(&self, state: &State) -> Option<String> {
 		let picked = self.selection.as_ref()?;
 		let collection = state.collection();
-		let item = picked.item(collection).filter(|item| item.visible)?;
+		let item = picked.item(collection).filter(|item| self.drawn(state, picked, item))?;
 		let shown = match &picked.layer.scene {
 			Some(scene) => self.edited(state) == Some(scene.as_str()),
 			None => self.off_air(state).is_none(),
@@ -195,7 +310,7 @@ impl Panels {
 	}
 
 	/// Stop passing input to a page, letting go of what it holds.
-	fn stop_interacting(&mut self, state: &State) {
+	pub(super) fn stop_interacting(&mut self, state: &State) {
 		self.interacting = false;
 		self.rebind(&state.sources);
 		deliver(&state.sources, self.interact.release());
@@ -204,14 +319,15 @@ impl Panels {
 	/// The layers the picture edits, front last, each with its place: the
 	/// scene's, then the always-on-top ones over it, unless the scene is open
 	/// off air, as they are drawn on program, each in its slot where the
-	/// scene's arrangement put it.
+	/// scene's arrangement put it, and each keeping clear where it was
+	/// placed.
 	pub(super) fn shown(&self, state: &State) -> Vec<(Picked, Item)> {
 		let (_, since) = self.edited_since(state);
 		let top = self.off_air(state).is_none().then(Layer::top);
 		let layers = self.scene(state).ok().into_iter().chain(top);
 		layers
 			.flat_map(|layer| {
-				let items = super::slots::placed(state, &layer);
+				let items = super::slots::placed(state, &layer, self.format);
 				let posed = items.into_iter().map(move |item| item.posed(since).into_owned());
 				posed.enumerate().map(move |(index, item)| {
 					let picked = Picked {
@@ -282,10 +398,13 @@ impl Panels {
 			let picked = shown[index].0.clone();
 			self.select(Some(picked.clone()));
 			let collection = state.collection();
-			let resting = picked.item(collection).cloned();
+			// A layer keeping clear moves from where it was placed.
+			let resting = picked
+				.rest(collection, self.format)
+				.map(|item| keep::placed(state, &picked.layer, picked.index, &item, self.format));
 			if let Some(resting) = resting {
 				let drawn = match resting.slot {
-					Some(_) => super::slots::drawn(state, &picked.layer, picked.index),
+					Some(_) => super::slots::drawn(state, &picked.layer, picked.index, self.format),
 					None => None,
 				};
 				let drawn = drawn.unwrap_or((resting.rect, resting.crop));
@@ -359,7 +478,7 @@ impl Panels {
 			let point = view.point(pos);
 			// Whole canvas pixels, so an unsnapped drag saves round numbers.
 			let delta = [(point[0] - drag.origin[0]).round(), (point[1] - drag.origin[1]).round()];
-			let item = drag.picked.item(state.collection()).cloned();
+			let item = drag.picked.rest(state.collection(), self.format);
 			let held = ui.input(|input| input.modifiers);
 			let (rect, crop) = match self.cropping {
 				true => {
@@ -385,7 +504,7 @@ impl Panels {
 								height: shown.height - rest.height,
 							},
 						};
-						let others = others(state, scene.as_deref(), &drag.picked, since);
+						let others = others(state, scene.as_deref(), &drag.picked, since, self.format);
 						snap.apply(drag.grab, rect, &others, &canvas)
 					});
 					let rect = drag.hints.as_ref().map_or(rect, |snapped| snapped.rect);
@@ -408,13 +527,30 @@ impl Panels {
 				let label = format!("{verb} `{}`", item.source);
 				spot = Some(Spot::Layer(drag.picked.layer.clone(), item.source.clone()));
 				let picked = &drag.picked;
-				result = edit(state, label, drag.gesture, |draft| {
-					draft.set_item(&picked.layer, picked.index, Item { rect, crop, ..item })
-				});
+				// A move by hand holds a layer keeping clear where it is put;
+				// a resize or a crop leaves it where it rests.
+				let rect = match verb {
+					"Move" => {
+						keep::hold(state, &picked.layer, picked.index, &item, self.format);
+						rect
+					}
+					_ => keep::resized(state, &picked.layer, picked.index, &item, rect, self.format),
+				};
+				if let Some(placed) = picked.placed(state.collection(), self.format, rect, crop) {
+					result = edit(state, label, drag.gesture, |draft| {
+						draft.set_item(&picked.layer, picked.index, placed)
+					});
+				}
 			}
 		}
 		if !response.dragged() {
 			self.drag = None;
+		}
+		// A layer keeping clear stays put while in hand, which each frame
+		// says again, at least four times a lease, whatever the canvas rate.
+		keep::grab(state, self.drag.as_ref().map(|drag| &drag.picked), self.format);
+		if self.drag.is_some() {
+			ui.ctx().request_repaint_after(moq_scene::place::GRAB / 4);
 		}
 		if response.has_focus() && self.drag.is_none() && result.is_ok() {
 			(spot, result) = self.nudge(ui, state, response.id);
@@ -427,12 +563,21 @@ impl Panels {
 		super::slots::outlines(&painter, &view, state, room, &shown, target);
 		let selected = shown.iter().find(|(picked, _)| Some(picked) == self.selection.as_ref());
 		let accent = ui.visuals().selection.stroke.color;
+		// What a layer keeping clear saw, under its handles, unless it is
+		// being dragged, which holds it where it is put.
+		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible && self.drag.is_none())
+			&& let Some(resting) = picked.item(state.collection())
+			&& let Some(placement) = keep::placement(state, &picked.layer, picked.index, resting, self.format)
+			&& let Some(keep) = resting.keep_clear
+		{
+			keep::overlay(&painter, &view, placement, &item.shape, keep.glide);
+		}
 		// A hidden layer has no handles, as the picture cannot grab it, and a
 		// locked one only its outline.
 		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible) {
 			if self.cropping {
 				let collection = state.collection();
-				let resting = picked.item(collection).map_or(item.crop, |item| item.crop);
+				let resting = picked.rest(collection, self.format).map_or(item.crop, |item| item.crop);
 				view.whole(&painter, &item.rect, &resting);
 			}
 			// A layer in a slot has no size of its own to drag.
@@ -521,12 +666,13 @@ impl Panels {
 			}
 		});
 		let Some(item) = picked
-			.item(state.collection())
+			.rest(state.collection(), self.format)
 			.filter(|item| !item.locked && item.slot.is_none())
-			.cloned()
 		else {
 			return (None, Ok(()));
 		};
+		// A layer keeping clear moves from where it was placed.
+		let item = keep::placed(state, &picked.layer, picked.index, &item, self.format);
 		if delta == [0.0; 2] {
 			return (None, Ok(()));
 		}
@@ -541,8 +687,12 @@ impl Panels {
 		};
 		let label = format!("Move `{}`", item.source);
 		let spot = Spot::Layer(picked.layer.clone(), item.source.clone());
+		let Some(moved) = picked.placed(state.collection(), self.format, rect, item.crop) else {
+			return (None, Ok(()));
+		};
+		keep::hold(state, &picked.layer, picked.index, &item, self.format);
 		let result = edit(state, label, Some(gesture), |draft| {
-			draft.set_item(&picked.layer, picked.index, Item { rect, ..item })
+			draft.set_item(&picked.layer, picked.index, moved)
 		});
 		(Some(spot), result)
 	}
@@ -675,22 +825,38 @@ impl Panels {
 				"`{name}` is in a slot, which places it; set it free to place it yourself"
 			)),
 			LayerAction::Slot(slot) => super::slots::set_slot(state, picked, slot),
-			LayerAction::Fit => {
-				let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-				let rect = match aspect(state, &item, true) {
-					Some(aspect) => snap::fit(aspect, &canvas),
-					None => Rect::fill(&canvas),
+			LayerAction::Fit | LayerAction::Fill => {
+				// In the picture BUILD edits.
+				let format = collection.format_of(layer, self.format);
+				let canvas = match collection.dual(layer) {
+					true => collection.canvas_of(format),
+					false => collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas),
 				};
-				set(state, format!("Fit `{name}`"), Item { rect, ..item })
-			}
-			LayerAction::Fill => {
-				let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-				let crop = match aspect(state, &item, false) {
-					Some(aspect) => snap::fill(aspect, &canvas),
-					None => Crop::default(),
+				if !item.shown_in(format) {
+					let why = format!("`{name}` is not shown in the {} picture", format.name().to_lowercase());
+					return (spot, Err(anyhow::anyhow!(why)));
+				}
+				let rest = collection.portrayed(&item, format);
+				let (label, rect, crop) = match action {
+					LayerAction::Fit => {
+						let rect = match aspect(state, &rest, true, format) {
+							Some(aspect) => snap::fit(aspect, &canvas),
+							None => Rect::fill(&canvas),
+						};
+						(format!("Fit `{name}`"), rect, rest.crop)
+					}
+					_ => {
+						let crop = match aspect(state, &rest, false, format) {
+							Some(aspect) => snap::fill(aspect, &canvas),
+							None => Crop::default(),
+						};
+						(format!("Fill with `{name}`"), Rect::fill(&canvas), crop)
+					}
 				};
-				let rect = Rect::fill(&canvas);
-				set(state, format!("Fill with `{name}`"), Item { rect, crop, ..item })
+				match picked.placed(collection, format, rect, crop) {
+					Some(placed) => set(state, label, placed),
+					None => Ok(()),
+				}
 			}
 			LayerAction::Shape(corners) => {
 				let shape = moq_scene::Shape { corners, ..item.shape };
@@ -736,13 +902,32 @@ impl Panels {
 				};
 				let count = collection.items(&to).map_or(0, <[Item]>::len);
 				// The always-on-top layers never go on, so they have no
-				// keyframes to play, nor slots; it stays where it was drawn.
-				let (rect, crop) = super::slots::drawn(state, layer, index).unwrap_or((item.rect, item.crop));
+				// keyframes to play, nor slots, nor a picture under them to
+				// keep clear of; it stays where it was drawn, in each picture
+				// it goes to.
+				let drawn = |format| {
+					let placed = collection.portrayed(&keep::placed(state, layer, index, &item, format), format);
+					let (rect, crop) =
+						super::slots::drawn(state, layer, index, format).unwrap_or((item.rect, item.crop));
+					match item.slot {
+						None => (placed.rect, placed.crop),
+						Some(_) => (rect, crop),
+					}
+				};
+				let (rect, crop) = drawn(Format::Landscape);
+				let dual = collection.dual(&to) && collection.dual(layer);
+				let portrait = dual.then(|| {
+					let (rect, crop) = drawn(Format::Portrait);
+					Placement { rect, crop }
+				});
 				let moved = Item {
 					keyframes: if top { Vec::new() } else { item.keyframes.clone() },
 					slot: None,
+					keep_clear: if top { None } else { item.keep_clear },
 					rect,
 					crop,
+					format: item.format.filter(|_| dual),
+					portrait: portrait.filter(|_| item.shown_in(Format::Portrait)),
 					..item.clone()
 				};
 				let label = match top {
@@ -1289,6 +1474,28 @@ pub(super) fn own_copy(collection: &Collection, source: &str) -> bool {
 	)
 }
 
+/// `scene` named `name`, laid out the same in each format, but neither
+/// published, recorded, nor safe, and carrying the audio scene on program.
+pub(super) fn scene_copy(scene: &Scene, name: String) -> Scene {
+	Scene {
+		name,
+		published: false,
+		recorded: false,
+		audio: None,
+		safe: false,
+		// A copy is the host's, never the studio's to give away.
+		items: scene
+			.items
+			.iter()
+			.map(|item| Item {
+				auto: false,
+				..item.clone()
+			})
+			.collect(),
+		..scene.clone()
+	}
+}
+
 /// Add a scene after the one at `index`, as large and showing the same
 /// layers, named for it, and return its name. Its layers show the same
 /// sources, or with `independent` each a copy of its own, keeping the look,
@@ -1300,21 +1507,7 @@ pub(super) fn duplicate_scene(state: &mut State, index: usize, independent: bool
 		.chain((2..).map(|n| format!("{} copy {n}", scene.name)))
 		.find(|name| collection.scene(name).is_none())
 		.expect("an unused name");
-	let mut copy = Scene {
-		name: name.clone(),
-		size: scene.size,
-		arrangement: scene.arrangement,
-		// A copy is the host's, never the studio's to give away.
-		items: scene
-			.items
-			.iter()
-			.map(|item| Item {
-				auto: false,
-				..item.clone()
-			})
-			.collect(),
-		..Scene::new("")
-	};
+	let mut copy = scene_copy(scene, name.clone());
 	// Each source shown, and the copy of its own each of its layers shows.
 	let mut copies: BTreeMap<String, (String, Source, Option<Video>)> = BTreeMap::new();
 	if independent {
@@ -1353,15 +1546,21 @@ pub(super) fn duplicate_scene(state: &mut State, index: usize, independent: bool
 /// The width over height of what `item` shows: after its crop if `cropped`,
 /// else after its source's alone. `None` for a source that fills any shape,
 /// such as a color.
-fn aspect(state: &State, item: &Item, cropped: bool) -> Option<f32> {
+fn aspect(state: &State, item: &Item, cropped: bool, format: Format) -> Option<f32> {
 	let collection = state.collection();
 	let capture = collection.capture(&item.source);
 	let (width, height) = match collection.sources.get(capture)? {
 		Source::Browser { width, height, .. } | Source::Overlay { width, height, .. } => (*width, *height),
+		// The program, or a scene, as `format`'s picture draws it: turned
+		// in portrait while drawn in both.
 		Source::Scene { scene } => collection
+			.formatted(format)
 			.canvas(Some(scene))
 			.map(|canvas| (canvas.width, canvas.height))?,
-		Source::Program => (collection.canvas.width, collection.canvas.height),
+		Source::Program => {
+			let canvas = collection.canvas_of(format);
+			(canvas.width, canvas.height)
+		}
 		Source::Color { .. } => return None,
 		_ => state.compositor.picture_size(capture)?,
 	};

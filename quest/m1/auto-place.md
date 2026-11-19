@@ -1,53 +1,58 @@
-# [L] A camera that keeps out of the way
+# [M] A camera that keeps out of the way remembers each app, in each format
 
 ## Goal
 
-A layer with **Keep out of the way** on moves itself so it does not cover what
-matters in the picture under it: a game's minimap, a slide's text, the window
-the streamer is working in. It chooses among a few slots along the edges,
-moves only when the content changes, and glides there. The `autoplace` frame
-of [`mock/later.html`](/quest/m0/ux/mock/later.html) shows the slots, what it
-saw, and the move.
+A layer with **Keep out of the way** on knows the app in front: it chooses
+again the moment another app comes to the front, rather than waiting to see
+the picture change, and the place it chose for an app is remembered per user,
+so a known game is right from its first frame. While the show goes out in
+landscape and portrait at once, it keeps out of the way in each picture on
+its own.
 
-The decision is made on the machine. Nothing is uploaded.
+The decision stays on the machine. Nothing is uploaded.
 
 ## Plan
+
+The rest of the quest landed: moq-scene's `place` module reads the picture
+under the layer on the GPU a few times a second, weighs motion, still edges
+(text), and still edges while the rest moves (a HUD), and keeps the layer in
+the corner or edge middle that covers the least, gliding there; BUILD shows
+what it saw, and the inspector its settings (`keep_clear` in the scene file).
+What remains needs moq to report the app in front.
+
+- **When it moves:** a notice that the app in front changed starts a new
+  choice at once, as the content changing kind does now
+  (`Placer::see` setting `looking`), for the display capture under the
+  layer.
+- **Memory:** the slot chosen for each app, keyed by the app moq reports,
+  kept per user with the hotkeys and snap settings, not in the scene file.
+  A remembered slot is where the layer starts when that app comes to the
+  front, before it has looked; a move by hand or a new choice updates it.
 
 Decided 2026-11-09 (maintainer, /quest-plan): ✅ local only (rejected: a
 hosted decision model asked on each content change, cheap but it uploads
 thumbnails of the streamer's screen and its image input is not production
-ready; local first with a hosted model as an opt-in tie-breaker).
+ready; local first with a hosted model as an opt-in tie-breaker). Should the
+signals prove too weak, a small on-device model is a later quest, not a
+hosted one.
 
-- **What it reads:** the composited picture under the layer, scaled far down
-  on the GPU a few times a second: where it moves, where it is dense with
-  edges and text, and what stays put while the rest moves, which is a HUD.
-  The inspector says which of these it stays clear of, and each can be
-  switched off. It reads neither the pointer nor the focused window, since
-  moq reports neither a pointer nor a window's place on its display.
-- **What it decides:** the slot whose area matters least, among the corners
-  and edge middles that fit the layer, inside the canvas's margins.
-- **When it moves:** when the scene changes, when the content under it
-  changes kind (another layout, or another app in front where
-  [moq reports it](/quest/m1/pin-capture-foreground.md)), or when its slot has been the
-  worst for a sustained time. Never on a single busy frame, and never while
-  the streamer is dragging it. A manual move wins and holds until the content
-  changes.
-- **Memory:** the slot chosen for an app is remembered per user, so a known
-  game is right from its first frame.
-- **Where it lives:** the analysis and the choice are UI-free, in moq-scene,
-  tested on recorded frames with a paused clock. The move is the item's
-  rect animated as a Move transition eases: moq-scene's `Glide`
-  (`rs/moq-scene/src/glide.rs`), which glides a scene's slots when they
-  reflow, eases any list of items from one placement to the next on the
-  program clock, keyed by what changed.
+- **In each format:** while the show goes out in landscape and portrait at
+  once, a layer keeping out of the way places only its landscape picture;
+  its portrait place stays as set by hand or derived when **Both at once**
+  was turned on. Placing each picture on its own remains: the analysis reads
+  the portrait picture too, chooses among the portrait canvas's slots, and
+  writes its `portrait` place through moq-scene's `Item::placed`, with a
+  `Glide` per view (`View::reflows` already is one). A layer shown in one
+  format only is placed in that one alone.
 
-Measure, per AGENTS.md: the frame time and GPU copies the analysis adds, and
-that the encoder's load does not move. Should the signals prove too weak, a
-small on-device model is a later quest, not a hosted one.
+Decided 2026-11-18 (maintainer, [moq-dev/studio#200](https://github.com/moq-dev/studio/pull/200#issuecomment-6994130042)):
+✅ landscape only in that PR, each format here (rejected: a placer per
+format in that PR).
 
-Human check: living with it for a few streams. Whether it moves too often is
-a judgment no test makes.
+## Required
+
+- [moq-video's foreground app is pinned](/quest/m1/pin-capture-foreground.md) - when the app in front changes, and the key its slot is remembered under
 
 ## Related
 
-- [moq-video's foreground app is pinned](/quest/m1/pin-capture-foreground.md) - when the app in front changes, and the key its slot is remembered under
+- [Living with it](/quest/m1/auto-place-check.md) - whether it moves too often, judged on real streams

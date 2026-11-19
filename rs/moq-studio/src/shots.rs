@@ -110,6 +110,12 @@ enum View {
 	Cued(Page),
 	/// A scene, by name, open for editing off air on BUILD.
 	OffAir(&'static str),
+	/// BUILD with the front layer selected, once it kept out of the way:
+	/// moved off what mattered and landed. If `dual`, with the show going
+	/// out in both formats.
+	KeepClear {
+		dual: bool,
+	},
 	/// BUILD with the game's window gone dark selected, and what to do about
 	/// it open from its badge.
 	Dark,
@@ -130,6 +136,37 @@ enum View {
 	/// BUILD's Add tab on the drop views' show, with a file dragged or
 	/// dropped on the picture.
 	Drop(Drop),
+	/// On the dual-format show, `page` with the layer of the scene on
+	/// program at `index`, front first, selected, BUILD editing `format`'s
+	/// picture, in Studio mode with the scene `cued` cued, if any, and the
+	/// scene `off_air` open off air, if any.
+	Dual {
+		page: Page,
+		format: moq_scene::Format,
+		index: Option<usize>,
+		cued: Option<&'static str>,
+		off_air: Option<&'static str>,
+	},
+	/// The command palette, open by its key over LIVE with a few keys bound,
+	/// with what is typed into it.
+	Palette(&'static str),
+}
+
+/// The studio on the dual-format views' show, at the mock-ups' size, turned
+/// to `page` with the camera's layer selected, editing `format`'s picture.
+fn dual(page: Page, format: moq_scene::Format) -> Open {
+	Open::Studio {
+		view: View::Dual {
+			page,
+			format,
+			index: Some(2),
+			cued: None,
+			off_air: None,
+		},
+		size: SIZE,
+		show: "dual.toml",
+		relay: false,
+	}
 }
 
 /// A file over the picture, at the pointer.
@@ -288,6 +325,17 @@ views! {
 	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
 	/// Too narrow for the banner beside the live picture, it goes under it.
 	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml", relay: false };
+	/// A facecam keeping out of the way of a game: what matters glowing on the
+	/// picture, the places it may go, where it was and the glide to where it
+	/// went, the legend under the picture, and its settings in the inspector.
+	build_keep_clear: Live, Open::Studio { view: View::KeepClear { dual: false }, size: SIZE, show: "keep.toml", relay: false };
+	/// The same in the smallest window: the legend's labels shortened to fit
+	/// beside the note, or the note left out.
+	build_keep_clear_compact: Live, Open::Studio { view: View::KeepClear { dual: false }, size: crate::ui::MIN_SIZE, show: "keep.toml", relay: false };
+	/// The same going out in both formats: the legend between the landscape
+	/// picture, the only one it moves in, and the tabs, the portrait picture
+	/// beside it showing the facecam where its rect rests, fitted.
+	build_keep_clear_dual: Live, Open::Studio { view: View::KeepClear { dual: true }, size: SIZE, show: "keep.toml", relay: false };
 	/// A window gone dark: its row, the layer on the picture, its scene's
 	/// pad, and the health dot turn amber, and its badge opens what happened
 	/// and the fixes.
@@ -306,6 +354,37 @@ views! {
 	build_drop_refused: Still, dropping(Drop::Refused);
 	/// The logo dropped lands where it was let go, at its own size, selected.
 	build_dropped: Still, dropping(Drop::Placed);
+	/// A show going out in both formats: the landscape and portrait
+	/// pictures side by side, each in its tally frame with its size under
+	/// it, where the selected camera is shown between them, and each pad
+	/// showing the pair, as the `dual` mock-up frame has it.
+	live_dual: Still, dual(Page::Live, moq_scene::Format::Landscape);
+	/// It in a half-size window: the chip of where the camera is shown keeps
+	/// clear of what is said under the landscape picture, without its words.
+	live_dual_compact: Still, Open::Studio { view: View::Dual { page: Page::Live, format: moq_scene::Format::Landscape, index: Some(2), cued: None, off_air: None }, size: HALF, show: "dual.toml", relay: false };
+	/// Studio mode on it: NEXT shows the cued scene in both formats.
+	live_dual_studio: Still, Open::Studio { view: View::Dual { page: Page::Live, format: moq_scene::Format::Landscape, index: None, cued: Some("Guests"), off_air: None }, size: SIZE, show: "dual.toml", relay: false };
+	/// BUILD on it: the landscape picture edited, the portrait one small
+	/// beside it, and under them the tabs that pick which and where the
+	/// selected camera is shown, which the inspector says too.
+	build_dual: Still, dual(Page::Build, moq_scene::Format::Landscape);
+	/// BUILD on it in a half-size window: the chip keeps clear of the tabs,
+	/// or leaves the choice to the inspector where there is no room.
+	build_dual_compact: Still, Open::Studio { view: View::Dual { page: Page::Build, format: moq_scene::Format::Landscape, index: Some(2), cued: None, off_air: None }, size: HALF, show: "dual.toml", relay: false };
+	/// BUILD editing the portrait picture: the camera's handles at its
+	/// portrait place, the landscape picture small beside it.
+	build_dual_portrait: Still, dual(Page::Build, moq_scene::Format::Portrait);
+	/// A scene laid out by slots on it, open off air in portrait: its own
+	/// arrangement there, a row, which the inspector picks.
+	build_dual_slots: Still, Open::Studio { view: View::Dual { page: Page::Build, format: moq_scene::Format::Portrait, index: None, cued: None, off_air: Some("Guests") }, size: SIZE, show: "dual.toml", relay: false };
+	/// Settings, Show on it: Both at once on.
+	settings_show_dual: Still, Open::Studio { view: View::Setting(Setting::Show), size: SIZE, show: "dual.toml", relay: false };
+	/// GO LIVE's sheet on it: both broadcasts to each relay, and the encoder
+	/// and connection checked for both pictures.
+	going_dual: Live, Open::Studio { view: View::Going, size: SIZE, show: "dual.toml", relay: true };
+	/// On air on it: both pictures in their ON AIR frames, each with what
+	/// its video sends under it.
+	on_air_dual: Live, Open::Studio { view: View::OnAir, size: SIZE, show: "dual.toml", relay: true };
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
 	mix: Still, mixing(MixView::Strips, None, SIZE);
@@ -359,6 +438,15 @@ views! {
 	settings_advanced: Still, studio(View::Setting(Setting::Advanced));
 	/// The scene graph, in a window of its own.
 	graph: Still, studio(View::Graph);
+	/// The command palette as its key opens it: every action, each with its
+	/// key and why it cannot run now, before the pages, settings, and what
+	/// can be added.
+	palette: Still, studio(View::Palette(""));
+	/// The palette finding what `take` names: the scenes and TAKE, which says
+	/// nothing is cued.
+	palette_found: Still, studio(View::Palette("take"));
+	/// The palette finding a setting by its name.
+	palette_setting: Still, studio(View::Palette("frame"));
 	/// The show's menu: its file, Reload, Copy, Paste, and Close show, which
 	/// returns to the library.
 	show_menu: Still, studio(View::ShowMenu);
@@ -600,6 +688,146 @@ fn a_click_takes_and_the_panic_key_cuts() {
 		closed.load(Ordering::Relaxed),
 		"the window counts the close as asked for"
 	);
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// The command palette as a person uses it: its key opens it from LIVE,
+/// what is typed finds a scene, a sound, and a setting, and Enter runs the
+/// one picked, taking the scene, muting the sound, and opening Settings at
+/// the setting. An action that cannot run now says why and stays open.
+/// Every setting the palette finds by name is a row of its pane. It draws
+/// no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn the_palette_finds_and_runs_anything() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let mut show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	// Failed in a build without `capture`, which leaves it a sound to mute.
+	show.push_str("\n[sources.mic]\nkind = \"microphone\"\n");
+	std::fs::write("show.toml", show).unwrap();
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let program = || {
+		let state = engine.state.lock().unwrap();
+		state.compositor.program_scene().map(str::to_string)
+	};
+	let muted = |name: &str| {
+		let state = engine.state.lock().unwrap();
+		state.collection().audio.get(name).is_some_and(|audio| audio.muted)
+	};
+	let run = |harness: &mut Harness<'_, Window>, query: &str| {
+		harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+		harness.run_steps(2);
+		harness.get_by_role(Role::TextInput).type_text(query);
+		harness.run_steps(2);
+		harness.key_press(egui::Key::Enter);
+		harness.run_steps(2);
+	};
+	assert_eq!(program().as_deref(), Some("Main"));
+
+	run(&mut harness, "interview");
+	assert_eq!(program().as_deref(), Some("Interview"), "the palette took the scene");
+	assert!(harness.query_by_role(Role::TextInput).is_none(), "and closed");
+
+	// Typed and run in one frame, Enter runs what was typed.
+	harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+	harness.run_steps(2);
+	let enter = egui::Event::Key {
+		key: egui::Key::Enter,
+		physical_key: None,
+		pressed: true,
+		repeat: false,
+		modifiers: egui::Modifiers::NONE,
+	};
+	let events = &mut harness.input_mut().events;
+	events.extend([egui::Event::Text("take scene break".into()), enter]);
+	harness.run_steps(2);
+	assert_eq!(program().as_deref(), Some("Break"), "the palette ran what was typed");
+
+	assert!(!muted("mic"));
+	run(&mut harness, "mute mic");
+	assert!(muted("mic"), "the palette muted the sound");
+	run(&mut harness, "unmute mic");
+	assert!(!muted("mic"), "and unmuted it");
+
+	// TAKE with nothing cued says why, and Enter leaves it open.
+	run(&mut harness, "take the cued");
+	let take = harness.get_by_label("Take the cued scene");
+	assert!(take.accesskit_node().is_disabled(), "it cannot run");
+	assert_eq!(program().as_deref(), Some("Break"));
+	assert!(harness.query_by_role(Role::TextInput).is_some(), "still open");
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	assert!(harness.query_by_role(Role::TextInput).is_none(), "Escape closes it");
+
+	// A setting under a disclosure opens it.
+	run(&mut harness, "scene sizes");
+	assert!(
+		harness.query_by_label("Give a scene its own size").is_some(),
+		"Scene sizes opened"
+	);
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+
+	run(&mut harness, "fps");
+	assert!(
+		harness.query_by_label("Frame rate").is_some(),
+		"Settings opened at the frame rate"
+	);
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+
+	// A key bound to a source with no sound, which the MIX lists no strip for,
+	// is still a sound of the show; only one the file lacks is no such sound.
+	{
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!("the studio is open")
+		};
+		let key = |code, name: &str| hotkeys::Binding {
+			modifiers: egui::Modifiers::NONE,
+			key: winit::keyboard::PhysicalKey::Code(code),
+			name: winit::keyboard::Key::Character(name.into()),
+		};
+		use crate::controls::Action;
+		use winit::keyboard::KeyCode;
+		studio.bind(&Action::Mute("host".into()), key(KeyCode::F7, "F7"));
+		studio.bind(&Action::Mute("nope".into()), key(KeyCode::F8, "F8"));
+		studio.open(Setting::Hotkeys);
+	}
+	harness.run_steps(2);
+	assert!(
+		harness.query_by_label("host").is_some(),
+		"the silent source's key is listed"
+	);
+	assert_eq!(
+		harness.query_all_by_label("no such sound").count(),
+		1,
+		"only the missing source is no such sound"
+	);
+
+	// Each setting the palette finds by name is a row of its pane.
+	for setting in Setting::ALL {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!("the studio is open")
+		};
+		studio.open(setting);
+		harness.run_steps(2);
+		for (name, _) in setting.rows() {
+			assert!(
+				harness.query_by_label(name).is_some(),
+				"{setting:?} has no row called `{name}`"
+			);
+		}
+	}
 
 	drop(harness);
 	quit(&engine, &runtime);
@@ -1402,6 +1630,9 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		Open::Kit { .. } | Open::Library => unreachable!("drawn without an engine"),
 		Open::Studio { show, view, relay, .. } => {
 			let mut text = std::fs::read_to_string(shows.join(show)).unwrap();
+			if let View::KeepClear { dual: true } = view {
+				text = text.replacen("version = 1\n", "version = 1\nportrait = true\n", 1);
+			}
 			if let View::Review { replays: true, .. } = view {
 				text.push_str("\n[sources.replay]\nkind = \"replay\"\n\n[sources.slowmo]\nkind = \"replay\"\n");
 			}
@@ -1435,6 +1666,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Mix(view, opened) => studio.mix(*view, *opened),
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
+		View::KeepClear { .. } => studio.build(Side::Layers, Inspect::Layer, Some(0)),
 		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
@@ -1467,6 +1699,36 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			}
 		}
 		View::Drop(_) => studio.build(Side::Add, Inspect::Layer, None),
+		View::Dual {
+			page,
+			format,
+			index,
+			cued,
+			off_air,
+		} => {
+			studio.build(Side::Layers, Inspect::Layer, *index);
+			studio.edit_format(*format);
+			if let Some(cued) = cued {
+				studio.studio_mode(true);
+				studio.cue(cued);
+			}
+			studio.turn(*page);
+			if let Some(scene) = off_air {
+				studio.edit_off_air(scene);
+			}
+		}
+		View::Palette(_) => {
+			let key = |code, name: &str| hotkeys::Binding {
+				modifiers: egui::Modifiers::NONE,
+				key: winit::keyboard::PhysicalKey::Code(code),
+				name: winit::keyboard::Key::Character(name.into()),
+			};
+			use crate::controls::Action;
+			use winit::keyboard::KeyCode;
+			studio.bind(&Action::Panic, key(KeyCode::F9, "F9"));
+			studio.bind(&Action::Scene("Main".into()), key(KeyCode::F1, "F1"));
+			studio.bind(&Action::Cut, key(KeyCode::Numpad0, "0"));
+		}
 		View::Review { picked, .. } => {
 			studio.turn(Page::Review);
 			studio.seed_shelf(shelf());
@@ -1540,6 +1802,48 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				}
 			}))
 			.expect("the room fails to join at launch"),
+		View::KeepClear { .. } => runtime
+			.block_on(kio::clock::timeout(SETTLE, async {
+				loop {
+					let landed = {
+						let state = engine.state.lock().unwrap();
+						let item = &state.collection().scenes[0].items[1];
+						let placement = state.compositor.placement("Gameplay", 1, &item.source);
+						placement.is_some_and(|placement| {
+							let slot = placement
+								.slot
+								.and_then(|slot| placement.slots.iter().find(|(fits, _)| *fits == slot));
+							placement.left.is_some() && slot.is_some_and(|(_, rect)| *rect == placement.rect)
+						})
+					};
+					if landed {
+						break;
+					}
+					harness.step();
+					kio::clock::sleep(Duration::from_millis(20)).await;
+				}
+				harness.run_steps(2);
+			}))
+			.expect("the facecam moves off the minimap and lands"),
+		View::OnAir if engine.state.lock().unwrap().collection().portrait => runtime
+			.block_on(kio::clock::timeout(SETTLE, async {
+				// Each picture's rate shows once health hears what its video
+				// sent.
+				let sending = |name: Option<&str>| {
+					let report = engine.health.lock().unwrap();
+					let broadcast = report.broadcasts.iter().find(|found| found.name.as_deref() == name);
+					broadcast.is_some_and(|broadcast| {
+						let mut tracks = broadcast.tracks.iter();
+						tracks.any(|track| track.label.starts_with("video") && track.sent.is_some())
+					})
+				};
+				while !(sending(None) && sending(Some(moq_scene::PORTRAIT))) {
+					harness.step();
+					kio::clock::sleep(Duration::from_millis(20)).await;
+				}
+				harness.run_steps(2);
+			}))
+			.expect("both pictures send"),
 		View::OnAirHealth => {
 			let pill = ["Healthy", "Starting", "Degraded", "Unhealthy"]
 				.into_iter()
@@ -1595,6 +1899,14 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			harness.run_steps(4);
 		}
 		View::Drop(drop) => drag(&mut harness, &engine, *drop),
+		View::Palette(query) => {
+			harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+			harness.run_steps(2);
+			if !query.is_empty() {
+				harness.get_by_role(Role::TextInput).type_text(query);
+			}
+			harness.run_steps(4);
+		}
 		View::History => {
 			harness
 				.get_all_by_label("Mute")

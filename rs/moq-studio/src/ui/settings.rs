@@ -5,6 +5,7 @@
 //! the show, this user's settings for what belongs to the operator, and
 //! `<show>.stream.toml` for where it streams and who joins it.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use egui::{Align, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
@@ -198,6 +199,12 @@ impl Panels {
 		self.confirm_restart(ctx);
 	}
 
+	/// Close Settings, dropping a restart it was asking about.
+	pub(super) fn close_settings(&mut self) {
+		self.setting = None;
+		self.restart = None;
+	}
+
 	/// The categories, the one shown lit: by name, or by `icons` alone.
 	fn settings_nav(&mut self, ui: &mut Ui, rect: Rect, icons: bool, setting: &mut Setting) {
 		let painter = ui.painter();
@@ -250,9 +257,10 @@ impl Panels {
 	/// Settings, Show: the format, the canvas size and frame rate by name or
 	/// by number, and each scene's own size.
 	fn show_pane(&mut self, ui: &mut Ui) {
-		let (current, scenes) = {
+		let (current, scenes, both) = {
 			let state = self.engine.state.lock().unwrap();
-			(state.collection().canvas, state.collection().scenes.clone())
+			let collection = state.collection();
+			(collection.canvas, collection.scenes.clone(), collection.portrait)
 		};
 		let shown = self.canvas.unwrap_or(current);
 		let mut wanted = None;
@@ -261,7 +269,7 @@ impl Panels {
 		row(
 			ui,
 			"Format",
-			"One format for the whole show. The layout of this window follows it.",
+			"The shape of the show's picture. The layout of this window follows it.",
 			|ui| {
 				ui.spacing_mut().item_spacing.x = CARD_GAP;
 				// Right to left, so Landscape comes first.
@@ -280,6 +288,26 @@ impl Panels {
 			},
 		);
 
+		let mut on = both;
+		row(
+			ui,
+			"Both at once",
+			"Also send a portrait picture, for phones, as its own broadcast beside the landscape one. Each \
+			 scene gets a portrait arrangement of its layers, and the machine encodes both.",
+			|ui| {
+				// As the scene file requires: only a canvas wider than tall turns.
+				let wide = current.width > current.height;
+				let toggle = ui
+					.add_enabled(wide, kit::Toggle::new(&mut on).label("Landscape and portrait"))
+					.on_disabled_hover_text(
+						"Only a canvas wider than tall turns: a portrait show turns to landscape first",
+					);
+				if toggle.changed() {
+					self.set_both(on);
+				}
+			},
+		);
+
 		let named = named_size(current).filter(|_| self.canvas.is_none());
 		let mut size = named;
 		let sizes: Vec<(Option<u32>, &str)> = SIZES
@@ -287,7 +315,7 @@ impl Panels {
 			.map(|(short, name)| (Some(*short), *name))
 			.chain([(None, "Custom")])
 			.collect();
-		row(ui, "Canvas size", &upload(current), |ui| {
+		row(ui, "Canvas size", &upload(current, both), |ui| {
 			// Custom lit, as for a size no name has, still opens its editor.
 			if ui.add(kit::Segmented::new(&mut size, &sizes).reclick()).changed() {
 				match size {
@@ -408,9 +436,15 @@ impl Panels {
 		};
 		let mut action = None;
 		let id = ui.make_persistent_id("scene sizes");
-		egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+		let top = ui.cursor().top();
+		let mut sizes = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+		// Found by the palette, it opens to show what it holds.
+		if seeking(ui.ctx(), SCENE_SIZES) {
+			sizes.set_open(true);
+		}
+		sizes
 			.show_header(ui, |ui| {
-				ui.label(RichText::new("Scene sizes").font(kit::ui_strong(13.5)).color(kit::TEXT));
+				ui.label(RichText::new(SCENE_SIZES).font(kit::ui_strong(13.5)).color(kit::TEXT));
 				ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
 					ui.label(RichText::new(count).font(kit::ui(12.0)).color(kit::DIM));
 				});
@@ -472,6 +506,8 @@ impl Panels {
 					"A scene of another size cannot go on air. Publish it as its own broadcast instead, under Advanced.",
 				);
 			});
+		let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+		sought(ui, SCENE_SIZES, rect);
 		action
 	}
 
@@ -514,20 +550,41 @@ impl Panels {
 					"Set the canvas to {}x{} at {} fps",
 					canvas.width, canvas.height, canvas.framerate
 				);
-				edit(&mut state, label, None, |draft| draft.set_canvas(canvas))
+				// Only a landscape canvas goes out in portrait too.
+				let turning_off = canvas.height >= canvas.width && state.collection().portrait;
+				let result = edit(&mut state, label, None, |draft| {
+					if canvas.height >= canvas.width {
+						draft.set_portrait(false)?;
+					}
+					draft.set_canvas(canvas)
+				});
+				// As turning Both off does, it removes the layers shown only in
+				// portrait, which may move the selected layer's index.
+				if result.is_ok() && turning_off {
+					self.deselect_item();
+				}
+				result
 			}
 			Restart::Scene(name, size) => match state.collection().scenes.iter().position(|scene| scene.name == name) {
 				Some(index) => {
-					let scene = state.collection().scenes[index].clone();
+					// The program's size, while the show goes out in portrait
+					// too, follows the program's, so the scene keeps its
+					// portrait picture and can still go on program.
+					let program = state.collection().canvas;
+					let size = size.filter(|size| {
+						!state.collection().portrait || (size.width, size.height) != (program.width, program.height)
+					});
 					let label = match size {
 						Some(size) => format!("Size scene `{name}` {}x{}", size.width, size.height),
 						None => format!("Size scene `{name}` as the program"),
 					};
-					let result = edit(&mut state, label, None, |draft| {
-						draft.set_scene(index, Scene { size, ..scene })
-					});
+					let result = edit(&mut state, label, None, |draft| draft.set_size(index, size));
 					if result.is_ok() {
 						self.sizes.remove(&name);
+						// Given its own size, its layers shown only in portrait go.
+						if size.is_some() {
+							self.deselect_item();
+						}
 					}
 					result
 				}
@@ -535,6 +592,24 @@ impl Panels {
 			},
 		};
 		drop(state);
+		self.check(result);
+	}
+
+	/// Send a portrait picture too, or stop, as an edit undo takes back.
+	fn set_both(&mut self, on: bool) {
+		let engine = self.engine.clone();
+		let mut state = engine.state.lock().unwrap();
+		let label = match on {
+			true => "Go out in landscape and portrait",
+			false => "Go out in landscape only",
+		};
+		let result = edit(&mut state, label.to_string(), None, |draft| draft.set_portrait(on));
+		drop(state);
+		// Turned off, the layers shown only in portrait go, which may move
+		// the selected layer's index.
+		if result.is_ok() && !on {
+			self.deselect_item();
+		}
 		self.check(result);
 	}
 
@@ -1098,29 +1173,29 @@ impl Panels {
 					});
 				});
 			});
-		let scenes: Vec<String> = {
+		// A source can be in the scene file yet unlisted, such as a clip with no
+		// audio, so a sound is gone only once the file lacks it, as firing it checks.
+		let (listed, sources): (Vec<Action>, HashSet<String>) = {
 			let state = self.engine.state.lock().unwrap();
-			state
-				.collection()
-				.scenes
-				.iter()
-				.map(|scene| scene.name.clone())
-				.collect()
+			let sources = state.collection().sources.keys().cloned().collect();
+			(Action::listed(&state), sources)
 		};
 		let bindings = hotkeys.bindings();
-		// A key bound to a scene the file no longer has, so it can be cleared.
-		let gone: Vec<Action> = bindings
+		// A key bound to an action not listed, so it can still be seen and cleared.
+		let unlisted: Vec<Action> = bindings
 			.keys()
-			.filter(|action| matches!(action, Action::Scene(name) if !scenes.contains(name)))
+			.filter(|action| !listed.contains(action))
 			.cloned()
 			.collect();
-		let mut scene_actions: Vec<Action> = scenes.iter().cloned().map(Action::Scene).collect();
-		scene_actions.extend(gone.iter().cloned());
-		let mut groups: Vec<(&str, Vec<Action>)> = Action::FIXED
-			.iter()
-			.map(|(caption, actions)| (*caption, actions.to_vec()))
-			.collect();
-		groups.insert(2, ("Scenes", scene_actions));
+		let groups = Group::ALL.map(|group| {
+			let actions: Vec<Action> = listed
+				.iter()
+				.chain(&unlisted)
+				.filter(|action| action.group() == group)
+				.cloned()
+				.collect();
+			(group.name(), actions)
+		});
 
 		let mut bind = None;
 		let mut clear = None;
@@ -1139,15 +1214,13 @@ impl Panels {
 				for (column, actions) in columns.iter_mut().zip(actions.chunks(half)) {
 					for action in actions {
 						let name = match action {
-							Action::Scene(name) => name.clone(),
+							Action::Scene(name) | Action::Mute(name) => name.clone(),
 							action => action.name(studio),
 						};
 						let detail = match action {
-							Action::EndStream => Some("held"),
-							Action::Panic => Some("safe scene, mics muted"),
-							Action::Scene(_) if studio => Some("cues"),
-							Action::Scene(name) if !scenes.contains(name) => Some("no such scene"),
-							_ => None,
+							Action::Scene(_) if unlisted.contains(action) => Some("no such scene"),
+							Action::Mute(name) if !sources.contains(name) => Some("no such sound"),
+							action => action.detail(studio),
 						};
 						let refusal = self
 							.refusal
@@ -1416,6 +1489,7 @@ pub(super) fn field_row(ui: &mut Ui, name: &str, help: &str, flag: Option<&str>,
 /// A row under a line: `name` and `help` in `share` of its width with
 /// `control` beside them, or `control` under them in a pane too narrow.
 fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce(&mut Ui)) {
+	let top = ui.cursor().top();
 	rule(ui);
 	ui.add_space(14.0);
 	let width = ui.available_width();
@@ -1440,6 +1514,67 @@ fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce
 		});
 	}
 	ui.add_space(14.0);
+	let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+	sought(ui, name, rect);
+}
+
+/// The setting the palette found, by its row's name, and when, which its
+/// pane scrolls to once and lights for a moment.
+#[derive(Clone)]
+struct Sought {
+	name: String,
+	since: f64,
+	scrolled: bool,
+}
+
+/// The Show pane's disclosure of each scene's own size, by its name.
+pub(super) const SCENE_SIZES: &str = "Scene sizes";
+
+/// Whether the palette found the setting called `name`, which its pane has
+/// yet to light.
+fn seeking(ctx: &egui::Context, name: &str) -> bool {
+	let sought = ctx.data(|data| data.get_temp::<Sought>(egui::Id::new("sought setting")));
+	sought.is_some_and(|sought| sought.name == name)
+}
+
+/// How long a setting the palette found stays lit.
+const LIT: f64 = 1.5;
+
+/// Scroll Settings to the row called `name` and light it, as the palette
+/// does for a setting it found.
+pub(super) fn seek(ctx: &egui::Context, name: &str) {
+	let since = ctx.input(|input| input.time);
+	let sought = Sought {
+		name: name.to_string(),
+		since,
+		scrolled: false,
+	};
+	ctx.data_mut(|data| data.insert_temp(egui::Id::new("sought setting"), sought));
+}
+
+/// Scroll to the row called `name` at `rect` once, and light it a moment, if
+/// the palette found it.
+fn sought(ui: &mut Ui, name: &str, rect: Rect) {
+	let id = egui::Id::new("sought setting");
+	let Some(mut sought) = ui.ctx().data(|data| data.get_temp::<Sought>(id)) else {
+		return;
+	};
+	if sought.name != name {
+		return;
+	}
+	if !std::mem::replace(&mut sought.scrolled, true) {
+		ui.scroll_to_rect(rect, Some(Align::Min));
+	}
+	let age = ui.input(|input| input.time) - sought.since;
+	if age > LIT {
+		ui.ctx().data_mut(|data| data.remove::<Sought>(id));
+		return;
+	}
+	let alpha = (1.0 - age / LIT) as f32;
+	ui.painter()
+		.rect_filled(rect, 8, kit::ACCENT.gamma_multiply(0.12 * alpha));
+	ui.ctx().request_repaint();
+	ui.ctx().data_mut(|data| data.insert_temp(id, sought));
 }
 
 /// That `flag` sets a setting for this run, over the show's own.
@@ -1628,13 +1763,24 @@ fn sized(canvas: Canvas, short: u32) -> Canvas {
 }
 
 /// What `canvas` costs in upload: the most its renditions and the audio
-/// send, as each rendition's ceiling allows.
-fn upload(canvas: Canvas) -> String {
-	let video: u64 = crate::ladder::sizes(canvas.size())
-		.into_iter()
-		.map(|size| crate::ladder::ceiling(size, canvas.framerate()).as_bps())
+/// send, as each rendition's ceiling allows, twice over, a picture in each
+/// format, if `both`.
+fn upload(canvas: Canvas, both: bool) -> String {
+	// The portrait picture is a broadcast of its own, audio included.
+	let pictures = std::iter::once(canvas).chain(both.then(|| canvas.turned()));
+	let total: u64 = pictures
+		.map(|canvas| {
+			let ladder = crate::ladder::sizes(canvas.size()).into_iter();
+			let video: u64 = ladder
+				.map(|size| crate::ladder::ceiling(size, canvas.framerate()).as_bps())
+				.sum();
+			video + crate::engine::AUDIO_BITRATE.as_bps()
+		})
 		.sum();
-	let total = video + crate::engine::AUDIO_BITRATE.as_bps();
+	let both = match both {
+		true => " in both formats",
+		false => "",
+	};
 	let name = named_size(canvas)
 		.and_then(|short| SIZES.iter().find(|(side, _)| *side == short))
 		.map_or_else(
@@ -1642,7 +1788,7 @@ fn upload(canvas: Canvas) -> String {
 			|(_, name)| name.to_string(),
 		);
 	format!(
-		"Bigger needs a faster encoder and more upload: {name} at {} wants up to about {:.1} Mb/s.",
+		"Bigger needs a faster encoder and more upload: {name} at {}{both} wants up to about {:.1} Mb/s.",
 		canvas.framerate,
 		total as f64 / 1e6
 	)
@@ -1658,6 +1804,25 @@ mod tests {
 			height,
 			framerate,
 		}
+	}
+
+	/// The portrait picture is a broadcast of its own, as costly as the
+	/// landscape one.
+	#[test]
+	fn both_formats_want_twice_the_upload() {
+		let canvas = canvas(1920, 1080, 30);
+		let wanted = |both| {
+			let said = upload(canvas, both);
+			let number = said.rsplit("about ").next().unwrap().trim_end_matches(" Mb/s.");
+			number.parse::<f64>().unwrap()
+		};
+		assert!(upload(canvas, true).contains("1080p at 30 in both formats"));
+		assert!(
+			(wanted(true) - 2.0 * wanted(false)).abs() <= 0.1,
+			"{} {}",
+			wanted(true),
+			wanted(false)
+		);
 	}
 
 	#[test]

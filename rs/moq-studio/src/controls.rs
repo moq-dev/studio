@@ -1,5 +1,6 @@
-//! What the operator does from a button or a hotkey: take a scene, panic,
-//! replay, save a clip, record, and go live and end the stream. Hotkeys fire
+//! What the operator does from a button, a hotkey, or the command palette:
+//! take a scene, mute a sound, panic, replay, save a clip, record, and go live
+//! and end the stream, each registered once in the table here. Hotkeys fire
 //! from outside the window's frames, so a key pressed while a game has focus
 //! acts at once, even while the window is hidden and draws nothing.
 
@@ -13,7 +14,8 @@ use crate::engine::{Engine, OnAir, State};
 use crate::replay;
 use crate::stream::{Stream, Switched};
 
-/// Something a hotkey can be bound to.
+/// Something the studio does, from a hotkey, the command palette, or a
+/// button. Bindings are saved by the variant's name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Action {
 	/// TAKE: put the cued scene on program at once.
@@ -37,19 +39,178 @@ pub enum Action {
 	GoLive,
 	/// End the stream, handing the relays its tail first.
 	EndStream,
+	/// Mute a sound, by its source's name, or unmute it.
+	Mute(String),
 }
 
-impl Action {
-	/// The actions every scene file has, by what they are for, as the
-	/// Hotkeys pane lists them, each scene's after the first two.
-	pub const FIXED: [(&'static str, &'static [Self]); 3] = [
-		("Live", &[Self::GoLive, Self::EndStream, Self::Panic, Self::Record]),
-		("Studio mode", &[Self::StudioMode, Self::Cut, Self::Transition]),
-		("Review", &[Self::Replay, Self::SaveClip]),
-	];
+/// What an action is for, which the Hotkeys pane and the palette group it by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+	Live,
+	StudioMode,
+	Scenes,
+	Sounds,
+	Review,
+}
 
-	/// What it does with Studio mode on or off, as the Hotkeys tab and a
-	/// hotkey's message name it.
+impl Group {
+	/// Each group, in the order the Hotkeys pane and the palette list them.
+	pub const ALL: [Self; 5] = [Self::Live, Self::StudioMode, Self::Scenes, Self::Sounds, Self::Review];
+
+	pub fn name(self) -> &'static str {
+		match self {
+			Self::Live => "Live",
+			Self::StudioMode => "Studio mode",
+			Self::Scenes => "Scenes",
+			Self::Sounds => "Sounds",
+			Self::Review => "Review",
+		}
+	}
+}
+
+/// An action every show has, as the table registers it.
+struct Fixed {
+	action: Action,
+	group: Group,
+	/// What the desktop's shortcut settings keep its key under, the same
+	/// across runs, so a key the operator picked there stays.
+	id: &'static str,
+	name: &'static str,
+	/// A word or two the Hotkeys pane shows beside the name.
+	detail: Option<&'static str>,
+	/// What else the palette finds it by.
+	words: &'static [&'static str],
+}
+
+/// The actions every show has, each registered once, in the order the
+/// Hotkeys pane and the palette list them within their group. Each scene and
+/// sound adds its own: see [`Action::listed`].
+const FIXED: [Fixed; 9] = [
+	Fixed {
+		action: Action::GoLive,
+		group: Group::Live,
+		id: "go-live",
+		name: "Go live",
+		detail: None,
+		words: &["start", "stream", "broadcast"],
+	},
+	Fixed {
+		action: Action::EndStream,
+		group: Group::Live,
+		id: "end-stream",
+		name: "End stream",
+		detail: Some("held"),
+		words: &["stop", "off air", "finish"],
+	},
+	Fixed {
+		action: Action::Panic,
+		group: Group::Live,
+		id: "panic",
+		name: "Panic",
+		detail: Some("safe scene, mics muted"),
+		words: &["safe", "emergency", "mute all", "hide"],
+	},
+	Fixed {
+		action: Action::Record,
+		group: Group::Live,
+		id: "record",
+		name: "Start or stop recording",
+		detail: None,
+		words: &["rec"],
+	},
+	Fixed {
+		action: Action::StudioMode,
+		group: Group::StudioMode,
+		id: "studio-mode",
+		name: "Turn Studio mode on or off",
+		detail: None,
+		words: &["preview", "cue"],
+	},
+	Fixed {
+		action: Action::Cut,
+		group: Group::StudioMode,
+		id: "cut",
+		name: "Take the cued scene",
+		detail: None,
+		words: &["cut"],
+	},
+	Fixed {
+		action: Action::Transition,
+		group: Group::StudioMode,
+		id: "transition",
+		name: "Auto: take the cued scene by the transition",
+		detail: None,
+		words: &["fade"],
+	},
+	Fixed {
+		action: Action::Replay,
+		group: Group::Review,
+		id: "replay",
+		name: "Replay",
+		detail: None,
+		words: &["instant", "play back"],
+	},
+	Fixed {
+		action: Action::SaveClip,
+		group: Group::Review,
+		id: "save-clip",
+		name: "Save clip",
+		detail: None,
+		words: &["highlight"],
+	},
+];
+
+impl Action {
+	/// Every action `state`'s show has, by group, in the order the Hotkeys
+	/// pane and the palette list them: the table's, a scene's for each scene,
+	/// and a mute for each sound.
+	pub fn listed(state: &State) -> Vec<Self> {
+		let scenes = state
+			.collection()
+			.scenes
+			.iter()
+			.map(|scene| Self::Scene(scene.name.clone()));
+		let sounds = state
+			.sources
+			.iter()
+			.filter(|(_, feed)| feed.strip().is_some())
+			.map(|(name, _)| Self::Mute(name.to_string()));
+		let mut listed: Vec<Self> = FIXED.iter().map(|fixed| fixed.action.clone()).collect();
+		listed.extend(scenes.chain(sounds));
+		// Stable, so each group keeps its order.
+		listed.sort_by_key(|action| Group::ALL.iter().position(|group| *group == action.group()));
+		listed
+	}
+
+	fn fixed(&self) -> &'static Fixed {
+		FIXED
+			.iter()
+			.find(|fixed| fixed.action == *self)
+			.expect("every action without a name is in the table")
+	}
+
+	/// What it is for.
+	pub fn group(&self) -> Group {
+		match self {
+			Self::Scene(_) => Group::Scenes,
+			Self::Mute(_) => Group::Sounds,
+			fixed => fixed.fixed().group,
+		}
+	}
+
+	/// What the desktop's shortcut settings keep its key under, the same
+	/// across runs, or `None` for a scene's, which is named for its key so
+	/// it follows the scene through renames. A source is never renamed.
+	pub fn id(&self) -> Option<String> {
+		match self {
+			Self::Scene(_) => None,
+			Self::Mute(name) => Some(format!("mute/{name}")),
+			fixed => Some(fixed.fixed().id.into()),
+		}
+	}
+
+	/// What it does with Studio mode on or off, as the Hotkeys tab, the
+	/// palette, and a hotkey's message name it.
 	pub fn name(&self, studio: bool) -> String {
 		match (self, studio) {
 			(Self::Scene(name), true) => format!("Cue scene `{name}`"),
@@ -57,22 +218,34 @@ impl Action {
 			_ => self.to_string(),
 		}
 	}
+
+	/// A word or two the Hotkeys pane shows beside the name, with Studio mode
+	/// on or off.
+	pub fn detail(&self, studio: bool) -> Option<&'static str> {
+		match self {
+			Self::Scene(_) => studio.then_some("cues"),
+			Self::Mute(_) => None,
+			fixed => fixed.fixed().detail,
+		}
+	}
+
+	/// What else the palette finds it by, besides its name and group.
+	pub fn words(&self) -> &'static [&'static str] {
+		match self {
+			Self::Scene(_) => &["take", "cue", "pad", "switch"],
+			Self::Mute(_) => &["unmute", "sound", "audio", "mic", "silence"],
+			fixed => fixed.fixed().words,
+		}
+	}
 }
 
 impl std::fmt::Display for Action {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::Cut => write!(f, "Take the cued scene"),
-			Self::Transition => write!(f, "Auto: take the cued scene by the transition"),
 			// The desktop's shortcut settings show it whichever mode is on.
 			Self::Scene(name) => write!(f, "Take or cue scene `{name}`"),
-			Self::StudioMode => write!(f, "Turn Studio mode on or off"),
-			Self::Replay => write!(f, "Replay"),
-			Self::SaveClip => write!(f, "Save clip"),
-			Self::Record => write!(f, "Start or stop recording"),
-			Self::Panic => write!(f, "Panic"),
-			Self::GoLive => write!(f, "Go live"),
-			Self::EndStream => write!(f, "End stream"),
+			Self::Mute(name) => write!(f, "Mute or unmute `{name}`"),
+			fixed => f.write_str(fixed.fixed().name),
 		}
 	}
 }
@@ -253,6 +426,36 @@ impl Controls {
 			}
 			Action::GoLive => self.go_live(),
 			Action::EndStream => self.end_stream(),
+			Action::Mute(name) => mute(&mut self.engine.state.lock().unwrap(), name),
+		}
+	}
+
+	/// Why `action` cannot run now, under `state` locked by the caller, if it
+	/// cannot, as the palette shows it beside the action.
+	pub fn refused(&self, state: &State, action: &Action) -> Option<String> {
+		let collection = state.collection();
+		match action {
+			Action::GoLive if self.engine.on_air() != OnAir::Off => Some("the program is already on air".into()),
+			Action::GoLive if self.going() => Some("already going live".into()),
+			Action::GoLive if self.closing.load(Ordering::Acquire) => Some("the show is closing".into()),
+			Action::EndStream if self.engine.on_air().live().is_none() => Some("the program is not on air".into()),
+			Action::Cut | Action::Transition => match state.cued() {
+				None => Some("nothing is cued".into()),
+				Some(scene) => collection.refuses(scene),
+			},
+			Action::Scene(name) => collection.refuses(name),
+			Action::Mute(name) if !collection.sources.contains_key(name) => {
+				Some(format!("there is no source `{name}`"))
+			}
+			// Whichever is picked, any replay source plays it.
+			Action::Replay => replay_source(collection, None).err().map(|err| err.to_string()),
+			Action::Record => self
+				.engine
+				.recorder
+				.status()
+				.is_some_and(|status| status.stopping && !status.done)
+				.then(|| "the last recording is still finishing".into()),
+			_ => None,
 		}
 	}
 
@@ -593,22 +796,9 @@ impl Controls {
 		Ok((saving, Some(save)))
 	}
 
-	/// The replay source a replay plays in: `picked`, or the first there is
-	/// while the panel has picked none, or one since removed.
+	/// The replay source a replay plays in, as [`replay_source`] picks it.
 	fn replay_source(&self, picked: Option<&str>) -> anyhow::Result<String> {
-		let state = self.engine.state.lock().unwrap();
-		let sources = &state.collection().sources;
-		let replays = || {
-			sources
-				.iter()
-				.filter(|(_, source)| matches!(source, Source::Replay))
-				.map(|(name, _)| name)
-		};
-		let name = replays()
-			.find(|name| Some(name.as_str()) == picked)
-			.or_else(|| replays().next())
-			.context("no replay source; add one in Sources")?;
-		Ok(name.clone())
+		replay_source(self.engine.state.lock().unwrap().collection(), picked)
 	}
 
 	/// Keep how `action`, fired by a hotkey, went for the status bar.
@@ -621,6 +811,40 @@ impl Controls {
 	pub fn fired(&self) -> Option<Result<String, String>> {
 		self.fired.lock().unwrap().take()
 	}
+}
+
+/// The replay source a replay plays in: `picked`, or the first there is
+/// while REVIEW has picked none, or one since removed.
+fn replay_source(collection: &moq_scene::Collection, picked: Option<&str>) -> anyhow::Result<String> {
+	let replays = || {
+		collection
+			.sources
+			.iter()
+			.filter(|(_, source)| matches!(source, Source::Replay))
+			.map(|(name, _)| name)
+	};
+	let name = replays()
+		.find(|name| Some(name.as_str()) == picked)
+		.or_else(|| replays().next())
+		.context("no replay source; add one in Sources")?;
+	Ok(name.clone())
+}
+
+/// Mute the sound called `name`, or unmute it, under `state` locked by the
+/// caller, as its strip's button does.
+pub fn mute(state: &mut State, name: &str) -> anyhow::Result<String> {
+	let collection = state.collection();
+	anyhow::ensure!(collection.sources.contains_key(name), "there is no source `{name}`");
+	let mut audio = collection.audio.get(name).cloned().unwrap_or_default();
+	audio.muted = !audio.muted;
+	let (verb, done) = match audio.muted {
+		true => ("Mute", "muted"),
+		false => ("Unmute", "unmuted"),
+	};
+	let mut draft = collection.draft(format!("{verb} `{name}`"));
+	draft.set_audio(name, Some(audio))?;
+	state.commit(draft, None)?;
+	Ok(format!("{done} `{name}`"))
 }
 
 /// Take the scene called `name` on program, under `state` locked by the
@@ -638,4 +862,60 @@ pub fn cue(state: &mut State, name: &str) -> anyhow::Result<String> {
 		Some(_) => format!("cued `{scene}`; TAKE or AUTO puts it on air"),
 		None => format!("`{scene}` is on air; nothing is cued"),
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Each action without a name of its own is in the table once, under an
+	/// id no other has, so the desktop never confuses two keys.
+	#[test]
+	fn every_action_is_registered_once() {
+		// Every variant, so a new one fails to build here until it is placed.
+		let registered = |action: &Action| match action {
+			Action::Scene(_) | Action::Mute(_) => false,
+			Action::Cut
+			| Action::Transition
+			| Action::StudioMode
+			| Action::Replay
+			| Action::SaveClip
+			| Action::Record
+			| Action::Panic
+			| Action::GoLive
+			| Action::EndStream => true,
+		};
+		for (index, fixed) in FIXED.iter().enumerate() {
+			assert!(registered(&fixed.action), "{:?}", fixed.action);
+			for other in &FIXED[index + 1..] {
+				assert_ne!(fixed.action, other.action);
+				assert_ne!(fixed.id, other.id);
+			}
+			assert_eq!(fixed.action.to_string(), fixed.name);
+		}
+		let scene = Action::Scene("Gameplay".into());
+		let mute = Action::Mute("Gameplay".into());
+		assert_eq!(scene.id(), None, "named for its key");
+		assert_ne!(mute.id(), Some("scene/Gameplay".into()));
+		assert_eq!((scene.group(), mute.group()), (Group::Scenes, Group::Sounds));
+	}
+
+	/// Each group lists its actions in the table's order, the groups in
+	/// theirs.
+	#[test]
+	fn groups_keep_the_tables_order() {
+		let order = |group: Group| {
+			FIXED
+				.iter()
+				.filter(move |fixed| fixed.group == group)
+				.map(|fixed| &fixed.action)
+		};
+		let mut seen = Vec::new();
+		for group in Group::ALL {
+			seen.extend(order(group));
+		}
+		assert_eq!(seen.len(), FIXED.len(), "every action has a group the pane lists");
+		let live: Vec<_> = order(Group::Live).cloned().collect();
+		assert_eq!(live, [Action::GoLive, Action::EndStream, Action::Panic, Action::Record]);
+	}
 }

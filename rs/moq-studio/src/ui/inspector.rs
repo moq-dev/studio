@@ -95,6 +95,11 @@ impl Panels {
 		}
 		let name = item.source.clone();
 		let mut asked = None;
+		// Whether the edit asked for is a move by hand, or switches keeping
+		// clear off, which leaves it where it is drawn as a move would.
+		// The picture a layer was moved by hand in, if it was.
+		let mut moved = None;
+		let kept = item.keep_clear;
 
 		section(ui, "Place");
 		if picked.layer.scene.is_some() {
@@ -124,7 +129,56 @@ impl Panels {
 				asked = Some(Asked::Act(LayerAction::Slot(slot)));
 			}
 		}
-		let mut rect = item.rect;
+		// Where it is shown, and its place in the picture BUILD edits, for a
+		// layer drawn in both.
+		let format = self.format;
+		if collection.dual(&picked.layer) {
+			let mut shown = item.format;
+			ui.horizontal(|ui| {
+				ui.label("Format");
+				let options = super::formats::shown_in_options();
+				ui.add(kit::Segmented::new(&mut shown, &options))
+					.on_hover_text("Which pictures show it: both, or only the landscape or the portrait one");
+			});
+			if shown != item.format {
+				asked = Some(Asked::Item(
+					super::formats::shown(&item, shown),
+					super::formats::shown_label(&name, shown),
+					None,
+				));
+			}
+			if item.slot.is_none() && item.shown_in(format) {
+				ui.label(
+					egui::RichText::new(format!("Its place in the {} picture", format.name().to_lowercase()))
+						.color(kit::DIM)
+						.font(kit::ui(11.0)),
+				);
+			}
+		}
+		let rest = picked.rest(collection, format).unwrap_or_else(|| item.clone());
+		let placed = |rect, crop| {
+			picked
+				.placed(collection, format, rect, crop)
+				.unwrap_or_else(|| item.clone())
+		};
+		// Where the picture draws it: a layer keeping clear where it was
+		// placed, which a move by hand starts from. Keeping clear places only
+		// the landscape picture, so its switch and what it saw speak of that.
+		let placement = keep::placement(&state, &picked.layer, picked.index, &item, Format::Landscape);
+		let drawn = keep::placement(&state, &picked.layer, picked.index, &item, format);
+		let mut rect = drawn.map_or(rest.rect, |placement| placement.drawn(rest.rect));
+		// A layer the picture BUILD edits never shows has no place there.
+		let placeable = item.shown_in(collection.format_of(&picked.layer, format));
+		if !placeable {
+			ui.label(
+				egui::RichText::new(format!(
+					"Not shown in the {} picture; place it in the other",
+					format.name().to_lowercase()
+				))
+				.color(kit::DIM)
+				.font(kit::ui(11.0)),
+			);
+		}
 		if item.slot.is_some() {
 			ui.label(
 				egui::RichText::new("Placed by the scene's arrangement; drag it onto another slot to swap them")
@@ -132,7 +186,7 @@ impl Panels {
 					.font(kit::ui(11.0)),
 			);
 		}
-		if item.slot.is_none() {
+		if item.slot.is_none() && placeable {
 			ui.horizontal(|ui| {
 				ui.spacing_mut().item_spacing.x = 4.0;
 				let width = ((ui.available_width() - 12.0) / 4.0).max(40.0);
@@ -153,28 +207,37 @@ impl Panels {
 				for (verb, response) in responses {
 					if let Some(gesture) = changed(&response, &mut self.gestures) {
 						let label = format!("{verb} `{name}`");
-						asked = Some(Asked::Item(Item { rect, ..item.clone() }, label, gesture));
+						// A resize keeps where a layer keeping clear rests, so it
+						// stays free to move.
+						let rect = match verb {
+							"Resize" => Rect {
+								x: rest.rect.x,
+								y: rest.rect.y,
+								..rect
+							},
+							_ => rect,
+						};
+						moved = (verb == "Move").then_some(format);
+						asked = Some(Asked::Item(placed(rect, rest.crop), label, gesture));
 					}
 				}
 			});
 		}
-		let mut crop = item.crop;
+		let mut crop = rest.crop;
+		if placeable {
+			ui.horizontal(|ui| {
+				ui.label(egui::RichText::new("Crop").color(kit::DIM));
+				if let Some(gesture) = crop_ui(ui, &mut crop, &mut self.gestures) {
+					asked = Some(Asked::Item(placed(rest.rect, crop), format!("Crop `{name}`"), gesture));
+				}
+			})
+			.response
+			.on_hover_text("Percent of the picture trimmed from the left, top, right, and bottom");
+		}
 		ui.horizontal(|ui| {
-			ui.label(egui::RichText::new("Crop").color(kit::DIM));
-			if let Some(gesture) = crop_ui(ui, &mut crop, &mut self.gestures) {
-				asked = Some(Asked::Item(
-					Item { crop, ..item.clone() },
-					format!("Crop `{name}`"),
-					gesture,
-				));
-			}
-		})
-		.response
-		.on_hover_text("Percent of the picture trimmed from the left, top, right, and bottom");
-		ui.horizontal(|ui| {
-			let fits = match item.slot {
-				Some(_) => &[][..],
-				None => &[
+			let fits = match (item.slot, placeable) {
+				(Some(_), _) | (_, false) => &[][..],
+				(None, true) => &[
 					(
 						"Fit",
 						LayerAction::Fit,
@@ -204,6 +267,37 @@ impl Panels {
 				asked = Some(Asked::Act(LayerAction::Lock(locked)));
 			}
 		});
+		// Only a scene's layer has a picture under it to keep clear of, and
+		// viewers place a published source where the scene file does. Keeping
+		// clear places only the landscape picture, so not one shown only in
+		// portrait.
+		let published = collection.published.contains(collection.capture(&item.source));
+		if picked.layer.scene.is_some()
+			&& item.slot.is_none()
+			&& !published
+			&& item.shown_in(Format::Landscape)
+			&& let Some((keep_clear, label)) = keep::inspector(ui, item.keep_clear, placement)
+		{
+			let label = format!("{label}: `{name}`");
+			// Switched off, it stays where it is drawn, as keeping it always
+			// on top does, rather than going back over what it moved off.
+			let rect = match (keep_clear, placement) {
+				(None, Some(placement)) => {
+					moved = Some(Format::Landscape);
+					placement.drawn(item.rect)
+				}
+				_ => item.rect,
+			};
+			asked = Some(Asked::Item(
+				Item {
+					keep_clear,
+					rect,
+					..item.clone()
+				},
+				label,
+				None,
+			));
+		}
 
 		section(ui, "Shape");
 		if let Some(corners) = shapes(ui, item.shape.corners) {
@@ -505,9 +599,19 @@ impl Panels {
 
 		let Some(asked) = asked else { return };
 		let result = match asked {
-			Asked::Item(item, label, gesture) => edit(&mut state, label, gesture, |draft| {
-				draft.set_item(&picked.layer, picked.index, item)
-			}),
+			Asked::Item(item, label, gesture) => {
+				if let Some(format) = moved {
+					// Held as it was before the edit, so an undo puts it back.
+					let was = Item {
+						keep_clear: kept,
+						..item.clone()
+					};
+					keep::hold(&mut state, &picked.layer, picked.index, &was, format);
+				}
+				edit(&mut state, label, gesture, |draft| {
+					draft.set_item(&picked.layer, picked.index, item)
+				})
+			}
 			Asked::Look(selection, look, label, gesture) => {
 				edit(&mut state, label, gesture, |draft| selection.set_look(draft, look))
 			}

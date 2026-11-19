@@ -53,8 +53,16 @@ impl Layout {
 	/// The layout of `collection` with the scene called `scene` on program
 	/// since `start` on the media clock, or no scene for `None`.
 	pub fn new(collection: &Collection, scene: Option<&str>, start: Duration) -> Self {
+		// As the landscape picture places them, which is the one the layout
+		// goes with: the portrait picture flattens them and has none.
 		let pictures = pictures(collection, scene, true)
 			.into_iter()
+			.map(|item| Item {
+				visible: item.visible && item.shown_in(crate::Format::Landscape),
+				format: None,
+				portrait: None,
+				..item
+			})
 			.map(Picture::new)
 			.collect();
 		let heard = collection.program_audio().map(|audio| collection.heard(audio));
@@ -322,6 +330,27 @@ mod tests {
 
 		let top = Layout::new(&collection, None, start);
 		assert_eq!(top.pictures.len(), 1, "only the top layer's");
+	}
+
+	/// In a show going out in both formats, the layout places each picture
+	/// as the landscape picture does, which it goes with: hidden there when
+	/// shown in portrait alone, and saying nothing of the portrait one.
+	#[test]
+	fn lays_out_the_landscape_picture_of_both() {
+		let mut collection = collection();
+		collection.portrait = true;
+		let cam = &mut collection.scenes[0].items[1];
+		cam.format = Some(crate::Format::Portrait);
+		cam.portrait = Some(crate::Placement {
+			rect: rect(4.0),
+			crop: Default::default(),
+		});
+		collection.validate().unwrap();
+		let layout = Layout::new(&collection, Some("live"), Duration::ZERO);
+		let cam = &layout.pictures[0].item;
+		assert!(!cam.visible, "shown in portrait alone");
+		assert_eq!((cam.format, cam.portrait), (None, None));
+		assert_eq!(cam.rect, rect(0.0));
 	}
 
 	/// Each source's own crop and filters fold into its picture, a clone's

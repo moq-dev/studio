@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use crate::Error;
+use crate::format::{Format, Placement, Portrait};
 
 /// Everything a studio composes: the program's canvas, the sources, and the
 /// scenes that place them.
@@ -24,6 +25,12 @@ pub struct Collection {
 	/// The program's size and frame rate: the size of every scene that sets
 	/// none, and the frame rate every scene is drawn at.
 	pub canvas: Canvas,
+	/// Whether the show goes out in portrait too, beside the landscape
+	/// canvas: every scene of the program's size drawn again on the canvas
+	/// turned on its side, as its [`Portrait`] arrangement and each item's
+	/// [`portrait`](Item::portrait) place it. Only a landscape canvas turns.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub portrait: bool,
 	/// How the preview is taken to program, short of a cut.
 	#[serde(default)]
 	pub transition: Transition,
@@ -77,6 +84,7 @@ impl Collection {
 	pub fn new() -> Self {
 		Self {
 			canvas: Canvas::default(),
+			portrait: false,
 			transition: Transition::default(),
 			sources: BTreeMap::new(),
 			audio: BTreeMap::new(),
@@ -221,9 +229,9 @@ impl Collection {
 	}
 
 	/// Whether the scene called `scene` can go on program: it is the
-	/// program's size, and draws no program source, which it would draw into
-	/// itself. Refused with the reason otherwise, or for a scene that does
-	/// not exist.
+	/// program's size, following it while the show goes out in portrait too,
+	/// and draws no program source, which it would draw into itself. Refused
+	/// with the reason otherwise, or for a scene that does not exist.
 	pub fn takes(&self, scene: &str) -> Result<(), Error> {
 		match self.refuses(scene) {
 			Some(why) => Err(Error::Invalid(why)),
@@ -241,6 +249,13 @@ impl Collection {
 			return Some(format!(
 				"`{scene}` is {}x{}, not the program's {}x{}, so it cannot go on program",
 				canvas.width, canvas.height, self.canvas.width, self.canvas.height
+			));
+		}
+		// Only a scene that follows the program's size has a portrait picture.
+		if self.portrait && self.scene(scene).is_some_and(|scene| scene.size.is_some()) {
+			return Some(format!(
+				"`{scene}` has a size of its own, so it has no portrait picture and cannot go on program while \
+				 the show goes out in portrait too"
 			));
 		}
 		if self.draws_program(scene) {
@@ -286,26 +301,39 @@ impl Collection {
 		}
 	}
 
-	/// The visible items `layers` draw, then those of each scene they draw
-	/// through a scene source, and so on, each scene once.
-	pub fn drawn(&self, layers: impl IntoIterator<Item = Layer>) -> Vec<&Item> {
-		let mut items: Vec<&Item> = layers
-			.into_iter()
-			.flat_map(|layer| self.items(&layer).unwrap_or_default())
-			.filter(|item| item.visible)
-			.collect();
+	/// The visible items `layers` draw in `format`'s picture, then those of
+	/// each scene they draw through a scene source, and so on, each scene
+	/// once, leaving out those shown only in the other picture. In the
+	/// portrait picture, a scene of its own size and all it draws are drawn as
+	/// the landscape picture draws them. The portrait picture draws nothing
+	/// unless the show goes out in it.
+	pub fn drawn(&self, layers: impl IntoIterator<Item = Layer>, format: Format) -> Vec<&Item> {
+		if format == Format::Portrait && !self.portrait {
+			return Vec::new();
+		}
+		let shown = |format: Format| move |item: &&Item| item.visible && item.shown_in(format);
+		let mut items: Vec<(&Item, Format)> = Vec::new();
+		for layer in layers {
+			let format = self.format_of(&layer, format);
+			let found = self.items(&layer).unwrap_or_default();
+			items.extend(found.iter().filter(shown(format)).map(|item| (item, format)));
+		}
 		let mut nested = BTreeSet::new();
 		let mut next = 0;
-		while let Some(item) = items.get(next) {
-			if let Some(Nested::Scene(scene)) = self.nested(&item.source)
-				&& nested.insert(scene)
-				&& let Some(scene) = self.scene(scene)
+		while let Some(&(item, outer)) = items.get(next) {
+			if let Some(Nested::Scene(name)) = self.nested(&item.source)
+				&& let Some(scene) = self.scene(name)
 			{
-				items.extend(scene.items.iter().filter(|item| item.visible));
+				// Drawn as the landscape picture draws it, a scene draws all it
+				// shows so.
+				let format = self.format_of(&Layer::scene(name), outer);
+				if nested.insert((name, format)) {
+					items.extend(scene.items.iter().filter(shown(format)).map(|item| (item, format)));
+				}
 			}
 			next += 1;
 		}
-		items
+		items.into_iter().map(|(item, _)| item).collect()
 	}
 
 	/// Whether the scene called `scene` places a program source, itself or in
@@ -491,7 +519,26 @@ impl Collection {
 					.validate()
 					.map_err(|err| Error::Invalid(format!("{on}: {err}")))?;
 				self.validate_chain(&item.filters, &on)?;
+				if let Some(keep) = &item.keep_clear
+					&& keep.glide > KeepClear::LONGEST
+				{
+					return Err(Error::Invalid(format!(
+						"{on} glides for {:?} to keep clear, longer than the {:?} a glide may take",
+						keep.glide,
+						KeepClear::LONGEST
+					)));
+				}
+				if item.keep_clear.is_some() && item.slot.is_some() {
+					return Err(Error::Invalid(format!(
+						"{on} keeps clear in a slot, but its scene's arrangement places it; set it free first"
+					)));
+				}
 				if layer.scene.is_none() {
+					if item.keep_clear.is_some() {
+						return Err(Error::Invalid(format!(
+							"{on} keeps clear, but only a scene's item has a picture under it to keep clear of"
+						)));
+					}
 					if !item.keyframes.is_empty() {
 						return Err(Error::Invalid(format!(
 							"{on} has keyframes, but an always-on-top layer never goes on to start them"
@@ -622,6 +669,7 @@ impl Collection {
 
 		self.validate_nesting()?;
 		self.validate_published()?;
+		self.validate_formats()?;
 		// Checked once the scenes it draws are, so a panic never finds out.
 		if let Some(safe) = self.safe()
 			&& let Some(why) = self.refuses(safe)
@@ -731,8 +779,9 @@ impl Collection {
 
 	/// Refuse an item showing a source published independently that the
 	/// layer layout cannot carry: one blended or filtered past opacity, which
-	/// not every player can reproduce, or one in a scene another scene draws,
-	/// which the layout cannot place.
+	/// not every player can reproduce, one keeping clear, which moves where
+	/// no player sees, or one in a scene another scene draws, which the
+	/// layout cannot place.
 	fn validate_published(&self) -> Result<(), Error> {
 		let nested: BTreeSet<&str> = self
 			.sources
@@ -757,6 +806,11 @@ impl Collection {
 				{
 					return Err(Error::Invalid(format!(
 						"{on} cannot be in a scene another scene draws, since viewers place it over the program"
+					)));
+				}
+				if item.keep_clear.is_some() {
+					return Err(Error::Invalid(format!(
+						"{on} cannot keep out of the way, since viewers place it where the scene file does"
 					)));
 				}
 				if item.slot.is_some() {
@@ -1077,6 +1131,11 @@ pub struct Scene {
 	/// Where its items in a [`Slot`] go.
 	#[serde(default, skip_serializing_if = "Arrangement::is_default")]
 	pub arrangement: Arrangement,
+	/// How it is arranged in the portrait picture, while the show goes out in
+	/// [portrait](Collection::portrait). Only a scene of the program's size
+	/// has one.
+	#[serde(default, skip_serializing_if = "Portrait::is_default")]
+	pub portrait: Portrait,
 	/// What the scene draws, back to front.
 	#[serde(default)]
 	pub items: Vec<Item>,
@@ -1094,6 +1153,7 @@ impl Scene {
 			audio: None,
 			safe: false,
 			arrangement: Arrangement::default(),
+			portrait: Portrait::default(),
 			items: Vec::new(),
 		}
 	}
@@ -1167,7 +1227,7 @@ impl Arrangement {
 	/// Every arrangement.
 	pub const ALL: [Self; 4] = [Self::Column, Self::Row, Self::Grid, Self::Inset];
 
-	fn is_default(&self) -> bool {
+	pub(crate) fn is_default(&self) -> bool {
 		*self == Self::default()
 	}
 }
@@ -1211,6 +1271,15 @@ pub struct Item {
 	/// or failed, and glides the others to their new places.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub slot: Option<Slot>,
+	/// The one format it is shown in, or `None` for both, while the show goes
+	/// out in [portrait](Collection::portrait).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub format: Option<Format>,
+	/// Where it is drawn in the portrait picture, or `None` where it sits on
+	/// the landscape one, scaled to fit, as [`Collection::placement`] has it.
+	/// An item in a slot has none, since the portrait arrangement places it.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub portrait: Option<Placement>,
 	/// Whether the studio placed it on its own, as a guest appearing in the
 	/// next tile, rather than the host: once that guest leaves, the next to
 	/// appear may take it. Undo restores it with the rest of the item, and a
@@ -1245,6 +1314,12 @@ pub struct Item {
 	/// layer never goes on.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub keyframes: Vec<Keyframe>,
+	/// Whether it moves itself off what matters in the picture under it, and
+	/// what that is. Its rect gives its size, and where it rests until it
+	/// first moves; the [`Compositor`](crate::Compositor) chooses where it
+	/// is drawn. Only a scene's item keeps clear.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub keep_clear: Option<KeepClear>,
 }
 
 impl Item {
@@ -1254,6 +1329,8 @@ impl Item {
 			source: source.into(),
 			rect,
 			slot: None,
+			format: None,
+			portrait: None,
 			auto: false,
 			visible: true,
 			locked: false,
@@ -1262,6 +1339,7 @@ impl Item {
 			filters: Vec::new(),
 			blend: Blend::Normal,
 			keyframes: Vec::new(),
+			keep_clear: None,
 		}
 	}
 
@@ -1276,6 +1354,8 @@ impl Item {
 		Cow::Owned(Self {
 			source: self.source.clone(),
 			slot: self.slot,
+			format: self.format,
+			portrait: self.portrait,
 			auto: self.auto,
 			rect: Rect {
 				x: self.rect.x + offset.x,
@@ -1291,6 +1371,7 @@ impl Item {
 			filters,
 			blend: self.blend,
 			keyframes: Vec::new(),
+			keep_clear: self.keep_clear,
 		})
 	}
 
@@ -1316,6 +1397,61 @@ impl Item {
 		// `to` is later than `since`, and `from` no later, so the span is not empty.
 		let linear = (since - from.at).as_secs_f32() / (to.at - from.at).as_secs_f32();
 		Some(from.toward(to, to.ease.apply(linear)))
+	}
+}
+
+/// What an item keeping out of the way stays clear of in the picture under
+/// it, and how it moves.
+///
+/// It chooses among the corners and edge middles of the canvas, inside a
+/// margin, and moves when the content under it changes, or when its place
+/// has been the worst of them for a while, never for a single busy moment.
+/// A move by hand holds until the content changes. The choice is made on
+/// this machine from the picture alone.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeepClear {
+	/// Whether it stays clear of where the picture moves.
+	#[serde(default = "yes", skip_serializing_if = "is_true")]
+	pub motion: bool,
+	/// Whether it stays clear of text and other dense detail.
+	#[serde(default = "yes", skip_serializing_if = "is_true")]
+	pub text: bool,
+	/// Whether it stays clear of what holds still while the rest moves, such
+	/// as a game's HUD or minimap.
+	#[serde(default = "yes", skip_serializing_if = "is_true")]
+	pub hud: bool,
+	/// How long it takes to glide to a new place.
+	#[serde(
+		default = "KeepClear::default_glide",
+		with = "humantime_serde",
+		skip_serializing_if = "KeepClear::is_default_glide"
+	)]
+	pub glide: Duration,
+}
+
+impl KeepClear {
+	/// The longest glide, so a typo cannot park an item mid-canvas for minutes.
+	pub const LONGEST: Duration = Duration::from_secs(5);
+
+	fn default_glide() -> Duration {
+		Duration::from_millis(400)
+	}
+
+	fn is_default_glide(glide: &Duration) -> bool {
+		*glide == Self::default_glide()
+	}
+}
+
+impl Default for KeepClear {
+	/// Clear of everything it can see, gliding for 0.4 s.
+	fn default() -> Self {
+		Self {
+			motion: true,
+			text: true,
+			hud: true,
+			glide: Self::default_glide(),
+		}
 	}
 }
 
@@ -1873,7 +2009,7 @@ impl Crop {
 		}
 	}
 
-	fn validate(&self) -> Result<(), String> {
+	pub(crate) fn validate(&self) -> Result<(), String> {
 		let edges = [self.left, self.top, self.right, self.bottom];
 		if edges.iter().any(|edge| !(0.0..1.0).contains(edge))
 			|| self.left + self.right >= 1.0
@@ -1976,7 +2112,7 @@ impl Rect {
 		*self == Self::default()
 	}
 
-	fn validate(&self, layer: &Layer, source: &str) -> Result<(), Error> {
+	pub(crate) fn validate(&self, layer: &Layer, source: &str) -> Result<(), Error> {
 		let finite = [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite());
 		if !finite || self.width < 0.0 || self.height < 0.0 {
 			return Err(Error::Invalid(format!(
@@ -3271,6 +3407,88 @@ background = "remove"
 		assert_eq!(filters(500), Filter::Invert { amount: 1.0 });
 	}
 
+	/// An item keeps clear with `keep_clear = {}`, of everything it can see,
+	/// writing only what differs from that.
+	#[test]
+	fn reads_and_writes_keep_clear() {
+		let text = r#"
+version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.camera]
+kind = "camera"
+
+[[scenes]]
+name = "Game"
+items = [
+    { source = "camera", rect = { x = 0, y = 0, width = 320, height = 180 }, keep_clear = {} },
+    { source = "camera", rect = { x = 0, y = 0, width = 320, height = 180 }, keep_clear = { hud = false, glide = "1s" } },
+]
+"#;
+		let collection = Collection::from_toml(text).unwrap();
+		let items = &collection.scenes[0].items;
+		assert_eq!(items[0].keep_clear, Some(KeepClear::default()));
+		let partly = KeepClear {
+			hud: false,
+			glide: Duration::from_secs(1),
+			..KeepClear::default()
+		};
+		assert_eq!(items[1].keep_clear, Some(partly));
+		let saved = collection.to_toml().unwrap();
+		assert!(
+			saved.contains("[scenes.items.keep_clear]\nhud = false\nglide = \"1s\"\n"),
+			"{saved}"
+		);
+		assert_eq!(Collection::from_toml(&saved).unwrap(), collection);
+	}
+
+	#[test]
+	fn refuses_keeping_clear_where_it_cannot() {
+		let refused = |collection: &Collection, why: &str| match collection.validate() {
+			Err(Error::Invalid(err)) => assert!(err.contains(why), "{err}"),
+			other => panic!("{why}: {other:?}"),
+		};
+		let mut collection = example();
+		collection.scenes[0].items[1].keep_clear = Some(KeepClear::default());
+		collection.validate().unwrap();
+		collection.scenes[0].items[1].keep_clear = Some(KeepClear {
+			glide: Duration::from_secs(6),
+			..KeepClear::default()
+		});
+		refused(&collection, "longer than");
+		collection.scenes[0].items[1].keep_clear = None;
+		collection.top[0].keep_clear = Some(KeepClear::default());
+		refused(&collection, "only a scene's item");
+		collection.top[0].keep_clear = None;
+		collection.validate().unwrap();
+		// A slot places the item, so it takes no rect of its own.
+		collection.scenes[0].items[1].keep_clear = Some(KeepClear::default());
+		let rect = std::mem::take(&mut collection.scenes[0].items[1].rect);
+		collection.scenes[0].items[1].slot = Some(Slot::Tile);
+		refused(&collection, "keeps clear in a slot");
+		collection.scenes[0].items[1].slot = None;
+		collection.scenes[0].items[1].rect = rect;
+		collection.validate().unwrap();
+
+		// A player of the layer layout places a published source where the
+		// file does, so it cannot move.
+		let mut published = Collection::new();
+		published.sources.insert("cam".into(), Source::Camera { id: None });
+		published.published.insert("cam".into());
+		published.scenes = vec![Scene {
+			items: vec![Item {
+				keep_clear: Some(KeepClear::default()),
+				..Item::new("cam", Rect::fill(&published.canvas))
+			}],
+			..Scene::new("Main")
+		}];
+		refused(&published, "viewers place it where the scene file does");
+	}
+
 	#[test]
 	fn refuses_keyframes_it_cannot_play() {
 		let at = |millis| Keyframe::new(Duration::from_millis(millis));
@@ -3457,15 +3675,68 @@ background = "remove"
 			},
 		];
 		collection.validate().unwrap();
-		let drawn: Vec<&str> = collection
-			.drawn([Layer::scene("A")])
-			.into_iter()
-			.map(|item| item.source.as_str())
-			.collect();
-		assert_eq!(drawn, ["b", "b", "logo", "c", "background"]);
+		let drawn = |collection: &Collection, format| -> Vec<String> {
+			let drawn = collection.drawn([Layer::scene("A")], format);
+			drawn.into_iter().map(|item| item.source.clone()).collect()
+		};
+		assert_eq!(
+			drawn(&collection, Format::Landscape),
+			["b", "b", "logo", "c", "background"]
+		);
+		assert!(drawn(&collection, Format::Portrait).is_empty(), "no portrait picture");
 		assert!(collection.draws_program("A"));
 		assert!(collection.draws_program("C"));
 		assert!(!collection.draws_program("Scene"));
+
+		// While the show goes out in both, each picture draws the layers
+		// shown in it, in a scene drawn whole or through a scene source,
+		// which shows its portrait picture in the portrait one.
+		let turned = Rect::fill(&collection.canvas.turned());
+		let portrait_only = |source| Item {
+			format: Some(Format::Portrait),
+			portrait: Some(Placement {
+				rect: turned,
+				crop: Crop::default(),
+			}),
+			..Item::new(source, fill)
+		};
+		collection.portrait = true;
+		collection.scenes[1].items.push(portrait_only("camera"));
+		collection.scenes[3].items.push(portrait_only("guest"));
+		collection.validate().unwrap();
+		assert_eq!(
+			drawn(&collection, Format::Landscape),
+			["b", "b", "logo", "c", "background"]
+		);
+		assert_eq!(
+			drawn(&collection, Format::Portrait),
+			["b", "b", "camera", "logo", "c", "background", "guest"]
+		);
+
+		// Shown only in landscape, B draws what it shows only in portrait in
+		// neither picture.
+		let mut landscape_only = collection.clone();
+		for item in &mut landscape_only.scenes[1].items[..2] {
+			item.format = Some(Format::Landscape);
+		}
+		landscape_only.validate().unwrap();
+		assert_eq!(
+			drawn(&landscape_only, Format::Landscape),
+			["b", "b", "logo", "c", "background"]
+		);
+		assert_eq!(drawn(&landscape_only, Format::Portrait), ["camera"]);
+
+		// Of its own size, B, and C through it, are drawn in portrait as the
+		// landscape picture draws them.
+		collection.scenes[2].size = Some(Size {
+			width: 1280,
+			height: 720,
+		});
+		collection.validate().unwrap();
+		assert_eq!(
+			drawn(&collection, Format::Portrait),
+			["b", "b", "camera", "logo", "c", "background"]
+		);
 	}
 
 	/// A scene's own size is one the encoder can take, a published scene is
