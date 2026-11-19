@@ -111,8 +111,11 @@ enum View {
 	/// A scene, by name, open for editing off air on BUILD.
 	OffAir(&'static str),
 	/// BUILD with the front layer selected, once it kept out of the way:
-	/// moved off what mattered and landed.
-	KeepClear,
+	/// moved off what mattered and landed. If `dual`, with the show going
+	/// out in both formats.
+	KeepClear {
+		dual: bool,
+	},
 	/// BUILD with the game's window gone dark selected, and what to do about
 	/// it open from its badge.
 	Dark,
@@ -325,10 +328,14 @@ views! {
 	/// A facecam keeping out of the way of a game: what matters glowing on the
 	/// picture, the places it may go, where it was and the glide to where it
 	/// went, the legend under the picture, and its settings in the inspector.
-	build_keep_clear: Live, Open::Studio { view: View::KeepClear, size: SIZE, show: "keep.toml", relay: false };
+	build_keep_clear: Live, Open::Studio { view: View::KeepClear { dual: false }, size: SIZE, show: "keep.toml", relay: false };
 	/// The same in the smallest window: the legend's labels shortened to fit
 	/// beside the note, or the note left out.
-	build_keep_clear_compact: Live, Open::Studio { view: View::KeepClear, size: crate::ui::MIN_SIZE, show: "keep.toml", relay: false };
+	build_keep_clear_compact: Live, Open::Studio { view: View::KeepClear { dual: false }, size: crate::ui::MIN_SIZE, show: "keep.toml", relay: false };
+	/// The same going out in both formats: the legend between the landscape
+	/// picture, the only one it moves in, and the tabs, the portrait picture
+	/// beside it showing the facecam where its rect rests, fitted.
+	build_keep_clear_dual: Live, Open::Studio { view: View::KeepClear { dual: true }, size: SIZE, show: "keep.toml", relay: false };
 	/// A window gone dark: its row, the layer on the picture, its scene's
 	/// pad, and the health dot turn amber, and its badge opens what happened
 	/// and the fixes.
@@ -1620,6 +1627,9 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		Open::Kit { .. } | Open::Library => unreachable!("drawn without an engine"),
 		Open::Studio { show, view, relay, .. } => {
 			let mut text = std::fs::read_to_string(shows.join(show)).unwrap();
+			if let View::KeepClear { dual: true } = view {
+				text = text.replacen("version = 1\n", "version = 1\nportrait = true\n", 1);
+			}
 			if let View::Review { replays: true, .. } = view {
 				text.push_str("\n[sources.replay]\nkind = \"replay\"\n\n[sources.slowmo]\nkind = \"replay\"\n");
 			}
@@ -1653,7 +1663,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Mix(view, opened) => studio.mix(*view, *opened),
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
-		View::KeepClear => studio.build(Side::Layers, Inspect::Layer, Some(0)),
+		View::KeepClear { .. } => studio.build(Side::Layers, Inspect::Layer, Some(0)),
 		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
@@ -1789,7 +1799,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				}
 			}))
 			.expect("the room fails to join at launch"),
-		View::KeepClear => runtime
+		View::KeepClear { .. } => runtime
 			.block_on(kio::clock::timeout(SETTLE, async {
 				loop {
 					let landed = {
