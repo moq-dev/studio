@@ -403,14 +403,26 @@ impl State {
 	/// mask's it reads.
 	fn placed<'a>(&self, scenes: impl IntoIterator<Item = Option<&'a str>>) -> BTreeSet<String> {
 		let collection = &self.collection;
-		let layers = scenes.into_iter().map(|scene| moq_scene::Layer {
-			scene: scene.map(str::to_string),
-		});
-		let items = collection.drawn(layers);
+		let items = scenes.into_iter().flat_map(|scene| self.drawn(scene));
 		items
-			.into_iter()
 			.flat_map(|item| std::iter::once(&item.source).chain(masks(collection.filters(item))))
 			.map(|source| collection.capture(source).to_string())
+			.collect()
+	}
+
+	/// The visible items the scene called `scene`, or the top layer for
+	/// `None`, draws where viewers see it, through the scenes they draw: in
+	/// each picture the show goes out in while it is on air, or for the top
+	/// layer, and in the landscape one alone for a scene drawn beside program.
+	fn drawn(&self, scene: Option<&str>) -> Vec<&moq_scene::Item> {
+		let on_air = scene.is_none_or(|scene| self.compositor.on_air().any(|on| on == scene));
+		let layer = moq_scene::Layer {
+			scene: scene.map(str::to_string),
+		};
+		let formats = moq_scene::Format::ALL.into_iter();
+		let formats = formats.filter(|format| on_air || *format == moq_scene::Format::Landscape);
+		formats
+			.flat_map(|format| self.collection.drawn([layer.clone()], format))
 			.collect()
 	}
 
@@ -506,10 +518,7 @@ impl State {
 		let roots = self.compositor.live().chain(published.map(|found| found.name.as_str()));
 		let roots = roots.map(Some).chain([None]);
 		for root in roots {
-			let layer = moq_scene::Layer {
-				scene: root.map(str::to_string),
-			};
-			let items = collection.drawn([layer]);
+			let items = self.drawn(root);
 			if items
 				.iter()
 				.any(|item| collection.nested(&item.source) == Some(moq_scene::Nested::Scene(scene)))
@@ -795,11 +804,12 @@ fn reordered(before: &[moq_scene::Item], after: &[moq_scene::Item]) -> bool {
 }
 
 /// Refuse edits, each read as its [`Collection::renames`], that remove a
-/// scene `on_air` program draws, so a slip cannot put black on air, that
-/// leave one drawing the program in `collection`, which it would draw into
-/// itself, or that make one another size than the program, which it would
-/// not fill. A reload that leaves one out still drops it, having nothing to
-/// show instead.
+/// scene `on_air` program draws, so a slip cannot put black on air, or that
+/// leave one in `collection` unable to go on program, as
+/// [`Collection::refuses`] says: drawing the program into itself, another
+/// size than the program, or of its own size while the show goes out in
+/// portrait too, with no portrait picture. A reload that leaves one out
+/// still drops it, having nothing to show instead.
 fn keep_on_air<'a>(
 	on_air: impl IntoIterator<Item = &'a str>,
 	renames: &'a [BTreeMap<String, Option<String>>],
@@ -813,15 +823,13 @@ fn keep_on_air<'a>(
 				None => {}
 			}
 		}
-		anyhow::ensure!(
-			!collection.draws_program(scene),
-			"`{scene}` is on air, so it cannot draw the program, which it would draw into itself"
-		);
-		let size = collection.canvas(Some(scene)).map(|canvas| canvas.size());
-		anyhow::ensure!(
-			size.is_none_or(|size| size == collection.canvas.size()),
-			"`{scene}` is on air, so it stays the program's size; cut to another scene first"
-		);
+		// A reload that leaves it out drops it, having nothing to show.
+		if collection.scene(scene).is_none() {
+			continue;
+		}
+		if let Some(why) = collection.refuses(scene) {
+			anyhow::bail!("`{scene}` is on air, so cut to another scene first: {why}");
+		}
 	}
 	Ok(())
 }
@@ -837,7 +845,8 @@ pub struct Stats {
 	/// hold.
 	pub recording: Arc<VideoStats>,
 	/// Each published scene's video, by the scene's name, while it is
-	/// published.
+	/// published, and the portrait picture's, as [`moq_scene::PORTRAIT`],
+	/// while the show goes out in both.
 	published: Mutex<BTreeMap<String, Arc<VideoStats>>>,
 	/// The video encoders open: the program's, each published scene's, the
 	/// recording's, and the sources'.
@@ -1899,37 +1908,60 @@ impl Engine {
 
 				// On air, each published scene's line starts once it is
 				// published, in a broadcast of its own, and ends once it no
-				// longer is.
+				// longer is, as does the portrait picture's while the show
+				// goes out in portrait.
 				let published = published(&state.collection);
+				let portrait = state.collection.portrait_canvas();
+				let extras: Vec<(Extra, Canvas)> = published
+					.iter()
+					.map(|(name, canvas)| (Extra::Scene(name.clone()), *canvas))
+					.chain(portrait.map(|canvas| (Extra::Portrait, canvas)))
+					.collect();
 				if let Some(air) = &mut air {
-					let gone: Vec<String> = air
+					// One whose name now carries the other kind, such as a scene
+					// named as the portrait picture before it went out in both,
+					// ends too, so its viewers see it end.
+					let gone: Vec<Extra> = air
 						.lines
 						.keys()
-						.filter(|line| !published.iter().any(|(name, _)| name == *line))
+						.filter(|line| !extras.iter().any(|(extra, _)| extra == *line))
 						.cloned()
 						.collect();
-					for name in gone {
-						if let Some(Some((line, broadcast))) = air.lines.remove(&name) {
+					for extra in gone {
+						if let Some(Some((line, broadcast))) = air.lines.remove(&extra) {
 							retired.push(line.end(Some(broadcast)));
 						}
-						self.stats.published.lock().unwrap().remove(&name);
+						self.stats.published.lock().unwrap().remove(extra.name());
 					}
-					for (name, canvas) in &published {
-						let started = !air.lines.contains_key(name);
+					for (extra, canvas) in &extras {
+						let name = extra.name();
+						let started = !air.lines.contains_key(extra);
 						let extras = &air.extras;
-						let line = air.lines.entry(name.clone()).or_insert_with(|| {
+						let line = air.lines.entry(extra.clone()).or_insert_with(|| {
 							let video = Arc::new(VideoStats::default());
-							self.stats.published.lock().unwrap().insert(name.clone(), video.clone());
+							self.stats
+								.published
+								.lock()
+								.unwrap()
+								.insert(name.to_string(), video.clone());
 							extras
 								.start(name, *canvas, video.clone())
 								.inspect_err(|err| video.fail(format!("{err:#}")))
 								.ok()
 						});
-						// Its audio follows the audio scene it carries from now on.
+						// Its audio follows the audio scene it carries from now on:
+						// the portrait picture's, the program's, with the sources
+						// published independently in it, as it carries no layout.
+						let mix = match extra {
+							Extra::Portrait => state.sources.whole(&state.collection),
+							Extra::Scene(name) => state
+								.collection
+								.published_audio(name)
+								.and_then(|audio| state.sources.mix(audio)),
+						};
 						if (synced || started)
 							&& let Some((_, broadcast)) = line
-							&& let Some(audio) = state.collection.published_audio(name)
-							&& let Some(mix) = state.sources.mix(audio)
+							&& let Some(mix) = mix
 						{
 							broadcast.audio.set(mix.clone());
 						}
@@ -1949,7 +1981,8 @@ impl Engine {
 				let cameras = &state.cameras;
 				let lines = air.as_ref().map(|air| &air.lines);
 				let wants = |name: &str| {
-					matches!(lines.and_then(|lines| lines.get(name)), Some(Some((line, _))) if line.wants())
+					let extra = Extra::Scene(name.to_string());
+					matches!(lines.and_then(|lines| lines.get(&extra)), Some(Some((line, _))) if line.wants())
 						|| cameras
 							.get(&Some(name.to_string()))
 							.is_some_and(crate::vcam::Camera::wanted)
@@ -1991,13 +2024,15 @@ impl Engine {
 				}
 				let program = (compositor.program().clone(), compositor.canvas());
 				let texture = |scene: &str| compositor.output(scene).and_then(moq_scene::Output::texture).cloned();
+				let portrait = compositor.portrait().map(|(texture, canvas)| (texture.clone(), canvas));
 				Drawn {
 					published: published
 						.into_iter()
 						.map(|(name, canvas)| {
 							let texture = texture(&name);
-							(name, texture, canvas)
+							(Extra::Scene(name), texture, canvas)
 						})
+						.chain(portrait.map(|(texture, canvas)| (Extra::Portrait, Some(texture), canvas)))
 						.collect(),
 					recorded: match recorded {
 						Some(scene) => (texture(&scene), recorded_canvas),
@@ -2020,8 +2055,8 @@ impl Engine {
 			recording.feed(texture.as_ref(), recorded, timestamp);
 			if let Some(air) = &mut air {
 				air.main.feed(Some(&program), canvas, timestamp);
-				for (name, texture, canvas) in drawn.published {
-					if let Some(Some((line, _))) = air.lines.get_mut(&name) {
+				for (extra, texture, canvas) in drawn.published {
+					if let Some(Some((line, _))) = air.lines.get_mut(&extra) {
 						line.feed(texture.as_ref(), canvas, timestamp);
 					}
 				}
@@ -2726,16 +2761,37 @@ impl Line {
 	}
 }
 
-/// Each published scene's line and broadcast, by name, or `None` once it
-/// failed to start, which is not retried until the scene is published again.
-type Lines = BTreeMap<String, Option<(Line, Broadcast)>>;
+/// Each published scene's line and broadcast, and the portrait picture's, or
+/// `None` once it failed to start, which is not retried until it starts
+/// again.
+type Lines = BTreeMap<Extra, Option<(Line, Broadcast)>>;
+
+/// A picture going out as a broadcast of its own, beneath the program's.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Extra {
+	/// A published scene, by name.
+	Scene(String),
+	/// The portrait picture, while the show goes out in both.
+	Portrait,
+}
+
+impl Extra {
+	/// Where it goes out, beneath the program's broadcast.
+	fn name(&self) -> &str {
+		match self {
+			Self::Scene(name) => name,
+			Self::Portrait => moq_scene::PORTRAIT,
+		}
+	}
+}
 
 /// What one tick drew, for the encoders.
 struct Drawn {
 	/// The program, at its canvas.
 	program: (wgpu::Texture, Canvas),
-	/// Each published scene by name, unless not drawn, at its canvas.
-	published: Vec<(String, Option<wgpu::Texture>, Canvas)>,
+	/// Each published scene, unless not drawn, at its canvas, and the
+	/// portrait picture, while the show goes out in portrait.
+	published: Vec<(Extra, Option<wgpu::Texture>, Canvas)>,
 	/// What recordings hold, unless not drawn, at its canvas.
 	recorded: (Option<wgpu::Texture>, Canvas),
 }
@@ -4578,8 +4634,23 @@ mod tests {
 		drawing.apply(&edit).unwrap();
 		let renames = [collection.renames(&edit)];
 		let err = keep_on_air([live.as_str()], &renames, &drawing).unwrap_err();
-		assert!(err.to_string().contains("cannot draw the program"), "{err}");
+		assert!(err.to_string().contains("draws the program"), "{err}");
 		keep_on_air(["Renamed"], &renames, &drawing).unwrap();
+
+		// Nor, while the show goes out in portrait too, one given a size of
+		// its own, even the program's, which has no portrait picture.
+		let mut both = collection.clone();
+		both.portrait = true;
+		let canvas = both.canvas;
+		let on_air = both.scenes.iter_mut().find(|scene| scene.name == live).unwrap();
+		on_air.size = Some(moq_scene::Size {
+			width: canvas.width,
+			height: canvas.height,
+		});
+		let err = keep_on_air([live.as_str()], &[], &both).unwrap_err();
+		assert!(err.to_string().contains("no portrait picture"), "{err}");
+		both.portrait = false;
+		keep_on_air([live.as_str()], &[], &both).unwrap();
 	}
 
 	async fn subscribe(
@@ -4882,6 +4953,113 @@ mod tests {
 			.await
 			.expect("the scene's broadcast ends");
 		assert_eq!(engine.stats.sessions.open(), 0);
+	}
+
+	/// A show going out in portrait too sends its portrait picture as a
+	/// broadcast of its own beneath the program's, turned on its side, with
+	/// the program's audio scene, holding an encode session of its own;
+	/// turning portrait off ends it, giving the session back. A scene
+	/// published where it goes out, until one edit unpublishes it and turns
+	/// portrait on, ends its broadcast, so its viewers see it end rather than
+	/// the portrait picture take its place.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
+	async fn the_portrait_picture_has_its_own_broadcast() {
+		let _ = moq_tokio::crypto::install_default();
+		let fixture = moq_relay::test_relay().await.expect("test relay");
+		let ready = fixture.relay.ready();
+		let relay = fixture.relay.cluster().origin.consume();
+		tokio::spawn(fixture.relay.run());
+		ready.wait().await.expect("relay ready");
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.fingerprint = vec![fixture.fingerprint.clone()];
+		let client = client.init(Default::default()).expect("client");
+
+		let dir = tempfile::tempdir().unwrap();
+		let tone = include_bytes!("../../moq-scene/src/test_data/tone.webm");
+		std::fs::write(dir.path().join("tone.webm"), tone).unwrap();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let relays = vec![Relay {
+			client,
+			url: fixture.url.clone(),
+		}];
+		let mut loaded = red_canvas();
+		let collection = &mut loaded.collection;
+		// The program's audio scene plays a tone over and over.
+		let tone = moq_scene::Source::Media {
+			path: "tone.webm".into(),
+			looping: true,
+			restart: false,
+		};
+		collection.sources.insert("tone".into(), tone);
+		collection.audio_scenes[0].sounds.insert("tone".into());
+		let mut published = collection.scenes[0].clone();
+		published.name = moq_scene::PORTRAIT.into();
+		published.published = true;
+		collection.scenes.push(published);
+		let engine = start(gpu, relays, dir.path(), autosave, loaded)
+			.await
+			.expect("the studio starts");
+
+		let path = format!("studio/{}", moq_scene::PORTRAIT);
+		let (scene, catalogs, catalog) = routed(&relay, &path).await;
+		let renditions = catalog.video.renditions.iter();
+		let mut wide = renditions.filter(|(_, config)| config.coded_width == Some(640));
+		let (video, _) = wide.next().expect("the scene at the program's size");
+		let track = served(&scene, video).await;
+		{
+			// Red fills the landscape picture, and is fitted across the
+			// middle of the portrait one.
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft("Both");
+			let unpublished = moq_scene::Scene {
+				published: false,
+				..state.collection().scenes[1].clone()
+			};
+			draft.set_scene(1, unpublished).unwrap();
+			draft.set_portrait(true).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		ended(catalogs, track).await;
+		kio::clock::timeout(TIMEOUT, scene.closed())
+			.await
+			.expect("the scene's broadcast ends");
+
+		let (broadcast, catalogs, catalog) = routed(&relay, &path).await;
+		assert!(catalog.audio.enabled().next().is_some(), "its audio");
+		let (video, config) = catalog
+			.video
+			.renditions
+			.iter()
+			.find(|(_, config)| config.coded_width == Some(360))
+			.expect("the canvas turned");
+		assert_eq!(config.coded_height, Some(640));
+		let video = video.clone();
+		let mut tall = Viewer::watch(&broadcast, &catalog, moq_video::Size::new(360, 640)).await;
+		tall.sees(RED).await;
+		// The tone peaks near 0.1 (-20 dBFS).
+		tall.hears(Duration::ZERO, Duration::ZERO, 0.05).await;
+		assert_eq!(engine.stats.sessions.open(), 2, "one full size each");
+
+		let track = served(&broadcast, &video).await;
+		{
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft("Landscape");
+			draft.set_portrait(false).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		ended(catalogs, track).await;
+		kio::clock::timeout(TIMEOUT, broadcast.closed())
+			.await
+			.expect("the portrait broadcast ends");
+		assert_eq!(engine.stats.sessions.open(), 1, "its session given back");
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
+		kio::clock::timeout(TIMEOUT, engine.close())
+			.await
+			.expect("the studio closes");
 	}
 
 	/// What a viewer of one broadcast takes in, frame by frame as it arrives,

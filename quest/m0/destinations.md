@@ -78,6 +78,14 @@ the go-live sheet and live control the studio has, which land them for MoQ
 relays. This quest adds its destinations to that sheet rather than
 building a second way to start a stream.
 
+Proposed 2026-11-17 by
+[Landscape and portrait at once](https://github.com/moq-dev/studio/pull/200),
+waiting on the maintainer there: a show going out in both formats has two
+broadcasts, the program's and `<broadcast>/portrait`. MoQ relays carry both,
+and each destination here names the one it takes, landscape by default, so a
+phone-first platform takes the portrait picture. That picture is another
+encoder-sharing key: two destinations taking it share its encoder.
+
 ## Required
 
 - [moq's egress dial changes are pinned](/quest/m0/pin-egress-dial.md) - RTMPS that keeps `tcUrl`, and a dial policy the caller supplies

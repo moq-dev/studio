@@ -1,11 +1,13 @@
-# [S] A camera that keeps out of the way remembers each app
+# [M] A camera that keeps out of the way remembers each app, in each format
 
 ## Goal
 
 A layer with **Keep out of the way** on knows the app in front: it chooses
 again the moment another app comes to the front, rather than waiting to see
 the picture change, and the place it chose for an app is remembered per user,
-so a known game is right from its first frame.
+so a known game is right from its first frame. While the show goes out in
+landscape and portrait at once, it keeps out of the way in each picture on
+its own.
 
 The decision stays on the machine. Nothing is uploaded.
 
@@ -33,6 +35,19 @@ thumbnails of the streamer's screen and its image input is not production
 ready; local first with a hosted model as an opt-in tie-breaker). Should the
 signals prove too weak, a small on-device model is a later quest, not a
 hosted one.
+
+- **In each format:** while the show goes out in landscape and portrait at
+  once, a layer keeping out of the way places only its landscape picture;
+  its portrait place stays as set by hand or derived when **Both at once**
+  was turned on. Placing each picture on its own remains: the analysis reads
+  the portrait picture too, chooses among the portrait canvas's slots, and
+  writes its `portrait` place through moq-scene's `Item::placed`, with a
+  `Glide` per view (`View::reflows` already is one). A layer shown in one
+  format only is placed in that one alone.
+
+Decided 2026-11-18 (maintainer, [moq-dev/studio#200](https://github.com/moq-dev/studio/pull/200#issuecomment-6994130042)):
+✅ landscape only in that PR, each format here (rejected: a placer per
+format in that PR).
 
 ## Required
 
