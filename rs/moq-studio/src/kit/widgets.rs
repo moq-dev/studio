@@ -1104,6 +1104,9 @@ pub struct Pad<'a> {
 	width: f32,
 	/// The thumbnail's shape, width over height: the show's.
 	shape: f32,
+	/// The scene's portrait thumbnail and its shape, drawn at the right of
+	/// the landscape one, while the show goes out in both.
+	portrait: Option<(Option<egui::load::SizedTexture>, f32)>,
 	pose: Option<Pose>,
 }
 
@@ -1120,8 +1123,19 @@ impl<'a> Pad<'a> {
 			dark: false,
 			width: 124.0,
 			shape: 16.0 / 9.0,
+			portrait: None,
 			pose: None,
 		}
+	}
+
+	/// Beside the landscape thumbnail, the portrait one of `shape`, once
+	/// there is one, for a scene going out in both. The pad's own
+	/// [`shape`](Self::shape) is then the pair's.
+	pub fn portrait(mut self, picture: Option<egui::load::SizedTexture>, shape: f32) -> Self {
+		if shape.is_finite() && shape > 0.0 {
+			self.portrait = Some((picture, shape));
+		}
+		self
 	}
 
 	/// The scene's thumbnail, once there is one, fit to the pad whatever its
@@ -1215,9 +1229,18 @@ impl Widget for Pad<'_> {
 			painter.rect(rect, 10, fill, Stroke::new(2.0, border), StrokeKind::Inside);
 			let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), picture);
 			painter.rect_filled(thumb, 7, BG);
-			if let Some(texture) = self.picture {
-				let fit = texture.size * (thumb.size() / texture.size).min_elem();
-				let at = Rect::from_center_size(thumb.center(), fit);
+			// The landscape picture, and the portrait one at its right.
+			let mut pictures = vec![(thumb, self.picture)];
+			if let Some((texture, shape)) = self.portrait {
+				let wide = (thumb.height() * shape).min(thumb.width() / 2.0);
+				let right = thumb.with_min_x(thumb.right() - wide);
+				pictures[0].0 = thumb.with_max_x(right.left() - 3.0);
+				pictures.push((right, texture));
+			}
+			for (room, texture) in pictures {
+				let Some(texture) = texture else { continue };
+				let fit = texture.size * (room.size() / texture.size).min_elem();
+				let at = Rect::from_center_size(room.center(), fit);
 				egui::Image::new(texture).corner_radius(7).paint_at(ui, at);
 			}
 			if self.refused.is_some() {

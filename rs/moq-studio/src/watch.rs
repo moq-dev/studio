@@ -916,9 +916,8 @@ mod tests {
 	/// a relay as the studio played it: the composition lists it where it is,
 	/// at the offset its timeline sits from the program's where the studio
 	/// shows it, never sooner after its stamp than its catalog's clock and the
-	/// studio's playout delay allow, and a player of that composition shows
-	/// each of its pictures beside the program picture that offset puts it
-	/// with.
+	/// studio's playout delay allow, and a player of that composition reads
+	/// the guest from the relay on the program's clock at that offset.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn plays_a_guest_where_the_studio_did() {

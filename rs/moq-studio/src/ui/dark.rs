@@ -197,9 +197,11 @@ pub(super) fn counted(dark: usize, stalled: usize) -> Option<String> {
 
 /// Whether the scene called `scene` draws a layer that `lost` its picture,
 /// as `lost` says of a source: through the scenes it nests, and the masks
-/// its layers read, and not one it hides.
+/// its layers read, in either picture, and not one it hides.
 pub(super) fn draws_lost(collection: &Collection, scene: &str, lost: impl Fn(&str) -> bool) -> bool {
-	collection.drawn([Layer::scene(scene)]).iter().any(|item| {
+	let formats = moq_scene::Format::ALL.into_iter();
+	let mut drawn = formats.flat_map(|format| collection.drawn([Layer::scene(scene)], format));
+	drawn.any(|item| {
 		let masks = collection.filters(item).filter_map(|filter| match filter {
 			Filter::Mask { source, .. } => Some(source.as_str()),
 			_ => None,

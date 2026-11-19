@@ -59,19 +59,22 @@ pub enum Change {
 		after: Option<Scene>,
 	},
 	/// The item at `index` of `layer`. Adding one inserts it there, in front of
-	/// the ones before it.
+	/// the ones before it. Boxed, as an item is far larger than any other
+	/// change.
 	Item {
 		layer: Layer,
 		index: usize,
 		#[serde(default, skip_serializing_if = "Option::is_none")]
-		before: Option<Item>,
+		before: Option<Box<Item>>,
 		#[serde(default, skip_serializing_if = "Option::is_none")]
-		after: Option<Item>,
+		after: Option<Box<Item>>,
 	},
 	/// [`Collection::transition`].
 	Transition { before: Transition, after: Transition },
 	/// [`Collection::canvas`].
 	Canvas { before: Canvas, after: Canvas },
+	/// [`Collection::portrait`].
+	Portrait { before: bool, after: bool },
 	/// [`Collection::audio_scenes`], whole.
 	AudioScenes {
 		before: Vec<AudioScene>,
@@ -127,6 +130,10 @@ impl Change {
 				before: after,
 				after: before,
 			},
+			Self::Portrait { before, after } => Self::Portrait {
+				before: after,
+				after: before,
+			},
 			Self::AudioScenes { before, after } => Self::AudioScenes {
 				before: after,
 				after: before,
@@ -145,6 +152,7 @@ impl Change {
 			| Self::Item { .. }
 			| Self::Transition { .. }
 			| Self::Canvas { .. }
+			| Self::Portrait { .. }
 			| Self::AudioScenes { .. } => None,
 		}
 	}
@@ -160,6 +168,7 @@ impl Change {
 			Self::Item { before, after, .. } => before == after,
 			Self::Transition { before, after } => before == after,
 			Self::Canvas { before, after } => before == after,
+			Self::Portrait { before, after } => before == after,
 			Self::AudioScenes { before, after } => before == after,
 		}
 	}
@@ -261,6 +270,9 @@ impl Change {
 			(Self::Canvas { before, after }, Self::Canvas { before: b, after: a }) if after == *b => {
 				Self::Canvas { before, after: *a }
 			}
+			(Self::Portrait { before, after }, Self::Portrait { before: b, after: a }) if after == *b => {
+				Self::Portrait { before, after: *a }
+			}
 			(Self::AudioScenes { before, after }, Self::AudioScenes { before: b, after: a }) if after == *b => {
 				Self::AudioScenes {
 					before,
@@ -291,6 +303,7 @@ impl Change {
 				Ok(())
 			}
 			Self::Scene { index, before, after } => {
+				let (before, after) = (before.as_ref(), after.as_ref());
 				splice(&mut collection.scenes, *index, before, after).map_err(|err| conflict(format!("scene {err}")))
 			}
 			Self::Item {
@@ -299,6 +312,7 @@ impl Change {
 				before,
 				after,
 			} => {
+				let (before, after) = (before.as_deref(), after.as_deref());
 				let spliced = collection.edit_items(layer, |items| splice(items, *index, before, after));
 				let spliced = spliced.ok_or_else(|| conflict(format!("there is no {layer}")))?;
 				spliced.map_err(|err| conflict(format!("layer {err} in {layer}")))
@@ -315,6 +329,13 @@ impl Change {
 					return Err(conflict("the canvas changed".into()));
 				}
 				collection.canvas = *after;
+				Ok(())
+			}
+			Self::Portrait { before, after } => {
+				if collection.portrait != *before {
+					return Err(conflict("whether the show goes out in portrait changed".into()));
+				}
+				collection.portrait = *after;
 				Ok(())
 			}
 			Self::AudioScenes { before, after } => {
@@ -353,8 +374,8 @@ fn replace<T: Clone + PartialEq>(
 fn splice<T: Clone + PartialEq>(
 	list: &mut Vec<T>,
 	index: usize,
-	before: &Option<T>,
-	after: &Option<T>,
+	before: Option<&T>,
+	after: Option<&T>,
 ) -> Result<(), String> {
 	match (before, after) {
 		(None, Some(after)) if index <= list.len() => list.insert(index, after.clone()),
@@ -761,7 +782,7 @@ impl Draft {
 		self.insert_scene(to, scene)
 	}
 
-	fn scene_at(&self, index: usize) -> Result<Scene, Error> {
+	pub(crate) fn scene_at(&self, index: usize) -> Result<Scene, Error> {
 		let scene = self.collection.scenes.get(index).cloned();
 		scene.ok_or_else(|| conflict(format!("there is no scene {index}")))
 	}
@@ -772,7 +793,7 @@ impl Draft {
 			layer: layer.clone(),
 			index,
 			before: None,
-			after: Some(item),
+			after: Some(Box::new(item)),
 		})
 	}
 
@@ -782,7 +803,7 @@ impl Draft {
 		self.change(Change::Item {
 			layer: layer.clone(),
 			index,
-			before: Some(before.clone()),
+			before: Some(Box::new(before.clone())),
 			after: None,
 		})?;
 		Ok(before)
@@ -794,8 +815,8 @@ impl Draft {
 		self.change(Change::Item {
 			layer: layer.clone(),
 			index,
-			before: Some(before),
-			after: Some(item),
+			before: Some(Box::new(before)),
+			after: Some(Box::new(item)),
 		})
 	}
 

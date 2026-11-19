@@ -13,6 +13,8 @@ pub(super) struct Cued {
 	pub(super) refused: Option<String>,
 	/// Its size, which its picture is drawn at.
 	pub(super) canvas: Canvas,
+	/// Its portrait picture's size, while it goes out in both.
+	pub(super) portrait: Option<Canvas>,
 	/// Whether it is open for editing off air, rather than only cued.
 	pub(super) off_air: bool,
 	/// Why viewers see it anyway, if they do, such as being published.
@@ -24,9 +26,21 @@ pub(super) struct Cued {
 impl Cued {
 	/// Its picture's shape, width over height.
 	pub(super) fn shape(&self) -> f32 {
-		self.canvas.width as f32 / self.canvas.height.max(1) as f32
+		super::shell::shape(self.canvas)
+	}
+
+	/// The shape of its pictures side by side, while it goes out in both,
+	/// with room between them, or else of its picture.
+	fn card_shape(&self) -> f32 {
+		match self.portrait {
+			Some(portrait) => super::layout::pair_shape([self.shape(), super::shell::shape(portrait)], CARD_GAP),
+			None => self.shape(),
+		}
 	}
 }
+
+/// The gap between the NEXT card's pictures, as a share of their height.
+const CARD_GAP: f32 = 0.06;
 
 /// A corner of the live picture, where the NEXT card docks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +90,7 @@ impl Panels {
 		let inner = width - 2.0 * PADDING;
 		// The rest of the card is about 120 points tall; the picture gets what
 		// the live picture leaves.
-		let tall = (inner / cued.shape())
+		let tall = (inner / cued.card_shape())
 			.min(picture.height() - 2.0 * INSET - 120.0)
 			.max(24.0);
 		let (header, buttons, hint) = (24.0, 40.0, 14.0);
@@ -140,11 +154,20 @@ impl Panels {
 		// The cued scene as it will go on air, framed in amber.
 		let frame = Rect::from_min_size(pos2(card.left() + PADDING, y), vec2(inner, tall));
 		painter.rect_filled(frame, 8, kit::BG);
-		let shown = vec2(cued.canvas.width as f32, cued.canvas.height as f32);
-		let fit = shown * (frame.shrink(3.0).size() / shown).min_elem();
-		egui::Image::new((self.preview.id, fit))
-			.corner_radius(6)
-			.paint_at(ui, Rect::from_center_size(frame.center(), fit));
+		// Both of its pictures, side by side, while it goes out in both.
+		let room = frame.shrink(3.0);
+		let pictures = match (cued.portrait, &self.portrait_preview) {
+			(Some(portrait), Some(registered)) => {
+				let shapes = [cued.shape(), super::shell::shape(portrait)];
+				let gap = CARD_GAP * room.height();
+				let [wide, tall] = super::layout::pair(room, shapes, gap);
+				vec![(self.preview.id, wide), (registered.id, tall)]
+			}
+			_ => vec![(self.preview.id, super::layout::fit(room, cued.shape()))],
+		};
+		for (id, at) in pictures {
+			egui::Image::new((id, at.size())).corner_radius(6).paint_at(ui, at);
+		}
 		ui.painter()
 			.rect_stroke(frame, 8, Stroke::new(2.0, kit::CUE), egui::StrokeKind::Inside);
 		y = frame.bottom() + 8.0;

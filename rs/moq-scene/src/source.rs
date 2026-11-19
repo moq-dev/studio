@@ -577,7 +577,8 @@ impl Sources {
 	/// The mix people in the studio hear of the audio scene called `scene`,
 	/// such as on **Listen** or in a guest's return feed: its
 	/// [`mix`](Self::mix) with the sources published independently it
-	/// reaches in too, as viewers hear them.
+	/// reaches in too, as viewers hear them. The portrait picture, which
+	/// carries no composition, encodes the program's audio scene's.
 	pub fn listened(&self, scene: &str) -> Option<&Mix> {
 		self.listened.get(scene).or_else(|| self.mixes.get(scene))
 	}
