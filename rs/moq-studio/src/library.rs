@@ -190,7 +190,7 @@ impl Picture {
 }
 
 /// Read the program's last frame back from the GPU as viewers see it, with
-/// its layer layout's pictures, shrunk for a card.
+/// its composition's pictures, shrunk for a card.
 pub fn capture(gpu: &Gpu, engine: &Engine) -> anyhow::Result<Picture> {
 	let (buffer, width, height, row) = {
 		let state = engine.state.lock().unwrap();

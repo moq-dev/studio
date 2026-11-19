@@ -285,10 +285,37 @@ impl State {
 		} else {
 			entries[from..position].iter().map(|&edit| edit.clone()).collect()
 		};
-		self.adopt(collection, &made)?;
+		let moved = self.adopt(collection, &made)?;
+		match position < from {
+			true => self.undone(&moved),
+			false => self.hold(&moved),
+		}
 		self.history = history;
 		self.edited();
 		Ok(())
+	}
+
+	/// Note each layer keeping clear in `moved`, as [`moved`] lists them, as
+	/// moved by hand: a redo or a reload put it elsewhere, so it stays where
+	/// the scene file has it until the content under it changes.
+	fn hold(&mut self, moved: &[Moved]) {
+		for moved in moved {
+			self.compositor
+				.redone(&moved.scene, moved.index, &moved.source, moved.rect);
+		}
+	}
+
+	/// Note each layer keeping clear in `moved`, as [`moved`] lists them, as
+	/// put back by an undo: one back where it was saved before a move by hand
+	/// held it, or before keeping clear was switched off, goes back to where
+	/// it was then, such as the slot it had glided to, so the undo puts back what the streamer saw; any other
+	/// holds, as [`hold`](Self::hold) says.
+	fn undone(&mut self, moved: &[Moved]) {
+		let now = kio::clock::now();
+		for moved in moved {
+			self.compositor
+				.undone(&moved.scene, moved.index, &moved.source, moved.rect, now);
+		}
 	}
 
 	/// Make `collection`, which the edits `made` led to from the current one,
@@ -297,8 +324,9 @@ impl State {
 	/// each edit read against the collection it was made to, and any
 	/// `collection` lacks is dropped. Edits that remove a scene on air, leave
 	/// one drawing the program, or make one another size than the program,
-	/// are refused, changing nothing.
-	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<()> {
+	/// are refused, changing nothing. Returns the layers keeping clear it
+	/// saved elsewhere, as [`moved`] finds them.
+	fn adopt(&mut self, collection: Collection, made: &[Edit]) -> anyhow::Result<Vec<Moved>> {
 		let mut before = self.collection.clone();
 		let mut renames = Vec::with_capacity(made.len());
 		for edit in made {
@@ -306,6 +334,7 @@ impl State {
 			before.apply(edit)?;
 		}
 		keep_on_air(self.compositor.on_air(), &renames, &collection)?;
+		let moved = moved(&self.collection, &collection, &renames);
 		self.compositor.fit(&collection)?;
 		for renames in &renames {
 			self.compositor.rename(renames);
@@ -316,7 +345,7 @@ impl State {
 		self.preview_cued();
 		self.renamed
 			.extend(renames.into_iter().filter(|renames| !renames.is_empty()));
-		Ok(())
+		Ok(moved)
 	}
 
 	/// The scene renames and removals since the last call, oldest first.
@@ -680,13 +709,89 @@ impl autosave::Document for State {
 		} = loaded;
 		// A scene in preview or on program that the file no longer has, such as
 		// one renamed by hand, leaves it until another is picked.
-		self.adopt(collection, &[])?;
+		let moved = self.adopt(collection, &[])?;
+		self.hold(&moved);
 		self.history = history;
 		self.dropped = dropped;
 		self.reloads += 1;
 		self.stale = true;
 		Ok(())
 	}
+}
+
+/// A scene item keeping clear that an edit saved elsewhere, as [`moved`]
+/// finds it.
+#[derive(Clone, Debug, PartialEq)]
+struct Moved {
+	scene: String,
+	index: usize,
+	source: String,
+	/// Where it is saved now.
+	rect: moq_scene::Rect,
+}
+
+/// Each scene item keeping clear in `after` that `before` saved elsewhere or
+/// had not keeping clear: the same scene's item at the same index showing
+/// the same source, at another x or y or switched back on, or one switched
+/// back on that `before` showed elsewhere in the scene, as an undo of a
+/// swap into a slot puts it. A scene is the one `renames`, each edit's
+/// between them, oldest first, called it in `before`. Its keeper is still
+/// under that place, as the compositor follows items only as it renders. A
+/// change of order alone moves nothing.
+fn moved(before: &Collection, after: &Collection, renames: &[BTreeMap<String, Option<String>>]) -> Vec<Moved> {
+	let mut moved = Vec::new();
+	for scene in &after.scenes {
+		let Some(was) = was_named(renames, &scene.name).and_then(|name| before.scene(&name)) else {
+			continue;
+		};
+		if reordered(&was.items, &scene.items) {
+			continue;
+		}
+		for (index, item) in scene.items.iter().enumerate() {
+			let Some(old) = was.items.get(index) else { continue };
+			let switched_on = |old: &moq_scene::Item| old.source == item.source && old.keep_clear.is_none();
+			if item.keep_clear.is_some()
+				&& (switched_on(old)
+					|| (old.source == item.source && (old.rect.x, old.rect.y) != (item.rect.x, item.rect.y))
+					|| (old.source != item.source && was.items.iter().any(switched_on)))
+			{
+				moved.push(Moved {
+					scene: scene.name.clone(),
+					index,
+					source: item.source.clone(),
+					rect: item.rect,
+				});
+			}
+		}
+	}
+	moved
+}
+
+/// What the scene called `name` after `renames`, each edit's, oldest first,
+/// was called before them, or `None` if one of them added it.
+fn was_named(renames: &[BTreeMap<String, Option<String>>], name: &str) -> Option<String> {
+	let mut name = name.to_string();
+	for renames in renames.iter().rev() {
+		if let Some((from, _)) = renames.iter().find(|(_, to)| to.as_deref() == Some(name.as_str())) {
+			name = from.clone();
+		} else if renames.contains_key(&name) {
+			return None;
+		}
+	}
+	Some(name)
+}
+
+/// Whether `after` holds each of `before`'s items once, in any order.
+fn reordered(before: &[moq_scene::Item], after: &[moq_scene::Item]) -> bool {
+	let mut left: Vec<&moq_scene::Item> = before.iter().collect();
+	before.len() == after.len()
+		&& after.iter().all(|item| {
+			let Some(at) = left.iter().position(|old| *old == item) else {
+				return false;
+			};
+			left.swap_remove(at);
+			true
+		})
 }
 
 /// Refuse edits, each read as its [`Collection::renames`], that remove a
@@ -3422,6 +3527,252 @@ mod tests {
 			history: History::new(),
 			dropped: 0,
 		}
+	}
+
+	/// A layer keeping clear that an undo, a redo, or a reload saved
+	/// elsewhere, or switched keeping clear back on, is listed as moved; one
+	/// only resized, another source, or one that does not keep clear is not.
+	#[test]
+	fn an_undo_or_a_reload_moves_by_hand() {
+		let mut before = red_canvas().collection;
+		let rect = moq_scene::Rect {
+			x: 400.0,
+			y: 200.0,
+			width: 100.0,
+			height: 100.0,
+		};
+		let keeping = moq_scene::Item {
+			keep_clear: Some(moq_scene::KeepClear::default()),
+			..moq_scene::Item::new("red", rect)
+		};
+		before.scenes[0]
+			.items
+			.extend([keeping.clone(), keeping.clone(), keeping]);
+		before.scenes[0].items.push(moq_scene::Item::new("red", rect));
+		before.scenes[0].items.push(moq_scene::Item::new("red", rect));
+		let main = before.scenes[0].name.clone();
+		let mut after = before.clone();
+		let items = &mut after.scenes[0].items;
+		items[1].rect.x = 300.0;
+		items[2].rect.width = 50.0;
+		items[3].source = "blue".into();
+		items[3].rect.x = 300.0;
+		items[4].rect.x = 300.0;
+		items[5].keep_clear = Some(moq_scene::KeepClear::default());
+		let moved = |index, rect| Moved {
+			scene: main.clone(),
+			index,
+			source: "red".into(),
+			rect,
+		};
+		let elsewhere = moq_scene::Rect { x: 300.0, ..rect };
+		assert_eq!(
+			super::moved(&before, &after, &[]),
+			[moved(1, elsewhere), moved(5, rect)]
+		);
+
+		// Two keeping clear of the same source swapped, as an undo of a
+		// change of order does: neither moved.
+		let mut after = before.clone();
+		after.scenes[0].items[1].rect.x = 300.0;
+		let mut swapped = after.clone();
+		swapped.scenes[0].items.swap(1, 2);
+		assert_eq!(super::moved(&after, &swapped, &[]), []);
+
+		// Switched back on where `before` showed it elsewhere in the scene, as
+		// an undo of a swap into a slot puts it.
+		let mut kept = before.clone();
+		kept.scenes[0].items.truncate(2);
+		kept.scenes[0].items.push(moq_scene::Item::new("blue", rect));
+		let mut slotted = kept.clone();
+		slotted.scenes[0].items.swap(1, 2);
+		slotted.scenes[0].items[2].keep_clear = None;
+		assert_eq!(super::moved(&slotted, &kept, &[]), [moved(1, rect)]);
+	}
+
+	/// Scenes are matched across the renames between them, so two that swap
+	/// names move nothing, and a move in a renamed scene is the new name's.
+	#[test]
+	fn a_renamed_scene_is_the_one_it_was() {
+		let mut before = red_canvas().collection;
+		let keeping = |x| moq_scene::Item {
+			keep_clear: Some(moq_scene::KeepClear::default()),
+			..moq_scene::Item::new(
+				"red",
+				moq_scene::Rect {
+					x,
+					y: 0.0,
+					width: 100.0,
+					height: 100.0,
+				},
+			)
+		};
+		before.scenes[0].name = "a".into();
+		before.scenes[0].items = vec![keeping(0.0)];
+		before.scenes.push(moq_scene::Scene {
+			items: vec![keeping(200.0)],
+			..moq_scene::Scene::new("b")
+		});
+		let mut after = before.clone();
+		after.scenes[0].name = "b".into();
+		after.scenes[1].name = "a".into();
+		let swap = BTreeMap::from([
+			("a".to_string(), Some("b".to_string())),
+			("b".to_string(), Some("a".to_string())),
+		]);
+		assert_eq!(super::moved(&before, &after, &[swap]), []);
+
+		after.scenes[0].items[0].rect.x = 50.0;
+		let rename = BTreeMap::from([("a".to_string(), Some("c".to_string()))]);
+		let added = BTreeMap::from([("b".to_string(), None)]);
+		after.scenes[0].name = "c".into();
+		after.scenes[1].name = "b".into();
+		assert_eq!(
+			super::moved(&before, &after, &[rename, added]),
+			[Moved {
+				scene: "c".into(),
+				index: 0,
+				source: "red".into(),
+				rect: after.scenes[0].items[0].rect,
+			}]
+		);
+	}
+
+	/// An undo of a move by hand puts a layer keeping clear back as it was
+	/// before the move, and a redo holds it again. An undo of an edit made
+	/// in the collection rather than by a gesture, which held nothing, holds
+	/// it where it puts it.
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn an_undo_puts_back_a_layer_keeping_clear() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut loaded = red_canvas();
+		let rect = moq_scene::Rect {
+			x: 400.0,
+			y: 200.0,
+			width: 100.0,
+			height: 100.0,
+		};
+		loaded.collection.scenes[0].items.push(moq_scene::Item {
+			keep_clear: Some(moq_scene::KeepClear::default()),
+			..moq_scene::Item::new("red", rect)
+		});
+		loaded.collection.sources.insert(
+			"blue".into(),
+			moq_scene::Source::Color {
+				color: moq_scene::Rgba([0, 0, 255, 255]),
+			},
+		);
+		let slot = moq_scene::Rect { y: 0.0, ..rect };
+		(loaded.collection.scenes[0].items).push(moq_scene::Item::new("blue", slot));
+		let main = loaded.collection.scenes[0].name.clone();
+		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
+		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
+		let engine = start(gpu, Vec::new(), dir.path(), autosave, loaded)
+			.await
+			.expect("the studio starts");
+		let placed = |at: moq_scene::Rect, held: bool| {
+			let engine = &engine;
+			let main = &main;
+			async move {
+				loop {
+					let placement = engine
+						.state
+						.lock()
+						.unwrap()
+						.compositor
+						.placement(main, 1, "red")
+						.cloned();
+					if placement.is_some_and(|placement| placement.rect == at && placement.held == held) {
+						return;
+					}
+					kio::clock::sleep(Duration::from_millis(10)).await;
+				}
+			}
+		};
+		kio::clock::timeout(TIMEOUT, placed(rect, false))
+			.await
+			.expect("placed where it is saved");
+
+		let commit = |to: moq_scene::Rect, by_hand: bool| {
+			let mut state = engine.state.lock().unwrap();
+			if by_hand {
+				state.compositor.hold(&main, 1, "red");
+			}
+			let collection = state.collection();
+			let item = collection.scenes[0].items[1].clone();
+			let mut draft = collection.draft("Move `red`");
+			let layer = moq_scene::Layer::scene(main.as_str());
+			draft.set_item(&layer, 1, moq_scene::Item { rect: to, ..item }).unwrap();
+			state.commit(draft, None).unwrap();
+		};
+
+		let moved = moq_scene::Rect { x: 200.0, ..rect };
+		commit(moved, true);
+		kio::clock::timeout(TIMEOUT, placed(moved, true))
+			.await
+			.expect("a move by hand holds it");
+		engine.state.lock().unwrap().undo().unwrap();
+		kio::clock::timeout(TIMEOUT, placed(rect, false))
+			.await
+			.expect("the undo puts it back as it was");
+		engine.state.lock().unwrap().redo().unwrap();
+		kio::clock::timeout(TIMEOUT, placed(moved, true))
+			.await
+			.expect("the redo holds it");
+		engine.state.lock().unwrap().undo().unwrap();
+		kio::clock::timeout(TIMEOUT, placed(rect, false))
+			.await
+			.expect("undone again, it is back");
+
+		commit(moved, false);
+		kio::clock::timeout(TIMEOUT, placed(moved, false))
+			.await
+			.expect("an edit is no move by hand");
+		engine.state.lock().unwrap().undo().unwrap();
+		kio::clock::timeout(TIMEOUT, placed(rect, true))
+			.await
+			.expect("the undo holds it");
+
+		// Swapped with another layer, as a drop into its slot does, it stops
+		// keeping clear; the undo takes its placer back from where it was
+		// parked rather than starting over.
+		{
+			let mut state = engine.state.lock().unwrap();
+			let collection = state.collection();
+			let items = &collection.scenes[0].items;
+			let (red, blue) = (items[1].clone(), items[2].clone());
+			let mut draft = collection.draft("Swap `red` into the slot");
+			let layer = moq_scene::Layer::scene(main.as_str());
+			draft.set_item(&layer, 1, blue).unwrap();
+			let parked = moq_scene::Item {
+				keep_clear: None,
+				..red
+			};
+			draft.set_item(&layer, 2, parked).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		// The render that drops its keeper parks it.
+		kio::clock::timeout(TIMEOUT, async {
+			while engine
+				.state
+				.lock()
+				.unwrap()
+				.compositor
+				.placement(&main, 1, "red")
+				.is_some()
+			{
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the swap parks it");
+		engine.state.lock().unwrap().undo().unwrap();
+		kio::clock::timeout(TIMEOUT, placed(rect, true))
+			.await
+			.expect("the undo of the swap takes back its held placer");
+		let stopping = engine.clone();
+		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 	}
 
 	/// Frames the recording's own encoder encoded.
