@@ -1842,7 +1842,7 @@ impl Compositor {
 			scene: scene.map(str::to_string),
 		});
 		let mut shown = HashSet::new();
-		for item in pictures.drawn(places) {
+		for item in pictures.drawn(places, false) {
 			shown.insert(collection.capture(&item.source));
 			masks(collection, &mut shown, collection.filters(item));
 		}
@@ -2380,16 +2380,17 @@ impl<'a> Pictures<'a> {
 		}
 	}
 
-	/// The visible items `places` draw, then those of each scene they draw
+	/// The visible items `places` draw, drawn by one drawn as the landscape
+	/// picture draws it if `outer`, then those of each scene they draw
 	/// through a scene source, and so on, each scene once, as
 	/// [`Collection::drawn`] has them, read as [`of`](Self::of) says.
-	fn drawn(&self, places: impl IntoIterator<Item = Place>) -> Vec<&'a Item> {
+	fn drawn(&self, places: impl IntoIterator<Item = Place>, outer: bool) -> Vec<&'a Item> {
 		let mut items: Vec<(&'a Item, bool)> = Vec::new();
 		for place in places {
-			let landscaped = place
-				.scene
-				.as_deref()
-				.is_some_and(|scene| self.landscaped(false, scene));
+			let landscaped = match place.scene.as_deref() {
+				Some(scene) => self.landscaped(outer, scene),
+				None => outer && self.landscape.is_some(),
+			};
 			let found = self.of(landscaped).items(&place).unwrap_or_default();
 			items.extend(found.iter().filter(|item| item.visible).map(|item| (item, landscaped)));
 		}
@@ -2539,8 +2540,7 @@ impl<'a> Nesting<'a> {
 				walk.program |= self.order[index].program;
 				continue;
 			}
-			let collection = pictures.of(landscaped);
-			let moment = moment(collection, scene, since);
+			let moment = moment(pictures, scene, landscaped, since);
 			match walked.get(&(scene, moment, landscaped)) {
 				Some(Some(index)) => {
 					let index = *index;
@@ -2552,7 +2552,8 @@ impl<'a> Nesting<'a> {
 				Some(None) => {}
 				None => {
 					walked.insert((scene, moment, landscaped), None);
-					let items = collection.scene(scene).map_or(&[][..], |scene| scene.items.as_slice());
+					let found = pictures.of(landscaped).scene(scene);
+					let items = found.map_or(&[][..], |scene| scene.items.as_slice());
 					stack.push(Walk {
 						nest: Some((scene, moment)),
 						items,
@@ -2569,8 +2570,8 @@ impl<'a> Nesting<'a> {
 /// The moment of its keyframes the scene called `scene` is drawn at, `since`
 /// the scene drawing it went on, or `None` once every item it draws, through
 /// the scenes it draws, holds its last keyframe.
-fn moment(collection: &Collection, scene: &str, since: Duration) -> Option<Duration> {
-	let items = collection.drawn([Place::scene(scene)]);
+fn moment(pictures: Pictures, scene: &str, landscaped: bool, since: Duration) -> Option<Duration> {
+	let items = pictures.drawn([Place::scene(scene)], landscaped);
 	let moving = items.iter().any(|item| item.settled(since) != Settled::After);
 	moving.then_some(since)
 }
@@ -4245,6 +4246,51 @@ mod tests {
 			assert!(!turned.as_chunks::<4>().0.contains(&GREEN), "a's portrait-only layer");
 		})
 		.await;
+	}
+
+	/// In the portrait picture, a scene of its own size moves as the
+	/// landscape picture draws what it shows: a layer moving in landscape
+	/// alone keeps it moving, so its draws at two moments are not shared.
+	#[test]
+	fn a_scene_of_its_own_size_moves_as_the_landscape_picture_does() {
+		let mut collection = dual();
+		for (name, scene) in [("scene a", "a"), ("scene w", "w")] {
+			let scene = scene.into();
+			collection.sources.insert(name.into(), Source::Scene { scene });
+		}
+		collection.scenes.push(Scene {
+			size: Some(crate::Size { width: 16, height: 8 }),
+			items: vec![Item::new(
+				"scene a",
+				Rect {
+					x: 0.0,
+					y: 0.0,
+					width: 16.0,
+					height: 8.0,
+				},
+			)],
+			..Scene::new("w")
+		});
+		// "d", drawn in both, shows "w".
+		collection.scenes.push(Scene {
+			items: vec![Item::new("scene w", Rect::fill(&collection.canvas))],
+			..Scene::new("d")
+		});
+		// Blue, shown in landscape alone, slides in.
+		collection.scenes[0].items[1].keyframes = slide_in();
+		collection.validate().unwrap();
+		let landscape = collection.formatted(Format::Landscape);
+		let portrait = collection.formatted(Format::Portrait);
+		let pictures = Pictures {
+			collection: &portrait,
+			landscape: Some(&landscape),
+		};
+		let since = Duration::from_millis(500);
+		assert!(pictures.landscaped(false, "w"));
+		assert_eq!(moment(pictures, "w", true, since), Some(since));
+		assert_eq!(moment(pictures, "d", false, since), Some(since), "through `w`");
+		assert_eq!(moment(pictures, "a", false, since), None, "still in portrait");
+		assert_eq!(moment(Pictures::single(&landscape), "a", false, since), Some(since));
 	}
 
 	/// A slot showing a scene in the portrait picture is cropped for the
