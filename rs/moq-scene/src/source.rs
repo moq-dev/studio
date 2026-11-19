@@ -220,10 +220,21 @@ struct Clock {
 /// holds no more decoder output than this.
 const QUEUED: usize = 3;
 
-/// How far past its arrival a layer's media can be due: its offset carries
-/// the studio's playout of its broadcast, up to [`MAX_DELAY`], and a viewer
-/// plays the program up to as far behind again.
+/// How long a layer's subscription holds a group it has not read yet once a
+/// newer one arrives: two playouts, the studio's of its broadcast, up to
+/// [`MAX_DELAY`], which its offset carries, and the viewer's own of the
+/// program. Its pictures wait there undecoded, so past this a picture due
+/// later still, as where the studio's path to the broadcast is that much
+/// slower than the viewer's, is skipped. A longer hold would also stall the
+/// layer that long at a lost group, which moq's subscription waits out for
+/// the same time.
 const LAYER_DELAY: Duration = MAX_DELAY.saturating_mul(2);
+
+/// How far ahead a layer holds decoded sound, read as it arrives: as long as
+/// its publisher keeps it, a bound on memory alone (about 11 MB of the bus's
+/// stereo), since the offset carries the studio's path to the broadcast, which
+/// no bound on playout covers.
+const LAYER_SOUND: Duration = hang::container::MAX_AGE;
 
 /// What a running source is doing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1639,12 +1650,12 @@ impl Driver {
 			tokio::select! {
 				read = consumer.read(), if !ended => match read? {
 					Some(moq_audio::decode::Read::Frame(frame)) => {
-						// One due past the longest delay would hold whatever a
-						// peer stamps.
+						// One due further ahead than sound is held would hold
+						// whatever a peer stamps.
 						let now = kio::clock::now();
 						let due = shift(frame.timestamp, *offsets.borrow()).and_then(|at| schedule.due(at));
 						let placed = !gone(due, length(&frame, bus), now, STRETCH)
-							&& due.is_some_and(|sounds| sounds <= now.saturating_add(LAYER_DELAY));
+							&& due.is_some_and(|sounds| sounds <= now.saturating_add(LAYER_SOUND));
 						if placed {
 							queue.push_back(frame);
 						}
@@ -3848,11 +3859,11 @@ mod tests {
 		.await;
 	}
 
-	/// A layer's sound sounds when its offset puts it more than
-	/// [`MAX_DELAY`] past its arrival, as the studio's playout carried in the
-	/// offset and a viewer's own playout add up to.
+	/// A layer's sound sounds when its offset puts it further past its
+	/// arrival than both playouts, as when the studio's path to the broadcast
+	/// is slower than the viewer's.
 	#[tokio::test(start_paused = true)]
-	async fn a_layer_sounds_two_playouts_late() {
+	async fn a_layer_sounds_past_both_playouts() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (mut context, origin) = context(dir.path());
@@ -3870,7 +3881,7 @@ mod tests {
 					clock: "guest".into(),
 					path: "room/cam".into(),
 					instance: None,
-					offset: 2_500_000,
+					offset: 5_000_000,
 				},
 			);
 			collection.audio_scenes[0].sounds.insert("cam".into());
@@ -3898,7 +3909,7 @@ mod tests {
 				&mut mixer,
 				&program,
 				&mut at,
-				arrived.saturating_add(Duration::from_secs(2)),
+				arrived.saturating_add(Duration::from_secs(5)),
 			)
 			.await;
 			assert_eq!(before, 0.0, "sounded before its moment");
@@ -3906,7 +3917,7 @@ mod tests {
 				&mut mixer,
 				&program,
 				&mut at,
-				arrived.saturating_add(Duration::from_secs(3)),
+				arrived.saturating_add(Duration::from_secs(6)),
 			)
 			.await;
 			assert!(heard > 0.0, "dropped as too far ahead");
