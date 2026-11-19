@@ -641,7 +641,9 @@ impl Panels {
 			(false, true) => (Icon::Mic, "Mute"),
 			(false, false) => (Icon::Sound, "Mute"),
 		};
+		let key = self.key(&Action::Mute(name.clone()), ui.ctx());
 		let button = IconButton::new(icon, verb)
+			.key(key.as_deref())
 			.look(kit::Look::Boxed)
 			.lit(muted, kit::CUE)
 			.width(parts.buttons.width());

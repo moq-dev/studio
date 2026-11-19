@@ -77,12 +77,14 @@ pub enum Icon {
 	/// Opens in a window of its own.
 	Detach,
 	Info,
+	/// Opens the command palette.
+	Search,
 }
 
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 65] = [
+	pub const ALL: [Self; 66] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -148,6 +150,7 @@ impl Icon {
 		Self::Advanced,
 		Self::Detach,
 		Self::Info,
+		Self::Search,
 	];
 
 	fn source(self) -> ImageSource<'static> {
@@ -217,6 +220,7 @@ impl Icon {
 			Self::Advanced => include_image!("../../assets/icons/sliders-horizontal.svg"),
 			Self::Detach => include_image!("../../assets/icons/external-link.svg"),
 			Self::Info => include_image!("../../assets/icons/info.svg"),
+			Self::Search => include_image!("../../assets/icons/search.svg"),
 		}
 	}
 

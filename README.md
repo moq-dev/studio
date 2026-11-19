@@ -188,6 +188,7 @@ macOS the system's buttons and edges stay. It holds, from the left:
 - The live control: **GO LIVE** off air, which opens the
   [go-live sheet](#going-live); on air, **LIVE** and how long the stream has
   run, which reads **END STREAM** under the pointer.
+- Search, which opens the [command palette](#command-palette).
 - The gear, which opens [Settings](#settings).
 - Minimize, maximize, and close, except on macOS.
 
@@ -348,6 +349,35 @@ corner while the selected layer is under it, so it hides neither the layer
 nor its toolbar, even mid-drag. Studio mode is kept per user, with
 the [hotkeys](#hotkeys), not in the scene file.
 
+### Command palette
+
+**Ctrl+K** (**Cmd+K** on macOS), or the search button in the title bar, opens
+a search box over any page that runs anything the studio can do. Type a few
+letters of what you want, pick a row with the arrows or the pointer, and
+press Enter or click it; Escape, a click outside it, or Ctrl+K again closes
+it. It lists:
+
+- Every action a [hotkey](#hotkeys) can do, by what it is for, each with the
+  key bound to it: going live, ending the stream, the panic key, recording,
+  Studio mode, TAKE and AUTO, taking or cueing each scene, muting or
+  unmuting each sound, and replay and clips. One that cannot run now stays
+  listed, dimmed, saying why, such as TAKE with nothing cued or a scene that
+  cannot go on program. **Go live** opens the go-live sheet, as GO LIVE does;
+  the rest act at once, as their keys do.
+- Selecting each layer of the scene BUILD edits, by its source's name.
+- Adding a camera, screen, window, or input: the first time, **Find cameras,
+  screens, windows, and inputs to add** lists them, then each is a row of its
+  own, added as a layer as the Add tab adds it. **Add a source** opens the
+  Add tab on any kind of source, to fill in by hand.
+- The pages, each Settings pane, and each setting by its name, such as
+  **Frame rate** or **Room key**, which opens its pane at that setting.
+- Undo and redo, naming the edit, the multiview, the stream's health in
+  detail, and the scene graph.
+
+A row is found by the words of its name, what it is for, and a few more it
+answers to, such as `fps` for the frame rate or `mic` for a mute, so `mute
+desk` finds **Mute `desk`**.
+
 ### Multiview
 
 **Open the multiview**, in the show's menu, opens a window for another
@@ -439,7 +469,7 @@ setting costs. Escape or a click outside closes it.
 | Show | Pick the format, landscape or portrait, which swaps the canvas's sides; the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, or **Custom** for exact numbers; the frame rate as 30, 60, or **Custom**; and, under **Scene sizes**, each scene's own size (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
 | Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)). |
 | Recording | Change or open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
-| Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; and replay and clips (see [Hotkeys](#hotkeys)). |
+| Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; each sound's mute; and replay and clips (see [Hotkeys](#hotkeys)). |
 | Guests | Set the room guests join, its key, the join page, how long a link lasts, and whether guests appear on their own (see [Guests](#guests)). |
 | Advanced | Publish scenes as broadcasts of their own and sources independently, turn the virtual camera of the program or of each published scene on, pick how the window's [effects](#effects) move, and open the [scene graph](#scene-graph). |
 
@@ -1586,8 +1616,10 @@ a WebGL page runs slower.
 Settings, Hotkeys binds a key to the **Panic** key, TAKE and AUTO
 for the cued scene, turning [Studio mode](#off-air-and-studio-mode) on or off,
 **Replay**, **Save clip**, starting or stopping a recording, **Go live**,
-**End stream**, and each scene, which its key takes, or cues in Studio mode,
-as its pad does; the tab says which. Press **Bind**, then the key with any
+**End stream**, each scene, which its key takes, or cues in Studio mode,
+as its pad does (the tab says which), and each sound, which its key mutes or
+unmutes, as its strip's button does. The [command palette](#command-palette)
+lists the same actions with their keys. Press **Bind**, then the key with any
 modifiers; Escape, or leaving
 the window or the tab, cancels. Every action starts unbound, so no key a game
 uses is taken unasked, and a key bound to one action is refused for another
