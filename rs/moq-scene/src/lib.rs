@@ -63,6 +63,7 @@ mod overlay;
 pub mod place;
 mod playout;
 pub mod publish;
+mod readback;
 pub mod replay;
 mod scale;
 pub mod source;
