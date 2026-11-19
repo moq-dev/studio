@@ -134,6 +134,8 @@ enum Row {
 struct Refusals {
 	replay: Option<String>,
 	save: Option<String>,
+	/// Why the pick holds no past, which a clip around a marker needs too.
+	held: Option<String>,
 }
 
 impl Panels {
@@ -148,7 +150,7 @@ impl Panels {
 		shell::bar(ui, fx, shelf);
 		ui.painter()
 			.vline(shelf.left() + 0.5, shelf.y_range(), Stroke::new(1.0, kit::LINE));
-		self.replays(ui, main.shrink2(vec2(24.0, 14.0)), shape);
+		let held = self.replays(ui, main.shrink2(vec2(24.0, 14.0)), shape);
 		let column = shelf.shrink2(vec2(16.0, 14.0));
 		let marked = self.controls.markers.list();
 		let rows = match marked.len() {
@@ -160,13 +162,14 @@ impl Panels {
 		let marks = column.with_max_y(column.top() + height);
 		ui.painter()
 			.hline(column.x_range(), marks.bottom() + 9.5, Stroke::new(1.0, kit::LINE));
-		self.markers(ui, marks, &marked);
+		self.markers(ui, marks, &marked, held.as_deref());
 		self.shelf(ui, column.with_min_y(marks.bottom() + 20.0));
 	}
 
 	/// This session's markers, the newest first, each with how long ago it
 	/// was dropped, its name to type, a clip around it, and its removal.
-	fn markers(&mut self, ui: &mut Ui, rect: Rect, marked: &[Marker]) {
+	/// `held` says why REVIEW's pick has no past to clip, if it has none.
+	fn markers(&mut self, ui: &mut Ui, rect: Rect, marked: &[Marker], held: Option<&str>) {
 		let painter = ui.painter();
 		let title = kit::caps_galley(painter, "Markers", kit::display_bold(22.0), kit::TEXT, None);
 		let title_height = title.size().y;
@@ -211,7 +214,7 @@ impl Panels {
 						let size = vec2(ui.available_width(), MARKER_ROW);
 						ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
 							ui.spacing_mut().item_spacing.x = 6.0;
-							if let Some(row) = self.marker_row(ui, marker, now) {
+							if let Some(row) = self.marker_row(ui, marker, now, held) {
 								asked = Some((marker.number, row));
 							}
 						});
@@ -234,7 +237,7 @@ impl Panels {
 
 	/// One marker's row, naming the marker once its name loses focus, and
 	/// returning what else it asked for.
-	fn marker_row(&mut self, ui: &mut Ui, marker: &Marker, now: Instant) -> Option<Row> {
+	fn marker_row(&mut self, ui: &mut Ui, marker: &Marker, now: Instant, held: Option<&str>) -> Option<Row> {
 		let badge = ui
 			.painter()
 			.layout_no_wrap(marker.number.to_string(), kit::mono(11.0), kit::TEXT);
@@ -244,7 +247,6 @@ impl Panels {
 			.galley(badge_rect.center() - badge.size() / 2.0, badge, kit::TEXT);
 
 		let ago = now.saturating_duration_since(marker.at);
-		let clippable = ago < replay::WINDOW;
 		let when = ui.painter().layout_no_wrap(since(ago), kit::mono(11.0), kit::DIM);
 		// The name takes what the age and the two buttons leave.
 		let field = (ui.available_width() - when.size().x - 2.0 * (24.0 + 6.0) - 12.0).max(40.0);
@@ -276,19 +278,16 @@ impl Panels {
 		}
 		let (when_rect, _) = ui.allocate_exact_size(when.size(), Sense::hover());
 		ui.painter().galley(when_rect.min, when, kit::DIM);
-		let note = match clippable {
-			true => format!(
+		let refusal = clip_refusal(ago, held);
+		let note = refusal.clone().unwrap_or_else(|| {
+			format!(
 				"Save from {} s before it to {} s after it, as Save clip does",
 				replay::BEFORE.as_secs(),
 				replay::AFTER.as_secs()
-			),
-			false => format!(
-				"It is older than the last {} s, as far back as a clip reaches",
-				replay::WINDOW.as_secs()
-			),
-		};
+			)
+		});
 		let clip = IconButton::new(Icon::Clip, "Clip around it").small().note(Some(&note));
-		if ui.add_enabled(clippable, clip).clicked() {
+		if ui.add_enabled(refusal.is_none(), clip).clicked() {
 			asked = Some(Row::Clip);
 		}
 		let remove = IconButton::new(Icon::Close, "Remove the marker").small();
@@ -299,8 +298,9 @@ impl Panels {
 	}
 
 	/// The large picture and what to replay, the strip, the speed, and the
-	/// two actions, top to bottom in `rect`.
-	fn replays(&mut self, ui: &mut Ui, rect: Rect, shape: f32) {
+	/// two actions, top to bottom in `rect`, returning why the pick holds no
+	/// past, if it holds none.
+	fn replays(&mut self, ui: &mut Ui, rect: Rect, shape: f32) -> Option<String> {
 		let replayable = self.replayable();
 		let controls = self.controls.clone();
 		let mut replay = controls.replay.lock().unwrap();
@@ -355,6 +355,7 @@ impl Panels {
 		if let Some(action) = fired {
 			let _ = controls.fire(&action);
 		}
+		refusals.held
 	}
 
 	/// Each source with a past to replay, and whether it is sound alone.
@@ -849,6 +850,7 @@ impl Panels {
 		let mut refusals = Refusals {
 			replay: None,
 			save: None,
+			held: None,
 		};
 		let stretch = replay
 			.stretch
@@ -867,11 +869,12 @@ impl Panels {
 			.iter()
 			.any(|(_, source)| matches!(source, Source::Replay));
 		drop(state);
-		refusals.replay = held.or(stretch).or_else(|| match () {
+		refusals.replay = held.clone().or(stretch).or_else(|| match () {
 			_ if !into => Some("Add a replay source to play replays in".into()),
 			_ if sound_only && replay.speed < 1.0 => Some("Sound plays only at 100%".into()),
 			_ => None,
 		});
+		refusals.held = held;
 		refusals
 	}
 
@@ -1486,6 +1489,19 @@ fn ago(then: kio::clock::Wall) -> String {
 	}
 }
 
+/// Why a marker dropped `ago` cannot be clipped around, if it cannot: REVIEW's
+/// pick holding no past, as `held` says, or the marker older than its window.
+fn clip_refusal(ago: Duration, held: Option<&str>) -> Option<String> {
+	match held {
+		Some(held) => Some(held.to_string()),
+		None if ago >= replay::WINDOW => Some(format!(
+			"It is older than the last {} s, as far back as a clip reaches",
+			replay::WINDOW.as_secs()
+		)),
+		None => None,
+	}
+}
+
 /// How long ago a marker was dropped: "now", "12 s ago", "4 min ago",
 /// "1 h 5 min ago".
 fn since(ago: Duration) -> String {
@@ -1536,6 +1552,17 @@ mod tests {
 		assert_eq!(grip_at(16.0, 20.0, 20.0), Some(Grip::From));
 		assert_eq!(grip_at(98.0, 100.0, 106.0), Some(Grip::From));
 		assert_eq!(grip_at(104.0, 100.0, 106.0), Some(Grip::To));
+	}
+
+	/// A marker's scissors give the reason Save clip gives when the pick
+	/// holds no past, such as the program off air, before the marker's age.
+	#[test]
+	fn a_marker_is_clipped_only_while_its_past_is_held() {
+		let off_air = Some("The program keeps no past until it goes live");
+		assert_eq!(clip_refusal(Duration::from_secs(4), None), None);
+		assert_eq!(clip_refusal(Duration::from_secs(4), off_air).as_deref(), off_air);
+		assert_eq!(clip_refusal(replay::WINDOW, off_air).as_deref(), off_air);
+		assert!(clip_refusal(replay::WINDOW, None).is_some_and(|why| why.starts_with("It is older")));
 	}
 
 	/// A wide picture in a narrow room is cut at its sides, a tall one at its

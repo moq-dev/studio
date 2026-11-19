@@ -625,7 +625,8 @@ fn a_click_takes_and_the_panic_key_cuts() {
 
 /// A name typed into a marker's row on REVIEW names that marker: when
 /// another marker's name is clicked next, and when a key drops a new marker
-/// above it while it is being typed. It draws no view.
+/// above it while it is being typed. Off air, the program keeps no past, so
+/// no marker can be clipped around. It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn a_marker_is_named_where_it_is_typed() {
@@ -679,6 +680,25 @@ fn a_marker_is_named_where_it_is_typed() {
 	harness.run_steps(2);
 	assert_eq!(name(2).as_deref(), Some("Comeback"), "the typing stayed on marker 2");
 	assert_eq!(name(3), None);
+
+	// Until the strip's thread first samples the program, nothing refuses.
+	let refused = |harness: &Harness<'_, Window>| {
+		harness.get_by_label("Save clip").accesskit_node().is_disabled()
+	};
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while !refused(&harness) {
+				harness.step();
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("off air, Save clip is refused");
+	let scissors: Vec<_> = harness.get_all_by_label("Clip around it").collect();
+	assert_eq!(scissors.len(), 3);
+	assert!(
+		scissors.iter().all(|clip| clip.accesskit_node().is_disabled()),
+		"no marker is clipped around off air"
+	);
 
 	drop(harness);
 	quit(&engine, &runtime);
