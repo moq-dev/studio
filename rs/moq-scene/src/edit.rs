@@ -1388,6 +1388,9 @@ fn aligned(state: &mut Collection, edit: &Edit, renames: &mut HashMap<Id, Id>) -
 		let held = change.held(state);
 		let (befores, afters) = change.sides_mut();
 		for (item, id) in befores.into_iter().zip(held) {
+			// An item an earlier change put in place under the file's
+			// identity, before a later one named it, is the item named.
+			let id = renames.get(&id).copied().unwrap_or(id);
 			let named = *renames.entry(item.id).or_insert(id);
 			if named != id {
 				return Err(conflict(format!("`{}` is two items", item.source)));
@@ -2143,6 +2146,54 @@ mod tests {
 		assert_eq!(ids(&reloaded), [blue], "red removed, blue added back");
 		loaded.undo(&mut reloaded).unwrap();
 		assert_eq!(ids(&reloaded), [red, blue], "red back");
+	}
+
+	/// Aligning past a swap, whose first replacement puts an item in place
+	/// before the second names it, goes on to the edits before it.
+	#[test]
+	fn a_loaded_history_aligns_past_a_swap() {
+		let mut collection = collection();
+		collection.sources.insert("blue".into(), color([0, 0, 255, 255]));
+		let fill = Rect::fill(&collection.canvas);
+		let items = &mut collection.scenes[0].items;
+		items.push(Item::new("blue", fill));
+		items.push(Item::new("red", Rect { x: 1.0, ..fill }));
+		let mut history = History::new();
+		let set = |collection: &mut Collection, history: &mut History, at: usize, x: f32| {
+			let mut draft = collection.draft("Edit");
+			let mut item = collection.scenes[0].items[at].clone();
+			item.rect.y = x;
+			draft.set_item(&main(), at, item).unwrap();
+			commit(collection, history, draft, None);
+		};
+		set(&mut collection, &mut history, 2, 5.0);
+		set(&mut collection, &mut history, 1, 5.0);
+		let mut draft = collection.draft("Swap");
+		let items = &collection.scenes[0].items;
+		let (one, two) = (items[0].clone(), items[1].clone());
+		draft.set_item(&main(), 0, Item { rect: one.rect, ..two }).unwrap();
+		draft
+			.set_item(
+				&main(),
+				1,
+				Item {
+					rect: Rect { y: 9.0, ..one.rect },
+					..one
+				},
+			)
+			.unwrap();
+		commit(&mut collection, &mut history, draft, None);
+
+		let mut reloaded = Collection::from_toml(&collection.to_toml().unwrap()).unwrap();
+		let (mut loaded, _) = History::from_toml(&history.to_toml().unwrap(), &reloaded).unwrap();
+		let third = reloaded.scenes[0].items[2].id;
+		for _ in 0..3 {
+			loaded.undo(&mut reloaded).unwrap();
+		}
+		assert_eq!(
+			reloaded.scenes[0].items[2].id, third,
+			"the first edit undone keeps its item"
+		);
 	}
 
 	/// A history reloaded unchanged takes the identities of the items it
