@@ -85,20 +85,7 @@ impl Encoding {
 
 	/// Whether the encoder keeps up with `canvas` in real time, within [`PACE`].
 	pub(crate) fn keeps_up(&self, canvas: Canvas) -> bool {
-		self.keeps_up_all(canvas, 1)
-	}
-
-	/// Whether it keeps up with `encodes` pictures of `canvas` at once, such
-	/// as a show's landscape and portrait ones: each costs about a frame of
-	/// the one timed, as a turned picture has as many pixels.
-	pub(crate) fn keeps_up_all(&self, canvas: Canvas, encodes: u32) -> bool {
-		self.frame * encodes <= budget(canvas)
-	}
-
-	/// What `encodes` pictures at this bitrate send, each a broadcast with
-	/// its own audio.
-	pub(crate) fn total_of(&self, encodes: u32) -> Rate {
-		Rate::from_bps(self.total().as_bps() * u64::from(encodes))
+		self.frame <= budget(canvas)
 	}
 
 	/// How many times its [`budget`] a frame of `canvas` took, scaled to compare
@@ -141,60 +128,116 @@ async fn probe_encoders(gpu: engine::Gpu) -> Encoders {
 	let picture = Picture::new(&gpu, &CANVASES);
 	let mut probed = Vec::new();
 	for canvas in CANVASES {
-		let result = probe_encoder(&gpu, &picture, canvas)
+		let result = probe_together(&gpu, &picture, &[canvas])
 			.await
+			.map(|mut encodings| encodings.remove(0))
 			.map_err(|err| format!("{err:#}"));
 		probed.push((canvas, result));
 	}
 	probed
 }
 
-/// How `canvas` encodes on this machine, as going live checks it: the probe
-/// setup runs for each canvas it could propose.
-pub(crate) async fn probe(gpu: engine::Gpu, canvas: Canvas) -> Result<Encoding, String> {
-	let picture = Picture::new(&gpu, &[canvas]);
-	probe_encoder(&gpu, &picture, canvas)
+/// How `canvases` encode on this machine at once, as going live checks them,
+/// each timed while the others run: the pictures a show sends together, such
+/// as its landscape and portrait ones. Each is probed as setup probes a canvas,
+/// and the result follows the order given.
+///
+/// Fails when any cannot open its encoder, as a hardware encoder at its
+/// session cap cannot, since going live would not send it either.
+pub(crate) async fn probe(gpu: engine::Gpu, canvases: &[Canvas]) -> Result<Vec<Encoding>, String> {
+	let picture = Picture::new(&gpu, canvases);
+	probe_together(&gpu, &picture, canvases)
 		.await
 		.map_err(|err| format!("{err:#}"))
 }
 
-async fn probe_encoder(gpu: &engine::Gpu, picture: &Picture, canvas: Canvas) -> anyhow::Result<Encoding> {
-	use moq_video::render::export::{Exporter, Route};
+/// Whether every encode in `encodings`, one per canvas of `canvases`, keeps up
+/// with its canvas while the others run.
+pub(crate) fn keeps_up(canvases: &[Canvas], encodings: &[Encoding]) -> bool {
+	canvases
+		.iter()
+		.zip(encodings)
+		.all(|(canvas, encoding)| encoding.keeps_up(*canvas))
+}
 
-	let config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
-	let (mut exporter, config, rendition) = Exporter::new(&gpu.device, &gpu.queue, &config).await?;
-	let bitrate = rendition.bitrate.context("the encoder reports no bitrate")?;
-	let encoder = match &config.kind {
-		moq_video::encode::Kind::Named(name) => name.clone(),
-		other => format!("{other:?}"),
-	};
+/// What `encodings` send together, each a broadcast with its own audio.
+pub(crate) fn total(encodings: &[Encoding]) -> Rate {
+	Rate::from_bps(encodings.iter().map(|encoding| encoding.total().as_bps()).sum())
+}
 
-	// The program's own path: a canvas-sized texture copied through the
-	// exporter, waited on, and encoded, as its encode thread does.
-	let started = kio::clock::now();
-	let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
-		label: Some("setup burst"),
-		size: extent(canvas.width, canvas.height),
-		mip_level_count: 1,
-		sample_count: 1,
-		dimension: wgpu::TextureDimension::D2,
-		format: wgpu::TextureFormat::Rgba8Unorm,
-		usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-		view_formats: &[],
-	});
-	let mut session = moq_video::encode::Encoder::new(&config)?;
-	let period = Duration::from_secs(1) / canvas.framerate;
-	let frame = time(budget(canvas), async |index| {
-		picture.pan(gpu, &target, index);
+/// One encode being timed: the exporter the program would open for a canvas,
+/// and the texture each frame is copied into. Its encoder opens on the thread
+/// that runs it, as the program's does, since an encoder stays on one.
+struct Lane {
+	canvas: Canvas,
+	exporter: moq_video::render::export::Exporter,
+	config: moq_video::encode::Config,
+	target: wgpu::Texture,
+	encoder: String,
+	bitrate: Rate,
+}
+
+impl Lane {
+	/// Open the exporter the program would for `canvas`, which settles its
+	/// encoder; the encode session opens on the burst's first frame.
+	async fn open(gpu: &engine::Gpu, canvas: Canvas) -> anyhow::Result<Self> {
+		let config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
+		let (exporter, config, rendition) = moq_video::render::export::Exporter::new(&gpu.device, &gpu.queue, &config)
+			.await
+			.with_context(|| format!("cannot encode {}", describe(canvas)))?;
+		let bitrate = rendition.bitrate.context("the encoder reports no bitrate")?;
+		let encoder = match &config.kind {
+			moq_video::encode::Kind::Named(name) => name.clone(),
+			other => format!("{other:?}"),
+		};
+		// The program's own path: a canvas-sized texture copied through the
+		// exporter, waited on, and encoded, as its encode thread does.
+		let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+			label: Some("setup burst"),
+			size: extent(canvas.width, canvas.height),
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			format: wgpu::TextureFormat::Rgba8Unorm,
+			usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+			view_formats: &[],
+		});
+		Ok(Self {
+			canvas,
+			exporter,
+			config,
+			target,
+			encoder,
+			bitrate: Rate::from_bps(bitrate),
+		})
+	}
+
+	/// Encode frame `index` of a burst, and how long it took from `handed`,
+	/// when it went to every encode, opening the encoder into `session` on the
+	/// first. A thread that was slow to start counts against the encode.
+	fn frame(
+		&mut self,
+		session: &mut Option<moq_video::encode::Encoder>,
+		gpu: &engine::Gpu,
+		picture: &Picture,
+		index: u32,
+		handed: kio::clock::Instant,
+	) -> anyhow::Result<Duration> {
+		let session = match session {
+			Some(session) => session,
+			None => session.insert(moq_video::encode::Encoder::new(&self.config)?),
+		};
+		picture.pan(gpu, &self.target, index);
+		let period = Duration::from_secs(1) / self.canvas.framerate;
 		let timestamp = moq_net::Timestamp::try_from(period * index)?;
-		let pending = match exporter.copy(&target, timestamp)? {
+		let pending = match self.exporter.copy(&self.target, timestamp)? {
 			Some(pending) => pending,
 			// Fed back to back, as the program never feeds it, a pipelined
 			// encoder can hold every slot; drained, it gives them back.
 			None => {
 				session.flush()?;
-				exporter
-					.copy(&target, timestamp)?
+				self.exporter
+					.copy(&self.target, timestamp)?
 					.context("the encoder holds every frame")?
 			}
 		};
@@ -203,43 +246,132 @@ async fn probe_encoder(gpu: &engine::Gpu, picture: &Picture, canvas: Canvas) -> 
 		if index == BURST {
 			session.flush()?;
 		}
-		Ok(())
-	})
-	.await?;
-	tracing::info!(
-		canvas = describe(canvas),
-		encoder,
-		?frame,
-		burst = ?started.elapsed(),
-		"timed the encoder"
-	);
+		Ok(handed.elapsed())
+	}
 
-	Ok(Encoding {
-		encoder,
-		gpu: exporter.route() == Route::Gpu,
-		bitrate: Rate::from_bps(bitrate),
-		frame,
-	})
-}
-
-/// How long a frame takes through `encode`, on average over [`BURST`] frames,
-/// calling it with each index from 0 through [`BURST`].
-///
-/// Frame 0 is not timed: it is a keyframe, and the encoder's first frame.
-/// The burst stops as soon as it is over `budget` a frame in total, since its
-/// average can no longer come in under it, so a slow encoder costs no more
-/// time than a fast one.
-async fn time(budget: Duration, mut encode: impl AsyncFnMut(u32) -> anyhow::Result<()>) -> anyhow::Result<Duration> {
-	encode(0).await?;
-	let started = kio::clock::now();
-	for index in 1..=BURST {
-		encode(index).await?;
-		let elapsed = started.elapsed();
-		if elapsed > budget * BURST {
-			return Ok(elapsed / index);
+	fn finish(self, frame: Duration) -> Encoding {
+		Encoding {
+			encoder: self.encoder,
+			gpu: self.exporter.route() == moq_video::render::export::Route::Gpu,
+			bitrate: self.bitrate,
+			frame,
 		}
 	}
-	Ok(started.elapsed() / BURST)
+}
+
+/// Open an encoder for each of `canvases` and time a burst through all of them
+/// at once: each frame is handed to every encode together, one thread each, as
+/// the compositor hands the program's encode threads theirs.
+async fn probe_together(gpu: &engine::Gpu, picture: &Picture, canvases: &[Canvas]) -> anyhow::Result<Vec<Encoding>> {
+	// Every exporter settles its encoder before any is timed. Each thread opens
+	// its session on frame 0 and holds it through the burst, as the program's
+	// encode threads do, so a refused one fails the check.
+	let mut lanes = Vec::new();
+	for canvas in canvases {
+		lanes.push(Lane::open(gpu, *canvas).await?);
+	}
+	let budgets: Vec<Duration> = canvases.iter().map(|canvas| budget(*canvas)).collect();
+	let started = kio::clock::now();
+	let (frames, lanes) = std::thread::scope(|scope| {
+		// A thread the OS refuses fails the check; dropping the feeds already
+		// made ends the threads that did start, so the scope can join them.
+		let workers = lanes
+			.into_iter()
+			.map(|mut lane| {
+				let (feed, indexes) = mpsc::channel::<(u32, kio::clock::Instant)>();
+				let (done, took) = mpsc::channel();
+				let thread = std::thread::Builder::new().spawn_scoped(scope, move || {
+					let mut session = None;
+					let canvas = lane.canvas;
+					for (index, handed) in indexes {
+						let result = lane
+							.frame(&mut session, gpu, picture, index, handed)
+							.with_context(|| format!("cannot encode {}", describe(canvas)));
+						if done.send(result).is_err() {
+							break;
+						}
+					}
+					lane
+				})?;
+				Ok((feed, took, thread))
+			})
+			.collect::<std::io::Result<Vec<_>>>();
+		let workers = match workers {
+			Ok(workers) => workers,
+			Err(err) => {
+				return (
+					Err(anyhow::Error::new(err).context("cannot start an encode thread")),
+					Vec::new(),
+				);
+			}
+		};
+		let frames = time(&budgets, |index| {
+			let handed = kio::clock::now();
+			for (feed, ..) in &workers {
+				feed.send((index, handed)).context("an encode thread ended")?;
+			}
+			workers
+				.iter()
+				.map(|(_, took, _)| took.recv().context("an encode thread ended").and_then(|result| result))
+				.collect()
+		});
+		// Ends each thread, whose lane comes back for its encoder's name.
+		let lanes: Vec<Lane> = workers
+			.into_iter()
+			.map(|(feed, took, thread)| {
+				drop((feed, took));
+				thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+			})
+			.collect();
+		(frames, lanes)
+	});
+	let encodings: Vec<Encoding> = lanes
+		.into_iter()
+		.zip(frames?)
+		.map(|(lane, frame)| lane.finish(frame))
+		.collect();
+	for (canvas, encoding) in canvases.iter().zip(&encodings) {
+		tracing::info!(
+			canvas = describe(*canvas),
+			encoder = encoding.encoder,
+			frame = ?encoding.frame,
+			together = encodings.len(),
+			burst = ?started.elapsed(),
+			"timed the encoder"
+		);
+	}
+	Ok(encodings)
+}
+
+/// How long a frame of each encode takes through `encode`, on average over
+/// [`BURST`] frames, calling it with each index from 0 through [`BURST`]; it
+/// returns each encode's own time for that frame.
+///
+/// Frame 0 is not timed: it is a keyframe, and the encoder's first frame.
+/// The burst stops as soon as any encode is over its budget a frame in total,
+/// since its average can no longer come in under it, so a slow encoder costs
+/// no more time than a fast one.
+fn time(
+	budgets: &[Duration],
+	mut encode: impl FnMut(u32) -> anyhow::Result<Vec<Duration>>,
+) -> anyhow::Result<Vec<Duration>> {
+	encode(0)?;
+	let mut totals = vec![Duration::ZERO; budgets.len()];
+	for index in 1..=BURST {
+		let frames = encode(index)?;
+		anyhow::ensure!(frames.len() == totals.len(), "an encode went untimed");
+		for (total, frame) in totals.iter_mut().zip(frames) {
+			*total += frame;
+		}
+		if totals
+			.iter()
+			.zip(budgets)
+			.any(|(total, budget)| *total > *budget * BURST)
+		{
+			return Ok(totals.into_iter().map(|total| total / index).collect());
+		}
+	}
+	Ok(totals.into_iter().map(|total| total / BURST).collect())
 }
 
 /// A picture as large as the largest canvas it serves plus a burst's panning,
@@ -951,8 +1083,23 @@ mod tests {
 	#[test]
 	fn both_formats_send_the_audio_twice() {
 		let encoding = encoders(DEFAULTS)[1].1.clone().unwrap();
-		assert_eq!(encoding.total_of(1), encoding.total());
-		assert_eq!(encoding.total_of(2), Rate::from_kbps(2 * (4354 + 128)));
+		assert_eq!(total(std::slice::from_ref(&encoding)), encoding.total());
+		assert_eq!(total(&[encoding.clone(), encoding]), Rate::from_kbps(2 * (4354 + 128)));
+	}
+
+	/// Each encode keeps up with its own canvas while the others run: the
+	/// slower of two is what fails the pair.
+	#[test]
+	fn both_formats_keep_up_when_each_does() {
+		let canvases = [CANVASES[1], CANVASES[1].turned()];
+		let encoding = |millis| Encoding {
+			frame: Duration::from_millis(millis),
+			..encoders(DEFAULTS)[1].1.clone().unwrap()
+		};
+		// 30 fps leaves 25 ms a frame.
+		assert!(keeps_up(&canvases, &[encoding(20), encoding(25)]));
+		assert!(!keeps_up(&canvases, &[encoding(20), encoding(26)]));
+		assert!(!keeps_up(&canvases, &[encoding(26), encoding(20)]));
 	}
 
 	#[test]
@@ -962,44 +1109,62 @@ mod tests {
 		assert_eq!(pick(&encoders, None), CANVASES[4]);
 	}
 
-	/// Times `time` over an encoder whose frames take `first` and then `rest`
-	/// on the paused clock, with how many frames it was handed.
-	async fn burst(budget: Duration, first: Duration, rest: Duration) -> (Duration, u32) {
+	/// Times `time` over an encoder whose frames take `rest`, with how many
+	/// frames it was handed; its first takes `first`, which is not timed.
+	fn burst(budget: Duration, first: Duration, rest: Duration) -> (Duration, u32) {
 		let mut calls = 0;
-		let frame = time(budget, async |index| {
+		let frames = time(&[budget], |index| {
 			calls += 1;
-			kio::clock::sleep(if index == 0 { first } else { rest }).await;
-			Ok(())
+			Ok(vec![if index == 0 { first } else { rest }])
 		})
-		.await
 		.unwrap();
-		(frame, calls)
+		(frames[0], calls)
 	}
 
-	#[tokio::test(start_paused = true)]
-	async fn times_every_frame_but_the_first() {
+	#[test]
+	fn times_every_frame_but_the_first() {
 		let budget = Duration::from_millis(25);
-		let (frame, calls) = burst(budget, Duration::from_secs(1), Duration::from_millis(10)).await;
+		let (frame, calls) = burst(budget, Duration::from_secs(1), Duration::from_millis(10));
 		assert_eq!(frame, Duration::from_millis(10));
 		assert_eq!(calls, BURST + 1);
 	}
 
 	/// A slow encoder is cut off once it cannot average under the budget, so
 	/// it takes no longer than one that keeps up.
-	#[tokio::test(start_paused = true)]
-	async fn stops_a_burst_that_falls_behind() {
+	#[test]
+	fn stops_a_burst_that_falls_behind() {
 		let budget = Duration::from_millis(25);
-		let started = kio::clock::now();
-		let (frame, calls) = burst(budget, Duration::ZERO, Duration::from_millis(50)).await;
+		let (frame, calls) = burst(budget, Duration::ZERO, Duration::from_millis(50));
 		assert_eq!(frame, Duration::from_millis(50));
 		// Over the 375 ms the whole burst may take, at the eighth timed frame.
 		assert_eq!(calls, 9);
-		assert!(started.elapsed() <= budget * BURST + Duration::from_millis(50));
+	}
+
+	/// Each encode is timed on its own, and the burst stops once any is over
+	/// its budget.
+	#[test]
+	fn times_each_encode_of_a_pair() {
+		let budgets = [Duration::from_millis(25), Duration::from_millis(25)];
+		let frames = time(&budgets, |_| {
+			Ok(vec![Duration::from_millis(10), Duration::from_millis(20)])
+		})
+		.unwrap();
+		assert_eq!(frames, [Duration::from_millis(10), Duration::from_millis(20)]);
+
+		let mut calls = 0;
+		let frames = time(&budgets, |_| {
+			calls += 1;
+			Ok(vec![Duration::from_millis(10), Duration::from_millis(50)])
+		})
+		.unwrap();
+		assert_eq!(frames, [Duration::from_millis(10), Duration::from_millis(50)]);
+		assert_eq!(calls, 9, "stopped as the second fell behind");
 	}
 
 	/// The burst runs on a real device and encoder, through the program's own
 	/// copy path, for each canvas setup proposes and for a portrait show's,
-	/// taller than any of them, as going live checks it.
+	/// taller than any of them, as going live checks it, alone and with its
+	/// landscape picture beside it.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device and an H.264 encoder; run by just render-sw"]
 	async fn times_every_canvas() {
@@ -1008,9 +1173,17 @@ mod tests {
 			let encoding = result.unwrap_or_else(|err| panic!("{}: {err}", describe(canvas)));
 			assert!(encoding.frame > Duration::ZERO, "{}", describe(canvas));
 		}
-		let portrait = canvas(720, 1280, 30);
-		let encoding = probe(gpu, portrait).await.expect("a portrait canvas encodes");
-		assert!(encoding.frame > Duration::ZERO);
+		let landscape = canvas(1280, 720, 30);
+		let portrait = landscape.turned();
+		let alone = probe(gpu.clone(), &[portrait])
+			.await
+			.expect("a portrait canvas encodes");
+		assert_eq!(alone.len(), 1);
+		let both = probe(gpu, &[landscape, portrait]).await.expect("both formats encode");
+		assert_eq!(both.len(), 2);
+		for encoding in alone.iter().chain(&both) {
+			assert!(encoding.frame > Duration::ZERO);
+		}
 	}
 
 	#[test]
