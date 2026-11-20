@@ -12,7 +12,7 @@ use moq_video::render::Renderer;
 use crate::Error;
 use crate::arrange::cover;
 use crate::collection::{
-	Background, Canvas, Collection, Crop, Direction, Filter, Item, Layer as Place, Nested, Rect, Settled, Shape,
+	Background, Canvas, Collection, Crop, Direction, Filter, Id, Item, Layer as Place, Nested, Rect, Settled, Shape,
 	Source, Transition,
 };
 use crate::dark::{Probe, Prober};
@@ -116,15 +116,16 @@ pub struct Compositor {
 	/// How long the program scene had been on program as of the last render.
 	program_shown: Duration,
 	switch: Option<Switch>,
-	/// Each scene item keeping clear, by its scene and place in it. It
-	/// places only the landscape picture: its portrait place stays as set.
-	keepers: HashMap<(String, usize), Keeper>,
-	/// Each scene item that stopped keeping clear, by its scene and place in
-	/// it, for as long as it is there and keeps clear of nothing.
-	parked: HashMap<(String, usize), Parked>,
-	/// The item keeping clear a gesture has in hand, by its scene, place, and
-	/// source, until when, unless the gesture says so again.
-	grabbed: Option<((String, usize, String), Instant)>,
+	/// Each scene item keeping clear, by its identity. It places only the
+	/// landscape picture: its portrait place stays as set.
+	keepers: HashMap<Id, Keeper>,
+	/// The placer of each item that stopped keeping clear or left its scene,
+	/// by its identity, held where it was, so an undo that brings it back
+	/// puts it back, until [`remember`](Compositor::remember) leaves it out.
+	parked: HashMap<Id, Placer>,
+	/// The item keeping clear a gesture has in hand, until when, unless the
+	/// gesture says so again.
+	grabbed: Option<(Id, Instant)>,
 	/// Reduces the pictures under them, made with the first.
 	reducer: Option<Reducer>,
 }
@@ -193,26 +194,11 @@ impl View {
 /// A scene item keeping clear: where it goes, and its reads of the picture
 /// under it.
 struct Keeper {
-	/// The source it shows: an item showing another is another keeper.
-	source: String,
-	/// The rect the scene file gave its item, as of the last render, which
-	/// tells it from another showing the same source.
-	rect: Rect,
 	/// Whether the last render read its picture: its scene drawn and it
 	/// shown.
 	watched: bool,
 	placer: Placer,
 	look: Look,
-}
-
-/// A scene item that stopped keeping clear: where it went, held since, so an
-/// undo that turns keeping clear back on puts it back.
-struct Parked {
-	/// The source it shows.
-	source: String,
-	/// The rect the scene file gave its item, as of the last render.
-	rect: Rect,
-	placer: Placer,
 }
 
 /// A scene a render draws, as [`Compositor::watched`] finds it.
@@ -229,7 +215,7 @@ struct Reflow {
 	/// Its items where its arrangement puts them, in order.
 	arranged: Vec<Item>,
 	/// Its items as drawn, gliding to `arranged` when a slot opens or closes.
-	glide: Glide<Vec<(String, bool, Rect)>>,
+	glide: Glide<Vec<(Id, String, bool, Rect)>>,
 }
 
 /// The program and the scenes a transition draws whole on its way, as of the
@@ -669,93 +655,76 @@ impl Compositor {
 		self.program_shown
 	}
 
-	/// Where the `index`th item of the scene called `scene`, one showing
-	/// `source` that keeps clear, was drawn as of the last
-	/// [`render`](Self::render), and why: `None` for any other item, or before
-	/// a render placed it.
-	pub fn placement(&self, scene: &str, index: usize, source: &str) -> Option<&Placement> {
-		let keeper = self.keepers.get(&(scene.to_string(), index))?;
-		(keeper.source == source).then(|| keeper.placer.placement())
+	/// Where the scene item `id`, one that keeps clear, was drawn as of the
+	/// last [`render`](Self::render), and why: `None` for any other item, or
+	/// before a render placed it.
+	pub fn placement(&self, id: Id) -> Option<&Placement> {
+		Some(self.keepers.get(&id)?.placer.placement())
 	}
 
-	/// Note the item a gesture has in hand as of `now`, such as a drag, as
-	/// its scene, index, and source, or `None` once let go: an item keeping
-	/// clear does not choose a place while in hand. Each frame of the gesture
-	/// says so again; one that stops saying so, as when the window is hidden
-	/// mid-drag, lets go after [`GRAB`].
-	pub fn grab(&mut self, item: Option<(&str, usize, &str)>, now: Instant) {
-		self.grabbed = item.map(|(scene, index, source)| {
-			let key = (scene.to_string(), index, source.to_string());
-			(key, now.saturating_add(GRAB))
-		});
+	/// Note the item a gesture has in hand as of `now`, such as a drag, or
+	/// `None` once let go: an item keeping clear does not choose a place
+	/// while in hand. Each frame of the gesture says so again; one that stops
+	/// saying so, as when the window is hidden mid-drag, lets go after
+	/// [`GRAB`].
+	pub fn grab(&mut self, item: Option<Id>, now: Instant) {
+		self.grabbed = item.map(|id| (id, now.saturating_add(GRAB)));
 	}
 
-	/// Note that the `index`th item of the scene called `scene`, one showing
-	/// `source` that keeps clear, was moved by hand: it stays where the scene
-	/// file puts it until the content under it changes. A resize is no move.
-	pub fn hold(&mut self, scene: &str, index: usize, source: &str) {
-		if let Some(keeper) = self.keepers.get_mut(&(scene.to_string(), index))
-			&& keeper.source == source
-		{
+	/// Note that the scene item `id`, one that keeps clear, was moved by
+	/// hand: it stays where the scene file puts it until the content under
+	/// it changes. A resize is no move.
+	pub fn hold(&mut self, id: Id) {
+		if let Some(keeper) = self.keepers.get_mut(&id) {
 			keeper.placer.hold();
 		}
 	}
 
-	/// Note that a redo or a reload saved the `index`th item of the scene
-	/// called `scene`, one showing `source` that keeps clear, at `saved`: it
-	/// holds there, as [`hold`](Self::hold) says.
-	pub fn redone(&mut self, scene: &str, index: usize, source: &str, saved: Rect) {
-		if let Some(keeper) = self.unpark(scene, index, source, saved) {
+	/// Note that a redo or a reload saved the scene item `id`, one that
+	/// keeps clear, at `saved`: it holds there, as [`hold`](Self::hold)
+	/// says.
+	pub fn redone(&mut self, id: Id, saved: Rect) {
+		if let Some(keeper) = self.unpark(id) {
 			keeper.placer.redone(saved);
 		}
 	}
 
-	/// Note that an undo saved the `index`th item of the scene called
-	/// `scene`, one showing `source` that keeps clear, at `saved` as of
-	/// `now`: back where it was saved before the move by hand that held it,
-	/// or before keeping clear was switched off, it goes back to where it was
-	/// then, such as the slot it had glided to. Anywhere else, it holds, as
-	/// [`hold`](Self::hold) says.
-	pub fn undone(&mut self, scene: &str, index: usize, source: &str, saved: Rect, now: Instant) {
-		if let Some(keeper) = self.unpark(scene, index, source, saved) {
+	/// Note that an undo saved the scene item `id`, one that keeps clear, at
+	/// `saved` as of `now`: back where it was saved before the move by hand
+	/// that held it, or before it stopped keeping clear or left its scene,
+	/// it goes back to where it was then, such as the slot it had glided to.
+	/// Anywhere else, it holds, as [`hold`](Self::hold) says.
+	pub fn undone(&mut self, id: Id, saved: Rect, now: Instant) {
+		if let Some(keeper) = self.unpark(id) {
 			keeper.placer.undone(saved, now);
 		}
 	}
 
-	/// The keeper of the `index`th item of the scene called `scene`, one
-	/// showing `source` saved at `saved`, taking it back from where it was
-	/// parked when an undo or a redo switches keeping clear back on: under
-	/// that item, or under the only other of the scene's items parked
-	/// showing `source`, as an undo of a swap into a slot moves it.
-	fn unpark(&mut self, scene: &str, index: usize, source: &str, saved: Rect) -> Option<&mut Keeper> {
-		let key = (scene.to_string(), index);
-		let found = match self.parked.get(&key) {
-			Some(parked) if parked.source == source => Some(key.clone()),
-			_ => {
-				let mut others = self
-					.parked
-					.iter()
-					.filter(|((at, _), parked)| at == scene && parked.source == source);
-				match (others.next(), others.next()) {
-					(Some((at, _)), None) => Some(at.clone()),
-					_ => None,
-				}
-			}
-		};
-		if !self.keepers.contains_key(&key)
-			&& let Some(found) = found
+	/// The keeper of the item `id`, taken back from where it was parked when
+	/// an undo or a redo brings it back keeping clear.
+	fn unpark(&mut self, id: Id) -> Option<&mut Keeper> {
+		if !self.keepers.contains_key(&id)
+			&& let Some(placer) = self.parked.remove(&id)
 		{
-			let parked = self.parked.remove(&found).expect("found above");
 			let keeper = Keeper {
-				source: parked.source,
-				rect: saved,
 				watched: true,
-				placer: parked.placer,
+				placer,
 				look: Look::new(&self.device, &self.queue),
 			};
-			self.keepers.insert(key.clone(), keeper);
+			self.keepers.insert(id, keeper);
 		}
-		self.keepers.get_mut(&key).filter(|keeper| keeper.source == source)
+		self.keepers.get_mut(&id)
+	}
+
+	/// Keep the parked placers only of the items among `ids`, those an undo
+	/// or a redo can still bring back, such as the ones the history holds,
+	/// and forget the rest.
+	pub fn remember(&mut self, ids: impl IntoIterator<Item = Id>) {
+		if self.parked.is_empty() {
+			return;
+		}
+		let ids: HashSet<Id> = ids.into_iter().collect();
+		self.parked.retain(|id, _| ids.contains(id));
 	}
 
 	/// Keep the scenes `outputs` names as outputs from now on, each with
@@ -959,17 +928,6 @@ impl Compositor {
 		self.view.rename(renames);
 		if let Some(portrait) = &mut self.portrait {
 			portrait.rename(renames);
-		}
-		// Each scene keeps where its items keeping clear went, so two
-		// swapping names do not take each other's.
-		self.keepers = renamed(std::mem::take(&mut self.keepers), renames, |(scene, _)| scene);
-		self.parked = renamed(std::mem::take(&mut self.parked), renames, |(scene, _)| scene);
-		if let Some(((scene, _, _), _)) = &mut self.grabbed {
-			match renames.get(scene.as_str()) {
-				Some(Some(to)) => *scene = to.clone(),
-				Some(None) => self.grabbed = None,
-				None => {}
-			}
 		}
 	}
 
@@ -1226,8 +1184,8 @@ impl Compositor {
 		self.effects.submit(frame);
 		if !reads.is_empty() {
 			let reducer = self.reducer.get_or_insert_with(|| Reducer::new(&self.device));
-			for key in reads {
-				let keeper = self.keepers.get_mut(&key).expect("read above");
+			for id in reads {
+				let keeper = self.keepers.get_mut(&id).expect("read above");
 				keeper.look.start(reducer, now);
 			}
 		}
@@ -1284,9 +1242,8 @@ impl Compositor {
 
 	/// `collection` with each scene item keeping clear where its placer puts
 	/// it at `now`, from what the reads of the picture under it that came
-	/// back show. A keeper whose item stopped keeping clear is parked, held
-	/// where it was, until the item keeps clear again or is gone; one whose
-	/// item is gone is forgotten.
+	/// back show. The placer of an item that stopped keeping clear or left
+	/// its scene is parked, held where it was.
 	fn place<'a>(
 		&mut self,
 		collection: &'a Collection,
@@ -1294,26 +1251,7 @@ impl Compositor {
 		now: Instant,
 	) -> Cow<'a, Collection> {
 		let mut staged = Cow::Borrowed(collection);
-		let keeping = |item: &Item| item.keep_clear.is_some();
-		let (mut kept, left) = follow(std::mem::take(&mut self.keepers), collection, keeping, |keeper| {
-			(keeper.source.as_str(), keeper.rect)
-		});
-		let mut parked = std::mem::take(&mut self.parked);
-		parked.extend(left.into_iter().map(|(key, mut keeper)| {
-			keeper.placer.hold();
-			let parked = Parked {
-				source: keeper.source,
-				rect: keeper.rect,
-				placer: keeper.placer,
-			};
-			(key, parked)
-		}));
-		(self.parked, _) = follow(
-			parked,
-			collection,
-			|item| !keeping(item),
-			|parked| (parked.source.as_str(), parked.rect),
-		);
+		let mut left = std::mem::take(&mut self.keepers);
 		let mut keepers = HashMap::new();
 		for (number, scene) in collection.scenes.iter().enumerate() {
 			let canvas = scene.canvas(collection.canvas);
@@ -1321,13 +1259,14 @@ impl Compositor {
 				if item.keep_clear.is_none() {
 					continue;
 				}
-				let key = (scene.name.clone(), index);
-				let mut keeper = kept.remove(&key).unwrap_or_else(|| Keeper {
-					source: item.source.clone(),
-					rect: item.rect,
-					watched: false,
-					placer: Placer::new(now),
-					look: Look::new(&self.device, &self.queue),
+				let mut keeper = left.remove(&item.id).unwrap_or_else(|| {
+					// Switched on by hand, it chooses afresh.
+					self.parked.remove(&item.id);
+					Keeper {
+						watched: false,
+						placer: Placer::new(now),
+						look: Look::new(&self.device, &self.queue),
+					}
 				});
 				// A scene that went on again shows new content, which the
 				// reads of what it showed before say nothing of.
@@ -1346,23 +1285,19 @@ impl Compositor {
 					),
 					None => {}
 				}
-				keeper.rect = item.rect;
 				keeper.placer.watch(keeper.watched, now);
-				let grabbed = self.grabbed.as_ref().is_some_and(|((at, number, source), until)| {
-					*at == scene.name && *number == index && *source == item.source && now < *until
-				});
+				let grabbed = self.grabbed.is_some_and(|(id, until)| id == item.id && now < until);
 				keeper.placer.grab(grabbed);
 				let rect = keeper.placer.place(item, canvas, now);
 				if rect != item.rect {
 					staged.to_mut().scenes[number].items[index].rect = rect;
 				}
-				keepers.insert(key, keeper);
+				keepers.insert(item.id, keeper);
 			}
-			for (index, item) in scene.items.iter().enumerate() {
-				if let Some(parked) = self.parked.get_mut(&(scene.name.clone(), index)) {
-					parked.rect = item.rect;
-				}
-			}
+		}
+		for (id, mut keeper) in left {
+			keeper.placer.hold();
+			self.parked.insert(id, keeper.placer);
 		}
 		self.keepers = keepers;
 		staged
@@ -1904,7 +1839,7 @@ impl Pass<'_, '_> {
 		outputs: &[(On, Target)],
 		thumbnails: &[(Shows, Duration, Target)],
 		keeping: Option<Keeping>,
-	) -> Vec<(String, usize)> {
+	) -> Vec<Id> {
 		let (landscape, landscape_program) = landscape.unzip();
 		let pictures = Pictures { collection, landscape };
 		let (preview, program, switch) = (self.preview, self.program, self.switch);
@@ -2061,41 +1996,35 @@ impl Pass<'_, '_> {
 		let Some(Keeping { keepers, watched, now }) = keeping else {
 			return reads;
 		};
-		for ((scene, index), keeper) in keepers {
+		for keeper in keepers.values_mut() {
 			keeper.watched = false;
-			let Some(&Watched { since, nested }) = watched.get(scene) else {
+		}
+		for scene in &collection.scenes {
+			let Some(&Watched { since, nested }) = watched.get(&scene.name) else {
 				continue;
 			};
-			let Some(shown) = collection.scene(scene) else { continue };
 			// While its slots glide, a scene draws only its visible items, in
-			// the order they stack, so one keeping clear is found by what it
-			// shows and where it was placed, nearest its place in the file.
-			let rect = keeper.placer.placement().rect;
-			let mine = |item: &Item| item.keep_clear.is_some() && item.source == keeper.source && item.rect == rect;
-			let at = shown
-				.items
-				.iter()
-				.enumerate()
-				.filter(|(_, item)| mine(item))
-				.min_by_key(|(at, _)| at.abs_diff(*index))
-				.map(|(at, _)| at);
-			let Some(at) = at.filter(|&at| shown.items[at].visible) else {
-				continue;
-			};
-			keeper.watched = true;
-			if !keeper.look.due(now) {
-				continue;
+			// the order they stack, so an item keeping clear is found by its
+			// identity.
+			for (at, item) in scene.items.iter().enumerate() {
+				let Some(keeper) = keepers.get_mut(&item.id).filter(|_| item.visible) else {
+					continue;
+				};
+				keeper.watched = true;
+				if !keeper.look.due(now) {
+					continue;
+				}
+				let canvas = canvas_of(Some(&scene.name));
+				let target = keeper.look.target(draw.effects, canvas);
+				draw.size = canvas;
+				// What a scene source draws starts transparent, as its nest does.
+				match nested {
+					true => draw.frame.target(&target.picture, canvas, wgpu::Color::TRANSPARENT),
+					false => draw.target(&target),
+				}
+				draw.under(&target, Place::scene(scene.name.as_str()), at, since);
+				reads.push(item.id);
 			}
-			let canvas = canvas_of(Some(scene));
-			let target = keeper.look.target(draw.effects, canvas);
-			draw.size = canvas;
-			// What a scene source draws starts transparent, as its nest does.
-			match nested {
-				true => draw.frame.target(&target.picture, canvas, wgpu::Color::TRANSPARENT),
-				false => draw.target(&target),
-			}
-			draw.under(&target, Place::scene(scene.as_str()), at, since);
-			reads.push((scene.clone(), *index));
 		}
 		reads
 	}
@@ -2104,7 +2033,7 @@ impl Pass<'_, '_> {
 /// The items keeping clear whose pictures a [`Pass`] reads, and each scene
 /// the render draws, as [`Compositor::watched`] finds them, as of `now`.
 struct Keeping<'a> {
-	keepers: &'a mut HashMap<(String, usize), Keeper>,
+	keepers: &'a mut HashMap<Id, Keeper>,
 	watched: &'a HashMap<String, Watched>,
 	now: Instant,
 }
@@ -2149,11 +2078,12 @@ fn reflow<'a>(
 			// dragged follows the pointer.
 			glide: Glide::new(REFLOW, |item| item.slot.is_some()),
 		});
-		// Only the slots start a glide: what each shows, whether it is
-		// open, and where.
+		// Only the slots start a glide: which item each holds, what it
+		// shows, whether it is open, and where, so two showing one source
+		// that swap places glide too.
 		let slotted = arranged.iter().filter(|item| item.slot.is_some());
 		let key = slotted
-			.map(|item| (item.source.clone(), item.visible, item.rect))
+			.map(|item| (item.id, item.source.clone(), item.visible, item.rect))
 			.collect();
 		placed.push((index, reflow.glide.show(key, &arranged, now).to_vec()));
 		reflow.arranged = arranged;
@@ -3109,80 +3039,6 @@ impl Target {
 	}
 }
 
-/// `map` with the scene each key names, as `scene` finds it, renamed as
-/// `renames` says, dropping those of scenes it removes.
-fn renamed<K: Eq + std::hash::Hash, V>(
-	map: HashMap<K, V>,
-	renames: &BTreeMap<String, Option<String>>,
-	scene: for<'k> fn(&'k mut K) -> &'k mut String,
-) -> HashMap<K, V> {
-	map.into_iter()
-		.filter_map(|(mut key, value)| {
-			let name = scene(&mut key);
-			match renames.get(name.as_str()) {
-				Some(Some(to)) => *name = to.clone(),
-				Some(None) => return None,
-				None => {}
-			}
-			Some((key, value))
-		})
-		.collect()
-}
-
-/// Each of something by the scene and place of the item it is for.
-type Placed<T> = HashMap<(String, usize), T>;
-
-/// `old`, the keepers, each under where its item that `keeps` now is, so it
-/// goes on from where it was placed, and the rest. A keeper shows the same
-/// source; of those, it is first the one in the same scene saved at the same
-/// rect, at the same index or the nearest, as a layer added or removed under
-/// it shifts it; then one in the same scene at the same index or the
-/// nearest, as an edit to its rect leaves it; then the same in a scene no
-/// longer there, as a rename leaves it.
-fn follow<T>(
-	mut old: Placed<T>,
-	collection: &Collection,
-	keeps: impl Fn(&Item) -> bool,
-	shows: impl Fn(&T) -> (&str, Rect),
-) -> (Placed<T>, Placed<T>) {
-	let mut kept = HashMap::new();
-	if old.is_empty() {
-		return (kept, old);
-	}
-	let mut missing: Vec<((String, usize), &Item)> = Vec::new();
-	for scene in &collection.scenes {
-		for (index, item) in scene.items.iter().enumerate() {
-			if keeps(item) {
-				missing.push(((scene.name.clone(), index), item));
-			}
-		}
-	}
-	let gone = |scene: &str| collection.scene(scene).is_none();
-	for (same_scene, same_rect) in [(true, true), (true, false), (false, true), (false, false)] {
-		missing.retain(|(key, item)| {
-			let found = old
-				.iter()
-				.filter(|((scene, _), keeper)| {
-					let (source, rect) = shows(keeper);
-					source == item.source
-						&& (!same_rect || rect == item.rect)
-						&& match same_scene {
-							true => *scene == key.0,
-							false => gone(scene),
-						}
-				})
-				.map(|(old_key, _)| old_key)
-				.min_by_key(|(_, index)| index.abs_diff(key.1))
-				.cloned();
-			let Some(found) = found else { return true };
-			let keeper = old.remove(&found).expect("found above");
-			kept.insert(key.clone(), keeper);
-			false
-		});
-	}
-	(kept, old)
-}
-
 #[cfg(test)]
 mod tests {
 	use std::time::Duration;
@@ -3428,6 +3284,7 @@ mod tests {
 			studio.compositor.set_preview(Some("busy".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			let camera = studio.collection.scenes[0].items.len() - 1;
+			let id = studio.collection.scenes[0].items[camera].id;
 			let block = camera - 1;
 			let saved = studio.collection.scenes[0].items[camera].rect;
 			let start = Instant::now();
@@ -3437,7 +3294,7 @@ mod tests {
 				studio.collection.scenes[0].items[block].rect.x = 240.0 + 6.0 * (frame % 7) as f32;
 				studio.render(now);
 				studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-				let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+				let placement = studio.compositor.placement(id).unwrap();
 				if placement.slot.is_some() {
 					moved = Some(now);
 					break;
@@ -3450,7 +3307,7 @@ mod tests {
 				moved.saturating_duration_since(start) >= crate::place::SETTLE,
 				"it looks before it moves"
 			);
-			let placement = studio.compositor.placement("busy", camera, "camera").unwrap().clone();
+			let placement = studio.compositor.placement(id).unwrap().clone();
 			assert_eq!(placement.slot, Some(crate::place::Slot::TopLeft));
 			let left = placement.left.unwrap();
 			assert_eq!(left.rect, saved);
@@ -3464,13 +3321,13 @@ mod tests {
 
 			let glide = crate::KeepClear::default().glide;
 			studio.render(moved.saturating_add(glide / 2));
-			let half = studio.compositor.placement("busy", camera, "camera").unwrap().rect;
+			let half = studio.compositor.placement(id).unwrap().rect;
 			assert!(half.x < saved.x && half.x > 9.0, "on its way: {half:?}");
 			studio.render(moved.saturating_add(glide));
 			let to = crate::place::Slot::TopLeft
 				.rect(64.0, 64.0, studio.collection.canvas)
 				.unwrap();
-			assert_eq!(studio.compositor.placement("busy", camera, "camera").unwrap().rect, to);
+			assert_eq!(studio.compositor.placement(id).unwrap().rect, to);
 			let program = studio.program();
 			assert_eq!(texel(&program, 320, 41, 41), BLUE, "the camera where it went");
 			assert_eq!(texel(&program, 320, 279, 139), [255; 4], "the block uncovered");
@@ -3485,76 +3342,76 @@ mod tests {
 			let camera = camera + 1;
 			let after = moved.saturating_add(glide * 2);
 			studio.render(after);
-			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			let placement = studio.compositor.placement(id).unwrap();
 			assert_eq!(placement.rect, to, "it goes on from where it was placed");
 			assert_eq!(placement.slot, Some(crate::place::Slot::TopLeft));
 
 			// Switched off, as the inspector does, holding it, and the switch
 			// undone before the next render: it is still in its slot.
-			studio.compositor.hold("busy", camera, "camera");
+			studio.compositor.hold(id);
 			let item = &mut studio.collection.scenes[0].items[camera];
 			let keep = item.keep_clear.take();
 			item.rect = to;
 			let item = &mut studio.collection.scenes[0].items[camera];
 			item.keep_clear = keep;
 			item.rect = saved;
-			studio.compositor.undone("busy", camera, "camera", saved, after);
+			studio.compositor.undone(id, saved, after);
 			let after = after.saturating_add(Duration::from_millis(100));
 			studio.render(after);
-			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			let placement = studio.compositor.placement(id).unwrap();
 			assert_eq!((placement.rect, placement.held), (to, false), "undone before it drew");
 
 			// Switched off and drawn so, it stays where it is drawn; an undo of
 			// that puts it back in its slot, keeping clear.
-			studio.compositor.hold("busy", camera, "camera");
+			studio.compositor.hold(id);
 			let item = &mut studio.collection.scenes[0].items[camera];
 			let keep = item.keep_clear.take();
 			item.rect = to;
 			let after = after.saturating_add(Duration::from_millis(100));
 			studio.render(after);
-			assert!(studio.compositor.placement("busy", camera, "camera").is_none());
+			assert!(studio.compositor.placement(id).is_none());
 			let item = &mut studio.collection.scenes[0].items[camera];
 			item.keep_clear = keep;
 			item.rect = saved;
-			studio.compositor.undone("busy", camera, "camera", saved, after);
+			studio.compositor.undone(id, saved, after);
 			let after = after.saturating_add(Duration::from_millis(100));
 			studio.render(after);
-			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			let placement = studio.compositor.placement(id).unwrap();
 			assert_eq!(placement.rect, to, "back where it was drawn");
 			assert_eq!(placement.slot, Some(crate::place::Slot::TopLeft));
 			assert!(!placement.held);
 
 			// Moved by hand, it stays where the scene file puts it.
-			studio.compositor.hold("busy", camera, "camera");
+			studio.compositor.hold(id);
 			let dragged = Rect { x: 200.0, ..saved };
 			studio.collection.scenes[0].items[camera].rect = dragged;
 			studio.render(after.saturating_add(Duration::from_millis(100)));
-			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			let placement = studio.compositor.placement(id).unwrap();
 			assert!(placement.held);
 			assert_eq!(placement.rect, dragged);
 
 			// Switched off where it is held, which leaves its rect as it is, and
 			// that undone: it is still held.
 			let after = after.saturating_add(Duration::from_millis(200));
-			studio.compositor.hold("busy", camera, "camera");
+			studio.compositor.hold(id);
 			studio.collection.scenes[0].items[camera].keep_clear = None;
 			studio.render(after);
 			studio.collection.scenes[0].items[camera].keep_clear = keep;
-			studio.compositor.undone("busy", camera, "camera", dragged, after);
+			studio.compositor.undone(id, dragged, after);
 			let after = after.saturating_add(Duration::from_millis(100));
 			studio.render(after);
-			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			let placement = studio.compositor.placement(id).unwrap();
 			assert_eq!((placement.rect, placement.held), (dragged, true), "still held");
 
 			// Switched off and drawn so, then back on by a redo: it holds.
 			studio.collection.scenes[0].items[camera].keep_clear = None;
 			let after = after.saturating_add(Duration::from_millis(100));
 			studio.render(after);
-			assert!(studio.compositor.placement("busy", camera, "camera").is_none());
+			assert!(studio.compositor.placement(id).is_none());
 			studio.collection.scenes[0].items[camera].keep_clear = keep;
-			studio.compositor.redone("busy", camera, "camera", dragged);
+			studio.compositor.redone(id, dragged);
 			studio.render(after.saturating_add(Duration::from_millis(100)));
-			let placement = studio.compositor.placement("busy", camera, "camera").unwrap();
+			let placement = studio.compositor.placement(id).unwrap();
 			assert_eq!((placement.rect, placement.held), (dragged, true), "a redo holds it");
 		})
 		.await;
@@ -3575,6 +3432,7 @@ mod tests {
 			studio.compositor.set_preview(Some("busy".into()));
 			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
 			let camera = studio.collection.scenes[0].items.len() - 1;
+			let id = studio.collection.scenes[0].items[camera].id;
 			let block = camera - 1;
 			let mut now = Instant::now();
 			let mut moved = None;
@@ -3582,13 +3440,7 @@ mod tests {
 				studio.collection.scenes[0].items[block].rect.x = 240.0 + 6.0 * (frame % 7) as f32;
 				studio.render(now);
 				studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-				if studio
-					.compositor
-					.placement("busy", camera, "camera")
-					.unwrap()
-					.slot
-					.is_some()
-				{
+				if studio.compositor.placement(id).unwrap().slot.is_some() {
 					moved = Some(now);
 					break;
 				}
@@ -3610,78 +3462,117 @@ mod tests {
 		.await;
 	}
 
-	/// Each scene's keepers follow a rename, so two scenes swapping names
-	/// keep their own, and a removed scene's are dropped.
-	#[test]
-	fn keepers_follow_a_rename() {
-		let key = |scene: &str, index| (scene.to_string(), index);
-		let keepers = HashMap::from([(key("a", 0), "a's"), (key("b", 0), "b's"), (key("c", 1), "c's")]);
-		let renames = BTreeMap::from([
-			("a".to_string(), Some("b".to_string())),
-			("b".to_string(), Some("a".to_string())),
-			("c".to_string(), None),
-		]);
-		let keepers = renamed(keepers, &renames, |(scene, _)| scene);
-		assert_eq!(keepers, HashMap::from([(key("b", 0), "a's"), (key("a", 0), "b's")]));
-	}
+	/// Two cameras keeping clear of one source at one rect, as Duplicate
+	/// makes them, keep their own placers by identity: one in its slot and
+	/// one held by hand stay so as a layer is added under both and as they
+	/// swap places. The one in its slot, removed or kept always on top and
+	/// then put back by an undo, goes back to its slot, and the other is
+	/// still held.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn duplicates_keep_their_own_placers() {
+		local(async {
+			let mut collection = busy();
+			let items = &mut collection.scenes[0].items;
+			let copy = Item {
+				id: Id::fresh(),
+				..items.last().unwrap().clone()
+			};
+			items.push(copy);
+			let mut studio = Studio::new(collection).await;
+			studio.compositor.set_preview(Some("busy".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			let items = &studio.collection.scenes[0].items;
+			// The one under the other sees the block move and leaves it.
+			let (slotted, held) = (items[items.len() - 2].id, items[items.len() - 1].id);
+			let block = items.len() - 3;
+			let saved = items[block + 1].rect;
+			let mut now = Instant::now();
+			for frame in 0..40u32 {
+				studio.collection.scenes[0].items[block].rect.x = 240.0 + 6.0 * (frame % 7) as f32;
+				studio.render(now);
+				studio.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+				now = now.saturating_add(Duration::from_millis(100));
+				if studio.compositor.placement(slotted).unwrap().slot.is_some() {
+					break;
+				}
+			}
+			now = now.saturating_add(crate::KeepClear::default().glide);
+			studio.render(now);
+			let slot = crate::place::Slot::TopLeft;
+			let corner = slot.rect(64.0, 64.0, studio.collection.canvas).unwrap();
+			studio.compositor.hold(held);
+			let tick = Duration::from_millis(100);
+			let step = |studio: &mut Studio, now: Instant, why: &str| {
+				studio.render(now);
+				let placement = studio.compositor.placement(held).unwrap();
+				assert_eq!(
+					(placement.rect, placement.held),
+					(saved, true),
+					"{why}: one held by hand"
+				);
+				let placement = studio.compositor.placement(slotted).unwrap();
+				assert_eq!(
+					(placement.rect, placement.slot, placement.held),
+					(corner, Some(slot), false),
+					"{why}: the other in its slot"
+				);
+			};
+			now = now.saturating_add(tick);
+			step(&mut studio, now, "held");
 
-	/// Two layers keeping clear of the same camera keep their own keepers as
-	/// a layer added under both shifts them, as an edit to one's rect, and as
-	/// their scene is renamed.
-	#[test]
-	fn keepers_follow_their_items() {
-		let rect = |x| Rect {
-			x,
-			y: 0.0,
-			width: 10.0,
-			height: 10.0,
-		};
-		let keeping = |x| Item {
-			keep_clear: Some(crate::KeepClear::default()),
-			..Item::new("camera", rect(x))
-		};
-		let mut collection = Collection::new();
-		collection.scenes = vec![Scene {
-			items: vec![keeping(0.0), keeping(50.0)],
-			..Scene::new("main")
-		}];
-		let named = |name: &str, index| (name.to_string(), index);
-		fn shows<'a>(keeper: &'a (String, Rect, &'static str)) -> (&'a str, Rect) {
-			(keeper.0.as_str(), keeper.1)
-		}
-		let keeping_clear = |item: &Item| item.keep_clear.is_some();
-		let mut keepers = HashMap::from([
-			(named("main", 0), ("camera".to_string(), rect(0.0), "first")),
-			(named("main", 1), ("camera".to_string(), rect(50.0), "second")),
-		]);
-		let which = |keepers: &HashMap<(String, usize), (String, Rect, &'static str)>, scene, index| {
-			keepers.get(&named(scene, index)).map(|keeper| keeper.2)
-		};
+			let added = Item {
+				visible: false,
+				..Item::new("black", Rect::fill(&studio.collection.canvas))
+			};
+			studio.collection.scenes[0].items.insert(0, added);
+			now = now.saturating_add(tick);
+			step(&mut studio, now, "a layer added under both");
 
-		collection.scenes[0].items.insert(0, Item::new("camera", rect(90.0)));
-		keepers = follow(keepers, &collection, keeping_clear, shows).0;
-		assert_eq!(which(&keepers, "main", 1), Some("first"));
-		assert_eq!(which(&keepers, "main", 2), Some("second"));
+			let items = &mut studio.collection.scenes[0].items;
+			let last = items.len() - 1;
+			items.swap(last - 1, last);
+			now = now.saturating_add(tick);
+			step(&mut studio, now, "swapped");
 
-		// Moved, the second still has its own.
-		collection.scenes[0].items[2].rect = rect(70.0);
-		keepers = follow(keepers, &collection, keeping_clear, shows).0;
-		assert_eq!(which(&keepers, "main", 1), Some("first"));
-		assert_eq!(which(&keepers, "main", 2), Some("second"));
-		keepers.get_mut(&named("main", 2)).unwrap().1 = rect(70.0);
+			// Removed and drawn so, its placer is parked; the undo brings it
+			// back to its slot.
+			let removed = studio.collection.scenes[0].items.remove(last);
+			now = now.saturating_add(tick);
+			studio.render(now);
+			assert!(studio.compositor.placement(slotted).is_none());
+			studio.collection.scenes[0].items.insert(last, removed);
+			studio.compositor.undone(slotted, saved, now);
+			now = now.saturating_add(tick);
+			step(&mut studio, now, "removed and put back");
 
-		collection.scenes[0].name = "renamed".into();
-		keepers = follow(keepers, &collection, keeping_clear, shows).0;
-		assert_eq!(which(&keepers, "renamed", 1), Some("first"));
-		assert_eq!(which(&keepers, "renamed", 2), Some("second"));
+			// Kept always on top the same way.
+			let moved = studio.collection.scenes[0].items.remove(last);
+			studio.collection.top.push(Item {
+				keep_clear: None,
+				..moved.clone()
+			});
+			now = now.saturating_add(tick);
+			studio.render(now);
+			assert!(studio.compositor.placement(slotted).is_none());
+			studio.collection.top.clear();
+			studio.collection.scenes[0].items.insert(last, moved);
+			studio.compositor.undone(slotted, saved, now);
+			now = now.saturating_add(tick);
+			step(&mut studio, now, "kept on top and put back");
 
-		// One that stops keeping clear has no keeper; its is left over.
-		collection.scenes[0].items[1].keep_clear = None;
-		let left;
-		(keepers, left) = follow(keepers, &collection, keeping_clear, shows);
-		assert_eq!(keepers.len(), 1);
-		assert_eq!(which(&keepers, "renamed", 2), Some("second"));
-		assert_eq!(which(&left, "renamed", 1), Some("first"));
+			// Once no undo can bring it back, a parked placer is forgotten.
+			let moved = studio.collection.scenes[0].items.remove(last);
+			now = now.saturating_add(tick);
+			studio.render(now);
+			studio.compositor.remember([held]);
+			studio.collection.scenes[0].items.insert(last, moved);
+			studio.compositor.undone(slotted, saved, now);
+			studio.render(now.saturating_add(tick));
+			let placement = studio.compositor.placement(slotted).unwrap();
+			assert_eq!((placement.rect, placement.slot), (saved, None), "it starts over");
+		})
+		.await;
 	}
 
 	/// A source published independently is left out of the program and drawn
@@ -4634,6 +4525,42 @@ mod tests {
 		.await;
 	}
 
+	/// Two tiles showing one source that swap places each glide from where
+	/// it was, though the slots show the same source where they did.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn duplicate_tiles_swapping_places_glide() {
+		local(async {
+			let mut collection = slotted();
+			collection.scenes[0].items[2].source = "blue".into();
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.render(start);
+			let before = studio.compositor.arranged(Format::Landscape, "slots").unwrap().to_vec();
+			assert_ne!(before[1].rect, before[2].rect, "the tiles are apart");
+
+			studio.collection.scenes[0].items.swap(1, 2);
+			studio.render(start);
+			studio.render(start.saturating_add(REFLOW / 2));
+			let placed = studio.compositor.placed(Format::Landscape, "slots").unwrap().to_vec();
+			let halfway = |from: f32, to: f32| (from + to) / 2.0;
+			for (was, now) in [(&before[1], &before[2]), (&before[2], &before[1])] {
+				let item = placed
+					.iter()
+					.find(|item| item.id == was.id)
+					.expect("each tile is drawn");
+				let (x, y) = (halfway(was.rect.x, now.rect.x), halfway(was.rect.y, now.rect.y));
+				assert!(
+					(item.rect.x - x).abs() < 0.01 && (item.rect.y - y).abs() < 0.01,
+					"each tile is halfway from where it was: {:?}, not ({x}, {y})",
+					item.rect
+				);
+			}
+		})
+		.await;
+	}
+
 	/// Two slotted scenes swapping names each keep where their slots were,
 	/// so neither glides from the other's arrangement.
 	#[tokio::test]
@@ -4641,11 +4568,14 @@ mod tests {
 	async fn scenes_swapping_names_keep_their_own_slots() {
 		local(async {
 			let mut collection = slotted();
-			let row = Scene {
+			let mut row = Scene {
 				name: "row".into(),
 				arrangement: crate::Arrangement::Row,
 				..collection.scenes[0].clone()
 			};
+			for item in &mut row.items {
+				item.id = Id::fresh();
+			}
 			collection.scenes.push(row);
 			collection.validate().unwrap();
 			let mut studio = Studio::new(collection).await;
@@ -6601,7 +6531,10 @@ mod tests {
 			]);
 			// Blue over the top-right quarter alone, transparent elsewhere.
 			collection.scenes.push(Scene {
-				items: vec![collection.scenes[0].items[1].clone()],
+				items: vec![Item {
+					id: Id::fresh(),
+					..collection.scenes[0].items[1].clone()
+				}],
 				..Scene::new("corner")
 			});
 			let corner = Source::Scene { scene: "corner".into() };

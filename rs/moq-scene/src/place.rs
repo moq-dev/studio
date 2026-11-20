@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
-use crate::collection::{Canvas, Item, KeepClear, Rect, mix};
+use crate::collection::{Canvas, Id, Item, KeepClear, Rect, mix};
 use crate::compositor::Target;
 use crate::effect::Effects;
 use crate::glide::Glide;
@@ -497,6 +497,8 @@ struct Before {
 /// under it show.
 pub(crate) struct Placer {
 	sight: Sight,
+	/// What its glide calls the item, so it glides on from where it was drawn.
+	id: Id,
 	at: At,
 	/// When it last started looking before choosing: when it began, its
 	/// scene went on, or the content under it changed.
@@ -546,6 +548,7 @@ impl Placer {
 		};
 		Self {
 			sight: Sight::default(),
+			id: Id::fresh(),
 			at: At::Rest,
 			looking: Some(now),
 			worst: None,
@@ -769,7 +772,7 @@ impl Placer {
 				..paused
 			};
 			self.glide = Glide::new(self.glides, |_| true);
-			self.glide.show(self.moves, &[shown(at)], now);
+			self.glide.show(self.moves, &[shown(self.id, at)], now);
 			self.moves += 1;
 		}
 		let rect = match self.paused {
@@ -791,7 +794,7 @@ impl Placer {
 					self.glide = Glide::new(self.glides, |_| true);
 				}
 				self.aimed = Some((target, self.moves));
-				self.glide.show(self.moves, &[shown(target)], now);
+				self.glide.show(self.moves, &[shown(self.id, target)], now);
 				self.glide.placed()[0].rect
 			}
 		};
@@ -905,15 +908,19 @@ impl Placer {
 			// Another length: a glide of that length, from where it is.
 			self.glides = keep.glide;
 			self.glide = Glide::new(keep.glide, |_| true);
-			self.glide.show(self.moves, &[shown(self.placement.rect)], now);
+			self.glide.show(self.moves, &[shown(self.id, self.placement.rect)], now);
 		}
 		self.moves += 1;
 	}
 }
 
-/// An item at `rect`, standing for the one keeping clear in its glide.
-fn shown(rect: Rect) -> Item {
-	Item::new("keeping clear", rect)
+/// An item at `rect`, standing for the one keeping clear in its glide as
+/// `id`.
+fn shown(id: Id, rect: Rect) -> Item {
+	Item {
+		id,
+		..Item::new("keeping clear", rect)
+	}
 }
 
 /// The pipeline every read of the picture under an item goes through.
