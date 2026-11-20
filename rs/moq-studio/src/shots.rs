@@ -457,6 +457,9 @@ views! {
 	/// Settings, Advanced: published scenes and sources, the virtual camera,
 	/// the effects, and the scene graph.
 	settings_advanced: Still, studio(View::Setting(Setting::Advanced));
+	/// Settings, Advanced with a source published: how viewers may treat it,
+	/// as a sound alone, with no layer to inspect, sets it.
+	settings_advanced_published: Still, Open::Studio { view: View::Setting(Setting::Advanced), size: SIZE, show: "published.toml", relay: false };
 	/// The scene graph, in a window of its own.
 	graph: Still, studio(View::Graph);
 	/// The command palette as its key opens it: every action, each with its

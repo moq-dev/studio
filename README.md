@@ -1674,8 +1674,10 @@ carries one rendition, the plain capture before any filter or gain, and
 encodes for as long as it is published, holding an encode session as one on
 program does.
 
-Once it is published, two more controls under the switch say how viewers
-may treat it, which the composition carries:
+Once it is published, two more controls say how viewers may treat it, which
+the composition carries. They sit under the switch, and in Settings, Advanced
+under each published source, which is where a sound alone, with no layer to
+inspect, sets them:
 
 - **Viewers may switch it off**, off by default, lets each viewer turn it
   off in their player, which then stops fetching it, such as a facecam or a

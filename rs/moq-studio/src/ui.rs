@@ -1935,6 +1935,50 @@ fn templates(pictures: &[String], luts: &[String]) -> Vec<Filter> {
 }
 
 /// The gesture an edit through `response` belongs to, if it changed anything.
+/// Whether viewers may switch off the source called `name`, published
+/// independently as `viewers` says, and its priority for them; what an edit
+/// asked, its label, and its gesture.
+fn viewers_ui(
+	ui: &mut Ui,
+	name: &str,
+	viewers: moq_scene::Published,
+	gestures: &mut Gestures,
+) -> Option<(moq_scene::Published, String, Option<u64>)> {
+	let mut asked = None;
+	let mut toggle = viewers.toggle;
+	if ui
+		.add(kit::Toggle::new(&mut toggle).label("Viewers may switch it off"))
+		.on_hover_text(
+			"Let each viewer switch it off in their player, which then stops fetching it, \
+			 such as a facecam or a screen share they can do without.",
+		)
+		.changed()
+	{
+		let label = match toggle {
+			true => format!("Let viewers switch `{name}` off"),
+			false => format!("Keep `{name}` on for viewers"),
+		};
+		let viewers = moq_scene::Published { toggle, ..viewers };
+		asked = Some((viewers, label, None));
+	}
+	ui.horizontal(|ui| {
+		ui.label("Priority");
+		let mut priority = viewers.priority;
+		let response = ui
+			.add(egui::DragValue::new(&mut priority).range(i8::MIN..=i8::MAX))
+			.on_hover_text(
+				"How far ahead of the program viewers fetch it when their connection cannot \
+				 carry everything: 0 ranks it with the program, below 0 it degrades first, \
+				 above 0 last.",
+			);
+		if let Some(gesture) = changed(&response, gestures) {
+			let viewers = moq_scene::Published { priority, ..viewers };
+			asked = Some((viewers, format!("Set `{name}`'s priority"), gesture));
+		}
+	});
+	asked
+}
+
 fn changed(response: &egui::Response, gestures: &mut Gestures) -> Option<Option<u64>> {
 	let gesture = gestures.of(response);
 	response.changed().then_some(gesture)

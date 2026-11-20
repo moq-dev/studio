@@ -5,7 +5,6 @@
 use super::build::{LayerAction, linked_note, shapes, shown_in};
 use super::layers::{section, status_of};
 use super::*;
-use moq_scene::Published;
 
 /// How wide a border's slider reaches, in canvas pixels.
 const BORDER: f32 = 32.0;
@@ -29,7 +28,7 @@ enum Asked {
 	Publish(String, bool),
 	/// Set how viewers may treat the source published independently,
 	/// labelled, as part of a gesture.
-	Viewers(String, Published, String, Option<u64>),
+	Viewers(String, moq_scene::Published, String, Option<u64>),
 	/// Watch the capture for going dark, or stop.
 	Warn(String, bool),
 	/// Fill the role called this with this source, or leave it unfilled.
@@ -592,47 +591,10 @@ impl Panels {
 				{
 					asked = Some(Asked::Publish(name.clone(), published));
 				}
-				if let Some(viewers) = viewers {
-					let mut toggle = viewers.toggle;
-					if ui
-						.add(kit::Toggle::new(&mut toggle).label("Viewers may switch it off"))
-						.on_hover_text(
-							"Let each viewer switch it off in their player, which then stops fetching it, \
-							 such as a facecam or a screen share they can do without.",
-						)
-						.changed()
-					{
-						let label = match toggle {
-							true => format!("Let viewers switch `{name}` off"),
-							false => format!("Keep `{name}` on for viewers"),
-						};
-						asked = Some(Asked::Viewers(
-							name.clone(),
-							Published { toggle, ..viewers },
-							label,
-							None,
-						));
-					}
-					ui.horizontal(|ui| {
-						ui.label("Priority");
-						let mut priority = viewers.priority;
-						let response = ui
-							.add(egui::DragValue::new(&mut priority).range(i8::MIN..=i8::MAX))
-							.on_hover_text(
-								"How far ahead of the program viewers fetch it when their connection \
-								 cannot carry everything: 0 ranks it with the program, below 0 it \
-								 degrades first, above 0 last.",
-							);
-						if let Some(gesture) = changed(&response, &mut self.gestures) {
-							let label = format!("Set `{name}`'s priority");
-							asked = Some(Asked::Viewers(
-								name.clone(),
-								Published { priority, ..viewers },
-								label,
-								gesture,
-							));
-						}
-					});
+				if let Some(viewers) = viewers
+					&& let Some((viewers, label, gesture)) = viewers_ui(ui, &name, viewers, &mut self.gestures)
+				{
+					asked = Some(Asked::Viewers(name.clone(), viewers, label, gesture));
 				}
 			}
 			// A role takes the look of the source filling it.
