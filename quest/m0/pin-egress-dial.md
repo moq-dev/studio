@@ -4,7 +4,7 @@
 
 The `moq` submodule includes the two moq changes destinations dial through:
 moq-rtmp's `rtmps://` dial keeps the URL-derived `tcUrl`, from
-[RTMPS keeps `tcUrl`](https://github.com/moq-dev/moq/blob/main/quest/m2/rtmp-rtmps-tcurl.md),
+[RTMPS keeps `tcUrl`](https://github.com/moq-dev/moq/pull/8744) (landed),
 and a dial takes a policy its caller supplies, so a host can refuse private
 and loopback addresses, from
 [a caller-supplied dial policy](https://github.com/moq-dev/moq/blob/main/quest/m3/webrtc-dial-policy.md).
@@ -21,7 +21,9 @@ fixing whatever the new API breaks here.
 ## Waiting
 
 - moq-dev/moq: both upstream quests above land. They were being planned in
-  moq's tree on 2026-11-09, so each link resolves once its plan merges.
+  moq's tree on 2026-11-09. RTMPS keeps `tcUrl` landed on 2026-11-14 as
+  [moq-dev/moq#8744](https://github.com/moq-dev/moq/pull/8744); the dial
+  policy is still open.
   Check: both quests' PRs have merged on moq's `main`, deleting their files,
   moq-rtmp's TLS dial sends the URL-derived `tcUrl`, and a dial takes the
   caller's policy. A quest file that moved, or went away without its work

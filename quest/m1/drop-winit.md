@@ -22,8 +22,9 @@ data type, on every backend including Wayland.
 - Once eframe runs on it, take drops from those events: the position from
   `DragMoved`, files and `text/uri-list` or `text/x-moz-url` web addresses
   from the data transfer, and delete `pointer.rs`.
-- Recommended, not decided (see Waiting): no per-platform hook for web
-  addresses meanwhile. Each platform would need its own drag target
+- Decided 2026-11-19 (maintainer, /quest-complete): ✅ dragged web
+  addresses wait for winit's drag API, with no per-platform hook meanwhile
+  (rejected: a hook per platform now). Each platform would need its own drag target
   registered beside winit's (an `IDropTarget` taking `CF_UNICODETEXT`, an
   `NSView` drag type for URLs, and an Xdnd type list winit owns), which the
   new API makes redundant, while Ctrl+V already turns a copied address into a
@@ -36,10 +37,6 @@ data type, on every backend including Wayland.
   release's `egui-winit` dependency on `winit`. A 0.30 backport of Wayland
   drops ([rust-windowing/winit#4729](https://github.com/rust-windowing/winit/pull/4729))
   would bring Wayland drops alone, landing at the scene's center, sooner.
-- Maintainer: whether web addresses dragged from a browser wait for that
-  release (recommended: paste covers them, and a hook per platform is three
-  drag targets beside winit's to delete later) or get a hook per platform
-  now.
 
 ## Related
 
