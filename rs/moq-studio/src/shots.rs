@@ -2059,7 +2059,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 					let landed = {
 						let state = engine.state.lock().unwrap();
 						let item = &state.collection().scenes[0].items[1];
-						let placement = state.compositor.placement("Gameplay", 1, &item.source);
+						let placement = state.compositor.placement(item.id);
 						placement.is_some_and(|placement| {
 							let slot = placement
 								.slot

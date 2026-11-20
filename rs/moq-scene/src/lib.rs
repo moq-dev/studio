@@ -72,7 +72,7 @@ pub mod source;
 
 pub use clip::Clip;
 pub use collection::{
-	Arrangement, Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Item,
+	Arrangement, Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Id, Item,
 	KeepClear, Keyframe, Layer, MaskMode, Nested, Published, Rect, Rgba, Scene, Shape, Size, Slot, Source, Transition,
 	Video,
 };

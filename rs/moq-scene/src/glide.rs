@@ -17,7 +17,8 @@ pub(crate) const REFLOW: Duration = Duration::from_millis(400);
 /// `K`, naming what moves the items, changes, those `glides` says it moves
 /// glide from where they were shown to where they now are, as a move
 /// transition takes them; the rest show as they are at once, so one being
-/// dragged follows the pointer.
+/// dragged follows the pointer. Each item glides from where the item of the
+/// same [identity](Item::id) was, so two showing one source keep their own.
 pub(crate) struct Glide<K> {
 	duration: Duration,
 	glides: fn(&Item) -> bool,
@@ -66,7 +67,7 @@ impl<K: PartialEq> Glide<K> {
 			let linear = now.saturating_duration_since(*start).as_secs_f32() / self.duration.as_secs_f32();
 			(linear < 1.0).then(|| Ease::InOut.apply(linear))
 		});
-		let same = |a: &Item, b: &Item| a.source == b.source;
+		let same = |a: &Item, b: &Item| a.id == b.id;
 		let glides = self.glides;
 		(self.shown, self.placed) = match (progress, &self.from) {
 			(Some(progress), Some((from, _))) => (
@@ -285,6 +286,14 @@ mod tests {
 		)
 	}
 
+	/// `item` moved to `x`.
+	fn to(item: &Item, x: f32) -> Item {
+		Item {
+			rect: Rect { x, ..item.rect },
+			..item.clone()
+		}
+	}
+
 	fn opacity(item: &Item) -> f32 {
 		match item.filters.last() {
 			Some(Filter::Opacity { amount }) => *amount,
@@ -321,8 +330,8 @@ mod tests {
 		let start = kio::clock::now();
 		let mut glide = Glide::new(Duration::from_millis(400), |_| true);
 		let one = vec![at("cam", 0.0)];
-		let two = vec![at("cam", 0.0), at("guest", 600.0)];
-		let three = vec![at("cam", 200.0), at("guest", 600.0)];
+		let two = vec![one[0].clone(), at("guest", 600.0)];
+		let three = vec![to(&two[0], 200.0), two[1].clone()];
 		assert_eq!(glide.show(1, &one, start), one.as_slice());
 		// It starts with the first draw that sees the new arrangement.
 		let joined = glide.show(2, &two, start).to_vec();
@@ -361,13 +370,29 @@ mod tests {
 		let start = kio::clock::now();
 		let mut glide = Glide::new(REFLOW, |item| item.source != "logo");
 		let one = vec![at("cam", 0.0), at("logo", 0.0)];
-		let two = vec![at("cam", 200.0), at("logo", 100.0)];
+		let two = vec![to(&one[0], 200.0), to(&one[1], 100.0)];
 		glide.show(1, &one, start);
 		glide.show(2, &two, start);
 		let half = glide.show(2, &two, start.saturating_add(REFLOW / 2)).to_vec();
 		assert_eq!(half[1].rect.x, 100.0, "the logo is where it is");
 		assert!(half[0].rect.x > 0.0 && half[0].rect.x < 200.0, "the camera glides");
 		assert_eq!(glide.placed()[1].rect.x, 100.0);
+	}
+
+	/// Two items showing one source, such as a duplicate, each glide from
+	/// where they were, by identity, as they swap places.
+	#[test]
+	fn duplicates_glide_from_their_own_places() {
+		let start = kio::clock::now();
+		let mut glide = Glide::new(REFLOW, |_| true);
+		let one = vec![at("cam", 0.0), at("cam", 400.0)];
+		let two = vec![to(&one[1], 200.0), to(&one[0], 600.0)];
+		glide.show(1, &one, start);
+		glide.show(2, &two, start);
+		let half = glide.show(2, &two, start.saturating_add(REFLOW / 2)).to_vec();
+		assert_eq!(half[0].rect.x, 300.0, "from 400 to 200");
+		assert_eq!(half[1].rect.x, 300.0, "from 0 to 600");
+		assert_eq!(half[0].id, one[1].id);
 	}
 
 	#[test]
