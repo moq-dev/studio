@@ -57,8 +57,9 @@ pub struct Collection {
 	/// its own can be, and not one with its background removed, since its
 	/// track would show the background. Wherever it is placed, it takes only what every
 	/// player can reproduce, and no scene that another scene draws holds it.
-	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-	pub published: BTreeSet<String>,
+	/// Each says how viewers may treat it.
+	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+	pub published: BTreeMap<String, Published>,
 	/// The scenes, in the order the scene list shows them.
 	#[serde(default)]
 	pub scenes: Vec<Scene>,
@@ -91,7 +92,7 @@ impl Collection {
 			sources: BTreeMap::new(),
 			audio: BTreeMap::new(),
 			video: BTreeMap::new(),
-			published: BTreeSet::new(),
+			published: BTreeMap::new(),
 			scenes: vec![Scene::new("Scene")],
 			audio_scenes: AudioScene::defaults(),
 			top: Vec::new(),
@@ -645,7 +646,7 @@ impl Collection {
 			self.validate_chain(&video.filters, &on)?;
 		}
 
-		for name in &self.published {
+		for name in self.published.keys() {
 			let Some(source) = self.sources.get(name) else {
 				return Err(Error::Invalid(format!(
 					"`{name}` is published, but there is no such source"
@@ -803,7 +804,7 @@ impl Collection {
 		for (layer, items) in self.layers() {
 			for item in items {
 				let source = self.capture(&item.source);
-				if !self.published.contains(source) {
+				if !self.published.contains_key(source) {
 					continue;
 				}
 				let on = format!(
@@ -2479,6 +2480,24 @@ fn is_center(pan: &f32) -> bool {
 	*pan == 0.0
 }
 
+/// How viewers may treat a source published independently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Published {
+	/// How far ahead of the program's tracks viewers fetch its own under
+	/// congestion, as a [`Child::priority`](crate::composition::Child::priority)
+	/// does: 0 ranks with the program, below it degrades first.
+	#[serde(default, skip_serializing_if = "is_level")]
+	pub priority: i8,
+	/// Whether a viewer may switch it off, so their player stops fetching it.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub toggle: bool,
+}
+
+fn is_level(priority: &i8) -> bool {
+	*priority == 0
+}
+
 /// An sRGB color with straight alpha, written `#rrggbb` or `#rrggbbaa`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerializeDisplay, DeserializeFromStr)]
 pub struct Rgba(pub [u8; 4]);
@@ -3037,15 +3056,15 @@ path = "sting.webm"
 		collection
 			.sources
 			.insert("cut".into(), Source::Clone { source: "cam".into() });
-		collection.published.insert("cam".into());
+		collection.published.insert("cam".into(), Default::default());
 		collection.validate().unwrap();
 
 		let mut missing = collection.clone();
-		missing.published.insert("gone".into());
+		missing.published.insert("gone".into(), Default::default());
 		assert!(missing.validate().is_err());
 
 		let mut clone = collection.clone();
-		clone.published.insert("cut".into());
+		clone.published.insert("cut".into(), Default::default());
 		assert!(clone.validate().is_err(), "a clone has no track of its own");
 
 		let mut removed = collection.clone();
@@ -3057,6 +3076,46 @@ path = "sting.webm"
 			},
 		);
 		assert!(removed.validate().is_err(), "its track would show the background");
+	}
+
+	/// Each published source's table says how viewers may treat it, and an
+	/// empty one ranks it with the program and keeps it on for them.
+	#[test]
+	fn reads_how_viewers_may_treat_a_published_source() {
+		let text = r#"
+version = 1
+
+[canvas]
+width = 1280
+height = 720
+framerate = 30
+
+[sources.cam]
+kind = "camera"
+
+[sources.mic]
+kind = "microphone"
+
+[published.cam]
+priority = -10
+toggle = true
+
+[published.mic]
+"#;
+		let collection = Collection::from_toml(text).unwrap();
+		let cam = Published {
+			priority: -10,
+			toggle: true,
+		};
+		assert_eq!(collection.published["cam"], cam);
+		assert_eq!(collection.published["mic"], Published::default());
+		assert_eq!(
+			Collection::from_toml(&collection.to_toml().unwrap()).unwrap(),
+			collection
+		);
+
+		let unknown = text.replace("toggle = true", "hidden = true");
+		assert!(matches!(Collection::from_toml(&unknown), Err(Error::Format(_))));
 	}
 
 	/// A background is removed only from a picture of the source's own that
@@ -3265,7 +3324,7 @@ background = "remove"
 
 		let mut published = Collection::new();
 		published.sources.insert("cam".into(), Source::Camera { id: None });
-		published.published.insert("cam".into());
+		published.published.insert("cam".into(), Default::default());
 		let shaped = Item {
 			shape: collection.scenes[0].items[0].shape,
 			..Item::new("cam", Rect::fill(&published.canvas))
@@ -3492,7 +3551,7 @@ items = [
 		// file does, so it cannot move.
 		let mut published = Collection::new();
 		published.sources.insert("cam".into(), Source::Camera { id: None });
-		published.published.insert("cam".into());
+		published.published.insert("cam".into(), Default::default());
 		published.scenes = vec![Scene {
 			items: vec![Item {
 				keep_clear: Some(KeepClear::default()),
@@ -4048,7 +4107,7 @@ rect = { x = 1700, y = 40, width = 160, height = 90 }
 		refused(
 			&|c| {
 				c.sources.insert("Cam".into(), Source::Camera { id: None });
-				c.published.insert("Cam".into());
+				c.published.insert("Cam".into(), Default::default());
 				c.scenes[0].items[1].source = "Cam".into();
 			},
 			"cannot be in a slot",

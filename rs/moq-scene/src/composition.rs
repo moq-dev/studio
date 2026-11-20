@@ -86,9 +86,9 @@ impl Composition {
 	/// The composition of `collection` with the scene called `scene` on
 	/// program since `start` on the media clock, or no scene for `None`,
 	/// drawn over `program`. Each source published independently is listed
-	/// as `children` locates it, its sound filled in; one `children` leaves
-	/// out, such as a guest offline, is left out with its pictures, as the
-	/// studio shows nothing of it either.
+	/// as `children` locates it, its sound, priority, and toggle filled in;
+	/// one `children` leaves out, such as a guest offline, is left out with
+	/// its pictures, as the studio shows nothing of it either.
 	pub fn new(
 		collection: &Collection,
 		scene: Option<&str>,
@@ -116,6 +116,11 @@ impl Composition {
 			}
 		}
 		children.retain(|name, child| child.sound.is_some() || pictures.iter().any(|item| item.source == *name));
+		for (name, child) in &mut children {
+			let viewers = collection.published.get(name).copied().unwrap_or_default();
+			child.priority = viewers.priority;
+			child.toggle = viewers.toggle;
+		}
 		Self {
 			version: Version,
 			canvas: Size {
@@ -141,7 +146,7 @@ pub(crate) fn pictures(collection: &Collection, scene: Option<&str>, top: bool) 
 	for place in places {
 		for item in collection.items(&place).unwrap_or_default() {
 			let source = collection.capture(&item.source);
-			if !collection.published.contains(source) {
+			if !collection.published.contains_key(source) {
 				continue;
 			}
 			pictures.push(Item {
@@ -223,11 +228,13 @@ pub struct Child {
 	/// the program's audio does not play it.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub sound: Option<Audio>,
-	/// The subscription priority a viewer fetches its tracks at, as moq-lite
-	/// orders them.
+	/// How far ahead of the program's tracks a viewer fetches its own: each
+	/// of its tracks at hang's priority for its kind plus this, as moq-lite
+	/// orders subscriptions, saturating. At 0 it ranks with the program; below,
+	/// it degrades first under congestion.
 	#[serde(default, skip_serializing_if = "is_zero")]
 	pub priority: i8,
-	/// Whether a viewer may switch it off.
+	/// Whether a viewer may switch it off, so their player stops fetching it.
 	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
 	pub toggle: bool,
 }
@@ -421,7 +428,7 @@ mod tests {
 		);
 		collection
 			.published
-			.extend(["cam".into(), "mic".into(), "alice".into()]);
+			.extend(["cam", "mic", "alice"].map(|name| (name.into(), Default::default())));
 		let mut cam = Item::new("cam", rect(0.0));
 		cam.filters = vec![Filter::Opacity { amount: 0.5 }];
 		cam.keyframes = vec![Keyframe {
@@ -507,6 +514,31 @@ mod tests {
 
 		let top = Composition::new(&collection, None, start, program(), children());
 		assert_eq!(top.pictures.len(), 1, "only the top layer's");
+	}
+
+	/// Each source carries how the scene file says viewers may treat it, and
+	/// one it says nothing of ranks with the program and stays on; the wire
+	/// leaves out both defaults.
+	#[test]
+	fn carries_how_viewers_may_treat_each_source() {
+		let mut collection = collection();
+		let viewers = crate::Published {
+			priority: -3,
+			toggle: true,
+		};
+		collection.published.insert("cam".into(), viewers);
+		let composition = Composition::new(&collection, Some("live"), Duration::ZERO, program(), children());
+		let cam = &composition.sources["cam"];
+		assert_eq!((cam.priority, cam.toggle), (-3, true));
+		let mic = &composition.sources["mic"];
+		assert_eq!((mic.priority, mic.toggle), (0, false));
+		let text = toml::to_string(&composition).unwrap();
+		assert!(
+			text.contains("[sources.cam]\nbroadcast = \"source/cam\"\npriority = -3\ntoggle = true\n"),
+			"{text}"
+		);
+		assert!(text.contains("[sources.mic]\nbroadcast = \"source/mic\"\n\n"), "{text}");
+		assert_eq!(toml::from_str::<Composition>(&text).unwrap(), composition);
 	}
 
 	/// A source left unlocated, such as a guest offline, is left out with its

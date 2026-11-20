@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::collection::{Audio, AudioScene, Canvas, Collection, Filter, Item, Layer, Scene, Source, Transition, Video};
+use crate::collection::{
+	Audio, AudioScene, Canvas, Collection, Filter, Item, Layer, Published, Scene, Source, Transition, Video,
+};
 
 /// One part of a collection, before and after an edit.
 ///
@@ -46,8 +48,14 @@ pub enum Change {
 		#[serde(default, skip_serializing_if = "Option::is_none")]
 		after: Option<Video>,
 	},
-	/// Whether [`Collection::published`] names the source `name`.
-	Published { name: String, before: bool, after: bool },
+	/// A [`Collection::published`] entry.
+	Published {
+		name: String,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		before: Option<Published>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		after: Option<Published>,
+	},
 	/// The scene at `index` of [`Collection::scenes`]. Adding one inserts it
 	/// there, shifting the later ones back, and replacing one with another
 	/// name renames it.
@@ -292,15 +300,7 @@ impl Change {
 			Self::Audio { name, before, after } => replace(&mut collection.audio, name, before, after, "audio"),
 			Self::Video { name, before, after } => replace(&mut collection.video, name, before, after, "video"),
 			Self::Published { name, before, after } => {
-				if collection.published.contains(name) != *before {
-					return Err(conflict(format!("whether `{name}` is published changed")));
-				}
-				if *after {
-					collection.published.insert(name.clone());
-				} else {
-					collection.published.remove(name);
-				}
-				Ok(())
+				replace(&mut collection.published, name, before, after, "published")
 			}
 			Self::Scene { index, before, after } => {
 				let (before, after) = (before.as_ref(), after.as_ref());
@@ -609,11 +609,12 @@ impl Draft {
 		})
 	}
 
-	/// Publish the source called `name` independently, or stop.
-	pub fn set_published(&mut self, name: &str, published: bool) -> Result<(), Error> {
+	/// Publish the source called `name` independently, as `published` says
+	/// viewers may treat it, or stop for `None`.
+	pub fn set_published(&mut self, name: &str, published: Option<Published>) -> Result<(), Error> {
 		self.change(Change::Published {
 			name: name.to_string(),
-			before: self.collection.published.contains(name),
+			before: self.collection.published.get(name).copied(),
 			after: published,
 		})
 	}
@@ -702,7 +703,7 @@ impl Draft {
 		if self.collection.transition.stinger() == Some(name) {
 			self.set_transition(Transition::default())?;
 		}
-		self.set_published(name, false)?;
+		self.set_published(name, None)?;
 		self.set_source(name, None)
 	}
 
@@ -1787,6 +1788,39 @@ mod tests {
 		assert_eq!(history.position(), History::LIMIT);
 		while history.undo(&mut collection).unwrap().is_some() {}
 		assert_eq!(collection.scenes[0].items[0].rect.x, 5.0);
+	}
+
+	/// Publishing a source and how viewers may treat it undo apart, a drag of
+	/// its priority is one entry, and removing the source stops publishing
+	/// it, all through a saved history.
+	#[test]
+	fn publishing_undoes() {
+		let mut collection = collection();
+		let mut history = History::new();
+		let mut draft = collection.draft("Publish red");
+		draft.set_published("red", Some(Published::default())).unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		let viewers = |priority| Published { priority, toggle: true };
+		for priority in [1, 2, 3] {
+			let mut draft = collection.draft("Set red's priority");
+			draft.set_published("red", Some(viewers(priority))).unwrap();
+			commit(&mut collection, &mut history, draft, Some(7));
+		}
+		assert_eq!(history.entries().len(), 2);
+		let mut draft = collection.draft("Remove red");
+		draft.remove_source("red").unwrap();
+		commit(&mut collection, &mut history, draft, None);
+		assert!(collection.published.is_empty());
+
+		let text = history.to_toml().unwrap();
+		let (mut loaded, dropped) = History::from_toml(&text, &collection).unwrap();
+		assert_eq!(dropped, 0);
+		loaded.undo(&mut collection).unwrap();
+		assert_eq!(collection.published["red"], viewers(3));
+		loaded.undo(&mut collection).unwrap();
+		assert_eq!(collection.published["red"], Published::default());
+		loaded.undo(&mut collection).unwrap();
+		assert!(collection.published.is_empty());
 	}
 
 	/// A saved history reloads against the collection saved with it, undo and

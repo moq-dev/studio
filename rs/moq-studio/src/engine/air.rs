@@ -813,7 +813,7 @@ impl Composed {
 		};
 		let collection = &state.collection;
 		let mut children = BTreeMap::new();
-		for name in &collection.published {
+		for name in collection.published.keys() {
 			let child = match collection.sources.get(name) {
 				Some(moq_scene::Source::Broadcast { path }) => {
 					// While it shows nothing of a stream, such as offline, the

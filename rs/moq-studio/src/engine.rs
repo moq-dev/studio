@@ -1111,15 +1111,17 @@ impl Program {
 			.collect();
 		let published = &state.collection.published;
 		self.published.send_if_modified(|current| {
-			let changed = current != published;
-			current.clone_from(published);
+			let changed = !current.iter().eq(published.keys());
+			if changed {
+				*current = published.keys().cloned().collect();
+			}
 			changed
 		});
 		// Published, a source encodes as though on program.
 		let mut shown = shown;
 		let mut heard: BTreeSet<String> = heard;
-		shown.extend(published.iter().cloned());
-		heard.extend(published.iter().cloned());
+		shown.extend(published.keys().cloned());
+		heard.extend(published.keys().cloned());
 		self.sources
 			.set_on_program(moq_scene::publish::OnProgram { shown, heard });
 	}
@@ -3920,7 +3922,7 @@ mod tests {
 		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let mut loaded = red_canvas();
-		loaded.collection.published.insert("red".into());
+		loaded.collection.published.insert("red".into(), Default::default());
 		let mut two = loaded.collection.scenes[0].clone();
 		two.name = "Two".into();
 		loaded.collection.scenes.push(two);
@@ -4039,7 +4041,7 @@ mod tests {
 		{
 			let mut state = engine.state.lock().unwrap();
 			let mut draft = state.collection().draft("Stop publishing `red`");
-			draft.set_published("red", false).unwrap();
+			draft.set_published("red", None).unwrap();
 			state.commit(draft, None).unwrap();
 		}
 		loop {

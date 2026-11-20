@@ -1292,7 +1292,8 @@ impl Panels {
 				.filter(|(_, source)| source.independent())
 				.map(|(name, _)| name.clone())
 				.collect();
-			(collection.scenes.clone(), sources, collection.published.clone())
+			let published: Vec<String> = collection.published.keys().cloned().collect();
+			(collection.scenes.clone(), sources, published)
 		};
 
 		let mut scene_publish = None;
@@ -1368,7 +1369,7 @@ impl Panels {
 			let verb = if published { "Publish" } else { "Stop publishing" };
 			let mut state = engine.state.lock().unwrap();
 			let result = edit(&mut state, format!("{verb} `{name}` independently"), None, |draft| {
-				draft.set_published(&name, published)
+				draft.set_published(&name, published.then(Default::default))
 			});
 			drop(state);
 			self.check(result);
