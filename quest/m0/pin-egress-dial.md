@@ -4,7 +4,7 @@
 
 The `moq` submodule includes the two moq changes destinations dial through:
 moq-rtmp's `rtmps://` dial keeps the URL-derived `tcUrl`, from
-[RTMPS keeps `tcUrl`](https://github.com/moq-dev/moq/blob/main/quest/m2/rtmp-rtmps-tcurl.md),
+[RTMPS keeps `tcUrl`](https://github.com/moq-dev/moq/pull/8744) (landed),
 and a dial takes a policy its caller supplies, so a host can refuse private
 and loopback addresses, from
 [a caller-supplied dial policy](https://github.com/moq-dev/moq/blob/main/quest/m3/webrtc-dial-policy.md).
