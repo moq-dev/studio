@@ -3,7 +3,7 @@
 	"private": true,
 	"type": "module",
 	"version": "0.0.0",
-	"description": "The page a guest opens to join a kixel.live Studio room",
+	"description": "The pages a guest opens to join a kixel.live Studio room, and a phone opens to drive it",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/studio",
 	"scripts": {
@@ -13,6 +13,8 @@
 		"test": "bun test"
 	},
 	"dependencies": {
+		"@moq/clock": "workspace:*",
+		"@moq/json": "workspace:*",
 		"@moq/net": "workspace:*",
 		"@moq/publish": "workspace:*",
 		"@moq/room": "workspace:*",

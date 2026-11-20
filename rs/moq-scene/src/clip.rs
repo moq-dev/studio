@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 use crate::collection::{
-	Audio, Collection, Filter, Item, Layer, Rect, Scene, Slot, Source, Video, validate_filters, versioned,
+	Audio, Collection, Filter, Id, Item, Layer, Rect, Scene, Slot, Source, Video, validate_filters, versioned,
 };
 use crate::edit::Draft;
 
@@ -278,6 +278,7 @@ impl Draft {
 				layer,
 				index,
 				Item {
+					id: Id::fresh(),
 					source,
 					filters,
 					slot,

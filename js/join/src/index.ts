@@ -13,46 +13,12 @@ import { Local } from "@moq/room";
 import { Effect, Signal } from "@moq/signals";
 import * as Watch from "@moq/watch";
 import * as Feed from "./feed.ts";
-import { format, type Link, parse } from "./link.ts";
+import { format, type Link } from "./link.ts";
+import { element, fail, read, stored } from "./page.ts";
 import * as Renew from "./renew.ts";
 
 /** Where the fragment is kept once it leaves the address bar, so a reload rejoins. */
 const STORED = "moq-studio-join";
-
-function element<T extends HTMLElement>(id: string): T {
-	const found = document.getElementById(id);
-	if (!found) throw new Error(`missing #${id}`);
-	return found as T;
-}
-
-function fail(err: unknown): void {
-	const error = element("error");
-	error.textContent = err instanceof Error ? err.message : String(err);
-	error.hidden = false;
-}
-
-/**
- * `use` on the page's session storage, or `undefined` where the browser denies
- * it, which only costs rejoining after a reload.
- */
-function stored<T>(use: (storage: Storage) => T): T | undefined {
-	try {
-		return use(sessionStorage);
-	} catch {
-		return undefined;
-	}
-}
-
-/** The link this page was opened with, moved out of the address bar. */
-function read(): Link {
-	const fragment = location.hash.slice(1) || stored((storage) => storage.getItem(STORED));
-	if (!fragment) throw new Error("open the join link the host sent you");
-	const link = parse(fragment);
-	// Out of the address bar, history, and anything that shows them, such as a screen share.
-	stored((storage) => storage.setItem(STORED, fragment));
-	history.replaceState(null, "", location.pathname + location.search);
-	return link;
-}
 
 /** Publish into the room until the guest leaves. Returns how to leave. */
 function join(link: Link): () => void {
@@ -141,7 +107,7 @@ function join(link: Link): () => void {
 function main(): void {
 	let link: Link;
 	try {
-		link = read();
+		link = read(STORED);
 	} catch (err) {
 		fail(err);
 		return;

@@ -84,6 +84,9 @@ enum View {
 	/// Settings' Guests pane, its room unable to join at launch, as its key
 	/// file is missing.
 	GuestsFailed,
+	/// Settings' Remote pane in a room, one phone paired and removed, and
+	/// another just paired by its name and Pair a phone.
+	Paired,
 	/// The scene graph's window.
 	Graph,
 	/// The stream's health in detail.
@@ -439,6 +442,12 @@ views! {
 	/// Settings, Guests, when the room saved cannot be joined, such as when
 	/// its key file is gone: why, and Try again.
 	settings_guests_failed: Live, relayed(View::GuestsFailed);
+	/// Settings, Remote with no room yet, which a remote joins.
+	settings_remote: Still, studio(View::Setting(Setting::Remote));
+	/// Settings, Remote with a phone just paired: the code its camera scans,
+	/// when its link expires, and every phone paired, one removed. Live, as
+	/// each link carries a token of its own.
+	settings_remote_paired: Live, studio(View::Paired);
 	/// Settings, Advanced: published scenes and sources, the virtual camera,
 	/// the effects, and the scene graph.
 	settings_advanced: Still, studio(View::Setting(Setting::Advanced));
@@ -1018,7 +1027,8 @@ fn the_palette_finds_and_runs_anything() {
 /// the format turn the program, keeping its frame rate. A show whose room
 /// key is missing still opens, and once the key is back, Try again joins its
 /// room. The Guests pane refuses a room guests could not join, saying why,
-/// and moves to the room it saves at once, off air. The recordings folder
+/// and moves to the room it saves at once, off air, dropping a phone's link
+/// into the room it left. The recordings folder
 /// moves only once no recording is under way. The scene
 /// graph's Open closes Settings for the graph. It draws no view.
 #[test]
@@ -1120,6 +1130,12 @@ fn settings_change_the_show_and_move_the_guests() {
 		engine.state.lock().unwrap().collection().audio["alice"].muted,
 		"{muted}"
 	);
+	// Remote, with no room to pair in, sends the host to the room's pane.
+	harness.get_by_label("Remote").click();
+	harness.run_steps(2);
+	harness.get_by_label("Set up the room").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Try again").is_some(), "Guests is open");
 	// The key is back in place, under the same name; the relay's path is the
 	// room's parent.
 	for room in ["guests", "other"] {
@@ -1129,6 +1145,15 @@ fn settings_change_the_show_and_move_the_guests() {
 	}
 	harness.get_by_label("Try again").click();
 	joined(&mut harness, "guests");
+	// A phone paired in this room, whose link stays on screen...
+	harness.get_by_label("Remote").click();
+	harness.run_steps(2);
+	fill(&mut harness, 0, "phone");
+	harness.get_by_label("Pair a phone").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Copy link").is_some(), "the phone's link shows");
+	harness.get_by_label("Guests").click();
+	harness.run_steps(2);
 	fill(&mut harness, 0, "other");
 	fill(&mut harness, 1, "");
 	harness.get_by_label("Save").click();
@@ -1149,6 +1174,13 @@ fn settings_change_the_show_and_move_the_guests() {
 	joined(&mut harness, "other");
 	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
 	assert!(saved.contains("room = \"other\""), "{saved}");
+	// ...until the room is another, which its link cannot join.
+	harness.get_by_label("Remote").click();
+	harness.run_steps(2);
+	assert!(
+		harness.query_by_label("Copy link").is_none(),
+		"a link into the room left shows"
+	);
 
 	// The recordings folder stays put while a recording is under way, then
 	// moves with the file naming it.
@@ -1852,6 +1884,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
 		View::GuestsFailed => studio.open(Setting::Guests),
+		View::Paired => studio.open(Setting::Remote),
 		View::Graph => studio.open_graph(),
 		View::Health => studio.details(),
 		View::Going => studio.going(),
@@ -1936,6 +1969,15 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		let stalled = Duration::from_secs(4);
 		engine.state.lock().unwrap().stalled.insert("host".into(), stalled);
 	}
+	if let View::Paired = view {
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://join.studio.moq.dev/").unwrap();
+		let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+		let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+		room.pair("tablet").unwrap();
+		room.unpair("tablet").unwrap();
+		engine.join(Some(crate::guests::Joining::offline(room))).unwrap();
+	}
 	if let View::Joined = view {
 		let mut state = engine.state.lock().unwrap();
 		let connect = url::Url::parse("https://relay.example/show").unwrap();
@@ -1982,6 +2024,14 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			harness.get_all_by_label("Custom").next().unwrap().click();
 			harness.run_steps(4);
 		}
+		View::Paired => {
+			harness.get_by_role(Role::TextInput).click();
+			harness.run_steps(2);
+			harness.get_by_role(Role::TextInput).type_text("Phone");
+			harness.run_steps(2);
+			harness.get_by_label("Pair a phone").click();
+			harness.run_steps(4);
+		}
 		View::GuestsFailed => runtime
 			.block_on(kio::clock::timeout(SETTLE, async {
 				while harness.query_by_label_contains("Guests cannot join").is_none() {
@@ -1996,7 +2046,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 					let landed = {
 						let state = engine.state.lock().unwrap();
 						let item = &state.collection().scenes[0].items[1];
-						let placement = state.compositor.placement("Gameplay", 1, &item.source);
+						let placement = state.compositor.placement(item.id);
 						placement.is_some_and(|placement| {
 							let slot = placement
 								.slot
