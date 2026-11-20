@@ -3,8 +3,9 @@
 ## Goal
 
 A layer's pictures wait in their subscription only as long as that layer
-plays behind, so a lost group stalls a guest 100 ms behind for about 100 ms,
-not the fixed `LAYER_DELAY` (two playouts) every layer holds today.
+plays behind, its own offset plus the viewer's playout, so a lost group
+stalls a guest close to live for that long, not for the fixed `LAYER_DELAY`
+(two full playouts) every layer holds today.
 
 ## Plan
 
@@ -21,8 +22,8 @@ the viewer's in the per-layer max. A layer's offset changes with each
 composition. Sound moves its max in place with
 `moq_audio::decode::Consumer::set_max_delay`, as `moq play` does; moq_video's
 decode consumer has no such setter, so recommended: resubscribe a layer's
-video when its offset outgrows its max by more than a frame, rather than on
-every change. Alternatives: add a `set_max_delay` to moq_video's decode
+video when its offset moves more than a frame from the one its max was set
+for, shrinking as well as growing, rather than on every change. Alternatives: add a `set_max_delay` to moq_video's decode
 consumer in moq first, mirroring moq_audio's, or have the layer read pictures
 out at once into a queue of its own and keep the subscription's max small;
 pick whichever measures better on a lossy link.
