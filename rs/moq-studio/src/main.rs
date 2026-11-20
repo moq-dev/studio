@@ -27,6 +27,7 @@ mod interact;
 mod kit;
 mod ladder;
 mod library;
+mod markers;
 mod mix;
 mod past;
 mod pointer;

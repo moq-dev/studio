@@ -5806,8 +5806,9 @@ mod tests {
 		.unwrap();
 		let held = view.held.expect("sampled").expect("the program's past");
 		assert!(held.video);
-		assert!(!view.pictures.is_empty(), "a keyframe of the past");
-		for picture in &view.pictures {
+		let pictures = view.pictures.expect("the past's pictures");
+		assert!(!pictures.is_empty(), "a keyframe of the past");
+		for picture in &pictures {
 			assert_eq!(picture.size[0], 480, "decoded small");
 			assert!(held.oldest <= picture.at && picture.at <= kio::clock::Instant::now());
 			let middle = (picture.size[1] / 2 * picture.size[0] + picture.size[0] / 2) * 4;
@@ -5816,7 +5817,7 @@ mod tests {
 			};
 			assert!(r > 200 && g < 60 && b < 60, "red, not {r} {g} {b}");
 		}
-		let times: Vec<_> = view.pictures.iter().map(|picture| picture.at).collect();
+		let times: Vec<_> = pictures.iter().map(|picture| picture.at).collect();
 		assert!(times.is_sorted(), "oldest first");
 		// And its sound, a packet at a time: the program's mix, silent here.
 		let sound = view.sound.expect("the program's sound");

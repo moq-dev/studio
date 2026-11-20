@@ -220,7 +220,7 @@ The **strip** holds:
   and cuts at once to the scene marked safe, if one is. Other remote feeds and
   media stay on. Mark one from its pad's menu, BUILD's inspector with no layer
   selected, or the scene graph. The scissors beside it save a replay clip (see
-  [Replay](#replay)).
+  [Replay](#replay)), and the flag drops a marker (see [Markers](#markers)).
 - A row for each sound the stream carries, with its meter and mute, and the
   **STREAM** meter of the audio scene on program, with **Listen** (the
   headphones) to hear it (see [Audio scenes](#audio-scenes)).
@@ -230,7 +230,7 @@ The **strip** holds:
 | LIVE | Watch the program while on air, and TAKE or AUTO a cued scene. |
 | BUILD | Edit the scene on program, or the one open off air, shown in the middle, with its layers and what can be added on the left and the inspector on the right (see [BUILD](#build)). |
 | MIX | Ride each sound's fader and mute it, open its strip for its pan and delay, and send each sound and audio scene into audio scenes, from dots under the strips or as a matrix under **Routes**. Add, rename, reorder, and remove audio scenes, put one on the stream, and listen to one on the output you pick (see [Audio scenes](#audio-scenes)). The program shows small in the strip's place for the sound. |
-| REVIEW | Pick a stretch of the last 30 seconds of the program or a source from a strip of its pictures, and replay it in a replay source, slowed down if you like, or save it as a clip (see [Replay](#replay)). Beside it, this show's recordings and clips as cards with their length and size, one repaired after a crash marked so, and **Open the folder**. The program's card is the live picture. |
+| REVIEW | Pick a stretch of the last 30 seconds of the program or a source from a strip of its pictures, and replay it in a replay source, slowed down if you like, or save it as a clip (see [Replay](#replay)). Beside it, this session's markers, with a clip around each (see [Markers](#markers)), over this show's recordings and clips as cards with their length and size, one repaired after a crash marked so, and **Open the folder**. The program's card is the live picture. |
 
 The layout follows the program's shape and the window's size, giving the
 picture the most room it can. A landscape program sits above the strip; a
@@ -478,7 +478,7 @@ setting costs. Escape or a click outside closes it.
 | Show | Pick the format, landscape or portrait, which swaps the canvas's sides; **Both at once**, which sends a portrait picture beside a landscape one (see [Both formats at once](#both-formats-at-once)); the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, for both pictures while Both at once is on, or **Custom** for exact numbers; the frame rate as 30, 60, or **Custom**; and, under **Scene sizes**, each scene's own size (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
 | Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)). |
 | Recording | Change or open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
-| Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; each sound's mute; and replay and clips (see [Hotkeys](#hotkeys)). |
+| Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; each sound's mute; and replay, clips, and markers (see [Hotkeys](#hotkeys)). |
 | Guests | Set the room guests join, its key, the join page, how long a link lasts, and whether guests appear on their own (see [Guests](#guests)). |
 | Advanced | Publish scenes as broadcasts of their own and sources independently, turn the virtual camera of the program or of each published scene on, pick how the window's [effects](#effects) move, and open the [scene graph](#scene-graph). |
 
@@ -1805,12 +1805,12 @@ Quitting first lets the recording's encoders publish what they still hold, and
 the program's file keeps it. A file nothing reached before the recording
 stopped is removed.
 
-While a file is written, a marker `<name>.mp4.unfinished` sits beside it. A
-crash, a power loss, or a write that failed leaves the marker, and the next
+While a file is written, a sidecar `<name>.mp4.unfinished` sits beside it. A
+crash, a power loss, or a write that failed leaves the sidecar, and the next
 launch repairs that file without asking: it writes `<name>.repaired.mp4`
 beside it, numbered if a file already has that name, a regular MP4 of
 everything the file holds up to its last complete fragment, leaves the
-original untouched, and removes the marker, so the file is repaired
+original untouched, and removes the sidecar, so the file is repaired
 only once. The repair runs in the background and appears at the top of the
 Health window and in the log, and REVIEW marks its card **Repaired after a crash**. A file another studio is still recording into the
 same directory is left alone.
@@ -1836,7 +1836,7 @@ a WebGL page runs slower.
 
 Settings, Hotkeys binds a key to the **Panic** key, TAKE and AUTO
 for the cued scene, turning [Studio mode](#off-air-and-studio-mode) on or off,
-**Replay**, **Save clip**, starting or stopping a recording, **Go live**,
+**Replay**, **Save clip**, **Drop a marker**, starting or stopping a recording, **Go live**,
 **End stream**, each scene, which its key takes, or cues in Studio mode,
 as its pad does (the tab says which), and each sound, which its key mutes or
 unmutes, as its strip's button does. The [command palette](#command-palette)
@@ -1949,6 +1949,29 @@ one refuses with the reason on REVIEW. An image, a color, or a web page has
 no past to replay: a page publishes no track of its own, so replay the program
 to show it. A replay source on program encodes each replay as its own track
 while it plays, like a camera.
+
+## Markers
+
+Drop a marker on a moment as the show runs, on air or off, with the flag
+beside the panic key or a key bound to **Drop a marker** (see
+[Hotkeys](#hotkeys)). REVIEW lists this session's markers, the newest first,
+each numbered in the order dropped, with how long ago it was. Type a name in
+its row, or remove it. Each marker still within the last 30 seconds shows on
+the strip as a numbered flag.
+
+The scissors in a marker's row save a clip around it, as **Save clip** does,
+of what REVIEW has picked to replay: from 10 seconds before the marker to 5
+after, or up to now while those 5 have yet to pass. The same keyframe limits
+apply. A clip reaches back only 30 seconds, so a marker older than that has
+no clip; its scissors say so.
+
+The markers are kept beside the recordings, not in the scene file:
+`show 2026-11-18T12-00-00Z.markers.toml` for `show.toml`, named for when the
+studio opened the show, lists each marker's number, the UTC moment it was
+dropped, and its name. It is written again on every change and removed once
+no marker is left, in the background, so a slow disk never holds up a key. A
+marker the folder refuses is kept for the session anyway, and REVIEW says why
+until a write succeeds. A session holds at most 255 markers.
 
 ## A capture gone dark
 
