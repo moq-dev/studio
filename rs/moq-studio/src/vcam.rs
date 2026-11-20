@@ -13,7 +13,7 @@
 //! the backend.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 use anyhow::Context;
 use moq_scene::Canvas;
@@ -37,7 +37,8 @@ pub struct Camera {
 	readback: Readback,
 	/// `None` once dropping.
 	work: Option<mpsc::Sender<Work>>,
-	worker: Option<std::thread::JoinHandle<()>>,
+	/// Set once the `vcam` thread, and the backend with it, has ended.
+	ended: Arc<Ended>,
 	shared: Arc<Shared>,
 }
 
@@ -141,29 +142,39 @@ impl Camera {
 		let scene = scene.map(str::to_string);
 
 		let (work, pending) = mpsc::channel();
-		let worker = {
+		let ended = Arc::new(Ended::default());
+		// Taken here, before this camera can be dropped itself, so it waits
+		// only for cameras turned off before it turned on.
+		let closing = {
+			let mut closing = CLOSING.lock().unwrap();
+			closing.retain(|ended| !ended.done());
+			closing.clone()
+		};
+		{
 			let shared = shared.clone();
+			let ended = ended.clone();
 			std::thread::Builder::new()
 				.name("vcam".into())
 				.spawn(move || {
-					let closing = std::mem::take(&mut *CLOSING.lock().unwrap());
-					for worker in closing {
-						let _ = worker.join();
+					// Set however the thread ends, a panic included.
+					let _ended = EndOnDrop(ended);
+					for camera in closing {
+						camera.wait();
 					}
 					match open(scene.as_deref(), canvas, &shared) {
 						Ok(sink) => run(pending, sink, scene.as_deref(), &shared),
 						Err(err) => shared.fail(format!("{err:#}")),
 					}
 				})
-				.context("cannot start the virtual camera thread")?
-		};
+				.context("cannot start the virtual camera thread")?;
+		}
 		Ok(Self {
 			device: device.clone(),
 			queue: queue.clone(),
 			canvas,
 			readback,
 			work: Some(work),
-			worker: Some(worker),
+			ended,
 			shared,
 		})
 	}
@@ -228,19 +239,46 @@ impl Drop for Camera {
 		// extension's does, and this runs on the UI's thread, so the next
 		// camera to open waits for it instead.
 		self.work.take();
-		if let Some(worker) = self.worker.take() {
-			let mut closing = CLOSING.lock().unwrap();
-			closing.retain(|worker| !worker.is_finished());
-			closing.push(worker);
+		CLOSING.lock().unwrap().push(self.ended.clone());
+	}
+}
+
+/// The cameras turned off whose threads may still be closing their backends.
+/// A camera waits for each before it opens, on its own thread, so it finds
+/// every device they held free, such as a v4l2loopback device or a scene's
+/// camera of the macOS extension. A camera waits only for those turned off
+/// before it turned on, so no two wait for each other.
+static CLOSING: Mutex<Vec<Arc<Ended>>> = Mutex::new(Vec::new());
+
+/// Whether a camera's thread has ended.
+#[derive(Default)]
+struct Ended {
+	done: Mutex<bool>,
+	changed: Condvar,
+}
+
+impl Ended {
+	fn done(&self) -> bool {
+		*self.done.lock().unwrap()
+	}
+
+	fn wait(&self) {
+		let mut done = self.done.lock().unwrap();
+		while !*done {
+			done = self.changed.wait(done).unwrap();
 		}
 	}
 }
 
-/// The threads of cameras turned off, each still closing its backend. A
-/// camera waits for them before it opens, on its own thread, so it finds
-/// every device they held free, such as a v4l2loopback device or a scene's
-/// camera of the macOS extension.
-static CLOSING: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+/// Sets [`Ended`] when dropped.
+struct EndOnDrop(Arc<Ended>);
+
+impl Drop for EndOnDrop {
+	fn drop(&mut self) {
+		*self.0.done.lock().unwrap() = true;
+		self.0.changed.notify_all();
+	}
+}
 
 fn size(canvas: Canvas) -> moq_video::Size {
 	moq_video::Size::new(canvas.width, canvas.height)
