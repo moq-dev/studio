@@ -687,7 +687,12 @@ through the first relay while that relay has a route to it, and
 through the failover otherwise, so a publisher restarted behind only the
 failover replaces the first relay's copy once that copy ends. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
-comes back on its own when the publisher restarts.
+comes back on its own when the publisher restarts. While it is offline, or
+once a new stream replaces the one it played, it shows nothing until the new
+stream's first picture, rather than freezing on the last one. A broadcast
+without video but with an image, such as a studio's image or color published
+independently, shows that image, and never reads as stalled, since it sends
+a picture only when it changes.
 
 A broadcast source, a guest's included, plays on its publisher's timestamps,
 so its sound and picture stay in sync through network jitter. It plays as far
@@ -868,16 +873,20 @@ to it), its gain to read or type, and its mute, which turns amber while it
 is on. These apply in every audio scene holding the sound. Click a sound's
 name to open its strip to its gain, pan (a double click centers it), and
 delay, and the audio scenes it is heard in; the other strips narrow beside it
-rather than hide. Each audio scene has a strip after the sounds with its
-meter, on the same scale, and **Listen**. A meter's top is full scale, where
-its last segment turns red: the sound clips.
+rather than hide. Each audio scene has a strip after the sounds with
+**Listen** and its meter, on the same scale, which reads the audio scene as
+**Listen** plays it, published sources included. A meter's top is full scale,
+where its last segment turns red: the sound clips.
 
 Under each strip is a dot for each audio scene, marked with its initial:
 filled where the strip is sent into it, the accent's color for the one the
 stream carries; ringed where it is heard there only through another audio
 scene; and faint where it is not heard. A click sends it in or takes it out.
 An audio scene shows a dash under its own strip and under any it holds, which
-it cannot be sent back into. **Routes** shows the same sends as a matrix, a
+it cannot be sent back into. A sound [published independently](#published-independently)
+keeps its dots and sends: they say where people in the studio hear it, while
+viewers hear it from its own broadcast and the audio the studio encodes
+leaves it out. **Routes** shows the same sends as a matrix, a
 row for each sound and audio scene and a column for each audio scene, with
 what each one holds at its foot.
 
@@ -1131,8 +1140,11 @@ before it expires, and is then renewed for as long as they stay, until you
 remove them. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, in no scene or audio scene: place
 them from BUILD's Add and send them to the audio scene on program on MIX
-to put them on air, or have them [appear on their own](#slots-and-roles) in
-the next tile of the scene on program. That includes a
+to put them on air, have them [appear on their own](#slots-and-roles) in
+the next tile of the scene on program, or switch on **Published
+independently** to have viewers fetch them from the guest instead of through
+the program (see [Published independently](#published-independently)). That
+includes a
 guest invited before a restart whose link still works. A guest's source is
 saved to the scene file but is not your edit: it stays out of History, so undo
 never removes it and a guest joining never loses what you could redo, unless
@@ -1479,7 +1491,7 @@ with the program's, and its own encode of the audio scene it carries. A show
 going out in both formats publishes its portrait picture the same way at
 `<broadcast>/portrait`, at the canvas turned and half of it, with its own
 encode of the audio scene on program. The sources published independently
-are drawn into it, with no layer layout of their own. Each relay carries both broadcasts,
+are drawn into it, with no [composition](#composition) of their own. Each relay carries both broadcasts,
 and GO LIVE's checks time the encoder and size the connection for both.
 Timestamps come from the studio's own clock, so a source that stalls repeats
 its last picture instead of holding up the stream.
@@ -1519,7 +1531,7 @@ stream.
 
 Each camera, display, window, image, media file, color, microphone, and system
 audio also has a track of its own, so the studio can replay or record it on its
-own. These tracks stay in the studio unless a source is [published independently](#published-independently): otherwise the program is all it publishes to a relay. They are listed in a local
+own. These tracks stay in the studio unless a source is [published independently](#published-independently): otherwise the program and its composition are all it publishes to a relay. They are listed in a local
 catalog under the `live.kixel.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
@@ -1579,24 +1591,37 @@ and software otherwise.
 
 ### Published independently
 
-A source with a track of its own can be **Published independently**, a
-switch in the inspector's Source section, off by default and kept in the scene file's
-`published` list. Its track then goes to the relay beside the program, in the
-same broadcast: the program's catalog lists it under the `live.kixel.studio`
-section's `sources`, by source name, as a hang catalog of its own whose track
-names start with `source/`. Viewers fetch it and place it over the program
-themselves, as the [layer layout](#layer-layout) says.
+A broadcast source, such as a guest's camera, or a source with a track of its
+own can be **Published independently**, a switch in the inspector's Source
+section, off by default and kept in the scene file's `published` list.
+Viewers then fetch it as a broadcast of its own and place it over the program
+themselves, as the [composition](#composition) says:
+
+- A local source's track goes to the relay as a broadcast of its own at
+  `<broadcast>/source/<name>`, with a hang catalog on the program's clock,
+  so its name is one segment of that path: no `/`, not `.` or `..`, and a `\`
+  only before another `\`.
+- A broadcast source is already its publisher's, so viewers read it where the
+  studio does, which their relay must let them: a guest's, under the room.
+  The studio publishes nothing more of it.
 
 The program leaves a published source out, wherever it or a clone of it is
-placed, and so does every audio scene's mix. The studio draws it only as
-viewers will: over the program, on every page and in the program's
-virtual camera, so both show what viewers see. It goes over every other layer of its scene, and over the always-on-top layers,
-however the scene stacks it. Recordings hold the program as published,
-without it, and recording **Each source too** gives a published camera,
-display, window, or microphone a file of its own. Published and recorded
-scenes, and a scene that shows the program, leave it out too. While viewers read its track, it claims its bitrate of the connection beside the program's, and its video encodes at what the connection grants it. Its track carries one rendition, the
-plain capture before any filter or gain, and encodes for as long as it is
-published, holding an encode session as one on program does.
+placed, and so does every audio scene's mix the studio encodes: the
+program's audio, recordings, and published scenes. People in the studio
+still hear it as viewers do: **Listen** and guests' return feeds mix it in
+where its audio scene reaches it, at its gain, mute, pan, and delay. The
+studio draws it only as viewers will: over the program, on every page and in
+the program's virtual camera, so both show what viewers see. It goes over
+every other layer of its scene, and over the always-on-top layers, however
+the scene stacks it. Recordings hold the program as published, without it,
+and recording **Each source too** gives a published camera, display, window,
+or microphone a file of its own. Published and recorded scenes, and a scene
+that shows the program, leave it out too. While viewers read a local
+source's track, it claims its bitrate of the connection beside the
+program's, and its video encodes at what the connection grants it. Its track
+carries one rendition, the plain capture before any filter or gain, and
+encodes for as long as it is published, holding an encode session as one on
+program does.
 
 Every player must reproduce how it is placed, so a layer showing it takes no
 filter but opacity, no blend mode, and no shape, nor do its source's filters or
@@ -1605,74 +1630,131 @@ draws can place it. A source with
 its background removed cannot be published, since H.264 carries no
 transparency and its track would show the background.
 
-#### Layer layout
+#### Composition
 
-While a source is published independently, the program's broadcast also
-carries a JSON track, `live.kixel.studio.layers`, listed in its catalog's `json`
-section. It is a snapshot: each change is a new group, stamped on the media
-clock with the frame it takes effect on, so a viewer who joins late reads the
-layout in force. The format is the studio's own until hang specifies a layer
-layout:
+While on air, beside the program, the studio publishes a composition at
+`<broadcast>/composition`, a broadcast of its own whose hang catalog carries
+it in the `live.kixel.studio.composition` section, on the program's clock.
+Each change is a new catalog, stamped with the program frame it takes effect
+on, so a player applies it when it plays that frame, and a viewer who joins
+late reads the composition in force. The catalog also lists the program's
+video and audio renditions, each with `"broadcast": "."`, so a player that
+knows no compositions plays the program from it, as it does at
+`<broadcast>`. The section's format is the studio's own until hang specifies
+a composition:
 
 ```json
 {
-  "version": 1,
-  "canvas": { "width": 1920, "height": 1080 },
-  "start": 10000000,
-  "pictures": [
-    {
-      "item": {
+  "video": {
+    "renditions": {
+      "video": { "broadcast": ".", "codec": "avc1.640028", "codedWidth": 1920, "codedHeight": 1080 }
+    }
+  },
+  "audio": {
+    "renditions": {
+      "audio": { "broadcast": ".", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2 }
+    }
+  },
+  "sync": { "clock": { "wall": 1751846400000000, "timescale": 1000000 }, "interval": 2000 },
+  "live.kixel.studio.composition": {
+    "version": 2,
+    "canvas": { "width": 1920, "height": 1080 },
+    "start": 10000000,
+    "program": { "broadcast": ".", "instance": "5c1f0e3a9b7d4e21a8f6c0d3b2e19f47" },
+    "sources": {
+      "camera": { "broadcast": "source/camera" },
+      "mic": { "broadcast": "source/mic", "sound": { "gain": 1.0, "delay": "80ms" } },
+      "alice": {
+        "broadcast": "../guests/alice/camera.hang",
+        "instance": "9e4b7c21d0a3f6e85b1c2d4f7a9e0b36",
+        "offset": -1500000,
+        "sound": { "gain": 0.8, "pan": -0.5 }
+      }
+    },
+    "pictures": [
+      {
         "source": "camera",
         "rect": { "x": 1440.0, "y": 760.0, "width": 400.0, "height": 225.0 },
-        "visible": true,
         "filters": [{ "kind": "opacity", "amount": 0.9 }],
         "keyframes": [{ "at": "1s", "x": 600.0 }]
-      }
-    }
-  ],
-  "sounds": [{ "source": "mic", "audio": { "gain": 1.0, "muted": false, "delay": "80ms" } }]
+      },
+      { "source": "alice", "rect": { "x": 40.0, "y": 760.0, "width": 400.0, "height": 225.0 } }
+    ]
+  }
 }
 ```
 
-- `version` is 1. A player refuses any other loudly and plays the program
-  alone.
+- `version` is 2. A player refuses any other loudly and plays the program
+  alone, as it does a composition in a catalog whose track has no timescale,
+  which says nothing of when an update applies. Version 1 was the layer
+  layout, a track of the program's broadcast naming its tracks.
 - `canvas` is the program's size, which pictures are placed on in pixels.
 - `start` is when the scene on program went on, in microseconds on the media
   clock: the moment its pictures' keyframes play from.
-- `pictures` lists each layer of the scene on program, then of the always-on-top ones,
-  showing a published source, back to front over the program, shown or
-  hidden. Each `item` is a layer as the scene file writes it: its `source` names the source's
-  entry under the catalog's `live.kixel.studio` `sources` (the source a clone
-  shows), and its `crop` and `filters` fold in its source's own.
-- `sounds` lists each published source the audio scene on program holds,
-  with the `gain`, `muted`, `pan`, and `delay` it plays at.
-- Each picture and sound may carry a subscription `priority` (0 if absent)
-  and whether a viewer may `toggle` it off (`false` if absent).
+- `program` names the program's broadcast, and `sources` each source
+  published independently that a picture shows or the program's audio plays,
+  by source name. Each `broadcast` is relative to the composition's path, as
+  hang's references are, so `.` is the program and `..` walks up a segment.
+  An `instance` names the stream it describes, left out when the relay minted
+  the one the studio reads.
+- A source's `offset`, in microseconds (0 if absent), is added to its
+  broadcast's timestamps to put them on the program's clock. A local source
+  is stamped on that clock, at 0. A guest keeps a timeline of its own, so its
+  offset is where the studio played it: a new composition follows it once it
+  moves more than 10 ms, and a guest who joins again, as a new instance, gets
+  a new one. A guest the studio shows nothing of, such as one offline, is
+  left out with its pictures until it shows again. A still,
+  such as another studio's published image, has no moment, so without sound
+  its offset is 0.
+- A source's `sound`, when the audio scene on program holds it, is the
+  `gain`, `muted`, `pan`, and `delay` it plays at.
+- Each source may carry a subscription `priority` (0 if absent) and whether a
+  viewer may `toggle` it off (`false` if absent).
+- `pictures` lists each layer of the scene on program, then of the
+  always-on-top ones, showing a published source, back to front over the
+  program, shown or hidden. Each is a layer as the scene file writes it: its
+  `source` names a key of `sources` (the source a clone shows), and its
+  `crop` and `filters` fold in its source's own. While the show goes out in
+  both formats, each is placed as the landscape picture places it, hidden
+  when shown in portrait alone: the composition goes with the program's
+  landscape broadcast, and the portrait one draws the published sources in.
 
-A take changes the layout on the frame the program starts showing the new
-scene, so the published sources of the scene leaving go off and those of the
-scene coming in go on at once, even through a transition.
+A take changes the composition on the frame the program starts showing the
+new scene, so the published sources of the scene leaving go off and those of
+the scene coming in go on at once, even through a transition. A published
+scene named `composition` would publish where the composition is, so it does
+not publish.
 
 #### Watching
 
-`moq-studio --watch https://relay.example/anon/my-show` plays a studio
-broadcast in a window as a viewer sees it: the program, with each picture of
-its layer layout over it and each sound mixed with it. The URL's path names
-the broadcast, as `moq play`'s does, and `--connect-token` and the `--quic-*`
-flags apply to it; `--connect`, `--failover`, and `--room` are refused
-beside it. It is a prototype for settling the layout's format, which goes
-once `moq play` plays layers.
+`moq-studio --watch https://relay.example/anon --broadcast my-show` plays a
+studio's composition in a window as a viewer sees it: the program at
+`my-show`, with each picture over it and each sound mixed with it. The URL
+names the relay as `--connect` does, and must reach every broadcast the
+composition lists, guests' included; `--connect-token` and the `--quic-*`
+flags apply to it, and `--connect`, `--failover`, and `--room` are refused
+beside it. It is a prototype for settling the composition's format, which
+goes once `moq play` plays compositions.
 
-- Each layout takes effect when the program plays the frame it is stamped
-  with, and its pictures' keyframes play from its `start`.
-- Each source plays its own track on the program's clock: a picture shows
-  when the program's picture stamped alike does, and a sound plays with the
-  program's sound stamped alike, at its `gain`, `muted`, `pan`, and `delay`.
-  A frame too late for its moment is dropped.
-- A broadcast without a layout, or with a layout of another `version`, plays
-  its program alone; the window says why for the latter.
-- Guests' broadcasts are not in the layout yet, so only sources local to the
-  studio play as layers. `priority` and `toggle` are not applied.
+- Each catalog's composition takes effect when the program plays the frame
+  the catalog is stamped with, a catalog without one plays the program alone
+  from there, as does a catalog that ends or fails at once, and a
+  composition's pictures' keyframes play from its `start`.
+- Each source plays its own broadcast on the program's clock, its timestamps
+  moved by its `offset`: a picture shows when the program's picture stamped
+  alike does, and a sound plays with the program's sound stamped alike, at
+  its `gain`, `muted`, `pan`, and `delay`. A frame too late for its moment is
+  dropped. A new offset plays on without fetching the broadcast again. A
+  source's sound is fetched only while the composition gives it a `sound`,
+  and gaining or losing one does not fetch its picture again.
+- A source whose `instance` another stream replaced shows nothing until a
+  composition names the new one, and a composition naming another program
+  stream waits for it, so neither plays on a timeline its offset is not for.
+- A broadcast without a composition, or with one of another `version`, in an
+  untimed catalog, or one it cannot place, such as one listing a broadcast
+  above the relay URL's path, plays its program alone; the window says why
+  for the latter.
+- `priority` and `toggle` are not applied.
 - Sound needs a build with `capture`; without it the window says so in the
   log and plays the pictures alone.
 

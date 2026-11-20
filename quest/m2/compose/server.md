@@ -27,14 +27,10 @@ too and moq never depends on this repository. Settle its name in this quest
 and document it in `README.md`.
 
 It flattens the composition the studio publishes
-([the composition](/quest/m2/compose/layout.md)); until that lands, it
-flattens the provisional `live.kixel.studio.layers` track (`rs/moq-scene/src/layout.rs`,
-and the README's "Layer layout").
+(`rs/moq-scene/src/composition.rs`, and the README's "Composition"), placing
+each listed broadcast on the program's clock at its offset as the
+`moq-studio --watch` prototype (`rs/moq-studio/src/watch.rs`) does.
 
 ## Required
 
 - [Destinations](/quest/m0/destinations.md) - the egress library the server pushes RTMP and WHIP through
-
-## Related
-
-- [The studio publishes a composition](/quest/m2/compose/layout.md) - the format it flattens

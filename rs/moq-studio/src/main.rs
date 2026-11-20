@@ -55,16 +55,17 @@ pub struct Config {
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub scenes: Option<PathBuf>,
 
-	/// Play a studio broadcast instead, as a viewer sees it: the program with
-	/// each source published independently over it. The URL's path names the
-	/// broadcast, as `moq play`'s does, such as
-	/// `https://relay.example/anon/studio`. A prototype, until `moq play` plays
-	/// the layer layout.
+	/// Play a studio broadcast instead, as a viewer sees it: its composition,
+	/// the program with each source published independently over it. The URL
+	/// names the relay, as `--connect` does, and `--broadcast` the studio's
+	/// broadcast under it, such as `https://relay.example/anon` and `studio`.
+	/// A prototype, until `moq play` plays compositions.
 	#[usage(long)]
 	pub watch: Option<url::Url>,
 
 	/// The broadcast path the program goes live at, for this run, over the
-	/// show's own (Settings, Stream), which is `studio` until set.
+	/// show's own (Settings, Stream), which is `studio` until set. With
+	/// `--watch`, the studio broadcast played, `studio` unless given.
 	#[usage(long)]
 	pub broadcast: Option<String>,
 
@@ -176,7 +177,8 @@ fn main() -> anyhow::Result<ExitCode> {
 	config.check_deprecated()?;
 	config.check_watch()?;
 	if let Some(url) = config.watch.clone() {
-		watch::run(config.client.clone(), config.quic.clone(), url)?;
+		let broadcast = config.broadcast.as_deref().unwrap_or(stream::BROADCAST);
+		watch::run(config.client.clone(), config.quic.clone(), url, broadcast)?;
 		return Ok(ExitCode::SUCCESS);
 	}
 
@@ -723,7 +725,7 @@ mod tests {
 	/// `--watch` opens no scene file and names its own relay.
 	#[test]
 	fn watch_takes_no_scene_file_or_relay() {
-		parse(&["--watch", "https://relay.example/anon/studio"])
+		parse(&["--watch", "https://relay.example/anon", "--broadcast", "studio"])
 			.check_watch()
 			.unwrap();
 		for refused in [
