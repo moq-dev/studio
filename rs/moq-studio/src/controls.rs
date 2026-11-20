@@ -250,6 +250,23 @@ impl Action {
 			fixed => fixed.fixed().words,
 		}
 	}
+
+	/// Whether a phone paired as a remote may fire it: what its page shows,
+	/// a scene's pad, a mute, TAKE, and AUTO. Every action says, so a new one
+	/// is kept off the network until it is placed here.
+	pub fn remote(&self) -> bool {
+		match self {
+			Self::Scene(_) | Self::Mute(_) | Self::Cut | Self::Transition => true,
+			Self::StudioMode
+			| Self::Replay
+			| Self::SaveClip
+			| Self::Marker
+			| Self::Record
+			| Self::Panic
+			| Self::GoLive
+			| Self::EndStream => false,
+		}
+	}
 }
 
 impl std::fmt::Display for Action {
@@ -623,7 +640,7 @@ impl Controls {
 	/// so the next go-live, end of stream, or save tries them again; and join
 	/// its guests' room on them, unless joined already. Call it holding
 	/// [`Self::following`], inside the runtime.
-	fn follow(&self, stream: &Stream) {
+	fn follow(self: &Arc<Self>, stream: &Stream) {
 		if !crate::show::follow(&self.engine, stream) {
 			self.rewatch.store(true, Ordering::Release);
 		}
@@ -634,7 +651,7 @@ impl Controls {
 	/// guests' room if the last try failed, so a room whose key file is back
 	/// joins at the next go-live, end of stream, or save, as well as on Try
 	/// again. Call it holding [`Self::following`], inside the runtime.
-	fn catch_up(&self, stream: &Stream, waiting: bool) {
+	fn catch_up(self: &Arc<Self>, stream: &Stream, waiting: bool) {
 		match waiting {
 			true => self.follow(stream),
 			false => self.join_room(stream),
@@ -646,7 +663,7 @@ impl Controls {
 	/// Call it holding [`Self::following`], which keeps two joins apart, as
 	/// [`Self::joined`] is let go while one reads the key file, so the UI
 	/// reading the failure never waits on the disk; inside the runtime.
-	fn join_room(&self, stream: &Stream) {
+	fn join_room(self: &Arc<Self>, stream: &Stream) {
 		let room = (stream.relay().cloned(), stream.guests());
 		{
 			let mut joined = self.joined.lock().unwrap();
@@ -667,6 +684,9 @@ impl Controls {
 		}
 		let joining =
 			crate::guests::Joining::connect(&room.1, room.0.as_ref(), &stream.client(), stream.quic().clone());
+		// Weak, so the remotes never keep the controls, and the engine, alive.
+		let board: std::sync::Weak<Self> = Arc::downgrade(self);
+		let joining = joining.map(|joining| joining.map(|joining| joining.driving(board)));
 		// A room that cannot be leaves the last one too, since its settings
 		// are gone; it is tried again once they change.
 		let result = match joining {
