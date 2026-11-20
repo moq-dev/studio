@@ -90,6 +90,11 @@ shows those pictures beside the frames they implement.
 - **Milestones:** ✅ redesigning what exists is m0, here. Features that do not
   exist yet are [m1](/quest/m1/README.md), and three more are
   [m2](/quest/m2/README.md) (rejected: all in m0; all in m1).
+- **Mods:** ✅ features most streamers never use are off until switched on
+  in Settings > Mods, and absent from every page until then: Both formats,
+  Studio mode, Multiview, Phone remote, Published scenes, and Scene graph
+  (rejected: leaving them on the pages and in Advanced). Decided 2026-11-20
+  (maintainer, /quest-plan); see [Mods](/quest/m0/ux/mods.md).
 - **Dropped:** a rundown that fills overlays, one-click looks and a brand kit,
   active-speaker layouts, control surfaces, and a rehearsal mode. Not planned.
 
@@ -106,7 +111,7 @@ program's card is the live picture.
 | Scene pads with live thumbnails | MIX: every strip, sends, filters, delay | Where the stream goes, keys, failover |
 | A meter and a mute for each sound on air | REVIEW: replay, clips, recordings | Recording folder and contents |
 | The live control, health dot, and record | Health details, from the health dot | Hotkeys, virtual camera, guests' room |
-| The panic key | Guests, from Add | Effects, published scenes, the scene graph, edit history |
+| The panic key | Guests, from Add | Edit history; Mods: both formats, Studio mode, multiview, phone remote, published scenes, the scene graph |
 
 ### The frames
 
