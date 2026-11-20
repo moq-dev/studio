@@ -440,7 +440,7 @@ impl Sources {
 		let listened = |scene: &str| {
 			heard
 				.get(scene)
-				.is_some_and(|heard| heard.iter().any(|name| collection.published.contains(*name)))
+				.is_some_and(|heard| heard.iter().any(|name| collection.published.contains_key(*name)))
 		};
 		self.mixes.retain(|name, _| collection.audio_scene(name).is_some());
 		self.listened.retain(|name, _| listened(name));
@@ -487,7 +487,7 @@ impl Sources {
 				// A source published independently reaches viewers by its own
 				// track, never through a mix they get, but people in the studio
 				// hear it.
-				let published = collection.published.contains(name);
+				let published = collection.published.contains_key(name);
 				for (scene, mix) in &self.mixes {
 					route(mix, strip, !published && reached(scene));
 				}
@@ -3125,7 +3125,8 @@ pub(crate) mod test {
 	pub(crate) struct Still {
 		_publication: moq_net::origin::Route,
 		_catalog: moq_mux::catalog::Producer,
-		_track: moq_net::track::Producer,
+		/// The image's track, which a reader subscribes to.
+		pub(crate) track: moq_net::track::Producer,
 	}
 
 	impl Still {
@@ -3151,7 +3152,7 @@ pub(crate) mod test {
 			Self {
 				_publication: publication,
 				_catalog: catalog,
-				_track: track,
+				track,
 			}
 		}
 	}
@@ -3355,7 +3356,7 @@ mod tests {
 			assert!(sources.mix(program).unwrap().routes(&strip));
 			assert!(sources.listened(program).unwrap().routes(&strip), "the mix itself");
 
-			collection.published.insert("guest".into());
+			collection.published.insert("guest".into(), Default::default());
 			assert!(sources.sync(&collection).is_empty());
 			assert!(!sources.mix(program).unwrap().routes(&strip), "encoded");
 			let listened = sources.listened(program).unwrap().clone();
@@ -3764,14 +3765,15 @@ mod tests {
 	}
 
 	/// A layer whose broadcast is a still, an image file on a binary track,
-	/// shows it as it arrives.
+	/// shows it as it arrives, and once removed, as a source a viewer switched
+	/// off is, stops fetching it.
 	#[tokio::test]
 	async fn a_layer_shows_a_still() {
 		local(async {
 			let dir = tempfile::tempdir().unwrap();
 			let (context, origin) = context(dir.path());
 			let _live = live(&origin, false).await;
-			let _still = Still::new(&origin, "room/logo", [255, 0, 0, 255]);
+			let still = Still::new(&origin, "room/logo", [255, 0, 0, 255]);
 
 			let mut collection = collection();
 			collection.sources.insert(
@@ -3793,6 +3795,12 @@ mod tests {
 			})
 			.await;
 			assert_eq!(pixels, [255, 0, 0, 255]);
+			assert!(still.track.subscription().is_some(), "fetched while it plays");
+
+			collection.sources.remove("logo");
+			assert!(sources.sync(&collection).is_empty());
+			assert!(sources.get("logo").is_none());
+			until(|| still.track.subscription().is_none().then_some(())).await;
 		})
 		.await;
 	}

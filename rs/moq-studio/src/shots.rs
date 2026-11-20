@@ -66,6 +66,9 @@ enum View {
 	},
 	/// BUILD with the host's layer selected and its row's menu open.
 	Menu,
+	/// BUILD with the host's layer selected, its inspector scrolled to how
+	/// viewers may treat it, published independently.
+	Published,
 	/// The edit history, under the title bar's undo, after an edit.
 	History,
 	/// The show's menu, open from the title bar.
@@ -305,6 +308,9 @@ views! {
 	build_add: Still, studio(View::Build { side: Side::Add, inspect: Inspect::Layer, index: None });
 	/// A layer row's menu, as a right click opens it.
 	build_menu: Still, studio(View::Menu);
+	/// A source published independently selected: under its switch in the
+	/// inspector, whether viewers may switch it off and its priority for them.
+	build_published: Still, Open::Studio { view: View::Published, size: SIZE, show: "published.toml", relay: false };
 	/// BUILD in a window snapped beside a game: the inspector is a tab beside
 	/// Layers and Add.
 	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml", relay: false };
@@ -451,6 +457,9 @@ views! {
 	/// Settings, Advanced: published scenes and sources, the virtual camera,
 	/// the effects, and the scene graph.
 	settings_advanced: Still, studio(View::Setting(Setting::Advanced));
+	/// Settings, Advanced with a source published: how viewers may treat it,
+	/// as a sound alone, with no layer to inspect, sets it.
+	settings_advanced_published: Still, Open::Studio { view: View::Setting(Setting::Advanced), size: SIZE, show: "published.toml", relay: false };
 	/// The scene graph, in a window of its own.
 	graph: Still, studio(View::Graph);
 	/// The command palette as its key opens it: every action, each with its
@@ -1152,6 +1161,7 @@ fn settings_change_the_show_and_move_the_guests() {
 	harness.get_by_label("Pair a phone").click();
 	harness.run_steps(2);
 	assert!(harness.query_by_label("Copy link").is_some(), "the phone's link shows");
+	let left = engine.room().unwrap();
 	harness.get_by_label("Guests").click();
 	harness.run_steps(2);
 	fill(&mut harness, 0, "other");
@@ -1172,6 +1182,8 @@ fn settings_change_the_show_and_move_the_guests() {
 	fill(&mut harness, 1, "other.jwk");
 	harness.get_by_label("Save").click();
 	joined(&mut harness, "other");
+	// The room left changes nothing the next could have missed.
+	assert!(left.unpair("phone").is_err(), "the room left removes a remote");
 	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
 	assert!(saved.contains("room = \"other\""), "{saved}");
 	// ...until the room is another, which its link cannot join.
@@ -1880,7 +1892,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
 		View::KeepClear { .. } => studio.build(Side::Layers, Inspect::Layer, Some(0)),
-		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
+		View::Menu | View::Published => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
 		View::GuestsFailed => studio.open(Setting::Guests),
@@ -2018,6 +2030,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		View::Restart => {
 			harness.get_by_label("720p").click();
+			harness.run_steps(4);
+		}
+		View::Published => {
+			harness.get_by_label("Priority").scroll_to_me();
 			harness.run_steps(4);
 		}
 		View::CustomCanvas => {

@@ -314,7 +314,7 @@ is named for it, with these sections:
 | Shape | Pick its outline, square, rounded, circle, or arch, give it a border inside that outline and the border's color, and give it a soft shadow, which follows the outline and is the layer's first drop shadow filter. |
 | Look | Remove its source's background, which every layer showing the source loses (make it independent to cut out here alone); grade its color through a LUT source; add, order, set, and remove its filters, copy them, or paste copied filters after its own; and set its blend mode. |
 | Shown in | See how many places show its source, **Linked in 3 scenes**, and **Make independent**, which points this layer at a copy of the source of its own, keeping its look, so editing that look no longer edits the others. A copy says what it copies. |
-| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. Publish it independently (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. **Warn when it goes dark**, on by default for a camera, display, or window, watches it for [going dark](#a-capture-gone-dark). For a role, pick the source filling it. |
+| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. Publish it independently, then whether viewers may switch it off and its priority for them (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. **Warn when it goes dark**, on by default for a camera, display, or window, watches it for [going dark](#a-capture-gone-dark). For a role, pick the source filling it. |
 
 Its **Animate** tab holds the layer's keyframes (see [Keyframes](#keyframes)).
 With no layer selected, the inspector shows the edited scene: rename it,
@@ -1197,15 +1197,16 @@ bar, as a key's does, and on the phone.
 Settings, Remote, pairs one: name it, **Pair a phone**, and scan the QR code
 with the phone's camera, or **Copy link** to send it. A remote joins the
 [guests' room](#guests), so it needs the room, its key, and the join page set
-there first; its page is `remote.html` beside the join page, and the link
+there first; its page is `remote.html` beside the join page, so a join page
+in a directory ends with `/` (`https://example.com/join/`), and the link
 lasts as long as a guest's (`--guest-expiry`). The pane lists each phone
 paired, whether it is connected, and its link, with **Show link** while that
 link still works, **New link**, and **Remove**. Treat the link like a
 password: anyone holding it can drive the show until you remove it.
 
 - A remote presses only what is safe to press by mistake from a pocket: a
-  scene's pad, TAKE, AUTO, and a sound's mute. Going live, ending the
-  stream, the panic key, recording, and replay stay on the studio.
+  scene's pad, TAKE, AUTO, and the mute of a source with sound. Going live,
+  ending the stream, the panic key, recording, and replay stay on the studio.
 - A remote's token, signed by the room key like a guest's, may publish only
   its presses, at `.press/<name>/<generation>` in the room, and read only the
   desk the studio publishes it at `.remote/<name>/<generation>`, which carries
@@ -1218,10 +1219,13 @@ password: anyone holding it can drive the show until you remove it.
   before the studio restarted or rejoined the room is not done again, since
   it was most likely done before: the page asks you to check it first.
 - **Remove** stops reading its presses at once, and stops renewing its token,
-  so it is disconnected within `--guest-expiry`; **New link** pairs it again
+  so it is disconnected within `--guest-expiry`, and no press of it is done
+  once Remove says it is removed; **New link** pairs it again
   under a new generation, which a link from before cannot reach. Pairings and
   removals outlast a restart, kept beside the room key as
-  `room.remotes.toml` for `room.jwk`.
+  `room.remotes.toml` for `room.jwk`. While the studio moves to another room,
+  or rejoins this one with new settings, pairing, removing, and inviting
+  guests are refused until it has joined, so the next room misses none.
 
 ## Scene file
 
@@ -1422,8 +1426,15 @@ program and holding nothing. `[audio.<source>]` sets a source's linear `gain`,
 `muted` (which the strip's mute and the panic key set), `pan` (`-1.0` hard left to `1.0` hard right, centered by
 default), and `delay`, in every audio scene holding it.
 
-`published = ["camera", "mic"]`, a top-level key, names the sources
-[published independently](#published-independently).
+`[published.<source>]` publishes a source
+[published independently](#published-independently), even empty: its
+`priority` (0 by default) ranks its tracks against the program's for
+viewers, and `toggle = true` lets each viewer switch it off.
+Scene files from before named them in a `published = [...]` list, which no
+longer loads: write a `[published.<name>]` table for each. A history saved
+before then that holds a publish edit fails to load the same way, naming
+`show.history.toml` beside the scene file: delete it to start a new history,
+so undo no longer reaches the edits before. A history without one loads.
 
 `portrait = true`, a top-level key, sends a portrait picture beside the
 landscape one (see [Both formats at once](#both-formats-at-once)). Meanwhile,
@@ -1640,9 +1651,9 @@ and software otherwise.
 
 A broadcast source, such as a guest's camera, or a source with a track of its
 own can be **Published independently**, a switch in the inspector's Source
-section, off by default and kept in the scene file's `published` list.
-Viewers then fetch it as a broadcast of its own and place it over the program
-themselves, as the [composition](#composition) says:
+section, off by default and kept in the scene file's `[published.<name>]`
+table. Viewers then fetch it as a broadcast of its own and place it over the
+program themselves, as the [composition](#composition) says:
 
 - A local source's track goes to the relay as a broadcast of its own at
   `<broadcast>/source/<name>`, with a hang catalog on the program's clock,
@@ -1669,6 +1680,21 @@ program's, and its video encodes at what the connection grants it. Its track
 carries one rendition, the plain capture before any filter or gain, and
 encodes for as long as it is published, holding an encode session as one on
 program does.
+
+Once it is published, two more controls say how viewers may treat it, which
+the composition carries. They sit under the switch, and in Settings, Advanced
+under each published source, which is where a sound alone, with no layer to
+inspect, sets them:
+
+- **Viewers may switch it off**, off by default, lets each viewer turn it
+  off in their player, which then stops fetching it, such as a facecam or a
+  screen share they can do without. The studio encodes it either way.
+- **Priority**, 0 by default, ranks its tracks against the program's when a
+  viewer's connection cannot carry everything: its picture and sound are
+  fetched at hang's priority for each, 60 and 80, plus this, so below 0 it
+  degrades before the program and above 0 after. Within 19 either way, its
+  sound still goes ahead of the program's picture, and its picture behind
+  the program's sound.
 
 Every player must reproduce how it is placed, so a layer showing it takes no
 filter but opacity, no blend mode, and no shape, nor do its source's filters or
@@ -1709,7 +1735,7 @@ a composition:
     "start": 10000000,
     "program": { "broadcast": ".", "instance": "5c1f0e3a9b7d4e21a8f6c0d3b2e19f47" },
     "sources": {
-      "camera": { "broadcast": "source/camera" },
+      "camera": { "broadcast": "source/camera", "priority": -10, "toggle": true },
       "mic": { "broadcast": "source/mic", "sound": { "gain": 1.0, "delay": "80ms" } },
       "alice": {
         "broadcast": "../guests/alice/camera.hang",
@@ -1755,8 +1781,12 @@ a composition:
   its offset is 0.
 - A source's `sound`, when the audio scene on program holds it, is the
   `gain`, `muted`, `pan`, and `delay` it plays at.
-- Each source may carry a subscription `priority` (0 if absent) and whether a
-  viewer may `toggle` it off (`false` if absent).
+- A source's `priority` (0 if absent) ranks its tracks against the
+  program's: a player subscribes to each of them at hang's priority for its
+  kind (60 for video, 80 for audio) plus it, saturating, so under congestion
+  one below 0 degrades first. `toggle` (`false` if absent) lets a viewer
+  switch the source off, which unsubscribes it and drops its pictures and
+  sound.
 - `pictures` lists each layer of the scene on program, then of the
   always-on-top ones, showing a published source, back to front over the
   program, shown or hidden. Each is a layer as the scene file writes it: its
@@ -1801,7 +1831,13 @@ goes once `moq play` plays compositions.
   untimed catalog, or one it cannot place, such as one listing a broadcast
   above the relay URL's path, plays its program alone; the window says why
   for the latter.
-- `priority` and `toggle` are not applied.
+- Each source the composition lets a viewer `toggle` has a switch in the
+  window's top-right corner, on until switched off. Off, it is not fetched,
+  and neither its pictures nor its sound play; the switch holds across
+  compositions, and a source the composition no longer lets a viewer toggle
+  plays, whatever its switch said.
+- `priority` is not applied yet: every source is fetched at hang's
+  priorities, as the program is.
 - Sound needs a build with `capture`; without it the window says so in the
   log and plays the pictures alone.
 

@@ -213,7 +213,7 @@ impl Board {
 					name: name.to_string(),
 					kind: kind(source),
 					microphone: matches!(source, Some(Source::Microphone { .. })),
-					published: collection.published.contains(name),
+					published: collection.published.contains_key(name),
 					audio: collection.audio.get(name).cloned().unwrap_or_default(),
 					reach: reach(Strip::Sound(name)),
 				}
@@ -1835,7 +1835,7 @@ mod tests {
 	fn a_published_sound_reaches_where_it_is_sent() {
 		let unpublished = collection();
 		let mut collection = collection();
-		collection.published.insert("mic".into());
+		collection.published.insert("mic".into(), Default::default());
 		for to in ["Mics", "Stream", "Headphones", "Recording"] {
 			assert_eq!(
 				reach(&collection, Strip::Sound("mic"), to),

@@ -26,6 +26,9 @@ enum Asked {
 	Reload(String),
 	/// Publish the source independently, or stop.
 	Publish(String, bool),
+	/// Set how viewers may treat the source published independently,
+	/// labelled, as part of a gesture.
+	Viewers(String, super::Viewers, String, Option<u64>),
 	/// Watch the capture for going dark, or stop.
 	Warn(String, bool),
 	/// Fill the role called this with this source, or leave it unfilled.
@@ -271,7 +274,7 @@ impl Panels {
 		// viewers place a published source where the scene file does. Keeping
 		// clear places only the landscape picture, so not one shown only in
 		// portrait.
-		let published = collection.published.contains(collection.capture(&item.source));
+		let published = collection.published.contains_key(collection.capture(&item.source));
 		if picked.layer.scene.is_some()
 			&& item.slot.is_none()
 			&& !published
@@ -564,7 +567,8 @@ impl Panels {
 				}
 			}
 			if source.independent() {
-				let mut published = collection.published.contains(&name);
+				let viewers = collection.published.get(&name).copied();
+				let mut published = viewers.is_some();
 				let hover = match source {
 					Source::Broadcast { .. } => {
 						"Leave this broadcast out of the program and list it in the composition, for viewers \
@@ -586,6 +590,11 @@ impl Panels {
 					.changed()
 				{
 					asked = Some(Asked::Publish(name.clone(), published));
+				}
+				if let Some(viewers) = viewers
+					&& let Some((viewers, label, gesture)) = viewers_ui(ui, &name, viewers, &mut self.gestures)
+				{
+					asked = Some(Asked::Viewers(name.clone(), viewers, label, gesture));
 				}
 			}
 			// A role takes the look of the source filling it.
@@ -653,8 +662,11 @@ impl Panels {
 			Asked::Publish(name, published) => {
 				let verb = if published { "Publish" } else { "Stop publishing" };
 				edit(&mut state, format!("{verb} `{name}` independently"), None, |draft| {
-					draft.set_published(&name, published)
+					draft.set_published(&name, published.then(Default::default))
 				})
+			}
+			Asked::Viewers(name, viewers, label, gesture) => {
+				edit(&mut state, label, gesture, |draft| viewers.apply(draft, &name))
 			}
 		};
 		drop(state);

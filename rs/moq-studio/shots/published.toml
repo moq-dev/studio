@@ -1,0 +1,33 @@
+# The show `just shots` renders a published source on: the host's picture,
+# published independently, which viewers may switch off and which degrades
+# before the program for them.
+version = 1
+
+[canvas]
+width = 1920
+height = 1080
+framerate = 30
+
+[sources.host]
+kind = "image"
+path = "person.jpg"
+
+[sources.backdrop]
+kind = "color"
+color = "#101828"
+
+[sources.bar]
+kind = "color"
+color = "#2563ebe6"
+
+[published.host]
+priority = -10
+toggle = true
+
+[[scenes]]
+name = "Main"
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
+    { source = "host", rect = { x = 1200, y = 600, width = 640, height = 360 } },
+    { source = "bar", rect = { x = 80, y = 860, width = 900, height = 120 } },
+]

@@ -29,6 +29,10 @@ Outside the dev shell, such as in Pullfrog's job, which puts the shell's tools o
 
 `README.md` is the user guide. A change to what a user does (flags, panels, the scene file, outputs) updates it in the same PR.
 
+Keep the window simple.
+A PR that adds visible UI says in its body why most streamers need it.
+A feature most won't use is a mod in Settings > Mods, off by default and absent from every page, menu, hotkey list, and the palette until enabled.
+
 `just shots` renders named views of the window to PNG with no display, on Linux (the table in `rs/moq-studio/src/shots.rs`).
 A PR that changes what the window shows adds a view for each page or state it builds, and shows the views it changes in its body, beside the mock-up frames they implement.
 To host them, convert the views to lossy WebP (`cwebp -q 80`), commit them in a commit of their own, link them by that commit's SHA, and delete them in the next commit.

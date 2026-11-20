@@ -1327,7 +1327,7 @@ impl Panels {
 			"Publish a source independently",
 			"Viewers and services fetch it on its own. It leaves the program and the audio the studio encodes, though Listen still hears it.",
 			|ui| {
-				let others = sources.iter().filter(|name| !published.contains(*name));
+				let others = sources.iter().filter(|name| !published.contains_key(*name));
 				add_menu(
 					ui,
 					"Publish a source",
@@ -1336,13 +1336,30 @@ impl Panels {
 						source_publish = Some((name, true));
 					},
 				);
-				for name in published.iter().rev() {
+				for name in published.keys().rev() {
 					if chip(ui, name, "Stop publishing it independently") {
 						source_publish = Some((name.clone(), false));
 					}
 				}
 			},
 		);
+		// Here too, as a sound alone has no layer to inspect.
+		let mut viewers_asked = None;
+		for (name, viewers) in &published {
+			labeled(
+				ui,
+				name,
+				"How viewers may treat it, published independently.",
+				NAME,
+				|ui| {
+					ui.vertical(|ui| {
+						if let Some(asked) = viewers_ui(ui, name, *viewers, &mut self.gestures) {
+							viewers_asked = Some((name.clone(), asked));
+						}
+					});
+				},
+			);
+		}
 		if let Some((index, published)) = scene_publish {
 			let name = scenes[index].name.clone();
 			let label = match published {
@@ -1364,11 +1381,17 @@ impl Panels {
 			drop(state);
 			self.check(result);
 		}
+		if let Some((name, (viewers, label, gesture))) = viewers_asked {
+			let mut state = engine.state.lock().unwrap();
+			let result = edit(&mut state, label, gesture, |draft| viewers.apply(draft, &name));
+			drop(state);
+			self.check(result);
+		}
 		if let Some((name, published)) = source_publish {
 			let verb = if published { "Publish" } else { "Stop publishing" };
 			let mut state = engine.state.lock().unwrap();
 			let result = edit(&mut state, format!("{verb} `{name}` independently"), None, |draft| {
-				draft.set_published(&name, published)
+				draft.set_published(&name, published.then(Default::default))
 			});
 			drop(state);
 			self.check(result);
