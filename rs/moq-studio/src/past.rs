@@ -58,12 +58,15 @@ struct Watch {
 pub struct View {
 	/// What it is of, which lags a change of pick by a sample.
 	pub of: Of,
-	/// The keyframe each group opens with, oldest first.
-	pub pictures: Vec<Arc<Picture>>,
+	/// The keyframe each group opens with, oldest first, or why they could
+	/// not be read.
+	pub pictures: Result<Vec<Arc<Picture>>, String>,
 	/// The loudest sample of each packet of sound, from 0 to 1, oldest first,
 	/// or why the sound could not be read.
 	pub sound: Result<Vec<(Instant, f32)>, String>,
-	/// How far back it reaches, or why there is nothing to replay.
+	/// How far back it reaches, or why there is nothing to replay. Pictures
+	/// or sound that cannot be read for the strip leave it held, since a
+	/// replay or clip copies what is held without decoding it here.
 	pub held: Option<Result<Held, String>>,
 }
 
@@ -71,7 +74,7 @@ impl Default for View {
 	fn default() -> Self {
 		Self {
 			of: Of::Program,
-			pictures: Vec::new(),
+			pictures: Ok(Vec::new()),
 			sound: Ok(Vec::new()),
 			held: None,
 		}
@@ -196,18 +199,25 @@ struct Decoding {
 
 impl Decoding {
 	fn sample(&mut self, engine: &Engine, of: &Of) -> View {
+		let now = Instant::now();
+		match replay::take(engine, of, Duration::ZERO, replay::WINDOW, true) {
+			Ok(take) => self.read(of, &take, now),
+			Err(err) => {
+				self.reset();
+				View {
+					of: of.clone(),
+					held: Some(Err(format!("{err:#}"))),
+					..View::default()
+				}
+			}
+		}
+	}
+
+	/// What `take`, of `of` and ending `now`, holds.
+	fn read(&mut self, of: &Of, take: &moq_scene::replay::Take, now: Instant) -> View {
 		let mut view = View {
 			of: of.clone(),
 			..View::default()
-		};
-		let now = Instant::now();
-		let take = match replay::take(engine, of, Duration::ZERO, replay::WINDOW, true) {
-			Ok(take) => take,
-			Err(err) => {
-				self.reset();
-				view.held = Some(Err(format!("{err:#}")));
-				return view;
-			}
 		};
 		let end = match Duration::try_from(take.end) {
 			Ok(end) => end,
@@ -235,14 +245,15 @@ impl Decoding {
 				.map(|(at, _)| *at);
 		}
 		if let Some((name, config)) = &take.video {
-			match self.pictures(&broadcast, of, name, config, &at) {
-				Ok(pictures) => view.pictures = pictures,
-				Err(err) => {
-					view.held = Some(Err(format!("{err:#}")));
-					return view;
-				}
-			}
-			let first = view.pictures.first().map(|picture| picture.at);
+			view.pictures = self
+				.pictures(&broadcast, of, name, config, &at)
+				.map_err(|err| format!("{err:#}"));
+			let first = view
+				.pictures
+				.as_ref()
+				.ok()
+				.and_then(|pictures| pictures.first())
+				.map(|picture| picture.at);
 			oldest = oldest.into_iter().chain(first).min();
 		}
 		view.held = Some(Ok(Held {
@@ -451,10 +462,8 @@ fn groups(
 mod tests {
 	use super::*;
 
-	/// The strip holds the keyframe each group of a take opens with, at the
-	/// moment it was shown, and decodes each only once across samples.
-	#[tokio::test]
-	async fn the_strip_shows_each_groups_keyframe_once() {
+	/// Three seconds of gray, a keyframe a second, as a take holds them.
+	async fn gray() -> moq_scene::replay::Take {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
@@ -477,14 +486,22 @@ mod tests {
 			let unit = encoder.receive().unwrap().expect("an access unit per picture");
 			producer.publish(&unit).unwrap();
 		}
-		let (name, video) = catalog.snapshot().video.renditions.into_iter().next().unwrap();
+		let video = catalog.snapshot().video.renditions.into_iter().next();
 		let target = moq_scene::replay::Target {
 			broadcast: broadcast.consume(),
-			video: Some((name.clone(), video.clone())),
+			video,
 			audio: None,
 			end: at(89),
 		};
-		let take = moq_scene::replay::Take::new(&target, Duration::from_secs(3)).unwrap();
+		moq_scene::replay::Take::new(&target, Duration::from_secs(3)).unwrap()
+	}
+
+	/// The strip holds the keyframe each group of a take opens with, at the
+	/// moment it was shown, and decodes each only once across samples.
+	#[tokio::test]
+	async fn the_strip_shows_each_groups_keyframe_once() {
+		let take = gray().await;
+		let (name, video) = take.video.clone().unwrap();
 
 		let zero = Instant::now();
 		let shown = |timestamp: moq_net::Timestamp| -> Result<Instant, moq_net::TimeOverflow> {
@@ -503,5 +520,27 @@ mod tests {
 			.unwrap();
 		let ids = |pictures: &[Arc<Picture>]| pictures.iter().map(|picture| picture.id).collect::<Vec<_>>();
 		assert_eq!(ids(&again), ids(&pictures), "decoded again");
+	}
+
+	/// Pictures the strip cannot decode leave the past held: a replay or a
+	/// clip copies it without decoding it here, so neither is refused.
+	#[tokio::test]
+	async fn pictures_it_cannot_decode_leave_the_past_held() {
+		let mut take = gray().await;
+		let (_, video) = take.video.as_mut().unwrap();
+		// avc1, whose parameter sets must come from a description, and this
+		// one is no avcC.
+		let hang::catalog::VideoCodec::H264(h264) = &mut video.codec else {
+			unreachable!("the software encoder makes H.264")
+		};
+		h264.inline = false;
+		video.description = Some(bytes::Bytes::from_static(&[0xff]));
+		let view = Decoding::default().read(&Of::Program, &take, Instant::now());
+		let held = view.held.expect("sampled").expect("the past is held");
+		assert!(held.video);
+		let Err(why) = view.pictures else {
+			panic!("the strip cannot decode it")
+		};
+		assert!(why.starts_with("cannot decode the pictures for the strip"), "{why}");
 	}
 }

@@ -162,6 +162,7 @@ impl Panels {
 				let nav = Rect::from_min_size(rect.min, vec2(if icons { NAV_ICONS } else { NAV }, rect.height()));
 				let pane = Rect::from_min_max(pos2(nav.right(), rect.top()), rect.max);
 				self.settings_nav(ui, nav, icons, &mut setting);
+				self.setting = Some(setting);
 				let builder = egui::UiBuilder::new().max_rect(pane.shrink2(vec2(MARGIN, 0.0)));
 				ui.scope_builder(builder, |ui| {
 					ui.add_space(24.0);
@@ -183,11 +184,16 @@ impl Panels {
 							Setting::Recording => self.recording(ui),
 							Setting::Hotkeys => self.hotkeys(ui, fx),
 							Setting::Guests => self.guest_settings(ui),
+							Setting::Remote => self.remote_settings(ui),
 							Setting::Advanced => self.advanced(ui, fx),
 						});
 					// A pane closes the window by clearing it, as the scene
-					// graph's Open does.
-					closed |= self.setting.is_none();
+					// graph's Open does, or opens another by naming it, as
+					// Remote's Set up the room does.
+					match self.setting {
+						None => closed = true,
+						Some(asked) => setting = asked,
+					}
 				});
 			});
 		// Escape while a key is being bound cancels the binding instead.
@@ -1283,7 +1289,7 @@ impl Panels {
 			let sources: Vec<String> = collection
 				.sources
 				.iter()
-				.filter(|(_, source)| source.publishes())
+				.filter(|(_, source)| source.independent())
 				.map(|(name, _)| name.clone())
 				.collect();
 			(collection.scenes.clone(), sources, collection.published.clone())
@@ -1319,7 +1325,7 @@ impl Panels {
 		row(
 			ui,
 			"Publish a source independently",
-			"Viewers and services fetch it on its own. It leaves the program and every audio scene.",
+			"Viewers and services fetch it on its own. It leaves the program and the audio the studio encodes, though Listen still hears it.",
 			|ui| {
 				let others = sources.iter().filter(|name| !published.contains(*name));
 				add_menu(

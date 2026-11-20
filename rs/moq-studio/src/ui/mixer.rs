@@ -116,9 +116,6 @@ enum Reach {
 	Through(String),
 	/// Not heard in it.
 	Not,
-	/// A sound published independently, which reaches viewers by its own
-	/// track and so no audio scene hears, whatever sends it.
-	Published,
 	/// The audio scene itself.
 	Own,
 	/// An audio scene the sender holds, which would then hold itself.
@@ -129,7 +126,6 @@ impl Reach {
 	/// How the strip `from` reaches the audio scene `to` of `collection`.
 	fn of(collection: &Collection, from: Strip<'_>, to: &AudioScene) -> Self {
 		match from {
-			Strip::Sound(name) if collection.published.contains(name) => Self::Published,
 			Strip::Sound(name) if to.sounds.contains(name) => Self::Sent,
 			Strip::Sound(name) => {
 				let through = to.scenes.iter().find(|held| collection.heard(held).contains(name));
@@ -161,9 +157,6 @@ impl Reach {
 			Self::Not => format!("{from} is left out of {to}; click to send it in"),
 			Self::Own => format!("{to} itself"),
 			Self::Loop => format!("{from} holds {to}, so {to} cannot hear it back"),
-			Self::Published => {
-				format!("{from} is published independently, so no audio scene hears it; stop publishing it in Build")
-			}
 		}
 	}
 }
@@ -174,6 +167,9 @@ struct Channel {
 	/// What kind of source it is, such as a microphone.
 	kind: &'static str,
 	microphone: bool,
+	/// Whether it is published independently, so viewers hear it from its
+	/// own broadcast rather than through a mix the studio encodes.
+	published: bool,
 	audio: moq_scene::Audio,
 	/// How it reaches each audio scene, in their order.
 	reach: Vec<Reach>,
@@ -217,6 +213,7 @@ impl Board {
 					name: name.to_string(),
 					kind: kind(source),
 					microphone: matches!(source, Some(Source::Microphone { .. })),
+					published: collection.published.contains(name),
 					audio: collection.audio.get(name).cloned().unwrap_or_default(),
 					reach: reach(Strip::Sound(name)),
 				}
@@ -873,11 +870,13 @@ impl Panels {
 			ui.add_space(10.0);
 			ui.separator();
 			ui.label(kit::caps("Heard in", kit::display(11.0)).color(kit::DIM));
-			let published = sound.reach.contains(&Reach::Published);
-			if published {
+			if sound.published {
 				ui.label(
-					egui::RichText::new("Published independently, so no audio scene hears it until it stops, in Build")
-						.color(kit::DIM),
+					egui::RichText::new(
+						"Published independently: viewers hear it from its own broadcast, so the stream, \
+						 recordings, and published scenes leave it out; Listen and guests hear it where it is sent",
+					)
+					.color(kit::DIM),
 				);
 			}
 			for (master, reach) in board.masters.iter().zip(&sound.reach) {
@@ -891,7 +890,7 @@ impl Panels {
 					}
 					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 						let mut sent = *reach == Reach::Sent;
-						let response = ui.add_enabled(!published, kit::Toggle::new(&mut sent));
+						let response = ui.add(kit::Toggle::new(&mut sent));
 						let response = kit::tip(response, &reach.says(name, &master.name), None);
 						if response.changed() {
 							changes.push(Change::Send {
@@ -1523,7 +1522,7 @@ impl Dot<'_> {
 	fn ui(self, ui: &mut Ui, at: Rect, changes: &mut Vec<Change>) {
 		let (from, to, reach) = (self.from(), &self.to.name, self.reach);
 		let scene = matches!(self.from, Strip::Scene(_));
-		let enabled = !matches!(reach, Reach::Own | Reach::Loop | Reach::Published);
+		let enabled = !matches!(reach, Reach::Own | Reach::Loop);
 		let sense = if enabled { Sense::click() } else { Sense::hover() };
 		let response = ui.interact(at, ui.id().with(("send", from, scene, to)), sense);
 		response.widget_info(|| {
@@ -1629,7 +1628,7 @@ fn paint_dot(painter: &egui::Painter, at: Rect, reach: &Reach, letter: &str, pro
 			painter.circle_filled(center, radius, kit::P2);
 			kit::FAINT
 		}
-		Reach::Own | Reach::Loop | Reach::Published => {
+		Reach::Own | Reach::Loop => {
 			let half = (radius * 0.4).max(3.0);
 			painter.hline(center.x - half..=center.x + half, center.y, Stroke::new(2.0, kit::LINE));
 			return;
@@ -1829,17 +1828,21 @@ mod tests {
 		assert!(!reach(&collection, Strip::Sound("other"), "Stream").heard());
 	}
 
-	/// A sound published independently is heard in no audio scene, however
-	/// it is sent, as the mixes leave it out; nor through one that holds it.
+	/// A sound published independently reaches each audio scene as it is
+	/// sent, which is where people in the studio hear it, though the mixes
+	/// the studio encodes leave it out.
 	#[test]
-	fn a_published_sound_is_heard_nowhere() {
+	fn a_published_sound_reaches_where_it_is_sent() {
+		let unpublished = collection();
 		let mut collection = collection();
 		collection.published.insert("mic".into());
 		for to in ["Mics", "Stream", "Headphones", "Recording"] {
-			assert_eq!(reach(&collection, Strip::Sound("mic"), to), Reach::Published, "{to}");
+			assert_eq!(
+				reach(&collection, Strip::Sound("mic"), to),
+				reach(&unpublished, Strip::Sound("mic"), to),
+				"{to}"
+			);
 		}
-		let music = Strip::Sound("music");
-		assert_eq!(reach(&collection, music, "Stream"), Reach::Sent, "others are as before");
 	}
 
 	/// An audio scene cannot be sent into itself, nor into one it holds,

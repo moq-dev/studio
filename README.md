@@ -73,9 +73,12 @@ cargo run --release -p moq-studio --features capture,openh264
   encoder.
 - `release` is what the packages build: `capture`, `openh264`, and the
   hardware codecs. The Flatpak adds `pipewire`.
-- `cef` adds browser sources, on Linux only for now. The build takes CEF from
-  `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
-  loads `libcef.so` from beside itself or from that `CEF_PATH`.
+- `cef` adds browser sources, on Linux and macOS. The build takes CEF from
+  `CEF_PATH`, which the dev shell sets on Linux, or else downloads it. On
+  Linux the binary loads `libcef.so` from beside itself or from that
+  `CEF_PATH`. On macOS browser sources run only from the app bundle, which
+  holds CEF's framework and its helper apps: build it with
+  `packaging/macos/bundle.sh`, which the macOS packages ship with `cef`.
 - On Linux, display and window sources capture X11 and XWayland by id. With
   `pipewire`, a display or window can also be picked in the desktop's
   screen-sharing picker, the only way to share a Wayland screen; see
@@ -217,7 +220,7 @@ The **strip** holds:
   and cuts at once to the scene marked safe, if one is. Other remote feeds and
   media stay on. Mark one from its pad's menu, BUILD's inspector with no layer
   selected, or the scene graph. The scissors beside it save a replay clip (see
-  [Replay](#replay)).
+  [Replay](#replay)), and the flag drops a marker (see [Markers](#markers)).
 - A row for each sound the stream carries, with its meter and mute, and the
   **STREAM** meter of the audio scene on program, with **Listen** (the
   headphones) to hear it (see [Audio scenes](#audio-scenes)).
@@ -227,7 +230,7 @@ The **strip** holds:
 | LIVE | Watch the program while on air, and TAKE or AUTO a cued scene. |
 | BUILD | Edit the scene on program, or the one open off air, shown in the middle, with its layers and what can be added on the left and the inspector on the right (see [BUILD](#build)). |
 | MIX | Ride each sound's fader and mute it, open its strip for its pan and delay, and send each sound and audio scene into audio scenes, from dots under the strips or as a matrix under **Routes**. Add, rename, reorder, and remove audio scenes, put one on the stream, and listen to one on the output you pick (see [Audio scenes](#audio-scenes)). The program shows small in the strip's place for the sound. |
-| REVIEW | Pick a stretch of the last 30 seconds of the program or a source from a strip of its pictures, and replay it in a replay source, slowed down if you like, or save it as a clip (see [Replay](#replay)). Beside it, this show's recordings and clips as cards with their length and size, one repaired after a crash marked so, and **Open the folder**. The program's card is the live picture. |
+| REVIEW | Pick a stretch of the last 30 seconds of the program or a source from a strip of its pictures, and replay it in a replay source, slowed down if you like, or save it as a clip (see [Replay](#replay)). Beside it, this session's markers, with a clip around each (see [Markers](#markers)), over this show's recordings and clips as cards with their length and size, one repaired after a crash marked so, and **Open the folder**. The program's card is the live picture. |
 
 The layout follows the program's shape and the window's size, giving the
 picture the most room it can. A landscape program sits above the strip; a
@@ -475,8 +478,9 @@ setting costs. Escape or a click outside closes it.
 | Show | Pick the format, landscape or portrait, which swaps the canvas's sides; **Both at once**, which sends a portrait picture beside a landscape one (see [Both formats at once](#both-formats-at-once)); the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, for both pictures while Both at once is on, or **Custom** for exact numbers; the frame rate as 30, 60, or **Custom**; and, under **Scene sizes**, each scene's own size (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
 | Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)). |
 | Recording | Change or open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
-| Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; each sound's mute; and replay and clips (see [Hotkeys](#hotkeys)). |
+| Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; each sound's mute; and replay, clips, and markers (see [Hotkeys](#hotkeys)). |
 | Guests | Set the room guests join, its key, the join page, how long a link lasts, and whether guests appear on their own (see [Guests](#guests)). |
+| Remote | Pair a phone as a remote by its QR code, see which are connected, and remove one (see [Phone remote](#phone-remote)). |
 | Advanced | Publish scenes as broadcasts of their own and sources independently, turn the virtual camera of the program or of each published scene on, pick how the window's [effects](#effects) move, and open the [scene graph](#scene-graph). |
 
 On air, a new canvas size or frame rate, or a published scene's new size,
@@ -687,7 +691,12 @@ through the first relay while that relay has a route to it, and
 through the failover otherwise, so a publisher restarted behind only the
 failover replaces the first relay's copy once that copy ends. It plays the
 best video and audio its catalog lists, switches when the catalog changes, and
-comes back on its own when the publisher restarts.
+comes back on its own when the publisher restarts. While it is offline, or
+once a new stream replaces the one it played, it shows nothing until the new
+stream's first picture, rather than freezing on the last one. A broadcast
+without video but with an image, such as a studio's image or color published
+independently, shows that image, and never reads as stalled, since it sends
+a picture only when it changes.
 
 A broadcast source, a guest's included, plays on its publisher's timestamps,
 so its sound and picture stay in sync through network jitter. It plays as far
@@ -868,16 +877,20 @@ to it), its gain to read or type, and its mute, which turns amber while it
 is on. These apply in every audio scene holding the sound. Click a sound's
 name to open its strip to its gain, pan (a double click centers it), and
 delay, and the audio scenes it is heard in; the other strips narrow beside it
-rather than hide. Each audio scene has a strip after the sounds with its
-meter, on the same scale, and **Listen**. A meter's top is full scale, where
-its last segment turns red: the sound clips.
+rather than hide. Each audio scene has a strip after the sounds with
+**Listen** and its meter, on the same scale, which reads the audio scene as
+**Listen** plays it, published sources included. A meter's top is full scale,
+where its last segment turns red: the sound clips.
 
 Under each strip is a dot for each audio scene, marked with its initial:
 filled where the strip is sent into it, the accent's color for the one the
 stream carries; ringed where it is heard there only through another audio
 scene; and faint where it is not heard. A click sends it in or takes it out.
 An audio scene shows a dash under its own strip and under any it holds, which
-it cannot be sent back into. **Routes** shows the same sends as a matrix, a
+it cannot be sent back into. A sound [published independently](#published-independently)
+keeps its dots and sends: they say where people in the studio hear it, while
+viewers hear it from its own broadcast and the audio the studio encodes
+leaves it out. **Routes** shows the same sends as a matrix, a
 row for each sound and audio scene and a column for each audio scene, with
 what each one holds at its foot.
 
@@ -914,17 +927,19 @@ A browser source renders a web page, such as an overlay, alert box, or chat
 widget, at the canvas frame rate (CEF caps it at 60) over a transparent
 background, and its sound joins the audio scenes that hold it. Every page shares one
 browser profile, kept in `$XDG_DATA_HOME/moq-studio/browser`
-(`~/.local/share/moq-studio/browser` by default) rather than beside the scene
-file, so cookies and logins, such as an alert service's, survive a reload and
-a restart of the studio. They are not encrypted with the desktop's keyring,
-so a locked keyring never holds a page back, and anything that can read your
-home directory can read them. One studio at a time can use the profile: a
+(`~/.local/share/moq-studio/browser` by default) on Linux and in
+`~/Library/Application Support/moq-studio/browser` on macOS, rather than
+beside the scene file, so cookies and logins, such as an alert service's,
+survive a reload and a restart of the studio. They are not encrypted with the
+desktop's keyring or keychain, so a locked keyring never holds a page back and
+no keychain prompt interrupts one, and anything that can read your home
+directory can read them. One studio at a time can use the profile: a
 second one's browser sources fail saying so. Each page renders in a process of its own, so
 a page that crashes fails only its own source, with the reason, while the
 stream carries on. A crash of the browser itself fails every browser source.
-Either shows at once, since the browser's processes dump no core. On Linux,
-pages run without Chromium's sandbox, as in OBS, so a page that exploits a
-browser bug can do anything you can: add only pages you trust.
+Either shows at once, since the browser's processes dump no core. Pages run
+without Chromium's sandbox, as in OBS, so a page that exploits a browser bug
+can do anything you can: add only pages you trust.
 The browser requests only what its pages load, never asking Google for
 updates, the time, or autofill suggestions on its own, so pages are not
 spellchecked, which would need a dictionary from Google. Nor does it run
@@ -933,9 +948,9 @@ browser extensions, even ones your distribution installs for every Chromium.
 lists, such as a `<select>`'s, draw over it and take clicks under
 **Interact**, but it opens no other windows (`window.open` and new-tab links
 do nothing). Copy and Cut there put the page's selected text on the clipboard,
-and nothing from a password field. Except for a page copied on the GPU through
-an X display, the text goes as plain text that the page's own copy handlers
-cannot change.
+and nothing from a password field. On Linux, except for a page copied on the
+GPU through an X display, the text goes as plain text that the page's own copy
+handlers cannot change; on macOS the page copies as it would in a browser.
 
 An overlay is a title, lower third, or other graphic written as HTML and CSS,
 drawn by the studio itself (through [Blitz](https://github.com/DioxusLabs/blitz))
@@ -1104,7 +1119,9 @@ why under Guests, with a button to the pane.
   without reconnecting. A guest's token may read only their own renewals and
   return feed, at `.renew/<name>/<generation>` and `.return/<name>/<generation>`
   in the room, and the program at `.program`, but anything else the relay lets
-  subscribe there can read every guest's, so grant that only to the studio. A guest who
+  subscribe there can read every guest's, so grant that only to the studio.
+  The same session publishes each [phone remote](#phone-remote)'s desk under
+  `.remote` and reads their presses under `.press`. A guest who
   leaves needs a link, or a renewed token, that has not expired to come back.
   BUILD's Add says, under Guests, when renewal is failing.
 - **Upgrading from a studio without renewal:** generate a new room key, drop
@@ -1131,8 +1148,11 @@ before it expires, and is then renewed for as long as they stay, until you
 remove them. A guest's broadcasts become sources named after them (`alice`,
 `alice screen`) when they first appear, in no scene or audio scene: place
 them from BUILD's Add and send them to the audio scene on program on MIX
-to put them on air, or have them [appear on their own](#slots-and-roles) in
-the next tile of the scene on program. That includes a
+to put them on air, have them [appear on their own](#slots-and-roles) in
+the next tile of the scene on program, or switch on **Published
+independently** to have viewers fetch them from the guest instead of through
+the program (see [Published independently](#published-independently)). That
+includes a
 guest invited before a restart whose link still works. A guest's source is
 saved to the scene file but is not your edit: it stays out of History, so undo
 never removes it and a guest joining never loses what you could redo, unless
@@ -1163,6 +1183,45 @@ encode as any viewer does. Each guest in the room costs one 64 kbps Opus
 encode of their mix-minus. A guest's
 screen share stays in their feed, since only their camera's microphone is
 taken out.
+
+## Phone remote
+
+A phone paired as a remote drives the show from wherever it reaches the
+relay, with nothing installed: its page shows the scene pads with their
+tally (ON AIR, FIRST, or NEXT, as the studio's own pads), TAKE and AUTO in
+Studio mode, each sound's mute, and the live clock, and the whole page is
+framed in the accent while the program is on air. A pad the studio cannot
+take now is greyed out. Each press shows in the studio's status
+bar, as a key's does, and on the phone.
+
+Settings, Remote, pairs one: name it, **Pair a phone**, and scan the QR code
+with the phone's camera, or **Copy link** to send it. A remote joins the
+[guests' room](#guests), so it needs the room, its key, and the join page set
+there first; its page is `remote.html` beside the join page, and the link
+lasts as long as a guest's (`--guest-expiry`). The pane lists each phone
+paired, whether it is connected, and its link, with **Show link** while that
+link still works, **New link**, and **Remove**. Treat the link like a
+password: anyone holding it can drive the show until you remove it.
+
+- A remote presses only what is safe to press by mistake from a pocket: a
+  scene's pad, TAKE, AUTO, and a sound's mute. Going live, ending the
+  stream, the panic key, recording, and replay stay on the studio.
+- A remote's token, signed by the room key like a guest's, may publish only
+  its presses, at `.press/<name>/<generation>` in the room, and read only the
+  desk the studio publishes it at `.remote/<name>/<generation>`, which carries
+  its renewed tokens. Remote names are their own, apart from guests'.
+- The studio reads a remote's newest press only, at most one a program frame,
+  and refuses one that is not a single action of at most 4 KiB, so a page
+  pressing faster costs the studio nothing more. The page sends its next
+  press once the desk says how the last went, and the desk catches up with
+  what changed at the studio four times a second. A press the phone made
+  before the studio restarted or rejoined the room is not done again, since
+  it was most likely done before: the page asks you to check it first.
+- **Remove** stops reading its presses at once, and stops renewing its token,
+  so it is disconnected within `--guest-expiry`; **New link** pairs it again
+  under a new generation, which a link from before cannot reach. Pairings and
+  removals outlast a restart, kept beside the room key as
+  `room.remotes.toml` for `room.jwk`.
 
 ## Scene file
 
@@ -1479,7 +1538,7 @@ with the program's, and its own encode of the audio scene it carries. A show
 going out in both formats publishes its portrait picture the same way at
 `<broadcast>/portrait`, at the canvas turned and half of it, with its own
 encode of the audio scene on program. The sources published independently
-are drawn into it, with no layer layout of their own. Each relay carries both broadcasts,
+are drawn into it, with no [composition](#composition) of their own. Each relay carries both broadcasts,
 and GO LIVE's checks time the encoder and size the connection for both.
 Timestamps come from the studio's own clock, so a source that stalls repeats
 its last picture instead of holding up the stream.
@@ -1519,7 +1578,7 @@ stream.
 
 Each camera, display, window, image, media file, color, microphone, and system
 audio also has a track of its own, so the studio can replay or record it on its
-own. These tracks stay in the studio unless a source is [published independently](#published-independently): otherwise the program is all it publishes to a relay. They are listed in a local
+own. These tracks stay in the studio unless a source is [published independently](#published-independently): otherwise the program and its composition are all it publishes to a relay. They are listed in a local
 catalog under the `live.kixel.studio` section's `sources`, by source name, each
 as a hang catalog of its own on the program's clock.
 
@@ -1579,24 +1638,37 @@ and software otherwise.
 
 ### Published independently
 
-A source with a track of its own can be **Published independently**, a
-switch in the inspector's Source section, off by default and kept in the scene file's
-`published` list. Its track then goes to the relay beside the program, in the
-same broadcast: the program's catalog lists it under the `live.kixel.studio`
-section's `sources`, by source name, as a hang catalog of its own whose track
-names start with `source/`. Viewers fetch it and place it over the program
-themselves, as the [layer layout](#layer-layout) says.
+A broadcast source, such as a guest's camera, or a source with a track of its
+own can be **Published independently**, a switch in the inspector's Source
+section, off by default and kept in the scene file's `published` list.
+Viewers then fetch it as a broadcast of its own and place it over the program
+themselves, as the [composition](#composition) says:
+
+- A local source's track goes to the relay as a broadcast of its own at
+  `<broadcast>/source/<name>`, with a hang catalog on the program's clock,
+  so its name is one segment of that path: no `/`, not `.` or `..`, and a `\`
+  only before another `\`.
+- A broadcast source is already its publisher's, so viewers read it where the
+  studio does, which their relay must let them: a guest's, under the room.
+  The studio publishes nothing more of it.
 
 The program leaves a published source out, wherever it or a clone of it is
-placed, and so does every audio scene's mix. The studio draws it only as
-viewers will: over the program, on every page and in the program's
-virtual camera, so both show what viewers see. It goes over every other layer of its scene, and over the always-on-top layers,
-however the scene stacks it. Recordings hold the program as published,
-without it, and recording **Each source too** gives a published camera,
-display, window, or microphone a file of its own. Published and recorded
-scenes, and a scene that shows the program, leave it out too. While viewers read its track, it claims its bitrate of the connection beside the program's, and its video encodes at what the connection grants it. Its track carries one rendition, the
-plain capture before any filter or gain, and encodes for as long as it is
-published, holding an encode session as one on program does.
+placed, and so does every audio scene's mix the studio encodes: the
+program's audio, recordings, and published scenes. People in the studio
+still hear it as viewers do: **Listen** and guests' return feeds mix it in
+where its audio scene reaches it, at its gain, mute, pan, and delay. The
+studio draws it only as viewers will: over the program, on every page and in
+the program's virtual camera, so both show what viewers see. It goes over
+every other layer of its scene, and over the always-on-top layers, however
+the scene stacks it. Recordings hold the program as published, without it,
+and recording **Each source too** gives a published camera, display, window,
+or microphone a file of its own. Published and recorded scenes, and a scene
+that shows the program, leave it out too. While viewers read a local
+source's track, it claims its bitrate of the connection beside the
+program's, and its video encodes at what the connection grants it. Its track
+carries one rendition, the plain capture before any filter or gain, and
+encodes for as long as it is published, holding an encode session as one on
+program does.
 
 Every player must reproduce how it is placed, so a layer showing it takes no
 filter but opacity, no blend mode, and no shape, nor do its source's filters or
@@ -1605,74 +1677,131 @@ draws can place it. A source with
 its background removed cannot be published, since H.264 carries no
 transparency and its track would show the background.
 
-#### Layer layout
+#### Composition
 
-While a source is published independently, the program's broadcast also
-carries a JSON track, `live.kixel.studio.layers`, listed in its catalog's `json`
-section. It is a snapshot: each change is a new group, stamped on the media
-clock with the frame it takes effect on, so a viewer who joins late reads the
-layout in force. The format is the studio's own until hang specifies a layer
-layout:
+While on air, beside the program, the studio publishes a composition at
+`<broadcast>/composition`, a broadcast of its own whose hang catalog carries
+it in the `live.kixel.studio.composition` section, on the program's clock.
+Each change is a new catalog, stamped with the program frame it takes effect
+on, so a player applies it when it plays that frame, and a viewer who joins
+late reads the composition in force. The catalog also lists the program's
+video and audio renditions, each with `"broadcast": "."`, so a player that
+knows no compositions plays the program from it, as it does at
+`<broadcast>`. The section's format is the studio's own until hang specifies
+a composition:
 
 ```json
 {
-  "version": 1,
-  "canvas": { "width": 1920, "height": 1080 },
-  "start": 10000000,
-  "pictures": [
-    {
-      "item": {
+  "video": {
+    "renditions": {
+      "video": { "broadcast": ".", "codec": "avc1.640028", "codedWidth": 1920, "codedHeight": 1080 }
+    }
+  },
+  "audio": {
+    "renditions": {
+      "audio": { "broadcast": ".", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2 }
+    }
+  },
+  "sync": { "clock": { "wall": 1751846400000000, "timescale": 1000000 }, "interval": 2000 },
+  "live.kixel.studio.composition": {
+    "version": 2,
+    "canvas": { "width": 1920, "height": 1080 },
+    "start": 10000000,
+    "program": { "broadcast": ".", "instance": "5c1f0e3a9b7d4e21a8f6c0d3b2e19f47" },
+    "sources": {
+      "camera": { "broadcast": "source/camera" },
+      "mic": { "broadcast": "source/mic", "sound": { "gain": 1.0, "delay": "80ms" } },
+      "alice": {
+        "broadcast": "../guests/alice/camera.hang",
+        "instance": "9e4b7c21d0a3f6e85b1c2d4f7a9e0b36",
+        "offset": -1500000,
+        "sound": { "gain": 0.8, "pan": -0.5 }
+      }
+    },
+    "pictures": [
+      {
         "source": "camera",
         "rect": { "x": 1440.0, "y": 760.0, "width": 400.0, "height": 225.0 },
-        "visible": true,
         "filters": [{ "kind": "opacity", "amount": 0.9 }],
         "keyframes": [{ "at": "1s", "x": 600.0 }]
-      }
-    }
-  ],
-  "sounds": [{ "source": "mic", "audio": { "gain": 1.0, "muted": false, "delay": "80ms" } }]
+      },
+      { "source": "alice", "rect": { "x": 40.0, "y": 760.0, "width": 400.0, "height": 225.0 } }
+    ]
+  }
 }
 ```
 
-- `version` is 1. A player refuses any other loudly and plays the program
-  alone.
+- `version` is 2. A player refuses any other loudly and plays the program
+  alone, as it does a composition in a catalog whose track has no timescale,
+  which says nothing of when an update applies. Version 1 was the layer
+  layout, a track of the program's broadcast naming its tracks.
 - `canvas` is the program's size, which pictures are placed on in pixels.
 - `start` is when the scene on program went on, in microseconds on the media
   clock: the moment its pictures' keyframes play from.
-- `pictures` lists each layer of the scene on program, then of the always-on-top ones,
-  showing a published source, back to front over the program, shown or
-  hidden. Each `item` is a layer as the scene file writes it: its `source` names the source's
-  entry under the catalog's `live.kixel.studio` `sources` (the source a clone
-  shows), and its `crop` and `filters` fold in its source's own.
-- `sounds` lists each published source the audio scene on program holds,
-  with the `gain`, `muted`, `pan`, and `delay` it plays at.
-- Each picture and sound may carry a subscription `priority` (0 if absent)
-  and whether a viewer may `toggle` it off (`false` if absent).
+- `program` names the program's broadcast, and `sources` each source
+  published independently that a picture shows or the program's audio plays,
+  by source name. Each `broadcast` is relative to the composition's path, as
+  hang's references are, so `.` is the program and `..` walks up a segment.
+  An `instance` names the stream it describes, left out when the relay minted
+  the one the studio reads.
+- A source's `offset`, in microseconds (0 if absent), is added to its
+  broadcast's timestamps to put them on the program's clock. A local source
+  is stamped on that clock, at 0. A guest keeps a timeline of its own, so its
+  offset is where the studio played it: a new composition follows it once it
+  moves more than 10 ms, and a guest who joins again, as a new instance, gets
+  a new one. A guest the studio shows nothing of, such as one offline, is
+  left out with its pictures until it shows again. A still,
+  such as another studio's published image, has no moment, so without sound
+  its offset is 0.
+- A source's `sound`, when the audio scene on program holds it, is the
+  `gain`, `muted`, `pan`, and `delay` it plays at.
+- Each source may carry a subscription `priority` (0 if absent) and whether a
+  viewer may `toggle` it off (`false` if absent).
+- `pictures` lists each layer of the scene on program, then of the
+  always-on-top ones, showing a published source, back to front over the
+  program, shown or hidden. Each is a layer as the scene file writes it: its
+  `source` names a key of `sources` (the source a clone shows), and its
+  `crop` and `filters` fold in its source's own. While the show goes out in
+  both formats, each is placed as the landscape picture places it, hidden
+  when shown in portrait alone: the composition goes with the program's
+  landscape broadcast, and the portrait one draws the published sources in.
 
-A take changes the layout on the frame the program starts showing the new
-scene, so the published sources of the scene leaving go off and those of the
-scene coming in go on at once, even through a transition.
+A take changes the composition on the frame the program starts showing the
+new scene, so the published sources of the scene leaving go off and those of
+the scene coming in go on at once, even through a transition. A published
+scene named `composition` would publish where the composition is, so it does
+not publish.
 
 #### Watching
 
-`moq-studio --watch https://relay.example/anon/my-show` plays a studio
-broadcast in a window as a viewer sees it: the program, with each picture of
-its layer layout over it and each sound mixed with it. The URL's path names
-the broadcast, as `moq play`'s does, and `--connect-token` and the `--quic-*`
-flags apply to it; `--connect`, `--failover`, and `--room` are refused
-beside it. It is a prototype for settling the layout's format, which goes
-once `moq play` plays layers.
+`moq-studio --watch https://relay.example/anon --broadcast my-show` plays a
+studio's composition in a window as a viewer sees it: the program at
+`my-show`, with each picture over it and each sound mixed with it. The URL
+names the relay as `--connect` does, and must reach every broadcast the
+composition lists, guests' included; `--connect-token` and the `--quic-*`
+flags apply to it, and `--connect`, `--failover`, and `--room` are refused
+beside it. It is a prototype for settling the composition's format, which
+goes once `moq play` plays compositions.
 
-- Each layout takes effect when the program plays the frame it is stamped
-  with, and its pictures' keyframes play from its `start`.
-- Each source plays its own track on the program's clock: a picture shows
-  when the program's picture stamped alike does, and a sound plays with the
-  program's sound stamped alike, at its `gain`, `muted`, `pan`, and `delay`.
-  A frame too late for its moment is dropped.
-- A broadcast without a layout, or with a layout of another `version`, plays
-  its program alone; the window says why for the latter.
-- Guests' broadcasts are not in the layout yet, so only sources local to the
-  studio play as layers. `priority` and `toggle` are not applied.
+- Each catalog's composition takes effect when the program plays the frame
+  the catalog is stamped with, a catalog without one plays the program alone
+  from there, as does a catalog that ends or fails at once, and a
+  composition's pictures' keyframes play from its `start`.
+- Each source plays its own broadcast on the program's clock, its timestamps
+  moved by its `offset`: a picture shows when the program's picture stamped
+  alike does, and a sound plays with the program's sound stamped alike, at
+  its `gain`, `muted`, `pan`, and `delay`. A frame too late for its moment is
+  dropped. A new offset plays on without fetching the broadcast again. A
+  source's sound is fetched only while the composition gives it a `sound`,
+  and gaining or losing one does not fetch its picture again.
+- A source whose `instance` another stream replaced shows nothing until a
+  composition names the new one, and a composition naming another program
+  stream waits for it, so neither plays on a timeline its offset is not for.
+- A broadcast without a composition, or with one of another `version`, in an
+  untimed catalog, or one it cannot place, such as one listing a broadcast
+  above the relay URL's path, plays its program alone; the window says why
+  for the latter.
+- `priority` and `toggle` are not applied.
 - Sound needs a build with `capture`; without it the window says so in the
   log and plays the pictures alone.
 
@@ -1718,12 +1847,12 @@ Quitting first lets the recording's encoders publish what they still hold, and
 the program's file keeps it. A file nothing reached before the recording
 stopped is removed.
 
-While a file is written, a marker `<name>.mp4.unfinished` sits beside it. A
-crash, a power loss, or a write that failed leaves the marker, and the next
+While a file is written, a sidecar `<name>.mp4.unfinished` sits beside it. A
+crash, a power loss, or a write that failed leaves the sidecar, and the next
 launch repairs that file without asking: it writes `<name>.repaired.mp4`
 beside it, numbered if a file already has that name, a regular MP4 of
 everything the file holds up to its last complete fragment, leaves the
-original untouched, and removes the marker, so the file is repaired
+original untouched, and removes the sidecar, so the file is repaired
 only once. The repair runs in the background and appears at the top of the
 Health window and in the log, and REVIEW marks its card **Repaired after a crash**. A file another studio is still recording into the
 same directory is left alone.
@@ -1738,7 +1867,8 @@ paints, given the same Vulkan DMA-BUF import and a display to paint through:
 the Wayland one when `$WAYLAND_DISPLAY` is set and has an output, such as a
 monitor, needing no XWayland, or else
 the X one in `$DISPLAY`, when the X server runs on the studio's GPU, since
-CEF paints on the X server's there. Every other source, every source on Windows or on a
+CEF paints on the X server's there. On macOS it is copied from the IOSurface
+CEF paints, through Metal. Every other source, every source on Windows or on a
 GPU that cannot import, and every still image delivers its frames from the
 CPU, which the compositor uploads. A browser source takes that path with no
 display at all too, and there renders its page in software, WebGL included, so
@@ -1748,7 +1878,7 @@ a WebGL page runs slower.
 
 Settings, Hotkeys binds a key to the **Panic** key, TAKE and AUTO
 for the cued scene, turning [Studio mode](#off-air-and-studio-mode) on or off,
-**Replay**, **Save clip**, starting or stopping a recording, **Go live**,
+**Replay**, **Save clip**, **Drop a marker**, starting or stopping a recording, **Go live**,
 **End stream**, each scene, which its key takes, or cues in Studio mode,
 as its pad does (the tab says which), and each sound, which its key mutes or
 unmutes, as its strip's button does. The [command palette](#command-palette)
@@ -1861,6 +1991,29 @@ one refuses with the reason on REVIEW. An image, a color, or a web page has
 no past to replay: a page publishes no track of its own, so replay the program
 to show it. A replay source on program encodes each replay as its own track
 while it plays, like a camera.
+
+## Markers
+
+Drop a marker on a moment as the show runs, on air or off, with the flag
+beside the panic key or a key bound to **Drop a marker** (see
+[Hotkeys](#hotkeys)). REVIEW lists this session's markers, the newest first,
+each numbered in the order dropped, with how long ago it was. Type a name in
+its row, or remove it. Each marker still within the last 30 seconds shows on
+the strip as a numbered flag.
+
+The scissors in a marker's row save a clip around it, as **Save clip** does,
+of what REVIEW has picked to replay: from 10 seconds before the marker to 5
+after, or up to now while those 5 have yet to pass. The same keyframe limits
+apply. A clip reaches back only 30 seconds, so a marker older than that has
+no clip; its scissors say so.
+
+The markers are kept beside the recordings, not in the scene file:
+`show 2026-11-18T12-00-00Z.markers.toml` for `show.toml`, named for when the
+studio opened the show, lists each marker's number, the UTC moment it was
+dropped, and its name. It is written again on every change and removed once
+no marker is left, in the background, so a slow disk never holds up a key. A
+marker the folder refuses is kept for the session anyway, and REVIEW says why
+until a write succeeds. A session holds at most 255 markers.
 
 ## A capture gone dark
 

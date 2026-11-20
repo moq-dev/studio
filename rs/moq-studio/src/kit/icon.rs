@@ -79,12 +79,16 @@ pub enum Icon {
 	Info,
 	/// Opens the command palette.
 	Search,
+	/// A moment marked in the show.
+	Marker,
+	/// A phone paired as a remote.
+	Phone,
 }
 
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 66] = [
+	pub const ALL: [Self; 68] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -151,6 +155,8 @@ impl Icon {
 		Self::Detach,
 		Self::Info,
 		Self::Search,
+		Self::Marker,
+		Self::Phone,
 	];
 
 	fn source(self) -> ImageSource<'static> {
@@ -221,6 +227,8 @@ impl Icon {
 			Self::Detach => include_image!("../../assets/icons/external-link.svg"),
 			Self::Info => include_image!("../../assets/icons/info.svg"),
 			Self::Search => include_image!("../../assets/icons/search.svg"),
+			Self::Marker => include_image!("../../assets/icons/flag.svg"),
+			Self::Phone => include_image!("../../assets/icons/smartphone.svg"),
 		}
 	}
 

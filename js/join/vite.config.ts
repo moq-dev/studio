@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import { worklet } from "../../moq/js/common/vite-plugin-worklet.ts";
 
@@ -8,6 +9,13 @@ export default defineConfig({
 	plugins: [worklet()],
 	build: {
 		target: "esnext",
+		// The join page, and the remote beside it, which the studio links as `remote.html`.
+		rollupOptions: {
+			input: {
+				index: fileURLToPath(new URL("index.html", import.meta.url)),
+				remote: fileURLToPath(new URL("remote.html", import.meta.url)),
+			},
+		},
 		// @moq/publish's capture and encode pipeline is most of the page, in one chunk.
 		chunkSizeWarningLimit: 1024,
 	},

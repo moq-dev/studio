@@ -18,6 +18,11 @@ pub const WINDOW: Duration = moq_scene::replay::MAX_LENGTH;
 /// The shortest stretch REVIEW's handles pick.
 pub const MIN_STRETCH: Duration = Duration::from_millis(500);
 
+/// How far before a marker its clip starts, and how far after it ends: a
+/// marker is dropped once something has happened, so most of it is before.
+pub const BEFORE: Duration = Duration::from_secs(10);
+pub const AFTER: Duration = Duration::from_secs(5);
+
 /// The speeds REVIEW offers: real time, and slow motion.
 pub const SPEEDS: [f32; 3] = [1.0, 0.5, 0.25];
 
@@ -53,6 +58,21 @@ impl Stretch {
 		let length = from.min(WINDOW).saturating_sub(to);
 		anyhow::ensure!(!length.is_zero(), "the picked stretch is empty");
 		Ok((to, length))
+	}
+
+	/// The stretch a clip around a marker dropped `at` takes: from [`BEFORE`]
+	/// it to [`AFTER`] it, or to `now` when that is sooner. Refuses a marker
+	/// that has aged out of the [`WINDOW`].
+	pub fn around(at: Instant, now: Instant) -> anyhow::Result<Self> {
+		anyhow::ensure!(
+			now.saturating_duration_since(at) < WINDOW,
+			"the marker is older than the last {} s, as far back as a clip reaches",
+			WINDOW.as_secs()
+		);
+		Ok(Self::Between(
+			at.saturating_sub(BEFORE),
+			at.saturating_add(AFTER).min(now),
+		))
 	}
 
 	/// The last stretch as long as this one, as a hotkey or the shell's clip
@@ -259,6 +279,22 @@ mod stretch_tests {
 		assert!(picked.span(gone).is_err(), "aged out");
 		let empty = Stretch::Between(ago(3), ago(3));
 		assert!(empty.span(now).is_err(), "empty");
+	}
+
+	/// A clip around a marker takes the seconds before it and after it, ends
+	/// now while those after have yet to happen, is cut where it leaves the
+	/// window, and is refused once the marker has left it.
+	#[test]
+	fn a_clip_around_a_marker_spans_both_sides() {
+		let secs = Duration::from_secs;
+		let now = Instant::now().saturating_add(secs(100));
+		let ago = |seconds| now.saturating_sub(secs(seconds));
+		let span = |at| Stretch::around(at, now).and_then(|stretch| stretch.span(now));
+		assert_eq!(span(ago(12)).unwrap(), (secs(7), BEFORE + AFTER));
+		assert_eq!(span(ago(2)).unwrap(), (Duration::ZERO, BEFORE + secs(2)), "ends now");
+		assert_eq!(span(now).unwrap(), (Duration::ZERO, BEFORE), "dropped this moment");
+		assert_eq!(span(ago(25)).unwrap(), (secs(20), secs(10)), "cut at the window");
+		assert!(span(ago(30)).is_err(), "aged out");
 	}
 
 	/// A hotkey takes the last stretch as long as the one picked, even once

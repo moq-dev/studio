@@ -35,9 +35,10 @@
 //!   picture, and how large its picture is.
 //! - [`publish`] gives each local source its own track, in a broadcast the
 //!   studio keeps to itself, to replay or record the source on its own.
-//! - [`layout`] says where and when each source published independently
-//!   shows over the program, and how its sound plays, for viewers to place
-//!   its track themselves.
+//! - [`composition`] lists the program and each source published
+//!   independently as a broadcast of its own, and says where and when each
+//!   shows over the program and how its sound plays, for viewers to place
+//!   them themselves.
 //!
 //! Every picture is drawn on the program clock the caller ticks
 //! [`Compositor::render`] with, from whatever each source delivered last: a
@@ -48,6 +49,7 @@ mod arrange;
 pub mod browser;
 pub mod clip;
 mod collection;
+pub mod composition;
 mod compositor;
 mod dark;
 mod edit;
@@ -56,7 +58,6 @@ pub mod file;
 mod format;
 mod glide;
 mod grant;
-pub mod layout;
 mod lut;
 mod matte;
 mod media;
@@ -64,6 +65,7 @@ mod overlay;
 pub mod place;
 mod playout;
 pub mod publish;
+mod readback;
 pub mod replay;
 mod scale;
 pub mod source;

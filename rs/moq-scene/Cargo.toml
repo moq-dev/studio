@@ -26,10 +26,17 @@ capture = ["moq-video/capture", "moq-audio/capture"]
 # package turns it on where the build host has it.
 pipewire = ["capture", "moq-video/pipewire", "moq-audio/pipewire"]
 # Browser sources, rendered by CEF (the Chromium Embedded Framework) in a helper
-# process, on Linux. Off by default: the build downloads the CEF runtime, or
-# takes it from `CEF_PATH`, and compiles its C++ wrapper. Without it, a browser
-# source reports that this build cannot render web pages.
-cef = ["dep:cef"]
+# process, on Linux and macOS. Off by default: the build downloads the CEF
+# runtime, or takes it from `CEF_PATH`, and compiles its C++ wrapper. Without
+# it, a browser source reports that this build cannot render web pages.
+cef = ["dep:cef", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+
+# CEF's subprocesses on macOS, which run from helper apps of their own in the
+# app bundle rather than from the studio's executable.
+[[bin]]
+name = "moq-browser-helper"
+path = "src/bin/browser-helper.rs"
+required-features = ["cef"]
 
 [dependencies]
 # Overlays: Blitz lays HTML and CSS out and paints it into a Vello scene, which
@@ -59,6 +66,8 @@ humantime-serde = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 kio = { workspace = true, features = ["runtime"] }
 moq-audio = { workspace = true }
+# Writes the composition broadcast's catalog, each update at its own timestamp.
+moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # `render` is the compositor's whole input path: it turns every decoded or
@@ -89,11 +98,13 @@ vello = "0.11"
 wuff = "0.2"
 
 # The helper process a browser source runs CEF in, and the socket between them.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # `accelerated_osr` copies the page's shared texture into the studio's device.
 cef = { version = "156.3", default-features = false, features = ["accelerated_osr"], optional = true }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 rustix = { version = "1", features = ["fs", "net", "process", "stdio"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 # Which GPU the X server runs on, which CEF paints on under X11. Pure Rust, and
 # 0.13 as the studio's hotkeys use.
 x11rb = { version = "0.13", features = ["dri3"] }
@@ -101,12 +112,35 @@ x11rb = { version = "0.13", features = ["dri3"] }
 # hangs. Pure Rust, and 0.31 as eframe's winit uses.
 wayland-client = "0.31"
 
+# Each is the release already in the graph through wgpu and winit.
+[target.'cfg(target_os = "macos")'.dependencies]
+# A page's shared texture is an IOSurface, which reaches the studio only as a
+# Mach port, sent to a bootstrap service the studio checks in.
+mach2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std"] }
+objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "IOSurfaceRef", "libc", "objc2-core-foundation"] }
+# The helper's NSApplication, which CEF needs to take part in its event
+# handling, kept out of the Dock and out of App Nap.
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSRunningApplication",
+], optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo", "NSString"], optional = true }
+
 [dev-dependencies]
-# Reads the layer layout track back as a player would.
-moq-json = { workspace = true, features = ["async"] }
+# Reads the composition broadcast's catalog back as a player would.
+hang = { workspace = true, features = ["async"] }
 # An encoder on every machine, for the source track and replay tests.
 moq-video = { workspace = true, features = ["openh264"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# Describes the IOSurface the Mach rendezvous test sends.
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
 
 [lints]
 workspace = true

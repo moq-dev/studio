@@ -16,7 +16,7 @@ use moq_audio::bus::Live as Sound;
 
 use super::layers::{Gpu, Layers};
 use super::outbox::Commands;
-use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Raster, Start};
+use super::protocol::{Area, Channel, Command, Event, Id, Layer, Open, Start};
 use super::{ARG, Helper, Page, Paint};
 use crate::Error;
 use crate::source::{Mailbox, Picture, Status};
@@ -221,9 +221,24 @@ impl Instance {
 			// once every other owner is gone.
 			let gpu = Gpu::new(&helper.device, &helper.queue);
 			let (reading, routes) = (commands.clone(), routes.clone());
+			#[cfg(target_os = "macos")]
+			let surfaces = Surfaces {
+				receiver: helper.surfaces.clone(),
+				pid: process.child.id(),
+			};
 			let spawned = std::thread::Builder::new()
 				.name("browser-events".into())
-				.spawn(move || read(&gpu, process, &events, &reading, &routes));
+				.spawn(move || {
+					read(
+						&gpu,
+						process,
+						&events,
+						&reading,
+						&routes,
+						#[cfg(target_os = "macos")]
+						&surfaces,
+					)
+				});
 			// The writer ends with it; the helper, dropped with the closure, is
 			// killed.
 			spawned.map_err(|err| {
@@ -391,7 +406,13 @@ fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 	// compressed layout with a second, auxiliary plane, and Chromium's frame
 	// capturer drops multi-plane buffers: the page never paints. Without
 	// compression, the texture is a single plane.
-	if let Raster::Gpu { .. } = helper.raster {
+	// Chromium's allocator needs macOS's nano malloc zone off, which Chrome's
+	// and CEF's own app bundles ask of Launch Services. The helper is started
+	// directly, so it asks here, for itself and every process CEF starts.
+	#[cfg(target_os = "macos")]
+	command.env("MallocNanoZone", "0");
+	#[cfg(target_os = "linux")]
+	if let super::protocol::Raster::Gpu { .. } = helper.raster {
 		let mut debug = std::env::var_os("INTEL_DEBUG").unwrap_or_default();
 		if !debug.is_empty() {
 			debug.push(",");
@@ -403,10 +424,45 @@ fn spawn(helper: &Helper) -> std::io::Result<(Process, Channel)> {
 	Ok((Process { child, exit: None }, Channel::new(ours)))
 }
 
+/// Where a helper's shared textures come from on macOS: the IOSurfaces it
+/// sends the studio's service, which only it, process `pid`, may hand over.
+#[cfg(target_os = "macos")]
+struct Surfaces {
+	/// The service, on the GPU path.
+	receiver: Option<Arc<super::mach::Receiver>>,
+	pid: u32,
+}
+
+#[cfg(target_os = "macos")]
+impl Surfaces {
+	/// The surface sent ahead of the texture message just read.
+	fn take(&self) -> Result<objc2_core_foundation::CFRetained<objc2_io_surface::IOSurfaceRef>, String> {
+		let receiver = self
+			.receiver
+			.as_ref()
+			.ok_or("the browser process sent a shared texture, though its pages paint into memory")?;
+		receiver.surface(self.pid)
+	}
+}
+
 /// Deliver the helper's events until it exits or breaks the protocol, then
 /// stop it and every page still open, saying why.
-fn read(gpu: &Gpu, mut process: Process, events: &Channel, commands: &Commands, routes: &Mutex<Routes>) {
-	let reason = match deliver(gpu, events, commands, routes) {
+fn read(
+	gpu: &Gpu,
+	mut process: Process,
+	events: &Channel,
+	commands: &Commands,
+	routes: &Mutex<Routes>,
+	#[cfg(target_os = "macos")] surfaces: &Surfaces,
+) {
+	let reason = match deliver(
+		gpu,
+		events,
+		commands,
+		routes,
+		#[cfg(target_os = "macos")]
+		surfaces,
+	) {
 		// Gone, or exiting: wait for it, so the next helper finds the profile
 		// free.
 		Ok(()) => match process.exited() {
@@ -429,7 +485,13 @@ fn read(gpu: &Gpu, mut process: Process, events: &Channel, commands: &Commands, 
 
 /// Route the helper's events to their pages until it closes the socket, or
 /// fail with why it cannot go on.
-fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Routes>) -> Result<(), String> {
+fn deliver(
+	gpu: &Gpu,
+	events: &Channel,
+	commands: &Commands,
+	routes: &Mutex<Routes>,
+	#[cfg(target_os = "macos")] surfaces: &Surfaces,
+) -> Result<(), String> {
 	use std::io::ErrorKind::*;
 
 	let Gpu { device, queue, .. } = gpu;
@@ -443,12 +505,18 @@ fn deliver(gpu: &Gpu, events: &Channel, commands: &Commands, routes: &Mutex<Rout
 			Err(err) => return Err(format!("the browser process's socket: {err}")),
 		};
 		let (id, layer, texture, paint) = match event {
-			Event::Texture(id, layer, texture) => (
-				id,
-				layer,
-				super::import::texture(device, queue, &texture, fds),
-				Paint::Gpu,
-			),
+			Event::Texture(id, layer, texture) => {
+				#[cfg(target_os = "linux")]
+				let imported = super::import::texture(device, queue, &texture, fds);
+				#[cfg(target_os = "macos")]
+				let imported = {
+					drop(fds);
+					surfaces
+						.take()
+						.and_then(|surface| super::import::texture(device, queue, &texture, &surface))
+				};
+				(id, layer, imported, Paint::Gpu)
+			}
 			Event::Pixels {
 				page,
 				layer,

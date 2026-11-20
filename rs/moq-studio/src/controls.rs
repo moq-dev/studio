@@ -1,16 +1,19 @@
 //! What the operator does from a button, a hotkey, or the command palette:
-//! take a scene, mute a sound, panic, replay, save a clip, record, and go live
-//! and end the stream, each registered once in the table here. Hotkeys fire
-//! from outside the window's frames, so a key pressed while a game has focus
-//! acts at once, even while the window is hidden and draws nothing.
+//! take a scene, mute a sound, panic, replay, save a clip, drop a marker,
+//! record, and go live and end the stream, each registered once in the table
+//! here. Hotkeys fire from outside the window's frames, so a key pressed while
+//! a game has focus acts at once, even while the window is hidden and draws
+//! nothing.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
+use kio::clock::Instant;
 use moq_scene::Source;
 
 use crate::engine::{Engine, OnAir, State};
+use crate::markers::Markers;
 use crate::replay;
 use crate::stream::{Stream, Switched};
 
@@ -31,6 +34,8 @@ pub enum Action {
 	Replay,
 	/// Save the stretch of the recent past REVIEW picks as a clip.
 	SaveClip,
+	/// Mark this moment of the show.
+	Marker,
 	/// Start recording, or stop the recording under way.
 	Record,
 	/// Cut to the safe scene and mute every microphone and guest.
@@ -85,7 +90,7 @@ struct Fixed {
 /// The actions every show has, each registered once, in the order the
 /// Hotkeys pane and the palette list them within their group. Each scene and
 /// sound adds its own: see [`Action::listed`].
-const FIXED: [Fixed; 9] = [
+const FIXED: [Fixed; 10] = [
 	Fixed {
 		action: Action::GoLive,
 		group: Group::Live,
@@ -157,6 +162,14 @@ const FIXED: [Fixed; 9] = [
 		name: "Save clip",
 		detail: None,
 		words: &["highlight"],
+	},
+	Fixed {
+		action: Action::Marker,
+		group: Group::Review,
+		id: "marker",
+		name: "Drop a marker",
+		detail: None,
+		words: &["mark", "flag", "bookmark", "moment"],
 	},
 ];
 
@@ -237,6 +250,23 @@ impl Action {
 			fixed => fixed.fixed().words,
 		}
 	}
+
+	/// Whether a phone paired as a remote may fire it: what its page shows,
+	/// a scene's pad, a mute, TAKE, and AUTO. Every action says, so a new one
+	/// is kept off the network until it is placed here.
+	pub fn remote(&self) -> bool {
+		match self {
+			Self::Scene(_) | Self::Mute(_) | Self::Cut | Self::Transition => true,
+			Self::StudioMode
+			| Self::Replay
+			| Self::SaveClip
+			| Self::Marker
+			| Self::Record
+			| Self::Panic
+			| Self::GoLive
+			| Self::EndStream => false,
+		}
+	}
 }
 
 impl std::fmt::Display for Action {
@@ -307,6 +337,8 @@ pub struct Controls {
 	probes: Arc<tokio::sync::watch::Sender<Probes>>,
 	/// REVIEW's replay picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
+	/// The moments marked this session.
+	pub markers: Markers,
 	/// Whether the next recording gives each source a file of its own too.
 	pub record_sources: AtomicBool,
 	/// Whether Studio mode is on: a scene's pad or key cues it rather than
@@ -345,6 +377,7 @@ impl Default for Replay {
 impl Controls {
 	pub fn new(engine: Arc<Engine>, stream: Stream, runtime: tokio::runtime::Handle) -> Self {
 		engine.set_guests_appear(stream.guests_appear());
+		let markers = Markers::new(engine.recorder.show());
 		Self {
 			engine,
 			runtime,
@@ -358,6 +391,7 @@ impl Controls {
 			joined: Mutex::default(),
 			probes: Arc::new(tokio::sync::watch::Sender::new(Probes::default())),
 			replay: Mutex::default(),
+			markers,
 			record_sources: AtomicBool::new(false),
 			studio: AtomicBool::new(false),
 			fired: Arc::default(),
@@ -408,8 +442,12 @@ impl Controls {
 				let rooms = self.engine.rooms();
 				self.engine.state.lock().unwrap().panic(&rooms)
 			}
-			Action::Replay => self.replay(true, false),
-			Action::SaveClip => self.replay(false, false),
+			Action::Replay => self.replay(true, false, None),
+			Action::SaveClip => self.replay(false, false, None),
+			Action::Marker => {
+				let number = self.markers.mark(&self.engine.recorder.dir(), Instant::now())?;
+				Ok(format!("dropped marker {number}"))
+			}
 			Action::Record => {
 				let recorder = &self.engine.recorder;
 				match recorder.status().filter(|status| !status.done) {
@@ -447,6 +485,7 @@ impl Controls {
 			Action::Mute(name) if !collection.sources.contains_key(name) => {
 				Some(format!("there is no source `{name}`"))
 			}
+			Action::Marker => self.markers.refused(),
 			// Whichever is picked, any replay source plays it.
 			Action::Replay => replay_source(collection, None).err().map(|err| err.to_string()),
 			Action::Record => self
@@ -601,7 +640,7 @@ impl Controls {
 	/// so the next go-live, end of stream, or save tries them again; and join
 	/// its guests' room on them, unless joined already. Call it holding
 	/// [`Self::following`], inside the runtime.
-	fn follow(&self, stream: &Stream) {
+	fn follow(self: &Arc<Self>, stream: &Stream) {
 		if !crate::show::follow(&self.engine, stream) {
 			self.rewatch.store(true, Ordering::Release);
 		}
@@ -612,7 +651,7 @@ impl Controls {
 	/// guests' room if the last try failed, so a room whose key file is back
 	/// joins at the next go-live, end of stream, or save, as well as on Try
 	/// again. Call it holding [`Self::following`], inside the runtime.
-	fn catch_up(&self, stream: &Stream, waiting: bool) {
+	fn catch_up(self: &Arc<Self>, stream: &Stream, waiting: bool) {
 		match waiting {
 			true => self.follow(stream),
 			false => self.join_room(stream),
@@ -624,7 +663,7 @@ impl Controls {
 	/// Call it holding [`Self::following`], which keeps two joins apart, as
 	/// [`Self::joined`] is let go while one reads the key file, so the UI
 	/// reading the failure never waits on the disk; inside the runtime.
-	fn join_room(&self, stream: &Stream) {
+	fn join_room(self: &Arc<Self>, stream: &Stream) {
 		let room = (stream.relay().cloned(), stream.guests());
 		{
 			let mut joined = self.joined.lock().unwrap();
@@ -645,6 +684,9 @@ impl Controls {
 		}
 		let joining =
 			crate::guests::Joining::connect(&room.1, room.0.as_ref(), &stream.client(), stream.quic().clone());
+		// Weak, so the remotes never keep the controls, and the engine, alive.
+		let board: std::sync::Weak<Self> = Arc::downgrade(self);
+		let joining = joining.map(|joining| joining.map(|joining| joining.driving(board)));
 		// A room that cannot be leaves the last one too, since its settings
 		// are gone; it is tried again once they change.
 		let result = match joining {
@@ -724,21 +766,38 @@ impl Controls {
 	/// Do `action` for a hotkey, keeping how it went for the status bar.
 	pub fn press(self: &Arc<Self>, action: &Action) {
 		match action {
-			Action::Replay => drop(self.replay(true, true)),
-			Action::SaveClip => drop(self.replay(false, true)),
+			Action::Replay => drop(self.replay(true, true, None)),
+			Action::SaveClip => drop(self.replay(false, true, None)),
 			action => self.report(action, self.fire(action).map_err(|err| format!("{err:#}"))),
 		}
 	}
 
-	/// Play REVIEW's pick in its replay source, or save it as a
-	/// clip. Copied now, without waiting on anything, so the span ends here and
-	/// replays apply in the order they were asked for. How it went shows in
-	/// REVIEW, and in the status bar too when a hotkey `pressed` it,
-	/// since the panel may be hidden.
-	fn replay(&self, play: bool, pressed: bool) -> anyhow::Result<String> {
+	/// Save a clip of what REVIEW picks around marker `number`, as Save clip
+	/// does, saying how it went in REVIEW.
+	pub fn clip_marker(&self, number: u32) -> anyhow::Result<String> {
+		let marker = self
+			.markers
+			.get(number)
+			.with_context(|| format!("there is no marker {number}"))?;
+		let stretch = replay::Stretch::around(marker.at, Instant::now());
+		let stretch = stretch.with_context(|| format!("cannot clip around {}", marker.title()))?;
+		self.replay(false, false, Some(stretch))
+	}
+
+	/// Play REVIEW's pick in its replay source, or save it as a clip, over
+	/// the stretch `around` a marker, if given. Copied now, without waiting
+	/// on anything, so the span ends here and replays apply in the order they
+	/// were asked for. How it went shows in REVIEW, and in the status bar too
+	/// when a hotkey `pressed` it, since the panel may be hidden.
+	fn replay(&self, play: bool, pressed: bool, around: Option<replay::Stretch>) -> anyhow::Result<String> {
 		let replay = self.replay.lock().unwrap();
 		let action = if play { Action::Replay } else { Action::SaveClip };
-		let taken = self.take(&replay, play, pressed);
+		let stretch = match (around, pressed) {
+			(Some(around), _) => around,
+			(None, true) => replay.stretch.last(),
+			(None, false) => replay.stretch,
+		};
+		let taken = self.take(&replay, play, stretch);
 		let message = taken
 			.as_ref()
 			.map(|(message, _)| message.clone())
@@ -762,22 +821,19 @@ impl Controls {
 		Ok(message)
 	}
 
-	/// What a replay or clip does at once, and the save a clip still runs.
-	/// One `pressed` from outside REVIEW's own buttons, by a hotkey or the
-	/// shell's clip button, takes the last stretch as long as the one picked.
+	/// What a replay or clip of `stretch` does at once, and the save a clip
+	/// still runs. One pressed from outside REVIEW's own buttons, by a hotkey
+	/// or the shell's clip button, takes the last stretch as long as the one
+	/// picked.
 	fn take(
 		&self,
 		replay: &Replay,
 		play: bool,
-		pressed: bool,
+		stretch: replay::Stretch,
 	) -> anyhow::Result<(String, Option<impl Future<Output = anyhow::Result<String>> + use<>>)> {
 		let into = match play {
 			true => Some(self.replay_source(replay.into.as_deref())?),
 			false => None,
-		};
-		let stretch = match pressed {
-			true => replay.stretch.last(),
-			false => replay.stretch,
 		};
 		let (ago, length) = stretch.span(kio::clock::Instant::now())?;
 		let take = replay::take(&self.engine, &replay.of, ago, length, into.is_some())?;
@@ -880,6 +936,7 @@ mod tests {
 			| Action::StudioMode
 			| Action::Replay
 			| Action::SaveClip
+			| Action::Marker
 			| Action::Record
 			| Action::Panic
 			| Action::GoLive

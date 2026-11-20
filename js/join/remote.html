@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<!-- The token is in the fragment, but keep the page itself out of every Referer. -->
+	<meta name="referrer" content="no-referrer">
+	<meta name="theme-color" content="#09090c">
+	<title>Studio remote</title>
+	<link rel="stylesheet" href="/src/remote.css">
+</head>
+
+<body>
+	<header class="top">
+		<span class="logo" aria-hidden="true"></span>
+		<b id="name" class="name"></b>
+		<span class="pill"><span id="status-dot" class="dot"></span><span id="status">Connecting</span></span>
+		<span id="air" class="air" role="status" aria-live="polite"></span>
+	</header>
+
+	<main>
+		<p id="error" class="error" hidden></p>
+		<p id="waiting" class="hint">Waiting for the studio. Keep the studio open with this phone paired.</p>
+
+		<div id="desk" hidden>
+			<section>
+				<h2 class="cap">Scenes</h2>
+				<div id="scenes" class="pads"></div>
+				<div id="take" class="take" hidden></div>
+				<p id="mode" class="hint"></p>
+			</section>
+
+			<section>
+				<h2 class="cap">Sound</h2>
+				<div id="sounds" class="sounds"></div>
+				<p id="no-sounds" class="hint" hidden>No sounds.</p>
+			</section>
+
+			<p id="said" class="said" role="status" aria-live="polite" hidden></p>
+		</div>
+	</main>
+
+	<script type="module" src="/src/remote.ts"></script>
+</body>
+
+</html>

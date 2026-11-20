@@ -504,7 +504,7 @@ pub(super) fn words(collection: &Collection, name: &str) -> String {
 		Some(Source::Media { .. }) => "Video file".to_string(),
 		Some(Source::Color { color }) => format!("Color {color}"),
 		Some(Source::Broadcast { path }) => format!("Broadcast {path}"),
-		Some(Source::Layer { source, .. }) => format!("Broadcast layer {source}"),
+		Some(Source::Layer { path, .. }) => format!("Composed {path}"),
 		Some(Source::Scene { scene }) => format!("Scene {scene}"),
 		Some(Source::Program) => "The program".to_string(),
 		Some(Source::Replay) => "Replay".to_string(),
@@ -753,6 +753,8 @@ impl Panels {
 			}
 			return;
 		};
+		// A link into a room the studio has left joins nothing.
+		self.shown.take_if(|shown| !shown.joins(&room));
 
 		ui.horizontal(|ui| {
 			ui.label("Name");
@@ -762,7 +764,7 @@ impl Panels {
 				let name = self.guest.trim().to_string();
 				match room.invite(&name) {
 					Ok(invite) => {
-						self.show(ui.ctx(), name, invite);
+						self.show(ui.ctx(), &room, name, invite);
 						self.guest.clear();
 					}
 					Err(err) => self.fail(Spot::Add, Err(err)),
@@ -859,11 +861,11 @@ impl Panels {
 		});
 
 		if let Some((name, link)) = show {
-			self.show(ui.ctx(), name, link);
+			self.show(ui.ctx(), &room, name, link);
 		}
 		if let Some(name) = invite {
 			match room.invite(&name) {
-				Ok(link) => self.show(ui.ctx(), name, link),
+				Ok(link) => self.show(ui.ctx(), &room, name, link),
 				Err(err) => self.fail(Spot::Add, Err(err)),
 			}
 		}
@@ -889,8 +891,15 @@ impl Panels {
 	}
 
 	/// Put `invite`'s link for `name` on screen as a QR code.
-	pub(super) fn show(&mut self, ctx: &egui::Context, name: String, invite: crate::guests::Invite) {
+	pub(super) fn show(
+		&mut self,
+		ctx: &egui::Context,
+		room: &Arc<crate::guests::Room>,
+		name: String,
+		invite: crate::guests::Invite,
+	) {
 		let qr = qr(ctx, invite.link.as_str());
-		self.shown = Some(Shown { name, invite, qr });
+		let room = Arc::downgrade(room);
+		self.shown = Some(Shown { name, invite, qr, room });
 	}
 }

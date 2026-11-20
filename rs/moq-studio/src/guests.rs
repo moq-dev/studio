@@ -22,6 +22,10 @@
 //! A renewed guest also gets a return feed, the program with a mix-minus, at
 //! `.return/<identity>/<generation>`, which only their token may read either;
 //! see [`crate::feed`].
+//!
+//! A phone paired as a [remote] drives the show from the same room.
+
+pub mod remote;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -147,24 +151,42 @@ impl Config {
 			.clone()
 			.unwrap_or_else(|| Url::parse(JOIN_PAGE).expect("the default join page is a URL"));
 		let connect = connect.context("guests join through the relay; set one in Settings, Stream")?;
-		let removals = removals_path(key);
+		let removals = beside(key, "guests");
+		let remotes = beside(key, "remotes");
 		let key = moq_auth::Key::from_file(key).with_context(|| format!("reading the room key {}", key.display()))?;
 		let expiry = self.guest_expiry.map_or(DEFAULT_EXPIRY, Duration::from);
 		let room = Room::new(connect, room, key, page, expiry)?;
-		Ok(Some(room.remember(removals)?))
+		let mut room = room.remember(removals)?;
+		room.remotes = remote::Remotes::load(remotes)?;
+		Ok(Some(room))
 	}
 }
 
-/// Where the guests removed from scenes, how often each was let back in, and
-/// who appeared on their own are kept: `room.guests.toml` for `room.jwk`. Beside the key, since the
-/// tokens they bound are the key's, whichever scene file the studio opens.
-fn removals_path(key: &std::path::Path) -> PathBuf {
+/// Where what the room key's tokens bound is kept beside it, whichever scene
+/// file the studio opens: `room.<what>.toml` for `room.jwk`. The guests removed
+/// from scenes, how often each was let back in, and who appeared on their own
+/// are in `guests`, and the phones paired as remotes in `remotes`.
+fn beside(key: &std::path::Path, what: &str) -> PathBuf {
 	let mut name = key.file_stem().unwrap_or_default().to_os_string();
-	name.push(".guests.toml");
+	name.push(format!(".{what}.toml"));
 	key.with_file_name(name)
 }
 
-/// The file at [`removals_path`].
+/// Replace the file at `path` with `text` whole, so a crash never leaves half
+/// a file.
+fn replace(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
+	let context = || format!("writing {}", path.display());
+	let dir = match path.parent() {
+		Some(dir) if !dir.as_os_str().is_empty() => dir,
+		_ => std::path::Path::new("."),
+	};
+	let mut file = tempfile::NamedTempFile::new_in(dir).with_context(context)?;
+	std::io::Write::write_all(&mut file, text.as_bytes()).with_context(context)?;
+	file.persist(path).map_err(|err| err.error).with_context(context)?;
+	Ok(())
+}
+
+/// The guests' file [`beside`] the key.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Removals {
@@ -201,6 +223,10 @@ pub struct Room {
 	session: OnceLock<moq_tokio::connection::Monitor>,
 	/// What that session publishes, once it dials.
 	origin: OnceLock<moq_net::origin::Producer>,
+	/// What that session reads, once it dials: the remotes' presses.
+	heard: OnceLock<moq_net::origin::Producer>,
+	/// The phones paired as remotes.
+	remotes: remote::Remotes,
 }
 
 /// One guest the studio knows of.
@@ -301,11 +327,14 @@ impl Room {
 			changed: Default::default(),
 			session: Default::default(),
 			origin: Default::default(),
+			heard: Default::default(),
+			remotes: Default::default(),
 		};
 		// Sign once now, so a key that cannot sign for guests or for the studio's
 		// own session fails at startup.
 		room.sign("guest", 0)?;
 		room.sign_session()?;
+		room.sign_remote("remote", 0)?;
 		Ok(room)
 	}
 
@@ -364,16 +393,7 @@ impl Room {
 				.collect(),
 			appeared: appeared.map(|(identity, _)| identity.clone()).collect(),
 		};
-		let context = || format!("writing {}", path.display());
-		let dir = match path.parent() {
-			Some(dir) if !dir.as_os_str().is_empty() => dir,
-			_ => std::path::Path::new("."),
-		};
-		// Replaced whole, so a crash never leaves half a file.
-		let mut file = tempfile::NamedTempFile::new_in(dir).with_context(context)?;
-		std::io::Write::write_all(&mut file, toml::to_string(&removals)?.as_bytes()).with_context(context)?;
-		file.persist(path).map_err(|err| err.error).with_context(context)?;
-		Ok(())
+		replace(path, &toml::to_string(&removals)?)
 	}
 
 	/// The room, relative to the studio's connection.
@@ -412,14 +432,7 @@ impl Room {
 				participant.generation += 1;
 			})?;
 		}
-		let mut link = self.page.clone();
-		let fragment = url::form_urlencoded::Serializer::new(String::new())
-			.append_pair("url", self.url.as_str())
-			.append_pair("name", name)
-			.append_pair("jwt", &token)
-			.append_pair("generation", &(generation + u64::from(removed)).to_string())
-			.finish();
-		link.set_fragment(Some(&fragment));
+		let link = self.link(self.page.clone(), name, &token, generation + u64::from(removed));
 		let invite = Invite { link, expires };
 		// A new link may appear on its own again.
 		if appeared {
@@ -429,6 +442,19 @@ impl Room {
 		drop(participants);
 		self.changed.send_replace(());
 		Ok(invite)
+	}
+
+	/// `page` with the room's relay, `name`, its `token`, and its `generation`
+	/// in the fragment, which the browser never sends to a server.
+	fn link(&self, mut page: Url, name: &str, token: &str, generation: u64) -> Url {
+		let fragment = url::form_urlencoded::Serializer::new(String::new())
+			.append_pair("url", self.url.as_str())
+			.append_pair("name", name)
+			.append_pair("jwt", token)
+			.append_pair("generation", &generation.to_string())
+			.finish();
+		page.set_fragment(Some(&fragment));
+		page
 	}
 
 	/// Stop renewing the token of the guest called `identity`, across restarts,
@@ -498,13 +524,18 @@ impl Room {
 	}
 
 	/// A token for the studio's own session in the room, which publishes the
-	/// renewals, the return feeds, and the program they show, and nothing else.
+	/// renewals, the return feeds, the program they show, and the remotes'
+	/// desks, and reads only the remotes' presses.
 	fn sign_session(&self) -> anyhow::Result<(String, kio::clock::Wall)> {
-		let claims = moq_auth::Claims::default().with_root(self.root.as_str()).with_publish([
-			moq_auth::Pattern::subtree(RENEW)?,
-			moq_auth::Pattern::subtree(RETURN)?,
-			moq_auth::Pattern::subtree(PROGRAM)?,
-		]);
+		let claims = moq_auth::Claims::default()
+			.with_root(self.root.as_str())
+			.with_publish([
+				moq_auth::Pattern::subtree(RENEW)?,
+				moq_auth::Pattern::subtree(RETURN)?,
+				moq_auth::Pattern::subtree(PROGRAM)?,
+				moq_auth::Pattern::subtree(remote::DESK)?,
+			])
+			.with_subscribe([moq_auth::Pattern::subtree(remote::PRESS)?]);
 		self.sign_claims(claims)
 			.context("the room key cannot sign the studio's own session in the room")
 	}
@@ -962,10 +993,12 @@ pub async fn run(engine: Arc<Engine>, room: Arc<Room>, origin: moq_net::origin::
 }
 
 /// A room ready for the engine to [join](Engine::join), with the studio's
-/// session in it, which renews its guests' tokens.
+/// session in it, which renews its guests' tokens, and what its remotes
+/// drive, if any.
 pub struct Joining {
 	pub(crate) room: Arc<Room>,
 	pub(crate) renewal: Option<Renewal>,
+	pub(crate) remotes: Option<remote::Service>,
 }
 
 impl Joining {
@@ -985,7 +1018,18 @@ impl Joining {
 		Ok(Some(Self {
 			room,
 			renewal: Some(renewal),
+			remotes: None,
 		}))
+	}
+
+	/// Let the room's remotes drive `board` for as long as the engine
+	/// follows the room.
+	pub fn driving(self, board: std::sync::Weak<dyn remote::Board>) -> Self {
+		let remotes = remote::Service::new(self.room.clone(), board);
+		Self {
+			remotes: Some(remotes),
+			..self
+		}
 	}
 
 	/// `room` with no session in it, so no guest is renewed or fed.
@@ -994,6 +1038,7 @@ impl Joining {
 		Self {
 			room: Arc::new(room),
 			renewal: None,
+			remotes: None,
 		}
 	}
 }
@@ -1033,9 +1078,14 @@ impl Renewal {
 			.init(quic)
 			.context("cannot set up the studio's session in the room")?;
 		let origin = moq_tokio::origin::spawn();
-		let connection = client.with_publisher(&origin).connect(room.url.clone());
+		let heard = moq_tokio::origin::spawn();
+		let connection = client
+			.with_publisher(&origin)
+			.with_subscriber(heard.clone())
+			.connect(room.url.clone());
 		let _ = room.session.set(connection.monitor());
 		let _ = room.origin.set(origin.clone());
+		let _ = room.heard.set(heard);
 		let renewals = Renewals::new(room, origin);
 		Ok(Self { renewals, connection })
 	}
