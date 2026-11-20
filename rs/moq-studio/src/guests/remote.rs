@@ -21,7 +21,8 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard, Weak};
 use std::task::{Poll, ready};
 use std::time::Duration;
 
@@ -77,9 +78,11 @@ pub struct Remote {
 /// The remotes the room key paired, kept beside it.
 #[derive(Default)]
 pub(super) struct Remotes {
-	paired: Mutex<BTreeMap<String, Remote>>,
+	paired: RwLock<BTreeMap<String, Remote>>,
 	/// Where they are kept, or `None` to keep them in memory alone.
 	file: Option<PathBuf>,
+	/// Whether the studio is leaving the room, which changes them no more.
+	left: AtomicBool,
 	/// Bumped when which remotes are read changes.
 	changed: tokio::sync::watch::Sender<()>,
 }
@@ -110,8 +113,9 @@ impl Remotes {
 			(name, remote)
 		});
 		Ok(Self {
-			paired: Mutex::new(paired.collect()),
+			paired: RwLock::new(paired.collect()),
 			file: Some(path),
+			left: AtomicBool::new(false),
 			changed: Default::default(),
 		})
 	}
@@ -135,7 +139,8 @@ impl Remotes {
 	/// Apply `change` to the remote called `name` once the file holds it, so
 	/// a failed write leaves both as they were.
 	fn change(&self, name: &str, change: impl FnOnce(&mut Remote)) -> anyhow::Result<Remote> {
-		let mut paired = self.paired.lock().unwrap();
+		let mut paired = self.paired.write().unwrap();
+		anyhow::ensure!(!self.left.load(Ordering::SeqCst), super::LEFT);
 		let before = paired.get(name).cloned();
 		let remote = paired.entry(name.to_string()).or_default();
 		change(remote);
@@ -154,16 +159,31 @@ impl Remotes {
 
 	/// The remotes whose presses are read, and in which generation.
 	fn read(&self) -> Vec<(String, u64)> {
-		let paired = self.paired.lock().unwrap();
+		let paired = self.paired.read().unwrap();
 		let read = paired.iter().filter(|(_, remote)| !remote.removed);
 		read.map(|(name, remote)| (name.clone(), remote.generation)).collect()
 	}
 
+	/// A hold on the remotes while the one called `name` in `generation` is
+	/// read, or `None` once it is not: a removal waits for the hold, so what
+	/// is done under it never follows one.
+	fn reading(&self, name: &str, generation: u64) -> Option<RwLockReadGuard<'_, BTreeMap<String, Remote>>> {
+		let paired = self.paired.read().unwrap();
+		let remote = paired.get(name)?;
+		(!remote.removed && remote.generation == generation).then_some(paired)
+	}
+
 	/// Note whether the page of the remote called `name` is connected.
 	fn connect(&self, name: &str, connected: bool) {
-		if let Some(remote) = self.paired.lock().unwrap().get_mut(name) {
+		if let Some(remote) = self.paired.write().unwrap().get_mut(name) {
 			remote.connected = connected;
 		}
+	}
+
+	/// Refuse every change from now on, once any under way is kept.
+	pub(super) fn leave(&self) {
+		self.left.store(true, Ordering::SeqCst);
+		drop(self.paired.write().unwrap());
 	}
 }
 
@@ -180,8 +200,16 @@ impl Room {
 			"a remote's name is one path segment, without `/` or `\\`"
 		);
 		anyhow::ensure!(!name.starts_with('.'), "a remote's name cannot start with `.`");
+		// `Url::join` reads a last segment as a file, so a directory without its
+		// `/` would put the remote's page beside the directory, not in it.
+		let last = self.page.path_segments().and_then(Iterator::last).unwrap_or_default();
+		anyhow::ensure!(
+			last.is_empty() || last.contains('.'),
+			"the join page {} ends in a directory without its `/`, so no remote's page is beside it; end it with `/`",
+			self.page
+		);
 		let page = self.page.join(PAGE).context("the join page has no page beside it")?;
-		let before = self.remotes.paired.lock().unwrap().get(name).cloned();
+		let before = self.remotes.paired.read().unwrap().get(name).cloned();
 		let generation = before
 			.as_ref()
 			.map_or(0, |remote| remote.generation + u64::from(remote.removed));
@@ -208,7 +236,7 @@ impl Room {
 
 	/// Every phone paired as a remote, by name.
 	pub fn remotes(&self) -> BTreeMap<String, Remote> {
-		self.remotes.paired.lock().unwrap().clone()
+		self.remotes.paired.read().unwrap().clone()
 	}
 
 	/// A token for the remote called `name` in `generation`, and when it
@@ -507,16 +535,21 @@ impl Paired {
 				}
 			};
 			self.room.remotes.connect(&self.name, true);
-			tokio::select! {
+			let changed = tokio::select! {
 				result = self.drive(broadcast, &mut done) => {
 					if let Err(err) = result {
 						tracing::debug!(remote = self.name, error = format!("{err:#}"), "stopped reading a remote");
 					}
-					next = following.available().await;
+					None
 				}
-				changed = following.available() => next = changed,
-			}
+				changed = following.available() => Some(changed),
+			};
+			// Not connected while waiting for the page's next broadcast.
 			self.room.remotes.connect(&self.name, false);
+			next = match changed {
+				Some(changed) => changed,
+				None => following.available().await,
+			};
 		}
 	}
 
@@ -573,7 +606,10 @@ impl Paired {
 				} => {
 					pressed = true;
 					match press {
-						Ok(Some(press)) => *done = Some(self.handle(press, &mut listening, done.as_ref())),
+						Ok(Some(press)) => {
+							let _reading = self.reading()?;
+							*done = Some(self.handle(press, &mut listening, done.as_ref()));
+						}
 						Ok(None) => return Ok(()),
 						Err(moq_json::Error::Net(err)) => return Err(err.into()),
 						// Refused whole, as one the page cannot be told about.
@@ -603,8 +639,18 @@ impl Paired {
 		Ok(())
 	}
 
+	/// Hold the remote paired while a press is done or a token renewed, so
+	/// neither follows its removal.
+	fn reading(&self) -> anyhow::Result<RwLockReadGuard<'_, BTreeMap<String, Remote>>> {
+		self.room
+			.remotes
+			.reading(&self.name, self.generation)
+			.context("the remote was removed")
+	}
+
 	/// Publish the remote a fresh token.
 	fn renew(&self, published: &mut Published) -> anyhow::Result<()> {
+		let _reading = self.reading()?;
 		let (token, _) = self.room.sign_remote(&self.name, self.generation)?;
 		let at = moq_net::Timestamp::unscaled(published.next);
 		published.tokens.write_frame(at, token)?;
@@ -737,6 +783,8 @@ impl Presses {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::Mutex;
+
 	use super::super::tests::{EXPIRY, Relay, fragment, key};
 	use super::*;
 	use url::Url;
@@ -912,6 +960,22 @@ mod tests {
 			assert!(room.pair(name).is_err(), "{name:?}");
 		}
 		assert_eq!(room.remotes().len(), 1, "a refused name is paired");
+
+		// The remote's page is beside the join page, which a directory without
+		// its `/` cannot say where.
+		let connect = Url::parse("https://relay.example/show").unwrap();
+		let at = |page: &str| {
+			let page = Url::parse(page).unwrap();
+			let room = Room::new(&connect, "guests", key.clone(), page, EXPIRY).unwrap();
+			room.pair("phone").map(|invite| invite.link.path().to_string())
+		};
+		assert_eq!(
+			at("https://studio.example/join/index.html").unwrap(),
+			"/join/remote.html"
+		);
+		assert_eq!(at("https://studio.example/").unwrap(), "/remote.html");
+		let err = at("https://studio.example/join").unwrap_err();
+		assert!(format!("{err:#}").contains("end it with `/`"), "{err:#}");
 	}
 
 	/// Who is paired, removed, and in which generation outlasts a restart,
@@ -943,6 +1007,24 @@ mod tests {
 		assert!(room.remotes()["tablet"].removed);
 		room.pair("tablet").unwrap();
 		assert_eq!(start().remotes()["tablet"].generation, 1);
+
+		// The studio leaving the room for the next, which reads the file only
+		// once the room left can change it no more: a removal there would be
+		// missed, and an unexpired link would press again.
+		room.leave();
+		let next = start();
+		let err = room.unpair("phone").unwrap_err();
+		assert_eq!(format!("{err:#}"), super::super::LEFT);
+		assert!(!room.remotes()["phone"].removed);
+		assert!(room.pair("laptop").is_err(), "a pairing the next room would miss");
+		assert!(
+			room.stop_renewing("alice").is_err(),
+			"a guest's removal the next room would miss"
+		);
+		next.unpair("phone").unwrap();
+		assert!(start().remotes()["phone"].removed);
+		next.pair("phone").unwrap();
+		let room = next;
 
 		// A removal the file cannot hold is not made.
 		std::fs::remove_file(&file).unwrap();
@@ -1025,15 +1107,34 @@ mod tests {
 		assert_eq!(refused.said, "Go live is not for a remote");
 		assert_eq!(fake.pressed().len(), 2);
 
+		let mute = Action::Mute("Desk mic".into());
+		page.press(press(14, Some(mute.clone())));
+		clock.advance(FRAME);
+		let muted = done(&mut desks, 14).await;
+		assert!(muted.ok, "{muted:?}");
+		assert_eq!(fake.pressed().len(), 3);
+
 		// The page back on a new connection: the press read first is the
-		// last it made, which is not done again.
+		// last it made, which is not done again, and the desk still says how
+		// it went.
 		drop(page);
 		while desks.latest().await.unwrap().is_some() {}
+		let built = fake.built();
 		let mut page = Page::open(&heard, "phone", 0);
-		page.press(press(13, Some(Action::GoLive)));
+		page.press(press(14, Some(mute)));
 		let mut desks = read_desks(publish.consume(), "phone", 0).await;
 		clock.advance(FRAME);
-		assert_eq!(done(&mut desks, 13).await, refused, "the last press, again");
+		// Read once the desk is built again after the one the page connected to.
+		for _ in 0..100 {
+			if fake.built() >= built + 2 {
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+		assert_eq!(fake.built(), built + 2, "the press is read");
+		let replayed = desks.latest().await.unwrap().unwrap().value.done;
+		assert_eq!(replayed, Some(muted), "the last press, again");
+		assert_eq!(fake.pressed().len(), 3, "done again");
 
 		// A page whose press the studio may have done before it restarted,
 		// which is told to check it, not done again.
@@ -1054,15 +1155,18 @@ mod tests {
 		};
 		assert!(!again.ok);
 		assert_eq!(again.said, RESTARTED);
-		assert_eq!(fake.pressed().len(), 2, "done again");
+		assert_eq!(fake.pressed().len(), 3, "done again");
 
-		// Removed: the desk ends, and nothing more is read.
-		room.unpair("phone").unwrap();
-		while desks.latest().await.is_ok_and(|desk| desk.is_some()) {}
+		// Removed while a press waits to be read: it is never done, and the
+		// desk ends.
 		page.press(press(2, Some(scene)));
 		clock.advance(FRAME);
-		tokio::task::yield_now().await;
-		assert_eq!(fake.pressed().len(), 2, "a removed remote drives");
+		room.unpair("phone").unwrap();
+		while desks.latest().await.is_ok_and(|desk| desk.is_some()) {}
+		for _ in 0..20 {
+			tokio::task::yield_now().await;
+		}
+		assert_eq!(fake.pressed().len(), 3, "a removed remote drives");
 		assert!(!room.remotes()["phone"].connected);
 	}
 
@@ -1128,6 +1232,13 @@ mod tests {
 		clock.advance(Duration::from_secs(1));
 		assert!(done(&mut desks, 2).await.ok);
 		assert_eq!(fake.pressed(), [scene.clone(), scene]);
+
+		// The page stops pressing while its broadcast stays announced: its desk
+		// ends, and it is no longer connected.
+		let _finished = page.track.clone().finish().unwrap();
+		clock.advance(Duration::from_secs(1));
+		while desks.latest().await.unwrap().is_some() {}
+		assert!(!room.remotes()["phone"].connected, "connected after its presses end");
 	}
 
 	/// A page that opens the link reaches the relay with its token, presses

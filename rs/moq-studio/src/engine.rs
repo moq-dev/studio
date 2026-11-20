@@ -4402,6 +4402,8 @@ mod tests {
 			height: 640,
 		});
 		collection.scenes.extend([moq_scene::Scene::new("Guest"), portrait]);
+		let host = moq_scene::Source::Broadcast { path: "host".into() };
+		collection.sources.insert("host".into(), host);
 		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
 		let (autosave, _) = Autosave::open(dir.path().join("show.toml")).unwrap();
 		let engine = start(gpu, Vec::new(), dir.path(), autosave, loaded)
@@ -4534,7 +4536,11 @@ mod tests {
 				refused(Action::Replay).as_deref(),
 				Some("no replay source; add one in Sources")
 			);
-			assert_eq!(refused(Action::Mute("red".into())), None);
+			assert_eq!(refused(Action::Mute("host".into())), None);
+			assert_eq!(
+				refused(Action::Mute("red".into())).as_deref(),
+				Some("`red` has no sound")
+			);
 			assert!(refused(Action::Mute("nobody".into())).is_some());
 			assert!(Action::listed(&state).contains(&Action::Scene("Portrait".into())));
 		}
@@ -4575,17 +4581,26 @@ mod tests {
 		}
 
 		// A sound's key or palette row flips its mute, an edit undo takes back.
-		let mute = crate::controls::Action::Mute("red".into());
-		assert_eq!(controls.fire(&mute).unwrap(), "muted `red`");
-		assert!(engine.state.lock().unwrap().collection().audio["red"].muted);
-		assert_eq!(controls.fire(&mute).unwrap(), "unmuted `red`");
-		assert!(!engine.state.lock().unwrap().collection().audio["red"].muted);
+		let mute = crate::controls::Action::Mute("host".into());
+		assert_eq!(controls.fire(&mute).unwrap(), "muted `host`");
+		assert!(engine.state.lock().unwrap().collection().audio["host"].muted);
+		assert_eq!(controls.fire(&mute).unwrap(), "unmuted `host`");
+		assert!(!engine.state.lock().unwrap().collection().audio["host"].muted);
 		assert_eq!(
 			engine.state.lock().unwrap().undo().unwrap().as_deref(),
-			Some("Unmute `red`")
+			Some("Unmute `host`")
 		);
-		assert!(engine.state.lock().unwrap().collection().audio["red"].muted);
+		assert!(engine.state.lock().unwrap().collection().audio["host"].muted);
 		assert!(controls.fire(&crate::controls::Action::Mute("nobody".into())).is_err());
+		// A source with no sound has no mute, from a key or a phone.
+		let silent = crate::controls::Action::Mute("red".into());
+		let err = controls.fire(&silent).unwrap_err();
+		assert_eq!(format!("{err:#}"), "`red` has no sound");
+		assert!(!engine.state.lock().unwrap().collection().audio.contains_key("red"));
+		{
+			use crate::guests::remote::Board;
+			assert_eq!(controls.clone().press(&silent), Err("`red` has no sound".into()));
+		}
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
 	}

@@ -29,6 +29,7 @@ pub mod remote;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -64,6 +65,9 @@ pub const MAX_GUESTS: usize = 4;
 /// The shortest `--guest-expiry`: half of it must leave room for a renewal to
 /// reach the guest and the relay before the token it replaces expires.
 const MIN_EXPIRY: Duration = Duration::from_secs(60);
+
+/// Why a room the studio is leaving refuses a change to what is kept beside its key.
+const LEFT: &str = "the studio is leaving this room; try again once it has joined the next";
 
 /// The two broadcasts a guest publishes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,7 +120,8 @@ pub struct Config {
 
 	/// The join page a guest opens, `js/join` hosted anywhere. Its link carries
 	/// the room's relay URL, the guest's name, and its token in the fragment.
-	/// Defaults to `https://join.studio.moq.dev/`.
+	/// A remote's page is beside it, so a directory ends with `/`. Defaults to
+	/// `https://join.studio.moq.dev/`.
 	#[usage(long)]
 	pub join_page: Option<Url>,
 
@@ -216,6 +221,8 @@ pub struct Room {
 	participants: Mutex<BTreeMap<String, Participant>>,
 	/// Where removals are kept, or `None` to keep them in memory alone.
 	removals: Option<PathBuf>,
+	/// Whether the studio is leaving the room, which changes its guests no more.
+	left: AtomicBool,
 	/// Bumped when who is renewed changes, which wakes the renewals and the
 	/// return feeds.
 	changed: tokio::sync::watch::Sender<()>,
@@ -324,6 +331,7 @@ impl Room {
 			expiry,
 			participants: Mutex::default(),
 			removals: None,
+			left: AtomicBool::new(false),
 			changed: Default::default(),
 			session: Default::default(),
 			origin: Default::default(),
@@ -360,6 +368,16 @@ impl Room {
 		Ok(self)
 	}
 
+	/// Refuse every change to what is kept beside the key from now on, once
+	/// any under way is kept, as the studio leaves the room: the room it
+	/// joins next reads the files after this, so it misses none, such as a
+	/// remote's removal, which it would otherwise undo.
+	pub fn leave(&self) {
+		self.left.store(true, Ordering::SeqCst);
+		drop(self.participants.lock().unwrap());
+		self.remotes.leave();
+	}
+
 	/// Apply `change` to `identity` once the file holds it, so a failed write
 	/// leaves both as they were.
 	fn change(
@@ -368,6 +386,8 @@ impl Room {
 		identity: &str,
 		change: impl FnOnce(&mut Participant),
 	) -> anyhow::Result<()> {
+		// The caller holds `participants`, which `leave` waits on.
+		anyhow::ensure!(!self.left.load(Ordering::SeqCst), LEFT);
 		let participant = participants.entry(identity.to_string()).or_default();
 		let before = participant.clone();
 		change(participant);

@@ -1152,6 +1152,7 @@ fn settings_change_the_show_and_move_the_guests() {
 	harness.get_by_label("Pair a phone").click();
 	harness.run_steps(2);
 	assert!(harness.query_by_label("Copy link").is_some(), "the phone's link shows");
+	let left = engine.room().unwrap();
 	harness.get_by_label("Guests").click();
 	harness.run_steps(2);
 	fill(&mut harness, 0, "other");
@@ -1172,6 +1173,8 @@ fn settings_change_the_show_and_move_the_guests() {
 	fill(&mut harness, 1, "other.jwk");
 	harness.get_by_label("Save").click();
 	joined(&mut harness, "other");
+	// The room left changes nothing the next could have missed.
+	assert!(left.unpair("phone").is_err(), "the room left removes a remote");
 	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
 	assert!(saved.contains("room = \"other\""), "{saved}");
 	// ...until the room is another, which its link cannot join.

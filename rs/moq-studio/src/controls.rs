@@ -186,7 +186,7 @@ impl Action {
 		let sounds = state
 			.sources
 			.iter()
-			.filter(|(_, feed)| feed.strip().is_some())
+			.filter(|(name, _)| sounds(state, name))
 			.map(|(name, _)| Self::Mute(name.to_string()));
 		let mut listed: Vec<Self> = FIXED.iter().map(|fixed| fixed.action.clone()).collect();
 		listed.extend(scenes.chain(sounds));
@@ -485,6 +485,7 @@ impl Controls {
 			Action::Mute(name) if !collection.sources.contains_key(name) => {
 				Some(format!("there is no source `{name}`"))
 			}
+			Action::Mute(name) if !sounds(state, name) => Some(format!("`{name}` has no sound")),
 			Action::Marker => self.markers.refused(),
 			// Whichever is picked, any replay source plays it.
 			Action::Replay => replay_source(collection, None).err().map(|err| err.to_string()),
@@ -681,6 +682,11 @@ impl Controls {
 		// its key file is gone, since one already in a scene may still play.
 		if let Some(path) = room.1.path() {
 			self.engine.remember_room(&path);
+		}
+		// The room left changes nothing kept beside its key once the next
+		// reads it, which would otherwise bring back a remote removed meanwhile.
+		if let Some(left) = self.engine.room() {
+			left.leave();
 		}
 		let joining =
 			crate::guests::Joining::connect(&room.1, room.0.as_ref(), &stream.client(), stream.quic().clone());
@@ -891,6 +897,7 @@ fn replay_source(collection: &moq_scene::Collection, picked: Option<&str>) -> an
 pub fn mute(state: &mut State, name: &str) -> anyhow::Result<String> {
 	let collection = state.collection();
 	anyhow::ensure!(collection.sources.contains_key(name), "there is no source `{name}`");
+	anyhow::ensure!(sounds(state, name), "`{name}` has no sound");
 	let mut audio = collection.audio.get(name).cloned().unwrap_or_default();
 	audio.muted = !audio.muted;
 	let (verb, done) = match audio.muted {
@@ -901,6 +908,11 @@ pub fn mute(state: &mut State, name: &str) -> anyhow::Result<String> {
 	draft.set_audio(name, Some(audio))?;
 	state.commit(draft, None)?;
 	Ok(format!("{done} `{name}`"))
+}
+
+/// Whether the source called `name` has sound, and so a mute.
+fn sounds(state: &State, name: &str) -> bool {
+	state.sources.get(name).is_some_and(|feed| feed.strip().is_some())
 }
 
 /// Take the scene called `name` on program, under `state` locked by the

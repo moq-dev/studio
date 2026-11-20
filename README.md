@@ -1197,15 +1197,16 @@ bar, as a key's does, and on the phone.
 Settings, Remote, pairs one: name it, **Pair a phone**, and scan the QR code
 with the phone's camera, or **Copy link** to send it. A remote joins the
 [guests' room](#guests), so it needs the room, its key, and the join page set
-there first; its page is `remote.html` beside the join page, and the link
+there first; its page is `remote.html` beside the join page, so a join page
+in a directory ends with `/` (`https://example.com/join/`), and the link
 lasts as long as a guest's (`--guest-expiry`). The pane lists each phone
 paired, whether it is connected, and its link, with **Show link** while that
 link still works, **New link**, and **Remove**. Treat the link like a
 password: anyone holding it can drive the show until you remove it.
 
 - A remote presses only what is safe to press by mistake from a pocket: a
-  scene's pad, TAKE, AUTO, and a sound's mute. Going live, ending the
-  stream, the panic key, recording, and replay stay on the studio.
+  scene's pad, TAKE, AUTO, and the mute of a source with sound. Going live,
+  ending the stream, the panic key, recording, and replay stay on the studio.
 - A remote's token, signed by the room key like a guest's, may publish only
   its presses, at `.press/<name>/<generation>` in the room, and read only the
   desk the studio publishes it at `.remote/<name>/<generation>`, which carries
@@ -1218,10 +1219,13 @@ password: anyone holding it can drive the show until you remove it.
   before the studio restarted or rejoined the room is not done again, since
   it was most likely done before: the page asks you to check it first.
 - **Remove** stops reading its presses at once, and stops renewing its token,
-  so it is disconnected within `--guest-expiry`; **New link** pairs it again
+  so it is disconnected within `--guest-expiry`, and no press of it is done
+  once Remove says it is removed; **New link** pairs it again
   under a new generation, which a link from before cannot reach. Pairings and
   removals outlast a restart, kept beside the room key as
-  `room.remotes.toml` for `room.jwk`.
+  `room.remotes.toml` for `room.jwk`. While the studio moves to another room,
+  or rejoins this one with new settings, pairing, removing, and inviting
+  guests are refused until it has joined, so the next room misses none.
 
 ## Scene file
 
