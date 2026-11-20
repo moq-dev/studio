@@ -349,7 +349,7 @@ fn activate() -> anyhow::Result<()> {
 	match rx.recv_timeout(ACTIVATE) {
 		Ok(Activated::Done) => Ok(()),
 		Ok(Activated::Approval) => {
-			anyhow::bail!("allow the kixel.live Studio camera in {ALLOW}, then turn it on again")
+			anyhow::bail!("allow the kixel.live Studio camera in {ALLOW}, then turn this camera off and on again")
 		}
 		Ok(Activated::Reboot) => anyhow::bail!("restart the Mac to finish installing the kixel.live Studio camera"),
 		Ok(Activated::Failed(err)) => anyhow::bail!("cannot install the kixel.live Studio camera: {err}"),

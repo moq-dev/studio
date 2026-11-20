@@ -247,8 +247,9 @@ impl Provider {
 	}
 
 	/// Show `config` on a camera of its own, replacing the camera with its
-	/// device id if that shows something else. Called on the provider's
-	/// queue, never from inside a property setter of the camera it replaces.
+	/// device id if that shows something else and the studio does not feed
+	/// it. Called on the provider's queue, never from inside a property
+	/// setter of the camera it replaces.
 	fn ask(&self, config: Config) {
 		let id = config.device();
 		let replaced: Vec<_> = {
@@ -257,14 +258,22 @@ impl Provider {
 				return;
 			}
 			let pending = self.ivars().pending.lock().unwrap().clone();
-			cameras
+			let replaced: Vec<_> = cameras
 				.iter()
 				.filter(|camera| {
 					let other = camera.ivars().config.device();
 					other == id || (config.scene.is_some() && pending.as_ref() == Some(&other))
 				})
 				.cloned()
-				.collect()
+				.collect();
+			// Any app may write the config, so none may pull a camera out from
+			// under the studio's feed. The studio's own reopen stops its sink
+			// before it asks, so this refuses only someone else's ask.
+			if replaced.iter().any(|camera| camera.fed()) {
+				log(&format!("refused to replace a fed camera with {config}"));
+				return;
+			}
+			replaced
 		};
 		for camera in replaced {
 			self.remove(&camera);
@@ -471,6 +480,14 @@ impl Camera {
 		}
 		let _ = this.ivars().device.set(device);
 		Ok(this)
+	}
+
+	/// Whether the studio feeds the camera.
+	fn fed(&self) -> bool {
+		self.ivars()
+			.sink
+			.get()
+			.is_some_and(|(_, stream)| stream.ivars().running.load(Ordering::Relaxed))
 	}
 
 	/// Whether an app reads the camera.

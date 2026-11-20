@@ -2182,7 +2182,7 @@ cannot be added as a source of the picture it shows.
 - **macOS:** a camera extension the app carries. The first time you turn a
   camera on, macOS asks you to allow it in System Settings > General > Login
   Items & Extensions > Camera Extensions, which needs the app in
-  Applications; then turn the camera on again. From then on apps list
+  Applications; then turn the camera off and on again. From then on apps list
   "kixel.live Studio", the program's camera, even while the studio is closed,
   when it shows nothing, and "kixel.live Studio: <scene>" while a scene's
   camera is on. A newer app replaces the extension, without a restart, the
