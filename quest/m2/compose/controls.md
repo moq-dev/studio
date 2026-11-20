@@ -40,6 +40,8 @@ priority off the publisher's aggregate subscription.
 ## Waiting
 
 - moq-dev/moq: `moq_video::decode::Options` and `moq_audio::decode::Options`
-  take the subscription priority, which each consumer fixes today at hang's
+  take the subscription priority, as
+  [Decode consumers take a subscription priority](https://github.com/moq-dev/moq/blob/main/quest/m1/decode-priority.md)
+  plans (being planned in [moq-dev/moq#9247](https://github.com/moq-dev/moq/pull/9247)), which each consumer fixes today at hang's
   `PRIORITY.video` and `PRIORITY.audio`. Check: both options carry a priority
   on moq's `main`.

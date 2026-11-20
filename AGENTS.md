@@ -11,6 +11,7 @@ kixel.live Studio is a native, cross-platform streaming studio that composites s
 
 Media, transport, and protocol work belongs in moq-dev/moq, not here: capture, codecs, rendering import and export (moq-video), audio capture, mixing, and filters (moq-audio), the catalog (hang), and the transport (moq-net, moq-tokio).
 A studio feature that needs a moq change lands that change in moq first, with a moq-side test proving it, then bumps the `moq` gitlink here.
+Use moq-net's API without inspecting the negotiated protocol version: a behavior that differs by version is moq-net's to hide, so change its API in moq instead.
 Never point the submodule at a commit off moq's `main`: CI's `sh/check-moq-main.sh` fails a PR that moves the pin there, and `just upgrade-moq` refuses one.
 
 # Rust
