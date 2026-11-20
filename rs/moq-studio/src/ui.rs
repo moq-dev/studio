@@ -2520,7 +2520,7 @@ fn describe(source: &Source) -> String {
 		Source::Replay => "replay".into(),
 		Source::Lut { path } => format!("LUT: {}", path.display()),
 		Source::Scene { scene } => format!("scene: {scene}"),
-		Source::Layer { broadcast, source } => format!("{source}, published in {broadcast}"),
+		Source::Layer { path, .. } => format!("composed: {path}"),
 		Source::Program => "program".into(),
 	}
 }

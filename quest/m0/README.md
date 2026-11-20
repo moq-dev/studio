@@ -88,7 +88,7 @@ each encoding costs an encoder session and consumer GPUs have few, so the
 [viewer-side composition](/quest/m2/compose/README.md) epic left m0 (now m2,
 replanned 2026-11-08 around independently published sources layered over the
 program). Overlays and animation render into the program here; that epic's
-layout track carries only the layers of independently published sources.
+composition lists only the independently published sources over it.
 
 Changed 2026-11-09 with the maintainer (/quest-plan): the studio gets one
 designed layout, a live picture with pages around it, in place of sixteen

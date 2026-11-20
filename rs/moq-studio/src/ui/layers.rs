@@ -504,7 +504,7 @@ pub(super) fn words(collection: &Collection, name: &str) -> String {
 		Some(Source::Media { .. }) => "Video file".to_string(),
 		Some(Source::Color { color }) => format!("Color {color}"),
 		Some(Source::Broadcast { path }) => format!("Broadcast {path}"),
-		Some(Source::Layer { source, .. }) => format!("Broadcast layer {source}"),
+		Some(Source::Layer { path, .. }) => format!("Composed {path}"),
 		Some(Source::Scene { scene }) => format!("Scene {scene}"),
 		Some(Source::Program) => "The program".to_string(),
 		Some(Source::Replay) => "Replay".to_string(),

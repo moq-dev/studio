@@ -122,8 +122,8 @@ pub(super) struct Lines {
 	/// The published scenes' lines.
 	pub lines: super::Lines,
 	/// Where and when the broadcast's viewers show the sources published
-	/// independently, while any is.
-	pub layout: moq_scene::layout::Publisher,
+	/// independently over the program.
+	pub composition: Composed,
 }
 
 impl Lines {
@@ -139,7 +139,7 @@ impl Lines {
 		);
 		Ending {
 			ended,
-			layout: Some(self.layout),
+			composition: Some(self.composition),
 		}
 	}
 }
@@ -148,8 +148,8 @@ impl Lines {
 #[derive(Default)]
 pub(super) struct Ending {
 	pub ended: Vec<Ended>,
-	/// Finished once the video it lays out has ended.
-	pub layout: Option<moq_scene::layout::Publisher>,
+	/// Finished once the video it composes has ended.
+	pub composition: Option<Composed>,
 }
 
 /// What the program clock takes from going live and gives back on ending,
@@ -395,13 +395,21 @@ impl Engine {
 			return Err(err).context("cannot announce the broadcast");
 		}
 
+		let composition = match Composed::new(&origin, &path, instance.clone(), clock.clone(), catalog.clone()) {
+			Ok(composition) => composition,
+			Err(err) => {
+				self.stats.grants.lock().unwrap().remove(&audio_track);
+				drop(main.end(None));
+				return Err(err);
+			}
+		};
 		let (forward_stop, stop) = tokio::sync::watch::channel(());
 		let forward = {
 			let sources = self.program.sources.clone();
 			let forward = moq_scene::publish::Forward {
 				published: self.program.published.subscribe(),
-				broadcast: broadcast.clone(),
-				catalog: catalog.clone(),
+				origin: origin.clone(),
+				base: composition.sources.clone(),
 				bandwidth: bandwidth.clone(),
 				stop,
 			};
@@ -434,8 +442,6 @@ impl Engine {
 			reclaim: self.program.reclaim.clone(),
 			graded: Some(publisher.scenes.clone()),
 		};
-		let layout = moq_scene::layout::Publisher::new(broadcast.clone(), catalog.clone());
-
 		// The audio scene on program, encoded on the runtime, never the
 		// program clock's thread.
 		let mut follow = self.program_audio.follow();
@@ -463,7 +469,7 @@ impl Engine {
 			main,
 			extras,
 			lines: super::Lines::new(),
-			layout,
+			composition,
 		};
 		{
 			let mut handoff = self.handoff.lock().unwrap();
@@ -557,7 +563,7 @@ impl Engine {
 	/// Finish `air` once its encoders, `ending`, have, then close its
 	/// sessions.
 	async fn land(&self, mut air: Air, ending: Ending) -> anyhow::Result<()> {
-		let Ending { ended, layout } = ending;
+		let Ending { ended, composition } = ending;
 		let joined = tokio::task::spawn_blocking(move || {
 			for ended in ended {
 				ended.join();
@@ -566,8 +572,8 @@ impl Engine {
 		if joined.await.is_err() {
 			tracing::error!("waiting on the encoders panicked");
 		}
-		if let Some(mut layout) = layout {
-			finish_layout(&mut layout);
+		if let Some(mut composition) = composition {
+			composition.finish();
 		}
 		// Dropped, so the audio finishes its track.
 		let (stop, _) = tokio::sync::oneshot::channel();
@@ -739,34 +745,120 @@ pub fn endpoint(url: &url::Url) -> String {
 	}
 }
 
-/// Publish the layer layout of what `state` drew on program at `at` on the
-/// media clock, while any source is published independently.
-pub(super) fn lay_out(publisher: &mut moq_scene::layout::Publisher, state: &State, at: Duration) {
-	// Past what a timestamp holds, the frame goes unstamped too.
-	let Ok(stamp) = moq_net::Timestamp::try_from(at) else {
-		return;
-	};
-	let collection = &state.collection;
-	let published = match collection.published.is_empty() {
-		true => publisher.finish(),
-		false => {
-			// To the whole microsecond as the frame's stamp is, rather than
-			// rounded as the wire would, so a cut's layout starts on its frame.
-			let start = at.saturating_sub(state.compositor.program_since()).as_micros();
-			let start = Duration::from_micros(start as u64);
-			let layout = moq_scene::layout::Layout::new(collection, state.compositor.program_scene(), start);
-			publisher.update(layout, stamp)
+/// The composition's broadcast, announced beneath the program's, and where it
+/// finds what it lists.
+pub(super) struct Composed {
+	/// The composition's broadcast, which closes once dropped.
+	route: moq_net::origin::Route,
+	publisher: moq_scene::composition::Publisher,
+	/// The composition's path, which each child's is relative to.
+	path: moq_net::Path,
+	/// The program's path and stream.
+	program: moq_net::Path,
+	instance: moq_net::Instance,
+	/// The program's catalog, whose renditions the composition's lists.
+	catalog: moq_scene::publish::Catalog,
+	/// Where each local source published independently has its broadcast.
+	sources: moq_net::Path,
+}
+
+impl Composed {
+	/// Announce the composition beneath the program's broadcast at `program`,
+	/// the stream `instance`, on `origin`, its catalog on the program's
+	/// `clock` over the renditions the program's `catalog` lists.
+	fn new(
+		origin: &moq_net::origin::Producer,
+		program: &moq_net::Path,
+		instance: moq_net::Instance,
+		clock: moq_mux::Clock,
+		catalog: moq_scene::publish::Catalog,
+	) -> anyhow::Result<Self> {
+		let below = |name: &'static str| program.join(&moq_net::Path::from_static(name));
+		let path = below(moq_scene::composition::PATH)?;
+		let route = origin
+			.route(&path, moq_net::origin::RouteOptions::hidden())
+			.context("cannot create the composition's broadcast")?;
+		let publisher = moq_scene::composition::Publisher::new(&mut route.broadcast().clone(), clock)?;
+		route.announce().context("cannot announce the composition")?;
+		Ok(Self {
+			route,
+			publisher,
+			path,
+			program: program.clone(),
+			instance,
+			catalog,
+			sources: below(moq_scene::composition::SOURCES)?,
+		})
+	}
+
+	/// Where the source called `name` is, relative to the composition: the
+	/// broadcast it plays at `path` for a broadcast source, else the local
+	/// one it is published to. `None` for a path no reference can name.
+	fn child(&self, name: &str, path: Option<&str>) -> Option<moq_net::path::Relative> {
+		let path = match path {
+			Some(path) => moq_net::Path::new(path).ok()?,
+			None => self.sources.join(&moq_net::Path::new(name).ok()?).ok()?,
+		};
+		path.relative(&self.path)
+	}
+
+	/// Publish the composition of what `state` drew on program at `at` on the
+	/// media clock, at `now`: the program, and each source published
+	/// independently, a broadcast source while it shows its stream, where
+	/// what it showed lands on the program's clock.
+	pub(super) fn compose(&mut self, state: &State, at: Duration, now: Instant) {
+		// Past what a timestamp holds, the frame goes unstamped too.
+		let Ok(stamp) = moq_net::Timestamp::try_from(at) else {
+			return;
+		};
+		let collection = &state.collection;
+		let mut children = BTreeMap::new();
+		for name in &collection.published {
+			let child = match collection.sources.get(name) {
+				Some(moq_scene::Source::Broadcast { path }) => {
+					// While it shows nothing of a stream, such as offline, the
+					// studio shows nothing of it, so viewers drop it too.
+					let Some(feed) = state.sources.get(name) else { continue };
+					let Some(landing) = feed.lands(at, now) else { continue };
+					let Some(broadcast) = self.child(name, Some(path)) else {
+						continue;
+					};
+					moq_scene::composition::Child::new(broadcast, landing.instance, landing.offset)
+				}
+				Some(_) => match self.child(name, None) {
+					Some(broadcast) => moq_scene::composition::Child::new(broadcast, None, 0),
+					None => continue,
+				},
+				None => continue,
+			};
+			children.insert(name.clone(), child);
 		}
-	};
-	if let Err(err) = published {
-		tracing::warn!(%err, "cannot publish the layer layout");
+		let program = moq_scene::composition::Program {
+			broadcast: self.program.relative(&self.path).expect("the program is above it"),
+			instance: Some(self.instance.clone()),
+		};
+		// To the whole microsecond as the frame's stamp is, rather than
+		// rounded as the wire would, so a cut's composition starts on its frame.
+		let start = at.saturating_sub(state.compositor.program_since()).as_micros();
+		let start = Duration::from_micros(start as u64);
+		let scene = state.compositor.program_scene();
+		let composition = moq_scene::composition::Composition::new(collection, scene, start, program, children);
+		if let Err(err) = self.publisher.update(composition, &self.catalog.snapshot(), stamp) {
+			tracing::warn!(%err, "cannot publish the composition");
+		}
+	}
+
+	/// End the composition, once the video it composes has ended.
+	pub(super) fn finish(&mut self) {
+		if let Err(err) = self.publisher.finish() {
+			tracing::warn!(%err, "cannot finish the composition");
+		}
 	}
 }
 
-/// End the layer layout, once the video it lays out has ended.
-pub(super) fn finish_layout(publisher: &mut moq_scene::layout::Publisher) {
-	if let Err(err) = publisher.finish() {
-		tracing::warn!(%err, "cannot finish the layer layout");
+impl Drop for Composed {
+	fn drop(&mut self) {
+		self.route.broadcast().close();
 	}
 }
 

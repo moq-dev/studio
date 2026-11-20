@@ -59,7 +59,7 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// anything showing it.
 ///
 /// A source published independently is left out of every texture, and drawn
-/// only as its [layer layout](crate::layout) places it: over the program, in
+/// only as its [composition](crate::composition) places it: over the program, in
 /// [`layered`](Self::layered), and over the scene in preview, so each shows
 /// what viewers see.
 ///
@@ -604,7 +604,7 @@ impl Compositor {
 
 	/// The scene in preview, at its own size, as of the last
 	/// [`render`](Self::render), under the top layer when it is the program's
-	/// size, with the pictures of their [layer layout](crate::layout) over
+	/// size, with the pictures of their [composition](crate::composition) over
 	/// both.
 	pub fn preview(&self) -> &wgpu::Texture {
 		&self.view.preview.texture
@@ -643,7 +643,7 @@ impl Compositor {
 	}
 
 	/// The program as viewers see it, as of the last [`render`](Self::render):
-	/// with each picture of its [layer layout](crate::layout) over it, or the
+	/// with each picture of its [composition](crate::composition) over it, or the
 	/// [`program`](Self::program) itself while it has none showing. Created
 	/// as the program is.
 	pub fn layered(&self) -> &wgpu::Texture {
@@ -654,7 +654,7 @@ impl Compositor {
 	/// [`render`](Self::render), with its canvas, while the show goes out in
 	/// portrait: the scene on program, or the transition under way, as its
 	/// portrait arrangement places it. It carries no
-	/// [layer layout](crate::layout), so the pictures of sources published
+	/// [composition](crate::composition), so the pictures of sources published
 	/// independently are drawn into it, as in [`layered`](Self::layered).
 	/// Created as the program is.
 	pub fn portrait(&self) -> Option<(&wgpu::Texture, Canvas)> {
@@ -664,7 +664,7 @@ impl Compositor {
 
 	/// How long the program scene had been on program as of the last
 	/// [`render`](Self::render): the moment of its items' keyframes the
-	/// program shows, and the layer layout's pictures play from.
+	/// program shows, and the composition's pictures play from.
 	pub fn program_since(&self) -> Duration {
 		self.program_shown
 	}
@@ -1372,11 +1372,16 @@ impl Compositor {
 	/// sources the collection no longer has or has since edited. An overlay
 	/// that arrives now starts its CSS timeline at `now`.
 	fn update(&mut self, collection: &Collection, sources: &Sources, now: Instant) {
-		self.layers
-			.retain(|name, layer| collection.sources.get(name) == Some(&layer.source));
+		// A layer only moved on its clock keeps its picture until the next.
+		self.layers.retain(|name, layer| {
+			collection
+				.sources
+				.get(name)
+				.is_some_and(|source| source.plays_alike(&layer.source))
+		});
 
 		for (name, source) in &collection.sources {
-			let Some(feed) = sources.get(name).filter(|feed| feed.source() == source) else {
+			let Some(feed) = sources.get(name).filter(|feed| feed.source().plays_alike(source)) else {
 				continue;
 			};
 			let taken = feed.take();
@@ -1398,6 +1403,7 @@ impl Compositor {
 				},
 				None => continue,
 			};
+			layer.source = source.clone();
 			let probed = source.may_go_dark() && !collection.video.get(name).is_some_and(|video| video.expect_dark);
 			match (&layer.probe, probed) {
 				(None, true) => layer.probe = Some(Probe::new(&self.device, &self.queue)),
@@ -1431,7 +1437,7 @@ impl Compositor {
 	/// good picture in its place while it holds one over the dark. A picture
 	/// cut out of its background is never held, since the good one is not.
 	/// A picture is drawn before it is judged, so black shows until the next
-	/// read, up to [`INTERVAL`](crate::dark::INTERVAL) and its readback:
+	/// read, up to [`INTERVAL`](crate::readback::INTERVAL) and its readback:
 	/// judging each one first would hold every capture's picture back by a
 	/// readback, or read every picture, and the maintainer took this bounded
 	/// flash over either on moq-dev/studio#192.
@@ -1964,8 +1970,8 @@ impl Pass<'_, '_> {
 
 		// The pictures viewers draw over the program, which the preview draws
 		// over its scene too, so both show what viewers would see.
-		let program_layers = crate::layout::pictures(collection, program.0, true);
-		let preview_layers = crate::layout::pictures(collection, preview.0, preview_top);
+		let program_layers = crate::composition::pictures(collection, program.0, true);
+		let preview_layers = crate::composition::pictures(collection, preview.0, preview_top);
 		view.layered = program_layers.iter().any(|item| item.visible);
 		if view.layered && view.program.layered.is_none() {
 			let target = Target::new(self.device, self.effects, program_canvas, "moq-scene layered");
@@ -2752,10 +2758,10 @@ impl Draw<'_> {
 		self.landscape(outer);
 	}
 
-	/// Draw `layers`, pictures of the layer layout, onto `target`, back to
+	/// Draw `layers`, pictures of the composition, onto `target`, back to
 	/// front, each posed `since` its scene went on. Each names the source it
 	/// shows and carries its source's crop and filters already, so it draws as
-	/// a player reading the layout would.
+	/// a player reading the composition would.
 	fn layers(&mut self, target: &Target, layers: &[Item], since: Duration) {
 		for item in layers.iter().filter(|item| item.visible) {
 			let item = item.posed(since);
@@ -3183,7 +3189,7 @@ mod tests {
 
 	use super::*;
 	use crate::collection::{Arrangement, Blend, MaskMode, Rgba, Scene, Size, Video};
-	use crate::source::test::{context, local, start, until, until_time};
+	use crate::source::test::{Still, context, local, start, until, until_time};
 
 	/// A fade over a second.
 	const FADE: Transition = Transition::Fade {
@@ -3267,7 +3273,7 @@ mod tests {
 		pub(super) compositor: Compositor,
 		pub(super) device: wgpu::Device,
 		queue: wgpu::Queue,
-		_origin: moq_net::origin::Producer,
+		origin: moq_net::origin::Producer,
 		_dir: tempfile::TempDir,
 	}
 
@@ -3296,7 +3302,7 @@ mod tests {
 				queue,
 				collection,
 				sources,
-				_origin: origin,
+				origin,
 				_dir: dir,
 			}
 		}
@@ -4954,6 +4960,46 @@ mod tests {
 		.await;
 	}
 
+	/// A layer whose offset alone changes keeps showing its picture, rather
+	/// than going blank until its broadcast sends another.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn a_layer_moved_on_its_clock_keeps_its_picture() {
+		local(async {
+			let mut collection = collection();
+			collection.sources.insert(
+				"guest".into(),
+				Source::Broadcast {
+					path: "room/offline".into(),
+				},
+			);
+			let layer = |offset| Source::Layer {
+				clock: "guest".into(),
+				path: "room/logo".into(),
+				instance: None,
+				offset,
+			};
+			collection.sources.insert("logo".into(), layer(0));
+			collection.scenes[1].items = vec![Item::new("logo", Rect::fill(&collection.canvas))];
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			let _still = Still::new(&studio.origin, "room/logo", GREEN);
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut(&studio.collection, &studio.sources).unwrap();
+			until(|| {
+				studio.render(Instant::now());
+				(pixel(&studio.program(), 1, 1) == GREEN).then_some(())
+			})
+			.await;
+
+			studio.collection.sources.insert("logo".into(), layer(250_000));
+			assert!(studio.sources.sync(&studio.collection).is_empty(), "it plays on");
+			studio.render(Instant::now());
+			assert_eq!(pixel(&studio.program(), 1, 1), GREEN);
+		})
+		.await;
+	}
+
 	/// Scenes "red" on program and "blue" in preview, with a stinger playing
 	/// `file` as the media source "sting", cutting 300 ms into it.
 	async fn stinging(file: &[u8]) -> Studio {
@@ -5432,7 +5478,7 @@ mod tests {
 
 		read(&mut compositor, &mut layer, RED, at(Duration::ZERO), Background::Keep);
 		assert!(!layer.holding);
-		let dark = crate::dark::INTERVAL;
+		let dark = crate::readback::INTERVAL;
 		read(&mut compositor, &mut layer, BLACK, at(dark), Background::Keep);
 		assert!(layer.holding, "the last good picture is drawn");
 		assert_eq!(layer.probe.as_ref().unwrap().dark(at(dark)), None);

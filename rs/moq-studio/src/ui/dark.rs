@@ -71,10 +71,10 @@ fn stalled(name: &str, source: &Source) -> Option<Advice> {
 			windows: false,
 			expected: false,
 		},
-		Source::Layer { broadcast, .. } => Advice {
+		Source::Layer { path, .. } => Advice {
 			title: "This layer stopped sending pictures.",
 			cause: format!(
-				"`{name}` comes from the broadcast `{broadcast}`, whose sender may have stopped or lost its connection. Viewers see its last picture, frozen."
+				"`{name}` comes from the broadcast `{path}`, whose sender may have stopped or lost its connection. Viewers see its last picture, frozen."
 			),
 			hint: None,
 			fixes: vec![again],
@@ -388,8 +388,10 @@ mod tests {
 			Source::Camera { id: None },
 			Source::Broadcast { path: "guest".into() },
 			Source::Layer {
-				broadcast: "remote".into(),
-				source: "cam".into(),
+				clock: "guest".into(),
+				path: "remote/cam".into(),
+				instance: None,
+				offset: 0,
 			},
 		];
 		for source in kinds {

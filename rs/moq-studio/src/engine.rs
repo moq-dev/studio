@@ -1632,7 +1632,8 @@ impl Engine {
 			if collection.audio_scene(monitor.name()).is_none() {
 				monitor.set_name(program);
 			}
-			if let Some(mix) = state.sources.mix(monitor.name()) {
+			// What viewers hear, published sources included.
+			if let Some(mix) = state.sources.listened(monitor.name()) {
 				monitor.play(mix.clone());
 			}
 		}
@@ -1853,18 +1854,18 @@ impl Engine {
 				// Without a sender, each encoder publishes what it was sent and
 				// still holds, then finishes its track.
 				retired.push(recording.end(None));
-				let mut layouts = Vec::new();
+				let mut compositions = Vec::new();
 				for lines in air.take().into_iter().chain(start) {
 					let ending = lines.end();
 					retired.extend(ending.ended);
-					layouts.extend(ending.layout);
+					compositions.extend(ending.composition);
 				}
 				for ended in retired {
 					ended.join();
 				}
-				// Once the video it lays out has ended.
-				for mut layout in layouts {
-					air::finish_layout(&mut layout);
+				// Once the video it composes has ended.
+				for mut composition in compositions {
+					composition.finish();
 				}
 				return;
 			}
@@ -1954,9 +1955,13 @@ impl Engine {
 						});
 						// Its audio follows the audio scene it carries from now on:
 						// the portrait picture's, the program's, with the sources
-						// published independently in it, as it carries no layout.
+						// published independently in it, as it carries no
+						// composition.
 						let mix = match extra {
-							Extra::Portrait => state.sources.whole(&state.collection),
+							Extra::Portrait => state
+								.collection
+								.program_audio()
+								.and_then(|audio| state.sources.listened(audio)),
 							Extra::Scene(name) => state
 								.collection
 								.published_audio(name)
@@ -2009,7 +2014,7 @@ impl Engine {
 				}
 				self.program.on_program(state, shown);
 				if let Some(air) = &mut air {
-					air::lay_out(&mut air.layout, state, at);
+					air.composition.compose(state, at, tick);
 				}
 				let compositor = &state.compositor;
 				for (scene, camera) in &mut state.cameras {
@@ -2890,6 +2895,10 @@ impl Extras {
 				"scene `{name}` would publish where viewers report back; rename it to publish it"
 			);
 		}
+		anyhow::ensure!(
+			name != moq_scene::composition::PATH,
+			"scene `{name}` would publish where the composition is; rename it to publish it"
+		);
 		let publication = self
 			.origin
 			.route(&path, moq_net::origin::RouteOptions::hidden())
@@ -3374,10 +3383,11 @@ fn browser(gpu: &Gpu) -> anyhow::Result<Option<moq_scene::browser::Helper>> {
 }
 
 /// Where browser sources keep their cookies and logins, whichever scene file
-/// is open: `moq-studio/browser` in the user's data directory, since browser
-/// sources run on Linux only for now.
+/// is open: `browser` in the studio's own data directory, the user's
+/// (`$XDG_DATA_HOME/moq-studio` on Linux, `Application Support` on macOS).
 fn browser_profile() -> anyhow::Result<PathBuf> {
-	Ok(xdg("XDG_DATA_HOME", ".local/share")?.join("moq-studio/browser"))
+	let dir = crate::data_dir().context("no home directory to keep the browser profile in")?;
+	Ok(dir.join("browser"))
 }
 
 /// Where the system picker's grants for the scene file at `scene` are kept:
@@ -3892,15 +3902,19 @@ mod tests {
 			.collect()
 	}
 
-	/// A source published independently goes on the program broadcast's
-	/// layer layout, from when its scene went on program: a cut's layout
-	/// takes effect on the frame its scene starts. Once nothing is published,
-	/// the layout ends and the catalog stops listing it, and quitting ends a
-	/// layout published again.
+	/// The studio publishes a composition beside the program while on air, in
+	/// the hang catalog of a broadcast of its own on the program's clock, over
+	/// the program's renditions: the program, and each source published
+	/// independently as a broadcast of its own beneath it at offset zero, from
+	/// when its scene went on program, so a cut's composition takes effect on
+	/// the frame its scene starts. Once nothing is published, the composition
+	/// lists the program alone and the source's broadcast ends, and quitting
+	/// ends the composition. Each is read off the relay, as a viewer would.
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "needs a Vulkan device; run by just render-sw"]
-	async fn the_program_carries_a_layer_layout() {
-		use moq_scene::layout::{Layout, TRACK};
+	async fn the_studio_publishes_a_composition() {
+		use moq_mux::catalog::Stream;
+		use moq_scene::composition::Ext;
 
 		let dir = tempfile::tempdir().unwrap();
 		let gpu = Gpu::new(wgpu::Backends::all()).await.expect("a GPU");
@@ -3910,73 +3924,140 @@ mod tests {
 		let mut two = loaded.collection.scenes[0].clone();
 		two.name = "Two".into();
 		loaded.collection.scenes.push(two);
-		let (relay, _routes, _) = test_relay().await;
+		let (relay, routes, mut config) = test_relay().await;
+		// A version that carries the program's stream to the relay, rather
+		// than leaving the relay to mint one.
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
+		let relay = Relay {
+			client: config.init(Default::default()).expect("client"),
+			url: relay.url,
+		};
 		let engine = start(gpu, vec![relay], dir.path(), autosave, loaded)
 			.await
 			.expect("the studio goes live");
+		let online = async |path: &str| {
+			let mut following = routes.follow(path, None).unwrap();
+			kio::clock::timeout(TIMEOUT, following.available())
+				.await
+				.expect("the broadcast")
+				.unwrap()
+				.expect("online")
+		};
 
-		let broadcast = engine.on_air_program.borrow().clone().expect("on air");
-		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, Default::default())
-			.await
-			.expect("the program's catalog");
-		let listed = |catalog: &hang::Catalog| catalog.json.tracks.contains_key(TRACK);
-		kio::clock::timeout(TIMEOUT, async {
-			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
+		// The stream the relay routes at the program's path.
+		let mut routed = routes.routes();
+		let program = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let event = routed.next().await.expect("routes");
+				let announce = event.announce;
+				if announce.prefix.as_str() == "studio"
+					&& matches!(event.kind, RouteKind::Start | RouteKind::Update | RouteKind::Restart)
+				{
+					return announce.route.instance().clone();
+				}
+			}
 		})
 		.await
-		.expect("the catalog lists the layout");
-		let read = || moq_json::snapshot::Consumer::<Layout>::new(broadcast.track(TRACK).unwrap(), Default::default());
-		let next = async |layouts: &mut moq_json::snapshot::Consumer<Layout>| {
-			kio::clock::timeout(TIMEOUT, layouts.next())
+		.expect("the relay routes the program");
+		let composed = online("studio/composition").await;
+		// As a player up to 10 s behind the live edge, so it reads each update.
+		let track = composed.track(hang::Catalog::DEFAULT_NAME).unwrap();
+		let mut catalogs = hang::catalog::Consumer::<Ext>::new(track, Duration::from_secs(10));
+		let next = async |catalogs: &mut hang::catalog::Consumer<Ext>| {
+			kio::clock::timeout(TIMEOUT, catalogs.next())
 				.await
-				.expect("a layout or its end")
+				.expect("a catalog or its end")
 				.unwrap()
 		};
-		let mut layouts = read();
-		let first = next(&mut layouts).await.expect("a layout");
-		let sources: Vec<&str> = first
-			.value
-			.pictures
-			.iter()
-			.map(|picture| picture.item.source.as_str())
-			.collect();
+		let first = next(&mut catalogs).await.expect("a catalog");
+		assert_eq!(
+			first.value.sync.clock,
+			engine.program.clock.wall(),
+			"the program's clock"
+		);
+		let composition = first.value.ext.composition.as_ref().expect("a composition");
+		assert_eq!(composition.program.broadcast.as_str(), ".");
+		assert_eq!(
+			composition.program.instance,
+			Some(program),
+			"the stream the relay routes"
+		);
+		let sources: Vec<&str> = composition.pictures.iter().map(|item| item.source.as_str()).collect();
 		assert_eq!(sources, ["red"]);
+		let red = &composition.sources["red"];
+		assert_eq!(
+			(red.broadcast.as_str(), red.offset, &red.instance),
+			("source/red", 0, &None)
+		);
+		// A player that knows no compositions finds the program's renditions.
+		let listed = loop {
+			let read = next(&mut catalogs).await.expect("a catalog");
+			if !read.value.video.renditions.is_empty() {
+				break read.value;
+			}
+		};
+		assert!(
+			listed
+				.video
+				.renditions
+				.values()
+				.all(|config| config.broadcast.as_ref().map(|path| path.as_str()) == Some(".")),
+			"each where the program is"
+		);
+		let start = listed.ext.composition.as_ref().unwrap().start;
+
+		// Its own broadcast, on the program's clock.
+		let source = online("studio/source/red").await;
+		let mut own = moq_mux::catalog::Consumer::<()>::new(&source, Default::default())
+			.await
+			.expect("the source's catalog");
+		let read = own.next().await.unwrap().expect("a catalog");
+		assert_eq!(read.sync.clock, engine.program.clock.wall(), "the program's clock");
+		assert!(!read.binary.tracks.is_empty(), "the color's still");
 
 		{
 			let mut state = engine.state.lock().unwrap();
 			state.compositor.set_preview(Some("Two".into()));
 			state.cut().unwrap();
 		}
-		let cut = next(&mut layouts).await.expect("a layout");
-		let at = Duration::try_from(cut.at).unwrap();
-		assert_eq!(cut.value.start, at, "on from the frame the cut drew");
-		assert!(cut.value.start > first.value.start);
-
-		let publish = |published: bool| {
-			let mut state = engine.state.lock().unwrap();
-			let mut draft = state.collection().draft("Publish `red`");
-			draft.set_published("red", published).unwrap();
-			state.commit(draft, None).unwrap();
+		let cut = loop {
+			let read = next(&mut catalogs).await.expect("a catalog");
+			if read.value.ext.composition.as_ref().unwrap().start != start {
+				break read;
+			}
 		};
-		publish(false);
-		assert!(next(&mut layouts).await.is_none(), "the layout ends");
-		kio::clock::timeout(TIMEOUT, async {
-			while catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
-		})
-		.await
-		.expect("the catalog stops listing the layout");
+		let at = Duration::try_from(cut.at).unwrap();
+		let went_on = cut.value.ext.composition.as_ref().unwrap().start;
+		// The catalog track is in milliseconds, so the update applies at most
+		// a millisecond before the frame the cut drew, never after it.
+		assert!(
+			went_on >= at && went_on < at + Duration::from_millis(1),
+			"{went_on:?} at {at:?}"
+		);
+		assert!(went_on > start);
 
-		publish(true);
-		kio::clock::timeout(TIMEOUT, async {
-			while !catalogs.next().await.unwrap().is_some_and(|catalog| listed(&catalog)) {}
-		})
-		.await
-		.expect("the catalog lists the layout again");
-		let mut layouts = read();
-		next(&mut layouts).await.expect("a layout");
+		{
+			let mut state = engine.state.lock().unwrap();
+			let mut draft = state.collection().draft("Stop publishing `red`");
+			draft.set_published("red", false).unwrap();
+			state.commit(draft, None).unwrap();
+		}
+		loop {
+			let read = next(&mut catalogs).await.expect("a catalog");
+			let composition = read.value.ext.composition.expect("a composition");
+			if composition.sources.is_empty() {
+				assert!(composition.pictures.is_empty(), "the program alone");
+				break;
+			}
+		}
+		kio::clock::timeout(TIMEOUT, async { while own.next().await.unwrap().is_some() {} })
+			.await
+			.expect("the source's broadcast ends");
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();
-		assert!(next(&mut layouts).await.is_none(), "quitting ends the layout");
+		kio::clock::timeout(TIMEOUT, async { while next(&mut catalogs).await.is_some() {} })
+			.await
+			.expect("quitting ends the composition");
 		kio::clock::timeout(TIMEOUT, engine.close())
 			.await
 			.expect("the studio closes");
@@ -5756,8 +5837,9 @@ mod tests {
 		.unwrap();
 		let held = view.held.expect("sampled").expect("the program's past");
 		assert!(held.video);
-		assert!(!view.pictures.is_empty(), "a keyframe of the past");
-		for picture in &view.pictures {
+		let pictures = view.pictures.expect("the past's pictures");
+		assert!(!pictures.is_empty(), "a keyframe of the past");
+		for picture in &pictures {
 			assert_eq!(picture.size[0], 480, "decoded small");
 			assert!(held.oldest <= picture.at && picture.at <= kio::clock::Instant::now());
 			let middle = (picture.size[1] / 2 * picture.size[0] + picture.size[0] / 2) * 4;
@@ -5766,7 +5848,7 @@ mod tests {
 			};
 			assert!(r > 200 && g < 60 && b < 60, "red, not {r} {g} {b}");
 		}
-		let times: Vec<_> = view.pictures.iter().map(|picture| picture.at).collect();
+		let times: Vec<_> = pictures.iter().map(|picture| picture.at).collect();
 		assert!(times.is_sorted(), "oldest first");
 		// And its sound, a packet at a time: the program's mix, silent here.
 		let sound = view.sound.expect("the program's sound");

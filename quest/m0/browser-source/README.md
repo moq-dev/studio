@@ -35,6 +35,13 @@ The studio holds the channel open until the helper exits and stops it with
 starts, as the studio dying, and kills the process group it leads with CEF's
 processes. Each platform's quest says what it needs on top.
 
+macOS landed next: the helper is still the studio's executable started
+again, and CEF's subprocesses run from `moq-studio Helper.app` and its
+variants beside CEF's framework under `Contents/Frameworks`, so browser
+sources run only from the app bundle.
+Each picture's IOSurface crosses as a Mach port, sent to a bootstrap service
+the studio checks in per helper, and taken only from the helper's pid.
+
 Decided 2026-11-09 (maintainer, /quest-audit): ✅ one quest per platform
 (rejected: Related links only; leaving one quest). One quest held macOS
 behind the Windows host, and shaped the macOS app bundle with no link to the

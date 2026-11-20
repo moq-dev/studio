@@ -10,7 +10,6 @@
 //! otherwise only once its place has been the worst for a while, gliding
 //! there. A move by hand holds until the content changes.
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kio::clock::Instant;
@@ -19,9 +18,10 @@ use crate::collection::{Canvas, Item, KeepClear, Rect, mix};
 use crate::compositor::Target;
 use crate::effect::Effects;
 use crate::glide::Glide;
+use crate::readback::Readback;
 
 /// How often the picture under an item is read, at most.
-pub const INTERVAL: Duration = Duration::from_millis(250);
+pub const INTERVAL: Duration = crate::readback::INTERVAL;
 
 /// How long after the read before a read follows a gap, as when its scene
 /// was off or the item hidden: it compares with no picture, and a change of
@@ -42,8 +42,8 @@ const SIDE: u32 = 512;
 /// A tile's side in pixels of the picture read, as `place.wgsl`'s workgroup.
 const TILE: u32 = 16;
 
-/// The bytes of the largest grid, four a tile.
-const BYTES: u64 = ((SIDE / TILE) * (SIDE / TILE) * 4) as u64;
+/// How many tiles the largest grid has.
+const COUNT: u32 = (SIDE / TILE) * (SIDE / TILE);
 
 /// How long what matters lingers once it stops, so one busy moment is never
 /// a reason to move.
@@ -946,7 +946,7 @@ impl Reducer {
 					ty: wgpu::BindingType::Buffer {
 						ty: wgpu::BufferBindingType::Storage { read_only: false },
 						has_dynamic_offset: false,
-						min_binding_size: wgpu::BufferSize::new(BYTES),
+						min_binding_size: wgpu::BufferSize::new(COUNT as u64 * 4),
 					},
 					count: None,
 				},
@@ -969,76 +969,44 @@ impl Reducer {
 	}
 }
 
-/// A read under way: when it was taken, its picture's size, whether it had
-/// one before to compare with, and the buffer's mapping once the GPU is done.
-struct Reading {
-	at: Instant,
+/// What a read is of: its picture's size, and whether it had one before to
+/// compare with.
+struct Of {
 	size: (u32, u32),
 	compared: bool,
-	mapped: Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
-	/// Whether it is of what the scene showed before it went on again, so it
-	/// is dropped once it comes back.
-	dropped: bool,
 }
 
 /// One item's reads of the picture under it.
 pub(crate) struct Look {
 	device: wgpu::Device,
-	queue: wgpu::Queue,
 	/// The pictures read, by turns: the next read draws into the one the read
 	/// before last did, and compares with the other.
 	pictures: [Option<Target>; 2],
 	/// Which of `pictures` the next read draws into.
 	next: usize,
-	tiles: wgpu::Buffer,
-	readback: wgpu::Buffer,
-	reading: Option<Reading>,
-	/// When the last read was taken.
-	last: Option<Instant>,
+	readback: Readback<Of>,
 }
 
 impl Look {
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-		let tiles = device.create_buffer(&wgpu::BufferDescriptor {
-			label: Some("moq-scene place tiles"),
-			size: BYTES,
-			usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-			mapped_at_creation: false,
-		});
-		let readback = device.create_buffer(&wgpu::BufferDescriptor {
-			label: Some("moq-scene place tiles"),
-			size: BYTES,
-			usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-			mapped_at_creation: false,
-		});
 		Self {
 			device: device.clone(),
-			queue: queue.clone(),
 			pictures: [None, None],
 			next: 0,
-			tiles,
-			readback,
-			reading: None,
-			last: None,
+			readback: Readback::new(device, queue, COUNT),
 		}
 	}
 
 	/// Forget the reads so far, as when the scene goes on again: the next
 	/// read compares with no picture, and one under way is dropped.
 	pub fn restart(&mut self) {
-		self.last = None;
-		if let Some(reading) = &mut self.reading {
-			reading.dropped = true;
-		}
+		self.readback.restart();
 	}
 
 	/// Whether a read may start at `now`: none is under way, and the last
 	/// was at least [`INTERVAL`] ago.
 	pub fn due(&self, now: Instant) -> bool {
-		self.reading.is_none()
-			&& self
-				.last
-				.is_none_or(|last| now.saturating_duration_since(last) >= INTERVAL)
+		self.readback.due(now)
 	}
 
 	/// What the next read draws the picture under the item into, `canvas`
@@ -1073,7 +1041,10 @@ impl Look {
 	/// [`GAP`], and read the tiles back.
 	pub fn start(&mut self, reducer: &Reducer, now: Instant) {
 		let read = self.pictures[self.next].as_ref().expect("drawn into");
-		let recent = self.last.is_some_and(|last| now.saturating_duration_since(last) <= GAP);
+		let recent = self
+			.readback
+			.last()
+			.is_some_and(|last| now.saturating_duration_since(last) <= GAP);
 		let before = self.pictures[1 - self.next].as_ref().filter(|_| recent);
 		let compared = before.is_some();
 		let view = |target: &Target| target.texture.create_view(&Default::default());
@@ -1091,7 +1062,7 @@ impl Look {
 				},
 				wgpu::BindGroupEntry {
 					binding: 2,
-					resource: self.tiles.as_entire_binding(),
+					resource: self.readback.binding(),
 				},
 			],
 		});
@@ -1106,55 +1077,24 @@ impl Look {
 			pass.set_bind_group(0, &bind, &[]);
 			pass.dispatch_workgroups(size.0.div_ceil(TILE), size.1.div_ceil(TILE), 1);
 		}
-		let bytes = u64::from(size.0.div_ceil(TILE) * size.1.div_ceil(TILE) * 4);
-		encoder.copy_buffer_to_buffer(&self.tiles, 0, &self.readback, 0, bytes);
-		self.queue.submit([encoder.finish()]);
-
-		let mapped = Arc::new(Mutex::new(None));
-		let done = mapped.clone();
-		// Called from a later submit or poll, once the GPU is done.
-		self.readback.map_async(wgpu::MapMode::Read, .., move |result| {
-			*done.lock().unwrap() = Some(result);
-		});
-		self.reading = Some(Reading {
-			at: now,
-			size,
-			compared,
-			mapped,
-			dropped: false,
-		});
-		self.last = Some(now);
+		let count = size.0.div_ceil(TILE) * size.1.div_ceil(TILE);
+		self.readback.submit(encoder, count, now, Of { size, compared });
 		self.next = 1 - self.next;
 	}
 
 	/// The read under way, once it came back, and when it was taken; a
 	/// dropped one comes back as nothing.
 	pub fn finish(&mut self) -> Option<Result<(Tiles, Instant), String>> {
-		let reading = self.reading.as_ref()?;
-		let mapped = reading.mapped.lock().unwrap().take()?;
-		let Reading {
-			at,
-			size,
-			compared,
-			dropped,
-			..
-		} = self.reading.take().expect("checked above");
-		if dropped {
-			if mapped.is_ok() {
-				self.readback.unmap();
-			}
-			return None;
-		}
-		let count = (size.0.div_ceil(TILE) * size.1.div_ceil(TILE)) as usize;
-		let read = mapped.map_err(|err| err.to_string()).and_then(|()| {
-			let tiles = match self.readback.slice(..).get_mapped_range() {
-				Ok(view) => Ok(view.as_chunks::<4>().0[..count].to_vec()),
-				Err(err) => Err(format!("{err:?}")),
+		let read = self.readback.finish()?;
+		Some(read.map(|read| {
+			let Of { size, compared } = read.of;
+			let tiles = Tiles {
+				size,
+				compared,
+				tiles: read.tiles,
 			};
-			self.readback.unmap();
-			tiles
-		});
-		Some(read.map(|tiles| (Tiles { size, compared, tiles }, at)))
+			(tiles, read.at)
+		}))
 	}
 }
 
