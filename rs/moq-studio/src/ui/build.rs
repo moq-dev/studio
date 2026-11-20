@@ -283,8 +283,7 @@ impl Panels {
 		let state = self.engine.state.lock().unwrap();
 		let item = picked.item(state.collection());
 		item.is_some_and(|item| {
-			self.drawn(&state, picked, item)
-				&& keep::placement(&state, &picked.layer, picked.index, item, self.format).is_some()
+			self.drawn(&state, picked, item) && keep::placement(&state, &picked.layer, item, self.format).is_some()
 		})
 	}
 
@@ -401,7 +400,7 @@ impl Panels {
 			// A layer keeping clear moves from where it was placed.
 			let resting = picked
 				.rest(collection, self.format)
-				.map(|item| keep::placed(state, &picked.layer, picked.index, &item, self.format));
+				.map(|item| keep::placed(state, &picked.layer, &item, self.format));
 			if let Some(resting) = resting {
 				let drawn = match resting.slot {
 					Some(_) => super::slots::drawn(state, &picked.layer, picked.index, self.format),
@@ -531,10 +530,10 @@ impl Panels {
 				// a resize or a crop leaves it where it rests.
 				let rect = match verb {
 					"Move" => {
-						keep::hold(state, &picked.layer, picked.index, &item, self.format);
+						keep::hold(state, &picked.layer, &item, self.format);
 						rect
 					}
-					_ => keep::resized(state, &picked.layer, picked.index, &item, rect, self.format),
+					_ => keep::resized(state, &picked.layer, &item, rect, self.format),
 				};
 				if let Some(placed) = picked.placed(state.collection(), self.format, rect, crop) {
 					result = edit(state, label, drag.gesture, |draft| {
@@ -567,7 +566,7 @@ impl Panels {
 		// being dragged, which holds it where it is put.
 		if let Some((picked, item)) = selected.filter(|(_, item)| item.visible && self.drag.is_none())
 			&& let Some(resting) = picked.item(state.collection())
-			&& let Some(placement) = keep::placement(state, &picked.layer, picked.index, resting, self.format)
+			&& let Some(placement) = keep::placement(state, &picked.layer, resting, self.format)
 			&& let Some(keep) = resting.keep_clear
 		{
 			keep::overlay(&painter, &view, placement, &item.shape, keep.glide);
@@ -672,7 +671,7 @@ impl Panels {
 			return (None, Ok(()));
 		};
 		// A layer keeping clear moves from where it was placed.
-		let item = keep::placed(state, &picked.layer, picked.index, &item, self.format);
+		let item = keep::placed(state, &picked.layer, &item, self.format);
 		if delta == [0.0; 2] {
 			return (None, Ok(()));
 		}
@@ -690,7 +689,7 @@ impl Panels {
 		let Some(moved) = picked.placed(state.collection(), self.format, rect, item.crop) else {
 			return (None, Ok(()));
 		};
-		keep::hold(state, &picked.layer, picked.index, &item, self.format);
+		keep::hold(state, &picked.layer, &item, self.format);
 		let result = edit(state, label, Some(gesture), |draft| {
 			draft.set_item(&picked.layer, picked.index, moved)
 		});
@@ -906,7 +905,7 @@ impl Panels {
 				// keep clear of; it stays where it was drawn, in each picture
 				// it goes to.
 				let drawn = |format| {
-					let placed = collection.portrayed(&keep::placed(state, layer, index, &item, format), format);
+					let placed = collection.portrayed(&keep::placed(state, layer, &item, format), format);
 					let (rect, crop) =
 						super::slots::drawn(state, layer, index, format).unwrap_or((item.rect, item.crop));
 					match item.slot {
@@ -948,6 +947,7 @@ impl Panels {
 			}
 			LayerAction::Duplicate { independent } => {
 				let mut copy = Item {
+					id: moq_scene::Id::fresh(),
 					auto: false,
 					..item.clone()
 				};
@@ -1488,6 +1488,7 @@ pub(super) fn scene_copy(scene: &Scene, name: String) -> Scene {
 			.items
 			.iter()
 			.map(|item| Item {
+				id: moq_scene::Id::fresh(),
 				auto: false,
 				..item.clone()
 			})
