@@ -204,6 +204,16 @@ impl State {
 		self.cameras.values().map(crate::vcam::Camera::status)
 	}
 
+	/// The capture ids of the studio's own virtual cameras, which adding a
+	/// source leaves out so none feeds what it shows back into itself: each
+	/// one on, and those listed even while off.
+	pub fn own_cameras(&self) -> Vec<String> {
+		self.cameras()
+			.map(|camera| camera.id)
+			.chain(crate::vcam::LISTED.iter().map(|id| id.to_string()))
+			.collect()
+	}
+
 	pub fn collection(&self) -> &Collection {
 		&self.collection
 	}

@@ -12,8 +12,10 @@ cd "$packaging/../.."
 # Info.plist's LSMinimumSystemVersion, so the linker and OpenH264's C build
 # target the oldest macOS the bundle claims.
 export MACOSX_DEPLOYMENT_TARGET=13.0
-# The studio, and the binary CEF's subprocesses run from (browser sources).
-json=$(cargo build --locked --release -p moq-studio -p moq-scene --bin moq-studio --bin moq-browser-helper \
+# The studio, the binary CEF's subprocesses run from (browser sources), and
+# the virtual camera's extension.
+json=$(cargo build --locked --release -p moq-studio -p moq-scene -p moq-studio-camera \
+    --bin moq-studio --bin moq-browser-helper --bin moq-studio-camera \
     --features moq-studio/release,moq-studio/cef,moq-scene/cef --message-format=json-render-diagnostics)
 # The binaries, the build script's output, which holds the icon it drew, and
 # cef-dll-sys's, where it downloads CEF unless CEF_PATH names a copy.
@@ -22,10 +24,11 @@ artifact() {
 }
 executable=$(artifact moq-studio)
 helper=$(artifact moq-browser-helper)
+camera=$(artifact moq-studio-camera)
 out=$(jq -r 'select(.reason == "build-script-executed" and (.package_id | test("/rs/moq-studio#"))) | .out_dir' <<<"$json")
 cef=$(jq -r 'select(.reason == "build-script-executed" and (.package_id | test("cef-dll-sys"))) | .out_dir' <<<"$json")
 version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "moq-studio") | .version')
-[[ -x $executable && -x $helper && -f $out/live.kixel.studio.icns && -n $version ]]
+[[ -x $executable && -x $helper && -x $camera && -f $out/live.kixel.studio.icns && -n $version ]]
 frameworks=()
 while IFS= read -r framework; do
     frameworks+=("$framework")
@@ -67,3 +70,14 @@ for variant in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
     plutil -lint "$contents/Info.plist"
     cp "$helper" "$contents/MacOS/$name"
 done
+
+# The virtual camera's Camera Extension, which the studio asks the system to
+# activate from here. Named for its identifier, as the system requires.
+contents="$app/Contents/Library/SystemExtensions/live.kixel.studio.camera.systemextension/Contents"
+mkdir -p "$contents/MacOS"
+cp "$packaging/Camera.plist" "$contents/Info.plist"
+chmod 644 "$contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$version" "$contents/Info.plist"
+plutil -replace CFBundleVersion -string "$version" "$contents/Info.plist"
+plutil -lint "$contents/Info.plist"
+cp "$camera" "$contents/MacOS/moq-studio-camera"

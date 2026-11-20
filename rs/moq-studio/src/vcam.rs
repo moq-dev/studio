@@ -4,7 +4,8 @@
 //! On Linux the camera is a PipeWire video node (with the `pipewire` feature),
 //! which PipeWire-aware apps such as browsers list as a camera. Without
 //! PipeWire it is an existing v4l2loopback device, since that kernel module
-//! needs root to load and so is never the first choice.
+//! needs root to load and so is never the first choice. On macOS it is a
+//! camera of the CoreMediaIO camera extension the app bundle carries.
 //!
 //! The program clock offers every frame it draws of what a camera shows;
 //! [`Camera::offer`] has moq-video read it back only while an app reads the
@@ -18,10 +19,19 @@ use anyhow::Context;
 use moq_scene::Canvas;
 use moq_video::render::readback::{Pending, Readback};
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pipewire;
 #[cfg(target_os = "linux")]
 mod v4l2;
+
+/// The capture ids of the studio's cameras listed even while off: on macOS
+/// the camera extension always lists the program's, so apps keep it.
+#[cfg(target_os = "macos")]
+pub const LISTED: &[&str] = &[moq_studio_camera::PROGRAM];
+#[cfg(not(target_os = "macos"))]
+pub const LISTED: &[&str] = &[];
 
 /// The program, or a published scene, as a camera other apps can open.
 ///
@@ -86,7 +96,8 @@ impl Shared {
 /// Where an open camera lives.
 #[derive(Clone, Default)]
 struct Opened {
-	/// For the Output panel: `PipeWire`, or the v4l2loopback device's path.
+	/// For the Output panel: `PipeWire`, the v4l2loopback device's path, or
+	/// `Camera extension`.
 	backend: String,
 	/// The id moq-video's camera capture lists it by.
 	id: String,
@@ -267,7 +278,18 @@ fn backend(
 	}
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn backend(
+	scene: Option<&str>,
+	size: moq_video::Size,
+	framerate: u32,
+	shared: &Arc<Shared>,
+) -> anyhow::Result<(Box<dyn Sink>, String, String)> {
+	let (extension, id) = macos::Extension::open(scene, size, framerate, shared.clone())?;
+	Ok((Box::new(extension), "Camera extension".to_string(), id))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn backend(
 	scene: Option<&str>,
 	size: moq_video::Size,

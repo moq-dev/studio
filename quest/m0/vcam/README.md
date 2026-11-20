@@ -23,3 +23,8 @@ one for the program and one for each published scene, not saved in the scene
 file. Each OS backend is a `vcam::backend` in `rs/moq-studio`, fed tightly
 packed RGBA frames of what its camera shows on a `vcam` thread only while an
 app reads the camera, and names its camera after the scene it shows.
+
+The macOS backend is a CoreMediaIO Camera Extension the app bundle carries
+(`rs/moq-studio-camera`). It always lists the program's camera, adds a
+scene's camera when the studio asks through a custom property, and takes
+pictures on each camera's sink stream only from the signed app.

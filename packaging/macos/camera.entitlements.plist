@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- The camera extension: sandboxed, as every Camera Extension must be, in
+     the app group its Mach service is named after (Camera.plist). A
+     team-prefixed group needs no provisioning profile. -->
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>D7D5SDDB5Z.live.kixel.studio.camera</string>
+	</array>
+</dict>
+</plist>

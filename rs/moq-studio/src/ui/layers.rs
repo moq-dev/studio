@@ -665,14 +665,7 @@ impl Panels {
 			let refreshed = self.devices.refresh(&self.runtime).context("cannot list devices");
 			self.fail(Spot::Add, refreshed);
 		}
-		let own: Vec<String> = self
-			.engine
-			.state
-			.lock()
-			.unwrap()
-			.cameras()
-			.map(|camera| camera.id)
-			.collect();
+		let own = self.engine.state.lock().unwrap().own_cameras();
 		let Some(picked) = self.devices.ui(ui, &own) else {
 			return;
 		};

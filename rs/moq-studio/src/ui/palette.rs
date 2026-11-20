@@ -201,7 +201,7 @@ impl Panels {
 				];
 				// Never the studio's own virtual cameras, which would feed what
 				// one shows back into itself.
-				let own: Vec<String> = state.cameras().map(|camera| camera.id).collect();
+				let own = state.own_cameras();
 				let own = |pick: &&Pick| matches!(&pick.source, Source::Camera { id: Some(id) } if own.contains(id));
 				for (kind, picks) in kinds {
 					for pick in picks.iter().flatten().filter(|pick| !own(pick)) {
