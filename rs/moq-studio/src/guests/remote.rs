@@ -1021,6 +1021,10 @@ mod tests {
 			room.stop_renewing("alice").is_err(),
 			"a guest's removal the next room would miss"
 		);
+		assert!(
+			room.invite("bob").is_err(),
+			"a guest's link the next room would not renew"
+		);
 		next.unpair("phone").unwrap();
 		assert!(start().remotes()["phone"].removed);
 		next.pair("phone").unwrap();

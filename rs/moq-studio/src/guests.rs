@@ -439,6 +439,8 @@ impl Room {
 		// studio would never see this guest join.
 		anyhow::ensure!(!name.starts_with('.'), "a guest's name cannot start with `.`");
 		let mut participants = self.participants.lock().unwrap();
+		// A link the room joined next would never renew.
+		anyhow::ensure!(!self.left.load(Ordering::SeqCst), LEFT);
 		let removed = participants.get(name).is_some_and(|participant| participant.removed);
 		let appeared = participants.get(name).is_some_and(|participant| participant.appeared);
 		let generation = participants.get(name).map_or(0, |participant| participant.generation);
