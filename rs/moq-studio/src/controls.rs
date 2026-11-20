@@ -260,6 +260,7 @@ impl Action {
 			Self::StudioMode
 			| Self::Replay
 			| Self::SaveClip
+			| Self::Marker
 			| Self::Record
 			| Self::Panic
 			| Self::GoLive
