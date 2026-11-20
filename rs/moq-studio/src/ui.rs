@@ -1934,7 +1934,31 @@ fn templates(pictures: &[String], luts: &[String]) -> Vec<Filter> {
 	filters
 }
 
-/// The gesture an edit through `response` belongs to, if it changed anything.
+/// One change to how viewers may treat a published source.
+#[derive(Clone, Copy, Debug)]
+enum Viewers {
+	Toggle(bool),
+	Priority(i8),
+}
+
+impl Viewers {
+	/// Apply it to the source called `name` as `draft` holds it now, changing
+	/// only its own field, so an edit made since the controls drew is kept.
+	fn apply(self, draft: &mut Draft, name: &str) -> Result<(), moq_scene::Error> {
+		let mut published = draft
+			.collection()
+			.published
+			.get(name)
+			.copied()
+			.ok_or_else(|| moq_scene::Error::Conflict(format!("`{name}` is no longer published")))?;
+		match self {
+			Self::Toggle(toggle) => published.toggle = toggle,
+			Self::Priority(priority) => published.priority = priority,
+		}
+		draft.set_published(name, Some(published))
+	}
+}
+
 /// Whether viewers may switch off the source called `name`, published
 /// independently as `viewers` says, and its priority for them; what an edit
 /// asked, its label, and its gesture.
@@ -1943,7 +1967,7 @@ fn viewers_ui(
 	name: &str,
 	viewers: moq_scene::Published,
 	gestures: &mut Gestures,
-) -> Option<(moq_scene::Published, String, Option<u64>)> {
+) -> Option<(Viewers, String, Option<u64>)> {
 	let mut asked = None;
 	let mut toggle = viewers.toggle;
 	if ui
@@ -1958,8 +1982,7 @@ fn viewers_ui(
 			true => format!("Let viewers switch `{name}` off"),
 			false => format!("Keep `{name}` on for viewers"),
 		};
-		let viewers = moq_scene::Published { toggle, ..viewers };
-		asked = Some((viewers, label, None));
+		asked = Some((Viewers::Toggle(toggle), label, None));
 	}
 	ui.horizontal(|ui| {
 		ui.label("Priority");
@@ -1972,13 +1995,13 @@ fn viewers_ui(
 				 above 0 last.",
 			);
 		if let Some(gesture) = changed(&response, gestures) {
-			let viewers = moq_scene::Published { priority, ..viewers };
-			asked = Some((viewers, format!("Set `{name}`'s priority"), gesture));
+			asked = Some((Viewers::Priority(priority), format!("Set `{name}`'s priority"), gesture));
 		}
 	});
 	asked
 }
 
+/// The gesture an edit through `response` belongs to, if it changed anything.
 fn changed(response: &egui::Response, gestures: &mut Gestures) -> Option<Option<u64>> {
 	let gesture = gestures.of(response);
 	response.changed().then_some(gesture)
@@ -2968,6 +2991,41 @@ mod tests {
 			places.sort();
 			assert_eq!(places, [0, 1, 2, 3, 4]);
 		}
+	}
+
+	/// A viewer control changes only its own field of the source as the
+	/// scene holds it now, so an edit since the controls drew is kept, and
+	/// refuses a source no longer published rather than publish it again.
+	#[test]
+	fn a_viewer_edit_keeps_what_changed_since() {
+		let text = r#"
+version = 1
+
+[canvas]
+width = 1280
+height = 720
+framerate = 30
+
+[sources.cam]
+kind = "camera"
+
+[published.cam]
+toggle = true
+"#;
+		let collection = Collection::from_toml(text).unwrap();
+		let mut draft = collection.draft("priority");
+		Viewers::Priority(-5).apply(&mut draft, "cam").unwrap();
+		let published = moq_scene::Published {
+			priority: -5,
+			toggle: true,
+		};
+		assert_eq!(draft.collection().published["cam"], published, "the toggle was lost");
+
+		let mut draft = collection.draft("unpublish");
+		draft.set_published("cam", None).unwrap();
+		let err = Viewers::Toggle(false).apply(&mut draft, "cam").unwrap_err();
+		assert!(matches!(err, moq_scene::Error::Conflict(_)), "{err}");
+		assert!(draft.collection().published.is_empty(), "it was published again");
 	}
 
 	/// The gain field shows a boost past its range without cutting it, and

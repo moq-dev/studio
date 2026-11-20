@@ -1427,7 +1427,10 @@ default), and `delay`, in every audio scene holding it.
 `priority` (0 by default) ranks its tracks against the program's for
 viewers, and `toggle = true` lets each viewer switch it off.
 Scene files from before named them in a `published = [...]` list, which no
-longer loads: write a `[published.<name>]` table for each.
+longer loads: write a `[published.<name>]` table for each. A history saved
+before then that holds a publish edit fails to load the same way, naming
+`show.history.toml` beside the scene file: delete it to start a new history,
+so undo no longer reaches the edits before. A history without one loads.
 
 `portrait = true`, a top-level key, sends a portrait picture beside the
 landscape one (see [Both formats at once](#both-formats-at-once)). Meanwhile,

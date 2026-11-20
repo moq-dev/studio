@@ -1383,9 +1383,7 @@ impl Panels {
 		}
 		if let Some((name, (viewers, label, gesture))) = viewers_asked {
 			let mut state = engine.state.lock().unwrap();
-			let result = edit(&mut state, label, gesture, |draft| {
-				draft.set_published(&name, Some(viewers))
-			});
+			let result = edit(&mut state, label, gesture, |draft| viewers.apply(draft, &name));
 			drop(state);
 			self.check(result);
 		}

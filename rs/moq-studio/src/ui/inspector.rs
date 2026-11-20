@@ -28,7 +28,7 @@ enum Asked {
 	Publish(String, bool),
 	/// Set how viewers may treat the source published independently,
 	/// labelled, as part of a gesture.
-	Viewers(String, moq_scene::Published, String, Option<u64>),
+	Viewers(String, super::Viewers, String, Option<u64>),
 	/// Watch the capture for going dark, or stop.
 	Warn(String, bool),
 	/// Fill the role called this with this source, or leave it unfilled.
@@ -665,9 +665,9 @@ impl Panels {
 					draft.set_published(&name, published.then(Default::default))
 				})
 			}
-			Asked::Viewers(name, viewers, label, gesture) => edit(&mut state, label, gesture, |draft| {
-				draft.set_published(&name, Some(viewers))
-			}),
+			Asked::Viewers(name, viewers, label, gesture) => {
+				edit(&mut state, label, gesture, |draft| viewers.apply(draft, &name))
+			}
 		};
 		drop(state);
 		self.fail(spot, result);
