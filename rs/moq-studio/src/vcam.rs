@@ -54,6 +54,8 @@ enum Work {
 /// What the camera's threads report to the program clock and the UI.
 #[derive(Default)]
 struct Shared {
+	/// The `vcam` thread is opening the backend.
+	opening: AtomicBool,
 	/// Where the camera lives now.
 	opened: Mutex<Opened>,
 	/// Whether an app reads the camera, so frames are worth copying.
@@ -137,7 +139,10 @@ impl Camera {
 		canvas: Canvas,
 	) -> anyhow::Result<Self> {
 		let readback = Readback::new(device, queue, size(canvas))?;
-		let shared = Arc::new(Shared::default());
+		let shared = Arc::new(Shared {
+			opening: AtomicBool::new(true),
+			..Default::default()
+		});
 		let scene = scene.map(str::to_string);
 
 		let (work, pending) = mpsc::channel();
@@ -145,9 +150,13 @@ impl Camera {
 			let shared = shared.clone();
 			std::thread::Builder::new()
 				.name("vcam".into())
-				.spawn(move || match open(scene.as_deref(), canvas, &shared) {
-					Ok(sink) => run(pending, sink, scene.as_deref(), &shared),
-					Err(err) => shared.fail(format!("{err:#}")),
+				.spawn(move || {
+					let opened = open(scene.as_deref(), canvas, &shared);
+					shared.opening.store(false, Ordering::Release);
+					match opened {
+						Ok(sink) => run(pending, sink, scene.as_deref(), &shared),
+						Err(err) => shared.fail(format!("{err:#}")),
+					}
 				})
 				.context("cannot start the virtual camera thread")?
 		};
@@ -218,9 +227,13 @@ impl Camera {
 impl Drop for Camera {
 	fn drop(&mut self) {
 		// Ends the thread, which removes the camera before this returns, so
-		// turning it straight back on finds the device free.
+		// turning it straight back on finds the device free. A backend still
+		// opening may wait on the system for seconds, and this runs on the
+		// UI's thread, so that thread is left to end on its own once it has.
 		self.work.take();
-		if let Some(worker) = self.worker.take() {
+		if let Some(worker) = self.worker.take()
+			&& !self.shared.opening.load(Ordering::Acquire)
+		{
 			let _ = worker.join();
 		}
 	}
