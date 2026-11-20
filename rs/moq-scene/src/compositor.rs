@@ -215,7 +215,7 @@ struct Reflow {
 	/// Its items where its arrangement puts them, in order.
 	arranged: Vec<Item>,
 	/// Its items as drawn, gliding to `arranged` when a slot opens or closes.
-	glide: Glide<Vec<(String, bool, Rect)>>,
+	glide: Glide<Vec<(Id, String, bool, Rect)>>,
 }
 
 /// The program and the scenes a transition draws whole on its way, as of the
@@ -2078,11 +2078,12 @@ fn reflow<'a>(
 			// dragged follows the pointer.
 			glide: Glide::new(REFLOW, |item| item.slot.is_some()),
 		});
-		// Only the slots start a glide: what each shows, whether it is
-		// open, and where.
+		// Only the slots start a glide: which item each holds, what it
+		// shows, whether it is open, and where, so two showing one source
+		// that swap places glide too.
 		let slotted = arranged.iter().filter(|item| item.slot.is_some());
 		let key = slotted
-			.map(|item| (item.source.clone(), item.visible, item.rect))
+			.map(|item| (item.id, item.source.clone(), item.visible, item.rect))
 			.collect();
 		placed.push((index, reflow.glide.show(key, &arranged, now).to_vec()));
 		reflow.arranged = arranged;
@@ -4520,6 +4521,42 @@ mod tests {
 			let (x, y) = center(&before[1].rect);
 			assert_ne!(texel(&program, width, x, y), BLUE, "blue gone");
 			assert_eq!(studio.program(), studio.preview(), "the preview glides alike");
+		})
+		.await;
+	}
+
+	/// Two tiles showing one source that swap places each glide from where
+	/// it was, though the slots show the same source where they did.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just render-sw"]
+	async fn duplicate_tiles_swapping_places_glide() {
+		local(async {
+			let mut collection = slotted();
+			collection.scenes[0].items[2].source = "blue".into();
+			collection.validate().unwrap();
+			let mut studio = Studio::new(collection).await;
+			let start = Instant::now();
+			studio.render(start);
+			let before = studio.compositor.arranged(Format::Landscape, "slots").unwrap().to_vec();
+			assert_ne!(before[1].rect, before[2].rect, "the tiles are apart");
+
+			studio.collection.scenes[0].items.swap(1, 2);
+			studio.render(start);
+			studio.render(start.saturating_add(REFLOW / 2));
+			let placed = studio.compositor.placed(Format::Landscape, "slots").unwrap().to_vec();
+			let halfway = |from: f32, to: f32| (from + to) / 2.0;
+			for (was, now) in [(&before[1], &before[2]), (&before[2], &before[1])] {
+				let item = placed
+					.iter()
+					.find(|item| item.id == was.id)
+					.expect("each tile is drawn");
+				let (x, y) = (halfway(was.rect.x, now.rect.x), halfway(was.rect.y, now.rect.y));
+				assert!(
+					(item.rect.x - x).abs() < 0.01 && (item.rect.y - y).abs() < 0.01,
+					"each tile is halfway from where it was: {:?}, not ({x}, {y})",
+					item.rect
+				);
+			}
 		})
 		.await;
 	}
