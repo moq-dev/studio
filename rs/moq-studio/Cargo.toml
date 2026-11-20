@@ -35,9 +35,11 @@ pipewire = ["capture", "moq-scene/pipewire", "dep:pipewire"]
 # system library at startup. `pipewire` is not one; the Flatpak, which bundles
 # libpipewire, adds it.
 release = ["capture", "nvidia", "openh264", "vaapi"]
-# Browser sources, rendered by CEF in a helper process (Linux). Off by default:
-# the build downloads the CEF runtime (or takes it from `CEF_PATH`) and copies
-# it beside the binary, where the binary looks for it when it starts.
+# Browser sources, rendered by CEF in a helper process (Linux and macOS). Off
+# by default: the build downloads the CEF runtime (or takes it from
+# `CEF_PATH`). On Linux it copies it beside the binary, where the binary looks
+# for it when it starts; on macOS packaging/macos/bundle.sh puts it in the app
+# bundle, the only place browser sources run from there.
 cef = ["moq-scene/cef"]
 
 [dependencies]

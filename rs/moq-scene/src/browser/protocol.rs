@@ -1,9 +1,11 @@
 //! What a browser source says to its helper process, and back.
 //!
 //! One Unix stream socket carries both directions, each message a
-//! little-endian `u32` length and that many bytes of postcard. A shared
-//! texture's DMA-BUF descriptors ride with the first byte of its message as
-//! `SCM_RIGHTS`, so they arrive with the message that describes them.
+//! little-endian `u32` length and that many bytes of postcard. On Linux, a
+//! shared texture's DMA-BUF descriptors ride with the first byte of its
+//! message as `SCM_RIGHTS`, so they arrive with the message that describes
+//! them. On macOS its IOSurface goes ahead of the message as a Mach port
+//! (`super::mach`), which no socket carries.
 
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
@@ -26,6 +28,20 @@ pub(crate) const MAX_PLANES: usize = 4;
 /// room for the rest of the message. Bounds what a misbehaving peer can make
 /// the other allocate.
 pub(crate) const MAX_MESSAGE: usize = (super::MAX_SIDE * super::MAX_SIDE * 4) as usize + 1024;
+
+/// How every message is sent: never raising `SIGPIPE` on a closed socket.
+/// macOS has no such flag, and Rust ignores the signal there anyway.
+#[cfg(target_os = "linux")]
+const SEND: SendFlags = SendFlags::NOSIGNAL;
+#[cfg(not(target_os = "linux"))]
+const SEND: SendFlags = SendFlags::empty();
+
+/// How every message is received: descriptors closed on exec, so no helper
+/// inherits another's. macOS has no such flag, and sends none.
+#[cfg(target_os = "linux")]
+const RECV: RecvFlags = RecvFlags::CMSG_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const RECV: RecvFlags = RecvFlags::empty();
 
 /// A page's number, unique among those one helper opens.
 pub(crate) type Id = u64;
@@ -63,12 +79,19 @@ pub(crate) struct Start {
 /// Where a helper's pages paint.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Raster {
-	/// On the GPU, into shared textures the studio imports: on the DRM render
-	/// node named, the studio's GPU, or else on the one CEF picks. CEF's GPU
-	/// process needs `display` to allocate them.
+	/// On the GPU, into shared textures the studio imports.
 	Gpu {
+		/// The DRM render node to paint on, the studio's GPU, or else the one
+		/// CEF picks.
+		#[cfg(target_os = "linux")]
 		render_node: Option<String>,
+		/// What CEF's GPU process allocates the textures through.
+		#[cfg(target_os = "linux")]
 		display: Display,
+		/// The studio's bootstrap service, which takes each texture's
+		/// IOSurface.
+		#[cfg(target_os = "macos")]
+		service: String,
 	},
 	/// In software, into memory the studio uploads, with no display opened.
 	/// Startup never waits on a GPU process CEF cannot start, and WebGL runs
@@ -78,20 +101,25 @@ pub(crate) enum Raster {
 }
 
 impl Raster {
-	/// Whether CEF's own copy reaches the desktop's clipboard: only through an
-	/// X display.
+	/// Whether CEF's own copy reaches the desktop's clipboard: on macOS
+	/// always, the pasteboard being a system service, and on Linux only
+	/// through an X display.
 	pub(crate) fn native_copy(&self) -> bool {
-		matches!(
+		#[cfg(target_os = "linux")]
+		return matches!(
 			self,
 			Raster::Gpu {
 				display: Display::X11,
 				..
 			}
-		)
+		);
+		#[cfg(not(target_os = "linux"))]
+		true
 	}
 }
 
 /// The display server the GPU path connects to, the one the studio runs on.
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Display {
 	/// `$WAYLAND_DISPLAY`, preferred: CEF paints there on the studio's GPU.
@@ -167,14 +195,16 @@ pub(crate) struct Area {
 }
 
 /// A shared texture's layout, CEF's `cef_accelerated_paint_info_t` minus the
-/// descriptors.
+/// handles: DMA-BUF descriptors on Linux, an IOSurface on macOS.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Texture {
 	pub width: u32,
 	pub height: u32,
 	pub format: Format,
 	/// The DRM format modifier: how the planes are tiled.
+	#[cfg(target_os = "linux")]
 	pub modifier: u64,
+	#[cfg(target_os = "linux")]
 	pub planes: Vec<Plane>,
 }
 
@@ -186,6 +216,7 @@ pub(crate) enum Format {
 }
 
 /// One plane of a shared texture.
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Plane {
 	pub stride: u32,
@@ -231,7 +262,7 @@ impl Channel {
 		}
 		// The descriptors go with the first byte sent; a short send leaves the
 		// rest for a plain write.
-		let sent = rustix::net::sendmsg(&self.socket, &[IoSlice::new(&bytes)], &mut control, SendFlags::NOSIGNAL)?;
+		let sent = rustix::net::sendmsg(&self.socket, &[IoSlice::new(&bytes)], &mut control, SEND)?;
 		(&self.socket).write_all(&bytes[sent..])
 	}
 
@@ -248,7 +279,7 @@ impl Channel {
 				&self.socket,
 				&mut [IoSliceMut::new(&mut length[read..])],
 				&mut control,
-				RecvFlags::CMSG_CLOEXEC,
+				RECV,
 			)?;
 			for message in control.drain() {
 				if let RecvAncillaryMessage::ScmRights(received) = message {
@@ -298,6 +329,7 @@ mod tests {
 	/// Descriptors arrive with the message they were sent with, not the one
 	/// before or after, however the stream splits.
 	#[test]
+	#[cfg(target_os = "linux")]
 	fn descriptors_ride_with_their_message() {
 		let (studio, helper) = pair();
 		let texture = Texture {

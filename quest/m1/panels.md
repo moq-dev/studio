@@ -29,8 +29,8 @@ page is the platform's own.
 - A page can do anything the browser can, as a browser source can: the same
   warning to add only pages you trust applies, and is shown when adding one.
 
-Browser sources exist on Linux only today, so panels arrive on macOS and
-Windows with them.
+Browser sources exist on Linux and macOS today, so panels arrive on Windows
+with them.
 
 Human check: a real chat page, logged in, typed into during a stream.
 

@@ -166,8 +166,9 @@ fn data_dir() -> Option<PathBuf> {
 }
 
 fn main() -> anyhow::Result<ExitCode> {
-	// A browser source's helper, and CEF's subprocesses, are this executable
-	// started again.
+	// A browser source's helper is this executable started again, as are
+	// CEF's subprocesses on Linux; on macOS they run from the bundle's helper
+	// apps.
 	if let Some(code) = moq_scene::browser::child() {
 		return Ok(code);
 	}

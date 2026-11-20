@@ -16,8 +16,13 @@
 //! `<select>`'s list, arrive the same way apart from the page, and the studio
 //! draws them over it. A page's sound joins the program bus at the bus's rate.
 //!
-//! Linux only for now, and only with the `cef` feature: elsewhere a browser
-//! source reports that it is unsupported.
+//! On macOS the helper is still the studio's executable, but only inside its
+//! app bundle, which holds CEF's framework and the helper apps CEF's
+//! subprocesses run from (the `moq-browser-helper` binary), and a page's
+//! shared texture is an IOSurface sent ahead of its message as a Mach port.
+//!
+//! Linux and macOS only for now, and only with the `cef` feature: elsewhere a
+//! browser source reports that it is unsupported.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,23 +30,25 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod layers;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod outbox;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod protocol;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod run;
 
-#[cfg(all(target_os = "linux", feature = "cef"))]
+#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "cef"))]
 mod host;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod import;
+#[cfg(target_os = "macos")]
+mod mach;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use protocol::Open;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use run::run;
 
 /// The longest side of a page, in pixels: room for a 4K canvas.
@@ -49,8 +56,8 @@ pub(crate) const MAX_SIDE: u32 = 4096;
 
 /// The argument that starts the studio's executable as a helper.
 #[cfg_attr(
-	not(target_os = "linux"),
-	expect(dead_code, reason = "browser sources are Linux-only")
+	not(any(target_os = "linux", target_os = "macos")),
+	expect(dead_code, reason = "browser sources run on Linux and macOS")
 )]
 const ARG: &str = "--moq-browser-helper";
 
@@ -60,7 +67,7 @@ const ARG: &str = "--moq-browser-helper";
 /// A binary that offers browser sources calls this before anything else in
 /// `main`, and exits with the code it returns.
 pub fn child() -> Option<ExitCode> {
-	#[cfg(all(target_os = "linux", feature = "cef"))]
+	#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "cef"))]
 	{
 		if std::env::args_os().nth(1).is_some_and(|arg| arg == ARG) {
 			return Some(host::run());
@@ -77,8 +84,8 @@ pub fn child() -> Option<ExitCode> {
 /// copied to. Clones share one helper.
 #[derive(Clone)]
 #[cfg_attr(
-	not(target_os = "linux"),
-	expect(dead_code, reason = "browser sources are Linux-only")
+	not(any(target_os = "linux", target_os = "macos")),
+	expect(dead_code, reason = "browser sources run on Linux and macOS")
 )]
 pub struct Helper {
 	program: PathBuf,
@@ -86,14 +93,17 @@ pub struct Helper {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
 	/// Where pages paint.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	raster: protocol::Raster,
 	/// Why a page that paints into memory does.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	fallback: Arc<str>,
 	/// The helper, once a page has started it.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	running: Arc<Mutex<Option<Arc<run::Instance>>>>,
+	/// Where every helper sends its pages' IOSurfaces, on the GPU path.
+	#[cfg(target_os = "macos")]
+	surfaces: Option<Arc<mach::Receiver>>,
 }
 
 impl Helper {
@@ -112,10 +122,17 @@ impl Helper {
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
 	) -> Self {
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 		let _ = adapter;
 		#[cfg(target_os = "linux")]
-		let (raster, fallback) = match gpu(adapter, device) {
+		let gpu = gpu(adapter, device);
+		#[cfg(target_os = "macos")]
+		let (gpu, surfaces) = match gpu(adapter) {
+			Ok((raster, receiver)) => (Ok(raster), Some(Arc::new(receiver))),
+			Err(why) => (Err(why), None),
+		};
+		#[cfg(any(target_os = "linux", target_os = "macos"))]
+		let (raster, fallback) = match gpu {
 			Ok(raster) => (raster, "its GPU process cannot share textures".into()),
 			Err(why) => (protocol::Raster::Cpu, why.into()),
 		};
@@ -124,32 +141,35 @@ impl Helper {
 			profile: profile.into(),
 			device: device.clone(),
 			queue: queue.clone(),
-			#[cfg(target_os = "linux")]
+			#[cfg(any(target_os = "linux", target_os = "macos"))]
 			raster,
-			#[cfg(target_os = "linux")]
+			#[cfg(any(target_os = "linux", target_os = "macos"))]
 			fallback,
-			#[cfg(target_os = "linux")]
+			#[cfg(any(target_os = "linux", target_os = "macos"))]
 			running: Default::default(),
+			#[cfg(target_os = "macos")]
+			surfaces,
 		}
 	}
 
 	/// Take what a page last copied or cut, once, for the desktop's
-	/// clipboard, which CEF reaches itself only through an X display.
-	#[cfg(target_os = "linux")]
+	/// clipboard, which CEF reaches itself only on macOS and through an X
+	/// display.
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	pub fn copied(&self) -> Option<String> {
 		let running = self.running.lock().unwrap();
 		running.as_ref()?.copied()
 	}
 
 	/// Take what a page last copied or cut: nothing, without browser sources.
-	#[cfg(not(target_os = "linux"))]
+	#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 	pub fn copied(&self) -> Option<String> {
 		None
 	}
 
 	/// Whether a page's Copy and Cut come back through [`Helper::copied`],
-	/// rather than reaching the X clipboard through CEF itself.
-	#[cfg(target_os = "linux")]
+	/// rather than reaching the desktop's clipboard through CEF itself.
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	pub fn relays_copies(&self) -> bool {
 		!self.raster.native_copy()
 	}
@@ -158,7 +178,7 @@ impl Helper {
 	/// profile is saved and free for the next studio. The next page to start
 	/// starts a new helper.
 	pub fn stop(&self) {
-		#[cfg(target_os = "linux")]
+		#[cfg(any(target_os = "linux", target_os = "macos"))]
 		{
 			// Held throughout, so no page starts another helper on the profile
 			// until this one has exited.
@@ -217,6 +237,31 @@ fn gpu(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Result<protocol::Raste
 		.flatten()
 		.and_then(|node| node.into_os_string().into_string().ok());
 	Ok(Raster::Gpu { render_node, display })
+}
+
+/// The GPU path pages paint on, and the service their surfaces arrive at,
+/// decided once from the studio's device, or why they cannot take it.
+#[cfg(target_os = "macos")]
+fn gpu(adapter: &wgpu::Adapter) -> Result<(protocol::Raster, mach::Receiver), String> {
+	if !cfg!(feature = "cef") {
+		return Err("this build cannot share textures".into());
+	}
+	let info = adapter.get_info();
+	if info.device_type == wgpu::DeviceType::Cpu {
+		return Err(format!("the studio's GPU, {}, renders in software", info.name));
+	}
+	// An IOSurface becomes a texture only through Metal.
+	if info.backend != wgpu::Backend::Metal {
+		return Err(format!(
+			"the studio's GPU, {}, draws with {}, not Metal, so it cannot import shared textures",
+			info.name, info.backend
+		));
+	}
+	let receiver = mach::Receiver::new()?;
+	let raster = protocol::Raster::Gpu {
+		service: receiver.name().to_string(),
+	};
+	Ok((raster, receiver))
 }
 
 /// Check that the Wayland display in `$WAYLAND_DISPLAY` advertises an output,
@@ -333,24 +378,24 @@ pub struct Page {
 #[derive(Default)]
 struct PageState {
 	/// The queue to the helper's socket, while the page is open.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	commands: Option<outbox::Commands>,
 	/// The page's number in the helper.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	id: protocol::Id,
 	/// Whether input is being dropped because the backlog is full.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	backlogged: bool,
 	/// The canvas's frame rate, which the page paints at.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	framerate: u32,
 	/// Whether the helper has yet to hear `framerate`.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	retime: bool,
 	paint: Option<Paint>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl PageState {
 	/// Queue `input`, which past the backlog drops, a release aside.
 	fn send(&mut self, input: Input) {
@@ -399,7 +444,7 @@ impl Page {
 	/// Paint at `rate`, the canvas's frame rate, from now on, without waiting on
 	/// the helper. One that is behind hears it once it catches up.
 	pub(crate) fn set_framerate(&self, rate: u32) {
-		#[cfg(target_os = "linux")]
+		#[cfg(any(target_os = "linux", target_os = "macos"))]
 		{
 			let mut state = self.state.lock().unwrap();
 			if state.framerate != rate {
@@ -408,7 +453,7 @@ impl Page {
 				state.flush();
 			}
 		}
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 		let _ = rate;
 	}
 
@@ -418,9 +463,9 @@ impl Page {
 	/// more, as a hung window's would be, except that a release is delivered
 	/// once the helper catches up.
 	pub fn send(&self, input: Input) {
-		#[cfg(target_os = "linux")]
+		#[cfg(any(target_os = "linux", target_os = "macos"))]
 		self.state.lock().unwrap().send(input);
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 		let _ = input;
 	}
 }
@@ -494,8 +539,8 @@ pub struct Modifiers {
 /// The texture a page's pixels are uploaded to: premultiplied BGRA, as CEF
 /// paints, and a copy source for drawing a popup over the page.
 #[cfg_attr(
-	not(target_os = "linux"),
-	expect(dead_code, reason = "browser sources are Linux-only")
+	not(any(target_os = "linux", target_os = "macos")),
+	expect(dead_code, reason = "browser sources run on Linux and macOS")
 )]
 fn upload(
 	device: &wgpu::Device,
@@ -541,7 +586,7 @@ fn upload(
 	Ok(texture)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
 	use super::*;
 

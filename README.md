@@ -73,9 +73,12 @@ cargo run --release -p moq-studio --features capture,openh264
   encoder.
 - `release` is what the packages build: `capture`, `openh264`, and the
   hardware codecs. The Flatpak adds `pipewire`.
-- `cef` adds browser sources, on Linux only for now. The build takes CEF from
-  `CEF_PATH`, which the dev shell sets, or else downloads it, and the binary
-  loads `libcef.so` from beside itself or from that `CEF_PATH`.
+- `cef` adds browser sources, on Linux and macOS. The build takes CEF from
+  `CEF_PATH`, which the dev shell sets on Linux, or else downloads it. On
+  Linux the binary loads `libcef.so` from beside itself or from that
+  `CEF_PATH`. On macOS browser sources run only from the app bundle, which
+  holds CEF's framework and its helper apps: build it with
+  `packaging/macos/bundle.sh`, which the macOS packages ship with `cef`.
 - On Linux, display and window sources capture X11 and XWayland by id. With
   `pipewire`, a display or window can also be picked in the desktop's
   screen-sharing picker, the only way to share a Wayland screen; see
@@ -923,17 +926,19 @@ A browser source renders a web page, such as an overlay, alert box, or chat
 widget, at the canvas frame rate (CEF caps it at 60) over a transparent
 background, and its sound joins the audio scenes that hold it. Every page shares one
 browser profile, kept in `$XDG_DATA_HOME/moq-studio/browser`
-(`~/.local/share/moq-studio/browser` by default) rather than beside the scene
-file, so cookies and logins, such as an alert service's, survive a reload and
-a restart of the studio. They are not encrypted with the desktop's keyring,
-so a locked keyring never holds a page back, and anything that can read your
-home directory can read them. One studio at a time can use the profile: a
+(`~/.local/share/moq-studio/browser` by default) on Linux and in
+`~/Library/Application Support/moq-studio/browser` on macOS, rather than
+beside the scene file, so cookies and logins, such as an alert service's,
+survive a reload and a restart of the studio. They are not encrypted with the
+desktop's keyring or keychain, so a locked keyring never holds a page back and
+no keychain prompt interrupts one, and anything that can read your home
+directory can read them. One studio at a time can use the profile: a
 second one's browser sources fail saying so. Each page renders in a process of its own, so
 a page that crashes fails only its own source, with the reason, while the
 stream carries on. A crash of the browser itself fails every browser source.
-Either shows at once, since the browser's processes dump no core. On Linux,
-pages run without Chromium's sandbox, as in OBS, so a page that exploits a
-browser bug can do anything you can: add only pages you trust.
+Either shows at once, since the browser's processes dump no core. Pages run
+without Chromium's sandbox, as in OBS, so a page that exploits a browser bug
+can do anything you can: add only pages you trust.
 The browser requests only what its pages load, never asking Google for
 updates, the time, or autofill suggestions on its own, so pages are not
 spellchecked, which would need a dictionary from Google. Nor does it run
@@ -942,9 +947,9 @@ browser extensions, even ones your distribution installs for every Chromium.
 lists, such as a `<select>`'s, draw over it and take clicks under
 **Interact**, but it opens no other windows (`window.open` and new-tab links
 do nothing). Copy and Cut there put the page's selected text on the clipboard,
-and nothing from a password field. Except for a page copied on the GPU through
-an X display, the text goes as plain text that the page's own copy handlers
-cannot change.
+and nothing from a password field. On Linux, except for a page copied on the
+GPU through an X display, the text goes as plain text that the page's own copy
+handlers cannot change; on macOS the page copies as it would in a browser.
 
 An overlay is a title, lower third, or other graphic written as HTML and CSS,
 drawn by the studio itself (through [Blitz](https://github.com/DioxusLabs/blitz))
@@ -1820,7 +1825,8 @@ paints, given the same Vulkan DMA-BUF import and a display to paint through:
 the Wayland one when `$WAYLAND_DISPLAY` is set and has an output, such as a
 monitor, needing no XWayland, or else
 the X one in `$DISPLAY`, when the X server runs on the studio's GPU, since
-CEF paints on the X server's there. Every other source, every source on Windows or on a
+CEF paints on the X server's there. On macOS it is copied from the IOSurface
+CEF paints, through Metal. Every other source, every source on Windows or on a
 GPU that cannot import, and every still image delivers its frames from the
 CPU, which the compositor uploads. A browser source takes that path with no
 display at all too, and there renders its page in software, WebGL included, so
