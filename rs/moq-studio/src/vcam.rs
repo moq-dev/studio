@@ -28,7 +28,7 @@ mod v4l2;
 
 /// The program, or a published scene, as a camera other apps can open.
 ///
-/// Dropping it removes the camera.
+/// Dropping it removes the camera, on its own thread.
 pub struct Camera {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
@@ -54,8 +54,6 @@ enum Work {
 /// What the camera's threads report to the program clock and the UI.
 #[derive(Default)]
 struct Shared {
-	/// The `vcam` thread is opening the backend.
-	opening: AtomicBool,
 	/// Where the camera lives now.
 	opened: Mutex<Opened>,
 	/// Whether an app reads the camera, so frames are worth copying.
@@ -139,10 +137,7 @@ impl Camera {
 		canvas: Canvas,
 	) -> anyhow::Result<Self> {
 		let readback = Readback::new(device, queue, size(canvas))?;
-		let shared = Arc::new(Shared {
-			opening: AtomicBool::new(true),
-			..Default::default()
-		});
+		let shared = Arc::new(Shared::default());
 		let scene = scene.map(str::to_string);
 
 		let (work, pending) = mpsc::channel();
@@ -151,9 +146,11 @@ impl Camera {
 			std::thread::Builder::new()
 				.name("vcam".into())
 				.spawn(move || {
-					let opened = open(scene.as_deref(), canvas, &shared);
-					shared.opening.store(false, Ordering::Release);
-					match opened {
+					let closing = std::mem::take(&mut *CLOSING.lock().unwrap());
+					for worker in closing {
+						let _ = worker.join();
+					}
+					match open(scene.as_deref(), canvas, &shared) {
 						Ok(sink) => run(pending, sink, scene.as_deref(), &shared),
 						Err(err) => shared.fail(format!("{err:#}")),
 					}
@@ -226,18 +223,24 @@ impl Camera {
 
 impl Drop for Camera {
 	fn drop(&mut self) {
-		// Ends the thread, which removes the camera before this returns, so
-		// turning it straight back on finds the device free. A backend still
-		// opening may wait on the system for seconds, and this runs on the
-		// UI's thread, so that thread is left to end on its own once it has.
+		// Ends the thread, which removes the camera once its backend returns.
+		// That may wait on the system for seconds, as macOS finding the camera
+		// extension's does, and this runs on the UI's thread, so the next
+		// camera to open waits for it instead.
 		self.work.take();
-		if let Some(worker) = self.worker.take()
-			&& !self.shared.opening.load(Ordering::Acquire)
-		{
-			let _ = worker.join();
+		if let Some(worker) = self.worker.take() {
+			let mut closing = CLOSING.lock().unwrap();
+			closing.retain(|worker| !worker.is_finished());
+			closing.push(worker);
 		}
 	}
 }
+
+/// The threads of cameras turned off, each still closing its backend. A
+/// camera waits for them before it opens, on its own thread, so it finds
+/// every device they held free, such as a v4l2loopback device or a scene's
+/// camera of the macOS extension.
+static CLOSING: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
 
 fn size(canvas: Canvas) -> moq_video::Size {
 	moq_video::Size::new(canvas.width, canvas.height)
