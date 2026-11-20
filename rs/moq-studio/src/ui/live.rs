@@ -25,9 +25,12 @@ const LISTEN: Duration = Duration::from_secs(4);
 
 /// The go-live sheet's checks, run while it is open.
 pub(super) struct Going {
-	/// The canvas the encoder was timed at; another starts the checks over.
-	canvas: Canvas,
-	encoder: Task<Result<Encoding, String>>,
+	/// The canvases the encoders were timed at together, the program's and
+	/// its turned one while the show goes out in both formats; others start
+	/// the checks over.
+	canvases: Vec<Canvas>,
+	/// How each encodes, in the canvases' order.
+	encoder: Task<Result<Vec<Encoding>, String>>,
 	/// Started once the encoder is known, since what it sends is what the
 	/// connection is measured toward.
 	uplink: Option<Measuring>,
@@ -75,25 +78,28 @@ struct Check {
 }
 
 impl Going {
-	/// Start the checks for the program at `canvas`, the encoder's noted as
+	/// Start the checks for the program at `canvases`, the encoders' noted as
 	/// `probing` until it ends, even once the sheet closes, and not run
 	/// without it, while a go-live opens the program's encoders.
 	fn new(
 		gpu: crate::engine::Gpu,
 		runtime: &tokio::runtime::Handle,
-		canvas: Canvas,
+		canvases: Vec<Canvas>,
 		probing: Option<crate::controls::Probing>,
 	) -> Self {
 		let encoder = match probing {
-			Some(probing) => Task::spawn(runtime, move || async move {
-				let _probing = probing;
-				setup::probe(gpu, canvas).await
+			Some(probing) => Task::spawn(runtime, {
+				let canvases = canvases.clone();
+				move || async move {
+					let _probing = probing;
+					setup::probe(gpu, &canvases).await
+				}
 			})
 			.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the check: {err}")))),
 			None => Task::Done(Err("not checked while a stream goes live".into())),
 		};
 		Self {
-			canvas,
+			canvases,
 			encoder,
 			uplink: None,
 			heard: BTreeMap::new(),
@@ -124,11 +130,16 @@ impl Going {
 /// stream for the uplink.
 struct Measuring {
 	task: Task<Result<Rate, String>>,
-	/// How many pictures its ceiling was sized for, so turning a second on
-	/// measures again, past what both send.
-	encodes: u32,
 	/// Dropping it ends the measurement.
 	_stop: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+/// The pictures the program encodes at once: its canvas, and the turned one
+/// while the show goes out in both formats.
+fn program_canvases(collection: &moq_scene::Collection) -> Vec<Canvas> {
+	std::iter::once(collection.canvas)
+		.chain(collection.portrait_canvas())
+		.collect()
 }
 
 /// `canvas` as a broadcaster names it, such as `1080p at 60`.
@@ -284,10 +295,10 @@ impl Panels {
 
 	/// Open the go-live sheet, starting its checks.
 	pub(super) fn open_going(&mut self) {
-		let canvas = self.engine.state.lock().unwrap().collection().canvas;
+		let canvases = program_canvases(self.engine.state.lock().unwrap().collection());
 		*self.controls.refused.lock().unwrap() = None;
 		let probing = self.controls.probing();
-		self.going = Some(Going::new(self.engine.gpu().clone(), &self.runtime, canvas, probing));
+		self.going = Some(Going::new(self.engine.gpu().clone(), &self.runtime, canvases, probing));
 	}
 
 	/// The go-live sheet, while open: where the stream goes, each with a
@@ -304,7 +315,7 @@ impl Panels {
 		}
 		ctx.request_repaint_after(Duration::from_millis(100));
 		let broadcast = self.controls.stream.lock().unwrap().broadcast().to_string();
-		let (show, program, canvas, both) = {
+		let (show, program, canvases, both) = {
 			let state = self.engine.state.lock().unwrap();
 			let path = self.engine.autosave.path();
 			let show = path
@@ -321,11 +332,11 @@ impl Panels {
 					moq_scene::PORTRAIT
 				)
 			});
-			(show, program, collection.canvas, both)
+			(show, program, program_canvases(collection), both)
 		};
 		// Not while going live, which keeps the sheet waiting on it, and
 		// whose encoders a new check would compete with: once it ends.
-		if self.going.as_ref().is_some_and(|going| going.canvas != canvas) && !self.controls.going() {
+		if self.going.as_ref().is_some_and(|going| going.canvases != canvases) && !self.controls.going() {
 			self.open_going();
 		}
 		self.advance_going();
@@ -427,31 +438,20 @@ impl Panels {
 	/// Collect the checks that finished, and start measuring the connection
 	/// once the encoder says what it sends.
 	fn advance_going(&mut self) {
-		let encodes = match self.engine.state.lock().unwrap().collection().portrait {
-			true => 2,
-			false => 1,
-		};
 		let Some(going) = &mut self.going else { return };
 		going.encoder.poll();
-		if going.uplink.as_ref().is_some_and(|uplink| uplink.encodes < encodes) {
-			going.uplink = None;
-		}
 		if going.uplink.is_none()
 			&& let Task::Done(encoder) = &going.encoder
 		{
 			going.uplink = Some(match encoder {
-				Ok(encoding) => {
-					// Up to past what it sends, so a connection that carries
+				Ok(encodings) => {
+					// Up to past what they send, so a connection that carries
 					// it says so rather than stopping at its rate.
-					let ceiling = encoding.total_of(encodes).scaled(1.0 / setup::headroom());
-					Measuring {
-						encodes,
-						..measure(&self.controls, &self.runtime, ceiling)
-					}
+					let ceiling = setup::total(encodings).scaled(1.0 / setup::headroom());
+					measure(&self.controls, &self.runtime, ceiling)
 				}
 				Err(_) => Measuring {
-					task: Task::Done(Err("nothing encodes, so nothing would be sent".into())),
-					encodes,
+					task: Task::Done(Err("the encoder failed, so what it would send is not known".into())),
 					_stop: None,
 				},
 			});
@@ -654,17 +654,17 @@ impl Panels {
 			},
 		});
 
-		// The encoder keeps up with the canvas: twice over, a picture in each
-		// format, while the show goes out in both.
-		let encodes = if collection.portrait { 2 } else { 1 };
+		// The encoders keep up with their canvases together: a picture in each
+		// format, timed at once, while the show goes out in both.
+		let encodes = going.canvases.len();
 		let formats = match encodes {
 			1 => String::new(),
 			_ => " in both formats".to_string(),
 		};
-		let canvas = going.canvas;
+		let canvas = going.canvases[0];
 		let send = smaller(canvas).map(|smaller| (format!("Send {} instead", named(smaller)), Fix::Send(smaller)));
 		let encoding = match &going.encoder {
-			Task::Done(Ok(encoding)) => Some(encoding.clone()),
+			Task::Done(Ok(encodings)) => Some(encodings.clone()),
 			_ => None,
 		};
 		checks.push(match &going.encoder {
@@ -676,7 +676,7 @@ impl Panels {
 				level: None,
 				fixes: Vec::new(),
 			},
-			Task::Done(Ok(encoding)) if encoding.keeps_up_all(canvas, encodes) => Check {
+			Task::Done(Ok(encodings)) if setup::keeps_up(&going.canvases, encodings) => Check {
 				mark: Outcome::Passed,
 				icon: Icon::Encoder,
 				name: "Encoder",
@@ -684,13 +684,18 @@ impl Panels {
 				level: None,
 				fixes: Vec::new(),
 			},
-			Task::Done(Ok(encoding)) => Check {
+			Task::Done(Ok(encodings)) => Check {
 				mark: Outcome::Failed,
 				icon: Icon::Encoder,
 				name: "Encoder",
 				said: format!(
 					"The encoder takes {} ms a frame, too slow for {}{formats}. Viewers would see it stutter.",
-					(encoding.frame * encodes).as_millis(),
+					encodings
+						.iter()
+						.map(|encoding| encoding.frame)
+						.max()
+						.unwrap_or_default()
+						.as_millis(),
 					named(canvas)
 				),
 				level: None,
@@ -700,9 +705,14 @@ impl Panels {
 				mark: Outcome::Failed,
 				icon: Icon::Encoder,
 				name: "Encoder",
-				said: format!("Nothing encodes {} here: {err}.", named(canvas)),
+				said: format!("The encoder failed: {err}."),
 				level: None,
-				fixes: send.clone().into_iter().collect(),
+				// A smaller picture frees no encode session, which a second
+				// picture is likelier to be refused for.
+				fixes: match encodes {
+					1 => send.clone().into_iter().collect(),
+					_ => Vec::new(),
+				},
 			},
 		});
 
@@ -734,8 +744,8 @@ impl Panels {
 				level: None,
 				fixes: Vec::new(),
 			},
-			(Some(Task::Done(Ok(carries))), Some(encoding)) => {
-				let needs = encoding.total_of(encodes);
+			(Some(Task::Done(Ok(carries))), Some(encodings)) => {
+				let needs = setup::total(encodings);
 				let sending = match encodes {
 					1 => "the program",
 					_ => "the program in both formats",
@@ -1150,7 +1160,6 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 	});
 	Measuring {
 		task: task.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the measurement: {err}")))),
-		encodes: 1,
 		_stop: Some(stop),
 	}
 }
