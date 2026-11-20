@@ -1,12 +1,10 @@
-# [M] Viewer controls
+# [S] Viewer priorities
 
 ## Goal
 
-A viewer watching a studio broadcast can switch off any source the
-composition marks toggleable (a facecam, a screen share), and stops fetching
-its broadcast. The composition's per-source priorities steer delivery, so
-under congestion the least important sources degrade first. The creator sets both per source in
-the studio.
+The `moq-studio --watch` prototype fetches each source of a composition at the
+priority the composition gives it, so under congestion the least important
+sources degrade first, as the creator ranked them in the studio.
 
 ## Plan
 
@@ -22,10 +20,26 @@ moq's native player,
 player's toggles would have no home). moq adds the toggles to that quest in
 its own tree.
 
-Map layer priority onto the subscription priorities moq-lite already has
-(`moq/doc/concept/moq-lite.md`), rather than a second mechanism. A toggled-off
-layer is unsubscribed, so it costs the viewer and the relay nothing. The
-studio keeps encoding it, so toggling it back on can reach its recent past.
-The composition carries `priority` and `toggle` on each source's entry
-(`rs/moq-scene/src/composition.rs`), not on each picture, so a source shown by
-several pictures is one subscription, on or off as a whole.
+[moq-dev/studio#218](https://github.com/moq-dev/studio/pull/218) landed the
+rest of this quest: the creator sets each published source's priority and
+whether viewers may switch it off (`[published.<name>]` in the scene file, and
+the inspector), the composition carries both on each source's entry, and
+`--watch` leaves out a source the viewer switched off, unsubscribing it.
+
+Map priority onto the subscription priorities moq-lite already has
+(`moq/doc/concept/moq-lite.md`), rather than a second mechanism. A source's
+`priority` is relative to the program's tracks: each of its tracks is fetched
+at hang's priority for its kind plus it, saturating
+(`Child::priority` in `rs/moq-scene/src/composition.rs`). Once the wait
+clears, advance the gitlink with `just upgrade-moq` in this PR unless a bump
+already has, carry the priority on `Source::Layer`, and pass it to the
+layer's video and audio decode consumers (`follow_video` and `follow_audio` in
+`rs/moq-scene/src/source.rs`). Prove it with a layer test that reads the
+priority off the publisher's aggregate subscription.
+
+## Waiting
+
+- moq-dev/moq: `moq_video::decode::Options` and `moq_audio::decode::Options`
+  take the subscription priority, which each consumer fixes today at hang's
+  `PRIORITY.video` and `PRIORITY.audio`. Check: both options carry a priority
+  on moq's `main`.

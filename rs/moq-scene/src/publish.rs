@@ -1578,13 +1578,13 @@ mod tests {
 					.sources
 					.insert(name.into(), Source::Color { color: Rgba(color) });
 			}
-			collection.published.insert("red".into());
+			collection.published.insert("red".into(), Default::default());
 			collection.validate().unwrap();
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;
 
-			let (published, follow) = tokio::sync::watch::channel(collection.published.clone());
+			let (published, follow) = tokio::sync::watch::channel(collection.published.keys().cloned().collect());
 			let (stop, stopped) = tokio::sync::watch::channel(());
 			let forward = Forward {
 				published: follow,

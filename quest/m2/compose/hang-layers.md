@@ -39,4 +39,4 @@ layer layout track and are replanned in moq's tree.
 
 ## Required
 
-- [Viewer controls](/quest/m2/compose/controls.md) - toggles and priorities the spec carries
+- [Viewer priorities](/quest/m2/compose/controls.md) - the priorities the spec carries, proven in the prototype

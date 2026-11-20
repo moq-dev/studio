@@ -11,7 +11,10 @@
 //! program reaches the media time it is stamped with, and its pictures'
 //! keyframes play from its `start` on that clock. A composition of another
 //! version, or one this player cannot place, is refused loudly, and the
-//! program plays alone.
+//! program plays alone. The viewer may switch off each source the
+//! composition lets them, which then has no layer, so nothing fetches it.
+//! Every source is fetched at hang's priorities for now, whatever
+//! priority the composition gives it.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -87,7 +90,7 @@ pub fn run(
 		browser: None,
 	});
 	let paths = Paths { program, at };
-	let collection = collection(None, CANVAS, &paths)?;
+	let collection = collection(None, CANVAS, &paths, &BTreeSet::new())?;
 	let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
 	compositor.set_previewing(false);
 	compositor.set_preview(Some(SCENE.into()));
@@ -106,6 +109,7 @@ pub fn run(
 		composition: None,
 		applied: false,
 		size: None,
+		off: BTreeSet::new(),
 		sources,
 		compositor,
 		monitor,
@@ -368,10 +372,17 @@ async fn instance(broadcast: moq_net::broadcast::Consumer, read: watch::Sender<R
 
 /// The collection `composition` drives on a canvas the program's `size` when
 /// it has none: the program at `paths`, and over it each picture's layer,
-/// with the program and each child's sound in the audio scene on program.
-/// Refused when it lists the program elsewhere, references a broadcast above
-/// the connection's root, or places a broadcast it does not list.
-fn collection(composition: Option<&Composition>, size: Canvas, paths: &Paths) -> anyhow::Result<Collection> {
+/// with the program and each child's sound in the audio scene on program,
+/// leaving out each child the viewer switched `off` that the composition
+/// lets them. Refused when it lists the program elsewhere, references a
+/// broadcast above the connection's root, or places a broadcast it does not
+/// list.
+fn collection(
+	composition: Option<&Composition>,
+	size: Canvas,
+	paths: &Paths,
+	off: &BTreeSet<String>,
+) -> anyhow::Result<Collection> {
 	let mut collection = Collection::new();
 	collection.canvas = match composition {
 		Some(composition) => Canvas {
@@ -398,7 +409,16 @@ fn collection(composition: Option<&Composition>, size: Canvas, paths: &Paths) ->
 			composition.program.broadcast.as_str(),
 			paths.program
 		);
+		let switched_off = |name: &str| {
+			composition
+				.sources
+				.get(name)
+				.is_some_and(|child| child.toggle && off.contains(name))
+		};
 		for (name, child) in &composition.sources {
+			if switched_off(name) {
+				continue;
+			}
 			let path = paths.at.try_resolve(&child.broadcast).with_context(|| {
 				format!(
 					"`{name}` is at `{}`, above the connection's root",
@@ -425,6 +445,9 @@ fn collection(composition: Option<&Composition>, size: Canvas, paths: &Paths) ->
 				"a picture shows `{}`, which the composition does not list",
 				picture.source
 			);
+			if switched_off(&picture.source) {
+				continue;
+			}
 			items.push(Item {
 				id: moq_scene::Id::fresh(),
 				source: layer(&picture.source),
@@ -461,6 +484,9 @@ struct Watch {
 	applied: bool,
 	/// The program's size, from its catalog.
 	size: Option<(u32, u32)>,
+	/// The sources the viewer switched off, by name, kept across
+	/// compositions so one that lists a source again leaves it off.
+	off: BTreeSet<String>,
 	sources: Sources,
 	compositor: Compositor,
 	monitor: Option<mix::Monitor>,
@@ -505,13 +531,13 @@ impl Watch {
 				None => CANVAS,
 			};
 			let composition = self.composition.as_ref().filter(|_| applies);
-			let mut collection = match collection(composition, size, &self.paths) {
+			let mut collection = match collection(composition, size, &self.paths, &self.off) {
 				Ok(collection) => collection,
 				Err(err) => {
 					tracing::error!(error = format!("{err:#}"), "playing the program alone");
 					self.read.send_modify(|read| read.refused = Some(format!("{err:#}")));
 					self.composition = None;
-					collection(None, size, &self.paths)?
+					collection(None, size, &self.paths, &self.off)?
 				}
 			};
 			self.applied = applies && self.composition.is_some();
@@ -548,6 +574,26 @@ impl Watch {
 
 		self.compositor.render(&self.collection, &self.sources, now)?;
 		Ok(())
+	}
+
+	/// Each source of the composition in effect the viewer may switch off,
+	/// by name, and whether it is on.
+	fn toggles(&self) -> Vec<(String, bool)> {
+		let composition = self.composition.as_ref().filter(|_| self.applied);
+		let sources = composition.into_iter().flat_map(|composition| &composition.sources);
+		sources
+			.filter(|(_, child)| child.toggle)
+			.map(|(name, _)| (name.clone(), !self.off.contains(name)))
+			.collect()
+	}
+
+	/// Switch the source called `name` on or off, from the next frame.
+	fn switch(&mut self, name: &str, on: bool) {
+		let changed = match on {
+			true => self.off.remove(name),
+			false => self.off.insert(name.to_string()),
+		};
+		self.synced &= !changed;
 	}
 
 	/// What the window says over the program, if anything.
@@ -600,6 +646,20 @@ impl eframe::App for Window {
 				egui::FontId::proportional(16.0),
 				egui::Color32::LIGHT_RED,
 			);
+		}
+		let toggles = watch.toggles();
+		if !toggles.is_empty() {
+			egui::Area::new(egui::Id::new("toggles"))
+				.anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+				.show(ui.ctx(), |ui| {
+					egui::Frame::popup(ui.style()).show(ui, |ui| {
+						for (name, mut on) in toggles {
+							if ui.add(crate::kit::Toggle::new(&mut on).label(&name)).changed() {
+								watch.switch(&name, on);
+							}
+						}
+					});
+				});
 		}
 		ui.ctx().request_repaint();
 	}
@@ -679,7 +739,7 @@ mod tests {
 	#[test]
 	fn a_composition_drives_the_collection() {
 		let composition = composition(Duration::ZERO);
-		let driven = collection(Some(&composition), CANVAS, &paths()).unwrap();
+		let driven = collection(Some(&composition), CANVAS, &paths(), &BTreeSet::new()).unwrap();
 		assert_eq!((driven.canvas.width, driven.canvas.height), (640, 360));
 		let items = &driven.scene(SCENE).unwrap().items;
 		let sources: Vec<&str> = items.iter().map(|item| item.source.as_str()).collect();
@@ -711,9 +771,26 @@ mod tests {
 			composition.sources["alice"].sound.as_ref()
 		);
 
-		let alone = collection(None, CANVAS, &paths()).unwrap();
+		let alone = collection(None, CANVAS, &paths(), &BTreeSet::new()).unwrap();
 		assert_eq!(alone.sources.len(), 1, "the program alone");
 		assert_eq!(alone.canvas, CANVAS);
+	}
+
+	/// A source the viewer switched off, which the composition lets them, has
+	/// no layer, picture, or sound, so nothing fetches it; one the
+	/// composition keeps on plays whatever the viewer asked.
+	#[test]
+	fn a_source_switched_off_is_not_fetched() {
+		let mut composition = composition(Duration::ZERO);
+		composition.sources.get_mut("alice").unwrap().toggle = true;
+		composition.pictures.push(Item::new("alice", Rect::fill(&CANVAS)));
+		let off = BTreeSet::from(["alice".to_string(), "program".to_string()]);
+		let driven = collection(Some(&composition), CANVAS, &paths(), &off).unwrap();
+		assert!(!driven.sources.contains_key("layer/alice"));
+		let items = &driven.scene(SCENE).unwrap().items;
+		let sources: Vec<&str> = items.iter().map(|item| item.source.as_str()).collect();
+		assert_eq!(sources, [PROGRAM, "layer/program", "layer/program"]);
+		assert_eq!(driven.heard(AudioScene::DEFAULT), BTreeSet::from([PROGRAM]));
 	}
 
 	/// A composition listing the program elsewhere, a broadcast above the
@@ -724,7 +801,10 @@ mod tests {
 		let refused = |edit: &dyn Fn(&mut Composition), why: &str| {
 			let mut composition = composition(Duration::ZERO);
 			edit(&mut composition);
-			let err = format!("{:#}", collection(Some(&composition), CANVAS, &paths()).unwrap_err());
+			let err = format!(
+				"{:#}",
+				collection(Some(&composition), CANVAS, &paths(), &BTreeSet::new()).unwrap_err()
+			);
 			assert!(err.contains(why), "{err}");
 		};
 		refused(
@@ -818,7 +898,7 @@ mod tests {
 			grants: None,
 			browser: None,
 		});
-		let collection = collection(None, CANVAS, &paths()).unwrap();
+		let collection = collection(None, CANVAS, &paths(), &BTreeSet::new()).unwrap();
 		let (read, _) = watch::channel(Read::default());
 		let mut watch = Watch {
 			url: String::new(),
@@ -830,6 +910,7 @@ mod tests {
 			composition: None,
 			applied: false,
 			size: None,
+			off: BTreeSet::new(),
 			sources,
 			monitor: None,
 			shown: None,
@@ -1075,7 +1156,11 @@ mod tests {
 				},
 			),
 		];
-		studio.published.insert("alice".into());
+		let viewers = moq_scene::Published {
+			priority: -5,
+			toggle: true,
+		};
+		studio.published.insert("alice".into(), viewers);
 		studio.validate().unwrap();
 		let launch = engine::Launch {
 			gpu,
@@ -1168,6 +1253,7 @@ mod tests {
 		let alice = &composition.sources["alice"];
 		assert_eq!(alice.broadcast.as_str(), "../guests/alice");
 		assert!(alice.instance.as_ref().is_none_or(|instance| !instance.is_minted()));
+		assert_eq!((alice.priority, alice.toggle), (-5, true), "as the studio publishes it");
 		assert_eq!(composition.pictures.len(), 1);
 
 		// A player of the composition, on the relay.
@@ -1188,7 +1274,7 @@ mod tests {
 			program: moq_net::Path::new("studio").unwrap(),
 			at: moq_net::Path::new("studio/composition").unwrap(),
 		};
-		let played = collection(Some(&composition), CANVAS, &paths).unwrap();
+		let played = collection(Some(&composition), CANVAS, &paths, &BTreeSet::new()).unwrap();
 		for driver in sources.sync(&played) {
 			engine::spawn(driver);
 		}
@@ -1208,6 +1294,12 @@ mod tests {
 		})
 		.await
 		.expect("the player reads the guest from the relay");
+
+		// Switched off, the guest's layer goes, and with it its subscription.
+		let off = BTreeSet::from(["alice".to_string()]);
+		let switched = collection(Some(&composition), CANVAS, &paths, &off).unwrap();
+		assert!(sources.sync(&switched).is_empty());
+		assert!(sources.get("layer/alice").is_none());
 
 		let stopping = engine.clone();
 		tokio::task::spawn_blocking(move || stopping.stop()).await.unwrap();

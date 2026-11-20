@@ -2935,7 +2935,7 @@ impl Draw<'_> {
 			None if self
 				.collection
 				.published
-				.contains(self.collection.capture(&item.source)) =>
+				.contains_key(self.collection.capture(&item.source)) =>
 			{
 				None
 			}
@@ -3585,7 +3585,7 @@ mod tests {
 		local(async {
 			let mut collection = collection();
 			collection.scenes[0].items.reverse();
-			collection.published.insert("blue".into());
+			collection.published.insert("blue".into(), Default::default());
 			collection.validate().unwrap();
 			let mut studio = Studio::new(collection).await;
 			studio.compositor.set_preview(Some("red".into()));
@@ -7324,7 +7324,9 @@ mod bench {
 				for published in [0, 1, 4] {
 					let mut collection = collection(sources, 0, sources);
 					let names = (sources - published..sources).map(|index| format!("color {index}"));
-					collection.published.extend(names);
+					collection
+						.published
+						.extend(names.map(|name| (name, Default::default())));
 					collection.validate().unwrap();
 					let scene = collection.scenes[0].name.clone();
 					let (frame, (passes, copies)) = cost(collection, &scene).await;

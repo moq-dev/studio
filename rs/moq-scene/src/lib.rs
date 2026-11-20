@@ -73,7 +73,8 @@ pub mod source;
 pub use clip::Clip;
 pub use collection::{
 	Arrangement, Audio, AudioScene, Background, Blend, Canvas, Collection, Crop, Direction, Ease, Filter, Id, Item,
-	KeepClear, Keyframe, Layer, MaskMode, Nested, Rect, Rgba, Scene, Shape, Size, Slot, Source, Transition, Video,
+	KeepClear, Keyframe, Layer, MaskMode, Nested, Published, Rect, Rgba, Scene, Shape, Size, Slot, Source, Transition,
+	Video,
 };
 pub use compositor::{Compositor, Detail, FORMAT, Output, Thumbnail};
 pub use edit::{Change, Draft, Edit, History};
