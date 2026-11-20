@@ -26,7 +26,9 @@ tip's breaks, as tried on #208:
   `Demand::wanted` became a bool.
 - `Stream::check_failover` (`rs/moq-studio/src/stream.rs`) stops inspecting
   the protocol version and its one-`--connect-version` rule goes: failover
-  relies on moq-net to resume across relays. The health grade (`health.rs`,
+  relies on moq-net to resume across relays. The rule's `--failover` doc
+  (`rs/moq-studio/src/main.rs`) and its two README lines (under the flags and
+  Stream settings' **Failover relay**) go with it. The health grade (`health.rs`,
   `engine/air.rs`, `setup.rs`, `fx.rs`) moves to the republished
   `hang::health`.
 

@@ -19,8 +19,16 @@ recorder or a restream, takes it (rejected: always landscape).
 [moq-dev/studio#200](https://github.com/moq-dev/studio/pull/200) built the
 portrait picture as its own broadcast, with the same audio scene as the
 program. The composition keeps placing landscape only and lists only the
-landscape renditions. Update [the dual-format check](/quest/m1/dual-format-check.md),
+landscape renditions. With the path gone, `moq_scene::PORTRAIT` and the rule
+refusing a published scene named `portrait` (`rs/moq-scene/src/format.rs`) go
+too. Update [the dual-format check](/quest/m1/dual-format-check.md),
 which watches `<broadcast>/portrait` on a phone, in this PR.
+
+`VideoConfig::preference` is a decode tier today: `@moq/watch` keeps only a
+catalog's highest preference before it selects (`preferredRenditions` in
+`js/watch/src/video/source.ts`), so a lower-ranked orientation stays reachable
+only once the orientation quest below filters by orientation before that
+tier.
 
 ## Waiting
 
