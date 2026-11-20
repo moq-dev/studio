@@ -23,15 +23,21 @@ egui keeps rendering through wgpu on the shared device, so the upstream fix is
 the real one. wgpu's suite has no native surface, so the fork's commit carries
 no test; the studio's repro is the evidence.
 
+Decided 2026-11-19 (maintainer, /quest-complete): ✅ wait on
+[gfx-rs/wgpu#10675](https://github.com/gfx-rs/wgpu/pull/10675), another
+author's PR that takes `command_indices` around the HAL surface configure and
+unconfigure and the queue's drop, the race the fork fixes (rejected: opening
+our own PR from `surface-configure-race`). It merged on
+2026-11-20 UTC. If the release that carries it still crashes the startup repro,
+open the fork's remaining change upstream then.
+
 Once a release carries it, drop the whole `[patch.crates-io]` block. If it
 lands only in a new wgpu major, bump egui and eframe to the release built on
 it in the same PR.
 
 ## Waiting
 
-- Maintainer: open the gfx-rs/wgpu PR from `moq-dev/wgpu`'s
-  `surface-configure-race` branch, rebased onto wgpu's trunk. wgpu's
-  CONTRIBUTING requires the human submitter to write the PR description, so no
-  agent posts there. Done when the PR is open.
-- gfx-rs/wgpu: merge that PR and publish a release carrying it. Check the
-  wgpu-core changelog on crates.io.
+- gfx-rs/wgpu: publish a release carrying
+  [gfx-rs/wgpu#10675](https://github.com/gfx-rs/wgpu/pull/10675), merged on
+  trunk 2026-11-20. Check: the wgpu-core changelog on crates.io lists it in a
+  release.
