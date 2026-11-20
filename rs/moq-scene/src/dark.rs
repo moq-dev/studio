@@ -4,9 +4,10 @@
 //!
 //! A camera that stops delivering already reads as stalled, but a display or
 //! window that stands still is no fault, so a capture is judged by what it
-//! shows. A [`Probe`] reads the newest picture at most every [`INTERVAL`],
-//! on the GPU: a compute shader reduces it to a small grid of tiles, and only
-//! the grid comes back, a frame or so later, to be judged on the CPU.
+//! shows. A [`Probe`] reads the newest picture at most every
+//! [`INTERVAL`](crate::readback::INTERVAL), on the GPU: a compute shader
+//! reduces it to a small grid of tiles, and only the grid comes back, a
+//! frame or so later, to be judged on the CPU.
 //!
 //! Until a capture has been dark for [`DARK`], the probe holds the last
 //! picture it judged not dark, for the compositor to draw in its place, so a
@@ -14,18 +15,12 @@
 //! After that the capture shows as it is, so a stale picture never passes for
 //! live.
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kio::clock::Instant;
 
 use crate::effect::{Effects, Picture};
-
-/// How often a probe reads a capture's picture, at most, and only when one
-/// arrives: a camera or window that stops delivering is not read, though a
-/// Linux screen capture repeats its last picture while it stands still, and
-/// is read each time.
-pub const INTERVAL: Duration = Duration::from_millis(250);
+use crate::readback::Readback;
 
 /// How long a capture's picture stays dark before it counts as gone dark,
 /// rather than a moment of black the last good picture covers.
@@ -35,8 +30,8 @@ pub const DARK: Duration = Duration::from_secs(3);
 /// texels a side at 1080p.
 const TILES: (u32, u32) = (64, 36);
 
-/// The bytes of the reduced grid, four a tile.
-const BYTES: u64 = (TILES.0 * TILES.1 * 4) as u64;
+/// How many tiles the grid has.
+const COUNT: u32 = TILES.0 * TILES.1;
 
 /// The brightest a dark picture's brightest channel gets, out of 255:
 /// a camera's noise in the dark stays under it, and any lit pixel passes it.
@@ -100,7 +95,7 @@ impl Prober {
 					ty: wgpu::BindingType::Buffer {
 						ty: wgpu::BufferBindingType::Storage { read_only: false },
 						has_dynamic_offset: false,
-						min_binding_size: wgpu::BufferSize::new(BYTES),
+						min_binding_size: wgpu::BufferSize::new(COUNT as u64 * 4),
 					},
 					count: None,
 				},
@@ -123,30 +118,17 @@ impl Prober {
 	}
 }
 
-/// A read under way: when its picture was taken, and the buffer's mapping
-/// once the GPU is done.
-struct Reading {
-	at: Instant,
-	mapped: Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
-	/// Whether the capture stopped being live since, so what it read is
-	/// from before and judged neither dark nor good.
-	stale: bool,
-}
-
 /// Watches one capture's pictures for going dark.
 pub(crate) struct Probe {
 	device: wgpu::Device,
-	queue: wgpu::Queue,
-	tiles: wgpu::Buffer,
-	readback: wgpu::Buffer,
+	/// The grid read back, a read under way dropped once the capture stops
+	/// being live, as it is from before and judged neither dark nor good.
+	readback: Readback<()>,
 	/// A copy of the picture last read, since the capture's own texture is
 	/// drawn over by its next picture before the read comes back.
 	read: Option<wgpu::Texture>,
 	/// The newest picture judged not dark, bound to draw.
 	good: Option<(wgpu::Texture, Picture)>,
-	reading: Option<Reading>,
-	/// When the last read was taken.
-	last: Option<Instant>,
 	/// Whether a picture arrived since the last read.
 	changed: bool,
 	/// When the first of the dark pictures read since the last good one was
@@ -159,27 +141,11 @@ pub(crate) struct Probe {
 
 impl Probe {
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-		let tiles = device.create_buffer(&wgpu::BufferDescriptor {
-			label: Some("moq-scene dark tiles"),
-			size: BYTES,
-			usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-			mapped_at_creation: false,
-		});
-		let readback = device.create_buffer(&wgpu::BufferDescriptor {
-			label: Some("moq-scene dark tiles"),
-			size: BYTES,
-			usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-			mapped_at_creation: false,
-		});
 		Self {
 			device: device.clone(),
-			queue: queue.clone(),
-			tiles,
-			readback,
+			readback: Readback::new(device, queue, COUNT),
 			read: None,
 			good: None,
-			reading: None,
-			last: None,
 			changed: true,
 			dark: None,
 			feed: None,
@@ -202,9 +168,7 @@ impl Probe {
 	fn forget(&mut self) {
 		self.dark = None;
 		self.good = None;
-		if let Some(reading) = &mut self.reading {
-			reading.stale = true;
-		}
+		self.readback.discard();
 	}
 
 	/// Note that the capture's texture holds a new picture.
@@ -214,7 +178,10 @@ impl Probe {
 
 	/// Judge the read that came back, if one did, and read `picture`, the
 	/// capture's newest, if it is new and the last read was at least
-	/// [`INTERVAL`] ago. `picture` needs `COPY_SRC`.
+	/// [`INTERVAL`](crate::readback::INTERVAL) ago. `picture` needs
+	/// `COPY_SRC`. A camera or window that stops delivering is not read,
+	/// though a Linux screen capture repeats its last picture while it stands
+	/// still, and is read each time.
 	///
 	/// A capture that is not `live`, such as one reopening, is not dark, and
 	/// forgets its last good picture and what it is reading, so nothing from
@@ -226,10 +193,7 @@ impl Probe {
 			self.forget();
 			return;
 		}
-		let due = self
-			.last
-			.is_none_or(|last| now.saturating_duration_since(last) >= INTERVAL);
-		if self.reading.is_none() && self.changed && due {
+		if self.changed && self.readback.due(now) {
 			self.start(prober, picture, now);
 		}
 	}
@@ -275,7 +239,7 @@ impl Probe {
 				},
 				wgpu::BindGroupEntry {
 					binding: 1,
-					resource: self.tiles.as_entire_binding(),
+					resource: self.readback.binding(),
 				},
 			],
 		});
@@ -290,46 +254,18 @@ impl Probe {
 			pass.set_bind_group(0, &bind, &[]);
 			pass.dispatch_workgroups(TILES.0, TILES.1, 1);
 		}
-		encoder.copy_buffer_to_buffer(&self.tiles, 0, &self.readback, 0, BYTES);
-
-		self.queue.submit([encoder.finish()]);
-		let mapped = Arc::new(Mutex::new(None));
-		let done = mapped.clone();
-		// Called from a later submit or poll, once the GPU is done.
-		self.readback.map_async(wgpu::MapMode::Read, .., move |result| {
-			*done.lock().unwrap() = Some(result);
-		});
+		self.readback.submit(encoder, COUNT, now, ());
 		self.read = Some(read);
-		self.reading = Some(Reading {
-			at: now,
-			mapped,
-			stale: false,
-		});
-		self.last = Some(now);
 		self.changed = false;
 	}
 
 	/// Judge the read under way, if it came back: a dark picture starts or
 	/// continues the dark, and any other ends it and becomes the good one.
 	fn judge(&mut self, effects: &Effects) {
-		let Some(reading) = &self.reading else { return };
-		let Some(mapped) = reading.mapped.lock().unwrap().take() else {
-			return;
-		};
-		let (at, stale) = (reading.at, reading.stale);
-		self.reading = None;
-		let dark = mapped.map_err(|err| err.to_string()).and_then(|()| {
-			let dark = match self.readback.slice(..).get_mapped_range() {
-				Ok(view) => Ok(judge(&view)),
-				Err(err) => Err(format!("{err:?}")),
-			};
-			self.readback.unmap();
-			dark
-		});
-		let dark = match dark {
-			Ok(_) if stale => return,
-			Ok(dark) => dark,
-			Err(err) => {
+		let (dark, at) = match self.readback.finish() {
+			None => return,
+			Some(Ok(read)) => (judge(read.tiles.as_flattened()), read.at),
+			Some(Err(err)) => {
 				tracing::warn!(%err, "cannot read a capture back to see if it went dark");
 				return;
 			}
@@ -349,6 +285,7 @@ impl Probe {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::readback::INTERVAL;
 
 	/// `tiles` tiles of one color, its brightest channel as given.
 	fn plain(rgb: [u8; 3], brightest: u8) -> Vec<u8> {
@@ -485,10 +422,10 @@ mod tests {
 	) {
 		probe.changed();
 		probe.step(prober, effects, &capture.texture, true, at);
-		assert!(probe.reading.is_some(), "a read started");
+		assert!(probe.readback.busy(), "a read started");
 		device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 		probe.step(prober, effects, &capture.texture, true, at);
-		assert!(probe.reading.is_none(), "the read came back");
+		assert!(!probe.readback.busy(), "the read came back");
 	}
 
 	/// The shader reads every texel: one line of light across a black 1080p
@@ -551,7 +488,7 @@ mod tests {
 
 		// Not read again without a new picture.
 		probe.step(&prober, &effects, &capture.texture, true, at(dark + INTERVAL / 2));
-		assert!(probe.reading.is_none());
+		assert!(!probe.readback.busy());
 
 		// A capture that stops being live, such as one reopening, is not dark,
 		// and forgets its last good picture: reopened dark, it holds nothing
@@ -574,11 +511,11 @@ mod tests {
 		capture.show([200, 40, 40], None);
 		probe.changed();
 		probe.step(&prober, &effects, &capture.texture, true, at(before));
-		assert!(probe.reading.is_some(), "a read started");
+		assert!(probe.readback.busy(), "a read started");
 		probe.step(&prober, &effects, &capture.texture, false, at(before));
 		device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 		probe.step(&prober, &effects, &capture.texture, true, at(before));
-		assert!(probe.reading.is_none(), "the read came back");
+		assert!(!probe.readback.busy(), "the read came back");
 		let after = before + INTERVAL;
 		capture.show([0, 0, 0], None);
 		read(&mut probe, &prober, &effects, &device, &capture, at(after));
@@ -618,14 +555,14 @@ mod tests {
 		// Live before its first picture, the new feed's layer still has the
 		// one from before, which is not read for it.
 		probe.step(&prober, &effects, &capture.texture, true, at(INTERVAL * 2));
-		assert!(probe.reading.is_none(), "the picture from before is not read");
+		assert!(!probe.readback.busy(), "the picture from before is not read");
 
 		// A read under way as the feed starts again is from before.
 		let before = INTERVAL * 2;
 		capture.show([200, 40, 40], None);
 		probe.changed();
 		probe.step(&prober, &effects, &capture.texture, true, at(before));
-		assert!(probe.reading.is_some(), "a read started");
+		assert!(probe.readback.busy(), "a read started");
 		probe.follow(3);
 		device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 		let after = before + INTERVAL;

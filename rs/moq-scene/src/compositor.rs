@@ -1437,7 +1437,7 @@ impl Compositor {
 	/// good picture in its place while it holds one over the dark. A picture
 	/// cut out of its background is never held, since the good one is not.
 	/// A picture is drawn before it is judged, so black shows until the next
-	/// read, up to [`INTERVAL`](crate::dark::INTERVAL) and its readback:
+	/// read, up to [`INTERVAL`](crate::readback::INTERVAL) and its readback:
 	/// judging each one first would hold every capture's picture back by a
 	/// readback, or read every picture, and the maintainer took this bounded
 	/// flash over either on moq-dev/studio#192.
@@ -5478,7 +5478,7 @@ mod tests {
 
 		read(&mut compositor, &mut layer, RED, at(Duration::ZERO), Background::Keep);
 		assert!(!layer.holding);
-		let dark = crate::dark::INTERVAL;
+		let dark = crate::readback::INTERVAL;
 		read(&mut compositor, &mut layer, BLACK, at(dark), Background::Keep);
 		assert!(layer.holding, "the last good picture is drawn");
 		assert_eq!(layer.probe.as_ref().unwrap().dark(at(dark)), None);
