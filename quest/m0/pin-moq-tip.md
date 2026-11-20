@@ -24,13 +24,17 @@ tip's breaks, as tried on #208:
   `ladder::Joins` is rewritten on `Demand::poll_refresh`.
 - Route `Preference` became `Priority`, `Key::to_public` became `public`, and
   `Demand::wanted` became a bool.
-- `Stream::check_failover` (`rs/moq-studio/src/stream.rs`) moves to moq's
-  public `lite::Version` instance query, and the health grade
-  (`health.rs`, `engine/air.rs`, `setup.rs`, `fx.rs`) to the republished
+- `Stream::check_failover` (`rs/moq-studio/src/stream.rs`) stops inspecting
+  the protocol version and its one-`--connect-version` rule goes: failover
+  relies on moq-net to resume across relays. The health grade (`health.rs`,
+  `engine/air.rs`, `setup.rs`, `fx.rs`) moves to the republished
   `hang::health`.
 
-Matching the version string instead of the instance query is rejected: it
-hard-codes `moq-lite-07-wip`.
+Decided 2026-11-20 (maintainer, /quest-plan): ✅ the studio never inspects
+the negotiated moq-net version; moq-net handles failover transparently, and if
+a failover relay then restarts viewers rather than resuming them, moq-net's API
+changes in a moq quest of its own (rejected: a public `lite::Version` instance
+query; a session capability query; matching the version string).
 
 ## Waiting
 
@@ -38,8 +42,3 @@ hard-codes `moq-lite-07-wip`.
   [Client health in use](https://github.com/moq-dev/moq/blob/main/quest/m3/stats/health-consumers.md)
   plans ([moq-dev/moq#8956](https://github.com/moq-dev/moq/pull/8956) made it
   private). Check: `rs/hang/src/lib.rs` on moq's `main` exports `health`.
-- moq-dev/moq: a public way to ask whether a `lite::Version` carries
-  instances ([moq-dev/moq#8931](https://github.com/moq-dev/moq/pull/8931) made
-  `has_instance` crate-private). Its quest is pending planning in moq's m1, so
-  it does not gate moq's 0.22.0 cut. Check: moq's `main` has a public query
-  `Stream::check_failover` can call.
