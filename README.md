@@ -420,8 +420,11 @@ window, so there the desktop picks where it opens.
   canvas (timed as [setup](#first-launch) times it), and whether the
   connection to the first relay switched on carries the program (measured as
   setup measures it; published scenes and sources share what is left). A show
-  going out in both formats needs about twice of each: two frames' encoding in
-  a frame's time, and two videos' bitrate. A failed check is one sentence and its fix,
+  going out in both formats times both encoders at once, each its own
+  picture, so the encoder check passes when each keeps up beside the other, and
+  needs two videos' bitrate. If a second encoder cannot open, such as a GPU
+  encoder at its session limit, the encoder check fails and says why. A failed
+  check is one sentence and its fix,
   such as **Send 720p instead**, which changes the canvas, or **Check again**.
 - **GO LIVE TO** the number of destinations switched on. A failed check never
   stops you; only having none switched on does.
