@@ -5,17 +5,18 @@
 //! sources below it alive: the [`Provider`] its cameras, and each [`Camera`]
 //! its device, its streams, and their [`Stream`] sources.
 
+use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueGlobalPriority, DispatchTime, GlobalQueueIdentifier};
-use moq_studio_camera::{APP, CONFIG, Config, READING};
+use moq_studio_camera::{APP, CONFIG, Config, READING, TEAM};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send};
-use objc2_core_foundation::CFRunLoop;
+use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFRunLoop, CFString, CFType};
 use objc2_core_media::{CMClock, CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionCreate};
 use objc2_core_media_io::{
 	CMIOExtensionClient, CMIOExtensionDevice, CMIOExtensionDeviceProperties, CMIOExtensionDeviceSource,
@@ -85,6 +86,47 @@ unsafe extern "C" {
 /// system starts the extension with nowhere for stderr to go.
 fn log(message: &str) {
 	unsafe { NSLog(ns_string!("%@"), &*NSString::from_str(message)) };
+}
+
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+	static kSecGuestAttributePid: &'static CFString;
+	fn SecCodeCopyGuestWithAttributes(
+		host: *const c_void,
+		attributes: &CFDictionary,
+		flags: u32,
+		guest: *mut *const c_void,
+	) -> i32;
+	fn SecRequirementCreateWithString(text: &CFString, flags: u32, requirement: *mut *const c_void) -> i32;
+	fn SecCodeCheckValidity(code: *const c_void, flags: u32, requirement: *const c_void) -> i32;
+}
+
+/// Whether the process `pid` is the studio: the app, signed by its team
+/// with a certificate Apple issued. Its signing identifier alone proves
+/// nothing, since anyone can sign anything with it.
+fn studio(pid: i32) -> bool {
+	/// Take over a reference a Security create or copy function handed out.
+	fn owned(object: *const c_void) -> Option<CFRetained<CFType>> {
+		NonNull::new(object.cast_mut().cast::<CFType>()).map(|object| unsafe { CFRetained::from_raw(object) })
+	}
+
+	let requirement = CFString::from_str(&format!(
+		"identifier \"{APP}\" and anchor apple generic and certificate leaf[subject.OU] = \"{TEAM}\""
+	));
+	let pid = CFNumber::new_i32(pid);
+	let attributes = CFDictionary::<CFString, CFNumber>::from_slices(&[unsafe { kSecGuestAttributePid }], &[&pid]);
+	let mut code = std::ptr::null();
+	let mut compiled = std::ptr::null();
+	let status = unsafe { SecCodeCopyGuestWithAttributes(std::ptr::null(), attributes.as_opaque(), 0, &mut code) };
+	let code = owned(code).filter(|_| status == 0);
+	let status = unsafe { SecRequirementCreateWithString(&requirement, 0, &mut compiled) };
+	let compiled = owned(compiled).filter(|_| status == 0);
+	let (Some(code), Some(compiled)) = (code, compiled) else {
+		return false;
+	};
+	let code: *const CFType = &*code;
+	let compiled: *const CFType = &*compiled;
+	unsafe { SecCodeCheckValidity(code.cast(), 0, compiled.cast()) == 0 }
 }
 
 /// An error for a client, saying `message`.
@@ -299,8 +341,8 @@ struct CameraIvars {
 	source: OnceLock<(Retained<CMIOExtensionStream>, Retained<Stream>)>,
 	/// What the studio feeds.
 	sink: OnceLock<(Retained<CMIOExtensionStream>, Retained<Stream>)>,
-	/// Whether an app reads the source stream.
-	reading: AtomicBool,
+	/// How many apps read the source stream.
+	readers: AtomicUsize,
 }
 
 define_class!(
@@ -400,7 +442,7 @@ impl Camera {
 			device: OnceLock::new(),
 			source: OnceLock::new(),
 			sink: OnceLock::new(),
-			reading: AtomicBool::new(false),
+			readers: AtomicUsize::new(0),
 		});
 		let this: Retained<Self> = unsafe { msg_send![super(this), init] };
 		let device = unsafe {
@@ -431,19 +473,27 @@ impl Camera {
 		Ok(this)
 	}
 
-	fn reading_value(&self) -> Retained<NSString> {
-		NSString::from_str(if self.ivars().reading.load(Ordering::Relaxed) {
-			"1"
-		} else {
-			"0"
-		})
+	/// Whether an app reads the camera.
+	fn reading(&self) -> bool {
+		self.ivars().readers.load(Ordering::Relaxed) > 0
 	}
 
-	/// Say whether an app reads the camera, so the studio copies pictures
-	/// only then.
-	fn set_reading(&self, reading: bool) {
-		self.ivars().reading.store(reading, Ordering::Relaxed);
-		let Some(device) = self.ivars().device.get() else {
+	fn reading_value(&self) -> Retained<NSString> {
+		NSString::from_str(if self.reading() { "1" } else { "0" })
+	}
+
+	/// Count an app starting to read the camera, or stopping, and say so
+	/// when the first starts or the last stops, so the studio copies
+	/// pictures only while any app reads.
+	fn read(&self, starts: bool) {
+		let readers = &self.ivars().readers;
+		let changed = match starts {
+			true => readers.fetch_add(1, Ordering::Relaxed) == 0,
+			false => readers
+				.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_sub(1))
+				.is_ok_and(|count| count == 1),
+		};
+		let Some(device) = self.ivars().device.get().filter(|_| changed) else {
 			return;
 		};
 		let key = NSString::from_str(&READING.name());
@@ -582,7 +632,7 @@ define_class!(
 			}
 			// Only the studio feeds a camera, so no other app shows its
 			// pictures under the studio's name.
-			let studio = unsafe { client.signingID() }.is_some_and(|id| id.to_string() == APP);
+			let studio = studio(unsafe { client.pid() });
 			if studio {
 				*self.ivars().client.lock().unwrap() = Some(client.retain());
 			} else {
@@ -603,7 +653,7 @@ define_class!(
 				}
 				self.consume();
 			} else {
-				camera.set_reading(true);
+				camera.read(true);
 			}
 			Bool::YES
 		}
@@ -622,7 +672,7 @@ define_class!(
 					provider.later(move |provider| provider.starved(&camera));
 				}
 			} else {
-				camera.set_reading(false);
+				camera.read(false);
 			}
 			Bool::YES
 		}
@@ -698,7 +748,7 @@ impl Stream {
 			return;
 		};
 		let now = now();
-		if camera.ivars().reading.load(Ordering::Relaxed) {
+		if camera.reading() {
 			unsafe { source.sendSampleBuffer_discontinuity_hostTimeInNanoseconds(picture, discontinuity, now) };
 		}
 		let output = unsafe {

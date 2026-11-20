@@ -1417,6 +1417,10 @@ impl Panels {
 			),
 		};
 		let help = match &camera {
+			Some(camera) if camera.backend.is_empty() => match camera.error {
+				Some(_) => "It could not open.".to_string(),
+				None => "Opening the camera...".to_string(),
+			},
 			Some(camera) => format!(
 				"{} at {}x{}, {} fps. {}; {} frames sent, {} dropped.",
 				camera.backend,

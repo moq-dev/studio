@@ -204,16 +204,6 @@ impl State {
 		self.cameras.values().map(crate::vcam::Camera::status)
 	}
 
-	/// The capture ids of the studio's own virtual cameras, which adding a
-	/// source leaves out so none feeds what it shows back into itself: each
-	/// one on, and those listed even while off.
-	pub fn own_cameras(&self) -> Vec<String> {
-		self.cameras()
-			.map(|camera| camera.id)
-			.chain(crate::vcam::LISTED.iter().map(|id| id.to_string()))
-			.collect()
-	}
-
 	pub fn collection(&self) -> &Collection {
 		&self.collection
 	}
@@ -1797,8 +1787,9 @@ impl Engine {
 
 	/// Turn the program's virtual camera, or the published scene `scene`'s,
 	/// on or off. Turning it on fails, saying why, when the scene is not
-	/// published or this machine has no way to publish a camera. A scene's
-	/// camera turns off once the scene is no longer published under its name.
+	/// published; the camera's status says why when this machine has no way
+	/// to publish one. A scene's camera turns off once the scene is no longer
+	/// published under its name.
 	pub fn set_camera(&self, scene: Option<&str>, on: bool) -> anyhow::Result<()> {
 		let canvas = {
 			let state = self.state.lock().unwrap();
@@ -6890,7 +6881,19 @@ mod tests {
 			(None, "pipewire:moq-studio"),
 			(Some("tall"), "pipewire:moq-studio-tall"),
 		] {
-			let status = engine.state.lock().unwrap().camera(scene).expect("a camera");
+			// The `vcam` thread opens the backend.
+			let status = kio::clock::timeout(TIMEOUT, async {
+				loop {
+					let status = engine.state.lock().unwrap().camera(scene).expect("a camera");
+					if !status.backend.is_empty() || status.error.is_some() {
+						return status;
+					}
+					kio::clock::sleep(Duration::from_millis(100)).await;
+				}
+			})
+			.await
+			.expect("the camera opens");
+			assert_eq!(status.error, None);
 			assert_eq!(status.backend, "PipeWire");
 			assert_eq!(status.id, id);
 			assert!(!status.reading, "nothing reads the camera yet");

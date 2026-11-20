@@ -26,13 +26,6 @@ mod pipewire;
 #[cfg(target_os = "linux")]
 mod v4l2;
 
-/// The capture ids of the studio's cameras listed even while off: on macOS
-/// the camera extension always lists the program's, so apps keep it.
-#[cfg(target_os = "macos")]
-pub const LISTED: &[&str] = &[moq_studio_camera::PROGRAM];
-#[cfg(not(target_os = "macos"))]
-pub const LISTED: &[&str] = &[];
-
 /// The program, or a published scene, as a camera other apps can open.
 ///
 /// Dropping it removes the camera.
@@ -107,7 +100,8 @@ struct Opened {
 
 /// How the camera is doing, for the Output panel.
 pub struct Status {
-	/// Where the camera lives, such as a PipeWire node or a `/dev/videoN` path.
+	/// Where the camera lives, such as a PipeWire node or a `/dev/videoN`
+	/// path; empty until the backend opens.
 	pub backend: String,
 	/// The id the Devices panel would list the camera by, so it can leave it out.
 	pub id: String,
@@ -131,8 +125,11 @@ impl Camera {
 	/// Publish the program, or the published scene called `scene`, drawn on
 	/// `device` at `canvas`, as a camera named after it.
 	///
-	/// Fails, naming why each backend refused, when this machine has no way to
-	/// publish one.
+	/// The `vcam` thread opens the backend, since one may wait seconds on the
+	/// system, as macOS installing the camera extension does, and this runs
+	/// on the UI's thread. Until it has, [`Status::backend`] is empty; a
+	/// machine with no way to publish a camera reports why each backend
+	/// refused in [`Status::error`].
 	pub fn open(
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
@@ -142,14 +139,16 @@ impl Camera {
 		let readback = Readback::new(device, queue, size(canvas))?;
 		let shared = Arc::new(Shared::default());
 		let scene = scene.map(str::to_string);
-		let sink = open(scene.as_deref(), canvas, &shared)?;
 
 		let (work, pending) = mpsc::channel();
 		let worker = {
 			let shared = shared.clone();
 			std::thread::Builder::new()
 				.name("vcam".into())
-				.spawn(move || run(pending, sink, scene.as_deref(), &shared))
+				.spawn(move || match open(scene.as_deref(), canvas, &shared) {
+					Ok(sink) => run(pending, sink, scene.as_deref(), &shared),
+					Err(err) => shared.fail(format!("{err:#}")),
+				})
 				.context("cannot start the virtual camera thread")?
 		};
 		Ok(Self {

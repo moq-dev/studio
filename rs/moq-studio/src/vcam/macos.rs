@@ -58,8 +58,11 @@ const APPEAR: Duration = Duration::from_secs(10);
 /// Where the user allows the extension.
 const ALLOW: &str = "System Settings > General > Login Items & Extensions > Camera Extensions";
 
-/// Whether this run of the app has activated the extension.
-static ACTIVATED: Mutex<bool> = Mutex::new(false);
+/// Whether this run of the app has activated the extension. Held while a
+/// camera opens, from asking for it until feeding it: the extension keeps
+/// only the camera asked for last until the studio feeds it, so two cameras
+/// opening at once, as after a frame rate change, would remove each other's.
+static OPENING: Mutex<bool> = Mutex::new(false);
 
 /// A camera of the extension, fed from the `vcam` thread.
 pub struct Extension {
@@ -98,7 +101,11 @@ impl Extension {
 		framerate: u32,
 		shared: Arc<Shared>,
 	) -> anyhow::Result<(Self, String)> {
-		activate()?;
+		let mut activated = OPENING.lock().unwrap();
+		if !*activated {
+			activate()?;
+			*activated = true;
+		}
 		let config = Config {
 			scene: scene.map(str::to_string),
 			width: size.width,
@@ -315,15 +322,11 @@ fn read(device: CMIOObjectID, shared: &Shared) {
 	}
 }
 
-/// Ask the system to activate the extension in the app bundle, once a run,
-/// which installs it or the update's, replacing the old one. The extension
+/// Ask the system to activate the extension in the app bundle, which installs
+/// it or the update's, replacing the old one. The extension
 /// takes pictures only from the app, so a build run from outside it has no
 /// camera.
 fn activate() -> anyhow::Result<()> {
-	let mut activated = ACTIVATED.lock().unwrap();
-	if *activated {
-		return Ok(());
-	}
 	let bundle = NSBundle::mainBundle().bundleIdentifier();
 	anyhow::ensure!(
 		bundle.is_some_and(|bundle| bundle.to_string() == moq_studio_camera::APP),
@@ -344,10 +347,7 @@ fn activate() -> anyhow::Result<()> {
 	std::mem::forget(delegate);
 
 	match rx.recv_timeout(ACTIVATE) {
-		Ok(Activated::Done) => {
-			*activated = true;
-			Ok(())
-		}
+		Ok(Activated::Done) => Ok(()),
 		Ok(Activated::Approval) => {
 			anyhow::bail!("allow the kixel.live Studio camera in {ALLOW}, then turn it on again")
 		}

@@ -18,6 +18,11 @@ use std::str::FromStr;
 /// The app's bundle identifier, the only client allowed to feed a camera.
 pub const APP: &str = "live.kixel.studio";
 
+/// The team that signs the app and the extension, which names the extension's
+/// Mach service and app group (`packaging/macos/Camera.plist` and
+/// `camera.entitlements.plist`).
+pub const TEAM: &str = "D7D5SDDB5Z";
+
 /// The extension's bundle identifier, which the app asks the system to
 /// activate.
 pub const EXTENSION: &str = "live.kixel.studio.camera";
@@ -250,6 +255,16 @@ mod tests {
 				id.chars()
 					.all(|c| c == '-' || c.is_ascii_hexdigit() && !c.is_ascii_lowercase())
 			);
+		}
+	}
+
+	#[test]
+	fn the_bundle_names_the_same_team() {
+		let service = format!("<string>{TEAM}.{EXTENSION}</string>");
+		for file in ["Camera.plist", "camera.entitlements.plist"] {
+			let path = format!("{}/../../packaging/macos/{file}", env!("CARGO_MANIFEST_DIR"));
+			let plist = std::fs::read_to_string(&path).unwrap();
+			assert!(plist.contains(&service), "{file} does not name {service}");
 		}
 	}
 
