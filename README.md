@@ -952,9 +952,9 @@ and nothing from a password field. On Linux, except for a page copied on the
 GPU through an X display, the text goes as plain text that the page's own copy
 handlers cannot change; on macOS the page copies as it would in a browser.
 
-On Linux the sandbox needs unprivileged user namespaces, and the studio run as
-a user other than root. Where the system refuses them, browser sources fail
-saying so rather than render a page unsandboxed. Ubuntu refuses them, since
+On Linux the sandbox needs unprivileged user namespaces, and a studio run by
+a user other than root. Where either is missing, browser sources fail saying
+so rather than render a page unsandboxed. Ubuntu refuses them, since
 23.10, to any program an AppArmor profile does not allow; as root, allow the
 studio, naming the `moq-studio` you run:
 
