@@ -1197,10 +1197,10 @@ impl Drop for Joined {
 
 impl Engine {
 	/// Open the `loaded` collection and history on `launch.gpu`, start the
-	/// program clock, and save both to `autosave`'s files as they change,
-	/// starting at once. Recordings go into `launch.recordings`. Guests join
-	/// once the engine [joins](Self::join) a room. Nothing is published until
-	/// the studio [goes live](Self::go_live).
+	/// program clock and the collection's sources, and save both to
+	/// `autosave`'s files as they change, starting at once. Recordings go into
+	/// `launch.recordings`. Guests join once the engine [joins](Self::join) a
+	/// room. Nothing is published until the studio [goes live](Self::go_live).
 	///
 	/// Call inside the tokio runtime that serves the relay connections.
 	pub async fn start(launch: Launch, autosave: Autosave, loaded: autosave::Loaded) -> anyhow::Result<Arc<Self>> {
@@ -1275,7 +1275,7 @@ impl Engine {
 				sources,
 				compositor,
 				cameras: BTreeMap::new(),
-				stale: true,
+				stale: false,
 				edits: autosave.edits(),
 				renamed: Vec::new(),
 				#[cfg(test)]
@@ -1323,13 +1323,15 @@ impl Engine {
 		// publication alive beside a retry's.
 		let starting = Starting(Some(engine.clone()));
 		// The audio clock first, so the bus keeps up with the program clock by
-		// the time the program starts the sources, whose sound otherwise waits
-		// for it.
+		// the time the sources start, whose sound otherwise waits for it.
 		let mix = engine.clone();
 		let config = bus.config().clone();
 		let rate = config.sample_rate;
 		let thread = clocked("audio".into(), async move || mix.run_audio(start, config, mixer).await)?;
 		engine.threads.lock().unwrap().push(thread);
+		// Before the program thread, so whoever holds the engine finds every
+		// source running, however late that thread first runs.
+		engine.sync(&mut engine.state.lock().unwrap());
 		let program = engine.clone();
 		let thread = clocked("program".into(), async move || {
 			program.run_program(start, epoch, recording).await
@@ -1584,6 +1586,20 @@ impl Engine {
 		monitor
 			.as_ref()
 			.map(|monitor| (monitor.name().to_string(), monitor.failed()))
+	}
+
+	/// Run exactly the sources `state`'s collection has, each on a thread of
+	/// its own, and point the audio at its audio scenes.
+	fn sync(&self, state: &mut State) {
+		let drivers = state.sources.sync(&state.collection);
+		self.recorder.set_sources(&state.collection);
+		if !drivers.is_empty() {
+			let mut running = self.running.lock().unwrap();
+			// Forgets the threads that have ended.
+			running.retain_mut(|ended| ended.try_recv() == Err(TryRecvError::Empty));
+			running.extend(drivers.into_iter().map(spawn));
+		}
+		self.pick_audio(state);
 	}
 
 	/// Point the program audio, the recorded audio, the monitor, and each
@@ -1873,15 +1889,7 @@ impl Engine {
 				let state = &mut *guard;
 				let synced = std::mem::take(&mut state.stale);
 				if synced {
-					let drivers = state.sources.sync(&state.collection);
-					self.recorder.set_sources(&state.collection);
-					if !drivers.is_empty() {
-						let mut running = self.running.lock().unwrap();
-						// Forgets the threads that have ended.
-						running.retain_mut(|ended| ended.try_recv() == Err(TryRecvError::Empty));
-						running.extend(drivers.into_iter().map(spawn));
-					}
-					self.pick_audio(state);
+					self.sync(state);
 				}
 
 				// On air, each published scene's line starts once it is
@@ -3985,14 +3993,10 @@ mod tests {
 		let engine = start(gpu, Vec::new(), dir.path(), autosave, red_canvas())
 			.await
 			.expect("the studio starts");
-		// The program thread starts the sources on its first sync.
-		kio::clock::timeout(Duration::from_secs(10), async {
-			while engine.state.lock().unwrap().sources.get("red").is_none() {
-				kio::clock::sleep(Duration::from_millis(20)).await;
-			}
-		})
-		.await
-		.expect("the source starts");
+		assert!(
+			engine.state.lock().unwrap().sources.get("red").is_some(),
+			"the source starts"
+		);
 		let secs = Duration::from_secs;
 		engine.state.lock().unwrap().dark.insert("red".into(), secs(12));
 		let local = engine.local(kio::clock::now());
