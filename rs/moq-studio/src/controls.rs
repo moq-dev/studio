@@ -79,6 +79,10 @@ struct Fixed {
 	group: Group,
 	/// What the desktop's shortcut settings keep its key under, the same
 	/// across runs, so a key the operator picked there stays.
+	#[cfg_attr(
+		not(any(target_os = "linux", test)),
+		expect(dead_code, reason = "only Wayland's portal binds through the desktop")
+	)]
 	id: &'static str,
 	name: &'static str,
 	/// A word or two the Hotkeys pane shows beside the name.
@@ -214,6 +218,10 @@ impl Action {
 	/// What the desktop's shortcut settings keep its key under, the same
 	/// across runs, or `None` for a scene's, which is named for its key so
 	/// it follows the scene through renames. A source is never renamed.
+	#[cfg_attr(
+		not(any(target_os = "linux", test)),
+		expect(dead_code, reason = "only Wayland's portal binds through the desktop")
+	)]
 	pub fn id(&self) -> Option<String> {
 		match self {
 			Self::Scene(_) => None,
