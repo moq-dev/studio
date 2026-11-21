@@ -29,7 +29,7 @@ pipewire = ["capture", "moq-video/pipewire", "moq-audio/pipewire"]
 # process, on Linux and macOS. Off by default: the build downloads the CEF
 # runtime, or takes it from `CEF_PATH`, and compiles its C++ wrapper. Without
 # it, a browser source reports that this build cannot render web pages.
-cef = ["dep:cef", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+cef = ["dep:cef", "dep:libc", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 
 # CEF's subprocesses on macOS, which run from helper apps of their own in the
 # app bundle rather than from the studio's executable.
@@ -111,6 +111,10 @@ x11rb = { version = "0.13", features = ["dri3"] }
 # Whether the Wayland display has an output, without which CEF's `initialize`
 # hangs. Pure Rust, and 0.31 as eframe's winit uses.
 wayland-client = "0.31"
+# Forks a child that makes the user namespaces Chromium's sandbox needs, which
+# rustix leaves out, since the child of a threaded process may make only raw
+# system calls. Already in the graph.
+libc = { version = "0.2", optional = true }
 
 # Each is the release already in the graph through wgpu and winit.
 [target.'cfg(target_os = "macos")'.dependencies]

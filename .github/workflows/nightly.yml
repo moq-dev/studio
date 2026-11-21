@@ -38,6 +38,22 @@ jobs:
 
       - uses: ./.github/actions/nix
 
+      # Ubuntu's AppArmor lets a program make the user namespaces Chromium's
+      # sandbox needs only where a profile allows it, and browser sources
+      # fail without them: the README's profile, for the studio the browser
+      # tests run.
+      - name: Allow the studio user namespaces
+        run: |
+          sudo tee /etc/apparmor.d/moq-studio >/dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile moq-studio $GITHUB_WORKSPACE/target/debug/moq-studio flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/moq-studio
+
       - name: Render
         run: nix develop --command just render-sw
 

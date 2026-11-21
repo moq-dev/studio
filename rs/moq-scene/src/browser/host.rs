@@ -27,6 +27,17 @@ const COPIED: &str = "moq-studio-copied";
 
 /// Run one of CEF's subprocesses (renderer, GPU, utility, zygote).
 pub(super) fn subprocess() -> ExitCode {
+	let args = args::Args::new();
+	// On macOS each subprocess enters Chromium's sandbox for its kind itself,
+	// before CEF's framework loads, as CEF's own helpers do, and leaves it
+	// only as it exits. Every bundle holds the sandbox's library, so a helper
+	// that cannot load it panics. On Linux the zygote CEF starts does this.
+	#[cfg(target_os = "macos")]
+	let _sandbox = {
+		let mut sandbox = cef::sandbox::Sandbox::new();
+		sandbox.initialize(args.as_main_args());
+		sandbox
+	};
 	#[cfg(target_os = "macos")]
 	let _framework = match mac::framework(true) {
 		Ok(framework) => framework,
@@ -36,7 +47,6 @@ pub(super) fn subprocess() -> ExitCode {
 		}
 	};
 	let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
-	let args = args::Args::new();
 	let mut app = RendererApp::new(RendererCopy::new());
 	let code = execute_process(Some(args.as_main_args()), Some(&mut app), std::ptr::null_mut());
 	ExitCode::from(code.clamp(0, 255) as u8)
@@ -170,6 +180,11 @@ fn browse(shared: &Arc<Shared>, start: Start, reader: Channel, painted_tx: mpsc:
 		},
 	)
 	.map_err(|err| format!("cannot turn off core dumps: {err}"))?;
+
+	// Chromium sandboxes every page's renderer, and would abort, not run it
+	// unsandboxed, where it cannot.
+	#[cfg(target_os = "linux")]
+	super::sandbox::check()?;
 
 	// Read before CEF starts, which can block for good, as on a display that
 	// never answers, so the studio's end is heard even then.
@@ -613,13 +628,6 @@ wrap_app! {
 			command_line.append_switch_with_value(Some(&"password-store".into()), Some(&"basic".into()));
 			#[cfg(target_os = "macos")]
 			command_line.append_switch(Some(&"use-mock-keychain".into()));
-			// Chromium's sandbox needs unprivileged user namespaces, which
-			// Ubuntu's AppArmor and a Flatpak deny, or a setuid-root helper,
-			// which a user build lacks. Without either, the browser aborts
-			// rather than run unsandboxed, so the sandbox is off, as in OBS. On
-			// macOS it needs CEF's sandbox library linked into every helper,
-			// which the `cef` crate leaves to the app, so it is off there too.
-			command_line.append_switch(Some(&"no-sandbox".into()));
 			// The browser requests only what its pages load. Otherwise it asks
 			// Google, unprompted, for the network time, for autofill's guesses
 			// at each form a page shows, and for whether AI Mode is offered.

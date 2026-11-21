@@ -4747,6 +4747,7 @@ dependencies = [
  "humantime-serde",
  "image",
  "kio",
+ "libc",
  "mach2",
  "moq-audio",
  "moq-json",
