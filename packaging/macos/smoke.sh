@@ -46,6 +46,15 @@ else
 fi
 executable=$app/Contents/MacOS/moq-studio
 
+# The camera extension, where the system looks for it, signed with the
+# sandbox every Camera Extension needs. Installing it takes a user's approval,
+# which no runner gives.
+extension=$app/Contents/Library/SystemExtensions/live.kixel.studio.camera.systemextension
+[[ -x $extension/Contents/MacOS/moq-studio-camera ]] || fail "the app carries no camera extension"
+codesign --verify --strict "$extension" || fail "the camera extension is not signed"
+codesign -d --entitlements - --xml "$extension" | grep com.apple.security.app-sandbox >/dev/null ||
+    fail "the camera extension is not sandboxed"
+
 # Whether the studio has a window on screen. Listing windows by owner needs
 # no permission, unlike reading their titles.
 window() {

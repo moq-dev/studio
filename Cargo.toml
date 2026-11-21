@@ -1,5 +1,5 @@
 [workspace]
-members = ["rs/moq-scene", "rs/moq-studio"]
+members = ["rs/moq-scene", "rs/moq-studio", "rs/moq-studio-camera"]
 # The moq submodule is its own cargo workspace; exclude it so this one does not
 # try to adopt its members.
 exclude = ["moq"]
@@ -32,6 +32,7 @@ moq-mux = { path = "moq/rs/moq-mux" }
 moq-net = { path = "moq/rs/moq-net" }
 moq-relay = { path = "moq/rs/moq-relay", default-features = false }
 moq-scene = { path = "rs/moq-scene" }
+moq-studio-camera = { path = "rs/moq-studio-camera" }
 moq-stats = { path = "moq/rs/moq-stats" }
 moq-tokio = { path = "moq/rs/moq-tokio", default-features = false }
 moq-v4l = { path = "moq/rs/moq-v4l" }

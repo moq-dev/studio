@@ -1,0 +1,32 @@
+[package]
+publish = false
+name = "moq-studio-camera"
+description = "The studio's macOS virtual camera: a CoreMediaIO Camera Extension, and what the studio says to it"
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+# The extension packaging/macos/bundle.sh puts in the app bundle. Only the
+# system's camera service starts it.
+[[bin]]
+name = "moq-studio-camera"
+path = "src/main.rs"
+
+# The objc2 releases moq-video's camera capture builds on, already in the graph
+# on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-core-media = "0.3"
+objc2-core-media-io = "0.3"
+objc2-core-video = "0.3"
+objc2-foundation = "0.3"
+
+[lints]
+workspace = true

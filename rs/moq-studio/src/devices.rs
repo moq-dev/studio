@@ -55,7 +55,19 @@ async fn find() -> Listing {
 			.map_err(|err| err.to_string())
 	}
 
-	let cameras = picks(moq_video::capture::cameras().await, |camera| Pick {
+	let cameras = moq_video::capture::cameras().await;
+	// Never the program's virtual camera, which the camera extension lists
+	// even while it is off, and which setup or Add would feed what it shows
+	// back into. Every other one of the studio's is listed only while on,
+	// when Add leaves it out.
+	#[cfg(target_os = "macos")]
+	let cameras = cameras.map(|cameras| {
+		cameras
+			.into_iter()
+			.filter(|camera| camera.id != moq_studio_camera::PROGRAM)
+			.collect::<Vec<_>>()
+	});
+	let cameras = picks(cameras, |camera| Pick {
 		name: camera.name,
 		source: Source::Camera { id: Some(camera.id) },
 	});

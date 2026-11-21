@@ -4,7 +4,8 @@
 //! On Linux the camera is a PipeWire video node (with the `pipewire` feature),
 //! which PipeWire-aware apps such as browsers list as a camera. Without
 //! PipeWire it is an existing v4l2loopback device, since that kernel module
-//! needs root to load and so is never the first choice.
+//! needs root to load and so is never the first choice. On macOS it is a
+//! camera of the CoreMediaIO camera extension the app bundle carries.
 //!
 //! The program clock offers every frame it draws of what a camera shows;
 //! [`Camera::offer`] has moq-video read it back only while an app reads the
@@ -12,12 +13,14 @@
 //! the backend.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 use anyhow::Context;
 use moq_scene::Canvas;
 use moq_video::render::readback::{Pending, Readback};
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pipewire;
 #[cfg(target_os = "linux")]
@@ -25,7 +28,7 @@ mod v4l2;
 
 /// The program, or a published scene, as a camera other apps can open.
 ///
-/// Dropping it removes the camera.
+/// Dropping it removes the camera, on its own thread.
 pub struct Camera {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
@@ -34,7 +37,8 @@ pub struct Camera {
 	readback: Readback,
 	/// `None` once dropping.
 	work: Option<mpsc::Sender<Work>>,
-	worker: Option<std::thread::JoinHandle<()>>,
+	/// Set once the `vcam` thread, and the backend with it, has ended.
+	ended: Arc<Ended>,
 	shared: Arc<Shared>,
 }
 
@@ -86,7 +90,8 @@ impl Shared {
 /// Where an open camera lives.
 #[derive(Clone, Default)]
 struct Opened {
-	/// For the Output panel: `PipeWire`, or the v4l2loopback device's path.
+	/// For the Output panel: `PipeWire`, the v4l2loopback device's path, or
+	/// `Camera extension`.
 	backend: String,
 	/// The id moq-video's camera capture lists it by.
 	id: String,
@@ -96,7 +101,8 @@ struct Opened {
 
 /// How the camera is doing, for the Output panel.
 pub struct Status {
-	/// Where the camera lives, such as a PipeWire node or a `/dev/videoN` path.
+	/// Where the camera lives, such as a PipeWire node or a `/dev/videoN`
+	/// path; empty until the backend opens.
 	pub backend: String,
 	/// The id the Devices panel would list the camera by, so it can leave it out.
 	pub id: String,
@@ -120,8 +126,11 @@ impl Camera {
 	/// Publish the program, or the published scene called `scene`, drawn on
 	/// `device` at `canvas`, as a camera named after it.
 	///
-	/// Fails, naming why each backend refused, when this machine has no way to
-	/// publish one.
+	/// The `vcam` thread opens the backend, since one may wait seconds on the
+	/// system, as macOS installing the camera extension does, and this runs
+	/// on the UI's thread. Until it has, [`Status::backend`] is empty; a
+	/// machine with no way to publish a camera reports why each backend
+	/// refused in [`Status::error`].
 	pub fn open(
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
@@ -131,23 +140,41 @@ impl Camera {
 		let readback = Readback::new(device, queue, size(canvas))?;
 		let shared = Arc::new(Shared::default());
 		let scene = scene.map(str::to_string);
-		let sink = open(scene.as_deref(), canvas, &shared)?;
 
 		let (work, pending) = mpsc::channel();
-		let worker = {
+		let ended = Arc::new(Ended::default());
+		// Taken here, before this camera can be dropped itself, so it waits
+		// only for cameras turned off before it turned on.
+		let closing = {
+			let mut closing = CLOSING.lock().unwrap();
+			closing.retain(|ended| !ended.done());
+			closing.clone()
+		};
+		{
 			let shared = shared.clone();
+			let ended = ended.clone();
 			std::thread::Builder::new()
 				.name("vcam".into())
-				.spawn(move || run(pending, sink, scene.as_deref(), &shared))
-				.context("cannot start the virtual camera thread")?
-		};
+				.spawn(move || {
+					// Set however the thread ends, a panic included.
+					let _ended = EndOnDrop(ended);
+					for camera in closing {
+						camera.wait();
+					}
+					match open(scene.as_deref(), canvas, &shared) {
+						Ok(sink) => run(pending, sink, scene.as_deref(), &shared),
+						Err(err) => shared.fail(format!("{err:#}")),
+					}
+				})
+				.context("cannot start the virtual camera thread")?;
+		}
 		Ok(Self {
 			device: device.clone(),
 			queue: queue.clone(),
 			canvas,
 			readback,
 			work: Some(work),
-			worker: Some(worker),
+			ended,
 			shared,
 		})
 	}
@@ -207,12 +234,49 @@ impl Camera {
 
 impl Drop for Camera {
 	fn drop(&mut self) {
-		// Ends the thread, which removes the camera before this returns, so
-		// turning it straight back on finds the device free.
+		// Ends the thread, which removes the camera once its backend returns.
+		// That may wait on the system for seconds, as macOS finding the camera
+		// extension's does, and this runs on the UI's thread, so the next
+		// camera to open waits for it instead.
 		self.work.take();
-		if let Some(worker) = self.worker.take() {
-			let _ = worker.join();
+		CLOSING.lock().unwrap().push(self.ended.clone());
+	}
+}
+
+/// The cameras turned off whose threads may still be closing their backends.
+/// A camera waits for each before it opens, on its own thread, so it finds
+/// every device they held free, such as a v4l2loopback device or a scene's
+/// camera of the macOS extension. A camera waits only for those turned off
+/// before it turned on, so no two wait for each other.
+static CLOSING: Mutex<Vec<Arc<Ended>>> = Mutex::new(Vec::new());
+
+/// Whether a camera's thread has ended.
+#[derive(Default)]
+struct Ended {
+	done: Mutex<bool>,
+	changed: Condvar,
+}
+
+impl Ended {
+	fn done(&self) -> bool {
+		*self.done.lock().unwrap()
+	}
+
+	fn wait(&self) {
+		let mut done = self.done.lock().unwrap();
+		while !*done {
+			done = self.changed.wait(done).unwrap();
 		}
+	}
+}
+
+/// Sets [`Ended`] when dropped.
+struct EndOnDrop(Arc<Ended>);
+
+impl Drop for EndOnDrop {
+	fn drop(&mut self) {
+		*self.0.done.lock().unwrap() = true;
+		self.0.changed.notify_all();
 	}
 }
 
@@ -267,7 +331,18 @@ fn backend(
 	}
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn backend(
+	scene: Option<&str>,
+	size: moq_video::Size,
+	framerate: u32,
+	shared: &Arc<Shared>,
+) -> anyhow::Result<(Box<dyn Sink>, String, String)> {
+	let (extension, id) = macos::Extension::open(scene, size, framerate, shared.clone())?;
+	Ok((Box::new(extension), "Camera extension".to_string(), id))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn backend(
 	scene: Option<&str>,
 	size: moq_video::Size,

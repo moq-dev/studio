@@ -157,6 +157,19 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 ] }
 # Relay tokens in the login keychain.
 apple-native-keyring-store = { version = "1.0", features = ["keychain"] }
+# The virtual camera: activating the camera extension the app bundle carries,
+# then feeding its cameras through CoreMediaIO. The releases moq-video's
+# capture builds on.
+block2 = "0.6"
+dispatch2 = "0.3"
+moq-studio-camera = { workspace = true }
+objc2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-core-media = "0.3"
+objc2-core-media-io = "0.3"
+objc2-core-video = "0.3"
+objc2-foundation = { version = "0.3", features = ["NSBundle"] }
+objc2-system-extensions = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 # Which virtual key the foreground window's layout puts on each key, so a

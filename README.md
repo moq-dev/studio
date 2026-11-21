@@ -2179,7 +2179,17 @@ cannot be added as a source of the picture it shows.
   open `/dev/video*` directly. The studio never loads that module, since it
   needs root. Load a device for each camera you turn on, such as two:
   `sudo modprobe v4l2loopback devices=2 exclusive_caps=1,1 card_label="kixel.live Studio","kixel.live Studio 2"`.
-- **macOS and Windows:** not available yet.
+- **macOS:** a camera extension the app carries. The first time you turn a
+  camera on, macOS asks you to allow it in System Settings > General > Login
+  Items & Extensions > Camera Extensions, which needs the app in
+  Applications; then turn the camera off and on again. From then on apps list
+  "kixel.live Studio", the program's camera, even while the studio is closed,
+  when it shows nothing, and "kixel.live Studio: <scene>" while a scene's
+  camera is on. A newer app replaces the extension, without a restart, the
+  first time you turn a camera on after updating. Only the app feeds the
+  extension's cameras, so the studio run from a build outside the app has no
+  virtual camera.
+- **Windows:** not available yet.
 
 ## Development
 
@@ -2202,7 +2212,8 @@ it. They draw on Mesa's software Vulkan driver, so need no display or GPU, and
 run on Linux only, where that driver builds. `SHOTS_DIR` picks another output
 directory; a full run clears old PNGs only from the default one.
 
-`rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app, and
+`rs/moq-scene` is the UI-free compositor, `rs/moq-studio` the app,
+`rs/moq-studio-camera` the macOS virtual camera's extension, and
 `js/join` the join page, built on `@moq/room`, `@moq/publish`, and
 `@moq/watch`. Like the
 Rust crates, those come from the `moq` submodule rather than npm, so

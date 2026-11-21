@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- The virtual camera's CoreMediaIO Camera Extension (moq-studio-camera).
+     bundle.sh writes moq-studio's version, which the system compares to
+     replace an installed extension with an update's. -->
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>kixel.live Studio Camera</string>
+	<key>CFBundleExecutable</key>
+	<string>moq-studio-camera</string>
+	<key>CFBundleIdentifier</key>
+	<string>live.kixel.studio.camera</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>kixel.live Studio Camera</string>
+	<key>CFBundlePackageType</key>
+	<string>SYSX</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.0.0</string>
+	<key>CMIOExtension</key>
+	<dict>
+		<!-- Prefixed with the team's ID, as the app group in
+		     camera.entitlements.plist that lets the sandbox serve it is. -->
+		<key>CMIOExtensionMachServiceName</key>
+		<string>D7D5SDDB5Z.live.kixel.studio.camera</string>
+	</dict>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Shows your program and published scenes as cameras that video-call apps can pick.</string>
+</dict>
+</plist>

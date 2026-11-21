@@ -1,8 +1,9 @@
 name: macOS
 
 # Builds the macOS app bundle for each architecture, with CEF for browser
-# sources, signs it ad hoc with the release's hardened runtime and
-# entitlements, runs the browser-source tests against it on Apple silicon,
+# sources and the virtual camera's extension, signs it ad hoc with the
+# release's hardened runtime and entitlements, less those only the release's
+# provisioning profile grants, runs the browser-source tests against it on Apple silicon,
 # packs it into a disk image, and checks the app in the image launches and
 # lists devices. Pull requests that change the packaging run it; nightly runs
 # it against main.
@@ -120,7 +121,10 @@ jobs:
     # Application .p12 (base64, legacy encryption so `security import` reads
     # it) and APPLE_CERTIFICATE_PASSWORD; APPLE_API_KEY, APPLE_API_ISSUER, and
     # APPLE_API_PRIVATE_KEY, the App Store Connect key ID, issuer ID, and .p8
-    # text. quest/m0/signing-renew.md renews them. Nothing built runs until
+    # text; APPLE_PROVISIONING_PROFILE, the Developer ID profile for
+    # live.kixel.studio with the System Extension capability (base64), which
+    # lets the app install its camera extension. quest/m0/signing-renew.md
+    # renews them. Nothing built runs until
     # they are gone from the runner.
     environment: release
 
@@ -192,6 +196,13 @@ jobs:
           echo "KEYCHAIN=$keychain" >>"$GITHUB_ENV"
           echo "IDENTITY=$identity" >>"$GITHUB_ENV"
 
+      # Where sign.sh reads the entitlements it grants from, and where the
+      # system looks for it when the app installs its camera extension.
+      - name: Embed the provisioning profile
+        env:
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: base64 --decode <<<"$APPLE_PROVISIONING_PROFILE" >"kixel.live Studio.app/Contents/embedded.provisionprofile"
+
       - name: Sign
         run: packaging/macos/sign.sh "kixel.live Studio.app" "$IDENTITY" "$KEYCHAIN"
 
@@ -236,6 +247,8 @@ jobs:
           assessment=$(spctl --assess --type execute --verbose=2 "kixel.live Studio.app" 2>&1)
           echo "$assessment"
           [[ $assessment == *"source=Notarized Developer ID"* ]]
+          # Allowed to install the camera extension.
+          codesign -d --entitlements - --xml "kixel.live Studio.app" | grep com.apple.developer.system-extension.install >/dev/null
 
       # The app as the image holds it, which is what users run.
       - name: Smoke test
