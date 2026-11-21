@@ -145,6 +145,8 @@ tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 # Describes the IOSurface the Mach rendezvous test sends.
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
+# Compares the received surface's ID with the sent one's.
+objc2-io-surface = { version = "0.3", default-features = false, features = ["IOSurfaceTypes"] }
 
 [lints]
 workspace = true
