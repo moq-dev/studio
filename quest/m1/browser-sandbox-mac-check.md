@@ -23,7 +23,8 @@ read-only path, from which Chromium builds its sandbox's rules).
   once from the image and once from Applications, add a browser source such
   as `https://webglsamples.org/aquarium/aquarium.html`, and check that it
   draws and plays, and that Activity Monitor's Sandbox column (View, Columns)
-  says Yes for `moq-studio Helper (Renderer)` and `moq-studio Helper (GPU)`.
+  says Yes for every `moq-studio Helper` process, plain ones included, since
+  CEF 156 starts pages' renderers from the plain helper.
   No reachable Mac runs a signed app, and the release job runs nothing built
   until its signing credentials leave the runner; running the browser tests
   there was considered and would add a second hour-long build of the test
