@@ -937,9 +937,9 @@ directory can read them. One studio at a time can use the profile: a
 second one's browser sources fail saying so. Each page renders in a process of its own, so
 a page that crashes fails only its own source, with the reason, while the
 stream carries on. A crash of the browser itself fails every browser source.
-Either shows at once, since the browser's processes dump no core. Pages run
-without Chromium's sandbox, as in OBS, so a page that exploits a browser bug
-can do anything you can: add only pages you trust.
+Either shows at once, since the browser's processes dump no core. Each page
+renders in Chromium's sandbox, so a page that exploits a browser bug still
+cannot read your files, keys, or stream credentials.
 The browser requests only what its pages load, never asking Google for
 updates, the time, or autofill suggestions on its own, so pages are not
 spellchecked, which would need a dictionary from Google. Nor does it run
@@ -951,6 +951,24 @@ do nothing). Copy and Cut there put the page's selected text on the clipboard,
 and nothing from a password field. On Linux, except for a page copied on the
 GPU through an X display, the text goes as plain text that the page's own copy
 handlers cannot change; on macOS the page copies as it would in a browser.
+
+On Linux the sandbox needs unprivileged user namespaces, and a studio run by
+a user other than root. Where either is missing, browser sources fail saying
+so rather than render a page unsandboxed. Ubuntu refuses them, since
+23.10, to any program an AppArmor profile does not allow; as root, allow the
+studio, naming the `moq-studio` you run:
+
+```bash
+cat >/etc/apparmor.d/moq-studio <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile moq-studio /path/to/moq-studio flags=(unconfined) {
+  userns,
+}
+EOF
+apparmor_parser -r /etc/apparmor.d/moq-studio
+```
 
 An overlay is a title, lower third, or other graphic written as HTML and CSS,
 drawn by the studio itself (through [Blitz](https://github.com/DioxusLabs/blitz))

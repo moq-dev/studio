@@ -1,33 +1,35 @@
-# [L] Chromium's sandbox for browser sources
+# [M] Chromium's sandbox for browser sources on Windows
 
 ## Goal
 
-A browser source's renderer runs inside Chromium's sandbox on every
-platform browser sources run on, so a hostile page, or an overlay site that
-gets compromised, cannot read the creator's files, keys, or stream credentials
+A browser source's renderer on Windows runs inside Chromium's sandbox, as it
+does on Linux and macOS, so a hostile page, or an overlay site that gets
+compromised, cannot read the creator's files, keys, or stream credentials
 through a renderer exploit. The helper passes no `--no-sandbox`.
 
 ## Plan
 
-Today every platform starts CEF with `--no-sandbox`
-(`rs/moq-scene/src/browser/host.rs`), and the README warns to add only pages
-you trust.
+Linux and macOS landed in
+[moq-dev/studio#223](https://github.com/moq-dev/studio/pull/223): on Linux
+`moq_scene::browser::sandbox::check` refuses to start CEF where the kernel
+refuses the user namespaces Chromium needs, and on macOS each helper app
+enters the Seatbelt sandbox through CEF's `libcef_sandbox.dylib`
+(`cef::sandbox::Sandbox`) before it loads CEF's framework.
 
-- **Linux:** Chromium's namespace sandbox needs unprivileged user namespaces,
-  which some distributions restrict (Ubuntu's AppArmor rule since 24.04);
-  the setuid `chrome-sandbox` fallback needs root to install. Recommendation:
-  use the namespace sandbox, and when the kernel refuses it, fail the browser
-  source loudly with what to enable rather than run unsandboxed.
-- **macOS:** link CEF's `cef_sandbox` static library into
-  `moq-browser-helper` and enter the Seatbelt sandbox first thing in its
-  `main`, as CEF's sample helpers do. Check the renderer's and GPU helper's
-  entitlements in `packaging/macos/sign.sh` still suffice.
-- **Windows:** CEF's sandbox needs its `cef_sandbox.lib` linked into the
-  executable and `bootstrap.exe`'s layout; land with or after
-  [Browser sources on Windows](/quest/m0/browser-source/windows.md).
-- A test per platform proves a page's renderer cannot open a file outside its
-  profile.
+- CEF's Windows sandbox needs `cef_sandbox.lib` linked into the executable
+  that runs the subprocesses, with its sandbox info passed to
+  `execute_process` and `initialize`, and `bootstrap.exe`'s layout. The `cef`
+  crate's `sandbox` feature, which `moq-scene` leaves off with its other
+  defaults, builds CEF's wrapper with it.
+- Prove it the way `a_renderer_cannot_read_the_user_s_files` in
+  `rs/moq-studio/tests/browser.rs` does on Linux and macOS: a Windows
+  `can_read` that asks whether the renderer's restricted, untrusted-integrity
+  token may open a file the test wrote, where the helper's may.
 
-## Related
+## Hosts
 
-- [Browser sources on macOS and Windows](/quest/m0/browser-source/README.md) - the browser sources this sandboxes
+- windows - CEF's Windows sandbox
+
+## Required
+
+- [Browser sources on Windows](/quest/m0/browser-source/windows.md) - browser sources run on Windows at all

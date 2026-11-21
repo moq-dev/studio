@@ -45,6 +45,8 @@ mod host;
 mod import;
 #[cfg(target_os = "macos")]
 mod mach;
+#[cfg(all(target_os = "linux", feature = "cef"))]
+mod sandbox;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use protocol::Open;

@@ -760,6 +760,82 @@ async fn a_crash_after_drawing_leaves_the_canvas() {
 	.await;
 }
 
+/// A page's renderer runs in Chromium's sandbox, so a page that exploits it
+/// still cannot read a file of the studio's user, which the helper can.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF and a GPU; run by just render-sw, and on macOS by macos.yml"]
+async fn a_renderer_cannot_read_the_user_s_files() {
+	local(async {
+		let dir = tempfile::tempdir().unwrap();
+		let secret = std::fs::canonicalize(dir.path()).unwrap().join("stream-key");
+		std::fs::write(&secret, "hunter2").unwrap();
+		let red = page("<body style='background:red'></body>");
+		let mut studio = Studio::new(&[("page", red)]).await;
+		studio.until_center([255, 0, 0, 255], &[]).await;
+
+		let helper = helper(std::process::id()).expect("the page's helper is running");
+		assert!(can_read(helper, &secret), "the helper reads the user's files");
+		let renderers = renderers(helper);
+		assert!(!renderers.is_empty(), "the page has a renderer");
+		for renderer in renderers {
+			assert!(
+				!can_read(renderer, &secret),
+				"renderer {renderer} reads {}",
+				secret.display()
+			);
+		}
+	})
+	.await;
+}
+
+/// Whether process `pid` can reach the file at `path`: whether it is there
+/// under the process's root, looked through from `/proc`. Chromium's
+/// namespace sandbox moves a renderer's root to the `fdinfo` directory of a
+/// thread that has since exited, where every lookup finds no such process.
+#[cfg(target_os = "linux")]
+fn can_read(pid: u32, path: &Path) -> bool {
+	let under = Path::new("/proc")
+		.join(pid.to_string())
+		.join("root")
+		.join(path.strip_prefix("/").unwrap());
+	match std::fs::metadata(&under) {
+		Ok(_) => true,
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+		Err(err) if err.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => false,
+		Err(err) => panic!("cannot look through {}: {err}", under.display()),
+	}
+}
+
+/// Whether process `pid` may read the file at `path`, as its Seatbelt
+/// sandbox, if any, decides.
+#[cfg(target_os = "macos")]
+fn can_read(pid: u32, path: &Path) -> bool {
+	use std::ffi::{CString, c_char, c_int};
+	use std::os::unix::ffi::OsStrExt;
+
+	unsafe extern "C" {
+		/// libsystem_sandbox's query of a process's sandbox: 0 if it allows
+		/// the operation, 1 if it denies it, -1 on failure.
+		fn sandbox_check(pid: c_int, operation: *const c_char, filter: c_int, ...) -> c_int;
+	}
+	const SANDBOX_FILTER_PATH: c_int = 1;
+	// Asked, not attempted, so nothing is logged as a violation.
+	const SANDBOX_CHECK_NO_REPORT: c_int = 0x4000_0000;
+
+	let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+	// SAFETY: a path filter takes one C string, which outlives the call.
+	let denied = unsafe {
+		sandbox_check(
+			pid as c_int,
+			c"file-read-data".as_ptr(),
+			SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT,
+			path.as_ptr(),
+		)
+	};
+	assert!(denied >= 0, "cannot ask process {pid}'s sandbox");
+	denied == 0
+}
+
 /// Cookies, even one without an expiry, survive a reload of the page and a
 /// restart of the studio, since every page keeps them in one profile on disk.
 /// A second studio on the profile while it is in use fails its pages saying
