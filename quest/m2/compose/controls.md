@@ -30,18 +30,14 @@ Map priority onto the subscription priorities moq-lite already has
 (`moq/doc/concept/moq-lite.md`), rather than a second mechanism. A source's
 `priority` is relative to the program's tracks: each of its tracks is fetched
 at hang's priority for its kind plus it, saturating
-(`Child::priority` in `rs/moq-scene/src/composition.rs`). Once the wait
-clears, advance the gitlink with `just upgrade-moq` in this PR unless a bump
-already has, carry the priority on `Source::Layer`, and pass it to the
+(`Child::priority` in `rs/moq-scene/src/composition.rs`). Both decode
+consumers' `Options` take the subscription priority on moq's `main` since
+[moq-dev/moq#9282](https://github.com/moq-dev/moq/pull/9282); once the pin is
+past it, carry the priority on `Source::Layer`, and pass it to the
 layer's video and audio decode consumers (`follow_video` and `follow_audio` in
 `rs/moq-scene/src/source.rs`). Prove it with a layer test that reads the
 priority off the publisher's aggregate subscription.
 
-## Waiting
+## Required
 
-- moq-dev/moq: `moq_video::decode::Options` and `moq_audio::decode::Options`
-  take the subscription priority, as
-  [Decode consumers take a subscription priority](https://github.com/moq-dev/moq/blob/main/quest/m1/decode-priority.md)
-  plans (being planned in [moq-dev/moq#9247](https://github.com/moq-dev/moq/pull/9247)), which each consumer fixes today at hang's
-  `PRIORITY.video` and `PRIORITY.audio`. Check: both options carry a priority
-  on moq's `main`.
+- [The studio catches up to moq's main](/quest/m0/pin-moq-tip.md) - moves the pin past moq-dev/moq#9282 and absorbs the tip's other breaks
